@@ -3,8 +3,14 @@ import cors from 'cors'
 import request from 'supertest'
 import { describe, expect, it, vi } from 'vitest'
 
-import { getCorrelationId, getRequestContext, runWithRequestContext } from '../../src/context/request-context'
 import {
+  enrichRequestContext,
+  getCorrelationId,
+  getRequestContext,
+  runWithRequestContext,
+} from '../../src/context/request-context'
+import {
+  correlationContextEnrichmentMiddleware,
   correlationErrorHandler,
   correlationIdMiddleware,
   isValidCorrelationId,
@@ -55,6 +61,22 @@ describe('request-context AsyncLocalStorage', () => {
   it('exposes the correlation id inside a run() scope', () => {
     const id = runWithRequestContext({ correlationId: 'scope-id' }, () => getCorrelationId())
     expect(id).toBe('scope-id')
+  })
+
+  it('enriches the active context with authenticated user and tenant ids', () => {
+    const ctx = runWithRequestContext({ correlationId: 'scope-id' }, () => {
+      enrichRequestContext({ userId: ' user-1 ', tenantId: ' tenant-a ' })
+      return getRequestContext()
+    })
+    expect(ctx).toEqual({
+      correlationId: 'scope-id',
+      userId: 'user-1',
+      tenantId: 'tenant-a',
+    })
+  })
+
+  it('returns undefined when enrichment runs outside a context', () => {
+    expect(enrichRequestContext({ userId: 'user-1' })).toBeUndefined()
   })
 })
 
@@ -119,6 +141,28 @@ describe('correlationIdMiddleware (express integration)', () => {
       .set('Origin', 'https://example.test')
 
     expect(res.headers['access-control-expose-headers']).toContain('X-Correlation-ID')
+  })
+
+  it('enriches context after auth has populated req.user', async () => {
+    const app = express()
+    app.use(correlationIdMiddleware)
+    app.use((req, _res, next) => {
+      req.user = {
+        id: 'user-1',
+        tenantId: 'tenant-a',
+      } as Express.Request['user']
+      next()
+    })
+    app.use(correlationContextEnrichmentMiddleware)
+    app.get('/probe', (_req, res) => res.json({ context: getRequestContext() }))
+
+    const res = await request(app).get('/probe').set('X-Correlation-ID', 'trace-1')
+
+    expect(res.body.context).toEqual({
+      correlationId: 'trace-1',
+      userId: 'user-1',
+      tenantId: 'tenant-a',
+    })
   })
 })
 
