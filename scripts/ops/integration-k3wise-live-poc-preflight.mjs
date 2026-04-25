@@ -62,13 +62,21 @@ function optionalArray(value, field) {
 function normalizeSafeBoolean(value, field) {
   if (value === undefined || value === null) return false
   if (typeof value === 'boolean') return value
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new LivePocPreflightError(`${field} must be a finite boolean, 0/1, or boolean-like string`, { field })
+    }
+    if (value === 1) return true
+    if (value === 0) return false
+    throw new LivePocPreflightError(`${field} must be 0 or 1 when given as a number`, { field, received: value })
+  }
   if (typeof value === 'string') {
     const normalized = value.trim().toLowerCase()
     if (normalized.length === 0) return false
     if (TRUE_BOOLEAN_TEXT.has(normalized)) return true
     if (FALSE_BOOLEAN_TEXT.has(normalized)) return false
   }
-  throw new LivePocPreflightError(`${field} must be a boolean or false-like string`, { field })
+  throw new LivePocPreflightError(`${field} must be a boolean, 0/1, or boolean-like string`, { field })
 }
 
 function normalizeSqlMode(value, sqlEnabled) {
@@ -201,18 +209,19 @@ function normalizeGate(input) {
     })
   }
 
-  const sqlEnabled = sqlServer.enabled === true
+  const sqlEnabled = normalizeSafeBoolean(sqlServer.enabled, 'sqlServer.enabled')
+  const sqlWriteCoreFlag = normalizeSafeBoolean(sqlServer.writeCoreTables, 'sqlServer.writeCoreTables')
   const sqlMode = normalizeSqlMode(sqlServer.mode, sqlEnabled)
   const allowedTables = optionalArray(sqlServer.allowedTables, 'sqlServer.allowedTables').map((table) => String(table))
   const writesCoreTable = allowedTables.some((table) => K3_CORE_TABLES.has(normalizeSqlObjectName(table)))
-  if (sqlEnabled && sqlMode !== 'readonly' && (sqlServer.writeCoreTables === true || writesCoreTable)) {
+  if (sqlEnabled && sqlMode !== 'readonly' && (sqlWriteCoreFlag || writesCoreTable)) {
     throw new LivePocPreflightError('SQL Server channel may not write K3 core business tables in live PoC', {
       field: 'sqlServer.allowedTables',
       allowedTables,
     })
   }
 
-  const bomEnabled = bom.enabled === true
+  const bomEnabled = normalizeSafeBoolean(bom.enabled, 'bom.enabled')
   const bomProductId = optionalString(bom.productId) || optionalString(plm.defaultProductId) || optionalString(plm.config && plm.config.defaultProductId)
   if (bomEnabled && !bomProductId) {
     throw new LivePocPreflightError('BOM PoC requires bom.productId or plm.defaultProductId', {
@@ -248,12 +257,15 @@ function normalizeGate(input) {
     plm,
     sqlServer: {
       ...sqlServer,
+      enabled: sqlEnabled,
+      writeCoreTables: sqlWriteCoreFlag,
       mode: sqlMode,
     },
     rollback,
     fieldMappings,
     bom: {
       ...bom,
+      enabled: bomEnabled,
       productId: bomProductId,
     },
     sqlEnabled,
