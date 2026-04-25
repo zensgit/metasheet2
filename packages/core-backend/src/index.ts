@@ -1947,6 +1947,7 @@ export class MetaSheetServer {
       const { YjsWebSocketAdapter } = await import('./collab/yjs-websocket-adapter')
       const { YjsRecordBridge } = await import('./collab/yjs-record-bridge')
       const { RecordWriteService } = await import('./multitable/record-write-service')
+      const { createYjsInvalidationPostCommitHook } = await import('./multitable/post-commit-hooks')
       const { db: kyselyDbYjs } = await import('./db/db')
       const collabIO = this.injector.get(ICollabService).getIO()
       if (collabIO) {
@@ -2137,7 +2138,9 @@ export class MetaSheetServer {
             yjsWsAdapter.notifyInvalidated(recordIds)
           }
         }
-        recordWriteService.setYjsInvalidator(yjsInvalidate)
+        recordWriteService.setPostCommitHooks([
+          createYjsInvalidationPostCommitHook(yjsInvalidate),
+        ])
         const univerMetaModule = await import('./routes/univer-meta')
         univerMetaModule.setYjsInvalidatorForRoutes(yjsInvalidate)
 

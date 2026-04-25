@@ -117,7 +117,6 @@ import {
   RecordValidationError as ServiceValidationError,
   RecordFieldForbiddenError as ServiceFieldForbiddenError,
   type RecordWriteHelpers,
-  type YjsInvalidator,
 } from '../multitable/record-write-service'
 import {
   RecordService,
@@ -129,6 +128,10 @@ import {
   RecordValidationFailedError as RecordCreateValidationFailedError,
   RecordPatchFieldValidationError as RecordServicePatchFieldValidationError,
 } from '../multitable/record-service'
+import {
+  createYjsInvalidationPostCommitHook,
+  type YjsInvalidator,
+} from '../multitable/post-commit-hooks'
 
 const multitableFormulaEngine = new MultitableFormulaEngine()
 
@@ -5772,7 +5775,10 @@ export function univerMetaRouter(): Router {
       }
       if (!capabilities.canEditRecord) return sendForbidden(res)
 
-      const recordService = new RecordService(pool, eventBus, yjsInvalidator)
+      const recordService = new RecordService(pool, eventBus)
+      if (yjsInvalidator) {
+        recordService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
+      }
       const patchResult = await recordService.patchRecord({
         recordId,
         sheetId,
@@ -6712,7 +6718,10 @@ export function univerMetaRouter(): Router {
         buildAttachmentSummaries: (q, sid, rows, af) => buildAttachmentSummaries(q, req, sid, rows, af),
         ensureAttachmentIdsExist,
       }
-      const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers, yjsInvalidator)
+      const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers)
+      if (yjsInvalidator) {
+        recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
+      }
 
       const result = await recordWriteService.patchRecords({
         sheetId,
