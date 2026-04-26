@@ -30,6 +30,7 @@
             <span class="meta-view-mgr__name" :title="view.name">{{ view.name }}</span>
             <span class="meta-view-mgr__type">{{ view.type }}</span>
             <button class="meta-view-mgr__action" title="Configure" @click="openConfig(view)">&#x2699;</button>
+            <button class="meta-view-mgr__action" title="Conditional formatting" @click="openConditionalFormatting(view)">&#x1F3A8;</button>
             <button class="meta-view-mgr__action" title="Rename" @click="startRename(view)">&#x270E;</button>
             <button
               class="meta-view-mgr__action meta-view-mgr__action--danger"
@@ -228,12 +229,21 @@
         </div>
       </div>
     </div>
+    <ConditionalFormattingDialog
+      :visible="conditionalFormattingTargetId !== null"
+      :fields="fields"
+      :view-config="conditionalFormattingTargetView?.config"
+      @update:dirty="conditionalFormattingDirty = $event"
+      @close="closeConditionalFormatting"
+      @save="onSaveConditionalFormatting"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import type {
+  ConditionalFormattingRule,
   MetaCalendarViewConfig,
   MetaField,
   MetaGalleryViewConfig,
@@ -247,6 +257,7 @@ import {
   resolveKanbanViewConfig,
   resolveTimelineViewConfig,
 } from '../utils/view-config'
+import ConditionalFormattingDialog from './ConditionalFormattingDialog.vue'
 
 const VIEW_TYPES = ['grid', 'form', 'kanban', 'gallery', 'calendar', 'timeline'] as const
 const VIEW_ICONS: Record<string, string> = {
@@ -313,8 +324,13 @@ const viewConfigBaseline = ref('')
 const viewConfigOutdated = ref(false)
 const viewConfigLiveRefreshText = ref('')
 const viewConfigSourceSignature = ref('')
+const conditionalFormattingTargetId = ref<string | null>(null)
+const conditionalFormattingDirty = ref(false)
 
 const configTarget = computed(() => props.views.find((view) => view.id === configTargetId.value) ?? null)
+const conditionalFormattingTargetView = computed(() =>
+  props.views.find((view) => view.id === conditionalFormattingTargetId.value) ?? null,
+)
 const deleteTarget = computed(() => props.views.find((view) => view.id === deleteTargetId.value) ?? null)
 const configTargetFields = computed(() => props.fields)
 const attachmentFields = computed(() => props.fields.filter((field) => field.type === 'attachment'))
@@ -423,6 +439,8 @@ function resetTransientState() {
   viewConfigOutdated.value = false
   viewConfigLiveRefreshText.value = ''
   viewConfigSourceSignature.value = ''
+  conditionalFormattingTargetId.value = null
+  conditionalFormattingDirty.value = false
   resetConfigDrafts()
 }
 
@@ -626,7 +644,7 @@ const renameDirty = computed(() => {
   return editingName.value.trim() !== (props.views.find((view) => view.id === editingId.value)?.name ?? '')
 })
 
-const hasPendingDrafts = computed(() => viewConfigDirty.value || newViewDraftDirty.value || renameDirty.value)
+const hasPendingDrafts = computed(() => viewConfigDirty.value || newViewDraftDirty.value || renameDirty.value || conditionalFormattingDirty.value)
 const managerDirty = computed(() => props.visible && hasPendingDrafts.value)
 
 function confirmDiscardViewManagerChanges() {
@@ -636,6 +654,27 @@ function confirmDiscardViewManagerChanges() {
 
 function reloadLatestConfig() {
   if (configTarget.value) hydrateExistingViewConfig(configTarget.value)
+}
+
+function openConditionalFormatting(view: MetaView) {
+  if (conditionalFormattingTargetId.value && conditionalFormattingTargetId.value !== view.id) {
+    if (conditionalFormattingDirty.value && !window.confirm('Discard unsaved formatting rules?')) return
+  }
+  conditionalFormattingTargetId.value = view.id
+}
+
+function closeConditionalFormatting() {
+  conditionalFormattingTargetId.value = null
+  conditionalFormattingDirty.value = false
+}
+
+function onSaveConditionalFormatting(rules: ConditionalFormattingRule[]) {
+  const target = conditionalFormattingTargetView.value
+  if (!target) return
+  const nextConfig: Record<string, unknown> = { ...(target.config ?? {}) }
+  nextConfig.conditionalFormattingRules = rules
+  emit('update-view', target.id, { config: nextConfig })
+  closeConditionalFormatting()
 }
 
 watch(

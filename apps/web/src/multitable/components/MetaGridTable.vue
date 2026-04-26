@@ -43,6 +43,7 @@
                 :aria-selected="row.id === selectedRecordId || undefined"
                 class="meta-grid__row"
                 :class="{ 'meta-grid__row--selected': row.id === selectedRecordId, 'meta-grid__row--focused': focusRow === flatIndex(group, ri) }"
+                :style="rowStyle(row.id)"
                 @click="emit('select-record', row.id)"
               >
                 <td v-if="enableMultiSelect" class="meta-grid__check-col" @click.stop>
@@ -67,7 +68,7 @@
                   :key="field.id"
                   class="meta-grid__cell"
                   :class="{ 'meta-grid__cell--editing': isEditing(row.id, field.id), 'meta-grid__cell--readonly': !isEditable(row.id, field), 'meta-grid__cell--focused': focusRow === flatIndex(group, ri) && focusCol === ci }"
-                  :style="cellStyle(field.id)"
+                  :style="cellStyle(row.id, field.id)"
                   @dblclick="startEdit(row, field)"
                   @click.stop="onCellClick(flatIndex(group, ri), ci, row.id)"
                 >
@@ -121,6 +122,7 @@
               :aria-selected="row.id === selectedRecordId || undefined"
               class="meta-grid__row"
               :class="{ 'meta-grid__row--selected': row.id === selectedRecordId, 'meta-grid__row--focused': focusRow === ri }"
+              :style="rowStyle(row.id)"
               @click="emit('select-record', row.id)"
             >
               <td v-if="enableMultiSelect" class="meta-grid__check-col" @click.stop>
@@ -148,7 +150,7 @@
                 :aria-label="field.name"
                 class="meta-grid__cell"
                 :class="{ 'meta-grid__cell--editing': isEditing(row.id, field.id), 'meta-grid__cell--readonly': !isEditable(row.id, field), 'meta-grid__cell--focused': focusRow === ri && focusCol === ci }"
-                :style="cellStyle(field.id)"
+                :style="cellStyle(row.id, field.id)"
                 @dblclick="startEdit(row, field)"
                 @click.stop="onCellClick(ri, ci, row.id)"
               >
@@ -250,6 +252,11 @@ import type {
   RowDensity,
 } from '../types'
 import type { SortRule } from '../composables/useMultitableGrid'
+import { composeStyleObject, type EvaluatedFormatting } from '../utils/conditional-formatting'
+
+interface ConditionalFormattingByRecord {
+  byRecordId: Map<string, EvaluatedFormatting>
+}
 import MetaCellRenderer from './cells/MetaCellRenderer.vue'
 import MetaCellEditor from './cells/MetaCellEditor.vue'
 import MetaFieldHeader from './MetaFieldHeader.vue'
@@ -289,6 +296,7 @@ const props = defineProps<{
   deleteAttachmentFn?: MetaAttachmentDeleteFn
   canComment?: boolean
   commentPresence?: Record<string, MultitableCommentPresenceSummary | undefined>
+  conditionalFormatting?: ConditionalFormattingByRecord
 }>()
 
 const emit = defineEmits<{
@@ -430,9 +438,23 @@ const isEditable = (recordId: string, f: MetaField) =>
   resolveRowActions(recordId).canEdit && EDITABLE.has(f.type) && !props.fieldReadOnlyIds?.includes(f.id)
 const isEditing = (rid: string, fid: string) => editCell.value?.recordId === rid && editCell.value?.fieldId === fid
 
-function cellStyle(fid: string) {
+function cellStyle(rid: string, fid: string) {
   const w = props.columnWidths?.[fid]
-  return w ? { width: `${w}px`, minWidth: `${w}px`, maxWidth: `${w}px` } : undefined
+  const widthStyle: Record<string, string> | undefined = w
+    ? { width: `${w}px`, minWidth: `${w}px`, maxWidth: `${w}px` }
+    : undefined
+  const formatting = props.conditionalFormatting?.byRecordId.get(rid)
+  const formatStyle = formatting
+    ? composeStyleObject(undefined, formatting.cellStyles[fid])
+    : undefined
+  if (!widthStyle && !formatStyle) return undefined
+  return { ...(widthStyle ?? {}), ...(formatStyle ?? {}) }
+}
+
+function rowStyle(rid: string): Record<string, string> | undefined {
+  const formatting = props.conditionalFormatting?.byRecordId.get(rid)
+  if (!formatting?.rowStyle) return undefined
+  return composeStyleObject(formatting.rowStyle, undefined)
 }
 
 function rowCommentAffordance(recordId: string) {

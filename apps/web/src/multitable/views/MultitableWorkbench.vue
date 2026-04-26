@@ -183,6 +183,7 @@
           :delete-attachment-fn="deleteAttachmentFn"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
+          :conditional-formatting="conditionalFormattingByRecord"
           @select-record="onSelectRecord" @toggle-sort="onToggleSort" @patch-cell="onPatchCell"
           @go-to-page="grid.goToPage" @open-link-picker="onGridLinkPicker" @resize-column="grid.setColumnWidth"
           @bulk-delete="onBulkDelete" @reorder-field="onReorderField"
@@ -375,6 +376,7 @@ import { buildXlsxBuffer } from '../import/xlsx-mapping'
 import { filterPropertyVisibleFields } from '../utils/field-permissions'
 import { isLinkField, isPersonField } from '../utils/link-fields'
 import { addPeopleLookupToken, inferPeopleLookupKind, resolvePeopleImportValue } from '../utils/people-import'
+import { buildRecordFormattingMap, extractRulesFromConfig } from '../utils/conditional-formatting'
 
 const props = defineProps<{ sheetId?: string; viewId?: string; baseId?: string; recordId?: string; commentId?: string; fieldId?: string; openComments?: boolean; mode?: string; role?: MultitableRole }>()
 const emit = defineEmits<{
@@ -632,6 +634,14 @@ const scopedAllFields = computed(() =>
 const scopedGridFields = computed(() =>
   grid.visibleFields.value.filter((field) => effectiveFieldPermissions.value[field.id]?.visible !== false),
 )
+const conditionalFormattingRules = computed(() =>
+  extractRulesFromConfig(workbench.activeView.value?.config),
+)
+const conditionalFormattingByRecord = computed(() => buildRecordFormattingMap(
+  conditionalFormattingRules.value,
+  grid.rows.value,
+  scopedAllFields.value,
+))
 const readOnlyFieldIds = computed(() =>
   Object.entries(effectiveFieldPermissions.value)
     .filter(([, permission]) => permission.readOnly)
