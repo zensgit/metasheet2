@@ -666,6 +666,69 @@ async function testTenantGuards() {
   assert.equal(blankContext.body.error.code, 'TENANT_CONTEXT_REQUIRED')
 }
 
+async function testListOffsetCap() {
+  const { MAX_LIST_OFFSET } = httpRoutes
+  assert.equal(typeof MAX_LIST_OFFSET, 'number', 'MAX_LIST_OFFSET is exported')
+
+  // Large offset (above cap) must be clamped at all 4 list endpoints
+  const hugeOffset = String(MAX_LIST_OFFSET + 999999)
+  const { calls: sysCalls, services: sysServices } = createMockServices()
+  const { routes: sysRoutes } = mountRoutes(sysServices)
+  await invoke(sysRoutes, 'GET', '/api/integration/external-systems', {
+    user: READ_USER,
+    query: { workspaceId: 'workspace_1', offset: hugeOffset },
+  })
+  assert.equal(findCall(sysCalls, 'listExternalSystems')[1].offset, MAX_LIST_OFFSET,
+    'external-systems: huge offset clamped to MAX_LIST_OFFSET')
+
+  const { calls: pipCalls, services: pipServices } = createMockServices()
+  const { routes: pipRoutes } = mountRoutes(pipServices)
+  await invoke(pipRoutes, 'GET', '/api/integration/pipelines', {
+    user: READ_USER,
+    query: { workspaceId: 'workspace_1', offset: hugeOffset },
+  })
+  assert.equal(findCall(pipCalls, 'listPipelines')[1].offset, MAX_LIST_OFFSET,
+    'pipelines: huge offset clamped to MAX_LIST_OFFSET')
+
+  const { calls: runCalls, services: runServices } = createMockServices()
+  const { routes: runRoutes } = mountRoutes(runServices)
+  await invoke(runRoutes, 'GET', '/api/integration/runs', {
+    user: READ_USER,
+    query: { workspaceId: 'workspace_1', offset: hugeOffset },
+  })
+  assert.equal(findCall(runCalls, 'listPipelineRuns')[1].offset, MAX_LIST_OFFSET,
+    'runs: huge offset clamped to MAX_LIST_OFFSET')
+
+  const { calls: dlCalls, services: dlServices } = createMockServices()
+  const { routes: dlRoutes } = mountRoutes(dlServices)
+  await invoke(dlRoutes, 'GET', '/api/integration/dead-letters', {
+    user: READ_USER,
+    query: { workspaceId: 'workspace_1', offset: hugeOffset },
+  })
+  assert.equal(findCall(dlCalls, 'listDeadLetters')[1].offset, MAX_LIST_OFFSET,
+    'dead-letters: huge offset clamped to MAX_LIST_OFFSET')
+
+  // offset = 0 → treated as no offset (undefined)
+  const { calls: zeroCalls, services: zeroServices } = createMockServices()
+  const { routes: zeroRoutes } = mountRoutes(zeroServices)
+  await invoke(zeroRoutes, 'GET', '/api/integration/pipelines', {
+    user: READ_USER,
+    query: { workspaceId: 'workspace_1', offset: '0' },
+  })
+  assert.equal(findCall(zeroCalls, 'listPipelines')[1].offset, undefined,
+    'offset=0 is treated as no offset (undefined)')
+
+  // Small valid offset passes through unchanged
+  const { calls: smallCalls, services: smallServices } = createMockServices()
+  const { routes: smallRoutes } = mountRoutes(smallServices)
+  await invoke(smallRoutes, 'GET', '/api/integration/pipelines', {
+    user: READ_USER,
+    query: { workspaceId: 'workspace_1', offset: '50' },
+  })
+  assert.equal(findCall(smallCalls, 'listPipelines')[1].offset, 50,
+    'small valid offset passes through unchanged')
+}
+
 async function main() {
   await testUnauthenticatedWriteRequestIsRejected()
   await testExternalSystemRoutes()
@@ -673,6 +736,7 @@ async function main() {
   await testRunAndDeadLetterRoutes()
   await testErrorResponseShape()
   await testTenantGuards()
+  await testListOffsetCap()
 
   console.log('http-routes: REST auth/list/upsert/run/dry-run/replay tests passed')
 }
