@@ -581,6 +581,17 @@ function toggleFieldSelection(values: string[], fieldId: string) {
   values.splice(0, values.length, ...next)
 }
 
+function preserveConditionalFormattingRules(target: MetaView, config: Record<string, unknown>): Record<string, unknown> {
+  const existingConfig = target.config ?? {}
+  if (!Object.prototype.hasOwnProperty.call(existingConfig, 'conditionalFormattingRules')) {
+    return config
+  }
+  return {
+    ...config,
+    conditionalFormattingRules: existingConfig.conditionalFormattingRules,
+  }
+}
+
 function saveConfig() {
   const target = configTarget.value
   if (!target || viewConfigBlockingReason.value) return
@@ -588,32 +599,32 @@ function saveConfig() {
   if (target.type === 'gallery') {
     const fieldIds = galleryDraft.fieldIds.filter((fieldId) => validFieldIds.value.has(fieldId))
     emit('update-view', target.id, {
-      config: {
+      config: preserveConditionalFormattingRules(target, {
         titleFieldId: galleryDraft.titleFieldId && validStringFieldIds.value.has(galleryDraft.titleFieldId) ? galleryDraft.titleFieldId : null,
         coverFieldId: galleryDraft.coverFieldId && validAttachmentFieldIds.value.has(galleryDraft.coverFieldId) ? galleryDraft.coverFieldId : null,
         fieldIds,
         columns: galleryDraft.columns,
         cardSize: galleryDraft.cardSize,
-      },
+      }),
     })
   } else if (target.type === 'calendar') {
     emit('update-view', target.id, {
-      config: {
+      config: preserveConditionalFormattingRules(target, {
         dateFieldId: calendarDraft.dateFieldId && validDateLikeFieldIds.value.has(calendarDraft.dateFieldId) ? calendarDraft.dateFieldId : null,
         endDateFieldId: calendarDraft.endDateFieldId && validDateLikeFieldIds.value.has(calendarDraft.endDateFieldId) ? calendarDraft.endDateFieldId : null,
         titleFieldId: calendarDraft.titleFieldId && validFieldIds.value.has(calendarDraft.titleFieldId) ? calendarDraft.titleFieldId : null,
         defaultView: calendarDraft.defaultView,
         weekStartsOn: calendarDraft.weekStartsOn,
-      },
+      }),
     })
   } else if (target.type === 'timeline') {
     emit('update-view', target.id, {
-      config: {
+      config: preserveConditionalFormattingRules(target, {
         startFieldId: timelineDraft.startFieldId && validDateFieldIds.value.has(timelineDraft.startFieldId) ? timelineDraft.startFieldId : null,
         endFieldId: timelineDraft.endFieldId && validDateFieldIds.value.has(timelineDraft.endFieldId) ? timelineDraft.endFieldId : null,
         labelFieldId: timelineDraft.labelFieldId && validFieldIds.value.has(timelineDraft.labelFieldId) ? timelineDraft.labelFieldId : null,
         zoom: timelineDraft.zoom,
-      },
+      }),
     })
   } else if (target.type === 'kanban') {
     const groupFieldId = kanbanDraft.groupFieldId && validSelectFieldIds.value.has(kanbanDraft.groupFieldId)
@@ -621,10 +632,10 @@ function saveConfig() {
       : null
     const cardFieldIds = kanbanDraft.cardFieldIds.filter((fieldId) => validFieldIds.value.has(fieldId))
     emit('update-view', target.id, {
-      config: {
+      config: preserveConditionalFormattingRules(target, {
         groupFieldId,
         cardFieldIds,
-      },
+      }),
       groupInfo: groupFieldId ? { fieldId: groupFieldId } : {},
     })
   }

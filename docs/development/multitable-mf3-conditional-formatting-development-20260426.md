@@ -182,7 +182,9 @@ codes were introduced.
 - `apps/web/src/multitable/components/ConditionalFormattingDialog.vue`
   (new, ~340 LoC).
 - `apps/web/src/multitable/components/MetaViewManager.vue` (edited;
-  +35 / −1: open dialog button + handlers + import).
+  +35 / −1: open dialog button + handlers + import; preserves
+  `conditionalFormattingRules` when saving existing gallery / kanban
+  / calendar / timeline view settings).
 - `apps/web/src/multitable/components/MetaGridTable.vue` (edited;
   +25 / −2: prop addition + `cellStyle(rid, fid)` signature change +
   `rowStyle(rid)` helper + style merge).

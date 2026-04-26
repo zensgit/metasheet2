@@ -177,7 +177,7 @@ const PALETTE = [
 ] as const
 
 const draftRules = ref<ConditionalFormattingRule[]>([])
-const baseline = ref('')
+const baseline = ref('[]')
 
 function snapshot(rules: ConditionalFormattingRule[]): string {
   return JSON.stringify(rules)
@@ -201,7 +201,7 @@ watch(() => props.viewConfig, () => {
   if (props.visible) hydrate()
 })
 
-const dirty = computed(() => snapshot(draftRules.value) !== baseline.value)
+const dirty = computed(() => props.visible && snapshot(draftRules.value) !== baseline.value)
 
 watch(dirty, (value) => emit('update:dirty', value), { immediate: true })
 

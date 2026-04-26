@@ -185,6 +185,11 @@ during development:
   calendar / timeline drafts, dirty tracking, outdated-source
   warning) is unchanged; the new affordance opens a sibling dialog
   that does not interact with the existing per-type config draft.
+- Review hardening: saving an existing gallery / kanban / calendar /
+  timeline config now preserves `config.conditionalFormattingRules`
+  instead of overwriting the whole config object and dropping rules.
+  The sibling dialog also reports `dirty=false` while hidden so the
+  view manager does not prompt for unsaved changes on initial mount.
 - POST `/api/multitable/views` and PATCH `/api/multitable/views/:id`
   remain backward compatible — the new validation only rejects
   `config.conditionalFormattingRules` payloads that exceed the limit
