@@ -71,6 +71,75 @@ describe('MetaViewManager', () => {
     app.unmount()
   })
 
+  it('preserves conditional formatting rules when saving view settings', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const updateSpy = vi.fn()
+    const rules = [
+      {
+        id: 'rule_overdue',
+        order: 0,
+        fieldId: 'fld_start',
+        operator: 'is_overdue',
+        style: { backgroundColor: '#fce4e4' },
+        enabled: true,
+      },
+    ]
+
+    const app = createApp({
+      render() {
+        return h(MetaViewManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          activeViewId: 'view_timeline',
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string' },
+            { id: 'fld_start', name: 'Start', type: 'date' },
+            { id: 'fld_end', name: 'End', type: 'date' },
+          ],
+          views: [
+            {
+              id: 'view_timeline',
+              sheetId: 'sheet_1',
+              name: 'Roadmap',
+              type: 'timeline',
+              config: {
+                startFieldId: 'fld_start',
+                endFieldId: 'fld_end',
+                zoom: 'week',
+                conditionalFormattingRules: rules,
+              },
+            },
+          ],
+          onUpdateView: updateSpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    ;(container.querySelector('.meta-view-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await nextTick()
+
+    ;(Array.from(container.querySelectorAll('.meta-view-mgr__btn-add')) as HTMLButtonElement[])
+      .find((button) => button.textContent?.includes('Save view settings'))
+      ?.click()
+    await nextTick()
+
+    expect(updateSpy).toHaveBeenCalledWith('view_timeline', {
+      config: {
+        startFieldId: 'fld_start',
+        endFieldId: 'fld_end',
+        labelFieldId: 'fld_name',
+        zoom: 'week',
+        conditionalFormattingRules: rules,
+      },
+    })
+
+    app.unmount()
+  })
+
   it('reconciles latest view config while clean and reloads latest when draft becomes stale', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)

@@ -65,6 +65,46 @@ export interface MetaView {
   config?: Record<string, unknown>
 }
 
+// --- Conditional formatting (MF3) ---
+// Mirrors `packages/core-backend/src/multitable/conditional-formatting-service.ts`.
+// Backend is the canonical source — keep shapes in sync when extending.
+export type ConditionalFormattingOperator =
+  | 'gt'
+  | 'gte'
+  | 'lt'
+  | 'lte'
+  | 'eq'
+  | 'neq'
+  | 'between'
+  | 'contains'
+  | 'not_contains'
+  | 'is_empty'
+  | 'is_not_empty'
+  | 'is_today'
+  | 'is_in_last_n_days'
+  | 'is_in_next_n_days'
+  | 'is_overdue'
+  | 'is_true'
+  | 'is_false'
+
+export interface ConditionalFormattingStyle {
+  backgroundColor?: string
+  textColor?: string
+  applyToRow?: boolean
+}
+
+export interface ConditionalFormattingRule {
+  id: string
+  order: number
+  fieldId: string
+  operator: ConditionalFormattingOperator
+  value?: unknown
+  style: ConditionalFormattingStyle
+  enabled: boolean
+}
+
+export const CONDITIONAL_FORMATTING_RULE_LIMIT = 20
+
 export interface MetaRecord {
   id: string
   version: number

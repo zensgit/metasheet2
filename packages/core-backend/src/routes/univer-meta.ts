@@ -133,6 +133,10 @@ import {
   createYjsInvalidationPostCommitHook,
   type YjsInvalidator,
 } from '../multitable/post-commit-hooks'
+import {
+  CONDITIONAL_FORMATTING_RULE_LIMIT,
+  sanitizeConditionalFormattingRules,
+} from '../multitable/conditional-formatting-service'
 
 const multitableFormulaEngine = new MultitableFormulaEngine()
 
@@ -4199,6 +4203,21 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
 
+      const incomingConfig: Record<string, unknown> = parsed.data.config ?? {}
+      const incomingRules = incomingConfig.conditionalFormattingRules
+      if (Array.isArray(incomingRules) && incomingRules.length > CONDITIONAL_FORMATTING_RULE_LIMIT) {
+        return res.status(400).json({
+          ok: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: `conditionalFormattingRules exceeds limit of ${CONDITIONAL_FORMATTING_RULE_LIMIT}`,
+          },
+        })
+      }
+      if (incomingRules !== undefined) {
+        incomingConfig.conditionalFormattingRules = sanitizeConditionalFormattingRules(incomingRules)
+      }
+
       await pool.query(
         `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
          VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)`,
@@ -4211,7 +4230,7 @@ export function univerMetaRouter(): Router {
           JSON.stringify(parsed.data.sortInfo ?? {}),
           JSON.stringify(parsed.data.groupInfo ?? {}),
           JSON.stringify(parsed.data.hiddenFieldIds ?? []),
-          JSON.stringify(parsed.data.config ?? {}),
+          JSON.stringify(incomingConfig),
         ],
       )
 
@@ -4224,7 +4243,7 @@ export function univerMetaRouter(): Router {
         sortInfo: parsed.data.sortInfo ?? {},
         groupInfo: parsed.data.groupInfo ?? {},
         hiddenFieldIds: parsed.data.hiddenFieldIds ?? [],
-        config: parsed.data.config ?? {},
+        config: incomingConfig,
       }
 
       metaViewConfigCache.set(viewId, view)
@@ -4278,6 +4297,20 @@ export function univerMetaRouter(): Router {
       const nextGroup = parsed.data.groupInfo ?? normalizeJson(row.group_info)
       const nextHiddenFieldIds = parsed.data.hiddenFieldIds ?? normalizeJsonArray(row.hidden_field_ids)
       const nextConfig = parsed.data.config ?? normalizeJson(row.config)
+      const incomingRules = (nextConfig as Record<string, unknown>).conditionalFormattingRules
+      if (Array.isArray(incomingRules) && incomingRules.length > CONDITIONAL_FORMATTING_RULE_LIMIT) {
+        return res.status(400).json({
+          ok: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: `conditionalFormattingRules exceeds limit of ${CONDITIONAL_FORMATTING_RULE_LIMIT}`,
+          },
+        })
+      }
+      if (incomingRules !== undefined) {
+        ;(nextConfig as Record<string, unknown>).conditionalFormattingRules =
+          sanitizeConditionalFormattingRules(incomingRules)
+      }
 
       await pool.query(
         `UPDATE meta_views
