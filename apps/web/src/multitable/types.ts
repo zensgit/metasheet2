@@ -14,6 +14,12 @@ export type MetaFieldType =
   | 'lookup'
   | 'rollup'
   | 'attachment'
+  | 'currency'
+  | 'percent'
+  | 'rating'
+  | 'url'
+  | 'email'
+  | 'phone'
 
 export type MetaFieldCreateType = MetaFieldType | 'person'
 

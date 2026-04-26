@@ -173,6 +173,45 @@
           </div>
         </template>
 
+        <template v-else-if="configTargetType === 'currency'">
+          <div class="meta-field-mgr__grid">
+            <label class="meta-field-mgr__field">
+              <span>Currency code (ISO 4217)</span>
+              <select v-model="currencyDraft.code" class="meta-field-mgr__select">
+                <option value="CNY">CNY (¥)</option>
+                <option value="USD">USD ($)</option>
+                <option value="EUR">EUR (€)</option>
+                <option value="GBP">GBP (£)</option>
+                <option value="JPY">JPY (¥)</option>
+                <option value="HKD">HKD (HK$)</option>
+                <option value="TWD">TWD (NT$)</option>
+                <option value="KRW">KRW (₩)</option>
+                <option value="AUD">AUD (A$)</option>
+                <option value="CAD">CAD (CA$)</option>
+                <option value="SGD">SGD (S$)</option>
+              </select>
+            </label>
+            <label class="meta-field-mgr__field">
+              <span>Decimals</span>
+              <input v-model.number="currencyDraft.decimals" class="meta-field-mgr__input" type="number" min="0" max="6" />
+            </label>
+          </div>
+        </template>
+
+        <template v-else-if="configTargetType === 'percent'">
+          <label class="meta-field-mgr__field">
+            <span>Decimals</span>
+            <input v-model.number="percentDraft.decimals" class="meta-field-mgr__input" type="number" min="0" max="6" />
+          </label>
+        </template>
+
+        <template v-else-if="configTargetType === 'rating'">
+          <label class="meta-field-mgr__field">
+            <span>Maximum rating (1-10)</span>
+            <input v-model.number="ratingDraft.max" class="meta-field-mgr__input" type="number" min="1" max="10" />
+          </label>
+        </template>
+
         <MetaFieldValidationPanel
           v-if="configTarget && validationPanelVisible"
           class="meta-field-mgr__validation"
@@ -221,9 +260,12 @@ import type { FieldValidationRule, MetaField, MetaFieldCreateType, MetaSheet } f
 import {
   normalizeStringArray,
   resolveAttachmentFieldProperty,
+  resolveCurrencyFieldProperty,
   resolveFormulaFieldProperty,
   resolveLinkFieldProperty,
   resolveLookupFieldProperty,
+  resolvePercentFieldProperty,
+  resolveRatingFieldProperty,
   resolveRollupFieldProperty,
   resolveSelectFieldOptions,
 } from '../utils/field-config'
@@ -317,10 +359,15 @@ function rulesToProperty(rules: FieldValidationRule[]): Array<Record<string, unk
   return out
 }
 
-const FIELD_TYPES: MetaFieldCreateType[] = ['string', 'number', 'boolean', 'date', 'select', 'link', 'person', 'formula', 'lookup', 'rollup', 'attachment']
+const FIELD_TYPES: MetaFieldCreateType[] = [
+  'string', 'number', 'boolean', 'date', 'select', 'link', 'person',
+  'formula', 'lookup', 'rollup', 'attachment',
+  'currency', 'percent', 'rating', 'url', 'email', 'phone',
+]
 const FIELD_ICONS: Record<string, string> = {
   string: 'Aa', number: '#', boolean: '\u2611', date: '\u{1F4C5}', select: '\u25CF',
   link: '\u21C4', person: '\u{1F464}', lookup: '\u2197', rollup: '\u03A3', formula: 'fx', attachment: '\uD83D\uDCCE',
+  currency: '\u00A4', percent: '%', rating: '\u2605', url: '\u{1F517}', email: '\u2709', phone: '\u260E',
 }
 
 const props = defineProps<{
@@ -375,6 +422,16 @@ const formulaDraft = reactive<{ expression: string }>({
 const attachmentDraft = reactive<{ maxFiles: number; acceptedMimeTypesText: string }>({
   maxFiles: 1,
   acceptedMimeTypesText: '',
+})
+const currencyDraft = reactive<{ code: string; decimals: number }>({
+  code: 'CNY',
+  decimals: 2,
+})
+const percentDraft = reactive<{ decimals: number }>({
+  decimals: 1,
+})
+const ratingDraft = reactive<{ max: number }>({
+  max: 5,
 })
 const validationDraft = ref<FieldValidationRule[]>([])
 // True when the field had explicit validation rules stored OR the user
@@ -432,7 +489,10 @@ function onValidationRulesChange(rules: FieldValidationRule[]) {
 }
 
 function requiresConfig(type: MetaFieldCreateType): boolean {
-  return ['select', 'link', 'person', 'lookup', 'rollup', 'formula', 'attachment'].includes(type)
+  return [
+    'select', 'link', 'person', 'lookup', 'rollup', 'formula', 'attachment',
+    'currency', 'percent', 'rating',
+  ].includes(type)
 }
 
 function displayFieldType(field: MetaField): string {
@@ -455,6 +515,10 @@ function resetDrafts() {
   formulaDraft.expression = ''
   attachmentDraft.maxFiles = 1
   attachmentDraft.acceptedMimeTypesText = ''
+  currencyDraft.code = 'CNY'
+  currencyDraft.decimals = 2
+  percentDraft.decimals = 1
+  ratingDraft.max = 5
   validationDraft.value = []
   validationDraftTouched.value = false
   fieldConfigError.value = ''
@@ -507,6 +571,15 @@ function serializeFieldDraft(type: string | null): string {
       maxFiles: attachmentDraft.maxFiles,
       acceptedMimeTypesText: attachmentDraft.acceptedMimeTypesText.trim(),
     })
+  }
+  if (type === 'currency') {
+    return JSON.stringify({ code: currencyDraft.code.trim().toUpperCase(), decimals: currencyDraft.decimals })
+  }
+  if (type === 'percent') {
+    return JSON.stringify({ decimals: percentDraft.decimals })
+  }
+  if (type === 'rating') {
+    return JSON.stringify({ max: ratingDraft.max })
   }
   if (type === 'string' || type === 'number') {
     return JSON.stringify({ validation })
@@ -571,6 +644,16 @@ function hydrateExistingFieldConfig(field: MetaField, options?: { liveRefreshTex
     const property = resolveAttachmentFieldProperty(field.property)
     attachmentDraft.maxFiles = property.maxFiles ?? 1
     attachmentDraft.acceptedMimeTypesText = property.acceptedMimeTypes.join(',')
+  } else if (fieldType === 'currency') {
+    const property = resolveCurrencyFieldProperty(field.property)
+    currencyDraft.code = property.code
+    currencyDraft.decimals = property.decimals
+  } else if (fieldType === 'percent') {
+    const property = resolvePercentFieldProperty(field.property)
+    percentDraft.decimals = property.decimals
+  } else if (fieldType === 'rating') {
+    const property = resolveRatingFieldProperty(field.property)
+    ratingDraft.max = property.max
   }
   if (VALIDATION_PANEL_TYPES.has(fieldType)) {
     const loaded = rulesFromProperty(field.property ?? null)
@@ -639,7 +722,7 @@ function openNewFieldConfigIfNeeded() {
 }
 
 function currentDraftProperty(type: MetaFieldCreateType | string): Record<string, unknown> | undefined {
-  const normalizedType = type === 'link' || type === 'select' || type === 'lookup' || type === 'rollup' || type === 'formula' || type === 'attachment' || type === 'person'
+  const normalizedType = type === 'link' || type === 'select' || type === 'lookup' || type === 'rollup' || type === 'formula' || type === 'attachment' || type === 'person' || type === 'currency' || type === 'percent' || type === 'rating'
     ? type
     : null
   fieldConfigError.value = ''
@@ -711,6 +794,35 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
       maxFiles: attachmentDraft.maxFiles,
       acceptedMimeTypes: normalizeStringArray(attachmentDraft.acceptedMimeTypesText.split(',')),
     }
+  }
+  if (normalizedType === 'currency') {
+    const code = currencyDraft.code.trim().toUpperCase()
+    if (!/^[A-Z]{3}$/.test(code)) {
+      fieldConfigError.value = 'Currency code must be a 3-letter ISO code (e.g. CNY, USD, EUR)'
+      return undefined
+    }
+    const decimals = Number(currencyDraft.decimals)
+    if (!Number.isFinite(decimals) || decimals < 0 || decimals > 6) {
+      fieldConfigError.value = 'Currency decimals must be between 0 and 6'
+      return undefined
+    }
+    return { code, decimals: Math.round(decimals) }
+  }
+  if (normalizedType === 'percent') {
+    const decimals = Number(percentDraft.decimals)
+    if (!Number.isFinite(decimals) || decimals < 0 || decimals > 6) {
+      fieldConfigError.value = 'Percent decimals must be between 0 and 6'
+      return undefined
+    }
+    return { decimals: Math.round(decimals) }
+  }
+  if (normalizedType === 'rating') {
+    const max = Number(ratingDraft.max)
+    if (!Number.isFinite(max) || max < 1 || max > 10) {
+      fieldConfigError.value = 'Rating max must be between 1 and 10'
+      return undefined
+    }
+    return { max: Math.round(max) }
   }
   if (type === 'string' || type === 'number') {
     return { ...validationProperty }

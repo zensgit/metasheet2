@@ -1,4 +1,11 @@
 import type { LinkedRecordSummary, MetaAttachment, MetaField } from '../types'
+import {
+  formatCurrencyValue,
+  formatPercentValue,
+  resolveCurrencyFieldProperty,
+  resolvePercentFieldProperty,
+  resolveRatingFieldProperty,
+} from './field-config'
 
 function formatDate(value: unknown): string {
   if (value === null || value === undefined || value === '') return '—'
@@ -29,6 +36,28 @@ export function formatFieldDisplay(params: {
 
   if (field.type === 'date') return formatDate(value)
   if (field.type === 'boolean') return value ? 'Yes' : 'No'
+
+  if (field.type === 'currency') {
+    const num = typeof value === 'number' ? value : Number(value)
+    if (!Number.isFinite(num)) return String(value)
+    const { code, decimals } = resolveCurrencyFieldProperty(field.property)
+    return formatCurrencyValue(num, code, decimals)
+  }
+
+  if (field.type === 'percent') {
+    const num = typeof value === 'number' ? value : Number(value)
+    if (!Number.isFinite(num)) return String(value)
+    const { decimals } = resolvePercentFieldProperty(field.property)
+    return formatPercentValue(num, decimals)
+  }
+
+  if (field.type === 'rating') {
+    const num = typeof value === 'number' ? value : Number(value)
+    if (!Number.isFinite(num)) return String(value)
+    const { max } = resolveRatingFieldProperty(field.property)
+    const filled = Math.max(0, Math.min(max, Math.round(num)))
+    return `${'★'.repeat(filled)}${'☆'.repeat(max - filled)}`
+  }
 
   if (field.type === 'select') {
     const rawValues = Array.isArray(value) ? value : [value]

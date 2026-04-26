@@ -22,6 +22,7 @@ import {
   type RecordPostCommitHook,
   type YjsInvalidator,
 } from './post-commit-hooks'
+import { BATCH1_FIELD_TYPES, coerceBatch1Value } from './field-codecs'
 
 // ---------------------------------------------------------------------------
 // Shared types (mirrors the ones in univer-meta.ts to avoid coupling)
@@ -40,7 +41,23 @@ export interface ConnectionPool {
 export type UniverMetaField = {
   id: string
   name: string
-  type: 'string' | 'number' | 'boolean' | 'date' | 'formula' | 'select' | 'link' | 'lookup' | 'rollup' | 'attachment'
+  type:
+    | 'string'
+    | 'number'
+    | 'boolean'
+    | 'date'
+    | 'formula'
+    | 'select'
+    | 'link'
+    | 'lookup'
+    | 'rollup'
+    | 'attachment'
+    | 'currency'
+    | 'percent'
+    | 'rating'
+    | 'url'
+    | 'email'
+    | 'phone'
   options?: Array<{ value: string; color?: string }>
   order?: number
   property?: Record<string, unknown>
@@ -161,6 +178,12 @@ export type FieldMutationGuard = {
   readOnly: boolean
   hidden: boolean
   link?: LinkFieldConfig | null
+  /**
+   * Sanitized property. Required by the MF2 batch-1 field types
+   * (currency/percent/rating) so coercion can read `code`/`decimals`/`max`
+   * without re-fetching the field definition.
+   */
+  property?: Record<string, unknown>
 }
 
 export interface RecordPatchInput {
@@ -491,6 +514,16 @@ export class RecordWriteService {
 
           if (field.type === 'attachment') {
             patch[change.fieldId] = h.normalizeAttachmentIds(change.value)
+            applied += 1
+            continue
+          }
+
+          if (BATCH1_FIELD_TYPES.has(field.type)) {
+            try {
+              patch[change.fieldId] = coerceBatch1Value(field.type, field.property, change.fieldId, change.value)
+            } catch (error) {
+              throw new RecordValidationError(error instanceof Error ? error.message : String(error))
+            }
             applied += 1
             continue
           }
