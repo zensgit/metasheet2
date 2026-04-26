@@ -22,7 +22,7 @@
 --   the (tenant_id, pipeline_id, status) prefix narrows the scan to O(1) rows.
 -- ---------------------------------------------------------------------------
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_integration_runs_tenant_pipeline_status
+CREATE INDEX IF NOT EXISTS idx_integration_runs_tenant_pipeline_status
   ON integration_runs (tenant_id, pipeline_id, status);
 
 -- Also covers the common "list recent runs for a pipeline" access pattern used by

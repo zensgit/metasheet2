@@ -49,7 +49,7 @@ Same multi-index join problem. Called once per `runPipeline` invocation (PR #118
 Migration 058 adds a single composite index:
 
 ```sql
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_integration_runs_tenant_pipeline_status
+CREATE INDEX IF NOT EXISTS idx_integration_runs_tenant_pipeline_status
   ON integration_runs (tenant_id, pipeline_id, status);
 ```
 
@@ -69,11 +69,19 @@ would create a second dimension before `pipeline_id`, increasing index size whil
 minimal additional filtering benefit. The `workspace_id` condition is cheap to evaluate
 as a residual predicate after the `(tenant_id, pipeline_id, status)` prefix narrows to O(1) rows.
 
-### Why `CONCURRENTLY`
+### Why not `CONCURRENTLY`
 
-The migration runs against a live database. `CONCURRENTLY` avoids an exclusive table lock
-that would block all reads/writes to `integration_runs` during the migration. The trade-off
-is that the index build takes longer (two table scans) but poses zero downtime risk.
+The repo's SQL migration provider executes migrations through Kysely's migrator,
+which wraps each migration in a transaction. PostgreSQL rejects
+`CREATE INDEX CONCURRENTLY` inside a transaction block, so this migration uses
+plain `CREATE INDEX IF NOT EXISTS` to stay compatible with existing migration
+replay and deployment tooling.
+
+Operational trade-off: this can briefly lock writes to `integration_runs` while
+the index is built. The current table is expected to be small during the K3 PoC
+phase. If this table becomes large before production rollout, build a dedicated
+non-transactional maintenance path for concurrent indexes rather than bypassing
+the normal migration runner in this PR.
 
 ## Secondary benefit
 

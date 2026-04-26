@@ -26,18 +26,32 @@ changes, so no unit tests are affected.
 ## Migration SQL review
 
 ```sql
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_integration_runs_tenant_pipeline_status
+CREATE INDEX IF NOT EXISTS idx_integration_runs_tenant_pipeline_status
   ON integration_runs (tenant_id, pipeline_id, status);
 ```
 
 | Check | Result |
 |---|---|
-| `CONCURRENTLY` — no exclusive table lock | ✅ |
+| No `CONCURRENTLY` — compatible with Kysely transactional migration runner | ✅ |
 | `IF NOT EXISTS` — idempotent re-run | ✅ |
 | References only `integration_runs` — no cross-table FK concerns | ✅ |
 | Does not drop or alter any existing index or table | ✅ |
 | Column names match 057 schema (`tenant_id`, `pipeline_id`, `status`) | ✅ |
 | No `DROP INDEX` or `DROP TABLE` statement | ✅ |
+
+## CI failure caught and fix
+
+Initial #1189 used `CREATE INDEX CONCURRENTLY IF NOT EXISTS`, but CI's
+`migration-replay` job failed with:
+
+```text
+error: CREATE INDEX CONCURRENTLY cannot run inside a transaction block
+```
+
+Root cause: `packages/core-backend/src/db/migration-provider.ts` executes SQL
+files via Kysely migrations, and Kysely wraps each migration in a transaction.
+The fix is to use plain `CREATE INDEX IF NOT EXISTS`, preserving idempotency and
+planner benefit while staying compatible with the existing migration runner.
 
 ## Manual EXPLAIN analysis (expected)
 
@@ -60,5 +74,5 @@ for healthy pipelines, meaning a single key lookup with no rows returned).
 
 - `migration-sql.test.cjs` — unchanged behavior (validates 057 only)
 - `migration-replay` CI job — replays migrations 001-058 against real Postgres;
-  `CONCURRENTLY` is accepted by Postgres ≥ 9.2 (CI uses Postgres 18.x / 20.x)
+  plain `CREATE INDEX IF NOT EXISTS` is accepted inside the runner transaction
 - `contracts`, `test 18.x`, `test 20.x` — unaffected (no application code changes)
