@@ -301,6 +301,95 @@ test('normalizeStatus synonym for fail in materialSaveOnly correctly skips Save-
   )
 })
 
+// ----- requirePacketSafety hand-edit hardening (deferred from #1175 / #1176 / #1177) -----
+
+test('requirePacketSafety accepts hand-edited string booleans for saveOnly / productionWriteBlocked', () => {
+  const p = packet()
+  p.safety.saveOnly = 'true'
+  p.safety.productionWriteBlocked = 'true'
+  // Should not throw; should produce normal PASS decision
+  const report = buildEvidenceReport(p, sampleEvidence())
+  assert.equal(report.decision, 'PASS')
+})
+
+test('requirePacketSafety accepts numeric 1 / 0 for safety fields (spreadsheet booleans)', () => {
+  const p = packet()
+  p.safety.saveOnly = 1
+  p.safety.autoSubmit = 0
+  p.safety.autoAudit = 0
+  p.safety.productionWriteBlocked = 1
+  const report = buildEvidenceReport(p, sampleEvidence())
+  assert.equal(report.decision, 'PASS')
+})
+
+test('requirePacketSafety accepts Chinese boolean synonyms for safety fields', () => {
+  const p = packet()
+  p.safety.saveOnly = '是'
+  p.safety.autoSubmit = '否'
+  p.safety.autoAudit = '关闭'
+  p.safety.productionWriteBlocked = '启用'
+  const report = buildEvidenceReport(p, sampleEvidence())
+  assert.equal(report.decision, 'PASS')
+})
+
+test('requirePacketSafety still rejects autoSubmit truthy hand-edits (safety contract preserved)', () => {
+  for (const truthyHandEdit of [true, 'true', '是', 1, 'yes', 'on']) {
+    const p = packet()
+    p.safety.autoSubmit = truthyHandEdit
+    assert.throws(
+      () => buildEvidenceReport(p, sampleEvidence()),
+      (error) => error instanceof LivePocEvidenceError && error.details.field === 'packet.safety',
+      `autoSubmit=${JSON.stringify(truthyHandEdit)} should still fail safety guard`,
+    )
+  }
+})
+
+test('requirePacketSafety still rejects autoAudit truthy hand-edits (safety contract preserved)', () => {
+  for (const truthyHandEdit of [true, 'true', '是', 1, 'yes']) {
+    const p = packet()
+    p.safety.autoAudit = truthyHandEdit
+    assert.throws(
+      () => buildEvidenceReport(p, sampleEvidence()),
+      (error) => error instanceof LivePocEvidenceError && error.details.field === 'packet.safety',
+      `autoAudit=${JSON.stringify(truthyHandEdit)} should still fail safety guard`,
+    )
+  }
+})
+
+test('requirePacketSafety still rejects falsy saveOnly hand-edits (safety contract preserved)', () => {
+  for (const falsyHandEdit of [false, 'false', '否', 0, 'no', 'off', '']) {
+    const p = packet()
+    p.safety.saveOnly = falsyHandEdit
+    assert.throws(
+      () => buildEvidenceReport(p, sampleEvidence()),
+      (error) => error instanceof LivePocEvidenceError && error.details.field === 'packet.safety',
+      `saveOnly=${JSON.stringify(falsyHandEdit)} should still fail safety guard`,
+    )
+  }
+})
+
+test('requirePacketSafety still rejects falsy productionWriteBlocked hand-edits', () => {
+  for (const falsyHandEdit of [false, 'false', '否', 0, 'no']) {
+    const p = packet()
+    p.safety.productionWriteBlocked = falsyHandEdit
+    assert.throws(
+      () => buildEvidenceReport(p, sampleEvidence()),
+      (error) => error instanceof LivePocEvidenceError && error.details.field === 'packet.safety.productionWriteBlocked',
+      `productionWriteBlocked=${JSON.stringify(falsyHandEdit)} should still fail`,
+    )
+  }
+})
+
+test('requirePacketSafety throws with field-named error for non-coercible safety values', () => {
+  const p = packet()
+  p.safety.saveOnly = 'maybe'
+  assert.throws(
+    () => buildEvidenceReport(p, sampleEvidence()),
+    (error) => error instanceof LivePocEvidenceError && error.details.field === 'packet.safety.saveOnly',
+    'unknown string boolean for saveOnly should throw with field name',
+  )
+})
+
 test('CLI writes redacted JSON and Markdown reports', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'integration-live-evidence-'))
   try {

@@ -143,14 +143,25 @@ function hasSqlChannel(packet) {
   })
 }
 
+// During incident response a customer/operator might hand-edit the packet JSON
+// to retry an evidence run. Coerce safety fields through normalizeSafeBoolean
+// so a hand-typed `"true"` / `"false"` / `0` / `1` is interpreted the same way
+// the preflight script would have written it. The safety contract is unchanged:
+// saveOnly must be truthy, autoSubmit / autoAudit must be falsy, and
+// productionWriteBlocked must be truthy — coercion only widens the input
+// surface, it does not weaken the gate.
 function requirePacketSafety(packet) {
   const safety = asObject(packet.safety, 'packet.safety')
-  if (safety.saveOnly !== true || safety.autoSubmit !== false || safety.autoAudit !== false) {
+  const saveOnly = normalizeSafeBoolean(safety.saveOnly, 'packet.safety.saveOnly')
+  const autoSubmit = normalizeSafeBoolean(safety.autoSubmit, 'packet.safety.autoSubmit')
+  const autoAudit = normalizeSafeBoolean(safety.autoAudit, 'packet.safety.autoAudit')
+  if (!saveOnly || autoSubmit || autoAudit) {
     throw new LivePocEvidenceError('preflight packet must be Save-only with autoSubmit=false and autoAudit=false', {
       field: 'packet.safety',
     })
   }
-  if (safety.productionWriteBlocked !== true) {
+  const productionWriteBlocked = normalizeSafeBoolean(safety.productionWriteBlocked, 'packet.safety.productionWriteBlocked')
+  if (!productionWriteBlocked) {
     throw new LivePocEvidenceError('preflight packet must explicitly block production writes', {
       field: 'packet.safety.productionWriteBlocked',
     })
