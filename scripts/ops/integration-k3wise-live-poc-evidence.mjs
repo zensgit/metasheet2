@@ -6,6 +6,26 @@ import { pathToFileURL } from 'node:url'
 const SECRET_KEY_PATTERN = /password|secret|token|session|credential|api[-_]?key|authorization/i
 const SAFE_SECRET_PLACEHOLDERS = new Set(['', '<redacted>', '<set-at-runtime>', 'redacted', '***'])
 const VALID_STATUSES = new Set(['pass', 'partial', 'fail', 'skipped', 'todo', 'blocked'])
+// Customer evidence often spells phase status with localized or English
+// synonyms (e.g. "passed", "成功", "完成", "failed", "失败", "进行中").
+// Without a synonym map, anything not in VALID_STATUSES silently defaults
+// to 'todo' — flipping a completed phase into a false PARTIAL decision.
+const STATUS_SYNONYMS = new Map([
+  ['passed', 'pass'], ['passing', 'pass'], ['complete', 'pass'], ['completed', 'pass'],
+  ['done', 'pass'], ['ok', 'pass'], ['success', 'pass'], ['successful', 'pass'], ['succeeded', 'pass'],
+  ['通过', 'pass'], ['成功', 'pass'], ['完成', 'pass'], ['已完成', 'pass'], ['已通过', 'pass'], ['完毕', 'pass'],
+  ['failed', 'fail'], ['fails', 'fail'], ['error', 'fail'], ['errored', 'fail'], ['failure', 'fail'],
+  ['失败', 'fail'], ['失败了', 'fail'], ['错误', 'fail'], ['出错', 'fail'],
+  ['partially', 'partial'], ['in-progress', 'partial'], ['in progress', 'partial'], ['inprogress', 'partial'],
+  ['ongoing', 'partial'], ['working', 'partial'],
+  ['进行中', 'partial'], ['部分通过', 'partial'], ['部分', 'partial'],
+  ['skip', 'skipped'], ['n/a', 'skipped'], ['na', 'skipped'], ['not applicable', 'skipped'],
+  ['跳过', 'skipped'], ['不适用', 'skipped'],
+  ['stuck', 'blocked'], ['waiting', 'blocked'], ['hold', 'blocked'], ['on hold', 'blocked'], ['on-hold', 'blocked'],
+  ['阻塞', 'blocked'], ['卡住', 'blocked'], ['等待中', 'blocked'],
+  ['pending', 'todo'], ['queued', 'todo'], ['planned', 'todo'], ['not started', 'todo'], ['not-started', 'todo'],
+  ['待办', 'todo'], ['待做', 'todo'], ['未开始', 'todo'], ['未做', 'todo'],
+])
 // Customer-supplied evidence often carries spreadsheet-export style booleans
 // (string "true" / "yes" / "是", or number 0 / 1). Strict `=== true` checks
 // silently let those slip past — same bug class as preflight #1168 / #1169.
@@ -76,7 +96,9 @@ function text(value) {
 
 function normalizeStatus(value) {
   const status = text(value).toLowerCase()
-  return VALID_STATUSES.has(status) ? status : 'todo'
+  if (VALID_STATUSES.has(status)) return status
+  if (STATUS_SYNONYMS.has(status)) return STATUS_SYNONYMS.get(status)
+  return 'todo'
 }
 
 function redact(value) {
