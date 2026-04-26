@@ -338,6 +338,16 @@ function createPipelineRunner(deps = {}) {
     const mode = input.mode || context.pipeline.mode || 'manual'
     const triggeredBy = input.triggeredBy || 'manual'
     const dryRun = coerceTruthyFlag(input.dryRun, 'input.dryRun')
+    // Sweep for stale 'running' runs on this pipeline before creating a new one.
+    // Recovers from process crashes that left a run permanently 'running', which
+    // would otherwise block the concurrent-run guard from ever accepting new runs.
+    if (typeof pipelineRegistry.abandonStaleRuns === 'function') {
+      await pipelineRegistry.abandonStaleRuns({
+        tenantId: context.tenantId,
+        workspaceId: context.workspaceId,
+        pipelineId: context.pipeline.id,
+      })
+    }
     const started = clock()
     const metrics = createMetrics()
     const preview = dryRun ? { records: [], errors: [] } : null

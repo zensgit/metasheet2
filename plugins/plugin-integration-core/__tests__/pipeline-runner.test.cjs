@@ -120,6 +120,11 @@ function createPipelineRegistry(pipeline, db) {
         details: row.details,
       }
     },
+    abandonStaleRunsCalls: [],
+    async abandonStaleRuns(input) {
+      this.abandonStaleRunsCalls.push({ ...input })
+      return []
+    },
   }
 }
 
@@ -226,7 +231,7 @@ function createRunnerHarness({ sourceRecords, pipelineOverrides = {}, sourceRead
     })(),
   })
 
-  return { adapterSystems, db, pipeline, runner, sourceRecords, targetRows }
+  return { adapterSystems, db, pipeline, pipelineRegistry, runner, sourceRecords, targetRows }
 }
 
 async function main() {
@@ -710,6 +715,41 @@ async function main() {
       allowInactive: truthyVariant,
     })
     assert.ok(result.run, `allowInactive: ${JSON.stringify(truthyVariant)} lets the inactive pipeline run`)
+  }
+
+  // --- 17. abandonStaleRuns autowire ---------------------------------------
+  // runPipeline must call pipelineRegistry.abandonStaleRuns before startRun,
+  // scoped to the specific pipeline being triggered.
+  {
+    const harness = createRunnerHarness({
+      sourceRecords: [{ code: 'a-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' }],
+    })
+    await harness.runner.runPipeline({
+      tenantId: 'tenant_1',
+      pipelineId: 'pipe_1',
+      mode: 'manual',
+      triggeredBy: 'api',
+    })
+    const calls = harness.pipelineRegistry.abandonStaleRunsCalls
+    assert.equal(calls.length, 1, 'abandonStaleRuns called once per run')
+    assert.equal(calls[0].tenantId, 'tenant_1', 'abandonStaleRuns scoped to correct tenant')
+    assert.equal(calls[0].pipelineId, 'pipe_1', 'abandonStaleRuns scoped to triggering pipeline')
+  }
+
+  // runPipeline works correctly when pipelineRegistry has no abandonStaleRuns method
+  // (backward-compatibility: existing registries that pre-date PR #1187 are unaffected)
+  {
+    const harness = createRunnerHarness({
+      sourceRecords: [{ code: 'a-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' }],
+    })
+    delete harness.pipelineRegistry.abandonStaleRuns
+    const result = await harness.runner.runPipeline({
+      tenantId: 'tenant_1',
+      pipelineId: 'pipe_1',
+      mode: 'manual',
+      triggeredBy: 'api',
+    })
+    assert.ok(result.run, 'run succeeds even when abandonStaleRuns is not present on registry')
   }
 
   console.log('✓ pipeline-runner: cleanse/idempotency/incremental E2E tests passed')
