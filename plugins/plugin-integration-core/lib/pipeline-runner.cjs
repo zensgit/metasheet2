@@ -467,18 +467,29 @@ function createPipelineRunner(deps = {}) {
 
       metrics.durationMs = Math.max(0, clock() - started)
       const status = metrics.rowsFailed > 0 ? 'partial' : 'succeeded'
-      run = await runLogger.finishRun(run, metrics, status, {
-        details: {
-          dryRun,
-          watermarkAdvanced: !dryRun && metrics.rowsFailed === 0 && Boolean(lastSuccessfulWatermark),
-          nextCursor: cursor,
-          erpFeedback,
-        },
-      })
+      let finishRunWarning = null
+      try {
+        run = await runLogger.finishRun(run, metrics, status, {
+          details: {
+            dryRun,
+            watermarkAdvanced: !dryRun && metrics.rowsFailed === 0 && Boolean(lastSuccessfulWatermark),
+            nextCursor: cursor,
+            erpFeedback,
+          },
+        })
+      } catch (finishError) {
+        // ERP writes already committed — don't propagate to catch block where
+        // callers would see a failure and potentially retry (duplicate writes).
+        finishRunWarning = {
+          code: 'FINISH_RUN_FAILED',
+          message: finishError.message || String(finishError),
+        }
+      }
       return {
         run,
         metrics,
         preview,
+        ...(finishRunWarning && { warning: finishRunWarning }),
       }
     } catch (error) {
       metrics.durationMs = Math.max(0, clock() - started)

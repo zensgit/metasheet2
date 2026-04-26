@@ -712,6 +712,83 @@ async function main() {
     assert.ok(result.run, `allowInactive: ${JSON.stringify(truthyVariant)} lets the inactive pipeline run`)
   }
 
+  // --- 18. finishRun failure in success path returns warning, not error ----
+  {
+    const db18 = createMockDb()
+    const pipeline18 = {
+      id: 'pipe_1', tenantId: 'tenant_1', workspaceId: null, projectId: 'project_1',
+      sourceSystemId: 'source_1', sourceObject: 'materials',
+      targetSystemId: 'target_1', targetObject: 'BD_MATERIAL',
+      mode: 'manual', status: 'active',
+      idempotencyKeyFields: ['code', 'revision'],
+      options: { batchSize: 100 },
+      fieldMappings: [
+        { sourceField: 'code', targetField: 'FNumber', transform: ['trim', 'upper'], validation: [{ type: 'required' }] },
+        { sourceField: 'name', targetField: 'FName', transform: { fn: 'trim' }, validation: [{ type: 'required' }] },
+      ],
+    }
+    const targetRows18 = new Map()
+    const adapterRegistry18 = createAdapterRegistry()
+      .registerAdapter('mock-source', () => ({
+        async testConnection() { return { ok: true } },
+        async listObjects() { return [] },
+        async getSchema() { return { fields: [] } },
+        async read() {
+          return createReadResult({ records: [
+            { code: 'mat-01', revision: 'r1', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+          ] })
+        },
+        async upsert() { throw new Error('source upsert should not be called') },
+      }))
+      .registerAdapter('mock-target', () => ({
+        async testConnection() { return { ok: true } },
+        async listObjects() { return [] },
+        async getSchema() { return { fields: [] } },
+        async read() { return createReadResult({ records: [] }) },
+        async upsert(input) {
+          for (const record of input.records) targetRows18.set(record._integration_idempotency_key, record)
+          return createUpsertResult({ written: input.records.length, skipped: 0, results: [] })
+        },
+      }))
+
+    function buildRunner18(pipelineRegistryOverride = {}) {
+      const registry = { ...createPipelineRegistry(pipeline18, db18), ...pipelineRegistryOverride }
+      return createPipelineRunner({
+        pipelineRegistry: registry,
+        externalSystemRegistry: createExternalSystemRegistry(),
+        adapterRegistry: adapterRegistry18,
+        deadLetterStore: createDeadLetterStore({ db: db18 }),
+        watermarkStore: createWatermarkStore({ db: db18 }),
+        runLogger: createRunLogger({ pipelineRegistry: registry }),
+      })
+    }
+
+    // 18a: finishRun throws (DB down) after ERP write → returns warning, not error
+    const throwingRunner = buildRunner18({
+      async updatePipelineRun() {
+        throw new Error('DB connection lost after ERP write')
+      },
+    })
+    const warnResult = await throwingRunner.runPipeline({
+      tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'manual', triggeredBy: 'api',
+    })
+    assert.ok(warnResult.run, 'result.run is present even when finishRun throws')
+    assert.equal(warnResult.metrics.rowsWritten, 1, 'ERP write completed before finishRun threw')
+    assert.ok(warnResult.warning, 'warning field present when finishRun fails')
+    assert.equal(warnResult.warning.code, 'FINISH_RUN_FAILED', 'warning code is FINISH_RUN_FAILED')
+    assert.equal(typeof warnResult.warning.message, 'string', 'warning message is a string')
+    assert.equal(targetRows18.size, 1, 'target record was written despite finishRun failure')
+
+    // 18b: normal finishRun (no override) — no warning field
+    const normalRunner = buildRunner18()
+    const normalResult = await normalRunner.runPipeline({
+      tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'manual', triggeredBy: 'api',
+    })
+    assert.ok(normalResult.run, 'normal result has run')
+    assert.equal(normalResult.run.status, 'succeeded', 'run status is succeeded')
+    assert.equal(normalResult.warning, undefined, 'no warning when finishRun succeeds')
+  }
+
   console.log('✓ pipeline-runner: cleanse/idempotency/incremental E2E tests passed')
 }
 
