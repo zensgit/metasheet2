@@ -506,6 +506,18 @@ function createPipelineRunner(deps = {}) {
         reason: 'PAYLOAD_TRUNCATED',
       })
     }
+    if (deadLetter.sourcePayload === null || deadLetter.sourcePayload === undefined) {
+      throw new PipelineRunnerError('dead letter source payload is null and cannot be replayed', {
+        id: deadLetter.id,
+        reason: 'NULL_PAYLOAD',
+      })
+    }
+    if (typeof deadLetter.sourcePayload !== 'object' || Array.isArray(deadLetter.sourcePayload)) {
+      throw new PipelineRunnerError('dead letter source payload is not a record object and cannot be replayed', {
+        id: deadLetter.id,
+        reason: 'INVALID_PAYLOAD_TYPE',
+      })
+    }
     const result = await runPipeline({
       tenantId: deadLetter.tenantId,
       workspaceId: deadLetter.workspaceId,

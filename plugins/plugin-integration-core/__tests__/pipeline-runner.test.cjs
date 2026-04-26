@@ -579,6 +579,50 @@ async function main() {
   assert.equal(replayError.details.reason, 'PAYLOAD_TRUNCATED')
   assert.equal(truncatedReplay.targetRows.size, 0, 'truncated replay is rejected before target write')
 
+  // --- 5b. null / non-object sourcePayload is rejected before target write -
+  // createDeadLetter validates sourcePayload is non-null, so simulate rows
+  // that arrive with corrupted payloads via direct DB table injection.
+  for (const [label, badPayload, expectedReason] of [
+    ['null', null, 'NULL_PAYLOAD'],
+    ['undefined', undefined, 'NULL_PAYLOAD'],
+    ['array', [{ code: 'x' }], 'INVALID_PAYLOAD_TYPE'],
+    ['string', 'raw-value', 'INVALID_PAYLOAD_TYPE'],
+    ['number', 42, 'INVALID_PAYLOAD_TYPE'],
+  ]) {
+    const badPayloadHarness = createRunnerHarness({ sourceRecords: [] })
+    const badStore = createDeadLetterStore({
+      db: badPayloadHarness.db,
+      idGenerator: () => `dl_bad_${label}`,
+    })
+    // Inject a row directly into the DB table to bypass createDeadLetter validation
+    badPayloadHarness.db.tables.get('integration_dead_letters').push({
+      id: `dl_bad_${label}`,
+      tenant_id: 'tenant_1',
+      workspace_id: null,
+      run_id: 'run_original',
+      pipeline_id: 'pipe_1',
+      source_payload: badPayload,
+      transformed_payload: null,
+      error_code: 'VALIDATION_FAILED',
+      error_message: `bad payload: ${label}`,
+      retry_count: 0,
+      status: 'open',
+      created_at: '2026-04-26T00:00:00.000Z',
+      updated_at: '2026-04-26T00:00:00.000Z',
+    })
+    const badError = await badPayloadHarness.runner.replayDeadLetter({
+      tenantId: 'tenant_1',
+      workspaceId: null,
+      id: `dl_bad_${label}`,
+    }).catch((error) => error)
+    assert.equal(badError.name, 'PipelineRunnerError',
+      `${label} payload rejected with PipelineRunnerError`)
+    assert.equal(badError.details.reason, expectedReason,
+      `${label} payload reason is ${expectedReason}`)
+    assert.equal(badPayloadHarness.targetRows.size, 0,
+      `${label} payload is rejected before any target write`)
+  }
+
   // --- 11. dryRun string coercion (REST API hand-typed booleans) ---------
   {
     const stringDry = createRunnerHarness({
