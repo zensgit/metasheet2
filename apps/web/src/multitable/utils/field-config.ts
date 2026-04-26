@@ -33,6 +33,20 @@ export type NormalizedAttachmentFieldProperty = {
   acceptedMimeTypes: string[]
 }
 
+// MF2 batch-1 field types (currency / percent / rating / url / email / phone).
+export type NormalizedCurrencyFieldProperty = {
+  code: string
+  decimals: number
+}
+
+export type NormalizedPercentFieldProperty = {
+  decimals: number
+}
+
+export type NormalizedRatingFieldProperty = {
+  max: number
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -124,6 +138,94 @@ export function shouldReplaceAttachmentSelection(field: MetaField, files: FileLi
   const { maxFiles } = resolveAttachmentFieldProperty(field.property)
   const fileCount = Array.from(files).length
   return maxFiles === 1 && existingCount >= 1 && fileCount === 1
+}
+
+export function resolveCurrencyFieldProperty(value: unknown): NormalizedCurrencyFieldProperty {
+  const property = asRecord(value)
+  const codeRaw = typeof property.code === 'string' ? property.code.trim().toUpperCase() : ''
+  const code = /^[A-Z]{3}$/.test(codeRaw) ? codeRaw : 'CNY'
+  const decimalsRaw = typeof property.decimals === 'number' ? property.decimals : Number(property.decimals)
+  const decimals = Number.isFinite(decimalsRaw) && decimalsRaw >= 0 && decimalsRaw <= 6
+    ? Math.round(decimalsRaw)
+    : 2
+  return { code, decimals }
+}
+
+export function resolvePercentFieldProperty(value: unknown): NormalizedPercentFieldProperty {
+  const property = asRecord(value)
+  const decimalsRaw = typeof property.decimals === 'number' ? property.decimals : Number(property.decimals)
+  const decimals = Number.isFinite(decimalsRaw) && decimalsRaw >= 0 && decimalsRaw <= 6
+    ? Math.round(decimalsRaw)
+    : 1
+  return { decimals }
+}
+
+export function resolveRatingFieldProperty(value: unknown): NormalizedRatingFieldProperty {
+  const property = asRecord(value)
+  const maxRaw = typeof property.max === 'number' ? property.max : Number(property.max)
+  const max = Number.isFinite(maxRaw) && maxRaw >= 1 && maxRaw <= 10 ? Math.round(maxRaw) : 5
+  return { max }
+}
+
+const CURRENCY_SYMBOL_BY_CODE: Record<string, string> = {
+  CNY: '¥',
+  USD: '$',
+  EUR: '€',
+  GBP: '£',
+  JPY: '¥',
+  HKD: 'HK$',
+  TWD: 'NT$',
+  KRW: '₩',
+  AUD: 'A$',
+  CAD: 'CA$',
+  SGD: 'S$',
+}
+
+export function currencySymbolFor(code: string): string {
+  const upper = code.trim().toUpperCase()
+  if (CURRENCY_SYMBOL_BY_CODE[upper]) return CURRENCY_SYMBOL_BY_CODE[upper]
+  return upper
+}
+
+export function formatCurrencyValue(value: number, code: string, decimals: number): string {
+  const symbol = currencySymbolFor(code)
+  try {
+    const formatted = new Intl.NumberFormat(undefined, {
+      minimumFractionDigits: decimals,
+      maximumFractionDigits: decimals,
+    }).format(value)
+    return `${symbol}${formatted}`
+  } catch {
+    return `${symbol}${value.toFixed(decimals)}`
+  }
+}
+
+export function formatPercentValue(value: number, decimals: number): string {
+  try {
+    const formatted = new Intl.NumberFormat(undefined, {
+      minimumFractionDigits: decimals,
+      maximumFractionDigits: decimals,
+    }).format(value)
+    return `${formatted}%`
+  } catch {
+    return `${value.toFixed(decimals)}%`
+  }
+}
+
+const URL_REGEX = /^https?:\/\/[^\s]+$/i
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const PHONE_REGEX = /^[+\d][\d\s\-().]{4,23}$/
+
+export function isValidUrlValue(value: unknown): boolean {
+  return typeof value === 'string' && URL_REGEX.test(value.trim())
+}
+
+export function isValidEmailValue(value: unknown): boolean {
+  return typeof value === 'string' && EMAIL_REGEX.test(value.trim())
+}
+
+export function isValidPhoneValue(value: unknown): boolean {
+  return typeof value === 'string' && PHONE_REGEX.test(value.trim())
 }
 
 export function validateAttachmentSelection(field: MetaField, files: FileList | File[], existingCount: number): string | null {

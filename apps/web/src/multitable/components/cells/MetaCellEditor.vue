@@ -85,6 +85,72 @@
       @click="emit('open-link-picker')"
     >{{ linkButtonLabel }}</button>
 
+    <!-- currency / percent: numeric input with field-specific step -->
+    <input
+      v-else-if="field.type === 'currency' || field.type === 'percent'"
+      ref="inputRef"
+      class="meta-cell-editor__input"
+      type="number"
+      :step="numericStep"
+      :value="modelValue ?? ''"
+      @input="onNumberInput"
+      @keydown.enter="emit('confirm')"
+      @keydown.escape="emit('cancel')"
+    />
+
+    <!-- rating: click-to-set stars -->
+    <div v-else-if="field.type === 'rating'" class="meta-cell-editor__rating">
+      <button
+        v-for="n in ratingMax"
+        :key="n"
+        type="button"
+        class="meta-cell-editor__rating-star"
+        :class="{ 'meta-cell-editor__rating-star--filled': n <= ratingValue }"
+        @click="onRatingPick(n)"
+      >★</button>
+      <button
+        v-if="ratingValue > 0"
+        type="button"
+        class="meta-cell-editor__rating-clear"
+        @click="onRatingPick(0)"
+      >Clear</button>
+    </div>
+
+    <!-- url / email / phone: validated text input -->
+    <input
+      v-else-if="field.type === 'url'"
+      ref="inputRef"
+      class="meta-cell-editor__input"
+      type="url"
+      placeholder="https://example.com"
+      :value="modelValue ?? ''"
+      @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
+      @keydown.enter="emit('confirm')"
+      @keydown.escape="emit('cancel')"
+    />
+    <input
+      v-else-if="field.type === 'email'"
+      ref="inputRef"
+      class="meta-cell-editor__input"
+      type="email"
+      placeholder="name@example.com"
+      :value="modelValue ?? ''"
+      @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
+      @keydown.enter="emit('confirm')"
+      @keydown.escape="emit('cancel')"
+    />
+    <input
+      v-else-if="field.type === 'phone'"
+      ref="inputRef"
+      class="meta-cell-editor__input"
+      type="tel"
+      placeholder="+86 138 0000 0000"
+      :value="modelValue ?? ''"
+      @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
+      @keydown.enter="emit('confirm')"
+      @keydown.escape="emit('cancel')"
+    />
+
     <!-- attachment -->
     <div v-else-if="field.type === 'attachment'" class="meta-cell-editor__attachment">
       <MetaAttachmentList
@@ -136,7 +202,15 @@ import { ref, computed, onMounted, toRef } from 'vue'
 import type { MetaAttachment, MetaAttachmentDeleteFn, MetaAttachmentUploadContext, MetaAttachmentUploadFn, MetaField } from '../../types'
 import MetaAttachmentList from '../MetaAttachmentList.vue'
 import MetaYjsPresenceChip from '../MetaYjsPresenceChip.vue'
-import { attachmentAcceptAttr, resolveAttachmentFieldProperty, shouldReplaceAttachmentSelection, validateAttachmentSelection } from '../../utils/field-config'
+import {
+  attachmentAcceptAttr,
+  resolveAttachmentFieldProperty,
+  resolveCurrencyFieldProperty,
+  resolvePercentFieldProperty,
+  resolveRatingFieldProperty,
+  shouldReplaceAttachmentSelection,
+  validateAttachmentSelection,
+} from '../../utils/field-config'
 import { linkActionLabel as formatLinkActionLabel } from '../../utils/link-fields'
 import { useYjsCellBinding, type YjsCellBinding } from '../../composables/useYjsCellBinding'
 
@@ -334,6 +408,35 @@ function onNumberInput(e: Event) {
   emit('update:modelValue', v === '' ? null : Number(v))
 }
 
+const numericStep = computed(() => {
+  if (props.field.type === 'currency') {
+    const { decimals } = resolveCurrencyFieldProperty(props.field.property)
+    return decimals > 0 ? `0.${'0'.repeat(decimals - 1)}1` : '1'
+  }
+  if (props.field.type === 'percent') {
+    const { decimals } = resolvePercentFieldProperty(props.field.property)
+    return decimals > 0 ? `0.${'0'.repeat(decimals - 1)}1` : '1'
+  }
+  return 'any'
+})
+
+const ratingMax = computed(() => {
+  if (props.field.type !== 'rating') return 5
+  return resolveRatingFieldProperty(props.field.property).max
+})
+
+const ratingValue = computed(() => {
+  const v = props.modelValue
+  const num = typeof v === 'number' ? v : Number(v)
+  if (!Number.isFinite(num)) return 0
+  return Math.max(0, Math.min(ratingMax.value, Math.round(num)))
+})
+
+function onRatingPick(value: number) {
+  emit('update:modelValue', value === 0 ? null : value)
+  emit('confirm')
+}
+
 async function onRemoveAttachment(attachmentId: string) {
   attachmentError.value = ''
   attachmentActivity.value = 'removing'
@@ -417,4 +520,15 @@ onMounted(() => {
 .meta-cell-editor__uploading { padding: 4px 0; font-size: 11px; color: #409eff; }
 .meta-cell-editor__error { font-size: 11px; color: #d14343; }
 .meta-cell-editor__readonly { color: #999; font-size: 13px; }
+.meta-cell-editor__rating { display: flex; align-items: center; gap: 2px; }
+.meta-cell-editor__rating-star {
+  border: none; background: none; padding: 0 1px; cursor: pointer;
+  font-size: 18px; color: #d6d6d6; line-height: 1;
+}
+.meta-cell-editor__rating-star--filled { color: #f5a623; }
+.meta-cell-editor__rating-star:hover { color: #f5a623; }
+.meta-cell-editor__rating-clear {
+  margin-left: 6px; padding: 1px 6px; border: 1px solid #ddd; border-radius: 3px;
+  background: #fff; cursor: pointer; font-size: 11px; color: #666;
+}
 </style>

@@ -119,6 +119,63 @@
             />
             <div v-if="attachmentOperationErrors[field.id]" class="meta-form-view__field-error">{{ attachmentOperationErrors[field.id] }}</div>
           </div>
+          <input
+            v-else-if="field.type === 'currency' || field.type === 'percent'"
+            :id="`field_${field.id}`"
+            class="meta-form-view__input"
+            :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
+            type="number"
+            step="any"
+            :disabled="isFieldReadOnly(field.id)"
+            :aria-required="field.required ? 'true' : undefined"
+            :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
+            :value="formData[field.id] ?? ''"
+            @input="formData[field.id] = ($event.target as HTMLInputElement).value === '' ? null : Number(($event.target as HTMLInputElement).value)"
+          />
+          <div v-else-if="field.type === 'rating'" class="meta-form-view__rating">
+            <button
+              v-for="n in ratingMaxFor(field)"
+              :key="n"
+              type="button"
+              class="meta-form-view__rating-star"
+              :class="{ 'meta-form-view__rating-star--filled': n <= ratingValueFor(field.id) }"
+              :disabled="isFieldReadOnly(field.id)"
+              @click="onRatingPick(field.id, n)"
+            >★</button>
+          </div>
+          <input
+            v-else-if="field.type === 'url'"
+            :id="`field_${field.id}`"
+            class="meta-form-view__input"
+            :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
+            type="url"
+            placeholder="https://example.com"
+            :disabled="isFieldReadOnly(field.id)"
+            :value="formData[field.id] ?? ''"
+            @input="formData[field.id] = ($event.target as HTMLInputElement).value"
+          />
+          <input
+            v-else-if="field.type === 'email'"
+            :id="`field_${field.id}`"
+            class="meta-form-view__input"
+            :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
+            type="email"
+            placeholder="name@example.com"
+            :disabled="isFieldReadOnly(field.id)"
+            :value="formData[field.id] ?? ''"
+            @input="formData[field.id] = ($event.target as HTMLInputElement).value"
+          />
+          <input
+            v-else-if="field.type === 'phone'"
+            :id="`field_${field.id}`"
+            class="meta-form-view__input"
+            :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
+            type="tel"
+            placeholder="+86 138 0000 0000"
+            :disabled="isFieldReadOnly(field.id)"
+            :value="formData[field.id] ?? ''"
+            @input="formData[field.id] = ($event.target as HTMLInputElement).value"
+          />
           <span v-else class="meta-form-view__readonly-val">{{ record?.data[field.id] ?? '—' }}</span>
           <div v-if="field.type === 'link' && linkPreview(field.id)" class="meta-form-view__link-summary">{{ linkPreview(field.id) }}</div>
           <div v-if="fieldErrors?.[field.id] || validationErrors[field.id]" :id="`error_${field.id}`" class="meta-form-view__field-error">{{ fieldErrors?.[field.id] || validationErrors[field.id] }}</div>
@@ -153,7 +210,13 @@ import {
   resolveCommentAffordanceStateClass,
   resolveFieldCommentAffordance,
 } from '../utils/comment-affordance'
-import { attachmentAcceptAttr, resolveAttachmentFieldProperty, shouldReplaceAttachmentSelection, validateAttachmentSelection } from '../utils/field-config'
+import {
+  attachmentAcceptAttr,
+  resolveAttachmentFieldProperty,
+  resolveRatingFieldProperty,
+  shouldReplaceAttachmentSelection,
+  validateAttachmentSelection,
+} from '../utils/field-config'
 import { linkActionLabel } from '../utils/link-fields'
 
 const props = defineProps<{
@@ -268,6 +331,21 @@ function linkButtonLabel(fieldId: string): string {
   const count = linkSummaryCount(fieldId)
   const field = props.fields.find((item) => item.id === fieldId) ?? null
   return linkActionLabel(field, count)
+}
+
+function ratingMaxFor(field: MetaField): number {
+  return resolveRatingFieldProperty(field.property).max
+}
+
+function ratingValueFor(fieldId: string): number {
+  const v = formData[fieldId]
+  const num = typeof v === 'number' ? v : Number(v)
+  if (!Number.isFinite(num)) return 0
+  return Math.max(0, Math.round(num))
+}
+
+function onRatingPick(fieldId: string, value: number) {
+  formData[fieldId] = value === ratingValueFor(fieldId) ? null : value
 }
 
 function linkPreview(fieldId: string): string {
@@ -508,4 +586,12 @@ function isSameFormValue(left: unknown, right: unknown): boolean {
 .meta-form-view__submit:disabled { opacity: 0.6; cursor: not-allowed; }
 .meta-form-view__reset { padding: 8px 16px; border: 1px solid #ddd; border-radius: 4px; background: #fff; font-size: 13px; cursor: pointer; color: #666; }
 .meta-form-view__reset:hover { background: #f5f7fa; }
+.meta-form-view__rating { display: inline-flex; gap: 2px; align-items: center; }
+.meta-form-view__rating-star {
+  border: none; background: none; padding: 0 1px; cursor: pointer;
+  font-size: 22px; color: #d6d6d6; line-height: 1;
+}
+.meta-form-view__rating-star--filled { color: #f5a623; }
+.meta-form-view__rating-star:disabled { cursor: not-allowed; }
+.meta-form-view__rating-star:hover:not(:disabled) { color: #f5a623; }
 </style>

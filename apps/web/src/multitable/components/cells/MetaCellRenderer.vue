@@ -41,6 +41,51 @@
       <MetaAttachmentList :attachments="attachmentItems" variant="compact" empty-label="" />
     </template>
 
+    <!-- currency / percent -->
+    <template v-else-if="field.type === 'currency' || field.type === 'percent'">
+      <span class="meta-cell-renderer__numeric">{{ displayValue }}</span>
+    </template>
+
+    <!-- rating -->
+    <template v-else-if="field.type === 'rating'">
+      <span class="meta-cell-renderer__rating" :title="ratingTitle">{{ displayValue }}</span>
+    </template>
+
+    <!-- url -->
+    <template v-else-if="field.type === 'url'">
+      <a
+        v-if="hasLinkValue"
+        class="meta-cell-renderer__url"
+        :href="String(value)"
+        target="_blank"
+        rel="noopener noreferrer"
+        @click.stop
+      >{{ value }}</a>
+      <template v-else>{{ displayValue }}</template>
+    </template>
+
+    <!-- email -->
+    <template v-else-if="field.type === 'email'">
+      <a
+        v-if="hasLinkValue"
+        class="meta-cell-renderer__email"
+        :href="`mailto:${value}`"
+        @click.stop
+      >{{ value }}</a>
+      <template v-else>{{ displayValue }}</template>
+    </template>
+
+    <!-- phone -->
+    <template v-else-if="field.type === 'phone'">
+      <a
+        v-if="hasLinkValue"
+        class="meta-cell-renderer__phone"
+        :href="`tel:${String(value).replace(/[^+\d]/g, '')}`"
+        @click.stop
+      >{{ value }}</a>
+      <template v-else>{{ displayValue }}</template>
+    </template>
+
     <!-- lookup / rollup -->
     <template v-else>{{ displayValue }}</template>
   </span>
@@ -135,6 +180,18 @@ const attachmentItems = computed<MetaAttachment[]>(() => {
   }]
 })
 
+const ratingTitle = computed(() => {
+  if (props.field.type !== 'rating') return ''
+  const num = typeof props.value === 'number' ? props.value : Number(props.value)
+  if (!Number.isFinite(num)) return ''
+  return `${num}`
+})
+
+const hasLinkValue = computed(() => {
+  const v = props.value
+  return typeof v === 'string' && v.trim().length > 0
+})
+
 // Conditional formatting: subtle background hints
 const conditionalClass = computed(() => {
   const v = props.value
@@ -167,4 +224,23 @@ const conditionalClass = computed(() => {
 .meta-cell-renderer--empty { color: #ccc; }
 .meta-cell-renderer--positive { color: #67c23a; }
 .meta-cell-renderer--negative { color: #f56c6c; }
+.meta-cell-renderer__numeric {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
+.meta-cell-renderer__rating {
+  color: #f5a623;
+  letter-spacing: 1px;
+}
+.meta-cell-renderer__url,
+.meta-cell-renderer__email,
+.meta-cell-renderer__phone {
+  color: #2563eb;
+  text-decoration: underline;
+}
+.meta-cell-renderer__url:hover,
+.meta-cell-renderer__email:hover,
+.meta-cell-renderer__phone:hover {
+  color: #1d4ed8;
+}
 </style>

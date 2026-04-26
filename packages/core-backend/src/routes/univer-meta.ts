@@ -92,6 +92,7 @@ import type { RequestWithFile } from '../types/multer'
 import { MultitableFormulaEngine } from '../multitable/formula-engine'
 import { validateRecord, getDefaultValidationRules } from '../multitable/field-validation-engine'
 import type { FieldValidationConfig } from '../multitable/field-validation'
+import { BATCH1_FIELD_TYPES, coerceBatch1Value } from '../multitable/field-codecs'
 import { conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
 import {
   AutomationRuleValidationError,
@@ -151,7 +152,23 @@ export function setYjsInvalidatorForRoutes(invalidator: YjsInvalidator | null): 
 type UniverMetaField = {
   id: string
   name: string
-  type: 'string' | 'number' | 'boolean' | 'date' | 'formula' | 'select' | 'link' | 'lookup' | 'rollup' | 'attachment'
+  type:
+    | 'string'
+    | 'number'
+    | 'boolean'
+    | 'date'
+    | 'formula'
+    | 'select'
+    | 'link'
+    | 'lookup'
+    | 'rollup'
+    | 'attachment'
+    | 'currency'
+    | 'percent'
+    | 'rating'
+    | 'url'
+    | 'email'
+    | 'phone'
   options?: Array<{ value: string; color?: string }>
   order?: number
   property?: Record<string, unknown>
@@ -1849,6 +1866,8 @@ type FieldMutationGuard = {
   readOnly: boolean
   hidden: boolean
   link?: LinkFieldConfig | null
+  /** Sanitized property — populated for MF2 batch-1 field types only. */
+  property?: Record<string, unknown>
 }
 
 function buildFieldMutationGuardMap(fields: UniverMetaField[]): Map<string, FieldMutationGuard> {
@@ -1865,6 +1884,9 @@ function buildFieldMutationGuardMap(fields: UniverMetaField[]): Map<string, Fiel
       }
       if (field.type === 'link') {
         return [field.id, { ...base, link: parseLinkFieldConfig(property) }] as const
+      }
+      if (BATCH1_FIELD_TYPES.has(field.type)) {
+        return [field.id, { ...base, property }] as const
       }
       return [field.id, base] as const
     }),
@@ -5457,6 +5479,15 @@ export function univerMetaRouter(): Router {
             fieldErrors[fieldId] = 'Formula must start with ='
             continue
           }
+        }
+
+        if (BATCH1_FIELD_TYPES.has(field.type)) {
+          try {
+            patch[fieldId] = coerceBatch1Value(field.type, field.property, fieldId, value)
+          } catch (error) {
+            fieldErrors[fieldId] = error instanceof Error ? error.message : String(error)
+          }
+          continue
         }
 
         patch[fieldId] = value

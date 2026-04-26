@@ -6,7 +6,14 @@ import {
   ensureAttachmentIdsExist as ensureAttachmentIdsExistShared,
   normalizeAttachmentIds as normalizeAttachmentIdsShared,
 } from './attachment-service'
-import { extractSelectOptions, normalizeJson, normalizeJsonArray, type MultitableField } from './field-codecs'
+import {
+  BATCH1_FIELD_TYPES,
+  coerceBatch1Value,
+  extractSelectOptions,
+  normalizeJson,
+  normalizeJsonArray,
+  type MultitableField,
+} from './field-codecs'
 import { getDefaultValidationRules, validateRecord } from './field-validation-engine'
 import type { FieldValidationConfig } from './field-validation'
 import { loadFieldsForSheet } from './loaders'
@@ -43,6 +50,13 @@ type CreateFieldGuard = {
   type: UniverMetaField['type']
   options?: string[]
   link?: LinkFieldConfig | null
+  /**
+   * Sanitized property (currency.code/decimals, percent.decimals,
+   * rating.max). Carried only for the MF2 batch-1 field types so the
+   * coercion helper in `field-codecs` can read the constraints without
+   * re-fetching the field row.
+   */
+  property?: Record<string, unknown>
 }
 
 type FieldMutationGuard = {
@@ -253,6 +267,11 @@ function buildCreateFieldGuardMap(rows: unknown[]): Map<string, CreateFieldGuard
       continue
     }
 
+    if (BATCH1_FIELD_TYPES.has(type)) {
+      guards.set(fieldId, { type, property: normalizeJson(row.property) })
+      continue
+    }
+
     guards.set(fieldId, { type })
   }
 
@@ -419,6 +438,15 @@ export class RecordService {
       if (field.type === 'formula') {
         if (typeof value !== 'string') continue
         if (value !== '' && !value.startsWith('=')) continue
+      }
+
+      if (BATCH1_FIELD_TYPES.has(field.type)) {
+        try {
+          patch[fieldId] = coerceBatch1Value(field.type, field.property, fieldId, value)
+        } catch (error) {
+          throw new RecordValidationError(error instanceof Error ? error.message : String(error))
+        }
+        continue
       }
 
       patch[fieldId] = value
