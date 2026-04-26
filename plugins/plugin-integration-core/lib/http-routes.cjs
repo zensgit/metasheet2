@@ -156,10 +156,18 @@ function requestParams(req) {
   return req.params && typeof req.params === 'object' ? req.params : {}
 }
 
+const MAX_LIST_LIMIT = 500
+
 function asPositiveInt(value) {
   if (value === undefined || value === null || value === '') return undefined
   const numeric = Number(value)
   return Number.isInteger(numeric) && numeric > 0 ? numeric : undefined
+}
+
+function asListLimit(value) {
+  const n = asPositiveInt(value)
+  if (n === undefined) return undefined
+  return Math.min(n, MAX_LIST_LIMIT)
 }
 
 function publicRunInput(body = {}) {
@@ -235,7 +243,7 @@ function createHandlers(services) {
       return sendOk(res, await externalSystems.listExternalSystems(scopedInput(req, {
         kind: query.kind,
         status: query.status,
-        limit: asPositiveInt(query.limit),
+        limit: asListLimit(query.limit),
         offset: asPositiveInt(query.offset),
       })))
     },
@@ -267,7 +275,7 @@ function createHandlers(services) {
         status: query.status,
         sourceSystemId: query.sourceSystemId,
         targetSystemId: query.targetSystemId,
-        limit: asPositiveInt(query.limit),
+        limit: asListLimit(query.limit),
         offset: asPositiveInt(query.offset),
       })))
     },
@@ -318,7 +326,7 @@ function createHandlers(services) {
       return sendOk(res, await pipelineRegistry.listPipelineRuns(scopedInput(req, {
         pipelineId: query.pipelineId,
         status: query.status,
-        limit: asPositiveInt(query.limit),
+        limit: asListLimit(query.limit),
         offset: asPositiveInt(query.offset),
       })))
     },
@@ -331,7 +339,7 @@ function createHandlers(services) {
         pipelineId: query.pipelineId,
         runId: query.runId,
         status: query.status,
-        limit: asPositiveInt(query.limit),
+        limit: asListLimit(query.limit),
         offset: asPositiveInt(query.offset),
       }))
       return sendOk(res, rows.map((row) => redactDeadLetter(row, fullPayload)))
@@ -382,6 +390,7 @@ function registerIntegrationRoutes({ context, services, logger } = {}) {
 module.exports = {
   ROUTES,
   HttpRouteError,
+  MAX_LIST_LIMIT,
   createHandlers,
   registerIntegrationRoutes,
   __internals: {
@@ -393,5 +402,7 @@ module.exports = {
     inferHttpStatus,
     publicRunInput,
     redactDeadLetter,
+    asListLimit,
+    asPositiveInt,
   },
 }
