@@ -472,6 +472,31 @@ async function testPipelineRoutes() {
   assert.equal(dryRunCall[1].dryRun, true)
   assert.equal(dryRunCall[1].sampleLimit, 2)
   assert.equal(res.body.data.metrics.rowsWritten, 0, 'dry-run response does not report target writes')
+
+  // --- run mode validation: internal-only and unknown modes are rejected ---
+  for (const badMode of ['replay', 'hacker', 'MANUAL', 'Incremental', '']) {
+    const modeRes = await invoke(routes, 'POST', '/api/integration/pipelines/:id/run', {
+      user: WRITE_USER,
+      params: { id: 'pipe_1' },
+      body: { tenantId: 'tenant_1', workspaceId: 'workspace_1', mode: badMode },
+    })
+    // empty string is treated as absent by publicRunInput (passes through)
+    if (badMode === '') {
+      assertOkResponse(modeRes, 202)
+    } else {
+      assert.equal(modeRes.statusCode, 400, `mode '${badMode}' must be rejected with 400`)
+      assert.equal(modeRes.body.error.code, 'INVALID_RUN_MODE', `mode '${badMode}' must yield INVALID_RUN_MODE`)
+    }
+  }
+
+  // dry-run also validates mode
+  const dryModeRes = await invoke(routes, 'POST', '/api/integration/pipelines/:id/dry-run', {
+    user: WRITE_USER,
+    params: { id: 'pipe_1' },
+    body: { tenantId: 'tenant_1', workspaceId: 'workspace_1', mode: 'replay' },
+  })
+  assert.equal(dryModeRes.statusCode, 400, "mode 'replay' must be rejected on dry-run too")
+  assert.equal(dryModeRes.body.error.code, 'INVALID_RUN_MODE')
 }
 
 async function testRunAndDeadLetterRoutes() {
