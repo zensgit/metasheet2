@@ -83,7 +83,7 @@
       :group-field-id="grid.groupFieldId.value"
       :search-text="searchText" :total-rows="grid.page.value.total" :row-density="rowDensity"
       @apply-sort-filter="grid.applySortFilter" @add-record="onAddRecord" @undo="grid.undo" @redo="grid.redo"
-      @set-group-field="grid.setGroupField" @export-csv="onExportCsv" @import="onOpenImportModal" @update:search-text="onSearchTextUpdate"
+      @set-group-field="grid.setGroupField" @export-csv="onExportCsv" @export-xlsx="onExportXlsx" @import="onOpenImportModal" @update:search-text="onSearchTextUpdate"
       @print="onPrint" @set-row-density="rowDensity = $event" @auto-fit-columns="onAutoFitColumns"
     />
     <div class="mt-workbench__content">
@@ -371,6 +371,7 @@ import MetaDashboardView from '../components/MetaDashboardView.vue'
 import type { MetaBase } from '../types'
 import { bulkImportRecords } from '../import/bulk-import'
 import { extractImportTokens, type ImportBuildFailure, type ImportBuildResult, type ImportValueResolver } from '../import/delimited'
+import { buildXlsxBuffer } from '../import/xlsx-mapping'
 import { filterPropertyVisibleFields } from '../utils/field-permissions'
 import { isLinkField, isPersonField } from '../utils/link-fields'
 import { addPeopleLookupToken, inferPeopleLookupKind, resolvePeopleImportValue } from '../utils/people-import'
@@ -2059,6 +2060,38 @@ function onExportCsv() {
 function csvEscape(val: string): string {
   if (val.includes(',') || val.includes('"') || val.includes('\n')) return `"${val.replace(/"/g, '""')}"`
   return val
+}
+
+// --- XLSX export ---
+async function onExportXlsx() {
+  const visibleFields = scopedGridFields.value
+  if (!visibleFields.length) return
+  try {
+    const xlsxModule = (await import('xlsx')) as unknown as Parameters<typeof buildXlsxBuffer>[0]
+    const headers = visibleFields.map((f) => f.name)
+    const rows = grid.rows.value.map((row) =>
+      visibleFields.map((f) => {
+        const v = row.data[f.id]
+        if (v === null || v === undefined) return ''
+        if (typeof v === 'boolean') return v
+        if (typeof v === 'number') return v
+        if (Array.isArray(v)) return v.map((item) => (typeof item === 'object' ? JSON.stringify(item) : String(item))).join('; ')
+        if (typeof v === 'object') return JSON.stringify(v)
+        return String(v)
+      }),
+    )
+    const sheetName = (workbench.activeSheetId.value || 'export').slice(0, 31)
+    const buffer = buildXlsxBuffer(xlsxModule, { sheetName, headers, rows })
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${workbench.activeSheetId.value || 'export'}.xlsx`
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (err: any) {
+    showError(err?.message ?? 'Excel export failed')
+  }
 }
 
 const drawerRecordIds = computed(() => grid.rows.value.map((r) => r.id))

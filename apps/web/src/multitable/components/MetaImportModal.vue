@@ -13,8 +13,13 @@
           </div>
           <p class="meta-import__hint">Paste tab-separated data from Excel or Google Sheets (first row = headers):</p>
           <label class="meta-import__file-drop" @dragover.prevent @drop.prevent="onFileDrop">
-            <input class="meta-import__file-input" type="file" accept=".csv,text/csv,.tsv,text/tab-separated-values,.txt,text/plain" @change="onFileSelect" />
-            <span>Choose a CSV/TSV file or drop it here</span>
+            <input
+              class="meta-import__file-input"
+              type="file"
+              accept=".csv,text/csv,.tsv,text/tab-separated-values,.txt,text/plain,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xls,application/vnd.ms-excel"
+              @change="onFileSelect"
+            />
+            <span>Choose a CSV/TSV/Excel file or drop it here</span>
           </label>
           <textarea
             ref="textareaRef"
@@ -33,6 +38,9 @@
         <div v-else-if="step === 'preview'" class="meta-import__body">
           <div v-if="restoredDraft" class="meta-import__warning">
             <span>Recovered your previous import draft for this sheet.</span>
+          </div>
+          <div v-if="parseWarning" class="meta-import__warning">
+            <span>{{ parseWarning }}</span>
           </div>
           <p class="meta-import__hint">{{ parsedRows.length }} record(s) detected. Map columns to fields:</p>
           <div v-if="hasImportDraftIssues" class="meta-import__warning">
@@ -168,6 +176,7 @@ import MetaLinkPicker from './MetaLinkPicker.vue'
 import type { LinkedRecordSummary, MetaField } from '../types'
 import { buildImportedRecords, parseDelimitedText } from '../import/delimited'
 import type { ImportBuildFailure, ImportBuildResult, ImportFieldOverrides, ImportValueResolver } from '../import/delimited'
+import { XLSX_MAX_BYTES, XLSX_MAX_ROWS, mapXlsxColumnsToFields, parseXlsxBuffer } from '../import/xlsx-mapping'
 import { isLinkField, isPersonField, linkActionLabel } from '../utils/link-fields'
 
 type ImportResultFailure = ImportBuildFailure & {
@@ -229,6 +238,7 @@ const lastAttemptRecords = ref<Array<Record<string, unknown>>>([])
 const lastAttemptRowIndexes = ref<number[]>([])
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const parseError = ref('')
+const parseWarning = ref('')
 const manualFieldOverrides = ref<ImportFieldOverrides>({})
 const manualOverrideSummaries = ref<Record<string, LinkedRecordSummary[]>>({})
 const pickerTarget = ref<{ rowIndex: number; fieldId: string } | null>(null)
@@ -442,6 +452,7 @@ function restoreImportDraft() {
       : {}
     step.value = snapshot.step === 'preview' && parsedRows.value.length > 0 ? 'preview' : 'paste'
     parseError.value = ''
+    parseWarning.value = ''
     restoredDraft.value = true
     return true
   } catch {
@@ -534,14 +545,56 @@ async function readAndSetText(file: File) {
   }
 }
 
+function isXlsxFile(file: File): boolean {
+  const lowerName = file.name.toLowerCase()
+  if (lowerName.endsWith('.xlsx') || lowerName.endsWith('.xls')) return true
+  const lowerType = file.type.toLowerCase()
+  return (
+    lowerType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+    lowerType === 'application/vnd.ms-excel'
+  )
+}
+
+async function readAndSetXlsx(file: File) {
+  parseError.value = ''
+  parseWarning.value = ''
+  if (file.size > XLSX_MAX_BYTES) {
+    parseError.value = `File too large (max ${(XLSX_MAX_BYTES / (1024 * 1024)).toFixed(0)} MB)`
+    return
+  }
+  try {
+    const xlsx = (await import('xlsx')) as unknown as Parameters<typeof parseXlsxBuffer>[0]
+    const buffer = await file.arrayBuffer()
+    const result = parseXlsxBuffer(xlsx, buffer)
+    if (!result.headers.length || !result.rows.length) {
+      parseError.value = 'No importable rows found in spreadsheet'
+      return
+    }
+    rawText.value = ''
+    parsedHeaders.value = result.headers
+    parsedRows.value = result.rows
+    fieldMapping.value = mapXlsxColumnsToFields(result.headers, importableFields.value).mapping
+    if (result.truncated) {
+      parseWarning.value = `Imported the first ${parsedRows.value.length} rows; remaining rows were skipped (limit ${XLSX_MAX_ROWS}).`
+    }
+    step.value = 'preview'
+  } catch (error: any) {
+    parseError.value = error?.message ?? 'Failed to read Excel file'
+  }
+}
+
 function onFileSelect(event: Event) {
   const file = (event.target as HTMLInputElement).files?.[0]
-  if (file) void readAndSetText(file)
+  if (!file) return
+  if (isXlsxFile(file)) void readAndSetXlsx(file)
+  else void readAndSetText(file)
 }
 
 function onFileDrop(event: DragEvent) {
   const file = event.dataTransfer?.files?.[0]
-  if (file) void readAndSetText(file)
+  if (!file) return
+  if (isXlsxFile(file)) void readAndSetXlsx(file)
+  else void readAndSetText(file)
 }
 
 watch([() => props.importing, () => props.result, () => props.visible], ([importing, result, visible]) => {
@@ -775,6 +828,7 @@ function resetState() {
   pickerTarget.value = null
   pickerVisible.value = false
   parseError.value = ''
+  parseWarning.value = ''
   restoredDraft.value = false
 }
 

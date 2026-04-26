@@ -113,7 +113,8 @@
       <button class="meta-toolbar__btn" title="Auto-fit columns" aria-label="Auto-fit columns" @click="emit('auto-fit-columns')">&#x2194; Fit</button>
       <button class="meta-toolbar__btn" title="Print" aria-label="Print grid" @click="emit('print')">&#x1F5A8; Print</button>
       <button v-if="canCreateRecord" class="meta-toolbar__btn" title="Import records" aria-label="Import records" @click="emit('import')">&#x2B71; Import</button>
-      <button v-if="canExport" class="meta-toolbar__btn" title="Export CSV" aria-label="Export CSV" @click="emit('export-csv')">&#x2B73; Export</button>
+      <button v-if="canExport" class="meta-toolbar__btn" title="Export CSV" aria-label="Export CSV" @click="emit('export-csv')">&#x2B73; Export CSV</button>
+      <button v-if="canExport" class="meta-toolbar__btn" title="Export Excel (.xlsx)" aria-label="Export Excel" @click="emit('export-xlsx')">&#x2B73; Export XLSX</button>
       <button v-if="canCreateRecord" class="meta-toolbar__btn meta-toolbar__btn--primary" @click="emit('add-record')">+ New Record</button>
     </div>
   </div>
@@ -157,6 +158,7 @@ const emit = defineEmits<{
   (e: 'redo'): void
   (e: 'set-group-field', fieldId: string | null): void
   (e: 'export-csv'): void
+  (e: 'export-xlsx'): void
   (e: 'import'): void
   (e: 'update:search-text', text: string): void
   (e: 'print'): void
