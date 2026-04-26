@@ -200,6 +200,107 @@ test('buildEvidenceReport accepts numeric runId for materialSaveOnly evidence', 
   )
 })
 
+// ----- normalizeStatus synonym map (deferred from #1175 / #1176, picked up here) -----
+
+test('normalizeStatus accepts English pass-synonyms ("passed", "complete", "done", "ok", "success", "succeeded")', () => {
+  for (const variant of ['passed', 'complete', 'completed', 'done', 'ok', 'success', 'successful', 'succeeded']) {
+    const evidence = sampleEvidence()
+    evidence.materialDryRun.status = variant
+    const report = buildEvidenceReport(packet(), evidence)
+    const phase = report.phases.find((p) => p.id === 'materialDryRun')
+    assert.equal(phase.status, 'pass', `variant ${JSON.stringify(variant)} should normalize to 'pass'`)
+  }
+})
+
+test('normalizeStatus accepts Chinese pass-synonyms ("通过", "成功", "完成", "已完成", "已通过", "完毕")', () => {
+  for (const variant of ['通过', '成功', '完成', '已完成', '已通过', '完毕']) {
+    const evidence = sampleEvidence()
+    evidence.materialDryRun.status = variant
+    const report = buildEvidenceReport(packet(), evidence)
+    const phase = report.phases.find((p) => p.id === 'materialDryRun')
+    assert.equal(phase.status, 'pass', `variant ${JSON.stringify(variant)} should normalize to 'pass'`)
+  }
+})
+
+test('normalizeStatus accepts fail synonyms (English + Chinese)', () => {
+  for (const variant of ['failed', 'error', 'errored', 'failure', '失败', '错误', '出错']) {
+    const evidence = sampleEvidence()
+    evidence.materialDryRun.status = variant
+    const report = buildEvidenceReport(packet(), evidence)
+    const phase = report.phases.find((p) => p.id === 'materialDryRun')
+    assert.equal(phase.status, 'fail', `variant ${JSON.stringify(variant)} should normalize to 'fail'`)
+  }
+})
+
+test('normalizeStatus accepts partial / blocked / skipped / todo synonyms', () => {
+  const cases = [
+    { variant: 'partially', expected: 'partial' },
+    { variant: 'in-progress', expected: 'partial' },
+    { variant: '进行中', expected: 'partial' },
+    { variant: '部分', expected: 'partial' },
+    { variant: 'on-hold', expected: 'blocked' },
+    { variant: 'waiting', expected: 'blocked' },
+    { variant: '阻塞', expected: 'blocked' },
+    { variant: 'skip', expected: 'skipped' },
+    { variant: 'n/a', expected: 'skipped' },
+    { variant: '跳过', expected: 'skipped' },
+    { variant: 'pending', expected: 'todo' },
+    { variant: '待办', expected: 'todo' },
+  ]
+  for (const { variant, expected } of cases) {
+    const evidence = sampleEvidence()
+    evidence.materialDryRun.status = variant
+    const report = buildEvidenceReport(packet(), evidence)
+    const phase = report.phases.find((p) => p.id === 'materialDryRun')
+    assert.equal(phase.status, expected, `variant ${JSON.stringify(variant)} should normalize to '${expected}'`)
+  }
+})
+
+test('normalizeStatus is case-insensitive ("PASSED" / "Failed" / "DONE")', () => {
+  const cases = [
+    { variant: 'PASSED', expected: 'pass' },
+    { variant: 'Failed', expected: 'fail' },
+    { variant: 'DONE', expected: 'pass' },
+    { variant: 'Pending', expected: 'todo' },
+  ]
+  for (const { variant, expected } of cases) {
+    const evidence = sampleEvidence()
+    evidence.materialDryRun.status = variant
+    const report = buildEvidenceReport(packet(), evidence)
+    const phase = report.phases.find((p) => p.id === 'materialDryRun')
+    assert.equal(phase.status, expected, `variant ${JSON.stringify(variant)} should normalize to '${expected}'`)
+  }
+})
+
+test('normalizeStatus still defaults unknown strings to "todo" (no over-acceptance)', () => {
+  for (const unknown of ['maybe', 'wat', 'xxxxx', 'random-junk', '不确定', 'unknown']) {
+    const evidence = sampleEvidence()
+    evidence.materialDryRun.status = unknown
+    const report = buildEvidenceReport(packet(), evidence)
+    const phase = report.phases.find((p) => p.id === 'materialDryRun')
+    assert.equal(phase.status, 'todo', `unknown variant ${JSON.stringify(unknown)} should default to 'todo'`)
+  }
+})
+
+test('normalizeStatus synonym for fail in materialSaveOnly correctly skips Save-only safety checks', () => {
+  // When status is "失败" (a fail synonym), evaluateMaterialSaveOnly must
+  // recognize this as a fail and SKIP the autoSubmit/autoAudit safety
+  // checks (since they only matter for runs that actually wrote data).
+  const evidence = sampleEvidence()
+  evidence.materialSaveOnly.status = '失败'
+  evidence.materialSaveOnly.autoSubmit = true  // would normally raise SAVE_ONLY_VIOLATED
+  const report = buildEvidenceReport(packet(), evidence)
+  // Phase status reflects the synonym mapping; the run failed, so save-only
+  // checks are bypassed (matching existing logic that returns early on non-pass).
+  const phase = report.phases.find((p) => p.id === 'materialSaveOnly')
+  assert.equal(phase.status, 'fail')
+  assert.equal(
+    report.issues.some((issue) => issue.code === 'SAVE_ONLY_VIOLATED'),
+    false,
+    'SAVE_ONLY_VIOLATED should not be raised when the save-only run itself failed',
+  )
+})
+
 test('CLI writes redacted JSON and Markdown reports', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'integration-live-evidence-'))
   try {
