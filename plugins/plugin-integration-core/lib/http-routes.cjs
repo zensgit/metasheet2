@@ -156,10 +156,18 @@ function requestParams(req) {
   return req.params && typeof req.params === 'object' ? req.params : {}
 }
 
+const MAX_SAMPLE_LIMIT = 10000
+
 function asPositiveInt(value) {
   if (value === undefined || value === null || value === '') return undefined
   const numeric = Number(value)
   return Number.isInteger(numeric) && numeric > 0 ? numeric : undefined
+}
+
+function asSampleLimit(value) {
+  const n = asPositiveInt(value)
+  if (n === undefined) return undefined
+  return Math.min(n, MAX_SAMPLE_LIMIT)
 }
 
 function publicRunInput(body = {}) {
@@ -168,7 +176,7 @@ function publicRunInput(body = {}) {
     workspaceId: body.workspaceId,
     mode: body.mode,
     cursor: body.cursor,
-    sampleLimit: asPositiveInt(body.sampleLimit),
+    sampleLimit: asSampleLimit(body.sampleLimit),
   }
   for (const key of Object.keys(input)) {
     if (input[key] === undefined || input[key] === null || input[key] === '') delete input[key]
@@ -384,6 +392,7 @@ module.exports = {
   HttpRouteError,
   createHandlers,
   registerIntegrationRoutes,
+  MAX_SAMPLE_LIMIT,
   __internals: {
     hasPermission,
     requireAccess,
@@ -393,5 +402,7 @@ module.exports = {
     inferHttpStatus,
     publicRunInput,
     redactDeadLetter,
+    asSampleLimit,
+    asPositiveInt,
   },
 }
