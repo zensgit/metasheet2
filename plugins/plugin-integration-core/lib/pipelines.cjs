@@ -38,6 +38,14 @@ class PipelineNotFoundError extends Error {
   }
 }
 
+class PipelineConflictError extends Error {
+  constructor(message, details = {}) {
+    super(message)
+    this.name = 'PipelineConflictError'
+    this.details = details
+  }
+}
+
 function requiredString(value, field) {
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new PipelineValidationError(`${field} is required`, { field })
@@ -491,6 +499,23 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
         status: pipeline.status,
       })
     }
+    // Reject concurrent runs: at most one run may be in the 'running' state per pipeline at a time.
+    // A second trigger (e.g. double-click, parallel API call) would otherwise cause both runs to
+    // read from the same watermark baseline and double-write to the target ERP.
+    const runningRows = unwrapRows(await db.select(RUNS_TABLE, {
+      where: {
+        ...scopeWhere(normalized),
+        pipeline_id: normalized.pipelineId,
+        status: 'running',
+      },
+      limit: 1,
+    }))
+    if (runningRows.length > 0) {
+      throw new PipelineConflictError('pipeline already has a run in progress', {
+        pipelineId: normalized.pipelineId,
+        runningRunId: runningRows[0].id,
+      })
+    }
     const insertRow = {
       id: normalized.id || idGenerator(),
       tenant_id: normalized.tenantId,
@@ -552,6 +577,45 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
     return rows.map(rowToPipelineRun)
   }
 
+  // Marks 'running' runs that started more than `olderThanMs` milliseconds ago as 'failed'.
+  // Called on plugin startup or before creating a new run to recover from crashed runner processes
+  // that never called failRun(). Without this, a crash between startRun and finishRun permanently
+  // blocks future runs of the same pipeline.
+  async function abandonStaleRuns(input = {}) {
+    const tenantId = requiredString(input.tenantId, 'tenantId')
+    const workspaceId = normalizeWorkspaceId(input.workspaceId)
+    const olderThanMs = Number.isInteger(input.olderThanMs) && input.olderThanMs > 0
+      ? input.olderThanMs
+      : 4 * 60 * 60 * 1000 // 4 hours default
+    const nowMs = typeof input.now === 'function' ? input.now() : Date.now()
+    const cutoffMs = nowMs - olderThanMs
+
+    const where = { ...scopeWhere({ tenantId, workspaceId }), status: 'running' }
+    if (input.pipelineId) where.pipeline_id = requiredString(input.pipelineId, 'pipelineId')
+    const runningRows = unwrapRows(await db.select(RUNS_TABLE, { where }))
+
+    const stale = runningRows.filter((row) => {
+      const startedMs = row.started_at ? Date.parse(row.started_at) : NaN
+      return !Number.isNaN(startedMs) && startedMs < cutoffMs
+    })
+
+    const abandoned = []
+    for (const row of stale) {
+      const finishedAt = new Date(nowMs).toISOString()
+      await db.updateRow(
+        RUNS_TABLE,
+        {
+          status: 'failed',
+          finished_at: finishedAt,
+          error_summary: 'abandoned: run exceeded stale threshold and was automatically failed',
+        },
+        { tenant_id: row.tenant_id, workspace_id: row.workspace_id, id: row.id }
+      )
+      abandoned.push(rowToPipelineRun({ ...row, status: 'failed', finished_at: finishedAt }))
+    }
+    return abandoned
+  }
+
   return {
     upsertPipeline,
     getPipeline,
@@ -559,6 +623,7 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
     createPipelineRun,
     updatePipelineRun,
     listPipelineRuns,
+    abandonStaleRuns,
   }
 }
 
@@ -566,6 +631,7 @@ module.exports = {
   createPipelineRegistry,
   PipelineValidationError,
   PipelineNotFoundError,
+  PipelineConflictError,
   __internals: {
     PIPELINES_TABLE,
     FIELD_MAPPINGS_TABLE,

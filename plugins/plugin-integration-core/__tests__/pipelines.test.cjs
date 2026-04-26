@@ -6,6 +6,7 @@ const {
   createPipelineRegistry,
   PipelineNotFoundError,
   PipelineValidationError,
+  PipelineConflictError,
 } = require(path.join(__dirname, '..', 'lib', 'pipelines.cjs'))
 
 function createIdGenerator() {
@@ -330,7 +331,123 @@ async function main() {
   }
   assert.ok(disabledRun instanceof PipelineValidationError, 'disabled pipeline cannot create runs')
 
-  console.log('✓ pipelines: registry + endpoint + field-mapping + run-ledger tests passed')
+  // re-enable pipeline for remaining tests
+  db.tables.get('integration_pipelines')[0].status = 'active'
+
+  // --- 9. Concurrent run guard -------------------------------------------
+  // Seed a 'running' run to simulate an in-progress execution
+  db.seed('integration_runs', [{
+    id: 'run_in_progress',
+    tenant_id: 'tenant_1',
+    workspace_id: null,
+    pipeline_id: 'id_1',
+    status: 'running',
+    started_at: new Date().toISOString(),
+  }])
+
+  let conflictError = null
+  try {
+    await registry.createPipelineRun({
+      tenantId: 'tenant_1',
+      workspaceId: null,
+      pipelineId: 'id_1',
+      mode: 'manual',
+      triggeredBy: 'api',
+    })
+  } catch (error) {
+    conflictError = error
+  }
+  assert.ok(conflictError instanceof PipelineConflictError, 'concurrent run rejected with PipelineConflictError')
+  assert.equal(conflictError.details.runningRunId, 'run_in_progress', 'conflict error includes the blocking run ID')
+  assert.ok(conflictError.message.includes('already has a run'), 'conflict error message is descriptive')
+
+  // A terminated run must not block future runs
+  db.tables.get('integration_runs').find(r => r.id === 'run_in_progress').status = 'succeeded'
+  const afterTerminal = await registry.createPipelineRun({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    pipelineId: 'id_1',
+    mode: 'manual',
+    triggeredBy: 'api',
+  })
+  assert.ok(afterTerminal.id, 'new run allowed once previous run terminates')
+
+  // A running run for a DIFFERENT pipeline must not block this pipeline
+  db.seed('integration_runs', [{
+    id: 'run_other_pipeline',
+    tenant_id: 'tenant_1',
+    workspace_id: null,
+    pipeline_id: 'id_2',
+    status: 'running',
+    started_at: new Date().toISOString(),
+  }])
+  const unrelatedPipelineRun = await registry.createPipelineRun({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    pipelineId: 'id_1',
+    mode: 'manual',
+    triggeredBy: 'api',
+  })
+  assert.ok(unrelatedPipelineRun.id, 'running run on other pipeline does not block this pipeline')
+
+  // --- 10. abandonStaleRuns -----------------------------------------------
+  // Clean up runs table; seed one stale running run and one fresh running run
+  db.tables.set('integration_runs', [])
+  const fiveHoursAgo = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString()
+  const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString()
+  db.seed('integration_runs', [
+    {
+      id: 'stale_run',
+      tenant_id: 'tenant_1',
+      workspace_id: null,
+      pipeline_id: 'id_1',
+      status: 'running',
+      started_at: fiveHoursAgo,
+    },
+    {
+      id: 'fresh_run',
+      tenant_id: 'tenant_1',
+      workspace_id: null,
+      pipeline_id: 'id_1',
+      status: 'running',
+      started_at: thirtyMinutesAgo,
+    },
+    {
+      id: 'other_tenant_stale',
+      tenant_id: 'tenant_2',
+      workspace_id: null,
+      pipeline_id: 'id_1',
+      status: 'running',
+      started_at: fiveHoursAgo,
+    },
+  ])
+
+  const abandoned = await registry.abandonStaleRuns({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+  })
+  assert.equal(abandoned.length, 1, 'only the stale run is abandoned')
+  assert.equal(abandoned[0].id, 'stale_run', 'abandoned run ID matches')
+  assert.equal(abandoned[0].status, 'failed', 'abandoned run status is failed')
+  assert.ok(abandoned[0].finishedAt, 'abandoned run has finishedAt')
+
+  // The fresh run and other-tenant run must be untouched
+  const stillRunning = db.tables.get('integration_runs').find(r => r.id === 'fresh_run')
+  assert.equal(stillRunning.status, 'running', 'fresh run is not abandoned')
+  const otherTenantRun = db.tables.get('integration_runs').find(r => r.id === 'other_tenant_stale')
+  assert.equal(otherTenantRun.status, 'running', 'other-tenant stale run is not affected')
+
+  // abandonStaleRuns with a custom olderThanMs: threshold of 1h abandons the 30-min-old run too
+  db.tables.get('integration_runs').find(r => r.id === 'fresh_run').status = 'running'
+  const abandonedShortWindow = await registry.abandonStaleRuns({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    olderThanMs: 15 * 60 * 1000, // 15 minutes
+  })
+  assert.equal(abandonedShortWindow.length, 1, 'short threshold abandons the 30-min-old run')
+  assert.equal(abandonedShortWindow[0].id, 'fresh_run', 'correct run abandoned with short threshold')
+
+  console.log('✓ pipelines: registry + endpoint + field-mapping + run-ledger + concurrent-guard + stale-run-cleanup tests passed')
 }
 
 main().catch((err) => {
