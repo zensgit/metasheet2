@@ -70,12 +70,13 @@ if (runningRows.length > 0) {
 **Why here and not in `runPipeline`:** `createPipelineRun` is the DB-authoritative
 gate. Checking in `runPipeline` before calling `startRun` would have a TOCTOU
 window — two callers check simultaneously, both see no running run, both insert.
-Placing the guard *inside* `createPipelineRun` (the insert point) does not
-close the window in pure application logic, but it is the correct layer to
-own the invariant since `createPipelineRun` is also where the `disabled`
-pipeline check lives. A true distributed lock (advisory PG lock,
-`SELECT ... FOR UPDATE SKIP LOCKED`) would close the window fully but is
-out of scope for single-node PoC.
+This PR places the guard at the insert point and wraps the check+insert critical
+section in an in-process `(tenantId, workspaceId, pipelineId)` lock. That closes
+the async race for the single-node PoC runtime while keeping the invariant owned
+by `createPipelineRun`, where the `disabled` pipeline check also lives. A true
+distributed lock (advisory PG lock, `SELECT ... FOR UPDATE SKIP LOCKED`, or a
+partial unique index) would close the window across multiple Node processes and
+is left for production hardening.
 
 **Error fields in details:**
 - `pipelineId` — which pipeline is blocked
@@ -122,17 +123,18 @@ Also future-proofs any other `*ConflictError` class in the codebase.
 
 | File | Change |
 |---|---|
-| `lib/pipelines.cjs` | `PipelineConflictError` class; guard in `createPipelineRun`; `abandonStaleRuns` function; export both |
+| `lib/pipelines.cjs` | `PipelineConflictError` class; in-process keyed lock + guard in `createPipelineRun`; `abandonStaleRuns` function; export both |
 | `lib/http-routes.cjs` | `inferHttpStatus`: add `Conflict` → 409 |
-| `__tests__/pipelines.test.cjs` | 5 new scenarios (conflict guard + stale cleanup) |
+| `__tests__/pipelines.test.cjs` | 6 new scenarios (conflict guard + in-process race + stale cleanup) |
 | `__tests__/http-routes.test.cjs` | 1 new scenario (409 response shape for conflict) |
 | this design doc | — |
 | matching verification doc | — |
 
 ## What this does NOT fix
 
-- **Distributed concurrent runs**: two Node processes on separate hosts can both
-  pass the guard simultaneously (TOCTOU). Not a concern for single-node PoC.
+- **Distributed concurrent runs**: two Node processes on separate hosts can still
+  pass the guard simultaneously. The in-process lock closes the single-node async
+  race only. Production hardening should add a DB-level advisory/unique lock.
 - **Long-running legitimate runs blocked by strict threshold**: `olderThanMs` is
   configurable; callers that need > 4h runs should pass a larger value.
 - **Auto-wiring of `abandonStaleRuns`**: exported but not called anywhere yet.

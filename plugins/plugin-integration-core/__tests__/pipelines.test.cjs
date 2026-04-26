@@ -390,6 +390,62 @@ async function main() {
   })
   assert.ok(unrelatedPipelineRun.id, 'running run on other pipeline does not block this pipeline')
 
+  // The guard must serialize the check+insert critical section in-process.
+  // Without the keyed lock, both calls below can snapshot "no running rows" before
+  // either insert happens, allowing two concurrent running runs for one pipeline.
+  {
+    const raceDb = createMockDb()
+    raceDb.seed('integration_pipelines', [{
+      id: 'pipe_race',
+      tenant_id: 'tenant_1',
+      workspace_id: null,
+      status: 'active',
+    }])
+    const originalSelect = raceDb.select.bind(raceDb)
+    let releaseSelect
+    const selectGate = new Promise((resolve) => {
+      releaseSelect = resolve
+    })
+    raceDb.select = async (table, options = {}) => {
+      if (table === 'integration_runs' && options.where && options.where.status === 'running') {
+        const snapshot = await originalSelect(table, options)
+        await selectGate
+        return snapshot
+      }
+      return originalSelect(table, options)
+    }
+    const raceRegistry = createPipelineRegistry({
+      db: raceDb,
+      idGenerator: createIdGenerator(),
+    })
+    const first = raceRegistry.createPipelineRun({
+      tenantId: 'tenant_1',
+      workspaceId: null,
+      pipelineId: 'pipe_race',
+      mode: 'manual',
+      triggeredBy: 'api',
+      status: 'running',
+      startedAt: new Date().toISOString(),
+    })
+    const second = raceRegistry.createPipelineRun({
+      tenantId: 'tenant_1',
+      workspaceId: null,
+      pipelineId: 'pipe_race',
+      mode: 'manual',
+      triggeredBy: 'api',
+      status: 'running',
+      startedAt: new Date().toISOString(),
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    releaseSelect()
+    const results = await Promise.allSettled([first, second])
+    assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1, 'only one concurrent run starts')
+    const rejected = results.find((result) => result.status === 'rejected')
+    assert.ok(rejected && rejected.reason instanceof PipelineConflictError, 'second concurrent run sees conflict')
+    const runningRows = raceDb.tables.get('integration_runs').filter((row) => row.pipeline_id === 'pipe_race' && row.status === 'running')
+    assert.equal(runningRows.length, 1, 'only one running row is inserted for the pipeline')
+  }
+
   // --- 10. abandonStaleRuns -----------------------------------------------
   // Clean up runs table; seed one stale running run and one fresh running run
   db.tables.set('integration_runs', [])

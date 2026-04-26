@@ -319,6 +319,10 @@ function unwrapRows(result) {
   return Array.isArray(result) ? result : result?.rows ?? []
 }
 
+function pipelineRunLockKey(input) {
+  return `${input.tenantId}\u0000${input.workspaceId || ''}\u0000${input.pipelineId}`
+}
+
 async function selectPipeline(db, input) {
   if (input.id) {
     return db.selectOne(PIPELINES_TABLE, {
@@ -379,6 +383,27 @@ async function loadFieldMappings(db, pipelineId) {
 function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
   if (!db || typeof db.selectOne !== 'function' || typeof db.insertOne !== 'function' || typeof db.updateRow !== 'function' || typeof db.select !== 'function') {
     throw new Error('createPipelineRegistry: scoped db helper is required')
+  }
+  const runLocks = new Map()
+
+  async function withPipelineRunLock(key, task) {
+    const previous = runLocks.get(key) || Promise.resolve()
+    let release
+    const gate = new Promise((resolve) => {
+      release = resolve
+    })
+    const tail = previous.catch(() => undefined).then(() => gate)
+    runLocks.set(key, tail)
+
+    await previous.catch(() => undefined)
+    try {
+      return await task()
+    } finally {
+      release()
+      if (runLocks.get(key) === tail) {
+        runLocks.delete(key)
+      }
+    }
   }
 
   async function upsertPipeline(input) {
@@ -482,60 +507,62 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
 
   async function createPipelineRun(input) {
     const normalized = normalizeCreateRunInput(input)
-    const pipeline = await db.selectOne(PIPELINES_TABLE, {
-      ...scopeWhere(normalized),
-      id: normalized.pipelineId,
-    })
-    if (!pipeline) {
-      throw new PipelineNotFoundError('pipeline not found', {
-        id: normalized.pipelineId,
-        tenantId: normalized.tenantId,
-        workspaceId: normalized.workspaceId,
-      })
-    }
-    if (pipeline.status === 'disabled') {
-      throw new PipelineValidationError('disabled pipeline cannot create runs', {
-        pipelineId: normalized.pipelineId,
-        status: pipeline.status,
-      })
-    }
-    // Reject concurrent runs: at most one run may be in the 'running' state per pipeline at a time.
-    // A second trigger (e.g. double-click, parallel API call) would otherwise cause both runs to
-    // read from the same watermark baseline and double-write to the target ERP.
-    const runningRows = unwrapRows(await db.select(RUNS_TABLE, {
-      where: {
+    return withPipelineRunLock(pipelineRunLockKey(normalized), async () => {
+      const pipeline = await db.selectOne(PIPELINES_TABLE, {
         ...scopeWhere(normalized),
-        pipeline_id: normalized.pipelineId,
-        status: 'running',
-      },
-      limit: 1,
-    }))
-    if (runningRows.length > 0) {
-      throw new PipelineConflictError('pipeline already has a run in progress', {
-        pipelineId: normalized.pipelineId,
-        runningRunId: runningRows[0].id,
+        id: normalized.pipelineId,
       })
-    }
-    const insertRow = {
-      id: normalized.id || idGenerator(),
-      tenant_id: normalized.tenantId,
-      workspace_id: normalized.workspaceId,
-      pipeline_id: normalized.pipelineId,
-      mode: normalized.mode,
-      triggered_by: normalized.triggeredBy,
-      status: normalized.status,
-      rows_read: normalized.rowsRead,
-      rows_cleaned: normalized.rowsCleaned,
-      rows_written: normalized.rowsWritten,
-      rows_failed: normalized.rowsFailed,
-      started_at: normalized.startedAt,
-      finished_at: normalized.finishedAt,
-      duration_ms: normalized.durationMs,
-      error_summary: normalized.errorSummary,
-      details: normalized.details,
-    }
-    const rows = unwrapRows(await db.insertOne(RUNS_TABLE, insertRow))
-    return rowToPipelineRun(rows[0] || insertRow)
+      if (!pipeline) {
+        throw new PipelineNotFoundError('pipeline not found', {
+          id: normalized.pipelineId,
+          tenantId: normalized.tenantId,
+          workspaceId: normalized.workspaceId,
+        })
+      }
+      if (pipeline.status === 'disabled') {
+        throw new PipelineValidationError('disabled pipeline cannot create runs', {
+          pipelineId: normalized.pipelineId,
+          status: pipeline.status,
+        })
+      }
+      // Reject concurrent runs: at most one run may be in the 'running' state per pipeline at a time.
+      // The keyed in-process lock serializes check+insert for single-node PoC deployments; multi-node
+      // deployments still need a DB-level advisory/unique lock follow-up.
+      const runningRows = unwrapRows(await db.select(RUNS_TABLE, {
+        where: {
+          ...scopeWhere(normalized),
+          pipeline_id: normalized.pipelineId,
+          status: 'running',
+        },
+        limit: 1,
+      }))
+      if (runningRows.length > 0) {
+        throw new PipelineConflictError('pipeline already has a run in progress', {
+          pipelineId: normalized.pipelineId,
+          runningRunId: runningRows[0].id,
+        })
+      }
+      const insertRow = {
+        id: normalized.id || idGenerator(),
+        tenant_id: normalized.tenantId,
+        workspace_id: normalized.workspaceId,
+        pipeline_id: normalized.pipelineId,
+        mode: normalized.mode,
+        triggered_by: normalized.triggeredBy,
+        status: normalized.status,
+        rows_read: normalized.rowsRead,
+        rows_cleaned: normalized.rowsCleaned,
+        rows_written: normalized.rowsWritten,
+        rows_failed: normalized.rowsFailed,
+        started_at: normalized.startedAt,
+        finished_at: normalized.finishedAt,
+        duration_ms: normalized.durationMs,
+        error_summary: normalized.errorSummary,
+        details: normalized.details,
+      }
+      const rows = unwrapRows(await db.insertOne(RUNS_TABLE, insertRow))
+      return rowToPipelineRun(rows[0] || insertRow)
+    })
   }
 
   async function updatePipelineRun(input) {
@@ -649,5 +676,6 @@ module.exports = {
     rowToPipeline,
     rowToFieldMapping,
     rowToPipelineRun,
+    pipelineRunLockKey,
   },
 }

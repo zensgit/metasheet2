@@ -52,7 +52,7 @@ runner-support: idempotency/watermark/dead-letter/run-log tests passed
 
 ## New test coverage breakdown (6 added)
 
-### pipelines.test.cjs (+5)
+### pipelines.test.cjs (+6)
 
 | # | Scenario | What it pins |
 |---|---|---|
@@ -60,19 +60,21 @@ runner-support: idempotency/watermark/dead-letter/run-log tests passed
 | 2 | error details include `runningRunId` | Operator can identify the blocking run without a DB query |
 | 3 | terminated run does not block | `succeeded` run allows new run — guard checks `status='running'` only |
 | 4 | running run on different pipeline does not block | Guard scopes to `pipeline_id`; unrelated pipelines are independent |
-| 5 | `abandonStaleRuns` default threshold (4h) | Stale run (5h old) abandoned; fresh run (30min) untouched; other-tenant run untouched |
-| 6 | `abandonStaleRuns` custom `olderThanMs` | 15min threshold correctly abandons the 30min-old run |
+| 5 | two concurrent `createPipelineRun` calls serialize through the in-process keyed lock | Only one call inserts a `running` row; the other receives `PipelineConflictError` even when both would otherwise snapshot no running rows |
+| 6 | `abandonStaleRuns` default threshold (4h) | Stale run (5h old) abandoned; fresh run (30min) untouched; other-tenant run untouched |
+| 7 | `abandonStaleRuns` custom `olderThanMs` | 15min threshold correctly abandons the 30min-old run |
 
 ### http-routes.test.cjs (+1, inside `testErrorResponseShape`)
 
 | # | Scenario | What it pins |
 |---|---|---|
-| 7 | `PipelineConflictError` → HTTP 409 | `inferHttpStatus` maps `Conflict` name to 409; error body includes `code` and `details` |
+| 8 | `PipelineConflictError` → HTTP 409 | `inferHttpStatus` maps `Conflict` name to 409; error body includes `code` and `details` |
 
 ## Manual code review checklist
 
 - [x] `PipelineConflictError` exported alongside `PipelineValidationError` / `PipelineNotFoundError`
 - [x] Guard placed after `disabled` check — ordering: pipeline exists → not disabled → not already running → insert
+- [x] In-process keyed lock wraps check+insert — closes the single-node async race
 - [x] Guard scopes correctly: `tenant_id`, `workspace_id`, `pipeline_id` all in WHERE clause
 - [x] `abandonStaleRuns` never abandons fresh runs (JS timestamp filter, not DB filter)
 - [x] `abandonStaleRuns` is tenant-scoped — other-tenant stale runs unaffected
@@ -84,7 +86,9 @@ runner-support: idempotency/watermark/dead-letter/run-log tests passed
 
 ## Known limitations (documented in design)
 
-- **TOCTOU window still exists** for distributed multi-node deployments. Single-node
-  PoC: not a concern. Production hardening would use `SELECT ... FOR UPDATE SKIP LOCKED`.
+- **TOCTOU window still exists** for distributed multi-node deployments. The
+  in-process keyed lock covers the single-node PoC race. Production hardening
+  would use `SELECT ... FOR UPDATE SKIP LOCKED`, advisory locks, or a partial
+  unique index.
 - **`abandonStaleRuns` not auto-wired**: exported but the caller (plugin activation or
   run-trigger route) must decide when to invoke it. This PR only provides the tool.
