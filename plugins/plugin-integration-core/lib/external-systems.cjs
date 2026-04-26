@@ -202,6 +202,15 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
     }
 
     if (existing) {
+      if (existing.kind !== normalized.kind || existing.role !== normalized.role) {
+        throw new ExternalSystemValidationError('kind and role cannot be changed after creation', {
+          id: existing.id,
+          existingKind: existing.kind,
+          existingRole: existing.role,
+          requestedKind: normalized.kind,
+          requestedRole: normalized.role,
+        })
+      }
       const updateRow = { ...baseRow }
       if (credentialsEncrypted !== undefined) {
         updateRow.credentials_encrypted = credentialsEncrypted
