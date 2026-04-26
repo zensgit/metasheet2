@@ -579,6 +579,139 @@ async function main() {
   assert.equal(replayError.details.reason, 'PAYLOAD_TRUNCATED')
   assert.equal(truncatedReplay.targetRows.size, 0, 'truncated replay is rejected before target write')
 
+  // --- 11. dryRun string coercion (REST API hand-typed booleans) ---------
+  {
+    const stringDry = createRunnerHarness({
+      sourceRecords: [
+        { code: 'a-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+      ],
+    })
+    const result = await stringDry.runner.runPipeline({
+      tenantId: 'tenant_1',
+      pipelineId: 'pipe_1',
+      mode: 'incremental',
+      triggeredBy: 'manual',
+      dryRun: 'true',  // STRING — would previously fall through to LIVE run via strict ===
+      sampleLimit: 1,
+    })
+    assert.equal(stringDry.targetRows.size, 0, 'dryRun: "true" (string) must NOT write to target')
+    assert.equal(stringDry.db.tables.get('integration_dead_letters').length, 0, 'dryRun: "true" (string) must NOT create dead letters')
+    assert.equal(await stringDry.db.selectOne('integration_watermarks', { pipeline_id: 'pipe_1' }), null, 'dryRun: "true" (string) must NOT advance watermark')
+    assert.ok(result.preview, 'dryRun: "true" (string) must produce preview object')
+    assert.equal(result.preview.records.length, 1, 'preview captured the cleaned record')
+  }
+
+  // --- 12. dryRun numeric 1 / Chinese "是" also work ---------------------
+  for (const truthyVariant of [1, '是', 'YES', 'on']) {
+    const harness = createRunnerHarness({
+      sourceRecords: [
+        { code: 'a-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+      ],
+    })
+    await harness.runner.runPipeline({
+      tenantId: 'tenant_1',
+      pipelineId: 'pipe_1',
+      mode: 'incremental',
+      triggeredBy: 'manual',
+      dryRun: truthyVariant,
+      sampleLimit: 1,
+    })
+    assert.equal(
+      harness.targetRows.size,
+      0,
+      `dryRun: ${JSON.stringify(truthyVariant)} must be honored as truthy and NOT write to target`,
+    )
+  }
+
+  // --- 13. dryRun explicit "false" / 0 / "否" → real run ------------------
+  for (const falsyVariant of [false, 'false', 0, '否', '']) {
+    const harness = createRunnerHarness({
+      sourceRecords: [
+        { code: 'a-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+      ],
+    })
+    await harness.runner.runPipeline({
+      tenantId: 'tenant_1',
+      pipelineId: 'pipe_1',
+      mode: 'incremental',
+      triggeredBy: 'manual',
+      dryRun: falsyVariant,
+      sampleLimit: 1,
+    })
+    assert.equal(
+      harness.targetRows.size,
+      1,
+      `dryRun: ${JSON.stringify(falsyVariant)} should be falsy → live run writes 1 row`,
+    )
+  }
+
+  // --- 14. dryRun "maybe" (unknown) throws PipelineRunnerError -----------
+  {
+    const harness = createRunnerHarness({
+      sourceRecords: [
+        { code: 'a-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+      ],
+    })
+    const error = await harness.runner.runPipeline({
+      tenantId: 'tenant_1',
+      pipelineId: 'pipe_1',
+      mode: 'incremental',
+      triggeredBy: 'manual',
+      dryRun: 'maybe',
+    }).catch((err) => err)
+    assert.equal(error.name, 'PipelineRunnerError', 'unknown string for dryRun should throw PipelineRunnerError')
+    assert.equal(error.details.field, 'input.dryRun', 'error includes the field name')
+  }
+
+  // --- 15. allowInactive string coercion: inactive pipeline + "true" runs ---
+  {
+    const inactive = createRunnerHarness({
+      sourceRecords: [
+        { code: 'a-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+      ],
+      pipelineOverrides: { status: 'paused' },
+    })
+
+    // Without allowInactive: rejected
+    const rejected = await inactive.runner.runPipeline({
+      tenantId: 'tenant_1',
+      pipelineId: 'pipe_1',
+      mode: 'incremental',
+      triggeredBy: 'manual',
+    }).catch((err) => err)
+    assert.equal(rejected.name, 'PipelineRunnerError', 'paused pipeline rejected when allowInactive unset')
+    assert.equal(rejected.message, 'pipeline is not active')
+
+    // With allowInactive: "true" (string) — must allow the run
+    const allowed = await inactive.runner.runPipeline({
+      tenantId: 'tenant_1',
+      pipelineId: 'pipe_1',
+      mode: 'incremental',
+      triggeredBy: 'manual',
+      allowInactive: 'true',  // STRING — would previously be rejected via strict !== true
+    })
+    assert.ok(allowed.run, 'allowInactive: "true" (string) lets the inactive pipeline run')
+    assert.equal(allowed.metrics.rowsRead, 1, 'inactive pipeline with allowInactive: "true" reads source')
+  }
+
+  // --- 16. allowInactive Chinese "是" / numeric 1 also work --------------
+  for (const truthyVariant of ['是', 1, 'YES']) {
+    const inactive = createRunnerHarness({
+      sourceRecords: [
+        { code: 'a-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+      ],
+      pipelineOverrides: { status: 'paused' },
+    })
+    const result = await inactive.runner.runPipeline({
+      tenantId: 'tenant_1',
+      pipelineId: 'pipe_1',
+      mode: 'incremental',
+      triggeredBy: 'manual',
+      allowInactive: truthyVariant,
+    })
+    assert.ok(result.run, `allowInactive: ${JSON.stringify(truthyVariant)} lets the inactive pipeline run`)
+  }
+
   console.log('✓ pipeline-runner: cleanse/idempotency/incremental E2E tests passed')
 }
 
