@@ -487,16 +487,29 @@ function createPipelineRunner(deps = {}) {
       sourceRecords: [deadLetter.sourcePayload],
     })
     if (result.metrics.rowsFailed > 0) return { deadLetter, replay: result }
-    const replayed = await deadLetterStore.markReplayed({
-      tenantId: deadLetter.tenantId,
-      workspaceId: deadLetter.workspaceId,
-      id: deadLetter.id,
-      replayRunId: result.run.id,
-      retryCount: (deadLetter.retryCount || 0) + 1,
-    })
+    // Best-effort bookkeeping: the ERP write already succeeded, so even if
+    // markReplayed fails (DB down at cleanup time) we must NOT throw — the
+    // caller would see 500 and retry, causing a duplicate ERP write.
+    let replayed = deadLetter
+    let markReplayedWarning = null
+    try {
+      replayed = await deadLetterStore.markReplayed({
+        tenantId: deadLetter.tenantId,
+        workspaceId: deadLetter.workspaceId,
+        id: deadLetter.id,
+        replayRunId: result.run.id,
+        retryCount: (deadLetter.retryCount || 0) + 1,
+      })
+    } catch (markError) {
+      markReplayedWarning = {
+        code: 'MARK_REPLAYED_FAILED',
+        message: markError.message || String(markError),
+      }
+    }
     return {
       deadLetter: replayed,
       replay: result,
+      ...(markReplayedWarning && { warning: markReplayedWarning }),
     }
   }
 
