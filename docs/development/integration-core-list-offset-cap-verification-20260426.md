@@ -35,7 +35,7 @@
 
 ## Regression Guard
 
-After merging current `origin/main`, including PR #1192 list-limit cap and PR #1196 public run-mode validation, all 18 `plugin-integration-core` test files pass:
+After merging current `origin/main`, including PR #1192 list-limit cap, PR #1196 public run-mode validation, and PR #1198 external-system config preservation, all 18 `plugin-integration-core` test files pass:
 
 ```
 http-routes: REST auth/list/upsert/run/dry-run/replay tests passed
