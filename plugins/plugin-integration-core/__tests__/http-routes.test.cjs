@@ -5,6 +5,7 @@ const path = require('node:path')
 
 const HTTP_ROUTES_PATH = path.join(__dirname, '..', 'lib', 'http-routes.cjs')
 const httpRoutes = require(HTTP_ROUTES_PATH)
+const { MAX_LIST_LIMIT } = httpRoutes
 
 const READ_USER = {
   id: 'user_read',
@@ -499,6 +500,26 @@ async function testRunAndDeadLetterRoutes() {
     offset: 2,
   })
 
+  // limit above MAX_LIST_LIMIT is clamped
+  const { calls: largeCalls, services: largeServices } = createMockServices()
+  const { routes: largeRoutes } = mountRoutes(largeServices)
+  const largeRes = await invoke(largeRoutes, 'GET', '/api/integration/runs', {
+    user: READ_USER,
+    query: { workspaceId: 'workspace_1', limit: String(MAX_LIST_LIMIT + 10000) },
+  })
+  assertOkResponse(largeRes, 200)
+  assert.equal(findCall(largeCalls, 'listPipelineRuns')[1].limit, MAX_LIST_LIMIT,
+    `limit clamped to MAX_LIST_LIMIT (${MAX_LIST_LIMIT})`)
+
+  // limit within MAX_LIST_LIMIT is passed through unchanged
+  const { calls: smallCalls, services: smallServices } = createMockServices()
+  const { routes: smallRoutes } = mountRoutes(smallServices)
+  await invoke(smallRoutes, 'GET', '/api/integration/runs', {
+    user: READ_USER,
+    query: { workspaceId: 'workspace_1', limit: '10' },
+  })
+  assert.equal(findCall(smallCalls, 'listPipelineRuns')[1].limit, 10, 'small limit is unchanged')
+
   res = await invoke(routes, 'GET', '/api/integration/dead-letters', {
     user: READ_USER,
     query: {
@@ -523,6 +544,16 @@ async function testRunAndDeadLetterRoutes() {
     limit: 20,
     offset: 2,
   })
+
+  // dead-letters list also caps at MAX_LIST_LIMIT
+  const { calls: dlLargeCalls, services: dlLargeServices } = createMockServices()
+  const { routes: dlLargeRoutes } = mountRoutes(dlLargeServices)
+  await invoke(dlLargeRoutes, 'GET', '/api/integration/dead-letters', {
+    user: READ_USER,
+    query: { workspaceId: 'workspace_1', limit: '999999' },
+  })
+  assert.equal(findCall(dlLargeCalls, 'listDeadLetters')[1].limit, MAX_LIST_LIMIT,
+    'dead-letters limit clamped to MAX_LIST_LIMIT')
 
   res = await invoke(routes, 'GET', '/api/integration/dead-letters', {
     user: WRITE_USER,
