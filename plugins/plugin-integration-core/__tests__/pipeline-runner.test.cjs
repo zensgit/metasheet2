@@ -1081,6 +1081,58 @@ async function main() {
     assert.equal(normalResult.warning, undefined, 'no warning when finishRun succeeds')
   }
 
+  // --- 19. maxPagesReached signal in run details when cap exhausted ---------
+  {
+    // Source returns 3 pages of records; pipeline maxPages=2 → cap hit, more data unread
+    let cappedPage = 0
+    const cappedHarness = createRunnerHarness({
+      sourceRecords: [],
+      pipelineOverrides: { options: { batchSize: 100, maxPages: 2 } },
+      sourceRead: async () => {
+        cappedPage += 1
+        return createReadResult({
+          records: [
+            { code: `cap-${cappedPage}-1`, revision: 'r1', qty: '1', name: 'Bolt', updatedAt: `2026-04-24T0${cappedPage}:00:00.000Z` },
+          ],
+          nextCursor: cappedPage < 3 ? `cursor-${cappedPage + 1}` : null,
+          done: cappedPage >= 3,
+        })
+      },
+    })
+    const cappedResult = await cappedHarness.runner.runPipeline({
+      tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'incremental', triggeredBy: 'manual',
+    })
+    assert.equal(cappedResult.run.details.maxPagesReached, true,
+      'maxPagesReached=true when source has more data and page cap is hit')
+    assert.equal(cappedResult.run.details.pagesProcessed, 2,
+      'pagesProcessed reflects the number of pages read')
+    assert.equal(cappedPage, 2, 'source read called exactly maxPages times')
+
+    // Source returns 1 page (done=true) → maxPagesReached=false, exited normally
+    let normalPage = 0
+    const normalHarness = createRunnerHarness({
+      sourceRecords: [],
+      pipelineOverrides: { options: { batchSize: 100, maxPages: 5 } },
+      sourceRead: async () => {
+        normalPage += 1
+        return createReadResult({
+          records: [
+            { code: `n-${normalPage}-1`, revision: 'r1', qty: '1', name: 'Bolt', updatedAt: `2026-04-24T01:00:00.000Z` },
+          ],
+          nextCursor: null,
+          done: true,
+        })
+      },
+    })
+    const normalResult = await normalHarness.runner.runPipeline({
+      tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'incremental', triggeredBy: 'manual',
+    })
+    assert.equal(normalResult.run.details.maxPagesReached, false,
+      'maxPagesReached=false when source signals done before cap')
+    assert.equal(normalResult.run.details.pagesProcessed, 1,
+      'pagesProcessed=1 when single page completes the run')
+  }
+
   console.log('✓ pipeline-runner: cleanse/idempotency/incremental E2E tests passed')
 }
 
