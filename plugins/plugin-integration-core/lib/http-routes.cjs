@@ -158,6 +158,7 @@ function requestParams(req) {
 }
 
 const MAX_LIST_LIMIT = 500
+const MAX_LIST_OFFSET = 10000
 
 function asPositiveInt(value) {
   if (value === undefined || value === null || value === '') return undefined
@@ -172,6 +173,12 @@ function asListLimit(value) {
   const n = asPositiveInt(value)
   if (n === undefined) return undefined
   return Math.min(n, MAX_LIST_LIMIT)
+}
+
+function asListOffset(value) {
+  const n = asPositiveInt(value)
+  if (n === undefined) return undefined
+  return Math.min(n, MAX_LIST_OFFSET)
 }
 
 function publicRunInput(body = {}) {
@@ -258,7 +265,7 @@ function createHandlers(services) {
         kind: query.kind,
         status: query.status,
         limit: asListLimit(query.limit),
-        offset: asPositiveInt(query.offset),
+        offset: asListOffset(query.offset),
       })))
     },
 
@@ -290,7 +297,7 @@ function createHandlers(services) {
         sourceSystemId: query.sourceSystemId,
         targetSystemId: query.targetSystemId,
         limit: asListLimit(query.limit),
-        offset: asPositiveInt(query.offset),
+        offset: asListOffset(query.offset),
       })))
     },
 
@@ -341,7 +348,7 @@ function createHandlers(services) {
         pipelineId: query.pipelineId,
         status: query.status,
         limit: asListLimit(query.limit),
-        offset: asPositiveInt(query.offset),
+        offset: asListOffset(query.offset),
       })))
     },
 
@@ -354,7 +361,7 @@ function createHandlers(services) {
         runId: query.runId,
         status: query.status,
         limit: asListLimit(query.limit),
-        offset: asPositiveInt(query.offset),
+        offset: asListOffset(query.offset),
       }))
       return sendOk(res, rows.map((row) => redactDeadLetter(row, fullPayload)))
     },
@@ -405,6 +412,7 @@ module.exports = {
   ROUTES,
   HttpRouteError,
   MAX_LIST_LIMIT,
+  MAX_LIST_OFFSET,
   createHandlers,
   registerIntegrationRoutes,
   VALID_USER_RUN_MODES,
@@ -417,6 +425,7 @@ module.exports = {
     inferHttpStatus,
     publicRunInput,
     redactDeadLetter,
+    asListOffset,
     asListLimit,
     asPositiveInt,
   },
