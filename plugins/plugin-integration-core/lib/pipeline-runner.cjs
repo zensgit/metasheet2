@@ -371,6 +371,7 @@ function createPipelineRunner(deps = {}) {
       let cursor = input.cursor || null
       let page = 0
       let lastSuccessfulWatermark = null
+      let exitedNormally = false
       const erpFeedback = []
       let remainingDryRunSamples = dryRun && Number.isInteger(input.sampleLimit) && input.sampleLimit > 0
         ? input.sampleLimit
@@ -449,10 +450,17 @@ function createPipelineRunner(deps = {}) {
         if (metrics.rowsFailed === 0) {
           lastSuccessfulWatermark = deriveNextWatermark(records, watermarkConfig) || lastSuccessfulWatermark
         }
-        if (remainingDryRunSamples !== null && remainingDryRunSamples <= 0) break
-        if (readResult.done || !readResult.nextCursor) break
+        if (remainingDryRunSamples !== null && remainingDryRunSamples <= 0) {
+          exitedNormally = true
+          break
+        }
+        if (readResult.done || !readResult.nextCursor) {
+          exitedNormally = true
+          break
+        }
         cursor = readResult.nextCursor
       }
+      const maxPagesReached = !exitedNormally && page >= maxPages
 
       if (!dryRun && metrics.rowsFailed === 0 && lastSuccessfulWatermark) {
         const advance = typeof watermarkStore.advanceWatermark === 'function'
@@ -473,6 +481,8 @@ function createPipelineRunner(deps = {}) {
           watermarkAdvanced: !dryRun && metrics.rowsFailed === 0 && Boolean(lastSuccessfulWatermark),
           nextCursor: cursor,
           erpFeedback,
+          maxPagesReached,
+          pagesProcessed: page,
         },
       })
       return {
