@@ -1,39 +1,41 @@
-# Verification: Cap Dry-Run sampleLimit at MAX_SAMPLE_LIMIT
+# Verification: Cap List Endpoint Offset at MAX_LIST_OFFSET
 
-**PR**: #1201  
+**PR**: #1199  
 **Date**: 2026-04-26
 
 ---
 
-## Test Scenarios Added (`testSampleLimitCap`)
+## Test Scenarios Added (`testListOffsetCap`)
 
-### /run: huge sampleLimit clamped to MAX_SAMPLE_LIMIT
+### All 4 list endpoints: huge offset → clamped to MAX_LIST_OFFSET
 
-**Input**: `sampleLimit: String(MAX_SAMPLE_LIMIT + 999999)` on `POST /api/integration/pipelines/:id/run`
+**Input**: `offset: String(MAX_LIST_OFFSET + 999999)` on each of:
+- `GET /api/integration/external-systems`
+- `GET /api/integration/pipelines`
+- `GET /api/integration/runs`
+- `GET /api/integration/dead-letters`
 
-**Assertion**: `runPipeline` receives `sampleLimit === MAX_SAMPLE_LIMIT`
+**Assertions**:
+- `listExternalSystems` receives `offset === MAX_LIST_OFFSET`
+- `listPipelines` receives `offset === MAX_LIST_OFFSET`
+- `listPipelineRuns` receives `offset === MAX_LIST_OFFSET`
+- `listDeadLetters` receives `offset === MAX_LIST_OFFSET`
 
-### /dry-run: huge sampleLimit clamped to MAX_SAMPLE_LIMIT
+### offset=0 → treated as undefined (no offset)
 
-**Input**: `sampleLimit: String(MAX_SAMPLE_LIMIT + 999999)` on `POST /api/integration/pipelines/:id/dry-run`
+**Input**: `offset: '0'`
 
-**Assertion**: `runPipeline` receives `sampleLimit === MAX_SAMPLE_LIMIT`
+**Assertion**: `listPipelines` receives `offset === undefined`
 
-### sampleLimit=0 is stripped (undefined)
+### Small valid offset → passes through unchanged
 
-**Input**: `sampleLimit: 0`
+**Input**: `offset: '50'`
 
-**Assertion**: `'sampleLimit' in runPipelineCall` is `false` (key deleted by `publicRunInput`'s falsy-strip loop)
-
-### Small valid sampleLimit passes through unchanged
-
-**Input**: `sampleLimit: 5`
-
-**Assertion**: `runPipeline` receives `sampleLimit === 5`
+**Assertion**: `listPipelines` receives `offset === 50`
 
 ## Regression Guard
 
-After merging current `origin/main`, including list limit, list offset, and public run-mode guards, all 18 `plugin-integration-core` test files pass:
+After merging current `origin/main`, including PR #1192 list-limit cap, PR #1196 public run-mode validation, and PR #1198 external-system config preservation, all 18 `plugin-integration-core` test files pass:
 
 ```
 http-routes: REST auth/list/upsert/run/dry-run/replay tests passed
@@ -59,6 +61,6 @@ runner-support: idempotency/watermark/dead-letter/run-log tests passed
 
 ## Worktree
 
-Branch: `codex/integration-sample-limit-cap-20260426`  
-Worktree: `/private/tmp/ms2-sample-limit-cap`  
+Branch: `codex/integration-list-offset-cap-20260426`  
+Worktree: `/private/tmp/ms2-list-offset-cap`  
 Base: current `origin/main` as of 2026-04-27
