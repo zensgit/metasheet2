@@ -21,6 +21,7 @@ const VALID_TRIGGERS = new Set(['cron', 'manual', 'api', 'replay'])
 const TERMINAL_RUN_STATUSES = new Set(['succeeded', 'partial', 'failed', 'cancelled'])
 const SOURCE_ROLES = new Set(['source', 'bidirectional'])
 const TARGET_ROLES = new Set(['target', 'bidirectional'])
+const RUNNING_RUN_UNIQUE_INDEX = 'uniq_integration_runs_one_running_per_pipeline'
 
 class PipelineValidationError extends Error {
   constructor(message, details = {}) {
@@ -34,6 +35,14 @@ class PipelineNotFoundError extends Error {
   constructor(message, details = {}) {
     super(message)
     this.name = 'PipelineNotFoundError'
+    this.details = details
+  }
+}
+
+class PipelineConflictError extends Error {
+  constructor(message, details = {}) {
+    super(message)
+    this.name = 'PipelineConflictError'
     this.details = details
   }
 }
@@ -311,6 +320,32 @@ function unwrapRows(result) {
   return Array.isArray(result) ? result : result?.rows ?? []
 }
 
+function pipelineRunLockKey(input) {
+  return `${input.tenantId}\u0000${input.workspaceId || ''}\u0000${input.pipelineId}`
+}
+
+function uniqueViolationMetadata(error) {
+  let current = error
+  while (current && typeof current === 'object') {
+    if (current.code === '23505') {
+      return {
+        constraint: current.constraint,
+        message: current.message || '',
+        detail: current.detail || '',
+      }
+    }
+    current = current.cause
+  }
+  return null
+}
+
+function isRunningRunUniqueViolation(error) {
+  const meta = uniqueViolationMetadata(error)
+  if (!meta) return false
+  const text = `${meta.constraint || ''}\n${meta.message}\n${meta.detail}`
+  return text.includes(RUNNING_RUN_UNIQUE_INDEX)
+}
+
 async function selectPipeline(db, input) {
   if (input.id) {
     return db.selectOne(PIPELINES_TABLE, {
@@ -321,6 +356,22 @@ async function selectPipeline(db, input) {
   return db.selectOne(PIPELINES_TABLE, {
     ...scopeWhere(input),
     name: input.name,
+  })
+}
+
+async function conflictFromRunningRun(db, normalized, details = {}) {
+  const runningRows = unwrapRows(await db.select(RUNS_TABLE, {
+    where: {
+      ...scopeWhere(normalized),
+      pipeline_id: normalized.pipelineId,
+      status: 'running',
+    },
+    limit: 1,
+  }))
+  return new PipelineConflictError('pipeline already has a run in progress', {
+    pipelineId: normalized.pipelineId,
+    runningRunId: runningRows[0]?.id || null,
+    ...details,
   })
 }
 
@@ -371,6 +422,27 @@ async function loadFieldMappings(db, pipelineId) {
 function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
   if (!db || typeof db.selectOne !== 'function' || typeof db.insertOne !== 'function' || typeof db.updateRow !== 'function' || typeof db.select !== 'function') {
     throw new Error('createPipelineRegistry: scoped db helper is required')
+  }
+  const runLocks = new Map()
+
+  async function withPipelineRunLock(key, task) {
+    const previous = runLocks.get(key) || Promise.resolve()
+    let release
+    const gate = new Promise((resolve) => {
+      release = resolve
+    })
+    const tail = previous.catch(() => undefined).then(() => gate)
+    runLocks.set(key, tail)
+
+    await previous.catch(() => undefined)
+    try {
+      return await task()
+    } finally {
+      release()
+      if (runLocks.get(key) === tail) {
+        runLocks.delete(key)
+      }
+    }
   }
 
   async function upsertPipeline(input) {
@@ -474,43 +546,68 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
 
   async function createPipelineRun(input) {
     const normalized = normalizeCreateRunInput(input)
-    const pipeline = await db.selectOne(PIPELINES_TABLE, {
-      ...scopeWhere(normalized),
-      id: normalized.pipelineId,
-    })
-    if (!pipeline) {
-      throw new PipelineNotFoundError('pipeline not found', {
+    return withPipelineRunLock(pipelineRunLockKey(normalized), async () => {
+      const pipeline = await db.selectOne(PIPELINES_TABLE, {
+        ...scopeWhere(normalized),
         id: normalized.pipelineId,
-        tenantId: normalized.tenantId,
-        workspaceId: normalized.workspaceId,
       })
-    }
-    if (pipeline.status === 'disabled') {
-      throw new PipelineValidationError('disabled pipeline cannot create runs', {
-        pipelineId: normalized.pipelineId,
-        status: pipeline.status,
-      })
-    }
-    const insertRow = {
-      id: normalized.id || idGenerator(),
-      tenant_id: normalized.tenantId,
-      workspace_id: normalized.workspaceId,
-      pipeline_id: normalized.pipelineId,
-      mode: normalized.mode,
-      triggered_by: normalized.triggeredBy,
-      status: normalized.status,
-      rows_read: normalized.rowsRead,
-      rows_cleaned: normalized.rowsCleaned,
-      rows_written: normalized.rowsWritten,
-      rows_failed: normalized.rowsFailed,
-      started_at: normalized.startedAt,
-      finished_at: normalized.finishedAt,
-      duration_ms: normalized.durationMs,
-      error_summary: normalized.errorSummary,
-      details: normalized.details,
-    }
-    const rows = unwrapRows(await db.insertOne(RUNS_TABLE, insertRow))
-    return rowToPipelineRun(rows[0] || insertRow)
+      if (!pipeline) {
+        throw new PipelineNotFoundError('pipeline not found', {
+          id: normalized.pipelineId,
+          tenantId: normalized.tenantId,
+          workspaceId: normalized.workspaceId,
+        })
+      }
+      if (pipeline.status === 'disabled') {
+        throw new PipelineValidationError('disabled pipeline cannot create runs', {
+          pipelineId: normalized.pipelineId,
+          status: pipeline.status,
+        })
+      }
+      // Reject concurrent runs early for a friendly error. The DB partial unique
+      // index remains the authoritative cross-process guard for true races.
+      const runningRows = unwrapRows(await db.select(RUNS_TABLE, {
+        where: {
+          ...scopeWhere(normalized),
+          pipeline_id: normalized.pipelineId,
+          status: 'running',
+        },
+        limit: 1,
+      }))
+      if (runningRows.length > 0) {
+        throw new PipelineConflictError('pipeline already has a run in progress', {
+          pipelineId: normalized.pipelineId,
+          runningRunId: runningRows[0].id,
+        })
+      }
+      const insertRow = {
+        id: normalized.id || idGenerator(),
+        tenant_id: normalized.tenantId,
+        workspace_id: normalized.workspaceId,
+        pipeline_id: normalized.pipelineId,
+        mode: normalized.mode,
+        triggered_by: normalized.triggeredBy,
+        status: normalized.status,
+        rows_read: normalized.rowsRead,
+        rows_cleaned: normalized.rowsCleaned,
+        rows_written: normalized.rowsWritten,
+        rows_failed: normalized.rowsFailed,
+        started_at: normalized.startedAt,
+        finished_at: normalized.finishedAt,
+        duration_ms: normalized.durationMs,
+        error_summary: normalized.errorSummary,
+        details: normalized.details,
+      }
+      try {
+        const rows = unwrapRows(await db.insertOne(RUNS_TABLE, insertRow))
+        return rowToPipelineRun(rows[0] || insertRow)
+      } catch (error) {
+        if (isRunningRunUniqueViolation(error)) {
+          throw await conflictFromRunningRun(db, normalized, { constraint: RUNNING_RUN_UNIQUE_INDEX })
+        }
+        throw error
+      }
+    })
   }
 
   async function updatePipelineRun(input) {
@@ -552,6 +649,45 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
     return rows.map(rowToPipelineRun)
   }
 
+  // Marks 'running' runs that started more than `olderThanMs` milliseconds ago as 'failed'.
+  // Called on plugin startup or before creating a new run to recover from crashed runner processes
+  // that never called failRun(). Without this, a crash between startRun and finishRun permanently
+  // blocks future runs of the same pipeline.
+  async function abandonStaleRuns(input = {}) {
+    const tenantId = requiredString(input.tenantId, 'tenantId')
+    const workspaceId = normalizeWorkspaceId(input.workspaceId)
+    const olderThanMs = Number.isInteger(input.olderThanMs) && input.olderThanMs > 0
+      ? input.olderThanMs
+      : 4 * 60 * 60 * 1000 // 4 hours default
+    const nowMs = typeof input.now === 'function' ? input.now() : Date.now()
+    const cutoffMs = nowMs - olderThanMs
+
+    const where = { ...scopeWhere({ tenantId, workspaceId }), status: 'running' }
+    if (input.pipelineId) where.pipeline_id = requiredString(input.pipelineId, 'pipelineId')
+    const runningRows = unwrapRows(await db.select(RUNS_TABLE, { where }))
+
+    const stale = runningRows.filter((row) => {
+      const startedMs = row.started_at ? Date.parse(row.started_at) : NaN
+      return !Number.isNaN(startedMs) && startedMs < cutoffMs
+    })
+
+    const abandoned = []
+    for (const row of stale) {
+      const finishedAt = new Date(nowMs).toISOString()
+      await db.updateRow(
+        RUNS_TABLE,
+        {
+          status: 'failed',
+          finished_at: finishedAt,
+          error_summary: 'abandoned: run exceeded stale threshold and was automatically failed',
+        },
+        { tenant_id: row.tenant_id, workspace_id: row.workspace_id, id: row.id }
+      )
+      abandoned.push(rowToPipelineRun({ ...row, status: 'failed', finished_at: finishedAt }))
+    }
+    return abandoned
+  }
+
   return {
     upsertPipeline,
     getPipeline,
@@ -559,6 +695,7 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
     createPipelineRun,
     updatePipelineRun,
     listPipelineRuns,
+    abandonStaleRuns,
   }
 }
 
@@ -566,6 +703,7 @@ module.exports = {
   createPipelineRegistry,
   PipelineValidationError,
   PipelineNotFoundError,
+  PipelineConflictError,
   __internals: {
     PIPELINES_TABLE,
     FIELD_MAPPINGS_TABLE,
@@ -576,6 +714,7 @@ module.exports = {
     VALID_STATUSES,
     VALID_RUN_STATUSES,
     VALID_TRIGGERS,
+    RUNNING_RUN_UNIQUE_INDEX,
     normalizePipelineInput,
     normalizeFieldMappings,
     normalizeCreateRunInput,
@@ -583,5 +722,7 @@ module.exports = {
     rowToPipeline,
     rowToFieldMapping,
     rowToPipelineRun,
+    pipelineRunLockKey,
+    isRunningRunUniqueViolation,
   },
 }

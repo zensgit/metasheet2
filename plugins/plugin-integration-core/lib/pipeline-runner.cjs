@@ -341,6 +341,21 @@ function createPipelineRunner(deps = {}) {
     const started = clock()
     const metrics = createMetrics()
     const preview = dryRun ? { records: [], errors: [] } : null
+
+    // Best-effort: recover any runs left stuck in 'running' by a previous crash.
+    // Wrapped in try-catch so a transient DB failure here never blocks the main run.
+    if (typeof pipelineRegistry.abandonStaleRuns === 'function') {
+      try {
+        await pipelineRegistry.abandonStaleRuns({
+          tenantId: context.tenantId,
+          workspaceId: context.workspaceId,
+          pipelineId: context.pipeline.id,
+        })
+      } catch {
+        // Non-fatal — stale-run cleanup is best-effort; proceed with the pipeline run.
+      }
+    }
+
     let run = await runLogger.startRun({
       tenantId: context.tenantId,
       workspaceId: context.workspaceId,
@@ -506,6 +521,15 @@ function createPipelineRunner(deps = {}) {
     const deadLetter = await deadLetterStore.getDeadLetter(input)
     if (!deadLetter) {
       throw new PipelineRunnerError('dead letter not found', { id: input.id })
+    }
+    // Only 'open' letters can be replayed. 'replayed' or 'discarded' letters must not
+    // trigger another live ERP write — idempotency would block the write but the run
+    // record and K3 WISE session calls still fire, polluting the run log.
+    if (deadLetter.status !== 'open') {
+      throw new PipelineRunnerError('dead letter cannot be replayed: status is not open', {
+        id: deadLetter.id,
+        status: deadLetter.status,
+      })
     }
     if (isTruncatedReplayPayload(deadLetter.sourcePayload)) {
       throw new PipelineRunnerError('dead letter payload is truncated and cannot be replayed safely', {
