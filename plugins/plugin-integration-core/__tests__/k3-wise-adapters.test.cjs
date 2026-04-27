@@ -348,10 +348,134 @@ async function testK3SqlServerChannel() {
   assert.ok(rawIdentifier instanceof AdapterValidationError, 'raw SQL-like identifiers are rejected')
 }
 
+async function testK3WebApiAutoFlagCoercion() {
+  // ----- helper: build adapter with custom autoSubmit/autoAudit config -----
+  function buildAdapter(systemConfigOverrides) {
+    const { calls, fetchImpl } = createK3FetchMock()
+    const system = createK3WebApiSystem({
+      config: {
+        baseUrl: 'https://k3.example.test',
+        healthPath: '/K3API/Health',
+        ...systemConfigOverrides,
+      },
+    })
+    const adapter = createK3WiseWebApiAdapter({ system, fetchImpl })
+    return { adapter, calls }
+  }
+
+  async function upsertOne(adapter, options = {}) {
+    return adapter.upsert({
+      object: 'material',
+      records: [{ FNumber: 'MAT-COERCE-001', FName: 'Coercion test bolt' }],
+      keyFields: ['FNumber'],
+      options,
+    })
+  }
+
+  // ----- Scenario A: hand-edited string "true" config respects intent -----
+  {
+    const { adapter } = buildAdapter({ autoSubmit: 'true', autoAudit: '是' })
+    const upsert = await upsertOne(adapter)
+    assert.equal(upsert.metadata.autoSubmit, true, 'config.autoSubmit="true" → resolved as true')
+    assert.equal(upsert.metadata.autoAudit, true, 'config.autoAudit="是" → resolved as true')
+  }
+
+  // ----- Scenario B: numeric 1 / 0 in config (spreadsheet booleans) -----
+  {
+    const { adapter } = buildAdapter({ autoSubmit: 1, autoAudit: 0 })
+    const upsert = await upsertOne(adapter)
+    assert.equal(upsert.metadata.autoSubmit, true, 'config.autoSubmit=1 → true')
+    assert.equal(upsert.metadata.autoAudit, false, 'config.autoAudit=0 → false')
+  }
+
+  // ----- Scenario C: HEADLINE FIX — request override "false" disables config truthy -----
+  {
+    const { adapter, calls } = buildAdapter({ autoSubmit: true, autoAudit: true })
+    const upsert = await upsertOne(adapter, { autoSubmit: 'false', autoAudit: '否' })
+    assert.equal(upsert.metadata.autoSubmit, false, 'request.options.autoSubmit="false" overrides config true')
+    assert.equal(upsert.metadata.autoAudit, false, 'request.options.autoAudit="否" overrides config true')
+    const submitCalls = calls.filter((call) => call.pathname === '/K3API/Material/Submit')
+    const auditCalls = calls.filter((call) => call.pathname === '/K3API/Material/Audit')
+    assert.equal(submitCalls.length, 0, 'Submit must NOT fire when operator hand-edited "false"')
+    assert.equal(auditCalls.length, 0, 'Audit must NOT fire when operator hand-edited "否"')
+  }
+
+  // ----- Scenario D: request override "true" enables when config is false -----
+  {
+    const { adapter } = buildAdapter({ autoSubmit: false, autoAudit: false })
+    const upsert = await upsertOne(adapter, { autoSubmit: 'true', autoAudit: 1 })
+    assert.equal(upsert.metadata.autoSubmit, true, 'request.options.autoSubmit="true" overrides config false')
+    assert.equal(upsert.metadata.autoAudit, true, 'request.options.autoAudit=1 overrides config false')
+  }
+
+  // ----- Scenario E: request unset, config drives (positive) -----
+  {
+    const { adapter } = buildAdapter({ autoSubmit: true, autoAudit: false })
+    const upsert = await upsertOne(adapter, {})
+    assert.equal(upsert.metadata.autoSubmit, true, 'unset request + config true → true')
+    assert.equal(upsert.metadata.autoAudit, false, 'unset request + config false → false')
+  }
+
+  // ----- Scenario F: both unset → default safe (false) -----
+  {
+    const { adapter } = buildAdapter({})
+    const upsert = await upsertOne(adapter, {})
+    assert.equal(upsert.metadata.autoSubmit, false, 'unset request + unset config → false (default safe)')
+    assert.equal(upsert.metadata.autoAudit, false, 'unset request + unset config → false (default safe)')
+  }
+
+  // ----- Scenario G: empty string treated as unset (falls through to config) -----
+  {
+    const { adapter } = buildAdapter({ autoSubmit: true })
+    const upsert = await upsertOne(adapter, { autoSubmit: '' })
+    assert.equal(upsert.metadata.autoSubmit, true, 'empty-string request → falls back to config (true)')
+  }
+
+  // ----- Scenario H: invalid value throws AdapterValidationError with field name -----
+  {
+    const { adapter } = buildAdapter({ autoSubmit: 'maybe' })
+    let threw = null
+    try {
+      await upsertOne(adapter)
+    } catch (error) {
+      threw = error
+    }
+    assert.ok(threw instanceof AdapterValidationError, 'unknown string boolean should throw AdapterValidationError')
+    assert.ok(/autoSubmit/.test(threw.message), 'error message includes field name autoSubmit')
+  }
+
+  // ----- Scenario I: NaN / non-finite number throws -----
+  {
+    const { adapter } = buildAdapter({ autoSubmit: NaN })
+    let threw = null
+    try {
+      await upsertOne(adapter)
+    } catch (error) {
+      threw = error
+    }
+    assert.ok(threw instanceof AdapterValidationError, 'NaN config should throw AdapterValidationError')
+    assert.ok(/finite/.test(threw.message), 'error message mentions "finite"')
+  }
+
+  // ----- Scenario J: number 2 (not 0/1) throws -----
+  {
+    const { adapter } = buildAdapter({ autoSubmit: 2 })
+    let threw = null
+    try {
+      await upsertOne(adapter)
+    } catch (error) {
+      threw = error
+    }
+    assert.ok(threw instanceof AdapterValidationError, 'numeric 2 should throw')
+    assert.ok(/0 or 1/.test(threw.message), 'error message mentions "0 or 1"')
+  }
+}
+
 async function main() {
   await testK3WebApiAdapter()
   await testK3SqlServerChannel()
-  console.log('✓ k3-wise-adapters: WebAPI and SQL Server channel tests passed')
+  await testK3WebApiAutoFlagCoercion()
+  console.log('✓ k3-wise-adapters: WebAPI, SQL Server channel, and auto-flag coercion tests passed')
 }
 
 main().catch((err) => {
