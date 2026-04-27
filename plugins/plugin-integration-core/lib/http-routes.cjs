@@ -165,6 +165,9 @@ function asPositiveInt(value) {
   return Number.isInteger(numeric) && numeric > 0 ? numeric : undefined
 }
 
+// 'replay' is internal-only: set by replayDeadLetter, not accepted over the API.
+const VALID_USER_RUN_MODES = new Set(['manual', 'incremental', 'scheduled'])
+
 function asListLimit(value) {
   const n = asPositiveInt(value)
   if (n === undefined) return undefined
@@ -172,6 +175,16 @@ function asListLimit(value) {
 }
 
 function publicRunInput(body = {}) {
+  if (body.mode !== undefined && body.mode !== null && body.mode !== '') {
+    if (!VALID_USER_RUN_MODES.has(body.mode)) {
+      throw new HttpRouteError(
+        400,
+        'INVALID_RUN_MODE',
+        `mode must be one of: ${Array.from(VALID_USER_RUN_MODES).join(', ')}`,
+        { received: body.mode }
+      )
+    }
+  }
   const input = {
     tenantId: body.tenantId,
     workspaceId: body.workspaceId,
@@ -394,6 +407,7 @@ module.exports = {
   MAX_LIST_LIMIT,
   createHandlers,
   registerIntegrationRoutes,
+  VALID_USER_RUN_MODES,
   __internals: {
     hasPermission,
     requireAccess,
