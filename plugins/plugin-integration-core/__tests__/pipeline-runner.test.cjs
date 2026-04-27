@@ -1133,6 +1133,52 @@ async function main() {
       'pagesProcessed=1 when single page completes the run')
   }
 
+  // --- 20. invalid source record (null/array/scalar) → dead letter, run continues
+  {
+    // Source returns a mix of nulls, valid records, and a scalar; transformRecord
+    // throws TransformError on non-objects, so without per-record guard the entire
+    // run dies on the first null. Verify each invalid record becomes its own
+    // dead letter with INVALID_SOURCE_RECORD and valid records still write.
+    let mixedPage = 0
+    const mixedHarness = createRunnerHarness({
+      sourceRecords: [],
+      sourceRead: async () => {
+        mixedPage += 1
+        return createReadResult({
+          records: [
+            null,
+            { code: 'valid-1', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+            undefined,
+            'raw-string-not-an-object',
+            { code: 'valid-2', revision: 'r1', qty: '5', name: 'Nut', updatedAt: '2026-04-24T01:10:00.000Z' },
+            [{ nested: 'array' }],
+          ],
+          done: true,
+          nextCursor: null,
+        })
+      },
+    })
+    const mixedResult = await mixedHarness.runner.runPipeline({
+      tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'incremental', triggeredBy: 'manual',
+    })
+    assert.equal(mixedResult.run.status, 'partial', 'run completes with partial status')
+    assert.equal(mixedResult.metrics.rowsRead, 6, 'all 6 records counted as read')
+    assert.equal(mixedResult.metrics.rowsCleaned, 2, 'two valid records cleaned')
+    assert.equal(mixedResult.metrics.rowsWritten, 2, 'two valid records written to target')
+    assert.equal(mixedResult.metrics.rowsFailed, 4, 'four invalid records failed')
+    assert.equal(mixedHarness.targetRows.size, 2, 'target has the two valid records only')
+
+    // Each invalid record produced its own dead letter with INVALID_SOURCE_RECORD
+    const deadLetters = mixedHarness.db.tables.get('integration_dead_letters')
+    const invalidLetters = deadLetters.filter((row) => row.error_code === 'INVALID_SOURCE_RECORD')
+    assert.equal(invalidLetters.length, 4, 'four INVALID_SOURCE_RECORD dead letters created')
+    const messages = invalidLetters.map((row) => row.error_message).sort()
+    assert.ok(messages.some((m) => m.includes('null')), 'null reported in error message')
+    assert.ok(messages.some((m) => m.includes('undefined')), 'undefined reported')
+    assert.ok(messages.some((m) => m.includes('array')), 'array reported')
+    assert.ok(messages.some((m) => m.includes('string')), 'string reported')
+  }
+
   console.log('✓ pipeline-runner: cleanse/idempotency/incremental E2E tests passed')
 }
 
