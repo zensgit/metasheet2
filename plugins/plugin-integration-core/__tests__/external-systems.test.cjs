@@ -113,7 +113,7 @@ async function main() {
     id: 'sys_1',
     name: 'K3 WISE renamed',
     kind: 'erp:k3-wise-webapi',
-    role: 'bidirectional',
+    role: 'source',
     config: { baseUrl: 'https://k3-new.example.test' },
     capabilities: { read: true, write: true },
     status: 'inactive',
@@ -254,6 +254,132 @@ async function main() {
     updateRace = error
   }
   assert.ok(updateRace instanceof ExternalSystemNotFoundError, 'empty update result is not reported as success')
+
+  // --- 7. config/capabilities preserved when not provided on update -------
+  const preserveDb = createMockDb()
+  const preserveRegistry = createExternalSystemRegistry({
+    db: preserveDb,
+    credentialStore,
+    idGenerator: () => 'sys_preserve',
+  })
+  await preserveRegistry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    name: 'K3 WISE full',
+    kind: 'erp:k3-wise-webapi',
+    role: 'target',
+    config: { baseUrl: 'https://k3.internal', acctId: 'ACCT001', orgId: 'ORG1' },
+    capabilities: { read: true, write: true, bom: true },
+    status: 'active',
+  })
+
+  // 7a: status-only update — config and capabilities must be preserved
+  const statusOnlyUpdate = await preserveRegistry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    id: 'sys_preserve',
+    name: 'K3 WISE full',
+    kind: 'erp:k3-wise-webapi',
+    role: 'target',
+    status: 'inactive',
+    // config and capabilities intentionally omitted
+  })
+  const storedRow = preserveDb.rows.find((row) => row.id === 'sys_preserve')
+  assert.deepEqual(storedRow.config, { baseUrl: 'https://k3.internal', acctId: 'ACCT001', orgId: 'ORG1' },
+    'config preserved when not provided on update')
+  assert.deepEqual(storedRow.capabilities, { read: true, write: true, bom: true },
+    'capabilities preserved when not provided on update')
+  assert.equal(statusOnlyUpdate.status, 'inactive', 'status was updated as requested')
+
+  // 7b: explicit config: {} replaces (caller opted in to clearing)
+  await preserveRegistry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    id: 'sys_preserve',
+    name: 'K3 WISE full',
+    kind: 'erp:k3-wise-webapi',
+    role: 'target',
+    config: {},
+    status: 'inactive',
+    // capabilities omitted — should still be preserved
+  })
+  const afterExplicitEmpty = preserveDb.rows.find((row) => row.id === 'sys_preserve')
+  assert.deepEqual(afterExplicitEmpty.config, {}, 'explicit config: {} replaces existing config')
+  assert.deepEqual(afterExplicitEmpty.capabilities, { read: true, write: true, bom: true },
+    'capabilities still preserved when only config was explicitly cleared')
+
+  // 7c: full config replacement works normally
+  await preserveRegistry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    id: 'sys_preserve',
+    name: 'K3 WISE full',
+    kind: 'erp:k3-wise-webapi',
+    role: 'target',
+    config: { baseUrl: 'https://k3-new.internal', acctId: 'ACCT002' },
+    capabilities: { read: true, write: false },
+    status: 'active',
+  })
+  const afterFullUpdate = preserveDb.rows.find((row) => row.id === 'sys_preserve')
+  assert.deepEqual(afterFullUpdate.config, { baseUrl: 'https://k3-new.internal', acctId: 'ACCT002' },
+    'explicit config replacement works')
+  assert.deepEqual(afterFullUpdate.capabilities, { read: true, write: false },
+    'explicit capabilities replacement works')
+
+  // --- 8. kind/role immutability after creation -------------------------
+  const immutableDb = createMockDb()
+  const immutableRegistry = createExternalSystemRegistry({
+    db: immutableDb,
+    credentialStore,
+    idGenerator: () => 'sys_imm',
+  })
+  await immutableRegistry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    name: 'immutable-sys',
+    kind: 'http',
+    role: 'source',
+  })
+
+  let kindChanged = null
+  try {
+    await immutableRegistry.upsertExternalSystem({
+      tenantId: 'tenant_1',
+      id: 'sys_imm',
+      name: 'immutable-sys',
+      kind: 'erp:k3-wise-webapi',
+      role: 'source',
+    })
+  } catch (error) {
+    kindChanged = error
+  }
+  assert.ok(kindChanged instanceof ExternalSystemValidationError, 'changing kind after creation is rejected')
+  assert.match(kindChanged.message, /kind and role cannot be changed/, 'error message identifies the invariant')
+  assert.equal(kindChanged.details.existingKind, 'http', 'details includes original kind')
+  assert.equal(kindChanged.details.requestedKind, 'erp:k3-wise-webapi', 'details includes attempted kind')
+
+  let roleChanged = null
+  try {
+    await immutableRegistry.upsertExternalSystem({
+      tenantId: 'tenant_1',
+      id: 'sys_imm',
+      name: 'immutable-sys',
+      kind: 'http',
+      role: 'target',
+    })
+  } catch (error) {
+    roleChanged = error
+  }
+  assert.ok(roleChanged instanceof ExternalSystemValidationError, 'changing role after creation is rejected')
+  assert.equal(roleChanged.details.existingRole, 'source', 'details includes original role')
+  assert.equal(roleChanged.details.requestedRole, 'target', 'details includes attempted role')
+
+  // Updating other fields with same kind/role succeeds
+  const sameKindRole = await immutableRegistry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    id: 'sys_imm',
+    name: 'immutable-sys renamed',
+    kind: 'http',
+    role: 'source',
+    status: 'inactive',
+  })
+  assert.equal(sameKindRole.name, 'immutable-sys renamed', 'update with unchanged kind/role succeeds')
+  assert.equal(sameKindRole.status, 'inactive', 'status update applied')
 
   console.log('✓ external-systems: registry + credential boundary tests passed')
 }

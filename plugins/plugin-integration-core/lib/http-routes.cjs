@@ -64,6 +64,7 @@ function sendError(res, error) {
 function inferHttpStatus(error) {
   const name = error && error.name ? String(error.name) : ''
   if (/NotFound/.test(name)) return 404
+  if (/Conflict/.test(name)) return 409
   if (/Validation|Transform|Watermark|DeadLetter/.test(name)) return 400
   if (/PipelineRunner/.test(name)) return 422
   return 500
@@ -156,10 +157,35 @@ function requestParams(req) {
   return req.params && typeof req.params === 'object' ? req.params : {}
 }
 
+const MAX_LIST_LIMIT = 500
+const MAX_LIST_OFFSET = 10000
+const MAX_SAMPLE_LIMIT = 10000
+
 function asPositiveInt(value) {
   if (value === undefined || value === null || value === '') return undefined
   const numeric = Number(value)
   return Number.isInteger(numeric) && numeric > 0 ? numeric : undefined
+}
+
+// 'replay' is internal-only: set by replayDeadLetter, not accepted over the API.
+const VALID_USER_RUN_MODES = new Set(['manual', 'incremental', 'scheduled'])
+
+function asListLimit(value) {
+  const n = asPositiveInt(value)
+  if (n === undefined) return undefined
+  return Math.min(n, MAX_LIST_LIMIT)
+}
+
+function asListOffset(value) {
+  const n = asPositiveInt(value)
+  if (n === undefined) return undefined
+  return Math.min(n, MAX_LIST_OFFSET)
+}
+
+function asSampleLimit(value) {
+  const n = asPositiveInt(value)
+  if (n === undefined) return undefined
+  return Math.min(n, MAX_SAMPLE_LIMIT)
 }
 
 function publicRunInput(body = {}) {
@@ -170,12 +196,22 @@ function publicRunInput(body = {}) {
       })
     }
   }
+  if (body.mode !== undefined && body.mode !== null && body.mode !== '') {
+    if (!VALID_USER_RUN_MODES.has(body.mode)) {
+      throw new HttpRouteError(
+        400,
+        'INVALID_RUN_MODE',
+        `mode must be one of: ${Array.from(VALID_USER_RUN_MODES).join(', ')}`,
+        { received: body.mode }
+      )
+    }
+  }
   const input = {
     tenantId: body.tenantId,
     workspaceId: body.workspaceId,
     mode: body.mode,
     cursor: body.cursor,
-    sampleLimit: asPositiveInt(body.sampleLimit),
+    sampleLimit: asSampleLimit(body.sampleLimit),
   }
   for (const key of Object.keys(input)) {
     if (input[key] === undefined || input[key] === null || input[key] === '') delete input[key]
@@ -242,8 +278,8 @@ function createHandlers(services) {
       return sendOk(res, await externalSystems.listExternalSystems(scopedInput(req, {
         kind: query.kind,
         status: query.status,
-        limit: asPositiveInt(query.limit),
-        offset: asPositiveInt(query.offset),
+        limit: asListLimit(query.limit),
+        offset: asListOffset(query.offset),
       })))
     },
 
@@ -274,8 +310,8 @@ function createHandlers(services) {
         status: query.status,
         sourceSystemId: query.sourceSystemId,
         targetSystemId: query.targetSystemId,
-        limit: asPositiveInt(query.limit),
-        offset: asPositiveInt(query.offset),
+        limit: asListLimit(query.limit),
+        offset: asListOffset(query.offset),
       })))
     },
 
@@ -325,8 +361,8 @@ function createHandlers(services) {
       return sendOk(res, await pipelineRegistry.listPipelineRuns(scopedInput(req, {
         pipelineId: query.pipelineId,
         status: query.status,
-        limit: asPositiveInt(query.limit),
-        offset: asPositiveInt(query.offset),
+        limit: asListLimit(query.limit),
+        offset: asListOffset(query.offset),
       })))
     },
 
@@ -338,8 +374,8 @@ function createHandlers(services) {
         pipelineId: query.pipelineId,
         runId: query.runId,
         status: query.status,
-        limit: asPositiveInt(query.limit),
-        offset: asPositiveInt(query.offset),
+        limit: asListLimit(query.limit),
+        offset: asListOffset(query.offset),
       }))
       return sendOk(res, rows.map((row) => redactDeadLetter(row, fullPayload)))
     },
@@ -389,8 +425,12 @@ function registerIntegrationRoutes({ context, services, logger } = {}) {
 module.exports = {
   ROUTES,
   HttpRouteError,
+  MAX_LIST_LIMIT,
+  MAX_LIST_OFFSET,
+  MAX_SAMPLE_LIMIT,
   createHandlers,
   registerIntegrationRoutes,
+  VALID_USER_RUN_MODES,
   __internals: {
     hasPermission,
     requireAccess,
@@ -400,5 +440,9 @@ module.exports = {
     inferHttpStatus,
     publicRunInput,
     redactDeadLetter,
+    asSampleLimit,
+    asListOffset,
+    asListLimit,
+    asPositiveInt,
   },
 }

@@ -44,7 +44,7 @@
 
 ## Regression Guard
 
-All 18 `plugin-integration-core` test files pass:
+After merging current `origin/main` through the dry-run sampleLimit cap, all 18 `plugin-integration-core` test files pass:
 
 ```
 ✓ credential-store        ✓ adapter-contracts       ✓ http-adapter
@@ -58,5 +58,5 @@ All 18 `plugin-integration-core` test files pass:
 ## Worktree
 
 Branch: `codex/integration-cursor-string-guard-20260427`  
-Worktree: `/tmp/ms2-cursor-guard`  
-Base: `202c10eff` (PR #1186, remote main)
+Worktree: `/private/tmp/ms2-cursor-guard`  
+Base: `33a4078bb` (origin/main after PR #1201)
