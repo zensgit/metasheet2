@@ -515,6 +515,15 @@ function createPipelineRunner(deps = {}) {
     if (!deadLetter) {
       throw new PipelineRunnerError('dead letter not found', { id: input.id })
     }
+    // Only 'open' letters can be replayed. 'replayed' or 'discarded' letters must not
+    // trigger another live ERP write — idempotency would block the write but the run
+    // record and K3 WISE session calls still fire, polluting the run log.
+    if (deadLetter.status !== 'open') {
+      throw new PipelineRunnerError('dead letter cannot be replayed: status is not open', {
+        id: deadLetter.id,
+        status: deadLetter.status,
+      })
+    }
     if (isTruncatedReplayPayload(deadLetter.sourcePayload)) {
       throw new PipelineRunnerError('dead letter payload is truncated and cannot be replayed safely', {
         id: deadLetter.id,

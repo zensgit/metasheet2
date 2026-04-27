@@ -579,6 +579,42 @@ async function main() {
   assert.equal(replayError.details.reason, 'PAYLOAD_TRUNCATED')
   assert.equal(truncatedReplay.targetRows.size, 0, 'truncated replay is rejected before target write')
 
+  // --- 6. Dead-letter status guard — already-replayed letter is rejected --
+  // The first replay in scenario 5 left dl_1 in status='replayed'. A second
+  // replay attempt must throw before any ERP call happens.
+  const doubleReplay = await replay.runner.replayDeadLetter({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    id: 'dl_1',
+  }).catch((error) => error)
+  assert.equal(doubleReplay.name, 'PipelineRunnerError', 'double-replay rejected with PipelineRunnerError')
+  assert.match(doubleReplay.message, /status is not open/, 'error message identifies the problem')
+  assert.equal(doubleReplay.details.status, 'replayed', 'error details include current status')
+  assert.equal(doubleReplay.details.id, 'dl_1', 'error details include dead letter id')
+  assert.equal(replay.targetRows.size, 1, 'target unchanged after rejected double-replay')
+
+  // Discarded dead letter is also rejected
+  const discardHarness = createRunnerHarness({ sourceRecords: [] })
+  const discardStore = createDeadLetterStore({ db: discardHarness.db, idGenerator: () => 'dl_discarded' })
+  await discardStore.createDeadLetter({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    runId: 'run_original',
+    pipelineId: 'pipe_1',
+    sourcePayload: { code: 'c-04', revision: 'r1', qty: '1', name: 'Nut', updatedAt: '2026-04-24T04:00:00.000Z' },
+    errorCode: 'VALIDATION_FAILED',
+    errorMessage: 'failed',
+    status: 'discarded',
+  })
+  const discardReplay = await discardHarness.runner.replayDeadLetter({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    id: 'dl_discarded',
+  }).catch((error) => error)
+  assert.equal(discardReplay.name, 'PipelineRunnerError', 'discarded letter replay rejected')
+  assert.equal(discardReplay.details.status, 'discarded', 'error details include discarded status')
+  assert.equal(discardHarness.targetRows.size, 0, 'target unchanged after rejected discarded-letter replay')
+
   // --- 11. dryRun string coercion (REST API hand-typed booleans) ---------
   {
     const stringDry = createRunnerHarness({
