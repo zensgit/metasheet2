@@ -7,8 +7,10 @@ const path = require('node:path')
 const repoRoot = path.resolve(__dirname, '..', '..', '..')
 const migrationPath = path.join(repoRoot, 'packages', 'core-backend', 'migrations', '057_create_integration_core_tables.sql')
 const runningUniqueMigrationPath = path.join(repoRoot, 'packages', 'core-backend', 'migrations', '058_integration_runs_running_unique.sql')
+const runHistoryIndexMigrationPath = path.join(repoRoot, 'packages', 'core-backend', 'migrations', '059_integration_runs_history_index.sql')
 const sql = fs.readFileSync(migrationPath, 'utf8')
 const runningUniqueSql = fs.readFileSync(runningUniqueMigrationPath, 'utf8')
+const runHistoryIndexSql = fs.readFileSync(runHistoryIndexMigrationPath, 'utf8')
 
 const expectedTables = [
   'integration_external_systems',
@@ -104,6 +106,12 @@ function main() {
     '058 migration closes duplicate running rows before creating unique index',
   )
   assert.doesNotMatch(runningUniqueSql, /\bDROP\s+(?:TABLE|INDEX)\b/i, '058 migration must not drop objects')
+  assert.match(
+    runHistoryIndexSql,
+    /CREATE INDEX IF NOT EXISTS idx_integration_runs_scope_pipeline_status_created_at\s+ON integration_runs \(tenant_id, workspace_id, pipeline_id, status, created_at DESC\);/m,
+    '059 migration adds run-history lookup index with workspace scope and created_at ordering',
+  )
+  assert.doesNotMatch(runHistoryIndexSql, /\bDROP\s+(?:TABLE|INDEX)\b/i, '059 migration must not drop objects')
 
   const ddlTableRefs = Array.from(sql.matchAll(/\b(?:CREATE|ALTER|DROP|TRUNCATE)\s+TABLE(?:\s+IF\s+(?:NOT\s+)?EXISTS)?\s+([a-zA-Z_][a-zA-Z0-9_]*)/gi))
     .map((match) => match[1])
@@ -114,13 +122,15 @@ function main() {
     .map((match) => match[1])
   const runningUniqueIndexTableRefs = Array.from(runningUniqueSql.matchAll(/\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+[a-zA-Z_][a-zA-Z0-9_]*[\s\S]*?\bON\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/gi))
     .map((match) => match[1])
-  assertOnlyIntegrationTableRefs('index', indexTableRefs.concat(runningUniqueIndexTableRefs))
+  const runHistoryIndexTableRefs = Array.from(runHistoryIndexSql.matchAll(/\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+[a-zA-Z_][a-zA-Z0-9_]*[\s\S]*?\bON\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/gi))
+    .map((match) => match[1])
+  assertOnlyIntegrationTableRefs('index', indexTableRefs.concat(runningUniqueIndexTableRefs, runHistoryIndexTableRefs))
 
   const foreignTableRefs = Array.from(sql.matchAll(/\bREFERENCES\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/gi))
     .map((match) => match[1])
   assertOnlyIntegrationTableRefs('foreign key', foreignTableRefs)
 
-  console.log('✓ migration-sql: 057/058 integration migration structure passed')
+  console.log('✓ migration-sql: 057/058/059 integration migration structure passed')
 }
 
 main()
