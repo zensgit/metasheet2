@@ -6,7 +6,9 @@ const path = require('node:path')
 
 const repoRoot = path.resolve(__dirname, '..', '..', '..')
 const migrationPath = path.join(repoRoot, 'packages', 'core-backend', 'migrations', '057_create_integration_core_tables.sql')
+const runningUniqueMigrationPath = path.join(repoRoot, 'packages', 'core-backend', 'migrations', '058_integration_runs_running_unique.sql')
 const sql = fs.readFileSync(migrationPath, 'utf8')
+const runningUniqueSql = fs.readFileSync(runningUniqueMigrationPath, 'utf8')
 
 const expectedTables = [
   'integration_external_systems',
@@ -91,6 +93,17 @@ function main() {
     /CREATE UNIQUE INDEX IF NOT EXISTS uniq_integration_pipelines_scope_name\s+ON integration_pipelines \(tenant_id, COALESCE\(workspace_id, ''\), name\);/m,
     'pipelines unique index treats NULL workspace_id deterministically',
   )
+  assert.match(
+    runningUniqueSql,
+    /CREATE UNIQUE INDEX IF NOT EXISTS uniq_integration_runs_one_running_per_pipeline\s+ON integration_runs \(tenant_id, COALESCE\(workspace_id, ''\), pipeline_id\)\s+WHERE status = 'running';/m,
+    'running-run unique index enforces one running row per tenant/workspace/pipeline',
+  )
+  assert.match(
+    runningUniqueSql,
+    /ROW_NUMBER\(\) OVER \(\s+PARTITION BY tenant_id, COALESCE\(workspace_id, ''\), pipeline_id[\s\S]*?WHERE status = 'running'/m,
+    '058 migration closes duplicate running rows before creating unique index',
+  )
+  assert.doesNotMatch(runningUniqueSql, /\bDROP\s+(?:TABLE|INDEX)\b/i, '058 migration must not drop objects')
 
   const ddlTableRefs = Array.from(sql.matchAll(/\b(?:CREATE|ALTER|DROP|TRUNCATE)\s+TABLE(?:\s+IF\s+(?:NOT\s+)?EXISTS)?\s+([a-zA-Z_][a-zA-Z0-9_]*)/gi))
     .map((match) => match[1])
@@ -99,13 +112,15 @@ function main() {
 
   const indexTableRefs = Array.from(sql.matchAll(/\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+[a-zA-Z_][a-zA-Z0-9_]*[\s\S]*?\bON\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/gi))
     .map((match) => match[1])
-  assertOnlyIntegrationTableRefs('index', indexTableRefs)
+  const runningUniqueIndexTableRefs = Array.from(runningUniqueSql.matchAll(/\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+[a-zA-Z_][a-zA-Z0-9_]*[\s\S]*?\bON\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/gi))
+    .map((match) => match[1])
+  assertOnlyIntegrationTableRefs('index', indexTableRefs.concat(runningUniqueIndexTableRefs))
 
   const foreignTableRefs = Array.from(sql.matchAll(/\bREFERENCES\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/gi))
     .map((match) => match[1])
   assertOnlyIntegrationTableRefs('foreign key', foreignTableRefs)
 
-  console.log('✓ migration-sql: 057 integration migration structure passed')
+  console.log('✓ migration-sql: 057/058 integration migration structure passed')
 }
 
 main()

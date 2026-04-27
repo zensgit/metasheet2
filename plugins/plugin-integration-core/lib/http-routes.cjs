@@ -64,6 +64,7 @@ function sendError(res, error) {
 function inferHttpStatus(error) {
   const name = error && error.name ? String(error.name) : ''
   if (/NotFound/.test(name)) return 404
+  if (/Conflict/.test(name)) return 409
   if (/Validation|Transform|Watermark|DeadLetter/.test(name)) return 400
   if (/PipelineRunner/.test(name)) return 422
   return 500
