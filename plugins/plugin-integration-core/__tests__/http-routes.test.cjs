@@ -474,8 +474,19 @@ async function testPipelineRoutes() {
   assert.equal(dryRunCall[1].sampleLimit, 2)
   assert.equal(res.body.data.metrics.rowsWritten, 0, 'dry-run response does not report target writes')
 
-  // --- run mode validation: internal-only and unknown modes are rejected ---
-  for (const badMode of ['replay', 'hacker', 'MANUAL', 'Incremental', '']) {
+  // --- run mode validation: only run-ledger modes exposed to users pass ---
+  for (const goodMode of ['manual', 'incremental', 'full']) {
+    const modeRes = await invoke(routes, 'POST', '/api/integration/pipelines/:id/run', {
+      user: WRITE_USER,
+      params: { id: 'pipe_1' },
+      body: { tenantId: 'tenant_1', workspaceId: 'workspace_1', mode: goodMode },
+    })
+    assertOkResponse(modeRes, 202)
+    assert.equal(findCalls(calls, 'runPipeline').at(-1)[1].mode, goodMode)
+  }
+
+  // internal-only, scheduler trigger labels, and unknown modes are rejected
+  for (const badMode of ['replay', 'scheduled', 'hacker', 'MANUAL', 'Incremental', '']) {
     const modeRes = await invoke(routes, 'POST', '/api/integration/pipelines/:id/run', {
       user: WRITE_USER,
       params: { id: 'pipe_1' },
