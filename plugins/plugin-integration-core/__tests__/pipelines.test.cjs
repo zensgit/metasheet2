@@ -6,6 +6,8 @@ const {
   createPipelineRegistry,
   PipelineNotFoundError,
   PipelineValidationError,
+  PipelineConflictError,
+  __internals,
 } = require(path.join(__dirname, '..', 'lib', 'pipelines.cjs'))
 
 function createIdGenerator() {
@@ -330,7 +332,231 @@ async function main() {
   }
   assert.ok(disabledRun instanceof PipelineValidationError, 'disabled pipeline cannot create runs')
 
-  console.log('✓ pipelines: registry + endpoint + field-mapping + run-ledger tests passed')
+  // re-enable pipeline for remaining tests
+  db.tables.get('integration_pipelines')[0].status = 'active'
+
+  // --- 9. Concurrent run guard -------------------------------------------
+  // Seed a 'running' run to simulate an in-progress execution
+  db.seed('integration_runs', [{
+    id: 'run_in_progress',
+    tenant_id: 'tenant_1',
+    workspace_id: null,
+    pipeline_id: 'id_1',
+    status: 'running',
+    started_at: new Date().toISOString(),
+  }])
+
+  let conflictError = null
+  try {
+    await registry.createPipelineRun({
+      tenantId: 'tenant_1',
+      workspaceId: null,
+      pipelineId: 'id_1',
+      mode: 'manual',
+      triggeredBy: 'api',
+    })
+  } catch (error) {
+    conflictError = error
+  }
+  assert.ok(conflictError instanceof PipelineConflictError, 'concurrent run rejected with PipelineConflictError')
+  assert.equal(conflictError.details.runningRunId, 'run_in_progress', 'conflict error includes the blocking run ID')
+  assert.ok(conflictError.message.includes('already has a run'), 'conflict error message is descriptive')
+
+  // A terminated run must not block future runs
+  db.tables.get('integration_runs').find(r => r.id === 'run_in_progress').status = 'succeeded'
+  const afterTerminal = await registry.createPipelineRun({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    pipelineId: 'id_1',
+    mode: 'manual',
+    triggeredBy: 'api',
+  })
+  assert.ok(afterTerminal.id, 'new run allowed once previous run terminates')
+
+  // A running run for a DIFFERENT pipeline must not block this pipeline
+  db.seed('integration_runs', [{
+    id: 'run_other_pipeline',
+    tenant_id: 'tenant_1',
+    workspace_id: null,
+    pipeline_id: 'id_2',
+    status: 'running',
+    started_at: new Date().toISOString(),
+  }])
+  const unrelatedPipelineRun = await registry.createPipelineRun({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    pipelineId: 'id_1',
+    mode: 'manual',
+    triggeredBy: 'api',
+  })
+  assert.ok(unrelatedPipelineRun.id, 'running run on other pipeline does not block this pipeline')
+
+  // The guard must serialize the check+insert critical section in-process.
+  // Without the keyed lock, both calls below can snapshot "no running rows" before
+  // either insert happens, allowing two concurrent running runs for one pipeline.
+  {
+    const raceDb = createMockDb()
+    raceDb.seed('integration_pipelines', [{
+      id: 'pipe_race',
+      tenant_id: 'tenant_1',
+      workspace_id: null,
+      status: 'active',
+    }])
+    const originalSelect = raceDb.select.bind(raceDb)
+    let releaseSelect
+    const selectGate = new Promise((resolve) => {
+      releaseSelect = resolve
+    })
+    raceDb.select = async (table, options = {}) => {
+      if (table === 'integration_runs' && options.where && options.where.status === 'running') {
+        const snapshot = await originalSelect(table, options)
+        await selectGate
+        return snapshot
+      }
+      return originalSelect(table, options)
+    }
+    const raceRegistry = createPipelineRegistry({
+      db: raceDb,
+      idGenerator: createIdGenerator(),
+    })
+    const first = raceRegistry.createPipelineRun({
+      tenantId: 'tenant_1',
+      workspaceId: null,
+      pipelineId: 'pipe_race',
+      mode: 'manual',
+      triggeredBy: 'api',
+      status: 'running',
+      startedAt: new Date().toISOString(),
+    })
+    const second = raceRegistry.createPipelineRun({
+      tenantId: 'tenant_1',
+      workspaceId: null,
+      pipelineId: 'pipe_race',
+      mode: 'manual',
+      triggeredBy: 'api',
+      status: 'running',
+      startedAt: new Date().toISOString(),
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    releaseSelect()
+    const results = await Promise.allSettled([first, second])
+    assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1, 'only one concurrent run starts')
+    const rejected = results.find((result) => result.status === 'rejected')
+    assert.ok(rejected && rejected.reason instanceof PipelineConflictError, 'second concurrent run sees conflict')
+    const runningRows = raceDb.tables.get('integration_runs').filter((row) => row.pipeline_id === 'pipe_race' && row.status === 'running')
+    assert.equal(runningRows.length, 1, 'only one running row is inserted for the pipeline')
+  }
+
+  // A DB-level unique violation from a different process is also normalized to
+  // PipelineConflictError. This covers the distributed race that an in-process
+  // lock cannot serialize.
+  {
+    const dbRace = createMockDb()
+    dbRace.seed('integration_pipelines', [{
+      id: 'pipe_db_race',
+      tenant_id: 'tenant_1',
+      workspace_id: null,
+      status: 'active',
+    }])
+    const originalInsert = dbRace.insertOne.bind(dbRace)
+    const uniqueViolation = new Error(`duplicate key value violates unique constraint "${__internals.RUNNING_RUN_UNIQUE_INDEX}"`)
+    uniqueViolation.code = '23505'
+    uniqueViolation.constraint = __internals.RUNNING_RUN_UNIQUE_INDEX
+    assert.equal(__internals.isRunningRunUniqueViolation(uniqueViolation), true,
+      'running-run unique violation is recognized by constraint name')
+
+    dbRace.insertOne = async (table, row) => {
+      if (table === 'integration_runs') {
+        dbRace.seed('integration_runs', [{
+          id: 'run_other_node',
+          tenant_id: row.tenant_id,
+          workspace_id: row.workspace_id,
+          pipeline_id: row.pipeline_id,
+          status: 'running',
+          started_at: new Date().toISOString(),
+        }])
+        throw uniqueViolation
+      }
+      return originalInsert(table, row)
+    }
+    const dbRaceRegistry = createPipelineRegistry({
+      db: dbRace,
+      idGenerator: createIdGenerator(),
+    })
+    const dbConflict = await dbRaceRegistry.createPipelineRun({
+      tenantId: 'tenant_1',
+      workspaceId: null,
+      pipelineId: 'pipe_db_race',
+      mode: 'manual',
+      triggeredBy: 'api',
+      status: 'running',
+      startedAt: new Date().toISOString(),
+    }).catch((error) => error)
+    assert.ok(dbConflict instanceof PipelineConflictError, 'DB unique violation maps to PipelineConflictError')
+    assert.equal(dbConflict.details.runningRunId, 'run_other_node',
+      'conflict details include the run inserted by the other process')
+    assert.equal(dbConflict.details.constraint, __internals.RUNNING_RUN_UNIQUE_INDEX,
+      'conflict details include the enforcing DB constraint')
+  }
+
+  // --- 10. abandonStaleRuns -----------------------------------------------
+  // Clean up runs table; seed one stale running run and one fresh running run
+  db.tables.set('integration_runs', [])
+  const fiveHoursAgo = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString()
+  const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString()
+  db.seed('integration_runs', [
+    {
+      id: 'stale_run',
+      tenant_id: 'tenant_1',
+      workspace_id: null,
+      pipeline_id: 'id_1',
+      status: 'running',
+      started_at: fiveHoursAgo,
+    },
+    {
+      id: 'fresh_run',
+      tenant_id: 'tenant_1',
+      workspace_id: null,
+      pipeline_id: 'id_1',
+      status: 'running',
+      started_at: thirtyMinutesAgo,
+    },
+    {
+      id: 'other_tenant_stale',
+      tenant_id: 'tenant_2',
+      workspace_id: null,
+      pipeline_id: 'id_1',
+      status: 'running',
+      started_at: fiveHoursAgo,
+    },
+  ])
+
+  const abandoned = await registry.abandonStaleRuns({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+  })
+  assert.equal(abandoned.length, 1, 'only the stale run is abandoned')
+  assert.equal(abandoned[0].id, 'stale_run', 'abandoned run ID matches')
+  assert.equal(abandoned[0].status, 'failed', 'abandoned run status is failed')
+  assert.ok(abandoned[0].finishedAt, 'abandoned run has finishedAt')
+
+  // The fresh run and other-tenant run must be untouched
+  const stillRunning = db.tables.get('integration_runs').find(r => r.id === 'fresh_run')
+  assert.equal(stillRunning.status, 'running', 'fresh run is not abandoned')
+  const otherTenantRun = db.tables.get('integration_runs').find(r => r.id === 'other_tenant_stale')
+  assert.equal(otherTenantRun.status, 'running', 'other-tenant stale run is not affected')
+
+  // abandonStaleRuns with a custom olderThanMs: threshold of 1h abandons the 30-min-old run too
+  db.tables.get('integration_runs').find(r => r.id === 'fresh_run').status = 'running'
+  const abandonedShortWindow = await registry.abandonStaleRuns({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    olderThanMs: 15 * 60 * 1000, // 15 minutes
+  })
+  assert.equal(abandonedShortWindow.length, 1, 'short threshold abandons the 30-min-old run')
+  assert.equal(abandonedShortWindow[0].id, 'fresh_run', 'correct run abandoned with short threshold')
+
+  console.log('✓ pipelines: registry + endpoint + field-mapping + run-ledger + concurrent-guard + stale-run-cleanup tests passed')
 }
 
 main().catch((err) => {
