@@ -8,6 +8,20 @@ import {
 import { db } from './db'
 import { createCoreBackendMigrationProvider } from './migration-provider'
 
+type MigrationCommand = 'latest' | 'list' | 'rollback' | 'reset' | 'help'
+
+const recognizedFlags = new Set(['latest', 'list', 'rollback', 'reset', 'help', 'h'])
+
+function parseCommand(argv: string[]): MigrationCommand {
+  for (const arg of argv) {
+    const flag = arg.replace(/^--/, '')
+    if (!recognizedFlags.has(flag)) continue
+    if (flag === 'h') return 'help'
+    return flag as MigrationCommand
+  }
+  return 'latest'
+}
+
 function buildMigrator(): Migrator {
   return new Migrator({
     db,
@@ -104,16 +118,15 @@ Notes:
 }
 
 async function main(): Promise<void> {
-  const argv = process.argv.slice(2)
-  const flags = new Set(argv.map((arg) => arg.replace(/^--/, '')))
+  const command = parseCommand(process.argv.slice(2))
 
-  if (flags.has('help') || flags.has('h')) {
+  if (command === 'help') {
     printHelp()
     return
   }
-  if (flags.has('list')) return commandList()
-  if (flags.has('rollback')) return commandRollback()
-  if (flags.has('reset')) return commandReset()
+  if (command === 'list') return commandList()
+  if (command === 'rollback') return commandRollback()
+  if (command === 'reset') return commandReset()
   return commandLatest()
 }
 
