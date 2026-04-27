@@ -22,6 +22,10 @@ class PipelineRunnerError extends Error {
 // known truthy variants enable the flag and unknown values fail loudly.
 const TRUE_BOOLEAN_TEXT = new Set(['true', '1', 'yes', 'y', 'on', '是', '启用', '开启'])
 const FALSE_BOOLEAN_TEXT = new Set(['false', '0', 'no', 'n', 'off', '否', '禁用', '关闭'])
+const DEFAULT_BATCH_SIZE = 1000
+const MAX_BATCH_SIZE = 10000
+const DEFAULT_MAX_PAGES = 100
+const MAX_RUN_PAGES = 10000
 
 function coerceTruthyFlag(value, field) {
   if (value === undefined || value === null) return false
@@ -41,6 +45,13 @@ function coerceTruthyFlag(value, field) {
     if (FALSE_BOOLEAN_TEXT.has(normalized)) return false
   }
   throw new PipelineRunnerError(`${field} must be a boolean, 0/1, or boolean-like string`, { field })
+}
+
+function normalizePositiveIntegerOption(value, { defaultValue, max }) {
+  if (value === undefined || value === null || value === '') return defaultValue
+  const numeric = Number(value)
+  if (!Number.isInteger(numeric) || numeric <= 0) return defaultValue
+  return Math.min(numeric, max)
 }
 
 function requireDependency(deps, name, methods) {
@@ -399,15 +410,17 @@ function createPipelineRunner(deps = {}) {
       const currentWatermark = mode === 'incremental'
         ? await watermarkStore.getWatermark(context.pipeline.id)
         : null
-      const batchSize = Number.isInteger(context.pipeline.options?.batchSize)
-        ? context.pipeline.options.batchSize
-        : 1000
+      const batchSize = normalizePositiveIntegerOption(context.pipeline.options?.batchSize, {
+        defaultValue: DEFAULT_BATCH_SIZE,
+        max: MAX_BATCH_SIZE,
+      })
       const effectiveBatchSize = dryRun && Number.isInteger(input.sampleLimit) && input.sampleLimit > 0
         ? Math.min(input.sampleLimit, batchSize)
         : batchSize
-      const maxPages = Number.isInteger(context.pipeline.options?.maxPages)
-        ? context.pipeline.options.maxPages
-        : 100
+      const maxPages = normalizePositiveIntegerOption(context.pipeline.options?.maxPages, {
+        defaultValue: DEFAULT_MAX_PAGES,
+        max: MAX_RUN_PAGES,
+      })
       let cursor = input.cursor || null
       let page = 0
       let lastSuccessfulWatermark = null
