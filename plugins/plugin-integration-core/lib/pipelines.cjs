@@ -21,6 +21,7 @@ const VALID_TRIGGERS = new Set(['cron', 'manual', 'api', 'replay'])
 const TERMINAL_RUN_STATUSES = new Set(['succeeded', 'partial', 'failed', 'cancelled'])
 const SOURCE_ROLES = new Set(['source', 'bidirectional'])
 const TARGET_ROLES = new Set(['target', 'bidirectional'])
+const RUNNING_RUN_UNIQUE_INDEX = 'uniq_integration_runs_one_running_per_pipeline'
 
 class PipelineValidationError extends Error {
   constructor(message, details = {}) {
@@ -323,6 +324,28 @@ function pipelineRunLockKey(input) {
   return `${input.tenantId}\u0000${input.workspaceId || ''}\u0000${input.pipelineId}`
 }
 
+function uniqueViolationMetadata(error) {
+  let current = error
+  while (current && typeof current === 'object') {
+    if (current.code === '23505') {
+      return {
+        constraint: current.constraint,
+        message: current.message || '',
+        detail: current.detail || '',
+      }
+    }
+    current = current.cause
+  }
+  return null
+}
+
+function isRunningRunUniqueViolation(error) {
+  const meta = uniqueViolationMetadata(error)
+  if (!meta) return false
+  const text = `${meta.constraint || ''}\n${meta.message}\n${meta.detail}`
+  return text.includes(RUNNING_RUN_UNIQUE_INDEX)
+}
+
 async function selectPipeline(db, input) {
   if (input.id) {
     return db.selectOne(PIPELINES_TABLE, {
@@ -333,6 +356,22 @@ async function selectPipeline(db, input) {
   return db.selectOne(PIPELINES_TABLE, {
     ...scopeWhere(input),
     name: input.name,
+  })
+}
+
+async function conflictFromRunningRun(db, normalized, details = {}) {
+  const runningRows = unwrapRows(await db.select(RUNS_TABLE, {
+    where: {
+      ...scopeWhere(normalized),
+      pipeline_id: normalized.pipelineId,
+      status: 'running',
+    },
+    limit: 1,
+  }))
+  return new PipelineConflictError('pipeline already has a run in progress', {
+    pipelineId: normalized.pipelineId,
+    runningRunId: runningRows[0]?.id || null,
+    ...details,
   })
 }
 
@@ -525,9 +564,8 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
           status: pipeline.status,
         })
       }
-      // Reject concurrent runs: at most one run may be in the 'running' state per pipeline at a time.
-      // The keyed in-process lock serializes check+insert for single-node PoC deployments; multi-node
-      // deployments still need a DB-level advisory/unique lock follow-up.
+      // Reject concurrent runs early for a friendly error. The DB partial unique
+      // index remains the authoritative cross-process guard for true races.
       const runningRows = unwrapRows(await db.select(RUNS_TABLE, {
         where: {
           ...scopeWhere(normalized),
@@ -560,8 +598,15 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
         error_summary: normalized.errorSummary,
         details: normalized.details,
       }
-      const rows = unwrapRows(await db.insertOne(RUNS_TABLE, insertRow))
-      return rowToPipelineRun(rows[0] || insertRow)
+      try {
+        const rows = unwrapRows(await db.insertOne(RUNS_TABLE, insertRow))
+        return rowToPipelineRun(rows[0] || insertRow)
+      } catch (error) {
+        if (isRunningRunUniqueViolation(error)) {
+          throw await conflictFromRunningRun(db, normalized, { constraint: RUNNING_RUN_UNIQUE_INDEX })
+        }
+        throw error
+      }
     })
   }
 
@@ -669,6 +714,7 @@ module.exports = {
     VALID_STATUSES,
     VALID_RUN_STATUSES,
     VALID_TRIGGERS,
+    RUNNING_RUN_UNIQUE_INDEX,
     normalizePipelineInput,
     normalizeFieldMappings,
     normalizeCreateRunInput,
@@ -677,5 +723,6 @@ module.exports = {
     rowToFieldMapping,
     rowToPipelineRun,
     pipelineRunLockKey,
+    isRunningRunUniqueViolation,
   },
 }

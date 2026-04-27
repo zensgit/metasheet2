@@ -7,6 +7,7 @@ const {
   PipelineNotFoundError,
   PipelineValidationError,
   PipelineConflictError,
+  __internals,
 } = require(path.join(__dirname, '..', 'lib', 'pipelines.cjs'))
 
 function createIdGenerator() {
@@ -444,6 +445,58 @@ async function main() {
     assert.ok(rejected && rejected.reason instanceof PipelineConflictError, 'second concurrent run sees conflict')
     const runningRows = raceDb.tables.get('integration_runs').filter((row) => row.pipeline_id === 'pipe_race' && row.status === 'running')
     assert.equal(runningRows.length, 1, 'only one running row is inserted for the pipeline')
+  }
+
+  // A DB-level unique violation from a different process is also normalized to
+  // PipelineConflictError. This covers the distributed race that an in-process
+  // lock cannot serialize.
+  {
+    const dbRace = createMockDb()
+    dbRace.seed('integration_pipelines', [{
+      id: 'pipe_db_race',
+      tenant_id: 'tenant_1',
+      workspace_id: null,
+      status: 'active',
+    }])
+    const originalInsert = dbRace.insertOne.bind(dbRace)
+    const uniqueViolation = new Error(`duplicate key value violates unique constraint "${__internals.RUNNING_RUN_UNIQUE_INDEX}"`)
+    uniqueViolation.code = '23505'
+    uniqueViolation.constraint = __internals.RUNNING_RUN_UNIQUE_INDEX
+    assert.equal(__internals.isRunningRunUniqueViolation(uniqueViolation), true,
+      'running-run unique violation is recognized by constraint name')
+
+    dbRace.insertOne = async (table, row) => {
+      if (table === 'integration_runs') {
+        dbRace.seed('integration_runs', [{
+          id: 'run_other_node',
+          tenant_id: row.tenant_id,
+          workspace_id: row.workspace_id,
+          pipeline_id: row.pipeline_id,
+          status: 'running',
+          started_at: new Date().toISOString(),
+        }])
+        throw uniqueViolation
+      }
+      return originalInsert(table, row)
+    }
+    const dbRaceRegistry = createPipelineRegistry({
+      db: dbRace,
+      idGenerator: createIdGenerator(),
+    })
+    const dbConflict = await dbRaceRegistry.createPipelineRun({
+      tenantId: 'tenant_1',
+      workspaceId: null,
+      pipelineId: 'pipe_db_race',
+      mode: 'manual',
+      triggeredBy: 'api',
+      status: 'running',
+      startedAt: new Date().toISOString(),
+    }).catch((error) => error)
+    assert.ok(dbConflict instanceof PipelineConflictError, 'DB unique violation maps to PipelineConflictError')
+    assert.equal(dbConflict.details.runningRunId, 'run_other_node',
+      'conflict details include the run inserted by the other process')
+    assert.equal(dbConflict.details.constraint, __internals.RUNNING_RUN_UNIQUE_INDEX,
+      'conflict details include the enforcing DB constraint')
   }
 
   // --- 10. abandonStaleRuns -----------------------------------------------

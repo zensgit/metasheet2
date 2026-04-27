@@ -70,13 +70,46 @@ if (runningRows.length > 0) {
 **Why here and not in `runPipeline`:** `createPipelineRun` is the DB-authoritative
 gate. Checking in `runPipeline` before calling `startRun` would have a TOCTOU
 window — two callers check simultaneously, both see no running run, both insert.
-This PR places the guard at the insert point and wraps the check+insert critical
-section in an in-process `(tenantId, workspaceId, pipelineId)` lock. That closes
-the async race for the single-node PoC runtime while keeping the invariant owned
-by `createPipelineRun`, where the `disabled` pipeline check also lives. A true
-distributed lock (advisory PG lock, `SELECT ... FOR UPDATE SKIP LOCKED`, or a
-partial unique index) would close the window across multiple Node processes and
-is left for production hardening.
+This PR places the friendly guard at the insert point and wraps the check+insert
+critical section in an in-process `(tenantId, workspaceId, pipelineId)` lock.
+That closes the async race for the single-node PoC runtime while keeping the
+invariant owned by `createPipelineRun`, where the `disabled` pipeline check also
+lives.
+
+### DB-authoritative partial unique index (migration 058)
+
+The in-process lock is not enough for a multi-node deployment: two separate Node
+processes can still both snapshot "no running row" before either insert commits.
+Migration 058 makes the invariant database-authoritative:
+
+```sql
+WITH duplicate_running AS (...)
+UPDATE integration_runs
+SET status = 'failed',
+    finished_at = COALESCE(finished_at, NOW()),
+    error_summary = COALESCE(error_summary, 'abandoned: duplicate running run closed before unique guard migration')
+WHERE id IN (SELECT id FROM duplicate_running WHERE duplicate_rank > 1);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_integration_runs_one_running_per_pipeline
+  ON integration_runs (tenant_id, COALESCE(workspace_id, ''), pipeline_id)
+  WHERE status = 'running';
+```
+
+`COALESCE(workspace_id, '')` is required because PostgreSQL unique indexes treat
+`NULL` values as distinct. Without the expression, two `workspace_id IS NULL`
+running rows for the same tenant/pipeline would still be allowed.
+
+The pre-index cleanup keeps the earliest `running` row per
+`(tenant_id, workspace_id, pipeline_id)` and fails duplicate running rows with a
+clear `error_summary`. That makes the migration replayable on an environment
+where the old bug already produced duplicate run rows instead of failing during
+`CREATE UNIQUE INDEX`.
+
+`createPipelineRun` keeps the pre-insert read for the normal operator path. If a
+real race still reaches `db.insertOne`, PostgreSQL raises `23505` on
+`uniq_integration_runs_one_running_per_pipeline`; the registry catches that
+specific constraint and converts it to the same `PipelineConflictError` shape,
+including `runningRunId` when the blocking row is visible.
 
 **Error fields in details:**
 - `pipelineId` — which pipeline is blocked
@@ -123,18 +156,17 @@ Also future-proofs any other `*ConflictError` class in the codebase.
 
 | File | Change |
 |---|---|
-| `lib/pipelines.cjs` | `PipelineConflictError` class; in-process keyed lock + guard in `createPipelineRun`; `abandonStaleRuns` function; export both |
+| `packages/core-backend/migrations/058_integration_runs_running_unique.sql` | duplicate-running cleanup + DB partial unique index for one `running` row per tenant/workspace/pipeline |
+| `lib/pipelines.cjs` | `PipelineConflictError` class; in-process keyed lock + friendly guard in `createPipelineRun`; DB unique-conflict normalization; `abandonStaleRuns` function; export both |
 | `lib/http-routes.cjs` | `inferHttpStatus`: add `Conflict` → 409 |
-| `__tests__/pipelines.test.cjs` | 6 new scenarios (conflict guard + in-process race + stale cleanup) |
+| `__tests__/pipelines.test.cjs` | conflict guard + in-process race + DB unique-conflict normalization + stale cleanup |
 | `__tests__/http-routes.test.cjs` | 1 new scenario (409 response shape for conflict) |
+| `__tests__/migration-sql.test.cjs` | validates migration 058 partial unique index shape |
 | this design doc | — |
 | matching verification doc | — |
 
 ## What this does NOT fix
 
-- **Distributed concurrent runs**: two Node processes on separate hosts can still
-  pass the guard simultaneously. The in-process lock closes the single-node async
-  race only. Production hardening should add a DB-level advisory/unique lock.
 - **Long-running legitimate runs blocked by strict threshold**: `olderThanMs` is
   configurable; callers that need > 4h runs should pass a larger value.
 - **Auto-wiring of `abandonStaleRuns`**: exported but not called anywhere yet.
