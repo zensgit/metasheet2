@@ -579,6 +579,77 @@ async function main() {
   assert.equal(replayError.details.reason, 'PAYLOAD_TRUNCATED')
   assert.equal(truncatedReplay.targetRows.size, 0, 'truncated replay is rejected before target write')
 
+  // --- 5b. markReplayed failure after successful replay does not throw ----
+  // If markReplayed fails (DB down at cleanup time), the replay already wrote to ERP.
+  // Throwing would cause the caller to retry → duplicate ERP write. Instead, return
+  // a structured result with a warning so the caller knows the bookkeeping is inconsistent.
+  {
+    const markFailDb = createMockDb()
+    const realDeadLetterStore = createDeadLetterStore({ db: markFailDb, idGenerator: () => 'dl_mark_fail' })
+    await realDeadLetterStore.createDeadLetter({
+      tenantId: 'tenant_1',
+      workspaceId: null,
+      runId: 'run_original',
+      pipelineId: 'pipe_1',
+      sourcePayload: { code: 'c-mark', revision: 'r1', qty: '5', name: 'Screw', updatedAt: '2026-04-24T04:00:00.000Z' },
+      transformedPayload: null,
+      errorCode: 'VALIDATION_FAILED',
+      errorMessage: 'original failure',
+    })
+    // Wrap the store: getDeadLetter works, markReplayed always throws
+    const throwingMarkStore = {
+      ...realDeadLetterStore,
+      async markReplayed() {
+        throw new Error('DB connection lost — cannot mark dead letter replayed')
+      },
+    }
+    const markFailTargetRows = new Map()
+    const markFailRunner = createPipelineRunner({
+      pipelineRegistry: createPipelineRegistry(
+        { ...createRunnerHarness({ sourceRecords: [] }).pipeline },
+        markFailDb
+      ),
+      externalSystemRegistry: createExternalSystemRegistry(),
+      adapterRegistry: createAdapterRegistry()
+        .registerAdapter('mock-source', () => ({
+          async testConnection() { return { ok: true } },
+          async listObjects() { return [] },
+          async getSchema() { return { fields: [] } },
+          async read() { return createReadResult({ records: [] }) },
+          async upsert() { throw new Error('source upsert should not be called') },
+        }))
+        .registerAdapter('mock-target', () => ({
+          async testConnection() { return { ok: true } },
+          async listObjects() { return [] },
+          async getSchema() { return { fields: [] } },
+          async read() { return createReadResult({ records: [] }) },
+          async upsert(input) {
+            for (const record of input.records) {
+              markFailTargetRows.set(record._integration_idempotency_key, record)
+            }
+            return createUpsertResult({ written: input.records.length, skipped: 0, results: input.records.map((r) => ({ key: r._integration_idempotency_key })) })
+          },
+        })),
+      deadLetterStore: throwingMarkStore,
+      watermarkStore: createWatermarkStore({ db: markFailDb }),
+      runLogger: createRunLogger({ pipelineRegistry: createPipelineRegistry(
+        { ...createRunnerHarness({ sourceRecords: [] }).pipeline },
+        markFailDb
+      ) }),
+    })
+    const markFailResult = await markFailRunner.replayDeadLetter({
+      tenantId: 'tenant_1',
+      workspaceId: null,
+      id: 'dl_mark_fail',
+    })
+    assert.equal(markFailTargetRows.size, 1, 'ERP write succeeded despite markReplayed failure')
+    assert.ok(markFailResult.warning, 'result includes a warning when markReplayed fails')
+    assert.equal(markFailResult.warning.code, 'MARK_REPLAYED_FAILED', 'warning code identifies the failure')
+    assert.match(markFailResult.warning.message, /DB connection lost/, 'warning message includes original error')
+    assert.equal(markFailResult.deadLetter.status, 'open', 'dead letter status remains open when marking failed')
+    assert.ok(markFailResult.replay.metrics.rowsWritten >= 1, 'replay metrics confirm write happened')
+  }
+
   // --- 6. Dead-letter status guard — already-replayed letter is rejected --
   // The first replay in scenario 5 left dl_1 in status='replayed'. A second
   // replay attempt must throw before any ERP call happens.
