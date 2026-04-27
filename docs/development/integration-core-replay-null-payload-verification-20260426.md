@@ -36,7 +36,7 @@ All 5 variants inject a DB row directly into `db.tables.get('integration_dead_le
 
 ## Regression Guard
 
-After merging current `origin/main` through the finishRun success-warning guard, all 18 `plugin-integration-core` test files pass:
+After merging current `origin/main` through the dry-run sampleLimit cap, all 18 `plugin-integration-core` test files pass:
 
 ```
 ✓ credential-store        ✓ adapter-contracts       ✓ http-adapter
@@ -51,4 +51,4 @@ After merging current `origin/main` through the finishRun success-warning guard,
 
 Branch: `codex/integration-replay-null-payload-20260426`  
 Worktree: `/private/tmp/ms2-replay-null-payload`  
-Base: `4ba8d3d50` (origin/main after PR #1200)
+Base: `33a4078bb` (origin/main after PR #1201)
