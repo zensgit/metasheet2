@@ -341,6 +341,21 @@ function createPipelineRunner(deps = {}) {
     const started = clock()
     const metrics = createMetrics()
     const preview = dryRun ? { records: [], errors: [] } : null
+
+    // Best-effort: recover any runs left stuck in 'running' by a previous crash.
+    // Wrapped in try-catch so a transient DB failure here never blocks the main run.
+    if (typeof pipelineRegistry.abandonStaleRuns === 'function') {
+      try {
+        await pipelineRegistry.abandonStaleRuns({
+          tenantId: context.tenantId,
+          workspaceId: context.workspaceId,
+          pipelineId: context.pipeline.id,
+        })
+      } catch {
+        // Non-fatal — stale-run cleanup is best-effort; proceed with the pipeline run.
+      }
+    }
+
     let run = await runLogger.startRun({
       tenantId: context.tenantId,
       workspaceId: context.workspaceId,
