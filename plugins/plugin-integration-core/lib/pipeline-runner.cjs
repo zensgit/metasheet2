@@ -251,6 +251,31 @@ function createPipelineRunner(deps = {}) {
 
   async function processRecord({ context, run, sourceRecord, cleanRecords, metrics, preview, dryRun }) {
     metrics.rowsRead += 1
+    if (sourceRecord === null || sourceRecord === undefined ||
+        typeof sourceRecord !== 'object' || Array.isArray(sourceRecord)) {
+      metrics.rowsFailed += 1
+      const failure = {
+        tenantId: context.tenantId,
+        workspaceId: context.workspaceId,
+        runId: run.id,
+        pipelineId: context.pipeline.id,
+        sourcePayload: sourceRecord === null || sourceRecord === undefined
+          ? { _adapterReturnedNullRecord: true }
+          : sanitizeIntegrationPayload({ _adapterReturnedNonObject: true, value: sourceRecord }),
+        transformedPayload: null,
+        errorCode: 'INVALID_SOURCE_RECORD',
+        errorMessage: `adapter returned ${
+          sourceRecord === null ? 'null'
+          : sourceRecord === undefined ? 'undefined'
+          : Array.isArray(sourceRecord) ? 'array'
+          : typeof sourceRecord
+        } instead of a record object`,
+        dryRun,
+      }
+      await writeDeadLetter(failure)
+      if (preview) preview.errors.push({ ...failure, dryRun: undefined })
+      return
+    }
     const transformed = transformRecord(sourceRecord, context.pipeline.fieldMappings || [])
     if (!transformed.ok) {
       metrics.rowsFailed += 1
