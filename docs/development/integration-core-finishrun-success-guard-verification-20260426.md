@@ -31,7 +31,7 @@ All scenarios use a fresh `buildRunner18` helper that creates a complete runner 
 
 ## Regression Guard
 
-After merging current `origin/main`, including stale-run cleanup, failed-run finalization, and replay bookkeeping guards, all 18 `plugin-integration-core` test files pass:
+After merging current `origin/main`, including stale-run cleanup, failed-run finalization, replay bookkeeping, and list offset guards, all 18 `plugin-integration-core` test files pass:
 
 ```
 ✓ adapter-contracts: registry + normalizer tests passed
