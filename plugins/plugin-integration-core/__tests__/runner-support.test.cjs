@@ -252,6 +252,49 @@ async function main() {
   assert.equal(runCalls[1][1].durationMs, 1500)
   assert.equal(runCalls.length, 2)
 
+  // --- run-log: errorSummary length cap ---------------------------------
+  {
+    const { MAX_ERROR_SUMMARY_LENGTH } = require(path.join(__dirname, '..', 'lib', 'run-log.cjs'))
+    const truncCalls = []
+    const truncLogger = createRunLog({
+      pipelineRegistry: {
+        async createPipelineRun(input) { return { id: 'run_t', ...input } },
+        async updatePipelineRun(input) { truncCalls.push(input); return { id: input.id, status: input.status } },
+      },
+      clock: () => '2026-04-27T00:00:00.000Z',
+    })
+    const truncRun = await truncLogger.start({
+      tenantId: 'tenant_1', pipelineId: 'pipe_t', mode: 'manual', triggeredBy: 'manual',
+    })
+
+    // Long error message via failRun → truncated with [truncated] suffix
+    const hugeMessage = 'X'.repeat(MAX_ERROR_SUMMARY_LENGTH * 5)
+    await truncLogger.failRun(truncRun, new Error(hugeMessage), {
+      rowsRead: 0, rowsCleaned: 0, rowsWritten: 0, rowsFailed: 0,
+    })
+    const failCall = truncCalls[truncCalls.length - 1]
+    assert.equal(failCall.errorSummary.length, MAX_ERROR_SUMMARY_LENGTH,
+      `errorSummary capped at MAX_ERROR_SUMMARY_LENGTH (${MAX_ERROR_SUMMARY_LENGTH})`)
+    assert.ok(failCall.errorSummary.endsWith('… [truncated]'),
+      'truncated errorSummary ends with [truncated] suffix')
+
+    // Long extra.errorSummary via finishRun directly → also truncated
+    await truncLogger.finishRun(truncRun, {}, 'failed', { errorSummary: hugeMessage })
+    const finishCall = truncCalls[truncCalls.length - 1]
+    assert.equal(finishCall.errorSummary.length, MAX_ERROR_SUMMARY_LENGTH,
+      'finishRun extra.errorSummary also capped')
+
+    // Short message → unchanged, no truncation suffix
+    await truncLogger.failRun(truncRun, new Error('connection refused'), {})
+    const shortCall = truncCalls[truncCalls.length - 1]
+    assert.equal(shortCall.errorSummary, 'connection refused', 'short messages pass through unchanged')
+
+    // null/undefined errorSummary → unchanged (passes through, DB layer handles null)
+    await truncLogger.finishRun(truncRun, {}, 'succeeded', {})
+    const nullCall = truncCalls[truncCalls.length - 1]
+    assert.equal(nullCall.errorSummary, undefined, 'absent errorSummary passes through as undefined')
+  }
+
   console.log('runner-support: idempotency/watermark/dead-letter/run-log tests passed')
 }
 

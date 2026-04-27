@@ -1,5 +1,19 @@
 'use strict'
 
+// Cap on the error_summary column so adapter errors that include full HTTP
+// response bodies or huge stack traces don't bloat the runs table. Long
+// summaries are truncated with a clear suffix so downstream tools can detect
+// truncation without re-reading the original row.
+const MAX_ERROR_SUMMARY_LENGTH = 2000
+const TRUNCATION_SUFFIX = '… [truncated]'
+
+function truncateErrorSummary(value) {
+  if (value === undefined || value === null) return value
+  const str = typeof value === 'string' ? value : String(value)
+  if (str.length <= MAX_ERROR_SUMMARY_LENGTH) return str
+  return str.slice(0, MAX_ERROR_SUMMARY_LENGTH - TRUNCATION_SUFFIX.length) + TRUNCATION_SUFFIX
+}
+
 function nowIso() {
   return new Date().toISOString()
 }
@@ -65,7 +79,7 @@ function createRunLogger({ pipelineRegistry, clock = nowIso } = {}) {
       rowsFailed: normalizedMetrics.rowsFailed,
       finishedAt,
       durationMs,
-      errorSummary: extra.errorSummary,
+      errorSummary: truncateErrorSummary(extra.errorSummary),
       details: {
         ...(run.details || {}),
         ...(extra.details || {}),
@@ -76,7 +90,9 @@ function createRunLogger({ pipelineRegistry, clock = nowIso } = {}) {
   async function failRun(run, error, metrics = {}, extra = {}) {
     return finishRun(run, metrics, 'failed', {
       ...extra,
-      errorSummary: extra.errorSummary || (error && error.message) || String(error),
+      errorSummary: truncateErrorSummary(
+        extra.errorSummary || (error && error.message) || String(error),
+      ),
     })
   }
 
@@ -91,6 +107,7 @@ function createRunLogger({ pipelineRegistry, clock = nowIso } = {}) {
 }
 
 module.exports = {
+  MAX_ERROR_SUMMARY_LENGTH,
   createRunLog: createRunLogger,
   createRunLogger,
   __internals: {
@@ -98,5 +115,6 @@ module.exports = {
     normalizeMetrics,
     nowIso,
     toIso,
+    truncateErrorSummary,
   },
 }
