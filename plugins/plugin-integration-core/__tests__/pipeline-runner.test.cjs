@@ -1179,6 +1179,52 @@ async function main() {
     assert.ok(messages.some((m) => m.includes('string')), 'string reported')
   }
 
+  // --- 21. invalid runner paging options fall back / cap safely ----------
+  {
+    const invalidOptionLimits = []
+    const invalidOptionHarness = createRunnerHarness({
+      sourceRecords: [],
+      pipelineOverrides: { options: { batchSize: 0, maxPages: 0 } },
+      sourceRead: async (input) => {
+        invalidOptionLimits.push(input.limit)
+        return createReadResult({
+          records: [
+            { code: 'fallback-1', revision: 'r1', qty: '1', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+          ],
+          done: true,
+          nextCursor: null,
+        })
+      },
+    })
+    const invalidOptionResult = await invalidOptionHarness.runner.runPipeline({
+      tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'incremental', triggeredBy: 'manual',
+    })
+    assert.equal(invalidOptionLimits[0], 1000, 'batchSize=0 falls back to default batch size')
+    assert.equal(invalidOptionResult.metrics.rowsRead, 1, 'maxPages=0 falls back instead of producing a silent no-op')
+    assert.equal(invalidOptionResult.run.details.pagesProcessed, 1, 'fallback maxPages allows one page to run')
+    assert.equal(invalidOptionHarness.targetRows.size, 1, 'valid record still writes with invalid option fallbacks')
+
+    const hugeOptionLimits = []
+    const hugeOptionHarness = createRunnerHarness({
+      sourceRecords: [],
+      pipelineOverrides: { options: { batchSize: 999999, maxPages: 1 } },
+      sourceRead: async (input) => {
+        hugeOptionLimits.push(input.limit)
+        return createReadResult({
+          records: [
+            { code: 'cap-1', revision: 'r1', qty: '1', name: 'Nut', updatedAt: '2026-04-24T02:00:00.000Z' },
+          ],
+          done: true,
+          nextCursor: null,
+        })
+      },
+    })
+    await hugeOptionHarness.runner.runPipeline({
+      tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'incremental', triggeredBy: 'manual',
+    })
+    assert.equal(hugeOptionLimits[0], 10000, 'huge batchSize is capped before adapter read()')
+  }
+
   console.log('✓ pipeline-runner: cleanse/idempotency/incremental E2E tests passed')
 }
 
