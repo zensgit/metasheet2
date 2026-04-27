@@ -744,6 +744,56 @@ async function testTenantGuards() {
   assert.equal(blankContext.body.error.code, 'TENANT_CONTEXT_REQUIRED')
 }
 
+async function testSampleLimitCap() {
+  const { MAX_SAMPLE_LIMIT } = httpRoutes
+  assert.equal(typeof MAX_SAMPLE_LIMIT, 'number', 'MAX_SAMPLE_LIMIT is exported')
+
+  // Huge sampleLimit on /run is clamped to MAX_SAMPLE_LIMIT
+  const { calls: runCalls, services: runServices } = createMockServices()
+  const { routes: runRoutes } = mountRoutes(runServices)
+  const hugeLimit = String(MAX_SAMPLE_LIMIT + 999999)
+  await invoke(runRoutes, 'POST', '/api/integration/pipelines/:id/run', {
+    user: WRITE_USER,
+    params: { id: 'pipe_1' },
+    body: { workspaceId: 'workspace_1', sampleLimit: hugeLimit },
+  })
+  assert.equal(findCall(runCalls, 'runPipeline')[1].sampleLimit, MAX_SAMPLE_LIMIT,
+    '/run: huge sampleLimit clamped to MAX_SAMPLE_LIMIT')
+
+  // Huge sampleLimit on /dry-run is also clamped
+  const { calls: dryCalls, services: dryServices } = createMockServices()
+  const { routes: dryRoutes } = mountRoutes(dryServices)
+  await invoke(dryRoutes, 'POST', '/api/integration/pipelines/:id/dry-run', {
+    user: WRITE_USER,
+    params: { id: 'pipe_1' },
+    body: { workspaceId: 'workspace_1', sampleLimit: hugeLimit },
+  })
+  assert.equal(findCall(dryCalls, 'runPipeline')[1].sampleLimit, MAX_SAMPLE_LIMIT,
+    '/dry-run: huge sampleLimit clamped to MAX_SAMPLE_LIMIT')
+
+  // sampleLimit = 0 → stripped (undefined)
+  const { calls: zeroCalls, services: zeroServices } = createMockServices()
+  const { routes: zeroRoutes } = mountRoutes(zeroServices)
+  await invoke(zeroRoutes, 'POST', '/api/integration/pipelines/:id/dry-run', {
+    user: WRITE_USER,
+    params: { id: 'pipe_1' },
+    body: { workspaceId: 'workspace_1', sampleLimit: 0 },
+  })
+  assert.equal('sampleLimit' in findCall(zeroCalls, 'runPipeline')[1], false,
+    'sampleLimit=0 is stripped from input (publicRunInput deletes falsy keys)')
+
+  // Small valid sampleLimit passes through unchanged
+  const { calls: smallCalls, services: smallServices } = createMockServices()
+  const { routes: smallRoutes } = mountRoutes(smallServices)
+  await invoke(smallRoutes, 'POST', '/api/integration/pipelines/:id/dry-run', {
+    user: WRITE_USER,
+    params: { id: 'pipe_1' },
+    body: { workspaceId: 'workspace_1', sampleLimit: 5 },
+  })
+  assert.equal(findCall(smallCalls, 'runPipeline')[1].sampleLimit, 5,
+    'small valid sampleLimit passes through unchanged')
+}
+
 async function testListOffsetCap() {
   const { MAX_LIST_OFFSET } = httpRoutes
   assert.equal(typeof MAX_LIST_OFFSET, 'number', 'MAX_LIST_OFFSET is exported')
@@ -814,6 +864,7 @@ async function main() {
   await testRunAndDeadLetterRoutes()
   await testErrorResponseShape()
   await testTenantGuards()
+  await testSampleLimitCap()
   await testListOffsetCap()
 
   console.log('http-routes: REST auth/list/upsert/run/dry-run/replay tests passed')
