@@ -712,6 +712,79 @@ async function main() {
     assert.ok(result.run, `allowInactive: ${JSON.stringify(truthyVariant)} lets the inactive pipeline run`)
   }
 
+  // --- 17. abandonStaleRuns called before run and is best-effort ----------
+  {
+    const staleDb = createMockDb()
+    const stalePipeline = {
+      id: 'pipe_1', tenantId: 'tenant_1', workspaceId: null, projectId: 'project_1',
+      sourceSystemId: 'source_1', sourceObject: 'materials',
+      targetSystemId: 'target_1', targetObject: 'BD_MATERIAL',
+      mode: 'manual', status: 'active',
+      idempotencyKeyFields: ['code', 'revision'],
+      options: { batchSize: 100 },
+      fieldMappings: [
+        { sourceField: 'code', targetField: 'FNumber', transform: ['trim', 'upper'], validation: [{ type: 'required' }] },
+        { sourceField: 'qty', targetField: 'FQty', transform: { fn: 'toNumber' }, validation: [{ type: 'min', value: 1 }] },
+        { sourceField: 'name', targetField: 'FName', transform: { fn: 'trim' }, validation: [{ type: 'required' }] },
+      ],
+    }
+    const staleSourceRecord = { code: 'a-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' }
+    const staleAdapterRegistry = createAdapterRegistry()
+      .registerAdapter('mock-source', () => ({
+        async testConnection() { return { ok: true } },
+        async listObjects() { return [] },
+        async getSchema() { return { fields: [] } },
+        async read() { return createReadResult({ records: [staleSourceRecord] }) },
+        async upsert() { throw new Error('should not upsert on source') },
+      }))
+      .registerAdapter('mock-target', () => ({
+        async testConnection() { return { ok: true } },
+        async listObjects() { return [] },
+        async getSchema() { return { fields: [] } },
+        async read() { return createReadResult({ records: [] }) },
+        async upsert(input) { return createUpsertResult({ written: input.records.length, skipped: 0, results: [] }) },
+      }))
+
+    function buildRunner(registryExtension = {}) {
+      const registry = { ...createPipelineRegistry(stalePipeline, staleDb), ...registryExtension }
+      return createPipelineRunner({
+        pipelineRegistry: registry,
+        externalSystemRegistry: createExternalSystemRegistry(),
+        adapterRegistry: staleAdapterRegistry,
+        deadLetterStore: createDeadLetterStore({ db: staleDb }),
+        watermarkStore: createWatermarkStore({ db: staleDb }),
+        runLogger: createRunLogger({ pipelineRegistry: registry }),
+      })
+    }
+
+    // 17a: abandonStaleRuns is called with correct tenant/pipeline context
+    const abandonCalls = []
+    const runnerWithAbandon = buildRunner({
+      async abandonStaleRuns(input) { abandonCalls.push(input); return [] },
+    })
+    await runnerWithAbandon.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'manual', triggeredBy: 'api' })
+    assert.equal(abandonCalls.length, 1, 'abandonStaleRuns called once before run')
+    assert.equal(abandonCalls[0].tenantId, 'tenant_1', 'abandonStaleRuns receives tenantId')
+    assert.equal(abandonCalls[0].pipelineId, 'pipe_1', 'abandonStaleRuns receives pipelineId')
+
+    // 17b: abandonStaleRuns throws → pipeline still runs (best-effort protection)
+    const resilientRunner = buildRunner({
+      async abandonStaleRuns() { throw new Error('DB connection lost during stale-run cleanup') },
+    })
+    const resilientResult = await resilientRunner.runPipeline({
+      tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'manual', triggeredBy: 'api',
+    })
+    assert.ok(resilientResult.run, 'pipeline run succeeds even when abandonStaleRuns throws')
+    assert.equal(resilientResult.metrics.rowsRead, 1, 'pipeline reads source despite cleanup failure')
+
+    // 17c: registry without abandonStaleRuns (typeof check) → no TypeError
+    const plainRunner = buildRunner()
+    const plainResult = await plainRunner.runPipeline({
+      tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'manual', triggeredBy: 'api',
+    })
+    assert.ok(plainResult.run, 'pipeline runs fine when registry has no abandonStaleRuns')
+  }
+
   console.log('✓ pipeline-runner: cleanse/idempotency/incremental E2E tests passed')
 }
 

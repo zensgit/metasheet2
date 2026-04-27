@@ -638,6 +638,28 @@ async function testErrorResponseShape() {
     query: { workspaceId: 'workspace_1' },
   })
   assert.equal(notFoundRes.statusCode, 404)
+
+  // PipelineConflictError (thrown by concurrent-run guard) maps to 409
+  const conflictError = new Error('pipeline already has a run in progress')
+  conflictError.name = 'PipelineConflictError'
+  conflictError.details = { pipelineId: 'pipe_1', runningRunId: 'run_existing' }
+  const { services: conflictServices } = createMockServices({
+    pipelineRunner: {
+      async runPipeline() {
+        throw conflictError
+      },
+    },
+  })
+  const { routes: conflictRoutes } = mountRoutes(conflictServices)
+  const conflictRes = await invoke(conflictRoutes, 'POST', '/api/integration/pipelines/:id/run', {
+    user: WRITE_USER,
+    params: { id: 'pipe_1' },
+    body: { workspaceId: 'workspace_1' },
+  })
+  assert.equal(conflictRes.statusCode, 409)
+  assert.equal(conflictRes.body.ok, false)
+  assert.equal(conflictRes.body.error.code, 'PipelineConflictError')
+  assert.equal(conflictRes.body.error.details.runningRunId, 'run_existing')
 }
 
 async function testTenantGuards() {
