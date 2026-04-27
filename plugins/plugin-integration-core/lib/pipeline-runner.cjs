@@ -497,9 +497,16 @@ function createPipelineRunner(deps = {}) {
       }
     } catch (error) {
       metrics.durationMs = Math.max(0, clock() - started)
-      run = await runLogger.finishRun(run, metrics, 'failed', {
-        errorSummary: error.message || String(error),
-      })
+      // Best-effort: mark the run as failed. If finishRun itself fails (e.g. DB
+      // is down) we suppress that secondary error and still throw the original.
+      // The stuck 'running' run will be recovered by abandonStaleRuns on next trigger.
+      try {
+        run = await runLogger.finishRun(run, metrics, 'failed', {
+          errorSummary: error.message || String(error),
+        })
+      } catch {
+        // Secondary failure — original error takes priority
+      }
       throw new PipelineRunnerError('pipeline run failed', {
         run,
         cause: error.message || String(error),
