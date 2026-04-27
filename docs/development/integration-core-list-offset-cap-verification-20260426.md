@@ -35,19 +35,32 @@
 
 ## Regression Guard
 
-All 18 `plugin-integration-core` test files pass:
+After merging current `origin/main`, including PR #1192 list-limit cap and PR #1196 public run-mode validation, all 18 `plugin-integration-core` test files pass:
 
 ```
-✓ credential-store        ✓ adapter-contracts       ✓ http-adapter
-✓ db.cjs                 ✓ plm-yuantus-wrapper     ✓ pipelines
-✓ external-systems       ✓ transform-validator      ✓ runner-support
-✓ payload-redaction      ✓ pipeline-runner          ✓ http-routes
-✓ k3-wise-adapters       ✓ erp-feedback             ✓ e2e-plm-k3wise-writeback
-✓ staging-installer      ✓ migration-sql
+http-routes: REST auth/list/upsert/run/dry-run/replay tests passed
+✓ adapter-contracts: registry + normalizer tests passed
+✓ credential-store: 10 scenarios passed
+✓ db.cjs: all CRUD + boundary + injection tests passed
+✓ e2e-plm-k3wise-writeback: mock PLM -> K3 WISE -> feedback tests passed
+✓ erp-feedback: normalize + writer tests passed
+✓ external-systems: registry + credential boundary tests passed
+✓ http-adapter: config-driven read/upsert tests passed
+http-routes: REST auth/list/upsert/run/dry-run/replay tests passed
+✓ k3-wise-adapters: WebAPI, SQL Server channel, and auto-flag coercion tests passed
+✓ migration-sql: 057/058/059 integration migration structure passed
+✓ payload-redaction: sensitive key redaction tests passed
+✓ pipeline-runner: cleanse/idempotency/incremental E2E tests passed
+✓ pipelines: registry + endpoint + field-mapping + run-ledger + concurrent-guard + stale-run-cleanup tests passed
+✓ plm-yuantus-wrapper: source facade tests passed
+✓ plugin-runtime-smoke: all assertions passed
+runner-support: idempotency/watermark/dead-letter/run-log tests passed
+✓ staging-installer: all 7 assertions passed
+[pass] transform-validator: transform engine + validator tests passed
 ```
 
 ## Worktree
 
 Branch: `codex/integration-list-offset-cap-20260426`  
-Worktree: `/tmp/ms2-list-offset-cap`  
-Base: `202c10eff` (PR #1186, remote main)
+Worktree: `/private/tmp/ms2-list-offset-cap`  
+Base: current `origin/main` as of 2026-04-27
