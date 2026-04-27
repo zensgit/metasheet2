@@ -1,0 +1,54 @@
+{
+  "_comment": "Customer GATE answer template. Copy this file outside Git, fill in real values, run: node scripts/ops/integration-k3wise-live-poc-preflight.mjs --input <path>. All fields below are accepted as: real boolean true/false, string 'true'/'false'/'yes'/'no'/'on'/'off', Chinese 是/否/启用/禁用, or numeric 0/1. Unknown values throw with the field name. Strings/numbers/Chinese for productId / runId are also accepted.",
+  "tenantId": "tenant-test",
+  "workspaceId": "workspace-test",
+  "operator": "integration-admin",
+  "k3Wise": {
+    "version": "K3 WISE 15.x test",
+    "apiUrl": "https://k3.example.test/K3API/",
+    "acctId": "AIS_TEST",
+    "environment": "test",
+    "credentials": {
+      "username": "k3-test-user",
+      "password": "<fill-outside-git>"
+    },
+    "autoSubmit": false,
+    "autoAudit": false
+  },
+  "plm": {
+    "kind": "plm:yuantus-wrapper",
+    "readMethod": "api",
+    "baseUrl": "https://plm.example.test/",
+    "defaultProductId": "PRODUCT-TEST-001",
+    "credentials": {
+      "username": "plm-test-user",
+      "password": "<fill-outside-git>"
+    }
+  },
+  "sqlServer": {
+    "enabled": true,
+    "mode": "readonly",
+    "server": "10.0.0.10",
+    "database": "AIS_TEST",
+    "allowedTables": ["t_ICItem", "t_MeasureUnit"]
+  },
+  "rollback": {
+    "owner": "customer-k3-admin",
+    "strategy": "disable-test-records"
+  },
+  "bom": {
+    "enabled": true
+  },
+  "fieldMappings": {
+    "material": [
+      { "sourceField": "code", "targetField": "FNumber", "transform": { "type": "upperTrim" }, "validation": [{ "type": "required" }] },
+      { "sourceField": "name", "targetField": "FName", "validation": [{ "type": "required" }] },
+      { "sourceField": "uom", "targetField": "FBaseUnitID", "transform": { "type": "dictMap", "dictionary": "unit" } }
+    ],
+    "bom": [
+      { "sourceField": "parentCode", "targetField": "FParentItemNumber", "validation": [{ "type": "required" }] },
+      { "sourceField": "childCode", "targetField": "FChildItems[].FItemNumber", "validation": [{ "type": "required" }] },
+      { "sourceField": "quantity", "targetField": "FChildItems[].FQty", "transform": { "type": "toNumber" } }
+    ]
+  }
+}

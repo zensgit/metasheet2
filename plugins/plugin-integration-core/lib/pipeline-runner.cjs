@@ -14,6 +14,35 @@ class PipelineRunnerError extends Error {
   }
 }
 
+// REST API request fields like dryRun / allowInactive arrive over JSON, but
+// admin tools, curl one-liners, and form helpers commonly serialize booleans
+// as strings ("true" / "false") or numerics (0 / 1). Strict `=== true` on
+// dryRun would silently fall through to a LIVE run when the operator typed
+// dryRun: "true" in their request body. Coerce with a small allow-list so
+// known truthy variants enable the flag and unknown values fail loudly.
+const TRUE_BOOLEAN_TEXT = new Set(['true', '1', 'yes', 'y', 'on', '是', '启用', '开启'])
+const FALSE_BOOLEAN_TEXT = new Set(['false', '0', 'no', 'n', 'off', '否', '禁用', '关闭'])
+
+function coerceTruthyFlag(value, field) {
+  if (value === undefined || value === null) return false
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new PipelineRunnerError(`${field} must be a finite boolean, 0/1, or boolean-like string`, { field })
+    }
+    if (value === 1) return true
+    if (value === 0) return false
+    throw new PipelineRunnerError(`${field} must be 0 or 1 when given as a number`, { field, received: value })
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (normalized.length === 0) return false
+    if (TRUE_BOOLEAN_TEXT.has(normalized)) return true
+    if (FALSE_BOOLEAN_TEXT.has(normalized)) return false
+  }
+  throw new PipelineRunnerError(`${field} must be a boolean, 0/1, or boolean-like string`, { field })
+}
+
 function requireDependency(deps, name, methods) {
   const value = deps[name]
   if (!value) throw new Error(`createPipelineRunner: ${name} is required`)
@@ -153,7 +182,7 @@ function createPipelineRunner(deps = {}) {
       id: input.pipelineId,
       includeFieldMappings: true,
     })
-    if (pipeline.status !== 'active' && input.allowInactive !== true) {
+    if (pipeline.status !== 'active' && !coerceTruthyFlag(input.allowInactive, 'input.allowInactive')) {
       throw new PipelineRunnerError('pipeline is not active', {
         pipelineId: pipeline.id,
         status: pipeline.status,
@@ -308,10 +337,25 @@ function createPipelineRunner(deps = {}) {
     const context = await loadPipelineContext(input)
     const mode = input.mode || context.pipeline.mode || 'manual'
     const triggeredBy = input.triggeredBy || 'manual'
-    const dryRun = input.dryRun === true
+    const dryRun = coerceTruthyFlag(input.dryRun, 'input.dryRun')
     const started = clock()
     const metrics = createMetrics()
     const preview = dryRun ? { records: [], errors: [] } : null
+
+    // Best-effort: recover any runs left stuck in 'running' by a previous crash.
+    // Wrapped in try-catch so a transient DB failure here never blocks the main run.
+    if (typeof pipelineRegistry.abandonStaleRuns === 'function') {
+      try {
+        await pipelineRegistry.abandonStaleRuns({
+          tenantId: context.tenantId,
+          workspaceId: context.workspaceId,
+          pipelineId: context.pipeline.id,
+        })
+      } catch {
+        // Non-fatal — stale-run cleanup is best-effort; proceed with the pipeline run.
+      }
+    }
+
     let run = await runLogger.startRun({
       tenantId: context.tenantId,
       workspaceId: context.workspaceId,
@@ -470,6 +514,15 @@ function createPipelineRunner(deps = {}) {
     const deadLetter = await deadLetterStore.getDeadLetter(input)
     if (!deadLetter) {
       throw new PipelineRunnerError('dead letter not found', { id: input.id })
+    }
+    // Only 'open' letters can be replayed. 'replayed' or 'discarded' letters must not
+    // trigger another live ERP write — idempotency would block the write but the run
+    // record and K3 WISE session calls still fire, polluting the run log.
+    if (deadLetter.status !== 'open') {
+      throw new PipelineRunnerError('dead letter cannot be replayed: status is not open', {
+        id: deadLetter.id,
+        status: deadLetter.status,
+      })
     }
     if (isTruncatedReplayPayload(deadLetter.sourcePayload)) {
       throw new PipelineRunnerError('dead letter payload is truncated and cannot be replayed safely', {

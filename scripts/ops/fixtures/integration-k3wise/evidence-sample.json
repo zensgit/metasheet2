@@ -1,0 +1,49 @@
+{
+  "_comment": "Customer-side evidence template. Fill in after the live PoC run: status fields accept canonical (pass/fail/partial/skipped/todo/blocked), English synonyms (passed/complete/failed/error/etc), or Chinese (通过/成功/完成/失败/进行中/跳过/阻塞). Boolean fields (autoSubmit, autoAudit, legacyPipelineOptionsSourceProductId) accept true/false, 'true'/'false', 'yes'/'no', '是'/'否', or 0/1. ID fields (runId, productId) accept strings or finite numbers. Run: node scripts/ops/integration-k3wise-live-poc-evidence.mjs --packet <preflight-out>/packet.json --evidence <this>",
+  "gate": {
+    "status": "pass",
+    "archivePath": "customer-secure-share://k3wise-gate-answers"
+  },
+  "connections": {
+    "plm": { "status": "pass", "requestId": "plm-conn-001" },
+    "k3Wise": { "status": "pass", "requestId": "k3-conn-001" },
+    "sqlServer": { "status": "pass", "requestId": "sql-conn-001" }
+  },
+  "materialDryRun": {
+    "status": "pass",
+    "runId": "run-dry-001",
+    "rowsPreviewed": 3
+  },
+  "materialSaveOnly": {
+    "status": "pass",
+    "runId": "run-save-001",
+    "rowsWritten": 2,
+    "autoSubmit": false,
+    "autoAudit": false,
+    "k3Records": [
+      { "materialCode": "MAT-001", "externalId": "K3-1001", "billNo": "K3-BILL-001" },
+      { "materialCode": "MAT-002", "externalId": "K3-1002", "billNo": "K3-BILL-002" }
+    ]
+  },
+  "deadLetterReplay": {
+    "status": "pass",
+    "originalRunId": "run-fail-001",
+    "replayRunId": "run-replay-001"
+  },
+  "bomPoC": {
+    "status": "pass",
+    "runId": "run-bom-001",
+    "productId": "PRODUCT-TEST-001",
+    "legacyPipelineOptionsSourceProductId": false
+  },
+  "rollback": {
+    "status": "pass",
+    "owner": "customer-k3-admin",
+    "evidence": "test records retained with TEST prefix"
+  },
+  "customerConfirmation": {
+    "status": "pass",
+    "owner": "customer-evidence-owner",
+    "confirmedAt": "2026-04-25T10:00:00.000Z"
+  }
+}

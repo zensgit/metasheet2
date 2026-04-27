@@ -128,6 +128,43 @@ function firstDefined(...values) {
   return undefined
 }
 
+// Tri-state coercion for autoSubmit / autoAudit decision logic.
+// Returns true / false for any boolean-like input, or null when the field is
+// truly unset (undefined / null / ""). The decision logic at upsert-time uses
+// null to mean "fall back to config default" — distinct from explicit false
+// which must always disable the lifecycle step. Strict `=== true / !== false`
+// would treat hand-edited string "false" as truthy (because "false" !== false),
+// silently firing auto-submit / auto-audit against operator intent.
+const TRUE_BOOLEAN_TEXT = new Set(['true', '1', 'yes', 'y', 'on', '是', '启用', '开启'])
+const FALSE_BOOLEAN_TEXT = new Set(['false', '0', 'no', 'n', 'off', '否', '禁用', '关闭'])
+
+function coerceTriBool(value, field) {
+  if (value === undefined || value === null) return null
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new AdapterValidationError(`${field} must be a finite boolean, 0/1, or boolean-like string`, { field })
+    }
+    if (value === 1) return true
+    if (value === 0) return false
+    throw new AdapterValidationError(`${field} must be 0 or 1 when given as a number`, { field, received: value })
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (normalized.length === 0) return null
+    if (TRUE_BOOLEAN_TEXT.has(normalized)) return true
+    if (FALSE_BOOLEAN_TEXT.has(normalized)) return false
+  }
+  throw new AdapterValidationError(`${field} must be a boolean, 0/1, or boolean-like string`, { field })
+}
+
+function resolveAutoFlag(requestValue, configValue, field) {
+  const requestExplicit = coerceTriBool(requestValue, `request.options.${field}`)
+  if (requestExplicit !== null) return requestExplicit
+  const configExplicit = coerceTriBool(configValue, `config.${field}`)
+  return configExplicit === true
+}
+
 async function parseResponseBody(response) {
   const text = typeof response.text === 'function' ? await response.text() : ''
   if (!text) return null
@@ -439,8 +476,8 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     const savePath = assertRelativePath(objectConfig.savePath || objectConfig.path, 'object.savePath')
     const submitPath = objectConfig.submitPath ? assertRelativePath(objectConfig.submitPath, 'object.submitPath') : null
     const auditPath = objectConfig.auditPath ? assertRelativePath(objectConfig.auditPath, 'object.auditPath') : null
-    const autoSubmit = request.options.autoSubmit === true || (request.options.autoSubmit !== false && config.autoSubmit === true)
-    const autoAudit = request.options.autoAudit === true || (request.options.autoAudit !== false && config.autoAudit === true)
+    const autoSubmit = resolveAutoFlag(request.options.autoSubmit, config.autoSubmit, 'autoSubmit')
+    const autoAudit = resolveAutoFlag(request.options.autoAudit, config.autoAudit, 'autoAudit')
     const authHeaders = await login()
     const results = []
     const errors = []
