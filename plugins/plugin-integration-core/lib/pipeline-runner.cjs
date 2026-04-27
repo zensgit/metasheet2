@@ -341,6 +341,21 @@ function createPipelineRunner(deps = {}) {
     const started = clock()
     const metrics = createMetrics()
     const preview = dryRun ? { records: [], errors: [] } : null
+
+    // Best-effort: recover any runs left stuck in 'running' by a previous crash.
+    // Wrapped in try-catch so a transient DB failure here never blocks the main run.
+    if (typeof pipelineRegistry.abandonStaleRuns === 'function') {
+      try {
+        await pipelineRegistry.abandonStaleRuns({
+          tenantId: context.tenantId,
+          workspaceId: context.workspaceId,
+          pipelineId: context.pipeline.id,
+        })
+      } catch {
+        // Non-fatal — stale-run cleanup is best-effort; proceed with the pipeline run.
+      }
+    }
+
     let run = await runLogger.startRun({
       tenantId: context.tenantId,
       workspaceId: context.workspaceId,
@@ -493,9 +508,16 @@ function createPipelineRunner(deps = {}) {
       }
     } catch (error) {
       metrics.durationMs = Math.max(0, clock() - started)
-      run = await runLogger.finishRun(run, metrics, 'failed', {
-        errorSummary: error.message || String(error),
-      })
+      // Best-effort: mark the run as failed. If finishRun itself fails (e.g. DB
+      // is down) we suppress that secondary error and still throw the original.
+      // The stuck 'running' run will be recovered by abandonStaleRuns on next trigger.
+      try {
+        run = await runLogger.finishRun(run, metrics, 'failed', {
+          errorSummary: error.message || String(error),
+        })
+      } catch {
+        // Secondary failure — original error takes priority
+      }
       throw new PipelineRunnerError('pipeline run failed', {
         run,
         cause: error.message || String(error),
@@ -510,6 +532,15 @@ function createPipelineRunner(deps = {}) {
     const deadLetter = await deadLetterStore.getDeadLetter(input)
     if (!deadLetter) {
       throw new PipelineRunnerError('dead letter not found', { id: input.id })
+    }
+    // Only 'open' letters can be replayed. 'replayed' or 'discarded' letters must not
+    // trigger another live ERP write — idempotency would block the write but the run
+    // record and K3 WISE session calls still fire, polluting the run log.
+    if (deadLetter.status !== 'open') {
+      throw new PipelineRunnerError('dead letter cannot be replayed: status is not open', {
+        id: deadLetter.id,
+        status: deadLetter.status,
+      })
     }
     if (isTruncatedReplayPayload(deadLetter.sourcePayload)) {
       throw new PipelineRunnerError('dead letter payload is truncated and cannot be replayed safely', {
@@ -527,16 +558,29 @@ function createPipelineRunner(deps = {}) {
       sourceRecords: [deadLetter.sourcePayload],
     })
     if (result.metrics.rowsFailed > 0) return { deadLetter, replay: result }
-    const replayed = await deadLetterStore.markReplayed({
-      tenantId: deadLetter.tenantId,
-      workspaceId: deadLetter.workspaceId,
-      id: deadLetter.id,
-      replayRunId: result.run.id,
-      retryCount: (deadLetter.retryCount || 0) + 1,
-    })
+    // Best-effort bookkeeping: the ERP write already succeeded, so even if
+    // markReplayed fails (DB down at cleanup time) we must NOT throw — the
+    // caller would see 500 and retry, causing a duplicate ERP write.
+    let replayed = deadLetter
+    let markReplayedWarning = null
+    try {
+      replayed = await deadLetterStore.markReplayed({
+        tenantId: deadLetter.tenantId,
+        workspaceId: deadLetter.workspaceId,
+        id: deadLetter.id,
+        replayRunId: result.run.id,
+        retryCount: (deadLetter.retryCount || 0) + 1,
+      })
+    } catch (markError) {
+      markReplayedWarning = {
+        code: 'MARK_REPLAYED_FAILED',
+        message: markError.message || String(markError),
+      }
+    }
     return {
       deadLetter: replayed,
       replay: result,
+      ...(markReplayedWarning && { warning: markReplayedWarning }),
     }
   }
 
