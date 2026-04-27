@@ -159,6 +159,7 @@ function requestParams(req) {
 
 const MAX_LIST_LIMIT = 500
 const MAX_LIST_OFFSET = 10000
+const MAX_SAMPLE_LIMIT = 10000
 
 function asPositiveInt(value) {
   if (value === undefined || value === null || value === '') return undefined
@@ -181,6 +182,12 @@ function asListOffset(value) {
   return Math.min(n, MAX_LIST_OFFSET)
 }
 
+function asSampleLimit(value) {
+  const n = asPositiveInt(value)
+  if (n === undefined) return undefined
+  return Math.min(n, MAX_SAMPLE_LIMIT)
+}
+
 function publicRunInput(body = {}) {
   if (body.mode !== undefined && body.mode !== null && body.mode !== '') {
     if (!VALID_USER_RUN_MODES.has(body.mode)) {
@@ -197,7 +204,7 @@ function publicRunInput(body = {}) {
     workspaceId: body.workspaceId,
     mode: body.mode,
     cursor: body.cursor,
-    sampleLimit: asPositiveInt(body.sampleLimit),
+    sampleLimit: asSampleLimit(body.sampleLimit),
   }
   for (const key of Object.keys(input)) {
     if (input[key] === undefined || input[key] === null || input[key] === '') delete input[key]
@@ -413,6 +420,7 @@ module.exports = {
   HttpRouteError,
   MAX_LIST_LIMIT,
   MAX_LIST_OFFSET,
+  MAX_SAMPLE_LIMIT,
   createHandlers,
   registerIntegrationRoutes,
   VALID_USER_RUN_MODES,
@@ -425,6 +433,7 @@ module.exports = {
     inferHttpStatus,
     publicRunInput,
     redactDeadLetter,
+    asSampleLimit,
     asListOffset,
     asListLimit,
     asPositiveInt,
