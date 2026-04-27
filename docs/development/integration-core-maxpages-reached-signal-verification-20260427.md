@@ -30,7 +30,7 @@
 
 ## Regression Guard
 
-After merging current `origin/main` through the dry-run sampleLimit cap, all 18 `plugin-integration-core` test files pass:
+After merging current `origin/main` through the replay sourcePayload guard, all 18 `plugin-integration-core` test files pass:
 
 ```
 ✓ credential-store        ✓ adapter-contracts       ✓ http-adapter
@@ -45,4 +45,4 @@ After merging current `origin/main` through the dry-run sampleLimit cap, all 18 
 
 Branch: `codex/integration-maxpages-reached-signal-20260427`  
 Worktree: `/private/tmp/ms2-maxpages-signal`  
-Base: `33a4078bb` (origin/main after PR #1201)
+Base: `2d7d616bb` (origin/main after PR #1202)
