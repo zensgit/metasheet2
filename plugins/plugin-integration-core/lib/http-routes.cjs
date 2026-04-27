@@ -163,6 +163,13 @@ function asPositiveInt(value) {
 }
 
 function publicRunInput(body = {}) {
+  if (body.cursor !== undefined && body.cursor !== null && body.cursor !== '') {
+    if (typeof body.cursor !== 'string') {
+      throw new HttpRouteError(400, 'INVALID_CURSOR', 'cursor must be a string', {
+        received: Array.isArray(body.cursor) ? 'array' : typeof body.cursor,
+      })
+    }
+  }
   const input = {
     tenantId: body.tenantId,
     workspaceId: body.workspaceId,
