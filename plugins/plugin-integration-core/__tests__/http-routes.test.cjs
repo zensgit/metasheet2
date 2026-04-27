@@ -5,6 +5,7 @@ const path = require('node:path')
 
 const HTTP_ROUTES_PATH = path.join(__dirname, '..', 'lib', 'http-routes.cjs')
 const httpRoutes = require(HTTP_ROUTES_PATH)
+const { MAX_LIST_LIMIT } = httpRoutes
 
 const READ_USER = {
   id: 'user_read',
@@ -472,6 +473,31 @@ async function testPipelineRoutes() {
   assert.equal(dryRunCall[1].dryRun, true)
   assert.equal(dryRunCall[1].sampleLimit, 2)
   assert.equal(res.body.data.metrics.rowsWritten, 0, 'dry-run response does not report target writes')
+
+  // --- run mode validation: internal-only and unknown modes are rejected ---
+  for (const badMode of ['replay', 'hacker', 'MANUAL', 'Incremental', '']) {
+    const modeRes = await invoke(routes, 'POST', '/api/integration/pipelines/:id/run', {
+      user: WRITE_USER,
+      params: { id: 'pipe_1' },
+      body: { tenantId: 'tenant_1', workspaceId: 'workspace_1', mode: badMode },
+    })
+    // empty string is treated as absent by publicRunInput (passes through)
+    if (badMode === '') {
+      assertOkResponse(modeRes, 202)
+    } else {
+      assert.equal(modeRes.statusCode, 400, `mode '${badMode}' must be rejected with 400`)
+      assert.equal(modeRes.body.error.code, 'INVALID_RUN_MODE', `mode '${badMode}' must yield INVALID_RUN_MODE`)
+    }
+  }
+
+  // dry-run also validates mode
+  const dryModeRes = await invoke(routes, 'POST', '/api/integration/pipelines/:id/dry-run', {
+    user: WRITE_USER,
+    params: { id: 'pipe_1' },
+    body: { tenantId: 'tenant_1', workspaceId: 'workspace_1', mode: 'replay' },
+  })
+  assert.equal(dryModeRes.statusCode, 400, "mode 'replay' must be rejected on dry-run too")
+  assert.equal(dryModeRes.body.error.code, 'INVALID_RUN_MODE')
 }
 
 async function testRunAndDeadLetterRoutes() {
@@ -499,6 +525,26 @@ async function testRunAndDeadLetterRoutes() {
     offset: 2,
   })
 
+  // limit above MAX_LIST_LIMIT is clamped
+  const { calls: largeCalls, services: largeServices } = createMockServices()
+  const { routes: largeRoutes } = mountRoutes(largeServices)
+  const largeRes = await invoke(largeRoutes, 'GET', '/api/integration/runs', {
+    user: READ_USER,
+    query: { workspaceId: 'workspace_1', limit: String(MAX_LIST_LIMIT + 10000) },
+  })
+  assertOkResponse(largeRes, 200)
+  assert.equal(findCall(largeCalls, 'listPipelineRuns')[1].limit, MAX_LIST_LIMIT,
+    `limit clamped to MAX_LIST_LIMIT (${MAX_LIST_LIMIT})`)
+
+  // limit within MAX_LIST_LIMIT is passed through unchanged
+  const { calls: smallCalls, services: smallServices } = createMockServices()
+  const { routes: smallRoutes } = mountRoutes(smallServices)
+  await invoke(smallRoutes, 'GET', '/api/integration/runs', {
+    user: READ_USER,
+    query: { workspaceId: 'workspace_1', limit: '10' },
+  })
+  assert.equal(findCall(smallCalls, 'listPipelineRuns')[1].limit, 10, 'small limit is unchanged')
+
   res = await invoke(routes, 'GET', '/api/integration/dead-letters', {
     user: READ_USER,
     query: {
@@ -523,6 +569,16 @@ async function testRunAndDeadLetterRoutes() {
     limit: 20,
     offset: 2,
   })
+
+  // dead-letters list also caps at MAX_LIST_LIMIT
+  const { calls: dlLargeCalls, services: dlLargeServices } = createMockServices()
+  const { routes: dlLargeRoutes } = mountRoutes(dlLargeServices)
+  await invoke(dlLargeRoutes, 'GET', '/api/integration/dead-letters', {
+    user: READ_USER,
+    query: { workspaceId: 'workspace_1', limit: '999999' },
+  })
+  assert.equal(findCall(dlLargeCalls, 'listDeadLetters')[1].limit, MAX_LIST_LIMIT,
+    'dead-letters limit clamped to MAX_LIST_LIMIT')
 
   res = await invoke(routes, 'GET', '/api/integration/dead-letters', {
     user: WRITE_USER,
@@ -638,6 +694,28 @@ async function testErrorResponseShape() {
     query: { workspaceId: 'workspace_1' },
   })
   assert.equal(notFoundRes.statusCode, 404)
+
+  // PipelineConflictError (thrown by concurrent-run guard) maps to 409
+  const conflictError = new Error('pipeline already has a run in progress')
+  conflictError.name = 'PipelineConflictError'
+  conflictError.details = { pipelineId: 'pipe_1', runningRunId: 'run_existing' }
+  const { services: conflictServices } = createMockServices({
+    pipelineRunner: {
+      async runPipeline() {
+        throw conflictError
+      },
+    },
+  })
+  const { routes: conflictRoutes } = mountRoutes(conflictServices)
+  const conflictRes = await invoke(conflictRoutes, 'POST', '/api/integration/pipelines/:id/run', {
+    user: WRITE_USER,
+    params: { id: 'pipe_1' },
+    body: { workspaceId: 'workspace_1' },
+  })
+  assert.equal(conflictRes.statusCode, 409)
+  assert.equal(conflictRes.body.ok, false)
+  assert.equal(conflictRes.body.error.code, 'PipelineConflictError')
+  assert.equal(conflictRes.body.error.details.runningRunId, 'run_existing')
 }
 
 async function testTenantGuards() {
@@ -666,6 +744,119 @@ async function testTenantGuards() {
   assert.equal(blankContext.body.error.code, 'TENANT_CONTEXT_REQUIRED')
 }
 
+async function testSampleLimitCap() {
+  const { MAX_SAMPLE_LIMIT } = httpRoutes
+  assert.equal(typeof MAX_SAMPLE_LIMIT, 'number', 'MAX_SAMPLE_LIMIT is exported')
+
+  // Huge sampleLimit on /run is clamped to MAX_SAMPLE_LIMIT
+  const { calls: runCalls, services: runServices } = createMockServices()
+  const { routes: runRoutes } = mountRoutes(runServices)
+  const hugeLimit = String(MAX_SAMPLE_LIMIT + 999999)
+  await invoke(runRoutes, 'POST', '/api/integration/pipelines/:id/run', {
+    user: WRITE_USER,
+    params: { id: 'pipe_1' },
+    body: { workspaceId: 'workspace_1', sampleLimit: hugeLimit },
+  })
+  assert.equal(findCall(runCalls, 'runPipeline')[1].sampleLimit, MAX_SAMPLE_LIMIT,
+    '/run: huge sampleLimit clamped to MAX_SAMPLE_LIMIT')
+
+  // Huge sampleLimit on /dry-run is also clamped
+  const { calls: dryCalls, services: dryServices } = createMockServices()
+  const { routes: dryRoutes } = mountRoutes(dryServices)
+  await invoke(dryRoutes, 'POST', '/api/integration/pipelines/:id/dry-run', {
+    user: WRITE_USER,
+    params: { id: 'pipe_1' },
+    body: { workspaceId: 'workspace_1', sampleLimit: hugeLimit },
+  })
+  assert.equal(findCall(dryCalls, 'runPipeline')[1].sampleLimit, MAX_SAMPLE_LIMIT,
+    '/dry-run: huge sampleLimit clamped to MAX_SAMPLE_LIMIT')
+
+  // sampleLimit = 0 → stripped (undefined)
+  const { calls: zeroCalls, services: zeroServices } = createMockServices()
+  const { routes: zeroRoutes } = mountRoutes(zeroServices)
+  await invoke(zeroRoutes, 'POST', '/api/integration/pipelines/:id/dry-run', {
+    user: WRITE_USER,
+    params: { id: 'pipe_1' },
+    body: { workspaceId: 'workspace_1', sampleLimit: 0 },
+  })
+  assert.equal('sampleLimit' in findCall(zeroCalls, 'runPipeline')[1], false,
+    'sampleLimit=0 is stripped from input (publicRunInput deletes falsy keys)')
+
+  // Small valid sampleLimit passes through unchanged
+  const { calls: smallCalls, services: smallServices } = createMockServices()
+  const { routes: smallRoutes } = mountRoutes(smallServices)
+  await invoke(smallRoutes, 'POST', '/api/integration/pipelines/:id/dry-run', {
+    user: WRITE_USER,
+    params: { id: 'pipe_1' },
+    body: { workspaceId: 'workspace_1', sampleLimit: 5 },
+  })
+  assert.equal(findCall(smallCalls, 'runPipeline')[1].sampleLimit, 5,
+    'small valid sampleLimit passes through unchanged')
+}
+
+async function testListOffsetCap() {
+  const { MAX_LIST_OFFSET } = httpRoutes
+  assert.equal(typeof MAX_LIST_OFFSET, 'number', 'MAX_LIST_OFFSET is exported')
+
+  // Large offset (above cap) must be clamped at all 4 list endpoints
+  const hugeOffset = String(MAX_LIST_OFFSET + 999999)
+  const { calls: sysCalls, services: sysServices } = createMockServices()
+  const { routes: sysRoutes } = mountRoutes(sysServices)
+  await invoke(sysRoutes, 'GET', '/api/integration/external-systems', {
+    user: READ_USER,
+    query: { workspaceId: 'workspace_1', offset: hugeOffset },
+  })
+  assert.equal(findCall(sysCalls, 'listExternalSystems')[1].offset, MAX_LIST_OFFSET,
+    'external-systems: huge offset clamped to MAX_LIST_OFFSET')
+
+  const { calls: pipCalls, services: pipServices } = createMockServices()
+  const { routes: pipRoutes } = mountRoutes(pipServices)
+  await invoke(pipRoutes, 'GET', '/api/integration/pipelines', {
+    user: READ_USER,
+    query: { workspaceId: 'workspace_1', offset: hugeOffset },
+  })
+  assert.equal(findCall(pipCalls, 'listPipelines')[1].offset, MAX_LIST_OFFSET,
+    'pipelines: huge offset clamped to MAX_LIST_OFFSET')
+
+  const { calls: runCalls, services: runServices } = createMockServices()
+  const { routes: runRoutes } = mountRoutes(runServices)
+  await invoke(runRoutes, 'GET', '/api/integration/runs', {
+    user: READ_USER,
+    query: { workspaceId: 'workspace_1', offset: hugeOffset },
+  })
+  assert.equal(findCall(runCalls, 'listPipelineRuns')[1].offset, MAX_LIST_OFFSET,
+    'runs: huge offset clamped to MAX_LIST_OFFSET')
+
+  const { calls: dlCalls, services: dlServices } = createMockServices()
+  const { routes: dlRoutes } = mountRoutes(dlServices)
+  await invoke(dlRoutes, 'GET', '/api/integration/dead-letters', {
+    user: READ_USER,
+    query: { workspaceId: 'workspace_1', offset: hugeOffset },
+  })
+  assert.equal(findCall(dlCalls, 'listDeadLetters')[1].offset, MAX_LIST_OFFSET,
+    'dead-letters: huge offset clamped to MAX_LIST_OFFSET')
+
+  // offset = 0 → treated as no offset (undefined)
+  const { calls: zeroCalls, services: zeroServices } = createMockServices()
+  const { routes: zeroRoutes } = mountRoutes(zeroServices)
+  await invoke(zeroRoutes, 'GET', '/api/integration/pipelines', {
+    user: READ_USER,
+    query: { workspaceId: 'workspace_1', offset: '0' },
+  })
+  assert.equal(findCall(zeroCalls, 'listPipelines')[1].offset, undefined,
+    'offset=0 is treated as no offset (undefined)')
+
+  // Small valid offset passes through unchanged
+  const { calls: smallCalls, services: smallServices } = createMockServices()
+  const { routes: smallRoutes } = mountRoutes(smallServices)
+  await invoke(smallRoutes, 'GET', '/api/integration/pipelines', {
+    user: READ_USER,
+    query: { workspaceId: 'workspace_1', offset: '50' },
+  })
+  assert.equal(findCall(smallCalls, 'listPipelines')[1].offset, 50,
+    'small valid offset passes through unchanged')
+}
+
 async function main() {
   await testUnauthenticatedWriteRequestIsRejected()
   await testExternalSystemRoutes()
@@ -673,6 +864,8 @@ async function main() {
   await testRunAndDeadLetterRoutes()
   await testErrorResponseShape()
   await testTenantGuards()
+  await testSampleLimitCap()
+  await testListOffsetCap()
 
   console.log('http-routes: REST auth/list/upsert/run/dry-run/replay tests passed')
 }
