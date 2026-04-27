@@ -744,6 +744,60 @@ async function testTenantGuards() {
   assert.equal(blankContext.body.error.code, 'TENANT_CONTEXT_REQUIRED')
 }
 
+async function testCursorStringGuard() {
+  const { calls, services } = createMockServices()
+  const { routes } = mountRoutes(services)
+
+  // cursor as object → 400 INVALID_CURSOR
+  const objRes = await invoke(routes, 'POST', '/api/integration/pipelines/:id/run', {
+    user: WRITE_USER,
+    params: { id: 'pipe_1' },
+    body: { workspaceId: 'workspace_1', cursor: { malicious: true } },
+  })
+  assert.equal(objRes.statusCode, 400, 'object cursor → 400')
+  assert.equal(objRes.body.error.code, 'INVALID_CURSOR', 'error code is INVALID_CURSOR')
+  assert.equal(objRes.body.error.details.received, 'object', 'received=object reported')
+
+  // cursor as array → 400 INVALID_CURSOR (received=array, not object)
+  const arrRes = await invoke(routes, 'POST', '/api/integration/pipelines/:id/dry-run', {
+    user: WRITE_USER,
+    params: { id: 'pipe_1' },
+    body: { workspaceId: 'workspace_1', cursor: ['c', 'd'] },
+  })
+  assert.equal(arrRes.statusCode, 400, 'array cursor → 400')
+  assert.equal(arrRes.body.error.code, 'INVALID_CURSOR')
+  assert.equal(arrRes.body.error.details.received, 'array', 'received=array (distinguished from object)')
+
+  // cursor as number → 400 INVALID_CURSOR
+  const numRes = await invoke(routes, 'POST', '/api/integration/pipelines/:id/run', {
+    user: WRITE_USER,
+    params: { id: 'pipe_1' },
+    body: { workspaceId: 'workspace_1', cursor: 42 },
+  })
+  assert.equal(numRes.statusCode, 400, 'numeric cursor → 400')
+  assert.equal(numRes.body.error.code, 'INVALID_CURSOR')
+
+  // cursor as valid string → passes through to runPipeline
+  const strRes = await invoke(routes, 'POST', '/api/integration/pipelines/:id/run', {
+    user: WRITE_USER,
+    params: { id: 'pipe_1' },
+    body: { workspaceId: 'workspace_1', cursor: 'page-token-abc' },
+  })
+  assertOkResponse(strRes, 202)
+  const runCall = findCall(calls, 'runPipeline')
+  assert.equal(runCall[1].cursor, 'page-token-abc', 'string cursor passed through')
+
+  // No cursor → not in input
+  const { calls: noCalls, services: noServices } = createMockServices()
+  const { routes: noRoutes } = mountRoutes(noServices)
+  await invoke(noRoutes, 'POST', '/api/integration/pipelines/:id/run', {
+    user: WRITE_USER,
+    params: { id: 'pipe_1' },
+    body: { workspaceId: 'workspace_1' },
+  })
+  assert.equal('cursor' in findCall(noCalls, 'runPipeline')[1], false, 'absent cursor → not in input')
+}
+
 async function testSampleLimitCap() {
   const { MAX_SAMPLE_LIMIT } = httpRoutes
   assert.equal(typeof MAX_SAMPLE_LIMIT, 'number', 'MAX_SAMPLE_LIMIT is exported')
@@ -864,6 +918,7 @@ async function main() {
   await testRunAndDeadLetterRoutes()
   await testErrorResponseShape()
   await testTenantGuards()
+  await testCursorStringGuard()
   await testSampleLimitCap()
   await testListOffsetCap()
 
