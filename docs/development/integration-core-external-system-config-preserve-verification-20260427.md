@@ -21,7 +21,7 @@ for f in plugins/plugin-integration-core/__tests__/*.test.cjs; do node "$f"; don
 
 ## Results
 
-Local tests passed in `/private/tmp/ms2-config-preserve-2` after resolving the merge conflict with current `origin/main`.
+Local tests passed in `/private/tmp/ms2-config-preserve-2` after resolving the merge conflict with current `origin/main`. The same commands were repeated after merging the PR #1196 mainline update into this branch.
 
 ```text
 ✓ external-systems: registry + credential boundary tests passed
