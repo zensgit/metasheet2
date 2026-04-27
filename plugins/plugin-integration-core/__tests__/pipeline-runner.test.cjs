@@ -623,6 +623,181 @@ async function main() {
       `${label} payload is rejected before any target write`)
   }
 
+  // --- 5c. markReplayed failure after successful replay does not throw ----
+  // If markReplayed fails (DB down at cleanup time), the replay already wrote to ERP.
+  // Throwing would cause the caller to retry → duplicate ERP write. Instead, return
+  // a structured result with a warning so the caller knows the bookkeeping is inconsistent.
+  {
+    const markFailDb = createMockDb()
+    const realDeadLetterStore = createDeadLetterStore({ db: markFailDb, idGenerator: () => 'dl_mark_fail' })
+    await realDeadLetterStore.createDeadLetter({
+      tenantId: 'tenant_1',
+      workspaceId: null,
+      runId: 'run_original',
+      pipelineId: 'pipe_1',
+      sourcePayload: { code: 'c-mark', revision: 'r1', qty: '5', name: 'Screw', updatedAt: '2026-04-24T04:00:00.000Z' },
+      transformedPayload: null,
+      errorCode: 'VALIDATION_FAILED',
+      errorMessage: 'original failure',
+    })
+    // Wrap the store: getDeadLetter works, markReplayed always throws
+    const throwingMarkStore = {
+      ...realDeadLetterStore,
+      async markReplayed() {
+        throw new Error('DB connection lost — cannot mark dead letter replayed')
+      },
+    }
+    const markFailTargetRows = new Map()
+    const markFailRunner = createPipelineRunner({
+      pipelineRegistry: createPipelineRegistry(
+        { ...createRunnerHarness({ sourceRecords: [] }).pipeline },
+        markFailDb
+      ),
+      externalSystemRegistry: createExternalSystemRegistry(),
+      adapterRegistry: createAdapterRegistry()
+        .registerAdapter('mock-source', () => ({
+          async testConnection() { return { ok: true } },
+          async listObjects() { return [] },
+          async getSchema() { return { fields: [] } },
+          async read() { return createReadResult({ records: [] }) },
+          async upsert() { throw new Error('source upsert should not be called') },
+        }))
+        .registerAdapter('mock-target', () => ({
+          async testConnection() { return { ok: true } },
+          async listObjects() { return [] },
+          async getSchema() { return { fields: [] } },
+          async read() { return createReadResult({ records: [] }) },
+          async upsert(input) {
+            for (const record of input.records) {
+              markFailTargetRows.set(record._integration_idempotency_key, record)
+            }
+            return createUpsertResult({ written: input.records.length, skipped: 0, results: input.records.map((r) => ({ key: r._integration_idempotency_key })) })
+          },
+        })),
+      deadLetterStore: throwingMarkStore,
+      watermarkStore: createWatermarkStore({ db: markFailDb }),
+      runLogger: createRunLogger({ pipelineRegistry: createPipelineRegistry(
+        { ...createRunnerHarness({ sourceRecords: [] }).pipeline },
+        markFailDb
+      ) }),
+    })
+    const markFailResult = await markFailRunner.replayDeadLetter({
+      tenantId: 'tenant_1',
+      workspaceId: null,
+      id: 'dl_mark_fail',
+    })
+    assert.equal(markFailTargetRows.size, 1, 'ERP write succeeded despite markReplayed failure')
+    assert.ok(markFailResult.warning, 'result includes a warning when markReplayed fails')
+    assert.equal(markFailResult.warning.code, 'MARK_REPLAYED_FAILED', 'warning code identifies the failure')
+    assert.match(markFailResult.warning.message, /DB connection lost/, 'warning message includes original error')
+    assert.equal(markFailResult.deadLetter.status, 'open', 'dead letter status remains open when marking failed')
+    assert.ok(markFailResult.replay.metrics.rowsWritten >= 1, 'replay metrics confirm write happened')
+  }
+
+  // --- 6. Dead-letter status guard — already-replayed letter is rejected --
+  // The first replay in scenario 5 left dl_1 in status='replayed'. A second
+  // replay attempt must throw before any ERP call happens.
+  const doubleReplay = await replay.runner.replayDeadLetter({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    id: 'dl_1',
+  }).catch((error) => error)
+  assert.equal(doubleReplay.name, 'PipelineRunnerError', 'double-replay rejected with PipelineRunnerError')
+  assert.match(doubleReplay.message, /status is not open/, 'error message identifies the problem')
+  assert.equal(doubleReplay.details.status, 'replayed', 'error details include current status')
+  assert.equal(doubleReplay.details.id, 'dl_1', 'error details include dead letter id')
+  assert.equal(replay.targetRows.size, 1, 'target unchanged after rejected double-replay')
+
+  // Discarded dead letter is also rejected
+  const discardHarness = createRunnerHarness({ sourceRecords: [] })
+  const discardStore = createDeadLetterStore({ db: discardHarness.db, idGenerator: () => 'dl_discarded' })
+  await discardStore.createDeadLetter({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    runId: 'run_original',
+    pipelineId: 'pipe_1',
+    sourcePayload: { code: 'c-04', revision: 'r1', qty: '1', name: 'Nut', updatedAt: '2026-04-24T04:00:00.000Z' },
+    errorCode: 'VALIDATION_FAILED',
+    errorMessage: 'failed',
+    status: 'discarded',
+  })
+  const discardReplay = await discardHarness.runner.replayDeadLetter({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    id: 'dl_discarded',
+  }).catch((error) => error)
+  assert.equal(discardReplay.name, 'PipelineRunnerError', 'discarded letter replay rejected')
+  assert.equal(discardReplay.details.status, 'discarded', 'error details include discarded status')
+  assert.equal(discardHarness.targetRows.size, 0, 'target unchanged after rejected discarded-letter replay')
+
+  // --- 7. finishRun failure does not mask original pipeline error ----------
+  // If finishRun itself throws (e.g. DB is down at the moment of failure),
+  // the caller must still see the ORIGINAL pipeline error, not the DB error.
+  {
+    const failingDb = createMockDb()
+    const failingPipelineRegistry = createPipelineRegistry(
+      { ...createRunnerHarness({ sourceRecords: [] }).pipeline },
+      failingDb
+    )
+    // Build a runLogger where finishRun always throws a secondary DB error
+    const throwingRunLogger = {
+      async startRun(input) {
+        const id = 'run_fail_test'
+        const row = {
+          id,
+          tenant_id: input.tenantId,
+          workspace_id: input.workspaceId ?? null,
+          pipeline_id: input.pipelineId,
+          mode: input.mode,
+          triggered_by: input.triggeredBy,
+          status: input.status,
+          rows_read: 0,
+          rows_cleaned: 0,
+          rows_written: 0,
+          rows_failed: 0,
+          started_at: input.startedAt || null,
+          details: input.details || {},
+        }
+        await failingDb.insertOne('integration_runs', row)
+        return { id, tenantId: input.tenantId, workspaceId: input.workspaceId ?? null, pipelineId: input.pipelineId, status: 'running', details: {} }
+      },
+      async finishRun() {
+        throw new Error('DB connection lost — cannot update run status')
+      },
+    }
+    const failRunner = createPipelineRunner({
+      pipelineRegistry: failingPipelineRegistry,
+      externalSystemRegistry: createExternalSystemRegistry(),
+      adapterRegistry: createAdapterRegistry()
+        .registerAdapter('mock-source', () => ({
+          async testConnection() { return { ok: true } },
+          async listObjects() { return [] },
+          async getSchema() { return { fields: [] } },
+          async read() { throw new Error('source read failed: network timeout') },
+          async upsert() { throw new Error('source upsert should not be called') },
+        }))
+        .registerAdapter('mock-target', () => ({
+          async testConnection() { return { ok: true } },
+          async listObjects() { return [] },
+          async getSchema() { return { fields: [] } },
+          async read() { return createReadResult({ records: [] }) },
+          async upsert() { return createUpsertResult({ written: 0, skipped: 0, results: [] }) },
+        })),
+      deadLetterStore: createDeadLetterStore({ db: failingDb }),
+      watermarkStore: createWatermarkStore({ db: failingDb }),
+      runLogger: throwingRunLogger,
+    })
+    const originalError = await failRunner.runPipeline({
+      tenantId: 'tenant_1',
+      pipelineId: 'pipe_1',
+      mode: 'manual',
+      triggeredBy: 'api',
+    }).catch((error) => error)
+    assert.equal(originalError.name, 'PipelineRunnerError', 'error is PipelineRunnerError even when finishRun throws')
+    assert.match(originalError.details.cause, /source read failed/, 'original pipeline error preserved in cause')
+    assert.doesNotMatch(originalError.message + (originalError.details.cause || ''), /DB connection lost/, 'secondary finishRun error is suppressed')
+  }
+
   // --- 11. dryRun string coercion (REST API hand-typed booleans) ---------
   {
     const stringDry = createRunnerHarness({
@@ -754,6 +929,156 @@ async function main() {
       allowInactive: truthyVariant,
     })
     assert.ok(result.run, `allowInactive: ${JSON.stringify(truthyVariant)} lets the inactive pipeline run`)
+  }
+
+  // --- 17. abandonStaleRuns called before run and is best-effort ----------
+  {
+    const staleDb = createMockDb()
+    const stalePipeline = {
+      id: 'pipe_1', tenantId: 'tenant_1', workspaceId: null, projectId: 'project_1',
+      sourceSystemId: 'source_1', sourceObject: 'materials',
+      targetSystemId: 'target_1', targetObject: 'BD_MATERIAL',
+      mode: 'manual', status: 'active',
+      idempotencyKeyFields: ['code', 'revision'],
+      options: { batchSize: 100 },
+      fieldMappings: [
+        { sourceField: 'code', targetField: 'FNumber', transform: ['trim', 'upper'], validation: [{ type: 'required' }] },
+        { sourceField: 'qty', targetField: 'FQty', transform: { fn: 'toNumber' }, validation: [{ type: 'min', value: 1 }] },
+        { sourceField: 'name', targetField: 'FName', transform: { fn: 'trim' }, validation: [{ type: 'required' }] },
+      ],
+    }
+    const staleSourceRecord = { code: 'a-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' }
+    const staleAdapterRegistry = createAdapterRegistry()
+      .registerAdapter('mock-source', () => ({
+        async testConnection() { return { ok: true } },
+        async listObjects() { return [] },
+        async getSchema() { return { fields: [] } },
+        async read() { return createReadResult({ records: [staleSourceRecord] }) },
+        async upsert() { throw new Error('should not upsert on source') },
+      }))
+      .registerAdapter('mock-target', () => ({
+        async testConnection() { return { ok: true } },
+        async listObjects() { return [] },
+        async getSchema() { return { fields: [] } },
+        async read() { return createReadResult({ records: [] }) },
+        async upsert(input) { return createUpsertResult({ written: input.records.length, skipped: 0, results: [] }) },
+      }))
+
+    function buildRunner(registryExtension = {}) {
+      const registry = { ...createPipelineRegistry(stalePipeline, staleDb), ...registryExtension }
+      return createPipelineRunner({
+        pipelineRegistry: registry,
+        externalSystemRegistry: createExternalSystemRegistry(),
+        adapterRegistry: staleAdapterRegistry,
+        deadLetterStore: createDeadLetterStore({ db: staleDb }),
+        watermarkStore: createWatermarkStore({ db: staleDb }),
+        runLogger: createRunLogger({ pipelineRegistry: registry }),
+      })
+    }
+
+    // 17a: abandonStaleRuns is called with correct tenant/pipeline context
+    const abandonCalls = []
+    const runnerWithAbandon = buildRunner({
+      async abandonStaleRuns(input) { abandonCalls.push(input); return [] },
+    })
+    await runnerWithAbandon.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'manual', triggeredBy: 'api' })
+    assert.equal(abandonCalls.length, 1, 'abandonStaleRuns called once before run')
+    assert.equal(abandonCalls[0].tenantId, 'tenant_1', 'abandonStaleRuns receives tenantId')
+    assert.equal(abandonCalls[0].pipelineId, 'pipe_1', 'abandonStaleRuns receives pipelineId')
+
+    // 17b: abandonStaleRuns throws -> pipeline still runs (best-effort protection)
+    const resilientRunner = buildRunner({
+      async abandonStaleRuns() { throw new Error('DB connection lost during stale-run cleanup') },
+    })
+    const resilientResult = await resilientRunner.runPipeline({
+      tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'manual', triggeredBy: 'api',
+    })
+    assert.ok(resilientResult.run, 'pipeline run succeeds even when abandonStaleRuns throws')
+    assert.equal(resilientResult.metrics.rowsRead, 1, 'pipeline reads source despite cleanup failure')
+
+    // 17c: registry without abandonStaleRuns (typeof check) -> no TypeError
+    const plainRunner = buildRunner()
+    const plainResult = await plainRunner.runPipeline({
+      tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'manual', triggeredBy: 'api',
+    })
+    assert.ok(plainResult.run, 'pipeline runs fine when registry has no abandonStaleRuns')
+  }
+
+  // --- 18. finishRun failure in success path returns warning, not error ----
+  {
+    const db18 = createMockDb()
+    const pipeline18 = {
+      id: 'pipe_1', tenantId: 'tenant_1', workspaceId: null, projectId: 'project_1',
+      sourceSystemId: 'source_1', sourceObject: 'materials',
+      targetSystemId: 'target_1', targetObject: 'BD_MATERIAL',
+      mode: 'manual', status: 'active',
+      idempotencyKeyFields: ['code', 'revision'],
+      options: { batchSize: 100 },
+      fieldMappings: [
+        { sourceField: 'code', targetField: 'FNumber', transform: ['trim', 'upper'], validation: [{ type: 'required' }] },
+        { sourceField: 'name', targetField: 'FName', transform: { fn: 'trim' }, validation: [{ type: 'required' }] },
+      ],
+    }
+    const targetRows18 = new Map()
+    const adapterRegistry18 = createAdapterRegistry()
+      .registerAdapter('mock-source', () => ({
+        async testConnection() { return { ok: true } },
+        async listObjects() { return [] },
+        async getSchema() { return { fields: [] } },
+        async read() {
+          return createReadResult({ records: [
+            { code: 'mat-01', revision: 'r1', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+          ] })
+        },
+        async upsert() { throw new Error('source upsert should not be called') },
+      }))
+      .registerAdapter('mock-target', () => ({
+        async testConnection() { return { ok: true } },
+        async listObjects() { return [] },
+        async getSchema() { return { fields: [] } },
+        async read() { return createReadResult({ records: [] }) },
+        async upsert(input) {
+          for (const record of input.records) targetRows18.set(record._integration_idempotency_key, record)
+          return createUpsertResult({ written: input.records.length, skipped: 0, results: [] })
+        },
+      }))
+
+    function buildRunner18(pipelineRegistryOverride = {}) {
+      const registry = { ...createPipelineRegistry(pipeline18, db18), ...pipelineRegistryOverride }
+      return createPipelineRunner({
+        pipelineRegistry: registry,
+        externalSystemRegistry: createExternalSystemRegistry(),
+        adapterRegistry: adapterRegistry18,
+        deadLetterStore: createDeadLetterStore({ db: db18 }),
+        watermarkStore: createWatermarkStore({ db: db18 }),
+        runLogger: createRunLogger({ pipelineRegistry: registry }),
+      })
+    }
+
+    // 18a: finishRun throws (DB down) after ERP write -> returns warning, not error
+    const throwingRunner = buildRunner18({
+      async updatePipelineRun() {
+        throw new Error('DB connection lost after ERP write')
+      },
+    })
+    const warnResult = await throwingRunner.runPipeline({
+      tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'manual', triggeredBy: 'api',
+    })
+    assert.ok(warnResult.run, 'result.run is present even when finishRun throws')
+    assert.equal(warnResult.metrics.rowsWritten, 1, 'ERP write completed before finishRun threw')
+    assert.ok(warnResult.warning, 'warning field present when finishRun fails')
+    assert.equal(warnResult.warning.code, 'FINISH_RUN_FAILED', 'warning code is FINISH_RUN_FAILED')
+    assert.equal(typeof warnResult.warning.message, 'string', 'warning message is a string')
+    assert.equal(targetRows18.size, 1, 'target record was written despite finishRun failure')
+
+    // 18b: normal finishRun (no override) — no warning field
+    const normalRunner = buildRunner18()
+    const normalResult = await normalRunner.runPipeline({
+      tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'manual', triggeredBy: 'api',
+    })
+    assert.ok(normalResult.run, 'normal result has run')
+    assert.equal(normalResult.run.status, 'succeeded', 'run status is succeeded')
+    assert.equal(normalResult.warning, undefined, 'no warning when finishRun succeeds')
   }
 
   console.log('✓ pipeline-runner: cleanse/idempotency/incremental E2E tests passed')
