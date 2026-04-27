@@ -2,12 +2,13 @@
 
 > Date: 2026-04-26
 > PR: #1189
-> Companion to: PR #1187 (concurrent-run guard), PR #1188 (stale-run autowire)
+> Companion to: PR #1187 (DB-authoritative concurrent-run guard), PR #1197 (stale-run best-effort autowire)
 
 ## Problem
 
-PR #1187 added two access patterns to `integration_runs` that the existing single-column
-indexes do not serve efficiently:
+#1187 and #1197 add three access patterns to `integration_runs`. #1187 now owns
+correctness with migration 058's partial unique index; this PR is only a
+performance follow-up for read/query shape.
 
 ### Pattern 1 — Concurrent-run guard (LIMIT 1)
 
@@ -20,7 +21,10 @@ WHERE tenant_id = $1
 LIMIT 1
 ```
 
-Fires on every `POST /pipelines/:id/run` request. With existing indexes:
+Fires on every `POST /pipelines/:id/run` request. Correctness is guaranteed by
+`uniq_integration_runs_one_running_per_pipeline` from migration 058. This PR
+only gives the friendly pre-check a regular lookup path before the insert hits
+the unique guard.
 
 | Index | Selectivity | Action |
 |---|---|---|
@@ -38,36 +42,53 @@ trigger.
 SELECT * FROM integration_runs
 WHERE tenant_id = $1
   AND workspace_id = $2
-  AND [pipeline_id = $3]
+  AND pipeline_id = $3
   AND status = 'running'
 ```
 
-Same multi-index join problem. Called once per `runPipeline` invocation (PR #1188).
+Called once per `runPipeline` invocation by #1197. The #1197 call is
+pipeline-scoped, so the lookup includes `pipeline_id`.
+
+### Pattern 3 — Run history for one pipeline and status
+
+```sql
+SELECT * FROM integration_runs
+WHERE tenant_id = $1
+  AND workspace_id = $2
+  AND pipeline_id = $3
+  AND status = $4
+ORDER BY created_at DESC
+LIMIT $5
+```
+
+This powers operator run-history screens such as:
+`GET /api/integration/runs?pipelineId=...&status=succeeded`.
 
 ## Solution
 
-Migration 058 adds a single composite index:
+Migration 059 adds a single composite index:
 
 ```sql
-CREATE INDEX IF NOT EXISTS idx_integration_runs_tenant_pipeline_status
-  ON integration_runs (tenant_id, pipeline_id, status);
+CREATE INDEX IF NOT EXISTS idx_integration_runs_scope_pipeline_status_created_at
+  ON integration_runs (tenant_id, workspace_id, pipeline_id, status, created_at DESC);
 ```
 
 ### Why these columns and this order
 
-- `tenant_id` first — highest selectivity in multi-tenant deployments; eliminates
-  cross-tenant rows immediately
-- `pipeline_id` second — narrows to one pipeline's runs in the remaining set
-- `status` third — the guard filters only `'running'` rows; with the composite, Postgres
-  can scan `(tenant_1, pipe_1, 'running')` as a single key lookup → LIMIT 1 short-circuits
-  after the first match (or no rows found)
+- `tenant_id`, `workspace_id` first — matches the integration scope guard used
+  throughout the plugin registries.
+- `pipeline_id` third — narrows to one pipeline's runs in the remaining scoped set.
+- `status` fourth — supports both `running` pre-check/stale cleanup and status
+  filtered run history.
+- `created_at DESC` last — supports the run-history `ORDER BY created_at DESC`
+  without an extra sort when all preceding equality predicates are present.
 
-### Why `workspace_id` is not in the leading columns
+### Why `workspace_id` is a normal key column
 
-Most deployments use one workspace per tenant. Including `workspace_id` in the index key
-would create a second dimension before `pipeline_id`, increasing index size while providing
-minimal additional filtering benefit. The `workspace_id` condition is cheap to evaluate
-as a residual predicate after the `(tenant_id, pipeline_id, status)` prefix narrows to O(1) rows.
+The DB unique index in 058 uses `COALESCE(workspace_id, '')` because it needs
+NULL-deterministic uniqueness. This performance index uses plain `workspace_id`
+because the safe query builder emits `workspace_id IS NULL` or
+`workspace_id = $n`; using a plain column keeps the index aligned with the query.
 
 ### Why not `CONCURRENTLY`
 
@@ -85,33 +106,33 @@ the normal migration runner in this PR.
 
 ## Secondary benefit
 
-`listPipelineRuns` with both `pipelineId` and `status` filters also benefits:
+The earlier draft used migration number 058 and an index on
+`(tenant_id, pipeline_id, status)`. That is no longer correct after #1187 merged:
 
-```sql
-SELECT * FROM integration_runs
-WHERE tenant_id = $1 AND workspace_id = $2 AND pipeline_id = $3 AND status = $4
-```
-
-This is the `GET /api/integration/runs?pipelineId=...&status=succeeded` access pattern
-used by the operator UI run-history view.
+- 058 is already used by the DB-authoritative running-run unique index.
+- The original index did not include `workspace_id`, so it did not match the
+  full tenant/workspace scope used by integration registry queries.
+- The original index did not include `created_at DESC`, so it did less for
+  ordered run-history pages.
 
 ## Files changed
 
 | File | Change |
 |---|---|
-| `packages/core-backend/migrations/058_integration_runs_composite_index.sql` | New migration (29 lines, comments included) |
+| `packages/core-backend/migrations/059_integration_runs_history_index.sql` | New performance index migration |
+| `plugins/plugin-integration-core/__tests__/migration-sql.test.cjs` | Validates 059 index structure |
 | this design doc | — |
 | matching verification doc | — |
 
 ## What this does NOT change
 
 - No application code changes — pure schema/index addition
-- The 057 migration is untouched
-- `migration-sql.test.cjs` validates 057 only; the 058 migration is tested by CI's
-  `migration-replay` job which replays all migrations against a real Postgres instance
+- The 057/058 migrations are untouched
+- This PR does not change locking correctness; 058's partial unique index remains
+  the final concurrent-run guard.
 
 ## Cross-references
 
-- PR #1187 — concurrent-run guard (introduces the query this index serves)
-- PR #1188 — stale-run autowire (introduces `abandonStaleRuns` call inside `runPipeline`)
+- PR #1187 — DB-authoritative concurrent-run guard
+- PR #1197 — stale-run best-effort autowire
 - `plugins/plugin-integration-core/lib/pipelines.cjs` — `createPipelineRun` and `abandonStaleRuns`
