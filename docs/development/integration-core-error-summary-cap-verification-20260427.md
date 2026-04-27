@@ -31,7 +31,7 @@
 
 ## Regression Guard
 
-All 18 `plugin-integration-core` test files pass on top of latest `origin/main` (`d7fd6d6ea`):
+All 18 `plugin-integration-core` test files pass on top of latest `origin/main` (`80cad6a2d`):
 
 ```
 ✓ credential-store        ✓ adapter-contracts       ✓ http-adapter
@@ -45,5 +45,5 @@ All 18 `plugin-integration-core` test files pass on top of latest `origin/main` 
 ## Worktree
 
 Branch: `codex/integration-error-summary-cap-20260427`  
-Worktree: `/tmp/ms2-error-summary-cap`  
-Base: `d7fd6d6ea` (origin/main after PR #1204)
+Worktree: `/private/tmp/ms2-error-summary-cap`  
+Base: `80cad6a2d` (origin/main after PR #1205)
