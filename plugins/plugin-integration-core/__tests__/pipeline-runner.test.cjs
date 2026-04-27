@@ -615,6 +615,74 @@ async function main() {
   assert.equal(discardReplay.details.status, 'discarded', 'error details include discarded status')
   assert.equal(discardHarness.targetRows.size, 0, 'target unchanged after rejected discarded-letter replay')
 
+  // --- 7. finishRun failure does not mask original pipeline error ----------
+  // If finishRun itself throws (e.g. DB is down at the moment of failure),
+  // the caller must still see the ORIGINAL pipeline error, not the DB error.
+  {
+    const failingDb = createMockDb()
+    const failingPipelineRegistry = createPipelineRegistry(
+      { ...createRunnerHarness({ sourceRecords: [] }).pipeline },
+      failingDb
+    )
+    // Build a runLogger where finishRun always throws a secondary DB error
+    const throwingRunLogger = {
+      async startRun(input) {
+        const id = 'run_fail_test'
+        const row = {
+          id,
+          tenant_id: input.tenantId,
+          workspace_id: input.workspaceId ?? null,
+          pipeline_id: input.pipelineId,
+          mode: input.mode,
+          triggered_by: input.triggeredBy,
+          status: input.status,
+          rows_read: 0,
+          rows_cleaned: 0,
+          rows_written: 0,
+          rows_failed: 0,
+          started_at: input.startedAt || null,
+          details: input.details || {},
+        }
+        await failingDb.insertOne('integration_runs', row)
+        return { id, tenantId: input.tenantId, workspaceId: input.workspaceId ?? null, pipelineId: input.pipelineId, status: 'running', details: {} }
+      },
+      async finishRun() {
+        throw new Error('DB connection lost — cannot update run status')
+      },
+    }
+    const failRunner = createPipelineRunner({
+      pipelineRegistry: failingPipelineRegistry,
+      externalSystemRegistry: createExternalSystemRegistry(),
+      adapterRegistry: createAdapterRegistry()
+        .registerAdapter('mock-source', () => ({
+          async testConnection() { return { ok: true } },
+          async listObjects() { return [] },
+          async getSchema() { return { fields: [] } },
+          async read() { throw new Error('source read failed: network timeout') },
+          async upsert() { throw new Error('source upsert should not be called') },
+        }))
+        .registerAdapter('mock-target', () => ({
+          async testConnection() { return { ok: true } },
+          async listObjects() { return [] },
+          async getSchema() { return { fields: [] } },
+          async read() { return createReadResult({ records: [] }) },
+          async upsert() { return createUpsertResult({ written: 0, skipped: 0, results: [] }) },
+        })),
+      deadLetterStore: createDeadLetterStore({ db: failingDb }),
+      watermarkStore: createWatermarkStore({ db: failingDb }),
+      runLogger: throwingRunLogger,
+    })
+    const originalError = await failRunner.runPipeline({
+      tenantId: 'tenant_1',
+      pipelineId: 'pipe_1',
+      mode: 'manual',
+      triggeredBy: 'api',
+    }).catch((error) => error)
+    assert.equal(originalError.name, 'PipelineRunnerError', 'error is PipelineRunnerError even when finishRun throws')
+    assert.match(originalError.details.cause, /source read failed/, 'original pipeline error preserved in cause')
+    assert.doesNotMatch(originalError.message + (originalError.details.cause || ''), /DB connection lost/, 'secondary finishRun error is suppressed')
+  }
+
   // --- 11. dryRun string coercion (REST API hand-typed booleans) ---------
   {
     const stringDry = createRunnerHarness({
