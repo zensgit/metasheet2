@@ -33,7 +33,7 @@
 
 ## Regression Guard
 
-After merging current `origin/main`, including list limit, list offset, and public run-mode guards, all 18 `plugin-integration-core` test files pass:
+After merging current `origin/main`, including list limit, list offset, public run-mode, and finishRun success warning guards, all 18 `plugin-integration-core` test files pass:
 
 ```
 http-routes: REST auth/list/upsert/run/dry-run/replay tests passed
