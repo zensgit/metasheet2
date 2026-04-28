@@ -109,17 +109,17 @@ Remote container state after the successful deploy:
 - `metasheet-postgres`: healthy
 - `metasheet-redis`: healthy
 
-A later mainline deployment superseded the container image tag with `1366cb7bf8728848bb743bfc57e43f907dd78efa`, which includes `1084f6ebb81f79423d33f25fb4baed8f28e98208`.
+Later non-doc mainline deployments can supersede the container image tag while still including `1084f6ebb81f79423d33f25fb4baed8f28e98208`.
 
-Final observed 142 state after that deployment:
+Latest observed 142 state during this verification window:
 
-- `metasheet-backend`: `ghcr.io/zensgit/metasheet2-backend:1366cb7bf8728848bb743bfc57e43f907dd78efa`
-- `metasheet-web`: `ghcr.io/zensgit/metasheet2-web:1366cb7bf8728848bb743bfc57e43f907dd78efa`
+- `metasheet-backend`: `ghcr.io/zensgit/metasheet2-backend:8cfcbab420ee2a8674379fc4d2a746b40ed87d53`
+- `metasheet-web`: `ghcr.io/zensgit/metasheet2-web:8cfcbab420ee2a8674379fc4d2a746b40ed87d53`
 - `metasheet-postgres`: healthy
 - `metasheet-redis`: healthy
-- Root filesystem: `55G` used, `19G` available, `75%`.
+- Root filesystem: `56G` used, `19G` available, `76%`.
 
-The docs-only merge that records this evidence does not trigger another Docker deploy because `.github/workflows/docker-build.yml` ignores `docs/**`.
+Docs-only merges that record this evidence do not trigger another Docker deploy because `.github/workflows/docker-build.yml` ignores `docs/**`.
 
 Workflow deploy log markers:
 
