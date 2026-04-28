@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
   applyExternalSystemToForm,
+  buildK3WisePipelinePayloads,
   buildK3WiseSetupPayloads,
   createDefaultK3WiseSetupForm,
   splitList,
+  validateK3WisePipelineTemplateForm,
   validateK3WiseSetupForm,
   type IntegrationExternalSystem,
 } from '../src/services/integration/k3WiseSetup'
@@ -134,5 +136,76 @@ describe('K3 WISE setup helpers', () => {
 
   it('splits comma and newline table lists', () => {
     expect(splitList('t_ICItem, t_ICBOM\n t_ICBomChild')).toEqual(['t_ICItem', 't_ICBOM', 't_ICBomChild'])
+  })
+
+  it('builds draft material and BOM cleansing pipeline templates', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      projectId: 'project_1',
+      sourceSystemId: 'plm_1',
+      webApiSystemId: 'k3_1',
+      materialStagingObjectId: 'standard_materials',
+      bomStagingObjectId: 'bom_cleanse',
+    })
+
+    expect(validateK3WisePipelineTemplateForm(form)).toEqual([])
+    const payloads = buildK3WisePipelinePayloads(form)
+
+    expect(payloads.material).toMatchObject({
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      projectId: 'project_1',
+      sourceSystemId: 'plm_1',
+      targetSystemId: 'k3_1',
+      sourceObject: 'materials',
+      targetObject: 'material',
+      mode: 'incremental',
+      status: 'draft',
+      idempotencyKeyFields: ['sourceId', 'revision'],
+      options: {
+        erpFeedback: {
+          objectId: 'standard_materials',
+          keyField: '_integration_idempotency_key',
+        },
+      },
+    })
+    expect(payloads.material.fieldMappings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sourceField: 'code', targetField: 'FNumber' }),
+        expect.objectContaining({ sourceField: 'name', targetField: 'FName' }),
+      ]),
+    )
+    expect(payloads.bom).toMatchObject({
+      sourceObject: 'bom',
+      targetObject: 'bom',
+      mode: 'manual',
+      options: {
+        erpFeedback: {
+          objectId: 'bom_cleanse',
+        },
+      },
+    })
+    expect(payloads.bom.fieldMappings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sourceField: 'parentCode', targetField: 'FParentItemNumber' }),
+        expect.objectContaining({ sourceField: 'quantity', targetField: 'FQty' }),
+      ]),
+    )
+  })
+
+  it('requires saved PLM source and K3 target systems before pipeline template creation', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      sourceSystemId: '',
+      webApiSystemId: '',
+    })
+
+    const messages = validateK3WisePipelineTemplateForm(form).map((issue) => issue.message)
+    expect(messages).toContain('PLM source system ID is required')
+    expect(messages).toContain('Save or select a K3 WISE WebAPI system before creating pipelines')
+    expect(() => buildK3WisePipelinePayloads(form)).toThrow('PLM source system ID is required')
   })
 })
