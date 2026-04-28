@@ -76,17 +76,68 @@ No webhook URL, DingTalk signing secret, bearer token, JWT, or raw `Authorizatio
 
 Recommended post-merge/post-deploy secret scan: run the existing DingTalk release secret scan over the changed source files and this document set.
 
-## Post-deploy Checklist
+## 142 Deploy and Post-deploy Verification
 
-After the branch is merged and the GHCR images are deployed to 142:
+PR #1212 was merged into `main` as commit `1084f6ebb81f79423d33f25fb4baed8f28e98208`.
 
-1. Confirm `/api/health` reports all plugins active.
-2. Generate or refresh a short-lived admin app token if needed; validate `/api/auth/me`.
-3. Open the form sharing panel and confirm the access-rule card appears for all three access modes.
-4. Confirm selected allowed users display DingTalk binding / authorization status.
-5. Confirm candidate search rows display DingTalk status.
-6. Re-run one real DingTalk public-form flow for each mode:
-   - `public`
-   - `dingtalk`
-   - `dingtalk_granted`
-7. Re-test a platform-created DingTalk user with `must_change_password = true`; expected behavior is form fill allowed through DingTalk public-form auth, while normal app routes still require password change.
+GitHub Actions run:
+
+- Run: `25042260683`
+- URL: `https://github.com/zensgit/metasheet2/actions/runs/25042260683`
+- Final status: `completed`
+- Final conclusion: `success`
+- Jobs: `build=success`, `deploy=success`
+
+The first deploy attempt failed before the remote deploy stage finished because the deploy host root filesystem was full:
+
+- Root filesystem before cleanup: `100%`, `0` available.
+- Docker image usage before cleanup: `41.38GB` total, `37.88GB` reclaimable.
+- Docker volumes were not pruned.
+
+Cleanup performed on `142.171.239.56`:
+
+- Removed one stale release image bundle under `artifacts/releases/dingtalk-image-bundles`.
+- Removed 70 unused `ghcr.io/zensgit/metasheet2-backend` / `ghcr.io/zensgit/metasheet2-web` image IDs in two conservative batches.
+- Root filesystem after cleanup and deploy: `55G` used, `20G` available, `74%`.
+
+The failed workflow jobs were then re-run with `gh run rerun 25042260683 --failed`.
+
+Remote container state after the successful deploy:
+
+- `metasheet-backend`: `ghcr.io/zensgit/metasheet2-backend:1084f6ebb81f79423d33f25fb4baed8f28e98208`
+- `metasheet-web`: `ghcr.io/zensgit/metasheet2-web:1084f6ebb81f79423d33f25fb4baed8f28e98208`
+- `metasheet-postgres`: healthy
+- `metasheet-redis`: healthy
+
+Workflow deploy log markers:
+
+- `=== DEPLOY START ===` / `=== DEPLOY END ===`: present.
+- `=== MIGRATE START ===` / `=== MIGRATE END ===`: present.
+- `=== SMOKE START ===` / `=== SMOKE END ===`: present.
+- Smoke summary: `api/plugins=ok health=ok web=ok`.
+
+Live HTTP checks:
+
+```bash
+curl -sS -m 10 http://142.171.239.56:8081/api/health
+curl -sS -m 10 http://142.171.239.56:8081/
+curl -sS -m 10 'http://142.171.239.56:8081/multitable/public-form/sheet_dingtalk_form_demo_20260420/view_form_dingtalk_demo_20260420?publicToken=pub_dingtalk_demo_20260420'
+```
+
+Results:
+
+- `/api/health`: `200`, `status=ok`, `plugins.total=13`, `plugins.active=13`, `plugins.failed=0`.
+- `/`: `200`, returned the MetaSheet frontend shell.
+- Public-form route: `200`, returned the MetaSheet frontend shell and did not redirect to a password-change page at the HTTP shell level.
+
+Runtime log check:
+
+- Backend logs after deploy showed normal plugin registration and server startup.
+- No real backend error stack, public-form exception, or DingTalk access-matrix error was observed in the checked deploy window.
+- Web logs showed expected nginx startup and `200` responses for `/`, `/api/health`, and the public-form route.
+
+Remaining manual checks:
+
+- Open the form sharing panel in a browser and visually confirm the access-rule card for `public`, `dingtalk`, and `dingtalk_granted`.
+- Confirm selected allowed users and candidate search rows display DingTalk binding / grant status.
+- Re-run a real DingTalk mobile flow for `public`, `dingtalk`, and `dingtalk_granted` if screenshots or product signoff evidence is required.

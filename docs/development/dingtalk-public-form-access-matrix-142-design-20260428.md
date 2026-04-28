@@ -47,13 +47,13 @@ Frontend:
 
 ## Deployment Position
 
-142 currently runs GHCR images for commit `dba5c8eac44fbd468310078ecb7952752299dc5a`, which already contains the password-change public-form fix.
+142 now runs GHCR images for merge commit `1084f6ebb81f79423d33f25fb4baed8f28e98208`, which contains both:
 
-This branch adds the remaining operator-visibility/access-matrix UI and config-response enrichment. It has not been deployed to 142 in this step because the local machine has no usable Docker daemon, and the repo's automated image build/deploy workflow is main-branch based.
+- The existing public-form password-change bypass for DingTalk token-authenticated fill flows.
+- The operator-facing public-form DingTalk access-matrix UI and config-response enrichment from PR #1212.
 
-Recommended release path:
+Deployment happened through `.github/workflows/docker-build.yml` after the branch was merged to `main`.
 
-1. Merge this branch to `main`.
-2. Let `.github/workflows/docker-build.yml` build and push backend/web images tagged by the merge commit SHA.
-3. Let the workflow deploy to 142, or manually deploy the pinned SHA with the existing production SOP.
-4. Run the post-deploy checks in the companion verification document.
+The first deploy attempt failed during deploy-host file sync because the remote root filesystem was full. Old unused Docker images and one stale release image bundle were removed without touching Docker volumes, then the failed workflow jobs were re-run successfully.
+
+The companion verification document records the exact post-deploy checks.
