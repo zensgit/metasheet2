@@ -98,6 +98,11 @@ describe('public multitable form route wiring', () => {
     expect(router.currentRoute.value.name).toBe(AppRouteNames.MULTITABLE_PUBLIC_FORM)
     const matched = router.currentRoute.value.matched.find((record) => record.name === AppRouteNames.MULTITABLE_PUBLIC_FORM)
     expect(matched?.path).toBe(ROUTE_PATHS.MULTITABLE_PUBLIC_FORM)
+    expect(matched?.meta).toMatchObject({
+      hideNavbar: true,
+      requiresAuth: false,
+      skipShellBootstrap: true,
+    })
     expect(resolvePublicMultitableFormRouteProps(router.currentRoute.value as any)).toEqual({
       sheetId: 'sheet_orders',
       viewId: 'view_form',

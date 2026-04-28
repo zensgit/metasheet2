@@ -85,7 +85,13 @@ async function hydrateAuthenticatedUser(req: Request, token: string): Promise<
       }
     }
 
-    if (user.must_change_password === true && !isPasswordChangeWhitelisted(req.path || req.originalUrl || '')) {
+    // DingTalk-protected public forms use optional auth. A local temporary
+    // password requirement should not block this external-auth form flow.
+    if (
+      user.must_change_password === true &&
+      !isPasswordChangeWhitelisted(req.path || req.originalUrl || '') &&
+      !isPublicFormAuthBypass(req)
+    ) {
       return {
         ok: false,
         statusCode: 403,
