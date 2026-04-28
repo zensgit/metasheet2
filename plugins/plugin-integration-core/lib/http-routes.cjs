@@ -168,7 +168,7 @@ function asPositiveInt(value) {
 }
 
 // 'replay' is internal-only: set by replayDeadLetter, not accepted over the API.
-const VALID_USER_RUN_MODES = new Set(['manual', 'incremental', 'scheduled'])
+const VALID_USER_RUN_MODES = new Set(['manual', 'incremental', 'full'])
 
 function asListLimit(value) {
   const n = asPositiveInt(value)
