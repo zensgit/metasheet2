@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   applyExternalSystemToForm,
+  buildK3WisePipelineObservationQuery,
   buildK3WisePipelinePayloads,
   buildK3WisePipelineRunPayload,
   buildK3WiseSetupPayloads,
@@ -8,6 +9,7 @@ import {
   createDefaultK3WiseSetupForm,
   getK3WisePipelineId,
   splitList,
+  validateK3WisePipelineObservationForm,
   validateK3WisePipelineTemplateForm,
   validateK3WisePipelineRunForm,
   validateK3WiseSetupForm,
@@ -282,5 +284,38 @@ describe('K3 WISE setup helpers', () => {
     expect(messages).toContain('Material pipeline ID is required before dry-run or run')
     expect(messages).toContain('Sample limit must be a positive integer')
     expect(() => buildK3WisePipelineRunPayload(form, 'material')).toThrow('tenantId is required')
+  })
+
+  it('builds run and dead-letter observation queries for selected pipelines', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      materialPipelineId: 'pipe_material',
+      bomPipelineId: 'pipe_bom',
+    })
+
+    expect(validateK3WisePipelineObservationForm(form, 'bom')).toEqual([])
+    expect(buildK3WisePipelineObservationQuery(form, 'bom', { status: 'open', limit: 5, offset: 0 })).toEqual({
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      pipelineId: 'pipe_bom',
+      status: 'open',
+      limit: 5,
+      offset: 0,
+    })
+  })
+
+  it('requires tenant and pipeline id before loading run history', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: '',
+      bomPipelineId: '',
+    })
+
+    const messages = validateK3WisePipelineObservationForm(form, 'bom').map((issue) => issue.message)
+    expect(messages).toContain('tenantId is required')
+    expect(messages).toContain('BOM pipeline ID is required before loading run history')
+    expect(() => buildK3WisePipelineObservationQuery(form, 'bom')).toThrow('tenantId is required')
   })
 })
