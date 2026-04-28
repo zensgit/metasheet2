@@ -133,6 +133,13 @@
                     <span class="meta-form-share__chip-text">
                       {{ group.label }}
                       <span v-if="group.subtitle" class="meta-form-share__chip-subtitle">{{ group.subtitle }}</span>
+                      <span
+                        v-if="subjectDingTalkStatus(group)"
+                        class="meta-form-share__chip-subtitle"
+                        :data-form-share-dingtalk-status="subjectDingTalkStatus(group)"
+                      >
+                        {{ subjectDingTalkStatus(group) }}
+                      </span>
                     </span>
                     <button
                       class="meta-form-share__chip-remove"
