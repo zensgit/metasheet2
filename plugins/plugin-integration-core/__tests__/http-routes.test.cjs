@@ -197,6 +197,25 @@ function createMockServices(overrides = {}) {
         return [deadLetter]
       },
     },
+    stagingInstaller: {
+      listStagingDescriptors() {
+        calls.push(['listStagingDescriptors'])
+        return [
+          { id: 'standard_materials', name: 'Standard Materials', fields: ['code', 'name'] },
+          { id: 'bom_cleanse', name: 'BOM Cleanse', fields: ['parentCode', 'childCode'] },
+        ]
+      },
+      async installStaging(input) {
+        calls.push(['installStaging', input])
+        return {
+          sheetIds: {
+            standard_materials: 'sheet_materials',
+            bom_cleanse: 'sheet_bom',
+          },
+          warnings: [],
+        }
+      },
+    },
   }
 
   return {
@@ -593,6 +612,58 @@ async function testPipelineRoutes() {
   })
   assert.equal(dryModeRes.statusCode, 400, "mode 'replay' must be rejected on dry-run too")
   assert.equal(dryModeRes.body.error.code, 'INVALID_RUN_MODE')
+}
+
+async function testStagingRoutes() {
+  const { calls, services } = createMockServices()
+  const { routes, registered } = mountRoutes(services)
+
+  assert.ok(
+    registered.includes('GET /api/integration/staging/descriptors'),
+    'staging descriptors route registered',
+  )
+  assert.ok(
+    registered.includes('POST /api/integration/staging/install'),
+    'staging install route registered',
+  )
+
+  let res = await invoke(routes, 'GET', '/api/integration/staging/descriptors', {
+    user: READ_USER,
+    query: { workspaceId: 'workspace_1' },
+  })
+  assertOkResponse(res, 200)
+  assert.deepEqual(res.body.data.map((item) => item.id), ['standard_materials', 'bom_cleanse'])
+  assert.equal(findCalls(calls, 'listStagingDescriptors').length, 1)
+
+  res = await invoke(routes, 'POST', '/api/integration/staging/install', {
+    user: WRITE_USER,
+    body: {
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      projectId: 'project_1',
+      baseId: 'base_1',
+    },
+  })
+  assertOkResponse(res, 201)
+  assert.deepEqual(res.body.data.sheetIds, {
+    standard_materials: 'sheet_materials',
+    bom_cleanse: 'sheet_bom',
+  })
+  assert.deepEqual(findCall(calls, 'installStaging')[1], {
+    tenantId: 'tenant_1',
+    workspaceId: 'workspace_1',
+    projectId: 'project_1',
+    baseId: 'base_1',
+  })
+
+  const missingProject = await invoke(routes, 'POST', '/api/integration/staging/install', {
+    user: WRITE_USER,
+    body: {
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+    },
+  })
+  assertErrorResponse(missingProject, [400])
 }
 
 async function testRunAndDeadLetterRoutes() {
@@ -1011,6 +1082,7 @@ async function main() {
   await testExternalSystemRoutes()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
   await testPipelineRoutes()
+  await testStagingRoutes()
   await testRunAndDeadLetterRoutes()
   await testErrorResponseShape()
   await testTenantGuards()
@@ -1018,7 +1090,7 @@ async function main() {
   await testSampleLimitCap()
   await testListOffsetCap()
 
-  console.log('http-routes: REST auth/list/upsert/run/dry-run/replay tests passed')
+  console.log('http-routes: REST auth/list/upsert/run/dry-run/staging/replay tests passed')
 }
 
 main().catch((err) => {
