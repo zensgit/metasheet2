@@ -90,6 +90,51 @@
           </ul>
           <pre v-if="pipelineResult" class="k3-setup__test-result">{{ pipelineResult }}</pre>
         </div>
+
+        <div class="k3-setup__panel">
+          <div class="k3-setup__panel-head">
+            <h2>执行 Pipeline</h2>
+            <span>{{ form.allowLivePipelineRun ? 'run enabled' : 'dry-run first' }}</span>
+          </div>
+          <button
+            class="k3-setup__btn k3-setup__btn--full"
+            type="button"
+            :disabled="isPipelineRunDisabled('material', true)"
+            @click="executePipeline('material', true)"
+          >
+            {{ runningPipeline === 'material:dry-run' ? 'Dry-run 中' : 'Dry-run 物料' }}
+          </button>
+          <button
+            class="k3-setup__btn k3-setup__btn--full"
+            type="button"
+            :disabled="isPipelineRunDisabled('material', false)"
+            @click="executePipeline('material', false)"
+          >
+            {{ runningPipeline === 'material:run' ? '执行中' : '执行物料' }}
+          </button>
+          <button
+            class="k3-setup__btn k3-setup__btn--full"
+            type="button"
+            :disabled="isPipelineRunDisabled('bom', true)"
+            @click="executePipeline('bom', true)"
+          >
+            {{ runningPipeline === 'bom:dry-run' ? 'Dry-run 中' : 'Dry-run BOM' }}
+          </button>
+          <button
+            class="k3-setup__btn k3-setup__btn--full"
+            type="button"
+            :disabled="isPipelineRunDisabled('bom', false)"
+            @click="executePipeline('bom', false)"
+          >
+            {{ runningPipeline === 'bom:run' ? '执行中' : '执行 BOM' }}
+          </button>
+          <ul v-if="materialRunIssues.length || bomRunIssues.length" class="k3-setup__issues k3-setup__issues--compact">
+            <li v-for="issue in [...materialRunIssues, ...bomRunIssues]" :key="`run:${issue.field}:${issue.message}`">
+              {{ issue.message }}
+            </li>
+          </ul>
+          <pre v-if="pipelineRunResult" class="k3-setup__test-result">{{ pipelineRunResult }}</pre>
+        </div>
       </aside>
 
       <form class="k3-setup__form" @submit.prevent="saveConfiguration">
@@ -310,6 +355,10 @@
               <input v-model.trim="form.materialPipelineName" autocomplete="off" />
             </label>
             <label class="k3-setup__field">
+              <span>物料 Pipeline ID</span>
+              <input v-model.trim="form.materialPipelineId" autocomplete="off" />
+            </label>
+            <label class="k3-setup__field">
               <span>物料 Staging 对象</span>
               <input v-model.trim="form.materialStagingObjectId" autocomplete="off" />
             </label>
@@ -318,8 +367,32 @@
               <input v-model.trim="form.bomPipelineName" autocomplete="off" />
             </label>
             <label class="k3-setup__field">
+              <span>BOM Pipeline ID</span>
+              <input v-model.trim="form.bomPipelineId" autocomplete="off" />
+            </label>
+            <label class="k3-setup__field">
               <span>BOM Staging 对象</span>
               <input v-model.trim="form.bomStagingObjectId" autocomplete="off" />
+            </label>
+            <label class="k3-setup__field">
+              <span>执行模式</span>
+              <select v-model="form.pipelineRunMode">
+                <option value="manual">manual</option>
+                <option value="incremental">incremental</option>
+                <option value="full">full</option>
+              </select>
+            </label>
+            <label class="k3-setup__field">
+              <span>Sample Limit</span>
+              <input v-model.trim="form.pipelineSampleLimit" inputmode="numeric" autocomplete="off" />
+            </label>
+            <label class="k3-setup__field">
+              <span>Cursor</span>
+              <input v-model.trim="form.pipelineCursor" autocomplete="off" />
+            </label>
+            <label class="k3-setup__check">
+              <input v-model="form.allowLivePipelineRun" type="checkbox" />
+              <span>允许真实执行 Pipeline</span>
             </label>
           </div>
         </section>
@@ -335,18 +408,23 @@ import {
   K3_WISE_WEBAPI_KIND,
   applyExternalSystemToForm,
   buildK3WisePipelinePayloads,
+  buildK3WisePipelineRunPayload,
   buildK3WiseSetupPayloads,
   buildK3WiseStagingInstallPayload,
   createDefaultK3WiseSetupForm,
+  getK3WisePipelineId,
   installIntegrationStaging,
   listIntegrationSystems,
+  runIntegrationPipeline,
   testIntegrationSystem,
   upsertIntegrationPipeline,
   upsertIntegrationSystem,
   validateK3WisePipelineTemplateForm,
+  validateK3WisePipelineRunForm,
   validateK3WiseSetupForm,
   validateK3WiseStagingInstallForm,
   type IntegrationExternalSystem,
+  type K3WisePipelineTarget,
 } from '../services/integration/k3WiseSetup'
 
 const form = reactive(createDefaultK3WiseSetupForm())
@@ -358,16 +436,20 @@ const testingWebApi = ref(false)
 const testingSql = ref(false)
 const installingStaging = ref(false)
 const creatingPipelines = ref(false)
+const runningPipeline = ref('')
 const statusMessage = ref('')
 const statusKind = ref<'info' | 'success' | 'error'>('info')
 const testResult = ref('')
 const stagingResult = ref('')
 const pipelineResult = ref('')
+const pipelineRunResult = ref('')
 
 const savedSystems = computed(() => [...webApiSystems.value, ...sqlSystems.value])
 const validationIssues = computed(() => validateK3WiseSetupForm(form))
 const stagingIssues = computed(() => validateK3WiseStagingInstallForm(form))
 const pipelineIssues = computed(() => validateK3WisePipelineTemplateForm(form))
+const materialRunIssues = computed(() => validateK3WisePipelineRunForm(form, 'material'))
+const bomRunIssues = computed(() => validateK3WisePipelineRunForm(form, 'bom'))
 
 function setStatus(message: string, kind: 'info' | 'success' | 'error' = 'info'): void {
   statusMessage.value = message
@@ -500,6 +582,8 @@ async function createPipelineTemplates(): Promise<void> {
       upsertIntegrationPipeline(payloads.material),
       upsertIntegrationPipeline(payloads.bom),
     ])
+    form.materialPipelineId = material.id
+    form.bomPipelineId = bom.id
     pipelineResult.value = JSON.stringify({
       material: { id: material.id, name: material.name, status: material.status },
       bom: { id: bom.id, name: bom.name, status: bom.status },
@@ -509,6 +593,40 @@ async function createPipelineTemplates(): Promise<void> {
     setStatus(formatError(error), 'error')
   } finally {
     creatingPipelines.value = false
+  }
+}
+
+function isPipelineRunDisabled(target: K3WisePipelineTarget, dryRun: boolean): boolean {
+  const issues = target === 'material' ? materialRunIssues.value : bomRunIssues.value
+  return Boolean(runningPipeline.value || issues.length > 0 || (!dryRun && !form.allowLivePipelineRun))
+}
+
+async function executePipeline(target: K3WisePipelineTarget, dryRun: boolean): Promise<void> {
+  const issues = validateK3WisePipelineRunForm(form, target)
+  if (issues.length > 0) {
+    setStatus(issues[0].message, 'error')
+    return
+  }
+  if (!dryRun && !form.allowLivePipelineRun) {
+    setStatus('真实执行前需要勾选允许真实执行 Pipeline', 'error')
+    return
+  }
+  runningPipeline.value = `${target}:${dryRun ? 'dry-run' : 'run'}`
+  pipelineRunResult.value = ''
+  try {
+    const pipelineId = getK3WisePipelineId(form, target)
+    const result = await runIntegrationPipeline(pipelineId, buildK3WisePipelineRunPayload(form, target), dryRun)
+    pipelineRunResult.value = JSON.stringify({
+      target,
+      dryRun,
+      pipelineId,
+      result,
+    }, null, 2)
+    setStatus(`${target === 'material' ? '物料' : 'BOM'} Pipeline ${dryRun ? 'dry-run' : 'run'} 已提交`, 'success')
+  } catch (error) {
+    setStatus(formatError(error), 'error')
+  } finally {
+    runningPipeline.value = ''
   }
 }
 

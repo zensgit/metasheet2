@@ -2,11 +2,14 @@ import { describe, expect, it } from 'vitest'
 import {
   applyExternalSystemToForm,
   buildK3WisePipelinePayloads,
+  buildK3WisePipelineRunPayload,
   buildK3WiseSetupPayloads,
   buildK3WiseStagingInstallPayload,
   createDefaultK3WiseSetupForm,
+  getK3WisePipelineId,
   splitList,
   validateK3WisePipelineTemplateForm,
+  validateK3WisePipelineRunForm,
   validateK3WiseSetupForm,
   validateK3WiseStagingInstallForm,
   type IntegrationExternalSystem,
@@ -239,5 +242,45 @@ describe('K3 WISE setup helpers', () => {
     const messages = validateK3WiseStagingInstallForm(form).map((issue) => issue.message)
     expect(messages).toContain('projectId is required before installing staging tables')
     expect(() => buildK3WiseStagingInstallPayload(form)).toThrow('projectId is required before installing staging tables')
+  })
+
+  it('builds pipeline dry-run and run payloads with only public run fields', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      materialPipelineId: 'pipe_material',
+      bomPipelineId: 'pipe_bom',
+      pipelineRunMode: 'incremental',
+      pipelineSampleLimit: '25',
+      pipelineCursor: 'wm_123',
+      allowLivePipelineRun: true,
+    })
+
+    expect(validateK3WisePipelineRunForm(form, 'material')).toEqual([])
+    expect(getK3WisePipelineId(form, 'material')).toBe('pipe_material')
+    expect(getK3WisePipelineId(form, 'bom')).toBe('pipe_bom')
+    expect(buildK3WisePipelineRunPayload(form, 'material')).toEqual({
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      mode: 'incremental',
+      sampleLimit: 25,
+      cursor: 'wm_123',
+    })
+  })
+
+  it('requires tenant, pipeline id, and positive sample limit before pipeline execution', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: '',
+      materialPipelineId: '',
+      pipelineSampleLimit: '0',
+    })
+
+    const messages = validateK3WisePipelineRunForm(form, 'material').map((issue) => issue.message)
+    expect(messages).toContain('tenantId is required')
+    expect(messages).toContain('Material pipeline ID is required before dry-run or run')
+    expect(messages).toContain('Sample limit must be a positive integer')
+    expect(() => buildK3WisePipelineRunPayload(form, 'material')).toThrow('tenantId is required')
   })
 })
