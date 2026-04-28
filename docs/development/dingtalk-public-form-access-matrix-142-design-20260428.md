@@ -52,7 +52,7 @@ The access-matrix change was first deployed to 142 with merge commit `1084f6ebb8
 - The existing public-form password-change bypass for DingTalk token-authenticated fill flows.
 - The operator-facing public-form DingTalk access-matrix UI and config-response enrichment from PR #1212.
 
-The final observed host state now runs a later mainline image, `1366cb7bf8728848bb743bfc57e43f907dd78efa`, which includes commit `1084f6ebb81f79423d33f25fb4baed8f28e98208`. The docs-only merge that records this evidence does not trigger a new Docker deploy because `.github/workflows/docker-build.yml` ignores `docs/**` changes.
+Later non-doc mainline deployments can supersede the container tag while still including the access-matrix commit. The latest observed host image during this verification window was `8cfcbab420ee2a8674379fc4d2a746b40ed87d53`, which includes commit `1084f6ebb81f79423d33f25fb4baed8f28e98208`. Docs-only merges that record this evidence do not trigger a new Docker deploy because `.github/workflows/docker-build.yml` ignores `docs/**` changes.
 
 Deployment happened through `.github/workflows/docker-build.yml` after the branch was merged to `main`.
 
