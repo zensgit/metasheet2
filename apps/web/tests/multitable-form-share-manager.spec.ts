@@ -35,7 +35,7 @@ function mockClient(config = fakeConfig()) {
     if (method === 'GET' && url.includes('/form-share-candidates')) {
       return ok({
         items: [
-          { subjectType: 'user', subjectId: 'user_1', label: 'Alice', subtitle: 'alice@test.local', isActive: true, accessLevel: 'write' },
+          { subjectType: 'user', subjectId: 'user_1', label: 'Alice', subtitle: 'alice@test.local', isActive: true, accessLevel: 'write', dingtalkBound: true, dingtalkGrantEnabled: true, dingtalkPersonDeliveryAvailable: true },
           { subjectType: 'member-group', subjectId: 'group_ops', label: 'Ops', subtitle: 'Operations', isActive: true, accessLevel: 'write' },
           { subjectType: 'user', subjectId: 'user_inactive', label: 'Inactive User', subtitle: 'inactive@test.local', isActive: false, accessLevel: 'write', dingtalkBound: false, dingtalkGrantEnabled: false, dingtalkPersonDeliveryAvailable: false },
         ],
@@ -237,6 +237,9 @@ describe('MetaFormShareManager', () => {
     expect(document.querySelector('[data-form-share-audience-rule]')?.textContent).toContain('All authorized DingTalk users')
     expect(document.body.textContent).toContain('DingTalk is only the sign-in and delivery channel. The allowlist still targets your local users and member groups.')
     expect(document.body.textContent).toContain('No local user allowlist configured. Access is still gated by the selected DingTalk mode; add local users or member groups to narrow who can fill this form.')
+    expect(document.body.textContent).toContain('DingTalk bound and authorized')
+    expect(document.body.textContent).toContain('DingTalk not bound')
+    expect(document.body.textContent).toContain('Members are checked individually')
   })
 
   it('summarizes the configured local allowlist audience', async () => {
@@ -257,6 +260,117 @@ describe('MetaFormShareManager', () => {
     expect(summary.textContent).toContain('Local allowlist limits: 1 local user and 1 local member group can fill after passing the selected DingTalk mode.')
     expect(document.querySelector('[data-form-share-audience-rule]')?.textContent).toContain('Selected DingTalk-bound users')
     expect(document.body.textContent).toContain('DingTalk bound')
+    expect(document.body.textContent).toContain('Members are checked individually')
+  })
+
+  it('renders the full DingTalk access matrix for operators', async () => {
+    const cases = [
+      {
+        config: fakeConfig({ accessMode: 'public' }),
+        expected: {
+          mode: 'public',
+          hasLocalAllowlist: 'false',
+          title: 'Fully public anonymous form',
+          description: 'Anyone with the link can open and submit without local login or DingTalk binding.',
+          allowlistVisible: false,
+        },
+      },
+      {
+        config: fakeConfig({ accessMode: 'dingtalk' }),
+        expected: {
+          mode: 'dingtalk',
+          hasLocalAllowlist: 'false',
+          title: 'All DingTalk-bound users',
+          description: 'Any local user can fill after DingTalk sign-in when their account is bound to DingTalk.',
+          allowlistVisible: true,
+        },
+      },
+      {
+        config: fakeConfig({
+          accessMode: 'dingtalk',
+          allowedUserIds: ['user_1'],
+          allowedUsers: [{ subjectType: 'user', subjectId: 'user_1', label: 'Alice', subtitle: 'alice@test.local', isActive: true, dingtalkBound: true, dingtalkGrantEnabled: true, dingtalkPersonDeliveryAvailable: true }],
+        }),
+        expected: {
+          mode: 'dingtalk',
+          hasLocalAllowlist: 'true',
+          title: 'Selected DingTalk-bound users',
+          description: 'Only selected local users or group members can fill, and each user must be bound to DingTalk.',
+          allowlistVisible: true,
+        },
+      },
+      {
+        config: fakeConfig({ accessMode: 'dingtalk_granted' }),
+        expected: {
+          mode: 'dingtalk_granted',
+          hasLocalAllowlist: 'false',
+          title: 'All authorized DingTalk users',
+          description: 'Any DingTalk-bound local user can fill after an administrator enables their DingTalk form authorization.',
+          allowlistVisible: true,
+        },
+      },
+      {
+        config: fakeConfig({
+          accessMode: 'dingtalk_granted',
+          allowedUserIds: ['user_authorized', 'user_needs_grant', 'user_unbound'],
+          allowedUsers: [
+            { subjectType: 'user', subjectId: 'user_authorized', label: 'Authorized User', subtitle: 'authorized@test.local', isActive: true, dingtalkBound: true, dingtalkGrantEnabled: true, dingtalkPersonDeliveryAvailable: true },
+            { subjectType: 'user', subjectId: 'user_needs_grant', label: 'Needs Grant', subtitle: 'needs-grant@test.local', isActive: true, dingtalkBound: true, dingtalkGrantEnabled: false, dingtalkPersonDeliveryAvailable: true },
+            { subjectType: 'user', subjectId: 'user_unbound', label: 'Unbound User', subtitle: 'unbound@test.local', isActive: true, dingtalkBound: false, dingtalkGrantEnabled: false, dingtalkPersonDeliveryAvailable: false },
+          ],
+          allowedMemberGroupIds: ['group_ops'],
+          allowedMemberGroups: [{ subjectType: 'member-group', subjectId: 'group_ops', label: 'Ops', subtitle: 'Operations', isActive: true }],
+        }),
+        expected: {
+          mode: 'dingtalk_granted',
+          hasLocalAllowlist: 'true',
+          title: 'Selected authorized DingTalk users',
+          description: 'Only selected local users or group members can fill, and each user must be DingTalk-bound with form authorization enabled.',
+          allowlistVisible: true,
+        },
+      },
+    ]
+
+    for (const item of cases) {
+      document.body.innerHTML = ''
+      const { client } = mockClient(item.config)
+      const { app } = mount({ visible: true, sheetId: 'sh_1', viewId: 'v_1', client })
+      await flushPromises()
+
+      const audience = document.querySelector('[data-form-share-audience-rule]') as HTMLElement
+      expect(audience).toBeTruthy()
+      expect(audience.getAttribute('data-access-mode')).toBe(item.expected.mode)
+      expect(audience.getAttribute('data-has-local-allowlist')).toBe(item.expected.hasLocalAllowlist)
+      expect(audience.textContent).toContain(item.expected.title)
+      expect(audience.textContent).toContain(item.expected.description)
+      expect(Boolean(document.querySelector('[data-form-share-allowlist-summary]'))).toBe(item.expected.allowlistVisible)
+
+      app.unmount()
+    }
+  })
+
+  it('shows DingTalk grant and member-group statuses for selected allowlist subjects', async () => {
+    const { client } = mockClient(fakeConfig({
+      accessMode: 'dingtalk_granted',
+      allowedUserIds: ['user_authorized', 'user_needs_grant', 'user_unbound'],
+      allowedUsers: [
+        { subjectType: 'user', subjectId: 'user_authorized', label: 'Authorized User', subtitle: 'authorized@test.local', isActive: true, dingtalkBound: true, dingtalkGrantEnabled: true, dingtalkPersonDeliveryAvailable: true },
+        { subjectType: 'user', subjectId: 'user_needs_grant', label: 'Needs Grant', subtitle: 'needs-grant@test.local', isActive: true, dingtalkBound: true, dingtalkGrantEnabled: false, dingtalkPersonDeliveryAvailable: true },
+        { subjectType: 'user', subjectId: 'user_unbound', label: 'Unbound User', subtitle: 'unbound@test.local', isActive: true, dingtalkBound: false, dingtalkGrantEnabled: false, dingtalkPersonDeliveryAvailable: false },
+      ],
+      allowedMemberGroupIds: ['group_ops'],
+      allowedMemberGroups: [{ subjectType: 'member-group', subjectId: 'group_ops', label: 'Ops', subtitle: 'Operations', isActive: true }],
+    }))
+    mount({ visible: true, sheetId: 'sh_1', viewId: 'v_1', client })
+    await flushPromises()
+
+    const statuses = Array.from(document.querySelectorAll('[data-form-share-dingtalk-status]'))
+      .map((el) => el.textContent?.trim())
+
+    expect(statuses).toContain('DingTalk bound and authorized')
+    expect(statuses).toContain('DingTalk authorization not enabled')
+    expect(statuses).toContain('DingTalk not bound')
+    expect(statuses).toContain('Members are checked individually')
   })
 
   it('adds an allowed user through the allowlist controls', async () => {

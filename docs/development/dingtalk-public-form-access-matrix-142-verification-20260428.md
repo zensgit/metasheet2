@@ -148,8 +148,11 @@ Runtime log check:
 - No real backend error stack, public-form exception, or DingTalk access-matrix error was observed in the checked deploy window.
 - Web logs showed expected nginx startup and `200` responses for `/`, `/api/health`, and the public-form route.
 
-Remaining manual checks:
+Follow-up automated UI acceptance:
 
-- Open the form sharing panel in a browser and visually confirm the access-rule card for `public`, `dingtalk`, and `dingtalk_granted`.
-- Confirm selected allowed users and candidate search rows display DingTalk binding / grant status.
+- `docs/development/dingtalk-public-form-access-matrix-ui-acceptance-verification-20260428.md` covers the share-panel access-rule card for `public`, `dingtalk`, and `dingtalk_granted`.
+- The same follow-up verification covers selected allowed users, selected member groups, and candidate search rows displaying DingTalk binding / grant status.
+
+Remaining manual check:
+
 - Re-run a real DingTalk mobile flow for `public`, `dingtalk`, and `dingtalk_granted` if screenshots or product signoff evidence is required.
