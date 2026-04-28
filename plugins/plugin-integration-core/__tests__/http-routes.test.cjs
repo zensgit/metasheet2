@@ -382,6 +382,90 @@ async function testExternalSystemRoutes() {
   assert.deepEqual(findCall(calls, 'createAdapter')[1].credentials, { bearerToken: 'secret-token' })
   assert.equal(res.body.data.ok, true)
   assert.equal(res.body.data.credentials, undefined, 'test response does not leak credentials')
+  assert.equal(res.body.data.system.credentials, undefined, 'test response system does not leak credentials')
+  assert.equal(res.body.data.system.credentialsEncrypted, undefined, 'test response system does not leak ciphertext')
+  const statusUpdates = findCalls(calls, 'upsertExternalSystem')
+  assert.equal(statusUpdates.length, 2, 'external system create plus test status update were persisted')
+  assert.deepEqual(statusUpdates[1][1], {
+    id: 'sys_2',
+    tenantId: 'tenant_1',
+    workspaceId: 'workspace_1',
+    name: 'K3 WISE',
+    kind: 'erp',
+    role: 'target',
+    status: 'active',
+    lastTestedAt: statusUpdates[1][1].lastTestedAt,
+    lastError: null,
+  })
+  assert.ok(!Number.isNaN(Date.parse(statusUpdates[1][1].lastTestedAt)), 'test status update stores ISO timestamp')
+}
+
+async function testExternalSystemTestPersistsFailureAndPreservesInactive() {
+  const { calls, services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        calls.push(['getExternalSystemForAdapter', input])
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          workspaceId: input.workspaceId,
+          name: 'Inactive ERP',
+          kind: 'erp',
+          role: 'target',
+          status: 'inactive',
+          credentials: { bearerToken: 'secret-token' },
+        }
+      },
+    },
+    adapterRegistry: {
+      createAdapter(input) {
+        calls.push(['createAdapter', input])
+        return {
+          async testConnection() {
+            calls.push(['testConnection'])
+            return { ok: false, code: 'ERP_DOWN', message: 'ERP endpoint unavailable' }
+          },
+        }
+      },
+    },
+  })
+  const { routes } = mountRoutes(services)
+
+  const res = await invoke(routes, 'POST', '/api/integration/external-systems/:id/test', {
+    user: WRITE_USER,
+    params: { id: 'sys_inactive' },
+    query: { workspaceId: 'workspace_1' },
+  })
+
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.ok, false)
+  assert.equal(res.body.data.system.status, 'error')
+  const statusUpdate = findCall(calls, 'upsertExternalSystem')[1]
+  assert.equal(statusUpdate.status, 'error')
+  assert.equal(statusUpdate.lastError, 'ERP endpoint unavailable')
+
+  calls.length = 0
+  services.adapterRegistry.createAdapter = (input) => {
+    calls.push(['createAdapter', input])
+    return {
+      async testConnection() {
+        calls.push(['testConnection'])
+        return { ok: true, status: 200 }
+      },
+    }
+  }
+
+  const success = await invoke(routes, 'POST', '/api/integration/external-systems/:id/test', {
+    user: WRITE_USER,
+    params: { id: 'sys_inactive' },
+    query: { workspaceId: 'workspace_1' },
+  })
+
+  assertOkResponse(success, 200)
+  assert.equal(success.body.data.ok, true)
+  const inactiveUpdate = findCall(calls, 'upsertExternalSystem')[1]
+  assert.equal(inactiveUpdate.status, 'inactive', 'successful test does not activate inactive systems')
+  assert.equal(inactiveUpdate.lastError, null)
 }
 
 async function testPipelineRoutes() {
@@ -925,6 +1009,7 @@ async function testListOffsetCap() {
 async function main() {
   await testUnauthenticatedWriteRequestIsRejected()
   await testExternalSystemRoutes()
+  await testExternalSystemTestPersistsFailureAndPreservesInactive()
   await testPipelineRoutes()
   await testRunAndDeadLetterRoutes()
   await testErrorResponseShape()

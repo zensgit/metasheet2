@@ -37,6 +37,8 @@
             >
               <span>{{ system.name }}</span>
               <small>{{ system.kind }} · {{ system.status }}</small>
+              <small v-if="system.lastTestedAt">Last test: {{ formatTimestamp(system.lastTestedAt) }}</small>
+              <small v-if="system.lastError" class="k3-setup__saved-error">{{ system.lastError }}</small>
             </button>
           </div>
         </div>
@@ -288,6 +290,12 @@ function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function formatTimestamp(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString()
+}
+
 function loadSystemIntoForm(system: IntegrationExternalSystem): void {
   Object.assign(form, applyExternalSystemToForm(form, system))
   testResult.value = ''
@@ -346,6 +354,7 @@ async function testWebApi(): Promise<void> {
   try {
     const result = await testIntegrationSystem(form.webApiSystemId, { skipHealth: !form.healthPath.trim() })
     testResult.value = JSON.stringify(result, null, 2)
+    await loadSystems()
     setStatus('WebAPI 连接测试完成', 'success')
   } catch (error) {
     setStatus(formatError(error), 'error')
@@ -361,6 +370,7 @@ async function testSqlServer(): Promise<void> {
   try {
     const result = await testIntegrationSystem(form.sqlSystemId)
     testResult.value = JSON.stringify(result, null, 2)
+    await loadSystems()
     setStatus('SQL Server 通道测试完成', 'success')
   } catch (error) {
     setStatus(formatError(error), 'error')
@@ -592,6 +602,11 @@ onMounted(() => {
 
 .k3-setup__saved small {
   color: #64748b;
+}
+
+.k3-setup__saved-error {
+  color: #9f1239;
+  overflow-wrap: anywhere;
 }
 
 .k3-setup__empty {

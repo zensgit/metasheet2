@@ -245,6 +245,54 @@ function redactSystemForTest(system) {
   }
 }
 
+function normalizeTestConnectionResult(result) {
+  if (result && typeof result === 'object' && !Array.isArray(result)) {
+    return { ...result }
+  }
+  return {
+    ok: result !== false,
+    raw: result,
+  }
+}
+
+function testConnectionErrorResult(error) {
+  return {
+    ok: false,
+    code: error && (error.code || error.name) ? String(error.code || error.name) : 'TEST_CONNECTION_FAILED',
+    message: error && error.message ? error.message : String(error),
+  }
+}
+
+function resolveTestedStatus(system, result) {
+  if (!result || result.ok !== true) return 'error'
+  // A connection test must not silently enable an intentionally inactive
+  // external system. It only clears a previous error status after success.
+  if (system && system.status === 'inactive') return 'inactive'
+  return 'active'
+}
+
+function resolveTestError(result) {
+  if (result && result.ok === true) return null
+  return firstString(
+    result && result.message,
+    result && result.code,
+    'connection test failed',
+  )
+}
+
+async function persistExternalSystemTestResult(externalSystems, req, system, result) {
+  if (!system || !system.id || !system.name || !system.kind) return null
+  return externalSystems.upsertExternalSystem(scopedInput(req, {
+    id: system.id,
+    name: system.name,
+    kind: system.kind,
+    role: system.role || 'bidirectional',
+    status: resolveTestedStatus(system, result),
+    lastTestedAt: new Date().toISOString(),
+    lastError: resolveTestError(result),
+  }))
+}
+
 function createHandlers(services) {
   function requireService(name, methods) {
     const service = services[name]
@@ -300,7 +348,17 @@ function createHandlers(services) {
         : externalSystems.getExternalSystem.bind(externalSystems)
       const system = await loadSystem(scopedInput(req, { id: requestParams(req).id }))
       const adapter = adapterRegistry.createAdapter(system)
-      return sendOk(res, await adapter.testConnection(requestBody(req)))
+      let result
+      try {
+        result = normalizeTestConnectionResult(await adapter.testConnection(requestBody(req)))
+      } catch (error) {
+        result = testConnectionErrorResult(error)
+      }
+      const updatedSystem = await persistExternalSystemTestResult(externalSystems, req, system, result)
+      return sendOk(res, {
+        ...result,
+        system: redactSystemForTest(updatedSystem),
+      })
     },
 
     async pipelinesList(req, res) {
