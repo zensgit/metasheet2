@@ -2,6 +2,8 @@ import { apiFetch } from '../../utils/api'
 
 export type IntegrationSystemStatus = 'active' | 'inactive' | 'error'
 export type K3SqlServerMode = 'readonly' | 'middle-table' | 'stored-procedure'
+export type IntegrationPipelineRunMode = 'manual' | 'incremental' | 'full'
+export type K3WisePipelineTarget = 'material' | 'bom'
 
 export interface IntegrationApiEnvelope<T> {
   ok: boolean
@@ -49,6 +51,16 @@ export interface IntegrationPipeline {
   fieldMappings?: Array<Record<string, unknown>>
   createdAt?: string | null
   updatedAt?: string | null
+}
+
+export interface IntegrationPipelineRunResult {
+  id?: string
+  runId?: string
+  pipelineId?: string
+  status?: string
+  dryRun?: boolean
+  metrics?: Record<string, unknown>
+  [key: string]: unknown
 }
 
 export interface IntegrationStagingDescriptor {
@@ -102,9 +114,15 @@ export interface K3WiseSetupForm {
   sqlStoredProcedures: string
   sourceSystemId: string
   materialPipelineName: string
+  materialPipelineId: string
   bomPipelineName: string
+  bomPipelineId: string
   materialStagingObjectId: string
   bomStagingObjectId: string
+  pipelineRunMode: IntegrationPipelineRunMode
+  pipelineSampleLimit: string
+  pipelineCursor: string
+  allowLivePipelineRun: boolean
 }
 
 export interface K3WiseSetupPayloads {
@@ -122,6 +140,14 @@ export interface K3WiseStagingInstallPayload {
   workspaceId: string | null
   projectId: string
   baseId?: string
+}
+
+export interface K3WisePipelineRunPayload {
+  tenantId: string
+  workspaceId?: string | null
+  mode: IntegrationPipelineRunMode
+  cursor?: string
+  sampleLimit?: number
 }
 
 export interface K3WiseSetupValidationIssue {
@@ -153,6 +179,13 @@ function parsePositiveInteger(value: string, fallback: number): number {
   if (!normalized) return fallback
   const parsed = Number(normalized)
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
+}
+
+function parseOptionalPositiveInteger(value: string): number | undefined {
+  const normalized = trim(value)
+  if (!normalized) return undefined
+  const parsed = Number(normalized)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
 }
 
 function assertRelativePath(value: string, field: keyof K3WiseSetupForm, issues: K3WiseSetupValidationIssue[]): void {
@@ -225,9 +258,15 @@ export function createDefaultK3WiseSetupForm(): K3WiseSetupForm {
     sqlStoredProcedures: '',
     sourceSystemId: '',
     materialPipelineName: 'PLM Material to K3 WISE',
+    materialPipelineId: '',
     bomPipelineName: 'PLM BOM to K3 WISE',
+    bomPipelineId: '',
     materialStagingObjectId: 'standard_materials',
     bomStagingObjectId: 'bom_cleanse',
+    pipelineRunMode: 'manual',
+    pipelineSampleLimit: '20',
+    pipelineCursor: '',
+    allowLivePipelineRun: false,
   }
 }
 
@@ -289,6 +328,29 @@ export function validateK3WiseStagingInstallForm(form: K3WiseSetupForm): K3WiseS
   return issues
 }
 
+export function validateK3WisePipelineRunForm(
+  form: K3WiseSetupForm,
+  target: K3WisePipelineTarget,
+): K3WiseSetupValidationIssue[] {
+  const issues: K3WiseSetupValidationIssue[] = []
+  const pipelineField: keyof K3WiseSetupForm = target === 'material' ? 'materialPipelineId' : 'bomPipelineId'
+  const pipelineId = trim(form[pipelineField])
+  if (!trim(form.tenantId)) issues.push({ field: 'tenantId', message: 'tenantId is required' })
+  if (!pipelineId) {
+    issues.push({
+      field: pipelineField,
+      message: `${target === 'material' ? 'Material' : 'BOM'} pipeline ID is required before dry-run or run`,
+    })
+  }
+  if (!['manual', 'incremental', 'full'].includes(form.pipelineRunMode)) {
+    issues.push({ field: 'pipelineRunMode', message: 'Pipeline run mode must be manual, incremental, or full' })
+  }
+  if (trim(form.pipelineSampleLimit) && parseOptionalPositiveInteger(form.pipelineSampleLimit) === undefined) {
+    issues.push({ field: 'pipelineSampleLimit', message: 'Sample limit must be a positive integer' })
+  }
+  return issues
+}
+
 export function buildK3WiseStagingInstallPayload(form: K3WiseSetupForm): K3WiseStagingInstallPayload {
   const issues = validateK3WiseStagingInstallForm(form)
   if (issues.length > 0) {
@@ -300,6 +362,28 @@ export function buildK3WiseStagingInstallPayload(form: K3WiseSetupForm): K3WiseS
     projectId: trim(form.projectId),
     ...(optionalString(form.baseId) ? { baseId: trim(form.baseId) } : {}),
   }
+}
+
+export function getK3WisePipelineId(form: K3WiseSetupForm, target: K3WisePipelineTarget): string {
+  return target === 'material' ? trim(form.materialPipelineId) : trim(form.bomPipelineId)
+}
+
+export function buildK3WisePipelineRunPayload(form: K3WiseSetupForm, target: K3WisePipelineTarget): K3WisePipelineRunPayload {
+  const issues = validateK3WisePipelineRunForm(form, target)
+  if (issues.length > 0) {
+    throw new Error(issues[0].message)
+  }
+
+  const payload: K3WisePipelineRunPayload = {
+    tenantId: trim(form.tenantId),
+    workspaceId: optionalString(form.workspaceId) ?? null,
+    mode: form.pipelineRunMode,
+  }
+  const sampleLimit = parseOptionalPositiveInteger(form.pipelineSampleLimit)
+  if (sampleLimit !== undefined) payload.sampleLimit = sampleLimit
+  const cursor = optionalString(form.pipelineCursor)
+  if (cursor) payload.cursor = cursor
+  return payload
 }
 
 export function buildK3WiseSetupPayloads(form: K3WiseSetupForm): K3WiseSetupPayloads {
@@ -651,6 +735,19 @@ export async function upsertIntegrationPipeline(payload: Record<string, unknown>
     body: JSON.stringify(payload),
   })
   return parseIntegrationResponse<IntegrationPipeline>(response)
+}
+
+export async function runIntegrationPipeline(
+  pipelineId: string,
+  payload: K3WisePipelineRunPayload,
+  dryRun = false,
+): Promise<IntegrationPipelineRunResult> {
+  const endpoint = dryRun ? 'dry-run' : 'run'
+  const response = await apiFetch(`/api/integration/pipelines/${encodeURIComponent(pipelineId)}/${endpoint}`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+  return parseIntegrationResponse<IntegrationPipelineRunResult>(response)
 }
 
 export async function listIntegrationStagingDescriptors(): Promise<IntegrationStagingDescriptor[]> {
