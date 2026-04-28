@@ -66,3 +66,7 @@ output/dingtalk-p4-final-input-status/
 output/dingtalk-p4-regression-gate/
 output/dingtalk-p4-release-readiness/
 artifacts/dingtalk-staging-evidence-packet/
+
+# K3 WISE postdeploy smoke artifacts can include deployment topology and
+# authenticated contract evidence.
+output/integration-k3wise-postdeploy-smoke/
