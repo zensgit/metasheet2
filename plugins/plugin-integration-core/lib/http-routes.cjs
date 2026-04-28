@@ -19,6 +19,8 @@ const ROUTES = [
   ['GET', '/api/integration/pipelines/:id', 'pipelinesGet'],
   ['POST', '/api/integration/pipelines/:id/run', 'pipelinesRun'],
   ['POST', '/api/integration/pipelines/:id/dry-run', 'pipelinesDryRun'],
+  ['GET', '/api/integration/staging/descriptors', 'stagingDescriptors'],
+  ['POST', '/api/integration/staging/install', 'stagingInstall'],
   ['GET', '/api/integration/runs', 'runsList'],
   ['GET', '/api/integration/dead-letters', 'deadLettersList'],
   ['POST', '/api/integration/dead-letters/:id/replay', 'deadLettersReplay'],
@@ -310,6 +312,7 @@ function createHandlers(services) {
   const pipelineRegistry = requireService('pipelineRegistry', ['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns'])
   const runner = requireService('pipelineRunner', ['runPipeline'])
   const deadLetters = requireService('deadLetterStore', ['listDeadLetters'])
+  const stagingInstaller = requireService('stagingInstaller', ['installStaging', 'listStagingDescriptors'])
 
   const handlers = {
     async status(req, res) {
@@ -411,6 +414,27 @@ function createHandlers(services) {
         triggeredBy: 'api',
         dryRun: true,
       })), 200)
+    },
+
+    async stagingDescriptors(req, res) {
+      requireAccess(req, 'read')
+      return sendOk(res, await stagingInstaller.listStagingDescriptors())
+    },
+
+    async stagingInstall(req, res) {
+      requireAccess(req, 'write')
+      const body = requestBody(req)
+      const projectId = firstString(body.projectId, requestQuery(req).projectId)
+      if (!projectId) {
+        throw new HttpRouteError(400, 'PROJECT_REQUIRED', 'projectId is required')
+      }
+      const baseId = firstString(body.baseId, requestQuery(req).baseId)
+      return sendOk(res, await stagingInstaller.installStaging(scopedInput(req, {
+        tenantId: body.tenantId,
+        workspaceId: body.workspaceId,
+        projectId,
+        baseId,
+      })), 201)
     },
 
     async runsList(req, res) {

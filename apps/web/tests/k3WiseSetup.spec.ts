@@ -3,10 +3,12 @@ import {
   applyExternalSystemToForm,
   buildK3WisePipelinePayloads,
   buildK3WiseSetupPayloads,
+  buildK3WiseStagingInstallPayload,
   createDefaultK3WiseSetupForm,
   splitList,
   validateK3WisePipelineTemplateForm,
   validateK3WiseSetupForm,
+  validateK3WiseStagingInstallForm,
   type IntegrationExternalSystem,
 } from '../src/services/integration/k3WiseSetup'
 
@@ -207,5 +209,35 @@ describe('K3 WISE setup helpers', () => {
     expect(messages).toContain('PLM source system ID is required')
     expect(messages).toContain('Save or select a K3 WISE WebAPI system before creating pipelines')
     expect(() => buildK3WisePipelinePayloads(form)).toThrow('PLM source system ID is required')
+  })
+
+  it('builds staging install payloads from tenant and project scope', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      projectId: 'project_1',
+      baseId: 'base_1',
+    })
+
+    expect(validateK3WiseStagingInstallForm(form)).toEqual([])
+    expect(buildK3WiseStagingInstallPayload(form)).toEqual({
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      projectId: 'project_1',
+      baseId: 'base_1',
+    })
+  })
+
+  it('requires project scope before staging install', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      projectId: '',
+    })
+
+    const messages = validateK3WiseStagingInstallForm(form).map((issue) => issue.message)
+    expect(messages).toContain('projectId is required before installing staging tables')
+    expect(() => buildK3WiseStagingInstallPayload(form)).toThrow('projectId is required before installing staging tables')
   })
 })

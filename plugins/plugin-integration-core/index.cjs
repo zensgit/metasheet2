@@ -30,6 +30,7 @@ const { createWatermarkStore } = require('./lib/watermark.cjs')
 const { createRunLogger } = require('./lib/run-log.cjs')
 const { createErpFeedbackWriter } = require('./lib/erp-feedback.cjs')
 const { createPipelineRunner } = require('./lib/pipeline-runner.cjs')
+const { installStaging, listStagingDescriptors } = require('./lib/staging-installer.cjs')
 const { registerIntegrationRoutes } = require('./lib/http-routes.cjs')
 
 const registeredRoutes = []
@@ -43,6 +44,7 @@ let watermarkStore = null
 let runLogger = null
 let erpFeedbackWriter = null
 let pipelineRunner = null
+let stagingInstaller = null
 
 function buildHealthPayload() {
   return {
@@ -73,6 +75,7 @@ function buildCommunicationApi() {
         pipelines: Boolean(pipelineRegistry),
         runner: Boolean(pipelineRunner),
         erpFeedback: Boolean(erpFeedbackWriter),
+        staging: Boolean(stagingInstaller),
       }
     },
     async upsertExternalSystem(input) {
@@ -119,6 +122,14 @@ function buildCommunicationApi() {
       if (!pipelineRunner) throw new Error('pipeline runner is not initialized')
       return pipelineRunner.runPipeline(input)
     },
+    async listStagingDescriptors() {
+      if (!stagingInstaller) throw new Error('staging installer is not initialized')
+      return stagingInstaller.listStagingDescriptors()
+    },
+    async installStaging(input) {
+      if (!stagingInstaller) throw new Error('staging installer is not initialized')
+      return stagingInstaller.installStaging(input)
+    },
   }
 }
 
@@ -151,6 +162,17 @@ module.exports = {
       context,
       logger,
     })
+    stagingInstaller = {
+      listStagingDescriptors,
+      installStaging(input = {}) {
+        return installStaging({
+          context,
+          projectId: input.projectId,
+          baseId: input.baseId || null,
+          logger,
+        })
+      },
+    }
     pipelineRunner = createPipelineRunner({
       pipelineRegistry,
       externalSystemRegistry,
@@ -175,6 +197,7 @@ module.exports = {
         pipelineRegistry,
         pipelineRunner,
         deadLetterStore,
+        stagingInstaller,
       },
     }))
 
@@ -200,6 +223,7 @@ module.exports = {
     runLogger = null
     erpFeedbackWriter = null
     pipelineRunner = null
+    stagingInstaller = null
     activeContext = null
     logger.info(`[${PLUGIN_ID}] deactivated`)
   },

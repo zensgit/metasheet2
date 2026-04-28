@@ -51,10 +51,22 @@ export interface IntegrationPipeline {
   updatedAt?: string | null
 }
 
+export interface IntegrationStagingDescriptor {
+  id: string
+  name: string
+  fields: string[]
+}
+
+export interface IntegrationStagingInstallResult {
+  sheetIds: Record<string, string>
+  warnings: string[]
+}
+
 export interface K3WiseSetupForm {
   tenantId: string
   workspaceId: string
   projectId: string
+  baseId: string
   webApiSystemId: string
   webApiHasCredentials: boolean
   webApiName: string
@@ -103,6 +115,13 @@ export interface K3WiseSetupPayloads {
 export interface K3WisePipelinePayloads {
   material: Record<string, unknown>
   bom: Record<string, unknown>
+}
+
+export interface K3WiseStagingInstallPayload {
+  tenantId: string
+  workspaceId: string | null
+  projectId: string
+  baseId?: string
 }
 
 export interface K3WiseSetupValidationIssue {
@@ -170,6 +189,7 @@ export function createDefaultK3WiseSetupForm(): K3WiseSetupForm {
     tenantId,
     workspaceId,
     projectId: '',
+    baseId: '',
     webApiSystemId: '',
     webApiHasCredentials: false,
     webApiName: 'K3 WISE WebAPI',
@@ -260,6 +280,26 @@ export function validateK3WisePipelineTemplateForm(form: K3WiseSetupForm): K3Wis
   if (!trim(form.materialStagingObjectId)) issues.push({ field: 'materialStagingObjectId', message: 'Material staging object is required' })
   if (!trim(form.bomStagingObjectId)) issues.push({ field: 'bomStagingObjectId', message: 'BOM staging object is required' })
   return issues
+}
+
+export function validateK3WiseStagingInstallForm(form: K3WiseSetupForm): K3WiseSetupValidationIssue[] {
+  const issues: K3WiseSetupValidationIssue[] = []
+  if (!trim(form.tenantId)) issues.push({ field: 'tenantId', message: 'tenantId is required' })
+  if (!trim(form.projectId)) issues.push({ field: 'projectId', message: 'projectId is required before installing staging tables' })
+  return issues
+}
+
+export function buildK3WiseStagingInstallPayload(form: K3WiseSetupForm): K3WiseStagingInstallPayload {
+  const issues = validateK3WiseStagingInstallForm(form)
+  if (issues.length > 0) {
+    throw new Error(issues[0].message)
+  }
+  return {
+    tenantId: trim(form.tenantId),
+    workspaceId: optionalString(form.workspaceId) ?? null,
+    projectId: trim(form.projectId),
+    ...(optionalString(form.baseId) ? { baseId: trim(form.baseId) } : {}),
+  }
 }
 
 export function buildK3WiseSetupPayloads(form: K3WiseSetupForm): K3WiseSetupPayloads {
@@ -611,6 +651,20 @@ export async function upsertIntegrationPipeline(payload: Record<string, unknown>
     body: JSON.stringify(payload),
   })
   return parseIntegrationResponse<IntegrationPipeline>(response)
+}
+
+export async function listIntegrationStagingDescriptors(): Promise<IntegrationStagingDescriptor[]> {
+  const response = await apiFetch('/api/integration/staging/descriptors')
+  const data = await parseIntegrationResponse<IntegrationStagingDescriptor[]>(response)
+  return Array.isArray(data) ? data : []
+}
+
+export async function installIntegrationStaging(payload: K3WiseStagingInstallPayload): Promise<IntegrationStagingInstallResult> {
+  const response = await apiFetch('/api/integration/staging/install', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+  return parseIntegrationResponse<IntegrationStagingInstallResult>(response)
 }
 
 export const K3_WISE_WEBAPI_KIND = WEBAPI_KIND

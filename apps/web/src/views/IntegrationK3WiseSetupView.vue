@@ -64,6 +64,20 @@
           <button
             class="k3-setup__btn k3-setup__btn--full"
             type="button"
+            :disabled="installingStaging || stagingIssues.length > 0"
+            @click="installStagingTables"
+          >
+            {{ installingStaging ? '安装中' : '安装 Staging 多维表' }}
+          </button>
+          <ul v-if="stagingIssues.length" class="k3-setup__issues k3-setup__issues--compact">
+            <li v-for="issue in stagingIssues" :key="`staging:${issue.field}:${issue.message}`">
+              {{ issue.message }}
+            </li>
+          </ul>
+          <pre v-if="stagingResult" class="k3-setup__test-result">{{ stagingResult }}</pre>
+          <button
+            class="k3-setup__btn k3-setup__btn--full"
+            type="button"
             :disabled="creatingPipelines || pipelineIssues.length > 0"
             @click="createPipelineTemplates"
           >
@@ -280,6 +294,10 @@
               <input v-model.trim="form.projectId" autocomplete="off" />
             </label>
             <label class="k3-setup__field">
+              <span>Base ID</span>
+              <input v-model.trim="form.baseId" autocomplete="off" />
+            </label>
+            <label class="k3-setup__field">
               <span>PLM Source System ID</span>
               <input v-model.trim="form.sourceSystemId" autocomplete="off" />
             </label>
@@ -318,13 +336,16 @@ import {
   applyExternalSystemToForm,
   buildK3WisePipelinePayloads,
   buildK3WiseSetupPayloads,
+  buildK3WiseStagingInstallPayload,
   createDefaultK3WiseSetupForm,
+  installIntegrationStaging,
   listIntegrationSystems,
   testIntegrationSystem,
   upsertIntegrationPipeline,
   upsertIntegrationSystem,
   validateK3WisePipelineTemplateForm,
   validateK3WiseSetupForm,
+  validateK3WiseStagingInstallForm,
   type IntegrationExternalSystem,
 } from '../services/integration/k3WiseSetup'
 
@@ -335,14 +356,17 @@ const loading = ref(false)
 const saving = ref(false)
 const testingWebApi = ref(false)
 const testingSql = ref(false)
+const installingStaging = ref(false)
 const creatingPipelines = ref(false)
 const statusMessage = ref('')
 const statusKind = ref<'info' | 'success' | 'error'>('info')
 const testResult = ref('')
+const stagingResult = ref('')
 const pipelineResult = ref('')
 
 const savedSystems = computed(() => [...webApiSystems.value, ...sqlSystems.value])
 const validationIssues = computed(() => validateK3WiseSetupForm(form))
+const stagingIssues = computed(() => validateK3WiseStagingInstallForm(form))
 const pipelineIssues = computed(() => validateK3WisePipelineTemplateForm(form))
 
 function setStatus(message: string, kind: 'info' | 'success' | 'error' = 'info'): void {
@@ -440,6 +464,25 @@ async function testSqlServer(): Promise<void> {
     setStatus(formatError(error), 'error')
   } finally {
     testingSql.value = false
+  }
+}
+
+async function installStagingTables(): Promise<void> {
+  const issues = validateK3WiseStagingInstallForm(form)
+  if (issues.length > 0) {
+    setStatus(issues[0].message, 'error')
+    return
+  }
+  installingStaging.value = true
+  stagingResult.value = ''
+  try {
+    const result = await installIntegrationStaging(buildK3WiseStagingInstallPayload(form))
+    stagingResult.value = JSON.stringify(result, null, 2)
+    setStatus('Staging 多维表已安装或确认存在', result.warnings.length > 0 ? 'info' : 'success')
+  } catch (error) {
+    setStatus(formatError(error), 'error')
+  } finally {
+    installingStaging.value = false
   }
 }
 
