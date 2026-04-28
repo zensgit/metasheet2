@@ -55,6 +55,27 @@
           </button>
           <pre v-if="testResult" class="k3-setup__test-result">{{ testResult }}</pre>
         </div>
+
+        <div class="k3-setup__panel">
+          <div class="k3-setup__panel-head">
+            <h2>清洗链路</h2>
+            <span>draft</span>
+          </div>
+          <button
+            class="k3-setup__btn k3-setup__btn--full"
+            type="button"
+            :disabled="creatingPipelines || pipelineIssues.length > 0"
+            @click="createPipelineTemplates"
+          >
+            {{ creatingPipelines ? '创建中' : '创建清洗 Pipeline' }}
+          </button>
+          <ul v-if="pipelineIssues.length" class="k3-setup__issues k3-setup__issues--compact">
+            <li v-for="issue in pipelineIssues" :key="`pipeline:${issue.field}:${issue.message}`">
+              {{ issue.message }}
+            </li>
+          </ul>
+          <pre v-if="pipelineResult" class="k3-setup__test-result">{{ pipelineResult }}</pre>
+        </div>
       </aside>
 
       <form class="k3-setup__form" @submit.prevent="saveConfiguration">
@@ -247,6 +268,43 @@
             </li>
           </ul>
         </section>
+
+        <section class="k3-setup__section">
+          <div class="k3-setup__section-head">
+            <h2>PLM → K3 清洗链路</h2>
+            <span>multitable staging + pipeline runner</span>
+          </div>
+          <div class="k3-setup__grid">
+            <label class="k3-setup__field">
+              <span>Project ID</span>
+              <input v-model.trim="form.projectId" autocomplete="off" />
+            </label>
+            <label class="k3-setup__field">
+              <span>PLM Source System ID</span>
+              <input v-model.trim="form.sourceSystemId" autocomplete="off" />
+            </label>
+            <label class="k3-setup__field">
+              <span>K3 Target System ID</span>
+              <input v-model.trim="form.webApiSystemId" autocomplete="off" readonly />
+            </label>
+            <label class="k3-setup__field">
+              <span>物料 Pipeline 名称</span>
+              <input v-model.trim="form.materialPipelineName" autocomplete="off" />
+            </label>
+            <label class="k3-setup__field">
+              <span>物料 Staging 对象</span>
+              <input v-model.trim="form.materialStagingObjectId" autocomplete="off" />
+            </label>
+            <label class="k3-setup__field">
+              <span>BOM Pipeline 名称</span>
+              <input v-model.trim="form.bomPipelineName" autocomplete="off" />
+            </label>
+            <label class="k3-setup__field">
+              <span>BOM Staging 对象</span>
+              <input v-model.trim="form.bomStagingObjectId" autocomplete="off" />
+            </label>
+          </div>
+        </section>
       </form>
     </section>
   </section>
@@ -258,11 +316,14 @@ import {
   K3_WISE_SQLSERVER_KIND,
   K3_WISE_WEBAPI_KIND,
   applyExternalSystemToForm,
+  buildK3WisePipelinePayloads,
   buildK3WiseSetupPayloads,
   createDefaultK3WiseSetupForm,
   listIntegrationSystems,
   testIntegrationSystem,
+  upsertIntegrationPipeline,
   upsertIntegrationSystem,
+  validateK3WisePipelineTemplateForm,
   validateK3WiseSetupForm,
   type IntegrationExternalSystem,
 } from '../services/integration/k3WiseSetup'
@@ -274,12 +335,15 @@ const loading = ref(false)
 const saving = ref(false)
 const testingWebApi = ref(false)
 const testingSql = ref(false)
+const creatingPipelines = ref(false)
 const statusMessage = ref('')
 const statusKind = ref<'info' | 'success' | 'error'>('info')
 const testResult = ref('')
+const pipelineResult = ref('')
 
 const savedSystems = computed(() => [...webApiSystems.value, ...sqlSystems.value])
 const validationIssues = computed(() => validateK3WiseSetupForm(form))
+const pipelineIssues = computed(() => validateK3WisePipelineTemplateForm(form))
 
 function setStatus(message: string, kind: 'info' | 'success' | 'error' = 'info'): void {
   statusMessage.value = message
@@ -376,6 +440,32 @@ async function testSqlServer(): Promise<void> {
     setStatus(formatError(error), 'error')
   } finally {
     testingSql.value = false
+  }
+}
+
+async function createPipelineTemplates(): Promise<void> {
+  const issues = validateK3WisePipelineTemplateForm(form)
+  if (issues.length > 0) {
+    setStatus(issues[0].message, 'error')
+    return
+  }
+  creatingPipelines.value = true
+  pipelineResult.value = ''
+  try {
+    const payloads = buildK3WisePipelinePayloads(form)
+    const [material, bom] = await Promise.all([
+      upsertIntegrationPipeline(payloads.material),
+      upsertIntegrationPipeline(payloads.bom),
+    ])
+    pipelineResult.value = JSON.stringify({
+      material: { id: material.id, name: material.name, status: material.status },
+      bom: { id: bom.id, name: bom.name, status: bom.status },
+    }, null, 2)
+    setStatus('PLM → K3 清洗 Pipeline 已创建为 draft', 'success')
+  } catch (error) {
+    setStatus(formatError(error), 'error')
+  } finally {
+    creatingPipelines.value = false
   }
 }
 
@@ -515,6 +605,11 @@ onMounted(() => {
   font: inherit;
 }
 
+.k3-setup__field input[readonly] {
+  background: #f8fafc;
+  color: #64748b;
+}
+
 .k3-setup__field textarea {
   resize: vertical;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -633,6 +728,11 @@ onMounted(() => {
   margin: 0;
   padding-left: 18px;
   color: #9a3412;
+}
+
+.k3-setup__issues--compact {
+  margin-top: 10px;
+  font-size: 13px;
 }
 
 @media (max-width: 1100px) {

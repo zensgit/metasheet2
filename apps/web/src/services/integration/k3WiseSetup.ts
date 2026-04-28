@@ -30,9 +30,31 @@ export interface IntegrationExternalSystem {
   credentialFingerprint?: string | null
 }
 
+export interface IntegrationPipeline {
+  id: string
+  tenantId: string
+  workspaceId: string | null
+  projectId?: string | null
+  name: string
+  description?: string | null
+  sourceSystemId: string
+  sourceObject: string
+  targetSystemId: string
+  targetObject: string
+  stagingSheetId?: string | null
+  mode: 'incremental' | 'full' | 'manual'
+  idempotencyKeyFields: string[]
+  options: Record<string, unknown>
+  status: 'draft' | 'active' | 'paused' | 'disabled'
+  fieldMappings?: Array<Record<string, unknown>>
+  createdAt?: string | null
+  updatedAt?: string | null
+}
+
 export interface K3WiseSetupForm {
   tenantId: string
   workspaceId: string
+  projectId: string
   webApiSystemId: string
   webApiHasCredentials: boolean
   webApiName: string
@@ -66,11 +88,21 @@ export interface K3WiseSetupForm {
   sqlAllowedTables: string
   sqlMiddleTables: string
   sqlStoredProcedures: string
+  sourceSystemId: string
+  materialPipelineName: string
+  bomPipelineName: string
+  materialStagingObjectId: string
+  bomStagingObjectId: string
 }
 
 export interface K3WiseSetupPayloads {
   webApi: Record<string, unknown>
   sqlServer: Record<string, unknown> | null
+}
+
+export interface K3WisePipelinePayloads {
+  material: Record<string, unknown>
+  bom: Record<string, unknown>
 }
 
 export interface K3WiseSetupValidationIssue {
@@ -137,6 +169,7 @@ export function createDefaultK3WiseSetupForm(): K3WiseSetupForm {
   return {
     tenantId,
     workspaceId,
+    projectId: '',
     webApiSystemId: '',
     webApiHasCredentials: false,
     webApiName: 'K3 WISE WebAPI',
@@ -170,6 +203,11 @@ export function createDefaultK3WiseSetupForm(): K3WiseSetupForm {
     sqlAllowedTables: 't_ICItem\nt_ICBOM\nt_ICBomChild',
     sqlMiddleTables: '',
     sqlStoredProcedures: '',
+    sourceSystemId: '',
+    materialPipelineName: 'PLM Material to K3 WISE',
+    bomPipelineName: 'PLM BOM to K3 WISE',
+    materialStagingObjectId: 'standard_materials',
+    bomStagingObjectId: 'bom_cleanse',
   }
 }
 
@@ -209,6 +247,18 @@ export function validateK3WiseSetupForm(form: K3WiseSetupForm): K3WiseSetupValid
       issues.push({ field: 'sqlPassword', message: 'SQL Server credentials must include both username and password' })
     }
   }
+  return issues
+}
+
+export function validateK3WisePipelineTemplateForm(form: K3WiseSetupForm): K3WiseSetupValidationIssue[] {
+  const issues: K3WiseSetupValidationIssue[] = []
+  if (!trim(form.tenantId)) issues.push({ field: 'tenantId', message: 'tenantId is required' })
+  if (!trim(form.sourceSystemId)) issues.push({ field: 'sourceSystemId', message: 'PLM source system ID is required' })
+  if (!trim(form.webApiSystemId)) issues.push({ field: 'webApiSystemId', message: 'Save or select a K3 WISE WebAPI system before creating pipelines' })
+  if (!trim(form.materialPipelineName)) issues.push({ field: 'materialPipelineName', message: 'Material pipeline name is required' })
+  if (!trim(form.bomPipelineName)) issues.push({ field: 'bomPipelineName', message: 'BOM pipeline name is required' })
+  if (!trim(form.materialStagingObjectId)) issues.push({ field: 'materialStagingObjectId', message: 'Material staging object is required' })
+  if (!trim(form.bomStagingObjectId)) issues.push({ field: 'bomStagingObjectId', message: 'BOM staging object is required' })
   return issues
 }
 
@@ -326,6 +376,147 @@ export function buildK3WiseSetupPayloads(form: K3WiseSetupForm): K3WiseSetupPayl
   return { webApi, sqlServer }
 }
 
+export function buildK3WisePipelinePayloads(form: K3WiseSetupForm): K3WisePipelinePayloads {
+  const issues = validateK3WisePipelineTemplateForm(form)
+  if (issues.length > 0) {
+    throw new Error(issues[0].message)
+  }
+
+  const tenantId = trim(form.tenantId)
+  const workspaceId = optionalString(form.workspaceId) ?? null
+  const projectId = optionalString(form.projectId) ?? null
+  const sourceSystemId = trim(form.sourceSystemId)
+  const targetSystemId = trim(form.webApiSystemId)
+  const base = {
+    tenantId,
+    workspaceId,
+    ...(projectId ? { projectId } : {}),
+    sourceSystemId,
+    targetSystemId,
+    status: 'draft',
+  }
+
+  return {
+    material: {
+      ...base,
+      name: trim(form.materialPipelineName),
+      description: 'Draft PLM material cleansing pipeline generated from the K3 WISE setup page.',
+      sourceObject: 'materials',
+      targetObject: 'material',
+      mode: 'incremental',
+      idempotencyKeyFields: ['sourceId', 'revision'],
+      options: {
+        batchSize: 100,
+        watermark: {
+          type: 'updated_at',
+          field: 'updatedAt',
+        },
+        erpFeedback: {
+          objectId: trim(form.materialStagingObjectId),
+          keyField: '_integration_idempotency_key',
+        },
+      },
+      fieldMappings: [
+        {
+          sourceField: 'code',
+          targetField: 'FNumber',
+          transform: ['trim', 'upper'],
+          validation: [{ type: 'required' }],
+        },
+        {
+          sourceField: 'name',
+          targetField: 'FName',
+          transform: { fn: 'trim' },
+          validation: [{ type: 'required' }],
+        },
+        {
+          sourceField: 'spec',
+          targetField: 'FModel',
+          transform: { fn: 'trim' },
+        },
+        {
+          sourceField: 'uom',
+          targetField: 'FBaseUnitID',
+          transform: {
+            fn: 'dictMap',
+            map: {
+              PCS: 'Pcs',
+              EA: 'Pcs',
+              KG: 'Kg',
+            },
+          },
+        },
+        {
+          sourceField: 'sourceId',
+          targetField: 'sourceId',
+          validation: [{ type: 'required' }],
+        },
+        {
+          sourceField: 'revision',
+          targetField: 'revision',
+          defaultValue: 'A',
+        },
+      ],
+    },
+    bom: {
+      ...base,
+      name: trim(form.bomPipelineName),
+      description: 'Draft PLM BOM cleansing pipeline generated from the K3 WISE setup page.',
+      sourceObject: 'bom',
+      targetObject: 'bom',
+      mode: 'manual',
+      idempotencyKeyFields: ['sourceId', 'revision'],
+      options: {
+        batchSize: 50,
+        erpFeedback: {
+          objectId: trim(form.bomStagingObjectId),
+          keyField: '_integration_idempotency_key',
+        },
+      },
+      fieldMappings: [
+        {
+          sourceField: 'parentCode',
+          targetField: 'FParentItemNumber',
+          transform: ['trim', 'upper'],
+          validation: [{ type: 'required' }],
+        },
+        {
+          sourceField: 'childCode',
+          targetField: 'FChildItemNumber',
+          transform: ['trim', 'upper'],
+          validation: [{ type: 'required' }],
+        },
+        {
+          sourceField: 'quantity',
+          targetField: 'FQty',
+          transform: { fn: 'toNumber' },
+          validation: [{ type: 'min', value: 0.000001 }],
+        },
+        {
+          sourceField: 'uom',
+          targetField: 'FUnitID',
+          transform: { fn: 'trim' },
+        },
+        {
+          sourceField: 'sequence',
+          targetField: 'FEntryID',
+          transform: { fn: 'toNumber' },
+        },
+        {
+          sourceField: 'sourceId',
+          targetField: 'sourceId',
+          validation: [{ type: 'required' }],
+        },
+        {
+          sourceField: 'revision',
+          targetField: 'revision',
+          defaultValue: 'A',
+        },
+      ],
+    },
+  }
+}
+
 export function applyExternalSystemToForm(form: K3WiseSetupForm, system: IntegrationExternalSystem): K3WiseSetupForm {
   const next = { ...form }
   if (system.kind === WEBAPI_KIND) {
@@ -412,6 +603,14 @@ export async function testIntegrationSystem(systemId: string, input: Record<stri
     body: JSON.stringify(input),
   })
   return parseIntegrationResponse<Record<string, unknown>>(response)
+}
+
+export async function upsertIntegrationPipeline(payload: Record<string, unknown>): Promise<IntegrationPipeline> {
+  const response = await apiFetch('/api/integration/pipelines', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+  return parseIntegrationResponse<IntegrationPipeline>(response)
 }
 
 export const K3_WISE_WEBAPI_KIND = WEBAPI_KIND
