@@ -45,6 +45,15 @@
                 <option value="dingtalk_granted">DingTalk-authorized users only</option>
               </select>
               <p class="meta-form-share__hint">{{ accessModeHint }}</p>
+              <div
+                class="meta-form-share__audience-card"
+                data-form-share-audience-rule="true"
+                :data-access-mode="config.accessMode"
+                :data-has-local-allowlist="hasLocalAllowlist ? 'true' : 'false'"
+              >
+                <strong>{{ audienceRule.title }}</strong>
+                <span>{{ audienceRule.description }}</span>
+              </div>
             </div>
 
             <div v-if="showAllowlistSection" class="meta-form-share__allowlist-section">
@@ -88,6 +97,13 @@
                       {{ user.label }}
                       <span v-if="user.subtitle" class="meta-form-share__chip-subtitle">{{ user.subtitle }}</span>
                       <span v-if="!user.isActive" class="meta-form-share__chip-subtitle">Inactive user</span>
+                      <span
+                        v-if="subjectDingTalkStatus(user)"
+                        class="meta-form-share__chip-subtitle"
+                        :data-form-share-dingtalk-status="subjectDingTalkStatus(user)"
+                      >
+                        {{ subjectDingTalkStatus(user) }}
+                      </span>
                     </span>
                     <button
                       class="meta-form-share__chip-remove"
@@ -155,6 +171,13 @@
                       </span>
                     </span>
                     <span v-if="candidate.subtitle" class="meta-form-share__candidate-subtitle">{{ candidate.subtitle }}</span>
+                    <span
+                      v-if="subjectDingTalkStatus(candidate)"
+                      class="meta-form-share__candidate-subtitle"
+                      :data-form-share-dingtalk-status="subjectDingTalkStatus(candidate)"
+                    >
+                      {{ subjectDingTalkStatus(candidate) }}
+                    </span>
                     <span v-if="candidate.subjectType === 'user' && !candidate.isActive" class="meta-form-share__candidate-subtitle">
                       Inactive users cannot be added
                     </span>
@@ -299,6 +322,36 @@ const allowedUsers = computed(() => config.value?.allowedUsers ?? [])
 const allowedMemberGroups = computed(() => config.value?.allowedMemberGroups ?? [])
 const allowedUserCount = computed(() => config.value?.allowedUserIds?.length ?? allowedUsers.value.length)
 const allowedMemberGroupCount = computed(() => config.value?.allowedMemberGroupIds?.length ?? allowedMemberGroups.value.length)
+const hasLocalAllowlist = computed(() => allowedUserCount.value > 0 || allowedMemberGroupCount.value > 0)
+const audienceRule = computed(() => {
+  const mode = config.value?.accessMode ?? 'public'
+  if (mode === 'public') {
+    return {
+      title: 'Fully public anonymous form',
+      description: 'Anyone with the link can open and submit without local login or DingTalk binding.',
+    }
+  }
+  if (mode === 'dingtalk_granted') {
+    return hasLocalAllowlist.value
+      ? {
+          title: 'Selected authorized DingTalk users',
+          description: 'Only selected local users or group members can fill, and each user must be DingTalk-bound with form authorization enabled.',
+        }
+      : {
+          title: 'All authorized DingTalk users',
+          description: 'Any DingTalk-bound local user can fill after an administrator enables their DingTalk form authorization.',
+        }
+  }
+  return hasLocalAllowlist.value
+    ? {
+        title: 'Selected DingTalk-bound users',
+        description: 'Only selected local users or group members can fill, and each user must be bound to DingTalk.',
+      }
+    : {
+        title: 'All DingTalk-bound users',
+        description: 'Any local user can fill after DingTalk sign-in when their account is bound to DingTalk.',
+      }
+})
 const allowlistAudienceSummary = computed(() => {
   const userCount = allowedUserCount.value
   const memberGroupCount = allowedMemberGroupCount.value
@@ -322,6 +375,23 @@ const selectedSubjectKeys = computed(() => new Set([
 const filteredCandidates = computed(() =>
   candidates.value.filter((candidate) => !selectedSubjectKeys.value.has(`${candidate.subjectType}:${candidate.subjectId}`)),
 )
+
+function subjectDingTalkStatus(
+  subject: Pick<MetaSheetPermissionCandidate, 'subjectType' | 'dingtalkBound' | 'dingtalkGrantEnabled' | 'dingtalkPersonDeliveryAvailable'>,
+): string {
+  const mode = config.value?.accessMode ?? 'public'
+  if (mode === 'public') return ''
+  if (subject.subjectType === 'member-group') return 'Members are checked individually'
+  if (subject.subjectType !== 'user') return ''
+  if (subject.dingtalkBound === false) return 'DingTalk not bound'
+  if (mode === 'dingtalk_granted') {
+    if (subject.dingtalkGrantEnabled === true) return 'DingTalk bound and authorized'
+    if (subject.dingtalkBound === true && subject.dingtalkGrantEnabled === false) return 'DingTalk authorization not enabled'
+  }
+  if (subject.dingtalkBound === true) return 'DingTalk bound'
+  if (subject.dingtalkPersonDeliveryAvailable === true) return 'DingTalk delivery linked'
+  return ''
+}
 
 async function loadConfig() {
   if (!props.client) return
@@ -773,6 +843,22 @@ watch(candidateQuery, () => {
 .meta-form-share__candidate-subtitle {
   font-size: 12px;
   color: #64748b;
+}
+
+.meta-form-share__audience-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid #bae6fd;
+  border-radius: 10px;
+  background: #f0f9ff;
+  color: #0c4a6e;
+  font-size: 12px;
+}
+
+.meta-form-share__audience-card strong {
+  font-size: 13px;
 }
 
 .meta-form-share__link-row,

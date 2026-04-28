@@ -355,6 +355,9 @@ type PublicFormAllowedSubjectSummary = {
   label: string
   subtitle: string | null
   isActive: boolean
+  dingtalkBound?: boolean | null
+  dingtalkGrantEnabled?: boolean | null
+  dingtalkPersonDeliveryAvailable?: boolean | null
 }
 
 type PublicFormShareConfigResponse = {
@@ -520,23 +523,32 @@ async function loadPublicFormAllowedSubjectSummaries(
       ]),
   )
 
-  return {
-    allowedUserIds,
-    allowedUsers: allowedUserIds.map((userId) => usersById.get(userId) ?? {
-      subjectType: 'user',
+  const subjects: PublicFormAllowedSubjectSummary[] = [
+    ...allowedUserIds.map((userId) => usersById.get(userId) ?? {
+      subjectType: 'user' as const,
       subjectId: userId,
       label: userId,
       subtitle: null,
       isActive: false,
-    }),
-    allowedMemberGroupIds,
-    allowedMemberGroups: allowedMemberGroupIds.map((groupId) => groupsById.get(groupId) ?? {
-      subjectType: 'member-group',
+    } satisfies PublicFormAllowedSubjectSummary),
+    ...allowedMemberGroupIds.map((groupId) => groupsById.get(groupId) ?? {
+      subjectType: 'member-group' as const,
       subjectId: groupId,
       label: groupId,
       subtitle: 'Member group',
       isActive: true,
-    }),
+    } satisfies PublicFormAllowedSubjectSummary),
+  ]
+  const enrichedSubjects = await enrichFormShareCandidatesWithDingTalkStatus(
+    query,
+    subjects as MultitableSheetPermissionCandidate[],
+  ) as PublicFormAllowedSubjectSummary[]
+
+  return {
+    allowedUserIds,
+    allowedUsers: enrichedSubjects.filter((subject) => subject.subjectType === 'user'),
+    allowedMemberGroupIds,
+    allowedMemberGroups: enrichedSubjects.filter((subject) => subject.subjectType === 'member-group'),
   }
 }
 

@@ -37,7 +37,7 @@ function mockClient(config = fakeConfig()) {
         items: [
           { subjectType: 'user', subjectId: 'user_1', label: 'Alice', subtitle: 'alice@test.local', isActive: true, accessLevel: 'write' },
           { subjectType: 'member-group', subjectId: 'group_ops', label: 'Ops', subtitle: 'Operations', isActive: true, accessLevel: 'write' },
-          { subjectType: 'user', subjectId: 'user_inactive', label: 'Inactive User', subtitle: 'inactive@test.local', isActive: false, accessLevel: 'write' },
+          { subjectType: 'user', subjectId: 'user_inactive', label: 'Inactive User', subtitle: 'inactive@test.local', isActive: false, accessLevel: 'write', dingtalkBound: false, dingtalkGrantEnabled: false, dingtalkPersonDeliveryAvailable: false },
         ],
         total: 3,
         limit: 20,
@@ -111,6 +111,10 @@ describe('MetaFormShareManager', () => {
     const copyBtn = document.querySelector('[data-form-share-copy]')
     expect(copyBtn).toBeTruthy()
     expect(copyBtn?.textContent?.trim()).toBe('Copy')
+    const audience = document.querySelector('[data-form-share-audience-rule]') as HTMLElement
+    expect(audience).toBeTruthy()
+    expect(audience.getAttribute('data-access-mode')).toBe('public')
+    expect(audience.textContent).toContain('Fully public anonymous form')
   })
 
   it('shows regenerate button', async () => {
@@ -212,6 +216,12 @@ describe('MetaFormShareManager', () => {
     expect(document.body.textContent).toContain('No local member-group allowlist configured. Add a local member group to let its members fill this form.')
     expect(document.querySelector('[data-form-share-add-subject="user:user_1"]')).toBeTruthy()
     expect(document.querySelector('[data-form-share-add-subject="member-group:group_ops"]')).toBeTruthy()
+    const audience = document.querySelector('[data-form-share-audience-rule]') as HTMLElement
+    expect(audience.getAttribute('data-access-mode')).toBe('dingtalk')
+    expect(audience.getAttribute('data-has-local-allowlist')).toBe('false')
+    expect(audience.textContent).toContain('All DingTalk-bound users')
+    expect(document.body.textContent).toContain('DingTalk not bound')
+    expect(document.body.textContent).toContain('Members are checked individually')
   })
 
   it('explains DingTalk delivery still uses local allowlists for granted mode', async () => {
@@ -224,6 +234,7 @@ describe('MetaFormShareManager', () => {
     expect(summary).toBeTruthy()
     expect(summary.textContent).toContain('No local allowlist limits are set; all users allowed by the selected DingTalk mode can fill this form.')
     expect(document.body.textContent).toContain('The form opens only for DingTalk-bound users whose DingTalk grant is enabled by an administrator.')
+    expect(document.querySelector('[data-form-share-audience-rule]')?.textContent).toContain('All authorized DingTalk users')
     expect(document.body.textContent).toContain('DingTalk is only the sign-in and delivery channel. The allowlist still targets your local users and member groups.')
     expect(document.body.textContent).toContain('No local user allowlist configured. Access is still gated by the selected DingTalk mode; add local users or member groups to narrow who can fill this form.')
   })
@@ -232,7 +243,7 @@ describe('MetaFormShareManager', () => {
     const { client } = mockClient(fakeConfig({
       accessMode: 'dingtalk',
       allowedUserIds: ['user_1'],
-      allowedUsers: [{ subjectType: 'user', subjectId: 'user_1', label: 'Alice', subtitle: 'alice@test.local', isActive: true }],
+      allowedUsers: [{ subjectType: 'user', subjectId: 'user_1', label: 'Alice', subtitle: 'alice@test.local', isActive: true, dingtalkBound: true, dingtalkGrantEnabled: false, dingtalkPersonDeliveryAvailable: true }],
       allowedMemberGroupIds: ['group_ops'],
       allowedMemberGroups: [{ subjectType: 'member-group', subjectId: 'group_ops', label: 'Ops', subtitle: 'Operations', isActive: true }],
     }))
@@ -244,6 +255,8 @@ describe('MetaFormShareManager', () => {
     expect(summary.getAttribute('data-user-count')).toBe('1')
     expect(summary.getAttribute('data-member-group-count')).toBe('1')
     expect(summary.textContent).toContain('Local allowlist limits: 1 local user and 1 local member group can fill after passing the selected DingTalk mode.')
+    expect(document.querySelector('[data-form-share-audience-rule]')?.textContent).toContain('Selected DingTalk-bound users')
+    expect(document.body.textContent).toContain('DingTalk bound')
   })
 
   it('adds an allowed user through the allowlist controls', async () => {
