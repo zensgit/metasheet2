@@ -135,6 +135,67 @@
           </ul>
           <pre v-if="pipelineRunResult" class="k3-setup__test-result">{{ pipelineRunResult }}</pre>
         </div>
+
+        <div class="k3-setup__panel">
+          <div class="k3-setup__panel-head">
+            <h2>运行观察</h2>
+            <span>{{ observationSummary }}</span>
+          </div>
+          <button
+            class="k3-setup__btn k3-setup__btn--full"
+            type="button"
+            :disabled="isPipelineObservationDisabled('material')"
+            @click="refreshPipelineObservation('material')"
+          >
+            {{ observingPipeline === 'material' ? '刷新中' : '刷新物料状态' }}
+          </button>
+          <button
+            class="k3-setup__btn k3-setup__btn--full"
+            type="button"
+            :disabled="isPipelineObservationDisabled('bom')"
+            @click="refreshPipelineObservation('bom')"
+          >
+            {{ observingPipeline === 'bom' ? '刷新中' : '刷新 BOM 状态' }}
+          </button>
+
+          <div class="k3-setup__records">
+            <div class="k3-setup__record-head">
+              <span>最近运行</span>
+              <small>{{ observedPipelineTarget }}</small>
+            </div>
+            <div v-if="pipelineRuns.length === 0" class="k3-setup__empty">暂无运行记录。</div>
+            <template v-else>
+              <div v-for="run in pipelineRuns" :key="run.id" class="k3-setup__record">
+                <div class="k3-setup__record-main">
+                  <strong>{{ run.id }}</strong>
+                  <span class="k3-setup__badge" :data-status="run.status">{{ run.status }}</span>
+                </div>
+                <small>{{ formatRunMetrics(run) }}</small>
+                <small>{{ formatTimestamp(run.startedAt || run.createdAt || '') }}</small>
+                <small v-if="run.errorSummary" class="k3-setup__saved-error">{{ run.errorSummary }}</small>
+              </div>
+            </template>
+          </div>
+
+          <div class="k3-setup__records">
+            <div class="k3-setup__record-head">
+              <span>Open Dead Letters</span>
+              <small>{{ deadLetters.length }}</small>
+            </div>
+            <div v-if="deadLetters.length === 0" class="k3-setup__empty">暂无 open dead letters。</div>
+            <template v-else>
+              <div v-for="deadLetter in deadLetters" :key="deadLetter.id" class="k3-setup__record">
+                <div class="k3-setup__record-main">
+                  <strong>{{ deadLetter.errorCode }}</strong>
+                  <span class="k3-setup__badge" :data-status="deadLetter.status">{{ deadLetter.status }}</span>
+                </div>
+                <small>{{ deadLetter.id }} · retry {{ deadLetter.retryCount }}</small>
+                <small class="k3-setup__saved-error">{{ deadLetter.errorMessage }}</small>
+                <small v-if="deadLetter.payloadRedacted">payload redacted</small>
+              </div>
+            </template>
+          </div>
+        </div>
       </aside>
 
       <form class="k3-setup__form" @submit.prevent="saveConfiguration">
@@ -407,6 +468,7 @@ import {
   K3_WISE_SQLSERVER_KIND,
   K3_WISE_WEBAPI_KIND,
   applyExternalSystemToForm,
+  buildK3WisePipelineObservationQuery,
   buildK3WisePipelinePayloads,
   buildK3WisePipelineRunPayload,
   buildK3WiseSetupPayloads,
@@ -414,16 +476,21 @@ import {
   createDefaultK3WiseSetupForm,
   getK3WisePipelineId,
   installIntegrationStaging,
+  listIntegrationDeadLetters,
+  listIntegrationPipelineRuns,
   listIntegrationSystems,
   runIntegrationPipeline,
   testIntegrationSystem,
   upsertIntegrationPipeline,
   upsertIntegrationSystem,
   validateK3WisePipelineTemplateForm,
+  validateK3WisePipelineObservationForm,
   validateK3WisePipelineRunForm,
   validateK3WiseSetupForm,
   validateK3WiseStagingInstallForm,
+  type IntegrationDeadLetter,
   type IntegrationExternalSystem,
+  type IntegrationPipelineRun,
   type K3WisePipelineTarget,
 } from '../services/integration/k3WiseSetup'
 
@@ -437,12 +504,16 @@ const testingSql = ref(false)
 const installingStaging = ref(false)
 const creatingPipelines = ref(false)
 const runningPipeline = ref('')
+const observingPipeline = ref('')
+const observedPipelineTarget = ref<K3WisePipelineTarget>('material')
 const statusMessage = ref('')
 const statusKind = ref<'info' | 'success' | 'error'>('info')
 const testResult = ref('')
 const stagingResult = ref('')
 const pipelineResult = ref('')
 const pipelineRunResult = ref('')
+const pipelineRuns = ref<IntegrationPipelineRun[]>([])
+const deadLetters = ref<IntegrationDeadLetter[]>([])
 
 const savedSystems = computed(() => [...webApiSystems.value, ...sqlSystems.value])
 const validationIssues = computed(() => validateK3WiseSetupForm(form))
@@ -450,6 +521,7 @@ const stagingIssues = computed(() => validateK3WiseStagingInstallForm(form))
 const pipelineIssues = computed(() => validateK3WisePipelineTemplateForm(form))
 const materialRunIssues = computed(() => validateK3WisePipelineRunForm(form, 'material'))
 const bomRunIssues = computed(() => validateK3WisePipelineRunForm(form, 'bom'))
+const observationSummary = computed(() => `${pipelineRuns.value.length} runs / ${deadLetters.value.length} open`)
 
 function setStatus(message: string, kind: 'info' | 'success' | 'error' = 'info'): void {
   statusMessage.value = message
@@ -461,9 +533,14 @@ function formatError(error: unknown): string {
 }
 
 function formatTimestamp(value: string): string {
+  if (!value) return '-'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
   return date.toLocaleString()
+}
+
+function formatRunMetrics(run: IntegrationPipelineRun): string {
+  return `read ${run.rowsRead} / clean ${run.rowsCleaned} / write ${run.rowsWritten} / failed ${run.rowsFailed}`
 }
 
 function loadSystemIntoForm(system: IntegrationExternalSystem): void {
@@ -601,6 +678,35 @@ function isPipelineRunDisabled(target: K3WisePipelineTarget, dryRun: boolean): b
   return Boolean(runningPipeline.value || issues.length > 0 || (!dryRun && !form.allowLivePipelineRun))
 }
 
+function isPipelineObservationDisabled(target: K3WisePipelineTarget): boolean {
+  return Boolean(observingPipeline.value || validateK3WisePipelineObservationForm(form, target).length > 0)
+}
+
+async function refreshPipelineObservation(target: K3WisePipelineTarget, silent = false): Promise<void> {
+  const issues = validateK3WisePipelineObservationForm(form, target)
+  if (issues.length > 0) {
+    if (!silent) setStatus(issues[0].message, 'error')
+    return
+  }
+  observingPipeline.value = target
+  observedPipelineTarget.value = target
+  try {
+    const [runs, openDeadLetters] = await Promise.all([
+      listIntegrationPipelineRuns(buildK3WisePipelineObservationQuery(form, target, { limit: 5 })),
+      listIntegrationDeadLetters(buildK3WisePipelineObservationQuery(form, target, { status: 'open', limit: 5 })),
+    ])
+    pipelineRuns.value = runs
+    deadLetters.value = openDeadLetters
+    if (!silent) {
+      setStatus(`${target === 'material' ? '物料' : 'BOM'} Pipeline 运行状态已刷新`, 'success')
+    }
+  } catch (error) {
+    if (!silent) setStatus(formatError(error), 'error')
+  } finally {
+    observingPipeline.value = ''
+  }
+}
+
 async function executePipeline(target: K3WisePipelineTarget, dryRun: boolean): Promise<void> {
   const issues = validateK3WisePipelineRunForm(form, target)
   if (issues.length > 0) {
@@ -622,6 +728,7 @@ async function executePipeline(target: K3WisePipelineTarget, dryRun: boolean): P
       pipelineId,
       result,
     }, null, 2)
+    await refreshPipelineObservation(target, true)
     setStatus(`${target === 'material' ? '物料' : 'BOM'} Pipeline ${dryRun ? 'dry-run' : 'run'} 已提交`, 'success')
   } catch (error) {
     setStatus(formatError(error), 'error')
@@ -867,6 +974,79 @@ onMounted(() => {
 
 .k3-setup__empty {
   color: #64748b;
+}
+
+.k3-setup__records {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.k3-setup__record-head,
+.k3-setup__record-main {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+}
+
+.k3-setup__record-head span {
+  color: #334155;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.k3-setup__record-head small {
+  color: #64748b;
+}
+
+.k3-setup__record {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 10px;
+  background: #f8fafc;
+}
+
+.k3-setup__record strong {
+  overflow-wrap: anywhere;
+  color: #172033;
+  font-size: 13px;
+}
+
+.k3-setup__record small {
+  overflow-wrap: anywhere;
+  color: #64748b;
+}
+
+.k3-setup__badge {
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: #e2e8f0;
+  color: #334155;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.k3-setup__badge[data-status="succeeded"],
+.k3-setup__badge[data-status="replayed"] {
+  background: #ccfbf1;
+  color: #115e59;
+}
+
+.k3-setup__badge[data-status="partial"],
+.k3-setup__badge[data-status="open"] {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.k3-setup__badge[data-status="failed"] {
+  background: #ffe4e6;
+  color: #9f1239;
 }
 
 .k3-setup__test-result {

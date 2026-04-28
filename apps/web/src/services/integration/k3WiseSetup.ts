@@ -4,6 +4,8 @@ export type IntegrationSystemStatus = 'active' | 'inactive' | 'error'
 export type K3SqlServerMode = 'readonly' | 'middle-table' | 'stored-procedure'
 export type IntegrationPipelineRunMode = 'manual' | 'incremental' | 'full'
 export type K3WisePipelineTarget = 'material' | 'bom'
+export type IntegrationPipelineRunStatus = 'pending' | 'running' | 'succeeded' | 'partial' | 'failed' | 'cancelled'
+export type IntegrationDeadLetterStatus = 'open' | 'replayed' | 'discarded'
 
 export interface IntegrationApiEnvelope<T> {
   ok: boolean
@@ -61,6 +63,43 @@ export interface IntegrationPipelineRunResult {
   dryRun?: boolean
   metrics?: Record<string, unknown>
   [key: string]: unknown
+}
+
+export interface IntegrationPipelineRun {
+  id: string
+  tenantId: string
+  workspaceId: string | null
+  pipelineId: string
+  mode: IntegrationPipelineRunMode | string
+  triggeredBy?: string | null
+  status: IntegrationPipelineRunStatus | string
+  rowsRead: number
+  rowsCleaned: number
+  rowsWritten: number
+  rowsFailed: number
+  startedAt?: string | null
+  finishedAt?: string | null
+  durationMs?: number | null
+  errorSummary?: string | null
+  details?: Record<string, unknown>
+  createdAt?: string | null
+}
+
+export interface IntegrationDeadLetter {
+  id: string
+  tenantId: string
+  workspaceId: string | null
+  runId: string
+  pipelineId: string
+  idempotencyKey?: string | null
+  errorCode: string
+  errorMessage: string
+  retryCount: number
+  status: IntegrationDeadLetterStatus | string
+  lastReplayRunId?: string | null
+  payloadRedacted?: boolean
+  createdAt?: string | null
+  updatedAt?: string | null
 }
 
 export interface IntegrationStagingDescriptor {
@@ -148,6 +187,15 @@ export interface K3WisePipelineRunPayload {
   mode: IntegrationPipelineRunMode
   cursor?: string
   sampleLimit?: number
+}
+
+export interface K3WisePipelineObservationQuery {
+  tenantId: string
+  workspaceId?: string | null
+  pipelineId: string
+  status?: string
+  limit?: number
+  offset?: number
 }
 
 export interface K3WiseSetupValidationIssue {
@@ -351,6 +399,22 @@ export function validateK3WisePipelineRunForm(
   return issues
 }
 
+export function validateK3WisePipelineObservationForm(
+  form: K3WiseSetupForm,
+  target: K3WisePipelineTarget,
+): K3WiseSetupValidationIssue[] {
+  const issues: K3WiseSetupValidationIssue[] = []
+  const pipelineField: keyof K3WiseSetupForm = target === 'material' ? 'materialPipelineId' : 'bomPipelineId'
+  if (!trim(form.tenantId)) issues.push({ field: 'tenantId', message: 'tenantId is required' })
+  if (!trim(form[pipelineField])) {
+    issues.push({
+      field: pipelineField,
+      message: `${target === 'material' ? 'Material' : 'BOM'} pipeline ID is required before loading run history`,
+    })
+  }
+  return issues
+}
+
 export function buildK3WiseStagingInstallPayload(form: K3WiseSetupForm): K3WiseStagingInstallPayload {
   const issues = validateK3WiseStagingInstallForm(form)
   if (issues.length > 0) {
@@ -384,6 +448,28 @@ export function buildK3WisePipelineRunPayload(form: K3WiseSetupForm, target: K3W
   const cursor = optionalString(form.pipelineCursor)
   if (cursor) payload.cursor = cursor
   return payload
+}
+
+export function buildK3WisePipelineObservationQuery(
+  form: K3WiseSetupForm,
+  target: K3WisePipelineTarget,
+  options: { status?: string; limit?: number; offset?: number } = {},
+): K3WisePipelineObservationQuery {
+  const issues = validateK3WisePipelineObservationForm(form, target)
+  if (issues.length > 0) {
+    throw new Error(issues[0].message)
+  }
+
+  const limit = options.limit
+  const offset = options.offset
+  return {
+    tenantId: trim(form.tenantId),
+    workspaceId: optionalString(form.workspaceId) ?? null,
+    pipelineId: getK3WisePipelineId(form, target),
+    ...(options.status ? { status: options.status } : {}),
+    ...(typeof limit === 'number' && Number.isInteger(limit) && limit > 0 ? { limit } : {}),
+    ...(typeof offset === 'number' && Number.isInteger(offset) && offset >= 0 ? { offset } : {}),
+  }
 }
 
 export function buildK3WiseSetupPayloads(form: K3WiseSetupForm): K3WiseSetupPayloads {
@@ -748,6 +834,27 @@ export async function runIntegrationPipeline(
     body: JSON.stringify(payload),
   })
   return parseIntegrationResponse<IntegrationPipelineRunResult>(response)
+}
+
+function buildQueryString(input: object): string {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+    if (value === undefined || value === null || value === '') continue
+    params.set(key, String(value))
+  }
+  return params.toString()
+}
+
+export async function listIntegrationPipelineRuns(query: K3WisePipelineObservationQuery): Promise<IntegrationPipelineRun[]> {
+  const response = await apiFetch(`/api/integration/runs?${buildQueryString(query)}`)
+  const data = await parseIntegrationResponse<IntegrationPipelineRun[]>(response)
+  return Array.isArray(data) ? data : []
+}
+
+export async function listIntegrationDeadLetters(query: K3WisePipelineObservationQuery): Promise<IntegrationDeadLetter[]> {
+  const response = await apiFetch(`/api/integration/dead-letters?${buildQueryString(query)}`)
+  const data = await parseIntegrationResponse<IntegrationDeadLetter[]>(response)
+  return Array.isArray(data) ? data : []
 }
 
 export async function listIntegrationStagingDescriptors(): Promise<IntegrationStagingDescriptor[]> {
