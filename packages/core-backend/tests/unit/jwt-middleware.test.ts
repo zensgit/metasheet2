@@ -234,6 +234,108 @@ describe('jwt auth middleware', () => {
     expect(next).toHaveBeenCalledTimes(1)
   })
 
+  it('allows DingTalk protected public-form context when the user must change password', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-5',
+      email: 'forced-public-form@example.com',
+      name: 'Forced Public Form User',
+      role: 'user',
+      permissions: ['multitable:read'],
+      must_change_password: true,
+      created_at: new Date('2026-04-28T00:00:00.000Z'),
+      updated_at: new Date('2026-04-28T00:00:00.000Z'),
+    })
+
+    const req = {
+      method: 'GET',
+      path: '/api/multitable/form-context',
+      query: { publicToken: 'pub_123' },
+      headers: {
+        authorization: 'Bearer forced-public-form-token',
+      },
+    } as unknown as Request
+    const res = {
+      status: vi.fn().mockReturnThis(),
+      json: vi.fn().mockReturnThis(),
+    } as unknown as Response
+    const next = vi.fn() as NextFunction
+
+    await optionalJwtAuthMiddleware(req, res, next)
+
+    expect(req.user).toMatchObject({ id: 'user-5' })
+    expect(res.status).not.toHaveBeenCalled()
+    expect(next).toHaveBeenCalledTimes(1)
+  })
+
+  it('allows DingTalk protected public-form submit when the user must change password', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-6',
+      email: 'forced-public-form-submit@example.com',
+      name: 'Forced Public Form Submit User',
+      role: 'user',
+      permissions: ['multitable:read'],
+      must_change_password: true,
+      created_at: new Date('2026-04-28T00:00:00.000Z'),
+      updated_at: new Date('2026-04-28T00:00:00.000Z'),
+    })
+
+    const req = {
+      method: 'POST',
+      path: '/api/multitable/views/view_form/submit',
+      query: {},
+      body: { publicToken: 'pub_123', data: { fld_title: 'Alpha' } },
+      headers: {
+        authorization: 'Bearer forced-public-form-submit-token',
+      },
+    } as unknown as Request
+    const res = {
+      status: vi.fn().mockReturnThis(),
+      json: vi.fn().mockReturnThis(),
+    } as unknown as Response
+    const next = vi.fn() as NextFunction
+
+    await optionalJwtAuthMiddleware(req, res, next)
+
+    expect(req.user).toMatchObject({ id: 'user-6' })
+    expect(res.status).not.toHaveBeenCalled()
+    expect(next).toHaveBeenCalledTimes(1)
+  })
+
+  it('still blocks must-change-password users on public form routes without a public token', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-7',
+      email: 'forced-no-token@example.com',
+      name: 'Forced No Token User',
+      role: 'user',
+      permissions: ['multitable:read'],
+      must_change_password: true,
+      created_at: new Date('2026-04-28T00:00:00.000Z'),
+      updated_at: new Date('2026-04-28T00:00:00.000Z'),
+    })
+
+    const req = {
+      method: 'GET',
+      path: '/api/multitable/form-context',
+      query: {},
+      headers: {
+        authorization: 'Bearer forced-no-public-token',
+      },
+    } as unknown as Request
+    const res = {
+      status: vi.fn().mockReturnThis(),
+      json: vi.fn().mockReturnThis(),
+    } as unknown as Response
+    const next = vi.fn() as NextFunction
+
+    await optionalJwtAuthMiddleware(req, res, next)
+
+    expect(res.status).toHaveBeenCalledWith(403)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      error: expect.objectContaining({ code: 'PASSWORD_CHANGE_REQUIRED' }),
+    }))
+    expect(next).not.toHaveBeenCalled()
+  })
+
   it('optional public form auth bypass does not fail when no bearer token is present', async () => {
     authServiceMocks.verifyToken.mockReset()
     const req = {

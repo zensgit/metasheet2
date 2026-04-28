@@ -109,6 +109,9 @@ describe('PublicMultitableFormView', () => {
 
     app = createApp(Root)
     app.mount(container)
+
+    expect(container.textContent).toContain('Loading secure form access...')
+
     await flushUi()
 
     expect(loadFormContextSpy).toHaveBeenCalledWith({

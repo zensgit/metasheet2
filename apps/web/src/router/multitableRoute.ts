@@ -68,6 +68,6 @@ export function buildPublicMultitableFormRoute(component: NonNullable<RouteRecor
     name: AppRouteNames.MULTITABLE_PUBLIC_FORM,
     component,
     props: resolvePublicMultitableFormRouteProps,
-    meta: { title: 'Public Multitable Form', hideNavbar: true, requiresAuth: false },
+    meta: { title: 'Public Multitable Form', hideNavbar: true, requiresAuth: false, skipShellBootstrap: true },
   }
 }

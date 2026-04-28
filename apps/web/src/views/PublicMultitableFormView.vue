@@ -68,7 +68,7 @@ const redirectingToDingTalk = ref(false)
 
 const title = computed(() => context.value?.view?.name || context.value?.sheet?.name || 'Public multitable form')
 const subtitle = computed(() => {
-  if (!context.value) return 'Submit this form anonymously.'
+  if (!context.value) return 'Loading secure form access...'
   const parts = [context.value.sheet?.name, context.value.view?.name].filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
   return parts.length ? parts.join(' · ') : 'Submit this form anonymously.'
 })
