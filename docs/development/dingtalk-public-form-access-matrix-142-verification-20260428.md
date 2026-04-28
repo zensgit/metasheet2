@@ -35,6 +35,26 @@ Non-blocking frontend test warning:
 
 - Vite dev WebSocket port was already in use during the focused Vitest run; test process exited successfully.
 
+## Codex Recheck
+
+Rechecked after PR review on 2026-04-28:
+
+```bash
+git diff --check
+pnpm --filter @metasheet/core-backend exec vitest run tests/integration/public-form-flow.test.ts --watch=false
+pnpm --filter @metasheet/web exec vitest run tests/multitable-form-share-manager.spec.ts --watch=false
+pnpm --filter @metasheet/core-backend build
+pnpm --filter @metasheet/web build
+```
+
+Results:
+
+- `git diff --check`: passed after removing one trailing blank line from the design MD.
+- Backend public-form integration test: passed, 19 tests.
+- Frontend share-manager unit test: passed, 15 tests.
+- Backend build: passed.
+- Web build: passed, with the same existing dynamic/static import and large chunk warnings.
+
 ## 142 Read-only Check
 
 Read-only SSH and HTTP checks were run against `142.171.239.56`.

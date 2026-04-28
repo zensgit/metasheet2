@@ -57,4 +57,3 @@ Recommended release path:
 2. Let `.github/workflows/docker-build.yml` build and push backend/web images tagged by the merge commit SHA.
 3. Let the workflow deploy to 142, or manually deploy the pinned SHA with the existing production SOP.
 4. Run the post-deploy checks in the companion verification document.
-
