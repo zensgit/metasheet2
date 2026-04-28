@@ -38,6 +38,7 @@
             <router-link v-if="canManageUsers" to="/admin/permissions" class="nav-link">{{ navLabels.permissions }}</router-link>
             <router-link v-if="canManageUsers" to="/admin/audit" class="nav-link">{{ navLabels.adminAudit }}</router-link>
             <router-link v-if="canManageUsers" to="/approvals/metrics" class="nav-link">{{ navLabels.approvalMetrics }}</router-link>
+            <router-link v-if="isAdmin" to="/integrations/k3-wise" class="nav-link">{{ navLabels.erpIntegration }}</router-link>
             <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
             <router-link v-if="canUsePlm" to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
             <router-link v-if="canUsePlm" to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
@@ -128,6 +129,7 @@ const navLabels = computed(() => {
       permissions: '权限',
       adminAudit: '管理审计',
       approvalMetrics: '审批 SLA',
+      erpIntegration: 'ERP 对接',
       plugins: '插件',
       plm: 'PLM',
       audit: '审计',
@@ -153,6 +155,7 @@ const navLabels = computed(() => {
     permissions: 'Permissions',
     adminAudit: 'Admin Audit',
     approvalMetrics: 'Approval SLA',
+    erpIntegration: 'ERP Integration',
     plugins: 'Plugins',
     plm: 'PLM',
     audit: 'Audit',

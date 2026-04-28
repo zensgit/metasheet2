@@ -134,6 +134,12 @@ async function main() {
   assert.equal(listed.length, 1)
   assert.equal(listed[0].id, 'sys_1')
 
+  const adapterSystem = await registry.getExternalSystemForAdapter({ tenantId: 'tenant_1', workspaceId: null, id: 'sys_1' })
+  assert.equal(adapterSystem.id, 'sys_1')
+  assert.deepEqual(adapterSystem.credentials, { username: 'u', password: 'secret' }, 'adapter load decrypts JSON credentials')
+  assert.equal(adapterSystem.credentialsEncrypted, undefined, 'adapter load never exposes ciphertext')
+  assert.equal(adapterSystem.credentialFingerprint, undefined, 'adapter load omits public fingerprint fields')
+
   const isolated = await registry.listExternalSystems({ tenantId: 'tenant_1', workspaceId: 'other' })
   assert.equal(isolated.length, 0, 'workspace scope isolates rows')
 
