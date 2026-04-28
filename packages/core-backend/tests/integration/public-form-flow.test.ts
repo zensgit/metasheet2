@@ -432,6 +432,15 @@ describe('Public form flow', () => {
         if (sql.includes('FROM platform_member_groups')) {
           return { rows: [{ id: 'group_1', name: 'Ops', description: 'Operations', member_count: 3 }, { id: 'group_2', name: 'Sales', description: 'Sales team', member_count: 4 }] }
         }
+        if (sql.includes('FROM user_external_identities')) {
+          return { rows: [{ local_user_id: 'user_1' }, { local_user_id: 'user_2' }] }
+        }
+        if (sql.includes('FROM directory_account_links')) {
+          return { rows: [{ local_user_id: 'user_2' }] }
+        }
+        if (sql.includes('FROM user_external_auth_grants')) {
+          return { rows: [{ local_user_id: 'user_1', enabled: true }, { local_user_id: 'user_2', enabled: false }] }
+        }
         if (sql.includes('SELECT id FROM users WHERE id = ANY')) {
           const ids = Array.isArray(params?.[0]) ? (params?.[0] as string[]) : []
           return { rows: ids.map((id) => ({ id })) }
@@ -454,6 +463,9 @@ describe('Public form flow', () => {
 
     expect(getResponse.body.data.allowedUserIds).toEqual(['user_1'])
     expect(getResponse.body.data.allowedUsers[0].label).toBe('User 1')
+    expect(getResponse.body.data.allowedUsers[0].dingtalkBound).toBe(true)
+    expect(getResponse.body.data.allowedUsers[0].dingtalkGrantEnabled).toBe(true)
+    expect(getResponse.body.data.allowedUsers[0].dingtalkPersonDeliveryAvailable).toBe(false)
     expect(getResponse.body.data.allowedMemberGroupIds).toEqual(['group_1'])
 
     const patchResponse = await request(app)
