@@ -1,8 +1,8 @@
-# Integration-Core Run Mode Contract Fix Development - 2026-04-27
+# Design: Integration-Core Run Mode Contract Fix
 
 ## Context
 
-Post-merge review of `origin/main@f372b9180` found a contract mismatch in the integration pipeline run route:
+Post-merge review after the runner paging-option hardening (`origin/main@fecbb787b`) found a contract mismatch in the integration pipeline run route:
 
 - REST `publicRunInput()` accepted `scheduled` as a public `mode`.
 - The run ledger `normalizeCreateRunInput()` accepts `manual`, `incremental`, `full`, and internal `replay`.

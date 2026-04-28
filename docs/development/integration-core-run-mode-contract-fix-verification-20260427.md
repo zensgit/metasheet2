@@ -24,7 +24,7 @@ node plugins/plugin-integration-core/__tests__/runner-support.test.cjs
 
 ## Results
 
-Executed in `/tmp/ms2-main-review-DC7XyQ` on branch `codex/integration-run-mode-contract-fix-20260427`.
+Executed in `/tmp/ms2-runmode-contract-refresh` on branch `codex/integration-run-mode-contract-fix-20260427`, after merging `origin/main@fecbb787b`.
 
 Syntax checks:
 
