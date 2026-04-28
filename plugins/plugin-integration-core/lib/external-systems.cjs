@@ -120,6 +120,30 @@ function rowToPublicExternalSystem(row, credentialFingerprint = null) {
   }
 }
 
+function rowToAdapterExternalSystem(row, credentials = undefined) {
+  if (!row) return null
+  const system = {
+    id: row.id,
+    tenantId: row.tenant_id,
+    workspaceId: row.workspace_id ?? null,
+    projectId: row.project_id ?? null,
+    name: row.name,
+    kind: row.kind,
+    role: row.role,
+    config: row.config ?? {},
+    capabilities: row.capabilities ?? {},
+    status: row.status,
+    lastTestedAt: row.last_tested_at ?? null,
+    lastError: row.last_error ?? null,
+    createdAt: row.created_at ?? null,
+    updatedAt: row.updated_at ?? null,
+  }
+  if (credentials !== undefined) {
+    system.credentials = credentials
+  }
+  return system
+}
+
 function detectCredentialFormat(ciphertext) {
   if (typeof ciphertext !== 'string' || ciphertext.length === 0) return null
   if (ciphertext.startsWith('enc:')) return 'enc'
@@ -135,6 +159,18 @@ async function fingerprintCredential(credentialStore, ciphertext) {
 async function publicRow(credentialStore, row) {
   if (!row) return null
   return rowToPublicExternalSystem(row, await fingerprintCredential(credentialStore, row.credentials_encrypted))
+}
+
+async function parseAdapterCredentials(credentialStore, ciphertext) {
+  if (typeof ciphertext !== 'string' || ciphertext.length === 0) return undefined
+  const plaintext = await credentialStore.decrypt(ciphertext)
+  if (typeof plaintext !== 'string') return plaintext
+  try {
+    const parsed = JSON.parse(plaintext)
+    return isPlainObject(parsed) ? parsed : plaintext
+  } catch {
+    return plaintext
+  }
 }
 
 function isPlainObject(value) {
@@ -261,6 +297,22 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
     return publicRow(credentialStore, row)
   }
 
+  async function getExternalSystemForAdapter(input) {
+    const tenantId = requiredString(input?.tenantId, 'tenantId')
+    const workspaceId = normalizeWorkspaceId(input?.workspaceId)
+    const id = requiredString(input?.id, 'id')
+    const row = await db.selectOne(TABLE, {
+      tenant_id: tenantId,
+      workspace_id: workspaceId,
+      id,
+    })
+    if (!row) {
+      throw new ExternalSystemNotFoundError('external system not found', { id, tenantId, workspaceId })
+    }
+    const credentials = await parseAdapterCredentials(credentialStore, row.credentials_encrypted)
+    return rowToAdapterExternalSystem(row, credentials)
+  }
+
   async function listExternalSystems(input = {}) {
     const tenantId = requiredString(input.tenantId, 'tenantId')
     const workspaceId = normalizeWorkspaceId(input.workspaceId)
@@ -286,6 +338,7 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
   return {
     upsertExternalSystem,
     getExternalSystem,
+    getExternalSystemForAdapter,
     listExternalSystems,
   }
 }
@@ -300,6 +353,8 @@ module.exports = {
     VALID_STATUSES,
     detectCredentialFormat,
     normalizeExternalSystemInput,
+    parseAdapterCredentials,
+    rowToAdapterExternalSystem,
     rowToPublicExternalSystem,
   },
 }

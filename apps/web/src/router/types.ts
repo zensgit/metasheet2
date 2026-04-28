@@ -91,6 +91,7 @@ export const AppRouteNames = {
   ADMIN_DASHBOARD: 'admin-dashboard',
   ADMIN_SETTINGS: 'admin-settings',
   ADMIN_LOGS: 'admin-logs',
+  INTEGRATION_K3_WISE: 'integration-k3-wise',
 
   // Error routes
   NOT_FOUND: 'not-found',
@@ -158,6 +159,7 @@ export interface AppRouteParams {
   'admin-dashboard': Record<string, never>
   'admin-settings': Record<string, never>
   'admin-logs': Record<string, never>
+  'integration-k3-wise': Record<string, never>
   'not-found': Record<string, never>
   'forbidden': Record<string, never>
   'server-error': Record<string, never>
