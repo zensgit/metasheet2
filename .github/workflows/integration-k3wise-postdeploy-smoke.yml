@@ -1,0 +1,98 @@
+name: K3 WISE Postdeploy Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: 'MetaSheet base URL to smoke'
+        required: false
+        default: 'http://142.171.239.56:8081'
+      require_auth:
+        description: 'Require authenticated integration contract checks'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      timeout_ms:
+        description: 'Per-request timeout in milliseconds'
+        required: false
+        default: '10000'
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run K3 WISE postdeploy smoke
+        id: smoke
+        continue-on-error: true
+        env:
+          METASHEET_BASE_URL: ${{ github.event.inputs.base_url || 'http://142.171.239.56:8081' }}
+          METASHEET_AUTH_TOKEN: ${{ secrets.METASHEET_K3WISE_SMOKE_TOKEN }}
+          REQUIRE_AUTH: ${{ github.event.inputs.require_auth || 'false' }}
+          TIMEOUT_MS: ${{ github.event.inputs.timeout_ms || '10000' }}
+        run: |
+          set -euo pipefail
+          smoke_out_dir="output/integration-k3wise-postdeploy-smoke/manual"
+          rm -rf "$smoke_out_dir"
+          mkdir -p "$smoke_out_dir"
+
+          args=(
+            --base-url "$METASHEET_BASE_URL"
+            --out-dir "$smoke_out_dir"
+            --timeout-ms "$TIMEOUT_MS"
+          )
+          if [[ "$REQUIRE_AUTH" == "true" ]]; then
+            args+=(--require-auth)
+          fi
+
+          set +e
+          node scripts/ops/integration-k3wise-postdeploy-smoke.mjs "${args[@]}" \
+            2> >(tee "$smoke_out_dir/stderr.log" >&2) \
+            | tee "$smoke_out_dir/cli-summary.json"
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "smoke_rc=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+      - name: Write K3 WISE smoke summary
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "## K3 WISE Postdeploy Smoke" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          node scripts/ops/integration-k3wise-postdeploy-summary.mjs \
+            --input output/integration-k3wise-postdeploy-smoke/manual/integration-k3wise-postdeploy-smoke.json \
+            --missing-ok >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Evidence artifact: \`integration-k3wise-postdeploy-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload K3 WISE smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-k3wise-postdeploy-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            output/integration-k3wise-postdeploy-smoke/manual/**
+
+      - name: Fail when K3 WISE smoke failed
+        if: always()
+        run: |
+          rc="${{ steps.smoke.outputs.smoke_rc }}"
+          if [[ -z "$rc" ]]; then
+            echo "smoke_rc missing; failing workflow." >&2
+            exit 1
+          fi
+          if [[ "$rc" != "0" ]]; then
+            echo "K3 WISE postdeploy smoke failed: rc=$rc" >&2
+            exit 1
+          fi
