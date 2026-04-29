@@ -184,10 +184,10 @@ jobs:
           else
             block="$(
               awk '
-                /^=== DOCKER GC START ===$/ { printing=1; next }
+                /^=== DOCKER GC START ===$/ { printing=1; count=0; next }
                 /^=== DOCKER GC END ===$/ { printing=0 }
-                printing { print }
-              ' "$gc_log" | head -n 120
+                printing && count < 120 { print; count++ }
+              ' "$gc_log"
             )"
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
