@@ -6,11 +6,12 @@ required="${K3_WISE_TOKEN_RESOLVE_REQUIRED:-false}"
 secret_token="${METASHEET_K3WISE_SMOKE_TOKEN_SECRET:-${METASHEET_K3WISE_SMOKE_TOKEN:-}}"
 tenant_id="${METASHEET_TENANT_ID:-${TENANT_ID:-}}"
 token_expiry="${K3_WISE_SMOKE_TOKEN_EXPIRY:-2h}"
+auto_discover_tenant="${K3_WISE_TOKEN_AUTO_DISCOVER_TENANT:-false}"
 deploy_path="${DEPLOY_PATH:-metasheet2}"
 deploy_compose_file="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
 
-is_required() {
-  case "${required}" in
+is_truthy() {
+  case "$1" in
     true|TRUE|True|1|yes|YES|Yes)
       return 0
       ;;
@@ -18,6 +19,10 @@ is_required() {
       return 1
       ;;
   esac
+}
+
+is_required() {
+  is_truthy "${required}"
 }
 
 warn_or_fail() {
@@ -49,20 +54,38 @@ write_token() {
   fi
 }
 
+write_resolved_tenant() {
+  local resolved_tenant_id="$1"
+  local source="$2"
+  if [[ -z "${resolved_tenant_id}" ]]; then
+    return 0
+  fi
+  if [[ -n "${GITHUB_ENV:-}" ]]; then
+    echo "K3_WISE_SMOKE_TENANT_ID=${resolved_tenant_id}" >> "${GITHUB_ENV}"
+    echo "K3 WISE smoke tenant scope resolved from ${source}: ${resolved_tenant_id}"
+  else
+    echo "K3 WISE smoke tenant scope resolved from ${source}: ${resolved_tenant_id}; GITHUB_ENV is not set"
+  fi
+}
+
 shell_quote() {
   printf '%q' "$1"
 }
 
 if [[ -n "${secret_token}" ]]; then
+  write_resolved_tenant "${tenant_id}" "METASHEET_TENANT_ID"
   write_token "${secret_token}" "METASHEET_K3WISE_SMOKE_TOKEN"
   exit 0
 fi
 
-if [[ -z "${tenant_id}" ]]; then
-  warn_or_fail "METASHEET_K3WISE_SMOKE_TOKEN is not set and METASHEET_TENANT_ID is empty; deploy-host token fallback needs an explicit tenant scope"
+if [[ -z "${tenant_id}" ]] && ! is_truthy "${auto_discover_tenant}"; then
+  warn_or_fail "METASHEET_K3WISE_SMOKE_TOKEN is not set and METASHEET_TENANT_ID is empty; deploy-host token fallback needs an explicit tenant scope (or K3_WISE_TOKEN_AUTO_DISCOVER_TENANT=true for singleton integration tenant auto-discovery)"
 fi
 
 if [[ -z "${DEPLOY_HOST:-}" || -z "${DEPLOY_USER:-}" || -z "${DEPLOY_SSH_KEY_B64:-}" ]]; then
+  if [[ -z "${tenant_id}" ]]; then
+    warn_or_fail "METASHEET_K3WISE_SMOKE_TOKEN is not set and METASHEET_TENANT_ID is empty; deploy-host token fallback needs an explicit tenant scope or deploy SSH inputs for singleton tenant auto-discovery"
+  fi
   warn_or_fail "METASHEET_K3WISE_SMOKE_TOKEN is not set and DEPLOY_HOST/DEPLOY_USER/DEPLOY_SSH_KEY_B64 are incomplete"
 fi
 
@@ -77,11 +100,12 @@ quoted_deploy_path="$(shell_quote "${deploy_path}")"
 quoted_compose_file="$(shell_quote "${deploy_compose_file}")"
 quoted_tenant_id="$(shell_quote "${tenant_id}")"
 quoted_token_expiry="$(shell_quote "${token_expiry}")"
+quoted_auto_discover_tenant="$(shell_quote "${auto_discover_tenant}")"
 
 set +e
 token="$(
   ssh ${ssh_opts} "${DEPLOY_USER}@${DEPLOY_HOST}" \
-    "DEPLOY_PATH=${quoted_deploy_path} DEPLOY_COMPOSE_FILE=${quoted_compose_file} K3_WISE_SMOKE_TENANT_ID=${quoted_tenant_id} K3_WISE_SMOKE_TOKEN_EXPIRY=${quoted_token_expiry} bash -s" <<'EOF'
+    "DEPLOY_PATH=${quoted_deploy_path} DEPLOY_COMPOSE_FILE=${quoted_compose_file} K3_WISE_SMOKE_TENANT_ID=${quoted_tenant_id} K3_WISE_SMOKE_TOKEN_EXPIRY=${quoted_token_expiry} K3_WISE_SMOKE_TENANT_AUTO_DISCOVER=${quoted_auto_discover_tenant} bash -s" <<'EOF'
 set -euo pipefail
 if [[ "${DEPLOY_PATH}" == /* ]]; then
   DEPLOY_REPO_PATH="${DEPLOY_PATH}"
@@ -103,17 +127,14 @@ fi
 
 "${COMPOSE_CMD[@]}" -f "${DEPLOY_COMPOSE_FILE}" exec -T backend \
   env K3_WISE_SMOKE_TENANT_ID="${K3_WISE_SMOKE_TENANT_ID}" \
+  K3_WISE_SMOKE_TENANT_AUTO_DISCOVER="${K3_WISE_SMOKE_TENANT_AUTO_DISCOVER:-false}" \
   JWT_EXPIRY="${K3_WISE_SMOKE_TOKEN_EXPIRY:-2h}" \
-  node --input-type=module - <<'NODE' \
-  | awk '/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/ { token = $0 } END { if (token) print token }'
+  node --input-type=module - <<'NODE'
 import pg from 'pg'
 import { authService } from '/app/packages/core-backend/dist/src/auth/AuthService.js'
 
-const tenantId = String(process.env.K3_WISE_SMOKE_TENANT_ID || '').trim()
-if (!tenantId) {
-  console.error('K3_WISE_SMOKE_TENANT_ID missing')
-  process.exit(2)
-}
+const configuredTenantId = String(process.env.K3_WISE_SMOKE_TENANT_ID || '').trim()
+const autoDiscoverTenant = /^(true|1|yes)$/i.test(String(process.env.K3_WISE_SMOKE_TENANT_AUTO_DISCOVER || 'false').trim())
 
 const { Client } = pg
 const databaseUrl = process.env.DATABASE_URL
@@ -127,8 +148,54 @@ const client = new Client({
   ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
 })
 
+async function tableExists(client, tableName) {
+  const result = await client.query('SELECT to_regclass($1) AS table_name', [tableName])
+  return Boolean(result.rows[0]?.table_name)
+}
+
+async function collectTenantIds(client, tableName, extraWhere = '') {
+  if (!await tableExists(client, tableName)) return []
+  const result = await client.query(`
+    SELECT DISTINCT btrim(tenant_id) AS tenant_id
+    FROM ${tableName}
+    WHERE tenant_id IS NOT NULL
+      AND btrim(tenant_id) <> ''
+      ${extraWhere}
+    ORDER BY tenant_id ASC
+  `)
+  return result.rows
+    .map((row) => typeof row.tenant_id === 'string' ? row.tenant_id.trim() : '')
+    .filter(Boolean)
+}
+
+async function inferSingletonTenantId(client) {
+  const ids = new Set()
+  for (const tenantId of [
+    ...await collectTenantIds(client, 'integration_external_systems'),
+    ...await collectTenantIds(client, 'integration_pipelines'),
+    ...await collectTenantIds(client, 'integration_runs'),
+    ...await collectTenantIds(client, 'integration_dead_letters'),
+    ...await collectTenantIds(client, 'platform_app_instances', "AND plugin_id = 'plugin-integration-core'"),
+  ]) {
+    ids.add(tenantId)
+  }
+
+  if (ids.size === 1) return Array.from(ids)[0]
+  if (ids.size > 1) {
+    console.error(`K3 WISE smoke tenant auto-discovery found multiple tenant scopes: ${Array.from(ids).join(', ')}`)
+    process.exit(5)
+  }
+  return ''
+}
+
 try {
   await client.connect()
+  const tenantId = configuredTenantId || (autoDiscoverTenant ? await inferSingletonTenantId(client) : '')
+  if (!tenantId) {
+    console.error('K3_WISE_SMOKE_TENANT_ID missing and singleton tenant auto-discovery found no integration tenant scope')
+    process.exit(2)
+  }
+
   const result = await client.query(`
     SELECT
       u.id,
@@ -172,6 +239,7 @@ try {
     created_at: new Date(),
     updated_at: new Date(),
   })
+  console.log(`K3_WISE_SMOKE_TENANT_ID=${tenantId}`)
   console.log(token)
 } finally {
   await client.end().catch(() => {})
@@ -181,9 +249,12 @@ EOF
 )"
 rc=$?
 set -e
+resolved_tenant_id="$(printf '%s\n' "${token}" | awk -F= '/^K3_WISE_SMOKE_TENANT_ID=/ { value = $0; sub(/^K3_WISE_SMOKE_TENANT_ID=/, "", value); tenant = value } END { if (tenant) print tenant }')"
+token="$(printf '%s\n' "${token}" | awk '/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/ { found = $0 } END { if (found) print found }')"
 
 if [[ "${rc}" != "0" || -z "${token}" ]]; then
   warn_or_fail "failed to mint temporary K3 WISE smoke token from deploy host"
 fi
 
+write_resolved_tenant "${resolved_tenant_id:-${tenant_id}}" "deploy-host backend runtime"
 write_token "${token}" "deploy-host backend runtime"

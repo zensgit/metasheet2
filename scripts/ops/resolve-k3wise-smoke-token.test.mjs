@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -78,6 +78,58 @@ test('resolver fails without tenant when auth is required', async () => {
 
   assert.equal(result.status, 1)
   assert.match(result.stderr, /::error::METASHEET_K3WISE_SMOKE_TOKEN is not set and METASHEET_TENANT_ID is empty/)
+})
+
+test('resolver can use deploy-host fallback without explicit tenant for backend singleton auto-discovery', async () => {
+  const tmp = makeTmpDir()
+  const githubEnv = path.join(tmp, 'github-env')
+  const binDir = path.join(tmp, 'bin')
+  const sshArgsPath = path.join(tmp, 'ssh-args')
+  try {
+    mkdirSync(binDir)
+    const sshPath = path.join(binDir, 'ssh')
+    writeFileSync(sshPath, `#!/usr/bin/env bash
+printf '%s\\n' "$*" > "$FAKE_SSH_ARGS_PATH"
+cat >/dev/null
+printf 'K3_WISE_SMOKE_TENANT_ID=tenant-auto\\n'
+printf 'header.payload.signature\\n'
+`)
+    chmodSync(sshPath, 0o755)
+
+    const result = await runResolver({
+      GITHUB_ENV: githubEnv,
+      HOME: tmp,
+      PATH: `${binDir}:${process.env.PATH || ''}`,
+      FAKE_SSH_ARGS_PATH: sshArgsPath,
+      K3_WISE_TOKEN_AUTO_DISCOVER_TENANT: 'true',
+      DEPLOY_HOST: 'deploy.example.test',
+      DEPLOY_USER: 'deployer',
+      DEPLOY_SSH_KEY_B64: Buffer.from('fake-key').toString('base64'),
+    })
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.doesNotMatch(result.stderr, /METASHEET_TENANT_ID is empty/)
+    assert.match(result.stdout, /K3 WISE smoke tenant scope resolved from deploy-host backend runtime: tenant-auto/)
+    assert.match(result.stdout, /K3 WISE smoke token resolved from deploy-host backend runtime/)
+    const githubEnvText = readFileSync(githubEnv, 'utf8')
+    assert.match(githubEnvText, /K3_WISE_SMOKE_TENANT_ID=tenant-auto/)
+    assert.match(githubEnvText, /K3_WISE_SMOKE_TOKEN<<EOF\nheader\.payload\.signature\nEOF/)
+    assert.match(readFileSync(sshArgsPath, 'utf8'), /K3_WISE_SMOKE_TENANT_AUTO_DISCOVER=true/)
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+test('resolver keeps missing tenant as a skip reason when tenant auto-discovery is disabled', async () => {
+  const result = await runResolver({
+    K3_WISE_TOKEN_AUTO_DISCOVER_TENANT: 'false',
+    DEPLOY_HOST: 'deploy.example.test',
+    DEPLOY_USER: 'deployer',
+    DEPLOY_SSH_KEY_B64: Buffer.from('fake-key').toString('base64'),
+  })
+
+  assert.equal(result.status, 0)
+  assert.match(result.stderr, /K3_WISE_TOKEN_AUTO_DISCOVER_TENANT=true/)
 })
 
 test('resolver exits zero without deploy SSH inputs when fallback is optional', async () => {
