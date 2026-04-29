@@ -42,3 +42,26 @@ Because this worktree did not have dependencies installed, `node_modules` and `a
 ## Verification Notes
 
 The first Vitest attempt used repo-root-relative test paths while `pnpm --filter @metasheet/web exec` executed from `apps/web`, so Vitest found no files. The successful run used package-relative `tests/...` paths.
+
+## CI Repair Pass
+
+GitHub Actions initially caught stricter `vue-tsc -b` issues in the recursive local component:
+
+- Inline template event lambdas inferred `recordId` as `any`.
+- The recursive `HierarchyNode` render component needed explicit return/type annotations.
+
+Commands:
+
+```bash
+pnpm type-check
+pnpm --filter @metasheet/web exec vitest run --watch=false \
+  tests/multitable-hierarchy-view.spec.ts \
+  tests/multitable-view-manager.spec.ts
+git diff --check origin/main...HEAD
+```
+
+Result:
+
+- `pnpm type-check` passed.
+- 2 frontend files passed, 17 tests passed.
+- Diff hygiene passed.

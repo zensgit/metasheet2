@@ -55,8 +55,8 @@
           :can-comment="canComment"
           :comment-presence="commentPresence"
           @toggle="toggleNode"
-          @select-record="(recordId) => emit('select-record', recordId)"
-          @open-comments="(recordId) => emit('open-comments', recordId)"
+          @select-record="emitSelectRecord"
+          @open-comments="emitOpenComments"
           @create-child="createChild"
         />
       </ul>
@@ -68,7 +68,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineComponent, h, reactive, ref, watch, type PropType } from 'vue'
+import { computed, defineComponent, h, reactive, ref, watch, type PropType, type VNode } from 'vue'
 import type { MetaField, MetaHierarchyViewConfig, MetaRecord, MultitableCommentPresenceSummary } from '../types'
 import { formatFieldDisplay } from '../utils/field-display'
 import { resolveHierarchyViewConfig } from '../utils/view-config'
@@ -214,6 +214,14 @@ function createChild(recordId: string) {
   emit('create-record', fieldId ? { [fieldId]: [recordId] } : {})
 }
 
+function emitSelectRecord(recordId: string): void {
+  emit('select-record', recordId)
+}
+
+function emitOpenComments(recordId: string): void {
+  emit('open-comments', recordId)
+}
+
 function firstParentId(value: unknown): string | null {
   if (Array.isArray(value)) {
     const first = value.find((item) => typeof item === 'string' && item.trim().length > 0)
@@ -264,7 +272,7 @@ function buildHierarchyTree(rows: MetaRecord[], parentFieldId: string | null, or
     }
   }
 
-  function assignDepth(nodes: HierarchyNodeModel[], depth: number) {
+  function assignDepth(nodes: HierarchyNodeModel[], depth: number): void {
     for (const node of nodes) {
       node.depth = depth
       assignDepth(node.children, depth + 1)
@@ -281,7 +289,7 @@ function buildHierarchyTree(rows: MetaRecord[], parentFieldId: string | null, or
 
 function defaultExpandedIds(nodes: HierarchyNodeModel[], depth: number): Set<string> {
   const ids = new Set<string>()
-  function visit(node: HierarchyNodeModel) {
+  function visit(node: HierarchyNodeModel): void {
     if (node.depth < depth && node.children.length > 0) ids.add(node.record.id)
     node.children.forEach(visit)
   }
@@ -289,7 +297,7 @@ function defaultExpandedIds(nodes: HierarchyNodeModel[], depth: number): Set<str
   return ids
 }
 
-const HierarchyNode = defineComponent({
+const HierarchyNode: ReturnType<typeof defineComponent> = defineComponent({
   name: 'HierarchyNode',
   props: {
     node: { type: Object as PropType<HierarchyNodeModel>, required: true },
@@ -307,7 +315,7 @@ const HierarchyNode = defineComponent({
     function rowCommentButtonClass(recordId: string): string {
       return resolveCommentAffordanceStateClass('meta-hierarchy__comment-btn', rowCommentAffordance(recordId))
     }
-    return () => {
+    return (): VNode => {
       const node = nodeProps.node
       const title = nodeProps.titleForRow(node.record)
       const expanded = nodeProps.expandedIds.has(node.record.id)
@@ -348,7 +356,7 @@ const HierarchyNode = defineComponent({
             : null,
         ]),
         hasChildren && expanded
-          ? h('ul', { class: 'meta-hierarchy__list', role: 'group' }, node.children.map((child) =>
+          ? h('ul', { class: 'meta-hierarchy__list', role: 'group' }, node.children.map((child: HierarchyNodeModel): VNode =>
             h(HierarchyNode, {
               key: child.record.id,
               node: child,
