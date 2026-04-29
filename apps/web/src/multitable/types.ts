@@ -586,6 +586,13 @@ export interface MetaGanttViewConfig {
   zoom?: 'day' | 'week' | 'month'
 }
 
+export interface MetaHierarchyViewConfig {
+  parentFieldId?: string | null
+  titleFieldId?: string | null
+  defaultExpandDepth?: number
+  orphanMode?: 'root' | 'hidden'
+}
+
 // --- Record-level permissions ---
 export type RecordPermissionAccessLevel = 'read' | 'write' | 'admin'
 export type RecordPermissionSubjectType = 'user' | 'role' | 'member-group'

@@ -248,6 +248,38 @@
           </div>
         </template>
 
+        <template v-else-if="configTarget.type === 'hierarchy'">
+          <div class="meta-view-mgr__grid">
+            <label class="meta-view-mgr__field">
+              <span>Parent field</span>
+              <select v-model="hierarchyDraft.parentFieldId" class="meta-view-mgr__select">
+                <option value="">(auto link field)</option>
+                <option v-for="field in linkFields" :key="field.id" :value="field.id">{{ field.name }}</option>
+              </select>
+            </label>
+            <label class="meta-view-mgr__field">
+              <span>Title field</span>
+              <select v-model="hierarchyDraft.titleFieldId" class="meta-view-mgr__select">
+                <option value="">(auto)</option>
+                <option v-for="field in configTargetFields" :key="field.id" :value="field.id">{{ field.name }}</option>
+              </select>
+            </label>
+          </div>
+          <div class="meta-view-mgr__grid">
+            <label class="meta-view-mgr__field">
+              <span>Default expand depth</span>
+              <input v-model.number="hierarchyDraft.defaultExpandDepth" class="meta-view-mgr__input" type="number" min="0" max="8" />
+            </label>
+            <label class="meta-view-mgr__field">
+              <span>Orphan records</span>
+              <select v-model="hierarchyDraft.orphanMode" class="meta-view-mgr__select">
+                <option value="root">show at root</option>
+                <option value="hidden">hide</option>
+              </select>
+            </label>
+          </div>
+        </template>
+
         <div v-else class="meta-view-mgr__config-note">
           No additional configuration is required for this view type.
         </div>
@@ -335,7 +367,7 @@
             <button v-if="configTargetFields.length" class="meta-view-mgr__btn-inline" @click="addSortRule">+ Add sort</button>
           </div>
 
-          <label v-if="configTarget.type !== 'kanban' && configTarget.type !== 'gantt'" class="meta-view-mgr__field">
+          <label v-if="configTarget.type !== 'kanban' && configTarget.type !== 'gantt' && configTarget.type !== 'hierarchy'" class="meta-view-mgr__field">
             <span>Group field</span>
             <select v-model="groupDraft.fieldId" class="meta-view-mgr__select">
               <option value="">None</option>
@@ -392,6 +424,7 @@ import type {
   MetaField,
   MetaGanttViewConfig,
   MetaGalleryViewConfig,
+  MetaHierarchyViewConfig,
   MetaKanbanViewConfig,
   MetaTimelineViewConfig,
   MetaView,
@@ -406,12 +439,13 @@ import {
   resolveCalendarViewConfig,
   resolveGanttViewConfig,
   resolveGalleryViewConfig,
+  resolveHierarchyViewConfig,
   resolveKanbanViewConfig,
   resolveTimelineViewConfig,
 } from '../utils/view-config'
 import ConditionalFormattingDialog from './ConditionalFormattingDialog.vue'
 
-const VIEW_TYPES = ['grid', 'form', 'kanban', 'gallery', 'calendar', 'timeline', 'gantt'] as const
+const VIEW_TYPES = ['grid', 'form', 'kanban', 'gallery', 'calendar', 'timeline', 'gantt', 'hierarchy'] as const
 const VIEW_ICONS: Record<string, string> = {
   grid: '\u2637',
   form: '\u2263',
@@ -420,6 +454,7 @@ const VIEW_ICONS: Record<string, string> = {
   calendar: '\u2339',
   timeline: '\u2500',
   gantt: '\u25AC',
+  hierarchy: '\u251C',
 }
 
 const props = defineProps<{
@@ -483,6 +518,12 @@ const ganttDraft = reactive<Required<MetaGanttViewConfig>>({
   groupFieldId: null,
   zoom: 'week',
 })
+const hierarchyDraft = reactive<Required<MetaHierarchyViewConfig>>({
+  parentFieldId: null,
+  titleFieldId: null,
+  defaultExpandDepth: 2,
+  orphanMode: 'root',
+})
 const filterDraft = reactive<{ conjunction: FilterConjunction; conditions: FilterRule[] }>({
   conjunction: 'and',
   conditions: [],
@@ -511,6 +552,7 @@ const dateFields = computed(() => props.fields.filter((field) => field.type === 
 const dateLikeFields = computed(() => props.fields.filter((field) => field.type === 'date' || field.type === 'string' || field.type === 'number'))
 const numericFields = computed(() => props.fields.filter((field) => ['number', 'currency', 'percent', 'rating'].includes(field.type)))
 const selectFields = computed(() => props.fields.filter((field) => field.type === 'select'))
+const linkFields = computed(() => props.fields.filter((field) => field.type === 'link'))
 const stringFields = computed(() => props.fields.filter((field) => ['string', 'formula', 'lookup'].includes(field.type)))
 const groupableFields = computed(() => props.fields.filter((field) => ['select', 'string', 'boolean', 'number', 'date'].includes(field.type)))
 const validFieldIds = computed(() => new Set(props.fields.map((field) => field.id)))
@@ -519,6 +561,7 @@ const validAttachmentFieldIds = computed(() => new Set(attachmentFields.value.ma
 const validDateFieldIds = computed(() => new Set(dateFields.value.map((field) => field.id)))
 const validDateLikeFieldIds = computed(() => new Set(dateLikeFields.value.map((field) => field.id)))
 const validSelectFieldIds = computed(() => new Set(selectFields.value.map((field) => field.id)))
+const validLinkFieldIds = computed(() => new Set(linkFields.value.map((field) => field.id)))
 const validGroupableFieldIds = computed(() => new Set(groupableFields.value.map((field) => field.id)))
 
 const viewConfigBlockingReason = computed(() => {
@@ -588,13 +631,22 @@ const viewConfigBlockingReason = computed(() => {
     }
   }
 
+  if (target.type === 'hierarchy') {
+    if (hierarchyDraft.parentFieldId && !validLinkFieldIds.value.has(hierarchyDraft.parentFieldId)) {
+      return 'The selected parent field is no longer a link field. Reload latest before saving.'
+    }
+    if (hierarchyDraft.titleFieldId && !validFieldIds.value.has(hierarchyDraft.titleFieldId)) {
+      return 'The selected title field disappeared in the background. Reload latest before saving.'
+    }
+  }
+
   if (filterDraft.conditions.some((condition) => condition.fieldId && !validFieldIds.value.has(condition.fieldId))) {
     return 'One or more selected filter fields disappeared in the background. Reload latest before saving.'
   }
   if (sortDraft.rules.some((rule) => rule.fieldId && !validFieldIds.value.has(rule.fieldId))) {
     return 'One or more selected sort fields disappeared in the background. Reload latest before saving.'
   }
-  if (target.type !== 'kanban' && target.type !== 'gantt' && groupDraft.fieldId && !validGroupableFieldIds.value.has(groupDraft.fieldId)) {
+  if (target.type !== 'kanban' && target.type !== 'gantt' && target.type !== 'hierarchy' && groupDraft.fieldId && !validGroupableFieldIds.value.has(groupDraft.fieldId)) {
     return 'The selected group field is no longer groupable. Reload latest before saving.'
   }
 
@@ -638,6 +690,12 @@ function resetConfigDrafts() {
     groupFieldId: null,
     zoom: 'week',
   } satisfies Required<MetaGanttViewConfig>)
+  Object.assign(hierarchyDraft, {
+    parentFieldId: null,
+    titleFieldId: null,
+    defaultExpandDepth: 2,
+    orphanMode: 'root',
+  } satisfies Required<MetaHierarchyViewConfig>)
   filterDraft.conjunction = 'and'
   filterDraft.conditions.splice(0)
   sortDraft.rules.splice(0)
@@ -761,6 +819,8 @@ function serializeCommonViewDraft(type: MetaView['type'] | null): Record<string,
       ? kanbanDraft.groupFieldId
       : type === 'gantt'
         ? ganttDraft.groupFieldId
+        : type === 'hierarchy'
+          ? ''
         : groupDraft.fieldId,
   }
 }
@@ -813,6 +873,15 @@ function serializeViewDraft(type: MetaView['type'] | null): string {
       ...serializeCommonViewDraft(type),
     })
   }
+  if (type === 'hierarchy') {
+    return JSON.stringify({
+      parentFieldId: hierarchyDraft.parentFieldId,
+      titleFieldId: hierarchyDraft.titleFieldId,
+      defaultExpandDepth: hierarchyDraft.defaultExpandDepth,
+      orphanMode: hierarchyDraft.orphanMode,
+      ...serializeCommonViewDraft(type),
+    })
+  }
   return JSON.stringify(serializeCommonViewDraft(type))
 }
 
@@ -849,6 +918,8 @@ function hydrateExistingViewConfig(view: MetaView, options?: { liveRefreshText?:
     Object.assign(ganttDraft, resolveGanttViewConfig(props.fields, view.config, view.groupInfo))
   } else if (view.type === 'kanban') {
     Object.assign(kanbanDraft, resolveKanbanViewConfig(props.fields, view.config, view.groupInfo))
+  } else if (view.type === 'hierarchy') {
+    Object.assign(hierarchyDraft, resolveHierarchyViewConfig(props.fields, view.config))
   }
   viewConfigBaseline.value = serializeViewDraft(view.type)
   viewConfigSourceSignature.value = serializeViewSourceSignature(view)
@@ -996,9 +1067,11 @@ function buildCommonViewPayload(target: MetaView): {
       ? ganttDraft.groupFieldId && validGroupableFieldIds.value.has(ganttDraft.groupFieldId)
         ? { fieldId: ganttDraft.groupFieldId }
         : {}
-    : groupDraft.fieldId && validGroupableFieldIds.value.has(groupDraft.fieldId)
-      ? { fieldId: groupDraft.fieldId }
-      : {}
+      : target.type === 'hierarchy'
+        ? undefined
+        : groupDraft.fieldId && validGroupableFieldIds.value.has(groupDraft.fieldId)
+          ? { fieldId: groupDraft.fieldId }
+          : {}
   return {
     ...(hasPayload(filterInfo) || hasPayload(target.filterInfo) ? { filterInfo } : {}),
     ...(hasPayload(sortInfo) || hasPayload(target.sortInfo) ? { sortInfo } : {}),
@@ -1068,6 +1141,17 @@ function saveConfig() {
         cardFieldIds,
       }),
       groupInfo: groupFieldId ? { fieldId: groupFieldId } : {},
+    })
+  } else if (target.type === 'hierarchy') {
+    const defaultExpandDepth = Math.max(0, Math.min(8, Math.round(Number(hierarchyDraft.defaultExpandDepth) || 0)))
+    emit('update-view', target.id, {
+      ...commonPayload,
+      config: preserveConditionalFormattingRules(target, {
+        parentFieldId: hierarchyDraft.parentFieldId && validLinkFieldIds.value.has(hierarchyDraft.parentFieldId) ? hierarchyDraft.parentFieldId : null,
+        titleFieldId: hierarchyDraft.titleFieldId && validFieldIds.value.has(hierarchyDraft.titleFieldId) ? hierarchyDraft.titleFieldId : null,
+        defaultExpandDepth,
+        orphanMode: hierarchyDraft.orphanMode === 'hidden' ? 'hidden' : 'root',
+      }),
     })
   } else {
     emit('update-view', target.id, commonPayload)

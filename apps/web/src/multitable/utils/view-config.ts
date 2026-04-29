@@ -3,6 +3,7 @@ import type {
   MetaField,
   MetaGanttViewConfig,
   MetaGalleryViewConfig,
+  MetaHierarchyViewConfig,
   MetaKanbanViewConfig,
   MetaTimelineViewConfig,
 } from '../types'
@@ -136,5 +137,21 @@ export function resolveGanttViewConfig(
     progressFieldId: stringOrNull(raw?.progressFieldId) ?? firstNonMatchingFieldId(fields, [startFieldId, endFieldId], ['number', 'percent']),
     groupFieldId: stringOrNull(raw?.groupFieldId) ?? stringOrNull(groupInfo?.fieldId),
     zoom: raw?.zoom === 'day' || raw?.zoom === 'month' ? raw.zoom : 'week',
+  }
+}
+
+export function resolveHierarchyViewConfig(
+  fields: MetaField[],
+  raw?: Record<string, unknown> | null,
+): Required<MetaHierarchyViewConfig> {
+  const configuredParentFieldId = stringOrNull(raw?.parentFieldId)
+  const parentFieldId = configuredParentFieldId && fields.some((field) => field.id === configuredParentFieldId && field.type === 'link')
+    ? configuredParentFieldId
+    : fields.find((field) => field.type === 'link')?.id ?? null
+  return {
+    parentFieldId,
+    titleFieldId: stringOrNull(raw?.titleFieldId) ?? firstFieldId(fields, ['string', 'formula', 'lookup']),
+    defaultExpandDepth: clamp(raw?.defaultExpandDepth, 0, 8, 2),
+    orphanMode: raw?.orphanMode === 'hidden' ? 'hidden' : 'root',
   }
 }
