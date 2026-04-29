@@ -4,6 +4,7 @@
 
 ```bash
 node --test scripts/ops/integration-k3wise-postdeploy-workflow-contract.test.mjs
+node --test scripts/ops/resolve-k3wise-smoke-token.test.mjs
 node --test scripts/ops/integration-k3wise-postdeploy-smoke.test.mjs
 node --test scripts/ops/integration-k3wise-postdeploy-summary.test.mjs
 ruby -e 'require "yaml"; ARGV.each { |f| YAML.load_file(f) }; puts "workflow yaml ok"' \
@@ -16,6 +17,8 @@ git diff --check
 
 - Workflow contract test passes and asserts tenant scope wiring in both
   workflow entrypoints.
+- Resolver test passes and asserts configured-token, optional-skip, and
+  required-failure behavior.
 - Smoke test passes and asserts explicit CLI tenant scope plus
   `METASHEET_TENANT_ID` env fallback are sent to all four authenticated list
   probes.

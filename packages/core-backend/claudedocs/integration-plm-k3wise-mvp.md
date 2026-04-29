@@ -535,6 +535,15 @@ control-plane list probe 都通过：
 - `/api/integration/runs?tenantId=<tenant>&limit=1`
 - `/api/integration/dead-letters?tenantId=<tenant>&limit=1`
 
+鉴权 token 来源顺序：
+
+1. 优先使用仓库 secret `METASHEET_K3WISE_SMOKE_TOKEN`。
+2. 若未配置 secret，workflow 会在 deploy host 的运行中 backend 容器内通过
+   `authService.createToken()` 临时签发 2 小时 token，并写入本次 job 的
+   `K3_WISE_SMOKE_TOKEN`；该 fallback 只查询 active admin 用户，不写业务库。
+3. deploy workflow 对 token 解析失败保持 public-only smoke；手动
+   `require_auth=true` 时 token 解析失败会直接失败。
+
 客户 GATE 答卷归档后，按下面这条线性顺序推进 M2-LIVE，每一步都要在测试账套用最小权限账号执行：
 
 | 步 | 命令 / 动作 | 期望产出 | 失败处理 |
@@ -600,6 +609,7 @@ pnpm -F plugin-integration-core test:e2e-plm-k3wise-writeback
 node scripts/ops/integration-k3wise-live-poc-preflight.test.mjs
 node scripts/ops/integration-k3wise-live-poc-evidence.test.mjs   # 31/31
 node scripts/ops/fixtures/integration-k3wise/run-mock-poc-demo.mjs
+node --test scripts/ops/resolve-k3wise-smoke-token.test.mjs
 node --test scripts/ops/integration-k3wise-postdeploy-smoke.test.mjs
 node --test scripts/ops/integration-k3wise-postdeploy-workflow-contract.test.mjs
 ```
@@ -758,6 +768,7 @@ pnpm -F plugin-integration-core test
 node scripts/ops/integration-k3wise-live-poc-preflight.test.mjs
 node scripts/ops/integration-k3wise-live-poc-evidence.test.mjs
 node scripts/ops/fixtures/integration-k3wise/run-mock-poc-demo.mjs
+node --test scripts/ops/resolve-k3wise-smoke-token.test.mjs
 node --test scripts/ops/integration-k3wise-postdeploy-smoke.test.mjs
 node --test scripts/ops/integration-k3wise-postdeploy-workflow-contract.test.mjs
 node --import tsx scripts/validate-plugin-manifests.ts
@@ -770,6 +781,7 @@ git diff --check
 - preflight 脚本测试全部通过（含 #1168 / #1169 bool sweep）。
 - evidence 脚本 31/31 测试通过（含 #1175 / #1176 / #1177 / #1182 全链路硬化）。
 - mock PoC demo 链路 9 步全 PASS（GATE → preflight → mock K3 → mock SQL → evidence → 断言 PASS）。
+- postdeploy token resolver 测试通过，覆盖长期 secret、可选跳过、必需失败与 deploy-host fallback 前置检查。
 - postdeploy smoke 测试通过，覆盖公开检查、鉴权控制面 list probe、tenant 显式参数和环境变量回退。
 - postdeploy workflow contract 测试通过，覆盖 deploy workflow 与手动 workflow 的 token / tenant wiring。
 - 插件 manifest 校验 13/13 valid，0 errors。

@@ -33,12 +33,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve K3 WISE smoke token
+        env:
+          METASHEET_K3WISE_SMOKE_TOKEN_SECRET: ${{ secrets.METASHEET_K3WISE_SMOKE_TOKEN }}
+          METASHEET_TENANT_ID: ${{ github.event.inputs.tenant_id || vars.METASHEET_TENANT_ID || '' }}
+          K3_WISE_TOKEN_RESOLVE_REQUIRED: ${{ github.event.inputs.require_auth || 'false' }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
+        run: scripts/ops/resolve-k3wise-smoke-token.sh
+
       - name: Run K3 WISE postdeploy smoke
         id: smoke
         continue-on-error: true
         env:
           METASHEET_BASE_URL: ${{ github.event.inputs.base_url || 'http://142.171.239.56:8081' }}
-          METASHEET_AUTH_TOKEN: ${{ secrets.METASHEET_K3WISE_SMOKE_TOKEN }}
           METASHEET_TENANT_ID: ${{ github.event.inputs.tenant_id || vars.METASHEET_TENANT_ID || '' }}
           REQUIRE_AUTH: ${{ github.event.inputs.require_auth || 'false' }}
           TIMEOUT_MS: ${{ github.event.inputs.timeout_ms || '10000' }}
@@ -58,6 +69,9 @@ jobs:
           fi
           if [[ -n "${METASHEET_TENANT_ID:-}" ]]; then
             args+=(--tenant-id "$METASHEET_TENANT_ID")
+          fi
+          if [[ -n "${K3_WISE_SMOKE_TOKEN:-}" ]]; then
+            export METASHEET_AUTH_TOKEN="$K3_WISE_SMOKE_TOKEN"
           fi
 
           set +e

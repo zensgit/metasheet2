@@ -364,11 +364,23 @@ jobs:
           echo "deploy_log=$deploy_log" >> "$GITHUB_OUTPUT"
           exit 0
 
+      - name: Resolve K3 WISE smoke token
+        if: ${{ steps.remote_deploy.outputs.deploy_rc == '0' }}
+        env:
+          METASHEET_K3WISE_SMOKE_TOKEN_SECRET: ${{ secrets.METASHEET_K3WISE_SMOKE_TOKEN }}
+          METASHEET_TENANT_ID: ${{ vars.METASHEET_TENANT_ID || '' }}
+          K3_WISE_TOKEN_RESOLVE_REQUIRED: 'false'
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
+        run: scripts/ops/resolve-k3wise-smoke-token.sh
+
       - name: K3 WISE postdeploy smoke
         if: ${{ steps.remote_deploy.outputs.deploy_rc == '0' }}
         env:
           METASHEET_BASE_URL: ${{ vars.METASHEET_BASE_URL || vars.PUBLIC_APP_URL || 'http://142.171.239.56:8081' }}
-          METASHEET_AUTH_TOKEN: ${{ secrets.METASHEET_K3WISE_SMOKE_TOKEN }}
           METASHEET_TENANT_ID: ${{ vars.METASHEET_TENANT_ID || '' }}
         run: |
           set -euo pipefail
@@ -380,6 +392,9 @@ jobs:
           )
           if [[ -n "${METASHEET_TENANT_ID:-}" ]]; then
             args+=(--tenant-id "$METASHEET_TENANT_ID")
+          fi
+          if [[ -n "${K3_WISE_SMOKE_TOKEN:-}" ]]; then
+            export METASHEET_AUTH_TOKEN="$K3_WISE_SMOKE_TOKEN"
           fi
           node scripts/ops/integration-k3wise-postdeploy-smoke.mjs "${args[@]}"
 
