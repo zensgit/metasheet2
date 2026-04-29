@@ -4,7 +4,7 @@ Date: 2026-04-29
 
 Branch: `codex/mfeishu2-formula-view-gantt-20260429`
 
-Base after rebase: `origin/main@6a99c117d`
+Base after final rebase: `origin/main@0635dc2a8`
 
 ## Scope
 
@@ -88,6 +88,6 @@ Tests:
 
 ## Deferred
 
-- Formula runtime parity remains backend-owned. This PR improves editor correctness and dependency-token insertion, but does not add new backend formula functions.
+- Formula runtime parity remains backend-owned. The companion #1228 backend PR adds the `DATEDIFF` runtime alias; this PR stays frontend-only for formula editing, view building, and Gantt rendering.
 - Gantt dependencies, hierarchy, critical path, and drag-resize are intentionally out of scope.
 - Backend OpenAPI schemas for `gantt` can be added in a separate contract PR if needed; current REST view routes accept string view types and `meta_views.type` has no active check constraint in the canonical meta schema.

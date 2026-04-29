@@ -4,7 +4,7 @@ Date: 2026-04-29
 
 Branch: `codex/mfeishu2-formula-view-gantt-20260429`
 
-Base after rebase: `origin/main@6a99c117d`
+Base after final rebase: `origin/main@0635dc2a8`
 
 ## Automated Verification
 
@@ -66,6 +66,18 @@ Result:
 EXIT 0
 ```
 
+### Final Rebase Verification
+
+After #1228 (`fix(formula): add DATEDIFF runtime alias`) merged to main, this branch was rebased onto `origin/main@0635dc2a8` and the same focused gate was rerun.
+
+Result:
+
+```text
+Focused frontend specs: 3 files / 19 tests passed
+Frontend type check:    EXIT 0
+Diff hygiene:           EXIT 0
+```
+
 ## Manual Staging Checklist
 
 After deployment, verify the following in a normal multitable sheet:
@@ -84,5 +96,5 @@ After deployment, verify the following in a normal multitable sheet:
 
 - Gantt is a frontend record visualization, not a full project-management engine.
 - Gantt does not support dependencies, hierarchy, critical path, drag-resize, or baseline tracking yet.
-- Formula docs are editor-side guidance only; unsupported backend functions still require backend formula-engine work.
+- Formula docs are editor-side guidance for the frontend editor. `DATEDIFF` runtime support is covered by companion #1228; other newly documented functions should stay aligned with backend formula-engine support before being exposed.
 - View builder shares existing sort/filter operator semantics. It does not add nested filter groups.
