@@ -50,8 +50,8 @@ const SECRET_PATTERNS = [
     regex: /\bpublicToken=(?!<redacted>|\$)[A-Za-z0-9._~+/=-]{12,}/i,
   },
   {
-    name: 'client_secret',
-    regex: /(?:^|[\s"'`&?])(?:client_secret|DINGTALK_CLIENT_SECRET|DINGTALK_STATE_SECRET)=(?!<redacted>|\$|\{)[^\s&"'`<>]{8,}/i,
+    name: 'dingtalk_secret_assignment',
+    regex: /\b(?:client_secret|DINGTALK_CLIENT_SECRET|DINGTALK_STATE_SECRET)\s*=\s*(?!<redacted>|replace-me|\$|\{|\s|$)[^\s&"'`<>]{8,}/i,
   },
 ]
 
@@ -318,7 +318,7 @@ function redactString(value) {
   return String(value ?? '')
     .replace(/(access_token=)[^&\s)]+/gi, '$1<redacted>')
     .replace(/(publicToken=)[^&\s)]+/gi, '$1<redacted>')
-    .replace(/((?:client_secret|DINGTALK_CLIENT_SECRET|DINGTALK_STATE_SECRET)=)[^&\s)"'`<>]+/gi, '$1<redacted>')
+    .replace(/\b((?:client_secret|DINGTALK_CLIENT_SECRET|DINGTALK_STATE_SECRET)\s*=\s*)[^&\s)"'`<>]+/gi, '$1<redacted>')
     .replace(/([?&](?:sign|timestamp)=)[^&\s)]+/gi, '$1<redacted>')
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer <redacted>')
     .replace(/\bSEC[A-Za-z0-9+/=_-]{8,}\b/g, 'SEC<redacted>')
