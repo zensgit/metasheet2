@@ -1,6 +1,7 @@
 import type {
   MetaCalendarViewConfig,
   MetaField,
+  MetaGanttViewConfig,
   MetaGalleryViewConfig,
   MetaKanbanViewConfig,
   MetaTimelineViewConfig,
@@ -115,6 +116,25 @@ export function resolveTimelineViewConfig(
     startFieldId,
     endFieldId,
     labelFieldId: stringOrNull(raw?.labelFieldId) ?? firstNonMatchingFieldId(fields, [startFieldId, endFieldId], ['string']) ?? firstFieldId(fields),
+    zoom: raw?.zoom === 'day' || raw?.zoom === 'month' ? raw.zoom : 'week',
+  }
+}
+
+export function resolveGanttViewConfig(
+  fields: MetaField[],
+  raw?: Record<string, unknown> | null,
+  groupInfo?: Record<string, unknown> | null,
+): Required<MetaGanttViewConfig> {
+  const startFieldId = stringOrNull(raw?.startFieldId) ?? firstFieldId(fields, ['date'])
+  const endFieldId = stringOrNull(raw?.endFieldId)
+    ?? firstNonMatchingFieldId(fields, [startFieldId], ['date'])
+    ?? startFieldId
+  return {
+    startFieldId,
+    endFieldId,
+    titleFieldId: stringOrNull(raw?.titleFieldId) ?? firstNonMatchingFieldId(fields, [startFieldId, endFieldId], ['string']) ?? firstFieldId(fields),
+    progressFieldId: stringOrNull(raw?.progressFieldId) ?? firstNonMatchingFieldId(fields, [startFieldId, endFieldId], ['number', 'percent']),
+    groupFieldId: stringOrNull(raw?.groupFieldId) ?? stringOrNull(groupInfo?.fieldId),
     zoom: raw?.zoom === 'day' || raw?.zoom === 'month' ? raw.zoom : 'week',
   }
 }

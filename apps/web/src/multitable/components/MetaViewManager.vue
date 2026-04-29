@@ -173,6 +173,58 @@
           </div>
         </template>
 
+        <template v-else-if="configTarget.type === 'gantt'">
+          <div class="meta-view-mgr__grid">
+            <label class="meta-view-mgr__field">
+              <span>Start field</span>
+              <select v-model="ganttDraft.startFieldId" class="meta-view-mgr__select">
+                <option value="">(auto)</option>
+                <option v-for="field in dateFields" :key="field.id" :value="field.id">{{ field.name }}</option>
+              </select>
+            </label>
+            <label class="meta-view-mgr__field">
+              <span>End field</span>
+              <select v-model="ganttDraft.endFieldId" class="meta-view-mgr__select">
+                <option value="">(auto)</option>
+                <option v-for="field in dateFields" :key="field.id" :value="field.id">{{ field.name }}</option>
+              </select>
+            </label>
+          </div>
+          <div class="meta-view-mgr__grid">
+            <label class="meta-view-mgr__field">
+              <span>Title field</span>
+              <select v-model="ganttDraft.titleFieldId" class="meta-view-mgr__select">
+                <option value="">(auto)</option>
+                <option v-for="field in configTargetFields" :key="field.id" :value="field.id">{{ field.name }}</option>
+              </select>
+            </label>
+            <label class="meta-view-mgr__field">
+              <span>Progress field</span>
+              <select v-model="ganttDraft.progressFieldId" class="meta-view-mgr__select">
+                <option value="">None</option>
+                <option v-for="field in numericFields" :key="field.id" :value="field.id">{{ field.name }}</option>
+              </select>
+            </label>
+          </div>
+          <div class="meta-view-mgr__grid">
+            <label class="meta-view-mgr__field">
+              <span>Gantt group field</span>
+              <select v-model="ganttDraft.groupFieldId" class="meta-view-mgr__select">
+                <option value="">None</option>
+                <option v-for="field in groupableFields" :key="field.id" :value="field.id">{{ field.name }}</option>
+              </select>
+            </label>
+            <label class="meta-view-mgr__field">
+              <span>Zoom</span>
+              <select v-model="ganttDraft.zoom" class="meta-view-mgr__select">
+                <option value="day">day</option>
+                <option value="week">week</option>
+                <option value="month">month</option>
+              </select>
+            </label>
+          </div>
+        </template>
+
         <template v-else-if="configTarget.type === 'kanban'">
           <label class="meta-view-mgr__field">
             <span>Group field</span>
@@ -198,6 +250,98 @@
 
         <div v-else class="meta-view-mgr__config-note">
           No additional configuration is required for this view type.
+        </div>
+
+        <div class="meta-view-mgr__common">
+          <div class="meta-view-mgr__common-header">
+            <strong>Filter, sort, group</strong>
+            <span>Shared by grid and visual views</span>
+          </div>
+
+          <div class="meta-view-mgr__field">
+            <div class="meta-view-mgr__subheader">
+              <span>Filters</span>
+              <select
+                v-if="filterDraft.conditions.length > 1"
+                v-model="filterDraft.conjunction"
+                class="meta-view-mgr__select meta-view-mgr__select--compact"
+              >
+                <option value="and">all conditions</option>
+                <option value="or">any condition</option>
+              </select>
+            </div>
+            <div v-if="filterDraft.conditions.length" class="meta-view-mgr__rules">
+              <div
+                v-for="(rule, idx) in filterDraft.conditions"
+                :key="idx"
+                class="meta-view-mgr__rule-row meta-view-mgr__rule-row--filter"
+              >
+                <select
+                  :value="rule.fieldId"
+                  class="meta-view-mgr__select"
+                  @change="updateFilterField(idx, ($event.target as HTMLSelectElement).value)"
+                >
+                  <option v-for="field in configTargetFields" :key="field.id" :value="field.id">{{ field.name }}</option>
+                </select>
+                <select
+                  :value="rule.operator"
+                  class="meta-view-mgr__select"
+                  @change="updateFilterOperator(idx, ($event.target as HTMLSelectElement).value)"
+                >
+                  <option v-for="operator in operatorsForField(rule.fieldId)" :key="operator.value" :value="operator.value">{{ operator.label }}</option>
+                </select>
+                <input
+                  v-if="!isUnaryFilterOperator(rule.operator)"
+                  class="meta-view-mgr__input"
+                  :type="inputTypeForField(rule.fieldId)"
+                  :value="rule.value ?? ''"
+                  @change="updateFilterValue(idx, ($event.target as HTMLInputElement).value)"
+                />
+                <span v-else class="meta-view-mgr__rule-empty">no value</span>
+                <button class="meta-view-mgr__action meta-view-mgr__action--danger" @click="removeFilterRule(idx)">&times;</button>
+              </div>
+            </div>
+            <button v-if="configTargetFields.length" class="meta-view-mgr__btn-inline" @click="addFilterRule">+ Add filter</button>
+          </div>
+
+          <div class="meta-view-mgr__field">
+            <div class="meta-view-mgr__subheader">
+              <span>Sorts</span>
+            </div>
+            <div v-if="sortDraft.rules.length" class="meta-view-mgr__rules">
+              <div
+                v-for="(rule, idx) in sortDraft.rules"
+                :key="idx"
+                class="meta-view-mgr__rule-row"
+              >
+                <select
+                  :value="rule.fieldId"
+                  class="meta-view-mgr__select"
+                  @change="updateSortField(idx, ($event.target as HTMLSelectElement).value)"
+                >
+                  <option v-for="field in configTargetFields" :key="field.id" :value="field.id">{{ field.name }}</option>
+                </select>
+                <select
+                  :value="rule.direction"
+                  class="meta-view-mgr__select"
+                  @change="updateSortDirection(idx, ($event.target as HTMLSelectElement).value as 'asc' | 'desc')"
+                >
+                  <option value="asc">A to Z</option>
+                  <option value="desc">Z to A</option>
+                </select>
+                <button class="meta-view-mgr__action meta-view-mgr__action--danger" @click="removeSortRule(idx)">&times;</button>
+              </div>
+            </div>
+            <button v-if="configTargetFields.length" class="meta-view-mgr__btn-inline" @click="addSortRule">+ Add sort</button>
+          </div>
+
+          <label v-if="configTarget.type !== 'kanban' && configTarget.type !== 'gantt'" class="meta-view-mgr__field">
+            <span>Group field</span>
+            <select v-model="groupDraft.fieldId" class="meta-view-mgr__select">
+              <option value="">None</option>
+              <option v-for="field in groupableFields" :key="field.id" :value="field.id">{{ field.name }}</option>
+            </select>
+          </label>
         </div>
 
         <div class="meta-view-mgr__config-actions">
@@ -246,20 +390,28 @@ import type {
   ConditionalFormattingRule,
   MetaCalendarViewConfig,
   MetaField,
+  MetaGanttViewConfig,
   MetaGalleryViewConfig,
   MetaKanbanViewConfig,
   MetaTimelineViewConfig,
   MetaView,
 } from '../types'
 import {
+  FILTER_OPERATORS_BY_TYPE,
+  type FilterConjunction,
+  type FilterRule,
+  type SortRule,
+} from '../composables/useMultitableGrid'
+import {
   resolveCalendarViewConfig,
+  resolveGanttViewConfig,
   resolveGalleryViewConfig,
   resolveKanbanViewConfig,
   resolveTimelineViewConfig,
 } from '../utils/view-config'
 import ConditionalFormattingDialog from './ConditionalFormattingDialog.vue'
 
-const VIEW_TYPES = ['grid', 'form', 'kanban', 'gallery', 'calendar', 'timeline'] as const
+const VIEW_TYPES = ['grid', 'form', 'kanban', 'gallery', 'calendar', 'timeline', 'gantt'] as const
 const VIEW_ICONS: Record<string, string> = {
   grid: '\u2637',
   form: '\u2263',
@@ -267,6 +419,7 @@ const VIEW_ICONS: Record<string, string> = {
   gallery: '\u25A6',
   calendar: '\u2339',
   timeline: '\u2500',
+  gantt: '\u25AC',
 }
 
 const props = defineProps<{
@@ -283,6 +436,8 @@ const emit = defineEmits<{
   (e: 'update-view', viewId: string, input: {
     name?: string
     config?: Record<string, unknown>
+    filterInfo?: Record<string, unknown>
+    sortInfo?: Record<string, unknown>
     groupInfo?: Record<string, unknown>
   }): void
   (e: 'delete-view', viewId: string): void
@@ -320,6 +475,24 @@ const timelineDraft = reactive<Required<MetaTimelineViewConfig>>({
   labelFieldId: null,
   zoom: 'week',
 })
+const ganttDraft = reactive<Required<MetaGanttViewConfig>>({
+  startFieldId: null,
+  endFieldId: null,
+  titleFieldId: null,
+  progressFieldId: null,
+  groupFieldId: null,
+  zoom: 'week',
+})
+const filterDraft = reactive<{ conjunction: FilterConjunction; conditions: FilterRule[] }>({
+  conjunction: 'and',
+  conditions: [],
+})
+const sortDraft = reactive<{ rules: SortRule[] }>({
+  rules: [],
+})
+const groupDraft = reactive<{ fieldId: string }>({
+  fieldId: '',
+})
 const viewConfigBaseline = ref('')
 const viewConfigOutdated = ref(false)
 const viewConfigLiveRefreshText = ref('')
@@ -336,14 +509,17 @@ const configTargetFields = computed(() => props.fields)
 const attachmentFields = computed(() => props.fields.filter((field) => field.type === 'attachment'))
 const dateFields = computed(() => props.fields.filter((field) => field.type === 'date'))
 const dateLikeFields = computed(() => props.fields.filter((field) => field.type === 'date' || field.type === 'string' || field.type === 'number'))
+const numericFields = computed(() => props.fields.filter((field) => ['number', 'currency', 'percent', 'rating'].includes(field.type)))
 const selectFields = computed(() => props.fields.filter((field) => field.type === 'select'))
 const stringFields = computed(() => props.fields.filter((field) => ['string', 'formula', 'lookup'].includes(field.type)))
+const groupableFields = computed(() => props.fields.filter((field) => ['select', 'string', 'boolean', 'number', 'date'].includes(field.type)))
 const validFieldIds = computed(() => new Set(props.fields.map((field) => field.id)))
 const validStringFieldIds = computed(() => new Set(stringFields.value.map((field) => field.id)))
 const validAttachmentFieldIds = computed(() => new Set(attachmentFields.value.map((field) => field.id)))
 const validDateFieldIds = computed(() => new Set(dateFields.value.map((field) => field.id)))
 const validDateLikeFieldIds = computed(() => new Set(dateLikeFields.value.map((field) => field.id)))
 const validSelectFieldIds = computed(() => new Set(selectFields.value.map((field) => field.id)))
+const validGroupableFieldIds = computed(() => new Set(groupableFields.value.map((field) => field.id)))
 
 const viewConfigBlockingReason = computed(() => {
   const target = configTarget.value
@@ -385,6 +561,24 @@ const viewConfigBlockingReason = computed(() => {
     }
   }
 
+  if (target.type === 'gantt') {
+    if (ganttDraft.startFieldId && !validDateFieldIds.value.has(ganttDraft.startFieldId)) {
+      return 'The selected start field is no longer a date field. Reload latest before saving.'
+    }
+    if (ganttDraft.endFieldId && !validDateFieldIds.value.has(ganttDraft.endFieldId)) {
+      return 'The selected end field is no longer a date field. Reload latest before saving.'
+    }
+    if (ganttDraft.titleFieldId && !validFieldIds.value.has(ganttDraft.titleFieldId)) {
+      return 'The selected title field disappeared in the background. Reload latest before saving.'
+    }
+    if (ganttDraft.progressFieldId && !numericFields.value.some((field) => field.id === ganttDraft.progressFieldId)) {
+      return 'The selected progress field is no longer numeric. Reload latest before saving.'
+    }
+    if (ganttDraft.groupFieldId && !validGroupableFieldIds.value.has(ganttDraft.groupFieldId)) {
+      return 'The selected Gantt group field is no longer groupable. Reload latest before saving.'
+    }
+  }
+
   if (target.type === 'kanban') {
     if (kanbanDraft.groupFieldId && !validSelectFieldIds.value.has(kanbanDraft.groupFieldId)) {
       return 'The selected group field is no longer a select field. Reload latest before saving.'
@@ -392,6 +586,16 @@ const viewConfigBlockingReason = computed(() => {
     if (kanbanDraft.cardFieldIds.some((fieldId) => !validFieldIds.value.has(fieldId))) {
       return 'One or more selected card fields disappeared in the background. Reload latest before saving.'
     }
+  }
+
+  if (filterDraft.conditions.some((condition) => condition.fieldId && !validFieldIds.value.has(condition.fieldId))) {
+    return 'One or more selected filter fields disappeared in the background. Reload latest before saving.'
+  }
+  if (sortDraft.rules.some((rule) => rule.fieldId && !validFieldIds.value.has(rule.fieldId))) {
+    return 'One or more selected sort fields disappeared in the background. Reload latest before saving.'
+  }
+  if (target.type !== 'kanban' && target.type !== 'gantt' && groupDraft.fieldId && !validGroupableFieldIds.value.has(groupDraft.fieldId)) {
+    return 'The selected group field is no longer groupable. Reload latest before saving.'
   }
 
   return ''
@@ -426,6 +630,18 @@ function resetConfigDrafts() {
     labelFieldId: null,
     zoom: 'week',
   } satisfies Required<MetaTimelineViewConfig>)
+  Object.assign(ganttDraft, {
+    startFieldId: null,
+    endFieldId: null,
+    titleFieldId: null,
+    progressFieldId: null,
+    groupFieldId: null,
+    zoom: 'week',
+  } satisfies Required<MetaGanttViewConfig>)
+  filterDraft.conjunction = 'and'
+  filterDraft.conditions.splice(0)
+  sortDraft.rules.splice(0)
+  groupDraft.fieldId = ''
 }
 
 function resetTransientState() {
@@ -492,6 +708,63 @@ function openConfig(view: MetaView) {
   hydrateExistingViewConfig(view)
 }
 
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+}
+
+function hasPayload(value: Record<string, unknown> | null | undefined): boolean {
+  return Boolean(value && Object.keys(value).length > 0)
+}
+
+function hydrateCommonViewRules(view: MetaView) {
+  const filterInfo = asRecord(view.filterInfo)
+  const conditions = Array.isArray(filterInfo.conditions) ? filterInfo.conditions : []
+  filterDraft.conjunction = filterInfo.conjunction === 'or' ? 'or' : 'and'
+  filterDraft.conditions.splice(0, filterDraft.conditions.length, ...conditions
+    .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item))
+    .map((item) => ({
+      fieldId: String(item.fieldId ?? ''),
+      operator: String(item.operator ?? 'is'),
+      value: item.value,
+    }))
+    .filter((item) => item.fieldId))
+
+  const sortInfo = asRecord(view.sortInfo)
+  const sortRules = Array.isArray(sortInfo.rules) ? sortInfo.rules : []
+  sortDraft.rules.splice(0, sortDraft.rules.length, ...sortRules
+    .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item))
+    .map((item) => ({
+      fieldId: String(item.fieldId ?? ''),
+      direction: item.desc === true ? 'desc' as const : 'asc' as const,
+    }))
+    .filter((item) => item.fieldId))
+
+  const groupInfo = asRecord(view.groupInfo)
+  groupDraft.fieldId = typeof groupInfo.fieldId === 'string' ? groupInfo.fieldId : ''
+}
+
+function serializeCommonViewDraft(type: MetaView['type'] | null): Record<string, unknown> {
+  return {
+    filterInfo: filterDraft.conditions.map((condition) => ({
+      fieldId: condition.fieldId,
+      operator: condition.operator,
+      value: condition.value,
+    })),
+    filterConjunction: filterDraft.conjunction,
+    sortInfo: sortDraft.rules.map((rule) => ({
+      fieldId: rule.fieldId,
+      direction: rule.direction,
+    })),
+    groupInfo: type === 'kanban'
+      ? kanbanDraft.groupFieldId
+      : type === 'gantt'
+        ? ganttDraft.groupFieldId
+        : groupDraft.fieldId,
+  }
+}
+
 function serializeViewDraft(type: MetaView['type'] | null): string {
   if (type === 'gallery') {
     return JSON.stringify({
@@ -500,6 +773,7 @@ function serializeViewDraft(type: MetaView['type'] | null): string {
       fieldIds: [...galleryDraft.fieldIds],
       columns: galleryDraft.columns,
       cardSize: galleryDraft.cardSize,
+      ...serializeCommonViewDraft(type),
     })
   }
   if (type === 'calendar') {
@@ -509,6 +783,7 @@ function serializeViewDraft(type: MetaView['type'] | null): string {
       titleFieldId: calendarDraft.titleFieldId,
       defaultView: calendarDraft.defaultView,
       weekStartsOn: calendarDraft.weekStartsOn,
+      ...serializeCommonViewDraft(type),
     })
   }
   if (type === 'timeline') {
@@ -517,15 +792,28 @@ function serializeViewDraft(type: MetaView['type'] | null): string {
       endFieldId: timelineDraft.endFieldId,
       labelFieldId: timelineDraft.labelFieldId,
       zoom: timelineDraft.zoom,
+      ...serializeCommonViewDraft(type),
+    })
+  }
+  if (type === 'gantt') {
+    return JSON.stringify({
+      startFieldId: ganttDraft.startFieldId,
+      endFieldId: ganttDraft.endFieldId,
+      titleFieldId: ganttDraft.titleFieldId,
+      progressFieldId: ganttDraft.progressFieldId,
+      groupFieldId: ganttDraft.groupFieldId,
+      zoom: ganttDraft.zoom,
+      ...serializeCommonViewDraft(type),
     })
   }
   if (type === 'kanban') {
     return JSON.stringify({
       groupFieldId: kanbanDraft.groupFieldId,
       cardFieldIds: [...kanbanDraft.cardFieldIds],
+      ...serializeCommonViewDraft(type),
     })
   }
-  return ''
+  return JSON.stringify(serializeCommonViewDraft(type))
 }
 
 function serializeViewSourceSignature(view: MetaView | null): string {
@@ -535,6 +823,8 @@ function serializeViewSourceSignature(view: MetaView | null): string {
     name: view.name,
     type: view.type,
     config: view.config ?? null,
+    filterInfo: view.filterInfo ?? null,
+    sortInfo: view.sortInfo ?? null,
     groupInfo: view.groupInfo ?? null,
     fields: props.fields.map((field) => ({
       id: field.id,
@@ -548,12 +838,15 @@ function hydrateExistingViewConfig(view: MetaView, options?: { liveRefreshText?:
   configTargetId.value = view.id
   viewConfigOutdated.value = false
   viewConfigLiveRefreshText.value = options?.liveRefreshText ?? ''
+  hydrateCommonViewRules(view)
   if (view.type === 'gallery') {
     Object.assign(galleryDraft, resolveGalleryViewConfig(props.fields, view.config))
   } else if (view.type === 'calendar') {
     Object.assign(calendarDraft, resolveCalendarViewConfig(props.fields, view.config))
   } else if (view.type === 'timeline') {
     Object.assign(timelineDraft, resolveTimelineViewConfig(props.fields, view.config))
+  } else if (view.type === 'gantt') {
+    Object.assign(ganttDraft, resolveGanttViewConfig(props.fields, view.config, view.groupInfo))
   } else if (view.type === 'kanban') {
     Object.assign(kanbanDraft, resolveKanbanViewConfig(props.fields, view.config, view.groupInfo))
   }
@@ -592,13 +885,136 @@ function preserveConditionalFormattingRules(target: MetaView, config: Record<str
   }
 }
 
+const UNARY_FILTER_OPERATORS = new Set(['isEmpty', 'isNotEmpty'])
+
+function isUnaryFilterOperator(operator: string): boolean {
+  return UNARY_FILTER_OPERATORS.has(operator)
+}
+
+function operatorsForField(fieldId: string) {
+  const fieldType = props.fields.find((field) => field.id === fieldId)?.type ?? 'string'
+  return FILTER_OPERATORS_BY_TYPE[fieldType] ?? FILTER_OPERATORS_BY_TYPE.string
+}
+
+function inputTypeForField(fieldId: string): string {
+  const fieldType = props.fields.find((field) => field.id === fieldId)?.type ?? 'string'
+  if (fieldType === 'number' || fieldType === 'currency' || fieldType === 'percent' || fieldType === 'rating') return 'number'
+  if (fieldType === 'date') return 'date'
+  return 'text'
+}
+
+function addFilterRule() {
+  const firstField = configTargetFields.value[0]
+  if (!firstField) return
+  const operator = operatorsForField(firstField.id)[0]?.value ?? 'is'
+  filterDraft.conditions.push({ fieldId: firstField.id, operator, value: isUnaryFilterOperator(operator) ? undefined : '' })
+}
+
+function updateFilterField(index: number, fieldId: string) {
+  const operator = operatorsForField(fieldId)[0]?.value ?? 'is'
+  filterDraft.conditions[index] = {
+    fieldId,
+    operator,
+    value: isUnaryFilterOperator(operator) ? undefined : '',
+  }
+}
+
+function updateFilterOperator(index: number, operator: string) {
+  const rule = filterDraft.conditions[index]
+  if (!rule) return
+  filterDraft.conditions[index] = {
+    ...rule,
+    operator,
+    value: isUnaryFilterOperator(operator) ? undefined : rule.value ?? '',
+  }
+}
+
+function updateFilterValue(index: number, value: string) {
+  const rule = filterDraft.conditions[index]
+  if (!rule) return
+  const fieldType = props.fields.find((field) => field.id === rule.fieldId)?.type ?? 'string'
+  filterDraft.conditions[index] = {
+    ...rule,
+    value: ['number', 'currency', 'percent', 'rating'].includes(fieldType) && value !== '' ? Number(value) : value,
+  }
+}
+
+function removeFilterRule(index: number) {
+  filterDraft.conditions.splice(index, 1)
+}
+
+function addSortRule() {
+  const firstField = configTargetFields.value[0]
+  if (!firstField) return
+  sortDraft.rules.push({ fieldId: firstField.id, direction: 'asc' })
+}
+
+function updateSortField(index: number, fieldId: string) {
+  const rule = sortDraft.rules[index]
+  if (!rule) return
+  sortDraft.rules[index] = { ...rule, fieldId }
+}
+
+function updateSortDirection(index: number, direction: 'asc' | 'desc') {
+  const rule = sortDraft.rules[index]
+  if (!rule) return
+  sortDraft.rules[index] = { ...rule, direction }
+}
+
+function removeSortRule(index: number) {
+  sortDraft.rules.splice(index, 1)
+}
+
+function buildFilterInfoPayload(): Record<string, unknown> {
+  const conditions = filterDraft.conditions
+    .filter((condition) => validFieldIds.value.has(condition.fieldId))
+    .map((condition) => ({
+      fieldId: condition.fieldId,
+      operator: condition.operator,
+      value: condition.value,
+    }))
+  return conditions.length > 0 ? { conjunction: filterDraft.conjunction, conditions } : {}
+}
+
+function buildSortInfoPayload(): Record<string, unknown> {
+  const rules = sortDraft.rules
+    .filter((rule) => validFieldIds.value.has(rule.fieldId))
+    .map((rule) => ({ fieldId: rule.fieldId, desc: rule.direction === 'desc' }))
+  return rules.length > 0 ? { rules } : {}
+}
+
+function buildCommonViewPayload(target: MetaView): {
+  filterInfo?: Record<string, unknown>
+  sortInfo?: Record<string, unknown>
+  groupInfo?: Record<string, unknown>
+} {
+  const filterInfo = buildFilterInfoPayload()
+  const sortInfo = buildSortInfoPayload()
+  const groupInfo = target.type === 'kanban'
+    ? undefined
+    : target.type === 'gantt'
+      ? ganttDraft.groupFieldId && validGroupableFieldIds.value.has(ganttDraft.groupFieldId)
+        ? { fieldId: ganttDraft.groupFieldId }
+        : {}
+    : groupDraft.fieldId && validGroupableFieldIds.value.has(groupDraft.fieldId)
+      ? { fieldId: groupDraft.fieldId }
+      : {}
+  return {
+    ...(hasPayload(filterInfo) || hasPayload(target.filterInfo) ? { filterInfo } : {}),
+    ...(hasPayload(sortInfo) || hasPayload(target.sortInfo) ? { sortInfo } : {}),
+    ...(groupInfo && (hasPayload(groupInfo) || hasPayload(target.groupInfo)) ? { groupInfo } : {}),
+  }
+}
+
 function saveConfig() {
   const target = configTarget.value
   if (!target || viewConfigBlockingReason.value) return
+  const commonPayload = buildCommonViewPayload(target)
 
   if (target.type === 'gallery') {
     const fieldIds = galleryDraft.fieldIds.filter((fieldId) => validFieldIds.value.has(fieldId))
     emit('update-view', target.id, {
+      ...commonPayload,
       config: preserveConditionalFormattingRules(target, {
         titleFieldId: galleryDraft.titleFieldId && validStringFieldIds.value.has(galleryDraft.titleFieldId) ? galleryDraft.titleFieldId : null,
         coverFieldId: galleryDraft.coverFieldId && validAttachmentFieldIds.value.has(galleryDraft.coverFieldId) ? galleryDraft.coverFieldId : null,
@@ -609,6 +1025,7 @@ function saveConfig() {
     })
   } else if (target.type === 'calendar') {
     emit('update-view', target.id, {
+      ...commonPayload,
       config: preserveConditionalFormattingRules(target, {
         dateFieldId: calendarDraft.dateFieldId && validDateLikeFieldIds.value.has(calendarDraft.dateFieldId) ? calendarDraft.dateFieldId : null,
         endDateFieldId: calendarDraft.endDateFieldId && validDateLikeFieldIds.value.has(calendarDraft.endDateFieldId) ? calendarDraft.endDateFieldId : null,
@@ -619,11 +1036,24 @@ function saveConfig() {
     })
   } else if (target.type === 'timeline') {
     emit('update-view', target.id, {
+      ...commonPayload,
       config: preserveConditionalFormattingRules(target, {
         startFieldId: timelineDraft.startFieldId && validDateFieldIds.value.has(timelineDraft.startFieldId) ? timelineDraft.startFieldId : null,
         endFieldId: timelineDraft.endFieldId && validDateFieldIds.value.has(timelineDraft.endFieldId) ? timelineDraft.endFieldId : null,
         labelFieldId: timelineDraft.labelFieldId && validFieldIds.value.has(timelineDraft.labelFieldId) ? timelineDraft.labelFieldId : null,
         zoom: timelineDraft.zoom,
+      }),
+    })
+  } else if (target.type === 'gantt') {
+    emit('update-view', target.id, {
+      ...commonPayload,
+      config: preserveConditionalFormattingRules(target, {
+        startFieldId: ganttDraft.startFieldId && validDateFieldIds.value.has(ganttDraft.startFieldId) ? ganttDraft.startFieldId : null,
+        endFieldId: ganttDraft.endFieldId && validDateFieldIds.value.has(ganttDraft.endFieldId) ? ganttDraft.endFieldId : null,
+        titleFieldId: ganttDraft.titleFieldId && validFieldIds.value.has(ganttDraft.titleFieldId) ? ganttDraft.titleFieldId : null,
+        progressFieldId: ganttDraft.progressFieldId && numericFields.value.some((field) => field.id === ganttDraft.progressFieldId) ? ganttDraft.progressFieldId : null,
+        groupFieldId: ganttDraft.groupFieldId && validGroupableFieldIds.value.has(ganttDraft.groupFieldId) ? ganttDraft.groupFieldId : null,
+        zoom: ganttDraft.zoom,
       }),
     })
   } else if (target.type === 'kanban') {
@@ -632,12 +1062,15 @@ function saveConfig() {
       : null
     const cardFieldIds = kanbanDraft.cardFieldIds.filter((fieldId) => validFieldIds.value.has(fieldId))
     emit('update-view', target.id, {
+      ...commonPayload,
       config: preserveConditionalFormattingRules(target, {
         groupFieldId,
         cardFieldIds,
       }),
       groupInfo: groupFieldId ? { fieldId: groupFieldId } : {},
     })
+  } else {
+    emit('update-view', target.id, commonPayload)
   }
 
   closeConfig()
@@ -780,12 +1213,21 @@ onBeforeUnmount(() => {
 .meta-view-mgr__warning { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; border: 1px solid #f3d19e; border-radius: 6px; background: #fff7e6; color: #8a5a00; font-size: 12px; }
 .meta-view-mgr__refresh { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; border: 1px solid #bfd6ff; border-radius: 6px; background: #eef5ff; color: #1d4ed8; font-size: 12px; }
 .meta-view-mgr__field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #666; }
+.meta-view-mgr__common { display: flex; flex-direction: column; gap: 12px; padding: 12px; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; }
+.meta-view-mgr__common-header { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: #64748b; }
+.meta-view-mgr__common-header strong { color: #334155; }
+.meta-view-mgr__subheader { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.meta-view-mgr__rules { display: flex; flex-direction: column; gap: 6px; }
+.meta-view-mgr__rule-row { display: grid; grid-template-columns: 1fr 120px auto; gap: 8px; align-items: center; }
+.meta-view-mgr__rule-row--filter { grid-template-columns: 1fr 130px minmax(80px, 1fr) auto; }
+.meta-view-mgr__rule-empty { padding: 5px 10px; border: 1px dashed #cbd5e1; border-radius: 4px; color: #94a3b8; background: #f8fafc; }
 .meta-view-mgr__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .meta-view-mgr__checks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 12px; max-height: 180px; overflow: auto; padding: 8px; border: 1px solid #e5e7eb; border-radius: 6px; background: #fff; }
 .meta-view-mgr__check { display: flex; gap: 8px; align-items: center; font-size: 12px; color: #444; }
 .meta-view-mgr__add-section { padding: 10px 16px; border-top: 1px solid #eee; }
 .meta-view-mgr__add-row { display: flex; gap: 8px; }
 .meta-view-mgr__input, .meta-view-mgr__select { width: 100%; padding: 5px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; background: #fff; }
+.meta-view-mgr__select--compact { width: auto; min-width: 130px; }
 .meta-view-mgr__btn-add { padding: 5px 14px; background: #409eff; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
 .meta-view-mgr__btn-add:disabled { opacity: 0.4; cursor: not-allowed; }
 .meta-view-mgr__btn-add:hover:not(:disabled) { background: #66b1ff; }

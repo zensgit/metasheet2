@@ -47,7 +47,7 @@ describe('MetaViewManager', () => {
     await nextTick()
 
     const selects = Array.from(container.querySelectorAll('.meta-view-mgr__config select')) as HTMLSelectElement[]
-    expect(selects).toHaveLength(4)
+    expect(selects.length).toBeGreaterThanOrEqual(4)
     selects[2].value = 'fld_owner'
     selects[2].dispatchEvent(new Event('change', { bubbles: true }))
     selects[3].value = 'month'
@@ -743,6 +743,90 @@ describe('MetaViewManager', () => {
     expect(titleOptionsAfterReload).not.toContain('Name')
     expect(coverSelectAfterReload.value).toBe('')
     expect(container.querySelector('.meta-view-mgr__warning')).toBeNull()
+
+    app.unmount()
+  })
+
+  it('emits visual filter sort and group settings from the shared builder', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const updateSpy = vi.fn()
+
+    const app = createApp({
+      render() {
+        return h(MetaViewManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          activeViewId: 'view_grid',
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string' },
+            { id: 'fld_status', name: 'Status', type: 'select' },
+            { id: 'fld_due', name: 'Due', type: 'date' },
+          ],
+          views: [
+            { id: 'view_grid', sheetId: 'sheet_1', name: 'Grid', type: 'grid' },
+          ],
+          onUpdateView: updateSpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    ;(container.querySelector('.meta-view-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await nextTick()
+
+    ;(Array.from(container.querySelectorAll('.meta-view-mgr__btn-inline')) as HTMLButtonElement[])
+      .find((button) => button.textContent?.includes('+ Add filter'))
+      ?.click()
+    await nextTick()
+
+    const filterRow = container.querySelector('.meta-view-mgr__rule-row--filter') as HTMLElement
+    const filterSelects = Array.from(filterRow.querySelectorAll('select')) as HTMLSelectElement[]
+    filterSelects[0].value = 'fld_status'
+    filterSelects[0].dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+    filterSelects[1].value = 'is'
+    filterSelects[1].dispatchEvent(new Event('change', { bubbles: true }))
+    const filterInput = filterRow.querySelector('input') as HTMLInputElement
+    filterInput.value = 'Open'
+    filterInput.dispatchEvent(new Event('change', { bubbles: true }))
+
+    ;(Array.from(container.querySelectorAll('.meta-view-mgr__btn-inline')) as HTMLButtonElement[])
+      .find((button) => button.textContent?.includes('+ Add sort'))
+      ?.click()
+    await nextTick()
+
+    const sortRow = Array.from(container.querySelectorAll('.meta-view-mgr__rule-row'))
+      .find((row) => !row.classList.contains('meta-view-mgr__rule-row--filter')) as HTMLElement
+    const sortSelects = Array.from(sortRow.querySelectorAll('select')) as HTMLSelectElement[]
+    sortSelects[0].value = 'fld_due'
+    sortSelects[0].dispatchEvent(new Event('change', { bubbles: true }))
+    sortSelects[1].value = 'desc'
+    sortSelects[1].dispatchEvent(new Event('change', { bubbles: true }))
+
+    const groupSelects = Array.from(container.querySelectorAll('.meta-view-mgr__common > label select')) as HTMLSelectElement[]
+    const groupSelect = groupSelects[groupSelects.length - 1]
+    groupSelect.value = 'fld_status'
+    groupSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    ;(Array.from(container.querySelectorAll('.meta-view-mgr__btn-add')) as HTMLButtonElement[])
+      .find((button) => button.textContent?.includes('Save view settings'))
+      ?.click()
+    await nextTick()
+
+    expect(updateSpy).toHaveBeenCalledWith('view_grid', {
+      filterInfo: {
+        conjunction: 'and',
+        conditions: [{ fieldId: 'fld_status', operator: 'is', value: 'Open' }],
+      },
+      sortInfo: {
+        rules: [{ fieldId: 'fld_due', desc: true }],
+      },
+      groupInfo: { fieldId: 'fld_status' },
+    })
 
     app.unmount()
   })

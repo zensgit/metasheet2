@@ -234,7 +234,7 @@ export interface AppRouteQuery {
     commentId?: string
     fieldId?: string
     openComments?: string
-    mode?: 'grid' | 'form' | 'kanban' | 'gallery' | 'calendar' | 'timeline'
+    mode?: 'grid' | 'form' | 'kanban' | 'gallery' | 'calendar' | 'timeline' | 'gantt'
     embedded?: string
     role?: 'owner' | 'editor' | 'commenter' | 'viewer'
   }
