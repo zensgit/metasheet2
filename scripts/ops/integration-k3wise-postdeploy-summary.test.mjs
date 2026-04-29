@@ -122,6 +122,14 @@ test('renders staging missing field details for failed descriptor checks', async
               standard_materials: ['erpSyncStatus'],
               integration_exceptions: ['errorMessage', 'status'],
             },
+            invalidFields: {
+              standard_materials: {
+                status: [
+                  'expected type select but got string',
+                  'missing options: active, obsolete',
+                ],
+              },
+            },
           },
         },
       ],
@@ -133,6 +141,7 @@ test('renders staging missing field details for failed descriptor checks', async
     assert.match(result.stdout, /`staging-descriptor-contract`: `fail`/)
     assert.match(result.stdout, /missingFields: standard_materials: `erpSyncStatus`/)
     assert.match(result.stdout, /integration_exceptions: `errorMessage`, `status`/)
+    assert.match(result.stdout, /invalidFields: standard_materials: status: `expected type select but got string`, `missing options: active, obsolete`/)
   } finally {
     rmSync(outDir, { recursive: true, force: true })
   }

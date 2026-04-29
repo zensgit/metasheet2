@@ -95,6 +95,13 @@ async function main() {
   const summary = listStagingDescriptors()
   assert.equal(summary.length, 5)
   assert.equal(typeof summary[0].fields[0], 'string')
+  assert.equal(summary[0].fieldDetails[0].id, 'sourceSystemId')
+  assert.equal(summary[0].fieldDetails[0].name, 'Source System')
+  assert.equal(summary[0].fieldDetails[0].type, 'string')
+  const standardMaterialsSummary = summary.find((d) => d.id === 'standard_materials')
+  const statusFieldSummary = standardMaterialsSummary.fieldDetails.find((f) => f.id === 'status')
+  assert.deepEqual(statusFieldSummary.options, ['draft', 'active', 'obsolete'])
+  assert.equal(statusFieldSummary.required, undefined, 'field details do not re-expose authoring-only required')
 
   // --- 1b. Required fields materialize into property.validation --------
   // Raw authored fields use `required: true`; the materialized descriptor

@@ -41,69 +41,69 @@ const REQUIRED_STAGING_DESCRIPTORS = [
   'integration_exceptions',
   'integration_run_log',
 ]
-const REQUIRED_STAGING_FIELDS = {
-  plm_raw_items: [
-    'sourceSystemId',
-    'objectType',
-    'sourceId',
-    'revision',
-    'code',
-    'name',
-    'rawPayload',
-    'fetchedAt',
-    'pipelineRunId',
-  ],
-  standard_materials: [
-    'code',
-    'name',
-    'uom',
-    'category',
-    'status',
-    'erpSyncStatus',
-    'erpExternalId',
-    'erpBillNo',
-    'erpResponseCode',
-    'erpResponseMessage',
-    'lastSyncedAt',
-  ],
-  bom_cleanse: [
-    'parentCode',
-    'childCode',
-    'quantity',
-    'uom',
-    'sequence',
-    'revision',
-    'validFrom',
-    'validTo',
-    'status',
-  ],
-  integration_exceptions: [
-    'pipelineId',
-    'runId',
-    'idempotencyKey',
-    'errorCode',
-    'errorMessage',
-    'sourcePayload',
-    'transformedPayload',
-    'status',
-    'assignee',
-    'note',
-  ],
-  integration_run_log: [
-    'pipelineId',
-    'runId',
-    'mode',
-    'triggeredBy',
-    'status',
-    'rowsRead',
-    'rowsCleaned',
-    'rowsWritten',
-    'rowsFailed',
-    'durationMs',
-    'startedAt',
-    'finishedAt',
-    'errorSummary',
-  ],
+const REQUIRED_STAGING_FIELD_DETAILS = {
+  plm_raw_items: {
+    sourceSystemId: { type: 'string' },
+    objectType: { type: 'string' },
+    sourceId: { type: 'string' },
+    revision: { type: 'string' },
+    code: { type: 'string' },
+    name: { type: 'string' },
+    rawPayload: { type: 'string' },
+    fetchedAt: { type: 'date' },
+    pipelineRunId: { type: 'string' },
+  },
+  standard_materials: {
+    code: { type: 'string' },
+    name: { type: 'string' },
+    uom: { type: 'string' },
+    category: { type: 'string' },
+    status: { type: 'select', options: ['draft', 'active', 'obsolete'] },
+    erpSyncStatus: { type: 'select', options: ['pending', 'synced', 'failed'] },
+    erpExternalId: { type: 'string' },
+    erpBillNo: { type: 'string' },
+    erpResponseCode: { type: 'string' },
+    erpResponseMessage: { type: 'string' },
+    lastSyncedAt: { type: 'date' },
+  },
+  bom_cleanse: {
+    parentCode: { type: 'string' },
+    childCode: { type: 'string' },
+    quantity: { type: 'number' },
+    uom: { type: 'string' },
+    sequence: { type: 'number' },
+    revision: { type: 'string' },
+    validFrom: { type: 'date' },
+    validTo: { type: 'date' },
+    status: { type: 'select', options: ['draft', 'active', 'obsolete'] },
+  },
+  integration_exceptions: {
+    pipelineId: { type: 'string' },
+    runId: { type: 'string' },
+    idempotencyKey: { type: 'string' },
+    errorCode: { type: 'string' },
+    errorMessage: { type: 'string' },
+    sourcePayload: { type: 'string' },
+    transformedPayload: { type: 'string' },
+    status: { type: 'select', options: ['open', 'in_review', 'replayed', 'discarded'] },
+    assignee: { type: 'string' },
+    note: { type: 'string' },
+  },
+  integration_run_log: {
+    pipelineId: { type: 'string' },
+    runId: { type: 'string' },
+    mode: { type: 'select', options: ['incremental', 'full', 'manual', 'replay'] },
+    triggeredBy: { type: 'string' },
+    status: { type: 'select', options: ['pending', 'running', 'succeeded', 'partial', 'failed', 'cancelled'] },
+    rowsRead: { type: 'number' },
+    rowsCleaned: { type: 'number' },
+    rowsWritten: { type: 'number' },
+    rowsFailed: { type: 'number' },
+    durationMs: { type: 'number' },
+    startedAt: { type: 'date' },
+    finishedAt: { type: 'date' },
+    errorSummary: { type: 'string' },
+  },
 }
 const TOKEN_PATTERN = /([A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._-]{16,})/g
 
@@ -353,6 +353,35 @@ function assertStatusRoutes(statusBody) {
   return { adapters, adaptersChecked: REQUIRED_ADAPTERS.length, routesChecked: REQUIRED_ROUTES.length }
 }
 
+function collectDescriptorFields(descriptor) {
+  const fieldIds = new Set()
+  const fieldDetailsById = new Map()
+
+  const collect = (field, detailSource) => {
+    if (typeof field === 'string') {
+      fieldIds.add(field)
+      return
+    }
+    if (!field || typeof field !== 'object' || typeof field.id !== 'string' || !field.id) return
+    fieldIds.add(field.id)
+    if (detailSource) fieldDetailsById.set(field.id, field)
+  }
+
+  if (Array.isArray(descriptor.fields)) {
+    for (const field of descriptor.fields) collect(field, typeof field === 'object')
+  }
+  if (Array.isArray(descriptor.fieldDetails)) {
+    for (const field of descriptor.fieldDetails) collect(field, true)
+  }
+  return { fieldIds, fieldDetailsById }
+}
+
+function addInvalidField(invalidFields, descriptorId, fieldId, message) {
+  if (!invalidFields[descriptorId]) invalidFields[descriptorId] = {}
+  if (!invalidFields[descriptorId][fieldId]) invalidFields[descriptorId][fieldId] = []
+  invalidFields[descriptorId][fieldId].push(message)
+}
+
 function assertStagingDescriptors(body) {
   const data = body && body.data ? body.data : body
   if (!Array.isArray(data)) {
@@ -369,34 +398,48 @@ function assertStagingDescriptors(body) {
     }
   }
   const missingFields = {}
+  const invalidFields = {}
   let fieldsChecked = 0
+  let fieldDetailsChecked = 0
   for (const id of REQUIRED_STAGING_DESCRIPTORS) {
     const descriptor = descriptorsById.get(id)
-    const fieldIds = new Set(
-      Array.isArray(descriptor.fields)
-        ? descriptor.fields
-          .map((field) => {
-            if (typeof field === 'string') return field
-            if (field && typeof field.id === 'string') return field.id
-            return ''
-          })
-          .filter(Boolean)
-        : [],
-    )
-    const requiredFields = REQUIRED_STAGING_FIELDS[id] || []
+    const { fieldIds, fieldDetailsById } = collectDescriptorFields(descriptor)
+    const requiredFieldDetails = REQUIRED_STAGING_FIELD_DETAILS[id] || {}
+    const requiredFields = Object.keys(requiredFieldDetails)
     fieldsChecked += requiredFields.length
     const missing = requiredFields.filter((fieldId) => !fieldIds.has(fieldId))
     if (missing.length > 0) missingFields[id] = missing
+
+    for (const [fieldId, expected] of Object.entries(requiredFieldDetails)) {
+      const detail = fieldDetailsById.get(fieldId)
+      if (!detail) {
+        addInvalidField(invalidFields, id, fieldId, 'missing field detail')
+        continue
+      }
+      fieldDetailsChecked += 1
+      if (detail.type !== expected.type) {
+        addInvalidField(invalidFields, id, fieldId, `expected type ${expected.type} but got ${detail.type || 'missing'}`)
+      }
+      if (Array.isArray(expected.options)) {
+        const actualOptions = Array.isArray(detail.options) ? new Set(detail.options.map(String)) : new Set()
+        const missingOptions = expected.options.filter((option) => !actualOptions.has(option))
+        if (missingOptions.length > 0) {
+          addInvalidField(invalidFields, id, fieldId, `missing options: ${missingOptions.join(', ')}`)
+        }
+      }
+    }
   }
-  if (Object.keys(missingFields).length > 0) {
-    throw new K3WisePostdeploySmokeError('staging descriptors are missing required fields', {
+  if (Object.keys(missingFields).length > 0 || Object.keys(invalidFields).length > 0) {
+    throw new K3WisePostdeploySmokeError('staging descriptors do not match required field contract', {
       missingFields,
+      invalidFields,
     })
   }
   return {
     descriptors: ids,
     descriptorsChecked: REQUIRED_STAGING_DESCRIPTORS.length,
     fieldsChecked,
+    fieldDetailsChecked,
   }
 }
 

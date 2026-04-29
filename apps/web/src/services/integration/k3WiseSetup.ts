@@ -106,6 +106,12 @@ export interface IntegrationStagingDescriptor {
   id: string
   name: string
   fields: string[]
+  fieldDetails?: Array<{
+    id: string
+    name: string
+    type: string
+    options?: string[]
+  }>
 }
 
 export interface IntegrationStagingInstallResult {

@@ -201,7 +201,15 @@ function createMockServices(overrides = {}) {
       listStagingDescriptors() {
         calls.push(['listStagingDescriptors'])
         return [
-          { id: 'standard_materials', name: 'Standard Materials', fields: ['code', 'name'] },
+          {
+            id: 'standard_materials',
+            name: 'Standard Materials',
+            fields: ['code', 'name'],
+            fieldDetails: [
+              { id: 'code', name: 'Material Code', type: 'string' },
+              { id: 'name', name: 'Material Name', type: 'string' },
+            ],
+          },
           { id: 'bom_cleanse', name: 'BOM Cleanse', fields: ['parentCode', 'childCode'] },
         ]
       },
@@ -633,6 +641,11 @@ async function testStagingRoutes() {
   })
   assertOkResponse(res, 200)
   assert.deepEqual(res.body.data.map((item) => item.id), ['standard_materials', 'bom_cleanse'])
+  assert.deepEqual(res.body.data[0].fieldDetails[0], {
+    id: 'code',
+    name: 'Material Code',
+    type: 'string',
+  })
   assert.equal(findCalls(calls, 'listStagingDescriptors').length, 1)
 
   res = await invoke(routes, 'POST', '/api/integration/staging/install', {
