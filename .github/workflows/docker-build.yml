@@ -369,13 +369,19 @@ jobs:
         env:
           METASHEET_BASE_URL: ${{ vars.METASHEET_BASE_URL || vars.PUBLIC_APP_URL || 'http://142.171.239.56:8081' }}
           METASHEET_AUTH_TOKEN: ${{ secrets.METASHEET_K3WISE_SMOKE_TOKEN }}
+          METASHEET_TENANT_ID: ${{ vars.METASHEET_TENANT_ID || '' }}
         run: |
           set -euo pipefail
           smoke_out_dir="output/deploy/k3wise-postdeploy-smoke"
           rm -rf "$smoke_out_dir"
-          node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
-            --base-url "$METASHEET_BASE_URL" \
+          args=(
+            --base-url "$METASHEET_BASE_URL"
             --out-dir "$smoke_out_dir"
+          )
+          if [[ -n "${METASHEET_TENANT_ID:-}" ]]; then
+            args+=(--tenant-id "$METASHEET_TENANT_ID")
+          fi
+          node scripts/ops/integration-k3wise-postdeploy-smoke.mjs "${args[@]}"
 
       - name: Write deploy summary (preflight + runbooks)
         if: always()
