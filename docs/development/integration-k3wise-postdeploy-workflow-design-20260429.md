@@ -26,9 +26,21 @@ If repository secret `METASHEET_K3WISE_SMOKE_TOKEN` is configured, the same step
 
 - `/api/auth/me`
 - `/api/integration/status`
+- `/api/integration/external-systems?tenantId=<tenant>&limit=1`
+- `/api/integration/pipelines?tenantId=<tenant>&limit=1`
+- `/api/integration/runs?tenantId=<tenant>&limit=1`
+- `/api/integration/dead-letters?tenantId=<tenant>&limit=1`
 - `/api/integration/staging/descriptors`
 
-The workflow does not pass `--require-auth`; missing auth is acceptable for the baseline deploy gate. A bad configured token still fails the smoke because the script treats supplied auth as strict.
+The deploy workflow reads optional repo variable `METASHEET_TENANT_ID` and passes
+it as `--tenant-id` when non-empty. The manual `K3 WISE Postdeploy Smoke`
+workflow can also receive `tenant_id` as an input and falls back to the same repo
+variable.
+
+The deploy workflow does not pass `--require-auth`; missing auth is acceptable
+for the baseline deploy gate. A bad configured token still fails the smoke
+because the script treats supplied auth as strict. The manual workflow can set
+`require_auth=true` for operator signoff runs.
 
 ## Failure Behavior
 

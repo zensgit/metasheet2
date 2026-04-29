@@ -15,6 +15,10 @@ on:
         options:
           - 'false'
           - 'true'
+      tenant_id:
+        description: 'Optional tenantId for authenticated control-plane list probes'
+        required: false
+        default: ''
       timeout_ms:
         description: 'Per-request timeout in milliseconds'
         required: false
@@ -35,6 +39,7 @@ jobs:
         env:
           METASHEET_BASE_URL: ${{ github.event.inputs.base_url || 'http://142.171.239.56:8081' }}
           METASHEET_AUTH_TOKEN: ${{ secrets.METASHEET_K3WISE_SMOKE_TOKEN }}
+          METASHEET_TENANT_ID: ${{ github.event.inputs.tenant_id || vars.METASHEET_TENANT_ID || '' }}
           REQUIRE_AUTH: ${{ github.event.inputs.require_auth || 'false' }}
           TIMEOUT_MS: ${{ github.event.inputs.timeout_ms || '10000' }}
         run: |
@@ -50,6 +55,9 @@ jobs:
           )
           if [[ "$REQUIRE_AUTH" == "true" ]]; then
             args+=(--require-auth)
+          fi
+          if [[ -n "${METASHEET_TENANT_ID:-}" ]]; then
+            args+=(--tenant-id "$METASHEET_TENANT_ID")
           fi
 
           set +e

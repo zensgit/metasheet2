@@ -27,9 +27,18 @@ Authenticated checks run only when a bearer token is provided:
 
 - `GET /api/auth/me`: supplied token is valid.
 - `GET /api/integration/status`: required K3 adapter kinds and integration API routes are registered.
+- `GET /api/integration/external-systems?tenantId=<tenant>&limit=1`: read-only external-system list endpoint is reachable.
+- `GET /api/integration/pipelines?tenantId=<tenant>&limit=1`: read-only pipeline list endpoint is reachable.
+- `GET /api/integration/runs?tenantId=<tenant>&limit=1`: read-only run-log list endpoint is reachable.
+- `GET /api/integration/dead-letters?tenantId=<tenant>&limit=1`: read-only dead-letter list endpoint is reachable.
 - `GET /api/integration/staging/descriptors`: required K3 PoC staging descriptors exist.
 
 Some deployments protect `/api/integration/*` behind auth. In that case, an unauthenticated `401` or `403` from `/api/integration/health` is reported as `skipped`, not as a deploy failure. Supplying `--auth-token` or `--token-file` makes the plugin health check strict.
+
+Tenant scope is optional but recommended for authenticated runs. If `--tenant-id`
+is omitted, the script derives tenant scope from `/api/auth/me` when the token
+claims include it. If neither source has a tenant, the list probes still run with
+`limit=1` and no `tenantId` query parameter.
 
 ## CLI Contract
 
@@ -45,6 +54,7 @@ Optional auth:
 node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
   --base-url "$METASHEET_BASE_URL" \
   --token-file "$METASHEET_AUTH_TOKEN_FILE" \
+  --tenant-id "$METASHEET_TENANT_ID" \
   --require-auth
 ```
 
@@ -53,6 +63,7 @@ Supported environment fallbacks:
 - `METASHEET_BASE_URL`, `PUBLIC_APP_URL`
 - `METASHEET_AUTH_TOKEN`, `ADMIN_TOKEN`, `AUTH_TOKEN`
 - `METASHEET_AUTH_TOKEN_FILE`, `AUTH_TOKEN_FILE`
+- `METASHEET_TENANT_ID`, `TENANT_ID`
 
 ## Safety
 
