@@ -1,5 +1,5 @@
 /**
- * MF2 batch-1 field types — currency / percent / rating / url / email / phone.
+ * MF2/MF3 field types — currency / percent / rating / url / email / phone / longText.
  *
  * Covers:
  *   - mapFieldType: each new type is recognised (not falling through to 'string').
@@ -24,6 +24,7 @@ import {
   sanitizeFieldProperty,
   serializeFieldRow,
   validateEmailValue,
+  validateLongTextValue,
   validatePhoneValue,
   validateUrlValue,
 } from '../../src/multitable/field-codecs'
@@ -47,6 +48,13 @@ describe('mapFieldType — MF2 batch-1', () => {
     expect(mapFieldType('string')).toBe('string')
     expect(mapFieldType('number')).toBe('number')
     expect(mapFieldType('select')).toBe('select')
+  })
+
+  it('recognises longText aliases without falling back to string', () => {
+    expect(mapFieldType('longText')).toBe('longText')
+    expect(mapFieldType('long_text')).toBe('longText')
+    expect(mapFieldType('textarea')).toBe('longText')
+    expect(mapFieldType('multi_line_text')).toBe('longText')
   })
 
   it('exposes BATCH1_FIELD_TYPES set with all 6 names', () => {
@@ -129,6 +137,18 @@ describe('sanitizeFieldProperty — url / email / phone', () => {
   })
 })
 
+describe('sanitizeFieldProperty — longText', () => {
+  it('preserves validation config for multiline text', () => {
+    expect(sanitizeFieldProperty('longText', {
+      validation: [{ type: 'maxLength', params: { value: 2000 } }],
+      placeholder: 'Paste notes',
+    })).toEqual({
+      validation: [{ type: 'maxLength', params: { value: 2000 } }],
+      placeholder: 'Paste notes',
+    })
+  })
+})
+
 describe('serializeFieldRow — batch-1 round-trip', () => {
   it('persists currency type + property', () => {
     const row = {
@@ -153,6 +173,20 @@ describe('serializeFieldRow — batch-1 round-trip', () => {
     })
     expect(serialized.type).toBe('rating')
     expect(serialized.property).toEqual({ max: 7 })
+  })
+
+  it('persists longText type + property', () => {
+    const serialized = serializeFieldRow({
+      id: 'fld_notes',
+      name: 'Notes',
+      type: 'long_text',
+      property: { validation: [{ type: 'maxLength', params: { value: 5000 } }] },
+      order: 2,
+    })
+    expect(serialized.type).toBe('longText')
+    expect(serialized.property).toEqual({
+      validation: [{ type: 'maxLength', params: { value: 5000 } }],
+    })
   })
 })
 
@@ -284,6 +318,21 @@ describe('validatePhoneValue', () => {
 
   it('returns null for empty', () => {
     expect(validatePhoneValue('', 'fld')).toBeNull()
+  })
+})
+
+describe('validateLongTextValue', () => {
+  it('preserves multiline strings exactly', () => {
+    expect(validateLongTextValue('line 1\n  line 2\n', 'fld_notes')).toBe('line 1\n  line 2\n')
+  })
+
+  it('returns null for empty input', () => {
+    expect(validateLongTextValue(null, 'fld_notes')).toBeNull()
+    expect(validateLongTextValue('', 'fld_notes')).toBeNull()
+  })
+
+  it('rejects non-string input', () => {
+    expect(() => validateLongTextValue(['line'], 'fld_notes')).toThrow(/Long text value must be a string/)
   })
 })
 

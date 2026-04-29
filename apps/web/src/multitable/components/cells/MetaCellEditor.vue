@@ -6,7 +6,7 @@
       ref="inputRef"
       class="meta-cell-editor__input"
       type="date"
-      :value="modelValue ?? ''"
+      :value="textControlValue(modelValue)"
       @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
       @keydown.enter="emit('confirm')"
       @keydown.escape="emit('cancel')"
@@ -17,7 +17,7 @@
       ref="inputRef"
       class="meta-cell-editor__input"
       type="date"
-      :value="modelValue ?? ''"
+      :value="textControlValue(modelValue)"
       @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
       @keydown.enter="emit('confirm')"
       @keydown.escape="emit('cancel')"
@@ -40,6 +40,19 @@
         :users="yjsCollaborators"
       />
     </div>
+
+    <!-- longText: multiline REST editor -->
+    <textarea
+      v-else-if="field.type === 'longText'"
+      ref="inputRef"
+      class="meta-cell-editor__textarea"
+      rows="4"
+      :value="textControlValue(modelValue)"
+      @input="emit('update:modelValue', ($event.target as HTMLTextAreaElement).value)"
+      @keydown.meta.enter.prevent="emit('confirm')"
+      @keydown.ctrl.enter.prevent="emit('confirm')"
+      @keydown.escape="emit('cancel')"
+    />
 
     <!-- number -->
     <input
@@ -251,6 +264,10 @@ const emit = defineEmits<{
    */
   (e: 'yjs-commit'): void
 }>()
+
+function textControlValue(value: unknown): string {
+  return value === null || value === undefined ? '' : String(value)
+}
 
 // --- Yjs opt-in binding (text cells only; inert when flag off) ---
 // See useYjsCellBinding for flag gating + timeout + fallback. The editor
@@ -489,6 +506,10 @@ onMounted(() => {
 .meta-cell-editor__input {
   width: 100%; padding: 2px 6px; border: 1px solid #409eff; border-radius: 3px;
   font-size: 13px; outline: none;
+}
+.meta-cell-editor__textarea {
+  width: 100%; min-height: 88px; padding: 6px 8px; border: 1px solid #409eff; border-radius: 4px;
+  font-size: 13px; line-height: 1.45; outline: none; resize: vertical; white-space: pre-wrap;
 }
 .meta-cell-editor__presence {
   flex-shrink: 0;

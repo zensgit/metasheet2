@@ -12,6 +12,7 @@ import {
   extractSelectOptions,
   normalizeJson,
   normalizeJsonArray,
+  validateLongTextValue,
   type MultitableField,
 } from './field-codecs'
 import { getDefaultValidationRules, validateRecord } from './field-validation-engine'
@@ -51,10 +52,8 @@ type CreateFieldGuard = {
   options?: string[]
   link?: LinkFieldConfig | null
   /**
-   * Sanitized property (currency.code/decimals, percent.decimals,
-   * rating.max). Carried only for the MF2 batch-1 field types so the
-   * coercion helper in `field-codecs` can read the constraints without
-   * re-fetching the field row.
+   * Sanitized property carried for types whose write path or validation
+   * needs field-level configuration.
    */
   property?: Record<string, unknown>
 }
@@ -198,6 +197,16 @@ function mapFieldType(type: string): UniverMetaField['type'] {
   if (normalized === 'lookup') return 'lookup'
   if (normalized === 'rollup') return 'rollup'
   if (normalized === 'attachment') return 'attachment'
+  if (
+    normalized === 'longtext' ||
+    normalized === 'long_text' ||
+    normalized === 'long-text' ||
+    normalized === 'textarea' ||
+    normalized === 'multi_line_text' ||
+    normalized === 'multiline'
+  ) {
+    return 'longText'
+  }
   return 'string'
 }
 
@@ -438,6 +447,15 @@ export class RecordService {
       if (field.type === 'formula') {
         if (typeof value !== 'string') continue
         if (value !== '' && !value.startsWith('=')) continue
+      }
+
+      if (field.type === 'longText') {
+        try {
+          patch[fieldId] = validateLongTextValue(value, fieldId)
+        } catch (error) {
+          throw new RecordValidationError(error instanceof Error ? error.message : String(error))
+        }
+        continue
       }
 
       if (BATCH1_FIELD_TYPES.has(field.type)) {
@@ -692,6 +710,14 @@ export class RecordService {
           fieldErrors[fieldId] = 'Formula must start with ='
           continue
         }
+      }
+      if (field.type === 'longText') {
+        try {
+          patch[fieldId] = validateLongTextValue(value, fieldId)
+        } catch (error) {
+          fieldErrors[fieldId] = error instanceof Error ? error.message : String(error)
+        }
+        continue
       }
       patch[fieldId] = value
     }

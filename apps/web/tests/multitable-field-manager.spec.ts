@@ -466,6 +466,37 @@ describe('MetaFieldManager', () => {
     app.unmount()
   })
 
+  it('renders the text validation panel for longText fields', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaFieldManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          sheets: [],
+          fields: [
+            { id: 'fld_notes', name: 'Notes', type: 'longText', property: {} },
+          ],
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    ;(container.querySelector('.meta-field-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await nextTick()
+
+    expect(container.querySelector('.meta-field-mgr__validation')).not.toBeNull()
+    expect(container.querySelector('[data-rule-type="minLength"]')).not.toBeNull()
+    expect(container.querySelector('[data-rule-type="pattern"]')).not.toBeNull()
+    expect(container.querySelector('[data-rule-type="min"]')).toBeNull()
+
+    app.unmount()
+  })
+
   it('hydrates stored engine-shape validation rules into the panel when opening', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)

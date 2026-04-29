@@ -20,6 +20,7 @@ export type MetaFieldType =
   | 'url'
   | 'email'
   | 'phone'
+  | 'longText'
 
 export type MetaFieldCreateType = MetaFieldType | 'person'
 

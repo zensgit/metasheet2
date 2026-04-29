@@ -2321,7 +2321,8 @@
               "link",
               "lookup",
               "rollup",
-              "attachment"
+              "attachment",
+              "longText"
             ]
           },
           "property": {
@@ -17466,7 +17467,8 @@
                       "link",
                       "lookup",
                       "rollup",
-                      "attachment"
+                      "attachment",
+                      "longText"
                     ]
                   },
                   "property": {
@@ -17577,7 +17579,8 @@
                       "link",
                       "lookup",
                       "rollup",
-                      "attachment"
+                      "attachment",
+                      "longText"
                     ]
                   },
                   "property": {

@@ -10,6 +10,54 @@ async function flushUi(cycles = 4) {
 }
 
 describe('MetaFormView attachment flow', () => {
+  it('renders longText as textarea and submits multiline values unchanged', async () => {
+    const submitSpy = vi.fn()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaFormView, {
+          fields: [
+            { id: 'fld_notes', name: 'Notes', type: 'longText' },
+          ],
+          record: {
+            id: 'rec_1',
+            version: 1,
+            data: {
+              fld_notes: 'line 1',
+            },
+          },
+          loading: false,
+          readOnly: false,
+          onSubmit: submitSpy,
+          onOpenLinkPicker: vi.fn(),
+        })
+      },
+    })
+
+    app.mount(container)
+    await flushUi()
+
+    const textarea = container.querySelector('#field_fld_notes') as HTMLTextAreaElement | null
+    expect(textarea).not.toBeNull()
+    expect(textarea?.tagName).toBe('TEXTAREA')
+    textarea!.value = 'line 1\nline 2\n'
+    textarea!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    const form = container.querySelector('form') as HTMLFormElement | null
+    form?.dispatchEvent(new Event('submit'))
+    await flushUi()
+
+    expect(submitSpy).toHaveBeenCalledWith({
+      fld_notes: 'line 1\nline 2\n',
+    })
+
+    app.unmount()
+    container.remove()
+  })
+
   it('hides non-visible fields and disables read-only scoped fields', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)

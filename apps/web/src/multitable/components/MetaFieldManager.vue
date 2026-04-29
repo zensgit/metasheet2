@@ -309,10 +309,10 @@ import {
 import MetaFieldValidationPanel from './MetaFieldValidationPanel.vue'
 
 /** Field types where the validation panel is configurable. */
-const VALIDATION_PANEL_TYPES: ReadonlySet<string> = new Set(['string', 'number', 'select'])
+const VALIDATION_PANEL_TYPES: ReadonlySet<string> = new Set(['string', 'longText', 'number', 'select'])
 
 function mapTypeForValidationPanel(fieldType: string): 'text' | 'number' | 'select' {
-  if (fieldType === 'string') return 'text'
+  if (fieldType === 'string' || fieldType === 'longText') return 'text'
   if (fieldType === 'number') return 'number'
   return 'select'
 }
@@ -397,12 +397,12 @@ function rulesToProperty(rules: FieldValidationRule[]): Array<Record<string, unk
 }
 
 const FIELD_TYPES: MetaFieldCreateType[] = [
-  'string', 'number', 'boolean', 'date', 'select', 'link', 'person',
+  'string', 'longText', 'number', 'boolean', 'date', 'select', 'link', 'person',
   'formula', 'lookup', 'rollup', 'attachment',
   'currency', 'percent', 'rating', 'url', 'email', 'phone',
 ]
 const FIELD_ICONS: Record<string, string> = {
-  string: 'Aa', number: '#', boolean: '\u2611', date: '\u{1F4C5}', select: '\u25CF',
+  string: 'Aa', longText: '\u00B6', number: '#', boolean: '\u2611', date: '\u{1F4C5}', select: '\u25CF',
   link: '\u21C4', person: '\u{1F464}', lookup: '\u2197', rollup: '\u03A3', formula: 'fx', attachment: '\uD83D\uDCCE',
   currency: '\u00A4', percent: '%', rating: '\u2605', url: '\u{1F517}', email: '\u2709', phone: '\u260E',
 }
@@ -535,7 +535,7 @@ function onValidationRulesChange(rules: FieldValidationRule[]) {
 function requiresConfig(type: MetaFieldCreateType): boolean {
   return [
     'select', 'link', 'person', 'lookup', 'rollup', 'formula', 'attachment',
-    'currency', 'percent', 'rating',
+    'currency', 'percent', 'rating', 'longText',
   ].includes(type)
 }
 
@@ -626,7 +626,7 @@ function serializeFieldDraft(type: string | null): string {
   if (type === 'rating') {
     return JSON.stringify({ max: ratingDraft.max })
   }
-  if (type === 'string' || type === 'number') {
+  if (type === 'string' || type === 'longText' || type === 'number') {
     return JSON.stringify({ validation })
   }
   return ''
@@ -874,7 +874,7 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
     }
     return { max: Math.round(max) }
   }
-  if (type === 'string' || type === 'number') {
+  if (type === 'string' || type === 'longText' || type === 'number') {
     return { ...validationProperty }
   }
   return undefined
@@ -927,7 +927,7 @@ function saveConfig() {
   // an empty `property: {}` would otherwise clobber existing values on
   // the server. Types with mandatory structural config (select/link/
   // lookup/rollup/formula/attachment) always have keys to persist.
-  const onlyValidationSurface = (fieldType === 'string' || fieldType === 'number')
+  const onlyValidationSurface = (fieldType === 'string' || fieldType === 'longText' || fieldType === 'number')
   if (onlyValidationSurface && !validationDraftTouched.value) {
     closeConfig()
     return

@@ -236,6 +236,7 @@ export function getDefaultValidationRules(
 ): FieldValidationConfig {
   switch (fieldType) {
     case 'string':
+    case 'longText':
       return [{ type: 'maxLength', params: { value: 10000 } }]
     case 'select': {
       const options = fieldProperty?.options
