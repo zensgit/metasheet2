@@ -19,6 +19,15 @@ const SQL_MODE_ALIASES = new Map([
   ['stored_procedure', 'stored-procedure'],
 ])
 const SQL_MODES = new Set(['readonly', 'middle-table', 'stored-procedure'])
+const MATERIAL_REQUIRED_TARGET_FIELDS = [
+  { label: 'K3 material code', targets: ['FNumber'] },
+  { label: 'K3 material name', targets: ['FName'] },
+]
+const BOM_REQUIRED_TARGET_FIELDS = [
+  { label: 'K3 BOM parent material', targets: ['FParentItemNumber'] },
+  { label: 'K3 BOM child material', targets: ['FChildItems[].FItemNumber', 'FChildItemNumber', 'FItemNumber'] },
+  { label: 'K3 BOM child quantity', targets: ['FChildItems[].FQty', 'FQty'] },
+]
 
 class LivePocPreflightError extends Error {
   constructor(message, details = {}) {
@@ -124,6 +133,41 @@ function assertK3AuthContract(k3Wise) {
       field: 'k3Wise.credentials',
       accepted: ['sessionId', 'username+password'],
     })
+  }
+}
+
+function normalizeTargetPath(value) {
+  return String(value)
+    .trim()
+    .replace(/\[\]/g, '')
+    .replace(/\s+/g, '')
+    .toLowerCase()
+}
+
+function collectTargetFields(mappings, field) {
+  return mappings.map((mapping, index) => {
+    if (!isPlainObject(mapping)) {
+      throw new LivePocPreflightError(`${field}[${index}] must be an object`, {
+        field,
+        index,
+      })
+    }
+    return requiredString(mapping.targetField, `${field}[${index}].targetField`)
+  })
+}
+
+function assertRequiredTargetFields(mappings, requirements, field) {
+  const targetFields = collectTargetFields(mappings, field)
+  const normalizedTargets = new Set(targetFields.map(normalizeTargetPath))
+  for (const requirement of requirements) {
+    const acceptedTargets = requirement.targets.map(normalizeTargetPath)
+    if (!acceptedTargets.some((target) => normalizedTargets.has(target))) {
+      throw new LivePocPreflightError(`${field} must map ${requirement.label}`, {
+        field,
+        requiredTargetFields: requirement.targets,
+        targetFields,
+      })
+    }
   }
 }
 
@@ -249,6 +293,16 @@ function normalizeGate(input) {
     throw new LivePocPreflightError('fieldMappings.material must contain at least one mapping', {
       field: 'fieldMappings.material',
     })
+  }
+  assertRequiredTargetFields(materialMappings, MATERIAL_REQUIRED_TARGET_FIELDS, 'fieldMappings.material')
+  if (bomEnabled) {
+    const bomMappings = optionalArray(fieldMappings.bom, 'fieldMappings.bom')
+    if (bomMappings.length === 0) {
+      throw new LivePocPreflightError('fieldMappings.bom must contain at least one mapping when BOM PoC is enabled', {
+        field: 'fieldMappings.bom',
+      })
+    }
+    assertRequiredTargetFields(bomMappings, BOM_REQUIRED_TARGET_FIELDS, 'fieldMappings.bom')
   }
 
   requiredString(k3Wise.version, 'k3Wise.version')
