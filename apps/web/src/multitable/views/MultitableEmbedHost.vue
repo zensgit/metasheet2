@@ -36,7 +36,7 @@ const props = defineProps<{
   commentId?: string
   fieldId?: string
   openComments?: boolean
-  mode?: string // force view type: grid | form | kanban | gallery | calendar
+  mode?: string // force view type: grid | form | kanban | gallery | calendar | timeline | gantt | hierarchy
   embedded?: boolean
   role?: MultitableRole
   primaryColor?: string
