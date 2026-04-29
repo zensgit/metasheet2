@@ -20,6 +20,12 @@ const REQUIRED_ROUTES = [
   ['GET', '/api/integration/staging/descriptors'],
   ['POST', '/api/integration/staging/install'],
 ]
+const CONTROL_PLANE_LIST_PROBES = [
+  ['integration-list-external-systems', '/api/integration/external-systems'],
+  ['integration-list-pipelines', '/api/integration/pipelines'],
+  ['integration-list-runs', '/api/integration/runs'],
+  ['integration-list-dead-letters', '/api/integration/dead-letters'],
+]
 const TOKEN_PATTERN = /([A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._-]{16,})/g
 
 class K3WisePostdeploySmokeError extends Error {
@@ -41,6 +47,7 @@ Options:
   --base-url <url>       MetaSheet base URL, default ${DEFAULT_BASE_URL}
   --auth-token <token>   Optional bearer token for authenticated checks
   --token-file <path>    Optional file containing bearer token
+  --tenant-id <id>       Optional tenant scope for authenticated list probes
   --require-auth         Fail when no token is supplied or auth checks are skipped
   --out-dir <dir>        Output directory, default ${DEFAULT_OUTPUT_ROOT}/<timestamp>
   --timeout-ms <ms>      Per-request timeout, default 10000
@@ -50,6 +57,7 @@ Environment fallbacks:
   METASHEET_BASE_URL, PUBLIC_APP_URL
   METASHEET_AUTH_TOKEN, ADMIN_TOKEN, AUTH_TOKEN
   METASHEET_AUTH_TOKEN_FILE, AUTH_TOKEN_FILE
+  METASHEET_TENANT_ID, TENANT_ID
 `)
 }
 
@@ -74,6 +82,7 @@ function parseArgs(argv = process.argv.slice(2)) {
     baseUrl: envValue('METASHEET_BASE_URL', 'PUBLIC_APP_URL') || DEFAULT_BASE_URL,
     authToken: envValue('METASHEET_AUTH_TOKEN', 'ADMIN_TOKEN', 'AUTH_TOKEN'),
     tokenFile: envValue('METASHEET_AUTH_TOKEN_FILE', 'AUTH_TOKEN_FILE'),
+    tenantId: envValue('METASHEET_TENANT_ID', 'TENANT_ID'),
     requireAuth: false,
     outDir: '',
     timeoutMs: 10_000,
@@ -93,6 +102,10 @@ function parseArgs(argv = process.argv.slice(2)) {
         break
       case '--token-file':
         opts.tokenFile = readRequiredValue(argv, i, arg)
+        i += 1
+        break
+      case '--tenant-id':
+        opts.tenantId = readRequiredValue(argv, i, arg)
         i += 1
         break
       case '--require-auth':
@@ -199,6 +212,15 @@ async function requestJson(baseUrl, pathname, { token = '', timeoutMs = 10_000, 
   return { status: response.status, body: sanitizeBody(body) }
 }
 
+function withQuery(pathname, query = {}) {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== null && value !== '') params.set(key, String(value))
+  }
+  const search = params.toString()
+  return search ? `${pathname}?${search}` : pathname
+}
+
 async function requestText(baseUrl, pathname, { timeoutMs = 10_000 } = {}) {
   const response = await fetchWithTimeout(`${baseUrl}${pathname}`, {
     headers: { Accept: 'text/html,application/xhtml+xml' },
@@ -262,6 +284,29 @@ function assertStagingDescriptors(body) {
   return { descriptors: ids }
 }
 
+function assertListResponse(body, probeId) {
+  const data = body && body.data !== undefined ? body.data : body
+  if (!Array.isArray(data)) {
+    throw new K3WisePostdeploySmokeError(`${probeId} response data must be an array`, {
+      received: Array.isArray(data) ? 'array' : typeof data,
+    })
+  }
+  return { rows: data.length }
+}
+
+function extractTenantId(authBody) {
+  const candidates = [
+    authBody?.tenantId,
+    authBody?.user?.tenantId,
+    authBody?.data?.tenantId,
+    authBody?.data?.user?.tenantId,
+  ]
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim()
+  }
+  return ''
+}
+
 async function runSmoke(opts) {
   const token = await readToken(opts)
   const checks = []
@@ -323,12 +368,15 @@ async function runSmoke(opts) {
     })
     checks.push(skipped)
   } else {
+    let tenantId = opts.tenantId
     try {
       const me = await requestJson(opts.baseUrl, '/api/auth/me', { token, timeoutMs: opts.timeoutMs })
       const user = me.body?.user || me.body?.data?.user || me.body?.data || {}
+      tenantId = tenantId || extractTenantId(me.body)
       checks.push(result('auth-me', 'pass', {
         userId: user.id || user.userId || null,
         role: user.role || null,
+        tenantId: tenantId || null,
       }))
     } catch (error) {
       checks.push(failResult('auth-me', error))
@@ -339,6 +387,22 @@ async function runSmoke(opts) {
       checks.push(result('integration-route-contract', 'pass', assertStatusRoutes(status.body)))
     } catch (error) {
       checks.push(failResult('integration-route-contract', error))
+    }
+
+    for (const [id, pathname] of CONTROL_PLANE_LIST_PROBES) {
+      try {
+        const response = await requestJson(opts.baseUrl, withQuery(pathname, {
+          tenantId,
+          limit: 1,
+        }), { token, timeoutMs: opts.timeoutMs })
+        checks.push(result(id, 'pass', {
+          path: pathname,
+          tenantId: tenantId || null,
+          ...assertListResponse(response.body, id),
+        }))
+      } catch (error) {
+        checks.push(failResult(id, error))
+      }
     }
 
     try {

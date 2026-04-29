@@ -99,7 +99,7 @@ function createFakeServer(options = {}) {
         sendJson(res, 401, { ok: false, error: { message: 'bad token' } })
         return
       }
-      sendJson(res, 200, { success: true, user: { id: 'admin_1', role: 'admin' } })
+      sendJson(res, 200, { success: true, user: { id: 'admin_1', role: 'admin', tenantId: 'tenant-smoke' } })
       return
     }
 
@@ -128,6 +128,27 @@ function createFakeServer(options = {}) {
           ].map(([method, routePath]) => ({ method, path: routePath })),
         },
       })
+      return
+    }
+
+    if (
+      req.method === 'GET' &&
+      [
+        '/api/integration/external-systems',
+        '/api/integration/pipelines',
+        '/api/integration/runs',
+        '/api/integration/dead-letters',
+      ].includes(url.pathname)
+    ) {
+      if (req.headers.authorization !== 'Bearer test.jwt.token') {
+        sendJson(res, 401, { ok: false, error: { message: 'bad token' } })
+        return
+      }
+      if (options.failControlPlanePath === url.pathname) {
+        sendJson(res, 500, { ok: false, error: { message: `${url.pathname} unavailable` } })
+        return
+      }
+      sendJson(res, 200, { ok: true, data: [] })
       return
     }
 
@@ -240,8 +261,52 @@ test('authenticated postdeploy smoke validates route and staging contracts witho
     assert.equal(evidence.authenticated, true)
     assert.equal(evidence.summary.fail, 0)
     assert.equal(evidence.checks.find((check) => check.id === 'integration-route-contract').status, 'pass')
+    for (const id of [
+      'integration-list-external-systems',
+      'integration-list-pipelines',
+      'integration-list-runs',
+      'integration-list-dead-letters',
+    ]) {
+      const check = evidence.checks.find((candidate) => candidate.id === id)
+      assert.equal(check.status, 'pass')
+      assert.equal(check.tenantId, 'tenant-smoke')
+    }
     assert.equal(evidence.checks.find((check) => check.id === 'staging-descriptor-contract').status, 'pass')
     assert.ok(fake.requests.some((request) => request.pathname === '/api/auth/me' && request.authorization === 'Bearer test.jwt.token'))
+    assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/external-systems'))
+    assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/pipelines'))
+    assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/runs'))
+    assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/dead-letters'))
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('authenticated postdeploy smoke fails when a read-only control-plane endpoint fails', async () => {
+  const fake = createFakeServer({ failControlPlanePath: '/api/integration/pipelines' })
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--auth-token', 'test.jwt.token',
+      '--require-auth',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 1)
+    assert.equal(result.stdout.includes('test.jwt.token'), false)
+    assert.equal(result.stderr.includes('test.jwt.token'), false)
+    const evidenceText = readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8')
+    assert.equal(evidenceText.includes('test.jwt.token'), false)
+    const evidence = JSON.parse(evidenceText)
+    assert.equal(evidence.ok, false)
+    assert.equal(evidence.summary.fail, 1)
+    assert.equal(evidence.checks.find((check) => check.id === 'integration-list-external-systems').status, 'pass')
+    const pipelinesCheck = evidence.checks.find((check) => check.id === 'integration-list-pipelines')
+    assert.equal(pipelinesCheck.status, 'fail')
+    assert.match(pipelinesCheck.error, /\/api\/integration\/pipelines\?tenantId=tenant-smoke&limit=1 returned HTTP 500/)
   } finally {
     await fake.close()
     rmSync(outDir, { recursive: true, force: true })
