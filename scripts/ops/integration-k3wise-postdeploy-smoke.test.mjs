@@ -32,76 +32,85 @@ const DEFAULT_ROUTES = [
   ['GET', '/api/integration/staging/descriptors'],
   ['POST', '/api/integration/staging/install'],
 ]
-const DEFAULT_STAGING_FIELDS = {
-  plm_raw_items: [
-    'sourceSystemId',
-    'objectType',
-    'sourceId',
-    'revision',
-    'code',
-    'name',
-    'rawPayload',
-    'fetchedAt',
-    'pipelineRunId',
-  ],
-  standard_materials: [
-    'code',
-    'name',
-    'uom',
-    'category',
-    'status',
-    'erpSyncStatus',
-    'erpExternalId',
-    'erpBillNo',
-    'erpResponseCode',
-    'erpResponseMessage',
-    'lastSyncedAt',
-  ],
-  bom_cleanse: [
-    'parentCode',
-    'childCode',
-    'quantity',
-    'uom',
-    'sequence',
-    'revision',
-    'validFrom',
-    'validTo',
-    'status',
-  ],
-  integration_exceptions: [
-    'pipelineId',
-    'runId',
-    'idempotencyKey',
-    'errorCode',
-    'errorMessage',
-    'sourcePayload',
-    'transformedPayload',
-    'status',
-    'assignee',
-    'note',
-  ],
-  integration_run_log: [
-    'pipelineId',
-    'runId',
-    'mode',
-    'triggeredBy',
-    'status',
-    'rowsRead',
-    'rowsCleaned',
-    'rowsWritten',
-    'rowsFailed',
-    'durationMs',
-    'startedAt',
-    'finishedAt',
-    'errorSummary',
-  ],
+const DEFAULT_STAGING_FIELD_DETAILS = {
+  plm_raw_items: {
+    sourceSystemId: { type: 'string' },
+    objectType: { type: 'string' },
+    sourceId: { type: 'string' },
+    revision: { type: 'string' },
+    code: { type: 'string' },
+    name: { type: 'string' },
+    rawPayload: { type: 'string' },
+    fetchedAt: { type: 'date' },
+    pipelineRunId: { type: 'string' },
+  },
+  standard_materials: {
+    code: { type: 'string' },
+    name: { type: 'string' },
+    uom: { type: 'string' },
+    category: { type: 'string' },
+    status: { type: 'select', options: ['draft', 'active', 'obsolete'] },
+    erpSyncStatus: { type: 'select', options: ['pending', 'synced', 'failed'] },
+    erpExternalId: { type: 'string' },
+    erpBillNo: { type: 'string' },
+    erpResponseCode: { type: 'string' },
+    erpResponseMessage: { type: 'string' },
+    lastSyncedAt: { type: 'date' },
+  },
+  bom_cleanse: {
+    parentCode: { type: 'string' },
+    childCode: { type: 'string' },
+    quantity: { type: 'number' },
+    uom: { type: 'string' },
+    sequence: { type: 'number' },
+    revision: { type: 'string' },
+    validFrom: { type: 'date' },
+    validTo: { type: 'date' },
+    status: { type: 'select', options: ['draft', 'active', 'obsolete'] },
+  },
+  integration_exceptions: {
+    pipelineId: { type: 'string' },
+    runId: { type: 'string' },
+    idempotencyKey: { type: 'string' },
+    errorCode: { type: 'string' },
+    errorMessage: { type: 'string' },
+    sourcePayload: { type: 'string' },
+    transformedPayload: { type: 'string' },
+    status: { type: 'select', options: ['open', 'in_review', 'replayed', 'discarded'] },
+    assignee: { type: 'string' },
+    note: { type: 'string' },
+  },
+  integration_run_log: {
+    pipelineId: { type: 'string' },
+    runId: { type: 'string' },
+    mode: { type: 'select', options: ['incremental', 'full', 'manual', 'replay'] },
+    triggeredBy: { type: 'string' },
+    status: { type: 'select', options: ['pending', 'running', 'succeeded', 'partial', 'failed', 'cancelled'] },
+    rowsRead: { type: 'number' },
+    rowsCleaned: { type: 'number' },
+    rowsWritten: { type: 'number' },
+    rowsFailed: { type: 'number' },
+    durationMs: { type: 'number' },
+    startedAt: { type: 'date' },
+    finishedAt: { type: 'date' },
+    errorSummary: { type: 'string' },
+  },
+}
+const DEFAULT_STAGING_FIELDS = Object.fromEntries(
+  Object.entries(DEFAULT_STAGING_FIELD_DETAILS).map(([descriptorId, fields]) => [descriptorId, Object.keys(fields)]),
+)
+function makeFieldDetails(descriptorId) {
+  return Object.entries(DEFAULT_STAGING_FIELD_DETAILS[descriptorId]).map(([id, detail]) => ({
+    id,
+    ...detail,
+  }))
 }
 const DEFAULT_STAGING_DESCRIPTORS = [
-  { id: 'plm_raw_items', name: 'PLM Raw Items', fields: DEFAULT_STAGING_FIELDS.plm_raw_items },
-  { id: 'standard_materials', name: 'Standard Materials', fields: DEFAULT_STAGING_FIELDS.standard_materials },
-  { id: 'bom_cleanse', name: 'BOM Cleanse', fields: DEFAULT_STAGING_FIELDS.bom_cleanse },
-  { id: 'integration_exceptions', name: 'Integration Exceptions', fields: DEFAULT_STAGING_FIELDS.integration_exceptions },
-  { id: 'integration_run_log', name: 'Integration Run Log', fields: DEFAULT_STAGING_FIELDS.integration_run_log },
+  { id: 'plm_raw_items', name: 'PLM Raw Items', fields: DEFAULT_STAGING_FIELDS.plm_raw_items, fieldDetails: makeFieldDetails('plm_raw_items') },
+  { id: 'standard_materials', name: 'Standard Materials', fields: DEFAULT_STAGING_FIELDS.standard_materials, fieldDetails: makeFieldDetails('standard_materials') },
+  { id: 'bom_cleanse', name: 'BOM Cleanse', fields: DEFAULT_STAGING_FIELDS.bom_cleanse, fieldDetails: makeFieldDetails('bom_cleanse') },
+  { id: 'integration_exceptions', name: 'Integration Exceptions', fields: DEFAULT_STAGING_FIELDS.integration_exceptions, fieldDetails: makeFieldDetails('integration_exceptions') },
+  { id: 'integration_run_log', name: 'Integration Run Log', fields: DEFAULT_STAGING_FIELDS.integration_run_log, fieldDetails: makeFieldDetails('integration_run_log') },
 ]
 
 function makeTmpDir() {
@@ -365,6 +374,7 @@ test('authenticated postdeploy smoke validates route and staging contracts witho
       stagingCheck.fieldsChecked,
       Object.values(DEFAULT_STAGING_FIELDS).reduce((sum, fields) => sum + fields.length, 0),
     )
+    assert.equal(stagingCheck.fieldDetailsChecked, stagingCheck.fieldsChecked)
     assert.ok(fake.requests.some((request) => request.pathname === '/api/auth/me' && request.authorization === 'Bearer test.jwt.token'))
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/external-systems'))
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/pipelines'))
@@ -571,6 +581,7 @@ test('authenticated postdeploy smoke fails when a required staging descriptor fi
       return {
         ...descriptor,
         fields: descriptor.fields.filter((fieldId) => fieldId !== 'erpSyncStatus'),
+        fieldDetails: descriptor.fieldDetails.filter((field) => field.id !== 'erpSyncStatus'),
       }
     }),
   })
@@ -588,9 +599,50 @@ test('authenticated postdeploy smoke fails when a required staging descriptor fi
     const evidence = JSON.parse(readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8'))
     const stagingCheck = evidence.checks.find((check) => check.id === 'staging-descriptor-contract')
     assert.equal(stagingCheck.status, 'fail')
-    assert.match(stagingCheck.error, /missing required fields/)
+    assert.match(stagingCheck.error, /required field contract/)
     assert.deepEqual(stagingCheck.details.missingFields, {
       standard_materials: ['erpSyncStatus'],
+    })
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('authenticated postdeploy smoke fails when a required staging field detail is wrong', async () => {
+  const fake = createFakeServer({
+    stagingDescriptors: DEFAULT_STAGING_DESCRIPTORS.map((descriptor) => {
+      if (descriptor.id !== 'standard_materials') return descriptor
+      return {
+        ...descriptor,
+        fieldDetails: descriptor.fieldDetails.map((field) => {
+          if (field.id !== 'status') return field
+          return { ...field, type: 'string', options: ['draft'] }
+        }),
+      }
+    }),
+  })
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--auth-token', 'test.jwt.token',
+      '--require-auth',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 1)
+    const evidence = JSON.parse(readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8'))
+    const stagingCheck = evidence.checks.find((check) => check.id === 'staging-descriptor-contract')
+    assert.equal(stagingCheck.status, 'fail')
+    assert.deepEqual(stagingCheck.details.invalidFields, {
+      standard_materials: {
+        status: [
+          'expected type select but got string',
+          'missing options: active, obsolete',
+        ],
+      },
     })
   } finally {
     await fake.close()

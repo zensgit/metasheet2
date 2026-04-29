@@ -207,11 +207,24 @@ async function installStaging({ context, projectId, baseId = null, logger } = {}
   return { sheetIds: result, warnings }
 }
 
+function summarizeField(field) {
+  const summary = {
+    id: field.id,
+    name: field.name,
+    type: field.type,
+  }
+  if (Array.isArray(field.options) && field.options.length > 0) {
+    summary.options = field.options.slice()
+  }
+  return summary
+}
+
 function listStagingDescriptors() {
   return STAGING_DESCRIPTORS.map((d) => ({
     id: d.id,
     name: d.name,
     fields: d.fields.map((f) => f.id),
+    fieldDetails: d.fields.map(summarizeField),
   }))
 }
 
@@ -223,6 +236,7 @@ module.exports = {
     isProvisioningAvailable,
     materializeField,
     materializeDescriptor,
+    summarizeField,
     RAW_DESCRIPTORS,
   },
 }
