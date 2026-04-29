@@ -14,9 +14,15 @@ function makeTmpDir() {
   return mkdtempSync(path.join(tmpdir(), 'integration-k3wise-postdeploy-smoke-'))
 }
 
-function runScript(args) {
+function runScript(args, options = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [scriptPath, ...args], { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(process.execPath, [scriptPath, ...args], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        ...(options.env || {}),
+      },
+    })
     let stdout = ''
     let stderr = ''
     const timer = setTimeout(() => {
@@ -62,6 +68,7 @@ function createFakeServer(options = {}) {
     requests.push({
       method: req.method,
       pathname: url.pathname,
+      query: Object.fromEntries(url.searchParams.entries()),
       authorization: req.headers.authorization || '',
     })
 
@@ -277,6 +284,85 @@ test('authenticated postdeploy smoke validates route and staging contracts witho
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/pipelines'))
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/runs'))
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/dead-letters'))
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('authenticated postdeploy smoke uses explicit tenant scope for control-plane list probes', async () => {
+  const fake = createFakeServer()
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--auth-token', 'test.jwt.token',
+      '--tenant-id', 'tenant-explicit',
+      '--require-auth',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 0, result.stderr)
+    const evidence = JSON.parse(readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8'))
+    for (const id of [
+      'integration-list-external-systems',
+      'integration-list-pipelines',
+      'integration-list-runs',
+      'integration-list-dead-letters',
+    ]) {
+      assert.equal(evidence.checks.find((check) => check.id === id).tenantId, 'tenant-explicit')
+    }
+    for (const pathname of [
+      '/api/integration/external-systems',
+      '/api/integration/pipelines',
+      '/api/integration/runs',
+      '/api/integration/dead-letters',
+    ]) {
+      const request = fake.requests.find((candidate) => candidate.pathname === pathname)
+      assert.deepEqual(request.query, { tenantId: 'tenant-explicit', limit: '1' })
+    }
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('authenticated postdeploy smoke falls back to tenant scope from environment', async () => {
+  const fake = createFakeServer()
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--auth-token', 'test.jwt.token',
+      '--require-auth',
+      '--out-dir', outDir,
+    ], {
+      env: {
+        METASHEET_TENANT_ID: 'tenant-env',
+      },
+    })
+
+    assert.equal(result.status, 0, result.stderr)
+    const evidence = JSON.parse(readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8'))
+    for (const id of [
+      'integration-list-external-systems',
+      'integration-list-pipelines',
+      'integration-list-runs',
+      'integration-list-dead-letters',
+    ]) {
+      assert.equal(evidence.checks.find((check) => check.id === id).tenantId, 'tenant-env')
+    }
+    for (const pathname of [
+      '/api/integration/external-systems',
+      '/api/integration/pipelines',
+      '/api/integration/runs',
+      '/api/integration/dead-letters',
+    ]) {
+      const request = fake.requests.find((candidate) => candidate.pathname === pathname)
+      assert.deepEqual(request.query, { tenantId: 'tenant-env', limit: '1' })
+    }
   } finally {
     await fake.close()
     rmSync(outDir, { recursive: true, force: true })

@@ -24,6 +24,9 @@ Wire optional tenant scope into both GitHub Actions entrypoints:
   - passes `--tenant-id` only when the value is non-empty.
 - Workflow contract test now asserts this wiring so future YAML edits cannot
   silently drop tenant scope.
+- Smoke script tests assert both tenant sources:
+  - explicit `--tenant-id` wins over the tenant returned by `/api/auth/me`;
+  - `METASHEET_TENANT_ID` is used when the CLI flag is absent.
 
 ## Behavior
 
@@ -34,6 +37,13 @@ authenticated checks.
 When `METASHEET_K3WISE_SMOKE_TOKEN` is configured, operators can provide tenant
 scope via manual input or repo variable and the authenticated smoke will use it
 for the read-only list probes.
+
+The tenant scope is carried only into the four read-only control-plane probes:
+
+- `/api/integration/external-systems?tenantId=<tenant>&limit=1`
+- `/api/integration/pipelines?tenantId=<tenant>&limit=1`
+- `/api/integration/runs?tenantId=<tenant>&limit=1`
+- `/api/integration/dead-letters?tenantId=<tenant>&limit=1`
 
 ## Non-Goals
 

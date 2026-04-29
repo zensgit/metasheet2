@@ -16,7 +16,10 @@ git diff --check
 
 - Workflow contract test passes and asserts tenant scope wiring in both
   workflow entrypoints.
-- Existing smoke and summary tests continue to pass.
+- Smoke test passes and asserts explicit CLI tenant scope plus
+  `METASHEET_TENANT_ID` env fallback are sent to all four authenticated list
+  probes.
+- Existing summary tests continue to pass.
 - Workflow YAML still parses.
 - Diff has no whitespace errors.
 

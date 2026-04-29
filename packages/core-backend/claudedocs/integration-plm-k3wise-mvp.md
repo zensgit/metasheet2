@@ -512,6 +512,29 @@ POST /api/integration/dead-letters/:id/replay
 
 ### 9.5 客户 GATE 答卷回卷后的执行顺序
 
+客户 GATE 答卷归档前，先确认当前 MetaSheet 部署本身具备 K3 WISE PoC
+控制面能力。这一步不访问客户 K3 / PLM / SQL Server，只读检查部署后的
+backend、插件、前端路由、integration API 路由和 staging descriptor：
+
+```bash
+node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
+  --base-url "$METASHEET_BASE_URL" \
+  --token-file "$METASHEET_AUTH_TOKEN_FILE" \
+  --tenant-id "$METASHEET_TENANT_ID" \
+  --require-auth \
+  --out-dir artifacts/integration-live-poc/postdeploy-smoke
+```
+
+也可以在 GitHub Actions 手动触发 `K3 WISE Postdeploy Smoke`，填写
+`base_url`、`require_auth=true`、`tenant_id`。期望产物是
+`integration-k3wise-postdeploy-smoke.json` / `.md` 均 PASS，且四个只读
+control-plane list probe 都通过：
+
+- `/api/integration/external-systems?tenantId=<tenant>&limit=1`
+- `/api/integration/pipelines?tenantId=<tenant>&limit=1`
+- `/api/integration/runs?tenantId=<tenant>&limit=1`
+- `/api/integration/dead-letters?tenantId=<tenant>&limit=1`
+
 客户 GATE 答卷归档后，按下面这条线性顺序推进 M2-LIVE，每一步都要在测试账套用最小权限账号执行：
 
 | 步 | 命令 / 动作 | 期望产出 | 失败处理 |
@@ -577,6 +600,8 @@ pnpm -F plugin-integration-core test:e2e-plm-k3wise-writeback
 node scripts/ops/integration-k3wise-live-poc-preflight.test.mjs
 node scripts/ops/integration-k3wise-live-poc-evidence.test.mjs   # 31/31
 node scripts/ops/fixtures/integration-k3wise/run-mock-poc-demo.mjs
+node --test scripts/ops/integration-k3wise-postdeploy-smoke.test.mjs
+node --test scripts/ops/integration-k3wise-postdeploy-workflow-contract.test.mjs
 ```
 
 最后一条 `run-mock-poc-demo.mjs` 是端到端 mock 链路烟雾测试（GATE → preflight → mock K3 WebAPI → mock SQL → evidence compile → 断言 PASS），用于在客户回卷前证明"链路是通的"。**Mock pass ≠ 客户 live pass**——见 `scripts/ops/fixtures/integration-k3wise/README.md`。
@@ -733,16 +758,20 @@ pnpm -F plugin-integration-core test
 node scripts/ops/integration-k3wise-live-poc-preflight.test.mjs
 node scripts/ops/integration-k3wise-live-poc-evidence.test.mjs
 node scripts/ops/fixtures/integration-k3wise/run-mock-poc-demo.mjs
+node --test scripts/ops/integration-k3wise-postdeploy-smoke.test.mjs
+node --test scripts/ops/integration-k3wise-postdeploy-workflow-contract.test.mjs
 node --import tsx scripts/validate-plugin-manifests.ts
 git diff --check
 ```
 
-截至 2026-04-26，本地验证结果：
+截至 2026-04-29，本地验证结果：
 
 - `plugin-integration-core` 全量测试通过（含 `testK3WebApiAutoFlagCoercion` 10 项硬化场景）。
 - preflight 脚本测试全部通过（含 #1168 / #1169 bool sweep）。
 - evidence 脚本 31/31 测试通过（含 #1175 / #1176 / #1177 / #1182 全链路硬化）。
 - mock PoC demo 链路 9 步全 PASS（GATE → preflight → mock K3 → mock SQL → evidence → 断言 PASS）。
+- postdeploy smoke 测试通过，覆盖公开检查、鉴权控制面 list probe、tenant 显式参数和环境变量回退。
+- postdeploy workflow contract 测试通过，覆盖 deploy workflow 与手动 workflow 的 token / tenant wiring。
 - 插件 manifest 校验 13/13 valid，0 errors。
 - `git diff --check` 通过。
 
