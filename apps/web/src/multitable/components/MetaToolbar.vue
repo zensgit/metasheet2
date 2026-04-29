@@ -53,20 +53,51 @@
             <span>conditions match</span>
           </div>
           <div v-for="(rule, idx) in filterRules" :key="idx" class="meta-toolbar__filter-rule">
-            <select :value="rule.fieldId" @change="onFilterFieldChange(idx, ($event.target as HTMLSelectElement).value)">
+            <select :value="rule.fieldId" aria-label="Filter field" @change="onFilterFieldChange(idx, ($event.target as HTMLSelectElement).value)">
               <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
             </select>
-            <select :value="rule.operator" @change="onFilterOperatorChange(idx, ($event.target as HTMLSelectElement).value)">
+            <span class="meta-toolbar__field-type">{{ getFilterFieldTypeLabel(rule.fieldId) }}</span>
+            <select :value="rule.operator" aria-label="Filter operator" @change="onFilterOperatorChange(idx, ($event.target as HTMLSelectElement).value)">
               <option v-for="op in getOperatorsForField(rule.fieldId)" :key="op.value" :value="op.value">{{ op.label }}</option>
             </select>
-            <input v-if="!isUnaryOp(rule.operator)" class="meta-toolbar__filter-value" :type="getInputType(rule.fieldId)" :value="rule.value ?? ''" @change="onFilterValueChange(idx, ($event.target as HTMLInputElement).value)" />
+            <span v-if="isUnaryOp(rule.operator)" class="meta-toolbar__filter-empty-hint">no value needed</span>
+            <select
+              v-else-if="isSelectLikeField(rule.fieldId)"
+              class="meta-toolbar__filter-value"
+              :value="String(rule.value ?? '')"
+              aria-label="Filter value"
+              @change="onFilterValueChange(idx, ($event.target as HTMLSelectElement).value)"
+            >
+              <option value="" disabled>{{ getSelectOptions(rule.fieldId).length ? 'Choose option...' : 'No options' }}</option>
+              <option v-for="option in getSelectOptions(rule.fieldId)" :key="option.value" :value="option.value">{{ option.label }}</option>
+            </select>
+            <select
+              v-else-if="getFieldType(rule.fieldId) === 'boolean'"
+              class="meta-toolbar__filter-value"
+              :value="String(rule.value ?? 'true')"
+              aria-label="Filter value"
+              @change="onFilterValueChange(idx, ($event.target as HTMLSelectElement).value)"
+            >
+              <option value="true">checked / true</option>
+              <option value="false">unchecked / false</option>
+            </select>
+            <input
+              v-else
+              class="meta-toolbar__filter-value"
+              :type="getInputType(rule.fieldId)"
+              :placeholder="getValuePlaceholder(rule.fieldId)"
+              :value="rule.value ?? ''"
+              aria-label="Filter value"
+              @change="onFilterValueChange(idx, ($event.target as HTMLInputElement).value)"
+            />
             <button class="meta-toolbar__remove" @click="emit('remove-filter', idx)">&times;</button>
           </div>
           <div class="meta-toolbar__filter-actions">
             <button v-if="fields.length" class="meta-toolbar__add" @click="onAddFilter">+ Add filter</button>
             <button v-if="filterRules.length" class="meta-toolbar__add meta-toolbar__add--danger" @click="emit('clear-filters')">Clear all</button>
           </div>
-          <button v-if="filterRules.length" class="meta-toolbar__apply" @click="emit('apply-sort-filter')">Apply</button>
+          <button v-if="filterRules.length" class="meta-toolbar__apply" @click="emit('apply-sort-filter')">{{ applyButtonLabel }}</button>
+          <p v-if="filterRules.length && sortFilterDirty" class="meta-toolbar__apply-hint">Filter changes are staged until applied.</p>
         </div>
       </div>
 
@@ -140,6 +171,7 @@ const props = defineProps<{
   searchText?: string
   totalRows?: number
   rowDensity?: RowDensity
+  sortFilterDirty?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -181,13 +213,63 @@ const groupableFields = computed(() => props.fields.filter((f) => GROUPABLE_TYPE
 const hiddenCount = computed(() => props.hiddenFieldIds.length)
 const UNARY = new Set(['isEmpty', 'isNotEmpty'])
 const isUnaryOp = (op: string) => UNARY.has(op)
-const getFieldType = (id: string) => props.fields.find((f) => f.id === id)?.type ?? 'string'
-const getOperatorsForField = (id: string) => FILTER_OPERATORS_BY_TYPE[getFieldType(id)] ?? FILTER_OPERATORS_BY_TYPE.string
+const getField = (id: string) => props.fields.find((f) => f.id === id)
+const getFieldType = (id: string) => getField(id)?.type ?? 'string'
+const isSelectLikeField = (id: string) => {
+  const type = String(getFieldType(id))
+  return type === 'select' || type === 'multiSelect'
+}
+const getOperatorsForField = (id: string) => {
+  const type = String(getFieldType(id))
+  if (type === 'multiSelect') {
+    return FILTER_OPERATORS_BY_TYPE.multiSelect ?? FILTER_OPERATORS_BY_TYPE.select
+  }
+  return FILTER_OPERATORS_BY_TYPE[type] ?? FILTER_OPERATORS_BY_TYPE.string
+}
+const applyButtonLabel = computed(() => props.sortFilterDirty ? 'Apply filter changes' : 'Apply filters')
 const getInputType = (id: string) => {
   const t = getFieldType(id)
   if (t === 'number') return 'number'
   if (t === 'date') return 'date'
   return 'text'
+}
+const getFilterFieldTypeLabel = (id: string) => {
+  const labels: Record<string, string> = {
+    string: 'text',
+    longText: 'long text',
+    number: 'number',
+    boolean: 'checkbox',
+    select: 'select',
+    multiSelect: 'multi-select',
+    date: 'date',
+  }
+  return labels[getFieldType(id)] ?? getFieldType(id)
+}
+const getValuePlaceholder = (id: string) => {
+  const t = getFieldType(id)
+  if (t === 'number') return 'Enter a number'
+  if (t === 'date') return 'Pick a date'
+  return 'Enter filter text'
+}
+function getSelectOptions(id: string): Array<{ value: string; label: string }> {
+  const field = getField(id)
+  const rawOptions = field?.options ?? (Array.isArray(field?.property?.options) ? field.property.options : [])
+  return rawOptions
+    .map((option) => {
+      if (typeof option === 'string') return { value: option, label: option }
+      if (option && typeof option === 'object' && 'value' in option) {
+        const value = String((option as { value?: unknown }).value ?? '')
+        return value ? { value, label: value } : null
+      }
+      return null
+    })
+    .filter((option): option is { value: string; label: string } => option !== null)
+}
+function getDefaultFilterValue(fieldId: string): unknown {
+  const type = getFieldType(fieldId)
+  if (String(type) === 'select' || String(type) === 'multiSelect') return getSelectOptions(fieldId)[0]?.value ?? ''
+  if (type === 'boolean') return true
+  return ''
 }
 
 function onSortFieldChange(idx: number, fieldId: string) { emit('update-sort', idx, { ...props.sortRules[idx], fieldId }) }
@@ -195,20 +277,24 @@ function onSortDirChange(idx: number, direction: 'asc'|'desc') { emit('update-so
 function onAddFilter() {
   if (!props.fields.length) return
   const ops = getOperatorsForField(props.fields[0].id)
-  emit('add-filter', { fieldId: props.fields[0].id, operator: ops[0]?.value ?? 'is', value: '' })
+  emit('add-filter', { fieldId: props.fields[0].id, operator: ops[0]?.value ?? 'is', value: getDefaultFilterValue(props.fields[0].id) })
 }
 function onFilterFieldChange(idx: number, fieldId: string) {
   const ops = getOperatorsForField(fieldId)
-  emit('update-filter', idx, { ...props.filterRules[idx], fieldId, operator: ops[0]?.value ?? 'is', value: '' })
+  emit('update-filter', idx, { ...props.filterRules[idx], fieldId, operator: ops[0]?.value ?? 'is', value: getDefaultFilterValue(fieldId) })
 }
 function onFilterOperatorChange(idx: number, operator: string) {
   const r = { ...props.filterRules[idx], operator }
   if (isUnaryOp(operator)) r.value = undefined
+  else if (r.value === undefined) r.value = getDefaultFilterValue(r.fieldId)
   emit('update-filter', idx, r)
 }
 function onFilterValueChange(idx: number, value: string) {
   const ft = getFieldType(props.filterRules[idx].fieldId)
-  emit('update-filter', idx, { ...props.filterRules[idx], value: ft === 'number' && value !== '' ? Number(value) : value })
+  let nextValue: unknown = value
+  if (ft === 'number' && value !== '') nextValue = Number(value)
+  if (ft === 'boolean') nextValue = value === 'true'
+  emit('update-filter', idx, { ...props.filterRules[idx], value: nextValue })
 }
 </script>
 
@@ -231,6 +317,7 @@ function onFilterValueChange(idx: number, value: string) {
 .meta-toolbar__sort-rule, .meta-toolbar__filter-rule { display: flex; gap: 4px; margin-bottom: 4px; align-items: center; }
 .meta-toolbar__sort-rule select, .meta-toolbar__filter-rule select { padding: 2px 6px; font-size: 12px; border: 1px solid #ddd; border-radius: 3px; }
 .meta-toolbar__filter-value { flex: 1; min-width: 80px; padding: 2px 6px; font-size: 12px; border: 1px solid #ddd; border-radius: 3px; }
+.meta-toolbar__filter-empty-hint { flex: 1; min-width: 80px; color: #999; font-size: 12px; }
 .meta-toolbar__conjunction { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #666; margin-bottom: 6px; }
 .meta-toolbar__conjunction select { padding: 2px 6px; font-size: 12px; border: 1px solid #ddd; border-radius: 3px; }
 .meta-toolbar__filter-actions { display: flex; gap: 12px; margin-top: 4px; }
@@ -241,6 +328,7 @@ function onFilterValueChange(idx: number, value: string) {
 .meta-toolbar__add--danger { color: #f56c6c; }
 .meta-toolbar__apply { display: block; width: 100%; margin-top: 8px; padding: 5px 0; background: #409eff; color: #fff; border: none; border-radius: 3px; font-size: 12px; cursor: pointer; }
 .meta-toolbar__apply:hover { background: #66b1ff; }
+.meta-toolbar__apply-hint { margin: 6px 0 0; color: #777; font-size: 11px; }
 .meta-toolbar__group-none { color: #999; }
 .meta-toolbar__field-type { font-size: 10px; color: #aaa; margin-left: auto; }
 .meta-toolbar__search { display: flex; align-items: center; gap: 4px; border: 1px solid #ddd; border-radius: 4px; padding: 2px 8px; background: #fafafa; transition: border-color 0.2s, background 0.2s; }
