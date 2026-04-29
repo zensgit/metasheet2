@@ -206,6 +206,7 @@ function buildSummary(opts, values) {
     },
     checks: [],
     missingInputs: [],
+    blockedInputCount: 0,
     nextCommands: [],
   }
 
@@ -270,6 +271,7 @@ function buildSummary(opts, values) {
       label: check.label,
       remediation: check.remediation,
     }))
+  summary.blockedInputCount = summary.missingInputs.length
   summary.overallStatus = summary.missingInputs.length === 0 ? 'ready' : 'blocked'
   summary.nextCommands = buildNextCommands(opts.envFile, summary.overallStatus)
   return summary
@@ -296,6 +298,7 @@ function renderMarkdown(summary) {
     `- Generated At: ${summary.generatedAt}`,
     `- Env File: \`${summary.envFile}\``,
     `- Overall Status: \`${summary.overallStatus}\``,
+    `- Blocked Input Count: \`${summary.blockedInputCount}\``,
     '',
     '## Redacted Environment',
     '',
