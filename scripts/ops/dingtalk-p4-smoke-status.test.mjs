@@ -176,6 +176,16 @@ test('dingtalk-p4-smoke-status reports manual pending gaps for bootstrap session
     assert.equal(summary.requiredChecks.find((check) => check.id === 'authorized-user-submit').docSection, 'Smoke 4')
     assert.equal(summary.requiredChecks.find((check) => check.id === 'authorized-user-submit').evidenceSnapshot.authorizedUserId, 'user_authorized_001')
     assert.equal(summary.remoteSmokeTodos.remaining > 0, true)
+    assert.deepEqual(summary.remoteSmokeTodos.manualEvidence, {
+      total: 4,
+      completed: 3,
+      remaining: 1,
+    })
+    assert.deepEqual(summary.remoteSmokeTodos.automatedChecks, {
+      total: 4,
+      completed: 4,
+      remaining: 0,
+    })
     assert.equal(summary.executionPlan.activePhaseId, 'client-access')
     assert.equal(summary.executionPlan.currentFocus.checkId, 'authorized-user-submit')
     assert.equal(summary.remoteSmokeTodos.items.find((item) => item.id === 'authorized-user-submit').completed, false)
@@ -187,11 +197,15 @@ test('dingtalk-p4-smoke-status reports manual pending gaps for bootstrap session
     const statusMd = readFileSync(path.join(sessionDir, 'smoke-status.md'), 'utf8')
     assert.match(statusMd, /Ordered Execution Plan/)
     assert.match(statusMd, /Remote smoke phase: \*\*manual_pending\*\*/)
+    assert.match(statusMd, /Manual evidence: \*\*3\/4\*\* complete, \*\*1\*\* remaining\./)
+    assert.match(statusMd, /Automated\/API checks: \*\*4\/4\*\* complete, \*\*0\*\* remaining\./)
     assert.match(statusMd, /Top-level Remote Smoke Steps/)
     assert.match(statusMd, /Current focus:/)
     const todoText = readFileSync(path.join(sessionDir, 'smoke-todo.md'), 'utf8')
     assert.match(todoText, /Current Focus/)
     assert.match(todoText, /Remote smoke phase: \*\*manual_pending\*\*/)
+    assert.match(todoText, /Manual evidence: \*\*3\/4\*\* complete, \*\*1\*\* remaining\./)
+    assert.match(todoText, /Automated\/API checks: \*\*4\/4\*\* complete, \*\*0\*\* remaining\./)
     assert.match(todoText, /Ordered Phase Plan/)
     assert.match(todoText, /### 3\. Validate protected form access/)
     assert.match(todoText, /evidence-record\.mjs.*refresh automatically/)
