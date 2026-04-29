@@ -9,6 +9,7 @@ Date: 2026-04-29
 - Backend execution fails clearly for missing recipients, missing templates, or missing `NotificationService`.
 - Rule editor saves normalized email payloads.
 - Rule editor disables save for incomplete email actions.
+- Branch was rebased onto `origin/main@74f96bc6c`.
 
 ## Focused Commands
 
@@ -17,8 +18,9 @@ Planned focused commands:
 ```bash
 pnpm --filter @metasheet/core-backend exec vitest run tests/unit/automation-v1.test.ts
 pnpm --filter @metasheet/web exec vitest run tests/multitable-automation-rule-editor.spec.ts --watch=false
-pnpm --filter @metasheet/core-backend type-check
-pnpm --filter @metasheet/web type-check
+pnpm --filter @metasheet/core-backend build
+pnpm --filter @metasheet/web exec vue-tsc --noEmit
+git diff --check origin/main...HEAD
 ```
 
 ## Real Capability Boundary
@@ -54,7 +56,13 @@ pnpm --filter @metasheet/core-backend build
 Result: passed. This runs `tsc` for the backend package.
 
 ```bash
-pnpm --filter @metasheet/web type-check
+pnpm --filter @metasheet/web exec vue-tsc --noEmit
 ```
 
-Result: passed. This runs `vue-tsc -b`.
+Result: passed.
+
+```bash
+git diff --check origin/main...HEAD
+```
+
+Result: passed.
