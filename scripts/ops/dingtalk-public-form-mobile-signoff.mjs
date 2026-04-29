@@ -112,8 +112,9 @@ form access modes. It does not call DingTalk or staging.
 Options:
   --init-kit <dir>       Write mobile-signoff.json, checklist, and artifact folders
   --record <file>        Update one check in an existing mobile-signoff.json
+  --todo <file>          Write or print the remaining-check TODO report
   --input <file>         Input mobile-signoff.json to compile
-  --output-dir <dir>     Output dir, default ${DEFAULT_OUTPUT_ROOT}/<run-id>
+  --output-dir <dir>     Output dir for --input, --todo, or --compile-when-ready
   --strict               Exit non-zero unless every required check passes
   --help                 Show this help
 
@@ -134,6 +135,7 @@ Record mode options:
   --form-rendered
   --password-change-required-shown
   --no-password-change-required-shown
+  --compile-when-ready  After a successful --record, strict-compile when no checks remain
   --dry-run              Validate and print the updated check without writing
 
 Evidence can be screenshot-free. For allowed submits, record a positive
@@ -155,6 +157,7 @@ function parseArgs(argv) {
   const opts = {
     initKit: '',
     record: '',
+    todo: '',
     input: '',
     outputDir: '',
     strict: false,
@@ -173,6 +176,7 @@ function parseArgs(argv) {
     blockedReason: '',
     formRendered: null,
     passwordChangeRequiredShown: null,
+    compileWhenReady: false,
     dryRun: false,
   }
 
@@ -185,6 +189,10 @@ function parseArgs(argv) {
         break
       case '--record':
         opts.record = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
+        i += 1
+        break
+      case '--todo':
+        opts.todo = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
         i += 1
         break
       case '--input':
@@ -258,6 +266,9 @@ function parseArgs(argv) {
       case '--no-password-change-required-shown':
         opts.passwordChangeRequiredShown = false
         break
+      case '--compile-when-ready':
+        opts.compileWhenReady = true
+        break
       case '--dry-run':
         opts.dryRun = true
         break
@@ -270,12 +281,15 @@ function parseArgs(argv) {
     }
   }
 
-  const modeCount = Number(Boolean(opts.initKit)) + Number(Boolean(opts.input)) + Number(Boolean(opts.record))
+  const modeCount = Number(Boolean(opts.initKit))
+    + Number(Boolean(opts.input))
+    + Number(Boolean(opts.record))
+    + Number(Boolean(opts.todo))
   if (modeCount > 1) {
-    throw new Error('--init-kit, --record, and --input are mutually exclusive')
+    throw new Error('--init-kit, --record, --todo, and --input are mutually exclusive')
   }
   if (modeCount === 0) {
-    throw new Error('one of --init-kit, --record, or --input is required')
+    throw new Error('one of --init-kit, --record, --todo, or --input is required')
   }
   if (opts.record) {
     if (!opts.checkId) {
@@ -293,6 +307,12 @@ function parseArgs(argv) {
     if (opts.source && !VALID_SOURCES.has(opts.source)) {
       throw new Error(`invalid --source: ${opts.source}`)
     }
+  }
+  if (opts.compileWhenReady && !opts.record) {
+    throw new Error('--compile-when-ready requires --record')
+  }
+  if (opts.compileWhenReady && opts.dryRun) {
+    throw new Error('--compile-when-ready cannot be used with --dry-run')
   }
   return opts
 }
@@ -388,7 +408,17 @@ node scripts/ops/dingtalk-public-form-mobile-signoff.mjs \\
   --source server-observation \\
   --operator qa \\
   --summary "Anonymous public form inserted one record." \\
-  --record-insert-delta 1
+  --record-insert-delta 1 \\
+  --compile-when-ready \\
+  --output-dir compiled
+\`\`\`
+
+Generate the remaining-check TODO report:
+
+\`\`\`bash
+node scripts/ops/dingtalk-public-form-mobile-signoff.mjs \\
+  --todo mobile-signoff.json \\
+  --output-dir todo
 \`\`\`
 `
 }
@@ -643,17 +673,164 @@ ${validation.warnings.length ? validation.warnings.map((warning) => `- ${warning
 `
 }
 
+function getEntryById(evidence) {
+  const entries = Array.isArray(evidence.checks) ? evidence.checks : []
+  return new Map(entries.map((entry) => [entry?.id, entry]))
+}
+
+function getStatusCounts(evidence) {
+  const entryById = getEntryById(evidence)
+  return CHECKS.reduce((acc, check) => {
+    const status = entryById.get(check.id)?.status ?? 'missing'
+    acc[status] = (acc[status] ?? 0) + 1
+    return acc
+  }, {})
+}
+
+function getCheckErrors(validation, checkId) {
+  return validation.errors.filter((error) => error.startsWith(`${checkId}:`))
+}
+
+function getEvidenceRecipe(check) {
+  if (check.kind === 'allow-submit') {
+    return 'Record a positive recordInsertDelta or increasing before/after record counts.'
+  }
+  if (check.kind === 'deny-submit') {
+    return 'Record submitBlocked=true, zero insert proof, and blockedReason.'
+  }
+  return 'Record formRendered=true and passwordChangeRequiredShown=false.'
+}
+
+function shellQuote(value) {
+  if (/^[A-Za-z0-9_./:-]+$/.test(value)) return value
+  return `'${value.replaceAll("'", "'\\''")}'`
+}
+
+function formatCliPath(file) {
+  const relative = path.relative(process.cwd(), file)
+  if (relative && !relative.startsWith('..')) {
+    return shellQuote(relative)
+  }
+  return shellQuote(file)
+}
+
+function getSuggestedRecordCommand(inputFile, check) {
+  const sourceHint = check.kind === 'allow-submit' ? 'server-observation' : 'manual-client'
+  const compiledOutput = path.join(path.dirname(inputFile), 'compiled')
+  return [
+    'node scripts/ops/dingtalk-public-form-mobile-signoff.mjs \\',
+    `  --record ${formatCliPath(inputFile)} \\`,
+    `  --check-id ${check.id} \\`,
+    '  --status pass \\',
+    `  --source ${sourceHint} \\`,
+    '  --operator <operator> \\',
+    `  --summary "<redaction-safe summary>" \\`,
+    `  ${check.commandHint} \\`,
+    `  --output-dir ${formatCliPath(compiledOutput)} \\`,
+    '  --compile-when-ready',
+  ].join('\n')
+}
+
+function buildTodoReport(inputFile, evidence) {
+  const validation = validateEvidence(inputFile, evidence, false)
+  const entryById = getEntryById(evidence)
+  const requiredChecks = CHECKS.map((check) => {
+    const entry = entryById.get(check.id)
+    const status = entry?.status ?? 'missing'
+    const errors = getCheckErrors(validation, check.id)
+    const complete = status === 'pass' && errors.length === 0
+    return {
+      id: check.id,
+      label: check.label,
+      scenario: check.scenario,
+      kind: check.kind,
+      status,
+      complete,
+      errors,
+      evidenceRecipe: getEvidenceRecipe(check),
+      suggestedRecordCommand: getSuggestedRecordCommand(inputFile, check),
+    }
+  })
+  const remainingChecks = requiredChecks.filter((check) => !check.complete)
+  const counts = getStatusCounts(evidence)
+  const strictReady = remainingChecks.length === 0 && validation.errors.length === 0
+
+  return {
+    tool: 'dingtalk-public-form-mobile-signoff',
+    runId: evidence.runId || '',
+    generatedAt: nowIso(),
+    sourceFile: path.basename(inputFile),
+    strictReady,
+    counts,
+    remainingChecks,
+    requiredChecks,
+    errors: validation.errors,
+    warnings: validation.warnings,
+  }
+}
+
+function renderTodo(report) {
+  const counts = report.counts
+  const remainingRows = report.remainingChecks.map((check) => (
+    `| \`${check.id}\` | ${check.status} | ${check.label} | ${check.evidenceRecipe} |`
+  )).join('\n')
+  const completedRows = report.requiredChecks
+    .filter((check) => check.complete)
+    .map((check) => `| \`${check.id}\` | ${check.label} |`)
+    .join('\n')
+  const commandBlocks = report.remainingChecks.map((check) => (
+    `### ${check.id}\n\n${check.errors.length ? `${check.errors.map((error) => `- ${error}`).join('\n')}\n\n` : ''}\`\`\`bash\n${check.suggestedRecordCommand}\n\`\`\``
+  )).join('\n\n')
+
+  return `# DingTalk Public Form Mobile Signoff TODO
+
+- Run ID: \`${report.runId || 'unknown'}\`
+- Source: \`${report.sourceFile}\`
+- Strict-ready: \`${report.strictReady ? 'yes' : 'no'}\`
+- Pass: ${counts.pass ?? 0}
+- Fail: ${counts.fail ?? 0}
+- Pending: ${counts.pending ?? 0}
+- Skipped: ${counts.skipped ?? 0}
+- Missing: ${counts.missing ?? 0}
+- Remaining checks: ${report.remainingChecks.length}
+
+## Remaining Checks
+
+${remainingRows || '- None'}
+
+## Suggested Record Commands
+
+${commandBlocks || '- None'}
+
+## Completed Checks
+
+${completedRows ? `| Check ID | Expected result |\n| --- | --- |\n${completedRows}` : '- None'}
+
+## Errors
+
+${report.errors.length ? report.errors.map((error) => `- ${error}`).join('\n') : '- None'}
+
+## Warnings
+
+${report.warnings.length ? report.warnings.map((warning) => `- ${warning}`).join('\n') : '- None'}
+`
+}
+
 function compileEvidence(opts) {
   const evidence = readJson(opts.input)
-  const validation = validateEvidence(opts.input, evidence, opts.strict)
-  const outputDir = opts.outputDir || path.join(process.cwd(), DEFAULT_OUTPUT_ROOT, evidence.runId || makeRunId())
-  mkdirSync(outputDir, { recursive: true })
+  return writeCompiledEvidence(opts.input, evidence, opts.outputDir, opts.strict)
+}
+
+function writeCompiledEvidence(inputFile, evidence, outputDir, strict) {
+  const validation = validateEvidence(inputFile, evidence, strict)
+  const resolvedOutputDir = outputDir || path.join(process.cwd(), DEFAULT_OUTPUT_ROOT, evidence.runId || makeRunId())
+  mkdirSync(resolvedOutputDir, { recursive: true })
 
   const summary = {
     tool: 'dingtalk-public-form-mobile-signoff',
     runId: evidence.runId || '',
     generatedAt: nowIso(),
-    strict: opts.strict,
+    strict,
     status: validation.errors.length === 0 ? 'pass' : 'fail',
     errors: validation.errors,
     warnings: validation.warnings,
@@ -664,9 +841,9 @@ function compileEvidence(opts) {
     })),
   }
 
-  writeJson(path.join(outputDir, 'summary.json'), summary)
-  writeFileSync(path.join(outputDir, 'summary.md'), summarize(evidence, validation), 'utf8')
-  writeJson(path.join(outputDir, 'mobile-signoff.redacted.json'), redactValue(evidence))
+  writeJson(path.join(resolvedOutputDir, 'summary.json'), summary)
+  writeFileSync(path.join(resolvedOutputDir, 'summary.md'), summarize(evidence, validation), 'utf8')
+  writeJson(path.join(resolvedOutputDir, 'mobile-signoff.redacted.json'), redactValue(evidence))
 
   if (validation.errors.length > 0) {
     console.error(`[dingtalk-public-form-mobile-signoff] validation failed: ${validation.errors.length} error(s)`)
@@ -674,9 +851,31 @@ function compileEvidence(opts) {
       console.error(`- ${error}`)
     }
     process.exitCode = 1
-    return
+    return { validation, outputDir: resolvedOutputDir, summary }
   }
-  console.log(`[dingtalk-public-form-mobile-signoff] wrote summary: ${path.join(outputDir, 'summary.md')}`)
+  console.log(`[dingtalk-public-form-mobile-signoff] wrote summary: ${path.join(resolvedOutputDir, 'summary.md')}`)
+  return { validation, outputDir: resolvedOutputDir, summary }
+}
+
+function writeTodo(opts) {
+  const evidence = readJson(opts.todo)
+  const report = buildTodoReport(opts.todo, evidence)
+  const markdown = renderTodo(report)
+
+  if (opts.outputDir) {
+    mkdirSync(opts.outputDir, { recursive: true })
+    writeJson(path.join(opts.outputDir, 'todo.json'), report)
+    writeFileSync(path.join(opts.outputDir, 'todo.md'), markdown, 'utf8')
+    writeJson(path.join(opts.outputDir, 'mobile-signoff.redacted.json'), redactValue(evidence))
+    console.log(`[dingtalk-public-form-mobile-signoff] wrote todo: ${path.join(opts.outputDir, 'todo.md')}`)
+  } else {
+    console.log(markdown)
+  }
+
+  if (report.errors.length > 0) {
+    console.error(`[dingtalk-public-form-mobile-signoff] todo has ${report.errors.length} validation error(s)`)
+    process.exitCode = 1
+  }
 }
 
 function setEvidenceValue(evidence, key, value) {
@@ -689,6 +888,22 @@ function appendArtifacts(evidence, refs) {
   if (refs.length === 0) return
   const existing = Array.isArray(evidence.artifacts) ? evidence.artifacts : []
   evidence.artifacts = Array.from(new Set([...existing, ...refs]))
+}
+
+function maybeCompileWhenReady(opts, signoff) {
+  if (!opts.compileWhenReady) return
+
+  const report = buildTodoReport(opts.record, signoff)
+  if (!report.strictReady) {
+    const remainingIds = report.remainingChecks.map((check) => check.id).join(', ')
+    console.log(`[dingtalk-public-form-mobile-signoff] not ready for strict compile; remaining: ${remainingIds || 'none'}`)
+    if (report.errors.length > 0) {
+      console.log(`[dingtalk-public-form-mobile-signoff] validation errors: ${report.errors.length}`)
+    }
+    return
+  }
+
+  writeCompiledEvidence(opts.record, signoff, opts.outputDir, true)
 }
 
 function recordCheck(opts) {
@@ -745,6 +960,7 @@ function recordCheck(opts) {
 
   writeJson(opts.record, signoff)
   console.log(`[dingtalk-public-form-mobile-signoff] recorded ${opts.checkId}: ${opts.status}`)
+  maybeCompileWhenReady(opts, signoff)
 }
 
 function main() {
@@ -756,6 +972,10 @@ function main() {
     }
     if (opts.record) {
       recordCheck(opts)
+      return
+    }
+    if (opts.todo) {
+      writeTodo(opts)
       return
     }
     compileEvidence(opts)
