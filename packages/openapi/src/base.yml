@@ -1553,6 +1553,7 @@ components:
             - date
             - formula
             - select
+            - multiSelect
             - link
             - lookup
             - rollup

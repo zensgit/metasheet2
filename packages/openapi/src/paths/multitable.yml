@@ -358,7 +358,7 @@ paths:
                 name: { type: string }
                 type:
                   type: string
-                  enum: [string, number, boolean, date, formula, select, link, lookup, rollup, attachment, longText]
+                  enum: [string, number, boolean, date, formula, select, multiSelect, link, lookup, rollup, attachment, longText]
                 property:
                   type: object
                   additionalProperties: true
@@ -409,7 +409,7 @@ paths:
                 name: { type: string }
                 type:
                   type: string
-                  enum: [string, number, boolean, date, formula, select, link, lookup, rollup, attachment, longText]
+                  enum: [string, number, boolean, date, formula, select, multiSelect, link, lookup, rollup, attachment, longText]
                 property:
                   type: object
                   additionalProperties: true

@@ -5,6 +5,7 @@ export type MultitableProvisioningFieldType =
   | 'date'
   | 'formula'
   | 'select'
+  | 'multiSelect'
   | 'link'
   | 'lookup'
   | 'rollup'

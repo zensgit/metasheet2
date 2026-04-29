@@ -91,6 +91,23 @@
       </option>
     </select>
 
+    <!-- multiSelect -->
+    <select
+      v-else-if="field.type === 'multiSelect'"
+      ref="inputRef"
+      class="meta-cell-editor__select meta-cell-editor__select--multi"
+      multiple
+      :value="multiSelectValue"
+      @change="onMultiSelectChange"
+      @keydown.meta.enter.prevent="emit('confirm')"
+      @keydown.ctrl.enter.prevent="emit('confirm')"
+      @keydown.escape="emit('cancel')"
+    >
+      <option v-for="opt in field.options ?? []" :key="opt.value" :value="opt.value">
+        {{ opt.value }}
+      </option>
+    </select>
+
     <!-- link -->
     <button
       v-else-if="field.type === 'link'"
@@ -323,6 +340,17 @@ function onTextConfirm() {
 }
 
 const inputRef = ref<HTMLElement | null>(null)
+const multiSelectValue = computed(() => {
+  const raw = props.modelValue
+  if (!Array.isArray(raw)) return []
+  return raw.map(String)
+})
+
+function onMultiSelectChange(event: Event) {
+  const select = event.target as HTMLSelectElement
+  emit('update:modelValue', Array.from(select.selectedOptions).map((option) => option.value))
+}
+
 const linkButtonLabel = computed(() => {
   if (props.field.type !== 'link') return 'Choose linked records...'
   const count = Array.isArray(props.modelValue) ? props.modelValue.length : props.modelValue ? 1 : 0
@@ -518,6 +546,7 @@ onMounted(() => {
   width: 100%; padding: 2px 4px; border: 1px solid #409eff; border-radius: 3px;
   font-size: 13px; outline: none;
 }
+.meta-cell-editor__select--multi { min-height: 96px; padding: 4px 6px; }
 .meta-cell-editor__check { display: flex; align-items: center; gap: 4px; font-size: 13px; cursor: pointer; }
 .meta-cell-editor__link-btn {
   padding: 2px 8px; border: 1px solid #409eff; border-radius: 3px;

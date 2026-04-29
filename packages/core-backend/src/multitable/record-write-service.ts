@@ -22,7 +22,7 @@ import {
   type RecordPostCommitHook,
   type YjsInvalidator,
 } from './post-commit-hooks'
-import { BATCH1_FIELD_TYPES, coerceBatch1Value, validateLongTextValue } from './field-codecs'
+import { BATCH1_FIELD_TYPES, coerceBatch1Value, normalizeMultiSelectValue, validateLongTextValue } from './field-codecs'
 
 // ---------------------------------------------------------------------------
 // Shared types (mirrors the ones in univer-meta.ts to avoid coupling)
@@ -48,6 +48,7 @@ export type UniverMetaField = {
     | 'date'
     | 'formula'
     | 'select'
+    | 'multiSelect'
     | 'link'
     | 'lookup'
     | 'rollup'
@@ -380,6 +381,14 @@ export class RecordWriteService {
           }
         }
 
+        if (field.type === 'multiSelect') {
+          try {
+            normalizeMultiSelectValue(change.value, change.fieldId, field.options ?? [])
+          } catch (error) {
+            throw new RecordValidationError(error instanceof Error ? error.message : String(error))
+          }
+        }
+
         if (field.type === 'link') {
           if (field.link) {
             const ids = h.normalizeLinkIds(change.value)
@@ -519,6 +528,16 @@ export class RecordWriteService {
 
           if (field.type === 'attachment') {
             patch[change.fieldId] = h.normalizeAttachmentIds(change.value)
+            applied += 1
+            continue
+          }
+
+          if (field.type === 'multiSelect') {
+            try {
+              patch[change.fieldId] = normalizeMultiSelectValue(change.value, change.fieldId, field.options ?? [])
+            } catch (error) {
+              throw new RecordValidationError(error instanceof Error ? error.message : String(error))
+            }
             applied += 1
             continue
           }

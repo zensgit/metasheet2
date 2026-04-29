@@ -2086,7 +2086,7 @@ export class MetaSheetServer {
                   const isReadOnly = readOnlyTypes.has(f.type) || prop.readOnly === true
                   const isHidden = prop.hidden === true || prop.permissionHidden === true
                   const guard: any = { type: f.type, readOnly: isReadOnly, hidden: isHidden }
-                  if (f.type === 'select' && Array.isArray(prop.options)) {
+                  if ((f.type === 'select' || f.type === 'multiSelect') && Array.isArray(prop.options)) {
                     guard.options = prop.options.map((o: any) => typeof o === 'string' ? o : o?.value ?? '')
                   }
                   if (f.type === 'link' && prop.foreignSheetId) {

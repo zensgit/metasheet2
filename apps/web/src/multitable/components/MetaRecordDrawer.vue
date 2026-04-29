@@ -87,6 +87,16 @@
             <option value="">—</option>
             <option v-for="opt in field.options ?? []" :key="opt.value" :value="opt.value">{{ opt.value }}</option>
           </select>
+          <select
+            v-else-if="canEditField(field.id) && field.type === 'multiSelect'"
+            :id="`drawer_field_${field.id}`"
+            class="meta-record-drawer__input meta-record-drawer__input--multi"
+            multiple
+            :value="multiSelectValue(field.id)"
+            @change="emit('patch', field.id, multiSelectEventValue($event))"
+          >
+            <option v-for="opt in field.options ?? []" :key="opt.value" :value="opt.value">{{ opt.value }}</option>
+          </select>
           <button
             v-else-if="canEditField(field.id) && field.type === 'link'"
             class="meta-record-drawer__link-btn"
@@ -255,6 +265,16 @@ function formatValue(v: unknown): string {
 
 function textControlValue(value: unknown): string {
   return value === null || value === undefined ? '' : String(value)
+}
+
+function multiSelectValue(fieldId: string): string[] {
+  const value = props.record?.data[fieldId]
+  return Array.isArray(value) ? value.map(String) : []
+}
+
+function multiSelectEventValue(event: Event): string[] {
+  const select = event.target as HTMLSelectElement
+  return Array.from(select.selectedOptions).map((option) => option.value)
 }
 
 function linkButtonLabel(fieldId: string): string {
@@ -476,6 +496,7 @@ function attachmentAllowsMultiple(field: MetaField): boolean {
 .meta-record-drawer__comment-anchor--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
 .meta-record-drawer__comment-anchor--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-record-drawer__input { width: 100%; padding: 4px 8px; border: 1px solid #ddd; border-radius: 3px; font-size: 13px; }
+.meta-record-drawer__input--multi { min-height: 96px; }
 .meta-record-drawer__textarea {
   width: 100%; min-height: 104px; padding: 6px 8px; border: 1px solid #ddd; border-radius: 3px;
   font-size: 13px; line-height: 1.45; resize: vertical; white-space: pre-wrap;

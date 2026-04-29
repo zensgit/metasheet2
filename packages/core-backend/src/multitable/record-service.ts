@@ -10,6 +10,7 @@ import {
   BATCH1_FIELD_TYPES,
   coerceBatch1Value,
   extractSelectOptions,
+  normalizeMultiSelectValue,
   normalizeJson,
   normalizeJsonArray,
   validateLongTextValue,
@@ -192,7 +193,14 @@ function mapFieldType(type: string): UniverMetaField['type'] {
   if (normalized === 'boolean' || normalized === 'checkbox') return 'boolean'
   if (normalized === 'date' || normalized === 'datetime') return 'date'
   if (normalized === 'formula') return 'formula'
-  if (normalized === 'select' || normalized === 'multiselect') return 'select'
+  if (normalized === 'select') return 'select'
+  if (
+    normalized === 'multiselect' ||
+    normalized === 'multi_select' ||
+    normalized === 'multi-select'
+  ) {
+    return 'multiSelect'
+  }
   if (normalized === 'link') return 'link'
   if (normalized === 'lookup') return 'lookup'
   if (normalized === 'rollup') return 'rollup'
@@ -260,7 +268,7 @@ function buildCreateFieldGuardMap(rows: unknown[]): Map<string, CreateFieldGuard
     if (!fieldId) continue
 
     const type = mapFieldType(String(row.type ?? 'string'))
-    if (type === 'select') {
+    if (type === 'select' || type === 'multiSelect') {
       guards.set(fieldId, {
         type,
         options: extractSelectOptions(row.property)?.map((option) => option.value) ?? [],
@@ -297,6 +305,9 @@ function buildFieldMutationGuardMap(fields: UniverMetaField[]): Map<string, Fiel
         hidden: isFieldPermissionHidden(field),
       }
       if (field.type === 'select') {
+        return [field.id, { ...base, options: field.options?.map((option) => option.value) ?? [] }] as const
+      }
+      if (field.type === 'multiSelect') {
         return [field.id, { ...base, options: field.options?.map((option) => option.value) ?? [] }] as const
       }
       if (field.type === 'link') {
@@ -384,6 +395,14 @@ export class RecordService {
         if (value !== '' && !allowed.has(value)) {
           throw new RecordValidationError(`Invalid select option for ${fieldId}: ${value}`)
         }
+      }
+      if (field.type === 'multiSelect') {
+        try {
+          patch[fieldId] = normalizeMultiSelectValue(value, fieldId, field.options ?? [])
+        } catch (error) {
+          throw new RecordValidationError(error instanceof Error ? error.message : String(error))
+        }
+        continue
       }
 
       if (field.type === 'link') {
@@ -645,6 +664,14 @@ export class RecordService {
           fieldErrors[fieldId] = 'Invalid select option'
           continue
         }
+      }
+      if (field.type === 'multiSelect') {
+        try {
+          patch[fieldId] = normalizeMultiSelectValue(value, fieldId, field.options ?? [])
+        } catch (error) {
+          fieldErrors[fieldId] = error instanceof Error ? error.message : String(error)
+        }
+        continue
       }
       if (field.type === 'link') {
         if (!field.link) {

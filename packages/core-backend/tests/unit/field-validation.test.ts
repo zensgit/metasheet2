@@ -445,6 +445,16 @@ describe('getDefaultValidationRules', () => {
     expect((rules[0].params as any).values).toEqual(['a', 'b', 'c'])
   })
 
+  test('multiSelect type returns enum from options and validates arrays', () => {
+    const rules = getDefaultValidationRules('multiSelect', {
+      options: [{ value: 'red' }, { value: 'blue' }],
+    })
+    expect(rules).toHaveLength(1)
+    expect(rules[0].type).toBe('enum')
+    expect(errors('multiSelect', ['red', 'blue'], rules)).toHaveLength(0)
+    expect(errors('multiSelect', ['red', 'missing'], rules)).toHaveLength(1)
+  })
+
   test('number type returns empty', () => {
     expect(getDefaultValidationRules('number')).toHaveLength(0)
   })

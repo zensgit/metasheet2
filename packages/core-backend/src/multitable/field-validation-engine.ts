@@ -109,6 +109,7 @@ function validatePattern(value: unknown, regex: string, flags?: string): boolean
 }
 
 function validateEnum(value: unknown, values: string[]): boolean {
+  if (Array.isArray(value)) return value.every((item) => values.includes(String(item)))
   if (typeof value === 'string') return values.includes(value)
   if (typeof value === 'number') return values.includes(String(value))
   return false
@@ -238,7 +239,8 @@ export function getDefaultValidationRules(
     case 'string':
     case 'longText':
       return [{ type: 'maxLength', params: { value: 10000 } }]
-    case 'select': {
+    case 'select':
+    case 'multiSelect': {
       const options = fieldProperty?.options
       if (Array.isArray(options)) {
         const values = options.map((opt: unknown) => {

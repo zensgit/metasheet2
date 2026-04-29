@@ -59,6 +59,57 @@ describe('MetaFieldManager', () => {
     app.unmount()
   })
 
+  it('emits multiSelect field properties when creating a configured field', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const createSpy = vi.fn()
+
+    const app = createApp({
+      render() {
+        return h(MetaFieldManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          sheets: [{ id: 'sheet_2', name: 'Related' }],
+          fields: [],
+          onCreateField: createSpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    const nameInput = container.querySelector('.meta-field-mgr__add-row .meta-field-mgr__input') as HTMLInputElement
+    const typeSelect = container.querySelector('.meta-field-mgr__add-row .meta-field-mgr__select') as HTMLSelectElement
+    nameInput.value = 'Tags'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    typeSelect.value = 'multiSelect'
+    typeSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    const optionInputs = Array.from(container.querySelectorAll('.meta-field-mgr__option-row .meta-field-mgr__input')) as HTMLInputElement[]
+    optionInputs[0].value = 'Urgent'
+    optionInputs[0].dispatchEvent(new Event('input', { bubbles: true }))
+    optionInputs[1].value = '#f56c6c'
+    optionInputs[1].dispatchEvent(new Event('input', { bubbles: true }))
+
+    ;(Array.from(container.querySelectorAll('.meta-field-mgr__btn-add')) as HTMLButtonElement[])
+      .find((button) => button.textContent?.includes('+ Add'))
+      ?.click()
+    await nextTick()
+
+    expect(createSpy).toHaveBeenCalledWith({
+      sheetId: 'sheet_1',
+      name: 'Tags',
+      type: 'multiSelect',
+      property: {
+        options: [{ value: 'Urgent', color: '#f56c6c' }],
+      },
+    })
+
+    app.unmount()
+  })
+
   it('emits attachment field property updates from the config panel', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)

@@ -7,6 +7,7 @@ export type MultitableFieldType =
   | 'date'
   | 'formula'
   | 'select'
+  | 'multiSelect'
   | 'link'
   | 'lookup'
   | 'rollup'
@@ -74,7 +75,14 @@ export function mapFieldType(type: string): MultitableFieldType | string {
   if (normalized === 'boolean' || normalized === 'checkbox') return 'boolean'
   if (normalized === 'date' || normalized === 'datetime') return 'date'
   if (normalized === 'formula') return 'formula'
-  if (normalized === 'select' || normalized === 'multiselect') return 'select'
+  if (normalized === 'select') return 'select'
+  if (
+    normalized === 'multiselect' ||
+    normalized === 'multi_select' ||
+    normalized === 'multi-select'
+  ) {
+    return 'multiSelect'
+  }
   if (normalized === 'link') return 'link'
   if (normalized === 'lookup') return 'lookup'
   if (normalized === 'rollup') return 'rollup'
@@ -147,7 +155,7 @@ export function sanitizeFieldProperty(
   property: unknown,
 ): Record<string, unknown> {
   const obj = normalizeJson(property)
-  if (type === 'select') {
+  if (type === 'select' || type === 'multiSelect') {
     const options = extractSelectOptions(obj) ?? []
     return { ...obj, options }
   }
@@ -302,7 +310,7 @@ export function serializeFieldRow(row: any): MultitableField {
     id: String(row.id),
     name: String(row.name),
     type: mappedType as MultitableFieldType,
-    ...(mappedType === 'select' ? { options: extractSelectOptions(property) } : {}),
+    ...(mappedType === 'select' || mappedType === 'multiSelect' ? { options: extractSelectOptions(property) } : {}),
     order: Number.isFinite(order) ? order : 0,
     property,
   }
@@ -418,6 +426,36 @@ export function validateLongTextValue(value: unknown, fieldId: string): string |
     throw new Error(`Long text value must be a string for ${fieldId}`)
   }
   return value
+}
+
+export function normalizeMultiSelectValue(
+  value: unknown,
+  fieldId: string,
+  options: string[],
+): string[] {
+  if (value === null || value === undefined || value === '') return []
+  if (!Array.isArray(value)) {
+    throw new Error(`Multi-select value must be an array for ${fieldId}`)
+  }
+
+  const allowed = new Set(options)
+  const seen = new Set<string>()
+  const normalized: string[] = []
+  for (const item of value) {
+    if (typeof item !== 'string' && typeof item !== 'number') {
+      throw new Error(`Multi-select option must be a string for ${fieldId}`)
+    }
+    const option = String(item).trim()
+    if (!option) continue
+    if (!allowed.has(option)) {
+      throw new Error(`Invalid multi-select option for ${fieldId}: ${option}`)
+    }
+    if (!seen.has(option)) {
+      seen.add(option)
+      normalized.push(option)
+    }
+  }
+  return normalized
 }
 
 /**

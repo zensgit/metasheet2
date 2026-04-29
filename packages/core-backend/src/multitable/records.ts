@@ -105,6 +105,36 @@ function normalizeSelectValue(
   return value
 }
 
+function normalizeMultiSelectValue(
+  value: unknown,
+  fieldId: string,
+  options: string[],
+): string[] {
+  if (value === null || value === undefined || value === '') return []
+  if (!Array.isArray(value)) {
+    throw new MultitableRecordValidationError(`Multi-select value must be array: ${fieldId}`)
+  }
+
+  const allowed = new Set(options)
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const item of value) {
+    if (typeof item !== 'string' && typeof item !== 'number') {
+      throw new MultitableRecordValidationError(`Multi-select option must be string: ${fieldId}`)
+    }
+    const option = String(item).trim()
+    if (!option) continue
+    if (!allowed.has(option)) {
+      throw new MultitableRecordValidationError(`Invalid multi-select option for ${fieldId}: ${option}`)
+    }
+    if (!seen.has(option)) {
+      seen.add(option)
+      out.push(option)
+    }
+  }
+  return out
+}
+
 function normalizeLinkIds(value: unknown): string[] {
   if (value === null || value === undefined) return []
 
@@ -170,6 +200,12 @@ function normalizeFieldValue(
   switch (field.type) {
     case 'select':
       return normalizeSelectValue(
+        value,
+        field.id,
+        (field.options ?? []).map((option) => option.value),
+      )
+    case 'multiSelect':
+      return normalizeMultiSelectValue(
         value,
         field.id,
         (field.options ?? []).map((option) => option.value),
