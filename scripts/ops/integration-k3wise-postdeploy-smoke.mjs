@@ -15,13 +15,16 @@ const REQUIRED_ROUTES = [
   ['GET', '/api/integration/status'],
   ['GET', '/api/integration/external-systems'],
   ['POST', '/api/integration/external-systems'],
+  ['GET', '/api/integration/external-systems/:id'],
   ['POST', '/api/integration/external-systems/:id/test'],
   ['GET', '/api/integration/pipelines'],
   ['POST', '/api/integration/pipelines'],
+  ['GET', '/api/integration/pipelines/:id'],
   ['POST', '/api/integration/pipelines/:id/dry-run'],
   ['POST', '/api/integration/pipelines/:id/run'],
   ['GET', '/api/integration/runs'],
   ['GET', '/api/integration/dead-letters'],
+  ['POST', '/api/integration/dead-letters/:id/replay'],
   ['GET', '/api/integration/staging/descriptors'],
   ['POST', '/api/integration/staging/install'],
 ]
@@ -177,8 +180,12 @@ function result(id, status, details = {}) {
 }
 
 function failResult(id, error) {
+  const details = error && error.details && typeof error.details === 'object'
+    ? { details: sanitizeBody(error.details) }
+    : {}
   return result(id, 'fail', {
     error: error && error.message ? redactText(error.message) : redactText(String(error)),
+    ...details,
   })
 }
 

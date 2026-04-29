@@ -15,6 +15,23 @@ const DEFAULT_ADAPTERS = [
   'erp:k3-wise-webapi',
   'erp:k3-wise-sqlserver',
 ]
+const DEFAULT_ROUTES = [
+  ['GET', '/api/integration/status'],
+  ['GET', '/api/integration/external-systems'],
+  ['POST', '/api/integration/external-systems'],
+  ['GET', '/api/integration/external-systems/:id'],
+  ['POST', '/api/integration/external-systems/:id/test'],
+  ['GET', '/api/integration/pipelines'],
+  ['POST', '/api/integration/pipelines'],
+  ['GET', '/api/integration/pipelines/:id'],
+  ['POST', '/api/integration/pipelines/:id/dry-run'],
+  ['POST', '/api/integration/pipelines/:id/run'],
+  ['GET', '/api/integration/runs'],
+  ['GET', '/api/integration/dead-letters'],
+  ['POST', '/api/integration/dead-letters/:id/replay'],
+  ['GET', '/api/integration/staging/descriptors'],
+  ['POST', '/api/integration/staging/install'],
+]
 const DEFAULT_STAGING_DESCRIPTORS = [
   { id: 'plm_raw_items', name: 'PLM Raw Items' },
   { id: 'standard_materials', name: 'Standard Materials' },
@@ -132,20 +149,8 @@ function createFakeServer(options = {}) {
         ok: true,
         data: {
           adapters: options.integrationAdapters || DEFAULT_ADAPTERS,
-          routes: [
-            ['GET', '/api/integration/status'],
-            ['GET', '/api/integration/external-systems'],
-            ['POST', '/api/integration/external-systems'],
-            ['POST', '/api/integration/external-systems/:id/test'],
-            ['GET', '/api/integration/pipelines'],
-            ['POST', '/api/integration/pipelines'],
-            ['POST', '/api/integration/pipelines/:id/dry-run'],
-            ['POST', '/api/integration/pipelines/:id/run'],
-            ['GET', '/api/integration/runs'],
-            ['GET', '/api/integration/dead-letters'],
-            ['GET', '/api/integration/staging/descriptors'],
-            ['POST', '/api/integration/staging/install'],
-          ].map(([method, routePath]) => ({ method, path: routePath })),
+          routes: (options.integrationRoutes || DEFAULT_ROUTES)
+            .map(([method, routePath]) => ({ method, path: routePath })),
         },
       })
       return
@@ -277,7 +282,9 @@ test('authenticated postdeploy smoke validates route and staging contracts witho
     const evidence = JSON.parse(evidenceText)
     assert.equal(evidence.authenticated, true)
     assert.equal(evidence.summary.fail, 0)
-    assert.equal(evidence.checks.find((check) => check.id === 'integration-route-contract').status, 'pass')
+    const routeCheck = evidence.checks.find((check) => check.id === 'integration-route-contract')
+    assert.equal(routeCheck.status, 'pass')
+    assert.equal(routeCheck.routesChecked, DEFAULT_ROUTES.length)
     for (const id of [
       'integration-list-external-systems',
       'integration-list-pipelines',
@@ -428,6 +435,35 @@ test('authenticated postdeploy smoke fails when status omits a required source a
     const routeCheck = evidence.checks.find((check) => check.id === 'integration-route-contract')
     assert.equal(routeCheck.status, 'fail')
     assert.match(routeCheck.error, /missing required adapters or routes/)
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('authenticated postdeploy smoke fails when status omits a required replay route', async () => {
+  const fake = createFakeServer({
+    integrationRoutes: DEFAULT_ROUTES.filter(
+      ([method, routePath]) =>
+        `${method} ${routePath}` !== 'POST /api/integration/dead-letters/:id/replay',
+    ),
+  })
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--auth-token', 'test.jwt.token',
+      '--require-auth',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 1)
+    const evidence = JSON.parse(readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8'))
+    const routeCheck = evidence.checks.find((check) => check.id === 'integration-route-contract')
+    assert.equal(routeCheck.status, 'fail')
+    assert.match(routeCheck.error, /missing required adapters or routes/)
+    assert.deepEqual(routeCheck.details.missingRoutes, ['POST /api/integration/dead-letters/:id/replay'])
   } finally {
     await fake.close()
     rmSync(outDir, { recursive: true, force: true })
