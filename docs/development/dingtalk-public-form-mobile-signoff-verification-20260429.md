@@ -9,6 +9,7 @@ Changed files:
 
 - `scripts/ops/dingtalk-public-form-mobile-signoff.mjs`
 - `scripts/ops/dingtalk-public-form-mobile-signoff.test.mjs`
+- `packages/core-backend/src/tests/rate-limiting.test.ts`
 - `docs/development/dingtalk-public-form-mobile-signoff-design-20260429.md`
 - `docs/development/dingtalk-public-form-mobile-signoff-verification-20260429.md`
 
@@ -17,8 +18,9 @@ Changed files:
 ```bash
 node --test scripts/ops/dingtalk-public-form-mobile-signoff.test.mjs
 node scripts/ops/dingtalk-public-form-mobile-signoff.mjs --init-kit /tmp/dingtalk-mobile-signoff-kit-verify
+pnpm --filter @metasheet/core-backend exec vitest run src/tests/rate-limiting.test.ts --watch=false
 git diff --check
-git diff --cached -- scripts/ops/dingtalk-public-form-mobile-signoff.mjs scripts/ops/dingtalk-public-form-mobile-signoff.test.mjs docs/development/dingtalk-public-form-mobile-signoff-design-20260429.md docs/development/dingtalk-public-form-mobile-signoff-verification-20260429.md \
+git diff --cached -- scripts/ops/dingtalk-public-form-mobile-signoff.mjs scripts/ops/dingtalk-public-form-mobile-signoff.test.mjs packages/core-backend/src/tests/rate-limiting.test.ts docs/development/dingtalk-public-form-mobile-signoff-design-20260429.md docs/development/dingtalk-public-form-mobile-signoff-verification-20260429.md \
   | rg -v "git diff --cached -- scripts/ops/dingtalk-public-form-mobile-signoff" \
   | rg -v "rg -n" \
   | rg -n "(access_token=[A-Za-z0-9]|SEC[0-9a-fA-F]{8,}|Authorization:|Bearer [A-Za-z0-9._-]{20,}|https://oapi\\.dingtalk\\.com/robot/send|JWT_SECRET|DINGTALK_APP_SECRET|publicToken=[A-Za-z0-9._~+/=-]{12,})" || true
@@ -28,6 +30,7 @@ git diff --cached -- scripts/ops/dingtalk-public-form-mobile-signoff.mjs scripts
 
 - Node test: passed, 4 tests.
 - Kit initialization command: passed and wrote `/tmp/dingtalk-mobile-signoff-kit-verify`.
+- Focused rate-limiter test: passed, 36 tests.
 - `git diff --check`: passed.
 - Diff secret scan: no matches for DingTalk webhook/token/JWT/public-token patterns.
 
@@ -39,6 +42,11 @@ The new Node test covers:
 - Strict compile with screenshot-free structured evidence.
 - Rejection of denied-submit checks that do not prove zero record inserts.
 - Rejection of secret-like evidence text, including public form token leakage.
+
+The rate-limiter assertion changed from exact equality to a bounded range
+because token refill can add a fractional amount between two immediate
+consumes on CI. This keeps the behavioral proof intact: the multi-token request
+is rejected and the bucket still has roughly the two expected remaining tokens.
 
 ## Expected Operator Flow
 
