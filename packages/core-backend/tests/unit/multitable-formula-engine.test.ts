@@ -84,6 +84,18 @@ describe('FormulaEngine - new functions', () => {
     })
   })
 
+  describe('DATEDIFF', () => {
+    it('calculates day difference using end date then start date', async () => {
+      const result = await engine.calculate('=DATEDIFF("2024-01-31","2024-01-01")', makeContext())
+      expect(result).toBe(30)
+    })
+
+    it('returns #VALUE! for invalid dates', async () => {
+      const result = await engine.calculate('=DATEDIFF("not-a-date","2024-01-01")', makeContext())
+      expect(result).toBe('#VALUE!')
+    })
+  })
+
   describe('COUNTA', () => {
     it('counts non-empty values', async () => {
       const result = await engine.calculate('=COUNTA("a","b","",NULL)', makeContext())
