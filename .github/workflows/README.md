@@ -37,7 +37,7 @@ This folder contains GitHub Actions that validate Phase 5 SLOs against a Prometh
 
 - `dingtalk-oauth-stability-recording-lite.yml`
   - Triggers every 2 hours (`15 */2 * * *`) and via manual dispatch.
-  - Restores the deploy SSH key, reapplies the on-prem Alertmanager webhook config from `SLACK_WEBHOOK_URL` when available, runs `scripts/ops/dingtalk-oauth-stability-check.sh` against `142.171.239.56`, and uploads JSON/log/summary artifacts.
+  - Restores the deploy SSH key, reapplies the on-prem Alertmanager webhook config from `ALERTMANAGER_WEBHOOK_URL`, `ALERT_WEBHOOK_URL`, `SLACK_WEBHOOK_URL`, or `ATTENDANCE_ALERT_SLACK_WEBHOOK_URL` when available, runs `scripts/ops/dingtalk-oauth-stability-check.sh` against `142.171.239.56`, and uploads JSON/log/summary artifacts.
   - Does not run the Slack drill; it is recording-only and fails the workflow when `healthy != true`.
   - Like other scheduled/manual workflows, it only becomes live after the workflow file exists on the default branch.
 
@@ -45,7 +45,7 @@ This folder contains GitHub Actions that validate Phase 5 SLOs against a Prometh
 
  - `METRICS_URL`: e.g., `https://staging.example.com/metrics/prom`.
  - `METRICS_AUTH_HEADER` (optional): e.g., `Authorization: Bearer <token>`.
- - `SLACK_WEBHOOK_URL` (optional for nightly failures / success enrichment; also used to self-heal on-prem Alertmanager webhook config before DingTalk OAuth stability checks).
+ - `ALERTMANAGER_WEBHOOK_URL`, `ALERT_WEBHOOK_URL`, `SLACK_WEBHOOK_URL`, or `ATTENDANCE_ALERT_SLACK_WEBHOOK_URL` (one optional webhook secret is used to self-heal on-prem Alertmanager config before DingTalk OAuth stability checks; `SLACK_WEBHOOK_URL` also powers older nightly notification workflows).
  - `SLACK_CHANNEL` (optional): e.g., `alerts`.
  - `GRAFANA_API_TOKEN` (ops deploy only, for dashboard upload).
  - `REDIS_URL` (optional: enables Redis-backed cache validation).

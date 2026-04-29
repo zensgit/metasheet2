@@ -21,10 +21,17 @@ test('DingTalk OAuth stability workflow reapplies Alertmanager webhook before ch
   assertContains(raw, 'cron:', 'workflow schedule')
   assertContains(raw, '- name: Prepare SSH key', 'ssh setup')
   assertContains(raw, '- name: Reapply Alertmanager webhook config', 'webhook self-heal step')
-  assertContains(raw, 'ALERTMANAGER_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}', 'webhook self-heal step')
+  assertContains(raw, 'id: webhook_self_heal', 'webhook self-heal step')
+  assertContains(
+    raw,
+    'ALERTMANAGER_WEBHOOK_URL: ${{ secrets.ALERTMANAGER_WEBHOOK_URL || secrets.ALERT_WEBHOOK_URL || secrets.SLACK_WEBHOOK_URL || secrets.ATTENDANCE_ALERT_SLACK_WEBHOOK_URL }}',
+    'webhook self-heal step',
+  )
   assertContains(raw, 'DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}', 'webhook self-heal step')
   assertContains(raw, 'DEPLOY_USER: ${{ secrets.DEPLOY_USER }}', 'webhook self-heal step')
-  assertContains(raw, 'SLACK_WEBHOOK_URL is not set; Alertmanager webhook self-heal skipped.', 'webhook self-heal skip notice')
+  assertContains(raw, 'echo "webhook_secret_available=false" >> "$GITHUB_OUTPUT"', 'webhook self-heal output')
+  assertContains(raw, 'echo "webhook_secret_available=true" >> "$GITHUB_OUTPUT"', 'webhook self-heal output')
+  assertContains(raw, 'No Alertmanager webhook secret is set; checked ALERTMANAGER_WEBHOOK_URL, ALERT_WEBHOOK_URL, SLACK_WEBHOOK_URL, and ATTENDANCE_ALERT_SLACK_WEBHOOK_URL. Alertmanager webhook self-heal skipped.', 'webhook self-heal skip notice')
   assertContains(raw, 'SSH_USER_HOST="${DEPLOY_USER}@${DEPLOY_HOST}"', 'webhook self-heal remote target')
   assertContains(raw, 'SSH_KEY="${HOME}/.ssh/deploy_key"', 'webhook self-heal remote key')
   assertContains(raw, 'scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh set', 'webhook self-heal command')
@@ -34,5 +41,6 @@ test('DingTalk OAuth stability workflow reapplies Alertmanager webhook before ch
     'webhook self-heal must run before remote stability check',
   )
   assertContains(raw, '- name: Fail if stability check is unhealthy', 'final hard gate')
+  assertContains(raw, "WEBHOOK_SECRET_AVAILABLE: ${{ steps.webhook_self_heal.outputs.webhook_secret_available || 'false' }}", 'summary env')
   assertContains(raw, 'stability check completed but reported healthy=false', 'final hard gate')
 })

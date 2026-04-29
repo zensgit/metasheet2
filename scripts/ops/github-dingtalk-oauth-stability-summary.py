@@ -29,6 +29,7 @@ def infer_failure_reasons(
     payload: Optional[dict[str, Any]],
     stability_rc: str,
     healthy: str,
+    webhook_secret_available: str,
 ) -> list[str]:
     reasons: list[str] = []
     if stability_rc != '0':
@@ -48,6 +49,10 @@ def infer_failure_reasons(
             )
         if webhook.get('configured') is not True:
             reasons.append('Alertmanager webhook is not configured')
+            if webhook_secret_available != 'true':
+                reasons.append(
+                    'No supported GitHub webhook secret was available for Alertmanager self-heal'
+                )
         elif webhook.get('host') != 'hooks.slack.com':
             reasons.append(f'Alertmanager webhook host drifted to {webhook.get("host")}')
         if int(alertmanager.get('notifyErrorsLastWindow') or 0) > 0:
@@ -85,6 +90,10 @@ def infer_next_actions(
             actions.append('Check the on-prem backend container health and `/health` response before retrying the workflow.')
         elif 'webhook is not configured' in reason or 'host drifted' in reason:
             actions.append('Reapply the persisted Alertmanager webhook configuration on the on-prem host.')
+        elif 'No supported GitHub webhook secret' in reason:
+            actions.append(
+                'Configure one supported GitHub Actions secret: ALERTMANAGER_WEBHOOK_URL, ALERT_WEBHOOK_URL, SLACK_WEBHOOK_URL, or ATTENDANCE_ALERT_SLACK_WEBHOOK_URL.'
+            )
         elif 'notify errors' in reason:
             actions.append('Inspect Alertmanager and webhook bridge logs, then confirm Slack delivery still resolves firing and resolved notifications.')
         elif 'root filesystem is at or above gate' in reason:
@@ -109,7 +118,8 @@ def make_summary_payload(
 ) -> dict[str, Any]:
     status = 'PASS' if stability_rc == '0' and healthy == 'true' else 'FAIL'
     run_url = github_run_url()
-    failure_reasons = infer_failure_reasons(payload, stability_rc, healthy)
+    webhook_secret_available = os.environ.get('WEBHOOK_SECRET_AVAILABLE', 'false')
+    failure_reasons = infer_failure_reasons(payload, stability_rc, healthy, webhook_secret_available)
     next_actions = infer_next_actions(payload, failure_reasons)
     summary_json_path = summary_path.with_suffix('.json')
 
@@ -129,6 +139,9 @@ def make_summary_payload(
             'runAttempt': os.environ.get('GITHUB_RUN_ATTEMPT', ''),
             'runUrl': run_url,
         },
+        'selfHeal': {
+            'webhookSecretAvailable': webhook_secret_available == 'true',
+        },
         'snapshot': payload,
         'artifacts': {
             'jsonPath': str(json_path),
@@ -146,9 +159,13 @@ def markdown_lines(summary: dict[str, Any]) -> list[str]:
     lines.append(f'- Stability rc: `{summary["stabilityRc"]}`')
     lines.append(f'- Healthy: `{str(summary["healthy"]).lower()}`')
     workflow = summary.get('workflow') or {}
+    self_heal = summary.get('selfHeal') or {}
     run_url = workflow.get('runUrl')
     if run_url:
         lines.append(f'- Run URL: `{run_url}`')
+    lines.append(
+        f'- Webhook self-heal secret available: `{str(bool(self_heal.get("webhookSecretAvailable"))).lower()}`'
+    )
     lines.append('')
 
     if payload:

@@ -23,9 +23,9 @@ Add a pre-check self-heal step to
 `.github/workflows/dingtalk-oauth-stability-recording-lite.yml`:
 
 1. Restore the deploy SSH key as before.
-2. If `SLACK_WEBHOOK_URL` is available, call
+2. If any supported webhook secret is available, call
    `scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh set` with:
-   - `ALERTMANAGER_WEBHOOK_URL=${{ secrets.SLACK_WEBHOOK_URL }}`
+   - `ALERTMANAGER_WEBHOOK_URL=${{ secrets.ALERTMANAGER_WEBHOOK_URL || secrets.ALERT_WEBHOOK_URL || secrets.SLACK_WEBHOOK_URL || secrets.ATTENDANCE_ALERT_SLACK_WEBHOOK_URL }}`
    - `SSH_USER_HOST=${DEPLOY_USER}@${DEPLOY_HOST}`
    - `SSH_KEY=${HOME}/.ssh/deploy_key`
 3. If the secret is absent, emit a GitHub notice and continue to the existing
@@ -39,8 +39,9 @@ missing or invalid.
 
 ## Safety
 
-- The webhook URL comes only from the existing GitHub secret
-  `SLACK_WEBHOOK_URL`.
+- The webhook URL comes only from GitHub secrets. The workflow checks
+  `ALERTMANAGER_WEBHOOK_URL`, `ALERT_WEBHOOK_URL`, `SLACK_WEBHOOK_URL`, then
+  `ATTENDANCE_ALERT_SLACK_WEBHOOK_URL`.
 - The helper script validates that the value is an HTTP/HTTPS URL.
 - The helper writes the remote env file via base64 and `install -m 600`.
 - The workflow does not print the webhook URL.
@@ -52,4 +53,4 @@ missing or invalid.
 - Does not create or rotate Slack webhooks.
 - Does not commit any webhook value.
 - Does not change the DingTalk OAuth health criteria.
-- Does not make missing `SLACK_WEBHOOK_URL` appear healthy.
+- Does not make missing webhook secrets appear healthy.
