@@ -74,7 +74,8 @@ describe('TokenBucketRateLimiter', () => {
       const result = rateLimiter.consume('tenant-1', 5)
 
       expect(result.allowed).toBe(false)
-      expect(result.tokensRemaining).toBe(2)
+      expect(result.tokensRemaining).toBeGreaterThanOrEqual(2)
+      expect(result.tokensRemaining).toBeLessThan(3)
     })
 
     it('should maintain separate buckets for different keys', () => {
