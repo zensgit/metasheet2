@@ -482,6 +482,45 @@ test('validate-dingtalk-staging-evidence-packet rejects secret-like raw evidence
   }
 })
 
+test('validate-dingtalk-staging-evidence-packet rejects raw token and password assignments', () => {
+  const tmpDir = makeTmpDir()
+  const packetDir = path.join(tmpDir, 'packet')
+  const reportPath = path.join(tmpDir, 'publish-check.json')
+
+  try {
+    const evidenceDir = writePacket(packetDir)
+    mkdirSync(path.join(evidenceDir, 'workspace', 'artifacts', 'no-email-user-create-bind'), { recursive: true })
+    writeFileSync(
+      path.join(evidenceDir, 'workspace', 'artifacts', 'no-email-user-create-bind', 'admin-note.txt'),
+      [
+        'DINGTALK_P4_AUTH_TOKEN=token-value-0123456789abcdef',
+        'ADMIN_TOKEN: admin-token-0123456789abcdef',
+        'temporary password: PlainTempPassword123',
+        'password=<redacted>',
+        'AUTH_TOKEN=$DINGTALK_P4_AUTH_TOKEN',
+      ].join('\n'),
+      'utf8',
+    )
+
+    const result = runValidator(['--packet-dir', packetDir, '--output-json', reportPath])
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /auth_token_assignment/)
+    assert.match(result.stderr, /password_assignment/)
+    const reportText = readFileSync(reportPath, 'utf8')
+    assert.doesNotMatch(reportText, /token-value-0123456789abcdef/)
+    assert.doesNotMatch(reportText, /admin-token-0123456789abcdef/)
+    assert.doesNotMatch(reportText, /PlainTempPassword123/)
+    const report = JSON.parse(reportText)
+    assert.equal(report.secretFindings.some((finding) => finding.pattern === 'auth_token_assignment'), true)
+    assert.equal(report.secretFindings.some((finding) => finding.pattern === 'password_assignment'), true)
+    assert.equal(report.secretFindings.some((finding) => finding.preview.includes('token-value')), false)
+    assert.equal(report.secretFindings.some((finding) => finding.preview.includes('PlainTempPassword123')), false)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('validate-dingtalk-staging-evidence-packet rejects unknown arguments', () => {
   const result = runValidator(['--unknown'])
 
