@@ -7,7 +7,7 @@ Branch: `codex/mfeishu3-longtext-field-20260429`
 
 Result: passed.
 
-The slice was verified with focused backend unit tests, frontend component tests, frontend typecheck, backend build, and diff hygiene.
+The slice was rebased onto `origin/main@74f96bc6c` and verified with focused backend unit tests, frontend component tests, frontend typecheck, backend build, and diff hygiene.
 
 ## Backend Tests
 
@@ -87,7 +87,7 @@ Result:
 Command:
 
 ```bash
-git diff --check
+git diff --check origin/main...HEAD
 ```
 
 Result:
