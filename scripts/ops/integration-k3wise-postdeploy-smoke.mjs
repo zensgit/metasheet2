@@ -41,6 +41,70 @@ const REQUIRED_STAGING_DESCRIPTORS = [
   'integration_exceptions',
   'integration_run_log',
 ]
+const REQUIRED_STAGING_FIELDS = {
+  plm_raw_items: [
+    'sourceSystemId',
+    'objectType',
+    'sourceId',
+    'revision',
+    'code',
+    'name',
+    'rawPayload',
+    'fetchedAt',
+    'pipelineRunId',
+  ],
+  standard_materials: [
+    'code',
+    'name',
+    'uom',
+    'category',
+    'status',
+    'erpSyncStatus',
+    'erpExternalId',
+    'erpBillNo',
+    'erpResponseCode',
+    'erpResponseMessage',
+    'lastSyncedAt',
+  ],
+  bom_cleanse: [
+    'parentCode',
+    'childCode',
+    'quantity',
+    'uom',
+    'sequence',
+    'revision',
+    'validFrom',
+    'validTo',
+    'status',
+  ],
+  integration_exceptions: [
+    'pipelineId',
+    'runId',
+    'idempotencyKey',
+    'errorCode',
+    'errorMessage',
+    'sourcePayload',
+    'transformedPayload',
+    'status',
+    'assignee',
+    'note',
+  ],
+  integration_run_log: [
+    'pipelineId',
+    'runId',
+    'mode',
+    'triggeredBy',
+    'status',
+    'rowsRead',
+    'rowsCleaned',
+    'rowsWritten',
+    'rowsFailed',
+    'durationMs',
+    'startedAt',
+    'finishedAt',
+    'errorSummary',
+  ],
+}
 const TOKEN_PATTERN = /([A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._-]{16,})/g
 
 class K3WisePostdeploySmokeError extends Error {
@@ -294,13 +358,46 @@ function assertStagingDescriptors(body) {
   if (!Array.isArray(data)) {
     throw new K3WisePostdeploySmokeError('staging descriptors response must be an array')
   }
-  const ids = data.map((descriptor) => descriptor && descriptor.id).filter(Boolean)
+  const descriptorsById = new Map()
+  for (const descriptor of data) {
+    if (descriptor && typeof descriptor.id === 'string') descriptorsById.set(descriptor.id, descriptor)
+  }
+  const ids = Array.from(descriptorsById.keys())
   for (const id of REQUIRED_STAGING_DESCRIPTORS) {
-    if (!ids.includes(id)) {
+    if (!descriptorsById.has(id)) {
       throw new K3WisePostdeploySmokeError(`missing staging descriptor ${id}`, { ids })
     }
   }
-  return { descriptors: ids, descriptorsChecked: REQUIRED_STAGING_DESCRIPTORS.length }
+  const missingFields = {}
+  let fieldsChecked = 0
+  for (const id of REQUIRED_STAGING_DESCRIPTORS) {
+    const descriptor = descriptorsById.get(id)
+    const fieldIds = new Set(
+      Array.isArray(descriptor.fields)
+        ? descriptor.fields
+          .map((field) => {
+            if (typeof field === 'string') return field
+            if (field && typeof field.id === 'string') return field.id
+            return ''
+          })
+          .filter(Boolean)
+        : [],
+    )
+    const requiredFields = REQUIRED_STAGING_FIELDS[id] || []
+    fieldsChecked += requiredFields.length
+    const missing = requiredFields.filter((fieldId) => !fieldIds.has(fieldId))
+    if (missing.length > 0) missingFields[id] = missing
+  }
+  if (Object.keys(missingFields).length > 0) {
+    throw new K3WisePostdeploySmokeError('staging descriptors are missing required fields', {
+      missingFields,
+    })
+  }
+  return {
+    descriptors: ids,
+    descriptorsChecked: REQUIRED_STAGING_DESCRIPTORS.length,
+    fieldsChecked,
+  }
 }
 
 function assertListResponse(body, probeId) {
