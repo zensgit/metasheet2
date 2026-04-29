@@ -50,6 +50,8 @@ Final handoff tests now cover:
 - handoff summary `mobileSignoff.required=true` and `includedCount=1`;
 - rejection when `--require-mobile-signoff-pass` is used without an included
   mobile signoff directory;
+- sanitized failure arrays for validator and preflight errors, including
+  secret-like path fragments;
 - existing failure-summary and secret-redaction behavior.
 
 Final closeout tests now cover:

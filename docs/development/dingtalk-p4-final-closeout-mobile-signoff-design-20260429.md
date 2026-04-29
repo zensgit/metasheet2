@@ -89,6 +89,8 @@ This slice does not change the underlying redaction model:
 - only strict compiled and redacted mobile signoff output should be included;
 - handoff and closeout summaries still redact DingTalk webhooks, signing
   secrets, JWTs, bearer tokens, public form tokens, timestamps, and signatures;
+- final handoff failure arrays are sanitized before JSON/Markdown summary output
+  so validator or preflight errors cannot echo raw credential fragments;
 - docs contain placeholder paths only.
 
 ## Non-goals

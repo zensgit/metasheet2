@@ -115,6 +115,10 @@ function redactString(value) {
     .replace(/\beyJ[A-Za-z0-9._-]{20,}\b/g, '<jwt:redacted>')
 }
 
+function displayPath(file) {
+  return redactString(relativePath(file))
+}
+
 function readJsonIfExists(file) {
   if (!existsSync(file) || !statSync(file).isFile()) return null
   return JSON.parse(readFileSync(file, 'utf8'))
@@ -124,6 +128,21 @@ function compactText(value) {
   const text = redactString(value ?? '').trim()
   if (!text) return ''
   return text.length > 4000 ? `${text.slice(0, 3997)}...` : text
+}
+
+function sanitizeFailureMessage(value) {
+  return compactText(value) || '<empty failure>'
+}
+
+function sanitizeFailureMessages(value) {
+  return Array.isArray(value) ? value.map((failure) => sanitizeFailureMessage(failure)) : value
+}
+
+function sanitizeSummaryValue(value) {
+  if (typeof value === 'string') return redactString(value)
+  if (Array.isArray(value)) return value.map((item) => sanitizeSummaryValue(item))
+  if (!value || typeof value !== 'object') return value
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, sanitizeSummaryValue(entry)]))
 }
 
 function runNodeStep(id, label, args) {
@@ -136,7 +155,7 @@ function runNodeStep(id, label, args) {
   return {
     id,
     label,
-    command: `node ${args.join(' ')}`,
+    command: compactText(`node ${args.join(' ')}`),
     status: result.status === 0 ? 'pass' : 'fail',
     exitCode: result.status ?? 1,
     startedAt,
@@ -191,14 +210,16 @@ function canWriteFailureSummary(opts) {
 
 function sanitizePublishCheck(value) {
   if (!value || typeof value !== 'object') return value
+  const sanitized = sanitizeSummaryValue(value)
   return {
-    ...value,
-    secretFindings: Array.isArray(value.secretFindings)
-      ? value.secretFindings.map((finding) => ({
+    ...sanitized,
+    failures: sanitizeFailureMessages(sanitized.failures),
+    secretFindings: Array.isArray(sanitized.secretFindings)
+      ? sanitized.secretFindings.map((finding) => ({
           ...finding,
           preview: finding?.preview ? '<redacted>' : finding?.preview,
         }))
-      : value.secretFindings,
+      : sanitized.secretFindings,
   }
 }
 
@@ -276,23 +297,23 @@ function buildSummary(opts, steps) {
     tool: 'dingtalk-p4-final-handoff',
     generatedAt: new Date().toISOString(),
     status: steps.every((step) => step.status === 'pass') && publishCheck?.status === 'pass' ? 'pass' : 'fail',
-    sessionDir: relativePath(opts.sessionDir),
-    sessionRunId: typeof sessionSummary?.runId === 'string' ? sessionSummary.runId : '',
-    outputDir: relativePath(opts.outputDir),
+    sessionDir: displayPath(opts.sessionDir),
+    sessionRunId: typeof sessionSummary?.runId === 'string' ? redactString(sessionSummary.runId) : '',
+    outputDir: displayPath(opts.outputDir),
     steps,
     publishCheck,
     mobileSignoff: {
       required: opts.requireMobileSignoffPass,
       includedCount: publishCheck?.includedMobileSignoffCount ?? 0,
-      sources: opts.includeMobileSignoffDirs.map((dir) => relativePath(dir)),
+      sources: opts.includeMobileSignoffDirs.map((dir) => displayPath(dir)),
     },
     failures,
     outputs: {
-      manifest: relativePath(path.join(opts.outputDir, 'manifest.json')),
-      readme: relativePath(path.join(opts.outputDir, 'README.md')),
-      publishCheckJson: relativePath(opts.publishCheckJson),
-      summaryJson: relativePath(opts.summaryJson),
-      summaryMd: relativePath(opts.summaryMd),
+      manifest: displayPath(path.join(opts.outputDir, 'manifest.json')),
+      readme: displayPath(path.join(opts.outputDir, 'README.md')),
+      publishCheckJson: displayPath(opts.publishCheckJson),
+      summaryJson: displayPath(opts.summaryJson),
+      summaryMd: displayPath(opts.summaryMd),
     },
   }
 }
@@ -331,19 +352,19 @@ async function main() {
 
     const summary = buildSummary(opts, steps)
     writeSummary(summary, opts)
-    console.log(`Wrote ${relativePath(opts.summaryJson)}`)
-    console.log(`Wrote ${relativePath(opts.summaryMd)}`)
+    console.log(`Wrote ${displayPath(opts.summaryJson)}`)
+    console.log(`Wrote ${displayPath(opts.summaryMd)}`)
     if (summary.status !== 'pass') process.exit(1)
   } catch (error) {
     if (opts && canWriteFailureSummary(opts)) {
       const summary = buildSummary(opts, steps)
       summary.status = 'fail'
-      summary.failures.push(error instanceof Error ? error.message : String(error))
+      summary.failures.push(sanitizeFailureMessage(error instanceof Error ? error.message : String(error)))
       writeSummary(summary, opts)
-      console.log(`Wrote ${relativePath(opts.summaryJson)}`)
-      console.log(`Wrote ${relativePath(opts.summaryMd)}`)
+      console.log(`Wrote ${displayPath(opts.summaryJson)}`)
+      console.log(`Wrote ${displayPath(opts.summaryMd)}`)
     }
-    console.error(`[dingtalk-p4-final-handoff] ERROR: ${error instanceof Error ? error.message : String(error)}`)
+    console.error(`[dingtalk-p4-final-handoff] ERROR: ${sanitizeFailureMessage(error instanceof Error ? error.message : String(error))}`)
     process.exit(1)
   }
 }
