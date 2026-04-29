@@ -38,6 +38,12 @@ When `METASHEET_K3WISE_SMOKE_TOKEN` is configured, operators can provide tenant
 scope via manual input or repo variable and the authenticated smoke will use it
 for the read-only list probes.
 
+If the long-lived repository secret is not configured, the workflows can also
+mint a temporary token from the deploy host backend runtime when `tenant_id` /
+`METASHEET_TENANT_ID` and deploy SSH inputs are available. That fallback is
+non-blocking for the deploy workflow and strict for manual `require_auth=true`
+runs.
+
 The tenant scope is carried only into the four read-only control-plane probes:
 
 - `/api/integration/external-systems?tenantId=<tenant>&limit=1`
