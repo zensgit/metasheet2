@@ -29,16 +29,19 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
 
       - name: Reapply Alertmanager webhook config
+        id: webhook_self_heal
         env:
-          ALERTMANAGER_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ALERTMANAGER_WEBHOOK_URL: ${{ secrets.ALERTMANAGER_WEBHOOK_URL || secrets.ALERT_WEBHOOK_URL || secrets.SLACK_WEBHOOK_URL || secrets.ATTENDANCE_ALERT_SLACK_WEBHOOK_URL }}
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
         run: |
           set -euo pipefail
           if [[ -z "${ALERTMANAGER_WEBHOOK_URL:-}" ]]; then
-            echo "::notice::SLACK_WEBHOOK_URL is not set; Alertmanager webhook self-heal skipped."
+            echo "webhook_secret_available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No Alertmanager webhook secret is set; checked ALERTMANAGER_WEBHOOK_URL, ALERT_WEBHOOK_URL, SLACK_WEBHOOK_URL, and ATTENDANCE_ALERT_SLACK_WEBHOOK_URL. Alertmanager webhook self-heal skipped."
             exit 0
           fi
+          echo "webhook_secret_available=true" >> "$GITHUB_OUTPUT"
 
           SSH_USER_HOST="${DEPLOY_USER}@${DEPLOY_HOST}" \
           SSH_KEY="${HOME}/.ssh/deploy_key" \
@@ -82,6 +85,7 @@ jobs:
         env:
           STABILITY_RC: ${{ steps.stability.outputs.stability_rc }}
           HEALTHY: ${{ steps.stability.outputs.healthy }}
+          WEBHOOK_SECRET_AVAILABLE: ${{ steps.webhook_self_heal.outputs.webhook_secret_available || 'false' }}
           JSON_PATH: ${{ steps.stability.outputs.json_path }}
           LOG_PATH: ${{ steps.stability.outputs.log_path }}
         run: |
