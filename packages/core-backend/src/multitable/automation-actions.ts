@@ -8,6 +8,7 @@ export type AutomationActionType =
   | 'create_record'
   | 'send_webhook'
   | 'send_notification'
+  | 'send_email'
   | 'send_dingtalk_group_message'
   | 'send_dingtalk_person_message'
   | 'lock_record'
@@ -17,6 +18,7 @@ export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'create_record',
   'send_webhook',
   'send_notification',
+  'send_email',
   'send_dingtalk_group_message',
   'send_dingtalk_person_message',
   'lock_record',
@@ -45,6 +47,13 @@ export interface SendWebhookConfig {
 export interface SendNotificationConfig {
   userIds: string[]
   message: string
+}
+
+/** Config shape for send_email */
+export interface SendEmailConfig {
+  recipients: string[]
+  subjectTemplate: string
+  bodyTemplate: string
 }
 
 /** Config shape for send_dingtalk_group_message */
