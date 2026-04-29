@@ -54,6 +54,15 @@ function normalizePositiveIntegerOption(value, { defaultValue, max }) {
   return Math.min(numeric, max)
 }
 
+function isPlainObject(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+function resolveTargetOptions(pipeline = {}) {
+  const targetOptions = pipeline.options && pipeline.options.target
+  return isPlainObject(targetOptions) ? { ...targetOptions } : {}
+}
+
 function requireDependency(deps, name, methods) {
   const value = deps[name]
   if (!value) throw new Error(`createPipelineRunner: ${name} is required`)
@@ -458,6 +467,7 @@ function createPipelineRunner(deps = {}) {
             object: context.pipeline.targetObject,
             records: cleanRecords.map((item) => item.targetRecord),
             keyFields: ['_integration_idempotency_key'],
+            options: resolveTargetOptions(context.pipeline),
           }), cleanRecords)
           metrics.rowsWritten += writeResult.written || 0
           metrics.rowsFailed += writeResult.failed || 0
