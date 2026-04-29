@@ -28,6 +28,22 @@ jobs:
           printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
 
+      - name: Reapply Alertmanager webhook config
+        env:
+          ALERTMANAGER_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${ALERTMANAGER_WEBHOOK_URL:-}" ]]; then
+            echo "::notice::SLACK_WEBHOOK_URL is not set; Alertmanager webhook self-heal skipped."
+            exit 0
+          fi
+
+          SSH_USER_HOST="${DEPLOY_USER}@${DEPLOY_HOST}" \
+          SSH_KEY="${HOME}/.ssh/deploy_key" \
+          bash scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh set
+
       - name: Run remote stability check
         id: stability
         continue-on-error: true
