@@ -97,19 +97,129 @@ function writeEvidence(tmpDir, evidence = makePassingEvidence()) {
   return input
 }
 
+function initKit(tmpDir) {
+  const kitDir = path.join(tmpDir, 'kit')
+  const result = runScript(['--init-kit', kitDir])
+  assert.equal(result.status, 0, result.stderr)
+  return {
+    kitDir,
+    input: path.join(kitDir, 'mobile-signoff.json'),
+  }
+}
+
 test('dingtalk-public-form-mobile-signoff initializes an editable kit', () => {
   const tmpDir = makeTmpDir()
   try {
-    const kitDir = path.join(tmpDir, 'kit')
-    const result = runScript(['--init-kit', kitDir])
+    const { kitDir } = initKit(tmpDir)
 
-    assert.equal(result.status, 0, result.stderr)
     assert.ok(existsSync(path.join(kitDir, 'mobile-signoff.json')))
     assert.ok(existsSync(path.join(kitDir, 'mobile-signoff-checklist.md')))
     assert.ok(existsSync(path.join(kitDir, 'artifacts', 'public-anonymous-submit')))
     const template = JSON.parse(readFileSync(path.join(kitDir, 'mobile-signoff.json'), 'utf8'))
     assert.equal(template.tool, 'dingtalk-public-form-mobile-signoff')
     assert.equal(template.checks.length, requiredCheckIds.length)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-public-form-mobile-signoff records allowed submit evidence', () => {
+  const tmpDir = makeTmpDir()
+  try {
+    const { input } = initKit(tmpDir)
+    const result = runScript([
+      '--record', input,
+      '--check-id', 'public-anonymous-submit',
+      '--status', 'pass',
+      '--source', 'server-observation',
+      '--operator', 'qa',
+      '--summary', 'Anonymous public form inserted one record.',
+      '--record-insert-delta', '1',
+    ])
+
+    assert.equal(result.status, 0, result.stderr)
+    const signoff = JSON.parse(readFileSync(input, 'utf8'))
+    const entry = signoff.checks.find((check) => check.id === 'public-anonymous-submit')
+    assert.equal(entry.status, 'pass')
+    assert.equal(entry.evidence.source, 'server-observation')
+    assert.equal(entry.evidence.recordInsertDelta, 1)
+    assert.match(entry.evidence.performedAt, /^\d{4}-\d{2}-\d{2}T/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-public-form-mobile-signoff records denied submit evidence', () => {
+  const tmpDir = makeTmpDir()
+  try {
+    const { input } = initKit(tmpDir)
+    const result = runScript([
+      '--record', input,
+      '--check-id', 'selected-unlisted-bound-rejected',
+      '--status', 'pass',
+      '--source', 'manual-client',
+      '--operator', 'qa',
+      '--summary', 'The unlisted bound user was blocked before insert.',
+      '--submit-blocked',
+      '--record-insert-delta', '0',
+      '--blocked-reason', 'Not in selected user or group allowlist.',
+    ])
+
+    assert.equal(result.status, 0, result.stderr)
+    const signoff = JSON.parse(readFileSync(input, 'utf8'))
+    const entry = signoff.checks.find((check) => check.id === 'selected-unlisted-bound-rejected')
+    assert.equal(entry.status, 'pass')
+    assert.equal(entry.evidence.submitBlocked, true)
+    assert.equal(entry.evidence.recordInsertDelta, 0)
+    assert.equal(entry.evidence.blockedReason, 'Not in selected user or group allowlist.')
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-public-form-mobile-signoff dry-runs a record without writing', () => {
+  const tmpDir = makeTmpDir()
+  try {
+    const { input } = initKit(tmpDir)
+    const before = readFileSync(input, 'utf8')
+    const result = runScript([
+      '--record', input,
+      '--check-id', 'password-change-bypass-observed',
+      '--status', 'pass',
+      '--source', 'manual-client',
+      '--operator', 'qa',
+      '--summary', 'The form rendered without the password-change page.',
+      '--form-rendered',
+      '--no-password-change-required-shown',
+      '--dry-run',
+    ])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /"id": "password-change-bypass-observed"/)
+    assert.equal(readFileSync(input, 'utf8'), before)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-public-form-mobile-signoff rejects secret-like record updates', () => {
+  const tmpDir = makeTmpDir()
+  try {
+    const { input } = initKit(tmpDir)
+    const before = readFileSync(input, 'utf8')
+    const result = runScript([
+      '--record', input,
+      '--check-id', 'public-anonymous-submit',
+      '--status', 'pass',
+      '--source', 'operator-note',
+      '--operator', 'qa',
+      '--summary', `Do not store ${'SEC'}1234567890abcdef here.`,
+      '--record-insert-delta', '1',
+    ])
+
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, /dingtalk_sec_secret/)
+    assert.equal(readFileSync(input, 'utf8'), before)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

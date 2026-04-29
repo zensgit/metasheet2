@@ -111,10 +111,30 @@ form access modes. It does not call DingTalk or staging.
 
 Options:
   --init-kit <dir>       Write mobile-signoff.json, checklist, and artifact folders
+  --record <file>        Update one check in an existing mobile-signoff.json
   --input <file>         Input mobile-signoff.json to compile
   --output-dir <dir>     Output dir, default ${DEFAULT_OUTPUT_ROOT}/<run-id>
   --strict               Exit non-zero unless every required check passes
   --help                 Show this help
+
+Record mode options:
+  --check-id <id>        Required with --record
+  --status <status>      Required with --record: pass, fail, skipped, pending
+  --source <source>      manual-client, server-observation, or operator-note
+  --operator <name>      Operator name or role, not a token or password
+  --performed-at <iso>   Defaults to now for pass/fail if not already present
+  --summary <text>       Short evidence summary
+  --notes <text>         Extra evidence notes
+  --artifact <path>      Relative artifact path, repeatable
+  --before-record-count <n>
+  --after-record-count <n>
+  --record-insert-delta <n>
+  --submit-blocked
+  --blocked-reason <text>
+  --form-rendered
+  --password-change-required-shown
+  --no-password-change-required-shown
+  --dry-run              Validate and print the updated check without writing
 
 Evidence can be screenshot-free. For allowed submits, record a positive
 recordInsertDelta or before/after record counts. For blocked submits, record
@@ -134,9 +154,26 @@ function readRequiredValue(argv, index, flag) {
 function parseArgs(argv) {
   const opts = {
     initKit: '',
+    record: '',
     input: '',
     outputDir: '',
     strict: false,
+    checkId: '',
+    status: '',
+    source: '',
+    operator: '',
+    performedAt: '',
+    summary: '',
+    notes: '',
+    artifacts: [],
+    beforeRecordCount: null,
+    afterRecordCount: null,
+    recordInsertDelta: null,
+    submitBlocked: null,
+    blockedReason: '',
+    formRendered: null,
+    passwordChangeRequiredShown: null,
+    dryRun: false,
   }
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -144,6 +181,10 @@ function parseArgs(argv) {
     switch (arg) {
       case '--init-kit':
         opts.initKit = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
+        i += 1
+        break
+      case '--record':
+        opts.record = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
         i += 1
         break
       case '--input':
@@ -157,6 +198,69 @@ function parseArgs(argv) {
       case '--strict':
         opts.strict = true
         break
+      case '--check-id':
+        opts.checkId = readRequiredValue(argv, i, arg)
+        i += 1
+        break
+      case '--status':
+        opts.status = readRequiredValue(argv, i, arg)
+        i += 1
+        break
+      case '--source':
+        opts.source = readRequiredValue(argv, i, arg)
+        i += 1
+        break
+      case '--operator':
+        opts.operator = readRequiredValue(argv, i, arg)
+        i += 1
+        break
+      case '--performed-at':
+        opts.performedAt = readRequiredValue(argv, i, arg)
+        i += 1
+        break
+      case '--summary':
+        opts.summary = readRequiredValue(argv, i, arg)
+        i += 1
+        break
+      case '--notes':
+        opts.notes = readRequiredValue(argv, i, arg)
+        i += 1
+        break
+      case '--artifact':
+        opts.artifacts.push(readRequiredValue(argv, i, arg))
+        i += 1
+        break
+      case '--before-record-count':
+        opts.beforeRecordCount = parseNonNegativeInteger(readRequiredValue(argv, i, arg), arg)
+        i += 1
+        break
+      case '--after-record-count':
+        opts.afterRecordCount = parseNonNegativeInteger(readRequiredValue(argv, i, arg), arg)
+        i += 1
+        break
+      case '--record-insert-delta':
+        opts.recordInsertDelta = parseNonNegativeInteger(readRequiredValue(argv, i, arg), arg)
+        i += 1
+        break
+      case '--submit-blocked':
+        opts.submitBlocked = true
+        break
+      case '--blocked-reason':
+        opts.blockedReason = readRequiredValue(argv, i, arg)
+        i += 1
+        break
+      case '--form-rendered':
+        opts.formRendered = true
+        break
+      case '--password-change-required-shown':
+        opts.passwordChangeRequiredShown = true
+        break
+      case '--no-password-change-required-shown':
+        opts.passwordChangeRequiredShown = false
+        break
+      case '--dry-run':
+        opts.dryRun = true
+        break
       case '--help':
         printHelp()
         process.exit(0)
@@ -166,13 +270,39 @@ function parseArgs(argv) {
     }
   }
 
-  if (opts.initKit && opts.input) {
-    throw new Error('--init-kit and --input are mutually exclusive')
+  const modeCount = Number(Boolean(opts.initKit)) + Number(Boolean(opts.input)) + Number(Boolean(opts.record))
+  if (modeCount > 1) {
+    throw new Error('--init-kit, --record, and --input are mutually exclusive')
   }
-  if (!opts.initKit && !opts.input) {
-    throw new Error('one of --init-kit or --input is required')
+  if (modeCount === 0) {
+    throw new Error('one of --init-kit, --record, or --input is required')
+  }
+  if (opts.record) {
+    if (!opts.checkId) {
+      throw new Error('--record requires --check-id')
+    }
+    if (!CHECK_BY_ID.has(opts.checkId)) {
+      throw new Error(`unknown --check-id: ${opts.checkId}`)
+    }
+    if (!opts.status) {
+      throw new Error('--record requires --status')
+    }
+    if (!VALID_STATUSES.has(opts.status)) {
+      throw new Error(`invalid --status: ${opts.status}`)
+    }
+    if (opts.source && !VALID_SOURCES.has(opts.source)) {
+      throw new Error(`invalid --source: ${opts.source}`)
+    }
   }
   return opts
+}
+
+function parseNonNegativeInteger(value, flag) {
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(`${flag} requires a non-negative integer`)
+  }
+  return parsed
 }
 
 function nowIso() {
@@ -246,6 +376,19 @@ node scripts/ops/dingtalk-public-form-mobile-signoff.mjs \\
   --input mobile-signoff.json \\
   --output-dir compiled \\
   --strict
+\`\`\`
+
+Record one check without hand-editing the JSON:
+
+\`\`\`bash
+node scripts/ops/dingtalk-public-form-mobile-signoff.mjs \\
+  --record mobile-signoff.json \\
+  --check-id public-anonymous-submit \\
+  --status pass \\
+  --source server-observation \\
+  --operator qa \\
+  --summary "Anonymous public form inserted one record." \\
+  --record-insert-delta 1
 \`\`\`
 `
 }
@@ -384,6 +527,27 @@ function validatePassCheck(inputDir, check, entry, errors) {
   }
 }
 
+function validateRecordedCheck(inputFile, check, entry) {
+  const errors = []
+  const inputDir = path.dirname(inputFile)
+  const evidence = isObject(entry.evidence) ? entry.evidence : {}
+  const summary = typeof evidence.summary === 'string' ? evidence.summary.trim() : ''
+  const notes = typeof evidence.notes === 'string' ? evidence.notes.trim() : ''
+
+  scanObjectStrings(entry, `record.${check.id}`, errors)
+
+  if (!VALID_STATUSES.has(entry.status)) {
+    errors.push(`${check.id}: invalid status ${JSON.stringify(entry.status)}`)
+  }
+  if (entry.status === 'pass') {
+    validatePassCheck(inputDir, check, entry, errors)
+  }
+  if (entry.status === 'fail' && !summary && !notes) {
+    errors.push(`${check.id}: fail evidence requires summary or notes`)
+  }
+  return errors
+}
+
 function validateEvidence(inputFile, evidence, strict) {
   const errors = []
   const warnings = []
@@ -515,11 +679,83 @@ function compileEvidence(opts) {
   console.log(`[dingtalk-public-form-mobile-signoff] wrote summary: ${path.join(outputDir, 'summary.md')}`)
 }
 
+function setEvidenceValue(evidence, key, value) {
+  if (value !== '' && value !== null) {
+    evidence[key] = value
+  }
+}
+
+function appendArtifacts(evidence, refs) {
+  if (refs.length === 0) return
+  const existing = Array.isArray(evidence.artifacts) ? evidence.artifacts : []
+  evidence.artifacts = Array.from(new Set([...existing, ...refs]))
+}
+
+function recordCheck(opts) {
+  const signoff = readJson(opts.record)
+  if (!Array.isArray(signoff.checks)) {
+    signoff.checks = []
+  }
+
+  const check = CHECK_BY_ID.get(opts.checkId)
+  let entry = signoff.checks.find((candidate) => candidate?.id === opts.checkId)
+  if (!entry) {
+    entry = makeTemplateCheck(check)
+    signoff.checks.push(entry)
+  }
+  if (!isObject(entry.evidence)) {
+    entry.evidence = {}
+  }
+
+  entry.status = opts.status
+  const evidence = entry.evidence
+  setEvidenceValue(evidence, 'source', opts.source)
+  setEvidenceValue(evidence, 'operator', opts.operator)
+  setEvidenceValue(evidence, 'summary', opts.summary)
+  setEvidenceValue(evidence, 'notes', opts.notes)
+  setEvidenceValue(evidence, 'beforeRecordCount', opts.beforeRecordCount)
+  setEvidenceValue(evidence, 'afterRecordCount', opts.afterRecordCount)
+  setEvidenceValue(evidence, 'recordInsertDelta', opts.recordInsertDelta)
+  setEvidenceValue(evidence, 'submitBlocked', opts.submitBlocked)
+  setEvidenceValue(evidence, 'blockedReason', opts.blockedReason)
+  setEvidenceValue(evidence, 'formRendered', opts.formRendered)
+  setEvidenceValue(evidence, 'passwordChangeRequiredShown', opts.passwordChangeRequiredShown)
+  appendArtifacts(evidence, opts.artifacts)
+
+  if ((opts.status === 'pass' || opts.status === 'fail') && !evidence.performedAt) {
+    evidence.performedAt = opts.performedAt || nowIso()
+  } else {
+    setEvidenceValue(evidence, 'performedAt', opts.performedAt)
+  }
+
+  const errors = validateRecordedCheck(opts.record, check, entry)
+  if (errors.length > 0) {
+    console.error(`[dingtalk-public-form-mobile-signoff] record rejected: ${errors.length} error(s)`)
+    for (const error of errors) {
+      console.error(`- ${error}`)
+    }
+    process.exitCode = 1
+    return
+  }
+
+  if (opts.dryRun) {
+    console.log(JSON.stringify(redactValue(entry), null, 2))
+    return
+  }
+
+  writeJson(opts.record, signoff)
+  console.log(`[dingtalk-public-form-mobile-signoff] recorded ${opts.checkId}: ${opts.status}`)
+}
+
 function main() {
   try {
     const opts = parseArgs(process.argv.slice(2))
     if (opts.initKit) {
       initKit(opts.initKit)
+      return
+    }
+    if (opts.record) {
+      recordCheck(opts)
       return
     }
     compileEvidence(opts)
