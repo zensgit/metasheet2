@@ -155,6 +155,47 @@ test('buildPacket requires K3 WISE auth keys before declaring preflight ready', 
   assert.equal(k3.credentials.sessionId, '<set-at-runtime>')
 })
 
+test('buildPacket requires minimum K3 material target mappings', () => {
+  assert.throws(
+    () => buildPacket(gate({
+      fieldMappings: {
+        material: [
+          { sourceField: 'code', targetField: 'FNumber' },
+        ],
+      },
+    })),
+    (error) => error instanceof LivePocPreflightError &&
+      error.details.field === 'fieldMappings.material' &&
+      error.details.requiredTargetFields.includes('FName'),
+    'material mappings must include K3 material name target field',
+  )
+})
+
+test('buildPacket requires minimum K3 BOM target mappings when BOM is enabled', () => {
+  assert.throws(
+    () => buildPacket(gate({
+      fieldMappings: {
+        bom: [
+          { sourceField: 'parentCode', targetField: 'FParentItemNumber' },
+          { sourceField: 'childCode', targetField: 'FChildItems[].FItemNumber' },
+        ],
+      },
+    })),
+    (error) => error instanceof LivePocPreflightError &&
+      error.details.field === 'fieldMappings.bom' &&
+      error.details.requiredTargetFields.includes('FChildItems[].FQty'),
+    'BOM mappings must include K3 child quantity target field',
+  )
+
+  const packet = buildPacket(gate({
+    bom: { enabled: false, productId: undefined },
+    fieldMappings: {
+      bom: [],
+    },
+  }))
+  assert.equal(packet.pipelines.some((pipeline) => pipeline.targetObject === 'bom'), false)
+})
+
 test('buildPacket blocks schema-qualified and quoted K3 core SQL table writes', () => {
   for (const table of [' t_ICItem ', 'dbo.t_ICItem', '[dbo].[t_ICBomChild]', '"dbo"."t_ICBOM"']) {
     assert.throws(
