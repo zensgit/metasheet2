@@ -37,6 +37,19 @@
             :value="formData[field.id] ?? ''"
             @input="formData[field.id] = ($event.target as HTMLInputElement).value"
           />
+          <textarea
+            v-else-if="field.type === 'longText'"
+            :id="`field_${field.id}`"
+            class="meta-form-view__textarea"
+            :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
+            rows="5"
+            :disabled="isFieldReadOnly(field.id)"
+            :aria-required="field.required ? 'true' : undefined"
+            :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
+            :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
+            :value="formData[field.id] ?? ''"
+            @input="formData[field.id] = ($event.target as HTMLTextAreaElement).value"
+          />
           <input
             v-else-if="field.type === 'number'"
             :id="`field_${field.id}`"
@@ -565,8 +578,13 @@ function isSameFormValue(left: unknown, right: unknown): boolean {
 .meta-form-view__comment-anchor--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
 .meta-form-view__comment-anchor--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-form-view__input { width: 100%; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
+.meta-form-view__textarea {
+  width: 100%; min-height: 120px; padding: 8px 10px; border: 1px solid #ddd; border-radius: 4px;
+  font-size: 13px; line-height: 1.5; resize: vertical; white-space: pre-wrap;
+}
 .meta-form-view__input--error { border-color: #f56c6c; background: #fff7f7; }
 .meta-form-view__input:disabled { background: #f5f7fa; color: #999; cursor: not-allowed; }
+.meta-form-view__textarea:disabled { background: #f5f7fa; color: #999; cursor: not-allowed; }
 .meta-form-view__check { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
 .meta-form-view__link-btn { padding: 6px 12px; border: 1px solid #409eff; border-radius: 4px; background: #ecf5ff; color: #409eff; cursor: pointer; font-size: 13px; }
 .meta-form-view__link-btn:disabled { opacity: 0.5; cursor: not-allowed; }

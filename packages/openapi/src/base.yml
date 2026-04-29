@@ -1557,6 +1557,7 @@ components:
             - lookup
             - rollup
             - attachment
+            - longText
         property:
           type: object
           additionalProperties: true

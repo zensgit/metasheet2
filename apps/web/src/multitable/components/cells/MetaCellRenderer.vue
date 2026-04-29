@@ -3,6 +3,11 @@
     <!-- string / formula -->
     <template v-if="field.type === 'string' || field.type === 'formula'">{{ displayValue }}</template>
 
+    <!-- long text -->
+    <template v-else-if="field.type === 'longText'">
+      <span class="meta-cell-renderer__long-text">{{ displayValue }}</span>
+    </template>
+
     <!-- date -->
     <template v-else-if="field.type === 'date'">
       <span class="meta-cell-renderer__date">{{ dateDisplay }}</span>
@@ -208,6 +213,12 @@ const conditionalClass = computed(() => {
 <style scoped>
 .meta-cell-renderer { font-size: 13px; line-height: 1.4; }
 .meta-cell-renderer__bool { font-size: 16px; }
+.meta-cell-renderer__long-text {
+  display: inline-block;
+  max-width: 100%;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .meta-cell-renderer__tag {
   display: inline-block; padding: 1px 6px; border-radius: 3px;
   font-size: 11px; margin-right: 4px; white-space: nowrap;

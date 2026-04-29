@@ -92,7 +92,7 @@ import type { RequestWithFile } from '../types/multer'
 import { MultitableFormulaEngine } from '../multitable/formula-engine'
 import { validateRecord, getDefaultValidationRules } from '../multitable/field-validation-engine'
 import type { FieldValidationConfig } from '../multitable/field-validation'
-import { BATCH1_FIELD_TYPES, coerceBatch1Value } from '../multitable/field-codecs'
+import { BATCH1_FIELD_TYPES, coerceBatch1Value, validateLongTextValue } from '../multitable/field-codecs'
 import { conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
 import {
   AutomationRuleValidationError,
@@ -173,6 +173,7 @@ type UniverMetaField = {
     | 'url'
     | 'email'
     | 'phone'
+    | 'longText'
   options?: Array<{ value: string; color?: string }>
   order?: number
   property?: Record<string, unknown>
@@ -943,7 +944,7 @@ function normalizeSearchTerm(value: unknown): string {
 }
 
 function isSearchableFieldType(type: UniverMetaField['type']): boolean {
-  return type === 'string' || type === 'number' || type === 'date' || type === 'select' || type === 'formula'
+  return type === 'string' || type === 'longText' || type === 'number' || type === 'date' || type === 'select' || type === 'formula'
 }
 
 function valueMatchesSearch(value: unknown, search: string): boolean {
@@ -996,6 +997,16 @@ function mapFieldType(type: string): UniverMetaField['type'] {
   if (normalized === 'lookup') return 'lookup'
   if (normalized === 'rollup') return 'rollup'
   if (normalized === 'attachment') return 'attachment'
+  if (
+    normalized === 'longtext' ||
+    normalized === 'long_text' ||
+    normalized === 'long-text' ||
+    normalized === 'textarea' ||
+    normalized === 'multi_line_text' ||
+    normalized === 'multiline'
+  ) {
+    return 'longText'
+  }
   return 'string'
 }
 
@@ -1882,7 +1893,7 @@ type FieldMutationGuard = {
   readOnly: boolean
   hidden: boolean
   link?: LinkFieldConfig | null
-  /** Sanitized property — populated for MF2 batch-1 field types only. */
+  /** Sanitized property — populated for field types whose write path needs config. */
   property?: Record<string, unknown>
 }
 
@@ -3671,7 +3682,7 @@ export function univerMetaRouter(): Router {
       id: z.string().min(1).max(50).optional(),
       sheetId: z.string().min(1).max(50),
       name: z.string().min(1).max(255),
-      type: z.enum(['string', 'number', 'boolean', 'date', 'formula', 'select', 'link', 'lookup', 'rollup', 'attachment']).default('string'),
+      type: z.enum(['string', 'number', 'boolean', 'date', 'formula', 'select', 'link', 'lookup', 'rollup', 'attachment', 'longText']).default('string'),
       property: z.record(z.unknown()).optional(),
       order: z.number().int().nonnegative().optional(),
     })
@@ -3927,7 +3938,7 @@ export function univerMetaRouter(): Router {
 
     const schema = z.object({
       name: z.string().min(1).max(255).optional(),
-      type: z.enum(['string', 'number', 'boolean', 'date', 'formula', 'select', 'link', 'lookup', 'rollup', 'attachment']).optional(),
+      type: z.enum(['string', 'number', 'boolean', 'date', 'formula', 'select', 'link', 'lookup', 'rollup', 'attachment', 'longText']).optional(),
       property: z.record(z.unknown()).optional(),
       order: z.number().int().nonnegative().optional(),
     }).refine((v) => Object.keys(v).length > 0, { message: 'At least one field must be updated' })
@@ -5524,6 +5535,15 @@ export function univerMetaRouter(): Router {
             fieldErrors[fieldId] = 'Formula must start with ='
             continue
           }
+        }
+
+        if (field.type === 'longText') {
+          try {
+            patch[fieldId] = validateLongTextValue(value, fieldId)
+          } catch (error) {
+            fieldErrors[fieldId] = error instanceof Error ? error.message : String(error)
+          }
+          continue
         }
 
         if (BATCH1_FIELD_TYPES.has(field.type)) {

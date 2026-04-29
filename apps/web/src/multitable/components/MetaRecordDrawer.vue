@@ -50,6 +50,14 @@
             :value="record.data[field.id] ?? ''"
             @change="emit('patch', field.id, ($event.target as HTMLInputElement).value)"
           />
+          <textarea
+            v-else-if="canEditField(field.id) && field.type === 'longText'"
+            :id="`drawer_field_${field.id}`"
+            class="meta-record-drawer__textarea"
+            :value="record.data[field.id] ?? ''"
+            rows="5"
+            @change="emit('patch', field.id, ($event.target as HTMLTextAreaElement).value)"
+          />
           <input
             v-else-if="canEditField(field.id) && field.type === 'number'"
             :id="`drawer_field_${field.id}`"
@@ -464,6 +472,10 @@ function attachmentAllowsMultiple(field: MetaField): boolean {
 .meta-record-drawer__comment-anchor--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
 .meta-record-drawer__comment-anchor--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-record-drawer__input { width: 100%; padding: 4px 8px; border: 1px solid #ddd; border-radius: 3px; font-size: 13px; }
+.meta-record-drawer__textarea {
+  width: 100%; min-height: 104px; padding: 6px 8px; border: 1px solid #ddd; border-radius: 3px;
+  font-size: 13px; line-height: 1.45; resize: vertical; white-space: pre-wrap;
+}
 .meta-record-drawer__check { cursor: pointer; }
 .meta-record-drawer__link-btn { padding: 4px 10px; border: 1px solid #409eff; border-radius: 3px; background: #ecf5ff; color: #409eff; cursor: pointer; font-size: 12px; }
 .meta-record-drawer__link-summary { margin-top: 6px; font-size: 12px; color: #606266; }
@@ -475,6 +487,6 @@ function attachmentAllowsMultiple(field: MetaField): boolean {
 .meta-record-drawer__attachment-clear:disabled { opacity: 0.5; cursor: not-allowed; }
 .meta-record-drawer__uploading { font-size: 12px; color: #409eff; }
 .meta-record-drawer__error { color: #f56c6c; font-size: 12px; }
-.meta-record-drawer__text { font-size: 13px; color: #333; }
+.meta-record-drawer__text { font-size: 13px; color: #333; white-space: pre-wrap; word-break: break-word; }
 .meta-record-drawer__empty { padding: 32px; text-align: center; color: #999; }
 </style>
