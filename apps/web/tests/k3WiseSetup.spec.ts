@@ -8,6 +8,8 @@ import {
   buildK3WiseSetupPayloads,
   buildK3WiseStagingInstallPayload,
   createDefaultK3WiseSetupForm,
+  formatIntegrationStagingDescriptorFieldSummary,
+  getIntegrationStagingFieldCount,
   getK3WisePipelineId,
   splitList,
   validateK3WisePipelineObservationForm,
@@ -163,7 +165,7 @@ describe('K3 WISE setup helpers', () => {
   })
 
   it('keeps the K3 WISE setup route behind the same admin feature as the nav entry', async () => {
-    const source = await readFile(new URL('../src/router/appRoutes.ts', import.meta.url), 'utf8')
+    const source = await readFile('src/router/appRoutes.ts', 'utf8')
 
     expect(source).toContain("path: '/integrations/k3-wise'")
     expect(source).toContain("titleZh: 'K3 WISE 对接'")
@@ -245,6 +247,38 @@ describe('K3 WISE setup helpers', () => {
     expect(() => buildK3WisePipelinePayloads(form)).toThrow('PLM source system ID is required')
   })
 
+  it('keeps pipeline staging object validation permissive until descriptors are loaded', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      sourceSystemId: 'plm_1',
+      webApiSystemId: 'k3_1',
+      materialStagingObjectId: 'custom_material_stage',
+      bomStagingObjectId: 'custom_bom_stage',
+    })
+
+    expect(validateK3WisePipelineTemplateForm(form)).toEqual([])
+  })
+
+  it('requires selected pipeline staging objects to match loaded descriptors', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      sourceSystemId: 'plm_1',
+      webApiSystemId: 'k3_1',
+      materialStagingObjectId: 'typo_materials',
+      bomStagingObjectId: 'bom_cleanse',
+    })
+
+    const messages = validateK3WisePipelineTemplateForm(form, [
+      { id: 'standard_materials', name: 'Standard Materials', fields: ['code'] },
+      { id: 'bom_cleanse', name: 'BOM Cleanse', fields: ['parentCode'] },
+    ]).map((issue) => issue.message)
+
+    expect(messages).toContain('Material staging object must match a loaded descriptor')
+    expect(messages).not.toContain('BOM staging object must match a loaded descriptor')
+  })
+
   it('builds staging install payloads from tenant and project scope', () => {
     const form = createDefaultK3WiseSetupForm()
     Object.assign(form, {
@@ -261,6 +295,35 @@ describe('K3 WISE setup helpers', () => {
       projectId: 'project_1',
       baseId: 'base_1',
     })
+  })
+
+  it('summarizes staging descriptor field details for the setup page preview', () => {
+    const descriptor = {
+      id: 'standard_materials',
+      name: 'Standard Materials',
+      fields: ['code', 'name', 'status'],
+      fieldDetails: [
+        { id: 'code', name: 'Material Code', type: 'string' },
+        { id: 'name', name: 'Material Name', type: 'string' },
+        { id: 'status', name: 'Status', type: 'select', options: ['draft', 'active', 'obsolete'] },
+      ],
+    }
+
+    expect(getIntegrationStagingFieldCount(descriptor)).toBe(3)
+    expect(formatIntegrationStagingDescriptorFieldSummary(descriptor)).toBe(
+      '3 fields · select:1, string:2 · select status(3)',
+    )
+  })
+
+  it('falls back to field ids when descriptor details are not available', () => {
+    const descriptor = {
+      id: 'legacy_descriptor',
+      name: 'Legacy Descriptor',
+      fields: ['code', 'name'],
+    }
+
+    expect(getIntegrationStagingFieldCount(descriptor)).toBe(2)
+    expect(formatIntegrationStagingDescriptorFieldSummary(descriptor)).toBe('2 fields')
   })
 
   it('requires project scope before staging install', () => {
