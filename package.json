@@ -70,6 +70,7 @@
     "profile:multitable-grid:local": "RUNNER_SCRIPT=scripts/profile-multitable-grid.mjs RUN_LABEL=multitable-grid-profile bash scripts/ops/multitable-pilot-local.sh",
     "profile:multitable-grid:staging": "RUNNER_SCRIPT=scripts/profile-multitable-grid.mjs RUN_LABEL=multitable-grid-profile-staging RUN_MODE=staging RUNNER_REPORT_BASENAME=staging-report AUTO_START_SERVICES=false REQUIRE_RUNNING_SERVICES=true bash scripts/ops/multitable-pilot-local.sh",
     "verify:multitable-grid-profile:summary": "node scripts/ops/multitable-grid-profile-summary.mjs",
+    "verify:integration-k3wise:poc": "node --test scripts/ops/integration-k3wise-live-poc-preflight.test.mjs && node --test scripts/ops/integration-k3wise-live-poc-evidence.test.mjs && node scripts/ops/fixtures/integration-k3wise/run-mock-poc-demo.mjs",
     "phase5:run-all": "bash scripts/phase5-run-all.sh",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
