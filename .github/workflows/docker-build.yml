@@ -364,6 +364,19 @@ jobs:
           echo "deploy_log=$deploy_log" >> "$GITHUB_OUTPUT"
           exit 0
 
+      - name: K3 WISE postdeploy smoke
+        if: ${{ steps.remote_deploy.outputs.deploy_rc == '0' }}
+        env:
+          METASHEET_BASE_URL: ${{ vars.METASHEET_BASE_URL || vars.PUBLIC_APP_URL || 'http://142.171.239.56:8081' }}
+          METASHEET_AUTH_TOKEN: ${{ secrets.METASHEET_K3WISE_SMOKE_TOKEN }}
+        run: |
+          set -euo pipefail
+          smoke_out_dir="output/deploy/k3wise-postdeploy-smoke"
+          rm -rf "$smoke_out_dir"
+          node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
+            --base-url "$METASHEET_BASE_URL" \
+            --out-dir "$smoke_out_dir"
+
       - name: Write deploy summary (preflight + runbooks)
         if: always()
         env:
@@ -564,9 +577,34 @@ jobs:
           fi
 
           echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### K3 WISE Postdeploy Smoke" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          k3_smoke_json="output/deploy/k3wise-postdeploy-smoke/integration-k3wise-postdeploy-smoke.json"
+          if [[ -f "$k3_smoke_json" ]]; then
+            node - "$k3_smoke_json" >> "$GITHUB_STEP_SUMMARY" <<'NODE'
+          const fs = require('fs')
+          const evidence = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
+          const summary = evidence.summary || {}
+          const status = evidence.ok ? 'PASS' : 'FAIL'
+          console.log(`- Status: **${status}**`)
+          console.log(`- Base URL: \`${evidence.baseUrl || 'unknown'}\``)
+          console.log(`- Authenticated checks: \`${evidence.authenticated ? 'yes' : 'no'}\``)
+          console.log(`- Summary: \`${summary.pass || 0} pass / ${summary.skipped || 0} skipped / ${summary.fail || 0} fail\``)
+          console.log('- Checks:')
+          for (const check of evidence.checks || []) {
+            console.log(`  - \`${check.id}\`: \`${check.status}\``)
+          }
+          NODE
+          else
+            echo "- Status: **NOT RUN**" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Reason: remote deploy did not complete successfully, or the K3 WISE smoke step did not produce evidence." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- Deploy logs artifact: \`${artifact_name}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- K3 WISE smoke evidence: \`output/deploy/k3wise-postdeploy-smoke/\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Local evidence path (after download): \`output/playwright/ga/${GITHUB_RUN_ID}/deploy.log\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Download:" >> "$GITHUB_STEP_SUMMARY"
