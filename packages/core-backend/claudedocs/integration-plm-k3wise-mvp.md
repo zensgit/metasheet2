@@ -535,7 +535,10 @@ node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
 ```
 
 也可以在 GitHub Actions 手动触发 `K3 WISE Postdeploy Smoke`，填写
-`base_url`、`require_auth=true`、`tenant_id`。期望产物是
+`base_url`、`require_auth=true`、`tenant_id`。如果确实是单租户部署，
+且 integration-core 历史数据里只有一个非空 `tenant_id`，可显式打开
+`auto_discover_tenant=true` 让 workflow 从 deploy host 只读推断租户；多租户
+或无历史数据时仍会失败关闭。期望产物是
 `integration-k3wise-postdeploy-smoke.json` / `.md` 均 PASS，且四个只读
 control-plane list probe 都通过：
 
@@ -550,7 +553,13 @@ control-plane list probe 都通过：
 2. 若未配置 secret，workflow 会在 deploy host 的运行中 backend 容器内通过
    `authService.createToken()` 临时签发 2 小时 token，并写入本次 job 的
    `K3_WISE_SMOKE_TOKEN`；该 fallback 只查询 active admin 用户，不写业务库。
-3. deploy workflow 对 token 解析失败保持 public-only smoke；手动
+3. token fallback 默认需要 repo variable / 手动输入提供 `METASHEET_TENANT_ID`。
+   若设置 `K3_WISE_TOKEN_AUTO_DISCOVER_TENANT=true` 或手动
+   `auto_discover_tenant=true`，只在 `integration_external_systems`、
+   `integration_pipelines`、`integration_runs`、`integration_dead_letters` 和
+   `platform_app_instances(plugin_id='plugin-integration-core')` 合计恰好一个租户时
+   自动写入 `K3_WISE_SMOKE_TENANT_ID` 给后续 smoke；零个或多个租户都不猜。
+4. deploy workflow 对 token 解析失败保持 public-only smoke；手动
    `require_auth=true` 时 token 解析失败会直接失败。
 
 客户 GATE 答卷归档后，按下面这条线性顺序推进 M2-LIVE，每一步都要在测试账套用最小权限账号执行：
@@ -794,7 +803,7 @@ git diff --check
 - preflight 脚本测试全部通过（含 #1168 / #1169 bool sweep）。
 - evidence 脚本 31/31 测试通过（含 #1175 / #1176 / #1177 / #1182 全链路硬化）。
 - mock PoC demo 链路 9 步全 PASS（GATE → preflight → mock K3 → mock SQL → evidence → 断言 PASS）。
-- postdeploy token resolver 测试通过，覆盖长期 secret、可选跳过、必需失败与 deploy-host fallback 前置检查。
+- postdeploy token resolver 测试通过，覆盖长期 secret、可选跳过、必需失败、deploy-host fallback 前置检查与显式开启的单租户自动发现。
 - postdeploy smoke 测试通过，覆盖公开检查、鉴权控制面 list probe、tenant 显式参数和环境变量回退。
 - postdeploy workflow contract 测试通过，覆盖 deploy workflow 与手动 workflow 的 token / tenant wiring。
 - 插件 manifest 校验 13/13 valid，0 errors。
