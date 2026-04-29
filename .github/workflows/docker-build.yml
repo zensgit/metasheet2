@@ -369,7 +369,7 @@ jobs:
         env:
           METASHEET_K3WISE_SMOKE_TOKEN_SECRET: ${{ secrets.METASHEET_K3WISE_SMOKE_TOKEN }}
           METASHEET_TENANT_ID: ${{ vars.METASHEET_TENANT_ID || '' }}
-          K3_WISE_TOKEN_RESOLVE_REQUIRED: 'false'
+          K3_WISE_TOKEN_RESOLVE_REQUIRED: 'true'
           K3_WISE_TOKEN_AUTO_DISCOVER_TENANT: ${{ vars.K3_WISE_TOKEN_AUTO_DISCOVER_TENANT || 'false' }}
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
@@ -391,6 +391,7 @@ jobs:
           args=(
             --base-url "$METASHEET_BASE_URL"
             --out-dir "$smoke_out_dir"
+            --require-auth
           )
           if [[ -n "${tenant_id:-}" ]]; then
             args+=(--tenant-id "$tenant_id")
