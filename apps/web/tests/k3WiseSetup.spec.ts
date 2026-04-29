@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { readFile } from 'node:fs/promises'
 import {
   applyExternalSystemToForm,
   buildK3WisePipelineObservationQuery,
@@ -139,6 +140,34 @@ describe('K3 WISE setup helpers', () => {
     const messages = validateK3WiseSetupForm(form).map((issue) => issue.message)
     expect(messages).toContain('K3 WISE password is required when credentials are created or replaced')
     expect(messages).toContain('materialSavePath must be relative to the K3 WISE base URL')
+  })
+
+  it('rejects invalid K3 numeric transport fields instead of silently using defaults', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      webApiName: 'K3 WISE WebAPI',
+      version: 'K3 WISE 15.x test',
+      baseUrl: 'https://k3.example.test/K3API/',
+      acctId: 'AIS_TEST',
+      username: 'k3-user',
+      password: 'secret',
+      lcid: 'zh-CN',
+      timeoutMs: '0',
+    })
+
+    const messages = validateK3WiseSetupForm(form).map((issue) => issue.message)
+    expect(messages).toContain('lcid must be a positive integer')
+    expect(messages).toContain('timeoutMs must be a positive integer')
+    expect(() => buildK3WiseSetupPayloads(form)).toThrow('lcid must be a positive integer')
+  })
+
+  it('keeps the K3 WISE setup route behind the same admin feature as the nav entry', async () => {
+    const source = await readFile(new URL('../src/router/appRoutes.ts', import.meta.url), 'utf8')
+
+    expect(source).toContain("path: '/integrations/k3-wise'")
+    expect(source).toContain("titleZh: 'K3 WISE 对接'")
+    expect(source).toContain("requiredFeature: 'attendanceAdmin'")
   })
 
   it('splits comma and newline table lists', () => {

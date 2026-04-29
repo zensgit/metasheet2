@@ -112,6 +112,21 @@ function normalizeSqlObjectName(value) {
   return parts.length > 0 ? parts[parts.length - 1] : ''
 }
 
+function assertK3AuthContract(k3Wise) {
+  const credentials = optionalObject(k3Wise.credentials, 'k3Wise.credentials')
+  const hasSessionId = Boolean(optionalString(credentials.sessionId))
+  const hasUsernamePassword = Boolean(
+    (optionalString(credentials.username) || optionalString(credentials.userName)) &&
+    optionalString(credentials.password)
+  )
+  if (!hasSessionId && !hasUsernamePassword) {
+    throw new LivePocPreflightError('K3 WISE credentials require credentials.sessionId or credentials.username/password', {
+      field: 'k3Wise.credentials',
+      accepted: ['sessionId', 'username+password'],
+    })
+  }
+}
+
 function validateUrl(value, field) {
   const text = requiredString(value, field)
   let parsed
@@ -239,6 +254,7 @@ function normalizeGate(input) {
   requiredString(k3Wise.version, 'k3Wise.version')
   validateUrl(k3Wise.apiUrl || k3Wise.baseUrl, 'k3Wise.apiUrl')
   requiredString(k3Wise.acctId, 'k3Wise.acctId')
+  assertK3AuthContract(k3Wise)
   requiredString(plm.readMethod, 'plm.readMethod')
   requiredString(rollback.owner, 'rollback.owner')
   requiredString(rollback.strategy, 'rollback.strategy')
