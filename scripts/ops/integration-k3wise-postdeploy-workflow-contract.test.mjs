@@ -1,0 +1,83 @@
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
+import test from 'node:test'
+import { fileURLToPath } from 'node:url'
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
+const manualWorkflowPath = path.join(repoRoot, '.github', 'workflows', 'integration-k3wise-postdeploy-smoke.yml')
+const deployWorkflowPath = path.join(repoRoot, '.github', 'workflows', 'docker-build.yml')
+
+function assertContains(haystack, needle, label) {
+  assert.ok(
+    String(haystack).includes(needle),
+    `${label} must include ${needle}`,
+  )
+}
+
+test('manual K3 WISE postdeploy smoke workflow keeps dispatch and auth contract stable', () => {
+  const raw = readFileSync(manualWorkflowPath, 'utf8')
+
+  assertContains(raw, 'name: K3 WISE Postdeploy Smoke', 'manual workflow')
+  assertContains(raw, 'workflow_dispatch:', 'manual trigger')
+  assertContains(raw, 'base_url:', 'manual inputs')
+  assertContains(raw, "default: 'http://142.171.239.56:8081'", 'manual default base URL')
+  assertContains(raw, 'require_auth:', 'manual inputs')
+  assertContains(raw, 'type: choice', 'manual require_auth input')
+  assertContains(raw, "- 'false'", 'manual require_auth input')
+  assertContains(raw, "- 'true'", 'manual require_auth input')
+  assertContains(raw, "default: '10000'", 'manual timeout input')
+  assertContains(raw, 'contents: read', 'manual permissions')
+  assertContains(raw, 'actions: read', 'manual permissions')
+  assertContains(raw, '- name: Run K3 WISE postdeploy smoke', 'manual smoke step')
+  assertContains(raw, 'continue-on-error: true', 'manual smoke step')
+  assertContains(raw, 'METASHEET_AUTH_TOKEN: ${{ secrets.METASHEET_K3WISE_SMOKE_TOKEN }}', 'manual smoke step')
+  assertContains(raw, "REQUIRE_AUTH: ${{ github.event.inputs.require_auth || 'false' }}", 'manual smoke step')
+  assertContains(raw, 'smoke_out_dir="output/integration-k3wise-postdeploy-smoke/manual"', 'manual smoke step')
+  assertContains(raw, 'node scripts/ops/integration-k3wise-postdeploy-smoke.mjs', 'manual smoke step')
+  assertContains(raw, '--base-url "$METASHEET_BASE_URL"', 'manual smoke step')
+  assertContains(raw, '--out-dir "$smoke_out_dir"', 'manual smoke step')
+  assertContains(raw, '--timeout-ms "$TIMEOUT_MS"', 'manual smoke step')
+  assertContains(raw, 'args+=(--require-auth)', 'manual smoke step')
+  assertContains(raw, 'stderr.log', 'manual smoke step')
+  assertContains(raw, 'cli-summary.json', 'manual smoke step')
+  assertContains(raw, 'smoke_rc=$rc', 'manual smoke step')
+  assertContains(raw, '- name: Write K3 WISE smoke summary', 'manual summary step')
+  assertContains(raw, 'if: always()', 'manual always-run steps')
+  assertContains(raw, 'scripts/ops/integration-k3wise-postdeploy-summary.mjs', 'manual summary step')
+  assertContains(raw, 'output/integration-k3wise-postdeploy-smoke/manual/integration-k3wise-postdeploy-smoke.json', 'manual summary step')
+  assertContains(raw, '--missing-ok', 'manual summary step')
+  assertContains(raw, 'integration-k3wise-postdeploy-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}', 'manual summary step')
+  assertContains(raw, '- name: Upload K3 WISE smoke artifacts', 'manual artifact upload')
+  assertContains(raw, 'uses: actions/upload-artifact@v4', 'manual artifact upload')
+  assertContains(raw, 'name: integration-k3wise-postdeploy-smoke-${{ github.run_id }}-${{ github.run_attempt }}', 'manual artifact upload')
+  assertContains(raw, 'output/integration-k3wise-postdeploy-smoke/manual/**', 'manual artifact upload')
+  assertContains(raw, '- name: Fail when K3 WISE smoke failed', 'manual final gate')
+  assertContains(raw, 'steps.smoke.outputs.smoke_rc', 'manual final gate')
+  assertContains(raw, 'K3 WISE postdeploy smoke failed', 'manual final gate')
+})
+
+test('deploy workflow keeps K3 WISE smoke evidence wired into deploy summary and artifacts', () => {
+  const raw = readFileSync(deployWorkflowPath, 'utf8')
+
+  assertContains(raw, 'deploy:', 'docker-build deploy job')
+  assertContains(raw, '- name: K3 WISE postdeploy smoke', 'deploy smoke step')
+  assertContains(raw, "if: ${{ steps.remote_deploy.outputs.deploy_rc == '0' }}", 'deploy smoke step')
+  assertContains(raw, 'METASHEET_AUTH_TOKEN: ${{ secrets.METASHEET_K3WISE_SMOKE_TOKEN }}', 'deploy smoke step')
+  assertContains(raw, 'smoke_out_dir="output/deploy/k3wise-postdeploy-smoke"', 'deploy smoke step')
+  assertContains(raw, 'node scripts/ops/integration-k3wise-postdeploy-smoke.mjs', 'deploy smoke step')
+  assertContains(raw, '--base-url "$METASHEET_BASE_URL"', 'deploy smoke step')
+  assertContains(raw, '--out-dir "$smoke_out_dir"', 'deploy smoke step')
+  assertContains(raw, '- name: Write deploy summary (preflight + runbooks)', 'deploy summary step')
+  assertContains(raw, '### K3 WISE Postdeploy Smoke', 'deploy summary step')
+  assertContains(raw, 'k3_smoke_json="output/deploy/k3wise-postdeploy-smoke/integration-k3wise-postdeploy-smoke.json"', 'deploy summary step')
+  assertContains(raw, 'scripts/ops/integration-k3wise-postdeploy-summary.mjs', 'deploy summary step')
+  assertContains(raw, '--input "$k3_smoke_json"', 'deploy summary step')
+  assertContains(raw, '--missing-ok', 'deploy summary step')
+  assertContains(raw, 'K3 WISE smoke evidence:', 'deploy summary step')
+  assertContains(raw, 'output/deploy/k3wise-postdeploy-smoke/', 'deploy summary step')
+  assertContains(raw, 'cp "$GITHUB_STEP_SUMMARY" output/deploy/step-summary.md', 'deploy summary archive')
+  assertContains(raw, '- name: Upload deploy artifacts', 'deploy artifact upload')
+  assertContains(raw, 'uses: actions/upload-artifact@v4', 'deploy artifact upload')
+  assertContains(raw, 'output/deploy/**', 'deploy artifact upload')
+})
