@@ -399,6 +399,108 @@ describe('AutomationExecutor', () => {
     expect(emitSpy).toHaveBeenCalledWith('automation.notification', expect.objectContaining({ userIds: ['u1', 'u2'] }))
   })
 
+  it('executes send_email action successfully through NotificationService email channel', async () => {
+    const send = vi.fn(async () => ({ id: 'notif_1', status: 'sent' as const }))
+    deps = createMockDeps({ notificationService: { send } })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_email',
+        config: {
+          recipients: ['ops@example.com', 'owner@example.com'],
+          subjectTemplate: 'Record {{record.title}} changed',
+          bodyTemplate: 'Status: {{record.status}}',
+        },
+      }],
+    })
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { title: 'Incident', status: 'open' },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('success')
+    expect(result.steps[0].actionType).toBe('send_email')
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({
+      channel: 'email',
+      subject: 'Record Incident changed',
+      content: 'Status: open',
+      recipients: [
+        { id: 'ops@example.com', type: 'email' },
+        { id: 'owner@example.com', type: 'email' },
+      ],
+      metadata: expect.objectContaining({
+        actionType: 'send_email',
+        ruleId: 'rule_1',
+        sheetId: 'sheet_1',
+        recordId: 'r1',
+      }),
+    }))
+  })
+
+  it('fails send_email with no recipients', async () => {
+    const send = vi.fn(async () => ({ id: 'notif_1', status: 'sent' as const }))
+    deps = createMockDeps({ notificationService: { send } })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_email',
+        config: {
+          recipients: [],
+          subjectTemplate: 'Subject',
+          bodyTemplate: 'Body',
+        },
+      }],
+    })
+    const result = await executor.execute(rule, { recordId: 'r1', sheetId: 'sheet_1' })
+
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].error).toContain('at least one recipient')
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('fails send_email with missing templates', async () => {
+    const send = vi.fn(async () => ({ id: 'notif_1', status: 'sent' as const }))
+    deps = createMockDeps({ notificationService: { send } })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_email',
+        config: {
+          recipients: ['ops@example.com'],
+          subjectTemplate: '',
+          bodyTemplate: 'Body',
+        },
+      }],
+    })
+    const result = await executor.execute(rule, { recordId: 'r1', sheetId: 'sheet_1' })
+
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].error).toContain('subjectTemplate is required')
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('fails send_email when NotificationService is not configured', async () => {
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_email',
+        config: {
+          recipients: ['ops@example.com'],
+          subjectTemplate: 'Subject',
+          bodyTemplate: 'Body',
+        },
+      }],
+    })
+    const result = await executor.execute(rule, { recordId: 'r1', sheetId: 'sheet_1' })
+
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].error).toContain('NotificationService is not configured')
+  })
+
   it('executes send_dingtalk_group_message action successfully', async () => {
     process.env.APP_BASE_URL = 'https://app.example.com'
     const queryFn = vi.fn()

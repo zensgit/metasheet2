@@ -129,6 +129,7 @@
                 <option value="create_record">Create record</option>
                 <option value="send_webhook">Send webhook</option>
                 <option value="send_notification">Send notification</option>
+                <option value="send_email">Send email</option>
                 <option value="send_dingtalk_group_message">Send DingTalk group message</option>
                 <option value="send_dingtalk_person_message">Send DingTalk person message</option>
                 <option value="lock_record">Lock record</option>
@@ -183,6 +184,35 @@
               <input v-model="action.config.userId" class="meta-rule-editor__input" type="text" placeholder="User ID" />
               <label class="meta-rule-editor__label">Message</label>
               <textarea v-model="action.config.message" class="meta-rule-editor__textarea" placeholder="Notification message" rows="3"></textarea>
+            </div>
+
+            <!-- send_email config -->
+            <div v-if="action.type === 'send_email'" class="meta-rule-editor__action-config">
+              <label class="meta-rule-editor__label">Recipients</label>
+              <textarea
+                v-model="action.config.recipientsText"
+                class="meta-rule-editor__textarea"
+                rows="3"
+                placeholder="ops@example.com, owner@example.com"
+                data-field="emailRecipients"
+              ></textarea>
+              <div class="meta-rule-editor__hint">Use comma or newline separated email addresses. Delivery uses the NotificationService email channel.</div>
+              <label class="meta-rule-editor__label">Subject template</label>
+              <input
+                v-model="action.config.subjectTemplate"
+                class="meta-rule-editor__input"
+                type="text"
+                placeholder="{{record.title}} needs attention"
+                data-field="emailSubjectTemplate"
+              />
+              <label class="meta-rule-editor__label">Body template</label>
+              <textarea
+                v-model="action.config.bodyTemplate"
+                class="meta-rule-editor__textarea"
+                rows="4"
+                placeholder="Record {{recordId}} changed. Status: {{record.status}}"
+                data-field="emailBodyTemplate"
+              ></textarea>
             </div>
 
             <!-- send_dingtalk_group_message config -->
@@ -853,6 +883,9 @@ type DraftActionConfig = Record<string, unknown> & {
   recipientFieldPath?: string
   memberGroupRecipientFieldPath?: string
   message?: string
+  recipientsText?: string
+  recipients?: string[]
+  subjectTemplate?: string
   destinationId?: string
   destinationIds?: string[]
   destinationPickerId?: string
@@ -991,6 +1024,14 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
       userIdsSearch: '',
     }
   }
+  if (type === 'send_email') {
+    return {
+      ...config,
+      recipientsText: Array.isArray(config.recipients)
+        ? config.recipients.join(', ')
+        : '',
+    }
+  }
   return { ...config }
 }
 
@@ -1060,6 +1101,12 @@ const canSave = computed(() => {
       if (publicFormLinkBlockingErrors(action.config.publicFormViewId).length) return false
       if (internalViewLinkBlockingErrors(action.config.internalViewId).length) return false
     }
+    if (action.type === 'send_email') {
+      const recipients = parseEmailRecipientsText(action.config.recipientsText)
+      const subjectTemplate = typeof action.config.subjectTemplate === 'string' ? action.config.subjectTemplate.trim() : ''
+      const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
+      if (!recipients.length || !subjectTemplate || !bodyTemplate) return false
+    }
   }
   return true
 })
@@ -1106,6 +1153,16 @@ function parseMemberGroupIdsText(value: unknown): string[] {
     .split(/[\n,]+/)
     .map((entry) => entry.trim())
     .filter(Boolean)
+}
+
+function parseEmailRecipientsText(value: unknown): string[] {
+  if (typeof value !== 'string') return []
+  return Array.from(new Set(
+    value
+      .split(/[\n,]+/)
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+  ))
 }
 
 function personRecipientDirectoryKey(subjectType: 'user' | 'member-group', subjectId: string) {
@@ -1592,6 +1649,8 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
       return { method: 'POST' }
     case 'send_notification':
       return { userId: '', message: '' }
+    case 'send_email':
+      return { recipientsText: '', subjectTemplate: '', bodyTemplate: '' }
     case 'send_dingtalk_group_message':
       return {
         destinationId: '',
@@ -1718,6 +1777,16 @@ function buildPayload(): Partial<AutomationRule> {
           internalViewId: typeof action.config.internalViewId === 'string' && action.config.internalViewId.trim()
             ? action.config.internalViewId.trim()
             : undefined,
+        },
+      }
+    }
+    if (action.type === 'send_email') {
+      return {
+        type: action.type,
+        config: {
+          recipients: parseEmailRecipientsText(action.config.recipientsText),
+          subjectTemplate: typeof action.config.subjectTemplate === 'string' ? action.config.subjectTemplate.trim() : '',
+          bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : '',
         },
       }
     }

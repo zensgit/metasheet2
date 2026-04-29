@@ -509,6 +509,96 @@ describe('MetaAutomationRuleEditor', () => {
     expect(triggerSelect.value).toBe('record.updated')
   })
 
+  it('emits normalized send_email action payload', async () => {
+    const saved = vi.fn()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      onSave: saved,
+    })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Email owner'
+    nameInput.dispatchEvent(new Event('input'))
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_email'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const recipientsInput = container.querySelector('[data-field="emailRecipients"]') as HTMLTextAreaElement
+    recipientsInput.value = 'ops@example.com, owner@example.com\nops@example.com'
+    recipientsInput.dispatchEvent(new Event('input'))
+
+    const subjectInput = container.querySelector('[data-field="emailSubjectTemplate"]') as HTMLInputElement
+    subjectInput.value = 'Record {{record.name}} changed'
+    subjectInput.dispatchEvent(new Event('input'))
+
+    const bodyInput = container.querySelector('[data-field="emailBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Open record {{recordId}}'
+    bodyInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    const payload = saved.mock.calls[0][0]
+    expect(payload.actionType).toBe('send_email')
+    expect(payload.actionConfig).toEqual({
+      recipients: ['ops@example.com', 'owner@example.com'],
+      subjectTemplate: 'Record {{record.name}} changed',
+      bodyTemplate: 'Open record {{recordId}}',
+    })
+    expect(payload.actions[0]).toEqual({
+      type: 'send_email',
+      config: {
+        recipients: ['ops@example.com', 'owner@example.com'],
+        subjectTemplate: 'Record {{record.name}} changed',
+        bodyTemplate: 'Open record {{recordId}}',
+      },
+    })
+  })
+
+  it('keeps save disabled for incomplete send_email action', async () => {
+    const saved = vi.fn()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      onSave: saved,
+    })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Email owner'
+    nameInput.dispatchEvent(new Event('input'))
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_email'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const recipientsInput = container.querySelector('[data-field="emailRecipients"]') as HTMLTextAreaElement
+    recipientsInput.value = 'ops@example.com'
+    recipientsInput.dispatchEvent(new Event('input'))
+
+    const subjectInput = container.querySelector('[data-field="emailSubjectTemplate"]') as HTMLInputElement
+    subjectInput.value = 'Subject'
+    subjectInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(true)
+    saveBtn.click()
+    await flushPromises()
+    expect(saved).not.toHaveBeenCalled()
+  })
+
   it('emits DingTalk group action config with optional links', async () => {
     const saved = vi.fn()
     const client = mockClient()

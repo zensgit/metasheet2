@@ -1890,6 +1890,7 @@ export class MetaSheetServer {
         undefined,
         schedulerLeaderOptions,
         { leaderStateGauge: promMetrics.automationSchedulerLeaderGauge },
+        notificationService,
       )
       this.automationService.init()
       setAutomationServiceInstance(this.automationService)
