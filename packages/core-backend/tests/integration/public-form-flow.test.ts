@@ -261,6 +261,19 @@ describe('Public form flow', () => {
     expect(res.body.error?.code).toBe('DINGTALK_AUTH_REQUIRED')
   })
 
+  test('dingtalk-protected form rejects a signed-in user without DingTalk binding', async () => {
+    const { app } = await createApp({
+      queryHandler: buildQueryHandler(VALID_TOKEN, { accessMode: 'dingtalk' }),
+      user: { id: 'user_unbound' },
+    })
+
+    const res = await request(app)
+      .get(`/api/multitable/form-context?viewId=${TEST_VIEW_ID}&publicToken=${VALID_TOKEN}`)
+
+    expect(res.status).toBe(403)
+    expect(res.body.error?.code).toBe('DINGTALK_BIND_REQUIRED')
+  })
+
   test('dingtalk-protected form allows a bound signed-in user', async () => {
     const { app } = await createApp({
       queryHandler: buildQueryHandler(VALID_TOKEN, { accessMode: 'dingtalk', hasDingTalkBinding: true }),
@@ -289,6 +302,40 @@ describe('Public form flow', () => {
 
     expect(res.status).toBe(403)
     expect(res.body.error?.code).toBe('DINGTALK_GRANT_REQUIRED')
+  })
+
+  test('dingtalk-granted selected-user form rejects selected users without DingTalk binding first', async () => {
+    const { app } = await createApp({
+      queryHandler: buildQueryHandler(VALID_TOKEN, {
+        accessMode: 'dingtalk_granted',
+        allowedUserIds: ['user_unbound'],
+      }),
+      user: { id: 'user_unbound' },
+    })
+
+    const res = await request(app)
+      .get(`/api/multitable/form-context?viewId=${TEST_VIEW_ID}&publicToken=${VALID_TOKEN}`)
+
+    expect(res.status).toBe(403)
+    expect(res.body.error?.code).toBe('DINGTALK_BIND_REQUIRED')
+  })
+
+  test('dingtalk-protected form rejects submit from a signed-in user without DingTalk binding', async () => {
+    const { app, mockPool } = await createApp({
+      queryHandler: buildQueryHandler(VALID_TOKEN, { accessMode: 'dingtalk' }),
+      user: { id: 'user_unbound' },
+    })
+
+    const res = await request(app)
+      .post(`/api/multitable/views/${TEST_VIEW_ID}/submit?publicToken=${VALID_TOKEN}`)
+      .send({
+        publicToken: VALID_TOKEN,
+        data: { fld_1: 'Alice', fld_2: 'alice@test.com' },
+      })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error?.code).toBe('DINGTALK_BIND_REQUIRED')
+    expect(mockPool.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO meta_records'))).toBe(false)
   })
 
   test('dingtalk-granted form rejects submit from a bound user without grant', async () => {
