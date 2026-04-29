@@ -207,6 +207,53 @@ describe('RecordWriteService', () => {
     )
   })
 
+  it('preserves longText multiline values in the shared write path', async () => {
+    const service = new RecordWriteService(pool, eventBus as any, helpers)
+    const fields: UniverMetaField[] = [
+      { id: 'fld_notes', name: 'Notes', type: 'longText', order: 0 },
+    ]
+    const input = buildTestInput({
+      fields,
+      visiblePropertyFields: fields,
+      visiblePropertyFieldIds: new Set(['fld_notes']),
+      fieldById: new Map([
+        ['fld_notes', { type: 'longText' as const, readOnly: false, hidden: false }],
+      ]) as any,
+      changesByRecord: new Map([
+        ['rec1', [{ fieldId: 'fld_notes', value: 'line 1\n  line 2\n' }]],
+      ]),
+    })
+
+    await service.patchRecords(input)
+
+    const updateCall = (pool.query as any).mock.calls.find((call: unknown[]) =>
+      typeof call[0] === 'string' && call[0].includes('UPDATE meta_records'),
+    )
+    expect(JSON.parse(updateCall[1][0])).toEqual({
+      fld_notes: 'line 1\n  line 2\n',
+    })
+  })
+
+  it('rejects non-string longText writes in the shared write path', async () => {
+    const service = new RecordWriteService(pool, eventBus as any, helpers)
+    const fields: UniverMetaField[] = [
+      { id: 'fld_notes', name: 'Notes', type: 'longText', order: 0 },
+    ]
+    const input = buildTestInput({
+      fields,
+      visiblePropertyFields: fields,
+      visiblePropertyFieldIds: new Set(['fld_notes']),
+      fieldById: new Map([
+        ['fld_notes', { type: 'longText' as const, readOnly: false, hidden: false }],
+      ]) as any,
+      changesByRecord: new Map([
+        ['rec1', [{ fieldId: 'fld_notes', value: ['line'] }]],
+      ]),
+    })
+
+    await expect(service.patchRecords(input)).rejects.toThrow(RecordValidationError)
+  })
+
   it('should throw VersionConflictError when expectedVersion does not match', async () => {
     pool = createMockPool({
       SELECT_FOR_UPDATE: { rows: [{ id: 'rec1', version: 5, created_by: 'user1' }] },
@@ -482,6 +529,19 @@ describe('RecordWriteService', () => {
 
       await expect(service.validateChanges({ sheetId: 's1', changesByRecord, fieldById }))
         .resolves.not.toThrow()
+    })
+
+    it('rejects non-string longText values during preflight validation', async () => {
+      const service = new RecordWriteService(pool, eventBus as any, helpers)
+      const changesByRecord = new Map([
+        ['rec1', [{ fieldId: 'fld_notes', value: { text: 'line' } }]],
+      ])
+      const fieldById = new Map([
+        ['fld_notes', { type: 'longText' as const, readOnly: false, hidden: false }],
+      ])
+
+      await expect(service.validateChanges({ sheetId: 's1', changesByRecord, fieldById }))
+        .rejects.toThrow(/Long text value must be a string/)
     })
   })
 

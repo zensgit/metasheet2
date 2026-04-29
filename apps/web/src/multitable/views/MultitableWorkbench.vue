@@ -554,8 +554,8 @@ const currentViewPermission = computed<MetaViewPermission | null>(() => {
   return activeViewId ? effectiveViewPermissions.value[activeViewId] ?? null : null
 })
 const mentionDisplayFieldId = computed(() =>
-  grid.visibleFields.value.find((field) => field.type === 'string')?.id
-  ?? grid.fields.value.find((field) => field.type === 'string')?.id
+  grid.visibleFields.value.find((field) => field.type === 'string' || field.type === 'longText')?.id
+  ?? grid.fields.value.find((field) => field.type === 'string' || field.type === 'longText')?.id
   ?? null,
 )
 const canConfigureCurrentView = computed(() => currentViewPermission.value?.canConfigure ?? true)

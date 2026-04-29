@@ -17,6 +17,7 @@ export type MultitableFieldType =
   | 'url'
   | 'email'
   | 'phone'
+  | 'longText'
 
 export type MultitableField = {
   id: string
@@ -84,6 +85,16 @@ export function mapFieldType(type: string): MultitableFieldType | string {
   if (normalized === 'url') return 'url'
   if (normalized === 'email') return 'email'
   if (normalized === 'phone') return 'phone'
+  if (
+    normalized === 'longtext' ||
+    normalized === 'long_text' ||
+    normalized === 'long-text' ||
+    normalized === 'textarea' ||
+    normalized === 'multi_line_text' ||
+    normalized === 'multiline'
+  ) {
+    return 'longText'
+  }
   if (fieldTypeRegistry.has(normalized)) return normalized
   return 'string'
 }
@@ -270,7 +281,7 @@ export function sanitizeFieldProperty(
     return { ...obj, max }
   }
 
-  if (type === 'url' || type === 'email' || type === 'phone') {
+  if (type === 'url' || type === 'email' || type === 'phone' || type === 'longText') {
     return obj
   }
 
@@ -399,6 +410,14 @@ export function validatePhoneValue(value: unknown, fieldId: string): string | nu
     throw new Error(`Invalid phone number for ${fieldId}: ${trimmed}`)
   }
   return trimmed
+}
+
+export function validateLongTextValue(value: unknown, fieldId: string): string | null {
+  if (value === null || value === undefined || value === '') return null
+  if (typeof value !== 'string') {
+    throw new Error(`Long text value must be a string for ${fieldId}`)
+  }
+  return value
 }
 
 /**

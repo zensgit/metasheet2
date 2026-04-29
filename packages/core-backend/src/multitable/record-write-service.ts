@@ -22,7 +22,7 @@ import {
   type RecordPostCommitHook,
   type YjsInvalidator,
 } from './post-commit-hooks'
-import { BATCH1_FIELD_TYPES, coerceBatch1Value } from './field-codecs'
+import { BATCH1_FIELD_TYPES, coerceBatch1Value, validateLongTextValue } from './field-codecs'
 
 // ---------------------------------------------------------------------------
 // Shared types (mirrors the ones in univer-meta.ts to avoid coupling)
@@ -58,6 +58,7 @@ export type UniverMetaField = {
     | 'url'
     | 'email'
     | 'phone'
+    | 'longText'
   options?: Array<{ value: string; color?: string }>
   order?: number
   property?: Record<string, unknown>
@@ -178,11 +179,7 @@ export type FieldMutationGuard = {
   readOnly: boolean
   hidden: boolean
   link?: LinkFieldConfig | null
-  /**
-   * Sanitized property. Required by the MF2 batch-1 field types
-   * (currency/percent/rating) so coercion can read `code`/`decimals`/`max`
-   * without re-fetching the field definition.
-   */
+  /** Sanitized property for field types whose write path needs config. */
   property?: Record<string, unknown>
 }
 
@@ -414,6 +411,14 @@ export class RecordWriteService {
             throw new RecordValidationError(attachmentError)
           }
         }
+
+        if (field.type === 'longText') {
+          try {
+            validateLongTextValue(change.value, change.fieldId)
+          } catch (error) {
+            throw new RecordValidationError(error instanceof Error ? error.message : String(error))
+          }
+        }
       }
     }
   }
@@ -514,6 +519,16 @@ export class RecordWriteService {
 
           if (field.type === 'attachment') {
             patch[change.fieldId] = h.normalizeAttachmentIds(change.value)
+            applied += 1
+            continue
+          }
+
+          if (field.type === 'longText') {
+            try {
+              patch[change.fieldId] = validateLongTextValue(change.value, change.fieldId)
+            } catch (error) {
+              throw new RecordValidationError(error instanceof Error ? error.message : String(error))
+            }
             applied += 1
             continue
           }

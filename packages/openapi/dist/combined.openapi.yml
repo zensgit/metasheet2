@@ -1614,6 +1614,7 @@ components:
             - lookup
             - rollup
             - attachment
+            - longText
         property:
           type: object
           additionalProperties: true
@@ -11330,6 +11331,7 @@ paths:
                     - lookup
                     - rollup
                     - attachment
+                    - longText
                 property:
                   type: object
                   additionalProperties: true
@@ -11402,6 +11404,7 @@ paths:
                     - lookup
                     - rollup
                     - attachment
+                    - longText
                 property:
                   type: object
                   additionalProperties: true

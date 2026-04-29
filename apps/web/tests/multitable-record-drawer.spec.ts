@@ -10,6 +10,48 @@ async function flushUi(cycles = 4) {
 }
 
 describe('MetaRecordDrawer', () => {
+  it('edits longText values with a textarea in the drawer', async () => {
+    const patchSpy = vi.fn()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaRecordDrawer, {
+          visible: true,
+          record: {
+            id: 'rec_notes_1',
+            version: 1,
+            data: {
+              fld_notes: 'line 1',
+            },
+          },
+          fields: [
+            { id: 'fld_notes', name: 'Notes', type: 'longText' },
+          ],
+          canEdit: true,
+          canComment: false,
+          canDelete: false,
+          onPatch: patchSpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await flushUi()
+
+    const textarea = container.querySelector('.meta-record-drawer__textarea') as HTMLTextAreaElement | null
+    expect(textarea).not.toBeNull()
+    textarea!.value = 'line 1\nline 2'
+    textarea!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+
+    expect(patchSpy).toHaveBeenCalledWith('fld_notes', 'line 1\nline 2')
+
+    app.unmount()
+    container.remove()
+  })
+
   it('uses scoped field permissions to render readonly fields as display-only values', async () => {
     const patchSpy = vi.fn()
     const container = document.createElement('div')
