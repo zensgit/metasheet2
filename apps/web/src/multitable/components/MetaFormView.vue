@@ -34,7 +34,7 @@
             :aria-required="field.required ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
-            :value="formData[field.id] ?? ''"
+            :value="textControlValue(formData[field.id])"
             @input="formData[field.id] = ($event.target as HTMLInputElement).value"
           />
           <textarea
@@ -47,7 +47,7 @@
             :aria-required="field.required ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
-            :value="formData[field.id] ?? ''"
+            :value="textControlValue(formData[field.id])"
             @input="formData[field.id] = ($event.target as HTMLTextAreaElement).value"
           />
           <input
@@ -288,6 +288,10 @@ function formFieldAffordance(fieldId: string) {
 
 function formFieldAnchorClass(fieldId: string): string {
   return resolveCommentAffordanceStateClass('meta-form-view__comment-anchor', formFieldAffordance(fieldId))
+}
+
+function textControlValue(value: unknown): string {
+  return value === null || value === undefined ? '' : String(value)
 }
 
 function syncFromRecord(record: MetaRecord | null | undefined) {

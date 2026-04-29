@@ -6,7 +6,7 @@
       ref="inputRef"
       class="meta-cell-editor__input"
       type="date"
-      :value="modelValue ?? ''"
+      :value="textControlValue(modelValue)"
       @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
       @keydown.enter="emit('confirm')"
       @keydown.escape="emit('cancel')"
@@ -17,7 +17,7 @@
       ref="inputRef"
       class="meta-cell-editor__input"
       type="date"
-      :value="modelValue ?? ''"
+      :value="textControlValue(modelValue)"
       @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
       @keydown.enter="emit('confirm')"
       @keydown.escape="emit('cancel')"
@@ -47,7 +47,7 @@
       ref="inputRef"
       class="meta-cell-editor__textarea"
       rows="4"
-      :value="modelValue ?? ''"
+      :value="textControlValue(modelValue)"
       @input="emit('update:modelValue', ($event.target as HTMLTextAreaElement).value)"
       @keydown.meta.enter.prevent="emit('confirm')"
       @keydown.ctrl.enter.prevent="emit('confirm')"
@@ -264,6 +264,10 @@ const emit = defineEmits<{
    */
   (e: 'yjs-commit'): void
 }>()
+
+function textControlValue(value: unknown): string {
+  return value === null || value === undefined ? '' : String(value)
+}
 
 // --- Yjs opt-in binding (text cells only; inert when flag off) ---
 // See useYjsCellBinding for flag gating + timeout + fallback. The editor

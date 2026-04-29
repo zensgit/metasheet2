@@ -47,14 +47,14 @@
             :id="`drawer_field_${field.id}`"
             class="meta-record-drawer__input"
             type="text"
-            :value="record.data[field.id] ?? ''"
+            :value="textControlValue(record.data[field.id])"
             @change="emit('patch', field.id, ($event.target as HTMLInputElement).value)"
           />
           <textarea
             v-else-if="canEditField(field.id) && field.type === 'longText'"
             :id="`drawer_field_${field.id}`"
             class="meta-record-drawer__textarea"
-            :value="record.data[field.id] ?? ''"
+            :value="textControlValue(record.data[field.id])"
             rows="5"
             @change="emit('patch', field.id, ($event.target as HTMLTextAreaElement).value)"
           />
@@ -251,6 +251,10 @@ function formatValue(v: unknown): string {
   if (v === null || v === undefined) return '—'
   if (Array.isArray(v)) return v.join(', ')
   return String(v)
+}
+
+function textControlValue(value: unknown): string {
+  return value === null || value === undefined ? '' : String(value)
 }
 
 function linkButtonLabel(fieldId: string): string {

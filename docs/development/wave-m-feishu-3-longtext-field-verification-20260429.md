@@ -94,6 +94,31 @@ Result:
 
 - Passed.
 
+## CI Repair Pass
+
+GitHub Actions initially caught two issues that the focused local commands did not cover:
+
+- `pnpm type-check` runs project references through `vue-tsc -b`; the long-text textarea values needed explicit `unknown` to string conversion before binding to native `value`.
+- `contracts (openapi)` requires generated files under `packages/openapi/dist` to be committed after editing `packages/openapi/src`.
+
+Commands:
+
+```bash
+pnpm exec tsx packages/openapi/tools/build.ts
+pnpm type-check
+pnpm --filter @metasheet/web exec vitest run --watch=false \
+  tests/multitable-longtext-cell.spec.ts \
+  tests/multitable-form-view.spec.ts \
+  tests/multitable-record-drawer.spec.ts \
+  tests/multitable-field-manager.spec.ts
+```
+
+Result:
+
+- OpenAPI dist regenerated.
+- `pnpm type-check` passed.
+- 4 frontend files passed, 29 tests passed.
+
 Temporary `node_modules` symlinks were used only for local worktree validation and should be removed before commit/PR creation:
 
 ```bash
