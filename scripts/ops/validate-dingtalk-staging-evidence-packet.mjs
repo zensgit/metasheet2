@@ -22,6 +22,17 @@ const REQUIRED_CHECK_IDS = [
   'delivery-history-group-person',
   'no-email-user-create-bind',
 ]
+const MOBILE_SIGNOFF_REQUIRED_CHECK_IDS = [
+  'public-anonymous-submit',
+  'dingtalk-unbound-rejected',
+  'dingtalk-bound-submit',
+  'selected-unbound-rejected',
+  'selected-bound-submit',
+  'selected-unlisted-bound-rejected',
+  'granted-bound-without-grant-rejected',
+  'granted-bound-with-grant-submit',
+  'password-change-bypass-observed',
+]
 const VALID_REMOTE_SMOKE_PHASES = new Set(['bootstrap_pending', 'manual_pending', 'finalize_pending', 'fail'])
 const SECRET_PATTERNS = [
   {
@@ -146,6 +157,13 @@ function evidenceTopLevelName(destination) {
   return parts[1]
 }
 
+function mobileSignoffTopLevelName(destination) {
+  if (typeof destination !== 'string') return ''
+  const parts = destination.replaceAll('\\', '/').split('/').filter(Boolean)
+  if (parts[0] !== 'mobile-signoff' || !parts[1]) return ''
+  return parts[1]
+}
+
 function validateRegisteredEvidenceEntries(packetDir, includedEvidence, failures) {
   const evidenceDir = path.join(packetDir, 'evidence')
   if (!existsSync(evidenceDir)) return
@@ -162,6 +180,26 @@ function validateRegisteredEvidenceEntries(packetDir, includedEvidence, failures
   for (const entry of readdirSync(evidenceDir, { withFileTypes: true })) {
     if (!registered.has(entry.name)) {
       failures.push(`evidence/${entry.name} is not registered in manifest includedEvidence`)
+    }
+  }
+}
+
+function validateRegisteredMobileSignoffEntries(packetDir, includedMobileSignoff, failures) {
+  const mobileSignoffDir = path.join(packetDir, 'mobile-signoff')
+  if (!existsSync(mobileSignoffDir)) return
+  if (!statSync(mobileSignoffDir).isDirectory()) {
+    failures.push('mobile-signoff is not a directory')
+    return
+  }
+
+  const registered = new Set(
+    Array.isArray(includedMobileSignoff)
+      ? includedMobileSignoff.map((entry) => mobileSignoffTopLevelName(entry?.destination)).filter(Boolean)
+      : [],
+  )
+  for (const entry of readdirSync(mobileSignoffDir, { withFileTypes: true })) {
+    if (!registered.has(entry.name)) {
+      failures.push(`mobile-signoff/${entry.name} is not registered in manifest includedMobileSignoff`)
     }
   }
 }
@@ -251,6 +289,74 @@ function validateIncludedEvidence(packetDir, entry, index, failures) {
   requireEmptyArray(compiledSummary.missingRequiredChecks, `${label}/compiled/summary.json missingRequiredChecks`, failures)
 }
 
+function validateIncludedMobileSignoff(packetDir, entry, index, failures) {
+  const label = `includedMobileSignoff[${index}]`
+  let signoffDir
+  try {
+    signoffDir = resolveInside(packetDir, entry?.destination, `${label}.destination`)
+  } catch (error) {
+    failures.push(error.message)
+    return
+  }
+  if (!existsSync(signoffDir) || !statSync(signoffDir).isDirectory()) {
+    failures.push(`${label}.destination directory does not exist`)
+    return
+  }
+
+  const status = entry.mobileSignoffStatus
+  if (status?.status !== 'pass') failures.push(`${label}.mobileSignoffStatus.status is not pass`)
+  if (status?.strict !== true) failures.push(`${label}.mobileSignoffStatus.strict is not true`)
+  if (status?.overallStatus !== 'pass') failures.push(`${label}.mobileSignoffStatus.overallStatus is not pass`)
+  if (status?.requiredChecks !== MOBILE_SIGNOFF_REQUIRED_CHECK_IDS.length) {
+    failures.push(`${label}.mobileSignoffStatus.requiredChecks is not ${MOBILE_SIGNOFF_REQUIRED_CHECK_IDS.length}`)
+  }
+
+  let summary
+  try {
+    summary = readJsonFile(path.join(signoffDir, 'summary.json'), `${label}/summary.json`)
+  } catch (error) {
+    failures.push(error.message)
+    return
+  }
+
+  if (summary.tool !== 'dingtalk-public-form-mobile-signoff') failures.push(`${label}/summary.json tool is not dingtalk-public-form-mobile-signoff`)
+  if (summary.strict !== true) failures.push(`${label}/summary.json strict is not true`)
+  if (summary.status !== 'pass') failures.push(`${label}/summary.json status is not pass`)
+  requireEmptyArray(summary.errors, `${label}/summary.json errors`, failures)
+  if (!existsSync(path.join(signoffDir, 'mobile-signoff.redacted.json'))) {
+    failures.push(`${label}/mobile-signoff.redacted.json does not exist`)
+  }
+  if (existsSync(path.join(signoffDir, 'mobile-signoff.json'))) {
+    failures.push(`${label}/mobile-signoff.json must not be included; include only compiled redacted signoff output`)
+  }
+  if (
+    typeof status?.overallStatus === 'string'
+    && typeof summary.status === 'string'
+    && status.overallStatus !== summary.status
+  ) {
+    failures.push(`${label}.mobileSignoffStatus.overallStatus does not match summary`)
+  }
+  if (
+    typeof status?.strict === 'boolean'
+    && typeof summary.strict === 'boolean'
+    && status.strict !== summary.strict
+  ) {
+    failures.push(`${label}.mobileSignoffStatus.strict does not match summary`)
+  }
+  if (!Array.isArray(summary.requiredChecks)) {
+    failures.push(`${label}/summary.json requiredChecks is not an array`)
+    return
+  }
+  if (summary.requiredChecks.length !== MOBILE_SIGNOFF_REQUIRED_CHECK_IDS.length) {
+    failures.push(`${label}/summary.json requiredChecks length is not ${MOBILE_SIGNOFF_REQUIRED_CHECK_IDS.length}`)
+  }
+  for (const id of MOBILE_SIGNOFF_REQUIRED_CHECK_IDS) {
+    if (!hasPassingCheck(summary.requiredChecks, id)) {
+      failures.push(`${label}/summary.json required check ${id} is not pass`)
+    }
+  }
+}
+
 function isLikelyText(buffer) {
   return !buffer.includes(0)
 }
@@ -297,6 +403,7 @@ function validatePacket(packetDir) {
   const manifestPath = path.join(packetDir, 'manifest.json')
   const readmePath = path.join(packetDir, 'README.md')
   const manifest = readJsonFile(manifestPath, 'manifest.json')
+  const includedMobileSignoff = Array.isArray(manifest.includedMobileSignoff) ? manifest.includedMobileSignoff : []
 
   if (!existsSync(readmePath) || !statSync(readmePath).isFile()) {
     failures.push('README.md does not exist')
@@ -310,6 +417,11 @@ function validatePacket(packetDir) {
     validateRegisteredEvidenceEntries(packetDir, manifest.includedEvidence, failures)
     manifest.includedEvidence.forEach((entry, index) => validateIncludedEvidence(packetDir, entry, index, failures))
   }
+  if (manifest.requireMobileSignoffPass === true && includedMobileSignoff.length === 0) {
+    failures.push('manifest requireMobileSignoffPass is true but includedMobileSignoff is empty')
+  }
+  validateRegisteredMobileSignoffEntries(packetDir, includedMobileSignoff, failures)
+  includedMobileSignoff.forEach((entry, index) => validateIncludedMobileSignoff(packetDir, entry, index, failures))
 
   let scannedFiles = 0
   walkFiles(packetDir, (file) => {
@@ -326,6 +438,7 @@ function validatePacket(packetDir) {
     packetDir: relativePath(packetDir),
     status: failures.length === 0 ? 'pass' : 'fail',
     includedEvidenceCount: Array.isArray(manifest.includedEvidence) ? manifest.includedEvidence.length : 0,
+    includedMobileSignoffCount: includedMobileSignoff.length,
     scannedFiles,
     secretFindings,
     failures,

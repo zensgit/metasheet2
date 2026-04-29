@@ -14,6 +14,17 @@ const DINGTALK_P4_REQUIRED_CHECK_IDS = [
   'delivery-history-group-person',
   'no-email-user-create-bind',
 ]
+const MOBILE_SIGNOFF_REQUIRED_CHECK_IDS = [
+  'public-anonymous-submit',
+  'dingtalk-unbound-rejected',
+  'dingtalk-bound-submit',
+  'selected-unbound-rejected',
+  'selected-bound-submit',
+  'selected-unlisted-bound-rejected',
+  'granted-bound-without-grant-rejected',
+  'granted-bound-with-grant-submit',
+  'password-change-bypass-observed',
+]
 
 const requiredPacketFiles = [
   {
@@ -132,6 +143,11 @@ const requiredPacketFiles = [
     description: 'runs strict finalize, final handoff, release-ready status, and final docs in one closeout command',
   },
   {
+    path: 'scripts/ops/dingtalk-public-form-mobile-signoff.mjs',
+    kind: 'script',
+    description: 'builds, records, TODO-tracks, and strict-compiles real DingTalk mobile public-form signoff evidence',
+  },
+  {
     path: 'scripts/ops/validate-dingtalk-staging-evidence-packet.mjs',
     kind: 'script',
     description: 'validates final gated evidence packets and scans for secret-like raw evidence before handoff',
@@ -147,6 +163,8 @@ Options:
   --output-dir <dir>              Output directory, default ${DEFAULT_OUTPUT_DIR}
   --include-output <dir>          Optional existing evidence directory to copy into evidence/
   --require-dingtalk-p4-pass      Require every included output to be a finalized passing P4 session
+  --include-mobile-signoff <dir>  Optional strict mobile signoff output dir to copy into mobile-signoff/
+  --require-mobile-signoff-pass   Require every included mobile signoff output to be strict passing
   --help                          Show this help
 
 Examples:
@@ -156,6 +174,11 @@ Examples:
   node scripts/ops/export-dingtalk-staging-evidence-packet.mjs \\
     --include-output output/dingtalk-p4-remote-smoke-session/142-session \\
     --require-dingtalk-p4-pass
+  node scripts/ops/export-dingtalk-staging-evidence-packet.mjs \\
+    --include-output output/dingtalk-p4-remote-smoke-session/142-session \\
+    --require-dingtalk-p4-pass \\
+    --include-mobile-signoff output/dingtalk-public-form-mobile-signoff/142-compiled \\
+    --require-mobile-signoff-pass
 `)
 }
 
@@ -172,6 +195,8 @@ function parseArgs(argv) {
     outputDir: path.resolve(process.cwd(), DEFAULT_OUTPUT_DIR),
     includeOutputDirs: [],
     requireDingTalkP4Pass: false,
+    includeMobileSignoffDirs: [],
+    requireMobileSignoffPass: false,
   }
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -188,6 +213,13 @@ function parseArgs(argv) {
         break
       case '--require-dingtalk-p4-pass':
         opts.requireDingTalkP4Pass = true
+        break
+      case '--include-mobile-signoff':
+        opts.includeMobileSignoffDirs.push(path.resolve(process.cwd(), readRequiredValue(argv, i, arg)))
+        i += 1
+        break
+      case '--require-mobile-signoff-pass':
+        opts.requireMobileSignoffPass = true
         break
       case '--help':
         printHelp()
@@ -317,6 +349,56 @@ function validateEvidenceDir(sourceDir, opts) {
   return opts.requireDingTalkP4Pass ? validateDingTalkP4FinalPass(sourceDir) : null
 }
 
+function validateMobileSignoffPass(sourceDir) {
+  const summaryPath = path.join(sourceDir, 'summary.json')
+  const redactedEvidencePath = path.join(sourceDir, 'mobile-signoff.redacted.json')
+  const summary = readJsonFile(summaryPath, 'mobile signoff summary.json')
+  const failures = []
+
+  if (summary.tool !== 'dingtalk-public-form-mobile-signoff') failures.push('summary.json tool is not dingtalk-public-form-mobile-signoff')
+  if (summary.strict !== true) failures.push('summary.json strict is not true')
+  if (summary.status !== 'pass') failures.push('summary.json status is not pass')
+  requireEmptyArray(summary.errors, 'summary.json errors', failures)
+  if (!existsSync(redactedEvidencePath) || !statSync(redactedEvidencePath).isFile()) {
+    failures.push('mobile-signoff.redacted.json does not exist')
+  }
+  if (existsSync(path.join(sourceDir, 'mobile-signoff.json'))) {
+    failures.push('raw mobile-signoff.json must not be included; use the compiled output directory')
+  }
+  const requiredChecks = getArray(summary.requiredChecks, 'summary.json requiredChecks', failures)
+  if (requiredChecks.length !== MOBILE_SIGNOFF_REQUIRED_CHECK_IDS.length) {
+    failures.push(`summary.json requiredChecks length is not ${MOBILE_SIGNOFF_REQUIRED_CHECK_IDS.length}`)
+  }
+  for (const id of MOBILE_SIGNOFF_REQUIRED_CHECK_IDS) {
+    if (!hasPassingCheck(requiredChecks, id)) {
+      failures.push(`summary.json required check ${id} is not pass`)
+    }
+  }
+
+  if (failures.length > 0) {
+    throw new Error(`included mobile signoff output is not strict pass: ${path.relative(process.cwd(), sourceDir).replaceAll('\\', '/')} (${failures.join('; ')})`)
+  }
+
+  return {
+    status: 'pass',
+    summary: path.relative(sourceDir, summaryPath).replaceAll('\\', '/'),
+    redactedEvidence: path.relative(sourceDir, redactedEvidencePath).replaceAll('\\', '/'),
+    strict: summary.strict,
+    overallStatus: summary.status,
+    requiredChecks: MOBILE_SIGNOFF_REQUIRED_CHECK_IDS.length,
+  }
+}
+
+function validateMobileSignoffDir(sourceDir, opts) {
+  if (!existsSync(sourceDir) || !statSync(sourceDir).isDirectory()) {
+    throw new Error(`--include-mobile-signoff must point to an existing directory: ${sourceDir}`)
+  }
+  if (existsSync(path.join(sourceDir, 'mobile-signoff.json'))) {
+    throw new Error(`--include-mobile-signoff must point to a compiled/redacted output directory, not a raw kit directory: ${sourceDir}`)
+  }
+  return opts.requireMobileSignoffPass ? validateMobileSignoffPass(sourceDir) : null
+}
+
 function inspectExistingPacketOutputDir(outputDir) {
   if (!existsSync(outputDir)) return { exists: false, isExistingPacket: false, entryCount: 0 }
   if (!statSync(outputDir).isDirectory()) {
@@ -371,18 +453,38 @@ function copyEvidenceDir(sourceDir, outputDir, index, dingtalkP4FinalStatus) {
   }
 }
 
+function copyMobileSignoffDir(sourceDir, outputDir, index, mobileSignoffStatus) {
+  const destinationName = `${String(index + 1).padStart(2, '0')}-${sanitizeEvidenceName(sourceDir)}`
+  const destination = path.join(outputDir, 'mobile-signoff', destinationName)
+  mkdirSync(path.dirname(destination), { recursive: true })
+  rmSync(destination, { recursive: true, force: true })
+  cpSync(sourceDir, destination, { recursive: true })
+  return {
+    source: path.relative(process.cwd(), sourceDir).replaceAll('\\', '/'),
+    destination: path.relative(outputDir, destination).replaceAll('\\', '/'),
+    ...(mobileSignoffStatus ? { mobileSignoffStatus } : {}),
+  }
+}
+
 function renderReadme(manifest) {
   const docs = manifest.files.filter((file) => file.kind !== 'script')
   const scripts = manifest.files.filter((file) => file.kind === 'script')
   const evidence = manifest.includedEvidence
+  const mobileSignoff = Array.isArray(manifest.includedMobileSignoff) ? manifest.includedMobileSignoff : []
 
   const fileLine = (file) => `- \`${file.path}\` — ${file.description}`
   const evidenceLines = evidence.length
     ? evidence.map((entry) => `- \`${entry.destination}\` copied from \`${entry.source}\``).join('\n')
     : '- No runtime evidence directory was included. Re-run with `--include-output <dir>` after staging smoke.'
+  const mobileSignoffLines = mobileSignoff.length
+    ? mobileSignoff.map((entry) => `- \`${entry.destination}\` copied from \`${entry.source}\``).join('\n')
+    : '- No mobile public-form signoff directory was included. Re-run with `--include-mobile-signoff <dir>` after real DingTalk mobile signoff.'
   const gateLine = manifest.requireDingTalkP4Pass
     ? '- DingTalk P4 final-pass gate was enabled; every included output was validated before copy.'
     : '- DingTalk P4 final-pass gate was not enabled. Use `--require-dingtalk-p4-pass` for release evidence handoff.'
+  const mobileGateLine = manifest.requireMobileSignoffPass
+    ? '- DingTalk mobile public-form signoff gate was enabled; every included mobile signoff output was validated before copy.'
+    : '- DingTalk mobile public-form signoff gate was not enabled. Use `--require-mobile-signoff-pass` for release evidence handoff.'
 
   return `# DingTalk Staging Evidence Packet
 
@@ -404,9 +506,14 @@ ${scripts.map(fileLine).join('\n')}
 
 ${evidenceLines}
 
+## Included Mobile Public-Form Signoff
+
+${mobileSignoffLines}
+
 ## Evidence Gates
 
 ${gateLine}
+${mobileGateLine}
 
 ## Recommended Order
 
@@ -426,7 +533,10 @@ ${gateLine}
 14. Run \`node scripts/ops/dingtalk-p4-final-handoff.mjs --session-dir <session-dir> --output-dir <packet-dir>\` after finalization passes.
 15. Re-run \`node scripts/ops/dingtalk-p4-smoke-status.mjs --session-dir <session-dir> --handoff-summary <packet-dir>/handoff-summary.json --require-release-ready\`.
 16. Generate final docs with \`node scripts/ops/dingtalk-p4-final-docs.mjs --session-dir <session-dir> --handoff-summary <packet-dir>/handoff-summary.json --require-release-ready\`.
-17. If debugging manually, re-export with \`--include-output <session-dir> --require-dingtalk-p4-pass\`, then validate with \`validate-dingtalk-staging-evidence-packet.mjs\`.
+17. For public-form mobile acceptance, create a kit with \`node scripts/ops/dingtalk-public-form-mobile-signoff.mjs --init-kit <mobile-kit-dir>\`.
+18. Track remaining checks with \`node scripts/ops/dingtalk-public-form-mobile-signoff.mjs --todo <mobile-kit-dir>/mobile-signoff.json --output-dir <mobile-kit-dir>/todo\`.
+19. Record each real DingTalk mobile result with the suggested \`--record ... --compile-when-ready\` command until strict output is written.
+20. If debugging manually, re-export with \`--include-output <session-dir> --require-dingtalk-p4-pass --include-mobile-signoff <mobile-compiled-dir> --require-mobile-signoff-pass\`, then validate with \`validate-dingtalk-staging-evidence-packet.mjs\`.
 
 ## Non-Goals
 
@@ -444,7 +554,11 @@ async function main() {
     if (opts.requireDingTalkP4Pass && opts.includeOutputDirs.length === 0) {
       throw new Error('--require-dingtalk-p4-pass requires at least one --include-output session directory')
     }
+    if (opts.requireMobileSignoffPass && opts.includeMobileSignoffDirs.length === 0) {
+      throw new Error('--require-mobile-signoff-pass requires at least one --include-mobile-signoff directory')
+    }
     const evidenceValidations = opts.includeOutputDirs.map((dir) => validateEvidenceDir(dir, opts))
+    const mobileSignoffValidations = opts.includeMobileSignoffDirs.map((dir) => validateMobileSignoffDir(dir, opts))
     mkdirSync(opts.outputDir, { recursive: true })
 
     const copiedFiles = requiredPacketFiles.map((entry) => {
@@ -462,13 +576,21 @@ async function main() {
       return copied
     })
 
+    const includedMobileSignoff = opts.includeMobileSignoffDirs.map((dir, index) => {
+      const copied = copyMobileSignoffDir(dir, opts.outputDir, index, mobileSignoffValidations[index])
+      console.log(`Copied mobile signoff ${copied.source}`)
+      return copied
+    })
+
     const manifest = {
       packet: 'dingtalk-staging-evidence-packet',
       generatedAt: new Date().toISOString(),
       repoRoot: process.cwd(),
       requireDingTalkP4Pass: opts.requireDingTalkP4Pass,
+      requireMobileSignoffPass: opts.requireMobileSignoffPass,
       files: copiedFiles,
       includedEvidence,
+      includedMobileSignoff,
     }
 
     const manifestPath = path.join(opts.outputDir, 'manifest.json')
