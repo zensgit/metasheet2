@@ -70,3 +70,4 @@ artifacts/dingtalk-staging-evidence-packet/
 # K3 WISE postdeploy smoke artifacts can include deployment topology and
 # authenticated contract evidence.
 output/integration-k3wise-postdeploy-smoke/
+output/deploy/k3wise-postdeploy-smoke*/
