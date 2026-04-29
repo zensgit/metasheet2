@@ -168,6 +168,16 @@
           @patch-dates="onTimelinePatchDates"
           @update-view-config="onPersistActiveViewConfig"
         />
+        <MetaGanttView
+          v-else-if="activeViewType === 'gantt'"
+          :rows="grid.rows.value" :fields="scopedAllFields" :loading="grid.loading.value"
+          :view-config="workbench.activeView.value?.config"
+          :group-info="workbench.activeView.value?.groupInfo"
+          :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
+          :can-create="caps.canCreateRecord.value"
+          @select-record="onSelectRecord" @create-record="onKanbanCreateRecord"
+          @update-view-config="onPersistActiveViewConfig"
+        />
         <MetaGridTable
           v-else
           :rows="grid.rows.value" :visible-fields="scopedGridFields" :sort-rules="grid.sortRules.value"
@@ -365,6 +375,7 @@ import MetaKanbanView from '../components/MetaKanbanView.vue'
 import MetaGalleryView from '../components/MetaGalleryView.vue'
 import MetaCalendarView from '../components/MetaCalendarView.vue'
 import MetaTimelineView from '../components/MetaTimelineView.vue'
+import MetaGanttView from '../components/MetaGanttView.vue'
 import MetaToast from '../components/MetaToast.vue'
 import MetaImportModal from '../components/MetaImportModal.vue'
 import MetaMentionPopover from '../components/MetaMentionPopover.vue'
@@ -1482,13 +1493,23 @@ async function onDeleteField(fieldId: string) {
 }
 
 // --- View management ---
-async function onCreateView(input: { sheetId: string; name: string; type: string; config?: Record<string, unknown>; groupInfo?: Record<string, unknown> }) {
+async function onCreateView(input: {
+  sheetId: string
+  name: string
+  type: string
+  config?: Record<string, unknown>
+  filterInfo?: Record<string, unknown>
+  sortInfo?: Record<string, unknown>
+  groupInfo?: Record<string, unknown>
+}) {
   try {
     const res = await workbench.client.createView({
       sheetId: input.sheetId,
       name: input.name,
       type: input.type,
       config: input.config,
+      filterInfo: input.filterInfo,
+      sortInfo: input.sortInfo,
       groupInfo: input.groupInfo,
     })
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
@@ -1497,11 +1518,22 @@ async function onCreateView(input: { sheetId: string; name: string; type: string
   } catch (e: any) { showError(e.message ?? 'Failed to create view') }
 }
 
-async function onUpdateView(viewId: string, input: { name?: string; config?: Record<string, unknown>; groupInfo?: Record<string, unknown> }) {
+async function onUpdateView(viewId: string, input: {
+  name?: string
+  config?: Record<string, unknown>
+  filterInfo?: Record<string, unknown>
+  sortInfo?: Record<string, unknown>
+  groupInfo?: Record<string, unknown>
+}) {
   await updateViewInternal(viewId, input, true)
 }
 
-async function onPersistActiveViewConfig(input: { config?: Record<string, unknown>; groupInfo?: Record<string, unknown> }) {
+async function onPersistActiveViewConfig(input: {
+  config?: Record<string, unknown>
+  filterInfo?: Record<string, unknown>
+  sortInfo?: Record<string, unknown>
+  groupInfo?: Record<string, unknown>
+}) {
   const viewId = workbench.activeViewId.value
   if (!viewId) return
   await updateViewInternal(viewId, input, false)
@@ -1509,7 +1541,13 @@ async function onPersistActiveViewConfig(input: { config?: Record<string, unknow
 
 async function updateViewInternal(
   viewId: string,
-  input: { name?: string; config?: Record<string, unknown>; groupInfo?: Record<string, unknown> },
+  input: {
+    name?: string
+    config?: Record<string, unknown>
+    filterInfo?: Record<string, unknown>
+    sortInfo?: Record<string, unknown>
+    groupInfo?: Record<string, unknown>
+  },
   notify: boolean,
 ) {
   try {

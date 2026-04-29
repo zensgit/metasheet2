@@ -576,6 +576,15 @@ export interface MetaTimelineViewConfig {
   zoom?: 'day' | 'week' | 'month'
 }
 
+export interface MetaGanttViewConfig {
+  startFieldId?: string | null
+  endFieldId?: string | null
+  titleFieldId?: string | null
+  progressFieldId?: string | null
+  groupFieldId?: string | null
+  zoom?: 'day' | 'week' | 'month'
+}
+
 // --- Record-level permissions ---
 export type RecordPermissionAccessLevel = 'read' | 'write' | 'admin'
 export type RecordPermissionSubjectType = 'user' | 'role' | 'member-group'

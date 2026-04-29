@@ -144,18 +144,50 @@
         <template v-else-if="configTargetType === 'formula'">
           <label class="meta-field-mgr__field">
             <span>Expression</span>
-            <textarea v-model="formulaDraft.expression" class="meta-field-mgr__textarea" placeholder="SUM({Price}, {Tax})"></textarea>
+            <textarea v-model="formulaDraft.expression" class="meta-field-mgr__textarea" placeholder="=SUM({fld_price}, {fld_tax})"></textarea>
           </label>
+          <div v-if="formulaDiagnostics.length" class="meta-field-mgr__formula-diagnostics">
+            <div
+              v-for="diagnostic in formulaDiagnostics"
+              :key="diagnostic.message"
+              class="meta-field-mgr__formula-diagnostic"
+              :class="`meta-field-mgr__formula-diagnostic--${diagnostic.severity}`"
+            >
+              {{ diagnostic.message }}
+            </div>
+          </div>
           <div class="meta-field-mgr__field">
-            <span>Insert field</span>
+            <span>Insert field token</span>
             <div class="meta-field-mgr__chips">
               <button
                 v-for="field in formulaSourceFields"
                 :key="field.id"
                 type="button"
                 class="meta-field-mgr__chip"
-                @click="insertFormulaField(field.name)"
+                :title="`Insert {${field.id}}`"
+                @click="insertFormulaField(field.id)"
               >{{ field.name }}</button>
+            </div>
+          </div>
+          <div class="meta-field-mgr__field">
+            <span>Function reference</span>
+            <input
+              v-model="formulaFunctionSearch"
+              class="meta-field-mgr__input"
+              placeholder="Search SUM, IF, TODAY..."
+            />
+            <div class="meta-field-mgr__formula-docs">
+              <button
+                v-for="doc in filteredFormulaDocs"
+                :key="doc.name"
+                type="button"
+                class="meta-field-mgr__formula-doc"
+                @click="insertFormulaFunction(doc.name)"
+              >
+                <strong>{{ doc.signature }}</strong>
+                <span>{{ doc.description }}</span>
+                <code>{{ doc.example }}</code>
+              </button>
             </div>
           </div>
         </template>
@@ -257,6 +289,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import type { FieldValidationRule, MetaField, MetaFieldCreateType, MetaSheet } from '../types'
+import {
+  searchFormulaFunctionDocs,
+  validateFormulaExpression,
+  type FormulaDiagnostic,
+} from '../utils/formula-docs'
 import {
   normalizeStringArray,
   resolveAttachmentFieldProperty,
@@ -419,6 +456,7 @@ const rollupDraft = reactive<{ linkFieldId: string; targetFieldId: string; forei
 const formulaDraft = reactive<{ expression: string }>({
   expression: '',
 })
+const formulaFunctionSearch = ref('')
 const attachmentDraft = reactive<{ maxFiles: number; acceptedMimeTypesText: string }>({
   maxFiles: 1,
   acceptedMimeTypesText: '',
@@ -450,6 +488,12 @@ const linkSourceFields = computed(() => props.fields.filter((field) => field.typ
 const targetSheets = computed(() => props.sheets.filter((sheet) => sheet.id !== props.sheetId))
 const formulaSourceFields = computed(() =>
   props.fields.filter((field) => field.id !== configTarget.value?.id && field.type !== 'formula'),
+)
+const filteredFormulaDocs = computed(() => searchFormulaFunctionDocs(formulaFunctionSearch.value).slice(0, 8))
+const formulaDiagnostics = computed<FormulaDiagnostic[]>(() =>
+  configTargetType.value === 'formula'
+    ? validateFormulaExpression(formulaDraft.expression, formulaSourceFields.value)
+    : [],
 )
 const configTargetType = computed(() => {
   if (configTarget.value) return configDraftType.value
@@ -513,6 +557,7 @@ function resetDrafts() {
   rollupDraft.foreignSheetId = ''
   rollupDraft.aggregation = 'count'
   formulaDraft.expression = ''
+  formulaFunctionSearch.value = ''
   attachmentDraft.maxFiles = 1
   attachmentDraft.acceptedMimeTypesText = ''
   currencyDraft.code = 'CNY'
@@ -787,6 +832,11 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
     }
   }
   if (normalizedType === 'formula') {
+    const blockingDiagnostic = formulaDiagnostics.value.find((diagnostic) => diagnostic.severity === 'error')
+    if (blockingDiagnostic) {
+      fieldConfigError.value = blockingDiagnostic.message
+      return undefined
+    }
     return { expression: formulaDraft.expression.trim() }
   }
   if (normalizedType === 'attachment') {
@@ -830,11 +880,18 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
   return undefined
 }
 
-function insertFormulaField(fieldName: string) {
-  const token = `{${fieldName}}`
+function appendFormulaToken(token: string) {
   formulaDraft.expression = formulaDraft.expression
     ? `${formulaDraft.expression}${formulaDraft.expression.endsWith(' ') ? '' : ' '}${token}`
     : token
+}
+
+function insertFormulaField(fieldId: string) {
+  appendFormulaToken(`{${fieldId}}`)
+}
+
+function insertFormulaFunction(functionName: string) {
+  appendFormulaToken(formulaDraft.expression.trim() ? `${functionName}()` : `=${functionName}()`)
 }
 
 function onAddField() {
@@ -1043,6 +1100,16 @@ onBeforeUnmount(() => {
 .meta-field-mgr__refresh { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; border: 1px solid #bfd6ff; border-radius: 6px; background: #eef5ff; color: #1d4ed8; font-size: 12px; }
 .meta-field-mgr__chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .meta-field-mgr__chip { border: 1px solid #d9ecff; border-radius: 999px; background: #f0f7ff; color: #2563eb; padding: 3px 10px; cursor: pointer; font-size: 11px; }
+.meta-field-mgr__formula-diagnostics { display: flex; flex-direction: column; gap: 4px; }
+.meta-field-mgr__formula-diagnostic { padding: 6px 8px; border-radius: 5px; font-size: 12px; }
+.meta-field-mgr__formula-diagnostic--warning { background: #fff7e6; color: #8a5a00; border: 1px solid #f3d19e; }
+.meta-field-mgr__formula-diagnostic--error { background: #fef0f0; color: #c0392b; border: 1px solid #fbc4c4; }
+.meta-field-mgr__formula-docs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; max-height: 180px; overflow-y: auto; }
+.meta-field-mgr__formula-doc { display: flex; flex-direction: column; gap: 3px; padding: 8px; border: 1px solid #e2e8f0; border-radius: 6px; background: #fff; color: #334155; text-align: left; cursor: pointer; }
+.meta-field-mgr__formula-doc:hover { border-color: #93c5fd; background: #f8fbff; }
+.meta-field-mgr__formula-doc strong { font-size: 12px; color: #1d4ed8; }
+.meta-field-mgr__formula-doc span { font-size: 11px; color: #64748b; }
+.meta-field-mgr__formula-doc code { font-size: 11px; color: #475569; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .meta-field-mgr__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .meta-field-mgr__stack { display: flex; flex-direction: column; gap: 8px; }
 .meta-field-mgr__option-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: center; }
