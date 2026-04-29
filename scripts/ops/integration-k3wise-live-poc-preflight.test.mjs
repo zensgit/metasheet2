@@ -130,6 +130,31 @@ test('buildPacket rejects truthy Submit/Audit strings and invalid flag values', 
   )
 })
 
+test('buildPacket requires K3 WISE auth keys before declaring preflight ready', () => {
+  assert.throws(
+    () => buildPacket(gate({ k3Wise: { credentials: {} } })),
+    (error) => error instanceof LivePocPreflightError && error.details.field === 'k3Wise.credentials',
+    'missing username/password or sessionId must block preflight-ready packet generation',
+  )
+
+  assert.throws(
+    () => buildPacket(gate({ k3Wise: { credentials: { username: 'k3-user' } } })),
+    (error) => error instanceof LivePocPreflightError && error.details.field === 'k3Wise.credentials',
+    'partial username-only credentials must still block preflight-ready packet generation',
+  )
+
+  const packet = buildPacket(gate({
+    k3Wise: {
+      credentials: {
+        sessionId: 'k3-session-from-customer',
+      },
+    },
+  }))
+  const k3 = packet.externalSystems.find((system) => system.kind === 'erp:k3-wise-webapi')
+  assert.deepEqual(k3.requiredCredentialKeys, ['acctId', 'sessionId'])
+  assert.equal(k3.credentials.sessionId, '<set-at-runtime>')
+})
+
 test('buildPacket blocks schema-qualified and quoted K3 core SQL table writes', () => {
   for (const table of [' t_ICItem ', 'dbo.t_ICItem', '[dbo].[t_ICBomChild]', '"dbo"."t_ICBOM"']) {
     assert.throws(

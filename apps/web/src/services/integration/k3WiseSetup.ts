@@ -222,11 +222,20 @@ export function splitList(value: string): string[] {
     .filter(Boolean)
 }
 
-function parsePositiveInteger(value: string, fallback: number): number {
+function isPositiveIntegerText(value: string): boolean {
   const normalized = trim(value)
-  if (!normalized) return fallback
+  if (!normalized) return false
   const parsed = Number(normalized)
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
+  return Number.isInteger(parsed) && parsed > 0
+}
+
+function parseRequiredPositiveInteger(value: string, field: keyof K3WiseSetupForm): number {
+  const normalized = trim(value)
+  const parsed = Number(normalized)
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${field} must be a positive integer`)
+  }
+  return parsed
 }
 
 function parseOptionalPositiveInteger(value: string): number | undefined {
@@ -329,6 +338,12 @@ export function validateK3WiseSetupForm(form: K3WiseSetupForm): K3WiseSetupValid
   if (webApiCredentialRequired && !trim(form.username)) issues.push({ field: 'username', message: 'K3 WISE username is required' })
   if (webApiCredentialRequired && !trim(form.password)) {
     issues.push({ field: 'password', message: 'K3 WISE password is required when credentials are created or replaced' })
+  }
+  if (!isPositiveIntegerText(form.lcid)) {
+    issues.push({ field: 'lcid', message: 'lcid must be a positive integer' })
+  }
+  if (!isPositiveIntegerText(form.timeoutMs)) {
+    issues.push({ field: 'timeoutMs', message: 'timeoutMs must be a positive integer' })
   }
   validateHttpUrl(form.baseUrl, 'baseUrl', issues)
   assertRelativePath(form.loginPath, 'loginPath', issues)
@@ -497,8 +512,8 @@ export function buildK3WiseSetupPayloads(form: K3WiseSetupForm): K3WiseSetupPayl
       baseUrl: trim(form.baseUrl),
       loginPath: trim(form.loginPath),
       ...(optionalString(form.healthPath) ? { healthPath: trim(form.healthPath) } : {}),
-      lcid: parsePositiveInteger(form.lcid, 2052),
-      timeoutMs: parsePositiveInteger(form.timeoutMs, 30000),
+      lcid: parseRequiredPositiveInteger(form.lcid, 'lcid'),
+      timeoutMs: parseRequiredPositiveInteger(form.timeoutMs, 'timeoutMs'),
       autoSubmit: form.autoSubmit,
       autoAudit: form.autoAudit,
       objects: {
