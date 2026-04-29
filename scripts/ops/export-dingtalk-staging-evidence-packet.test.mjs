@@ -18,6 +18,17 @@ const dingtalkP4RequiredCheckIds = [
   'delivery-history-group-person',
   'no-email-user-create-bind',
 ]
+const mobileSignoffRequiredCheckIds = [
+  'public-anonymous-submit',
+  'dingtalk-unbound-rejected',
+  'dingtalk-bound-submit',
+  'selected-unbound-rejected',
+  'selected-bound-submit',
+  'selected-unlisted-bound-rejected',
+  'granted-bound-without-grant-rejected',
+  'granted-bound-with-grant-submit',
+  'password-change-bypass-observed',
+]
 
 function makeTmpDir() {
   return mkdtempSync(path.join(tmpdir(), 'dingtalk-staging-evidence-packet-'))
@@ -62,6 +73,31 @@ function writeDingTalkP4Session(dir, overrides = {}) {
     unknownChecks: [],
     manualEvidenceIssues: [],
     ...overrides.compiledSummary,
+  }, null, 2)}\n`, 'utf8')
+}
+
+function writeMobileSignoffOutput(dir, overrides = {}) {
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(path.join(dir, 'summary.json'), `${JSON.stringify({
+    tool: 'dingtalk-public-form-mobile-signoff',
+    runId: 'mobile-signoff-test',
+    generatedAt: '2026-04-29T00:00:00.000Z',
+    strict: true,
+    status: 'pass',
+    errors: [],
+    warnings: [],
+    requiredChecks: mobileSignoffRequiredCheckIds.map((id) => ({
+      id,
+      status: 'pass',
+      kind: id.includes('rejected') ? 'deny-submit' : 'allow-submit',
+    })),
+    ...overrides.summary,
+  }, null, 2)}\n`, 'utf8')
+  writeFileSync(path.join(dir, 'summary.md'), '# Mobile Signoff Summary\n', 'utf8')
+  writeFileSync(path.join(dir, 'mobile-signoff.redacted.json'), `${JSON.stringify({
+    tool: 'dingtalk-public-form-mobile-signoff',
+    checks: mobileSignoffRequiredCheckIds.map((id) => ({ id, status: 'pass' })),
+    ...overrides.redactedEvidence,
   }, null, 2)}\n`, 'utf8')
 }
 
@@ -125,6 +161,10 @@ test('export-dingtalk-staging-evidence-packet copies required handoff files and 
       true,
     )
     assert.equal(
+      existsSync(path.join(outputDir, 'scripts/ops/dingtalk-public-form-mobile-signoff.mjs')),
+      true,
+    )
+    assert.equal(
       existsSync(path.join(outputDir, 'scripts/ops/validate-dingtalk-staging-evidence-packet.mjs')),
       true,
     )
@@ -134,7 +174,9 @@ test('export-dingtalk-staging-evidence-packet copies required handoff files and 
     const manifest = JSON.parse(readFileSync(path.join(outputDir, 'manifest.json'), 'utf8'))
     assert.equal(manifest.packet, 'dingtalk-staging-evidence-packet')
     assert.equal(manifest.requireDingTalkP4Pass, false)
+    assert.equal(manifest.requireMobileSignoffPass, false)
     assert.equal(manifest.includedEvidence.length, 0)
+    assert.equal(manifest.includedMobileSignoff.length, 0)
     assert.equal(
       manifest.files.some((file) => file.path === 'scripts/ops/validate-env-file.sh'),
       true,
@@ -180,6 +222,10 @@ test('export-dingtalk-staging-evidence-packet copies required handoff files and 
       true,
     )
     assert.equal(
+      manifest.files.some((file) => file.path === 'scripts/ops/dingtalk-public-form-mobile-signoff.mjs'),
+      true,
+    )
+    assert.equal(
       manifest.files.some((file) => file.path === 'scripts/ops/validate-dingtalk-staging-evidence-packet.mjs'),
       true,
     )
@@ -195,12 +241,181 @@ test('export-dingtalk-staging-evidence-packet copies required handoff files and 
     assert.match(readme, /dingtalk-p4-final-handoff\.mjs/)
     assert.match(readme, /dingtalk-p4-final-docs\.mjs/)
     assert.match(readme, /dingtalk-p4-final-closeout\.mjs/)
+    assert.match(readme, /dingtalk-public-form-mobile-signoff\.mjs/)
     assert.match(readme, /dingtalk-p4-smoke-status\.mjs --session-dir <session-dir> --handoff-summary <packet-dir>\/handoff-summary\.json --require-release-ready/)
     assert.match(readme, /validate-dingtalk-staging-evidence-packet\.mjs/)
     assert.match(readme, /compile-dingtalk-p4-smoke-evidence\.mjs/)
     assert.match(readme, /No runtime evidence directory was included/)
+    assert.match(readme, /No mobile public-form signoff directory was included/)
     assert.match(readme, /DingTalk P4 final-pass gate was not enabled/)
+    assert.match(readme, /DingTalk mobile public-form signoff gate was not enabled/)
     assert.match(readme, /does not generate secrets/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('export-dingtalk-staging-evidence-packet accepts strict mobile signoff pass evidence when required', () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'packet')
+  const evidenceDir = path.join(tmpDir, '142-session')
+  const mobileSignoffDir = path.join(tmpDir, 'mobile-signoff-compiled')
+
+  try {
+    writeDingTalkP4Session(evidenceDir)
+    writeMobileSignoffOutput(mobileSignoffDir)
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        scriptPath,
+        '--output-dir',
+        outputDir,
+        '--include-output',
+        evidenceDir,
+        '--require-dingtalk-p4-pass',
+        '--include-mobile-signoff',
+        mobileSignoffDir,
+        '--require-mobile-signoff-pass',
+      ],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      },
+    )
+
+    assert.equal(result.status, 0, result.stderr)
+    const manifest = JSON.parse(readFileSync(path.join(outputDir, 'manifest.json'), 'utf8'))
+    assert.equal(manifest.requireMobileSignoffPass, true)
+    assert.equal(manifest.includedMobileSignoff.length, 1)
+    assert.equal(manifest.includedMobileSignoff[0].destination, 'mobile-signoff/01-mobile-signoff-compiled')
+    assert.equal(manifest.includedMobileSignoff[0].mobileSignoffStatus.status, 'pass')
+    assert.equal(manifest.includedMobileSignoff[0].mobileSignoffStatus.strict, true)
+    assert.equal(manifest.includedMobileSignoff[0].mobileSignoffStatus.requiredChecks, 9)
+    assert.equal(
+      existsSync(path.join(outputDir, 'mobile-signoff/01-mobile-signoff-compiled/mobile-signoff.redacted.json')),
+      true,
+    )
+
+    const readme = readFileSync(path.join(outputDir, 'README.md'), 'utf8')
+    assert.match(readme, /Included Mobile Public-Form Signoff/)
+    assert.match(readme, /DingTalk mobile public-form signoff gate was enabled/)
+    assert.match(readme, /--include-mobile-signoff <mobile-compiled-dir> --require-mobile-signoff-pass/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('export-dingtalk-staging-evidence-packet rejects non-strict mobile signoff when required', () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'packet')
+  const evidenceDir = path.join(tmpDir, '142-session')
+  const mobileSignoffDir = path.join(tmpDir, 'mobile-signoff-compiled')
+
+  try {
+    writeDingTalkP4Session(evidenceDir)
+    writeMobileSignoffOutput(mobileSignoffDir, {
+      summary: {
+        strict: false,
+        status: 'fail',
+        errors: ['still pending'],
+      },
+    })
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        scriptPath,
+        '--output-dir',
+        outputDir,
+        '--include-output',
+        evidenceDir,
+        '--require-dingtalk-p4-pass',
+        '--include-mobile-signoff',
+        mobileSignoffDir,
+        '--require-mobile-signoff-pass',
+      ],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      },
+    )
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /included mobile signoff output is not strict pass/)
+    assert.match(result.stderr, /summary\.json strict is not true/)
+    assert.equal(existsSync(path.join(outputDir, 'manifest.json')), false)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('export-dingtalk-staging-evidence-packet rejects raw mobile signoff kit directories', () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'packet')
+  const evidenceDir = path.join(tmpDir, '142-session')
+  const mobileSignoffDir = path.join(tmpDir, 'mobile-signoff-kit')
+
+  try {
+    writeDingTalkP4Session(evidenceDir)
+    writeMobileSignoffOutput(mobileSignoffDir)
+    writeFileSync(path.join(mobileSignoffDir, 'mobile-signoff.json'), '{"raw":true}\n', 'utf8')
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        scriptPath,
+        '--output-dir',
+        outputDir,
+        '--include-output',
+        evidenceDir,
+        '--require-dingtalk-p4-pass',
+        '--include-mobile-signoff',
+        mobileSignoffDir,
+        '--require-mobile-signoff-pass',
+      ],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      },
+    )
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /must point to a compiled\/redacted output directory/)
+    assert.equal(existsSync(path.join(outputDir, 'manifest.json')), false)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('export-dingtalk-staging-evidence-packet requires mobile signoff input when mobile gate enabled', () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'packet')
+  const evidenceDir = path.join(tmpDir, '142-session')
+
+  try {
+    writeDingTalkP4Session(evidenceDir)
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        scriptPath,
+        '--output-dir',
+        outputDir,
+        '--include-output',
+        evidenceDir,
+        '--require-dingtalk-p4-pass',
+        '--require-mobile-signoff-pass',
+      ],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      },
+    )
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /--require-mobile-signoff-pass requires at least one --include-mobile-signoff directory/)
+    assert.equal(existsSync(path.join(outputDir, 'manifest.json')), false)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
