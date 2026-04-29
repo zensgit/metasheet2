@@ -18,15 +18,18 @@ Date: 2026-04-29
 ```bash
 pnpm --filter @metasheet/web exec vitest run --watch=false tests/multitable-hierarchy-view.spec.ts tests/multitable-view-manager.spec.ts
 pnpm --filter @metasheet/web exec vue-tsc --noEmit
+git diff --check origin/main...HEAD
 ```
 
-Because this worktree did not have dependencies installed, `node_modules` and `apps/web/node_modules` were temporarily symlinked from the main repo for verification, then removed.
+Because this worktree did not have dependencies installed, `node_modules` and `apps/web/node_modules` were temporarily symlinked from the main repo for verification, then removed. The branch was rebased onto `origin/main@74f96bc6c` before the final verification pass.
 
 ## Results
 
 - `pnpm --filter @metasheet/web exec vitest run --watch=false tests/multitable-hierarchy-view.spec.ts tests/multitable-view-manager.spec.ts`
   - Passed: 2 files, 17 tests.
 - `pnpm --filter @metasheet/web exec vue-tsc --noEmit`
+  - Passed.
+- `git diff --check origin/main...HEAD`
   - Passed.
 
 ## Boundary Checks
