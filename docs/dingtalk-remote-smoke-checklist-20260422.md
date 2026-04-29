@@ -290,6 +290,8 @@ After all manual evidence has been recorded, prefer the closeout wrapper when yo
 node scripts/ops/dingtalk-p4-final-closeout.mjs \
   --session-dir output/dingtalk-p4-remote-smoke-session/142-session \
   --packet-output-dir artifacts/dingtalk-staging-evidence-packet/142-final \
+  --include-mobile-signoff output/dingtalk-public-form-mobile-signoff/142-compiled \
+  --require-mobile-signoff-pass \
   --docs-output-dir docs/development \
   --date 20260423
 ```
@@ -315,7 +317,9 @@ After finalization passes, prefer the one-command final handoff wrapper. It expo
 ```bash
 node scripts/ops/dingtalk-p4-final-handoff.mjs \
   --session-dir output/dingtalk-p4-remote-smoke-session/142-session \
-  --output-dir artifacts/dingtalk-staging-evidence-packet/142-final
+  --output-dir artifacts/dingtalk-staging-evidence-packet/142-final \
+  --include-mobile-signoff output/dingtalk-public-form-mobile-signoff/142-compiled \
+  --require-mobile-signoff-pass
 ```
 
 After final handoff, re-run status with the handoff summary when you need a single release-readiness gate:
@@ -333,6 +337,8 @@ If debugging the individual steps, export a handoff packet with the final-pass g
 node scripts/ops/export-dingtalk-staging-evidence-packet.mjs \
   --include-output output/dingtalk-p4-remote-smoke-session/142-session \
   --require-dingtalk-p4-pass \
+  --include-mobile-signoff output/dingtalk-public-form-mobile-signoff/142-compiled \
+  --require-mobile-signoff-pass \
   --output-dir artifacts/dingtalk-staging-evidence-packet/142-final
 ```
 
@@ -343,6 +349,7 @@ The packet exporter rejects the included session unless the final pass is machin
 - `remoteSmokePhase` is copied into packet metadata when present and must be one of `bootstrap_pending`, `manual_pending`, `finalize_pending`, or `fail`.
 - All eight required checks must exist with `status: "pass"`.
 - `requiredChecksNotPassed`, `manualEvidenceIssues`, `failedChecks`, and `missingRequiredChecks` must be arrays and empty.
+- When `--require-mobile-signoff-pass` is used, the mobile signoff output must be a strict compiled directory containing `summary.json` and `mobile-signoff.redacted.json`, and must not include raw `mobile-signoff.json`.
 - The exporter does not create secrets, but it copies raw included evidence. Review and redact raw workspace/artifact files before release handoff.
 
 Before publishing or sending the packet, run the release handoff validator:

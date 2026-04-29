@@ -14,6 +14,10 @@ Exports and validates a finalized DingTalk P4 smoke session in one local handoff
 Options:
   --session-dir <dir>          Finalized DingTalk P4 smoke session directory (required)
   --output-dir <dir>           Packet directory, default ${DEFAULT_PACKET_ROOT}/<session-name>-final
+  --include-mobile-signoff <dir>
+                               Optional strict mobile public-form signoff output dir
+  --require-mobile-signoff-pass
+                               Require every included mobile signoff output to be strict passing
   --publish-check-json <file>  Validator JSON output, default <output-dir>/publish-check.json
   --summary-json <file>        Handoff JSON summary, default <output-dir>/handoff-summary.json
   --summary-md <file>          Handoff Markdown summary, default <output-dir>/handoff-summary.md
@@ -40,6 +44,8 @@ function parseArgs(argv) {
   const opts = {
     sessionDir: '',
     outputDir: '',
+    includeMobileSignoffDirs: [],
+    requireMobileSignoffPass: false,
     publishCheckJson: '',
     summaryJson: '',
     summaryMd: '',
@@ -55,6 +61,13 @@ function parseArgs(argv) {
       case '--output-dir':
         opts.outputDir = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
         i += 1
+        break
+      case '--include-mobile-signoff':
+        opts.includeMobileSignoffDirs.push(path.resolve(process.cwd(), readRequiredValue(argv, i, arg)))
+        i += 1
+        break
+      case '--require-mobile-signoff-pass':
+        opts.requireMobileSignoffPass = true
         break
       case '--publish-check-json':
         opts.publishCheckJson = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
@@ -151,10 +164,25 @@ function validateOutputDir(opts) {
   }
 }
 
+function validateMobileSignoffArgs(opts) {
+  if (opts.requireMobileSignoffPass && opts.includeMobileSignoffDirs.length === 0) {
+    throw new Error('--require-mobile-signoff-pass requires at least one --include-mobile-signoff directory')
+  }
+}
+
 function clearGeneratedHandoffMarkers(opts) {
   for (const file of [opts.publishCheckJson, opts.summaryJson, opts.summaryMd]) {
     rmSync(file, { force: true })
   }
+}
+
+function mobileSignoffExportArgs(opts) {
+  const args = []
+  for (const dir of opts.includeMobileSignoffDirs) {
+    args.push('--include-mobile-signoff', relativePath(dir))
+  }
+  if (opts.requireMobileSignoffPass) args.push('--require-mobile-signoff-pass')
+  return args
 }
 
 function canWriteFailureSummary(opts) {
@@ -195,6 +223,10 @@ Session directory: \`${summary.sessionDir}\`
 Packet directory: \`${summary.outputDir}\`
 
 Publish check status: **${publishStatus}**
+
+Mobile signoff gate: **${summary.mobileSignoff.required ? 'required' : 'not_required'}**
+
+Included mobile signoff count: **${summary.mobileSignoff.includedCount}**
 
 ## Steps
 
@@ -249,6 +281,11 @@ function buildSummary(opts, steps) {
     outputDir: relativePath(opts.outputDir),
     steps,
     publishCheck,
+    mobileSignoff: {
+      required: opts.requireMobileSignoffPass,
+      includedCount: publishCheck?.includedMobileSignoffCount ?? 0,
+      sources: opts.includeMobileSignoffDirs.map((dir) => relativePath(dir)),
+    },
     failures,
     outputs: {
       manifest: relativePath(path.join(opts.outputDir, 'manifest.json')),
@@ -267,6 +304,7 @@ async function main() {
     opts = parseArgs(process.argv.slice(2))
     validateSessionDir(opts.sessionDir)
     validateOutputDir(opts)
+    validateMobileSignoffArgs(opts)
     clearGeneratedHandoffMarkers(opts)
 
     const exportStep = runNodeStep('export-packet', 'Export final gated packet', [
@@ -274,6 +312,7 @@ async function main() {
       '--include-output',
       relativePath(opts.sessionDir),
       '--require-dingtalk-p4-pass',
+      ...mobileSignoffExportArgs(opts),
       '--output-dir',
       relativePath(opts.outputDir),
     ])
