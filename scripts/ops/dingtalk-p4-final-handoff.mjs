@@ -325,8 +325,8 @@ async function main() {
     opts = parseArgs(process.argv.slice(2))
     validateSessionDir(opts.sessionDir)
     validateOutputDir(opts)
-    validateMobileSignoffArgs(opts)
     clearGeneratedHandoffMarkers(opts)
+    validateMobileSignoffArgs(opts)
 
     const exportStep = runNodeStep('export-packet', 'Export final gated packet', [
       'scripts/ops/export-dingtalk-staging-evidence-packet.mjs',

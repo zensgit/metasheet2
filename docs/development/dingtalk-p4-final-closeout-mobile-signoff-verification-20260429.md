@@ -31,7 +31,7 @@ git diff -- scripts/ops/dingtalk-p4-final-handoff.mjs scripts/ops/dingtalk-p4-fi
 
 ## Results
 
-- Final handoff test suite: passed, `10` tests.
+- Final handoff test suite: passed, `11` tests.
 - Final closeout test suite: passed, `7` tests.
 - Exporter regression suite: passed, `18` tests.
 - Packet validator regression suite: passed, `14` tests.
@@ -50,6 +50,8 @@ Final handoff tests now cover:
 - handoff summary `mobileSignoff.required=true` and `includedCount=1`;
 - rejection when `--require-mobile-signoff-pass` is used without an included
   mobile signoff directory;
+- stale `publish-check.json` cleanup before mobile signoff prevalidation
+  failures;
 - sanitized failure arrays for validator and preflight errors, including
   secret-like path fragments;
 - existing failure-summary and secret-redaction behavior.

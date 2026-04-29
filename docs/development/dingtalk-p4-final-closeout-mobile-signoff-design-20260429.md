@@ -62,6 +62,11 @@ exporter, which performs the strict signoff validation before copy.
 directory. The wrapper rejects the missing-input case before running the final
 handoff export, and closeout rejects it before finalizing the session.
 
+Before any pre-export validation can write a failure summary, final handoff now
+clears stale generated handoff markers. That prevents an old `publish-check.json`
+from making a failed rerun look like it still included passing mobile signoff
+evidence.
+
 ## Summary Output
 
 `dingtalk-p4-final-handoff.mjs` now records:

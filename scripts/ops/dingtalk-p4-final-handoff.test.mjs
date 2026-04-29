@@ -196,6 +196,41 @@ test('dingtalk-p4-final-handoff rejects required mobile signoff without input', 
   }
 })
 
+test('dingtalk-p4-final-handoff clears stale publish check before mobile signoff prevalidation failure', () => {
+  const tmpDir = makeTmpDir()
+  const sessionDir = path.join(tmpDir, '142-session')
+  const mobileSignoffDir = path.join(tmpDir, 'mobile-compiled')
+  const outputDir = path.join(tmpDir, 'packet')
+
+  try {
+    writeFinalSession(sessionDir)
+    writeMobileSignoffOutput(mobileSignoffDir)
+    const firstResult = runScript([
+      '--session-dir',
+      sessionDir,
+      '--output-dir',
+      outputDir,
+      '--include-mobile-signoff',
+      mobileSignoffDir,
+      '--require-mobile-signoff-pass',
+    ])
+    assert.equal(firstResult.status, 0, firstResult.stderr || firstResult.stdout)
+    assert.equal(existsSync(path.join(outputDir, 'publish-check.json')), true)
+
+    const secondResult = runScript(['--session-dir', sessionDir, '--output-dir', outputDir, '--require-mobile-signoff-pass'])
+
+    assert.equal(secondResult.status, 1)
+    assert.equal(existsSync(path.join(outputDir, 'publish-check.json')), false)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'handoff-summary.json'), 'utf8'))
+    assert.equal(summary.status, 'fail')
+    assert.equal(summary.publishCheck, null)
+    assert.equal(summary.mobileSignoff.includedCount, 0)
+    assert.equal(summary.failures.some((failure) => failure.includes('--require-mobile-signoff-pass requires')), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('dingtalk-p4-final-handoff fails and writes summary when export gate fails', () => {
   const tmpDir = makeTmpDir()
   const sessionDir = path.join(tmpDir, '142-session')
