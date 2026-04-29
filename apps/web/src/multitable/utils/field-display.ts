@@ -59,7 +59,7 @@ export function formatFieldDisplay(params: {
     return `${'★'.repeat(filled)}${'☆'.repeat(max - filled)}`
   }
 
-  if (field.type === 'select') {
+  if (field.type === 'select' || field.type === 'multiSelect') {
     const rawValues = Array.isArray(value) ? value : [value]
     const displayValues = rawValues
       .filter((item) => item !== null && item !== undefined && String(item).trim().length > 0)

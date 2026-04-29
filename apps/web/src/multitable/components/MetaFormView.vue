@@ -95,6 +95,21 @@
             <option value="">—</option>
             <option v-for="opt in field.options ?? []" :key="opt.value" :value="opt.value">{{ opt.value }}</option>
           </select>
+          <select
+            v-else-if="field.type === 'multiSelect'"
+            :id="`field_${field.id}`"
+            class="meta-form-view__input meta-form-view__input--multi"
+            :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
+            multiple
+            :disabled="isFieldReadOnly(field.id)"
+            :aria-required="field.required ? 'true' : undefined"
+            :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
+            :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
+            :value="multiSelectValue(field.id)"
+            @change="formData[field.id] = multiSelectEventValue($event)"
+          >
+            <option v-for="opt in field.options ?? []" :key="opt.value" :value="opt.value">{{ opt.value }}</option>
+          </select>
           <button
             v-else-if="field.type === 'link'"
             type="button"
@@ -292,6 +307,16 @@ function formFieldAnchorClass(fieldId: string): string {
 
 function textControlValue(value: unknown): string {
   return value === null || value === undefined ? '' : String(value)
+}
+
+function multiSelectValue(fieldId: string): string[] {
+  const value = formData[fieldId]
+  return Array.isArray(value) ? value.map(String) : []
+}
+
+function multiSelectEventValue(event: Event): string[] {
+  const select = event.target as HTMLSelectElement
+  return Array.from(select.selectedOptions).map((option) => option.value)
 }
 
 function syncFromRecord(record: MetaRecord | null | undefined) {
@@ -582,6 +607,7 @@ function isSameFormValue(left: unknown, right: unknown): boolean {
 .meta-form-view__comment-anchor--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
 .meta-form-view__comment-anchor--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-form-view__input { width: 100%; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
+.meta-form-view__input--multi { min-height: 110px; }
 .meta-form-view__textarea {
   width: 100%; min-height: 120px; padding: 8px 10px; border: 1px solid #ddd; border-radius: 4px;
   font-size: 13px; line-height: 1.5; resize: vertical; white-space: pre-wrap;

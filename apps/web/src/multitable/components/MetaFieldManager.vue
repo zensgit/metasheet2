@@ -53,7 +53,7 @@
           <button class="meta-field-mgr__btn-inline" @click="dismissLiveRefreshNotice">Dismiss</button>
         </div>
 
-        <template v-if="configTargetType === 'select'">
+        <template v-if="configTargetType === 'select' || configTargetType === 'multiSelect'">
           <div class="meta-field-mgr__field">
             <span>Options</span>
             <div class="meta-field-mgr__stack">
@@ -309,7 +309,7 @@ import {
 import MetaFieldValidationPanel from './MetaFieldValidationPanel.vue'
 
 /** Field types where the validation panel is configurable. */
-const VALIDATION_PANEL_TYPES: ReadonlySet<string> = new Set(['string', 'longText', 'number', 'select'])
+const VALIDATION_PANEL_TYPES: ReadonlySet<string> = new Set(['string', 'longText', 'number', 'select', 'multiSelect'])
 
 function mapTypeForValidationPanel(fieldType: string): 'text' | 'number' | 'select' {
   if (fieldType === 'string' || fieldType === 'longText') return 'text'
@@ -397,12 +397,12 @@ function rulesToProperty(rules: FieldValidationRule[]): Array<Record<string, unk
 }
 
 const FIELD_TYPES: MetaFieldCreateType[] = [
-  'string', 'longText', 'number', 'boolean', 'date', 'select', 'link', 'person',
+  'string', 'longText', 'number', 'boolean', 'date', 'select', 'multiSelect', 'link', 'person',
   'formula', 'lookup', 'rollup', 'attachment',
   'currency', 'percent', 'rating', 'url', 'email', 'phone',
 ]
 const FIELD_ICONS: Record<string, string> = {
-  string: 'Aa', longText: '\u00B6', number: '#', boolean: '\u2611', date: '\u{1F4C5}', select: '\u25CF',
+  string: 'Aa', longText: '\u00B6', number: '#', boolean: '\u2611', date: '\u{1F4C5}', select: '\u25CF', multiSelect: '\u25C9',
   link: '\u21C4', person: '\u{1F464}', lookup: '\u2197', rollup: '\u03A3', formula: 'fx', attachment: '\uD83D\uDCCE',
   currency: '\u00A4', percent: '%', rating: '\u2605', url: '\u{1F517}', email: '\u2709', phone: '\u260E',
 }
@@ -521,7 +521,7 @@ const validationPanelFieldType = computed(() => {
 })
 
 const validationPanelOptions = computed(() => {
-  if (configDraftType.value !== 'select') return undefined
+  if (configDraftType.value !== 'select' && configDraftType.value !== 'multiSelect') return undefined
   return selectDraft.options
     .map((option) => ({ value: option.value.trim() }))
     .filter((option) => option.value.length > 0)
@@ -534,7 +534,7 @@ function onValidationRulesChange(rules: FieldValidationRule[]) {
 
 function requiresConfig(type: MetaFieldCreateType): boolean {
   return [
-    'select', 'link', 'person', 'lookup', 'rollup', 'formula', 'attachment',
+    'select', 'multiSelect', 'link', 'person', 'lookup', 'rollup', 'formula', 'attachment',
     'currency', 'percent', 'rating', 'longText',
   ].includes(type)
 }
@@ -573,7 +573,7 @@ function serializeFieldDraft(type: string | null): string {
   const validation = VALIDATION_PANEL_TYPES.has(type ?? '') && validationDraftTouched.value
     ? rulesToProperty(validationDraft.value)
     : undefined
-  if (type === 'select') {
+  if (type === 'select' || type === 'multiSelect') {
     return JSON.stringify({
       options: selectDraft.options.map((option) => ({
         value: option.value.trim(),
@@ -660,7 +660,7 @@ function hydrateExistingFieldConfig(field: MetaField, options?: { liveRefreshTex
   const fieldType = displayFieldType(field)
   configDraftType.value = fieldType
   fieldConfigLiveRefreshText.value = options?.liveRefreshText ?? ''
-  if (fieldType === 'select') {
+  if (fieldType === 'select' || fieldType === 'multiSelect') {
     const optionsList = resolveSelectFieldOptions(field.property)
     selectDraft.options = optionsList.length > 0
       ? optionsList.map((option) => ({ value: option.value, color: option.color ?? '' }))
@@ -767,7 +767,7 @@ function openNewFieldConfigIfNeeded() {
 }
 
 function currentDraftProperty(type: MetaFieldCreateType | string): Record<string, unknown> | undefined {
-  const normalizedType = type === 'link' || type === 'select' || type === 'lookup' || type === 'rollup' || type === 'formula' || type === 'attachment' || type === 'person' || type === 'currency' || type === 'percent' || type === 'rating'
+  const normalizedType = type === 'link' || type === 'select' || type === 'multiSelect' || type === 'lookup' || type === 'rollup' || type === 'formula' || type === 'attachment' || type === 'person' || type === 'currency' || type === 'percent' || type === 'rating'
     ? type
     : null
   fieldConfigError.value = ''
@@ -776,12 +776,12 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
     ? { validation: rulesToProperty(validationDraft.value) }
     : {}
 
-  if (normalizedType === 'select') {
+  if (normalizedType === 'select' || normalizedType === 'multiSelect') {
     const options = selectDraft.options
       .map((option) => ({ value: option.value.trim(), color: option.color.trim() }))
       .filter((option) => option.value.length > 0)
     if (!options.length) {
-      fieldConfigError.value = 'Select fields need at least one option'
+      fieldConfigError.value = `${normalizedType === 'multiSelect' ? 'Multi-select' : 'Select'} fields need at least one option`
       return undefined
     }
     return { options, ...validationProperty }

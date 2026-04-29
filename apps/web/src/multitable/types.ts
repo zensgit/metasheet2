@@ -10,6 +10,7 @@ export type MetaFieldType =
   | 'date'
   | 'formula'
   | 'select'
+  | 'multiSelect'
   | 'link'
   | 'lookup'
   | 'rollup'

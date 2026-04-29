@@ -243,7 +243,7 @@ export function evaluateRule(
     }
     case 'eq': {
       // For select fields, match if any selected option equals rule.value.
-      if (field?.type === 'select') {
+      if (field?.type === 'select' || field?.type === 'multiSelect') {
         const expected = toComparableString(rule.value)
         if (expected === null) return false
         return selectValuesArray(cellValue).includes(expected)
@@ -255,7 +255,7 @@ export function evaluateRule(
       return a === b
     }
     case 'neq': {
-      if (field?.type === 'select') {
+      if (field?.type === 'select' || field?.type === 'multiSelect') {
         const expected = toComparableString(rule.value)
         if (expected === null) return false
         return !selectValuesArray(cellValue).includes(expected)

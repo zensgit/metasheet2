@@ -149,6 +149,33 @@ describe('RecordService', () => {
     )
   })
 
+  it('creates a record with normalized multiSelect values', async () => {
+    pool = createMockPool({
+      SELECT_FIELDS: {
+        rows: [{
+          id: 'fld_tags',
+          name: 'Tags',
+          type: 'multiSelect',
+          property: { options: [{ value: 'Urgent' }, { value: 'VIP' }] },
+        }],
+      },
+    })
+    const service = new RecordService(pool, eventBus as any)
+
+    const result = await service.createRecord({
+      sheetId: 'sheet_ops',
+      data: { fld_tags: ['Urgent', 'VIP', 'Urgent'] },
+      actorId: 'user_1',
+      capabilities: fullCapabilities,
+    })
+
+    expect(result.data).toEqual({ fld_tags: ['Urgent', 'VIP'] })
+    expect(pool.queryMock).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO meta_records'),
+      [expect.any(String), 'sheet_ops', JSON.stringify({ fld_tags: ['Urgent', 'VIP'] }), 'user_1'],
+    )
+  })
+
   it('rejects create when a linked target record is missing', async () => {
     pool = createMockPool({
       SELECT_FIELDS: {
@@ -334,6 +361,35 @@ describe('RecordService', () => {
     expect(pool.queryMock).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO meta_links'),
       [expect.stringMatching(/^lnk_/), 'fld_customer', 'rec_existing', 'rec_customer_2'],
+    )
+  })
+
+  it('patches a record with normalized multiSelect values', async () => {
+    pool = createMockPool({
+      SELECT_FIELDS: {
+        rows: [{
+          id: 'fld_tags',
+          name: 'Tags',
+          type: 'multiSelect',
+          property: { options: [{ value: 'Urgent' }, { value: 'VIP' }] },
+        }],
+      },
+    })
+    const service = new RecordService(pool, eventBus as any)
+
+    const result = await service.patchRecord({
+      recordId: 'rec_existing',
+      sheetId: 'sheet_ops',
+      data: { fld_tags: ['VIP', 'Urgent', 'VIP'] },
+      expectedVersion: 4,
+      access: { userId: 'user_1', permissions: [], isAdminRole: false },
+      capabilities: fullCapabilities,
+    })
+
+    expect(result.patch).toEqual({ fld_tags: ['VIP', 'Urgent'] })
+    expect(pool.queryMock).toHaveBeenCalledWith(
+      expect.stringContaining('UPDATE meta_records'),
+      [JSON.stringify({ fld_tags: ['VIP', 'Urgent'] }), 'rec_existing', 'sheet_ops'],
     )
   })
 

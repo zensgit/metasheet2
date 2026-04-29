@@ -21,8 +21,8 @@
       <span class="meta-cell-renderer__bool">{{ value ? '\u2611' : '\u2610' }}</span>
     </template>
 
-    <!-- select -->
-    <template v-else-if="field.type === 'select'">
+    <!-- select / multiSelect -->
+    <template v-else-if="field.type === 'select' || field.type === 'multiSelect'">
       <span
         v-for="(tag, i) in selectTags"
         :key="i"

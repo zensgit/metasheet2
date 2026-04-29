@@ -1610,6 +1610,7 @@ components:
             - date
             - formula
             - select
+            - multiSelect
             - link
             - lookup
             - rollup
@@ -11327,6 +11328,7 @@ paths:
                     - date
                     - formula
                     - select
+                    - multiSelect
                     - link
                     - lookup
                     - rollup
@@ -11400,6 +11402,7 @@ paths:
                     - date
                     - formula
                     - select
+                    - multiSelect
                     - link
                     - lookup
                     - rollup

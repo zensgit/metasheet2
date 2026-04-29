@@ -27,7 +27,7 @@ import { ref, computed } from 'vue'
 import type { MetaField } from '../types'
 
 const FIELD_ICONS: Record<string, string> = {
-  string: 'Aa', number: '#', boolean: '\u2611', date: '\u{1F4C5}', select: '\u25CF',
+  string: 'Aa', number: '#', boolean: '\u2611', date: '\u{1F4C5}', select: '\u25CF', multiSelect: '\u25C9',
   link: '\u21C4', lookup: '\u2197', rollup: '\u03A3', formula: 'fx',
 }
 

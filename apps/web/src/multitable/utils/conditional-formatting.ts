@@ -212,7 +212,7 @@ export function evaluateRule(
       return v >= Math.min(lo, hi) && v <= Math.max(lo, hi)
     }
     case 'eq': {
-      if (field?.type === 'select') {
+      if (field?.type === 'select' || field?.type === 'multiSelect') {
         const expected = toComparableString(rule.value)
         if (expected === null) return false
         return selectValuesArray(cellValue).includes(expected)
@@ -223,7 +223,7 @@ export function evaluateRule(
       return a === b
     }
     case 'neq': {
-      if (field?.type === 'select') {
+      if (field?.type === 'select' || field?.type === 'multiSelect') {
         const expected = toComparableString(rule.value)
         if (expected === null) return false
         return !selectValuesArray(cellValue).includes(expected)

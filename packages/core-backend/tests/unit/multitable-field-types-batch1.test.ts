@@ -21,6 +21,7 @@ import {
   coercePercentValue,
   coerceRatingValue,
   mapFieldType,
+  normalizeMultiSelectValue,
   sanitizeFieldProperty,
   serializeFieldRow,
   validateEmailValue,
@@ -48,6 +49,13 @@ describe('mapFieldType — MF2 batch-1', () => {
     expect(mapFieldType('string')).toBe('string')
     expect(mapFieldType('number')).toBe('number')
     expect(mapFieldType('select')).toBe('select')
+  })
+
+  it('recognises multiSelect aliases without falling back to select', () => {
+    expect(mapFieldType('multiSelect')).toBe('multiSelect')
+    expect(mapFieldType('multiselect')).toBe('multiSelect')
+    expect(mapFieldType('multi-select')).toBe('multiSelect')
+    expect(mapFieldType('multi_select')).toBe('multiSelect')
   })
 
   it('recognises longText aliases without falling back to string', () => {
@@ -149,6 +157,18 @@ describe('sanitizeFieldProperty — longText', () => {
   })
 })
 
+describe('sanitizeFieldProperty — multiSelect', () => {
+  it('preserves options and validation config', () => {
+    expect(sanitizeFieldProperty('multiSelect', {
+      options: [{ value: 'Urgent', color: '#f56c6c' }, { value: 'VIP' }],
+      validation: [{ type: 'enum', params: { values: ['Urgent', 'VIP'] } }],
+    })).toEqual({
+      options: [{ value: 'Urgent', color: '#f56c6c' }, { value: 'VIP' }],
+      validation: [{ type: 'enum', params: { values: ['Urgent', 'VIP'] } }],
+    })
+  })
+})
+
 describe('serializeFieldRow — batch-1 round-trip', () => {
   it('persists currency type + property', () => {
     const row = {
@@ -187,6 +207,34 @@ describe('serializeFieldRow — batch-1 round-trip', () => {
     expect(serialized.property).toEqual({
       validation: [{ type: 'maxLength', params: { value: 5000 } }],
     })
+  })
+
+  it('persists multiSelect type + options', () => {
+    const serialized = serializeFieldRow({
+      id: 'fld_tags',
+      name: 'Tags',
+      type: 'multi-select',
+      property: { options: [{ value: 'Urgent', color: '#f56c6c' }, { value: 'VIP' }] },
+      order: 3,
+    })
+    expect(serialized.type).toBe('multiSelect')
+    expect(serialized.options).toEqual([{ value: 'Urgent', color: '#f56c6c' }, { value: 'VIP' }])
+  })
+})
+
+describe('normalizeMultiSelectValue', () => {
+  it('normalizes arrays, trims values, and removes duplicates', () => {
+    expect(normalizeMultiSelectValue(['Urgent', 'VIP', 'Urgent', ''], 'fld_tags', ['Urgent', 'VIP'])).toEqual(['Urgent', 'VIP'])
+  })
+
+  it('treats empty input as an empty selection', () => {
+    expect(normalizeMultiSelectValue(null, 'fld_tags', ['Urgent'])).toEqual([])
+    expect(normalizeMultiSelectValue('', 'fld_tags', ['Urgent'])).toEqual([])
+  })
+
+  it('rejects scalar or unknown options', () => {
+    expect(() => normalizeMultiSelectValue('Urgent', 'fld_tags', ['Urgent'])).toThrow(/must be an array/)
+    expect(() => normalizeMultiSelectValue(['Missing'], 'fld_tags', ['Urgent'])).toThrow(/Invalid multi-select option/)
   })
 })
 

@@ -214,7 +214,8 @@ const fieldsById = computed(() => {
 const selectableFields = computed(() => props.fields)
 
 function isSelectField(fieldId: string): boolean {
-  return fieldsById.value.get(fieldId)?.type === 'select'
+  const type = fieldsById.value.get(fieldId)?.type
+  return type === 'select' || type === 'multiSelect'
 }
 
 function isDateField(fieldId: string): boolean {

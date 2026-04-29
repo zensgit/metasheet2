@@ -499,6 +499,38 @@ describe('RecordWriteService', () => {
         .rejects.toThrow(/Invalid select option/)
     })
 
+    it('rejects scalar or invalid multiSelect options', async () => {
+      const service = new RecordWriteService(pool, eventBus as any, helpers)
+      const fieldById = new Map([
+        ['fld_tags', { type: 'multiSelect' as const, readOnly: false, hidden: false, options: ['a', 'b'] }],
+      ])
+
+      await expect(service.validateChanges({
+        sheetId: 's1',
+        changesByRecord: new Map([['rec1', [{ fieldId: 'fld_tags', value: 'a' }]]]),
+        fieldById,
+      })).rejects.toThrow(/must be an array/)
+
+      await expect(service.validateChanges({
+        sheetId: 's1',
+        changesByRecord: new Map([['rec1', [{ fieldId: 'fld_tags', value: ['x'] }]]]),
+        fieldById,
+      })).rejects.toThrow(/Invalid multi-select option/)
+    })
+
+    it('passes valid multiSelect array changes', async () => {
+      const service = new RecordWriteService(pool, eventBus as any, helpers)
+      const fieldById = new Map([
+        ['fld_tags', { type: 'multiSelect' as const, readOnly: false, hidden: false, options: ['a', 'b'] }],
+      ])
+
+      await expect(service.validateChanges({
+        sheetId: 's1',
+        changesByRecord: new Map([['rec1', [{ fieldId: 'fld_tags', value: ['a', 'b'] }]]]),
+        fieldById,
+      })).resolves.not.toThrow()
+    })
+
     it('rejects link field with multiple records when limitSingleRecord', async () => {
       const service = new RecordWriteService(pool, eventBus as any, helpers)
       const changesByRecord = new Map([

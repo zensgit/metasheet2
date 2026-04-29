@@ -153,7 +153,7 @@ function buildFieldProperty(
   field: MultitableProvisioningFieldDescriptor,
 ): Record<string, unknown> {
   const base = normalizeJson(field.property)
-  if (field.type !== 'select' || !Array.isArray(field.options) || field.options.length === 0) {
+  if ((field.type !== 'select' && field.type !== 'multiSelect') || !Array.isArray(field.options) || field.options.length === 0) {
     return base
   }
   return {

@@ -92,7 +92,7 @@ import type { RequestWithFile } from '../types/multer'
 import { MultitableFormulaEngine } from '../multitable/formula-engine'
 import { validateRecord, getDefaultValidationRules } from '../multitable/field-validation-engine'
 import type { FieldValidationConfig } from '../multitable/field-validation'
-import { BATCH1_FIELD_TYPES, coerceBatch1Value, validateLongTextValue } from '../multitable/field-codecs'
+import { BATCH1_FIELD_TYPES, coerceBatch1Value, normalizeMultiSelectValue, validateLongTextValue } from '../multitable/field-codecs'
 import { conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
 import {
   AutomationRuleValidationError,
@@ -163,6 +163,7 @@ type UniverMetaField = {
     | 'date'
     | 'formula'
     | 'select'
+    | 'multiSelect'
     | 'link'
     | 'lookup'
     | 'rollup'
@@ -944,7 +945,7 @@ function normalizeSearchTerm(value: unknown): string {
 }
 
 function isSearchableFieldType(type: UniverMetaField['type']): boolean {
-  return type === 'string' || type === 'longText' || type === 'number' || type === 'date' || type === 'select' || type === 'formula'
+  return type === 'string' || type === 'longText' || type === 'number' || type === 'date' || type === 'select' || type === 'multiSelect' || type === 'formula'
 }
 
 function valueMatchesSearch(value: unknown, search: string): boolean {
@@ -992,7 +993,14 @@ function mapFieldType(type: string): UniverMetaField['type'] {
   if (normalized === 'boolean' || normalized === 'checkbox') return 'boolean'
   if (normalized === 'date' || normalized === 'datetime') return 'date'
   if (normalized === 'formula') return 'formula'
-  if (normalized === 'select' || normalized === 'multiselect') return 'select'
+  if (normalized === 'select') return 'select'
+  if (
+    normalized === 'multiselect' ||
+    normalized === 'multi_select' ||
+    normalized === 'multi-select'
+  ) {
+    return 'multiSelect'
+  }
   if (normalized === 'link') return 'link'
   if (normalized === 'lookup') return 'lookup'
   if (normalized === 'rollup') return 'rollup'
@@ -1154,7 +1162,7 @@ function applyFieldValidationNormalisation(obj: Record<string, unknown>): Record
 
 function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown): Record<string, unknown> {
   const obj = applyFieldValidationNormalisation(normalizeJson(property))
-  if (type === 'select') {
+  if (type === 'select' || type === 'multiSelect') {
     const options = extractSelectOptions(obj) ?? []
     return { ...obj, options }
   }
@@ -1237,7 +1245,7 @@ function serializeFieldRow(row: any): UniverMetaField {
     id: String(row.id),
     name: String(row.name),
     type: mappedType,
-    ...(mappedType === 'select' ? { options: extractSelectOptions(property) } : {}),
+    ...(mappedType === 'select' || mappedType === 'multiSelect' ? { options: extractSelectOptions(property) } : {}),
     order: Number.isFinite(order) ? order : 0,
     property,
   }
@@ -1248,6 +1256,7 @@ type MetaSortRule = { fieldId: string; desc: boolean }
 function isNullishSortValue(value: unknown): boolean {
   if (value === null || value === undefined) return true
   if (typeof value === 'string' && value.trim() === '') return true
+  if (Array.isArray(value) && value.length === 0) return true
   return false
 }
 
@@ -1906,7 +1915,7 @@ function buildFieldMutationGuardMap(fields: UniverMetaField[]): Map<string, Fiel
         readOnly: isFieldAlwaysReadOnly(field),
         hidden: isFieldPermissionHidden(field),
       }
-      if (field.type === 'select') {
+      if (field.type === 'select' || field.type === 'multiSelect') {
         return [field.id, { ...base, options: field.options?.map((option) => option.value) ?? [] }] as const
       }
       if (field.type === 'link') {
@@ -3682,7 +3691,7 @@ export function univerMetaRouter(): Router {
       id: z.string().min(1).max(50).optional(),
       sheetId: z.string().min(1).max(50),
       name: z.string().min(1).max(255),
-      type: z.enum(['string', 'number', 'boolean', 'date', 'formula', 'select', 'link', 'lookup', 'rollup', 'attachment', 'longText']).default('string'),
+      type: z.enum(['string', 'number', 'boolean', 'date', 'formula', 'select', 'multiSelect', 'link', 'lookup', 'rollup', 'attachment', 'longText']).default('string'),
       property: z.record(z.unknown()).optional(),
       order: z.number().int().nonnegative().optional(),
     })
@@ -3938,7 +3947,7 @@ export function univerMetaRouter(): Router {
 
     const schema = z.object({
       name: z.string().min(1).max(255).optional(),
-      type: z.enum(['string', 'number', 'boolean', 'date', 'formula', 'select', 'link', 'lookup', 'rollup', 'attachment', 'longText']).optional(),
+      type: z.enum(['string', 'number', 'boolean', 'date', 'formula', 'select', 'multiSelect', 'link', 'lookup', 'rollup', 'attachment', 'longText']).optional(),
       property: z.record(z.unknown()).optional(),
       order: z.number().int().nonnegative().optional(),
     }).refine((v) => Object.keys(v).length > 0, { message: 'At least one field must be updated' })
@@ -5476,6 +5485,15 @@ export function univerMetaRouter(): Router {
             fieldErrors[fieldId] = 'Invalid select option'
             continue
           }
+        }
+
+        if (field.type === 'multiSelect') {
+          try {
+            patch[fieldId] = normalizeMultiSelectValue(value, fieldId, field.options ?? [])
+          } catch (error) {
+            fieldErrors[fieldId] = error instanceof Error ? error.message : String(error)
+          }
+          continue
         }
 
         if (field.type === 'link') {
