@@ -7,30 +7,39 @@ The K3 WISE postdeploy smoke has two modes:
 - public checks only when no token is available.
 - authenticated checks when a bearer token is resolved.
 
-Public-only smoke is useful for manual diagnostics, but it is too weak for the
-production deploy workflow. The staging descriptor, route, adapter, list-probe,
-and field-detail contracts all require authenticated API access. If deploy
-token resolution is optional, a missing token can make deploy pass without
-running the checks that protect the PLM-to-K3 workflow.
+Public-only smoke is useful for diagnostics, but authenticated smoke is needed
+when the environment is meant to protect the staging descriptor, route,
+adapter, list-probe, and field-detail contracts.
+
+The docker-build deploy job currently runs in environments that may not provide
+`METASHEET_K3WISE_SMOKE_TOKEN` or `METASHEET_TENANT_ID`. Making auth mandatory
+unconditionally caused the deploy job to fail at token resolution before the
+smoke could run. The workflow therefore needs an explicit deployment setting
+instead of a hard-coded requirement.
 
 ## Design
 
-The deploy workflow now makes K3 WISE postdeploy smoke authenticated by
-default:
+The deploy workflow now uses one repository variable to choose the deploy
+smoke auth mode:
 
-- token resolution uses `K3_WISE_TOKEN_RESOLVE_REQUIRED: 'true'`.
-- the deploy smoke command always passes `--require-auth`.
+- `K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH=true` makes token resolution required and
+  passes `--require-auth` to the smoke command.
+- the default `false` keeps the docker-build deploy job compatible with
+  environments that have not configured a K3 smoke token or tenant scope yet.
 
 The manual `K3 WISE Postdeploy Smoke` workflow keeps its explicit
-`require_auth` input. Manual operators can still run public-only diagnostics by
-choosing `false`; production deploy cannot silently downgrade.
+`require_auth` input. Manual operators can still run public-only diagnostics or
+force authenticated probes per run.
 
 ## Failure Mode
 
-If no configured token is present and deploy-host fallback cannot mint one, the
-token resolver fails before the smoke step. If the smoke starts without an auth
-token for any reason, `--require-auth` makes the smoke fail rather than produce
-a PASS with skipped authenticated checks.
+When `K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH=true`, missing token material remains a
+hard failure before the smoke step, and `--require-auth` prevents a public-only
+PASS.
+
+When the variable is unset or `false`, the resolver stays best-effort and the
+smoke runs public checks. This mode must not be treated as proof that
+authenticated K3 control-plane probes ran.
 
 ## Files
 
