@@ -7,11 +7,21 @@
         <p v-if="subtitle" class="public-multitable-form__subtitle">{{ subtitle }}</p>
       </header>
 
-      <div v-if="loading || redirectingToDingTalk" class="public-multitable-form__state">
-        {{ redirectingToDingTalk ? redirectingMessage : 'Loading form…' }}
+      <div v-if="loading || redirectingToDingTalk || bindingToDingTalk" class="public-multitable-form__state">
+        {{ redirectingToDingTalk || bindingToDingTalk ? redirectingMessage : 'Loading form…' }}
       </div>
       <div v-else-if="loadError" class="public-multitable-form__state public-multitable-form__state--error">
-        {{ loadError }}
+        <p class="public-multitable-form__state-message">{{ loadError }}</p>
+        <button
+          v-if="canLaunchDingTalkBinding"
+          type="button"
+          class="public-multitable-form__button public-multitable-form__button--error"
+          data-dingtalk-bind
+          :disabled="bindingToDingTalk"
+          @click="launchDingTalkBinding"
+        >
+          Bind DingTalk and return to this form
+        </button>
       </div>
       <div v-else-if="submitted && submissionResult" class="public-multitable-form__state public-multitable-form__state--success">
         <h2>Submission received</h2>
@@ -65,6 +75,8 @@ const submitted = ref(false)
 const submissionResult = ref<FormSubmitResult | null>(null)
 const formKey = ref(0)
 const redirectingToDingTalk = ref(false)
+const bindingToDingTalk = ref(false)
+const loadErrorCode = ref('')
 
 const title = computed(() => context.value?.view?.name || context.value?.sheet?.name || 'Public multitable form')
 const subtitle = computed(() => {
@@ -78,16 +90,21 @@ const submissionMessage = computed(() => {
     ? 'Your response has been updated successfully.'
     : 'Your response has been submitted successfully.'
 })
-const redirectingMessage = computed(() => 'Redirecting to DingTalk sign-in…')
+const redirectingMessage = computed(() => (
+  bindingToDingTalk.value ? 'Redirecting to DingTalk binding…' : 'Redirecting to DingTalk sign-in…'
+))
+const canLaunchDingTalkBinding = computed(() => loadErrorCode.value === 'DINGTALK_BIND_REQUIRED')
 
 async function loadForm(): Promise<void> {
   loading.value = true
   loadError.value = null
+  loadErrorCode.value = ''
   submitError.value = null
   fieldErrors.value = null
   submitted.value = false
   submissionResult.value = null
   redirectingToDingTalk.value = false
+  bindingToDingTalk.value = false
   try {
     const publicToken = props.publicToken?.trim()
     if (!publicToken) {
@@ -107,9 +124,10 @@ async function loadForm(): Promise<void> {
       if (launched) return
     }
     context.value = null
+    loadErrorCode.value = readErrorCode(error)
     loadError.value = readPublicFormErrorMessage(error, 'Failed to load public form')
   } finally {
-    if (!redirectingToDingTalk.value) {
+    if (!redirectingToDingTalk.value && !bindingToDingTalk.value) {
       loading.value = false
     }
   }
@@ -193,6 +211,7 @@ function currentPublicFormRedirect(): string {
 async function launchDingTalkSignIn(): Promise<boolean> {
   redirectingToDingTalk.value = true
   loadError.value = null
+  loadErrorCode.value = ''
   try {
     const response = await apiFetch(
       `/api/auth/dingtalk/launch?redirect=${encodeURIComponent(currentPublicFormRedirect())}`,
@@ -214,6 +233,37 @@ async function launchDingTalkSignIn(): Promise<boolean> {
   } catch (error) {
     redirectingToDingTalk.value = false
     loadError.value = readErrorMessage(error, 'Failed to start DingTalk sign-in')
+    loadErrorCode.value = ''
+    return false
+  }
+}
+
+async function launchDingTalkBinding(): Promise<boolean> {
+  bindingToDingTalk.value = true
+  loadError.value = null
+  loadErrorCode.value = ''
+  try {
+    const response = await apiFetch(
+      `/api/auth/dingtalk/launch?intent=bind&redirect=${encodeURIComponent(currentPublicFormRedirect())}`,
+      { suppressUnauthorizedRedirect: true },
+    )
+    const payload = await response.json().catch(() => null)
+    if (!response.ok || !payload?.success || typeof payload?.data?.url !== 'string' || payload.data.url.trim().length === 0) {
+      throw new Error(readErrorMessage(payload, 'Failed to start DingTalk binding'))
+    }
+    if (typeof window !== 'undefined' && typeof window.location?.assign === 'function') {
+      window.location.assign(payload.data.url)
+      return true
+    }
+    if (typeof window !== 'undefined') {
+      window.location.href = payload.data.url
+      return true
+    }
+    return false
+  } catch (error) {
+    bindingToDingTalk.value = false
+    loadError.value = readErrorMessage(error, 'Failed to start DingTalk binding')
+    loadErrorCode.value = 'DINGTALK_BIND_REQUIRED'
     return false
   }
 }
@@ -284,7 +334,13 @@ watch(
   color: #334155;
 }
 
+.public-multitable-form__state-message {
+  margin: 0;
+}
+
 .public-multitable-form__state--error {
+  display: grid;
+  gap: 12px;
   background: #fff1f2;
   color: #be123c;
 }
@@ -318,5 +374,18 @@ watch(
 
 .public-multitable-form__button:hover {
   background: #166534;
+}
+
+.public-multitable-form__button--error {
+  background: #be123c;
+}
+
+.public-multitable-form__button--error:hover {
+  background: #9f1239;
+}
+
+.public-multitable-form__button:disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
 }
 </style>
