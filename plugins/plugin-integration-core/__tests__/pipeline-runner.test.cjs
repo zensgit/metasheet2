@@ -255,6 +255,32 @@ async function main() {
   assert.equal(cleanse.db.tables.get('integration_dead_letters').length, 1)
   assert.equal(await cleanse.db.selectOne('integration_watermarks', { pipeline_id: 'pipe_1' }), null, 'failed batch does not advance watermark')
 
+  // --- 1b. Target runtime options are passed through to the adapter ----
+  let observedTargetOptions = null
+  const targetOptions = createRunnerHarness({
+    sourceRecords: [
+      { code: 'save-01', revision: 'r1', qty: '1', name: 'Save Only', updatedAt: '2026-04-24T01:00:00.000Z' },
+    ],
+    pipelineOverrides: {
+      options: {
+        batchSize: 100,
+        watermark: { type: 'updated_at', field: 'updatedAt' },
+        target: { autoSubmit: false, autoAudit: false, marker: 'save-only' },
+      },
+    },
+    targetUpsert: async (input) => {
+      observedTargetOptions = input.options
+      return createUpsertResult({
+        written: input.records.length,
+        skipped: 0,
+        results: input.records.map((record) => ({ key: record._integration_idempotency_key })),
+      })
+    },
+  })
+  const targetOptionsRun = await targetOptions.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'full', triggeredBy: 'manual' })
+  assert.equal(targetOptionsRun.run.status, 'succeeded')
+  assert.deepEqual(observedTargetOptions, { autoSubmit: false, autoAudit: false, marker: 'save-only' })
+
   // --- 2. Idempotency prevents duplicate target writes ------------------
   const idem = createRunnerHarness({
     sourceRecords: [

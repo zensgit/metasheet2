@@ -206,6 +206,7 @@ Yuantus/现有 PLM wrapper：
 - credential 通过 external-system registry 写入，不从 API 响应返回明文。
 - `autoSubmit/autoAudit` 默认关闭。
 - **`autoSubmit/autoAudit` 输入硬化（PR #1183）**：config 与 pipeline `request.options` 都接受 `true/false`、字符串 `"true"/"false"/"yes"/"no"/"on"/"off"`、中文 `是/否/启用/禁用/开启/关闭`、数字 `0/1`。Tri-state semantics — 显式 request 值覆盖 config，request 未设时 config 决定，全部未设默认 `false`。错误手输（如 `"maybe"`、`2`、`NaN`）抛 `AdapterValidationError` 带字段名。
+- **Save-only runtime guard**：M2 Live PoC 的 material/BOM pipeline 必须把 `options.target.autoSubmit=false` 与 `options.target.autoAudit=false` 写进 pipeline 配置；pipeline-runner 会把 `pipeline.options.target` 原样传给 target adapter，K3 adapter 的 request options 优先级高于 external-system config。即使 K3 external system config 被后续误改成 `autoSubmit=true`，PoC pipeline 仍以 Save-only 为准。
 - **历史 bug**：在 #1183 之前，操作员手输 `request.options.autoSubmit = "false"`（字符串）会被 `!== false` 判为 truthy，回退到 config，造成 auto-submit 仍触发——已修复并由 `__tests__/k3-wise-adapters.test.cjs` 中 10 项 `testK3WebApiAutoFlagCoercion` 场景固化。
 
 ### 5.3 K3 WISE SQL Server channel
@@ -274,6 +275,10 @@ SQL Server channel 当前是 skeleton：
       "type": "updated_at",
       "field": "updatedAt"
     },
+    "target": {
+      "autoSubmit": false,
+      "autoAudit": false
+    },
     "erpFeedback": {
       "objectId": "standard_materials",
       "keyField": "_integration_idempotency_key"
@@ -335,6 +340,10 @@ SQL Server channel 当前是 skeleton：
   "idempotencyKeyFields": ["sourceId", "revision"],
   "options": {
     "batchSize": 50,
+    "target": {
+      "autoSubmit": false,
+      "autoAudit": false
+    },
     "erpFeedback": {
       "objectId": "bom_cleanse",
       "keyField": "_integration_idempotency_key"
