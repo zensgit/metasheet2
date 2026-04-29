@@ -48,7 +48,7 @@ function onAddSheet() {
 }
 
 function viewTypeIcon(type: string): string {
-  const map: Record<string, string> = { grid: '\u2637', form: '\u2263', kanban: '\u2630', gallery: '\u25A6', calendar: '\u2339' }
+  const map: Record<string, string> = { grid: '\u2637', form: '\u2263', kanban: '\u2630', gallery: '\u25A6', calendar: '\u2339', timeline: '\u2500', gantt: '\u25AC', hierarchy: '\u251C' }
   return map[type] ?? '\u2637'
 }
 </script>

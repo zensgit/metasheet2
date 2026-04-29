@@ -178,6 +178,17 @@
           @select-record="onSelectRecord" @create-record="onKanbanCreateRecord"
           @update-view-config="onPersistActiveViewConfig"
         />
+        <MetaHierarchyView
+          v-else-if="activeViewType === 'hierarchy'"
+          :rows="grid.rows.value" :fields="scopedAllFields" :loading="grid.loading.value"
+          :view-config="workbench.activeView.value?.config"
+          :can-create="caps.canCreateRecord.value"
+          :can-comment="effectiveRowActions.canComment"
+          :comment-presence="commentPresenceState.presenceByRecordId.value"
+          @select-record="onSelectRecord" @create-record="onKanbanCreateRecord"
+          @open-comments="onOpenRecordComments"
+          @update-view-config="onPersistActiveViewConfig"
+        />
         <MetaGridTable
           v-else
           :rows="grid.rows.value" :visible-fields="scopedGridFields" :sort-rules="grid.sortRules.value"
@@ -376,6 +387,7 @@ import MetaGalleryView from '../components/MetaGalleryView.vue'
 import MetaCalendarView from '../components/MetaCalendarView.vue'
 import MetaTimelineView from '../components/MetaTimelineView.vue'
 import MetaGanttView from '../components/MetaGanttView.vue'
+import MetaHierarchyView from '../components/MetaHierarchyView.vue'
 import MetaToast from '../components/MetaToast.vue'
 import MetaImportModal from '../components/MetaImportModal.vue'
 import MetaMentionPopover from '../components/MetaMentionPopover.vue'

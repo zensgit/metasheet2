@@ -71,6 +71,69 @@ describe('MetaViewManager', () => {
     app.unmount()
   })
 
+  it('emits persisted hierarchy config when saving view settings', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const updateSpy = vi.fn()
+
+    const app = createApp({
+      render() {
+        return h(MetaViewManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          activeViewId: 'view_hierarchy',
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string' },
+            { id: 'fld_parent', name: 'Parent', type: 'link' },
+            { id: 'fld_alt_parent', name: 'Alt Parent', type: 'link' },
+          ],
+          views: [
+            {
+              id: 'view_hierarchy',
+              sheetId: 'sheet_1',
+              name: 'Hierarchy',
+              type: 'hierarchy',
+              config: { parentFieldId: 'fld_parent', titleFieldId: 'fld_name', defaultExpandDepth: 1, orphanMode: 'root' },
+            },
+          ],
+          onUpdateView: updateSpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    ;(container.querySelector('.meta-view-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await nextTick()
+
+    const selects = Array.from(container.querySelectorAll('.meta-view-mgr__config select')) as HTMLSelectElement[]
+    selects[0].value = 'fld_alt_parent'
+    selects[0].dispatchEvent(new Event('change', { bubbles: true }))
+    selects[2].value = 'hidden'
+    selects[2].dispatchEvent(new Event('change', { bubbles: true }))
+    const depthInput = container.querySelector('.meta-view-mgr__config input[type="number"]') as HTMLInputElement
+    depthInput.value = '3'
+    depthInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+
+    ;(Array.from(container.querySelectorAll('.meta-view-mgr__btn-add')) as HTMLButtonElement[])
+      .find((button) => button.textContent?.includes('Save view settings'))
+      ?.click()
+    await nextTick()
+
+    expect(updateSpy).toHaveBeenCalledWith('view_hierarchy', {
+      config: {
+        parentFieldId: 'fld_alt_parent',
+        titleFieldId: 'fld_name',
+        defaultExpandDepth: 3,
+        orphanMode: 'hidden',
+      },
+    })
+
+    app.unmount()
+  })
+
   it('preserves conditional formatting rules when saving view settings', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
