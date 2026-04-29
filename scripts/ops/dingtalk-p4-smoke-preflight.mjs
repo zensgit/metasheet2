@@ -312,6 +312,15 @@ function hasFailure(summary) {
   return summary.checks.some((check) => check.status === 'fail')
 }
 
+function summarizeChecks(checks) {
+  return {
+    total: checks.length,
+    passed: checks.filter((check) => check.status === 'pass').length,
+    failed: checks.filter((check) => check.status === 'fail').length,
+    skipped: checks.filter((check) => check.status === 'skipped').length,
+  }
+}
+
 function validateBaseUrls(opts, summary) {
   try {
     opts.apiBase = normalizeUrl(opts.apiBase)
@@ -613,6 +622,8 @@ Generated at: ${summary.generatedAt}
 
 Overall status: **${summary.overallStatus}**
 
+Check totals: **${summary.totals.passed}/${summary.totals.total}** passed, **${summary.totals.failed}** failed, **${summary.totals.skipped}** skipped.
+
 ## Checks
 
 | ID | Check | Status | Notes |
@@ -660,6 +671,12 @@ async function runPreflight(opts) {
       manualTargets: {},
     },
     checks: [],
+    totals: {
+      total: 0,
+      passed: 0,
+      failed: 0,
+      skipped: 0,
+    },
     overallStatus: 'fail',
   }
 
@@ -686,6 +703,7 @@ async function runPreflight(opts) {
     personUserCount: opts.personUserIds.length,
     manualTargets: manualTargets(opts),
   }
+  summary.totals = summarizeChecks(summary.checks)
   summary.overallStatus = hasFailure(summary) ? 'fail' : 'pass'
 
   const outputDir = opts.outputDir ?? path.resolve(process.cwd(), DEFAULT_OUTPUT_ROOT, runId)
