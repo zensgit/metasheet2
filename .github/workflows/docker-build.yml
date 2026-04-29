@@ -369,7 +369,7 @@ jobs:
         env:
           METASHEET_K3WISE_SMOKE_TOKEN_SECRET: ${{ secrets.METASHEET_K3WISE_SMOKE_TOKEN }}
           METASHEET_TENANT_ID: ${{ vars.METASHEET_TENANT_ID || '' }}
-          K3_WISE_TOKEN_RESOLVE_REQUIRED: 'true'
+          K3_WISE_TOKEN_RESOLVE_REQUIRED: ${{ vars.K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH || 'false' }}
           K3_WISE_TOKEN_AUTO_DISCOVER_TENANT: ${{ vars.K3_WISE_TOKEN_AUTO_DISCOVER_TENANT || 'false' }}
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
@@ -383,16 +383,22 @@ jobs:
         env:
           METASHEET_BASE_URL: ${{ vars.METASHEET_BASE_URL || vars.PUBLIC_APP_URL || 'http://142.171.239.56:8081' }}
           METASHEET_TENANT_ID: ${{ vars.METASHEET_TENANT_ID || '' }}
+          K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH: ${{ vars.K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH || 'false' }}
         run: |
           set -euo pipefail
           smoke_out_dir="output/deploy/k3wise-postdeploy-smoke"
           rm -rf "$smoke_out_dir"
           tenant_id="${METASHEET_TENANT_ID:-${K3_WISE_SMOKE_TENANT_ID:-}}"
+          require_auth="${K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH:-false}"
           args=(
             --base-url "$METASHEET_BASE_URL"
             --out-dir "$smoke_out_dir"
-            --require-auth
           )
+          case "${require_auth}" in
+            true|TRUE|True|1|yes|YES|Yes)
+              args+=(--require-auth)
+              ;;
+          esac
           if [[ -n "${tenant_id:-}" ]]; then
             args+=(--tenant-id "$tenant_id")
           fi

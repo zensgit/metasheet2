@@ -4,15 +4,15 @@
 
 Worktree:
 
-`/tmp/ms2-k3wise-deploy-auth-20260429`
+`/tmp/ms2-k3wise-deploy-auth-fix-20260429`
 
 Branch:
 
-`codex/k3wise-deploy-auth-smoke-20260429`
+`codex/k3wise-deploy-auth-fix-20260429`
 
 Baseline:
 
-`origin/main` at `4dc64b39aebc455b23e87902e6996670acc241c6`
+`origin/main` at `e6e585fad2411adc06db4c0132bd3e84c2660326`
 
 Commands:
 
@@ -34,10 +34,15 @@ Results:
 
 ## Regression Coverage
 
-Added coverage:
+Updated coverage:
 
-- deploy workflow token resolver must be required.
-- deploy workflow smoke command must pass `--require-auth`.
+- deploy workflow token resolver must read
+  `K3_WISE_TOKEN_RESOLVE_REQUIRED` from
+  `vars.K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH || 'false'`.
+- deploy workflow smoke command must read
+  `K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH`.
+- deploy workflow smoke command only passes `--require-auth` when that setting
+  is truthy (`true`, `TRUE`, `True`, `1`, `yes`, `YES`, `Yes`).
 
 Existing coverage preserved:
 
@@ -48,8 +53,13 @@ Existing coverage preserved:
 
 ## Residual Risk
 
-This makes production deploy stricter. A deployment missing both
+Docker-build deploy remains public-smoke by default until the repository or
+environment sets `K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH=true`. The residual risk is
+that a green deploy in default mode does not prove authenticated K3 control
+plane checks ran. The run summary and artifacts should be used to distinguish
+public-only evidence from authenticated evidence.
+
+When `K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH=true`, a deployment missing both
 `METASHEET_K3WISE_SMOKE_TOKEN` and a working deploy-host token fallback will
-now fail at the K3 WISE smoke phase. That is intentional because otherwise the
-deploy can look green while skipping the authenticated checks that validate the
-ERP integration surface.
+fail before or during the K3 WISE smoke. That is intentional for environments
+that have opted into authenticated deploy gating.
