@@ -203,6 +203,7 @@ export class FormulaEngine {
     this.functions.set('SWITCH', this.switchFunction.bind(this))
     this.functions.set('CONCAT', this.concatenate.bind(this))
     this.functions.set('DATEDIF', this.datedif.bind(this))
+    this.functions.set('DATEDIFF', this.datediff.bind(this))
     this.functions.set('COUNTA', this.counta.bind(this))
   }
 
@@ -722,6 +723,10 @@ export class FormulaEngine {
       default:
         return '#VALUE!'
     }
+  }
+
+  private datediff(endDate: unknown, startDate: unknown): number | string {
+    return this.datedif(startDate, endDate, 'D')
   }
 
   private counta(...args: unknown[]): number {
