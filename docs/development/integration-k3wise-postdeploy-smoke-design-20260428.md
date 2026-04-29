@@ -26,7 +26,7 @@ Public checks always run:
 Authenticated checks run only when a bearer token is provided:
 
 - `GET /api/auth/me`: supplied token is valid.
-- `GET /api/integration/status`: required K3 adapter kinds and integration API routes are registered.
+- `GET /api/integration/status`: required source, PLM, and K3 adapter kinds and integration API routes are registered.
 - `GET /api/integration/external-systems?tenantId=<tenant>&limit=1`: read-only external-system list endpoint is reachable.
 - `GET /api/integration/pipelines?tenantId=<tenant>&limit=1`: read-only pipeline list endpoint is reachable.
 - `GET /api/integration/runs?tenantId=<tenant>&limit=1`: read-only run-log list endpoint is reachable.

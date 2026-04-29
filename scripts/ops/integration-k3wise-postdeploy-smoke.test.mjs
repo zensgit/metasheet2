@@ -9,6 +9,19 @@ import { fileURLToPath } from 'node:url'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const scriptPath = path.join(repoRoot, 'scripts', 'ops', 'integration-k3wise-postdeploy-smoke.mjs')
+const DEFAULT_ADAPTERS = [
+  'http',
+  'plm:yuantus-wrapper',
+  'erp:k3-wise-webapi',
+  'erp:k3-wise-sqlserver',
+]
+const DEFAULT_STAGING_DESCRIPTORS = [
+  { id: 'plm_raw_items', name: 'PLM Raw Items' },
+  { id: 'standard_materials', name: 'Standard Materials' },
+  { id: 'bom_cleanse', name: 'BOM Cleanse' },
+  { id: 'integration_exceptions', name: 'Integration Exceptions' },
+  { id: 'integration_run_log', name: 'Integration Run Log' },
+]
 
 function makeTmpDir() {
   return mkdtempSync(path.join(tmpdir(), 'integration-k3wise-postdeploy-smoke-'))
@@ -118,7 +131,7 @@ function createFakeServer(options = {}) {
       sendJson(res, 200, {
         ok: true,
         data: {
-          adapters: ['http', 'plm:yuantus-wrapper', 'erp:k3-wise-webapi', 'erp:k3-wise-sqlserver'],
+          adapters: options.integrationAdapters || DEFAULT_ADAPTERS,
           routes: [
             ['GET', '/api/integration/status'],
             ['GET', '/api/integration/external-systems'],
@@ -166,10 +179,7 @@ function createFakeServer(options = {}) {
       }
       sendJson(res, 200, {
         ok: true,
-        data: [
-          { id: 'standard_materials', name: 'Standard Materials' },
-          { id: 'bom_cleanse', name: 'BOM Cleanse' },
-        ],
+        data: options.stagingDescriptors || DEFAULT_STAGING_DESCRIPTORS,
       })
       return
     }
@@ -393,6 +403,56 @@ test('authenticated postdeploy smoke fails when a read-only control-plane endpoi
     const pipelinesCheck = evidence.checks.find((check) => check.id === 'integration-list-pipelines')
     assert.equal(pipelinesCheck.status, 'fail')
     assert.match(pipelinesCheck.error, /\/api\/integration\/pipelines\?tenantId=tenant-smoke&limit=1 returned HTTP 500/)
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('authenticated postdeploy smoke fails when status omits a required source adapter', async () => {
+  const fake = createFakeServer({
+    integrationAdapters: ['http', 'erp:k3-wise-webapi', 'erp:k3-wise-sqlserver'],
+  })
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--auth-token', 'test.jwt.token',
+      '--require-auth',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 1)
+    const evidence = JSON.parse(readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8'))
+    const routeCheck = evidence.checks.find((check) => check.id === 'integration-route-contract')
+    assert.equal(routeCheck.status, 'fail')
+    assert.match(routeCheck.error, /missing required adapters or routes/)
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('authenticated postdeploy smoke fails when a required staging descriptor is missing', async () => {
+  const fake = createFakeServer({
+    stagingDescriptors: DEFAULT_STAGING_DESCRIPTORS.filter((descriptor) => descriptor.id !== 'integration_exceptions'),
+  })
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--auth-token', 'test.jwt.token',
+      '--require-auth',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 1)
+    const evidence = JSON.parse(readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8'))
+    const stagingCheck = evidence.checks.find((check) => check.id === 'staging-descriptor-contract')
+    assert.equal(stagingCheck.status, 'fail')
+    assert.match(stagingCheck.error, /missing staging descriptor integration_exceptions/)
   } finally {
     await fake.close()
     rmSync(outDir, { recursive: true, force: true })

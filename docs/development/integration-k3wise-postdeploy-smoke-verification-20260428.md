@@ -86,5 +86,5 @@ node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
 Expected authenticated additions:
 
 - `auth-me`: pass.
-- `integration-route-contract`: pass with K3 WebAPI and SQL Server adapter kinds registered.
-- `staging-descriptor-contract`: pass with `standard_materials` and `bom_cleanse`.
+- `integration-route-contract`: pass with `http`, `plm:yuantus-wrapper`, K3 WebAPI, and K3 SQL Server adapter kinds registered.
+- `staging-descriptor-contract`: pass with `plm_raw_items`, `standard_materials`, `bom_cleanse`, `integration_exceptions`, and `integration_run_log`.

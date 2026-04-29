@@ -5,7 +5,12 @@ import { pathToFileURL } from 'node:url'
 
 const DEFAULT_BASE_URL = 'http://142.171.239.56:8081'
 const DEFAULT_OUTPUT_ROOT = 'output/integration-k3wise-postdeploy-smoke'
-const REQUIRED_ADAPTERS = ['erp:k3-wise-webapi', 'erp:k3-wise-sqlserver']
+const REQUIRED_ADAPTERS = [
+  'http',
+  'plm:yuantus-wrapper',
+  'erp:k3-wise-webapi',
+  'erp:k3-wise-sqlserver',
+]
 const REQUIRED_ROUTES = [
   ['GET', '/api/integration/status'],
   ['GET', '/api/integration/external-systems'],
@@ -25,6 +30,13 @@ const CONTROL_PLANE_LIST_PROBES = [
   ['integration-list-pipelines', '/api/integration/pipelines'],
   ['integration-list-runs', '/api/integration/runs'],
   ['integration-list-dead-letters', '/api/integration/dead-letters'],
+]
+const REQUIRED_STAGING_DESCRIPTORS = [
+  'plm_raw_items',
+  'standard_materials',
+  'bom_cleanse',
+  'integration_exceptions',
+  'integration_run_log',
 ]
 const TOKEN_PATTERN = /([A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._-]{16,})/g
 
@@ -267,7 +279,7 @@ function assertStatusRoutes(statusBody) {
     })
   }
 
-  return { adapters, routesChecked: REQUIRED_ROUTES.length }
+  return { adapters, adaptersChecked: REQUIRED_ADAPTERS.length, routesChecked: REQUIRED_ROUTES.length }
 }
 
 function assertStagingDescriptors(body) {
@@ -276,12 +288,12 @@ function assertStagingDescriptors(body) {
     throw new K3WisePostdeploySmokeError('staging descriptors response must be an array')
   }
   const ids = data.map((descriptor) => descriptor && descriptor.id).filter(Boolean)
-  for (const id of ['standard_materials', 'bom_cleanse']) {
+  for (const id of REQUIRED_STAGING_DESCRIPTORS) {
     if (!ids.includes(id)) {
       throw new K3WisePostdeploySmokeError(`missing staging descriptor ${id}`, { ids })
     }
   }
-  return { descriptors: ids }
+  return { descriptors: ids, descriptorsChecked: REQUIRED_STAGING_DESCRIPTORS.length }
 }
 
 function assertListResponse(body, probeId) {
