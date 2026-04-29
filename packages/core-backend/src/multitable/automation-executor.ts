@@ -23,12 +23,14 @@ import {
 import type {
   AutomationAction,
   AutomationActionType,
+  SendEmailConfig,
   SendDingTalkGroupMessageConfig,
   SendDingTalkPersonMessageConfig,
 } from './automation-actions'
 import type { ConditionGroup } from './automation-conditions'
 import { evaluateConditions } from './automation-conditions'
 import type { AutomationTrigger } from './automation-triggers'
+import type { NotificationService } from '../types/plugin'
 
 const logger = new Logger('AutomationExecutor')
 
@@ -476,6 +478,7 @@ export interface AutomationDeps {
   eventBus: EventBus
   queryFn: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
   fetchFn?: typeof fetch
+  notificationService?: Pick<NotificationService, 'send'>
 }
 
 // ── Executor class ────────────────────────────────────────────────────────
@@ -571,6 +574,9 @@ export class AutomationExecutor {
             break
           case 'send_notification':
             result = await this.executeSendNotification(action.config, context)
+            break
+          case 'send_email':
+            result = await this.executeSendEmail(action.config as unknown as SendEmailConfig, context)
             break
           case 'send_dingtalk_group_message':
             result = await this.executeSendDingTalkGroupMessage(action.config as unknown as SendDingTalkGroupMessageConfig, context)
@@ -780,6 +786,76 @@ export class AutomationExecutor {
       }
     } catch (err) {
       return { actionType: 'send_notification', status: 'failed', error: err instanceof Error ? err.message : String(err) }
+    }
+  }
+
+  private async executeSendEmail(
+    config: SendEmailConfig,
+    context: ExecutionContext,
+  ): Promise<AutomationStepResult> {
+    const recipients = Array.from(new Set(
+      (Array.isArray(config.recipients) ? config.recipients : [])
+        .filter((entry): entry is string => typeof entry === 'string')
+        .map((entry) => entry.trim())
+        .filter(Boolean),
+    ))
+    const subjectTemplate = typeof config.subjectTemplate === 'string' ? config.subjectTemplate.trim() : ''
+    const bodyTemplate = typeof config.bodyTemplate === 'string' ? config.bodyTemplate.trim() : ''
+
+    if (!recipients.length) {
+      return { actionType: 'send_email', status: 'failed', error: 'send_email requires at least one recipient' }
+    }
+    if (!subjectTemplate) {
+      return { actionType: 'send_email', status: 'failed', error: 'send_email subjectTemplate is required' }
+    }
+    if (!bodyTemplate) {
+      return { actionType: 'send_email', status: 'failed', error: 'send_email bodyTemplate is required' }
+    }
+    if (!this.deps.notificationService) {
+      return { actionType: 'send_email', status: 'failed', error: 'NotificationService is not configured for send_email automation action' }
+    }
+
+    const templateData: Record<string, unknown> = {
+      sheetId: context.sheetId,
+      recordId: context.recordId,
+      actorId: context.actorId ?? '',
+      record: context.recordData,
+    }
+    const subject = renderAutomationTemplate(subjectTemplate, templateData).trim()
+    const content = renderAutomationTemplate(bodyTemplate, templateData).trim()
+
+    const result = await this.deps.notificationService.send({
+      channel: 'email',
+      subject,
+      content,
+      recipients: recipients.map((recipient) => ({ id: recipient, type: 'email' })),
+      metadata: {
+        source: 'automation',
+        actionType: 'send_email',
+        ruleId: context.ruleId,
+        sheetId: context.sheetId,
+        recordId: context.recordId,
+        actorId: context.actorId ?? null,
+      },
+    })
+
+    if (result.status === 'failed') {
+      return {
+        actionType: 'send_email',
+        status: 'failed',
+        error: result.failedReason ?? 'NotificationService email send failed',
+        output: result,
+      }
+    }
+
+    return {
+      actionType: 'send_email',
+      status: 'success',
+      output: {
+        notificationId: result.id,
+        notificationStatus: result.status,
+        recipientCount: recipients.length,
+      },
     }
   }
 

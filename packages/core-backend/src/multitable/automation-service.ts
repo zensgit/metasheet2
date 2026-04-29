@@ -54,10 +54,46 @@ const VALID_ACTION_TYPES = new Set([
   'create_record',
   'send_webhook',
   'send_notification',
+  'send_email',
   'send_dingtalk_group_message',
   'send_dingtalk_person_message',
   'lock_record',
 ])
+
+function normalizeStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((entry): entry is string => typeof entry === 'string')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+}
+
+function validateSendEmailConfig(config: Record<string, unknown>): string | null {
+  const recipients = normalizeStringList(config.recipients)
+  const subjectTemplate = typeof config.subjectTemplate === 'string' ? config.subjectTemplate.trim() : ''
+  const bodyTemplate = typeof config.bodyTemplate === 'string' ? config.bodyTemplate.trim() : ''
+  if (!recipients.length) return 'send_email requires at least one recipient'
+  if (!subjectTemplate) return 'send_email subjectTemplate is required'
+  if (!bodyTemplate) return 'send_email bodyTemplate is required'
+  return null
+}
+
+function validateSendEmailActionConfigs(
+  actionType: string,
+  actionConfig: Record<string, unknown>,
+  actions: AutomationAction[] | null | undefined,
+): string | null {
+  if (actionType === 'send_email') {
+    const error = validateSendEmailConfig(actionConfig)
+    if (error) return error
+  }
+  for (const action of actions ?? []) {
+    if (action.type !== 'send_email') continue
+    const error = validateSendEmailConfig(action.config)
+    if (error) return error
+  }
+  return null
+}
 
 /**
  * Legacy DB-shaped rule (from automation_rules table).
@@ -197,6 +233,7 @@ export class AutomationService {
     fetchFn?: typeof fetch,
     schedulerLeaderOptions: AutomationSchedulerLeaderOptions | null = null,
     schedulerRuntime: AutomationSchedulerRuntimeOptions = {},
+    notificationService?: AutomationDeps['notificationService'],
   ) {
     this.eventBus = eventBus
     this.db = db
@@ -206,6 +243,7 @@ export class AutomationService {
       eventBus,
       queryFn,
       fetchFn,
+      notificationService,
     }
     this.executor = new AutomationExecutor(deps)
     this.logService = new AutomationLogService()
@@ -277,6 +315,8 @@ export class AutomationService {
       : input.actions ?? null
     const actionConfigValidationError = validateDingTalkAutomationActionConfigs(input.actionType, actionConfig, actions)
     if (actionConfigValidationError) throw new AutomationRuleValidationError(actionConfigValidationError)
+    const sendEmailValidationError = validateSendEmailActionConfigs(input.actionType, actionConfig, actions)
+    if (sendEmailValidationError) throw new AutomationRuleValidationError(sendEmailValidationError)
     const linkValidationError = await validateDingTalkAutomationLinks(
       this.queryFn,
       sheetId,
@@ -389,6 +429,12 @@ export class AutomationService {
         normalizedNextActions,
       )
       if (actionConfigValidationError) throw new AutomationRuleValidationError(actionConfigValidationError)
+      const sendEmailValidationError = validateSendEmailActionConfigs(
+        nextActionType,
+        normalizedNextActionConfig,
+        normalizedNextActions,
+      )
+      if (sendEmailValidationError) throw new AutomationRuleValidationError(sendEmailValidationError)
       const linkValidationError = await validateDingTalkAutomationLinks(
         this.queryFn,
         sheetId,
