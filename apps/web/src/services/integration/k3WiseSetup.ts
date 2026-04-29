@@ -102,16 +102,18 @@ export interface IntegrationDeadLetter {
   updatedAt?: string | null
 }
 
+export interface IntegrationStagingFieldDetail {
+  id: string
+  name: string
+  type: string
+  options?: string[]
+}
+
 export interface IntegrationStagingDescriptor {
   id: string
   name: string
   fields: string[]
-  fieldDetails?: Array<{
-    id: string
-    name: string
-    type: string
-    options?: string[]
-  }>
+  fieldDetails?: IntegrationStagingFieldDetail[]
 }
 
 export interface IntegrationStagingInstallResult {
@@ -378,7 +380,10 @@ export function validateK3WiseSetupForm(form: K3WiseSetupForm): K3WiseSetupValid
   return issues
 }
 
-export function validateK3WisePipelineTemplateForm(form: K3WiseSetupForm): K3WiseSetupValidationIssue[] {
+export function validateK3WisePipelineTemplateForm(
+  form: K3WiseSetupForm,
+  descriptors: IntegrationStagingDescriptor[] = [],
+): K3WiseSetupValidationIssue[] {
   const issues: K3WiseSetupValidationIssue[] = []
   if (!trim(form.tenantId)) issues.push({ field: 'tenantId', message: 'tenantId is required' })
   if (!trim(form.sourceSystemId)) issues.push({ field: 'sourceSystemId', message: 'PLM source system ID is required' })
@@ -387,6 +392,15 @@ export function validateK3WisePipelineTemplateForm(form: K3WiseSetupForm): K3Wis
   if (!trim(form.bomPipelineName)) issues.push({ field: 'bomPipelineName', message: 'BOM pipeline name is required' })
   if (!trim(form.materialStagingObjectId)) issues.push({ field: 'materialStagingObjectId', message: 'Material staging object is required' })
   if (!trim(form.bomStagingObjectId)) issues.push({ field: 'bomStagingObjectId', message: 'BOM staging object is required' })
+  if (descriptors.length > 0) {
+    const descriptorIds = new Set(descriptors.map((descriptor) => descriptor.id))
+    if (trim(form.materialStagingObjectId) && !descriptorIds.has(trim(form.materialStagingObjectId))) {
+      issues.push({ field: 'materialStagingObjectId', message: 'Material staging object must match a loaded descriptor' })
+    }
+    if (trim(form.bomStagingObjectId) && !descriptorIds.has(trim(form.bomStagingObjectId))) {
+      issues.push({ field: 'bomStagingObjectId', message: 'BOM staging object must match a loaded descriptor' })
+    }
+  }
   return issues
 }
 
@@ -447,6 +461,32 @@ export function buildK3WiseStagingInstallPayload(form: K3WiseSetupForm): K3WiseS
     projectId: trim(form.projectId),
     ...(optionalString(form.baseId) ? { baseId: trim(form.baseId) } : {}),
   }
+}
+
+export function getIntegrationStagingFieldCount(descriptor: IntegrationStagingDescriptor): number {
+  return descriptor.fieldDetails?.length || descriptor.fields.length
+}
+
+export function formatIntegrationStagingDescriptorFieldSummary(descriptor: IntegrationStagingDescriptor): string {
+  const details = descriptor.fieldDetails || []
+  if (details.length === 0) return `${descriptor.fields.length} fields`
+  const selectFields = details
+    .filter((field) => field.type === 'select')
+    .map((field) => {
+      const optionCount = Array.isArray(field.options) ? field.options.length : 0
+      return `${field.id}(${optionCount})`
+    })
+  const typeCounts = details.reduce<Record<string, number>>((acc, field) => {
+    acc[field.type] = (acc[field.type] || 0) + 1
+    return acc
+  }, {})
+  const typeText = Object.entries(typeCounts)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([type, count]) => `${type}:${count}`)
+    .join(', ')
+  return selectFields.length > 0
+    ? `${details.length} fields · ${typeText} · select ${selectFields.join(', ')}`
+    : `${details.length} fields · ${typeText}`
 }
 
 export function getK3WisePipelineId(form: K3WiseSetupForm, target: K3WisePipelineTarget): string {

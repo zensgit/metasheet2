@@ -59,8 +59,27 @@
         <div class="k3-setup__panel">
           <div class="k3-setup__panel-head">
             <h2>清洗链路</h2>
-            <span>draft</span>
+            <span>{{ stagingDescriptorLabel }}</span>
           </div>
+          <button
+            class="k3-setup__btn k3-setup__btn--full"
+            type="button"
+            :disabled="loadingStagingDescriptors"
+            @click="loadStagingDescriptors(false)"
+          >
+            {{ loadingStagingDescriptors ? '刷新中' : '刷新 Staging 契约' }}
+          </button>
+          <div v-if="stagingDescriptors.length" class="k3-setup__descriptor-list">
+            <div v-for="descriptor in stagingDescriptors" :key="descriptor.id" class="k3-setup__descriptor">
+              <div class="k3-setup__record-main">
+                <strong>{{ descriptor.name }}</strong>
+                <span class="k3-setup__badge">{{ getIntegrationStagingFieldCount(descriptor) }} fields</span>
+              </div>
+              <small>{{ descriptor.id }}</small>
+              <small>{{ formatIntegrationStagingDescriptorFieldSummary(descriptor) }}</small>
+            </div>
+          </div>
+          <div v-else class="k3-setup__empty">未加载 Staging 契约。</div>
           <button
             class="k3-setup__btn k3-setup__btn--full"
             type="button"
@@ -421,7 +440,12 @@
             </label>
             <label class="k3-setup__field">
               <span>物料 Staging 对象</span>
-              <input v-model.trim="form.materialStagingObjectId" autocomplete="off" />
+              <select v-if="stagingDescriptors.length" v-model="form.materialStagingObjectId">
+                <option v-for="descriptor in stagingDescriptors" :key="`material:${descriptor.id}`" :value="descriptor.id">
+                  {{ descriptor.id }}
+                </option>
+              </select>
+              <input v-else v-model.trim="form.materialStagingObjectId" autocomplete="off" />
             </label>
             <label class="k3-setup__field">
               <span>BOM Pipeline 名称</span>
@@ -433,7 +457,12 @@
             </label>
             <label class="k3-setup__field">
               <span>BOM Staging 对象</span>
-              <input v-model.trim="form.bomStagingObjectId" autocomplete="off" />
+              <select v-if="stagingDescriptors.length" v-model="form.bomStagingObjectId">
+                <option v-for="descriptor in stagingDescriptors" :key="`bom:${descriptor.id}`" :value="descriptor.id">
+                  {{ descriptor.id }}
+                </option>
+              </select>
+              <input v-else v-model.trim="form.bomStagingObjectId" autocomplete="off" />
             </label>
             <label class="k3-setup__field">
               <span>执行模式</span>
@@ -474,10 +503,13 @@ import {
   buildK3WiseSetupPayloads,
   buildK3WiseStagingInstallPayload,
   createDefaultK3WiseSetupForm,
+  formatIntegrationStagingDescriptorFieldSummary,
+  getIntegrationStagingFieldCount,
   getK3WisePipelineId,
   installIntegrationStaging,
   listIntegrationDeadLetters,
   listIntegrationPipelineRuns,
+  listIntegrationStagingDescriptors,
   listIntegrationSystems,
   runIntegrationPipeline,
   testIntegrationSystem,
@@ -491,6 +523,7 @@ import {
   type IntegrationDeadLetter,
   type IntegrationExternalSystem,
   type IntegrationPipelineRun,
+  type IntegrationStagingDescriptor,
   type K3WisePipelineTarget,
 } from '../services/integration/k3WiseSetup'
 
@@ -505,6 +538,7 @@ const installingStaging = ref(false)
 const creatingPipelines = ref(false)
 const runningPipeline = ref('')
 const observingPipeline = ref('')
+const loadingStagingDescriptors = ref(false)
 const observedPipelineTarget = ref<K3WisePipelineTarget>('material')
 const statusMessage = ref('')
 const statusKind = ref<'info' | 'success' | 'error'>('info')
@@ -514,14 +548,16 @@ const pipelineResult = ref('')
 const pipelineRunResult = ref('')
 const pipelineRuns = ref<IntegrationPipelineRun[]>([])
 const deadLetters = ref<IntegrationDeadLetter[]>([])
+const stagingDescriptors = ref<IntegrationStagingDescriptor[]>([])
 
 const savedSystems = computed(() => [...webApiSystems.value, ...sqlSystems.value])
 const validationIssues = computed(() => validateK3WiseSetupForm(form))
 const stagingIssues = computed(() => validateK3WiseStagingInstallForm(form))
-const pipelineIssues = computed(() => validateK3WisePipelineTemplateForm(form))
+const pipelineIssues = computed(() => validateK3WisePipelineTemplateForm(form, stagingDescriptors.value))
 const materialRunIssues = computed(() => validateK3WisePipelineRunForm(form, 'material'))
 const bomRunIssues = computed(() => validateK3WisePipelineRunForm(form, 'bom'))
 const observationSummary = computed(() => `${pipelineRuns.value.length} runs / ${deadLetters.value.length} open`)
+const stagingDescriptorLabel = computed(() => stagingDescriptors.value.length > 0 ? `${stagingDescriptors.value.length} descriptors` : 'not loaded')
 
 function setStatus(message: string, kind: 'info' | 'success' | 'error' = 'info'): void {
   statusMessage.value = message
@@ -626,6 +662,18 @@ async function testSqlServer(): Promise<void> {
   }
 }
 
+async function loadStagingDescriptors(silent = false): Promise<void> {
+  loadingStagingDescriptors.value = true
+  try {
+    stagingDescriptors.value = await listIntegrationStagingDescriptors()
+    if (!silent) setStatus('Staging 契约已刷新', 'success')
+  } catch (error) {
+    if (!silent) setStatus(formatError(error), 'error')
+  } finally {
+    loadingStagingDescriptors.value = false
+  }
+}
+
 async function installStagingTables(): Promise<void> {
   const issues = validateK3WiseStagingInstallForm(form)
   if (issues.length > 0) {
@@ -637,6 +685,7 @@ async function installStagingTables(): Promise<void> {
   try {
     const result = await installIntegrationStaging(buildK3WiseStagingInstallPayload(form))
     stagingResult.value = JSON.stringify(result, null, 2)
+    await loadStagingDescriptors(true)
     setStatus('Staging 多维表已安装或确认存在', result.warnings.length > 0 ? 'info' : 'success')
   } catch (error) {
     setStatus(formatError(error), 'error')
@@ -646,7 +695,7 @@ async function installStagingTables(): Promise<void> {
 }
 
 async function createPipelineTemplates(): Promise<void> {
-  const issues = validateK3WisePipelineTemplateForm(form)
+  const issues = validateK3WisePipelineTemplateForm(form, stagingDescriptors.value)
   if (issues.length > 0) {
     setStatus(issues[0].message, 'error')
     return
@@ -739,6 +788,7 @@ async function executePipeline(target: K3WisePipelineTarget, dryRun: boolean): P
 
 onMounted(() => {
   void loadSystems()
+  void loadStagingDescriptors(true)
 })
 </script>
 
@@ -981,6 +1031,34 @@ onMounted(() => {
   flex-direction: column;
   gap: 8px;
   margin-top: 12px;
+}
+
+.k3-setup__descriptor-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.k3-setup__descriptor {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 10px;
+  background: #f8fafc;
+}
+
+.k3-setup__descriptor strong,
+.k3-setup__descriptor small {
+  overflow-wrap: anywhere;
+}
+
+.k3-setup__descriptor small {
+  color: #64748b;
+  font-size: 12px;
 }
 
 .k3-setup__record-head,
