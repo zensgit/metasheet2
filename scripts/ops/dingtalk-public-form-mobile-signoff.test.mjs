@@ -225,6 +225,197 @@ test('dingtalk-public-form-mobile-signoff rejects secret-like record updates', (
   }
 })
 
+test('dingtalk-public-form-mobile-signoff writes a remaining-check todo report', () => {
+  const tmpDir = makeTmpDir()
+  try {
+    const { input } = initKit(tmpDir)
+    const outputDir = path.join(tmpDir, 'todo')
+
+    const publicRecord = runScript([
+      '--record', input,
+      '--check-id', 'public-anonymous-submit',
+      '--status', 'pass',
+      '--source', 'server-observation',
+      '--operator', 'qa',
+      '--summary', 'Anonymous public form inserted one record.',
+      '--record-insert-delta', '1',
+    ])
+    assert.equal(publicRecord.status, 0, publicRecord.stderr)
+
+    const deniedRecord = runScript([
+      '--record', input,
+      '--check-id', 'selected-unlisted-bound-rejected',
+      '--status', 'pass',
+      '--source', 'manual-client',
+      '--operator', 'qa',
+      '--summary', 'The unlisted bound user was blocked before insert.',
+      '--submit-blocked',
+      '--record-insert-delta', '0',
+      '--blocked-reason', 'Not in selected user or group allowlist.',
+    ])
+    assert.equal(deniedRecord.status, 0, deniedRecord.stderr)
+
+    const result = runScript(['--todo', input, '--output-dir', outputDir])
+
+    assert.equal(result.status, 0, result.stderr)
+    const report = JSON.parse(readFileSync(path.join(outputDir, 'todo.json'), 'utf8'))
+    assert.equal(report.strictReady, false)
+    assert.equal(report.remainingChecks.length, requiredCheckIds.length - 2)
+    assert.equal(report.counts.pass, 2)
+    const markdown = readFileSync(path.join(outputDir, 'todo.md'), 'utf8')
+    assert.match(markdown, /Remaining checks: 7/)
+    assert.match(markdown, /--check-id dingtalk-unbound-rejected/)
+    assert.ok(existsSync(path.join(outputDir, 'mobile-signoff.redacted.json')))
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-public-form-mobile-signoff prints todo markdown to stdout', () => {
+  const tmpDir = makeTmpDir()
+  try {
+    const { input } = initKit(tmpDir)
+    const result = runScript(['--todo', input])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /DingTalk Public Form Mobile Signoff TODO/)
+    assert.match(result.stdout, /--record .*mobile-signoff\.json/)
+    assert.match(result.stdout, /--compile-when-ready/)
+    assert.match(result.stdout, /Remaining checks: 9/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-public-form-mobile-signoff flags secret-like todo inputs without leaking them', () => {
+  const tmpDir = makeTmpDir()
+  try {
+    const evidence = makePassingEvidence()
+    const secretValue = `https://example.test/form?public${'Token'}=secret-public-token-12345`
+    evidence.checks[0].evidence.summary = `Opened ${secretValue}`
+    const input = writeEvidence(tmpDir, evidence)
+    const outputDir = path.join(tmpDir, 'todo')
+    const result = runScript(['--todo', input, '--output-dir', outputDir])
+
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, /todo has 1 validation error/)
+    assert.match(readFileSync(path.join(outputDir, 'todo.md'), 'utf8'), /public_form_token/)
+    const redacted = readFileSync(path.join(outputDir, 'mobile-signoff.redacted.json'), 'utf8')
+    assert.doesNotMatch(redacted, /secret-public-token-12345/)
+    assert.match(redacted, /<redacted:public_form_token>/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-public-form-mobile-signoff compile-when-ready reports remaining checks', () => {
+  const tmpDir = makeTmpDir()
+  try {
+    const { input } = initKit(tmpDir)
+    const outputDir = path.join(tmpDir, 'compiled')
+    const result = runScript([
+      '--record', input,
+      '--check-id', 'public-anonymous-submit',
+      '--status', 'pass',
+      '--source', 'server-observation',
+      '--operator', 'qa',
+      '--summary', 'Anonymous public form inserted one record.',
+      '--record-insert-delta', '1',
+      '--output-dir', outputDir,
+      '--compile-when-ready',
+    ])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /not ready for strict compile/)
+    assert.match(result.stdout, /dingtalk-unbound-rejected/)
+    assert.equal(existsSync(path.join(outputDir, 'summary.json')), false)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-public-form-mobile-signoff compile-when-ready writes strict output on final record', () => {
+  const tmpDir = makeTmpDir()
+  try {
+    const evidence = makePassingEvidence()
+    const finalCheck = evidence.checks.find((check) => check.id === 'password-change-bypass-observed')
+    finalCheck.status = 'pending'
+    finalCheck.evidence = {}
+    const input = writeEvidence(tmpDir, evidence)
+    const outputDir = path.join(tmpDir, 'compiled')
+    const result = runScript([
+      '--record', input,
+      '--check-id', 'password-change-bypass-observed',
+      '--status', 'pass',
+      '--source', 'manual-client',
+      '--operator', 'qa',
+      '--summary', 'The form rendered without the password-change page.',
+      '--form-rendered',
+      '--no-password-change-required-shown',
+      '--output-dir', outputDir,
+      '--compile-when-ready',
+    ])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /wrote summary/)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'summary.json'), 'utf8'))
+    assert.equal(summary.strict, true)
+    assert.equal(summary.status, 'pass')
+    assert.ok(readFileSync(path.join(outputDir, 'summary.md'), 'utf8').includes('Strict-ready: `yes`'))
+    assert.ok(existsSync(path.join(outputDir, 'mobile-signoff.redacted.json')))
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-public-form-mobile-signoff rejects compile-when-ready dry-run', () => {
+  const tmpDir = makeTmpDir()
+  try {
+    const { input } = initKit(tmpDir)
+    const result = runScript([
+      '--record', input,
+      '--check-id', 'public-anonymous-submit',
+      '--status', 'pass',
+      '--source', 'server-observation',
+      '--operator', 'qa',
+      '--summary', 'Anonymous public form inserted one record.',
+      '--record-insert-delta', '1',
+      '--compile-when-ready',
+      '--dry-run',
+    ])
+
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, /--compile-when-ready cannot be used with --dry-run/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-public-form-mobile-signoff rejects secret-like compile-when-ready records before output', () => {
+  const tmpDir = makeTmpDir()
+  try {
+    const { input } = initKit(tmpDir)
+    const outputDir = path.join(tmpDir, 'compiled')
+    const result = runScript([
+      '--record', input,
+      '--check-id', 'public-anonymous-submit',
+      '--status', 'pass',
+      '--source', 'server-observation',
+      '--operator', 'qa',
+      '--summary', `Do not store ${'SEC'}1234567890abcdef here.`,
+      '--record-insert-delta', '1',
+      '--output-dir', outputDir,
+      '--compile-when-ready',
+    ])
+
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, /dingtalk_sec_secret/)
+    assert.equal(existsSync(path.join(outputDir, 'summary.json')), false)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('dingtalk-public-form-mobile-signoff accepts screenshot-free strict evidence', () => {
   const tmpDir = makeTmpDir()
   try {
