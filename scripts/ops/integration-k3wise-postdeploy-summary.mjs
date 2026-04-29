@@ -73,6 +73,35 @@ function renderMissingSummary(inputPath) {
   ].join('\n')
 }
 
+function formatDetailValue(value) {
+  if (Array.isArray(value)) {
+    if (value.length === 0) return '`none`'
+    return value.map((item) => `\`${String(item)}\``).join(', ')
+  }
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value)
+      .filter(([, child]) => Array.isArray(child) ? child.length > 0 : child !== undefined && child !== null)
+      .map(([key, child]) => `${key}: ${formatDetailValue(child)}`)
+    return entries.length > 0 ? entries.join('; ') : '`none`'
+  }
+  return `\`${String(value)}\``
+}
+
+function summarizeCheckDetails(check) {
+  const details = check && check.details && typeof check.details === 'object' ? check.details : {}
+  const lines = []
+  for (const key of ['missingAdapters', 'missingRoutes', 'missingFields']) {
+    const value = details[key]
+    const hasValue = Array.isArray(value)
+      ? value.length > 0
+      : value && typeof value === 'object'
+        ? Object.keys(value).length > 0
+        : value !== undefined && value !== null && value !== ''
+    if (hasValue) lines.push(`    - ${key}: ${formatDetailValue(value)}`)
+  }
+  return lines
+}
+
 function renderEvidenceSummary(evidence) {
   const summary = evidence && typeof evidence === 'object' ? evidence.summary || {} : {}
   const checks = Array.isArray(evidence?.checks) ? evidence.checks : []
@@ -86,6 +115,9 @@ function renderEvidenceSummary(evidence) {
   ]
   for (const check of checks) {
     lines.push(`  - \`${check?.id || 'unknown'}\`: \`${check?.status || 'unknown'}\``)
+    if (check?.status === 'fail') {
+      lines.push(...summarizeCheckDetails(check))
+    }
   }
   if (checks.length === 0) {
     lines.push('  - `none`: `missing`')
@@ -141,8 +173,10 @@ if (entryPath && import.meta.url === entryPath) {
 
 export {
   K3WisePostdeploySummaryError,
+  formatDetailValue,
   parseArgs,
   renderEvidenceSummary,
   renderMissingSummary,
+  summarizeCheckDetails,
   runCli,
 }

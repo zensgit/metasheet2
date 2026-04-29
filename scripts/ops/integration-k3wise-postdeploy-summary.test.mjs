@@ -80,7 +80,14 @@ test('renders fail summary without failing the summary renderer', async () => {
       summary: { pass: 1, skipped: 0, fail: 1 },
       checks: [
         { id: 'api-health', status: 'pass' },
-        { id: 'integration-route-contract', status: 'fail' },
+        {
+          id: 'integration-route-contract',
+          status: 'fail',
+          details: {
+            missingAdapters: ['erp:k3-wise-webapi'],
+            missingRoutes: ['POST /api/integration/dead-letters/:id/replay'],
+          },
+        },
       ],
     })}\n`)
 
@@ -90,6 +97,42 @@ test('renders fail summary without failing the summary renderer', async () => {
     assert.match(result.stdout, /Status: \*\*FAIL\*\*/)
     assert.match(result.stdout, /Authenticated checks: `yes`/)
     assert.match(result.stdout, /`integration-route-contract`: `fail`/)
+    assert.match(result.stdout, /missingAdapters: `erp:k3-wise-webapi`/)
+    assert.match(result.stdout, /missingRoutes: `POST \/api\/integration\/dead-letters\/:id\/replay`/)
+  } finally {
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('renders staging missing field details for failed descriptor checks', async () => {
+  const outDir = makeTmpDir()
+  const evidencePath = path.join(outDir, 'evidence.json')
+  try {
+    writeFileSync(evidencePath, `${JSON.stringify({
+      ok: false,
+      baseUrl: 'http://127.0.0.1:8081',
+      authenticated: true,
+      summary: { pass: 3, skipped: 0, fail: 1 },
+      checks: [
+        {
+          id: 'staging-descriptor-contract',
+          status: 'fail',
+          details: {
+            missingFields: {
+              standard_materials: ['erpSyncStatus'],
+              integration_exceptions: ['errorMessage', 'status'],
+            },
+          },
+        },
+      ],
+    })}\n`)
+
+    const result = await runScript(['--input', evidencePath])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /`staging-descriptor-contract`: `fail`/)
+    assert.match(result.stdout, /missingFields: standard_materials: `erpSyncStatus`/)
+    assert.match(result.stdout, /integration_exceptions: `errorMessage`, `status`/)
   } finally {
     rmSync(outDir, { recursive: true, force: true })
   }

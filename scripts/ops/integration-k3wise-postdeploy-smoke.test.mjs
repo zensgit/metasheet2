@@ -32,12 +32,76 @@ const DEFAULT_ROUTES = [
   ['GET', '/api/integration/staging/descriptors'],
   ['POST', '/api/integration/staging/install'],
 ]
+const DEFAULT_STAGING_FIELDS = {
+  plm_raw_items: [
+    'sourceSystemId',
+    'objectType',
+    'sourceId',
+    'revision',
+    'code',
+    'name',
+    'rawPayload',
+    'fetchedAt',
+    'pipelineRunId',
+  ],
+  standard_materials: [
+    'code',
+    'name',
+    'uom',
+    'category',
+    'status',
+    'erpSyncStatus',
+    'erpExternalId',
+    'erpBillNo',
+    'erpResponseCode',
+    'erpResponseMessage',
+    'lastSyncedAt',
+  ],
+  bom_cleanse: [
+    'parentCode',
+    'childCode',
+    'quantity',
+    'uom',
+    'sequence',
+    'revision',
+    'validFrom',
+    'validTo',
+    'status',
+  ],
+  integration_exceptions: [
+    'pipelineId',
+    'runId',
+    'idempotencyKey',
+    'errorCode',
+    'errorMessage',
+    'sourcePayload',
+    'transformedPayload',
+    'status',
+    'assignee',
+    'note',
+  ],
+  integration_run_log: [
+    'pipelineId',
+    'runId',
+    'mode',
+    'triggeredBy',
+    'status',
+    'rowsRead',
+    'rowsCleaned',
+    'rowsWritten',
+    'rowsFailed',
+    'durationMs',
+    'startedAt',
+    'finishedAt',
+    'errorSummary',
+  ],
+}
 const DEFAULT_STAGING_DESCRIPTORS = [
-  { id: 'plm_raw_items', name: 'PLM Raw Items' },
-  { id: 'standard_materials', name: 'Standard Materials' },
-  { id: 'bom_cleanse', name: 'BOM Cleanse' },
-  { id: 'integration_exceptions', name: 'Integration Exceptions' },
-  { id: 'integration_run_log', name: 'Integration Run Log' },
+  { id: 'plm_raw_items', name: 'PLM Raw Items', fields: DEFAULT_STAGING_FIELDS.plm_raw_items },
+  { id: 'standard_materials', name: 'Standard Materials', fields: DEFAULT_STAGING_FIELDS.standard_materials },
+  { id: 'bom_cleanse', name: 'BOM Cleanse', fields: DEFAULT_STAGING_FIELDS.bom_cleanse },
+  { id: 'integration_exceptions', name: 'Integration Exceptions', fields: DEFAULT_STAGING_FIELDS.integration_exceptions },
+  { id: 'integration_run_log', name: 'Integration Run Log', fields: DEFAULT_STAGING_FIELDS.integration_run_log },
 ]
 
 function makeTmpDir() {
@@ -295,7 +359,12 @@ test('authenticated postdeploy smoke validates route and staging contracts witho
       assert.equal(check.status, 'pass')
       assert.equal(check.tenantId, 'tenant-smoke')
     }
-    assert.equal(evidence.checks.find((check) => check.id === 'staging-descriptor-contract').status, 'pass')
+    const stagingCheck = evidence.checks.find((check) => check.id === 'staging-descriptor-contract')
+    assert.equal(stagingCheck.status, 'pass')
+    assert.equal(
+      stagingCheck.fieldsChecked,
+      Object.values(DEFAULT_STAGING_FIELDS).reduce((sum, fields) => sum + fields.length, 0),
+    )
     assert.ok(fake.requests.some((request) => request.pathname === '/api/auth/me' && request.authorization === 'Bearer test.jwt.token'))
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/external-systems'))
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/pipelines'))
@@ -489,6 +558,40 @@ test('authenticated postdeploy smoke fails when a required staging descriptor is
     const stagingCheck = evidence.checks.find((check) => check.id === 'staging-descriptor-contract')
     assert.equal(stagingCheck.status, 'fail')
     assert.match(stagingCheck.error, /missing staging descriptor integration_exceptions/)
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('authenticated postdeploy smoke fails when a required staging descriptor field is missing', async () => {
+  const fake = createFakeServer({
+    stagingDescriptors: DEFAULT_STAGING_DESCRIPTORS.map((descriptor) => {
+      if (descriptor.id !== 'standard_materials') return descriptor
+      return {
+        ...descriptor,
+        fields: descriptor.fields.filter((fieldId) => fieldId !== 'erpSyncStatus'),
+      }
+    }),
+  })
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--auth-token', 'test.jwt.token',
+      '--require-auth',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 1)
+    const evidence = JSON.parse(readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8'))
+    const stagingCheck = evidence.checks.find((check) => check.id === 'staging-descriptor-contract')
+    assert.equal(stagingCheck.status, 'fail')
+    assert.match(stagingCheck.error, /missing required fields/)
+    assert.deepEqual(stagingCheck.details.missingFields, {
+      standard_materials: ['erpSyncStatus'],
+    })
   } finally {
     await fake.close()
     rmSync(outDir, { recursive: true, force: true })
