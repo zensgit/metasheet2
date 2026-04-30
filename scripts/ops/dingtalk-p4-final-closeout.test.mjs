@@ -317,3 +317,11 @@ test('dingtalk-p4-final-closeout rejects overlapping packet output directory', (
     rmSync(tmpDir, { recursive: true, force: true })
   }
 })
+
+test('dingtalk-p4-final-closeout redacts spaced client secret assignments in top-level errors', () => {
+  const result = runScript(['--DINGTALK_CLIENT_SECRET = abcdefghijklmnopqrstuvwxyz123456'])
+
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /DINGTALK_CLIENT_SECRET = <redacted>/)
+  assert.doesNotMatch(result.stderr, /abcdefghijklmnopqrstuvwxyz123456/)
+})

@@ -372,7 +372,7 @@ function redactString(value) {
     .replace(/(access_token=)[^&\s)]+/gi, '$1<redacted>')
     .replace(/(publicToken=)[^&\s)]+/gi, '$1<redacted>')
     .replace(/([?&](?:sign|timestamp)=)[^&\s)]+/gi, '$1<redacted>')
-    .replace(/((?:client_secret|DINGTALK_CLIENT_SECRET|DINGTALK_STATE_SECRET)=)[^\s&]+/gi, '$1<redacted>')
+    .replace(/\b((?:client_secret|DINGTALK_CLIENT_SECRET|DINGTALK_STATE_SECRET)\s*=\s*)[^&\s)"'`<>]+/gi, '$1<redacted>')
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer <redacted>')
     .replace(/\bSEC[A-Za-z0-9+/=_-]{8,}\b/g, 'SEC<redacted>')
     .replace(/\beyJ[A-Za-z0-9._-]{20,}\b/g, '<jwt:redacted>')
@@ -958,6 +958,6 @@ try {
     compileEvidence(opts)
   }
 } catch (error) {
-  console.error(`[compile-dingtalk-p4-smoke-evidence] ERROR: ${error instanceof Error ? error.message : String(error)}`)
+  console.error(`[compile-dingtalk-p4-smoke-evidence] ERROR: ${redactString(error instanceof Error ? error.message : String(error))}`)
   process.exit(1)
 }

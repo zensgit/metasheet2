@@ -250,8 +250,9 @@ test('dingtalk-p4-final-handoff rejects overlapping output and session paths', (
 })
 
 test('dingtalk-p4-final-handoff rejects unknown arguments', () => {
-  const result = runScript(['--unknown'])
+  const result = runScript(['--DINGTALK_CLIENT_SECRET = abcdefghijklmnopqrstuvwxyz123456'])
 
   assert.equal(result.status, 1)
-  assert.match(result.stderr, /Unknown argument: --unknown/)
+  assert.match(result.stderr, /DINGTALK_CLIENT_SECRET = <redacted>/)
+  assert.doesNotMatch(result.stderr, /abcdefghijklmnopqrstuvwxyz123456/)
 })
