@@ -41,6 +41,11 @@ For manual signoff, run `K3 WISE Postdeploy Smoke` with:
 - `auto_discover_tenant`: `true` only when the deployment has exactly one
   integration tenant scope.
 
+For the current 142 internal trial deployment, use tenant scope `default`.
+`METASHEET_TENANT_ID=default` is configured as a GitHub repository variable, so
+the manual workflow can be run without filling `tenant_id`; use the input only
+when intentionally testing another tenant.
+
 Token resolution order:
 
 1. `METASHEET_K3WISE_SMOKE_TOKEN` secret.
@@ -86,3 +91,19 @@ K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH=true
 Keep it unset or `false` only when the deployment is still in diagnostic mode.
 Diagnostic mode can prove the web/API surface is reachable, but cannot sign off
 the internal K3 WISE trial.
+
+## 142 Internal Trial Evidence
+
+Latest confirmed signoff run:
+
+- Workflow: `K3 WISE Postdeploy Smoke`
+- Run: `https://github.com/zensgit/metasheet2/actions/runs/25157307393`
+- Tenant source: repository variable `METASHEET_TENANT_ID=default`
+- Result: `signoff.internalTrial=pass`
+- Summary: `10 pass / 0 skipped / 0 fail`
+- Artifact: `integration-k3wise-postdeploy-smoke-25157307393-1`
+
+The run proved the deployed 142 environment can mint a temporary masked admin
+token from the deploy host, reach the K3 setup frontend route, validate the
+integration plugin route contract, list the four tenant-scoped control-plane
+collections, and validate staging descriptors.
