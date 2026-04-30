@@ -95,15 +95,60 @@ Expected docs:
 
 ## Phase 2 - P0 Gap: Backend XLSX Route Layer
 
-- [ ] Decide backend `xlsx` dependency policy.
-- [ ] Add backend xlsx import adapter or optional dependency seam.
-- [ ] Implement `POST /api/multitable/sheets/:sheetId/import-xlsx`.
-- [ ] Implement `GET /api/multitable/sheets/:sheetId/export-xlsx`.
-- [ ] Ensure import writes go through the authoritative record write path.
-- [ ] Ensure export respects current sheet/view permissions.
-- [ ] Add backend tests for import mapping, invalid file, permission denial, and export.
-- [ ] Update OpenAPI source and generated dist.
-- [ ] Mark frontend-only xlsx limitation as closed or explicitly narrowed.
+- [x] Decide backend `xlsx` dependency policy.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
+  - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
+  - Verification summary: `xlsx` added as explicit `@metasheet/core-backend` runtime dependency; lockfile updated.
+- [x] Add backend xlsx import adapter or optional dependency seam.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
+  - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
+  - Verification summary: `xlsx-service.ts` added with parse/build/map helpers; 5 focused unit tests pass.
+- [x] Implement `POST /api/multitable/sheets/:sheetId/import-xlsx`.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
+  - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
+  - Verification summary: multipart route accepts `file`, optional `sheetName`, and optional JSON `mapping`.
+- [x] Implement `GET /api/multitable/sheets/:sheetId/export-xlsx`.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
+  - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
+  - Verification summary: route returns XLSX binary with content-disposition and truncation header.
+- [x] Ensure import writes go through the authoritative record write path.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
+  - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
+  - Verification summary: import delegates row writes to `RecordService.createRecord()`.
+- [x] Ensure export respects current sheet/view permissions.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
+  - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
+  - Verification summary: export requires `canRead` and `canExport`; optional `viewId` is scope-checked.
+- [x] Add backend tests for import mapping, invalid file, permission denial, and export.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
+  - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
+  - Verification summary: `multitable-xlsx-routes.test.ts` covers import mapping, invalid input, permission denial, and export.
+- [x] Update OpenAPI source and generated dist.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
+  - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
+  - Verification summary: OpenAPI source updated and generated dist refreshed.
+- [x] Mark frontend-only xlsx limitation as closed or explicitly narrowed.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
+  - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
+  - Verification summary: limitation narrowed to frontend not yet wired to backend routes; backend capability exists.
 
 Expected docs:
 
