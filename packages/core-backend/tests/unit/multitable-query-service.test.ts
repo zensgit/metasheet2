@@ -52,6 +52,62 @@ describe('multitable query-service', () => {
     ])
   })
 
+  it('injects readonly system field values from record metadata', async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = []
+    const query: MultitableRecordsQueryFn = async (sql, params) => {
+      calls.push({ sql, params })
+      if (sql.includes('FROM meta_sheets')) {
+        return { rows: [{ id: 'sheet_1', name: 'Tickets' }], rowCount: 1 }
+      }
+      if (sql.includes('FROM meta_fields')) {
+        return {
+          rows: [
+            { id: 'title', sheet_id: 'sheet_1', name: 'Title', type: 'string', property: {}, order: 1 },
+            { id: 'created_at_sys', sheet_id: 'sheet_1', name: 'Created At', type: 'createdTime', property: {}, order: 2 },
+            { id: 'updated_at_sys', sheet_id: 'sheet_1', name: 'Updated At', type: 'modifiedTime', property: {}, order: 3 },
+            { id: 'created_by_sys', sheet_id: 'sheet_1', name: 'Created By', type: 'createdBy', property: {}, order: 4 },
+            { id: 'modified_by_sys', sheet_id: 'sheet_1', name: 'Modified By', type: 'modifiedBy', property: {}, order: 5 },
+          ],
+          rowCount: 5,
+        }
+      }
+      return {
+        rows: [{
+          id: 'rec_1',
+          sheet_id: 'sheet_1',
+          version: 3,
+          data: { title: 'A', created_at_sys: 'client-forged' },
+          created_at: new Date('2026-04-30T01:02:03.000Z'),
+          updated_at: '2026-04-30T02:03:04.000Z',
+          created_by: 'user_creator',
+          modified_by: 'user_editor',
+        }],
+        rowCount: 1,
+      }
+    }
+
+    await expect(listRecords({ query, sheetId: 'sheet_1' })).resolves.toEqual([
+      {
+        id: 'rec_1',
+        sheetId: 'sheet_1',
+        version: 3,
+        createdAt: '2026-04-30T01:02:03.000Z',
+        updatedAt: '2026-04-30T02:03:04.000Z',
+        createdBy: 'user_creator',
+        modifiedBy: 'user_editor',
+        data: {
+          title: 'A',
+          created_at_sys: '2026-04-30T01:02:03.000Z',
+          updated_at_sys: '2026-04-30T02:03:04.000Z',
+          created_by_sys: 'user_creator',
+          modified_by_sys: 'user_editor',
+        },
+      },
+    ])
+
+    expect(calls.at(-1)?.sql).toContain('created_at, updated_at, created_by, modified_by')
+  })
+
   it('builds filter/search/order SQL without touching write helpers', async () => {
     const { query, calls } = createQuery([
       { id: 'rec_1', sheet_id: 'sheet_1', version: 1, data: JSON.stringify({ title: 'A', status: 'open' }) },

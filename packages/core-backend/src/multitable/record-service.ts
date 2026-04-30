@@ -167,6 +167,7 @@ export type RecordPatchInput = {
   sheetId: string
   data: Record<string, unknown>
   expectedVersion?: number
+  actorId?: string | null
   access: AccessInfo
   capabilities: MultitableCapabilities
   sheetScope?: SheetPermissionScope
@@ -500,8 +501,8 @@ export class RecordService {
     const recordId = `rec_${randomUUID()}`
     const recordRes = await this.pool.transaction(async ({ query }) => {
       const inserted = await query(
-        `INSERT INTO meta_records (id, sheet_id, data, version, created_by)
-         VALUES ($1, $2, $3::jsonb, 1, $4)
+        `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
+         VALUES ($1, $2, $3::jsonb, 1, $4, $4)
          RETURNING version`,
         [recordId, sheetId, JSON.stringify(patch), actorId],
       )
@@ -629,6 +630,7 @@ export class RecordService {
     if (!capabilities.canEditRecord) {
       throw new RecordPermissionError('Insufficient permissions')
     }
+    const patchActorId = input.actorId ?? access.userId ?? null
 
     const fields = await loadFieldsForSheet(this.pool.query.bind(this.pool), sheetId)
     if (fields.length === 0) {
@@ -781,10 +783,10 @@ export class RecordService {
       if (Object.keys(patch).length > 0) {
         const updateRes = await query(
           `UPDATE meta_records
-           SET data = data || $1::jsonb, updated_at = now(), version = version + 1
+           SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
            WHERE id = $2 AND sheet_id = $3
            RETURNING version`,
-          [JSON.stringify(patch), recordId, sheetId],
+          [JSON.stringify(patch), recordId, sheetId, patchActorId],
         )
         nextVersion = Number((updateRes.rows[0] as { version?: unknown } | undefined)?.version ?? serverVersion)
       } else {

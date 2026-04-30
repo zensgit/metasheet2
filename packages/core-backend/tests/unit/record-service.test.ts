@@ -352,7 +352,7 @@ describe('RecordService', () => {
     expect(yjsInvalidator).toHaveBeenCalledWith(['rec_existing'])
     expect(pool.queryMock).toHaveBeenCalledWith(
       expect.stringContaining('UPDATE meta_records'),
-      [JSON.stringify({ fld_title: 'Updated', fld_customer: ['rec_customer_2'] }), 'rec_existing', 'sheet_ops'],
+      [JSON.stringify({ fld_title: 'Updated', fld_customer: ['rec_customer_2'] }), 'rec_existing', 'sheet_ops', 'user_1'],
     )
     expect(pool.queryMock).toHaveBeenCalledWith(
       expect.stringContaining('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2 AND foreign_record_id = ANY'),
@@ -389,7 +389,7 @@ describe('RecordService', () => {
     expect(result.patch).toEqual({ fld_tags: ['VIP', 'Urgent'] })
     expect(pool.queryMock).toHaveBeenCalledWith(
       expect.stringContaining('UPDATE meta_records'),
-      [JSON.stringify({ fld_tags: ['VIP', 'Urgent'] }), 'rec_existing', 'sheet_ops'],
+      [JSON.stringify({ fld_tags: ['VIP', 'Urgent'] }), 'rec_existing', 'sheet_ops', 'user_1'],
     )
   })
 

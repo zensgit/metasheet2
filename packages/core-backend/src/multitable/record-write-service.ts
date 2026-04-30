@@ -60,6 +60,10 @@ export type UniverMetaField = {
     | 'email'
     | 'phone'
     | 'longText'
+    | 'createdTime'
+    | 'modifiedTime'
+    | 'createdBy'
+    | 'modifiedBy'
   options?: Array<{ value: string; color?: string }>
   order?: number
   property?: Record<string, unknown>
@@ -587,10 +591,10 @@ export class RecordWriteService {
         // Apply patch
         const updateRes = await query(
           `UPDATE meta_records
-           SET data = data || $1::jsonb, updated_at = now(), version = version + 1
+           SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
            WHERE sheet_id = $2 AND id = $3
            RETURNING version`,
-          [JSON.stringify(patch), sheetId, recordId],
+          [JSON.stringify(patch), sheetId, recordId, actorId],
         )
         if ((updateRes.rows as any[]).length === 0) {
           throw new RecordNotFoundError(`Record not found: ${recordId}`)

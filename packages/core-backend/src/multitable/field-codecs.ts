@@ -19,6 +19,10 @@ export type MultitableFieldType =
   | 'email'
   | 'phone'
   | 'longText'
+  | 'createdTime'
+  | 'modifiedTime'
+  | 'createdBy'
+  | 'modifiedBy'
 
 export type MultitableField = {
   id: string
@@ -93,6 +97,14 @@ export function mapFieldType(type: string): MultitableFieldType | string {
   if (normalized === 'url') return 'url'
   if (normalized === 'email') return 'email'
   if (normalized === 'phone') return 'phone'
+  if (normalized === 'createdtime' || normalized === 'created_time' || normalized === 'created-time') {
+    return 'createdTime'
+  }
+  if (normalized === 'modifiedtime' || normalized === 'modified_time' || normalized === 'modified-time') {
+    return 'modifiedTime'
+  }
+  if (normalized === 'createdby' || normalized === 'created_by' || normalized === 'created-by') return 'createdBy'
+  if (normalized === 'modifiedby' || normalized === 'modified_by' || normalized === 'modified-by') return 'modifiedBy'
   if (
     normalized === 'longtext' ||
     normalized === 'long_text' ||
@@ -293,6 +305,10 @@ export function sanitizeFieldProperty(
     return obj
   }
 
+  if (SYSTEM_FIELD_TYPES.has(type)) {
+    return { ...obj, readOnly: true }
+  }
+
   const customDef = fieldTypeRegistry.get(type)
   if (customDef) {
     return customDef.sanitizeProperty(property)
@@ -490,3 +506,14 @@ export const BATCH1_FIELD_TYPES: ReadonlySet<string> = new Set([
   'email',
   'phone',
 ])
+
+export const SYSTEM_FIELD_TYPES: ReadonlySet<string> = new Set([
+  'createdTime',
+  'modifiedTime',
+  'createdBy',
+  'modifiedBy',
+])
+
+export function isSystemFieldType(type: string): boolean {
+  return SYSTEM_FIELD_TYPES.has(type)
+}

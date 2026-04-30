@@ -160,14 +160,20 @@ function createQuery(): {
       }
     }
 
-    if (normalized.startsWith('SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+    if (
+      normalized.includes('FROM meta_records WHERE id = $1 AND sheet_id = $2') &&
+      normalized.includes('SELECT id, sheet_id, version, data')
+    ) {
       const [recordId, sheetId] = params as [string, string]
       return {
         rows: records.filter((record) => record.id === recordId && record.sheet_id === sheetId),
       }
     }
 
-    if (normalized.startsWith('SELECT id, sheet_id, version, data FROM meta_records WHERE sheet_id = $1')) {
+    if (
+      normalized.includes('FROM meta_records WHERE sheet_id = $1') &&
+      normalized.includes('SELECT id, sheet_id, version, data')
+    ) {
       let filtered = records.filter((record) => record.sheet_id === String(params[0]))
 
       const whereFilters = normalized.match(/data ->(?:>|) \$(\d+)(?: = \$(\d+)| IS NULL)/g) ?? []

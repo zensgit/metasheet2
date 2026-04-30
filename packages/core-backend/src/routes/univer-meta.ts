@@ -183,6 +183,10 @@ const MULTITABLE_FIELD_TYPES = [
   'email',
   'phone',
   'longText',
+  'createdTime',
+  'modifiedTime',
+  'createdBy',
+  'modifiedBy',
 ] as const
 
 type UniverMetaField = {
@@ -207,6 +211,10 @@ type UniverMetaField = {
     | 'email'
     | 'phone'
     | 'longText'
+    | 'createdTime'
+    | 'modifiedTime'
+    | 'createdBy'
+    | 'modifiedBy'
   options?: Array<{ value: string; color?: string }>
   order?: number
   property?: Record<string, unknown>
@@ -1039,6 +1047,14 @@ function mapFieldType(type: string): UniverMetaField['type'] {
   if (normalized === 'rollup') return 'rollup'
   if (normalized === 'attachment') return 'attachment'
   if (BATCH1_FIELD_TYPES.has(normalized as any)) return normalized as UniverMetaField['type']
+  if (normalized === 'createdtime' || normalized === 'created_time' || normalized === 'created-time') {
+    return 'createdTime'
+  }
+  if (normalized === 'modifiedtime' || normalized === 'modified_time' || normalized === 'modified-time') {
+    return 'modifiedTime'
+  }
+  if (normalized === 'createdby' || normalized === 'created_by' || normalized === 'created-by') return 'createdBy'
+  if (normalized === 'modifiedby' || normalized === 'modified_by' || normalized === 'modified-by') return 'modifiedBy'
   if (
     normalized === 'longtext' ||
     normalized === 'long_text' ||
@@ -1265,6 +1281,10 @@ function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown)
       ...(Number.isFinite(maxFiles) && maxFiles > 0 ? { maxFiles: Math.round(maxFiles) } : {}),
       acceptedMimeTypes: sanitizeStringArray(obj.acceptedMimeTypes),
     }
+  }
+
+  if (type === 'createdTime' || type === 'modifiedTime' || type === 'createdBy' || type === 'modifiedBy') {
+    return { ...obj, readOnly: true }
   }
 
   return obj
@@ -5881,10 +5901,10 @@ export function univerMetaRouter(): Router {
           if (Object.keys(patch).length > 0) {
             const updateRes = await query(
               `UPDATE meta_records
-               SET data = data || $1::jsonb, updated_at = now(), version = version + 1
+               SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
                WHERE id = $2 AND sheet_id = $3
                RETURNING version`,
-              [JSON.stringify(patch), recordId, view.sheetId],
+              [JSON.stringify(patch), recordId, view.sheetId, getRequestActorId(req)],
             )
             nextVersion = Number((updateRes as any).rows[0]?.version ?? serverVersion)
           } else {
@@ -5924,8 +5944,8 @@ export function univerMetaRouter(): Router {
         }
 
         const insertRes = await query(
-          `INSERT INTO meta_records (id, sheet_id, data, version, created_by)
-           VALUES ($1, $2, $3::jsonb, 1, $4)
+          `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
+           VALUES ($1, $2, $3::jsonb, 1, $4, $4)
            RETURNING id, version`,
           [
             resultRecordId,
@@ -6138,6 +6158,7 @@ export function univerMetaRouter(): Router {
         sheetId,
         data: parsed.data.data ?? {},
         expectedVersion: parsed.data.expectedVersion,
+        actorId: getRequestActorId(req),
         access,
         capabilities,
         sheetScope,
@@ -6829,10 +6850,10 @@ export function univerMetaRouter(): Router {
             if (nextIds.length !== currentIds.length) {
               const updateRes = await query(
                 `UPDATE meta_records
-                 SET data = data || $1::jsonb, updated_at = now(), version = version + 1
+                 SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
                  WHERE id = $2 AND sheet_id = $3
                  RETURNING version`,
-                [JSON.stringify({ [fieldId]: nextIds }), recordId, sheetId],
+                [JSON.stringify({ [fieldId]: nextIds }), recordId, sheetId, getRequestActorId(req)],
               )
               updatedRecordRealtimeScope = {
                 sheetId,

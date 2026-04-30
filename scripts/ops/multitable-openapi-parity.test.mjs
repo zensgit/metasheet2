@@ -26,6 +26,10 @@ const expectedFieldTypes = [
   'email',
   'phone',
   'longText',
+  'createdTime',
+  'modifiedTime',
+  'createdBy',
+  'modifiedBy',
 ]
 
 const expectedViewTypes = [

@@ -207,6 +207,23 @@ describe('RecordWriteService', () => {
     )
   })
 
+  it('persists modified_by with the patch actor', async () => {
+    const service = new RecordWriteService(pool, eventBus as any, helpers)
+
+    await service.patchRecords(buildTestInput({ actorId: 'user_editor' }))
+
+    const updateCall = (pool.query as any).mock.calls.find((call: unknown[]) =>
+      typeof call[0] === 'string' && call[0].includes('UPDATE meta_records'),
+    )
+    expect(updateCall[0]).toContain('modified_by = $4')
+    expect(updateCall[1]).toEqual([
+      JSON.stringify({ fld_name: 'Alice' }),
+      'sheet1',
+      'rec1',
+      'user_editor',
+    ])
+  })
+
   it('preserves longText multiline values in the shared write path', async () => {
     const service = new RecordWriteService(pool, eventBus as any, helpers)
     const fields: UniverMetaField[] = [

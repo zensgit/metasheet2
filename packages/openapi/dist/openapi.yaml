@@ -1599,6 +1599,10 @@ components:
         - email
         - phone
         - longText
+        - createdTime
+        - modifiedTime
+        - createdBy
+        - modifiedBy
     MultitableView:
       type: object
       properties:
