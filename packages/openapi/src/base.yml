@@ -1586,6 +1586,53 @@ components:
         data:
           type: object
           additionalProperties: true
+    MultitableXlsxImportResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: object
+          properties:
+            sheetId:
+              type: string
+            sheetName:
+              type: string
+            headers:
+              type: array
+              items: { type: string }
+            mapping:
+              type: object
+              additionalProperties:
+                type: string
+            unmappedHeaders:
+              type: array
+              items: { type: string }
+            unmappedFields:
+              type: array
+              items: { type: string }
+            attempted:
+              type: integer
+            imported:
+              type: integer
+            failed:
+              type: integer
+            failures:
+              type: array
+              items:
+                type: object
+                properties:
+                  rowIndex:
+                    type: integer
+                  message:
+                    type: string
+                  code:
+                    type: string
+            createdRecordIds:
+              type: array
+              items: { type: string }
+            truncated:
+              type: boolean
     MultitableCommentsScope:
       type: object
       properties:

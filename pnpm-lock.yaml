@@ -220,6 +220,9 @@ importers:
       winston:
         specifier: ^3.17.0
         version: 3.18.3
+      xlsx:
+        specifier: ^0.18.5
+        version: 0.18.5
       xml2js:
         specifier: ^0.6.2
         version: 0.6.2
@@ -306,6 +309,8 @@ importers:
       vite:
         specifier: ^5.4.0
         version: 5.4.21(@types/node@20.19.25)(less@4.4.2)
+
+  plugins/plugin-integration-core: {}
 
   plugins/plugin-intelligent-restore:
     devDependencies:

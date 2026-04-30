@@ -137,6 +137,17 @@ import {
   CONDITIONAL_FORMATTING_RULE_LIMIT,
   sanitizeConditionalFormattingRules,
 } from '../multitable/conditional-formatting-service'
+import {
+  XLSX_MAX_BYTES,
+  XLSX_MAX_ROWS,
+  buildXlsxBuffer,
+  buildXlsxImportRecords,
+  normalizeXlsxColumnMapping,
+  parseXlsxBuffer,
+  serializeXlsxCell,
+  type ParsedXlsxResult,
+  type XlsxModule,
+} from '../multitable/xlsx-service'
 
 const multitableFormulaEngine = new MultitableFormulaEngine()
 
@@ -232,6 +243,7 @@ const ATTACHMENT_PATH = process.env.ATTACHMENT_PATH || path.join(process.cwd(), 
 const ATTACHMENT_UPLOAD_MAX_SIZE = Number.parseInt(process.env.ATTACHMENT_MAX_SIZE ?? '', 10) || 100 * 1024 * 1024
 const multitableMulter = loadMulter()
 const multitableUpload = createUploadMiddleware(multitableMulter, { fileSize: ATTACHMENT_UPLOAD_MAX_SIZE })
+const xlsxUpload = createUploadMiddleware(multitableMulter, { fileSize: XLSX_MAX_BYTES })
 
 let multitableAttachmentStorage: StorageServiceImpl | null = null
 const metaSheetSummaryCache = new Map<string, { id: string; name: string }>()
@@ -1938,6 +1950,25 @@ function filterRecordDataByFieldIds(data: unknown, allowedFieldIds: Set<string>)
   return Object.fromEntries(
     Object.entries(data as Record<string, unknown>).filter(([fieldId]) => allowedFieldIds.has(fieldId)),
   )
+}
+
+async function loadXlsxModule(): Promise<XlsxModule> {
+  return await import('xlsx') as unknown as XlsxModule
+}
+
+function parseJsonFormField(value: unknown, fieldName: string): unknown {
+  if (value === undefined || value === null || value === '') return undefined
+  if (typeof value !== 'string') return value
+  try {
+    return JSON.parse(value) as unknown
+  } catch {
+    throw new ValidationError(`${fieldName} must be valid JSON`)
+  }
+}
+
+function buildXlsxAttachmentFilename(sheetName: string): string {
+  const base = sheetName.replace(/[^\w.-]+/g, '_').replace(/^_+|_+$/g, '') || 'multitable'
+  return `${base}.xlsx`
 }
 
 async function loadDashboardSourceRows(args: {
@@ -4836,6 +4867,198 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] create sheet failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create sheet' } })
+    }
+  })
+
+  router.post('/sheets/:sheetId/import-xlsx', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+    if (!xlsxUpload) {
+      return res.status(500).json({ ok: false, error: { code: 'UPLOAD_UNAVAILABLE', message: 'XLSX upload not available - multer not installed' } })
+    }
+
+    xlsxUpload.single('file')(req, res, async (uploadErr: unknown) => {
+      if (uploadErr) {
+        return res.status(400).json({ ok: false, error: { code: 'UPLOAD_FAILED', message: String(uploadErr) } })
+      }
+
+      const file = (req as RequestWithFile).file
+      if (!file?.buffer || file.buffer.length === 0) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No XLSX file provided. Use "file" as the form field name.' } })
+      }
+
+      try {
+        const pool = poolManager.get()
+        const sheet = await loadSheetRowShared(pool.query.bind(pool), sheetId)
+        if (!sheet) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+        }
+
+        const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+        if (!access.userId) {
+          return res.status(401).json({ error: 'Authentication required' })
+        }
+        if (!capabilities.canCreateRecord) return sendForbidden(res)
+
+        const xlsx = await loadXlsxModule()
+        let parsed: ParsedXlsxResult
+        try {
+          parsed = parseXlsxBuffer(xlsx, file.buffer, {
+            sheetName: typeof req.body.sheetName === 'string' ? req.body.sheetName : undefined,
+          })
+        } catch {
+          throw new ValidationError('Invalid XLSX file')
+        }
+        if (parsed.headers.length === 0) {
+          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'XLSX file has no header row' } })
+        }
+
+        const fields = await loadFieldsForSheetShared(pool.query.bind(pool), sheetId)
+        const rawMapping = parseJsonFormField(req.body.mapping, 'mapping')
+        const columnMapping = normalizeXlsxColumnMapping(rawMapping, parsed.headers, fields)
+        if (Object.keys(columnMapping.mapping).length === 0) {
+          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No XLSX columns map to importable fields' } })
+        }
+
+        const built = buildXlsxImportRecords(parsed, columnMapping.mapping)
+        const recordService = new RecordService(pool, eventBus)
+        if (yjsInvalidator) {
+          recordService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
+        }
+
+        const failures: Array<{ rowIndex: number; message: string; code?: string }> = []
+        const createdRecordIds: string[] = []
+        for (let index = 0; index < built.records.length; index += 1) {
+          const data = built.records[index]
+          const rowIndex = built.rowIndexes[index] ?? index
+          try {
+            const created = await recordService.createRecord({
+              sheetId,
+              capabilities,
+              actorId: getRequestActorId(req),
+              data,
+            })
+            createdRecordIds.push(created.recordId)
+          } catch (error) {
+            if (error instanceof RecordCreateValidationFailedError) {
+              failures.push({ rowIndex, message: 'Record validation failed', code: 'VALIDATION_FAILED' })
+            } else if (error instanceof RecordServiceFieldForbiddenError || error instanceof RecordServiceValidationError) {
+              failures.push({ rowIndex, message: error.message, code: error.code })
+            } else if (error instanceof RecordServicePermissionError) {
+              failures.push({ rowIndex, message: error.message, code: 'FORBIDDEN' })
+            } else {
+              throw error
+            }
+          }
+        }
+
+        return res.json({
+          ok: failures.length === 0,
+          data: {
+            sheetId,
+            sheetName: parsed.sheetName,
+            headers: parsed.headers,
+            mapping: columnMapping.mapping,
+            unmappedHeaders: columnMapping.unmappedHeaders,
+            unmappedFields: columnMapping.unmappedFields,
+            attempted: built.records.length,
+            imported: createdRecordIds.length,
+            failed: failures.length,
+            failures,
+            createdRecordIds,
+            truncated: parsed.truncated,
+          },
+        })
+      } catch (err) {
+        if (err instanceof ValidationError) {
+          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
+        }
+        if (err instanceof RecordServiceNotFoundError || err instanceof NotFoundError) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+        }
+        if (err instanceof RecordServicePermissionError) {
+          return sendForbidden(res, err.message)
+        }
+        if (err instanceof RecordServiceValidationError || err instanceof ServiceValidationError) {
+          return res.status(400).json({ ok: false, error: { code: err.code || 'VALIDATION_ERROR', message: err.message } })
+        }
+        const hint = getDbNotReadyMessage(err)
+        if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+        console.error('[univer-meta] xlsx import failed:', err)
+        return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to import XLSX' } })
+      }
+    })
+  })
+
+  router.get('/sheets/:sheetId/export-xlsx', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const viewId = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRowShared(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      if (viewId) {
+        const view = await tryResolveViewShared(pool.query.bind(pool), viewId)
+        if (!view || view.sheetId !== sheetId) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
+        }
+      }
+
+      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      if (!capabilities.canRead || !capabilities.canExport) return sendForbidden(res)
+
+      const fields = filterVisiblePropertyFields(await loadFieldsForSheetShared(pool.query.bind(pool), sheetId))
+      const fieldIds = new Set(fields.map((field) => field.id))
+      const rows: Array<Array<string | number | boolean | null | undefined>> = []
+      let cursor: string | undefined
+      let truncated = false
+      do {
+        const result = await queryRecordsWithCursor({
+          query: pool.query.bind(pool),
+          sheetId,
+          cursor,
+          limit: Math.min(5000, XLSX_MAX_ROWS - rows.length),
+        })
+        for (const record of result.items) {
+          const data = filterRecordDataByFieldIds(record.data, fieldIds)
+          rows.push(fields.map((field) => serializeXlsxCell(data[field.id])))
+          if (rows.length >= XLSX_MAX_ROWS) {
+            truncated = result.hasMore
+            break
+          }
+        }
+        cursor = result.hasMore && rows.length < XLSX_MAX_ROWS ? result.nextCursor ?? undefined : undefined
+      } while (cursor)
+
+      const xlsx = await loadXlsxModule()
+      const buffer = buildXlsxBuffer(xlsx, {
+        sheetName: sheet.name,
+        headers: fields.map((field) => field.name),
+        rows,
+      })
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+      res.setHeader('Content-Disposition', `attachment; filename="${buildXlsxAttachmentFilename(sheet.name)}"`)
+      res.setHeader('X-MetaSheet-XLSX-Truncated', truncated ? 'true' : 'false')
+      return res.send(buffer)
+    } catch (err) {
+      if (err instanceof ValidationError) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] xlsx export failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to export XLSX' } })
     }
   })
 

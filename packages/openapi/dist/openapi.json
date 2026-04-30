@@ -2368,6 +2368,84 @@
           }
         }
       },
+      "MultitableXlsxImportResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "sheetId": {
+                "type": "string"
+              },
+              "sheetName": {
+                "type": "string"
+              },
+              "headers": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "mapping": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "unmappedHeaders": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "unmappedFields": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "attempted": {
+                "type": "integer"
+              },
+              "imported": {
+                "type": "integer"
+              },
+              "failed": {
+                "type": "integer"
+              },
+              "failures": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "rowIndex": {
+                      "type": "integer"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "createdRecordIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      },
       "MultitableCommentsScope": {
         "type": "object",
         "properties": {
@@ -17014,6 +17092,142 @@
                       }
                     }
                   }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/multitable/sheets/{sheetId}/import-xlsx": {
+      "post": {
+        "summary": "Import XLSX rows into a multitable sheet",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sheetId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  },
+                  "sheetName": {
+                    "type": "string",
+                    "description": "Optional workbook sheet name. Defaults to first sheet."
+                  },
+                  "mapping": {
+                    "type": "string",
+                    "description": "Optional JSON object mapping zero-based XLSX column indexes to field IDs."
+                  }
+                },
+                "required": [
+                  "file"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Import summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MultitableXlsxImportResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/multitable/sheets/{sheetId}/export-xlsx": {
+      "get": {
+        "summary": "Export a multitable sheet as XLSX",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sheetId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "viewId",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional view guard. The route verifies the view belongs to the sheet."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "XLSX workbook",
+            "headers": {
+              "X-MetaSheet-XLSX-Truncated": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "true",
+                    "false"
+                  ]
+                },
+                "description": "Whether the export hit the server-side row cap."
+              }
+            },
+            "content": {
+              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
                 }
               }
             }
