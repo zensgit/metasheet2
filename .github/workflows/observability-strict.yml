@@ -460,8 +460,8 @@ jobs:
 
       - name: Validate RealShare presence (non-blocking)
         run: |
-          REAL=$(awk '/rbac_perm_queries_real_total/{print $2}' metrics.txt | head -1)
-          SYN=$(awk '/rbac_perm_queries_synth_total/{print $2}' metrics.txt | head -1)
+          REAL=$(awk '/rbac_perm_queries_real_total/{print $2; exit}' metrics.txt)
+          SYN=$(awk '/rbac_perm_queries_synth_total/{print $2; exit}' metrics.txt)
           if [ -z "$REAL" ] || [ -z "$SYN" ]; then
             echo '::warning::RealShare counters absent'; exit 0; fi
           TOTAL=$((REAL + SYN))
@@ -520,8 +520,8 @@ jobs:
       - name: Assert STRICT cache performance
         run: |
           # Cache hit rate must be > 60% in strict mode
-          HITS=$(awk '/^rbac_perm_cache_hits_total\{[^}]*\} [0-9]+$/ {print $NF}' metrics.txt | head -1)
-          MISSES=$(awk '/^rbac_perm_cache_misses_total\{[^}]*\} [0-9]+$/ {print $NF}' metrics.txt | head -1)
+          HITS=$(awk '/^rbac_perm_cache_hits_total\{[^}]*\} [0-9]+$/ {print $NF; exit}' metrics.txt)
+          MISSES=$(awk '/^rbac_perm_cache_misses_total\{[^}]*\} [0-9]+$/ {print $NF; exit}' metrics.txt)
 
           echo "Cache hits: ${HITS:-0}"
           echo "Cache misses: ${MISSES:-0}"
@@ -545,7 +545,7 @@ jobs:
         run: |
           # Check approval metrics
           SUCCESS=$(awk '/^metasheet_approval_actions_total\{[^}]*result="success"[^}]*\} [0-9]+$/{sum+=$NF} END{print (sum==""?0:sum)}' metrics.txt)
-          CONFLICT=$(awk '/^metasheet_approval_conflict_total\{[^}]*\} [0-9]+$/{print $NF}' metrics.txt | head -1)
+          CONFLICT=$(awk '/^metasheet_approval_conflict_total\{[^}]*\} [0-9]+$/{print $NF; exit}' metrics.txt)
 
           echo "Successful approvals: ${SUCCESS:-0}"
           echo "Approval conflicts: ${CONFLICT:-0}"
