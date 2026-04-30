@@ -203,6 +203,10 @@ describe('K3 WISE setup helpers', () => {
       status: 'draft',
       idempotencyKeyFields: ['sourceId', 'revision'],
       options: {
+        target: {
+          autoSubmit: false,
+          autoAudit: false,
+        },
         erpFeedback: {
           objectId: 'standard_materials',
           keyField: '_integration_idempotency_key',
@@ -220,6 +224,10 @@ describe('K3 WISE setup helpers', () => {
       targetObject: 'bom',
       mode: 'manual',
       options: {
+        target: {
+          autoSubmit: false,
+          autoAudit: false,
+        },
         erpFeedback: {
           objectId: 'bom_cleanse',
         },
