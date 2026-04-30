@@ -2261,6 +2261,42 @@
           }
         }
       },
+      "MultitableViewType": {
+        "type": "string",
+        "enum": [
+          "grid",
+          "form",
+          "kanban",
+          "gallery",
+          "calendar",
+          "timeline",
+          "gantt",
+          "hierarchy"
+        ]
+      },
+      "MultitableFieldType": {
+        "type": "string",
+        "enum": [
+          "string",
+          "number",
+          "boolean",
+          "date",
+          "formula",
+          "select",
+          "multiSelect",
+          "link",
+          "lookup",
+          "rollup",
+          "attachment",
+          "currency",
+          "percent",
+          "rating",
+          "url",
+          "email",
+          "phone",
+          "longText"
+        ]
+      },
       "MultitableView": {
         "type": "object",
         "properties": {
@@ -2274,7 +2310,7 @@
             "type": "string"
           },
           "type": {
-            "type": "string"
+            "$ref": "#/components/schemas/MultitableViewType"
           },
           "filterInfo": {
             "type": "object",
@@ -2310,21 +2346,7 @@
             "type": "string"
           },
           "type": {
-            "type": "string",
-            "enum": [
-              "string",
-              "number",
-              "boolean",
-              "date",
-              "formula",
-              "select",
-              "multiSelect",
-              "link",
-              "lookup",
-              "rollup",
-              "attachment",
-              "longText"
-            ]
+            "$ref": "#/components/schemas/MultitableFieldType"
           },
           "property": {
             "type": "object",
@@ -17221,6 +17243,12 @@
                   ]
                 },
                 "description": "Whether the export hit the server-side row cap."
+              },
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Attachment filename header."
               }
             },
             "content": {
@@ -17671,21 +17699,7 @@
                     "type": "string"
                   },
                   "type": {
-                    "type": "string",
-                    "enum": [
-                      "string",
-                      "number",
-                      "boolean",
-                      "date",
-                      "formula",
-                      "select",
-                      "multiSelect",
-                      "link",
-                      "lookup",
-                      "rollup",
-                      "attachment",
-                      "longText"
-                    ]
+                    "$ref": "#/components/schemas/MultitableFieldType"
                   },
                   "property": {
                     "type": "object",
@@ -17784,21 +17798,7 @@
                     "type": "string"
                   },
                   "type": {
-                    "type": "string",
-                    "enum": [
-                      "string",
-                      "number",
-                      "boolean",
-                      "date",
-                      "formula",
-                      "select",
-                      "multiSelect",
-                      "link",
-                      "lookup",
-                      "rollup",
-                      "attachment",
-                      "longText"
-                    ]
+                    "$ref": "#/components/schemas/MultitableFieldType"
                   },
                   "property": {
                     "type": "object",
@@ -18008,7 +18008,7 @@
                     "type": "string"
                   },
                   "type": {
-                    "type": "string"
+                    "$ref": "#/components/schemas/MultitableViewType"
                   },
                   "filterInfo": {
                     "type": "object",
@@ -18112,7 +18112,7 @@
                     "type": "string"
                   },
                   "type": {
-                    "type": "string"
+                    "$ref": "#/components/schemas/MultitableViewType"
                   },
                   "filterInfo": {
                     "type": "object",

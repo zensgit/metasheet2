@@ -3,6 +3,7 @@
 ## Status
 
 - Baseline: `origin/main@08f4ff920`
+- Latest RC worktree base used by Phase 3: `origin/main@751cb8439` after clean rebase.
 - Goal: Feishu-parity RC for staging and internal trial.
 - Current phase: RC audit first, then P0 gaps.
 - Rule: every completed item must be marked `[x]` and linked to PR, commit, development MD, and verification MD.
@@ -96,56 +97,56 @@ Expected docs:
 ## Phase 2 - P0 Gap: Backend XLSX Route Layer
 
 - [x] Decide backend `xlsx` dependency policy.
-  - PR: pending
-  - Merge commit: pending
+  - PR: #1275
+  - Merge commit: `5c4130913`
   - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
   - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
   - Verification summary: `xlsx` added as explicit `@metasheet/core-backend` runtime dependency; lockfile updated.
 - [x] Add backend xlsx import adapter or optional dependency seam.
-  - PR: pending
-  - Merge commit: pending
+  - PR: #1275
+  - Merge commit: `5c4130913`
   - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
   - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
   - Verification summary: `xlsx-service.ts` added with parse/build/map helpers; 5 focused unit tests pass.
 - [x] Implement `POST /api/multitable/sheets/:sheetId/import-xlsx`.
-  - PR: pending
-  - Merge commit: pending
+  - PR: #1275
+  - Merge commit: `5c4130913`
   - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
   - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
   - Verification summary: multipart route accepts `file`, optional `sheetName`, and optional JSON `mapping`.
 - [x] Implement `GET /api/multitable/sheets/:sheetId/export-xlsx`.
-  - PR: pending
-  - Merge commit: pending
+  - PR: #1275
+  - Merge commit: `5c4130913`
   - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
   - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
   - Verification summary: route returns XLSX binary with content-disposition and truncation header.
 - [x] Ensure import writes go through the authoritative record write path.
-  - PR: pending
-  - Merge commit: pending
+  - PR: #1275
+  - Merge commit: `5c4130913`
   - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
   - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
   - Verification summary: import delegates row writes to `RecordService.createRecord()`.
 - [x] Ensure export respects current sheet/view permissions.
-  - PR: pending
-  - Merge commit: pending
+  - PR: #1275
+  - Merge commit: `5c4130913`
   - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
   - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
   - Verification summary: export requires `canRead` and `canExport`; optional `viewId` is scope-checked.
 - [x] Add backend tests for import mapping, invalid file, permission denial, and export.
-  - PR: pending
-  - Merge commit: pending
+  - PR: #1275
+  - Merge commit: `5c4130913`
   - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
   - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
   - Verification summary: `multitable-xlsx-routes.test.ts` covers import mapping, invalid input, permission denial, and export.
 - [x] Update OpenAPI source and generated dist.
-  - PR: pending
-  - Merge commit: pending
+  - PR: #1275
+  - Merge commit: `5c4130913`
   - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
   - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
   - Verification summary: OpenAPI source updated and generated dist refreshed.
 - [x] Mark frontend-only xlsx limitation as closed or explicitly narrowed.
-  - PR: pending
-  - Merge commit: pending
+  - PR: #1275
+  - Merge commit: `5c4130913`
   - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
   - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
   - Verification summary: limitation narrowed to frontend not yet wired to backend routes; backend capability exists.
@@ -157,12 +158,42 @@ Expected docs:
 
 ## Phase 3 - P0 Gap: OpenAPI / Contract Cleanup
 
-- [ ] Audit OpenAPI coverage for new field types.
-- [ ] Audit OpenAPI coverage for new view types: `gantt`, `hierarchy`.
-- [ ] Audit OpenAPI coverage for xlsx routes after Phase 2.
-- [ ] Regenerate and commit OpenAPI dist artifacts.
-- [ ] Run OpenAPI contract guard.
-- [ ] Add a verification doc listing schema additions and generated outputs.
+- [x] Audit OpenAPI coverage for new field types.
+  - PR: #1277
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-openapi-rc-contract-cleanup-development-20260430.md`
+  - Verification MD: `docs/development/multitable-openapi-rc-contract-cleanup-verification-20260430.md`
+  - Verification summary: `MultitableFieldType` now centralizes all runtime field types including `currency`, `percent`, `rating`, `url`, `email`, and `phone`.
+- [x] Audit OpenAPI coverage for new view types: `gantt`, `hierarchy`.
+  - PR: #1277
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-openapi-rc-contract-cleanup-development-20260430.md`
+  - Verification MD: `docs/development/multitable-openapi-rc-contract-cleanup-verification-20260430.md`
+  - Verification summary: `MultitableViewType` now enumerates `grid`, `form`, `kanban`, `gallery`, `calendar`, `timeline`, `gantt`, and `hierarchy`.
+- [x] Audit OpenAPI coverage for xlsx routes after Phase 2.
+  - PR: #1277
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-openapi-rc-contract-cleanup-development-20260430.md`
+  - Verification MD: `docs/development/multitable-openapi-rc-contract-cleanup-verification-20260430.md`
+  - Verification summary: parity guard checks import/export route presence and export response headers including `Content-Disposition`.
+- [x] Regenerate and commit OpenAPI dist artifacts.
+  - PR: #1277
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-openapi-rc-contract-cleanup-development-20260430.md`
+  - Verification MD: `docs/development/multitable-openapi-rc-contract-cleanup-verification-20260430.md`
+  - Verification summary: `packages/openapi/dist/{combined.openapi.yml,openapi.json,openapi.yaml}` regenerated.
+- [x] Run OpenAPI contract guard.
+  - PR: #1277
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-openapi-rc-contract-cleanup-development-20260430.md`
+  - Verification MD: `docs/development/multitable-openapi-rc-contract-cleanup-verification-20260430.md`
+  - Verification summary: `node --test scripts/ops/multitable-openapi-parity.test.mjs` passes.
+- [x] Add a verification doc listing schema additions and generated outputs.
+  - PR: #1277
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-openapi-rc-contract-cleanup-development-20260430.md`
+  - Verification MD: `docs/development/multitable-openapi-rc-contract-cleanup-verification-20260430.md`
+  - Verification summary: this Phase 3 dev/verification pair records implementation scope and validation commands.
 
 Expected docs:
 
