@@ -40,6 +40,14 @@ function createHealthServer(statusCode = 200, options = {}) {
       res.end(JSON.stringify({ ok: statusCode >= 200 && statusCode < 300 }))
       return
     }
+    if (req.method === 'GET' && req.url === '/api/auth/me') {
+      const authStatusCode = options.authStatusCode ?? 200
+      const authBody = options.authBody ?? { success: true, role: 'admin', plm: true }
+      res.statusCode = authStatusCode
+      res.setHeader('Content-Type', 'application/json')
+      res.end(JSON.stringify(authBody))
+      return
+    }
     res.statusCode = 404
     res.end('not found')
   })
@@ -126,9 +134,11 @@ test('dingtalk-p4-smoke-preflight passes with valid inputs and redacts secrets',
     assert.doesNotMatch(result.stdout, /secret-admin-token/)
     assert.doesNotMatch(result.stdout, /robot-secret-a/)
     assert.doesNotMatch(result.stdout, /SECabcdefghijklmnop12345678/)
-    assert.equal(server.requests.length, 1)
+    assert.equal(server.requests.length, 2)
     assert.equal(server.requests[0].url, '/health')
     assert.equal(server.requests[0].headers.authorization, undefined)
+    assert.equal(server.requests[1].url, '/api/auth/me')
+    assert.equal(server.requests[1].headers.authorization, 'Bearer secret-admin-token')
 
     const summaryText = readFileSync(path.join(outputDir, 'preflight-summary.json'), 'utf8')
     assert.doesNotMatch(summaryText, /secret-admin-token/)
@@ -146,6 +156,7 @@ test('dingtalk-p4-smoke-preflight passes with valid inputs and redacts secrets',
     const byId = new Map(summary.checks.map((check) => [check.id, check]))
     assert.equal(byId.get('local-tools-present').status, 'pass')
     assert.equal(byId.get('api-health').status, 'pass')
+    assert.equal(byId.get('auth-token-valid').status, 'pass')
     assert.equal(byId.get('person-smoke-input').status, 'pass')
     assert.equal(byId.get('manual-targets-declared').status, 'pass')
     assert.equal(summary.environment.authTokenPresent, true)
@@ -186,13 +197,61 @@ test('dingtalk-p4-smoke-preflight falls back to API-prefixed health JSON', async
     ])
 
     assert.equal(result.status, 0, result.stderr || result.stdout)
-    assert.deepEqual(server.requests.map((request) => request.url), ['/health', '/api/health'])
+    assert.deepEqual(server.requests.map((request) => request.url), ['/health', '/api/health', '/api/auth/me'])
 
     const summary = JSON.parse(readFileSync(path.join(outputDir, 'preflight-summary.json'), 'utf8'))
     const health = summary.checks.find((check) => check.id === 'api-health')
     assert.equal(summary.overallStatus, 'pass')
     assert.equal(health.status, 'pass')
     assert.match(health.details.url, /\/api\/health$/)
+    assert.equal(summary.checks.find((check) => check.id === 'auth-token-valid').status, 'pass')
+  } finally {
+    await server.close()
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-smoke-preflight fails invalid auth token before remote smoke', async () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'preflight')
+  const server = createHealthServer(200, {
+    authStatusCode: 401,
+    authBody: { success: false, error: { message: 'Invalid token for secret-admin-token' } },
+  })
+
+  try {
+    const apiBase = await server.listen()
+    const result = await runScriptAsync([
+      '--api-base',
+      apiBase,
+      '--web-base',
+      'https://metasheet.example.test',
+      '--auth-token',
+      'secret-admin-token',
+      '--group-a-webhook',
+      'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-a',
+      '--group-b-webhook',
+      'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-b',
+      '--allowed-user',
+      'user_authorized',
+      '--output-dir',
+      outputDir,
+    ])
+
+    assert.equal(result.status, 1)
+    assert.doesNotMatch(result.stdout, /secret-admin-token/)
+    assert.doesNotMatch(result.stderr, /secret-admin-token/)
+    assert.deepEqual(server.requests.map((request) => request.url), ['/health', '/api/auth/me'])
+
+    const summaryText = readFileSync(path.join(outputDir, 'preflight-summary.json'), 'utf8')
+    assert.doesNotMatch(summaryText, /secret-admin-token/)
+    assert.match(summaryText, /<redacted>/)
+    const summary = JSON.parse(summaryText)
+    const authCheck = summary.checks.find((check) => check.id === 'auth-token-valid')
+    assert.equal(summary.overallStatus, 'fail')
+    assert.equal(authCheck.status, 'fail')
+    assert.equal(authCheck.details.statusCode, 401)
+    assert.match(authCheck.details.error, /Invalid token/)
   } finally {
     await server.close()
     rmSync(tmpDir, { recursive: true, force: true })
