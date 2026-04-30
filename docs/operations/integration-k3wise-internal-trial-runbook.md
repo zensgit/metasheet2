@@ -50,6 +50,11 @@ Token resolution order:
 The manual workflow fails when `require_auth=true` and token resolution or
 authenticated checks fail.
 
+When token resolution fails, the workflow still runs the smoke script without a
+bearer token so it can upload a failure evidence artifact. Treat that artifact
+as a blocked signoff record, not as a passed smoke. The final workflow gate
+still fails on the token resolver return code.
+
 ## CLI Path
 
 ```bash
