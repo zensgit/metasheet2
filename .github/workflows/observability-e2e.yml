@@ -223,9 +223,9 @@ jobs:
       - name: Assert RBAC metrics activity (relaxed)
         run: |
           # Extract numeric values only (skip HELP/TYPE lines)
-          HITS=$(awk '/^rbac_perm_cache_hits_total [0-9]/{print $2}' /tmp/metrics.txt | head -1)
+          HITS=$(awk '/^rbac_perm_cache_hits_total [0-9]/{print $2; exit}' /tmp/metrics.txt)
           # Note: The metric name is rbac_perm_cache_miss_total (no 's'), not misses
-          MISS=$(awk '/^rbac_perm_cache_miss_total [0-9]/{print $2}' /tmp/metrics.txt | head -1)
+          MISS=$(awk '/^rbac_perm_cache_miss_total [0-9]/{print $2; exit}' /tmp/metrics.txt)
 
           HITS=${HITS:-0}
           MISS=${MISS:-0}
@@ -250,8 +250,8 @@ jobs:
 
       - name: Validate RealShare presence (non-blocking)
         run: |
-          REAL=$(awk '/rbac_perm_queries_real_total/{print $2}' /tmp/metrics.txt | head -1)
-          SYN=$(awk '/rbac_perm_queries_synth_total/{print $2}' /tmp/metrics.txt | head -1)
+          REAL=$(awk '/rbac_perm_queries_real_total/{print $2; exit}' /tmp/metrics.txt)
+          SYN=$(awk '/rbac_perm_queries_synth_total/{print $2; exit}' /tmp/metrics.txt)
           if [ -z "$REAL" ] || [ -z "$SYN" ]; then
             echo '::warning::RealShare counters absent'; exit 0; fi
           TOTAL=$((REAL + SYN))
