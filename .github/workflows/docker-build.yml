@@ -467,10 +467,10 @@ jobs:
           else
             preflight_block="$(
               awk '
-                /^=== ATTENDANCE PREFLIGHT START ===$/ { printing=1; next }
+                /^=== ATTENDANCE PREFLIGHT START ===$/ { printing=1; count=0; next }
                 /^=== ATTENDANCE PREFLIGHT END ===$/ { printing=0 }
-                printing { print }
-              ' "$deploy_log" | head -n 120
+                printing && count < 120 { print; count++ }
+              ' "$deploy_log"
             )"
 
             if [[ -z "${preflight_block}" ]]; then
@@ -507,11 +507,11 @@ jobs:
               local start="$1"
               local end="$2"
               local max_lines="$3"
-              awk -v start="$start" -v end="$end" '
-                $0 == start { printing=1; next }
+              awk -v start="$start" -v end="$end" -v max_lines="$max_lines" '
+                $0 == start { printing=1; count=0; next }
                 $0 == end { printing=0 }
-                printing { print }
-              ' "$deploy_log" | head -n "$max_lines"
+                printing && count < max_lines { print; count++ }
+              ' "$deploy_log"
             }
 
             deploy_stage="UNKNOWN"
