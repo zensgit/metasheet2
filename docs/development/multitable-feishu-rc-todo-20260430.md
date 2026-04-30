@@ -2,7 +2,7 @@
 
 ## Status
 
-- Baseline: `origin/main@0e059ce99`
+- Baseline: `origin/main@08f4ff920`
 - Goal: Feishu-parity RC for staging and internal trial.
 - Current phase: RC audit first, then P0 gaps.
 - Rule: every completed item must be marked `[x]` and linked to PR, commit, development MD, and verification MD.
@@ -32,19 +32,44 @@ Do not mark an item done if:
 ## Phase 0 - Worktree Hygiene
 
 - [x] Create this master TODO MD and companion development/verification MDs.
-  - PR: pending
-  - Merge commit: pending
+  - PR: #1270
+  - Merge commit: `08f4ff920`
   - Development MD: `docs/development/multitable-feishu-rc-development-20260430.md`
   - Verification MD: `docs/development/multitable-feishu-rc-verification-20260430.md`
-  - Verification summary: docs-only local validation pending PR CI.
-- [ ] Confirm root worktree dirty state is unrelated to this RC stream.
-- [ ] Create all RC work in clean `/tmp` or `.worktrees` branches from `origin/main`.
-- [ ] Do not touch DingTalk/public-form dirty files unless the task explicitly requires it.
+  - Verification summary: docs-only PR CI passed and merged.
+- [x] Confirm root worktree dirty state is unrelated to this RC stream.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-audit-development-20260430.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-audit-verification-20260430.md`
+  - Verification summary: root status reviewed; dirty files are public-form/DingTalk/docs paths outside this RC audit worktree.
+- [x] Create all RC work in clean `/tmp` or `.worktrees` branches from `origin/main`.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-audit-development-20260430.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-audit-verification-20260430.md`
+  - Verification summary: Phase 1 worktree created at `/tmp/ms2-feishu-rc-audit-20260430` from `origin/main@08f4ff920`.
+- [x] Do not touch DingTalk/public-form dirty files unless the task explicitly requires it.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-audit-development-20260430.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-audit-verification-20260430.md`
+  - Verification summary: Phase 1 changes are docs-only under `docs/development`.
 
 ## Phase 1 - RC Audit + Staging Smoke
 
-- [ ] Create RC audit checklist for current merged multitable capabilities.
-- [ ] Create staging smoke checklist for manual tester.
+- [x] Create RC audit checklist for current merged multitable capabilities.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-audit-development-20260430.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-audit-verification-20260430.md`
+  - Verification summary: checklist added at `docs/development/multitable-feishu-rc-audit-checklist-20260430.md`.
+- [x] Create staging smoke checklist for manual tester.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-audit-development-20260430.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-audit-verification-20260430.md`
+  - Verification summary: checklist added at `docs/development/multitable-feishu-staging-smoke-checklist-20260430.md`.
 - [ ] Verify staging deployment target version and document exact commit.
 - [ ] Smoke test basic multitable sheet lifecycle: create base, sheet, view, fields, records.
 - [ ] Smoke test xlsx frontend import/export with a real file.
@@ -56,7 +81,12 @@ Do not mark an item done if:
 - [ ] Smoke test Hierarchy view rendering and child creation.
 - [ ] Smoke test public form submit path.
 - [ ] Smoke test automation send_email save/execute path.
-- [ ] Produce RC audit result MD with P0/P1/P2 defects.
+- [x] Produce RC audit result MD with P0/P1/P2 defects.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-audit-development-20260430.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-audit-verification-20260430.md`
+  - Verification summary: result added at `docs/development/multitable-feishu-rc-audit-result-20260430.md`; staging-only smoke items remain unchecked.
 
 Expected docs:
 
