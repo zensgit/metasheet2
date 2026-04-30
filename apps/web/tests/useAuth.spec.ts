@@ -105,6 +105,30 @@ describe('useAuth', () => {
     expect(hasAdminAccess()).toBe(true)
   })
 
+  it('matches integration permissions with backend-compatible hierarchy', () => {
+    store.user_permissions = JSON.stringify(['integration:write'])
+    const { hasPermission } = useAuth()
+
+    expect(hasPermission('integration:read')).toBe(true)
+    expect(hasPermission('integration:write')).toBe(true)
+    expect(hasPermission('integration:admin')).toBe(false)
+    expect(hasPermission('attendance:read')).toBe(false)
+  })
+
+  it('allows resource admin and role admin permissions through the shared helper', () => {
+    store.user_permissions = JSON.stringify(['integration:admin'])
+    const { hasPermission, clearStoredUserSnapshot } = useAuth()
+
+    expect(hasPermission('integration:read')).toBe(true)
+    expect(hasPermission('integration:write')).toBe(true)
+    expect(hasPermission('integration:admin')).toBe(true)
+
+    clearStoredUserSnapshot()
+    store.user_roles = JSON.stringify(['admin'])
+
+    expect(hasPermission('integration:write')).toBe(true)
+  })
+
   it('bootstraps session only once for the same token and reuses the cached payload', async () => {
     store.jwt = 'stable-token'
     store.tenantId = 'tenant_42'
