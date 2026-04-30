@@ -67,6 +67,8 @@ For internal staging signoff, the next non-customer blocker is deployment
 evidence:
 
 - Run the K3 postdeploy smoke with authenticated checks enabled.
+- Require the smoke evidence to show `signoff.internalTrial=pass`,
+  `authenticated=true`, and `summary.fail=0`.
 - Ensure the target tenant has integration permissions seeded for the test
   operator.
 - Treat public-only smoke as insufficient for internal trial signoff.

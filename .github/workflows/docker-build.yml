@@ -612,6 +612,7 @@ jobs:
           k3_smoke_json="output/deploy/k3wise-postdeploy-smoke/integration-k3wise-postdeploy-smoke.json"
           node scripts/ops/integration-k3wise-postdeploy-summary.mjs \
             --input "$k3_smoke_json" \
+            --require-auth-signoff \
             --missing-ok >> "$GITHUB_STEP_SUMMARY"
 
           echo "" >> "$GITHUB_STEP_SUMMARY"

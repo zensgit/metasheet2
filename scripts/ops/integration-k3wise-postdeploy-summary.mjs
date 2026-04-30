@@ -20,6 +20,9 @@ smoke evidence JSON file.
 Options:
   --input <path>     Evidence JSON path
   --missing-ok       Render NOT RUN and exit 0 when the evidence file is missing
+  --require-auth-signoff
+                      Render internal-trial signoff as blocked unless the smoke
+                      evidence contains an authenticated PASS
   --help             Show this help
 `)
 }
@@ -36,6 +39,7 @@ function parseArgs(argv = process.argv.slice(2)) {
   const opts = {
     input: '',
     missingOk: false,
+    requireAuthSignoff: false,
     help: false,
   }
 
@@ -48,6 +52,9 @@ function parseArgs(argv = process.argv.slice(2)) {
         break
       case '--missing-ok':
         opts.missingOk = true
+        break
+      case '--require-auth-signoff':
+        opts.requireAuthSignoff = true
         break
       case '--help':
       case '-h':
@@ -65,12 +72,43 @@ function parseArgs(argv = process.argv.slice(2)) {
   return opts
 }
 
-function renderMissingSummary(inputPath) {
-  return [
+function renderMissingSummary(inputPath, { requireAuthSignoff = false } = {}) {
+  const lines = []
+  if (requireAuthSignoff) {
+    lines.push('- Internal trial signoff: **BLOCKED**')
+    lines.push('- Signoff reason: evidence file missing; authenticated smoke did not run')
+  }
+  lines.push(
     '- Status: **NOT RUN**',
     `- Reason: evidence file missing at \`${inputPath || 'unknown'}\``,
     '',
-  ].join('\n')
+  )
+  return lines.join('\n')
+}
+
+function inferInternalTrialSignoff(evidence) {
+  if (evidence?.signoff?.internalTrial === 'pass') {
+    return { status: 'PASS', reason: evidence.signoff.reason || 'authenticated smoke passed' }
+  }
+  if (evidence?.signoff?.internalTrial === 'blocked') {
+    return { status: 'BLOCKED', reason: evidence.signoff.reason || 'authenticated smoke did not pass' }
+  }
+  if (evidence?.ok && evidence?.authenticated) {
+    return { status: 'PASS', reason: 'authenticated smoke passed' }
+  }
+  if (!evidence?.authenticated) {
+    return { status: 'BLOCKED', reason: 'authenticated checks did not run' }
+  }
+  return { status: 'BLOCKED', reason: 'one or more smoke checks failed' }
+}
+
+function renderSignoffLines(evidence, { requireAuthSignoff = false } = {}) {
+  if (!requireAuthSignoff) return []
+  const signoff = inferInternalTrialSignoff(evidence)
+  return [
+    `- Internal trial signoff: **${signoff.status}**`,
+    `- Signoff reason: ${signoff.reason}`,
+  ]
 }
 
 function formatDetailValue(value) {
@@ -102,11 +140,12 @@ function summarizeCheckDetails(check) {
   return lines
 }
 
-function renderEvidenceSummary(evidence) {
+function renderEvidenceSummary(evidence, options = {}) {
   const summary = evidence && typeof evidence === 'object' ? evidence.summary || {} : {}
   const checks = Array.isArray(evidence?.checks) ? evidence.checks : []
   const status = evidence?.ok ? 'PASS' : 'FAIL'
   const lines = [
+    ...renderSignoffLines(evidence, options),
     `- Status: **${status}**`,
     `- Base URL: \`${evidence?.baseUrl || 'unknown'}\``,
     `- Authenticated checks: \`${evidence?.authenticated ? 'yes' : 'no'}\``,
@@ -147,11 +186,11 @@ async function runCli(argv = process.argv.slice(2)) {
   const inputPath = path.resolve(opts.input)
   try {
     const evidence = await readEvidence(inputPath)
-    console.log(renderEvidenceSummary(evidence))
+    console.log(renderEvidenceSummary(evidence, { requireAuthSignoff: opts.requireAuthSignoff }))
     return 0
   } catch (error) {
     if (opts.missingOk && error && error.code === 'ENOENT') {
-      console.log(renderMissingSummary(opts.input))
+      console.log(renderMissingSummary(opts.input, { requireAuthSignoff: opts.requireAuthSignoff }))
       return 0
     }
     throw error
@@ -174,9 +213,11 @@ if (entryPath && import.meta.url === entryPath) {
 export {
   K3WisePostdeploySummaryError,
   formatDetailValue,
+  inferInternalTrialSignoff,
   parseArgs,
   renderEvidenceSummary,
   renderMissingSummary,
+  renderSignoffLines,
   summarizeCheckDetails,
   runCli,
 }
