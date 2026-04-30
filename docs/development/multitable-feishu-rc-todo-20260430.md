@@ -235,14 +235,14 @@ Expected docs:
   - Verification MD: `docs/development/multitable-system-fields-backend-verification-20260430.md`
   - Verification summary: `isFieldAlwaysReadOnly()` treats system field types as readonly, reusing existing write guards.
 - [x] Add frontend renderer/editor behavior: render-only for readonly system fields.
-  - PR: pending
-  - Merge commit: pending
+  - PR: #1283
+  - Merge commit: `8174f26f9`
   - Development MD: `docs/development/multitable-system-fields-frontend-development-20260430.md`
   - Verification MD: `docs/development/multitable-system-fields-frontend-verification-20260430.md`
   - Verification summary: grid, cell editor, record drawer, and form view treat system fields as formatted read-only values.
 - [x] Add field manager support for creating/configuring allowed system fields.
-  - PR: pending
-  - Merge commit: pending
+  - PR: #1283
+  - Merge commit: `8174f26f9`
   - Development MD: `docs/development/multitable-system-fields-frontend-development-20260430.md`
   - Verification MD: `docs/development/multitable-system-fields-frontend-verification-20260430.md`
   - Verification summary: field manager exposes `createdTime`, `modifiedTime`, `createdBy`, and `modifiedBy` as createable no-config fields.
@@ -267,18 +267,53 @@ Expected docs:
 
 ## Phase 5 - P1 Gap: Record Version History
 
-- [ ] Add record revision persistence table.
-- [ ] Record revision after successful authoritative writes.
-- [ ] Capture actor, source, version, changed fields, and timestamp.
-- [ ] Add API to list record history.
-- [ ] Add record drawer History tab.
-- [ ] Add tests for single-field patch, multi-field patch, actor attribution, and permission denial.
-- [ ] Document retention default: no cleanup in v1.
+- [x] Add record revision persistence table.
+  - PR: local branch `codex/multitable-record-history-20260430`
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-record-history-development-20260430.md`
+  - Verification MD: `docs/development/multitable-record-history-verification-20260430.md`
+  - Verification summary: migration creates `meta_record_revisions` with revision indexes.
+- [x] Record revision after successful authoritative writes.
+  - PR: local branch `codex/multitable-record-history-20260430`
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-record-history-development-20260430.md`
+  - Verification MD: `docs/development/multitable-record-history-verification-20260430.md`
+  - Verification summary: `RecordService` create/patch/delete and `RecordWriteService.patchRecords()` persist revisions in the same transaction.
+- [x] Capture actor, source, version, changed fields, and timestamp.
+  - PR: local branch `codex/multitable-record-history-20260430`
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-record-history-development-20260430.md`
+  - Verification MD: `docs/development/multitable-record-history-verification-20260430.md`
+  - Verification summary: revision rows include actor, source, action, version, changed field ids, patch, snapshot, and server timestamp.
+- [x] Add API to list record history.
+  - PR: local branch `codex/multitable-record-history-20260430`
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-record-history-development-20260430.md`
+  - Verification MD: `docs/development/multitable-record-history-verification-20260430.md`
+  - Verification summary: `GET /api/multitable/sheets/:sheetId/records/:recordId/history` added with auth/read checks; OpenAPI source and dist regenerated.
+- [x] Add record drawer History tab.
+  - PR: local branch `codex/multitable-record-history-20260430`
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-record-history-development-20260430.md`
+  - Verification MD: `docs/development/multitable-record-history-verification-20260430.md`
+  - Verification summary: drawer adds lazy-loaded `Details` and `History` tabs.
+- [x] Add tests for single-field patch, multi-field patch, actor attribution, and permission denial.
+  - PR: local branch `codex/multitable-record-history-20260430`
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-record-history-development-20260430.md`
+  - Verification MD: `docs/development/multitable-record-history-verification-20260430.md`
+  - Verification summary: focused backend/frontend tests pass; DB route permission integration remains a documented follow-up.
+- [x] Document retention default: no cleanup in v1.
+  - PR: local branch `codex/multitable-record-history-20260430`
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-record-history-development-20260430.md`
+  - Verification MD: `docs/development/multitable-record-history-verification-20260430.md`
+  - Verification summary: retention default documented as indefinite/no cleanup in v1.
 
 Expected docs:
 
-- `docs/development/multitable-record-history-development-20260502.md`
-- `docs/development/multitable-record-history-verification-20260502.md`
+- `docs/development/multitable-record-history-development-20260430.md`
+- `docs/development/multitable-record-history-verification-20260430.md`
 
 ## Phase 6 - P1 Gap: Record Subscription Notifications
 

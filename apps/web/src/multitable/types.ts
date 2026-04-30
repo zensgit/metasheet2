@@ -198,6 +198,22 @@ export interface MetaRecordContext {
   attachmentSummaries?: Record<string, MetaAttachment[]>
 }
 
+export type MetaRecordRevisionAction = 'create' | 'update' | 'delete'
+
+export interface MetaRecordRevision {
+  id: string
+  sheetId: string
+  recordId: string
+  version: number
+  action: MetaRecordRevisionAction
+  source: string
+  actorId: string | null
+  changedFieldIds: string[]
+  patch: Record<string, unknown>
+  snapshot: Record<string, unknown> | null
+  createdAt: string
+}
+
 // --- Form context (GET /api/multitable/form-context) ---
 export interface MetaFormContext {
   mode: 'form'

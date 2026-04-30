@@ -528,6 +528,48 @@ describe('MultitableApiClient', () => {
     }))
   })
 
+  it('loads and normalizes record history entries', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      data: {
+        items: [
+          {
+            id: 'rev_1',
+            sheetId: 'sheet history',
+            recordId: 'rec history',
+            version: 3,
+            action: 'update',
+            source: 'rest',
+            actorId: 'user_1',
+            changedFieldIds: ['fld_title'],
+            patch: { fld_title: 'Updated' },
+            snapshot: { fld_title: 'Updated' },
+            createdAt: '2026-04-30T09:00:00.000Z',
+          },
+          { id: 'bad' },
+        ],
+      },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    await expect(client.listRecordHistory('sheet history', 'rec history', { limit: 25 })).resolves.toEqual([
+      {
+        id: 'rev_1',
+        sheetId: 'sheet history',
+        recordId: 'rec history',
+        version: 3,
+        action: 'update',
+        source: 'rest',
+        actorId: 'user_1',
+        changedFieldIds: ['fld_title'],
+        patch: { fld_title: 'Updated' },
+        snapshot: { fld_title: 'Updated' },
+        createdAt: '2026-04-30T09:00:00.000Z',
+      },
+    ])
+    expect(fetchFn).toHaveBeenCalledWith('/api/multitable/sheets/sheet%20history/records/rec%20history/history?limit=25')
+  })
+
   it('parses Retry-After seconds and http-date values', () => {
     expect(parseRetryAfterMs('2')).toBe(2000)
     expect(parseRetryAfterMs('Wed, 25 Mar 2026 12:00:05 GMT')).toBe(5000)

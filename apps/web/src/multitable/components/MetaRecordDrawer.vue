@@ -25,6 +25,25 @@
       </div>
     </div>
     <div v-if="record" class="meta-record-drawer__body">
+      <div class="meta-record-drawer__tabs" role="tablist" aria-label="Record drawer sections">
+        <button
+          class="meta-record-drawer__tab"
+          :class="{ 'meta-record-drawer__tab--active': activeTab === 'details' }"
+          type="button"
+          role="tab"
+          :aria-selected="activeTab === 'details'"
+          @click="activeTab = 'details'"
+        >Details</button>
+        <button
+          class="meta-record-drawer__tab"
+          :class="{ 'meta-record-drawer__tab--active': activeTab === 'history' }"
+          type="button"
+          role="tab"
+          :aria-selected="activeTab === 'history'"
+          @click="activeTab = 'history'"
+        >History</button>
+      </div>
+      <div v-if="activeTab === 'details'" class="meta-record-drawer__fields">
       <div v-for="field in visibleFields" :key="field.id" class="meta-record-drawer__field">
         <div class="meta-record-drawer__field-header">
           <label class="meta-record-drawer__label" :for="`drawer_field_${field.id}`">{{ field.name }}</label>
@@ -136,6 +155,29 @@
           <div v-if="field.type === 'link' && linkPreview(field.id)" class="meta-record-drawer__link-summary">{{ linkPreview(field.id) }}</div>
         </div>
       </div>
+      </div>
+      <div v-else class="meta-record-drawer__history">
+        <div v-if="historyLoading" class="meta-record-drawer__history-state">Loading history...</div>
+        <div v-else-if="historyError" class="meta-record-drawer__history-state meta-record-drawer__history-state--error">{{ historyError }}</div>
+        <div v-else-if="!canLoadHistory" class="meta-record-drawer__history-state">History unavailable for this record.</div>
+        <div v-else-if="historyItems.length === 0" class="meta-record-drawer__history-state">No history yet.</div>
+        <ol v-else class="meta-record-drawer__history-list">
+          <li v-for="item in historyItems" :key="item.id" class="meta-record-drawer__history-item">
+            <div class="meta-record-drawer__history-main">
+              <span class="meta-record-drawer__history-action">{{ historyActionLabel(item.action) }}</span>
+              <span class="meta-record-drawer__history-version">v{{ item.version }}</span>
+            </div>
+            <div class="meta-record-drawer__history-meta">
+              <span>{{ formatHistoryTime(item.createdAt) }}</span>
+              <span v-if="item.actorId">by {{ item.actorId }}</span>
+              <span>{{ item.source }}</span>
+            </div>
+            <div v-if="item.changedFieldIds.length" class="meta-record-drawer__history-fields">
+              {{ historyFieldLabels(item.changedFieldIds) }}
+            </div>
+          </li>
+        </ol>
+      </div>
     </div>
     <div v-else class="meta-record-drawer__empty">No record selected</div>
     <MetaRecordPermissionManager
@@ -161,6 +203,7 @@ import type {
   MetaFieldPermission,
   MetaField,
   MetaRecord,
+  MetaRecordRevision,
   MetaRowActions,
 } from '../types'
 import type { MultitableApiClient } from '../api/client'
@@ -213,6 +256,11 @@ const emit = defineEmits<{
 }>()
 
 const showRecordPermissions = ref(false)
+const activeTab = ref<'details' | 'history'>('details')
+const historyItems = ref<MetaRecordRevision[]>([])
+const historyLoading = ref(false)
+const historyError = ref('')
+let historyRequestId = 0
 
 const attachmentActivity = ref<Record<string, 'uploading' | 'removing' | 'clearing'>>({})
 const attachmentErrors = ref<Record<string, string>>({})
@@ -222,7 +270,17 @@ watch(() => props.record, () => {
   attachmentActivity.value = {}
   attachmentErrors.value = {}
   localAttachmentSummaries.value = {}
+  historyItems.value = []
+  historyError.value = ''
 })
+
+watch(
+  [() => activeTab.value, () => props.visible, () => props.record?.id, () => props.sheetId, () => props.apiClient],
+  () => {
+    if (activeTab.value === 'history') void loadRecordHistory()
+  },
+  { immediate: false },
+)
 
 const currentRecordIndex = computed(() => {
   if (!props.record || !props.recordIds.length) return -1
@@ -230,6 +288,8 @@ const currentRecordIndex = computed(() => {
 })
 
 const visibleFields = computed(() => props.fields.filter((field) => props.fieldPermissions?.[field.id]?.visible !== false))
+const fieldLabelById = computed(() => new Map(props.fields.map((field) => [field.id, field.name])))
+const canLoadHistory = computed(() => !!props.apiClient && !!props.sheetId && !!props.record?.id)
 const resolvedCanComment = computed(() => props.rowActions?.canComment ?? props.canComment)
 const resolvedCanDelete = computed(() => props.rowActions?.canDelete ?? props.canDelete)
 const drawerCommentAffordance = computed(() => resolveRecordCommentAffordance(props.commentPresence))
@@ -261,6 +321,51 @@ function navigatePrev() {
 function navigateNext() {
   const idx = currentRecordIndex.value
   if (idx >= 0 && idx < props.recordIds.length - 1) emit('navigate', props.recordIds[idx + 1])
+}
+
+async function loadRecordHistory() {
+  const apiClient = props.apiClient
+  const sheetId = props.sheetId
+  const recordId = props.record?.id
+  if (!apiClient || !sheetId || !recordId) {
+    historyItems.value = []
+    historyLoading.value = false
+    historyError.value = ''
+    return
+  }
+  const requestId = ++historyRequestId
+  historyLoading.value = true
+  historyError.value = ''
+  try {
+    const items = await apiClient.listRecordHistory(sheetId, recordId, { limit: 50 })
+    if (requestId !== historyRequestId) return
+    historyItems.value = items
+  } catch (error: any) {
+    if (requestId !== historyRequestId) return
+    historyItems.value = []
+    historyError.value = error?.message ?? 'Failed to load history'
+  } finally {
+    if (requestId === historyRequestId) historyLoading.value = false
+  }
+}
+
+function historyActionLabel(action: MetaRecordRevision['action']): string {
+  if (action === 'create') return 'Created'
+  if (action === 'delete') return 'Deleted'
+  return 'Updated'
+}
+
+function historyFieldLabels(fieldIds: string[]): string {
+  return fieldIds
+    .map((fieldId) => fieldLabelById.value.get(fieldId) ?? fieldId)
+    .join(', ')
+}
+
+function formatHistoryTime(value: string): string {
+  if (!value) return ''
+  const timestamp = Date.parse(value)
+  if (Number.isNaN(timestamp)) return value
+  return new Date(timestamp).toLocaleString()
 }
 
 function formatValue(field: MetaField, v: unknown): string {
@@ -497,6 +602,9 @@ function attachmentAllowsMultiple(field: MetaField): boolean {
 .meta-record-drawer__nav-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 .meta-record-drawer__nav-pos { font-size: 11px; color: #999; min-width: 36px; text-align: center; }
 .meta-record-drawer__body { padding: 12px 16px; flex: 1; }
+.meta-record-drawer__tabs { display: inline-flex; gap: 4px; padding: 3px; margin-bottom: 14px; border: 1px solid #e5e7eb; border-radius: 999px; background: #f8fafc; }
+.meta-record-drawer__tab { min-width: 76px; padding: 5px 12px; border: none; border-radius: 999px; background: transparent; color: #64748b; cursor: pointer; font-size: 12px; font-weight: 600; }
+.meta-record-drawer__tab--active { background: #111827; color: #fff; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.16); }
 .meta-record-drawer__field { margin-bottom: 14px; }
 .meta-record-drawer__field-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
 .meta-record-drawer__label { display: block; font-size: 12px; color: #999; }
@@ -523,4 +631,13 @@ function attachmentAllowsMultiple(field: MetaField): boolean {
 .meta-record-drawer__error { color: #f56c6c; font-size: 12px; }
 .meta-record-drawer__text { font-size: 13px; color: #333; white-space: pre-wrap; word-break: break-word; }
 .meta-record-drawer__empty { padding: 32px; text-align: center; color: #999; }
+.meta-record-drawer__history-state { padding: 18px 12px; border: 1px dashed #d8e1ee; border-radius: 8px; color: #64748b; font-size: 13px; text-align: center; }
+.meta-record-drawer__history-state--error { border-color: #fecaca; color: #b91c1c; background: #fef2f2; }
+.meta-record-drawer__history-list { display: flex; flex-direction: column; gap: 10px; padding: 0; margin: 0; list-style: none; }
+.meta-record-drawer__history-item { padding: 10px 12px; border: 1px solid #e5e7eb; border-radius: 10px; background: #fff; }
+.meta-record-drawer__history-main { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 5px; }
+.meta-record-drawer__history-action { font-size: 13px; font-weight: 700; color: #111827; }
+.meta-record-drawer__history-version { font-size: 11px; font-weight: 700; color: #2563eb; background: #eff6ff; border-radius: 999px; padding: 2px 7px; }
+.meta-record-drawer__history-meta { display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; color: #64748b; }
+.meta-record-drawer__history-fields { margin-top: 8px; font-size: 12px; color: #374151; word-break: break-word; }
 </style>
