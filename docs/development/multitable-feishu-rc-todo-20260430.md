@@ -206,31 +206,31 @@ Expected docs:
   - Blocked: not included in backend seam slice because stable auto-number requires persistent sequence allocation; do not ship a row-index placeholder.
 - [x] Add `createdTime` field type mapped to record `created_at`.
   - PR: #1280
-  - Merge commit: pending
+  - Merge commit: c45da32c1
   - Development MD: `docs/development/multitable-system-fields-backend-development-20260430.md`
   - Verification MD: `docs/development/multitable-system-fields-backend-verification-20260430.md`
   - Verification summary: query service injects `createdTime` from `meta_records.created_at`.
 - [x] Add `modifiedTime` field type mapped to record `updated_at`.
   - PR: #1280
-  - Merge commit: pending
+  - Merge commit: c45da32c1
   - Development MD: `docs/development/multitable-system-fields-backend-development-20260430.md`
   - Verification MD: `docs/development/multitable-system-fields-backend-verification-20260430.md`
   - Verification summary: query service injects `modifiedTime` from `meta_records.updated_at`.
 - [x] Add `createdBy` field type mapped to record `created_by`.
   - PR: #1280
-  - Merge commit: pending
+  - Merge commit: c45da32c1
   - Development MD: `docs/development/multitable-system-fields-backend-development-20260430.md`
   - Verification MD: `docs/development/multitable-system-fields-backend-verification-20260430.md`
   - Verification summary: query service injects `createdBy` from `meta_records.created_by`.
 - [x] Add `modifiedBy` storage if missing, then expose `modifiedBy`.
   - PR: #1280
-  - Merge commit: pending
+  - Merge commit: c45da32c1
   - Development MD: `docs/development/multitable-system-fields-backend-development-20260430.md`
   - Verification MD: `docs/development/multitable-system-fields-backend-verification-20260430.md`
   - Verification summary: migration adds `meta_records.modified_by`; record write paths set it from the actor and query service injects `modifiedBy`.
 - [x] Make all system fields readonly from normal patch/create payloads.
   - PR: #1280
-  - Merge commit: pending
+  - Merge commit: c45da32c1
   - Development MD: `docs/development/multitable-system-fields-backend-development-20260430.md`
   - Verification MD: `docs/development/multitable-system-fields-backend-verification-20260430.md`
   - Verification summary: `isFieldAlwaysReadOnly()` treats system field types as readonly, reusing existing write guards.
@@ -241,7 +241,7 @@ Expected docs:
   - Remaining: frontend render/editor tests and sorting/filtering behavior tests after the UI slice.
 - [x] Update OpenAPI source and generated dist.
   - PR: #1280
-  - Merge commit: pending
+  - Merge commit: c45da32c1
   - Development MD: `docs/development/multitable-system-fields-backend-development-20260430.md`
   - Verification MD: `docs/development/multitable-system-fields-backend-verification-20260430.md`
   - Verification summary: OpenAPI field type enum and generated dist now include system field types.
