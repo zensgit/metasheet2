@@ -249,7 +249,7 @@ const SELFTEST_SECRET_CHECKS = [
     command: [
       'node',
       '-e',
-      "console.log('Bearer abcdefghijklmnopqrstuvwxyz1234567890 access_token=0123456789abcdef0123456789abcdef SECabcdefghijklmnop12345678 publicToken=public-0123456789')",
+      "console.log('Bearer abcdefghijklmnopqrstuvwxyz1234567890 access_token=0123456789abcdef0123456789abcdef SECabcdefghijklmnop12345678 publicToken=public-0123456789 DINGTALK_CLIENT_SECRET = ' + 'zyxwvutsrqponml' + 'kjihgfedcba123456')",
     ],
   },
 ]
@@ -377,7 +377,7 @@ function redactString(value) {
     .replace(/(access_token=)[^&\s)]+/gi, '$1<redacted>')
     .replace(/(publicToken=)[^&\s)]+/gi, '$1<redacted>')
     .replace(/([?&](?:sign|timestamp)=)[^&\s)]+/gi, '$1<redacted>')
-    .replace(/((?:client_secret|DINGTALK_CLIENT_SECRET|DINGTALK_STATE_SECRET)=)[^\s&]+/gi, '$1<redacted>')
+    .replace(/\b((?:client_secret|DINGTALK_CLIENT_SECRET|DINGTALK_STATE_SECRET)\s*=\s*)[^&\s)"'`<>]+/gi, '$1<redacted>')
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer <redacted>')
     .replace(/\bSEC[A-Za-z0-9+/=_-]{8,}\b/g, 'SEC<redacted>')
     .replace(/\beyJ[A-Za-z0-9._-]{20,}\b/g, '<jwt:redacted>')
@@ -580,6 +580,6 @@ try {
   const opts = parseArgs(process.argv.slice(2))
   process.exit(run(opts))
 } catch (error) {
-  console.error(`[dingtalk-p4-regression-gate] ERROR: ${error instanceof Error ? error.message : String(error)}`)
+  console.error(`[dingtalk-p4-regression-gate] ERROR: ${redactString(error instanceof Error ? error.message : String(error))}`)
   process.exit(1)
 }

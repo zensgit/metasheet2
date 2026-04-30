@@ -154,7 +154,7 @@ test('dingtalk-p4-smoke-status reports manual pending gaps for bootstrap session
         'authorized-user-submit': {
           status: 'pending',
           evidence: {
-            summary: 'open https://oapi.dingtalk.com/robot/send?access_token=secret-token-should-hide',
+            summary: 'open https://oapi.dingtalk.com/robot/send?access_token=secret-token-should-hide and DINGTALK_CLIENT_SECRET = abcdefghijklmnopqrstuvwxyz123456',
             manualTarget: {
               authorizedUserId: 'user_authorized_001',
             },
@@ -168,6 +168,7 @@ test('dingtalk-p4-smoke-status reports manual pending gaps for bootstrap session
     assert.equal(result.status, 0, result.stderr)
     const summaryText = readFileSync(path.join(sessionDir, 'smoke-status.json'), 'utf8')
     assert.doesNotMatch(summaryText, /secret-token-should-hide/)
+    assert.doesNotMatch(summaryText, /abcdefghijklmnopqrstuvwxyz123456/)
     const summary = JSON.parse(summaryText)
     assert.equal(summary.overallStatus, 'manual_pending')
     assert.equal(summary.remoteSmokePhase, 'manual_pending')
@@ -504,7 +505,7 @@ test('dingtalk-p4-smoke-status treats strict manual evidence issues as manual pe
         {
           id: 'authorized-user-submit',
           code: 'artifact_ref_missing',
-          message: 'authorized-user-submit artifact file does not exist: Bearer very-secret-admin-token-should-hide',
+          message: 'authorized-user-submit artifact file does not exist: Bearer very-secret-admin-token-should-hide and DINGTALK_CLIENT_SECRET = abcdefghijklmnopqrstuvwxyz123456',
         },
       ],
     })
@@ -514,6 +515,8 @@ test('dingtalk-p4-smoke-status treats strict manual evidence issues as manual pe
     assert.equal(result.status, 0, result.stderr)
     const summaryText = readFileSync(path.join(sessionDir, 'smoke-status.json'), 'utf8')
     assert.doesNotMatch(summaryText, /very-secret-admin-token-should-hide/)
+    assert.doesNotMatch(summaryText, /abcdefghijklmnopqrstuvwxyz123456/)
+    assert.match(summaryText, /DINGTALK_CLIENT_SECRET = <redacted>/)
     const summary = JSON.parse(summaryText)
     assert.equal(summary.overallStatus, 'manual_pending')
     assert.equal(summary.remoteSmokePhase, 'manual_pending')

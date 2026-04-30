@@ -124,15 +124,27 @@ test('dingtalk-p4-regression-gate redacts secret-like output in logs and summari
 
     assert.doesNotMatch(summaryText, /0123456789abcdef0123456789abcdef/)
     assert.doesNotMatch(summaryText, /abcdefghijklmnopqrstuvwxyz1234567890/)
+    assert.doesNotMatch(summaryText, /zyxwvutsrqponmlkjihgfedcba123456/)
     assert.doesNotMatch(summaryText, /SECabcdefghijklmnop12345678/)
     assert.doesNotMatch(summaryText, /public-0123456789/)
     assert.match(stdout, /Bearer <redacted>/)
     assert.match(stdout, /access_token=<redacted>/)
     assert.match(stdout, /SEC<redacted>/)
     assert.match(stdout, /publicToken=<redacted>/)
+    assert.match(stdout, /DINGTALK_CLIENT_SECRET = <redacted>/)
   } finally {
     rmSync(outputDir, { recursive: true, force: true })
   }
+})
+
+test('dingtalk-p4-regression-gate redacts spaced client secret assignments in top-level errors', () => {
+  const result = runScript([
+    '--DINGTALK_CLIENT_SECRET = abcdefghijklmnopqrstuvwxyz123456',
+  ])
+
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /DINGTALK_CLIENT_SECRET = <redacted>/)
+  assert.doesNotMatch(result.stderr, /abcdefghijklmnopqrstuvwxyz123456/)
 })
 
 test('dingtalk-p4-regression-gate rejects invalid public profiles', () => {
