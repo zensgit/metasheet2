@@ -234,11 +234,23 @@ Expected docs:
   - Development MD: `docs/development/multitable-system-fields-backend-development-20260430.md`
   - Verification MD: `docs/development/multitable-system-fields-backend-verification-20260430.md`
   - Verification summary: `isFieldAlwaysReadOnly()` treats system field types as readonly, reusing existing write guards.
-- [ ] Add frontend renderer/editor behavior: render-only for readonly system fields.
-- [ ] Add field manager support for creating/configuring allowed system fields.
-- [ ] Add tests for create, patch rejection, render, sorting/filtering where applicable.
+- [x] Add frontend renderer/editor behavior: render-only for readonly system fields.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-system-fields-frontend-development-20260430.md`
+  - Verification MD: `docs/development/multitable-system-fields-frontend-verification-20260430.md`
+  - Verification summary: grid, cell editor, record drawer, and form view treat system fields as formatted read-only values.
+- [x] Add field manager support for creating/configuring allowed system fields.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-system-fields-frontend-development-20260430.md`
+  - Verification MD: `docs/development/multitable-system-fields-frontend-verification-20260430.md`
+  - Verification summary: field manager exposes `createdTime`, `modifiedTime`, `createdBy`, and `modifiedBy` as createable no-config fields.
+- [x] Add tests for create, patch rejection, render, sorting/filtering where applicable.
   - Partial: backend tests cover metadata projection and actor persistence in `docs/development/multitable-system-fields-backend-verification-20260430.md`.
-  - Remaining: frontend render/editor tests and sorting/filtering behavior tests after the UI slice.
+  - Development MD: `docs/development/multitable-system-fields-frontend-development-20260430.md`
+  - Verification MD: `docs/development/multitable-system-fields-frontend-verification-20260430.md`
+  - Verification summary: frontend tests cover field-manager create payloads, renderer/editor readonly behavior, and grid no-edit behavior; backend tests continue to cover patch rejection.
 - [x] Update OpenAPI source and generated dist.
   - PR: #1280
   - Merge commit: c45da32c1
@@ -248,8 +260,10 @@ Expected docs:
 
 Expected docs:
 
-- `docs/development/multitable-system-fields-batch-development-20260501.md`
-- `docs/development/multitable-system-fields-batch-verification-20260501.md`
+- `docs/development/multitable-system-fields-backend-development-20260430.md`
+- `docs/development/multitable-system-fields-backend-verification-20260430.md`
+- `docs/development/multitable-system-fields-frontend-development-20260430.md`
+- `docs/development/multitable-system-fields-frontend-verification-20260430.md`
 
 ## Phase 5 - P1 Gap: Record Version History
 

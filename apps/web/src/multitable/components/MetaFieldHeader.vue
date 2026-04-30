@@ -27,8 +27,10 @@ import { ref, computed } from 'vue'
 import type { MetaField } from '../types'
 
 const FIELD_ICONS: Record<string, string> = {
-  string: 'Aa', number: '#', boolean: '\u2611', date: '\u{1F4C5}', select: '\u25CF', multiSelect: '\u25C9',
-  link: '\u21C4', lookup: '\u2197', rollup: '\u03A3', formula: 'fx',
+  string: 'Aa', longText: '\u00B6', number: '#', boolean: '\u2611', date: '\u{1F4C5}', select: '\u25CF', multiSelect: '\u25C9',
+  link: '\u21C4', person: '\u{1F464}', lookup: '\u2197', rollup: '\u03A3', formula: 'fx', attachment: '\uD83D\uDCCE',
+  currency: '\u00A4', percent: '%', rating: '\u2605', url: '\u{1F517}', email: '\u2709', phone: '\u260E',
+  createdTime: 'CT', modifiedTime: 'MT', createdBy: 'CB', modifiedBy: 'MB',
 }
 
 const props = defineProps<{

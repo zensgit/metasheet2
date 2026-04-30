@@ -22,6 +22,10 @@ export type MetaFieldType =
   | 'email'
   | 'phone'
   | 'longText'
+  | 'createdTime'
+  | 'modifiedTime'
+  | 'createdBy'
+  | 'modifiedBy'
 
 export type MetaFieldCreateType = MetaFieldType | 'person'
 
