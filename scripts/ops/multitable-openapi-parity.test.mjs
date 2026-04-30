@@ -7,6 +7,38 @@ const rootDir = path.resolve(import.meta.dirname, '../..')
 const openapiPath = path.join(rootDir, 'packages/openapi/dist/openapi.json')
 const openapi = JSON.parse(readFileSync(openapiPath, 'utf8'))
 
+const expectedFieldTypes = [
+  'string',
+  'number',
+  'boolean',
+  'date',
+  'formula',
+  'select',
+  'multiSelect',
+  'link',
+  'lookup',
+  'rollup',
+  'attachment',
+  'currency',
+  'percent',
+  'rating',
+  'url',
+  'email',
+  'phone',
+  'longText',
+]
+
+const expectedViewTypes = [
+  'grid',
+  'form',
+  'kanban',
+  'gallery',
+  'calendar',
+  'timeline',
+  'gantt',
+  'hierarchy',
+]
+
 test('multitable openapi stays aligned with runtime contracts', () => {
   const paths = openapi.paths ?? {}
   const schemas = openapi.components?.schemas ?? {}
@@ -14,6 +46,35 @@ test('multitable openapi stays aligned with runtime contracts', () => {
   assert.ok(paths['/api/multitable/person-fields/prepare']?.post, 'missing person-field prepare endpoint')
   assert.ok(paths['/api/multitable/sheets/{sheetId}']?.delete, 'missing sheet delete endpoint')
   assert.ok(paths['/api/multitable/records/{recordId}']?.patch, 'missing single-record patch endpoint')
+  assert.ok(paths['/api/multitable/sheets/{sheetId}/import-xlsx']?.post, 'missing xlsx import endpoint')
+  assert.ok(paths['/api/multitable/sheets/{sheetId}/export-xlsx']?.get, 'missing xlsx export endpoint')
+
+  assert.deepEqual(schemas.MultitableFieldType?.enum, expectedFieldTypes)
+  assert.deepEqual(schemas.MultitableViewType?.enum, expectedViewTypes)
+  assert.equal(
+    paths['/api/multitable/fields']?.post?.requestBody?.content?.['application/json']?.schema?.properties?.type?.$ref,
+    '#/components/schemas/MultitableFieldType',
+  )
+  assert.equal(
+    paths['/api/multitable/fields/{fieldId}']?.patch?.requestBody?.content?.['application/json']?.schema?.properties?.type?.$ref,
+    '#/components/schemas/MultitableFieldType',
+  )
+  assert.equal(
+    paths['/api/multitable/views']?.post?.requestBody?.content?.['application/json']?.schema?.properties?.type?.$ref,
+    '#/components/schemas/MultitableViewType',
+  )
+  assert.equal(
+    paths['/api/multitable/views/{viewId}']?.patch?.requestBody?.content?.['application/json']?.schema?.properties?.type?.$ref,
+    '#/components/schemas/MultitableViewType',
+  )
+  assert.equal(
+    paths['/api/multitable/sheets/{sheetId}/export-xlsx']?.get?.responses?.['200']?.headers?.['X-MetaSheet-XLSX-Truncated']?.schema?.enum?.join(','),
+    'true,false',
+  )
+  assert.equal(
+    paths['/api/multitable/sheets/{sheetId}/export-xlsx']?.get?.responses?.['200']?.headers?.['Content-Disposition']?.schema?.type,
+    'string',
+  )
 
   assert.equal(
     paths['/api/multitable/view']?.get?.responses?.['200']?.content?.['application/json']?.schema?.properties?.data?.$ref,
@@ -55,6 +116,8 @@ test('multitable openapi stays aligned with runtime contracts', () => {
     '#/components/schemas/MultitablePatchResult',
   )
 
+  assert.equal(schemas.MultitableView?.properties?.type?.$ref, '#/components/schemas/MultitableViewType')
+  assert.equal(schemas.MultitableField?.properties?.type?.$ref, '#/components/schemas/MultitableFieldType')
   assert.equal(schemas.MultitableView?.properties?.config?.type, 'object')
   assert.equal(schemas.MultitableField?.properties?.options?.items?.properties?.value?.type, 'string')
   assert.equal(

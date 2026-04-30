@@ -164,6 +164,27 @@ export function setYjsInvalidatorForRoutes(invalidator: YjsInvalidator | null): 
   yjsInvalidator = invalidator
 }
 
+const MULTITABLE_FIELD_TYPES = [
+  'string',
+  'number',
+  'boolean',
+  'date',
+  'formula',
+  'select',
+  'multiSelect',
+  'link',
+  'lookup',
+  'rollup',
+  'attachment',
+  'currency',
+  'percent',
+  'rating',
+  'url',
+  'email',
+  'phone',
+  'longText',
+] as const
+
 type UniverMetaField = {
   id: string
   name: string
@@ -1017,6 +1038,7 @@ function mapFieldType(type: string): UniverMetaField['type'] {
   if (normalized === 'lookup') return 'lookup'
   if (normalized === 'rollup') return 'rollup'
   if (normalized === 'attachment') return 'attachment'
+  if (BATCH1_FIELD_TYPES.has(normalized as any)) return normalized as UniverMetaField['type']
   if (
     normalized === 'longtext' ||
     normalized === 'long_text' ||
@@ -3722,7 +3744,7 @@ export function univerMetaRouter(): Router {
       id: z.string().min(1).max(50).optional(),
       sheetId: z.string().min(1).max(50),
       name: z.string().min(1).max(255),
-      type: z.enum(['string', 'number', 'boolean', 'date', 'formula', 'select', 'multiSelect', 'link', 'lookup', 'rollup', 'attachment', 'longText']).default('string'),
+      type: z.enum(MULTITABLE_FIELD_TYPES).default('string'),
       property: z.record(z.unknown()).optional(),
       order: z.number().int().nonnegative().optional(),
     })
@@ -3978,7 +4000,7 @@ export function univerMetaRouter(): Router {
 
     const schema = z.object({
       name: z.string().min(1).max(255).optional(),
-      type: z.enum(['string', 'number', 'boolean', 'date', 'formula', 'select', 'multiSelect', 'link', 'lookup', 'rollup', 'attachment', 'longText']).optional(),
+      type: z.enum(MULTITABLE_FIELD_TYPES).optional(),
       property: z.record(z.unknown()).optional(),
       order: z.number().int().nonnegative().optional(),
     }).refine((v) => Object.keys(v).length > 0, { message: 'At least one field must be updated' })

@@ -935,4 +935,128 @@ describe('Multitable context API', () => {
       order: 3,
     })
   })
+
+  test('accepts MF2 field types in create and update multitable field contracts', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops' }] }
+        }
+        if (sql.includes('SELECT COALESCE(MAX("order"), -1) AS max_order FROM meta_fields')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ max_order: 3 }] }
+        }
+        if (sql.includes('INSERT INTO meta_fields')) {
+          expect(params).toEqual([
+            'fld_amount',
+            'sheet_ops',
+            'Amount',
+            'currency',
+            '{"code":"usd","decimals":2}',
+            4,
+          ])
+          return {
+            rows: [{
+              id: 'fld_amount',
+              name: 'Amount',
+              type: 'currency',
+              property: { code: 'usd', decimals: 2 },
+              order: 4,
+            }],
+          }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE id = $1')) {
+          if (params?.[0] === 'fld_amount') {
+            return {
+              rows: [{
+                id: 'fld_amount',
+                name: 'Amount',
+                type: 'currency',
+                property: { code: 'usd', decimals: 2 },
+                order: 4,
+              }],
+            }
+          }
+          throw new Error(`Unexpected field lookup params: ${JSON.stringify(params)}`)
+        }
+        if (sql.includes('SELECT id, sheet_id FROM meta_fields WHERE id = $1')) {
+          if (params?.[0] === 'fld_amount') {
+            return { rows: [{ id: 'fld_amount', sheet_id: 'sheet_ops' }] }
+          }
+          throw new Error(`Unexpected field lookup params: ${JSON.stringify(params)}`)
+        }
+        if (sql.includes('SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1')) {
+          if (params?.[0] === 'fld_amount') {
+            return {
+              rows: [{
+                id: 'fld_amount',
+                sheet_id: 'sheet_ops',
+                name: 'Amount',
+                type: 'currency',
+                property: { code: 'usd', decimals: 2 },
+                order: 4,
+              }],
+            }
+          }
+          throw new Error(`Unexpected field lookup params: ${JSON.stringify(params)}`)
+        }
+        if (sql.includes('UPDATE meta_fields') && sql.includes('SET name = $2, type = $3, property = $4::jsonb, "order" = $5')) {
+          expect(params).toEqual([
+            'fld_amount',
+            'Amount',
+            'email',
+            '{}',
+            4,
+          ])
+          return {
+            rows: [{
+              id: 'fld_amount',
+              name: 'Amount',
+              type: 'email',
+              property: {},
+              order: 4,
+            }],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const createResponse = await request(app)
+      .post('/api/multitable/fields')
+      .send({
+        id: 'fld_amount',
+        sheetId: 'sheet_ops',
+        name: 'Amount',
+        type: 'currency',
+        property: { code: 'usd', decimals: 2 },
+      })
+      .expect(201)
+
+    expect(createResponse.body.data.field).toMatchObject({
+      id: 'fld_amount',
+      name: 'Amount',
+      type: 'currency',
+      property: { code: 'usd', decimals: 2 },
+      order: 4,
+    })
+
+    const updateResponse = await request(app)
+      .patch('/api/multitable/fields/fld_amount')
+      .send({
+        type: 'email',
+        property: {},
+      })
+      .expect(200)
+
+    expect(updateResponse.body.data.field).toMatchObject({
+      id: 'fld_amount',
+      name: 'Amount',
+      type: 'email',
+      property: {},
+      order: 4,
+    })
+  })
 })

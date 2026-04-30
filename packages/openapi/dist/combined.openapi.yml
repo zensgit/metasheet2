@@ -1567,6 +1567,38 @@ components:
         description:
           type: string
           nullable: true
+    MultitableViewType:
+      type: string
+      enum:
+        - grid
+        - form
+        - kanban
+        - gallery
+        - calendar
+        - timeline
+        - gantt
+        - hierarchy
+    MultitableFieldType:
+      type: string
+      enum:
+        - string
+        - number
+        - boolean
+        - date
+        - formula
+        - select
+        - multiSelect
+        - link
+        - lookup
+        - rollup
+        - attachment
+        - currency
+        - percent
+        - rating
+        - url
+        - email
+        - phone
+        - longText
     MultitableView:
       type: object
       properties:
@@ -1577,7 +1609,7 @@ components:
         name:
           type: string
         type:
-          type: string
+          $ref: '#/components/schemas/MultitableViewType'
         filterInfo:
           type: object
           additionalProperties: true
@@ -1602,20 +1634,7 @@ components:
         name:
           type: string
         type:
-          type: string
-          enum:
-            - string
-            - number
-            - boolean
-            - date
-            - formula
-            - select
-            - multiSelect
-            - link
-            - lookup
-            - rollup
-            - attachment
-            - longText
+          $ref: '#/components/schemas/MultitableFieldType'
         property:
           type: object
           additionalProperties: true
@@ -11177,6 +11196,10 @@ paths:
                   - 'true'
                   - 'false'
               description: Whether the export hit the server-side row cap.
+            Content-Disposition:
+              schema:
+                type: string
+              description: Attachment filename header.
           content:
             application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
               schema:
@@ -11459,20 +11482,7 @@ paths:
                 name:
                   type: string
                 type:
-                  type: string
-                  enum:
-                    - string
-                    - number
-                    - boolean
-                    - date
-                    - formula
-                    - select
-                    - multiSelect
-                    - link
-                    - lookup
-                    - rollup
-                    - attachment
-                    - longText
+                  $ref: '#/components/schemas/MultitableFieldType'
                 property:
                   type: object
                   additionalProperties: true
@@ -11533,20 +11543,7 @@ paths:
                 name:
                   type: string
                 type:
-                  type: string
-                  enum:
-                    - string
-                    - number
-                    - boolean
-                    - date
-                    - formula
-                    - select
-                    - multiSelect
-                    - link
-                    - lookup
-                    - rollup
-                    - attachment
-                    - longText
+                  $ref: '#/components/schemas/MultitableFieldType'
                 property:
                   type: object
                   additionalProperties: true
@@ -11674,7 +11671,7 @@ paths:
                 name:
                   type: string
                 type:
-                  type: string
+                  $ref: '#/components/schemas/MultitableViewType'
                 filterInfo:
                   type: object
                   additionalProperties: true
@@ -11740,7 +11737,7 @@ paths:
                 name:
                   type: string
                 type:
-                  type: string
+                  $ref: '#/components/schemas/MultitableViewType'
                 filterInfo:
                   type: object
                   additionalProperties: true
