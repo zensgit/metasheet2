@@ -85,7 +85,10 @@ function defaultQueryHandler(records: any[] = []): QueryHandler {
       expect(params).toEqual([SHEET_ID])
       return { rows: FIELD_ROWS }
     }
-    if (sql.includes('SELECT id, sheet_id, version, data FROM meta_records')) {
+    if (
+      sql.includes('FROM meta_records') &&
+      sql.includes('SELECT id, sheet_id, version, data')
+    ) {
       expect(params?.[0]).toBe(SHEET_ID)
       return { rows: records }
     }

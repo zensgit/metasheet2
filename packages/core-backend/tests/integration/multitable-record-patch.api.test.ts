@@ -117,10 +117,14 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
             JSON.stringify({ fld_title: 'Updated title' }),
             'rec_1',
             'sheet_ops',
+            'user_patch_1',
           ])
           return { rows: [{ version: 8 }] }
         }
-        if (sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+        if (
+          sql.includes('FROM meta_records WHERE id = $1 AND sheet_id = $2') &&
+          sql.includes('SELECT id, version, data')
+        ) {
           return { rows: [{ id: 'rec_1', version: 8, data: { fld_title: 'Updated title' } }] }
         }
         throw new Error(`Unhandled SQL in test: ${sql}`)
@@ -317,6 +321,7 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
             JSON.stringify({ fld_customer: ['rec_c2', 'rec_c3'] }),
             'rec_1',
             'sheet_ops',
+            'user_patch_1',
           ])
           return { rows: [{ version: 3 }] }
         }
@@ -330,7 +335,10 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
         if (sql.includes('INSERT INTO meta_links')) {
           return { rows: [], rowCount: 1 }
         }
-        if (sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+        if (
+          sql.includes('FROM meta_records WHERE id = $1 AND sheet_id = $2') &&
+          sql.includes('SELECT id, version, data')
+        ) {
           return { rows: [{ id: 'rec_1', version: 3, data: { fld_customer: ['rec_c2', 'rec_c3'] } }] }
         }
         if (sql.includes('SELECT field_id, record_id, foreign_record_id')) {
@@ -418,7 +426,10 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
         if (sql.includes('UPDATE meta_records') && sql.includes('RETURNING version')) {
           return { rows: [{ version: 3 }] }
         }
-        if (sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+        if (
+          sql.includes('FROM meta_records WHERE id = $1 AND sheet_id = $2') &&
+          sql.includes('SELECT id, version, data')
+        ) {
           return { rows: [{ id: 'rec_1', version: 3, data: { fld_files: ['att_new_1'] } }] }
         }
         throw new Error(`Unhandled SQL in test: ${sql}`)

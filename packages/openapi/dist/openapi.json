@@ -2294,7 +2294,11 @@
           "url",
           "email",
           "phone",
-          "longText"
+          "longText",
+          "createdTime",
+          "modifiedTime",
+          "createdBy",
+          "modifiedBy"
         ]
       },
       "MultitableView": {
