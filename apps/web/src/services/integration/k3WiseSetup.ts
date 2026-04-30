@@ -678,6 +678,10 @@ export function buildK3WisePipelinePayloads(form: K3WiseSetupForm): K3WisePipeli
       idempotencyKeyFields: ['sourceId', 'revision'],
       options: {
         batchSize: 100,
+        target: {
+          autoSubmit: false,
+          autoAudit: false,
+        },
         watermark: {
           type: 'updated_at',
           field: 'updatedAt',
@@ -739,6 +743,10 @@ export function buildK3WisePipelinePayloads(form: K3WiseSetupForm): K3WisePipeli
       idempotencyKeyFields: ['sourceId', 'revision'],
       options: {
         batchSize: 50,
+        target: {
+          autoSubmit: false,
+          autoAudit: false,
+        },
         erpFeedback: {
           objectId: trim(form.bomStagingObjectId),
           keyField: '_integration_idempotency_key',
