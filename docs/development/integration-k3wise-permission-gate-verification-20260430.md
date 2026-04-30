@@ -50,4 +50,5 @@ git diff --check HEAD~1..HEAD                PASS
 - No customer K3 WISE credentials, customer tenant, SQL Server, or PLM endpoint
   were used.
 - This is not a staging deployment signoff. Deployment signoff still requires
-  authenticated K3 WISE postdeploy smoke against the target environment.
+  authenticated K3 WISE postdeploy smoke against the target environment with
+  `signoff.internalTrial=pass`.

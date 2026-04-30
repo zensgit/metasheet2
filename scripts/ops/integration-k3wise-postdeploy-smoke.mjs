@@ -573,12 +573,22 @@ async function runSmoke(opts) {
   }
 
   const failed = checks.filter((check) => check.status === 'fail')
+  const internalTrialSignoff = failed.length === 0 && Boolean(token)
+  const internalTrialSignoffReason = internalTrialSignoff
+    ? 'authenticated smoke passed'
+    : failed.length > 0
+      ? 'one or more smoke checks failed'
+      : 'authenticated checks did not run'
   const evidence = {
     ok: failed.length === 0,
     generatedAt: new Date().toISOString(),
     baseUrl: opts.baseUrl,
     authenticated: Boolean(token),
     requireAuth: opts.requireAuth,
+    signoff: {
+      internalTrial: internalTrialSignoff ? 'pass' : 'blocked',
+      reason: internalTrialSignoffReason,
+    },
     checks,
     summary: {
       pass: checks.filter((check) => check.status === 'pass').length,
@@ -606,7 +616,8 @@ function renderMarkdown(evidence) {
     `- Generated at: ${evidence.generatedAt}`,
     `- Base URL: ${evidence.baseUrl}`,
     `- Authenticated checks: ${evidence.authenticated ? 'yes' : 'no'}`,
-    `- Result: ${evidence.ok ? 'PASS' : 'FAIL'}`,
+    `- Internal trial signoff: ${evidence.signoff?.internalTrial === 'pass' ? 'PASS' : 'BLOCKED'} (${evidence.signoff?.reason || 'unknown'})`,
+    `- Diagnostic result: ${evidence.ok ? 'PASS' : 'FAIL'}`,
     `- Summary: ${evidence.summary.pass} pass / ${evidence.summary.skipped} skipped / ${evidence.summary.fail} fail`,
     '',
     '## Checks',
@@ -634,6 +645,7 @@ async function runCli(argv = process.argv.slice(2)) {
     ok: evidence.ok,
     baseUrl: evidence.baseUrl,
     authenticated: evidence.authenticated,
+    signoff: evidence.signoff,
     summary: evidence.summary,
     jsonPath: paths.jsonPath,
     mdPath: paths.mdPath,

@@ -295,8 +295,16 @@ test('public postdeploy smoke passes without an auth token and skips authenticat
     assert.equal(stdout.summary.fail, 0)
     assert.equal(stdout.summary.skipped, 1)
     assert.equal(stdout.summary.pass, 3)
+    assert.deepEqual(stdout.signoff, {
+      internalTrial: 'blocked',
+      reason: 'authenticated checks did not run',
+    })
 
     const evidence = JSON.parse(readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8'))
+    assert.deepEqual(evidence.signoff, {
+      internalTrial: 'blocked',
+      reason: 'authenticated checks did not run',
+    })
     assert.equal(evidence.checks.find((check) => check.id === 'authenticated-integration-contract').status, 'skipped')
     assert.equal(evidence.checks.find((check) => check.id === 'k3-wise-frontend-route').status, 'pass')
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/health'))
@@ -354,6 +362,15 @@ test('authenticated postdeploy smoke validates route and staging contracts witho
     assert.equal(evidenceText.includes('test.jwt.token'), false)
     const evidence = JSON.parse(evidenceText)
     assert.equal(evidence.authenticated, true)
+    const stdout = JSON.parse(result.stdout)
+    assert.deepEqual(stdout.signoff, {
+      internalTrial: 'pass',
+      reason: 'authenticated smoke passed',
+    })
+    assert.deepEqual(evidence.signoff, {
+      internalTrial: 'pass',
+      reason: 'authenticated smoke passed',
+    })
     assert.equal(evidence.summary.fail, 0)
     const routeCheck = evidence.checks.find((check) => check.id === 'integration-route-contract')
     assert.equal(routeCheck.status, 'pass')
@@ -484,6 +501,10 @@ test('authenticated postdeploy smoke fails when a read-only control-plane endpoi
     assert.equal(evidenceText.includes('test.jwt.token'), false)
     const evidence = JSON.parse(evidenceText)
     assert.equal(evidence.ok, false)
+    assert.deepEqual(evidence.signoff, {
+      internalTrial: 'blocked',
+      reason: 'one or more smoke checks failed',
+    })
     assert.equal(evidence.summary.fail, 1)
     assert.equal(evidence.checks.find((check) => check.id === 'integration-list-external-systems').status, 'pass')
     const pipelinesCheck = evidence.checks.find((check) => check.id === 'integration-list-pipelines')

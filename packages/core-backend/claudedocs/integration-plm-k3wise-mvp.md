@@ -519,7 +519,44 @@ GET  /api/integration/dead-letters
 POST /api/integration/dead-letters/:id/replay
 ```
 
-### 9.5 客户 GATE 答卷回卷后的执行顺序
+### 9.5 内部试用部署验收
+
+客户 GATE 答卷回来之前，内部环境也可以先验收 K3 WISE control-plane 是否可用。
+验收标准不是 public-only smoke PASS，而是 authenticated postdeploy smoke PASS：
+
+- `integration-k3wise-postdeploy-smoke.json` 存在。
+- `ok=true`。
+- `authenticated=true`。
+- `signoff.internalTrial=pass`。
+- `summary.fail=0`。
+- `auth-me`、`integration-route-contract`、四个 control-plane list probe、
+  `staging-descriptor-contract` 全部通过。
+
+CLI 签收命令：
+
+```bash
+node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
+  --base-url "$METASHEET_BASE_URL" \
+  --token-file "$METASHEET_AUTH_TOKEN_FILE" \
+  --tenant-id "$METASHEET_TENANT_ID" \
+  --require-auth \
+  --out-dir artifacts/integration-k3wise/internal-trial/postdeploy-smoke
+
+node scripts/ops/integration-k3wise-postdeploy-summary.mjs \
+  --input artifacts/integration-k3wise/internal-trial/postdeploy-smoke/integration-k3wise-postdeploy-smoke.json \
+  --require-auth-signoff
+```
+
+GitHub Actions 签收入口：
+
+- 手动触发 `K3 WISE Postdeploy Smoke`，保持 `require_auth=true`。
+- 若要让 main deploy 自动成为硬门禁，设置 repo variable
+  `K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH=true`。
+
+如果 evidence 显示 `signoff.internalTrial=blocked`，即使 diagnostic result
+是 PASS，也只能说明基础可达，不能作为内部试用签收。
+
+### 9.6 客户 GATE 答卷回卷后的执行顺序
 
 客户 GATE 答卷归档前，先确认当前 MetaSheet 部署本身具备 K3 WISE PoC
 控制面能力。这一步不访问客户 K3 / PLM / SQL Server，只读检查部署后的
@@ -535,12 +572,12 @@ node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
 ```
 
 也可以在 GitHub Actions 手动触发 `K3 WISE Postdeploy Smoke`，填写
-`base_url`、`require_auth=true`、`tenant_id`。如果确实是单租户部署，
+`base_url`、保持默认 `require_auth=true`、填写 `tenant_id`。如果确实是单租户部署，
 且 integration-core 历史数据里只有一个非空 `tenant_id`，可显式打开
 `auto_discover_tenant=true` 让 workflow 从 deploy host 只读推断租户；多租户
 或无历史数据时仍会失败关闭。期望产物是
-`integration-k3wise-postdeploy-smoke.json` / `.md` 均 PASS，且四个只读
-control-plane list probe 都通过：
+`integration-k3wise-postdeploy-smoke.json` / `.md` 均 PASS，
+`signoff.internalTrial=pass`，且四个只读 control-plane list probe 都通过：
 
 - `/api/integration/external-systems?tenantId=<tenant>&limit=1`
 - `/api/integration/pipelines?tenantId=<tenant>&limit=1`
@@ -559,8 +596,10 @@ control-plane list probe 都通过：
    `integration_pipelines`、`integration_runs`、`integration_dead_letters` 和
    `platform_app_instances(plugin_id='plugin-integration-core')` 合计恰好一个租户时
    自动写入 `K3_WISE_SMOKE_TENANT_ID` 给后续 smoke；零个或多个租户都不猜。
-4. deploy workflow 对 token 解析失败保持 public-only smoke；手动
-   `require_auth=true` 时 token 解析失败会直接失败。
+4. deploy workflow 仅在 `K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH=true` 时把 token
+   解析失败作为硬失败；否则 public-only smoke 只能用于诊断，summary 会显示
+   internal trial signoff blocked。手动 workflow 默认 `require_auth=true`，
+   token 解析失败会直接失败。
 
 客户 GATE 答卷归档后，按下面这条线性顺序推进 M2-LIVE，每一步都要在测试账套用最小权限账号执行：
 
@@ -577,7 +616,7 @@ control-plane list probe 都通过：
 
 每一步的 evidence JSON 字段都已硬化（见 §11.5）：客户随手写中文 `成功` / `通过` / `失败`、字符串 `"true"` / `"false"`、数字 ID `12345`、numeric `0/1` 都被接受，只有 `"maybe"` / `NaN` / `2` 等真正无意义的值才会抛错。
 
-### 9.6 字段输入规约（GATE + evidence 共同适用）
+### 9.7 字段输入规约（GATE + evidence 共同适用）
 
 | 字段类型 | 接受 | 拒绝 | PR |
 |---|---|---|---|
@@ -588,7 +627,7 @@ control-plane list probe 都通过：
 
 **关键：** 所有"接受"的变体在硬化层 normalizeSafeBoolean 处都被规范化为真正的布尔/字符串，下游业务逻辑看到的永远是 canonical 形态。客户不需要逐字段研究规范——按习惯写就好，错的会带字段名抛出。
 
-### 9.7 错误处理快查表
+### 9.8 错误处理快查表
 
 下表覆盖客户/操作员最可能遇到的 7 类错误，按"看到这条信息→怎么办"组织：
 
