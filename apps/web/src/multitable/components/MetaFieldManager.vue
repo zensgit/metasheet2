@@ -294,6 +294,9 @@
           </select>
           <button class="meta-field-mgr__btn-add" :disabled="!newFieldName.trim()" @click="onAddField">+ Add</button>
         </div>
+        <div v-if="newFieldTypeIsSystem" class="meta-field-mgr__hint meta-field-mgr__hint--system">
+          {{ systemFieldHint(newFieldType) }}
+        </div>
       </div>
 
       <div v-if="deleteTarget" class="meta-field-mgr__confirm">
@@ -332,6 +335,11 @@ import {
   resolveRollupFieldProperty,
   resolveSelectFieldOptions,
 } from '../utils/field-config'
+import {
+  SYSTEM_FIELD_TYPES,
+  isSystemFieldCreateType,
+  systemFieldHint,
+} from '../utils/system-fields'
 import MetaFieldValidationPanel from './MetaFieldValidationPanel.vue'
 
 /** Field types where the validation panel is configurable. */
@@ -426,11 +434,13 @@ const FIELD_TYPES: MetaFieldCreateType[] = [
   'string', 'longText', 'number', 'boolean', 'date', 'select', 'multiSelect', 'link', 'person',
   'formula', 'lookup', 'rollup', 'attachment',
   'currency', 'percent', 'rating', 'url', 'email', 'phone',
+  ...SYSTEM_FIELD_TYPES,
 ]
 const FIELD_ICONS: Record<string, string> = {
   string: 'Aa', longText: '\u00B6', number: '#', boolean: '\u2611', date: '\u{1F4C5}', select: '\u25CF', multiSelect: '\u25C9',
   link: '\u21C4', person: '\u{1F464}', lookup: '\u2197', rollup: '\u03A3', formula: 'fx', attachment: '\uD83D\uDCCE',
   currency: '\u00A4', percent: '%', rating: '\u2605', url: '\u{1F517}', email: '\u2709', phone: '\u260E',
+  createdTime: 'CT', modifiedTime: 'MT', createdBy: 'CB', modifiedBy: 'MB',
 }
 
 const props = defineProps<{
@@ -540,6 +550,7 @@ const fieldConfigBlockingReason = computed(() => {
 const fieldConfigWarningText = computed(() => {
   return fieldConfigBlockingReason.value || 'This field changed in the background. Save keeps your draft, or reload the latest settings.'
 })
+const newFieldTypeIsSystem = computed(() => isSystemFieldCreateType(newFieldType.value))
 
 const validationPanelVisible = computed(() => {
   const draftType = configDraftType.value

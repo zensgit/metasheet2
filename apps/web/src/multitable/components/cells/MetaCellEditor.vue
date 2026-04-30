@@ -223,7 +223,7 @@
     </div>
 
     <!-- readonly fallback -->
-    <span v-else class="meta-cell-editor__readonly">{{ modelValue ?? '' }}</span>
+    <span v-else class="meta-cell-editor__readonly">{{ readonlyDisplayValue }}</span>
   </div>
 </template>
 
@@ -242,6 +242,7 @@ import {
   validateAttachmentSelection,
 } from '../../utils/field-config'
 import { linkActionLabel as formatLinkActionLabel } from '../../utils/link-fields'
+import { formatFieldDisplay } from '../../utils/field-display'
 import { useYjsCellBinding, type YjsCellBinding } from '../../composables/useYjsCellBinding'
 
 const props = defineProps<{
@@ -281,6 +282,14 @@ const emit = defineEmits<{
    */
   (e: 'yjs-commit'): void
 }>()
+
+const readonlyDisplayValue = computed(() =>
+  formatFieldDisplay({
+    field: props.field,
+    value: props.modelValue,
+    attachmentSummaries: props.attachmentSummaries,
+  }),
+)
 
 function textControlValue(value: unknown): string {
   return value === null || value === undefined ? '' : String(value)

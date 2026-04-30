@@ -132,7 +132,7 @@
             </div>
             <div v-if="attachmentErrors[field.id]" class="meta-record-drawer__error">{{ attachmentErrors[field.id] }}</div>
           </div>
-          <span v-else class="meta-record-drawer__text">{{ formatValue(record.data[field.id]) }}</span>
+          <span v-else class="meta-record-drawer__text">{{ formatValue(field, record.data[field.id]) }}</span>
           <div v-if="field.type === 'link' && linkPreview(field.id)" class="meta-record-drawer__link-summary">{{ linkPreview(field.id) }}</div>
         </div>
       </div>
@@ -175,6 +175,8 @@ import {
 } from '../utils/comment-affordance'
 import { attachmentAcceptAttr, resolveAttachmentFieldProperty, shouldReplaceAttachmentSelection, validateAttachmentSelection } from '../utils/field-config'
 import { linkActionLabel } from '../utils/link-fields'
+import { formatFieldDisplay } from '../utils/field-display'
+import { isSystemField } from '../utils/system-fields'
 
 const props = withDefaults(defineProps<{
   visible: boolean
@@ -236,7 +238,11 @@ const drawerCommentButtonClass = computed(() =>
 )
 
 function canEditField(fieldId: string): boolean {
-  return props.canEdit && props.rowActions?.canEdit !== false && props.fieldPermissions?.[fieldId]?.readOnly !== true
+  const field = props.fields.find((item) => item.id === fieldId) ?? null
+  return props.canEdit
+    && props.rowActions?.canEdit !== false
+    && props.fieldPermissions?.[fieldId]?.readOnly !== true
+    && !isSystemField(field)
 }
 
 function recordFieldAffordance(fieldId: string) {
@@ -257,10 +263,13 @@ function navigateNext() {
   if (idx >= 0 && idx < props.recordIds.length - 1) emit('navigate', props.recordIds[idx + 1])
 }
 
-function formatValue(v: unknown): string {
-  if (v === null || v === undefined) return '—'
-  if (Array.isArray(v)) return v.join(', ')
-  return String(v)
+function formatValue(field: MetaField, v: unknown): string {
+  return formatFieldDisplay({
+    field,
+    value: v,
+    linkSummaries: props.linkSummariesByField?.[field.id],
+    attachmentSummaries: props.attachmentSummariesByField?.[field.id],
+  })
 }
 
 function textControlValue(value: unknown): string {
