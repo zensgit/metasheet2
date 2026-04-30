@@ -245,15 +245,16 @@ jobs:
           if [[ -f "$reconcile_log" ]]; then
             block="$(
               awk '
-                /^=== ENV RECONCILE START ===$/ { printing=1; next }
+                /^=== ENV RECONCILE START ===$/ { printing=1; total=0; next }
                 /^=== ENV RECONCILE END ===$/ { printing=0; after=1; next }
-                printing { print; next }
-                after {
+                printing && total < 120 { print; total++; next }
+                after && total < 120 {
                   print
+                  total++
                   count++
                   if (count >= 20) exit
                 }
-              ' "$reconcile_log" | head -n 120
+              ' "$reconcile_log"
             )"
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"

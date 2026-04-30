@@ -236,15 +236,16 @@ jobs:
           if [[ -f "$cleanup_log" ]]; then
             block="$(
               awk '
-                /^=== UPLOAD CLEANUP START ===$/ { printing=1; next }
+                /^=== UPLOAD CLEANUP START ===$/ { printing=1; total=0; next }
                 /^=== UPLOAD CLEANUP END ===$/ { printing=0; after=1; next }
-                printing { print; next }
-                after {
+                printing && total < 120 { print; total++; next }
+                after && total < 120 {
                   print
+                  total++
                   count++
                   if (count >= 20) exit
                 }
-              ' "$cleanup_log" | head -n 120
+              ' "$cleanup_log"
             )"
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
