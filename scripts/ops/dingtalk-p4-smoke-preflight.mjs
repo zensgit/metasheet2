@@ -278,6 +278,23 @@ function addCheck(summary, id, label, status, details = {}) {
   })
 }
 
+function apiBasePath(value) {
+  try {
+    return new URL(value).pathname.replace(/\/+$/, '')
+  } catch {
+    return ''
+  }
+}
+
+function healthUrlCandidates(apiBase) {
+  const routes = ['/health']
+  const basePath = apiBasePath(apiBase)
+  if (basePath && basePath !== '/' && basePath !== '/health') {
+    routes.push(`${basePath}/health`)
+  }
+  return routes.map((route) => new URL(route, apiBase))
+}
+
 function hasFailure(summary) {
   return summary.checks.some((check) => check.status === 'fail')
 }
@@ -432,23 +449,44 @@ async function validateApiHealth(opts, summary) {
     return
   }
 
-  const url = new URL('/health', opts.apiBase)
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), opts.timeoutMs)
+  const healthUrls = healthUrlCandidates(opts.apiBase)
+  let lastFailure = null
   try {
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-      signal: controller.signal,
-    })
-    addCheck(summary, 'api-health', 'Backend /health is reachable', response.status === 200 || response.status === 204 ? 'pass' : 'fail', {
-      statusCode: response.status,
-      url: url.toString(),
+    for (const url of healthUrls) {
+      try {
+        const response = await fetch(url, {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+          signal: controller.signal,
+        })
+        const text = await response.text()
+        if (text) JSON.parse(text)
+        if (response.status === 200 || response.status === 204) {
+          addCheck(summary, 'api-health', 'Backend /health is reachable', 'pass', {
+            statusCode: response.status,
+            url: url.toString(),
+          })
+          return
+        }
+        lastFailure = { statusCode: response.status, url: url.toString() }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        lastFailure = {
+          url: url.toString(),
+          error: redactString(message),
+        }
+      }
+    }
+    addCheck(summary, 'api-health', 'Backend /health is reachable', 'fail', lastFailure ?? {
+      url: healthUrls[0]?.toString() ?? '',
+      error: 'health check failed',
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     addCheck(summary, 'api-health', 'Backend /health is reachable', 'fail', {
-      url: url.toString(),
+      url: healthUrls[0]?.toString() ?? '',
       error: redactString(message),
     })
   } finally {

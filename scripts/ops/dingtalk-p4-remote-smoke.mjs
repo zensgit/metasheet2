@@ -597,6 +597,36 @@ async function requestJson(opts, route, options = {}) {
   }
 }
 
+function apiBasePath(opts) {
+  try {
+    return new URL(opts.apiBase).pathname.replace(/\/+$/, '')
+  } catch {
+    return ''
+  }
+}
+
+function healthRouteCandidates(opts) {
+  const routes = ['/health']
+  const basePath = apiBasePath(opts)
+  if (basePath && basePath !== '/' && basePath !== '/health') {
+    routes.push(`${basePath}/health`)
+  }
+  return routes
+}
+
+async function requestHealthJson(opts) {
+  let lastError = null
+  for (const route of healthRouteCandidates(opts)) {
+    try {
+      await requestJson(opts, route, { expected: [200, 204] })
+      return route
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw lastError ?? new Error('GET /health failed')
+}
+
 function markdownCell(value) {
   return String(value ?? '').replaceAll('|', '\\|').replaceAll('\n', '<br>')
 }
@@ -678,8 +708,8 @@ function writeEvidenceWorkspace(outputDir, evidence) {
 
 async function runSmoke(opts, evidence) {
   if (!opts.skipHealth) {
-    await requestJson(opts, '/health', { expected: [200, 204] })
-    evidence.artifacts.push({ kind: 'api-health', status: 'pass', path: '/health' })
+    const healthPath = await requestHealthJson(opts)
+    evidence.artifacts.push({ kind: 'api-health', status: 'pass', path: healthPath })
   }
 
   const stamp = evidence.runId.replace(/[^A-Za-z0-9_-]/g, '-')

@@ -14,7 +14,7 @@ function makeTmpDir() {
   return mkdtempSync(path.join(tmpdir(), 'dingtalk-p4-smoke-preflight-'))
 }
 
-function createHealthServer(statusCode = 200) {
+function createHealthServer(statusCode = 200, options = {}) {
   const requests = []
   const server = http.createServer((req, res) => {
     requests.push({
@@ -22,7 +22,19 @@ function createHealthServer(statusCode = 200) {
       url: req.url,
       headers: req.headers,
     })
+    if (req.method === 'GET' && req.url === '/health' && options.rootHealthHtml) {
+      res.statusCode = 200
+      res.setHeader('Content-Type', 'text/html')
+      res.end('<!doctype html><html><body>frontend health</body></html>')
+      return
+    }
     if (req.method === 'GET' && req.url === '/health') {
+      res.statusCode = statusCode
+      res.setHeader('Content-Type', 'application/json')
+      res.end(JSON.stringify({ ok: statusCode >= 200 && statusCode < 300 }))
+      return
+    }
+    if (req.method === 'GET' && req.url === '/api/health') {
       res.statusCode = statusCode
       res.setHeader('Content-Type', 'application/json')
       res.end(JSON.stringify({ ok: statusCode >= 200 && statusCode < 300 }))
@@ -143,6 +155,44 @@ test('dingtalk-p4-smoke-preflight passes with valid inputs and redacts secrets',
       unauthorizedUserId: 'user_unauthorized',
       noEmailDingTalkExternalId: 'dt_no_email_001',
     })
+  } finally {
+    await server.close()
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-smoke-preflight falls back to API-prefixed health JSON', async () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'preflight')
+  const server = createHealthServer(200, { rootHealthHtml: true })
+
+  try {
+    const apiRoot = await server.listen()
+    const result = await runScriptAsync([
+      '--api-base',
+      `${apiRoot}/api`,
+      '--web-base',
+      'https://metasheet.example.test',
+      '--auth-token',
+      'secret-admin-token',
+      '--group-a-webhook',
+      'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-a',
+      '--group-b-webhook',
+      'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-b',
+      '--allowed-user',
+      'user_authorized',
+      '--output-dir',
+      outputDir,
+    ])
+
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    assert.deepEqual(server.requests.map((request) => request.url), ['/health', '/api/health'])
+
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'preflight-summary.json'), 'utf8'))
+    const health = summary.checks.find((check) => check.id === 'api-health')
+    assert.equal(summary.overallStatus, 'pass')
+    assert.equal(health.status, 'pass')
+    assert.match(health.details.url, /\/api\/health$/)
   } finally {
     await server.close()
     rmSync(tmpDir, { recursive: true, force: true })
