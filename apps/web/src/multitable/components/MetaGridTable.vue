@@ -267,6 +267,7 @@ import {
   resolveFieldCommentAffordance,
   resolveRecordCommentAffordance,
 } from '../utils/comment-affordance'
+import { isSystemField } from '../utils/system-fields'
 
 const EDITABLE = new Set(['string', 'number', 'boolean', 'date', 'select', 'link', 'attachment'])
 
@@ -435,7 +436,7 @@ function resolveRowActions(recordId: string): MetaRowActions {
   }
 }
 const isEditable = (recordId: string, f: MetaField) =>
-  resolveRowActions(recordId).canEdit && EDITABLE.has(f.type) && !props.fieldReadOnlyIds?.includes(f.id)
+  resolveRowActions(recordId).canEdit && EDITABLE.has(f.type) && !isSystemField(f) && !props.fieldReadOnlyIds?.includes(f.id)
 const isEditing = (rid: string, fid: string) => editCell.value?.recordId === rid && editCell.value?.fieldId === fid
 
 function cellStyle(rid: string, fid: string) {

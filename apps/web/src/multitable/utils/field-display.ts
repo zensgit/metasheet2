@@ -6,12 +6,26 @@ import {
   resolvePercentFieldProperty,
   resolveRatingFieldProperty,
 } from './field-config'
+import { isSystemFieldType } from './system-fields'
 
 function formatDate(value: unknown): string {
   if (value === null || value === undefined || value === '') return '—'
   const date = new Date(String(value))
   if (Number.isNaN(date.getTime())) return String(value)
   return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
+function formatDateTime(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '—'
+  const date = new Date(String(value))
+  if (Number.isNaN(date.getTime())) return String(value)
+  return date.toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 
 function summarizeLinkCount(field: MetaField, count: number): string {
@@ -35,6 +49,8 @@ export function formatFieldDisplay(params: {
   if (value === null || value === undefined || value === '') return '—'
 
   if (field.type === 'date') return formatDate(value)
+  if (field.type === 'createdTime' || field.type === 'modifiedTime') return formatDateTime(value)
+  if (isSystemFieldType(field.type)) return String(value)
   if (field.type === 'boolean') return value ? 'Yes' : 'No'
 
   if (field.type === 'currency') {

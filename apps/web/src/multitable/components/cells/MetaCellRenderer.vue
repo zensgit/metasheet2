@@ -13,6 +13,11 @@
       <span class="meta-cell-renderer__date">{{ dateDisplay }}</span>
     </template>
 
+    <!-- system fields -->
+    <template v-else-if="isSystemField">
+      <span class="meta-cell-renderer__system" :title="displayValue">{{ displayValue }}</span>
+    </template>
+
     <!-- number -->
     <template v-else-if="field.type === 'number'">{{ displayValue }}</template>
 
@@ -102,6 +107,7 @@ import type { MetaAttachment, MetaField, LinkedRecordSummary } from '../../types
 import MetaAttachmentList from '../MetaAttachmentList.vue'
 import { isPersonField } from '../../utils/link-fields'
 import { formatFieldDisplay } from '../../utils/field-display'
+import { isSystemFieldType } from '../../utils/system-fields'
 
 const props = defineProps<{ field: MetaField; value: unknown; linkSummaries?: LinkedRecordSummary[]; attachmentSummaries?: MetaAttachment[] }>()
 
@@ -113,6 +119,7 @@ const displayValue = computed(() => {
     attachmentSummaries: props.attachmentSummaries,
   })
 })
+const isSystemField = computed(() => isSystemFieldType(props.field.type))
 
 const dateDisplay = computed(() => {
   const v = props.value
@@ -232,6 +239,11 @@ const conditionalClass = computed(() => {
   color: #227447;
 }
 .meta-cell-renderer__date { color: #606266; }
+.meta-cell-renderer__system {
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
 .meta-cell-renderer--empty { color: #ccc; }
 .meta-cell-renderer--positive { color: #67c23a; }
 .meta-cell-renderer--negative { color: #f56c6c; }

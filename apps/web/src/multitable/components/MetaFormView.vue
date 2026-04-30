@@ -204,7 +204,7 @@
             :value="formData[field.id] ?? ''"
             @input="formData[field.id] = ($event.target as HTMLInputElement).value"
           />
-          <span v-else class="meta-form-view__readonly-val">{{ record?.data[field.id] ?? '—' }}</span>
+          <span v-else class="meta-form-view__readonly-val">{{ readonlyFieldDisplay(field) }}</span>
           <div v-if="field.type === 'link' && linkPreview(field.id)" class="meta-form-view__link-summary">{{ linkPreview(field.id) }}</div>
           <div v-if="fieldErrors?.[field.id] || validationErrors[field.id]" :id="`error_${field.id}`" class="meta-form-view__field-error">{{ fieldErrors?.[field.id] || validationErrors[field.id] }}</div>
         </div>
@@ -246,6 +246,8 @@ import {
   validateAttachmentSelection,
 } from '../utils/field-config'
 import { linkActionLabel } from '../utils/link-fields'
+import { formatFieldDisplay } from '../utils/field-display'
+import { isSystemField } from '../utils/system-fields'
 
 const props = defineProps<{
   fields: MetaField[]
@@ -286,7 +288,8 @@ const editableFields = computed(() => {
 })
 
 function isFieldReadOnly(fieldId: string): boolean {
-  return !!props.readOnly || props.fieldPermissions?.[fieldId]?.readOnly === true || props.rowActions?.canEdit === false
+  const field = props.fields.find((item) => item.id === fieldId) ?? null
+  return !!props.readOnly || props.fieldPermissions?.[fieldId]?.readOnly === true || props.rowActions?.canEdit === false || isSystemField(field)
 }
 
 const hasUnsavedChanges = computed(() => {
@@ -360,7 +363,7 @@ function validate(): boolean {
 
 function onSubmit() {
   if (!validate()) return
-  emit('submit', { ...formData })
+  emit('submit', buildSubmitPayload())
 }
 
 function resetForm() {
@@ -403,6 +406,22 @@ function linkSummaryCount(fieldId: string): number {
   if (summaries.length) return summaries.length
   const raw = formData[fieldId] ?? props.record?.data[fieldId]
   return Array.isArray(raw) ? raw.length : raw ? 1 : 0
+}
+
+function readonlyFieldDisplay(field: MetaField): string {
+  return formatFieldDisplay({
+    field,
+    value: formData[field.id] ?? props.record?.data[field.id],
+    linkSummaries: props.linkSummariesByField?.[field.id],
+    attachmentSummaries: props.attachmentSummariesByField?.[field.id],
+  })
+}
+
+function buildSubmitPayload(): Record<string, unknown> {
+  const systemFieldIds = new Set(props.fields.filter((field) => isSystemField(field)).map((field) => field.id))
+  return Object.fromEntries(
+    Object.entries(formData).filter(([fieldId]) => !systemFieldIds.has(fieldId)),
+  )
 }
 
 function attachmentList(fieldId: string): string[] {
