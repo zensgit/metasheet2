@@ -338,6 +338,20 @@ test('dingtalk-p4-smoke-session writes an editable env template', () => {
   }
 })
 
+test('dingtalk-p4-smoke-session redacts spaced client secret assignments in argument errors', () => {
+  const result = spawnSync(process.execPath, [
+    scriptPath,
+    '--DINGTALK_CLIENT_SECRET = abcdefghijklmnopqrstuvwxyz123456',
+  ], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  })
+
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /DINGTALK_CLIENT_SECRET = <redacted>/)
+  assert.doesNotMatch(result.stderr, /abcdefghijklmnopqrstuvwxyz123456/)
+})
+
 test('dingtalk-p4-smoke-session rejects non-canonical robot webhook during preflight', () => {
   const tmpDir = makeTmpDir()
   const outputDir = path.join(tmpDir, 'session')

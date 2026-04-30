@@ -46,7 +46,8 @@ function sendJson(res, status, body) {
   res.end(JSON.stringify(body))
 }
 
-function createFakeApiServer() {
+function createFakeApiServer(options = {}) {
+  const { onRequest = null } = options
   const requests = []
   let groupCount = 0
 
@@ -61,6 +62,11 @@ function createFakeApiServer() {
         headers: req.headers,
         body,
       })
+
+      if (onRequest) {
+        const handled = await onRequest({ req, res, url, body, sendJson, requests })
+        if (handled) return
+      }
 
       if (req.method === 'GET' && url.pathname === '/health') {
         sendJson(res, 200, { ok: true })
@@ -532,4 +538,43 @@ test('dingtalk-p4-remote-smoke rejects malformed DingTalk robot secrets', () => 
   assert.equal(result.status, 1)
   assert.match(result.stderr, /--group-a-secret/)
   assert.doesNotMatch(result.stderr, /secret-admin-token/)
+})
+
+test('dingtalk-p4-remote-smoke redacts spaced client secret assignments from API errors', async () => {
+  const fakeApi = createFakeApiServer({
+    onRequest: async ({ req, res, url, sendJson }) => {
+      if (req.method === 'POST' && url.pathname === '/api/multitable/bases') {
+        sendJson(res, 500, {
+          ok: false,
+          error: {
+            message: 'DINGTALK_CLIENT_SECRET = abcdefghijklmnopqrstuvwxyz123456',
+          },
+        })
+        return true
+      }
+      return false
+    },
+  })
+
+  try {
+    const apiBase = await fakeApi.listen()
+    const result = await runScript([
+      '--api-base',
+      apiBase,
+      '--auth-token',
+      'secret-admin-token',
+      '--group-a-webhook',
+      'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-a',
+      '--group-b-webhook',
+      'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-b',
+      '--allowed-user',
+      'user_authorized',
+    ])
+
+    assert.equal(result.code, 1)
+    assert.match(result.stderr, /DINGTALK_CLIENT_SECRET = <redacted>/)
+    assert.doesNotMatch(result.stderr, /abcdefghijklmnopqrstuvwxyz123456/)
+  } finally {
+    await fakeApi.close()
+  }
 })
