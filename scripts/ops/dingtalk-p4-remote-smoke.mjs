@@ -40,6 +40,10 @@ const REQUIRED_CHECKS = [
     label: 'Create and bind a no-email DingTalk-synced local user',
   },
 ]
+
+const GROUP_ROBOT_KEYWORD_PREFIX = 'P4 metasheet'
+const DELIVERY_READ_ATTEMPTS = 20
+const DELIVERY_READ_DELAY_MS = 1_500
 const MANUAL_EVIDENCE_REQUIREMENTS = [
   {
     id: 'send-group-message-form-link',
@@ -537,6 +541,29 @@ function getDeliveries(payload) {
   return []
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function requestDeliveriesWithRetry(opts, route, label, minCount) {
+  let lastError = null
+  let lastCount = 0
+  for (let attempt = 1; attempt <= DELIVERY_READ_ATTEMPTS; attempt += 1) {
+    try {
+      const deliveries = getDeliveries(await requestJson(opts, route))
+      lastCount = deliveries.length
+      if (deliveries.length >= minCount) return deliveries
+      lastError = new Error(`${label} delivery rows ${deliveries.length} < ${minCount}`)
+    } catch (error) {
+      lastError = error
+    }
+    if (attempt < DELIVERY_READ_ATTEMPTS) {
+      await sleep(DELIVERY_READ_DELAY_MS)
+    }
+  }
+  throw lastError ?? new Error(`${label} delivery rows ${lastCount} < ${minCount}`)
+}
+
 function getExecutionStatus(execution) {
   if (!isObject(execution)) return 'unknown'
   return typeof execution.status === 'string' ? execution.status : 'unknown'
@@ -836,19 +863,18 @@ async function runSmoke(opts, evidence) {
           method: 'POST',
           expected: [200, 204],
           body: {
-            subject: `P4 smoke ${destination.key}`,
-            content: `P4 DingTalk group destination test-send for ${sheetId}.`,
+            subject: `${GROUP_ROBOT_KEYWORD_PREFIX} smoke ${destination.key}`,
+            content: `${GROUP_ROBOT_KEYWORD_PREFIX} DingTalk group destination test-send for ${sheetId}.`,
           },
         },
       )
-      const deliveries = getDeliveries(await requestJson(
+      const deliveries = await requestDeliveriesWithRetry(
         opts,
         `/api/multitable/dingtalk-groups/${encodePath(destination.id)}/deliveries?sheetId=${encodeURIComponent(sheetId)}&limit=20`,
-      ))
+        `DingTalk group ${destination.key} test-send`,
+        1,
+      )
       manualDeliveryCounts[destination.id] = deliveries.length
-      if (deliveries.length === 0) {
-        throw new Error(`DingTalk group ${destination.key} test-send produced no delivery rows`)
-      }
     }
   }
 
@@ -875,8 +901,8 @@ async function runSmoke(opts, evidence) {
         actionType: 'send_dingtalk_group_message',
         actionConfig: {
           destinationIds: destinations.map((destination) => destination.id),
-          titleTemplate: 'DingTalk P4 protected form smoke',
-          bodyTemplate: 'Open the protected form link from DingTalk. Only allowlisted local users or member groups should be able to submit.',
+          titleTemplate: `${GROUP_ROBOT_KEYWORD_PREFIX} DingTalk protected form smoke`,
+          bodyTemplate: `${GROUP_ROBOT_KEYWORD_PREFIX}: Open the protected form link from DingTalk. Only allowlisted local users or member groups should be able to submit.`,
           publicFormViewId: formViewId,
         },
       },
@@ -892,14 +918,13 @@ async function runSmoke(opts, evidence) {
       { method: 'POST', expected: [200] },
     )
     assertSuccessfulExecution(execution, 'group automation')
-    const ruleDeliveries = getDeliveries(await requestJson(
+    const ruleDeliveries = await requestDeliveriesWithRetry(
       opts,
       `/api/multitable/sheets/${encodePath(sheetId)}/automations/${encodePath(groupRuleId)}/dingtalk-group-deliveries?limit=20`,
-    ))
+      'group automation',
+      destinations.length,
+    )
     groupRuleDeliveryCount = ruleDeliveries.length
-    if (ruleDeliveries.length < destinations.length) {
-      throw new Error(`group automation delivery rows ${ruleDeliveries.length} < destination count ${destinations.length}`)
-    }
   }
 
   setCheck(evidence, 'send-group-message-form-link', 'pending', makeManualEvidenceSkeleton(
@@ -951,14 +976,13 @@ async function runSmoke(opts, evidence) {
         { method: 'POST', expected: [200] },
       )
       assertSuccessfulExecution(execution, 'person automation')
-      const personDeliveries = getDeliveries(await requestJson(
+      const personDeliveries = await requestDeliveriesWithRetry(
         opts,
         `/api/multitable/sheets/${encodePath(sheetId)}/automations/${encodePath(personRuleId)}/dingtalk-person-deliveries?limit=20`,
-      ))
+        'person automation',
+        1,
+      )
       personRuleDeliveryCount = personDeliveries.length
-      if (personDeliveries.length === 0) {
-        throw new Error('person automation test-run produced no delivery rows')
-      }
     }
   }
 

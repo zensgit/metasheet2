@@ -31,6 +31,10 @@ node scripts/ops/dingtalk-p4-smoke-preflight.mjs \
 - `GET /api/auth/me` validates the bearer token after backend health passes.
 - Invalid or expired bearer tokens fail as `auth-token-valid` before remote
   smoke state mutations or DingTalk delivery attempts.
+- Group robot test-send and group form-link automation payloads include the
+  required `P4 metasheet` keywords for the real A/B robots.
+- Delivery-history reads tolerate delayed DingTalk delivery row writes after
+  automation test-run completion.
 - Secrets remain outside stdout and generated summaries.
 
 ## Live Finding
@@ -55,3 +59,23 @@ targets, and `api-health`. It then failed safely at
 `GET http://142.171.239.56:8081/api/auth/me` with `401 Invalid token`. No raw
 bearer token, robot access token, or SEC secret was written to the generated
 summary.
+
+After re-issuing a fresh 72h 142 application admin token from the running
+backend container, the live preflight in
+`output/dingtalk-p4-remote-smoke-session/142-token-preflight-20260430T-live`
+passed every check, including `auth-token-valid`.
+
+The first full live smoke reached group test-send and failed because the real
+robots enforce keywords. After adding `P4 metasheet` to group smoke messages,
+the live run in
+`output/dingtalk-p4-remote-smoke-session/142-session-20260430T-live-keyword-retry30`
+passed group robot binding, test-send, and group automation delivery history.
+It then stopped at person automation because the running `metasheet-backend`
+container has no `DINGTALK_AGENT_ID` or `DINGTALK_NOTIFY_AGENT_ID` configured.
+
+The group-only live smoke in
+`output/dingtalk-p4-remote-smoke-session/142-session-20260430T-live-group-only`
+completed with exit code 0. It verified disposable base/form creation, two
+group robot destinations, both group test-send delivery rows, DingTalk-granted
+form share, and two group automation delivery rows. Manual client evidence and
+person-message evidence remain pending by design.

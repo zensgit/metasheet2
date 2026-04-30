@@ -151,7 +151,8 @@ function createFakeApiServer(options = {}) {
       const testSendMatch = url.pathname.match(/^\/api\/multitable\/dingtalk-groups\/(dt_group_[12])\/test-send$/)
       if (req.method === 'POST' && testSendMatch) {
         assert.equal(url.searchParams.get('sheetId'), 'sheet_1')
-        assert.match(body.subject, /P4 smoke/)
+        assert.match(body.subject, /P4 metasheet smoke/)
+        assert.match(body.content, /P4 metasheet DingTalk group destination test-send/)
         sendJson(res, 204)
         return
       }
@@ -180,6 +181,8 @@ function createFakeApiServer(options = {}) {
         if (body.actionType === 'send_dingtalk_group_message') {
           assert.deepEqual(body.actionConfig.destinationIds, ['dt_group_1', 'dt_group_2'])
           assert.equal(body.actionConfig.publicFormViewId, 'view_form_1')
+          assert.match(body.actionConfig.titleTemplate, /P4 metasheet/)
+          assert.match(body.actionConfig.bodyTemplate, /P4 metasheet/)
           sendJson(res, 200, { ok: true, data: { rule: { id: 'rule_group_1', actionType: body.actionType } } })
           return
         }

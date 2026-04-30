@@ -25,11 +25,20 @@ smoke started mutating state.
   with `GET /api/auth/me` after backend health passes. The auth check uses the
   same API-prefix handling and reports a redacted `auth-token-valid` failure on
   `401` or `403`.
+- `scripts/ops/dingtalk-p4-remote-smoke.mjs` now includes the P4 robot
+  keywords `P4 metasheet` in group test-send and group form-link automation
+  messages so the real A/B robots with keyword security can accept smoke
+  traffic.
+- Delivery-history reads now retry for a short window after group/person
+  automation test-runs. The 142 backend can write DingTalk delivery rows a few
+  seconds after the test-run API returns.
 - Regression tests cover a frontend HTML `/health` response plus a backend JSON
   `/api/health` response for both preflight and API runner flows.
 - Regression tests also cover valid-token preflight success and invalid-token
   preflight failure without leaking the bearer token into stdout or generated
   summaries.
+- Regression tests assert the group robot smoke payload includes both required
+  keywords.
 
 ## Result
 
@@ -37,4 +46,6 @@ Operators can keep the public web base at `http://142.171.239.56:8081` while
 using an API base such as `http://142.171.239.56:8081/api` without the smoke
 runner failing on the frontend health page. Expired 142 application admin tokens
 now fail during preflight before the remote smoke creates any tables or sends
-any DingTalk messages.
+any DingTalk messages. Real group robot keyword checks and delayed delivery
+history writes are handled by the runner, leaving only genuine environment
+configuration and manual DingTalk-client evidence as release blockers.
