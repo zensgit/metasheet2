@@ -114,6 +114,11 @@ router.beforeEach(async (to, _from, next) => {
       return next(flags.resolveHomePath())
     }
 
+    const requiredPermissions = Array.isArray(to.meta?.permissions) ? to.meta.permissions : []
+    if (requiredPermissions.length > 0 && !requiredPermissions.every((permission) => auth.hasPermission(permission))) {
+      return next(flags.resolveHomePath())
+    }
+
     if (flags.isAttendanceFocused()) {
       const allowed = new Set<string>([
         '/attendance',
@@ -128,7 +133,7 @@ router.beforeEach(async (to, _from, next) => {
 
     if (typeof flags.isPlmWorkbenchFocused === 'function' && flags.isPlmWorkbenchFocused()) {
       const path = String(to.path || '')
-      const allowedPrefixes = ['/plm', '/workflows', '/approvals']
+      const allowedPrefixes = ['/plm', '/workflows', '/approvals', '/integrations']
       const allowed = allowedPrefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))
       if (!allowed) {
         return next('/plm')

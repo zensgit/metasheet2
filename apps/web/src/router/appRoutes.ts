@@ -188,7 +188,7 @@ export const appRoutes: RouteRecordRaw[] = [
     path: '/integrations/k3-wise',
     name: AppRouteNames.INTEGRATION_K3_WISE,
     component: () => import('../views/IntegrationK3WiseSetupView.vue'),
-    meta: { title: 'K3 WISE Integration', titleZh: 'K3 WISE 对接', requiresAuth: true, requiredFeature: 'attendanceAdmin' }
+    meta: { title: 'K3 WISE Integration', titleZh: 'K3 WISE 对接', requiresAuth: true, permissions: ['integration:write'] }
   },
   {
     path: '/workflows',

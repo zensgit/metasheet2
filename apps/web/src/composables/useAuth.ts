@@ -410,6 +410,24 @@ export function useAuth() {
     return getAccessSnapshot().isAdmin
   }
 
+  function hasPermission(requiredPermission: string): boolean {
+    const normalized = String(requiredPermission || '').trim()
+    if (!normalized) return true
+
+    const snapshot = getAccessSnapshot()
+    if (snapshot.isAdmin || snapshot.roles.includes('admin')) return true
+
+    const permissions = snapshot.permissions
+    if (permissions.includes(normalized) || permissions.includes('*:*')) return true
+
+    const [resource, action] = normalized.split(':')
+    if (!resource || !action) return false
+    if (permissions.includes(`${resource}:*`)) return true
+    if (permissions.includes(`${resource}:admin`) && action !== 'admin') return true
+    if (action === 'read' && permissions.includes(`${resource}:write`)) return true
+    return false
+  }
+
   function getCurrentUser(): SessionUserRecord | null {
     return (extractSessionUser(sessionCache?.payload ?? null) as SessionUserRecord | null) ?? null
   }
@@ -434,6 +452,7 @@ export function useAuth() {
     buildAuthHeaders,
     getAccessSnapshot,
     hasAdminAccess,
+    hasPermission,
     getCurrentUser,
     getCurrentUserId,
   }

@@ -164,12 +164,19 @@ describe('K3 WISE setup helpers', () => {
     expect(() => buildK3WiseSetupPayloads(form)).toThrow('lcid must be a positive integer')
   })
 
-  it('keeps the K3 WISE setup route behind the same admin feature as the nav entry', async () => {
+  it('keeps the K3 WISE setup route behind integration write permission', async () => {
     const source = await readFile('src/router/appRoutes.ts', 'utf8')
+    const mainSource = await readFile('src/main.ts', 'utf8')
+    const routeStart = source.indexOf("path: '/integrations/k3-wise'")
+    const routeEnd = source.indexOf("path: '/workflows'", routeStart)
+    const routeBlock = source.slice(routeStart, routeEnd)
 
-    expect(source).toContain("path: '/integrations/k3-wise'")
-    expect(source).toContain("titleZh: 'K3 WISE 对接'")
-    expect(source).toContain("requiredFeature: 'attendanceAdmin'")
+    expect(routeBlock).toContain("path: '/integrations/k3-wise'")
+    expect(routeBlock).toContain("titleZh: 'K3 WISE 对接'")
+    expect(routeBlock).toContain("permissions: ['integration:write']")
+    expect(routeBlock).not.toContain("requiredFeature: 'attendanceAdmin'")
+    expect(mainSource).toContain('to.meta?.permissions')
+    expect(mainSource).toContain('auth.hasPermission(permission)')
   })
 
   it('splits comma and newline table lists', () => {
