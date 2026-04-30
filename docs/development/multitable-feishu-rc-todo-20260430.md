@@ -160,37 +160,37 @@ Expected docs:
 
 - [x] Audit OpenAPI coverage for new field types.
   - PR: #1277
-  - Merge commit: pending
+  - Merge commit: `e97e22648`
   - Development MD: `docs/development/multitable-openapi-rc-contract-cleanup-development-20260430.md`
   - Verification MD: `docs/development/multitable-openapi-rc-contract-cleanup-verification-20260430.md`
   - Verification summary: `MultitableFieldType` now centralizes all runtime field types including `currency`, `percent`, `rating`, `url`, `email`, and `phone`.
 - [x] Audit OpenAPI coverage for new view types: `gantt`, `hierarchy`.
   - PR: #1277
-  - Merge commit: pending
+  - Merge commit: `e97e22648`
   - Development MD: `docs/development/multitable-openapi-rc-contract-cleanup-development-20260430.md`
   - Verification MD: `docs/development/multitable-openapi-rc-contract-cleanup-verification-20260430.md`
   - Verification summary: `MultitableViewType` now enumerates `grid`, `form`, `kanban`, `gallery`, `calendar`, `timeline`, `gantt`, and `hierarchy`.
 - [x] Audit OpenAPI coverage for xlsx routes after Phase 2.
   - PR: #1277
-  - Merge commit: pending
+  - Merge commit: `e97e22648`
   - Development MD: `docs/development/multitable-openapi-rc-contract-cleanup-development-20260430.md`
   - Verification MD: `docs/development/multitable-openapi-rc-contract-cleanup-verification-20260430.md`
   - Verification summary: parity guard checks import/export route presence and export response headers including `Content-Disposition`.
 - [x] Regenerate and commit OpenAPI dist artifacts.
   - PR: #1277
-  - Merge commit: pending
+  - Merge commit: `e97e22648`
   - Development MD: `docs/development/multitable-openapi-rc-contract-cleanup-development-20260430.md`
   - Verification MD: `docs/development/multitable-openapi-rc-contract-cleanup-verification-20260430.md`
   - Verification summary: `packages/openapi/dist/{combined.openapi.yml,openapi.json,openapi.yaml}` regenerated.
 - [x] Run OpenAPI contract guard.
   - PR: #1277
-  - Merge commit: pending
+  - Merge commit: `e97e22648`
   - Development MD: `docs/development/multitable-openapi-rc-contract-cleanup-development-20260430.md`
   - Verification MD: `docs/development/multitable-openapi-rc-contract-cleanup-verification-20260430.md`
   - Verification summary: `node --test scripts/ops/multitable-openapi-parity.test.mjs` passes.
 - [x] Add a verification doc listing schema additions and generated outputs.
   - PR: #1277
-  - Merge commit: pending
+  - Merge commit: `e97e22648`
   - Development MD: `docs/development/multitable-openapi-rc-contract-cleanup-development-20260430.md`
   - Verification MD: `docs/development/multitable-openapi-rc-contract-cleanup-verification-20260430.md`
   - Verification summary: this Phase 3 dev/verification pair records implementation scope and validation commands.
