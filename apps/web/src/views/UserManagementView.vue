@@ -42,6 +42,9 @@
         <router-link class="user-admin__button user-admin__button--secondary user-admin__button-link" :to="directoryReturnLocation">
           返回目录同步
         </router-link>
+        <button class="user-admin__button user-admin__button--secondary" type="button" @click="clearDirectoryNavigationContext()">
+          清除目录回跳
+        </button>
       </div>
     </section>
     <section class="user-admin__panel user-admin__panel--create">
@@ -1494,6 +1497,19 @@ function readDirectoryFailureMessage(value: string): string {
   if (value === 'missing_account') return '未找到目标目录成员'
   if (value.trim().length > 0) return value.trim()
   return ''
+}
+
+function clearDirectoryNavigationContext(): void {
+  const nextNavigation: InitialUserNavigation = {
+    ...userNavigation.value,
+    source: '',
+    integrationId: '',
+    accountId: '',
+    directoryFailure: '',
+  }
+  userNavigation.value = nextNavigation
+  replaceUserNavigation(nextNavigation)
+  setStatus('已清除目录回跳上下文')
 }
 
 function replaceUserNavigation(navigation: InitialUserNavigation): void {
