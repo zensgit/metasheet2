@@ -307,7 +307,11 @@ export class FormulaEngine {
 
     // Check if it's a string (quoted)
     if (formula.startsWith('"') && formula.endsWith('"')) {
-      return { type: 'string', value: formula.slice(1, -1) }
+      try {
+        return { type: 'string', value: JSON.parse(formula) as string }
+      } catch {
+        return { type: 'error', value: '#ERROR!' }
+      }
     }
 
     // Check if it's an array literal (e.g. [[1, 2], [3, 4]])

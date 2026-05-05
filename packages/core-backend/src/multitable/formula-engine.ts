@@ -61,7 +61,7 @@ export class MultitableFormulaEngine {
     const resolved = expression.replace(FIELD_REF_PATTERN, (_match, fieldId: string) => {
       const value = recordData[fieldId]
       if (value === null || value === undefined) return '0'
-      if (typeof value === 'string') return `"${value}"`
+      if (typeof value === 'string') return JSON.stringify(value)
       if (typeof value === 'number') return String(value)
       if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE'
       return String(value)

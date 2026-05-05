@@ -60,6 +60,16 @@ describe('FormulaEngine - new functions', () => {
       const result = await engine.calculate('=CONCAT("val",1)', makeContext())
       expect(result).toBe('val1')
     })
+
+    it('decodes escaped quoted string literals', async () => {
+      const result = await engine.calculate('=CONCAT("A \\"quoted\\" value","\\\\path")', makeContext())
+      expect(result).toBe('A "quoted" value\\path')
+    })
+
+    it('returns #ERROR! for malformed quoted string literals', async () => {
+      const result = await engine.calculate('=CONCAT("bad \\\\","suffix")', makeContext())
+      expect(result).toBe('#ERROR!')
+    })
   })
 
   describe('DATEDIF', () => {
@@ -158,6 +168,24 @@ describe('MultitableFormulaEngine', () => {
         sampleFields,
       )
       expect(result).toBe('Widget total')
+    })
+
+    it('escapes quoted string field references before evaluation', async () => {
+      const result = await mtEngine.evaluateField(
+        '=CONCAT({fld_name}," shipped")',
+        { fld_name: 'Widget "Pro"' },
+        sampleFields,
+      )
+      expect(result).toBe('Widget "Pro" shipped')
+    })
+
+    it('escapes backslash and newline string field references', async () => {
+      const result = await mtEngine.evaluateField(
+        '=CONCAT({fld_name}," done")',
+        { fld_name: 'C:\\temp\nline2' },
+        sampleFields,
+      )
+      expect(result).toBe('C:\\temp\nline2 done')
     })
   })
 
