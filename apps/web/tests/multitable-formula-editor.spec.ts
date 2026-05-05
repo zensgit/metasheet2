@@ -34,6 +34,31 @@ describe('multitable formula editor', () => {
     ])).toContainEqual({ severity: 'error', message: 'Unknown field reference {fld_missing}.' })
   })
 
+  it('reports common formula syntax issues before save', () => {
+    const fields = [{ id: 'fld_price', name: 'Price', type: 'number' }]
+
+    expect(validateFormulaExpression('=CONCAT("unterminated)', fields)).toContainEqual({
+      severity: 'error',
+      message: 'Quoted string is not closed.',
+    })
+    expect(validateFormulaExpression('=SUM([1, 2)', fields)).toContainEqual({
+      severity: 'error',
+      message: 'Array brackets are not balanced.',
+    })
+    expect(validateFormulaExpression('=SUM({fld_price)', fields)).toContainEqual({
+      severity: 'error',
+      message: 'Field reference braces are not balanced.',
+    })
+    expect(validateFormulaExpression('=SUM({fld_price}) +', fields)).toContainEqual({
+      severity: 'error',
+      message: 'Formula cannot end with a binary operator.',
+    })
+    expect(validateFormulaExpression('="("', fields)).not.toContainEqual({
+      severity: 'error',
+      message: 'Parentheses are not balanced.',
+    })
+  })
+
   it('builds categorized function catalog sections and insertion text', () => {
     const mathSections = getFormulaFunctionCatalog('round', 'math')
     expect(mathSections).toHaveLength(1)
