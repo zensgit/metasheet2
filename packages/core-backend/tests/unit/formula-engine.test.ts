@@ -271,6 +271,19 @@ describe('Formula Engine', () => {
       expect(await engine.calculate('=1 + 2 & " items"', context)).toBe('3 items')
     })
 
+    test('Power operator', async () => {
+      expect(await engine.calculate('=2 ^ 3', context)).toBe(8)
+      expect(await engine.calculate('=2^3^2', context)).toBe(512)
+      expect(await engine.calculate('=2 * 3^2', context)).toBe(18)
+      expect(await engine.calculate('=2^-3', context)).toBe(0.125)
+    })
+
+    test('Power operator binds tighter than unary signs', async () => {
+      expect(await engine.calculate('=-2^2', context)).toBe(-4)
+      expect(await engine.calculate('=(-2)^2', context)).toBe(4)
+      expect(await engine.calculate('=--2^2', context)).toBe(4)
+    })
+
     test('Same-precedence arithmetic operators are left-associative', async () => {
       expect(await engine.calculate('=5 - 3 - 1', context)).toBe(1)
       expect(await engine.calculate('=8 / 4 / 2', context)).toBe(1)

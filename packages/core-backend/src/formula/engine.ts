@@ -302,9 +302,9 @@ export class FormulaEngine {
       return this.parseFormula(formula.slice(1, -1).trim())
     }
 
-    // Check for operators from lowest to highest precedence. Operators in the
-    // same precedence group are left-associative, so split on the rightmost
-    // top-level operator to recursively keep the left side grouped first.
+    // Check for left-associative operators from lowest to highest precedence.
+    // Split on the rightmost top-level operator to recursively keep the left
+    // side grouped first.
     const operatorGroups = [
       ['>=', '<=', '<>', '=', '>', '<'],
       ['&'],
@@ -328,6 +328,20 @@ export class FormulaEngine {
     const unaryExpression = this.parseUnaryExpression(formula)
     if (unaryExpression) {
       return unaryExpression
+    }
+
+    // Exponentiation is right-associative and binds tighter than unary signs,
+    // so parse it after unary handling and split on the leftmost top-level ^.
+    const exponentMatch = this.findTopLevelOperator(formula, ['^'], 'right')
+    if (exponentMatch) {
+      return {
+        type: 'operator',
+        operator: exponentMatch.operator,
+        left: this.parseFormula(formula.slice(0, exponentMatch.index).trim()),
+        right: this.parseFormula(
+          formula.slice(exponentMatch.index + exponentMatch.operator.length).trim()
+        )
+      }
     }
 
     // Check if it's a boolean
@@ -414,7 +428,11 @@ export class FormulaEngine {
   /**
    * Find an operator that is not inside quoted strings, function arguments, or arrays.
    */
-  private findTopLevelOperator(formula: string, operators: string[]): { index: number; operator: string } | null {
+  private findTopLevelOperator(
+    formula: string,
+    operators: string[],
+    associativity: 'left' | 'right' = 'left'
+  ): { index: number; operator: string } | null {
     let depth = 0
     let inQuotes = false
     let match: { index: number; operator: string } | null = null
@@ -445,6 +463,9 @@ export class FormulaEngine {
             if ((operator === '+' || operator === '-') && this.isUnarySign(formula, i)) {
               continue
             }
+            if (associativity === 'right') {
+              return { index: i, operator }
+            }
             match = { index: i, operator }
             i += operator.length - 1
             break
@@ -469,7 +490,7 @@ export class FormulaEngine {
       const mantissaTail = formula[previousIndex - 1]
       return exponentIsAdjacent && (/\d/.test(mantissaTail) || mantissaTail === '.')
     }
-    return ['+', '-', '*', '/', '=', '>', '<', '(', '[', ','].includes(previous)
+    return ['+', '-', '*', '/', '^', '=', '>', '<', '(', '[', ','].includes(previous)
   }
 
   private parseUnaryExpression(formula: string): UnaryNode | null {
@@ -623,6 +644,7 @@ export class FormulaEngine {
       case '-': return (left as number) - (right as number)
       case '*': return (left as number) * (right as number)
       case '/': return right === 0 ? '#DIV/0!' : (left as number) / (right as number)
+      case '^': return Math.pow(Number(left), Number(right))
       case '=': return left === right
       case '>': return (left as number) > (right as number)
       case '<': return (left as number) < (right as number)
