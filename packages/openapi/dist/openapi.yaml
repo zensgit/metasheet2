@@ -2011,6 +2011,10 @@ components:
           type: array
           items:
             type: string
+        capabilityOrigin:
+          $ref: '#/components/schemas/MultitableCapabilityOrigin'
+        permissions:
+          $ref: '#/components/schemas/MultitableScopedPermissions'
     MultitableCapabilities:
       type: object
       properties:
@@ -2057,6 +2061,7 @@ components:
       enum:
         - user
         - role
+        - member-group
     MultitableSheetPermissionEntry:
       type: object
       properties:
@@ -2189,6 +2194,19 @@ components:
         - canEdit
         - canDelete
         - canComment
+    MultitableScopedPermissions:
+      type: object
+      properties:
+        fieldPermissions:
+          $ref: '#/components/schemas/MultitableFieldPermissions'
+        viewPermissions:
+          $ref: '#/components/schemas/MultitableViewPermissions'
+        rowActions:
+          $ref: '#/components/schemas/MultitableRowActions'
+        rowActionOverrides:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/MultitableRowActions'
     MultitableDependencyNode:
       type: object
       properties:
@@ -2317,10 +2335,19 @@ components:
             $ref: '#/components/schemas/MultitableView'
         capabilities:
           $ref: '#/components/schemas/MultitableCapabilities'
-        fieldCapabilities:
-          allOf:
-            - $ref: '#/components/schemas/MultitableFieldCapabilities'
-          nullable: true
+        capabilityOrigin:
+          $ref: '#/components/schemas/MultitableCapabilityOrigin'
+        fieldPermissions:
+          $ref: '#/components/schemas/MultitableFieldPermissions'
+        viewPermissions:
+          $ref: '#/components/schemas/MultitableViewPermissions'
+      required:
+        - sheets
+        - views
+        - capabilities
+        - capabilityOrigin
+        - fieldPermissions
+        - viewPermissions
     MultitableViewData:
       type: object
       properties:
@@ -2338,14 +2365,6 @@ components:
           $ref: '#/components/schemas/MultitableViewLinkSummaries'
         attachmentSummaries:
           $ref: '#/components/schemas/MultitableViewAttachmentSummaries'
-        fieldCapabilities:
-          allOf:
-            - $ref: '#/components/schemas/MultitableFieldCapabilities'
-          nullable: true
-        dependencyGraph:
-          allOf:
-            - $ref: '#/components/schemas/MultitableDependencyGraph'
-          nullable: true
         view:
           allOf:
             - $ref: '#/components/schemas/MultitableView'
@@ -2422,14 +2441,14 @@ components:
             $ref: '#/components/schemas/MultitableField'
         capabilities:
           $ref: '#/components/schemas/MultitableCapabilities'
-        fieldCapabilities:
-          allOf:
-            - $ref: '#/components/schemas/MultitableFieldCapabilities'
-          nullable: true
-        dependencyGraph:
-          allOf:
-            - $ref: '#/components/schemas/MultitableDependencyGraph'
-          nullable: true
+        capabilityOrigin:
+          $ref: '#/components/schemas/MultitableCapabilityOrigin'
+        fieldPermissions:
+          $ref: '#/components/schemas/MultitableFieldPermissions'
+        viewPermissions:
+          $ref: '#/components/schemas/MultitableViewPermissions'
+        rowActions:
+          $ref: '#/components/schemas/MultitableRowActions'
         record:
           allOf:
             - $ref: '#/components/schemas/MultitableRecord'
@@ -2447,6 +2466,7 @@ components:
         - sheet
         - fields
         - capabilities
+        - fieldPermissions
     MultitablePersonFieldPrepareResult:
       type: object
       properties:

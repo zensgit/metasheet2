@@ -2882,6 +2882,12 @@
             "items": {
               "type": "string"
             }
+          },
+          "capabilityOrigin": {
+            "$ref": "#/components/schemas/MultitableCapabilityOrigin"
+          },
+          "permissions": {
+            "$ref": "#/components/schemas/MultitableScopedPermissions"
           }
         }
       },
@@ -2945,7 +2951,8 @@
         "type": "string",
         "enum": [
           "user",
-          "role"
+          "role",
+          "member-group"
         ]
       },
       "MultitableSheetPermissionEntry": {
@@ -3140,6 +3147,26 @@
           "canComment"
         ]
       },
+      "MultitableScopedPermissions": {
+        "type": "object",
+        "properties": {
+          "fieldPermissions": {
+            "$ref": "#/components/schemas/MultitableFieldPermissions"
+          },
+          "viewPermissions": {
+            "$ref": "#/components/schemas/MultitableViewPermissions"
+          },
+          "rowActions": {
+            "$ref": "#/components/schemas/MultitableRowActions"
+          },
+          "rowActionOverrides": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/MultitableRowActions"
+            }
+          }
+        }
+      },
       "MultitableDependencyNode": {
         "type": "object",
         "properties": {
@@ -3324,15 +3351,24 @@
           "capabilities": {
             "$ref": "#/components/schemas/MultitableCapabilities"
           },
-          "fieldCapabilities": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/MultitableFieldCapabilities"
-              }
-            ],
-            "nullable": true
+          "capabilityOrigin": {
+            "$ref": "#/components/schemas/MultitableCapabilityOrigin"
+          },
+          "fieldPermissions": {
+            "$ref": "#/components/schemas/MultitableFieldPermissions"
+          },
+          "viewPermissions": {
+            "$ref": "#/components/schemas/MultitableViewPermissions"
           }
-        }
+        },
+        "required": [
+          "sheets",
+          "views",
+          "capabilities",
+          "capabilityOrigin",
+          "fieldPermissions",
+          "viewPermissions"
+        ]
       },
       "MultitableViewData": {
         "type": "object",
@@ -3357,22 +3393,6 @@
           },
           "attachmentSummaries": {
             "$ref": "#/components/schemas/MultitableViewAttachmentSummaries"
-          },
-          "fieldCapabilities": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/MultitableFieldCapabilities"
-              }
-            ],
-            "nullable": true
-          },
-          "dependencyGraph": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/MultitableDependencyGraph"
-              }
-            ],
-            "nullable": true
           },
           "view": {
             "allOf": [
@@ -3490,21 +3510,17 @@
           "capabilities": {
             "$ref": "#/components/schemas/MultitableCapabilities"
           },
-          "fieldCapabilities": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/MultitableFieldCapabilities"
-              }
-            ],
-            "nullable": true
+          "capabilityOrigin": {
+            "$ref": "#/components/schemas/MultitableCapabilityOrigin"
           },
-          "dependencyGraph": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/MultitableDependencyGraph"
-              }
-            ],
-            "nullable": true
+          "fieldPermissions": {
+            "$ref": "#/components/schemas/MultitableFieldPermissions"
+          },
+          "viewPermissions": {
+            "$ref": "#/components/schemas/MultitableViewPermissions"
+          },
+          "rowActions": {
+            "$ref": "#/components/schemas/MultitableRowActions"
           },
           "record": {
             "allOf": [
@@ -3532,7 +3548,8 @@
           "submitPath",
           "sheet",
           "fields",
-          "capabilities"
+          "capabilities",
+          "fieldPermissions"
         ]
       },
       "MultitablePersonFieldPrepareResult": {
