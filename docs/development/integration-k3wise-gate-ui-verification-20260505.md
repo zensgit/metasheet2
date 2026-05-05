@@ -46,6 +46,18 @@ Customer GATE import follow-up:
   - mock PoC demo ended with `K3 WISE PoC mock chain verified end-to-end (PASS)`.
 - `git diff --check`: passed.
 
+Customer GATE import UI regression follow-up:
+
+- `k3WiseSetupView.spec.ts`: 1/1 passed.
+- `k3WiseSetup.spec.ts` + `platform-shell-nav.spec.ts`: 27/27 passed.
+  - `platform-shell-nav.spec.ts` printed the existing `WebSocket server error: Port is already in use` warning, but all assertions passed.
+- `@metasheet/web type-check`: passed.
+- `@metasheet/web build`: passed. Vite reported the existing dynamic import and large chunk warnings.
+- `verify:integration-k3wise:poc`: passed.
+  - preflight tests: 16/16 passed.
+  - evidence tests: 31/31 passed.
+  - mock PoC demo ended with `K3 WISE PoC mock chain verified end-to-end (PASS)`.
+
 ## Coverage Added
 
 - GATE draft generation from the setup form.
@@ -57,6 +69,7 @@ Customer GATE import follow-up:
 - Boolean normalization for English, numeric, and Chinese customer hand-edit variants.
 - Alias normalization for K3 environment, PLM read method, and SQL Server mode.
 - Secret-like field detection and password-field clearing on import.
+- Page-level regression coverage for the import textarea, import button, warning list, rendered form values, and password clearing.
 
 ## Not Covered
 

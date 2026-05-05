@@ -16,7 +16,7 @@
       </div>
     </header>
 
-    <p v-if="statusMessage" class="k3-setup__status" :data-kind="statusKind">{{ statusMessage }}</p>
+    <p v-if="statusMessage" class="k3-setup__status" :data-kind="statusKind" data-testid="k3-wise-status">{{ statusMessage }}</p>
 
     <section class="k3-setup__layout">
       <aside class="k3-setup__rail">
@@ -180,6 +180,7 @@
             <span>导入客户 GATE JSON</span>
             <textarea
               v-model="gateImportText"
+              data-testid="k3-wise-gate-import-textarea"
               rows="6"
               spellcheck="false"
               placeholder="粘贴客户回传的 GATE JSON，导入后会清空密码字段"
@@ -188,12 +189,13 @@
           <button
             class="k3-setup__btn k3-setup__btn--full"
             type="button"
+            data-testid="k3-wise-gate-import-button"
             :disabled="!gateImportText.trim()"
             @click="importGateJson"
           >
             导入 GATE JSON
           </button>
-          <ul v-if="gateImportWarnings.length" class="k3-setup__issues k3-setup__issues--compact">
+          <ul v-if="gateImportWarnings.length" class="k3-setup__issues k3-setup__issues--compact" data-testid="k3-wise-gate-import-warnings">
             <li v-for="warning in gateImportWarnings" :key="`gate-import:${warning}`">
               {{ warning }}
             </li>

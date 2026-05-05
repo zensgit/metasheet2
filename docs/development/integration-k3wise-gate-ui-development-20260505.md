@@ -68,6 +68,22 @@ For a customer-returned packet:
 4. Re-enter any required credentials through the credential form, not through pasted JSON.
 5. Re-run the visible GATE validation before copying/downloading a corrected packet.
 
+## UI Regression Coverage
+
+The view exposes stable test selectors for the customer GATE import path:
+
+- `data-testid="k3-wise-gate-import-textarea"`
+- `data-testid="k3-wise-gate-import-button"`
+- `data-testid="k3-wise-gate-import-warnings"`
+- `data-testid="k3-wise-status"`
+
+`apps/web/tests/k3WiseSetupView.spec.ts` mounts the real setup page, mocks the integration API bootstrap calls, pastes a customer-style GATE JSON payload, clicks the explicit import button, and verifies:
+
+- visible K3, PLM, SQL Server, rollback, and BOM form fields are populated.
+- Chinese/numeric customer variants normalize in the rendered controls.
+- all visible password inputs are cleared after import.
+- ignored secret-like fields appear as warnings in the page.
+
 ## Boundary
 
 This is a readiness/UI slice. Real live validation still requires customer GATE answers, customer PLM access, and a K3 WISE test account set to Save-only.
