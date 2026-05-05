@@ -58,6 +58,7 @@
     "verify:multitable-pilot:release-gate:staging": "RUN_MODE=staging bash scripts/ops/multitable-pilot-release-gate.sh",
     "verify:multitable-pilot:release-gate:test": "node --test scripts/ops/multitable-pilot-release-gate.test.mjs",
     "verify:multitable-openapi:parity": "pnpm exec tsx packages/openapi/tools/build.ts && node --test scripts/ops/multitable-openapi-parity.test.mjs",
+    "verify:multitable-yjs:contract": "node --test scripts/ops/multitable-yjs-contract-parity.test.mjs",
     "prepare:multitable-pilot:handoff": "node scripts/ops/multitable-pilot-handoff.mjs",
     "prepare:multitable-pilot:handoff:release-bound": "bash scripts/ops/multitable-pilot-handoff-release-bound.sh",
     "prepare:multitable-pilot:handoff:staging:release-bound": "RUN_MODE=staging bash scripts/ops/multitable-pilot-handoff-release-bound.sh",

@@ -1,0 +1,254 @@
+{
+  "asyncapi": "2.6.0",
+  "info": {
+    "title": "MetaSheet Multitable Yjs Realtime Events",
+    "version": "1.0.0",
+    "description": "Socket.IO contract for record-scoped Yjs collaboration on the /yjs namespace."
+  },
+  "servers": {
+    "yjs": {
+      "url": "/yjs",
+      "protocol": "socket.io",
+      "security": [
+        {
+          "jwtAuth": []
+        }
+      ],
+      "description": "Socket.IO namespace mounted by YjsWebSocketAdapter. Clients authenticate with handshake auth.token."
+    }
+  },
+  "channels": {
+    "/yjs": {
+      "bindings": {
+        "socketio": {
+          "namespace": "/yjs"
+        }
+      },
+      "publish": {
+        "summary": "Client-to-server Yjs events.",
+        "message": {
+          "oneOf": [
+            {
+              "$ref": "#/components/messages/YjsSubscribe"
+            },
+            {
+              "$ref": "#/components/messages/YjsClientMessage"
+            },
+            {
+              "$ref": "#/components/messages/YjsClientUpdate"
+            },
+            {
+              "$ref": "#/components/messages/YjsClientPresence"
+            },
+            {
+              "$ref": "#/components/messages/YjsUnsubscribe"
+            }
+          ]
+        }
+      },
+      "subscribe": {
+        "summary": "Server-to-client Yjs events.",
+        "message": {
+          "oneOf": [
+            {
+              "$ref": "#/components/messages/YjsServerMessage"
+            },
+            {
+              "$ref": "#/components/messages/YjsServerUpdate"
+            },
+            {
+              "$ref": "#/components/messages/YjsPresence"
+            },
+            {
+              "$ref": "#/components/messages/YjsError"
+            },
+            {
+              "$ref": "#/components/messages/YjsInvalidated"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "jwtAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Passed as Socket.IO handshake auth.token."
+      }
+    },
+    "messages": {
+      "YjsSubscribe": {
+        "name": "yjs:subscribe",
+        "payload": {
+          "$ref": "#/components/schemas/RecordRef"
+        }
+      },
+      "YjsUnsubscribe": {
+        "name": "yjs:unsubscribe",
+        "payload": {
+          "$ref": "#/components/schemas/RecordRef"
+        }
+      },
+      "YjsClientMessage": {
+        "name": "yjs:message",
+        "payload": {
+          "$ref": "#/components/schemas/YjsBinaryMessage"
+        }
+      },
+      "YjsServerMessage": {
+        "name": "yjs:message",
+        "payload": {
+          "$ref": "#/components/schemas/YjsBinaryMessage"
+        }
+      },
+      "YjsClientUpdate": {
+        "name": "yjs:update",
+        "payload": {
+          "$ref": "#/components/schemas/YjsBinaryMessage"
+        }
+      },
+      "YjsServerUpdate": {
+        "name": "yjs:update",
+        "payload": {
+          "$ref": "#/components/schemas/YjsBinaryMessage"
+        }
+      },
+      "YjsClientPresence": {
+        "name": "yjs:presence",
+        "payload": {
+          "$ref": "#/components/schemas/YjsPresenceUpdate"
+        }
+      },
+      "YjsPresence": {
+        "name": "yjs:presence",
+        "payload": {
+          "$ref": "#/components/schemas/YjsPresenceSnapshot"
+        }
+      },
+      "YjsError": {
+        "name": "yjs:error",
+        "payload": {
+          "$ref": "#/components/schemas/YjsError"
+        }
+      },
+      "YjsInvalidated": {
+        "name": "yjs:invalidated",
+        "payload": {
+          "$ref": "#/components/schemas/YjsInvalidated"
+        }
+      }
+    },
+    "schemas": {
+      "RecordRef": {
+        "type": "object",
+        "required": ["recordId"],
+        "properties": {
+          "recordId": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "YjsBinaryMessage": {
+        "type": "object",
+        "required": ["recordId", "data"],
+        "properties": {
+          "recordId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            }
+          }
+        }
+      },
+      "YjsPresenceUpdate": {
+        "type": "object",
+        "required": ["recordId"],
+        "properties": {
+          "recordId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "fieldId": {
+            "type": ["string", "null"]
+          }
+        }
+      },
+      "YjsPresenceUser": {
+        "type": "object",
+        "required": ["id", "fieldIds"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "fieldIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "YjsPresenceSnapshot": {
+        "type": "object",
+        "required": ["recordId", "activeCount", "users"],
+        "properties": {
+          "recordId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "activeCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "users": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/YjsPresenceUser"
+            }
+          }
+        }
+      },
+      "YjsError": {
+        "type": "object",
+        "required": ["recordId", "code", "message"],
+        "properties": {
+          "recordId": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "enum": ["UNAUTHENTICATED", "NOT_FOUND", "FORBIDDEN"]
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "YjsInvalidated": {
+        "type": "object",
+        "required": ["recordId", "reason"],
+        "properties": {
+          "recordId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "enum": ["rest-write"]
+          }
+        }
+      }
+    }
+  }
+}
