@@ -913,6 +913,22 @@ watch(candidateQuery, () => {
   color: #fff;
 }
 
+.meta-form-share__audience-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid #bae6fd;
+  border-radius: 10px;
+  background: #f0f9ff;
+  color: #0c4a6e;
+  font-size: 12px;
+}
+
+.meta-form-share__audience-card strong {
+  font-size: 13px;
+}
+
 .meta-form-share__hint {
   margin: 0;
   font-size: 12px;

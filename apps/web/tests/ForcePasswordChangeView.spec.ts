@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   loadProductFeatures: vi.fn().mockResolvedValue(undefined),
   resolveHomePath: vi.fn(() => '/attendance'),
   apiFetch: vi.fn(),
+  clearStoredAuthState: vi.fn(),
 }))
 
 vi.mock('vue-router', () => ({
@@ -26,7 +27,7 @@ vi.mock('../src/utils/api', async () => {
   return {
     ...actual,
     apiFetch: mocks.apiFetch,
-    clearStoredAuthState: vi.fn(),
+    clearStoredAuthState: mocks.clearStoredAuthState,
   }
 })
 
@@ -37,14 +38,55 @@ async function flushUi(cycles = 4): Promise<void> {
   }
 }
 
+function createMemoryStorage(): Storage {
+  const store = new Map<string, string>()
+  return {
+    get length() {
+      return store.size
+    },
+    clear: () => store.clear(),
+    getItem: (key: string) => store.get(key) ?? null,
+    key: (index: number) => Array.from(store.keys())[index] ?? null,
+    removeItem: (key: string) => {
+      store.delete(key)
+    },
+    setItem: (key: string, value: string) => {
+      store.set(key, String(value))
+    },
+  } as Storage
+}
+
+function installMemoryStorage(storage: Storage): void {
+  Object.defineProperty(globalThis, 'localStorage', { value: storage, configurable: true })
+  Object.defineProperty(window, 'localStorage', { value: storage, configurable: true })
+}
+
+function resetAuthStorage(): void {
+  const keys = [
+    'auth_token',
+    'jwt',
+    'devToken',
+    'metasheet_locale',
+    'metasheet_features',
+    'metasheet_product_mode',
+    'user_permissions',
+    'user_roles',
+  ]
+  for (const key of keys) {
+    window.localStorage.removeItem(key)
+  }
+}
+
 describe('ForcePasswordChangeView', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
   let ForcePasswordChangeViewComponent: Component
   const originalFetch = globalThis.fetch
+  const originalLocalStorage = globalThis.localStorage
 
   beforeEach(async () => {
-    window.localStorage.clear()
+    installMemoryStorage(createMemoryStorage())
+    resetAuthStorage()
     window.localStorage.setItem('auth_token', 'forced-token')
     window.localStorage.setItem('metasheet_locale', 'zh-CN')
     vi.clearAllMocks()
@@ -103,6 +145,7 @@ describe('ForcePasswordChangeView', () => {
     app = null
     container = null
     globalThis.fetch = originalFetch
+    installMemoryStorage(originalLocalStorage)
   })
 
   it('changes the password and redirects back to the resolved home path', async () => {
@@ -137,5 +180,31 @@ describe('ForcePasswordChangeView', () => {
     expect(window.localStorage.getItem('auth_token')).toBe('fresh-token')
     expect(mocks.loadProductFeatures).toHaveBeenCalledWith(true, { skipSessionProbe: true })
     expect(mocks.routerReplace).toHaveBeenCalledWith('/attendance')
+  })
+
+  it('allows signing out from the forced password change page', async () => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+
+    app = createApp(ForcePasswordChangeViewComponent)
+    app.mount(container)
+    await flushUi(6)
+
+    const logoutButton = container.querySelector('.force-password-logout') as HTMLButtonElement | null
+    expect(logoutButton?.textContent).toContain('退出登录')
+
+    logoutButton?.click()
+    await flushUi(8)
+
+    expect(mocks.apiFetch).toHaveBeenCalledWith(
+      '/api/auth/logout',
+      expect.objectContaining({
+        method: 'POST',
+        suppressUnauthorizedRedirect: true,
+      }),
+    )
+    expect(window.localStorage.getItem('auth_token')).toBeNull()
+    expect(mocks.clearStoredAuthState).toHaveBeenCalled()
+    expect(mocks.routerReplace).toHaveBeenCalledWith('/login')
   })
 })

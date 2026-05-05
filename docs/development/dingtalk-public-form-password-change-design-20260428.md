@@ -16,7 +16,7 @@ The public form endpoints intentionally use optional JWT auth:
 
 Those endpoints must allow both anonymous public forms and DingTalk-protected forms. For DingTalk-protected forms, a bearer token carries the local user identity bound to a DingTalk account.
 
-The bug was that optional auth reused the normal password-change guard. If a DingTalk-bound local user had `must_change_password = true`, `hydrateAuthenticatedUser()` returned `403 PASSWORD_CHANGE_REQUIRED` before public-form DingTalk access rules could run.
+The bug was that optional auth reused the normal password-change guard. If a DingTalk-bound local user had `must_change_password = true`, `hydrateAuthenticatedUser()` returned `403 PASSWORD_CHANGE_REQUIRED` before public-form DingTalk access rules could run. The frontend already suppressed global redirects for public-form requests, so it displayed the backend message in-place.
 
 The public form route also did not opt out of shell bootstrap, so unrelated product-feature loading could run on a public route.
 

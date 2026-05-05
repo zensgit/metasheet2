@@ -88,7 +88,7 @@ function createAccount(overrides: Record<string, unknown> = {}) {
     corpId: 'dingcorp',
     externalUserId: '0447654442691174',
     unionId: 'union-1',
-    openId: null,
+    openId: 'open-1',
     externalKey: 'union-1',
     name: '林岚',
     email: null,
@@ -340,7 +340,168 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('最近告警')
     expect(container?.textContent).toContain('Union ID')
     expect(container?.textContent).toContain('0447654442691174')
+    expect(container?.textContent).toContain('最近目录同步')
     expect(container?.textContent).toContain('第 1 / 3 页')
+  })
+
+  it('warns and disables DingTalk grant toggles when a directory account is missing openId', async () => {
+    const missingOpenIdAccount = createAccount({
+      openId: null,
+      localUser: {
+        id: 'user-1',
+        email: 'alpha@example.com',
+        username: 'alpha',
+        name: 'Alpha',
+      },
+    })
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([
+          {
+            kind: 'pending_binding',
+            reason: '目录成员尚未绑定本地用户。',
+            account: missingOpenIdAccount,
+            flags: {
+              missingUnionId: false,
+              missingOpenId: true,
+            },
+            actionable: {
+              canBatchUnbind: false,
+              canConfirmRecommendation: true,
+            },
+          },
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([missingOpenIdAccount]),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi()
+
+    expect(container?.textContent).toContain('openId 缺失，当前无法同时开通钉钉登录')
+    expect(container?.textContent).toContain('修复建议：若该成员刚完成钉钉登录/绑定，先刷新当前成员')
+    const refreshButtons = Array.from(container!.querySelectorAll('button')).filter((button) => button.textContent?.includes('刷新当前成员'))
+    expect(refreshButtons.length).toBeGreaterThanOrEqual(2)
+    const userLinks = Array.from(container!.querySelectorAll('a')).filter((link) => link.textContent?.includes('前往用户管理'))
+    expect(userLinks.length).toBeGreaterThanOrEqual(1)
+    expect(userLinks[0]?.getAttribute('href')).toBe('/admin/users?userId=user-1&source=directory-sync&integrationId=dir-1&accountId=account-1&filter=dingtalk-openid-missing')
+    const grantLabels = Array.from(container!.querySelectorAll('label.directory-admin__toggle'))
+      .filter((label) => label.textContent?.includes('绑定后同时开通钉钉登录'))
+    expect(grantLabels.length).toBeGreaterThanOrEqual(2)
+    for (const label of grantLabels) {
+      const input = label.querySelector('input[type="checkbox"]') as HTMLInputElement | null
+      expect(input?.disabled).toBe(true)
+      expect(input?.checked).toBe(false)
+    }
+  })
+
+  it('binds an openId-missing account without enabling DingTalk grant', async () => {
+    const missingOpenIdAccount = createAccount({ openId: null })
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([missingOpenIdAccount]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          account: createAccount({
+            openId: null,
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-1',
+              email: 'alpha@example.com',
+              name: 'Alpha',
+            },
+          }),
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [createIntegration()] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([createAccount({
+          openId: null,
+          linkStatus: 'linked',
+          matchStrategy: 'manual_admin',
+          localUser: {
+            id: 'user-1',
+            email: 'alpha@example.com',
+            name: 'Alpha',
+          },
+        })]),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const accountsSection = findAccountsSection(container!)
+    const bindInput = accountsSection.querySelector('input[placeholder="例如 user-123 或 alpha@example.com"]') as HTMLInputElement | null
+    expect(bindInput).toBeTruthy()
+    bindInput!.value = 'alpha@example.com'
+    bindInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+
+    const bindButton = Array.from(accountsSection.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('绑定用户'))
+    expect(bindButton).toBeTruthy()
+    bindButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(10)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/account-1/bind',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          localUserRef: 'alpha@example.com',
+          enableDingTalkGrant: false,
+        }),
+      }),
+    )
   })
 
   it('posts manual sync and refreshes the selected integration', async () => {

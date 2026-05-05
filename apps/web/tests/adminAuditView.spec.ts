@@ -33,7 +33,12 @@ function createJsonResponse(payload: unknown, status = 200) {
 function registerRouterLink(app: App<Element>): void {
   app.component('RouterLink', {
     props: ['to'],
-    template: '<a><slot /></a>',
+    computed: {
+      resolvedHref(): string {
+        return typeof this.to === 'string' ? this.to : String(this.to || '')
+      },
+    },
+    template: '<a :href="resolvedHref"><slot /></a>',
   })
 }
 
@@ -87,6 +92,8 @@ describe('AdminAuditView', () => {
   const originalRevokeObjectURL = globalThis.URL.revokeObjectURL
 
   beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-05T08:00:00.000Z'))
     apiFetchMock.mockReset()
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -99,6 +106,8 @@ describe('AdminAuditView', () => {
     if (container) container.remove()
     app = null
     container = null
+    window.history.replaceState({}, '', '/')
+    vi.useRealTimers()
     globalThis.URL.createObjectURL = originalCreateObjectURL
     globalThis.URL.revokeObjectURL = originalRevokeObjectURL
   })
@@ -239,5 +248,97 @@ describe('AdminAuditView', () => {
     expect(options?.method).toBe('GET')
 
     expect(container?.textContent).toContain('审计日志 CSV 已导出')
+  })
+
+  it('prefills filters from the audit deep link query string', async () => {
+    window.history.replaceState({}, '', '/admin/audit?resourceType=user-auth-grant&action=revoke')
+    apiFetchMock.mockResolvedValueOnce(createJsonResponse(createListPayload([createLogItem({
+      action: 'revoke',
+      resource_type: 'user-auth-grant',
+      resource_id: 'user-2:dingtalk',
+    })], { total: 1 })))
+
+    app = createApp(AdminAuditView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const resourceSelect = container?.querySelectorAll('select')[0] as HTMLSelectElement
+    const actionSelect = container?.querySelectorAll('select')[1] as HTMLSelectElement
+    expect(resourceSelect.value).toBe('user-auth-grant')
+    expect(actionSelect.value).toBe('revoke')
+
+    const url = getLastFetchUrl()
+    expect(url).toContain('resourceType=user-auth-grant')
+    expect(url).toContain('action=revoke')
+    expect(container?.textContent).toContain('当前场景已应用')
+  })
+
+  it('applies the DingTalk governance scene card and syncs the URL', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse(createListPayload([createLogItem()], { total: 1 })))
+      .mockResolvedValueOnce(createJsonResponse(createListPayload([createLogItem({
+        action: 'revoke',
+        resource_type: 'user-auth-grant',
+        resource_id: 'user-3:dingtalk',
+      })], { total: 1 })))
+
+    app = createApp(AdminAuditView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const sceneButton = findButtonByText(container!, '打开钉钉治理审计')
+    expect(sceneButton).toBeTruthy()
+    sceneButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+
+    const resourceSelect = container?.querySelectorAll('select')[0] as HTMLSelectElement
+    const actionSelect = container?.querySelectorAll('select')[1] as HTMLSelectElement
+    expect(resourceSelect.value).toBe('user-auth-grant')
+    expect(actionSelect.value).toBe('revoke')
+
+    const url = getLastFetchUrl()
+    expect(url).toContain('resourceType=user-auth-grant')
+    expect(url).toContain('action=revoke')
+    expect(window.location.search).toBe('?resourceType=user-auth-grant&action=revoke')
+    expect(container?.textContent).toContain('当前场景已应用')
+  })
+
+  it('applies the recent DingTalk governance scene with a 7 day date range', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse(createListPayload([createLogItem()], { total: 1 })))
+      .mockResolvedValueOnce(createJsonResponse(createListPayload([createLogItem({
+        action: 'revoke',
+        resource_type: 'user-auth-grant',
+        resource_id: 'user-7:dingtalk',
+      })], { total: 1 })))
+
+    app = createApp(AdminAuditView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const sceneButton = findButtonByText(container!, '查看最近 7 天收口')
+    expect(sceneButton).toBeTruthy()
+    sceneButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+
+    const resourceSelect = container?.querySelectorAll('select')[0] as HTMLSelectElement
+    const actionSelect = container?.querySelectorAll('select')[1] as HTMLSelectElement
+    const dateInputs = container?.querySelectorAll('input[type="date"]') as NodeListOf<HTMLInputElement>
+    expect(resourceSelect.value).toBe('user-auth-grant')
+    expect(actionSelect.value).toBe('revoke')
+    expect(dateInputs[0]?.value).toBe('2026-04-29')
+    expect(dateInputs[1]?.value).toBe('2026-05-05')
+
+    const url = getLastFetchUrl()
+    expect(url).toContain('resourceType=user-auth-grant')
+    expect(url).toContain('action=revoke')
+    expect(url).toContain('from=2026-04-29T00%3A00%3A00.000Z')
+    expect(url).toContain('to=2026-05-05T23%3A59%3A59.999Z')
+    expect(window.location.search).toBe('?resourceType=user-auth-grant&action=revoke&from=2026-04-29T00%3A00%3A00.000Z&to=2026-05-05T23%3A59%3A59.999Z')
+    expect(container?.textContent).toContain('最近 7 天收口结果')
+    expect(container?.textContent).toContain('当前场景已应用')
   })
 })

@@ -97,17 +97,36 @@ type AdminInviteLedgerRow = {
 }
 
 type AdminDingTalkGrantRow = {
+  user_id?: string
   enabled: boolean
   granted_by: string | null
+  granted_by_name?: string | null
+  granted_by_email?: string | null
   created_at: string
   updated_at: string
 }
 
 type AdminDingTalkIdentityRow = {
+  local_user_id?: string
   corp_id: string | null
+  provider_union_id: string | null
+  provider_open_id: string | null
   last_login_at: string | null
   created_at: string
   updated_at: string
+}
+
+type AdminUserListSignals = {
+  dingtalkLoginEnabled: boolean
+  dingtalkGrantUpdatedAt: string | null
+  dingtalkGrantUpdatedBy: string | null
+  directoryLinked: boolean
+  dingtalkIdentityExists: boolean
+  dingtalkHasUnionId: boolean
+  dingtalkHasOpenId: boolean
+  dingtalkOpenIdMissing: boolean
+  dingtalkCorpId: string | null
+  lastDirectorySyncAt: string | null
 }
 
 type DirectoryMembershipRow = {
@@ -249,6 +268,8 @@ type CreateUserRequestBody = {
 
 const ADMIN_AUDIT_RESOURCE_TYPES = ['user', 'user-role', 'user-auth-grant', 'user-namespace-admission', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template', 'delegated-admin-scope', 'delegated-admin-scope-template', 'platform-member-group', 'delegated-admin-group-scope'] as const
 const DINGTALK_PROVIDER = 'dingtalk'
+const DINGTALK_OPEN_ID_REQUIRED_FOR_GRANT_ERROR =
+  'Directory account is missing DingTalk openId and cannot enable DingTalk login grant; resync DingTalk directory or complete DingTalk OAuth binding first'
 const PLATFORM_ADMIN_ROLE_ID = 'admin'
 const ATTENDANCE_ROLE_IDS = new Set(['attendance_employee', 'attendance_approver', 'attendance_admin'])
 
@@ -429,7 +450,7 @@ async function fetchDingTalkAccessSnapshot(userId: string) {
       [DINGTALK_PROVIDER, userId],
     ),
     query<AdminDingTalkIdentityRow>(
-      `SELECT corp_id, last_login_at, created_at, updated_at
+      `SELECT corp_id, provider_union_id, provider_open_id, last_login_at, created_at, updated_at
        FROM user_external_identities
        WHERE provider = $1 AND local_user_id = $2
        ORDER BY updated_at DESC
@@ -472,11 +493,124 @@ async function fetchDingTalkAccessSnapshot(userId: string) {
     identity: {
       exists: identity !== null,
       corpId: identity?.corp_id ?? null,
+      unionId: identity?.provider_union_id ?? null,
+      openId: identity?.provider_open_id ?? null,
+      hasUnionId: Boolean(identity?.provider_union_id),
+      hasOpenId: Boolean(identity?.provider_open_id),
       lastLoginAt: identity?.last_login_at ?? null,
       createdAt: identity?.created_at ?? null,
       updatedAt: identity?.updated_at ?? null,
     },
   }
+}
+
+async function assertUsersCanEnableDingTalkGrant(userIds: string[]): Promise<void> {
+  if (userIds.length === 0) return
+
+  const identityResult = await query<{
+    local_user_id: string
+    corp_id: string | null
+    provider_open_id: string | null
+  }>(
+    `SELECT local_user_id, corp_id, provider_open_id
+     FROM user_external_identities
+     WHERE provider = $1
+       AND local_user_id = ANY($2::text[])`,
+    [DINGTALK_PROVIDER, userIds],
+  )
+
+  const blockedUserIds = new Set<string>()
+  for (const row of identityResult.rows) {
+    if (row.corp_id && !row.provider_open_id) {
+      blockedUserIds.add(row.local_user_id)
+    }
+  }
+
+  if (blockedUserIds.size > 0) {
+    throw new Error(`${DINGTALK_OPEN_ID_REQUIRED_FOR_GRANT_ERROR} (userIds: ${Array.from(blockedUserIds).sort().join(', ')})`)
+  }
+}
+
+async function fetchAdminUserListSignals(userIds: string[]): Promise<Map<string, AdminUserListSignals>> {
+  const signalMap = new Map<string, AdminUserListSignals>()
+  if (userIds.length === 0) return signalMap
+
+  const [grantResult, directoryResult, identityResult] = await Promise.all([
+    query<Required<Pick<AdminDingTalkGrantRow, 'user_id' | 'enabled' | 'granted_by' | 'created_at' | 'updated_at'>> & {
+      granted_by_name: string | null
+      granted_by_email: string | null
+    }>(
+      `SELECT
+          g.local_user_id AS user_id,
+          g.enabled,
+          g.granted_by,
+          g.created_at,
+          g.updated_at,
+          u.name AS granted_by_name,
+          u.email AS granted_by_email
+       FROM user_external_auth_grants g
+       LEFT JOIN users u ON u.id = g.granted_by
+       WHERE provider = $1
+         AND local_user_id = ANY($2::text[])`,
+      [DINGTALK_PROVIDER, userIds],
+    ),
+    query<{ user_id: string, last_directory_sync_at: string | null }>(
+      `SELECT
+          l.local_user_id AS user_id,
+          MAX(a.updated_at) AS last_directory_sync_at
+       FROM directory_account_links l
+       JOIN directory_accounts a ON a.id = l.directory_account_id
+       WHERE l.link_status = 'linked'
+         AND l.local_user_id = ANY($1::text[])
+       GROUP BY l.local_user_id`,
+      [userIds],
+    ),
+    query<Required<Pick<AdminDingTalkIdentityRow, 'local_user_id' | 'corp_id' | 'provider_union_id' | 'provider_open_id'>> & {
+      last_login_at: string | null
+      created_at: string
+      updated_at: string
+    }>(
+      `SELECT DISTINCT ON (local_user_id)
+          local_user_id,
+          corp_id,
+          provider_union_id,
+          provider_open_id,
+          last_login_at,
+          created_at,
+          updated_at
+       FROM user_external_identities
+       WHERE provider = $1
+         AND local_user_id = ANY($2::text[])
+       ORDER BY local_user_id, updated_at DESC`,
+      [DINGTALK_PROVIDER, userIds],
+    ),
+  ])
+
+  const grantMap = new Map(grantResult.rows.map((row) => [row.user_id, row]))
+  const directoryMap = new Map(directoryResult.rows.map((row) => [row.user_id, row.last_directory_sync_at ?? null]))
+  const identityMap = new Map(identityResult.rows.map((row) => [row.local_user_id, row]))
+
+  for (const userId of userIds) {
+    const grant = grantMap.get(userId)
+    const identity = identityMap.get(userId)
+    const hasUnionId = Boolean(identity?.provider_union_id)
+    const hasOpenId = Boolean(identity?.provider_open_id)
+    const corpId = identity?.corp_id ?? null
+    signalMap.set(userId, {
+      dingtalkLoginEnabled: grant?.enabled === true,
+      dingtalkGrantUpdatedAt: grant?.updated_at ?? null,
+      dingtalkGrantUpdatedBy: grant?.granted_by_name ?? grant?.granted_by_email ?? grant?.granted_by ?? null,
+      directoryLinked: directoryMap.has(userId),
+      dingtalkIdentityExists: Boolean(identity),
+      dingtalkHasUnionId: hasUnionId,
+      dingtalkHasOpenId: hasOpenId,
+      dingtalkOpenIdMissing: Boolean(identity && corpId && !hasOpenId),
+      dingtalkCorpId: corpId,
+      lastDirectorySyncAt: directoryMap.get(userId) ?? null,
+    })
+  }
+
+  return signalMap
 }
 
 function normalizeUserIdList(value: unknown): string[] {
@@ -2513,8 +2647,25 @@ export function adminUsersRouter(): Router {
         }
       }
 
+      const userSignals = await fetchAdminUserListSignals(items.map((row) => row.id))
+
       return jsonOk(res, {
-        items,
+        items: items.map((row) => {
+          const signals = userSignals.get(row.id)
+          return {
+            ...row,
+            dingtalkLoginEnabled: signals?.dingtalkLoginEnabled ?? false,
+            dingtalkGrantUpdatedAt: signals?.dingtalkGrantUpdatedAt ?? null,
+            dingtalkGrantUpdatedBy: signals?.dingtalkGrantUpdatedBy ?? null,
+            directoryLinked: signals?.directoryLinked ?? false,
+            dingtalkIdentityExists: signals?.dingtalkIdentityExists ?? false,
+            dingtalkHasUnionId: signals?.dingtalkHasUnionId ?? false,
+            dingtalkHasOpenId: signals?.dingtalkHasOpenId ?? false,
+            dingtalkOpenIdMissing: signals?.dingtalkOpenIdMissing ?? false,
+            dingtalkCorpId: signals?.dingtalkCorpId ?? null,
+            lastDirectorySyncAt: signals?.lastDirectorySyncAt ?? null,
+          }
+        }),
         page,
         pageSize,
         total,
@@ -3272,6 +3423,7 @@ export function adminUsersRouter(): Router {
 
       const profile = await fetchUserProfile(userId)
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+      if (enabled) await assertUsersCanEnableDingTalkGrant([userId])
 
       await upsertDingTalkGrants([userId], enabled, adminUserId)
 
@@ -3295,7 +3447,11 @@ export function adminUsersRouter(): Router {
         ...(await fetchDingTalkAccessSnapshot(userId)),
       })
     } catch (error) {
-      return jsonError(res, 500, 'DINGTALK_GRANT_UPDATE_FAILED', (error as Error)?.message || 'Failed to update DingTalk access')
+      const message = (error as Error)?.message || 'Failed to update DingTalk access'
+      if (message.includes('missing DingTalk openId')) {
+        return jsonError(res, 400, 'DINGTALK_OPEN_ID_REQUIRED', message)
+      }
+      return jsonError(res, 500, 'DINGTALK_GRANT_UPDATE_FAILED', message)
     }
   })
 
@@ -3320,6 +3476,7 @@ export function adminUsersRouter(): Router {
       if (missingUserIds.length > 0) {
         return jsonError(res, 404, 'USERS_NOT_FOUND', 'One or more users were not found', { missingUserIds })
       }
+      if (enabled) await assertUsersCanEnableDingTalkGrant(userIds)
 
       await upsertDingTalkGrants(userIds, enabled, adminUserId)
 
@@ -3346,7 +3503,11 @@ export function adminUsersRouter(): Router {
         userIds,
       })
     } catch (error) {
-      return jsonError(res, 500, 'DINGTALK_BULK_GRANT_UPDATE_FAILED', (error as Error)?.message || 'Failed to update DingTalk access in bulk')
+      const message = (error as Error)?.message || 'Failed to update DingTalk access in bulk'
+      if (message.includes('missing DingTalk openId')) {
+        return jsonError(res, 400, 'DINGTALK_OPEN_ID_REQUIRED', message)
+      }
+      return jsonError(res, 500, 'DINGTALK_BULK_GRANT_UPDATE_FAILED', message)
     }
   })
 
