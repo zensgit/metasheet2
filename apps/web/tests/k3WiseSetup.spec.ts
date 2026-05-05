@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest'
 import { readFile } from 'node:fs/promises'
 import {
   applyExternalSystemToForm,
+  buildK3WiseGateDraft,
   buildK3WisePipelineObservationQuery,
   buildK3WisePipelinePayloads,
   buildK3WisePipelineRunPayload,
+  buildK3WisePocCommandSet,
   buildK3WiseSetupPayloads,
   buildK3WiseStagingInstallPayload,
   createDefaultK3WiseSetupForm,
@@ -12,6 +14,8 @@ import {
   getIntegrationStagingFieldCount,
   getK3WisePipelineId,
   splitList,
+  stringifyK3WiseGateDraft,
+  validateK3WiseGateDraftForm,
   validateK3WisePipelineObservationForm,
   validateK3WisePipelineTemplateForm,
   validateK3WisePipelineRunForm,
@@ -391,6 +395,120 @@ describe('K3 WISE setup helpers', () => {
     expect(messages).toContain('Material pipeline ID is required before dry-run or run')
     expect(messages).toContain('Sample limit must be a positive integer')
     expect(() => buildK3WisePipelineRunPayload(form, 'material')).toThrow('tenantId is required')
+  })
+
+  it('builds a redacted customer GATE draft and preflight command set from the setup form', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      projectId: 'project_1',
+      operator: 'integration-admin',
+      version: 'K3 WISE 15.x test',
+      environment: 'uat',
+      baseUrl: 'https://k3.example.test/K3API/',
+      acctId: 'AIS_TEST',
+      username: 'k3-user',
+      password: 'real-k3-password',
+      sqlEnabled: true,
+      sqlMode: 'readonly',
+      sqlServer: '10.0.0.10',
+      sqlDatabase: 'AIS_TEST',
+      sqlAllowedTables: 'dbo.t_ICItem\ndbo.t_MeasureUnit',
+      plmKind: 'plm:yuantus-wrapper',
+      plmReadMethod: 'api',
+      plmBaseUrl: 'https://plm.example.test/',
+      plmDefaultProductId: 'PRODUCT-TEST-001',
+      plmUsername: 'plm-user',
+      plmPassword: 'real-plm-password',
+      rollbackOwner: 'customer-k3-admin',
+      rollbackStrategy: 'disable-test-records',
+      bomEnabled: true,
+    })
+
+    expect(validateK3WiseGateDraftForm(form)).toEqual([])
+    const draft = buildK3WiseGateDraft(form)
+
+    expect(draft).toMatchObject({
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      projectId: 'project_1',
+      operator: 'integration-admin',
+      k3Wise: {
+        version: 'K3 WISE 15.x test',
+        apiUrl: 'https://k3.example.test/K3API/',
+        acctId: 'AIS_TEST',
+        environment: 'uat',
+        credentials: {
+          username: 'k3-user',
+          password: '<fill-outside-git>',
+        },
+        autoSubmit: false,
+        autoAudit: false,
+      },
+      plm: {
+        kind: 'plm:yuantus-wrapper',
+        readMethod: 'api',
+        baseUrl: 'https://plm.example.test/',
+        config: {
+          defaultProductId: 'PRODUCT-TEST-001',
+        },
+        credentials: {
+          username: 'plm-user',
+          password: '<fill-outside-git>',
+        },
+      },
+      sqlServer: {
+        enabled: true,
+        mode: 'readonly',
+        allowedTables: ['dbo.t_ICItem', 'dbo.t_MeasureUnit'],
+        writeCoreTables: false,
+      },
+      rollback: {
+        owner: 'customer-k3-admin',
+        strategy: 'disable-test-records',
+      },
+      bom: {
+        enabled: true,
+        productId: 'PRODUCT-TEST-001',
+      },
+    })
+    expect(JSON.stringify(draft)).not.toContain('real-k3-password')
+    expect(JSON.stringify(draft)).not.toContain('real-plm-password')
+    expect(stringifyK3WiseGateDraft(form)).toContain('"fieldMappings"')
+
+    const commands = buildK3WisePocCommandSet('tmp/gate.json')
+    expect(commands.preflight).toContain('--input tmp/gate.json')
+    expect(commands.offlineMock).toBe('pnpm run verify:integration-k3wise:poc')
+    expect(commands.evidence).toContain('integration-k3wise-live-poc-evidence.mjs')
+  })
+
+  it('blocks unsafe live PoC GATE drafts before preflight JSON is copied', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      operator: 'integration-admin',
+      version: 'K3 WISE 15.x test',
+      environment: 'production',
+      baseUrl: 'https://k3.example.test/K3API/',
+      acctId: 'AIS_TEST',
+      autoSubmit: true,
+      sqlEnabled: true,
+      sqlMode: 'middle-table',
+      sqlAllowedTables: 'dbo.t_ICItem',
+      rollbackOwner: 'customer-k3-admin',
+      bomEnabled: true,
+      bomProductId: '',
+      plmDefaultProductId: '',
+    })
+
+    const messages = validateK3WiseGateDraftForm(form).map((issue) => issue.message)
+    expect(messages).toContain('Live PoC GATE must target a non-production K3 WISE environment')
+    expect(messages).toContain('Live PoC GATE must stay Save-only: autoSubmit and autoAudit must be false')
+    expect(messages).toContain('Live PoC may not write K3 WISE core business tables')
+    expect(messages).toContain('BOM PoC requires BOM product ID or PLM default product ID')
+    expect(() => buildK3WiseGateDraft(form)).toThrow('Live PoC GATE must target a non-production K3 WISE environment')
   })
 
   it('builds run and dead-letter observation queries for selected pipelines', () => {

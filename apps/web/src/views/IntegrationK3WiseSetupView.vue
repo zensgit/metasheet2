@@ -157,6 +157,43 @@
 
         <div class="k3-setup__panel">
           <div class="k3-setup__panel-head">
+            <h2>PoC 准备</h2>
+            <span>{{ gateIssues.length ? `${gateIssues.length} gaps` : 'ready' }}</span>
+          </div>
+          <button
+            class="k3-setup__btn k3-setup__btn--full"
+            type="button"
+            :disabled="gateIssues.length > 0 || !gateDraftText"
+            @click="copyGateDraft"
+          >
+            复制 GATE JSON
+          </button>
+          <button
+            class="k3-setup__btn k3-setup__btn--full"
+            type="button"
+            :disabled="gateIssues.length > 0 || !gateDraftText"
+            @click="downloadGateDraft"
+          >
+            下载 GATE JSON
+          </button>
+          <ul v-if="gateIssues.length" class="k3-setup__issues k3-setup__issues--compact">
+            <li v-for="issue in gateIssues" :key="`gate:${issue.field}:${issue.message}`">
+              {{ issue.message }}
+            </li>
+          </ul>
+          <div class="k3-setup__commands">
+            <strong>Preflight</strong>
+            <code>{{ gateCommands.preflight }}</code>
+            <strong>Offline mock</strong>
+            <code>{{ gateCommands.offlineMock }}</code>
+            <strong>Evidence</strong>
+            <code>{{ gateCommands.evidence }}</code>
+          </div>
+          <pre v-if="gateDraftText" class="k3-setup__test-result">{{ gateDraftText }}</pre>
+        </div>
+
+        <div class="k3-setup__panel">
+          <div class="k3-setup__panel-head">
             <h2>运行观察</h2>
             <span>{{ observationSummary }}</span>
           </div>
@@ -396,6 +433,65 @@
           </div>
         </section>
 
+        <section class="k3-setup__section">
+          <div class="k3-setup__section-head">
+            <h2>客户 GATE / PLM Source</h2>
+            <span>preflight JSON</span>
+          </div>
+          <div class="k3-setup__grid">
+            <label class="k3-setup__field">
+              <span>Operator</span>
+              <input v-model.trim="form.operator" autocomplete="off" />
+            </label>
+            <label class="k3-setup__field">
+              <span>PLM Kind</span>
+              <input v-model.trim="form.plmKind" autocomplete="off" />
+            </label>
+            <label class="k3-setup__field">
+              <span>PLM Read Method</span>
+              <select v-model="form.plmReadMethod">
+                <option value="api">api</option>
+                <option value="database">database</option>
+                <option value="table">table</option>
+                <option value="file">file</option>
+                <option value="manual">manual</option>
+              </select>
+            </label>
+            <label class="k3-setup__field k3-setup__field--wide">
+              <span>PLM Base URL</span>
+              <input v-model.trim="form.plmBaseUrl" placeholder="https://plm.example.test/" autocomplete="off" />
+            </label>
+            <label class="k3-setup__field">
+              <span>PLM Default Product ID</span>
+              <input v-model.trim="form.plmDefaultProductId" autocomplete="off" />
+            </label>
+            <label class="k3-setup__field">
+              <span>PLM 用户名</span>
+              <input v-model.trim="form.plmUsername" autocomplete="off" />
+            </label>
+            <label class="k3-setup__field">
+              <span>PLM 密码</span>
+              <input v-model="form.plmPassword" type="password" autocomplete="new-password" />
+            </label>
+            <label class="k3-setup__field">
+              <span>Rollback Owner</span>
+              <input v-model.trim="form.rollbackOwner" autocomplete="off" />
+            </label>
+            <label class="k3-setup__field">
+              <span>Rollback Strategy</span>
+              <input v-model.trim="form.rollbackStrategy" autocomplete="off" />
+            </label>
+            <label class="k3-setup__check">
+              <input v-model="form.bomEnabled" type="checkbox" />
+              <span>启用 BOM PoC</span>
+            </label>
+            <label v-if="form.bomEnabled" class="k3-setup__field">
+              <span>BOM Product ID</span>
+              <input v-model.trim="form.bomProductId" autocomplete="off" />
+            </label>
+          </div>
+        </section>
+
         <section v-if="validationIssues.length" class="k3-setup__section k3-setup__section--issues">
           <div class="k3-setup__section-head">
             <h2>待补字段</h2>
@@ -500,6 +596,7 @@ import {
   buildK3WisePipelineObservationQuery,
   buildK3WisePipelinePayloads,
   buildK3WisePipelineRunPayload,
+  buildK3WisePocCommandSet,
   buildK3WiseSetupPayloads,
   buildK3WiseStagingInstallPayload,
   createDefaultK3WiseSetupForm,
@@ -512,9 +609,11 @@ import {
   listIntegrationStagingDescriptors,
   listIntegrationSystems,
   runIntegrationPipeline,
+  stringifyK3WiseGateDraft,
   testIntegrationSystem,
   upsertIntegrationPipeline,
   upsertIntegrationSystem,
+  validateK3WiseGateDraftForm,
   validateK3WisePipelineTemplateForm,
   validateK3WisePipelineObservationForm,
   validateK3WisePipelineRunForm,
@@ -556,6 +655,16 @@ const stagingIssues = computed(() => validateK3WiseStagingInstallForm(form))
 const pipelineIssues = computed(() => validateK3WisePipelineTemplateForm(form, stagingDescriptors.value))
 const materialRunIssues = computed(() => validateK3WisePipelineRunForm(form, 'material'))
 const bomRunIssues = computed(() => validateK3WisePipelineRunForm(form, 'bom'))
+const gateIssues = computed(() => validateK3WiseGateDraftForm(form))
+const gateCommands = buildK3WisePocCommandSet()
+const gateDraftText = computed(() => {
+  if (gateIssues.value.length > 0) return ''
+  try {
+    return stringifyK3WiseGateDraft(form)
+  } catch {
+    return ''
+  }
+})
 const observationSummary = computed(() => `${pipelineRuns.value.length} runs / ${deadLetters.value.length} open`)
 const stagingDescriptorLabel = computed(() => stagingDescriptors.value.length > 0 ? `${stagingDescriptors.value.length} descriptors` : 'not loaded')
 
@@ -577,6 +686,28 @@ function formatTimestamp(value: string): string {
 
 function formatRunMetrics(run: IntegrationPipelineRun): string {
   return `read ${run.rowsRead} / clean ${run.rowsCleaned} / write ${run.rowsWritten} / failed ${run.rowsFailed}`
+}
+
+async function copyGateDraft(): Promise<void> {
+  if (!gateDraftText.value) return
+  try {
+    await navigator.clipboard.writeText(gateDraftText.value)
+    setStatus('GATE JSON 已复制', 'success')
+  } catch (error) {
+    setStatus(formatError(error), 'error')
+  }
+}
+
+function downloadGateDraft(): void {
+  if (!gateDraftText.value || typeof document === 'undefined') return
+  const blob = new Blob([gateDraftText.value], { type: 'application/json;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = 'k3-wise-live-poc-gate.json'
+  anchor.click()
+  URL.revokeObjectURL(url)
+  setStatus('GATE JSON 已生成', 'success')
 }
 
 function loadSystemIntoForm(system: IntegrationExternalSystem): void {
@@ -1031,6 +1162,28 @@ onMounted(() => {
   flex-direction: column;
   gap: 8px;
   margin-top: 12px;
+}
+
+.k3-setup__commands {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.k3-setup__commands strong {
+  color: #334155;
+  font-size: 12px;
+}
+
+.k3-setup__commands code {
+  display: block;
+  overflow-wrap: anywhere;
+  border-radius: 6px;
+  padding: 8px;
+  background: #f1f5f9;
+  color: #172033;
+  font-size: 12px;
 }
 
 .k3-setup__descriptor-list {

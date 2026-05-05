@@ -6,6 +6,7 @@ export type IntegrationPipelineRunMode = 'manual' | 'incremental' | 'full'
 export type K3WisePipelineTarget = 'material' | 'bom'
 export type IntegrationPipelineRunStatus = 'pending' | 'running' | 'succeeded' | 'partial' | 'failed' | 'cancelled'
 export type IntegrationDeadLetterStatus = 'open' | 'replayed' | 'discarded'
+export type PlmReadMethod = 'api' | 'database' | 'table' | 'file' | 'manual'
 
 export interface IntegrationApiEnvelope<T> {
   ok: boolean
@@ -126,6 +127,7 @@ export interface K3WiseSetupForm {
   workspaceId: string
   projectId: string
   baseId: string
+  operator: string
   webApiSystemId: string
   webApiHasCredentials: boolean
   webApiName: string
@@ -159,6 +161,16 @@ export interface K3WiseSetupForm {
   sqlAllowedTables: string
   sqlMiddleTables: string
   sqlStoredProcedures: string
+  plmKind: string
+  plmReadMethod: PlmReadMethod
+  plmBaseUrl: string
+  plmDefaultProductId: string
+  plmUsername: string
+  plmPassword: string
+  rollbackOwner: string
+  rollbackStrategy: string
+  bomEnabled: boolean
+  bomProductId: string
   sourceSystemId: string
   materialPipelineName: string
   materialPipelineId: string
@@ -209,6 +221,12 @@ export interface K3WisePipelineObservationQuery {
 export interface K3WiseSetupValidationIssue {
   field: keyof K3WiseSetupForm | 'form'
   message: string
+}
+
+export interface K3WisePocCommandSet {
+  preflight: string
+  offlineMock: string
+  evidence: string
 }
 
 const WEBAPI_KIND = 'erp:k3-wise-webapi'
@@ -288,6 +306,7 @@ export function createDefaultK3WiseSetupForm(): K3WiseSetupForm {
     workspaceId,
     projectId: '',
     baseId: '',
+    operator: 'integration-operator',
     webApiSystemId: '',
     webApiHasCredentials: false,
     webApiName: 'K3 WISE WebAPI',
@@ -321,6 +340,16 @@ export function createDefaultK3WiseSetupForm(): K3WiseSetupForm {
     sqlAllowedTables: 't_ICItem\nt_ICBOM\nt_ICBomChild',
     sqlMiddleTables: '',
     sqlStoredProcedures: '',
+    plmKind: 'plm:yuantus-wrapper',
+    plmReadMethod: 'api',
+    plmBaseUrl: '',
+    plmDefaultProductId: '',
+    plmUsername: '',
+    plmPassword: '',
+    rollbackOwner: '',
+    rollbackStrategy: 'disable-test-records',
+    bomEnabled: true,
+    bomProductId: '',
     sourceSystemId: '',
     materialPipelineName: 'PLM Material to K3 WISE',
     materialPipelineId: '',
@@ -376,6 +405,48 @@ export function validateK3WiseSetupForm(form: K3WiseSetupForm): K3WiseSetupValid
     if (sqlCredentialTouched && (!trim(form.sqlUsername) || !trim(form.sqlPassword))) {
       issues.push({ field: 'sqlPassword', message: 'SQL Server credentials must include both username and password' })
     }
+  }
+  return issues
+}
+
+function normalizeSqlObjectLeaf(value: string): string {
+  const parts = value
+    .trim()
+    .toLowerCase()
+    .split('.')
+    .map((part) => part.replace(/^[\[`"']+|[\]`"']+$/g, '').trim())
+    .filter(Boolean)
+  return parts[parts.length - 1] || ''
+}
+
+function isK3CoreBusinessTable(value: string): boolean {
+  return new Set(['t_icitem', 't_icbom', 't_icbomchild']).has(normalizeSqlObjectLeaf(value))
+}
+
+export function validateK3WiseGateDraftForm(form: K3WiseSetupForm): K3WiseSetupValidationIssue[] {
+  const issues: K3WiseSetupValidationIssue[] = []
+  if (!trim(form.tenantId)) issues.push({ field: 'tenantId', message: 'tenantId is required' })
+  if (!trim(form.workspaceId)) issues.push({ field: 'workspaceId', message: 'workspaceId is required for live PoC GATE' })
+  if (!trim(form.operator)) issues.push({ field: 'operator', message: 'operator is required for live PoC GATE' })
+  if (!trim(form.version)) issues.push({ field: 'version', message: 'K3 WISE version is required' })
+  if (!trim(form.acctId)) issues.push({ field: 'acctId', message: 'acctId is required' })
+  validateHttpUrl(form.baseUrl, 'baseUrl', issues)
+  if (form.environment === 'production') {
+    issues.push({ field: 'environment', message: 'Live PoC GATE must target a non-production K3 WISE environment' })
+  }
+  if (form.autoSubmit || form.autoAudit) {
+    issues.push({ field: 'form', message: 'Live PoC GATE must stay Save-only: autoSubmit and autoAudit must be false' })
+  }
+  if (!trim(form.plmKind)) issues.push({ field: 'plmKind', message: 'PLM kind is required' })
+  if (!trim(form.plmReadMethod)) issues.push({ field: 'plmReadMethod', message: 'PLM read method is required' })
+  if (trim(form.plmBaseUrl)) validateHttpUrl(form.plmBaseUrl, 'plmBaseUrl', issues)
+  if (!trim(form.rollbackOwner)) issues.push({ field: 'rollbackOwner', message: 'Rollback owner is required' })
+  if (!trim(form.rollbackStrategy)) issues.push({ field: 'rollbackStrategy', message: 'Rollback strategy is required' })
+  if (form.bomEnabled && !trim(form.bomProductId) && !trim(form.plmDefaultProductId)) {
+    issues.push({ field: 'bomProductId', message: 'BOM PoC requires BOM product ID or PLM default product ID' })
+  }
+  if (form.sqlEnabled && form.sqlMode !== 'readonly' && splitList(form.sqlAllowedTables).some(isK3CoreBusinessTable)) {
+    issues.push({ field: 'sqlAllowedTables', message: 'Live PoC may not write K3 WISE core business tables' })
   }
   return issues
 }
@@ -487,6 +558,100 @@ export function formatIntegrationStagingDescriptorFieldSummary(descriptor: Integ
   return selectFields.length > 0
     ? `${details.length} fields · ${typeText} · select ${selectFields.join(', ')}`
     : `${details.length} fields · ${typeText}`
+}
+
+function credentialPlaceholder(): string {
+  return '<fill-outside-git>'
+}
+
+function buildMaterialGateMappings(): Array<Record<string, unknown>> {
+  return [
+    { sourceField: 'code', targetField: 'FNumber', transform: { type: 'upperTrim' }, validation: [{ type: 'required' }] },
+    { sourceField: 'name', targetField: 'FName', validation: [{ type: 'required' }] },
+    { sourceField: 'uom', targetField: 'FBaseUnitID', transform: { type: 'dictMap', dictionary: 'unit' } },
+    { sourceField: 'spec', targetField: 'FModel', transform: { type: 'trim' } },
+  ]
+}
+
+function buildBomGateMappings(): Array<Record<string, unknown>> {
+  return [
+    { sourceField: 'parentCode', targetField: 'FParentItemNumber', validation: [{ type: 'required' }] },
+    { sourceField: 'childCode', targetField: 'FChildItems[].FItemNumber', validation: [{ type: 'required' }] },
+    { sourceField: 'quantity', targetField: 'FChildItems[].FQty', transform: { type: 'toNumber' } },
+  ]
+}
+
+export function buildK3WiseGateDraft(form: K3WiseSetupForm): Record<string, unknown> {
+  const issues = validateK3WiseGateDraftForm(form)
+  if (issues.length > 0) {
+    throw new Error(issues[0].message)
+  }
+
+  const plmConfig: Record<string, unknown> = {}
+  if (trim(form.plmDefaultProductId)) plmConfig.defaultProductId = trim(form.plmDefaultProductId)
+
+  return {
+    tenantId: trim(form.tenantId),
+    workspaceId: trim(form.workspaceId),
+    ...(optionalString(form.projectId) ? { projectId: trim(form.projectId) } : {}),
+    operator: trim(form.operator),
+    k3Wise: {
+      version: trim(form.version),
+      apiUrl: trim(form.baseUrl),
+      acctId: trim(form.acctId),
+      environment: form.environment,
+      credentials: {
+        username: trim(form.username) || credentialPlaceholder(),
+        password: credentialPlaceholder(),
+      },
+      autoSubmit: false,
+      autoAudit: false,
+    },
+    plm: {
+      kind: trim(form.plmKind),
+      readMethod: form.plmReadMethod,
+      ...(optionalString(form.plmBaseUrl) ? { baseUrl: trim(form.plmBaseUrl) } : {}),
+      ...(Object.keys(plmConfig).length > 0 ? { config: plmConfig } : {}),
+      credentials: {
+        username: trim(form.plmUsername) || credentialPlaceholder(),
+        password: credentialPlaceholder(),
+      },
+    },
+    sqlServer: {
+      enabled: form.sqlEnabled,
+      mode: form.sqlEnabled ? form.sqlMode : 'readonly',
+      ...(optionalString(form.sqlServer) ? { server: trim(form.sqlServer) } : {}),
+      ...(optionalString(form.sqlDatabase) ? { database: trim(form.sqlDatabase) } : {}),
+      allowedTables: splitList(form.sqlAllowedTables),
+      middleTables: splitList(form.sqlMiddleTables),
+      storedProcedures: splitList(form.sqlStoredProcedures),
+      writeCoreTables: false,
+    },
+    rollback: {
+      owner: trim(form.rollbackOwner),
+      strategy: trim(form.rollbackStrategy),
+    },
+    bom: {
+      enabled: form.bomEnabled,
+      ...(form.bomEnabled ? { productId: trim(form.bomProductId) || trim(form.plmDefaultProductId) } : {}),
+    },
+    fieldMappings: {
+      material: buildMaterialGateMappings(),
+      ...(form.bomEnabled ? { bom: buildBomGateMappings() } : {}),
+    },
+  }
+}
+
+export function stringifyK3WiseGateDraft(form: K3WiseSetupForm): string {
+  return JSON.stringify(buildK3WiseGateDraft(form), null, 2)
+}
+
+export function buildK3WisePocCommandSet(gatePath = 'artifacts/integration-live-poc/gate.json'): K3WisePocCommandSet {
+  return {
+    preflight: `node scripts/ops/integration-k3wise-live-poc-preflight.mjs --input ${gatePath} --out-dir artifacts/integration-live-poc`,
+    offlineMock: 'pnpm run verify:integration-k3wise:poc',
+    evidence: 'node scripts/ops/integration-k3wise-live-poc-evidence.mjs --packet artifacts/integration-live-poc/packet.json --evidence artifacts/integration-live-poc/evidence.json --out-dir artifacts/integration-live-poc/evidence',
+  }
 }
 
 export function getK3WisePipelineId(form: K3WiseSetupForm, target: K3WisePipelineTarget): string {
