@@ -23,6 +23,15 @@ Entry points:
   - Verification: `docs/development/github-stability-summary-polish-verification-20260406.md`
   - Notes: adds machine-readable `summary.json`, failure reasons, and next actions while keeping GitHub in passive recording mode.
 
+## 2026-05-05 GitHub Actions Runtime Readiness
+
+- Runtime readiness for K3 deploy auth and DingTalk Alertmanager self-heal:
+  - Script: `scripts/ops/github-actions-runtime-readiness.mjs`
+  - Tests: `scripts/ops/github-actions-runtime-readiness.test.mjs`
+  - Design: `docs/development/github-actions-runtime-readiness-design-20260505.md`
+  - Verification: `docs/development/github-actions-runtime-readiness-verification-20260505.md`
+  - Notes: checks required GitHub secret names and repo variables without reading or printing secret values.
+
 ## 2026-04-07 Multitable Staging Profile Baseline
 
 - Multitable staging profile threshold follow-up:
