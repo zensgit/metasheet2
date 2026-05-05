@@ -254,6 +254,12 @@ describe('Formula Engine', () => {
       expect(await engine.calculate('=6 / 3', context)).toBe(2)
     })
 
+    test('Addition coerces operands numerically instead of concatenating strings', async () => {
+      expect(await engine.calculate('="1" + 2', context)).toBe(3)
+      expect(await engine.calculate('=TRUE + 1', context)).toBe(2)
+      expect(await engine.calculate('=SUM(1, 2) + "4"', context)).toBe(7)
+    })
+
     test('Same-precedence arithmetic operators are left-associative', async () => {
       expect(await engine.calculate('=5 - 3 - 1', context)).toBe(1)
       expect(await engine.calculate('=8 / 4 / 2', context)).toBe(1)

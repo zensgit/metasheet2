@@ -617,7 +617,7 @@ export class FormulaEngine {
    */
   private evaluateOperator(operator: string, left: unknown, right: unknown): number | boolean | string {
     switch (operator) {
-      case '+': return (left as number) + (right as number)
+      case '+': return Number(left) + Number(right)
       case '-': return (left as number) - (right as number)
       case '*': return (left as number) * (right as number)
       case '/': return right === 0 ? '#DIV/0!' : (left as number) / (right as number)
