@@ -276,17 +276,24 @@ export class FormulaEngine {
       return { type: 'number', value: strictNum }
     }
 
-    // Check for operators
-    // Sort operators by length descending to match >= before >
-    const operators = ['>=', '<=', '<>', '+', '-', '*', '/', '=', '>', '<']
-    for (const op of operators) {
-      const operatorIndex = this.findTopLevelOperator(formula, op)
-      if (operatorIndex >= 0) {
+    // Check for operators from lowest to highest precedence. Operators in the
+    // same precedence group are left-associative, so split on the rightmost
+    // top-level operator to recursively keep the left side grouped first.
+    const operatorGroups = [
+      ['>=', '<=', '<>', '=', '>', '<'],
+      ['+', '-'],
+      ['*', '/']
+    ]
+    for (const operators of operatorGroups) {
+      const operatorMatch = this.findTopLevelOperator(formula, operators)
+      if (operatorMatch) {
         return {
           type: 'operator',
-          operator: op,
-          left: this.parseFormula(formula.slice(0, operatorIndex).trim()),
-          right: this.parseFormula(formula.slice(operatorIndex + op.length).trim())
+          operator: operatorMatch.operator,
+          left: this.parseFormula(formula.slice(0, operatorMatch.index).trim()),
+          right: this.parseFormula(
+            formula.slice(operatorMatch.index + operatorMatch.operator.length).trim()
+          )
         }
       }
     }
@@ -334,11 +341,13 @@ export class FormulaEngine {
   /**
    * Find an operator that is not inside quoted strings, function arguments, or arrays.
    */
-  private findTopLevelOperator(formula: string, operator: string): number {
+  private findTopLevelOperator(formula: string, operators: string[]): { index: number; operator: string } | null {
     let depth = 0
     let inQuotes = false
+    let match: { index: number; operator: string } | null = null
+    const sortedOperators = [...operators].sort((a, b) => b.length - a.length)
 
-    for (let i = 0; i <= formula.length - operator.length; i++) {
+    for (let i = 0; i < formula.length; i++) {
       const char = formula[i]
 
       if (char === '"' && (i === 0 || formula[i - 1] !== '\\')) {
@@ -357,15 +366,21 @@ export class FormulaEngine {
         continue
       }
 
-      if (depth === 0 && formula.startsWith(operator, i)) {
-        if ((operator === '+' || operator === '-') && this.isUnarySign(formula, i)) {
-          continue
+      if (depth === 0) {
+        for (const operator of sortedOperators) {
+          if (formula.startsWith(operator, i)) {
+            if ((operator === '+' || operator === '-') && this.isUnarySign(formula, i)) {
+              continue
+            }
+            match = { index: i, operator }
+            i += operator.length - 1
+            break
+          }
         }
-        return i
       }
     }
 
-    return -1
+    return match
   }
 
   private isUnarySign(formula: string, index: number): boolean {
