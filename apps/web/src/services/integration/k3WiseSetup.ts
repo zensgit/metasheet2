@@ -442,6 +442,8 @@ export function validateK3WiseGateDraftForm(form: K3WiseSetupForm): K3WiseSetupV
   validateHttpUrl(form.baseUrl, 'baseUrl', issues)
   if (form.environment === 'production') {
     issues.push({ field: 'environment', message: 'Live PoC GATE must target a non-production K3 WISE environment' })
+  } else if (!['test', 'uat', 'staging'].includes(form.environment)) {
+    issues.push({ field: 'environment', message: 'Live PoC GATE environment must be test, uat, or staging' })
   }
   if (form.autoSubmit || form.autoAudit) {
     issues.push({ field: 'form', message: 'Live PoC GATE must stay Save-only: autoSubmit and autoAudit must be false' })

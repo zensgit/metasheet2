@@ -53,6 +53,8 @@ Import behavior is intentionally conservative:
 - PLM read method aliases normalize to `api`, `database`, `table`, `file`, or `manual`.
 - Unsupported environment/read-method/mode values fall back conservatively and surface import warnings.
 - Secret-like keys such as `password`, `token`, `secret`, `sessionId`, and private/access key fields are never copied into the form. The three password fields are cleared on import to prevent stale credential carryover.
+- After a successful import, the pasted JSON textarea is cleared as well. This prevents a customer packet with accidental secrets from remaining in the DOM after the form has imported only public fields.
+- Unsupported K3 WISE environments still normalize to `other` for operator visibility, but `other` is not GATE-ready. Copy/download stays blocked until the operator selects `test`, `uat`, or `staging`, matching the live preflight allowlist.
 
 ## Operator Flow
 
@@ -69,7 +71,7 @@ For a customer-returned packet:
 
 1. Paste the JSON into `导入客户 GATE JSON`.
 2. Click `导入 GATE JSON`.
-3. Review import warnings, especially ignored secret fields and unsupported aliases.
+3. Review import warnings, especially ignored secret fields and unsupported aliases. The paste box is cleared after successful import.
 4. Re-enter any required credentials through the credential form, not through pasted JSON.
 5. Re-run the visible GATE validation before copying/downloading a corrected packet.
 
@@ -90,6 +92,7 @@ The view exposes stable test selectors for the customer GATE import path:
 - visible K3, PLM, SQL Server, rollback, and BOM form fields are populated.
 - Chinese/numeric customer variants normalize in the rendered controls.
 - all visible password inputs are cleared after import.
+- the pasted import textarea is cleared after successful import.
 - ignored secret-like fields appear as warnings in the page.
 
 The same spec also covers the outbound copy and download paths:

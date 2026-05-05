@@ -198,6 +198,7 @@ describe('IntegrationK3WiseSetupView', () => {
     for (const passwordField of Array.from(container.querySelectorAll('input[type="password"]')) as HTMLInputElement[]) {
       expect(passwordField.value).toBe('')
     }
+    expect(textarea!.value).toBe('')
 
     const warnings = container.querySelector('[data-testid="k3-wise-gate-import-warnings"]')?.textContent || ''
     expect(warnings).toContain('k3Wise.credentials.password ignored')

@@ -547,6 +547,15 @@ describe('K3 WISE setup helpers', () => {
     expect(messages).toContain('Live PoC may not write K3 WISE core business tables')
     expect(messages).toContain('BOM PoC requires BOM product ID or PLM default product ID')
     expect(() => buildK3WiseGateDraft(form)).toThrow('Live PoC GATE must target a non-production K3 WISE environment')
+
+    form.environment = 'other'
+    form.autoSubmit = false
+    form.sqlMode = 'readonly'
+    form.bomProductId = 'BOM-PRODUCT-001'
+    expect(validateK3WiseGateDraftForm(form).map((issue) => issue.message)).toContain(
+      'Live PoC GATE environment must be test, uat, or staging',
+    )
+    expect(() => buildK3WiseGateDraft(form)).toThrow('Live PoC GATE environment must be test, uat, or staging')
   })
 
   it('imports customer GATE JSON public fields without credential secrets', () => {

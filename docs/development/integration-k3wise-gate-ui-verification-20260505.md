@@ -69,6 +69,8 @@ Customer GATE import UI regression follow-up:
 - Boolean normalization for English, numeric, and Chinese customer hand-edit variants.
 - Alias normalization for K3 environment, PLM read method, and SQL Server mode.
 - Secret-like field detection and password-field clearing on import.
+- Successful import clears the pasted JSON textarea so accidental customer secrets do not remain visible in the DOM.
+- Unsupported K3 WISE environment aliases normalize to `other`, but `other` blocks GATE copy/download until changed to `test`, `uat`, or `staging`.
 - Page-level regression coverage for the import textarea, import button, warning list, rendered form values, and password clearing.
 - Page-level regression coverage for generated GATE JSON download redaction, hidden anchor cleanup, and deferred object URL release.
 - Page-level regression coverage for authenticated postdeploy smoke and summary commands in the PoC readiness panel.
@@ -155,6 +157,12 @@ Deploy signoff bundle follow-up:
   - mock PoC demo ended with `K3 WISE PoC mock chain verified end-to-end (PASS)`.
 - `node scripts/ops/integration-k3wise-postdeploy-smoke.mjs --help` and `node scripts/ops/integration-k3wise-postdeploy-summary.mjs --help`: passed.
 - `git diff --check`: passed.
+
+Reviewer hardening follow-up:
+
+- Cleared the customer GATE import textarea after successful import, closing the DOM-retention gap for pasted secret-bearing JSON packets.
+- Added a GATE-ready block for `environment=other`, aligning the page validator with the live preflight allowlist (`test`, `uat`, `staging`).
+- Added regression coverage for both behaviors.
 
 ## Not Covered
 

@@ -185,7 +185,7 @@
               data-testid="k3-wise-gate-import-textarea"
               rows="6"
               spellcheck="false"
-              placeholder="粘贴客户回传的 GATE JSON，导入后会清空密码字段"
+              placeholder="粘贴客户回传的 GATE JSON，导入后会清空输入框和密码字段"
             />
           </label>
           <button
@@ -808,6 +808,7 @@ function importGateJson(): void {
     const result = applyK3WiseGateJsonToForm(form, gateImportText.value)
     Object.assign(form, result.form)
     gateImportWarnings.value = result.warnings
+    gateImportText.value = ''
     setStatus(
       result.warnings.length > 0
         ? `GATE JSON 已导入，${result.warnings.length} 项需要人工确认`
