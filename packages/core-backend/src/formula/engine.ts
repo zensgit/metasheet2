@@ -41,6 +41,7 @@ export interface ASTNode {
     | 'function'
     | 'operator'
     | 'unary'
+    | 'percent'
 }
 
 export interface NumberNode extends ASTNode {
@@ -104,6 +105,11 @@ export interface UnaryNode extends ASTNode {
   operand: ASTNodeUnion
 }
 
+export interface PercentNode extends ASTNode {
+  type: 'percent'
+  operand: ASTNodeUnion
+}
+
 export type ASTNodeUnion =
   | NumberNode
   | BooleanNode
@@ -116,6 +122,7 @@ export type ASTNodeUnion =
   | FunctionNode
   | OperatorNode
   | UnaryNode
+  | PercentNode
 
 // Function type for spreadsheet functions
 type SpreadsheetFunction = (...args: unknown[]) => unknown
@@ -344,6 +351,14 @@ export class FormulaEngine {
       }
     }
 
+    const percentIndex = this.findTrailingTopLevelPercent(formula)
+    if (percentIndex !== null) {
+      return {
+        type: 'percent',
+        operand: this.parseFormula(formula.slice(0, percentIndex).trim())
+      }
+    }
+
     // Check if it's a boolean
     if (formula.toUpperCase() === 'TRUE') return { type: 'boolean', value: true }
     if (formula.toUpperCase() === 'FALSE') return { type: 'boolean', value: false }
@@ -423,6 +438,41 @@ export class FormulaEngine {
     }
 
     return { type: 'malformed' }
+  }
+
+  private findTrailingTopLevelPercent(formula: string): number | null {
+    const trimmed = formula.trimEnd()
+    if (!trimmed.endsWith('%')) return null
+
+    let depth = 0
+    let inQuotes = false
+
+    for (let i = 0; i < trimmed.length; i++) {
+      const char = trimmed[i]
+
+      if (char === '"' && (i === 0 || trimmed[i - 1] !== '\\')) {
+        inQuotes = !inQuotes
+        continue
+      }
+
+      if (inQuotes) continue
+
+      if (char === '(' || char === '[') {
+        depth++
+        continue
+      }
+
+      if (char === ')' || char === ']') {
+        depth--
+        continue
+      }
+
+      if (char === '%' && depth === 0 && i === trimmed.length - 1) {
+        return trimmed.slice(0, i).trim().length > 0 ? i : null
+      }
+    }
+
+    return null
   }
 
   /**
@@ -627,6 +677,11 @@ export class FormulaEngine {
         const value = await this.evaluateAST(node.operand, context)
         const numericValue = Number(value)
         return node.operator === '-' ? -numericValue : numericValue
+      }
+
+      case 'percent': {
+        const value = await this.evaluateAST(node.operand, context)
+        return Number(value) / 100
       }
 
       default:

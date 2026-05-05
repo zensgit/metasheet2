@@ -284,6 +284,19 @@ describe('Formula Engine', () => {
       expect(await engine.calculate('=--2^2', context)).toBe(4)
     })
 
+    test('Percent postfix operator', async () => {
+      expect(await engine.calculate('=50%', context)).toBe(0.5)
+      expect(await engine.calculate('=200 * 10%', context)).toBe(20)
+      expect(await engine.calculate('=1 + 10%', context)).toBe(1.1)
+      expect(await engine.calculate('=-50%', context)).toBe(-0.5)
+    })
+
+    test('Percent postfix works with power and preserves string literals', async () => {
+      expect(await engine.calculate('=2^3%', context)).toBeCloseTo(1.021012, 6)
+      expect(await engine.calculate('=(50%)^2', context)).toBe(0.25)
+      expect(await engine.calculate('="50%"', context)).toBe('50%')
+    })
+
     test('Same-precedence arithmetic operators are left-associative', async () => {
       expect(await engine.calculate('=5 - 3 - 1', context)).toBe(1)
       expect(await engine.calculate('=8 / 4 / 2', context)).toBe(1)
