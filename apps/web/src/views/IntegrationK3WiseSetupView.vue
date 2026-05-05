@@ -208,6 +208,20 @@
             </li>
           </ul>
           <div class="k3-setup__commands" data-testid="k3-wise-gate-commands">
+            <div class="k3-setup__command k3-setup__command--env" data-testid="k3-wise-env-template">
+              <div class="k3-setup__command-head">
+                <strong>Deploy env</strong>
+                <button
+                  class="k3-setup__command-copy"
+                  type="button"
+                  data-testid="k3-wise-copy-env-template"
+                  @click="copyGateCommand('Deploy env', gateEnvTemplate)"
+                >
+                  复制
+                </button>
+              </div>
+              <code>{{ gateEnvTemplate }}</code>
+            </div>
             <div
               v-for="command in gateCommandItems"
               :key="command.key"
@@ -636,6 +650,7 @@ import {
   buildK3WisePipelinePayloads,
   buildK3WisePipelineRunPayload,
   buildK3WisePocCommandSet,
+  buildK3WisePocEnvironmentTemplate,
   buildK3WiseSetupPayloads,
   buildK3WiseStagingInstallPayload,
   createDefaultK3WiseSetupForm,
@@ -698,6 +713,7 @@ const materialRunIssues = computed(() => validateK3WisePipelineRunForm(form, 'ma
 const bomRunIssues = computed(() => validateK3WisePipelineRunForm(form, 'bom'))
 const gateIssues = computed(() => validateK3WiseGateDraftForm(form))
 const gateCommands = buildK3WisePocCommandSet()
+const gateEnvTemplate = computed(() => buildK3WisePocEnvironmentTemplate(form))
 const gateCommandItems = [
   { key: 'postdeploy-smoke', label: 'Postdeploy smoke', value: gateCommands.postdeploySmoke },
   { key: 'postdeploy-summary', label: 'Postdeploy summary', value: gateCommands.postdeploySummary },
@@ -1294,6 +1310,10 @@ onMounted(() => {
   background: #f1f5f9;
   color: #172033;
   font-size: 12px;
+}
+
+.k3-setup__command--env code {
+  white-space: pre-wrap;
 }
 
 .k3-setup__descriptor-list {

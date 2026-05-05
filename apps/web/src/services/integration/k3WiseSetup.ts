@@ -927,6 +927,19 @@ export function buildK3WisePocCommandSet(gatePath = 'artifacts/integration-live-
   }
 }
 
+function shellDoubleQuote(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/`/g, '\\`')}"`
+}
+
+export function buildK3WisePocEnvironmentTemplate(form: Pick<K3WiseSetupForm, 'tenantId'>): string {
+  const tenantId = trim(form.tenantId) || '<tenant-id>'
+  return [
+    `export METASHEET_BASE_URL=${shellDoubleQuote('https://metasheet.example.test')}`,
+    `export METASHEET_AUTH_TOKEN_FILE=${shellDoubleQuote('/secure/path/metasheet-admin.jwt')}`,
+    `export METASHEET_TENANT_ID=${shellDoubleQuote(tenantId)}`,
+  ].join('\n')
+}
+
 export function getK3WisePipelineId(form: K3WiseSetupForm, target: K3WisePipelineTarget): string {
   return target === 'material' ? trim(form.materialPipelineId) : trim(form.bomPipelineId)
 }

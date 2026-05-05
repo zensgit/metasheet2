@@ -73,6 +73,7 @@ Customer GATE import UI regression follow-up:
 - Page-level regression coverage for generated GATE JSON download redaction, hidden anchor cleanup, and deferred object URL release.
 - Page-level regression coverage for authenticated postdeploy smoke and summary commands in the PoC readiness panel.
 - Page-level regression coverage for one-click copy of displayed postdeploy commands.
+- Service and page-level regression coverage for the redacted deploy environment template.
 
 GATE JSON copy redaction UI regression follow-up:
 
@@ -117,6 +118,20 @@ PoC command copy UI follow-up:
 - `k3WiseSetupView.spec.ts`: 3/3 passed, covering copying `Postdeploy smoke` directly from the PoC readiness panel and preserving the existing GATE JSON copy path.
 - `k3WiseSetup.spec.ts`: 24/24 passed. The local jsdom run printed the existing `WebSocket server error: Port is already in use` warning, but all assertions passed.
 - `k3WiseSetup.spec.ts` + `k3WiseSetupView.spec.ts` + `platform-shell-nav.spec.ts`: 30/30 passed.
+- `@metasheet/web type-check`: passed.
+- `@metasheet/web build`: passed. Vite reported the existing dynamic import and large chunk warnings.
+- `verify:integration-k3wise:poc`: passed.
+  - preflight tests: 16/16 passed.
+  - evidence tests: 31/31 passed.
+  - mock PoC demo ended with `K3 WISE PoC mock chain verified end-to-end (PASS)`.
+- `node scripts/ops/integration-k3wise-postdeploy-smoke.mjs --help` and `node scripts/ops/integration-k3wise-postdeploy-summary.mjs --help`: passed.
+- `git diff --check`: passed.
+
+Deploy environment template follow-up:
+
+- `k3WiseSetup.spec.ts`: 25/25 passed, covering `buildK3WisePocEnvironmentTemplate()`, tenant shell escaping, and no bearer-token value emission. The local jsdom run printed the existing `WebSocket server error: Port is already in use` warning, but all assertions passed.
+- `k3WiseSetupView.spec.ts`: 3/3 passed, covering rendering `METASHEET_BASE_URL`, `METASHEET_AUTH_TOKEN_FILE`, and the current `METASHEET_TENANT_ID`, plus copying the template through the page control.
+- `k3WiseSetup.spec.ts` + `k3WiseSetupView.spec.ts` + `platform-shell-nav.spec.ts`: 31/31 passed.
 - `@metasheet/web type-check`: passed.
 - `@metasheet/web build`: passed. Vite reported the existing dynamic import and large chunk warnings.
 - `verify:integration-k3wise:poc`: passed.

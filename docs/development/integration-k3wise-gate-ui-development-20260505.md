@@ -34,6 +34,7 @@ The page adds a PoC readiness panel with:
 - GATE JSON copy and download actions.
 - customer-returned GATE JSON import.
 - visible authenticated postdeploy smoke, postdeploy summary, preflight, offline mock, and evidence commands.
+- a redacted deploy environment template for `METASHEET_BASE_URL`, `METASHEET_AUTH_TOKEN_FILE`, and `METASHEET_TENANT_ID`.
 - one-click copy controls for each displayed PoC/deploy command.
 - inline blocking issues before an operator can copy/download the GATE packet.
 
@@ -58,9 +59,10 @@ Import behavior is intentionally conservative:
 2. Fill PLM source and rollback fields in `客户 GATE / PLM Source`.
 3. Use `PoC 准备` to copy or download the redacted GATE JSON.
 4. Fill real credentials outside Git if needed.
-5. Before customer live execution, run the displayed postdeploy smoke and summary commands with `METASHEET_BASE_URL`, `METASHEET_AUTH_TOKEN_FILE`, and `METASHEET_TENANT_ID` set.
-6. Run the displayed preflight command.
-7. Run `pnpm run verify:integration-k3wise:poc` before customer live execution.
+5. Copy the deploy environment template, replace the base URL and token file path outside Git, and keep `METASHEET_TENANT_ID` aligned with the form.
+6. Before customer live execution, run the displayed postdeploy smoke and summary commands.
+7. Run the displayed preflight command.
+8. Run `pnpm run verify:integration-k3wise:poc` before customer live execution.
 
 For a customer-returned packet:
 
@@ -92,7 +94,9 @@ The view exposes stable test selectors for the customer GATE import path:
 The same spec also covers the outbound copy and download paths:
 
 - visible form fields can make the GATE draft ready.
+- the page renders a redacted deploy environment template with the current tenant ID and no bearer token value.
 - the page renders authenticated postdeploy smoke and summary commands before customer live execution commands.
+- the deploy environment template can be copied without exposing a token.
 - each displayed command can be copied without selecting shell text manually.
 - the copy button writes the generated JSON to `navigator.clipboard`.
 - the download button writes the same generated JSON into a Blob-backed download.

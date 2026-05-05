@@ -8,6 +8,7 @@ import {
   buildK3WisePipelinePayloads,
   buildK3WisePipelineRunPayload,
   buildK3WisePocCommandSet,
+  buildK3WisePocEnvironmentTemplate,
   buildK3WiseSetupPayloads,
   buildK3WiseStagingInstallPayload,
   createDefaultK3WiseSetupForm,
@@ -487,6 +488,19 @@ describe('K3 WISE setup helpers', () => {
     expect(commands.preflight).toContain('--input tmp/gate.json')
     expect(commands.offlineMock).toBe('pnpm run verify:integration-k3wise:poc')
     expect(commands.evidence).toContain('integration-k3wise-live-poc-evidence.mjs')
+  })
+
+  it('builds a redacted deploy environment template for postdeploy smoke commands', () => {
+    const form = createDefaultK3WiseSetupForm()
+    form.tenantId = 'tenant_$1'
+
+    const template = buildK3WisePocEnvironmentTemplate(form)
+
+    expect(template).toContain('export METASHEET_BASE_URL="https://metasheet.example.test"')
+    expect(template).toContain('export METASHEET_AUTH_TOKEN_FILE="/secure/path/metasheet-admin.jwt"')
+    expect(template).toContain('export METASHEET_TENANT_ID="tenant_\\$1"')
+    expect(template).not.toContain('METASHEET_AUTH_TOKEN=')
+    expect(template).not.toContain('Bearer ')
   })
 
   it('blocks unsafe live PoC GATE drafts before preflight JSON is copied', () => {

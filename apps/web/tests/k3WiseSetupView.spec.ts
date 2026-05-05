@@ -230,6 +230,22 @@ describe('IntegrationK3WiseSetupView', () => {
     expect(commands).toContain('integration-k3wise-postdeploy-summary.mjs')
     expect(commands).toContain('--require-auth-signoff')
 
+    const envTemplate = container.querySelector('[data-testid="k3-wise-env-template"]')?.textContent || ''
+    expect(envTemplate).toContain('METASHEET_BASE_URL')
+    expect(envTemplate).toContain('METASHEET_AUTH_TOKEN_FILE')
+    expect(envTemplate).toContain('METASHEET_TENANT_ID="tenant_1"')
+    expect(envTemplate).not.toContain('METASHEET_AUTH_TOKEN=')
+
+    const copyEnvTemplateButton = container.querySelector('[data-testid="k3-wise-copy-env-template"]') as HTMLButtonElement | null
+    expect(copyEnvTemplateButton).not.toBeNull()
+    copyEnvTemplateButton?.click()
+    await flushUi()
+
+    expect(navigator.clipboard?.writeText).toHaveBeenCalledWith(expect.stringContaining('export METASHEET_BASE_URL='))
+    expect(navigator.clipboard?.writeText).toHaveBeenCalledWith(expect.stringContaining('export METASHEET_TENANT_ID="tenant_1"'))
+    expect(container.querySelector('[data-testid="k3-wise-status"]')?.textContent).toContain('Deploy env 命令已复制')
+    vi.mocked(navigator.clipboard!.writeText).mockClear()
+
     const copyPostdeploySmokeButton = container.querySelector('[data-testid="k3-wise-copy-command-postdeploy-smoke"]') as HTMLButtonElement | null
     expect(copyPostdeploySmokeButton).not.toBeNull()
     copyPostdeploySmokeButton?.click()
