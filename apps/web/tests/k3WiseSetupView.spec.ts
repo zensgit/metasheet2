@@ -246,6 +246,23 @@ describe('IntegrationK3WiseSetupView', () => {
     expect(container.querySelector('[data-testid="k3-wise-status"]')?.textContent).toContain('Deploy env 命令已复制')
     vi.mocked(navigator.clipboard!.writeText).mockClear()
 
+    const postdeployBundle = container.querySelector('[data-testid="k3-wise-postdeploy-bundle"]')?.textContent || ''
+    expect(postdeployBundle).toContain('set -euo pipefail')
+    expect(postdeployBundle).toContain('METASHEET_TENANT_ID="tenant_1"')
+    expect(postdeployBundle).toContain('integration-k3wise-postdeploy-smoke.mjs')
+    expect(postdeployBundle).toContain('integration-k3wise-postdeploy-summary.mjs')
+    expect(postdeployBundle).not.toContain('METASHEET_AUTH_TOKEN=')
+
+    const copyPostdeployBundleButton = container.querySelector('[data-testid="k3-wise-copy-postdeploy-bundle"]') as HTMLButtonElement | null
+    expect(copyPostdeployBundleButton).not.toBeNull()
+    copyPostdeployBundleButton?.click()
+    await flushUi()
+
+    expect(navigator.clipboard?.writeText).toHaveBeenCalledWith(expect.stringContaining('set -euo pipefail'))
+    expect(navigator.clipboard?.writeText).toHaveBeenCalledWith(expect.stringContaining('integration-k3wise-postdeploy-summary.mjs'))
+    expect(container.querySelector('[data-testid="k3-wise-status"]')?.textContent).toContain('Deploy signoff bundle 命令已复制')
+    vi.mocked(navigator.clipboard!.writeText).mockClear()
+
     const copyPostdeploySmokeButton = container.querySelector('[data-testid="k3-wise-copy-command-postdeploy-smoke"]') as HTMLButtonElement | null
     expect(copyPostdeploySmokeButton).not.toBeNull()
     copyPostdeploySmokeButton?.click()

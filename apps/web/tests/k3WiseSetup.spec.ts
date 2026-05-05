@@ -7,6 +7,7 @@ import {
   buildK3WisePipelineObservationQuery,
   buildK3WisePipelinePayloads,
   buildK3WisePipelineRunPayload,
+  buildK3WisePostdeploySignoffBundle,
   buildK3WisePocCommandSet,
   buildK3WisePocEnvironmentTemplate,
   buildK3WiseSetupPayloads,
@@ -501,6 +502,23 @@ describe('K3 WISE setup helpers', () => {
     expect(template).toContain('export METASHEET_TENANT_ID="tenant_\\$1"')
     expect(template).not.toContain('METASHEET_AUTH_TOKEN=')
     expect(template).not.toContain('Bearer ')
+  })
+
+  it('builds a redacted postdeploy signoff bundle from env and smoke commands', () => {
+    const form = createDefaultK3WiseSetupForm()
+    form.tenantId = 'tenant_1'
+
+    const bundle = buildK3WisePostdeploySignoffBundle(form)
+
+    expect(bundle).toContain('set -euo pipefail')
+    expect(bundle).toContain('export METASHEET_BASE_URL=')
+    expect(bundle).toContain('export METASHEET_TENANT_ID="tenant_1"')
+    expect(bundle).toContain('integration-k3wise-postdeploy-smoke.mjs')
+    expect(bundle).toContain('--require-auth')
+    expect(bundle).toContain('integration-k3wise-postdeploy-summary.mjs')
+    expect(bundle).toContain('--require-auth-signoff')
+    expect(bundle).not.toContain('METASHEET_AUTH_TOKEN=')
+    expect(bundle).not.toContain('Bearer ')
   })
 
   it('blocks unsafe live PoC GATE drafts before preflight JSON is copied', () => {

@@ -940,6 +940,20 @@ export function buildK3WisePocEnvironmentTemplate(form: Pick<K3WiseSetupForm, 't
   ].join('\n')
 }
 
+export function buildK3WisePostdeploySignoffBundle(
+  form: Pick<K3WiseSetupForm, 'tenantId'>,
+  commands: Pick<K3WisePocCommandSet, 'postdeploySmoke' | 'postdeploySummary'> = buildK3WisePocCommandSet(),
+): string {
+  return [
+    '# K3 WISE postdeploy signoff - replace placeholders outside Git before running',
+    'set -euo pipefail',
+    buildK3WisePocEnvironmentTemplate(form),
+    '',
+    commands.postdeploySmoke,
+    commands.postdeploySummary,
+  ].join('\n')
+}
+
 export function getK3WisePipelineId(form: K3WiseSetupForm, target: K3WisePipelineTarget): string {
   return target === 'material' ? trim(form.materialPipelineId) : trim(form.bomPipelineId)
 }
