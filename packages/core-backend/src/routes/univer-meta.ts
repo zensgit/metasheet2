@@ -133,6 +133,7 @@ import {
   createYjsInvalidationPostCommitHook,
   type YjsInvalidator,
 } from '../multitable/post-commit-hooks'
+import { listRecordRevisions } from '../multitable/record-history-service'
 import {
   CONDITIONAL_FORMATTING_RULE_LIMIT,
   sanitizeConditionalFormattingRules,
@@ -3621,6 +3622,61 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] list record permissions failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list record permissions' } })
+    }
+  })
+
+  router.get('/sheets/:sheetId/records/:recordId/history', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
+    const limitParam = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : 50
+    const offsetParam = typeof req.query.offset === 'string' ? Number.parseInt(req.query.offset, 10) : 0
+    const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 100) : 50
+    const offset = Number.isFinite(offsetParam) ? Math.max(offsetParam, 0) : 0
+    if (!sheetId || !recordId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and recordId are required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const recordCheck = await pool.query(
+        'SELECT id, sheet_id FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        [recordId, sheetId],
+      )
+      if (recordCheck.rows.length === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
+      }
+
+      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      if (!capabilities.canRead) return sendForbidden(res)
+
+      if (!access.isAdminRole) {
+        const hasRecordPerms = await hasRecordPermissionAssignments(pool.query.bind(pool), sheetId)
+        if (hasRecordPerms) {
+          const recordScopeMap = await loadRecordPermissionScopeMap(
+            pool.query.bind(pool),
+            sheetId,
+            [recordId],
+            access.userId,
+          )
+          if (recordScopeMap.size > 0 && !deriveRecordPermissions(recordId, capabilities, recordScopeMap).canRead) {
+            return sendForbidden(res)
+          }
+        }
+      }
+
+      const items = await listRecordRevisions(pool.query.bind(pool), { sheetId, recordId, limit, offset })
+      return res.json({ ok: true, data: { items, limit, offset } })
+    } catch (err) {
+      if (isUndefinedTableError(err, 'meta_record_revisions')) {
+        return res.json({ ok: true, data: { items: [], limit, offset } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list record history failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list record history' } })
     }
   })
 

@@ -98,6 +98,105 @@ describe('MetaRecordDrawer', () => {
     container.remove()
   })
 
+  it('loads and renders record history in the History tab', async () => {
+    const listRecordHistory = vi.fn().mockResolvedValue([
+      {
+        id: 'rev_2',
+        sheetId: 'sheet_orders',
+        recordId: 'rec_history_1',
+        version: 2,
+        action: 'update',
+        source: 'rest',
+        actorId: 'user_1',
+        changedFieldIds: ['fld_title'],
+        patch: { fld_title: 'Updated' },
+        snapshot: { fld_title: 'Updated' },
+        createdAt: '2026-04-30T09:00:00.000Z',
+      },
+    ])
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaRecordDrawer, {
+          visible: true,
+          record: {
+            id: 'rec_history_1',
+            version: 2,
+            data: {
+              fld_title: 'Updated',
+            },
+          },
+          fields: [
+            { id: 'fld_title', name: 'Title', type: 'string' },
+          ],
+          canEdit: true,
+          canComment: false,
+          canDelete: false,
+          sheetId: 'sheet_orders',
+          apiClient: { listRecordHistory } as any,
+        })
+      },
+    })
+
+    app.mount(container)
+    await flushUi()
+
+    ;(Array.from(container.querySelectorAll('.meta-record-drawer__tab')).find((button) =>
+      button.textContent?.includes('History'),
+    ) as HTMLButtonElement | undefined)?.click()
+    await flushUi()
+
+    expect(listRecordHistory).toHaveBeenCalledWith('sheet_orders', 'rec_history_1', { limit: 50 })
+    expect(container.textContent).toContain('Updated')
+    expect(container.textContent).toContain('v2')
+    expect(container.textContent).toContain('Title')
+    expect(container.textContent).toContain('user_1')
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('shows history unavailable when no api client is provided', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaRecordDrawer, {
+          visible: true,
+          record: {
+            id: 'rec_history_2',
+            version: 1,
+            data: {
+              fld_title: 'Alpha',
+            },
+          },
+          fields: [
+            { id: 'fld_title', name: 'Title', type: 'string' },
+          ],
+          canEdit: true,
+          canComment: false,
+          canDelete: false,
+        })
+      },
+    })
+
+    app.mount(container)
+    await flushUi()
+
+    ;(Array.from(container.querySelectorAll('.meta-record-drawer__tab')).find((button) =>
+      button.textContent?.includes('History'),
+    ) as HTMLButtonElement | undefined)?.click()
+    await flushUi()
+
+    expect(container.textContent).toContain('History unavailable for this record.')
+
+    app.unmount()
+    container.remove()
+  })
+
   it('honors scoped row actions and exposes the workflow entry', async () => {
     const toggleCommentsSpy = vi.fn()
     const openAutomationSpy = vi.fn()

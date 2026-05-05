@@ -23,6 +23,7 @@ import {
   type YjsInvalidator,
 } from './post-commit-hooks'
 import { BATCH1_FIELD_TYPES, coerceBatch1Value, normalizeMultiSelectValue, validateLongTextValue } from './field-codecs'
+import { recordRecordRevision } from './record-history-service'
 
 // ---------------------------------------------------------------------------
 // Shared types (mirrors the ones in univer-meta.ts to avoid coupling)
@@ -463,6 +464,7 @@ export class RecordWriteService {
       capabilities,
       sheetScope,
       access,
+      source,
     } = input
 
     const h = this.helpers
@@ -484,7 +486,7 @@ export class RecordWriteService {
         )[0]
 
         const recordRes = await query(
-          'SELECT id, version, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE',
+          'SELECT id, version, data, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE',
           [sheetId, recordId],
         )
         if ((recordRes.rows as any[]).length === 0) {
@@ -508,6 +510,7 @@ export class RecordWriteService {
         if (typeof expectedVersion === 'number' && expectedVersion !== serverVersion) {
           throw new VersionConflictError(recordId, serverVersion)
         }
+        const previousData = h.normalizeJson(recordRow?.data)
 
         const patch: Record<string, unknown> = {}
         const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
@@ -599,6 +602,18 @@ export class RecordWriteService {
         if ((updateRes.rows as any[]).length === 0) {
           throw new RecordNotFoundError(`Record not found: ${recordId}`)
         }
+        const nextVersion = Number((updateRes.rows[0] as any).version)
+        await recordRecordRevision(query, {
+          sheetId,
+          recordId,
+          version: nextVersion,
+          action: 'update',
+          source: source ?? 'rest',
+          actorId,
+          changedFieldIds: Object.keys(patch),
+          patch,
+          snapshot: { ...previousData, ...patch },
+        })
 
         // Sync link table
         if (linkUpdates.size > 0) {
@@ -654,7 +669,7 @@ export class RecordWriteService {
           }
         }
 
-        updated.push({ recordId, version: Number((updateRes.rows[0] as any).version) })
+        updated.push({ recordId, version: nextVersion })
       }
 
       return updated

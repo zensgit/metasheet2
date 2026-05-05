@@ -323,6 +323,51 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /api/multitable/sheets/{sheetId}/records/{recordId}/history:
+    get:
+      summary: List multitable record revision history
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: sheetId
+          required: true
+          schema: { type: string }
+        - in: path
+          name: recordId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/MultitableRecordRevision'
+                      limit:
+                        type: integer
+                      offset:
+                        type: integer
+                    required: [items, limit, offset]
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
   /api/multitable/sheets/{sheetId}/permissions/{subjectType}/{subjectId}:
     put:
       summary: Set a sheet access level for a person or role

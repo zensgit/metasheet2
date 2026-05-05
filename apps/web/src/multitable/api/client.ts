@@ -11,6 +11,7 @@ import type {
   MetaContext,
   MetaRecord,
   MetaRecordContext,
+  MetaRecordRevision,
   MetaFormContext,
   PatchResult,
   FormSubmitResult,
@@ -563,6 +564,42 @@ function normalizeRecordPermissionEntries(
     : []
 }
 
+function normalizeRecordHistoryEntry(payload: Partial<MetaRecordRevision> | null | undefined): MetaRecordRevision | null {
+  const id = typeof payload?.id === 'string' ? payload.id : ''
+  const sheetId = typeof payload?.sheetId === 'string' ? payload.sheetId : ''
+  const recordId = typeof payload?.recordId === 'string' ? payload.recordId : ''
+  const version = typeof payload?.version === 'number' && Number.isFinite(payload.version) ? payload.version : null
+  const action = payload?.action === 'create' || payload?.action === 'delete' || payload?.action === 'update'
+    ? payload.action
+    : null
+  if (!id || !sheetId || !recordId || version === null || !action) return null
+  return {
+    id,
+    sheetId,
+    recordId,
+    version,
+    action,
+    source: typeof payload?.source === 'string' ? payload.source : 'rest',
+    actorId: typeof payload?.actorId === 'string' ? payload.actorId : null,
+    changedFieldIds: Array.isArray(payload?.changedFieldIds) ? payload.changedFieldIds.map(String) : [],
+    patch: isPlainObject(payload?.patch) ? payload.patch : {},
+    snapshot: payload?.snapshot === null || payload?.snapshot === undefined
+      ? null
+      : isPlainObject(payload.snapshot) ? payload.snapshot : {},
+    createdAt: typeof payload?.createdAt === 'string' ? payload.createdAt : '',
+  }
+}
+
+function normalizeRecordHistoryEntries(
+  payload: { items?: Array<Partial<MetaRecordRevision>> } | null | undefined,
+): MetaRecordRevision[] {
+  return Array.isArray(payload?.items)
+    ? payload.items
+      .map((item) => normalizeRecordHistoryEntry(item))
+      .filter((item): item is MetaRecordRevision => !!item)
+    : []
+}
+
 function normalizeCommentsParams(params: { containerId: string; targetId: string; targetFieldId?: string | null } | MetaCommentsScope) {
   if ('containerType' in params) {
     return {
@@ -845,6 +882,14 @@ export class MultitableApiClient {
   async getRecord(recordId: string, params?: { sheetId?: string; viewId?: string }): Promise<MetaRecordContext> {
     const res = await this.fetch(`/api/multitable/records/${recordId}${qs(params ?? {})}`)
     return parseJson(res)
+  }
+
+  async listRecordHistory(sheetId: string, recordId: string, params?: { limit?: number; offset?: number }): Promise<MetaRecordRevision[]> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/history${qs(params ?? {})}`,
+    )
+    const data = await parseJson<{ items?: Array<Partial<MetaRecordRevision>> }>(res)
+    return normalizeRecordHistoryEntries(data)
   }
 
   async createRecord(input: CreateRecordInput, opts?: { signal?: AbortSignal }): Promise<{ record: MetaRecord }> {

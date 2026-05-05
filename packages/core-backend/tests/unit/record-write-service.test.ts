@@ -66,11 +66,14 @@ function createMockPool(queryResponses: Record<string, { rows: unknown[] }> = {}
 
   const queryFn = vi.fn(async (sql: string, _params?: unknown[]) => {
     // Match SQL patterns to return the correct responses
-    if (sql.includes('SELECT id, version, created_by FROM meta_records') && sql.includes('FOR UPDATE')) {
-      return queryResponses['SELECT_FOR_UPDATE'] ?? { rows: [{ id: 'rec1', version: 1, created_by: 'user1' }] }
+    if (sql.includes('SELECT id, version, data, created_by FROM meta_records') && sql.includes('FOR UPDATE')) {
+      return queryResponses['SELECT_FOR_UPDATE'] ?? { rows: [{ id: 'rec1', version: 1, data: { fld_name: 'Before' }, created_by: 'user1' }] }
     }
     if (sql.includes('UPDATE meta_records')) {
       return queryResponses['UPDATE'] ?? { rows: [{ version: 2 }] }
+    }
+    if (sql.includes('INSERT INTO meta_record_revisions')) {
+      return queryResponses['INSERT_REVISION'] ?? { rows: [], rowCount: 1 }
     }
     if (sql.includes('SELECT id, version, data FROM meta_records')) {
       return queryResponses['SELECT_UPDATED'] ?? defaultQueryResponse
@@ -222,6 +225,39 @@ describe('RecordWriteService', () => {
       'rec1',
       'user_editor',
     ])
+  })
+
+  it('writes one record revision for each authoritative patch', async () => {
+    const service = new RecordWriteService(pool, eventBus as any, helpers)
+
+    await service.patchRecords(buildTestInput({ actorId: 'user_editor' }))
+
+    expect(pool.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO meta_record_revisions'),
+      expect.arrayContaining([
+        expect.any(String),
+        'sheet1',
+        'rec1',
+        2,
+        'update',
+        'rest',
+        'user_editor',
+        ['fld_name'],
+        JSON.stringify({ fld_name: 'Alice' }),
+        JSON.stringify({ fld_name: 'Alice' }),
+      ]),
+    )
+  })
+
+  it('preserves yjs-bridge as the record revision source', async () => {
+    const service = new RecordWriteService(pool, eventBus as any, helpers)
+
+    await service.patchRecords(buildTestInput({ source: 'yjs-bridge' }))
+
+    expect(pool.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO meta_record_revisions'),
+      expect.arrayContaining(['yjs-bridge']),
+    )
   })
 
   it('preserves longText multiline values in the shared write path', async () => {

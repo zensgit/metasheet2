@@ -27,6 +27,7 @@ import {
 } from './post-commit-hooks'
 import { isFieldAlwaysReadOnly, isFieldPermissionHidden } from './permission-derivation'
 import { publishMultitableSheetRealtime } from './realtime-publish'
+import { recordRecordRevision } from './record-history-service'
 import { ensureRecordWriteAllowed, type AccessInfo, type SheetPermissionScope } from './sheet-capabilities'
 
 export type QueryFn = (
@@ -520,6 +521,19 @@ export class RecordService {
         }
       }
 
+      const version = Number((inserted.rows[0] as { version?: unknown } | undefined)?.version ?? 1)
+      await recordRecordRevision(query, {
+        sheetId,
+        recordId,
+        version,
+        action: 'create',
+        source: 'rest',
+        actorId,
+        changedFieldIds: Object.keys(patch),
+        patch,
+        snapshot: patch,
+      })
+
       return inserted
     })
 
@@ -579,7 +593,7 @@ export class RecordService {
 
     await this.pool.transaction(async ({ query }) => {
       const lockedRecordRes = await query(
-        'SELECT id, sheet_id, version FROM meta_records WHERE id = $1 FOR UPDATE',
+        'SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1 FOR UPDATE',
         [recordId],
       )
       if (lockedRecordRes.rows.length === 0) {
@@ -591,6 +605,7 @@ export class RecordService {
       if (typeof expectedVersion === 'number' && expectedVersion !== serverVersion) {
         throw new VersionConflictError(recordId, serverVersion)
       }
+      const snapshot = normalizeJson(currentRow.data)
 
       try {
         await query(
@@ -600,6 +615,18 @@ export class RecordService {
       } catch (err) {
         if (!isUndefinedTableError(err, 'meta_links')) throw err
       }
+
+      await recordRecordRevision(query, {
+        sheetId,
+        recordId,
+        version: serverVersion,
+        action: 'delete',
+        source: 'rest',
+        actorId,
+        changedFieldIds: [],
+        patch: {},
+        snapshot,
+      })
 
       await query('DELETE FROM meta_records WHERE id = $1', [recordId])
     })
@@ -758,7 +785,7 @@ export class RecordService {
     let nextVersion = 1
     await this.pool.transaction(async ({ query }) => {
       const currentRes = await query(
-        'SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
+        'SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
         [recordId, sheetId],
       )
       if (currentRes.rows.length === 0) {
@@ -779,6 +806,7 @@ export class RecordService {
       if (typeof expectedVersion === 'number' && expectedVersion !== serverVersion) {
         throw new VersionConflictError(recordId, serverVersion)
       }
+      const previousData = normalizeJson(currentRow.data)
 
       if (Object.keys(patch).length > 0) {
         const updateRes = await query(
@@ -789,6 +817,17 @@ export class RecordService {
           [JSON.stringify(patch), recordId, sheetId, patchActorId],
         )
         nextVersion = Number((updateRes.rows[0] as { version?: unknown } | undefined)?.version ?? serverVersion)
+        await recordRecordRevision(query, {
+          sheetId,
+          recordId,
+          version: nextVersion,
+          action: 'update',
+          source: 'rest',
+          actorId: patchActorId,
+          changedFieldIds: Object.keys(patch),
+          patch,
+          snapshot: { ...previousData, ...patch },
+        })
       } else {
         nextVersion = serverVersion
       }

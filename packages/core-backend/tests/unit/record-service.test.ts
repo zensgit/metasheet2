@@ -60,6 +60,9 @@ function createMockPool(
     if (sql.includes('INSERT INTO meta_records') && sql.includes('RETURNING version')) {
       return responses.INSERT_RECORD ?? { rows: [{ version: 1 }] }
     }
+    if (sql.includes('INSERT INTO meta_record_revisions')) {
+      return responses.INSERT_REVISION ?? { rows: [], rowCount: 1 }
+    }
     if (sql.includes('INSERT INTO meta_links')) {
       return responses.INSERT_LINK ?? { rows: [], rowCount: 1 }
     }
@@ -68,14 +71,14 @@ function createMockPool(
         rows: [{ id: 'rec_existing', sheet_id: 'sheet_ops', created_by: 'user_1' }],
       }
     }
-    if (sql.includes('SELECT id, sheet_id, version FROM meta_records WHERE id = $1 FOR UPDATE')) {
+    if (sql.includes('SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1 FOR UPDATE')) {
       return responses.SELECT_DELETE_FOR_UPDATE ?? {
-        rows: [{ id: 'rec_existing', sheet_id: 'sheet_ops', version: 4 }],
+        rows: [{ id: 'rec_existing', sheet_id: 'sheet_ops', version: 4, data: { fld_title: 'Before' } }],
       }
     }
-    if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+    if (sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
       return responses.SELECT_PATCH_FOR_UPDATE ?? {
-        rows: [{ id: 'rec_existing', version: 4, created_by: 'user_1' }],
+        rows: [{ id: 'rec_existing', version: 4, data: { fld_title: 'Before' }, created_by: 'user_1' }],
       }
     }
     if (sql.includes('UPDATE meta_records') && sql.includes('RETURNING version')) {
@@ -146,6 +149,21 @@ describe('RecordService', () => {
         recordIds: [result.recordId],
         fieldIds: ['fld_title'],
       }),
+    )
+    expect(pool.queryMock).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO meta_record_revisions'),
+      expect.arrayContaining([
+        expect.any(String),
+        'sheet_ops',
+        result.recordId,
+        1,
+        'create',
+        'rest',
+        'user_1',
+        ['fld_title'],
+        JSON.stringify({ fld_title: 'Alpha' }),
+        JSON.stringify({ fld_title: 'Alpha' }),
+      ]),
     )
   })
 
@@ -253,6 +271,21 @@ describe('RecordService', () => {
         recordIds: ['rec_existing'],
       }),
     )
+    expect(pool.queryMock).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO meta_record_revisions'),
+      expect.arrayContaining([
+        expect.any(String),
+        'sheet_ops',
+        'rec_existing',
+        4,
+        'delete',
+        'rest',
+        'user_1',
+        [],
+        JSON.stringify({}),
+        JSON.stringify({ fld_title: 'Before' }),
+      ]),
+    )
   })
 
   it('throws VersionConflictError when delete expectedVersion does not match', async () => {
@@ -353,6 +386,21 @@ describe('RecordService', () => {
     expect(pool.queryMock).toHaveBeenCalledWith(
       expect.stringContaining('UPDATE meta_records'),
       [JSON.stringify({ fld_title: 'Updated', fld_customer: ['rec_customer_2'] }), 'rec_existing', 'sheet_ops', 'user_1'],
+    )
+    expect(pool.queryMock).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO meta_record_revisions'),
+      expect.arrayContaining([
+        expect.any(String),
+        'sheet_ops',
+        'rec_existing',
+        5,
+        'update',
+        'rest',
+        'user_1',
+        ['fld_title', 'fld_customer'],
+        JSON.stringify({ fld_title: 'Updated', fld_customer: ['rec_customer_2'] }),
+        JSON.stringify({ fld_title: 'Updated', fld_customer: ['rec_customer_2'] }),
+      ]),
     )
     expect(pool.queryMock).toHaveBeenCalledWith(
       expect.stringContaining('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2 AND foreign_record_id = ANY'),

@@ -1721,6 +1721,51 @@ components:
       required:
         - recordId
         - version
+    MultitableRecordRevision:
+      type: object
+      properties:
+        id:
+          type: string
+        sheetId:
+          type: string
+        recordId:
+          type: string
+        version:
+          type: integer
+        action:
+          type: string
+          enum: [create, update, delete]
+        source:
+          type: string
+        actorId:
+          type: string
+          nullable: true
+        changedFieldIds:
+          type: array
+          items:
+            type: string
+        patch:
+          type: object
+          additionalProperties: true
+        snapshot:
+          type: object
+          nullable: true
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - sheetId
+        - recordId
+        - version
+        - action
+        - source
+        - actorId
+        - changedFieldIds
+        - patch
+        - snapshot
+        - createdAt
     MultitableComputedRecord:
       type: object
       properties:
