@@ -244,6 +244,20 @@ describe('Formula Engine', () => {
       expect(await engine.calculate('=6 / 3', context)).toBe(2)
     })
 
+    test('Same-precedence arithmetic operators are left-associative', async () => {
+      expect(await engine.calculate('=5 - 3 - 1', context)).toBe(1)
+      expect(await engine.calculate('=8 / 4 / 2', context)).toBe(1)
+      expect(await engine.calculate('=5 + 3 - 1', context)).toBe(7)
+      expect(await engine.calculate('=5 * 3 / 5', context)).toBe(3)
+    })
+
+    test('Comparison operators have lower precedence than arithmetic', async () => {
+      expect(await engine.calculate('=1 + 2 > 2', context)).toBe(true)
+      expect(await engine.calculate('=1 + 2 = 3', context)).toBe(true)
+      expect(await engine.calculate('=10 / 2 <= 4 + 1', context)).toBe(true)
+      expect(await engine.calculate('=2 * 3 <> 7 - 1', context)).toBe(false)
+    })
+
     test('Division by zero', async () => {
       expect(await engine.calculate('=5 / 0', context)).toBe('#DIV/0!')
     })
