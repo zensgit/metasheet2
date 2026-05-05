@@ -23,6 +23,16 @@ async function flushUi(cycles = 6): Promise<void> {
   }
 }
 
+async function readBlobText(blob: Blob): Promise<string> {
+  if (typeof blob.text === 'function') return blob.text()
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(reader.error || new Error('Failed to read blob text'))
+    reader.readAsText(blob)
+  })
+}
+
 function setupIntegrationApiMock(): void {
   mocks.apiFetch.mockImplementation(async (path: string) => {
     if (path.startsWith('/api/integration/external-systems?')) return jsonResponse([])
@@ -47,11 +57,28 @@ function setFieldValue(field: HTMLInputElement | HTMLSelectElement | HTMLTextAre
   field.dispatchEvent(new Event('change', { bubbles: true }))
 }
 
+function fillReadyGateForm(container: HTMLElement): void {
+  setFieldValue(findField(container, 'Tenant ID'), 'tenant_1')
+  setFieldValue(findField(container, 'Workspace ID'), 'workspace_1')
+  setFieldValue(findField(container, 'K3 WISE 版本'), 'K3 WISE 15.1')
+  setFieldValue(findField(container, 'WebAPI Base URL'), 'https://k3.example.test/K3API/')
+  setFieldValue(findField(container, 'Acct ID'), 'AIS_TEST')
+  setFieldValue(findField(container, '用户名'), 'k3-user')
+  setFieldValue(findField(container, '密码'), 'real-k3-password')
+  setFieldValue(findField(container, 'PLM Base URL'), 'https://plm.example.test/')
+  setFieldValue(findField(container, 'PLM Default Product ID'), 'PRODUCT-001')
+  setFieldValue(findField(container, 'PLM 用户名'), 'plm-user')
+  setFieldValue(findField(container, 'PLM 密码'), 'real-plm-password')
+  setFieldValue(findField(container, 'Rollback Owner'), 'rollback-owner')
+}
+
 describe('IntegrationK3WiseSetupView', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
   let K3WiseSetupView: Component
   const originalClipboard = navigator.clipboard
+  const originalCreateObjectURL = URL.createObjectURL
+  const originalRevokeObjectURL = URL.revokeObjectURL
 
   beforeEach(async () => {
     window.localStorage.clear()
@@ -69,6 +96,15 @@ describe('IntegrationK3WiseSetupView', () => {
       configurable: true,
       value: originalClipboard,
     })
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: originalCreateObjectURL,
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: originalRevokeObjectURL,
+    })
+    vi.useRealTimers()
     vi.clearAllMocks()
   })
 
@@ -185,18 +221,7 @@ describe('IntegrationK3WiseSetupView', () => {
     app.mount(container)
     await flushUi()
 
-    setFieldValue(findField(container, 'Tenant ID'), 'tenant_1')
-    setFieldValue(findField(container, 'Workspace ID'), 'workspace_1')
-    setFieldValue(findField(container, 'K3 WISE 版本'), 'K3 WISE 15.1')
-    setFieldValue(findField(container, 'WebAPI Base URL'), 'https://k3.example.test/K3API/')
-    setFieldValue(findField(container, 'Acct ID'), 'AIS_TEST')
-    setFieldValue(findField(container, '用户名'), 'k3-user')
-    setFieldValue(findField(container, '密码'), 'real-k3-password')
-    setFieldValue(findField(container, 'PLM Base URL'), 'https://plm.example.test/')
-    setFieldValue(findField(container, 'PLM Default Product ID'), 'PRODUCT-001')
-    setFieldValue(findField(container, 'PLM 用户名'), 'plm-user')
-    setFieldValue(findField(container, 'PLM 密码'), 'real-plm-password')
-    setFieldValue(findField(container, 'Rollback Owner'), 'rollback-owner')
+    fillReadyGateForm(container)
     await flushUi()
 
     const copyButton = container.querySelector('[data-testid="k3-wise-gate-copy-button"]') as HTMLButtonElement | null
@@ -215,5 +240,58 @@ describe('IntegrationK3WiseSetupView', () => {
     expect(copiedText).not.toContain('real-k3-password')
     expect(copiedText).not.toContain('real-plm-password')
     expect(container.querySelector('[data-testid="k3-wise-status"]')?.textContent).toContain('GATE JSON 已复制')
+  })
+
+  it('downloads a redacted GATE JSON draft and releases the object URL', async () => {
+    const createObjectURLMock = vi.fn(() => 'blob:k3-wise-gate')
+    const revokeObjectURLMock = vi.fn()
+    const scheduledCallbacks: Array<() => void> = []
+    const setTimeoutSpy = vi.spyOn(window, 'setTimeout').mockImplementation((handler: Parameters<typeof window.setTimeout>[0]) => {
+      if (typeof handler === 'function') scheduledCallbacks.push(handler)
+      return 1 as unknown as ReturnType<typeof window.setTimeout>
+    })
+    const anchorClickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: createObjectURLMock,
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: revokeObjectURLMock,
+    })
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+
+    app = createApp(K3WiseSetupView)
+    app.mount(container)
+    await flushUi()
+
+    fillReadyGateForm(container)
+    await flushUi()
+
+    const downloadButton = container.querySelector('[data-testid="k3-wise-gate-download-button"]') as HTMLButtonElement | null
+    expect(downloadButton).not.toBeNull()
+    expect(downloadButton?.disabled).toBe(false)
+
+    downloadButton?.click()
+    await flushUi()
+
+    expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+    expect(anchorClickSpy).toHaveBeenCalledTimes(1)
+    const blob = createObjectURLMock.mock.calls[0]?.[0] as Blob
+    expect(blob.type).toBe('application/json;charset=utf-8')
+    const downloadedText = await readBlobText(blob)
+    expect(downloadedText).toContain('"tenantId": "tenant_1"')
+    expect(downloadedText).toContain('"password": "<fill-outside-git>"')
+    expect(downloadedText).not.toContain('real-k3-password')
+    expect(downloadedText).not.toContain('real-plm-password')
+    expect(document.body.querySelector('a[href="blob:k3-wise-gate"]')).toBeNull()
+
+    expect(setTimeoutSpy).toHaveBeenCalledTimes(1)
+    expect(revokeObjectURLMock).not.toHaveBeenCalled()
+    scheduledCallbacks[0]?.()
+    expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:k3-wise-gate')
+    expect(container.querySelector('[data-testid="k3-wise-status"]')?.textContent).toContain('GATE JSON 已生成')
   })
 })

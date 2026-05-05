@@ -76,6 +76,7 @@ The view exposes stable test selectors for the customer GATE import path:
 - `data-testid="k3-wise-gate-import-button"`
 - `data-testid="k3-wise-gate-import-warnings"`
 - `data-testid="k3-wise-gate-copy-button"`
+- `data-testid="k3-wise-gate-download-button"`
 - `data-testid="k3-wise-status"`
 
 `apps/web/tests/k3WiseSetupView.spec.ts` mounts the real setup page, mocks the integration API bootstrap calls, pastes a customer-style GATE JSON payload, clicks the explicit import button, and verifies:
@@ -85,12 +86,15 @@ The view exposes stable test selectors for the customer GATE import path:
 - all visible password inputs are cleared after import.
 - ignored secret-like fields appear as warnings in the page.
 
-The same spec also covers the outbound copy path:
+The same spec also covers the outbound copy and download paths:
 
 - visible form fields can make the GATE draft ready.
 - the copy button writes the generated JSON to `navigator.clipboard`.
+- the download button writes the same generated JSON into a Blob-backed download.
 - submitted K3/PLM password values are redacted as `<fill-outside-git>`.
-- the copied JSON preserves public usernames and scope fields.
+- outbound JSON preserves public usernames and scope fields.
+- the hidden download anchor is removed immediately after click.
+- the object URL is released through a deferred `URL.revokeObjectURL()` call after the browser has had a chance to consume the download URL.
 
 ## Boundary
 

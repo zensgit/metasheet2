@@ -172,6 +172,7 @@
           <button
             class="k3-setup__btn k3-setup__btn--full"
             type="button"
+            data-testid="k3-wise-gate-download-button"
             :disabled="gateIssues.length > 0 || !gateDraftText"
             @click="downloadGateDraft"
           >
@@ -727,14 +728,18 @@ async function copyGateDraft(): Promise<void> {
 }
 
 function downloadGateDraft(): void {
-  if (!gateDraftText.value || typeof document === 'undefined') return
+  if (!gateDraftText.value || typeof document === 'undefined' || typeof URL.createObjectURL !== 'function') return
   const blob = new Blob([gateDraftText.value], { type: 'application/json;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = url
   anchor.download = 'k3-wise-live-poc-gate.json'
+  anchor.rel = 'noopener'
+  anchor.style.display = 'none'
+  document.body.appendChild(anchor)
   anchor.click()
-  URL.revokeObjectURL(url)
+  anchor.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 0)
   setStatus('GATE JSON 已生成', 'success')
 }
 

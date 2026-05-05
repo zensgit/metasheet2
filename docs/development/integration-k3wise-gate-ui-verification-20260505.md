@@ -70,11 +70,24 @@ Customer GATE import UI regression follow-up:
 - Alias normalization for K3 environment, PLM read method, and SQL Server mode.
 - Secret-like field detection and password-field clearing on import.
 - Page-level regression coverage for the import textarea, import button, warning list, rendered form values, and password clearing.
+- Page-level regression coverage for generated GATE JSON download redaction, hidden anchor cleanup, and deferred object URL release.
 
 GATE JSON copy redaction UI regression follow-up:
 
 - `k3WiseSetupView.spec.ts`: 2/2 passed.
 - `k3WiseSetup.spec.ts` + `k3WiseSetupView.spec.ts` + `platform-shell-nav.spec.ts`: 29/29 passed.
+- `@metasheet/web type-check`: passed.
+- `@metasheet/web build`: passed. Vite reported the existing dynamic import and large chunk warnings.
+- `verify:integration-k3wise:poc`: passed.
+  - preflight tests: 16/16 passed.
+  - evidence tests: 31/31 passed.
+  - mock PoC demo ended with `K3 WISE PoC mock chain verified end-to-end (PASS)`.
+- `git diff --check`: passed.
+
+GATE JSON download redaction UI regression follow-up:
+
+- `k3WiseSetupView.spec.ts`: 3/3 passed.
+- `k3WiseSetup.spec.ts` + `k3WiseSetupView.spec.ts` + `platform-shell-nav.spec.ts`: 30/30 passed.
 - `@metasheet/web type-check`: passed.
 - `@metasheet/web build`: passed. Vite reported the existing dynamic import and large chunk warnings.
 - `verify:integration-k3wise:poc`: passed.
