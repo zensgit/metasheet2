@@ -2,7 +2,8 @@
 
 Date: 2026-05-05
 Branch: `codex/multitable-record-subscriptions-20260505`
-Base: `origin/main@390a95ff1`
+PR: #1290
+Merge commit: `6e28cf9fbd79c78d7a1eed92975c74c8d2d45487`
 
 ## Scope
 
