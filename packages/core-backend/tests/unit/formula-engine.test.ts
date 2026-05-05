@@ -269,6 +269,18 @@ describe('Formula Engine', () => {
       expect(await engine.calculate('=(1 + 2) = (5 - 2)', context)).toBe(true)
     })
 
+    test('Unary signs apply to grouped expressions', async () => {
+      expect(await engine.calculate('=-(1 + 2)', context)).toBe(-3)
+      expect(await engine.calculate('=+(1 + 2)', context)).toBe(3)
+      expect(await engine.calculate('=5 * -(1 + 2)', context)).toBe(-15)
+      expect(await engine.calculate('=--(1 + 2)', context)).toBe(3)
+    })
+
+    test('Unary signs apply to function results', async () => {
+      expect(await engine.calculate('=-SUM(1, 2)', context)).toBe(-3)
+      expect(await engine.calculate('=+SUM(1, 2)', context)).toBe(3)
+    })
+
     test('Division by zero', async () => {
       expect(await engine.calculate('=5 / 0', context)).toBe('#DIV/0!')
     })
