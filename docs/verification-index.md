@@ -32,6 +32,16 @@ Entry points:
   - Verification: `docs/development/github-actions-runtime-readiness-verification-20260505.md`
   - Notes: checks required GitHub secret names and repo variables without reading or printing secret values.
 
+## 2026-05-05 DingTalk Alertmanager Webhook Secret Ops
+
+- Safe operator path for DingTalk Alertmanager webhook secret setup:
+  - Script: `scripts/ops/set-dingtalk-alertmanager-webhook-secret.mjs`
+  - Tests: `scripts/ops/set-dingtalk-alertmanager-webhook-secret.test.mjs`
+  - Runbook: `docs/operations/dingtalk-alertmanager-webhook-secret-runbook.md`
+  - Design: `docs/development/dingtalk-alertmanager-webhook-secret-ops-design-20260505.md`
+  - Verification: `docs/development/dingtalk-alertmanager-webhook-secret-ops-verification-20260505.md`
+  - Notes: reads the webhook from stdin/env, writes through `gh secret set`, and prints only redacted metadata.
+
 ## 2026-04-07 Multitable Staging Profile Baseline
 
 - Multitable staging profile threshold follow-up:
