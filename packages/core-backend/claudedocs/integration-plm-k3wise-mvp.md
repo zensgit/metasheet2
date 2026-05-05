@@ -629,13 +629,14 @@ node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
 
 ### 9.8 错误处理快查表
 
-下表覆盖客户/操作员最可能遇到的 7 类错误，按"看到这条信息→怎么办"组织：
+下表覆盖客户/操作员最可能遇到的错误，按"看到这条信息→怎么办"组织：
 
 | 错误信号 | 典型场景 | 怎么办 |
 |---|---|---|
 | `LivePocPreflightError: <field> must be a boolean, 0/1, or boolean-like string` | GATE 答卷写了 `autoSubmit: "maybe"` 或类似无效值 | 改成允许的写法（`true/false/是/否/0/1/...`）后重跑 preflight |
 | `LivePocPreflightError: M2 live PoC packet is Save-only: autoSubmit and autoAudit must be false` | GATE 答卷写了 `autoSubmit: true` | M2 PoC 强制 Save-only。等过 PoC 后再单独申请开 auto-submit。改回 `false` 重跑 |
 | `LivePocPreflightError: SQL Server channel may not write K3 core business tables in live PoC` | `sqlServer.allowedTables` 含 `t_ICItem` / `t_ICBOM` 且 `mode != readonly` | 把 mode 改回 `readonly`，或把 allowedTables 限制到中间表 |
+| `LivePocPreflightError: sqlServer.mode=disabled requires sqlServer.enabled=false` | 想关闭 SQL Server 通道时只写了 `sqlServer.mode: "disabled"`，但 `sqlServer.enabled` 仍是 `true` | 真正关闭通道请设 `sqlServer.enabled=false`；如果要启用通道，只能选择 `readonly` / `middle-table` / `stored-procedure` |
 | `LivePocPreflightError: K3 WISE live PoC must target a non-production test environment` | `k3Wise.environment` 写成 `production` / `prod` | 改成 `test` / `uat` / `staging` 等非生产环境标识 |
 | `LivePocEvidenceError: evidence contains unredacted secret-like fields` | evidence JSON 里残留了真密码 / token / sessionId | 把 secret-like key 的值替换成 `<redacted>` 或空字符串后重跑 |
 | `SAVE_ONLY_VIOLATED` (evidence 报告 issues) | evidence 中 `materialSaveOnly.autoSubmit` 或 `autoAudit` 是 truthy（含字符串/数字/中文） | 客户 K3 实际跑时确实开了自动审核——按 GATE 答卷 Save-only 约定重新跑客户侧 K3 测试，或回流 M2 adapter 硬化 |

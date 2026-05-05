@@ -47,6 +47,12 @@ All planned commands passed:
 - `git diff --check`
   - passed.
 
+Runbook lookup coverage was also added:
+
+- `packages/core-backend/claudedocs/integration-plm-k3wise-mvp.md`
+  - §9.8 now maps the exact `sqlServer.mode=disabled requires sqlServer.enabled=false` error to the operator fix.
+  - The fix says to set `sqlServer.enabled=false` when disabling the channel, or choose `readonly`, `middle-table`, or `stored-procedure` when enabling it.
+
 ## Not Covered
 
 - Real customer SQL Server connectivity.

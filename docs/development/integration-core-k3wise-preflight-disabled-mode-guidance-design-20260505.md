@@ -45,6 +45,8 @@ The error details include:
 
 This keeps machine-readable diagnostics stable while giving operators a direct remediation path.
 
+The operator-facing runbook also records the same message in the K3 WISE quick lookup table, so the person receiving a failed preflight run can map the exact error to the right GATE JSON edit without reading the script.
+
 ## Boundary
 
 This does not change SQL Server channel safety behavior. It only improves the preflight guidance for an already-rejected packet shape.
