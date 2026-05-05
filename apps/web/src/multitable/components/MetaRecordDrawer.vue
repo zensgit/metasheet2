@@ -9,6 +9,17 @@
       </div>
       <div class="meta-record-drawer__actions">
         <button
+          v-if="record && canLoadSubscription"
+          class="meta-record-drawer__btn meta-record-drawer__btn--watch"
+          :class="{ 'meta-record-drawer__btn--watching': recordSubscribed }"
+          type="button"
+          :disabled="subscriptionLoading"
+          :title="recordSubscribed ? 'Unwatch this record' : 'Watch this record'"
+          @click="toggleRecordSubscription"
+        >
+          {{ recordSubscribed ? 'Watching' : 'Watch' }}
+        </button>
+        <button
           v-if="resolvedCanComment"
           class="meta-record-drawer__btn meta-record-drawer__btn--comment"
           :class="drawerCommentButtonClass"
@@ -43,6 +54,7 @@
           @click="activeTab = 'history'"
         >History</button>
       </div>
+      <div v-if="subscriptionError" class="meta-record-drawer__watch-error">{{ subscriptionError }}</div>
       <div v-if="activeTab === 'details'" class="meta-record-drawer__fields">
       <div v-for="field in visibleFields" :key="field.id" class="meta-record-drawer__field">
         <div class="meta-record-drawer__field-header">
@@ -204,6 +216,7 @@ import type {
   MetaField,
   MetaRecord,
   MetaRecordRevision,
+  MetaRecordSubscriptionStatus,
   MetaRowActions,
 } from '../types'
 import type { MultitableApiClient } from '../api/client'
@@ -261,6 +274,10 @@ const historyItems = ref<MetaRecordRevision[]>([])
 const historyLoading = ref(false)
 const historyError = ref('')
 let historyRequestId = 0
+const recordSubscribed = ref(false)
+const subscriptionLoading = ref(false)
+const subscriptionError = ref('')
+let subscriptionRequestId = 0
 
 const attachmentActivity = ref<Record<string, 'uploading' | 'removing' | 'clearing'>>({})
 const attachmentErrors = ref<Record<string, string>>({})
@@ -272,7 +289,17 @@ watch(() => props.record, () => {
   localAttachmentSummaries.value = {}
   historyItems.value = []
   historyError.value = ''
+  recordSubscribed.value = false
+  subscriptionError.value = ''
 })
+
+watch(
+  [() => props.visible, () => props.record?.id, () => props.sheetId, () => props.apiClient],
+  () => {
+    if (props.visible) void loadRecordSubscription()
+  },
+  { immediate: true },
+)
 
 watch(
   [() => activeTab.value, () => props.visible, () => props.record?.id, () => props.sheetId, () => props.apiClient],
@@ -290,6 +317,7 @@ const currentRecordIndex = computed(() => {
 const visibleFields = computed(() => props.fields.filter((field) => props.fieldPermissions?.[field.id]?.visible !== false))
 const fieldLabelById = computed(() => new Map(props.fields.map((field) => [field.id, field.name])))
 const canLoadHistory = computed(() => !!props.apiClient && !!props.sheetId && !!props.record?.id)
+const canLoadSubscription = computed(() => !!props.apiClient && !!props.sheetId && !!props.record?.id)
 const resolvedCanComment = computed(() => props.rowActions?.canComment ?? props.canComment)
 const resolvedCanDelete = computed(() => props.rowActions?.canDelete ?? props.canDelete)
 const drawerCommentAffordance = computed(() => resolveRecordCommentAffordance(props.commentPresence))
@@ -346,6 +374,58 @@ async function loadRecordHistory() {
     historyError.value = error?.message ?? 'Failed to load history'
   } finally {
     if (requestId === historyRequestId) historyLoading.value = false
+  }
+}
+
+function applySubscriptionStatus(status: MetaRecordSubscriptionStatus) {
+  recordSubscribed.value = status.subscribed
+}
+
+async function loadRecordSubscription() {
+  const apiClient = props.apiClient
+  const sheetId = props.sheetId
+  const recordId = props.record?.id
+  if (!apiClient || !sheetId || !recordId) {
+    recordSubscribed.value = false
+    subscriptionLoading.value = false
+    subscriptionError.value = ''
+    return
+  }
+  const requestId = ++subscriptionRequestId
+  subscriptionLoading.value = true
+  subscriptionError.value = ''
+  try {
+    const status = await apiClient.getRecordSubscriptionStatus(sheetId, recordId)
+    if (requestId !== subscriptionRequestId) return
+    applySubscriptionStatus(status)
+  } catch (error: any) {
+    if (requestId !== subscriptionRequestId) return
+    recordSubscribed.value = false
+    subscriptionError.value = error?.message ?? 'Failed to load watch status'
+  } finally {
+    if (requestId === subscriptionRequestId) subscriptionLoading.value = false
+  }
+}
+
+async function toggleRecordSubscription() {
+  const apiClient = props.apiClient
+  const sheetId = props.sheetId
+  const recordId = props.record?.id
+  if (!apiClient || !sheetId || !recordId || subscriptionLoading.value) return
+  const requestId = ++subscriptionRequestId
+  subscriptionLoading.value = true
+  subscriptionError.value = ''
+  try {
+    const status = recordSubscribed.value
+      ? await apiClient.unsubscribeRecord(sheetId, recordId)
+      : await apiClient.subscribeRecord(sheetId, recordId)
+    if (requestId !== subscriptionRequestId) return
+    applySubscriptionStatus(status)
+  } catch (error: any) {
+    if (requestId !== subscriptionRequestId) return
+    subscriptionError.value = error?.message ?? 'Failed to update watch status'
+  } finally {
+    if (requestId === subscriptionRequestId) subscriptionLoading.value = false
   }
 }
 
@@ -595,6 +675,9 @@ function attachmentAllowsMultiple(field: MetaField): boolean {
 .meta-record-drawer__btn--comment.meta-record-drawer__btn--comment--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
 .meta-record-drawer__btn--comment.meta-record-drawer__btn--comment--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-record-drawer__btn--danger { color: #f56c6c; border-color: #f56c6c; }
+.meta-record-drawer__btn--watch { border-color: #bfdbfe; color: #1d4ed8; background: #eff6ff; }
+.meta-record-drawer__btn--watching { border-color: #0f766e; color: #0f766e; background: #ecfdf5; }
+.meta-record-drawer__btn:disabled { opacity: 0.55; cursor: not-allowed; }
 .meta-record-drawer__close { border: none; background: none; font-size: 20px; cursor: pointer; color: #999; }
 .meta-record-drawer__nav { display: flex; align-items: center; gap: 4px; margin-right: auto; margin-left: 8px; }
 .meta-record-drawer__nav-btn { width: 24px; height: 24px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 14px; display: flex; align-items: center; justify-content: center; }
@@ -605,6 +688,7 @@ function attachmentAllowsMultiple(field: MetaField): boolean {
 .meta-record-drawer__tabs { display: inline-flex; gap: 4px; padding: 3px; margin-bottom: 14px; border: 1px solid #e5e7eb; border-radius: 999px; background: #f8fafc; }
 .meta-record-drawer__tab { min-width: 76px; padding: 5px 12px; border: none; border-radius: 999px; background: transparent; color: #64748b; cursor: pointer; font-size: 12px; font-weight: 600; }
 .meta-record-drawer__tab--active { background: #111827; color: #fff; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.16); }
+.meta-record-drawer__watch-error { margin: -4px 0 12px; color: #b91c1c; font-size: 12px; }
 .meta-record-drawer__field { margin-bottom: 14px; }
 .meta-record-drawer__field-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
 .meta-record-drawer__label { display: block; font-size: 12px; color: #999; }

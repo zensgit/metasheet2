@@ -197,6 +197,77 @@ describe('MetaRecordDrawer', () => {
     container.remove()
   })
 
+  it('loads and toggles record watch state', async () => {
+    const getRecordSubscriptionStatus = vi.fn().mockResolvedValue({
+      subscribed: false,
+      subscription: null,
+      items: [],
+    })
+    const subscribeRecord = vi.fn().mockResolvedValue({
+      subscribed: true,
+      subscription: {
+        id: 'sub_1',
+        sheetId: 'sheet_orders',
+        recordId: 'rec_watch_1',
+        userId: 'user_1',
+        createdAt: '2026-05-05T00:00:00.000Z',
+        updatedAt: '2026-05-05T00:00:00.000Z',
+      },
+    })
+    const unsubscribeRecord = vi.fn().mockResolvedValue({
+      subscribed: false,
+      subscription: null,
+    })
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaRecordDrawer, {
+          visible: true,
+          record: {
+            id: 'rec_watch_1',
+            version: 1,
+            data: { fld_title: 'Alpha' },
+          },
+          fields: [{ id: 'fld_title', name: 'Title', type: 'string' }],
+          canEdit: true,
+          canComment: false,
+          canDelete: false,
+          sheetId: 'sheet_orders',
+          apiClient: {
+            getRecordSubscriptionStatus,
+            subscribeRecord,
+            unsubscribeRecord,
+          } as any,
+        })
+      },
+    })
+
+    app.mount(container)
+    await flushUi()
+
+    const watchButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Watch'),
+    ) as HTMLButtonElement | undefined
+    expect(getRecordSubscriptionStatus).toHaveBeenCalledWith('sheet_orders', 'rec_watch_1')
+    expect(watchButton?.textContent).toContain('Watch')
+
+    watchButton?.click()
+    await flushUi()
+    expect(subscribeRecord).toHaveBeenCalledWith('sheet_orders', 'rec_watch_1')
+    expect(container.textContent).toContain('Watching')
+
+    ;(Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Watching'),
+    ) as HTMLButtonElement | undefined)?.click()
+    await flushUi()
+    expect(unsubscribeRecord).toHaveBeenCalledWith('sheet_orders', 'rec_watch_1')
+
+    app.unmount()
+    container.remove()
+  })
+
   it('honors scoped row actions and exposes the workflow entry', async () => {
     const toggleCommentsSpy = vi.fn()
     const openAutomationSpy = vi.fn()

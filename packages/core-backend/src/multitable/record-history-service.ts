@@ -35,7 +35,8 @@ export interface RecordRevisionEntry {
   createdAt: string
 }
 
-export async function recordRecordRevision(query: QueryFn, input: RecordRevisionInput): Promise<void> {
+export async function recordRecordRevision(query: QueryFn, input: RecordRevisionInput): Promise<string> {
+  const id = randomUUID()
   const changedFieldIds = Array.from(new Set((input.changedFieldIds ?? []).filter(Boolean)))
   await query(
     `INSERT INTO meta_record_revisions (
@@ -49,10 +50,10 @@ export async function recordRecordRevision(query: QueryFn, input: RecordRevision
        changed_field_ids,
        patch,
        snapshot
-     )
+    )
      VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::text[], $9::jsonb, $10::jsonb)`,
     [
-      randomUUID(),
+      id,
       input.sheetId,
       input.recordId,
       input.version,
@@ -64,6 +65,7 @@ export async function recordRecordRevision(query: QueryFn, input: RecordRevision
       input.snapshot === undefined ? null : JSON.stringify(input.snapshot),
     ],
   )
+  return id
 }
 
 export async function listRecordRevisions(

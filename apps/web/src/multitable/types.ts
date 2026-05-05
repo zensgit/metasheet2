@@ -214,6 +214,36 @@ export interface MetaRecordRevision {
   createdAt: string
 }
 
+export interface MetaRecordSubscription {
+  id: string
+  sheetId: string
+  recordId: string
+  userId: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface MetaRecordSubscriptionStatus {
+  subscribed: boolean
+  subscription: MetaRecordSubscription | null
+  items?: MetaRecordSubscription[]
+}
+
+export type MetaRecordSubscriptionNotificationType = 'record.updated' | 'comment.created'
+
+export interface MetaRecordSubscriptionNotification {
+  id: string
+  sheetId: string
+  recordId: string
+  userId: string
+  eventType: MetaRecordSubscriptionNotificationType
+  actorId: string | null
+  revisionId: string | null
+  commentId: string | null
+  createdAt: string
+  readAt: string | null
+}
+
 // --- Form context (GET /api/multitable/form-context) ---
 export interface MetaFormContext {
   mode: 'form'

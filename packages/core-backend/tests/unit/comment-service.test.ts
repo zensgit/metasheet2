@@ -89,6 +89,11 @@ const mockLogger: ILogger = {
   debug: vi.fn(),
 }
 
+const mockNotifyRecordSubscribersWithKysely = vi.fn()
+vi.mock('../../src/multitable/record-subscription-service', () => ({
+  notifyRecordSubscribersWithKysely: (...args: unknown[]) => mockNotifyRecordSubscribersWithKysely(...args),
+}))
+
 // ── Import SUT after mocks ──────────────────────────────────────────────────
 
 import { CommentService, CommentValidationError, CommentNotFoundError, CommentAccessError, CommentConflictError } from '../../src/services/CommentService'
@@ -149,6 +154,7 @@ describe('CommentService', () => {
     // Clear result queues
     queueExec.length = 0
     queueTakeFirst.length = 0
+    mockNotifyRecordSubscribersWithKysely.mockResolvedValue({ inserted: 0, userIds: [] })
     service = new CommentService(
       mockCollabService as unknown as CollabService,
       mockLogger,
@@ -179,6 +185,31 @@ describe('CommentService', () => {
       })
 
       expect(comment.mentions).toEqual(['user-123'])
+    })
+
+    it('notifies record watchers for new comments and suppresses the author in the notifier', async () => {
+      pushExec([]) // insert
+      pushTakeFirst(makeCommentRow({
+        id: 'cmt_watch',
+        spreadsheet_id: 'sheet-1',
+        row_id: 'row-1',
+      }))
+      pushExec([]) // markCommentRead
+
+      await service.createComment({
+        spreadsheetId: 'sheet-1',
+        rowId: 'row-1',
+        content: 'Watcher update',
+        authorId: 'user-author',
+      })
+
+      expect(mockNotifyRecordSubscribersWithKysely).toHaveBeenCalledWith(expect.anything(), {
+        sheetId: 'sheet-1',
+        recordId: 'row-1',
+        eventType: 'comment.created',
+        actorId: 'user-author',
+        commentId: 'cmt_watch',
+      })
     })
 
     it('handles multiple mentions in one content string', async () => {

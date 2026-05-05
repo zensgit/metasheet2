@@ -75,6 +75,12 @@ function createMockPool(queryResponses: Record<string, { rows: unknown[] }> = {}
     if (sql.includes('INSERT INTO meta_record_revisions')) {
       return queryResponses['INSERT_REVISION'] ?? { rows: [], rowCount: 1 }
     }
+    if (sql.includes('FROM meta_record_subscriptions')) {
+      return queryResponses['SELECT_RECORD_SUBSCRIPTIONS'] ?? { rows: [] }
+    }
+    if (sql.includes('INSERT INTO meta_record_subscription_notifications')) {
+      return queryResponses['INSERT_RECORD_SUBSCRIPTION_NOTIFICATIONS'] ?? { rows: [], rowCount: 1 }
+    }
     if (sql.includes('SELECT id, version, data FROM meta_records')) {
       return queryResponses['SELECT_UPDATED'] ?? defaultQueryResponse
     }
@@ -207,6 +213,26 @@ describe('RecordWriteService', () => {
         kind: 'record-updated',
         recordIds: ['rec1'],
       }),
+    )
+  })
+
+  it('creates subscriber notifications for each updated record and skips the actor', async () => {
+    pool = createMockPool({
+      SELECT_RECORD_SUBSCRIPTIONS: { rows: [{ user_id: 'watcher_2' }] },
+    })
+    const service = new RecordWriteService(pool, eventBus as any, helpers)
+
+    await service.patchRecords(buildTestInput({ actorId: 'user_editor' }))
+
+    expect(pool.query).toHaveBeenCalledWith(
+      expect.stringContaining('FROM meta_record_subscriptions'),
+      ['sheet1', 'rec1', 'user_editor'],
+    )
+    expect(pool.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO meta_record_subscription_notifications'),
+      expect.arrayContaining([
+        expect.stringContaining('"user_id":"watcher_2"'),
+      ]),
     )
   })
 

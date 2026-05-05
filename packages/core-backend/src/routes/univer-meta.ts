@@ -135,6 +135,13 @@ import {
 } from '../multitable/post-commit-hooks'
 import { listRecordRevisions } from '../multitable/record-history-service'
 import {
+  getRecordSubscriptionStatus,
+  listRecordSubscriptionNotifications,
+  listRecordSubscriptions,
+  subscribeRecord,
+  unsubscribeRecord,
+} from '../multitable/record-subscription-service'
+import {
   CONDITIONAL_FORMATTING_RULE_LIMIT,
   sanitizeConditionalFormattingRules,
 } from '../multitable/conditional-formatting-service'
@@ -1951,6 +1958,50 @@ function sendForbidden(res: Response, message = 'Insufficient permissions') {
   return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message } })
 }
 
+async function requireRecordReadable(
+  req: Request,
+  query: QueryFn,
+  sheetId: string,
+  recordId: string,
+): Promise<{ access: ResolvedRequestAccess } | { status: number; body: unknown }> {
+  const recordCheck = await query(
+    'SELECT id, sheet_id FROM meta_records WHERE id = $1 AND sheet_id = $2',
+    [recordId, sheetId],
+  )
+  if (recordCheck.rows.length === 0) {
+    return {
+      status: 404,
+      body: { ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } },
+    }
+  }
+
+  const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, sheetId)
+  if (!access.userId) {
+    return { status: 401, body: { error: 'Authentication required' } }
+  }
+  if (!capabilities.canRead) {
+    return {
+      status: 403,
+      body: { ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } },
+    }
+  }
+
+  if (!access.isAdminRole) {
+    const hasRecordPerms = await hasRecordPermissionAssignments(query, sheetId)
+    if (hasRecordPerms) {
+      const recordScopeMap = await loadRecordPermissionScopeMap(query, sheetId, [recordId], access.userId)
+      if (recordScopeMap.size > 0 && !deriveRecordPermissions(recordId, capabilities, recordScopeMap).canRead) {
+        return {
+          status: 403,
+          body: { ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } },
+        }
+      }
+    }
+  }
+
+  return { access }
+}
+
 type FieldMutationGuard = {
   type: UniverMetaField['type']
   options?: string[]
@@ -3677,6 +3728,124 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] list record history failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list record history' } })
+    }
+  })
+
+  router.get('/sheets/:sheetId/records/:recordId/subscriptions', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
+    if (!sheetId || !recordId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and recordId are required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const readable = await requireRecordReadable(req, pool.query.bind(pool), sheetId, recordId)
+      if ('status' in readable) return res.status(readable.status).json(readable.body)
+
+      const [items, status] = await Promise.all([
+        listRecordSubscriptions(pool.query.bind(pool), { sheetId, recordId }),
+        getRecordSubscriptionStatus(pool.query.bind(pool), { sheetId, recordId, userId: readable.access.userId }),
+      ])
+      return res.json({
+        ok: true,
+        data: {
+          items,
+          subscribed: status.subscribed,
+          subscription: status.subscription,
+        },
+      })
+    } catch (err) {
+      if (isUndefinedTableError(err, 'meta_record_subscriptions')) {
+        return res.json({ ok: true, data: { items: [], subscribed: false, subscription: null } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list record subscriptions failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list record subscriptions' } })
+    }
+  })
+
+  router.put('/sheets/:sheetId/records/:recordId/subscriptions/me', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
+    if (!sheetId || !recordId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and recordId are required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const readable = await requireRecordReadable(req, pool.query.bind(pool), sheetId, recordId)
+      if ('status' in readable) return res.status(readable.status).json(readable.body)
+
+      const subscription = await subscribeRecord(pool.query.bind(pool), {
+        sheetId,
+        recordId,
+        userId: readable.access.userId,
+      })
+      return res.json({ ok: true, data: { subscribed: true, subscription } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] subscribe record failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to subscribe record' } })
+    }
+  })
+
+  router.delete('/sheets/:sheetId/records/:recordId/subscriptions/me', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
+    if (!sheetId || !recordId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and recordId are required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const readable = await requireRecordReadable(req, pool.query.bind(pool), sheetId, recordId)
+      if ('status' in readable) return res.status(readable.status).json(readable.body)
+
+      await unsubscribeRecord(pool.query.bind(pool), {
+        sheetId,
+        recordId,
+        userId: readable.access.userId,
+      })
+      return res.json({ ok: true, data: { subscribed: false, subscription: null } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] unsubscribe record failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to unsubscribe record' } })
+    }
+  })
+
+  router.get('/record-subscription-notifications', async (req: Request, res: Response) => {
+    const limitParam = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : 50
+    const offsetParam = typeof req.query.offset === 'string' ? Number.parseInt(req.query.offset, 10) : 0
+    const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 100) : 50
+    const offset = Number.isFinite(offsetParam) ? Math.max(offsetParam, 0) : 0
+    const sheetId = typeof req.query.sheetId === 'string' && req.query.sheetId.trim() ? req.query.sheetId.trim() : undefined
+    const recordId = typeof req.query.recordId === 'string' && req.query.recordId.trim() ? req.query.recordId.trim() : undefined
+
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) return res.status(401).json({ error: 'Authentication required' })
+      const items = await listRecordSubscriptionNotifications(pool.query.bind(pool), {
+        userId: access.userId,
+        sheetId,
+        recordId,
+        limit,
+        offset,
+      })
+      return res.json({ ok: true, data: { items, limit, offset } })
+    } catch (err) {
+      if (isUndefinedTableError(err, 'meta_record_subscription_notifications')) {
+        return res.json({ ok: true, data: { items: [], limit, offset } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list record subscription notifications failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list record subscription notifications' } })
     }
   })
 
