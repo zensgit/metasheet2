@@ -22,6 +22,7 @@ export type MetaFieldType =
   | 'email'
   | 'phone'
   | 'longText'
+  | 'autoNumber'
   | 'createdTime'
   | 'modifiedTime'
   | 'createdBy'

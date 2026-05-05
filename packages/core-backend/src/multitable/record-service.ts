@@ -16,6 +16,7 @@ import {
   validateLongTextValue,
   type MultitableField,
 } from './field-codecs'
+import { allocateAutoNumberValues } from './auto-number-service'
 import { getDefaultValidationRules, validateRecord } from './field-validation-engine'
 import type { FieldValidationConfig } from './field-validation'
 import { loadFieldsForSheet } from './loaders'
@@ -211,6 +212,17 @@ function mapFieldType(type: string): UniverMetaField['type'] {
   if (normalized === 'lookup') return 'lookup'
   if (normalized === 'rollup') return 'rollup'
   if (normalized === 'attachment') return 'attachment'
+  if (normalized === 'currency') return 'currency'
+  if (normalized === 'percent') return 'percent'
+  if (normalized === 'rating') return 'rating'
+  if (normalized === 'url') return 'url'
+  if (normalized === 'email') return 'email'
+  if (normalized === 'phone') return 'phone'
+  if (normalized === 'autonumber' || normalized === 'auto_number' || normalized === 'auto-number') return 'autoNumber'
+  if (normalized === 'createdtime' || normalized === 'created_time' || normalized === 'created-time') return 'createdTime'
+  if (normalized === 'modifiedtime' || normalized === 'modified_time' || normalized === 'modified-time') return 'modifiedTime'
+  if (normalized === 'createdby' || normalized === 'created_by' || normalized === 'created-by') return 'createdBy'
+  if (normalized === 'modifiedby' || normalized === 'modified_by' || normalized === 'modified-by') return 'modifiedBy'
   if (
     normalized === 'longtext' ||
     normalized === 'long_text' ||
@@ -290,7 +302,12 @@ function buildCreateFieldGuardMap(rows: unknown[]): Map<string, CreateFieldGuard
       continue
     }
 
-    if (BATCH1_FIELD_TYPES.has(type)) {
+  if (BATCH1_FIELD_TYPES.has(type)) {
+      guards.set(fieldId, { type, property: normalizeJson(row.property) })
+      continue
+    }
+
+    if (type === 'autoNumber') {
       guards.set(fieldId, { type, property: normalizeJson(row.property) })
       continue
     }
@@ -389,7 +406,7 @@ export class RecordService {
         throw new RecordValidationError(`Unknown fieldId: ${fieldId}`)
       }
 
-      if (field.type === 'lookup' || field.type === 'rollup') {
+      if (isFieldAlwaysReadOnly(field)) {
         throw new RecordFieldForbiddenError(`Field is readonly: ${fieldId}`, fieldId)
       }
 
@@ -505,6 +522,11 @@ export class RecordService {
 
     const recordId = `rec_${randomUUID()}`
     const recordRes = await this.pool.transaction(async ({ query }) => {
+      Object.assign(patch, await allocateAutoNumberValues(query, sheetId, Array.from(fieldById, ([id, field]) => ({
+        id,
+        type: field.type,
+        property: field.property,
+      }))))
       const inserted = await query(
         `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
          VALUES ($1, $2, $3::jsonb, 1, $4, $4)

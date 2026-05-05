@@ -1,6 +1,7 @@
 import type { MetaField, MetaFieldCreateType, MetaFieldType } from '../types'
 
 export const SYSTEM_FIELD_TYPES = [
+  'autoNumber',
   'createdTime',
   'modifiedTime',
   'createdBy',
@@ -27,6 +28,8 @@ export function systemFieldHint(type: MetaFieldCreateType | string | null | unde
   switch (type) {
     case 'createdTime':
       return 'Created time is generated from the record creation timestamp and is read-only.'
+    case 'autoNumber':
+      return 'Auto number is generated when a record is created and is read-only.'
     case 'modifiedTime':
       return 'Modified time is generated from the last record update timestamp and is read-only.'
     case 'createdBy':

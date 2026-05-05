@@ -96,6 +96,7 @@ export interface Database {
   // Meta tables
   meta_sheets: MetaSheetsTable
   meta_fields: MetaFieldsTable
+  meta_field_auto_number_sequences: MetaFieldAutoNumberSequencesTable
   meta_views: MetaViewsTable
   meta_records: MetaRecordsTable
   meta_links: MetaLinksTable
@@ -626,6 +627,14 @@ export interface MetaFieldsTable {
   type: string
   property: JSONColumnType<Record<string, unknown> | null>
   order: number
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface MetaFieldAutoNumberSequencesTable {
+  field_id: string
+  sheet_id: string
+  next_value: number
   created_at: CreatedAt
   updated_at: UpdatedAt
 }

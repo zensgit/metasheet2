@@ -26,6 +26,7 @@ const expectedFieldTypes = [
   'email',
   'phone',
   'longText',
+  'autoNumber',
   'createdTime',
   'modifiedTime',
   'createdBy',

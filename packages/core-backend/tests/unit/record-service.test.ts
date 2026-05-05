@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   RecordNotFoundError,
+  RecordFieldForbiddenError,
   RecordPatchFieldValidationError,
   RecordPermissionError,
   RecordService,
@@ -68,6 +69,9 @@ function createMockPool(
     }
     if (sql.includes('INSERT INTO meta_record_subscription_notifications')) {
       return responses.INSERT_RECORD_SUBSCRIPTION_NOTIFICATIONS ?? { rows: [], rowCount: 1 }
+    }
+    if (sql.includes('INSERT INTO meta_field_auto_number_sequences')) {
+      return responses.ALLOCATE_AUTO_NUMBER ?? { rows: [{ value: 1 }], rowCount: 1 }
     }
     if (sql.includes('INSERT INTO meta_links')) {
       return responses.INSERT_LINK ?? { rows: [], rowCount: 1 }
@@ -198,6 +202,52 @@ describe('RecordService', () => {
       expect.stringContaining('INSERT INTO meta_records'),
       [expect.any(String), 'sheet_ops', JSON.stringify({ fld_tags: ['Urgent', 'VIP'] }), 'user_1'],
     )
+  })
+
+  it('allocates readonly autoNumber values during create', async () => {
+    pool = createMockPool({
+      SELECT_FIELDS: {
+        rows: [
+          { id: 'fld_seq', name: 'No.', type: 'autoNumber', property: { startAt: 10 } },
+          { id: 'fld_title', name: 'Title', type: 'string', property: {} },
+        ],
+      },
+      ALLOCATE_AUTO_NUMBER: { rows: [{ value: 10 }] },
+    })
+    const service = new RecordService(pool, eventBus as any)
+
+    const result = await service.createRecord({
+      sheetId: 'sheet_ops',
+      data: { fld_title: 'Alpha' },
+      actorId: 'user_1',
+      capabilities: fullCapabilities,
+    })
+
+    expect(result.data).toEqual({ fld_title: 'Alpha', fld_seq: 10 })
+    expect(pool.queryMock).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO meta_field_auto_number_sequences'),
+      ['fld_seq', 'sheet_ops', 11],
+    )
+    expect(pool.queryMock).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO meta_records'),
+      [expect.any(String), 'sheet_ops', JSON.stringify({ fld_title: 'Alpha', fld_seq: 10 }), 'user_1'],
+    )
+  })
+
+  it('rejects client-supplied autoNumber values during create', async () => {
+    pool = createMockPool({
+      SELECT_FIELDS: {
+        rows: [{ id: 'fld_seq', name: 'No.', type: 'autoNumber', property: {} }],
+      },
+    })
+    const service = new RecordService(pool, eventBus as any)
+
+    await expect(service.createRecord({
+      sheetId: 'sheet_ops',
+      data: { fld_seq: 99 },
+      actorId: 'user_1',
+      capabilities: fullCapabilities,
+    })).rejects.toThrow(RecordFieldForbiddenError)
   })
 
   it('rejects create when a linked target record is missing', async () => {
