@@ -250,17 +250,21 @@ export class FormulaEngine {
    * Parse formula string into AST
    */
   private parseFormula(formula: string): ASTNodeUnion {
+    formula = formula.trim()
+
     // Simple tokenizer and parser (simplified for demo)
     // In production, use a proper parser like PEG.js or write a full recursive descent parser
 
     // Check if it's a function call
-    const functionMatch = formula.match(/^([A-Za-z][A-Za-z0-9_]*)\((.*)\)$/)
-    if (functionMatch) {
-      const functionName = functionMatch[1].toUpperCase()
-      const args = this.parseArguments(functionMatch[2])
+    const functionCall = this.parseFunctionCall(formula)
+    if (functionCall?.type === 'malformed') {
+      return { type: 'error', value: '#ERROR!' }
+    }
+    if (functionCall?.type === 'function') {
+      const args = this.parseArguments(functionCall.argsString)
       return {
         type: 'function',
-        name: functionName,
+        name: functionCall.name,
         arguments: args
       }
     }
@@ -363,6 +367,47 @@ export class FormulaEngine {
     }
 
     return { type: 'string', value: formula }
+  }
+
+  private parseFunctionCall(
+    formula: string
+  ): { type: 'function'; name: string; argsString: string } | { type: 'malformed' } | null {
+    const nameMatch = formula.match(/^([A-Za-z][A-Za-z0-9_]*)\s*\(/)
+    if (!nameMatch) return null
+
+    const openParenIndex = formula.indexOf('(', nameMatch[1].length)
+    let depth = 0
+    let inQuotes = false
+
+    for (let i = openParenIndex; i < formula.length; i++) {
+      const char = formula[i]
+
+      if (char === '"' && (i === 0 || formula[i - 1] !== '\\')) {
+        inQuotes = !inQuotes
+        continue
+      }
+
+      if (inQuotes) continue
+
+      if (char === '(') {
+        depth++
+        continue
+      }
+
+      if (char === ')') {
+        depth--
+        if (depth === 0) {
+          if (i !== formula.length - 1) return null
+          return {
+            type: 'function',
+            name: nameMatch[1].toUpperCase(),
+            argsString: formula.slice(openParenIndex + 1, i)
+          }
+        }
+      }
+    }
+
+    return { type: 'malformed' }
   }
 
   /**
