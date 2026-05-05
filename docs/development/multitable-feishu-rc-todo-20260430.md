@@ -268,44 +268,44 @@ Expected docs:
 ## Phase 5 - P1 Gap: Record Version History
 
 - [x] Add record revision persistence table.
-  - PR: local branch `codex/multitable-record-history-20260430`
-  - Merge commit: pending
+  - PR: #1285
+  - Merge commit: `3371d8b53`
   - Development MD: `docs/development/multitable-record-history-development-20260430.md`
   - Verification MD: `docs/development/multitable-record-history-verification-20260430.md`
   - Verification summary: migration creates `meta_record_revisions` with revision indexes.
 - [x] Record revision after successful authoritative writes.
-  - PR: local branch `codex/multitable-record-history-20260430`
-  - Merge commit: pending
+  - PR: #1285
+  - Merge commit: `3371d8b53`
   - Development MD: `docs/development/multitable-record-history-development-20260430.md`
   - Verification MD: `docs/development/multitable-record-history-verification-20260430.md`
   - Verification summary: `RecordService` create/patch/delete and `RecordWriteService.patchRecords()` persist revisions in the same transaction.
 - [x] Capture actor, source, version, changed fields, and timestamp.
-  - PR: local branch `codex/multitable-record-history-20260430`
-  - Merge commit: pending
+  - PR: #1285
+  - Merge commit: `3371d8b53`
   - Development MD: `docs/development/multitable-record-history-development-20260430.md`
   - Verification MD: `docs/development/multitable-record-history-verification-20260430.md`
   - Verification summary: revision rows include actor, source, action, version, changed field ids, patch, snapshot, and server timestamp.
 - [x] Add API to list record history.
-  - PR: local branch `codex/multitable-record-history-20260430`
-  - Merge commit: pending
+  - PR: #1285
+  - Merge commit: `3371d8b53`
   - Development MD: `docs/development/multitable-record-history-development-20260430.md`
   - Verification MD: `docs/development/multitable-record-history-verification-20260430.md`
   - Verification summary: `GET /api/multitable/sheets/:sheetId/records/:recordId/history` added with auth/read checks; OpenAPI source and dist regenerated.
 - [x] Add record drawer History tab.
-  - PR: local branch `codex/multitable-record-history-20260430`
-  - Merge commit: pending
+  - PR: #1285
+  - Merge commit: `3371d8b53`
   - Development MD: `docs/development/multitable-record-history-development-20260430.md`
   - Verification MD: `docs/development/multitable-record-history-verification-20260430.md`
   - Verification summary: drawer adds lazy-loaded `Details` and `History` tabs.
 - [x] Add tests for single-field patch, multi-field patch, actor attribution, and permission denial.
-  - PR: local branch `codex/multitable-record-history-20260430`
-  - Merge commit: pending
+  - PR: #1285
+  - Merge commit: `3371d8b53`
   - Development MD: `docs/development/multitable-record-history-development-20260430.md`
   - Verification MD: `docs/development/multitable-record-history-verification-20260430.md`
   - Verification summary: focused backend/frontend tests pass; DB route permission integration remains a documented follow-up.
 - [x] Document retention default: no cleanup in v1.
-  - PR: local branch `codex/multitable-record-history-20260430`
-  - Merge commit: pending
+  - PR: #1285
+  - Merge commit: `3371d8b53`
   - Development MD: `docs/development/multitable-record-history-development-20260430.md`
   - Verification MD: `docs/development/multitable-record-history-verification-20260430.md`
   - Verification summary: retention default documented as indefinite/no cleanup in v1.
