@@ -34,6 +34,7 @@ The page adds a PoC readiness panel with:
 - GATE JSON copy and download actions.
 - customer-returned GATE JSON import.
 - visible authenticated postdeploy smoke, postdeploy summary, preflight, offline mock, and evidence commands.
+- one-click copy controls for each displayed PoC/deploy command.
 - inline blocking issues before an operator can copy/download the GATE packet.
 
 ## Customer GATE Import
@@ -92,6 +93,7 @@ The same spec also covers the outbound copy and download paths:
 
 - visible form fields can make the GATE draft ready.
 - the page renders authenticated postdeploy smoke and summary commands before customer live execution commands.
+- each displayed command can be copied without selecting shell text manually.
 - the copy button writes the generated JSON to `navigator.clipboard`.
 - the download button writes the same generated JSON into a Blob-backed download.
 - submitted K3/PLM password values are redacted as `<fill-outside-git>`.

@@ -230,6 +230,16 @@ describe('IntegrationK3WiseSetupView', () => {
     expect(commands).toContain('integration-k3wise-postdeploy-summary.mjs')
     expect(commands).toContain('--require-auth-signoff')
 
+    const copyPostdeploySmokeButton = container.querySelector('[data-testid="k3-wise-copy-command-postdeploy-smoke"]') as HTMLButtonElement | null
+    expect(copyPostdeploySmokeButton).not.toBeNull()
+    copyPostdeploySmokeButton?.click()
+    await flushUi()
+
+    expect(navigator.clipboard?.writeText).toHaveBeenCalledWith(expect.stringContaining('integration-k3wise-postdeploy-smoke.mjs'))
+    expect(navigator.clipboard?.writeText).toHaveBeenCalledWith(expect.stringContaining('--require-auth'))
+    expect(container.querySelector('[data-testid="k3-wise-status"]')?.textContent).toContain('Postdeploy smoke 命令已复制')
+    vi.mocked(navigator.clipboard!.writeText).mockClear()
+
     const copyButton = container.querySelector('[data-testid="k3-wise-gate-copy-button"]') as HTMLButtonElement | null
     expect(copyButton).not.toBeNull()
     expect(copyButton?.disabled).toBe(false)

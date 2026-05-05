@@ -208,16 +208,24 @@
             </li>
           </ul>
           <div class="k3-setup__commands" data-testid="k3-wise-gate-commands">
-            <strong>Postdeploy smoke</strong>
-            <code>{{ gateCommands.postdeploySmoke }}</code>
-            <strong>Postdeploy summary</strong>
-            <code>{{ gateCommands.postdeploySummary }}</code>
-            <strong>Preflight</strong>
-            <code>{{ gateCommands.preflight }}</code>
-            <strong>Offline mock</strong>
-            <code>{{ gateCommands.offlineMock }}</code>
-            <strong>Evidence</strong>
-            <code>{{ gateCommands.evidence }}</code>
+            <div
+              v-for="command in gateCommandItems"
+              :key="command.key"
+              class="k3-setup__command"
+            >
+              <div class="k3-setup__command-head">
+                <strong>{{ command.label }}</strong>
+                <button
+                  class="k3-setup__command-copy"
+                  type="button"
+                  :data-testid="`k3-wise-copy-command-${command.key}`"
+                  @click="copyGateCommand(command.label, command.value)"
+                >
+                  复制
+                </button>
+              </div>
+              <code>{{ command.value }}</code>
+            </div>
           </div>
           <pre v-if="gateDraftText" class="k3-setup__test-result">{{ gateDraftText }}</pre>
         </div>
@@ -690,6 +698,13 @@ const materialRunIssues = computed(() => validateK3WisePipelineRunForm(form, 'ma
 const bomRunIssues = computed(() => validateK3WisePipelineRunForm(form, 'bom'))
 const gateIssues = computed(() => validateK3WiseGateDraftForm(form))
 const gateCommands = buildK3WisePocCommandSet()
+const gateCommandItems = [
+  { key: 'postdeploy-smoke', label: 'Postdeploy smoke', value: gateCommands.postdeploySmoke },
+  { key: 'postdeploy-summary', label: 'Postdeploy summary', value: gateCommands.postdeploySummary },
+  { key: 'preflight', label: 'Preflight', value: gateCommands.preflight },
+  { key: 'offline-mock', label: 'Offline mock', value: gateCommands.offlineMock },
+  { key: 'evidence', label: 'Evidence', value: gateCommands.evidence },
+]
 const gateDraftText = computed(() => {
   if (gateIssues.value.length > 0) return ''
   try {
@@ -726,6 +741,15 @@ async function copyGateDraft(): Promise<void> {
   try {
     await navigator.clipboard.writeText(gateDraftText.value)
     setStatus('GATE JSON 已复制', 'success')
+  } catch (error) {
+    setStatus(formatError(error), 'error')
+  }
+}
+
+async function copyGateCommand(label: string, command: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(command)
+    setStatus(`${label} 命令已复制`, 'success')
   } catch (error) {
     setStatus(formatError(error), 'error')
   }
@@ -1225,13 +1249,41 @@ onMounted(() => {
 .k3-setup__commands {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 10px;
   margin-top: 12px;
 }
 
-.k3-setup__commands strong {
+.k3-setup__command {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.k3-setup__command-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.k3-setup__command-head strong {
   color: #334155;
   font-size: 12px;
+}
+
+.k3-setup__command-copy {
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 3px 8px;
+  background: #fff;
+  color: #334155;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.k3-setup__command-copy:hover {
+  border-color: #94a3b8;
+  background: #f8fafc;
 }
 
 .k3-setup__commands code {
