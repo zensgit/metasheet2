@@ -2,6 +2,8 @@
 
 Date: 2026-05-05
 Branch: `codex/multitable-record-subscriptions-20260505`
+PR: #1290
+Merge commit: `6e28cf9fbd79c78d7a1eed92975c74c8d2d45487`
 
 ## Commands Run
 
@@ -76,6 +78,16 @@ Frontend Vitest printed `WebSocket server error: Port is already in use`; tests 
 ## CI Follow-Up
 
 PR #1290 initially failed `test (18.x)` in `tests/integration/multitable-record-patch.api.test.ts` because the mocked SQL fixture did not know about the new `meta_record_subscriptions` lookup and notification insert. The route returned 500 only in the test harness. The fixture now returns empty watcher rows for those legacy route extraction scenarios, and the targeted integration file passes locally.
+
+Final GitHub checks on PR #1290 passed before merge:
+
+- `test (18.x)` passed;
+- `test (20.x)` passed;
+- `coverage` passed;
+- `migration-replay`, `contracts`, `e2e`, `after-sales integration`, and `K3 WISE offline PoC` passed;
+- `Strict E2E with Enhanced Gates` was skipped as expected.
+
+PR #1290 was squash-merged into `main` at `6e28cf9fbd79c78d7a1eed92975c74c8d2d45487`.
 
 ## Follow-Up
 
