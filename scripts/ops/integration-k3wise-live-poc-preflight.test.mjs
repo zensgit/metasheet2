@@ -245,6 +245,24 @@ test('buildPacket coerces sqlServer.enabled "true" string and still applies allo
   assert.equal(packet.safety.sqlServerMode, 'disabled', 'string "no" + no explicit mode disables sql server')
 })
 
+test('buildPacket explains disabled SQL mode requires sqlServer.enabled=false', () => {
+  assert.throws(
+    () => buildPacket(gate({
+      sqlServer: {
+        enabled: true,
+        mode: 'disabled',
+        allowedTables: [],
+      },
+    })),
+    (error) => error instanceof LivePocPreflightError &&
+      error.details.field === 'sqlServer.mode' &&
+      error.details.sqlServerEnabled === true &&
+      error.details.acceptedModes.includes('readonly') &&
+      /requires sqlServer\.enabled=false/.test(error.message),
+    'enabled SQL Server channel with mode=disabled must tell operators to set enabled=false instead',
+  )
+})
+
 test('buildPacket coerces sqlServer.writeCoreTables "true" string', () => {
   // Same string-truthy pattern: customer typing writeCoreTables: "true" was
   // previously read as not-true (=== true comparison), bypassing the guard.

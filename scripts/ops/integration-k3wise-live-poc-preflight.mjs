@@ -95,6 +95,17 @@ function normalizeSqlMode(value, sqlEnabled) {
   const key = text.toLowerCase().replace(/\s+/g, ' ')
   const normalized = SQL_MODE_ALIASES.get(key) || key
   if (normalized === 'disabled' && !sqlEnabled) return normalized
+  if (normalized === 'disabled' && sqlEnabled) {
+    throw new LivePocPreflightError(
+      'sqlServer.mode=disabled requires sqlServer.enabled=false; set enabled=false or choose readonly, middle-table, or stored-procedure',
+      {
+        field: 'sqlServer.mode',
+        mode: text,
+        sqlServerEnabled: true,
+        acceptedModes: ['readonly', 'middle-table', 'stored-procedure'],
+      },
+    )
+  }
   if (!SQL_MODES.has(normalized)) {
     throw new LivePocPreflightError('sqlServer.mode must be readonly, middle-table, or stored-procedure', {
       field: 'sqlServer.mode',
