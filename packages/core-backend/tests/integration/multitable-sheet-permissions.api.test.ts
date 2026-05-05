@@ -9,7 +9,10 @@ type QueryResult = {
 
 type QueryHandler = (sql: string, params?: unknown[]) => QueryResult | Promise<QueryResult>
 
-function createMockPool(queryHandler: QueryHandler) {
+function createMockPool(
+  queryHandler: QueryHandler,
+  userPermissionMap: Record<string, string[]> = {},
+) {
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
     if (
       sql.includes('FROM meta_view_permissions')
@@ -24,6 +27,53 @@ function createMockPool(queryHandler: QueryHandler) {
       return { rows: [], rowCount: 0 }
     }
     if (sql.includes('FROM record_permissions') && !sql.includes('FROM record_permissions rp')) return { rows: [], rowCount: 0 }
+    if (
+      sql.includes('FROM user_permissions up')
+      && sql.includes('JOIN role_permissions rp ON rp.role_id = ur.role_id')
+      && sql.includes('WHERE up.user_id = ANY($1::text[])')
+    ) {
+      const userIds = Array.isArray(params?.[0]) ? params[0].map(String) : []
+      return {
+        rows: userIds.flatMap((userId) =>
+          (userPermissionMap[userId] ?? []).map((permissionCode) => ({
+            user_id: userId,
+            permission_code: permissionCode,
+          })),
+        ),
+      }
+    }
+    if (sql.includes('FROM user_roles') && sql.includes('WHERE user_id = ANY($1::text[])') && sql.includes('role_id = $2')) {
+      return { rows: [], rowCount: 0 }
+    }
+    if (sql.includes('SELECT role_id, permission_code FROM role_permissions WHERE role_id = ANY($1::text[])')) {
+      const roleIds = Array.isArray(params?.[0]) ? params[0].map(String) : []
+      const rows: Array<{ role_id: string; permission_code: string }> = []
+      for (const roleId of roleIds) {
+        const result = await queryHandler('SELECT permission_code FROM role_permissions WHERE role_id = $1', [roleId])
+        for (const row of result.rows) {
+          if (typeof row.permission_code === 'string') rows.push({ role_id: roleId, permission_code: row.permission_code })
+        }
+      }
+      return { rows }
+    }
+    if (sql.includes('INSERT INTO meta_record_revisions')) {
+      return { rows: [], rowCount: 1 }
+    }
+    if (sql.includes('SELECT DISTINCT field_id FROM formula_dependencies')) {
+      return { rows: [], rowCount: 0 }
+    }
+    if (sql.includes('FROM meta_record_subscriptions')) {
+      return { rows: [], rowCount: 0 }
+    }
+    if (sql.includes('SELECT id, permissions') && sql.includes('FROM users') && sql.includes('WHERE id = ANY($1::text[])')) {
+      const userIds = Array.isArray(params?.[0]) ? params[0].map(String) : []
+      return {
+        rows: userIds.map((userId) => ({
+          id: userId,
+          permissions: userPermissionMap[userId] ?? [],
+        })),
+      }
+    }
     return queryHandler(sql, params)
   })
   const transaction = vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query }))
@@ -49,7 +99,7 @@ async function createApp(args: {
 
   const { poolManager } = await import('../../src/integration/db/connection-pool')
   const { univerMetaRouter } = await import('../../src/routes/univer-meta')
-  const mockPool = createMockPool(args.queryHandler)
+  const mockPool = createMockPool(args.queryHandler, args.userPermissionMap)
   vi.spyOn(poolManager, 'get').mockReturnValue(mockPool as any)
 
   const app = express()
@@ -696,12 +746,16 @@ describe('Multitable sheet-scoped permissions API', () => {
             rows: [{ id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 }],
           }
         }
-        if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+        if (
+          sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')
+          || sql.includes('SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')
+        ) {
           const recordId = String(params?.[0] ?? '')
           return {
             rows: [{
               id: recordId,
               version: recordId === 'rec_owned' ? 3 : 4,
+              data: { fld_name: recordId === 'rec_owned' ? 'Mine' : 'Theirs' },
               created_by: recordId === 'rec_owned' ? 'user_sheet_acl_1' : 'user_sheet_acl_2',
             }],
           }
@@ -805,8 +859,9 @@ describe('Multitable sheet-scoped permissions API', () => {
             rows: [{ id: 'fld_name', name: 'Name', type: 'string', property: {} }],
           }
         }
-        if (sql.includes('INSERT INTO meta_records (id, sheet_id, data, version, created_by)')) {
-          const [recordId, sheetId, dataJson, _version, createdBy] = params as [string, string, string, number, string]
+        if (sql.includes('INSERT INTO meta_records (id, sheet_id, data, version, created_by')) {
+          const [recordId, sheetId, dataJson] = params as [string, string, string]
+          const createdBy = String(params?.[3] ?? '')
           const next = {
             id: recordId,
             sheetId,
@@ -825,20 +880,26 @@ describe('Multitable sheet-scoped permissions API', () => {
             rows: row ? [{ id: row.id, version: row.version, data: row.data }] : [],
           }
         }
-        if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')) {
+        if (
+          sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')
+          || sql.includes('SELECT id, version, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')
+        ) {
           expect(params?.[0]).toEqual('sheet_ops')
           const recordId = String(params?.[1] ?? '')
           const row = records.get(recordId)
           return {
-            rows: row ? [{ id: row.id, version: row.version, created_by: row.createdBy }] : [],
+            rows: row ? [{ id: row.id, version: row.version, data: row.data, created_by: row.createdBy }] : [],
           }
         }
-        if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+        if (
+          sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')
+          || sql.includes('SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')
+        ) {
           expect(params?.[1]).toEqual('sheet_ops')
           const recordId = String(params?.[0] ?? '')
           const row = records.get(recordId)
           return {
-            rows: row ? [{ id: row.id, version: row.version, created_by: row.createdBy }] : [],
+            rows: row ? [{ id: row.id, version: row.version, data: row.data, created_by: row.createdBy }] : [],
           }
         }
         if (sql.includes('UPDATE meta_records') && sql.includes('WHERE sheet_id = $2 AND id = $3')) {
@@ -879,11 +940,14 @@ describe('Multitable sheet-scoped permissions API', () => {
             rows: row ? [{ id: row.id, sheet_id: row.sheetId }] : [],
           }
         }
-        if (sql.includes('SELECT id, sheet_id, version FROM meta_records WHERE id = $1 FOR UPDATE')) {
+        if (
+          sql.includes('SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1 FOR UPDATE')
+          || sql.includes('SELECT id, sheet_id, version FROM meta_records WHERE id = $1 FOR UPDATE')
+        ) {
           expect(params).toEqual(['rec_owned'])
           const row = records.get('rec_owned')
           return {
-            rows: row ? [{ id: row.id, sheet_id: row.sheetId, version: row.version }] : [],
+            rows: row ? [{ id: row.id, sheet_id: row.sheetId, version: row.version, data: row.data }] : [],
           }
         }
         if (sql.includes('DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1')) {
