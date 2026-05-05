@@ -1169,6 +1169,24 @@ describe('UserManagementView', () => {
     expect(rows[0]?.textContent).toContain('Bravo')
   })
 
+  it('preserves directory return context when the user changes governance filters', async () => {
+    window.history.replaceState({}, '', '/admin/users?userId=user-2&source=directory-sync&directoryFailure=missing_account&integrationId=ding-1&accountId=user-2-directory')
+    const state = createApiState()
+    state[1].hasOpenId = false
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+    app.mount(container!)
+    await flushUi(20)
+
+    findButtonByText(container!, '缺 OpenID').click()
+    await flushUi()
+
+    expect(window.location.search).toBe('?userId=user-2&source=directory-sync&directoryFailure=missing_account&integrationId=ding-1&accountId=user-2-directory&filter=dingtalk-openid-missing')
+    expect(container?.textContent).toContain('目录定位未完成')
+    expect(container?.textContent).toContain('目标集成：ding-1 · 目标成员：user-2-directory')
+  })
+
   it('bulk disables dingtalk grant for the current missing-openid screening list', async () => {
     const state = createApiState()
     state[1].hasOpenId = false
@@ -1457,7 +1475,54 @@ describe('UserManagementView', () => {
     await flushUi(20)
 
     expect(container?.textContent).toContain('已从目录同步定位到用户 Bravo')
+    expect(container?.textContent).toContain('目录同步回跳')
+    expect(container?.textContent).toContain('已从目录同步返回用户管理')
+    expect(container?.textContent).toContain('目标集成：ding-1 · 目标成员：user-2-directory')
+    const returnDirectoryLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('返回目录同步'))
+    expect(returnDirectoryLink?.getAttribute('href')).toBe('/admin/directory?integrationId=ding-1&accountId=user-2-directory&source=user-management&userId=user-2')
     expect(container?.textContent).toContain('Bravo')
+  })
+
+  it('shows a directory failure banner when returning from a missing directory account', async () => {
+    window.history.replaceState({}, '', '/admin/users?userId=user-2&source=directory-sync&directoryFailure=missing_account&integrationId=ding-1&accountId=user-2-directory')
+    const state = createApiState()
+    const bravo = state.find((user) => user.id === 'user-2')
+    if (!bravo) throw new Error('Bravo fixture not found')
+    bravo.directoryLinked = true
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(20)
+
+    expect(container?.textContent).toContain('目录定位未完成')
+    expect(container?.textContent).toContain('未找到目标目录成员')
+    expect(container?.textContent).toContain('目标集成：ding-1 · 目标成员：user-2-directory')
+    expect(container?.textContent).toContain('已从目录同步定位到用户 Bravo')
+    const returnDirectoryLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('返回目录同步'))
+    expect(returnDirectoryLink?.getAttribute('href')).toBe('/admin/directory?integrationId=ding-1&accountId=user-2-directory&source=user-management&userId=user-2')
+  })
+
+  it('shows a directory failure banner when returning from a missing directory integration', async () => {
+    window.history.replaceState({}, '', '/admin/users?userId=user-2&source=directory-sync&directoryFailure=missing_integration&integrationId=ding-missing&accountId=user-2-directory')
+    const state = createApiState()
+    const bravo = state.find((user) => user.id === 'user-2')
+    if (!bravo) throw new Error('Bravo fixture not found')
+    bravo.directoryLinked = true
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(20)
+
+    expect(container?.textContent).toContain('目录定位未完成')
+    expect(container?.textContent).toContain('未找到目标目录集成')
+    expect(container?.textContent).toContain('目标集成：ding-missing · 目标成员：user-2-directory')
+    expect(container?.textContent).toContain('已从目录同步定位到用户 Bravo')
+    const returnDirectoryLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('返回目录同步'))
+    expect(returnDirectoryLink?.getAttribute('href')).toBe('/admin/directory?integrationId=ding-missing&accountId=user-2-directory&source=user-management&userId=user-2')
   })
 
   it('can re-focus a user when query params change on the same mounted instance', async () => {
