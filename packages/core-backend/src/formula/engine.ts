@@ -266,7 +266,7 @@ export class FormulaEngine {
     }
 
     // Check if it's a cell reference
-    const cellMatch = formula.match(/^([A-Z]+)(\d+)$/)
+    const cellMatch = formula.match(/^([A-Za-z]+)(\d+)$/)
     if (cellMatch) {
       return {
         type: 'cell',
@@ -276,7 +276,7 @@ export class FormulaEngine {
     }
 
     // Check if it's a range
-    const rangeMatch = formula.match(/^([A-Z]+\d+):([A-Z]+\d+)$/)
+    const rangeMatch = formula.match(/^([A-Za-z]+\d+):([A-Za-z]+\d+)$/)
     if (rangeMatch) {
       const start = this.parseCellReference(rangeMatch[1])
       const end = this.parseCellReference(rangeMatch[2])
@@ -672,7 +672,7 @@ export class FormulaEngine {
    * Parse cell reference string
    */
   private parseCellReference(ref: string): { row: number; col: number } {
-    const match = ref.match(/^([A-Z]+)(\d+)$/)
+    const match = ref.match(/^([A-Za-z]+)(\d+)$/)
     if (!match) throw new Error(`Invalid cell reference: ${ref}`)
 
     return {
@@ -685,7 +685,7 @@ export class FormulaEngine {
    * Convert column letter to index
    */
   private columnLetterToIndex(letter: string): number {
-    return letter
+    return letter.toUpperCase()
       .split('')
       .reduce((acc, char) => acc * 26 + char.charCodeAt(0) - 64, 0) - 1
   }
