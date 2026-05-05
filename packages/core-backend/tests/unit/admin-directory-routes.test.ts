@@ -623,6 +623,29 @@ describe('adminDirectoryRouter', () => {
     }))
   })
 
+  it('returns 400 when a directory bind would enable DingTalk grant without openId', async () => {
+    directoryMocks.bindDirectoryAccount.mockRejectedValue(
+      new Error('Directory account is missing DingTalk openId and cannot enable DingTalk login grant; resync DingTalk directory or complete DingTalk OAuth binding first'),
+    )
+
+    const response = await invokeRoute('post', '/accounts/:accountId/bind', {
+      params: { accountId: 'account-1' },
+      body: {
+        localUserRef: 'alpha@example.com',
+        enableDingTalkGrant: true,
+      },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: {
+        code: 'DIRECTORY_BIND_FAILED',
+      },
+    })
+  })
+
   it('creates a local user and binds the directory account through manual admission', async () => {
     directoryMocks.admitDirectoryAccountUser.mockResolvedValue({
       account: {
@@ -686,6 +709,30 @@ describe('adminDirectoryRouter', () => {
         },
         temporaryPassword: 'Temp#123456',
         inviteToken: 'invite-token-fixed',
+      },
+    })
+  })
+
+  it('returns 400 when manual admission would enable DingTalk grant without openId', async () => {
+    directoryMocks.admitDirectoryAccountUser.mockRejectedValue(
+      new Error('Directory account is missing DingTalk openId and cannot enable DingTalk login grant; resync DingTalk directory or complete DingTalk OAuth binding first'),
+    )
+
+    const response = await invokeRoute('post', '/accounts/:accountId/admit-user', {
+      params: { accountId: 'account-1' },
+      body: {
+        name: '李青',
+        username: 'liqing',
+        enableDingTalkGrant: true,
+      },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: {
+        code: 'DIRECTORY_ADMISSION_FAILED',
       },
     })
   })

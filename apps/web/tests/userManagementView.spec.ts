@@ -99,7 +99,14 @@ type UserFixture = {
   role: string
   is_active: boolean
   grantEnabled: boolean
+  dingtalkGrantUpdatedAt?: string | null
+  dingtalkGrantUpdatedBy?: string | null
   directoryLinked: boolean
+  dingtalkIdentityExists?: boolean
+  hasOpenId: boolean
+  hasUnionId: boolean
+  dingtalkCorpId?: string | null
+  lastDirectorySyncAt?: string | null
   namespaceAdmissions: Array<{
     namespace: string
     enabled: boolean
@@ -120,7 +127,14 @@ function createApiState(): UserFixture[] {
       role: 'user',
       is_active: true,
       grantEnabled: true,
+      dingtalkGrantUpdatedAt: '2026-04-09T00:00:00.000Z',
+      dingtalkGrantUpdatedBy: 'Admin One',
       directoryLinked: true,
+      dingtalkIdentityExists: true,
+      hasOpenId: true,
+      hasUnionId: true,
+      dingtalkCorpId: 'dingcorp',
+      lastDirectorySyncAt: '2026-04-09T00:00:00.000Z',
       namespaceAdmissions: [
         {
           namespace: 'crm',
@@ -140,7 +154,14 @@ function createApiState(): UserFixture[] {
       role: 'user',
       is_active: true,
       grantEnabled: false,
+      dingtalkGrantUpdatedAt: '2026-04-09T00:00:00.000Z',
+      dingtalkGrantUpdatedBy: 'Admin One',
       directoryLinked: false,
+      dingtalkIdentityExists: true,
+      hasOpenId: true,
+      hasUnionId: true,
+      dingtalkCorpId: 'dingcorp',
+      lastDirectorySyncAt: null,
       namespaceAdmissions: [
         {
           namespace: 'crm',
@@ -160,7 +181,14 @@ function createApiState(): UserFixture[] {
       role: 'user',
       is_active: false,
       grantEnabled: true,
+      dingtalkGrantUpdatedAt: '2026-04-09T00:00:00.000Z',
+      dingtalkGrantUpdatedBy: 'Admin One',
       directoryLinked: false,
+      dingtalkIdentityExists: true,
+      hasOpenId: true,
+      hasUnionId: true,
+      dingtalkCorpId: 'dingcorp',
+      lastDirectorySyncAt: null,
       namespaceAdmissions: [
         {
           namespace: 'crm',
@@ -180,7 +208,14 @@ function createApiState(): UserFixture[] {
       role: 'admin',
       is_active: true,
       grantEnabled: false,
+      dingtalkGrantUpdatedAt: '2026-04-09T00:00:00.000Z',
+      dingtalkGrantUpdatedBy: 'Admin One',
       directoryLinked: false,
+      dingtalkIdentityExists: true,
+      hasOpenId: true,
+      hasUnionId: true,
+      dingtalkCorpId: 'dingcorp',
+      lastDirectorySyncAt: null,
       namespaceAdmissions: [
         {
           namespace: 'crm',
@@ -230,7 +265,15 @@ function createApiImplementation(
       platformAdminEnabled: user.role === 'admin',
       attendanceAdminEnabled: false,
       dingtalkLoginEnabled: user.grantEnabled,
+      dingtalkGrantUpdatedAt: user.dingtalkGrantUpdatedAt ?? '2026-04-09T00:00:00.000Z',
+      dingtalkGrantUpdatedBy: user.dingtalkGrantUpdatedBy ?? 'Admin One',
       directoryLinked: user.directoryLinked,
+      dingtalkIdentityExists: user.dingtalkIdentityExists !== false,
+      dingtalkHasUnionId: user.hasUnionId,
+      dingtalkHasOpenId: user.hasOpenId,
+      dingtalkOpenIdMissing: (user.dingtalkIdentityExists !== false) && Boolean((user.dingtalkCorpId ?? 'dingcorp')) && !user.hasOpenId,
+      dingtalkCorpId: user.dingtalkCorpId ?? 'dingcorp',
+      lastDirectorySyncAt: user.lastDirectorySyncAt ?? null,
       businessRoleCount: 1,
     })
 
@@ -264,6 +307,10 @@ function createApiImplementation(
       identity: {
         exists: true,
         corpId: 'dingcorp',
+        unionId: user.hasUnionId ? `${user.id}-union` : null,
+        openId: user.hasOpenId ? `${user.id}-open` : null,
+        hasUnionId: user.hasUnionId,
+        hasOpenId: user.hasOpenId,
         lastLoginAt: '2026-04-09T00:00:00.000Z',
         createdAt: '2026-04-09T00:00:00.000Z',
         updatedAt: '2026-04-09T00:00:00.000Z',
@@ -403,6 +450,8 @@ function createApiImplementation(
       for (const user of state) {
         if (userIds.includes(user.id)) {
           user.grantEnabled = enabled
+          user.dingtalkGrantUpdatedAt = '2026-04-10T00:00:00.000Z'
+          user.dingtalkGrantUpdatedBy = 'Admin One'
         }
       }
       return createJsonResponse({
@@ -411,6 +460,18 @@ function createApiImplementation(
           userIds,
           enabled,
         },
+      })
+    }
+
+    const dingtalkGrantMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/dingtalk-grant$/)
+    if (dingtalkGrantMatch) {
+      const user = findUserById(decodeURIComponent(dingtalkGrantMatch[1]))
+      const rawBody = typeof init?.body === 'string' ? init.body : ''
+      const parsed = rawBody ? JSON.parse(rawBody) as { enabled?: unknown } : {}
+      user.grantEnabled = parsed.enabled === true
+      return createJsonResponse({
+        ok: true,
+        data: buildDingTalkAccessPayload(user),
       })
     }
 
@@ -543,11 +604,35 @@ describe('UserManagementView', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
   let callLog: string[] = []
+  const OriginalBlob = Blob
+  const originalCreateObjectURL = URL.createObjectURL
+  const originalRevokeObjectURL = URL.revokeObjectURL
+  let createObjectURLMock: ReturnType<typeof vi.fn>
+  let revokeObjectURLMock: ReturnType<typeof vi.fn>
+  let clickedAnchors: Array<{ href: string; download: string }> = []
+  let createdBlobParts: string[] = []
 
   beforeEach(() => {
     apiFetchMock.mockReset()
     callLog = []
     apiFetchMock.mockImplementation(createApiImplementation(callLog))
+    createObjectURLMock = vi.fn(() => 'blob:user-management-export')
+    revokeObjectURLMock = vi.fn()
+    clickedAnchors = []
+    createdBlobParts = []
+    globalThis.Blob = class TestBlob extends OriginalBlob {
+      constructor(parts?: BlobPart[], options?: BlobPropertyBag) {
+        createdBlobParts = Array.isArray(parts) ? parts.map((part) => String(part)) : []
+        super(parts, options)
+      }
+    } as typeof Blob
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURLMock })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURLMock })
+    const originalClick = HTMLAnchorElement.prototype.click
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function click(this: HTMLAnchorElement) {
+      clickedAnchors.push({ href: this.href, download: this.download })
+      return originalClick.call(this)
+    })
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -558,6 +643,10 @@ describe('UserManagementView', () => {
     window.history.replaceState({}, '', '/')
     app = null
     container = null
+    vi.restoreAllMocks()
+    globalThis.Blob = OriginalBlob
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
   })
 
   it('distinguishes DingTalk login from plugin usage and can open namespace admission', async () => {
@@ -574,6 +663,10 @@ describe('UserManagementView', () => {
     expect(container?.textContent).toContain('服务端已启用钉钉登录')
     expect(container?.textContent).toContain('服务端钉钉登录可用')
     expect(container?.textContent).toContain('允许企业：dingcorp、dingcorp-2')
+    expect(container?.textContent).toContain('身份 corpId：dingcorp')
+    expect(container?.textContent).toContain('Union ID：user-1-union')
+    expect(container?.textContent).toContain('Open ID：user-1-open')
+    expect(container?.textContent).toContain('最近目录同步：')
     expect(container?.textContent).toContain('已开通钉钉扫码')
     expect(container?.textContent).toContain('插件使用未开通')
     expect(container?.textContent).toContain('当前不可用')
@@ -666,6 +759,451 @@ describe('UserManagementView', () => {
     await flushUi()
     expect(container?.textContent).toContain('已批量关闭 4 个用户的钉钉扫码')
     expect(container?.textContent).toContain('未开通钉钉登录')
+  })
+
+  it('warns and disables enabling DingTalk grant when the identity is missing openId', async () => {
+    const state = createApiState()
+    state[1].hasOpenId = false
+    state[1].directoryLinked = true
+    state[1].lastDirectorySyncAt = '2026-04-10T00:00:00.000Z'
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+    app.mount(container!)
+    await flushUi(20)
+
+    const bravoRow = findUserRow(container!, 'Bravo')
+    const bravoDetailButton = Array.from(bravoRow.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Bravo'))
+    if (!(bravoDetailButton instanceof HTMLButtonElement)) {
+      throw new Error('Bravo detail button not found')
+    }
+    bravoDetailButton.click()
+    await waitForCondition(() => callLog.includes('/api/admin/users/user-2/dingtalk-access'))
+
+    expect(container?.textContent).toContain('当前钉钉身份缺少 openId')
+    expect(container?.textContent).toContain('Union ID：user-2-union')
+    expect(container?.textContent).toContain('Open ID：未记录')
+    expect(container?.textContent).toContain('最近目录同步：')
+    expect(container?.textContent).toContain('修复建议：先回到目录同步查看该成员是否已补齐 openId')
+    const enableButton = findButtonByText(container!, '开通钉钉扫码')
+    expect(enableButton.disabled).toBe(true)
+    const directoryLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('前往目录成员'))
+    expect(directoryLink?.getAttribute('href')).toBe('/admin/directory?integrationId=ding-1&accountId=user-2-directory&source=user-management&userId=user-2')
+    expect(apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users/user-2/dingtalk-grant')).toBe(false)
+  })
+
+  it('filters the list to users missing DingTalk openId', async () => {
+    const state = createApiState()
+    state[1].hasOpenId = false
+    state[1].directoryLinked = true
+    state[1].lastDirectorySyncAt = '2026-04-10T00:00:00.000Z'
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+    app.mount(container!)
+    await flushUi(20)
+
+    expect(container?.textContent).toContain('缺 OpenID')
+    const filterButton = findButtonByText(container!, '缺 OpenID')
+    filterButton.click()
+    await flushUi()
+
+    const userRows = Array.from(container!.querySelectorAll('.user-admin__user')).map((row) => row.textContent || '')
+    expect(userRows.some((text) => text.includes('Bravo'))).toBe(true)
+    expect(userRows.some((text) => text.includes('Alpha'))).toBe(false)
+    expect(container?.textContent).toContain('corpId dingcorp')
+    expect(container?.textContent).toContain('最近目录同步')
+  })
+
+  it('exports the current missing-openid screening list as CSV', async () => {
+    const state = createApiState()
+    state[1].hasOpenId = false
+    state[1].directoryLinked = true
+    state[1].lastDirectorySyncAt = '2026-04-10T00:00:00.000Z'
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+    app.mount(container!)
+    await flushUi(20)
+
+    const exportButton = findButtonByText(container!, '导出缺 OpenID 清单')
+    expect(exportButton.disabled).toBe(false)
+    exportButton.click()
+    await flushUi()
+
+    expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+    const exportedBlob = createObjectURLMock.mock.calls[0]?.[0] as Blob
+    expect(exportedBlob).toBeInstanceOf(Blob)
+    const exportedText = createdBlobParts.join('')
+    expect(exportedText).toContain('userId,name,account,role,dingtalkCorpId,directoryLinked,lastDirectorySyncAt')
+    expect(exportedText).toContain('user-2,Bravo,bravo@example.com,user,dingcorp,linked,2026-04-10T00:00:00.000Z')
+    expect(clickedAnchors[0]?.download).toContain('dingtalk-missing-openid-users-')
+    expect(container?.textContent).toContain('已导出 1 个缺 OpenID 用户的治理清单')
+    expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:user-management-export')
+  })
+
+  it('exports the governance daily summary with counts, suggestions, and workbench links', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-05T08:00:00.000Z'))
+    try {
+      const state = createApiState()
+      state[1].hasOpenId = false
+      state[1].directoryLinked = true
+      state[1].grantEnabled = false
+      state[1].dingtalkGrantUpdatedAt = '2026-05-04T08:00:00.000Z'
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+      app.mount(container!)
+      await flushUi(20)
+
+      const exportButton = findButtonByText(container!, '导出治理日报摘要')
+      exportButton.click()
+      await flushUi()
+
+      expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+      const exportedText = createdBlobParts.join('')
+      expect(exportedText).toContain('# DingTalk 治理日报摘要')
+      expect(exportedText).toContain('日期：2026-05-05')
+      expect(exportedText).toContain('- 缺 OpenID：1')
+      expect(exportedText).toContain('- 待收口：0')
+      expect(exportedText).toContain('- 已收口：1')
+      expect(exportedText).toContain('缺 OpenID 成员：当前没有待收口成员需要优先处理')
+      expect(exportedText).toContain('目录同步修复入口：1 个成员可先回目录同步继续补齐 openId')
+      expect(exportedText).toContain('最近 7 天收口审计：最近 7 天已收口 1 个成员，可直接复盘处理动作')
+      expect(exportedText).toContain('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/directory?source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/audit?resourceType=user-auth-grant&action=revoke&from=2026-04-29T00%3A00%3A00.000Z&to=2026-05-05T23%3A59%3A59.999Z')
+      expect(clickedAnchors[0]?.download).toBe('dingtalk-governance-daily-summary-2026-05-05.md')
+      expect(container?.textContent).toContain('已导出 DingTalk 治理日报摘要')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('exports the live validation checklist with baseline, steps, and workbench links', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-05T08:00:00.000Z'))
+    try {
+      const state = createApiState()
+      state[1].hasOpenId = false
+      state[1].directoryLinked = true
+      state[1].grantEnabled = false
+      state[1].dingtalkGrantUpdatedAt = '2026-05-04T08:00:00.000Z'
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+      app.mount(container!)
+      await flushUi(20)
+
+      const exportButton = findButtonByText(container!, '导出联调检查单')
+      exportButton.click()
+      await flushUi()
+
+      expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+      const exportedText = createdBlobParts.join('')
+      expect(exportedText).toContain('# DingTalk 治理联调检查单')
+      expect(exportedText).toContain('日期：2026-05-05')
+      expect(exportedText).toContain('- 缺 OpenID：1')
+      expect(exportedText).toContain('- 待收口：0')
+      expect(exportedText).toContain('- 已收口：1')
+      expect(exportedText).toContain('## 联调步骤')
+      expect(exportedText).toContain('打开缺 OpenID 成员清单')
+      expect(exportedText).toContain('跳到目录同步页，刷新目录成员并确认是否补齐 openId')
+      expect(exportedText).toContain('打开最近 7 天收口审计')
+      expect(exportedText).toContain('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/directory?source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/audit?resourceType=user-auth-grant&action=revoke&from=2026-04-29T00%3A00%3A00.000Z&to=2026-05-05T23%3A59%3A59.999Z')
+      expect(clickedAnchors[0]?.download).toBe('dingtalk-governance-live-validation-checklist-2026-05-05.md')
+      expect(container?.textContent).toContain('已导出 DingTalk 联调检查单')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('exports the validation result template with baseline, fill-in sections, and workbench links', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-05T08:00:00.000Z'))
+    try {
+      const state = createApiState()
+      state[1].hasOpenId = false
+      state[1].directoryLinked = true
+      state[1].grantEnabled = false
+      state[1].dingtalkGrantUpdatedAt = '2026-05-04T08:00:00.000Z'
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+      app.mount(container!)
+      await flushUi(20)
+
+      const exportButton = findButtonByText(container!, '导出联调结果模板')
+      exportButton.click()
+      await flushUi()
+
+      expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+      const exportedText = createdBlobParts.join('')
+      expect(exportedText).toContain('# DingTalk 治理联调结果回填模板')
+      expect(exportedText).toContain('日期：2026-05-05')
+      expect(exportedText).toContain('## 联调环境')
+      expect(exportedText).toContain('- 缺 OpenID：1')
+      expect(exportedText).toContain('- 待收口：0')
+      expect(exportedText).toContain('- 已收口：1')
+      expect(exportedText).toContain('## 结果回填')
+      expect(exportedText).toContain('缺 OpenID 成员清单与预期一致')
+      expect(exportedText).toContain('目录同步可补齐 openId / 或确认仍缺失原因')
+      expect(exportedText).toContain('最近 7 天收口审计可看到时间、处理人和动作')
+      expect(exportedText).toContain('## 执行后结论')
+      expect(exportedText).toContain('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/directory?source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/audit?resourceType=user-auth-grant&action=revoke&from=2026-04-29T00%3A00%3A00.000Z&to=2026-05-05T23%3A59%3A59.999Z')
+      expect(clickedAnchors[0]?.download).toBe('dingtalk-governance-validation-result-template-2026-05-05.md')
+      expect(container?.textContent).toContain('已导出 DingTalk 联调结果模板')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('exports the governance execution package index with ordered artifacts and workbench links', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-05T08:00:00.000Z'))
+    try {
+      const state = createApiState()
+      state[1].hasOpenId = false
+      state[1].directoryLinked = true
+      state[1].grantEnabled = false
+      state[1].dingtalkGrantUpdatedAt = '2026-05-04T08:00:00.000Z'
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+      app.mount(container!)
+      await flushUi(20)
+
+      const exportButton = findButtonByText(container!, '导出联调执行包索引')
+      exportButton.click()
+      await flushUi()
+
+      expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+      const exportedText = createdBlobParts.join('')
+      expect(exportedText).toContain('# DingTalk 治理联调执行包索引')
+      expect(exportedText).toContain('日期：2026-05-05')
+      expect(exportedText).toContain('## 推荐执行顺序')
+      expect(exportedText).toContain('1. 导出治理日报摘要')
+      expect(exportedText).toContain('2. 导出联调检查单')
+      expect(exportedText).toContain('3. 执行真实联调')
+      expect(exportedText).toContain('4. 导出联调结果模板')
+      expect(exportedText).toContain('5. 回填并归档结果')
+      expect(exportedText).toContain('dingtalk-governance-daily-summary-2026-05-05.md')
+      expect(exportedText).toContain('dingtalk-governance-live-validation-checklist-2026-05-05.md')
+      expect(exportedText).toContain('dingtalk-governance-validation-result-template-2026-05-05.md')
+      expect(exportedText).toContain('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/directory?source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/audit?resourceType=user-auth-grant&action=revoke&from=2026-04-29T00%3A00%3A00.000Z&to=2026-05-05T23%3A59%3A59.999Z')
+      expect(clickedAnchors[0]?.download).toBe('dingtalk-governance-execution-package-index-2026-05-05.md')
+      expect(container?.textContent).toContain('已导出 DingTalk 联调执行包索引')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('exports the full governance validation package as one markdown handoff file', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-05T08:00:00.000Z'))
+    try {
+      const state = createApiState()
+      state[1].hasOpenId = false
+      state[1].directoryLinked = true
+      state[1].grantEnabled = false
+      state[1].dingtalkGrantUpdatedAt = '2026-05-04T08:00:00.000Z'
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+      app.mount(container!)
+      await flushUi(20)
+
+      const exportButton = findButtonByText(container!, '导出完整联调包')
+      exportButton.click()
+      await flushUi()
+
+      expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+      const exportedText = createdBlobParts.join('')
+      expect(exportedText).toContain('# DingTalk 治理完整联调包')
+      expect(exportedText).toContain('日期：2026-05-05')
+      expect(exportedText).toContain('## 包内目录')
+      expect(exportedText).toContain('## 当前基线')
+      expect(exportedText).toContain('- 缺 OpenID：1')
+      expect(exportedText).toContain('- 待收口：0')
+      expect(exportedText).toContain('- 已收口：1')
+      expect(exportedText).toContain('## 推荐执行顺序')
+      expect(exportedText).toContain('## 治理日报摘要')
+      expect(exportedText).toContain('## 联调检查单')
+      expect(exportedText).toContain('## 联调结果回填模板')
+      expect(exportedText).toContain('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/directory?source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/audit?resourceType=user-auth-grant&action=revoke&from=2026-04-29T00%3A00%3A00.000Z&to=2026-05-05T23%3A59%3A59.999Z')
+      expect(clickedAnchors[0]?.download).toBe('dingtalk-governance-full-validation-package-2026-05-05.md')
+      expect(container?.textContent).toContain('已导出 DingTalk 完整联调包')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('links the screening view to the DingTalk governance audit shortcut', async () => {
+    const state = createApiState()
+    state[1].hasOpenId = false
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+    app.mount(container!)
+    await flushUi(20)
+
+    const auditLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('查看钉钉治理审计'))
+    expect(auditLink?.getAttribute('href')).toBe('/admin/audit?resourceType=user-auth-grant&action=revoke')
+  })
+
+  it('shows a governance workbench with fixed quick links', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-05T08:00:00.000Z'))
+    try {
+      const state = createApiState()
+      state[1].hasOpenId = false
+      state[1].directoryLinked = true
+      state[1].grantEnabled = false
+      state[1].dingtalkGrantUpdatedAt = '2026-05-04T08:00:00.000Z'
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+      app.mount(container!)
+      await flushUi(20)
+
+      const missingUsersLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('缺 OpenID 成员'))
+      const directoryLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('目录同步修复入口'))
+      const recentAuditLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('最近 7 天收口审计'))
+
+      expect(missingUsersLink?.getAttribute('href')).toBe('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
+      expect(directoryLink?.getAttribute('href')).toBe('/admin/directory?source=dingtalk-governance')
+      expect(recentAuditLink?.getAttribute('href')).toBe('/admin/audit?resourceType=user-auth-grant&action=revoke&from=2026-04-29T00%3A00%3A00.000Z&to=2026-05-05T23%3A59%3A59.999Z')
+      expect(container?.textContent).toContain('当前没有待收口成员需要优先处理')
+      expect(container?.textContent).toContain('1 个成员可先回目录同步继续补齐 openId')
+      expect(container?.textContent).toContain('最近 7 天已收口 1 个成员，可直接复盘处理动作')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('links the pending governance summary metric to the DingTalk governance audit shortcut', async () => {
+    const state = createApiState()
+    state[1].hasOpenId = false
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+    app.mount(container!)
+    await flushUi(20)
+
+    const pendingLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('待收口'))
+    expect(pendingLink?.getAttribute('href')).toBe('/admin/audit?resourceType=user-auth-grant&action=revoke')
+  })
+
+  it('links the missing-openid summary metric to a shareable filtered user-management view', async () => {
+    const state = createApiState()
+    state[1].hasOpenId = false
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+    app.mount(container!)
+    await flushUi(20)
+
+    const missingLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('缺 OpenID'))
+    expect(missingLink?.getAttribute('href')).toBe('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
+  })
+
+  it('links the governed summary metric to the recent 7 day DingTalk governance audit shortcut', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-05T08:00:00.000Z'))
+    try {
+      const state = createApiState()
+      state[1].hasOpenId = false
+      state[1].grantEnabled = false
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+      app.mount(container!)
+      await flushUi(20)
+
+      const governedLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('已收口'))
+      expect(governedLink?.getAttribute('href')).toBe('/admin/audit?resourceType=user-auth-grant&action=revoke&from=2026-04-29T00%3A00%3A00.000Z&to=2026-05-05T23%3A59%3A59.999Z')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('applies the missing-openid filter from a deep link on first load', async () => {
+    window.history.replaceState({}, '', '/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
+    const state = createApiState()
+    state[1].hasOpenId = false
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+    app.mount(container!)
+    await flushUi(20)
+
+    const rows = Array.from(container!.querySelectorAll('.user-admin__user'))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.textContent).toContain('Bravo')
+  })
+
+  it('syncs the missing-openid filter back to the URL when selected in-page', async () => {
+    const state = createApiState()
+    state[1].hasOpenId = false
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+    app.mount(container!)
+    await flushUi(20)
+
+    findButtonByText(container!, '缺 OpenID').click()
+    await flushUi()
+
+    expect(window.location.search).toBe('?filter=dingtalk-openid-missing')
+    const rows = Array.from(container!.querySelectorAll('.user-admin__user'))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.textContent).toContain('Bravo')
+  })
+
+  it('bulk disables dingtalk grant for the current missing-openid screening list', async () => {
+    const state = createApiState()
+    state[1].hasOpenId = false
+    state[1].directoryLinked = true
+    state[1].grantEnabled = true
+    state[1].lastDirectorySyncAt = '2026-04-10T00:00:00.000Z'
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+    app.mount(container!)
+    await flushUi(20)
+
+    expect(container?.textContent).toContain('1缺 OpenID')
+    expect(container?.textContent).toContain('0已收口')
+    expect(container?.textContent).toContain('1待收口')
+
+    findButtonByText(container!, '缺 OpenID').click()
+    await flushUi()
+
+    const actionButton = findButtonByText(container!, '批量关闭缺 OpenID 钉钉扫码')
+    expect(actionButton.disabled).toBe(false)
+    actionButton.click()
+    await waitForCondition(() => apiFetchMock.mock.calls.filter((args) => String(args[0]) === '/api/admin/users/dingtalk-grants/bulk').length >= 1)
+
+    const bulkCall = apiFetchMock.mock.calls.find((args) => String(args[0]) === '/api/admin/users/dingtalk-grants/bulk')
+    expect(JSON.parse(String((bulkCall?.[1] as RequestInit | undefined)?.body))).toEqual({
+      userIds: ['user-2'],
+      enabled: false,
+    })
+    await flushUi()
+    expect(container?.textContent).toContain('已批量关闭 1 个缺 OpenID 用户的钉钉扫码')
+    expect(container?.textContent).toContain('最近关闭钉钉扫码')
+    expect(container?.textContent).toContain('处理人 Admin One')
+    expect(container?.textContent).toContain('1已收口')
+    expect(container?.textContent).toContain('0待收口')
   })
 
   it('can batch update plugin usage with namespace selection and refresh the current detail user', async () => {

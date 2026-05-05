@@ -336,6 +336,36 @@ describe('jwt auth middleware', () => {
     expect(next).not.toHaveBeenCalled()
   })
 
+  it('ignores stale bearer tokens on public form routes so DingTalk re-auth can start', async () => {
+    metricsMocks.jwtAuthFail.inc.mockClear()
+    metricsMocks.authFailures.inc.mockClear()
+    const expiredError = new Error('jwt expired')
+    expiredError.name = 'TokenExpiredError'
+    authServiceMocks.verifyToken.mockRejectedValue(expiredError)
+
+    const req = {
+      method: 'GET',
+      path: '/api/multitable/form-context',
+      query: { publicToken: 'pub_123' },
+      headers: {
+        authorization: 'Bearer expired-public-form-token',
+      },
+    } as unknown as Request
+    const res = {
+      status: vi.fn().mockReturnThis(),
+      json: vi.fn().mockReturnThis(),
+    } as unknown as Response
+    const next = vi.fn() as NextFunction
+
+    await optionalJwtAuthMiddleware(req, res, next)
+
+    expect(req.user).toBeUndefined()
+    expect(res.status).not.toHaveBeenCalled()
+    expect(metricsMocks.jwtAuthFail.inc).not.toHaveBeenCalled()
+    expect(metricsMocks.authFailures.inc).not.toHaveBeenCalled()
+    expect(next).toHaveBeenCalledTimes(1)
+  })
+
   it('optional public form auth bypass does not fail when no bearer token is present', async () => {
     authServiceMocks.verifyToken.mockReset()
     const req = {

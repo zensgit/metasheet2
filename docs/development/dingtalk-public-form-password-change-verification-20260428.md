@@ -22,8 +22,6 @@ git diff --check
 
 ## Results
 
-Executed in `/tmp/ms2-dingtalk-public-form-password-change` on branch `codex/dingtalk-public-form-password-change-20260428`.
-
 Backend JWT middleware unit test:
 
 ```text
@@ -57,5 +55,5 @@ git diff --check
 
 ## Non-Gating Observations
 
-- The frontend Vitest run printed a Vite websocket `Port is already in use` warning and a jsdom navigation warning from the DingTalk redirect test. Exit code was 0.
+- The frontend Vitest run printed Vite websocket/socket warnings and a jsdom navigation warning from DingTalk redirect tests. Exit code was 0.
 - The frontend production build printed existing dynamic-import and large-chunk warnings. Exit code was 0.
