@@ -249,6 +249,31 @@ describe('admin-users routes', () => {
           },
         ],
       })
+      .mockResolvedValueOnce({
+        rows: [{
+          user_id: 'user-1',
+          enabled: true,
+          granted_by: 'admin-1',
+          granted_by_name: 'Admin One',
+          granted_by_email: 'admin@example.com',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-13T00:05:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ user_id: 'user-1', last_directory_sync_at: '2026-03-13T00:00:00.000Z' }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          local_user_id: 'user-1',
+          corp_id: 'ding-corp',
+          provider_union_id: 'union-1',
+          provider_open_id: null,
+          last_login_at: '2026-03-13T00:00:00.000Z',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-13T00:00:00.000Z',
+        }],
+      })
 
     const response = await invokeRoute('get', '/api/admin/users', {
       query: { q: 'alpha', page: '1', pageSize: '20' },
@@ -268,6 +293,16 @@ describe('admin-users routes', () => {
       id: 'user-1',
       email: 'alpha@example.com',
       mobile: '13800138000',
+      dingtalkLoginEnabled: true,
+      dingtalkGrantUpdatedAt: '2026-03-13T00:05:00.000Z',
+      dingtalkGrantUpdatedBy: 'Admin One',
+      directoryLinked: true,
+      dingtalkIdentityExists: true,
+      dingtalkHasUnionId: true,
+      dingtalkHasOpenId: false,
+      dingtalkOpenIdMissing: true,
+      dingtalkCorpId: 'ding-corp',
+      lastDirectorySyncAt: '2026-03-13T00:00:00.000Z',
     })
   })
 
@@ -307,13 +342,16 @@ describe('admin-users routes', () => {
           },
         ],
       })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
 
     const response = await invokeRoute('get', '/api/admin/users', {
       query: { userId: 'user-pinned', page: '1', pageSize: '1' },
     })
 
     expect(response.statusCode).toBe(200)
-    expect(pgMocks.query).toHaveBeenCalledTimes(3)
+    expect(pgMocks.query).toHaveBeenCalledTimes(6)
     const items = (response.body as Record<string, any>).data.items
     expect(items[0].id).toBe('user-pinned')
     expect(items.map((row: Record<string, unknown>) => row.id)).toEqual(['user-pinned'])
@@ -354,13 +392,16 @@ describe('admin-users routes', () => {
           },
         ],
       })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
 
     const response = await invokeRoute('get', '/api/admin/users', {
       query: { userId: 'user-a' },
     })
 
     expect(response.statusCode).toBe(200)
-    expect(pgMocks.query).toHaveBeenCalledTimes(2)
+    expect(pgMocks.query).toHaveBeenCalledTimes(5)
     expect((response.body as Record<string, any>).data.items.map((row: Record<string, unknown>) => row.id)).toEqual(['user-a', 'user-b'])
     expect((response.body as Record<string, any>).data.pinUserIncluded).toBe(true)
   })
@@ -671,6 +712,8 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce({
         rows: [{
           corp_id: 'ding-corp',
+          provider_union_id: 'union-1',
+          provider_open_id: 'open-1',
           last_login_at: '2026-03-13T00:00:00.000Z',
           created_at: '2026-03-12T00:00:00.000Z',
           updated_at: '2026-03-13T00:00:00.000Z',
@@ -706,7 +749,14 @@ describe('admin-users routes', () => {
         linkedCount: 2,
       },
       grant: { exists: true, enabled: true },
-      identity: { exists: true, corpId: 'ding-corp' },
+      identity: {
+        exists: true,
+        corpId: 'ding-corp',
+        unionId: 'union-1',
+        openId: 'open-1',
+        hasUnionId: true,
+        hasOpenId: true,
+      },
     })
   })
 
@@ -777,6 +827,8 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce({
         rows: [{
           corp_id: 'ding-corp',
+          provider_union_id: 'union-1',
+          provider_open_id: 'open-1',
           last_login_at: '2026-03-13T00:00:00.000Z',
           created_at: '2026-03-12T00:00:00.000Z',
           updated_at: '2026-03-13T00:00:00.000Z',
@@ -805,7 +857,14 @@ describe('admin-users routes', () => {
       ],
       dingtalk: {
         grant: { exists: true, enabled: true },
-        identity: { exists: true, corpId: 'ding-corp' },
+        identity: {
+          exists: true,
+          corpId: 'ding-corp',
+          unionId: 'union-1',
+          openId: 'open-1',
+          hasUnionId: true,
+          hasOpenId: true,
+        },
       },
       namespaceAdmissions: [
         expect.objectContaining({
@@ -2018,6 +2077,7 @@ describe('admin-users routes', () => {
         }],
       })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [{
           enabled: true,
@@ -2044,6 +2104,42 @@ describe('admin-users routes', () => {
       resourceType: 'user-auth-grant',
       resourceId: 'user-1:dingtalk',
     }))
+  })
+
+  it('rejects enabling dingtalk grant when bound identity is missing openId', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          local_user_id: 'user-1',
+          corp_id: 'dingcorp',
+          provider_open_id: null,
+        }],
+      })
+
+    const response = await invokeRoute('patch', '/api/admin/users/:userId/dingtalk-grant', {
+      params: { userId: 'user-1' },
+      body: { enabled: true },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).error.code).toBe('DINGTALK_OPEN_ID_REQUIRED')
+    expect(String((response.body as Record<string, any>).error.message || '')).toContain('missing DingTalk openId')
+    expect(String(pgMocks.query.mock.calls[1]?.[0] || '')).toContain('provider_open_id')
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
   })
 
   it('updates dingtalk grants in bulk and records an audit entry per user', async () => {
@@ -2093,6 +2189,39 @@ describe('admin-users routes', () => {
         selectionSize: 2,
       }),
     }))
+  })
+
+  it('rejects bulk enabling dingtalk grants when one identity is missing openId', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [
+          { id: 'user-1' },
+          { id: 'user-2' },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            local_user_id: 'user-2',
+            corp_id: 'dingcorp',
+            provider_open_id: null,
+          },
+        ],
+      })
+
+    const response = await invokeRoute('post', '/api/admin/users/dingtalk-grants/bulk', {
+      body: {
+        userIds: ['user-1', 'user-2'],
+        enabled: true,
+      },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).error.code).toBe('DINGTALK_OPEN_ID_REQUIRED')
+    expect(String((response.body as Record<string, any>).error.message || '')).toContain('user-2')
+    expect(String(pgMocks.query.mock.calls[1]?.[0] || '')).toContain('provider_open_id')
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
   })
 
   it('assigns a role and invalidates cached permissions', async () => {

@@ -30,6 +30,20 @@
     <p v-if="status" class="user-admin__status" :class="{ 'user-admin__status--error': statusTone === 'error' }">
       {{ status }}
     </p>
+    <section
+      v-if="hasDirectorySyncNavigation"
+      class="user-admin__status user-admin__source-banner"
+      :class="{ 'user-admin__status--error': userNavigation.directoryFailure }"
+    >
+      <strong>{{ userNavigation.directoryFailure ? '目录定位未完成' : '目录同步回跳' }}</strong>
+      <p>{{ directoryNavigationNotice }}</p>
+      <p v-if="directoryNavigationTargetLabel">{{ directoryNavigationTargetLabel }}</p>
+      <div v-if="directoryReturnLocation" class="user-admin__source-actions">
+        <router-link class="user-admin__button user-admin__button--secondary user-admin__button-link" :to="directoryReturnLocation">
+          返回目录同步
+        </router-link>
+      </div>
+    </section>
     <section class="user-admin__panel user-admin__panel--create">
       <div class="user-admin__section-head">
         <div>
@@ -156,6 +170,54 @@
             <strong>{{ governanceSummary.directoryLinked }}</strong>
             <small>目录已链接</small>
           </span>
+          <router-link class="user-admin__metric user-admin__metric-link" :to="buildMissingOpenIdUserManagementLocation()">
+            <strong>{{ governanceSummary.dingtalkOpenIdMissing }}</strong>
+            <small>缺 OpenID</small>
+          </router-link>
+          <router-link class="user-admin__metric user-admin__metric-link" :to="buildRecentDingTalkGovernanceAuditLocation()">
+            <strong>{{ governanceSummary.dingtalkOpenIdGoverned }}</strong>
+            <small>已收口</small>
+          </router-link>
+          <router-link class="user-admin__metric user-admin__metric-link" :to="buildDingTalkGovernanceAuditLocation()">
+            <strong>{{ governanceSummary.dingtalkOpenIdPending }}</strong>
+            <small>待收口</small>
+          </router-link>
+        </div>
+        <div class="user-admin__section-head user-admin__section-head--workbench">
+          <div>
+            <h3>治理工作台</h3>
+            <p class="user-admin__hint">把筛查、目录修复和审计复盘入口放到同一个工作台，便于值班和日常收口。</p>
+          </div>
+          <div class="user-admin__role-actions">
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="exportGovernanceDailySummary()">
+              导出治理日报摘要
+            </button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="exportGovernanceLiveValidationChecklist()">
+              导出联调检查单
+            </button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="exportGovernanceValidationResultTemplate()">
+              导出联调结果模板
+            </button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="exportGovernanceExecutionPackageIndex()">
+              导出联调执行包索引
+            </button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="exportGovernanceFullValidationPackage()">
+              导出完整联调包
+            </button>
+          </div>
+        </div>
+        <div class="user-admin__workbench">
+          <router-link
+            v-for="card in governanceWorkbenchCards"
+            :key="card.title"
+            class="user-admin__workbench-card"
+            :to="card.to"
+          >
+            <span class="user-admin__workbench-kicker">{{ card.kicker }}</span>
+            <strong>{{ card.title }}</strong>
+            <small>{{ card.description }}</small>
+            <span class="user-admin__workbench-note">{{ card.note }}</span>
+          </router-link>
         </div>
         <div class="user-admin__filters" role="group" aria-label="成员治理筛选">
           <button
@@ -174,6 +236,12 @@
             <strong>批量操作</strong>
             <p class="user-admin__hint">
               已选择 {{ selectedUserIds.length }} / {{ visibleUsers.length }} 个当前筛选结果。
+            </p>
+            <p v-if="screeningUsersMissingOpenId.length > 0" class="user-admin__hint">
+              当前筛选结果中有 {{ screeningUsersMissingOpenId.length }} 个缺 OpenID 用户，可直接导出治理清单。
+            </p>
+            <p v-if="screeningUsersMissingOpenIdWithGrant.length > 0" class="user-admin__hint">
+              其中 {{ screeningUsersMissingOpenIdWithGrant.length }} 个仍开通钉钉扫码，可直接批量关闭以降低误用风险。
             </p>
           </div>
           <div class="user-admin__bulk-group">
@@ -210,6 +278,15 @@
             <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="loading || bulkBusy || selectedUserIds.length === 0" @click="void bulkUpdateDingTalkGrants(false)">
               批量关闭钉钉扫码
             </button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="screeningUsersMissingOpenIdWithGrant.length === 0" @click="void bulkDisableMissingOpenIdDingTalkGrants()">
+              批量关闭缺 OpenID 钉钉扫码
+            </button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="screeningUsersMissingOpenId.length === 0" @click="exportMissingOpenIdCsv()">
+              导出缺 OpenID 清单
+            </button>
+            <router-link class="user-admin__button user-admin__button--secondary" :to="buildDingTalkGovernanceAuditLocation()">
+              查看钉钉治理审计
+            </router-link>
           </div>
         </div>
         <div v-if="visibleUsers.length === 0" class="user-admin__empty">暂无用户数据</div>
@@ -241,6 +318,9 @@
               <span class="user-admin__row-badge" :class="{ 'user-admin__row-badge--success': user.directoryLinked === true, 'user-admin__row-badge--danger': user.directoryLinked !== true }">
                 {{ user.directoryLinked === true ? '目录已链接' : '目录未链接' }}
               </span>
+              <span v-if="user.dingtalkOpenIdMissing" class="user-admin__row-badge user-admin__row-badge--danger">
+                缺 OpenID
+              </span>
               <span v-if="user.platformAdminEnabled" class="user-admin__row-badge user-admin__row-badge--accent">
                 平台管理员
               </span>
@@ -252,6 +332,9 @@
               </span>
             </div>
           </button>
+          <p v-if="user.dingtalkOpenIdMissing" class="user-admin__hint">
+            {{ readMissingOpenIdGovernanceHint(user) }}
+          </p>
         </article>
       </aside>
 
@@ -471,14 +554,35 @@
             <p v-if="dingtalkAccess?.server?.allowedCorpIds?.length" class="user-admin__hint">
               允许企业：{{ dingtalkAccess.server.allowedCorpIds.join('、') }}
             </p>
+            <div v-if="dingtalkAccess" class="user-admin__create-grid">
+              <div class="user-admin__hint"><strong>身份 corpId：</strong>{{ dingtalkAccess.identity.corpId || dingtalkAccess.server?.corpId || '未记录' }}</div>
+              <div class="user-admin__hint"><strong>Union ID：</strong>{{ dingtalkAccess.identity.unionId || '未记录' }}</div>
+              <div class="user-admin__hint"><strong>Open ID：</strong>{{ dingtalkAccess.identity.openId || '未记录' }}</div>
+              <div class="user-admin__hint"><strong>最近钉钉登录：</strong>{{ formatDate(dingtalkAccess.identity.lastLoginAt) }}</div>
+              <div class="user-admin__hint"><strong>最近目录同步：</strong>{{ formatDirectorySyncAt(memberAdmission) }}</div>
+              <div class="user-admin__hint"><strong>钉钉身份更新时间：</strong>{{ formatDate(dingtalkAccess.identity.updatedAt) }}</div>
+            </div>
             <p v-if="dingtalkAccess?.identity.lastLoginAt" class="user-admin__hint">
               最近钉钉登录：{{ formatDate(dingtalkAccess.identity.lastLoginAt) }}
+            </p>
+            <p v-if="shouldWarnMissingDingTalkOpenId(dingtalkAccess)" class="user-admin__warning">
+              当前钉钉身份缺少 openId，暂不能开通钉钉扫码；请重新同步目录或让用户完成一次钉钉 OAuth 绑定。
+            </p>
+            <p v-if="shouldWarnMissingDingTalkOpenId(dingtalkAccess)" class="user-admin__hint">
+              修复建议：先回到目录同步查看该成员是否已补齐 openId；如果目录仍未返回，请让用户先完成一次钉钉 OAuth 绑定；确认 openId 已补齐后刷新本页，再开通钉钉扫码。
             </p>
             <p v-if="dingtalkAccess?.grant.updatedAt" class="user-admin__hint">
               开通状态更新时间：{{ formatDate(dingtalkAccess.grant.updatedAt) }}
             </p>
             <div class="user-admin__role-actions">
-              <button class="user-admin__button" type="button" :disabled="busy || loadingDingTalk || dingtalkAccess?.grant.enabled === true" @click="void updateDingTalkGrant(true)">
+              <router-link
+                v-if="shouldWarnMissingDingTalkOpenId(dingtalkAccess) && access && readPrimaryDingTalkDirectoryMembership(memberAdmission)"
+                class="user-admin__button user-admin__button--secondary"
+                :to="buildDirectoryManagementLocation(access.user.id, readPrimaryDingTalkDirectoryMembership(memberAdmission)!)"
+              >
+                前往目录成员
+              </router-link>
+              <button class="user-admin__button" type="button" :disabled="busy || loadingDingTalk || dingtalkAccess?.grant.enabled === true || !canEnableDingTalkGrant(dingtalkAccess)" @click="void updateDingTalkGrant(true)">
                 开通钉钉扫码
               </button>
               <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="busy || loadingDingTalk || dingtalkAccess?.grant.enabled !== true" @click="void updateDingTalkGrant(false)">
@@ -604,7 +708,15 @@ type ManagedUser = {
   platformAdminEnabled?: boolean
   attendanceAdminEnabled?: boolean
   dingtalkLoginEnabled?: boolean
+  dingtalkGrantUpdatedAt?: string | null
+  dingtalkGrantUpdatedBy?: string | null
   directoryLinked?: boolean
+  dingtalkIdentityExists?: boolean
+  dingtalkHasUnionId?: boolean
+  dingtalkHasOpenId?: boolean
+  dingtalkOpenIdMissing?: boolean
+  dingtalkCorpId?: string | null
+  lastDirectorySyncAt?: string | null
   businessRoleCount?: number
 }
 
@@ -649,6 +761,10 @@ type DingTalkAccess = {
   identity: {
     exists: boolean
     corpId: string | null
+    unionId: string | null
+    openId: string | null
+    hasUnionId: boolean
+    hasOpenId: boolean
     lastLoginAt: string | null
     createdAt: string | null
     updatedAt: string | null
@@ -763,9 +879,17 @@ type UserSessionRecord = {
   userAgent: string | null
 }
 
+type UserListFilter = 'all' | 'account-disabled' | 'dingtalk-disabled' | 'directory-unlinked' | 'dingtalk-openid-missing' | 'platform-admin'
+
+const USER_LIST_FILTER_VALUES: UserListFilter[] = ['all', 'account-disabled', 'dingtalk-disabled', 'directory-unlinked', 'dingtalk-openid-missing', 'platform-admin']
+
 type InitialUserNavigation = {
   userId: string
   source: string
+  filter: UserListFilter
+  integrationId: string
+  accountId: string
+  directoryFailure: string
 }
 
 const { hasAdminAccess } = useAuth()
@@ -783,7 +907,7 @@ const statusTone = ref<'info' | 'error'>('info')
 const search = ref('')
 const users = ref<ManagedUser[]>([])
 const selectedUserIds = ref<string[]>([])
-const userListFilter = ref<'all' | 'account-disabled' | 'dingtalk-disabled' | 'directory-unlinked' | 'platform-admin'>('all')
+const userListFilter = ref<UserListFilter>(readInitialUserNavigation().filter)
 const roleCatalog = ref<RoleCatalogItem[]>([])
 const accessPresets = ref<AccessPreset[]>([])
 const presetModeFilter = ref<'' | 'platform' | 'attendance' | 'plm-workbench'>('')
@@ -820,22 +944,70 @@ const governanceSummary = computed(() => ({
   accountEnabled: users.value.filter((user) => user.is_active).length,
   dingtalkEnabled: users.value.filter((user) => user.dingtalkLoginEnabled !== false).length,
   directoryLinked: users.value.filter((user) => user.directoryLinked === true).length,
+  dingtalkOpenIdMissing: users.value.filter((user) => user.dingtalkOpenIdMissing === true).length,
+  dingtalkOpenIdGoverned: users.value.filter((user) => user.dingtalkOpenIdMissing === true && user.dingtalkLoginEnabled === false).length,
+  dingtalkOpenIdPending: users.value.filter((user) => user.dingtalkOpenIdMissing === true && user.dingtalkLoginEnabled !== false).length,
 }))
+const governanceWorkbenchCards = computed(() => {
+  const pendingToday = users.value.filter((user) => (
+    user.dingtalkOpenIdMissing === true
+    && user.dingtalkLoginEnabled !== false
+  )).length
+  const directoryRepairCount = users.value.filter((user) => (
+    user.dingtalkOpenIdMissing === true
+    && user.directoryLinked === true
+  )).length
+  const governedRecent = users.value.filter((user) => (
+    user.dingtalkOpenIdMissing === true
+    && user.dingtalkLoginEnabled === false
+    && isWithinRecentDays(user.dingtalkGrantUpdatedAt, 7)
+  )).length
+
+  return [
+    {
+      kicker: '治理清单',
+      title: '缺 OpenID 成员',
+      description: '直接进入当前缺 OpenID 用户筛选，适合先做名单筛查和批量收口。',
+      note: pendingToday > 0 ? `今日优先处理 ${pendingToday} 个待收口成员` : '当前没有待收口成员需要优先处理',
+      to: buildMissingOpenIdUserManagementLocation(),
+    },
+    {
+      kicker: '目录修复',
+      title: '目录同步修复入口',
+      description: '跳到目录同步页，继续刷新目录成员、补齐 openId 或回看目录绑定状态。',
+      note: directoryRepairCount > 0 ? `${directoryRepairCount} 个成员可先回目录同步继续补齐 openId` : '当前没有需要回目录同步补齐的成员',
+      to: buildDirectoryMissingOpenIdWorkbenchLocation(),
+    },
+    {
+      kicker: '审计复盘',
+      title: '最近 7 天收口审计',
+      description: '查看最近 7 天钉钉扫码关闭记录，适合巡检治理结果和责任追踪。',
+      note: governedRecent > 0 ? `最近 7 天已收口 ${governedRecent} 个成员，可直接复盘处理动作` : '最近 7 天暂无新的收口记录',
+      to: buildRecentDingTalkGovernanceAuditLocation(),
+    },
+  ]
+})
 const visibleUsers = computed(() => {
   return users.value.filter((user) => {
     if (userListFilter.value === 'account-disabled') return !user.is_active
     if (userListFilter.value === 'dingtalk-disabled') return user.dingtalkLoginEnabled === false
     if (userListFilter.value === 'directory-unlinked') return user.directoryLinked !== true
+    if (userListFilter.value === 'dingtalk-openid-missing') return user.dingtalkOpenIdMissing === true
     if (userListFilter.value === 'platform-admin') return user.platformAdminEnabled === true
     return true
   })
 })
+const screeningUsersMissingOpenId = computed(() => visibleUsers.value.filter((user) => user.dingtalkOpenIdMissing === true))
+const screeningUsersMissingOpenIdWithGrant = computed(() => (
+  screeningUsersMissingOpenId.value.filter((user) => user.dingtalkLoginEnabled === true)
+))
 const selectedUserIdSet = computed(() => new Set(selectedUserIds.value))
 const userFilterOptions = [
   { value: 'all', label: '全部' },
   { value: 'account-disabled', label: '账号停用' },
   { value: 'dingtalk-disabled', label: '钉钉停用' },
   { value: 'directory-unlinked', label: '目录未链接' },
+  { value: 'dingtalk-openid-missing', label: '缺 OpenID' },
   { value: 'platform-admin', label: '平台管理员' },
 ] as const
 const hasPlatformAdminAccess = computed(() => {
@@ -863,6 +1035,361 @@ function formatManagedUserLabel(user: ManagedUser | null | undefined): string {
   if (!user) return ''
   return user.name || formatManagedUserIdentifier(user)
 }
+
+function isWithinRecentDays(value: string | null | undefined, days: number): boolean {
+  if (!value) return false
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return false
+  const now = new Date()
+  const threshold = new Date(now)
+  threshold.setDate(now.getDate() - Math.max(0, days - 1))
+  threshold.setHours(0, 0, 0, 0)
+  return date.getTime() >= threshold.getTime()
+}
+
+function readMissingOpenIdGovernanceHint(user: ManagedUser): string {
+  const parts = [`corpId ${user.dingtalkCorpId || '未记录'}`]
+  if (user.lastDirectorySyncAt) {
+    parts.push(`最近目录同步 ${formatDate(user.lastDirectorySyncAt)}`)
+  }
+  if (user.dingtalkLoginEnabled === false && user.dingtalkGrantUpdatedAt) {
+    const actor = user.dingtalkGrantUpdatedBy ? ` · 处理人 ${user.dingtalkGrantUpdatedBy}` : ''
+    parts.push(`最近关闭钉钉扫码 ${formatDate(user.dingtalkGrantUpdatedAt)}${actor}`)
+  }
+  return parts.join(' · ')
+}
+
+function escapeCsvValue(value: unknown): string {
+  const text = String(value ?? '')
+  if (!/[",\n]/.test(text)) return text
+  return `"${text.replaceAll('"', '""')}"`
+}
+
+function downloadText(filename: string, text: string, mimeType: string): void {
+  if (typeof window === 'undefined' || typeof document === 'undefined' || typeof URL.createObjectURL !== 'function') {
+    throw new Error('当前环境不支持文件导出')
+  }
+  const blob = new Blob([`\ufeff${text}`], { type: mimeType })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
+function exportMissingOpenIdCsv(): void {
+  if (screeningUsersMissingOpenId.value.length === 0) {
+    setStatus('当前筛选结果中没有缺 OpenID 用户可导出', 'error')
+    return
+  }
+
+  const header = ['userId', 'name', 'account', 'role', 'dingtalkCorpId', 'directoryLinked', 'lastDirectorySyncAt']
+  const rows = screeningUsersMissingOpenId.value.map((user) => ([
+    user.id,
+    user.name || '',
+    formatManagedUserIdentifier(user),
+    user.role,
+    user.dingtalkCorpId || '',
+    user.directoryLinked === true ? 'linked' : 'unlinked',
+    user.lastDirectorySyncAt || '',
+  ].map(escapeCsvValue).join(',')))
+  downloadText(
+    `dingtalk-missing-openid-users-${new Date().toISOString().slice(0, 10)}.csv`,
+    [header.join(','), ...rows].join('\n'),
+    'text/csv;charset=utf-8',
+  )
+  setStatus(`已导出 ${screeningUsersMissingOpenId.value.length} 个缺 OpenID 用户的治理清单`)
+}
+
+function exportGovernanceDailySummary(): void {
+  const today = formatDateInput(new Date())
+  const lines = [
+    `# DingTalk 治理日报摘要`,
+    '',
+    `日期：${today}`,
+    '',
+    `## 核心统计`,
+    `- 缺 OpenID：${governanceSummary.value.dingtalkOpenIdMissing}`,
+    `- 待收口：${governanceSummary.value.dingtalkOpenIdPending}`,
+    `- 已收口：${governanceSummary.value.dingtalkOpenIdGoverned}`,
+    `- 目录已链接：${governanceSummary.value.directoryLinked}`,
+    '',
+    `## 当前建议`,
+    ...governanceWorkbenchCards.value.map((card) => `- ${card.title}：${card.note}`),
+    '',
+    `## 工作台入口`,
+    ...governanceWorkbenchCards.value.map((card) => `- ${card.title}：${card.to}`),
+  ]
+  downloadText(
+    `dingtalk-governance-daily-summary-${today}.md`,
+    lines.join('\n'),
+    'text/markdown;charset=utf-8',
+  )
+  setStatus('已导出 DingTalk 治理日报摘要')
+}
+
+function exportGovernanceLiveValidationChecklist(): void {
+  const today = formatDateInput(new Date())
+  const lines = [
+    '# DingTalk 治理联调检查单',
+    '',
+    `日期：${today}`,
+    '',
+    '## 当前基线',
+    `- 缺 OpenID：${governanceSummary.value.dingtalkOpenIdMissing}`,
+    `- 待收口：${governanceSummary.value.dingtalkOpenIdPending}`,
+    `- 已收口：${governanceSummary.value.dingtalkOpenIdGoverned}`,
+    '',
+    '## 联调步骤',
+    '- 1. 打开缺 OpenID 成员清单，确认待收口成员列表与当前预期一致。',
+    `  入口：${buildMissingOpenIdUserManagementLocation()}`,
+    '- 2. 随机抽取至少 1 个目录已链接但缺 openId 的成员，跳到目录同步页，刷新目录成员并确认是否补齐 openId。',
+    `  入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
+    '- 3. 对仍缺 openId 且已开通钉钉扫码的成员，执行批量关闭，确认治理统计从“待收口”转到“已收口”。',
+    '- 4. 打开最近 7 天收口审计，确认最近治理动作、处理时间和处理人可追溯。',
+    `  入口：${buildRecentDingTalkGovernanceAuditLocation()}`,
+    '- 5. 在真实钉钉账号上验证：已修复成员可正常钉钉登录；未修复成员仍被正确阻止。',
+    '- 6. 导出治理日报摘要，归档当天治理结果。',
+    '',
+    '## 当前建议',
+    ...governanceWorkbenchCards.value.map((card) => `- ${card.title}：${card.note}`),
+  ]
+  downloadText(
+    `dingtalk-governance-live-validation-checklist-${today}.md`,
+    lines.join('\n'),
+    'text/markdown;charset=utf-8',
+  )
+  setStatus('已导出 DingTalk 联调检查单')
+}
+
+function exportGovernanceValidationResultTemplate(): void {
+  const today = formatDateInput(new Date())
+  const lines = [
+    '# DingTalk 治理联调结果回填模板',
+    '',
+    `日期：${today}`,
+    '',
+    '## 联调环境',
+    '- 环境：142 / staging / other',
+    '- 执行人：',
+    '- 协同人：',
+    '- 执行时间：',
+    '',
+    '## 执行前基线',
+    `- 缺 OpenID：${governanceSummary.value.dingtalkOpenIdMissing}`,
+    `- 待收口：${governanceSummary.value.dingtalkOpenIdPending}`,
+    `- 已收口：${governanceSummary.value.dingtalkOpenIdGoverned}`,
+    '',
+    '## 结果回填',
+    '- [ ] 缺 OpenID 成员清单与预期一致',
+    '  - 实际结果：',
+    `  - 入口：${buildMissingOpenIdUserManagementLocation()}`,
+    '- [ ] 目录同步可补齐 openId / 或确认仍缺失原因',
+    '  - 实际结果：',
+    `  - 入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
+    '- [ ] 批量关闭缺 OpenID 钉钉扫码后，待收口数量正确变化',
+    '  - 实际结果：',
+    '- [ ] 最近 7 天收口审计可看到时间、处理人和动作',
+    '  - 实际结果：',
+    `  - 入口：${buildRecentDingTalkGovernanceAuditLocation()}`,
+    '- [ ] 真实钉钉账号验证通过',
+    '  - 已修复成员：',
+    '  - 未修复成员：',
+    '',
+    '## 异常记录',
+    '- 账号 / 现象 / 初步判断：',
+    '- 日志或截图位置：',
+    '',
+    '## 执行后结论',
+    '- 是否可继续放量：',
+    '- 是否需要继续修复：',
+    '- 下一步负责人：',
+    '',
+    '## 当前建议',
+    ...governanceWorkbenchCards.value.map((card) => `- ${card.title}：${card.note}`),
+  ]
+  downloadText(
+    `dingtalk-governance-validation-result-template-${today}.md`,
+    lines.join('\n'),
+    'text/markdown;charset=utf-8',
+  )
+  setStatus('已导出 DingTalk 联调结果模板')
+}
+
+function exportGovernanceExecutionPackageIndex(): void {
+  const today = formatDateInput(new Date())
+  const dailySummaryFile = `dingtalk-governance-daily-summary-${today}.md`
+  const checklistFile = `dingtalk-governance-live-validation-checklist-${today}.md`
+  const resultTemplateFile = `dingtalk-governance-validation-result-template-${today}.md`
+  const lines = [
+    '# DingTalk 治理联调执行包索引',
+    '',
+    `日期：${today}`,
+    '',
+    '## 推荐执行顺序',
+    '1. 导出治理日报摘要',
+    `   - 文件：${dailySummaryFile}`,
+    '2. 导出联调检查单',
+    `   - 文件：${checklistFile}`,
+    '3. 执行真实联调',
+    `   - 缺 OpenID 成员入口：${buildMissingOpenIdUserManagementLocation()}`,
+    `   - 目录同步修复入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
+    `   - 最近 7 天收口审计：${buildRecentDingTalkGovernanceAuditLocation()}`,
+    '4. 导出联调结果模板',
+    `   - 文件：${resultTemplateFile}`,
+    '5. 回填并归档结果',
+    '   - 建议归档日报、检查单、结果模板和异常截图 / 日志位置。',
+    '',
+    '## 当前基线',
+    `- 缺 OpenID：${governanceSummary.value.dingtalkOpenIdMissing}`,
+    `- 待收口：${governanceSummary.value.dingtalkOpenIdPending}`,
+    `- 已收口：${governanceSummary.value.dingtalkOpenIdGoverned}`,
+    `- 目录已链接：${governanceSummary.value.directoryLinked}`,
+    '',
+    '## 导出文件清单',
+    `- ${dailySummaryFile}`,
+    `- ${checklistFile}`,
+    `- ${resultTemplateFile}`,
+    '',
+    '## 工作台入口',
+    ...governanceWorkbenchCards.value.map((card) => `- ${card.title}：${card.to}`),
+    '',
+    '## 当前建议',
+    ...governanceWorkbenchCards.value.map((card) => `- ${card.title}：${card.note}`),
+  ]
+  downloadText(
+    `dingtalk-governance-execution-package-index-${today}.md`,
+    lines.join('\n'),
+    'text/markdown;charset=utf-8',
+  )
+  setStatus('已导出 DingTalk 联调执行包索引')
+}
+
+function exportGovernanceFullValidationPackage(): void {
+  const today = formatDateInput(new Date())
+  const lines = [
+    '# DingTalk 治理完整联调包',
+    '',
+    `日期：${today}`,
+    '',
+    '## 包内目录',
+    '- 治理日报摘要',
+    '- 联调检查单',
+    '- 联调结果回填模板',
+    '- 工作台入口与当前建议',
+    '',
+    '## 当前基线',
+    `- 缺 OpenID：${governanceSummary.value.dingtalkOpenIdMissing}`,
+    `- 待收口：${governanceSummary.value.dingtalkOpenIdPending}`,
+    `- 已收口：${governanceSummary.value.dingtalkOpenIdGoverned}`,
+    `- 目录已链接：${governanceSummary.value.directoryLinked}`,
+    '',
+    '## 推荐执行顺序',
+    '1. 先看治理日报摘要，确认当天缺 OpenID、待收口、已收口数量。',
+    '2. 按联调检查单执行缺 OpenID 清单、目录同步修复、批量关闭和审计复盘。',
+    '3. 用真实钉钉账号验证已修复成员和未修复成员的登录结果。',
+    '4. 在结果回填模板中记录执行结论、异常和下一步负责人。',
+    '5. 归档本完整包以及必要的日志或截图位置。',
+    '',
+    '## 治理日报摘要',
+    `- 缺 OpenID：${governanceSummary.value.dingtalkOpenIdMissing}`,
+    `- 待收口：${governanceSummary.value.dingtalkOpenIdPending}`,
+    `- 已收口：${governanceSummary.value.dingtalkOpenIdGoverned}`,
+    `- 目录已链接：${governanceSummary.value.directoryLinked}`,
+    '',
+    '## 联调检查单',
+    '- [ ] 缺 OpenID 成员清单与预期一致',
+    `  - 入口：${buildMissingOpenIdUserManagementLocation()}`,
+    '- [ ] 目录同步页可用于补齐 openId 或确认仍缺失原因',
+    `  - 入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
+    '- [ ] 批量关闭缺 OpenID 钉钉扫码后，待收口和已收口统计变化正确',
+    '- [ ] 最近 7 天收口审计可看到动作、处理时间和处理人',
+    `  - 入口：${buildRecentDingTalkGovernanceAuditLocation()}`,
+    '- [ ] 真实钉钉账号验证通过',
+    '  - 已修复成员：',
+    '  - 未修复成员：',
+    '',
+    '## 联调结果回填模板',
+    '- 环境：142 / staging / other',
+    '- 执行人：',
+    '- 协同人：',
+    '- 执行时间：',
+    '- 实际结果：',
+    '- 异常记录：',
+    '- 是否可继续放量：',
+    '- 是否需要继续修复：',
+    '- 下一步负责人：',
+    '',
+    '## 工作台入口',
+    ...governanceWorkbenchCards.value.map((card) => `- ${card.title}：${card.to}`),
+    '',
+    '## 当前建议',
+    ...governanceWorkbenchCards.value.map((card) => `- ${card.title}：${card.note}`),
+  ]
+  downloadText(
+    `dingtalk-governance-full-validation-package-${today}.md`,
+    lines.join('\n'),
+    'text/markdown;charset=utf-8',
+  )
+  setStatus('已导出 DingTalk 完整联调包')
+}
+
+function buildDingTalkGovernanceAuditLocation(): string {
+  const params = new URLSearchParams({
+    resourceType: 'user-auth-grant',
+    action: 'revoke',
+  })
+  return `/admin/audit?${params.toString()}`
+}
+
+function buildMissingOpenIdUserManagementLocation(): string {
+  const params = new URLSearchParams({
+    filter: 'dingtalk-openid-missing',
+    source: 'dingtalk-governance',
+  })
+  return `/admin/users?${params.toString()}`
+}
+
+function buildDirectoryMissingOpenIdWorkbenchLocation(): string {
+  const params = new URLSearchParams({
+    source: 'dingtalk-governance',
+  })
+  return `/admin/directory?${params.toString()}`
+}
+
+function formatDateInput(date: Date): string {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function buildRecentDingTalkGovernanceAuditLocation(): string {
+  const end = new Date()
+  const start = new Date(end)
+  start.setDate(start.getDate() - 6)
+  const params = new URLSearchParams({
+    resourceType: 'user-auth-grant',
+    action: 'revoke',
+    from: `${formatDateInput(start)}T00:00:00.000Z`,
+    to: `${formatDateInput(end)}T23:59:59.999Z`,
+  })
+  return `/admin/audit?${params.toString()}`
+}
+
+watch(userListFilter, (nextFilter) => {
+  if (userNavigation.value.filter === nextFilter) return
+  const nextNavigation: InitialUserNavigation = {
+    ...userNavigation.value,
+    filter: nextFilter,
+  }
+  userNavigation.value = nextNavigation
+  replaceUserNavigation(nextNavigation)
+})
+
 const namespaceOptions = computed(() => {
   const namespaces: string[] = []
   const append = (namespace: string): void => {
@@ -885,20 +1412,45 @@ const namespaceOptions = computed(() => {
   return namespaces
 })
 const userNavigation = ref(readInitialUserNavigation())
+const hasDirectorySyncNavigation = computed(() => userNavigation.value.source === 'directory-sync')
+const directoryReturnLocation = computed(() => buildDirectoryReturnLocation(userNavigation.value))
+const directoryNavigationTargetLabel = computed(() => {
+  const integrationId = userNavigation.value.integrationId.trim()
+  const accountId = userNavigation.value.accountId.trim()
+  if (!integrationId && !accountId) return ''
+  return `目标集成：${integrationId || '未指定'} · 目标成员：${accountId || '未指定'}`
+})
+const directoryNavigationNotice = computed(() => {
+  if (!hasDirectorySyncNavigation.value) return ''
+  const failureMessage = readDirectoryFailureMessage(userNavigation.value.directoryFailure)
+  if (failureMessage) {
+    return `从目录同步返回用户管理，但定位未完成：${failureMessage}。请确认目录集成或成员是否仍存在。`
+  }
+  return '已从目录同步返回用户管理，可继续查看用户授权、钉钉身份和 openId 治理状态。'
+})
 
 function setStatus(message: string, tone: 'info' | 'error' = 'info'): void {
   status.value = message
   statusTone.value = tone
 }
 
+function normalizeUserListFilter(value: string | null | undefined): UserListFilter {
+  const candidate = String(value || '').trim()
+  return USER_LIST_FILTER_VALUES.includes(candidate as UserListFilter) ? candidate as UserListFilter : 'all'
+}
+
 function readInitialUserNavigation(): InitialUserNavigation {
   if (typeof window === 'undefined') {
-    return { userId: '', source: '' }
+    return { userId: '', source: '', filter: 'all', integrationId: '', accountId: '', directoryFailure: '' }
   }
   const params = new URL(window.location.href).searchParams
   return {
     userId: params.get('userId')?.trim() || '',
     source: params.get('source')?.trim() || '',
+    filter: normalizeUserListFilter(params.get('filter')),
+    integrationId: params.get('integrationId')?.trim() || '',
+    accountId: params.get('accountId')?.trim() || '',
+    directoryFailure: params.get('directoryFailure')?.trim() || '',
   }
 }
 
@@ -906,6 +1458,10 @@ function buildUserNavigationKey(navigation: InitialUserNavigation): string {
   return [
     navigation.userId.trim(),
     navigation.source.trim(),
+    navigation.filter,
+    navigation.integrationId.trim(),
+    navigation.accountId.trim(),
+    navigation.directoryFailure.trim(),
   ].join('|')
 }
 
@@ -915,8 +1471,29 @@ function buildUserLocation(navigation: InitialUserNavigation): string {
   const params = new URLSearchParams()
   if (navigation.userId.trim().length > 0) params.set('userId', navigation.userId.trim())
   if (navigation.source.trim().length > 0) params.set('source', navigation.source.trim())
+  if (navigation.directoryFailure.trim().length > 0) params.set('directoryFailure', navigation.directoryFailure.trim())
+  if (navigation.integrationId.trim().length > 0) params.set('integrationId', navigation.integrationId.trim())
+  if (navigation.accountId.trim().length > 0) params.set('accountId', navigation.accountId.trim())
+  if (navigation.filter !== 'all') params.set('filter', navigation.filter)
   const search = params.toString()
   return `${url.pathname}${search ? `?${search}` : ''}${url.hash}`
+}
+
+function buildDirectoryReturnLocation(navigation: InitialUserNavigation): string {
+  if (navigation.source !== 'directory-sync') return ''
+  const params = new URLSearchParams()
+  if (navigation.integrationId.trim().length > 0) params.set('integrationId', navigation.integrationId.trim())
+  if (navigation.accountId.trim().length > 0) params.set('accountId', navigation.accountId.trim())
+  params.set('source', 'user-management')
+  if (navigation.userId.trim().length > 0) params.set('userId', navigation.userId.trim())
+  return `/admin/directory?${params.toString()}`
+}
+
+function readDirectoryFailureMessage(value: string): string {
+  if (value === 'missing_integration') return '未找到目标目录集成'
+  if (value === 'missing_account') return '未找到目标目录成员'
+  if (value.trim().length > 0) return value.trim()
+  return ''
 }
 
 function replaceUserNavigation(navigation: InitialUserNavigation): void {
@@ -929,6 +1506,7 @@ function syncUserNavigationFromLocation(): boolean {
   const currentKey = buildUserNavigationKey(userNavigation.value)
   const nextKey = buildUserNavigationKey(next)
   userNavigation.value = next
+  userListFilter.value = next.filter
   return currentKey !== nextKey
 }
 
@@ -999,6 +1577,39 @@ function readDingTalkServerStatus(accessValue: DingTalkAccess | null): string {
     return '服务端钉钉登录暂不可用'
   }
   return '服务端钉钉登录可用'
+}
+
+function canEnableDingTalkGrant(accessValue: DingTalkAccess | null): boolean {
+  if (!accessValue) return false
+  if (!accessValue.identity.exists) return true
+  if (!accessValue.server?.corpId) return true
+  return accessValue.identity.hasOpenId
+}
+
+function shouldWarnMissingDingTalkOpenId(accessValue: DingTalkAccess | null): boolean {
+  if (!accessValue?.identity.exists) return false
+  if (!accessValue.server?.corpId) return false
+  return !accessValue.identity.hasOpenId
+}
+
+function readPrimaryDingTalkDirectoryMembership(admissionValue: MemberAdmission | null): MemberDirectoryMembership | null {
+  const membership = admissionValue?.directoryMemberships.find((item) => item.provider === 'dingtalk')
+  return membership ?? null
+}
+
+function formatDirectorySyncAt(admissionValue: MemberAdmission | null): string {
+  const membership = readPrimaryDingTalkDirectoryMembership(admissionValue)
+  return formatDate(membership?.accountUpdatedAt)
+}
+
+function buildDirectoryManagementLocation(userId: string, membership: Pick<MemberDirectoryMembership, 'integrationId' | 'directoryAccountId'>): string {
+  const params = new URLSearchParams({
+    integrationId: membership.integrationId,
+    accountId: membership.directoryAccountId,
+    source: 'user-management',
+    userId,
+  })
+  return `/admin/directory?${params.toString()}`
 }
 
 function normalizeNamespaceAdmissions(value: unknown): NamespaceAdmission[] {
@@ -1073,7 +1684,15 @@ async function loadUsers(): Promise<void> {
           platformAdminEnabled: item.platformAdminEnabled ?? (item.role === 'admin' || item.is_admin),
           attendanceAdminEnabled: item.attendanceAdminEnabled ?? false,
           dingtalkLoginEnabled: item.dingtalkLoginEnabled ?? false,
+          dingtalkGrantUpdatedAt: item.dingtalkGrantUpdatedAt ?? null,
+          dingtalkGrantUpdatedBy: item.dingtalkGrantUpdatedBy ?? null,
           directoryLinked: item.directoryLinked ?? false,
+          dingtalkIdentityExists: item.dingtalkIdentityExists ?? false,
+          dingtalkHasUnionId: item.dingtalkHasUnionId ?? false,
+          dingtalkHasOpenId: item.dingtalkHasOpenId ?? false,
+          dingtalkOpenIdMissing: item.dingtalkOpenIdMissing ?? false,
+          dingtalkCorpId: item.dingtalkCorpId ?? null,
+          lastDirectorySyncAt: item.lastDirectorySyncAt ?? null,
           businessRoleCount: item.businessRoleCount ?? 0,
         }))
       : []
@@ -1351,6 +1970,10 @@ async function updateNamespaceAdmission(admission: NamespaceAdmission, enabled: 
 
 async function updateDingTalkGrant(enabled: boolean): Promise<void> {
   if (!access.value) return
+  if (enabled && !canEnableDingTalkGrant(dingtalkAccess.value)) {
+    setStatus('当前钉钉身份缺少 openId，暂不能开通钉钉扫码；请重新同步目录或让用户完成一次钉钉 OAuth 绑定。', 'error')
+    return
+  }
   busy.value = true
   try {
     const response = await apiFetch(`/api/admin/users/${encodeURIComponent(access.value.user.id)}/dingtalk-grant`, {
@@ -1405,6 +2028,42 @@ async function bulkUpdateDingTalkGrants(enabled: boolean): Promise<void> {
     setStatus(enabled ? `已批量开通 ${userIds.length} 个用户的钉钉扫码` : `已批量关闭 ${userIds.length} 个用户的钉钉扫码`)
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '批量更新钉钉扫码失败', 'error')
+  } finally {
+    bulkBusy.value = false
+  }
+}
+
+async function bulkDisableMissingOpenIdDingTalkGrants(): Promise<void> {
+  const userIds = screeningUsersMissingOpenIdWithGrant.value.map((user) => user.id)
+  if (userIds.length === 0) {
+    setStatus('当前筛选结果中没有已开通钉钉扫码的缺 OpenID 用户', 'error')
+    return
+  }
+
+  bulkBusy.value = true
+  try {
+    const response = await apiFetch('/api/admin/users/dingtalk-grants/bulk', {
+      method: 'POST',
+      body: JSON.stringify({
+        userIds,
+        enabled: false,
+      }),
+    })
+    const payload = await readJson(response)
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '批量关闭缺 OpenID 钉钉扫码失败'))
+    }
+
+    await loadUsers()
+    if (selectedUserId.value && userIds.includes(selectedUserId.value)) {
+      await Promise.all([
+        loadDingTalkAccess(selectedUserId.value),
+        loadMemberAdmission(selectedUserId.value),
+      ])
+    }
+    setStatus(`已批量关闭 ${userIds.length} 个缺 OpenID 用户的钉钉扫码`)
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '批量关闭缺 OpenID 钉钉扫码失败', 'error')
   } finally {
     bulkBusy.value = false
   }
@@ -1958,6 +2617,10 @@ onUnmounted(() => {
   gap: 12px;
 }
 
+.user-admin__section-head--workbench {
+  margin-top: 4px;
+}
+
 .user-admin__panel--detail {
   gap: 16px;
 }
@@ -1968,6 +2631,12 @@ onUnmounted(() => {
   gap: 8px;
 }
 
+.user-admin__workbench {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
 .user-admin__metric {
   display: grid;
   gap: 4px;
@@ -1975,6 +2644,55 @@ onUnmounted(() => {
   border: 1px solid #e5e7eb;
   border-radius: 10px;
   background: #f8fafc;
+}
+
+.user-admin__metric-link {
+  color: inherit;
+  text-decoration: none;
+  transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+
+.user-admin__metric-link:hover {
+  border-color: #93c5fd;
+  background: #eff6ff;
+}
+
+.user-admin__workbench-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid #dbeafe;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #f8fbff, #eff6ff);
+  color: inherit;
+  text-decoration: none;
+  transition: border-color 0.2s ease, transform 0.2s ease;
+}
+
+.user-admin__workbench-card:hover {
+  border-color: #60a5fa;
+  transform: translateY(-1px);
+}
+
+.user-admin__workbench-card strong {
+  color: #111827;
+}
+
+.user-admin__workbench-card small,
+.user-admin__workbench-kicker {
+  color: #6b7280;
+}
+
+.user-admin__workbench-note {
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.user-admin__workbench-kicker {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
 }
 
 .user-admin__metric strong {
@@ -2203,7 +2921,9 @@ onUnmounted(() => {
     grid-template-columns: 1fr;
   }
 
-  .user-admin__create-grid {
+  .user-admin__create-grid,
+  .user-admin__summary,
+  .user-admin__workbench {
     grid-template-columns: 1fr;
   }
 

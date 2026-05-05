@@ -55,6 +55,31 @@
       {{ status }}
     </p>
 
+    <section class="admin-audit__scenes">
+      <article
+        v-for="scene in auditScenes"
+        :key="scene.key"
+        class="admin-audit__scene-card"
+        :class="{ 'admin-audit__scene-card--active': activeSceneKey === scene.key }"
+      >
+        <div class="admin-audit__scene-copy">
+          <span class="admin-audit__scene-kicker">{{ scene.kicker }}</span>
+          <h2>{{ scene.title }}</h2>
+          <p>{{ scene.description }}</p>
+        </div>
+        <div class="admin-audit__scene-actions">
+          <button
+            class="admin-audit__button"
+            type="button"
+            :disabled="activityLoading || activeSceneKey === scene.key"
+            @click="void applyAuditScene(scene.key)"
+          >
+            {{ activeSceneKey === scene.key ? '当前场景已应用' : scene.cta }}
+          </button>
+        </div>
+      </article>
+    </section>
+
     <section class="admin-audit__summary">
       <article class="admin-audit__summary-card">
         <span class="admin-audit__summary-label">审计日志总数</span>
@@ -158,8 +183,11 @@ type AdminAuditLogItem = {
   latency_ms: number | null
 }
 
+type AuditSceneKey = 'dingtalk-governance' | 'dingtalk-governance-recent'
+
 const resourceTypeOptions = [
   { value: 'user', label: '用户' },
+  { value: 'user-auth-grant', label: '钉钉登录授权' },
   { value: 'user-role', label: '用户角色' },
   { value: 'user-invite', label: '用户邀请' },
   { value: 'permission', label: '直接权限' },
@@ -185,6 +213,45 @@ const activityTotal = ref(0)
 const pageSize = 20
 
 const activityTotalPages = computed(() => Math.max(1, Math.ceil(activityTotal.value / pageSize)))
+const auditScenes = [
+  {
+    key: 'dingtalk-governance',
+    kicker: '治理场景',
+    title: '钉钉治理动作',
+    description: '一键切到钉钉登录授权撤销审计，适合排查缺 OpenID 收口、批量关闭钉钉扫码和后续责任追踪。',
+    cta: '打开钉钉治理审计',
+  },
+  {
+    key: 'dingtalk-governance-recent',
+    kicker: '巡检场景',
+    title: '最近 7 天收口结果',
+    description: '聚焦最近 7 天的钉钉登录授权撤销记录，适合日常巡检最近关闭钉钉扫码的治理结果。',
+    cta: '查看最近 7 天收口',
+  },
+] as const satisfies ReadonlyArray<{
+  key: AuditSceneKey
+  kicker: string
+  title: string
+  description: string
+  cta: string
+}>
+
+const activeSceneKey = computed<AuditSceneKey | ''>(() => {
+  if (
+    resourceTypeFilter.value !== 'user-auth-grant'
+    || actionFilter.value !== 'revoke'
+    || actorIdInput.value
+    || resourceIdInput.value
+  ) {
+    return ''
+  }
+  if (!fromDate.value && !toDate.value) return 'dingtalk-governance'
+  const recentRange = buildRecentDayRange(7)
+  if (fromDate.value === recentRange.fromDate && toDate.value === recentRange.toDate) {
+    return 'dingtalk-governance-recent'
+  }
+  return ''
+})
 
 const activeFilterSummary = computed(() => {
   const parts: string[] = []
@@ -200,6 +267,44 @@ const activeFilterSummary = computed(() => {
 function setStatus(message: string, tone: 'info' | 'error' = 'info'): void {
   status.value = message
   statusTone.value = tone
+}
+
+function applyFiltersFromLocation(): void {
+  if (typeof window === 'undefined') return
+  const params = new URL(window.location.href).searchParams
+  resourceIdInput.value = params.get('resourceId')?.trim() || ''
+  actorIdInput.value = params.get('actorId')?.trim() || ''
+  resourceTypeFilter.value = params.get('resourceType')?.trim() || ''
+  actionFilter.value = params.get('action')?.trim() || ''
+  const from = params.get('from')?.trim() || ''
+  const to = params.get('to')?.trim() || ''
+  fromDate.value = from ? from.slice(0, 10) : ''
+  toDate.value = to ? to.slice(0, 10) : ''
+}
+
+function formatDateInput(date: Date): string {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function buildRecentDayRange(days: number): { fromDate: string; toDate: string } {
+  const end = new Date()
+  const start = new Date(end)
+  start.setDate(start.getDate() - Math.max(0, days - 1))
+  return {
+    fromDate: formatDateInput(start),
+    toDate: formatDateInput(end),
+  }
+}
+
+function syncFiltersToLocation(): void {
+  if (typeof window === 'undefined') return
+  const params = buildQueryParams()
+  const path = window.location.pathname || '/admin/audit'
+  const url = params.toString() ? `${path}?${params.toString()}` : path
+  window.history.replaceState({}, '', url)
 }
 
 async function readJson(response: Response): Promise<Record<string, unknown>> {
@@ -292,11 +397,28 @@ function buildQueryParams(extra: Record<string, string> = {}): URLSearchParams {
   return params
 }
 
+async function applyAuditScene(scene: AuditSceneKey): Promise<void> {
+  actorIdInput.value = ''
+  resourceIdInput.value = ''
+  resourceTypeFilter.value = 'user-auth-grant'
+  actionFilter.value = 'revoke'
+  if (scene === 'dingtalk-governance-recent') {
+    const recentRange = buildRecentDayRange(7)
+    fromDate.value = recentRange.fromDate
+    toDate.value = recentRange.toDate
+  } else {
+    fromDate.value = ''
+    toDate.value = ''
+  }
+  await loadActivityLogs(1)
+}
+
 async function loadActivityLogs(page = 1): Promise<void> {
   activityLoading.value = true
   setStatus('')
   try {
     const params = buildQueryParams({ page: String(page), pageSize: String(pageSize) })
+    syncFiltersToLocation()
     const response = await apiFetch(`/api/audit-logs?${params.toString()}`)
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
@@ -354,6 +476,7 @@ async function exportActivityCsv(): Promise<void> {
 }
 
 onMounted(() => {
+  applyFiltersFromLocation()
   void loadActivityLogs(1)
 })
 </script>
@@ -367,6 +490,7 @@ onMounted(() => {
 }
 
 .admin-audit__header,
+.admin-audit__scenes,
 .admin-audit__summary,
 .admin-audit__panel {
   background: #fff;
@@ -419,6 +543,46 @@ onMounted(() => {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+}
+
+.admin-audit__scene-card {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+}
+
+.admin-audit__scene-card--active {
+  padding: 12px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #eff6ff, #f8fafc);
+}
+
+.admin-audit__scene-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.admin-audit__scene-copy h2,
+.admin-audit__scene-copy p {
+  margin: 0;
+}
+
+.admin-audit__scene-copy p,
+.admin-audit__scene-kicker {
+  color: #6b7280;
+}
+
+.admin-audit__scene-kicker {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.admin-audit__scene-actions {
+  display: flex;
+  align-items: center;
 }
 
 .admin-audit__summary-card {
@@ -508,6 +672,7 @@ onMounted(() => {
 
 @media (max-width: 1100px) {
   .admin-audit__header,
+  .admin-audit__scene-card,
   .admin-audit__panel-head,
   .admin-audit__pagination {
     flex-direction: column;

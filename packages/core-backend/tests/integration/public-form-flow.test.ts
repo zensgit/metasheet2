@@ -474,6 +474,11 @@ describe('Public form flow', () => {
       .expect(200)
 
     expect(patchResponse.body.data.allowedUserIds).toEqual(['user_2'])
+    expect(patchResponse.body.data.allowedUsers[0]).toMatchObject({
+      dingtalkBound: true,
+      dingtalkGrantEnabled: false,
+      dingtalkPersonDeliveryAvailable: true,
+    })
     expect(patchResponse.body.data.allowedMemberGroupIds).toEqual(['group_2'])
     expect(storedConfig.publicForm.allowedUserIds).toEqual(['user_2'])
     expect(storedConfig.publicForm.allowedMemberGroupIds).toEqual(['group_2'])
