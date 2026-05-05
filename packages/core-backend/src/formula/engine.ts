@@ -29,7 +29,18 @@ export interface FormulaContext {
 
 // AST Node Types
 export interface ASTNode {
-  type: 'number' | 'boolean' | 'null' | 'array' | 'string' | 'cell' | 'range' | 'error' | 'function' | 'operator'
+  type:
+    | 'number'
+    | 'boolean'
+    | 'null'
+    | 'array'
+    | 'string'
+    | 'cell'
+    | 'range'
+    | 'error'
+    | 'function'
+    | 'operator'
+    | 'unary'
 }
 
 export interface NumberNode extends ASTNode {
@@ -87,6 +98,12 @@ export interface OperatorNode extends ASTNode {
   right: ASTNodeUnion
 }
 
+export interface UnaryNode extends ASTNode {
+  type: 'unary'
+  operator: '+' | '-'
+  operand: ASTNodeUnion
+}
+
 export type ASTNodeUnion =
   | NumberNode
   | BooleanNode
@@ -98,6 +115,7 @@ export type ASTNodeUnion =
   | ErrorNode
   | FunctionNode
   | OperatorNode
+  | UnaryNode
 
 // Function type for spreadsheet functions
 type SpreadsheetFunction = (...args: unknown[]) => unknown
@@ -302,6 +320,11 @@ export class FormulaEngine {
       }
     }
 
+    const unaryExpression = this.parseUnaryExpression(formula)
+    if (unaryExpression) {
+      return unaryExpression
+    }
+
     // Check if it's a boolean
     if (formula.toUpperCase() === 'TRUE') return { type: 'boolean', value: true }
     if (formula.toUpperCase() === 'FALSE') return { type: 'boolean', value: false }
@@ -401,6 +424,24 @@ export class FormulaEngine {
       return exponentIsAdjacent && (/\d/.test(mantissaTail) || mantissaTail === '.')
     }
     return ['+', '-', '*', '/', '=', '>', '<', '(', '[', ','].includes(previous)
+  }
+
+  private parseUnaryExpression(formula: string): UnaryNode | null {
+    const firstTokenIndex = formula.search(/\S/)
+    if (firstTokenIndex < 0) return null
+
+    const operator = formula[firstTokenIndex]
+    if (operator !== '+' && operator !== '-') return null
+    if (!this.isUnarySign(formula, firstTokenIndex)) return null
+
+    const operand = formula.slice(firstTokenIndex + 1).trim()
+    if (operand.length === 0) return null
+
+    return {
+      type: 'unary',
+      operator,
+      operand: this.parseFormula(operand),
+    }
   }
 
   private isWrappedExpression(formula: string): boolean {
@@ -513,6 +554,12 @@ export class FormulaEngine {
         const left = await this.evaluateAST(node.left, context)
         const right = await this.evaluateAST(node.right, context)
         return this.evaluateOperator(node.operator, left, right)
+      }
+
+      case 'unary': {
+        const value = await this.evaluateAST(node.operand, context)
+        const numericValue = Number(value)
+        return node.operator === '-' ? -numericValue : numericValue
       }
 
       default:

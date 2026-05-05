@@ -208,6 +208,24 @@ describe('MultitableFormulaEngine', () => {
       expect(result).toBe(60)
     })
 
+    it('evaluates unary signs for grouped field reference expressions', async () => {
+      const result = await mtEngine.evaluateField(
+        '=-({fld_price}+{fld_fee})*{fld_qty}',
+        { fld_price: 10, fld_fee: 2, fld_qty: 5 },
+        sampleFields,
+      )
+      expect(result).toBe(-60)
+    })
+
+    it('evaluates unary signs for function results', async () => {
+      const result = await mtEngine.evaluateField(
+        '=-SUM({fld_price},{fld_fee})',
+        { fld_price: 10, fld_fee: 2 },
+        sampleFields,
+      )
+      expect(result).toBe(-12)
+    })
+
     it('handles string field references', async () => {
       const result = await mtEngine.evaluateField(
         '=CONCAT({fld_name}," total")',
