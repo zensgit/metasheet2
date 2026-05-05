@@ -65,6 +65,47 @@ test('buildEvidenceReport rejects unredacted secret-like evidence fields', () =>
   )
 })
 
+test('buildEvidenceReport requires material dry-run runId when dry-run passed', () => {
+  const evidence = sampleEvidence()
+  delete evidence.materialDryRun.runId
+  const report = buildEvidenceReport(packet(), evidence)
+  assert.equal(report.decision, 'FAIL')
+  assert.equal(report.issues.some((issue) => issue.code === 'MATERIAL_DRY_RUN_ID_REQUIRED'), true)
+})
+
+test('buildEvidenceReport requires material dry-run preview count to stay within PoC sample limit', () => {
+  for (const rowsPreviewed of [0, 4, '4', 'many', NaN, Infinity]) {
+    const evidence = sampleEvidence()
+    evidence.materialDryRun.rowsPreviewed = rowsPreviewed
+    const report = buildEvidenceReport(packet(), evidence)
+    assert.equal(report.decision, 'FAIL', `rowsPreviewed=${String(rowsPreviewed)} should fail`)
+    assert.equal(
+      report.issues.some((issue) => issue.code === 'MATERIAL_DRY_RUN_ROW_COUNT'),
+      true,
+      `rowsPreviewed=${String(rowsPreviewed)} should raise MATERIAL_DRY_RUN_ROW_COUNT`,
+    )
+  }
+})
+
+test('buildEvidenceReport accepts material dry-run numeric-string preview count', () => {
+  const evidence = sampleEvidence()
+  evidence.materialDryRun.runId = 123456
+  evidence.materialDryRun.rowsPreviewed = '3'
+  const report = buildEvidenceReport(packet(), evidence)
+  assert.equal(report.decision, 'PASS')
+})
+
+test('buildEvidenceReport skips material dry-run row checks when dry-run did not pass', () => {
+  const evidence = sampleEvidence()
+  evidence.materialDryRun.status = 'blocked'
+  delete evidence.materialDryRun.runId
+  evidence.materialDryRun.rowsPreviewed = 99
+  const report = buildEvidenceReport(packet(), evidence)
+  assert.equal(report.decision, 'PARTIAL')
+  assert.equal(report.issues.some((issue) => issue.code === 'MATERIAL_DRY_RUN_ID_REQUIRED'), false)
+  assert.equal(report.issues.some((issue) => issue.code === 'MATERIAL_DRY_RUN_ROW_COUNT'), false)
+})
+
 // ----- migration of bool-coercion sweep from preflight (#1168 / #1169) -----
 
 test('buildEvidenceReport returns FAIL when materialSaveOnly autoSubmit is the string "true"', () => {

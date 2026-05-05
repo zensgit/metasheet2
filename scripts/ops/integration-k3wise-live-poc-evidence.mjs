@@ -184,6 +184,20 @@ function addIssue(issues, severity, code, message, phaseId = null) {
   issues.push({ severity, code, message, phaseId })
 }
 
+function evaluateMaterialDryRun(evidence, issues) {
+  const dryRun = asObject(evidence.materialDryRun, 'evidence.materialDryRun')
+  const status = normalizeStatus(dryRun.status)
+  if (status !== 'pass') return
+
+  if (!text(dryRun.runId)) {
+    addIssue(issues, 'fail', 'MATERIAL_DRY_RUN_ID_REQUIRED', 'material dry-run evidence must include runId', 'materialDryRun')
+  }
+  const rowsPreviewed = Number(dryRun.rowsPreviewed)
+  if (!Number.isInteger(rowsPreviewed) || rowsPreviewed < 1 || rowsPreviewed > 3) {
+    addIssue(issues, 'fail', 'MATERIAL_DRY_RUN_ROW_COUNT', 'material dry-run must preview between 1 and 3 rows', 'materialDryRun')
+  }
+}
+
 function evaluatePhases(packet, evidence) {
   const connections = asObject(evidence.connections, 'evidence.connections')
   const bomRequired = hasBomPipeline(packet)
@@ -263,6 +277,7 @@ function buildEvidenceReport(packet, evidence, { generatedAt = new Date().toISOS
 
   const issues = []
   const phases = evaluatePhases(packet, evidence)
+  evaluateMaterialDryRun(evidence, issues)
   evaluateMaterialSaveOnly(evidence, issues)
   evaluateBom(packet, evidence, issues)
 

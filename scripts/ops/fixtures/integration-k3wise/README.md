@@ -13,6 +13,7 @@ Fixtures and mock server for the K3 WISE Live PoC chain. Used to:
 | `evidence-sample.json` | Customer-side evidence template after live PoC. Customer fills in run IDs, K3 record IDs, statuses, etc. |
 | `mock-k3-webapi-server.mjs` | Minimal in-process HTTP mock for K3 WISE WebAPI: Login / Health / Material / BOM Save / Submit / Audit. NOT a full K3 simulator. |
 | `mock-sqlserver-executor.mjs` | Mock SQL executor: read-only on K3 core tables, writeable on integration middle tables, rejects writes to `t_ICItem` / `t_ICBOM`. |
+| `fixture-contract.test.mjs` | Contract test proving the copy-and-edit JSON templates still match the exported CLI samples and compile into PASS preflight/evidence results. |
 | `run-mock-poc-demo.mjs` | End-to-end smoke: loads gate sample → preflight → spins up mock K3 → adapter Save-only → SQL channel readonly probe → evidence compile → asserts PASS. |
 
 ## Local verification
@@ -20,6 +21,7 @@ Fixtures and mock server for the K3 WISE Live PoC chain. Used to:
 From repo root:
 
 ```bash
+node --test scripts/ops/fixtures/integration-k3wise/fixture-contract.test.mjs
 node scripts/ops/fixtures/integration-k3wise/run-mock-poc-demo.mjs
 ```
 
