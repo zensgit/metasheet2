@@ -59,6 +59,39 @@ describe('multitable formula editor', () => {
     })
   })
 
+  it('reports incomplete formula function arguments before save', () => {
+    const fields = [
+      { id: 'fld_price', name: 'Price', type: 'number' },
+      { id: 'fld_start', name: 'Start', type: 'date' },
+      { id: 'fld_end', name: 'End', type: 'date' },
+    ]
+
+    expect(validateFormulaExpression('=IF({fld_price} > 0, "ok")', fields)).toContainEqual({
+      severity: 'error',
+      message: 'IF expects at least 3 arguments.',
+    })
+    expect(validateFormulaExpression('=ROUND({fld_price}, 2, 3)', fields)).toContainEqual({
+      severity: 'error',
+      message: 'ROUND expects at most 2 arguments.',
+    })
+    expect(validateFormulaExpression('=ROUND(, 2)', fields)).toContainEqual({
+      severity: 'error',
+      message: 'ROUND has an empty argument.',
+    })
+    expect(validateFormulaExpression('=DATEDIF({fld_start}, {fld_end})', fields)).toContainEqual({
+      severity: 'error',
+      message: 'DATEDIF expects at least 3 arguments.',
+    })
+    expect(validateFormulaExpression('=TODAY(1)', fields)).toContainEqual({
+      severity: 'error',
+      message: 'TODAY expects at most 0 arguments.',
+    })
+
+    expect(validateFormulaExpression('=ROUND({fld_price}, 2)', fields).filter((diagnostic) =>
+      diagnostic.severity === 'error'
+    )).toEqual([])
+  })
+
   it('builds categorized function catalog sections and insertion text', () => {
     const mathSections = getFormulaFunctionCatalog('round', 'math')
     expect(mathSections).toHaveLength(1)
