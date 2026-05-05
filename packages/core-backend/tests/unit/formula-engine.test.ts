@@ -39,6 +39,11 @@ describe('Formula Engine', () => {
         expect(result).toBe(15)
       })
 
+      test('Function names should be case-insensitive', async () => {
+        expect(await engine.calculate('=sum(1, 2, 3)', context)).toBe(6)
+        expect(await engine.calculate('=CoUnT(1, 2, "", 4)', context)).toBe(3)
+      })
+
       test('SUM with nested arrays', async () => {
         const result = await engine.calculate('=SUM([[1, 2], [3, 4]])', context)
         expect(result).toBe(10)
@@ -91,6 +96,11 @@ describe('Formula Engine', () => {
       test('CONCATENATE function', async () => {
         const result = await engine.calculate('=CONCATENATE("Hello", " ", "World")', context)
         expect(result).toBe('Hello World')
+      })
+
+      test('Text function names should be case-insensitive', async () => {
+        expect(await engine.calculate('=concatenate("Hello", " ", "World")', context)).toBe('Hello World')
+        expect(await engine.calculate('=LoWeR("HELLO")', context)).toBe('hello')
       })
 
       test('LEFT function', async () => {
@@ -244,6 +254,49 @@ describe('Formula Engine', () => {
       expect(await engine.calculate('=6 / 3', context)).toBe(2)
     })
 
+    test('Addition coerces operands numerically instead of concatenating strings', async () => {
+      expect(await engine.calculate('="1" + 2', context)).toBe(3)
+      expect(await engine.calculate('=TRUE + 1', context)).toBe(2)
+      expect(await engine.calculate('=SUM(1, 2) + "4"', context)).toBe(7)
+    })
+
+    test('Text concatenation operator', async () => {
+      expect(await engine.calculate('="Hello" & " " & "World"', context)).toBe('Hello World')
+      expect(await engine.calculate('="Total: " & SUM(1, 2)', context)).toBe('Total: 3')
+      expect(await engine.calculate('=("A" & "B") = "AB"', context)).toBe(true)
+    })
+
+    test('Text concatenation has lower precedence than arithmetic', async () => {
+      expect(await engine.calculate('="Total: " & 1 + 2', context)).toBe('Total: 3')
+      expect(await engine.calculate('=1 + 2 & " items"', context)).toBe('3 items')
+    })
+
+    test('Power operator', async () => {
+      expect(await engine.calculate('=2 ^ 3', context)).toBe(8)
+      expect(await engine.calculate('=2^3^2', context)).toBe(512)
+      expect(await engine.calculate('=2 * 3^2', context)).toBe(18)
+      expect(await engine.calculate('=2^-3', context)).toBe(0.125)
+    })
+
+    test('Power operator binds tighter than unary signs', async () => {
+      expect(await engine.calculate('=-2^2', context)).toBe(-4)
+      expect(await engine.calculate('=(-2)^2', context)).toBe(4)
+      expect(await engine.calculate('=--2^2', context)).toBe(4)
+    })
+
+    test('Percent postfix operator', async () => {
+      expect(await engine.calculate('=50%', context)).toBe(0.5)
+      expect(await engine.calculate('=200 * 10%', context)).toBe(20)
+      expect(await engine.calculate('=1 + 10%', context)).toBe(1.1)
+      expect(await engine.calculate('=-50%', context)).toBe(-0.5)
+    })
+
+    test('Percent postfix works with power and preserves string literals', async () => {
+      expect(await engine.calculate('=2^3%', context)).toBeCloseTo(1.021012, 6)
+      expect(await engine.calculate('=(50%)^2', context)).toBe(0.25)
+      expect(await engine.calculate('="50%"', context)).toBe('50%')
+    })
+
     test('Same-precedence arithmetic operators are left-associative', async () => {
       expect(await engine.calculate('=5 - 3 - 1', context)).toBe(1)
       expect(await engine.calculate('=8 / 4 / 2', context)).toBe(1)
@@ -267,6 +320,29 @@ describe('Formula Engine', () => {
     test('Parenthesized comparison groups', async () => {
       expect(await engine.calculate('=(1 + 2) > 2', context)).toBe(true)
       expect(await engine.calculate('=(1 + 2) = (5 - 2)', context)).toBe(true)
+    })
+
+    test('Unary signs apply to grouped expressions', async () => {
+      expect(await engine.calculate('=-(1 + 2)', context)).toBe(-3)
+      expect(await engine.calculate('=+(1 + 2)', context)).toBe(3)
+      expect(await engine.calculate('=5 * -(1 + 2)', context)).toBe(-15)
+      expect(await engine.calculate('=--(1 + 2)', context)).toBe(3)
+    })
+
+    test('Unary signs apply to function results', async () => {
+      expect(await engine.calculate('=-SUM(1, 2)', context)).toBe(-3)
+      expect(await engine.calculate('=+SUM(1, 2)', context)).toBe(3)
+    })
+
+    test('Function calls participate in arithmetic expressions', async () => {
+      expect(await engine.calculate('=SUM(1, 2) + SUM(3, 4)', context)).toBe(10)
+      expect(await engine.calculate('=SUM(10, 5) / SUM(1, 2)', context)).toBe(5)
+      expect(await engine.calculate('=(SUM(1, 2) + 3) * 2', context)).toBe(12)
+    })
+
+    test('Function calls participate in comparison expressions', async () => {
+      expect(await engine.calculate('=SUM(1, 2) = SUM(3)', context)).toBe(true)
+      expect(await engine.calculate('=MAX(1, 5) > MIN(2, 3)', context)).toBe(true)
     })
 
     test('Division by zero', async () => {
@@ -297,6 +373,24 @@ describe('Formula Engine', () => {
 
       const result = await engine.calculate('=A1', context)
       expect(result).toBe(42)
+    })
+
+    test('Cell references should be case-insensitive', async () => {
+      const whereMock = vi.fn().mockReturnThis()
+      mockDb.selectFrom.mockReturnValue({
+        select: vi.fn().mockReturnThis(),
+        where: whereMock,
+        executeTakeFirst: vi.fn().mockResolvedValue({
+          value: '42',
+          data_type: 'number',
+          formula: null
+        })
+      })
+
+      const result = await engine.calculate('=aa1', context)
+
+      expect(result).toBe(42)
+      expect(whereMock).toHaveBeenCalledWith('column_index', '=', 26)
     })
 
     test('Cell reference with formula', async () => {
@@ -332,6 +426,26 @@ describe('Formula Engine', () => {
       })
 
       const result = await engine.calculate('=SUM(A1:A3)', context)
+      expect(result).toBe(6)
+    })
+
+    test('Range references should be case-insensitive', async () => {
+      const cellValues = [
+        { value: '1', data_type: 'number', formula: null },
+        { value: '2', data_type: 'number', formula: null },
+        { value: '3', data_type: 'number', formula: null }
+      ]
+
+      let callIndex = 0
+      mockDb.selectFrom.mockReturnValue({
+        select: vi.fn().mockReturnThis(),
+        where: vi.fn().mockReturnThis(),
+        executeTakeFirst: vi.fn().mockImplementation(() => {
+          return Promise.resolve(cellValues[callIndex++] || null)
+        })
+      })
+
+      const result = await engine.calculate('=sum(a1:a3)', context)
       expect(result).toBe(6)
     })
   })
