@@ -75,6 +75,7 @@ The view exposes stable test selectors for the customer GATE import path:
 - `data-testid="k3-wise-gate-import-textarea"`
 - `data-testid="k3-wise-gate-import-button"`
 - `data-testid="k3-wise-gate-import-warnings"`
+- `data-testid="k3-wise-gate-copy-button"`
 - `data-testid="k3-wise-status"`
 
 `apps/web/tests/k3WiseSetupView.spec.ts` mounts the real setup page, mocks the integration API bootstrap calls, pastes a customer-style GATE JSON payload, clicks the explicit import button, and verifies:
@@ -83,6 +84,13 @@ The view exposes stable test selectors for the customer GATE import path:
 - Chinese/numeric customer variants normalize in the rendered controls.
 - all visible password inputs are cleared after import.
 - ignored secret-like fields appear as warnings in the page.
+
+The same spec also covers the outbound copy path:
+
+- visible form fields can make the GATE draft ready.
+- the copy button writes the generated JSON to `navigator.clipboard`.
+- submitted K3/PLM password values are redacted as `<fill-outside-git>`.
+- the copied JSON preserves public usernames and scope fields.
 
 ## Boundary
 

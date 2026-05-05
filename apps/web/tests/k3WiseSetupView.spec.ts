@@ -51,6 +51,7 @@ describe('IntegrationK3WiseSetupView', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
   let K3WiseSetupView: Component
+  const originalClipboard = navigator.clipboard
 
   beforeEach(async () => {
     window.localStorage.clear()
@@ -64,6 +65,10 @@ describe('IntegrationK3WiseSetupView', () => {
     if (container) container.remove()
     app = null
     container = null
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: originalClipboard,
+    })
     vi.clearAllMocks()
   })
 
@@ -163,5 +168,52 @@ describe('IntegrationK3WiseSetupView', () => {
     expect(warnings).toContain('plm.credentials.token ignored')
     expect(warnings).toContain('sqlServer.credentials.password ignored')
     expect(container.querySelector('[data-testid="k3-wise-status"]')?.textContent).toContain('GATE JSON 已导入')
+  })
+
+  it('copies a redacted GATE JSON draft from visible form fields', async () => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: vi.fn().mockResolvedValue(undefined),
+      },
+    })
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+
+    app = createApp(K3WiseSetupView)
+    app.mount(container)
+    await flushUi()
+
+    setFieldValue(findField(container, 'Tenant ID'), 'tenant_1')
+    setFieldValue(findField(container, 'Workspace ID'), 'workspace_1')
+    setFieldValue(findField(container, 'K3 WISE 版本'), 'K3 WISE 15.1')
+    setFieldValue(findField(container, 'WebAPI Base URL'), 'https://k3.example.test/K3API/')
+    setFieldValue(findField(container, 'Acct ID'), 'AIS_TEST')
+    setFieldValue(findField(container, '用户名'), 'k3-user')
+    setFieldValue(findField(container, '密码'), 'real-k3-password')
+    setFieldValue(findField(container, 'PLM Base URL'), 'https://plm.example.test/')
+    setFieldValue(findField(container, 'PLM Default Product ID'), 'PRODUCT-001')
+    setFieldValue(findField(container, 'PLM 用户名'), 'plm-user')
+    setFieldValue(findField(container, 'PLM 密码'), 'real-plm-password')
+    setFieldValue(findField(container, 'Rollback Owner'), 'rollback-owner')
+    await flushUi()
+
+    const copyButton = container.querySelector('[data-testid="k3-wise-gate-copy-button"]') as HTMLButtonElement | null
+    expect(copyButton).not.toBeNull()
+    expect(copyButton?.disabled).toBe(false)
+
+    copyButton?.click()
+    await flushUi()
+
+    expect(navigator.clipboard?.writeText).toHaveBeenCalledTimes(1)
+    const copiedText = vi.mocked(navigator.clipboard!.writeText).mock.calls[0]?.[0] as string
+    expect(copiedText).toContain('"tenantId": "tenant_1"')
+    expect(copiedText).toContain('"password": "<fill-outside-git>"')
+    expect(copiedText).toContain('"username": "k3-user"')
+    expect(copiedText).toContain('"username": "plm-user"')
+    expect(copiedText).not.toContain('real-k3-password')
+    expect(copiedText).not.toContain('real-plm-password')
+    expect(container.querySelector('[data-testid="k3-wise-status"]')?.textContent).toContain('GATE JSON 已复制')
   })
 })

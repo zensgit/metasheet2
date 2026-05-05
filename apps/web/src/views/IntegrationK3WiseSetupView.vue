@@ -163,6 +163,7 @@
           <button
             class="k3-setup__btn k3-setup__btn--full"
             type="button"
+            data-testid="k3-wise-gate-copy-button"
             :disabled="gateIssues.length > 0 || !gateDraftText"
             @click="copyGateDraft"
           >
