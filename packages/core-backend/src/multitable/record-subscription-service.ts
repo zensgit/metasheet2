@@ -30,6 +30,15 @@ export interface RecordSubscriptionNotification {
   readAt: string | null
 }
 
+export interface NotifyRecordSubscribersInput {
+  sheetId: string
+  recordId: string
+  eventType: RecordSubscriptionEventType
+  actorId?: string | null
+  revisionId?: string | null
+  commentId?: string | null
+}
+
 export async function subscribeRecord(
   query: QueryFn,
   input: { sheetId: string; recordId: string; userId: string },
@@ -90,14 +99,7 @@ export async function getRecordSubscriptionStatus(
 
 export async function notifyRecordSubscribers(
   query: QueryFn,
-  input: {
-    sheetId: string
-    recordId: string
-    eventType: RecordSubscriptionEventType
-    actorId?: string | null
-    revisionId?: string | null
-    commentId?: string | null
-  },
+  input: NotifyRecordSubscribersInput,
 ): Promise<{ inserted: number; userIds: string[] }> {
   const subscriptions = await query(
     `SELECT user_id
@@ -169,16 +171,22 @@ export async function notifyRecordSubscribers(
   return { inserted: userIds.length, userIds }
 }
 
+export async function notifyRecordSubscribersBestEffort(
+  query: QueryFn,
+  input: NotifyRecordSubscribersInput,
+  context = 'record-subscription',
+): Promise<{ inserted: number; userIds: string[] } | null> {
+  try {
+    return await notifyRecordSubscribers(query, input)
+  } catch (error) {
+    console.warn(`[${context}] Failed to notify record subscribers`, error)
+    return null
+  }
+}
+
 export async function notifyRecordSubscribersWithKysely(
   db: Kysely<any>,
-  input: {
-    sheetId: string
-    recordId: string
-    eventType: RecordSubscriptionEventType
-    actorId?: string | null
-    revisionId?: string | null
-    commentId?: string | null
-  },
+  input: NotifyRecordSubscribersInput,
 ): Promise<{ inserted: number; userIds: string[] }> {
   const subscriptionRows = await sql<{ user_id: string }>`
     SELECT user_id

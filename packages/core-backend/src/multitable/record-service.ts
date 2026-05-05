@@ -28,7 +28,10 @@ import {
 import { isFieldAlwaysReadOnly, isFieldPermissionHidden } from './permission-derivation'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { recordRecordRevision } from './record-history-service'
-import { notifyRecordSubscribers } from './record-subscription-service'
+import {
+  notifyRecordSubscribersBestEffort,
+  type NotifyRecordSubscribersInput,
+} from './record-subscription-service'
 import { ensureRecordWriteAllowed, type AccessInfo, type SheetPermissionScope } from './sheet-capabilities'
 
 export type QueryFn = (
@@ -784,6 +787,7 @@ export class RecordService {
     }
 
     let nextVersion = 1
+    let pendingSubscriberNotification: NotifyRecordSubscribersInput | null = null
     await this.pool.transaction(async ({ query }) => {
       const currentRes = await query(
         'SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
@@ -829,13 +833,13 @@ export class RecordService {
           patch,
           snapshot: { ...previousData, ...patch },
         })
-        await notifyRecordSubscribers(query, {
+        pendingSubscriberNotification = {
           sheetId,
           recordId,
           eventType: 'record.updated',
           actorId: patchActorId,
           revisionId,
-        })
+        }
       } else {
         nextVersion = serverVersion
       }
@@ -870,6 +874,14 @@ export class RecordService {
         }
       }
     })
+
+    if (pendingSubscriberNotification) {
+      await notifyRecordSubscribersBestEffort(
+        this.pool.query.bind(this.pool),
+        pendingSubscriberNotification,
+        'record-service',
+      )
+    }
 
     if (this.postCommitHooks.length > 0) {
       const context: RecordPostCommitContext = {
