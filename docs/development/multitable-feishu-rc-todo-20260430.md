@@ -202,8 +202,12 @@ Expected docs:
 
 ## Phase 4 - P0/P1 Gap: System Fields Batch
 
-- [ ] Add `autoNumber` field type.
-  - Blocked: not included in backend seam slice because stable auto-number requires persistent sequence allocation; do not ship a row-index placeholder.
+- [x] Add `autoNumber` field type.
+  - PR: #1321
+  - Merge commit: `9a8f9c1f1`
+  - Development MD: `docs/development/multitable-auto-number-system-field-design-20260505.md`
+  - Verification MD: `docs/development/multitable-auto-number-system-field-verification-20260505.md`
+  - Verification summary: persistent per-field sequence table added; create paths allocate `autoNumber` values transactionally; focused backend/frontend tests, backend build, frontend type-check, OpenAPI parity, migration replay, and CI passed.
 - [x] Add `createdTime` field type mapped to record `created_at`.
   - PR: #1280
   - Merge commit: c45da32c1
