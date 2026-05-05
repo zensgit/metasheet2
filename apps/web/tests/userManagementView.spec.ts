@@ -1187,6 +1187,28 @@ describe('UserManagementView', () => {
     expect(container?.textContent).toContain('目标集成：ding-1 · 目标成员：user-2-directory')
   })
 
+  it('can clear directory return context while keeping the focused user and filter', async () => {
+    window.history.replaceState({}, '', '/admin/users?userId=user-2&source=directory-sync&directoryFailure=missing_account&integrationId=ding-1&accountId=user-2-directory')
+    const state = createApiState()
+    state[1].hasOpenId = false
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+    app.mount(container!)
+    await flushUi(20)
+
+    findButtonByText(container!, '缺 OpenID').click()
+    await flushUi()
+    findButtonByText(container!, '清除目录回跳').click()
+    await flushUi()
+
+    expect(window.location.search).toBe('?userId=user-2&filter=dingtalk-openid-missing')
+    expect(container?.textContent).toContain('已清除目录回跳上下文')
+    expect(container?.textContent).not.toContain('目录定位未完成')
+    expect(container?.textContent).not.toContain('目标集成：ding-1 · 目标成员：user-2-directory')
+    expect(container?.textContent).toContain('Bravo')
+  })
+
   it('bulk disables dingtalk grant for the current missing-openid screening list', async () => {
     const state = createApiState()
     state[1].hasOpenId = false
