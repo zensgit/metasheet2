@@ -52,6 +52,22 @@ test('multitable openapi stays aligned with runtime contracts', () => {
   assert.ok(paths['/api/multitable/records/{recordId}']?.patch, 'missing single-record patch endpoint')
   assert.ok(paths['/api/multitable/sheets/{sheetId}/import-xlsx']?.post, 'missing xlsx import endpoint')
   assert.ok(paths['/api/multitable/sheets/{sheetId}/export-xlsx']?.get, 'missing xlsx export endpoint')
+  assert.ok(
+    paths['/api/multitable/sheets/{sheetId}/records/{recordId}/subscriptions']?.get,
+    'missing record subscription status endpoint',
+  )
+  assert.ok(
+    paths['/api/multitable/sheets/{sheetId}/records/{recordId}/subscriptions/me']?.put,
+    'missing current-user record subscribe endpoint',
+  )
+  assert.ok(
+    paths['/api/multitable/sheets/{sheetId}/records/{recordId}/subscriptions/me']?.delete,
+    'missing current-user record unsubscribe endpoint',
+  )
+  assert.ok(
+    paths['/api/multitable/record-subscription-notifications']?.get,
+    'missing record subscription notification list endpoint',
+  )
 
   assert.deepEqual(schemas.MultitableFieldType?.enum, expectedFieldTypes)
   assert.deepEqual(schemas.MultitableViewType?.enum, expectedViewTypes)
@@ -119,9 +135,33 @@ test('multitable openapi stays aligned with runtime contracts', () => {
     paths['/api/multitable/patch']?.post?.responses?.['200']?.content?.['application/json']?.schema?.properties?.data?.$ref,
     '#/components/schemas/MultitablePatchResult',
   )
+  assert.equal(
+    paths['/api/multitable/sheets/{sheetId}/records/{recordId}/subscriptions']?.get?.responses?.['200']?.content?.['application/json']?.schema?.properties?.data?.$ref,
+    '#/components/schemas/MultitableRecordSubscriptionStatus',
+  )
+  assert.equal(
+    paths['/api/multitable/sheets/{sheetId}/records/{recordId}/subscriptions/me']?.put?.responses?.['200']?.content?.['application/json']?.schema?.properties?.data?.$ref,
+    '#/components/schemas/MultitableRecordSubscriptionStatus',
+  )
+  assert.equal(
+    paths['/api/multitable/sheets/{sheetId}/records/{recordId}/subscriptions/me']?.delete?.responses?.['200']?.content?.['application/json']?.schema?.properties?.data?.$ref,
+    '#/components/schemas/MultitableRecordSubscriptionStatus',
+  )
+  assert.equal(
+    paths['/api/multitable/record-subscription-notifications']?.get?.responses?.['200']?.content?.['application/json']?.schema?.properties?.data?.properties?.items?.items?.$ref,
+    '#/components/schemas/MultitableRecordSubscriptionNotification',
+  )
 
   assert.equal(schemas.MultitableView?.properties?.type?.$ref, '#/components/schemas/MultitableViewType')
   assert.equal(schemas.MultitableField?.properties?.type?.$ref, '#/components/schemas/MultitableFieldType')
+  assert.equal(
+    schemas.MultitableRecordSubscriptionStatus?.properties?.subscription?.allOf?.[0]?.$ref,
+    '#/components/schemas/MultitableRecordSubscription',
+  )
+  assert.equal(
+    schemas.MultitableRecordSubscriptionNotification?.properties?.eventType?.$ref,
+    '#/components/schemas/MultitableRecordSubscriptionNotificationType',
+  )
   assert.equal(schemas.MultitableView?.properties?.config?.type, 'object')
   assert.equal(schemas.MultitableField?.properties?.options?.items?.properties?.value?.type, 'string')
   assert.equal(
