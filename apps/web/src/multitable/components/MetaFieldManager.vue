@@ -170,12 +170,12 @@
             </div>
           </div>
           <div class="meta-field-mgr__field">
-            <span>Function reference</span>
+            <span>Formula reference</span>
             <div class="meta-field-mgr__formula-toolbar">
               <input
                 v-model="formulaFunctionSearch"
                 class="meta-field-mgr__input"
-                placeholder="Search SUM, IF, TODAY..."
+                placeholder="Search SUM, IF, %, ^, &..."
               />
               <select v-model="formulaFunctionCategory" class="meta-field-mgr__select">
                 <option value="all">All categories</option>

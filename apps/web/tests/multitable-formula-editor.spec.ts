@@ -49,6 +49,24 @@ describe('multitable formula editor', () => {
     expect(buildFormulaFieldTokenInsertion('=SUM()', 'fld_tax')).toBe('=SUM() {fld_tax}')
   })
 
+  it('documents recently supported formula operators', () => {
+    const operatorSections = getFormulaFunctionCatalog('', 'operator')
+    expect(operatorSections).toHaveLength(1)
+    expect(operatorSections[0].functions.map((doc) => doc.signature)).toEqual(expect.arrayContaining([
+      'left + right',
+      'left ^ right',
+      'value%',
+      'left & right',
+      '=, <>, >, >=, <, <=',
+    ]))
+
+    expect(searchFormulaFunctionDocs('%').map((doc) => doc.name)).toContain('PERCENT_OPERATOR')
+
+    const percentDoc = operatorSections[0].functions.find((doc) => doc.name === 'PERCENT_OPERATOR')
+    expect(percentDoc).toBeTruthy()
+    expect(buildFormulaFunctionInsertion('={fld_price} *', percentDoc!)).toBe('={fld_price} * 10%')
+  })
+
   it('inserts backend-compatible field id tokens from field chips', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
@@ -137,6 +155,43 @@ describe('multitable formula editor', () => {
 
     const textarea = container.querySelector('.meta-field-mgr__textarea') as HTMLTextAreaElement
     expect(textarea.value).toBe('=ROUND(, 2)')
+
+    app.unmount()
+  })
+
+  it('renders the operator reference category in the formula panel', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaFieldManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          sheets: [],
+          fields: [
+            { id: 'fld_price', name: 'Price', type: 'number' },
+            { id: 'fld_total', name: 'Total', type: 'formula', property: { expression: '={fld_price}' } },
+          ],
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    const configureButtons = Array.from(container.querySelectorAll('.meta-field-mgr__action[title="Configure"]')) as HTMLButtonElement[]
+    configureButtons[1]?.click()
+    await nextTick()
+
+    const categorySelect = container.querySelector('.meta-field-mgr__formula-toolbar .meta-field-mgr__select') as HTMLSelectElement
+    categorySelect.value = 'operator'
+    categorySelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    expect(container.textContent).toContain('Operators')
+    expect(container.textContent).toContain('value%')
+    expect(container.textContent).toContain('left ^ right')
 
     app.unmount()
   })

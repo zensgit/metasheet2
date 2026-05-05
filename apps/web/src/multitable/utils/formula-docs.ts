@@ -3,6 +3,7 @@ import type { MetaField } from '../types'
 export type FormulaFunctionCategory =
   | 'aggregate'
   | 'math'
+  | 'operator'
   | 'logic'
   | 'text'
   | 'date'
@@ -39,6 +40,7 @@ export interface FormulaDiagnostic {
 export const FORMULA_FUNCTION_CATEGORIES: FormulaFunctionCategoryDoc[] = [
   { id: 'aggregate', label: 'Aggregate', description: 'Summarize numeric or non-empty values.' },
   { id: 'math', label: 'Math', description: 'Round, transform, and compare numbers.' },
+  { id: 'operator', label: 'Operators', description: 'Combine values with spreadsheet operators.' },
   { id: 'logic', label: 'Logic', description: 'Branch and combine conditions.' },
   { id: 'text', label: 'Text', description: 'Join, slice, and normalize text.' },
   { id: 'date', label: 'Date', description: 'Create or extract date values.' },
@@ -110,6 +112,70 @@ export const FORMULA_FUNCTION_DOCS: FormulaFunctionDoc[] = [
     description: 'Returns the absolute value of a number.',
     example: '=ABS({fld_delta})',
     insertText: 'ABS()',
+  },
+  {
+    name: 'ADD',
+    signature: 'left + right',
+    category: 'operator',
+    description: 'Adds two numeric values. Text numbers are coerced to numbers.',
+    example: '={fld_price} + {fld_tax}',
+    insertText: '+',
+  },
+  {
+    name: 'SUBTRACT',
+    signature: 'left - right',
+    category: 'operator',
+    description: 'Subtracts the right numeric value from the left value.',
+    example: '={fld_budget} - {fld_actual}',
+    insertText: '-',
+  },
+  {
+    name: 'MULTIPLY',
+    signature: 'left * right',
+    category: 'operator',
+    description: 'Multiplies two numeric values.',
+    example: '={fld_qty} * {fld_price}',
+    insertText: '*',
+  },
+  {
+    name: 'DIVIDE',
+    signature: 'left / right',
+    category: 'operator',
+    description: 'Divides the left numeric value by the right value.',
+    example: '={fld_total} / {fld_count}',
+    insertText: '/',
+  },
+  {
+    name: 'POWER_OPERATOR',
+    signature: 'left ^ right',
+    category: 'operator',
+    description: 'Raises the left numeric value to the power of the right value.',
+    example: '={fld_base} ^ 2',
+    insertText: '^',
+  },
+  {
+    name: 'PERCENT_OPERATOR',
+    signature: 'value%',
+    category: 'operator',
+    description: 'Converts a number to a percentage value, for example 50% becomes 0.5.',
+    example: '={fld_price} * 10%',
+    insertText: '10%',
+  },
+  {
+    name: 'CONCAT_OPERATOR',
+    signature: 'left & right',
+    category: 'operator',
+    description: 'Concatenates values as text.',
+    example: '={fld_first_name} & " " & {fld_last_name}',
+    insertText: '&',
+  },
+  {
+    name: 'COMPARISON',
+    signature: '=, <>, >, >=, <, <=',
+    category: 'operator',
+    description: 'Compares two values and returns TRUE or FALSE.',
+    example: '={fld_amount} >= 1000',
+    insertText: '>=',
   },
   {
     name: 'IF',
