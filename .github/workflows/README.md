@@ -66,6 +66,11 @@ To configure the DingTalk Alertmanager webhook secret without printing the URL,
 use `scripts/ops/set-dingtalk-alertmanager-webhook-secret.mjs`. See
 `docs/operations/dingtalk-alertmanager-webhook-secret-runbook.md`.
 
+After configuring the secret, close the loop with
+`scripts/ops/dingtalk-alertmanager-closeout.mjs --repo zensgit/metasheet2 --trigger --wait`.
+It checks readiness, dispatches the stability workflow, waits for completion,
+downloads the artifact, and prints a redacted summary.
+
 ## Manual Dispatch (Nightly)
 
 1. Actions → Phase 5 Nightly Validation (Regression) → Run workflow.
