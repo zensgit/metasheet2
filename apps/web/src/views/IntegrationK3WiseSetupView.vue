@@ -176,6 +176,28 @@
           >
             下载 GATE JSON
           </button>
+          <label class="k3-setup__field k3-setup__gate-import">
+            <span>导入客户 GATE JSON</span>
+            <textarea
+              v-model="gateImportText"
+              rows="6"
+              spellcheck="false"
+              placeholder="粘贴客户回传的 GATE JSON，导入后会清空密码字段"
+            />
+          </label>
+          <button
+            class="k3-setup__btn k3-setup__btn--full"
+            type="button"
+            :disabled="!gateImportText.trim()"
+            @click="importGateJson"
+          >
+            导入 GATE JSON
+          </button>
+          <ul v-if="gateImportWarnings.length" class="k3-setup__issues k3-setup__issues--compact">
+            <li v-for="warning in gateImportWarnings" :key="`gate-import:${warning}`">
+              {{ warning }}
+            </li>
+          </ul>
           <ul v-if="gateIssues.length" class="k3-setup__issues k3-setup__issues--compact">
             <li v-for="issue in gateIssues" :key="`gate:${issue.field}:${issue.message}`">
               {{ issue.message }}
@@ -593,6 +615,7 @@ import {
   K3_WISE_SQLSERVER_KIND,
   K3_WISE_WEBAPI_KIND,
   applyExternalSystemToForm,
+  applyK3WiseGateJsonToForm,
   buildK3WisePipelineObservationQuery,
   buildK3WisePipelinePayloads,
   buildK3WisePipelineRunPayload,
@@ -648,6 +671,8 @@ const pipelineRunResult = ref('')
 const pipelineRuns = ref<IntegrationPipelineRun[]>([])
 const deadLetters = ref<IntegrationDeadLetter[]>([])
 const stagingDescriptors = ref<IntegrationStagingDescriptor[]>([])
+const gateImportText = ref('')
+const gateImportWarnings = ref<string[]>([])
 
 const savedSystems = computed(() => [...webApiSystems.value, ...sqlSystems.value])
 const validationIssues = computed(() => validateK3WiseSetupForm(form))
@@ -708,6 +733,23 @@ function downloadGateDraft(): void {
   anchor.click()
   URL.revokeObjectURL(url)
   setStatus('GATE JSON 已生成', 'success')
+}
+
+function importGateJson(): void {
+  try {
+    const result = applyK3WiseGateJsonToForm(form, gateImportText.value)
+    Object.assign(form, result.form)
+    gateImportWarnings.value = result.warnings
+    setStatus(
+      result.warnings.length > 0
+        ? `GATE JSON 已导入，${result.warnings.length} 项需要人工确认`
+        : 'GATE JSON 已导入',
+      result.warnings.length > 0 ? 'info' : 'success',
+    )
+  } catch (error) {
+    gateImportWarnings.value = []
+    setStatus(formatError(error), 'error')
+  }
 }
 
 function loadSystemIntoForm(system: IntegrationExternalSystem): void {
@@ -1063,6 +1105,10 @@ onMounted(() => {
   resize: vertical;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 13px;
+}
+
+.k3-setup__gate-import {
+  margin-top: 12px;
 }
 
 .k3-setup__check,

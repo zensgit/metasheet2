@@ -229,8 +229,15 @@ export interface K3WisePocCommandSet {
   evidence: string
 }
 
+export interface K3WiseGateJsonImportResult {
+  form: K3WiseSetupForm
+  warnings: string[]
+}
+
 const WEBAPI_KIND = 'erp:k3-wise-webapi'
 const SQLSERVER_KIND = 'erp:k3-wise-sqlserver'
+const IMPORT_SECRET_KEY_PATTERN =
+  /(password|passwd|pwd|secret|token|sessionid|session_id|cookie|accesskey|access_key|privatekey|private_key|clientsecret|client_secret)/i
 
 function trim(value: string): string {
   return value.trim()
@@ -644,6 +651,268 @@ export function buildK3WiseGateDraft(form: K3WiseSetupForm): Record<string, unkn
 
 export function stringifyK3WiseGateDraft(form: K3WiseSetupForm): string {
   return JSON.stringify(buildK3WiseGateDraft(form), null, 2)
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function hasOwn(record: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key)
+}
+
+function recordAt(record: Record<string, unknown>, key: string): Record<string, unknown> | null {
+  const value = record[key]
+  return isPlainRecord(value) ? value : null
+}
+
+function importedString(value: unknown): string {
+  if (typeof value === 'string') return trim(value)
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return ''
+}
+
+function firstImportedString(record: Record<string, unknown> | null, keys: string[]): string {
+  if (!record) return ''
+  for (const key of keys) {
+    if (!hasOwn(record, key)) continue
+    const value = importedString(record[key])
+    if (value) return value
+  }
+  return ''
+}
+
+function firstImportedValue(record: Record<string, unknown> | null, keys: string[]): unknown {
+  if (!record) return undefined
+  for (const key of keys) {
+    if (hasOwn(record, key)) return record[key]
+  }
+  return undefined
+}
+
+function importedListText(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value.map((item) => importedString(item)).filter(Boolean).join('\n')
+  }
+  if (typeof value === 'string') {
+    return splitList(value).join('\n')
+  }
+  return ''
+}
+
+function normalizeImportedBoolean(
+  value: unknown,
+  fallback: boolean,
+  field: string,
+  warnings: Set<string>,
+): boolean {
+  if (value === undefined || value === null || value === '') return fallback
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') {
+    if (value === 0 || value === 1) return value === 1
+    warnings.add(`${field} ignored because it is not a boolean-like value`)
+    return fallback
+  }
+  if (typeof value !== 'string') {
+    warnings.add(`${field} ignored because it is not a boolean-like value`)
+    return fallback
+  }
+
+  const normalized = trim(value).toLowerCase()
+  if (['true', '1', 'yes', 'y', 'on', '是', '启用', '开启', '开'].includes(normalized)) return true
+  if (['false', '0', 'no', 'n', 'off', '否', '禁用', '关闭', '关'].includes(normalized)) return false
+  warnings.add(`${field} ignored because it is not a boolean-like value`)
+  return fallback
+}
+
+function normalizeImportedEnvironment(
+  value: unknown,
+  fallback: K3WiseSetupForm['environment'],
+  warnings: Set<string>,
+): K3WiseSetupForm['environment'] {
+  const normalized = importedString(value).toLowerCase()
+  if (!normalized) return fallback
+  if (['test', 'testing', '测试'].includes(normalized)) return 'test'
+  if (['uat', '用户验收'].includes(normalized)) return 'uat'
+  if (['staging', 'stage', 'pre', '预发'].includes(normalized)) return 'staging'
+  if (['production', 'prod', '生产'].includes(normalized)) return 'production'
+  if (normalized === 'other') return 'other'
+  warnings.add(`k3Wise.environment "${importedString(value)}" mapped to other`)
+  return 'other'
+}
+
+function normalizeImportedSqlMode(
+  value: unknown,
+  fallback: K3SqlServerMode,
+  warnings: Set<string>,
+): K3SqlServerMode {
+  const normalized = importedString(value)
+    .toLowerCase()
+    .replace(/[\s_]+/g, '-')
+  if (!normalized) return fallback
+  if (['readonly', 'read-only', 'ro', '只读'].includes(normalized)) return 'readonly'
+  if (['middle-table', 'integration-table', 'staging-table', '中间表'].includes(normalized)) return 'middle-table'
+  if (['stored-procedure', 'procedure', 'proc', 'sp', '存储过程'].includes(normalized)) return 'stored-procedure'
+  warnings.add(`sqlServer.mode "${importedString(value)}" ignored; kept ${fallback}`)
+  return fallback
+}
+
+function normalizeImportedPlmReadMethod(
+  value: unknown,
+  fallback: PlmReadMethod,
+  warnings: Set<string>,
+): PlmReadMethod {
+  const normalized = importedString(value)
+    .toLowerCase()
+    .replace(/[\s_]+/g, '-')
+  if (!normalized) return fallback
+  if (['api', 'rest', 'webapi', 'interface', '接口'].includes(normalized)) return 'api'
+  if (['database', 'db', 'sql', '数据库'].includes(normalized)) return 'database'
+  if (['table', 'data-table', '数据表', '表'].includes(normalized)) return 'table'
+  if (['file', 'excel', 'csv', '文件'].includes(normalized)) return 'file'
+  if (['manual', 'hand', '手工', '手动'].includes(normalized)) return 'manual'
+  warnings.add(`plm.readMethod "${importedString(value)}" ignored; mapped to manual`)
+  return 'manual'
+}
+
+function hasPresentSecretValue(value: unknown): boolean {
+  if (typeof value === 'string') return trim(value).length > 0
+  if (Array.isArray(value)) return value.length > 0
+  if (isPlainRecord(value)) return Object.keys(value).length > 0
+  return value !== undefined && value !== null
+}
+
+function collectIgnoredSecretWarnings(value: unknown, path: string, warnings: Set<string>): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => collectIgnoredSecretWarnings(item, `${path}[${index}]`, warnings))
+    return
+  }
+  if (!isPlainRecord(value)) return
+
+  for (const [key, child] of Object.entries(value)) {
+    const nextPath = path ? `${path}.${key}` : key
+    if (IMPORT_SECRET_KEY_PATTERN.test(key) && hasPresentSecretValue(child)) {
+      warnings.add(`${nextPath} ignored; enter it in the credential form if needed`)
+      continue
+    }
+    collectIgnoredSecretWarnings(child, nextPath, warnings)
+  }
+}
+
+function hasImportedSqlConfig(sqlServer: Record<string, unknown>): boolean {
+  return ['mode', 'server', 'database', 'allowedTables', 'middleTables', 'storedProcedures'].some((key) => {
+    if (!hasOwn(sqlServer, key)) return false
+    const value = sqlServer[key]
+    if (Array.isArray(value)) return value.length > 0
+    if (isPlainRecord(value)) return Object.keys(value).length > 0
+    return importedString(value).length > 0 || typeof value === 'boolean'
+  })
+}
+
+export function parseK3WiseGateJsonText(jsonText: string): Record<string, unknown> {
+  const normalized = trim(jsonText)
+  if (!normalized) {
+    throw new Error('GATE JSON is required')
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(normalized)
+  } catch {
+    throw new Error('GATE JSON must be valid JSON')
+  }
+  if (!isPlainRecord(parsed)) {
+    throw new Error('GATE JSON must be an object')
+  }
+  return parsed
+}
+
+export function applyK3WiseGateJsonToForm(form: K3WiseSetupForm, jsonText: string): K3WiseGateJsonImportResult {
+  const draft = parseK3WiseGateJsonText(jsonText)
+  const warnings = new Set<string>()
+  collectIgnoredSecretWarnings(draft, '', warnings)
+
+  const k3Wise = recordAt(draft, 'k3Wise')
+  const k3Credentials = recordAt(k3Wise || {}, 'credentials')
+  const plm = recordAt(draft, 'plm')
+  const plmCredentials = recordAt(plm || {}, 'credentials')
+  const plmConfig = recordAt(plm || {}, 'config')
+  const sqlServer = recordAt(draft, 'sqlServer')
+  const sqlCredentials = recordAt(sqlServer || {}, 'credentials')
+  const rollback = recordAt(draft, 'rollback')
+  const bom = recordAt(draft, 'bom')
+
+  const next: K3WiseSetupForm = {
+    ...form,
+    password: '',
+    plmPassword: '',
+    sqlPassword: '',
+  }
+
+  const tenantId = firstImportedString(draft, ['tenantId'])
+  if (tenantId) next.tenantId = tenantId
+  const workspaceId = firstImportedString(draft, ['workspaceId'])
+  if (workspaceId) next.workspaceId = workspaceId
+  const projectId = firstImportedString(draft, ['projectId'])
+  if (projectId) next.projectId = projectId
+  const operator = firstImportedString(draft, ['operator'])
+  if (operator) next.operator = operator
+
+  const version = firstImportedString(k3Wise, ['version'])
+  if (version) next.version = version
+  const baseUrl = firstImportedString(k3Wise, ['apiUrl', 'baseUrl', 'url'])
+  if (baseUrl) next.baseUrl = baseUrl
+  const acctId = firstImportedString(k3Wise, ['acctId', 'accountId', 'account'])
+  if (acctId) next.acctId = acctId
+  next.environment = normalizeImportedEnvironment(firstImportedValue(k3Wise, ['environment']), next.environment, warnings)
+  const username = firstImportedString(k3Credentials, ['username', 'userName', 'user']) || firstImportedString(k3Wise, ['username', 'userName', 'user'])
+  if (username) next.username = username
+  next.autoSubmit = normalizeImportedBoolean(firstImportedValue(k3Wise, ['autoSubmit']), next.autoSubmit, 'k3Wise.autoSubmit', warnings)
+  next.autoAudit = normalizeImportedBoolean(firstImportedValue(k3Wise, ['autoAudit']), next.autoAudit, 'k3Wise.autoAudit', warnings)
+
+  const plmKind = firstImportedString(plm, ['kind', 'type'])
+  if (plmKind) next.plmKind = plmKind
+  next.plmReadMethod = normalizeImportedPlmReadMethod(firstImportedValue(plm, ['readMethod']), next.plmReadMethod, warnings)
+  const plmBaseUrl = firstImportedString(plm, ['baseUrl', 'apiUrl', 'url'])
+  if (plmBaseUrl) next.plmBaseUrl = plmBaseUrl
+  const plmDefaultProductId =
+    firstImportedString(plm, ['defaultProductId', 'productId']) ||
+    firstImportedString(plmConfig, ['defaultProductId', 'productId'])
+  if (plmDefaultProductId) next.plmDefaultProductId = plmDefaultProductId
+  const plmUsername = firstImportedString(plmCredentials, ['username', 'userName', 'user']) || firstImportedString(plm, ['username', 'userName', 'user'])
+  if (plmUsername) next.plmUsername = plmUsername
+
+  if (sqlServer) {
+    const enabledValue = firstImportedValue(sqlServer, ['enabled'])
+    next.sqlEnabled = enabledValue === undefined
+      ? (hasImportedSqlConfig(sqlServer) || next.sqlEnabled)
+      : normalizeImportedBoolean(enabledValue, next.sqlEnabled, 'sqlServer.enabled', warnings)
+    next.sqlMode = normalizeImportedSqlMode(firstImportedValue(sqlServer, ['mode']), next.sqlMode, warnings)
+    const sqlHost = firstImportedString(sqlServer, ['server', 'host'])
+    if (sqlHost) next.sqlServer = sqlHost
+    const database = firstImportedString(sqlServer, ['database', 'dbName'])
+    if (database) next.sqlDatabase = database
+    const sqlUsername = firstImportedString(sqlCredentials, ['username', 'userName', 'user']) || firstImportedString(sqlServer, ['username', 'userName', 'user'])
+    if (sqlUsername) next.sqlUsername = sqlUsername
+    if (hasOwn(sqlServer, 'allowedTables')) next.sqlAllowedTables = importedListText(sqlServer.allowedTables)
+    if (hasOwn(sqlServer, 'middleTables')) next.sqlMiddleTables = importedListText(sqlServer.middleTables)
+    if (hasOwn(sqlServer, 'storedProcedures')) next.sqlStoredProcedures = importedListText(sqlServer.storedProcedures)
+  }
+
+  const rollbackOwner = firstImportedString(rollback, ['owner'])
+  if (rollbackOwner) next.rollbackOwner = rollbackOwner
+  const rollbackStrategy = firstImportedString(rollback, ['strategy'])
+  if (rollbackStrategy) next.rollbackStrategy = rollbackStrategy
+
+  if (bom) {
+    next.bomEnabled = normalizeImportedBoolean(firstImportedValue(bom, ['enabled']), next.bomEnabled, 'bom.enabled', warnings)
+    const bomProductId = firstImportedString(bom, ['productId'])
+    if (bomProductId) next.bomProductId = bomProductId
+  }
+
+  return {
+    form: next,
+    warnings: Array.from(warnings),
+  }
 }
 
 export function buildK3WisePocCommandSet(gatePath = 'artifacts/integration-live-poc/gate.json'): K3WisePocCommandSet {

@@ -24,9 +24,22 @@ git diff --check
 
 ## Results
 
+Initial GATE readiness slice:
+
 - `k3WiseSetup.spec.ts`: 21/21 passed.
 - `@metasheet/web type-check`: passed.
 - `@metasheet/web build`: passed. Vite reported the existing large chunk warnings.
+- `verify:integration-k3wise:poc`: passed.
+  - preflight tests: 16/16 passed.
+  - evidence tests: 31/31 passed.
+  - mock PoC demo ended with `K3 WISE PoC mock chain verified end-to-end (PASS)`.
+- `git diff --check`: passed.
+
+Customer GATE import follow-up:
+
+- `k3WiseSetup.spec.ts`: 24/24 passed.
+- `@metasheet/web type-check`: passed.
+- `@metasheet/web build`: passed. Vite reported the existing dynamic import and large chunk warnings.
 - `verify:integration-k3wise:poc`: passed.
   - preflight tests: 16/16 passed.
   - evidence tests: 31/31 passed.
@@ -39,6 +52,11 @@ git diff --check
 - Secret redaction for K3 and PLM passwords in generated GATE JSON.
 - PoC command-set generation for preflight, offline mock, and evidence compilation.
 - Client-side blocking for production K3 WISE, non-Save-only flags, BOM product-scope gaps, and SQL core-table writes in non-readonly modes.
+- Customer-returned GATE JSON import into public form fields.
+- Rejection for empty, malformed, and non-object GATE JSON.
+- Boolean normalization for English, numeric, and Chinese customer hand-edit variants.
+- Alias normalization for K3 environment, PLM read method, and SQL Server mode.
+- Secret-like field detection and password-field clearing on import.
 
 ## Not Covered
 

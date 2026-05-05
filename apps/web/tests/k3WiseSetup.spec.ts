@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { readFile } from 'node:fs/promises'
 import {
+  applyK3WiseGateJsonToForm,
   applyExternalSystemToForm,
   buildK3WiseGateDraft,
   buildK3WisePipelineObservationQuery,
@@ -509,6 +510,141 @@ describe('K3 WISE setup helpers', () => {
     expect(messages).toContain('Live PoC may not write K3 WISE core business tables')
     expect(messages).toContain('BOM PoC requires BOM product ID or PLM default product ID')
     expect(() => buildK3WiseGateDraft(form)).toThrow('Live PoC GATE must target a non-production K3 WISE environment')
+  })
+
+  it('imports customer GATE JSON public fields without credential secrets', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      password: 'old-k3-secret',
+      plmPassword: 'old-plm-secret',
+      sqlPassword: 'old-sql-secret',
+    })
+
+    const result = applyK3WiseGateJsonToForm(form, JSON.stringify({
+      tenantId: 'tenant_customer',
+      workspaceId: 'workspace_customer',
+      projectId: 'project_customer',
+      operator: 'customer-k3-admin',
+      k3Wise: {
+        version: 'K3 WISE 15.1',
+        baseUrl: 'https://k3.example.test/K3API/',
+        acctId: 1001,
+        environment: 'UAT',
+        autoSubmit: '否',
+        autoAudit: 0,
+        credentials: {
+          username: 'k3-user',
+          password: 'do-not-import',
+        },
+      },
+      plm: {
+        kind: 'plm:third-party',
+        readMethod: '数据库',
+        baseUrl: 'https://plm.example.test/',
+        config: {
+          defaultProductId: 'PRODUCT-001',
+        },
+        credentials: {
+          username: 'plm-user',
+          token: 'do-not-import-token',
+        },
+      },
+      sqlServer: {
+        enabled: '是',
+        mode: 'middle table',
+        server: 'sql-host',
+        database: 'AIS_TEST',
+        allowedTables: ['dbo.t_ICItem', 'dbo.t_MeasureUnit'],
+        middleTables: 'dbo.integration_material_stage, dbo.integration_bom_stage',
+        storedProcedures: ['dbo.usp_push_material'],
+        credentials: {
+          username: 'sql-user',
+          password: 'do-not-import-sql',
+        },
+      },
+      rollback: {
+        owner: 'rollback-owner',
+        strategy: 'delete-test-records',
+      },
+      bom: {
+        enabled: 1,
+        productId: 'BOM-PRODUCT-001',
+      },
+    }))
+
+    expect(result.form).toMatchObject({
+      tenantId: 'tenant_customer',
+      workspaceId: 'workspace_customer',
+      projectId: 'project_customer',
+      operator: 'customer-k3-admin',
+      version: 'K3 WISE 15.1',
+      baseUrl: 'https://k3.example.test/K3API/',
+      acctId: '1001',
+      environment: 'uat',
+      username: 'k3-user',
+      password: '',
+      autoSubmit: false,
+      autoAudit: false,
+      plmKind: 'plm:third-party',
+      plmReadMethod: 'database',
+      plmBaseUrl: 'https://plm.example.test/',
+      plmDefaultProductId: 'PRODUCT-001',
+      plmUsername: 'plm-user',
+      plmPassword: '',
+      sqlEnabled: true,
+      sqlMode: 'middle-table',
+      sqlServer: 'sql-host',
+      sqlDatabase: 'AIS_TEST',
+      sqlUsername: 'sql-user',
+      sqlPassword: '',
+      sqlAllowedTables: 'dbo.t_ICItem\ndbo.t_MeasureUnit',
+      sqlMiddleTables: 'dbo.integration_material_stage\ndbo.integration_bom_stage',
+      sqlStoredProcedures: 'dbo.usp_push_material',
+      rollbackOwner: 'rollback-owner',
+      rollbackStrategy: 'delete-test-records',
+      bomEnabled: true,
+      bomProductId: 'BOM-PRODUCT-001',
+    })
+    expect(result.warnings).toContain('k3Wise.credentials.password ignored; enter it in the credential form if needed')
+    expect(result.warnings).toContain('plm.credentials.token ignored; enter it in the credential form if needed')
+    expect(result.warnings).toContain('sqlServer.credentials.password ignored; enter it in the credential form if needed')
+  })
+
+  it('rejects invalid customer GATE JSON before applying it to the form', () => {
+    const form = createDefaultK3WiseSetupForm()
+
+    expect(() => applyK3WiseGateJsonToForm(form, '')).toThrow('GATE JSON is required')
+    expect(() => applyK3WiseGateJsonToForm(form, '{broken')).toThrow('GATE JSON must be valid JSON')
+    expect(() => applyK3WiseGateJsonToForm(form, '[]')).toThrow('GATE JSON must be an object')
+  })
+
+  it('keeps customer GATE imports conservative for unsupported aliases', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      sqlMode: 'readonly',
+    })
+
+    const result = applyK3WiseGateJsonToForm(form, JSON.stringify({
+      k3Wise: {
+        environment: 'sandbox',
+        autoSubmit: 'maybe',
+      },
+      plm: {
+        readMethod: 'graphql',
+      },
+      sqlServer: {
+        mode: 'direct-write',
+      },
+    }))
+
+    expect(result.form.environment).toBe('other')
+    expect(result.form.autoSubmit).toBe(false)
+    expect(result.form.plmReadMethod).toBe('manual')
+    expect(result.form.sqlMode).toBe('readonly')
+    expect(result.warnings).toContain('k3Wise.environment "sandbox" mapped to other')
+    expect(result.warnings).toContain('k3Wise.autoSubmit ignored because it is not a boolean-like value')
+    expect(result.warnings).toContain('plm.readMethod "graphql" ignored; mapped to manual')
+    expect(result.warnings).toContain('sqlServer.mode "direct-write" ignored; kept readonly')
   })
 
   it('builds run and dead-letter observation queries for selected pipelines', () => {

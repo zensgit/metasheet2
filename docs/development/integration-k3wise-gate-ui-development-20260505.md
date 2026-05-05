@@ -32,8 +32,24 @@ The service layer builds a redacted GATE JSON draft from the form:
 The page adds a PoC readiness panel with:
 
 - GATE JSON copy and download actions.
+- customer-returned GATE JSON import.
 - visible preflight, offline mock, and evidence commands.
 - inline blocking issues before an operator can copy/download the GATE packet.
+
+## Customer GATE Import
+
+The PoC readiness panel now accepts a pasted customer GATE JSON packet and applies it back into the setup form.
+
+Import behavior is intentionally conservative:
+
+- The operator must click `导入 GATE JSON`; paste/input alone does not mutate the form.
+- Empty JSON, malformed JSON, and array JSON are rejected before any form update.
+- K3 WISE, PLM, SQL Server, rollback, and BOM public fields are normalized into the setup form.
+- Boolean variants are accepted for common customer hand-edits: `true/false`, `0/1`, `yes/no`, `on/off`, and Chinese `是/否/启用/禁用/开启/关闭`.
+- SQL Server mode aliases normalize to `readonly`, `middle-table`, or `stored-procedure`.
+- PLM read method aliases normalize to `api`, `database`, `table`, `file`, or `manual`.
+- Unsupported environment/read-method/mode values fall back conservatively and surface import warnings.
+- Secret-like keys such as `password`, `token`, `secret`, `sessionId`, and private/access key fields are never copied into the form. The three password fields are cleared on import to prevent stale credential carryover.
 
 ## Operator Flow
 
@@ -43,6 +59,14 @@ The page adds a PoC readiness panel with:
 4. Fill real credentials outside Git if needed.
 5. Run the displayed preflight command.
 6. Run `pnpm run verify:integration-k3wise:poc` before customer live execution.
+
+For a customer-returned packet:
+
+1. Paste the JSON into `导入客户 GATE JSON`.
+2. Click `导入 GATE JSON`.
+3. Review import warnings, especially ignored secret fields and unsupported aliases.
+4. Re-enter any required credentials through the credential form, not through pasted JSON.
+5. Re-run the visible GATE validation before copying/downloading a corrected packet.
 
 ## Boundary
 
