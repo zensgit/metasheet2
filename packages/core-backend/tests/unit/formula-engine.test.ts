@@ -321,6 +321,24 @@ describe('Formula Engine', () => {
       expect(result).toBe(42)
     })
 
+    test('Cell references should be case-insensitive', async () => {
+      const whereMock = vi.fn().mockReturnThis()
+      mockDb.selectFrom.mockReturnValue({
+        select: vi.fn().mockReturnThis(),
+        where: whereMock,
+        executeTakeFirst: vi.fn().mockResolvedValue({
+          value: '42',
+          data_type: 'number',
+          formula: null
+        })
+      })
+
+      const result = await engine.calculate('=aa1', context)
+
+      expect(result).toBe(42)
+      expect(whereMock).toHaveBeenCalledWith('column_index', '=', 26)
+    })
+
     test('Cell reference with formula', async () => {
       mockDb.selectFrom.mockReturnValue({
         select: vi.fn().mockReturnThis(),
@@ -354,6 +372,26 @@ describe('Formula Engine', () => {
       })
 
       const result = await engine.calculate('=SUM(A1:A3)', context)
+      expect(result).toBe(6)
+    })
+
+    test('Range references should be case-insensitive', async () => {
+      const cellValues = [
+        { value: '1', data_type: 'number', formula: null },
+        { value: '2', data_type: 'number', formula: null },
+        { value: '3', data_type: 'number', formula: null }
+      ]
+
+      let callIndex = 0
+      mockDb.selectFrom.mockReturnValue({
+        select: vi.fn().mockReturnThis(),
+        where: vi.fn().mockReturnThis(),
+        executeTakeFirst: vi.fn().mockImplementation(() => {
+          return Promise.resolve(cellValues[callIndex++] || null)
+        })
+      })
+
+      const result = await engine.calculate('=sum(a1:a3)', context)
       expect(result).toBe(6)
     })
   })
