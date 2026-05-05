@@ -218,6 +218,25 @@ describe('Formula Engine', () => {
   })
 
   describe('Operators', () => {
+    test('Signed and exponent numeric literals', async () => {
+      expect(await engine.calculate('=-3', context)).toBe(-3)
+      expect(await engine.calculate('=+3', context)).toBe(3)
+      expect(await engine.calculate('=1e-3', context)).toBe(0.001)
+      expect(await engine.calculate('=1e+3', context)).toBe(1000)
+    })
+
+    test('Signed numeric literals inside arithmetic expressions', async () => {
+      expect(await engine.calculate('=-3+5', context)).toBe(2)
+      expect(await engine.calculate('=5*-3', context)).toBe(-15)
+      expect(await engine.calculate('=5--3', context)).toBe(8)
+      expect(await engine.calculate('=1e-3+2', context)).toBe(2.001)
+    })
+
+    test('Binary signs after identifiers ending in E remain operators', async () => {
+      expect(await engine.calculate('=TRUE-1', context)).toBe(0)
+      expect(await engine.calculate('=FALSE+1', context)).toBe(1)
+    })
+
     test('Arithmetic operators', async () => {
       expect(await engine.calculate('=5 + 3', context)).toBe(8)
       expect(await engine.calculate('=5 - 3', context)).toBe(2)

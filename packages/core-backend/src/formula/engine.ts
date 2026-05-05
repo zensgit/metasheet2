@@ -269,6 +269,13 @@ export class FormulaEngine {
       }
     }
 
+    // Check if it's a number before scanning operators so signed and exponent
+    // literals such as -3 and 1e-3 are not split as binary operations.
+    const strictNum = Number(formula)
+    if (formula.trim().length > 0 && Number.isFinite(strictNum)) {
+      return { type: 'number', value: strictNum }
+    }
+
     // Check for operators
     // Sort operators by length descending to match >= before >
     const operators = ['>=', '<=', '<>', '+', '-', '*', '/', '=', '>', '<']
@@ -288,22 +295,6 @@ export class FormulaEngine {
     if (formula.toUpperCase() === 'TRUE') return { type: 'boolean', value: true }
     if (formula.toUpperCase() === 'FALSE') return { type: 'boolean', value: false }
     if (formula.toUpperCase() === 'NULL') return { type: 'null', value: null }
-
-    // Check if it's a number
-    const num = parseFloat(formula)
-    if (!isNaN(num) && isFinite(num) && !formula.includes(' ')) {
-       // Only treat as number if it parses fully and doesn't contain spaces (to avoid "5 + 3" -> 5)
-       // Actually parseFloat("5 + 3") is 5.
-       // We want to avoid treating "5 + 3" as number 5.
-       // If the string contains spaces and parses as number, it might be partial match.
-       // But " 5 " is valid number.
-       // "5 + 3" is NOT a valid number representation in strict sense.
-       // Number() constructor is stricter than parseFloat.
-       const strictNum = Number(formula)
-       if (!isNaN(strictNum)) {
-         return { type: 'number', value: strictNum }
-       }
-    }
 
     // Check if it's a string (quoted)
     if (formula.startsWith('"') && formula.endsWith('"')) {
@@ -367,11 +358,30 @@ export class FormulaEngine {
       }
 
       if (depth === 0 && formula.startsWith(operator, i)) {
+        if ((operator === '+' || operator === '-') && this.isUnarySign(formula, i)) {
+          continue
+        }
         return i
       }
     }
 
     return -1
+  }
+
+  private isUnarySign(formula: string, index: number): boolean {
+    let previousIndex = index - 1
+    while (previousIndex >= 0 && /\s/.test(formula[previousIndex])) {
+      previousIndex--
+    }
+
+    if (previousIndex < 0) return true
+    const previous = formula[previousIndex]
+    if (previous === 'e' || previous === 'E') {
+      const exponentIsAdjacent = previousIndex === index - 1
+      const mantissaTail = formula[previousIndex - 1]
+      return exponentIsAdjacent && (/\d/.test(mantissaTail) || mantissaTail === '.')
+    }
+    return ['+', '-', '*', '/', '=', '>', '<', '(', '[', ','].includes(previous)
   }
 
   /**
