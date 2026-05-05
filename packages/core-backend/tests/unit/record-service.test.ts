@@ -63,6 +63,12 @@ function createMockPool(
     if (sql.includes('INSERT INTO meta_record_revisions')) {
       return responses.INSERT_REVISION ?? { rows: [], rowCount: 1 }
     }
+    if (sql.includes('FROM meta_record_subscriptions')) {
+      return responses.SELECT_RECORD_SUBSCRIPTIONS ?? { rows: [] }
+    }
+    if (sql.includes('INSERT INTO meta_record_subscription_notifications')) {
+      return responses.INSERT_RECORD_SUBSCRIPTION_NOTIFICATIONS ?? { rows: [], rowCount: 1 }
+    }
     if (sql.includes('INSERT INTO meta_links')) {
       return responses.INSERT_LINK ?? { rows: [], rowCount: 1 }
     }
@@ -284,6 +290,35 @@ describe('RecordService', () => {
         [],
         JSON.stringify({}),
         JSON.stringify({ fld_title: 'Before' }),
+      ]),
+    )
+  })
+
+  it('notifies record subscribers after a successful single-record patch and suppresses the actor', async () => {
+    pool = createMockPool({
+      SELECT_RECORD_SUBSCRIPTIONS: {
+        rows: [{ user_id: 'watcher_1' }],
+      },
+    })
+    const service = new RecordService(pool, eventBus as any)
+
+    await service.patchRecord({
+      recordId: 'rec_existing',
+      sheetId: 'sheet_ops',
+      data: { fld_title: 'After' },
+      actorId: 'user_editor',
+      access: { userId: 'user_editor', permissions: [], isAdminRole: false },
+      capabilities: fullCapabilities,
+    })
+
+    expect(pool.queryMock).toHaveBeenCalledWith(
+      expect.stringContaining('FROM meta_record_subscriptions'),
+      ['sheet_ops', 'rec_existing', 'user_editor'],
+    )
+    expect(pool.queryMock).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO meta_record_subscription_notifications'),
+      expect.arrayContaining([
+        expect.stringContaining('"user_id":"watcher_1"'),
       ]),
     )
   })

@@ -24,6 +24,7 @@ import {
 } from './post-commit-hooks'
 import { BATCH1_FIELD_TYPES, coerceBatch1Value, normalizeMultiSelectValue, validateLongTextValue } from './field-codecs'
 import { recordRecordRevision } from './record-history-service'
+import { notifyRecordSubscribers } from './record-subscription-service'
 
 // ---------------------------------------------------------------------------
 // Shared types (mirrors the ones in univer-meta.ts to avoid coupling)
@@ -603,7 +604,7 @@ export class RecordWriteService {
           throw new RecordNotFoundError(`Record not found: ${recordId}`)
         }
         const nextVersion = Number((updateRes.rows[0] as any).version)
-        await recordRecordRevision(query, {
+        const revisionId = await recordRecordRevision(query, {
           sheetId,
           recordId,
           version: nextVersion,
@@ -613,6 +614,13 @@ export class RecordWriteService {
           changedFieldIds: Object.keys(patch),
           patch,
           snapshot: { ...previousData, ...patch },
+        })
+        await notifyRecordSubscribers(query, {
+          sheetId,
+          recordId,
+          eventType: 'record.updated',
+          actorId,
+          revisionId,
         })
 
         // Sync link table

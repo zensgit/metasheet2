@@ -28,6 +28,7 @@ import {
 import { isFieldAlwaysReadOnly, isFieldPermissionHidden } from './permission-derivation'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { recordRecordRevision } from './record-history-service'
+import { notifyRecordSubscribers } from './record-subscription-service'
 import { ensureRecordWriteAllowed, type AccessInfo, type SheetPermissionScope } from './sheet-capabilities'
 
 export type QueryFn = (
@@ -817,7 +818,7 @@ export class RecordService {
           [JSON.stringify(patch), recordId, sheetId, patchActorId],
         )
         nextVersion = Number((updateRes.rows[0] as { version?: unknown } | undefined)?.version ?? serverVersion)
-        await recordRecordRevision(query, {
+        const revisionId = await recordRecordRevision(query, {
           sheetId,
           recordId,
           version: nextVersion,
@@ -827,6 +828,13 @@ export class RecordService {
           changedFieldIds: Object.keys(patch),
           patch,
           snapshot: { ...previousData, ...patch },
+        })
+        await notifyRecordSubscribers(query, {
+          sheetId,
+          recordId,
+          eventType: 'record.updated',
+          actorId: patchActorId,
+          revisionId,
         })
       } else {
         nextVersion = serverVersion

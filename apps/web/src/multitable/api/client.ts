@@ -12,6 +12,9 @@ import type {
   MetaRecord,
   MetaRecordContext,
   MetaRecordRevision,
+  MetaRecordSubscription,
+  MetaRecordSubscriptionNotification,
+  MetaRecordSubscriptionStatus,
   MetaFormContext,
   PatchResult,
   FormSubmitResult,
@@ -600,6 +603,71 @@ function normalizeRecordHistoryEntries(
     : []
 }
 
+function normalizeRecordSubscription(payload: Partial<MetaRecordSubscription> | null | undefined): MetaRecordSubscription | null {
+  const id = typeof payload?.id === 'string' ? payload.id : ''
+  const sheetId = typeof payload?.sheetId === 'string' ? payload.sheetId : ''
+  const recordId = typeof payload?.recordId === 'string' ? payload.recordId : ''
+  const userId = typeof payload?.userId === 'string' ? payload.userId : ''
+  if (!id || !sheetId || !recordId || !userId) return null
+  return {
+    id,
+    sheetId,
+    recordId,
+    userId,
+    createdAt: typeof payload?.createdAt === 'string' ? payload.createdAt : '',
+    updatedAt: typeof payload?.updatedAt === 'string' ? payload.updatedAt : '',
+  }
+}
+
+function normalizeRecordSubscriptionStatus(
+  payload: { subscribed?: boolean; subscription?: Partial<MetaRecordSubscription> | null; items?: Array<Partial<MetaRecordSubscription>> } | null | undefined,
+): MetaRecordSubscriptionStatus {
+  const subscription = normalizeRecordSubscription(payload?.subscription ?? null)
+  const items = Array.isArray(payload?.items)
+    ? payload.items
+      .map((item) => normalizeRecordSubscription(item))
+      .filter((item): item is MetaRecordSubscription => !!item)
+    : []
+  return {
+    subscribed: payload?.subscribed === true || !!subscription,
+    subscription,
+    items,
+  }
+}
+
+function normalizeRecordSubscriptionNotification(
+  payload: Partial<MetaRecordSubscriptionNotification> | null | undefined,
+): MetaRecordSubscriptionNotification | null {
+  const id = typeof payload?.id === 'string' ? payload.id : ''
+  const sheetId = typeof payload?.sheetId === 'string' ? payload.sheetId : ''
+  const recordId = typeof payload?.recordId === 'string' ? payload.recordId : ''
+  const userId = typeof payload?.userId === 'string' ? payload.userId : ''
+  const eventType = payload?.eventType === 'comment.created' ? 'comment.created' : payload?.eventType === 'record.updated' ? 'record.updated' : null
+  if (!id || !sheetId || !recordId || !userId || !eventType) return null
+  return {
+    id,
+    sheetId,
+    recordId,
+    userId,
+    eventType,
+    actorId: typeof payload?.actorId === 'string' ? payload.actorId : null,
+    revisionId: typeof payload?.revisionId === 'string' ? payload.revisionId : null,
+    commentId: typeof payload?.commentId === 'string' ? payload.commentId : null,
+    createdAt: typeof payload?.createdAt === 'string' ? payload.createdAt : '',
+    readAt: typeof payload?.readAt === 'string' ? payload.readAt : null,
+  }
+}
+
+function normalizeRecordSubscriptionNotifications(
+  payload: { items?: Array<Partial<MetaRecordSubscriptionNotification>> } | null | undefined,
+): MetaRecordSubscriptionNotification[] {
+  return Array.isArray(payload?.items)
+    ? payload.items
+      .map((item) => normalizeRecordSubscriptionNotification(item))
+      .filter((item): item is MetaRecordSubscriptionNotification => !!item)
+    : []
+}
+
 function normalizeCommentsParams(params: { containerId: string; targetId: string; targetFieldId?: string | null } | MetaCommentsScope) {
   if ('containerType' in params) {
     return {
@@ -890,6 +958,38 @@ export class MultitableApiClient {
     )
     const data = await parseJson<{ items?: Array<Partial<MetaRecordRevision>> }>(res)
     return normalizeRecordHistoryEntries(data)
+  }
+
+  async getRecordSubscriptionStatus(sheetId: string, recordId: string): Promise<MetaRecordSubscriptionStatus> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/subscriptions`,
+    )
+    const data = await parseJson<{ subscribed?: boolean; subscription?: Partial<MetaRecordSubscription> | null; items?: Array<Partial<MetaRecordSubscription>> }>(res)
+    return normalizeRecordSubscriptionStatus(data)
+  }
+
+  async subscribeRecord(sheetId: string, recordId: string): Promise<MetaRecordSubscriptionStatus> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/subscriptions/me`,
+      { method: 'PUT' },
+    )
+    const data = await parseJson<{ subscribed?: boolean; subscription?: Partial<MetaRecordSubscription> | null }>(res)
+    return normalizeRecordSubscriptionStatus(data)
+  }
+
+  async unsubscribeRecord(sheetId: string, recordId: string): Promise<MetaRecordSubscriptionStatus> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/subscriptions/me`,
+      { method: 'DELETE' },
+    )
+    const data = await parseJson<{ subscribed?: boolean; subscription?: Partial<MetaRecordSubscription> | null }>(res)
+    return normalizeRecordSubscriptionStatus(data)
+  }
+
+  async listRecordSubscriptionNotifications(params?: { sheetId?: string; recordId?: string; limit?: number; offset?: number }): Promise<MetaRecordSubscriptionNotification[]> {
+    const res = await this.fetch(`/api/multitable/record-subscription-notifications${qs(params ?? {})}`)
+    const data = await parseJson<{ items?: Array<Partial<MetaRecordSubscriptionNotification>> }>(res)
+    return normalizeRecordSubscriptionNotifications(data)
   }
 
   async createRecord(input: CreateRecordInput, opts?: { signal?: AbortSignal }): Promise<{ record: MetaRecord }> {

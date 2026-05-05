@@ -570,6 +570,94 @@ describe('MultitableApiClient', () => {
     expect(fetchFn).toHaveBeenCalledWith('/api/multitable/sheets/sheet%20history/records/rec%20history/history?limit=25')
   })
 
+  it('loads and toggles record subscription status', async () => {
+    const fetchFn = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input === '/api/multitable/sheets/sheet%201/records/rec%201/subscriptions') {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            subscribed: false,
+            subscription: null,
+            items: [],
+          },
+        }), { status: 200 })
+      }
+      if (input === '/api/multitable/sheets/sheet%201/records/rec%201/subscriptions/me' && init?.method === 'PUT') {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            subscribed: true,
+            subscription: {
+              id: 'sub_1',
+              sheetId: 'sheet 1',
+              recordId: 'rec 1',
+              userId: 'user_1',
+              createdAt: '2026-05-05T00:00:00.000Z',
+              updatedAt: '2026-05-05T00:00:00.000Z',
+            },
+          },
+        }), { status: 200 })
+      }
+      if (input === '/api/multitable/sheets/sheet%201/records/rec%201/subscriptions/me' && init?.method === 'DELETE') {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            subscribed: false,
+            subscription: null,
+          },
+        }), { status: 200 })
+      }
+      throw new Error(`Unexpected request: ${input}`)
+    })
+    const client = new MultitableApiClient({ fetchFn })
+
+    await expect(client.getRecordSubscriptionStatus('sheet 1', 'rec 1')).resolves.toEqual({
+      subscribed: false,
+      subscription: null,
+      items: [],
+    })
+    await expect(client.subscribeRecord('sheet 1', 'rec 1')).resolves.toEqual({
+      subscribed: true,
+      subscription: expect.objectContaining({ id: 'sub_1', userId: 'user_1' }),
+      items: [],
+    })
+    await expect(client.unsubscribeRecord('sheet 1', 'rec 1')).resolves.toEqual({
+      subscribed: false,
+      subscription: null,
+      items: [],
+    })
+  })
+
+  it('loads record subscription notifications', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      data: {
+        items: [{
+          id: 'note_1',
+          sheetId: 'sheet_1',
+          recordId: 'rec_1',
+          userId: 'user_1',
+          eventType: 'comment.created',
+          actorId: 'user_2',
+          revisionId: null,
+          commentId: 'cmt_1',
+          createdAt: '2026-05-05T00:00:00.000Z',
+          readAt: null,
+        }],
+      },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    await expect(client.listRecordSubscriptionNotifications({ sheetId: 'sheet_1', recordId: 'rec_1', limit: 10 })).resolves.toEqual([
+      expect.objectContaining({
+        id: 'note_1',
+        eventType: 'comment.created',
+        commentId: 'cmt_1',
+      }),
+    ])
+    expect(fetchFn).toHaveBeenCalledWith('/api/multitable/record-subscription-notifications?sheetId=sheet_1&recordId=rec_1&limit=10')
+  })
+
   it('parses Retry-After seconds and http-date values', () => {
     expect(parseRetryAfterMs('2')).toBe(2000)
     expect(parseRetryAfterMs('Wed, 25 Mar 2026 12:00:05 GMT')).toBe(5000)

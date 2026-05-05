@@ -317,12 +317,42 @@ Expected docs:
 
 ## Phase 6 - P1 Gap: Record Subscription Notifications
 
-- [ ] Add record subscription table or reuse existing notification model if already sufficient.
-- [ ] Add subscribe/unsubscribe/list APIs.
-- [ ] Add record drawer watch/unwatch control.
-- [ ] Notify watchers on record update and comment events.
-- [ ] Do not notify the actor for their own write by default.
-- [ ] Add tests for subscribe, unsubscribe, update notification, comment notification, and self-notification suppression.
+- [x] Add record subscription table or reuse existing notification model if already sufficient.
+  - PR: local branch `codex/multitable-record-subscriptions-20260505`
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-record-subscription-development-20260503.md`
+  - Verification MD: `docs/development/multitable-record-subscription-verification-20260503.md`
+  - Verification summary: migration adds `meta_record_subscriptions` and durable `meta_record_subscription_notifications`.
+- [x] Add subscribe/unsubscribe/list APIs.
+  - PR: local branch `codex/multitable-record-subscriptions-20260505`
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-record-subscription-development-20260503.md`
+  - Verification MD: `docs/development/multitable-record-subscription-verification-20260503.md`
+  - Verification summary: record-scoped subscription status/list, subscribe, unsubscribe, and current-user notification list APIs added with auth/read checks.
+- [x] Add record drawer watch/unwatch control.
+  - PR: local branch `codex/multitable-record-subscriptions-20260505`
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-record-subscription-development-20260503.md`
+  - Verification MD: `docs/development/multitable-record-subscription-verification-20260503.md`
+  - Verification summary: drawer loads watch state and toggles Watch/Watching through `MultitableApiClient`.
+- [x] Notify watchers on record update and comment events.
+  - PR: local branch `codex/multitable-record-subscriptions-20260505`
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-record-subscription-development-20260503.md`
+  - Verification MD: `docs/development/multitable-record-subscription-verification-20260503.md`
+  - Verification summary: `RecordService.patchRecord()`, `RecordWriteService.patchRecords()`, and `CommentService.createComment()` enqueue watcher notifications.
+- [x] Do not notify the actor for their own write by default.
+  - PR: local branch `codex/multitable-record-subscriptions-20260505`
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-record-subscription-development-20260503.md`
+  - Verification MD: `docs/development/multitable-record-subscription-verification-20260503.md`
+  - Verification summary: subscriber lookup filters `user_id <> actorId` when actor is present.
+- [x] Add tests for subscribe, unsubscribe, update notification, comment notification, and self-notification suppression.
+  - PR: local branch `codex/multitable-record-subscriptions-20260505`
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-record-subscription-development-20260503.md`
+  - Verification MD: `docs/development/multitable-record-subscription-verification-20260503.md`
+  - Verification summary: focused backend service/write/comment tests and frontend client/drawer tests pass.
 
 Expected docs:
 
