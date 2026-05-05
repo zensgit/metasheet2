@@ -2903,6 +2903,9 @@
           "canManageFields": {
             "type": "boolean"
           },
+          "canManageSheetAccess": {
+            "type": "boolean"
+          },
           "canManageViews": {
             "type": "boolean"
           },
@@ -2910,6 +2913,9 @@
             "type": "boolean"
           },
           "canManageAutomation": {
+            "type": "boolean"
+          },
+          "canExport": {
             "type": "boolean"
           }
         },
@@ -2919,9 +2925,11 @@
           "canEditRecord",
           "canDeleteRecord",
           "canManageFields",
+          "canManageSheetAccess",
           "canManageViews",
           "canComment",
-          "canManageAutomation"
+          "canManageAutomation",
+          "canExport"
         ]
       },
       "MultitableSheetPermissionAccessLevel": {
@@ -3045,6 +3053,92 @@
         "additionalProperties": {
           "$ref": "#/components/schemas/MultitableFieldCapability"
         }
+      },
+      "MultitableCapabilityOrigin": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "admin",
+              "global-rbac",
+              "sheet-grant",
+              "sheet-scope"
+            ]
+          },
+          "hasSheetAssignments": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "source",
+          "hasSheetAssignments"
+        ]
+      },
+      "MultitableFieldPermission": {
+        "type": "object",
+        "properties": {
+          "visible": {
+            "type": "boolean"
+          },
+          "readOnly": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "visible",
+          "readOnly"
+        ]
+      },
+      "MultitableFieldPermissions": {
+        "type": "object",
+        "additionalProperties": {
+          "$ref": "#/components/schemas/MultitableFieldPermission"
+        }
+      },
+      "MultitableViewPermission": {
+        "type": "object",
+        "properties": {
+          "canAccess": {
+            "type": "boolean"
+          },
+          "canConfigure": {
+            "type": "boolean"
+          },
+          "canDelete": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "canAccess",
+          "canConfigure",
+          "canDelete"
+        ]
+      },
+      "MultitableViewPermissions": {
+        "type": "object",
+        "additionalProperties": {
+          "$ref": "#/components/schemas/MultitableViewPermission"
+        }
+      },
+      "MultitableRowActions": {
+        "type": "object",
+        "properties": {
+          "canEdit": {
+            "type": "boolean"
+          },
+          "canDelete": {
+            "type": "boolean"
+          },
+          "canComment": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "canEdit",
+          "canDelete",
+          "canComment"
+        ]
       },
       "MultitableDependencyNode": {
         "type": "object",
@@ -3327,21 +3421,17 @@
           "capabilities": {
             "$ref": "#/components/schemas/MultitableCapabilities"
           },
-          "fieldCapabilities": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/MultitableFieldCapabilities"
-              }
-            ],
-            "nullable": true
+          "capabilityOrigin": {
+            "$ref": "#/components/schemas/MultitableCapabilityOrigin"
           },
-          "dependencyGraph": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/MultitableDependencyGraph"
-              }
-            ],
-            "nullable": true
+          "fieldPermissions": {
+            "$ref": "#/components/schemas/MultitableFieldPermissions"
+          },
+          "viewPermissions": {
+            "$ref": "#/components/schemas/MultitableViewPermissions"
+          },
+          "rowActions": {
+            "$ref": "#/components/schemas/MultitableRowActions"
           },
           "commentsScope": {
             "$ref": "#/components/schemas/MultitableCommentsScope"
@@ -3358,6 +3448,9 @@
           "fields",
           "record",
           "capabilities",
+          "capabilityOrigin",
+          "fieldPermissions",
+          "rowActions",
           "commentsScope",
           "linkSummaries"
         ]

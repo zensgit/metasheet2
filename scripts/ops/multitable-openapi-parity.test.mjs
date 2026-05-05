@@ -173,6 +173,52 @@ test('multitable openapi stays aligned with runtime contracts', () => {
     '#/components/schemas/MultitableAttachmentSummaryMap',
   )
   assert.equal(
+    schemas.MultitableRecordContext?.properties?.capabilityOrigin?.$ref,
+    '#/components/schemas/MultitableCapabilityOrigin',
+  )
+  assert.equal(
+    schemas.MultitableRecordContext?.properties?.fieldPermissions?.$ref,
+    '#/components/schemas/MultitableFieldPermissions',
+  )
+  assert.equal(
+    schemas.MultitableRecordContext?.properties?.viewPermissions?.$ref,
+    '#/components/schemas/MultitableViewPermissions',
+  )
+  assert.equal(
+    schemas.MultitableRecordContext?.properties?.rowActions?.$ref,
+    '#/components/schemas/MultitableRowActions',
+  )
+  assert.ok(
+    schemas.MultitableRecordContext?.required?.includes('capabilityOrigin'),
+    'record context must document runtime capabilityOrigin',
+  )
+  assert.ok(
+    schemas.MultitableRecordContext?.required?.includes('fieldPermissions'),
+    'record context must document runtime fieldPermissions',
+  )
+  assert.ok(
+    schemas.MultitableRecordContext?.required?.includes('rowActions'),
+    'record context must document runtime rowActions',
+  )
+  assert.equal(
+    Object.hasOwn(schemas.MultitableRecordContext?.properties ?? {}, 'fieldCapabilities'),
+    false,
+    'record context should not expose stale fieldCapabilities',
+  )
+  assert.equal(
+    Object.hasOwn(schemas.MultitableRecordContext?.properties ?? {}, 'dependencyGraph'),
+    false,
+    'record context should not expose stale dependencyGraph',
+  )
+  assert.equal(
+    schemas.MultitableCapabilityOrigin?.properties?.source?.enum?.join(','),
+    'admin,global-rbac,sheet-grant,sheet-scope',
+  )
+  assert.deepEqual(
+    schemas.MultitableCapabilities?.required?.filter((key) => key === 'canManageSheetAccess' || key === 'canExport'),
+    ['canManageSheetAccess', 'canExport'],
+  )
+  assert.equal(
     schemas.MultitableFormContext?.properties?.attachmentSummaries?.$ref,
     '#/components/schemas/MultitableAttachmentSummaryMap',
   )
