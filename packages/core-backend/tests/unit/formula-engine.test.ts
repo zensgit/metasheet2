@@ -39,6 +39,11 @@ describe('Formula Engine', () => {
         expect(result).toBe(15)
       })
 
+      test('Function names should be case-insensitive', async () => {
+        expect(await engine.calculate('=sum(1, 2, 3)', context)).toBe(6)
+        expect(await engine.calculate('=CoUnT(1, 2, "", 4)', context)).toBe(3)
+      })
+
       test('SUM with nested arrays', async () => {
         const result = await engine.calculate('=SUM([[1, 2], [3, 4]])', context)
         expect(result).toBe(10)
@@ -91,6 +96,11 @@ describe('Formula Engine', () => {
       test('CONCATENATE function', async () => {
         const result = await engine.calculate('=CONCATENATE("Hello", " ", "World")', context)
         expect(result).toBe('Hello World')
+      })
+
+      test('Text function names should be case-insensitive', async () => {
+        expect(await engine.calculate('=concatenate("Hello", " ", "World")', context)).toBe('Hello World')
+        expect(await engine.calculate('=LoWeR("HELLO")', context)).toBe('hello')
       })
 
       test('LEFT function', async () => {

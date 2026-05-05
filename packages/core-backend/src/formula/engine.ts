@@ -254,9 +254,9 @@ export class FormulaEngine {
     // In production, use a proper parser like PEG.js or write a full recursive descent parser
 
     // Check if it's a function call
-    const functionMatch = formula.match(/^([A-Z]+)\((.*)\)$/)
+    const functionMatch = formula.match(/^([A-Za-z][A-Za-z0-9_]*)\((.*)\)$/)
     if (functionMatch) {
-      const functionName = functionMatch[1]
+      const functionName = functionMatch[1].toUpperCase()
       const args = this.parseArguments(functionMatch[2])
       return {
         type: 'function',
