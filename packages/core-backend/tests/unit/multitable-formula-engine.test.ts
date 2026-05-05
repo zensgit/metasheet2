@@ -70,6 +70,21 @@ describe('FormulaEngine - new functions', () => {
       const result = await engine.calculate('=CONCAT("bad \\\\","suffix")', makeContext())
       expect(result).toBe('#ERROR!')
     })
+
+    it('does not split operators inside quoted string literals', async () => {
+      const plusResult = await engine.calculate('="A+B"', makeContext())
+      const equalsResult = await engine.calculate('="A=B"', makeContext())
+      const comparisonResult = await engine.calculate('="A=B"="A=B"', makeContext())
+
+      expect(plusResult).toBe('A+B')
+      expect(equalsResult).toBe('A=B')
+      expect(comparisonResult).toBe(true)
+    })
+
+    it('does not split operators inside nested function arguments', async () => {
+      const result = await engine.calculate('=IF("a>b"="a>b","ok","bad")', makeContext())
+      expect(result).toBe('ok')
+    })
   })
 
   describe('DATEDIF', () => {
@@ -186,6 +201,15 @@ describe('MultitableFormulaEngine', () => {
         sampleFields,
       )
       expect(result).toBe('C:\\temp\nline2 done')
+    })
+
+    it('does not split operators inside string field references', async () => {
+      const result = await mtEngine.evaluateField(
+        '={fld_name}="A+B=C"',
+        { fld_name: 'A+B=C' },
+        sampleFields,
+      )
+      expect(result).toBe(true)
     })
   })
 

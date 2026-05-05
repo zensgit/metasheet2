@@ -273,13 +273,13 @@ export class FormulaEngine {
     // Sort operators by length descending to match >= before >
     const operators = ['>=', '<=', '<>', '+', '-', '*', '/', '=', '>', '<']
     for (const op of operators) {
-      const parts = formula.split(op)
-      if (parts.length === 2) {
+      const operatorIndex = this.findTopLevelOperator(formula, op)
+      if (operatorIndex >= 0) {
         return {
           type: 'operator',
           operator: op,
-          left: this.parseFormula(parts[0].trim()),
-          right: this.parseFormula(parts[1].trim())
+          left: this.parseFormula(formula.slice(0, operatorIndex).trim()),
+          right: this.parseFormula(formula.slice(operatorIndex + op.length).trim())
         }
       }
     }
@@ -338,6 +338,40 @@ export class FormulaEngine {
     }
 
     return { type: 'string', value: formula }
+  }
+
+  /**
+   * Find an operator that is not inside quoted strings, function arguments, or arrays.
+   */
+  private findTopLevelOperator(formula: string, operator: string): number {
+    let depth = 0
+    let inQuotes = false
+
+    for (let i = 0; i <= formula.length - operator.length; i++) {
+      const char = formula[i]
+
+      if (char === '"' && (i === 0 || formula[i - 1] !== '\\')) {
+        inQuotes = !inQuotes
+        continue
+      }
+
+      if (inQuotes) continue
+
+      if (char === '(' || char === '[') {
+        depth++
+        continue
+      }
+      if (char === ')' || char === ']') {
+        depth--
+        continue
+      }
+
+      if (depth === 0 && formula.startsWith(operator, i)) {
+        return i
+      }
+    }
+
+    return -1
   }
 
   /**
