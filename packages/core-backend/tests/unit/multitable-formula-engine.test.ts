@@ -87,6 +87,28 @@ describe('FormulaEngine - new functions', () => {
     })
   })
 
+  describe('parenthesized expressions', () => {
+    it('evaluates arithmetic groups inside formulas', async () => {
+      const result = await engine.calculate('=(1+2)*3', makeContext())
+      expect(result).toBe(9)
+    })
+
+    it('evaluates nested arithmetic groups', async () => {
+      const result = await engine.calculate('=((1+2)*(4-1))', makeContext())
+      expect(result).toBe(9)
+    })
+
+    it('evaluates parenthesized function arguments', async () => {
+      const result = await engine.calculate('=SUM((1+2),3)', makeContext())
+      expect(result).toBe(6)
+    })
+
+    it('does not strip partial leading parentheses', async () => {
+      const result = await engine.calculate('=(1+2)+(3+4)', makeContext())
+      expect(result).toBe(10)
+    })
+  })
+
   describe('DATEDIF', () => {
     it('calculates days between dates', async () => {
       const result = await engine.calculate('=DATEDIF("2024-01-01","2024-01-31","D")', makeContext())
@@ -140,6 +162,7 @@ describe('MultitableFormulaEngine', () => {
 
   const sampleFields: MultitableField[] = [
     { id: 'fld_price', name: 'Price', type: 'number' },
+    { id: 'fld_fee', name: 'Fee', type: 'number' },
     { id: 'fld_qty', name: 'Quantity', type: 'number' },
     { id: 'fld_total', name: 'Total', type: 'formula', property: { expression: '={fld_price}*{fld_qty}' } },
     { id: 'fld_name', name: 'Name', type: 'string' },
@@ -174,6 +197,15 @@ describe('MultitableFormulaEngine', () => {
         sampleFields,
       )
       expect(result).toBe(50)
+    })
+
+    it('evaluates parenthesized field reference groups', async () => {
+      const result = await mtEngine.evaluateField(
+        '=({fld_price}+{fld_fee})*{fld_qty}',
+        { fld_price: 10, fld_fee: 2, fld_qty: 5 },
+        sampleFields,
+      )
+      expect(result).toBe(60)
     })
 
     it('handles string field references', async () => {
