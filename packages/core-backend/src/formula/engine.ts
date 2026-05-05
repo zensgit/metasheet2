@@ -307,6 +307,7 @@ export class FormulaEngine {
     // top-level operator to recursively keep the left side grouped first.
     const operatorGroups = [
       ['>=', '<=', '<>', '=', '>', '<'],
+      ['&'],
       ['+', '-'],
       ['*', '/']
     ]
@@ -618,6 +619,7 @@ export class FormulaEngine {
   private evaluateOperator(operator: string, left: unknown, right: unknown): number | boolean | string {
     switch (operator) {
       case '+': return Number(left) + Number(right)
+      case '&': return String(left) + String(right)
       case '-': return (left as number) - (right as number)
       case '*': return (left as number) * (right as number)
       case '/': return right === 0 ? '#DIV/0!' : (left as number) / (right as number)
