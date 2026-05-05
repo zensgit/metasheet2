@@ -2,6 +2,7 @@ import { createApp, h, nextTick } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import MetaFieldManager from '../src/multitable/components/MetaFieldManager.vue'
 import {
+  FORMULA_FUNCTION_DOCS,
   buildFormulaFieldTokenInsertion,
   buildFormulaFunctionInsertion,
   extractFormulaFieldRefs,
@@ -39,14 +40,68 @@ describe('multitable formula editor', () => {
     expect(mathSections[0]).toMatchObject({
       category: 'math',
       label: 'Math',
-      functions: [expect.objectContaining({ name: 'ROUND', insertText: 'ROUND(, 2)' })],
     })
+    expect(mathSections[0].functions).toContainEqual(expect.objectContaining({ name: 'ROUND', insertText: 'ROUND(, 2)' }))
 
     const ifDoc = getFormulaFunctionCatalog('if', 'logic')[0].functions.find((doc) => doc.name === 'IF')
     expect(ifDoc).toBeTruthy()
     expect(buildFormulaFunctionInsertion('', ifDoc!)).toBe('=IF(, , )')
     expect(buildFormulaFunctionInsertion('=SUM({fld_price})', 'today')).toBe('=SUM({fld_price}) TODAY()')
     expect(buildFormulaFieldTokenInsertion('=SUM()', 'fld_tax')).toBe('=SUM() {fld_tax}')
+  })
+
+  it('documents every backend registered formula function', () => {
+    const backendFunctions = [
+      'ABS',
+      'AND',
+      'AVERAGE',
+      'CEILING',
+      'CONCAT',
+      'CONCATENATE',
+      'COUNT',
+      'COUNTA',
+      'DATE',
+      'DATEDIF',
+      'DATEDIFF',
+      'DAY',
+      'FALSE',
+      'FLOOR',
+      'HLOOKUP',
+      'IF',
+      'INDEX',
+      'LEFT',
+      'LEN',
+      'LOWER',
+      'MATCH',
+      'MAX',
+      'MEDIAN',
+      'MID',
+      'MIN',
+      'MOD',
+      'MODE',
+      'MONTH',
+      'NOT',
+      'NOW',
+      'OR',
+      'POWER',
+      'RIGHT',
+      'ROUND',
+      'SQRT',
+      'STDEV',
+      'SUBSTITUTE',
+      'SUM',
+      'SWITCH',
+      'TODAY',
+      'TRIM',
+      'TRUE',
+      'UPPER',
+      'VAR',
+      'VLOOKUP',
+      'YEAR',
+    ]
+    const documentedFunctions = new Set(FORMULA_FUNCTION_DOCS.map((doc) => doc.name))
+
+    expect(backendFunctions.filter((name) => !documentedFunctions.has(name))).toEqual([])
   })
 
   it('documents recently supported formula operators', () => {
