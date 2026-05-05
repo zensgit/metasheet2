@@ -154,6 +154,10 @@ test('multitable openapi stays aligned with runtime contracts', () => {
 
   assert.equal(schemas.MultitableView?.properties?.type?.$ref, '#/components/schemas/MultitableViewType')
   assert.equal(schemas.MultitableField?.properties?.type?.$ref, '#/components/schemas/MultitableFieldType')
+  assert.deepEqual(
+    schemas.MultitableSheetPermissionSubjectType?.enum,
+    ['user', 'role', 'member-group'],
+  )
   assert.equal(
     schemas.MultitableRecordSubscriptionStatus?.properties?.subscription?.allOf?.[0]?.$ref,
     '#/components/schemas/MultitableRecordSubscription',
@@ -167,6 +171,69 @@ test('multitable openapi stays aligned with runtime contracts', () => {
   assert.equal(
     schemas.MultitableViewData?.properties?.attachmentSummaries?.$ref,
     '#/components/schemas/MultitableViewAttachmentSummaries',
+  )
+  assert.equal(
+    schemas.MultitableViewData?.properties?.meta?.$ref,
+    '#/components/schemas/MultitableViewMeta',
+  )
+  assert.equal(
+    schemas.MultitableViewMeta?.properties?.capabilityOrigin?.$ref,
+    '#/components/schemas/MultitableCapabilityOrigin',
+  )
+  assert.equal(
+    schemas.MultitableViewMeta?.properties?.permissions?.$ref,
+    '#/components/schemas/MultitableScopedPermissions',
+  )
+  assert.equal(
+    schemas.MultitableScopedPermissions?.properties?.fieldPermissions?.$ref,
+    '#/components/schemas/MultitableFieldPermissions',
+  )
+  assert.equal(
+    schemas.MultitableScopedPermissions?.properties?.viewPermissions?.$ref,
+    '#/components/schemas/MultitableViewPermissions',
+  )
+  assert.equal(
+    schemas.MultitableScopedPermissions?.properties?.rowActions?.$ref,
+    '#/components/schemas/MultitableRowActions',
+  )
+  assert.equal(
+    schemas.MultitableScopedPermissions?.properties?.rowActionOverrides?.additionalProperties?.$ref,
+    '#/components/schemas/MultitableRowActions',
+  )
+  assert.equal(
+    Object.hasOwn(schemas.MultitableViewData?.properties ?? {}, 'fieldCapabilities'),
+    false,
+    'view data should not expose stale fieldCapabilities',
+  )
+  assert.equal(
+    Object.hasOwn(schemas.MultitableViewData?.properties ?? {}, 'dependencyGraph'),
+    false,
+    'view data should not expose stale dependencyGraph',
+  )
+  assert.equal(
+    schemas.MultitableContext?.properties?.capabilityOrigin?.$ref,
+    '#/components/schemas/MultitableCapabilityOrigin',
+  )
+  assert.equal(
+    schemas.MultitableContext?.properties?.fieldPermissions?.$ref,
+    '#/components/schemas/MultitableFieldPermissions',
+  )
+  assert.equal(
+    schemas.MultitableContext?.properties?.viewPermissions?.$ref,
+    '#/components/schemas/MultitableViewPermissions',
+  )
+  assert.ok(
+    schemas.MultitableContext?.required?.includes('capabilityOrigin'),
+    'context must document runtime capabilityOrigin',
+  )
+  assert.ok(
+    schemas.MultitableContext?.required?.includes('fieldPermissions'),
+    'context must document runtime fieldPermissions',
+  )
+  assert.equal(
+    Object.hasOwn(schemas.MultitableContext?.properties ?? {}, 'fieldCapabilities'),
+    false,
+    'context should not expose stale fieldCapabilities',
   )
   assert.equal(
     schemas.MultitableRecordContext?.properties?.attachmentSummaries?.$ref,
@@ -221,6 +288,36 @@ test('multitable openapi stays aligned with runtime contracts', () => {
   assert.equal(
     schemas.MultitableFormContext?.properties?.attachmentSummaries?.$ref,
     '#/components/schemas/MultitableAttachmentSummaryMap',
+  )
+  assert.equal(
+    schemas.MultitableFormContext?.properties?.capabilityOrigin?.$ref,
+    '#/components/schemas/MultitableCapabilityOrigin',
+  )
+  assert.equal(
+    schemas.MultitableFormContext?.properties?.fieldPermissions?.$ref,
+    '#/components/schemas/MultitableFieldPermissions',
+  )
+  assert.equal(
+    schemas.MultitableFormContext?.properties?.viewPermissions?.$ref,
+    '#/components/schemas/MultitableViewPermissions',
+  )
+  assert.equal(
+    schemas.MultitableFormContext?.properties?.rowActions?.$ref,
+    '#/components/schemas/MultitableRowActions',
+  )
+  assert.ok(
+    schemas.MultitableFormContext?.required?.includes('fieldPermissions'),
+    'form context must document runtime fieldPermissions',
+  )
+  assert.equal(
+    Object.hasOwn(schemas.MultitableFormContext?.properties ?? {}, 'fieldCapabilities'),
+    false,
+    'form context should not expose stale fieldCapabilities',
+  )
+  assert.equal(
+    Object.hasOwn(schemas.MultitableFormContext?.properties ?? {}, 'dependencyGraph'),
+    false,
+    'form context should not expose stale dependencyGraph',
   )
   assert.equal(
     schemas.MultitableFormSubmitResult?.properties?.attachmentSummaries?.$ref,
