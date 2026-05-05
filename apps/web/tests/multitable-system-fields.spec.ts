@@ -155,6 +155,7 @@ describe('multitable system fields', () => {
       'modifiedTime',
       'createdBy',
       'modifiedBy',
+      'autoNumber',
     ]))
 
     nameInput.value = 'Created at'
@@ -174,6 +175,52 @@ describe('multitable system fields', () => {
       sheetId: 'sheet_1',
       name: 'Created at',
       type: 'createdTime',
+    })
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('creates autoNumber fields as read-only system fields', async () => {
+    const createSpy = vi.fn()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaFieldManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          sheets: [],
+          fields: [],
+          onCreateField: createSpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await flushUi()
+
+    const nameInput = container.querySelector('.meta-field-mgr__add-row .meta-field-mgr__input') as HTMLInputElement
+    const typeSelect = container.querySelector('.meta-field-mgr__add-row .meta-field-mgr__select') as HTMLSelectElement
+
+    nameInput.value = 'No.'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    typeSelect.value = 'autoNumber'
+    typeSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+
+    expect(container.textContent).toContain('Auto number is generated')
+
+    ;(Array.from(container.querySelectorAll('.meta-field-mgr__btn-add')) as HTMLButtonElement[])
+      .find((button) => button.textContent?.includes('+ Add'))
+      ?.click()
+    await flushUi()
+
+    expect(createSpy).toHaveBeenCalledWith({
+      sheetId: 'sheet_1',
+      name: 'No.',
+      type: 'autoNumber',
     })
 
     app.unmount()

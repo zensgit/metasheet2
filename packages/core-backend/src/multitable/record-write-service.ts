@@ -65,6 +65,7 @@ export type UniverMetaField = {
     | 'email'
     | 'phone'
     | 'longText'
+    | 'autoNumber'
     | 'createdTime'
     | 'modifiedTime'
     | 'createdBy'

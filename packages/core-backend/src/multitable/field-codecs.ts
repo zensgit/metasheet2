@@ -19,6 +19,7 @@ export type MultitableFieldType =
   | 'email'
   | 'phone'
   | 'longText'
+  | 'autoNumber'
   | 'createdTime'
   | 'modifiedTime'
   | 'createdBy'
@@ -97,6 +98,13 @@ export function mapFieldType(type: string): MultitableFieldType | string {
   if (normalized === 'url') return 'url'
   if (normalized === 'email') return 'email'
   if (normalized === 'phone') return 'phone'
+  if (
+    normalized === 'autonumber' ||
+    normalized === 'auto_number' ||
+    normalized === 'auto-number'
+  ) {
+    return 'autoNumber'
+  }
   if (normalized === 'createdtime' || normalized === 'created_time' || normalized === 'created-time') {
     return 'createdTime'
   }
@@ -305,6 +313,14 @@ export function sanitizeFieldProperty(
     return obj
   }
 
+  if (type === 'autoNumber') {
+    const startAtRaw = typeof obj.startAt === 'number' ? obj.startAt : Number(obj.startAt)
+    const startAt = Number.isFinite(startAtRaw) && startAtRaw > 0
+      ? Math.floor(startAtRaw)
+      : 1
+    return { ...obj, startAt, readOnly: true }
+  }
+
   if (SYSTEM_FIELD_TYPES.has(type)) {
     return { ...obj, readOnly: true }
   }
@@ -508,6 +524,7 @@ export const BATCH1_FIELD_TYPES: ReadonlySet<string> = new Set([
 ])
 
 export const SYSTEM_FIELD_TYPES: ReadonlySet<string> = new Set([
+  'autoNumber',
   'createdTime',
   'modifiedTime',
   'createdBy',

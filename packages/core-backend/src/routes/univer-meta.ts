@@ -129,6 +129,7 @@ import {
   RecordValidationFailedError as RecordCreateValidationFailedError,
   RecordPatchFieldValidationError as RecordServicePatchFieldValidationError,
 } from '../multitable/record-service'
+import { allocateAutoNumberValues } from '../multitable/auto-number-service'
 import {
   createYjsInvalidationPostCommitHook,
   type YjsInvalidator,
@@ -190,6 +191,7 @@ const MULTITABLE_FIELD_TYPES = [
   'email',
   'phone',
   'longText',
+  'autoNumber',
   'createdTime',
   'modifiedTime',
   'createdBy',
@@ -218,6 +220,7 @@ type UniverMetaField = {
     | 'email'
     | 'phone'
     | 'longText'
+    | 'autoNumber'
     | 'createdTime'
     | 'modifiedTime'
     | 'createdBy'
@@ -1054,6 +1057,7 @@ function mapFieldType(type: string): UniverMetaField['type'] {
   if (normalized === 'rollup') return 'rollup'
   if (normalized === 'attachment') return 'attachment'
   if (BATCH1_FIELD_TYPES.has(normalized as any)) return normalized as UniverMetaField['type']
+  if (normalized === 'autonumber' || normalized === 'auto_number' || normalized === 'auto-number') return 'autoNumber'
   if (normalized === 'createdtime' || normalized === 'created_time' || normalized === 'created-time') {
     return 'createdTime'
   }
@@ -1288,6 +1292,12 @@ function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown)
       ...(Number.isFinite(maxFiles) && maxFiles > 0 ? { maxFiles: Math.round(maxFiles) } : {}),
       acceptedMimeTypes: sanitizeStringArray(obj.acceptedMimeTypes),
     }
+  }
+
+  if (type === 'autoNumber') {
+    const startAtRaw = typeof obj.startAt === 'number' ? obj.startAt : Number(obj.startAt)
+    const startAt = Number.isFinite(startAtRaw) && startAtRaw > 0 ? Math.floor(startAtRaw) : 1
+    return { ...obj, startAt, readOnly: true }
   }
 
   if (type === 'createdTime' || type === 'modifiedTime' || type === 'createdBy' || type === 'modifiedBy') {
@@ -4275,6 +4285,7 @@ export function univerMetaRouter(): Router {
         const row = (existing as any).rows[0]
         sheetId = String(row.sheet_id)
         const currentOrder = Number(row.order ?? 0)
+        const currentType = mapFieldType(String(row.type))
 
         const nextName = typeof parsed.data.name === 'string' ? parsed.data.name.trim() : String(row.name)
         const nextType = (parsed.data.type ?? mapFieldType(String(row.type))) as UniverMetaField['type']
@@ -4314,6 +4325,10 @@ export function univerMetaRouter(): Router {
         )
         const updatedRow = (update as any).rows?.[0]
         if (!updatedRow) throw new Error('Update returned no rows')
+
+        if (currentType === 'autoNumber' && nextType !== 'autoNumber') {
+          await query('DELETE FROM meta_field_auto_number_sequences WHERE field_id = $1', [fieldId])
+        }
 
         // Track formula dependencies on update
         if (nextType === 'formula' && nextProperty?.expression) {
@@ -4388,6 +4403,7 @@ export function univerMetaRouter(): Router {
         const order = Number(row.order ?? 0)
 
         await query('DELETE FROM meta_fields WHERE id = $1', [fieldId])
+        await query('DELETE FROM meta_field_auto_number_sequences WHERE field_id = $1', [fieldId])
 
         try {
           await query('DELETE FROM meta_links WHERE field_id = $1', [fieldId])
@@ -6166,6 +6182,8 @@ export function univerMetaRouter(): Router {
           }
           return
         }
+
+        Object.assign(patch, await allocateAutoNumberValues(query, view.sheetId, fields))
 
         const insertRes = await query(
           `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
