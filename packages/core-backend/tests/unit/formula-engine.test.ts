@@ -260,6 +260,17 @@ describe('Formula Engine', () => {
       expect(await engine.calculate('=SUM(1, 2) + "4"', context)).toBe(7)
     })
 
+    test('Text concatenation operator', async () => {
+      expect(await engine.calculate('="Hello" & " " & "World"', context)).toBe('Hello World')
+      expect(await engine.calculate('="Total: " & SUM(1, 2)', context)).toBe('Total: 3')
+      expect(await engine.calculate('=("A" & "B") = "AB"', context)).toBe(true)
+    })
+
+    test('Text concatenation has lower precedence than arithmetic', async () => {
+      expect(await engine.calculate('="Total: " & 1 + 2', context)).toBe('Total: 3')
+      expect(await engine.calculate('=1 + 2 & " items"', context)).toBe('3 items')
+    })
+
     test('Same-precedence arithmetic operators are left-associative', async () => {
       expect(await engine.calculate('=5 - 3 - 1', context)).toBe(1)
       expect(await engine.calculate('=8 / 4 / 2', context)).toBe(1)
