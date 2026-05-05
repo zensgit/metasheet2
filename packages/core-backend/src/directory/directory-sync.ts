@@ -32,6 +32,8 @@ const DEFAULT_ROOT_DEPARTMENT_ID = '1'
 const DEFAULT_PAGE_SIZE = 50
 const DEFAULT_ADMISSION_MODE = 'manual_only'
 const DEFAULT_MEMBER_GROUP_SYNC_MODE = 'disabled'
+const DINGTALK_OPEN_ID_REQUIRED_FOR_GRANT_ERROR =
+  'Directory account is missing DingTalk openId and cannot enable DingTalk login grant; resync DingTalk directory or complete DingTalk OAuth binding first'
 
 type JsonRecord = Record<string, unknown>
 export type DirectoryAdmissionMode = 'manual_only' | 'auto_for_scoped_departments'
@@ -1075,6 +1077,16 @@ function buildDingTalkIdentityExternalKey(corpId: string | null | undefined, ope
   }
 
   return normalizedUnionId || normalizedOpenId
+}
+
+function assertDirectoryAccountCanEnableDingTalkGrant(
+  account: Pick<DirectoryBindingTargetAccountRow, 'corp_id' | 'open_id'>,
+  enableDingTalkGrant: boolean,
+): void {
+  if (!enableDingTalkGrant) return
+  if (!normalizeText(account.corp_id)) return
+  if (normalizeText(account.open_id)) return
+  throw new Error(DINGTALK_OPEN_ID_REQUIRED_FOR_GRANT_ERROR)
 }
 
 function buildRecommendationScore(reasons: DirectoryBindingRecommendationReason[]): number {
@@ -2861,6 +2873,7 @@ async function applyDirectoryAccountBindInTransaction(
   if (!identityExternalKey) {
     throw new Error('Directory account is missing DingTalk openId/unionId and cannot be pre-bound for DingTalk login')
   }
+  assertDirectoryAccountCanEnableDingTalkGrant(account, enableDingTalkGrant)
 
   const profile = JSON.stringify({
     source: 'directory_admin_bind',
@@ -3534,6 +3547,7 @@ export async function bindDirectoryAccount(
   if (!buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)) {
     throw new Error('Directory account is missing DingTalk openId/unionId and cannot be pre-bound for DingTalk login')
   }
+  assertDirectoryAccountCanEnableDingTalkGrant(account, enableDingTalkGrant)
 
   const localUser = await resolveDirectoryBindingUser(normalizedLocalUserRef)
   if (!localUser) throw new Error('Local user not found')
@@ -3604,6 +3618,7 @@ export async function admitDirectoryAccountUser(
   if (!buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)) {
     throw new Error('Directory account is missing DingTalk openId/unionId and cannot be pre-bound for DingTalk login')
   }
+  assertDirectoryAccountCanEnableDingTalkGrant(account, enableDingTalkGrant)
 
   const passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
   let userId = ''

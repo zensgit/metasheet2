@@ -353,7 +353,7 @@ export function adminDirectoryRouter(): Router {
         ? 404
         : /already bound|already linked/i.test(message)
           ? 409
-          : /required|cannot be pre-bound/i.test(message)
+          : /required|cannot be pre-bound|missing DingTalk openId/i.test(message)
             ? 400
             : 500
       jsonError(res, statusCode, 'DIRECTORY_BIND_FAILED', message)
@@ -432,7 +432,7 @@ export function adminDirectoryRouter(): Router {
         ? 404
         : /already exists|already bound|already linked/i.test(message)
           ? 409
-          : /required|invalid|password|cannot be pre-bound/i.test(message)
+          : /required|invalid|password|cannot be pre-bound|missing DingTalk openId/i.test(message)
             ? 400
             : 500
       jsonError(res, statusCode, 'DIRECTORY_ADMISSION_FAILED', message)
@@ -485,7 +485,7 @@ export function adminDirectoryRouter(): Router {
         ? 404
         : /already bound|already linked/i.test(message)
           ? 409
-          : /required|cannot be pre-bound/i.test(message)
+          : /required|cannot be pre-bound|missing DingTalk openId/i.test(message)
             ? 400
             : 500
       jsonError(res, statusCode, 'DIRECTORY_BATCH_BIND_FAILED', message)

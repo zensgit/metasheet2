@@ -91,7 +91,12 @@ describe('dingtalk oauth login gates', () => {
       })
       .mockResolvedValueOnce({ rows: [] })
 
-    await expect(exchangeCodeForUser('code-1')).rejects.toThrow('DingTalk login is not enabled for this user')
+    await expect(exchangeCodeForUser('code-1')).rejects.toMatchObject({
+      name: 'DingTalkLoginPolicyError',
+      statusCode: 403,
+      code: 'grant_required',
+      message: 'DingTalk login is not enabled for this user',
+    })
   })
 
   it('allows email-linked login when strict grant mode is enabled and grant is present', async () => {
@@ -135,7 +140,12 @@ describe('dingtalk oauth login gates', () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
 
-    await expect(exchangeCodeForUser('code-3')).rejects.toThrow('DingTalk account beta@example.com is not linked to an enabled local user')
+    await expect(exchangeCodeForUser('code-3')).rejects.toMatchObject({
+      name: 'DingTalkLoginPolicyError',
+      statusCode: 403,
+      code: 'unlinked_enabled_local_user',
+      message: 'DingTalk account beta@example.com is not linked to an enabled local user',
+    })
   })
 
   it('reports runtime status with grant mode and allowlist details', () => {

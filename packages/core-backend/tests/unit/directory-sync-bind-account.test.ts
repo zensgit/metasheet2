@@ -189,6 +189,126 @@ describe('bindDirectoryAccount', () => {
     expect(pgMocks.transaction).not.toHaveBeenCalled()
   })
 
+  it('rejects enabling DingTalk grant when a corp-scoped directory account is missing openId', async () => {
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'account-1',
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          external_user_id: '0447654442691174',
+          union_id: 'union-1',
+          open_id: null,
+          external_key: 'union-1',
+          name: '林岚',
+          email: null,
+          mobile: '13900001234',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          local_user_id: null,
+          local_user_email: null,
+          local_user_name: null,
+        }],
+      })
+
+    await expect(bindDirectoryAccount('account-1', {
+      localUserRef: 'alpha@example.com',
+      adminUserId: 'admin-1',
+      enableDingTalkGrant: true,
+    })).rejects.toThrow('missing DingTalk openId')
+
+    expect(pgMocks.transaction).not.toHaveBeenCalled()
+  })
+
+  it('allows union-only pre-binding when DingTalk grant is disabled', async () => {
+    const clientQuery = vi.fn().mockResolvedValue({ rows: [] })
+    pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'account-1',
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          external_user_id: '0447654442691174',
+          union_id: 'union-1',
+          open_id: null,
+          external_key: 'union-1',
+          name: '林岚',
+          email: null,
+          mobile: '13900001234',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          local_user_id: null,
+          local_user_email: null,
+          local_user_name: null,
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          directory_account_id: 'account-1',
+          external_user_id: '0447654442691174',
+          union_id: 'union-1',
+          open_id: null,
+          external_key: 'union-1',
+          account_name: '林岚',
+          account_email: null,
+          account_mobile: '13900001234',
+          account_is_active: true,
+          account_updated_at: '2026-04-11T08:00:00.000Z',
+          link_status: 'linked',
+          match_strategy: 'manual_admin',
+          reviewed_by: 'admin-1',
+          review_note: null,
+          link_updated_at: '2026-04-11T08:00:00.000Z',
+          local_user_id: 'user-1',
+          local_user_email: 'alpha@example.com',
+          local_user_name: 'Alpha',
+          department_paths: ['DingTalk CN'],
+        }],
+      })
+
+    const result = await bindDirectoryAccount('account-1', {
+      localUserRef: 'alpha@example.com',
+      adminUserId: 'admin-1',
+      enableDingTalkGrant: false,
+    })
+
+    expect(clientQuery).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO user_external_identities'),
+      expect.arrayContaining([
+        'dingtalk',
+        'union-1',
+        'union-1',
+        null,
+        'dingcorp',
+        'user-1',
+      ]),
+    )
+    expect(clientQuery).not.toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO user_external_auth_grants'),
+      expect.anything(),
+    )
+    expect(result.account.localUser?.id).toBe('user-1')
+  })
+
   it('fails closed when a mobile binding reference matches multiple local users', async () => {
     pgMocks.query
       .mockResolvedValueOnce({
@@ -579,6 +699,43 @@ describe('bindDirectoryAccount', () => {
     })
     expect(inviteLedgerMocks.recordInvite).not.toHaveBeenCalled()
     expect(inviteTokenMocks.issueInviteToken).not.toHaveBeenCalled()
+  })
+
+  it('rejects manual admission with DingTalk grant when the directory account is missing openId', async () => {
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'account-admit-3',
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          external_user_id: '0447654442691199',
+          union_id: 'union-3',
+          open_id: null,
+          external_key: 'union-3',
+          name: '王松松',
+          email: null,
+          mobile: '13900007890',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          local_user_id: null,
+          local_user_email: null,
+          local_user_username: null,
+          local_user_name: null,
+        }],
+      })
+
+    await expect(admitDirectoryAccountUser('account-admit-3', {
+      adminUserId: 'admin-1',
+      name: '王松松',
+      username: 'wss142',
+      mobile: '13900007890',
+      enableDingTalkGrant: true,
+    })).rejects.toThrow('missing DingTalk openId')
+
+    expect(pgMocks.transaction).not.toHaveBeenCalled()
   })
 
   it('removes the bound identity, optionally disables grant, and resets the link on unbind', async () => {
