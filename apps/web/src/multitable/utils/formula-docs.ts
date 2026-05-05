@@ -17,6 +17,8 @@ export interface FormulaFunctionDoc {
   description: string
   example: string
   insertText?: string
+  minArgs?: number
+  maxArgs?: number
 }
 
 export interface FormulaFunctionCategoryDoc {
@@ -486,6 +488,57 @@ export const FORMULA_FUNCTION_DOCS: FormulaFunctionDoc[] = [
 const FUNCTION_CALL_PATTERN = /\b([A-Z][A-Z0-9_]*)\s*\(/g
 const FIELD_REF_PATTERN = /\{([^{}]+)\}/g
 const TRAILING_BINARY_OPERATOR_PATTERN = /(?:>=|<=|<>|[+\-*/^&=><])$/
+const IDENTIFIER_START_PATTERN = /[A-Za-z_]/
+const IDENTIFIER_PART_PATTERN = /[A-Za-z0-9_]/
+
+const FORMULA_FUNCTION_ARITY: Record<string, Pick<FormulaFunctionDoc, 'minArgs' | 'maxArgs'>> = {
+  ABS: { minArgs: 1, maxArgs: 1 },
+  AND: { minArgs: 1 },
+  AVERAGE: { minArgs: 1 },
+  CEILING: { minArgs: 1, maxArgs: 1 },
+  CONCAT: { minArgs: 1 },
+  CONCATENATE: { minArgs: 1 },
+  COUNT: { minArgs: 1 },
+  COUNTA: { minArgs: 1 },
+  DATE: { minArgs: 3, maxArgs: 3 },
+  DATEDIF: { minArgs: 3, maxArgs: 3 },
+  DATEDIFF: { minArgs: 2, maxArgs: 2 },
+  DAY: { minArgs: 1, maxArgs: 1 },
+  FALSE: { minArgs: 0, maxArgs: 0 },
+  FLOOR: { minArgs: 1, maxArgs: 1 },
+  HLOOKUP: { minArgs: 3, maxArgs: 4 },
+  IF: { minArgs: 3, maxArgs: 3 },
+  INDEX: { minArgs: 2, maxArgs: 3 },
+  LEFT: { minArgs: 2, maxArgs: 2 },
+  LEN: { minArgs: 1, maxArgs: 1 },
+  LOWER: { minArgs: 1, maxArgs: 1 },
+  MATCH: { minArgs: 2, maxArgs: 3 },
+  MAX: { minArgs: 1 },
+  MEDIAN: { minArgs: 1 },
+  MID: { minArgs: 3, maxArgs: 3 },
+  MIN: { minArgs: 1 },
+  MOD: { minArgs: 2, maxArgs: 2 },
+  MODE: { minArgs: 1 },
+  MONTH: { minArgs: 1, maxArgs: 1 },
+  NOT: { minArgs: 1, maxArgs: 1 },
+  NOW: { minArgs: 0, maxArgs: 0 },
+  OR: { minArgs: 1 },
+  POWER: { minArgs: 2, maxArgs: 2 },
+  RIGHT: { minArgs: 2, maxArgs: 2 },
+  ROUND: { minArgs: 1, maxArgs: 2 },
+  SQRT: { minArgs: 1, maxArgs: 1 },
+  STDEV: { minArgs: 1 },
+  SUBSTITUTE: { minArgs: 3, maxArgs: 3 },
+  SUM: { minArgs: 1 },
+  SWITCH: { minArgs: 3 },
+  TODAY: { minArgs: 0, maxArgs: 0 },
+  TRIM: { minArgs: 1, maxArgs: 1 },
+  TRUE: { minArgs: 0, maxArgs: 0 },
+  UPPER: { minArgs: 1, maxArgs: 1 },
+  VAR: { minArgs: 1 },
+  VLOOKUP: { minArgs: 3, maxArgs: 4 },
+  YEAR: { minArgs: 1, maxArgs: 1 },
+}
 
 export function searchFormulaFunctionDocs(query: string): FormulaFunctionDoc[] {
   const normalized = query.trim().toUpperCase()
@@ -639,6 +692,226 @@ function getFormulaSyntaxDiagnostics(expression: string): FormulaDiagnostic[] {
   return diagnostics
 }
 
+interface ParsedFormulaFunctionCall {
+  name: string
+  args: string[]
+}
+
+function findClosingParenthesis(expression: string, openIndex: number): number | null {
+  let depth = 0
+  let inQuotes = false
+  let escaped = false
+
+  for (let i = openIndex; i < expression.length; i++) {
+    const char = expression[i]
+
+    if (inQuotes) {
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (char === '\\') {
+        escaped = true
+        continue
+      }
+      if (char === '"') {
+        inQuotes = false
+      }
+      continue
+    }
+
+    if (char === '"') {
+      inQuotes = true
+      continue
+    }
+    if (char === '(') {
+      depth++
+      continue
+    }
+    if (char === ')') {
+      depth--
+      if (depth === 0) return i
+    }
+  }
+
+  return null
+}
+
+function splitFormulaArguments(source: string): string[] {
+  if (!source.trim()) return []
+
+  const args: string[] = []
+  let current = ''
+  let parenthesesDepth = 0
+  let bracketDepth = 0
+  let braceDepth = 0
+  let inQuotes = false
+  let escaped = false
+
+  for (let i = 0; i < source.length; i++) {
+    const char = source[i]
+
+    if (inQuotes) {
+      current += char
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (char === '\\') {
+        escaped = true
+        continue
+      }
+      if (char === '"') {
+        inQuotes = false
+      }
+      continue
+    }
+
+    if (char === '"') {
+      inQuotes = true
+      current += char
+      continue
+    }
+    if (char === '(') {
+      parenthesesDepth++
+      current += char
+      continue
+    }
+    if (char === ')') {
+      parenthesesDepth = Math.max(0, parenthesesDepth - 1)
+      current += char
+      continue
+    }
+    if (char === '[') {
+      bracketDepth++
+      current += char
+      continue
+    }
+    if (char === ']') {
+      bracketDepth = Math.max(0, bracketDepth - 1)
+      current += char
+      continue
+    }
+    if (char === '{') {
+      braceDepth++
+      current += char
+      continue
+    }
+    if (char === '}') {
+      braceDepth = Math.max(0, braceDepth - 1)
+      current += char
+      continue
+    }
+
+    if (char === ',' && parenthesesDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
+      args.push(current.trim())
+      current = ''
+      continue
+    }
+
+    current += char
+  }
+
+  args.push(current.trim())
+  return args
+}
+
+function collectFormulaFunctionCalls(expression: string): ParsedFormulaFunctionCall[] {
+  const calls: ParsedFormulaFunctionCall[] = []
+  let inQuotes = false
+  let escaped = false
+
+  for (let i = 0; i < expression.length; i++) {
+    const char = expression[i]
+
+    if (inQuotes) {
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (char === '\\') {
+        escaped = true
+        continue
+      }
+      if (char === '"') {
+        inQuotes = false
+      }
+      continue
+    }
+
+    if (char === '"') {
+      inQuotes = true
+      continue
+    }
+
+    if (!IDENTIFIER_START_PATTERN.test(char)) continue
+
+    const start = i
+    i++
+    while (i < expression.length && IDENTIFIER_PART_PATTERN.test(expression[i] ?? '')) {
+      i++
+    }
+
+    const rawName = expression.slice(start, i)
+    let cursor = i
+    while (cursor < expression.length && /\s/.test(expression[cursor] ?? '')) {
+      cursor++
+    }
+    if (expression[cursor] !== '(') {
+      i--
+      continue
+    }
+
+    const closeIndex = findClosingParenthesis(expression, cursor)
+    if (closeIndex === null) {
+      i--
+      continue
+    }
+
+    const argsSource = expression.slice(cursor + 1, closeIndex)
+    const args = splitFormulaArguments(argsSource)
+    calls.push({ name: rawName.toUpperCase(), args })
+    calls.push(...collectFormulaFunctionCalls(argsSource))
+    i = closeIndex
+  }
+
+  return calls
+}
+
+function getFormulaFunctionArgumentDiagnostics(expression: string): FormulaDiagnostic[] {
+  const diagnostics: FormulaDiagnostic[] = []
+  const knownFunctions = new Set(FORMULA_FUNCTION_DOCS.map((doc) => doc.name))
+  for (const call of collectFormulaFunctionCalls(expression)) {
+    if (!knownFunctions.has(call.name)) continue
+
+    const emptyArgument = call.args.some((arg) => !arg)
+    if (emptyArgument) {
+      diagnostics.push({ severity: 'error', message: `${call.name} has an empty argument.` })
+      continue
+    }
+
+    const arity = FORMULA_FUNCTION_ARITY[call.name]
+    if (!arity) continue
+
+    if (typeof arity.minArgs === 'number' && call.args.length < arity.minArgs) {
+      diagnostics.push({
+        severity: 'error',
+        message: `${call.name} expects at least ${arity.minArgs} argument${arity.minArgs === 1 ? '' : 's'}.`,
+      })
+      continue
+    }
+
+    if (typeof arity.maxArgs === 'number' && call.args.length > arity.maxArgs) {
+      diagnostics.push({
+        severity: 'error',
+        message: `${call.name} expects at most ${arity.maxArgs} argument${arity.maxArgs === 1 ? '' : 's'}.`,
+      })
+    }
+  }
+
+  return diagnostics
+}
+
 export function validateFormulaExpression(expression: string, fields: MetaField[]): FormulaDiagnostic[] {
   const diagnostics: FormulaDiagnostic[] = []
   const trimmed = expression.trim()
@@ -648,6 +921,7 @@ export function validateFormulaExpression(expression: string, fields: MetaField[
   }
 
   diagnostics.push(...getFormulaSyntaxDiagnostics(trimmed))
+  diagnostics.push(...getFormulaFunctionArgumentDiagnostics(trimmed))
 
   const fieldIds = new Set(fields.map((field) => field.id))
   const fieldNames = new Set(fields.map((field) => field.name))
