@@ -71,6 +71,7 @@ Customer GATE import UI regression follow-up:
 - Secret-like field detection and password-field clearing on import.
 - Page-level regression coverage for the import textarea, import button, warning list, rendered form values, and password clearing.
 - Page-level regression coverage for generated GATE JSON download redaction, hidden anchor cleanup, and deferred object URL release.
+- Page-level regression coverage for authenticated postdeploy smoke and summary commands in the PoC readiness panel.
 
 GATE JSON copy redaction UI regression follow-up:
 
@@ -94,6 +95,20 @@ GATE JSON download redaction UI regression follow-up:
   - preflight tests: 16/16 passed.
   - evidence tests: 31/31 passed.
   - mock PoC demo ended with `K3 WISE PoC mock chain verified end-to-end (PASS)`.
+- `git diff --check`: passed.
+
+Postdeploy smoke command UI follow-up:
+
+- `k3WiseSetup.spec.ts`: 24/24 passed.
+- `k3WiseSetupView.spec.ts`: 3/3 passed. The local jsdom run printed the existing `WebSocket server error: Port is already in use` warning, but all assertions passed.
+- `k3WiseSetup.spec.ts` + `k3WiseSetupView.spec.ts` + `platform-shell-nav.spec.ts`: 30/30 passed.
+- `@metasheet/web type-check`: passed.
+- `@metasheet/web build`: passed. Vite reported the existing dynamic import and large chunk warnings.
+- `verify:integration-k3wise:poc`: passed.
+  - preflight tests: 16/16 passed.
+  - evidence tests: 31/31 passed.
+  - mock PoC demo ended with `K3 WISE PoC mock chain verified end-to-end (PASS)`.
+- `node scripts/ops/integration-k3wise-postdeploy-smoke.mjs --help` and `node scripts/ops/integration-k3wise-postdeploy-summary.mjs --help`: passed, confirming the surfaced flags still match CLI contracts.
 - `git diff --check`: passed.
 
 ## Not Covered

@@ -33,7 +33,7 @@ The page adds a PoC readiness panel with:
 
 - GATE JSON copy and download actions.
 - customer-returned GATE JSON import.
-- visible preflight, offline mock, and evidence commands.
+- visible authenticated postdeploy smoke, postdeploy summary, preflight, offline mock, and evidence commands.
 - inline blocking issues before an operator can copy/download the GATE packet.
 
 ## Customer GATE Import
@@ -57,8 +57,9 @@ Import behavior is intentionally conservative:
 2. Fill PLM source and rollback fields in `客户 GATE / PLM Source`.
 3. Use `PoC 准备` to copy or download the redacted GATE JSON.
 4. Fill real credentials outside Git if needed.
-5. Run the displayed preflight command.
-6. Run `pnpm run verify:integration-k3wise:poc` before customer live execution.
+5. Before customer live execution, run the displayed postdeploy smoke and summary commands with `METASHEET_BASE_URL`, `METASHEET_AUTH_TOKEN_FILE`, and `METASHEET_TENANT_ID` set.
+6. Run the displayed preflight command.
+7. Run `pnpm run verify:integration-k3wise:poc` before customer live execution.
 
 For a customer-returned packet:
 
@@ -77,6 +78,7 @@ The view exposes stable test selectors for the customer GATE import path:
 - `data-testid="k3-wise-gate-import-warnings"`
 - `data-testid="k3-wise-gate-copy-button"`
 - `data-testid="k3-wise-gate-download-button"`
+- `data-testid="k3-wise-gate-commands"`
 - `data-testid="k3-wise-status"`
 
 `apps/web/tests/k3WiseSetupView.spec.ts` mounts the real setup page, mocks the integration API bootstrap calls, pastes a customer-style GATE JSON payload, clicks the explicit import button, and verifies:
@@ -89,6 +91,7 @@ The view exposes stable test selectors for the customer GATE import path:
 The same spec also covers the outbound copy and download paths:
 
 - visible form fields can make the GATE draft ready.
+- the page renders authenticated postdeploy smoke and summary commands before customer live execution commands.
 - the copy button writes the generated JSON to `navigator.clipboard`.
 - the download button writes the same generated JSON into a Blob-backed download.
 - submitted K3/PLM password values are redacted as `<fill-outside-git>`.

@@ -224,6 +224,8 @@ export interface K3WiseSetupValidationIssue {
 }
 
 export interface K3WisePocCommandSet {
+  postdeploySmoke: string
+  postdeploySummary: string
   preflight: string
   offlineMock: string
   evidence: string
@@ -917,6 +919,8 @@ export function applyK3WiseGateJsonToForm(form: K3WiseSetupForm, jsonText: strin
 
 export function buildK3WisePocCommandSet(gatePath = 'artifacts/integration-live-poc/gate.json'): K3WisePocCommandSet {
   return {
+    postdeploySmoke: 'node scripts/ops/integration-k3wise-postdeploy-smoke.mjs --base-url "$METASHEET_BASE_URL" --token-file "$METASHEET_AUTH_TOKEN_FILE" --tenant-id "$METASHEET_TENANT_ID" --require-auth --out-dir artifacts/integration-live-poc/postdeploy-smoke',
+    postdeploySummary: 'node scripts/ops/integration-k3wise-postdeploy-summary.mjs --input artifacts/integration-live-poc/postdeploy-smoke/integration-k3wise-postdeploy-smoke.json --require-auth-signoff',
     preflight: `node scripts/ops/integration-k3wise-live-poc-preflight.mjs --input ${gatePath} --out-dir artifacts/integration-live-poc`,
     offlineMock: 'pnpm run verify:integration-k3wise:poc',
     evidence: 'node scripts/ops/integration-k3wise-live-poc-evidence.mjs --packet artifacts/integration-live-poc/packet.json --evidence artifacts/integration-live-poc/evidence.json --out-dir artifacts/integration-live-poc/evidence',

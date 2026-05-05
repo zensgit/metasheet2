@@ -479,6 +479,11 @@ describe('K3 WISE setup helpers', () => {
     expect(stringifyK3WiseGateDraft(form)).toContain('"fieldMappings"')
 
     const commands = buildK3WisePocCommandSet('tmp/gate.json')
+    expect(commands.postdeploySmoke).toContain('integration-k3wise-postdeploy-smoke.mjs')
+    expect(commands.postdeploySmoke).toContain('--require-auth')
+    expect(commands.postdeploySmoke).toContain('METASHEET_AUTH_TOKEN_FILE')
+    expect(commands.postdeploySummary).toContain('integration-k3wise-postdeploy-summary.mjs')
+    expect(commands.postdeploySummary).toContain('--require-auth-signoff')
     expect(commands.preflight).toContain('--input tmp/gate.json')
     expect(commands.offlineMock).toBe('pnpm run verify:integration-k3wise:poc')
     expect(commands.evidence).toContain('integration-k3wise-live-poc-evidence.mjs')

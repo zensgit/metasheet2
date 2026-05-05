@@ -224,6 +224,12 @@ describe('IntegrationK3WiseSetupView', () => {
     fillReadyGateForm(container)
     await flushUi()
 
+    const commands = container.querySelector('[data-testid="k3-wise-gate-commands"]')?.textContent || ''
+    expect(commands).toContain('integration-k3wise-postdeploy-smoke.mjs')
+    expect(commands).toContain('--require-auth')
+    expect(commands).toContain('integration-k3wise-postdeploy-summary.mjs')
+    expect(commands).toContain('--require-auth-signoff')
+
     const copyButton = container.querySelector('[data-testid="k3-wise-gate-copy-button"]') as HTMLButtonElement | null
     expect(copyButton).not.toBeNull()
     expect(copyButton?.disabled).toBe(false)

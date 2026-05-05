@@ -207,7 +207,11 @@
               {{ issue.message }}
             </li>
           </ul>
-          <div class="k3-setup__commands">
+          <div class="k3-setup__commands" data-testid="k3-wise-gate-commands">
+            <strong>Postdeploy smoke</strong>
+            <code>{{ gateCommands.postdeploySmoke }}</code>
+            <strong>Postdeploy summary</strong>
+            <code>{{ gateCommands.postdeploySummary }}</code>
             <strong>Preflight</strong>
             <code>{{ gateCommands.preflight }}</code>
             <strong>Offline mock</strong>
