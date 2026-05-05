@@ -137,7 +137,6 @@ import { listRecordRevisions } from '../multitable/record-history-service'
 import {
   getRecordSubscriptionStatus,
   listRecordSubscriptionNotifications,
-  listRecordSubscriptions,
   subscribeRecord,
   unsubscribeRecord,
 } from '../multitable/record-subscription-service'
@@ -3743,21 +3742,21 @@ export function univerMetaRouter(): Router {
       const readable = await requireRecordReadable(req, pool.query.bind(pool), sheetId, recordId)
       if ('status' in readable) return res.status(readable.status).json(readable.body)
 
-      const [items, status] = await Promise.all([
-        listRecordSubscriptions(pool.query.bind(pool), { sheetId, recordId }),
-        getRecordSubscriptionStatus(pool.query.bind(pool), { sheetId, recordId, userId: readable.access.userId }),
-      ])
+      const status = await getRecordSubscriptionStatus(pool.query.bind(pool), {
+        sheetId,
+        recordId,
+        userId: readable.access.userId,
+      })
       return res.json({
         ok: true,
         data: {
-          items,
           subscribed: status.subscribed,
           subscription: status.subscription,
         },
       })
     } catch (err) {
       if (isUndefinedTableError(err, 'meta_record_subscriptions')) {
-        return res.json({ ok: true, data: { items: [], subscribed: false, subscription: null } })
+        return res.json({ ok: true, data: { subscribed: false, subscription: null } })
       }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })

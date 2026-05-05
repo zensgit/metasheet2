@@ -24,7 +24,10 @@ import {
 } from './post-commit-hooks'
 import { BATCH1_FIELD_TYPES, coerceBatch1Value, normalizeMultiSelectValue, validateLongTextValue } from './field-codecs'
 import { recordRecordRevision } from './record-history-service'
-import { notifyRecordSubscribers } from './record-subscription-service'
+import {
+  notifyRecordSubscribersBestEffort,
+  type NotifyRecordSubscribersInput,
+} from './record-subscription-service'
 
 // ---------------------------------------------------------------------------
 // Shared types (mirrors the ones in univer-meta.ts to avoid coupling)
@@ -478,6 +481,7 @@ export class RecordWriteService {
     // -----------------------------------------------------------------------
     // Step 1: DB transaction
     // -----------------------------------------------------------------------
+    const pendingSubscriberNotifications: NotifyRecordSubscribersInput[] = []
     const updates = await this.pool.transaction(async ({ query }) => {
       const updated: Array<{ recordId: string; version: number }> = []
 
@@ -615,7 +619,7 @@ export class RecordWriteService {
           patch,
           snapshot: { ...previousData, ...patch },
         })
-        await notifyRecordSubscribers(query, {
+        pendingSubscriberNotifications.push({
           sheetId,
           recordId,
           eventType: 'record.updated',
@@ -684,7 +688,18 @@ export class RecordWriteService {
     })
 
     // -----------------------------------------------------------------------
-    // Step 2: Post-commit hooks (best effort, immediately after commit)
+    // Step 2: Subscriber notifications (best effort, after commit)
+    // -----------------------------------------------------------------------
+    for (const notification of pendingSubscriberNotifications) {
+      await notifyRecordSubscribersBestEffort(
+        this.pool.query.bind(this.pool),
+        notification,
+        'record-write',
+      )
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 3: Post-commit hooks (best effort, immediately after commit)
     // -----------------------------------------------------------------------
     if (this.postCommitHooks.length > 0 && updates.length > 0) {
       const context: RecordPostCommitContext = {
@@ -706,7 +721,7 @@ export class RecordWriteService {
     }
 
     // -----------------------------------------------------------------------
-    // Step 3: Computed field recalculation (lookup / rollup)
+    // Step 4: Computed field recalculation (lookup / rollup)
     // -----------------------------------------------------------------------
     let computedRecords: Array<{ recordId: string; data: Record<string, unknown> }> | undefined
     let updatedRowsForSummaries: UniverMetaRecord[] = []

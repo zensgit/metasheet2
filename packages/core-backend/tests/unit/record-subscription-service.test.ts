@@ -5,6 +5,7 @@ import {
   listRecordSubscriptionNotifications,
   listRecordSubscriptions,
   notifyRecordSubscribers,
+  notifyRecordSubscribersBestEffort,
   subscribeRecord,
   unsubscribeRecord,
 } from '../../src/multitable/record-subscription-service'
@@ -99,6 +100,25 @@ describe('record-subscription-service', () => {
     expect(query).toHaveBeenNthCalledWith(2, expect.stringContaining('INSERT INTO meta_record_subscription_notifications'), [
       expect.stringContaining('"event_type":"record.updated"'),
     ])
+  })
+
+  it('keeps watcher notification enqueue best-effort for write paths', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const query = vi.fn().mockRejectedValue(new Error('meta_record_subscriptions missing'))
+
+    await expect(notifyRecordSubscribersBestEffort(query, {
+      sheetId: 'sheet_1',
+      recordId: 'rec_1',
+      eventType: 'record.updated',
+      actorId: 'actor_1',
+      revisionId: '11111111-1111-1111-1111-111111111111',
+    }, 'test-record-write')).resolves.toBeNull()
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[test-record-write] Failed to notify record subscribers',
+      expect.any(Error),
+    )
+    warnSpy.mockRestore()
   })
 
   it('lists current user record subscription notifications', async () => {
