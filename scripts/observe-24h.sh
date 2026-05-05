@@ -41,6 +41,11 @@ REPORT_DIR="claudedocs"
 ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-""}  # Slack/Webhook for CRIT alerts
 HOOK_CRIT_CMD=${HOOK_CRIT_CMD:-""}          # Custom command on CRIT
 CREATE_GH_ISSUE=${CREATE_GH_ISSUE:-"false"} # Auto-create GitHub issues
+if [ -n "$ALERT_WEBHOOK_URL" ]; then
+  ALERT_WEBHOOK_STATUS="configured"
+else
+  ALERT_WEBHOOK_STATUS="disabled"
+fi
 
 # Cold start exemption and smoothing
 COLD_START_SAMPLES=1                        # Skip alerts for first N samples
@@ -78,7 +83,7 @@ echo "  - Cold Start Exemption: First ${COLD_START_SAMPLES} samples"
 echo "  - P99 Smoothing: Median of last ${SMOOTHING_WINDOW} samples"
 echo ""
 echo "🔔 Alert Hooks:"
-echo "  - Webhook: ${ALERT_WEBHOOK_URL:-disabled}"
+echo "  - Webhook: ${ALERT_WEBHOOK_STATUS}"
 echo "  - Custom CMD: ${HOOK_CRIT_CMD:-disabled}"
 echo "  - GitHub Issues: ${CREATE_GH_ISSUE}"
 echo ""

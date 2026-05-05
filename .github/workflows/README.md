@@ -62,6 +62,10 @@ metadata only. It verifies that DingTalk stability has deploy SSH inputs plus
 one supported Alertmanager webhook secret, and that K3 automatic deploy smoke is
 using `METASHEET_TENANT_ID` with `K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH=true`.
 
+To configure the DingTalk Alertmanager webhook secret without printing the URL,
+use `scripts/ops/set-dingtalk-alertmanager-webhook-secret.mjs`. See
+`docs/operations/dingtalk-alertmanager-webhook-secret-runbook.md`.
+
 ## Manual Dispatch (Nightly)
 
 1. Actions → Phase 5 Nightly Validation (Regression) → Run workflow.
