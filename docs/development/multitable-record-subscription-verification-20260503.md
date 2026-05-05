@@ -13,6 +13,9 @@ pnpm --filter @metasheet/core-backend exec vitest run \
   tests/unit/record-write-service.test.ts \
   tests/unit/comment-service.test.ts \
   --reporter=dot
+pnpm --filter @metasheet/core-backend exec vitest run \
+  tests/integration/multitable-record-patch.api.test.ts \
+  --reporter=dot
 pnpm --filter @metasheet/web exec vitest run \
   tests/multitable-record-drawer.spec.ts \
   tests/multitable-client.spec.ts \
@@ -32,6 +35,11 @@ Frontend focused tests:
 
 - 2 files passed;
 - 31 tests passed.
+
+Record patch integration regression:
+
+- 1 file passed;
+- 6 tests passed.
 
 Type/build gates:
 
@@ -64,6 +72,10 @@ Frontend coverage includes:
 `RecordWriteService` tests intentionally log post-commit hook failures in existing test cases that assert failed hooks do not fail the write.
 
 Frontend Vitest printed `WebSocket server error: Port is already in use`; tests still completed successfully.
+
+## CI Follow-Up
+
+PR #1290 initially failed `test (18.x)` in `tests/integration/multitable-record-patch.api.test.ts` because the mocked SQL fixture did not know about the new `meta_record_subscriptions` lookup and notification insert. The route returned 500 only in the test harness. The fixture now returns empty watcher rows for those legacy route extraction scenarios, and the targeted integration file passes locally.
 
 ## Follow-Up
 

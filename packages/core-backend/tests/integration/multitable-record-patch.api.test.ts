@@ -124,6 +124,12 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
         if (sql.includes('INSERT INTO meta_record_revisions')) {
           return { rows: [], rowCount: 1 }
         }
+        if (sql.includes('FROM meta_record_subscriptions')) {
+          return { rows: [] }
+        }
+        if (sql.includes('INSERT INTO meta_record_subscription_notifications')) {
+          return { rows: [], rowCount: 0 }
+        }
         if (
           sql.includes('FROM meta_records WHERE id = $1 AND sheet_id = $2') &&
           sql.includes('SELECT id, version, data')
@@ -331,6 +337,12 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
         if (sql.includes('INSERT INTO meta_record_revisions')) {
           return { rows: [], rowCount: 1 }
         }
+        if (sql.includes('FROM meta_record_subscriptions')) {
+          return { rows: [] }
+        }
+        if (sql.includes('INSERT INTO meta_record_subscription_notifications')) {
+          return { rows: [], rowCount: 0 }
+        }
         if (sql.includes('SELECT foreign_record_id FROM meta_links WHERE field_id = $1 AND record_id = $2')) {
           return { rows: [{ foreign_record_id: 'rec_c1' }, { foreign_record_id: 'rec_c2' }] }
         }
@@ -435,6 +447,12 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
         }
         if (sql.includes('INSERT INTO meta_record_revisions')) {
           return { rows: [], rowCount: 1 }
+        }
+        if (sql.includes('FROM meta_record_subscriptions')) {
+          return { rows: [] }
+        }
+        if (sql.includes('INSERT INTO meta_record_subscription_notifications')) {
+          return { rows: [], rowCount: 0 }
         }
         if (
           sql.includes('FROM meta_records WHERE id = $1 AND sheet_id = $2') &&
