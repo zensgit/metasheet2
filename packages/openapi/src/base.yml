@@ -1609,6 +1609,94 @@ components:
         data:
           type: object
           additionalProperties: true
+    MultitableRecordSubscription:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        sheetId:
+          type: string
+        recordId:
+          type: string
+        userId:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - sheetId
+        - recordId
+        - userId
+        - createdAt
+        - updatedAt
+    MultitableRecordSubscriptionStatus:
+      type: object
+      properties:
+        subscribed:
+          type: boolean
+        subscription:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/MultitableRecordSubscription'
+        items:
+          type: array
+          description: Legacy watcher list emitted by older runtimes. Clients should rely on `subscribed` and `subscription` for the current user.
+          items:
+            $ref: '#/components/schemas/MultitableRecordSubscription'
+      required:
+        - subscribed
+        - subscription
+    MultitableRecordSubscriptionNotificationType:
+      type: string
+      enum:
+        - record.updated
+        - comment.created
+    MultitableRecordSubscriptionNotification:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        sheetId:
+          type: string
+        recordId:
+          type: string
+        userId:
+          type: string
+        eventType:
+          $ref: '#/components/schemas/MultitableRecordSubscriptionNotificationType'
+        actorId:
+          type: string
+          nullable: true
+        revisionId:
+          type: string
+          nullable: true
+        commentId:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        readAt:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - id
+        - sheetId
+        - recordId
+        - userId
+        - eventType
+        - actorId
+        - revisionId
+        - commentId
+        - createdAt
+        - readAt
     MultitableXlsxImportResponse:
       type: object
       properties:
