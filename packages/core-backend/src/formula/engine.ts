@@ -276,6 +276,10 @@ export class FormulaEngine {
       return { type: 'number', value: strictNum }
     }
 
+    if (this.isWrappedExpression(formula)) {
+      return this.parseFormula(formula.slice(1, -1).trim())
+    }
+
     // Check for operators from lowest to highest precedence. Operators in the
     // same precedence group are left-associative, so split on the rightmost
     // top-level operator to recursively keep the left side grouped first.
@@ -397,6 +401,36 @@ export class FormulaEngine {
       return exponentIsAdjacent && (/\d/.test(mantissaTail) || mantissaTail === '.')
     }
     return ['+', '-', '*', '/', '=', '>', '<', '(', '[', ','].includes(previous)
+  }
+
+  private isWrappedExpression(formula: string): boolean {
+    if (!formula.startsWith('(') || !formula.endsWith(')')) return false
+
+    let depth = 0
+    let inQuotes = false
+
+    for (let i = 0; i < formula.length; i++) {
+      const char = formula[i]
+
+      if (char === '"' && (i === 0 || formula[i - 1] !== '\\')) {
+        inQuotes = !inQuotes
+        continue
+      }
+
+      if (inQuotes) continue
+
+      if (char === '(') {
+        depth++
+        continue
+      }
+
+      if (char === ')') {
+        depth--
+        if (depth === 0 && i < formula.length - 1) return false
+      }
+    }
+
+    return depth === 0 && !inQuotes
   }
 
   /**

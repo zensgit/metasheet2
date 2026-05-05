@@ -258,6 +258,17 @@ describe('Formula Engine', () => {
       expect(await engine.calculate('=2 * 3 <> 7 - 1', context)).toBe(false)
     })
 
+    test('Parenthesized arithmetic groups', async () => {
+      expect(await engine.calculate('=(1 + 2) * 3', context)).toBe(9)
+      expect(await engine.calculate('=10 / (2 + 3)', context)).toBe(2)
+      expect(await engine.calculate('=((1 + 2) * (4 - 1))', context)).toBe(9)
+    })
+
+    test('Parenthesized comparison groups', async () => {
+      expect(await engine.calculate('=(1 + 2) > 2', context)).toBe(true)
+      expect(await engine.calculate('=(1 + 2) = (5 - 2)', context)).toBe(true)
+    })
+
     test('Division by zero', async () => {
       expect(await engine.calculate('=5 / 0', context)).toBe('#DIV/0!')
     })
