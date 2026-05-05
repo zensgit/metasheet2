@@ -291,6 +291,17 @@ describe('Formula Engine', () => {
       expect(await engine.calculate('=+SUM(1, 2)', context)).toBe(3)
     })
 
+    test('Function calls participate in arithmetic expressions', async () => {
+      expect(await engine.calculate('=SUM(1, 2) + SUM(3, 4)', context)).toBe(10)
+      expect(await engine.calculate('=SUM(10, 5) / SUM(1, 2)', context)).toBe(5)
+      expect(await engine.calculate('=(SUM(1, 2) + 3) * 2', context)).toBe(12)
+    })
+
+    test('Function calls participate in comparison expressions', async () => {
+      expect(await engine.calculate('=SUM(1, 2) = SUM(3)', context)).toBe(true)
+      expect(await engine.calculate('=MAX(1, 5) > MIN(2, 3)', context)).toBe(true)
+    })
+
     test('Division by zero', async () => {
       expect(await engine.calculate('=5 / 0', context)).toBe('#DIV/0!')
     })
