@@ -485,6 +485,7 @@ export const FORMULA_FUNCTION_DOCS: FormulaFunctionDoc[] = [
 
 const FUNCTION_CALL_PATTERN = /\b([A-Z][A-Z0-9_]*)\s*\(/g
 const FIELD_REF_PATTERN = /\{([^{}]+)\}/g
+const TRAILING_BINARY_OPERATOR_PATTERN = /(?:>=|<=|<>|[+\-*/^&=><])$/
 
 export function searchFormulaFunctionDocs(query: string): FormulaFunctionDoc[] {
   const normalized = query.trim().toUpperCase()
@@ -547,6 +548,97 @@ export function extractFormulaFieldRefs(expression: string): string[] {
   return refs
 }
 
+function getFormulaSyntaxDiagnostics(expression: string): FormulaDiagnostic[] {
+  const diagnostics: FormulaDiagnostic[] = []
+  let parenthesesDepth = 0
+  let bracketDepth = 0
+  let braceDepth = 0
+  let inQuotes = false
+  let escaped = false
+
+  for (let i = 0; i < expression.length; i++) {
+    const char = expression[i]
+
+    if (inQuotes) {
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (char === '\\') {
+        escaped = true
+        continue
+      }
+      if (char === '"') {
+        inQuotes = false
+      }
+      continue
+    }
+
+    if (char === '"') {
+      inQuotes = true
+      continue
+    }
+
+    if (char === '(') {
+      parenthesesDepth++
+      continue
+    }
+    if (char === ')') {
+      if (parenthesesDepth === 0) {
+        diagnostics.push({ severity: 'error', message: 'Unexpected closing parenthesis.' })
+      } else {
+        parenthesesDepth--
+      }
+      continue
+    }
+
+    if (char === '[') {
+      bracketDepth++
+      continue
+    }
+    if (char === ']') {
+      if (bracketDepth === 0) {
+        diagnostics.push({ severity: 'error', message: 'Unexpected closing array bracket.' })
+      } else {
+        bracketDepth--
+      }
+      continue
+    }
+
+    if (char === '{') {
+      braceDepth++
+      continue
+    }
+    if (char === '}') {
+      if (braceDepth === 0) {
+        diagnostics.push({ severity: 'error', message: 'Unexpected closing field-reference brace.' })
+      } else {
+        braceDepth--
+      }
+    }
+  }
+
+  if (inQuotes) {
+    diagnostics.push({ severity: 'error', message: 'Quoted string is not closed.' })
+  }
+  if (parenthesesDepth > 0) {
+    diagnostics.push({ severity: 'error', message: 'Parentheses are not balanced.' })
+  }
+  if (bracketDepth > 0) {
+    diagnostics.push({ severity: 'error', message: 'Array brackets are not balanced.' })
+  }
+  if (braceDepth > 0) {
+    diagnostics.push({ severity: 'error', message: 'Field reference braces are not balanced.' })
+  }
+
+  const withoutWhitespace = expression.trimEnd()
+  if (TRAILING_BINARY_OPERATOR_PATTERN.test(withoutWhitespace)) {
+    diagnostics.push({ severity: 'error', message: 'Formula cannot end with a binary operator.' })
+  }
+
+  return diagnostics
+}
+
 export function validateFormulaExpression(expression: string, fields: MetaField[]): FormulaDiagnostic[] {
   const diagnostics: FormulaDiagnostic[] = []
   const trimmed = expression.trim()
@@ -555,11 +647,7 @@ export function validateFormulaExpression(expression: string, fields: MetaField[
     return diagnostics
   }
 
-  const openCount = (trimmed.match(/\(/g) ?? []).length
-  const closeCount = (trimmed.match(/\)/g) ?? []).length
-  if (openCount !== closeCount) {
-    diagnostics.push({ severity: 'error', message: 'Parentheses are not balanced.' })
-  }
+  diagnostics.push(...getFormulaSyntaxDiagnostics(trimmed))
 
   const fieldIds = new Set(fields.map((field) => field.id))
   const fieldNames = new Set(fields.map((field) => field.name))
