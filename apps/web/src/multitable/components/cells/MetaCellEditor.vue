@@ -68,6 +68,19 @@
       @keydown.escape="emit('cancel')"
     />
 
+    <!-- location: address-only editor; coordinates can still be supplied through API. -->
+    <input
+      v-else-if="field.type === 'location'"
+      ref="inputRef"
+      class="meta-cell-editor__input"
+      type="text"
+      placeholder="Enter address"
+      :value="locationAddressValue(modelValue)"
+      @input="emit('update:modelValue', locationValueFromAddress(($event.target as HTMLInputElement).value))"
+      @keydown.enter="emit('confirm')"
+      @keydown.escape="emit('cancel')"
+    />
+
     <!-- number -->
     <input
       v-else-if="field.type === 'number'"
@@ -258,7 +271,7 @@ import {
   validateAttachmentSelection,
 } from '../../utils/field-config'
 import { linkActionLabel as formatLinkActionLabel } from '../../utils/link-fields'
-import { formatFieldDisplay } from '../../utils/field-display'
+import { formatFieldDisplay, locationAddressValue, locationValueFromAddress } from '../../utils/field-display'
 import { useYjsCellBinding, type YjsCellBinding } from '../../composables/useYjsCellBinding'
 
 const props = defineProps<{

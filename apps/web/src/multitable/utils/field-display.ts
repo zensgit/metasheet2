@@ -40,6 +40,29 @@ function summarizeAttachmentCount(count: number): string {
   return count === 1 ? '1 attachment' : `${count} attachments`
 }
 
+export function locationAddressValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') return ''
+  if (typeof value === 'string' || typeof value === 'number') return String(value)
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    const obj = value as Record<string, unknown>
+    const rawAddress = obj.address ?? obj.name ?? obj.fullAddress
+    if (rawAddress !== null && rawAddress !== undefined && String(rawAddress).trim().length > 0) {
+      return String(rawAddress)
+    }
+    const latitude = obj.latitude ?? obj.lat
+    const longitude = obj.longitude ?? obj.lng ?? obj.lon
+    if (latitude !== null && latitude !== undefined && longitude !== null && longitude !== undefined) {
+      return `${latitude}, ${longitude}`
+    }
+  }
+  return String(value)
+}
+
+export function locationValueFromAddress(address: string): { address: string } | null {
+  const trimmed = address.trim()
+  return trimmed ? { address: trimmed } : null
+}
+
 export function formatFieldDisplay(params: {
   field: MetaField
   value: unknown
@@ -80,6 +103,11 @@ export function formatFieldDisplay(params: {
     const { max } = resolveRatingFieldProperty(field.property)
     const filled = Math.max(0, Math.min(max, Math.round(num)))
     return `${'★'.repeat(filled)}${'☆'.repeat(max - filled)}`
+  }
+
+  if (field.type === 'location') {
+    const location = locationAddressValue(value).trim()
+    return location.length > 0 ? location : '—'
   }
 
   if (field.type === 'select' || field.type === 'multiSelect') {

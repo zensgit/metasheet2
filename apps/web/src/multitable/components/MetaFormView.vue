@@ -66,6 +66,20 @@
             @input="formData[field.id] = ($event.target as HTMLInputElement).value"
           />
           <input
+            v-else-if="field.type === 'location'"
+            :id="`field_${field.id}`"
+            class="meta-form-view__input"
+            :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
+            type="text"
+            placeholder="Enter address"
+            :disabled="isFieldReadOnly(field.id)"
+            :aria-required="field.required ? 'true' : undefined"
+            :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
+            :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
+            :value="locationAddressValue(formData[field.id])"
+            @input="formData[field.id] = locationValueFromAddress(($event.target as HTMLInputElement).value)"
+          />
+          <input
             v-else-if="field.type === 'number'"
             :id="`field_${field.id}`"
             class="meta-form-view__input"
@@ -261,7 +275,7 @@ import {
   validateAttachmentSelection,
 } from '../utils/field-config'
 import { linkActionLabel } from '../utils/link-fields'
-import { formatFieldDisplay } from '../utils/field-display'
+import { formatFieldDisplay, locationAddressValue, locationValueFromAddress } from '../utils/field-display'
 import { isSystemField } from '../utils/system-fields'
 
 const props = defineProps<{
