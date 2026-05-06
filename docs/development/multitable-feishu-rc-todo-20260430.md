@@ -94,6 +94,12 @@ Do not mark an item done if:
   - Development MD: `docs/development/multitable-feishu-rc-142-api-smoke-design-20260506.md`
   - Verification MD: `docs/development/multitable-feishu-rc-142-api-smoke-verification-20260506.md`
   - Verification summary: `API_BASE=http://142.171.239.56:8081 CONFIRM_WRITE=1 ALLOW_INSTALL=1 EXPECTED_COMMIT=aec377f80 node scripts/ops/multitable-feishu-rc-api-smoke.mjs` exited 0; 11/11 checks passed; browser-only smoke items remain unchecked.
+- [x] Harden browser staging smoke blockers found on 142.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-142-ui-smoke-hardening-design-20260506.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-142-ui-smoke-hardening-verification-20260506.md`
+  - Verification summary: retry import mapping, exact form attachment labels, scoped record comment selectors, and upgraded-DB comment scope inserts fixed locally; focused backend/comment tests pass; 142 full UI smoke remains pending until this fix is deployed.
 - [x] Produce RC audit result MD with P0/P1/P2 defects.
   - PR: pending
   - Merge commit: pending

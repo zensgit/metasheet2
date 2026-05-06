@@ -42,6 +42,31 @@ function exactTextRegex(value) {
   return new RegExp(`^\\s*${String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`)
 }
 
+function formFieldByLabel(page, fieldName) {
+  return page.locator('.meta-form-view__field').filter({
+    has: page.locator('.meta-form-view__label').filter({ hasText: exactTextRegex(fieldName) }),
+  }).first()
+}
+
+function recordCommentsButton(page) {
+  return page.locator('.meta-record-drawer__btn--comment[title="Comments"]').first()
+}
+
+async function addAndResolveRecordComment(page) {
+  const commentsDrawer = page.locator('.meta-comments-drawer')
+  await commentsDrawer.waitFor({ state: 'visible', timeout: timeoutMs })
+  const commentText = `smoke comment ${Date.now()}`
+  const commentBox = commentsDrawer.getByRole('textbox', { name: 'Add a comment...' })
+  await commentBox.fill(commentText)
+  await commentsDrawer.getByRole('button', { name: 'Send' }).click()
+  const commentThread = commentsDrawer.locator('.meta-comments-drawer__thread').filter({ hasText: commentText }).first()
+  await commentThread.waitFor({ state: 'attached', timeout: timeoutMs })
+  await commentThread.scrollIntoViewIfNeeded()
+  await commentThread.locator('.meta-comments-drawer__resolve').click()
+  await commentThread.locator('.meta-comments-drawer__badge').getByText('Resolved', { exact: true }).waitFor({ state: 'visible', timeout: timeoutMs })
+  return commentText
+}
+
 export function renderSmokeMarkdown(reportPayload) {
   const checks = Array.isArray(reportPayload?.checks) ? reportPayload.checks : []
   const failingChecks = checks.filter((item) => item && item.ok === false)
@@ -1631,6 +1656,11 @@ async function importRecordsViaGridWithRetry(page, {
     await page.getByText('Import Records').waitFor({ state: 'visible', timeout: timeoutMs })
     await page.locator('input.meta-import__file-input[type="file"]').setInputFiles(csvPath)
     await page.getByRole('button', { name: 'Preview' }).click()
+    await ensureImportFieldMappedByColumnIndex(page, {
+      columnIndex: 0,
+      fieldId: titleFieldId,
+      label: 'grid retry import title mapping',
+    })
     const importButton = page.getByRole('button', { name: /Import 2 record\(s\)/ })
     await waitForActionButtonEnabled(importButton, 'grid retry import button enable')
     await importButton.click()
@@ -2000,23 +2030,17 @@ async function verifyFormUploadAndComments(page, { baseId, sheetId, viewId, reco
 
   const uploadPath = path.join(outputDir, attachmentName)
   fs.writeFileSync(uploadPath, `multitable smoke ${new Date().toISOString()}\n`)
-  const attachmentField = page.locator('.meta-form-view__field').filter({ hasText: attachmentFieldName }).first()
+  const attachmentField = formFieldByLabel(page, attachmentFieldName)
   await attachmentField.locator('input[type="file"]').setInputFiles(uploadPath)
   await attachmentField.getByText('Uploading...').waitFor({ state: 'visible', timeout: timeoutMs })
   await attachmentField.getByText('Uploading...').waitFor({ state: 'hidden', timeout: timeoutMs })
   await page.getByRole('button', { name: 'Save' }).click()
   await page.getByText('Changes saved').first().waitFor({ state: 'visible', timeout: timeoutMs })
 
-  const commentsButton = page.getByRole('button', { name: '💬' })
+  const commentsButton = recordCommentsButton(page)
   await commentsButton.click()
   await page.getByRole('heading', { name: 'Comments' }).waitFor({ state: 'visible', timeout: timeoutMs })
-  const commentText = `smoke comment ${Date.now()}`
-  const commentBox = page.getByRole('textbox', { name: 'Add a comment...' })
-  await commentBox.fill(commentText)
-  await page.getByRole('button', { name: 'Send' }).click()
-  await page.getByText(commentText).waitFor({ state: 'visible', timeout: timeoutMs })
-  await page.getByRole('button', { name: 'Resolve' }).click()
-  await page.locator('.meta-comments-drawer__badge').getByText('Resolved', { exact: true }).waitFor({ state: 'visible', timeout: timeoutMs })
+  await addAndResolveRecordComment(page)
 
   await page.screenshot({ path: path.join(outputDir, 'form-comments.png'), fullPage: true })
   record('ui.form.upload-comments', true, { recordId, attachmentName })
@@ -2050,7 +2074,7 @@ async function verifyFormAttachmentLifecycle(page, {
     return uploadPath
   })
 
-  const attachmentField = page.locator('.meta-form-view__field').filter({ hasText: attachmentFieldName }).first()
+  const attachmentField = formFieldByLabel(page, attachmentFieldName)
   await attachmentField.locator('input[type="file"]').setInputFiles(uploads)
   await attachmentField.getByText('Uploading...').waitFor({ state: 'visible', timeout: timeoutMs })
   await attachmentField.getByText('Uploading...').waitFor({ state: 'hidden', timeout: timeoutMs })
@@ -2097,16 +2121,10 @@ async function verifyFormAttachmentLifecycle(page, {
     attachmentIds: uploadedAttachments.map((item) => item.id),
   })
 
-  const commentsButton = page.getByRole('button', { name: '💬' })
+  const commentsButton = recordCommentsButton(page)
   await commentsButton.click()
   await page.getByRole('heading', { name: 'Comments' }).waitFor({ state: 'visible', timeout: timeoutMs })
-  const commentText = `smoke comment ${Date.now()}`
-  const commentBox = page.getByRole('textbox', { name: 'Add a comment...' })
-  await commentBox.fill(commentText)
-  await page.getByRole('button', { name: 'Send' }).click()
-  await page.getByText(commentText).waitFor({ state: 'visible', timeout: timeoutMs })
-  await page.getByRole('button', { name: 'Resolve' }).click()
-  await page.locator('.meta-comments-drawer__badge').getByText('Resolved', { exact: true }).waitFor({ state: 'visible', timeout: timeoutMs })
+  await addAndResolveRecordComment(page)
 
   await page.screenshot({ path: path.join(outputDir, 'form-comments.png'), fullPage: true })
   record('ui.form.upload-comments', true, { recordId, attachmentNames })
@@ -2132,7 +2150,7 @@ async function verifyAttachmentDeleteClear(page, {
     extra: { mode: 'form', recordId },
   })
 
-  const attachmentField = page.locator('.meta-form-view__field').filter({ hasText: attachmentFieldName }).first()
+  const attachmentField = formFieldByLabel(page, attachmentFieldName)
   const initialRecord = await fetchRecord(token, sheetId, recordId)
   let remainingAttachmentIds = (initialRecord.attachmentSummaries?.[attachmentFieldId] ?? []).map((item) => item.id)
   cleanupAttachmentIds.clear()
