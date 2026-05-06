@@ -19,6 +19,26 @@ Record exact staging evidence:
 - Browser:
 - Backend log source:
 
+## Optional API Smoke Helper
+
+Run this before manual browser smoke to collect repeatable backend/API evidence:
+
+```bash
+API_BASE="<staging-url>" \
+AUTH_TOKEN="<redacted>" \
+CONFIRM_WRITE=1 \
+ALLOW_INSTALL=1 \
+EXPECTED_COMMIT="<deployed-main-sha>" \
+pnpm verify:multitable-feishu-rc:api-smoke
+```
+
+Expected artifacts:
+
+- `output/multitable-feishu-rc-api-smoke/<timestamp>/report.json`
+- `output/multitable-feishu-rc-api-smoke/<timestamp>/report.md`
+
+This helper covers API health, auth, template availability/install, batch field creation, record create/patch, conditional-formatting persistence, and public-form submit. It does not replace the manual UI checks below.
+
 ## Smoke 1 - Basic Sheet Lifecycle
 
 - [ ] Create a base.
