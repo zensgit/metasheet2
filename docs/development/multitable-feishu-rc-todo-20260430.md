@@ -403,7 +403,12 @@ These are not RC blockers.
   - Development MD: `docs/development/multitable-number-format-design-20260505.md`
   - Verification MD: `docs/development/multitable-number-format-verification-20260505.md`
   - Verification summary: backend sanitizer, frontend formatter/field-manager/editor tests, backend build, frontend type-check, whitespace guard, and CI passed; Strict E2E was expected skip.
-- [ ] Template library V1.
+- [x] Template library V1.
+  - PR: #1356
+  - Merge commit: `f503af7b2c674f44bf1127be0cc31fb3bde0eeef`
+  - Development MD: `docs/development/multitable-template-library-v1-design-20260506.md`
+  - Verification MD: `docs/development/multitable-template-library-v1-verification-20260506.md`
+  - Verification summary: built-in template catalog plus atomic install route and Workbench entry shipped; focused backend/frontend tests, backend build, frontend type-check, OpenAPI parity, whitespace guard, and CI passed; Strict E2E was expected skip.
 - [x] Native person field migration.
   - PR: #1353
   - Merge commit: `58da251dc209e34fbf3a3a5e968aa16d059c759a`
