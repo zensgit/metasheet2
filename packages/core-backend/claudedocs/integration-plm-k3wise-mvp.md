@@ -676,6 +676,28 @@ node --test scripts/ops/integration-k3wise-postdeploy-workflow-contract.test.mjs
 
 `pnpm run verify:integration-k3wise:poc` 是 CI 入口：它串起 preflight 单测、evidence 单测、端到端 mock PoC demo，并在 `Plugin System Tests` 的独立 Node 20 job 中执行，不依赖客户凭据或真实外部系统。
 
+### 10.1.1 交付状态判定
+
+当 postdeploy smoke、客户 GATE preflight、客户 live evidence 逐步产生后，用统一 readiness gate 合并证据：
+
+```bash
+node scripts/ops/integration-k3wise-delivery-readiness.mjs \
+  --postdeploy-smoke output/integration-k3wise-postdeploy-smoke/manual/integration-k3wise-postdeploy-smoke.json \
+  --preflight-packet artifacts/integration-live-poc/packet.json \
+  --live-evidence-report artifacts/integration-live-poc/evidence/integration-k3wise-live-poc-evidence-report.json \
+  --out-dir artifacts/integration-k3wise/delivery-readiness \
+  --fail-on-blocked
+```
+
+输出：
+
+- `INTERNAL_READY_WAITING_CUSTOMER_GATE`：部署侧 K3 WISE control-plane 已通过，等待客户 GATE 答卷。
+- `CUSTOMER_TRIAL_READY`：客户 GATE 已经生成 Save-only preflight packet，可以进入客户测试账套 live PoC。
+- `CUSTOMER_TRIAL_SIGNED_OFF`：客户 live evidence 为 PASS，可以准备生产变更评审。
+- `BLOCKED`：至少一个 gate 失败，不能进入下一阶段。
+
+注意：`CUSTOMER_TRIAL_SIGNED_OFF` 仍不等于生产可直接上线；生产使用还需要客户变更批准、备份/回滚确认和上线窗口。
+
 ### 10.2 测试账套验收
 
 客户测试账套必须完成：
