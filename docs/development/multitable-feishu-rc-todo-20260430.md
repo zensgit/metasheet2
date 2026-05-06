@@ -372,7 +372,12 @@ These are not RC blockers.
 - [ ] Hierarchy drag-to-reparent.
 - [ ] Hierarchy server-side cycle prevention.
 - [ ] DateTime field with timezone.
-- [ ] Number format: decimals, thousands, unit.
+- [x] Number format: decimals, thousands, unit.
+  - PR: #1323
+  - Merge commit: `1e5237439b048d0515a885110134d77024fcf54f`
+  - Development MD: `docs/development/multitable-number-format-design-20260505.md`
+  - Verification MD: `docs/development/multitable-number-format-verification-20260505.md`
+  - Verification summary: backend sanitizer, frontend formatter/field-manager/editor tests, backend build, frontend type-check, whitespace guard, and CI passed; Strict E2E was expected skip.
 - [ ] Template library V1.
 - [ ] Native person field migration.
 - [ ] Barcode field.
