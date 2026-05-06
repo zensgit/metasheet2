@@ -51,6 +51,7 @@ export type UniverMetaField = {
     | 'number'
     | 'boolean'
     | 'date'
+    | 'dateTime'
     | 'formula'
     | 'select'
     | 'multiSelect'

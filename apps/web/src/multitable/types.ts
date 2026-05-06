@@ -8,6 +8,7 @@ export type MetaFieldType =
   | 'number'
   | 'boolean'
   | 'date'
+  | 'dateTime'
   | 'formula'
   | 'select'
   | 'multiSelect'

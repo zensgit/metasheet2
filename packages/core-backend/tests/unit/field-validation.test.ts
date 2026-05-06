@@ -439,6 +439,10 @@ describe('getDefaultValidationRules', () => {
     expect(getDefaultValidationRules('location')).toHaveLength(0)
   })
 
+  test('dateTime type returns empty defaults because write coercion validates timestamp shape', () => {
+    expect(getDefaultValidationRules('dateTime')).toHaveLength(0)
+  })
+
   test('select type returns enum from options', () => {
     const rules = getDefaultValidationRules('select', {
       options: [{ value: 'red' }, { value: 'blue' }],

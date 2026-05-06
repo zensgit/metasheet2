@@ -159,10 +159,10 @@ watch(
   { immediate: true },
 )
 
-const dateFields = computed(() => props.fields.filter((field) => field.type === 'date'))
+const dateFields = computed(() => props.fields.filter((field) => field.type === 'date' || field.type === 'dateTime'))
 const titleFields = computed(() => props.fields)
 const numericFields = computed(() => props.fields.filter((field) => ['number', 'percent', 'currency', 'rating'].includes(field.type)))
-const groupableFields = computed(() => props.fields.filter((field) => ['select', 'string', 'boolean', 'date'].includes(field.type)))
+const groupableFields = computed(() => props.fields.filter((field) => ['select', 'string', 'boolean', 'date', 'dateTime'].includes(field.type)))
 
 function parseDate(value: unknown): Date | null {
   if (!value) return null

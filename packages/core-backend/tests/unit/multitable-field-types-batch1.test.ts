@@ -1,5 +1,5 @@
 /**
- * MF2/MF3 field types — currency / percent / rating / url / email / phone / barcode / location / longText.
+ * MF2/MF3 field types — currency / percent / rating / url / email / phone / barcode / location / dateTime / longText.
  *
  * Covers:
  *   - mapFieldType: each new type is recognised (not falling through to 'string').
@@ -26,6 +26,7 @@ import {
   serializeFieldRow,
   validateEmailValue,
   validateBarcodeValue,
+  validateDateTimeValue,
   validateLocationValue,
   validateLongTextValue,
   validatePhoneValue,
@@ -42,6 +43,7 @@ describe('mapFieldType — MF2 batch-1', () => {
     expect(mapFieldType('phone')).toBe('phone')
     expect(mapFieldType('barcode')).toBe('barcode')
     expect(mapFieldType('location')).toBe('location')
+    expect(mapFieldType('dateTime')).toBe('dateTime')
   })
 
   it('is case-insensitive and trims whitespace', () => {
@@ -52,7 +54,15 @@ describe('mapFieldType — MF2 batch-1', () => {
   it('keeps legacy types working', () => {
     expect(mapFieldType('string')).toBe('string')
     expect(mapFieldType('number')).toBe('number')
+    expect(mapFieldType('date')).toBe('date')
     expect(mapFieldType('select')).toBe('select')
+  })
+
+  it('recognises dateTime aliases without collapsing them to date', () => {
+    expect(mapFieldType('datetime')).toBe('dateTime')
+    expect(mapFieldType('date_time')).toBe('dateTime')
+    expect(mapFieldType('date-time')).toBe('dateTime')
+    expect(mapFieldType('timestamp')).toBe('dateTime')
   })
 
   it('recognises multiSelect aliases without falling back to select', () => {
@@ -77,7 +87,7 @@ describe('mapFieldType — MF2 batch-1', () => {
 
   it('exposes BATCH1_FIELD_TYPES set with normalized runtime types', () => {
     expect(Array.from(BATCH1_FIELD_TYPES).sort()).toEqual([
-      'barcode', 'currency', 'email', 'location', 'percent', 'phone', 'rating', 'url',
+      'barcode', 'currency', 'dateTime', 'email', 'location', 'percent', 'phone', 'rating', 'url',
     ])
   })
 })
@@ -181,6 +191,19 @@ describe('sanitizeFieldProperty — url / email / phone / barcode / location', (
 
   it('keeps custom keys for forward-compat', () => {
     expect(sanitizeFieldProperty('url', { hint: 'External link' })).toEqual({ hint: 'External link' })
+  })
+})
+
+describe('sanitizeFieldProperty — dateTime', () => {
+  it('round-trips a valid IANA timezone', () => {
+    expect(sanitizeFieldProperty('dateTime', { timezone: 'Asia/Shanghai' })).toEqual({
+      timezone: 'Asia/Shanghai',
+    })
+  })
+
+  it('falls back to UTC on missing or invalid timezone', () => {
+    expect(sanitizeFieldProperty('dateTime', {})).toEqual({ timezone: 'UTC' })
+    expect(sanitizeFieldProperty('dateTime', { timezone: 'Invalid/Zone' })).toEqual({ timezone: 'UTC' })
   })
 })
 
@@ -480,6 +503,23 @@ describe('validateLocationValue', () => {
   })
 })
 
+describe('validateDateTimeValue', () => {
+  it('normalizes string and numeric timestamps to ISO strings', () => {
+    expect(validateDateTimeValue('2026-05-06T10:30:00+08:00', 'fld_datetime')).toBe('2026-05-06T02:30:00.000Z')
+    expect(validateDateTimeValue(Date.UTC(2026, 4, 6, 2, 30, 0), 'fld_datetime')).toBe('2026-05-06T02:30:00.000Z')
+  })
+
+  it('returns null for empty datetime values', () => {
+    expect(validateDateTimeValue(null, 'fld_datetime')).toBeNull()
+    expect(validateDateTimeValue('', 'fld_datetime')).toBeNull()
+  })
+
+  it('rejects invalid datetime values and unsupported shapes', () => {
+    expect(() => validateDateTimeValue('not-a-date', 'fld_datetime')).toThrow(/Invalid DateTime/)
+    expect(() => validateDateTimeValue({ iso: '2026-05-06' }, 'fld_datetime')).toThrow(/DateTime value must/)
+  })
+})
+
 describe('coerceBatch1Value — dispatch', () => {
   it('dispatches to currency / percent / rating coercion', () => {
     expect(coerceBatch1Value('currency', { code: 'USD', decimals: 2 }, 'fld', '99.99')).toBe(99.99)
@@ -493,6 +533,7 @@ describe('coerceBatch1Value — dispatch', () => {
     expect(coerceBatch1Value('phone', undefined, 'fld', '+86 138 0000 0000')).toBe('+86 138 0000 0000')
     expect(coerceBatch1Value('barcode', undefined, 'fld', '  6901234567890  ')).toBe('6901234567890')
     expect(coerceBatch1Value('location', undefined, 'fld', '  Shanghai Tower  ')).toEqual({ address: 'Shanghai Tower' })
+    expect(coerceBatch1Value('dateTime', undefined, 'fld', '2026-05-06T10:30:00+08:00')).toBe('2026-05-06T02:30:00.000Z')
   })
 
   it('uses default rating max when property missing', () => {
@@ -518,6 +559,7 @@ describe('coerceBatch1Value — dispatch', () => {
     expect(coerceBatch1Value('phone', undefined, 'fld', null)).toBeNull()
     expect(coerceBatch1Value('barcode', undefined, 'fld', '')).toBeNull()
     expect(coerceBatch1Value('location', undefined, 'fld', '')).toBeNull()
+    expect(coerceBatch1Value('dateTime', undefined, 'fld', '')).toBeNull()
   })
 
   it('surfaces validation errors as thrown exceptions', () => {

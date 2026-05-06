@@ -198,7 +198,15 @@ function mapFieldType(type: string): UniverMetaField['type'] {
   const normalized = type.trim().toLowerCase()
   if (normalized === 'number') return 'number'
   if (normalized === 'boolean' || normalized === 'checkbox') return 'boolean'
-  if (normalized === 'date' || normalized === 'datetime') return 'date'
+  if (normalized === 'date') return 'date'
+  if (
+    normalized === 'datetime' ||
+    normalized === 'date_time' ||
+    normalized === 'date-time' ||
+    normalized === 'timestamp'
+  ) {
+    return 'dateTime'
+  }
   if (normalized === 'formula') return 'formula'
   if (normalized === 'select') return 'select'
   if (

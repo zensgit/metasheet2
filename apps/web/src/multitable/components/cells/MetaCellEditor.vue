@@ -11,6 +11,17 @@
       @keydown.enter="emit('confirm')"
       @keydown.escape="emit('cancel')"
     />
+    <!-- datetime field type -->
+    <input
+      v-else-if="field.type === 'dateTime'"
+      ref="inputRef"
+      class="meta-cell-editor__input"
+      type="datetime-local"
+      :value="dateTimeInputValue(modelValue)"
+      @input="emit('update:modelValue', dateTimeValueFromLocalInput(($event.target as HTMLInputElement).value))"
+      @keydown.enter="emit('confirm')"
+      @keydown.escape="emit('cancel')"
+    />
     <!-- string: date-like -->
     <input
       v-else-if="field.type === 'string' && isDateLike"
@@ -271,7 +282,13 @@ import {
   validateAttachmentSelection,
 } from '../../utils/field-config'
 import { linkActionLabel as formatLinkActionLabel } from '../../utils/link-fields'
-import { formatFieldDisplay, locationAddressValue, locationValueFromAddress } from '../../utils/field-display'
+import {
+  dateTimeInputValue,
+  dateTimeValueFromLocalInput,
+  formatFieldDisplay,
+  locationAddressValue,
+  locationValueFromAddress,
+} from '../../utils/field-display'
 import { useYjsCellBinding, type YjsCellBinding } from '../../composables/useYjsCellBinding'
 
 const props = defineProps<{
