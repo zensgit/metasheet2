@@ -82,6 +82,12 @@ Do not mark an item done if:
 - [ ] Smoke test Hierarchy view rendering and child creation.
 - [ ] Smoke test public form submit path.
 - [ ] Smoke test automation send_email save/execute path.
+- [x] Create executable API smoke helper for repeatable staging evidence.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-api-smoke-design-20260506.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-api-smoke-verification-20260506.md`
+  - Verification summary: `node --test scripts/ops/multitable-feishu-rc-api-smoke.test.mjs`, `node --check` for runner/test, and `git diff --check`; real staging run remains pending.
 - [x] Produce RC audit result MD with P0/P1/P2 defects.
   - PR: pending
   - Merge commit: pending
