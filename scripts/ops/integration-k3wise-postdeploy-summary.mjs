@@ -88,6 +88,12 @@ function renderMissingSummary(inputPath, { requireAuthSignoff = false } = {}) {
 
 function inferInternalTrialSignoff(evidence) {
   if (evidence?.signoff?.internalTrial === 'pass') {
+    if (!evidence?.ok) {
+      return { status: 'BLOCKED', reason: 'one or more smoke checks failed' }
+    }
+    if (!evidence?.authenticated) {
+      return { status: 'BLOCKED', reason: 'authenticated checks did not run' }
+    }
     return { status: 'PASS', reason: evidence.signoff.reason || 'authenticated smoke passed' }
   }
   if (evidence?.signoff?.internalTrial === 'blocked') {
