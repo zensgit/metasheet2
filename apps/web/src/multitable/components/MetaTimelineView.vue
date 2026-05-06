@@ -263,7 +263,7 @@ watch(
   { immediate: true },
 )
 
-const dateFields = computed(() => props.fields.filter((f) => f.type === 'date'))
+const dateFields = computed(() => props.fields.filter((f) => f.type === 'date' || f.type === 'dateTime'))
 const labelFields = computed(() => props.fields)
 
 const displayField = computed(() =>

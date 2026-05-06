@@ -3,6 +3,7 @@ export type MultitableProvisioningFieldType =
   | 'number'
   | 'boolean'
   | 'date'
+  | 'dateTime'
   | 'formula'
   | 'select'
   | 'multiSelect'

@@ -16,7 +16,34 @@ function formatDate(value: unknown): string {
   return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
 }
 
-function formatDateTime(value: unknown): string {
+export function resolveDateTimeTimezone(property?: Record<string, unknown> | null): string {
+  const timezone = typeof property?.timezone === 'string' && property.timezone.trim().length > 0
+    ? property.timezone.trim()
+    : 'UTC'
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(new Date(0))
+    return timezone
+  } catch {
+    return 'UTC'
+  }
+}
+
+export function dateTimeInputValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') return ''
+  const date = new Date(String(value))
+  if (Number.isNaN(date.getTime())) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+export function dateTimeValueFromLocalInput(value: string): string | null {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  const date = new Date(trimmed)
+  return Number.isNaN(date.getTime()) ? null : date.toISOString()
+}
+
+function formatDateTime(value: unknown, timezone?: string): string {
   if (value === null || value === undefined || value === '') return '—'
   const date = new Date(String(value))
   if (Number.isNaN(date.getTime())) return String(value)
@@ -26,6 +53,7 @@ function formatDateTime(value: unknown): string {
     day: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
+    timeZone: timezone,
   })
 }
 
@@ -73,6 +101,7 @@ export function formatFieldDisplay(params: {
   if (value === null || value === undefined || value === '') return '—'
 
   if (field.type === 'date') return formatDate(value)
+  if (field.type === 'dateTime') return formatDateTime(value, resolveDateTimeTimezone(field.property))
   if (field.type === 'createdTime' || field.type === 'modifiedTime') return formatDateTime(value)
   if (isSystemFieldType(field.type)) return String(value)
   if (field.type === 'boolean') return value ? 'Yes' : 'No'

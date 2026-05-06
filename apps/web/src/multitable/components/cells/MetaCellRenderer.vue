@@ -13,6 +13,11 @@
       <span class="meta-cell-renderer__date">{{ dateDisplay }}</span>
     </template>
 
+    <!-- datetime -->
+    <template v-else-if="field.type === 'dateTime'">
+      <span class="meta-cell-renderer__date-time">{{ displayValue }}</span>
+    </template>
+
     <!-- system fields -->
     <template v-else-if="isSystemField">
       <span class="meta-cell-renderer__system" :title="displayValue">{{ displayValue }}</span>
@@ -249,6 +254,11 @@ const conditionalClass = computed(() => {
   color: #227447;
 }
 .meta-cell-renderer__date { color: #606266; }
+.meta-cell-renderer__date-time {
+  color: #475569;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
 .meta-cell-renderer__system {
   color: #64748b;
   font-variant-numeric: tabular-nums;

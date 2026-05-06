@@ -12,6 +12,7 @@ const expectedFieldTypes = [
   'number',
   'boolean',
   'date',
+  'dateTime',
   'formula',
   'select',
   'multiSelect',

@@ -5,6 +5,7 @@ export type MultitableFieldType =
   | 'number'
   | 'boolean'
   | 'date'
+  | 'dateTime'
   | 'formula'
   | 'select'
   | 'multiSelect'
@@ -80,7 +81,15 @@ export function mapFieldType(type: string): MultitableFieldType | string {
   const normalized = type.trim().toLowerCase()
   if (normalized === 'number') return 'number'
   if (normalized === 'boolean' || normalized === 'checkbox') return 'boolean'
-  if (normalized === 'date' || normalized === 'datetime') return 'date'
+  if (normalized === 'date') return 'date'
+  if (
+    normalized === 'datetime' ||
+    normalized === 'date_time' ||
+    normalized === 'date-time' ||
+    normalized === 'timestamp'
+  ) {
+    return 'dateTime'
+  }
   if (normalized === 'formula') return 'formula'
   if (normalized === 'select') return 'select'
   if (
@@ -338,6 +347,17 @@ export function sanitizeFieldProperty(
     return { ...obj, max }
   }
 
+  if (type === 'dateTime') {
+    const rawTimezone = typeof obj.timezone === 'string' ? obj.timezone.trim() : ''
+    let timezone = rawTimezone || 'UTC'
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(new Date(0))
+    } catch {
+      timezone = 'UTC'
+    }
+    return { ...obj, timezone }
+  }
+
   if (type === 'url' || type === 'email' || type === 'phone' || type === 'barcode' || type === 'location' || type === 'longText') {
     return obj
   }
@@ -378,7 +398,7 @@ export function serializeFieldRow(row: any): MultitableField {
 }
 
 // ---------------------------------------------------------------------------
-// MF2 field-types batch 1: currency / percent / rating / url / email / phone / barcode / location
+// MF2 field-types batch 1: currency / percent / rating / url / email / phone / barcode / location / dateTime
 // ---------------------------------------------------------------------------
 //
 // Validation regex chosen to match Feishu's lenient client-side checks and
@@ -561,6 +581,18 @@ export function validateLocationValue(value: unknown, fieldId: string): Location
   }
 }
 
+export function validateDateTimeValue(value: unknown, fieldId: string): string | null {
+  if (value === null || value === undefined || value === '') return null
+  if (typeof value !== 'string' && typeof value !== 'number' && !(value instanceof Date)) {
+    throw new Error(`DateTime value must be a string, number, or Date for ${fieldId}`)
+  }
+  const date = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    throw new Error(`Invalid DateTime for ${fieldId}: ${String(value)}`)
+  }
+  return date.toISOString()
+}
+
 export function normalizeMultiSelectValue(
   value: unknown,
   fieldId: string,
@@ -614,6 +646,7 @@ export function coerceBatch1Value(
   if (fieldType === 'phone') return validatePhoneValue(value, fieldId)
   if (fieldType === 'barcode') return validateBarcodeValue(value, fieldId)
   if (fieldType === 'location') return validateLocationValue(value, fieldId)
+  if (fieldType === 'dateTime') return validateDateTimeValue(value, fieldId)
   return value
 }
 
@@ -626,6 +659,7 @@ export const BATCH1_FIELD_TYPES: ReadonlySet<string> = new Set([
   'phone',
   'barcode',
   'location',
+  'dateTime',
 ])
 
 export const SYSTEM_FIELD_TYPES: ReadonlySet<string> = new Set([

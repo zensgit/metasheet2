@@ -124,6 +124,14 @@
             :value="record.data[field.id] ?? ''"
             @change="emit('patch', field.id, ($event.target as HTMLInputElement).value)"
           />
+          <input
+            v-else-if="canEditField(field.id) && field.type === 'dateTime'"
+            :id="`drawer_field_${field.id}`"
+            class="meta-record-drawer__input"
+            type="datetime-local"
+            :value="dateTimeInputValue(record.data[field.id])"
+            @change="emit('patch', field.id, dateTimeValueFromLocalInput(($event.target as HTMLInputElement).value))"
+          />
           <label v-else-if="canEditField(field.id) && field.type === 'boolean'" class="meta-record-drawer__check">
             <input type="checkbox" :checked="!!record.data[field.id]" @change="emit('patch', field.id, ($event.target as HTMLInputElement).checked)" />
           </label>
@@ -250,7 +258,13 @@ import {
 } from '../utils/comment-affordance'
 import { attachmentAcceptAttr, resolveAttachmentFieldProperty, shouldReplaceAttachmentSelection, validateAttachmentSelection } from '../utils/field-config'
 import { linkActionLabel } from '../utils/link-fields'
-import { formatFieldDisplay, locationAddressValue, locationValueFromAddress } from '../utils/field-display'
+import {
+  dateTimeInputValue,
+  dateTimeValueFromLocalInput,
+  formatFieldDisplay,
+  locationAddressValue,
+  locationValueFromAddress,
+} from '../utils/field-display'
 import { isSystemField } from '../utils/system-fields'
 
 const props = withDefaults(defineProps<{
