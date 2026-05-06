@@ -74,8 +74,11 @@ test('manual K3 WISE postdeploy smoke workflow keeps dispatch and auth contract 
   assertContains(raw, '- name: Fail when K3 WISE smoke failed', 'manual final gate')
   assertContains(raw, 'steps.token_resolve.outputs.token_resolve_rc', 'manual final gate')
   assertContains(raw, 'steps.smoke.outputs.smoke_rc', 'manual final gate')
+  assertContains(raw, "REQUIRE_AUTH: ${{ github.event.inputs.require_auth || 'true' }}", 'manual final gate')
   assertContains(raw, 'K3 WISE smoke token resolution failed', 'manual final gate')
   assertContains(raw, 'K3 WISE postdeploy smoke failed', 'manual final gate')
+  assertContains(raw, 'scripts/ops/integration-k3wise-signoff-gate.mjs', 'manual final gate')
+  assertContains(raw, '--input output/integration-k3wise-postdeploy-smoke/manual/integration-k3wise-postdeploy-smoke.json', 'manual final gate')
 })
 
 test('deploy workflow keeps K3 WISE smoke evidence wired into deploy summary and artifacts', () => {
