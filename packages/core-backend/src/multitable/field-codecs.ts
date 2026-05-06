@@ -19,6 +19,7 @@ export type MultitableFieldType =
   | 'email'
   | 'phone'
   | 'barcode'
+  | 'location'
   | 'longText'
   | 'autoNumber'
   | 'createdTime'
@@ -100,6 +101,15 @@ export function mapFieldType(type: string): MultitableFieldType | string {
   if (normalized === 'email') return 'email'
   if (normalized === 'phone') return 'phone'
   if (normalized === 'barcode' || normalized === 'bar_code' || normalized === 'bar-code') return 'barcode'
+  if (
+    normalized === 'location' ||
+    normalized === 'geo' ||
+    normalized === 'geolocation' ||
+    normalized === 'geo_location' ||
+    normalized === 'geo-location'
+  ) {
+    return 'location'
+  }
   if (
     normalized === 'autonumber' ||
     normalized === 'auto_number' ||
@@ -328,7 +338,7 @@ export function sanitizeFieldProperty(
     return { ...obj, max }
   }
 
-  if (type === 'url' || type === 'email' || type === 'phone' || type === 'barcode' || type === 'longText') {
+  if (type === 'url' || type === 'email' || type === 'phone' || type === 'barcode' || type === 'location' || type === 'longText') {
     return obj
   }
 
@@ -368,7 +378,7 @@ export function serializeFieldRow(row: any): MultitableField {
 }
 
 // ---------------------------------------------------------------------------
-// MF2 field-types batch 1: currency / percent / rating / url / email / phone / barcode
+// MF2 field-types batch 1: currency / percent / rating / url / email / phone / barcode / location
 // ---------------------------------------------------------------------------
 //
 // Validation regex chosen to match Feishu's lenient client-side checks and
@@ -492,6 +502,65 @@ export function validateBarcodeValue(value: unknown, fieldId: string): string | 
   return trimmed
 }
 
+export type LocationValue = {
+  address: string
+  latitude?: number
+  longitude?: number
+}
+
+function coerceLocationCoordinate(
+  value: unknown,
+  label: 'latitude' | 'longitude',
+  fieldId: string,
+  min: number,
+  max: number,
+): number | undefined {
+  if (value === null || value === undefined || value === '') return undefined
+  const num = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(num)) {
+    throw new Error(`Location ${label} must be a finite number for ${fieldId}`)
+  }
+  if (num < min || num > max) {
+    throw new Error(`Location ${label} must be between ${min} and ${max} for ${fieldId}`)
+  }
+  return num
+}
+
+export function validateLocationValue(value: unknown, fieldId: string): LocationValue | null {
+  if (value === null || value === undefined || value === '') return null
+  if (typeof value === 'string' || typeof value === 'number') {
+    const address = String(value).trim()
+    if (!address) return null
+    if (address.length > 512) {
+      throw new Error(`Location address must be 512 characters or fewer for ${fieldId}`)
+    }
+    return { address }
+  }
+  if (!isPlainObject(value)) {
+    throw new Error(`Location value must be a string or object for ${fieldId}`)
+  }
+
+  const rawAddress = value.address ?? value.name ?? value.fullAddress
+  const address = rawAddress === null || rawAddress === undefined ? '' : String(rawAddress).trim()
+  if (address.length > 512) {
+    throw new Error(`Location address must be 512 characters or fewer for ${fieldId}`)
+  }
+
+  const rawLatitude = value.latitude ?? value.lat
+  const rawLongitude = value.longitude ?? value.lng ?? value.lon
+  const latitude = coerceLocationCoordinate(rawLatitude, 'latitude', fieldId, -90, 90)
+  const longitude = coerceLocationCoordinate(rawLongitude, 'longitude', fieldId, -180, 180)
+  if ((latitude === undefined) !== (longitude === undefined)) {
+    throw new Error(`Location latitude and longitude must be provided together for ${fieldId}`)
+  }
+  if (!address && latitude === undefined) return null
+
+  return {
+    address,
+    ...(latitude !== undefined && longitude !== undefined ? { latitude, longitude } : {}),
+  }
+}
+
 export function normalizeMultiSelectValue(
   value: unknown,
   fieldId: string,
@@ -544,6 +613,7 @@ export function coerceBatch1Value(
   if (fieldType === 'email') return validateEmailValue(value, fieldId)
   if (fieldType === 'phone') return validatePhoneValue(value, fieldId)
   if (fieldType === 'barcode') return validateBarcodeValue(value, fieldId)
+  if (fieldType === 'location') return validateLocationValue(value, fieldId)
   return value
 }
 
@@ -555,6 +625,7 @@ export const BATCH1_FIELD_TYPES: ReadonlySet<string> = new Set([
   'email',
   'phone',
   'barcode',
+  'location',
 ])
 
 export const SYSTEM_FIELD_TYPES: ReadonlySet<string> = new Set([

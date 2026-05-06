@@ -435,6 +435,10 @@ describe('getDefaultValidationRules', () => {
     expect(errors('barcode', 'x'.repeat(257), rules)).toHaveLength(1)
   })
 
+  test('location type returns empty defaults because write coercion validates structured shape', () => {
+    expect(getDefaultValidationRules('location')).toHaveLength(0)
+  })
+
   test('select type returns enum from options', () => {
     const rules = getDefaultValidationRules('select', {
       options: [{ value: 'red' }, { value: 'blue' }],

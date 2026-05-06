@@ -1,5 +1,5 @@
 /**
- * MF2/MF3 field types — currency / percent / rating / url / email / phone / barcode / longText.
+ * MF2/MF3 field types — currency / percent / rating / url / email / phone / barcode / location / longText.
  *
  * Covers:
  *   - mapFieldType: each new type is recognised (not falling through to 'string').
@@ -26,6 +26,7 @@ import {
   serializeFieldRow,
   validateEmailValue,
   validateBarcodeValue,
+  validateLocationValue,
   validateLongTextValue,
   validatePhoneValue,
   validateUrlValue,
@@ -40,6 +41,7 @@ describe('mapFieldType — MF2 batch-1', () => {
     expect(mapFieldType('email')).toBe('email')
     expect(mapFieldType('phone')).toBe('phone')
     expect(mapFieldType('barcode')).toBe('barcode')
+    expect(mapFieldType('location')).toBe('location')
   })
 
   it('is case-insensitive and trims whitespace', () => {
@@ -67,9 +69,15 @@ describe('mapFieldType — MF2 batch-1', () => {
     expect(mapFieldType('multi_line_text')).toBe('longText')
   })
 
+  it('recognises location aliases without falling back to string', () => {
+    expect(mapFieldType('geo')).toBe('location')
+    expect(mapFieldType('geo_location')).toBe('location')
+    expect(mapFieldType('geo-location')).toBe('location')
+  })
+
   it('exposes BATCH1_FIELD_TYPES set with normalized runtime types', () => {
     expect(Array.from(BATCH1_FIELD_TYPES).sort()).toEqual([
-      'barcode', 'currency', 'email', 'percent', 'phone', 'rating', 'url',
+      'barcode', 'currency', 'email', 'location', 'percent', 'phone', 'rating', 'url',
     ])
   })
 })
@@ -162,12 +170,13 @@ describe('sanitizeFieldProperty — rating', () => {
   })
 })
 
-describe('sanitizeFieldProperty — url / email / phone / barcode', () => {
+describe('sanitizeFieldProperty — url / email / phone / barcode / location', () => {
   it('returns the property object unchanged (no required options)', () => {
     expect(sanitizeFieldProperty('url', {})).toEqual({})
     expect(sanitizeFieldProperty('email', {})).toEqual({})
     expect(sanitizeFieldProperty('phone', {})).toEqual({})
     expect(sanitizeFieldProperty('barcode', {})).toEqual({})
+    expect(sanitizeFieldProperty('location', {})).toEqual({})
   })
 
   it('keeps custom keys for forward-compat', () => {
@@ -431,6 +440,46 @@ describe('validateBarcodeValue', () => {
   })
 })
 
+describe('validateLocationValue', () => {
+  it('normalizes string addresses', () => {
+    expect(validateLocationValue('  Shanghai Tower  ', 'fld_location')).toEqual({ address: 'Shanghai Tower' })
+  })
+
+  it('normalizes structured values and coordinate aliases', () => {
+    expect(validateLocationValue({
+      address: 'Shanghai Tower',
+      lat: '31.2335',
+      lng: 121.5055,
+    }, 'fld_location')).toEqual({
+      address: 'Shanghai Tower',
+      latitude: 31.2335,
+      longitude: 121.5055,
+    })
+  })
+
+  it('accepts coordinate-only structured values', () => {
+    expect(validateLocationValue({ latitude: 31.2335, longitude: 121.5055 }, 'fld_location')).toEqual({
+      address: '',
+      latitude: 31.2335,
+      longitude: 121.5055,
+    })
+  })
+
+  it('returns null for empty location values', () => {
+    expect(validateLocationValue(null, 'fld_location')).toBeNull()
+    expect(validateLocationValue('', 'fld_location')).toBeNull()
+    expect(validateLocationValue({}, 'fld_location')).toBeNull()
+  })
+
+  it('rejects invalid shapes, partial coordinates, out-of-range coordinates, and long addresses', () => {
+    expect(() => validateLocationValue(['Shanghai'], 'fld_location')).toThrow(/string or object/)
+    expect(() => validateLocationValue({ address: 'A', latitude: 31 }, 'fld_location')).toThrow(/provided together/)
+    expect(() => validateLocationValue({ address: 'A', latitude: 91, longitude: 0 }, 'fld_location')).toThrow(/latitude/)
+    expect(() => validateLocationValue({ address: 'A', latitude: 0, longitude: 181 }, 'fld_location')).toThrow(/longitude/)
+    expect(() => validateLocationValue('x'.repeat(513), 'fld_location')).toThrow(/512 characters/)
+  })
+})
+
 describe('coerceBatch1Value — dispatch', () => {
   it('dispatches to currency / percent / rating coercion', () => {
     expect(coerceBatch1Value('currency', { code: 'USD', decimals: 2 }, 'fld', '99.99')).toBe(99.99)
@@ -443,6 +492,7 @@ describe('coerceBatch1Value — dispatch', () => {
     expect(coerceBatch1Value('email', undefined, 'fld', 'a@b.co')).toBe('a@b.co')
     expect(coerceBatch1Value('phone', undefined, 'fld', '+86 138 0000 0000')).toBe('+86 138 0000 0000')
     expect(coerceBatch1Value('barcode', undefined, 'fld', '  6901234567890  ')).toBe('6901234567890')
+    expect(coerceBatch1Value('location', undefined, 'fld', '  Shanghai Tower  ')).toEqual({ address: 'Shanghai Tower' })
   })
 
   it('uses default rating max when property missing', () => {
@@ -467,6 +517,7 @@ describe('coerceBatch1Value — dispatch', () => {
     expect(coerceBatch1Value('email', undefined, 'fld', '')).toBeNull()
     expect(coerceBatch1Value('phone', undefined, 'fld', null)).toBeNull()
     expect(coerceBatch1Value('barcode', undefined, 'fld', '')).toBeNull()
+    expect(coerceBatch1Value('location', undefined, 'fld', '')).toBeNull()
   })
 
   it('surfaces validation errors as thrown exceptions', () => {

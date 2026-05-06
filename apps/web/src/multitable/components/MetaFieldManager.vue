@@ -459,13 +459,13 @@ function rulesToProperty(rules: FieldValidationRule[]): Array<Record<string, unk
 const FIELD_TYPES: MetaFieldCreateType[] = [
   'string', 'longText', 'number', 'boolean', 'date', 'select', 'multiSelect', 'link', 'person',
   'formula', 'lookup', 'rollup', 'attachment',
-  'currency', 'percent', 'rating', 'url', 'email', 'phone', 'barcode',
+  'currency', 'percent', 'rating', 'url', 'email', 'phone', 'barcode', 'location',
   ...SYSTEM_FIELD_TYPES,
 ]
 const FIELD_ICONS: Record<string, string> = {
   string: 'Aa', longText: '\u00B6', number: '#', boolean: '\u2611', date: '\u{1F4C5}', select: '\u25CF', multiSelect: '\u25C9',
   link: '\u21C4', person: '\u{1F464}', lookup: '\u2197', rollup: '\u03A3', formula: 'fx', attachment: '\uD83D\uDCCE',
-  currency: '\u00A4', percent: '%', rating: '\u2605', url: '\u{1F517}', email: '\u2709', phone: '\u260E', barcode: '\u25A5',
+  currency: '\u00A4', percent: '%', rating: '\u2605', url: '\u{1F517}', email: '\u2709', phone: '\u260E', barcode: '\u25A5', location: '\u{1F4CD}',
   autoNumber: '#+', createdTime: 'CT', modifiedTime: 'MT', createdBy: 'CB', modifiedBy: 'MB',
 }
 

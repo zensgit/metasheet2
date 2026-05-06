@@ -26,6 +26,11 @@
       <code class="meta-cell-renderer__barcode">{{ displayValue }}</code>
     </template>
 
+    <!-- location -->
+    <template v-else-if="field.type === 'location'">
+      <span class="meta-cell-renderer__location" :title="displayValue">{{ displayValue }}</span>
+    </template>
+
     <!-- boolean -->
     <template v-else-if="field.type === 'boolean'">
       <span class="meta-cell-renderer__bool">{{ value ? '\u2611' : '\u2610' }}</span>
@@ -268,6 +273,16 @@ const conditionalClass = computed(() => {
   border-radius: 4px;
   padding: 1px 5px;
   color: #334155;
+}
+.meta-cell-renderer__location {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #0f766e;
+}
+.meta-cell-renderer__location::before {
+  content: '\1F4CD';
+  font-size: 12px;
 }
 .meta-cell-renderer__url,
 .meta-cell-renderer__email,

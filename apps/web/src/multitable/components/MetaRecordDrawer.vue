@@ -100,6 +100,15 @@
             @change="emit('patch', field.id, ($event.target as HTMLInputElement).value)"
           />
           <input
+            v-else-if="canEditField(field.id) && field.type === 'location'"
+            :id="`drawer_field_${field.id}`"
+            class="meta-record-drawer__input"
+            type="text"
+            placeholder="Enter address"
+            :value="locationAddressValue(record.data[field.id])"
+            @change="emit('patch', field.id, locationValueFromAddress(($event.target as HTMLInputElement).value))"
+          />
+          <input
             v-else-if="canEditField(field.id) && field.type === 'number'"
             :id="`drawer_field_${field.id}`"
             class="meta-record-drawer__input"
@@ -241,7 +250,7 @@ import {
 } from '../utils/comment-affordance'
 import { attachmentAcceptAttr, resolveAttachmentFieldProperty, shouldReplaceAttachmentSelection, validateAttachmentSelection } from '../utils/field-config'
 import { linkActionLabel } from '../utils/link-fields'
-import { formatFieldDisplay } from '../utils/field-display'
+import { formatFieldDisplay, locationAddressValue, locationValueFromAddress } from '../utils/field-display'
 import { isSystemField } from '../utils/system-fields'
 
 const props = withDefaults(defineProps<{

@@ -33,7 +33,7 @@ export type NormalizedAttachmentFieldProperty = {
   acceptedMimeTypes: string[]
 }
 
-// MF2 batch-1 field types (currency / percent / rating / url / email / phone).
+// MF2 batch-1 field types (currency / percent / rating / url / email / phone / barcode / location).
 export type NormalizedCurrencyFieldProperty = {
   code: string
   decimals: number

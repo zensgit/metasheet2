@@ -11,6 +11,7 @@ export type MultitableProvisioningFieldType =
   | 'rollup'
   | 'attachment'
   | 'barcode'
+  | 'location'
   | 'longText'
 
 export interface MultitableProvisioningFieldDescriptor {
