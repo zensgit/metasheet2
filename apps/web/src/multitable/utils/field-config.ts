@@ -47,6 +47,12 @@ export type NormalizedRatingFieldProperty = {
   max: number
 }
 
+export type NormalizedNumberFieldProperty = {
+  decimals: number | null
+  thousands: boolean
+  unit: string
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -167,6 +173,20 @@ export function resolveRatingFieldProperty(value: unknown): NormalizedRatingFiel
   return { max }
 }
 
+export function resolveNumberFieldProperty(value: unknown): NormalizedNumberFieldProperty {
+  const property = asRecord(value)
+  const decimalsRaw = typeof property.decimals === 'number' ? property.decimals : Number(property.decimals)
+  const decimals = Number.isFinite(decimalsRaw) && decimalsRaw >= 0 && decimalsRaw <= 6
+    ? Math.round(decimalsRaw)
+    : null
+  const unit = typeof property.unit === 'string' ? property.unit.trim().slice(0, 24) : ''
+  return {
+    decimals,
+    thousands: property.thousands === true,
+    unit,
+  }
+}
+
 const CURRENCY_SYMBOL_BY_CODE: Record<string, string> = {
   CNY: '¥',
   USD: '$',
@@ -210,6 +230,27 @@ export function formatPercentValue(value: number, decimals: number): string {
   } catch {
     return `${value.toFixed(decimals)}%`
   }
+}
+
+function splitFixedNumber(value: number, decimals: number | null): { sign: string; integer: string; fraction: string } {
+  const raw = decimals === null ? String(value) : value.toFixed(decimals)
+  const sign = raw.startsWith('-') ? '-' : ''
+  const unsigned = sign ? raw.slice(1) : raw
+  const [integer = '0', fraction = ''] = unsigned.split('.')
+  return { sign, integer, fraction }
+}
+
+function groupThousands(integer: string): string {
+  return integer.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+}
+
+export function formatNumberValue(value: number, property: unknown): string {
+  const { decimals, thousands, unit } = resolveNumberFieldProperty(property)
+  if (decimals === null && !thousands && !unit) return String(value)
+  const { sign, integer, fraction } = splitFixedNumber(value, decimals)
+  const whole = thousands ? groupThousands(integer) : integer
+  const numeric = fraction.length > 0 ? `${sign}${whole}.${fraction}` : `${sign}${whole}`
+  return unit ? `${numeric} ${unit}` : numeric
 }
 
 const URL_REGEX = /^https?:\/\/[^\s]+$/i

@@ -60,6 +60,7 @@
       ref="inputRef"
       class="meta-cell-editor__input"
       type="number"
+      :step="numericStep"
       :value="modelValue ?? ''"
       @input="onNumberInput"
       @keydown.enter="emit('confirm')"
@@ -236,6 +237,7 @@ import {
   attachmentAcceptAttr,
   resolveAttachmentFieldProperty,
   resolveCurrencyFieldProperty,
+  resolveNumberFieldProperty,
   resolvePercentFieldProperty,
   resolveRatingFieldProperty,
   shouldReplaceAttachmentSelection,
@@ -463,6 +465,10 @@ function onNumberInput(e: Event) {
 }
 
 const numericStep = computed(() => {
+  if (props.field.type === 'number') {
+    const { decimals } = resolveNumberFieldProperty(props.field.property)
+    return decimals && decimals > 0 ? `0.${'0'.repeat(decimals - 1)}1` : 'any'
+  }
   if (props.field.type === 'currency') {
     const { decimals } = resolveCurrencyFieldProperty(props.field.property)
     return decimals > 0 ? `0.${'0'.repeat(decimals - 1)}1` : '1'

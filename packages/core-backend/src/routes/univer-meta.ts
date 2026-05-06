@@ -1294,6 +1294,23 @@ function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown)
     }
   }
 
+  if (type === 'number') {
+    const next: Record<string, unknown> = { ...obj }
+    if ('decimals' in obj) {
+      const decimalsRaw = typeof obj.decimals === 'number' ? obj.decimals : Number(obj.decimals)
+      if (Number.isFinite(decimalsRaw) && decimalsRaw >= 0 && decimalsRaw <= 6) {
+        next.decimals = Math.round(decimalsRaw)
+      } else {
+        delete next.decimals
+      }
+    }
+    next.thousands = obj.thousands === true
+    const unit = typeof obj.unit === 'string' ? obj.unit.trim().slice(0, 24) : ''
+    if (unit) next.unit = unit
+    else delete next.unit
+    return next
+  }
+
   if (type === 'autoNumber') {
     const startAtRaw = typeof obj.startAt === 'number' ? obj.startAt : Number(obj.startAt)
     const startAt = Number.isFinite(startAtRaw) && startAtRaw > 0 ? Math.floor(startAtRaw) : 1
