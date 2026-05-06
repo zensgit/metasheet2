@@ -260,6 +260,17 @@ async function readToken(opts) {
   return raw.trim()
 }
 
+async function resolveToken(opts) {
+  try {
+    return { token: await readToken(opts), check: null }
+  } catch (error) {
+    return {
+      token: '',
+      check: failResult('auth-token', error),
+    }
+  }
+}
+
 async function fetchWithTimeout(url, options = {}, timeoutMs = 10_000) {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
@@ -467,8 +478,10 @@ function extractTenantId(authBody) {
 }
 
 async function runSmoke(opts) {
-  const token = await readToken(opts)
   const checks = []
+  const resolvedToken = await resolveToken(opts)
+  const token = resolvedToken.token
+  if (resolvedToken.check) checks.push(resolvedToken.check)
 
   try {
     const health = await requestJson(opts.baseUrl, '/api/health', { timeoutMs: opts.timeoutMs })
@@ -671,6 +684,7 @@ export {
   assertStagingDescriptors,
   assertStatusRoutes,
   parseArgs,
+  resolveToken,
   renderMarkdown,
   runCli,
   runSmoke,
