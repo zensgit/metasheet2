@@ -695,6 +695,36 @@ vi.mock('../src/multitable/components/MetaTimelineView.vue', () => ({
     },
   }),
 }))
+vi.mock('../src/multitable/components/MetaGanttView.vue', () => ({
+  default: defineComponent({
+    name: 'MetaGanttView',
+    props: {
+      canEdit: { type: Boolean, default: false },
+    },
+    emits: ['patch-dates'],
+    render() {
+      return h('div', {
+        'data-gantt-can-edit': String(this.$props.canEdit),
+      }, [
+        h(
+          'button',
+          {
+            'data-gantt-patch': 'true',
+            onClick: () => this.$emit('patch-dates', {
+              recordId: 'rec_1',
+              version: 4,
+              startFieldId: 'fld_start',
+              endFieldId: 'fld_end',
+              startValue: '2026-04-01',
+              endValue: '2026-04-04',
+            }),
+          },
+          'gantt-patch',
+        ),
+      ])
+    },
+  }),
+}))
 vi.mock('../src/multitable/components/MetaImportModal.vue', () => ({
   default: defineComponent({
     name: 'MetaImportModal',
@@ -1712,10 +1742,11 @@ describe('MultitableWorkbench view wiring', () => {
     expect(gridMock.loadViewData).toHaveBeenCalled()
   })
 
-  it('passes scoped row edit gating into kanban and timeline views', async () => {
+  it('passes scoped row edit gating into kanban, timeline and gantt views', async () => {
     workbenchMock.views.value = [
       { id: 'view_kanban', sheetId: 'sheet_orders', name: 'Kanban', type: 'kanban' },
       { id: 'view_timeline', sheetId: 'sheet_orders', name: 'Timeline', type: 'timeline', config: { zoom: 'week' } },
+      { id: 'view_gantt', sheetId: 'sheet_orders', name: 'Gantt', type: 'gantt', config: { zoom: 'week' } },
     ]
     gridMock.rowActions.value = {
       canEdit: false,
@@ -1732,6 +1763,11 @@ describe('MultitableWorkbench view wiring', () => {
     await flushUi()
 
     expect(container!.querySelector('[data-timeline-can-edit]')?.getAttribute('data-timeline-can-edit')).toBe('false')
+
+    workbenchMock.activeViewId.value = 'view_gantt'
+    await flushUi()
+
+    expect(container!.querySelector('[data-gantt-can-edit]')?.getAttribute('data-gantt-can-edit')).toBe('false')
   })
 
   it('patches timeline date updates through patchRecords and refreshes the active page', async () => {
@@ -1750,7 +1786,31 @@ describe('MultitableWorkbench view wiring', () => {
       ],
     })
     expect(gridMock.loadViewData).toHaveBeenCalled()
-    expect(showSuccessSpy).toHaveBeenCalledWith('Timeline updated')
+    expect(showSuccessSpy).toHaveBeenCalledWith('Dates updated')
+  })
+
+  it('patches gantt resize date updates through patchRecords and refreshes the active page', async () => {
+    workbenchMock.views.value = [
+      ...workbenchMock.views.value,
+      { id: 'view_gantt', sheetId: 'sheet_orders', name: 'Gantt', type: 'gantt', config: { zoom: 'week' } },
+    ]
+
+    mountWorkbench({ viewId: 'view_gantt' })
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-gantt-patch="true"]')!.click()
+    await flushUi()
+
+    expect(workbenchMock.client.patchRecords).toHaveBeenCalledWith({
+      sheetId: 'sheet_orders',
+      viewId: 'view_gantt',
+      changes: [
+        { recordId: 'rec_1', fieldId: 'fld_start', value: '2026-04-01', expectedVersion: 4 },
+        { recordId: 'rec_1', fieldId: 'fld_end', value: '2026-04-04', expectedVersion: 4 },
+      ],
+    })
+    expect(gridMock.loadViewData).toHaveBeenCalled()
+    expect(showSuccessSpy).toHaveBeenCalledWith('Dates updated')
   })
 
   it('blocks timeline patch updates when scoped rowActions disallow edits', async () => {
