@@ -638,6 +638,7 @@ export interface MetaGanttViewConfig {
   titleFieldId?: string | null
   progressFieldId?: string | null
   groupFieldId?: string | null
+  dependencyFieldId?: string | null
   zoom?: 'day' | 'week' | 'month'
 }
 

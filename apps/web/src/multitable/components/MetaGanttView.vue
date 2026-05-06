@@ -39,6 +39,13 @@
           </select>
         </label>
         <label class="meta-gantt__control">
+          Dependencies
+          <select :value="dependencyFieldId" @change="onConfigChange('dependencyFieldId', ($event.target as HTMLSelectElement).value || null)">
+            <option value="">none</option>
+            <option v-for="field in dependencyFields" :key="field.id" :value="field.id">{{ field.name }}</option>
+          </select>
+        </label>
+        <label class="meta-gantt__control">
           Zoom
           <select :value="zoom" @change="onConfigChange('zoom', ($event.target as HTMLSelectElement).value)">
             <option value="day">Day</option>
@@ -77,6 +84,15 @@
               <small>{{ task.startDate }} to {{ task.endDate }}</small>
             </span>
             <span class="meta-gantt__bar-area">
+              <span
+                v-for="dependency in dependencyLinksFor(task)"
+                :key="dependency.id"
+                class="meta-gantt__dependency-arrow"
+                :class="{ 'meta-gantt__dependency-arrow--backward': dependency.backward }"
+                :style="{ left: dependency.left + '%', width: dependency.width + '%' }"
+                :title="dependency.label"
+                aria-hidden="true"
+              ></span>
               <span
                 class="meta-gantt__bar"
                 :style="{ left: task.left + '%', width: task.width + '%' }"
@@ -135,6 +151,7 @@ const endFieldId = ref('')
 const titleFieldId = ref('')
 const progressFieldId = ref('')
 const groupFieldId = ref('')
+const dependencyFieldId = ref('')
 const zoom = ref<'day' | 'week' | 'month'>('week')
 const selectedRecordId = ref<string | null>(null)
 const pendingConfigKey = ref<string | null>(null)
@@ -153,6 +170,7 @@ watch(
     titleFieldId.value = config.titleFieldId ?? ''
     progressFieldId.value = config.progressFieldId ?? ''
     groupFieldId.value = config.groupFieldId ?? ''
+    dependencyFieldId.value = config.dependencyFieldId ?? ''
     zoom.value = config.zoom
     if (pendingConfigKey.value === key) pendingConfigKey.value = null
   },
@@ -163,6 +181,7 @@ const dateFields = computed(() => props.fields.filter((field) => field.type === 
 const titleFields = computed(() => props.fields)
 const numericFields = computed(() => props.fields.filter((field) => ['number', 'percent', 'currency', 'rating'].includes(field.type)))
 const groupableFields = computed(() => props.fields.filter((field) => ['select', 'string', 'boolean', 'date', 'dateTime'].includes(field.type)))
+const dependencyFields = computed(() => props.fields.filter((field) => ['link', 'multiSelect', 'string'].includes(field.type)))
 
 function parseDate(value: unknown): Date | null {
   if (!value) return null
@@ -207,7 +226,17 @@ const timeRange = computed(() => {
   return { min: min - pad, max: max + pad }
 })
 
-const scheduledTasks = computed(() => {
+type ScheduledTask = {
+  record: MetaRecord
+  startDate: string
+  endDate: string
+  left: number
+  width: number
+  progress: number
+  dependencyIds: string[]
+}
+
+const scheduledTasks = computed<ScheduledTask[]>(() => {
   if (!startFieldId.value || !endFieldId.value) return []
   const { min, max } = timeRange.value
   const range = max - min || 1
@@ -225,6 +254,7 @@ const scheduledTasks = computed(() => {
         left: Math.max(0, left),
         width: Math.min(100 - Math.max(0, left), width),
         progress: progressValue(record),
+        dependencyIds: dependencyIdsFor(record),
       }
     })
     .filter((item): item is NonNullable<typeof item> => item !== null)
@@ -246,6 +276,56 @@ const groupedSections = computed(() => {
   }
   return [...buckets.values()]
 })
+
+const scheduledTaskById = computed(() => new Map(scheduledTasks.value.map((task) => [task.record.id, task])))
+
+const dependencyLinksByRecordId = computed(() => {
+  const byId = scheduledTaskById.value
+  const links = new Map<string, Array<{ id: string; left: number; width: number; backward: boolean; label: string }>>()
+  for (const task of scheduledTasks.value) {
+    const taskLinks = task.dependencyIds
+      .map((dependencyId) => {
+        const dependency = byId.get(dependencyId)
+        if (!dependency || dependency.record.id === task.record.id) return null
+        const dependencyEnd = dependency.left + dependency.width
+        const forward = dependencyEnd <= task.left
+        const left = Math.max(0, Math.min(forward ? dependencyEnd : task.left, forward ? task.left : dependencyEnd))
+        const right = Math.min(100, Math.max(forward ? dependencyEnd : task.left, forward ? task.left : dependencyEnd))
+        return {
+          id: dependency.record.id,
+          left,
+          width: Math.max(1, right - left),
+          backward: !forward,
+          label: `${displayTitle(dependency.record)} \u2192 ${displayTitle(task.record)}`,
+        }
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null)
+    if (taskLinks.length) links.set(task.record.id, taskLinks)
+  }
+  return links
+})
+
+function normalizeDependencyIds(value: unknown): string[] {
+  const rawValues = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(/[,;\n]/)
+      : value === null || value === undefined || value === ''
+        ? []
+        : [value]
+  return [...new Set(rawValues
+    .map((item) => String(item).trim())
+    .filter((item) => item.length > 0))]
+}
+
+function dependencyIdsFor(record: MetaRecord): string[] {
+  if (!dependencyFieldId.value) return []
+  return normalizeDependencyIds(record.data[dependencyFieldId.value])
+}
+
+function dependencyLinksFor(task: ScheduledTask) {
+  return dependencyLinksByRecordId.value.get(task.record.id) ?? []
+}
 
 const axisTicks = computed(() => {
   const { min, max } = timeRange.value
@@ -272,6 +352,7 @@ function currentConfig(): Required<MetaGanttViewConfig> {
     titleFieldId: titleFieldId.value || null,
     progressFieldId: progressFieldId.value || null,
     groupFieldId: groupFieldId.value || null,
+    dependencyFieldId: dependencyFieldId.value || null,
     zoom: zoom.value,
   }
 }
@@ -283,6 +364,7 @@ function onConfigChange(key: keyof Required<MetaGanttViewConfig>, value: unknown
   titleFieldId.value = next.titleFieldId ?? ''
   progressFieldId.value = next.progressFieldId ?? ''
   groupFieldId.value = next.groupFieldId ?? ''
+  dependencyFieldId.value = next.dependencyFieldId ?? ''
   zoom.value = next.zoom
   pendingConfigKey.value = JSON.stringify(next)
   emit('update-view-config', {
@@ -324,9 +406,13 @@ function onQuickCreate() {
 .meta-gantt__group { padding: 7px 12px; border-bottom: 1px solid #e2e8f0; background: #eef2ff; color: #3730a3; font-size: 12px; font-weight: 600; }
 .meta-gantt__row { display: grid; grid-template-columns: 260px 1fr; min-height: 52px; border: 0; border-bottom: 1px solid #e2e8f0; background: #fff; color: inherit; cursor: pointer; }
 .meta-gantt__row:hover, .meta-gantt__row--selected { background: #eff6ff; }
-.meta-gantt__bar-area { position: relative; margin: 12px 16px; border-radius: 999px; background: linear-gradient(90deg, rgba(203,213,225,.28) 1px, transparent 1px); background-size: 8.333% 100%; }
-.meta-gantt__bar { position: absolute; top: 7px; height: 16px; min-width: 6px; overflow: hidden; border-radius: 999px; background: #93c5fd; box-shadow: 0 4px 10px rgba(37,99,235,.18); }
+.meta-gantt__bar-area { position: relative; display: block; min-height: 40px; margin: 6px 16px; border-radius: 999px; background: linear-gradient(90deg, rgba(203,213,225,.28) 1px, transparent 1px); background-size: 8.333% 100%; }
+.meta-gantt__bar { position: absolute; top: 12px; height: 16px; min-width: 6px; overflow: hidden; border-radius: 999px; background: #93c5fd; box-shadow: 0 4px 10px rgba(37,99,235,.18); z-index: 2; }
 .meta-gantt__bar-progress { display: block; height: 100%; border-radius: inherit; background: #2563eb; }
+.meta-gantt__dependency-arrow { position: absolute; top: 20px; height: 0; border-top: 2px solid #f97316; z-index: 1; pointer-events: none; }
+.meta-gantt__dependency-arrow::after { content: ''; position: absolute; right: -1px; top: -5px; border-style: solid; border-width: 5px 0 5px 7px; border-color: transparent transparent transparent #f97316; }
+.meta-gantt__dependency-arrow--backward { border-top-style: dashed; opacity: 0.85; }
+.meta-gantt__dependency-arrow--backward::after { left: -1px; right: auto; border-width: 5px 7px 5px 0; border-color: transparent #f97316 transparent transparent; }
 .meta-gantt__unscheduled { margin: 16px; padding: 12px; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; }
 .meta-gantt__unscheduled-row { display: block; width: 100%; margin-top: 6px; padding: 6px 8px; border: 1px solid #e2e8f0; border-radius: 6px; background: #f8fafc; text-align: left; cursor: pointer; }
 </style>

@@ -215,6 +215,15 @@
               </select>
             </label>
             <label class="meta-view-mgr__field">
+              <span>Dependency field</span>
+              <select v-model="ganttDraft.dependencyFieldId" class="meta-view-mgr__select">
+                <option value="">None</option>
+                <option v-for="field in dependencyFields" :key="field.id" :value="field.id">{{ field.name }}</option>
+              </select>
+            </label>
+          </div>
+          <div class="meta-view-mgr__grid">
+            <label class="meta-view-mgr__field">
               <span>Zoom</span>
               <select v-model="ganttDraft.zoom" class="meta-view-mgr__select">
                 <option value="day">day</option>
@@ -516,6 +525,7 @@ const ganttDraft = reactive<Required<MetaGanttViewConfig>>({
   titleFieldId: null,
   progressFieldId: null,
   groupFieldId: null,
+  dependencyFieldId: null,
   zoom: 'week',
 })
 const hierarchyDraft = reactive<Required<MetaHierarchyViewConfig>>({
@@ -553,6 +563,7 @@ const dateLikeFields = computed(() => props.fields.filter((field) => field.type 
 const numericFields = computed(() => props.fields.filter((field) => ['number', 'currency', 'percent', 'rating'].includes(field.type)))
 const selectFields = computed(() => props.fields.filter((field) => field.type === 'select'))
 const linkFields = computed(() => props.fields.filter((field) => field.type === 'link'))
+const dependencyFields = computed(() => props.fields.filter((field) => ['link', 'multiSelect', 'string'].includes(field.type)))
 const stringFields = computed(() => props.fields.filter((field) => ['string', 'formula', 'lookup'].includes(field.type)))
 const groupableFields = computed(() => props.fields.filter((field) => ['select', 'string', 'boolean', 'number', 'date', 'dateTime'].includes(field.type)))
 const validFieldIds = computed(() => new Set(props.fields.map((field) => field.id)))
@@ -562,6 +573,7 @@ const validDateFieldIds = computed(() => new Set(dateFields.value.map((field) =>
 const validDateLikeFieldIds = computed(() => new Set(dateLikeFields.value.map((field) => field.id)))
 const validSelectFieldIds = computed(() => new Set(selectFields.value.map((field) => field.id)))
 const validLinkFieldIds = computed(() => new Set(linkFields.value.map((field) => field.id)))
+const validDependencyFieldIds = computed(() => new Set(dependencyFields.value.map((field) => field.id)))
 const validGroupableFieldIds = computed(() => new Set(groupableFields.value.map((field) => field.id)))
 
 const viewConfigBlockingReason = computed(() => {
@@ -619,6 +631,9 @@ const viewConfigBlockingReason = computed(() => {
     }
     if (ganttDraft.groupFieldId && !validGroupableFieldIds.value.has(ganttDraft.groupFieldId)) {
       return 'The selected Gantt group field is no longer groupable. Reload latest before saving.'
+    }
+    if (ganttDraft.dependencyFieldId && !validDependencyFieldIds.value.has(ganttDraft.dependencyFieldId)) {
+      return 'The selected dependency field is no longer supported. Reload latest before saving.'
     }
   }
 
@@ -688,6 +703,7 @@ function resetConfigDrafts() {
     titleFieldId: null,
     progressFieldId: null,
     groupFieldId: null,
+    dependencyFieldId: null,
     zoom: 'week',
   } satisfies Required<MetaGanttViewConfig>)
   Object.assign(hierarchyDraft, {
@@ -862,6 +878,7 @@ function serializeViewDraft(type: MetaView['type'] | null): string {
       titleFieldId: ganttDraft.titleFieldId,
       progressFieldId: ganttDraft.progressFieldId,
       groupFieldId: ganttDraft.groupFieldId,
+      dependencyFieldId: ganttDraft.dependencyFieldId,
       zoom: ganttDraft.zoom,
       ...serializeCommonViewDraft(type),
     })
@@ -1126,6 +1143,7 @@ function saveConfig() {
         titleFieldId: ganttDraft.titleFieldId && validFieldIds.value.has(ganttDraft.titleFieldId) ? ganttDraft.titleFieldId : null,
         progressFieldId: ganttDraft.progressFieldId && numericFields.value.some((field) => field.id === ganttDraft.progressFieldId) ? ganttDraft.progressFieldId : null,
         groupFieldId: ganttDraft.groupFieldId && validGroupableFieldIds.value.has(ganttDraft.groupFieldId) ? ganttDraft.groupFieldId : null,
+        dependencyFieldId: ganttDraft.dependencyFieldId && validDependencyFieldIds.value.has(ganttDraft.dependencyFieldId) ? ganttDraft.dependencyFieldId : null,
         zoom: ganttDraft.zoom,
       }),
     })
