@@ -380,7 +380,12 @@ These are not RC blockers.
   - Verification summary: backend sanitizer, frontend formatter/field-manager/editor tests, backend build, frontend type-check, whitespace guard, and CI passed; Strict E2E was expected skip.
 - [ ] Template library V1.
 - [ ] Native person field migration.
-- [ ] Barcode field.
+- [x] Barcode field.
+  - PR: #1328
+  - Merge commit: `afa48d03e130ddfd6d8b8042c689940d430203d3`
+  - Development MD: `docs/development/multitable-barcode-field-design-20260505.md`
+  - Verification MD: `docs/development/multitable-barcode-field-verification-20260505.md`
+  - Verification summary: backend codec/default-validation tests, frontend renderer/editor/form/drawer tests, OpenAPI generation/parity, backend build, frontend type-check, whitespace guard, and CI passed; Strict E2E was expected skip.
 - [ ] Location field.
 
 ## Global Verification Commands
