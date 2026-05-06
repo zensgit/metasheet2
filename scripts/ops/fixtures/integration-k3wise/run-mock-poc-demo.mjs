@@ -90,7 +90,7 @@ async function main() {
         kind: 'erp:k3-wise-sqlserver',
         role: 'bidirectional',
         config: {
-          allowedTables: ['dbo.t_ICItem', 'dbo.integration_material_stage'],
+        allowedTables: ['t_ICItem', 'dbo.t_ICItem', 'dbo.integration_material_stage'],
           objects: {
             material_stage: {
               table: 'dbo.integration_material_stage',
@@ -128,13 +128,24 @@ async function main() {
     assert(auditCalls.length === 0, `expected 0 Audit calls (Save-only), got ${auditCalls.length}`)
     console.log(`✓ step 6: K3 Save-only upsert wrote 2 records, 0 Submit, 0 Audit (PoC safety preserved)`)
 
-    // 7. SQL channel readonly probe + safety check
+    // 7. SQL channel contract probes + safety check
     try {
-      sqlReadResult = await mockSql.query({ sql: 'SELECT FItemID, FNumber, FName FROM dbo.t_ICItem WHERE FNumber = ?', params: ['MAT-EXISTING'] })
-      assert(sqlReadResult.rows.length === 1, 'mock SQL readonly probe should return 1 row')
-      console.log(`✓ step 7a: SQL readonly probe returned ${sqlReadResult.rows.length} row from t_ICItem`)
+      sqlReadResult = await sqlChannel.read({ object: 'material', limit: 1 })
+      assert(sqlReadResult.records.length === 1, 'SQL channel readonly probe should return 1 row')
+      console.log(`✓ step 7a: SQL channel readonly probe returned ${sqlReadResult.records.length} row from t_ICItem`)
     } catch (error) {
-      throw new Error(`SQL readonly probe failed: ${error.message}`)
+      throw new Error(`SQL channel readonly probe failed: ${error.message}`)
+    }
+    try {
+      const middleWriteResult = await sqlChannel.upsert({
+        object: 'material_stage',
+        records: [{ FNumber: 'MAT-STAGE-001', FName: 'Mock staged material' }],
+        keyFields: ['FNumber'],
+      })
+      assert(middleWriteResult.written === 1, `expected 1 SQL middle-table write, got ${middleWriteResult.written}`)
+      console.log('✓ step 7b: SQL channel middle-table upsert wrote 1 integration row')
+    } catch (error) {
+      throw new Error(`SQL channel middle-table upsert failed: ${error.message}`)
     }
     try {
       await mockSql.exec({ sql: 'INSERT INTO dbo.t_ICItem (FNumber, FName) VALUES (?, ?)', params: ['MAT-FORBIDDEN', 'should be blocked'] })
@@ -143,7 +154,7 @@ async function main() {
       sqlWriteRejected = /core table/.test(error.message)
     }
     assert(sqlWriteRejected, 'SQL safety: write to t_ICItem must be rejected')
-    console.log('✓ step 7b: SQL safety guard rejected INSERT into t_ICItem (core table)')
+    console.log('✓ step 7c: SQL safety guard rejected INSERT into t_ICItem (core table)')
 
     // 8-9. Compose evidence + run compiler
     const evidence = {
