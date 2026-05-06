@@ -2,8 +2,11 @@
 
 import {
   existsSync,
+  closeSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   readdirSync,
   statSync,
   writeFileSync,
@@ -12,6 +15,8 @@ import path from 'node:path'
 
 const DEFAULT_PACKET_DIR = 'artifacts/dingtalk-staging-evidence-packet'
 const MAX_SECRET_SCAN_BYTES = 2 * 1024 * 1024
+const SECRET_SCAN_CHUNK_BYTES = MAX_SECRET_SCAN_BYTES
+const SECRET_SCAN_OVERLAP_BYTES = 4096
 const REQUIRED_CHECK_IDS = [
   'create-table-form',
   'bind-two-dingtalk-groups',
@@ -361,20 +366,29 @@ function isLikelyText(buffer) {
   return !buffer.includes(0)
 }
 
+function readFileSample(file, sizeBytes) {
+  const sample = Buffer.alloc(Math.min(sizeBytes, 8192))
+  const fd = openSync(file, 'r')
+  try {
+    readSync(fd, sample, 0, sample.length, 0)
+  } finally {
+    closeSync(fd)
+  }
+  return sample
+}
+
 function redactedFindingPreview(match, patternName) {
   return `<redacted ${patternName}; ${String(match ?? '').length} chars>`
 }
 
-function scanFileForSecrets(file, packetDir, findings) {
-  const stats = statSync(file)
-  if (!stats.isFile() || stats.size > MAX_SECRET_SCAN_BYTES) return 0
-  const buffer = readFileSync(file)
-  if (!isLikelyText(buffer)) return 0
-  const content = buffer.toString('utf8')
+function recordSecretMatches(content, file, packetDir, findings, minMatchEndOffset = 0) {
   let matches = 0
   for (const pattern of SECRET_PATTERNS) {
     pattern.regex.lastIndex = 0
     for (const match of content.matchAll(pattern.regex)) {
+      const matchStart = typeof match.index === 'number' ? match.index : 0
+      const matchEnd = matchStart + String(match[0] ?? '').length
+      if (matchEnd <= minMatchEndOffset) continue
       findings.push({
         file: path.relative(packetDir, file).replaceAll('\\', '/'),
         pattern: pattern.name,
@@ -384,6 +398,44 @@ function scanFileForSecrets(file, packetDir, findings) {
     }
   }
   return matches
+}
+
+function scanLargeFileForSecrets(file, stats, packetDir, findings) {
+  const sample = readFileSample(file, Math.min(stats.size, 8192))
+  if (!isLikelyText(sample)) return 0
+
+  const fd = openSync(file, 'r')
+  const buffer = Buffer.alloc(SECRET_SCAN_CHUNK_BYTES)
+  let matches = 0
+  let carry = ''
+  let position = 0
+  try {
+    while (position < stats.size) {
+      const bytesRead = readSync(fd, buffer, 0, buffer.length, position)
+      if (bytesRead <= 0) break
+      const chunk = buffer.subarray(0, bytesRead)
+      if (!isLikelyText(chunk)) return matches
+      const text = chunk.toString('utf8')
+      const window = `${carry}${text}`
+      matches += recordSecretMatches(window, file, packetDir, findings, carry.length)
+      carry = window.slice(-SECRET_SCAN_OVERLAP_BYTES)
+      position += bytesRead
+    }
+  } finally {
+    closeSync(fd)
+  }
+  return matches
+}
+
+function scanFileForSecrets(file, packetDir, findings) {
+  const stats = statSync(file)
+  if (!stats.isFile()) return 0
+  if (stats.size > MAX_SECRET_SCAN_BYTES) {
+    return scanLargeFileForSecrets(file, stats, packetDir, findings)
+  }
+  const buffer = readFileSync(file)
+  if (!isLikelyText(buffer)) return 0
+  return recordSecretMatches(buffer.toString('utf8'), file, packetDir, findings)
 }
 
 function walkFiles(dir, visit) {

@@ -482,6 +482,96 @@ test('validate-dingtalk-staging-evidence-packet rejects secret-like raw evidence
   }
 })
 
+test('validate-dingtalk-staging-evidence-packet rejects secret-like raw evidence in oversized text files', () => {
+  const tmpDir = makeTmpDir()
+  const packetDir = path.join(tmpDir, 'packet')
+  const reportPath = path.join(tmpDir, 'publish-check.json')
+  const leakedToken = '0123456789abcdef0123456789abcdef'
+
+  try {
+    const evidenceDir = writePacket(packetDir)
+    const logDir = path.join(evidenceDir, 'workspace', 'artifacts', 'oversized-log')
+    mkdirSync(logDir, { recursive: true })
+    writeFileSync(
+      path.join(logDir, 'large-live-smoke.log'),
+      `${'x'.repeat((2 * 1024 * 1024) + 1)}\nhttps://example.test/callback?access_token=${leakedToken}\n`,
+      'utf8',
+    )
+
+    const result = runValidator(['--packet-dir', packetDir, '--output-json', reportPath])
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /secret-like value detected/)
+    assert.match(result.stderr, /access_token_param/)
+    assert.doesNotMatch(result.stderr, new RegExp(leakedToken))
+    const reportText = readFileSync(reportPath, 'utf8')
+    assert.doesNotMatch(reportText, new RegExp(leakedToken))
+    const report = JSON.parse(reportText)
+    assert.equal(report.secretFindings.length, 1)
+    assert.equal(report.secretFindings[0].file, 'evidence/01-142-session/workspace/artifacts/oversized-log/large-live-smoke.log')
+    assert.equal(report.secretFindings[0].pattern, 'access_token_param')
+    assert.match(report.secretFindings[0].preview, /^<redacted /)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('validate-dingtalk-staging-evidence-packet detects large-file secrets across chunk boundaries', () => {
+  const tmpDir = makeTmpDir()
+  const packetDir = path.join(tmpDir, 'packet')
+  const reportPath = path.join(tmpDir, 'publish-check.json')
+  const token = 'boundary-bearer-token-01234567890123456789'
+  const prefix = '\nBearer '
+  const chunkBoundaryPrefixLength = (2 * 1024 * 1024) - prefix.length + 3
+
+  try {
+    const evidenceDir = writePacket(packetDir)
+    const logDir = path.join(evidenceDir, 'workspace', 'artifacts', 'boundary-log')
+    mkdirSync(logDir, { recursive: true })
+    writeFileSync(
+      path.join(logDir, 'boundary-live-smoke.log'),
+      `${'x'.repeat(chunkBoundaryPrefixLength)}${prefix}${token}\n`,
+      'utf8',
+    )
+
+    const result = runValidator(['--packet-dir', packetDir, '--output-json', reportPath])
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /bearer_token/)
+    assert.doesNotMatch(result.stderr, new RegExp(token))
+    const reportText = readFileSync(reportPath, 'utf8')
+    assert.doesNotMatch(reportText, new RegExp(token))
+    const report = JSON.parse(reportText)
+    assert.equal(report.secretFindings.length, 1)
+    assert.equal(report.secretFindings[0].pattern, 'bearer_token')
+    assert.match(report.secretFindings[0].preview, /^<redacted /)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('validate-dingtalk-staging-evidence-packet allows oversized binary evidence files', () => {
+  const tmpDir = makeTmpDir()
+  const packetDir = path.join(tmpDir, 'packet')
+  const reportPath = path.join(tmpDir, 'publish-check.json')
+
+  try {
+    const evidenceDir = writePacket(packetDir)
+    const screenshotDir = path.join(evidenceDir, 'workspace', 'artifacts', 'screenshots')
+    mkdirSync(screenshotDir, { recursive: true })
+    writeFileSync(path.join(screenshotDir, 'large-screenshot.bin'), Buffer.alloc((2 * 1024 * 1024) + 1))
+
+    const result = runValidator(['--packet-dir', packetDir, '--output-json', reportPath])
+
+    assert.equal(result.status, 0)
+    const report = JSON.parse(readFileSync(reportPath, 'utf8'))
+    assert.equal(report.status, 'pass')
+    assert.deepEqual(report.secretFindings, [])
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('validate-dingtalk-staging-evidence-packet rejects unknown arguments', () => {
   const result = runValidator(['--unknown'])
 
