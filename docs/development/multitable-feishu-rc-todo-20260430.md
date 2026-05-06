@@ -367,7 +367,12 @@ Expected docs:
 
 These are not RC blockers.
 
-- [ ] Gantt dependencies and dependency arrows.
+- [x] Gantt dependencies and dependency arrows.
+  - PR: #1340
+  - Merge commit: `d8bbab3ca2beda2a29a8330cfaa1a4fe624b9ece`
+  - Development MD: `docs/development/multitable-gantt-dependencies-design-20260506.md`
+  - Verification MD: `docs/development/multitable-gantt-dependencies-verification-20260506.md`
+  - Verification summary: focused Gantt/ViewManager frontend tests, Vue type-check, whitespace guard, and CI passed; Strict E2E was expected skip.
 - [ ] Gantt drag resize.
 - [ ] Hierarchy drag-to-reparent.
 - [ ] Hierarchy server-side cycle prevention.
