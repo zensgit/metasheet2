@@ -2294,6 +2294,7 @@
           "url",
           "email",
           "phone",
+          "barcode",
           "longText",
           "autoNumber",
           "createdTime",

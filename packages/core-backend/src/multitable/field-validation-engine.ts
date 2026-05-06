@@ -239,6 +239,8 @@ export function getDefaultValidationRules(
     case 'string':
     case 'longText':
       return [{ type: 'maxLength', params: { value: 10000 } }]
+    case 'barcode':
+      return [{ type: 'maxLength', params: { value: 256 } }]
     case 'select':
     case 'multiSelect': {
       const options = fieldProperty?.options

@@ -21,6 +21,11 @@
     <!-- number -->
     <template v-else-if="field.type === 'number'">{{ displayValue }}</template>
 
+    <!-- barcode -->
+    <template v-else-if="field.type === 'barcode'">
+      <code class="meta-cell-renderer__barcode">{{ displayValue }}</code>
+    </template>
+
     <!-- boolean -->
     <template v-else-if="field.type === 'boolean'">
       <span class="meta-cell-renderer__bool">{{ value ? '\u2611' : '\u2610' }}</span>
@@ -254,6 +259,15 @@ const conditionalClass = computed(() => {
 .meta-cell-renderer__rating {
   color: #f5a623;
   letter-spacing: 1px;
+}
+.meta-cell-renderer__barcode {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  font-size: 12px;
+  background: #f6f8fa;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: #334155;
 }
 .meta-cell-renderer__url,
 .meta-cell-renderer__email,

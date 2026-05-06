@@ -1541,6 +1541,7 @@ components:
         - url
         - email
         - phone
+        - barcode
         - longText
         - autoNumber
         - createdTime

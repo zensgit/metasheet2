@@ -18,6 +18,7 @@ export type MultitableFieldType =
   | 'url'
   | 'email'
   | 'phone'
+  | 'barcode'
   | 'longText'
   | 'autoNumber'
   | 'createdTime'
@@ -98,6 +99,7 @@ export function mapFieldType(type: string): MultitableFieldType | string {
   if (normalized === 'url') return 'url'
   if (normalized === 'email') return 'email'
   if (normalized === 'phone') return 'phone'
+  if (normalized === 'barcode' || normalized === 'bar_code' || normalized === 'bar-code') return 'barcode'
   if (
     normalized === 'autonumber' ||
     normalized === 'auto_number' ||
@@ -326,7 +328,7 @@ export function sanitizeFieldProperty(
     return { ...obj, max }
   }
 
-  if (type === 'url' || type === 'email' || type === 'phone' || type === 'longText') {
+  if (type === 'url' || type === 'email' || type === 'phone' || type === 'barcode' || type === 'longText') {
     return obj
   }
 
@@ -366,7 +368,7 @@ export function serializeFieldRow(row: any): MultitableField {
 }
 
 // ---------------------------------------------------------------------------
-// MF2 field-types batch 1: currency / percent / rating / url / email / phone
+// MF2 field-types batch 1: currency / percent / rating / url / email / phone / barcode
 // ---------------------------------------------------------------------------
 //
 // Validation regex chosen to match Feishu's lenient client-side checks and
@@ -477,6 +479,19 @@ export function validateLongTextValue(value: unknown, fieldId: string): string |
   return value
 }
 
+export function validateBarcodeValue(value: unknown, fieldId: string): string | null {
+  if (value === null || value === undefined || value === '') return null
+  if (typeof value !== 'string' && typeof value !== 'number') {
+    throw new Error(`Barcode value must be a string for ${fieldId}`)
+  }
+  const trimmed = String(value).trim()
+  if (trimmed === '') return null
+  if (trimmed.length > 256) {
+    throw new Error(`Barcode value must be 256 characters or fewer for ${fieldId}`)
+  }
+  return trimmed
+}
+
 export function normalizeMultiSelectValue(
   value: unknown,
   fieldId: string,
@@ -528,6 +543,7 @@ export function coerceBatch1Value(
   if (fieldType === 'url') return validateUrlValue(value, fieldId)
   if (fieldType === 'email') return validateEmailValue(value, fieldId)
   if (fieldType === 'phone') return validatePhoneValue(value, fieldId)
+  if (fieldType === 'barcode') return validateBarcodeValue(value, fieldId)
   return value
 }
 
@@ -538,6 +554,7 @@ export const BATCH1_FIELD_TYPES: ReadonlySet<string> = new Set([
   'url',
   'email',
   'phone',
+  'barcode',
 ])
 
 export const SYSTEM_FIELD_TYPES: ReadonlySet<string> = new Set([

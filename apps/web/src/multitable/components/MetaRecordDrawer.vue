@@ -90,6 +90,16 @@
             @change="emit('patch', field.id, ($event.target as HTMLTextAreaElement).value)"
           />
           <input
+            v-else-if="canEditField(field.id) && field.type === 'barcode'"
+            :id="`drawer_field_${field.id}`"
+            class="meta-record-drawer__input"
+            type="text"
+            inputmode="text"
+            placeholder="Scan or enter barcode"
+            :value="textControlValue(record.data[field.id])"
+            @change="emit('patch', field.id, ($event.target as HTMLInputElement).value)"
+          />
+          <input
             v-else-if="canEditField(field.id) && field.type === 'number'"
             :id="`drawer_field_${field.id}`"
             class="meta-record-drawer__input"

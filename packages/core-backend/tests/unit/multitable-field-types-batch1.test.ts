@@ -1,5 +1,5 @@
 /**
- * MF2/MF3 field types — currency / percent / rating / url / email / phone / longText.
+ * MF2/MF3 field types — currency / percent / rating / url / email / phone / barcode / longText.
  *
  * Covers:
  *   - mapFieldType: each new type is recognised (not falling through to 'string').
@@ -25,6 +25,7 @@ import {
   sanitizeFieldProperty,
   serializeFieldRow,
   validateEmailValue,
+  validateBarcodeValue,
   validateLongTextValue,
   validatePhoneValue,
   validateUrlValue,
@@ -38,6 +39,7 @@ describe('mapFieldType — MF2 batch-1', () => {
     expect(mapFieldType('url')).toBe('url')
     expect(mapFieldType('email')).toBe('email')
     expect(mapFieldType('phone')).toBe('phone')
+    expect(mapFieldType('barcode')).toBe('barcode')
   })
 
   it('is case-insensitive and trims whitespace', () => {
@@ -65,9 +67,9 @@ describe('mapFieldType — MF2 batch-1', () => {
     expect(mapFieldType('multi_line_text')).toBe('longText')
   })
 
-  it('exposes BATCH1_FIELD_TYPES set with all 6 names', () => {
+  it('exposes BATCH1_FIELD_TYPES set with normalized runtime types', () => {
     expect(Array.from(BATCH1_FIELD_TYPES).sort()).toEqual([
-      'currency', 'email', 'percent', 'phone', 'rating', 'url',
+      'barcode', 'currency', 'email', 'percent', 'phone', 'rating', 'url',
     ])
   })
 })
@@ -160,11 +162,12 @@ describe('sanitizeFieldProperty — rating', () => {
   })
 })
 
-describe('sanitizeFieldProperty — url / email / phone', () => {
+describe('sanitizeFieldProperty — url / email / phone / barcode', () => {
   it('returns the property object unchanged (no required options)', () => {
     expect(sanitizeFieldProperty('url', {})).toEqual({})
     expect(sanitizeFieldProperty('email', {})).toEqual({})
     expect(sanitizeFieldProperty('phone', {})).toEqual({})
+    expect(sanitizeFieldProperty('barcode', {})).toEqual({})
   })
 
   it('keeps custom keys for forward-compat', () => {
@@ -411,6 +414,23 @@ describe('validateLongTextValue', () => {
   })
 })
 
+describe('validateBarcodeValue', () => {
+  it('trims string and numeric barcode values', () => {
+    expect(validateBarcodeValue('  6901234567890  ', 'fld_barcode')).toBe('6901234567890')
+    expect(validateBarcodeValue(1234567890, 'fld_barcode')).toBe('1234567890')
+  })
+
+  it('returns null for empty barcode values', () => {
+    expect(validateBarcodeValue(null, 'fld_barcode')).toBeNull()
+    expect(validateBarcodeValue('', 'fld_barcode')).toBeNull()
+  })
+
+  it('rejects object values and overly long strings', () => {
+    expect(() => validateBarcodeValue(['123'], 'fld_barcode')).toThrow(/Barcode value must be a string/)
+    expect(() => validateBarcodeValue('x'.repeat(257), 'fld_barcode')).toThrow(/256 characters/)
+  })
+})
+
 describe('coerceBatch1Value — dispatch', () => {
   it('dispatches to currency / percent / rating coercion', () => {
     expect(coerceBatch1Value('currency', { code: 'USD', decimals: 2 }, 'fld', '99.99')).toBe(99.99)
@@ -422,6 +442,7 @@ describe('coerceBatch1Value — dispatch', () => {
     expect(coerceBatch1Value('url', undefined, 'fld', 'https://feishu.cn')).toBe('https://feishu.cn')
     expect(coerceBatch1Value('email', undefined, 'fld', 'a@b.co')).toBe('a@b.co')
     expect(coerceBatch1Value('phone', undefined, 'fld', '+86 138 0000 0000')).toBe('+86 138 0000 0000')
+    expect(coerceBatch1Value('barcode', undefined, 'fld', '  6901234567890  ')).toBe('6901234567890')
   })
 
   it('uses default rating max when property missing', () => {
@@ -445,6 +466,7 @@ describe('coerceBatch1Value — dispatch', () => {
     expect(coerceBatch1Value('url', undefined, 'fld', null)).toBeNull()
     expect(coerceBatch1Value('email', undefined, 'fld', '')).toBeNull()
     expect(coerceBatch1Value('phone', undefined, 'fld', null)).toBeNull()
+    expect(coerceBatch1Value('barcode', undefined, 'fld', '')).toBeNull()
   })
 
   it('surfaces validation errors as thrown exceptions', () => {

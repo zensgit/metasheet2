@@ -10,6 +10,7 @@ export type MultitableProvisioningFieldType =
   | 'lookup'
   | 'rollup'
   | 'attachment'
+  | 'barcode'
   | 'longText'
 
 export interface MultitableProvisioningFieldDescriptor {
