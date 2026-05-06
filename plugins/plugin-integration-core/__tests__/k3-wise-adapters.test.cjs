@@ -209,6 +209,28 @@ async function testK3WebApiAdapter() {
   assert.equal(missingAcctIdStatus.code, 'K3_WISE_CREDENTIALS_MISSING')
   assert.match(missingAcctIdStatus.message, /acctId/)
 
+  const loginWithoutAuthTransportCalls = []
+  const loginWithoutAuthTransport = createK3WiseWebApiAdapter({
+    system: createK3WebApiSystem(),
+    fetchImpl: async (url, options = {}) => {
+      const parsed = new URL(url)
+      loginWithoutAuthTransportCalls.push({ pathname: parsed.pathname, options })
+      if (parsed.pathname === '/K3API/Login') {
+        return jsonResponse(200, { success: true })
+      }
+      return jsonResponse(200, { ok: true })
+    },
+  })
+  const missingAuthTransportStatus = await loginWithoutAuthTransport.testConnection({ skipHealth: true })
+  assert.equal(missingAuthTransportStatus.ok, false)
+  assert.equal(missingAuthTransportStatus.code, 'K3_WISE_AUTH_TRANSPORT_MISSING')
+  assert.match(missingAuthTransportStatus.message, /session cookie or session id/)
+  assert.deepEqual(
+    loginWithoutAuthTransportCalls.map((call) => call.pathname),
+    ['/K3API/Login'],
+    'missing auth transport fails at login and does not continue to health checks',
+  )
+
   assert.equal(webApiInternals.businessSuccess({ success: true }, {}), true)
   assert.equal(webApiInternals.businessSuccess({ Result: { ResponseStatus: { IsSuccess: true } } }, {}), true)
   assert.equal(webApiInternals.businessSuccess({ Result: { ResponseStatus: { IsSuccess: false } } }, {}), false)

@@ -419,6 +419,12 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     )
     if (cookie) authHeaders.Cookie = cookie
     if (sessionId) authHeaders[config.sessionHeader || 'X-K3-Session'] = String(sessionId)
+    if (Object.keys(authHeaders).length === 0) {
+      throw new K3WiseWebApiAdapterError('K3 WISE WebAPI login succeeded but did not return a session cookie or session id', {
+        code: 'K3_WISE_AUTH_TRANSPORT_MISSING',
+        body: data,
+      })
+    }
     cachedAuthHeaders = authHeaders
     return cachedAuthHeaders
   }

@@ -13,7 +13,12 @@
 
 import { createServer } from 'node:http'
 
-export function createMockK3WebApiServer({ logger = () => {}, knownBadFNumbers = new Set(['BAD']) } = {}) {
+export function createMockK3WebApiServer({
+  logger = () => {},
+  knownBadFNumbers = new Set(['BAD']),
+  includeSessionCookie = true,
+  includeSessionId = true,
+} = {}) {
   const calls = []
 
   async function readBody(req) {
@@ -25,11 +30,24 @@ export function createMockK3WebApiServer({ logger = () => {}, knownBadFNumbers =
     })
   }
 
-  function jsonResponse(res, status, payload) {
+  function jsonResponse(res, status, payload, { setCookie = includeSessionCookie } = {}) {
     res.statusCode = status
     res.setHeader('Content-Type', 'application/json')
-    res.setHeader('Set-Cookie', 'K3SESSION=mock-cookie-1; Path=/; HttpOnly')
+    if (setCookie) res.setHeader('Set-Cookie', 'K3SESSION=mock-cookie-1; Path=/; HttpOnly')
     res.end(JSON.stringify(payload))
+  }
+
+  function requireMethod(req, res, expectedMethod) {
+    if (req.method === expectedMethod) return true
+    res.statusCode = 405
+    res.setHeader('Content-Type', 'application/json')
+    res.setHeader('Allow', expectedMethod)
+    res.end(JSON.stringify({
+      success: false,
+      message: `mock K3 method not allowed: ${req.method} ${req.url}`,
+      expectedMethod,
+    }))
+    return false
   }
 
   const server = createServer(async (req, res) => {
@@ -46,14 +64,20 @@ export function createMockK3WebApiServer({ logger = () => {}, knownBadFNumbers =
     logger({ method: req.method, pathname, body })
 
     if (pathname === '/K3API/Login') {
-      jsonResponse(res, 200, { success: true, sessionId: 'mock-session-1' })
+      if (!requireMethod(req, res, 'POST')) return
+      jsonResponse(res, 200, {
+        success: true,
+        ...(includeSessionId ? { sessionId: 'mock-session-1' } : {}),
+      })
       return
     }
     if (pathname === '/K3API/Health') {
+      if (!requireMethod(req, res, 'GET')) return
       jsonResponse(res, 200, { ok: true })
       return
     }
     if (pathname === '/K3API/Material/Save') {
+      if (!requireMethod(req, res, 'POST')) return
       const fNumber = body?.Model?.FNumber
       if (knownBadFNumbers.has(fNumber)) {
         jsonResponse(res, 200, { success: false, message: `mock K3 rejects ${fNumber}: invalid material code` })
@@ -63,14 +87,17 @@ export function createMockK3WebApiServer({ logger = () => {}, knownBadFNumbers =
       return
     }
     if (pathname === '/K3API/Material/Submit') {
+      if (!requireMethod(req, res, 'POST')) return
       jsonResponse(res, 200, { success: true, submitted: body?.Number })
       return
     }
     if (pathname === '/K3API/Material/Audit') {
+      if (!requireMethod(req, res, 'POST')) return
       jsonResponse(res, 200, { success: true, audited: body?.Number })
       return
     }
     if (pathname === '/K3API/BOM/Save') {
+      if (!requireMethod(req, res, 'POST')) return
       const fNumber = body?.Model?.FNumber
       if (knownBadFNumbers.has(fNumber)) {
         jsonResponse(res, 200, { success: false, message: `mock K3 BOM rejects ${fNumber}` })
@@ -80,10 +107,12 @@ export function createMockK3WebApiServer({ logger = () => {}, knownBadFNumbers =
       return
     }
     if (pathname === '/K3API/BOM/Submit') {
+      if (!requireMethod(req, res, 'POST')) return
       jsonResponse(res, 200, { success: true, submitted: body?.Number })
       return
     }
     if (pathname === '/K3API/BOM/Audit') {
+      if (!requireMethod(req, res, 'POST')) return
       jsonResponse(res, 200, { success: true, audited: body?.Number })
       return
     }
