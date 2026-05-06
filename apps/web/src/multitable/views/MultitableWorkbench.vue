@@ -185,10 +185,12 @@
           :rows="grid.rows.value" :fields="scopedAllFields" :loading="grid.loading.value"
           :view-config="workbench.activeView.value?.config"
           :can-create="caps.canCreateRecord.value"
+          :can-edit="effectiveRowActions.canEdit"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
           @select-record="onSelectRecord" @create-record="onKanbanCreateRecord"
           @open-comments="onOpenRecordComments"
+          @reparent-record="onHierarchyReparentRecord"
           @update-view-config="onPersistActiveViewConfig"
         />
         <MetaGridTable
@@ -1242,6 +1244,35 @@ async function onTimelinePatchDates(payload: {
     showSuccess('Dates updated')
   } catch (error: any) {
     showError(error?.message ?? 'Failed to update timeline dates')
+  }
+}
+async function onHierarchyReparentRecord(payload: {
+  recordId: string
+  version: number
+  parentFieldId: string
+  parentRecordId: string | null
+}) {
+  if (!ensureCanEditRecord(payload.recordId)) return
+  try {
+    await workbench.client.patchRecords({
+      sheetId: workbench.activeSheetId.value || undefined,
+      viewId: workbench.activeViewId.value || undefined,
+      changes: [
+        {
+          recordId: payload.recordId,
+          fieldId: payload.parentFieldId,
+          value: payload.parentRecordId ? [payload.parentRecordId] : [],
+          expectedVersion: payload.version,
+        },
+      ],
+    })
+    await grid.loadViewData(grid.page.value.offset)
+    if (selectedRecordId.value === payload.recordId) {
+      await resolveDeepLink(payload.recordId)
+    }
+    showSuccess('Hierarchy updated')
+  } catch (error: any) {
+    showError(error?.message ?? 'Failed to update hierarchy parent')
   }
 }
 async function onAddRecord() {

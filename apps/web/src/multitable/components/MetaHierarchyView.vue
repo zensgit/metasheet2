@@ -44,6 +44,16 @@
       <div v-if="treeDiagnostics.length" class="meta-hierarchy__notice" role="status">
         {{ treeDiagnostics.join(' ') }}
       </div>
+      <div
+        v-if="canEdit && draggingRecordId"
+        class="meta-hierarchy__root-drop"
+        role="button"
+        tabindex="0"
+        @dragover.prevent
+        @drop.prevent="onDropToRoot"
+      >
+        Drop here to move to root
+      </div>
       <ul v-if="visibleRoots.length" class="meta-hierarchy__list meta-hierarchy__list--root">
         <HierarchyNode
           v-for="node in visibleRoots"
@@ -52,12 +62,17 @@
           :expanded-ids="expandedIds"
           :title-for-row="titleForRow"
           :can-create="canCreate"
+          :can-edit="canEdit"
           :can-comment="canComment"
+          :dragging-record-id="draggingRecordId"
           :comment-presence="commentPresence"
           @toggle="toggleNode"
           @select-record="emitSelectRecord"
           @open-comments="emitOpenComments"
           @create-child="createChild"
+          @drag-start-record="onDragStartRecord"
+          @drag-end-record="onDragEndRecord"
+          @drop-record="onDropRecord"
         />
       </ul>
       <div v-else class="meta-hierarchy__empty">No records match this hierarchy view.</div>
@@ -95,6 +110,7 @@ const props = defineProps<{
   fields: MetaField[]
   loading: boolean
   canCreate?: boolean
+  canEdit?: boolean
   canComment?: boolean
   viewConfig?: Record<string, unknown> | null
   commentPresence?: Record<string, MultitableCommentPresenceSummary | undefined>
@@ -105,6 +121,7 @@ const emit = defineEmits<{
   (e: 'open-comments', recordId: string): void
   (e: 'create-record', data: Record<string, unknown>): void
   (e: 'update-view-config', input: { config: Record<string, unknown> }): void
+  (e: 'reparent-record', payload: { recordId: string; version: number; parentFieldId: string; parentRecordId: string | null }): void
 }>()
 
 const hierarchyDraft = reactive<Required<MetaHierarchyViewConfig>>({
@@ -115,6 +132,8 @@ const hierarchyDraft = reactive<Required<MetaHierarchyViewConfig>>({
 })
 const pendingConfigKey = ref<string | null>(null)
 const expandedIds = ref<Set<string>>(new Set())
+const draggingRecordId = ref<string | null>(null)
+const dragWarning = ref<string | null>(null)
 
 const hierarchyConfig = computed<Required<MetaHierarchyViewConfig>>(() =>
   resolveHierarchyViewConfig(props.fields, props.viewConfig),
@@ -147,7 +166,10 @@ const treeResult = computed<TreeResult>(() =>
   buildHierarchyTree(props.rows, hierarchyDraft.parentFieldId, hierarchyDraft.orphanMode),
 )
 const visibleRoots = computed(() => treeResult.value.roots)
-const treeDiagnostics = computed(() => treeResult.value.diagnostics)
+const treeDiagnostics = computed(() => [
+  ...(dragWarning.value ? [dragWarning.value] : []),
+  ...treeResult.value.diagnostics,
+])
 
 watch(
   [() => props.rows, () => hierarchyDraft.defaultExpandDepth, () => hierarchyDraft.parentFieldId],
@@ -212,6 +234,78 @@ function toggleNode(recordId: string) {
 function createChild(recordId: string) {
   const fieldId = hierarchyDraft.parentFieldId
   emit('create-record', fieldId ? { [fieldId]: [recordId] } : {})
+}
+
+function currentParentId(recordId: string): string | null {
+  const row = props.rows.find((item) => item.id === recordId)
+  return row && hierarchyDraft.parentFieldId ? firstParentId(row.data[hierarchyDraft.parentFieldId]) : null
+}
+
+function descendantIdsOf(recordId: string): Set<string> {
+  const childIdsByParent = new Map<string, string[]>()
+  if (!hierarchyDraft.parentFieldId) return new Set()
+  for (const row of props.rows) {
+    const parentId = firstParentId(row.data[hierarchyDraft.parentFieldId])
+    if (!parentId) continue
+    if (!childIdsByParent.has(parentId)) childIdsByParent.set(parentId, [])
+    childIdsByParent.get(parentId)?.push(row.id)
+  }
+  const descendants = new Set<string>()
+  const stack = [...(childIdsByParent.get(recordId) ?? [])]
+  while (stack.length) {
+    const childId = stack.pop()!
+    if (descendants.has(childId)) continue
+    descendants.add(childId)
+    stack.push(...(childIdsByParent.get(childId) ?? []))
+  }
+  return descendants
+}
+
+function onDragStartRecord(recordId: string): void {
+  if (!props.canEdit) return
+  draggingRecordId.value = recordId
+  dragWarning.value = null
+}
+
+function onDragEndRecord(): void {
+  draggingRecordId.value = null
+}
+
+function onDropRecord(payload: { recordId: string; parentRecordId: string | null }): void {
+  if (!props.canEdit || !hierarchyDraft.parentFieldId) return
+  const record = props.rows.find((row) => row.id === payload.recordId)
+  if (!record) return
+  if (payload.parentRecordId === payload.recordId) {
+    dragWarning.value = 'Cannot move a record under itself.'
+    draggingRecordId.value = null
+    return
+  }
+  if (payload.parentRecordId && descendantIdsOf(payload.recordId).has(payload.parentRecordId)) {
+    dragWarning.value = 'Cannot move a record under its own descendant.'
+    draggingRecordId.value = null
+    return
+  }
+  if ((currentParentId(payload.recordId) ?? null) === (payload.parentRecordId ?? null)) {
+    draggingRecordId.value = null
+    return
+  }
+  if (payload.parentRecordId) {
+    expandedIds.value = new Set([...expandedIds.value, payload.parentRecordId])
+  }
+  draggingRecordId.value = null
+  dragWarning.value = null
+  emit('reparent-record', {
+    recordId: payload.recordId,
+    version: record.version,
+    parentFieldId: hierarchyDraft.parentFieldId,
+    parentRecordId: payload.parentRecordId,
+  })
+}
+
+function onDropToRoot(): void {
+  const recordId = draggingRecordId.value
+  if (!recordId) return
+  onDropRecord({ recordId, parentRecordId: null })
 }
 
 function emitSelectRecord(recordId: string): void {
@@ -304,10 +398,12 @@ const HierarchyNode: ReturnType<typeof defineComponent> = defineComponent({
     expandedIds: { type: Object as PropType<Set<string>>, required: true },
     titleForRow: { type: Function as PropType<(row: MetaRecord) => string>, required: true },
     canCreate: { type: Boolean, default: false },
+    canEdit: { type: Boolean, default: false },
     canComment: { type: Boolean, default: false },
+    draggingRecordId: { type: String as PropType<string | null>, default: null },
     commentPresence: { type: Object as PropType<Record<string, MultitableCommentPresenceSummary | undefined> | undefined>, default: undefined },
   },
-  emits: ['toggle', 'select-record', 'open-comments', 'create-child'],
+  emits: ['toggle', 'select-record', 'open-comments', 'create-child', 'drag-start-record', 'drag-end-record', 'drop-record'],
   setup(nodeProps, { emit: nodeEmit }) {
     function rowCommentAffordance(recordId: string) {
       return resolveRecordCommentAffordance(nodeProps.commentPresence?.[recordId])
@@ -322,10 +418,35 @@ const HierarchyNode: ReturnType<typeof defineComponent> = defineComponent({
       const hasChildren = node.children.length > 0
       return h('li', { class: 'meta-hierarchy__item' }, [
         h('div', {
-          class: 'meta-hierarchy__row',
+          class: ['meta-hierarchy__row', {
+            'meta-hierarchy__row--draggable': nodeProps.canEdit,
+            'meta-hierarchy__row--drop-target': Boolean(nodeProps.canEdit && nodeProps.draggingRecordId && nodeProps.draggingRecordId !== node.record.id),
+          }],
           role: 'treeitem',
           'aria-expanded': hasChildren ? String(expanded) : undefined,
+          draggable: nodeProps.canEdit,
           style: { paddingLeft: `${node.depth * 18 + 8}px` },
+          onDragstart: (event: DragEvent) => {
+            if (!nodeProps.canEdit) return
+            event.stopPropagation()
+            event.dataTransfer?.setData('text/plain', node.record.id)
+            if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
+            nodeEmit('drag-start-record', node.record.id)
+          },
+          onDragend: () => nodeEmit('drag-end-record'),
+          onDragover: (event: DragEvent) => {
+            if (!nodeProps.canEdit || !nodeProps.draggingRecordId || nodeProps.draggingRecordId === node.record.id) return
+            event.preventDefault()
+            if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+          },
+          onDrop: (event: DragEvent) => {
+            if (!nodeProps.canEdit) return
+            event.preventDefault()
+            event.stopPropagation()
+            const recordId = nodeProps.draggingRecordId ?? event.dataTransfer?.getData('text/plain') ?? ''
+            if (!recordId) return
+            nodeEmit('drop-record', { recordId, parentRecordId: node.record.id })
+          },
         }, [
           h('button', {
             class: ['meta-hierarchy__toggle', { 'meta-hierarchy__toggle--empty': !hasChildren }],
@@ -363,12 +484,17 @@ const HierarchyNode: ReturnType<typeof defineComponent> = defineComponent({
               expandedIds: nodeProps.expandedIds,
               titleForRow: nodeProps.titleForRow,
               canCreate: nodeProps.canCreate,
+              canEdit: nodeProps.canEdit,
               canComment: nodeProps.canComment,
+              draggingRecordId: nodeProps.draggingRecordId,
               commentPresence: nodeProps.commentPresence,
               onToggle: (recordId: string) => nodeEmit('toggle', recordId),
               onSelectRecord: (recordId: string) => nodeEmit('select-record', recordId),
               onOpenComments: (recordId: string) => nodeEmit('open-comments', recordId),
               onCreateChild: (recordId: string) => nodeEmit('create-child', recordId),
+              onDragStartRecord: (recordId: string) => nodeEmit('drag-start-record', recordId),
+              onDragEndRecord: () => nodeEmit('drag-end-record'),
+              onDropRecord: (payload: { recordId: string; parentRecordId: string | null }) => nodeEmit('drop-record', payload),
             }),
           ))
           : null,
@@ -387,9 +513,13 @@ const HierarchyNode: ReturnType<typeof defineComponent> = defineComponent({
 .meta-hierarchy__placeholder, .meta-hierarchy__empty { margin: 24px; padding: 28px; border: 1px dashed #cbd5e1; border-radius: 10px; background: #fff; color: #64748b; text-align: center; display: flex; flex-direction: column; gap: 6px; }
 .meta-hierarchy__body { flex: 1; min-height: 0; overflow: auto; padding: 14px 16px 24px; }
 .meta-hierarchy__notice { margin-bottom: 10px; padding: 8px 10px; border: 1px solid #fde68a; border-radius: 8px; background: #fffbeb; color: #92400e; font-size: 12px; }
+.meta-hierarchy__root-drop { margin-bottom: 10px; padding: 10px 12px; border: 1px dashed #93c5fd; border-radius: 8px; background: #eff6ff; color: #1d4ed8; font-size: 12px; font-weight: 600; text-align: center; }
 .meta-hierarchy__list { margin: 0; padding: 0; list-style: none; }
 .meta-hierarchy__list--root { border: 1px solid #e2e8f0; border-radius: 10px; overflow: hidden; background: #fff; }
 .meta-hierarchy__row { display: flex; align-items: center; gap: 8px; min-height: 40px; border-bottom: 1px solid #edf2f7; }
+.meta-hierarchy__row--draggable { cursor: grab; }
+.meta-hierarchy__row--draggable:active { cursor: grabbing; }
+.meta-hierarchy__row--drop-target { background: #f0fdf4; box-shadow: inset 3px 0 0 #22c55e; }
 .meta-hierarchy__item:last-child > .meta-hierarchy__row { border-bottom: 0; }
 .meta-hierarchy__toggle { width: 24px; height: 24px; border: 0; border-radius: 6px; background: #eef2ff; color: #3730a3; cursor: pointer; }
 .meta-hierarchy__toggle--empty { background: transparent; color: #94a3b8; cursor: default; }
