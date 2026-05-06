@@ -84,10 +84,16 @@ Do not mark an item done if:
 - [ ] Smoke test automation send_email save/execute path.
 - [x] Create executable API smoke helper for repeatable staging evidence.
   - PR: #1359
-  - Merge commit: pending
+  - Merge commit: `aec377f80`
   - Development MD: `docs/development/multitable-feishu-rc-api-smoke-design-20260506.md`
   - Verification MD: `docs/development/multitable-feishu-rc-api-smoke-verification-20260506.md`
-  - Verification summary: `node --test scripts/ops/multitable-feishu-rc-api-smoke.test.mjs`, `node --check` for runner/test, and `git diff --check`; real staging run remains pending.
+  - Verification summary: `node --test scripts/ops/multitable-feishu-rc-api-smoke.test.mjs`, `node --check` for runner/test, `git diff --check`, and PR CI passed before merge.
+- [x] Run executable API smoke helper against 142 staging.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-142-api-smoke-design-20260506.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-142-api-smoke-verification-20260506.md`
+  - Verification summary: `API_BASE=http://142.171.239.56:8081 CONFIRM_WRITE=1 ALLOW_INSTALL=1 EXPECTED_COMMIT=aec377f80 node scripts/ops/multitable-feishu-rc-api-smoke.mjs` exited 0; 11/11 checks passed; browser-only smoke items remain unchecked.
 - [x] Produce RC audit result MD with P0/P1/P2 defects.
   - PR: pending
   - Merge commit: pending
