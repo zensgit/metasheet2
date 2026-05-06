@@ -2070,12 +2070,12 @@ export class MetaSheetServer {
               const sheetId = String((recResult.rows[0] as any).sheet_id)
 
               const fieldResult = await pool.query(
-                'SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1',
+                'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC',
                 [sheetId],
               )
               const fields = (fieldResult.rows as any[]).map((f: any) => {
                 const prop = f.property && typeof f.property === 'object' ? f.property : {}
-                return { id: String(f.id), name: String(f.name), type: f.type, property: prop, options: prop.options }
+                return { id: String(f.id), name: String(f.name), type: f.type, property: prop, options: prop.options, order: Number(f.order ?? 0) }
               })
 
               // Build real field mutation guards from DB (same logic as buildFieldMutationGuardMap)

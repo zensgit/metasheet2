@@ -16,6 +16,13 @@ import {
   validateLongTextValue,
   type MultitableField,
 } from './field-codecs'
+import {
+  HierarchyCycleError,
+  assertNoHierarchyParentCycle,
+  buildHierarchyParentOverridesByField,
+  collectSameSheetLinkChangeFieldIds,
+  loadHierarchyParentFieldIds,
+} from './hierarchy-cycle-guard'
 import { allocateAutoNumberValues } from './auto-number-service'
 import { getDefaultValidationRules, validateRecord } from './field-validation-engine'
 import type { FieldValidationConfig } from './field-validation'
@@ -826,6 +833,32 @@ export class RecordService {
       throw new RecordPatchFieldValidationError(fieldErrors)
     }
 
+    const changesByRecord = new Map<string, Array<{ fieldId: string; value: unknown }>>([
+      [recordId, Object.entries(data).map(([fieldId, value]) => ({ fieldId, value }))],
+    ])
+    const sameSheetLinkChangeFieldIds = collectSameSheetLinkChangeFieldIds({
+      changesByRecord,
+      fieldById,
+      sheetId,
+    })
+    const hierarchyParentFieldIds = sameSheetLinkChangeFieldIds.size > 0
+      ? await loadHierarchyParentFieldIds({
+          query: this.pool.query.bind(this.pool),
+          sheetId,
+          fields,
+        })
+      : new Set<string>()
+    const guardedHierarchyParentFieldIds = new Set(
+      [...sameSheetLinkChangeFieldIds].filter((fieldId) => hierarchyParentFieldIds.has(fieldId)),
+    )
+    const hierarchyParentOverridesByField = guardedHierarchyParentFieldIds.size > 0
+      ? buildHierarchyParentOverridesByField({
+          changesByRecord,
+          hierarchyParentFieldIds: guardedHierarchyParentFieldIds,
+          normalizeLinkIds,
+        })
+      : new Map<string, Map<string, string[]>>()
+
     let nextVersion = 1
     let pendingSubscriberNotification: NotifyRecordSubscribersInput | null = null
     await this.pool.transaction(async ({ query }) => {
@@ -852,6 +885,28 @@ export class RecordService {
         throw new VersionConflictError(recordId, serverVersion)
       }
       const previousData = normalizeJson(currentRow.data)
+
+      for (const [fieldId, { ids, cfg }] of linkUpdates.entries()) {
+        if (ids.length === 0 || !guardedHierarchyParentFieldIds.has(fieldId) || cfg.foreignSheetId !== sheetId) {
+          continue
+        }
+        try {
+          await assertNoHierarchyParentCycle({
+            query,
+            sheetId,
+            recordId,
+            fieldId,
+            parentRecordIds: ids,
+            parentOverridesByRecord: hierarchyParentOverridesByField.get(fieldId) ?? new Map(),
+            normalizeLinkIds,
+          })
+        } catch (error) {
+          if (error instanceof HierarchyCycleError) {
+            throw new RecordValidationError(error.message, error.code)
+          }
+          throw error
+        }
+      }
 
       if (Object.keys(patch).length > 0) {
         const updateRes = await query(
