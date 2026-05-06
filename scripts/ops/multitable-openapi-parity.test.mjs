@@ -25,6 +25,7 @@ const expectedFieldTypes = [
   'url',
   'email',
   'phone',
+  'barcode',
   'longText',
   'autoNumber',
   'createdTime',

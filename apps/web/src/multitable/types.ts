@@ -21,6 +21,7 @@ export type MetaFieldType =
   | 'url'
   | 'email'
   | 'phone'
+  | 'barcode'
   | 'longText'
   | 'autoNumber'
   | 'createdTime'

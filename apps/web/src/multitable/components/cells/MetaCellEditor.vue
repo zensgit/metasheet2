@@ -54,6 +54,20 @@
       @keydown.escape="emit('cancel')"
     />
 
+    <!-- barcode: text-backed field; scanner/image generation is out of scope. -->
+    <input
+      v-else-if="field.type === 'barcode'"
+      ref="inputRef"
+      class="meta-cell-editor__input"
+      type="text"
+      inputmode="text"
+      placeholder="Scan or enter barcode"
+      :value="textControlValue(modelValue)"
+      @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
+      @keydown.enter="emit('confirm')"
+      @keydown.escape="emit('cancel')"
+    />
+
     <!-- number -->
     <input
       v-else-if="field.type === 'number'"

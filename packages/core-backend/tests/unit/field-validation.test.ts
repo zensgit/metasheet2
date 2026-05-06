@@ -428,6 +428,13 @@ describe('getDefaultValidationRules', () => {
     expect((rules[0].params as any).value).toBe(10000)
   })
 
+  test('barcode type returns maxLength 256', () => {
+    const rules = getDefaultValidationRules('barcode')
+    expect(rules).toEqual([{ type: 'maxLength', params: { value: 256 } }])
+    expect(errors('barcode', 'x'.repeat(256), rules)).toHaveLength(0)
+    expect(errors('barcode', 'x'.repeat(257), rules)).toHaveLength(1)
+  })
+
   test('select type returns enum from options', () => {
     const rules = getDefaultValidationRules('select', {
       options: [{ value: 'red' }, { value: 'blue' }],

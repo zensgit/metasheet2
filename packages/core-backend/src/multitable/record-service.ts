@@ -218,6 +218,7 @@ function mapFieldType(type: string): UniverMetaField['type'] {
   if (normalized === 'url') return 'url'
   if (normalized === 'email') return 'email'
   if (normalized === 'phone') return 'phone'
+  if (normalized === 'barcode' || normalized === 'bar_code' || normalized === 'bar-code') return 'barcode'
   if (normalized === 'autonumber' || normalized === 'auto_number' || normalized === 'auto-number') return 'autoNumber'
   if (normalized === 'createdtime' || normalized === 'created_time' || normalized === 'created-time') return 'createdTime'
   if (normalized === 'modifiedtime' || normalized === 'modified_time' || normalized === 'modified-time') return 'modifiedTime'
