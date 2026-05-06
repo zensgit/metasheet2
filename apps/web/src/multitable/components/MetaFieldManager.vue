@@ -226,6 +226,31 @@
           </div>
         </template>
 
+        <template v-else-if="configTargetType === 'number'">
+          <div class="meta-field-mgr__grid">
+            <label class="meta-field-mgr__field">
+              <span>Decimals</span>
+              <input
+                class="meta-field-mgr__input"
+                type="number"
+                min="0"
+                max="6"
+                placeholder="Preserve"
+                :value="numberDraft.decimals ?? ''"
+                @input="onNumberDecimalsInput"
+              />
+            </label>
+            <label class="meta-field-mgr__field">
+              <span>Unit</span>
+              <input v-model="numberDraft.unit" class="meta-field-mgr__input" maxlength="24" placeholder="kg, hours, pcs..." />
+            </label>
+          </div>
+          <label class="meta-field-mgr__toggle">
+            <input v-model="numberDraft.thousands" type="checkbox" />
+            <span>Use thousands separators</span>
+          </label>
+        </template>
+
         <template v-else-if="configTargetType === 'currency'">
           <div class="meta-field-mgr__grid">
             <label class="meta-field-mgr__field">
@@ -330,6 +355,7 @@ import {
   resolveFormulaFieldProperty,
   resolveLinkFieldProperty,
   resolveLookupFieldProperty,
+  resolveNumberFieldProperty,
   resolvePercentFieldProperty,
   resolveRatingFieldProperty,
   resolveRollupFieldProperty,
@@ -503,6 +529,11 @@ const currencyDraft = reactive<{ code: string; decimals: number }>({
   code: 'CNY',
   decimals: 2,
 })
+const numberDraft = reactive<{ decimals: number | null; thousands: boolean; unit: string }>({
+  decimals: null,
+  thousands: false,
+  unit: '',
+})
 const percentDraft = reactive<{ decimals: number }>({
   decimals: 1,
 })
@@ -574,10 +605,15 @@ function onValidationRulesChange(rules: FieldValidationRule[]) {
   validationDraftTouched.value = true
 }
 
+function onNumberDecimalsInput(event: Event) {
+  const value = (event.target as HTMLInputElement).value.trim()
+  numberDraft.decimals = value === '' ? null : Number(value)
+}
+
 function requiresConfig(type: MetaFieldCreateType): boolean {
   return [
     'select', 'multiSelect', 'link', 'person', 'lookup', 'rollup', 'formula', 'attachment',
-    'currency', 'percent', 'rating', 'longText',
+    'number', 'currency', 'percent', 'rating', 'longText',
   ].includes(type)
 }
 
@@ -605,6 +641,9 @@ function resetDrafts() {
   attachmentDraft.acceptedMimeTypesText = ''
   currencyDraft.code = 'CNY'
   currencyDraft.decimals = 2
+  numberDraft.decimals = null
+  numberDraft.thousands = false
+  numberDraft.unit = ''
   percentDraft.decimals = 1
   ratingDraft.max = 5
   validationDraft.value = []
@@ -662,6 +701,14 @@ function serializeFieldDraft(type: string | null): string {
   }
   if (type === 'currency') {
     return JSON.stringify({ code: currencyDraft.code.trim().toUpperCase(), decimals: currencyDraft.decimals })
+  }
+  if (type === 'number') {
+    return JSON.stringify({
+      decimals: numberDraft.decimals,
+      thousands: numberDraft.thousands,
+      unit: numberDraft.unit.trim(),
+      validation,
+    })
   }
   if (type === 'percent') {
     return JSON.stringify({ decimals: percentDraft.decimals })
@@ -736,6 +783,11 @@ function hydrateExistingFieldConfig(field: MetaField, options?: { liveRefreshTex
     const property = resolveCurrencyFieldProperty(field.property)
     currencyDraft.code = property.code
     currencyDraft.decimals = property.decimals
+  } else if (fieldType === 'number') {
+    const property = resolveNumberFieldProperty(field.property)
+    numberDraft.decimals = property.decimals
+    numberDraft.thousands = property.thousands
+    numberDraft.unit = property.unit
   } else if (fieldType === 'percent') {
     const property = resolvePercentFieldProperty(field.property)
     percentDraft.decimals = property.decimals
@@ -810,7 +862,7 @@ function openNewFieldConfigIfNeeded() {
 }
 
 function currentDraftProperty(type: MetaFieldCreateType | string): Record<string, unknown> | undefined {
-  const normalizedType = type === 'link' || type === 'select' || type === 'multiSelect' || type === 'lookup' || type === 'rollup' || type === 'formula' || type === 'attachment' || type === 'person' || type === 'currency' || type === 'percent' || type === 'rating'
+  const normalizedType = type === 'link' || type === 'select' || type === 'multiSelect' || type === 'lookup' || type === 'rollup' || type === 'formula' || type === 'attachment' || type === 'person' || type === 'number' || type === 'currency' || type === 'percent' || type === 'rating'
     ? type
     : null
   fieldConfigError.value = ''
@@ -901,6 +953,25 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
     }
     return { code, decimals: Math.round(decimals) }
   }
+  if (normalizedType === 'number') {
+    const property: Record<string, unknown> = { ...validationProperty }
+    if (numberDraft.decimals !== null) {
+      const decimals = Number(numberDraft.decimals)
+      if (!Number.isFinite(decimals) || decimals < 0 || decimals > 6) {
+        fieldConfigError.value = 'Number decimals must be blank or between 0 and 6'
+        return undefined
+      }
+      property.decimals = Math.round(decimals)
+    }
+    property.thousands = numberDraft.thousands
+    const unit = numberDraft.unit.trim()
+    if (unit.length > 24) {
+      fieldConfigError.value = 'Number unit must be 24 characters or fewer'
+      return undefined
+    }
+    if (unit) property.unit = unit
+    return property
+  }
   if (normalizedType === 'percent') {
     const decimals = Number(percentDraft.decimals)
     if (!Number.isFinite(decimals) || decimals < 0 || decimals > 6) {
@@ -917,7 +988,7 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
     }
     return { max: Math.round(max) }
   }
-  if (type === 'string' || type === 'longText' || type === 'number') {
+  if (type === 'string' || type === 'longText') {
     return { ...validationProperty }
   }
   return undefined
@@ -964,7 +1035,7 @@ function saveConfig() {
   // an empty `property: {}` would otherwise clobber existing values on
   // the server. Types with mandatory structural config (select/link/
   // lookup/rollup/formula/attachment) always have keys to persist.
-  const onlyValidationSurface = (fieldType === 'string' || fieldType === 'longText' || fieldType === 'number')
+  const onlyValidationSurface = (fieldType === 'string' || fieldType === 'longText')
   if (onlyValidationSurface && !validationDraftTouched.value) {
     closeConfig()
     return

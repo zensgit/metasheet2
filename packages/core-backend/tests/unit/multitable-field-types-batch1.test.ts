@@ -107,6 +107,33 @@ describe('sanitizeFieldProperty — currency', () => {
   })
 })
 
+describe('sanitizeFieldProperty — number format', () => {
+  it('preserves safe display-format options without changing validation rules', () => {
+    expect(sanitizeFieldProperty('number', {
+      decimals: '2',
+      thousands: true,
+      unit: ' kg ',
+      validation: [{ type: 'min', params: { value: 0 } }],
+    })).toEqual({
+      decimals: 2,
+      thousands: true,
+      unit: 'kg',
+      validation: [{ type: 'min', params: { value: 0 } }],
+    })
+  })
+
+  it('drops invalid decimals and trims unit length', () => {
+    expect(sanitizeFieldProperty('number', {
+      decimals: 99,
+      thousands: 'yes',
+      unit: 'abcdefghijklmnopqrstuvwxy',
+    })).toEqual({
+      thousands: false,
+      unit: 'abcdefghijklmnopqrstuvwx',
+    })
+  })
+})
+
 describe('sanitizeFieldProperty — percent', () => {
   it('round-trips valid decimals', () => {
     expect(sanitizeFieldProperty('percent', { decimals: 0 })).toEqual({ decimals: 0 })
