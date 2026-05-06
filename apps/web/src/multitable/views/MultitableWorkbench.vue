@@ -175,8 +175,9 @@
           :view-config="workbench.activeView.value?.config"
           :group-info="workbench.activeView.value?.groupInfo"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
-          :can-create="caps.canCreateRecord.value"
+          :can-create="caps.canCreateRecord.value" :can-edit="effectiveRowActions.canEdit"
           @select-record="onSelectRecord" @create-record="onKanbanCreateRecord"
+          @patch-dates="onTimelinePatchDates"
           @update-view-config="onPersistActiveViewConfig"
         />
         <MetaHierarchyView
@@ -1238,7 +1239,7 @@ async function onTimelinePatchDates(payload: {
     if (selectedRecordId.value === payload.recordId) {
       await resolveDeepLink(payload.recordId)
     }
-    showSuccess('Timeline updated')
+    showSuccess('Dates updated')
   } catch (error: any) {
     showError(error?.message ?? 'Failed to update timeline dates')
   }
