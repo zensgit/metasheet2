@@ -109,9 +109,10 @@ export function resolveTimelineViewConfig(
   fields: MetaField[],
   raw?: Record<string, unknown> | null,
 ): Required<MetaTimelineViewConfig> {
-  const startFieldId = stringOrNull(raw?.startFieldId) ?? firstFieldId(fields, ['date'])
+  const dateFieldTypes = ['date', 'dateTime']
+  const startFieldId = stringOrNull(raw?.startFieldId) ?? firstFieldId(fields, dateFieldTypes)
   const endFieldId = stringOrNull(raw?.endFieldId)
-    ?? firstNonMatchingFieldId(fields, [startFieldId], ['date'])
+    ?? firstNonMatchingFieldId(fields, [startFieldId], dateFieldTypes)
     ?? startFieldId
   return {
     startFieldId,
@@ -126,9 +127,16 @@ export function resolveGanttViewConfig(
   raw?: Record<string, unknown> | null,
   groupInfo?: Record<string, unknown> | null,
 ): Required<MetaGanttViewConfig> {
-  const startFieldId = stringOrNull(raw?.startFieldId) ?? firstFieldId(fields, ['date'])
+  const dateFieldTypes = ['date', 'dateTime']
+  const dependencyFieldTypes = ['link', 'multiSelect', 'string']
+  const configuredDependencyFieldId = stringOrNull(raw?.dependencyFieldId)
+  const dependencyFieldId = configuredDependencyFieldId
+    && fields.some((field) => field.id === configuredDependencyFieldId && dependencyFieldTypes.includes(field.type))
+    ? configuredDependencyFieldId
+    : null
+  const startFieldId = stringOrNull(raw?.startFieldId) ?? firstFieldId(fields, dateFieldTypes)
   const endFieldId = stringOrNull(raw?.endFieldId)
-    ?? firstNonMatchingFieldId(fields, [startFieldId], ['date'])
+    ?? firstNonMatchingFieldId(fields, [startFieldId], dateFieldTypes)
     ?? startFieldId
   return {
     startFieldId,
@@ -136,6 +144,7 @@ export function resolveGanttViewConfig(
     titleFieldId: stringOrNull(raw?.titleFieldId) ?? firstNonMatchingFieldId(fields, [startFieldId, endFieldId], ['string']) ?? firstFieldId(fields),
     progressFieldId: stringOrNull(raw?.progressFieldId) ?? firstNonMatchingFieldId(fields, [startFieldId, endFieldId], ['number', 'percent']),
     groupFieldId: stringOrNull(raw?.groupFieldId) ?? stringOrNull(groupInfo?.fieldId),
+    dependencyFieldId,
     zoom: raw?.zoom === 'day' || raw?.zoom === 'month' ? raw.zoom : 'week',
   }
 }

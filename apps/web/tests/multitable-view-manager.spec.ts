@@ -71,6 +71,70 @@ describe('MetaViewManager', () => {
     app.unmount()
   })
 
+  it('emits persisted Gantt dependency field config when saving view settings', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const updateSpy = vi.fn()
+
+    const app = createApp({
+      render() {
+        return h(MetaViewManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          activeViewId: 'view_gantt',
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string' },
+            { id: 'fld_start', name: 'Start', type: 'date' },
+            { id: 'fld_end', name: 'End', type: 'date' },
+            { id: 'fld_deps', name: 'Depends on', type: 'link' },
+            { id: 'fld_status', name: 'Status', type: 'select' },
+          ],
+          views: [
+            {
+              id: 'view_gantt',
+              sheetId: 'sheet_1',
+              name: 'Gantt',
+              type: 'gantt',
+              config: { startFieldId: 'fld_start', endFieldId: 'fld_end', titleFieldId: 'fld_name', zoom: 'week' },
+            },
+          ],
+          onUpdateView: updateSpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    ;(container.querySelector('.meta-view-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await nextTick()
+
+    const selects = Array.from(container.querySelectorAll('.meta-view-mgr__config select')) as HTMLSelectElement[]
+    expect(selects.map((select) => Array.from(select.options).map((option) => option.value))).toContainEqual(['', 'fld_name', 'fld_deps'])
+    selects[5].value = 'fld_deps'
+    selects[5].dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    ;(Array.from(container.querySelectorAll('.meta-view-mgr__btn-add')) as HTMLButtonElement[])
+      .find((button) => button.textContent?.includes('Save view settings'))
+      ?.click()
+    await nextTick()
+
+    expect(updateSpy).toHaveBeenCalledWith('view_gantt', {
+      config: {
+        startFieldId: 'fld_start',
+        endFieldId: 'fld_end',
+        titleFieldId: 'fld_name',
+        progressFieldId: null,
+        groupFieldId: null,
+        dependencyFieldId: 'fld_deps',
+        zoom: 'week',
+      },
+    })
+
+    app.unmount()
+  })
+
   it('emits persisted hierarchy config when saving view settings', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
