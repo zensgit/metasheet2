@@ -130,6 +130,47 @@ test('buildPacket rejects truthy Submit/Audit strings and invalid flag values', 
   )
 })
 
+test('buildPacket rejects inline credentials and secret query parameters in endpoint URLs', () => {
+  assert.throws(
+    () => buildPacket(gate({
+      k3Wise: { apiUrl: 'https://k3-user:k3-secret@k3.example.test/K3API/' },
+    })),
+    (error) => error instanceof LivePocPreflightError &&
+      error.details.field === 'k3Wise.apiUrl' &&
+      /inline username or password/.test(error.message),
+    'K3 API URL must not carry basic-auth credentials into the generated packet',
+  )
+
+  assert.throws(
+    () => buildPacket(gate({
+      k3Wise: { apiUrl: 'https://k3.example.test/K3API/?token=k3-secret-token' },
+    })),
+    (error) => error instanceof LivePocPreflightError &&
+      error.details.field === 'k3Wise.apiUrl' &&
+      error.details.queryKeys.includes('token'),
+    'K3 API URL must not carry token-like query parameters into the generated packet',
+  )
+
+  assert.throws(
+    () => buildPacket(gate({
+      plm: { baseUrl: 'https://plm.example.test/api?api_key=plm-secret-key' },
+    })),
+    (error) => error instanceof LivePocPreflightError &&
+      error.details.field === 'plm.baseUrl' &&
+      error.details.queryKeys.includes('api_key'),
+    'PLM base URL must not carry API-key-like query parameters into the generated packet',
+  )
+
+  const packet = buildPacket(gate({
+    plm: { baseUrl: 'https://plm.example.test/api?tenant=demo' },
+  }))
+  assert.equal(
+    packet.externalSystems.find((system) => system.kind === 'plm:yuantus-wrapper').config.baseUrl,
+    'https://plm.example.test/api?tenant=demo',
+    'non-secret query parameters remain available for customer routing metadata',
+  )
+})
+
 test('buildPacket requires K3 WISE auth keys before declaring preflight ready', () => {
   assert.throws(
     () => buildPacket(gate({ k3Wise: { credentials: {} } })),

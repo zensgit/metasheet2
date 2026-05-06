@@ -182,7 +182,24 @@ function validateUrl(value, field) {
   if (!['http:', 'https:'].includes(parsed.protocol)) {
     throw new LivePocPreflightError(`${field} must use http or https`, { field })
   }
+  if (parsed.username || parsed.password) {
+    throw new LivePocPreflightError(`${field} must not contain inline username or password credentials`, {
+      field,
+    })
+  }
+  const sensitiveQueryKeys = Array.from(parsed.searchParams.keys()).filter((key) => SECRET_KEY_PATTERN.test(key))
+  if (sensitiveQueryKeys.length > 0) {
+    throw new LivePocPreflightError(`${field} must not contain secret-like query parameters`, {
+      field,
+      queryKeys: sensitiveQueryKeys,
+    })
+  }
   return parsed.toString()
+}
+
+function optionalUrl(value, field) {
+  const text = optionalString(value)
+  return text ? validateUrl(text, field) : null
 }
 
 function assertNoSecretStrings(value, secrets, location = 'root') {
@@ -287,6 +304,7 @@ function normalizeGate(input) {
       field: 'bom.productId',
     })
   }
+  const plmBaseUrl = optionalUrl(plm.baseUrl, 'plm.baseUrl')
 
   const materialMappings = optionalArray(fieldMappings.material, 'fieldMappings.material')
   if (materialMappings.length === 0) {
@@ -324,7 +342,10 @@ function normalizeGate(input) {
       autoSubmit: false,
       autoAudit: false,
     },
-    plm,
+    plm: {
+      ...plm,
+      baseUrl: plmBaseUrl || undefined,
+    },
     sqlServer: {
       ...sqlServer,
       enabled: sqlEnabled,
