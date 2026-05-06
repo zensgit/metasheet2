@@ -17,6 +17,7 @@ const expectedFieldTypes = [
   'select',
   'multiSelect',
   'link',
+  'person',
   'lookup',
   'rollup',
   'attachment',

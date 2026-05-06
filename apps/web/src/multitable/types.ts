@@ -13,6 +13,7 @@ export type MetaFieldType =
   | 'select'
   | 'multiSelect'
   | 'link'
+  | 'person'
   | 'lookup'
   | 'rollup'
   | 'attachment'
@@ -31,7 +32,7 @@ export type MetaFieldType =
   | 'createdBy'
   | 'modifiedBy'
 
-export type MetaFieldCreateType = MetaFieldType | 'person'
+export type MetaFieldCreateType = MetaFieldType
 
 export type RowDensity = 'compact' | 'normal' | 'expanded'
 

@@ -201,6 +201,13 @@ const MULTITABLE_FIELD_TYPES = [
   'modifiedBy',
 ] as const
 
+const MULTITABLE_FIELD_INPUT_TYPES = [
+  ...MULTITABLE_FIELD_TYPES,
+  'person',
+] as const
+
+type MultitableFieldInputType = (typeof MULTITABLE_FIELD_INPUT_TYPES)[number]
+
 type UniverMetaField = {
   id: string
   name: string
@@ -1067,6 +1074,7 @@ function mapFieldType(type: string): UniverMetaField['type'] {
     return 'multiSelect'
   }
   if (normalized === 'link') return 'link'
+  if (normalized === 'person') return 'link'
   if (normalized === 'lookup') return 'lookup'
   if (normalized === 'rollup') return 'rollup'
   if (normalized === 'attachment') return 'attachment'
@@ -2481,6 +2489,37 @@ async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<
       limitSingleRecord: true,
       refKind: 'user',
     },
+  }
+}
+
+async function normalizeFieldWriteInput(
+  query: QueryFn,
+  sheetId: string,
+  requestedType: MultitableFieldInputType | UniverMetaField['type'],
+  rawProperty: unknown,
+): Promise<{ type: UniverMetaField['type']; property: Record<string, unknown> }> {
+  if (requestedType !== 'person') {
+    return {
+      type: requestedType as UniverMetaField['type'],
+      property: sanitizeFieldProperty(requestedType as UniverMetaField['type'], rawProperty),
+    }
+  }
+
+  const sourceSheet = await loadSheetRow(query, sheetId)
+  if (!sourceSheet) throw new NotFoundError(`Sheet not found: ${sheetId}`)
+
+  const baseId = sourceSheet.baseId ?? await ensureLegacyBase(query)
+  const preset = await ensurePeopleSheetPreset(query, baseId)
+  const obj = normalizeJson(rawProperty)
+  const limitSingleRecord = obj.limitSingleRecord !== false
+
+  return {
+    type: 'link',
+    property: sanitizeFieldProperty('link', {
+      ...preset.fieldProperty,
+      limitSingleRecord,
+      refKind: 'user',
+    }),
   }
 }
 
@@ -4030,7 +4069,7 @@ export function univerMetaRouter(): Router {
       id: z.string().min(1).max(50).optional(),
       sheetId: z.string().min(1).max(50),
       name: z.string().min(1).max(255),
-      type: z.enum(MULTITABLE_FIELD_TYPES).default('string'),
+      type: z.enum(MULTITABLE_FIELD_INPUT_TYPES).default('string'),
       property: z.record(z.unknown()).optional(),
       order: z.number().int().nonnegative().optional(),
     })
@@ -4043,8 +4082,8 @@ export function univerMetaRouter(): Router {
     const sheetId = parsed.data.sheetId
     const fieldId = parsed.data.id ?? buildId('fld').slice(0, 50)
     const name = parsed.data.name.trim()
-    const type = parsed.data.type
-    const property = sanitizeFieldProperty(type, parsed.data.property ?? {})
+    const requestedType = parsed.data.type
+    const rawProperty = parsed.data.property ?? {}
     const desiredOrder = parsed.data.order
 
     try {
@@ -4056,6 +4095,12 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
       await pool.transaction(async ({ query }) => {
+        const { type, property } = await normalizeFieldWriteInput(
+          query as unknown as QueryFn,
+          sheetId,
+          requestedType,
+          rawProperty,
+        )
         const configError = await validateLookupRollupConfig(req, query, sheetId, type, property)
         if (configError) {
           throw new ValidationError(configError)
@@ -4286,7 +4331,7 @@ export function univerMetaRouter(): Router {
 
     const schema = z.object({
       name: z.string().min(1).max(255).optional(),
-      type: z.enum(MULTITABLE_FIELD_TYPES).optional(),
+      type: z.enum(MULTITABLE_FIELD_INPUT_TYPES).optional(),
       property: z.record(z.unknown()).optional(),
       order: z.number().int().nonnegative().optional(),
     }).refine((v) => Object.keys(v).length > 0, { message: 'At least one field must be updated' })
@@ -4320,9 +4365,11 @@ export function univerMetaRouter(): Router {
         const currentType = mapFieldType(String(row.type))
 
         const nextName = typeof parsed.data.name === 'string' ? parsed.data.name.trim() : String(row.name)
-        const nextType = (parsed.data.type ?? mapFieldType(String(row.type))) as UniverMetaField['type']
-        const nextProperty = sanitizeFieldProperty(
-          nextType,
+        const requestedType = parsed.data.type ?? mapFieldType(String(row.type))
+        const { type: nextType, property: nextProperty } = await normalizeFieldWriteInput(
+          query as unknown as QueryFn,
+          sheetId,
+          requestedType,
           typeof parsed.data.property !== 'undefined' ? parsed.data.property : row.property,
         )
         const desiredOrder = parsed.data.order

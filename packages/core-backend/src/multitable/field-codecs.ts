@@ -100,6 +100,7 @@ export function mapFieldType(type: string): MultitableFieldType | string {
     return 'multiSelect'
   }
   if (normalized === 'link') return 'link'
+  if (normalized === 'person') return 'link'
   if (normalized === 'lookup') return 'lookup'
   if (normalized === 'rollup') return 'rollup'
   if (normalized === 'attachment') return 'attachment'
