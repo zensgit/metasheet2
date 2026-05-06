@@ -725,6 +725,34 @@ vi.mock('../src/multitable/components/MetaGanttView.vue', () => ({
     },
   }),
 }))
+vi.mock('../src/multitable/components/MetaHierarchyView.vue', () => ({
+  default: defineComponent({
+    name: 'MetaHierarchyView',
+    props: {
+      canEdit: { type: Boolean, default: false },
+    },
+    emits: ['reparent-record'],
+    render() {
+      return h('div', {
+        'data-hierarchy-can-edit': String(this.$props.canEdit),
+      }, [
+        h(
+          'button',
+          {
+            'data-hierarchy-reparent': 'true',
+            onClick: () => this.$emit('reparent-record', {
+              recordId: 'rec_1',
+              version: 5,
+              parentFieldId: 'fld_parent',
+              parentRecordId: 'rec_parent',
+            }),
+          },
+          'hierarchy-reparent',
+        ),
+      ])
+    },
+  }),
+}))
 vi.mock('../src/multitable/components/MetaImportModal.vue', () => ({
   default: defineComponent({
     name: 'MetaImportModal',
@@ -1742,11 +1770,12 @@ describe('MultitableWorkbench view wiring', () => {
     expect(gridMock.loadViewData).toHaveBeenCalled()
   })
 
-  it('passes scoped row edit gating into kanban, timeline and gantt views', async () => {
+  it('passes scoped row edit gating into kanban, timeline, gantt and hierarchy views', async () => {
     workbenchMock.views.value = [
       { id: 'view_kanban', sheetId: 'sheet_orders', name: 'Kanban', type: 'kanban' },
       { id: 'view_timeline', sheetId: 'sheet_orders', name: 'Timeline', type: 'timeline', config: { zoom: 'week' } },
       { id: 'view_gantt', sheetId: 'sheet_orders', name: 'Gantt', type: 'gantt', config: { zoom: 'week' } },
+      { id: 'view_hierarchy', sheetId: 'sheet_orders', name: 'Hierarchy', type: 'hierarchy', config: { parentFieldId: 'fld_parent' } },
     ]
     gridMock.rowActions.value = {
       canEdit: false,
@@ -1768,6 +1797,11 @@ describe('MultitableWorkbench view wiring', () => {
     await flushUi()
 
     expect(container!.querySelector('[data-gantt-can-edit]')?.getAttribute('data-gantt-can-edit')).toBe('false')
+
+    workbenchMock.activeViewId.value = 'view_hierarchy'
+    await flushUi()
+
+    expect(container!.querySelector('[data-hierarchy-can-edit]')?.getAttribute('data-hierarchy-can-edit')).toBe('false')
   })
 
   it('patches timeline date updates through patchRecords and refreshes the active page', async () => {
@@ -1811,6 +1845,29 @@ describe('MultitableWorkbench view wiring', () => {
     })
     expect(gridMock.loadViewData).toHaveBeenCalled()
     expect(showSuccessSpy).toHaveBeenCalledWith('Dates updated')
+  })
+
+  it('patches hierarchy reparent updates through patchRecords and refreshes the active page', async () => {
+    workbenchMock.views.value = [
+      ...workbenchMock.views.value,
+      { id: 'view_hierarchy', sheetId: 'sheet_orders', name: 'Hierarchy', type: 'hierarchy', config: { parentFieldId: 'fld_parent' } },
+    ]
+
+    mountWorkbench({ viewId: 'view_hierarchy' })
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-hierarchy-reparent="true"]')!.click()
+    await flushUi()
+
+    expect(workbenchMock.client.patchRecords).toHaveBeenCalledWith({
+      sheetId: 'sheet_orders',
+      viewId: 'view_hierarchy',
+      changes: [
+        { recordId: 'rec_1', fieldId: 'fld_parent', value: ['rec_parent'], expectedVersion: 5 },
+      ],
+    })
+    expect(gridMock.loadViewData).toHaveBeenCalled()
+    expect(showSuccessSpy).toHaveBeenCalledWith('Hierarchy updated')
   })
 
   it('blocks timeline patch updates when scoped rowActions disallow edits', async () => {
