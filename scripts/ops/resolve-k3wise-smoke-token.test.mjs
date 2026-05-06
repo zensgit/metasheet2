@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -114,7 +114,67 @@ printf 'header.payload.signature\\n'
     const githubEnvText = readFileSync(githubEnv, 'utf8')
     assert.match(githubEnvText, /K3_WISE_SMOKE_TENANT_ID=tenant-auto/)
     assert.match(githubEnvText, /K3_WISE_SMOKE_TOKEN<<EOF\nheader\.payload\.signature\nEOF/)
-    assert.match(readFileSync(sshArgsPath, 'utf8'), /K3_WISE_SMOKE_TENANT_AUTO_DISCOVER=true/)
+    const sshArgs = readFileSync(sshArgsPath, 'utf8')
+    assert.match(sshArgs, /K3_WISE_SMOKE_TENANT_AUTO_DISCOVER=true/)
+    assert.doesNotMatch(sshArgs, /\.ssh\/deploy_key/)
+    assert.equal(existsSync(path.join(tmp, '.ssh', 'deploy_key')), false)
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+test('resolver cleans up temporary deploy SSH key after fallback execution', async () => {
+  const tmp = makeTmpDir()
+  const githubEnv = path.join(tmp, 'github-env')
+  const binDir = path.join(tmp, 'bin')
+  const sshArgsPath = path.join(tmp, 'ssh-args')
+  const sshKeyPathFile = path.join(tmp, 'ssh-key-path')
+  try {
+    mkdirSync(binDir)
+    const sshPath = path.join(binDir, 'ssh')
+    writeFileSync(sshPath, `#!/usr/bin/env bash
+printf '%s\\n' "$*" > "$FAKE_SSH_ARGS_PATH"
+while [[ "$#" -gt 0 ]]; do
+  if [[ "$1" == "-i" ]]; then
+    shift
+    printf '%s\\n' "$1" > "$FAKE_SSH_KEY_PATH"
+    if [[ ! -f "$1" ]]; then
+      echo "missing ssh key" >&2
+      exit 9
+    fi
+    mode="$(stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1")"
+    if [[ "$mode" != "600" ]]; then
+      echo "bad ssh key mode: $mode" >&2
+      exit 10
+    fi
+  fi
+  shift
+done
+cat >/dev/null
+printf 'K3_WISE_SMOKE_TENANT_ID=tenant-auto\\n'
+printf 'header.payload.signature\\n'
+`)
+    chmodSync(sshPath, 0o755)
+
+    const result = await runResolver({
+      GITHUB_ENV: githubEnv,
+      HOME: tmp,
+      TMPDIR: tmp,
+      PATH: `${binDir}:${process.env.PATH || ''}`,
+      FAKE_SSH_ARGS_PATH: sshArgsPath,
+      FAKE_SSH_KEY_PATH: sshKeyPathFile,
+      K3_WISE_TOKEN_AUTO_DISCOVER_TENANT: 'true',
+      DEPLOY_HOST: 'deploy.example.test',
+      DEPLOY_USER: 'deployer',
+      DEPLOY_SSH_KEY_B64: Buffer.from('fake-key').toString('base64'),
+    })
+
+    assert.equal(result.status, 0, result.stderr)
+    const usedKeyPath = readFileSync(sshKeyPathFile, 'utf8').trim()
+    assert.match(usedKeyPath, new RegExp(`^${tmp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/k3wise-smoke-ssh-key\\.`))
+    assert.equal(existsSync(usedKeyPath), false)
+    assert.equal(existsSync(path.join(tmp, '.ssh', 'deploy_key')), false)
+    assert.doesNotMatch(readFileSync(sshArgsPath, 'utf8'), /\.ssh\/deploy_key/)
   } finally {
     rmSync(tmp, { recursive: true, force: true })
   }
