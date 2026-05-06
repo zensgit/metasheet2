@@ -371,7 +371,12 @@ These are not RC blockers.
 - [ ] Gantt drag resize.
 - [ ] Hierarchy drag-to-reparent.
 - [ ] Hierarchy server-side cycle prevention.
-- [ ] DateTime field with timezone.
+- [x] DateTime field with timezone.
+  - PR: #1336
+  - Merge commit: `7ccd5dead503a4b8e12d312859ac817b488154a0`
+  - Development MD: `docs/development/multitable-datetime-field-design-20260506.md`
+  - Verification MD: `docs/development/multitable-datetime-field-verification-20260506.md`
+  - Verification summary: backend dateTime alias/coercion/timezone tests, frontend renderer/editor/form/drawer tests, OpenAPI generation/parity, backend build, frontend type-check, whitespace guard, and CI passed; Strict E2E was expected skip.
 - [x] Number format: decimals, thousands, unit.
   - PR: #1323
   - Merge commit: `1e5237439b048d0515a885110134d77024fcf54f`
