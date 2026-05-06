@@ -83,7 +83,7 @@ Do not mark an item done if:
 - [ ] Smoke test public form submit path.
 - [ ] Smoke test automation send_email save/execute path.
 - [x] Create executable API smoke helper for repeatable staging evidence.
-  - PR: pending
+  - PR: #1359
   - Merge commit: pending
   - Development MD: `docs/development/multitable-feishu-rc-api-smoke-design-20260506.md`
   - Verification MD: `docs/development/multitable-feishu-rc-api-smoke-verification-20260506.md`
