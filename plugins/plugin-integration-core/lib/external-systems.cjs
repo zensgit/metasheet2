@@ -9,6 +9,7 @@
 // ---------------------------------------------------------------------------
 
 const crypto = require('node:crypto')
+const { sanitizeIntegrationPayload } = require('./payload-redaction.cjs')
 
 const TABLE = 'integration_external_systems'
 const VALID_ROLES = new Set(['source', 'target', 'bidirectional'])
@@ -107,7 +108,7 @@ function rowToPublicExternalSystem(row, credentialFingerprint = null) {
     name: row.name,
     kind: row.kind,
     role: row.role,
-    config: row.config ?? {},
+    config: sanitizeIntegrationPayload(row.config ?? {}),
     capabilities: row.capabilities ?? {},
     status: row.status,
     lastTestedAt: row.last_tested_at ?? null,

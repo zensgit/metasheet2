@@ -143,7 +143,57 @@ async function main() {
   const isolated = await registry.listExternalSystems({ tenantId: 'tenant_1', workspaceId: 'other' })
   assert.equal(isolated.length, 0, 'workspace scope isolates rows')
 
-  // --- 4. Credential clear writes NULL ----------------------------------
+  // --- 4. Public config is redacted while adapter config stays raw -------
+  const configDb = createMockDb()
+  const configRegistry = createExternalSystemRegistry({
+    db: configDb,
+    credentialStore,
+    idGenerator: () => 'sys_config',
+  })
+  const publicConfigCreate = await configRegistry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    name: 'config-leak-risk',
+    kind: 'http',
+    role: 'source',
+    config: {
+      baseUrl: 'https://third-party.example.test',
+      accessToken: 'config-access-token',
+      headers: {
+        Authorization: 'Bearer config-bearer-token',
+        'X-Request-Id': 'request-id-header',
+      },
+      nested: {
+        password: 'config-password',
+        safeLabel: 'visible',
+      },
+    },
+    credentials: { apiKey: 'credential-secret' },
+    status: 'active',
+  })
+  assert.equal(publicConfigCreate.config.baseUrl, 'https://third-party.example.test')
+  assert.equal(publicConfigCreate.config.accessToken, '[redacted]')
+  assert.equal(publicConfigCreate.config.headers.Authorization, '[redacted]')
+  assert.equal(publicConfigCreate.config.headers['X-Request-Id'], 'request-id-header')
+  assert.equal(publicConfigCreate.config.nested.password, '[redacted]')
+  assert.equal(publicConfigCreate.config.nested.safeLabel, 'visible')
+  assert.equal(publicConfigCreate.credentials, undefined, 'credential payload remains write-only on create')
+
+  const publicConfigList = await configRegistry.listExternalSystems({ tenantId: 'tenant_1' })
+  assert.equal(publicConfigList[0].config.accessToken, '[redacted]', 'list redacts public config secrets')
+  assert.equal(publicConfigList[0].config.headers.Authorization, '[redacted]', 'list redacts nested public config secrets')
+
+  const publicConfigGet = await configRegistry.getExternalSystem({ tenantId: 'tenant_1', id: 'sys_config' })
+  assert.equal(publicConfigGet.config.nested.password, '[redacted]', 'get redacts nested public config secrets')
+
+  const adapterConfigSystem = await configRegistry.getExternalSystemForAdapter({ tenantId: 'tenant_1', id: 'sys_config' })
+  assert.equal(adapterConfigSystem.config.accessToken, 'config-access-token', 'adapter receives raw config token')
+  assert.equal(adapterConfigSystem.config.headers.Authorization, 'Bearer config-bearer-token',
+    'adapter receives raw config authorization header')
+  assert.equal(adapterConfigSystem.config.nested.password, 'config-password', 'adapter receives raw nested config password')
+  assert.deepEqual(adapterConfigSystem.credentials, { apiKey: 'credential-secret' },
+    'adapter credentials still decrypt through private path')
+
+  // --- 5. Credential clear writes NULL ----------------------------------
   const cleared = await registry.upsertExternalSystem({
     tenantId: 'tenant_1',
     workspaceId: null,
@@ -157,7 +207,7 @@ async function main() {
   assert.equal(cleared.hasCredentials, false)
   assert.equal(cleared.credentialFormat, null)
 
-  // --- 5. Credential input and format boundaries ------------------------
+  // --- 6. Credential input and format boundaries ------------------------
   for (const invalidCredentials of [123, true, ['token'], new Date('2026-04-24T00:00:00.000Z')]) {
     let badCredentials = null
     try {
@@ -190,7 +240,7 @@ async function main() {
   assert.equal(unknownCredentialRows[0].credentialFormat, null, 'unknown credential prefixes map to null')
   assert.equal(__internals.detectCredentialFormat('legacy:opaque'), null)
 
-  // --- 6. Not-found and validation errors -------------------------------
+  // --- 7. Not-found and validation errors -------------------------------
   let notFound = null
   try {
     await registry.getExternalSystem({ tenantId: 'tenant_1', id: 'missing' })
@@ -261,7 +311,7 @@ async function main() {
   }
   assert.ok(updateRace instanceof ExternalSystemNotFoundError, 'empty update result is not reported as success')
 
-  // --- 7. config/capabilities preserved when not provided on update -------
+  // --- 8. config/capabilities preserved when not provided on update -------
   const preserveDb = createMockDb()
   const preserveRegistry = createExternalSystemRegistry({
     db: preserveDb,
@@ -328,7 +378,7 @@ async function main() {
   assert.deepEqual(afterFullUpdate.capabilities, { read: true, write: false },
     'explicit capabilities replacement works')
 
-  // --- 8. kind/role immutability after creation -------------------------
+  // --- 9. kind/role immutability after creation -------------------------
   const immutableDb = createMockDb()
   const immutableRegistry = createExternalSystemRegistry({
     db: immutableDb,
