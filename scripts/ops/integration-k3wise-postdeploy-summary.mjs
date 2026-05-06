@@ -86,14 +86,40 @@ function renderMissingSummary(inputPath, { requireAuthSignoff = false } = {}) {
   return lines.join('\n')
 }
 
+function countSummaryFailures(evidence) {
+  const failCount = Number(evidence?.summary?.fail ?? 0)
+  return Number.isFinite(failCount) ? failCount : 0
+}
+
+function getAuthenticatedPassBlockers(evidence) {
+  const blockers = []
+  if (evidence?.ok !== true) {
+    blockers.push('top-level ok is not true')
+  }
+  if (evidence?.authenticated !== true) {
+    blockers.push('authenticated checks did not run')
+  }
+  if (countSummaryFailures(evidence) !== 0) {
+    blockers.push('summary.fail is not 0')
+  }
+  return blockers
+}
+
 function inferInternalTrialSignoff(evidence) {
   if (evidence?.signoff?.internalTrial === 'pass') {
+    const blockers = getAuthenticatedPassBlockers(evidence)
+    if (blockers.length > 0) {
+      return {
+        status: 'BLOCKED',
+        reason: `authenticated signoff evidence is inconsistent: ${blockers.join('; ')}`,
+      }
+    }
     return { status: 'PASS', reason: evidence.signoff.reason || 'authenticated smoke passed' }
   }
   if (evidence?.signoff?.internalTrial === 'blocked') {
     return { status: 'BLOCKED', reason: evidence.signoff.reason || 'authenticated smoke did not pass' }
   }
-  if (evidence?.ok && evidence?.authenticated) {
+  if (evidence?.ok && evidence?.authenticated && countSummaryFailures(evidence) === 0) {
     return { status: 'PASS', reason: 'authenticated smoke passed' }
   }
   if (!evidence?.authenticated) {
@@ -212,7 +238,9 @@ if (entryPath && import.meta.url === entryPath) {
 
 export {
   K3WisePostdeploySummaryError,
+  countSummaryFailures,
   formatDetailValue,
+  getAuthenticatedPassBlockers,
   inferInternalTrialSignoff,
   parseArgs,
   renderEvidenceSummary,
