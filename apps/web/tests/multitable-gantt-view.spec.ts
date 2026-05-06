@@ -160,6 +160,113 @@ describe('MetaGanttView', () => {
     app.unmount()
   })
 
+  it('emits patch-dates when resizing a task end handle', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const patchSpy = vi.fn()
+
+    const app = createApp({
+      render() {
+        return h(MetaGanttView, {
+          loading: false,
+          canEdit: true,
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string' },
+            { id: 'fld_start', name: 'Start', type: 'date' },
+            { id: 'fld_end', name: 'End', type: 'date' },
+          ],
+          rows: [
+            {
+              id: 'rec_build',
+              version: 7,
+              data: {
+                fld_name: 'Build',
+                fld_start: '2026-04-01',
+                fld_end: '2026-04-03',
+              },
+            },
+          ],
+          viewConfig: {
+            startFieldId: 'fld_start',
+            endFieldId: 'fld_end',
+            titleFieldId: 'fld_name',
+          },
+          onPatchDates: patchSpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    const barArea = container.querySelector('.meta-gantt__bar-area') as HTMLElement | null
+    const endHandle = container.querySelector('.meta-gantt__resize-handle--end') as HTMLElement | null
+    expect(barArea).not.toBeNull()
+    expect(endHandle).not.toBeNull()
+
+    Object.defineProperty(barArea!, 'getBoundingClientRect', {
+      value: () => ({ left: 0, width: 300, top: 0, height: 40, right: 300, bottom: 40 }),
+    })
+
+    endHandle?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: 150 }))
+    window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 300 }))
+    window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: 300 }))
+    await nextTick()
+
+    expect(patchSpy).toHaveBeenCalledWith({
+      recordId: 'rec_build',
+      version: 7,
+      startFieldId: 'fld_start',
+      endFieldId: 'fld_end',
+      startValue: '2026-04-01',
+      endValue: '2026-04-04',
+    })
+
+    app.unmount()
+  })
+
+  it('does not expose resize handles for read-only Gantt tasks', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaGanttView, {
+          loading: false,
+          canEdit: false,
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string' },
+            { id: 'fld_start', name: 'Start', type: 'date' },
+            { id: 'fld_end', name: 'End', type: 'date' },
+          ],
+          rows: [
+            {
+              id: 'rec_build',
+              version: 1,
+              data: {
+                fld_name: 'Build',
+                fld_start: '2026-04-01',
+                fld_end: '2026-04-03',
+              },
+            },
+          ],
+          viewConfig: {
+            startFieldId: 'fld_start',
+            endFieldId: 'fld_end',
+            titleFieldId: 'fld_name',
+          },
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    expect(container.querySelector('.meta-gantt__resize-handle')).toBeNull()
+
+    app.unmount()
+  })
+
   it('emits persisted Gantt config and groupInfo from toolbar changes', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
