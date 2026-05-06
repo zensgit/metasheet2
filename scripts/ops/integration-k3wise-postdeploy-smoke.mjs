@@ -34,6 +34,11 @@ const CONTROL_PLANE_LIST_PROBES = [
   ['integration-list-runs', '/api/integration/runs'],
   ['integration-list-dead-letters', '/api/integration/dead-letters'],
 ]
+const LIVE_OPERATOR_CLAIMS = [
+  'role:admin',
+  'integration:admin',
+  'integration:write',
+]
 const REQUIRED_STAGING_DESCRIPTORS = [
   'plm_raw_items',
   'standard_materials',
@@ -477,6 +482,51 @@ function extractTenantId(authBody) {
   return ''
 }
 
+function resolveAuthUser(authBody) {
+  return authBody?.user || authBody?.data?.user || authBody?.data || {}
+}
+
+function addStringClaims(claims, values) {
+  if (!Array.isArray(values)) return
+  for (const value of values) {
+    const claim = String(value ?? '').trim()
+    if (claim) claims.add(claim)
+  }
+}
+
+function collectAuthClaims(authBody) {
+  const user = resolveAuthUser(authBody)
+  const claims = new Set()
+  for (const source of [authBody, authBody?.data, user]) {
+    if (!source || typeof source !== 'object') continue
+    addStringClaims(claims, source.permissions)
+    addStringClaims(claims, source.perms)
+    if (typeof source.role === 'string' && source.role.trim()) claims.add(`role:${source.role.trim()}`)
+    if (Array.isArray(source.roles)) {
+      for (const role of source.roles) {
+        const normalized = String(role ?? '').trim()
+        if (normalized) claims.add(`role:${normalized}`)
+      }
+    }
+  }
+  return Array.from(claims).sort()
+}
+
+function assertLiveOperatorClaims(authBody) {
+  const claims = collectAuthClaims(authBody)
+  const matchedClaims = LIVE_OPERATOR_CLAIMS.filter((claim) => claims.includes(claim))
+  if (matchedClaims.length === 0) {
+    throw new K3WisePostdeploySmokeError('auth token lacks K3 WISE live-operator permissions', {
+      requiredAnyOf: LIVE_OPERATOR_CLAIMS,
+      observedClaims: claims,
+    })
+  }
+  return {
+    requiredAnyOf: LIVE_OPERATOR_CLAIMS,
+    matchedClaims,
+  }
+}
+
 async function runSmoke(opts) {
   const checks = []
   const resolvedToken = await resolveToken(opts)
@@ -541,9 +591,11 @@ async function runSmoke(opts) {
     checks.push(skipped)
   } else {
     let tenantId = opts.tenantId
+    let authBody = null
     try {
       const me = await requestJson(opts.baseUrl, '/api/auth/me', { token, timeoutMs: opts.timeoutMs })
-      const user = me.body?.user || me.body?.data?.user || me.body?.data || {}
+      authBody = me.body
+      const user = resolveAuthUser(authBody)
       tenantId = tenantId || extractTenantId(me.body)
       checks.push(result('auth-me', 'pass', {
         userId: user.id || user.userId || null,
@@ -552,6 +604,14 @@ async function runSmoke(opts) {
       }))
     } catch (error) {
       checks.push(failResult('auth-me', error))
+    }
+
+    if (authBody) {
+      try {
+        checks.push(result('operator-permission', 'pass', assertLiveOperatorClaims(authBody)))
+      } catch (error) {
+        checks.push(failResult('operator-permission', error))
+      }
     }
 
     try {
@@ -681,8 +741,10 @@ if (entryPath && import.meta.url === entryPath) {
 
 export {
   K3WisePostdeploySmokeError,
+  assertLiveOperatorClaims,
   assertStagingDescriptors,
   assertStatusRoutes,
+  collectAuthClaims,
   parseArgs,
   resolveToken,
   renderMarkdown,

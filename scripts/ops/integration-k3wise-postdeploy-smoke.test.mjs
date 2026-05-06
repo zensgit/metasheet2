@@ -209,7 +209,17 @@ function createFakeServer(options = {}) {
         sendJson(res, 401, { ok: false, error: { message: 'bad token' } })
         return
       }
-      sendJson(res, 200, { success: true, user: { id: 'admin_1', role: 'admin', tenantId: 'tenant-smoke' } })
+      sendJson(res, 200, {
+        success: true,
+        data: {
+          user: options.authUser || {
+            id: 'admin_1',
+            role: 'admin',
+            permissions: [],
+            tenantId: 'tenant-smoke',
+          },
+        },
+      })
       return
     }
 
@@ -372,6 +382,9 @@ test('authenticated postdeploy smoke validates route and staging contracts witho
       reason: 'authenticated smoke passed',
     })
     assert.equal(evidence.summary.fail, 0)
+    const operatorCheck = evidence.checks.find((check) => check.id === 'operator-permission')
+    assert.equal(operatorCheck.status, 'pass')
+    assert.deepEqual(operatorCheck.matchedClaims, ['role:admin'])
     const routeCheck = evidence.checks.find((check) => check.id === 'integration-route-contract')
     assert.equal(routeCheck.status, 'pass')
     assert.equal(routeCheck.routesChecked, DEFAULT_ROUTES.length)
@@ -397,6 +410,119 @@ test('authenticated postdeploy smoke validates route and staging contracts witho
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/pipelines'))
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/runs'))
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/dead-letters'))
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('authenticated postdeploy smoke passes operator gate for integration:write permission', async () => {
+  const fake = createFakeServer({
+    authUser: {
+      id: 'operator_1',
+      role: 'user',
+      permissions: ['integration:read', 'integration:write'],
+      tenantId: 'tenant-smoke',
+    },
+  })
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--auth-token', 'test.jwt.token',
+      '--require-auth',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 0, result.stderr)
+    const evidence = JSON.parse(readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8'))
+    const operatorCheck = evidence.checks.find((check) => check.id === 'operator-permission')
+    assert.equal(operatorCheck.status, 'pass')
+    assert.deepEqual(operatorCheck.matchedClaims, ['integration:write'])
+    assert.deepEqual(evidence.signoff, {
+      internalTrial: 'pass',
+      reason: 'authenticated smoke passed',
+    })
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('authenticated postdeploy smoke passes operator gate for integration:admin permission', async () => {
+  const fake = createFakeServer({
+    authUser: {
+      id: 'integration_admin_1',
+      role: 'user',
+      permissions: ['integration:admin'],
+      tenantId: 'tenant-smoke',
+    },
+  })
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--auth-token', 'test.jwt.token',
+      '--require-auth',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 0, result.stderr)
+    const evidence = JSON.parse(readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8'))
+    const operatorCheck = evidence.checks.find((check) => check.id === 'operator-permission')
+    assert.equal(operatorCheck.status, 'pass')
+    assert.deepEqual(operatorCheck.matchedClaims, ['integration:admin'])
+    assert.deepEqual(evidence.signoff, {
+      internalTrial: 'pass',
+      reason: 'authenticated smoke passed',
+    })
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('authenticated postdeploy smoke blocks internal trial signoff for read-only operator token', async () => {
+  const fake = createFakeServer({
+    authUser: {
+      id: 'readonly_1',
+      role: 'user',
+      permissions: ['integration:read'],
+      tenantId: 'tenant-smoke',
+    },
+  })
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--auth-token', 'test.jwt.token',
+      '--require-auth',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 1)
+    assert.equal(result.stdout.includes('test.jwt.token'), false)
+    assert.equal(result.stderr.includes('test.jwt.token'), false)
+    const evidenceText = readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8')
+    assert.equal(evidenceText.includes('test.jwt.token'), false)
+    const evidence = JSON.parse(evidenceText)
+    const operatorCheck = evidence.checks.find((check) => check.id === 'operator-permission')
+    assert.equal(operatorCheck.status, 'fail')
+    assert.match(operatorCheck.error, /lacks K3 WISE live-operator permissions/)
+    assert.deepEqual(operatorCheck.details.requiredAnyOf, [
+      'role:admin',
+      'integration:admin',
+      'integration:write',
+    ])
+    assert.deepEqual(operatorCheck.details.observedClaims, ['integration:read', 'role:user'])
+    assert.equal(evidence.checks.find((check) => check.id === 'integration-route-contract').status, 'pass')
+    assert.deepEqual(evidence.signoff, {
+      internalTrial: 'blocked',
+      reason: 'one or more smoke checks failed',
+    })
   } finally {
     await fake.close()
     rmSync(outDir, { recursive: true, force: true })
