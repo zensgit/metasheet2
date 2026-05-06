@@ -289,6 +289,26 @@ async function main() {
     const shortCall = truncCalls[truncCalls.length - 1]
     assert.equal(shortCall.errorSummary, 'connection refused', 'short messages pass through unchanged')
 
+    // Secret-bearing messages from adapters are redacted before persistence.
+    await truncLogger.failRun(truncRun, new Error(
+      'K3 WebAPI failed: Bearer live-bearer-token; https://erp.example.test/api?access_token=query-token&password=query-password token=inline-token Authorization=Basic abc123',
+    ), {})
+    const redactedFailCall = truncCalls[truncCalls.length - 1]
+    assert.match(redactedFailCall.errorSummary, /Bearer \[redacted\]/)
+    assert.match(redactedFailCall.errorSummary, /access_token=\[redacted\]/)
+    assert.match(redactedFailCall.errorSummary, /password=\[redacted\]/)
+    assert.match(redactedFailCall.errorSummary, /token=\[redacted\]/)
+    assert.match(redactedFailCall.errorSummary, /Authorization=\[redacted\]/)
+    assert.doesNotMatch(redactedFailCall.errorSummary, /live-bearer-token|query-token|query-password|inline-token|abc123/)
+
+    await truncLogger.finishRun(truncRun, {}, 'failed', {
+      errorSummary: 'PLM failed at https://plm-user:plm-password@plm.example.test/api with api_key=plm-api-key',
+    })
+    const redactedFinishCall = truncCalls[truncCalls.length - 1]
+    assert.match(redactedFinishCall.errorSummary, /https:\/\/plm-user:\[redacted\]@plm\.example\.test/)
+    assert.match(redactedFinishCall.errorSummary, /api_key=\[redacted\]/)
+    assert.doesNotMatch(redactedFinishCall.errorSummary, /plm-password|plm-api-key/)
+
     // null/undefined errorSummary → unchanged (passes through, DB layer handles null)
     await truncLogger.finishRun(truncRun, {}, 'succeeded', {})
     const nullCall = truncCalls[truncCalls.length - 1]
