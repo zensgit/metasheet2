@@ -1,5 +1,5 @@
 {
-  "_comment": "Customer-side evidence template. Fill in after the live PoC run: status fields accept canonical (pass/fail/partial/skipped/todo/blocked), English synonyms (passed/complete/failed/error/etc), or Chinese (通过/成功/完成/失败/进行中/跳过/阻塞). Boolean fields (autoSubmit, autoAudit, legacyPipelineOptionsSourceProductId) accept true/false, 'true'/'false', 'yes'/'no', '是'/'否', or 0/1. ID fields (runId, productId) accept strings or finite numbers. Run: node scripts/ops/integration-k3wise-live-poc-evidence.mjs --packet <preflight-out>/packet.json --evidence <this>",
+  "_comment": "Customer-side evidence template. Fill in after the live PoC run: status fields accept canonical (pass/fail/partial/skipped/todo/blocked), English synonyms (passed/complete/failed/error/etc), or Chinese (通过/成功/完成/失败/进行中/跳过/阻塞). Boolean fields (autoSubmit, autoAudit, legacyPipelineOptionsSourceProductId) accept true/false, 'true'/'false', 'yes'/'no', '是'/'否', or 0/1. ID fields (runId, productId) accept strings or finite numbers. erpFeedback proves MetaSheet staging feedback fields were updated after K3 Save-only. Run: node scripts/ops/integration-k3wise-live-poc-evidence.mjs --packet <preflight-out>/packet.json --evidence <this>",
   "gate": {
     "status": "pass",
     "archivePath": "customer-secure-share://k3wise-gate-answers"
@@ -23,6 +23,32 @@
     "k3Records": [
       { "materialCode": "MAT-001", "externalId": "K3-1001", "billNo": "K3-BILL-001" },
       { "materialCode": "MAT-002", "externalId": "K3-1002", "billNo": "K3-BILL-002" }
+    ]
+  },
+  "erpFeedback": {
+    "status": "pass",
+    "runId": "run-feedback-001",
+    "rowsUpdated": 2,
+    "fieldsUpdated": ["erpSyncStatus", "erpExternalId", "erpBillNo", "erpResponseCode", "erpResponseMessage", "lastSyncedAt"],
+    "updatedRows": [
+      {
+        "materialCode": "MAT-001",
+        "erpSyncStatus": "synced",
+        "erpExternalId": "K3-1001",
+        "erpBillNo": "K3-BILL-001",
+        "erpResponseCode": "OK",
+        "erpResponseMessage": "K3 WISE save succeeded",
+        "lastSyncedAt": "2026-04-25T10:05:00.000Z"
+      },
+      {
+        "materialCode": "MAT-002",
+        "erpSyncStatus": "synced",
+        "erpExternalId": "K3-1002",
+        "erpBillNo": "K3-BILL-002",
+        "erpResponseCode": "OK",
+        "erpResponseMessage": "K3 WISE save succeeded",
+        "lastSyncedAt": "2026-04-25T10:05:00.000Z"
+      }
     ]
   },
   "deadLetterReplay": {

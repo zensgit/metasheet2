@@ -33,6 +33,8 @@ const STATUS_SYNONYMS = new Map([
 // of cross-file imports for the customer-runnable script surface).
 const TRUE_BOOLEAN_TEXT = new Set(['true', '1', 'yes', 'y', 'on', '是', '启用', '开启'])
 const FALSE_BOOLEAN_TEXT = new Set(['false', '0', 'no', 'n', 'off', '否', '禁用', '关闭'])
+const ERP_FEEDBACK_REQUIRED_FIELDS = ['erpSyncStatus', 'erpResponseCode', 'erpResponseMessage', 'lastSyncedAt']
+const ERP_FEEDBACK_ID_FIELDS = ['erpExternalId', 'erpBillNo']
 
 class LivePocEvidenceError extends Error {
   constructor(message, details = {}) {
@@ -194,6 +196,7 @@ function evaluatePhases(packet, evidence) {
     phase(connections.k3Wise, 'k3Connection', 'K3 WISE testConnection', true),
     phase(evidence.materialDryRun, 'materialDryRun', 'Material dry-run', true),
     phase(evidence.materialSaveOnly, 'materialSaveOnly', 'Material Save-only write', true),
+    phase(evidence.erpFeedback, 'erpFeedback', 'ERP feedback writeback', true),
     phase(evidence.deadLetterReplay, 'deadLetterReplay', 'Dead letter and replay', true),
     phase(evidence.bomPoC, 'bomPoC', 'Simple BOM PoC', bomRequired),
     phase(evidence.rollback, 'rollback', 'Rollback or cleanup', true),
@@ -222,6 +225,56 @@ function evaluateMaterialSaveOnly(evidence, issues) {
   }
   if (asArray(save.k3Records, 'materialSaveOnly.k3Records').length === 0) {
     addIssue(issues, 'fail', 'K3_RECORD_REQUIRED', 'material Save-only evidence must include at least one K3 test record', 'materialSaveOnly')
+  }
+}
+
+function collectErpFeedbackRows(feedback) {
+  for (const field of ['updatedRows', 'updatedItems', 'items', 'records']) {
+    if (feedback[field] !== undefined && feedback[field] !== null) {
+      return asArray(feedback[field], `erpFeedback.${field}`)
+    }
+  }
+  return []
+}
+
+function collectErpFeedbackFields(feedback, rows) {
+  const fields = new Set()
+  for (const field of ['fieldsUpdated', 'updatedFields']) {
+    for (const item of asArray(feedback[field], `erpFeedback.${field}`)) {
+      const value = text(item)
+      if (value) fields.add(value)
+    }
+  }
+  for (const row of rows) {
+    if (!isPlainObject(row)) continue
+    for (const key of Object.keys(row)) fields.add(key)
+  }
+  return fields
+}
+
+function evaluateErpFeedback(evidence, issues) {
+  const feedback = asObject(evidence.erpFeedback, 'evidence.erpFeedback')
+  if (normalizeStatus(feedback.status) !== 'pass') return
+
+  const rows = collectErpFeedbackRows(feedback)
+  const rowsUpdated = Number(feedback.rowsUpdated)
+  const hasUpdatedRows = rows.length > 0 || (Number.isInteger(rowsUpdated) && rowsUpdated > 0)
+  if (!hasUpdatedRows) {
+    addIssue(issues, 'fail', 'ERP_FEEDBACK_ROWS_REQUIRED', 'ERP feedback evidence must include at least one updated staging row', 'erpFeedback')
+  }
+
+  const fields = collectErpFeedbackFields(feedback, rows)
+  const missingFields = ERP_FEEDBACK_REQUIRED_FIELDS.filter((field) => !fields.has(field))
+  const hasExternalReference = ERP_FEEDBACK_ID_FIELDS.some((field) => fields.has(field))
+  if (missingFields.length > 0 || !hasExternalReference) {
+    const required = [...ERP_FEEDBACK_REQUIRED_FIELDS, `${ERP_FEEDBACK_ID_FIELDS.join(' or ')}`]
+    addIssue(
+      issues,
+      'fail',
+      'ERP_FEEDBACK_FIELDS_REQUIRED',
+      `ERP feedback evidence must cover fields: ${required.join(', ')}`,
+      'erpFeedback',
+    )
   }
 }
 
@@ -264,6 +317,7 @@ function buildEvidenceReport(packet, evidence, { generatedAt = new Date().toISOS
   const issues = []
   const phases = evaluatePhases(packet, evidence)
   evaluateMaterialSaveOnly(evidence, issues)
+  evaluateErpFeedback(evidence, issues)
   evaluateBom(packet, evidence, issues)
 
   for (const item of phases) {
@@ -369,6 +423,23 @@ function sampleEvidence() {
       k3Records: [
         { materialCode: 'MAT-001', externalId: 'K3-1001', billNo: 'K3-BILL-001' },
         { materialCode: 'MAT-002', externalId: 'K3-1002', billNo: 'K3-BILL-002' },
+      ],
+    },
+    erpFeedback: {
+      status: 'pass',
+      runId: 'run-feedback-001',
+      rowsUpdated: 2,
+      fieldsUpdated: ['erpSyncStatus', 'erpExternalId', 'erpBillNo', 'erpResponseCode', 'erpResponseMessage', 'lastSyncedAt'],
+      updatedRows: [
+        {
+          materialCode: 'MAT-001',
+          erpSyncStatus: 'synced',
+          erpExternalId: 'K3-1001',
+          erpBillNo: 'K3-BILL-001',
+          erpResponseCode: 'OK',
+          erpResponseMessage: 'K3 WISE save succeeded',
+          lastSyncedAt: '2026-04-25T10:05:00.000Z',
+        },
       ],
     },
     deadLetterReplay: {

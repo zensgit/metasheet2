@@ -29,6 +29,7 @@ test('buildEvidenceReport returns PASS for complete Save-only evidence', () => {
   assert.equal(report.issues.length, 0)
   assert.equal(report.scope.bomRequired, true)
   assert.equal(report.phases.find((phase) => phase.id === 'bomPoC').status, 'pass')
+  assert.equal(report.phases.find((phase) => phase.id === 'erpFeedback').status, 'pass')
   assert.match(renderMarkdown(report), /Decision: PASS/)
 })
 
@@ -38,6 +39,19 @@ test('buildEvidenceReport returns PARTIAL when a required phase is missing', () 
   const report = buildEvidenceReport(packet(), evidence)
   assert.equal(report.decision, 'PARTIAL')
   assert.equal(report.phases.find((phase) => phase.id === 'customerConfirmation').status, 'todo')
+})
+
+test('buildEvidenceReport returns PARTIAL when ERP feedback evidence is missing', () => {
+  const evidence = sampleEvidence()
+  delete evidence.erpFeedback
+  const report = buildEvidenceReport(packet(), evidence)
+  assert.equal(report.decision, 'PARTIAL')
+  assert.equal(report.phases.find((phase) => phase.id === 'erpFeedback').status, 'todo')
+  assert.equal(
+    report.issues.some((issue) => issue.code === 'ERP_FEEDBACK_FIELDS_REQUIRED'),
+    false,
+    'missing phase should be incomplete, not a malformed feedback payload',
+  )
 })
 
 test('buildEvidenceReport returns FAIL when Save-only row count exceeds PoC limit', () => {
@@ -54,6 +68,43 @@ test('buildEvidenceReport returns FAIL when autoAudit appears in Save-only evide
   const report = buildEvidenceReport(packet(), evidence)
   assert.equal(report.decision, 'FAIL')
   assert.equal(report.issues.some((issue) => issue.code === 'SAVE_ONLY_VIOLATED'), true)
+})
+
+test('buildEvidenceReport returns FAIL when passed ERP feedback has no updated rows', () => {
+  const evidence = sampleEvidence()
+  evidence.erpFeedback.updatedRows = []
+  evidence.erpFeedback.rowsUpdated = 0
+  const report = buildEvidenceReport(packet(), evidence)
+  assert.equal(report.decision, 'FAIL')
+  assert.equal(report.issues.some((issue) => issue.code === 'ERP_FEEDBACK_ROWS_REQUIRED'), true)
+})
+
+test('buildEvidenceReport returns FAIL when passed ERP feedback omits required fields', () => {
+  const evidence = sampleEvidence()
+  evidence.erpFeedback.fieldsUpdated = ['erpSyncStatus', 'erpExternalId', 'lastSyncedAt']
+  evidence.erpFeedback.updatedRows = [
+    {
+      erpSyncStatus: 'synced',
+      erpExternalId: 'K3-1001',
+      lastSyncedAt: '2026-04-25T10:05:00.000Z',
+    },
+  ]
+  const report = buildEvidenceReport(packet(), evidence)
+  assert.equal(report.decision, 'FAIL')
+  assert.equal(report.issues.some((issue) => issue.code === 'ERP_FEEDBACK_FIELDS_REQUIRED'), true)
+})
+
+test('buildEvidenceReport accepts ERP feedback proof from rowsUpdated plus fieldsUpdated', () => {
+  const evidence = sampleEvidence()
+  evidence.erpFeedback = {
+    status: 'pass',
+    runId: 'run-feedback-002',
+    rowsUpdated: 1,
+    fieldsUpdated: ['erpSyncStatus', 'erpBillNo', 'erpResponseCode', 'erpResponseMessage', 'lastSyncedAt'],
+  }
+  const report = buildEvidenceReport(packet(), evidence)
+  assert.equal(report.decision, 'PASS')
+  assert.equal(report.issues.some((issue) => issue.code.startsWith('ERP_FEEDBACK_')), false)
 })
 
 test('buildEvidenceReport rejects unredacted secret-like evidence fields', () => {
