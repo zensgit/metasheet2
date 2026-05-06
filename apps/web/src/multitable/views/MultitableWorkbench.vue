@@ -49,9 +49,39 @@
       <button v-if="caps.canManageViews.value && canConfigureCurrentView" class="mt-workbench__mgr-btn" @click="showViewManager = true">&#x2630; Views</button>
       <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="openWorkflowDesigner()">&#x2699; Workflow</button>
       <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="showAutomationManager = true">&#x26A1; Automations</button>
+      <button v-if="canCreateBasesAndSheets" class="mt-workbench__mgr-btn" data-action="open-template-library" @click="openTemplateLibrary">&#x1F5C2; Templates</button>
       <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard">&#x1F4CA; Dashboard</button>
       <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true">&#x1F517; Share Form</button>
       <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true">&#x1F511; API &amp; Webhooks</button>
+    </div>
+    <div v-if="showTemplateLibrary" class="mt-template-library" data-testid="multitable-template-library">
+      <div class="mt-template-library__header">
+        <div>
+          <strong>Template Library</strong>
+          <span>Start a new base from a built-in workspace pattern.</span>
+        </div>
+        <button class="mt-template-library__close" @click="showTemplateLibrary = false">&times;</button>
+      </div>
+      <div v-if="templateLibraryLoading" class="mt-template-library__state">Loading templates...</div>
+      <div v-else-if="templateLibraryError" class="mt-template-library__state mt-template-library__state--error">{{ templateLibraryError }}</div>
+      <div v-else class="mt-template-library__grid">
+        <article v-for="template in templates" :key="template.id" class="mt-template-library__card" :style="{ borderColor: template.color }">
+          <div class="mt-template-library__card-top">
+            <span class="mt-template-library__icon" :style="{ backgroundColor: template.color }">{{ template.icon }}</span>
+            <span class="mt-template-library__category">{{ template.category }}</span>
+          </div>
+          <h3>{{ template.name }}</h3>
+          <p>{{ template.description }}</p>
+          <small>{{ template.sheets.length }} sheet{{ template.sheets.length === 1 ? '' : 's' }} · {{ template.sheets[0]?.fields.length ?? 0 }} fields</small>
+          <button
+            class="mt-template-library__install"
+            :disabled="installingTemplateId === template.id"
+            @click="onInstallTemplate(template)"
+          >
+            {{ installingTemplateId === template.id ? 'Installing...' : 'Use template' }}
+          </button>
+        </article>
+      </div>
     </div>
     <div
       v-if="capabilityOriginNotice"
@@ -357,6 +387,7 @@ import type {
   MetaViewPermission,
   MetaFieldPermissionEntry,
   MetaViewPermissionEntry,
+  MetaTemplate,
   RowDensity,
 } from '../types'
 import type { MultitableRole } from '../composables/useMultitableCapabilities'
@@ -445,6 +476,7 @@ const showFieldManager = ref(false)
 const showPermissionManager = ref(false)
 const showAutomationManager = ref(false)
 const showDashboardView = ref(false)
+const showTemplateLibrary = ref(false)
 const showFormShareManager = ref(false)
 const showApiTokenManager = ref(false)
 const fieldPermissionEntries = ref<MetaFieldPermissionEntry[]>([])
@@ -458,6 +490,10 @@ const currentUserId = ref<string | null>(null)
 const commentMentionSuggestions = ref<MetaCommentMentionSuggestion[]>([])
 const commentMentionSuggestionsLoadedForSheetId = ref<string | null>(null)
 const searchText = ref('')
+const templates = ref<MetaTemplate[]>([])
+const templateLibraryLoading = ref(false)
+const templateLibraryError = ref<string | null>(null)
+const installingTemplateId = ref<string | null>(null)
 const showShortcuts = ref(false)
 const showImportModal = ref(false)
 const importSubmitting = ref(false)
@@ -1983,6 +2019,60 @@ async function onCreateBase(name: string) {
   } catch (e: any) { showError(e.message ?? 'Failed to create base') }
 }
 
+async function loadTemplateLibrary() {
+  templateLibraryLoading.value = true
+  templateLibraryError.value = null
+  try {
+    const data = await workbench.client.listTemplates()
+    templates.value = data.templates ?? []
+  } catch (e: any) {
+    templateLibraryError.value = e.message ?? 'Failed to load templates'
+  } finally {
+    templateLibraryLoading.value = false
+  }
+}
+
+async function openTemplateLibrary() {
+  if (!canCreateBasesAndSheets.value) {
+    showError('Template installation requires multitable write access.')
+    return
+  }
+  showTemplateLibrary.value = true
+  if (templates.value.length === 0 && !templateLibraryLoading.value) {
+    await loadTemplateLibrary()
+  }
+}
+
+async function onInstallTemplate(template: MetaTemplate) {
+  if (!canCreateBasesAndSheets.value) {
+    showError('Template installation requires multitable write access.')
+    return
+  }
+  if (!confirmDiscardContextChanges()) return
+  installingTemplateId.value = template.id
+  try {
+    const result = await workbench.client.installTemplate(template.id)
+    if (!bases.value.some((base) => base.id === result.base.id)) {
+      bases.value.push(result.base)
+    }
+    const ok = await workbench.syncExternalContext({
+      baseId: result.base.id,
+      sheetId: result.sheets[0]?.id,
+      viewId: result.views[0]?.id,
+    })
+    if (!ok) {
+      showError(workbench.error.value ?? 'Installed template but failed to refresh workbench context')
+      return
+    }
+    showTemplateLibrary.value = false
+    showSuccess(`Installed ${result.template.name}`)
+  } catch (e: any) {
+    showError(e.message ?? 'Failed to install template')
+  } finally {
+    installingTemplateId.value = null
+  }
+}
+
 // --- Print ---
 function onPrint() { window.print() }
 
@@ -2757,6 +2847,39 @@ defineExpose({
 .mt-workbench__mgr-btn--attention { border-color: #f59e0b; color: #92400e; background: #fffbeb; }
 .mt-workbench__mgr-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: #f59e0b; color: #fff; font-size: 11px; font-weight: 600; }
 .mt-workbench__base-bar { padding: 8px 16px 0; border-bottom: 1px solid #f0f0f0; }
+.mt-template-library {
+  margin: 8px 16px 0;
+  padding: 14px;
+  border: 1px solid #dbeafe;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #f8fbff 0%, #eef6ff 100%);
+  box-shadow: 0 10px 24px rgba(37, 99, 235, .08);
+}
+.mt-template-library__header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 12px; }
+.mt-template-library__header div { display: flex; flex-direction: column; gap: 3px; }
+.mt-template-library__header strong { font-size: 14px; color: #0f172a; }
+.mt-template-library__header span { font-size: 12px; color: #64748b; }
+.mt-template-library__close { border: none; background: transparent; color: #64748b; font-size: 20px; line-height: 1; cursor: pointer; }
+.mt-template-library__state { padding: 12px; border-radius: 10px; background: #fff; color: #475569; font-size: 12px; }
+.mt-template-library__state--error { color: #b91c1c; background: #fef2f2; }
+.mt-template-library__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.mt-template-library__card {
+  padding: 12px;
+  border: 1px solid;
+  border-radius: 12px;
+  background: rgba(255,255,255,.92);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mt-template-library__card-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.mt-template-library__icon { min-width: 36px; height: 24px; padding: 0 8px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; color: #fff; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+.mt-template-library__category { color: #64748b; font-size: 11px; }
+.mt-template-library__card h3 { margin: 0; color: #111827; font-size: 14px; }
+.mt-template-library__card p { margin: 0; min-height: 36px; color: #475569; font-size: 12px; line-height: 1.5; }
+.mt-template-library__card small { color: #64748b; font-size: 11px; }
+.mt-template-library__install { margin-top: auto; padding: 7px 10px; border: 1px solid #2563eb; border-radius: 8px; background: #2563eb; color: #fff; cursor: pointer; font-size: 12px; }
+.mt-template-library__install:disabled { opacity: .7; cursor: wait; }
 .mt-workbench__shortcuts-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.3); display: flex; align-items: center; justify-content: center; }
 .mt-workbench__shortcuts { background: #fff; border-radius: 8px; padding: 20px 24px; min-width: 320px; box-shadow: 0 8px 24px rgba(0,0,0,.15); }
 .mt-workbench__shortcuts-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; font-size: 15px; }
@@ -2765,7 +2888,7 @@ defineExpose({
 .mt-workbench__shortcut { display: flex; align-items: center; gap: 12px; font-size: 13px; }
 .mt-workbench__shortcut kbd { background: #f0f0f0; border: 1px solid #ddd; border-radius: 3px; padding: 2px 8px; font-family: monospace; font-size: 12px; min-width: 80px; text-align: center; }
 @media print {
-  .mt-workbench__base-bar, .mt-workbench__actions, .mt-workbench__shortcuts-overlay { display: none !important; }
+  .mt-workbench__base-bar, .mt-workbench__actions, .mt-workbench__shortcuts-overlay, .mt-template-library { display: none !important; }
   .mt-workbench__content { overflow: visible !important; }
   .mt-workbench__main { overflow: visible !important; }
 }

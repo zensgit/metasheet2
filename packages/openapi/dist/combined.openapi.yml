@@ -1567,6 +1567,131 @@ components:
         description:
           type: string
           nullable: true
+    MultitableTemplateField:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          $ref: '#/components/schemas/MultitableFieldType'
+        order:
+          type: integer
+        options:
+          type: array
+          items:
+            type: string
+        property:
+          type: object
+          additionalProperties: true
+        description:
+          type: string
+      required:
+        - id
+        - name
+        - type
+    MultitableTemplateView:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          $ref: '#/components/schemas/MultitableViewType'
+        groupByFieldId:
+          type: string
+        dateFieldId:
+          type: string
+        titleFieldId:
+          type: string
+        hiddenFieldIds:
+          type: array
+          items:
+            type: string
+        config:
+          type: object
+          additionalProperties: true
+      required:
+        - id
+        - name
+        - type
+    MultitableTemplateSheet:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableTemplateField'
+        views:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableTemplateView'
+      required:
+        - id
+        - name
+        - fields
+        - views
+    MultitableTemplate:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        category:
+          type: string
+        icon:
+          type: string
+        color:
+          type: string
+        sheets:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableTemplateSheet'
+      required:
+        - id
+        - name
+        - description
+        - category
+        - icon
+        - color
+        - sheets
+    MultitableTemplateInstallResult:
+      type: object
+      properties:
+        template:
+          $ref: '#/components/schemas/MultitableTemplate'
+        base:
+          $ref: '#/components/schemas/MultitableBase'
+        sheets:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableSheet'
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableField'
+        views:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableView'
+      required:
+        - template
+        - base
+        - sheets
+        - fields
+        - views
     MultitableViewType:
       type: string
       enum:
@@ -11239,6 +11364,76 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /api/multitable/templates:
+    get:
+      summary: List built-in multitable templates
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      templates:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/MultitableTemplate'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/multitable/templates/{templateId}/install:
+    post:
+      summary: Install a built-in multitable template as a new base
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: templateId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                baseName:
+                  type: string
+                workspaceId:
+                  type: string
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/MultitableTemplateInstallResult'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
   /api/multitable/context:
     get:
       summary: Load multitable workbench context

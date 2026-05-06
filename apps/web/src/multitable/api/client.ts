@@ -55,8 +55,11 @@ import type {
   DashboardUpdateInput,
   FormShareConfig,
   FormShareConfigUpdate,
+  InstallTemplateInput,
+  InstallTemplateResult,
   ApiToken,
   ApiTokenCreateResult,
+  MetaTemplate,
   Webhook,
   WebhookCreateInput,
   WebhookDelivery,
@@ -698,6 +701,20 @@ export class MultitableApiClient {
 
   async createBase(input: CreateBaseInput): Promise<{ base: MetaBase }> {
     const res = await this.fetch('/api/multitable/bases', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    return parseJson(res)
+  }
+
+  async listTemplates(): Promise<{ templates: MetaTemplate[] }> {
+    const res = await this.fetch('/api/multitable/templates')
+    return parseJson(res)
+  }
+
+  async installTemplate(templateId: string, input: InstallTemplateInput = {}): Promise<InstallTemplateResult> {
+    const res = await this.fetch(`/api/multitable/templates/${encodeURIComponent(templateId)}/install`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),

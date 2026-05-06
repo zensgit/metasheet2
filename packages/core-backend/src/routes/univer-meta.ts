@@ -67,6 +67,12 @@ import {
 } from '../multitable/loaders'
 import { ensureLegacyBase as ensureLegacyBaseShared } from '../multitable/provisioning'
 import {
+  MultitableTemplateConflictError,
+  MultitableTemplateNotFoundError,
+  installMultitableTemplate,
+  listMultitableTemplates,
+} from '../multitable/template-library'
+import {
   queryRecordsWithCursor,
   buildRecordsCacheKey,
   type CursorPaginatedResult,
@@ -2989,6 +2995,57 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] create base failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create base' } })
+    }
+  })
+
+  router.get('/templates', rbacGuard('multitable', 'read'), async (_req: Request, res: Response) => {
+    return res.json({ ok: true, data: { templates: listMultitableTemplates() } })
+  })
+
+  router.post('/templates/:templateId/install', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+    const schema = z.object({
+      baseName: z.string().min(1).max(255).optional(),
+      workspaceId: z.string().min(1).max(100).optional(),
+    })
+
+    const parsed = schema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    const templateId = typeof req.params.templateId === 'string' ? req.params.templateId.trim() : ''
+    if (!templateId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'templateId is required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) {
+        return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      }
+
+      const result = await pool.transaction(async ({ query }) => installMultitableTemplate({
+        query: query as unknown as QueryFn,
+        templateId,
+        baseName: parsed.data.baseName,
+        ownerId: access.userId,
+        workspaceId: parsed.data.workspaceId ?? null,
+        idGenerator: (prefix) => buildId(prefix).slice(0, 50),
+      }))
+
+      return res.status(201).json({ ok: true, data: result })
+    } catch (err) {
+      if (err instanceof MultitableTemplateNotFoundError) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+      }
+      if (err instanceof MultitableTemplateConflictError) {
+        return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: err.message } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] install multitable template failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to install template' } })
     }
   })
 

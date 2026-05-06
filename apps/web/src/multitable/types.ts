@@ -491,6 +491,59 @@ export interface RecordSummaryPage {
   page: MetaPage
 }
 
+// --- Template library ---
+export interface MetaTemplateField {
+  id: string
+  name: string
+  type: MetaFieldType
+  order?: number
+  options?: string[]
+  property?: Record<string, unknown>
+  description?: string
+}
+
+export interface MetaTemplateView {
+  id: string
+  name: string
+  type: string
+  groupByFieldId?: string
+  dateFieldId?: string
+  titleFieldId?: string
+  hiddenFieldIds?: string[]
+  config?: Record<string, unknown>
+}
+
+export interface MetaTemplateSheet {
+  id: string
+  name: string
+  description?: string | null
+  fields: MetaTemplateField[]
+  views: MetaTemplateView[]
+}
+
+export interface MetaTemplate {
+  id: string
+  name: string
+  description: string
+  category: string
+  icon: string
+  color: string
+  sheets: MetaTemplateSheet[]
+}
+
+export interface InstallTemplateInput {
+  baseName?: string
+  workspaceId?: string
+}
+
+export interface InstallTemplateResult {
+  template: MetaTemplate
+  base: MetaBase
+  sheets: MetaSheet[]
+  fields: MetaField[]
+  views: MetaView[]
+}
+
 // --- Input types ---
 export interface CreateBaseInput {
   id?: string

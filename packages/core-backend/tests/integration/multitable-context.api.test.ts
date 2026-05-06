@@ -543,6 +543,110 @@ describe('Multitable context API', () => {
     expect(mockPool.transaction).toHaveBeenCalledTimes(1)
   })
 
+  test('lists the built-in multitable template catalog', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async () => ({ rows: [], rowCount: 0 }),
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/templates')
+      .expect(200)
+
+    expect(response.body.ok).toBe(true)
+    expect(response.body.data.templates.map((template: any) => template.id)).toEqual([
+      'project-tracker',
+      'sales-crm',
+      'issue-tracker',
+    ])
+  })
+
+  test('installs a built-in template as a new base in one transaction', async () => {
+    const bases: any[] = []
+    const sheets: any[] = []
+    const fields: any[] = []
+    const views: any[] = []
+    const { app, mockPool } = await createApp({
+      tokenPerms: ['multitable:write'],
+      queryHandler: async (sql, params = []) => {
+        const normalized = sql.replace(/\s+/g, ' ').trim()
+        if (normalized.startsWith('INSERT INTO meta_bases')) {
+          const [id, name, icon, color, ownerId, workspaceId] = params as [string, string, string, string, string | null, string | null]
+          const base = { id, name, icon, color, owner_id: ownerId, workspace_id: workspaceId }
+          bases.push(base)
+          return { rows: [base], rowCount: 1 }
+        }
+        if (normalized.startsWith('INSERT INTO meta_sheets')) {
+          const [id, baseId, name, description] = params as [string, string, string, string | null]
+          sheets.push({ id, base_id: baseId, name, description })
+          return { rows: [], rowCount: 1 }
+        }
+        if (normalized.includes('FROM meta_sheets') && normalized.includes('WHERE id = $1')) {
+          const [sheetId] = params as [string]
+          return { rows: sheets.filter((sheet) => sheet.id === sheetId) }
+        }
+        if (normalized.startsWith('INSERT INTO meta_fields')) {
+          const [id, sheetId, name, type, propertyJson, order] = params as [string, string, string, string, string, number]
+          fields.push({ id, sheet_id: sheetId, name, type, property: JSON.parse(propertyJson), order })
+          return { rows: [], rowCount: 1 }
+        }
+        if (normalized.includes('FROM meta_fields') && normalized.includes('id = ANY($2::text[])')) {
+          const [sheetId, ids] = params as [string, string[]]
+          const idSet = new Set(ids)
+          return {
+            rows: fields
+              .filter((field) => field.sheet_id === sheetId && idSet.has(field.id))
+              .sort((a, b) => a.order - b.order),
+          }
+        }
+        if (normalized.startsWith('INSERT INTO meta_views')) {
+          const [id, sheetId, name, type, filterInfoJson, sortInfoJson, groupInfoJson, hiddenFieldIdsJson, configJson] = params as [
+            string,
+            string,
+            string,
+            string,
+            string,
+            string,
+            string,
+            string,
+            string,
+          ]
+          views.push({
+            id,
+            sheet_id: sheetId,
+            name,
+            type,
+            filter_info: JSON.parse(filterInfoJson),
+            sort_info: JSON.parse(sortInfoJson),
+            group_info: JSON.parse(groupInfoJson),
+            hidden_field_ids: JSON.parse(hiddenFieldIdsJson),
+            config: JSON.parse(configJson),
+          })
+          return { rows: [], rowCount: 1 }
+        }
+        if (normalized.includes('FROM meta_views') && normalized.includes('WHERE id = $1')) {
+          const [viewId] = params as [string]
+          return { rows: views.filter((view) => view.id === viewId) }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .post('/api/multitable/templates/project-tracker/install')
+      .send({ baseName: 'Launch Base' })
+      .expect(201)
+
+    expect(response.body.ok).toBe(true)
+    expect(response.body.data.base.name).toBe('Launch Base')
+    expect(response.body.data.template.id).toBe('project-tracker')
+    expect(response.body.data.sheets).toHaveLength(1)
+    expect(response.body.data.fields).toHaveLength(6)
+    expect(response.body.data.views.map((view: any) => view.type)).toEqual(['grid', 'kanban', 'calendar'])
+    expect(bases[0].owner_id).toBe('user_multitable_1')
+    expect(mockPool.transaction).toHaveBeenCalledTimes(1)
+  })
+
   test('allows create sheet under an owned base without global multitable write', async () => {
     const { app, mockPool } = await createApp({
       tokenPerms: [],

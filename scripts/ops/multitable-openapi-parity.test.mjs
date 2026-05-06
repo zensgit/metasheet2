@@ -53,6 +53,8 @@ test('multitable openapi stays aligned with runtime contracts', () => {
   const schemas = openapi.components?.schemas ?? {}
 
   assert.ok(paths['/api/multitable/person-fields/prepare']?.post, 'missing person-field prepare endpoint')
+  assert.ok(paths['/api/multitable/templates']?.get, 'missing template catalog endpoint')
+  assert.ok(paths['/api/multitable/templates/{templateId}/install']?.post, 'missing template install endpoint')
   assert.ok(paths['/api/multitable/sheets/{sheetId}']?.delete, 'missing sheet delete endpoint')
   assert.ok(paths['/api/multitable/records/{recordId}']?.patch, 'missing single-record patch endpoint')
   assert.ok(paths['/api/multitable/sheets/{sheetId}/import-xlsx']?.post, 'missing xlsx import endpoint')
@@ -76,6 +78,22 @@ test('multitable openapi stays aligned with runtime contracts', () => {
 
   assert.deepEqual(schemas.MultitableFieldType?.enum, expectedFieldTypes)
   assert.deepEqual(schemas.MultitableViewType?.enum, expectedViewTypes)
+  assert.equal(
+    paths['/api/multitable/templates']?.get?.responses?.['200']?.content?.['application/json']?.schema?.properties?.data?.properties?.templates?.items?.$ref,
+    '#/components/schemas/MultitableTemplate',
+  )
+  assert.equal(
+    paths['/api/multitable/templates/{templateId}/install']?.post?.responses?.['201']?.content?.['application/json']?.schema?.properties?.data?.$ref,
+    '#/components/schemas/MultitableTemplateInstallResult',
+  )
+  assert.equal(
+    schemas.MultitableTemplateField?.properties?.type?.$ref,
+    '#/components/schemas/MultitableFieldType',
+  )
+  assert.equal(
+    schemas.MultitableTemplateView?.properties?.type?.$ref,
+    '#/components/schemas/MultitableViewType',
+  )
   assert.equal(
     paths['/api/multitable/fields']?.post?.requestBody?.content?.['application/json']?.schema?.properties?.type?.$ref,
     '#/components/schemas/MultitableFieldType',
