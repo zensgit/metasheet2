@@ -53,12 +53,13 @@ function sendError(res, error) {
   const status = Number.isInteger(error.status) ? error.status : inferHttpStatus(error)
   const code = error.code || error.name || 'INTERNAL_ERROR'
   const message = error.message || 'Internal server error'
+  const details = error.details ? sanitizeIntegrationPayload(error.details) : undefined
   return sendJson(res, status, {
     ok: false,
     error: {
       code,
       message,
-      details: error.details || undefined,
+      details,
     },
   })
 }

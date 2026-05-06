@@ -834,11 +834,49 @@ async function testErrorResponseShape() {
 
   assert.equal(res.statusCode, 409)
   assert.equal(res.body.ok, false)
-  assert.deepEqual(res.body.error, {
-    code: 'EXTERNAL_SYSTEM_CONFLICT',
-    message: 'external system conflict',
-    details: { id: 'sys_1' },
+  assert.equal(res.body.error.code, 'EXTERNAL_SYSTEM_CONFLICT')
+  assert.equal(res.body.error.message, 'external system conflict')
+  assert.equal(res.body.error.details.id, 'sys_1')
+
+  const sensitiveDetailsError = new Error('target adapter rejected request')
+  sensitiveDetailsError.status = 502
+  sensitiveDetailsError.code = 'ERP_REQUEST_FAILED'
+  sensitiveDetailsError.details = {
+    id: 'pipe_1',
+    password: 'plain-password',
+    headers: {
+      Authorization: 'Bearer live-token',
+      'x-api-key': 'api-key-value',
+    },
+    rawPayload: {
+      token: 'raw-token',
+    },
+    nested: {
+      cookie: 'sid=secret',
+    },
+  }
+  const { services: sensitiveDetailsServices } = createMockServices({
+    pipelineRegistry: {
+      async listPipelines() {
+        throw sensitiveDetailsError
+      },
+    },
   })
+  const { routes: sensitiveDetailsRoutes } = mountRoutes(sensitiveDetailsServices)
+  const sensitiveDetailsRes = await invoke(sensitiveDetailsRoutes, 'GET', '/api/integration/pipelines', {
+    user: READ_USER,
+    query: { workspaceId: 'workspace_1' },
+  })
+  assert.equal(sensitiveDetailsRes.statusCode, 502)
+  assert.equal(sensitiveDetailsRes.body.error.code, 'ERP_REQUEST_FAILED')
+  assert.equal(sensitiveDetailsRes.body.error.details.id, 'pipe_1')
+  assert.equal(sensitiveDetailsRes.body.error.details.password, '[redacted]')
+  assert.equal(sensitiveDetailsRes.body.error.details.headers.Authorization, '[redacted]')
+  assert.equal(sensitiveDetailsRes.body.error.details.headers['x-api-key'], '[redacted]')
+  assert.equal(sensitiveDetailsRes.body.error.details.rawPayload, '[redacted]')
+  assert.equal(sensitiveDetailsRes.body.error.details.nested.cookie, '[redacted]')
+  const errorJson = JSON.stringify(sensitiveDetailsRes.body.error)
+  assert.doesNotMatch(errorJson, /plain-password|live-token|api-key-value|raw-token|sid=secret/)
 
   const validationError = new Error('bad input')
   validationError.name = 'PipelineValidationError'
