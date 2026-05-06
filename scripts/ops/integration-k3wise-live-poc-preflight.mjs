@@ -24,6 +24,7 @@ const MATERIAL_REQUIRED_TARGET_FIELDS = [
   { label: 'K3 material name', targets: ['FName'] },
 ]
 const BOM_REQUIRED_TARGET_FIELDS = [
+  { label: 'K3 BOM number', targets: ['FNumber'] },
   { label: 'K3 BOM parent material', targets: ['FParentItemNumber'] },
   { label: 'K3 BOM child material', targets: ['FChildItems[].FItemNumber', 'FChildItemNumber', 'FItemNumber'] },
   { label: 'K3 BOM child quantity', targets: ['FChildItems[].FQty', 'FQty'] },
@@ -692,11 +693,12 @@ function sampleGate() {
     },
     fieldMappings: {
       material: [
-        { sourceField: 'code', targetField: 'FNumber', transform: { type: 'upperTrim' }, validation: [{ type: 'required' }] },
+        { sourceField: 'code', targetField: 'FNumber', transform: ['trim', 'upper'], validation: [{ type: 'required' }] },
         { sourceField: 'name', targetField: 'FName', validation: [{ type: 'required' }] },
-        { sourceField: 'uom', targetField: 'FBaseUnitID', transform: { type: 'dictMap', dictionary: 'unit' } },
+        { sourceField: 'uom', targetField: 'FBaseUnitID' },
       ],
       bom: [
+        { sourceField: 'bomNumber', targetField: 'FNumber', defaultValue: 'BOM-TEST-001', validation: [{ type: 'required' }] },
         { sourceField: 'parentCode', targetField: 'FParentItemNumber', validation: [{ type: 'required' }] },
         { sourceField: 'childCode', targetField: 'FChildItems[].FItemNumber', validation: [{ type: 'required' }] },
         { sourceField: 'quantity', targetField: 'FChildItems[].FQty', transform: { type: 'toNumber' } },

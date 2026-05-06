@@ -34,6 +34,10 @@
     "status": "pass",
     "runId": "run-bom-001",
     "productId": "PRODUCT-TEST-001",
+    "rowsWritten": 1,
+    "k3Records": [
+      { "bomNumber": "BOM-001", "externalId": "K3-BOM-1001", "billNo": "K3-BOM-BILL-001" }
+    ],
     "legacyPipelineOptionsSourceProductId": false
   },
   "rollback": {

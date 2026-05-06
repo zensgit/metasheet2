@@ -97,6 +97,47 @@ test('buildEvidenceReport returns FAIL when bom.legacyPipelineOptionsSourceProdu
   assert.equal(report.issues.some((issue) => issue.code === 'LEGACY_BOM_PRODUCT_ID_USED'), true)
 })
 
+test('buildEvidenceReport returns FAIL when successful BOM evidence omits runId', () => {
+  const evidence = sampleEvidence()
+  delete evidence.bomPoC.runId
+  const report = buildEvidenceReport(packet(), evidence)
+  assert.equal(report.decision, 'FAIL')
+  assert.equal(report.issues.some((issue) => issue.code === 'BOM_RUN_ID_REQUIRED'), true)
+})
+
+test('buildEvidenceReport returns FAIL when successful BOM row count is outside PoC bounds', () => {
+  for (const rowsWritten of [0, 4, 'not-a-number']) {
+    const evidence = sampleEvidence()
+    evidence.bomPoC.rowsWritten = rowsWritten
+    const report = buildEvidenceReport(packet(), evidence)
+    assert.equal(report.decision, 'FAIL', `rowsWritten=${JSON.stringify(rowsWritten)} should fail`)
+    assert.equal(
+      report.issues.some((issue) => issue.code === 'BOM_ROW_COUNT'),
+      true,
+      `rowsWritten=${JSON.stringify(rowsWritten)} should raise BOM_ROW_COUNT`,
+    )
+  }
+})
+
+test('buildEvidenceReport returns FAIL when successful BOM evidence has no K3 records', () => {
+  const evidence = sampleEvidence()
+  evidence.bomPoC.k3Records = []
+  const report = buildEvidenceReport(packet(), evidence)
+  assert.equal(report.decision, 'FAIL')
+  assert.equal(report.issues.some((issue) => issue.code === 'BOM_K3_RECORD_REQUIRED'), true)
+})
+
+test('buildEvidenceReport returns FAIL when successful BOM K3 records have no external response id', () => {
+  const evidence = sampleEvidence()
+  evidence.bomPoC.k3Records = [
+    { bomNumber: 'BOM-001' },
+    null,
+  ]
+  const report = buildEvidenceReport(packet(), evidence)
+  assert.equal(report.decision, 'FAIL')
+  assert.equal(report.issues.some((issue) => issue.code === 'BOM_K3_RESPONSE_REQUIRED'), true)
+})
+
 test('buildEvidenceReport returns FAIL when materialSaveOnly autoSubmit is the number 1 (spreadsheet boolean)', () => {
   const evidence = sampleEvidence()
   evidence.materialSaveOnly.autoSubmit = 1

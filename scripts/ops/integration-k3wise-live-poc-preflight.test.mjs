@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -11,6 +12,9 @@ import {
   runCli,
   sampleGate,
 } from './integration-k3wise-live-poc-preflight.mjs'
+
+const require = createRequire(import.meta.url)
+const { transformRecord } = require('../../plugins/plugin-integration-core/lib/transform-engine.cjs')
 
 function gate(overrides = {}) {
   return {
@@ -63,6 +67,31 @@ test('buildPacket emits Save-only external systems, pipelines, and BOM product s
   const bom = packet.pipelines.find((pipeline) => pipeline.targetObject === 'bom')
   assert.equal(bom.options.source.filters.productId, 'PRODUCT-TEST-001')
   assert.equal(bom.options.source.productId, undefined)
+})
+
+test('sampleGate field mappings are accepted by transform-engine', () => {
+  const packet = buildPacket(gate())
+  const material = packet.pipelines.find((pipeline) => pipeline.targetObject === 'material')
+  const bom = packet.pipelines.find((pipeline) => pipeline.targetObject === 'bom')
+
+  const materialResult = transformRecord({
+    code: ' mat-001 ',
+    name: 'Sample material',
+    uom: 'PCS',
+  }, material.fieldMappings)
+  assert.equal(materialResult.ok, true)
+  assert.deepEqual(materialResult.errors, [])
+  assert.equal(materialResult.value.FNumber, 'MAT-001')
+
+  const bomResult = transformRecord({
+    bomNumber: 'BOM-001',
+    parentCode: 'MAT-001',
+    childCode: 'MAT-002',
+    quantity: '2',
+  }, bom.fieldMappings)
+  assert.equal(bomResult.ok, true)
+  assert.deepEqual(bomResult.errors, [])
+  assert.deepEqual(bomResult.value.FChildItems, [{ FItemNumber: 'MAT-002', FQty: 2 }])
 })
 
 test('buildPacket blocks production K3 WISE environments', () => {
@@ -176,6 +205,23 @@ test('buildPacket requires minimum K3 BOM target mappings when BOM is enabled', 
     () => buildPacket(gate({
       fieldMappings: {
         bom: [
+          { sourceField: 'parentCode', targetField: 'FParentItemNumber' },
+          { sourceField: 'childCode', targetField: 'FChildItems[].FItemNumber' },
+          { sourceField: 'quantity', targetField: 'FChildItems[].FQty' },
+        ],
+      },
+    })),
+    (error) => error instanceof LivePocPreflightError &&
+      error.details.field === 'fieldMappings.bom' &&
+      error.details.requiredTargetFields.includes('FNumber'),
+    'BOM mappings must include K3 BOM number target field',
+  )
+
+  assert.throws(
+    () => buildPacket(gate({
+      fieldMappings: {
+        bom: [
+          { sourceField: 'bomNumber', targetField: 'FNumber' },
           { sourceField: 'parentCode', targetField: 'FParentItemNumber' },
           { sourceField: 'childCode', targetField: 'FChildItems[].FItemNumber' },
         ],

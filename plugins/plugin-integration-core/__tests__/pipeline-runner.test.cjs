@@ -281,6 +281,59 @@ async function main() {
   assert.equal(targetOptionsRun.run.status, 'succeeded')
   assert.deepEqual(observedTargetOptions, { autoSubmit: false, autoAudit: false, marker: 'save-only' })
 
+  // --- 1c. Source runtime filters/options are passed through to adapter ---
+  let observedSourceRead = null
+  const sourceOptions = createRunnerHarness({
+    sourceRecords: [],
+    pipelineOverrides: {
+      sourceObject: 'bom',
+      options: {
+        batchSize: 100,
+        source: {
+          filters: {
+            productId: 'PRODUCT-TEST-001',
+            revision: 'A',
+          },
+          productId: 'LEGACY-SHOULD-NOT-PASS',
+          limit: 999,
+          cursor: 'operator-cursor',
+          watermark: { updatedAt: 'operator-watermark' },
+          includeSubstitutes: false,
+        },
+      },
+    },
+    sourceRead: async (input) => {
+      observedSourceRead = input
+      return createReadResult({
+        records: [
+          { code: 'bom-01', revision: 'r1', qty: '1', name: 'BOM', updatedAt: '2026-04-24T01:00:00.000Z' },
+        ],
+        done: true,
+      })
+    },
+  })
+  const sourceOptionsRun = await sourceOptions.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'full', triggeredBy: 'manual' })
+  assert.equal(sourceOptionsRun.run.status, 'succeeded')
+  assert.equal(observedSourceRead.object, 'bom')
+  assert.equal(observedSourceRead.limit, 100)
+  assert.equal(observedSourceRead.cursor, null)
+  assert.deepEqual(observedSourceRead.filters, { productId: 'PRODUCT-TEST-001', revision: 'A' })
+  assert.deepEqual(observedSourceRead.options, { includeSubstitutes: false })
+
+  const invalidSourceFilters = createRunnerHarness({
+    pipelineOverrides: {
+      options: {
+        source: {
+          filters: 'PRODUCT-TEST-001',
+        },
+      },
+    },
+  })
+  await assert.rejects(
+    () => invalidSourceFilters.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'full', triggeredBy: 'manual' }),
+    (error) => error.name === 'PipelineRunnerError' && /pipeline\.options\.source\.filters/.test(error.details.cause),
+  )
+
   // --- 2. Idempotency prevents duplicate target writes ------------------
   const idem = createRunnerHarness({
     sourceRecords: [

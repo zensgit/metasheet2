@@ -232,6 +232,24 @@ function evaluateBom(packet, evidence, issues) {
   if (!text(bom.productId)) {
     addIssue(issues, 'fail', 'BOM_PRODUCT_SCOPE_REQUIRED', 'BOM PoC evidence must include productId', 'bomPoC')
   }
+  if (!text(bom.runId)) {
+    addIssue(issues, 'fail', 'BOM_RUN_ID_REQUIRED', 'BOM PoC evidence must include runId', 'bomPoC')
+  }
+  const rowsWritten = Number(bom.rowsWritten)
+  if (!Number.isInteger(rowsWritten) || rowsWritten < 1 || rowsWritten > 3) {
+    addIssue(issues, 'fail', 'BOM_ROW_COUNT', 'BOM PoC Save-only must write between 1 and 3 rows', 'bomPoC')
+  }
+  const k3Records = asArray(bom.k3Records, 'bomPoC.k3Records')
+  if (k3Records.length === 0) {
+    addIssue(issues, 'fail', 'BOM_K3_RECORD_REQUIRED', 'BOM PoC evidence must include at least one K3 test record', 'bomPoC')
+  } else {
+    const hasK3Response = k3Records.some((record) => (
+      isPlainObject(record) && (text(record.externalId) || text(record.billNo))
+    ))
+    if (!hasK3Response) {
+      addIssue(issues, 'fail', 'BOM_K3_RESPONSE_REQUIRED', 'BOM PoC evidence must include K3 externalId or billNo', 'bomPoC')
+    }
+  }
   if (normalizeSafeBoolean(bom.legacyPipelineOptionsSourceProductId, 'bomPoC.legacyPipelineOptionsSourceProductId')) {
     addIssue(issues, 'fail', 'LEGACY_BOM_PRODUCT_ID_USED', 'BOM PoC must not use pipeline.options.source.productId', 'bomPoC')
   }
@@ -380,6 +398,10 @@ function sampleEvidence() {
       status: 'pass',
       runId: 'run-bom-001',
       productId: 'PRODUCT-TEST-001',
+      rowsWritten: 1,
+      k3Records: [
+        { bomNumber: 'BOM-001', externalId: 'K3-BOM-1001', billNo: 'K3-BOM-BILL-001' },
+      ],
       legacyPipelineOptionsSourceProductId: false,
     },
     rollback: {

@@ -63,6 +63,26 @@ function resolveTargetOptions(pipeline = {}) {
   return isPlainObject(targetOptions) ? { ...targetOptions } : {}
 }
 
+function resolveSourceReadOptions(pipeline = {}) {
+  const sourceOptions = pipeline.options && pipeline.options.source
+  if (sourceOptions === undefined || sourceOptions === null) return { filters: {}, options: {} }
+  if (!isPlainObject(sourceOptions)) {
+    throw new PipelineRunnerError('pipeline.options.source must be an object', { field: 'pipeline.options.source' })
+  }
+  if (sourceOptions.filters !== undefined && sourceOptions.filters !== null && !isPlainObject(sourceOptions.filters)) {
+    throw new PipelineRunnerError('pipeline.options.source.filters must be an object', { field: 'pipeline.options.source.filters' })
+  }
+  const filters = isPlainObject(sourceOptions.filters) ? { ...sourceOptions.filters } : {}
+  const options = { ...sourceOptions }
+  delete options.filters
+  delete options.productId
+  delete options.product_id
+  delete options.limit
+  delete options.cursor
+  delete options.watermark
+  return { filters, options }
+}
+
 function requireDependency(deps, name, methods) {
   const value = deps[name]
   if (!value) throw new Error(`createPipelineRunner: ${name} is required`)
@@ -441,6 +461,7 @@ function createPipelineRunner(deps = {}) {
 
       while (page < maxPages) {
         page += 1
+        const sourceReadOptions = resolveSourceReadOptions(context.pipeline)
         const readResult = Array.isArray(input.sourceRecords)
           ? {
               records: input.sourceRecords,
@@ -452,6 +473,8 @@ function createPipelineRunner(deps = {}) {
               limit: effectiveBatchSize,
               cursor,
               watermark: currentWatermark ? { [watermarkConfig.field]: currentWatermark.value } : {},
+              filters: sourceReadOptions.filters,
+              options: sourceReadOptions.options,
             })
         const cleanRecords = []
         const records = remainingDryRunSamples === null
