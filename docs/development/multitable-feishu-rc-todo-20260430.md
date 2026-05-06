@@ -385,7 +385,12 @@ These are not RC blockers.
   - Development MD: `docs/development/multitable-hierarchy-drag-reparent-design-20260506.md`
   - Verification MD: `docs/development/multitable-hierarchy-drag-reparent-verification-20260506.md`
   - Verification summary: focused Hierarchy drag/drop and Workbench wiring tests, Vue type-check, whitespace guard, and CI passed; Strict E2E was expected skip.
-- [ ] Hierarchy server-side cycle prevention.
+- [x] Hierarchy server-side cycle prevention.
+  - PR: #1350
+  - Merge commit: `f6ab034d63fb4d9e3700044708711cf10911c397`
+  - Development MD: `docs/development/multitable-hierarchy-cycle-guard-design-20260506.md`
+  - Verification MD: `docs/development/multitable-hierarchy-cycle-guard-verification-20260506.md`
+  - Verification summary: focused RecordWriteService and RecordService unit tests, backend build, whitespace guard, and CI passed; Strict E2E was expected skip.
 - [x] DateTime field with timezone.
   - PR: #1336
   - Merge commit: `7ccd5dead503a4b8e12d312859ac817b488154a0`
