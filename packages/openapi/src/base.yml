@@ -1510,6 +1510,131 @@ components:
         description:
           type: string
           nullable: true
+    MultitableTemplateField:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          $ref: '#/components/schemas/MultitableFieldType'
+        order:
+          type: integer
+        options:
+          type: array
+          items:
+            type: string
+        property:
+          type: object
+          additionalProperties: true
+        description:
+          type: string
+      required:
+        - id
+        - name
+        - type
+    MultitableTemplateView:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          $ref: '#/components/schemas/MultitableViewType'
+        groupByFieldId:
+          type: string
+        dateFieldId:
+          type: string
+        titleFieldId:
+          type: string
+        hiddenFieldIds:
+          type: array
+          items:
+            type: string
+        config:
+          type: object
+          additionalProperties: true
+      required:
+        - id
+        - name
+        - type
+    MultitableTemplateSheet:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableTemplateField'
+        views:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableTemplateView'
+      required:
+        - id
+        - name
+        - fields
+        - views
+    MultitableTemplate:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        category:
+          type: string
+        icon:
+          type: string
+        color:
+          type: string
+        sheets:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableTemplateSheet'
+      required:
+        - id
+        - name
+        - description
+        - category
+        - icon
+        - color
+        - sheets
+    MultitableTemplateInstallResult:
+      type: object
+      properties:
+        template:
+          $ref: '#/components/schemas/MultitableTemplate'
+        base:
+          $ref: '#/components/schemas/MultitableBase'
+        sheets:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableSheet'
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableField'
+        views:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableView'
+      required:
+        - template
+        - base
+        - sheets
+        - fields
+        - views
     MultitableViewType:
       type: string
       enum:
