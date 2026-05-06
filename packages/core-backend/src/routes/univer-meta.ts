@@ -7326,7 +7326,7 @@ export function univerMetaRouter(): Router {
       if (!capabilities.canEditRecord) return sendForbidden(res)
 
       const fieldRes = await pool.query(
-        'SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1',
+        'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC',
         [sheetId],
       )
       if (fieldRes.rows.length === 0) {

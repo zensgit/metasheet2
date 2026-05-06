@@ -70,6 +70,12 @@ function createMockPool(
     if (sql.includes('INSERT INTO meta_record_subscription_notifications')) {
       return responses.INSERT_RECORD_SUBSCRIPTION_NOTIFICATIONS ?? { rows: [], rowCount: 1 }
     }
+    if (sql.includes('SELECT id, config FROM meta_views WHERE sheet_id = $1 AND type = $2')) {
+      return responses.SELECT_HIERARCHY_VIEWS ?? { rows: [] }
+    }
+    if (sql.includes('SELECT data FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')) {
+      return responses.SELECT_HIERARCHY_PARENT_RECORD ?? { rows: [] }
+    }
     if (sql.includes('INSERT INTO meta_field_auto_number_sequences')) {
       return responses.ALLOCATE_AUTO_NUMBER ?? { rows: [{ value: 1 }], rowCount: 1 }
     }
@@ -371,6 +377,34 @@ describe('RecordService', () => {
         expect.stringContaining('"user_id":"watcher_1"'),
       ]),
     )
+  })
+
+  it('rejects direct record patches that would create a hierarchy cycle', async () => {
+    pool = createMockPool({
+      SELECT_FIELDS: {
+        rows: [
+          { id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 0 },
+          { id: 'fld_parent', name: 'Parent', type: 'link', property: { foreignSheetId: 'sheet_ops', limitSingleRecord: true }, order: 1 },
+        ],
+      },
+      SELECT_LINK_TARGETS: { rows: [{ id: 'rec_child' }] },
+      SELECT_HIERARCHY_VIEWS: { rows: [{ id: 'view_hierarchy', config: { parentFieldId: 'fld_parent' } }] },
+      SELECT_PATCH_FOR_UPDATE: {
+        rows: [{ id: 'rec_root', version: 4, data: { fld_title: 'Root' }, created_by: 'user_1' }],
+      },
+      SELECT_HIERARCHY_PARENT_RECORD: { rows: [{ data: { fld_parent: ['rec_root'] } }] },
+    })
+    const service = new RecordService(pool, eventBus as any)
+
+    await expect(service.patchRecord({
+      recordId: 'rec_root',
+      sheetId: 'sheet_ops',
+      data: { fld_parent: ['rec_child'] },
+      actorId: 'user_1',
+      access: { userId: 'user_1', permissions: [], isAdminRole: false },
+      capabilities: fullCapabilities,
+    })).rejects.toMatchObject({ code: 'HIERARCHY_CYCLE' })
+    expect(pool.queryMock).not.toHaveBeenCalledWith(expect.stringContaining('UPDATE meta_records'), expect.anything())
   })
 
   it('throws VersionConflictError when delete expectedVersion does not match', async () => {

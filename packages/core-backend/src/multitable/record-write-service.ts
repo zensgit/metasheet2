@@ -23,6 +23,13 @@ import {
   type YjsInvalidator,
 } from './post-commit-hooks'
 import { BATCH1_FIELD_TYPES, coerceBatch1Value, normalizeMultiSelectValue, validateLongTextValue } from './field-codecs'
+import {
+  HierarchyCycleError,
+  assertNoHierarchyParentCycle,
+  buildHierarchyParentOverridesByField,
+  collectSameSheetLinkChangeFieldIds,
+  loadHierarchyParentFieldIds,
+} from './hierarchy-cycle-guard'
 import { recordRecordRevision } from './record-history-service'
 import {
   notifyRecordSubscribersBestEffort,
@@ -481,6 +488,28 @@ export class RecordWriteService {
     // Step 0: Validate changes (field writability + value constraints)
     // -----------------------------------------------------------------------
     await this.validateChanges({ sheetId, changesByRecord, fieldById })
+    const sameSheetLinkChangeFieldIds = collectSameSheetLinkChangeFieldIds({
+      changesByRecord,
+      fieldById,
+      sheetId,
+    })
+    const hierarchyParentFieldIds = sameSheetLinkChangeFieldIds.size > 0
+      ? await loadHierarchyParentFieldIds({
+          query: this.pool.query.bind(this.pool),
+          sheetId,
+          fields,
+        })
+      : new Set<string>()
+    const guardedHierarchyParentFieldIds = new Set(
+      [...sameSheetLinkChangeFieldIds].filter((fieldId) => hierarchyParentFieldIds.has(fieldId)),
+    )
+    const hierarchyParentOverridesByField = guardedHierarchyParentFieldIds.size > 0
+      ? buildHierarchyParentOverridesByField({
+          changesByRecord,
+          hierarchyParentFieldIds: guardedHierarchyParentFieldIds,
+          normalizeLinkIds: h.normalizeLinkIds,
+        })
+      : new Map<string, Map<string, string[]>>()
 
     // -----------------------------------------------------------------------
     // Step 1: DB transaction
@@ -585,7 +614,7 @@ export class RecordWriteService {
         if (applied === 0) continue
 
         // Validate link targets exist
-        for (const { ids, cfg } of linkUpdates.values()) {
+        for (const [fieldId, { ids, cfg }] of linkUpdates.entries()) {
           if (ids.length === 0) continue
           const exists = await query(
             'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
@@ -597,6 +626,24 @@ export class RecordWriteService {
             throw new RecordValidationError(
               `Linked record(s) not found in sheet ${cfg.foreignSheetId}: ${missing.join(', ')}`,
             )
+          }
+          if (guardedHierarchyParentFieldIds.has(fieldId) && cfg.foreignSheetId === sheetId) {
+            try {
+              await assertNoHierarchyParentCycle({
+                query,
+                sheetId,
+                recordId,
+                fieldId,
+                parentRecordIds: ids,
+                parentOverridesByRecord: hierarchyParentOverridesByField.get(fieldId) ?? new Map(),
+                normalizeLinkIds: h.normalizeLinkIds,
+              })
+            } catch (error) {
+              if (error instanceof HierarchyCycleError) {
+                throw new RecordValidationError(error.message, error.code)
+              }
+              throw error
+            }
           }
         }
 
