@@ -495,6 +495,53 @@ async function testExternalSystemTestPersistsFailureAndPreservesInactive() {
   assert.equal(inactiveUpdate.lastError, null)
 }
 
+async function testExternalSystemTestRequiresSavedSystem() {
+  const { calls, services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        calls.push(['getExternalSystemForAdapter', input])
+        const error = new Error('external system not found')
+        error.name = 'ExternalSystemNotFoundError'
+        throw error
+      },
+    },
+    adapterRegistry: {
+      createAdapter(input) {
+        calls.push(['createAdapter', input])
+        return {
+          async testConnection() {
+            calls.push(['testConnection'])
+            return { ok: true, status: 200 }
+          },
+        }
+      },
+    },
+  })
+  const { routes } = mountRoutes(services)
+
+  const res = await invoke(routes, 'POST', '/api/integration/external-systems/:id/test', {
+    user: WRITE_USER,
+    params: { id: 'missing_sys' },
+    query: { workspaceId: 'workspace_1' },
+    body: {
+      name: 'Unsaved K3 draft',
+      kind: 'erp:k3-wise-webapi',
+      config: { baseUrl: 'https://draft.example.test/K3API/' },
+      credentials: { username: 'draft-user', password: 'draft-password', acctId: 'AIS_DRAFT' },
+    },
+  })
+
+  assertErrorResponse(res, [404])
+  assert.deepEqual(findCall(calls, 'getExternalSystemForAdapter')[1], {
+    id: 'missing_sys',
+    tenantId: 'tenant_1',
+    workspaceId: 'workspace_1',
+  })
+  assert.equal(findCalls(calls, 'createAdapter').length, 0, 'missing systems do not instantiate adapters')
+  assert.equal(findCalls(calls, 'testConnection').length, 0, 'missing systems do not run connection tests')
+  assert.equal(findCalls(calls, 'upsertExternalSystem').length, 0, 'request body drafts are not persisted by test route')
+}
+
 async function testPipelineRoutes() {
   const { calls, services } = createMockServices()
   const { routes } = mountRoutes(services)
@@ -1094,6 +1141,7 @@ async function main() {
   await testUnauthenticatedWriteRequestIsRejected()
   await testExternalSystemRoutes()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
+  await testExternalSystemTestRequiresSavedSystem()
   await testPipelineRoutes()
   await testStagingRoutes()
   await testRunAndDeadLetterRoutes()

@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest'
 import { readFile } from 'node:fs/promises'
 import {
   applyExternalSystemToForm,
+  buildK3WiseSqlConnectionFingerprint,
+  buildK3WiseSqlSystemConnectionFingerprint,
+  buildK3WiseWebApiConnectionFingerprint,
+  buildK3WiseWebApiSystemConnectionFingerprint,
   buildK3WisePipelineObservationQuery,
   buildK3WisePipelinePayloads,
   buildK3WisePipelineRunPayload,
@@ -94,6 +98,11 @@ describe('K3 WISE setup helpers', () => {
 
   it('loads public external-system config without exposing credentials', () => {
     const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      acctId: 'draft-acct',
+      username: 'draft-user',
+      password: 'draft-password',
+    })
     const system: IntegrationExternalSystem = {
       id: 'sys_1',
       tenantId: 'tenant_1',
@@ -121,7 +130,107 @@ describe('K3 WISE setup helpers', () => {
     expect(next.webApiSystemId).toBe('sys_1')
     expect(next.webApiHasCredentials).toBe(true)
     expect(next.baseUrl).toBe('https://k3.example.test/')
+    expect(next.healthPath).toBe('')
+    expect(next.acctId).toBe('')
+    expect(next.username).toBe('')
     expect(next.password).toBe('')
+  })
+
+  it('tracks unsaved WebAPI connection drafts without reacting to pipeline-only edits', () => {
+    const form = createDefaultK3WiseSetupForm()
+    const system: IntegrationExternalSystem = {
+      id: 'sys_1',
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      name: 'K3 loaded',
+      kind: 'erp:k3-wise-webapi',
+      role: 'target',
+      status: 'active',
+      hasCredentials: true,
+      config: {
+        version: 'K3 WISE 15.x',
+        environment: 'uat',
+        baseUrl: 'https://k3.example.test/',
+        loginPath: '/login',
+        healthPath: '/health',
+        lcid: 2052,
+        timeoutMs: 30000,
+      },
+      capabilities: {},
+    }
+    const loaded = applyExternalSystemToForm(form, system)
+    const savedFingerprint = buildK3WiseWebApiSystemConnectionFingerprint(system)
+
+    expect(buildK3WiseWebApiConnectionFingerprint(loaded)).toBe(savedFingerprint)
+
+    loaded.projectId = 'project_1'
+    loaded.materialPipelineId = 'pipe_material'
+    loaded.pipelineCursor = 'cursor_1'
+    loaded.allowLivePipelineRun = true
+    expect(buildK3WiseWebApiConnectionFingerprint(loaded)).toBe(savedFingerprint)
+
+    loaded.baseUrl = 'https://k3-new.example.test/'
+    expect(buildK3WiseWebApiConnectionFingerprint(loaded)).not.toBe(savedFingerprint)
+
+    loaded.baseUrl = 'https://k3.example.test/'
+    loaded.username = 'replacement-user'
+    expect(buildK3WiseWebApiConnectionFingerprint(loaded)).not.toBe(savedFingerprint)
+  })
+
+  it('tracks unsaved SQL Server connection drafts without reacting to pipeline-only edits', () => {
+    const form = createDefaultK3WiseSetupForm()
+    form.sqlUsername = 'draft-user'
+    form.sqlPassword = 'draft-password'
+    const system: IntegrationExternalSystem = {
+      id: 'sql_1',
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      name: 'K3 SQL loaded',
+      kind: 'erp:k3-wise-sqlserver',
+      role: 'bidirectional',
+      status: 'active',
+      hasCredentials: true,
+      config: {
+        mode: 'readonly',
+        server: '10.0.0.10',
+        database: 'AIS_TEST',
+        allowedTables: ['dbo.t_ICItem', 'dbo.t_ICBOM'],
+        middleTables: ['dbo.integration_material_stage'],
+        storedProcedures: ['dbo.usp_integration_material'],
+      },
+      capabilities: {},
+    }
+    const loaded = applyExternalSystemToForm(form, system)
+    const savedFingerprint = buildK3WiseSqlSystemConnectionFingerprint(system)
+
+    expect(loaded.sqlUsername).toBe('')
+    expect(loaded.sqlPassword).toBe('')
+    expect(buildK3WiseSqlConnectionFingerprint(loaded)).toBe(savedFingerprint)
+
+    loaded.projectId = 'project_1'
+    loaded.bomPipelineId = 'pipe_bom'
+    loaded.pipelineCursor = 'cursor_1'
+    expect(buildK3WiseSqlConnectionFingerprint(loaded)).toBe(savedFingerprint)
+
+    loaded.sqlServer = '10.0.0.11'
+    expect(buildK3WiseSqlConnectionFingerprint(loaded)).not.toBe(savedFingerprint)
+
+    loaded.sqlServer = '10.0.0.10'
+    loaded.sqlPassword = 'replacement-password'
+    expect(buildK3WiseSqlConnectionFingerprint(loaded)).not.toBe(savedFingerprint)
+  })
+
+  it('keeps K3 setup connection test controls behind saved-draft fingerprints', async () => {
+    const source = await readFile('src/views/IntegrationK3WiseSetupView.vue', 'utf8')
+
+    expect(source).toContain(':disabled="webApiTestDisabled"')
+    expect(source).toContain(':disabled="sqlTestDisabled"')
+    expect(source).toContain('hasUnsavedWebApiConnectionDraft')
+    expect(source).toContain('hasUnsavedSqlConnectionDraft')
+    expect(source).toContain('if (!system) return Boolean(form.webApiSystemId)')
+    expect(source).toContain('if (!system) return Boolean(form.sqlSystemId)')
+    expect(source).toContain('if (!form.webApiSystemId || hasUnsavedWebApiConnectionDraft.value) return')
+    expect(source).toContain('if (!form.sqlSystemId || hasUnsavedSqlConnectionDraft.value) return')
   })
 
   it('validates absolute endpoint paths and incomplete credential replacement', () => {

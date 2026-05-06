@@ -253,6 +253,64 @@ function parseOptionalPositiveInteger(value: string): number | undefined {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
 }
 
+function fingerprintJson(value: Record<string, unknown>): string {
+  return JSON.stringify(value)
+}
+
+function normalizeListFingerprint(value: string): string[] {
+  return splitList(value)
+}
+
+function hasWebApiCredentialDraft(form: K3WiseSetupForm): boolean {
+  return Boolean(trim(form.username) || trim(form.acctId) || trim(form.password))
+}
+
+function hasSqlCredentialDraft(form: K3WiseSetupForm): boolean {
+  return Boolean(trim(form.sqlUsername) || trim(form.sqlPassword))
+}
+
+export function buildK3WiseWebApiConnectionFingerprint(form: K3WiseSetupForm): string {
+  return fingerprintJson({
+    tenantId: trim(form.tenantId),
+    workspaceId: trim(form.workspaceId),
+    systemId: trim(form.webApiSystemId),
+    hasCredentials: form.webApiHasCredentials === true,
+    credentialDraftTouched: hasWebApiCredentialDraft(form),
+    version: trim(form.version),
+    environment: form.environment,
+    baseUrl: trim(form.baseUrl),
+    loginPath: trim(form.loginPath),
+    healthPath: trim(form.healthPath),
+    lcid: trim(form.lcid),
+    timeoutMs: trim(form.timeoutMs),
+  })
+}
+
+export function buildK3WiseSqlConnectionFingerprint(form: K3WiseSetupForm): string {
+  return fingerprintJson({
+    tenantId: trim(form.tenantId),
+    workspaceId: trim(form.workspaceId),
+    enabled: form.sqlEnabled === true,
+    systemId: trim(form.sqlSystemId),
+    hasCredentials: form.sqlHasCredentials === true,
+    credentialDraftTouched: hasSqlCredentialDraft(form),
+    mode: form.sqlMode,
+    server: trim(form.sqlServer),
+    database: trim(form.sqlDatabase),
+    allowedTables: normalizeListFingerprint(form.sqlAllowedTables),
+    middleTables: normalizeListFingerprint(form.sqlMiddleTables),
+    storedProcedures: normalizeListFingerprint(form.sqlStoredProcedures),
+  })
+}
+
+export function buildK3WiseWebApiSystemConnectionFingerprint(system: IntegrationExternalSystem): string {
+  return buildK3WiseWebApiConnectionFingerprint(applyExternalSystemToForm(createDefaultK3WiseSetupForm(), system))
+}
+
+export function buildK3WiseSqlSystemConnectionFingerprint(system: IntegrationExternalSystem): string {
+  return buildK3WiseSqlConnectionFingerprint(applyExternalSystemToForm(createDefaultK3WiseSetupForm(), system))
+}
+
 function assertRelativePath(value: string, field: keyof K3WiseSetupForm, issues: K3WiseSetupValidationIssue[]): void {
   const normalized = trim(value)
   if (!normalized) {
@@ -805,6 +863,9 @@ export function applyExternalSystemToForm(form: K3WiseSetupForm, system: Integra
     const bom = objects.bom || {}
     next.webApiSystemId = system.id
     next.webApiHasCredentials = system.hasCredentials === true
+    next.acctId = ''
+    next.username = ''
+    next.password = ''
     next.tenantId = system.tenantId || next.tenantId
     next.workspaceId = system.workspaceId || ''
     next.webApiName = system.name
@@ -812,7 +873,7 @@ export function applyExternalSystemToForm(form: K3WiseSetupForm, system: Integra
     next.environment = typeof config.environment === 'string' ? config.environment as K3WiseSetupForm['environment'] : next.environment
     next.baseUrl = typeof config.baseUrl === 'string' ? config.baseUrl : next.baseUrl
     next.loginPath = typeof config.loginPath === 'string' ? config.loginPath : next.loginPath
-    next.healthPath = typeof config.healthPath === 'string' ? config.healthPath : next.healthPath
+    next.healthPath = typeof config.healthPath === 'string' ? config.healthPath : ''
     next.lcid = config.lcid === undefined ? next.lcid : String(config.lcid)
     next.timeoutMs = config.timeoutMs === undefined ? next.timeoutMs : String(config.timeoutMs)
     next.autoSubmit = config.autoSubmit === true
@@ -829,6 +890,8 @@ export function applyExternalSystemToForm(form: K3WiseSetupForm, system: Integra
     next.sqlEnabled = true
     next.sqlSystemId = system.id
     next.sqlHasCredentials = system.hasCredentials === true
+    next.sqlUsername = ''
+    next.sqlPassword = ''
     next.tenantId = system.tenantId || next.tenantId
     next.workspaceId = system.workspaceId || ''
     next.sqlName = system.name
