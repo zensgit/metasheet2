@@ -1,6 +1,7 @@
 import type { LinkedRecordSummary, MetaAttachment, MetaField } from '../types'
 import {
   formatCurrencyValue,
+  formatNumberValue,
   formatPercentValue,
   resolveCurrencyFieldProperty,
   resolvePercentFieldProperty,
@@ -52,6 +53,12 @@ export function formatFieldDisplay(params: {
   if (field.type === 'createdTime' || field.type === 'modifiedTime') return formatDateTime(value)
   if (isSystemFieldType(field.type)) return String(value)
   if (field.type === 'boolean') return value ? 'Yes' : 'No'
+
+  if (field.type === 'number') {
+    const num = typeof value === 'number' ? value : Number(value)
+    if (!Number.isFinite(num)) return String(value)
+    return formatNumberValue(num, field.property)
+  }
 
   if (field.type === 'currency') {
     const num = typeof value === 'number' ? value : Number(value)
