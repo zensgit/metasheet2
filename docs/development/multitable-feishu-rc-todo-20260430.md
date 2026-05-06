@@ -386,7 +386,12 @@ These are not RC blockers.
   - Development MD: `docs/development/multitable-barcode-field-design-20260505.md`
   - Verification MD: `docs/development/multitable-barcode-field-verification-20260505.md`
   - Verification summary: backend codec/default-validation tests, frontend renderer/editor/form/drawer tests, OpenAPI generation/parity, backend build, frontend type-check, whitespace guard, and CI passed; Strict E2E was expected skip.
-- [ ] Location field.
+- [x] Location field.
+  - PR: #1333
+  - Merge commit: `0cf0d8eb5d997b4335a518a235f0104699e9cb8c`
+  - Development MD: `docs/development/multitable-location-field-design-20260506.md`
+  - Verification MD: `docs/development/multitable-location-field-verification-20260506.md`
+  - Verification summary: backend codec/default-validation tests, frontend display/renderer/editor/form/drawer tests, OpenAPI generation/parity, backend build, frontend type-check, whitespace guard, and CI passed; Strict E2E was expected skip.
 
 ## Global Verification Commands
 
