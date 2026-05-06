@@ -71,7 +71,12 @@ Do not mark an item done if:
   - Development MD: `docs/development/multitable-feishu-rc-audit-development-20260430.md`
   - Verification MD: `docs/development/multitable-feishu-rc-audit-verification-20260430.md`
   - Verification summary: checklist added at `docs/development/multitable-feishu-staging-smoke-checklist-20260430.md`.
-- [ ] Verify staging deployment target version and document exact commit.
+- [x] Verify staging deployment target version and document exact commit.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-142-postdeploy-design-20260506.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-142-postdeploy-verification-20260506.md`
+  - Verification summary: GitHub Actions run `25435548148` deployed `9464b628479cdff1769c864de05f5ec5b6bf7d94` to 142 after rerunning a transient GHCR `unknown blob` failure; postdeploy health/API probes passed.
 - [ ] Smoke test basic multitable sheet lifecycle: create base, sheet, view, fields, records.
 - [ ] Smoke test xlsx frontend import/export with a real file.
 - [ ] Smoke test field types: currency, percent, rating, url, email, phone, longText, multiSelect.
@@ -100,6 +105,12 @@ Do not mark an item done if:
   - Development MD: `docs/development/multitable-feishu-rc-142-ui-smoke-hardening-design-20260506.md`
   - Verification MD: `docs/development/multitable-feishu-rc-142-ui-smoke-hardening-verification-20260506.md`
   - Verification summary: retry import mapping, exact form attachment labels, scoped record comment selectors, and upgraded-DB comment scope inserts fixed locally; focused backend/comment tests pass; 142 full UI smoke remains pending until this fix is deployed.
+- [x] Run full Playwright 142 UI smoke after `#1365` deploy.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-142-postdeploy-design-20260506.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-142-postdeploy-verification-20260506.md`
+  - Verification summary: `AUTH_TOKEN=... API_BASE=http://142.171.239.56:8081 WEB_BASE=http://142.171.239.56:8081 pnpm verify:multitable-pilot:staging` passed `125/125` checks with no failures; token value was not printed or committed.
 - [x] Produce RC audit result MD with P0/P1/P2 defects.
   - PR: pending
   - Merge commit: pending
