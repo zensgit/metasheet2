@@ -814,6 +814,228 @@ describe('Multitable context API', () => {
     })
   })
 
+  test('creates native person field requests as system people link fields', async () => {
+    let peopleSheetId = ''
+
+    const { app } = await createApp({
+      tokenPerms: ['multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops' }] }
+        }
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: null }] }
+        }
+        if (sql.includes('FROM meta_sheets') && sql.includes('WHERE base_id = $1')) {
+          expect(params).toEqual(['base_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: null }] }
+        }
+        if (sql.includes('INSERT INTO meta_sheets')) {
+          peopleSheetId = String(params?.[0] ?? '')
+          expect(params).toEqual([
+            expect.any(String),
+            'base_ops',
+            'People',
+            '__metasheet_system:people__',
+          ])
+          return { rows: [], rowCount: 1 }
+        }
+        if (sql.includes('SELECT id, name, type, "order" FROM meta_fields WHERE sheet_id = $1')) {
+          expect(params).toEqual([peopleSheetId])
+          return { rows: [] }
+        }
+        if (sql.includes('INSERT INTO meta_fields') && params?.[1] === peopleSheetId) {
+          return { rows: [], rowCount: 1 }
+        }
+        if (sql.includes('SELECT id, email, name, avatar_url') && sql.includes('FROM users')) {
+          return { rows: [] }
+        }
+        if (sql.includes('SELECT COALESCE(MAX("order"), -1) AS max_order FROM meta_fields')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ max_order: 4 }] }
+        }
+        if (sql.includes('INSERT INTO meta_fields')) {
+          expect(params).toEqual([
+            'fld_owner',
+            'sheet_ops',
+            'Owner',
+            'link',
+            JSON.stringify({
+              foreignSheetId: peopleSheetId,
+              limitSingleRecord: false,
+              refKind: 'user',
+              foreignDatasheetId: peopleSheetId,
+            }),
+            5,
+          ])
+          return {
+            rows: [{
+              id: 'fld_owner',
+              name: 'Owner',
+              type: 'link',
+              property: {
+                foreignSheetId: peopleSheetId,
+                limitSingleRecord: false,
+                refKind: 'user',
+                foreignDatasheetId: peopleSheetId,
+              },
+              order: 5,
+            }],
+          }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE id = $1')) {
+          expect(params).toEqual(['fld_owner'])
+          return {
+            rows: [{
+              id: 'fld_owner',
+              name: 'Owner',
+              type: 'link',
+              property: {
+                foreignSheetId: peopleSheetId,
+                limitSingleRecord: false,
+                refKind: 'user',
+                foreignDatasheetId: peopleSheetId,
+              },
+              order: 5,
+            }],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .post('/api/multitable/fields')
+      .send({
+        id: 'fld_owner',
+        sheetId: 'sheet_ops',
+        name: 'Owner',
+        type: 'person',
+        property: {
+          limitSingleRecord: false,
+          foreignSheetId: 'sheet_spoofed',
+        },
+      })
+      .expect(201)
+
+    expect(response.body.data.field).toMatchObject({
+      id: 'fld_owner',
+      name: 'Owner',
+      type: 'link',
+      order: 5,
+      property: {
+        foreignSheetId: peopleSheetId,
+        limitSingleRecord: false,
+        refKind: 'user',
+        foreignDatasheetId: peopleSheetId,
+      },
+    })
+  })
+
+  test('updates native person field requests into system people link fields', async () => {
+    let peopleSheetId = ''
+
+    const { app } = await createApp({
+      tokenPerms: ['multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id FROM meta_fields WHERE id = $1')) {
+          expect(params).toEqual(['fld_assignee'])
+          return { rows: [{ id: 'fld_assignee', sheet_id: 'sheet_ops' }] }
+        }
+        if (sql.includes('SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1')) {
+          expect(params).toEqual(['fld_assignee'])
+          return {
+            rows: [{
+              id: 'fld_assignee',
+              sheet_id: 'sheet_ops',
+              name: 'Assignee',
+              type: 'string',
+              property: {},
+              order: 2,
+            }],
+          }
+        }
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: null }] }
+        }
+        if (sql.includes('FROM meta_sheets') && sql.includes('WHERE base_id = $1')) {
+          expect(params).toEqual(['base_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: null }] }
+        }
+        if (sql.includes('INSERT INTO meta_sheets')) {
+          peopleSheetId = String(params?.[0] ?? '')
+          return { rows: [], rowCount: 1 }
+        }
+        if (sql.includes('SELECT id, name, type, "order" FROM meta_fields WHERE sheet_id = $1')) {
+          expect(params).toEqual([peopleSheetId])
+          return { rows: [] }
+        }
+        if (sql.includes('INSERT INTO meta_fields') && params?.[1] === peopleSheetId) {
+          return { rows: [], rowCount: 1 }
+        }
+        if (sql.includes('SELECT id, email, name, avatar_url') && sql.includes('FROM users')) {
+          return { rows: [] }
+        }
+        if (sql.includes('UPDATE meta_fields') && sql.includes('SET name = $2, type = $3, property = $4::jsonb, "order" = $5')) {
+          expect(params).toEqual([
+            'fld_assignee',
+            'Assignee',
+            'link',
+            JSON.stringify({
+              foreignSheetId: peopleSheetId,
+              limitSingleRecord: true,
+              refKind: 'user',
+              foreignDatasheetId: peopleSheetId,
+            }),
+            2,
+          ])
+          return {
+            rows: [{
+              id: 'fld_assignee',
+              name: 'Assignee',
+              type: 'link',
+              property: {
+                foreignSheetId: peopleSheetId,
+                limitSingleRecord: true,
+                refKind: 'user',
+                foreignDatasheetId: peopleSheetId,
+              },
+              order: 2,
+            }],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .patch('/api/multitable/fields/fld_assignee')
+      .send({
+        type: 'person',
+        property: {
+          foreignSheetId: 'sheet_spoofed',
+          limitSingleRecord: true,
+        },
+      })
+      .expect(200)
+
+    expect(response.body.data.field).toMatchObject({
+      id: 'fld_assignee',
+      name: 'Assignee',
+      type: 'link',
+      order: 2,
+      property: {
+        foreignSheetId: peopleSheetId,
+        limitSingleRecord: true,
+        refKind: 'user',
+        foreignDatasheetId: peopleSheetId,
+      },
+    })
+  })
+
   test('accepts date fields in create and update multitable field contracts', async () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],

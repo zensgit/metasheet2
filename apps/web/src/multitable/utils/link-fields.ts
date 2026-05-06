@@ -1,11 +1,11 @@
 import type { MetaField } from '../types'
 
 export function isLinkField(field?: MetaField | null): boolean {
-  return field?.type === 'link'
+  return field?.type === 'link' || field?.type === 'person'
 }
 
 export function isPersonField(field?: MetaField | null): boolean {
-  return isLinkField(field) && field?.property?.refKind === 'user'
+  return field?.type === 'person' || (isLinkField(field) && field?.property?.refKind === 'user')
 }
 
 function linkEntityLabel(field?: MetaField | null, count?: number): string {
