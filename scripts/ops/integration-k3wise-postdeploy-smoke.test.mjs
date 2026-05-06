@@ -691,3 +691,41 @@ test('require-auth turns missing token into a failing check', async () => {
     rmSync(outDir, { recursive: true, force: true })
   }
 })
+
+test('missing token file still writes structured smoke evidence', async () => {
+  const fake = createFakeServer()
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  const missingTokenPath = path.join(outDir, 'missing-token.txt')
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--token-file', missingTokenPath,
+      '--require-auth',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 1)
+    const stdout = JSON.parse(result.stdout)
+    assert.equal(stdout.ok, false)
+    assert.equal(stdout.authenticated, false)
+    assert.equal(stdout.summary.fail, 2)
+
+    const evidencePath = path.join(outDir, 'integration-k3wise-postdeploy-smoke.json')
+    const markdownPath = path.join(outDir, 'integration-k3wise-postdeploy-smoke.md')
+    const evidence = JSON.parse(readFileSync(evidencePath, 'utf8'))
+    const markdown = readFileSync(markdownPath, 'utf8')
+    const tokenRead = evidence.checks.find((check) => check.id === 'auth-token-read')
+    const authenticated = evidence.checks.find((check) => check.id === 'authenticated-integration-contract')
+
+    assert.equal(tokenRead.status, 'fail')
+    assert.match(tokenRead.error, /ENOENT/)
+    assert.equal(authenticated.status, 'fail')
+    assert.equal(authenticated.reason, 'no bearer token supplied')
+    assert.match(markdown, /auth-token-read/)
+    assert.match(markdown, /authenticated-integration-contract/)
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})

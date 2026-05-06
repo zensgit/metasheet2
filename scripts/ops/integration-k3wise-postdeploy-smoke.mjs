@@ -467,8 +467,14 @@ function extractTenantId(authBody) {
 }
 
 async function runSmoke(opts) {
-  const token = await readToken(opts)
   const checks = []
+  let token = ''
+
+  try {
+    token = await readToken(opts)
+  } catch (error) {
+    checks.push(failResult('auth-token-read', error))
+  }
 
   try {
     const health = await requestJson(opts.baseUrl, '/api/health', { timeoutMs: opts.timeoutMs })

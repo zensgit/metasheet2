@@ -366,6 +366,8 @@ jobs:
 
       - name: Resolve K3 WISE smoke token
         if: ${{ steps.remote_deploy.outputs.deploy_rc == '0' }}
+        id: k3_token_resolve
+        continue-on-error: true
         env:
           METASHEET_K3WISE_SMOKE_TOKEN_SECRET: ${{ secrets.METASHEET_K3WISE_SMOKE_TOKEN }}
           METASHEET_TENANT_ID: ${{ vars.METASHEET_TENANT_ID || '' }}
@@ -376,10 +378,18 @@ jobs:
           DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
-        run: scripts/ops/resolve-k3wise-smoke-token.sh
+        run: |
+          set +e
+          scripts/ops/resolve-k3wise-smoke-token.sh
+          rc=$?
+          set -e
+          echo "token_resolve_rc=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
 
       - name: K3 WISE postdeploy smoke
         if: ${{ steps.remote_deploy.outputs.deploy_rc == '0' }}
+        id: k3_smoke
+        continue-on-error: true
         env:
           METASHEET_BASE_URL: ${{ vars.METASHEET_BASE_URL || vars.PUBLIC_APP_URL || 'http://142.171.239.56:8081' }}
           METASHEET_TENANT_ID: ${{ vars.METASHEET_TENANT_ID || '' }}
@@ -388,6 +398,7 @@ jobs:
           set -euo pipefail
           smoke_out_dir="output/deploy/k3wise-postdeploy-smoke"
           rm -rf "$smoke_out_dir"
+          mkdir -p "$smoke_out_dir"
           tenant_id="${METASHEET_TENANT_ID:-${K3_WISE_SMOKE_TENANT_ID:-}}"
           require_auth="${K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH:-false}"
           args=(
@@ -405,7 +416,14 @@ jobs:
           if [[ -n "${K3_WISE_SMOKE_TOKEN:-}" ]]; then
             export METASHEET_AUTH_TOKEN="$K3_WISE_SMOKE_TOKEN"
           fi
-          node scripts/ops/integration-k3wise-postdeploy-smoke.mjs "${args[@]}"
+          set +e
+          node scripts/ops/integration-k3wise-postdeploy-smoke.mjs "${args[@]}" \
+            2> >(tee "$smoke_out_dir/stderr.log" >&2) \
+            | tee "$smoke_out_dir/cli-summary.json"
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "smoke_rc=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
 
       - name: Write deploy summary (preflight + runbooks)
         if: always()
@@ -656,5 +674,15 @@ jobs:
           fi
           if [[ "$rc" != "0" ]]; then
             echo "Remote deploy failed: rc=$rc" >&2
+            exit 1
+          fi
+          token_rc="${{ steps.k3_token_resolve.outputs.token_resolve_rc }}"
+          smoke_rc="${{ steps.k3_smoke.outputs.smoke_rc }}"
+          if [[ -n "$token_rc" && "$token_rc" != "0" ]]; then
+            echo "K3 WISE smoke token resolution failed: rc=$token_rc" >&2
+            exit 1
+          fi
+          if [[ -n "$smoke_rc" && "$smoke_rc" != "0" ]]; then
+            echo "K3 WISE postdeploy smoke failed: rc=$smoke_rc" >&2
             exit 1
           fi
