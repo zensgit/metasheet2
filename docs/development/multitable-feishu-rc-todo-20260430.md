@@ -373,7 +373,12 @@ These are not RC blockers.
   - Development MD: `docs/development/multitable-gantt-dependencies-design-20260506.md`
   - Verification MD: `docs/development/multitable-gantt-dependencies-verification-20260506.md`
   - Verification summary: focused Gantt/ViewManager frontend tests, Vue type-check, whitespace guard, and CI passed; Strict E2E was expected skip.
-- [ ] Gantt drag resize.
+- [x] Gantt drag resize.
+  - PR: #1343
+  - Merge commit: `7735b3d80a062f72d5f02b386434ca4e09de6623`
+  - Development MD: `docs/development/multitable-gantt-drag-resize-design-20260506.md`
+  - Verification MD: `docs/development/multitable-gantt-drag-resize-verification-20260506.md`
+  - Verification summary: focused Gantt resize and Workbench wiring tests, Vue type-check, whitespace guard, and CI passed; Strict E2E was expected skip.
 - [ ] Hierarchy drag-to-reparent.
 - [ ] Hierarchy server-side cycle prevention.
 - [x] DateTime field with timezone.
