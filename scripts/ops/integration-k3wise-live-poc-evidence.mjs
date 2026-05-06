@@ -4,6 +4,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const SECRET_KEY_PATTERN = /password|secret|token|session|credential|api[-_]?key|authorization/i
+const SECRET_METADATA_KEY_PATTERN = /^(requiredCredentialKeys|credentialKeys|credentialFieldKeys)$/i
 const SAFE_SECRET_PLACEHOLDERS = new Set(['', '<redacted>', '<set-at-runtime>', 'redacted', '***'])
 const VALID_STATUSES = new Set(['pass', 'partial', 'fail', 'skipped', 'todo', 'blocked'])
 // Customer evidence often spells phase status with localized or English
@@ -111,6 +112,25 @@ function redact(value) {
   return result
 }
 
+function findSecretValueLeaks(value, location, leaks) {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => findSecretValueLeaks(item, `${location}[${index}]`, leaks))
+    return leaks
+  }
+  if (isPlainObject(value)) {
+    for (const [key, child] of Object.entries(value)) {
+      findSecretValueLeaks(child, `${location}.${key}`, leaks)
+    }
+    return leaks
+  }
+  if (typeof value !== 'string') return leaks
+  const normalized = value.trim()
+  if (normalized.length >= 4 && !SAFE_SECRET_PLACEHOLDERS.has(normalized.toLowerCase())) {
+    leaks.push(location)
+  }
+  return leaks
+}
+
 function findSecretLeaks(value, location = 'root', leaks = []) {
   if (Array.isArray(value)) {
     value.forEach((item, index) => findSecretLeaks(item, `${location}[${index}]`, leaks))
@@ -119,11 +139,9 @@ function findSecretLeaks(value, location = 'root', leaks = []) {
   if (!isPlainObject(value)) return leaks
   for (const [key, child] of Object.entries(value)) {
     const childPath = `${location}.${key}`
-    if (SECRET_KEY_PATTERN.test(key) && typeof child === 'string') {
-      const normalized = child.trim()
-      if (normalized.length >= 4 && !SAFE_SECRET_PLACEHOLDERS.has(normalized.toLowerCase())) {
-        leaks.push(childPath)
-      }
+    if (SECRET_KEY_PATTERN.test(key)) {
+      if (SECRET_METADATA_KEY_PATTERN.test(key)) continue
+      findSecretValueLeaks(child, childPath, leaks)
       continue
     }
     findSecretLeaks(child, childPath, leaks)
@@ -253,7 +271,7 @@ function evaluateBom(packet, evidence, issues) {
 
 function determineDecision(phases, issues) {
   if (issues.some((issue) => issue.severity === 'fail')) return 'FAIL'
-  if (phases.some((item) => item.required && item.status === 'fail')) return 'FAIL'
+  if (phases.some((item) => item.status === 'fail')) return 'FAIL'
   if (phases.some((item) => item.status === 'blocked')) return 'PARTIAL'
   if (phases.some((item) => item.required && item.status !== 'pass')) return 'PARTIAL'
   if (issues.length > 0) return 'PARTIAL'

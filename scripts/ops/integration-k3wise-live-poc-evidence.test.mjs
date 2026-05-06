@@ -40,6 +40,23 @@ test('buildEvidenceReport returns PARTIAL when a required phase is missing', () 
   assert.equal(report.phases.find((phase) => phase.id === 'customerConfirmation').status, 'todo')
 })
 
+test('buildEvidenceReport returns FAIL when optional SQL channel explicitly fails', () => {
+  const evidence = sampleEvidence()
+  evidence.connections.sqlServer.status = 'fail'
+  const report = buildEvidenceReport(packet(), evidence)
+  assert.equal(report.decision, 'FAIL')
+  assert.equal(report.phases.find((phase) => phase.id === 'sqlConnection').status, 'fail')
+  assert.equal(report.issues.length, 0)
+})
+
+test('buildEvidenceReport allows optional SQL channel to be skipped', () => {
+  const evidence = sampleEvidence()
+  evidence.connections.sqlServer.status = 'skipped'
+  const report = buildEvidenceReport(packet(), evidence)
+  assert.equal(report.decision, 'PASS')
+  assert.equal(report.phases.find((phase) => phase.id === 'sqlConnection').status, 'skipped')
+})
+
 test('buildEvidenceReport returns FAIL when Save-only row count exceeds PoC limit', () => {
   const evidence = sampleEvidence()
   evidence.materialSaveOnly.rowsWritten = 4
@@ -63,6 +80,41 @@ test('buildEvidenceReport rejects unredacted secret-like evidence fields', () =>
     () => buildEvidenceReport(packet(), evidence),
     (error) => error instanceof LivePocEvidenceError && error.details.secretLeaks.includes('evidence.connections.k3Wise.sessionToken'),
   )
+})
+
+test('buildEvidenceReport rejects nested secret-like object values', () => {
+  const evidence = sampleEvidence()
+  evidence.connections.k3Wise.credentials = {
+    value: 'live-k3-password',
+  }
+  assert.throws(
+    () => buildEvidenceReport(packet(), evidence),
+    (error) =>
+      error instanceof LivePocEvidenceError &&
+      error.details.secretLeaks.includes('evidence.connections.k3Wise.credentials.value'),
+  )
+})
+
+test('buildEvidenceReport rejects secret-like array values', () => {
+  const evidence = sampleEvidence()
+  evidence.connections.k3Wise.authorization = ['Bearer live-session-token']
+  assert.throws(
+    () => buildEvidenceReport(packet(), evidence),
+    (error) =>
+      error instanceof LivePocEvidenceError &&
+      error.details.secretLeaks.includes('evidence.connections.k3Wise.authorization[0]'),
+  )
+})
+
+test('buildEvidenceReport accepts nested secret-like placeholders', () => {
+  const evidence = sampleEvidence()
+  evidence.connections.k3Wise.credentials = {
+    password: '<redacted>',
+    token: '<set-at-runtime>',
+    notes: ['***', 'redacted'],
+  }
+  const report = buildEvidenceReport(packet(), evidence)
+  assert.equal(report.decision, 'PASS')
 })
 
 test('buildEvidenceReport requires material dry-run runId when dry-run passed', () => {
