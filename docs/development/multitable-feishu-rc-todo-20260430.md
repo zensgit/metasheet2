@@ -404,7 +404,12 @@ These are not RC blockers.
   - Verification MD: `docs/development/multitable-number-format-verification-20260505.md`
   - Verification summary: backend sanitizer, frontend formatter/field-manager/editor tests, backend build, frontend type-check, whitespace guard, and CI passed; Strict E2E was expected skip.
 - [ ] Template library V1.
-- [ ] Native person field migration.
+- [x] Native person field migration.
+  - PR: #1353
+  - Merge commit: `58da251dc209e34fbf3a3a5e968aa16d059c759a`
+  - Development MD: `docs/development/multitable-person-field-migration-design-20260506.md`
+  - Verification MD: `docs/development/multitable-person-field-migration-verification-20260506.md`
+  - Verification summary: native `type: person` create/update requests are accepted, normalized to storage-compatible `link + refKind=user`, covered by focused backend integration/frontend tests, backend build, frontend type-check, OpenAPI parity, whitespace guard, and CI; Strict E2E was expected skip.
 - [x] Barcode field.
   - PR: #1328
   - Merge commit: `afa48d03e130ddfd6d8b8042c689940d430203d3`
