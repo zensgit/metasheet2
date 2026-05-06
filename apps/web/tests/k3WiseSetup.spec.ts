@@ -124,6 +124,60 @@ describe('K3 WISE setup helpers', () => {
     expect(next.password).toBe('')
   })
 
+  it('normalizes saved K3 WISE auto-submit flags from string, numeric, and Chinese variants', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      autoSubmit: false,
+      autoAudit: true,
+    })
+    const system: IntegrationExternalSystem = {
+      id: 'sys_1',
+      tenantId: 'tenant_1',
+      workspaceId: null,
+      name: 'K3 loaded',
+      kind: 'erp:k3-wise-webapi',
+      role: 'target',
+      status: 'active',
+      config: {
+        autoSubmit: '是',
+        autoAudit: 0,
+      },
+      capabilities: {},
+    }
+
+    const next = applyExternalSystemToForm(form, system)
+
+    expect(next.autoSubmit).toBe(true)
+    expect(next.autoAudit).toBe(false)
+  })
+
+  it('clears K3 WISE auto-submit flags when saved config contains unknown values', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      autoSubmit: true,
+      autoAudit: false,
+    })
+    const system: IntegrationExternalSystem = {
+      id: 'sys_1',
+      tenantId: 'tenant_1',
+      workspaceId: null,
+      name: 'K3 loaded',
+      kind: 'erp:k3-wise-webapi',
+      role: 'target',
+      status: 'active',
+      config: {
+        autoSubmit: 'maybe',
+        autoAudit: {},
+      },
+      capabilities: {},
+    }
+
+    const next = applyExternalSystemToForm(form, system)
+
+    expect(next.autoSubmit).toBe(false)
+    expect(next.autoAudit).toBe(false)
+  })
+
   it('validates absolute endpoint paths and incomplete credential replacement', () => {
     const form = createDefaultK3WiseSetupForm()
     Object.assign(form, {

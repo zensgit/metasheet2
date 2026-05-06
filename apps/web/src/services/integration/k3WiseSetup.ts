@@ -253,6 +253,23 @@ function parseOptionalPositiveInteger(value: string): number | undefined {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
 }
 
+const BOOLEAN_TRUE_TEXT = new Set(['true', '1', 'yes', 'y', 'on', 'enable', 'enabled', '是', '启用', '开启'])
+const BOOLEAN_FALSE_TEXT = new Set(['false', '0', 'no', 'n', 'off', 'disable', 'disabled', '否', '禁用', '关闭'])
+
+function normalizeSavedBoolean(value: unknown): boolean {
+  if (value === true || value === false) return value
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    if (value === 1) return true
+    if (value === 0) return false
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (BOOLEAN_TRUE_TEXT.has(normalized)) return true
+    if (BOOLEAN_FALSE_TEXT.has(normalized)) return false
+  }
+  return false
+}
+
 function assertRelativePath(value: string, field: keyof K3WiseSetupForm, issues: K3WiseSetupValidationIssue[]): void {
   const normalized = trim(value)
   if (!normalized) {
@@ -815,8 +832,8 @@ export function applyExternalSystemToForm(form: K3WiseSetupForm, system: Integra
     next.healthPath = typeof config.healthPath === 'string' ? config.healthPath : next.healthPath
     next.lcid = config.lcid === undefined ? next.lcid : String(config.lcid)
     next.timeoutMs = config.timeoutMs === undefined ? next.timeoutMs : String(config.timeoutMs)
-    next.autoSubmit = config.autoSubmit === true
-    next.autoAudit = config.autoAudit === true
+    next.autoSubmit = normalizeSavedBoolean(config.autoSubmit)
+    next.autoAudit = normalizeSavedBoolean(config.autoAudit)
     next.materialSavePath = typeof material.savePath === 'string' ? material.savePath : next.materialSavePath
     next.materialSubmitPath = typeof material.submitPath === 'string' ? material.submitPath : next.materialSubmitPath
     next.materialAuditPath = typeof material.auditPath === 'string' ? material.auditPath : next.materialAuditPath
