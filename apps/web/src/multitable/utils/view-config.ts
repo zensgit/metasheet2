@@ -128,7 +128,7 @@ export function resolveGanttViewConfig(
   groupInfo?: Record<string, unknown> | null,
 ): Required<MetaGanttViewConfig> {
   const dateFieldTypes = ['date', 'dateTime']
-  const dependencyFieldTypes = ['link', 'multiSelect', 'string']
+  const dependencyFieldTypes = ['link']
   const configuredDependencyFieldId = stringOrNull(raw?.dependencyFieldId)
   const dependencyFieldId = configuredDependencyFieldId
     && fields.some((field) => field.id === configuredDependencyFieldId && dependencyFieldTypes.includes(field.type))

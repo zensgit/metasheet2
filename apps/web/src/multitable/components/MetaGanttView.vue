@@ -225,7 +225,7 @@ const dateFields = computed(() => props.fields.filter((field) => field.type === 
 const titleFields = computed(() => props.fields)
 const numericFields = computed(() => props.fields.filter((field) => ['number', 'percent', 'currency', 'rating'].includes(field.type)))
 const groupableFields = computed(() => props.fields.filter((field) => ['select', 'string', 'boolean', 'date', 'dateTime'].includes(field.type)))
-const dependencyFields = computed(() => props.fields.filter((field) => ['link', 'multiSelect', 'string'].includes(field.type)))
+const dependencyFields = computed(() => props.fields.filter((field) => field.type === 'link'))
 const canResizeTasks = computed(() => Boolean(props.canEdit && startFieldId.value && endFieldId.value && startFieldId.value !== endFieldId.value))
 
 function parseDate(value: unknown): Date | null {
