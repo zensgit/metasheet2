@@ -278,7 +278,23 @@ async function main() {
     status: 'active',
   })
 
-  // 7a: status-only update — config and capabilities must be preserved
+  // 7a: config-only update — omitted status/role must be preserved on update.
+  await preserveRegistry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    id: 'sys_preserve',
+    name: 'K3 WISE full',
+    kind: 'erp:k3-wise-webapi',
+    config: { baseUrl: 'https://k3-config-only.internal', acctId: 'ACCT-CONFIG' },
+    // role/status intentionally omitted
+  })
+  const afterConfigOnlyUpdate = preserveDb.rows.find((row) => row.id === 'sys_preserve')
+  assert.equal(afterConfigOnlyUpdate.role, 'target', 'omitted role preserves existing target role')
+  assert.equal(afterConfigOnlyUpdate.status, 'active', 'omitted status preserves existing active status')
+  assert.deepEqual(afterConfigOnlyUpdate.config,
+    { baseUrl: 'https://k3-config-only.internal', acctId: 'ACCT-CONFIG' },
+    'provided config is still updated')
+
+  // 7b: status-only update — config and capabilities must be preserved
   const statusOnlyUpdate = await preserveRegistry.upsertExternalSystem({
     tenantId: 'tenant_1',
     id: 'sys_preserve',
@@ -289,13 +305,13 @@ async function main() {
     // config and capabilities intentionally omitted
   })
   const storedRow = preserveDb.rows.find((row) => row.id === 'sys_preserve')
-  assert.deepEqual(storedRow.config, { baseUrl: 'https://k3.internal', acctId: 'ACCT001', orgId: 'ORG1' },
+  assert.deepEqual(storedRow.config, { baseUrl: 'https://k3-config-only.internal', acctId: 'ACCT-CONFIG' },
     'config preserved when not provided on update')
   assert.deepEqual(storedRow.capabilities, { read: true, write: true, bom: true },
     'capabilities preserved when not provided on update')
   assert.equal(statusOnlyUpdate.status, 'inactive', 'status was updated as requested')
 
-  // 7b: explicit config: {} replaces (caller opted in to clearing)
+  // 7c: explicit config: {} replaces (caller opted in to clearing)
   await preserveRegistry.upsertExternalSystem({
     tenantId: 'tenant_1',
     id: 'sys_preserve',
@@ -311,7 +327,7 @@ async function main() {
   assert.deepEqual(afterExplicitEmpty.capabilities, { read: true, write: true, bom: true },
     'capabilities still preserved when only config was explicitly cleared')
 
-  // 7c: full config replacement works normally
+  // 7d: full config replacement works normally
   await preserveRegistry.upsertExternalSystem({
     tenantId: 'tenant_1',
     id: 'sys_preserve',
