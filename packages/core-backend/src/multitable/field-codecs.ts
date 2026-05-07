@@ -1,3 +1,4 @@
+import { normalizeAutoNumberProperty } from './auto-number-property'
 import { fieldTypeRegistry } from './field-type-registry'
 
 export type MultitableFieldType =
@@ -364,11 +365,7 @@ export function sanitizeFieldProperty(
   }
 
   if (type === 'autoNumber') {
-    const startAtRaw = typeof obj.startAt === 'number' ? obj.startAt : Number(obj.startAt)
-    const startAt = Number.isFinite(startAtRaw) && startAtRaw > 0
-      ? Math.floor(startAtRaw)
-      : 1
-    return { ...obj, startAt, readOnly: true }
+    return normalizeAutoNumberProperty(obj)
   }
 
   if (SYSTEM_FIELD_TYPES.has(type)) {
