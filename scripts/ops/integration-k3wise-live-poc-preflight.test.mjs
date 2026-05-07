@@ -155,6 +155,28 @@ test('buildPacket requires K3 WISE auth keys before declaring preflight ready', 
   assert.equal(k3.credentials.sessionId, '<set-at-runtime>')
 })
 
+test('buildPacket rejects secret-bearing URL and free-text values before packet generation', () => {
+  assert.throws(
+    () => buildPacket(gate({
+      k3Wise: {
+        apiUrl: 'https://k3-user:k3-pass@k3.example.test/K3API?access_token=live-token-123456',
+      },
+    })),
+    (error) => error instanceof LivePocPreflightError && error.details.location === 'k3Wise.apiUrl',
+    'K3 apiUrl with URL credentials or token query must be rejected',
+  )
+
+  assert.throws(
+    () => buildPacket(gate({
+      plm: {
+        baseUrl: 'https://plm.example.test/api?signature=SEC123456789012345',
+      },
+    })),
+    (error) => error instanceof LivePocPreflightError && error.details.location === 'plm.baseUrl',
+    'PLM baseUrl with signed query must be rejected',
+  )
+})
+
 test('buildPacket requires minimum K3 material target mappings', () => {
   assert.throws(
     () => buildPacket(gate({

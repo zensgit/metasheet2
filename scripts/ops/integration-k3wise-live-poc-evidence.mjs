@@ -4,6 +4,10 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const SECRET_KEY_PATTERN = /password|secret|token|session|credential|api[-_]?key|authorization/i
+const SECRET_TEXT_PATTERN = /(?:access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?id|api[_-]?key|secret|signature|sig|sign|password)=([^&#\s]+)/i
+const AUTH_TEXT_PATTERN = /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/i
+const JWT_TEXT_PATTERN = /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/
+const SECRET_ID_PATTERN = /\bSEC[A-Za-z0-9_-]{12,}\b/
 const SAFE_SECRET_PLACEHOLDERS = new Set(['', '<redacted>', '<set-at-runtime>', 'redacted', '***'])
 const VALID_STATUSES = new Set(['pass', 'partial', 'fail', 'skipped', 'todo', 'blocked'])
 // Customer evidence often spells phase status with localized or English
@@ -116,6 +120,10 @@ function findSecretLeaks(value, location = 'root', leaks = []) {
     value.forEach((item, index) => findSecretLeaks(item, `${location}[${index}]`, leaks))
     return leaks
   }
+  if (typeof value === 'string') {
+    if (containsSecretLikeText(value)) leaks.push(location)
+    return leaks
+  }
   if (!isPlainObject(value)) return leaks
   for (const [key, child] of Object.entries(value)) {
     const childPath = `${location}.${key}`
@@ -129,6 +137,24 @@ function findSecretLeaks(value, location = 'root', leaks = []) {
     findSecretLeaks(child, childPath, leaks)
   }
   return leaks
+}
+
+function containsSecretLikeText(value) {
+  const textValue = String(value).trim()
+  if (!textValue) return false
+  if (SECRET_TEXT_PATTERN.test(textValue) || AUTH_TEXT_PATTERN.test(textValue) || JWT_TEXT_PATTERN.test(textValue) || SECRET_ID_PATTERN.test(textValue)) {
+    return true
+  }
+  try {
+    const parsed = new URL(textValue)
+    if (parsed.username || parsed.password) return true
+    for (const [key, val] of parsed.searchParams.entries()) {
+      if (SECRET_KEY_PATTERN.test(key) && val.trim().length >= 4) return true
+    }
+  } catch {
+    // Not a URL; regex checks above are enough for free-form evidence text.
+  }
+  return false
 }
 
 function hasBomPipeline(packet) {
@@ -464,6 +490,7 @@ if (entryPath && import.meta.url === entryPath) {
 export {
   LivePocEvidenceError,
   buildEvidenceReport,
+  containsSecretLikeText,
   findSecretLeaks,
   redact,
   renderMarkdown,

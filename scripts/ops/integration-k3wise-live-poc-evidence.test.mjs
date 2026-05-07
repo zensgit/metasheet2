@@ -65,6 +65,24 @@ test('buildEvidenceReport rejects unredacted secret-like evidence fields', () =>
   )
 })
 
+test('buildEvidenceReport rejects secret-bearing evidence text in non-secret fields', () => {
+  const evidence = sampleEvidence()
+  evidence.gate.archivePath = 'https://share.example.test/k3-gate.zip?access_token=live-token-123456'
+  assert.throws(
+    () => buildEvidenceReport(packet(), evidence),
+    (error) => error instanceof LivePocEvidenceError && error.details.secretLeaks.includes('evidence.gate.archivePath'),
+    'secret-bearing archivePath must be rejected even though key name is not secret-like',
+  )
+
+  const evidence2 = sampleEvidence()
+  evidence2.connections.k3Wise.requestId = 'Bearer liveBearerToken123456'
+  assert.throws(
+    () => buildEvidenceReport(packet(), evidence2),
+    (error) => error instanceof LivePocEvidenceError && error.details.secretLeaks.includes('evidence.connections.k3Wise.requestId'),
+    'Bearer token in free-text evidence must be rejected',
+  )
+})
+
 // ----- migration of bool-coercion sweep from preflight (#1168 / #1169) -----
 
 test('buildEvidenceReport returns FAIL when materialSaveOnly autoSubmit is the string "true"', () => {

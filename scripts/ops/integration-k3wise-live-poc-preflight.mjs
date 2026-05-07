@@ -5,6 +5,10 @@ import { pathToFileURL } from 'node:url'
 
 const REQUIRED_TOP_LEVEL = ['tenantId', 'workspaceId', 'k3Wise', 'plm', 'rollback']
 const SECRET_KEY_PATTERN = /password|secret|token|session|credential|api[-_]?key|authorization/i
+const SECRET_TEXT_PATTERN = /(?:access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?id|api[_-]?key|secret|signature|sig|sign|password)=([^&#\s]+)/i
+const AUTH_TEXT_PATTERN = /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/i
+const JWT_TEXT_PATTERN = /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/
+const SECRET_ID_PATTERN = /\bSEC[A-Za-z0-9_-]{12,}\b/
 const NON_PRODUCTION_ENVS = new Set(['test', 'testing', 'uat', 'sandbox', 'staging', 'dev', 'development'])
 const K3_CORE_TABLES = new Set(['t_icitem', 't_icbom', 't_icbomchild'])
 const TRUE_BOOLEAN_TEXT = new Set(['true', '1', 'yes', 'y', 'on', '是', '启用', '开启'])
@@ -182,11 +186,38 @@ function validateUrl(value, field) {
   if (!['http:', 'https:'].includes(parsed.protocol)) {
     throw new LivePocPreflightError(`${field} must use http or https`, { field })
   }
+  assertNoSecretLikeText(text, field)
   return parsed.toString()
+}
+
+function assertNoSecretLikeText(value, location) {
+  if (typeof value !== 'string') return
+  const text = value.trim()
+  if (!text) return
+  if (SECRET_TEXT_PATTERN.test(text) || AUTH_TEXT_PATTERN.test(text) || JWT_TEXT_PATTERN.test(text) || SECRET_ID_PATTERN.test(text)) {
+    throw new LivePocPreflightError(`${location} contains secret-like text`, { location })
+  }
+  try {
+    const parsed = new URL(text)
+    if (parsed.username || parsed.password) {
+      throw new LivePocPreflightError(`${location} must not include URL username/password`, { location })
+    }
+    for (const [key, val] of parsed.searchParams.entries()) {
+      if (SECRET_KEY_PATTERN.test(key) && val.trim().length >= 4) {
+        throw new LivePocPreflightError(`${location} must not include secret-bearing query parameters`, {
+          location,
+          queryParam: key,
+        })
+      }
+    }
+  } catch (error) {
+    if (error instanceof LivePocPreflightError) throw error
+  }
 }
 
 function assertNoSecretStrings(value, secrets, location = 'root') {
   if (typeof value === 'string') {
+    assertNoSecretLikeText(value, location)
     for (const secret of secrets) {
       if (secret && value.includes(secret)) {
         throw new LivePocPreflightError(`generated packet leaks secret at ${location}`, { location })
@@ -310,6 +341,7 @@ function normalizeGate(input) {
   requiredString(k3Wise.acctId, 'k3Wise.acctId')
   assertK3AuthContract(k3Wise)
   requiredString(plm.readMethod, 'plm.readMethod')
+  if (optionalString(plm.baseUrl)) validateUrl(plm.baseUrl, 'plm.baseUrl')
   requiredString(rollback.owner, 'rollback.owner')
   requiredString(rollback.strategy, 'rollback.strategy')
 
