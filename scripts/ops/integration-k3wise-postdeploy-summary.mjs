@@ -11,6 +11,26 @@ class K3WisePostdeploySummaryError extends Error {
   }
 }
 
+const TOKEN_PATTERN = /([A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._-]{16,})/g
+
+function redactText(value) {
+  return String(value).replace(TOKEN_PATTERN, '<redacted-token>')
+}
+
+function redactBaseUrlForDisplay(value) {
+  const text = String(value || '').trim()
+  if (!text) return 'unknown'
+  try {
+    const parsed = new URL(text)
+    let display = `${parsed.protocol}//${parsed.host}${parsed.pathname}`
+    if (parsed.search) display += '?<redacted-query>'
+    if (parsed.hash) display += '#<redacted-fragment>'
+    return redactText(display)
+  } catch {
+    return redactText(text)
+  }
+}
+
 function printHelp() {
   console.log(`Usage: node scripts/ops/integration-k3wise-postdeploy-summary.mjs --input <path> [options]
 
@@ -147,7 +167,7 @@ function renderEvidenceSummary(evidence, options = {}) {
   const lines = [
     ...renderSignoffLines(evidence, options),
     `- Status: **${status}**`,
-    `- Base URL: \`${evidence?.baseUrl || 'unknown'}\``,
+    `- Base URL: \`${redactBaseUrlForDisplay(evidence?.baseUrl)}\``,
     `- Authenticated checks: \`${evidence?.authenticated ? 'yes' : 'no'}\``,
     `- Summary: \`${Number(summary.pass || 0)} pass / ${Number(summary.skipped || 0)} skipped / ${Number(summary.fail || 0)} fail\``,
     '- Checks:',
@@ -215,6 +235,7 @@ export {
   formatDetailValue,
   inferInternalTrialSignoff,
   parseArgs,
+  redactBaseUrlForDisplay,
   renderEvidenceSummary,
   renderMissingSummary,
   renderSignoffLines,

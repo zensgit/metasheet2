@@ -129,6 +129,33 @@ test('renders passing internal signoff for authenticated smoke evidence', async 
   }
 })
 
+test('redacts credential and query material from evidence base URL summary output', async () => {
+  const outDir = makeTmpDir()
+  const evidencePath = path.join(outDir, 'evidence.json')
+  try {
+    writeFileSync(evidencePath, `${JSON.stringify({
+      ok: true,
+      baseUrl: 'https://operator:base-url-password@example.test/app?access_token=base-url-token#frag-secret',
+      authenticated: true,
+      summary: { pass: 1, skipped: 0, fail: 0 },
+      checks: [
+        { id: 'api-health', status: 'pass' },
+      ],
+    })}\n`)
+
+    const result = await runScript(['--input', evidencePath])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /Base URL: `https:\/\/example\.test\/app\?<redacted-query>#<redacted-fragment>`/)
+    assert.equal(result.stdout.includes('operator'), false)
+    assert.equal(result.stdout.includes('base-url-password'), false)
+    assert.equal(result.stdout.includes('base-url-token'), false)
+    assert.equal(result.stdout.includes('frag-secret'), false)
+  } finally {
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
 test('renders fail summary without failing the summary renderer', async () => {
   const outDir = makeTmpDir()
   const evidencePath = path.join(outDir, 'evidence.json')

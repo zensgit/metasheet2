@@ -403,6 +403,43 @@ test('authenticated postdeploy smoke validates route and staging contracts witho
   }
 })
 
+test('postdeploy smoke rejects base URLs with credential or query material without leaking values', async () => {
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', 'https://operator:base-url-password@example.test?access_token=base-url-token',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 1)
+    assert.equal(result.stdout, '')
+    assert.match(result.stderr, /--base-url must not include username or password material/)
+    assert.equal(result.stderr.includes('base-url-password'), false)
+    assert.equal(result.stderr.includes('base-url-token'), false)
+    assert.equal(result.stderr.includes('operator'), false)
+  } finally {
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('postdeploy smoke rejects base URL query strings without leaking query values', async () => {
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', 'https://example.test/app?access_token=base-url-token',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 1)
+    assert.equal(result.stdout, '')
+    assert.match(result.stderr, /--base-url must not include query parameters/)
+    assert.match(result.stderr, /access_token/)
+    assert.equal(result.stderr.includes('base-url-token'), false)
+  } finally {
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
 test('authenticated postdeploy smoke uses explicit tenant scope for control-plane list probes', async () => {
   const fake = createFakeServer()
   const baseUrl = await fake.listen()

@@ -219,10 +219,26 @@ function normalizeBaseUrl(value) {
   try {
     url = new URL(value)
   } catch {
-    throw new K3WisePostdeploySmokeError('--base-url must be a valid URL', { baseUrl: value })
+    throw new K3WisePostdeploySmokeError('--base-url must be a valid URL', { field: '--base-url' })
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new K3WisePostdeploySmokeError('--base-url must use http or https', { baseUrl: value })
+    throw new K3WisePostdeploySmokeError('--base-url must use http or https', { field: '--base-url' })
+  }
+  if (url.username || url.password) {
+    throw new K3WisePostdeploySmokeError('--base-url must not include username or password material', {
+      field: '--base-url',
+    })
+  }
+  if (url.search) {
+    throw new K3WisePostdeploySmokeError('--base-url must not include query parameters', {
+      field: '--base-url',
+      queryKeys: Array.from(url.searchParams.keys()).slice(0, 20),
+    })
+  }
+  if (url.hash) {
+    throw new K3WisePostdeploySmokeError('--base-url must not include a fragment', {
+      field: '--base-url',
+    })
   }
   return url.toString().replace(/\/+$/, '')
 }
