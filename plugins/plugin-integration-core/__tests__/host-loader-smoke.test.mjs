@@ -115,6 +115,8 @@ async function main() {
   const ping = await host.context.communication.call('integration-core', 'ping')
   assert.equal(ping.ok, true)
   assert.equal(ping.plugin, 'plugin-integration-core')
+  assert.equal(ping.version, '0.1.0')
+  assert.equal(ping.phase, 'integration-core-mvp')
 
   const status = await host.context.communication.call('integration-core', 'getStatus')
   assert.equal(status.plugin, 'plugin-integration-core')

@@ -158,6 +158,8 @@ async function main() {
   // --- 5. Comm API returns expected shape ------------------------------
   const pingResult = await commApi.ping()
   assert.equal(pingResult.ok, true, 'ping.ok')
+  assert.equal(pingResult.version, manifest.version, 'ping.version follows manifest')
+  assert.equal(pingResult.phase, 'integration-core-mvp', 'ping.phase')
   const statusResult = await commApi.getStatus()
   assert.equal(statusResult.plugin, 'plugin-integration-core', 'status.plugin')
   assert.equal(statusResult.version, manifest.version, 'status.version follows manifest')

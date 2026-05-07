@@ -100,7 +100,13 @@ function buildCommunicationApi() {
   return {
     // Cross-plugin control seam for the integration plugin family.
     async ping() {
-      return { ok: true, plugin: PLUGIN_ID, ts: Date.now() }
+      return {
+        ok: true,
+        plugin: PLUGIN_ID,
+        version: PLUGIN_VERSION,
+        phase: PLUGIN_PHASE,
+        ts: Date.now(),
+      }
     },
     async getStatus() {
       const capabilities = buildCapabilityStatus()
