@@ -24,6 +24,7 @@ Self-table validation (the second half of B1) is left as a known limitation — 
 - Narrow accepted dependency field type to `['link']` (was `['link', 'multiSelect', 'string']`):
   - `apps/web/src/multitable/utils/view-config.ts:131`
   - `apps/web/src/multitable/components/MetaGanttView.vue:228`
+  - `apps/web/src/multitable/components/MetaViewManager.vue:565`
 - Add five focused edge-case tests in `apps/web/tests/multitable-gantt-view.spec.ts`:
   - Non-link field configured as `dependencyFieldId` resolved to `null` (link / multiSelect / string / select coverage)
   - Dependency dropdown only lists link fields
@@ -71,7 +72,9 @@ View config persistence in metasheet2 is a JSONB blob; backend validation for vi
 |---|---|
 | `apps/web/src/multitable/utils/view-config.ts` | -1 / +1 |
 | `apps/web/src/multitable/components/MetaGanttView.vue` | -1 / +1 |
+| `apps/web/src/multitable/components/MetaViewManager.vue` | -1 / +1 |
 | `apps/web/tests/multitable-gantt-view.spec.ts` | +203 |
+| `apps/web/tests/multitable-view-manager.spec.ts` | view-manager dependency dropdown assertion tightened |
 | `docs/development/multitable-gantt-dependency-arrows-tightening-development-20260507.md` | +new |
 | `docs/development/multitable-gantt-dependency-arrows-tightening-verification-20260507.md` | +new |
 
