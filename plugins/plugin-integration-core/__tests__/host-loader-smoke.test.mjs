@@ -107,6 +107,10 @@ async function main() {
   await healthRoute.handler({}, { json(value) { responseBody = value } })
   assert.equal(responseBody?.ok, true)
   assert.equal(responseBody?.plugin, 'plugin-integration-core')
+  assert.equal(responseBody?.phase, 'integration-core-mvp')
+  assert.equal(responseBody?.milestone, 'integration-core-mvp')
+  assert.equal(responseBody?.capabilities?.runner, true)
+  assert.equal(responseBody?.capabilities?.deadLetterReplay, true)
 
   const ping = await host.context.communication.call('integration-core', 'ping')
   assert.equal(ping.ok, true)
@@ -114,12 +118,16 @@ async function main() {
 
   const status = await host.context.communication.call('integration-core', 'getStatus')
   assert.equal(status.plugin, 'plugin-integration-core')
+  assert.equal(status.phase, 'integration-core-mvp')
+  assert.equal(status.milestone, 'integration-core-mvp')
   assert.equal(status.routesRegistered, host.routes.length)
   assert.deepEqual(status.credentialStore, { source: 'host-security', format: 'enc' })
   assert.equal(status.externalSystems, true)
   assert.ok(status.adapters.includes('http'), 'status reports http adapter')
   assert.ok(status.adapters.includes('erp:k3-wise-webapi'), 'status reports K3 WISE WebAPI adapter')
   assert.ok(status.adapters.includes('erp:k3-wise-sqlserver'), 'status reports K3 WISE SQL Server adapter')
+  assert.equal(status.capabilities?.runner, true)
+  assert.equal(status.capabilities?.deadLetterReplay, true)
   assert.equal(typeof host.namespaces.get('integration-core').upsertExternalSystem, 'function')
   assert.deepEqual(
     await host.context.communication.call('integration-core', 'listAdapterKinds'),
