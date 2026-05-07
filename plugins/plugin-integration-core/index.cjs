@@ -55,9 +55,31 @@ function buildHealthPayload() {
   }
 }
 
+function requireInitialized(service, message) {
+  if (!service) throw new Error(message)
+  return service
+}
+
+function redactDeadLetterForCommunication(deadLetter) {
+  if (!deadLetter || typeof deadLetter !== 'object') return deadLetter
+  const { sourcePayload: _sourcePayload, transformedPayload: _transformedPayload, ...safe } = deadLetter
+  return {
+    ...safe,
+    payloadRedacted: true,
+  }
+}
+
+function redactReplayResultForCommunication(result) {
+  if (!result || typeof result !== 'object') return result
+  return {
+    ...result,
+    deadLetter: redactDeadLetterForCommunication(result.deadLetter),
+  }
+}
+
 function buildCommunicationApi() {
   return {
-    // M0/M1 seam. Later slices will add pipeline-runner / dead-letter replay.
+    // Cross-plugin control seam for the integration plugin family.
     async ping() {
       return { ok: true, plugin: PLUGIN_ID, ts: Date.now() }
     },
@@ -75,60 +97,69 @@ function buildCommunicationApi() {
         pipelines: Boolean(pipelineRegistry),
         runner: Boolean(pipelineRunner),
         erpFeedback: Boolean(erpFeedbackWriter),
+        deadLetters: Boolean(deadLetterStore),
+        deadLetterReplay: Boolean(pipelineRunner && typeof pipelineRunner.replayDeadLetter === 'function'),
         staging: Boolean(stagingInstaller),
       }
     },
     async upsertExternalSystem(input) {
-      if (!externalSystemRegistry) throw new Error('external system registry is not initialized')
-      return externalSystemRegistry.upsertExternalSystem(input)
+      return requireInitialized(externalSystemRegistry, 'external system registry is not initialized')
+        .upsertExternalSystem(input)
     },
     async getExternalSystem(input) {
-      if (!externalSystemRegistry) throw new Error('external system registry is not initialized')
-      return externalSystemRegistry.getExternalSystem(input)
+      return requireInitialized(externalSystemRegistry, 'external system registry is not initialized')
+        .getExternalSystem(input)
     },
     async listExternalSystems(input) {
-      if (!externalSystemRegistry) throw new Error('external system registry is not initialized')
-      return externalSystemRegistry.listExternalSystems(input)
+      return requireInitialized(externalSystemRegistry, 'external system registry is not initialized')
+        .listExternalSystems(input)
     },
     async listAdapterKinds() {
-      if (!adapterRegistry) throw new Error('adapter registry is not initialized')
-      return adapterRegistry.listAdapterKinds()
+      return requireInitialized(adapterRegistry, 'adapter registry is not initialized').listAdapterKinds()
     },
     async upsertPipeline(input) {
-      if (!pipelineRegistry) throw new Error('pipeline registry is not initialized')
-      return pipelineRegistry.upsertPipeline(input)
+      return requireInitialized(pipelineRegistry, 'pipeline registry is not initialized').upsertPipeline(input)
     },
     async getPipeline(input) {
-      if (!pipelineRegistry) throw new Error('pipeline registry is not initialized')
-      return pipelineRegistry.getPipeline(input)
+      return requireInitialized(pipelineRegistry, 'pipeline registry is not initialized').getPipeline(input)
     },
     async listPipelines(input) {
-      if (!pipelineRegistry) throw new Error('pipeline registry is not initialized')
-      return pipelineRegistry.listPipelines(input)
+      return requireInitialized(pipelineRegistry, 'pipeline registry is not initialized').listPipelines(input)
     },
     async createPipelineRun(input) {
-      if (!pipelineRegistry) throw new Error('pipeline registry is not initialized')
-      return pipelineRegistry.createPipelineRun(input)
+      return requireInitialized(pipelineRegistry, 'pipeline registry is not initialized').createPipelineRun(input)
     },
     async updatePipelineRun(input) {
-      if (!pipelineRegistry) throw new Error('pipeline registry is not initialized')
-      return pipelineRegistry.updatePipelineRun(input)
+      return requireInitialized(pipelineRegistry, 'pipeline registry is not initialized').updatePipelineRun(input)
     },
     async listPipelineRuns(input) {
-      if (!pipelineRegistry) throw new Error('pipeline registry is not initialized')
-      return pipelineRegistry.listPipelineRuns(input)
+      return requireInitialized(pipelineRegistry, 'pipeline registry is not initialized').listPipelineRuns(input)
     },
     async runPipeline(input) {
-      if (!pipelineRunner) throw new Error('pipeline runner is not initialized')
-      return pipelineRunner.runPipeline(input)
+      return requireInitialized(pipelineRunner, 'pipeline runner is not initialized').runPipeline(input)
+    },
+    async listDeadLetters(input) {
+      const rows = await requireInitialized(deadLetterStore, 'dead-letter store is not initialized')
+        .listDeadLetters(input)
+      return rows.map(redactDeadLetterForCommunication)
+    },
+    async getDeadLetter(input) {
+      const deadLetter = await requireInitialized(deadLetterStore, 'dead-letter store is not initialized')
+        .getDeadLetter(input)
+      return redactDeadLetterForCommunication(deadLetter)
+    },
+    async replayDeadLetter(input) {
+      const runner = requireInitialized(pipelineRunner, 'pipeline runner is not initialized')
+      if (typeof runner.replayDeadLetter !== 'function') {
+        throw new Error('dead-letter replay is not implemented')
+      }
+      return redactReplayResultForCommunication(await runner.replayDeadLetter(input))
     },
     async listStagingDescriptors() {
-      if (!stagingInstaller) throw new Error('staging installer is not initialized')
-      return stagingInstaller.listStagingDescriptors()
+      return requireInitialized(stagingInstaller, 'staging installer is not initialized').listStagingDescriptors()
     },
     async installStaging(input) {
-      if (!stagingInstaller) throw new Error('staging installer is not initialized')
-      return stagingInstaller.installStaging(input)
+      return requireInitialized(stagingInstaller, 'staging installer is not initialized').installStaging(input)
     },
   }
 }

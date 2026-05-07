@@ -27,6 +27,23 @@ function createMockContext() {
   const registeredNamespaces = new Map()
   const logs = []
   const databaseCalls = []
+  const deadLetterRow = {
+    id: 'dl_1',
+    tenant_id: 'tenant_1',
+    workspace_id: null,
+    run_id: 'run_1',
+    pipeline_id: 'pipe_1',
+    idempotency_key: 'idem_1',
+    source_payload: { FNumber: 'MAT-001', password: 'secret' },
+    transformed_payload: { FNumber: 'MAT-001', token: 'secret' },
+    error_code: 'VALIDATION_FAILED',
+    error_message: 'field FName is required',
+    retry_count: 0,
+    status: 'open',
+    last_replay_run_id: null,
+    created_at: '2026-05-07T00:00:00.000Z',
+    updated_at: '2026-05-07T00:00:00.000Z',
+  }
 
   return {
     context: {
@@ -42,6 +59,9 @@ function createMockContext() {
         database: {
           async query(sql, params) {
             databaseCalls.push({ sql, params })
+            if (String(sql).includes('FROM "integration_dead_letters"')) {
+              return [deadLetterRow]
+            }
             return []
           },
         },
@@ -144,6 +164,8 @@ async function main() {
   assert.ok(statusResult.adapters.includes('http'), 'status reports http adapter')
   assert.ok(statusResult.adapters.includes('erp:k3-wise-webapi'), 'status reports K3 WISE WebAPI adapter')
   assert.ok(statusResult.adapters.includes('erp:k3-wise-sqlserver'), 'status reports K3 WISE SQL Server adapter')
+  assert.equal(statusResult.deadLetters, true, 'status reports dead-letter store')
+  assert.equal(statusResult.deadLetterReplay, true, 'status reports dead-letter replay')
 
   // --- 5b. Comm API exposes registry methods ----------------------------
   assert.equal(typeof commApi.upsertExternalSystem, 'function', 'comm api exposes upsertExternalSystem')
@@ -151,6 +173,30 @@ async function main() {
   assert.equal(typeof commApi.listExternalSystems, 'function', 'comm api exposes listExternalSystems')
   assert.equal(typeof commApi.listAdapterKinds, 'function', 'comm api exposes listAdapterKinds')
   assert.deepEqual(await commApi.listAdapterKinds(), statusResult.adapters, 'comm api adapter kinds match status')
+
+  // --- 5c. Comm API exposes redacted dead-letter control methods ---------
+  assert.equal(typeof commApi.listDeadLetters, 'function', 'comm api exposes listDeadLetters')
+  assert.equal(typeof commApi.getDeadLetter, 'function', 'comm api exposes getDeadLetter')
+  assert.equal(typeof commApi.replayDeadLetter, 'function', 'comm api exposes replayDeadLetter')
+  const deadLetters = await commApi.listDeadLetters({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    status: 'open',
+  })
+  assert.equal(deadLetters.length, 1, 'comm api lists dead letters')
+  assert.equal(deadLetters[0].id, 'dl_1', 'comm api maps dead-letter id')
+  assert.equal(deadLetters[0].payloadRedacted, true, 'comm api marks dead-letter payload redacted')
+  assert.equal('sourcePayload' in deadLetters[0], false, 'comm api does not expose sourcePayload by default')
+  assert.equal('transformedPayload' in deadLetters[0], false, 'comm api does not expose transformedPayload by default')
+  const deadLetter = await commApi.getDeadLetter({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    id: 'dl_1',
+  })
+  assert.equal(deadLetter.id, 'dl_1', 'comm api gets a single dead letter')
+  assert.equal(deadLetter.payloadRedacted, true, 'comm api redacts single dead-letter payload')
+  assert.equal('sourcePayload' in deadLetter, false, 'comm api single dead-letter omits sourcePayload')
+  assert.equal('transformedPayload' in deadLetter, false, 'comm api single dead-letter omits transformedPayload')
 
   // --- 6. Activation logged --------------------------------------------
   const hasActivationLog = inspect.logs.some(
