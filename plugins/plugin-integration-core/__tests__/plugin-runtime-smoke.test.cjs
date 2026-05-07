@@ -147,13 +147,22 @@ async function main() {
   const healthBody = await runMockResponse(healthRoute.handler)
   assert.equal(healthBody.ok, true, 'health.ok')
   assert.equal(healthBody.plugin, 'plugin-integration-core', 'health.plugin')
+  assert.equal(healthBody.version, manifest.version, 'health.version follows manifest')
+  assert.equal(healthBody.phase, 'integration-core-mvp', 'health.phase')
+  assert.equal(healthBody.milestone, 'integration-core-mvp', 'health.milestone')
   assert.equal(typeof healthBody.ts, 'number', 'health.ts is number')
+  assert.equal(healthBody.capabilities.externalSystems, true, 'health capabilities report external systems')
+  assert.equal(healthBody.capabilities.runner, true, 'health capabilities report runner')
+  assert.equal(healthBody.capabilities.deadLetterReplay, true, 'health capabilities report dead-letter replay')
 
   // --- 5. Comm API returns expected shape ------------------------------
   const pingResult = await commApi.ping()
   assert.equal(pingResult.ok, true, 'ping.ok')
   const statusResult = await commApi.getStatus()
   assert.equal(statusResult.plugin, 'plugin-integration-core', 'status.plugin')
+  assert.equal(statusResult.version, manifest.version, 'status.version follows manifest')
+  assert.equal(statusResult.phase, 'integration-core-mvp', 'status.phase')
+  assert.equal(statusResult.milestone, 'integration-core-mvp', 'status.milestone')
   assert.equal(statusResult.routesRegistered, inspect.routes.length, 'status.routesRegistered matches registered routes')
   assert.deepEqual(
     statusResult.credentialStore,
@@ -166,6 +175,16 @@ async function main() {
   assert.ok(statusResult.adapters.includes('erp:k3-wise-sqlserver'), 'status reports K3 WISE SQL Server adapter')
   assert.equal(statusResult.deadLetters, true, 'status reports dead-letter store')
   assert.equal(statusResult.deadLetterReplay, true, 'status reports dead-letter replay')
+  assert.deepEqual(statusResult.capabilities, {
+    externalSystems: statusResult.externalSystems,
+    adapters: statusResult.adapters,
+    pipelines: statusResult.pipelines,
+    runner: statusResult.runner,
+    erpFeedback: statusResult.erpFeedback,
+    deadLetters: statusResult.deadLetters,
+    deadLetterReplay: statusResult.deadLetterReplay,
+    staging: statusResult.staging,
+  }, 'status capabilities mirror flat readiness fields')
 
   // --- 5b. Comm API exposes registry methods ----------------------------
   assert.equal(typeof commApi.upsertExternalSystem, 'function', 'comm api exposes upsertExternalSystem')

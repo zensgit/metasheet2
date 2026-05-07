@@ -5,7 +5,7 @@
 //
 // PLM/ERP integration pipeline — system plugin MVP.
 //
-// M0 scope: minimal runtime spike. Registers a health route and a cross-plugin
+// Registers the integration health route, REST control plane, and cross-plugin
 // communication namespace so the rest of the plugin family can call into this
 // one via `context.communication.call('integration-core', ...)`.
 //
@@ -32,8 +32,11 @@ const { createErpFeedbackWriter } = require('./lib/erp-feedback.cjs')
 const { createPipelineRunner } = require('./lib/pipeline-runner.cjs')
 const { installStaging, listStagingDescriptors } = require('./lib/staging-installer.cjs')
 const { registerIntegrationRoutes } = require('./lib/http-routes.cjs')
+const manifest = require('./plugin.json')
 
 const registeredRoutes = []
+const PLUGIN_VERSION = manifest.version || '0.1.0'
+const PLUGIN_PHASE = 'integration-core-mvp'
 let activeContext = null
 let credentialStore = null
 let externalSystemRegistry = null
@@ -46,12 +49,28 @@ let erpFeedbackWriter = null
 let pipelineRunner = null
 let stagingInstaller = null
 
+function buildCapabilityStatus() {
+  return {
+    externalSystems: Boolean(externalSystemRegistry),
+    adapters: adapterRegistry ? adapterRegistry.listAdapterKinds() : [],
+    pipelines: Boolean(pipelineRegistry),
+    runner: Boolean(pipelineRunner),
+    erpFeedback: Boolean(erpFeedbackWriter),
+    deadLetters: Boolean(deadLetterStore),
+    deadLetterReplay: Boolean(pipelineRunner && typeof pipelineRunner.replayDeadLetter === 'function'),
+    staging: Boolean(stagingInstaller),
+  }
+}
+
 function buildHealthPayload() {
   return {
     ok: true,
     plugin: PLUGIN_ID,
+    version: PLUGIN_VERSION,
+    phase: PLUGIN_PHASE,
     ts: Date.now(),
-    milestone: 'M0-spike',
+    milestone: PLUGIN_PHASE,
+    capabilities: buildCapabilityStatus(),
   }
 }
 
@@ -84,22 +103,18 @@ function buildCommunicationApi() {
       return { ok: true, plugin: PLUGIN_ID, ts: Date.now() }
     },
     async getStatus() {
+      const capabilities = buildCapabilityStatus()
       return {
         plugin: PLUGIN_ID,
-        version: '0.1.0',
-        milestone: 'M0-spike',
+        version: PLUGIN_VERSION,
+        phase: PLUGIN_PHASE,
+        milestone: PLUGIN_PHASE,
         routesRegistered: registeredRoutes.length,
         credentialStore: credentialStore
           ? { source: credentialStore.source, format: credentialStore.format }
           : null,
-        externalSystems: Boolean(externalSystemRegistry),
-        adapters: adapterRegistry ? adapterRegistry.listAdapterKinds() : [],
-        pipelines: Boolean(pipelineRegistry),
-        runner: Boolean(pipelineRunner),
-        erpFeedback: Boolean(erpFeedbackWriter),
-        deadLetters: Boolean(deadLetterStore),
-        deadLetterReplay: Boolean(pipelineRunner && typeof pipelineRunner.replayDeadLetter === 'function'),
-        staging: Boolean(stagingInstaller),
+        ...capabilities,
+        capabilities,
       }
     },
     async upsertExternalSystem(input) {
@@ -235,7 +250,7 @@ module.exports = {
     // --- Cross-plugin communication --------------------------------------
     context.communication.register(COMMUNICATION_NAMESPACE, buildCommunicationApi())
 
-    logger.info(`[${PLUGIN_ID}] activated (M0 spike). routes=${registeredRoutes.length}`)
+    logger.info(`[${PLUGIN_ID}] activated (${PLUGIN_PHASE}). routes=${registeredRoutes.length}`)
   },
 
   async deactivate() {
