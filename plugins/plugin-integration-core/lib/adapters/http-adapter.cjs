@@ -56,8 +56,11 @@ function assertRelativePath(path, field) {
     throw new AdapterValidationError(`${field} is required`, { field })
   }
   const trimmed = path.trim()
-  if (/^https?:\/\//i.test(trimmed)) {
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed) || trimmed.startsWith('//')) {
     throw new AdapterValidationError(`${field} must be relative to baseUrl`, { field })
+  }
+  if (/[\u0000-\u001F\u007F]/.test(trimmed) || trimmed.includes('\\')) {
+    throw new AdapterValidationError(`${field} must be a safe URL path`, { field })
   }
   return trimmed.startsWith('/') ? trimmed : `/${trimmed}`
 }
