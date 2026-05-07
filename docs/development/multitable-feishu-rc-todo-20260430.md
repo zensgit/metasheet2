@@ -85,9 +85,19 @@ Do not mark an item done if:
   - Verification MD: `docs/development/multitable-feishu-rc-xlsx-ui-smoke-verification-20260506.md`
   - Verification summary: `AUTH_TOKEN=... API_BASE=http://142.171.239.56:8081 WEB_BASE=http://142.171.239.56:8081 pnpm verify:multitable-pilot:staging` passed `130/130` checks; new `ui.xlsx.import-file` and `ui.xlsx.export-download` checks passed with a real `.xlsx` file and parsed download.
 - [ ] Smoke test field types: currency, percent, rating, url, email, phone, longText, multiSelect.
-- [ ] Smoke test conditional formatting persistence and reload.
+- [x] Smoke test conditional formatting persistence and reload.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-filter-format-ui-smoke-design-20260507.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-filter-format-ui-smoke-verification-20260507.md`
+  - Verification summary: `AUTH_TOKEN=... API_BASE=http://142.171.239.56:8081 WEB_BASE=http://142.171.239.56:8081 pnpm verify:multitable-pilot:staging` passed `140/140` checks; new `ui.conditional-formatting.reload-replay` persisted a `Score > 90` row-format rule, reloaded it, and verified rendered row background `rgb(214, 235, 255)`.
 - [ ] Smoke test formula editor: field token insertion, function insertion, diagnostics.
-- [ ] Smoke test filter builder typed controls and saved view behavior.
+- [x] Smoke test filter builder typed controls and saved view behavior.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-filter-format-ui-smoke-design-20260507.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-filter-format-ui-smoke-verification-20260507.md`
+  - Verification summary: same `140/140` staging run passed `ui.filter-builder.typed-controls-replay`; the runner added select/date/number filters through the toolbar UI, verified saved `filterInfo`, reloaded the view, and confirmed all three controls hydrated from persistence.
 - [ ] Smoke test Gantt view rendering.
 - [ ] Smoke test Hierarchy view rendering and child creation.
 - [ ] Smoke test public form submit path.

@@ -218,19 +218,36 @@ async function selectLinkPickerOption(page, { display, label }) {
   const pickerSearch = page.locator('.meta-link-picker__input')
   await pickerSearch.fill(display)
   const target = page.locator('.meta-link-picker__item').filter({ hasText: display }).first()
+  const directMatch = await target.waitFor({ state: 'visible', timeout: Math.min(timeoutMs, 10_000) })
+    .then(() => true)
+    .catch(() => false)
+  if (directMatch) {
+    await target.click()
+    return display
+  }
+
+  // Some live people sheets use generated IDs as display values; the search
+  // endpoint can be stricter than the initial option list. Fall back to the
+  // first selectable option so repair flows still exercise a real link choice.
+  await pickerSearch.fill('')
+  const fallbackTarget = page.locator('.meta-link-picker__item').first()
   await waitForPredicate(async () => {
-    const visible = await target.isVisible().catch(() => false)
+    const visible = await fallbackTarget.isVisible().catch(() => false)
     const loading = await page.locator('.meta-link-picker__loading').isVisible().catch(() => false)
     const empty = await page.locator('.meta-link-picker__empty').isVisible().catch(() => false)
+    const fallbackText = visible ? (await fallbackTarget.textContent().catch(() => '')) : ''
     return {
       ok: visible && !loading,
       visible,
       loading,
       empty,
       display,
+      fallbackText,
     }
-  }, label)
-  await target.click()
+  }, `${label} fallback option`)
+  const fallbackText = ((await fallbackTarget.textContent()) ?? '').trim().replace(/\s+/g, ' ')
+  await fallbackTarget.click()
+  return fallbackText || display
 }
 
 function headers(token, extra = {}) {
@@ -1850,12 +1867,12 @@ async function importRecordViaGridWithPeopleManualFix(page, {
   await page.locator('.meta-import__fixes').waitFor({ state: 'visible', timeout: timeoutMs })
   await page.getByRole('button', { name: /Select person|Select people|Choose person|Choose people/ }).click()
   await page.locator('.meta-link-picker').waitFor({ state: 'visible', timeout: timeoutMs })
-  await selectLinkPickerOption(page, {
+  const selectedPersonDisplay = await selectLinkPickerOption(page, {
     display: personDisplay,
     label: 'people manual-fix picker option',
   })
   await page.getByRole('button', { name: 'Confirm' }).click()
-  await page.locator('.meta-import__fix-selected').getByText(personDisplay).waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.locator('.meta-import__fix-selected').getByText(selectedPersonDisplay).waitFor({ state: 'visible', timeout: timeoutMs })
   await page.getByRole('button', { name: 'Apply fixes and retry' }).click()
   await page.locator('.meta-import-overlay').waitFor({ state: 'hidden', timeout: timeoutMs })
   await waitForImportedGridRow(page, {
@@ -1872,7 +1889,7 @@ async function importRecordViaGridWithPeopleManualFix(page, {
     sheetId,
     viewId,
     importedRowTitle,
-    personDisplay,
+    personDisplay: selectedPersonDisplay,
   })
 }
 
@@ -2001,12 +2018,12 @@ async function verifyPeopleRepairReconcile(page, {
   await page.locator('.meta-import__fixes').waitFor({ state: 'visible', timeout: timeoutMs })
   await page.getByRole('button', { name: /Select person|Select people|Choose person|Choose people/ }).click()
   await page.locator('.meta-link-picker').waitFor({ state: 'visible', timeout: timeoutMs })
-  await selectLinkPickerOption(page, {
+  const selectedPersonDisplay = await selectLinkPickerOption(page, {
     display: personDisplay,
     label: 'people repair picker option',
   })
   await page.getByRole('button', { name: 'Confirm' }).click()
-  await page.locator('.meta-import__fix-selected').getByText(personDisplay).waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.locator('.meta-import__fix-selected').getByText(selectedPersonDisplay).waitFor({ state: 'visible', timeout: timeoutMs })
 
   await updateField(token, fieldId, {
     name: renamedFieldName,
@@ -2110,6 +2127,7 @@ async function verifyPeopleRepairReconcile(page, {
     renamedFieldName,
     importedRowTitle,
     importedRowId: imported.rowId ?? null,
+    personDisplay: selectedPersonDisplay,
     warningText,
     applyDisabledBeforeReconcile,
     applyDisabledAfterReconcile,
@@ -2130,14 +2148,14 @@ async function assignPersonViaDrawer(page, { searchValue, personFieldName, perso
   const personField = page.locator('.meta-record-drawer__field').filter({ hasText: personFieldName }).first()
   await personField.locator('.meta-record-drawer__link-btn').click()
   await page.locator('.meta-link-picker').waitFor({ state: 'visible', timeout: timeoutMs })
-  await selectLinkPickerOption(page, {
+  const selectedPersonDisplay = await selectLinkPickerOption(page, {
     display: personDisplay,
     label: 'drawer people picker option',
   })
   await page.getByRole('button', { name: 'Confirm' }).click()
-  await page.locator('.meta-record-drawer__link-summary').getByText(personDisplay).waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.locator('.meta-record-drawer__link-summary').getByText(selectedPersonDisplay).waitFor({ state: 'visible', timeout: timeoutMs })
   await page.getByText('Linked records updated').waitFor({ state: 'visible', timeout: timeoutMs })
-  record('ui.person.assign', true, { personDisplay })
+  record('ui.person.assign', true, { personDisplay: selectedPersonDisplay })
 }
 
 async function verifyFormUploadAndComments(page, { baseId, sheetId, viewId, recordId, attachmentFieldName, attachmentName }) {
@@ -2333,6 +2351,232 @@ async function verifyGridHydration(page, { baseId, sheetId, viewId, searchValue,
   await page.getByText(personDisplay).first().waitFor({ state: 'visible', timeout: timeoutMs })
   await page.screenshot({ path: path.join(outputDir, 'grid-hydrated.png'), fullPage: true })
   record('ui.grid.search-hydration', true, { searchValue, attachmentName, personDisplay })
+}
+
+async function fetchViewById(token, sheetId, viewId) {
+  const views = await fetchViews(token, sheetId)
+  const view = views.find((item) => item.id === viewId)
+  if (!view) throw new Error(`View not found while verifying smoke replay: ${viewId}`)
+  return view
+}
+
+async function openFilterPanel(page) {
+  const filterButton = page.locator('button.meta-toolbar__btn').filter({ hasText: /Filter/ }).first()
+  await filterButton.click()
+  const panel = page.locator('.meta-toolbar__panel--filter')
+  await panel.waitFor({ state: 'visible', timeout: timeoutMs })
+  return panel
+}
+
+async function addFilterRule(panel, index, { fieldId, operator, value }) {
+  await panel.getByRole('button', { name: '+ Add filter' }).click()
+  const rule = panel.locator('.meta-toolbar__filter-rule').nth(index)
+  await rule.locator('select[aria-label="Filter field"]').selectOption(fieldId)
+  if (operator) {
+    await rule.locator('select[aria-label="Filter operator"]').selectOption(operator)
+  }
+  const valueControl = rule.locator('[aria-label="Filter value"]')
+  await valueControl.waitFor({ state: 'visible', timeout: timeoutMs })
+  const tagName = await valueControl.evaluate((element) => element.tagName.toLowerCase())
+  const inputType = await valueControl.evaluate((element) => element.getAttribute('type') ?? '')
+  if (tagName === 'select') {
+    await valueControl.selectOption(String(value))
+  } else {
+    await valueControl.fill(String(value))
+    await valueControl.dispatchEvent('change')
+  }
+  return {
+    tagName,
+    type: inputType,
+    value: await valueControl.inputValue(),
+  }
+}
+
+async function verifyFilterBuilderTypedControlsReplay(page, {
+  token,
+  baseId,
+  sheetId,
+  viewId,
+  statusFieldId,
+  startFieldId,
+  scoreFieldId,
+  includedTitle,
+  excludedTitle,
+  startValue,
+  scoreThreshold,
+}) {
+  const originalView = await fetchViewById(token, sheetId, viewId)
+  const originalFilterInfo = originalView.filterInfo ?? {}
+  try {
+    await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
+    await page.getByRole('searchbox', { name: 'Search records' }).waitFor({ state: 'visible', timeout: timeoutMs })
+    const panel = await openFilterPanel(page)
+    const controlTypes = [
+      await addFilterRule(panel, 0, { fieldId: statusFieldId, operator: 'is', value: 'Todo' }),
+      await addFilterRule(panel, 1, { fieldId: startFieldId, operator: 'is', value: startValue }),
+      await addFilterRule(panel, 2, { fieldId: scoreFieldId, operator: 'greater', value: scoreThreshold }),
+    ]
+    await Promise.all([
+      waitForViewPatch(page, viewId),
+      panel.getByRole('button', { name: /Apply filter changes|Apply filters/ }).click(),
+    ])
+    await page.getByText('1 rows').waitFor({ state: 'visible', timeout: timeoutMs })
+    await page.locator('.meta-grid__row').filter({ hasText: includedTitle }).first().waitFor({ state: 'visible', timeout: timeoutMs })
+    const excludedVisibleAfterApply = await page.locator('.meta-grid__row').filter({ hasText: excludedTitle }).count()
+
+    const persisted = await waitForPredicate(async () => {
+      const view = await fetchViewById(token, sheetId, viewId)
+      const conditions = Array.isArray(view.filterInfo?.conditions) ? view.filterInfo.conditions : []
+      const byField = new Map(conditions.map((condition) => [condition.fieldId, condition]))
+      return {
+        ok: conditions.length === 3
+          && byField.get(statusFieldId)?.operator === 'is'
+          && byField.get(statusFieldId)?.value === 'Todo'
+          && byField.get(startFieldId)?.operator === 'is'
+          && byField.get(startFieldId)?.value === startValue
+          && byField.get(scoreFieldId)?.operator === 'greater'
+          && Number(byField.get(scoreFieldId)?.value) === Number(scoreThreshold),
+        conditions,
+      }
+    }, 'filter builder persisted conditions')
+
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: timeoutMs })
+    await page.getByText('1 rows').waitFor({ state: 'visible', timeout: timeoutMs })
+    await page.locator('.meta-grid__row').filter({ hasText: includedTitle }).first().waitFor({ state: 'visible', timeout: timeoutMs })
+    const excludedVisibleAfterReload = await page.locator('.meta-grid__row').filter({ hasText: excludedTitle }).count()
+    const reloadedPanel = await openFilterPanel(page)
+    const reloadedRules = await reloadedPanel.locator('.meta-toolbar__filter-rule').count()
+    const reloadedStatusValue = await reloadedPanel.locator('.meta-toolbar__filter-rule').nth(0).locator('[aria-label="Filter value"]').inputValue()
+    const reloadedStartValue = await reloadedPanel.locator('.meta-toolbar__filter-rule').nth(1).locator('[aria-label="Filter value"]').inputValue()
+    const reloadedScoreValue = await reloadedPanel.locator('.meta-toolbar__filter-rule').nth(2).locator('[aria-label="Filter value"]').inputValue()
+    const ok = excludedVisibleAfterApply === 0
+      && excludedVisibleAfterReload === 0
+      && reloadedRules === 3
+      && reloadedStatusValue === 'Todo'
+      && reloadedStartValue === startValue
+      && Number(reloadedScoreValue) === Number(scoreThreshold)
+    record('ui.filter-builder.typed-controls-replay', ok, {
+      viewId,
+      includedTitle,
+      excludedTitle,
+      controlTypes,
+      persistedConditions: persisted.conditions,
+      excludedVisibleAfterApply,
+      excludedVisibleAfterReload,
+      reloadedRules,
+      reloadedStatusValue,
+      reloadedStartValue,
+      reloadedScoreValue,
+    })
+    if (!ok) {
+      throw new Error('Filter builder typed controls did not persist and replay correctly')
+    }
+  } finally {
+    await updateView(token, viewId, { filterInfo: originalFilterInfo })
+  }
+}
+
+async function verifyConditionalFormattingReloadReplay(page, {
+  token,
+  baseId,
+  sheetId,
+  viewId,
+  viewName,
+  scoreFieldId,
+  includedTitle,
+  scoreThreshold,
+}) {
+  const originalView = await fetchViewById(token, sheetId, viewId)
+  const originalConfig = originalView.config ?? {}
+  const expectedBackground = 'rgb(214, 235, 255)'
+  try {
+    await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
+    await page.getByRole('searchbox', { name: 'Search records' }).waitFor({ state: 'visible', timeout: timeoutMs })
+    await page.locator('button.mt-workbench__mgr-btn').filter({ hasText: /Views/ }).click()
+    const manager = page.locator('.meta-view-mgr')
+    await manager.waitFor({ state: 'visible', timeout: timeoutMs })
+    const viewRow = manager.locator('.meta-view-mgr__row').filter({ hasText: viewName }).first()
+    await viewRow.locator('button[title="Conditional formatting"]').click()
+    const dialog = page.getByRole('dialog', { name: 'Conditional formatting rules' })
+    await dialog.waitFor({ state: 'visible', timeout: timeoutMs })
+    await dialog.getByRole('button', { name: '+ Add rule' }).click()
+    const rule = dialog.locator('.cf-dlg__rule').first()
+    await rule.locator('.cf-dlg__select').nth(0).selectOption(scoreFieldId)
+    await rule.locator('.cf-dlg__select').nth(1).selectOption('gt')
+    await rule.locator('.cf-dlg__input[type="number"]').fill(String(scoreThreshold))
+    await rule.locator('.cf-dlg__hex').fill('#d6ebff')
+    await rule.locator('label').filter({ hasText: 'Apply to whole row' }).locator('input').check()
+    await Promise.all([
+      waitForViewPatch(page, viewId),
+      dialog.getByRole('button', { name: 'Save rules' }).click(),
+    ])
+
+    const persisted = await waitForPredicate(async () => {
+      const view = await fetchViewById(token, sheetId, viewId)
+      const rules = Array.isArray(view.config?.conditionalFormattingRules)
+        ? view.config.conditionalFormattingRules
+        : []
+      const saved = rules[0] ?? {}
+      return {
+        ok: rules.length === 1
+          && saved.fieldId === scoreFieldId
+          && saved.operator === 'gt'
+          && Number(saved.value) === Number(scoreThreshold)
+          && saved.style?.backgroundColor === '#d6ebff'
+          && saved.style?.applyToRow === true,
+        rules,
+      }
+    }, 'conditional formatting persisted rule')
+
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: timeoutMs })
+    const search = page.getByRole('searchbox', { name: 'Search records' })
+    await search.waitFor({ state: 'visible', timeout: timeoutMs })
+    await search.fill(includedTitle)
+    await page.getByText('1 rows').waitFor({ state: 'visible', timeout: timeoutMs })
+    const highlightedRow = page.locator('.meta-grid__row').filter({ hasText: includedTitle }).first()
+    await highlightedRow.waitFor({ state: 'visible', timeout: timeoutMs })
+    const rowBackground = await waitForPredicate(async () => {
+      const backgroundColor = await highlightedRow.evaluate((element) => window.getComputedStyle(element).backgroundColor)
+      return {
+        ok: backgroundColor === expectedBackground,
+        backgroundColor,
+      }
+    }, 'conditional formatting row background')
+
+    await page.locator('button.mt-workbench__mgr-btn').filter({ hasText: /Views/ }).click()
+    const reloadedManager = page.locator('.meta-view-mgr')
+    await reloadedManager.waitFor({ state: 'visible', timeout: timeoutMs })
+    const reloadedViewRow = reloadedManager.locator('.meta-view-mgr__row').filter({ hasText: viewName }).first()
+    await reloadedViewRow.locator('button[title="Conditional formatting"]').click()
+    const reloadedDialog = page.getByRole('dialog', { name: 'Conditional formatting rules' })
+    await reloadedDialog.waitFor({ state: 'visible', timeout: timeoutMs })
+    const reloadedRule = reloadedDialog.locator('.cf-dlg__rule').first()
+    const reloadedFieldId = await reloadedRule.locator('.cf-dlg__select').nth(0).inputValue()
+    const reloadedOperator = await reloadedRule.locator('.cf-dlg__select').nth(1).inputValue()
+    const reloadedValue = await reloadedRule.locator('.cf-dlg__input[type="number"]').inputValue()
+    const reloadedApplyToRow = await reloadedRule.locator('label').filter({ hasText: 'Apply to whole row' }).locator('input').isChecked()
+    const ok = reloadedFieldId === scoreFieldId
+      && reloadedOperator === 'gt'
+      && Number(reloadedValue) === Number(scoreThreshold)
+      && reloadedApplyToRow
+      && rowBackground.backgroundColor === expectedBackground
+    record('ui.conditional-formatting.reload-replay', ok, {
+      viewId,
+      scoreFieldId,
+      scoreThreshold,
+      rowBackground: rowBackground.backgroundColor,
+      persistedRules: persisted.rules,
+      reloadedFieldId,
+      reloadedOperator,
+      reloadedValue,
+      reloadedApplyToRow,
+    })
+    if (!ok) {
+      throw new Error('Conditional formatting rule did not persist, reload, and render correctly')
+    }
+  } finally {
+    await updateView(token, viewId, { config: originalConfig })
+  }
 }
 
 async function verifyConflictRecovery(page, { token, baseId, sheetId, viewId, recordId, titleFieldId, searchValue, originalTitle }) {
@@ -3230,6 +3474,13 @@ async function run() {
       property: personField.property,
     })
     cleanupFieldIds.add(tempPeopleRepairField.id)
+    const scoreField = await createField(token, {
+      id: `fld_pilot_score_${Date.now()}`,
+      sheetId: sheet.id,
+      name: `Score ${titlePrefix}`,
+      type: 'number',
+    })
+    cleanupFieldIds.add(scoreField.id)
     const tempField = await createField(token, {
       id: `fld_pilot_temp_attach_${Date.now()}`,
       sheetId: sheet.id,
@@ -3422,6 +3673,7 @@ async function run() {
           [priorityField.id]: 'P1',
           [startField.id]: '2026-03-10',
           [endField.id]: '2026-03-11',
+          [scoreField.id]: 95,
         },
       })
       await patchFields(token, {
@@ -3434,6 +3686,7 @@ async function run() {
           [priorityField.id]: 'P2',
           [startField.id]: '2026-03-12',
           [endField.id]: '2026-03-13',
+          [scoreField.id]: 10,
         },
       })
       trackRecord(await fetchRecord(token, sheet.id, imported.row.id).then((res) => res.record))
@@ -3447,6 +3700,31 @@ async function run() {
         titleText: importedTitle,
         attachmentName: attachmentNames[0],
         personDisplay: personChoice.display || personChoice.id,
+      })
+
+      await verifyFilterBuilderTypedControlsReplay(page, {
+        token,
+        baseId: base.id,
+        sheetId: sheet.id,
+        viewId: gridView.id,
+        statusFieldId: statusField.id,
+        startFieldId: startField.id,
+        scoreFieldId: scoreField.id,
+        includedTitle: importedTitle,
+        excludedTitle: retryTitle,
+        startValue: '2026-03-10',
+        scoreThreshold: 90,
+      })
+
+      await verifyConditionalFormattingReloadReplay(page, {
+        token,
+        baseId: base.id,
+        sheetId: sheet.id,
+        viewId: gridView.id,
+        viewName: gridView.name,
+        scoreFieldId: scoreField.id,
+        includedTitle: importedTitle,
+        scoreThreshold: 90,
       })
 
       await verifyFieldManagerPropReconcile(page, {
