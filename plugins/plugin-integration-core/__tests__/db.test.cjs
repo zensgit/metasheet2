@@ -106,6 +106,17 @@ async function main() {
   assert.match(q5b.sql, /^SELECT \* FROM "integration_runs" LIMIT 1 OFFSET 0$/)
   assert.deepEqual(q5b.params, [])
 
+  for (const invalidWhere of ['status=active', ['status'], 42]) {
+    let whereErr = null
+    try {
+      await db5.select('integration_pipelines', { where: invalidWhere })
+    } catch (error) {
+      whereErr = error
+    }
+    assert.ok(whereErr instanceof ScopeViolationError,
+      `select rejects invalid where shape ${JSON.stringify(invalidWhere)}`)
+  }
+
   // select rejects forbidden table
   let selErr = null
   try { await db5.select('users') } catch (e) { selErr = e }

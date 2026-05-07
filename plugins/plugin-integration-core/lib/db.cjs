@@ -71,8 +71,11 @@ function quoteIdent(name) {
 }
 
 function buildWhereClause(where, startParamIndex) {
-  if (!where || typeof where !== 'object' || Array.isArray(where)) {
+  if (where === undefined || where === null) {
     return { sql: '', params: [], nextIndex: startParamIndex }
+  }
+  if (typeof where !== 'object' || Array.isArray(where)) {
+    throw new ScopeViolationError('plugin-integration-core: where clause must be an object', {})
   }
   const parts = []
   const params = []
