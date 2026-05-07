@@ -1,9 +1,11 @@
 import fs from 'fs'
 import path from 'path'
-import { fileURLToPath } from 'url'
+import { createRequire } from 'module'
+import { fileURLToPath, pathToFileURL } from 'url'
 import { chromium } from '@playwright/test'
 import { resolveMultitableAuthToken } from './multitable-auth.mjs'
 
+const require = createRequire(import.meta.url)
 const apiBase = process.env.API_BASE || 'http://127.0.0.1:7778'
 const webBase = process.env.WEB_BASE || 'http://127.0.0.1:8899'
 const outputDir = process.env.OUTPUT_DIR || 'output/playwright/multitable-live-smoke'
@@ -50,6 +52,17 @@ function formFieldByLabel(page, fieldName) {
 
 function recordCommentsButton(page) {
   return page.locator('.meta-record-drawer__btn--comment[title="Comments"]').first()
+}
+
+async function importXlsxModule() {
+  const resolved = require.resolve('xlsx', {
+    paths: [
+      path.resolve('apps/web'),
+      path.resolve('packages/core-backend'),
+      process.cwd(),
+    ],
+  })
+  return import(pathToFileURL(resolved).href)
 }
 
 async function addAndResolveRecordComment(page) {
@@ -1588,6 +1601,116 @@ async function importRecordViaGrid(page, { baseId, sheetId, viewId, csvPath, sea
   record('ui.grid.import', true, { searchValue })
 }
 
+async function loadXlsxApi() {
+  const mod = await importXlsxModule()
+  return mod.default?.utils ? mod.default : mod
+}
+
+async function writeXlsxFixture(filePath, { sheetName, headers, rows }) {
+  const xlsx = await loadXlsxApi()
+  const worksheet = xlsx.utils.aoa_to_sheet([headers, ...rows])
+  const workbook = xlsx.utils.book_new()
+  xlsx.utils.book_append_sheet(workbook, worksheet, sheetName)
+  xlsx.writeFile(workbook, filePath)
+}
+
+async function readXlsxRows(filePath) {
+  const xlsx = await loadXlsxApi()
+  const workbook = xlsx.readFile(filePath)
+  const sheetName = workbook.SheetNames[0]
+  if (!sheetName) return []
+  return xlsx.utils.sheet_to_json(workbook.Sheets[sheetName], {
+    header: 1,
+    raw: false,
+    defval: '',
+    blankrows: false,
+  })
+}
+
+async function verifyXlsxImportExport(page, {
+  token,
+  baseId,
+  sheetId,
+  viewId,
+  titleFieldId,
+  importedRowTitle,
+  onImportedRecord,
+}) {
+  const xlsxPath = path.join(outputDir, 'pilot-import.xlsx')
+  await writeXlsxFixture(xlsxPath, {
+    sheetName: 'Import',
+    headers: ['Title'],
+    rows: [[importedRowTitle]],
+  })
+
+  await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
+  await page.getByRole('searchbox', { name: 'Search records' }).waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByRole('button', { name: 'Import records' }).click()
+  await page.getByText('Import Records').waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.locator('input.meta-import__file-input[type="file"]').setInputFiles(xlsxPath)
+  await page.getByText('1 record(s) detected. Map columns to fields:').waitFor({ state: 'visible', timeout: timeoutMs })
+  await ensureImportFieldMappedByColumnIndex(page, {
+    columnIndex: 0,
+    fieldId: titleFieldId,
+    label: 'xlsx import title mapping',
+  })
+  const importButton = page.getByRole('button', { name: /Import 1 record\(s\)/ })
+  await waitForActionButtonEnabled(importButton, 'xlsx import button enable')
+  await importButton.click()
+  await page.getByText('1 record(s) imported').waitFor({ state: 'visible', timeout: timeoutMs })
+
+  await waitForImportedGridRow(page, {
+    token,
+    baseId,
+    sheetId,
+    viewId,
+    searchValue: importedRowTitle,
+    label: 'xlsx file import',
+  })
+  const imported = await findRecordBySearch(token, sheetId, viewId, importedRowTitle)
+  const importOk = !!imported.row?.id
+  record('ui.xlsx.import-file', importOk, {
+    baseId,
+    sheetId,
+    viewId,
+    recordId: imported.row?.id ?? null,
+    title: importedRowTitle,
+  })
+  if (!importOk) {
+    throw new Error('XLSX import did not hydrate the imported row')
+  }
+  if (typeof onImportedRecord === 'function') {
+    onImportedRecord(imported.row)
+  }
+
+  const exportPromise = page.waitForEvent('download', { timeout: timeoutMs })
+  await page.getByRole('button', { name: 'Export Excel' }).click()
+  const download = await exportPromise
+  const suggestedFilename = download.suggestedFilename()
+  const exportPath = path.join(outputDir, `pilot-export-${Date.now()}.xlsx`)
+  await download.saveAs(exportPath)
+  const stats = fs.statSync(exportPath)
+  const rows = await readXlsxRows(exportPath)
+  const flattened = rows.flat().map((value) => String(value))
+  const exportOk = suggestedFilename.endsWith('.xlsx') &&
+    stats.size > 0 &&
+    flattened.includes('Title') &&
+    flattened.includes(importedRowTitle)
+  record('ui.xlsx.export-download', exportOk, {
+    suggestedFilename,
+    bytes: stats.size,
+    title: importedRowTitle,
+    rowCount: rows.length,
+    exportPath,
+  })
+  if (!exportOk) {
+    throw new Error('XLSX export did not include the imported row')
+  }
+
+  await page.screenshot({ path: path.join(outputDir, 'grid-xlsx-import-export.png'), fullPage: true })
+  return imported.row
+}
+
 async function importRecordsViaGridWithRetry(page, {
   baseId,
   sheetId,
@@ -3090,6 +3213,7 @@ async function run() {
     const retryTitle = `${titlePrefix} retry`
     const peopleRepairReconcileTitle = `${titlePrefix} people repair reconcile`
     const manualFixTitle = `${titlePrefix} manual fix`
+    const xlsxImportTitle = `${titlePrefix} xlsx import`
     const viewSubmitTitle = `${titlePrefix} view submit`
     const importDriftField = await createField(token, {
       id: `fld_pilot_import_drift_${Date.now()}`,
@@ -3210,6 +3334,10 @@ async function run() {
       cleanupRecords.set(retried.row.id, retried.row.version)
       cleanupRecords.set(peopleRepairReconcile.row.id, peopleRepairReconcile.row.version)
       cleanupRecords.set(manualFixed.row.id, manualFixed.row.version)
+      const recordId = imported.row.id
+      const trackRecord = (record) => {
+        if (record?.id) cleanupRecords.set(record.id, record.version)
+      }
       const manualFixRecord = await fetchRecord(token, sheet.id, manualFixed.row.id)
       const manualFixPeople = manualFixRecord.linkSummaries?.[personField.id] ?? []
       const manualFixOk = manualFixPeople.some((item) => item.id === personChoice.id)
@@ -3221,10 +3349,16 @@ async function run() {
       if (!manualFixOk) {
         throw new Error('Manual-fix people import did not persist selected person link')
       }
-      let recordId = imported.row.id
-      const trackRecord = (record) => {
-        if (record?.id) cleanupRecords.set(record.id, record.version)
-      }
+
+      const xlsxImported = await verifyXlsxImportExport(page, {
+        token,
+        baseId: base.id,
+        sheetId: sheet.id,
+        viewId: gridView.id,
+        titleFieldId: titleField.id,
+        importedRowTitle: xlsxImportTitle,
+        onImportedRecord: trackRecord,
+      })
 
       await assignPersonViaDrawer(page, {
         searchValue: importedTitle,
@@ -3601,6 +3735,7 @@ async function run() {
         primaryRecordId: recordId,
         retryRecordId: retried.row.id,
         manualFixRecordId: manualFixed.row.id,
+        xlsxImportRecordId: xlsxImported.id,
         viewSubmitRecordId: viewSubmit.record.id,
         embedHostGeneratedRequestId: embedHost.generatedRequestId,
         embedHostExplicitRequestId: embedHost.explicitRequestId,

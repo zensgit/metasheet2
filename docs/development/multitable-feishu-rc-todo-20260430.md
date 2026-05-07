@@ -78,7 +78,12 @@ Do not mark an item done if:
   - Verification MD: `docs/development/multitable-feishu-rc-142-postdeploy-verification-20260506.md`
   - Verification summary: GitHub Actions run `25435548148` deployed `9464b628479cdff1769c864de05f5ec5b6bf7d94` to 142 after rerunning a transient GHCR `unknown blob` failure; postdeploy health/API probes passed.
 - [ ] Smoke test basic multitable sheet lifecycle: create base, sheet, view, fields, records.
-- [ ] Smoke test xlsx frontend import/export with a real file.
+- [x] Smoke test xlsx frontend import/export with a real file.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-xlsx-ui-smoke-design-20260506.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-xlsx-ui-smoke-verification-20260506.md`
+  - Verification summary: `AUTH_TOKEN=... API_BASE=http://142.171.239.56:8081 WEB_BASE=http://142.171.239.56:8081 pnpm verify:multitable-pilot:staging` passed `130/130` checks; new `ui.xlsx.import-file` and `ui.xlsx.export-download` checks passed with a real `.xlsx` file and parsed download.
 - [ ] Smoke test field types: currency, percent, rating, url, email, phone, longText, multiSelect.
 - [ ] Smoke test conditional formatting persistence and reload.
 - [ ] Smoke test formula editor: field token insertion, function insertion, diagnostics.
