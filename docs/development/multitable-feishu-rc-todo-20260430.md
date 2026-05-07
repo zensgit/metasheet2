@@ -84,12 +84,12 @@ Do not mark an item done if:
   - Development MD: `docs/development/multitable-feishu-rc-xlsx-ui-smoke-design-20260506.md`
   - Verification MD: `docs/development/multitable-feishu-rc-xlsx-ui-smoke-verification-20260506.md`
   - Verification summary: `AUTH_TOKEN=... API_BASE=http://142.171.239.56:8081 WEB_BASE=http://142.171.239.56:8081 pnpm verify:multitable-pilot:staging` passed `130/130` checks; new `ui.xlsx.import-file` and `ui.xlsx.export-download` checks passed with a real `.xlsx` file and parsed download.
-- [ ] Smoke test field types: currency, percent, rating, url, email, phone, longText, multiSelect.
-  - PR: pending
-  - Merge commit: pending
+- [x] Smoke test field types: currency, percent, rating, url, email, phone, longText, multiSelect.
+  - PR: #1379 + #1384
+  - Merge commit: `e6f6547a1` + #1384 pending
   - Development MD: `docs/development/multitable-feishu-rc-field-types-ui-smoke-design-20260507.md`
   - Verification MD: `docs/development/multitable-feishu-rc-field-types-ui-smoke-verification-20260507.md`
-  - Verification summary: runner coverage is implemented and local static checks pass; final staging pass is blocked because 142 `8081` is not serving the main app and 142 `8082` is running an older backend image that rejects MF2 field types at create-field validation.
+  - Verification summary: `AUTH_TOKEN=... API_BASE=http://142.171.239.56:8081 WEB_BASE=http://142.171.239.56:8081 pnpm verify:multitable-pilot:staging` passed `159/159` checks against main `e6f6547a158361042a42788701d8debef8e1d725`; new `api.field-types.value-normalization` and `ui.field-types.reload-replay` checks covered all 8 field types.
 - [x] Smoke test conditional formatting persistence and reload.
   - PR: pending
   - Merge commit: pending

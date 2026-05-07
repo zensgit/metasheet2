@@ -2007,10 +2007,11 @@ async function verifyImportMappingReconcile(page, {
   await page.getByRole('button', { name: 'Preview' }).click()
 
   const fieldSelect = page.locator('.meta-import__field-select').first()
-  await page.waitForFunction(({ selector, targetValue }) => {
-    const element = document.querySelector(selector)
-    return element instanceof HTMLSelectElement && element.value === targetValue
-  }, { selector: '.meta-import__field-select', targetValue: fieldId }, { timeout: timeoutMs })
+  await ensureImportFieldMappedByColumnIndex(page, {
+    columnIndex: 0,
+    fieldId,
+    label: 'import mapping reconcile initial mapping',
+  })
 
   await updateField(token, fieldId, { name: renamedFieldName })
 
@@ -2458,6 +2459,10 @@ function apiFieldValueMatches(actual, expected) {
   return actual === expected
 }
 
+function phoneHrefFor(value) {
+  return `tel:${String(value).replace(/[^+\d]/g, '')}`
+}
+
 async function assertFieldTypeGridRender(page, titleText, specs) {
   const search = page.getByRole('searchbox', { name: 'Search records' })
   await search.waitFor({ state: 'visible', timeout: timeoutMs })
@@ -2509,7 +2514,7 @@ async function assertFieldTypeGridRender(page, titleText, specs) {
     if (spec.key === 'phone') {
       const href = await cell.locator('a.meta-cell-renderer__phone').getAttribute('href')
       details[spec.key].href = href
-      if (href !== 'tel:+861380000000' || !text.includes(spec.value)) {
+      if (href !== phoneHrefFor(spec.value) || !text.includes(spec.value)) {
         throw new Error(`Phone cell anchor mismatch: ${href}`)
       }
     }

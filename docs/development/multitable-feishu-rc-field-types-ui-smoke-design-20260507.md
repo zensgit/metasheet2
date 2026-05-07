@@ -49,6 +49,12 @@ The check records:
 
 The screenshot `field-types-reloaded.png` is written to the run output directory for manual review when needed.
 
+### Runner Hardening
+
+The phone href expectation is derived from the smoke value with the same digit sanitization used by the renderer. This avoids brittle hand-written `tel:` constants.
+
+The import mapping reconcile setup actively maps the target field with `ensureImportFieldMappedByColumnIndex()` before mutating field metadata. This keeps the existing reconcile smoke stable when the import preview field list grows with temporary field-type columns.
+
 ## Non-Goals
 
 - No editor interaction coverage for these fields.
