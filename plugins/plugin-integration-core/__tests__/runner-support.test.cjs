@@ -188,6 +188,30 @@ async function main() {
   assert.equal(replayed.lastReplayRunId, 'run_2')
   assert.equal(replayed.retryCount, 1)
 
+  await deadLetters.create({
+    id: 'dl_discarded_store',
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    runId: 'run_1',
+    pipelineId: 'pipe_1',
+    sourcePayload: { code: 'DISCARDED-01' },
+    errorCode: 'VALIDATION_FAILED',
+    errorMessage: 'discarded',
+    status: 'discarded',
+  })
+  const rejectedReplayMark = await deadLetters.markReplayed({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    id: 'dl_discarded_store',
+    replayRunId: 'run_3',
+    retryCount: 1,
+  }).catch((error) => error)
+  assert.equal(rejectedReplayMark.name, 'DeadLetterError',
+    'markReplayed refuses discarded rows at write time')
+  const discardedRow = db.tables.get('integration_dead_letters').find((row) => row.id === 'dl_discarded_store')
+  assert.equal(discardedRow.status, 'discarded', 'discarded row status remains unchanged')
+  assert.equal(discardedRow.last_replay_run_id, null, 'discarded row replay run is not written')
+
   const capped = await deadLetters.create({
     tenantId: 'tenant_1',
     workspaceId: null,
