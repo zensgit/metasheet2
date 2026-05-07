@@ -2899,6 +2899,42 @@ class ValidationError extends Error {
   }
 }
 
+function stringFromRecord(value: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const raw = value[key]
+    if (typeof raw === 'string' && raw.trim()) return raw.trim()
+  }
+  return ''
+}
+
+async function validateGanttDependencyConfig(
+  query: QueryFn,
+  sheetId: string,
+  viewType: string,
+  config: Record<string, unknown>,
+): Promise<string | null> {
+  if (viewType !== 'gantt') return null
+  const dependencyFieldId = typeof config.dependencyFieldId === 'string' ? config.dependencyFieldId.trim() : ''
+  if (!dependencyFieldId) return null
+
+  const fieldRes = await query(
+    'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 AND id = $2',
+    [sheetId, dependencyFieldId],
+  )
+  const fieldRow = (fieldRes.rows as any[])[0]
+  if (!fieldRow) {
+    return `Gantt dependency field must be a self-table link field: ${dependencyFieldId}`
+  }
+
+  const field = serializeFieldRow(fieldRow)
+  const foreignSheetId = stringFromRecord(field.property ?? {}, ['foreignSheetId', 'foreignDatasheetId', 'datasheetId'])
+  if (field.type !== 'link' || foreignSheetId !== sheetId) {
+    return `Gantt dependency field must be a self-table link field: ${dependencyFieldId}`
+  }
+
+  return null
+}
+
 class PermissionError extends Error {
   constructor(public message: string) {
     super(message)
@@ -4709,6 +4745,10 @@ export function univerMetaRouter(): Router {
       if (incomingRules !== undefined) {
         incomingConfig.conditionalFormattingRules = sanitizeConditionalFormattingRules(incomingRules)
       }
+      const ganttConfigError = await validateGanttDependencyConfig(pool.query.bind(pool), sheetId, type, incomingConfig)
+      if (ganttConfigError) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: ganttConfigError } })
+      }
 
       await pool.query(
         `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
@@ -4802,6 +4842,17 @@ export function univerMetaRouter(): Router {
       if (incomingRules !== undefined) {
         ;(nextConfig as Record<string, unknown>).conditionalFormattingRules =
           sanitizeConditionalFormattingRules(incomingRules)
+      }
+      if (parsed.data.config !== undefined || parsed.data.type !== undefined) {
+        const ganttConfigError = await validateGanttDependencyConfig(
+          pool.query.bind(pool),
+          String(row.sheet_id),
+          nextType,
+          nextConfig as Record<string, unknown>,
+        )
+        if (ganttConfigError) {
+          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: ganttConfigError } })
+        }
       }
 
       await pool.query(

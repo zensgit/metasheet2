@@ -34,15 +34,17 @@ describe('MetaGanttView', () => {
       { id: 'fld_name', name: 'Name', type: 'string' as const },
       { id: 'fld_start', name: 'Start', type: 'dateTime' as const },
       { id: 'fld_end', name: 'End', type: 'dateTime' as const },
-      { id: 'fld_deps', name: 'Depends on', type: 'link' as const },
+      { id: 'fld_deps', name: 'Depends on', type: 'link' as const, property: { foreignSheetId: 'sheet_1' } },
+      { id: 'fld_external', name: 'External', type: 'link' as const, property: { foreignSheetId: 'sheet_2' } },
       { id: 'fld_status', name: 'Status', type: 'select' as const },
     ]
 
-    expect(resolveGanttViewConfig(fields, { dependencyFieldId: 'fld_deps' })).toEqual(expect.objectContaining({
+    expect(resolveGanttViewConfig(fields, { dependencyFieldId: 'fld_deps' }, null, 'sheet_1')).toEqual(expect.objectContaining({
       startFieldId: 'fld_start',
       endFieldId: 'fld_end',
       dependencyFieldId: 'fld_deps',
     }))
+    expect(resolveGanttViewConfig(fields, { dependencyFieldId: 'fld_external' }, null, 'sheet_1').dependencyFieldId).toBeNull()
     expect(resolveGanttViewConfig(fields, { dependencyFieldId: 'fld_status' }).dependencyFieldId).toBeNull()
   })
 
@@ -310,31 +312,33 @@ describe('MetaGanttView', () => {
     const fields = [
       { id: 'fld_start', name: 'Start', type: 'date' as const },
       { id: 'fld_end', name: 'End', type: 'date' as const },
-      { id: 'fld_link', name: 'Depends on', type: 'link' as const },
+      { id: 'fld_link', name: 'Depends on', type: 'link' as const, property: { foreignSheetId: 'sheet_1' } },
       { id: 'fld_multi', name: 'Tags', type: 'multiSelect' as const },
       { id: 'fld_string', name: 'Notes', type: 'string' as const },
       { id: 'fld_select', name: 'Status', type: 'select' as const },
     ]
 
-    expect(resolveGanttViewConfig(fields, { dependencyFieldId: 'fld_link' }).dependencyFieldId).toBe('fld_link')
+    expect(resolveGanttViewConfig(fields, { dependencyFieldId: 'fld_link' }, null, 'sheet_1').dependencyFieldId).toBe('fld_link')
     expect(resolveGanttViewConfig(fields, { dependencyFieldId: 'fld_multi' }).dependencyFieldId).toBeNull()
     expect(resolveGanttViewConfig(fields, { dependencyFieldId: 'fld_string' }).dependencyFieldId).toBeNull()
     expect(resolveGanttViewConfig(fields, { dependencyFieldId: 'fld_select' }).dependencyFieldId).toBeNull()
   })
 
-  it('only lists link fields in the dependency dropdown', async () => {
+  it('only lists self-table link fields in the dependency dropdown', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
 
     const app = createApp({
       render() {
         return h(MetaGanttView, {
+          sheetId: 'sheet_1',
           loading: false,
           fields: [
             { id: 'fld_name', name: 'Name', type: 'string' },
             { id: 'fld_start', name: 'Start', type: 'date' },
             { id: 'fld_end', name: 'End', type: 'date' },
-            { id: 'fld_deps', name: 'Depends on', type: 'link' },
+            { id: 'fld_deps', name: 'Depends on', type: 'link', property: { foreignSheetId: 'sheet_1' } },
+            { id: 'fld_external', name: 'External deps', type: 'link', property: { foreignSheetId: 'sheet_2' } },
             { id: 'fld_tags', name: 'Tags', type: 'multiSelect' },
             { id: 'fld_notes', name: 'Notes', type: 'string' },
           ],
@@ -352,6 +356,7 @@ describe('MetaGanttView', () => {
     const optionLabels = Array.from(dependencySelect.options).map((opt) => opt.textContent?.trim())
 
     expect(optionLabels).toContain('Depends on')
+    expect(optionLabels).not.toContain('External deps')
     expect(optionLabels).not.toContain('Tags')
     expect(optionLabels).not.toContain('Notes')
 
