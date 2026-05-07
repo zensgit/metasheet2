@@ -1053,6 +1053,21 @@ export function buildK3WiseSetupPayloads(form: K3WiseSetupForm): K3WiseSetupPayl
   }
 
   if (!form.sqlEnabled) {
+    const sqlSystemId = optionalString(form.sqlSystemId)
+    if (sqlSystemId) {
+      return {
+        webApi,
+        sqlServer: {
+          tenantId: trim(form.tenantId),
+          workspaceId,
+          id: sqlSystemId,
+          name: optionalString(form.sqlName) ?? 'K3 WISE SQL Server',
+          kind: SQLSERVER_KIND,
+          role: 'bidirectional',
+          status: 'inactive',
+        },
+      }
+    }
     return { webApi, sqlServer: null }
   }
 

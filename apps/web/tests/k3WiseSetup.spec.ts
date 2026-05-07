@@ -99,6 +99,57 @@ describe('K3 WISE setup helpers', () => {
     expect(payloads.webApi).not.toHaveProperty('credentials')
   })
 
+  it('persists disabling an existing SQL Server channel without clearing stored config', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      webApiSystemId: 'webapi_1',
+      webApiHasCredentials: true,
+      version: 'K3 WISE 15.x test',
+      baseUrl: 'https://k3.example.test/K3API/',
+      acctId: '',
+      username: '',
+      password: '',
+      sqlEnabled: false,
+      sqlSystemId: 'sql_1',
+      sqlName: 'K3 WISE SQL Server',
+      sqlHasCredentials: true,
+    })
+
+    expect(validateK3WiseSetupForm(form)).toEqual([])
+    const payloads = buildK3WiseSetupPayloads(form)
+
+    expect(payloads.sqlServer).toEqual({
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      id: 'sql_1',
+      name: 'K3 WISE SQL Server',
+      kind: 'erp:k3-wise-sqlserver',
+      role: 'bidirectional',
+      status: 'inactive',
+    })
+  })
+
+  it('does not create a SQL Server system when disabled and no prior system exists', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      webApiSystemId: 'webapi_1',
+      webApiHasCredentials: true,
+      version: 'K3 WISE 15.x test',
+      baseUrl: 'https://k3.example.test/K3API/',
+      acctId: '',
+      username: '',
+      password: '',
+      sqlEnabled: false,
+      sqlSystemId: '',
+    })
+
+    expect(validateK3WiseSetupForm(form)).toEqual([])
+    expect(buildK3WiseSetupPayloads(form).sqlServer).toBeNull()
+  })
+
   it('loads public external-system config without exposing credentials', () => {
     const form = createDefaultK3WiseSetupForm()
     const system: IntegrationExternalSystem = {
