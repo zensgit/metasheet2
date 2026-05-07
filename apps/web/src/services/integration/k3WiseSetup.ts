@@ -211,6 +211,27 @@ export interface K3WiseSetupValidationIssue {
   message: string
 }
 
+export type K3WiseDeployGateStatus = 'ready' | 'missing' | 'warning' | 'external'
+
+export interface K3WiseDeployGateItem {
+  id: string
+  label: string
+  status: K3WiseDeployGateStatus
+  message: string
+  field?: keyof K3WiseSetupForm
+}
+
+export interface K3WiseDeployGateSummary {
+  ready: number
+  missing: number
+  warning: number
+  external: number
+  canSaveConfiguration: boolean
+  canCreatePipelines: boolean
+  canRunDryRun: boolean
+  canRunLive: boolean
+}
+
 const WEBAPI_KIND = 'erp:k3-wise-webapi'
 const SQLSERVER_KIND = 'erp:k3-wise-sqlserver'
 
@@ -448,6 +469,179 @@ export function validateK3WisePipelineObservationForm(
     })
   }
   return issues
+}
+
+function gateItem(
+  id: string,
+  label: string,
+  status: K3WiseDeployGateStatus,
+  message: string,
+  field?: keyof K3WiseSetupForm,
+): K3WiseDeployGateItem {
+  return field ? { id, label, status, message, field } : { id, label, status, message }
+}
+
+export function buildK3WiseDeployGateChecklist(form: K3WiseSetupForm): K3WiseDeployGateItem[] {
+  const webApiCredentialTouched = Boolean(trim(form.username) || trim(form.password) || trim(form.acctId))
+  const webApiCredentialsReady = form.webApiHasCredentials && !webApiCredentialTouched
+    ? true
+    : Boolean(trim(form.acctId) && trim(form.username) && trim(form.password))
+  const webApiConfigReady = Boolean(trim(form.tenantId) && trim(form.version) && trim(form.baseUrl) && trim(form.loginPath))
+  const stagingReady = Boolean(trim(form.tenantId) && trim(form.projectId))
+  const pipelineTemplateReady = Boolean(trim(form.sourceSystemId) && trim(form.webApiSystemId) && trim(form.materialStagingObjectId) && trim(form.bomStagingObjectId))
+  const materialDryRunReady = Boolean(trim(form.materialPipelineId))
+  const bomDryRunReady = Boolean(trim(form.bomPipelineId))
+  const sqlAllowedTables = splitList(form.sqlAllowedTables)
+  const sqlMiddleTables = splitList(form.sqlMiddleTables)
+  const sqlStoredProcedures = splitList(form.sqlStoredProcedures)
+
+  const items: K3WiseDeployGateItem[] = [
+    gateItem(
+      'tenant-scope',
+      '租户作用域',
+      trim(form.tenantId) ? 'ready' : 'missing',
+      trim(form.tenantId)
+        ? 'Tenant 已可用于保存 K3 WISE 外部系统配置'
+        : '部署后可在页面填写 tenantId；缺 tenantId 时不能保存配置',
+      'tenantId',
+    ),
+    gateItem(
+      'webapi',
+      'K3 WISE WebAPI',
+      webApiConfigReady ? 'ready' : 'missing',
+      webApiConfigReady
+        ? '版本、环境、Base URL 和接口路径已具备'
+        : '部署后可在页面填写 K3 WISE 版本、环境、WebAPI Base URL 和相对接口路径',
+      webApiConfigReady ? undefined : 'baseUrl',
+    ),
+    gateItem(
+      'webapi-credentials',
+      'WebAPI 账套与凭据',
+      webApiCredentialsReady ? 'ready' : 'missing',
+      webApiCredentialsReady
+        ? form.webApiHasCredentials && !webApiCredentialTouched
+          ? '已保存凭据会保留，页面不会回显密码'
+          : 'Acct ID、用户名和密码已可用于保存或替换凭据'
+        : '部署后可在页面填写 acctId、用户名和密码；密码只会提交保存，不会回显',
+      webApiCredentialsReady ? undefined : 'acctId',
+    ),
+    gateItem(
+      'submit-audit-policy',
+      'Submit / Audit 策略',
+      form.environment === 'production' && (form.autoSubmit || form.autoAudit) ? 'missing' : 'ready',
+      form.environment === 'production' && (form.autoSubmit || form.autoAudit)
+        ? '生产环境自动 Submit/Audit 需要单独审批策略；当前页面会阻止保存'
+        : form.autoSubmit || form.autoAudit
+          ? '非生产环境可保存自动 Submit/Audit 策略'
+          : '当前为 save-only 策略，可先做低风险联调',
+      'autoSubmit',
+    ),
+    gateItem(
+      'sql-channel',
+      'SQL Server 通道',
+      form.sqlEnabled
+        ? trim(form.sqlServer) && trim(form.sqlDatabase) && sqlAllowedTables.length > 0
+          ? 'ready'
+          : 'missing'
+        : 'warning',
+      form.sqlEnabled
+        ? trim(form.sqlServer) && trim(form.sqlDatabase) && sqlAllowedTables.length > 0
+          ? 'SQL Server 主机、数据库和读取白名单已填写'
+          : '启用 SQL Server 后必须填写 Server、Database 和允许读取表'
+        : '可先做 WebAPI-only / dry-run；读取 K3 表或中间表回写前需启用并填写 SQL 通道',
+      form.sqlEnabled ? 'sqlServer' : 'sqlEnabled',
+    ),
+    gateItem(
+      'sql-write-path',
+      'SQL 写入边界',
+      !form.sqlEnabled || form.sqlMode === 'readonly'
+        ? 'ready'
+        : form.sqlMode === 'middle-table'
+          ? sqlMiddleTables.length > 0 ? 'ready' : 'missing'
+          : sqlStoredProcedures.length > 0 ? 'ready' : 'missing',
+      !form.sqlEnabled || form.sqlMode === 'readonly'
+        ? '当前不会通过 SQL 通道写入 K3'
+        : form.sqlMode === 'middle-table'
+          ? sqlMiddleTables.length > 0
+            ? 'middle-table 模式已有中间表写入目标'
+            : 'middle-table 模式必须填写中间表，避免误把 K3 核心表当写入目标'
+          : sqlStoredProcedures.length > 0
+            ? 'stored-procedure 模式已有可调用存储过程'
+            : 'stored-procedure 模式必须填写允许调用的存储过程',
+      form.sqlMode === 'middle-table' ? 'sqlMiddleTables' : 'sqlStoredProcedures',
+    ),
+    gateItem(
+      'plm-source',
+      'PLM Source System',
+      trim(form.sourceSystemId) ? 'ready' : 'external',
+      trim(form.sourceSystemId)
+        ? '已选择或粘贴 PLM source system ID，可创建清洗 pipeline'
+        : '当前页面只粘贴 sourceSystemId；第三方 PLM 连接本身仍需先通过 integration API/种子/后续 PLM UI 创建',
+      'sourceSystemId',
+    ),
+    gateItem(
+      'staging',
+      'Staging 多维表',
+      stagingReady ? 'ready' : 'missing',
+      stagingReady
+        ? '可在页面安装或确认 staging 多维表'
+        : '部署后可在页面填写 projectId，再点击安装 staging 多维表',
+      stagingReady ? undefined : 'projectId',
+    ),
+    gateItem(
+      'pipeline-template',
+      '清洗 Pipeline 模板',
+      pipelineTemplateReady ? 'ready' : 'missing',
+      pipelineTemplateReady
+        ? 'PLM source、K3 target 和 staging 对象已具备，可创建 draft pipeline'
+        : '需先保存 K3 WebAPI、准备 PLM source system，并选择物料/BOM staging 对象',
+      pipelineTemplateReady ? undefined : 'sourceSystemId',
+    ),
+    gateItem(
+      'pipeline-dry-run',
+      'Pipeline Dry-run',
+      materialDryRunReady && bomDryRunReady ? 'ready' : 'missing',
+      materialDryRunReady && bomDryRunReady
+        ? '物料与 BOM pipeline ID 已具备，可在页面发起 dry-run'
+        : '创建 pipeline 后页面会回填 pipeline ID；缺 ID 时不能 dry-run',
+      materialDryRunReady ? 'bomPipelineId' : 'materialPipelineId',
+    ),
+    gateItem(
+      'pipeline-live-run',
+      'Pipeline 真实执行',
+      form.allowLivePipelineRun ? 'warning' : 'ready',
+      form.allowLivePipelineRun
+        ? '已允许真实执行；实体机测试前需确认客户账套、回滚人与审批策略'
+        : '默认只允许 dry-run；真实执行需显式勾选',
+      'allowLivePipelineRun',
+    ),
+  ]
+
+  return items
+}
+
+export function summarizeK3WiseDeployGateChecklist(items: K3WiseDeployGateItem[]): K3WiseDeployGateSummary {
+  const summary = items.reduce(
+    (acc, item) => {
+      acc[item.status] += 1
+      return acc
+    },
+    { ready: 0, missing: 0, warning: 0, external: 0 },
+  )
+  const getStatus = (id: string): K3WiseDeployGateStatus | undefined => items.find((item) => item.id === id)?.status
+  const canSaveConfiguration = ['tenant-scope', 'webapi', 'webapi-credentials', 'submit-audit-policy', 'sql-channel', 'sql-write-path']
+    .every((id) => getStatus(id) === 'ready' || getStatus(id) === 'warning')
+  const canCreatePipelines = canSaveConfiguration && ['plm-source', 'staging', 'pipeline-template']
+    .every((id) => getStatus(id) === 'ready')
+  const canRunDryRun = canCreatePipelines && getStatus('pipeline-dry-run') === 'ready'
+  const canRunLive = canRunDryRun && getStatus('pipeline-live-run') === 'warning'
+  return {
+    ...summary,
+    canSaveConfiguration,
+    canCreatePipelines,
+    canRunDryRun,
+    canRunLive,
+  }
 }
 
 export function buildK3WiseStagingInstallPayload(form: K3WiseSetupForm): K3WiseStagingInstallPayload {
