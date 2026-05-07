@@ -124,6 +124,7 @@ function createQuery(): {
   ]
   const records: FakeRecord[] = []
   const links: FakeLink[] = []
+  const autoNumberNextByField = new Map<string, number>()
 
   const query: MultitableRecordsQueryFn = async (sql, params = []) => {
     const normalized = sql.replace(/\s+/g, ' ').trim()
@@ -131,6 +132,10 @@ function createQuery(): {
     if (normalized.includes('FROM meta_sheets') && normalized.includes('WHERE id = $1')) {
       const [sheetId] = params as [string]
       return { rows: sheets.filter((sheet) => sheet.id === sheetId) }
+    }
+
+    if (normalized.includes('SELECT pg_advisory_xact_lock')) {
+      return { rows: [], rowCount: 1 }
     }
 
     if (normalized.includes('FROM meta_fields') && normalized.includes('WHERE sheet_id = $1')) {
@@ -148,6 +153,19 @@ function createQuery(): {
       }
       records.push(record)
       return { rows: [{ version: 1 }], rowCount: 1 }
+    }
+
+    if (normalized.startsWith('INSERT INTO meta_field_auto_number_sequences')) {
+      const [fieldId, , nextValueRaw, batchSizeRaw] = params as [string, string, number, number | undefined]
+      const batchSize = typeof batchSizeRaw === 'number' ? batchSizeRaw : 1
+      const initialNextValue = Number(nextValueRaw)
+      const current = autoNumberNextByField.get(fieldId)
+      if (current === undefined) {
+        autoNumberNextByField.set(fieldId, initialNextValue)
+        return { rows: [{ start_value: initialNextValue - batchSize }], rowCount: 1 }
+      }
+      autoNumberNextByField.set(fieldId, current + batchSize)
+      return { rows: [{ start_value: current }], rowCount: 1 }
     }
 
     if (normalized.startsWith('SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])')) {
@@ -350,6 +368,50 @@ describe('multitable records helper', () => {
       refundAmount: 88.5,
     })
     expect(records).toHaveLength(1)
+  })
+
+  it('allocates autoNumber values through the helper create path', async () => {
+    const { query, fields } = createQuery()
+    fields.push({
+      id: 'autoNo',
+      sheet_id: 'sheet_service_ticket',
+      name: 'Auto No',
+      type: 'autoNumber',
+      property: { startAt: 100, prefix: 'TK-', digits: 4 },
+      order: 6,
+    })
+
+    const first = await createRecord({
+      query,
+      sheetId: 'sheet_service_ticket',
+      data: { title: 'Broken compressor' },
+    })
+    const second = await createRecord({
+      query,
+      sheetId: 'sheet_service_ticket',
+      data: { title: 'Worn bearing' },
+    })
+
+    expect(first.data.autoNo).toBe(100)
+    expect(second.data.autoNo).toBe(101)
+  })
+
+  it('rejects client supplied autoNumber values through the helper create path', async () => {
+    const { query, fields } = createQuery()
+    fields.push({
+      id: 'autoNo',
+      sheet_id: 'sheet_service_ticket',
+      name: 'Auto No',
+      type: 'autoNumber',
+      property: {},
+      order: 6,
+    })
+
+    await expect(createRecord({
+      query,
+      sheetId: 'sheet_service_ticket',
+      data: { autoNo: 999 },
+    })).rejects.toBeInstanceOf(MultitableRecordValidationError)
   })
 
   it('throws when the sheet is missing', async () => {
