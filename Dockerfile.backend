@@ -1,7 +1,8 @@
 FROM node:20-slim AS builder
 
 WORKDIR /app
-RUN corepack enable
+ARG PNPM_VERSION=10.16.1
+RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY tsconfig.json ./
@@ -17,7 +18,8 @@ RUN pnpm --filter @metasheet/core-backend build
 FROM node:20-slim AS runner
 
 WORKDIR /app
-RUN corepack enable
+ARG PNPM_VERSION=10.16.1
+RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
 ENV NODE_ENV=production
 ENV HOST=0.0.0.0
 ENV PORT=8900
