@@ -28,6 +28,9 @@ const DEFAULT_OBJECT_BY_TARGET = Object.freeze({
   k3_bom: 'bom_cleanse',
 })
 
+const TRUE_BOOLEAN_TEXT = new Set(['true', '1', 'yes', 'y', 'on', '是', '启用', '开启'])
+const FALSE_BOOLEAN_TEXT = new Set(['false', '0', 'no', 'n', 'off', '否', '禁用', '关闭'])
+
 class ErpFeedbackError extends Error {
   constructor(message, details = {}) {
     super(message)
@@ -47,6 +50,26 @@ function objectOrEmpty(value) {
 function normalizeString(value) {
   if (value === undefined || value === null || value === '') return null
   return String(value)
+}
+
+function normalizeOptionalBoolean(value, field) {
+  if (value === undefined || value === null || value === '') return undefined
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') {
+    if (Number.isNaN(value) || !Number.isFinite(value)) {
+      throw new ErpFeedbackError(`${field} must be a boolean-like value`, { field, value })
+    }
+    if (value === 1) return true
+    if (value === 0) return false
+    throw new ErpFeedbackError(`${field} must be a boolean-like value`, { field, value })
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (normalized === '') return undefined
+    if (TRUE_BOOLEAN_TEXT.has(normalized)) return true
+    if (FALSE_BOOLEAN_TEXT.has(normalized)) return false
+  }
+  throw new ErpFeedbackError(`${field} must be a boolean-like value`, { field, value })
 }
 
 function nowIso(clock) {
@@ -229,7 +252,7 @@ function buildFeedbackFields({ status, outcome = {}, raw, fieldMap, syncedAt }) 
 
 function normalizeFeedbackItems({ writeResult = {}, cleanRecords = [], pipeline = {}, options = {}, clock } = {}) {
   const normalizedOptions = normalizeFeedbackOptions(pipeline, options)
-  if (normalizedOptions.enabled === false) return []
+  if (normalizeOptionalBoolean(normalizedOptions.enabled, 'erpFeedback.enabled') === false) return []
   const fieldMap = mergeFieldMap(normalizedOptions)
   const keyField = resolveKeyField(pipeline, normalizedOptions)
   const syncedAt = normalizeString(normalizedOptions.syncedAt) || nowIso(clock)
@@ -409,7 +432,9 @@ function createErpFeedbackWriter({ stagingWriter, context, logger, clock } = {})
   async function writeBack(input = {}) {
     const pipeline = input.pipeline || {}
     const options = normalizeFeedbackOptions(pipeline, input.options)
-    if (options.enabled === false) {
+    const enabled = normalizeOptionalBoolean(options.enabled, 'erpFeedback.enabled')
+    const failOnError = normalizeOptionalBoolean(options.failOnError, 'erpFeedback.failOnError') === true
+    if (enabled === false) {
       return { ok: true, skipped: true, reason: 'ERP_FEEDBACK_DISABLED', items: [] }
     }
 
@@ -480,7 +505,7 @@ function createErpFeedbackWriter({ stagingWriter, context, logger, clock } = {})
       if (logger && typeof logger.warn === 'function') {
         logger.warn(`[plugin-integration-core] ERP feedback writeback failed: ${error && error.message ? error.message : error}`)
       }
-      if (options.failOnError === true) throw error
+      if (failOnError) throw error
       return {
         ok: false,
         skipped: false,
