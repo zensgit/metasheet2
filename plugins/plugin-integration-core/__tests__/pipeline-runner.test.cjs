@@ -957,7 +957,60 @@ async function main() {
     assert.ok(result.run, `allowInactive: ${JSON.stringify(truthyVariant)} lets the inactive pipeline run`)
   }
 
-  // --- 17. abandonStaleRuns called before run and is best-effort ----------
+  // --- 17. missing pipeline returns a structured runner error ------------
+  {
+    const harness = createRunnerHarness({
+      sourceRecords: [
+        { code: 'a-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+      ],
+    })
+    const runner = createPipelineRunner({
+      pipelineRegistry: {
+        async getPipeline(input) {
+          assert.equal(input.id, 'missing_pipe')
+          return null
+        },
+      },
+      externalSystemRegistry: createExternalSystemRegistry(),
+      adapterRegistry: createAdapterRegistry()
+        .registerAdapter('mock-source', () => ({
+          async testConnection() { return { ok: true } },
+          async listObjects() { return [] },
+          async getSchema() { return { fields: [] } },
+          async read() { return createReadResult({ records: [] }) },
+          async upsert() { return createUpsertResult({ written: 0 }) },
+        }))
+        .registerAdapter('mock-target', () => ({
+          async testConnection() { return { ok: true } },
+          async listObjects() { return [] },
+          async getSchema() { return { fields: [] } },
+          async read() { return createReadResult({ records: [] }) },
+          async upsert() { return createUpsertResult({ written: 0 }) },
+        })),
+      deadLetterStore: createDeadLetterStore({ db: harness.db }),
+      watermarkStore: createWatermarkStore({ db: harness.db }),
+      runLogger: createRunLogger({
+        pipelineRegistry: createPipelineRegistry(harness.pipeline, harness.db),
+      }),
+    })
+
+    const error = await runner.runPipeline({
+      tenantId: 'tenant_1',
+      workspaceId: null,
+      pipelineId: 'missing_pipe',
+      mode: 'manual',
+      triggeredBy: 'api',
+    }).catch((err) => err)
+    assert.equal(error.name, 'PipelineRunnerError')
+    assert.equal(error.message, 'pipeline not found')
+    assert.equal(error.details.pipelineId, 'missing_pipe')
+    assert.equal(error.details.tenantId, 'tenant_1')
+    assert.equal(error.details.workspaceId, null)
+    assert.doesNotMatch(error.stack || '', /Cannot read properties/)
+    assert.equal(harness.db.tables.get('integration_runs').length, 0, 'missing pipeline fails before creating run rows')
+  }
+
+  // --- 18. abandonStaleRuns called before run and is best-effort ----------
   {
     const staleDb = createMockDb()
     const stalePipeline = {
@@ -1002,7 +1055,7 @@ async function main() {
       })
     }
 
-    // 17a: abandonStaleRuns is called with correct tenant/pipeline context
+    // 18a: abandonStaleRuns is called with correct tenant/pipeline context
     const abandonCalls = []
     const runnerWithAbandon = buildRunner({
       async abandonStaleRuns(input) { abandonCalls.push(input); return [] },
@@ -1012,7 +1065,7 @@ async function main() {
     assert.equal(abandonCalls[0].tenantId, 'tenant_1', 'abandonStaleRuns receives tenantId')
     assert.equal(abandonCalls[0].pipelineId, 'pipe_1', 'abandonStaleRuns receives pipelineId')
 
-    // 17b: abandonStaleRuns throws -> pipeline still runs (best-effort protection)
+    // 18b: abandonStaleRuns throws -> pipeline still runs (best-effort protection)
     const resilientRunner = buildRunner({
       async abandonStaleRuns() { throw new Error('DB connection lost during stale-run cleanup') },
     })
@@ -1022,7 +1075,7 @@ async function main() {
     assert.ok(resilientResult.run, 'pipeline run succeeds even when abandonStaleRuns throws')
     assert.equal(resilientResult.metrics.rowsRead, 1, 'pipeline reads source despite cleanup failure')
 
-    // 17c: registry without abandonStaleRuns (typeof check) -> no TypeError
+    // 18c: registry without abandonStaleRuns (typeof check) -> no TypeError
     const plainRunner = buildRunner()
     const plainResult = await plainRunner.runPipeline({
       tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'manual', triggeredBy: 'api',
@@ -1030,7 +1083,7 @@ async function main() {
     assert.ok(plainResult.run, 'pipeline runs fine when registry has no abandonStaleRuns')
   }
 
-  // --- 18. finishRun failure in success path returns warning, not error ----
+  // --- 19. finishRun failure in success path returns warning, not error ----
   {
     const db18 = createMockDb()
     const pipeline18 = {
@@ -1081,7 +1134,7 @@ async function main() {
       })
     }
 
-    // 18a: finishRun throws (DB down) after ERP write -> returns warning, not error
+    // 19a: finishRun throws (DB down) after ERP write -> returns warning, not error
     const throwingRunner = buildRunner18({
       async updatePipelineRun() {
         throw new Error('DB connection lost after ERP write')
@@ -1097,7 +1150,7 @@ async function main() {
     assert.equal(typeof warnResult.warning.message, 'string', 'warning message is a string')
     assert.equal(targetRows18.size, 1, 'target record was written despite finishRun failure')
 
-    // 18b: normal finishRun (no override) — no warning field
+    // 19b: normal finishRun (no override) — no warning field
     const normalRunner = buildRunner18()
     const normalResult = await normalRunner.runPipeline({
       tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'manual', triggeredBy: 'api',
@@ -1107,7 +1160,7 @@ async function main() {
     assert.equal(normalResult.warning, undefined, 'no warning when finishRun succeeds')
   }
 
-  // --- 19. maxPagesReached signal in run details when cap exhausted ---------
+  // --- 20. maxPagesReached signal in run details when cap exhausted ---------
   {
     // Source returns 3 pages of records; pipeline maxPages=2 → cap hit, more data unread
     let cappedPage = 0
@@ -1159,7 +1212,7 @@ async function main() {
       'pagesProcessed=1 when single page completes the run')
   }
 
-  // --- 20. invalid source record (null/array/scalar) → dead letter, run continues
+  // --- 21. invalid source record (null/array/scalar) → dead letter, run continues
   {
     // Source returns a mix of nulls, valid records, and a scalar; transformRecord
     // throws TransformError on non-objects, so without per-record guard the entire
@@ -1205,7 +1258,7 @@ async function main() {
     assert.ok(messages.some((m) => m.includes('string')), 'string reported')
   }
 
-  // --- 21. invalid runner paging options fall back / cap safely ----------
+  // --- 22. invalid runner paging options fall back / cap safely ----------
   {
     const invalidOptionLimits = []
     const invalidOptionHarness = createRunnerHarness({
