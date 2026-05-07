@@ -394,6 +394,27 @@ async function main() {
   assert.equal(underReported.db.tables.get('integration_dead_letters')[0].source_payload.unaccountedFailed, 1)
   assert.equal(await underReported.db.selectOne('integration_watermarks', { pipeline_id: 'pipe_1' }), null, 'under-reported target result does not advance watermark')
 
+  // --- 4c.1a. Malformed target counters are normalized to a safe failure --
+  const malformedCounters = createRunnerHarness({
+    sourceRecords: [
+      { code: 'bad-count-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+    ],
+    targetUpsert: async () => ({
+      written: Infinity,
+      skipped: -1,
+      failed: '0',
+      errors: [],
+    }),
+  })
+  const malformedCounterRun = await malformedCounters.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'incremental', triggeredBy: 'manual' })
+  assert.equal(malformedCounterRun.run.status, 'partial')
+  assert.equal(malformedCounterRun.metrics.rowsWritten, 0, 'invalid written counter is not added to metrics')
+  assert.equal(malformedCounterRun.metrics.rowsFailed, 1, 'malformed adapter counters force a safe aggregate failure')
+  const malformedLetter = malformedCounters.db.tables.get('integration_dead_letters')[0]
+  assert.equal(malformedLetter.error_code, 'TARGET_WRITE_AGGREGATE_FAILED')
+  assert.deepEqual(malformedLetter.source_payload.invalidCounts.map((item) => item.field).sort(), ['skipped', 'written'])
+  assert.equal(await malformedCounters.db.selectOne('integration_watermarks', { pipeline_id: 'pipe_1' }), null, 'malformed target counters do not advance watermark')
+
   // --- 4c.1. Adapter errors count as failed even if failed=0 ------------
   const errorOnly = createRunnerHarness({
     sourceRecords: [
