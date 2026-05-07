@@ -563,7 +563,7 @@ const dateLikeFields = computed(() => props.fields.filter((field) => field.type 
 const numericFields = computed(() => props.fields.filter((field) => ['number', 'currency', 'percent', 'rating'].includes(field.type)))
 const selectFields = computed(() => props.fields.filter((field) => field.type === 'select'))
 const linkFields = computed(() => props.fields.filter((field) => field.type === 'link'))
-const dependencyFields = computed(() => props.fields.filter((field) => ['link', 'multiSelect', 'string'].includes(field.type)))
+const dependencyFields = computed(() => props.fields.filter((field) => field.type === 'link'))
 const stringFields = computed(() => props.fields.filter((field) => ['string', 'formula', 'lookup'].includes(field.type)))
 const groupableFields = computed(() => props.fields.filter((field) => ['select', 'string', 'boolean', 'number', 'date', 'dateTime'].includes(field.type)))
 const validFieldIds = computed(() => new Set(props.fields.map((field) => field.id)))

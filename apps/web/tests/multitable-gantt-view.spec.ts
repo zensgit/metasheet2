@@ -305,4 +305,207 @@ describe('MetaGanttView', () => {
 
     app.unmount()
   })
+
+  it('rejects non-link fields configured as dependencyFieldId', () => {
+    const fields = [
+      { id: 'fld_start', name: 'Start', type: 'date' as const },
+      { id: 'fld_end', name: 'End', type: 'date' as const },
+      { id: 'fld_link', name: 'Depends on', type: 'link' as const },
+      { id: 'fld_multi', name: 'Tags', type: 'multiSelect' as const },
+      { id: 'fld_string', name: 'Notes', type: 'string' as const },
+      { id: 'fld_select', name: 'Status', type: 'select' as const },
+    ]
+
+    expect(resolveGanttViewConfig(fields, { dependencyFieldId: 'fld_link' }).dependencyFieldId).toBe('fld_link')
+    expect(resolveGanttViewConfig(fields, { dependencyFieldId: 'fld_multi' }).dependencyFieldId).toBeNull()
+    expect(resolveGanttViewConfig(fields, { dependencyFieldId: 'fld_string' }).dependencyFieldId).toBeNull()
+    expect(resolveGanttViewConfig(fields, { dependencyFieldId: 'fld_select' }).dependencyFieldId).toBeNull()
+  })
+
+  it('only lists link fields in the dependency dropdown', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaGanttView, {
+          loading: false,
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string' },
+            { id: 'fld_start', name: 'Start', type: 'date' },
+            { id: 'fld_end', name: 'End', type: 'date' },
+            { id: 'fld_deps', name: 'Depends on', type: 'link' },
+            { id: 'fld_tags', name: 'Tags', type: 'multiSelect' },
+            { id: 'fld_notes', name: 'Notes', type: 'string' },
+          ],
+          rows: [],
+          viewConfig: { startFieldId: 'fld_start', endFieldId: 'fld_end' },
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    const controls = Array.from(container.querySelectorAll('.meta-gantt__control select')) as HTMLSelectElement[]
+    const dependencySelect = controls[5]
+    const optionLabels = Array.from(dependencySelect.options).map((opt) => opt.textContent?.trim())
+
+    expect(optionLabels).toContain('Depends on')
+    expect(optionLabels).not.toContain('Tags')
+    expect(optionLabels).not.toContain('Notes')
+
+    app.unmount()
+  })
+
+  it('filters self-dependencies and skips dependencies whose record is missing', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaGanttView, {
+          loading: false,
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string' },
+            { id: 'fld_start', name: 'Start', type: 'date' },
+            { id: 'fld_end', name: 'End', type: 'date' },
+            { id: 'fld_deps', name: 'Depends on', type: 'link' },
+          ],
+          rows: [
+            {
+              id: 'rec_solo',
+              version: 1,
+              data: {
+                fld_name: 'Solo',
+                fld_start: '2026-04-01',
+                fld_end: '2026-04-03',
+                fld_deps: ['rec_solo', 'rec_missing'],
+              },
+            },
+          ],
+          viewConfig: {
+            startFieldId: 'fld_start',
+            endFieldId: 'fld_end',
+            titleFieldId: 'fld_name',
+            dependencyFieldId: 'fld_deps',
+          },
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    expect(container.querySelectorAll('.meta-gantt__dependency-arrow')).toHaveLength(0)
+
+    app.unmount()
+  })
+
+  it('renders one arrow per predecessor when a task has multiple dependencies', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaGanttView, {
+          loading: false,
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string' },
+            { id: 'fld_start', name: 'Start', type: 'date' },
+            { id: 'fld_end', name: 'End', type: 'date' },
+            { id: 'fld_deps', name: 'Depends on', type: 'link' },
+          ],
+          rows: [
+            { id: 'rec_a', version: 1, data: { fld_name: 'A', fld_start: '2026-04-01', fld_end: '2026-04-03' } },
+            { id: 'rec_b', version: 1, data: { fld_name: 'B', fld_start: '2026-04-02', fld_end: '2026-04-04' } },
+            {
+              id: 'rec_c',
+              version: 1,
+              data: {
+                fld_name: 'C',
+                fld_start: '2026-04-08',
+                fld_end: '2026-04-12',
+                fld_deps: ['rec_a', 'rec_b'],
+              },
+            },
+          ],
+          viewConfig: {
+            startFieldId: 'fld_start',
+            endFieldId: 'fld_end',
+            titleFieldId: 'fld_name',
+            dependencyFieldId: 'fld_deps',
+          },
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    const arrows = Array.from(container.querySelectorAll('.meta-gantt__dependency-arrow'))
+    const titles = arrows.map((arrow) => arrow.getAttribute('title')).sort()
+
+    expect(arrows).toHaveLength(2)
+    expect(titles).toEqual(['A → C', 'B → C'])
+
+    app.unmount()
+  })
+
+  it('renders both arrows for a cycle (A->B->A) without crashing or recursing', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaGanttView, {
+          loading: false,
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string' },
+            { id: 'fld_start', name: 'Start', type: 'date' },
+            { id: 'fld_end', name: 'End', type: 'date' },
+            { id: 'fld_deps', name: 'Depends on', type: 'link' },
+          ],
+          rows: [
+            {
+              id: 'rec_a',
+              version: 1,
+              data: {
+                fld_name: 'A',
+                fld_start: '2026-04-01',
+                fld_end: '2026-04-04',
+                fld_deps: ['rec_b'],
+              },
+            },
+            {
+              id: 'rec_b',
+              version: 1,
+              data: {
+                fld_name: 'B',
+                fld_start: '2026-04-06',
+                fld_end: '2026-04-09',
+                fld_deps: ['rec_a'],
+              },
+            },
+          ],
+          viewConfig: {
+            startFieldId: 'fld_start',
+            endFieldId: 'fld_end',
+            titleFieldId: 'fld_name',
+            dependencyFieldId: 'fld_deps',
+          },
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    const arrows = Array.from(container.querySelectorAll('.meta-gantt__dependency-arrow'))
+    const backwardArrows = arrows.filter((arrow) => arrow.classList.contains('meta-gantt__dependency-arrow--backward'))
+    expect(arrows).toHaveLength(2)
+    expect(backwardArrows).toHaveLength(1)
+
+    app.unmount()
+  })
 })
