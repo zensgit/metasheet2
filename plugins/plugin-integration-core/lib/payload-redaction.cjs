@@ -9,6 +9,9 @@ const SENSITIVE_PAYLOAD_KEYS = new Set([
   'secret',
   'clientsecret',
   'privatekey',
+  'connectsid',
+  'jsessionid',
+  'sid',
   'sessionid',
   'authorization',
   'cookie',
@@ -16,6 +19,7 @@ const SENSITIVE_PAYLOAD_KEYS = new Set([
   'proxyauthorization',
   'xapikey',
   'xauthtoken',
+  'xsessionid',
   'credentials',
   'rawpayload',
 ])

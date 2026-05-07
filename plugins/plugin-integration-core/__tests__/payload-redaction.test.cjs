@@ -11,6 +11,10 @@ const {
 function main() {
   assert.equal(isSensitivePayloadKey('Authorization'), true)
   assert.equal(isSensitivePayloadKey('x-api-key'), true)
+  assert.equal(isSensitivePayloadKey('JSESSIONID'), true)
+  assert.equal(isSensitivePayloadKey('connect.sid'), true)
+  assert.equal(isSensitivePayloadKey('X-Session-Id'), true)
+  assert.equal(isSensitivePayloadKey('sid'), true)
   assert.equal(isSensitivePayloadKey('apiKeyHeader'), false)
   assert.equal(isSensitivePayloadKey('tokenPath'), false)
 
@@ -21,6 +25,12 @@ function main() {
     password: 'secret',
     headers: {
       Authorization: 'Bearer token',
+      'X-Session-Id': 'session-token',
+    },
+    cookies: {
+      JSESSIONID: 'k3-session',
+      'connect.sid': 'connect-session',
+      sid: 'short-session',
     },
     rawPayload: {
       token: 'raw-token',
@@ -35,6 +45,10 @@ function main() {
   assert.equal(redacted.code, 'MAT-001')
   assert.equal(redacted.password, '[redacted]')
   assert.equal(redacted.headers.Authorization, '[redacted]')
+  assert.equal(redacted.headers['X-Session-Id'], '[redacted]')
+  assert.equal(redacted.cookies.JSESSIONID, '[redacted]')
+  assert.equal(redacted.cookies['connect.sid'], '[redacted]')
+  assert.equal(redacted.cookies.sid, '[redacted]')
   assert.equal(redacted.rawPayload, '[redacted]')
   assert.equal(redacted.rows[0].cookie, '[redacted]')
   assert.equal(redacted.circular.self, '[circular]')
