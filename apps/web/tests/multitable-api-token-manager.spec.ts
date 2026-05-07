@@ -116,8 +116,14 @@ function mockClient(
   deliveries: WebhookDelivery[] = [],
   dingTalkGroups: DingTalkGroupDestination[] = [],
   dingTalkDeliveries: DingTalkGroupDelivery[] = [],
+  options: {
+    failDingTalkGroupCreate?: string
+    failDingTalkGroupUpdate?: string
+    failDingTalkGroupTest?: string
+  } = {},
 ) {
   let currentDingTalkDeliveries = [...dingTalkDeliveries]
+  let currentDingTalkGroups = [...dingTalkGroups]
 
   const fetchFn = vi.fn(async (url: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET'
@@ -160,9 +166,15 @@ function mockClient(
       return okResponse({ deliveries: currentDingTalkDeliveries })
     }
     if (method === 'GET' && url.includes('/dingtalk-groups') && !url.includes('/test-send')) {
-      return okResponse({ destinations: dingTalkGroups })
+      return okResponse({ destinations: currentDingTalkGroups })
     }
     if (method === 'POST' && url.includes('/dingtalk-groups') && !url.includes('/test-send')) {
+      if (options.failDingTalkGroupCreate) {
+        return new Response(JSON.stringify({
+          ok: false,
+          error: { code: 'CREATE_FAILED', message: options.failDingTalkGroupCreate },
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } })
+      }
       const body = JSON.parse(init?.body as string)
       return okResponse({
         id: 'dt_new',
@@ -172,17 +184,63 @@ function mockClient(
       })
     }
     if (method === 'PATCH' && url.includes('/dingtalk-groups/')) {
+      if (options.failDingTalkGroupUpdate) {
+        return new Response(JSON.stringify({
+          ok: false,
+          error: { code: 'UPDATE_FAILED', message: options.failDingTalkGroupUpdate },
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } })
+      }
       return okResponse(dingTalkGroups[0] ?? {})
     }
     if (method === 'DELETE' && url.includes('/dingtalk-groups/')) {
       return noContentResponse()
     }
     if (method === 'POST' && url.includes('/dingtalk-groups/') && url.includes('/test-send')) {
+      const body = init?.body ? JSON.parse(init.body as string) : {}
+      const groupId = decodeURIComponent(url.match(/\/dingtalk-groups\/([^/]+)\/test-send/)?.[1] ?? '')
+      if (options.failDingTalkGroupTest) {
+        const testedAt = new Date().toISOString()
+        currentDingTalkGroups = currentDingTalkGroups.map((group) => group.id === groupId
+          ? {
+              ...group,
+              lastTestedAt: testedAt,
+              lastTestStatus: 'failed',
+              lastTestError: options.failDingTalkGroupTest,
+            }
+          : group)
+        currentDingTalkDeliveries = [
+          fakeDingTalkDelivery({
+            id: `dtd_${currentDingTalkDeliveries.length + 1}`,
+            destinationId: groupId || 'dt_1',
+            sourceType: 'manual_test',
+            subject: body.subject ?? 'P4 metasheet DingTalk group validity test',
+            content: body.content ?? 'P4 / metasheet robot validity check from MetaSheet.',
+            success: false,
+            httpStatus: 200,
+            errorMessage: options.failDingTalkGroupTest,
+          }),
+          ...currentDingTalkDeliveries,
+        ]
+        return new Response(JSON.stringify({
+          ok: false,
+          error: { code: 'TEST_FAILED', message: options.failDingTalkGroupTest },
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } })
+      }
+      currentDingTalkGroups = currentDingTalkGroups.map((group) => group.id === groupId
+        ? {
+            ...group,
+            lastTestedAt: new Date().toISOString(),
+            lastTestStatus: 'success',
+            lastTestError: undefined,
+          }
+        : group)
       currentDingTalkDeliveries = [
         fakeDingTalkDelivery({
           id: `dtd_${currentDingTalkDeliveries.length + 1}`,
+          destinationId: groupId || 'dt_1',
           sourceType: 'manual_test',
-          subject: 'MetaSheet DingTalk group test',
+          subject: body.subject ?? 'P4 metasheet DingTalk group validity test',
+          content: body.content ?? 'P4 / metasheet robot validity check from MetaSheet.',
         }),
         ...currentDingTalkDeliveries,
       ]
@@ -482,6 +540,45 @@ describe('MetaApiTokenManager', () => {
     expect(text).not.toContain('super-secret-token')
   })
 
+  it('shows DingTalk validity guidance for untested, failed, and stale groups', async () => {
+    const staleDate = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString()
+    const { client } = mockClient([], [], [], [
+      fakeDingTalkGroup({
+        id: 'dt_untested',
+        name: 'Untested DingTalk Group',
+        lastTestedAt: undefined,
+        lastTestStatus: undefined,
+      }),
+      fakeDingTalkGroup({
+        id: 'dt_failed',
+        name: 'Failed DingTalk Group',
+        lastTestStatus: 'failed',
+        lastTestError: 'DingTalk errcode 300005: token is not exist',
+      }),
+      fakeDingTalkGroup({
+        id: 'dt_stale',
+        name: 'Stale DingTalk Group',
+        lastTestedAt: staleDate,
+        lastTestStatus: 'success',
+      }),
+    ])
+    mount({ visible: true, client })
+    await flushPromises()
+
+    const dingTalkTab = document.querySelectorAll('[role="tab"]')[2] as HTMLButtonElement
+    dingTalkTab.click()
+    await flushPromises()
+
+    const untestedCard = document.querySelector('[data-dingtalk-group-id="dt_untested"]') as HTMLElement
+    const failedCard = document.querySelector('[data-dingtalk-group-id="dt_failed"]') as HTMLElement
+    const staleCard = document.querySelector('[data-dingtalk-group-id="dt_stale"]') as HTMLElement
+
+    expect(untestedCard?.querySelector('[data-dingtalk-group-validity-note]')?.textContent).toContain('Validity check needed')
+    expect(failedCard?.querySelector('[data-dingtalk-group-validity-note]')?.textContent).toContain('Validity failed')
+    expect(failedCard?.textContent).toContain('token is not exist')
+    expect(staleCard?.querySelector('[data-dingtalk-group-validity-note]')?.textContent).toContain('more than 30 days ago')
+  })
+
   it('creates a DingTalk group destination', async () => {
     const { client, fetchFn } = mockClient()
     mount({ visible: true, client })
@@ -499,7 +596,9 @@ describe('MetaApiTokenManager', () => {
 
     const webhookHelp = document.querySelector('[data-dingtalk-group-webhook-help]') as HTMLElement
     expect(webhookHelp?.textContent).toContain('DingTalk group robot settings')
-    expect(webhookHelp?.textContent).toContain("appears in this table's automation rule editor")
+    expect(webhookHelp?.textContent).toContain('Saving sends a verification message first')
+    expect(webhookHelp?.textContent).toContain('only valid robots are stored')
+    expect(webhookHelp?.textContent).toContain("shown in this table's automation rule editor")
     expect(webhookHelp?.textContent).toContain('masked in this UI')
     const secretHelp = document.querySelector('[data-dingtalk-group-secret-help]') as HTMLElement
     expect(secretHelp?.textContent).toContain('signature security')
@@ -515,6 +614,7 @@ describe('MetaApiTokenManager', () => {
     await flushPromises()
 
     const saveBtn = document.querySelector('[data-dingtalk-group-save]') as HTMLButtonElement
+    expect(saveBtn.textContent).toContain('Verify & Create')
     saveBtn.click()
     await flushPromises()
 
@@ -527,6 +627,43 @@ describe('MetaApiTokenManager', () => {
       webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=test-token',
       sheetId: 'sheet_1',
     })
+  })
+
+  it('keeps the DingTalk group form open when save-time verification fails', async () => {
+    const verificationMessage = 'DingTalk group destination verification failed: DingTalk errcode 300005: token is not exist'
+    const { client, fetchFn } = mockClient([], [], [], [], [], {
+      failDingTalkGroupCreate: verificationMessage,
+    })
+    mount({ visible: true, client })
+    await flushPromises()
+
+    const dingTalkTab = document.querySelectorAll('[role="tab"]')[2] as HTMLButtonElement
+    dingTalkTab.click()
+    await flushPromises()
+
+    const newBtn = document.querySelector('[data-dingtalk-group-new]') as HTMLButtonElement
+    newBtn.click()
+    await flushPromises()
+
+    const nameInput = document.querySelector('[data-dingtalk-group-name]') as HTMLInputElement
+    nameInput.value = 'Support group'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const urlInput = document.querySelector('[data-dingtalk-group-webhook-url]') as HTMLInputElement
+    urlInput.value = 'https://oapi.dingtalk.com/robot/send?access_token=revoked-token'
+    urlInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    const saveBtn = document.querySelector('[data-dingtalk-group-save]') as HTMLButtonElement
+    saveBtn.click()
+    await flushPromises()
+
+    expect(fetchFn.mock.calls.some(
+      (c: [string, RequestInit?]) => c[1]?.method === 'POST' && c[0].includes('/dingtalk-groups') && !c[0].includes('/test-send'),
+    )).toBe(true)
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain('token is not exist')
+    expect(document.querySelector('[data-dingtalk-group-form]')).toBeTruthy()
+    expect(document.querySelector('[data-dingtalk-group-id]')).toBeNull()
   })
 
   it('disables DingTalk group save for invalid robot webhook settings', async () => {
@@ -650,8 +787,37 @@ describe('MetaApiTokenManager', () => {
     })
   })
 
-  it('tests a DingTalk group destination', async () => {
+  it('runs a DingTalk group validity test', async () => {
     const { client, fetchFn } = mockClient([], [], [], [fakeDingTalkGroup()])
+    mount({ visible: true, client })
+    await flushPromises()
+
+    const dingTalkTab = document.querySelectorAll('[role="tab"]')[2] as HTMLButtonElement
+    dingTalkTab.click()
+    await flushPromises()
+
+    expect(document.querySelector('[data-dingtalk-group-id]')?.textContent).toContain('Last validity test')
+    expect(document.querySelector('[data-dingtalk-group-id]')?.textContent).toContain('Validity: success')
+    const testSendBtn = document.querySelector('[data-dingtalk-group-test-send]') as HTMLButtonElement
+    expect(testSendBtn.textContent).toContain('Test validity')
+    testSendBtn.click()
+    await flushPromises()
+
+    const testSendCalls = fetchFn.mock.calls.filter(
+      (c: [string, RequestInit?]) => c[1]?.method === 'POST' && c[0].includes('/dingtalk-groups/') && c[0].includes('/test-send'),
+    )
+    expect(testSendCalls.length).toBe(1)
+    expect(testSendCalls[0][0]).toContain('sheetId=sheet_1')
+    expect(JSON.parse(testSendCalls[0][1]?.body as string)).toEqual({
+      subject: 'P4 metasheet DingTalk group validity test',
+      content: 'P4 / metasheet robot validity check from MetaSheet.',
+    })
+  })
+
+  it('refreshes DingTalk group validity state after a failed validity test', async () => {
+    const { client } = mockClient([], [], [], [fakeDingTalkGroup()], [], {
+      failDingTalkGroupTest: 'DingTalk errcode 310000: keyword mismatch',
+    })
     mount({ visible: true, client })
     await flushPromises()
 
@@ -663,11 +829,36 @@ describe('MetaApiTokenManager', () => {
     testSendBtn.click()
     await flushPromises()
 
-    const testSendCalls = fetchFn.mock.calls.filter(
-      (c: [string, RequestInit?]) => c[1]?.method === 'POST' && c[0].includes('/dingtalk-groups/') && c[0].includes('/test-send'),
-    )
-    expect(testSendCalls.length).toBe(1)
-    expect(testSendCalls[0][0]).toContain('sheetId=sheet_1')
+    const card = document.querySelector('[data-dingtalk-group-id="dt_1"]') as HTMLElement
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain('keyword mismatch')
+    expect(card?.querySelector('[data-dingtalk-group-test-status]')?.textContent).toContain('failed')
+    expect(card?.querySelector('[data-dingtalk-group-validity-note]')?.textContent).toContain('Validity failed')
+    expect(card?.textContent).toContain('keyword mismatch')
+  })
+
+  it('shows DingTalk delivery failure details inline', async () => {
+    const { client } = mockClient([], [], [], [fakeDingTalkGroup()], [
+      fakeDingTalkDelivery({
+        id: 'dtd_failed',
+        success: false,
+        httpStatus: 200,
+        errorMessage: 'DingTalk errcode 310000: keyword mismatch',
+      }),
+    ])
+    mount({ visible: true, client })
+    await flushPromises()
+
+    const dingTalkTab = document.querySelectorAll('[role="tab"]')[2] as HTMLButtonElement
+    dingTalkTab.click()
+    await flushPromises()
+
+    const deliveriesBtn = document.querySelector('[data-dingtalk-group-deliveries]') as HTMLButtonElement
+    deliveriesBtn.click()
+    await flushPromises()
+
+    const row = document.querySelector('[data-dingtalk-delivery-id="dtd_failed"]') as HTMLElement
+    expect(row?.textContent).toContain('FAIL')
+    expect(row?.textContent).toContain('Error: DingTalk errcode 310000: keyword mismatch')
   })
 
   it('views DingTalk group deliveries', async () => {
@@ -739,7 +930,35 @@ describe('MetaApiTokenManager', () => {
     rows = document.querySelectorAll('[data-dingtalk-delivery-id]')
     expect(rows.length).toBe(2)
     expect(rows[0]?.textContent).toContain('Manual test')
-    expect(rows[0]?.textContent).toContain('MetaSheet DingTalk group test')
+    expect(rows[0]?.textContent).toContain('P4 metasheet DingTalk group validity test')
+  })
+
+  it('refreshes open DingTalk delivery history with failure details after failed test send', async () => {
+    const { client } = mockClient([], [], [], [fakeDingTalkGroup()], [], {
+      failDingTalkGroupTest: 'DingTalk errcode 310000: keyword mismatch',
+    })
+    mount({ visible: true, client })
+    await flushPromises()
+
+    const dingTalkTab = document.querySelectorAll('[role="tab"]')[2] as HTMLButtonElement
+    dingTalkTab.click()
+    await flushPromises()
+
+    const deliveriesBtn = document.querySelector('[data-dingtalk-group-deliveries]') as HTMLButtonElement
+    deliveriesBtn.click()
+    await flushPromises()
+
+    expect(document.querySelector('[data-dingtalk-deliveries-empty]')?.textContent).toContain('No DingTalk deliveries yet.')
+
+    const testSendBtn = document.querySelector('[data-dingtalk-group-test-send]') as HTMLButtonElement
+    testSendBtn.click()
+    await flushPromises()
+
+    const rows = document.querySelectorAll('[data-dingtalk-delivery-id]')
+    expect(rows.length).toBe(1)
+    expect(rows[0]?.textContent).toContain('FAIL')
+    expect(rows[0]?.textContent).toContain('P4 metasheet DingTalk group validity test')
+    expect(rows[0]?.textContent).toContain('Error: DingTalk errcode 310000: keyword mismatch')
   })
 
   it('shows an empty state for DingTalk delivery history', async () => {

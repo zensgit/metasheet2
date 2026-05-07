@@ -344,6 +344,7 @@ import {
   AutomationRuleValidationError,
   parseCreateRuleInput,
   parseDingTalkAutomationDeliveryLimit,
+  parseDingTalkAutomationDeliveryRecordId,
   parseUpdateRuleInput,
   preflightDingTalkAutomationCreate,
   preflightDingTalkAutomationUpdate,
@@ -412,6 +413,15 @@ describe('M5 — Automation route helpers', () => {
     it('floors fractional values inside the valid range', () => {
       expect(parseDingTalkAutomationDeliveryLimit('25.7')).toBe(25)
       expect(parseDingTalkAutomationDeliveryLimit('200.9')).toBe(200)
+    })
+  })
+
+  describe('parseDingTalkAutomationDeliveryRecordId', () => {
+    it('trims string record ids and ignores non-string values', () => {
+      expect(parseDingTalkAutomationDeliveryRecordId(' rec_1 ')).toBe('rec_1')
+      expect(parseDingTalkAutomationDeliveryRecordId('')).toBe('')
+      expect(parseDingTalkAutomationDeliveryRecordId(undefined)).toBe('')
+      expect(parseDingTalkAutomationDeliveryRecordId(['rec_1'] as unknown)).toBe('')
     })
   })
 

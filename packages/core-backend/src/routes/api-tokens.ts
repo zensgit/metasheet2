@@ -207,7 +207,9 @@ function serviceErrorResponse(res: Response, err: unknown, action: string): void
     message.includes('required')
     || message.includes('valid URL')
     || message.includes('HTTPS')
+    || message.includes('DingTalk errcode')
     || message.includes('DingTalk robot')
+    || message.includes('DingTalk group destination verification failed')
     || message.includes('DingTalk group webhook')
     || message.includes('At least one scope')
   ) {

@@ -140,7 +140,7 @@ describe('DingTalk automation delivery routes', () => {
       ok: true,
       data: { deliveries: personDeliveries },
     })
-    expect(listPersonDeliveries).toHaveBeenCalledWith(expect.any(Function), RULE_ID, 1)
+    expect(listPersonDeliveries).toHaveBeenCalledWith(expect.any(Function), RULE_ID, 1, '')
   })
 
   it('lists group delivery history and clamps large limits to 200', async () => {
@@ -156,7 +156,39 @@ describe('DingTalk automation delivery routes', () => {
       ok: true,
       data: { deliveries: groupDeliveries },
     })
-    expect(listGroupDeliveries).toHaveBeenCalledWith(expect.any(Function), RULE_ID, 200)
+    expect(listGroupDeliveries).toHaveBeenCalledWith(expect.any(Function), RULE_ID, 200, '')
+  })
+
+  it('passes recordId filters to person delivery history reads', async () => {
+    const personDeliveries = [{ id: 'person_delivery_record_scoped', recordId: 'record_42' }]
+    const { app, listPersonDeliveries } = await createApp({ personDeliveries })
+
+    const response = await request(app)
+      .get(`/api/multitable/sheets/${SHEET_ID}/automations/${RULE_ID}/dingtalk-person-deliveries`)
+      .query({ limit: '25', recordId: ' record_42 ' })
+      .expect(200)
+
+    expect(response.body).toEqual({
+      ok: true,
+      data: { deliveries: personDeliveries },
+    })
+    expect(listPersonDeliveries).toHaveBeenCalledWith(expect.any(Function), RULE_ID, 25, 'record_42')
+  })
+
+  it('passes recordId filters to group delivery history reads', async () => {
+    const groupDeliveries = [{ id: 'group_delivery_record_scoped', recordId: 'record_42' }]
+    const { app, listGroupDeliveries } = await createApp({ groupDeliveries })
+
+    const response = await request(app)
+      .get(`/api/multitable/sheets/${SHEET_ID}/automations/${RULE_ID}/dingtalk-group-deliveries`)
+      .query({ limit: '25', recordId: ' record_42 ' })
+      .expect(200)
+
+    expect(response.body).toEqual({
+      ok: true,
+      data: { deliveries: groupDeliveries },
+    })
+    expect(listGroupDeliveries).toHaveBeenCalledWith(expect.any(Function), RULE_ID, 25, 'record_42')
   })
 
   it('rejects delivery history reads when the user cannot manage automations', async () => {

@@ -40,6 +40,28 @@
           >
             查看本地用户
           </router-link>
+          <button
+            class="directory-admin__button directory-admin__button--secondary"
+            type="button"
+            @click="void copyManualAdmissionUserManagementLocation()"
+          >
+            复制用户链接
+          </button>
+          <button
+            v-if="manualAdmissionResult.onboarding?.inviteMessage"
+            class="directory-admin__button directory-admin__button--secondary"
+            type="button"
+            @click="void copyManualAdmissionInviteMessage()"
+          >
+            复制邀请文案
+          </button>
+          <button
+            class="directory-admin__button directory-admin__button--secondary"
+            type="button"
+            @click="void copyManualAdmissionDeliveryPacket()"
+          >
+            复制完整交付信息
+          </button>
           <button class="directory-admin__button directory-admin__button--secondary" type="button" @click="clearManualAdmissionResult()">
             关闭结果
           </button>
@@ -93,6 +115,30 @@
           <p class="directory-admin__hint">以下无邮箱目录成员已自动创建本地用户，请通过安全渠道下发登录账号与临时密码。</p>
         </div>
         <div class="directory-admin__actions">
+          <button
+            v-if="autoAdmissionOnboardingPackets.length > 0"
+            class="directory-admin__button directory-admin__button--secondary"
+            type="button"
+            @click="void copyAllAutoAdmissionUserManagementLocations()"
+          >
+            复制全部用户链接
+          </button>
+          <button
+            v-if="autoAdmissionOnboardingPackets.length > 0"
+            class="directory-admin__button directory-admin__button--secondary"
+            type="button"
+            @click="void copyAllAutoAdmissionDeliveryPackets()"
+          >
+            复制全部完整交付信息
+          </button>
+          <button
+            v-if="hasAutoAdmissionInviteMessages"
+            class="directory-admin__button directory-admin__button--secondary"
+            type="button"
+            @click="void copyAllAutoAdmissionInviteMessages()"
+          >
+            复制全部邀请文案
+          </button>
           <button class="directory-admin__button directory-admin__button--secondary" type="button" @click="clearAutoAdmissionOnboardingPackets()">
             关闭结果
           </button>
@@ -104,6 +150,36 @@
         :key="packet.userId"
         class="directory-admin__review-admission"
       >
+        <div class="directory-admin__actions">
+          <router-link
+            class="directory-admin__button directory-admin__button--secondary"
+            :to="buildUserManagementLocation(packet.userId, { id: packet.accountId, integrationId: packet.integrationId })"
+          >
+            查看本地用户
+          </router-link>
+          <button
+            class="directory-admin__button directory-admin__button--secondary"
+            type="button"
+            @click="void copyAutoAdmissionUserManagementLocation(packet)"
+          >
+            复制用户链接
+          </button>
+          <button
+            v-if="packet.onboarding?.inviteMessage"
+            class="directory-admin__button directory-admin__button--secondary"
+            type="button"
+            @click="void copyAutoAdmissionInviteMessage(packet)"
+          >
+            复制邀请文案
+          </button>
+          <button
+            class="directory-admin__button directory-admin__button--secondary"
+            type="button"
+            @click="void copyAutoAdmissionDeliveryPacket(packet)"
+          >
+            复制完整交付信息
+          </button>
+        </div>
         <div class="directory-admin__account-grid">
           <div>
             <strong>本地用户</strong>
@@ -274,6 +350,12 @@
               placeholder="填写命名空间，例如 crm；支持逗号或换行分隔"
             />
           </label>
+          <div class="directory-admin__field directory-admin__field--wide">
+            <span>组织架构同步说明</span>
+            <p class="directory-admin__hint">
+              当前方案会把钉钉部门和成员同步到目录镜像，并可将选定部门投影为平台成员组，用于权限、表单和消息治理；不会自动生成第二套可编辑的本地组织树。
+            </p>
+          </div>
           <label class="directory-admin__field">
             <span>状态</span>
             <select v-model="draft.status" class="directory-admin__input">
@@ -923,6 +1005,15 @@
                 返回用户管理
               </router-link>
               <button
+                v-if="routeNavigationFailureUserManagementLocation"
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                :disabled="routeNavigationFailureAction.length > 0"
+                @click="void copyRouteNavigationFailureUserManagementLocation()"
+              >
+                复制用户链接
+              </button>
+              <button
                 class="directory-admin__button directory-admin__button--secondary"
                 type="button"
                 :disabled="routeNavigationFailureAction.length > 0"
@@ -957,6 +1048,14 @@
                 前往用户管理
               </router-link>
               <button
+                v-if="focusedVisibleAccount?.localUser?.id"
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                @click="void copyFocusedUserManagementLocation()"
+              >
+                复制用户链接
+              </button>
+              <button
                 v-if="focusedVisibleAccount && focusedVisibleAccountBindDraft.length > 0"
                 class="directory-admin__button"
                 type="button"
@@ -965,7 +1064,7 @@
               >
                 {{ focusedVisibleAccountBindLabel }}
               </button>
-              <button class="directory-admin__button directory-admin__button--secondary" type="button" @click="clearFocusedAccount()">
+              <button class="directory-admin__button directory-admin__button--secondary" type="button" @click="clearFocusedAccountAndDirectoryNavigation()">
                 清除定位
               </button>
             </div>
@@ -1476,6 +1575,8 @@ type ManualAdmissionResult = {
 }
 
 type AutoAdmissionOnboardingPacket = {
+  accountId: string
+  integrationId: string
   userId: string
   name: string
   email: string | null
@@ -1706,6 +1807,38 @@ const showPendingBindingManualReasonFilters = computed(() => (
 const focusedVisibleAccount = computed(() => (
   accounts.value.find((account) => account.id === focusedAccountId.value) ?? null
 ))
+const autoAdmissionInviteMessages = computed(() => (
+  autoAdmissionOnboardingPackets.value
+    .map((packet) => String(packet.onboarding?.inviteMessage || '').trim())
+    .filter((message) => message.length > 0)
+))
+const autoAdmissionUserManagementLocations = computed(() => (
+  autoAdmissionOnboardingPackets.value.map((packet) => {
+    const location = buildUserManagementLocation(packet.userId, {
+      id: packet.accountId,
+      integrationId: packet.integrationId,
+    })
+    return typeof window === 'undefined'
+      ? location
+      : new URL(location, window.location.origin).toString()
+  })
+))
+const autoAdmissionDeliveryPackets = computed(() => (
+  autoAdmissionOnboardingPackets.value.map((packet) => {
+    const location = buildUserManagementLocation(packet.userId, {
+      id: packet.accountId,
+      integrationId: packet.integrationId,
+    })
+    const absoluteLocation = typeof window === 'undefined'
+      ? location
+      : new URL(location, window.location.origin).toString()
+    const inviteMessage = String(packet.onboarding?.inviteMessage || '').trim()
+    return inviteMessage.length > 0
+      ? `用户治理链接：${absoluteLocation}\n\n${inviteMessage}`
+      : `用户治理链接：${absoluteLocation}`
+  })
+))
+const hasAutoAdmissionInviteMessages = computed(() => autoAdmissionInviteMessages.value.length > 0)
 const focusedVisibleAccountBindDraft = computed(() => {
   if (!focusedVisibleAccount.value) return ''
   return readBindingDraft(focusedVisibleAccount.value).trim()
@@ -2075,6 +2208,22 @@ function clearFocusedAccount() {
   pendingFocusedAccountScroll.value = false
 }
 
+function clearFocusedAccountAndDirectoryNavigation() {
+  clearFocusedAccount()
+  const navigation = directoryNavigation.value
+  if (!navigation.accountId && !navigation.source && !navigation.userId) return
+  const nextNavigation: InitialDirectoryNavigation = {
+    integrationId: navigation.integrationId || selectedIntegrationId.value,
+    accountId: '',
+    source: '',
+    userId: '',
+  }
+  directoryNavigation.value = nextNavigation
+  replaceDirectoryNavigation(nextNavigation)
+  appliedDirectoryNavigationKey.value = buildDirectoryNavigationKey(nextNavigation)
+  setStatus('已清除目录定位上下文')
+}
+
 function clearFocusedAccountNavigationState() {
   clearFocusedAccount()
   accountQuery.value = ''
@@ -2102,13 +2251,16 @@ function clearFailedDirectoryNavigation() {
   try {
     const retainedIntegrationId = selectedIntegration.value?.id ?? selectedIntegrationId.value
     const retainedIntegrationName = selectedIntegration.value?.name ?? routeNavigationFailureNotice.value.currentIntegrationName
-    clearRouteNavigationFailureNotice()
-    replaceDirectoryNavigation({
+    const nextNavigation: InitialDirectoryNavigation = {
       integrationId: retainedIntegrationId,
       accountId: '',
       source: '',
       userId: '',
-    })
+    }
+    clearRouteNavigationFailureNotice()
+    directoryNavigation.value = nextNavigation
+    replaceDirectoryNavigation(nextNavigation)
+    appliedDirectoryNavigationKey.value = buildDirectoryNavigationKey(nextNavigation)
     setStatus(retainedIntegrationName ? `已保留当前目录上下文 ${retainedIntegrationName}` : '已清除失败定位条件')
   } finally {
     routeNavigationFailureAction.value = ''
@@ -2412,9 +2564,13 @@ function readAutoAdmissionOnboardingPackets(data: Record<string, unknown> | unde
   return rawPackets.flatMap((entry) => {
     if (!entry || typeof entry !== 'object') return []
     const packet = entry as Record<string, unknown>
+    const accountId = typeof packet.accountId === 'string' ? packet.accountId.trim() : ''
+    const integrationId = typeof packet.integrationId === 'string' ? packet.integrationId.trim() : ''
     const userId = typeof packet.userId === 'string' ? packet.userId.trim() : ''
-    if (!userId) return []
+    if (!userId || !accountId || !integrationId) return []
     return [{
+      accountId,
+      integrationId,
       userId,
       name: typeof packet.name === 'string' ? packet.name : '',
       email: typeof packet.email === 'string' && packet.email.trim().length > 0 ? packet.email : null,
@@ -3095,6 +3251,167 @@ function buildUserManagementLocation(userId: string, account: Pick<DirectoryAcco
     params.set('filter', 'dingtalk-openid-missing')
   }
   return `/admin/users?${params.toString()}`
+}
+
+async function copyRouteNavigationFailureUserManagementLocation(): Promise<void> {
+  const location = routeNavigationFailureUserManagementLocation.value
+  if (!location) return
+  try {
+    const absoluteLocation = typeof window === 'undefined'
+      ? location
+      : new URL(location, window.location.origin).toString()
+    await navigator.clipboard.writeText(absoluteLocation)
+    setStatus('失败回跳用户链接已复制')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '复制失败回跳用户链接失败', 'error')
+  }
+}
+
+async function copyManualAdmissionUserManagementLocation(): Promise<void> {
+  const result = manualAdmissionResult.value
+  if (!result) return
+  try {
+    const location = buildUserManagementLocation(result.userId, {
+      id: result.accountId,
+      integrationId: result.integrationId,
+    })
+    const absoluteLocation = typeof window === 'undefined'
+      ? location
+      : new URL(location, window.location.origin).toString()
+    await navigator.clipboard.writeText(absoluteLocation)
+    setStatus('创建结果用户链接已复制')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '复制创建结果用户链接失败', 'error')
+  }
+}
+
+async function copyManualAdmissionInviteMessage(): Promise<void> {
+  const inviteMessage = String(manualAdmissionResult.value?.onboarding?.inviteMessage || '').trim()
+  if (!inviteMessage) return
+  try {
+    await navigator.clipboard.writeText(inviteMessage)
+    setStatus('创建结果邀请文案已复制')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '复制创建结果邀请文案失败', 'error')
+  }
+}
+
+async function copyManualAdmissionDeliveryPacket(): Promise<void> {
+  const result = manualAdmissionResult.value
+  if (!result) return
+  const location = buildUserManagementLocation(result.userId, {
+    id: result.accountId,
+    integrationId: result.integrationId,
+  })
+  const absoluteLocation = typeof window === 'undefined'
+    ? location
+    : new URL(location, window.location.origin).toString()
+  const inviteMessage = String(result.onboarding?.inviteMessage || '').trim()
+  const payload = inviteMessage.length > 0
+    ? `用户治理链接：${absoluteLocation}\n\n${inviteMessage}`
+    : `用户治理链接：${absoluteLocation}`
+  try {
+    await navigator.clipboard.writeText(payload)
+    setStatus('创建结果完整交付信息已复制')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '复制创建结果完整交付信息失败', 'error')
+  }
+}
+
+async function copyAutoAdmissionUserManagementLocation(packet: AutoAdmissionOnboardingPacket): Promise<void> {
+  try {
+    const location = buildUserManagementLocation(packet.userId, {
+      id: packet.accountId,
+      integrationId: packet.integrationId,
+    })
+    const absoluteLocation = typeof window === 'undefined'
+      ? location
+      : new URL(location, window.location.origin).toString()
+    await navigator.clipboard.writeText(absoluteLocation)
+    setStatus('自动准入用户链接已复制')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '复制自动准入用户链接失败', 'error')
+  }
+}
+
+async function copyAutoAdmissionInviteMessage(packet: AutoAdmissionOnboardingPacket): Promise<void> {
+  const inviteMessage = String(packet.onboarding?.inviteMessage || '').trim()
+  if (!inviteMessage) return
+  try {
+    await navigator.clipboard.writeText(inviteMessage)
+    setStatus('自动准入邀请文案已复制')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '复制自动准入邀请文案失败', 'error')
+  }
+}
+
+async function copyAutoAdmissionDeliveryPacket(packet: AutoAdmissionOnboardingPacket): Promise<void> {
+  try {
+    const location = buildUserManagementLocation(packet.userId, {
+      id: packet.accountId,
+      integrationId: packet.integrationId,
+    })
+    const absoluteLocation = typeof window === 'undefined'
+      ? location
+      : new URL(location, window.location.origin).toString()
+    const inviteMessage = String(packet.onboarding?.inviteMessage || '').trim()
+    const payload = inviteMessage.length > 0
+      ? `用户治理链接：${absoluteLocation}\n\n${inviteMessage}`
+      : `用户治理链接：${absoluteLocation}`
+    await navigator.clipboard.writeText(payload)
+    setStatus('自动准入完整交付信息已复制')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '复制自动准入完整交付信息失败', 'error')
+  }
+}
+
+async function copyAllAutoAdmissionInviteMessages(): Promise<void> {
+  const inviteMessage = autoAdmissionInviteMessages.value.join('\n\n').trim()
+  if (!inviteMessage) return
+  try {
+    await navigator.clipboard.writeText(inviteMessage)
+    setStatus('全部自动准入邀请文案已复制')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '复制全部自动准入邀请文案失败', 'error')
+  }
+}
+
+async function copyAllAutoAdmissionUserManagementLocations(): Promise<void> {
+  const links = autoAdmissionUserManagementLocations.value.join('\n').trim()
+  if (!links) return
+  try {
+    await navigator.clipboard.writeText(links)
+    setStatus('全部自动准入用户链接已复制')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '复制全部自动准入用户链接失败', 'error')
+  }
+}
+
+async function copyAllAutoAdmissionDeliveryPackets(): Promise<void> {
+  const payload = autoAdmissionDeliveryPackets.value.join('\n\n---\n\n').trim()
+  if (!payload) return
+  try {
+    await navigator.clipboard.writeText(payload)
+    setStatus('全部自动准入完整交付信息已复制')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '复制全部自动准入完整交付信息失败', 'error')
+  }
+}
+
+async function copyFocusedUserManagementLocation(): Promise<void> {
+  const account = focusedVisibleAccount.value
+  const userId = account?.localUser?.id?.trim() ?? ''
+  if (!account || userId.length === 0) return
+  try {
+    const location = buildUserManagementLocation(userId, account)
+    const absoluteLocation = typeof window === 'undefined'
+      ? location
+      : new URL(location, window.location.origin).toString()
+    await navigator.clipboard.writeText(absoluteLocation)
+    setStatus('用户管理链接已复制')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '复制用户管理链接失败', 'error')
+  }
 }
 
 async function handleReviewUnbind(item: DirectoryReviewItem) {

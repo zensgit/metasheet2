@@ -99,6 +99,7 @@ import {
   getAutomationServiceInstance,
   parseCreateRuleInput,
   parseDingTalkAutomationDeliveryLimit,
+  parseDingTalkAutomationDeliveryRecordId,
   parseUpdateRuleInput,
   preflightDingTalkAutomationCreate,
   preflightDingTalkAutomationUpdate,
@@ -7539,7 +7540,8 @@ export function univerMetaRouter(): Router {
       }
 
       const limit = parseDingTalkAutomationDeliveryLimit(req.query.limit)
-      const deliveries = await listAutomationDingTalkPersonDeliveries(pool.query.bind(pool), ruleId, limit)
+      const recordId = parseDingTalkAutomationDeliveryRecordId(req.query.recordId)
+      const deliveries = await listAutomationDingTalkPersonDeliveries(pool.query.bind(pool), ruleId, limit, recordId)
       return res.json({ ok: true, data: { deliveries } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
@@ -7570,7 +7572,8 @@ export function univerMetaRouter(): Router {
       }
 
       const limit = parseDingTalkAutomationDeliveryLimit(req.query.limit)
-      const deliveries = await listAutomationDingTalkGroupDeliveries(pool.query.bind(pool), ruleId, limit)
+      const recordId = parseDingTalkAutomationDeliveryRecordId(req.query.recordId)
+      const deliveries = await listAutomationDingTalkGroupDeliveries(pool.query.bind(pool), ruleId, limit, recordId)
       return res.json({ ok: true, data: { deliveries } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)

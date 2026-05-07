@@ -37,6 +37,7 @@ const logger = new Logger('AutomationExecutor')
 const WEBHOOK_TIMEOUT_MS = 5_000
 const MAX_WEBHOOK_RETRIES = 2
 const DINGTALK_PERSON_BATCH_SIZE = 100
+const DINGTALK_GROUP_FAILURE_ALERT_SUBJECT = 'MetaSheet DingTalk group delivery failed'
 
 function readJsonSafely(response: Response): Promise<unknown> {
   return response.json().catch(() => null)
@@ -67,6 +68,11 @@ function renderAutomationTemplate(template: string, data: Record<string, unknown
   return template.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_match, key: string) =>
     renderTemplateValue(lookupTemplateValue(key, data)),
   )
+}
+
+function truncateForDingTalkAlert(value: string, maxLength = 800): string {
+  if (value.length <= maxLength) return value
+  return `${value.slice(0, Math.max(0, maxLength - 3))}...`
 }
 
 function normalizeUserIds(value: unknown): string[] {
@@ -1196,6 +1202,125 @@ export class AutomationExecutor {
     }
   }
 
+  private async notifyRuleCreatorOfDingTalkGroupFailure(
+    config: SendDingTalkGroupMessageConfig,
+    context: ExecutionContext,
+    input: {
+      renderedTitle: string
+      failedDestinations: Array<{ id: string; name: string; error: string }>
+    },
+  ): Promise<{ status: 'success' | 'failed' | 'skipped'; error?: string } | undefined> {
+    if (config.notifyRuleCreatorOnFailure !== true) return undefined
+    const creatorId = context.ruleCreatedBy?.trim()
+    if (!creatorId) return { status: 'skipped', error: 'Rule creator is missing' }
+
+    const subject = DINGTALK_GROUP_FAILURE_ALERT_SUBJECT
+    const failureLines = input.failedDestinations.map((destination) =>
+      `- ${destination.name || destination.id}: ${destination.error}`,
+    )
+    const content = truncateForDingTalkAlert([
+      `Rule: ${context.ruleId}`,
+      `Record: ${context.recordId || '-'}`,
+      `Original title: ${input.renderedTitle || '-'}`,
+      '',
+      'Failed destinations:',
+      ...failureLines,
+    ].join('\n'))
+
+    const recipientsResult = await this.deps.queryFn(
+      `SELECT u.id AS local_user_id,
+              u.is_active AS local_user_active,
+              linked.external_user_id AS dingtalk_user_id
+         FROM users u
+         LEFT JOIN LATERAL (
+           SELECT a.external_user_id
+             FROM directory_account_links l
+             JOIN directory_accounts a ON a.id = l.directory_account_id
+            WHERE l.local_user_id = u.id
+              AND l.link_status = 'linked'
+              AND a.provider = 'dingtalk'
+              AND a.is_active = TRUE
+            ORDER BY a.updated_at DESC
+            LIMIT 1
+         ) linked ON TRUE
+        WHERE u.id = ANY($1::text[])`,
+      [[creatorId]],
+    )
+    const row = recipientsResult.rows[0] as Record<string, unknown> | undefined
+    const dingtalkUserId = typeof row?.dingtalk_user_id === 'string' ? row.dingtalk_user_id.trim() : ''
+    const isActive = row?.local_user_active === true
+
+    if (!isActive || !dingtalkUserId) {
+      await recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
+        localUserId: creatorId,
+        sourceType: 'automation',
+        subject,
+        content,
+        success: false,
+        status: 'skipped',
+        errorMessage: 'DingTalk account is not linked or user is inactive',
+        automationRuleId: context.ruleId,
+        recordId: context.recordId,
+        initiatedBy: context.actorId ?? null,
+      })
+      return { status: 'skipped', error: 'DingTalk account is not linked or user is inactive' }
+    }
+
+    try {
+      const messageConfig = readDingTalkMessageConfig()
+      const accessToken = await fetchDingTalkAppAccessToken(messageConfig, { fetchFn: this.deps.fetchFn })
+      const result = await sendDingTalkWorkNotification(
+        accessToken,
+        {
+          userIds: [dingtalkUserId],
+          title: subject,
+          content,
+        },
+        messageConfig,
+        { fetchFn: this.deps.fetchFn },
+      )
+      await recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
+        localUserId: creatorId,
+        dingtalkUserId,
+        sourceType: 'automation',
+        subject,
+        content,
+        success: true,
+        status: 'success',
+        httpStatus: 200,
+        responseBody: stringifyResponseBody(result.raw),
+        automationRuleId: context.ruleId,
+        recordId: context.recordId,
+        initiatedBy: context.actorId ?? null,
+      })
+      return { status: 'success' }
+    } catch (error) {
+      const httpStatus = error instanceof DingTalkRequestError ? error.statusCode : error instanceof DingTalkBusinessError ? 200 : null
+      const responseBody = error instanceof DingTalkRequestError
+        ? stringifyResponseBody(error.responseBody)
+        : error instanceof DingTalkBusinessError
+          ? stringifyResponseBody(error.responseBody)
+          : null
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      await recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
+        localUserId: creatorId,
+        dingtalkUserId,
+        sourceType: 'automation',
+        subject,
+        content,
+        success: false,
+        status: 'failed',
+        httpStatus,
+        responseBody,
+        errorMessage,
+        automationRuleId: context.ruleId,
+        recordId: context.recordId,
+        initiatedBy: context.actorId ?? null,
+      })
+      return { status: 'failed', error: errorMessage }
+    }
+  }
+
   private async executeLockRecord(
     config: Record<string, unknown>,
     context: ExecutionContext,
@@ -1436,6 +1561,10 @@ export class AutomationExecutor {
           initiatedBy: context.actorId ?? null,
         }),
       ))
+      const failureAlert = await this.notifyRuleCreatorOfDingTalkGroupFailure(config, context, {
+        renderedTitle,
+        failedDestinations,
+      })
       return {
         actionType: 'send_dingtalk_group_message',
         status: 'failed',
@@ -1450,6 +1579,7 @@ export class AutomationExecutor {
           sentCount: 0,
           failedDestinationIds: failedDestinations.map((destination) => destination.id),
           linkCount: linkLines.length,
+          ...(failureAlert ? { failureAlert } : {}),
         },
       }
     }
@@ -1561,6 +1691,10 @@ export class AutomationExecutor {
     }
 
     if (failedDestinations.length) {
+      const failureAlert = await this.notifyRuleCreatorOfDingTalkGroupFailure(config, context, {
+        renderedTitle,
+        failedDestinations,
+      })
       return {
         actionType: 'send_dingtalk_group_message',
         status: 'failed',
@@ -1575,6 +1709,7 @@ export class AutomationExecutor {
           sentCount: successfulDestinations.length,
           failedDestinationIds: failedDestinations.map((destination) => destination.id),
           linkCount: linkLines.length,
+          ...(failureAlert ? { failureAlert } : {}),
         },
       }
     }

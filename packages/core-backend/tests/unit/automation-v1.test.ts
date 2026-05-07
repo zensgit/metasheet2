@@ -47,7 +47,12 @@ vi.mock('../../src/db/db', () => {
 })
 
 import { AutomationLogService } from '../../src/multitable/automation-log-service'
-import { AutomationRuleValidationError, AutomationService } from '../../src/multitable/automation-service'
+import {
+  type AutomationRule as ServiceAutomationRule,
+  AutomationRuleValidationError,
+  AutomationService,
+  preflightDingTalkAutomationUpdate,
+} from '../../src/multitable/automation-service'
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -840,6 +845,237 @@ describe('AutomationExecutor', () => {
     expect(insertArgs?.[6]).toBe(200)
     expect(insertArgs?.[7]).toContain('signature mismatch')
     expect(insertArgs?.[8]).toContain('signature mismatch')
+  })
+
+  it('does not notify the rule creator when DingTalk group failure alerts are explicitly disabled', async () => {
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{ id: 'dt_1', name: 'Ops Group', webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=test', secret: null, enabled: true }],
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ errcode: 310000, errmsg: 'keyword mismatch' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      createdBy: 'u1',
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'dt_1',
+          titleTemplate: 'Record {{record.title}} ready',
+          bodyTemplate: 'Status: {{record.status}}',
+          notifyRuleCreatorOnFailure: false,
+        },
+      }],
+    })
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { title: 'Incident', status: 'open' },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].output).toEqual(expect.objectContaining({
+      failedDestinationIds: ['dt_1'],
+    }))
+    expect(result.steps[0].output).not.toHaveProperty('failureAlert')
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(queryFn.mock.calls.some((call) => String(call[0]).includes('FROM users u'))).toBe(false)
+    expect(queryFn.mock.calls.some((call) => String(call[0]).includes('INSERT INTO dingtalk_person_deliveries'))).toBe(false)
+    expect(queryFn.mock.calls.some((call) => String(call[0]).includes('INSERT INTO dingtalk_group_deliveries'))).toBe(true)
+  })
+
+  it('records a skipped creator failure alert when DingTalk group delivery fails and creator is not linked', async () => {
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{ id: 'dt_1', name: 'Ops Group', webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=test', secret: null, enabled: true }],
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ local_user_id: 'u1', local_user_active: true, dingtalk_user_id: null }] })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ errcode: 310000, errmsg: 'keyword mismatch' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      createdBy: 'u1',
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'dt_1',
+          titleTemplate: 'Record {{record.title}} ready',
+          bodyTemplate: 'Status: {{record.status}}',
+          notifyRuleCreatorOnFailure: true,
+        },
+      }],
+    })
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { title: 'Incident', status: 'open' },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].output).toEqual(expect.objectContaining({
+      failureAlert: {
+        status: 'skipped',
+        error: 'DingTalk account is not linked or user is inactive',
+      },
+    }))
+    const personInsert = queryFn.mock.calls.find((call) => String(call[0]).includes('INSERT INTO dingtalk_person_deliveries'))
+    expect(personInsert?.[1]?.[1]).toBe('u1')
+    expect(personInsert?.[1]?.[4]).toBe('MetaSheet DingTalk group delivery failed')
+    expect(personInsert?.[1]?.[7]).toBe('skipped')
+    expect(personInsert?.[1]?.[10]).toBe('DingTalk account is not linked or user is inactive')
+  })
+
+  it('sends a creator failure alert when DingTalk group delivery fails and creator is linked', async () => {
+    process.env.DINGTALK_APP_KEY = 'dt-app-key'
+    process.env.DINGTALK_APP_SECRET = 'dt-app-secret'
+    process.env.DINGTALK_AGENT_ID = '123456789'
+
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{ id: 'dt_1', name: 'Ops Group', webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=test', secret: null, enabled: true }],
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ local_user_id: 'u1', local_user_active: true, dingtalk_user_id: 'dt-user-1' }] })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 310000, errmsg: 'keyword mismatch' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', access_token: 'app-access-token' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', task_id: 778899, request_id: 'req_1' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      createdBy: 'u1',
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'dt_1',
+          titleTemplate: 'Record {{record.title}} ready',
+          bodyTemplate: 'Status: {{record.status}}',
+          notifyRuleCreatorOnFailure: true,
+        },
+      }],
+    })
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { title: 'Incident', status: 'open' },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].output).toEqual(expect.objectContaining({
+      failureAlert: { status: 'success' },
+    }))
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+    const [workNotifyUrl, workNotifyInit] = fetchFn.mock.calls[2] as [string, RequestInit]
+    expect(workNotifyUrl).toContain('/topapi/message/corpconversation/asyncsend_v2?access_token=app-access-token')
+    const workNotifyPayload = JSON.parse(workNotifyInit.body as string)
+    expect(workNotifyPayload.userid_list).toBe('dt-user-1')
+    expect(workNotifyPayload.msg.markdown.text).toContain('keyword mismatch')
+
+    const personInsert = queryFn.mock.calls.find((call) => String(call[0]).includes('INSERT INTO dingtalk_person_deliveries'))
+    expect(personInsert?.[1]?.[1]).toBe('u1')
+    expect(personInsert?.[1]?.[2]).toBe('dt-user-1')
+    expect(personInsert?.[1]?.[4]).toBe('MetaSheet DingTalk group delivery failed')
+    expect(personInsert?.[1]?.[6]).toBe(true)
+    expect(personInsert?.[1]?.[7]).toBe('success')
+    expect(personInsert?.[1]?.[9]).toContain('778899')
+  })
+
+  it('records a failed creator failure alert when DingTalk work notification send fails', async () => {
+    process.env.DINGTALK_APP_KEY = 'dt-app-key'
+    process.env.DINGTALK_APP_SECRET = 'dt-app-secret'
+    process.env.DINGTALK_AGENT_ID = '123456789'
+
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{ id: 'dt_1', name: 'Ops Group', webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=test', secret: null, enabled: true }],
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ local_user_id: 'u1', local_user_active: true, dingtalk_user_id: 'dt-user-1' }] })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 310000, errmsg: 'keyword mismatch' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', access_token: 'app-access-token' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 60020, errmsg: 'invalid user id' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      createdBy: 'u1',
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'dt_1',
+          titleTemplate: 'Record {{record.title}} ready',
+          bodyTemplate: 'Status: {{record.status}}',
+          notifyRuleCreatorOnFailure: true,
+        },
+      }],
+    })
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { title: 'Incident', status: 'open' },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].output).toEqual(expect.objectContaining({
+      failureAlert: {
+        status: 'failed',
+        error: 'Failed to send DingTalk work notification',
+      },
+    }))
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+    expect(queryFn.mock.calls.some((call) => String(call[0]).includes('INSERT INTO dingtalk_group_deliveries'))).toBe(true)
+
+    const personInsert = queryFn.mock.calls.find((call) => String(call[0]).includes('INSERT INTO dingtalk_person_deliveries'))
+    expect(personInsert?.[1]?.[1]).toBe('u1')
+    expect(personInsert?.[1]?.[2]).toBe('dt-user-1')
+    expect(personInsert?.[1]?.[4]).toBe('MetaSheet DingTalk group delivery failed')
+    expect(personInsert?.[1]?.[6]).toBe(false)
+    expect(personInsert?.[1]?.[7]).toBe('failed')
+    expect(personInsert?.[1]?.[8]).toBe(200)
+    expect(personInsert?.[1]?.[9]).toContain('60020')
+    expect(personInsert?.[1]?.[9]).toContain('invalid user id')
+    expect(personInsert?.[1]?.[10]).toBe('Failed to send DingTalk work notification')
   })
 
   it('keeps send_dingtalk_group_message successful when delivery history persistence fails', async () => {
@@ -1910,6 +2146,7 @@ describe('AutomationService — Rule CRUD', () => {
   let service: AutomationService
   let eventBus: EventBus
   let queryFn: ReturnType<typeof vi.fn>
+  let dbMock: Record<string, unknown>
 
   // Build a Kysely mock that returns controllable results
   let dbExecuteResults: unknown[]
@@ -1976,8 +2213,8 @@ describe('AutomationService — Rule CRUD', () => {
   beforeEach(() => {
     eventBus = new EventBus()
     queryFn = vi.fn(async () => ({ rows: [], rowCount: 0 }))
-    const db = makeMockDb()
-    service = new AutomationService(eventBus, db as never, queryFn)
+    dbMock = makeMockDb()
+    service = new AutomationService(eventBus, dbMock as never, queryFn)
   })
 
   it('createRule inserts a rule and returns it', async () => {
@@ -2017,6 +2254,268 @@ describe('AutomationService — Rule CRUD', () => {
       destinationId: 'group_1',
       titleTemplate: 'Please fill',
       bodyTemplate: 'Open form',
+      notifyRuleCreatorOnFailure: true,
+    })
+  })
+
+  it('createRule preserves an explicit disabled DingTalk group creator failure alert', async () => {
+    dbExecuteResults.push([])
+    const rule = await service.createRule('sheet_1', {
+      name: 'DingTalk group',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'send_dingtalk_group_message',
+      actionConfig: {
+        destinationId: 'group_1',
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+        notifyRuleCreatorOnFailure: false,
+      },
+      createdBy: 'user_1',
+    })
+
+    expect(rule.action_config).toMatchObject({
+      destinationId: 'group_1',
+      titleTemplate: 'Please fill',
+      bodyTemplate: 'Open form',
+      notifyRuleCreatorOnFailure: false,
+    })
+  })
+
+  it('createRule defaults V1 DingTalk group action creator failure alerts on', async () => {
+    dbExecuteResults.push([])
+    const rule = await service.createRule('sheet_1', {
+      name: 'DingTalk group chain',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'notify',
+      actionConfig: { message: 'created' },
+      actions: [
+        {
+          type: 'send_dingtalk_group_message',
+          config: {
+            destinationId: 'group_1',
+            titleTemplate: 'Please fill',
+            bodyTemplate: 'Open form',
+          },
+        },
+      ],
+      createdBy: 'user_1',
+    })
+
+    expect(rule.actions?.[0]).toEqual({
+      type: 'send_dingtalk_group_message',
+      config: {
+        destinationId: 'group_1',
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+        notifyRuleCreatorOnFailure: true,
+      },
+    })
+  })
+
+  it('preflight update preserves legacy DingTalk group rules without creator failure alerts', async () => {
+    const existing = makeRuleRow({
+      action_type: 'send_dingtalk_group_message',
+      action_config: {
+        destinationId: 'group_1',
+        titleTemplate: 'Old title',
+        bodyTemplate: 'Old body',
+      },
+    }) as ServiceAutomationRule
+    const input = {
+      actionConfig: {
+        destinationId: 'group_1',
+        titleTemplate: 'New title',
+        bodyTemplate: 'New body',
+      },
+    }
+
+    const result = await preflightDingTalkAutomationUpdate(queryFn, 'sheet_1', 'atr_1', input, {
+      getRule: vi.fn(async () => existing),
+    })
+
+    expect(result?.actionConfig).toEqual({
+      destinationId: 'group_1',
+      titleTemplate: 'New title',
+      bodyTemplate: 'New body',
+    })
+  })
+
+  it('preflight update preserves legacy V1 DingTalk group actions without creator failure alerts', async () => {
+    const existing = makeRuleRow({
+      action_type: 'notify',
+      action_config: { message: 'legacy top-level notification' },
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'group_1',
+          titleTemplate: 'Old title',
+          bodyTemplate: 'Old body',
+        },
+      }],
+    }) as ServiceAutomationRule
+    const input = {
+      actionType: 'send_dingtalk_group_message',
+      actionConfig: {
+        destinationId: 'group_1',
+        titleTemplate: 'New title',
+        bodyTemplate: 'New body',
+      },
+      actions: [{
+        type: 'send_dingtalk_group_message' as const,
+        config: {
+          destinationId: 'group_1',
+          titleTemplate: 'New title',
+          bodyTemplate: 'New body',
+        },
+      }],
+    }
+
+    const result = await preflightDingTalkAutomationUpdate(queryFn, 'sheet_1', 'atr_1', input, {
+      getRule: vi.fn(async () => existing),
+    })
+
+    expect(result?.actionConfig).toEqual({
+      destinationId: 'group_1',
+      titleTemplate: 'New title',
+      bodyTemplate: 'New body',
+    })
+    expect(result?.actions?.[0]).toEqual({
+      type: 'send_dingtalk_group_message',
+      config: {
+        destinationId: 'group_1',
+        titleTemplate: 'New title',
+        bodyTemplate: 'New body',
+      },
+    })
+  })
+
+  it('preflight update defaults creator failure alerts on when switching into DingTalk group action', async () => {
+    const existing = makeRuleRow({
+      action_type: 'notify',
+      action_config: { message: 'created' },
+    }) as ServiceAutomationRule
+    const input = {
+      actionType: 'send_dingtalk_group_message',
+      actionConfig: {
+        destinationId: 'group_1',
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+      },
+    }
+
+    const result = await preflightDingTalkAutomationUpdate(queryFn, 'sheet_1', 'atr_1', input, {
+      getRule: vi.fn(async () => existing),
+    })
+
+    expect(result?.actionConfig).toEqual({
+      destinationId: 'group_1',
+      titleTemplate: 'Please fill',
+      bodyTemplate: 'Open form',
+      notifyRuleCreatorOnFailure: true,
+    })
+  })
+
+  it('preflight update preserves explicit disabled creator failure alerts when switching into DingTalk group action', async () => {
+    const existing = makeRuleRow({
+      action_type: 'notify',
+      action_config: { message: 'created' },
+    }) as ServiceAutomationRule
+    const input = {
+      actionType: 'send_dingtalk_group_message',
+      actionConfig: {
+        destinationId: 'group_1',
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+        notifyRuleCreatorOnFailure: false,
+      },
+    }
+
+    const result = await preflightDingTalkAutomationUpdate(queryFn, 'sheet_1', 'atr_1', input, {
+      getRule: vi.fn(async () => existing),
+    })
+
+    expect(result?.actionConfig).toEqual({
+      destinationId: 'group_1',
+      titleTemplate: 'Please fill',
+      bodyTemplate: 'Open form',
+      notifyRuleCreatorOnFailure: false,
+    })
+  })
+
+  it('preflight update defaults creator failure alerts on when adding a V1 DingTalk group action', async () => {
+    const existing = makeRuleRow({
+      action_type: 'notify',
+      action_config: { message: 'created' },
+      actions: [{ type: 'notify', config: { message: 'created' } }],
+    }) as ServiceAutomationRule
+    const input = {
+      actionType: 'notify',
+      actionConfig: { message: 'created' },
+      actions: [
+        { type: 'notify' as const, config: { message: 'created' } },
+        {
+          type: 'send_dingtalk_group_message' as const,
+          config: {
+            destinationId: 'group_1',
+            titleTemplate: 'Please fill',
+            bodyTemplate: 'Open form',
+          },
+        },
+      ],
+    }
+
+    const result = await preflightDingTalkAutomationUpdate(queryFn, 'sheet_1', 'atr_1', input, {
+      getRule: vi.fn(async () => existing),
+    })
+
+    expect(result?.actions?.[1]).toEqual({
+      type: 'send_dingtalk_group_message',
+      config: {
+        destinationId: 'group_1',
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+        notifyRuleCreatorOnFailure: true,
+      },
+    })
+  })
+
+  it('preflight update preserves explicit disabled creator failure alerts when adding a V1 DingTalk group action', async () => {
+    const existing = makeRuleRow({
+      action_type: 'notify',
+      action_config: { message: 'created' },
+      actions: [{ type: 'notify', config: { message: 'created' } }],
+    }) as ServiceAutomationRule
+    const input = {
+      actionType: 'notify',
+      actionConfig: { message: 'created' },
+      actions: [
+        { type: 'notify' as const, config: { message: 'created' } },
+        {
+          type: 'send_dingtalk_group_message' as const,
+          config: {
+            destinationId: 'group_1',
+            titleTemplate: 'Please fill',
+            bodyTemplate: 'Open form',
+            notifyRuleCreatorOnFailure: false,
+          },
+        },
+      ],
+    }
+
+    const result = await preflightDingTalkAutomationUpdate(queryFn, 'sheet_1', 'atr_1', input, {
+      getRule: vi.fn(async () => existing),
+    })
+
+    expect(result?.actions?.[1]).toEqual({
+      type: 'send_dingtalk_group_message',
+      config: {
+        destinationId: 'group_1',
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+        notifyRuleCreatorOnFailure: false,
+      },
     })
   })
 
@@ -2152,6 +2651,246 @@ describe('AutomationService — Rule CRUD', () => {
     expect(rule).not.toBeNull()
     expect(rule!.name).toBe('Updated')
     expect(queryFn).not.toHaveBeenCalled()
+  })
+
+  it('updateRule preserves legacy V1 DingTalk group actions without creator failure alerts', async () => {
+    dbExecuteTakeFirstResults.push(makeRuleRow({
+      action_type: 'notify',
+      action_config: { message: 'legacy top-level notification' },
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'group_1',
+          titleTemplate: 'Old title',
+          bodyTemplate: 'Old body',
+        },
+      }],
+    }))
+    dbExecuteResults.push([makeRuleRow({
+      action_type: 'send_dingtalk_group_message',
+      action_config: {
+        destinationId: 'group_1',
+        titleTemplate: 'New title',
+        bodyTemplate: 'New body',
+      },
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'group_1',
+          titleTemplate: 'New title',
+          bodyTemplate: 'New body',
+        },
+      }],
+    })])
+
+    const rule = await service.updateRule('atr_1', 'sheet_1', {
+      actionType: 'send_dingtalk_group_message',
+      actionConfig: {
+        destinationId: 'group_1',
+        titleTemplate: 'New title',
+        bodyTemplate: 'New body',
+      },
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'group_1',
+          titleTemplate: 'New title',
+          bodyTemplate: 'New body',
+        },
+      }],
+    })
+
+    const updatePayload = (dbMock.set as ReturnType<typeof vi.fn>).mock.calls[0][0] as Record<string, unknown>
+    expect(JSON.parse(updatePayload.action_config as string)).toEqual({
+      destinationId: 'group_1',
+      titleTemplate: 'New title',
+      bodyTemplate: 'New body',
+    })
+    expect(JSON.parse(updatePayload.actions as string)).toEqual([{
+      type: 'send_dingtalk_group_message',
+      config: {
+        destinationId: 'group_1',
+        titleTemplate: 'New title',
+        bodyTemplate: 'New body',
+      },
+    }])
+    expect(rule?.action_config).toEqual({
+      destinationId: 'group_1',
+      titleTemplate: 'New title',
+      bodyTemplate: 'New body',
+    })
+  })
+
+  it('updateRule preserves explicit disabled creator failure alerts when switching into DingTalk group action', async () => {
+    dbExecuteTakeFirstResults.push(makeRuleRow({
+      action_type: 'notify',
+      action_config: { message: 'created' },
+    }))
+    dbExecuteResults.push([makeRuleRow({
+      action_type: 'send_dingtalk_group_message',
+      action_config: {
+        destinationId: 'group_1',
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+        notifyRuleCreatorOnFailure: false,
+      },
+    })])
+
+    const rule = await service.updateRule('atr_1', 'sheet_1', {
+      actionType: 'send_dingtalk_group_message',
+      actionConfig: {
+        destinationId: 'group_1',
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+        notifyRuleCreatorOnFailure: false,
+      },
+    })
+
+    const updatePayload = (dbMock.set as ReturnType<typeof vi.fn>).mock.calls[0][0] as Record<string, unknown>
+    expect(JSON.parse(updatePayload.action_config as string)).toEqual({
+      destinationId: 'group_1',
+      titleTemplate: 'Please fill',
+      bodyTemplate: 'Open form',
+      notifyRuleCreatorOnFailure: false,
+    })
+    expect(rule?.action_config).toEqual({
+      destinationId: 'group_1',
+      titleTemplate: 'Please fill',
+      bodyTemplate: 'Open form',
+      notifyRuleCreatorOnFailure: false,
+    })
+  })
+
+  it('updateRule defaults creator failure alerts on when switching into DingTalk group action', async () => {
+    dbExecuteTakeFirstResults.push(makeRuleRow({
+      action_type: 'notify',
+      action_config: { message: 'created' },
+    }))
+    dbExecuteResults.push([makeRuleRow({
+      action_type: 'send_dingtalk_group_message',
+      action_config: {
+        destinationId: 'group_1',
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+        notifyRuleCreatorOnFailure: true,
+      },
+    })])
+
+    await service.updateRule('atr_1', 'sheet_1', {
+      actionType: 'send_dingtalk_group_message',
+      actionConfig: {
+        destinationId: 'group_1',
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+      },
+    })
+
+    const updatePayload = (dbMock.set as ReturnType<typeof vi.fn>).mock.calls[0][0] as Record<string, unknown>
+    expect(JSON.parse(updatePayload.action_config as string)).toEqual({
+      destinationId: 'group_1',
+      titleTemplate: 'Please fill',
+      bodyTemplate: 'Open form',
+      notifyRuleCreatorOnFailure: true,
+    })
+  })
+
+  it('updateRule defaults creator failure alerts on when adding a V1 DingTalk group action', async () => {
+    dbExecuteTakeFirstResults.push(makeRuleRow({
+      action_type: 'notify',
+      action_config: { message: 'created' },
+      actions: [{ type: 'notify', config: { message: 'created' } }],
+    }))
+    dbExecuteResults.push([makeRuleRow({
+      action_type: 'notify',
+      action_config: { message: 'created' },
+      actions: [
+        { type: 'notify', config: { message: 'created' } },
+        {
+          type: 'send_dingtalk_group_message',
+          config: {
+            destinationId: 'group_1',
+            titleTemplate: 'Please fill',
+            bodyTemplate: 'Open form',
+            notifyRuleCreatorOnFailure: true,
+          },
+        },
+      ],
+    })])
+
+    await service.updateRule('atr_1', 'sheet_1', {
+      actions: [
+        { type: 'notify', config: { message: 'created' } },
+        {
+          type: 'send_dingtalk_group_message',
+          config: {
+            destinationId: 'group_1',
+            titleTemplate: 'Please fill',
+            bodyTemplate: 'Open form',
+          },
+        },
+      ],
+    })
+
+    const updatePayload = (dbMock.set as ReturnType<typeof vi.fn>).mock.calls[0][0] as Record<string, unknown>
+    expect(JSON.parse(updatePayload.actions as string)[1]).toEqual({
+      type: 'send_dingtalk_group_message',
+      config: {
+        destinationId: 'group_1',
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+        notifyRuleCreatorOnFailure: true,
+      },
+    })
+  })
+
+  it('updateRule preserves explicit disabled creator failure alerts when adding a V1 DingTalk group action', async () => {
+    dbExecuteTakeFirstResults.push(makeRuleRow({
+      action_type: 'notify',
+      action_config: { message: 'created' },
+      actions: [{ type: 'notify', config: { message: 'created' } }],
+    }))
+    dbExecuteResults.push([makeRuleRow({
+      action_type: 'notify',
+      action_config: { message: 'created' },
+      actions: [
+        { type: 'notify', config: { message: 'created' } },
+        {
+          type: 'send_dingtalk_group_message',
+          config: {
+            destinationId: 'group_1',
+            titleTemplate: 'Please fill',
+            bodyTemplate: 'Open form',
+            notifyRuleCreatorOnFailure: false,
+          },
+        },
+      ],
+    })])
+
+    await service.updateRule('atr_1', 'sheet_1', {
+      actions: [
+        { type: 'notify', config: { message: 'created' } },
+        {
+          type: 'send_dingtalk_group_message',
+          config: {
+            destinationId: 'group_1',
+            titleTemplate: 'Please fill',
+            bodyTemplate: 'Open form',
+            notifyRuleCreatorOnFailure: false,
+          },
+        },
+      ],
+    })
+
+    const updatePayload = (dbMock.set as ReturnType<typeof vi.fn>).mock.calls[0][0] as Record<string, unknown>
+    expect(JSON.parse(updatePayload.actions as string)[1]).toEqual({
+      type: 'send_dingtalk_group_message',
+      config: {
+        destinationId: 'group_1',
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+        notifyRuleCreatorOnFailure: false,
+      },
+    })
   })
 
   it('updateRule validates the merged state when only actionType changes to DingTalk', async () => {

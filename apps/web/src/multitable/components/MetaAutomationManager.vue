@@ -241,6 +241,17 @@
             >
               {{ warning }}
             </div>
+            <label class="meta-automation__checkbox">
+              <input
+                v-model="draft.notifyRuleCreatorOnFailure"
+                type="checkbox"
+                data-automation-field="notifyRuleCreatorOnFailure"
+              />
+              Notify me if DingTalk group delivery fails
+            </label>
+            <div class="meta-automation__hint" data-automation-field="notifyRuleCreatorOnFailureHint">
+              Sends a DingTalk work notification to the rule creator when this group robot delivery fails.
+            </div>
             <div class="meta-automation__preview" data-automation-summary="group">
               <div class="meta-automation__preview-title">Message summary</div>
               <div><strong>Groups:</strong> {{ dingTalkGroupSummary }}</div>
@@ -841,6 +852,7 @@ interface DraftState {
   dingtalkBodyTemplate: string
   publicFormViewId: string
   internalViewId: string
+  notifyRuleCreatorOnFailure: boolean
   dingtalkPersonUserIds: string
   dingtalkPersonMemberGroupIds: string
   dingtalkPersonRecipientFieldPath: string
@@ -867,6 +879,7 @@ function emptyDraft(): DraftState {
     dingtalkBodyTemplate: '',
     publicFormViewId: '',
     internalViewId: '',
+    notifyRuleCreatorOnFailure: true,
     dingtalkPersonUserIds: '',
     dingtalkPersonMemberGroupIds: '',
     dingtalkPersonRecipientFieldPath: '',
@@ -1679,6 +1692,7 @@ function openEditForm(rule: AutomationRule) {
     dingtalkBodyTemplate: (rule.actionConfig?.bodyTemplate as string) ?? '',
     publicFormViewId: (rule.actionConfig?.publicFormViewId as string) ?? '',
     internalViewId: (rule.actionConfig?.internalViewId as string) ?? '',
+    notifyRuleCreatorOnFailure: rule.actionConfig?.notifyRuleCreatorOnFailure === true,
     dingtalkPersonUserIds: Array.isArray(rule.actionConfig?.userIds) ? rule.actionConfig?.userIds.join(', ') : '',
     dingtalkPersonMemberGroupIds: Array.isArray(rule.actionConfig?.memberGroupIds) ? rule.actionConfig?.memberGroupIds.join(', ') : '',
     dingtalkPersonRecipientFieldPath: Array.isArray(rule.actionConfig?.userIdFieldPaths)
@@ -1734,6 +1748,7 @@ function buildActionConfig(): Record<string, unknown> {
       bodyTemplate: draft.value.dingtalkBodyTemplate,
       publicFormViewId: draft.value.publicFormViewId || undefined,
       internalViewId: draft.value.internalViewId || undefined,
+      notifyRuleCreatorOnFailure: draft.value.notifyRuleCreatorOnFailure === true,
     }
   }
   if (draft.value.actionType === 'send_dingtalk_person_message') {
@@ -1867,6 +1882,7 @@ function describeDingTalkActionLinks(actionConfig: Record<string, unknown>): str
   const parts = [
     publicFormViewId ? `Public form: ${viewSummaryName(publicFormViewId, publicFormViewId)}` : '',
     internalViewId ? `Internal processing: ${viewSummaryName(internalViewId, internalViewId)}` : '',
+    actionConfig.notifyRuleCreatorOnFailure === true ? 'Failure alerts: rule creator' : '',
   ].filter(Boolean)
   return parts.length ? ` · ${parts.join(' · ')}` : ''
 }

@@ -60,6 +60,20 @@ function createMockDb() {
   }
 }
 
+function createOkFetch() {
+  return vi.fn(async () => new Response(
+    JSON.stringify({ errcode: 0, errmsg: 'ok' }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  ))
+}
+
+function createDingTalkErrorFetch(message = 'token is not exist') {
+  return vi.fn(async () => new Response(
+    JSON.stringify({ errcode: 300005, errmsg: message }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  ))
+}
+
 function destinationRow(overrides: Record<string, unknown> = {}) {
   return {
     id: 'dt_1',
@@ -107,7 +121,8 @@ describe('DingTalkGroupDestinationService', () => {
 
   test('creates and lists destinations', async () => {
     const { db, roots } = createMockDb()
-    const service = new DingTalkGroupDestinationService(db, vi.fn())
+    const fetchFn = createOkFetch()
+    const service = new DingTalkGroupDestinationService(db, fetchFn as typeof fetch)
 
     const created = await service.createDestination('user_1', {
       name: ' Ops DingTalk Group ',
@@ -125,6 +140,8 @@ describe('DingTalkGroupDestinationService', () => {
     const values = insertChain?.values?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
     expect(values?.secret).toBe('SEC123')
     expect(values?.org_id).toBeNull()
+    expect(values?.last_test_status).toBe('success')
+    expect(fetchFn).toHaveBeenCalledTimes(1)
 
     executeQueue.push([destinationRow({ sheet_id: 'sheet_1' }), destinationRow({ id: 'dt_legacy', sheet_id: null })])
     const listed = await service.listDestinations('user_1', 'sheet_1')
@@ -136,7 +153,8 @@ describe('DingTalkGroupDestinationService', () => {
 
   test('creates organization-scoped destinations', async () => {
     const { db, roots } = createMockDb()
-    const service = new DingTalkGroupDestinationService(db, vi.fn())
+    const fetchFn = createOkFetch()
+    const service = new DingTalkGroupDestinationService(db, fetchFn as typeof fetch)
 
     const created = await service.createDestination('admin_1', {
       name: 'Org Ops DingTalk Group',
@@ -152,6 +170,21 @@ describe('DingTalkGroupDestinationService', () => {
     const values = insertChain?.values?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
     expect(values?.sheet_id).toBeNull()
     expect(values?.org_id).toBe('org_1')
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  test('does not create a destination when DingTalk verification fails', async () => {
+    const { db, roots } = createMockDb()
+    const fetchFn = createDingTalkErrorFetch()
+    const service = new DingTalkGroupDestinationService(db, fetchFn as typeof fetch)
+
+    await expect(service.createDestination('user_1', {
+      name: 'Ops DingTalk Group',
+      webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=bad-token',
+    })).rejects.toThrow('DingTalk group destination verification failed')
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(roots.insertInto).not.toHaveBeenCalled()
   })
 
   test('rejects invalid organization destination scope combinations', async () => {
@@ -252,7 +285,8 @@ describe('DingTalkGroupDestinationService', () => {
 
   test('updates a destination', async () => {
     const { db } = createMockDb()
-    const service = new DingTalkGroupDestinationService(db, vi.fn())
+    const fetchFn = createOkFetch()
+    const service = new DingTalkGroupDestinationService(db, fetchFn as typeof fetch)
 
     executeTakeFirstQueue.push(destinationRow())
     executeTakeFirstQueue.push(destinationRow({
@@ -270,6 +304,23 @@ describe('DingTalkGroupDestinationService', () => {
     expect(updated.name).toBe('Updated group')
     expect(updated.enabled).toBe(false)
     expect(updated.webhookUrl).toContain('access_token=next')
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  test('does not update webhook or secret when DingTalk verification fails', async () => {
+    const { db, roots } = createMockDb()
+    const fetchFn = createDingTalkErrorFetch('signature mismatch')
+    const service = new DingTalkGroupDestinationService(db, fetchFn as typeof fetch)
+
+    executeTakeFirstQueue.push(destinationRow())
+
+    await expect(service.updateDestination('dt_1', 'user_1', {
+      webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=bad-token',
+      secret: 'SEC_NEXT',
+    })).rejects.toThrow('DingTalk group destination verification failed')
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(roots.updateTable).not.toHaveBeenCalled()
   })
 
   test('rejects invalid DingTalk robot webhook URL on update', async () => {
@@ -321,10 +372,7 @@ describe('DingTalkGroupDestinationService', () => {
 
   test('testSend marks success when DingTalk responds ok', async () => {
     const { db, roots } = createMockDb()
-    const fetchFn = vi.fn(async () => new Response(
-      JSON.stringify({ errcode: 0, errmsg: 'ok' }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } },
-    ))
+    const fetchFn = createOkFetch()
     const service = new DingTalkGroupDestinationService(db, fetchFn as typeof fetch)
 
     executeTakeFirstQueue.push(destinationRow())
@@ -336,6 +384,8 @@ describe('DingTalkGroupDestinationService', () => {
     expect(roots.insertInto).toHaveBeenCalledWith('dingtalk_group_deliveries')
     const insertChain = roots.insertInto.mock.results[0]?.value as MockChain | undefined
     const deliveryValues = insertChain?.values?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
+    expect(deliveryValues?.subject).toBe('P4 metasheet DingTalk group validity test')
+    expect(deliveryValues?.content).toBe('P4 / metasheet robot validity check from MetaSheet.')
     expect(deliveryValues?.http_status).toBe(200)
     expect(deliveryValues?.response_body).toContain('"errcode":0')
     const updateChain = roots.updateTable.mock.results[0]?.value as MockChain | undefined
@@ -346,10 +396,7 @@ describe('DingTalkGroupDestinationService', () => {
 
   test('testSend rejects legacy invalid webhook URL without fetch', async () => {
     const { db, roots } = createMockDb()
-    const fetchFn = vi.fn(async () => new Response(
-      JSON.stringify({ errcode: 0, errmsg: 'ok' }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } },
-    ))
+    const fetchFn = createOkFetch()
     const service = new DingTalkGroupDestinationService(db, fetchFn as typeof fetch)
 
     executeTakeFirstQueue.push(destinationRow({ webhook_url: 'https://example.com/hook' }))
@@ -370,10 +417,7 @@ describe('DingTalkGroupDestinationService', () => {
 
   test('testSend allows shared destination access for non-owner on the same sheet', async () => {
     const { db } = createMockDb()
-    const fetchFn = vi.fn(async () => new Response(
-      JSON.stringify({ errcode: 0, errmsg: 'ok' }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } },
-    ))
+    const fetchFn = createOkFetch()
     const service = new DingTalkGroupDestinationService(db, fetchFn as typeof fetch)
 
     executeTakeFirstQueue.push(destinationRow({ sheet_id: 'sheet_1', created_by: 'owner_user' }))
@@ -406,10 +450,7 @@ describe('DingTalkGroupDestinationService', () => {
 
   test('testSend still succeeds when delivery history persistence fails', async () => {
     const { db, roots } = createMockDb()
-    const fetchFn = vi.fn(async () => new Response(
-      JSON.stringify({ errcode: 0, errmsg: 'ok' }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } },
-    ))
+    const fetchFn = createOkFetch()
     const deliveryInsertChain = makeChain()
     deliveryInsertChain.execute = vi.fn(async () => {
       throw new Error('delivery history unavailable')

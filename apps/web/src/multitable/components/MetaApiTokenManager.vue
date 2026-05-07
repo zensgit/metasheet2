@@ -204,7 +204,7 @@
               data-dingtalk-group-webhook-url="true"
             />
             <p id="dingtalk-group-webhook-help" class="meta-api-mgr__help" data-dingtalk-group-webhook-help="true">
-              Paste the robot webhook from the target DingTalk group robot settings. After saving, this destination appears in this table's automation rule editor. The access token is stored for delivery but masked in this UI.
+              Paste the robot webhook from the target DingTalk group robot settings. Saving sends a verification message first; only valid robots are stored and shown in this table's automation rule editor. The access token is stored for delivery but masked in this UI.
             </p>
             <p
               v-if="dingTalkGroupWebhookValidationMessage && dingTalkGroupDraft.webhookUrl.trim()"
@@ -261,7 +261,7 @@
                 data-dingtalk-group-save="true"
                 @click="onSaveDingTalkGroup"
               >
-                {{ editingDingTalkGroupId ? 'Update' : 'Create' }}
+                {{ editingDingTalkGroupId ? 'Verify & Update' : 'Verify & Create' }}
               </button>
               <button class="meta-api-mgr__btn" type="button" @click="cancelDingTalkGroupForm">Cancel</button>
             </div>
@@ -302,13 +302,20 @@
               <span>Secret: {{ group.hasSecret ? 'configured' : 'not configured' }}</span>
               <span>{{ dingTalkGroupScopeLabel(group) }}</span>
               <span>Created: {{ formatDate(group.createdAt) }}</span>
-              <span v-if="group.lastTestedAt">Last test: {{ formatDate(group.lastTestedAt) }}</span>
+              <span v-if="group.lastTestedAt">Last validity test: {{ formatDate(group.lastTestedAt) }}</span>
               <span v-if="group.lastTestStatus" :data-dingtalk-group-test-status="group.lastTestStatus">
-                Test status: {{ group.lastTestStatus }}
+                Validity: {{ group.lastTestStatus }}
               </span>
             </div>
             <div v-if="group.lastTestError" class="meta-api-mgr__card-meta meta-api-mgr__card-failures">
               <span>Last error: {{ group.lastTestError }}</span>
+            </div>
+            <div
+              v-if="dingTalkGroupValidityNote(group)"
+              class="meta-api-mgr__card-meta meta-api-mgr__card-validity-note"
+              data-dingtalk-group-validity-note="true"
+            >
+              <span>{{ dingTalkGroupValidityNote(group) }}</span>
             </div>
             <div class="meta-api-mgr__card-actions">
               <button v-if="canMutateDingTalkGroup(group)" class="meta-api-mgr__btn" type="button" data-dingtalk-group-edit="true" @click="openEditDingTalkGroup(group)">
@@ -321,7 +328,7 @@
                 Deliveries
               </button>
               <button v-if="canMutateDingTalkGroup(group)" class="meta-api-mgr__btn" type="button" :disabled="busy" data-dingtalk-group-test-send="true" @click="onTestDingTalkGroup(group)">
-                Test send
+                Test validity
               </button>
               <button v-if="canMutateDingTalkGroup(group)" class="meta-api-mgr__btn meta-api-mgr__btn--danger" type="button" :disabled="busy" data-dingtalk-group-delete="true" @click="onDeleteDingTalkGroup(group)">
                 Delete
@@ -360,6 +367,9 @@
                   <span>{{ delivery.sourceType === 'manual_test' ? 'Manual test' : 'Automation' }}</span>
                   <span>{{ delivery.subject }}</span>
                   <span>HTTP {{ delivery.httpStatus ?? '-' }}</span>
+                  <span v-if="delivery.errorMessage" class="meta-api-mgr__delivery--fail">
+                    Error: {{ delivery.errorMessage }}
+                  </span>
                   <span>{{ formatDate(delivery.createdAt) }}</span>
                 </div>
               </template>
@@ -428,6 +438,7 @@ const dingTalkDeliveriesGroupId = ref<string | null>(null)
 const dingTalkDeliveriesLoading = ref(false)
 const dingTalkDeliveries = ref<DingTalkGroupDelivery[]>([])
 let dingTalkDeliveriesRequestToken = 0
+const DINGTALK_GROUP_VALIDITY_STALE_MS = 30 * 24 * 60 * 60 * 1000
 const dingTalkGroupDraft = ref({
   name: '',
   webhookUrl: '',
@@ -535,6 +546,21 @@ function dingTalkGroupScopeLabel(group: DingTalkGroupDestination): string {
   if (scope === 'org') return group.orgId ? `Organization catalog group: ${group.orgId}` : 'Organization catalog group'
   if (scope === 'sheet') return group.sheetId ? `Shared with sheet: ${group.sheetId}` : 'Shared with this sheet'
   return 'Private legacy group'
+}
+
+function dingTalkGroupValidityNote(group: DingTalkGroupDestination): string {
+  if (group.lastTestStatus === 'failed') {
+    return 'Validity failed. Update the webhook or SEC secret, then run Test validity again.'
+  }
+  if (!group.lastTestedAt) {
+    return 'Validity check needed. This destination has not been tested yet.'
+  }
+  const testedAt = Date.parse(group.lastTestedAt)
+  if (!Number.isFinite(testedAt)) return ''
+  if (Date.now() - testedAt > DINGTALK_GROUP_VALIDITY_STALE_MS) {
+    return 'Validity check recommended. Last test was more than 30 days ago.'
+  }
+  return ''
 }
 
 function canMutateDingTalkGroup(group: DingTalkGroupDestination): boolean {
@@ -871,13 +897,21 @@ async function onTestDingTalkGroup(group: DingTalkGroupDestination) {
   busy.value = true
   error.value = null
   try {
-    await props.client.testDingTalkGroup(groupId, undefined, props.sheetId)
+    await props.client.testDingTalkGroup(groupId, {
+      subject: 'P4 metasheet DingTalk group validity test',
+      content: 'P4 / metasheet robot validity check from MetaSheet.',
+    }, props.sheetId)
     await loadDingTalkGroups()
     if (dingTalkDeliveriesGroupId.value === groupId) {
       await loadDingTalkDeliveries(group)
     }
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to test DingTalk group'
+    const message = err instanceof Error ? err.message : 'Failed to test DingTalk group'
+    await loadDingTalkGroups()
+    if (dingTalkDeliveriesGroupId.value === groupId) {
+      await loadDingTalkDeliveries(group)
+    }
+    error.value = message
   } finally {
     busy.value = false
   }
@@ -1224,6 +1258,11 @@ watch(canManageDingTalkGroups, (canManage) => {
 
 .meta-api-mgr__card-failures {
   color: #dc2626;
+  font-weight: 600;
+}
+
+.meta-api-mgr__card-validity-note {
+  color: #92400e;
   font-weight: 600;
 }
 

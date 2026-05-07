@@ -95,6 +95,11 @@ function validateSendEmailActionConfigs(
   return null
 }
 
+function hasDingTalkGroupAction(actionType: unknown, actions: AutomationAction[] | null | undefined): boolean {
+  return actionType === 'send_dingtalk_group_message'
+    || (actions ?? []).some((action) => action.type === 'send_dingtalk_group_message')
+}
+
 /**
  * Legacy DB-shaped rule (from automation_rules table).
  * Kept for backward compatibility with existing CRUD routes.
@@ -416,7 +421,11 @@ export class AutomationService {
       const nextActionType = input.actionType ?? existing.action_type
       const nextActionConfig = input.actionConfig ?? existing.action_config
       const nextActions = input.actions !== undefined ? input.actions : existing.actions ?? null
-      const normalizedDingTalkInputs = normalizeDingTalkAutomationActionInputs(nextActionType, nextActionConfig, nextActions)
+      const defaultGroupFailureAlert = !hasDingTalkGroupAction(existing.action_type, existing.actions ?? null)
+        && hasDingTalkGroupAction(nextActionType, nextActions)
+      const normalizedDingTalkInputs = normalizeDingTalkAutomationActionInputs(nextActionType, nextActionConfig, nextActions, {
+        defaultGroupFailureAlert,
+      })
       const normalizedNextActionConfig = normalizedDingTalkInputs.actionConfig && typeof normalizedDingTalkInputs.actionConfig === 'object'
         ? normalizedDingTalkInputs.actionConfig as Record<string, unknown>
         : nextActionConfig
@@ -744,6 +753,13 @@ export function parseDingTalkAutomationDeliveryLimit(value: unknown): number {
 }
 
 /**
+ * Parse an optional delivery `recordId` query parameter.
+ */
+export function parseDingTalkAutomationDeliveryRecordId(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+/**
  * Parse a `POST /sheets/:sheetId/automations` request body into a
  * `CreateRuleInput`. Throws `AutomationRuleValidationError` for invalid
  * trigger / action types.
@@ -921,8 +937,12 @@ export async function preflightDingTalkAutomationUpdate(
   const nextActionType = input.actionType ?? existing.action_type
   const nextActionConfig = input.actionConfig ?? existing.action_config
   const nextActions: AutomationAction[] | null = input.actions !== undefined ? input.actions : existing.actions ?? null
+  const defaultGroupFailureAlert = !hasDingTalkGroupAction(existing.action_type, existing.actions ?? null)
+    && hasDingTalkGroupAction(nextActionType, nextActions)
 
-  const normalized = normalizeDingTalkAutomationActionInputs(nextActionType, nextActionConfig, nextActions)
+  const normalized = normalizeDingTalkAutomationActionInputs(nextActionType, nextActionConfig, nextActions, {
+    defaultGroupFailureAlert,
+  })
   const normalizedActionConfig = normalized.actionConfig && typeof normalized.actionConfig === 'object'
     ? normalized.actionConfig as Record<string, unknown>
     : nextActionConfig

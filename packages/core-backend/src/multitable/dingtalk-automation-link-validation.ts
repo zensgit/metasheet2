@@ -104,13 +104,24 @@ function hasText(value: unknown): boolean {
   return typeof value === 'string' && value.trim().length > 0
 }
 
-function normalizeDingTalkMessageConfig(config: Record<string, unknown>): Record<string, unknown> {
+function normalizeDingTalkMessageConfig(
+  actionType: 'send_dingtalk_group_message' | 'send_dingtalk_person_message',
+  config: Record<string, unknown>,
+  options: { defaultGroupFailureAlert?: boolean } = {},
+): Record<string, unknown> {
   const normalized = { ...config }
   if (!hasText(normalized.titleTemplate) && hasText(normalized.title)) {
     normalized.titleTemplate = normalized.title
   }
   if (!hasText(normalized.bodyTemplate) && hasText(normalized.content)) {
     normalized.bodyTemplate = normalized.content
+  }
+  if (
+    actionType === 'send_dingtalk_group_message'
+    && options.defaultGroupFailureAlert !== false
+    && normalized.notifyRuleCreatorOnFailure === undefined
+  ) {
+    normalized.notifyRuleCreatorOnFailure = true
   }
   return normalized
 }
@@ -119,14 +130,15 @@ export function normalizeDingTalkAutomationActionInputs(
   actionType: unknown,
   actionConfig: unknown,
   actions: unknown,
+  options: { defaultGroupFailureAlert?: boolean } = {},
 ): { actionConfig: unknown; actions: unknown } {
   const normalizedActionConfig = isDingTalkAutomationActionType(actionType) && isPlainObject(actionConfig)
-    ? normalizeDingTalkMessageConfig(actionConfig)
+    ? normalizeDingTalkMessageConfig(actionType, actionConfig, options)
     : actionConfig
   const normalizedActions = Array.isArray(actions)
     ? actions.map((item) => {
       if (!isPlainObject(item) || !isDingTalkAutomationActionType(item.type) || !isPlainObject(item.config)) return item
-      return { ...item, config: normalizeDingTalkMessageConfig(item.config) }
+      return { ...item, config: normalizeDingTalkMessageConfig(item.type, item.config, options) }
     })
     : actions
   return { actionConfig: normalizedActionConfig, actions: normalizedActions }

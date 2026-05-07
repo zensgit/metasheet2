@@ -529,6 +529,8 @@ export type DirectoryAccountManualAdmissionResult = DirectoryAccountMutationResu
 }
 
 export type DirectoryAutoAdmissionOnboardingPacket = {
+  accountId: string
+  integrationId: string
   userId: string
   name: string
   email: string | null
@@ -2208,6 +2210,8 @@ export async function syncDirectoryIntegration(
                   } else {
                     autoAdmittedNoEmailCount += 1
                     autoAdmissionOnboardingPackets.push({
+                      accountId: account.id,
+                      integrationId,
                       userId: created.userId,
                       name: cleanName,
                       email: cleanEmail,

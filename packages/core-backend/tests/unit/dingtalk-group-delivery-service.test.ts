@@ -28,6 +28,7 @@ describe('dingtalk group delivery service', () => {
     const deliveries = await listAutomationDingTalkGroupDeliveries(queryFn, 'rule_1', 500)
 
     expect(queryFn).toHaveBeenCalledWith(expect.stringContaining('FROM dingtalk_group_deliveries d'), ['rule_1', 200])
+    expect(String(queryFn.mock.calls[0]?.[0] ?? '')).not.toContain('d.record_id =')
     expect(deliveries).toEqual([
       {
         id: 'dgd_1',
@@ -47,5 +48,17 @@ describe('dingtalk group delivery service', () => {
         deliveredAt: '2026-04-20T08:00:01.000Z',
       },
     ])
+  })
+
+  it('filters automation-scoped deliveries by record id when provided', async () => {
+    const queryFn = vi.fn(async () => ({ rows: [] }))
+
+    await listAutomationDingTalkGroupDeliveries(queryFn, 'rule_1', 25, ' rec_42 ')
+
+    expect(queryFn).toHaveBeenCalledWith(
+      expect.stringContaining('AND d.record_id = $2'),
+      ['rule_1', 'rec_42', 25],
+    )
+    expect(String(queryFn.mock.calls[0]?.[0] ?? '')).toContain('LIMIT $3')
   })
 })

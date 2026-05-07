@@ -42,6 +42,12 @@
         <router-link class="user-admin__button user-admin__button--secondary user-admin__button-link" :to="directoryReturnLocation">
           返回目录同步
         </router-link>
+        <button class="user-admin__button user-admin__button--secondary" type="button" @click="void copyDirectoryReturnLocation()">
+          复制目录链接
+        </button>
+        <button class="user-admin__button user-admin__button--secondary" type="button" @click="void copyCurrentUserManagementLocation()">
+          复制用户链接
+        </button>
         <button class="user-admin__button user-admin__button--secondary" type="button" @click="clearDirectoryNavigationContext()">
           清除目录回跳
         </button>
@@ -206,6 +212,48 @@
             </button>
             <button class="user-admin__button user-admin__button--secondary" type="button" @click="exportGovernanceFullValidationPackage()">
               导出完整联调包
+            </button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="exportGovernanceDeliveryChecklist()">
+              导出交付清单
+            </button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="exportGovernance142AcceptanceChecklist()">
+              导出 142 联调验收清单
+            </button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="exportGovernanceTrialRunbook()">
+              导出试运行值班说明
+            </button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="exportGovernanceDeliveryDecision()">
+              导出正式交付结论
+            </button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="exportGovernanceDeliveryArchiveIndex()">
+              导出交付归档包索引
+            </button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="exportGovernanceCloseoutChecklist()">
+              导出收尾检查单
+            </button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="exportGovernanceStakeholderUpdateTemplate()">
+              导出对外同步模板
+            </button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="exportGovernanceLaunchObservationTemplate()">
+              导出上线观察记录模板
+            </button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="exportGovernanceManualAcceptanceScript()">
+              导出真人侧验收执行单
+            </button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="exportGovernance142AcceptancePackage()">
+              导出 142 验收执行包
+            </button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="exportGovernanceFinalHandoffPackage()">
+              导出最终交付包
+            </button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="exportGovernanceAcceptanceResultSummaryTemplate()">
+              导出验收结果汇总模板
+            </button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="exportGovernanceAcceptanceReadinessSnapshot()">
+              导出当前验收就绪快照
+            </button>
+            <button class="user-admin__button user-admin__button--secondary" type="button" @click="exportGovernanceEnvironmentBlockerTemplate()">
+              导出环境阻塞记录模板
             </button>
           </div>
         </div>
@@ -1340,6 +1388,807 @@ function exportGovernanceFullValidationPackage(): void {
   setStatus('已导出 DingTalk 完整联调包')
 }
 
+function exportGovernanceDeliveryChecklist(): void {
+  const today = formatDateInput(new Date())
+  const lines = [
+    '# DingTalk 交付清单',
+    '',
+    `日期：${today}`,
+    '',
+    '## 当前交付判断',
+    '- 当前阶段：可进入试运行 / 试交付',
+    '- 正式交付前提：完成 142 真实环境联调、钉钉授权范围确认、真实账号访问矩阵验收',
+    '- 适用范围：钉钉登录、目录同步、成员绑定、无邮箱自动准入、治理工作台、公共表单联调',
+    '',
+    '## 代码基线',
+    `- 缺 OpenID：${governanceSummary.value.dingtalkOpenIdMissing}`,
+    `- 待收口：${governanceSummary.value.dingtalkOpenIdPending}`,
+    `- 已收口：${governanceSummary.value.dingtalkOpenIdGoverned}`,
+    `- 目录已链接：${governanceSummary.value.directoryLinked}`,
+    '',
+    '## 交付项',
+    '- [ ] 钉钉登录与本地账号绑定链路可用',
+    '- [ ] 目录同步页可定位成员、回跳用户治理页、复制协作链接',
+    '- [ ] 无邮箱成员自动准入与手工创建链路可复制完整交付信息',
+    '- [ ] 治理工作台可导出日报、联调检查单、联调结果模板、完整联调包',
+    '- [ ] 公共表单在匿名 / 登录 / 指定用户 / 未绑定用户场景的预期文案明确',
+    '',
+    '## 交付前操作',
+    `- 导出完整联调包：dingtalk-governance-full-validation-package-${today}.md`,
+    `- 导出 142 联调验收清单：dingtalk-governance-142-acceptance-checklist-${today}.md`,
+    '- 准备真实钉钉测试账号、真实群机器人 webhook、目录同步管理员账号',
+    '- 准备回填位置：异常记录、截图位置、日志位置、负责人',
+    '',
+    '## 关键入口',
+    `- 缺 OpenID 成员：${buildMissingOpenIdUserManagementLocation()}`,
+    `- 目录同步修复入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
+    `- 最近 7 天治理审计：${buildRecentDingTalkGovernanceAuditLocation()}`,
+    '',
+    '## 剩余风险',
+    '- 钉钉授权用户组、组织范围和 openId 数据完整性仍需以 142 实际联调为准。',
+    '- 首次改密用户、未绑定钉钉用户、匿名表单访问仍需做真实环境矩阵回归。',
+    '- 正式交付结论不应只依据本地测试通过，需要结合 142 运行结果一起判断。',
+    '',
+    '## 当前建议',
+    ...governanceWorkbenchCards.value.map((card) => `- ${card.title}：${card.note}`),
+  ]
+  downloadText(
+    `dingtalk-governance-delivery-checklist-${today}.md`,
+    lines.join('\n'),
+    'text/markdown;charset=utf-8',
+  )
+  setStatus('已导出 DingTalk 交付清单')
+}
+
+function exportGovernance142AcceptanceChecklist(): void {
+  const today = formatDateInput(new Date())
+  const fullPackageFile = `dingtalk-governance-full-validation-package-${today}.md`
+  const lines = [
+    '# DingTalk 142 联调验收清单',
+    '',
+    `日期：${today}`,
+    '',
+    '## 验收前提',
+    `- 先导出完整联调包：${fullPackageFile}`,
+    '- 准备 142 管理员账号、真实钉钉测试账号、无邮箱测试账号、至少 1 个授权用户组外账号',
+    '- 准备真实 DingTalk 群机器人 webhook 和需要联调的公共表单链接',
+    '',
+    '## 验收矩阵',
+    '- [ ] 场景 1：已绑定且启用的 DingTalk 用户可正常登录并访问目标页面',
+    '- [ ] 场景 2：未绑定本地启用用户的 DingTalk 账号收到明确失败提示',
+    '- [ ] 场景 3：缺 openId 用户不会被误判为可用登录用户',
+    '- [ ] 场景 4：首次登录需改密用户能看到正确改密页和退出路径',
+    '- [ ] 场景 5：公共表单在匿名、登录、指定用户三类模式下行为符合预期',
+    '- [ ] 场景 6：目录同步可定位并补齐目标成员信息，或准确提示缺失原因',
+    '- [ ] 场景 7：群机器人消息发送成功，签名和关键词限制符合预期',
+    '',
+    '## 执行入口',
+    `- 用户治理入口：${buildMissingOpenIdUserManagementLocation()}`,
+    `- 目录同步入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
+    `- 治理审计入口：${buildRecentDingTalkGovernanceAuditLocation()}`,
+    '',
+    '## 结果回填',
+    '- 验收环境：142',
+    '- 执行人：',
+    '- 执行时间：',
+    '- 通过项：',
+    '- 失败项：',
+    '- 失败现象：',
+    '- 对应截图 / 日志位置：',
+    '- 是否允许正式交付：',
+    '- 下一步负责人：',
+    '',
+    '## 当前基线',
+    `- 缺 OpenID：${governanceSummary.value.dingtalkOpenIdMissing}`,
+    `- 待收口：${governanceSummary.value.dingtalkOpenIdPending}`,
+    `- 已收口：${governanceSummary.value.dingtalkOpenIdGoverned}`,
+    `- 目录已链接：${governanceSummary.value.directoryLinked}`,
+    '',
+    '## 当前建议',
+    ...governanceWorkbenchCards.value.map((card) => `- ${card.title}：${card.note}`),
+  ]
+  downloadText(
+    `dingtalk-governance-142-acceptance-checklist-${today}.md`,
+    lines.join('\n'),
+    'text/markdown;charset=utf-8',
+  )
+  setStatus('已导出 DingTalk 142 联调验收清单')
+}
+
+function exportGovernanceTrialRunbook(): void {
+  const today = formatDateInput(new Date())
+  const lines = [
+    '# DingTalk 试运行值班说明',
+    '',
+    `日期：${today}`,
+    '',
+    '## 适用阶段',
+    '- 当前用于试运行 / 灰度放量阶段。',
+    '- 目标是在正式交付前，把钉钉登录、目录同步、公共表单和群机器人链路跑通并留痕。',
+    '',
+    '## 值班前准备',
+    '- 导出交付清单，明确今日试运行范围与剩余风险。',
+    `  - 文件：dingtalk-governance-delivery-checklist-${today}.md`,
+    '- 导出 142 联调验收清单，作为当天结果回填载体。',
+    `  - 文件：dingtalk-governance-142-acceptance-checklist-${today}.md`,
+    '- 准备至少 1 个已绑定用户、1 个未绑定用户、1 个无邮箱准入用户和 1 个授权组外用户。',
+    '',
+    '## 值班入口',
+    `- 缺 OpenID 成员：${buildMissingOpenIdUserManagementLocation()}`,
+    `- 目录同步修复入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
+    `- 最近 7 天治理审计：${buildRecentDingTalkGovernanceAuditLocation()}`,
+    '',
+    '## 值班检查项',
+    '- [ ] 已绑定钉钉用户能正常登录目标页面。',
+    '- [ ] 未绑定或未启用用户得到正确失败提示，不出现误放行。',
+    '- [ ] 缺 openId 成员可在目录页定位，或能明确看到缺失原因。',
+    '- [ ] 自动准入 / 手工创建结果卡片可复制交付信息并发给协作者。',
+    '- [ ] 公共表单在匿名、登录、指定用户模式下行为符合预期。',
+    '- [ ] 群机器人消息发送成功，关键词与签名校验符合预期。',
+    '',
+    '## 异常上报',
+    '- 记录账号、页面、时间、错误文案、是否可复现。',
+    '- 附上截图位置、接口日志位置和初步判断。',
+    '- 如为钉钉授权范围 / 组织范围问题，单独标记为环境侧阻塞。',
+    '',
+    '## 当日收口',
+    '- 回填 142 联调验收清单中的通过项、失败项和负责人。',
+    '- 导出治理日报摘要，用于和前一日对比。',
+    '- 如果失败项只剩环境问题，可进入“可试交付、待正式验收”状态。',
+    '',
+    '## 当前基线',
+    `- 缺 OpenID：${governanceSummary.value.dingtalkOpenIdMissing}`,
+    `- 待收口：${governanceSummary.value.dingtalkOpenIdPending}`,
+    `- 已收口：${governanceSummary.value.dingtalkOpenIdGoverned}`,
+    `- 目录已链接：${governanceSummary.value.directoryLinked}`,
+    '',
+    '## 当前建议',
+    ...governanceWorkbenchCards.value.map((card) => `- ${card.title}：${card.note}`),
+  ]
+  downloadText(
+    `dingtalk-governance-trial-runbook-${today}.md`,
+    lines.join('\n'),
+    'text/markdown;charset=utf-8',
+  )
+  setStatus('已导出 DingTalk 试运行值班说明')
+}
+
+function exportGovernanceDeliveryDecision(): void {
+  const today = formatDateInput(new Date())
+  const lines = [
+    '# DingTalk 正式交付结论',
+    '',
+    `日期：${today}`,
+    '',
+    '## 结论类型',
+    '- [ ] 可正式交付',
+    '- [ ] 可试交付，需继续观察',
+    '- [ ] 暂不交付，需继续修复',
+    '',
+    '## 依据文档',
+    `- 交付清单：dingtalk-governance-delivery-checklist-${today}.md`,
+    `- 142 联调验收清单：dingtalk-governance-142-acceptance-checklist-${today}.md`,
+    `- 试运行值班说明：dingtalk-governance-trial-runbook-${today}.md`,
+    `- 完整联调包：dingtalk-governance-full-validation-package-${today}.md`,
+    '',
+    '## 当前基线',
+    `- 缺 OpenID：${governanceSummary.value.dingtalkOpenIdMissing}`,
+    `- 待收口：${governanceSummary.value.dingtalkOpenIdPending}`,
+    `- 已收口：${governanceSummary.value.dingtalkOpenIdGoverned}`,
+    `- 目录已链接：${governanceSummary.value.directoryLinked}`,
+    '',
+    '## 关键链路结论',
+    '- 钉钉登录：',
+    '- 本地账号绑定：',
+    '- 目录同步与成员定位：',
+    '- 无邮箱自动准入 / 手工创建：',
+    '- 公共表单匿名 / 登录 / 指定用户访问：',
+    '- 群机器人消息发送：',
+    '',
+    '## 环境侧结论',
+    '- 钉钉授权组范围是否正确：',
+    '- 钉钉组织范围 / 通讯录同步是否正确：',
+    '- 是否仍存在 openId / unionId 数据缺口：',
+    '- 是否存在仅 142 环境可复现的问题：',
+    '',
+    '## 风险与阻塞',
+    '- 仍需修复项：',
+    '- 环境侧阻塞项：',
+    '- 是否影响正式交付：',
+    '',
+    '## 建议动作',
+    '- 是否继续放量：',
+    '- 是否进入正式交付：',
+    '- 下一步负责人：',
+    '- 计划完成时间：',
+    '',
+    '## 关键入口',
+    `- 用户治理入口：${buildMissingOpenIdUserManagementLocation()}`,
+    `- 目录同步入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
+    `- 治理审计入口：${buildRecentDingTalkGovernanceAuditLocation()}`,
+    '',
+    '## 当前建议',
+    ...governanceWorkbenchCards.value.map((card) => `- ${card.title}：${card.note}`),
+  ]
+  downloadText(
+    `dingtalk-governance-delivery-decision-${today}.md`,
+    lines.join('\n'),
+    'text/markdown;charset=utf-8',
+  )
+  setStatus('已导出 DingTalk 正式交付结论')
+}
+
+function exportGovernanceDeliveryArchiveIndex(): void {
+  const today = formatDateInput(new Date())
+  const lines = [
+    '# DingTalk 交付归档包索引',
+    '',
+    `日期：${today}`,
+    '',
+    '## 归档目的',
+    '- 用于把试运行、142 联调验收和正式交付结论相关文档集中归档。',
+    '- 适合作为交付负责人、测试、运维和后续值班复盘的统一入口。',
+    '',
+    '## 归档文件清单',
+    `- dingtalk-governance-daily-summary-${today}.md`,
+    `- dingtalk-governance-live-validation-checklist-${today}.md`,
+    `- dingtalk-governance-validation-result-template-${today}.md`,
+    `- dingtalk-governance-execution-package-index-${today}.md`,
+    `- dingtalk-governance-full-validation-package-${today}.md`,
+    `- dingtalk-governance-delivery-checklist-${today}.md`,
+    `- dingtalk-governance-142-acceptance-checklist-${today}.md`,
+    `- dingtalk-governance-trial-runbook-${today}.md`,
+    `- dingtalk-governance-delivery-decision-${today}.md`,
+    '',
+    '## 建议归档顺序',
+    '1. 先归档完整联调包与交付清单，保留当天基线。',
+    '2. 再归档 142 联调验收清单和试运行值班说明，保留真实环境执行记录。',
+    '3. 最后归档正式交付结论，形成 go / no-go 结论。',
+    '',
+    '## 配套证据',
+    '- 异常截图路径：',
+    '- 接口日志路径：',
+    '- 群机器人发送记录：',
+    '- 真实账号测试记录：',
+    '',
+    '## 当前基线',
+    `- 缺 OpenID：${governanceSummary.value.dingtalkOpenIdMissing}`,
+    `- 待收口：${governanceSummary.value.dingtalkOpenIdPending}`,
+    `- 已收口：${governanceSummary.value.dingtalkOpenIdGoverned}`,
+    `- 目录已链接：${governanceSummary.value.directoryLinked}`,
+    '',
+    '## 关键入口',
+    `- 用户治理入口：${buildMissingOpenIdUserManagementLocation()}`,
+    `- 目录同步入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
+    `- 治理审计入口：${buildRecentDingTalkGovernanceAuditLocation()}`,
+    '',
+    '## 当前建议',
+    ...governanceWorkbenchCards.value.map((card) => `- ${card.title}：${card.note}`),
+  ]
+  downloadText(
+    `dingtalk-governance-delivery-archive-index-${today}.md`,
+    lines.join('\n'),
+    'text/markdown;charset=utf-8',
+  )
+  setStatus('已导出 DingTalk 交付归档包索引')
+}
+
+function exportGovernanceCloseoutChecklist(): void {
+  const today = formatDateInput(new Date())
+  const lines = [
+    '# DingTalk 收尾检查单',
+    '',
+    `日期：${today}`,
+    '',
+    '## 收尾目标',
+    '- 在代码开发基本收口后，完成 142 联调回填、交付判断、归档和对外同步。',
+    '- 这份清单用于把“可试运行”推进到“可正式交付”或“明确暂缓交付”。',
+    '',
+    '## 必做项',
+    '- [ ] 回填 142 联调验收清单中的通过项、失败项、截图和日志位置。',
+    '- [ ] 根据试运行结果补齐正式交付结论中的 go / no-go 判断。',
+    '- [ ] 归档完整联调包、试运行说明、正式交付结论和交付归档包索引。',
+    '- [ ] 明确是否还存在环境侧阻塞，如授权组、组织范围、openId 数据缺口。',
+    '- [ ] 向测试、运维、业务负责人同步当天结论和下一步动作。',
+    '',
+    '## 建议执行顺序',
+    `1. 导出并回填 142 联调验收清单：dingtalk-governance-142-acceptance-checklist-${today}.md`,
+    `2. 导出并补齐正式交付结论：dingtalk-governance-delivery-decision-${today}.md`,
+    `3. 导出交付归档包索引：dingtalk-governance-delivery-archive-index-${today}.md`,
+    `4. 如仍在观察期，导出试运行值班说明：dingtalk-governance-trial-runbook-${today}.md`,
+    '',
+    '## 输出物',
+    `- dingtalk-governance-delivery-checklist-${today}.md`,
+    `- dingtalk-governance-142-acceptance-checklist-${today}.md`,
+    `- dingtalk-governance-trial-runbook-${today}.md`,
+    `- dingtalk-governance-delivery-decision-${today}.md`,
+    `- dingtalk-governance-delivery-archive-index-${today}.md`,
+    '',
+    '## 关键入口',
+    `- 用户治理入口：${buildMissingOpenIdUserManagementLocation()}`,
+    `- 目录同步入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
+    `- 治理审计入口：${buildRecentDingTalkGovernanceAuditLocation()}`,
+    '',
+    '## 当前基线',
+    `- 缺 OpenID：${governanceSummary.value.dingtalkOpenIdMissing}`,
+    `- 待收口：${governanceSummary.value.dingtalkOpenIdPending}`,
+    `- 已收口：${governanceSummary.value.dingtalkOpenIdGoverned}`,
+    `- 目录已链接：${governanceSummary.value.directoryLinked}`,
+    '',
+    '## 当前建议',
+    ...governanceWorkbenchCards.value.map((card) => `- ${card.title}：${card.note}`),
+  ]
+  downloadText(
+    `dingtalk-governance-closeout-checklist-${today}.md`,
+    lines.join('\n'),
+    'text/markdown;charset=utf-8',
+  )
+  setStatus('已导出 DingTalk 收尾检查单')
+}
+
+function exportGovernanceStakeholderUpdateTemplate(): void {
+  const today = formatDateInput(new Date())
+  const lines = [
+    '# DingTalk 对外同步模板',
+    '',
+    `日期：${today}`,
+    '',
+    '## 同步对象',
+    '- 测试负责人：',
+    '- 运维负责人：',
+    '- 业务负责人：',
+    '- 项目负责人：',
+    '',
+    '## 今日结论',
+    '- 当前阶段：试运行 / 联调验收 / 可正式交付 / 暂缓交付',
+    '- 今日总体判断：',
+    '- 是否允许继续放量：',
+    '',
+    '## 关键状态',
+    `- 缺 OpenID：${governanceSummary.value.dingtalkOpenIdMissing}`,
+    `- 待收口：${governanceSummary.value.dingtalkOpenIdPending}`,
+    `- 已收口：${governanceSummary.value.dingtalkOpenIdGoverned}`,
+    `- 目录已链接：${governanceSummary.value.directoryLinked}`,
+    '',
+    '## 已完成事项',
+    '- [ ] 142 联调验收完成并已回填',
+    '- [ ] 试运行结果已回填',
+    '- [ ] 正式交付结论已更新',
+    '- [ ] 归档包索引已整理',
+    '',
+    '## 风险与阻塞',
+    '- 环境侧阻塞：',
+    '- 代码侧待修复：',
+    '- 是否影响交付：',
+    '',
+    '## 附件与文档',
+    `- 交付清单：dingtalk-governance-delivery-checklist-${today}.md`,
+    `- 142 联调验收清单：dingtalk-governance-142-acceptance-checklist-${today}.md`,
+    `- 试运行值班说明：dingtalk-governance-trial-runbook-${today}.md`,
+    `- 正式交付结论：dingtalk-governance-delivery-decision-${today}.md`,
+    `- 交付归档包索引：dingtalk-governance-delivery-archive-index-${today}.md`,
+    `- 收尾检查单：dingtalk-governance-closeout-checklist-${today}.md`,
+    '',
+    '## 关键入口',
+    `- 用户治理入口：${buildMissingOpenIdUserManagementLocation()}`,
+    `- 目录同步入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
+    `- 治理审计入口：${buildRecentDingTalkGovernanceAuditLocation()}`,
+    '',
+    '## 建议下一步',
+    '- 下一步动作：',
+    '- 下一步负责人：',
+    '- 目标完成时间：',
+    '',
+    '## 当前建议',
+    ...governanceWorkbenchCards.value.map((card) => `- ${card.title}：${card.note}`),
+  ]
+  downloadText(
+    `dingtalk-governance-stakeholder-update-template-${today}.md`,
+    lines.join('\n'),
+    'text/markdown;charset=utf-8',
+  )
+  setStatus('已导出 DingTalk 对外同步模板')
+}
+
+function exportGovernanceLaunchObservationTemplate(): void {
+  const today = formatDateInput(new Date())
+  const lines = [
+    '# DingTalk 上线观察记录模板',
+    '',
+    `日期：${today}`,
+    '',
+    '## 观察窗口',
+    '- 观察开始时间：',
+    '- 观察结束时间：',
+    '- 观察负责人：',
+    '- 观察阶段：试运行 / 正式放量 / 全量上线后观察',
+    '',
+    '## 关键指标',
+    `- 缺 OpenID：${governanceSummary.value.dingtalkOpenIdMissing}`,
+    `- 待收口：${governanceSummary.value.dingtalkOpenIdPending}`,
+    `- 已收口：${governanceSummary.value.dingtalkOpenIdGoverned}`,
+    `- 目录已链接：${governanceSummary.value.directoryLinked}`,
+    '- 登录成功率：',
+    '- 表单访问成功率：',
+    '- 群机器人消息成功率：',
+    '',
+    '## 观察项',
+    '- [ ] 已绑定 DingTalk 用户登录稳定，无新增异常。',
+    '- [ ] 未绑定 / 授权组外用户得到正确提示，无误放行。',
+    '- [ ] 目录同步、成员定位和回跳链路稳定。',
+    '- [ ] 公共表单访问符合当前授权模式预期。',
+    '- [ ] 群机器人消息发送稳定，关键词和签名限制正常。',
+    '',
+    '## 异常记录',
+    '- 时间 / 账号 / 场景 / 现象：',
+    '- 影响范围：',
+    '- 初步判断：代码 / 数据 / 授权组 / 组织范围 / 第三方波动',
+    '- 对应截图 / 日志路径：',
+    '',
+    '## 结论',
+    '- 是否继续观察：',
+    '- 是否允许继续放量：',
+    '- 是否需要回滚或暂停：',
+    '- 下一步负责人：',
+    '',
+    '## 关联文档',
+    `- 142 联调验收清单：dingtalk-governance-142-acceptance-checklist-${today}.md`,
+    `- 正式交付结论：dingtalk-governance-delivery-decision-${today}.md`,
+    `- 收尾检查单：dingtalk-governance-closeout-checklist-${today}.md`,
+    `- 对外同步模板：dingtalk-governance-stakeholder-update-template-${today}.md`,
+    '',
+    '## 关键入口',
+    `- 用户治理入口：${buildMissingOpenIdUserManagementLocation()}`,
+    `- 目录同步入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
+    `- 治理审计入口：${buildRecentDingTalkGovernanceAuditLocation()}`,
+    '',
+    '## 当前建议',
+    ...governanceWorkbenchCards.value.map((card) => `- ${card.title}：${card.note}`),
+  ]
+  downloadText(
+    `dingtalk-governance-launch-observation-template-${today}.md`,
+    lines.join('\n'),
+    'text/markdown;charset=utf-8',
+  )
+  setStatus('已导出 DingTalk 上线观察记录模板')
+}
+
+function exportGovernanceManualAcceptanceScript(): void {
+  const today = formatDateInput(new Date())
+  const lines = [
+    '# DingTalk 真人侧验收执行单',
+    '',
+    `日期：${today}`,
+    '',
+    '## 验收目标',
+    '- 用最少的人工作业完成 142 真实环境的关键闭环验证。',
+    '- 把“成功样本”“缺 openId 样本”“受保护表单样本”“群机器人样本”按固定顺序跑完。',
+    '',
+    '## 执行角色',
+    '- 执行人：',
+    '- 协同记录人：',
+    '- 钉钉真人账号持有人：',
+    '',
+    '## 样本清单',
+    '- 成功登录样本：zhouhua',
+    '- 缺 openId 样本：P4 Unauthorized Target',
+    '- 公开表单样本：钉钉填写入口',
+    '- 受保护表单样本：DingTalk P4 Protected Form',
+    '- 群机器人样本：生产群机器人 / 验证群',
+    '',
+    '## 执行顺序',
+    '1. 用成功样本打开 DingTalk 登录入口，记录是否成功进入目标页面。',
+    '2. 用缺 openId 样本打开同一入口，记录是否被正确拦截，以及错误文案。',
+    '3. 打开公开表单样本，记录是否无需额外登录即可进入并看到填写页。',
+    '4. 打开受保护表单样本，先记录未登录时是否出现 `DINGTALK_AUTH_REQUIRED` 类提示；再用允许名单用户完成 DingTalk 登录，记录能否进入。',
+    '5. 触发一次群机器人消息发送，记录群内是否成功收到消息，以及关键词 / 加签是否符合预期。',
+    '',
+    '## 机器侧参考',
+    `- 用户治理入口：${buildMissingOpenIdUserManagementLocation()}`,
+    `- 目录同步入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
+    `- 治理审计入口：${buildRecentDingTalkGovernanceAuditLocation()}`,
+    '- 受保护表单机器探针结果：当前匿名访问会返回 `DINGTALK_AUTH_REQUIRED`。',
+    '',
+    '## 结果回填',
+    '- 成功登录样本结果：',
+    '- 缺 openId 样本结果：',
+    '- 公开表单样本结果：',
+    '- 受保护表单样本结果：',
+    '- 群机器人样本结果：',
+    '- 截图 / 日志位置：',
+    '- 是否允许继续放量：',
+    '',
+    '## 关联文档',
+    `- 142 联调验收清单：dingtalk-governance-142-acceptance-checklist-${today}.md`,
+    `- 正式交付结论：dingtalk-governance-delivery-decision-${today}.md`,
+    `- 上线观察记录模板：dingtalk-governance-launch-observation-template-${today}.md`,
+    `- 对外同步模板：dingtalk-governance-stakeholder-update-template-${today}.md`,
+    '',
+    '## 当前建议',
+    ...governanceWorkbenchCards.value.map((card) => `- ${card.title}：${card.note}`),
+  ]
+  downloadText(
+    `dingtalk-governance-manual-acceptance-script-${today}.md`,
+    lines.join('\n'),
+    'text/markdown;charset=utf-8',
+  )
+  setStatus('已导出 DingTalk 真人侧验收执行单')
+}
+
+function exportGovernance142AcceptancePackage(): void {
+  const today = formatDateInput(new Date())
+  const lines = [
+    '# DingTalk 142 验收执行包',
+    '',
+    `日期：${today}`,
+    '',
+    '## 包内目录',
+    `- 142 联调验收清单：dingtalk-governance-142-acceptance-checklist-${today}.md`,
+    `- 真人侧验收执行单：dingtalk-governance-manual-acceptance-script-${today}.md`,
+    `- 上线观察记录模板：dingtalk-governance-launch-observation-template-${today}.md`,
+    `- 正式交付结论：dingtalk-governance-delivery-decision-${today}.md`,
+    '',
+    '## 当前机器侧结论',
+    `- 缺 OpenID：${governanceSummary.value.dingtalkOpenIdMissing}`,
+    `- 待收口：${governanceSummary.value.dingtalkOpenIdPending}`,
+    `- 已收口：${governanceSummary.value.dingtalkOpenIdGoverned}`,
+    `- 目录已链接：${governanceSummary.value.directoryLinked}`,
+    '- 受保护表单机器探针：匿名访问返回 `DINGTALK_AUTH_REQUIRED`',
+    '- 公开表单机器探针：可拿到 submitPath',
+    '',
+    '## 142 真人侧执行顺序',
+    '1. 先跑成功登录样本：zhouhua。',
+    '2. 再跑缺 openId 样本：P4 Unauthorized Target。',
+    '3. 再跑公开表单样本：钉钉填写入口。',
+    '4. 再跑受保护表单样本：DingTalk P4 Protected Form。',
+    '5. 最后跑群机器人消息样本。',
+    '',
+    '## 关键入口',
+    `- 用户治理入口：${buildMissingOpenIdUserManagementLocation()}`,
+    `- 目录同步入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
+    `- 治理审计入口：${buildRecentDingTalkGovernanceAuditLocation()}`,
+    '',
+    '## 回填要求',
+    '- 每个真人侧样本至少记录：结果、错误文案、截图位置、是否影响交付。',
+    '- 完成后同步更新正式交付结论与上线观察记录模板。',
+    '- 如只剩环境侧阻塞，应在结论中明确标记，不和代码缺陷混淆。',
+    '',
+    '## 当前建议',
+    ...governanceWorkbenchCards.value.map((card) => `- ${card.title}：${card.note}`),
+  ]
+  downloadText(
+    `dingtalk-governance-142-acceptance-package-${today}.md`,
+    lines.join('\n'),
+    'text/markdown;charset=utf-8',
+  )
+  setStatus('已导出 DingTalk 142 验收执行包')
+}
+
+function exportGovernanceFinalHandoffPackage(): void {
+  const today = formatDateInput(new Date())
+  const lines = [
+    '# DingTalk 最终交付包',
+    '',
+    `日期：${today}`,
+    '',
+    '## 包内目录',
+    `- 142 验收执行包：dingtalk-governance-142-acceptance-package-${today}.md`,
+    `- 正式交付结论：dingtalk-governance-delivery-decision-${today}.md`,
+    `- 对外同步模板：dingtalk-governance-stakeholder-update-template-${today}.md`,
+    `- 上线观察记录模板：dingtalk-governance-launch-observation-template-${today}.md`,
+    `- 交付归档包索引：dingtalk-governance-delivery-archive-index-${today}.md`,
+    `- 收尾检查单：dingtalk-governance-closeout-checklist-${today}.md`,
+    '',
+    '## 当前交付判断',
+    '- 当前状态：代码侧已基本收口，等待 142 真人侧验收回填。',
+    `- 缺 OpenID：${governanceSummary.value.dingtalkOpenIdMissing}`,
+    `- 待收口：${governanceSummary.value.dingtalkOpenIdPending}`,
+    `- 已收口：${governanceSummary.value.dingtalkOpenIdGoverned}`,
+    `- 目录已链接：${governanceSummary.value.directoryLinked}`,
+    '',
+    '## 最终执行顺序',
+    '1. 先执行 142 验收执行包中的真人侧样本。',
+    '2. 回填正式交付结论，确认 go / no-go。',
+    '3. 导出对外同步模板，向测试、运维、业务和项目负责人同步结论。',
+    '4. 用上线观察记录模板记录放量后的观察窗口结果。',
+    '5. 用交付归档包索引完成最终归档。',
+    '',
+    '## 关键入口',
+    `- 用户治理入口：${buildMissingOpenIdUserManagementLocation()}`,
+    `- 目录同步入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
+    `- 治理审计入口：${buildRecentDingTalkGovernanceAuditLocation()}`,
+    '',
+    '## 最终回填要求',
+    '- 必须记录：成功样本、失败样本、受保护表单、公开表单、群机器人结果。',
+    '- 必须记录：截图位置、日志位置、是否影响正式交付。',
+    '- 如仍存在环境侧阻塞，必须在正式交付结论和对外同步模板里显式说明。',
+    '',
+    '## 当前建议',
+    ...governanceWorkbenchCards.value.map((card) => `- ${card.title}：${card.note}`),
+  ]
+  downloadText(
+    `dingtalk-governance-final-handoff-package-${today}.md`,
+    lines.join('\n'),
+    'text/markdown;charset=utf-8',
+  )
+  setStatus('已导出 DingTalk 最终交付包')
+}
+
+function exportGovernanceAcceptanceResultSummaryTemplate(): void {
+  const today = formatDateInput(new Date())
+  const lines = [
+    '# DingTalk 验收结果汇总模板',
+    '',
+    `日期：${today}`,
+    '',
+    '## 汇总目标',
+    '- 用一页汇总 142 真人侧验收与机器探针的最终结果。',
+    '- 适合作为交付负责人、测试、运维和业务方的统一结果页。',
+    '',
+    '## 当前基线',
+    `- 缺 OpenID：${governanceSummary.value.dingtalkOpenIdMissing}`,
+    `- 待收口：${governanceSummary.value.dingtalkOpenIdPending}`,
+    `- 已收口：${governanceSummary.value.dingtalkOpenIdGoverned}`,
+    `- 目录已链接：${governanceSummary.value.directoryLinked}`,
+    '',
+    '## 样本结果汇总',
+    '- 成功登录样本：',
+    '- 缺 OpenID 样本：',
+    '- 公开表单样本：',
+    '- 受保护表单样本：',
+    '- 群机器人样本：',
+    '',
+    '## 机器探针结论',
+    '- 管理员联调 token：已恢复 / 未恢复',
+    '- `/api/auth/me`：通过 / 失败',
+    '- 用户治理接口：通过 / 失败',
+    '- 目录同步接口：通过 / 失败',
+    '- 审计接口：通过 / 失败',
+    '',
+    '## 风险与阻塞',
+    '- 代码侧问题：',
+    '- 环境侧问题：',
+    '- 是否影响正式交付：',
+    '',
+    '## 最终结论',
+    '- 是否允许继续放量：',
+    '- 是否允许正式交付：',
+    '- 下一步负责人：',
+    '- 计划完成时间：',
+    '',
+    '## 关联文档',
+    `- 142 验收执行包：dingtalk-governance-142-acceptance-package-${today}.md`,
+    `- 最终交付包：dingtalk-governance-final-handoff-package-${today}.md`,
+    `- 正式交付结论：dingtalk-governance-delivery-decision-${today}.md`,
+    `- 对外同步模板：dingtalk-governance-stakeholder-update-template-${today}.md`,
+    '',
+    '## 关键入口',
+    `- 用户治理入口：${buildMissingOpenIdUserManagementLocation()}`,
+    `- 目录同步入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
+    `- 治理审计入口：${buildRecentDingTalkGovernanceAuditLocation()}`,
+    '',
+    '## 当前建议',
+    ...governanceWorkbenchCards.value.map((card) => `- ${card.title}：${card.note}`),
+  ]
+  downloadText(
+    `dingtalk-governance-acceptance-result-summary-template-${today}.md`,
+    lines.join('\n'),
+    'text/markdown;charset=utf-8',
+  )
+  setStatus('已导出 DingTalk 验收结果汇总模板')
+}
+
+function exportGovernanceAcceptanceReadinessSnapshot(): void {
+  const today = formatDateInput(new Date())
+  const lines = [
+    '# DingTalk 当前验收就绪快照',
+    '',
+    `日期：${today}`,
+    '',
+    '## 当前就绪判断',
+    '- 代码侧：已完成主要治理与导出收口。',
+    '- 机器探针：已覆盖管理员鉴权、用户治理、目录同步、审计接口、公开表单、受保护表单匿名拦截。',
+    '- 真人侧：仍需完成成功样本、缺 openId 样本、受保护表单允许名单样本、群机器人消息样本。',
+    '',
+    '## 当前基线',
+    `- 缺 OpenID：${governanceSummary.value.dingtalkOpenIdMissing}`,
+    `- 待收口：${governanceSummary.value.dingtalkOpenIdPending}`,
+    `- 已收口：${governanceSummary.value.dingtalkOpenIdGoverned}`,
+    `- 目录已链接：${governanceSummary.value.directoryLinked}`,
+    '',
+    '## 已准备好的执行物',
+    `- 142 验收执行包：dingtalk-governance-142-acceptance-package-${today}.md`,
+    `- 真人侧验收执行单：dingtalk-governance-manual-acceptance-script-${today}.md`,
+    `- 最终交付包：dingtalk-governance-final-handoff-package-${today}.md`,
+    `- 验收结果汇总模板：dingtalk-governance-acceptance-result-summary-template-${today}.md`,
+    '',
+    '## 现场开测前检查',
+    '- [ ] 本地 142 管理员 token 文件可读取',
+    '- [ ] 真实 DingTalk 测试账号在手',
+    '- [ ] 公开表单和受保护表单链接已准备',
+    '- [ ] 群机器人测试群可观察到消息',
+    '- [ ] 回填人和截图 / 日志记录位置已明确',
+    '',
+    '## 下一步顺序',
+    '1. 先用真人侧验收执行单跑 4 项样本。',
+    '2. 用验收结果汇总模板汇总结果。',
+    '3. 更新正式交付结论和对外同步模板。',
+    '4. 如通过，则进入上线观察记录模板阶段。',
+    '',
+    '## 关键入口',
+    `- 用户治理入口：${buildMissingOpenIdUserManagementLocation()}`,
+    `- 目录同步入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
+    `- 治理审计入口：${buildRecentDingTalkGovernanceAuditLocation()}`,
+    '',
+    '## 当前建议',
+    ...governanceWorkbenchCards.value.map((card) => `- ${card.title}：${card.note}`),
+  ]
+  downloadText(
+    `dingtalk-governance-acceptance-readiness-snapshot-${today}.md`,
+    lines.join('\n'),
+    'text/markdown;charset=utf-8',
+  )
+  setStatus('已导出 DingTalk 当前验收就绪快照')
+}
+
+function exportGovernanceEnvironmentBlockerTemplate(): void {
+  const today = formatDateInput(new Date())
+  const lines = [
+    '# DingTalk 环境阻塞记录模板',
+    '',
+    `日期：${today}`,
+    '',
+    '## 适用范围',
+    '- 用于记录并跟踪非代码缺陷类阻塞。',
+    '- 典型场景包括：钉钉授权组范围、组织范围、openId 数据缺口、真实群机器人配置、第三方波动。',
+    '',
+    '## 当前基线',
+    `- 缺 OpenID：${governanceSummary.value.dingtalkOpenIdMissing}`,
+    `- 待收口：${governanceSummary.value.dingtalkOpenIdPending}`,
+    `- 已收口：${governanceSummary.value.dingtalkOpenIdGoverned}`,
+    `- 目录已链接：${governanceSummary.value.directoryLinked}`,
+    '',
+    '## 阻塞记录',
+    '- 阻塞标题：',
+    '- 阻塞类型：授权组 / 组织范围 / openId 数据 / 群机器人 / 第三方波动 / 其他',
+    '- 影响范围：',
+    '- 复现账号 / 样本：',
+    '- 现象描述：',
+    '- 当前判断：',
+    '- 是否影响正式交付：是 / 否',
+    '',
+    '## 已采取动作',
+    '- 已执行检查：',
+    '- 已联系对象：',
+    '- 已收集证据：截图 / 日志 / 返回报文 / 配置快照',
+    '',
+    '## 下一步',
+    '- 下一步动作：',
+    '- 负责人：',
+    '- 预计完成时间：',
+    '- 回退方案 / 绕行方案：',
+    '',
+    '## 关联文档',
+    `- 142 验收执行包：dingtalk-governance-142-acceptance-package-${today}.md`,
+    `- 验收结果汇总模板：dingtalk-governance-acceptance-result-summary-template-${today}.md`,
+    `- 最终交付包：dingtalk-governance-final-handoff-package-${today}.md`,
+    '',
+    '## 关键入口',
+    `- 用户治理入口：${buildMissingOpenIdUserManagementLocation()}`,
+    `- 目录同步入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
+    `- 治理审计入口：${buildRecentDingTalkGovernanceAuditLocation()}`,
+    '',
+    '## 当前建议',
+    ...governanceWorkbenchCards.value.map((card) => `- ${card.title}：${card.note}`),
+  ]
+  downloadText(
+    `dingtalk-governance-environment-blocker-template-${today}.md`,
+    lines.join('\n'),
+    'text/markdown;charset=utf-8',
+  )
+  setStatus('已导出 DingTalk 环境阻塞记录模板')
+}
+
 function buildDingTalkGovernanceAuditLocation(): string {
   const params = new URLSearchParams({
     resourceType: 'user-auth-grant',
@@ -1510,6 +2359,34 @@ function clearDirectoryNavigationContext(): void {
   userNavigation.value = nextNavigation
   replaceUserNavigation(nextNavigation)
   setStatus('已清除目录回跳上下文')
+}
+
+async function copyDirectoryReturnLocation(): Promise<void> {
+  const location = directoryReturnLocation.value
+  if (!location) return
+  try {
+    const absoluteLocation = typeof window === 'undefined'
+      ? location
+      : new URL(location, window.location.origin).toString()
+    await navigator.clipboard.writeText(absoluteLocation)
+    setStatus('目录回跳链接已复制')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '复制目录回跳链接失败', 'error')
+  }
+}
+
+async function copyCurrentUserManagementLocation(): Promise<void> {
+  const location = buildUserLocation(userNavigation.value)
+  if (!location) return
+  try {
+    const absoluteLocation = typeof window === 'undefined'
+      ? location
+      : new URL(location, window.location.origin).toString()
+    await navigator.clipboard.writeText(absoluteLocation)
+    setStatus('用户治理链接已复制')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '复制用户治理链接失败', 'error')
+  }
 }
 
 function replaceUserNavigation(navigation: InitialUserNavigation): void {

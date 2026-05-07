@@ -418,6 +418,17 @@
               >
                 {{ warning }}
               </div>
+              <label class="meta-rule-editor__checkbox">
+                <input
+                  v-model="action.config.notifyRuleCreatorOnFailure"
+                  type="checkbox"
+                  data-field="notifyRuleCreatorOnFailure"
+                />
+                Notify me if DingTalk group delivery fails
+              </label>
+              <div class="meta-rule-editor__hint" data-field="notifyRuleCreatorOnFailureHint">
+                Sends a DingTalk work notification to the rule creator when this group robot delivery fails. If the creator is not linked to DingTalk, the alert is recorded as skipped.
+              </div>
               <div class="meta-rule-editor__preview" data-field="groupMessageSummary">
                 <div class="meta-rule-editor__preview-title">Message summary</div>
                 <div><strong>Groups:</strong> {{ dingTalkGroupSummary(action) }}</div>
@@ -894,6 +905,7 @@ type DraftActionConfig = Record<string, unknown> & {
   bodyTemplate?: string
   publicFormViewId?: string
   internalViewId?: string
+  notifyRuleCreatorOnFailure?: boolean
   locked?: boolean
 }
 
@@ -1000,6 +1012,7 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
           ? config.destinationIdFieldPath
           : '',
       destinationPickerId: '',
+      notifyRuleCreatorOnFailure: config.notifyRuleCreatorOnFailure === true,
     }
   }
   if (type === 'send_dingtalk_person_message') {
@@ -1661,6 +1674,7 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
         bodyTemplate: '',
         publicFormViewId: '',
         internalViewId: '',
+        notifyRuleCreatorOnFailure: true,
       }
     case 'send_dingtalk_person_message':
       return {
@@ -1740,6 +1754,7 @@ function buildPayload(): Partial<AutomationRule> {
           internalViewId: typeof action.config.internalViewId === 'string' && action.config.internalViewId.trim()
             ? action.config.internalViewId.trim()
             : undefined,
+          notifyRuleCreatorOnFailure: action.config.notifyRuleCreatorOnFailure === true,
         },
       }
     }

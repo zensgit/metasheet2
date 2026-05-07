@@ -258,8 +258,59 @@ describe('DingTalk automation link route validation', () => {
         bodyTemplate: 'Open form',
         publicFormViewId: VALID_FORM_VIEW_ID,
         internalViewId: INTERNAL_VIEW_ID,
+        notifyRuleCreatorOnFailure: true,
       }),
     }))
+    expect(res.body.data.rule).toMatchObject({
+      actionType: 'send_dingtalk_group_message',
+      actionConfig: expect.objectContaining({
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+        publicFormViewId: VALID_FORM_VIEW_ID,
+        internalViewId: INTERNAL_VIEW_ID,
+        notifyRuleCreatorOnFailure: true,
+      }),
+    })
+  })
+
+  it('preserves an explicit disabled creator failure alert on DingTalk group rule create', async () => {
+    const { app, automationService } = await createApp()
+
+    const res = await request(app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/automations`)
+      .send({
+        name: 'Notify group without creator alert',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: {
+          destinationId: 'group_1',
+          title: 'Please fill',
+          content: 'Open form',
+          notifyRuleCreatorOnFailure: false,
+        },
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(automationService.createRule).toHaveBeenCalledWith(SHEET_ID, expect.objectContaining({
+      actionType: 'send_dingtalk_group_message',
+      actionConfig: expect.objectContaining({
+        destinationId: 'group_1',
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+        notifyRuleCreatorOnFailure: false,
+      }),
+    }))
+    expect(res.body.data.rule).toMatchObject({
+      actionType: 'send_dingtalk_group_message',
+      actionConfig: expect.objectContaining({
+        destinationId: 'group_1',
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+        notifyRuleCreatorOnFailure: false,
+      }),
+    })
   })
 
   it('persists a DingTalk group rule when public form access requires DingTalk authorization', async () => {
@@ -1003,6 +1054,8 @@ describe('DingTalk automation link route validation', () => {
         internalViewId: INTERNAL_VIEW_ID,
       }),
     }))
+    const updateInput = vi.mocked(automationService.updateRule).mock.calls[0][2]
+    expect(updateInput.actionConfig).not.toHaveProperty('notifyRuleCreatorOnFailure')
     expect(res.body.data.rule.actionConfig).toEqual(expect.objectContaining({
       titleTemplate: 'Please fill',
       bodyTemplate: 'Open form',
@@ -1010,6 +1063,155 @@ describe('DingTalk automation link route validation', () => {
       internalViewId: INTERNAL_VIEW_ID,
     }))
     expect(mockPool.query.mock.calls.some(([sql]) => String(sql).includes('FROM meta_views'))).toBe(true)
+  })
+
+  it('preserves an explicit disabled creator failure alert when switching into a DingTalk group action on update', async () => {
+    const automationService = createMockAutomationService(makeAutomationRule({
+      action_type: 'notify',
+      action_config: {
+        message: 'stale notification',
+      },
+    }))
+    const { app } = await createApp({ automationService })
+
+    const res = await request(app)
+      .patch(`/api/multitable/sheets/${SHEET_ID}/automations/${RULE_ID}`)
+      .send({
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: {
+          destinationId: 'group_1',
+          title: 'Please fill',
+          content: 'Open form',
+          notifyRuleCreatorOnFailure: false,
+        },
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(automationService.getRule).toHaveBeenCalledWith(RULE_ID)
+    expect(automationService.updateRule).toHaveBeenCalledWith(RULE_ID, SHEET_ID, expect.objectContaining({
+      actionType: 'send_dingtalk_group_message',
+      actionConfig: expect.objectContaining({
+        destinationId: 'group_1',
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+        notifyRuleCreatorOnFailure: false,
+      }),
+    }))
+    expect(res.body.data.rule.actionConfig).toEqual(expect.objectContaining({
+      destinationId: 'group_1',
+      titleTemplate: 'Please fill',
+      bodyTemplate: 'Open form',
+      notifyRuleCreatorOnFailure: false,
+    }))
+  })
+
+  it('defaults creator failure alerts on when switching into a DingTalk group action on update', async () => {
+    const automationService = createMockAutomationService(makeAutomationRule({
+      action_type: 'notify',
+      action_config: {
+        message: 'stale notification',
+      },
+    }))
+    const { app } = await createApp({ automationService })
+
+    const res = await request(app)
+      .patch(`/api/multitable/sheets/${SHEET_ID}/automations/${RULE_ID}`)
+      .send({
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: {
+          destinationId: 'group_1',
+          title: 'Please fill',
+          content: 'Open form',
+        },
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(automationService.getRule).toHaveBeenCalledWith(RULE_ID)
+    expect(automationService.updateRule).toHaveBeenCalledWith(RULE_ID, SHEET_ID, expect.objectContaining({
+      actionType: 'send_dingtalk_group_message',
+      actionConfig: expect.objectContaining({
+        destinationId: 'group_1',
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+        notifyRuleCreatorOnFailure: true,
+      }),
+    }))
+    expect(res.body.data.rule.actionConfig).toEqual(expect.objectContaining({
+      destinationId: 'group_1',
+      titleTemplate: 'Please fill',
+      bodyTemplate: 'Open form',
+      notifyRuleCreatorOnFailure: true,
+    }))
+  })
+
+  it('preserves legacy V1 DingTalk group actions without creator failure alerts on automation update', async () => {
+    const automationService = createMockAutomationService(makeAutomationRule({
+      action_type: 'notify',
+      action_config: {
+        message: 'stale legacy notification',
+      },
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'group_1',
+          titleTemplate: 'Old title',
+          bodyTemplate: 'Old body',
+        },
+      }],
+    }))
+    const { app } = await createApp({ automationService })
+
+    const res = await request(app)
+      .patch(`/api/multitable/sheets/${SHEET_ID}/automations/${RULE_ID}`)
+      .send({
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: {
+          destinationId: 'group_1',
+          title: 'Please fill',
+          content: 'Open form',
+          publicFormViewId: VALID_FORM_VIEW_ID,
+          internalViewId: INTERNAL_VIEW_ID,
+        },
+        actions: [{
+          type: 'send_dingtalk_group_message',
+          config: {
+            destinationId: 'group_1',
+            title: 'Please fill',
+            content: 'Open form',
+            publicFormViewId: VALID_FORM_VIEW_ID,
+            internalViewId: INTERNAL_VIEW_ID,
+          },
+        }],
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(automationService.getRule).toHaveBeenCalledWith(RULE_ID)
+    expect(automationService.updateRule).toHaveBeenCalledTimes(1)
+
+    const updateInput = vi.mocked(automationService.updateRule).mock.calls[0][2]
+    expect(updateInput.actionConfig).toEqual(expect.objectContaining({
+      destinationId: 'group_1',
+      titleTemplate: 'Please fill',
+      bodyTemplate: 'Open form',
+      publicFormViewId: VALID_FORM_VIEW_ID,
+      internalViewId: INTERNAL_VIEW_ID,
+    }))
+    expect(updateInput.actionConfig).not.toHaveProperty('notifyRuleCreatorOnFailure')
+    expect(updateInput.actions).toEqual([{
+      type: 'send_dingtalk_group_message',
+      config: expect.objectContaining({
+        destinationId: 'group_1',
+        titleTemplate: 'Please fill',
+        bodyTemplate: 'Open form',
+        publicFormViewId: VALID_FORM_VIEW_ID,
+        internalViewId: INTERNAL_VIEW_ID,
+      }),
+    }])
+    const updateActions = updateInput.actions as Array<{ config: Record<string, unknown> }>
+    expect(updateActions[0].config).not.toHaveProperty('notifyRuleCreatorOnFailure')
   })
 
   it('rejects an invalid public form link in a V1 DingTalk person action on automation update', async () => {

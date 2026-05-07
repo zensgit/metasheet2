@@ -77,8 +77,15 @@ export async function listAutomationDingTalkPersonDeliveries(
   queryFn: QueryFn,
   ruleId: string,
   limit = 50,
+  recordId = '',
 ): Promise<DingTalkPersonDelivery[]> {
   const normalizedLimit = Math.min(Math.max(limit, 1), 200)
+  const normalizedRecordId = recordId.trim()
+  const params: unknown[] = [ruleId]
+  const recordFilter = normalizedRecordId ? ' AND d.record_id = $2' : ''
+  if (normalizedRecordId) params.push(normalizedRecordId)
+  params.push(normalizedLimit)
+  const limitParam = params.length
   const result = await queryFn(
     `SELECT d.id,
             d.local_user_id,
@@ -102,9 +109,10 @@ export async function listAutomationDingTalkPersonDeliveries(
        FROM dingtalk_person_deliveries d
        LEFT JOIN users u ON u.id = d.local_user_id
       WHERE d.automation_rule_id = $1
+        ${recordFilter}
       ORDER BY d.created_at DESC
-      LIMIT $2`,
-    [ruleId, normalizedLimit],
+      LIMIT $${limitParam}`,
+    params,
   )
 
   return (result.rows as DeliveryRow[]).map(mapDeliveryRow)

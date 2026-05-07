@@ -1047,6 +1047,581 @@ describe('UserManagementView', () => {
     }
   })
 
+  it('exports the governance delivery checklist as a markdown handoff file', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-06T08:00:00.000Z'))
+    try {
+      const state = createApiState()
+      state[1].hasOpenId = false
+      state[1].directoryLinked = true
+      state[1].grantEnabled = false
+      state[1].dingtalkGrantUpdatedAt = '2026-05-05T08:00:00.000Z'
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+      app.mount(container!)
+      await flushUi(20)
+
+      const exportButton = findButtonByText(container!, '导出交付清单')
+      exportButton.click()
+      await flushUi()
+
+      expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+      const exportedText = createdBlobParts.join('')
+      expect(exportedText).toContain('# DingTalk 交付清单')
+      expect(exportedText).toContain('日期：2026-05-06')
+      expect(exportedText).toContain('## 当前交付判断')
+      expect(exportedText).toContain('- 当前阶段：可进入试运行 / 试交付')
+      expect(exportedText).toContain('## 交付项')
+      expect(exportedText).toContain('## 交付前操作')
+      expect(exportedText).toContain('dingtalk-governance-full-validation-package-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-142-acceptance-checklist-2026-05-06.md')
+      expect(exportedText).toContain('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/directory?source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/audit?resourceType=user-auth-grant&action=revoke&from=2026-04-30T00%3A00%3A00.000Z&to=2026-05-06T23%3A59%3A59.999Z')
+      expect(clickedAnchors[0]?.download).toBe('dingtalk-governance-delivery-checklist-2026-05-06.md')
+      expect(container?.textContent).toContain('已导出 DingTalk 交付清单')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('exports the 142 acceptance checklist as a markdown handoff file', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-06T08:00:00.000Z'))
+    try {
+      const state = createApiState()
+      state[1].hasOpenId = false
+      state[1].directoryLinked = true
+      state[1].grantEnabled = false
+      state[1].dingtalkGrantUpdatedAt = '2026-05-05T08:00:00.000Z'
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+      app.mount(container!)
+      await flushUi(20)
+
+      const exportButton = findButtonByText(container!, '导出 142 联调验收清单')
+      exportButton.click()
+      await flushUi()
+
+      expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+      const exportedText = createdBlobParts.join('')
+      expect(exportedText).toContain('# DingTalk 142 联调验收清单')
+      expect(exportedText).toContain('日期：2026-05-06')
+      expect(exportedText).toContain('## 验收前提')
+      expect(exportedText).toContain('dingtalk-governance-full-validation-package-2026-05-06.md')
+      expect(exportedText).toContain('## 验收矩阵')
+      expect(exportedText).toContain('场景 1：已绑定且启用的 DingTalk 用户可正常登录并访问目标页面')
+      expect(exportedText).toContain('场景 7：群机器人消息发送成功，签名和关键词限制符合预期')
+      expect(exportedText).toContain('## 结果回填')
+      expect(exportedText).toContain('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/directory?source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/audit?resourceType=user-auth-grant&action=revoke&from=2026-04-30T00%3A00%3A00.000Z&to=2026-05-06T23%3A59%3A59.999Z')
+      expect(clickedAnchors[0]?.download).toBe('dingtalk-governance-142-acceptance-checklist-2026-05-06.md')
+      expect(container?.textContent).toContain('已导出 DingTalk 142 联调验收清单')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('exports the governance trial runbook as a markdown handoff file', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-06T08:00:00.000Z'))
+    try {
+      const state = createApiState()
+      state[1].hasOpenId = false
+      state[1].directoryLinked = true
+      state[1].grantEnabled = false
+      state[1].dingtalkGrantUpdatedAt = '2026-05-05T08:00:00.000Z'
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+      app.mount(container!)
+      await flushUi(20)
+
+      const exportButton = findButtonByText(container!, '导出试运行值班说明')
+      exportButton.click()
+      await flushUi()
+
+      expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+      const exportedText = createdBlobParts.join('')
+      expect(exportedText).toContain('# DingTalk 试运行值班说明')
+      expect(exportedText).toContain('日期：2026-05-06')
+      expect(exportedText).toContain('## 适用阶段')
+      expect(exportedText).toContain('## 值班前准备')
+      expect(exportedText).toContain('dingtalk-governance-delivery-checklist-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-142-acceptance-checklist-2026-05-06.md')
+      expect(exportedText).toContain('## 值班检查项')
+      expect(exportedText).toContain('## 异常上报')
+      expect(exportedText).toContain('## 当日收口')
+      expect(exportedText).toContain('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/directory?source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/audit?resourceType=user-auth-grant&action=revoke&from=2026-04-30T00%3A00%3A00.000Z&to=2026-05-06T23%3A59%3A59.999Z')
+      expect(clickedAnchors[0]?.download).toBe('dingtalk-governance-trial-runbook-2026-05-06.md')
+      expect(container?.textContent).toContain('已导出 DingTalk 试运行值班说明')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('exports the governance delivery decision as a markdown handoff file', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-06T08:00:00.000Z'))
+    try {
+      const state = createApiState()
+      state[1].hasOpenId = false
+      state[1].directoryLinked = true
+      state[1].grantEnabled = false
+      state[1].dingtalkGrantUpdatedAt = '2026-05-05T08:00:00.000Z'
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+      app.mount(container!)
+      await flushUi(20)
+
+      const exportButton = findButtonByText(container!, '导出正式交付结论')
+      exportButton.click()
+      await flushUi()
+
+      expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+      const exportedText = createdBlobParts.join('')
+      expect(exportedText).toContain('# DingTalk 正式交付结论')
+      expect(exportedText).toContain('日期：2026-05-06')
+      expect(exportedText).toContain('## 结论类型')
+      expect(exportedText).toContain('## 依据文档')
+      expect(exportedText).toContain('dingtalk-governance-delivery-checklist-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-142-acceptance-checklist-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-trial-runbook-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-full-validation-package-2026-05-06.md')
+      expect(exportedText).toContain('## 关键链路结论')
+      expect(exportedText).toContain('## 环境侧结论')
+      expect(exportedText).toContain('## 风险与阻塞')
+      expect(exportedText).toContain('## 建议动作')
+      expect(exportedText).toContain('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/directory?source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/audit?resourceType=user-auth-grant&action=revoke&from=2026-04-30T00%3A00%3A00.000Z&to=2026-05-06T23%3A59%3A59.999Z')
+      expect(clickedAnchors[0]?.download).toBe('dingtalk-governance-delivery-decision-2026-05-06.md')
+      expect(container?.textContent).toContain('已导出 DingTalk 正式交付结论')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('exports the governance delivery archive index as a markdown handoff file', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-06T08:00:00.000Z'))
+    try {
+      const state = createApiState()
+      state[1].hasOpenId = false
+      state[1].directoryLinked = true
+      state[1].grantEnabled = false
+      state[1].dingtalkGrantUpdatedAt = '2026-05-05T08:00:00.000Z'
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+      app.mount(container!)
+      await flushUi(20)
+
+      const exportButton = findButtonByText(container!, '导出交付归档包索引')
+      exportButton.click()
+      await flushUi()
+
+      expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+      const exportedText = createdBlobParts.join('')
+      expect(exportedText).toContain('# DingTalk 交付归档包索引')
+      expect(exportedText).toContain('日期：2026-05-06')
+      expect(exportedText).toContain('## 归档文件清单')
+      expect(exportedText).toContain('dingtalk-governance-daily-summary-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-full-validation-package-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-142-acceptance-checklist-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-trial-runbook-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-delivery-decision-2026-05-06.md')
+      expect(exportedText).toContain('## 建议归档顺序')
+      expect(exportedText).toContain('## 配套证据')
+      expect(exportedText).toContain('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/directory?source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/audit?resourceType=user-auth-grant&action=revoke&from=2026-04-30T00%3A00%3A00.000Z&to=2026-05-06T23%3A59%3A59.999Z')
+      expect(clickedAnchors[0]?.download).toBe('dingtalk-governance-delivery-archive-index-2026-05-06.md')
+      expect(container?.textContent).toContain('已导出 DingTalk 交付归档包索引')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('exports the governance closeout checklist as a markdown handoff file', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-06T08:00:00.000Z'))
+    try {
+      const state = createApiState()
+      state[1].hasOpenId = false
+      state[1].directoryLinked = true
+      state[1].grantEnabled = false
+      state[1].dingtalkGrantUpdatedAt = '2026-05-05T08:00:00.000Z'
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+      app.mount(container!)
+      await flushUi(20)
+
+      const exportButton = findButtonByText(container!, '导出收尾检查单')
+      exportButton.click()
+      await flushUi()
+
+      expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+      const exportedText = createdBlobParts.join('')
+      expect(exportedText).toContain('# DingTalk 收尾检查单')
+      expect(exportedText).toContain('日期：2026-05-06')
+      expect(exportedText).toContain('## 收尾目标')
+      expect(exportedText).toContain('## 必做项')
+      expect(exportedText).toContain('## 建议执行顺序')
+      expect(exportedText).toContain('dingtalk-governance-142-acceptance-checklist-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-delivery-decision-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-delivery-archive-index-2026-05-06.md')
+      expect(exportedText).toContain('## 输出物')
+      expect(exportedText).toContain('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/directory?source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/audit?resourceType=user-auth-grant&action=revoke&from=2026-04-30T00%3A00%3A00.000Z&to=2026-05-06T23%3A59%3A59.999Z')
+      expect(clickedAnchors[0]?.download).toBe('dingtalk-governance-closeout-checklist-2026-05-06.md')
+      expect(container?.textContent).toContain('已导出 DingTalk 收尾检查单')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('exports the governance stakeholder update template as a markdown handoff file', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-06T08:00:00.000Z'))
+    try {
+      const state = createApiState()
+      state[1].hasOpenId = false
+      state[1].directoryLinked = true
+      state[1].grantEnabled = false
+      state[1].dingtalkGrantUpdatedAt = '2026-05-05T08:00:00.000Z'
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+      app.mount(container!)
+      await flushUi(20)
+
+      const exportButton = findButtonByText(container!, '导出对外同步模板')
+      exportButton.click()
+      await flushUi()
+
+      expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+      const exportedText = createdBlobParts.join('')
+      expect(exportedText).toContain('# DingTalk 对外同步模板')
+      expect(exportedText).toContain('日期：2026-05-06')
+      expect(exportedText).toContain('## 同步对象')
+      expect(exportedText).toContain('## 今日结论')
+      expect(exportedText).toContain('## 关键状态')
+      expect(exportedText).toContain('## 已完成事项')
+      expect(exportedText).toContain('## 风险与阻塞')
+      expect(exportedText).toContain('dingtalk-governance-delivery-decision-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-delivery-archive-index-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-closeout-checklist-2026-05-06.md')
+      expect(exportedText).toContain('## 建议下一步')
+      expect(exportedText).toContain('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/directory?source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/audit?resourceType=user-auth-grant&action=revoke&from=2026-04-30T00%3A00%3A00.000Z&to=2026-05-06T23%3A59%3A59.999Z')
+      expect(clickedAnchors[0]?.download).toBe('dingtalk-governance-stakeholder-update-template-2026-05-06.md')
+      expect(container?.textContent).toContain('已导出 DingTalk 对外同步模板')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('exports the governance launch observation template as a markdown handoff file', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-06T08:00:00.000Z'))
+    try {
+      const state = createApiState()
+      state[1].hasOpenId = false
+      state[1].directoryLinked = true
+      state[1].grantEnabled = false
+      state[1].dingtalkGrantUpdatedAt = '2026-05-05T08:00:00.000Z'
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+      app.mount(container!)
+      await flushUi(20)
+
+      const exportButton = findButtonByText(container!, '导出上线观察记录模板')
+      exportButton.click()
+      await flushUi()
+
+      expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+      const exportedText = createdBlobParts.join('')
+      expect(exportedText).toContain('# DingTalk 上线观察记录模板')
+      expect(exportedText).toContain('日期：2026-05-06')
+      expect(exportedText).toContain('## 观察窗口')
+      expect(exportedText).toContain('## 关键指标')
+      expect(exportedText).toContain('## 观察项')
+      expect(exportedText).toContain('## 异常记录')
+      expect(exportedText).toContain('## 结论')
+      expect(exportedText).toContain('dingtalk-governance-delivery-decision-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-closeout-checklist-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-stakeholder-update-template-2026-05-06.md')
+      expect(exportedText).toContain('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/directory?source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/audit?resourceType=user-auth-grant&action=revoke&from=2026-04-30T00%3A00%3A00.000Z&to=2026-05-06T23%3A59%3A59.999Z')
+      expect(clickedAnchors[0]?.download).toBe('dingtalk-governance-launch-observation-template-2026-05-06.md')
+      expect(container?.textContent).toContain('已导出 DingTalk 上线观察记录模板')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('exports the governance manual acceptance script as a markdown handoff file', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-06T08:00:00.000Z'))
+    try {
+      const state = createApiState()
+      state[1].hasOpenId = false
+      state[1].directoryLinked = true
+      state[1].grantEnabled = false
+      state[1].dingtalkGrantUpdatedAt = '2026-05-05T08:00:00.000Z'
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+      app.mount(container!)
+      await flushUi(20)
+
+      const exportButton = findButtonByText(container!, '导出真人侧验收执行单')
+      exportButton.click()
+      await flushUi()
+
+      expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+      const exportedText = createdBlobParts.join('')
+      expect(exportedText).toContain('# DingTalk 真人侧验收执行单')
+      expect(exportedText).toContain('日期：2026-05-06')
+      expect(exportedText).toContain('## 样本清单')
+      expect(exportedText).toContain('成功登录样本：zhouhua')
+      expect(exportedText).toContain('缺 openId 样本：P4 Unauthorized Target')
+      expect(exportedText).toContain('## 执行顺序')
+      expect(exportedText).toContain('DINGTALK_AUTH_REQUIRED')
+      expect(exportedText).toContain('## 结果回填')
+      expect(exportedText).toContain('dingtalk-governance-142-acceptance-checklist-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-delivery-decision-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-launch-observation-template-2026-05-06.md')
+      expect(exportedText).toContain('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/directory?source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/audit?resourceType=user-auth-grant&action=revoke&from=2026-04-30T00%3A00%3A00.000Z&to=2026-05-06T23%3A59%3A59.999Z')
+      expect(clickedAnchors[0]?.download).toBe('dingtalk-governance-manual-acceptance-script-2026-05-06.md')
+      expect(container?.textContent).toContain('已导出 DingTalk 真人侧验收执行单')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('exports the governance 142 acceptance package as a markdown handoff file', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-06T08:00:00.000Z'))
+    try {
+      const state = createApiState()
+      state[1].hasOpenId = false
+      state[1].directoryLinked = true
+      state[1].grantEnabled = false
+      state[1].dingtalkGrantUpdatedAt = '2026-05-05T08:00:00.000Z'
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+      app.mount(container!)
+      await flushUi(20)
+
+      const exportButton = findButtonByText(container!, '导出 142 验收执行包')
+      exportButton.click()
+      await flushUi()
+
+      expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+      const exportedText = createdBlobParts.join('')
+      expect(exportedText).toContain('# DingTalk 142 验收执行包')
+      expect(exportedText).toContain('日期：2026-05-06')
+      expect(exportedText).toContain('## 包内目录')
+      expect(exportedText).toContain('dingtalk-governance-142-acceptance-checklist-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-manual-acceptance-script-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-launch-observation-template-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-delivery-decision-2026-05-06.md')
+      expect(exportedText).toContain('## 当前机器侧结论')
+      expect(exportedText).toContain('DINGTALK_AUTH_REQUIRED')
+      expect(exportedText).toContain('## 142 真人侧执行顺序')
+      expect(exportedText).toContain('P4 Unauthorized Target')
+      expect(exportedText).toContain('## 回填要求')
+      expect(exportedText).toContain('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/directory?source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/audit?resourceType=user-auth-grant&action=revoke&from=2026-04-30T00%3A00%3A00.000Z&to=2026-05-06T23%3A59%3A59.999Z')
+      expect(clickedAnchors[0]?.download).toBe('dingtalk-governance-142-acceptance-package-2026-05-06.md')
+      expect(container?.textContent).toContain('已导出 DingTalk 142 验收执行包')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('exports the governance final handoff package as a markdown handoff file', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-06T08:00:00.000Z'))
+    try {
+      const state = createApiState()
+      state[1].hasOpenId = false
+      state[1].directoryLinked = true
+      state[1].grantEnabled = false
+      state[1].dingtalkGrantUpdatedAt = '2026-05-05T08:00:00.000Z'
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+      app.mount(container!)
+      await flushUi(20)
+
+      const exportButton = findButtonByText(container!, '导出最终交付包')
+      exportButton.click()
+      await flushUi()
+
+      expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+      const exportedText = createdBlobParts.join('')
+      expect(exportedText).toContain('# DingTalk 最终交付包')
+      expect(exportedText).toContain('日期：2026-05-06')
+      expect(exportedText).toContain('## 包内目录')
+      expect(exportedText).toContain('dingtalk-governance-142-acceptance-package-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-delivery-decision-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-stakeholder-update-template-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-launch-observation-template-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-delivery-archive-index-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-closeout-checklist-2026-05-06.md')
+      expect(exportedText).toContain('## 当前交付判断')
+      expect(exportedText).toContain('## 最终执行顺序')
+      expect(exportedText).toContain('## 最终回填要求')
+      expect(exportedText).toContain('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/directory?source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/audit?resourceType=user-auth-grant&action=revoke&from=2026-04-30T00%3A00%3A00.000Z&to=2026-05-06T23%3A59%3A59.999Z')
+      expect(clickedAnchors[0]?.download).toBe('dingtalk-governance-final-handoff-package-2026-05-06.md')
+      expect(container?.textContent).toContain('已导出 DingTalk 最终交付包')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('exports the governance acceptance result summary template as a markdown handoff file', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-06T08:00:00.000Z'))
+    try {
+      const state = createApiState()
+      state[1].hasOpenId = false
+      state[1].directoryLinked = true
+      state[1].grantEnabled = false
+      state[1].dingtalkGrantUpdatedAt = '2026-05-05T08:00:00.000Z'
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+      app.mount(container!)
+      await flushUi(20)
+
+      const exportButton = findButtonByText(container!, '导出验收结果汇总模板')
+      exportButton.click()
+      await flushUi()
+
+      expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+      const exportedText = createdBlobParts.join('')
+      expect(exportedText).toContain('# DingTalk 验收结果汇总模板')
+      expect(exportedText).toContain('日期：2026-05-06')
+      expect(exportedText).toContain('## 样本结果汇总')
+      expect(exportedText).toContain('## 机器探针结论')
+      expect(exportedText).toContain('## 风险与阻塞')
+      expect(exportedText).toContain('## 最终结论')
+      expect(exportedText).toContain('dingtalk-governance-142-acceptance-package-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-final-handoff-package-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-delivery-decision-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-stakeholder-update-template-2026-05-06.md')
+      expect(exportedText).toContain('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/directory?source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/audit?resourceType=user-auth-grant&action=revoke&from=2026-04-30T00%3A00%3A00.000Z&to=2026-05-06T23%3A59%3A59.999Z')
+      expect(clickedAnchors[0]?.download).toBe('dingtalk-governance-acceptance-result-summary-template-2026-05-06.md')
+      expect(container?.textContent).toContain('已导出 DingTalk 验收结果汇总模板')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('exports the governance acceptance readiness snapshot as a markdown handoff file', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-06T08:00:00.000Z'))
+    try {
+      const state = createApiState()
+      state[1].hasOpenId = false
+      state[1].directoryLinked = true
+      state[1].grantEnabled = false
+      state[1].dingtalkGrantUpdatedAt = '2026-05-05T08:00:00.000Z'
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+      app.mount(container!)
+      await flushUi(20)
+
+      const exportButton = findButtonByText(container!, '导出当前验收就绪快照')
+      exportButton.click()
+      await flushUi()
+
+      expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+      const exportedText = createdBlobParts.join('')
+      expect(exportedText).toContain('# DingTalk 当前验收就绪快照')
+      expect(exportedText).toContain('日期：2026-05-06')
+      expect(exportedText).toContain('## 当前就绪判断')
+      expect(exportedText).toContain('## 已准备好的执行物')
+      expect(exportedText).toContain('dingtalk-governance-142-acceptance-package-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-manual-acceptance-script-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-final-handoff-package-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-acceptance-result-summary-template-2026-05-06.md')
+      expect(exportedText).toContain('## 现场开测前检查')
+      expect(exportedText).toContain('## 下一步顺序')
+      expect(exportedText).toContain('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/directory?source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/audit?resourceType=user-auth-grant&action=revoke&from=2026-04-30T00%3A00%3A00.000Z&to=2026-05-06T23%3A59%3A59.999Z')
+      expect(clickedAnchors[0]?.download).toBe('dingtalk-governance-acceptance-readiness-snapshot-2026-05-06.md')
+      expect(container?.textContent).toContain('已导出 DingTalk 当前验收就绪快照')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('exports the governance environment blocker template as a markdown handoff file', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-06T08:00:00.000Z'))
+    try {
+      const state = createApiState()
+      state[1].hasOpenId = false
+      state[1].directoryLinked = true
+      state[1].grantEnabled = false
+      state[1].dingtalkGrantUpdatedAt = '2026-05-05T08:00:00.000Z'
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+      app.mount(container!)
+      await flushUi(20)
+
+      const exportButton = findButtonByText(container!, '导出环境阻塞记录模板')
+      exportButton.click()
+      await flushUi()
+
+      expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+      const exportedText = createdBlobParts.join('')
+      expect(exportedText).toContain('# DingTalk 环境阻塞记录模板')
+      expect(exportedText).toContain('日期：2026-05-06')
+      expect(exportedText).toContain('## 阻塞记录')
+      expect(exportedText).toContain('授权组 / 组织范围 / openId 数据 / 群机器人 / 第三方波动 / 其他')
+      expect(exportedText).toContain('## 已采取动作')
+      expect(exportedText).toContain('## 下一步')
+      expect(exportedText).toContain('dingtalk-governance-142-acceptance-package-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-acceptance-result-summary-template-2026-05-06.md')
+      expect(exportedText).toContain('dingtalk-governance-final-handoff-package-2026-05-06.md')
+      expect(exportedText).toContain('/admin/users?filter=dingtalk-openid-missing&source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/directory?source=dingtalk-governance')
+      expect(exportedText).toContain('/admin/audit?resourceType=user-auth-grant&action=revoke&from=2026-04-30T00%3A00%3A00.000Z&to=2026-05-06T23%3A59%3A59.999Z')
+      expect(clickedAnchors[0]?.download).toBe('dingtalk-governance-environment-blocker-template-2026-05-06.md')
+      expect(container?.textContent).toContain('已导出 DingTalk 环境阻塞记录模板')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('links the screening view to the DingTalk governance audit shortcut', async () => {
     const state = createApiState()
     state[1].hasOpenId = false
@@ -1207,6 +1782,73 @@ describe('UserManagementView', () => {
     expect(container?.textContent).not.toContain('目录定位未完成')
     expect(container?.textContent).not.toContain('目标集成：ding-1 · 目标成员：user-2-directory')
     expect(container?.textContent).toContain('Bravo')
+  })
+
+  it('can copy the directory return link without changing the current context', async () => {
+    window.history.replaceState({}, '', '/admin/users?userId=user-2&source=directory-sync&directoryFailure=missing_account&integrationId=ding-1&accountId=user-2-directory')
+    const writeTextMock = vi.fn().mockResolvedValue(undefined)
+    const originalClipboard = navigator.clipboard
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: writeTextMock },
+    })
+    try {
+      const state = createApiState()
+      state[1].hasOpenId = false
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+      app.mount(container!)
+      await flushUi(20)
+
+      findButtonByText(container!, '复制目录链接').click()
+      await flushUi()
+
+      expect(writeTextMock).toHaveBeenCalledWith(`${window.location.origin}/admin/directory?integrationId=ding-1&accountId=user-2-directory&source=user-management&userId=user-2`)
+      expect(window.location.search).toBe('?userId=user-2&source=directory-sync&directoryFailure=missing_account&integrationId=ding-1&accountId=user-2-directory')
+      expect(container?.textContent).toContain('目录回跳链接已复制')
+      expect(container?.textContent).toContain('目录定位未完成')
+    } finally {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: originalClipboard,
+      })
+    }
+  })
+
+  it('can copy the current user-management link without changing the directory return context', async () => {
+    window.history.replaceState({}, '', '/admin/users?userId=user-2&source=directory-sync&directoryFailure=missing_account&integrationId=ding-1&accountId=user-2-directory')
+    const writeTextMock = vi.fn().mockResolvedValue(undefined)
+    const originalClipboard = navigator.clipboard
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: writeTextMock },
+    })
+    try {
+      const state = createApiState()
+      state[1].hasOpenId = false
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, state))
+      app.mount(container!)
+      await flushUi(20)
+
+      findButtonByText(container!, '缺 OpenID').click()
+      await flushUi()
+      findButtonByText(container!, '复制用户链接').click()
+      await flushUi()
+
+      expect(writeTextMock).toHaveBeenCalledWith(`${window.location.origin}/admin/users?userId=user-2&source=directory-sync&directoryFailure=missing_account&integrationId=ding-1&accountId=user-2-directory&filter=dingtalk-openid-missing`)
+      expect(window.location.search).toBe('?userId=user-2&source=directory-sync&directoryFailure=missing_account&integrationId=ding-1&accountId=user-2-directory&filter=dingtalk-openid-missing')
+      expect(container?.textContent).toContain('用户治理链接已复制')
+      expect(container?.textContent).toContain('目录定位未完成')
+      expect(container?.textContent).toContain('目标集成：ding-1 · 目标成员：user-2-directory')
+    } finally {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: originalClipboard,
+      })
+    }
   })
 
   it('bulk disables dingtalk grant for the current missing-openid screening list', async () => {

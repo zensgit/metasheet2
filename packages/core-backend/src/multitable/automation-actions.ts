@@ -66,6 +66,7 @@ export interface SendDingTalkGroupMessageConfig {
   bodyTemplate: string
   publicFormViewId?: string
   internalViewId?: string
+  notifyRuleCreatorOnFailure?: boolean
 }
 
 /** Config shape for send_dingtalk_person_message */

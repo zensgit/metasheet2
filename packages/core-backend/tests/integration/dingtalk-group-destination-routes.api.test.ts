@@ -25,8 +25,8 @@ function makeDelivery(overrides: Record<string, unknown> = {}) {
     id: 'dgd_route_1',
     destinationId: DESTINATION_ID,
     sourceType: 'manual_test',
-    subject: 'MetaSheet DingTalk group test',
-    content: 'This is a standard DingTalk group destination test message.',
+    subject: 'P4 metasheet DingTalk group validity test',
+    content: 'P4 / metasheet robot validity check from MetaSheet.',
     success: true,
     httpStatus: 200,
     responseBody: '{"errcode":0,"errmsg":"ok"}',
@@ -140,6 +140,36 @@ describe('DingTalk group destination routes', () => {
     expect(Object.prototype.hasOwnProperty.call(response.body.data, 'secret')).toBe(false)
   })
 
+  it('returns validation failure when save-time DingTalk verification fails on create', async () => {
+    const verificationError = new Error('DingTalk group destination verification failed: DingTalk errcode 300005: token is not exist')
+    const { app, service } = await createApp({
+      serviceOverrides: {
+        createDestination: vi.fn(async () => {
+          throw verificationError
+        }),
+      },
+    })
+
+    const response = await request(app)
+      .post('/api/multitable/dingtalk-groups')
+      .send({
+        name: 'Ops DingTalk Group',
+        webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=revoked-token',
+        secret: 'SECsecret',
+        sheetId: SHEET_ID,
+      })
+      .expect(400)
+
+    expect(service.createDestination).toHaveBeenCalledTimes(1)
+    expect(response.body).toEqual({
+      ok: false,
+      error: {
+        code: 'CREATE_FAILED',
+        message: verificationError.message,
+      },
+    })
+  })
+
   it('creates an organization-scoped destination only for admins', async () => {
     const { app, service } = await createApp({
       authUser: { id: 'admin_1', roles: ['admin'], perms: ['workflow:write'] },
@@ -233,6 +263,44 @@ describe('DingTalk group destination routes', () => {
     expect(service[serviceMethod as keyof typeof service]).not.toHaveBeenCalled()
   })
 
+  it('returns validation failure when save-time DingTalk verification fails on update', async () => {
+    const verificationError = new Error('DingTalk group destination verification failed: DingTalk errcode 310000: keyword mismatch')
+    const { app, service } = await createApp({
+      serviceOverrides: {
+        updateDestination: vi.fn(async () => {
+          throw verificationError
+        }),
+      },
+    })
+
+    const response = await request(app)
+      .patch(`/api/multitable/dingtalk-groups/${DESTINATION_ID}`)
+      .query({ sheetId: SHEET_ID })
+      .send({
+        webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=next-token',
+        secret: 'SECsecret',
+      })
+      .expect(400)
+
+    expect(service.updateDestination).toHaveBeenCalledWith(
+      DESTINATION_ID,
+      'user_1',
+      expect.objectContaining({
+        webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=next-token',
+        secret: 'SECsecret',
+      }),
+      SHEET_ID,
+      undefined,
+    )
+    expect(response.body).toEqual({
+      ok: false,
+      error: {
+        code: 'UPDATE_FAILED',
+        message: verificationError.message,
+      },
+    })
+  })
+
   it('lists delivery history for an authorized sheet-scoped destination', async () => {
     const { app, service } = await createApp()
 
@@ -265,6 +333,44 @@ describe('DingTalk group destination routes', () => {
       SHEET_ID,
       undefined,
     )
+  })
+
+  it('returns validation failure when DingTalk validity test fails', async () => {
+    const testError = new Error('DingTalk errcode 310000: keyword mismatch')
+    const { app, service } = await createApp({
+      serviceOverrides: {
+        testSend: vi.fn(async () => {
+          throw testError
+        }),
+      },
+    })
+
+    const response = await request(app)
+      .post(`/api/multitable/dingtalk-groups/${DESTINATION_ID}/test-send`)
+      .query({ sheetId: SHEET_ID })
+      .send({
+        subject: 'P4 metasheet DingTalk group validity test',
+        content: 'P4 / metasheet robot validity check from MetaSheet.',
+      })
+      .expect(400)
+
+    expect(service.testSend).toHaveBeenCalledWith(
+      DESTINATION_ID,
+      'user_1',
+      {
+        subject: 'P4 metasheet DingTalk group validity test',
+        content: 'P4 / metasheet robot validity check from MetaSheet.',
+      },
+      SHEET_ID,
+      undefined,
+    )
+    expect(response.body).toEqual({
+      ok: false,
+      error: {
+        code: 'TEST_SEND_FAILED',
+        message: testError.message,
+      },
+    })
   })
 
   it('lists delivery history for an organization destination shared with the caller org', async () => {

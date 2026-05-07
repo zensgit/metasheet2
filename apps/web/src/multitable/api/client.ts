@@ -1439,17 +1439,17 @@ export class MultitableApiClient {
     return parseJson<AutomationStats>(res)
   }
 
-  async getAutomationDingTalkPersonDeliveries(sheetId: string, ruleId: string, limit?: number): Promise<DingTalkPersonDelivery[]> {
+  async getAutomationDingTalkPersonDeliveries(sheetId: string, ruleId: string, limit?: number, recordId?: string): Promise<DingTalkPersonDelivery[]> {
     const res = await this.fetch(
-      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/dingtalk-person-deliveries${qs({ limit })}`,
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/dingtalk-person-deliveries${qs({ limit, recordId })}`,
     )
     const data = await parseJson<{ deliveries: DingTalkPersonDelivery[] }>(res)
     return Array.isArray(data?.deliveries) ? data.deliveries : []
   }
 
-  async getAutomationDingTalkGroupDeliveries(sheetId: string, ruleId: string, limit?: number): Promise<DingTalkGroupDelivery[]> {
+  async getAutomationDingTalkGroupDeliveries(sheetId: string, ruleId: string, limit?: number, recordId?: string): Promise<DingTalkGroupDelivery[]> {
     const res = await this.fetch(
-      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/dingtalk-group-deliveries${qs({ limit })}`,
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/dingtalk-group-deliveries${qs({ limit, recordId })}`,
     )
     const data = await parseJson<{ deliveries: DingTalkGroupDelivery[] }>(res)
     return Array.isArray(data?.deliveries) ? data.deliveries : []

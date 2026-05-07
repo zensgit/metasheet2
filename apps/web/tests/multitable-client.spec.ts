@@ -730,6 +730,46 @@ describe('MultitableApiClient', () => {
     await expect(client.getCommentUnreadCount()).resolves.toBe(3)
   })
 
+  it('sends DingTalk group validity test payload with sheet scope', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    await expect(client.testDingTalkGroup('dt_1', {
+      subject: 'P4 metasheet DingTalk group validity test',
+      content: 'P4 / metasheet robot validity check from MetaSheet.',
+    }, 'sheet_1')).resolves.toBeUndefined()
+
+    expect(fetchFn).toHaveBeenCalledWith('/api/multitable/dingtalk-groups/dt_1/test-send?sheetId=sheet_1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        subject: 'P4 metasheet DingTalk group validity test',
+        content: 'P4 / metasheet robot validity check from MetaSheet.',
+      }),
+    })
+  })
+
+  it('surfaces DingTalk group validity test backend errors', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: false,
+      error: {
+        code: 'TEST_SEND_FAILED',
+        message: 'DingTalk errcode 310000: keyword mismatch',
+      },
+    }), { status: 400, headers: { 'Content-Type': 'application/json' } }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    await expect(client.testDingTalkGroup('dt_1', {
+      subject: 'P4 metasheet DingTalk group validity test',
+      content: 'P4 / metasheet robot validity check from MetaSheet.',
+    }, 'sheet_1')).rejects.toMatchObject({
+      name: 'MultitableApiError',
+      status: 400,
+      code: 'TEST_SEND_FAILED',
+      message: 'DingTalk errcode 310000: keyword mismatch',
+    })
+  })
+
   it('ignores invalid Retry-After values', () => {
     expect(parseRetryAfterMs(null)).toBeUndefined()
     expect(parseRetryAfterMs('')).toBeUndefined()

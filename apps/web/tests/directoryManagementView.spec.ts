@@ -338,6 +338,8 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('待处理队列')
     expect(container?.textContent).toContain('自动同步观测')
     expect(container?.textContent).toContain('最近告警')
+    expect(container?.textContent).toContain('组织架构同步说明')
+    expect(container?.textContent).toContain('不会自动生成第二套可编辑的本地组织树')
     expect(container?.textContent).toContain('Union ID')
     expect(container?.textContent).toContain('0447654442691174')
     expect(container?.textContent).toContain('最近目录同步')
@@ -505,6 +507,14 @@ describe('DirectoryManagementView', () => {
   })
 
   it('posts manual sync and refreshes the selected integration', async () => {
+    const writeTextMock = vi.fn().mockResolvedValue(undefined)
+    const originalClipboard = navigator.clipboard
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: writeTextMock },
+    })
+
+    try {
     apiFetchMock
       .mockResolvedValueOnce(createJsonResponse({
         ok: true,
@@ -570,6 +580,8 @@ describe('DirectoryManagementView', () => {
           },
           autoAdmissionOnboardingPackets: [
             {
+              accountId: 'account-no-email-1',
+              integrationId: 'dir-1',
               userId: 'user-no-email-1',
               name: '林岚',
               email: null,
@@ -689,10 +701,7 @@ describe('DirectoryManagementView', () => {
       ))
 
     app = createApp(DirectoryManagementView)
-    app.component('RouterLink', {
-      props: ['to'],
-      template: '<a><slot /></a>',
-    })
+    registerRouterLink(app, true)
     app.mount(container!)
     await flushUi()
 
@@ -717,6 +726,50 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('Tmp-NoEmail-123')
     expect(container?.textContent).toContain('该账号未生成邀请链接，请直接分发登录账号和临时密码。')
     expect(container?.textContent).toContain('账号 99')
+    const copyAllUserLinksButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('复制全部用户链接'))
+    expect(copyAllUserLinksButton).toBeTruthy()
+    copyAllUserLinksButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(writeTextMock).toHaveBeenCalledWith(`${window.location.origin}/admin/users?userId=user-no-email-1&source=directory-sync&integrationId=dir-1&accountId=account-no-email-1`)
+    expect(container?.textContent).toContain('全部自动准入用户链接已复制')
+    const copyAllDeliveryPacketsButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('复制全部完整交付信息'))
+    expect(copyAllDeliveryPacketsButton).toBeTruthy()
+    copyAllDeliveryPacketsButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(writeTextMock).toHaveBeenCalledWith(`用户治理链接：${window.location.origin}/admin/users?userId=user-no-email-1&source=directory-sync&integrationId=dir-1&accountId=account-no-email-1\n\n账号：dt_linlan_12345678\n临时密码：Tmp-NoEmail-123`)
+    expect(container?.textContent).toContain('全部自动准入完整交付信息已复制')
+    const copyAllInviteMessagesButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('复制全部邀请文案'))
+    expect(copyAllInviteMessagesButton).toBeTruthy()
+    copyAllInviteMessagesButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(writeTextMock).toHaveBeenCalledWith('账号：dt_linlan_12345678\n临时密码：Tmp-NoEmail-123')
+    expect(container?.textContent).toContain('全部自动准入邀请文案已复制')
+    const autoAdmissionUserLink = Array.from(container!.querySelectorAll('a')).find((link) => link.textContent?.includes('查看本地用户'))
+    expect(autoAdmissionUserLink?.getAttribute('href')).toBe('/admin/users?userId=user-no-email-1&source=directory-sync&integrationId=dir-1&accountId=account-no-email-1')
+    const copyUserLinkButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('复制用户链接'))
+    expect(copyUserLinkButton).toBeTruthy()
+    copyUserLinkButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(writeTextMock).toHaveBeenCalledWith(`${window.location.origin}/admin/users?userId=user-no-email-1&source=directory-sync&integrationId=dir-1&accountId=account-no-email-1`)
+    expect(container?.textContent).toContain('自动准入用户链接已复制')
+    const copyInviteMessageButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('复制邀请文案'))
+    expect(copyInviteMessageButton).toBeTruthy()
+    copyInviteMessageButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(writeTextMock).toHaveBeenLastCalledWith('账号：dt_linlan_12345678\n临时密码：Tmp-NoEmail-123')
+    expect(container?.textContent).toContain('自动准入邀请文案已复制')
+    const copyDeliveryPacketButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('复制完整交付信息'))
+    expect(copyDeliveryPacketButton).toBeTruthy()
+    copyDeliveryPacketButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(writeTextMock).toHaveBeenLastCalledWith(`用户治理链接：${window.location.origin}/admin/users?userId=user-no-email-1&source=directory-sync&integrationId=dir-1&accountId=account-no-email-1\n\n账号：dt_linlan_12345678\n临时密码：Tmp-NoEmail-123`)
+    expect(container?.textContent).toContain('自动准入完整交付信息已复制')
+    } finally {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: originalClipboard,
+      })
+    }
   })
 
   it('paginates directory accounts', async () => {
@@ -920,142 +973,168 @@ describe('DirectoryManagementView', () => {
   })
 
   it('creates a local user from a pending review item and binds it immediately', async () => {
-    apiFetchMock
-      .mockResolvedValueOnce(createJsonResponse({
-        ok: true,
-        data: {
-          items: [createIntegration()],
-        },
-      }))
-      .mockResolvedValueOnce(createJsonResponse({
-        ok: true,
-        data: { items: [] },
-      }))
-      .mockResolvedValueOnce(createJsonResponse(
-        createScheduleSnapshotPayload(),
-      ))
-      .mockResolvedValueOnce(createJsonResponse(
-        createAlertListPayload([]),
-      ))
-      .mockResolvedValueOnce(createJsonResponse(
-        createReviewItemsPayload([
-          {
-            kind: 'pending_binding',
-            reason: '目录成员尚未绑定本地用户。',
-            account: createAccount({
-              id: 'account-manual-create',
+    const writeTextMock = vi.fn().mockResolvedValue(undefined)
+    const originalClipboard = navigator.clipboard
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: writeTextMock },
+    })
+
+    try {
+      apiFetchMock
+        .mockResolvedValueOnce(createJsonResponse({
+          ok: true,
+          data: {
+            items: [createIntegration()],
+          },
+        }))
+        .mockResolvedValueOnce(createJsonResponse({
+          ok: true,
+          data: { items: [] },
+        }))
+        .mockResolvedValueOnce(createJsonResponse(
+          createScheduleSnapshotPayload(),
+        ))
+        .mockResolvedValueOnce(createJsonResponse(
+          createAlertListPayload([]),
+        ))
+        .mockResolvedValueOnce(createJsonResponse(
+          createReviewItemsPayload([
+            {
+              kind: 'pending_binding',
+              reason: '目录成员尚未绑定本地用户。',
+              account: createAccount({
+                id: 'account-manual-create',
+                name: '李青',
+                email: null,
+                mobile: '13900001234',
+              }),
+              flags: {
+                missingUnionId: false,
+                missingOpenId: true,
+              },
+              actionable: {
+                canBatchUnbind: false,
+                canConfirmRecommendation: false,
+              },
+              recommendations: [],
+              recommendationStatus: {
+                code: 'no_exact_match',
+                message: '未匹配到本地用户',
+              },
+            },
+          ]),
+        ))
+        .mockResolvedValueOnce(createJsonResponse(
+          createAccountListPayload([createAccount({
+            id: 'account-manual-create',
+            name: '李青',
+            email: null,
+            mobile: '13900001234',
+          })], { total: 1 }),
+        ))
+        .mockResolvedValueOnce(createJsonResponse({
+          ok: true,
+          data: {
+            user: {
+              id: 'user-created',
+              email: 'liqing@example.com',
               name: '李青',
-              email: null,
-              mobile: '13900001234',
-            }),
-            flags: {
-              missingUnionId: false,
-              missingOpenId: true,
+              mobile: null,
+              role: 'user',
+              is_active: true,
             },
-            actionable: {
-              canBatchUnbind: false,
-              canConfirmRecommendation: false,
-            },
-            recommendations: [],
-            recommendationStatus: {
-              code: 'no_exact_match',
-              message: '未匹配到本地用户',
+            roles: [],
+            permissions: [],
+            isAdmin: false,
+            temporaryPassword: 'Temp#123456',
+            onboarding: {
+              acceptInviteUrl: 'https://example.com/invite/abc',
+              inviteMessage: '请使用邀请链接加入平台',
             },
           },
-        ]),
-      ))
-      .mockResolvedValueOnce(createJsonResponse(
-        createAccountListPayload([createAccount({
-          id: 'account-manual-create',
-          name: '李青',
-          email: null,
-          mobile: '13900001234',
-        })], { total: 1 }),
-      ))
-      .mockResolvedValueOnce(createJsonResponse({
-        ok: true,
-        data: {
-          user: {
-            id: 'user-created',
-            email: 'liqing@example.com',
+        }))
+        .mockResolvedValueOnce(createJsonResponse({
+          ok: true,
+          data: {
+            items: [createIntegration()],
+          },
+        }))
+        .mockResolvedValueOnce(createJsonResponse(
+          createReviewItemsPayload([]),
+        ))
+        .mockResolvedValueOnce(createJsonResponse(
+          createAccountListPayload([createAccount({
+            id: 'account-manual-create',
             name: '李青',
-            mobile: null,
-            role: 'user',
-            is_active: true,
-          },
-          roles: [],
-          permissions: [],
-          isAdmin: false,
-          temporaryPassword: 'Temp#123456',
-          onboarding: {
-            acceptInviteUrl: 'https://example.com/invite/abc',
-            inviteMessage: '请使用邀请链接加入平台',
-          },
-        },
-      }))
-      .mockResolvedValueOnce(createJsonResponse({
-        ok: true,
-        data: {
-          items: [createIntegration()],
-        },
-      }))
-      .mockResolvedValueOnce(createJsonResponse(
-        createReviewItemsPayload([]),
-      ))
-      .mockResolvedValueOnce(createJsonResponse(
-        createAccountListPayload([createAccount({
-          id: 'account-manual-create',
-          name: '李青',
-          email: 'liqing@example.com',
-          mobile: '13900001234',
-          linkStatus: 'linked',
-          matchStrategy: 'manual_admin',
-          localUser: {
-            id: 'user-created',
             email: 'liqing@example.com',
+            mobile: '13900001234',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-created',
+              email: 'liqing@example.com',
+              name: '李青',
+            },
+          })], { total: 1 }),
+        ))
+
+      app = createApp(DirectoryManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi()
+
+      const toggleButton = Array.from(container!.querySelectorAll('.directory-admin__review-item button')).find((button) => button.textContent?.includes('手动创建用户'))
+      expect(toggleButton).toBeTruthy()
+      toggleButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(2)
+
+      const emailInput = Array.from(container!.querySelectorAll('input')).find((input) => input.getAttribute('type') === 'email') as HTMLInputElement | undefined
+      expect(emailInput).toBeTruthy()
+      emailInput!.value = 'liqing@example.com'
+      emailInput!.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi(2)
+
+      const createAndBindButton = Array.from(container!.querySelectorAll('.directory-admin__review-item button')).find((button) => button.textContent?.includes('创建用户并绑定'))
+      expect(createAndBindButton).toBeTruthy()
+      createAndBindButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(12)
+
+      expect(apiFetchMock).toHaveBeenCalledWith(
+        '/api/admin/directory/accounts/account-manual-create/admit-user',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
             name: '李青',
-          },
-        })], { total: 1 }),
-      ))
-
-    app = createApp(DirectoryManagementView)
-    registerRouterLink(app)
-    app.mount(container!)
-    await flushUi()
-
-    const toggleButton = Array.from(container!.querySelectorAll('.directory-admin__review-item button')).find((button) => button.textContent?.includes('手动创建用户'))
-    expect(toggleButton).toBeTruthy()
-    toggleButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await flushUi(2)
-
-    const emailInput = Array.from(container!.querySelectorAll('input')).find((input) => input.getAttribute('type') === 'email') as HTMLInputElement | undefined
-    expect(emailInput).toBeTruthy()
-    emailInput!.value = 'liqing@example.com'
-    emailInput!.dispatchEvent(new Event('input', { bubbles: true }))
-    await flushUi(2)
-
-    const createAndBindButton = Array.from(container!.querySelectorAll('.directory-admin__review-item button')).find((button) => button.textContent?.includes('创建用户并绑定'))
-    expect(createAndBindButton).toBeTruthy()
-    createAndBindButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await flushUi(12)
-
-    expect(apiFetchMock).toHaveBeenCalledWith(
-      '/api/admin/directory/accounts/account-manual-create/admit-user',
-      expect.objectContaining({
-        method: 'POST',
-        body: JSON.stringify({
-          name: '李青',
-          email: 'liqing@example.com',
-          mobile: '13900001234',
-          enableDingTalkGrant: true,
+            email: 'liqing@example.com',
+            mobile: '13900001234',
+            enableDingTalkGrant: true,
+          }),
         }),
-      }),
-    )
-    expect(container?.textContent).toContain('最近创建并绑定结果')
-    expect(container?.textContent).toContain('新用户临时密码：Temp#123456')
-    expect(container?.textContent).toContain('https://example.com/invite/abc')
-    expect(container?.textContent).toContain('请使用邀请链接加入平台')
-    expect(container?.textContent).toContain('已创建本地用户并完成绑定')
+      )
+      expect(container?.textContent).toContain('最近创建并绑定结果')
+      expect(container?.textContent).toContain('新用户临时密码：Temp#123456')
+      expect(container?.textContent).toContain('https://example.com/invite/abc')
+      expect(container?.textContent).toContain('请使用邀请链接加入平台')
+      expect(container?.textContent).toContain('已创建本地用户并完成绑定')
+      const copyDeliveryPacketButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('复制完整交付信息'))
+      expect(copyDeliveryPacketButton).toBeTruthy()
+      copyDeliveryPacketButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi()
+      expect(writeTextMock).toHaveBeenCalledWith(`用户治理链接：${window.location.origin}/admin/users?userId=user-created&source=directory-sync&integrationId=dir-1&accountId=account-manual-create\n\n请使用邀请链接加入平台`)
+      expect(container?.textContent).toContain('创建结果完整交付信息已复制')
+      const copyInviteMessageButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('复制邀请文案'))
+      expect(copyInviteMessageButton).toBeTruthy()
+      copyInviteMessageButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi()
+      expect(writeTextMock).toHaveBeenCalledWith('请使用邀请链接加入平台')
+      expect(container?.textContent).toContain('创建结果邀请文案已复制')
+    } finally {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: originalClipboard,
+      })
+    }
   })
 
   it('supports no-email manual admission with username/mobile and shows temporary-password onboarding', async () => {
@@ -1203,120 +1282,142 @@ describe('DirectoryManagementView', () => {
   })
 
   it('creates and binds a no-email local user from the account list', async () => {
-    apiFetchMock
-      .mockResolvedValueOnce(createJsonResponse({
-        ok: true,
-        data: {
-          items: [createIntegration()],
-        },
-      }))
-      .mockResolvedValueOnce(createJsonResponse({
-        ok: true,
-        data: { items: [] },
-      }))
-      .mockResolvedValueOnce(createJsonResponse(
-        createScheduleSnapshotPayload(),
-      ))
-      .mockResolvedValueOnce(createJsonResponse(
-        createAlertListPayload([]),
-      ))
-      .mockResolvedValueOnce(createJsonResponse(
-        createReviewItemsPayload([]),
-      ))
-      .mockResolvedValueOnce(createJsonResponse(
-        createAccountListPayload([createAccount({
-          id: 'account-list-no-email',
-          name: '王武',
-          email: null,
-          mobile: '13900008888',
-        })], { total: 1 }),
-      ))
-      .mockResolvedValueOnce(createJsonResponse({
-        ok: true,
-        data: {
-          user: {
-            id: 'user-created-list-no-email',
-            email: null,
-            username: 'wangwu',
+    const writeTextMock = vi.fn().mockResolvedValue(undefined)
+    const originalClipboard = navigator.clipboard
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: writeTextMock },
+    })
+
+    try {
+      apiFetchMock
+        .mockResolvedValueOnce(createJsonResponse({
+          ok: true,
+          data: {
+            items: [createIntegration()],
+          },
+        }))
+        .mockResolvedValueOnce(createJsonResponse({
+          ok: true,
+          data: { items: [] },
+        }))
+        .mockResolvedValueOnce(createJsonResponse(
+          createScheduleSnapshotPayload(),
+        ))
+        .mockResolvedValueOnce(createJsonResponse(
+          createAlertListPayload([]),
+        ))
+        .mockResolvedValueOnce(createJsonResponse(
+          createReviewItemsPayload([]),
+        ))
+        .mockResolvedValueOnce(createJsonResponse(
+          createAccountListPayload([createAccount({
+            id: 'account-list-no-email',
             name: '王武',
+            email: null,
             mobile: '13900008888',
-            role: 'user',
-            is_active: true,
+          })], { total: 1 }),
+        ))
+        .mockResolvedValueOnce(createJsonResponse({
+          ok: true,
+          data: {
+            user: {
+              id: 'user-created-list-no-email',
+              email: null,
+              username: 'wangwu',
+              name: '王武',
+              mobile: '13900008888',
+              role: 'user',
+              is_active: true,
+            },
+            temporaryPassword: 'Temp#888888',
+            onboarding: {
+              accountLabel: 'wangwu',
+              acceptInviteUrl: '',
+              inviteMessage: '账号：wangwu',
+            },
           },
-          temporaryPassword: 'Temp#888888',
-          onboarding: {
-            accountLabel: 'wangwu',
-            acceptInviteUrl: '',
-            inviteMessage: '账号：wangwu',
+        }))
+        .mockResolvedValueOnce(createJsonResponse({
+          ok: true,
+          data: {
+            items: [createIntegration()],
           },
-        },
-      }))
-      .mockResolvedValueOnce(createJsonResponse({
-        ok: true,
-        data: {
-          items: [createIntegration()],
-        },
-      }))
-      .mockResolvedValueOnce(createJsonResponse(
-        createReviewItemsPayload([]),
-      ))
-      .mockResolvedValueOnce(createJsonResponse(
-        createAccountListPayload([createAccount({
-          id: 'account-list-no-email',
-          name: '王武',
-          email: null,
-          mobile: '13900008888',
-          linkStatus: 'linked',
-          matchStrategy: 'manual_admin',
-          localUser: {
-            id: 'user-created-list-no-email',
-            email: null,
-            username: 'wangwu',
+        }))
+        .mockResolvedValueOnce(createJsonResponse(
+          createReviewItemsPayload([]),
+        ))
+        .mockResolvedValueOnce(createJsonResponse(
+          createAccountListPayload([createAccount({
+            id: 'account-list-no-email',
             name: '王武',
-          },
-        })], { total: 1 }),
-      ))
+            email: null,
+            mobile: '13900008888',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-created-list-no-email',
+              email: null,
+              username: 'wangwu',
+              name: '王武',
+            },
+          })], { total: 1 }),
+        ))
 
-    app = createApp(DirectoryManagementView)
-    registerRouterLink(app)
-    app.mount(container!)
-    await flushUi()
+      app = createApp(DirectoryManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi()
 
-    const accountsSection = findAccountsSection(container!)
-    const accountCard = accountsSection.querySelector('.directory-admin__account') as HTMLElement
-    expect(accountCard).toBeTruthy()
-    const toggleButton = Array.from(accountCard.querySelectorAll('button')).find((button) => button.textContent?.includes('手动创建用户'))
-    expect(toggleButton).toBeTruthy()
-    toggleButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await flushUi(2)
+      const accountsSection = findAccountsSection(container!)
+      const accountCard = accountsSection.querySelector('.directory-admin__account') as HTMLElement
+      expect(accountCard).toBeTruthy()
+      const toggleButton = Array.from(accountCard.querySelectorAll('button')).find((button) => button.textContent?.includes('手动创建用户'))
+      expect(toggleButton).toBeTruthy()
+      toggleButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(2)
 
-    const usernameInput = Array.from(accountCard.querySelectorAll('input')).find((input) => input.getAttribute('placeholder') === '例如 liqing') as HTMLInputElement | undefined
-    expect(usernameInput).toBeTruthy()
-    usernameInput!.value = 'wangwu'
-    usernameInput!.dispatchEvent(new Event('input', { bubbles: true }))
-    await flushUi(2)
+      const usernameInput = Array.from(accountCard.querySelectorAll('input')).find((input) => input.getAttribute('placeholder') === '例如 liqing') as HTMLInputElement | undefined
+      expect(usernameInput).toBeTruthy()
+      usernameInput!.value = 'wangwu'
+      usernameInput!.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi(2)
 
-    const createAndBindButton = Array.from(accountCard.querySelectorAll('button')).find((button) => button.textContent?.includes('创建用户并绑定'))
-    expect(createAndBindButton).toBeTruthy()
-    createAndBindButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await flushUi(12)
+      const createAndBindButton = Array.from(accountCard.querySelectorAll('button')).find((button) => button.textContent?.includes('创建用户并绑定'))
+      expect(createAndBindButton).toBeTruthy()
+      createAndBindButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(12)
 
-    expect(apiFetchMock).toHaveBeenCalledWith(
-      '/api/admin/directory/accounts/account-list-no-email/admit-user',
-      expect.objectContaining({
-        method: 'POST',
-        body: JSON.stringify({
-          name: '王武',
-          username: 'wangwu',
-          mobile: '13900008888',
-          enableDingTalkGrant: true,
+      expect(apiFetchMock).toHaveBeenCalledWith(
+        '/api/admin/directory/accounts/account-list-no-email/admit-user',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            name: '王武',
+            username: 'wangwu',
+            mobile: '13900008888',
+            enableDingTalkGrant: true,
+          }),
         }),
-      }),
-    )
-    expect(container?.textContent).toContain('最近创建并绑定结果')
-    expect(container?.textContent).toContain('新用户临时密码：Temp#888888')
-    expect(container?.textContent).toContain('账号：wangwu')
-    expect(container?.textContent).toContain('目录成员 王武 已创建本地用户并完成绑定')
+      )
+      expect(container?.textContent).toContain('最近创建并绑定结果')
+      expect(container?.textContent).toContain('新用户临时密码：Temp#888888')
+      expect(container?.textContent).toContain('账号：wangwu')
+      expect(container?.textContent).toContain('目录成员 王武 已创建本地用户并完成绑定')
+
+      const copyUserLinkButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('复制用户链接'))
+      expect(copyUserLinkButton).toBeTruthy()
+      copyUserLinkButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi()
+
+      expect(writeTextMock).toHaveBeenCalledWith(`${window.location.origin}/admin/users?userId=user-created-list-no-email&source=directory-sync&integrationId=dir-1&accountId=account-list-no-email`)
+      expect(container?.textContent).toContain('创建结果用户链接已复制')
+    } finally {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: originalClipboard,
+      })
+    }
   })
 
   it('focuses a reviewed account and quick-binds it from the accounts banner', async () => {
@@ -1538,6 +1639,93 @@ describe('DirectoryManagementView', () => {
 
     const userLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('前往用户管理'))
     expect(userLink?.getAttribute('href')).toBe('/admin/users?userId=user-1&source=directory-sync&integrationId=dir-1&accountId=account-focus')
+
+    const clearFocusButton = Array.from(container!.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('清除定位'))
+    expect(clearFocusButton).toBeTruthy()
+    clearFocusButton?.click()
+    await flushUi()
+
+    expect(window.location.search).toBe('?integrationId=dir-1')
+    expect(container?.textContent).toContain('已清除目录定位上下文')
+    expect(container?.querySelector('.directory-admin__focus-card')).toBeNull()
+    expect(container?.querySelector('.directory-admin__account--focused')).toBeNull()
+  })
+
+  it('can copy the focused user-management link without changing directory navigation context', async () => {
+    window.history.replaceState({}, '', '/admin/directory?integrationId=dir-1&accountId=account-focus&source=user-management&userId=user-1')
+    const writeTextMock = vi.fn().mockResolvedValue(undefined)
+    const originalClipboard = navigator.clipboard
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: writeTextMock },
+    })
+
+    try {
+      apiFetchMock
+        .mockResolvedValueOnce(createJsonResponse({
+          ok: true,
+          data: {
+            items: [createIntegration()],
+          },
+        }))
+        .mockResolvedValueOnce(createJsonResponse({
+          ok: true,
+          data: {
+            account: createAccount({
+              id: 'account-focus',
+              name: '定位成员',
+              externalUserId: '0447654442691199',
+              linkStatus: 'linked',
+              matchStrategy: 'manual_admin',
+              localUser: {
+                id: 'user-1',
+                email: 'alpha@example.com',
+                name: 'Alpha',
+              },
+            }),
+          },
+        }))
+        .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+        .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+        .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+        .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+        .mockResolvedValueOnce(createJsonResponse(
+          createAccountListPayload([
+            createAccount({
+              id: 'account-focus',
+              name: '定位成员',
+              externalUserId: '0447654442691199',
+              linkStatus: 'linked',
+              matchStrategy: 'manual_admin',
+              localUser: {
+                id: 'user-1',
+                email: 'alpha@example.com',
+                name: 'Alpha',
+              },
+            }),
+          ], { total: 1 }),
+        ))
+
+      app = createApp(DirectoryManagementView)
+      registerRouterLink(app, true)
+      app.mount(container!)
+      await flushUi(12)
+
+      const copyLinkButton = Array.from(container!.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('复制用户链接'))
+      expect(copyLinkButton).toBeTruthy()
+      copyLinkButton?.click()
+      await flushUi()
+
+      expect(writeTextMock).toHaveBeenCalledWith(`${window.location.origin}/admin/users?userId=user-1&source=directory-sync&integrationId=dir-1&accountId=account-focus`)
+      expect(window.location.search).toBe('?integrationId=dir-1&accountId=account-focus&source=user-management&userId=user-1')
+      expect(container?.textContent).toContain('用户管理链接已复制')
+      expect(container?.textContent).toContain('当前定位成员：定位成员')
+    } finally {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: originalClipboard,
+      })
+    }
   })
 
   it('clears stale focus and shows a specific error when query targets a missing integration', async () => {
@@ -1657,96 +1845,116 @@ describe('DirectoryManagementView', () => {
 
   it('clears stale focus and shows a specific error when query targets a missing account', async () => {
     window.history.replaceState({}, '', '/admin/directory?integrationId=dir-1&accountId=account-focus&source=user-management&userId=user-1')
+    const writeTextMock = vi.fn().mockResolvedValue(undefined)
+    const originalClipboard = navigator.clipboard
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: writeTextMock },
+    })
 
-    apiFetchMock
-      .mockResolvedValueOnce(createJsonResponse({
-        ok: true,
-        data: {
-          items: [createIntegration()],
-        },
-      }))
-      .mockResolvedValueOnce(createJsonResponse({
-        ok: true,
-        data: {
-          account: createAccount({
-            id: 'account-focus',
-            name: '定位成员',
-            externalUserId: '0447654442691199',
-            linkStatus: 'linked',
-            matchStrategy: 'manual_admin',
-            localUser: {
-              id: 'user-1',
-              email: 'alpha@example.com',
-              name: 'Alpha',
-            },
-          }),
-        },
-      }))
-      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
-      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
-      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
-      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
-      .mockResolvedValueOnce(createJsonResponse(
-        createAccountListPayload([
-          createAccount({
-            id: 'account-focus',
-            name: '定位成员',
-            externalUserId: '0447654442691199',
-            linkStatus: 'linked',
-            matchStrategy: 'manual_admin',
-            localUser: {
-              id: 'user-1',
-              email: 'alpha@example.com',
-              name: 'Alpha',
-            },
-          }),
-        ], { total: 1 }),
-      ))
-      .mockResolvedValueOnce(createJsonResponse({ ok: false }, 404))
-      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
-      .mockResolvedValueOnce(createJsonResponse(
-        createAccountListPayload([
-          createAccount({
-            id: 'account-focus',
-            name: '定位成员',
-            externalUserId: '0447654442691199',
-            linkStatus: 'linked',
-            matchStrategy: 'manual_admin',
-            localUser: {
-              id: 'user-1',
-              email: 'alpha@example.com',
-              name: 'Alpha',
-            },
-          }),
-        ], { total: 1 }),
-      ))
+    try {
+      apiFetchMock
+        .mockResolvedValueOnce(createJsonResponse({
+          ok: true,
+          data: {
+            items: [createIntegration()],
+          },
+        }))
+        .mockResolvedValueOnce(createJsonResponse({
+          ok: true,
+          data: {
+            account: createAccount({
+              id: 'account-focus',
+              name: '定位成员',
+              externalUserId: '0447654442691199',
+              linkStatus: 'linked',
+              matchStrategy: 'manual_admin',
+              localUser: {
+                id: 'user-1',
+                email: 'alpha@example.com',
+                name: 'Alpha',
+              },
+            }),
+          },
+        }))
+        .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+        .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+        .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+        .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+        .mockResolvedValueOnce(createJsonResponse(
+          createAccountListPayload([
+            createAccount({
+              id: 'account-focus',
+              name: '定位成员',
+              externalUserId: '0447654442691199',
+              linkStatus: 'linked',
+              matchStrategy: 'manual_admin',
+              localUser: {
+                id: 'user-1',
+                email: 'alpha@example.com',
+                name: 'Alpha',
+              },
+            }),
+          ], { total: 1 }),
+        ))
+        .mockResolvedValueOnce(createJsonResponse({ ok: false }, 404))
+        .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+        .mockResolvedValueOnce(createJsonResponse(
+          createAccountListPayload([
+            createAccount({
+              id: 'account-focus',
+              name: '定位成员',
+              externalUserId: '0447654442691199',
+              linkStatus: 'linked',
+              matchStrategy: 'manual_admin',
+              localUser: {
+                id: 'user-1',
+                email: 'alpha@example.com',
+                name: 'Alpha',
+              },
+            }),
+          ], { total: 1 }),
+        ))
 
-    app = createApp(DirectoryManagementView)
-    registerRouterLink(app, true)
-    app.mount(container!)
-    await flushUi(12)
+      app = createApp(DirectoryManagementView)
+      registerRouterLink(app, true)
+      app.mount(container!)
+      await flushUi(12)
 
-    expect(container?.textContent).toContain('当前定位成员：定位成员')
+      expect(container?.textContent).toContain('当前定位成员：定位成员')
 
-    window.history.replaceState({}, '', '/admin/directory?integrationId=dir-1&accountId=account-missing&source=user-management&userId=user-2')
-    await flushUi(12)
+      window.history.replaceState({}, '', '/admin/directory?integrationId=dir-1&accountId=account-missing&source=user-management&userId=user-2')
+      await flushUi(12)
 
-    expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/accounts/account-missing')
-    const accountsSection = findAccountsSection(container!)
-    const routeBanner = accountsSection.querySelector('.directory-admin__route-banner')
-    expect(routeBanner).toBeInstanceOf(HTMLElement)
-    expect(routeBanner?.textContent).toContain('定位未完成')
-    expect(routeBanner?.textContent).toContain('未找到目录成员 account-missing')
-    expect(routeBanner?.textContent).toContain('目标集成：dir-1')
-    expect(routeBanner?.textContent).toContain('目标成员：account-missing')
-    expect(routeBanner?.textContent).toContain('当前仍停留在 DingTalk CN')
-    const returnUserLink = Array.from(accountsSection.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('返回用户管理'))
-    expect(returnUserLink?.getAttribute('href')).toBe('/admin/users?userId=user-2&source=directory-sync&directoryFailure=missing_account&integrationId=dir-1&accountId=account-missing')
-    expect(container?.querySelector('.directory-admin__focus-card')).toBeNull()
-    expect(container?.querySelector('.directory-admin__account--focused')).toBeNull()
-    const accountSearch = container?.querySelector('input[placeholder="搜索姓名 / 邮箱 / 手机 / 钉钉 ID / 本地用户"]')
-    expect(accountSearch).toBeInstanceOf(HTMLInputElement)
-    expect((accountSearch as HTMLInputElement).value).toBe('')
+      expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/accounts/account-missing')
+      const accountsSection = findAccountsSection(container!)
+      const routeBanner = accountsSection.querySelector('.directory-admin__route-banner')
+      expect(routeBanner).toBeInstanceOf(HTMLElement)
+      expect(routeBanner?.textContent).toContain('定位未完成')
+      expect(routeBanner?.textContent).toContain('未找到目录成员 account-missing')
+      expect(routeBanner?.textContent).toContain('目标集成：dir-1')
+      expect(routeBanner?.textContent).toContain('目标成员：account-missing')
+      expect(routeBanner?.textContent).toContain('当前仍停留在 DingTalk CN')
+      const returnUserLink = Array.from(accountsSection.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('返回用户管理'))
+      expect(returnUserLink?.getAttribute('href')).toBe('/admin/users?userId=user-2&source=directory-sync&directoryFailure=missing_account&integrationId=dir-1&accountId=account-missing')
+      const copyUserLinkButton = Array.from(accountsSection.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('复制用户链接'))
+      expect(copyUserLinkButton).toBeTruthy()
+      copyUserLinkButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi()
+      expect(writeTextMock).toHaveBeenCalledWith(`${window.location.origin}/admin/users?userId=user-2&source=directory-sync&directoryFailure=missing_account&integrationId=dir-1&accountId=account-missing`)
+      expect(window.location.search).toBe('?integrationId=dir-1&accountId=account-missing&source=user-management&userId=user-2')
+      expect(container?.textContent).toContain('失败回跳用户链接已复制')
+      expect(container?.querySelector('.directory-admin__focus-card')).toBeNull()
+      expect(container?.querySelector('.directory-admin__account--focused')).toBeNull()
+      const accountSearch = container?.querySelector('input[placeholder="搜索姓名 / 邮箱 / 手机 / 钉钉 ID / 本地用户"]')
+      expect(accountSearch).toBeInstanceOf(HTMLInputElement)
+      expect((accountSearch as HTMLInputElement).value).toBe('')
+    } finally {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: originalClipboard,
+      })
+    }
   })
 
   it('can retry route navigation from the failure banner after a missing account result', async () => {

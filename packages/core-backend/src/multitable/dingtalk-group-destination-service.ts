@@ -21,6 +21,10 @@ import type {
 
 const logger = new Logger('DingTalkGroupDestinationService')
 const DINGTALK_REQUEST_TIMEOUT_MS = 5_000
+const DINGTALK_SAVE_PRECHECK_SUBJECT = 'MetaSheet DingTalk group verification'
+const DINGTALK_SAVE_PRECHECK_CONTENT = 'P4 / metasheet destination verification before saving this DingTalk group robot.'
+const DINGTALK_VALIDITY_TEST_SUBJECT = 'P4 metasheet DingTalk group validity test'
+const DINGTALK_VALIDITY_TEST_CONTENT = 'P4 / metasheet robot validity check from MetaSheet.'
 
 type DingTalkGroupDestinationRow = {
   id: string
@@ -106,6 +110,22 @@ async function readJsonSafely(response: Response): Promise<unknown> {
   }
 }
 
+type DingTalkRobotDeliveryResult = {
+  httpStatus: number
+  responseBody: string | null
+}
+
+class DingTalkRobotDeliveryError extends Error {
+  httpStatus: number | null
+  responseBody: string | null
+
+  constructor(message: string, httpStatus: number | null, responseBody: string | null) {
+    super(message)
+    this.httpStatus = httpStatus
+    this.responseBody = responseBody
+  }
+}
+
 export class DingTalkGroupDestinationService {
   private db: Kysely<Database>
   private fetchFn: typeof fetch
@@ -128,6 +148,7 @@ export class DingTalkGroupDestinationService {
     if (scope === 'org' && !orgId) throw new Error('orgId is required for organization DingTalk group destinations')
     if (scope === 'private' && (sheetId || orgId)) throw new Error('private DingTalk group destinations cannot include sheetId or orgId')
 
+    const precheck = await this.verifyRobotBeforeSave(webhookUrl, secret)
     const id = generateId()
     const enabled = input.enabled ?? true
     const now = new Date().toISOString()
@@ -142,7 +163,22 @@ export class DingTalkGroupDestinationService {
       org_id: orgId,
       created_by: userId,
       created_at: now,
+      updated_at: now,
+      last_tested_at: now,
+      last_test_status: 'success',
+      last_test_error: null,
     }).execute()
+
+    await this.recordDeliverySafely({
+      destinationId: id,
+      sourceType: 'manual_test',
+      subject: DINGTALK_SAVE_PRECHECK_SUBJECT,
+      content: DINGTALK_SAVE_PRECHECK_CONTENT,
+      initiatedBy: userId,
+      success: true,
+      httpStatus: precheck.httpStatus,
+      responseBody: precheck.responseBody,
+    })
 
     logger.info(`Created DingTalk group destination ${id} for ${userId}`)
     return {
@@ -156,6 +192,9 @@ export class DingTalkGroupDestinationService {
       ...(orgId ? { orgId } : {}),
       createdBy: userId,
       createdAt: now,
+      updatedAt: now,
+      lastTestedAt: now,
+      lastTestStatus: 'success',
     }
   }
 
@@ -263,19 +302,45 @@ export class DingTalkGroupDestinationService {
     sheetId?: string,
     orgId?: string,
   ): Promise<DingTalkGroupDestination> {
-    await this.loadAuthorizedDestination(id, userId, sheetId, orgId)
+    const current = await this.loadAuthorizedDestination(id, userId, sheetId, orgId)
 
     const updates: Record<string, unknown> = { updated_at: nowTimestamp() }
+    let nextWebhookUrl = current.webhook_url
+    let nextSecret = current.secret ?? undefined
+    let shouldVerifyBeforeSave = false
     if (input.name !== undefined) {
       const name = input.name.trim()
       if (!name) throw new Error('Destination name is required')
       updates.name = name
     }
     if (input.webhookUrl !== undefined) {
-      updates.webhook_url = normalizeDingTalkRobotWebhookUrl(input.webhookUrl)
+      nextWebhookUrl = normalizeDingTalkRobotWebhookUrl(input.webhookUrl)
+      updates.webhook_url = nextWebhookUrl
+      shouldVerifyBeforeSave = true
     }
-    if (input.secret !== undefined) updates.secret = normalizeDingTalkRobotSecret(input.secret) ?? null
+    if (input.secret !== undefined) {
+      nextSecret = normalizeDingTalkRobotSecret(input.secret)
+      updates.secret = nextSecret ?? null
+      shouldVerifyBeforeSave = true
+    }
     if (input.enabled !== undefined) updates.enabled = input.enabled
+
+    if (shouldVerifyBeforeSave) {
+      const precheck = await this.verifyRobotBeforeSave(nextWebhookUrl, nextSecret)
+      updates.last_tested_at = nowTimestamp()
+      updates.last_test_status = 'success'
+      updates.last_test_error = null
+      await this.recordDeliverySafely({
+        destinationId: id,
+        sourceType: 'manual_test',
+        subject: DINGTALK_SAVE_PRECHECK_SUBJECT,
+        content: DINGTALK_SAVE_PRECHECK_CONTENT,
+        initiatedBy: userId,
+        success: true,
+        httpStatus: precheck.httpStatus,
+        responseBody: precheck.responseBody,
+      })
+    }
 
     await this.db.updateTable('dingtalk_group_destinations')
       .set(updates as never)
@@ -305,70 +370,21 @@ export class DingTalkGroupDestinationService {
   ): Promise<{ ok: true }> {
     const row = await this.loadAuthorizedDestination(id, userId, sheetId, orgId)
 
-    const subject = input.subject?.trim() || 'MetaSheet DingTalk group test'
-    const content = input.content?.trim() || 'This is a standard DingTalk group destination test message.'
-    const payload = buildDingTalkMarkdown(subject, content)
+    const subject = input.subject?.trim() || DINGTALK_VALIDITY_TEST_SUBJECT
+    const content = input.content?.trim() || DINGTALK_VALIDITY_TEST_CONTENT
     let deliveryRecorded = false
     let responseStatus: number | null = null
     let responseBody: string | null = null
 
     try {
-      const signedUrl = buildSignedDingTalkWebhookUrl(
+      const result = await this.sendRobotMessage(
         normalizeDingTalkRobotWebhookUrl(row.webhook_url),
         normalizeDingTalkRobotSecret(row.secret ?? undefined),
+        subject,
+        content,
       )
-      const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(), DINGTALK_REQUEST_TIMEOUT_MS)
-      let response: Response
-      try {
-        response = await this.fetchFn(signedUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'User-Agent': 'MetaSheet-DingTalk-Destination-Test/1.0',
-          },
-          body: JSON.stringify(payload),
-          signal: controller.signal,
-        })
-      } finally {
-        clearTimeout(timeout)
-      }
-
-      const parsed = await readJsonSafely(response)
-      responseStatus = response.status
-      responseBody = parsed ? JSON.stringify(parsed) : response.statusText || null
-      if (!response.ok) {
-        deliveryRecorded = true
-        await this.recordDeliverySafely({
-          destinationId: id,
-          sourceType: 'manual_test',
-          subject,
-          content,
-          initiatedBy: userId,
-          success: false,
-          httpStatus: response.status,
-          responseBody,
-          errorMessage: `HTTP ${response.status}: ${response.statusText}`,
-        })
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-      }
-      try {
-        validateDingTalkRobotResponse(parsed)
-      } catch (error) {
-        deliveryRecorded = true
-        await this.recordDeliverySafely({
-          destinationId: id,
-          sourceType: 'manual_test',
-          subject,
-          content,
-          initiatedBy: userId,
-          success: false,
-          httpStatus: response.status,
-          responseBody,
-          errorMessage: error instanceof Error ? error.message : 'DingTalk robot response validation failed',
-        })
-        throw error
-      }
+      responseStatus = result.httpStatus
+      responseBody = result.responseBody
       deliveryRecorded = true
       await this.recordDeliverySafely({
         destinationId: id,
@@ -377,7 +393,7 @@ export class DingTalkGroupDestinationService {
         content,
         initiatedBy: userId,
         success: true,
-        httpStatus: response.status,
+        httpStatus: result.httpStatus,
         responseBody,
       })
 
@@ -394,6 +410,10 @@ export class DingTalkGroupDestinationService {
       logger.info(`DingTalk group destination test sent to ${maskDingTalkWebhookUrl(row.webhook_url)}`)
       return { ok: true }
     } catch (error) {
+      if (error instanceof DingTalkRobotDeliveryError) {
+        responseStatus = error.httpStatus
+        responseBody = error.responseBody
+      }
       const message = error instanceof Error ? error.message : 'Unknown error'
       if (!deliveryRecorded) {
         await this.recordDeliverySafely({
@@ -418,6 +438,62 @@ export class DingTalkGroupDestinationService {
         .where('id', '=', id)
         .execute()
       throw new Error(message)
+    }
+  }
+
+  private async verifyRobotBeforeSave(webhookUrl: string, secret?: string): Promise<DingTalkRobotDeliveryResult> {
+    try {
+      return await this.sendRobotMessage(
+        webhookUrl,
+        secret,
+        DINGTALK_SAVE_PRECHECK_SUBJECT,
+        DINGTALK_SAVE_PRECHECK_CONTENT,
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'DingTalk group destination verification failed'
+      throw new Error(`DingTalk group destination verification failed: ${message}`)
+    }
+  }
+
+  private async sendRobotMessage(
+    webhookUrl: string,
+    secret: string | undefined,
+    subject: string,
+    content: string,
+  ): Promise<DingTalkRobotDeliveryResult> {
+    const payload = buildDingTalkMarkdown(subject, content)
+    const signedUrl = buildSignedDingTalkWebhookUrl(webhookUrl, secret)
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), DINGTALK_REQUEST_TIMEOUT_MS)
+    let response: Response
+    try {
+      response = await this.fetchFn(signedUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'MetaSheet-DingTalk-Destination-Test/1.0',
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      })
+    } finally {
+      clearTimeout(timeout)
+    }
+
+    const parsed = await readJsonSafely(response)
+    const responseBody = parsed ? JSON.stringify(parsed) : response.statusText || null
+    if (!response.ok) {
+      throw new DingTalkRobotDeliveryError(`HTTP ${response.status}: ${response.statusText}`, response.status, responseBody)
+    }
+    try {
+      validateDingTalkRobotResponse(parsed)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'DingTalk robot response validation failed'
+      throw new DingTalkRobotDeliveryError(message, response.status, responseBody)
+    }
+    return {
+      httpStatus: response.status,
+      responseBody,
     }
   }
 

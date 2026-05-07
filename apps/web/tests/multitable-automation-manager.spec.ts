@@ -332,6 +332,7 @@ describe('MetaAutomationManager', () => {
               bodyTemplate: 'Please fill {{record.status}}',
               publicFormViewId: 'view_form',
               internalViewId: 'view_grid',
+              notifyRuleCreatorOnFailure: true,
             },
           },
         ],
@@ -345,6 +346,7 @@ describe('MetaAutomationManager', () => {
     expect(desc?.textContent).toContain('Send DingTalk group message')
     expect(desc?.textContent).toContain('Public form: Public Form')
     expect(desc?.textContent).toContain('Internal processing: Grid')
+    expect(desc?.textContent).toContain('Failure alerts: rule creator')
 
     const publicLink = container.querySelector('[data-automation-card-link="public-form:view_form"]') as HTMLAnchorElement
     expect(publicLink).not.toBeNull()
@@ -565,6 +567,7 @@ describe('MetaAutomationManager', () => {
         bodyTemplate: 'Please fill {{record.status}}',
         publicFormViewId: 'view_form',
         internalViewId: 'view_grid',
+        notifyRuleCreatorOnFailure: true,
       },
     })
     expect(body.actions).toEqual([{
@@ -578,6 +581,7 @@ describe('MetaAutomationManager', () => {
         bodyTemplate: 'Please fill {{record.status}}',
         publicFormViewId: 'view_form',
         internalViewId: 'view_grid',
+        notifyRuleCreatorOnFailure: true,
       },
     }])
     expect(updatedSpy).toHaveBeenCalledTimes(1)
@@ -839,6 +843,10 @@ describe('MetaAutomationManager', () => {
     const internalViewSelect = container.querySelector('[data-automation-field="internalViewId"]') as HTMLSelectElement
     internalViewSelect.value = 'view_grid'
     internalViewSelect.dispatchEvent(new Event('change', { bubbles: true }))
+
+    const notifyCreator = container.querySelector('[data-automation-field="notifyRuleCreatorOnFailure"]') as HTMLInputElement
+    expect(container.querySelector('[data-automation-field="notifyRuleCreatorOnFailureHint"]')?.textContent).toContain('rule creator')
+    expect(notifyCreator.checked).toBe(true)
     await flushPromises()
 
     expect(container.querySelector('[data-automation-group-destination="dt_1"]')).not.toBeNull()
@@ -859,8 +867,61 @@ describe('MetaAutomationManager', () => {
       bodyTemplate: 'Please fill {{record.status}}',
       publicFormViewId: 'view_form',
       internalViewId: 'view_grid',
+      notifyRuleCreatorOnFailure: true,
     })
     expect(fetchFn.mock.calls.some(([url]) => String(url).includes('/api/multitable/dingtalk-groups?sheetId=sheet_1'))).toBe(true)
+  })
+
+  it('persists an explicit disabled DingTalk group creator failure alert via form create', async () => {
+    const { client, fetchFn } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const nameInput = container.querySelector('[data-automation-field="name"]') as HTMLInputElement
+    nameInput.value = 'DingTalk notify without creator alert'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const destinationSelect = container.querySelector('[data-automation-field="dingtalkDestinationPickerId"]') as HTMLSelectElement
+    destinationSelect.value = 'dt_1'
+    destinationSelect.dispatchEvent(new Event('change', { bubbles: true }))
+
+    const titleInput = container.querySelector('[data-automation-field="dingtalkTitleTemplate"]') as HTMLInputElement
+    titleInput.value = 'Ticket {{recordId}}'
+    titleInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const bodyInput = container.querySelector('[data-automation-field="dingtalkBodyTemplate"]') as HTMLTextAreaElement
+    bodyInput.value = 'Please fill {{record.status}}'
+    bodyInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const notifyCreator = container.querySelector('[data-automation-field="notifyRuleCreatorOnFailure"]') as HTMLInputElement
+    expect(notifyCreator.checked).toBe(true)
+    notifyCreator.checked = false
+    notifyCreator.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('.meta-automation__btn--primary') as HTMLButtonElement
+    saveBtn.click()
+    await flushPromises()
+
+    const postCalls = fetchFn.mock.calls.filter(([, init]: [string, RequestInit | undefined]) => init?.method === 'POST')
+    expect(postCalls.length).toBe(1)
+    const body = JSON.parse(postCalls[0][1]?.body as string)
+    expect(body.actionConfig).toEqual(expect.objectContaining({
+      destinationId: 'dt_1',
+      destinationIds: ['dt_1'],
+      titleTemplate: 'Ticket {{recordId}}',
+      bodyTemplate: 'Please fill {{record.status}}',
+      notifyRuleCreatorOnFailure: false,
+    }))
   })
 
   it('labels organization catalog DingTalk groups in the automation form', async () => {
@@ -979,6 +1040,7 @@ describe('MetaAutomationManager', () => {
       destinationIdFieldPaths: ['record.fld_2'],
       titleTemplate: 'Ticket {{recordId}}',
       bodyTemplate: 'Please fill {{record.status}}',
+      notifyRuleCreatorOnFailure: true,
     })
   })
 
@@ -1128,6 +1190,7 @@ describe('MetaAutomationManager', () => {
       destinationIdFieldPaths: ['record.fld_2'],
       titleTemplate: 'Ticket {{recordId}}',
       bodyTemplate: 'Please fill {{record.status}}',
+      notifyRuleCreatorOnFailure: true,
     })
   })
 
@@ -2641,7 +2704,7 @@ describe('MetaAutomationManager', () => {
         }],
       }),
     ]
-    const { client } = mockClient(rules)
+    const { client, fetchFn } = mockClient(rules)
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
     await flushPromises()
 
@@ -2656,6 +2719,40 @@ describe('MetaAutomationManager', () => {
     expect(document.querySelector('[data-group-destination="dt_2"]')?.textContent).toContain('Escalation Group')
     expect((document.querySelector('[data-field="dingtalkTitleTemplate"]') as HTMLInputElement).value).toBe('Ticket {{recordId}}')
     expect((document.querySelector('[data-field="dingtalkBodyTemplate"]') as HTMLTextAreaElement).value).toBe('Please review {{record.status}}')
+    expect((document.querySelector('[data-field="notifyRuleCreatorOnFailure"]') as HTMLInputElement).checked).toBe(false)
+
+    const saveBtn = document.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushPromises()
+
+    const patchCalls = fetchFn.mock.calls.filter(([, init]: [string, RequestInit | undefined]) => init?.method === 'PATCH')
+    expect(patchCalls.length).toBe(1)
+    const body = JSON.parse(patchCalls[0][1]?.body as string)
+    expect(body).toMatchObject({
+      actionType: 'send_dingtalk_group_message',
+      actionConfig: {
+        destinationId: 'dt_1',
+        destinationIds: ['dt_1', 'dt_2'],
+        titleTemplate: 'Ticket {{recordId}}',
+        bodyTemplate: 'Please review {{record.status}}',
+        publicFormViewId: 'view_form',
+        internalViewId: 'view_grid',
+        notifyRuleCreatorOnFailure: false,
+      },
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'dt_1',
+          destinationIds: ['dt_1', 'dt_2'],
+          titleTemplate: 'Ticket {{recordId}}',
+          bodyTemplate: 'Please review {{record.status}}',
+          publicFormViewId: 'view_form',
+          internalViewId: 'view_grid',
+          notifyRuleCreatorOnFailure: false,
+        },
+      }],
+    })
   })
 
   it('opens the rule editor with DingTalk person dynamic recipients from V1 actions when legacy action fields are stale', async () => {
