@@ -629,6 +629,160 @@ describe('MetaFieldManager', () => {
     app.unmount()
   })
 
+  it('blocks adding a field whose name duplicates an existing one (case-insensitive)', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const createSpy = vi.fn()
+
+    const app = createApp({
+      render() {
+        return h(MetaFieldManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          sheets: [],
+          fields: [{ id: 'fld_status', name: 'Status', type: 'string', property: {} }],
+          onCreateField: createSpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    const nameInput = container.querySelector('.meta-field-mgr__add-row .meta-field-mgr__input') as HTMLInputElement
+    nameInput.value = 'status'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+
+    const inlineError = container.querySelector('[data-test="add-conflict-error"]') as HTMLElement | null
+    expect(inlineError).not.toBeNull()
+    expect(inlineError?.textContent).toContain('already exists')
+    expect(nameInput.getAttribute('aria-invalid')).toBe('true')
+
+    const addButton = (Array.from(container.querySelectorAll('.meta-field-mgr__btn-add')) as HTMLButtonElement[])
+      .find((button) => button.textContent?.includes('+ Add')) as HTMLButtonElement
+    expect(addButton.disabled).toBe(true)
+    addButton.click()
+    nameInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await nextTick()
+    expect(createSpy).not.toHaveBeenCalled()
+
+    // Resolve the conflict by giving the new field a unique name.
+    nameInput.value = 'Priority'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+    expect(container.querySelector('[data-test="add-conflict-error"]')).toBeNull()
+    expect(addButton.disabled).toBe(false)
+
+    addButton.click()
+    await nextTick()
+    expect(createSpy).toHaveBeenCalledWith({
+      sheetId: 'sheet_1',
+      name: 'Priority',
+      type: 'string',
+    })
+
+    app.unmount()
+  })
+
+  it('blocks renaming a field to an existing name and excludes the field itself', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const updateSpy = vi.fn()
+
+    const app = createApp({
+      render() {
+        return h(MetaFieldManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          sheets: [],
+          fields: [
+            { id: 'fld_status', name: 'Status', type: 'string', property: {} },
+            { id: 'fld_priority', name: 'Priority', type: 'string', property: {} },
+          ],
+          onUpdateField: updateSpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    // Open rename for the second field (Priority).
+    const renameButtons = Array.from(
+      container.querySelectorAll('.meta-field-mgr__action[title="Rename"]'),
+    ) as HTMLButtonElement[]
+    renameButtons[1].click()
+    await nextTick()
+
+    const renameInput = container.querySelector('.meta-field-mgr__rename') as HTMLInputElement
+    expect(renameInput.value).toBe('Priority')
+
+    // Try to rename Priority → Status (conflicts with first field).
+    renameInput.value = 'status'
+    renameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+
+    const inlineError = container.querySelector('[data-test="rename-conflict-error"]') as HTMLElement | null
+    expect(inlineError).not.toBeNull()
+    expect(renameInput.getAttribute('aria-invalid')).toBe('true')
+
+    const okButton = container.querySelector('.meta-field-mgr__action--ok') as HTMLButtonElement
+    expect(okButton.disabled).toBe(true)
+    renameInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await nextTick()
+    expect(updateSpy).not.toHaveBeenCalled()
+
+    // Editing the field's own current name (Priority) must NOT flag a conflict.
+    renameInput.value = 'Priority'
+    renameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+    expect(container.querySelector('[data-test="rename-conflict-error"]')).toBeNull()
+
+    // A unique name proceeds normally.
+    renameInput.value = 'Urgency'
+    renameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+    expect(container.querySelector('[data-test="rename-conflict-error"]')).toBeNull()
+
+    const okButtonAfterFix = container.querySelector('.meta-field-mgr__action--ok') as HTMLButtonElement
+    expect(okButtonAfterFix.disabled).toBe(false)
+    okButtonAfterFix.click()
+    await nextTick()
+    expect(updateSpy).toHaveBeenCalledWith('fld_priority', { name: 'Urgency' })
+
+    app.unmount()
+  })
+
+  it('does not flag the add-row when the input is empty or whitespace', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaFieldManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          sheets: [],
+          fields: [{ id: 'fld_status', name: 'Status', type: 'string', property: {} }],
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    const nameInput = container.querySelector('.meta-field-mgr__add-row .meta-field-mgr__input') as HTMLInputElement
+    nameInput.value = '   '
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+
+    expect(container.querySelector('[data-test="add-conflict-error"]')).toBeNull()
+    expect(nameInput.getAttribute('aria-invalid')).not.toBe('true')
+
+    app.unmount()
+  })
+
   it('emits engine-shape validation rules in the property payload on save', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
