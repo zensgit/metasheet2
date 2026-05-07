@@ -137,6 +137,15 @@ function createReadResult({ records, nextCursor = null, done, raw = undefined, m
   }
 }
 
+function normalizeResultCount(value, field) {
+  if (value === undefined || value === null || value === '') return 0
+  const numeric = Number(value)
+  if (!Number.isInteger(numeric) || numeric < 0) {
+    throw new AdapterContractError(`${field} must be a non-negative integer`, { field, value })
+  }
+  return numeric
+}
+
 function createUpsertResult({ written = 0, skipped = 0, failed = 0, results = [], errors = [], raw = undefined, metadata = {} } = {}) {
   if (!Array.isArray(results)) {
     throw new AdapterContractError('upsert result results must be an array', { field: 'results' })
@@ -145,9 +154,9 @@ function createUpsertResult({ written = 0, skipped = 0, failed = 0, results = []
     throw new AdapterContractError('upsert result errors must be an array', { field: 'errors' })
   }
   return {
-    written: Number(written) || 0,
-    skipped: Number(skipped) || 0,
-    failed: Number(failed) || 0,
+    written: normalizeResultCount(written, 'written'),
+    skipped: normalizeResultCount(skipped, 'skipped'),
+    failed: normalizeResultCount(failed, 'failed'),
     results,
     errors,
     raw,
@@ -243,5 +252,6 @@ module.exports = {
     optionalString,
     objectOrEmpty,
     normalizeLimit,
+    normalizeResultCount,
   },
 }
