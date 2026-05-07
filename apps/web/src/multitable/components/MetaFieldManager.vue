@@ -15,15 +15,32 @@
           <span class="meta-field-mgr__icon">{{ FIELD_ICONS[displayFieldType(field)] ?? '?' }}</span>
 
           <template v-if="editingId === field.id">
-            <input
-              class="meta-field-mgr__rename"
-              :value="editingName"
-              @input="editingName = ($event.target as HTMLInputElement).value"
-              @keydown.enter="confirmRename(field.id)"
-              @keydown.escape="cancelRename"
-            />
-            <button class="meta-field-mgr__action meta-field-mgr__action--ok" @click="confirmRename(field.id)">&#x2713;</button>
-            <button class="meta-field-mgr__action" @click="cancelRename">&#x2717;</button>
+            <div class="meta-field-mgr__rename-wrap">
+              <input
+                class="meta-field-mgr__rename"
+                :class="{ 'meta-field-mgr__rename--invalid': renameNameConflict }"
+                :value="editingName"
+                :aria-invalid="renameNameConflict"
+                :aria-describedby="renameNameConflict ? 'meta-field-mgr-rename-error' : undefined"
+                @input="editingName = ($event.target as HTMLInputElement).value"
+                @keydown.enter="confirmRename(field.id)"
+                @keydown.escape="cancelRename"
+              />
+              <span
+                v-if="renameNameConflict"
+                id="meta-field-mgr-rename-error"
+                class="meta-field-mgr__inline-error"
+                data-test="rename-conflict-error"
+                role="alert"
+              >A field named "{{ editingName.trim() }}" already exists</span>
+            </div>
+            <button
+              class="meta-field-mgr__action meta-field-mgr__action--ok"
+              :disabled="renameNameConflict"
+              :title="renameNameConflict ? 'Resolve the duplicate name to confirm' : 'Confirm rename'"
+              @click="confirmRename(field.id)"
+            >&#x2713;</button>
+            <button class="meta-field-mgr__action" title="Cancel rename" @click="cancelRename">&#x2717;</button>
           </template>
           <template v-else>
             <span class="meta-field-mgr__name" :title="field.name">{{ field.name }}</span>
@@ -331,14 +348,28 @@
           <input
             v-model="newFieldName"
             class="meta-field-mgr__input"
+            :class="{ 'meta-field-mgr__input--invalid': addNameConflict }"
             placeholder="Field name"
+            :aria-invalid="addNameConflict"
+            :aria-describedby="addNameConflict ? 'meta-field-mgr-add-error' : undefined"
             @keydown.enter="onAddField"
           />
           <select v-model="newFieldType" class="meta-field-mgr__select" @change="openNewFieldConfigIfNeeded">
             <option v-for="t in FIELD_TYPES" :key="t" :value="t">{{ t }}</option>
           </select>
-          <button class="meta-field-mgr__btn-add" :disabled="!newFieldName.trim()" @click="onAddField">+ Add</button>
+          <button
+            class="meta-field-mgr__btn-add"
+            :disabled="!newFieldName.trim() || addNameConflict"
+            @click="onAddField"
+          >+ Add</button>
         </div>
+        <div
+          v-if="addNameConflict"
+          id="meta-field-mgr-add-error"
+          class="meta-field-mgr__inline-error"
+          data-test="add-conflict-error"
+          role="alert"
+        >A field named "{{ newFieldName.trim() }}" already exists</div>
         <div v-if="newFieldTypeIsSystem" class="meta-field-mgr__hint meta-field-mgr__hint--system">
           {{ systemFieldHint(newFieldType) }}
         </div>
@@ -608,6 +639,31 @@ const fieldConfigWarningText = computed(() => {
   return fieldConfigBlockingReason.value || 'This field changed in the background. Save keeps your draft, or reload the latest settings.'
 })
 const newFieldTypeIsSystem = computed(() => isSystemFieldCreateType(newFieldType.value))
+
+/**
+ * Compare field names case-insensitively after trimming. Field-name UIs
+ * across the app treat names as user-facing labels, and the friendlier
+ * default for inline conflict detection is to flag "Status" vs "status"
+ * before the user round-trips to the backend.
+ */
+function normalizeFieldName(name: string): string {
+  return name.trim().toLowerCase()
+}
+
+const addNameConflict = computed(() => {
+  const normalized = normalizeFieldName(newFieldName.value)
+  if (!normalized) return false
+  return props.fields.some((field) => normalizeFieldName(field.name) === normalized)
+})
+
+const renameNameConflict = computed(() => {
+  if (!editingId.value) return false
+  const normalized = normalizeFieldName(editingName.value)
+  if (!normalized) return false
+  return props.fields.some(
+    (field) => field.id !== editingId.value && normalizeFieldName(field.name) === normalized,
+  )
+})
 
 const validationPanelVisible = computed(() => {
   const draftType = configDraftType.value
@@ -1071,6 +1127,7 @@ function insertFormulaFunction(doc: FormulaFunctionDoc) {
 function onAddField() {
   const name = newFieldName.value.trim()
   if (!name) return
+  if (addNameConflict.value) return
   if (requiresConfig(newFieldType.value) && !newFieldConfigVisible.value) {
     openNewFieldConfigIfNeeded()
     return
@@ -1117,6 +1174,7 @@ function startRename(field: MetaField) {
 }
 
 function confirmRename(fieldId: string) {
+  if (renameNameConflict.value) return
   const name = editingName.value.trim()
   if (name && name !== props.fields.find((field) => field.id === fieldId)?.name) {
     emit('update-field', fieldId, { name })
@@ -1308,4 +1366,8 @@ onBeforeUnmount(() => {
 .meta-field-mgr__btn-delete { padding: 4px 12px; background: #f56c6c; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px; }
 .meta-field-mgr__error { color: #f56c6c; font-size: 12px; }
 .meta-field-mgr__validation { margin-top: 4px; }
+.meta-field-mgr__rename-wrap { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.meta-field-mgr__rename--invalid { border-color: #f56c6c; }
+.meta-field-mgr__input--invalid { border-color: #f56c6c; }
+.meta-field-mgr__inline-error { color: #f56c6c; font-size: 11px; margin-top: 4px; }
 </style>
