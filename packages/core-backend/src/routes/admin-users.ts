@@ -4,6 +4,7 @@ import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
 import { buildOnboardingPacket, getAccessPreset, listAccessPresets } from '../auth/access-presets'
 import { getDingTalkRuntimeStatus } from '../auth/dingtalk-oauth'
+import { getDingTalkWorkNotificationRuntimeStatus } from '../integrations/dingtalk/client'
 import { recordInvite } from '../auth/invite-ledger'
 import { isInviteTokenExpired, issueInviteToken } from '../auth/invite-tokens'
 import { validatePassword } from '../auth/password-policy'
@@ -471,6 +472,7 @@ async function fetchDingTalkAccessSnapshot(userId: string) {
   const grant = grantResult.rows[0] ?? null
   const identity = identityResult.rows[0] ?? null
   const runtime = getDingTalkRuntimeStatus()
+  const workNotification = getDingTalkWorkNotificationRuntimeStatus()
   const linkedCount = Number(linkedDirectoryResult.rows[0]?.linked_count || 0)
 
   return {
@@ -479,6 +481,7 @@ async function fetchDingTalkAccessSnapshot(userId: string) {
     autoLinkEmail: runtime.autoLinkEmail,
     autoProvision: runtime.autoProvision,
     server: runtime,
+    workNotification,
     directory: {
       linked: linkedCount > 0,
       linkedCount,

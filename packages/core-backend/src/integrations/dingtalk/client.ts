@@ -35,6 +35,30 @@ export interface DingTalkMessageConfig extends DingTalkDirectoryConfig {
   agentId: string
 }
 
+export interface DingTalkWorkNotificationRuntimeStatus {
+  configured: boolean
+  available: boolean
+  unavailableReason: 'missing_app_key' | 'missing_app_secret' | 'missing_agent_id' | null
+  requirements: {
+    appKey: {
+      configured: boolean
+      selectedKey: 'DINGTALK_APP_KEY' | 'DINGTALK_CLIENT_ID' | null
+    }
+    appSecret: {
+      configured: boolean
+      selectedKey: 'DINGTALK_APP_SECRET' | 'DINGTALK_CLIENT_SECRET' | null
+    }
+    agentId: {
+      configured: boolean
+      selectedKey: 'DINGTALK_AGENT_ID' | 'DINGTALK_NOTIFY_AGENT_ID' | null
+    }
+    baseUrl: {
+      configured: boolean
+      selectedKey: 'DINGTALK_BASE_URL' | null
+    }
+  }
+}
+
 export interface DingTalkWorkNotificationInput {
   userIds: string[]
   title: string
@@ -116,6 +140,24 @@ function readStringEnv(...keys: string[]): string {
     }
   }
   return ''
+}
+
+function readEnvStatus<const T extends readonly string[]>(
+  keys: T,
+): { configured: boolean; selectedKey: T[number] | null } {
+  for (const key of keys) {
+    const value = process.env[key]
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return {
+        configured: true,
+        selectedKey: key,
+      }
+    }
+  }
+  return {
+    configured: false,
+    selectedKey: null,
+  }
 }
 
 function normalizeErrorMessage(payload: Record<string, unknown> | null, fallback: string): string {
@@ -243,6 +285,32 @@ export function readDingTalkMessageConfig(): DingTalkMessageConfig {
     appSecret,
     agentId,
     baseUrl,
+  }
+}
+
+export function getDingTalkWorkNotificationRuntimeStatus(): DingTalkWorkNotificationRuntimeStatus {
+  const appKey = readEnvStatus(['DINGTALK_APP_KEY', 'DINGTALK_CLIENT_ID'] as const)
+  const appSecret = readEnvStatus(['DINGTALK_APP_SECRET', 'DINGTALK_CLIENT_SECRET'] as const)
+  const agentId = readEnvStatus(['DINGTALK_AGENT_ID', 'DINGTALK_NOTIFY_AGENT_ID'] as const)
+  const baseUrl = readEnvStatus(['DINGTALK_BASE_URL'] as const)
+  const unavailableReason = !appKey.configured
+    ? 'missing_app_key'
+    : !appSecret.configured
+      ? 'missing_app_secret'
+      : !agentId.configured
+        ? 'missing_agent_id'
+        : null
+
+  return {
+    configured: unavailableReason === null,
+    available: unavailableReason === null,
+    unavailableReason,
+    requirements: {
+      appKey,
+      appSecret,
+      agentId,
+      baseUrl,
+    },
   }
 }
 

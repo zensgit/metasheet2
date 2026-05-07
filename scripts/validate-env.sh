@@ -41,6 +41,30 @@ validate_required() {
     fi
 }
 
+validate_required_any() {
+    local description=$1
+    shift
+    local found_var=""
+
+    for var_name in "$@"; do
+        local var_value="${!var_name}"
+        if [ -n "$var_value" ]; then
+            found_var="$var_name"
+            break
+        fi
+    done
+
+    if [ -z "$found_var" ]; then
+        echo -e "${RED}❌ MISSING: one of $*${NC}"
+        echo -e "   ${description}"
+        MISSING_VARS+=("$*")
+        VALIDATION_FAILED=1
+    else
+        local found_value="${!found_var}"
+        echo -e "${GREEN}✅ ${found_var}${NC}: ${found_value:0:50}..."
+    fi
+}
+
 # Validation function with warning (optional but recommended)
 validate_recommended() {
     local var_name=$1
@@ -146,9 +170,10 @@ if [ -n "$FEISHU_APP_ID" ] || [ -n "$FEISHU_APP_SECRET" ]; then
     validate_required "FEISHU_APP_SECRET" "Feishu (Lark) application secret"
 fi
 
-if [ -n "$DINGTALK_APP_KEY" ] || [ -n "$DINGTALK_APP_SECRET" ]; then
-    validate_required "DINGTALK_APP_KEY" "DingTalk application key"
-    validate_required "DINGTALK_APP_SECRET" "DingTalk application secret"
+if [ -n "$DINGTALK_APP_KEY" ] || [ -n "$DINGTALK_APP_SECRET" ] || [ -n "$DINGTALK_CLIENT_ID" ] || [ -n "$DINGTALK_CLIENT_SECRET" ] || [ -n "$DINGTALK_AGENT_ID" ] || [ -n "$DINGTALK_NOTIFY_AGENT_ID" ]; then
+    validate_required_any "DingTalk application key for OAuth and work notifications" "DINGTALK_APP_KEY" "DINGTALK_CLIENT_ID"
+    validate_required_any "DingTalk application secret for OAuth and work notifications" "DINGTALK_APP_SECRET" "DINGTALK_CLIENT_SECRET"
+    validate_required_any "DingTalk work-notification agent id for direct messages and rule-creator failure alerts" "DINGTALK_AGENT_ID" "DINGTALK_NOTIFY_AGENT_ID"
 fi
 
 if [ -n "$WECHAT_WORK_CORP_ID" ] || [ -n "$WECHAT_WORK_SECRET" ]; then

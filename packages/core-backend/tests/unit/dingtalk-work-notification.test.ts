@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  getDingTalkWorkNotificationRuntimeStatus,
   readDingTalkMessageConfig,
   sendDingTalkWorkNotification,
 } from '../../src/integrations/dingtalk/client'
@@ -16,6 +17,53 @@ describe('dingtalk work notification client', () => {
     vi.stubEnv('DINGTALK_APP_SECRET', 'dt-app-secret')
 
     expect(() => readDingTalkMessageConfig()).toThrow('DINGTALK_AGENT_ID or DINGTALK_NOTIFY_AGENT_ID is not configured')
+  })
+
+  it('reports redaction-safe work notification runtime status', () => {
+    vi.stubEnv('DINGTALK_APP_KEY', 'dt-app-key')
+    vi.stubEnv('DINGTALK_APP_SECRET', 'dt-app-secret')
+
+    expect(getDingTalkWorkNotificationRuntimeStatus()).toEqual({
+      configured: false,
+      available: false,
+      unavailableReason: 'missing_agent_id',
+      requirements: {
+        appKey: {
+          configured: true,
+          selectedKey: 'DINGTALK_APP_KEY',
+        },
+        appSecret: {
+          configured: true,
+          selectedKey: 'DINGTALK_APP_SECRET',
+        },
+        agentId: {
+          configured: false,
+          selectedKey: null,
+        },
+        baseUrl: {
+          configured: false,
+          selectedKey: null,
+        },
+      },
+    })
+  })
+
+  it('reports legacy alias readiness for work notification runtime status', () => {
+    vi.stubEnv('DINGTALK_CLIENT_ID', 'dt-client-id')
+    vi.stubEnv('DINGTALK_CLIENT_SECRET', 'dt-client-secret')
+    vi.stubEnv('DINGTALK_NOTIFY_AGENT_ID', '987654321')
+    vi.stubEnv('DINGTALK_BASE_URL', 'https://oapi.dingtalk.com')
+
+    const status = getDingTalkWorkNotificationRuntimeStatus()
+
+    expect(status.configured).toBe(true)
+    expect(status.available).toBe(true)
+    expect(status.unavailableReason).toBeNull()
+    expect(status.requirements.appKey.selectedKey).toBe('DINGTALK_CLIENT_ID')
+    expect(status.requirements.appSecret.selectedKey).toBe('DINGTALK_CLIENT_SECRET')
+    expect(status.requirements.agentId.selectedKey).toBe('DINGTALK_NOTIFY_AGENT_ID')
+    expect(status.requirements.baseUrl.selectedKey).toBe('DINGTALK_BASE_URL')
+    expect(JSON.stringify(status)).not.toContain('dt-client-secret')
   })
 
   it('sends work notifications to DingTalk user ids', async () => {

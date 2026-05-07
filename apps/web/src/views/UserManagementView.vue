@@ -605,6 +605,26 @@
             <p v-if="dingtalkAccess?.server?.allowedCorpIds?.length" class="user-admin__hint">
               允许企业：{{ dingtalkAccess.server.allowedCorpIds.join('、') }}
             </p>
+            <div v-if="dingtalkAccess?.workNotification" class="user-admin__chips">
+              <span
+                class="user-admin__chip"
+                :class="{ 'user-admin__chip--success': dingtalkAccess.workNotification.available, 'user-admin__chip--danger': !dingtalkAccess.workNotification.available }"
+              >
+                {{ dingtalkAccess.workNotification.available ? '工作通知已配置' : '工作通知未配置完整' }}
+              </span>
+              <span class="user-admin__chip" :class="{ 'user-admin__chip--success': dingtalkAccess.workNotification.requirements.appKey.configured, 'user-admin__chip--danger': !dingtalkAccess.workNotification.requirements.appKey.configured }">
+                App Key
+              </span>
+              <span class="user-admin__chip" :class="{ 'user-admin__chip--success': dingtalkAccess.workNotification.requirements.appSecret.configured, 'user-admin__chip--danger': !dingtalkAccess.workNotification.requirements.appSecret.configured }">
+                App Secret
+              </span>
+              <span class="user-admin__chip" :class="{ 'user-admin__chip--success': dingtalkAccess.workNotification.requirements.agentId.configured, 'user-admin__chip--danger': !dingtalkAccess.workNotification.requirements.agentId.configured }">
+                Agent ID
+              </span>
+            </div>
+            <p v-if="dingtalkAccess?.workNotification" class="user-admin__hint">
+              {{ readDingTalkWorkNotificationStatus(dingtalkAccess) }}
+            </p>
             <div v-if="dingtalkAccess" class="user-admin__create-grid">
               <div class="user-admin__hint"><strong>身份 corpId：</strong>{{ dingtalkAccess.identity.corpId || dingtalkAccess.server?.corpId || '未记录' }}</div>
               <div class="user-admin__hint"><strong>Union ID：</strong>{{ dingtalkAccess.identity.unionId || '未记录' }}</div>
@@ -796,12 +816,37 @@ type DingTalkRuntimeStatus = {
   unavailableReason: 'missing_client_id' | 'missing_client_secret' | 'missing_redirect_uri' | 'corp_not_allowed' | null
 }
 
+type DingTalkWorkNotificationRuntimeStatus = {
+  configured: boolean
+  available: boolean
+  unavailableReason: 'missing_app_key' | 'missing_app_secret' | 'missing_agent_id' | null
+  requirements: {
+    appKey: {
+      configured: boolean
+      selectedKey: string | null
+    }
+    appSecret: {
+      configured: boolean
+      selectedKey: string | null
+    }
+    agentId: {
+      configured: boolean
+      selectedKey: string | null
+    }
+    baseUrl?: {
+      configured: boolean
+      selectedKey: string | null
+    }
+  }
+}
+
 type DingTalkAccess = {
   provider: 'dingtalk'
   requireGrant: boolean
   autoLinkEmail: boolean
   autoProvision: boolean
   server?: DingTalkRuntimeStatus
+  workNotification?: DingTalkWorkNotificationRuntimeStatus
   grant: {
     exists: boolean
     enabled: boolean
@@ -2470,6 +2515,15 @@ function readDingTalkServerStatus(accessValue: DingTalkAccess | null): string {
     return '服务端钉钉登录暂不可用'
   }
   return '服务端钉钉登录可用'
+}
+
+function readDingTalkWorkNotificationStatus(accessValue: DingTalkAccess | null): string {
+  const reason = accessValue?.workNotification?.unavailableReason ?? null
+  if (reason === 'missing_app_key') return '钉钉工作通知缺少 DINGTALK_APP_KEY 或 DINGTALK_CLIENT_ID'
+  if (reason === 'missing_app_secret') return '钉钉工作通知缺少 DINGTALK_APP_SECRET 或 DINGTALK_CLIENT_SECRET'
+  if (reason === 'missing_agent_id') return '钉钉工作通知缺少 DINGTALK_AGENT_ID 或 DINGTALK_NOTIFY_AGENT_ID'
+  if (accessValue?.workNotification?.available === false) return '钉钉工作通知暂不可用'
+  return '钉钉工作通知可用；群机器人发送失败时可通知规则创建人'
 }
 
 function canEnableDingTalkGrant(accessValue: DingTalkAccess | null): boolean {
