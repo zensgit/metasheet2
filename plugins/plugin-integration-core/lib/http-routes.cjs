@@ -247,13 +247,48 @@ function redactSystemForTest(system) {
   }
 }
 
+const TEST_CONNECTION_RESULT_KEYS = new Set([
+  'ok',
+  'status',
+  'code',
+  'message',
+  'authenticated',
+  'connected',
+])
+const SECRET_TEXT_PATTERN = /(?:access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?id|api[_-]?key|secret|signature|sig|sign|password)=([^&#\s]+)/ig
+const AUTH_TEXT_PATTERN = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/ig
+const JWT_TEXT_PATTERN = /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g
+const SECRET_ID_PATTERN = /\bSEC[A-Za-z0-9_-]{12,}\b/g
+
+function redactSecretText(value) {
+  if (typeof value !== 'string') return value
+  return value
+    .replace(/:\/\/([^:/?#\s]+):([^@/?#\s]+)@/g, '://[redacted]@')
+    .replace(SECRET_TEXT_PATTERN, (match) => {
+      const equals = match.indexOf('=')
+      return equals === -1 ? '[redacted]' : `${match.slice(0, equals + 1)}[redacted]`
+    })
+    .replace(AUTH_TEXT_PATTERN, '$1 [redacted]')
+    .replace(JWT_TEXT_PATTERN, '[redacted-jwt]')
+    .replace(SECRET_ID_PATTERN, '[redacted-secret-id]')
+}
+
+function sanitizeTestConnectionResult(result) {
+  const safe = {}
+  for (const key of TEST_CONNECTION_RESULT_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(result, key)) continue
+    const value = result[key]
+    safe[key] = typeof value === 'string' ? redactSecretText(value) : value
+  }
+  return safe
+}
+
 function normalizeTestConnectionResult(result) {
   if (result && typeof result === 'object' && !Array.isArray(result)) {
-    return { ...result }
+    return sanitizeTestConnectionResult(result)
   }
   return {
     ok: result !== false,
-    raw: result,
   }
 }
 
@@ -261,7 +296,7 @@ function testConnectionErrorResult(error) {
   return {
     ok: false,
     code: error && (error.code || error.name) ? String(error.code || error.name) : 'TEST_CONNECTION_FAILED',
-    message: error && error.message ? error.message : String(error),
+    message: redactSecretText(error && error.message ? error.message : String(error)),
   }
 }
 
@@ -276,8 +311,8 @@ function resolveTestedStatus(system, result) {
 function resolveTestError(result) {
   if (result && result.ok === true) return null
   return firstString(
-    result && result.message,
-    result && result.code,
+    result && typeof result.message === 'string' ? redactSecretText(result.message) : result && result.message,
+    result && typeof result.code === 'string' ? redactSecretText(result.code) : result && result.code,
     'connection test failed',
   )
 }
@@ -526,5 +561,7 @@ module.exports = {
     asListOffset,
     asListLimit,
     asPositiveInt,
+    redactSecretText,
+    sanitizeTestConnectionResult,
   },
 }
