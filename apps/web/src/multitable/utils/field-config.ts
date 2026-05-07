@@ -198,7 +198,7 @@ export function resolveAutoNumberFieldProperty(value: unknown): NormalizedAutoNu
   const prefix = typeof property.prefix === 'string' ? property.prefix.trim().slice(0, 32) : ''
   const digitsRaw = typeof property.digits === 'number' ? property.digits : Number(property.digits)
   const digits = Number.isFinite(digitsRaw) && digitsRaw >= 0 && digitsRaw <= 12
-    ? Math.round(digitsRaw)
+    ? Math.floor(digitsRaw)
     : 0
   const startRaw = typeof property.start === 'number' ? property.start : Number(property.start ?? property.startAt)
   const start = Number.isFinite(startRaw) && startRaw > 0 ? Math.floor(startRaw) : 1

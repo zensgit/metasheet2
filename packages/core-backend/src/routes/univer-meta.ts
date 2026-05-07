@@ -6332,7 +6332,8 @@ export function univerMetaRouter(): Router {
           return
         }
 
-        Object.assign(patch, await allocateAutoNumberValues(query, view.sheetId, fields))
+        const latestFields = await loadFieldsForSheet(query, view.sheetId)
+        Object.assign(patch, await allocateAutoNumberValues(query, view.sheetId, latestFields))
 
         const insertRes = await query(
           `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)

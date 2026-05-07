@@ -83,6 +83,8 @@ New field creation backfills records missing the field key. Type conversion into
 
 The standard `RecordService.createRecord()` path now acquires the same sheet-level lock before reading fields. This prevents a create request from reading the pre-backfill schema while an `autoNumber` field is being created.
 
+The public form direct create path acquires the same lock inside its write transaction and reloads the latest fields for auto-number allocation before insert.
+
 The plugin helper path also acquires the sheet-level lock before loading fields. Callers should pass a transaction-bound query when they need the lock held across the whole write.
 
 ## Frontend Design
@@ -98,5 +100,5 @@ Display formatting is centralized in `formatFieldDisplay()`, so grid, renderer, 
 
 ## Residual Limits
 
-- Public form direct create now locks inside its write transaction, but it still loads and validates fields before that transaction. The sequence allocation itself remains atomic; the full schema-read race is best removed when public-form create is routed through `RecordService.createRecord()`.
 - XLSX import currently creates records one by one through `RecordService`; values are correct and serialized, but it does not yet reserve a single batch range for the whole import.
+- `multitable.records.createRecord()` can only hold the sheet lock across the whole write when its `query` argument is transaction-bound.

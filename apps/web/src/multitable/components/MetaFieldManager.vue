@@ -1049,7 +1049,7 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
     const normalizedStart = Math.floor(start)
     return {
       prefix,
-      digits: Math.round(digits),
+      digits: Math.floor(digits),
       start: normalizedStart,
       startAt: normalizedStart,
     }

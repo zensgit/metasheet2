@@ -259,6 +259,23 @@ describe('RecordService', () => {
     })).rejects.toThrow(RecordFieldForbiddenError)
   })
 
+  it('preserves not-found priority for missing sheets during create', async () => {
+    pool = createMockPool({
+      SELECT_SHEET: { rows: [] },
+    })
+    const service = new RecordService(pool, eventBus as any)
+
+    await expect(service.createRecord({
+      sheetId: 'sheet_missing',
+      data: { fld_title: 'Alpha' },
+      actorId: 'user_1',
+      capabilities: {
+        ...fullCapabilities,
+        canCreateRecord: false,
+      },
+    })).rejects.toThrow(RecordNotFoundError)
+  })
+
   it('rejects create when a linked target record is missing', async () => {
     pool = createMockPool({
       SELECT_FIELDS: {

@@ -404,6 +404,14 @@ export class RecordService {
   async createRecord(input: RecordCreateInput): Promise<RecordCreateResult> {
     const { sheetId, data, actorId, capabilities } = input
 
+    const sheetRes = await this.pool.query(
+      'SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
+      [sheetId],
+    )
+    if (sheetRes.rows.length === 0) {
+      throw new RecordNotFoundError(`Sheet not found: ${sheetId}`)
+    }
+
     if (!capabilities.canCreateRecord) {
       throw new RecordPermissionError('Insufficient permissions')
     }
@@ -412,14 +420,6 @@ export class RecordService {
     const recordId = `rec_${randomUUID()}`
     const recordRes = await this.pool.transaction(async ({ query }) => {
       await acquireAutoNumberSheetWriteLock(query, sheetId)
-
-      const sheetRes = await query(
-        'SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
-        [sheetId],
-      )
-      if (sheetRes.rows.length === 0) {
-        throw new RecordNotFoundError(`Sheet not found: ${sheetId}`)
-      }
 
       const fieldRes = await query(
         'SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1',

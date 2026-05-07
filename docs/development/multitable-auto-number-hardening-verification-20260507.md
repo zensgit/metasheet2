@@ -32,7 +32,7 @@ pnpm verify:multitable-openapi:parity
 
 - `pnpm install --frozen-lockfile`: passed.
 - `git diff --check`: passed.
-- Backend focused tests: `3 passed`, `34/34` tests passed.
+- Backend focused tests: `3 passed`, `35/35` tests passed.
 - Frontend focused tests: `1 passed`, `7/7` tests passed.
 - Backend type-check: passed.
 - Frontend type-check: passed.
