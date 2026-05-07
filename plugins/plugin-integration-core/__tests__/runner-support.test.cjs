@@ -9,6 +9,7 @@ const {
 const {
   createWatermarkStore,
   deriveNextWatermark,
+  WatermarkError,
 } = require(path.join(__dirname, '..', 'lib', 'watermark.cjs'))
 const { createDeadLetterStore } = require(path.join(__dirname, '..', 'lib', 'dead-letter.cjs'))
 const { createRunLog, createRunLogger } = require(path.join(__dirname, '..', 'lib', 'run-log.cjs'))
@@ -159,6 +160,31 @@ async function main() {
   assert.equal(updatedWatermark.value, '42')
   const notRegressed = await watermarks.advanceWatermark({ pipelineId: 'pipe_1', type: 'monotonic_id', value: '7' })
   assert.equal(notRegressed.value, '42', 'advanceWatermark does not move monotonic watermarks backwards')
+  await assert.rejects(() => watermarks.setWatermark({
+    pipelineId: 'pipe_bad_ts',
+    type: 'updated_at',
+    value: 'not-a-timestamp',
+  }), WatermarkError)
+  await assert.rejects(() => watermarks.setWatermark({
+    pipelineId: 'pipe_bad_id',
+    type: 'monotonic_id',
+    value: 'not-a-number',
+  }), WatermarkError)
+  await assert.rejects(() => watermarks.advanceWatermark({
+    pipelineId: 'pipe_1',
+    type: 'monotonic_id',
+    value: Number.POSITIVE_INFINITY,
+  }), WatermarkError)
+  assert.equal(
+    await db.selectOne('integration_watermarks', { pipeline_id: 'pipe_bad_ts' }),
+    null,
+    'invalid timestamp watermark is rejected before persistence',
+  )
+  assert.equal(
+    await db.selectOne('integration_watermarks', { pipeline_id: 'pipe_bad_id' }),
+    null,
+    'invalid monotonic watermark is rejected before persistence',
+  )
 
   // Dead letters can be created, listed, and marked as replayed.
   const deadLetters = createDeadLetterStore({ db, idGenerator: () => 'dl_1' })
