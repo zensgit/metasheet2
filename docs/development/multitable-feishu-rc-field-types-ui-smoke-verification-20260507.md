@@ -22,6 +22,13 @@ Result:
 - `node --test scripts/verify-multitable-live-smoke.test.mjs`: `1/1` pass
 - `git diff --check`: pass
 
+## Follow-up Runner Hardening
+
+Two runner-only issues were fixed after the first successful deployment of `#1379` to 8081:
+
+- Phone link assertion now derives the expected `tel:` href with the same digit sanitization as `MetaCellRenderer.vue`, instead of using a hand-written constant.
+- Import mapping reconcile now uses `ensureImportFieldMappedByColumnIndex()` so the runner actively maps the target field when the import preview does not auto-select quickly enough.
+
 ## 142 Staging Smoke
 
 ### Attempt 1 - 8081 Main Entry
@@ -43,7 +50,7 @@ Result:
 
 - Overall: blocked before runner start
 - Failure: backend not reachable at `http://142.171.239.56:8081`
-- Remote evidence: `metasheet-142` has no main app container exposing `8081`; `127.0.0.1:8081` returns connection refused from the host.
+- Remote evidence at that moment: `127.0.0.1:8081` returned connection refused from the host. Later recheck showed this was deploy-target churn, not a durable topology fact.
 
 ### Attempt 2 - 8082 Staging Entry
 
@@ -82,18 +89,90 @@ Cleanup evidence:
 - Temporary fields created before the failure were deleted by the runner cleanup path.
 - No field-type temporary fields were created on 8082 because the first `currency` create failed.
 
+### Attempt 3 - 8081 Main After #1379 Deploy
+
+GitHub Actions run `25472158432` deployed main `e6f6547a158361042a42788701d8debef8e1d725` to 8081 successfully.
+
+Remote target evidence:
+
+- Repo: `/home/mainuser/metasheet2` at `e6f6547`
+- `IMAGE_TAG=e6f6547a158361042a42788701d8debef8e1d725`
+- `metasheet-web`: `ghcr.io/zensgit/metasheet2-web:e6f6547a158361042a42788701d8debef8e1d725`
+- `metasheet-backend`: `ghcr.io/zensgit/metasheet2-backend:e6f6547a158361042a42788701d8debef8e1d725`
+- `/api/health`: pass
+- `/api/auth/me`: pass with a short-lived admin JWT generated inside the running backend container; token value was not printed or committed.
+
+Command shape, with token redacted:
+
+```bash
+AUTH_TOKEN="<redacted>" \
+API_BASE=http://142.171.239.56:8081 \
+WEB_BASE=http://142.171.239.56:8081 \
+OUTPUT_ROOT=output/playwright/multitable-feishu-rc-field-types-smoke/20260506-192330 \
+ENSURE_PLAYWRIGHT=false \
+HEADLESS=true \
+TIMEOUT_MS=45000 \
+pnpm verify:multitable-pilot:staging
+```
+
+Result:
+
+- Overall: fail due runner assertion, not product behavior
+- Failure: `Phone cell anchor mismatch: tel:+8613800000000`
+- Finding: the frontend correctly sanitizes `+86 138 0000 0000` to `tel:+8613800000000`; the runner expected a hand-written href with one fewer `0`.
+
+### Attempt 4 - 8081 Main After Runner Hardening
+
+Command shape, with token redacted:
+
+```bash
+AUTH_TOKEN="<redacted>" \
+API_BASE=http://142.171.239.56:8081 \
+WEB_BASE=http://142.171.239.56:8081 \
+OUTPUT_ROOT=output/playwright/multitable-feishu-rc-field-types-smoke/20260506-193219 \
+ENSURE_PLAYWRIGHT=false \
+HEADLESS=true \
+TIMEOUT_MS=45000 \
+pnpm verify:multitable-pilot:staging
+```
+
+Result:
+
+- Overall: pass
+- Total checks: `159/159`
+- Report JSON: `output/playwright/multitable-feishu-rc-field-types-smoke/20260506-193219/report.json`
+- Report MD: `output/playwright/multitable-feishu-rc-field-types-smoke/20260506-193219/report.md`
+- Finished at: `2026-05-07T02:35:37.033Z`
+
+New check evidence:
+
+- `api.field-types.value-normalization`: pass
+  - Covered field types: `currency`, `percent`, `rating`, `url`, `email`, `phone`, `longText`, `multiSelect`
+  - `apiMismatches`: `[]`
+- `ui.field-types.reload-replay`: pass
+  - Initial and reloaded render both showed:
+    - currency: `¥1,234.56`
+    - percent: `37.5%`
+    - rating: `★★★★☆`
+    - url href: `https://example.com/multitable-rc`
+    - email href: `mailto:rc-field-types@example.com`
+    - phone href: `tel:+8613800000000`
+    - longText: both lines
+    - multiSelect tags: `Alpha`, `Gamma`
+
+Cleanup evidence:
+
+- Temporary imported records were deleted.
+- Temporary attachment was deleted.
+- Temporary field-type fields were deleted.
+- Existing view `filterInfo` and `config` restoration completed as part of the full smoke.
+
 ## Conclusion
 
-The runner change is locally valid, but the final 142 staging smoke cannot be marked complete until a 142 target is running a backend build that includes MF2 field types.
-
-Required next gate:
-
-1. Deploy current `main` or a verified image containing MF2 field types to the selected 142 smoke target.
-2. Re-run the same `pnpm verify:multitable-pilot:staging` command.
-3. Mark the RC TODO item complete only after `api.field-types.value-normalization` and `ui.field-types.reload-replay` pass.
+The field-type smoke item is now closed against 142 main/8081. The 8082 staging stack remains intentionally out of scope because it is still on the older `62a75f9809-itemresults` image and migration lineage.
 
 ## TODO Linkage
 
-This verification adds executable coverage for this RC TODO item, but does not close it until the staging target is upgraded and the smoke passes:
+This verification closes this RC TODO item:
 
 - `Smoke test field types: currency, percent, rating, url, email, phone, longText, multiSelect.`
