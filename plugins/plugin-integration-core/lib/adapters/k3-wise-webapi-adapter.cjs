@@ -93,10 +93,29 @@ function assertRelativePath(path, field) {
     throw new AdapterValidationError(`${field} is required`, { field })
   }
   const trimmed = path.trim()
-  if (/^https?:\/\//i.test(trimmed)) {
+  const hasScheme = /^[A-Za-z][A-Za-z0-9+.-]*:/.test(trimmed)
+  const isProtocolRelative = trimmed.startsWith('//')
+  const hasBackslash = trimmed.includes('\\')
+  if (hasScheme || isProtocolRelative || hasBackslash) {
     throw new AdapterValidationError(`${field} must be relative to baseUrl`, { field })
   }
   return trimmed.startsWith('/') ? trimmed : `/${trimmed}`
+}
+
+function buildEndpointUrl(baseUrl, path) {
+  const endpointPath = assertRelativePath(path, 'path')
+  const url = new URL(baseUrl)
+  const basePath = url.pathname && url.pathname !== '/'
+    ? url.pathname.replace(/\/+$/, '')
+    : ''
+  if (basePath && endpointPath !== basePath && !endpointPath.startsWith(`${basePath}/`)) {
+    url.pathname = `${basePath}${endpointPath}`
+  } else {
+    url.pathname = endpointPath
+  }
+  url.search = ''
+  url.hash = ''
+  return url.toString()
 }
 
 function normalizeHeaders(value, field) {
@@ -326,7 +345,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
   }
 
   async function requestJson(path, { method = 'GET', headers, body } = {}) {
-    const url = new URL(assertRelativePath(path, 'path'), baseUrl).toString()
+    const url = buildEndpointUrl(baseUrl, path)
     const controller = typeof AbortController === 'function' ? new AbortController() : null
     const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null
     const requestHeaders = mergeHeaders(
