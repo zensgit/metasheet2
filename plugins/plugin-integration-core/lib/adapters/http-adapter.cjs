@@ -130,6 +130,17 @@ function mergeHeaders(...sets) {
   return Object.assign({}, ...sets.filter(Boolean))
 }
 
+function readOptionsQuery(value) {
+  const query = toPlainObject(value, 'options.query')
+  const safe = { ...query }
+  // Pagination is governed by normalizeReadRequest(). Operator-provided
+  // options.query may add vendor filters, but it must not override the guarded
+  // limit/cursor values after they have been normalized.
+  delete safe.limit
+  delete safe.cursor
+  return safe
+}
+
 async function parseResponseBody(response) {
   const text = typeof response.text === 'function' ? await response.text() : ''
   if (!text) return null
@@ -306,13 +317,14 @@ function createHttpAdapter({ system, fetchImpl = globalThis.fetch, logger } = {}
     const objectConfig = getObjectConfig(request.object)
     ensureOperation(normalizedSystem.kind, request.object, objectConfig, 'read')
     const path = assertRelativePath(objectConfig.path || objectConfig.readPath, 'object.path')
+    const optionsQuery = readOptionsQuery(request.options.query)
     const query = {
       ...toPlainObject(objectConfig.query, 'object.query'),
       ...request.filters,
+      ...request.watermark,
+      ...optionsQuery,
       limit: request.limit,
       cursor: request.cursor,
-      ...request.watermark,
-      ...request.options.query,
     }
     const { data } = await requestJson(path, {
       method: objectConfig.method || objectConfig.readMethod || 'GET',
@@ -393,5 +405,6 @@ module.exports = {
     normalizeBaseUrl,
     normalizeObjects,
     credentialHeaders,
+    readOptionsQuery,
   },
 }
