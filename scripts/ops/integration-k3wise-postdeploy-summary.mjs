@@ -72,6 +72,19 @@ function parseArgs(argv = process.argv.slice(2)) {
   return opts
 }
 
+function markdownText(value) {
+  return String(value).replace(/\r?\n|\r/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
+function markdownInlineCode(value) {
+  const text = markdownText(value)
+  const runs = text.match(/`+/g) || ['']
+  const fenceLength = Math.max(1, ...runs.map((run) => run.length + 1))
+  const fence = '`'.repeat(fenceLength)
+  const content = text.startsWith('`') || text.endsWith('`') ? ` ${text} ` : text
+  return `${fence}${content}${fence}`
+}
+
 function renderMissingSummary(inputPath, { requireAuthSignoff = false } = {}) {
   const lines = []
   if (requireAuthSignoff) {
@@ -80,7 +93,7 @@ function renderMissingSummary(inputPath, { requireAuthSignoff = false } = {}) {
   }
   lines.push(
     '- Status: **NOT RUN**',
-    `- Reason: evidence file missing at \`${inputPath || 'unknown'}\``,
+    `- Reason: evidence file missing at ${markdownInlineCode(inputPath || 'unknown')}`,
     '',
   )
   return lines.join('\n')
@@ -107,22 +120,22 @@ function renderSignoffLines(evidence, { requireAuthSignoff = false } = {}) {
   const signoff = inferInternalTrialSignoff(evidence)
   return [
     `- Internal trial signoff: **${signoff.status}**`,
-    `- Signoff reason: ${signoff.reason}`,
+    `- Signoff reason: ${markdownText(signoff.reason)}`,
   ]
 }
 
 function formatDetailValue(value) {
   if (Array.isArray(value)) {
-    if (value.length === 0) return '`none`'
-    return value.map((item) => `\`${String(item)}\``).join(', ')
+    if (value.length === 0) return markdownInlineCode('none')
+    return value.map((item) => markdownInlineCode(item)).join(', ')
   }
   if (value && typeof value === 'object') {
     const entries = Object.entries(value)
       .filter(([, child]) => Array.isArray(child) ? child.length > 0 : child !== undefined && child !== null)
-      .map(([key, child]) => `${key}: ${formatDetailValue(child)}`)
-    return entries.length > 0 ? entries.join('; ') : '`none`'
+      .map(([key, child]) => `${markdownText(key)}: ${formatDetailValue(child)}`)
+    return entries.length > 0 ? entries.join('; ') : markdownInlineCode('none')
   }
-  return `\`${String(value)}\``
+  return markdownInlineCode(value)
 }
 
 function summarizeCheckDetails(check) {
@@ -147,13 +160,13 @@ function renderEvidenceSummary(evidence, options = {}) {
   const lines = [
     ...renderSignoffLines(evidence, options),
     `- Status: **${status}**`,
-    `- Base URL: \`${evidence?.baseUrl || 'unknown'}\``,
-    `- Authenticated checks: \`${evidence?.authenticated ? 'yes' : 'no'}\``,
-    `- Summary: \`${Number(summary.pass || 0)} pass / ${Number(summary.skipped || 0)} skipped / ${Number(summary.fail || 0)} fail\``,
+    `- Base URL: ${markdownInlineCode(evidence?.baseUrl || 'unknown')}`,
+    `- Authenticated checks: ${markdownInlineCode(evidence?.authenticated ? 'yes' : 'no')}`,
+    `- Summary: ${markdownInlineCode(`${Number(summary.pass || 0)} pass / ${Number(summary.skipped || 0)} skipped / ${Number(summary.fail || 0)} fail`)}`,
     '- Checks:',
   ]
   for (const check of checks) {
-    lines.push(`  - \`${check?.id || 'unknown'}\`: \`${check?.status || 'unknown'}\``)
+    lines.push(`  - ${markdownInlineCode(check?.id || 'unknown')}: ${markdownInlineCode(check?.status || 'unknown')}`)
     if (check?.status === 'fail') {
       lines.push(...summarizeCheckDetails(check))
     }
@@ -214,6 +227,8 @@ export {
   K3WisePostdeploySummaryError,
   formatDetailValue,
   inferInternalTrialSignoff,
+  markdownInlineCode,
+  markdownText,
   parseArgs,
   renderEvidenceSummary,
   renderMissingSummary,
