@@ -44,6 +44,75 @@ function exactTextRegex(value) {
   return new RegExp(`^\\s*${String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`)
 }
 
+const fieldTypeSmokeSpecs = [
+  {
+    key: 'currency',
+    idPart: 'currency',
+    label: 'Currency',
+    type: 'currency',
+    property: { code: 'CNY', decimals: 2 },
+    value: 1234.56,
+  },
+  {
+    key: 'percent',
+    idPart: 'percent',
+    label: 'Percent',
+    type: 'percent',
+    property: { decimals: 1 },
+    value: 37.5,
+  },
+  {
+    key: 'rating',
+    idPart: 'rating',
+    label: 'Rating',
+    type: 'rating',
+    property: { max: 5 },
+    value: 4,
+  },
+  {
+    key: 'url',
+    idPart: 'url',
+    label: 'URL',
+    type: 'url',
+    value: 'https://example.com/multitable-rc',
+  },
+  {
+    key: 'email',
+    idPart: 'email',
+    label: 'Email',
+    type: 'email',
+    value: 'rc-field-types@example.com',
+  },
+  {
+    key: 'phone',
+    idPart: 'phone',
+    label: 'Phone',
+    type: 'phone',
+    value: '+86 138 0000 0000',
+  },
+  {
+    key: 'longText',
+    idPart: 'long_text',
+    label: 'Long Text',
+    type: 'longText',
+    value: 'Line one field smoke\nLine two field smoke',
+  },
+  {
+    key: 'multiSelect',
+    idPart: 'multi_select',
+    label: 'Multi Select',
+    type: 'multiSelect',
+    property: {
+      options: [
+        { value: 'Alpha', color: '#3b82f6' },
+        { value: 'Beta', color: '#22c55e' },
+        { value: 'Gamma', color: '#f59e0b' },
+      ],
+    },
+    value: ['Alpha', 'Gamma'],
+  },
+]
+
 function formFieldByLabel(page, fieldName) {
   return page.locator('.meta-form-view__field').filter({
     has: page.locator('.meta-form-view__label').filter({ hasText: exactTextRegex(fieldName) }),
@@ -347,6 +416,26 @@ async function createField(token, input) {
   })
   const json = await ensureOk('api.multitable.create-field', result, { sheetId: input.sheetId, fieldId: input.id, name: input.name, type: input.type })
   return json.data.field
+}
+
+async function createFieldTypeSmokeFields(token, sheetId, titlePrefix) {
+  const stamp = Date.now()
+  const fields = []
+  for (const spec of fieldTypeSmokeSpecs) {
+    const field = await createField(token, {
+      id: `fld_pilot_${spec.idPart}_${stamp}`,
+      sheetId,
+      name: `${spec.label} ${titlePrefix}`,
+      type: spec.type,
+      ...(spec.property ? { property: spec.property } : {}),
+    })
+    fields.push({ ...spec, field })
+  }
+  return fields
+}
+
+function fieldTypeSmokePatchValues(specs) {
+  return Object.fromEntries(specs.map((spec) => [spec.field.id, spec.value]))
 }
 
 async function updateField(token, fieldId, input) {
@@ -2353,6 +2442,124 @@ async function verifyGridHydration(page, { baseId, sheetId, viewId, searchValue,
   record('ui.grid.search-hydration', true, { searchValue, attachmentName, personDisplay })
 }
 
+function fieldCell(row, fieldName) {
+  const safeName = String(fieldName).replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  return row.locator(`.meta-grid__cell[aria-label="${safeName}"]`).first()
+}
+
+function hasSameArrayValues(actual, expected) {
+  return Array.isArray(actual)
+    && actual.length === expected.length
+    && expected.every((value, index) => actual[index] === value)
+}
+
+function apiFieldValueMatches(actual, expected) {
+  if (Array.isArray(expected)) return hasSameArrayValues(actual, expected)
+  return actual === expected
+}
+
+async function assertFieldTypeGridRender(page, titleText, specs) {
+  const search = page.getByRole('searchbox', { name: 'Search records' })
+  await search.waitFor({ state: 'visible', timeout: timeoutMs })
+  await search.fill(titleText)
+  await page.getByText('1 rows').waitFor({ state: 'visible', timeout: timeoutMs })
+  const row = page.locator('.meta-grid__row').filter({ hasText: titleText }).first()
+  await row.waitFor({ state: 'visible', timeout: timeoutMs })
+
+  const details = {}
+  for (const spec of specs) {
+    const cell = fieldCell(row, spec.field.name)
+    await cell.waitFor({ state: 'visible', timeout: timeoutMs })
+    const text = (await cell.textContent())?.trim() ?? ''
+    details[spec.key] = { text }
+
+    if (spec.key === 'currency' && !text.includes('\u00a51,234.56')) {
+      throw new Error(`Currency cell did not render expected value: ${text}`)
+    }
+    if (spec.key === 'percent' && !text.includes('37.5%')) {
+      throw new Error(`Percent cell did not render expected value: ${text}`)
+    }
+    if (spec.key === 'rating' && !text.includes('\u2605\u2605\u2605\u2605\u2606')) {
+      throw new Error(`Rating cell did not render expected value: ${text}`)
+    }
+    if (spec.key === 'longText' && (!text.includes('Line one field smoke') || !text.includes('Line two field smoke'))) {
+      throw new Error(`Long text cell did not render both lines: ${text}`)
+    }
+    if (spec.key === 'multiSelect') {
+      const tags = (await cell.locator('.meta-cell-renderer__tag').allTextContents()).map((item) => item.trim()).filter(Boolean)
+      details[spec.key].tags = tags
+      if (!hasSameArrayValues(tags, spec.value)) {
+        throw new Error(`Multi-select cell tags mismatch: ${JSON.stringify(tags)}`)
+      }
+    }
+    if (spec.key === 'url') {
+      const href = await cell.locator('a.meta-cell-renderer__url').getAttribute('href')
+      details[spec.key].href = href
+      if (href !== spec.value || !text.includes(spec.value)) {
+        throw new Error(`URL cell anchor mismatch: ${href}`)
+      }
+    }
+    if (spec.key === 'email') {
+      const href = await cell.locator('a.meta-cell-renderer__email').getAttribute('href')
+      details[spec.key].href = href
+      if (href !== `mailto:${spec.value}` || !text.includes(spec.value)) {
+        throw new Error(`Email cell anchor mismatch: ${href}`)
+      }
+    }
+    if (spec.key === 'phone') {
+      const href = await cell.locator('a.meta-cell-renderer__phone').getAttribute('href')
+      details[spec.key].href = href
+      if (href !== 'tel:+861380000000' || !text.includes(spec.value)) {
+        throw new Error(`Phone cell anchor mismatch: ${href}`)
+      }
+    }
+  }
+
+  return details
+}
+
+async function verifyFieldTypesReloadReplay(page, {
+  token,
+  baseId,
+  sheetId,
+  viewId,
+  recordId,
+  titleText,
+  specs,
+}) {
+  const persistedRecord = await fetchRecord(token, sheetId, recordId)
+  const data = persistedRecord.record?.data ?? {}
+  const apiMismatches = specs
+    .filter((spec) => !apiFieldValueMatches(data[spec.field.id], spec.value))
+    .map((spec) => ({
+      key: spec.key,
+      fieldId: spec.field.id,
+      actual: data[spec.field.id],
+      expected: spec.value,
+    }))
+  const apiOk = apiMismatches.length === 0
+  record('api.field-types.value-normalization', apiOk, {
+    recordId,
+    fieldIds: specs.map((spec) => spec.field.id),
+    apiMismatches,
+  })
+  if (!apiOk) {
+    throw new Error(`Field type API value mismatch: ${JSON.stringify(apiMismatches)}`)
+  }
+
+  await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
+  const initialRender = await assertFieldTypeGridRender(page, titleText, specs)
+  await page.reload({ waitUntil: 'domcontentloaded', timeout: timeoutMs })
+  const reloadedRender = await assertFieldTypeGridRender(page, titleText, specs)
+  await page.screenshot({ path: path.join(outputDir, 'field-types-reloaded.png'), fullPage: true })
+  record('ui.field-types.reload-replay', true, {
+    recordId,
+    fields: specs.map((spec) => ({ key: spec.key, fieldId: spec.field.id, type: spec.type })),
+    initialRender,
+    reloadedRender,
+  })
+}
+
 async function fetchViewById(token, sheetId, viewId) {
   const views = await fetchViews(token, sheetId)
   const view = views.find((item) => item.id === viewId)
@@ -3481,6 +3688,8 @@ async function run() {
       type: 'number',
     })
     cleanupFieldIds.add(scoreField.id)
+    const fieldTypeSmokeFields = await createFieldTypeSmokeFields(token, sheet.id, titlePrefix)
+    for (const spec of fieldTypeSmokeFields) cleanupFieldIds.add(spec.field.id)
     const tempField = await createField(token, {
       id: `fld_pilot_temp_attach_${Date.now()}`,
       sheetId: sheet.id,
@@ -3674,6 +3883,7 @@ async function run() {
           [startField.id]: '2026-03-10',
           [endField.id]: '2026-03-11',
           [scoreField.id]: 95,
+          ...fieldTypeSmokePatchValues(fieldTypeSmokeFields),
         },
       })
       await patchFields(token, {
@@ -3700,6 +3910,16 @@ async function run() {
         titleText: importedTitle,
         attachmentName: attachmentNames[0],
         personDisplay: personChoice.display || personChoice.id,
+      })
+
+      await verifyFieldTypesReloadReplay(page, {
+        token,
+        baseId: base.id,
+        sheetId: sheet.id,
+        viewId: gridView.id,
+        recordId,
+        titleText: importedTitle,
+        specs: fieldTypeSmokeFields,
       })
 
       await verifyFilterBuilderTypedControlsReplay(page, {
