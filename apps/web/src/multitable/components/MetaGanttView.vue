@@ -147,9 +147,10 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaGanttViewConfig, MetaRecord } from '../types'
 import { formatFieldDisplay } from '../utils/field-display'
-import { resolveGanttViewConfig } from '../utils/view-config'
+import { isSelfTableLinkField, resolveGanttViewConfig } from '../utils/view-config'
 
 const props = defineProps<{
+  sheetId?: string
   rows: MetaRecord[]
   fields: MetaField[]
   loading: boolean
@@ -201,7 +202,7 @@ const resizeState = ref<{
 } | null>(null)
 
 const resolvedConfig = computed<Required<MetaGanttViewConfig>>(() =>
-  resolveGanttViewConfig(props.fields, props.viewConfig, props.groupInfo),
+  resolveGanttViewConfig(props.fields, props.viewConfig, props.groupInfo, props.sheetId),
 )
 
 watch(
@@ -225,7 +226,7 @@ const dateFields = computed(() => props.fields.filter((field) => field.type === 
 const titleFields = computed(() => props.fields)
 const numericFields = computed(() => props.fields.filter((field) => ['number', 'percent', 'currency', 'rating'].includes(field.type)))
 const groupableFields = computed(() => props.fields.filter((field) => ['select', 'string', 'boolean', 'date', 'dateTime'].includes(field.type)))
-const dependencyFields = computed(() => props.fields.filter((field) => field.type === 'link'))
+const dependencyFields = computed(() => props.fields.filter((field) => isSelfTableLinkField(field, props.sheetId)))
 const canResizeTasks = computed(() => Boolean(props.canEdit && startFieldId.value && endFieldId.value && startFieldId.value !== endFieldId.value))
 
 function parseDate(value: unknown): Date | null {

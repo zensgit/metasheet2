@@ -201,6 +201,7 @@
         />
         <MetaGanttView
           v-else-if="activeViewType === 'gantt'"
+          :sheet-id="workbench.activeSheetId.value"
           :rows="grid.rows.value" :fields="scopedAllFields" :loading="grid.loading.value"
           :view-config="workbench.activeView.value?.config"
           :group-info="workbench.activeView.value?.groupInfo"
