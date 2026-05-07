@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -54,7 +54,64 @@ test('resolver prefers configured smoke token and writes it to GitHub env', asyn
     assert.equal(result.status, 0, result.stderr)
     assert.match(result.stdout, /::add-mask::header\.payload\.signature/)
     assert.match(result.stdout, /K3 WISE smoke token resolved from METASHEET_K3WISE_SMOKE_TOKEN/)
-    assert.equal(readFileSync(githubEnv, 'utf8'), `RESOLVED_TOKEN<<EOF\n${token}\nEOF\n`)
+    assert.equal(readFileSync(githubEnv, 'utf8'), `RESOLVED_TOKEN<<K3WISE_ENV_EOF\n${token}\nK3WISE_ENV_EOF\n`)
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+test('resolver rejects configured smoke token env-file injection payloads', async () => {
+  const tmp = makeTmpDir()
+  const githubEnv = path.join(tmp, 'github-env')
+  try {
+    const result = await runResolver({
+      GITHUB_ENV: githubEnv,
+      K3_WISE_TOKEN_RESOLVE_REQUIRED: 'true',
+      METASHEET_K3WISE_SMOKE_TOKEN_SECRET: 'header.payload.signature\nINJECTED_ENV=1\nEOF',
+    })
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /configured K3 WISE smoke token must be a compact JWT/)
+    assert.doesNotMatch(result.stdout, /::add-mask::/)
+    assert.equal(existsSync(githubEnv) ? readFileSync(githubEnv, 'utf8') : '', '')
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+test('resolver rejects invalid GitHub env output names before writing token', async () => {
+  const tmp = makeTmpDir()
+  const githubEnv = path.join(tmp, 'github-env')
+  try {
+    const result = await runResolver({
+      GITHUB_ENV: githubEnv,
+      K3_WISE_TOKEN_OUTPUT_ENV: 'BAD-NAME',
+      METASHEET_K3WISE_SMOKE_TOKEN_SECRET: 'header.payload.signature',
+    })
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /invalid GitHub env output name: BAD-NAME/)
+    assert.equal(existsSync(githubEnv) ? readFileSync(githubEnv, 'utf8') : '', '')
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+test('resolver rejects multiline tenant scope before exporting token', async () => {
+  const tmp = makeTmpDir()
+  const githubEnv = path.join(tmp, 'github-env')
+  try {
+    const result = await runResolver({
+      GITHUB_ENV: githubEnv,
+      K3_WISE_TOKEN_RESOLVE_REQUIRED: 'true',
+      METASHEET_TENANT_ID: 'tenant-a\nINJECTED_ENV=1',
+      METASHEET_K3WISE_SMOKE_TOKEN_SECRET: 'header.payload.signature',
+    })
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /K3 WISE smoke tenant scope must be a single-line value/)
+    assert.doesNotMatch(result.stdout, /::add-mask::/)
+    assert.equal(existsSync(githubEnv) ? readFileSync(githubEnv, 'utf8') : '', '')
   } finally {
     rmSync(tmp, { recursive: true, force: true })
   }
@@ -112,8 +169,8 @@ printf 'header.payload.signature\\n'
     assert.match(result.stdout, /K3 WISE smoke tenant scope resolved from deploy-host backend runtime: tenant-auto/)
     assert.match(result.stdout, /K3 WISE smoke token resolved from deploy-host backend runtime/)
     const githubEnvText = readFileSync(githubEnv, 'utf8')
-    assert.match(githubEnvText, /K3_WISE_SMOKE_TENANT_ID=tenant-auto/)
-    assert.match(githubEnvText, /K3_WISE_SMOKE_TOKEN<<EOF\nheader\.payload\.signature\nEOF/)
+    assert.match(githubEnvText, /K3_WISE_SMOKE_TENANT_ID<<K3WISE_ENV_EOF\ntenant-auto\nK3WISE_ENV_EOF/)
+    assert.match(githubEnvText, /K3_WISE_SMOKE_TOKEN<<K3WISE_ENV_EOF\nheader\.payload\.signature\nK3WISE_ENV_EOF/)
     assert.match(readFileSync(sshArgsPath, 'utf8'), /K3_WISE_SMOKE_TENANT_AUTO_DISCOVER=true/)
   } finally {
     rmSync(tmp, { recursive: true, force: true })
