@@ -213,6 +213,8 @@ export interface K3WiseSetupValidationIssue {
 
 const WEBAPI_KIND = 'erp:k3-wise-webapi'
 const SQLSERVER_KIND = 'erp:k3-wise-sqlserver'
+const K3_WISE_POC_MIN_SAMPLE_LIMIT = 1
+const K3_WISE_POC_MAX_SAMPLE_LIMIT = 3
 
 function trim(value: string): string {
   return value.trim()
@@ -329,7 +331,7 @@ export function createDefaultK3WiseSetupForm(): K3WiseSetupForm {
     materialStagingObjectId: 'standard_materials',
     bomStagingObjectId: 'bom_cleanse',
     pipelineRunMode: 'manual',
-    pipelineSampleLimit: '20',
+    pipelineSampleLimit: String(K3_WISE_POC_MAX_SAMPLE_LIMIT),
     pipelineCursor: '',
     allowLivePipelineRun: false,
   }
@@ -428,8 +430,14 @@ export function validateK3WisePipelineRunForm(
   if (!['manual', 'incremental', 'full'].includes(form.pipelineRunMode)) {
     issues.push({ field: 'pipelineRunMode', message: 'Pipeline run mode must be manual, incremental, or full' })
   }
-  if (trim(form.pipelineSampleLimit) && parseOptionalPositiveInteger(form.pipelineSampleLimit) === undefined) {
+  const sampleLimit = parseOptionalPositiveInteger(form.pipelineSampleLimit)
+  if (trim(form.pipelineSampleLimit) && sampleLimit === undefined) {
     issues.push({ field: 'pipelineSampleLimit', message: 'Sample limit must be a positive integer' })
+  } else if (
+    sampleLimit !== undefined &&
+    (sampleLimit < K3_WISE_POC_MIN_SAMPLE_LIMIT || sampleLimit > K3_WISE_POC_MAX_SAMPLE_LIMIT)
+  ) {
+    issues.push({ field: 'pipelineSampleLimit', message: 'Live PoC sample limit must be between 1 and 3 rows' })
   }
   return issues
 }

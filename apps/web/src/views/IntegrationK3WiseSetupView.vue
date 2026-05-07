@@ -474,7 +474,7 @@
             </label>
             <label class="k3-setup__field">
               <span>Sample Limit</span>
-              <input v-model.trim="form.pipelineSampleLimit" inputmode="numeric" autocomplete="off" />
+              <input v-model.trim="form.pipelineSampleLimit" inputmode="numeric" min="1" max="3" autocomplete="off" />
             </label>
             <label class="k3-setup__field">
               <span>Cursor</span>

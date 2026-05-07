@@ -309,6 +309,24 @@ test('buildPacket accepts numeric 0/1 for boolean flags but rejects other number
   )
 })
 
+test('buildPacket enforces material Save-only sample limit before live PoC packet generation', () => {
+  for (const sampleLimit of [1, 2, 3, '1', '2', '3']) {
+    const packet = buildPacket(gate({ k3Wise: { sampleLimit } }))
+    const materialPipeline = packet.pipelines.find((pipeline) => pipeline.targetObject === 'material')
+    assert.equal(materialPipeline.options.sampleLimit, Number(sampleLimit))
+  }
+
+  for (const sampleLimit of [0, 4, 20, '0', '4', '20', 'abc']) {
+    assert.throws(
+      () => buildPacket(gate({ k3Wise: { sampleLimit } })),
+      (error) => error instanceof LivePocPreflightError &&
+        error.details.field === 'k3Wise.sampleLimit' &&
+        /1 to 3/.test(error.message),
+      `sampleLimit=${String(sampleLimit)} must be rejected before packet generation`,
+    )
+  }
+})
+
 test('buildPacket requires BOM product scope when BOM PoC is enabled', () => {
   assert.throws(
     () => buildPacket(gate({

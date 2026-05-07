@@ -361,7 +361,7 @@ describe('K3 WISE setup helpers', () => {
       materialPipelineId: 'pipe_material',
       bomPipelineId: 'pipe_bom',
       pipelineRunMode: 'incremental',
-      pipelineSampleLimit: '25',
+      pipelineSampleLimit: '3',
       pipelineCursor: 'wm_123',
       allowLivePipelineRun: true,
     })
@@ -373,7 +373,7 @@ describe('K3 WISE setup helpers', () => {
       tenantId: 'tenant_1',
       workspaceId: 'workspace_1',
       mode: 'incremental',
-      sampleLimit: 25,
+      sampleLimit: 3,
       cursor: 'wm_123',
     })
   })
@@ -391,6 +391,19 @@ describe('K3 WISE setup helpers', () => {
     expect(messages).toContain('Material pipeline ID is required before dry-run or run')
     expect(messages).toContain('Sample limit must be a positive integer')
     expect(() => buildK3WisePipelineRunPayload(form, 'material')).toThrow('tenantId is required')
+  })
+
+  it('caps K3 WISE live PoC pipeline sample limit at three rows', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      materialPipelineId: 'pipe_material',
+      pipelineSampleLimit: '4',
+    })
+
+    const messages = validateK3WisePipelineRunForm(form, 'material').map((issue) => issue.message)
+    expect(messages).toContain('Live PoC sample limit must be between 1 and 3 rows')
+    expect(() => buildK3WisePipelineRunPayload(form, 'material')).toThrow('Live PoC sample limit must be between 1 and 3 rows')
   })
 
   it('builds run and dead-letter observation queries for selected pipelines', () => {

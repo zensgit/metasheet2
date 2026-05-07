@@ -28,6 +28,8 @@ const BOM_REQUIRED_TARGET_FIELDS = [
   { label: 'K3 BOM child material', targets: ['FChildItems[].FItemNumber', 'FChildItemNumber', 'FItemNumber'] },
   { label: 'K3 BOM child quantity', targets: ['FChildItems[].FQty', 'FQty'] },
 ]
+const MATERIAL_SAMPLE_LIMIT_MIN = 1
+const MATERIAL_SAMPLE_LIMIT_MAX = 3
 
 class LivePocPreflightError extends Error {
   constructor(message, details = {}) {
@@ -86,6 +88,29 @@ function normalizeSafeBoolean(value, field) {
     if (FALSE_BOOLEAN_TEXT.has(normalized)) return false
   }
   throw new LivePocPreflightError(`${field} must be a boolean, 0/1, or boolean-like string`, { field })
+}
+
+function normalizeMaterialSampleLimit(value, field = 'k3Wise.sampleLimit') {
+  if (value === undefined || value === null || value === '') return MATERIAL_SAMPLE_LIMIT_MAX
+  let parsed
+  if (typeof value === 'number') {
+    parsed = value
+  } else if (typeof value === 'string') {
+    const normalized = value.trim()
+    if (normalized.length === 0) return MATERIAL_SAMPLE_LIMIT_MAX
+    parsed = Number(normalized)
+  } else {
+    throw new LivePocPreflightError(`${field} must be an integer from 1 to 3`, { field })
+  }
+  if (!Number.isInteger(parsed) || parsed < MATERIAL_SAMPLE_LIMIT_MIN || parsed > MATERIAL_SAMPLE_LIMIT_MAX) {
+    throw new LivePocPreflightError(`${field} must be an integer from 1 to 3`, {
+      field,
+      min: MATERIAL_SAMPLE_LIMIT_MIN,
+      max: MATERIAL_SAMPLE_LIMIT_MAX,
+      received: value,
+    })
+  }
+  return parsed
 }
 
 function normalizeSqlMode(value, sqlEnabled) {
@@ -323,6 +348,7 @@ function normalizeGate(input) {
       environment,
       autoSubmit: false,
       autoAudit: false,
+      sampleLimit: normalizeMaterialSampleLimit(k3Wise.sampleLimit),
     },
     plm,
     sqlServer: {
@@ -471,7 +497,7 @@ function buildPipelines(gate, externalSystems) {
       idempotencyKeyFields: ['sourceSystemId', 'objectType', 'sourceId', 'revision'],
       options: {
         writeMode: 'saveOnly',
-        sampleLimit: gate.k3Wise.sampleLimit || 3,
+        sampleLimit: gate.k3Wise.sampleLimit,
         advanceWatermarkOnPartialFailure: false,
         target: {
           autoSubmit: false,
