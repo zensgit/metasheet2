@@ -62,8 +62,50 @@ jobs:
           echo "token_resolve_rc=$rc" >> "$GITHUB_OUTPUT"
           exit "$rc"
 
+      - name: Check K3 WISE smoke inputs
+        id: env_check
+        continue-on-error: true
+        env:
+          METASHEET_BASE_URL: ${{ github.event.inputs.base_url || 'http://142.171.239.56:8081' }}
+          METASHEET_TENANT_ID: ${{ github.event.inputs.tenant_id || vars.METASHEET_TENANT_ID || '' }}
+          REQUIRE_AUTH: ${{ github.event.inputs.require_auth || 'true' }}
+          TIMEOUT_MS: ${{ github.event.inputs.timeout_ms || '10000' }}
+        run: |
+          set -euo pipefail
+          env_check_out_dir="output/integration-k3wise-postdeploy-env-check/manual"
+          smoke_out_dir="output/integration-k3wise-postdeploy-smoke/manual"
+          rm -rf "$env_check_out_dir"
+          mkdir -p "$env_check_out_dir"
+          tenant_id="${METASHEET_TENANT_ID:-${K3_WISE_SMOKE_TENANT_ID:-}}"
+
+          args=(
+            --base-url "$METASHEET_BASE_URL"
+            --out-dir "$env_check_out_dir"
+            --smoke-out-dir "$smoke_out_dir"
+            --timeout-ms "$TIMEOUT_MS"
+          )
+          if [[ "$REQUIRE_AUTH" == "true" ]]; then
+            args+=(--require-auth)
+          fi
+          if [[ -n "${tenant_id:-}" ]]; then
+            args+=(--tenant-id "$tenant_id")
+          fi
+          if [[ -n "${K3_WISE_SMOKE_TOKEN:-}" ]]; then
+            export METASHEET_AUTH_TOKEN="$K3_WISE_SMOKE_TOKEN"
+          fi
+
+          set +e
+          node scripts/ops/integration-k3wise-postdeploy-env-check.mjs "${args[@]}" \
+            2> >(tee "$env_check_out_dir/stderr.log" >&2) \
+            | tee "$env_check_out_dir/cli-summary.json"
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "env_check_rc=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
       - name: Run K3 WISE postdeploy smoke
         id: smoke
+        if: ${{ steps.env_check.outputs.env_check_rc == '0' }}
         continue-on-error: true
         env:
           METASHEET_BASE_URL: ${{ github.event.inputs.base_url || 'http://142.171.239.56:8081' }}
@@ -107,6 +149,17 @@ jobs:
           set -euo pipefail
           echo "## K3 WISE Postdeploy Smoke" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Input Check" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          env_check_md="output/integration-k3wise-postdeploy-env-check/manual/integration-k3wise-postdeploy-env-check.md"
+          if [[ -f "$env_check_md" ]]; then
+            cat "$env_check_md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Status: **NOT RUN**" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Smoke Evidence" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
           node scripts/ops/integration-k3wise-postdeploy-summary.mjs \
             --input output/integration-k3wise-postdeploy-smoke/manual/integration-k3wise-postdeploy-smoke.json \
             --require-auth-signoff \
@@ -115,6 +168,7 @@ jobs:
           echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- Evidence artifact: \`integration-k3wise-postdeploy-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Input check path: \`output/integration-k3wise-postdeploy-env-check/manual/\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload K3 WISE smoke artifacts
         if: always()
@@ -124,22 +178,32 @@ jobs:
           retention-days: 14
           path: |
             output/integration-k3wise-postdeploy-smoke/manual/**
+            output/integration-k3wise-postdeploy-env-check/manual/**
 
       - name: Fail when K3 WISE smoke failed
         if: always()
         run: |
           token_rc="${{ steps.token_resolve.outputs.token_resolve_rc }}"
+          env_check_rc="${{ steps.env_check.outputs.env_check_rc }}"
           rc="${{ steps.smoke.outputs.smoke_rc }}"
           if [[ -z "$token_rc" ]]; then
             echo "token_resolve_rc missing; failing workflow." >&2
             exit 1
           fi
-          if [[ -z "$rc" ]]; then
-            echo "smoke_rc missing; failing workflow." >&2
+          if [[ -z "$env_check_rc" ]]; then
+            echo "env_check_rc missing; failing workflow." >&2
             exit 1
           fi
           if [[ "$token_rc" != "0" ]]; then
             echo "K3 WISE smoke token resolution failed: rc=$token_rc" >&2
+            exit 1
+          fi
+          if [[ "$env_check_rc" != "0" ]]; then
+            echo "K3 WISE postdeploy smoke input check failed: rc=$env_check_rc" >&2
+            exit 1
+          fi
+          if [[ -z "$rc" ]]; then
+            echo "smoke_rc missing; failing workflow." >&2
             exit 1
           fi
           if [[ "$rc" != "0" ]]; then
