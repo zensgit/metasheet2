@@ -55,6 +55,13 @@ async function main() {
 
   // --- 2. Transform failures are typed and record-level errors are structured
   assert.throws(() => transformValue('not-a-number', 'toNumber'), TransformError)
+  for (const value of [true, false, [], [2], {}]) {
+    assert.throws(
+      () => transformValue(value, 'toNumber'),
+      TransformError,
+      `toNumber rejects ${JSON.stringify(value)} instead of coercing it`,
+    )
+  }
 
   let userJsRan = false
   const blocked = transformRecord({ value: 'abc' }, [

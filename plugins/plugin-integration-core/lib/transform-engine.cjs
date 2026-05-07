@@ -67,6 +67,20 @@ function isBlankAfterTrim(value) {
   return typeof value === 'string' && value.trim() === ''
 }
 
+function normalizeFiniteNumber(value) {
+  if (typeof value === 'number') {
+    if (Number.isFinite(value)) return value
+    throw new TransformError('toNumber failed', { value })
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().replace(/,/g, '')
+    if (normalized === '') return ''
+    const numeric = Number(normalized)
+    if (Number.isFinite(numeric)) return numeric
+  }
+  throw new TransformError('toNumber failed', { value })
+}
+
 function normalizeTransformList(transform) {
   if (transform === undefined || transform === null) return []
   if (Array.isArray(transform)) return transform
@@ -116,13 +130,7 @@ function applyTransform(value, step, sourceRecord) {
       return value === undefined || value === null ? value : String(value).toLowerCase()
     case 'toNumber': {
       if (isBlank(value)) return value
-      const normalized = typeof value === 'string' ? value.trim().replace(/,/g, '') : value
-      if (normalized === '') return ''
-      const numeric = Number(normalized)
-      if (!Number.isFinite(numeric)) {
-        throw new TransformError('toNumber failed', { value })
-      }
-      return numeric
+      return normalizeFiniteNumber(value)
     }
     case 'toDate': {
       if (isBlank(value)) return value
@@ -237,5 +245,6 @@ module.exports = {
     isPlainObject,
     normalizeTransformList,
     normalizeTransformStep,
+    normalizeFiniteNumber,
   },
 }
