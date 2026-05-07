@@ -135,7 +135,12 @@ import {
   RecordValidationFailedError as RecordCreateValidationFailedError,
   RecordPatchFieldValidationError as RecordServicePatchFieldValidationError,
 } from '../multitable/record-service'
-import { allocateAutoNumberValues } from '../multitable/auto-number-service'
+import {
+  acquireAutoNumberSheetWriteLock,
+  allocateAutoNumberValues,
+  backfillAutoNumberField,
+} from '../multitable/auto-number-service'
+import { normalizeAutoNumberProperty } from '../multitable/auto-number-property'
 import {
   createYjsInvalidationPostCommitHook,
   type YjsInvalidator,
@@ -1340,9 +1345,7 @@ function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown)
   }
 
   if (type === 'autoNumber') {
-    const startAtRaw = typeof obj.startAt === 'number' ? obj.startAt : Number(obj.startAt)
-    const startAt = Number.isFinite(startAtRaw) && startAtRaw > 0 ? Math.floor(startAtRaw) : 1
-    return { ...obj, startAt, readOnly: true }
+    return normalizeAutoNumberProperty(obj)
   }
 
   if (type === 'createdTime' || type === 'modifiedTime' || type === 'createdBy' || type === 'modifiedBy') {
@@ -4186,6 +4189,10 @@ export function univerMetaRouter(): Router {
           const refs = multitableFormulaEngine.extractFieldReferences(String(property.expression))
           await syncFormulaDependencies(query, sheetId, fieldId, refs)
         }
+
+        if (type === 'autoNumber') {
+          await backfillAutoNumberField(query, sheetId, fieldId, property)
+        }
       })
 
       const fieldRes = await pool.query(
@@ -4464,6 +4471,10 @@ export function univerMetaRouter(): Router {
 
         if (currentType === 'autoNumber' && nextType !== 'autoNumber') {
           await query('DELETE FROM meta_field_auto_number_sequences WHERE field_id = $1', [fieldId])
+        }
+
+        if (currentType !== 'autoNumber' && nextType === 'autoNumber') {
+          await backfillAutoNumberField(query, sheetId, fieldId, nextProperty, { overwrite: true })
         }
 
         // Track formula dependencies on update
@@ -6257,6 +6268,8 @@ export function univerMetaRouter(): Router {
       let nextVersion = 1
 
       await pool.transaction(async ({ query }) => {
+        await acquireAutoNumberSheetWriteLock(query, view.sheetId)
+
         if (recordId) {
           const currentRes = await query(
             'SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',

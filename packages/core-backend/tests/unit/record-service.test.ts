@@ -76,8 +76,11 @@ function createMockPool(
     if (sql.includes('SELECT data FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')) {
       return responses.SELECT_HIERARCHY_PARENT_RECORD ?? { rows: [] }
     }
+    if (sql.includes('SELECT pg_advisory_xact_lock')) {
+      return responses.ADVISORY_LOCK ?? { rows: [], rowCount: 1 }
+    }
     if (sql.includes('INSERT INTO meta_field_auto_number_sequences')) {
-      return responses.ALLOCATE_AUTO_NUMBER ?? { rows: [{ value: 1 }], rowCount: 1 }
+      return responses.ALLOCATE_AUTO_NUMBER ?? { rows: [{ start_value: 1 }], rowCount: 1 }
     }
     if (sql.includes('INSERT INTO meta_links')) {
       return responses.INSERT_LINK ?? { rows: [], rowCount: 1 }
@@ -218,7 +221,7 @@ describe('RecordService', () => {
           { id: 'fld_title', name: 'Title', type: 'string', property: {} },
         ],
       },
-      ALLOCATE_AUTO_NUMBER: { rows: [{ value: 10 }] },
+      ALLOCATE_AUTO_NUMBER: { rows: [{ start_value: 10 }] },
     })
     const service = new RecordService(pool, eventBus as any)
 
@@ -232,7 +235,7 @@ describe('RecordService', () => {
     expect(result.data).toEqual({ fld_title: 'Alpha', fld_seq: 10 })
     expect(pool.queryMock).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO meta_field_auto_number_sequences'),
-      ['fld_seq', 'sheet_ops', 11],
+      ['fld_seq', 'sheet_ops', 11, 1],
     )
     expect(pool.queryMock).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO meta_records'),

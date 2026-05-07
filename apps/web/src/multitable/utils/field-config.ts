@@ -53,6 +53,12 @@ export type NormalizedNumberFieldProperty = {
   unit: string
 }
 
+export type NormalizedAutoNumberFieldProperty = {
+  prefix: string
+  digits: number
+  start: number
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -185,6 +191,18 @@ export function resolveNumberFieldProperty(value: unknown): NormalizedNumberFiel
     thousands: property.thousands === true,
     unit,
   }
+}
+
+export function resolveAutoNumberFieldProperty(value: unknown): NormalizedAutoNumberFieldProperty {
+  const property = asRecord(value)
+  const prefix = typeof property.prefix === 'string' ? property.prefix.trim().slice(0, 32) : ''
+  const digitsRaw = typeof property.digits === 'number' ? property.digits : Number(property.digits)
+  const digits = Number.isFinite(digitsRaw) && digitsRaw >= 0 && digitsRaw <= 12
+    ? Math.round(digitsRaw)
+    : 0
+  const startRaw = typeof property.start === 'number' ? property.start : Number(property.start ?? property.startAt)
+  const start = Number.isFinite(startRaw) && startRaw > 0 ? Math.floor(startRaw) : 1
+  return { prefix, digits, start }
 }
 
 const CURRENCY_SYMBOL_BY_CODE: Record<string, string> = {
