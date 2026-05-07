@@ -136,12 +136,17 @@ function ensureOperation(kind, object, objectConfig, operation) {
 }
 
 function normalizeTableSet(config) {
-  const allowedTables = new Set([
-    ...normalizeIdentifierList(config.allowedTables, 'config.allowedTables'),
-    ...normalizeIdentifierList(config.readTables, 'config.readTables'),
-    ...normalizeIdentifierList(config.writeTables, 'config.writeTables'),
-  ])
-  return allowedTables
+  const sharedTables = normalizeIdentifierList(config.allowedTables, 'config.allowedTables')
+  return {
+    read: new Set([
+      ...sharedTables,
+      ...normalizeIdentifierList(config.readTables, 'config.readTables'),
+    ]),
+    write: new Set([
+      ...sharedTables,
+      ...normalizeIdentifierList(config.writeTables, 'config.writeTables'),
+    ]),
+  }
 }
 
 function assertAllowedTable(table, allowedTables, field) {
@@ -242,7 +247,7 @@ function createK3WiseSqlServerChannel({ system, queryExecutor, logger } = {}) {
     const request = normalizeReadRequest(input)
     const objectConfig = assertObjectConfigured(objects, request.object)
     ensureOperation(normalizedSystem.kind, request.object, objectConfig, 'read')
-    const table = assertAllowedTable(objectConfig.table, allowedTables, `config.objects.${request.object}.table`)
+    const table = assertAllowedTable(objectConfig.table, allowedTables.read, `config.objects.${request.object}.table`)
     const result = normalizeExecutorResult(await executor.select({
       table,
       columns: Array.isArray(objectConfig.columns) ? [...objectConfig.columns] : undefined,
@@ -276,7 +281,7 @@ function createK3WiseSqlServerChannel({ system, queryExecutor, logger } = {}) {
     const request = normalizeUpsertRequest(input)
     const objectConfig = assertObjectConfigured(objects, request.object)
     ensureOperation(normalizedSystem.kind, request.object, objectConfig, 'upsert')
-    const table = assertAllowedTable(objectConfig.table, allowedTables, `config.objects.${request.object}.table`)
+    const table = assertAllowedTable(objectConfig.table, allowedTables.write, `config.objects.${request.object}.table`)
     assertNoDirectK3Write(table, objectConfig)
 
     const raw = await executor.insertMany({
@@ -334,6 +339,7 @@ module.exports = {
     DEFAULT_OBJECTS,
     IDENTIFIER_PATTERN,
     normalizeIdentifier,
+    normalizeTableSet,
     normalizeObjects,
   },
 }
