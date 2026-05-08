@@ -116,6 +116,28 @@ async function main() {
   assert.equal(plmClient.calls[0].options.lifecycle, 'released')
   assert.deepEqual(plmClient.calls[0].options.watermark, { updatedAt: '2026-04-24T00:00:00.000Z' })
 
+  const trimmedMaterial = createYuantusPlmWrapperAdapter({
+    system: createSystem(),
+    plmClient: {
+      async getProducts() {
+        return {
+          data: [
+            {
+              id: ' trim-1 ',
+              itemCode: ' MAT-TRIM-001 ',
+              itemName: ' Trimmed Bolt ',
+            },
+          ],
+          metadata: {},
+        }
+      },
+    },
+  })
+  const trimmed = await trimmedMaterial.read({ object: 'materials' })
+  assert.equal(trimmed.records[0].sourceId, 'trim-1')
+  assert.equal(trimmed.records[0].code, 'MAT-TRIM-001')
+  assert.equal(trimmed.records[0].name, 'Trimmed Bolt')
+
   const bom = await adapter.read({
     object: 'bom',
     limit: 10,
@@ -236,6 +258,17 @@ async function main() {
   const invalidMaterialRead = await invalidMaterial.read({ object: 'materials' }).catch((error) => error)
   assert.ok(invalidMaterialRead instanceof AdapterValidationError, 'material sourceId/code is required')
 
+  const whitespaceMaterial = createYuantusPlmWrapperAdapter({
+    system: createSystem(),
+    plmClient: {
+      async getProducts() {
+        return { data: [{ id: 'p_blank', code: '   ', name: '   ' }], metadata: {} }
+      },
+    },
+  })
+  const whitespaceMaterialRead = await whitespaceMaterial.read({ object: 'materials' }).catch((error) => error)
+  assert.ok(whitespaceMaterialRead instanceof AdapterValidationError, 'whitespace material code/name are rejected')
+
   const invalidBomQuantity = createYuantusPlmWrapperAdapter({
     system: createSystem(),
     plmClient: {
@@ -258,6 +291,49 @@ async function main() {
     filters: { productId: 'root' },
   }).catch((error) => error)
   assert.ok(invalidBomRead instanceof AdapterValidationError, 'BOM quantity is required')
+
+  for (const quantity of [true, false, [], [2], {}]) {
+    const invalidTypedBom = createYuantusPlmWrapperAdapter({
+      system: createSystem(),
+      plmClient: {
+        async getProductBOM() {
+          return {
+            data: [
+              {
+                id: 'bad_typed_qty',
+                parentCode: 'ASM-001',
+                componentCode: 'MAT-007',
+                quantity,
+              },
+            ],
+            metadata: {},
+          }
+        },
+      },
+    })
+    const result = await invalidTypedBom.read({
+      object: 'bom',
+      filters: { productId: 'root' },
+    }).catch((error) => error)
+    assert.ok(result instanceof AdapterValidationError, `BOM quantity ${JSON.stringify(quantity)} is rejected`)
+  }
+
+  let blankProductCalled = false
+  const blankProduct = createYuantusPlmWrapperAdapter({
+    system: createSystem(),
+    plmClient: {
+      async getProductBOM() {
+        blankProductCalled = true
+        return { data: [], metadata: {} }
+      },
+    },
+  })
+  const blankProductRead = await blankProduct.read({
+    object: 'bom',
+    filters: { productId: '   ' },
+  }).catch((error) => error)
+  assert.ok(blankProductRead instanceof AdapterValidationError, 'blank BOM productId is rejected')
+  assert.equal(blankProductCalled, false, 'blank BOM productId does not call PLM client')
 
   const missingProduct = await adapter.read({ object: 'bom' }).catch((error) => error)
   assert.ok(missingProduct instanceof AdapterValidationError, 'BOM read requires productId')
