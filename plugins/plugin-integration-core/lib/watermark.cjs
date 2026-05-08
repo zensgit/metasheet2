@@ -102,6 +102,7 @@ function createWatermarkStore({ db } = {}) {
     const normalized = normalizeWatermarkConfig({ type })
     if (isBlank(pipelineId)) throw new WatermarkError('pipelineId is required')
     if (isBlank(value)) throw new WatermarkError('watermark value is required')
+    parseWatermarkValue(normalized.type, value)
     const existing = await db.selectOne(TABLE, { pipeline_id: pipelineId })
     const row = {
       pipeline_id: pipelineId,
@@ -121,6 +122,7 @@ function createWatermarkStore({ db } = {}) {
     const normalized = normalizeWatermarkConfig({ type })
     if (isBlank(pipelineId)) throw new WatermarkError('pipelineId is required')
     if (isBlank(value)) throw new WatermarkError('watermark value is required')
+    parseWatermarkValue(normalized.type, value)
 
     const existing = await db.selectOne(TABLE, { pipeline_id: pipelineId })
     if (

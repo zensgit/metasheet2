@@ -5,6 +5,7 @@ const path = require('node:path')
 const {
   createErpFeedbackWriter,
   createMultitableFeedbackWriter,
+  ErpFeedbackError,
   normalizeFeedbackItems,
 } = require(path.join(__dirname, '..', 'lib', 'erp-feedback.cjs'))
 
@@ -197,6 +198,38 @@ async function testNormalizeFeedbackItems() {
   })
   assert.equal(k3RawNumberOnly[0].fields.erpExternalId, null, 'K3 Number is not reused as external id')
   assert.equal(k3RawNumberOnly[0].fields.erpBillNo, 'MAT-001')
+
+  for (const enabled of ['false', '否', 0]) {
+    const disabledItems = normalizeFeedbackItems({
+      cleanRecords,
+      clock: fixedClock,
+      pipeline: {
+        options: {
+          erpFeedback: {
+            enabled,
+          },
+        },
+      },
+      writeResult: {
+        results: [{ key: 'idem_1', externalId: 'mat_1' }],
+      },
+    })
+    assert.deepEqual(disabledItems, [], `erpFeedback.enabled=${JSON.stringify(enabled)} disables feedback items`)
+  }
+
+  assert.throws(() => normalizeFeedbackItems({
+    cleanRecords,
+    pipeline: {
+      options: {
+        erpFeedback: {
+          enabled: 'maybe',
+        },
+      },
+    },
+    writeResult: {
+      results: [{ key: 'idem_1', externalId: 'mat_1' }],
+    },
+  }), ErpFeedbackError)
 }
 
 async function testWriterBoundary() {
@@ -256,6 +289,22 @@ async function testWriterBoundary() {
   assert.equal(disabled.skipped, true)
   assert.equal(disabled.reason, 'ERP_FEEDBACK_DISABLED')
 
+  const disabledByString = await writer.writeBack({
+    pipeline: {
+      options: {
+        erpFeedback: {
+          enabled: '否',
+        },
+      },
+    },
+    cleanRecords,
+    writeResult: {
+      results: [{ key: 'idem_1' }],
+    },
+  })
+  assert.equal(disabledByString.skipped, true)
+  assert.equal(disabledByString.reason, 'ERP_FEEDBACK_DISABLED')
+
   const missingTarget = await writer.writeBack({
     pipeline: {
       targetObject: 'unknown',
@@ -267,6 +316,51 @@ async function testWriterBoundary() {
   })
   assert.equal(missingTarget.skipped, true)
   assert.equal(missingTarget.reason, 'ERP_FEEDBACK_TARGET_MISSING')
+
+  const failingWriter = createErpFeedbackWriter({
+    clock: fixedClock,
+    stagingWriter: {
+      async updateRecords() {
+        throw new Error('staging writer failed')
+      },
+    },
+  })
+
+  const nonThrowingFailure = await failingWriter.writeBack({
+    pipeline: {
+      projectId: 'project_1',
+      targetObject: 'BD_MATERIAL',
+      options: {
+        erpFeedback: {
+          failOnError: 'false',
+        },
+      },
+    },
+    cleanRecords,
+    writeResult: {
+      results: [{ key: 'idem_1', externalId: 'mat_1' }],
+    },
+  })
+  assert.equal(nonThrowingFailure.ok, false)
+  assert.equal(nonThrowingFailure.reason, 'ERP_FEEDBACK_WRITE_FAILED')
+
+  for (const failOnError of ['true', '是', 1]) {
+    await assert.rejects(() => failingWriter.writeBack({
+      pipeline: {
+        projectId: 'project_1',
+        targetObject: 'BD_MATERIAL',
+        options: {
+          erpFeedback: {
+            failOnError,
+          },
+        },
+      },
+      cleanRecords,
+      writeResult: {
+        results: [{ key: 'idem_1', externalId: 'mat_1' }],
+      },
+    }), /staging writer failed/)
+  }
 }
 
 async function testMultitableWriter() {

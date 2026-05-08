@@ -22,6 +22,28 @@
       <aside class="k3-setup__rail">
         <div class="k3-setup__panel">
           <div class="k3-setup__panel-head">
+            <h2>部署测试准备</h2>
+            <span>{{ deployGateSummary.ready }}/{{ deployGateChecklist.length }} ready</span>
+          </div>
+          <div class="k3-setup__gate-summary">
+            <span class="k3-setup__badge" data-status="succeeded">ready {{ deployGateSummary.ready }}</span>
+            <span v-if="deployGateSummary.missing" class="k3-setup__badge" data-status="failed">missing {{ deployGateSummary.missing }}</span>
+            <span v-if="deployGateSummary.external" class="k3-setup__badge" data-status="open">external {{ deployGateSummary.external }}</span>
+            <span v-if="deployGateSummary.warning" class="k3-setup__badge" data-status="partial">warning {{ deployGateSummary.warning }}</span>
+          </div>
+          <div class="k3-setup__gate-list">
+            <div v-for="item in deployGateChecklist" :key="item.id" class="k3-setup__gate-item">
+              <div class="k3-setup__record-main">
+                <strong>{{ item.label }}</strong>
+                <span class="k3-setup__badge" :data-status="formatDeployGateStatus(item.status)">{{ item.status }}</span>
+              </div>
+              <small>{{ item.message }}</small>
+            </div>
+          </div>
+        </div>
+
+        <div class="k3-setup__panel">
+          <div class="k3-setup__panel-head">
             <h2>已保存系统</h2>
             <span>{{ webApiSystems.length + sqlSystems.length }}</span>
           </div>
@@ -497,6 +519,7 @@ import {
   K3_WISE_SQLSERVER_KIND,
   K3_WISE_WEBAPI_KIND,
   applyExternalSystemToForm,
+  buildK3WiseDeployGateChecklist,
   buildK3WisePipelineObservationQuery,
   buildK3WisePipelinePayloads,
   buildK3WisePipelineRunPayload,
@@ -512,6 +535,7 @@ import {
   listIntegrationStagingDescriptors,
   listIntegrationSystems,
   runIntegrationPipeline,
+  summarizeK3WiseDeployGateChecklist,
   testIntegrationSystem,
   upsertIntegrationPipeline,
   upsertIntegrationSystem,
@@ -556,6 +580,8 @@ const stagingIssues = computed(() => validateK3WiseStagingInstallForm(form))
 const pipelineIssues = computed(() => validateK3WisePipelineTemplateForm(form, stagingDescriptors.value))
 const materialRunIssues = computed(() => validateK3WisePipelineRunForm(form, 'material'))
 const bomRunIssues = computed(() => validateK3WisePipelineRunForm(form, 'bom'))
+const deployGateChecklist = computed(() => buildK3WiseDeployGateChecklist(form))
+const deployGateSummary = computed(() => summarizeK3WiseDeployGateChecklist(deployGateChecklist.value))
 const observationSummary = computed(() => `${pipelineRuns.value.length} runs / ${deadLetters.value.length} open`)
 const stagingDescriptorLabel = computed(() => stagingDescriptors.value.length > 0 ? `${stagingDescriptors.value.length} descriptors` : 'not loaded')
 
@@ -577,6 +603,13 @@ function formatTimestamp(value: string): string {
 
 function formatRunMetrics(run: IntegrationPipelineRun): string {
   return `read ${run.rowsRead} / clean ${run.rowsCleaned} / write ${run.rowsWritten} / failed ${run.rowsFailed}`
+}
+
+function formatDeployGateStatus(status: string): string {
+  if (status === 'ready') return 'succeeded'
+  if (status === 'missing') return 'failed'
+  if (status === 'warning') return 'partial'
+  return 'open'
 }
 
 function loadSystemIntoForm(system: IntegrationExternalSystem): void {
@@ -1038,6 +1071,39 @@ onMounted(() => {
   flex-direction: column;
   gap: 8px;
   margin-top: 10px;
+}
+
+.k3-setup__gate-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.k3-setup__gate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.k3-setup__gate-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 10px;
+  background: #f8fafc;
+}
+
+.k3-setup__gate-item small {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .k3-setup__descriptor {
