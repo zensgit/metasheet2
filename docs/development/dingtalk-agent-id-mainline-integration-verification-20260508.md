@@ -286,10 +286,12 @@ PR:
 https://github.com/zensgit/metasheet2/pull/1430
 ```
 
-Status after the final rebase:
+Status after the final runtime rebase and 142 acceptance:
 
-- Head: `245701aeb5afc57ae5a5932cc4f58ef3aef3a973`.
-- Base: `61605888739e731cedbc6dc377c93893106e338a`.
+- Runtime image verified on 142: `245701aeb5afc57ae5a5932cc4f58ef3aef3a973`.
+- Base included in that runtime image: `61605888739e731cedbc6dc377c93893106e338a`.
+- The PR may contain later docs-only commits after the runtime image tag; those
+  commits do not change backend/frontend runtime behavior.
 - Automated checks observed in the PR rollup passed, except the configured
   strict E2E job that was skipped by workflow policy.
 - Merge state was still `BLOCKED` because repository review/merge policy had
