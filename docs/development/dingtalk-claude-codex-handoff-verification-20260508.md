@@ -35,7 +35,11 @@ git log -1 --oneline
 Expected:
 
 - Branch is `codex/dingtalk-agent-id-mainline-20260508`.
-- HEAD matches the latest commit referenced in the design doc.
+- HEAD is on PR #1430 branch. The runtime/code verification point
+  referenced in the design doc is
+  `826242b5adb89c87b4e03d502a3905e4b270e43a`, rebased onto base
+  `20fb5270a09d4cc3d2c98e84db3601fc3f4231c5`. Later docs-only commits
+  may advance HEAD without changing the verified runtime code.
 
 ## Doc-only diff check (Claude side)
 
@@ -118,13 +122,36 @@ curl -sS -o /dev/null -w '%{http_code}\n' \
   http://127.0.0.1:8900/api/admin/directory/dingtalk/work-notification
 ```
 
-Expected:
+Expected at the current pre-merge handoff point:
 
-- `metasheet-backend` and `metasheet-web` images both end with the tag
-  `245701aeb5afc57ae5a5932cc4f58ef3aef3a973`.
+- `metasheet-backend` and `metasheet-web` images both end with the
+  current auto-deployed `main` tag
+  `20fb5270a09d4cc3d2c98e84db3601fc3f4231c5`. The earlier verified
+  Agent ID feature tag `245701aeb5afc57ae5a5932cc4f58ef3aef3a973`
+  has been overwritten by the automatic `main` deploy and is no
+  longer expected on 142.
 - Health: `{"ok":true,"status":"ok","success":true,"plugins":13}`.
 - Frontend: `200`.
-- Unauthenticated admin route: `401`.
+- Unauthenticated admin route: `401` if the deployed `main` already
+  ships the Agent ID admin endpoint, or `404` if `main` has not yet
+  been advanced past PR #1430. A `404` here is the expected signal
+  that the Agent ID save / real-send acceptance must wait for the
+  post-merge `main` auto-deploy and must not be forced through a
+  manual feature-tag switch.
+
+After PR #1430 is merged and 142 has auto-deployed the new `main`,
+re-run the same four commands. The two image tags should advance to
+the post-merge `main` commit SHA, health and frontend stay `200`, and
+the admin route returns `401` (now confirming the Agent ID feature is
+live in `main`).
+
+The Agent ID status / save / real-send helpers below are intended to
+run against the post-merge `main` image on 142. Do **not** drive them
+by manually switching `metasheet-backend` / `metasheet-web` back onto
+a pre-merge feature tag — the next automatic `main` deploy will
+overwrite that switch and invalidate any acceptance run captured on
+top of it. Merge PR #1430 first, let 142 auto-deploy the new `main`,
+then proceed.
 
 ## 142 Agent ID status helper (Codex)
 
@@ -238,13 +265,21 @@ console — not in the repo.
 gh pr view 1430 --json number,headRefOid,baseRefOid,mergeable,mergeStateStatus,statusCheckRollup
 ```
 
-Expected:
+Expected at the current handoff point:
 
-- `mergeable` is `MERGEABLE` or `UNKNOWN`.
-- `mergeStateStatus` ends in either `CLEAN` or `BLOCKED` (BLOCKED only
-  because of human review policy, not failed checks).
+- `headRefOid` is at or after the runtime/code verification point
+  `826242b5adb89c87b4e03d502a3905e4b270e43a`.
+- `baseRefOid` is `20fb5270a09d4cc3d2c98e84db3601fc3f4231c5`.
+- `mergeable` is `MERGEABLE` (or transiently `UNKNOWN`).
+- `mergeStateStatus` is `BLOCKED`, blocked **only** by
+  `REVIEW_REQUIRED` from the human review policy. No technical check
+  is failing.
 - All non-skipped checks are `SUCCESS`.
 - The configured strict E2E job may remain `SKIPPED` per workflow policy.
+
+After human review is added and the PR is merged, the post-merge
+`main` is what 142 should auto-deploy and what the Agent ID save /
+real-send acceptance runs against.
 
 ## Stop conditions
 
@@ -252,15 +287,22 @@ The handoff loop ends when **all** of the following are true:
 
 1. Both handoff Markdown files exist under `docs/development/` and have
    passed the secret-shape scan.
-2. 142 backend health is `200` and frontend root is `200` on image tag
-   `245701aeb5afc57ae5a5932cc4f58ef3aef3a973`.
-3. The admin status helper returns `status: "pass"` with
-   `agentIdValuePrinted=false`.
-4. The admin save helper returns `status: "pass"` with
+2. PR #1430 has all required technical checks green, has cleared the
+   `REVIEW_REQUIRED` block via human approval, and is merged into
+   `main`.
+3. 142 has auto-deployed the post-merge `main` image; both
+   `metasheet-backend` and `metasheet-web` advance to that post-merge
+   commit SHA without any manual container switch onto a pre-merge
+   feature tag.
+4. 142 backend health is `200` and frontend root is `200` on the
+   post-merge `main` tag.
+5. The admin status helper (run on the post-merge image) returns
+   `status: "pass"` with `agentIdValuePrinted=false`.
+6. The admin save helper returns `status: "pass"` with
    `statusAfter.configured=true` and `statusAfter.available=true`.
-5. At least one real-send DingTalk work-notification acceptance has
-   recorded `delivered=true` and `recipientValuePrinted=false`.
-6. PR #1430 has all required checks green and is merged into `main`.
+7. At least one real-send DingTalk work-notification acceptance has
+   recorded `delivered=true` and `recipientValuePrinted=false`, on the
+   post-merge `main` image.
 
 The loop must **abort** (not auto-retry) on any of:
 

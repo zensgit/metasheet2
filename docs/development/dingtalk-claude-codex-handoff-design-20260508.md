@@ -11,11 +11,31 @@ status / test / save endpoints plus the directory-management Agent ID UI.
 State at handoff time:
 
 - Branch: `codex/dingtalk-agent-id-mainline-20260508`.
-- Runtime image verified on 142: `245701aeb5afc57ae5a5932cc4f58ef3aef3a973`.
+- PR #1430 runtime/code verification point:
+  `826242b5adb89c87b4e03d502a3905e4b270e43a` (rebased onto latest
+  `origin/main`). The PR may contain later docs-only commits; those do
+  not change the runtime code verified at this point.
+- PR #1430 base: `20fb5270a09d4cc3d2c98e84db3601fc3f4231c5`.
+- All non-review CI checks on PR #1430 are green. The merge is BLOCKED
+  only by `REVIEW_REQUIRED` (human approval policy), not by any failing
+  technical check.
+- 142 currently runs the auto-deployed main tag
+  `20fb5270a09d4cc3d2c98e84db3601fc3f4231c5` for both
+  `metasheet-backend` and `metasheet-web`.
 - 142 backend health: `200`.
 - 142 frontend root: `200`.
-- The private Agent ID file exists on 142 but is intentionally empty.
-- Real-send DingTalk work-notification acceptance is therefore still pending.
+- The Agent ID runtime tag `245701aeb5afc57ae5a5932cc4f58ef3aef3a973`
+  that was previously verified on 142 has been overwritten by the
+  automatic `main` deployment. Repeated manual container switches back
+  onto a feature tag are **not** recommended at this point — they will
+  keep being overwritten by the next `main` auto-deploy and only churn
+  the runtime.
+- The private Agent ID file on 142 still exists but is empty, so
+  real-send DingTalk work-notification acceptance is still pending.
+- Forward path: merge PR #1430 into `main` first, let 142 auto-deploy
+  the new `main` image (which will include the Agent ID feature
+  commits), then run the real Agent ID save and real-send acceptance
+  on that auto-deployed image — not on a manually switched tag.
 
 This document defines the division of labor between Claude (in-repo agent) and
 Codex (release / verification agent) for the remaining work.
@@ -80,7 +100,11 @@ Codex is the only agent permitted to:
   jobs in the trusted build environment (locally or in CI).
 - Trigger and inspect the GHCR `Build and Push Docker Images` workflow.
 - Execute the manual 142 container switch for `metasheet-backend` and
-  `metasheet-web`, including rollback to the prior baseline.
+  `metasheet-web`, including rollback to the prior baseline. At this
+  stage of the loop, manual switches should be reserved for rollback
+  only — forward switches onto pre-merge feature tags will be
+  overwritten by the next `main` auto-deploy and are no longer the
+  preferred path to acceptance.
 - Run `scripts/ops/dingtalk-work-notification-admin-agent-id.mjs` against
   127.0.0.1 on 142 with the real auth token file and Agent ID file.
 - Drive the real-send DingTalk work-notification acceptance using the
