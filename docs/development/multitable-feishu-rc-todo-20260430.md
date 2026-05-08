@@ -257,6 +257,7 @@ Expected docs:
   - Development MD: `docs/development/multitable-auto-number-system-field-design-20260505.md`
   - Verification MD: `docs/development/multitable-auto-number-system-field-verification-20260505.md`
   - Verification summary: persistent per-field sequence table added; create paths allocate `autoNumber` values transactionally; focused backend/frontend tests, backend build, frontend type-check, OpenAPI parity, migration replay, and CI passed.
+  - 2026-05-07 follow-up hardening: `docs/development/multitable-auto-number-hardening-design-20260507.md` and `docs/development/multitable-auto-number-hardening-verification-20260507.md` add prefix/digits/start config, existing-record backfill, advisory locking, helper create-path coverage, and frontend formatting.
 - [x] Add `createdTime` field type mapped to record `created_at`.
   - PR: #1280
   - Merge commit: c45da32c1
