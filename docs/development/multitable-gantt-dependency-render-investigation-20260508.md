@@ -1,92 +1,160 @@
-# Multitable Gantt Dependency-Arrow Render — Investigation Handoff
+# Multitable Gantt Dependency-Arrow Render — Root Cause + Fix
 
 > Date: 2026-05-08
 > Branch: `codex/multitable-gantt-dependency-field-render-fix-20260508`
-> Status: Diagnosis only — **no fix written**. Handoff for an FE specialist (Codex / human with browser dev-tools access).
+> Status: **Root cause confirmed; fix applied in this branch**.
 > Companion artifacts: `docs/development/artifacts/multitable-gantt-dependency-render-investigation-20260508/`
+
+## TL;DR
+
+When the URL anchors on a fresh sheet (`/multitable/<sheetId>/<viewId>?mode=gantt`) and that sheet does **not** belong to the user's first base, `MultitableWorkbench.vue#loadBases` auto-selected `bases[0]` (typically `base_legacy`). The follow-up `loadBaseContext(base_legacy, {sheetId})` returned **403 FORBIDDEN** because the sheet does not live under that base. With `/context` 403'd, the workbench composable's `views.value` stayed empty, `activeView.value?.config` was `undefined`, and `<MetaGanttView :view-config="undefined">` had no saved `dependencyFieldId` — so the toolbar fell back to "none" and no arrows rendered. Bars still rendered because `resolveGanttViewConfig` has fallbacks for `start/end/title` field ids but **no fallback for `dependencyFieldId`**.
+
+The fix: skip the auto-pick of `bases[0]` whenever `props.sheetId` is in the URL, and use `loadSheetMeta(sheetId, {viewId})` to let the backend resolve the owning base from the sheet itself. `syncContextState` then sets `activeBaseId` from `ctx.sheet.baseId`.
 
 ## Symptom
 
-`scripts/verify-multitable-rc-staging-smoke.mjs` (the API harness) passes 7/7 against deployed staging at `34d731670`. But `packages/core-backend/tests/e2e/multitable-gantt-smoke.spec.ts` "renders dependency arrows when dependencyFieldId is configured" fails on the same deployment:
+`packages/core-backend/tests/e2e/multitable-gantt-smoke.spec.ts` "renders dependency arrows when dependencyFieldId is configured" failed against `34d731670` on 142 staging:
 
-- `.meta-gantt__dependency-arrow` selector never appears within 15 s timeout
-- Page snapshot shows the Gantt view loaded, both records rendered as bars, the "Predecessor" link field listed in the **Dependencies** dropdown — **but the dropdown's selected value is `none`**, not the saved `dependencyFieldId`
+- `.meta-gantt__dependency-arrow` selector never appeared within 15 s
+- Page snapshot showed the Gantt view loaded, both records rendered as bars, the "Predecessor" link field listed in the **Dependencies** dropdown — but the dropdown's selected value was `none`
 
-So the saved `view.config.dependencyFieldId` is not reaching the rendered toolbar's bound `<select :value="dependencyFieldId">` despite the SPA receiving the correct API response.
+## Diagnosis trail (what was ruled OUT first)
 
-## What is confirmed correct
+1. **Backend persistence**: live curl confirmed `POST /api/multitable/views` and `GET /api/multitable/views?sheetId=…` both round-trip `view.config.dependencyFieldId`.
+2. **Predecessor field property**: API response carried both `foreignSheetId` AND `foreignDatasheetId` set to the parent sheet id.
+3. **`MetaGanttView.vue` source**: four new vitest reproducers (mount + async fields race + async viewConfig race + sheetId race, all in `apps/web/tests/multitable-gantt-view.spec.ts`) **all pass**. The component itself is correct.
+4. **Resolver and helpers**: `resolveGanttViewConfig` returns the configured `dependencyFieldId` when the inputs match staging's data. `isSelfTableLinkField` is correct (it added Predecessor to the dropdown's option list, proving the strict branch returned true at render time).
+5. **Compiled bundle**: matches the source on `34d731670`; image tag verified via `docker inspect`.
 
-### Backend (DB → API contract)
+## Diagnosis trail (what surfaced the truth)
 
-Live curl against `127.0.0.1:18081` (via SSH tunnel) on the deployed image:
+A debug Playwright spec (`multitable-gantt-debug-spec.spec.ts`, removed before merge) navigated to the failing URL with `page.on('console')` + `page.on('response')` enabled and dumped:
 
-- `POST /api/multitable/views` with `config.dependencyFieldId: "fld_xxx"` → 200, response carries `data.view.config.dependencyFieldId`
-- `GET /api/multitable/views?sheetId=…` → 200, the persisted view's `config.dependencyFieldId` is present
-- The Predecessor field's `property` carries both `foreignSheetId` AND `foreignDatasheetId` set to the parent sheet id
+```json
+{
+  "arrowCount": 0,
+  "depSelectValue": "",
+  "consoleCount": 2,
+  "responseCount": 3,
+  "contextResponseCount": 1
+}
+```
 
-The captured `POST /views` response is at `artifacts/.../post-views-response.json`.
+Two console errors recorded:
+- `Failed to load resource: the server responded with a status of 500 (Internal Server Error)` (red herring; an unrelated 500 from another endpoint that was below the priority bar)
+- `Failed to load resource: the server responded with a status of 403 (Forbidden)`
 
-### MetaGanttView.vue source
+The 403 was the load-bearing one. The single matching response in the dump:
 
-Four new vitest cases in `apps/web/tests/multitable-gantt-view.spec.ts` exercise the component directly with the same data shape staging produces. **All four pass** on `34d731670`:
+```
+403 http://127.0.0.1:18081/api/multitable/context?baseId=base_legacy&sheetId=sheet_c76fb688-…&viewId=view_3f94f64d-…
+{"ok":false,"error":{"code":"FORBIDDEN","message":"Insufficient permissions"}}
+```
 
-1. `renders dependency arrows when sheetId is supplied and link field foreignSheetId matches (staging regression)` — synchronous mount with all props populated
-2. `renders dependency arrows after fields prop populates after initial empty mount (workbench async-load regression)` — fields arrive AFTER first mount tick
-3. `renders dependency arrows after viewConfig prop populates after fields load (workbench late-config regression)` — viewConfig arrives later
-4. `renders dependency arrows when sheetId arrives empty initially then populates (sheetId race regression)` — sheetId arrives later
+The SPA was calling `/context` with `baseId=base_legacy` even though the test had created the sheet under a brand-new base. The workbench composable then never received the view, and the Gantt component fell back to defaults (which work for date/title fields but not for `dependencyFieldId`).
 
-These are kept as durable regression tests; even though they currently pass, they document the rendering contract MetaGanttView is supposed to honor and would catch a future regression that does affect the component itself.
+## Where the bug lived
 
-### Resolver and helper functions
+`apps/web/src/multitable/views/MultitableWorkbench.vue` `loadBases()`:
 
-- `resolveGanttViewConfig` returns the configured `dependencyFieldId` when the field exists with `type === 'link'` and `isSelfTableLinkField(field, sheetId) === true`.
-- `isSelfTableLinkField` permissive branch (`!currentSheetId → return true`) is irrelevant here because staging passes a real sheetId, and the strict branch (`foreignSheetId === currentSheetId`) succeeds with the API data captured above.
+```ts
+async function loadBases() {
+  try {
+    const data = await workbench.client.listBases()
+    bases.value = data.bases ?? []
+    if (!workbench.activeBaseId.value && bases.value.length) workbench.selectBase(bases.value[0].id)
+                                                              // ↑ auto-picks bases[0] even when the URL anchors on a sheet that lives elsewhere.
+  } catch { /* silent */ }
+}
+```
 
-### Page snapshot evidence
+And the follow-up in `onMounted`:
 
-`artifacts/.../page-snapshot.md` shows:
+```ts
+await loadBases()
+if (workbench.activeBaseId.value) {
+  await workbench.loadBaseContext(workbench.activeBaseId.value, {
+    sheetId: props.sheetId,
+    viewId: props.viewId,
+  })
+} else {
+  await workbench.loadSheets()
+}
+```
 
-- `region "Gantt view"` is the active rendering (forced-mode `?mode=gantt` works — bars render)
-- `combobox "Dependencies"` lists `option "none" [selected]` and `option "Predecessor"` — the dropdown's options computed by `dependencyFields` *include* Predecessor (so `isSelfTableLinkField(Predecessor, sheetId)` returned true at that moment), but the selected value is the empty fallback
+After the auto-pick, `loadBaseContext(base_legacy, {sheetId, viewId})` would 403 if the sheet was elsewhere, and the workbench composable's `views.value` stayed empty.
 
-## What is unconfirmed and still suspect
+## The fix in this PR
 
-The bug is reproducible only against the deployed FE bundle running in real Chromium. None of the four vitest reproducers — exercising the component under jsdom-style runtime — surfaces the failure. Likely suspects, none of which can be verified from this branch:
+Two adjustments in `apps/web/src/multitable/views/MultitableWorkbench.vue`:
 
-1. **A timing or ordering quirk specific to real Chromium** that jsdom-style runtimes (happy-dom or @vue/test-utils' DOM) don't replicate. For example, an extra microtask flush ordering between `props.fields`, `props.viewConfig`, and `props.sheetId` populating from three separate composable refs.
-2. **The compiled SPA bundle differs from the source** in how the `<script setup>` macros, `defineProps`, or `computed`/`watch` are emitted. This would make the bundled MetaGanttView behave differently from the source-mounted reproducer even when the inputs are identical.
-3. **Workbench composable / activeView reactivity drift** after `?mode=gantt` forces gantt rendering. The composable might leave `activeView.value` lagging on a previous view (whose config has no `dependencyFieldId`) for the first paint, and the watcher's `pendingConfigKey` might not retroactively pick up the eventual update. The reproducers cover async props but not the multi-ref composable lifecycle.
-4. **An overlapping mutation source** — for example, a separate `MetaViewManager` instance that also resolves view config, races with `MetaGanttView`, and writes back a sanitized config that drops `dependencyFieldId`.
+1. **Defer base auto-pick when the URL is sheet-anchored**:
 
-## Steps recommended for the FE specialist
+   ```ts
+   if (!workbench.activeBaseId.value && !props.sheetId && bases.value.length) {
+     workbench.selectBase(bases.value[0].id)
+   }
+   ```
 
-In rough order of cheapness:
+2. **Route to `loadSheetMeta(sheetId, {viewId})` when `props.sheetId` is set but no base is yet active**:
 
-1. **Inject a `console.log` patch into `MetaGanttView.vue`'s watcher and resolver** to record `props.fields.length`, `props.viewConfig`, `props.sheetId`, and `resolvedConfig.dependencyFieldId` at every tick. Build a debug image of `metasheet-web`, redeploy to staging, re-run the failing spec, capture the console log via Playwright's `page.on('console', …)`. Compare to the four passing reproducers' implied trace.
-2. If 1 surfaces a transient `dependencyFieldId=null` followed by `=fld_xxx` then "stuck" at empty: the watcher is dropping the late update under `pendingConfigKey` lock. Fix by gating the lock with a generation token instead of a JSON-stringify key, or by clearing `pendingConfigKey` on prop change.
-3. If 1 shows `dependencyFieldId=fld_xxx` but the `<select>` still binds to '': the `dependencyFieldId` ref is stale at template render time. Possible Vue 3 reactivity bug after #1440's mode-forcing changes. Inspect the `forced-mode → activeViewType → conditional render` branch in `MultitableWorkbench.vue` — maybe the `MetaGanttView` instance is being replaced (key collision) when `?mode=gantt` is applied.
-4. Inspect `MetaViewManager.vue:936` (`Object.assign(ganttDraft, resolveGanttViewConfig(...))`). If the view manager is mounted in parallel and re-emits a sanitized config back via `update-view-config`, that could overwrite the saved `dependencyFieldId` with `null`.
+   ```ts
+   await loadBases()
+   if (workbench.activeBaseId.value) {
+     await workbench.loadBaseContext(workbench.activeBaseId.value, {
+       sheetId: props.sheetId,
+       viewId: props.viewId,
+     })
+   } else if (props.sheetId) {
+     await workbench.loadSheetMeta(props.sheetId, { viewId: props.viewId })
+   } else {
+     await workbench.loadSheets()
+   }
+   ```
 
-## Artifacts attached for triage
+`loadSheetMeta(sheetId)` calls `/api/multitable/context?sheetId=…&viewId=…` (no `baseId`), the backend resolves the owning base from the sheet, and `syncContextState` then sets `activeBaseId` from `ctx.sheet.baseId`. Composable contract already covered by `apps/web/tests/multitable-workbench.spec.ts:126` "syncs activeBaseId from loaded sheet metadata".
 
-- `staging-trace.zip` — full Playwright trace.zip from the failing run (chromium 1208, headless, 142 via tunnel)
-- `post-views-response.json` — actual API response showing `config.dependencyFieldId` is persisted
-- `page-snapshot.md` — accessibility tree at moment of `.meta-gantt__dependency-arrow` timeout
-- Four new vitest cases in `apps/web/tests/multitable-gantt-view.spec.ts` (+ regression tests for future coverage)
+## Behaviour matrix (URL → onMounted path)
 
-## What this branch does NOT contain
+| URL pattern | Old behaviour | New behaviour |
+|---|---|---|
+| `?baseId=B&sheetId=S&viewId=V` | `loadBaseContext(B, {S,V})` | unchanged |
+| `/multitable/S/V` (no baseId) | `loadBases()` auto-picks `bases[0]` → `loadBaseContext(bases[0], {S,V})` → **403 if S ∉ bases[0]** | `loadBases()` defers auto-pick → `loadSheetMeta(S, {V})` → `/context` derives base from S |
+| `?baseId=B` (no sheetId) | `loadBaseContext(B, {})` | unchanged |
+| empty URL | `loadBases()` auto-picks `bases[0]` → `loadBaseContext(bases[0], {})` | unchanged (`!props.sheetId` keeps the auto-pick) |
 
-- Any change to MetaGanttView.vue, useMultitableWorkbench.ts, view-config.ts, or the API client. The bug was not localised to a specific code path.
-- A speculative fix. Without a confirmed reproduction, applying changes risks introducing different defects.
+## Tests in this branch
+
+- `apps/web/tests/multitable-gantt-view.spec.ts` adds 4 regression cases for `MetaGanttView.vue` (sheetId + self-table link, async fields, async viewConfig, sheetId race). Currently green; document contracts the component must continue to honour.
+- Existing composable tests (`apps/web/tests/multitable-workbench.spec.ts`) cover `loadSheetMeta` resolving `activeBaseId` from `/context` (already passing on origin/main).
+- Local pre-existing failures in `multitable-workbench-import-flow.spec.ts` and `multitable-workbench-manager-flow.spec.ts` are environment-bound (`window.localStorage.clear is not a function` from the happy-dom polyfill) — confirmed reproducible on origin/main without any local changes; out of scope for this PR.
+
+## Verification on staging (post-deploy)
+
+After deploying this branch's `metasheet-web` build to 142 and re-running:
+
+```bash
+cd packages/core-backend
+TOKEN=$(cat /tmp/<staging-admin-jwt>) FE_BASE_URL=http://127.0.0.1:18081 \
+  API_BASE_URL=http://127.0.0.1:18081 AUTH_TOKEN="$TOKEN" \
+  pnpm exec playwright test --config tests/e2e/playwright.config.ts \
+  multitable-gantt-smoke.spec.ts --workers=1
+```
+
+Expected: 3/3 pass (was 2/3 — bars + dropdown filter pass; arrows fail because `dependencyFieldId` is `none`).
 
 ## RC implications
 
-Per the user's earlier judgement: `multitable-rc-20260508-1b06bf286` remains the API/automation GO baseline. **No new RC tag should be cut at `34d731670`** until this UI render bug is fixed and the Gantt UI smoke moves to 3/3.
+Once 3/3 lands on the deployed image and `verify:multitable-rc:staging` (the API harness) is re-run for confirmation, a follow-up RC tag `multitable-rc-20260508b-<sha>` is appropriate.
 
 ## Cross-references
 
-- Failing spec: `packages/core-backend/tests/e2e/multitable-gantt-smoke.spec.ts:95` "renders dependency arrows when dependencyFieldId is configured"
-- API harness (still 7/7 GO): `scripts/verify-multitable-rc-staging-smoke.mjs`
-- Source under suspicion: `apps/web/src/multitable/components/MetaGanttView.vue` (watcher at L208), `apps/web/src/multitable/views/MultitableWorkbench.vue` (forced-mode branch at L593-597 + `<MetaGanttView>` at L202)
-- Resolver: `apps/web/src/multitable/utils/view-config.ts:136` (`resolveGanttViewConfig`)
-- Recent merges related to this surface: PR #1409 (link-only narrowing), #1412 (self-table enforcement), #1440 (Workbench forced-mode support), #1441 (`?mode=gantt` deeplink in smoke)
+- Bug introduced in: `apps/web/src/multitable/views/MultitableWorkbench.vue:1725` (`loadBases` auto-pick) — predates the multitable RC closeout series; not specific to any single commit.
+- Composable contract relied on: `apps/web/src/multitable/composables/useMultitableWorkbench.ts:121-122` (`syncContextState` setting `activeBaseId` from `ctx.sheet.baseId`).
+- Backend `/context` route: `packages/core-backend/src/routes/univer-meta.ts:3091`. The `resolveMetaSheetId` step at line 3113 is what derives the owning base when only `sheetId` is supplied.
+
+## Artifacts attached for triage
+
+- `staging-trace.zip` — full Playwright trace from the failing pre-fix run
+- `post-views-response.json` — proof backend persists `dependencyFieldId`
+- `page-snapshot.md` — accessibility tree at the moment of `.meta-gantt__dependency-arrow` timeout
