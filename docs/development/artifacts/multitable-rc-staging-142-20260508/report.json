@@ -1,0 +1,86 @@
+{
+  "apiBase": "http://127.0.0.1:18990",
+  "startedAt": "2026-05-08T07:48:20.497Z",
+  "finishedAt": "2026-05-08T07:48:37.146Z",
+  "total": 7,
+  "passes": 7,
+  "fails": 0,
+  "skips": 0,
+  "results": [
+    {
+      "name": "lifecycle",
+      "status": "pass",
+      "durationMs": 2637,
+      "evidence": {
+        "sheetId": "sheet_2fec8215-488c-4cc9-be7f-a99fe3d48fa5",
+        "viewId": "view_628bb6d3-48a9-4c39-ae1e-cde37534e8f4",
+        "recordId": "rec_e904684c-e814-4342-b81e-07bea422ae0e",
+        "fieldId": "fld_97718188-40ca-4f1d-8b42-2c7398604142"
+      }
+    },
+    {
+      "name": "public-form",
+      "status": "pass",
+      "durationMs": 3045,
+      "evidence": {
+        "sheetId": "sheet_43f06ae5-4e63-43ae-96c0-705ede25aa4a",
+        "viewId": "view_9a68d789-104a-4fcc-ad65-2d89cfbd7687",
+        "recordId": "rec_1b2325c7-90c6-47d5-a932-f5adc3887614",
+        "rotatedRecordId": "rec_c468283f-46d6-4962-9acb-d67f8e6aa91b"
+      }
+    },
+    {
+      "name": "hierarchy",
+      "status": "pass",
+      "durationMs": 1757,
+      "evidence": {
+        "sheetId": "sheet_3a949813-c771-4a96-bb59-5f789e04e983",
+        "parentFieldId": "fld_367c58ff-4529-49b7-9582-3b5495b8ea18",
+        "recordId": "rec_31b6608f-c499-4df3-bb6c-6c0e1084911c"
+      }
+    },
+    {
+      "name": "gantt-config",
+      "status": "pass",
+      "durationMs": 2131,
+      "evidence": {
+        "sheetId": "sheet_fcd550bc-022a-452c-9269-acd841c45b59",
+        "viewId": "view_3847beb6-5b91-4c08-a7bd-da231b544b79"
+      }
+    },
+    {
+      "name": "formula",
+      "status": "pass",
+      "durationMs": 1947,
+      "evidence": {
+        "sheetId": "sheet_79d58570-29a5-43b2-93f8-5f02b84dc67d",
+        "formulaFieldId": "fld_ff915ffa-e264-47c5-a0f7-c718e98e977f"
+      }
+    },
+    {
+      "name": "automation-email",
+      "status": "pass",
+      "durationMs": 2191,
+      "evidence": {
+        "sheetId": "sheet_0dd4d5fd-6f76-438a-92ca-99b9ab20d8e8",
+        "ruleId": "atr_9f603083-8b95-434f-a44d-b9443d68cc40",
+        "executionId": "axe_06c04914-b096-491f-a3e9-61225be9c1ba"
+      }
+    },
+    {
+      "name": "autoNumber-backfill",
+      "status": "pass",
+      "durationMs": 2940,
+      "evidence": {
+        "sheetId": "sheet_2d57347f-b0f6-442d-867f-57ae570556b3",
+        "fieldId": "fld_9dd71b70-5cb0-40dd-9622-caa5619581e0",
+        "backfilled": [
+          1000,
+          1001,
+          1002
+        ],
+        "freshValue": 1003
+      }
+    }
+  ]
+}
