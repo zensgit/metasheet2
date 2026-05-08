@@ -109,3 +109,35 @@ After filling the private file:
 ```
 
 run the same helper with `--agent-id-file ... --save`.
+
+## Final Release Design Notes
+
+During release, `origin/main` advanced again after the first integration image
+was built. To avoid rolling back unrelated mainline changes, the integration
+branch was rebased onto the latest observed main:
+
+```text
+06f71465ac55843431f7d5de7eea00fd7eb1a5d2
+```
+
+The final deployable Agent ID image tag is:
+
+```text
+9e17038871ff4a0cbdb32d8c816692f10d1f92cb
+```
+
+142 also had concurrent external deployments that temporarily moved the main
+containers through other mainline tags. The release policy used here was:
+
+- Do not fight an active external deploy process.
+- Wait for 142 to settle on the latest main tag.
+- Rebase Agent ID work onto that latest main.
+- Build immutable GHCR images from the rebased branch.
+- Manually switch only `metasheet-backend` and `metasheet-web`.
+- Keep the immediately previous main tag as the rollback baseline.
+
+The 142 disk filled during image pulls because many old GHCR backend/web images
+were retained. The cleanup deliberately removed only unused `metasheet2`
+backend/web GHCR image tags, preserving running images plus the current and
+rollback baselines. No database volumes, Redis data, or application uploads were
+removed.

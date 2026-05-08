@@ -8,10 +8,22 @@ Date: 2026-05-08
 codex/dingtalk-agent-id-mainline-20260508
 ```
 
-Base:
+Initial base:
 
 ```text
 origin/main
+```
+
+Final release base:
+
+```text
+06f71465ac55843431f7d5de7eea00fd7eb1a5d2
+```
+
+Final release image tag:
+
+```text
+9e17038871ff4a0cbdb32d8c816692f10d1f92cb
 ```
 
 ## 142 Pre-Integration Evidence
@@ -117,6 +129,17 @@ Result:
 
 - Pass.
 
+Frontend build:
+
+```bash
+pnpm --filter @metasheet/web build
+```
+
+Result:
+
+- Pass.
+- Vite reported existing chunk-size warnings only.
+
 Diff whitespace:
 
 ```bash
@@ -126,6 +149,127 @@ git diff --check origin/main..HEAD
 Result:
 
 - Pass.
+
+Secret scan:
+
+```bash
+git diff --name-only origin/main..HEAD | xargs rg -n --no-heading -S \
+  'oapi\.dingtalk\.com/robot/send|access_token=|\bSEC[a-zA-Z0-9]{20,}\b|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+'
+```
+
+Result:
+
+- No real DingTalk webhook, robot `SEC...`, admin JWT, or Agent ID value found.
+- Matches were limited to redactor code, generated URL construction, docs scan
+  commands, and dummy test fixtures.
+
+## GHCR Verification
+
+Workflow:
+
+```text
+Build and Push Docker Images
+```
+
+Run:
+
+```text
+https://github.com/zensgit/metasheet2/actions/runs/25535508861
+```
+
+Result:
+
+- Build job passed.
+- Backend image pushed for `9e17038871ff4a0cbdb32d8c816692f10d1f92cb`.
+- Web image pushed for `9e17038871ff4a0cbdb32d8c816692f10d1f92cb`.
+- Deploy job skipped because the branch is not `main`, which is expected for
+  this manual 142 acceptance release.
+
+## 142 Deployment Verification
+
+Before final switch, 142 had advanced to latest main:
+
+```text
+IMAGE_TAG=06f71465ac55843431f7d5de7eea00fd7eb1a5d2
+```
+
+The final manual switch changed only `metasheet-backend` and `metasheet-web`:
+
+```text
+IMAGE_TAG=9e17038871ff4a0cbdb32d8c816692f10d1f92cb
+```
+
+Container state:
+
+```text
+metasheet-web     ghcr.io/zensgit/metasheet2-web:9e17038871ff4a0cbdb32d8c816692f10d1f92cb
+metasheet-backend ghcr.io/zensgit/metasheet2-backend:9e17038871ff4a0cbdb32d8c816692f10d1f92cb
+metasheet-postgres postgres:15-alpine healthy
+metasheet-redis    redis:7-alpine healthy
+```
+
+Health:
+
+```text
+GET http://127.0.0.1:8900/api/health -> 200
+GET http://127.0.0.1:8081/ -> 200
+```
+
+Disk:
+
+```text
+Before cleanup: / use=100%, avail=0
+After cleanup:  / use=44%-46%, avail=40G+
+```
+
+Cleanup scope:
+
+- Removed only unused `ghcr.io/zensgit/metasheet2-backend` and
+  `ghcr.io/zensgit/metasheet2-web` image tags.
+- Preserved running images and rollback/current baselines.
+- Did not remove Docker volumes, Postgres data, Redis data, uploads, or secrets.
+
+## 142 Agent ID Acceptance
+
+Unauthenticated route:
+
+```text
+GET /api/admin/directory/dingtalk/work-notification -> 401
+```
+
+Authenticated status helper:
+
+```json
+{
+  "status": "pass",
+  "statusBefore": {
+    "configured": false,
+    "available": false,
+    "unavailableReason": "missing_agent_id",
+    "source": "mixed"
+  }
+}
+```
+
+Authenticated save helper with the private Agent ID file:
+
+```json
+{
+  "saveExitCode": 1,
+  "saveStatus": "blocked",
+  "saveFailureCodes": ["AGENT_ID_FILE_EMPTY"],
+  "agentFileEmpty": true
+}
+```
+
+Conclusion:
+
+- The Agent ID admin route is present and authenticated.
+- Empty Agent ID is rejected before save.
+- The private Agent ID file currently exists but is intentionally empty.
+- The next real-send acceptance step requires filling the Agent ID through the
+  frontend page or the private file, then optionally providing a recipient user
+  id file for a real DingTalk work-notification send test.
 
 ## Security
 
@@ -137,13 +281,10 @@ The helper output intentionally keeps:
 - token file paths redacted to basenames
 - Agent ID represented only by configured state and length
 
-## Remaining Production Acceptance
+## Remaining Non-Blocking Items
 
-After GHCR builds this integration branch or after merge to main:
-
-1. Deploy 142 main to the new SHA.
-2. Verify `/api/health` and `/`.
-3. Run admin helper `--status-only`; route should no longer be 404.
-4. Fill `/home/mainuser/metasheet2/.secrets/dingtalk-agent-id.txt` or save Agent ID through the frontend directory-management page.
-5. Run helper with `--agent-id-file ... --save`.
-6. Optional: add `--recipient-user-id-file` for real DingTalk work-notification delivery verification.
+1. Fill/save the real DingTalk work-notification Agent ID.
+2. Run helper with `--agent-id-file ... --save`.
+3. Optionally add `--recipient-user-id-file` for a real DingTalk work-notification delivery test.
+4. Merge this branch to `main` so future automatic 142 deployments stop
+   overwriting the manual Agent ID acceptance image.
