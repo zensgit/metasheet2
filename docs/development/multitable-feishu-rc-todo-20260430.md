@@ -77,7 +77,12 @@ Do not mark an item done if:
   - Development MD: `docs/development/multitable-feishu-rc-142-postdeploy-design-20260506.md`
   - Verification MD: `docs/development/multitable-feishu-rc-142-postdeploy-verification-20260506.md`
   - Verification summary: GitHub Actions run `25435548148` deployed `9464b628479cdff1769c864de05f5ec5b6bf7d94` to 142 after rerunning a transient GHCR `unknown blob` failure; postdeploy health/API probes passed.
-- [ ] Smoke test basic multitable sheet lifecycle: create base, sheet, view, fields, records.
+- [x] Smoke test basic multitable sheet lifecycle: create base, sheet, view, fields, records.
+  - PR: #1415
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-rc-lifecycle-smoke-development-20260507.md`
+  - Verification MD: `docs/development/multitable-rc-lifecycle-smoke-verification-20260507.md`
+  - Verification summary: Playwright RC smoke parses two tests for base -> sheet -> field -> view -> record -> workbench render plus an HTTP `FIELD_READONLY` autoNumber raw-write regression guard; local `tsc --noEmit` and `git diff --check` pass. Live stack execution remains deferred to staging/dev-stack availability.
 - [x] Smoke test xlsx frontend import/export with a real file.
   - PR: pending
   - Merge commit: pending

@@ -15,8 +15,8 @@ Result:
 
 ```
 Listing tests:
-  multitable-lifecycle-smoke.spec.ts:72:7 › Multitable lifecycle smoke › creates base, sheet, field, view, record and renders in workbench
-  multitable-lifecycle-smoke.spec.ts:130:7 › Multitable lifecycle smoke › rejects client-supplied autoNumber values during record create (regression guard)
+  multitable-lifecycle-smoke.spec.ts:79:7 › Multitable lifecycle smoke › creates base, sheet, field, view, record and renders in workbench
+  multitable-lifecycle-smoke.spec.ts:137:7 › Multitable lifecycle smoke › rejects client-supplied autoNumber values during record create (regression guard)
 Total: 2 tests in 1 file
 ```
 
@@ -39,8 +39,9 @@ Result: passed.
 ## Scoped diff
 
 ```
-packages/core-backend/tests/e2e/multitable-lifecycle-smoke.spec.ts | +143 (new)
+packages/core-backend/tests/e2e/multitable-lifecycle-smoke.spec.ts | new
 packages/core-backend/tests/e2e/README.md                          | +1 / -0
+docs/development/multitable-feishu-rc-todo-20260430.md              | lifecycle smoke marked complete
 docs/development/multitable-rc-lifecycle-smoke-development-20260507.md | new
 docs/development/multitable-rc-lifecycle-smoke-verification-20260507.md | new
 ```
@@ -78,10 +79,12 @@ The default GitHub Actions matrix does not currently start a multitable dev stac
 ## Pre-deployment checks
 
 - [x] PR #1406 autoNumber hardening + PR #1412 self-table dependency tightening already merged on main; this branch is rebased onto `d291bc4d1`.
+- [x] Reviewer hardening: frontend availability is now checked before the suite runs, matching the documented skip contract.
+- [x] Reviewer hardening: autoNumber raw-write now asserts exact `403 FIELD_READONLY` response instead of any generic `4xx`.
 - [x] No DingTalk / public-form / `plugins/plugin-integration-core/*` files touched.
 - [x] No autoNumber-related code modified (the regression guard hits already-shipped behavior).
 - [x] No migration / OpenAPI / schema change.
 
 ## Result
 
-Spec parses, types clean, diff hygiene clean. Ready to merge as the first of six RC-smoke conversions; remaining five (`formula editor`, `Gantt rendering`, `Hierarchy rendering`, `public form submit`, `automation send_email`) can fork this spec's pattern in subsequent PRs.
+Spec parses, types clean, diff hygiene clean. The master RC TODO now points at this PR and preserves the live-stack execution caveat. Ready to merge as the first of six RC-smoke conversions; remaining five (`formula editor`, `Gantt rendering`, `Hierarchy rendering`, `public form submit`, `automation send_email`) can fork this spec's pattern in subsequent PRs.

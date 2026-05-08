@@ -15,8 +15,9 @@ The RC TODO (`docs/development/multitable-feishu-rc-todo-20260430.md`) carried 6
 
 - New Playwright spec `packages/core-backend/tests/e2e/multitable-lifecycle-smoke.spec.ts` containing two `test.describe` cases:
   1. **Lifecycle**: `POST /api/multitable/bases` → `POST /api/multitable/sheets` → `POST /api/multitable/fields` (string field `Title`) → `GET /api/multitable/views?sheetId=…` (reuse seeded grid view, fall back to `POST /api/multitable/views` if absent) → `POST /api/multitable/records` with `{[fieldId]: 'smoke-record-<ts>'}`. Final assertion: navigate browser to `/multitable/{sheetId}/{viewId}` with `phase0@test.local` token injected to localStorage and assert the cell value renders.
-  2. **autoNumber raw-write regression guard**: create an `autoNumber` field, attempt `POST /api/multitable/records` with `data: {[fieldId]: 999}`. Expect `4xx`. Demonstrates that the smoke also covers the `RecordFieldForbiddenError` path landed in PR #1406 hardening.
+  2. **autoNumber raw-write regression guard**: create an `autoNumber` field, attempt `POST /api/multitable/records` with `data: {[fieldId]: 999}`. Expect `403 FIELD_READONLY`. Demonstrates that the smoke also covers the `RecordFieldForbiddenError` path landed in PR #1406 hardening.
 - README update at `packages/core-backend/tests/e2e/README.md` listing the new spec under "What's tested".
+- RC TODO update marking the lifecycle smoke as covered by PR #1415 while preserving the live-stack execution caveat.
 
 ### Out
 
@@ -50,8 +51,9 @@ Adding the regression test adds ~25 lines and exercises `RecordService.createRec
 
 | File | Lines |
 |---|---|
-| `packages/core-backend/tests/e2e/multitable-lifecycle-smoke.spec.ts` | +new (143) |
+| `packages/core-backend/tests/e2e/multitable-lifecycle-smoke.spec.ts` | +new |
 | `packages/core-backend/tests/e2e/README.md` | +1 |
+| `docs/development/multitable-feishu-rc-todo-20260430.md` | lifecycle smoke marked complete |
 | `docs/development/multitable-rc-lifecycle-smoke-development-20260507.md` | +new |
 | `docs/development/multitable-rc-lifecycle-smoke-verification-20260507.md` | +new |
 

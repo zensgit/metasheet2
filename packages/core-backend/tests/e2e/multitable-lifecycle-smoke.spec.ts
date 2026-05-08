@@ -14,7 +14,7 @@
  *   npx playwright test --config tests/e2e/playwright.config.ts \
  *     multitable-lifecycle-smoke.spec.ts
  */
-import { test, expect } from '@playwright/test'
+import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
 
 const FE = 'http://127.0.0.1:8899'
 const API = 'http://localhost:7778'
@@ -29,6 +29,13 @@ test.beforeAll(async ({ request }) => {
     test.skip(true, 'Metasheet backend not reachable')
   }
 
+  try {
+    const frontend = await request.get(FE, { timeout: 3000 })
+    if (!frontend.ok()) test.skip(true, 'Metasheet frontend not reachable')
+  } catch {
+    test.skip(true, 'Metasheet frontend not reachable')
+  }
+
   const loginRes = await request.post(`${API}/api/auth/login`, {
     data: { email: 'phase0@test.local', password: 'Phase0Test!2026' },
   })
@@ -37,7 +44,7 @@ test.beforeAll(async ({ request }) => {
   if (!token) test.skip(true, 'Login failed — phase0 user may not exist')
 })
 
-async function injectTokenAndGo(page: any, path: string) {
+async function injectTokenAndGo(page: Page, path: string) {
   await page.goto(FE)
   await page.evaluate((t: string) => {
     localStorage.setItem('metasheet_token', t)
@@ -46,7 +53,7 @@ async function injectTokenAndGo(page: any, path: string) {
   await page.goto(`${FE}${path}`)
 }
 
-async function postJson(request: any, path: string, body: unknown) {
+async function postJson(request: APIRequestContext, path: string, body: unknown) {
   const res = await request.post(`${API}${path}`, {
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     data: body,
@@ -60,7 +67,7 @@ async function postJson(request: any, path: string, body: unknown) {
   return json
 }
 
-async function getJson(request: any, path: string) {
+async function getJson(request: APIRequestContext, path: string) {
   const res = await request.get(`${API}${path}`, {
     headers: { Authorization: `Bearer ${token}` },
   })
@@ -143,7 +150,14 @@ test.describe('Multitable lifecycle smoke', () => {
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       data: { sheetId: sheet.id, data: { [seq.id]: 999 } },
     })
-    expect(res.status()).toBeGreaterThanOrEqual(400)
-    expect(res.status()).toBeLessThan(500)
+    expect(res.status()).toBe(403)
+    const body = await res.json()
+    expect(body).toMatchObject({
+      ok: false,
+      error: {
+        code: 'FIELD_READONLY',
+        message: `Field is readonly: ${seq.id}`,
+      },
+    })
   })
 })
