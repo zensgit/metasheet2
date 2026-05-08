@@ -108,7 +108,12 @@ Do not mark an item done if:
   - Development MD: `docs/development/multitable-feishu-rc-filter-format-ui-smoke-design-20260507.md`
   - Verification MD: `docs/development/multitable-feishu-rc-filter-format-ui-smoke-verification-20260507.md`
   - Verification summary: same `140/140` staging run passed `ui.filter-builder.typed-controls-replay`; the runner added select/date/number filters through the toolbar UI, verified saved `filterInfo`, reloaded the view, and confirmed all three controls hydrated from persistence.
-- [ ] Smoke test Gantt view rendering.
+- [x] Smoke test Gantt view rendering.
+  - PR: #1421
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-rc-gantt-smoke-development-20260507.md`
+  - Verification MD: `docs/development/multitable-rc-gantt-smoke-verification-20260507.md`
+  - Verification summary: Playwright RC smoke parses three tests for gantt bar rendering with date ranges, dependency arrow rendering with a configured self-table link `dependencyFieldId`, and PATCH rejection of a gantt view whose `dependencyFieldId` points at a non-link field (HTTP 400 + `VALIDATION_ERROR` containing `self-table link field`). Exercises `validateGanttDependencyConfig` (`packages/core-backend/src/routes/univer-meta.ts`) at the HTTP layer. Local `tsc --noEmit` and `git diff --check` pass. Live stack execution remains deferred to staging/dev-stack availability.
 - [x] Smoke test Hierarchy view rendering and child creation.
   - PR: #1419
   - Merge commit: pending
