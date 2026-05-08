@@ -105,14 +105,29 @@ deliberately, not to block the preflight.
 
 ### Secret handling
 
-- DATABASE_URL: stored only as a masked URL (password → `<redacted>`); host /
-  port / database recorded for diagnostic value.
+- DATABASE_URL: stored only as a sanitized URL (userinfo password → `<redacted>`,
+  any secret-keyed query param → `<redacted>`); host / port / database recorded
+  for diagnostic value.
 - JWT_SECRET: only the length is recorded.
 - K3 credentials: only `usernamePresent: true` / `passwordPresent: true` are
   recorded — never the raw values.
-- All console / Markdown output passes through `redactString`, which catches
-  `?access_token=` / `?token=` / `?password=` / `?sign=` query parts, `Bearer
-  …` headers, JWT-shaped tokens (`eyJ…`), and `postgres://user:pass@` URLs.
+- K3_API_URL: stored as a sanitized URL via the same `sanitizeUrl` helper —
+  some K3 deployments place auth tokens in the URL query string, and the raw
+  value must never land in `preflight.json`.
+- Two-layer redaction so all three output channels are leak-free:
+  - **At storage time** — `sanitizeUrl(value)` is applied to URLs *before*
+    they enter `summary.checks[].details`. This protects `preflight.json`,
+    which is written via `JSON.stringify` and does NOT pass through
+    `redactString`.
+  - **At render time** — console and Markdown output pass through
+    `redactString`, which catches `?access_token=` / `?token=` / `?password=` /
+    `?secret=` / `?sign[ature]=` / `?api_key=` / `?session_id=` query parts,
+    `Bearer …` headers, JWT-shaped tokens (`eyJ…`), and
+    `postgres://user:pass@` URLs.
+- The two-layer design is the explicit application of the PR Hardening
+  Checklist item *"sanitize env values in artifact files"*: render-time
+  redaction alone is insufficient because `preflight.json` is written outside
+  that path.
 
 ### Output
 
@@ -135,8 +150,8 @@ deliberately, not to block the preflight.
 
 | File | Change |
 |---|---|
-| `scripts/ops/integration-k3wise-onprem-preflight.mjs` | New script (~470 lines) |
-| `scripts/ops/integration-k3wise-onprem-preflight.test.mjs` | New test (12 cases) |
+| `scripts/ops/integration-k3wise-onprem-preflight.mjs` | New script (~650 lines) |
+| `scripts/ops/integration-k3wise-onprem-preflight.test.mjs` | New test (14 cases) |
 | `package.json` | New script `verify:integration-k3wise:onprem-preflight` |
 
 No changes to `plugins/plugin-integration-core/`, runtime code, runtime config,

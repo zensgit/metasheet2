@@ -10,8 +10,11 @@
 //
 // What this does NOT do:
 // - Run migrations, write to any DB, or call any K3 write endpoint.
-// - Print or persist secret values (DATABASE_URL password, JWT, Bearer tokens,
-//   `?access_token=` / `?token=` / `?password=` query parts, K3_PASSWORD).
+// - Print or persist secret values. URL credentials (DATABASE_URL / K3_API_URL
+//   userinfo password) are stripped at storage time; query params whose keys
+//   match access_token / token / password / secret / sign / signature /
+//   api_key / session_id are redacted in BOTH stdout/MD (via redactString)
+//   AND preflight.json (via sanitizeUrl applied at storage time).
 //
 // Exit codes (stable contract):
 //   0  PASS         — safe to proceed with on-prem PoC test
@@ -37,27 +40,46 @@ const REQUIRED_FIXTURES = [
 const MIN_JWT_SECRET_LENGTH = 32
 const DEFAULT_TIMEOUT_MS = 5000
 
+const SECRET_QUERY_PARAM_PATTERN = /^(access[-_]?token|token|password|secret|signature|sign|api[-_]?key|sessionid|session[-_]?id|auth)$/i
+
 function redactString(value) {
   return String(value)
-    .replace(/(access_token=)[^&\s)]+/gi, '$1<redacted>')
+    .replace(/([?&]access[-_]?token=)[^&\s)]+/gi, '$1<redacted>')
     .replace(/([?&]token=)[^&\s)]+/gi, '$1<redacted>')
     .replace(/([?&]password=)[^&\s)]+/gi, '$1<redacted>')
-    .replace(/([?&]sign=)[^&\s)]+/gi, '$1<redacted>')
+    .replace(/([?&]secret=)[^&\s)]+/gi, '$1<redacted>')
+    .replace(/([?&]sign(?:ature)?=)[^&\s)]+/gi, '$1<redacted>')
+    .replace(/([?&]api[-_]?key=)[^&\s)]+/gi, '$1<redacted>')
+    .replace(/([?&]session[-_]?id=)[^&\s)]+/gi, '$1<redacted>')
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer <redacted>')
     .replace(/\beyJ[A-Za-z0-9._-]{20,}\b/g, '<jwt:redacted>')
     .replace(/(postgres(?:ql)?:\/\/[^:/?@\s]+):[^@\s]+@/gi, '$1:<redacted>@')
 }
 
-function maskedDatabaseUrl(value) {
+// Sanitize a URL for storage in artifact files (preflight.json / preflight.md).
+// Strips userinfo password and redacts query params whose keys look like
+// secrets. Used at storage time so JSON output is safe even though
+// JSON.stringify does not pass through redactString. (PR Hardening Checklist:
+// "sanitize env values in artifact files".)
+function sanitizeUrl(value) {
   if (!value) return ''
   try {
     const u = new URL(value)
     if (u.password) u.password = '<redacted>'
+    for (const key of Array.from(u.searchParams.keys())) {
+      if (SECRET_QUERY_PARAM_PATTERN.test(key)) {
+        u.searchParams.set(key, '<redacted>')
+      }
+    }
     return u.toString()
   } catch {
     return '<unparseable>'
   }
 }
+
+// Backward-compatible alias for the original export name; behaviour is now a
+// superset (also redacts secret query params).
+const maskedDatabaseUrl = sanitizeUrl
 
 function parseArgs(argv) {
   const opts = {
@@ -387,7 +409,11 @@ function checkLiveK3Config(env, mode, summary) {
   }
 
   addCheck(summary, 'k3.live-config', 'K3 WISE live endpoint config', 'pass', {
-    apiUrl,
+    // Some K3 deployments place auth tokens in the API URL query string. Store
+    // a sanitized form so the raw token never lands in preflight.json. The
+    // unsanitized URL is still used live for the host:port TCP probe via
+    // parsedUrl.hostname/port; it is never persisted.
+    apiUrl: sanitizeUrl(apiUrl),
     acctId,
     usernamePresent: true,
     passwordPresent: true,
@@ -482,7 +508,7 @@ function renderMarkdown(summary) {
     '- Read-only: no DB writes, no migration runs, no K3 write calls.',
     '- Mock mode does not require any K3 endpoint or credentials.',
     '- Live mode performs only a TCP-level reachability probe on the K3 endpoint host:port; it does NOT call the K3 API.',
-    '- Secrets are redacted in all output paths (DATABASE_URL password, JWT, Bearer tokens, `?access_token=` / `?token=` / `?password=` query parts, K3_PASSWORD).',
+    '- Secrets are redacted in all output paths — stdout/MD via `redactString` and preflight.json via `sanitizeUrl` at storage time. Covered: DATABASE_URL / K3_API_URL userinfo password; query params keyed `access_token` / `token` / `password` / `secret` / `sign(ature)` / `api_key` / `session_id` / `auth`; `Bearer …` headers; `eyJ…` JWT-shaped tokens; K3_PASSWORD value.',
     '',
   )
   return lines.join('\n') + '\n'
@@ -622,5 +648,6 @@ export {
   renderConsole,
   renderMarkdown,
   runPreflight,
+  sanitizeUrl,
   tcpProbe,
 }

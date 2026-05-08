@@ -290,6 +290,60 @@ test('output redacts real secret values in stdout, JSON, and MD', () => {
   }
 })
 
+test('output sanitizes secret query params in K3_API_URL across stdout, JSON, and MD', () => {
+  // Some K3 deployments place auth tokens in the API URL query string. The
+  // raw values must never appear in any output channel — including
+  // preflight.json (which does not pass through redactString at write time and
+  // therefore relies on sanitizeUrl at storage time).
+  const tmp = makeTmpDir()
+  try {
+    const out = path.join(tmp, 'r')
+    const accessToken = 'AT-leak-VALUE-9988'
+    const queryPassword = 'PW-leak-VALUE-7766'
+    const sign = 'SIGN-leak-VALUE-5544'
+    const apiKey = 'AK-leak-VALUE-3322'
+    const sessionId = 'SID-leak-VALUE-1100'
+    const k3ApiUrl =
+      `http://k3.example.test:8080/K3API/?access_token=${accessToken}` +
+      `&password=${queryPassword}&sign=${sign}&api_key=${apiKey}` +
+      `&session_id=${sessionId}`
+    const result = runScript(
+      ['--live', '--skip-tcp', '--skip-migrations', '--out-dir', out],
+      {
+        DATABASE_URL: VALID_DB_URL,
+        JWT_SECRET: VALID_JWT,
+        K3_API_URL: k3ApiUrl,
+        K3_ACCT_ID: LIVE_K3_ACCT_ID,
+        K3_USERNAME: LIVE_K3_USERNAME,
+        K3_PASSWORD: LIVE_K3_PASSWORD,
+      },
+    )
+    // Exit code is irrelevant here (will likely fail on K3 reachability or
+    // gate-blocked on the gate file). What matters: leak-free across all
+    // three output channels.
+    const { json, md } = readOutputs(out)
+    const jsonText = JSON.stringify(json)
+    const queryParamSecrets = [accessToken, queryPassword, sign, apiKey, sessionId]
+
+    assertNoLeak(result.stdout, queryParamSecrets)
+    assertNoLeak(jsonText, queryParamSecrets)
+    assertNoLeak(md, queryParamSecrets)
+
+    // Confirm the JSON kept the URL shape so operators can still see what
+    // host/path was registered, with the secret slots replaced.
+    const liveConfig = findCheck(json, 'k3.live-config')
+    assert.equal(liveConfig.status, 'pass')
+    assert.match(liveConfig.details.apiUrl, /^http:\/\/k3\.example\.test:8080\/K3API\//)
+    assert.match(liveConfig.details.apiUrl, /access_token=(?:%3C|<)redacted(?:%3E|>)/i)
+    assert.match(liveConfig.details.apiUrl, /password=(?:%3C|<)redacted(?:%3E|>)/i)
+    assert.match(liveConfig.details.apiUrl, /sign=(?:%3C|<)redacted(?:%3E|>)/i)
+    assert.match(liveConfig.details.apiUrl, /api_key=(?:%3C|<)redacted(?:%3E|>)/i)
+    assert.match(liveConfig.details.apiUrl, /session_id=(?:%3C|<)redacted(?:%3E|>)/i)
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
 test('rejects unknown CLI argument with non-zero exit', () => {
   const result = runScript(['--definitely-not-a-flag'])
   assert.equal(result.status, 1)

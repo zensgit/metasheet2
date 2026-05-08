@@ -17,7 +17,8 @@
 | `JWT_SECRET` too short fails | `exit 1 when JWT_SECRET is too short, with explicit length hint` | `1` | PASS |
 | Mock mode does not require real K3 endpoint | `exit 0 in mock mode with valid env, K3 endpoint not required` | `0` | PASS |
 | Live mode missing K3 URL/acctId/username → `GATE_BLOCKED` | `exit 2 (GATE_BLOCKED) when --live and K3 env is missing` | `2` | PASS |
-| Output never leaks `password` / `token` / `secret` values | `output redacts real secret values in stdout, JSON, and MD` | n/a | PASS |
+| Output never leaks `password` / `token` / `secret` values (env-supplied values) | `output redacts real secret values in stdout, JSON, and MD` | n/a | PASS |
+| Output never leaks secret values embedded as K3_API_URL query params | `output sanitizes secret query params in K3_API_URL across stdout, JSON, and MD` | n/a | PASS |
 | Postgres unreachable yields a clear diagnostic | `Postgres TCP probe: ECONNREFUSED yields clear diagnostic` | `1` | PASS |
 | Migration alignment status explains "code vs DB" | `migration alignment check explains alignment status when skipped` + `… when DATABASE_URL is missing` | `0` / `1` | PASS |
 
@@ -47,12 +48,13 @@ $ pnpm verify:integration-k3wise:onprem-preflight
 ✔ migration alignment check explains alignment status when skipped
 ✔ migration alignment check skips with explanation when DATABASE_URL is missing
 ✔ output redacts real secret values in stdout, JSON, and MD
+✔ output sanitizes secret query params in K3_API_URL across stdout, JSON, and MD
 ✔ rejects unknown CLI argument with non-zero exit
 ✔ rejects out-of-range --timeout-ms
 ✔ migration alignment check gracefully skips when pnpm/tsx is not on PATH
 ✔ --gate-file pointing at nonexistent path fails (not gate-blocked)
-ℹ tests 13 / pass 13 / fail 0
-ℹ duration_ms 485.604
+ℹ tests 14 / pass 14 / fail 0
+ℹ duration_ms 574.516
 ```
 
 ### 2) Existing K3 WISE PoC chain — regression check
@@ -134,6 +136,41 @@ $ grep -c -E "hunter2_secret_value|realpass-LeAk-tEsT|xxxxxxxxxxxx" \
 
 All three output channels report **0 occurrences** of the real secret values.
 
+### 4b) Redaction — secret-bearing K3_API_URL query params
+
+Some K3 deployments place auth tokens in the API URL query string. The
+sanitization must apply at *storage time* (so `preflight.json` is leak-free
+without depending on a render-time pass). End-to-end check:
+
+```
+$ DATABASE_URL='postgres://demo:demo@127.0.0.1:65432/demo' \
+  JWT_SECRET="$(printf 'a%.0s' {1..40})" \
+  K3_API_URL='http://k3.example.test/K3API/?access_token=ABCDEFleak1&password=PWleak2&sign=SIGNleak3' \
+  K3_ACCT_ID=AIS_LIVE K3_USERNAME=realuser K3_PASSWORD=realpass-LeAk-tEsT-1234 \
+  node scripts/ops/integration-k3wise-onprem-preflight.mjs \
+    --live --skip-tcp --skip-migrations --out-dir /tmp/ms2-pf-urlleak
+
+$ grep -c -E "ABCDEFleak1|PWleak2|SIGNleak3|realpass-LeAk-tEsT|aaaaaaaaaaaaaaaaaaaa" \
+    /tmp/ms2-pf-urlleak.stdout \
+    /tmp/ms2-pf-urlleak/preflight.json \
+    /tmp/ms2-pf-urlleak/preflight.md
+/tmp/ms2-pf-urlleak/preflight.md:0
+/tmp/ms2-pf-urlleak/preflight.json:0
+/tmp/ms2-pf-urlleak.stdout:0
+
+$ grep -A1 '"k3.live-config"' /tmp/ms2-pf-urlleak/preflight.json | head -8
+      "id": "k3.live-config",
+      "details": {
+        "apiUrl": "http://k3.example.test/K3API/?access_token=%3Credacted%3E&password=%3Credacted%3E&sign=%3Credacted%3E",
+        "acctId": "AIS_LIVE",
+        ...
+```
+
+The persisted `apiUrl` keeps host/path/scheme intact (so operators can still
+read what they registered) but every secret-keyed query value is replaced with
+`<redacted>` (URL-encoded as `%3Credacted%3E` in the JSON, which is the same
+string).
+
 ### 5) Help text and arg validation
 
 ```
@@ -183,5 +220,7 @@ PR is **outside** the GATE block:
 
 ## Worktree
 
-Branch: `codex/dingtalk-directory-return-banner-tests-20260505` (continued)
+Branch: `codex/integration-k3wise-onprem-preflight-20260507` (forked from
+`origin/main` after Codex flagged that the previous draft was sitting on the
+unrelated dingtalk Agent ID branch).
 Cwd: `/Users/chouhua/Downloads/Github/metasheet2`
