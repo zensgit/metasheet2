@@ -378,8 +378,40 @@ jobs:
           DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
         run: scripts/ops/resolve-k3wise-smoke-token.sh
 
-      - name: K3 WISE postdeploy smoke
+      - name: K3 WISE postdeploy smoke input check
+        id: k3_env_check
         if: ${{ steps.remote_deploy.outputs.deploy_rc == '0' }}
+        env:
+          METASHEET_BASE_URL: ${{ vars.METASHEET_BASE_URL || vars.PUBLIC_APP_URL || 'http://142.171.239.56:8081' }}
+          METASHEET_TENANT_ID: ${{ vars.METASHEET_TENANT_ID || '' }}
+          K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH: ${{ vars.K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH || 'false' }}
+        run: |
+          set -euo pipefail
+          env_check_out_dir="output/deploy/k3wise-postdeploy-env-check"
+          smoke_out_dir="output/deploy/k3wise-postdeploy-smoke"
+          rm -rf "$env_check_out_dir"
+          tenant_id="${METASHEET_TENANT_ID:-${K3_WISE_SMOKE_TENANT_ID:-}}"
+          require_auth="${K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH:-false}"
+          args=(
+            --base-url "$METASHEET_BASE_URL"
+            --out-dir "$env_check_out_dir"
+            --smoke-out-dir "$smoke_out_dir"
+          )
+          case "${require_auth}" in
+            true|TRUE|True|1|yes|YES|Yes)
+              args+=(--require-auth)
+              ;;
+          esac
+          if [[ -n "${tenant_id:-}" ]]; then
+            args+=(--tenant-id "$tenant_id")
+          fi
+          if [[ -n "${K3_WISE_SMOKE_TOKEN:-}" ]]; then
+            export METASHEET_AUTH_TOKEN="$K3_WISE_SMOKE_TOKEN"
+          fi
+          node scripts/ops/integration-k3wise-postdeploy-env-check.mjs "${args[@]}"
+
+      - name: K3 WISE postdeploy smoke
+        if: ${{ steps.remote_deploy.outputs.deploy_rc == '0' && steps.k3_env_check.outcome == 'success' }}
         env:
           METASHEET_BASE_URL: ${{ vars.METASHEET_BASE_URL || vars.PUBLIC_APP_URL || 'http://142.171.239.56:8081' }}
           METASHEET_TENANT_ID: ${{ vars.METASHEET_TENANT_ID || '' }}
@@ -609,6 +641,15 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "### K3 WISE Postdeploy Smoke" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
+          k3_env_check_md="output/deploy/k3wise-postdeploy-env-check/integration-k3wise-postdeploy-env-check.md"
+          if [[ -f "$k3_env_check_md" ]]; then
+            echo "#### Input Check" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            cat "$k3_env_check_md" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "#### Smoke Evidence" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          fi
           k3_smoke_json="output/deploy/k3wise-postdeploy-smoke/integration-k3wise-postdeploy-smoke.json"
           node scripts/ops/integration-k3wise-postdeploy-summary.mjs \
             --input "$k3_smoke_json" \
@@ -619,6 +660,7 @@ jobs:
           echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- Deploy logs artifact: \`${artifact_name}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- K3 WISE smoke input check: \`output/deploy/k3wise-postdeploy-env-check/\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- K3 WISE smoke evidence: \`output/deploy/k3wise-postdeploy-smoke/\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Local evidence path (after download): \`output/playwright/ga/${GITHUB_RUN_ID}/deploy.log\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"

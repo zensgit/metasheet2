@@ -155,6 +155,28 @@ test('buildPacket requires K3 WISE auth keys before declaring preflight ready', 
   assert.equal(k3.credentials.sessionId, '<set-at-runtime>')
 })
 
+test('buildPacket rejects secret-bearing URL and free-text values before packet generation', () => {
+  assert.throws(
+    () => buildPacket(gate({
+      k3Wise: {
+        apiUrl: 'https://k3-user:k3-pass@k3.example.test/K3API?access_token=live-token-123456',
+      },
+    })),
+    (error) => error instanceof LivePocPreflightError && error.details.location === 'k3Wise.apiUrl',
+    'K3 apiUrl with URL credentials or token query must be rejected',
+  )
+
+  assert.throws(
+    () => buildPacket(gate({
+      plm: {
+        baseUrl: 'https://plm.example.test/api?signature=SEC123456789012345',
+      },
+    })),
+    (error) => error instanceof LivePocPreflightError && error.details.location === 'plm.baseUrl',
+    'PLM baseUrl with signed query must be rejected',
+  )
+})
+
 test('buildPacket requires minimum K3 material target mappings', () => {
   assert.throws(
     () => buildPacket(gate({
@@ -345,4 +367,57 @@ test('renderMarkdown and CLI outputs do not leak submitted secret values', async
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+test('renderMarkdown keeps preflight packet tables stable for markdown-breaking values', () => {
+  const markdown = renderMarkdown({
+    generatedAt: '2026-05-07T09:00:00.000Z',
+    status: 'preflight|ready\nnext',
+    tenantId: 'tenant|one\nnext',
+    workspaceId: 'workspace`one`\nnext',
+    safety: {
+      environment: 'uat|test\nnext',
+      saveOnly: true,
+      autoSubmit: false,
+      autoAudit: false,
+      sqlServerMode: 'middle|table\nnext',
+    },
+    externalSystems: [
+      {
+        name: 'K3|WISE\n`target`',
+        kind: 'erp:k3-wise-webapi',
+        role: 'target|erp',
+        status: 'ready\nok',
+        requiredCredentialKeys: ['username|id', 'password\nruntime'],
+      },
+    ],
+    pipelines: [
+      {
+        name: 'Material|Save\nonly',
+        sourceObject: 'material\nsource',
+        targetObject: 'material|target',
+        mode: 'manual\nsafe',
+        status: 'ready|go',
+      },
+    ],
+    checklist: [
+      {
+        id: 'gate|001\nline',
+        status: 'pass\nok',
+        check: 'Save-only | confirmed\nby operator',
+      },
+    ],
+    notes: ['operator note | safe\nnext line'],
+  })
+
+  assert.match(markdown, /Status: `preflight\|ready next`/)
+  assert.match(markdown, /Workspace: ``workspace`one` next``/)
+  assert.equal(markdown.includes('operator note | safe\nnext line'), false)
+  assert.match(markdown, /- operator note \| safe next line/)
+
+  const tableRows = markdown.split('\n').filter((line) => line.startsWith('| '))
+  assert.equal(tableRows.length, 6)
+  assert.equal(tableRows[1], '| `` K3\\|WISE `target` `` | `erp:k3-wise-webapi` | `target\\|erp` | `ready ok` | `username\\|id, password runtime` |')
+  assert.equal(tableRows[3], '| `Material\\|Save only` | `material source` | `material\\|target` | `manual safe` | `ready\\|go` |')
+  assert.equal(tableRows[5], '| `gate\\|001 line` | `pass ok` | `Save-only \\| confirmed by operator` |')
 })
