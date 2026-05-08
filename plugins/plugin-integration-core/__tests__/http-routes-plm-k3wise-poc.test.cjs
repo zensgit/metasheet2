@@ -716,7 +716,7 @@ async function main() {
   })
   assertOkResponse(res, 200)
   assert.equal(res.body.data.length, 1)
-  assert.equal(res.body.data[0].sourcePayload.code, ' bad-02 ')
+  assert.equal(res.body.data[0].sourcePayload.code, 'bad-02')
   assert.equal(res.body.data[0].sourcePayload.rawPayload, '[redacted]')
   assert.equal(res.body.data[0].transformedPayload.FNumber, 'BAD-02')
   assert.equal(res.body.data[0].payloadRedacted, true)
