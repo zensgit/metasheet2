@@ -32,8 +32,8 @@ git show origin/main:scripts/ops/integration-k3wise-onprem-preflight.mjs \
 | Migration check — `DATABASE_URL not set; cannot query kysely_migration` | line 291 |
 | Migration check — `pnpm/tsx not on PATH; …` | line 318 |
 | `pendingMigrations` capped at 50 | line 347 (`.slice(0, 50)`) |
-| Sanitized URL replaces `<redacted>` for secret query keys | lines 71–76 (`SECRET_QUERY_PARAM_PATTERN`) |
-| Pre-share self-check: no `"password":` non-redacted, no `eyJ…` JWT-shaped | matches the regex set the script defends against |
+| Sanitized URL replaces `<redacted>` for secret query keys | `SECRET_QUERY_PARAM_PATTERN` defined at line 43; `sanitizeUrl()` body lines 64–78; the secret-key replacement loop runs at lines 69–74 |
+| Pre-share self-check covers the same secret surfaces the storage-time sanitizer protects | grep set in runbook §"Sharing the artifact safely" (4 checks); see synthetic-leak fixture below for adversarial validation |
 
 ## Recipe verification — `--mock` against real Docker prod env
 
@@ -72,17 +72,72 @@ test -f scripts/ops/integration-k3wise-live-poc-preflight.mjs && echo OK
 
 All three return `OK`.
 
-### 2. Pre-share self-check pattern works on a real artifact
+### 2. Pre-share self-check — both clean artifact AND adversarial fixture
+
+The runbook's pre-share self-check has four greps (JSON `password` field,
+`eyJ…` JWT shape, secret-keyed URL query params, raw `postgres://user:pass@`
+userinfo). Two angles of validation:
+
+**(a) Real, sanitized artifact** — every check returns `0`:
 
 ```bash
 ART=artifacts/integration-k3wise-onprem-preflight/142-real-env
-grep -cE '"password":\s*"[^<]' "$ART"/preflight.json   # → 0
-grep -cE 'eyJ[A-Za-z0-9_-]{20,}' "$ART"/preflight.json # → 0
-grep -cE 'eyJ[A-Za-z0-9_-]{20,}' "$ART"/preflight.md   # → 0
+grep -cE '"password":\s*"[^<]' "$ART"/preflight.json                                                    # → 0
+grep -cE 'eyJ[A-Za-z0-9_-]{20,}' "$ART"/preflight.json "$ART"/preflight.md                              # → 0
+grep -oE '[?&](access[-_]?token|token|password|secret|sign(ature)?|api[-_]?key|session(_)?id|auth)=[^&"[:space:]]+' \
+    "$ART"/preflight.json "$ART"/preflight.md \
+  | grep -vEc '=(<redacted>|%3Credacted%3E)$'                                                           # → 0
+grep -oE 'postgres(ql)?://[^:/?@[:space:]]+:[^@[:space:]]+@' "$ART"/preflight.json "$ART"/preflight.md \
+  | grep -vEc ':(<redacted>|%3Credacted%3E)@$'                                                          # → 0
 ```
 
-All three return `0`. The self-check pattern documented in the runbook
-correctly identifies the absence of secrets in a real, sanitized artifact.
+All four return `0` against the real 142 PoC artifact, confirming the new
+checks don't false-positive on legitimate sanitized output.
+
+**(b) Synthetic leak fixture** — the new checks catch what the old two miss.
+
+Fixture (an artifact post-edited to introduce a leak the preflight's own
+sanitizer would have prevented):
+
+```json
+{
+  "checks": [
+    { "id": "k3.live-config",
+      "details": { "apiUrl": "http://k3.example.test:8080/K3API/?access_token=ABC123leak&password=PWleak1234&sign=SIGNleak" } },
+    { "id": "env.database-url",
+      "details": { "masked": "postgres://metasheet:hunter2_RAW_secret@10.0.0.5:5432/metasheet" } }
+  ]
+}
+```
+
+Running the **old** two-check set against it:
+
+```
+"password": JSON-field check → 0   ← MISS (the password leak is in a URL query, not a JSON field)
+eyJ JWT-shape check          → 0   ← MISS (no JWT-shaped string)
+```
+
+Old self-check would clear this artifact for sharing. That is the gap.
+
+Running the **new** four-check set:
+
+```
+JSON-field "password" check  → 0   (no JSON field — same as before)
+eyJ JWT-shape check          → 0   (no JWT-shape — same as before)
+URL query secret check       → 3   ← CATCHES ?access_token=ABC123leak,
+                                       &password=PWleak1234, &sign=SIGNleak
+Raw postgres userinfo check  → 1   ← CATCHES postgres://metasheet:hunter2_RAW_secret@
+```
+
+The new checks block sharing of the synthetic-leak artifact. Reproducible
+with `/tmp/runbook-leak-test/synthetic-leak.json` from the local validation
+session that produced this report.
+
+**Acceptable values** — both new checks normalize against `<redacted>` (the
+literal string written by `redactString` to stdout/MD) and `%3Credacted%3E`
+(the URL-percent-encoded form `JSON.stringify` produces from the same value
+inside a `URL` object's query). The grep `-v` filters those acceptable
+markers before counting, so a legitimately-sanitized artifact returns `0`.
 
 ### 3. Existing test suites unaffected
 

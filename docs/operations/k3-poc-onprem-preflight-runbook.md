@@ -266,16 +266,40 @@ or paste into chat:
   `api_key` / `session_id` / `auth`) are replaced with `<redacted>` before
   being placed in the JSON.
 
-Pre-share self-check:
+Pre-share self-check (run all four; every count must be `0`):
 
 ```bash
 ART=artifacts/integration-k3wise-onprem-preflight/<runId>
+
+# 1. JSON field literally named "password" carrying a non-redacted value.
 grep -cE '"password":\s*"[^<]' "$ART"/preflight.json
+
+# 2. JWT-shaped tokens (eyJ...).
 grep -cE 'eyJ[A-Za-z0-9_-]{20,}' "$ART"/preflight.json "$ART"/preflight.md
+
+# 3. URL query params with a secret-shaped key whose value is NOT <redacted>
+#    or %3Credacted%3E. Catches K3_API_URL ?access_token=… leaks the
+#    JSON-field check (1) misses because the secret lives inside a URL string,
+#    not a JSON field. Covers: access_token / token / password / secret /
+#    sign / signature / api_key / session_id / auth.
+grep -oE '[?&](access[-_]?token|token|password|secret|sign(ature)?|api[-_]?key|session(_)?id|auth)=[^&"[:space:]]+' \
+    "$ART"/preflight.json "$ART"/preflight.md \
+  | grep -vEc '=(<redacted>|%3Credacted%3E)$'
+
+# 4. Raw postgres userinfo: postgres://user:rawpass@host where rawpass is NOT
+#    <redacted> or %3Credacted%3E. Catches a raw DATABASE_URL that escaped
+#    sanitization (operator pasted unmasked, log truncation re-introduced it,
+#    sanitizeUrl regression, etc.).
+grep -oE 'postgres(ql)?://[^:/?@[:space:]]+:[^@[:space:]]+@' \
+    "$ART"/preflight.json "$ART"/preflight.md \
+  | grep -vEc ':(<redacted>|%3Credacted%3E)@$'
 ```
 
-All three counts should be `0`. If any is `>0`, the artifact has been edited
-after the script wrote it — do not share until you confirm what was added.
+All four counts must be `0`. The only acceptable values for a secret-shaped
+URL slot are the literal string `<redacted>` (in stdout/MD) or its
+URL-percent-encoded form `%3Credacted%3E` (in JSON). Anything else means the
+artifact was post-edited or the sanitizer regressed — **do not share** until
+you understand why.
 
 The `artifacts/integration-k3wise-onprem-preflight/` directory is gitignored
 so accidental `git add` won't surface artifacts containing host topology
@@ -299,7 +323,8 @@ information into the repo history.
 | `pg.migrations-aligned: skip` with "pnpm/tsx not on PATH" on what should be a dev box | Running inside the slim prod container | Re-run from host repo checkout, or accept and pass `--skip-migrations` |
 | `k3.live-reachable: fail` with `ECONNREFUSED` against a known-good K3 | Wrong port — URL implies 80, K3 listens on `8080` / `8088` | Confirm port with customer; update GATE answer |
 | Decision is `PASS` (exit 0) but operators see app failures | Preflight only checks env / DB reachability / config presence; not boot | Run the application's own smoke after the preflight |
-| `preflight.json` contains a value that looks like a token | Storage-time sanitizer regression (no real case observed yet) | Re-run `pnpm verify:integration-k3wise:onprem-preflight` to catch via the unit test; file a bug |
+| Pre-share self-check #3 returns `>0` | URL with `?access_token=…` (or `password=`/`secret=`/`sign=`/`api_key=`/`session_id=`/`auth=`) reached `preflight.json` with a non-redacted value | Storage-time `sanitizeUrl` regression. Re-run `pnpm verify:integration-k3wise:onprem-preflight`; file a bug. Don't share the artifact. |
+| Pre-share self-check #4 returns `>0` | Raw `postgres://user:rawpass@host` value present | DATABASE_URL leaked into a non-`masked` field (custom field, unredacted log paste, etc.). Find the source and remove before sharing. |
 
 ## See also
 
