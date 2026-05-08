@@ -98,10 +98,25 @@ async function main() {
   assert.equal(summary[0].fieldDetails[0].id, 'sourceSystemId')
   assert.equal(summary[0].fieldDetails[0].name, 'Source System')
   assert.equal(summary[0].fieldDetails[0].type, 'string')
+  assert.deepEqual(summary[0].fieldDetails[0].property.validation, [{ type: 'required' }])
   const standardMaterialsSummary = summary.find((d) => d.id === 'standard_materials')
+  const codeFieldSummary = standardMaterialsSummary.fieldDetails.find((f) => f.id === 'code')
   const statusFieldSummary = standardMaterialsSummary.fieldDetails.find((f) => f.id === 'status')
+  assert.deepEqual(codeFieldSummary.property.validation, [{ type: 'required' }])
   assert.deepEqual(statusFieldSummary.options, ['draft', 'active', 'obsolete'])
+  assert.deepEqual(statusFieldSummary.property.validation, [{ type: 'required' }])
   assert.equal(statusFieldSummary.required, undefined, 'field details do not re-expose authoring-only required')
+
+  statusFieldSummary.property.validation.push({ type: 'mutated-by-caller' })
+  const summaryAfterMutation = listStagingDescriptors()
+  const statusFieldAfterMutation = summaryAfterMutation
+    .find((d) => d.id === 'standard_materials')
+    .fieldDetails.find((f) => f.id === 'status')
+  assert.deepEqual(
+    statusFieldAfterMutation.property.validation,
+    [{ type: 'required' }],
+    'field detail property is copied defensively',
+  )
 
   // --- 1b. Required fields materialize into property.validation --------
   // Raw authored fields use `required: true`; the materialized descriptor
