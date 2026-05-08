@@ -50,13 +50,13 @@ Without the trailing `clear B.Parent` assertion, a regression that broke ALL hie
 
 ### Auth helpers typed as `APIRequestContext`
 
-Following Codex's #1417 review hardening (`request: any` → `APIRequestContext`), this spec types both `authPost` / `authPatch` / `authGet` and the failure-expected variants (`authPostExpectingFailure`, `authPatchExpectingFailure`) with `APIRequestContext` from `@playwright/test`. Same for the `Page` parameter on `injectTokenAndGo`.
+Following Codex's #1417 review hardening (`request: any` → `APIRequestContext`), this spec types `authPost` / `authPatch`, the expected-failure `authPatchExpectingFailure`, and the `Page` parameter on `injectTokenAndGo` with imports from `@playwright/test`.
 
 ## Files changed
 
 | File | Lines |
 |---|---|
-| `packages/core-backend/tests/e2e/multitable-hierarchy-smoke.spec.ts` | +new (~210) |
+| `packages/core-backend/tests/e2e/multitable-hierarchy-smoke.spec.ts` | +new |
 | `packages/core-backend/tests/e2e/README.md` | +1 |
 | `docs/development/multitable-feishu-rc-todo-20260430.md` | tick line 112 + add PR/MD pointers |
 | `docs/development/multitable-rc-hierarchy-smoke-development-20260507.md` | +new |

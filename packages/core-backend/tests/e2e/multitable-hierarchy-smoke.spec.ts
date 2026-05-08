@@ -61,14 +61,6 @@ async function authPost(request: APIRequestContext, path: string, body: unknown)
   return json
 }
 
-async function authPostExpectingFailure(request: APIRequestContext, path: string, body: unknown) {
-  const res = await request.post(`${API}${path}`, {
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    data: body,
-  })
-  return { status: res.status(), body: await res.json().catch(() => null) }
-}
-
 async function authPatch(request: APIRequestContext, path: string, body: unknown) {
   const res = await request.patch(`${API}${path}`, {
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },

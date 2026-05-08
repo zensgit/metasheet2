@@ -110,7 +110,7 @@ Do not mark an item done if:
   - Verification summary: same `140/140` staging run passed `ui.filter-builder.typed-controls-replay`; the runner added select/date/number filters through the toolbar UI, verified saved `filterInfo`, reloaded the view, and confirmed all three controls hydrated from persistence.
 - [ ] Smoke test Gantt view rendering.
 - [x] Smoke test Hierarchy view rendering and child creation.
-  - PR: pending
+  - PR: #1419
   - Merge commit: pending
   - Development MD: `docs/development/multitable-rc-hierarchy-smoke-development-20260507.md`
   - Verification MD: `docs/development/multitable-rc-hierarchy-smoke-verification-20260507.md`

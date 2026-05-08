@@ -15,9 +15,9 @@ Result:
 
 ```
 Listing tests:
-  multitable-hierarchy-smoke.spec.ts:128:7 › Multitable Hierarchy smoke › renders parent and child records in the hierarchy workbench
-  multitable-hierarchy-smoke.spec.ts:155:7 › Multitable Hierarchy smoke › rejects setting a record as its own parent (HIERARCHY_CYCLE)
-  multitable-hierarchy-smoke.spec.ts:171:7 › Multitable Hierarchy smoke › rejects setting a descendant as the parent (HIERARCHY_CYCLE through chain)
+  multitable-hierarchy-smoke.spec.ts:120:7 › Multitable Hierarchy smoke › renders parent and child records in the hierarchy workbench
+  multitable-hierarchy-smoke.spec.ts:147:7 › Multitable Hierarchy smoke › rejects setting a record as its own parent (HIERARCHY_CYCLE)
+  multitable-hierarchy-smoke.spec.ts:163:7 › Multitable Hierarchy smoke › rejects setting a descendant as the parent (HIERARCHY_CYCLE through chain)
 Total: 3 tests in 1 file
 ```
 
@@ -40,7 +40,7 @@ Result: passed.
 ## Scoped diff
 
 ```
-packages/core-backend/tests/e2e/multitable-hierarchy-smoke.spec.ts | +210 (new)
+packages/core-backend/tests/e2e/multitable-hierarchy-smoke.spec.ts | new
 packages/core-backend/tests/e2e/README.md                          | +1 / -1
 docs/development/multitable-feishu-rc-todo-20260430.md             | +5 / -1 (tick line 112 + PR/MD pointers)
 docs/development/multitable-rc-hierarchy-smoke-development-20260507.md | new
