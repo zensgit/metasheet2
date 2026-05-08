@@ -29,7 +29,7 @@ test('buildEvidenceReport returns PASS for complete Save-only evidence', () => {
   assert.equal(report.issues.length, 0)
   assert.equal(report.scope.bomRequired, true)
   assert.equal(report.phases.find((phase) => phase.id === 'bomPoC').status, 'pass')
-  assert.match(renderMarkdown(report), /Decision: PASS/)
+  assert.match(renderMarkdown(report), /Decision: `PASS`/)
 })
 
 test('buildEvidenceReport returns PARTIAL when a required phase is missing', () => {
@@ -62,6 +62,24 @@ test('buildEvidenceReport rejects unredacted secret-like evidence fields', () =>
   assert.throws(
     () => buildEvidenceReport(packet(), evidence),
     (error) => error instanceof LivePocEvidenceError && error.details.secretLeaks.includes('evidence.connections.k3Wise.sessionToken'),
+  )
+})
+
+test('buildEvidenceReport rejects secret-bearing evidence text in non-secret fields', () => {
+  const evidence = sampleEvidence()
+  evidence.gate.archivePath = 'https://share.example.test/k3-gate.zip?access_token=live-token-123456'
+  assert.throws(
+    () => buildEvidenceReport(packet(), evidence),
+    (error) => error instanceof LivePocEvidenceError && error.details.secretLeaks.includes('evidence.gate.archivePath'),
+    'secret-bearing archivePath must be rejected even though key name is not secret-like',
+  )
+
+  const evidence2 = sampleEvidence()
+  evidence2.connections.k3Wise.requestId = 'Bearer liveBearerToken123456'
+  assert.throws(
+    () => buildEvidenceReport(packet(), evidence2),
+    (error) => error instanceof LivePocEvidenceError && error.details.secretLeaks.includes('evidence.connections.k3Wise.requestId'),
+    'Bearer token in free-text evidence must be rejected',
   )
 })
 
@@ -401,10 +419,58 @@ test('CLI writes redacted JSON and Markdown reports', async () => {
     const json = await readFile(path.join(dir, 'integration-k3wise-live-poc-evidence-report.json'), 'utf8')
     const md = await readFile(path.join(dir, 'integration-k3wise-live-poc-evidence-report.md'), 'utf8')
     assert.match(json, /"decision": "PASS"/)
-    assert.match(md, /Decision: PASS/)
+    assert.match(md, /Decision: `PASS`/)
     assert.equal(json.includes('password'), false)
     assert.equal(md.includes('sessionToken'), false)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+test('renderMarkdown keeps evidence report tables stable for markdown-breaking values', () => {
+  const markdown = renderMarkdown({
+    schemaVersion: 1,
+    generatedAt: '2026-05-07T09:00:00.000Z',
+    decision: 'FAIL|manual\nreview',
+    packet: {
+      tenantId: 'tenant|one\nnext',
+      workspaceId: 'workspace`one`\nnext',
+      safety: {
+        saveOnly: true,
+        autoSubmit: false,
+        autoAudit: false,
+      },
+    },
+    scope: {
+      bomRequired: true,
+      sqlChannelExpected: false,
+    },
+    phases: [
+      {
+        label: 'Material|Save\n`only`',
+        required: true,
+        status: 'fail\nretry',
+        evidence: 'run|001\nsee operator note',
+      },
+    ],
+    issues: [
+      {
+        severity: 'fail|hard',
+        code: 'SAVE|ONLY\nVIOLATED',
+        phaseId: 'materialSaveOnly\nphase',
+        message: 'Submit call | observed\n`unsafe`',
+      },
+    ],
+    redactedEvidence: {},
+  })
+
+  assert.match(markdown, /Decision: `FAIL\|manual review`/)
+  assert.match(markdown, /Workspace: ``workspace`one` next``/)
+  assert.equal(markdown.includes('see operator note\n'), false)
+  assert.equal(markdown.includes('observed\n`unsafe`'), false)
+
+  const tableRows = markdown.split('\n').filter((line) => line.startsWith('| '))
+  assert.equal(tableRows.length, 4)
+  assert.equal(tableRows[1], '| `` Material\\|Save `only` `` | `yes` | `fail retry` | `run\\|001 see operator note` |')
+  assert.equal(tableRows[3], '| `fail\\|hard` | `SAVE\\|ONLY VIOLATED` | `materialSaveOnly phase` | `` Submit call \\| observed `unsafe` `` |')
 })

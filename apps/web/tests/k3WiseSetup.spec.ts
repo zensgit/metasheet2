@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { readFile } from 'node:fs/promises'
 import {
   applyExternalSystemToForm,
+  buildK3WiseDeployGateChecklist,
   buildK3WisePipelineObservationQuery,
   buildK3WisePipelinePayloads,
   buildK3WisePipelineRunPayload,
@@ -12,6 +13,7 @@ import {
   getIntegrationStagingFieldCount,
   getK3WisePipelineId,
   splitList,
+  summarizeK3WiseDeployGateChecklist,
   validateK3WisePipelineObservationForm,
   validateK3WisePipelineTemplateForm,
   validateK3WisePipelineRunForm,
@@ -90,6 +92,57 @@ describe('K3 WISE setup helpers', () => {
       kind: 'erp:k3-wise-webapi',
     })
     expect(payloads.webApi).not.toHaveProperty('credentials')
+  })
+
+  it('persists disabling an existing SQL Server channel without clearing stored config', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      webApiSystemId: 'webapi_1',
+      webApiHasCredentials: true,
+      version: 'K3 WISE 15.x test',
+      baseUrl: 'https://k3.example.test/K3API/',
+      acctId: '',
+      username: '',
+      password: '',
+      sqlEnabled: false,
+      sqlSystemId: 'sql_1',
+      sqlName: 'K3 WISE SQL Server',
+      sqlHasCredentials: true,
+    })
+
+    expect(validateK3WiseSetupForm(form)).toEqual([])
+    const payloads = buildK3WiseSetupPayloads(form)
+
+    expect(payloads.sqlServer).toEqual({
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      id: 'sql_1',
+      name: 'K3 WISE SQL Server',
+      kind: 'erp:k3-wise-sqlserver',
+      role: 'bidirectional',
+      status: 'inactive',
+    })
+  })
+
+  it('does not create a SQL Server system when disabled and no prior system exists', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      webApiSystemId: 'webapi_1',
+      webApiHasCredentials: true,
+      version: 'K3 WISE 15.x test',
+      baseUrl: 'https://k3.example.test/K3API/',
+      acctId: '',
+      username: '',
+      password: '',
+      sqlEnabled: false,
+      sqlSystemId: '',
+    })
+
+    expect(validateK3WiseSetupForm(form)).toEqual([])
+    expect(buildK3WiseSetupPayloads(form).sqlServer).toBeNull()
   })
 
   it('loads public external-system config without exposing credentials', () => {
@@ -424,5 +477,88 @@ describe('K3 WISE setup helpers', () => {
     expect(messages).toContain('tenantId is required')
     expect(messages).toContain('BOM pipeline ID is required before loading run history')
     expect(() => buildK3WisePipelineObservationQuery(form, 'bom')).toThrow('tenantId is required')
+  })
+
+  it('summarizes deploy readiness fields that can be filled after deployment', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      version: 'K3 WISE 15.x test',
+      baseUrl: 'https://k3.example.test/K3API/',
+      acctId: 'AIS_TEST',
+      username: 'k3-user',
+      password: 'secret',
+    })
+
+    const checklist = buildK3WiseDeployGateChecklist(form)
+    const summary = summarizeK3WiseDeployGateChecklist(checklist)
+    const byId = Object.fromEntries(checklist.map((item) => [item.id, item]))
+
+    expect(byId.webapi?.status).toBe('ready')
+    expect(byId['webapi-credentials']?.status).toBe('ready')
+    expect(byId['sql-channel']?.status).toBe('warning')
+    expect(byId['plm-source']?.status).toBe('external')
+    expect(byId.staging?.status).toBe('missing')
+    expect(summary).toMatchObject({
+      external: 1,
+      canSaveConfiguration: true,
+      canCreatePipelines: false,
+      canRunDryRun: false,
+      canRunLive: false,
+    })
+  })
+
+  it('marks internal dry-run ready only after source, target, staging, and pipeline ids exist', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      projectId: 'project_1',
+      webApiSystemId: 'k3_1',
+      webApiHasCredentials: true,
+      version: 'K3 WISE 15.x test',
+      baseUrl: 'https://k3.example.test/K3API/',
+      sourceSystemId: 'plm_1',
+      materialPipelineId: 'pipe_material',
+      bomPipelineId: 'pipe_bom',
+    })
+
+    const checklist = buildK3WiseDeployGateChecklist(form)
+    const summary = summarizeK3WiseDeployGateChecklist(checklist)
+    const byId = Object.fromEntries(checklist.map((item) => [item.id, item]))
+
+    expect(byId['pipeline-template']?.status).toBe('ready')
+    expect(byId['pipeline-dry-run']?.status).toBe('ready')
+    expect(byId['pipeline-live-run']?.status).toBe('ready')
+    expect(summary.canSaveConfiguration).toBe(true)
+    expect(summary.canCreatePipelines).toBe(true)
+    expect(summary.canRunDryRun).toBe(true)
+    expect(summary.canRunLive).toBe(false)
+  })
+
+  it('requires an explicit live-run opt-in before deploy checklist allows real pipeline execution', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      projectId: 'project_1',
+      webApiSystemId: 'k3_1',
+      webApiHasCredentials: true,
+      version: 'K3 WISE 15.x test',
+      baseUrl: 'https://k3.example.test/K3API/',
+      sourceSystemId: 'plm_1',
+      materialPipelineId: 'pipe_material',
+      bomPipelineId: 'pipe_bom',
+      allowLivePipelineRun: true,
+    })
+
+    const checklist = buildK3WiseDeployGateChecklist(form)
+    const summary = summarizeK3WiseDeployGateChecklist(checklist)
+    const liveRun = checklist.find((item) => item.id === 'pipeline-live-run')
+
+    expect(liveRun).toMatchObject({
+      status: 'warning',
+      field: 'allowLivePipelineRun',
+    })
+    expect(summary.canRunLive).toBe(true)
   })
 })

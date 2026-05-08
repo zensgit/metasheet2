@@ -23,7 +23,10 @@ import {
   collectSameSheetLinkChangeFieldIds,
   loadHierarchyParentFieldIds,
 } from './hierarchy-cycle-guard'
-import { allocateAutoNumberValues } from './auto-number-service'
+import {
+  acquireAutoNumberSheetWriteLock,
+  allocateAutoNumberValues,
+} from './auto-number-service'
 import { getDefaultValidationRules, validateRecord } from './field-validation-engine'
 import type { FieldValidationConfig } from './field-validation'
 import { loadFieldsForSheet } from './loaders'
@@ -413,140 +416,142 @@ export class RecordService {
       throw new RecordPermissionError('Insufficient permissions')
     }
 
-    const fieldRes = await this.pool.query(
-      'SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1',
-      [sheetId],
-    )
-    if (fieldRes.rows.length === 0) {
-      throw new RecordNotFoundError(`Sheet not found: ${sheetId}`)
-    }
-
-    const fieldById = buildCreateFieldGuardMap(fieldRes.rows)
     const patch: Record<string, unknown> = {}
-    const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
+    const recordId = `rec_${randomUUID()}`
+    const recordRes = await this.pool.transaction(async ({ query }) => {
+      await acquireAutoNumberSheetWriteLock(query, sheetId)
 
-    for (const [fieldId, value] of Object.entries(data)) {
-      const field = fieldById.get(fieldId)
-      if (!field) {
-        throw new RecordValidationError(`Unknown fieldId: ${fieldId}`)
+      const fieldRes = await query(
+        'SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1',
+        [sheetId],
+      )
+      if (fieldRes.rows.length === 0) {
+        throw new RecordNotFoundError(`Sheet not found: ${sheetId}`)
       }
 
-      if (isFieldAlwaysReadOnly(field)) {
-        throw new RecordFieldForbiddenError(`Field is readonly: ${fieldId}`, fieldId)
-      }
+      const fieldById = buildCreateFieldGuardMap(fieldRes.rows)
+      const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
 
-      if (field.type === 'select') {
-        if (typeof value !== 'string') {
-          throw new RecordValidationError(`Select value must be string: ${fieldId}`)
+      for (const [fieldId, value] of Object.entries(data)) {
+        const field = fieldById.get(fieldId)
+        if (!field) {
+          throw new RecordValidationError(`Unknown fieldId: ${fieldId}`)
         }
-        const allowed = new Set(field.options ?? [])
-        if (value !== '' && !allowed.has(value)) {
-          throw new RecordValidationError(`Invalid select option for ${fieldId}: ${value}`)
+
+        if (isFieldAlwaysReadOnly(field)) {
+          throw new RecordFieldForbiddenError(`Field is readonly: ${fieldId}`, fieldId)
         }
-      }
-      if (field.type === 'multiSelect') {
-        try {
-          patch[fieldId] = normalizeMultiSelectValue(value, fieldId, field.options ?? [])
-        } catch (error) {
-          throw new RecordValidationError(error instanceof Error ? error.message : String(error))
+
+        if (field.type === 'select') {
+          if (typeof value !== 'string') {
+            throw new RecordValidationError(`Select value must be string: ${fieldId}`)
+          }
+          const allowed = new Set(field.options ?? [])
+          if (value !== '' && !allowed.has(value)) {
+            throw new RecordValidationError(`Invalid select option for ${fieldId}: ${value}`)
+          }
         }
-        continue
-      }
-
-      if (field.type === 'link') {
-        if (field.link) {
-          const ids = normalizeLinkIds(value)
-          if (field.link.limitSingleRecord && ids.length > 1) {
-            throw new RecordValidationError(`Link field only allows a single record: ${fieldId}`)
+        if (field.type === 'multiSelect') {
+          try {
+            patch[fieldId] = normalizeMultiSelectValue(value, fieldId, field.options ?? [])
+          } catch (error) {
+            throw new RecordValidationError(error instanceof Error ? error.message : String(error))
           }
-          const tooLong = ids.find((id) => id.length > 50)
-          if (tooLong) {
-            throw new RecordValidationError(`Link id too long (>50): ${tooLong}`)
-          }
-
-          if (ids.length > 0) {
-            const exists = await this.pool.query(
-              'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
-              [field.link.foreignSheetId, ids],
-            )
-            const found = new Set(
-              (exists.rows as Array<Record<string, unknown>>)
-                .map((row) => (typeof row.id === 'string' ? row.id : ''))
-                .filter((id) => id.length > 0),
-            )
-            const missing = ids.filter((id) => !found.has(id))
-            if (missing.length > 0) {
-              throw new RecordValidationError(
-                `Linked record(s) not found in sheet ${field.link.foreignSheetId}: ${missing.join(', ')}`,
-              )
-            }
-          }
-
-          patch[fieldId] = ids
-          linkUpdates.set(fieldId, { ids, cfg: field.link })
           continue
         }
 
-        if (typeof value !== 'string') {
-          throw new RecordValidationError(`Link value must be string: ${fieldId}`)
+        if (field.type === 'link') {
+          if (field.link) {
+            const ids = normalizeLinkIds(value)
+            if (field.link.limitSingleRecord && ids.length > 1) {
+              throw new RecordValidationError(`Link field only allows a single record: ${fieldId}`)
+            }
+            const tooLong = ids.find((id) => id.length > 50)
+            if (tooLong) {
+              throw new RecordValidationError(`Link id too long (>50): ${tooLong}`)
+            }
+
+            if (ids.length > 0) {
+              const exists = await query(
+                'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+                [field.link.foreignSheetId, ids],
+              )
+              const found = new Set(
+                (exists.rows as Array<Record<string, unknown>>)
+                  .map((row) => (typeof row.id === 'string' ? row.id : ''))
+                  .filter((id) => id.length > 0),
+              )
+              const missing = ids.filter((id) => !found.has(id))
+              if (missing.length > 0) {
+                throw new RecordValidationError(
+                  `Linked record(s) not found in sheet ${field.link.foreignSheetId}: ${missing.join(', ')}`,
+                )
+              }
+            }
+
+            patch[fieldId] = ids
+            linkUpdates.set(fieldId, { ids, cfg: field.link })
+            continue
+          }
+
+          if (typeof value !== 'string') {
+            throw new RecordValidationError(`Link value must be string: ${fieldId}`)
+          }
         }
+
+        if (field.type === 'attachment') {
+          const ids = normalizeAttachmentIdsShared(value)
+          const tooLong = ids.find((id) => id.length > 100)
+          if (tooLong) {
+            throw new RecordValidationError(`Attachment id too long: ${tooLong}`)
+          }
+          const attachmentError = await ensureAttachmentIdsExistShared({
+            query,
+            sheetId,
+            fieldId,
+            attachmentIds: ids,
+          })
+          if (attachmentError) {
+            throw new RecordValidationError(attachmentError)
+          }
+          patch[fieldId] = ids
+          continue
+        }
+
+        if (field.type === 'formula') {
+          if (typeof value !== 'string') continue
+          if (value !== '' && !value.startsWith('=')) continue
+        }
+
+        if (field.type === 'longText') {
+          try {
+            patch[fieldId] = validateLongTextValue(value, fieldId)
+          } catch (error) {
+            throw new RecordValidationError(error instanceof Error ? error.message : String(error))
+          }
+          continue
+        }
+
+        if (BATCH1_FIELD_TYPES.has(field.type)) {
+          try {
+            patch[fieldId] = coerceBatch1Value(field.type, field.property, fieldId, value)
+          } catch (error) {
+            throw new RecordValidationError(error instanceof Error ? error.message : String(error))
+          }
+          continue
+        }
+
+        patch[fieldId] = value
       }
 
-      if (field.type === 'attachment') {
-        const ids = normalizeAttachmentIdsShared(value)
-        const tooLong = ids.find((id) => id.length > 100)
-        if (tooLong) {
-          throw new RecordValidationError(`Attachment id too long: ${tooLong}`)
-        }
-        const attachmentError = await ensureAttachmentIdsExistShared({
-          query: this.pool.query.bind(this.pool),
-          sheetId,
-          fieldId,
-          attachmentIds: ids,
-        })
-        if (attachmentError) {
-          throw new RecordValidationError(attachmentError)
-        }
-        patch[fieldId] = ids
-        continue
+      const directValidationResult = validateRecord(
+        buildDirectValidationFields(fieldRes.rows),
+        patch,
+      )
+      if (!directValidationResult.valid) {
+        throw new RecordValidationFailedError(directValidationResult.errors)
       }
 
-      if (field.type === 'formula') {
-        if (typeof value !== 'string') continue
-        if (value !== '' && !value.startsWith('=')) continue
-      }
-
-      if (field.type === 'longText') {
-        try {
-          patch[fieldId] = validateLongTextValue(value, fieldId)
-        } catch (error) {
-          throw new RecordValidationError(error instanceof Error ? error.message : String(error))
-        }
-        continue
-      }
-
-      if (BATCH1_FIELD_TYPES.has(field.type)) {
-        try {
-          patch[fieldId] = coerceBatch1Value(field.type, field.property, fieldId, value)
-        } catch (error) {
-          throw new RecordValidationError(error instanceof Error ? error.message : String(error))
-        }
-        continue
-      }
-
-      patch[fieldId] = value
-    }
-
-    const directValidationResult = validateRecord(
-      buildDirectValidationFields(fieldRes.rows),
-      patch,
-    )
-    if (!directValidationResult.valid) {
-      throw new RecordValidationFailedError(directValidationResult.errors)
-    }
-
-    const recordId = `rec_${randomUUID()}`
-    const recordRes = await this.pool.transaction(async ({ query }) => {
       Object.assign(patch, await allocateAutoNumberValues(query, sheetId, Array.from(fieldById, ([id, field]) => ({
         id,
         type: field.type,
