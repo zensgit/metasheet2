@@ -151,6 +151,25 @@ async function main() {
   assert.equal(readCall.searchParams.status, 'approved')
   assert.equal(readCall.searchParams.updated_at, '2026-04-24T00:00:00Z')
 
+  await adapter.read({
+    object: 'materials',
+    limit: 50000,
+    cursor: 'safe-cursor',
+    filters: { status: 'approved' },
+    watermark: { updated_at: '2026-04-24T00:00:00Z' },
+    options: {
+      query: {
+        limit: 999999,
+        cursor: 'evil-cursor',
+        vendorFlag: 'yes',
+      },
+    },
+  })
+  const guardedReadCall = calls.filter((call) => call.pathname === '/api/materials' && call.options.method === 'GET').at(-1)
+  assert.equal(guardedReadCall.searchParams.limit, '10000', 'options.query cannot override normalized MAX_READ_LIMIT cap')
+  assert.equal(guardedReadCall.searchParams.cursor, 'safe-cursor', 'options.query cannot override normalized cursor')
+  assert.equal(guardedReadCall.searchParams.vendorFlag, 'yes', 'non-reserved vendor query options still pass through')
+
   // --- 4. upsert() posts normalized records and parses counts -----------
   const upsert = await adapter.upsert({
     object: 'materials',
