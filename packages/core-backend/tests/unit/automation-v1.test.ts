@@ -10,6 +10,7 @@ import { EventBus } from '../../src/integration/events/event-bus'
 
 const _executeResults: unknown[] = []
 const _executeTakeFirstResults: unknown[] = []
+const _valuesCalls: unknown[] = []
 
 function makeChain(): Record<string, unknown> {
   const self: Record<string, unknown> = {}
@@ -22,7 +23,12 @@ function makeChain(): Record<string, unknown> {
     'leftJoin',
   ]
   for (const m of methods) {
-    self[m] = vi.fn(chainFn)
+    self[m] = m === 'values'
+      ? vi.fn((value: unknown) => {
+        _valuesCalls.push(value)
+        return self
+      })
+      : vi.fn(chainFn)
   }
   self.execute = vi.fn(async () => {
     return _executeResults.shift() ?? []
@@ -1809,6 +1815,7 @@ describe('AutomationLogService', () => {
   beforeEach(() => {
     _executeResults.length = 0
     _executeTakeFirstResults.length = 0
+    _valuesCalls.length = 0
     logService = new AutomationLogService()
   })
 
@@ -1818,6 +1825,32 @@ describe('AutomationLogService', () => {
     _executeResults.push([])
     await logService.record(exec)
     // If it didn't throw, the insert was called
+  })
+
+  it('record() casts step arrays through jsonb instead of passing a raw PostgreSQL array', async () => {
+    const exec = createExecution({
+      ruleId: 'r1',
+      steps: [
+        {
+          actionType: 'send_email',
+          status: 'success',
+          output: {
+            notificationId: 'notif_1',
+            notificationStatus: 'sent',
+            recipientCount: 2,
+          },
+          durationMs: 205,
+        },
+      ],
+    })
+
+    _executeResults.push([])
+    await logService.record(exec)
+
+    const inserted = _valuesCalls.at(-1) as Record<string, unknown>
+
+    expect(inserted.steps).not.toBe(exec.steps)
+    expect(typeof (inserted.steps as { toOperationNode?: unknown }).toOperationNode).toBe('function')
   })
 
   it('getByRule() returns mapped executions', async () => {
@@ -1976,6 +2009,7 @@ describe('AutomationService — Rule CRUD', () => {
   beforeEach(() => {
     eventBus = new EventBus()
     queryFn = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+    _valuesCalls.length = 0
     const db = makeMockDb()
     service = new AutomationService(eventBus, db as never, queryFn)
   })
@@ -2114,6 +2148,19 @@ describe('AutomationService — Rule CRUD', () => {
     expect(rule).not.toBeNull()
     expect(rule!.id).toBe('atr_123')
     expect(rule!.trigger_type).toBe('record.created')
+  })
+
+  it('executeRule returns the execution even when log persistence fails', async () => {
+    const logFailure = vi.spyOn(service.logs, 'record').mockRejectedValueOnce(new Error('jsonb insert failed'))
+
+    const execution = await service.executeRule(
+      createMockRule({ actions: [] }),
+      { sheetId: 'sheet_1', recordId: 'rec_1', data: {}, _triggeredBy: 'test' },
+    )
+
+    expect(logFailure).toHaveBeenCalledOnce()
+    expect(execution.status).toBe('success')
+    expect(execution.steps).toEqual([])
   })
 
   it('getRule returns null when not found', async () => {
