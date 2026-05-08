@@ -151,6 +151,25 @@ async function main() {
   assert.equal(readCall.searchParams.status, 'approved')
   assert.equal(readCall.searchParams.updated_at, '2026-04-24T00:00:00Z')
 
+  await adapter.read({
+    object: 'materials',
+    limit: 50000,
+    cursor: 'safe-cursor',
+    filters: { status: 'approved' },
+    watermark: { updated_at: '2026-04-24T00:00:00Z' },
+    options: {
+      query: {
+        limit: 999999,
+        cursor: 'evil-cursor',
+        vendorFlag: 'yes',
+      },
+    },
+  })
+  const guardedReadCall = calls.filter((call) => call.pathname === '/api/materials' && call.options.method === 'GET').at(-1)
+  assert.equal(guardedReadCall.searchParams.limit, '10000', 'options.query cannot override normalized MAX_READ_LIMIT cap')
+  assert.equal(guardedReadCall.searchParams.cursor, 'safe-cursor', 'options.query cannot override normalized cursor')
+  assert.equal(guardedReadCall.searchParams.vendorFlag, 'yes', 'non-reserved vendor query options still pass through')
+
   // --- 4. upsert() posts normalized records and parses counts -----------
   const upsert = await adapter.upsert({
     object: 'materials',
@@ -191,6 +210,55 @@ async function main() {
     invalidConfig = error
   }
   assert.ok(invalidConfig instanceof AdapterValidationError, 'non-http baseUrl rejected')
+
+  const unsafePaths = [
+    { label: 'absolute http path', healthPath: 'https://evil.example.test/health' },
+    { label: 'protocol-relative path', healthPath: '//evil.example.test/health' },
+    { label: 'non-http scheme path', healthPath: 'file:///tmp/health' },
+    { label: 'backslash path', healthPath: '\\\\evil.example.test\\health' },
+    { label: 'control-character path', healthPath: '/health\nX-Injected: yes' },
+  ]
+  for (const { label, healthPath } of unsafePaths) {
+    const unsafeAdapter = createHttpAdapter({
+      system: createSystem({
+        config: {
+          ...createSystem().config,
+          healthPath,
+        },
+      }),
+      fetchImpl,
+    })
+    const unsafe = await unsafeAdapter.testConnection().catch((error) => error)
+    assert.equal(unsafe.ok, false, `${label} is rejected by testConnection`)
+    assert.equal(unsafe.code, 'HTTP_TEST_FAILED', `${label} reports HTTP_TEST_FAILED`)
+  }
+
+  const unsafeObjectAdapter = createHttpAdapter({
+    system: createSystem({
+      config: {
+        ...createSystem().config,
+        objects: {
+          unsafe_read: {
+            path: '//evil.example.test/materials',
+            operations: ['read'],
+          },
+          unsafe_write: {
+            path: '/api/materials',
+            upsertPath: 'javascript:alert(1)',
+            operations: ['upsert'],
+          },
+        },
+      },
+    }),
+    fetchImpl,
+  })
+  const unsafeRead = await unsafeObjectAdapter.read({ object: 'unsafe_read' }).catch((error) => error)
+  assert.ok(unsafeRead instanceof AdapterValidationError, 'protocol-relative read path is rejected')
+  const unsafeWrite = await unsafeObjectAdapter.upsert({
+    object: 'unsafe_write',
+    records: [{ code: 'A-01' }],
+  }).catch((error) => error)
+  assert.ok(unsafeWrite instanceof AdapterValidationError, 'scheme-bearing upsert path is rejected')
 
   let httpFailure = null
   try {
