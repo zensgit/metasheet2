@@ -238,16 +238,18 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
     }
 
     if (existing) {
-      if (existing.kind !== normalized.kind || existing.role !== normalized.role) {
+      const role = input.role === undefined ? existing.role : normalized.role
+      const status = input.status === undefined ? existing.status : normalized.status
+      if (existing.kind !== normalized.kind || existing.role !== role) {
         throw new ExternalSystemValidationError('kind and role cannot be changed after creation', {
           id: existing.id,
           existingKind: existing.kind,
           existingRole: existing.role,
           requestedKind: normalized.kind,
-          requestedRole: normalized.role,
+          requestedRole: role,
         })
       }
-      const updateRow = { ...baseRow }
+      const updateRow = { ...baseRow, role, status }
       // Preserve stored config/capabilities when the caller did not explicitly
       // provide them. A status-only or name-only update must not wipe stored
       // connection config (baseUrl, orgId, etc.) or capability flags.
