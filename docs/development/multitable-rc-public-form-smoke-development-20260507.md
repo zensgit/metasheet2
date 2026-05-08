@@ -2,7 +2,7 @@
 
 > Date: 2026-05-07
 > Branch: `codex/multitable-rc-smoke-public-form-20260507`
-> Base: `origin/main@4d648f345` (after PR #1398 idempotency-fields merge)
+> Base: `origin/main@35f70a230` (after PR #1416 ERP PLM phase 2 runtime closeout docs merge)
 > Closes RC TODO line 108: `Smoke test public form submit path`
 
 ## Background
@@ -17,9 +17,10 @@ Public form submission is a more interesting smoke than basic record create beca
 
 - New Playwright spec `packages/core-backend/tests/e2e/multitable-public-form-smoke.spec.ts` containing three `test` cases:
   1. **Happy path**: admin creates base + sheet + string field + grid view (using the lifecycle template), then `PATCH /sheets/:sheetId/views/:viewId/form-share` with `{enabled: true, accessMode: 'public'}` to obtain `publicToken`. An anonymous request (no `Authorization` header) submits via `POST /views/:viewId/submit` with `{publicToken, data: {[fieldId]: 'pf-anon-…'}}`. The test then logs back in as admin and uses `GET /records?sheetId=…` to confirm the record persists with the expected cell value.
-  2. **Disabled-view regression guard**: admin creates the same sheet + view layout but **does not** call PATCH form-share. Anonymous submit with a fabricated `publicToken` returns 401.
-  3. **Rotated-token regression guard**: admin enables form-share, captures `oldToken`, calls `POST /form-share/regenerate` to obtain `newToken`, asserts `oldToken !== newToken`. Anonymous submit with `oldToken` returns 401; anonymous submit with `newToken` succeeds. Confirms the regenerate endpoint actually invalidates the prior credential rather than just adding a parallel one.
+  2. **Disabled-view regression guard**: admin creates the same sheet + view layout but **does not** call PATCH form-share. Anonymous submit with a fabricated `publicToken` returns `401` with `Authentication required`.
+  3. **Rotated-token regression guard**: admin enables form-share, captures `oldToken`, calls `POST /form-share/regenerate` to obtain `newToken`, asserts `oldToken !== newToken`. Anonymous submit with `oldToken` returns `401` with `Authentication required`; anonymous submit with `newToken` succeeds and returns the submitted value. Confirms the regenerate endpoint actually invalidates the prior credential rather than just adding a parallel one.
 - README addition pointing to the new spec.
+- RC TODO update marking the public-form smoke as covered by PR #1417 while preserving the live-stack execution caveat.
 - Both auth helpers (`authPost`, `authPatch`, `authGet`) and the shared `setupSheetWithStringField` are local to this spec; not yet refactored into a common e2e helper module to keep the patch surface narrow. Three smoke files all sharing this scaffold is the threshold at which extracting helpers makes sense.
 
 ### Out
@@ -57,8 +58,9 @@ If only the 401 case were asserted, a regression that broke `regenerate` entirel
 
 | File | Lines |
 |---|---|
-| `packages/core-backend/tests/e2e/multitable-public-form-smoke.spec.ts` | +new (~165) |
+| `packages/core-backend/tests/e2e/multitable-public-form-smoke.spec.ts` | +new |
 | `packages/core-backend/tests/e2e/README.md` | +1 / -1 |
+| `docs/development/multitable-feishu-rc-todo-20260430.md` | public-form smoke marked complete |
 | `docs/development/multitable-rc-public-form-smoke-development-20260507.md` | +new |
 | `docs/development/multitable-rc-public-form-smoke-verification-20260507.md` | +new |
 

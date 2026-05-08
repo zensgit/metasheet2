@@ -110,7 +110,12 @@ Do not mark an item done if:
   - Verification summary: same `140/140` staging run passed `ui.filter-builder.typed-controls-replay`; the runner added select/date/number filters through the toolbar UI, verified saved `filterInfo`, reloaded the view, and confirmed all three controls hydrated from persistence.
 - [ ] Smoke test Gantt view rendering.
 - [ ] Smoke test Hierarchy view rendering and child creation.
-- [ ] Smoke test public form submit path.
+- [x] Smoke test public form submit path.
+  - PR: #1417
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-rc-public-form-smoke-development-20260507.md`
+  - Verification MD: `docs/development/multitable-rc-public-form-smoke-verification-20260507.md`
+  - Verification summary: Playwright RC smoke parses three tests for public form enable -> anonymous submit -> persisted record, disabled-view 401, and regenerate stale-token 401 plus new-token success. Local `tsc --noEmit` and `git diff --check` pass. Live stack execution remains deferred to staging/dev-stack availability.
 - [ ] Smoke test automation send_email save/execute path.
 - [x] Create executable API smoke helper for repeatable staging evidence.
   - PR: #1359

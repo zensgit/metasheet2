@@ -15,7 +15,7 @@
  *   npx playwright test --config tests/e2e/playwright.config.ts \
  *     multitable-public-form-smoke.spec.ts
  */
-import { test, expect } from '@playwright/test'
+import { test, expect, type APIRequestContext } from '@playwright/test'
 
 const FE = 'http://127.0.0.1:8899'
 const API = 'http://localhost:7778'
@@ -45,7 +45,7 @@ test.beforeAll(async ({ request }) => {
   if (!token) test.skip(true, 'Login failed — phase0 user may not exist')
 })
 
-async function authPost(request: any, path: string, body: unknown) {
+async function authPost(request: APIRequestContext, path: string, body: unknown) {
   const res = await request.post(`${API}${path}`, {
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     data: body,
@@ -57,7 +57,7 @@ async function authPost(request: any, path: string, body: unknown) {
   return json
 }
 
-async function authPatch(request: any, path: string, body: unknown) {
+async function authPatch(request: APIRequestContext, path: string, body: unknown) {
   const res = await request.patch(`${API}${path}`, {
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     data: body,
@@ -69,7 +69,7 @@ async function authPatch(request: any, path: string, body: unknown) {
   return json
 }
 
-async function authGet(request: any, path: string) {
+async function authGet(request: APIRequestContext, path: string) {
   const res = await request.get(`${API}${path}`, {
     headers: { Authorization: `Bearer ${token}` },
   })
@@ -77,7 +77,7 @@ async function authGet(request: any, path: string) {
   return res.json()
 }
 
-async function setupSheetWithStringField(request: any, label: string) {
+async function setupSheetWithStringField(request: APIRequestContext, label: string) {
   const stamp = Date.now() + Math.floor(Math.random() * 1000)
   const base = (await authPost(request, '/api/multitable/bases', { name: `${label}-base-${stamp}` })).data.base
   const sheet = (await authPost(request, '/api/multitable/sheets', { baseId: base.id, name: `${label}-sheet-${stamp}` })).data.sheet
@@ -142,6 +142,7 @@ test.describe('Multitable public form smoke', () => {
       data: { publicToken: 'definitely-not-the-real-token', data: { [field.id]: 'should-not-persist' } },
     })
     expect(res.status()).toBe(401)
+    expect(await res.json()).toMatchObject({ error: 'Authentication required' })
   })
 
   test('rejects anonymous submit with stale token after regenerate (regression guard)', async ({ request }) => {
@@ -166,12 +167,16 @@ test.describe('Multitable public form smoke', () => {
       data: { publicToken: oldToken, data: { [field.id]: 'rotated-out' } },
     })
     expect(res.status()).toBe(401)
+    expect(await res.json()).toMatchObject({ error: 'Authentication required' })
 
     // New token still works (sanity)
+    const rotatedValue = `pf-rotated-${Date.now()}`
     const okRes = await request.post(`${API}/api/multitable/views/${view.id}/submit`, {
       headers: { 'Content-Type': 'application/json' },
-      data: { publicToken: newToken, data: { [field.id]: `pf-rotated-${Date.now()}` } },
+      data: { publicToken: newToken, data: { [field.id]: rotatedValue } },
     })
     expect(okRes.ok()).toBe(true)
+    const okBody = await okRes.json()
+    expect(okBody.data?.record?.data?.[field.id]).toBe(rotatedValue)
   })
 })
