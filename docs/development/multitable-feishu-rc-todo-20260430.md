@@ -101,7 +101,12 @@ Do not mark an item done if:
   - Development MD: `docs/development/multitable-feishu-rc-filter-format-ui-smoke-design-20260507.md`
   - Verification MD: `docs/development/multitable-feishu-rc-filter-format-ui-smoke-verification-20260507.md`
   - Verification summary: `AUTH_TOKEN=... API_BASE=http://142.171.239.56:8081 WEB_BASE=http://142.171.239.56:8081 pnpm verify:multitable-pilot:staging` passed `140/140` checks; new `ui.conditional-formatting.reload-replay` persisted a `Score > 90` row-format rule, reloaded it, and verified rendered row background `rgb(214, 235, 255)`.
-- [ ] Smoke test formula editor: field token insertion, function insertion, diagnostics.
+- [x] Smoke test formula editor: field token insertion, function insertion, diagnostics.
+  - PR: #1424
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-rc-formula-smoke-development-20260507.md`
+  - Verification MD: `docs/development/multitable-rc-formula-smoke-verification-20260507.md`
+  - Verification summary: Playwright RC smoke parses four tests for formula field create with referencing expression + workbench column header rendering, PATCH expression update persistence, sanitize regression clamping non-string expression to empty, and a tiny envelope-shape contract guard for the shared helpers. Click-driven editor UI (token-insertion / function-picker / inline diagnostics) is left to a follow-up that fixates DOM selectors first. Same PR extracts `packages/core-backend/tests/e2e/multitable-helpers.ts` and migrates the four prior RC smokes (lifecycle, public-form, hierarchy, gantt) to consume the shared scaffold. Local `tsc --noEmit` and `git diff --check` pass; `playwright test --list` reports 19 tests across the six e2e files. Live stack execution remains deferred to staging/dev-stack availability.
 - [x] Smoke test filter builder typed controls and saved view behavior.
   - PR: pending
   - Merge commit: pending

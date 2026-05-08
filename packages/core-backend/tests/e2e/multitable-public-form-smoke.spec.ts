@@ -1,11 +1,11 @@
 /**
  * Multitable public form submit smoke E2E.
  *
- * Closes RC TODO `Smoke test public form submit path`. Forks the
- * lifecycle smoke template: admin creates a sheet, enables public form
+ * Closes RC TODO `Smoke test public form submit path`. Migrated to the
+ * shared multitable-helpers.ts scaffold in PR #1423 (formula-smoke +
+ * helper-extraction lane). Admin sets up a sheet, enables public form
  * sharing on a grid view, then an anonymous request submits a record
- * via the unauthenticated submit endpoint. Admin verifies the record
- * landed.
+ * via the unauthenticated submit endpoint.
  *
  * Prerequisites: Metasheet backend (:7778) and frontend (:8899) running
  * locally. Tests skip if either server is unreachable.
@@ -16,167 +16,122 @@
  *     multitable-public-form-smoke.spec.ts
  */
 import { test, expect, type APIRequestContext } from '@playwright/test'
-
-const FE = 'http://127.0.0.1:8899'
-const API = 'http://localhost:7778'
+import {
+  API_BASE_URL,
+  createBase,
+  createField,
+  createSheet,
+  createView,
+  ensureServersReachable,
+  loginAsPhase0,
+  makeAuthClient,
+  requireValue,
+  uniqueLabel,
+  type AuthClient,
+  type Entity,
+} from './multitable-helpers'
 
 let token = ''
 
 test.beforeAll(async ({ request }) => {
-  try {
-    const apiHealth = await request.get(`${API}/health`, { timeout: 3000 })
-    if (!apiHealth.ok()) test.skip(true, 'Metasheet backend not reachable')
-  } catch {
-    test.skip(true, 'Metasheet backend not reachable')
-  }
-
-  try {
-    const feHealth = await request.get(FE, { timeout: 3000 })
-    if (!feHealth.ok()) test.skip(true, 'Metasheet frontend not reachable')
-  } catch {
-    test.skip(true, 'Metasheet frontend not reachable')
-  }
-
-  const loginRes = await request.post(`${API}/api/auth/login`, {
-    data: { email: 'phase0@test.local', password: 'Phase0Test!2026' },
-  })
-  const loginBody = await loginRes.json()
-  token = loginBody.data?.token
-  if (!token) test.skip(true, 'Login failed — phase0 user may not exist')
+  await ensureServersReachable(request)
+  token = await loginAsPhase0(request)
 })
 
-async function authPost(request: APIRequestContext, path: string, body: unknown) {
-  const res = await request.post(`${API}${path}`, {
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    data: body,
-  })
-  const status = res.status()
-  let json: any = null
-  try { json = await res.json() } catch {}
-  if (!res.ok()) throw new Error(`POST ${path} failed: ${status} ${JSON.stringify(json)}`)
-  return json
-}
+async function setupSheetWithStringField(client: AuthClient, label: string): Promise<{
+  base: Entity
+  sheet: Entity
+  field: Entity
+  view: Entity
+}> {
+  const base = await createBase(client, `${label}-base`)
+  const sheet = await createSheet(client, base.id, `${label}-sheet`)
+  const field = await createField(client, sheet.id, 'Title', 'string')
 
-async function authPatch(request: APIRequestContext, path: string, body: unknown) {
-  const res = await request.patch(`${API}${path}`, {
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    data: body,
-  })
-  const status = res.status()
-  let json: any = null
-  try { json = await res.json() } catch {}
-  if (!res.ok()) throw new Error(`PATCH ${path} failed: ${status} ${JSON.stringify(json)}`)
-  return json
-}
-
-async function authGet(request: APIRequestContext, path: string) {
-  const res = await request.get(`${API}${path}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  })
-  if (!res.ok()) throw new Error(`GET ${path} failed: ${res.status()}`)
-  return res.json()
-}
-
-async function setupSheetWithStringField(request: APIRequestContext, label: string) {
-  const stamp = Date.now() + Math.floor(Math.random() * 1000)
-  const base = (await authPost(request, '/api/multitable/bases', { name: `${label}-base-${stamp}` })).data.base
-  const sheet = (await authPost(request, '/api/multitable/sheets', { baseId: base.id, name: `${label}-sheet-${stamp}` })).data.sheet
-  const field = (await authPost(request, '/api/multitable/fields', {
-    sheetId: sheet.id,
-    name: 'Title',
-    type: 'string',
-  })).data.field
-
-  const viewsBody = await authGet(request, `/api/multitable/views?sheetId=${sheet.id}`)
-  const existingViews = (viewsBody.data?.views ?? []) as Array<{ id: string; type: string }>
-  let view = existingViews.find((v) => v.type === 'grid') ?? existingViews[0]
+  const viewsBody = await client.get<{ views: Array<Entity & { type: string }> }>(`/api/multitable/views?sheetId=${sheet.id}`)
+  const existingViews = viewsBody.data?.views ?? []
+  let view: Entity | undefined = existingViews.find((v) => v.type === 'grid') ?? existingViews[0]
   if (!view) {
-    const created = await authPost(request, '/api/multitable/views', {
-      sheetId: sheet.id,
-      name: 'Default Grid',
-      type: 'grid',
-    })
-    view = created.data.view
+    view = await createView(client, sheet.id, 'Default Grid', 'grid')
   }
-  return { base, sheet, field, view }
+  return { base, sheet, field, view: requireValue(view, 'grid view') }
+}
+
+async function anonymousPost(request: APIRequestContext, path: string, body: unknown) {
+  return request.post(`${API_BASE_URL}${path}`, {
+    headers: { 'Content-Type': 'application/json' },
+    data: body,
+  })
 }
 
 test.describe('Multitable public form smoke', () => {
   test('admin enables public form, anonymous submits, record persists', async ({ request }) => {
-    const { sheet, field, view } = await setupSheetWithStringField(request, 'pf-happy')
+    const client = makeAuthClient(request, token)
+    const { sheet, field, view } = await setupSheetWithStringField(client, uniqueLabel('pf-happy'))
 
-    // Enable public form on the grid view
-    const shareBody = await authPatch(request, `/api/multitable/sheets/${sheet.id}/views/${view.id}/form-share`, {
+    const shareBody = await client.patch<{ publicToken?: string }>(`/api/multitable/sheets/${sheet.id}/views/${view.id}/form-share`, {
       enabled: true,
       accessMode: 'public',
     })
-    const publicToken: string = shareBody.data?.publicToken
-    expect(publicToken).toBeTruthy()
+    const publicToken = requireValue(shareBody.data?.publicToken, 'publicToken')
     expect(typeof publicToken).toBe('string')
 
-    // Anonymous submit (no Authorization header)
     const cellValue = `pf-anon-${Date.now()}`
-    const submitRes = await request.post(`${API}/api/multitable/views/${view.id}/submit`, {
-      headers: { 'Content-Type': 'application/json' },
-      data: { publicToken, data: { [field.id]: cellValue } },
+    const submitRes = await anonymousPost(request, `/api/multitable/views/${view.id}/submit`, {
+      publicToken,
+      data: { [field.id]: cellValue },
     })
     expect(submitRes.ok()).toBe(true)
-    const submitBody = await submitRes.json()
-    const newRecordId = submitBody.data?.record?.id
-    expect(newRecordId).toBeTruthy()
+    const submitBody = (await submitRes.json()) as { data?: { record?: Entity & { data?: Record<string, unknown> } } }
+    const newRecordId = requireValue(submitBody.data?.record?.id, 'submitted record id')
 
-    // Admin verifies the record is queryable in the sheet
-    const recordsBody = await authGet(request, `/api/multitable/records?sheetId=${sheet.id}`)
-    const rows = (recordsBody.data?.records ?? []) as Array<{ id: string; data: Record<string, unknown> }>
+    const recordsBody = await client.get<{ records: Array<Entity & { data: Record<string, unknown> }> }>(`/api/multitable/records?sheetId=${sheet.id}`)
+    const rows = recordsBody.data?.records ?? []
     const persisted = rows.find((row) => row.id === newRecordId)
     expect(persisted, 'record should be visible to admin after public submit').toBeTruthy()
     expect(persisted?.data?.[field.id]).toBe(cellValue)
   })
 
   test('rejects anonymous submit when public form is disabled (regression guard)', async ({ request }) => {
-    const { view, field } = await setupSheetWithStringField(request, 'pf-disabled')
+    const client = makeAuthClient(request, token)
+    const { view, field } = await setupSheetWithStringField(client, uniqueLabel('pf-disabled'))
 
-    // Do NOT enable form-share. Submit must fail.
-    const res = await request.post(`${API}/api/multitable/views/${view.id}/submit`, {
-      headers: { 'Content-Type': 'application/json' },
-      data: { publicToken: 'definitely-not-the-real-token', data: { [field.id]: 'should-not-persist' } },
+    const res = await anonymousPost(request, `/api/multitable/views/${view.id}/submit`, {
+      publicToken: 'definitely-not-the-real-token',
+      data: { [field.id]: 'should-not-persist' },
     })
     expect(res.status()).toBe(401)
     expect(await res.json()).toMatchObject({ error: 'Authentication required' })
   })
 
   test('rejects anonymous submit with stale token after regenerate (regression guard)', async ({ request }) => {
-    const { sheet, field, view } = await setupSheetWithStringField(request, 'pf-rotated')
+    const client = makeAuthClient(request, token)
+    const { sheet, field, view } = await setupSheetWithStringField(client, uniqueLabel('pf-rotated'))
 
-    const shareBody = await authPatch(request, `/api/multitable/sheets/${sheet.id}/views/${view.id}/form-share`, {
+    const shareBody = await client.patch<{ publicToken?: string }>(`/api/multitable/sheets/${sheet.id}/views/${view.id}/form-share`, {
       enabled: true,
       accessMode: 'public',
     })
-    const oldToken: string = shareBody.data?.publicToken
-    expect(oldToken).toBeTruthy()
+    const oldToken = requireValue(shareBody.data?.publicToken, 'old publicToken')
 
-    // Rotate
-    const regenBody = await authPost(request, `/api/multitable/sheets/${sheet.id}/views/${view.id}/form-share/regenerate`, {})
-    const newToken: string = regenBody.data?.publicToken
-    expect(newToken).toBeTruthy()
+    const regenBody = await client.post<{ publicToken?: string }>(`/api/multitable/sheets/${sheet.id}/views/${view.id}/form-share/regenerate`, {})
+    const newToken = requireValue(regenBody.data?.publicToken, 'new publicToken')
     expect(newToken).not.toBe(oldToken)
 
-    // Old token must be rejected
-    const res = await request.post(`${API}/api/multitable/views/${view.id}/submit`, {
-      headers: { 'Content-Type': 'application/json' },
-      data: { publicToken: oldToken, data: { [field.id]: 'rotated-out' } },
+    const staleRes = await anonymousPost(request, `/api/multitable/views/${view.id}/submit`, {
+      publicToken: oldToken,
+      data: { [field.id]: 'rotated-out' },
     })
-    expect(res.status()).toBe(401)
-    expect(await res.json()).toMatchObject({ error: 'Authentication required' })
+    expect(staleRes.status()).toBe(401)
+    expect(await staleRes.json()).toMatchObject({ error: 'Authentication required' })
 
-    // New token still works (sanity)
     const rotatedValue = `pf-rotated-${Date.now()}`
-    const okRes = await request.post(`${API}/api/multitable/views/${view.id}/submit`, {
-      headers: { 'Content-Type': 'application/json' },
-      data: { publicToken: newToken, data: { [field.id]: rotatedValue } },
+    const okRes = await anonymousPost(request, `/api/multitable/views/${view.id}/submit`, {
+      publicToken: newToken,
+      data: { [field.id]: rotatedValue },
     })
     expect(okRes.ok()).toBe(true)
-    const okBody = await okRes.json()
+    const okBody = (await okRes.json()) as { data?: { record?: { data?: Record<string, unknown> } } }
     expect(okBody.data?.record?.data?.[field.id]).toBe(rotatedValue)
   })
 })

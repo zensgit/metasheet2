@@ -6,6 +6,9 @@
  * the public REST API and asserts the workbench frontend renders the
  * resulting record.
  *
+ * Migrated to the shared multitable-helpers.ts scaffold in PR #1423
+ * (the formula-smoke + helper-extraction lane).
+ *
  * Prerequisites: Metasheet backend (:7778) and frontend (:8899) running
  * locally. Tests skip if either server is unreachable.
  *
@@ -14,145 +17,69 @@
  *   npx playwright test --config tests/e2e/playwright.config.ts \
  *     multitable-lifecycle-smoke.spec.ts
  */
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
-
-const FE = 'http://127.0.0.1:8899'
-const API = 'http://localhost:7778'
+import { test, expect } from '@playwright/test'
+import {
+  createBase,
+  createField,
+  createRecord,
+  createSheet,
+  createView,
+  ensureServersReachable,
+  injectTokenAndGo,
+  loginAsPhase0,
+  makeAuthClient,
+  requireValue,
+  uniqueLabel,
+  type Entity,
+} from './multitable-helpers'
 
 let token = ''
 
 test.beforeAll(async ({ request }) => {
-  try {
-    const health = await request.get(`${API}/health`, { timeout: 3000 })
-    if (!health.ok()) test.skip(true, 'Metasheet backend not reachable')
-  } catch {
-    test.skip(true, 'Metasheet backend not reachable')
-  }
-
-  try {
-    const frontend = await request.get(FE, { timeout: 3000 })
-    if (!frontend.ok()) test.skip(true, 'Metasheet frontend not reachable')
-  } catch {
-    test.skip(true, 'Metasheet frontend not reachable')
-  }
-
-  const loginRes = await request.post(`${API}/api/auth/login`, {
-    data: { email: 'phase0@test.local', password: 'Phase0Test!2026' },
-  })
-  const loginBody = await loginRes.json()
-  token = loginBody.data?.token
-  if (!token) test.skip(true, 'Login failed — phase0 user may not exist')
+  await ensureServersReachable(request)
+  token = await loginAsPhase0(request)
 })
-
-async function injectTokenAndGo(page: Page, path: string) {
-  await page.goto(FE)
-  await page.evaluate((t: string) => {
-    localStorage.setItem('metasheet_token', t)
-    localStorage.setItem('token', t)
-  }, token)
-  await page.goto(`${FE}${path}`)
-}
-
-async function postJson(request: APIRequestContext, path: string, body: unknown) {
-  const res = await request.post(`${API}${path}`, {
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    data: body,
-  })
-  const status = res.status()
-  let json: any = null
-  try { json = await res.json() } catch {}
-  if (!res.ok()) {
-    throw new Error(`POST ${path} failed: ${status} ${JSON.stringify(json)}`)
-  }
-  return json
-}
-
-async function getJson(request: APIRequestContext, path: string) {
-  const res = await request.get(`${API}${path}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  })
-  if (!res.ok()) throw new Error(`GET ${path} failed: ${res.status()}`)
-  return res.json()
-}
 
 test.describe('Multitable lifecycle smoke', () => {
   test('creates base, sheet, field, view, record and renders in workbench', async ({ request, page }) => {
-    const stamp = Date.now()
+    const client = makeAuthClient(request, token)
+    const label = uniqueLabel('smoke')
 
-    // 1. Base
-    const baseBody = await postJson(request, '/api/multitable/bases', {
-      name: `smoke-base-${stamp}`,
-    })
-    const base = baseBody.data?.base
-    expect(base?.id).toBeTruthy()
+    const base = await createBase(client, `${label}-base`)
+    const sheet = await createSheet(client, base.id, `${label}-sheet`)
+    const field = await createField(client, sheet.id, 'Title', 'string')
+    expect(field.id).toBeTruthy()
 
-    // 2. Sheet under base
-    const sheetBody = await postJson(request, '/api/multitable/sheets', {
-      baseId: base.id,
-      name: `smoke-sheet-${stamp}`,
-    })
-    const sheet = sheetBody.data?.sheet
-    expect(sheet?.id).toBeTruthy()
-
-    // 3. Title field
-    const fieldBody = await postJson(request, '/api/multitable/fields', {
-      sheetId: sheet.id,
-      name: 'Title',
-      type: 'string',
-    })
-    const field = fieldBody.data?.field
-    expect(field?.id).toBeTruthy()
-    expect(field.type).toBe('string')
-
-    // 4. View — reuse default if sheet seeded one, otherwise create explicitly
-    const viewsBody = await getJson(request, `/api/multitable/views?sheetId=${sheet.id}`)
-    const existingViews = (viewsBody.data?.views ?? []) as Array<{ id: string; type: string }>
-    let view = existingViews.find((v) => v.type === 'grid') ?? existingViews[0]
+    const viewsBody = await client.get<{ views: Array<Entity & { type: string }> }>(`/api/multitable/views?sheetId=${sheet.id}`)
+    const existingViews = viewsBody.data?.views ?? []
+    let view: Entity | undefined = existingViews.find((v) => v.type === 'grid') ?? existingViews[0]
     if (!view) {
-      const created = await postJson(request, '/api/multitable/views', {
-        sheetId: sheet.id,
-        name: 'Default Grid',
-        type: 'grid',
-      })
-      view = created.data?.view
+      view = await createView(client, sheet.id, 'Default Grid', 'grid')
     }
-    expect(view?.id).toBeTruthy()
+    const resolvedView = requireValue(view, 'view')
 
-    // 5. Record carrying the title field value
-    const cellValue = `smoke-record-${stamp}`
-    const recordBody = await postJson(request, '/api/multitable/records', {
-      sheetId: sheet.id,
-      data: { [field.id]: cellValue },
-    })
-    const record = recordBody.data?.record
-    expect(record?.id).toBeTruthy()
+    const cellValue = `smoke-record-${label}`
+    const record = await createRecord(client, sheet.id, { [field.id]: cellValue })
     expect(record.data[field.id]).toBe(cellValue)
 
-    // 6. Workbench frontend renders the value
-    await injectTokenAndGo(page, `/multitable/${sheet.id}/${view.id}`)
-    const body = page.locator('body')
-    await expect(body).toContainText(cellValue, { timeout: 15000 })
+    await injectTokenAndGo(page, token, `/multitable/${sheet.id}/${resolvedView.id}`)
+    await expect(page.locator('body')).toContainText(cellValue, { timeout: 15000 })
   })
 
   test('rejects client-supplied autoNumber values during record create (regression guard)', async ({ request }) => {
-    const stamp = Date.now() + 1
-    const base = (await postJson(request, '/api/multitable/bases', { name: `smoke-base-an-${stamp}` })).data.base
-    const sheet = (await postJson(request, '/api/multitable/sheets', { baseId: base.id, name: `smoke-sheet-an-${stamp}` })).data.sheet
-    const seq = (await postJson(request, '/api/multitable/fields', {
-      sheetId: sheet.id,
-      name: 'No.',
-      type: 'autoNumber',
-      property: { start: 1 },
-    })).data.field
-    expect(seq.type).toBe('autoNumber')
+    const client = makeAuthClient(request, token)
+    const label = uniqueLabel('smoke-an')
 
-    const res = await request.post(`${API}/api/multitable/records`, {
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      data: { sheetId: sheet.id, data: { [seq.id]: 999 } },
+    const base = await createBase(client, `${label}-base`)
+    const sheet = await createSheet(client, base.id, `${label}-sheet`)
+    const seq = await createField(client, sheet.id, 'No.', 'autoNumber', { start: 1 })
+
+    const fail = await client.postExpectingFailure('/api/multitable/records', {
+      sheetId: sheet.id,
+      data: { [seq.id]: 999 },
     })
-    expect(res.status()).toBe(403)
-    const body = await res.json()
-    expect(body).toMatchObject({
+    expect(fail.status).toBe(403)
+    expect(fail.body).toMatchObject({
       ok: false,
       error: {
         code: 'FIELD_READONLY',
