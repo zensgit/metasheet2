@@ -26,4 +26,3 @@ The temporary worktree initially lacked linked `node_modules`, so the first web 
 - Preflight rejects numeric strings and numbers outside the 1 to 3 PoC boundary.
 - Frontend helper rejects live PoC sample limits above 3.
 - Existing evidence test remains aligned with the same row-count contract.
-

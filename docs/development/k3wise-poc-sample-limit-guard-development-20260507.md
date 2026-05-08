@@ -33,4 +33,3 @@ That could produce a `preflight-ready` packet or live run payload that evidence 
 - Missing sample limit defaults to `3`.
 - `sampleLimit` values such as `0`, `4`, `20`, and `abc` are rejected before packet/run payload generation.
 - Frontend helper and preflight script now match the evidence row-count contract.
-
