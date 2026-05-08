@@ -101,8 +101,82 @@ Result: not run as a gate because this package has no `type-check` script. The r
 9. Rerun the release gate and verify status is `pass`.
 10. Trigger a controlled group robot failure and verify the rule creator receives the default work-notification failure alert.
 
+## 142 Deployment Verification
+
+Deployment was completed from GHCR immutable tag:
+
+```text
+9129dae6678e623ff1df2e0d0121d5882199e9ef
+```
+
+GitHub Actions:
+
+- Workflow: `Build and Push Docker Images`
+- Run: `25531740871`
+- Result: build passed.
+- Deploy job: skipped by workflow rule because this was a `codex/` branch dispatch, not `main`.
+- Annotation: GitHub reported the Node.js 20 action runtime deprecation warning for `actions/checkout@v4` and `docker/login-action@v3`; this did not block the build.
+
+142 baseline before deployment:
+
+```text
+backend image: ghcr.io/zensgit/metasheet2-backend:8f5bd7f4bbac3a2fe6298b3293f476628e224065
+web image:     ghcr.io/zensgit/metasheet2-web:8f5bd7f4bbac3a2fe6298b3293f476628e224065
+health:        /api/health success=true
+```
+
+142 deployment actions:
+
+```text
+backup:  /home/mainuser/metasheet2/.env.bak.before-9129dae66-20260508T014051Z
+changed: IMAGE_TAG=9129dae6678e623ff1df2e0d0121d5882199e9ef
+scope:   backend and web only
+db:      migration command executed after backend/web recreation
+```
+
+142 post-deployment verification:
+
+```text
+backend image: ghcr.io/zensgit/metasheet2-backend:9129dae6678e623ff1df2e0d0121d5882199e9ef
+web image:     ghcr.io/zensgit/metasheet2-web:9129dae6678e623ff1df2e0d0121d5882199e9ef
+backend state: running
+web state:     running
+/api/health:   200, success=true, plugins=13, failed plugins=0
+frontend:      200 from server-local http://127.0.0.1:8081/
+/api/auth/me:  success=true, role=admin
+```
+
+New Agent ID admin endpoint on 142:
+
+```text
+GET /api/admin/directory/dingtalk/work-notification
+ok=true
+configured=false
+available=false
+source=mixed
+unavailableReason=missing_agent_id
+agentIdConfigured=false
+```
+
+Interpretation: the new backend route and frontend assets are deployed. Work notification is still blocked only because the real DingTalk Agent ID has not yet been saved in the admin UI or env.
+
+Observed network note:
+
+- Server-local frontend/API checks passed.
+- A local-machine curl to the public `http://142.171.239.56:8081` returned an empty reply during this run. This has appeared in prior 142 verification notes and should be treated as a host/network edge until browser/mobile access is rechecked.
+
+Rollback command if needed:
+
+```bash
+cd /home/mainuser/metasheet2
+cp .env.bak.before-9129dae66-20260508T014051Z .env
+docker compose -f docker-compose.app.yml pull backend web
+docker compose -f docker-compose.app.yml up -d --no-deps --force-recreate backend web
+curl -fsS http://127.0.0.1:8900/api/health
+```
+
 ## Remaining Non-Blocking Notes
 
 - A real DingTalk send cannot be fully proven by the no-recipient basic test. Use a recipient DingTalk user id or a controlled automation run for final live acceptance.
 - The older private-file env helper remains available for env-only operations, but the preferred admin flow after this change is UI test plus UI save.
-- This local verification did not deploy to 142 by itself. Deployment still requires publishing the new GHCR backend/web images and updating the 142 containers.
+- The 142 deployment is complete, but final DingTalk acceptance still requires saving the real Agent ID and running one real recipient work-notification test.
