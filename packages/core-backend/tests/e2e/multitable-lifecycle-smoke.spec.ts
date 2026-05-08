@@ -6,7 +6,7 @@
  * the public REST API and asserts the workbench frontend renders the
  * resulting record.
  *
- * Migrated to the shared multitable-helpers.ts scaffold in PR #1423
+ * Migrated to the shared multitable-helpers.ts scaffold in PR #1424
  * (the formula-smoke + helper-extraction lane).
  *
  * Prerequisites: Metasheet backend (:7778) and frontend (:8899) running

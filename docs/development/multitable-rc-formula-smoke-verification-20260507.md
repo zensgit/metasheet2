@@ -46,6 +46,19 @@ pnpm --filter @metasheet/core-backend exec tsc --noEmit
 
 Result: passed (no output / exit 0).
 
+## Formula Editor UI Suite
+
+```bash
+pnpm --filter @metasheet/web exec vitest run tests/multitable-formula-editor.spec.ts --watch=false
+```
+
+Result: `10/10` tests passed.
+
+This is the direct coverage for the RC item's editor requirements:
+- field-chip insertion writes stable `{field_id}` tokens into the textarea
+- function catalog filtering inserts snippets such as `ROUND(, 2)`
+- diagnostics block invalid expressions with unknown fields / syntax / argument-count errors
+
 ## Diff hygiene
 
 ```bash
@@ -61,7 +74,7 @@ For each migrated spec, the behavior body (assertions, selectors, status codes, 
 - Inline `authPost` / `authPatch` / `authGet` → `const client = makeAuthClient(request, token)` per test, methods on `client`
 - Inline `setup<Type>Sheet(request, label)` → composed from `createBase` / `createSheet` / `createField` / `createView` primitives
 - Inline `injectTokenAndGo(page, path)` (closing over module-level `token`) → `injectTokenAndGo(page, token, path)` (token passed explicitly)
-- `let json: any = null` → `let json: unknown = null` (in helpers) plus `as ApiEnvelope<TData>` at boundary
+- legacy loose JSON helpers → `let json: unknown = null` (in helpers) plus `as ApiEnvelope<TData>` at boundary
 
 The public-form spec retains `anonymousPost` inline — see development MD for rationale.
 
@@ -82,11 +95,11 @@ Expected: 19 tests pass; total ~30–60s including frontend cold-start and PLM f
 
 ## Pre-deployment checks
 
-- [x] PR #1406 + #1409 + #1410 + #1412 + #1415 + #1417 + #1419 + #1421 already merged on main; this branch is rebased onto `e23a5ab53`.
+- [x] PR #1406 + #1409 + #1410 + #1412 + #1415 + #1417 + #1419 + #1421 + #1422 + #1423 + #1425 + #1394 already merged on main; this branch is rebased onto `3ce20f59a`.
 - [x] No DingTalk / public-form runtime / Gantt runtime / Hierarchy runtime / formula runtime / `plugins/plugin-integration-core/*` files touched.
 - [x] No autoNumber / migration / OpenAPI changes.
 - [x] RC TODO formula line ticked in the same commit with PR / dev MD / verification MD pointers.
 
 ## Result
 
-19 tests parse, types clean, diff hygiene clean, RC TODO updated with the formula tick. Ready to merge as the fifth of six RC-smoke conversions and the helpers extraction pass; the remaining one (`automation send_email`) can fork the formula spec and add a small SMTP/email-mock harness in a follow-up.
+19 Playwright tests parse, 10 frontend formula-editor tests pass, types clean, diff hygiene clean, RC TODO updated with the formula tick. Ready to merge as the fifth of six RC-smoke conversions and the helpers extraction pass; the remaining one (`automation send_email`) can fork the formula spec and add a small SMTP/email-mock harness in a follow-up.

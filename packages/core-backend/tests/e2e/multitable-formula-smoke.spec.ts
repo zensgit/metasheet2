@@ -1,10 +1,12 @@
 /**
  * Multitable formula field smoke E2E.
  *
- * Closes RC TODO `Smoke test formula editor: field token insertion,
- * function insertion, diagnostics`. Forks the gantt-smoke template
- * (PR #1421). This is the first spec to consume the shared helpers
- * extracted into multitable-helpers.ts.
+ * Closes the RC formula item together with
+ * apps/web/tests/multitable-formula-editor.spec.ts. This E2E spec
+ * verifies the persisted formula-field surface; the frontend suite
+ * covers field-token insertion, function insertion, and diagnostics.
+ * It is the first spec to consume the shared helpers extracted into
+ * multitable-helpers.ts.
  *
  * Three cases:
  *   1. Create a formula field with an expression referencing two
@@ -19,10 +21,9 @@
  *      rather than corrupting persistence (regression for
  *      sanitizeFieldProperty's formula branch).
  *
- * Editor UI (textarea token-insertion / function-picker / inline
- * diagnostics) is exercised only through the persisted property
- * surface; the click-driven editor flow is left to a follow-up that
- * fixates DOM selectors first.
+ * Browser-level clicks through the full field-manager drawer remain
+ * a future hard-gate candidate, but the editor interactions themselves
+ * are already covered by the frontend formula-editor suite.
  *
  * Prerequisites: Metasheet backend (:7778) and frontend (:8899) running
  * locally. Tests skip if either server is unreachable.

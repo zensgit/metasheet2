@@ -2,14 +2,18 @@
 
 > Date: 2026-05-07
 > Branch: `codex/multitable-rc-smoke-formula-20260507`
-> Base: `origin/main@e23a5ab53` (after PR #1421 gantt-smoke merge)
-> Closes RC TODO line `Smoke test formula editor`
+> Base: `origin/main@3ce20f59a` after reviewer rebase
+> Closes RC TODO item: `Smoke test formula editor`
 
 ## Background
 
 PRs #1415 / #1417 / #1419 / #1421 shipped the first four executable RC smoke specs (lifecycle, public-form, hierarchy, gantt). Each spec carried inline copies of the same scaffolding: server reachability check, `phase0@test.local` login, `authPost` / `authPatch` / `authGet` helpers, `injectTokenAndGo`, and a `setup<Type>Sheet` factory. Three inline copies was acceptable; the four-copy threshold came due, and the fifth smoke would have been a fifth divergent copy.
 
-This PR closes the formula RC item AND extracts the shared scaffolding into `packages/core-backend/tests/e2e/multitable-helpers.ts`, then migrates all four prior smokes to consume it. The four merged specs lose ~50 lines each of inline boilerplate, and the formula spec is the first to be written natively against the helper module.
+This PR closes the formula RC item by combining two layers of evidence:
+- New Playwright smoke for formula-field persistence, sanitization, and workbench column rendering.
+- Existing frontend formula-editor suite for field-token insertion, function insertion, and inline diagnostics.
+
+It also extracts the shared scaffolding into `packages/core-backend/tests/e2e/multitable-helpers.ts`, then migrates all four prior smokes to consume it. The four merged specs lose ~50 lines each of inline boilerplate, and the formula spec is the first to be written natively against the helper module.
 
 ## Scope
 
@@ -38,12 +42,16 @@ This PR closes the formula RC item AND extracts the shared scaffolding into `pac
   - `multitable-public-form-smoke.spec.ts` (3 tests; anonymous POST stays inline as `anonymousPost(request, …)` since the helpers deliberately never strip the `Authorization` header)
   - `multitable-hierarchy-smoke.spec.ts` (3 tests)
   - `multitable-gantt-smoke.spec.ts` (3 tests)
+- Frontend editor verification by rerunning `apps/web/tests/multitable-formula-editor.spec.ts`, which covers:
+  - field-chip token insertion into the formula textarea
+  - function catalog filtering and snippet insertion
+  - diagnostics for syntax, argument-count, and unknown-field errors
 - README "What's tested" addition for formula spec + new "Shared scaffolding" subsection pointing at the helper module.
 
 ### Out
 
 - The remaining 1 RC smoke item: `automation send_email`. It needs an email-mock harness or SMTP stub before a smoke is meaningful; out of scope for this lane.
-- Click-driven formula editor UI (textarea token-insertion via the field picker button, function picker insertion, inline diagnostics rendering). The Field Manager's `formulaDraft` ref + `buildFormulaFieldTokenInsertion` / `buildFormulaFunctionInsertion` handlers exist; a follow-up that fixates the relevant DOM selectors can write a UI smoke against them.
+- Full browser E2E clicks through the field-manager drawer. The editor interactions themselves are already covered by `apps/web/tests/multitable-formula-editor.spec.ts`; promoting those interactions to a browser-level hard gate can remain a follow-up once the dev-stack runner is provisioned.
 - handoff-journey.spec.ts is deliberately NOT migrated. It targets PLM federation, has its own session shape (cookies, B_ID constant, click-driven UX), and predates this lane; mixing it in would muddy the diff. If a future PLM smoke joins the family, helpers can grow to host it.
 
 ## K3 PoC Stage 1 Lock applicability
@@ -103,13 +111,14 @@ The helpers reference `@playwright/test` types and assume the metasheet backend'
 ## Known limitations
 
 1. **CI does not provision the dev stack** — same caveat as #1415 / #1417 / #1419 / #1421. Suite skip-passes by default; promoting to a hard gate is a follow-up CI provisioning task.
-2. **Click-driven formula editor UI deferred** — the Field Manager's formula textarea + token-insertion / function-picker buttons exist; this PR exercises only the persisted property surface. A future spec that pins down the editor's DOM selectors can layer interaction tests on top of these foundations.
+2. **Browser-level field-manager clicks deferred** — the Playwright smoke exercises the persisted formula-field surface. The editor UI interactions required by the RC item are covered by the existing frontend formula-editor suite and were rerun during review.
 3. **`automation send_email` smoke is the last remaining RC item** — it needs an email-mock or SMTP stub before a smoke is meaningful.
 4. **Test data not cleaned up** — `uniqueLabel` prevents collisions; matches the prior smoke policy.
 
 ## Cross-references
 
 - RC TODO master: `docs/development/multitable-feishu-rc-todo-20260430.md`
+- Frontend formula editor suite: `apps/web/tests/multitable-formula-editor.spec.ts`
 - Formula property sanitize: `sanitizeFieldProperty` formula branch in `packages/core-backend/src/routes/univer-meta.ts`
 - Formula evaluation engine: `packages/core-backend/src/multitable/formula-engine.ts`
 - Pattern source: PR #1421 (`e23a5ab53`) — multitable Gantt smoke

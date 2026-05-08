@@ -2,7 +2,7 @@
  * Multitable public form submit smoke E2E.
  *
  * Closes RC TODO `Smoke test public form submit path`. Migrated to the
- * shared multitable-helpers.ts scaffold in PR #1423 (formula-smoke +
+ * shared multitable-helpers.ts scaffold in PR #1424 (formula-smoke +
  * helper-extraction lane). Admin sets up a sheet, enables public form
  * sharing on a grid view, then an anonymous request submits a record
  * via the unauthenticated submit endpoint.

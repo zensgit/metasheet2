@@ -2,7 +2,7 @@
  * Multitable Gantt view rendering smoke E2E.
  *
  * Closes RC TODO `Smoke test Gantt view rendering`. Migrated to the
- * shared multitable-helpers.ts scaffold in PR #1423 (formula-smoke +
+ * shared multitable-helpers.ts scaffold in PR #1424 (formula-smoke +
  * helper-extraction lane).
  *
  * Three cases:

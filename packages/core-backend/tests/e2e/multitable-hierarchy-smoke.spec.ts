@@ -2,7 +2,7 @@
  * Multitable Hierarchy view smoke E2E.
  *
  * Closes RC TODO `Smoke test Hierarchy view rendering and child creation`.
- * Migrated to the shared multitable-helpers.ts scaffold in PR #1423
+ * Migrated to the shared multitable-helpers.ts scaffold in PR #1424
  * (formula-smoke + helper-extraction lane).
  *
  * Admin creates a sheet with a self-table single-value link parent
