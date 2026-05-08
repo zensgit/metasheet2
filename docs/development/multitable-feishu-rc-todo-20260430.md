@@ -131,7 +131,12 @@ Do not mark an item done if:
   - Development MD: `docs/development/multitable-rc-public-form-smoke-development-20260507.md`
   - Verification MD: `docs/development/multitable-rc-public-form-smoke-verification-20260507.md`
   - Verification summary: Playwright RC smoke parses three tests for public form enable -> anonymous submit -> persisted record, disabled-view 401, and regenerate stale-token 401 plus new-token success. Local `tsc --noEmit` and `git diff --check` pass. Live stack execution remains deferred to staging/dev-stack availability.
-- [ ] Smoke test automation send_email save/execute path.
+- [x] Smoke test automation send_email save/execute path.
+  - PR: #1428
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-rc-automation-send-email-smoke-development-20260507.md`
+  - Verification MD: `docs/development/multitable-rc-automation-send-email-smoke-verification-20260507.md`
+  - Verification summary: Playwright RC smoke parses three tests for record.created → send_email rule end-to-end execution via the real event chain (eventBus → automation executor → `NotificationService.send` → mock `EmailNotificationChannel`), polling `GET /sheets/:sheetId/automations/:ruleId/logs?limit=10` for up to 12 s and asserting `status === 'success'` + `steps[0].actionType === 'send_email'` + `steps[0].status === 'success'` + `steps[0].output.recipientCount === 2` + `steps[0].output.notificationStatus === 'sent'`; plus two configuration negatives covering `validateSendEmailConfig` for missing `recipients` and missing `subjectTemplate` (400 + `VALIDATION_ERROR` with the specific error message). The logs API flat-shape contract (no `{ ok, data }` envelope) is consumed via a direct `request.get`. Local `tsc --noEmit` and `git diff --check` pass. Live stack execution remains deferred to staging/dev-stack availability.
 - [x] Create executable API smoke helper for repeatable staging evidence.
   - PR: #1359
   - Merge commit: `aec377f80`
