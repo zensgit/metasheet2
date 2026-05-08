@@ -54,4 +54,18 @@ describe('PLM disable switch', () => {
     expect(response.status).toBe(404)
     expect(response.body?.error?.code).toBe('FEATURE_DISABLED')
   })
+
+  it('returns 404 for plm import routes when plm is disabled', async () => {
+    const { MetaSheetServer } = await import('../../src/index')
+    const server = new MetaSheetServer({ port: 0, host: '127.0.0.1' })
+    const app = (server as unknown as { app: Parameters<typeof request>[0] }).app
+
+    const response = await request(app)
+      .post('/api/federation/import/plm')
+      .set('Authorization', 'Bearer live-token')
+      .send({ productId: 'prod-1', includeDocuments: true, includeBOM: true })
+
+    expect(response.status).toBe(404)
+    expect(response.body?.error?.code).toBe('FEATURE_DISABLED')
+  })
 })

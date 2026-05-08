@@ -22,8 +22,17 @@ const K3_CORE_TABLES = new Set([
 ])
 
 function tableNameFromSql(sql) {
-  const match = sql.match(/(?:from|into|update|table)\s+(?:dbo\.)?["[]?([a-z_][a-z0-9_]*)["\]]?/i)
-  return match ? match[1].toLowerCase() : null
+  const identifier = /(?:"[^"]+"|\[[^\]]+\]|[a-z_][a-z0-9_]*)/i
+  const reference = new RegExp(
+    `(?:from|into|update|table)\\s+(${identifier.source}(?:\\s*\\.\\s*${identifier.source}){0,2})`,
+    'i',
+  )
+  const match = sql.match(reference)
+  if (!match) return null
+
+  const parts = match[1].match(/"[^"]+"|\[[^\]]+\]|[a-z_][a-z0-9_]*/gi) || []
+  const table = parts[parts.length - 1]
+  return table ? table.replace(/^["[]|["\]]$/g, '').toLowerCase() : null
 }
 
 function operationFromSql(sql) {
