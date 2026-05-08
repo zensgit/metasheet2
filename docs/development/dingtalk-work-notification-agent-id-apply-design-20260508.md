@@ -4,18 +4,25 @@
 
 Provide a safe final-step helper for the 142 DingTalk work-notification blocker: app key and app secret are already present, but `DINGTALK_AGENT_ID` or `DINGTALK_NOTIFY_AGENT_ID` is missing.
 
-The helper lets operations place the real agent id in a local file and apply it to the runtime env without pasting the value into chat, shell history, Git, or evidence markdown.
+The helper lets operations initialize a private fill-in file, place the real agent id in that file, and apply it to the runtime env without pasting the value into chat, shell history, Git, or evidence markdown.
 
 ## Scope
 
 - Add `scripts/ops/dingtalk-work-notification-agent-id-apply.mjs`.
-- Add focused Node tests for apply, dry-run, conflict protection, forced replacement, and invalid input.
+- Add focused Node tests for file initialization, apply, dry-run, conflict protection, forced replacement, and invalid input.
 - Keep `scripts/ops/dingtalk-work-notification-env-status.mjs` read-only.
 - Do not call DingTalk APIs or validate the credential remotely; the existing status helper remains the readiness gate after restart.
 
 ## Behavior
 
-The helper requires:
+The helper supports two modes.
+
+Initialization mode:
+
+- `--init-agent-id-file <file>`: create an empty `0600` file and a `0700` parent directory.
+- `--force`: overwrite an existing file only when explicitly requested.
+
+Apply mode requires:
 
 - `--env-file <file>`: the env file to update.
 - `--agent-id-file <file>`: a local file containing only the numeric DingTalk agent id.
@@ -47,14 +54,14 @@ The restart path records only command metadata and output lengths, never credent
 
 ## 142 Usage
 
-On 142, create/fill a private file with only the numeric agent id:
+On 142, initialize the private file:
 
 ```bash
-mkdir -p /home/mainuser/metasheet2/.secrets
-chmod 700 /home/mainuser/metasheet2/.secrets
-printf '<agent-id-only>' > /home/mainuser/metasheet2/.secrets/dingtalk-agent-id.txt
-chmod 600 /home/mainuser/metasheet2/.secrets/dingtalk-agent-id.txt
+node /tmp/dingtalk-work-notification-agent-id-apply.mjs \
+  --init-agent-id-file /home/mainuser/metasheet2/.secrets/dingtalk-agent-id.txt
 ```
+
+Then fill that file with only the numeric agent id.
 
 Then apply and restart:
 

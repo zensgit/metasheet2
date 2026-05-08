@@ -2,7 +2,7 @@
 
 ## Summary
 
-Added a redaction-safe helper for the remaining 142 work-notification configuration step. The helper can apply `DINGTALK_AGENT_ID` from a private file, create a backup, optionally restart backend, and emit evidence without printing the value.
+Added a redaction-safe helper for the remaining 142 work-notification configuration step. The helper can initialize a private agent-id input file, apply `DINGTALK_AGENT_ID` from that file, create a backup, optionally restart backend, and emit evidence without printing the value.
 
 142 was not changed in this verification because the real DingTalk agent id value is still not available in the workspace or chat. A private fill-in file was prepared on 142 for the operator-provided value.
 
@@ -22,10 +22,12 @@ Unit tests:
 node --test scripts/ops/dingtalk-work-notification-agent-id-apply.test.mjs
 ```
 
-Result: passed, 6 tests.
+Result: passed, 8 tests.
 
 Covered cases:
 
+- Private agent id file is initialized as empty `0600`.
+- Existing private agent id file is not overwritten unless `--force` is used.
 - Missing agent id is appended as `DINGTALK_AGENT_ID`.
 - `--dry-run` writes evidence without changing env file.
 - Existing `DINGTALK_NOTIFY_AGENT_ID` alias is reused.
@@ -77,6 +79,20 @@ ssh metasheet-142 'node --check /tmp/dingtalk-work-notification-agent-id-apply.m
 
 Result: passed.
 
+Remote initialization smoke used only `/tmp`:
+
+```bash
+ssh metasheet-142 'node /tmp/dingtalk-work-notification-agent-id-apply.mjs \
+  --init-agent-id-file /tmp/dingtalk-agent-id-apply-smoke/.secrets/dingtalk-agent-id.txt'
+```
+
+Result:
+
+- File exists.
+- File size: `0` bytes.
+- File mode: `600`.
+- Parent directory mode: `700`.
+
 Prepared private input path on 142:
 
 ```bash
@@ -116,6 +132,10 @@ Result:
 After filling the private file on 142:
 
 ```bash
+node /tmp/dingtalk-work-notification-agent-id-apply.mjs \
+  --init-agent-id-file /home/mainuser/metasheet2/.secrets/dingtalk-agent-id.txt
+# Fill /home/mainuser/metasheet2/.secrets/dingtalk-agent-id.txt with only the numeric DingTalk agent id.
+
 node /tmp/dingtalk-work-notification-agent-id-apply.mjs \
   --env-file /home/mainuser/metasheet2/docker/app.env \
   --agent-id-file /home/mainuser/metasheet2/.secrets/dingtalk-agent-id.txt \

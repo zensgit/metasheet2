@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -60,6 +60,44 @@ test('applies a missing DingTalk agent id without printing the value', () => {
     rmSync(tmpDir, { recursive: true, force: true })
   }
 })
+
+test('initializes an empty private agent id file', () => {
+  const tmpDir = makeTmpDir()
+  const agentIdFile = path.join(tmpDir, '.secrets', 'dingtalk-agent-id.txt')
+  try {
+    const result = runScript(['--init-agent-id-file', agentIdFile])
+
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    assert.equal(existsSync(agentIdFile), true)
+    assert.equal(readFileSync(agentIdFile, 'utf8'), '')
+    assert.equal(statSync(agentIdFile).mode & 0o777, 0o600)
+    assert.equal(statSync(path.dirname(agentIdFile)).mode & 0o777, 0o700)
+    assert.doesNotMatch(result.stdout, /\d{6,}|access_token|SEC/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('refuses to overwrite initialized agent id files unless forced', () => {
+  const tmpDir = makeTmpDir()
+  const agentIdFile = path.join(tmpDir, 'agent-id.txt')
+  try {
+    writeFileSync(agentIdFile, '123456789\n', 'utf8')
+
+    const blocked = runScript(['--init-agent-id-file', agentIdFile])
+    assert.equal(blocked.status, 1)
+    assert.match(blocked.stderr, /already exists/)
+    assert.equal(readFileSync(agentIdFile, 'utf8'), '123456789\n')
+
+    const forced = runScript(['--init-agent-id-file', agentIdFile, '--force'])
+    assert.equal(forced.status, 0, forced.stderr || forced.stdout)
+    assert.equal(readFileSync(agentIdFile, 'utf8'), '')
+    assert.equal(statSync(agentIdFile).mode & 0o777, 0o600)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('dry-run validates but does not change the env file', () => {
   const tmpDir = makeTmpDir()
   const envFile = path.join(tmpDir, 'app.env')

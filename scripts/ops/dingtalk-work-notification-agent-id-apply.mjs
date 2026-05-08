@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 
@@ -16,6 +16,7 @@ printing the value. Intended for the final 142 blocker after app key/secret are
 already configured.
 
 Options:
+  --init-agent-id-file <file>    Create an empty 0600 agent id file and exit
   --env-file <file>              Env file to update, required
   --agent-id-file <file>         File containing only the numeric DingTalk agent id, required
   --key <env-key>                Target key, default DINGTALK_AGENT_ID unless an accepted alias already exists
@@ -45,6 +46,7 @@ function parseArgs(argv) {
   const opts = {
     envFile: '',
     agentIdFile: '',
+    initAgentIdFile: '',
     key: 'DINGTALK_AGENT_ID',
     keyExplicit: false,
     backupDir: '',
@@ -62,6 +64,10 @@ function parseArgs(argv) {
     switch (arg) {
       case '--env-file':
         opts.envFile = path.resolve(process.cwd(), readRequiredValue(argv, index, arg))
+        index += 1
+        break
+      case '--init-agent-id-file':
+        opts.initAgentIdFile = path.resolve(process.cwd(), readRequiredValue(argv, index, arg))
         index += 1
         break
       case '--agent-id-file':
@@ -111,6 +117,8 @@ function parseArgs(argv) {
     }
   }
 
+  if (opts.initAgentIdFile) return opts
+
   if (!opts.envFile) throw new Error('--env-file is required')
   if (!opts.agentIdFile) throw new Error('--agent-id-file is required')
   if (!AGENT_ID_KEYS.includes(opts.key)) {
@@ -119,6 +127,16 @@ function parseArgs(argv) {
   if (!opts.backupDir) opts.backupDir = path.dirname(opts.envFile)
 
   return opts
+}
+
+function initAgentIdFile(file, force = false) {
+  if (existsSync(file) && !force) {
+    throw new Error(`agent id file already exists: ${file}; pass --force to overwrite`)
+  }
+  mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
+  chmodSync(path.dirname(file), 0o700)
+  writeFileSync(file, '', { encoding: 'utf8', mode: 0o600 })
+  chmodSync(file, 0o600)
 }
 
 function relativePath(file) {
@@ -361,6 +379,12 @@ function writeSummary(opts, summary) {
 
 function main() {
   const opts = parseArgs(process.argv.slice(2))
+  if (opts.initAgentIdFile) {
+    initAgentIdFile(opts.initAgentIdFile, opts.force)
+    console.log(`DingTalk work-notification agent id file initialized: ${relativePath(opts.initAgentIdFile)}; mode=600; bytes=0`)
+    return
+  }
+
   const agentId = readAgentId(opts.agentIdFile)
   const applyResult = applyEnvUpdate(opts, agentId)
   if (opts.restartBackend && !opts.dryRun && applyResult.action !== 'blocked' && applyResult.action !== 'unchanged') {
