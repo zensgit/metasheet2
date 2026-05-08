@@ -1,0 +1,163 @@
+# Page snapshot
+
+```yaml
+- generic [active] [ref=e1]:
+  - generic [ref=e3]:
+    - navigation [ref=e4]:
+      - generic [ref=e6]: MetaSheet
+      - generic [ref=e7]:
+        - link "Attendance" [ref=e8] [cursor=pointer]:
+          - /url: /attendance
+        - link "Apps" [ref=e9] [cursor=pointer]:
+          - /url: /apps
+        - link "Grid" [ref=e10] [cursor=pointer]:
+          - /url: /grid
+        - link "Spreadsheets" [ref=e11] [cursor=pointer]:
+          - /url: /spreadsheets
+        - link "Kanban" [ref=e12] [cursor=pointer]:
+          - /url: /kanban
+        - link "Calendar" [ref=e13] [cursor=pointer]:
+          - /url: /calendar
+        - link "Gallery" [ref=e14] [cursor=pointer]:
+          - /url: /gallery
+        - link "Form" [ref=e15] [cursor=pointer]:
+          - /url: /form
+        - link "Approvals" [ref=e16] [cursor=pointer]:
+          - /url: /approvals
+        - link "After Sales" [ref=e17] [cursor=pointer]:
+          - /url: /p/plugin-after-sales/after-sales
+        - link "Users" [ref=e18] [cursor=pointer]:
+          - /url: /admin/users
+        - link "Roles" [ref=e19] [cursor=pointer]:
+          - /url: /admin/roles
+        - link "Permissions" [ref=e20] [cursor=pointer]:
+          - /url: /admin/permissions
+        - link "Admin Audit" [ref=e21] [cursor=pointer]:
+          - /url: /admin/audit
+        - link "Approval SLA" [ref=e22] [cursor=pointer]:
+          - /url: /approvals/metrics
+        - link "ERP Integration" [ref=e23] [cursor=pointer]:
+          - /url: /integrations/k3-wise
+        - link "Plugins" [ref=e24] [cursor=pointer]:
+          - /url: /admin/plugins
+        - link "PLM" [ref=e25] [cursor=pointer]:
+          - /url: /plm
+        - link "Audit" [ref=e26] [cursor=pointer]:
+          - /url: /plm/audit
+      - generic [ref=e27]:
+        - generic [ref=e28]:
+          - generic [ref=e29]: Language
+          - combobox "Language" [ref=e30]:
+            - option "English" [selected]
+            - option "中文"
+        - generic [ref=e31]: zhouhua@china-yaguang.com
+        - link "My Sessions" [ref=e32] [cursor=pointer]:
+          - /url: /settings
+        - button "Sign out" [ref=e33] [cursor=pointer]
+    - main [ref=e34]:
+      - generic [ref=e36]:
+        - generic [ref=e39] [cursor=pointer]:
+          - generic [ref=e40]: table
+          - generic [ref=e41]: Migrated Base
+          - generic [ref=e42]: ▼
+        - button "+" [ref=e45] [cursor=pointer]
+        - generic [ref=e46]:
+          - button "💬 Comment Inbox 10" [ref=e47] [cursor=pointer]:
+            - text: 💬 Comment Inbox
+            - generic [ref=e48]: "10"
+          - button "🗂 Templates" [ref=e49] [cursor=pointer]
+          - button "📊 Dashboard" [ref=e50] [cursor=pointer]
+          - button "🔑 API & Webhooks" [ref=e51] [cursor=pointer]
+        - generic [ref=e52]:
+          - strong [ref=e53]: Admin access
+          - generic [ref=e54]: This sheet is available through your administrator role.
+        - toolbar "Grid toolbar" [ref=e55]:
+          - generic [ref=e56]:
+            - button "☰ Fields" [ref=e58] [cursor=pointer]:
+              - generic [ref=e59]: ☰
+              - text: Fields
+            - button "↕ Sort" [ref=e61] [cursor=pointer]:
+              - generic [ref=e62]: ↕
+              - text: Sort
+            - button "⨁ Filter" [ref=e64] [cursor=pointer]:
+              - generic [ref=e65]: ⨁
+              - text: Filter
+            - button "⊞ Group" [ref=e67] [cursor=pointer]:
+              - generic [ref=e68]: ⊞
+              - text: Group
+            - button "Undo" [disabled] [ref=e69]: ↩
+            - button "Redo" [disabled] [ref=e70]: ↪
+          - generic [ref=e71]:
+            - search [ref=e72]:
+              - generic [ref=e73]: 🔍
+              - searchbox "Search records" [ref=e74]
+            - generic [ref=e75]: 2 rows
+            - button "Row height" [ref=e77] [cursor=pointer]: ↕ Rows
+            - button "Auto-fit columns" [ref=e78] [cursor=pointer]: ↔ Fit
+            - button "Print grid" [ref=e79] [cursor=pointer]: 🖨 Print
+        - region "Gantt view" [ref=e82]:
+          - generic [ref=e83]:
+            - generic [ref=e84]:
+              - text: Start
+              - combobox "Start" [ref=e85]:
+                - option "select"
+                - option "Start" [selected]
+                - option "End"
+            - generic [ref=e86]:
+              - text: End
+              - combobox "End" [ref=e87]:
+                - option "select"
+                - option "Start"
+                - option "End" [selected]
+            - generic [ref=e88]:
+              - text: Title
+              - combobox "Title" [ref=e89]:
+                - option "auto"
+                - option "Title" [selected]
+                - option "Start"
+                - option "End"
+                - option "Predecessor"
+            - generic [ref=e90]:
+              - text: Progress
+              - combobox "Progress" [ref=e91]:
+                - option "none"
+            - generic [ref=e92]:
+              - text: Group
+              - combobox "Group" [ref=e93]:
+                - option "none" [selected]
+                - option "Title"
+                - option "Start"
+                - option "End"
+            - generic [ref=e94]:
+              - text: Dependencies
+              - combobox "Dependencies" [ref=e95]:
+                - option "none" [selected]
+                - option "Predecessor"
+            - generic [ref=e96]:
+              - text: Zoom
+              - combobox "Zoom" [ref=e97]:
+                - option "Day"
+                - option "Week" [selected]
+                - option "Month"
+          - generic [ref=e98]:
+            - generic [ref=e99]: Task
+            - generic [ref=e100]:
+              - generic [ref=e101]: Mar 30
+              - generic [ref=e102]: Apr 6
+          - generic [ref=e103]:
+            - button "g-design-arrow-1778245454729 2026-04-01 to 2026-04-04 Resize start for g-design-arrow-1778245454729 Resize end for g-design-arrow-1778245454729" [ref=e104] [cursor=pointer]:
+              - generic [ref=e105]:
+                - strong [ref=e106]: g-design-arrow-1778245454729
+                - generic [ref=e107]: 2026-04-01 to 2026-04-04
+              - generic "2026-04-01 → 2026-04-04" [ref=e109]:
+                - separator "Resize start for g-design-arrow-1778245454729" [ref=e110]
+                - separator "Resize end for g-design-arrow-1778245454729" [ref=e111]
+            - button "g-build-arrow-1778245454729 2026-04-06 to 2026-04-10 Resize start for g-build-arrow-1778245454729 Resize end for g-build-arrow-1778245454729" [ref=e112] [cursor=pointer]:
+              - generic [ref=e113]:
+                - strong [ref=e114]: g-build-arrow-1778245454729
+                - generic [ref=e115]: 2026-04-06 to 2026-04-10
+              - generic "2026-04-06 → 2026-04-10" [ref=e117]:
+                - separator "Resize start for g-build-arrow-1778245454729" [ref=e118]
+                - separator "Resize end for g-build-arrow-1778245454729" [ref=e119]
+  - status
+```
