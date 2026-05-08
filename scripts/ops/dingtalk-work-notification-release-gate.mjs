@@ -32,6 +32,10 @@ Options:
   --output-md <file>             Output Markdown path, default ${DEFAULT_OUTPUT_DIR}/summary.md
   --timeout-ms <ms>              HTTP timeout, default 10000
   --skip-admin-api               Only run env-status and health checks
+  --skip-env-status              Skip the env-status helper; record env as
+                                 skipped without producing ENV_STATUS_BLOCKED.
+                                 Useful when the real runtime envs live inside
+                                 the backend container and not in a host .env.
   --allow-blocked                Exit 0 even when the gate is blocked
   --help                         Show this help
 `)
@@ -63,6 +67,7 @@ function parseArgs(argv) {
     outputMd: path.resolve(process.cwd(), DEFAULT_OUTPUT_DIR, 'summary.md'),
     timeoutMs: 10_000,
     skipAdminApi: false,
+    skipEnvStatus: false,
     allowBlocked: false,
   }
 
@@ -107,6 +112,9 @@ function parseArgs(argv) {
         break
       case '--skip-admin-api':
         opts.skipAdminApi = true
+        break
+      case '--skip-env-status':
+        opts.skipEnvStatus = true
         break
       case '--allow-blocked':
         opts.allowBlocked = true
@@ -168,6 +176,22 @@ function addFailure(failures, code, message, detail = {}) {
   failures.push({ code, message, detail: redactDeep(detail) })
 }
 
+function buildSkippedEnvStatus() {
+  return {
+    skipped: true,
+    reason: 'skip_env_status_flag',
+    command: '',
+    exitCode: 0,
+    stdoutLength: 0,
+    stderrLength: 0,
+    outputJson: '',
+    outputMd: '',
+    overallStatus: 'not_applicable',
+    missingInputs: [],
+    requirements: {},
+  }
+}
+
 function runEnvStatus(opts) {
   const statusOutputJson = path.join(path.dirname(opts.outputJson), 'env-status.json')
   const statusOutputMd = path.join(path.dirname(opts.outputMd), 'env-status.md')
@@ -190,6 +214,7 @@ function runEnvStatus(opts) {
     }
   }
   return {
+    skipped: false,
     command: [
       'node',
       relativePath(opts.statusHelper),
@@ -281,11 +306,11 @@ function readWorkNotificationResult(result) {
 
 async function runGate(opts) {
   const failures = []
-  const envStatus = runEnvStatus(opts)
-  if (envStatus.exitCode !== 0) {
+  const envStatus = opts.skipEnvStatus ? buildSkippedEnvStatus() : runEnvStatus(opts)
+  if (!envStatus.skipped && envStatus.exitCode !== 0) {
     addFailure(failures, 'ENV_STATUS_HELPER_FAILED', 'Env status helper failed', { exitCode: envStatus.exitCode })
   }
-  const envStatusBlocked = envStatus.overallStatus !== 'ready'
+  const envStatusBlocked = !envStatus.skipped && envStatus.overallStatus !== 'ready'
 
   const healthResult = readHealthResult(await fetchJson(opts, '/api/health'))
   if (!healthResult.ok) {
@@ -334,6 +359,7 @@ async function runGate(opts) {
     authTokenFile: opts.authTokenFile ? relativePath(opts.authTokenFile) : '',
     userId: opts.userId || '',
     skipAdminApi: opts.skipAdminApi,
+    skipEnvStatus: opts.skipEnvStatus,
     envStatus,
     health: healthResult,
     auth,
@@ -365,10 +391,11 @@ function renderMarkdown(summary) {
     `- API Base: \`${summary.apiBase}\``,
     `- Env Files: ${summary.envFiles.length ? summary.envFiles.map((file) => `\`${file}\``).join(', ') : '`<none>`'}`,
     `- Admin API Skipped: \`${summary.skipAdminApi}\``,
+    `- Env Status Skipped: \`${summary.skipEnvStatus === true}\``,
     '',
     '## Checks',
     '',
-    `- Env Status: \`${summary.envStatus.overallStatus || '<unknown>'}\``,
+    `- Env Status: \`${summary.envStatus.skipped ? 'skipped' : (summary.envStatus.overallStatus || '<unknown>')}\``,
     `- Runtime Status Overrides Env Status: \`${summary.runtimeStatusOverridesEnvStatus === true}\``,
     `- Health: \`${summary.health.ok}\` (status ${summary.health.status})`,
     `- Auth: \`${summary.auth.skipped ? 'skipped' : summary.auth.ok}\``,
@@ -385,8 +412,12 @@ function renderMarkdown(summary) {
   }
 
   lines.push('## Evidence', '')
-  lines.push(`- Env Status JSON: \`${summary.envStatus.outputJson}\``)
-  lines.push(`- Env Status MD: \`${summary.envStatus.outputMd}\``)
+  if (summary.envStatus.skipped) {
+    lines.push('- Env Status: `skipped`')
+  } else {
+    lines.push(`- Env Status JSON: \`${summary.envStatus.outputJson}\``)
+    lines.push(`- Env Status MD: \`${summary.envStatus.outputMd}\``)
+  }
   if (!summary.workNotification.skipped) {
     lines.push(`- Work Notification Reason: \`${summary.workNotification.unavailableReason || '<none>'}\``)
   }
