@@ -41,11 +41,12 @@
   },
   "fieldMappings": {
     "material": [
-      { "sourceField": "code", "targetField": "FNumber", "transform": { "type": "upperTrim" }, "validation": [{ "type": "required" }] },
+      { "sourceField": "code", "targetField": "FNumber", "transform": ["trim", "upper"], "validation": [{ "type": "required" }] },
       { "sourceField": "name", "targetField": "FName", "validation": [{ "type": "required" }] },
-      { "sourceField": "uom", "targetField": "FBaseUnitID", "transform": { "type": "dictMap", "dictionary": "unit" } }
+      { "sourceField": "uom", "targetField": "FBaseUnitID" }
     ],
     "bom": [
+      { "sourceField": "bomNumber", "targetField": "FNumber", "defaultValue": "BOM-TEST-001", "validation": [{ "type": "required" }] },
       { "sourceField": "parentCode", "targetField": "FParentItemNumber", "validation": [{ "type": "required" }] },
       { "sourceField": "childCode", "targetField": "FChildItems[].FItemNumber", "validation": [{ "type": "required" }] },
       { "sourceField": "quantity", "targetField": "FChildItems[].FQty", "transform": { "type": "toNumber" } }

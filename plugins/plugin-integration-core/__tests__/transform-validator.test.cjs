@@ -31,6 +31,8 @@ async function main() {
     status: 'A',
     missingName: '',
     nested: { code: ' xYz ' },
+    childCode: ' mat-child-001 ',
+    childQty: '2.5',
   }, [
     { sourceField: 'sku', targetField: 'sku', transform: ['trim', 'upper'] },
     { sourceField: 'quantity', targetField: 'quantity', transform: 'toNumber' },
@@ -39,6 +41,8 @@ async function main() {
     { sourceField: 'first', targetField: 'syncKey', transform: { fn: 'concat', fields: ['second'], values: ['DONE'], separator: '|' } },
     { sourceField: 'status', targetField: 'status', transform: { fn: 'dictMap', map: { A: 'active' }, defaultValue: 'unknown' } },
     { sourceField: 'nested.code', targetField: 'nested.code', transform: ['trim', 'lower'] },
+    { sourceField: 'childCode', targetField: 'FChildItems[].FItemNumber', transform: ['trim', 'upper'] },
+    { sourceField: 'childQty', targetField: 'FChildItems[].FQty', transform: 'toNumber' },
   ])
 
   assert.equal(transformed.ok, true)
@@ -51,6 +55,9 @@ async function main() {
     syncKey: 'PLM|ERP|DONE',
     status: 'active',
     nested: { code: 'xyz' },
+    FChildItems: [
+      { FItemNumber: 'MAT-CHILD-001', FQty: 2.5 },
+    ],
   })
 
   // --- 2. Transform failures are typed and record-level errors are structured
