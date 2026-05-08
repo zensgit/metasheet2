@@ -535,6 +535,7 @@ describe('K3 WISE setup helpers', () => {
       sqlEnabled: true,
       sqlMode: 'middle-table',
       sqlAllowedTables: 'dbo.t_ICItem',
+      sqlMiddleTables: 'dbo.t_ICItem',
       rollbackOwner: 'customer-k3-admin',
       bomEnabled: true,
       bomProductId: '',
@@ -556,6 +557,58 @@ describe('K3 WISE setup helpers', () => {
       'Live PoC GATE environment must be test, uat, or staging',
     )
     expect(() => buildK3WiseGateDraft(form)).toThrow('Live PoC GATE environment must be test, uat, or staging')
+  })
+
+  it('allows live PoC GATE drafts to read K3 core tables when writes target middle tables', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      operator: 'integration-admin',
+      version: 'K3 WISE 15.x test',
+      environment: 'uat',
+      baseUrl: 'https://k3.example.test/K3API/',
+      acctId: 'AIS_TEST',
+      sqlEnabled: true,
+      sqlMode: 'middle-table',
+      sqlAllowedTables: 'dbo.t_ICItem\ndbo.t_ICBOM\ndbo.t_ICBomChild',
+      sqlMiddleTables: 'dbo.integration_material_stage\ndbo.integration_bom_stage',
+      rollbackOwner: 'customer-k3-admin',
+      rollbackStrategy: 'delete-test-records',
+      bomEnabled: true,
+      bomProductId: 'BOM-PRODUCT-001',
+    })
+
+    expect(validateK3WiseGateDraftForm(form)).toEqual([])
+    const draft = buildK3WiseGateDraft(form) as { sqlServer?: { allowedTables?: string[]; middleTables?: string[] } }
+    expect(draft.sqlServer?.allowedTables).toEqual(['dbo.t_ICItem', 'dbo.t_ICBOM', 'dbo.t_ICBomChild'])
+    expect(draft.sqlServer?.middleTables).toEqual(['dbo.integration_material_stage', 'dbo.integration_bom_stage'])
+  })
+
+  it('blocks live PoC GATE drafts when middle-table writes target K3 core business tables', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      operator: 'integration-admin',
+      version: 'K3 WISE 15.x test',
+      environment: 'uat',
+      baseUrl: 'https://k3.example.test/K3API/',
+      acctId: 'AIS_TEST',
+      sqlEnabled: true,
+      sqlMode: 'middle-table',
+      sqlAllowedTables: 'dbo.t_ICItem',
+      sqlMiddleTables: 'dbo.t_ICBomChild',
+      rollbackOwner: 'customer-k3-admin',
+      rollbackStrategy: 'delete-test-records',
+      bomEnabled: true,
+      bomProductId: 'BOM-PRODUCT-001',
+    })
+
+    expect(validateK3WiseGateDraftForm(form)).toEqual([
+      { field: 'sqlMiddleTables', message: 'Live PoC may not write K3 WISE core business tables' },
+    ])
+    expect(() => buildK3WiseGateDraft(form)).toThrow('Live PoC may not write K3 WISE core business tables')
   })
 
   it('imports customer GATE JSON public fields without credential secrets', () => {

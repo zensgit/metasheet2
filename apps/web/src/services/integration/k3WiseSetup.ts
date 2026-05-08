@@ -456,8 +456,8 @@ export function validateK3WiseGateDraftForm(form: K3WiseSetupForm): K3WiseSetupV
   if (form.bomEnabled && !trim(form.bomProductId) && !trim(form.plmDefaultProductId)) {
     issues.push({ field: 'bomProductId', message: 'BOM PoC requires BOM product ID or PLM default product ID' })
   }
-  if (form.sqlEnabled && form.sqlMode !== 'readonly' && splitList(form.sqlAllowedTables).some(isK3CoreBusinessTable)) {
-    issues.push({ field: 'sqlAllowedTables', message: 'Live PoC may not write K3 WISE core business tables' })
+  if (form.sqlEnabled && form.sqlMode !== 'readonly' && splitList(form.sqlMiddleTables).some(isK3CoreBusinessTable)) {
+    issues.push({ field: 'sqlMiddleTables', message: 'Live PoC may not write K3 WISE core business tables' })
   }
   return issues
 }
