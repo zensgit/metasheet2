@@ -17,13 +17,13 @@ origin/main
 Final release base:
 
 ```text
-06f71465ac55843431f7d5de7eea00fd7eb1a5d2
+61605888739e731cedbc6dc377c93893106e338a
 ```
 
 Final release image tag:
 
 ```text
-9e17038871ff4a0cbdb32d8c816692f10d1f92cb
+245701aeb5afc57ae5a5932cc4f58ef3aef3a973
 ```
 
 ## 142 Pre-Integration Evidence
@@ -174,36 +174,43 @@ Build and Push Docker Images
 Run:
 
 ```text
-https://github.com/zensgit/metasheet2/actions/runs/25535508861
+https://github.com/zensgit/metasheet2/actions/runs/25535973036
 ```
 
 Result:
 
 - Build job passed.
-- Backend image pushed for `9e17038871ff4a0cbdb32d8c816692f10d1f92cb`.
-- Web image pushed for `9e17038871ff4a0cbdb32d8c816692f10d1f92cb`.
+- Backend image pushed for `245701aeb5afc57ae5a5932cc4f58ef3aef3a973`.
+- Web image pushed for `245701aeb5afc57ae5a5932cc4f58ef3aef3a973`.
 - Deploy job skipped because the branch is not `main`, which is expected for
   this manual 142 acceptance release.
 
 ## 142 Deployment Verification
 
-Before final switch, 142 had advanced to latest main:
+Before the first manual switch, 142 had advanced to latest main:
 
 ```text
 IMAGE_TAG=06f71465ac55843431f7d5de7eea00fd7eb1a5d2
 ```
 
-The final manual switch changed only `metasheet-backend` and `metasheet-web`:
+The branch was then rebased again onto:
 
 ```text
-IMAGE_TAG=9e17038871ff4a0cbdb32d8c816692f10d1f92cb
+61605888739e731cedbc6dc377c93893106e338a
+```
+
+The final manual switch changed only `metasheet-backend` and `metasheet-web`
+from the interim Agent ID tag to the latest rebased Agent ID tag:
+
+```text
+IMAGE_TAG=245701aeb5afc57ae5a5932cc4f58ef3aef3a973
 ```
 
 Container state:
 
 ```text
-metasheet-web     ghcr.io/zensgit/metasheet2-web:9e17038871ff4a0cbdb32d8c816692f10d1f92cb
-metasheet-backend ghcr.io/zensgit/metasheet2-backend:9e17038871ff4a0cbdb32d8c816692f10d1f92cb
+metasheet-web     ghcr.io/zensgit/metasheet2-web:245701aeb5afc57ae5a5932cc4f58ef3aef3a973
+metasheet-backend ghcr.io/zensgit/metasheet2-backend:245701aeb5afc57ae5a5932cc4f58ef3aef3a973
 metasheet-postgres postgres:15-alpine healthy
 metasheet-redis    redis:7-alpine healthy
 ```
@@ -270,6 +277,23 @@ Conclusion:
 - The next real-send acceptance step requires filling the Agent ID through the
   frontend page or the private file, then optionally providing a recipient user
   id file for a real DingTalk work-notification send test.
+
+## PR Status
+
+PR:
+
+```text
+https://github.com/zensgit/metasheet2/pull/1430
+```
+
+Status after the final rebase:
+
+- Head: `245701aeb5afc57ae5a5932cc4f58ef3aef3a973`.
+- Base: `61605888739e731cedbc6dc377c93893106e338a`.
+- Automated checks observed in the PR rollup passed, except the configured
+  strict E2E job that was skipped by workflow policy.
+- Merge state was still `BLOCKED` because repository review/merge policy had
+  not yet been satisfied.
 
 ## Security
 
