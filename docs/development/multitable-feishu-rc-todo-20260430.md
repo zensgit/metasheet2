@@ -77,19 +77,24 @@ Do not mark an item done if:
   - Development MD: `docs/development/multitable-feishu-rc-142-postdeploy-design-20260506.md`
   - Verification MD: `docs/development/multitable-feishu-rc-142-postdeploy-verification-20260506.md`
   - Verification summary: GitHub Actions run `25435548148` deployed `9464b628479cdff1769c864de05f5ec5b6bf7d94` to 142 after rerunning a transient GHCR `unknown blob` failure; postdeploy health/API probes passed.
-- [ ] Smoke test basic multitable sheet lifecycle: create base, sheet, view, fields, records.
+- [x] Smoke test basic multitable sheet lifecycle: create base, sheet, view, fields, records.
+  - PR: #1415
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-rc-lifecycle-smoke-development-20260507.md`
+  - Verification MD: `docs/development/multitable-rc-lifecycle-smoke-verification-20260507.md`
+  - Verification summary: Playwright RC smoke parses two tests for base -> sheet -> field -> view -> record -> workbench render plus an HTTP `FIELD_READONLY` autoNumber raw-write regression guard; local `tsc --noEmit` and `git diff --check` pass. Live stack execution remains deferred to staging/dev-stack availability.
 - [x] Smoke test xlsx frontend import/export with a real file.
   - PR: pending
   - Merge commit: pending
   - Development MD: `docs/development/multitable-feishu-rc-xlsx-ui-smoke-design-20260506.md`
   - Verification MD: `docs/development/multitable-feishu-rc-xlsx-ui-smoke-verification-20260506.md`
   - Verification summary: `AUTH_TOKEN=... API_BASE=http://142.171.239.56:8081 WEB_BASE=http://142.171.239.56:8081 pnpm verify:multitable-pilot:staging` passed `130/130` checks; new `ui.xlsx.import-file` and `ui.xlsx.export-download` checks passed with a real `.xlsx` file and parsed download.
-- [ ] Smoke test field types: currency, percent, rating, url, email, phone, longText, multiSelect.
-  - PR: pending
-  - Merge commit: pending
+- [x] Smoke test field types: currency, percent, rating, url, email, phone, longText, multiSelect.
+  - PR: #1379 + #1384
+  - Merge commit: `e6f6547a1` + #1384 pending
   - Development MD: `docs/development/multitable-feishu-rc-field-types-ui-smoke-design-20260507.md`
   - Verification MD: `docs/development/multitable-feishu-rc-field-types-ui-smoke-verification-20260507.md`
-  - Verification summary: runner coverage is implemented and local static checks pass; final staging pass is blocked because 142 `8081` is not serving the main app and 142 `8082` is running an older backend image that rejects MF2 field types at create-field validation.
+  - Verification summary: `AUTH_TOKEN=... API_BASE=http://142.171.239.56:8081 WEB_BASE=http://142.171.239.56:8081 pnpm verify:multitable-pilot:staging` passed `159/159` checks against main `e6f6547a158361042a42788701d8debef8e1d725`; new `api.field-types.value-normalization` and `ui.field-types.reload-replay` checks covered all 8 field types.
 - [x] Smoke test conditional formatting persistence and reload.
   - PR: pending
   - Merge commit: pending
@@ -105,7 +110,12 @@ Do not mark an item done if:
   - Verification summary: same `140/140` staging run passed `ui.filter-builder.typed-controls-replay`; the runner added select/date/number filters through the toolbar UI, verified saved `filterInfo`, reloaded the view, and confirmed all three controls hydrated from persistence.
 - [ ] Smoke test Gantt view rendering.
 - [ ] Smoke test Hierarchy view rendering and child creation.
-- [ ] Smoke test public form submit path.
+- [x] Smoke test public form submit path.
+  - PR: #1417
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-rc-public-form-smoke-development-20260507.md`
+  - Verification MD: `docs/development/multitable-rc-public-form-smoke-verification-20260507.md`
+  - Verification summary: Playwright RC smoke parses three tests for public form enable -> anonymous submit -> persisted record, disabled-view 401, and regenerate stale-token 401 plus new-token success. Local `tsc --noEmit` and `git diff --check` pass. Live stack execution remains deferred to staging/dev-stack availability.
 - [ ] Smoke test automation send_email save/execute path.
 - [x] Create executable API smoke helper for repeatable staging evidence.
   - PR: #1359
@@ -257,6 +267,7 @@ Expected docs:
   - Development MD: `docs/development/multitable-auto-number-system-field-design-20260505.md`
   - Verification MD: `docs/development/multitable-auto-number-system-field-verification-20260505.md`
   - Verification summary: persistent per-field sequence table added; create paths allocate `autoNumber` values transactionally; focused backend/frontend tests, backend build, frontend type-check, OpenAPI parity, migration replay, and CI passed.
+  - 2026-05-07 follow-up hardening: `docs/development/multitable-auto-number-hardening-design-20260507.md` and `docs/development/multitable-auto-number-hardening-verification-20260507.md` add prefix/digits/start config, existing-record backfill, advisory locking, helper create-path coverage, and frontend formatting.
 - [x] Add `createdTime` field type mapped to record `created_at`.
   - PR: #1280
   - Merge commit: c45da32c1

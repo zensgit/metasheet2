@@ -47,3 +47,5 @@ Metasheet user: `phase0@test.local` / `Phase0Test!2026` (role=admin)
 ## What's tested
 
 - `handoff-journey.spec.ts`: source product → documents → open AML doc → return → roundtrip
+- `multitable-lifecycle-smoke.spec.ts`: create base → sheet → field → view → record (REST), then assert workbench frontend renders the value; also includes an autoNumber raw-write rejection regression guard. Closes the `Smoke test basic multitable sheet lifecycle` RC TODO item. Yuantus/PLM is NOT required.
+- `multitable-public-form-smoke.spec.ts`: admin sets up a sheet + grid view, enables `accessMode: 'public'` form sharing via `PATCH /sheets/:sheetId/views/:viewId/form-share`, then an anonymous (unauthenticated) request submits a record through `POST /views/:viewId/submit` using the issued `publicToken`. Admin verifies the record is queryable via `GET /records?sheetId=…`. Includes two regression guards: anonymous submit on a view with form-share disabled returns 401, and anonymous submit using a token rotated by `POST /form-share/regenerate` returns 401. Closes the `Smoke test public form submit path` RC TODO item. Yuantus/PLM is NOT required.
