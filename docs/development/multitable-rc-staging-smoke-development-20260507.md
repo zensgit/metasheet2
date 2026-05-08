@@ -17,7 +17,7 @@ For the RC closeout we need an automated, browser-free, fail-loud harness agains
 
 - New script `scripts/verify-multitable-rc-staging-smoke.mjs` (~510 LOC) covering seven checks against any deployed multitable backend reachable at `${API_BASE}` with an admin Bearer token at `${AUTH_TOKEN}`:
   1. `lifecycle` — base/sheet/field/view/record + GET records readback
-  2. `public-form` — admin enables `accessMode: 'public'`, anonymous `POST /views/:viewId/submit` with the issued `publicToken`, admin verifies persisted record; plus a stale-token negative
+  2. `public-form` — admin enables `accessMode: 'public'`, anonymous `POST /views/:viewId/submit` with the issued `publicToken`, admin verifies persisted record; then regenerates the token and asserts the old token returns 401 while the new token can submit and persist a second record
   3. `hierarchy` — self-table single-value link parent + PATCH self-parent → 400 + `error.code === 'HIERARCHY_CYCLE'`
   4. `gantt-config` — gantt view PATCH with non-link `dependencyFieldId` → 400 + `VALIDATION_ERROR` + message contains `self-table link field`
   5. `formula` — formula field with `={A.id}+{B.id}` expression + GET fields verifies persisted property
@@ -26,6 +26,7 @@ For the RC closeout we need an automated, browser-free, fail-loud harness agains
 - New package.json script `verify:multitable-rc:staging` that invokes the harness via `node scripts/...mjs`.
 - Outputs `report.json` + `report.md` under `${OUTPUT_DIR}` (default `output/multitable-rc-staging-smoke`). Each row records pass/fail/skip + duration; failures include a stack-printable error string. Exit code 0 = all pass, 1 = at least one fail, 2 = env / fatal before any check ran.
 - Supports `SKIP=automation-email,autoNumber-backfill` env to skip specific checks (useful when the staging deployment hasn't yet caught up to the latest perf merge).
+- `API_BASE` is validated before use and rejected if it contains embedded credentials, query params, or a URL fragment. Reports include the normalized API URL, so this avoids writing secret-bearing URLs to `report.json` / `report.md`.
 
 ### Out
 

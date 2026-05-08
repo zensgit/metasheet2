@@ -6,7 +6,7 @@
  * RC TODO smoke surfaces against a deployed multitable backend:
  *
  *   1. lifecycle           — create base/sheet/field/view/record + GET records
- *   2. public-form         — admin enable accessMode='public' + anonymous submit + admin verify persisted
+ *   2. public-form         — admin enable accessMode='public' + anonymous submit + token rotation
  *   3. hierarchy           — self-table link parent field + PATCH self-parent → 400 + HIERARCHY_CYCLE
  *   4. gantt-config        — gantt view with non-link dependencyFieldId → 400 + VALIDATION_ERROR + self-table link msg
  *   5. formula             — formula field with `={A.id}+{B.id}` expression + verify persisted property
@@ -47,7 +47,28 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
-const apiBase = (process.env.API_BASE || '').replace(/\/+$/, '')
+function normalizeApiBase(rawValue) {
+  const value = (rawValue || '').trim().replace(/\/+$/, '')
+  if (!value) return ''
+  let parsed
+  try {
+    parsed = new URL(value)
+  } catch {
+    console.error('[rc-smoke] API_BASE must be an absolute http(s) URL')
+    process.exit(2)
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    console.error('[rc-smoke] API_BASE must use http or https')
+    process.exit(2)
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    console.error('[rc-smoke] API_BASE must not contain credentials, query, or fragment')
+    process.exit(2)
+  }
+  return value
+}
+
+const apiBase = normalizeApiBase(process.env.API_BASE)
 const authToken = process.env.AUTH_TOKEN || ''
 const outputDir = process.env.OUTPUT_DIR || 'output/multitable-rc-staging-smoke'
 const reportJsonPath = process.env.REPORT_JSON || path.join(outputDir, 'report.json')
@@ -196,6 +217,7 @@ registerCheck('lifecycle', async () => {
   const base = await createBase(`${label}-base`)
   const sheet = await createSheet(base.id, `${label}-sheet`)
   const field = await createField(sheet.id, 'Title', 'string')
+  const view = await createView(sheet.id, 'Default Grid', 'grid')
   const cellValue = `lifecycle-${stamp}`
   const record = await createRecord(sheet.id, { [field.id]: cellValue })
   if (record.data?.[field.id] !== cellValue) {
@@ -208,7 +230,7 @@ registerCheck('lifecycle', async () => {
   if (persisted.data?.[field.id] !== cellValue) {
     throw new Error(`Record value drift after read-back: '${persisted.data?.[field.id]}'`)
   }
-  return { sheetId: sheet.id, recordId: record.id, fieldId: field.id }
+  return { sheetId: sheet.id, viewId: view.id, recordId: record.id, fieldId: field.id }
 })
 
 // ── 2. public-form ──────────────────────────────────────────────────────────
@@ -241,15 +263,41 @@ registerCheck('public-form', async () => {
     throw new Error(`Submitted value drift: '${persisted.data?.[field.id]}'`)
   }
 
-  // Negative: stale token must reject
+  const regenBody = await authPost(
+    `/api/multitable/sheets/${sheet.id}/views/${view.id}/form-share/regenerate`,
+    {},
+  )
+  const rotatedToken = requireValue(regenBody.data?.publicToken, 'rotated publicToken')
+  if (rotatedToken === publicToken) {
+    throw new Error('Regenerated publicToken matched the previous token')
+  }
+
+  // Negative: a previously-valid token must reject after regeneration.
   const stale = await anonPost(`/api/multitable/views/${view.id}/submit`, {
-    publicToken: 'definitely-not-the-real-token',
+    publicToken,
     data: { [field.id]: 'should-not-persist' },
   })
   if (stale.status !== 401) {
-    throw new Error(`Expected 401 for stale-token anonymous submit; got ${stale.status}`)
+    throw new Error(`Expected 401 for rotated stale-token anonymous submit; got ${stale.status}`)
   }
-  return { sheetId: sheet.id, viewId: view.id, recordId: newRecordId }
+
+  const rotatedValue = `pf-rotated-${stamp}`
+  const rotatedSubmit = await anonPost(`/api/multitable/views/${view.id}/submit`, {
+    publicToken: rotatedToken,
+    data: { [field.id]: rotatedValue },
+  })
+  if (!rotatedSubmit.ok) {
+    throw new Error(`Anonymous submit with rotated token failed: ${rotatedSubmit.status} ${JSON.stringify(rotatedSubmit.body)}`)
+  }
+  const rotatedRecordId = requireValue(rotatedSubmit.body?.data?.record?.id, 'rotated-token submitted record id')
+  const rotatedRecordsBody = await authGet(`/api/multitable/records?sheetId=${sheet.id}`)
+  const rotatedPersisted = (rotatedRecordsBody.data?.records ?? []).find((row) => row.id === rotatedRecordId)
+  if (!rotatedPersisted) throw new Error(`Rotated-token submitted record ${rotatedRecordId} not visible to admin`)
+  if (rotatedPersisted.data?.[field.id] !== rotatedValue) {
+    throw new Error(`Rotated-token submitted value drift: '${rotatedPersisted.data?.[field.id]}'`)
+  }
+
+  return { sheetId: sheet.id, viewId: view.id, recordId: newRecordId, rotatedRecordId }
 })
 
 // ── 3. hierarchy ────────────────────────────────────────────────────────────

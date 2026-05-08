@@ -69,6 +69,24 @@ Confirms:
 - Both `report.json` and `report.md` are written
 - Exit code is non-zero on any failure (verified via `&&`-chain semantics in the dry-run)
 
+## Codex review hardening
+
+During review, Codex tightened two details before merge:
+
+- `lifecycle` now creates the grid view it claimed to cover and returns `viewId` in evidence. The original draft created base/sheet/field/record but not a view, which made the report over-state lifecycle coverage.
+- `public-form` now tests real token rotation rather than a hard-coded invalid token: initial token submits successfully, regenerated old token returns 401, and the new token also submits and persists a second record.
+- `API_BASE` is now parsed and rejected when it contains embedded credentials, query params, or a URL fragment, so secret-bearing URLs cannot be written into `report.json` / `report.md`.
+
+Additional syntax guard for the URL validation path:
+
+```bash
+AUTH_TOKEN=fake-token \
+API_BASE='http://user:pass@127.0.0.1:1?token=secret' \
+node scripts/verify-multitable-rc-staging-smoke.mjs
+```
+
+Result: exits 2 with `API_BASE must not contain credentials, query, or fragment`.
+
 ## Diff hygiene
 
 ```bash
