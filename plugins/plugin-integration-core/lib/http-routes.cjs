@@ -289,6 +289,7 @@ async function persistExternalSystemTestResult(externalSystems, req, system, res
     name: system.name,
     kind: system.kind,
     role: system.role || 'bidirectional',
+    projectId: system.projectId,
     status: resolveTestedStatus(system, result),
     lastTestedAt: new Date().toISOString(),
     lastError: resolveTestError(result),
