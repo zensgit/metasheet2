@@ -5,8 +5,8 @@ import { defineConfig } from '@playwright/test'
  *
  * Prerequisites (external — not auto-started by this config):
  *   1. Yuantus on http://127.0.0.1:7910
- *   2. Metasheet backend on http://localhost:7778
- *   3. Metasheet frontend on http://127.0.0.1:8899
+ *   2. Metasheet backend on API_BASE_URL or http://localhost:7778
+ *   3. Metasheet frontend on FE_BASE_URL or http://127.0.0.1:8899
  *
  * Tests skip automatically if servers are not reachable.
  *
@@ -21,6 +21,6 @@ export default defineConfig({
   retries: 0,
   use: {
     headless: true,
-    baseURL: 'http://127.0.0.1:8899',
+    baseURL: process.env.FE_BASE_URL?.trim() || 'http://127.0.0.1:8899',
   },
 })

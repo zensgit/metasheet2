@@ -42,9 +42,9 @@ import {
   createView,
   ensureServersReachable,
   injectTokenAndGo,
-  loginAsPhase0,
   makeAuthClient,
   requireValue,
+  resolveE2EAuthToken,
   uniqueLabel,
   type ApiEnvelope,
   type Entity,
@@ -54,7 +54,7 @@ let token = ''
 
 test.beforeAll(async ({ request }) => {
   await ensureServersReachable(request)
-  token = await loginAsPhase0(request)
+  token = await resolveE2EAuthToken(request)
 })
 
 type FormulaFieldRow = Entity & {

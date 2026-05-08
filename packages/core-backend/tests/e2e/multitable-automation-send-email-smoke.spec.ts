@@ -43,8 +43,8 @@ import {
   createSheet,
   createView,
   ensureServersReachable,
-  loginAsPhase0,
   makeAuthClient,
+  resolveE2EAuthToken,
   uniqueLabel,
   type AuthClient,
   type Entity,
@@ -54,7 +54,7 @@ let token = ''
 
 test.beforeAll(async ({ request }) => {
   await ensureServersReachable(request)
-  token = await loginAsPhase0(request)
+  token = await resolveE2EAuthToken(request)
 })
 
 type AutomationStep = {

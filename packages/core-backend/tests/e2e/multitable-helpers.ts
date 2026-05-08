@@ -6,10 +6,11 @@
  * "rule of three" trigger noted in the post-#1421 review.
  *
  * Public surface:
- *   - FE_BASE_URL / API_BASE_URL constants
+ *   - FE_BASE_URL / API_BASE_URL constants, overridable by env
  *   - Entity / ApiEnvelope / FailureResponse types
  *   - requireValue() to safely unwrap optional response fields
- *   - ensureServersReachable() / loginAsPhase0() bootstrap
+ *   - ensureServersReachable() / loginAsPhase0() /
+ *     resolveE2EAuthToken() bootstrap
  *   - makeAuthClient() per-test bound to (request, token)
  *   - injectTokenAndGo() for browser-side auth setup
  *   - createBase / createSheet / createField / createView / createRecord
@@ -22,8 +23,19 @@
  */
 import { test, type APIRequestContext, type Page } from '@playwright/test'
 
-export const FE_BASE_URL = 'http://127.0.0.1:8899'
-export const API_BASE_URL = 'http://localhost:7778'
+function envBaseUrl(name: string, fallback: string): string {
+  const value = process.env[name]?.trim()
+  return (value && value.length > 0 ? value : fallback).replace(/\/+$/, '')
+}
+
+function envToken(name: string): string | undefined {
+  const value = process.env[name]?.trim()
+  return value && value.length > 0 ? value : undefined
+}
+
+export const FE_BASE_URL = envBaseUrl('FE_BASE_URL', 'http://127.0.0.1:8899')
+export const API_BASE_URL = envBaseUrl('API_BASE_URL', 'http://localhost:7778')
+export const AUTH_STORAGE_KEYS = ['auth_token', 'jwt', 'devToken', 'metasheet_token', 'token'] as const
 
 export type Entity = { id: string }
 
@@ -45,8 +57,11 @@ export function requireValue<T>(value: T | undefined, label: string): T {
 
 export async function ensureServersReachable(request: APIRequestContext): Promise<void> {
   try {
-    const apiHealth = await request.get(`${API_BASE_URL}/health`, { timeout: 3000 })
-    if (!apiHealth.ok()) test.skip(true, 'Metasheet backend not reachable')
+    const rootHealth = await request.get(`${API_BASE_URL}/health`, { timeout: 3000 })
+    if (!rootHealth.ok()) {
+      const apiHealth = await request.get(`${API_BASE_URL}/api/health`, { timeout: 3000 })
+      if (!apiHealth.ok()) test.skip(true, 'Metasheet backend not reachable')
+    }
   } catch {
     test.skip(true, 'Metasheet backend not reachable')
   }
@@ -72,6 +87,12 @@ export async function loginAsPhase0(request: APIRequestContext): Promise<string>
     throw new Error('unreachable')
   }
   return token
+}
+
+export async function resolveE2EAuthToken(request: APIRequestContext): Promise<string> {
+  const providedToken = envToken('AUTH_TOKEN')
+  if (providedToken) return providedToken
+  return loginAsPhase0(request)
 }
 
 export type AuthClient = {
@@ -128,10 +149,9 @@ export function makeAuthClient(request: APIRequestContext, token: string): AuthC
 
 export async function injectTokenAndGo(page: Page, token: string, path: string): Promise<void> {
   await page.goto(FE_BASE_URL)
-  await page.evaluate((t: string) => {
-    localStorage.setItem('metasheet_token', t)
-    localStorage.setItem('token', t)
-  }, token)
+  await page.evaluate(({ keys, value }: { keys: readonly string[], value: string }) => {
+    for (const key of keys) localStorage.setItem(key, value)
+  }, { keys: [...AUTH_STORAGE_KEYS], value: token })
   await page.goto(`${FE_BASE_URL}${path}`)
 }
 

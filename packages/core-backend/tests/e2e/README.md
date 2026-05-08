@@ -7,8 +7,8 @@ Browser-level regression tests for federated PLM user journeys.
 These tests require **three servers running externally**:
 
 1. **Yuantus** on `http://127.0.0.1:7910`
-2. **Metasheet backend** on `http://localhost:7778`
-3. **Metasheet frontend** on `http://127.0.0.1:8899`
+2. **Metasheet backend** on `API_BASE_URL` or `http://localhost:7778`
+3. **Metasheet frontend** on `FE_BASE_URL` or `http://127.0.0.1:8899`
 
 Tests auto-skip if any server is unreachable.
 
@@ -34,6 +34,37 @@ cd /path/to/metasheet2/packages/core-backend
 npx playwright test --config tests/e2e/playwright.config.ts
 ```
 
+## Staging / remote run
+
+The multitable RC smoke specs can run against a deployed staging stack without
+creating the local `phase0@test.local` account. Provide:
+
+- `FE_BASE_URL`: frontend origin.
+- `API_BASE_URL`: backend origin.
+- `AUTH_TOKEN`: short-lived admin token. Prefer reading it from a local `0600`
+  file; do not paste token values into shell history or PR comments.
+
+Example with an SSH tunnel:
+
+```bash
+ssh -fN \
+  -L 18081:127.0.0.1:8081 \
+  -L 18990:127.0.0.1:8900 \
+  <staging-host>
+
+FE_BASE_URL=http://127.0.0.1:18081 \
+API_BASE_URL=http://127.0.0.1:18990 \
+AUTH_TOKEN="$(cat /tmp/metasheet-staging-admin.jwt)" \
+npx playwright test --config tests/e2e/playwright.config.ts \
+  multitable-lifecycle-smoke.spec.ts \
+  multitable-public-form-smoke.spec.ts \
+  multitable-hierarchy-smoke.spec.ts \
+  multitable-gantt-smoke.spec.ts \
+  multitable-formula-smoke.spec.ts \
+  multitable-automation-send-email-smoke.spec.ts \
+  --workers=1
+```
+
 ## Test data
 
 Tests use the B demo object:
@@ -42,7 +73,8 @@ Tests use the B demo object:
 - Has 1 file attachment + 1 AML related document (Doc UI Doc)
 - Has 1 ECO (DOCUI-ECO-1768357216, state=progress)
 
-Metasheet user: `phase0@test.local` / `Phase0Test!2026` (role=admin)
+Default local fallback user: `phase0@test.local` / `Phase0Test!2026`
+(role=admin). Remote/staging runs should prefer `AUTH_TOKEN`.
 
 ## What's tested
 
@@ -56,4 +88,4 @@ Metasheet user: `phase0@test.local` / `Phase0Test!2026` (role=admin)
 
 ### Shared scaffolding
 
-Helpers live in `multitable-helpers.ts`: `FE_BASE_URL` / `API_BASE_URL` constants, `Entity` / `ApiEnvelope` / `FailureResponse` types, `requireValue`, `ensureServersReachable`, `loginAsPhase0`, `makeAuthClient`, `injectTokenAndGo`, `uniqueLabel`, and the `createBase` / `createSheet` / `createField` / `createView` / `createRecord` primitives. The lifecycle / public-form / hierarchy / gantt / formula specs all consume this module; new RC smokes should fork the formula spec or extend the helpers rather than copying inline.
+Helpers live in `multitable-helpers.ts`: environment-overridable `FE_BASE_URL` / `API_BASE_URL` constants, `Entity` / `ApiEnvelope` / `FailureResponse` types, `requireValue`, `ensureServersReachable`, `loginAsPhase0`, `resolveE2EAuthToken`, `makeAuthClient`, `injectTokenAndGo`, `uniqueLabel`, and the `createBase` / `createSheet` / `createField` / `createView` / `createRecord` primitives. `resolveE2EAuthToken` uses `AUTH_TOKEN` when present and falls back to the local phase0 login otherwise. The lifecycle / public-form / hierarchy / gantt / formula specs all consume this module; new RC smokes should fork the formula spec or extend the helpers rather than copying inline.

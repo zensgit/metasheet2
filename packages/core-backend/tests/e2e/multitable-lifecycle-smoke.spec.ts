@@ -26,9 +26,9 @@ import {
   createView,
   ensureServersReachable,
   injectTokenAndGo,
-  loginAsPhase0,
   makeAuthClient,
   requireValue,
+  resolveE2EAuthToken,
   uniqueLabel,
   type Entity,
 } from './multitable-helpers'
@@ -37,7 +37,7 @@ let token = ''
 
 test.beforeAll(async ({ request }) => {
   await ensureServersReachable(request)
-  token = await loginAsPhase0(request)
+  token = await resolveE2EAuthToken(request)
 })
 
 test.describe('Multitable lifecycle smoke', () => {
