@@ -22,7 +22,7 @@ Option 2 (medium) was the natural pick: 0 backend changes, exercises the real ev
 ### In
 
 - New Playwright spec `packages/core-backend/tests/e2e/multitable-automation-send-email-smoke.spec.ts` containing three `test` cases:
-  1. **End-to-end**: admin creates a sheet + Title (string) + Owner (string) + grid view, then POSTs a rule with `triggerType: 'record.created'`, `actionType: 'send_email'`, and `actionConfig: { recipients: ['team@test.local', 'lead@test.local'], subjectTemplate, bodyTemplate }`. The templates reference `{{recordId}}` and `{{record.<fieldId>}}` so a render-time bug would surface as a templating mismatch in the body. The spec then creates a real record (which fires the actual `record.created` event chain, NOT the `/test` endpoint), polls `GET .../logs?limit=10` for up to 12 s with 1 s interval, and asserts the resulting `AutomationExecution`:
+  1. **End-to-end**: admin creates a sheet + Title (string) + Owner (string) + grid view, then POSTs a rule with `triggerType: 'record.created'`, `actionType: 'send_email'`, and `actionConfig: { recipients: ['team@test.local', 'lead@test.local'], subjectTemplate, bodyTemplate }`. The templates reference `{{recordId}}` and `{{record.<fieldId>}}` to exercise the same dot-path renderer used by production automation. Because this option intentionally avoids a test-only notification-history endpoint, the smoke asserts the sent-step contract rather than rendered email content. The spec then creates a real record (which fires the actual `record.created` event chain, NOT the `/test` endpoint), polls `GET .../logs?limit=10` for up to 12 s with 1 s interval, and asserts the resulting `AutomationExecution`:
      - `execution.status === 'success'`
      - `execution.steps[0].actionType === 'send_email'`
      - `execution.steps[0].status === 'success'`
@@ -58,7 +58,7 @@ Automation execution is event-driven and asynchronous; the `record.created` even
 
 ### Why `templates` reference `{{record.<fieldId>}}` rather than `{{record.title}}`
 
-`renderAutomationTemplate` (`packages/core-backend/src/multitable/automation-executor.ts`) does dot-path lookup against the `templateData` object, where `record` is the persisted record's `data` map. Field values are keyed by field id (`fld_xxx`), not human name. Using `{{record.${title.id}}}` proves the templating machinery wires through; using `{{record.title}}` would silently render `''` (key miss) and the executor would still report `success`, masking a templating regression.
+`renderAutomationTemplate` (`packages/core-backend/src/multitable/automation-executor.ts`) does dot-path lookup against the `templateData` object, where `record` is the persisted record's `data` map. Field values are keyed by field id (`fld_xxx`), not human name. Using `{{record.${title.id}}}` keeps the smoke aligned with the real template shape. This spec does not inspect rendered email content; that stronger assertion would require the explicitly-deferred notification-history endpoint noted under Known limitations.
 
 ### Why the negative tests assert exact message strings
 
