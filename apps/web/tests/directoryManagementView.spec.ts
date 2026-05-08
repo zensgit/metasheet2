@@ -4741,6 +4741,147 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('根部门 1 当前仅返回 1 个直属成员')
   })
 
+  it('tests and saves DingTalk work notification Agent ID from the directory page', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          result: {
+            integration: { id: 'dir-1', name: 'DingTalk CN', status: 'active' },
+            agentId: { configured: true, length: 9, valuePrinted: false, persisted: false },
+            accessTokenVerified: true,
+            notificationSent: false,
+          },
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          result: {
+            integration: { id: 'dir-1', name: 'DingTalk CN', status: 'active' },
+            agentId: { configured: true, length: 9, valuePrinted: false, persisted: false },
+            accessTokenVerified: true,
+            notificationSent: false,
+            saved: true,
+          },
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration({
+            config: {
+              ...createIntegration().config,
+              workNotificationAgentIdConfigured: true,
+            },
+          })],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([]),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const agentInput = container!.querySelector('input[placeholder*="仅系统管理员填写"]') as HTMLInputElement | null
+    expect(agentInput).toBeTruthy()
+    agentInput!.value = '123456789'
+    agentInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+
+    const testButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('测试工作通知'))
+    expect(testButton).toBeTruthy()
+    testButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(6)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/dingtalk/work-notification/test',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          integrationId: 'dir-1',
+          agentId: '123456789',
+          recipientUserId: '',
+        }),
+      }),
+    )
+    expect(container?.textContent).toContain('工作通知 Agent ID 基础测试通过')
+
+    const saveButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('保存 Agent ID'))
+    expect(saveButton).toBeTruthy()
+    saveButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(8)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/dingtalk/work-notification',
+      expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({
+          integrationId: 'dir-1',
+          agentId: '123456789',
+          recipientUserId: '',
+        }),
+      }),
+    )
+    expect(container?.textContent).toContain('Agent ID 已保存')
+  })
+
+  it('hides DingTalk work notification Agent ID inputs until an integration is selected', async () => {
+    apiFetchMock.mockResolvedValueOnce(createJsonResponse({
+      ok: true,
+      data: {
+        items: [],
+      },
+    }))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    expect(container?.textContent).toContain('请先创建并选中钉钉目录集成')
+    expect(container!.querySelector('input[placeholder*="仅系统管理员填写"]')).toBeNull()
+    expect(Array.from(container!.querySelectorAll('button')).some((button) => button.textContent?.includes('保存 Agent ID'))).toBe(false)
+  })
+
   it('unbinds a linked directory account', async () => {
     apiFetchMock
       .mockResolvedValueOnce(createJsonResponse({

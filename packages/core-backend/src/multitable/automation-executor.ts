@@ -9,9 +9,9 @@ import {
   DingTalkBusinessError,
   DingTalkRequestError,
   fetchDingTalkAppAccessToken,
-  readDingTalkMessageConfig,
   sendDingTalkWorkNotification,
 } from '../integrations/dingtalk/client'
+import { readDingTalkMessageConfigFromRuntime } from '../integrations/dingtalk/work-notification-settings'
 import type { EventBus } from '../integration/events/event-bus'
 import {
   buildDingTalkMarkdown,
@@ -1108,7 +1108,7 @@ export class AutomationExecutor {
     const batches = chunkItems(resolvedRecipients, DINGTALK_PERSON_BATCH_SIZE)
 
     try {
-      const messageConfig = readDingTalkMessageConfig()
+      const messageConfig = await readDingTalkMessageConfigFromRuntime()
       const accessToken = await fetchDingTalkAppAccessToken(messageConfig, { fetchFn: this.deps.fetchFn })
       let responseCount = 0
 
