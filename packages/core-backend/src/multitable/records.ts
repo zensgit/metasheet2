@@ -1,5 +1,9 @@
 import { randomUUID } from 'crypto'
 
+import {
+  acquireAutoNumberSheetWriteLock,
+  allocateAutoNumberValues,
+} from './auto-number-service'
 import { fieldTypeRegistry } from './field-type-registry'
 import { loadFieldsForSheet, loadSheetRow } from './loaders'
 import { MultitableRecordNotFoundError, MultitableRecordValidationError } from './record-errors'
@@ -232,6 +236,8 @@ function normalizeFieldValue(
         throw new MultitableRecordValidationError(`Formula must start with "=": ${field.id}`)
       }
       return value
+    case 'autoNumber':
+      throw new MultitableRecordValidationError(`Field is readonly: ${field.id}`)
     case 'lookup':
     case 'rollup':
     case 'attachment':
@@ -461,9 +467,15 @@ export async function createRecord(
   input: CreateMultitableRecordInput,
 ): Promise<CreatedMultitableRecord> {
   const query = input.query
+  await acquireAutoNumberSheetWriteLock(query, input.sheetId)
   const { fields } = await loadSheetAndFields(query, input.sheetId)
 
   const { patch, linkUpdates } = await buildNormalizedPatch(query, fields, input.data)
+  Object.assign(patch, await allocateAutoNumberValues(query, input.sheetId, fields.map((field) => ({
+    id: field.id,
+    type: field.type,
+    property: field.property,
+  }))))
 
   const recordId = `rec_${randomUUID()}`
   const inserted = await query(

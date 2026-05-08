@@ -135,7 +135,12 @@ import {
   RecordValidationFailedError as RecordCreateValidationFailedError,
   RecordPatchFieldValidationError as RecordServicePatchFieldValidationError,
 } from '../multitable/record-service'
-import { allocateAutoNumberValues } from '../multitable/auto-number-service'
+import {
+  acquireAutoNumberSheetWriteLock,
+  allocateAutoNumberValues,
+  backfillAutoNumberField,
+} from '../multitable/auto-number-service'
+import { normalizeAutoNumberProperty } from '../multitable/auto-number-property'
 import {
   createYjsInvalidationPostCommitHook,
   type YjsInvalidator,
@@ -1340,9 +1345,7 @@ function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown)
   }
 
   if (type === 'autoNumber') {
-    const startAtRaw = typeof obj.startAt === 'number' ? obj.startAt : Number(obj.startAt)
-    const startAt = Number.isFinite(startAtRaw) && startAtRaw > 0 ? Math.floor(startAtRaw) : 1
-    return { ...obj, startAt, readOnly: true }
+    return normalizeAutoNumberProperty(obj)
   }
 
   if (type === 'createdTime' || type === 'modifiedTime' || type === 'createdBy' || type === 'modifiedBy') {
@@ -2896,6 +2899,42 @@ class ValidationError extends Error {
   }
 }
 
+function stringFromRecord(value: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const raw = value[key]
+    if (typeof raw === 'string' && raw.trim()) return raw.trim()
+  }
+  return ''
+}
+
+async function validateGanttDependencyConfig(
+  query: QueryFn,
+  sheetId: string,
+  viewType: string,
+  config: Record<string, unknown>,
+): Promise<string | null> {
+  if (viewType !== 'gantt') return null
+  const dependencyFieldId = typeof config.dependencyFieldId === 'string' ? config.dependencyFieldId.trim() : ''
+  if (!dependencyFieldId) return null
+
+  const fieldRes = await query(
+    'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 AND id = $2',
+    [sheetId, dependencyFieldId],
+  )
+  const fieldRow = (fieldRes.rows as any[])[0]
+  if (!fieldRow) {
+    return `Gantt dependency field must be a self-table link field: ${dependencyFieldId}`
+  }
+
+  const field = serializeFieldRow(fieldRow)
+  const foreignSheetId = stringFromRecord(field.property ?? {}, ['foreignSheetId', 'foreignDatasheetId', 'datasheetId'])
+  if (field.type !== 'link' || foreignSheetId !== sheetId) {
+    return `Gantt dependency field must be a self-table link field: ${dependencyFieldId}`
+  }
+
+  return null
+}
+
 class PermissionError extends Error {
   constructor(public message: string) {
     super(message)
@@ -4186,6 +4225,10 @@ export function univerMetaRouter(): Router {
           const refs = multitableFormulaEngine.extractFieldReferences(String(property.expression))
           await syncFormulaDependencies(query, sheetId, fieldId, refs)
         }
+
+        if (type === 'autoNumber') {
+          await backfillAutoNumberField(query, sheetId, fieldId, property)
+        }
       })
 
       const fieldRes = await pool.query(
@@ -4466,6 +4509,10 @@ export function univerMetaRouter(): Router {
           await query('DELETE FROM meta_field_auto_number_sequences WHERE field_id = $1', [fieldId])
         }
 
+        if (currentType !== 'autoNumber' && nextType === 'autoNumber') {
+          await backfillAutoNumberField(query, sheetId, fieldId, nextProperty, { overwrite: true })
+        }
+
         // Track formula dependencies on update
         if (nextType === 'formula' && nextProperty?.expression) {
           const refs = multitableFormulaEngine.extractFieldReferences(String(nextProperty.expression))
@@ -4698,6 +4745,10 @@ export function univerMetaRouter(): Router {
       if (incomingRules !== undefined) {
         incomingConfig.conditionalFormattingRules = sanitizeConditionalFormattingRules(incomingRules)
       }
+      const ganttConfigError = await validateGanttDependencyConfig(pool.query.bind(pool), sheetId, type, incomingConfig)
+      if (ganttConfigError) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: ganttConfigError } })
+      }
 
       await pool.query(
         `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
@@ -4791,6 +4842,17 @@ export function univerMetaRouter(): Router {
       if (incomingRules !== undefined) {
         ;(nextConfig as Record<string, unknown>).conditionalFormattingRules =
           sanitizeConditionalFormattingRules(incomingRules)
+      }
+      if (parsed.data.config !== undefined || parsed.data.type !== undefined) {
+        const ganttConfigError = await validateGanttDependencyConfig(
+          pool.query.bind(pool),
+          String(row.sheet_id),
+          nextType,
+          nextConfig as Record<string, unknown>,
+        )
+        if (ganttConfigError) {
+          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: ganttConfigError } })
+        }
       }
 
       await pool.query(
@@ -6257,6 +6319,8 @@ export function univerMetaRouter(): Router {
       let nextVersion = 1
 
       await pool.transaction(async ({ query }) => {
+        await acquireAutoNumberSheetWriteLock(query, view.sheetId)
+
         if (recordId) {
           const currentRes = await query(
             'SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
@@ -6319,7 +6383,8 @@ export function univerMetaRouter(): Router {
           return
         }
 
-        Object.assign(patch, await allocateAutoNumberValues(query, view.sheetId, fields))
+        const latestFields = await loadFieldsForSheet(query, view.sheetId)
+        Object.assign(patch, await allocateAutoNumberValues(query, view.sheetId, latestFields))
 
         const insertRes = await query(
           `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
