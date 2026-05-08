@@ -9,6 +9,7 @@ const {
 const {
   createWatermarkStore,
   deriveNextWatermark,
+  WatermarkError,
 } = require(path.join(__dirname, '..', 'lib', 'watermark.cjs'))
 const { createDeadLetterStore } = require(path.join(__dirname, '..', 'lib', 'dead-letter.cjs'))
 const { createRunLog, createRunLogger } = require(path.join(__dirname, '..', 'lib', 'run-log.cjs'))
@@ -116,6 +117,74 @@ async function main() {
     revision: 'v2',
     targetSystem: 'k3_1',
   }))
+  const multiDimKeyA = computeRecordIdempotencyKey({
+    record: { code: 'MAT-001', revision: 'A', org: '100', locale: 'zh-CN' },
+    pipeline: {
+      sourceSystemId: 'plm_pipeline',
+      targetSystemId: 'erp_pipeline',
+      sourceObject: 'materials',
+      idempotencyKeyFields: ['code', 'revision', 'org', 'locale'],
+    },
+    sourceSystem: { id: 'plm_1' },
+    targetSystem: { id: 'k3_1' },
+  })
+  const multiDimKeyB = computeRecordIdempotencyKey({
+    record: { code: 'MAT-001', revision: 'A', org: '200', locale: 'zh-CN' },
+    pipeline: {
+      sourceSystemId: 'plm_pipeline',
+      targetSystemId: 'erp_pipeline',
+      sourceObject: 'materials',
+      idempotencyKeyFields: ['code', 'revision', 'org', 'locale'],
+    },
+    sourceSystem: { id: 'plm_1' },
+    targetSystem: { id: 'k3_1' },
+  })
+  assert.notEqual(multiDimKeyA, multiDimKeyB, 'all idempotencyKeyFields after the first two contribute to the key')
+  assert.equal(multiDimKeyA, computeIdempotencyKey({
+    sourceSystem: 'plm_1',
+    objectType: 'materials',
+    sourceId: 'MAT-001',
+    revision: 'A',
+    targetSystem: 'k3_1',
+    dimensions: {
+      org: '100',
+      locale: 'zh-CN',
+    },
+  }))
+  assert.throws(
+    () => computeRecordIdempotencyKey({
+      record: { code: 'MAT-001', revision: 'A', org: '' },
+      pipeline: {
+        sourceSystemId: 'plm_pipeline',
+        targetSystemId: 'erp_pipeline',
+        sourceObject: 'materials',
+        idempotencyKeyFields: ['code', 'revision', 'org'],
+      },
+      sourceSystem: { id: 'plm_1' },
+      targetSystem: { id: 'k3_1' },
+    }),
+    /dimensions\.org is required/,
+  )
+  const unsafeDimensionInput = {
+    sourceSystem: 'plm_1',
+    objectType: 'materials',
+    sourceId: 'MAT-001',
+    revision: 'A',
+    targetSystem: 'k3_1',
+    dimensions: { ['__proto__']: 'safe', constructor: 'safe', prototype: 'safe', org: '100' },
+  }
+  const unsafeDimensionVariant = {
+    ...unsafeDimensionInput,
+    dimensions: { ['__proto__']: 'changed', constructor: 'safe', prototype: 'safe', org: '100' },
+  }
+  const unsafeDimensionKey = computeIdempotencyKey(unsafeDimensionInput)
+  assert.match(unsafeDimensionKey, /^idem_[0-9a-f]{64}$/)
+  assert.notEqual(
+    unsafeDimensionKey,
+    computeIdempotencyKey(unsafeDimensionVariant),
+    'special dimension keys remain own data keys and contribute to the fingerprint',
+  )
+  assert.equal({}.polluted, undefined, 'idempotency dimensions cannot pollute Object.prototype')
   assert.throws(
     () => computeIdempotencyKey({ sourceSystem: 'plm_1', objectType: 'materials', targetSystem: 'k3_1' }),
     /sourceId is required/,
@@ -159,6 +228,31 @@ async function main() {
   assert.equal(updatedWatermark.value, '42')
   const notRegressed = await watermarks.advanceWatermark({ pipelineId: 'pipe_1', type: 'monotonic_id', value: '7' })
   assert.equal(notRegressed.value, '42', 'advanceWatermark does not move monotonic watermarks backwards')
+  await assert.rejects(() => watermarks.setWatermark({
+    pipelineId: 'pipe_bad_ts',
+    type: 'updated_at',
+    value: 'not-a-timestamp',
+  }), WatermarkError)
+  await assert.rejects(() => watermarks.setWatermark({
+    pipelineId: 'pipe_bad_id',
+    type: 'monotonic_id',
+    value: 'not-a-number',
+  }), WatermarkError)
+  await assert.rejects(() => watermarks.advanceWatermark({
+    pipelineId: 'pipe_1',
+    type: 'monotonic_id',
+    value: Number.POSITIVE_INFINITY,
+  }), WatermarkError)
+  assert.equal(
+    await db.selectOne('integration_watermarks', { pipeline_id: 'pipe_bad_ts' }),
+    null,
+    'invalid timestamp watermark is rejected before persistence',
+  )
+  assert.equal(
+    await db.selectOne('integration_watermarks', { pipeline_id: 'pipe_bad_id' }),
+    null,
+    'invalid monotonic watermark is rejected before persistence',
+  )
 
   // Dead letters can be created, listed, and marked as replayed.
   const deadLetters = createDeadLetterStore({ db, idGenerator: () => 'dl_1' })
@@ -187,6 +281,30 @@ async function main() {
   assert.equal(replayed.status, 'replayed')
   assert.equal(replayed.lastReplayRunId, 'run_2')
   assert.equal(replayed.retryCount, 1)
+
+  await deadLetters.create({
+    id: 'dl_discarded_store',
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    runId: 'run_1',
+    pipelineId: 'pipe_1',
+    sourcePayload: { code: 'DISCARDED-01' },
+    errorCode: 'VALIDATION_FAILED',
+    errorMessage: 'discarded',
+    status: 'discarded',
+  })
+  const rejectedReplayMark = await deadLetters.markReplayed({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    id: 'dl_discarded_store',
+    replayRunId: 'run_3',
+    retryCount: 1,
+  }).catch((error) => error)
+  assert.equal(rejectedReplayMark.name, 'DeadLetterError',
+    'markReplayed refuses discarded rows at write time')
+  const discardedRow = db.tables.get('integration_dead_letters').find((row) => row.id === 'dl_discarded_store')
+  assert.equal(discardedRow.status, 'discarded', 'discarded row status remains unchanged')
+  assert.equal(discardedRow.last_replay_run_id, null, 'discarded row replay run is not written')
 
   const capped = await deadLetters.create({
     tenantId: 'tenant_1',
