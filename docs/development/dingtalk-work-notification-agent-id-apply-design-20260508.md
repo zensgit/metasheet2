@@ -9,7 +9,7 @@ The helper lets operations initialize a private fill-in file, place the real age
 ## Scope
 
 - Add `scripts/ops/dingtalk-work-notification-agent-id-apply.mjs`.
-- Add focused Node tests for file initialization, apply, dry-run, conflict protection, forced replacement, and invalid input.
+- Add focused Node tests for file initialization, apply, dry-run, conflict protection, forced replacement, post-apply status verification, and invalid input.
 - Keep `scripts/ops/dingtalk-work-notification-env-status.mjs` read-only.
 - Do not call DingTalk APIs or validate the credential remotely; the existing status helper remains the readiness gate after restart.
 
@@ -45,6 +45,14 @@ docker compose -f <compose-file> up -d --no-deps --force-recreate <service>
 
 The restart path records only command metadata and output lengths, never credential values.
 
+Optional `--verify-env-status` runs the existing read-only status helper after a successful apply:
+
+```bash
+node <status-helper> --env-file <env-file> --output-json <post-status.json> --output-md <post-status.md>
+```
+
+The apply summary embeds only the status helper's readiness result, output paths, exit code, and missing input ids. It does not embed credential values or raw helper output.
+
 ## Security Boundary
 
 - No `--agent-id <value>` option is provided to avoid shell history leaks.
@@ -71,6 +79,10 @@ node /tmp/dingtalk-work-notification-agent-id-apply.mjs \
   --agent-id-file /home/mainuser/metasheet2/.secrets/dingtalk-agent-id.txt \
   --restart-backend \
   --compose-file /home/mainuser/metasheet2/docker-compose.app.yml \
+  --verify-env-status \
+  --status-helper /tmp/dingtalk-work-notification-env-status.mjs \
+  --status-env-file /home/mainuser/metasheet2/docker/app.env \
+  --status-env-file /home/mainuser/metasheet2/.env \
   --output-json /tmp/dingtalk-work-notification-agent-id-apply/summary.json \
   --output-md /tmp/dingtalk-work-notification-agent-id-apply/summary.md
 ```

@@ -2,7 +2,7 @@
 
 ## Summary
 
-Added a redaction-safe helper for the remaining 142 work-notification configuration step. The helper can initialize a private agent-id input file, apply `DINGTALK_AGENT_ID` from that file, create a backup, optionally restart backend, and emit evidence without printing the value.
+Added a redaction-safe helper for the remaining 142 work-notification configuration step. The helper can initialize a private agent-id input file, apply `DINGTALK_AGENT_ID` from that file, create a backup, optionally restart backend, run post-apply env-status verification, and emit evidence without printing the value.
 
 142 was not changed in this verification because the real DingTalk agent id value is still not available in the workspace or chat. A private fill-in file was prepared on 142 for the operator-provided value.
 
@@ -22,7 +22,7 @@ Unit tests:
 node --test scripts/ops/dingtalk-work-notification-agent-id-apply.test.mjs
 ```
 
-Result: passed, 8 tests.
+Result: passed, 9 tests.
 
 Covered cases:
 
@@ -33,6 +33,7 @@ Covered cases:
 - Existing `DINGTALK_NOTIFY_AGENT_ID` alias is reused.
 - Different existing value is blocked unless `--force` is used.
 - `--force` creates a backup before replacement.
+- `--verify-env-status` invokes the read-only status helper and records `overallStatus=ready`.
 - Empty and non-numeric agent id files are rejected.
 - Console output and `summary.json/md` do not contain the agent id value.
 
@@ -127,6 +128,28 @@ Result:
 - `targetKey=DINGTALK_AGENT_ID`
 - `agentIdLength=9`
 
+Remote post-apply env-status smoke also used only dummy values under `/tmp` and did not modify production env:
+
+```bash
+ssh metasheet-142 'node /tmp/dingtalk-work-notification-agent-id-apply.mjs \
+  --env-file /tmp/dingtalk-agent-id-post-status-smoke/app.env \
+  --agent-id-file /tmp/dingtalk-agent-id-post-status-smoke/agent-id.txt \
+  --verify-env-status \
+  --status-helper /tmp/dingtalk-work-notification-env-status.mjs \
+  --status-output-json /tmp/dingtalk-agent-id-post-status-smoke/post-status.json \
+  --status-output-md /tmp/dingtalk-agent-id-post-status-smoke/post-status.md \
+  --output-json /tmp/dingtalk-agent-id-post-status-smoke/summary.json \
+  --output-md /tmp/dingtalk-agent-id-post-status-smoke/summary.md'
+```
+
+Result:
+
+- `status=pass`
+- `action=updated`
+- `envStatus.attempted=true`
+- `envStatus.exitCode=0`
+- `envStatus.overallStatus=ready`
+
 ## Final Apply Command
 
 After filling the private file on 142:
@@ -141,6 +164,10 @@ node /tmp/dingtalk-work-notification-agent-id-apply.mjs \
   --agent-id-file /home/mainuser/metasheet2/.secrets/dingtalk-agent-id.txt \
   --restart-backend \
   --compose-file /home/mainuser/metasheet2/docker-compose.app.yml \
+  --verify-env-status \
+  --status-helper /tmp/dingtalk-work-notification-env-status.mjs \
+  --status-env-file /home/mainuser/metasheet2/docker/app.env \
+  --status-env-file /home/mainuser/metasheet2/.env \
   --output-json /tmp/dingtalk-work-notification-agent-id-apply/summary.json \
   --output-md /tmp/dingtalk-work-notification-agent-id-apply/summary.md
 ```

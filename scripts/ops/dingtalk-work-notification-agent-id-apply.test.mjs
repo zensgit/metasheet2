@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const scriptPath = path.join(repoRoot, 'scripts', 'ops', 'dingtalk-work-notification-agent-id-apply.mjs')
+const statusScriptPath = path.join(repoRoot, 'scripts', 'ops', 'dingtalk-work-notification-env-status.mjs')
 
 function makeTmpDir() {
   return mkdtempSync(path.join(tmpdir(), 'dingtalk-work-notification-agent-id-apply-'))
@@ -122,6 +123,45 @@ test('dry-run validates but does not change the env file', () => {
     assert.equal(summary.action, 'would_update')
     assert.equal(summary.backupFile, '')
     assert.doesNotMatch(readFileSync(outputMd, 'utf8'), /987654321/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('runs env-status verification after a successful apply', () => {
+  const tmpDir = makeTmpDir()
+  const envFile = path.join(tmpDir, 'app.env')
+  const agentIdFile = path.join(tmpDir, 'agent-id.txt')
+  const outputJson = path.join(tmpDir, 'summary.json')
+  const outputMd = path.join(tmpDir, 'summary.md')
+  const statusOutputJson = path.join(tmpDir, 'post-status.json')
+  const statusOutputMd = path.join(tmpDir, 'post-status.md')
+  try {
+    writeFileSync(envFile, 'DINGTALK_APP_KEY=client-id\nDINGTALK_APP_SECRET=client-secret\n', 'utf8')
+    writeFileSync(agentIdFile, '123456789\n', 'utf8')
+
+    const result = runScript([
+      '--env-file', envFile,
+      '--agent-id-file', agentIdFile,
+      '--verify-env-status',
+      '--status-helper', statusScriptPath,
+      '--status-output-json', statusOutputJson,
+      '--status-output-md', statusOutputMd,
+      '--output-json', outputJson,
+      '--output-md', outputMd,
+    ])
+
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    const summary = readJson(outputJson)
+    assert.equal(summary.status, 'pass')
+    assert.equal(summary.envStatus.requested, true)
+    assert.equal(summary.envStatus.attempted, true)
+    assert.equal(summary.envStatus.exitCode, 0)
+    assert.equal(summary.envStatus.overallStatus, 'ready')
+    assert.equal(existsSync(statusOutputJson), true)
+    assert.equal(readJson(statusOutputJson).overallStatus, 'ready')
+    assert.doesNotMatch(readFileSync(outputJson, 'utf8'), /123456789|client-secret/)
+    assert.doesNotMatch(readFileSync(statusOutputJson, 'utf8'), /123456789|client-secret/)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

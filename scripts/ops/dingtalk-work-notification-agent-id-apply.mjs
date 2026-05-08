@@ -28,6 +28,11 @@ Options:
   --restart-backend              Recreate backend after updating the env file
   --compose-file <file>          Compose file for --restart-backend, default docker-compose.app.yml
   --service <name>               Compose service for --restart-backend, default backend
+  --verify-env-status            Run env-status helper after a successful apply
+  --status-helper <file>         Env-status helper path, default scripts/ops/dingtalk-work-notification-env-status.mjs
+  --status-env-file <file>       Env file passed to env-status helper; repeatable, default --env-file
+  --status-output-json <file>    Env-status JSON output path
+  --status-output-md <file>      Env-status Markdown output path
   --help                         Show this help
 
 Security:
@@ -57,6 +62,11 @@ function parseArgs(argv) {
     restartBackend: false,
     composeFile: path.resolve(process.cwd(), 'docker-compose.app.yml'),
     service: 'backend',
+    verifyEnvStatus: false,
+    statusHelper: path.resolve(process.cwd(), 'scripts/ops/dingtalk-work-notification-env-status.mjs'),
+    statusEnvFiles: [],
+    statusOutputJson: path.resolve(process.cwd(), DEFAULT_OUTPUT_DIR, 'post-status.json'),
+    statusOutputMd: path.resolve(process.cwd(), DEFAULT_OUTPUT_DIR, 'post-status.md'),
   }
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -106,6 +116,25 @@ function parseArgs(argv) {
         break
       case '--service':
         opts.service = readRequiredValue(argv, index, arg)
+        index += 1
+        break
+      case '--verify-env-status':
+        opts.verifyEnvStatus = true
+        break
+      case '--status-helper':
+        opts.statusHelper = path.resolve(process.cwd(), readRequiredValue(argv, index, arg))
+        index += 1
+        break
+      case '--status-env-file':
+        opts.statusEnvFiles.push(path.resolve(process.cwd(), readRequiredValue(argv, index, arg)))
+        index += 1
+        break
+      case '--status-output-json':
+        opts.statusOutputJson = path.resolve(process.cwd(), readRequiredValue(argv, index, arg))
+        index += 1
+        break
+      case '--status-output-md':
+        opts.statusOutputMd = path.resolve(process.cwd(), readRequiredValue(argv, index, arg))
         index += 1
         break
       case '--help':
@@ -300,6 +329,58 @@ function restartBackend(opts) {
   }
 }
 
+function makeEnvStatusCommand(opts) {
+  const envFiles = opts.statusEnvFiles.length > 0 ? opts.statusEnvFiles : [opts.envFile]
+  const args = [
+    opts.statusHelper,
+    ...envFiles.flatMap((file) => ['--env-file', file]),
+    '--output-json',
+    opts.statusOutputJson,
+    '--output-md',
+    opts.statusOutputMd,
+  ]
+  return { args, envFiles }
+}
+
+function runEnvStatusVerification(opts) {
+  const { args, envFiles } = makeEnvStatusCommand(opts)
+  const result = spawnSync(process.execPath, args, {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+  })
+  let parsed = null
+  if (existsSync(opts.statusOutputJson)) {
+    try {
+      parsed = JSON.parse(readFileSync(opts.statusOutputJson, 'utf8'))
+    } catch {
+      parsed = null
+    }
+  }
+  return {
+    requested: true,
+    attempted: true,
+    command: [
+      'node',
+      relativePath(opts.statusHelper),
+      ...envFiles.flatMap((file) => ['--env-file', relativePath(file)]),
+      '--output-json',
+      relativePath(opts.statusOutputJson),
+      '--output-md',
+      relativePath(opts.statusOutputMd),
+    ].join(' '),
+    exitCode: typeof result.status === 'number' ? result.status : 1,
+    signal: result.signal ?? '',
+    stdoutLength: result.stdout?.length ?? 0,
+    stderrLength: result.stderr?.length ?? 0,
+    outputJson: relativePath(opts.statusOutputJson),
+    outputMd: relativePath(opts.statusOutputMd),
+    overallStatus: typeof parsed?.overallStatus === 'string' ? parsed.overallStatus : '',
+    missingInputs: Array.isArray(parsed?.missingInputs)
+      ? parsed.missingInputs.map((item) => ({ id: String(item?.id ?? '') })).filter((item) => item.id)
+      : [],
+  }
+}
+
 function buildSummary(opts, applyResult, agentIdLength) {
   return {
     tool: 'dingtalk-work-notification-agent-id-apply',
@@ -315,6 +396,15 @@ function buildSummary(opts, applyResult, agentIdLength) {
     existingKeys: applyResult.existingKeys,
     backupFile: relativePath(applyResult.backupFile),
     restart: applyResult.restart,
+    envStatus: applyResult.envStatus ?? {
+      requested: opts.verifyEnvStatus,
+      attempted: false,
+      skippedReason: opts.verifyEnvStatus
+        ? opts.dryRun
+          ? 'dry_run'
+          : applyResult.action
+        : '',
+    },
     checks: applyResult.checks,
     nextCommands: applyResult.action === 'blocked'
       ? ['Confirm the existing agent id, then rerun with --force if replacement is intended.']
@@ -361,6 +451,18 @@ function renderMarkdown(summary) {
     lines.push(`- Command: \`${summary.restart.command}\``)
   }
 
+  lines.push('', '## Env Status Verification', '')
+  lines.push(`- Requested: \`${summary.envStatus.requested}\``)
+  lines.push(`- Attempted: \`${summary.envStatus.attempted}\``)
+  if (summary.envStatus.attempted) {
+    lines.push(`- Exit Code: \`${summary.envStatus.exitCode}\``)
+    lines.push(`- Overall Status: \`${summary.envStatus.overallStatus || '<unknown>'}\``)
+    lines.push(`- Output JSON: \`${summary.envStatus.outputJson}\``)
+    lines.push(`- Output MD: \`${summary.envStatus.outputMd}\``)
+  } else if (summary.envStatus.skippedReason) {
+    lines.push(`- Skipped Reason: \`${summary.envStatus.skippedReason}\``)
+  }
+
   lines.push('', '## Next Commands', '')
   for (const command of summary.nextCommands) lines.push(`- ${command}`)
 
@@ -400,6 +502,19 @@ function main() {
       },
     })
   }
+  if (opts.verifyEnvStatus && !opts.dryRun && applyResult.action !== 'blocked') {
+    applyResult.envStatus = runEnvStatusVerification(opts)
+    applyResult.checks.push({
+      id: 'env-status-verification',
+      status: applyResult.envStatus.exitCode === 0 && applyResult.envStatus.overallStatus === 'ready' ? 'pass' : 'fail',
+      details: {
+        attempted: applyResult.envStatus.attempted,
+        exitCode: applyResult.envStatus.exitCode,
+        overallStatus: applyResult.envStatus.overallStatus,
+        missingInputs: applyResult.envStatus.missingInputs.map((item) => item.id),
+      },
+    })
+  }
 
   const summary = buildSummary(opts, applyResult, agentId.length)
   writeSummary(opts, summary)
@@ -407,6 +522,7 @@ function main() {
 
   if (summary.status === 'blocked') process.exit(1)
   if (summary.restart.attempted && summary.restart.exitCode !== 0) process.exit(summary.restart.exitCode || 1)
+  if (summary.envStatus.attempted && summary.envStatus.exitCode !== 0) process.exit(summary.envStatus.exitCode || 1)
 }
 
 try {
