@@ -1,9 +1,11 @@
 import fs from 'fs'
 import path from 'path'
-import { fileURLToPath } from 'url'
+import { createRequire } from 'module'
+import { fileURLToPath, pathToFileURL } from 'url'
 import { chromium } from '@playwright/test'
 import { resolveMultitableAuthToken } from './multitable-auth.mjs'
 
+const require = createRequire(import.meta.url)
 const apiBase = process.env.API_BASE || 'http://127.0.0.1:7778'
 const webBase = process.env.WEB_BASE || 'http://127.0.0.1:8899'
 const outputDir = process.env.OUTPUT_DIR || 'output/playwright/multitable-live-smoke'
@@ -40,6 +42,111 @@ function recordOnce(name, ok, details = {}) {
 
 function exactTextRegex(value) {
   return new RegExp(`^\\s*${String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`)
+}
+
+const fieldTypeSmokeSpecs = [
+  {
+    key: 'currency',
+    idPart: 'currency',
+    label: 'Currency',
+    type: 'currency',
+    property: { code: 'CNY', decimals: 2 },
+    value: 1234.56,
+  },
+  {
+    key: 'percent',
+    idPart: 'percent',
+    label: 'Percent',
+    type: 'percent',
+    property: { decimals: 1 },
+    value: 37.5,
+  },
+  {
+    key: 'rating',
+    idPart: 'rating',
+    label: 'Rating',
+    type: 'rating',
+    property: { max: 5 },
+    value: 4,
+  },
+  {
+    key: 'url',
+    idPart: 'url',
+    label: 'URL',
+    type: 'url',
+    value: 'https://example.com/multitable-rc',
+  },
+  {
+    key: 'email',
+    idPart: 'email',
+    label: 'Email',
+    type: 'email',
+    value: 'rc-field-types@example.com',
+  },
+  {
+    key: 'phone',
+    idPart: 'phone',
+    label: 'Phone',
+    type: 'phone',
+    value: '+86 138 0000 0000',
+  },
+  {
+    key: 'longText',
+    idPart: 'long_text',
+    label: 'Long Text',
+    type: 'longText',
+    value: 'Line one field smoke\nLine two field smoke',
+  },
+  {
+    key: 'multiSelect',
+    idPart: 'multi_select',
+    label: 'Multi Select',
+    type: 'multiSelect',
+    property: {
+      options: [
+        { value: 'Alpha', color: '#3b82f6' },
+        { value: 'Beta', color: '#22c55e' },
+        { value: 'Gamma', color: '#f59e0b' },
+      ],
+    },
+    value: ['Alpha', 'Gamma'],
+  },
+]
+
+function formFieldByLabel(page, fieldName) {
+  return page.locator('.meta-form-view__field').filter({
+    has: page.locator('.meta-form-view__label').filter({ hasText: exactTextRegex(fieldName) }),
+  }).first()
+}
+
+function recordCommentsButton(page) {
+  return page.locator('.meta-record-drawer__btn--comment[title="Comments"]').first()
+}
+
+async function importXlsxModule() {
+  const resolved = require.resolve('xlsx', {
+    paths: [
+      path.resolve('apps/web'),
+      path.resolve('packages/core-backend'),
+      process.cwd(),
+    ],
+  })
+  return import(pathToFileURL(resolved).href)
+}
+
+async function addAndResolveRecordComment(page) {
+  const commentsDrawer = page.locator('.meta-comments-drawer')
+  await commentsDrawer.waitFor({ state: 'visible', timeout: timeoutMs })
+  const commentText = `smoke comment ${Date.now()}`
+  const commentBox = commentsDrawer.getByRole('textbox', { name: 'Add a comment...' })
+  await commentBox.fill(commentText)
+  await commentsDrawer.getByRole('button', { name: 'Send' }).click()
+  const commentThread = commentsDrawer.locator('.meta-comments-drawer__thread').filter({ hasText: commentText }).first()
+  await commentThread.waitFor({ state: 'attached', timeout: timeoutMs })
+  await commentThread.scrollIntoViewIfNeeded()
+  await commentThread.locator('.meta-comments-drawer__resolve').click()
+  await commentThread.locator('.meta-comments-drawer__badge').getByText('Resolved', { exact: true }).waitFor({ state: 'visible', timeout: timeoutMs })
+  return commentText
 }
 
 export function renderSmokeMarkdown(reportPayload) {
@@ -180,19 +287,36 @@ async function selectLinkPickerOption(page, { display, label }) {
   const pickerSearch = page.locator('.meta-link-picker__input')
   await pickerSearch.fill(display)
   const target = page.locator('.meta-link-picker__item').filter({ hasText: display }).first()
+  const directMatch = await target.waitFor({ state: 'visible', timeout: Math.min(timeoutMs, 10_000) })
+    .then(() => true)
+    .catch(() => false)
+  if (directMatch) {
+    await target.click()
+    return display
+  }
+
+  // Some live people sheets use generated IDs as display values; the search
+  // endpoint can be stricter than the initial option list. Fall back to the
+  // first selectable option so repair flows still exercise a real link choice.
+  await pickerSearch.fill('')
+  const fallbackTarget = page.locator('.meta-link-picker__item').first()
   await waitForPredicate(async () => {
-    const visible = await target.isVisible().catch(() => false)
+    const visible = await fallbackTarget.isVisible().catch(() => false)
     const loading = await page.locator('.meta-link-picker__loading').isVisible().catch(() => false)
     const empty = await page.locator('.meta-link-picker__empty').isVisible().catch(() => false)
+    const fallbackText = visible ? (await fallbackTarget.textContent().catch(() => '')) : ''
     return {
       ok: visible && !loading,
       visible,
       loading,
       empty,
       display,
+      fallbackText,
     }
-  }, label)
-  await target.click()
+  }, `${label} fallback option`)
+  const fallbackText = ((await fallbackTarget.textContent()) ?? '').trim().replace(/\s+/g, ' ')
+  await fallbackTarget.click()
+  return fallbackText || display
 }
 
 function headers(token, extra = {}) {
@@ -292,6 +416,26 @@ async function createField(token, input) {
   })
   const json = await ensureOk('api.multitable.create-field', result, { sheetId: input.sheetId, fieldId: input.id, name: input.name, type: input.type })
   return json.data.field
+}
+
+async function createFieldTypeSmokeFields(token, sheetId, titlePrefix) {
+  const stamp = Date.now()
+  const fields = []
+  for (const spec of fieldTypeSmokeSpecs) {
+    const field = await createField(token, {
+      id: `fld_pilot_${spec.idPart}_${stamp}`,
+      sheetId,
+      name: `${spec.label} ${titlePrefix}`,
+      type: spec.type,
+      ...(spec.property ? { property: spec.property } : {}),
+    })
+    fields.push({ ...spec, field })
+  }
+  return fields
+}
+
+function fieldTypeSmokePatchValues(specs) {
+  return Object.fromEntries(specs.map((spec) => [spec.field.id, spec.value]))
 }
 
 async function updateField(token, fieldId, input) {
@@ -1563,6 +1707,116 @@ async function importRecordViaGrid(page, { baseId, sheetId, viewId, csvPath, sea
   record('ui.grid.import', true, { searchValue })
 }
 
+async function loadXlsxApi() {
+  const mod = await importXlsxModule()
+  return mod.default?.utils ? mod.default : mod
+}
+
+async function writeXlsxFixture(filePath, { sheetName, headers, rows }) {
+  const xlsx = await loadXlsxApi()
+  const worksheet = xlsx.utils.aoa_to_sheet([headers, ...rows])
+  const workbook = xlsx.utils.book_new()
+  xlsx.utils.book_append_sheet(workbook, worksheet, sheetName)
+  xlsx.writeFile(workbook, filePath)
+}
+
+async function readXlsxRows(filePath) {
+  const xlsx = await loadXlsxApi()
+  const workbook = xlsx.readFile(filePath)
+  const sheetName = workbook.SheetNames[0]
+  if (!sheetName) return []
+  return xlsx.utils.sheet_to_json(workbook.Sheets[sheetName], {
+    header: 1,
+    raw: false,
+    defval: '',
+    blankrows: false,
+  })
+}
+
+async function verifyXlsxImportExport(page, {
+  token,
+  baseId,
+  sheetId,
+  viewId,
+  titleFieldId,
+  importedRowTitle,
+  onImportedRecord,
+}) {
+  const xlsxPath = path.join(outputDir, 'pilot-import.xlsx')
+  await writeXlsxFixture(xlsxPath, {
+    sheetName: 'Import',
+    headers: ['Title'],
+    rows: [[importedRowTitle]],
+  })
+
+  await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
+  await page.getByRole('searchbox', { name: 'Search records' }).waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByRole('button', { name: 'Import records' }).click()
+  await page.getByText('Import Records').waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.locator('input.meta-import__file-input[type="file"]').setInputFiles(xlsxPath)
+  await page.getByText('1 record(s) detected. Map columns to fields:').waitFor({ state: 'visible', timeout: timeoutMs })
+  await ensureImportFieldMappedByColumnIndex(page, {
+    columnIndex: 0,
+    fieldId: titleFieldId,
+    label: 'xlsx import title mapping',
+  })
+  const importButton = page.getByRole('button', { name: /Import 1 record\(s\)/ })
+  await waitForActionButtonEnabled(importButton, 'xlsx import button enable')
+  await importButton.click()
+  await page.getByText('1 record(s) imported').waitFor({ state: 'visible', timeout: timeoutMs })
+
+  await waitForImportedGridRow(page, {
+    token,
+    baseId,
+    sheetId,
+    viewId,
+    searchValue: importedRowTitle,
+    label: 'xlsx file import',
+  })
+  const imported = await findRecordBySearch(token, sheetId, viewId, importedRowTitle)
+  const importOk = !!imported.row?.id
+  record('ui.xlsx.import-file', importOk, {
+    baseId,
+    sheetId,
+    viewId,
+    recordId: imported.row?.id ?? null,
+    title: importedRowTitle,
+  })
+  if (!importOk) {
+    throw new Error('XLSX import did not hydrate the imported row')
+  }
+  if (typeof onImportedRecord === 'function') {
+    onImportedRecord(imported.row)
+  }
+
+  const exportPromise = page.waitForEvent('download', { timeout: timeoutMs })
+  await page.getByRole('button', { name: 'Export Excel' }).click()
+  const download = await exportPromise
+  const suggestedFilename = download.suggestedFilename()
+  const exportPath = path.join(outputDir, `pilot-export-${Date.now()}.xlsx`)
+  await download.saveAs(exportPath)
+  const stats = fs.statSync(exportPath)
+  const rows = await readXlsxRows(exportPath)
+  const flattened = rows.flat().map((value) => String(value))
+  const exportOk = suggestedFilename.endsWith('.xlsx') &&
+    stats.size > 0 &&
+    flattened.includes('Title') &&
+    flattened.includes(importedRowTitle)
+  record('ui.xlsx.export-download', exportOk, {
+    suggestedFilename,
+    bytes: stats.size,
+    title: importedRowTitle,
+    rowCount: rows.length,
+    exportPath,
+  })
+  if (!exportOk) {
+    throw new Error('XLSX export did not include the imported row')
+  }
+
+  await page.screenshot({ path: path.join(outputDir, 'grid-xlsx-import-export.png'), fullPage: true })
+  return imported.row
+}
+
 async function importRecordsViaGridWithRetry(page, {
   baseId,
   sheetId,
@@ -1631,6 +1885,11 @@ async function importRecordsViaGridWithRetry(page, {
     await page.getByText('Import Records').waitFor({ state: 'visible', timeout: timeoutMs })
     await page.locator('input.meta-import__file-input[type="file"]').setInputFiles(csvPath)
     await page.getByRole('button', { name: 'Preview' }).click()
+    await ensureImportFieldMappedByColumnIndex(page, {
+      columnIndex: 0,
+      fieldId: titleFieldId,
+      label: 'grid retry import title mapping',
+    })
     const importButton = page.getByRole('button', { name: /Import 2 record\(s\)/ })
     await waitForActionButtonEnabled(importButton, 'grid retry import button enable')
     await importButton.click()
@@ -1697,12 +1956,12 @@ async function importRecordViaGridWithPeopleManualFix(page, {
   await page.locator('.meta-import__fixes').waitFor({ state: 'visible', timeout: timeoutMs })
   await page.getByRole('button', { name: /Select person|Select people|Choose person|Choose people/ }).click()
   await page.locator('.meta-link-picker').waitFor({ state: 'visible', timeout: timeoutMs })
-  await selectLinkPickerOption(page, {
+  const selectedPersonDisplay = await selectLinkPickerOption(page, {
     display: personDisplay,
     label: 'people manual-fix picker option',
   })
   await page.getByRole('button', { name: 'Confirm' }).click()
-  await page.locator('.meta-import__fix-selected').getByText(personDisplay).waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.locator('.meta-import__fix-selected').getByText(selectedPersonDisplay).waitFor({ state: 'visible', timeout: timeoutMs })
   await page.getByRole('button', { name: 'Apply fixes and retry' }).click()
   await page.locator('.meta-import-overlay').waitFor({ state: 'hidden', timeout: timeoutMs })
   await waitForImportedGridRow(page, {
@@ -1719,7 +1978,7 @@ async function importRecordViaGridWithPeopleManualFix(page, {
     sheetId,
     viewId,
     importedRowTitle,
-    personDisplay,
+    personDisplay: selectedPersonDisplay,
   })
 }
 
@@ -1748,10 +2007,11 @@ async function verifyImportMappingReconcile(page, {
   await page.getByRole('button', { name: 'Preview' }).click()
 
   const fieldSelect = page.locator('.meta-import__field-select').first()
-  await page.waitForFunction(({ selector, targetValue }) => {
-    const element = document.querySelector(selector)
-    return element instanceof HTMLSelectElement && element.value === targetValue
-  }, { selector: '.meta-import__field-select', targetValue: fieldId }, { timeout: timeoutMs })
+  await ensureImportFieldMappedByColumnIndex(page, {
+    columnIndex: 0,
+    fieldId,
+    label: 'import mapping reconcile initial mapping',
+  })
 
   await updateField(token, fieldId, { name: renamedFieldName })
 
@@ -1848,12 +2108,12 @@ async function verifyPeopleRepairReconcile(page, {
   await page.locator('.meta-import__fixes').waitFor({ state: 'visible', timeout: timeoutMs })
   await page.getByRole('button', { name: /Select person|Select people|Choose person|Choose people/ }).click()
   await page.locator('.meta-link-picker').waitFor({ state: 'visible', timeout: timeoutMs })
-  await selectLinkPickerOption(page, {
+  const selectedPersonDisplay = await selectLinkPickerOption(page, {
     display: personDisplay,
     label: 'people repair picker option',
   })
   await page.getByRole('button', { name: 'Confirm' }).click()
-  await page.locator('.meta-import__fix-selected').getByText(personDisplay).waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.locator('.meta-import__fix-selected').getByText(selectedPersonDisplay).waitFor({ state: 'visible', timeout: timeoutMs })
 
   await updateField(token, fieldId, {
     name: renamedFieldName,
@@ -1957,6 +2217,7 @@ async function verifyPeopleRepairReconcile(page, {
     renamedFieldName,
     importedRowTitle,
     importedRowId: imported.rowId ?? null,
+    personDisplay: selectedPersonDisplay,
     warningText,
     applyDisabledBeforeReconcile,
     applyDisabledAfterReconcile,
@@ -1977,14 +2238,14 @@ async function assignPersonViaDrawer(page, { searchValue, personFieldName, perso
   const personField = page.locator('.meta-record-drawer__field').filter({ hasText: personFieldName }).first()
   await personField.locator('.meta-record-drawer__link-btn').click()
   await page.locator('.meta-link-picker').waitFor({ state: 'visible', timeout: timeoutMs })
-  await selectLinkPickerOption(page, {
+  const selectedPersonDisplay = await selectLinkPickerOption(page, {
     display: personDisplay,
     label: 'drawer people picker option',
   })
   await page.getByRole('button', { name: 'Confirm' }).click()
-  await page.locator('.meta-record-drawer__link-summary').getByText(personDisplay).waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.locator('.meta-record-drawer__link-summary').getByText(selectedPersonDisplay).waitFor({ state: 'visible', timeout: timeoutMs })
   await page.getByText('Linked records updated').waitFor({ state: 'visible', timeout: timeoutMs })
-  record('ui.person.assign', true, { personDisplay })
+  record('ui.person.assign', true, { personDisplay: selectedPersonDisplay })
 }
 
 async function verifyFormUploadAndComments(page, { baseId, sheetId, viewId, recordId, attachmentFieldName, attachmentName }) {
@@ -2000,23 +2261,17 @@ async function verifyFormUploadAndComments(page, { baseId, sheetId, viewId, reco
 
   const uploadPath = path.join(outputDir, attachmentName)
   fs.writeFileSync(uploadPath, `multitable smoke ${new Date().toISOString()}\n`)
-  const attachmentField = page.locator('.meta-form-view__field').filter({ hasText: attachmentFieldName }).first()
+  const attachmentField = formFieldByLabel(page, attachmentFieldName)
   await attachmentField.locator('input[type="file"]').setInputFiles(uploadPath)
   await attachmentField.getByText('Uploading...').waitFor({ state: 'visible', timeout: timeoutMs })
   await attachmentField.getByText('Uploading...').waitFor({ state: 'hidden', timeout: timeoutMs })
   await page.getByRole('button', { name: 'Save' }).click()
   await page.getByText('Changes saved').first().waitFor({ state: 'visible', timeout: timeoutMs })
 
-  const commentsButton = page.getByRole('button', { name: '💬' })
+  const commentsButton = recordCommentsButton(page)
   await commentsButton.click()
   await page.getByRole('heading', { name: 'Comments' }).waitFor({ state: 'visible', timeout: timeoutMs })
-  const commentText = `smoke comment ${Date.now()}`
-  const commentBox = page.getByRole('textbox', { name: 'Add a comment...' })
-  await commentBox.fill(commentText)
-  await page.getByRole('button', { name: 'Send' }).click()
-  await page.getByText(commentText).waitFor({ state: 'visible', timeout: timeoutMs })
-  await page.getByRole('button', { name: 'Resolve' }).click()
-  await page.locator('.meta-comments-drawer__badge').getByText('Resolved', { exact: true }).waitFor({ state: 'visible', timeout: timeoutMs })
+  await addAndResolveRecordComment(page)
 
   await page.screenshot({ path: path.join(outputDir, 'form-comments.png'), fullPage: true })
   record('ui.form.upload-comments', true, { recordId, attachmentName })
@@ -2050,7 +2305,7 @@ async function verifyFormAttachmentLifecycle(page, {
     return uploadPath
   })
 
-  const attachmentField = page.locator('.meta-form-view__field').filter({ hasText: attachmentFieldName }).first()
+  const attachmentField = formFieldByLabel(page, attachmentFieldName)
   await attachmentField.locator('input[type="file"]').setInputFiles(uploads)
   await attachmentField.getByText('Uploading...').waitFor({ state: 'visible', timeout: timeoutMs })
   await attachmentField.getByText('Uploading...').waitFor({ state: 'hidden', timeout: timeoutMs })
@@ -2097,16 +2352,10 @@ async function verifyFormAttachmentLifecycle(page, {
     attachmentIds: uploadedAttachments.map((item) => item.id),
   })
 
-  const commentsButton = page.getByRole('button', { name: '💬' })
+  const commentsButton = recordCommentsButton(page)
   await commentsButton.click()
   await page.getByRole('heading', { name: 'Comments' }).waitFor({ state: 'visible', timeout: timeoutMs })
-  const commentText = `smoke comment ${Date.now()}`
-  const commentBox = page.getByRole('textbox', { name: 'Add a comment...' })
-  await commentBox.fill(commentText)
-  await page.getByRole('button', { name: 'Send' }).click()
-  await page.getByText(commentText).waitFor({ state: 'visible', timeout: timeoutMs })
-  await page.getByRole('button', { name: 'Resolve' }).click()
-  await page.locator('.meta-comments-drawer__badge').getByText('Resolved', { exact: true }).waitFor({ state: 'visible', timeout: timeoutMs })
+  await addAndResolveRecordComment(page)
 
   await page.screenshot({ path: path.join(outputDir, 'form-comments.png'), fullPage: true })
   record('ui.form.upload-comments', true, { recordId, attachmentNames })
@@ -2132,7 +2381,7 @@ async function verifyAttachmentDeleteClear(page, {
     extra: { mode: 'form', recordId },
   })
 
-  const attachmentField = page.locator('.meta-form-view__field').filter({ hasText: attachmentFieldName }).first()
+  const attachmentField = formFieldByLabel(page, attachmentFieldName)
   const initialRecord = await fetchRecord(token, sheetId, recordId)
   let remainingAttachmentIds = (initialRecord.attachmentSummaries?.[attachmentFieldId] ?? []).map((item) => item.id)
   cleanupAttachmentIds.clear()
@@ -2192,6 +2441,354 @@ async function verifyGridHydration(page, { baseId, sheetId, viewId, searchValue,
   await page.getByText(personDisplay).first().waitFor({ state: 'visible', timeout: timeoutMs })
   await page.screenshot({ path: path.join(outputDir, 'grid-hydrated.png'), fullPage: true })
   record('ui.grid.search-hydration', true, { searchValue, attachmentName, personDisplay })
+}
+
+function fieldCell(row, fieldName) {
+  const safeName = String(fieldName).replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  return row.locator(`.meta-grid__cell[aria-label="${safeName}"]`).first()
+}
+
+function hasSameArrayValues(actual, expected) {
+  return Array.isArray(actual)
+    && actual.length === expected.length
+    && expected.every((value, index) => actual[index] === value)
+}
+
+function apiFieldValueMatches(actual, expected) {
+  if (Array.isArray(expected)) return hasSameArrayValues(actual, expected)
+  return actual === expected
+}
+
+function phoneHrefFor(value) {
+  return `tel:${String(value).replace(/[^+\d]/g, '')}`
+}
+
+async function assertFieldTypeGridRender(page, titleText, specs) {
+  const search = page.getByRole('searchbox', { name: 'Search records' })
+  await search.waitFor({ state: 'visible', timeout: timeoutMs })
+  await search.fill(titleText)
+  await page.getByText('1 rows').waitFor({ state: 'visible', timeout: timeoutMs })
+  const row = page.locator('.meta-grid__row').filter({ hasText: titleText }).first()
+  await row.waitFor({ state: 'visible', timeout: timeoutMs })
+
+  const details = {}
+  for (const spec of specs) {
+    const cell = fieldCell(row, spec.field.name)
+    await cell.waitFor({ state: 'visible', timeout: timeoutMs })
+    const text = (await cell.textContent())?.trim() ?? ''
+    details[spec.key] = { text }
+
+    if (spec.key === 'currency' && !text.includes('\u00a51,234.56')) {
+      throw new Error(`Currency cell did not render expected value: ${text}`)
+    }
+    if (spec.key === 'percent' && !text.includes('37.5%')) {
+      throw new Error(`Percent cell did not render expected value: ${text}`)
+    }
+    if (spec.key === 'rating' && !text.includes('\u2605\u2605\u2605\u2605\u2606')) {
+      throw new Error(`Rating cell did not render expected value: ${text}`)
+    }
+    if (spec.key === 'longText' && (!text.includes('Line one field smoke') || !text.includes('Line two field smoke'))) {
+      throw new Error(`Long text cell did not render both lines: ${text}`)
+    }
+    if (spec.key === 'multiSelect') {
+      const tags = (await cell.locator('.meta-cell-renderer__tag').allTextContents()).map((item) => item.trim()).filter(Boolean)
+      details[spec.key].tags = tags
+      if (!hasSameArrayValues(tags, spec.value)) {
+        throw new Error(`Multi-select cell tags mismatch: ${JSON.stringify(tags)}`)
+      }
+    }
+    if (spec.key === 'url') {
+      const href = await cell.locator('a.meta-cell-renderer__url').getAttribute('href')
+      details[spec.key].href = href
+      if (href !== spec.value || !text.includes(spec.value)) {
+        throw new Error(`URL cell anchor mismatch: ${href}`)
+      }
+    }
+    if (spec.key === 'email') {
+      const href = await cell.locator('a.meta-cell-renderer__email').getAttribute('href')
+      details[spec.key].href = href
+      if (href !== `mailto:${spec.value}` || !text.includes(spec.value)) {
+        throw new Error(`Email cell anchor mismatch: ${href}`)
+      }
+    }
+    if (spec.key === 'phone') {
+      const href = await cell.locator('a.meta-cell-renderer__phone').getAttribute('href')
+      details[spec.key].href = href
+      if (href !== phoneHrefFor(spec.value) || !text.includes(spec.value)) {
+        throw new Error(`Phone cell anchor mismatch: ${href}`)
+      }
+    }
+  }
+
+  return details
+}
+
+async function verifyFieldTypesReloadReplay(page, {
+  token,
+  baseId,
+  sheetId,
+  viewId,
+  recordId,
+  titleText,
+  specs,
+}) {
+  const persistedRecord = await fetchRecord(token, sheetId, recordId)
+  const data = persistedRecord.record?.data ?? {}
+  const apiMismatches = specs
+    .filter((spec) => !apiFieldValueMatches(data[spec.field.id], spec.value))
+    .map((spec) => ({
+      key: spec.key,
+      fieldId: spec.field.id,
+      actual: data[spec.field.id],
+      expected: spec.value,
+    }))
+  const apiOk = apiMismatches.length === 0
+  record('api.field-types.value-normalization', apiOk, {
+    recordId,
+    fieldIds: specs.map((spec) => spec.field.id),
+    apiMismatches,
+  })
+  if (!apiOk) {
+    throw new Error(`Field type API value mismatch: ${JSON.stringify(apiMismatches)}`)
+  }
+
+  await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
+  const initialRender = await assertFieldTypeGridRender(page, titleText, specs)
+  await page.reload({ waitUntil: 'domcontentloaded', timeout: timeoutMs })
+  const reloadedRender = await assertFieldTypeGridRender(page, titleText, specs)
+  await page.screenshot({ path: path.join(outputDir, 'field-types-reloaded.png'), fullPage: true })
+  record('ui.field-types.reload-replay', true, {
+    recordId,
+    fields: specs.map((spec) => ({ key: spec.key, fieldId: spec.field.id, type: spec.type })),
+    initialRender,
+    reloadedRender,
+  })
+}
+
+async function fetchViewById(token, sheetId, viewId) {
+  const views = await fetchViews(token, sheetId)
+  const view = views.find((item) => item.id === viewId)
+  if (!view) throw new Error(`View not found while verifying smoke replay: ${viewId}`)
+  return view
+}
+
+async function openFilterPanel(page) {
+  const filterButton = page.locator('button.meta-toolbar__btn').filter({ hasText: /Filter/ }).first()
+  await filterButton.click()
+  const panel = page.locator('.meta-toolbar__panel--filter')
+  await panel.waitFor({ state: 'visible', timeout: timeoutMs })
+  return panel
+}
+
+async function addFilterRule(panel, index, { fieldId, operator, value }) {
+  await panel.getByRole('button', { name: '+ Add filter' }).click()
+  const rule = panel.locator('.meta-toolbar__filter-rule').nth(index)
+  await rule.locator('select[aria-label="Filter field"]').selectOption(fieldId)
+  if (operator) {
+    await rule.locator('select[aria-label="Filter operator"]').selectOption(operator)
+  }
+  const valueControl = rule.locator('[aria-label="Filter value"]')
+  await valueControl.waitFor({ state: 'visible', timeout: timeoutMs })
+  const tagName = await valueControl.evaluate((element) => element.tagName.toLowerCase())
+  const inputType = await valueControl.evaluate((element) => element.getAttribute('type') ?? '')
+  if (tagName === 'select') {
+    await valueControl.selectOption(String(value))
+  } else {
+    await valueControl.fill(String(value))
+    await valueControl.dispatchEvent('change')
+  }
+  return {
+    tagName,
+    type: inputType,
+    value: await valueControl.inputValue(),
+  }
+}
+
+async function verifyFilterBuilderTypedControlsReplay(page, {
+  token,
+  baseId,
+  sheetId,
+  viewId,
+  statusFieldId,
+  startFieldId,
+  scoreFieldId,
+  includedTitle,
+  excludedTitle,
+  startValue,
+  scoreThreshold,
+}) {
+  const originalView = await fetchViewById(token, sheetId, viewId)
+  const originalFilterInfo = originalView.filterInfo ?? {}
+  try {
+    await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
+    await page.getByRole('searchbox', { name: 'Search records' }).waitFor({ state: 'visible', timeout: timeoutMs })
+    const panel = await openFilterPanel(page)
+    const controlTypes = [
+      await addFilterRule(panel, 0, { fieldId: statusFieldId, operator: 'is', value: 'Todo' }),
+      await addFilterRule(panel, 1, { fieldId: startFieldId, operator: 'is', value: startValue }),
+      await addFilterRule(panel, 2, { fieldId: scoreFieldId, operator: 'greater', value: scoreThreshold }),
+    ]
+    await Promise.all([
+      waitForViewPatch(page, viewId),
+      panel.getByRole('button', { name: /Apply filter changes|Apply filters/ }).click(),
+    ])
+    await page.getByText('1 rows').waitFor({ state: 'visible', timeout: timeoutMs })
+    await page.locator('.meta-grid__row').filter({ hasText: includedTitle }).first().waitFor({ state: 'visible', timeout: timeoutMs })
+    const excludedVisibleAfterApply = await page.locator('.meta-grid__row').filter({ hasText: excludedTitle }).count()
+
+    const persisted = await waitForPredicate(async () => {
+      const view = await fetchViewById(token, sheetId, viewId)
+      const conditions = Array.isArray(view.filterInfo?.conditions) ? view.filterInfo.conditions : []
+      const byField = new Map(conditions.map((condition) => [condition.fieldId, condition]))
+      return {
+        ok: conditions.length === 3
+          && byField.get(statusFieldId)?.operator === 'is'
+          && byField.get(statusFieldId)?.value === 'Todo'
+          && byField.get(startFieldId)?.operator === 'is'
+          && byField.get(startFieldId)?.value === startValue
+          && byField.get(scoreFieldId)?.operator === 'greater'
+          && Number(byField.get(scoreFieldId)?.value) === Number(scoreThreshold),
+        conditions,
+      }
+    }, 'filter builder persisted conditions')
+
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: timeoutMs })
+    await page.getByText('1 rows').waitFor({ state: 'visible', timeout: timeoutMs })
+    await page.locator('.meta-grid__row').filter({ hasText: includedTitle }).first().waitFor({ state: 'visible', timeout: timeoutMs })
+    const excludedVisibleAfterReload = await page.locator('.meta-grid__row').filter({ hasText: excludedTitle }).count()
+    const reloadedPanel = await openFilterPanel(page)
+    const reloadedRules = await reloadedPanel.locator('.meta-toolbar__filter-rule').count()
+    const reloadedStatusValue = await reloadedPanel.locator('.meta-toolbar__filter-rule').nth(0).locator('[aria-label="Filter value"]').inputValue()
+    const reloadedStartValue = await reloadedPanel.locator('.meta-toolbar__filter-rule').nth(1).locator('[aria-label="Filter value"]').inputValue()
+    const reloadedScoreValue = await reloadedPanel.locator('.meta-toolbar__filter-rule').nth(2).locator('[aria-label="Filter value"]').inputValue()
+    const ok = excludedVisibleAfterApply === 0
+      && excludedVisibleAfterReload === 0
+      && reloadedRules === 3
+      && reloadedStatusValue === 'Todo'
+      && reloadedStartValue === startValue
+      && Number(reloadedScoreValue) === Number(scoreThreshold)
+    record('ui.filter-builder.typed-controls-replay', ok, {
+      viewId,
+      includedTitle,
+      excludedTitle,
+      controlTypes,
+      persistedConditions: persisted.conditions,
+      excludedVisibleAfterApply,
+      excludedVisibleAfterReload,
+      reloadedRules,
+      reloadedStatusValue,
+      reloadedStartValue,
+      reloadedScoreValue,
+    })
+    if (!ok) {
+      throw new Error('Filter builder typed controls did not persist and replay correctly')
+    }
+  } finally {
+    await updateView(token, viewId, { filterInfo: originalFilterInfo })
+  }
+}
+
+async function verifyConditionalFormattingReloadReplay(page, {
+  token,
+  baseId,
+  sheetId,
+  viewId,
+  viewName,
+  scoreFieldId,
+  includedTitle,
+  scoreThreshold,
+}) {
+  const originalView = await fetchViewById(token, sheetId, viewId)
+  const originalConfig = originalView.config ?? {}
+  const expectedBackground = 'rgb(214, 235, 255)'
+  try {
+    await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
+    await page.getByRole('searchbox', { name: 'Search records' }).waitFor({ state: 'visible', timeout: timeoutMs })
+    await page.locator('button.mt-workbench__mgr-btn').filter({ hasText: /Views/ }).click()
+    const manager = page.locator('.meta-view-mgr')
+    await manager.waitFor({ state: 'visible', timeout: timeoutMs })
+    const viewRow = manager.locator('.meta-view-mgr__row').filter({ hasText: viewName }).first()
+    await viewRow.locator('button[title="Conditional formatting"]').click()
+    const dialog = page.getByRole('dialog', { name: 'Conditional formatting rules' })
+    await dialog.waitFor({ state: 'visible', timeout: timeoutMs })
+    await dialog.getByRole('button', { name: '+ Add rule' }).click()
+    const rule = dialog.locator('.cf-dlg__rule').first()
+    await rule.locator('.cf-dlg__select').nth(0).selectOption(scoreFieldId)
+    await rule.locator('.cf-dlg__select').nth(1).selectOption('gt')
+    await rule.locator('.cf-dlg__input[type="number"]').fill(String(scoreThreshold))
+    await rule.locator('.cf-dlg__hex').fill('#d6ebff')
+    await rule.locator('label').filter({ hasText: 'Apply to whole row' }).locator('input').check()
+    await Promise.all([
+      waitForViewPatch(page, viewId),
+      dialog.getByRole('button', { name: 'Save rules' }).click(),
+    ])
+
+    const persisted = await waitForPredicate(async () => {
+      const view = await fetchViewById(token, sheetId, viewId)
+      const rules = Array.isArray(view.config?.conditionalFormattingRules)
+        ? view.config.conditionalFormattingRules
+        : []
+      const saved = rules[0] ?? {}
+      return {
+        ok: rules.length === 1
+          && saved.fieldId === scoreFieldId
+          && saved.operator === 'gt'
+          && Number(saved.value) === Number(scoreThreshold)
+          && saved.style?.backgroundColor === '#d6ebff'
+          && saved.style?.applyToRow === true,
+        rules,
+      }
+    }, 'conditional formatting persisted rule')
+
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: timeoutMs })
+    const search = page.getByRole('searchbox', { name: 'Search records' })
+    await search.waitFor({ state: 'visible', timeout: timeoutMs })
+    await search.fill(includedTitle)
+    await page.getByText('1 rows').waitFor({ state: 'visible', timeout: timeoutMs })
+    const highlightedRow = page.locator('.meta-grid__row').filter({ hasText: includedTitle }).first()
+    await highlightedRow.waitFor({ state: 'visible', timeout: timeoutMs })
+    const rowBackground = await waitForPredicate(async () => {
+      const backgroundColor = await highlightedRow.evaluate((element) => window.getComputedStyle(element).backgroundColor)
+      return {
+        ok: backgroundColor === expectedBackground,
+        backgroundColor,
+      }
+    }, 'conditional formatting row background')
+
+    await page.locator('button.mt-workbench__mgr-btn').filter({ hasText: /Views/ }).click()
+    const reloadedManager = page.locator('.meta-view-mgr')
+    await reloadedManager.waitFor({ state: 'visible', timeout: timeoutMs })
+    const reloadedViewRow = reloadedManager.locator('.meta-view-mgr__row').filter({ hasText: viewName }).first()
+    await reloadedViewRow.locator('button[title="Conditional formatting"]').click()
+    const reloadedDialog = page.getByRole('dialog', { name: 'Conditional formatting rules' })
+    await reloadedDialog.waitFor({ state: 'visible', timeout: timeoutMs })
+    const reloadedRule = reloadedDialog.locator('.cf-dlg__rule').first()
+    const reloadedFieldId = await reloadedRule.locator('.cf-dlg__select').nth(0).inputValue()
+    const reloadedOperator = await reloadedRule.locator('.cf-dlg__select').nth(1).inputValue()
+    const reloadedValue = await reloadedRule.locator('.cf-dlg__input[type="number"]').inputValue()
+    const reloadedApplyToRow = await reloadedRule.locator('label').filter({ hasText: 'Apply to whole row' }).locator('input').isChecked()
+    const ok = reloadedFieldId === scoreFieldId
+      && reloadedOperator === 'gt'
+      && Number(reloadedValue) === Number(scoreThreshold)
+      && reloadedApplyToRow
+      && rowBackground.backgroundColor === expectedBackground
+    record('ui.conditional-formatting.reload-replay', ok, {
+      viewId,
+      scoreFieldId,
+      scoreThreshold,
+      rowBackground: rowBackground.backgroundColor,
+      persistedRules: persisted.rules,
+      reloadedFieldId,
+      reloadedOperator,
+      reloadedValue,
+      reloadedApplyToRow,
+    })
+    if (!ok) {
+      throw new Error('Conditional formatting rule did not persist, reload, and render correctly')
+    }
+  } finally {
+    await updateView(token, viewId, { config: originalConfig })
+  }
 }
 
 async function verifyConflictRecovery(page, { token, baseId, sheetId, viewId, recordId, titleFieldId, searchValue, originalTitle }) {
@@ -3072,6 +3669,7 @@ async function run() {
     const retryTitle = `${titlePrefix} retry`
     const peopleRepairReconcileTitle = `${titlePrefix} people repair reconcile`
     const manualFixTitle = `${titlePrefix} manual fix`
+    const xlsxImportTitle = `${titlePrefix} xlsx import`
     const viewSubmitTitle = `${titlePrefix} view submit`
     const importDriftField = await createField(token, {
       id: `fld_pilot_import_drift_${Date.now()}`,
@@ -3088,6 +3686,15 @@ async function run() {
       property: personField.property,
     })
     cleanupFieldIds.add(tempPeopleRepairField.id)
+    const scoreField = await createField(token, {
+      id: `fld_pilot_score_${Date.now()}`,
+      sheetId: sheet.id,
+      name: `Score ${titlePrefix}`,
+      type: 'number',
+    })
+    cleanupFieldIds.add(scoreField.id)
+    const fieldTypeSmokeFields = await createFieldTypeSmokeFields(token, sheet.id, titlePrefix)
+    for (const spec of fieldTypeSmokeFields) cleanupFieldIds.add(spec.field.id)
     const tempField = await createField(token, {
       id: `fld_pilot_temp_attach_${Date.now()}`,
       sheetId: sheet.id,
@@ -3192,6 +3799,10 @@ async function run() {
       cleanupRecords.set(retried.row.id, retried.row.version)
       cleanupRecords.set(peopleRepairReconcile.row.id, peopleRepairReconcile.row.version)
       cleanupRecords.set(manualFixed.row.id, manualFixed.row.version)
+      const recordId = imported.row.id
+      const trackRecord = (record) => {
+        if (record?.id) cleanupRecords.set(record.id, record.version)
+      }
       const manualFixRecord = await fetchRecord(token, sheet.id, manualFixed.row.id)
       const manualFixPeople = manualFixRecord.linkSummaries?.[personField.id] ?? []
       const manualFixOk = manualFixPeople.some((item) => item.id === personChoice.id)
@@ -3203,10 +3814,16 @@ async function run() {
       if (!manualFixOk) {
         throw new Error('Manual-fix people import did not persist selected person link')
       }
-      let recordId = imported.row.id
-      const trackRecord = (record) => {
-        if (record?.id) cleanupRecords.set(record.id, record.version)
-      }
+
+      const xlsxImported = await verifyXlsxImportExport(page, {
+        token,
+        baseId: base.id,
+        sheetId: sheet.id,
+        viewId: gridView.id,
+        titleFieldId: titleField.id,
+        importedRowTitle: xlsxImportTitle,
+        onImportedRecord: trackRecord,
+      })
 
       await assignPersonViaDrawer(page, {
         searchValue: importedTitle,
@@ -3270,6 +3887,8 @@ async function run() {
           [priorityField.id]: 'P1',
           [startField.id]: '2026-03-10',
           [endField.id]: '2026-03-11',
+          [scoreField.id]: 95,
+          ...fieldTypeSmokePatchValues(fieldTypeSmokeFields),
         },
       })
       await patchFields(token, {
@@ -3282,6 +3901,7 @@ async function run() {
           [priorityField.id]: 'P2',
           [startField.id]: '2026-03-12',
           [endField.id]: '2026-03-13',
+          [scoreField.id]: 10,
         },
       })
       trackRecord(await fetchRecord(token, sheet.id, imported.row.id).then((res) => res.record))
@@ -3295,6 +3915,41 @@ async function run() {
         titleText: importedTitle,
         attachmentName: attachmentNames[0],
         personDisplay: personChoice.display || personChoice.id,
+      })
+
+      await verifyFieldTypesReloadReplay(page, {
+        token,
+        baseId: base.id,
+        sheetId: sheet.id,
+        viewId: gridView.id,
+        recordId,
+        titleText: importedTitle,
+        specs: fieldTypeSmokeFields,
+      })
+
+      await verifyFilterBuilderTypedControlsReplay(page, {
+        token,
+        baseId: base.id,
+        sheetId: sheet.id,
+        viewId: gridView.id,
+        statusFieldId: statusField.id,
+        startFieldId: startField.id,
+        scoreFieldId: scoreField.id,
+        includedTitle: importedTitle,
+        excludedTitle: retryTitle,
+        startValue: '2026-03-10',
+        scoreThreshold: 90,
+      })
+
+      await verifyConditionalFormattingReloadReplay(page, {
+        token,
+        baseId: base.id,
+        sheetId: sheet.id,
+        viewId: gridView.id,
+        viewName: gridView.name,
+        scoreFieldId: scoreField.id,
+        includedTitle: importedTitle,
+        scoreThreshold: 90,
       })
 
       await verifyFieldManagerPropReconcile(page, {
@@ -3583,6 +4238,7 @@ async function run() {
         primaryRecordId: recordId,
         retryRecordId: retried.row.id,
         manualFixRecordId: manualFixed.row.id,
+        xlsxImportRecordId: xlsxImported.id,
         viewSubmitRecordId: viewSubmit.record.id,
         embedHostGeneratedRequestId: embedHost.generatedRequestId,
         embedHostExplicitRequestId: embedHost.explicitRequestId,

@@ -6,12 +6,28 @@
 // truncation without re-reading the original row.
 const MAX_ERROR_SUMMARY_LENGTH = 2000
 const TRUNCATION_SUFFIX = '… [truncated]'
+const REDACTED = '[redacted]'
+
+function redactErrorSummaryText(value) {
+  if (value === undefined || value === null) return value
+  return String(value)
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, `Bearer ${REDACTED}`)
+    .replace(/\b(Authorization\s*[:=]\s*)\S+(?:\s+\S+)?/gi, `$1${REDACTED}`)
+    .replace(/\beyJ[A-Za-z0-9._-]{20,}\b/g, REDACTED)
+    .replace(/([?&](?:access_token|refresh_token|token|password|secret|api[-_]?key|authorization)=)[^&\s)]+/gi, `$1${REDACTED}`)
+    .replace(/\b((?:access_token|refresh_token|token|password|secret|api[-_]?key|authorization)\s*[:=]\s*)[^\s,;&]+/gi, `$1${REDACTED}`)
+    .replace(/(https?:\/\/[^/\s:@]+:)[^@\s/]+@/gi, `$1${REDACTED}@`)
+}
 
 function truncateErrorSummary(value) {
   if (value === undefined || value === null) return value
   const str = typeof value === 'string' ? value : String(value)
   if (str.length <= MAX_ERROR_SUMMARY_LENGTH) return str
   return str.slice(0, MAX_ERROR_SUMMARY_LENGTH - TRUNCATION_SUFFIX.length) + TRUNCATION_SUFFIX
+}
+
+function sanitizeErrorSummary(value) {
+  return truncateErrorSummary(redactErrorSummaryText(value))
 }
 
 function nowIso() {
@@ -79,7 +95,7 @@ function createRunLogger({ pipelineRegistry, clock = nowIso } = {}) {
       rowsFailed: normalizedMetrics.rowsFailed,
       finishedAt,
       durationMs,
-      errorSummary: truncateErrorSummary(extra.errorSummary),
+      errorSummary: sanitizeErrorSummary(extra.errorSummary),
       details: {
         ...(run.details || {}),
         ...(extra.details || {}),
@@ -90,9 +106,7 @@ function createRunLogger({ pipelineRegistry, clock = nowIso } = {}) {
   async function failRun(run, error, metrics = {}, extra = {}) {
     return finishRun(run, metrics, 'failed', {
       ...extra,
-      errorSummary: truncateErrorSummary(
-        extra.errorSummary || (error && error.message) || String(error),
-      ),
+      errorSummary: extra.errorSummary || (error && error.message) || String(error),
     })
   }
 
@@ -114,6 +128,8 @@ module.exports = {
     deriveDurationMs,
     normalizeMetrics,
     nowIso,
+    redactErrorSummaryText,
+    sanitizeErrorSummary,
     toIso,
     truncateErrorSummary,
   },
