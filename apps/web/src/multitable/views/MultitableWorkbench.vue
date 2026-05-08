@@ -583,9 +583,16 @@ function ensureCanDeleteRecord(recordId?: string | null): boolean {
   return false
 }
 
+const FORCED_VIEW_MODES = new Set(['grid', 'form', 'kanban', 'gallery', 'calendar', 'timeline', 'gantt', 'hierarchy'])
+
+function normalizeForcedViewMode(mode?: string): string | null {
+  const value = typeof mode === 'string' ? mode.trim() : ''
+  return FORCED_VIEW_MODES.has(value) ? value : null
+}
+
 const activeViewType = computed(() => {
-  if (props.mode === 'form') return 'form'
-  if (props.mode === 'grid') return 'grid'
+  const forcedMode = normalizeForcedViewMode(props.mode)
+  if (forcedMode) return forcedMode
   return workbench.activeView.value?.type ?? 'grid'
 })
 const canCreateBasesAndSheets = computed(() => {
