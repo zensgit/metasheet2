@@ -34,6 +34,12 @@ const schedulerMocks = vi.hoisted(() => ({
   refreshDirectoryIntegrationSchedule: vi.fn(),
 }))
 
+const workNotificationMocks = vi.hoisted(() => ({
+  getDingTalkWorkNotificationRuntimeStatusFromStore: vi.fn(),
+  saveDingTalkWorkNotificationAgentId: vi.fn(),
+  testDingTalkWorkNotificationAgentId: vi.fn(),
+}))
+
 vi.mock('../../src/rbac/service', () => ({
   isAdmin: rbacMocks.isRbacAdmin,
 }))
@@ -65,6 +71,12 @@ vi.mock('../../src/directory/directory-sync', () => ({
 
 vi.mock('../../src/directory/directory-sync-scheduler', () => ({
   refreshDirectoryIntegrationSchedule: schedulerMocks.refreshDirectoryIntegrationSchedule,
+}))
+
+vi.mock('../../src/integrations/dingtalk/work-notification-settings', () => ({
+  getDingTalkWorkNotificationRuntimeStatusFromStore: workNotificationMocks.getDingTalkWorkNotificationRuntimeStatusFromStore,
+  saveDingTalkWorkNotificationAgentId: workNotificationMocks.saveDingTalkWorkNotificationAgentId,
+  testDingTalkWorkNotificationAgentId: workNotificationMocks.testDingTalkWorkNotificationAgentId,
 }))
 
 import { adminDirectoryRouter } from '../../src/routes/admin-directory'
@@ -159,6 +171,9 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.unbindDirectoryAccount.mockReset()
     directoryMocks.updateDirectoryIntegration.mockReset()
     schedulerMocks.refreshDirectoryIntegrationSchedule.mockReset()
+    workNotificationMocks.getDingTalkWorkNotificationRuntimeStatusFromStore.mockReset()
+    workNotificationMocks.saveDingTalkWorkNotificationAgentId.mockReset()
+    workNotificationMocks.testDingTalkWorkNotificationAgentId.mockReset()
   })
 
   it('rejects unauthenticated requests', async () => {
@@ -185,6 +200,101 @@ describe('adminDirectoryRouter', () => {
       ok: true,
       data: { items: [{ id: 'dir-1', name: 'DingTalk CN' }] },
     })
+  })
+
+  it('returns DingTalk work notification runtime status without exposing values', async () => {
+    workNotificationMocks.getDingTalkWorkNotificationRuntimeStatusFromStore.mockResolvedValue({
+      configured: false,
+      available: false,
+      unavailableReason: 'missing_agent_id',
+      source: 'directory_integration',
+      integration: { id: 'dir-1', name: 'DingTalk CN', status: 'active', updatedAt: '2026-05-08T00:00:00.000Z' },
+      requirements: {
+        appKey: { configured: true, selectedKey: 'directory_integrations.config.appKey' },
+        appSecret: { configured: true, selectedKey: 'directory_integrations.config.appSecret' },
+        agentId: { configured: false, selectedKey: null },
+        baseUrl: { configured: false, selectedKey: null },
+      },
+    })
+
+    const response = await invokeRoute('get', '/dingtalk/work-notification', {
+      query: { integrationId: 'dir-1' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(workNotificationMocks.getDingTalkWorkNotificationRuntimeStatusFromStore).toHaveBeenCalledWith('dir-1')
+    expect(JSON.stringify(response.body)).not.toContain('secret')
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        status: {
+          unavailableReason: 'missing_agent_id',
+          integration: { id: 'dir-1' },
+        },
+      },
+    })
+  })
+
+  it('tests DingTalk work notification Agent ID without persisting it', async () => {
+    workNotificationMocks.testDingTalkWorkNotificationAgentId.mockResolvedValue({
+      integration: { id: 'dir-1', name: 'DingTalk CN', status: 'active' },
+      agentId: { configured: true, length: 9, valuePrinted: false, persisted: false },
+      accessTokenVerified: true,
+      notificationSent: false,
+    })
+
+    const payload = { integrationId: 'dir-1', agentId: '123456789' }
+    const response = await invokeRoute('post', '/dingtalk/work-notification/test', {
+      body: payload,
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(workNotificationMocks.testDingTalkWorkNotificationAgentId).toHaveBeenCalledWith(payload)
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        result: {
+          agentId: { length: 9, valuePrinted: false },
+          accessTokenVerified: true,
+        },
+      },
+    })
+  })
+
+  it('saves DingTalk work notification Agent ID and writes a redacted audit entry', async () => {
+    workNotificationMocks.saveDingTalkWorkNotificationAgentId.mockResolvedValue({
+      integration: { id: 'dir-1', name: 'DingTalk CN', status: 'active' },
+      agentId: { configured: true, length: 9, valuePrinted: false, persisted: false },
+      accessTokenVerified: true,
+      notificationSent: false,
+      saved: true,
+      status: {
+        configured: true,
+        available: true,
+        unavailableReason: null,
+      },
+    })
+
+    const payload = { integrationId: 'dir-1', agentId: '123456789' }
+    const response = await invokeRoute('put', '/dingtalk/work-notification', {
+      body: payload,
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(workNotificationMocks.saveDingTalkWorkNotificationAgentId).toHaveBeenCalledWith(payload)
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'update',
+      resourceType: 'dingtalk-work-notification-config',
+      resourceId: 'dir-1',
+      meta: expect.objectContaining({
+        agentIdLength: 9,
+        agentIdValuePrinted: false,
+      }),
+    }))
+    expect(JSON.stringify(auditMocks.auditLog.mock.calls)).not.toContain('123456789')
   })
 
   it('refreshes scheduler state after creating an integration', async () => {

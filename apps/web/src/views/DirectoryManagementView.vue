@@ -279,6 +279,16 @@
             <span>App Secret</span>
             <input v-model.trim="draft.appSecret" class="directory-admin__input" type="password" placeholder="创建必填，更新可留空" />
           </label>
+          <template v-if="selectedIntegration">
+            <label class="directory-admin__field">
+              <span>工作通知 Agent ID</span>
+              <input v-model.trim="draft.workNotificationAgentId" class="directory-admin__input" type="password" inputmode="numeric" placeholder="不回显已保存值；仅系统管理员填写" />
+            </label>
+            <label class="directory-admin__field">
+              <span>测试接收 DingTalk UserID</span>
+              <input v-model.trim="draft.workNotificationTestUserId" class="directory-admin__input" type="text" placeholder="可选；填写后会发送测试工作通知" />
+            </label>
+          </template>
           <label class="directory-admin__field">
             <span>根部门 ID</span>
             <input v-model.trim="draft.rootDepartmentId" class="directory-admin__input" type="text" placeholder="默认 1" />
@@ -356,6 +366,25 @@
               当前方案会把钉钉部门和成员同步到目录镜像，并可将选定部门投影为平台成员组，用于权限、表单和消息治理；不会自动生成第二套可编辑的本地组织树。
             </p>
           </div>
+          <div v-if="selectedIntegration" class="directory-admin__field directory-admin__field--wide">
+            <span>工作通知配置说明</span>
+            <div class="directory-admin__chips">
+              <span class="directory-admin__chip" :class="{ 'directory-admin__chip--success': selectedIntegration?.config.workNotificationAgentIdConfigured, 'directory-admin__chip--danger': selectedIntegration && !selectedIntegration.config.workNotificationAgentIdConfigured }">
+                {{ selectedIntegration?.config.workNotificationAgentIdConfigured ? 'Agent ID 已保存' : 'Agent ID 未保存' }}
+              </span>
+              <span class="directory-admin__chip">不回显敏感值</span>
+              <span class="directory-admin__chip">保存前先验证 AppKey/AppSecret</span>
+            </div>
+            <p class="directory-admin__hint">
+              Agent ID 来自钉钉开放平台企业内部应用，必须与当前 App Key / App Secret 属于同一个应用；未填写测试接收人时，只做基础连通性验证，不发送真实工作通知。
+            </p>
+          </div>
+          <div v-else class="directory-admin__field directory-admin__field--wide">
+            <span>工作通知配置说明</span>
+            <p class="directory-admin__hint">
+              请先创建并选中钉钉目录集成，再通过专用的“测试工作通知”和“保存 Agent ID”按钮配置工作通知，避免敏感值跟随普通目录保存路径写入。
+            </p>
+          </div>
           <label class="directory-admin__field">
             <span>状态</span>
             <select v-model="draft.status" class="directory-admin__input">
@@ -386,6 +415,12 @@
           </button>
           <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy" @click="void testIntegration()">
             测试连通性
+          </button>
+          <button v-if="selectedIntegration" class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy" @click="void testWorkNotificationAgentId()">
+            测试工作通知
+          </button>
+          <button v-if="selectedIntegration" class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || draft.workNotificationAgentId.trim().length === 0" @click="void saveWorkNotificationAgentId()">
+            保存 Agent ID
           </button>
           <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || !selectedIntegration" @click="void syncIntegration()">
             手动同步
@@ -1376,6 +1411,7 @@ type DirectoryIntegration = {
   config: {
     appKey: string
     appSecretConfigured: boolean
+    workNotificationAgentIdConfigured?: boolean
     rootDepartmentId: string
     baseUrl: string | null
     pageSize: number
@@ -1624,6 +1660,8 @@ type DirectoryDraft = {
   corpId: string
   appKey: string
   appSecret: string
+  workNotificationAgentId: string
+  workNotificationTestUserId: string
   rootDepartmentId: string
   baseUrl: string
   pageSize: number
@@ -1725,6 +1763,8 @@ const draft = reactive<DirectoryDraft>({
   corpId: '',
   appKey: '',
   appSecret: '',
+  workNotificationAgentId: '',
+  workNotificationTestUserId: '',
   rootDepartmentId: '1',
   baseUrl: '',
   pageSize: 50,
@@ -2006,6 +2046,8 @@ function resetDraft() {
   draft.corpId = ''
   draft.appKey = ''
   draft.appSecret = ''
+  draft.workNotificationAgentId = ''
+  draft.workNotificationTestUserId = ''
   draft.rootDepartmentId = '1'
   draft.baseUrl = ''
   draft.pageSize = 50
@@ -2027,6 +2069,8 @@ function applyIntegrationToDraft(integration: DirectoryIntegration) {
   draft.corpId = integration.corpId
   draft.appKey = integration.config.appKey
   draft.appSecret = ''
+  draft.workNotificationAgentId = ''
+  draft.workNotificationTestUserId = ''
   draft.rootDepartmentId = integration.config.rootDepartmentId
   draft.baseUrl = integration.config.baseUrl ?? ''
   draft.pageSize = integration.config.pageSize
@@ -2648,6 +2692,66 @@ async function testIntegration() {
     setStatus('目录连通性测试通过')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '目录连通性测试失败', 'error')
+  } finally {
+    busy.value = false
+  }
+}
+
+function buildWorkNotificationPayload() {
+  return {
+    integrationId: selectedIntegration.value?.id ?? '',
+    agentId: draft.workNotificationAgentId.trim(),
+    recipientUserId: draft.workNotificationTestUserId.trim(),
+  }
+}
+
+async function testWorkNotificationAgentId() {
+  if (!selectedIntegration.value) {
+    setStatus('请先选择或创建钉钉目录集成', 'error')
+    return
+  }
+  busy.value = true
+  try {
+    const response = await apiFetch('/api/admin/directory/dingtalk/work-notification/test', {
+      method: 'POST',
+      body: JSON.stringify(buildWorkNotificationPayload()),
+    })
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '工作通知 Agent ID 测试失败'))
+    const notificationSent = body?.data?.result?.notificationSent === true
+    setStatus(notificationSent
+      ? '工作通知 Agent ID 测试通过，已发送测试消息'
+      : '工作通知 Agent ID 基础测试通过；未填写测试接收人，未发送真实工作通知')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '工作通知 Agent ID 测试失败', 'error')
+  } finally {
+    busy.value = false
+  }
+}
+
+async function saveWorkNotificationAgentId() {
+  if (!selectedIntegration.value) {
+    setStatus('请先选择或创建钉钉目录集成', 'error')
+    return
+  }
+  if (!draft.workNotificationAgentId.trim()) {
+    setStatus('请填写工作通知 Agent ID', 'error')
+    return
+  }
+  busy.value = true
+  try {
+    const response = await apiFetch('/api/admin/directory/dingtalk/work-notification', {
+      method: 'PUT',
+      body: JSON.stringify(buildWorkNotificationPayload()),
+    })
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '保存工作通知 Agent ID 失败'))
+    const currentIntegrationId = selectedIntegration.value.id
+    setStatus('工作通知 Agent ID 已验证并保存')
+    await loadIntegrations()
+    await selectIntegration(currentIntegrationId)
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '保存工作通知 Agent ID 失败', 'error')
   } finally {
     busy.value = false
   }

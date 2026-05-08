@@ -42,19 +42,19 @@ export interface DingTalkWorkNotificationRuntimeStatus {
   requirements: {
     appKey: {
       configured: boolean
-      selectedKey: 'DINGTALK_APP_KEY' | 'DINGTALK_CLIENT_ID' | null
+      selectedKey: string | null
     }
     appSecret: {
       configured: boolean
-      selectedKey: 'DINGTALK_APP_SECRET' | 'DINGTALK_CLIENT_SECRET' | null
+      selectedKey: string | null
     }
     agentId: {
       configured: boolean
-      selectedKey: 'DINGTALK_AGENT_ID' | 'DINGTALK_NOTIFY_AGENT_ID' | null
+      selectedKey: string | null
     }
     baseUrl: {
       configured: boolean
-      selectedKey: 'DINGTALK_BASE_URL' | null
+      selectedKey: string | null
     }
   }
 }
