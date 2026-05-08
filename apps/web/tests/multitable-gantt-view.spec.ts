@@ -308,6 +308,339 @@ describe('MetaGanttView', () => {
     app.unmount()
   })
 
+  it('renders dependency arrows when sheetId is supplied and link field foreignSheetId matches (staging regression)', async () => {
+    // Regression for the 142 staging Gantt UI smoke: with sheetId + a
+    // self-table link Predecessor field + a saved dependencyFieldId in
+    // viewConfig, the toolbar reads "Dependencies = none" and no arrow
+    // renders. The pre-existing "renders dependency arrows from the
+    // configured dependency field" case omits sheetId, so it hit the
+    // permissive `!currentSheetId → return true` branch in
+    // isSelfTableLinkField and never exercised this path.
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaGanttView, {
+          sheetId: 'sheet_repro',
+          loading: false,
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string' },
+            { id: 'fld_start', name: 'Start', type: 'date' },
+            { id: 'fld_end', name: 'End', type: 'date' },
+            {
+              id: 'fld_deps',
+              name: 'Predecessor',
+              type: 'link',
+              property: { foreignSheetId: 'sheet_repro', limitSingleRecord: true },
+            },
+          ],
+          rows: [
+            {
+              id: 'rec_design',
+              version: 1,
+              data: {
+                fld_name: 'Design',
+                fld_start: '2026-04-01',
+                fld_end: '2026-04-03',
+              },
+            },
+            {
+              id: 'rec_build',
+              version: 1,
+              data: {
+                fld_name: 'Build',
+                fld_start: '2026-04-05',
+                fld_end: '2026-04-09',
+                fld_deps: ['rec_design'],
+              },
+            },
+          ],
+          viewConfig: {
+            startFieldId: 'fld_start',
+            endFieldId: 'fld_end',
+            titleFieldId: 'fld_name',
+            dependencyFieldId: 'fld_deps',
+          },
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+    await nextTick()
+
+    const dependencySelect = Array.from(
+      container.querySelectorAll('.meta-gantt__control select'),
+    ).find((node) => {
+      const label = node.parentElement?.textContent ?? ''
+      return label.includes('Dependencies')
+    }) as HTMLSelectElement | null
+    expect(dependencySelect).not.toBeNull()
+    expect(dependencySelect!.value).toBe('fld_deps')
+
+    const arrow = container.querySelector('.meta-gantt__dependency-arrow') as HTMLElement | null
+    expect(arrow).not.toBeNull()
+    expect(arrow?.getAttribute('title')).toBe('Design → Build')
+
+    app.unmount()
+  })
+
+  it('renders dependency arrows after fields prop populates after initial empty mount (workbench async-load regression)', async () => {
+    // The previous test mounts with both viewConfig and fields populated
+    // atomically. The real workbench path is async: viewConfig from
+    // /context arrives separately from fields from /listFields, so the
+    // component first sees fields=[] + viewConfig.dependencyFieldId set.
+    // The first resolver call returns dependencyFieldId=null because
+    // fields.some(...) is false; the watcher writes
+    // dependencyFieldId.value=''. When fields populate later, the resolver
+    // should recompute and the watcher should pick up the new value.
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const linkField = {
+      id: 'fld_deps',
+      name: 'Predecessor',
+      type: 'link' as const,
+      property: { foreignSheetId: 'sheet_repro', limitSingleRecord: true },
+    }
+    const propsRef = {
+      sheetId: 'sheet_repro',
+      loading: false,
+      fields: [] as Array<Record<string, unknown>>,
+      rows: [
+        {
+          id: 'rec_design',
+          version: 1,
+          data: {
+            fld_name: 'Design',
+            fld_start: '2026-04-01',
+            fld_end: '2026-04-03',
+          },
+        },
+        {
+          id: 'rec_build',
+          version: 1,
+          data: {
+            fld_name: 'Build',
+            fld_start: '2026-04-05',
+            fld_end: '2026-04-09',
+            fld_deps: ['rec_design'],
+          },
+        },
+      ],
+      viewConfig: {
+        startFieldId: 'fld_start',
+        endFieldId: 'fld_end',
+        titleFieldId: 'fld_name',
+        dependencyFieldId: 'fld_deps',
+      } as Record<string, unknown>,
+    }
+    let updateProps: ((next: Partial<typeof propsRef>) => void) | null = null
+
+    const app = createApp({
+      data: () => propsRef,
+      mounted() {
+        updateProps = (next) => {
+          Object.assign(this, next)
+        }
+      },
+      render() {
+        return h(MetaGanttView, {
+          sheetId: this.sheetId,
+          loading: this.loading,
+          fields: this.fields,
+          rows: this.rows,
+          viewConfig: this.viewConfig,
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+    // At this point, fields is empty; resolver returns dependencyFieldId=null
+    // and the toolbar should show "none". Then the workbench loads fields.
+    updateProps?.({
+      fields: [
+        { id: 'fld_name', name: 'Name', type: 'string' },
+        { id: 'fld_start', name: 'Start', type: 'date' },
+        { id: 'fld_end', name: 'End', type: 'date' },
+        linkField,
+      ],
+    })
+    await nextTick()
+    await nextTick()
+
+    const dependencySelect = Array.from(
+      container.querySelectorAll('.meta-gantt__control select'),
+    ).find((node) => {
+      const label = node.parentElement?.textContent ?? ''
+      return label.includes('Dependencies')
+    }) as HTMLSelectElement | null
+    expect(dependencySelect).not.toBeNull()
+    expect(dependencySelect!.value).toBe('fld_deps')
+
+    const arrow = container.querySelector('.meta-gantt__dependency-arrow') as HTMLElement | null
+    expect(arrow).not.toBeNull()
+
+    app.unmount()
+  })
+
+  it('renders dependency arrows after viewConfig prop populates after fields load (workbench late-config regression)', async () => {
+    // Another async race: workbench.activeView.value?.config might be
+    // undefined/null initially (when activeView is still resolving from
+    // views.value) and populate after fields are loaded.
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const propsRef = {
+      sheetId: 'sheet_repro',
+      loading: false,
+      fields: [
+        { id: 'fld_name', name: 'Name', type: 'string' },
+        { id: 'fld_start', name: 'Start', type: 'date' },
+        { id: 'fld_end', name: 'End', type: 'date' },
+        {
+          id: 'fld_deps',
+          name: 'Predecessor',
+          type: 'link',
+          property: { foreignSheetId: 'sheet_repro', limitSingleRecord: true },
+        },
+      ],
+      rows: [
+        {
+          id: 'rec_design',
+          version: 1,
+          data: { fld_name: 'Design', fld_start: '2026-04-01', fld_end: '2026-04-03' },
+        },
+        {
+          id: 'rec_build',
+          version: 1,
+          data: { fld_name: 'Build', fld_start: '2026-04-05', fld_end: '2026-04-09', fld_deps: ['rec_design'] },
+        },
+      ],
+      viewConfig: null as Record<string, unknown> | null,
+    }
+    let updateProps: ((next: Partial<typeof propsRef>) => void) | null = null
+
+    const app = createApp({
+      data: () => propsRef,
+      mounted() {
+        updateProps = (next) => Object.assign(this, next)
+      },
+      render() {
+        return h(MetaGanttView, {
+          sheetId: this.sheetId,
+          loading: this.loading,
+          fields: this.fields,
+          rows: this.rows,
+          viewConfig: this.viewConfig,
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+    // viewConfig populates after the active view resolves
+    updateProps?.({
+      viewConfig: {
+        startFieldId: 'fld_start',
+        endFieldId: 'fld_end',
+        titleFieldId: 'fld_name',
+        dependencyFieldId: 'fld_deps',
+      },
+    })
+    await nextTick()
+    await nextTick()
+
+    const dependencySelect = Array.from(
+      container.querySelectorAll('.meta-gantt__control select'),
+    ).find((node) => {
+      const label = node.parentElement?.textContent ?? ''
+      return label.includes('Dependencies')
+    }) as HTMLSelectElement | null
+    expect(dependencySelect).not.toBeNull()
+    expect(dependencySelect!.value).toBe('fld_deps')
+
+    const arrow = container.querySelector('.meta-gantt__dependency-arrow') as HTMLElement | null
+    expect(arrow).not.toBeNull()
+
+    app.unmount()
+  })
+
+  it('renders dependency arrows when sheetId arrives empty initially then populates (sheetId race regression)', async () => {
+    // Reproduces a real workbench race: MetaGanttView mounts before
+    // workbench.activeSheetId.value resolves. With sheetId='', the
+    // resolver's isSelfTableLinkField permissive branch keeps
+    // dependencyFieldId, but if pendingConfigKey gets armed during
+    // initial render the watcher might block subsequent updates when
+    // sheetId fills in.
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const propsRef = {
+      sheetId: '' as string,
+      loading: false,
+      fields: [
+        { id: 'fld_name', name: 'Name', type: 'string' },
+        { id: 'fld_start', name: 'Start', type: 'date' },
+        { id: 'fld_end', name: 'End', type: 'date' },
+        {
+          id: 'fld_deps',
+          name: 'Predecessor',
+          type: 'link',
+          property: { foreignSheetId: 'sheet_repro', limitSingleRecord: true },
+        },
+      ],
+      rows: [
+        { id: 'rec_design', version: 1, data: { fld_name: 'Design', fld_start: '2026-04-01', fld_end: '2026-04-03' } },
+        { id: 'rec_build', version: 1, data: { fld_name: 'Build', fld_start: '2026-04-05', fld_end: '2026-04-09', fld_deps: ['rec_design'] } },
+      ],
+      viewConfig: {
+        startFieldId: 'fld_start',
+        endFieldId: 'fld_end',
+        titleFieldId: 'fld_name',
+        dependencyFieldId: 'fld_deps',
+      } as Record<string, unknown>,
+    }
+    let updateProps: ((next: Partial<typeof propsRef>) => void) | null = null
+
+    const app = createApp({
+      data: () => propsRef,
+      mounted() { updateProps = (next) => Object.assign(this, next) },
+      render() {
+        return h(MetaGanttView, {
+          sheetId: this.sheetId,
+          loading: this.loading,
+          fields: this.fields,
+          rows: this.rows,
+          viewConfig: this.viewConfig,
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+    // sheetId resolves later (workbench.activeSheetId.value populates)
+    updateProps?.({ sheetId: 'sheet_repro' })
+    await nextTick()
+    await nextTick()
+
+    const dependencySelect = Array.from(
+      container.querySelectorAll('.meta-gantt__control select'),
+    ).find((node) => {
+      const label = node.parentElement?.textContent ?? ''
+      return label.includes('Dependencies')
+    }) as HTMLSelectElement | null
+    expect(dependencySelect).not.toBeNull()
+    expect(dependencySelect!.value).toBe('fld_deps')
+
+    const arrow = container.querySelector('.meta-gantt__dependency-arrow') as HTMLElement | null
+    expect(arrow).not.toBeNull()
+
+    app.unmount()
+  })
+
   it('rejects non-link fields configured as dependencyFieldId', () => {
     const fields = [
       { id: 'fld_start', name: 'Start', type: 'date' as const },

@@ -1722,7 +1722,18 @@ async function loadBases() {
   try {
     const data = await workbench.client.listBases()
     bases.value = data.bases ?? []
-    if (!workbench.activeBaseId.value && bases.value.length) workbench.selectBase(bases.value[0].id)
+    // When the URL anchors on a sheetId, defer base selection — the sheet
+    // may belong to a base that is NOT the user's first one. Auto-picking
+    // bases[0] caused /api/multitable/context to return 403 because the
+    // requested sheet does not live under that base, which silently broke
+    // the workbench composable's views.value (and any view-config such
+    // as Gantt's dependencyFieldId that has no resolver fallback).
+    // The downstream onMounted flow uses loadSheetMeta(sheetId) which
+    // hits /context with the sheetId only and lets the backend resolve
+    // the correct base.
+    if (!workbench.activeBaseId.value && !props.sheetId && bases.value.length) {
+      workbench.selectBase(bases.value[0].id)
+    }
   } catch { /* silent */ }
 }
 
@@ -2711,6 +2722,11 @@ onMounted(async () => {
         sheetId: props.sheetId,
         viewId: props.viewId,
       })
+    } else if (props.sheetId) {
+      // Sheet-anchored URL with no baseId: let /context derive the
+      // owning base from the sheet itself. syncContextState then sets
+      // activeBaseId from ctx.sheet.baseId.
+      await workbench.loadSheetMeta(props.sheetId, { viewId: props.viewId })
     } else {
       await workbench.loadSheets()
     }
