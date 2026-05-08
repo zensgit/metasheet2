@@ -94,6 +94,23 @@ function text(value) {
   return ''
 }
 
+function markdownText(value) {
+  return String(value ?? '').replace(/\r?\n|\r/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
+function markdownInlineCode(value) {
+  const rendered = markdownText(value)
+  const runs = rendered.match(/`+/g) || ['']
+  const fenceLength = Math.max(1, ...runs.map((run) => run.length + 1))
+  const fence = '`'.repeat(fenceLength)
+  const content = rendered.startsWith('`') || rendered.endsWith('`') ? ` ${rendered} ` : rendered
+  return `${fence}${content}${fence}`
+}
+
+function markdownTableCodeCell(value) {
+  return markdownInlineCode(value).replace(/\|/g, '\\|')
+}
+
 function normalizeStatus(value) {
   const status = text(value).toLowerCase()
   if (VALID_STATUSES.has(status)) return status
@@ -304,20 +321,20 @@ function renderMarkdown(report) {
     '',
     '## Decision',
     '',
-    `- Decision: ${report.decision}`,
-    `- Tenant: ${report.packet.tenantId}`,
-    `- Workspace: ${report.packet.workspaceId}`,
-    `- BOM required: ${report.scope.bomRequired}`,
-    `- SQL channel expected: ${report.scope.sqlChannelExpected}`,
-    `- Save-only: ${report.packet.safety.saveOnly}`,
-    `- Auto Submit: ${report.packet.safety.autoSubmit}`,
-    `- Auto Audit: ${report.packet.safety.autoAudit}`,
+    `- Decision: ${markdownInlineCode(report.decision)}`,
+    `- Tenant: ${markdownInlineCode(report.packet.tenantId)}`,
+    `- Workspace: ${markdownInlineCode(report.packet.workspaceId)}`,
+    `- BOM required: ${markdownInlineCode(report.scope.bomRequired)}`,
+    `- SQL channel expected: ${markdownInlineCode(report.scope.sqlChannelExpected)}`,
+    `- Save-only: ${markdownInlineCode(report.packet.safety.saveOnly)}`,
+    `- Auto Submit: ${markdownInlineCode(report.packet.safety.autoSubmit)}`,
+    `- Auto Audit: ${markdownInlineCode(report.packet.safety.autoAudit)}`,
     '',
     '## Phase Results',
     '',
     '| Phase | Required | Status | Evidence |',
     '|---|---:|---|---|',
-    ...report.phases.map((item) => `| ${item.label} | ${item.required ? 'yes' : 'no'} | ${item.status} | ${item.evidence || '-'} |`),
+    ...report.phases.map((item) => `| ${markdownTableCodeCell(item.label)} | ${markdownTableCodeCell(item.required ? 'yes' : 'no')} | ${markdownTableCodeCell(item.status)} | ${markdownTableCodeCell(item.evidence || '-')} |`),
     '',
     '## Issues',
     '',
@@ -327,7 +344,7 @@ function renderMarkdown(report) {
   } else {
     lines.push('| Severity | Code | Phase | Message |', '|---|---|---|---|')
     for (const issue of report.issues) {
-      lines.push(`| ${issue.severity} | ${issue.code} | ${issue.phaseId || '-'} | ${issue.message} |`)
+      lines.push(`| ${markdownTableCodeCell(issue.severity)} | ${markdownTableCodeCell(issue.code)} | ${markdownTableCodeCell(issue.phaseId || '-')} | ${markdownTableCodeCell(issue.message)} |`)
     }
     lines.push('')
   }

@@ -116,6 +116,74 @@ async function main() {
     revision: 'v2',
     targetSystem: 'k3_1',
   }))
+  const multiDimKeyA = computeRecordIdempotencyKey({
+    record: { code: 'MAT-001', revision: 'A', org: '100', locale: 'zh-CN' },
+    pipeline: {
+      sourceSystemId: 'plm_pipeline',
+      targetSystemId: 'erp_pipeline',
+      sourceObject: 'materials',
+      idempotencyKeyFields: ['code', 'revision', 'org', 'locale'],
+    },
+    sourceSystem: { id: 'plm_1' },
+    targetSystem: { id: 'k3_1' },
+  })
+  const multiDimKeyB = computeRecordIdempotencyKey({
+    record: { code: 'MAT-001', revision: 'A', org: '200', locale: 'zh-CN' },
+    pipeline: {
+      sourceSystemId: 'plm_pipeline',
+      targetSystemId: 'erp_pipeline',
+      sourceObject: 'materials',
+      idempotencyKeyFields: ['code', 'revision', 'org', 'locale'],
+    },
+    sourceSystem: { id: 'plm_1' },
+    targetSystem: { id: 'k3_1' },
+  })
+  assert.notEqual(multiDimKeyA, multiDimKeyB, 'all idempotencyKeyFields after the first two contribute to the key')
+  assert.equal(multiDimKeyA, computeIdempotencyKey({
+    sourceSystem: 'plm_1',
+    objectType: 'materials',
+    sourceId: 'MAT-001',
+    revision: 'A',
+    targetSystem: 'k3_1',
+    dimensions: {
+      org: '100',
+      locale: 'zh-CN',
+    },
+  }))
+  assert.throws(
+    () => computeRecordIdempotencyKey({
+      record: { code: 'MAT-001', revision: 'A', org: '' },
+      pipeline: {
+        sourceSystemId: 'plm_pipeline',
+        targetSystemId: 'erp_pipeline',
+        sourceObject: 'materials',
+        idempotencyKeyFields: ['code', 'revision', 'org'],
+      },
+      sourceSystem: { id: 'plm_1' },
+      targetSystem: { id: 'k3_1' },
+    }),
+    /dimensions\.org is required/,
+  )
+  const unsafeDimensionInput = {
+    sourceSystem: 'plm_1',
+    objectType: 'materials',
+    sourceId: 'MAT-001',
+    revision: 'A',
+    targetSystem: 'k3_1',
+    dimensions: { ['__proto__']: 'safe', constructor: 'safe', prototype: 'safe', org: '100' },
+  }
+  const unsafeDimensionVariant = {
+    ...unsafeDimensionInput,
+    dimensions: { ['__proto__']: 'changed', constructor: 'safe', prototype: 'safe', org: '100' },
+  }
+  const unsafeDimensionKey = computeIdempotencyKey(unsafeDimensionInput)
+  assert.match(unsafeDimensionKey, /^idem_[0-9a-f]{64}$/)
+  assert.notEqual(
+    unsafeDimensionKey,
+    computeIdempotencyKey(unsafeDimensionVariant),
+    'special dimension keys remain own data keys and contribute to the fingerprint',
+  )
+  assert.equal({}.polluted, undefined, 'idempotency dimensions cannot pollute Object.prototype')
   assert.throws(
     () => computeIdempotencyKey({ sourceSystem: 'plm_1', objectType: 'materials', targetSystem: 'k3_1' }),
     /sourceId is required/,
