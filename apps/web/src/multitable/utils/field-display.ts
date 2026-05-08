@@ -3,6 +3,7 @@ import {
   formatCurrencyValue,
   formatNumberValue,
   formatPercentValue,
+  resolveAutoNumberFieldProperty,
   resolveCurrencyFieldProperty,
   resolvePercentFieldProperty,
   resolveRatingFieldProperty,
@@ -57,6 +58,13 @@ function formatDateTime(value: unknown, timezone?: string): string {
   })
 }
 
+function formatAutoNumber(value: unknown, property: Record<string, unknown> | undefined): string {
+  const num = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(num)) return String(value)
+  const { prefix, digits } = resolveAutoNumberFieldProperty(property)
+  return `${prefix}${String(Math.trunc(num)).padStart(digits, '0')}`
+}
+
 function summarizeLinkCount(field: MetaField, count: number): string {
   if (count <= 0) return '—'
   if (field.property?.refKind === 'user') return count === 1 ? '1 person' : `${count} people`
@@ -103,6 +111,7 @@ export function formatFieldDisplay(params: {
   if (field.type === 'date') return formatDate(value)
   if (field.type === 'dateTime') return formatDateTime(value, resolveDateTimeTimezone(field.property))
   if (field.type === 'createdTime' || field.type === 'modifiedTime') return formatDateTime(value)
+  if (field.type === 'autoNumber') return formatAutoNumber(value, field.property)
   if (isSystemFieldType(field.type)) return String(value)
   if (field.type === 'boolean') return value ? 'Yes' : 'No'
 

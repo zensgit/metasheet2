@@ -535,6 +535,14 @@ POST /api/integration/dead-letters/:id/replay
 CLI 签收命令：
 
 ```bash
+node scripts/ops/integration-k3wise-postdeploy-env-check.mjs \
+  --base-url "$METASHEET_BASE_URL" \
+  --token-file "$METASHEET_AUTH_TOKEN_FILE" \
+  --tenant-id "$METASHEET_TENANT_ID" \
+  --require-auth \
+  --out-dir artifacts/integration-k3wise/internal-trial/postdeploy-env-check \
+  --smoke-out-dir artifacts/integration-k3wise/internal-trial/postdeploy-smoke
+
 node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
   --base-url "$METASHEET_BASE_URL" \
   --token-file "$METASHEET_AUTH_TOKEN_FILE" \
@@ -563,6 +571,14 @@ GitHub Actions 签收入口：
 backend、插件、前端路由、integration API 路由和 staging descriptor：
 
 ```bash
+node scripts/ops/integration-k3wise-postdeploy-env-check.mjs \
+  --base-url "$METASHEET_BASE_URL" \
+  --token-file "$METASHEET_AUTH_TOKEN_FILE" \
+  --tenant-id "$METASHEET_TENANT_ID" \
+  --require-auth \
+  --out-dir artifacts/integration-live-poc/postdeploy-env-check \
+  --smoke-out-dir artifacts/integration-live-poc/postdeploy-smoke
+
 node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
   --base-url "$METASHEET_BASE_URL" \
   --token-file "$METASHEET_AUTH_TOKEN_FILE" \
@@ -668,6 +684,7 @@ node scripts/ops/integration-k3wise-live-poc-preflight.test.mjs
 node scripts/ops/integration-k3wise-live-poc-evidence.test.mjs   # 31/31
 node scripts/ops/fixtures/integration-k3wise/run-mock-poc-demo.mjs
 node --test scripts/ops/resolve-k3wise-smoke-token.test.mjs
+node --test scripts/ops/integration-k3wise-postdeploy-env-check.test.mjs
 node --test scripts/ops/integration-k3wise-postdeploy-smoke.test.mjs
 node --test scripts/ops/integration-k3wise-postdeploy-workflow-contract.test.mjs
 ```
