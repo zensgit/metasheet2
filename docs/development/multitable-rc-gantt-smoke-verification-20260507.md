@@ -37,11 +37,24 @@ git diff --check
 
 Result: passed.
 
+## Codex reviewer hardening
+
+Reviewer patch:
+- Rebased onto `origin/main@9de886a29` after PR #1420.
+- Replaced the loose `authPost` JSON helper with typed `ApiEnvelope` / `Entity` helpers.
+- Removed the unused `view` destructuring in the dependency-arrow case.
+- Removed drift-prone line-number references from the development and verification MDs.
+
+Reviewer re-run:
+- `cd packages/core-backend && npx playwright test --list --config tests/e2e/playwright.config.ts tests/e2e/multitable-gantt-smoke.spec.ts` -> 3 tests listed.
+- `pnpm --filter @metasheet/core-backend exec tsc --noEmit` -> passed.
+- `git diff --check` -> passed.
+
 ## Scoped diff
 
 - `packages/core-backend/tests/e2e/multitable-gantt-smoke.spec.ts` — new spec
 - `packages/core-backend/tests/e2e/README.md` — one-line addition under "What's tested"
-- `docs/development/multitable-feishu-rc-todo-20260430.md` — tick line 111 + add PR/MD pointers
+- `docs/development/multitable-feishu-rc-todo-20260430.md` — tick RC TODO item + add PR/MD pointers
 - `docs/development/multitable-rc-gantt-smoke-development-20260507.md` — new
 - `docs/development/multitable-rc-gantt-smoke-verification-20260507.md` — new
 
@@ -91,10 +104,10 @@ Expected: 3 tests pass; total ~10–15s including frontend cold-start for the tw
 
 ## Pre-deployment checks
 
-- [x] PR #1406 + #1409 + #1410 + #1412 + #1415 + #1417 + #1419 already merged on main; this branch is rebased onto `449cc6353`.
+- [x] PR #1406 + #1409 + #1410 + #1412 + #1415 + #1417 + #1419 + #1420 already merged on main; this branch is rebased onto `9de886a29`.
 - [x] No DingTalk / public-form runtime / Gantt runtime / `plugins/plugin-integration-core/*` files touched.
 - [x] No autoNumber / Hierarchy / formula / migration / OpenAPI changes.
-- [x] RC TODO line 111 ticked with PR / dev MD / verification MD pointers in the same commit.
+- [x] RC TODO item ticked with PR / dev MD / verification MD pointers in the same commit.
 
 ## Result
 

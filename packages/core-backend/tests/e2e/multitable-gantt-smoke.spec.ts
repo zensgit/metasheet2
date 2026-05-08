@@ -28,6 +28,12 @@ const API = 'http://localhost:7778'
 
 let token = ''
 
+type Entity = { id: string }
+type ApiEnvelope<TData extends Record<string, unknown> = Record<string, unknown>> = {
+  data?: TData
+  error?: { code?: string; message?: string }
+}
+
 test.beforeAll(async ({ request }) => {
   try {
     const apiHealth = await request.get(`${API}/health`, { timeout: 3000 })
@@ -51,16 +57,25 @@ test.beforeAll(async ({ request }) => {
   if (!token) test.skip(true, 'Login failed — phase0 user may not exist')
 })
 
-async function authPost(request: APIRequestContext, path: string, body: unknown) {
+function requireValue<T>(value: T | undefined, label: string): T {
+  if (!value) throw new Error(`Expected ${label} in API response`)
+  return value
+}
+
+async function authPost<TData extends Record<string, unknown>>(
+  request: APIRequestContext,
+  path: string,
+  body: unknown,
+): Promise<ApiEnvelope<TData>> {
   const res = await request.post(`${API}${path}`, {
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     data: body,
   })
   const status = res.status()
-  let json: any = null
+  let json: unknown = null
   try { json = await res.json() } catch {}
   if (!res.ok()) throw new Error(`POST ${path} failed: ${status} ${JSON.stringify(json)}`)
-  return json
+  return json as ApiEnvelope<TData>
 }
 
 async function authPatchExpectingFailure(request: APIRequestContext, path: string, body: unknown) {
@@ -82,24 +97,30 @@ async function injectTokenAndGo(page: Page, path: string) {
 
 async function setupGanttSheet(request: APIRequestContext, label: string) {
   const stamp = Date.now() + Math.floor(Math.random() * 1000)
-  const base = (await authPost(request, '/api/multitable/bases', { name: `${label}-base-${stamp}` })).data.base
-  const sheet = (await authPost(request, '/api/multitable/sheets', { baseId: base.id, name: `${label}-sheet-${stamp}` })).data.sheet
-  const title = (await authPost(request, '/api/multitable/fields', {
+  const base = requireValue(
+    (await authPost<{ base: Entity }>(request, '/api/multitable/bases', { name: `${label}-base-${stamp}` })).data?.base,
+    'base',
+  )
+  const sheet = requireValue(
+    (await authPost<{ sheet: Entity }>(request, '/api/multitable/sheets', { baseId: base.id, name: `${label}-sheet-${stamp}` })).data?.sheet,
+    'sheet',
+  )
+  const title = requireValue((await authPost<{ field: Entity }>(request, '/api/multitable/fields', {
     sheetId: sheet.id,
     name: 'Title',
     type: 'string',
-  })).data.field
-  const startField = (await authPost(request, '/api/multitable/fields', {
+  })).data?.field, 'title field')
+  const startField = requireValue((await authPost<{ field: Entity }>(request, '/api/multitable/fields', {
     sheetId: sheet.id,
     name: 'Start',
     type: 'date',
-  })).data.field
-  const endField = (await authPost(request, '/api/multitable/fields', {
+  })).data?.field, 'start field')
+  const endField = requireValue((await authPost<{ field: Entity }>(request, '/api/multitable/fields', {
     sheetId: sheet.id,
     name: 'End',
     type: 'date',
-  })).data.field
-  const view = (await authPost(request, '/api/multitable/views', {
+  })).data?.field, 'end field')
+  const view = requireValue((await authPost<{ view: Entity }>(request, '/api/multitable/views', {
     sheetId: sheet.id,
     name: 'Gantt',
     type: 'gantt',
@@ -108,8 +129,8 @@ async function setupGanttSheet(request: APIRequestContext, label: string) {
       endFieldId: endField.id,
       titleFieldId: title.id,
     },
-  })).data.view
-  return { base, sheet, title, startField, endField, view }
+  })).data?.view, 'gantt view')
+  return { sheet, title, startField, endField, view }
 }
 
 test.describe('Multitable Gantt smoke', () => {
@@ -148,17 +169,17 @@ test.describe('Multitable Gantt smoke', () => {
   })
 
   test('renders dependency arrows when dependencyFieldId is configured', async ({ request, page }) => {
-    const { sheet, title, startField, endField, view } = await setupGanttSheet(request, 'g-arrow')
+    const { sheet, title, startField, endField } = await setupGanttSheet(request, 'g-arrow')
 
-    const predecessor = (await authPost(request, '/api/multitable/fields', {
+    const predecessor = requireValue((await authPost<{ field: Entity }>(request, '/api/multitable/fields', {
       sheetId: sheet.id,
       name: 'Predecessor',
       type: 'link',
       property: { foreignSheetId: sheet.id, limitSingleRecord: true },
-    })).data.field
+    })).data?.field, 'predecessor field')
 
     // Wire dependency on the gantt view
-    const updated = await authPost(request, '/api/multitable/views', {
+    const updated = await authPost<{ view: Entity }>(request, '/api/multitable/views', {
       sheetId: sheet.id,
       name: 'Gantt-with-arrows',
       type: 'gantt',
@@ -169,21 +190,20 @@ test.describe('Multitable Gantt smoke', () => {
         dependencyFieldId: predecessor.id,
       },
     })
-    const arrowView = updated.data.view
-    expect(arrowView?.id).toBeTruthy()
+    const arrowView = requireValue(updated.data?.view, 'dependency gantt view')
 
     const stamp = Date.now()
     const designName = `g-design-arrow-${stamp}`
     const buildName = `g-build-arrow-${stamp}`
 
-    const design = (await authPost(request, '/api/multitable/records', {
+    const design = requireValue((await authPost<{ record: Entity }>(request, '/api/multitable/records', {
       sheetId: sheet.id,
       data: {
         [title.id]: designName,
         [startField.id]: '2026-04-01',
         [endField.id]: '2026-04-04',
       },
-    })).data.record
+    })).data?.record, 'design record')
 
     await authPost(request, '/api/multitable/records', {
       sheetId: sheet.id,

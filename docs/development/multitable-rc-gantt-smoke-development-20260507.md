@@ -2,8 +2,8 @@
 
 > Date: 2026-05-07
 > Branch: `codex/multitable-rc-smoke-gantt-20260507`
-> Base: `origin/main@449cc6353` (after PR #1419 hierarchy-smoke merge)
-> Closes RC TODO line 111: `Smoke test Gantt view rendering`
+> Base: `origin/main@9de886a29` after reviewer rebase
+> Closes RC TODO item: `Smoke test Gantt view rendering`
 
 ## Background
 
@@ -25,9 +25,9 @@ There is no E2E coverage that exercises any of these end-to-end through the HTTP
 - New Playwright spec `packages/core-backend/tests/e2e/multitable-gantt-smoke.spec.ts` containing three `test` cases:
   1. **Bar rendering**: admin creates a base + sheet + Title (string) + Start (date) + End (date) fields and a gantt view configured with `{startFieldId, endFieldId, titleFieldId}`. Creates two records spanning date ranges 2026-04-01..05 and 2026-04-06..12. Browser navigates to the workbench gantt URL and asserts (a) at least two `.meta-gantt__bar` selectors are visible and (b) both task labels appear in the rendered DOM.
   2. **Dependency arrow rendering**: same setup plus a self-table single-value link `Predecessor` field and a second gantt view configured with `dependencyFieldId: predecessor.id`. Creates record A with one date range and B with `[Predecessor: A]` and a later date range. Asserts at least one `.meta-gantt__dependency-arrow` selector is visible.
-  3. **Backend rejection of non-link `dependencyFieldId`**: PATCHes the gantt view's config so that `dependencyFieldId` points at the Title (string) field. Asserts HTTP 400 + `error.code === 'VALIDATION_ERROR'` + message contains `self-table link field`. Exercises `validateGanttDependencyConfig` (`packages/core-backend/src/routes/univer-meta.ts:2910`) at the HTTP layer; previously only covered indirectly by the resolver-level frontend tests in `apps/web/tests/multitable-gantt-view.spec.ts`.
+  3. **Backend rejection of non-link `dependencyFieldId`**: PATCHes the gantt view's config so that `dependencyFieldId` points at the Title (string) field. Asserts HTTP 400 + `error.code === 'VALIDATION_ERROR'` + message contains `self-table link field`. Exercises `validateGanttDependencyConfig` (`packages/core-backend/src/routes/univer-meta.ts`) at the HTTP layer; previously only covered indirectly by the resolver-level frontend tests in `apps/web/tests/multitable-gantt-view.spec.ts`.
 - README addition listing the new spec.
-- RC TODO line 111 ticked in the same commit with PR / dev MD / verification MD pointers (per the post-#1419 hardening pattern).
+- RC TODO item ticked in the same commit with PR / dev MD / verification MD pointers (per the post-#1419 hardening pattern).
 
 ### Out
 
@@ -44,9 +44,13 @@ There is no E2E coverage that exercises any of these end-to-end through the HTTP
 
 ## Implementation notes
 
+### Reviewer hardening
+
+Codex review rebased the branch onto `origin/main@9de886a29` and kept the PR source-only/test-only scope. The review patch tightened the smoke helper types by replacing the loose JSON helper return with typed `ApiEnvelope` / `Entity` helpers, removed an unused destructured `view` binding in the dependency-arrow test, and replaced drift-prone line-number references in the MDs with symbol / route references.
+
 ### Why the regression guard targets PATCH and not POST
 
-`validateGanttDependencyConfig` runs in both `POST /views` and `PATCH /views/:viewId` (lines 4748 and 4847 respectively). The PATCH path also runs when `parsed.data.config !== undefined || parsed.data.type !== undefined`, matching this PR's payload shape. The PATCH path is more interesting because it covers the operator workflow ("operator already has a Gantt view; tries to wire dependency on the wrong field"); the POST path is structurally identical from the validator's perspective. One representative case is sufficient.
+`validateGanttDependencyConfig` runs in both `POST /views` and `PATCH /views/:viewId`. The PATCH path also runs when `parsed.data.config !== undefined || parsed.data.type !== undefined`, matching this PR's payload shape. The PATCH path is more interesting because it covers the operator workflow ("operator already has a Gantt view; tries to wire dependency on the wrong field"); the POST path is structurally identical from the validator's perspective. One representative case is sufficient.
 
 ### Why the bar-rendering case asserts both selector visibility AND label text
 
@@ -66,20 +70,20 @@ Only two failure-expected helpers are needed by this spec (`authPatchExpectingFa
 |---|---|
 | `packages/core-backend/tests/e2e/multitable-gantt-smoke.spec.ts` | +new (~225) |
 | `packages/core-backend/tests/e2e/README.md` | +1 |
-| `docs/development/multitable-feishu-rc-todo-20260430.md` | tick line 111 + PR/MD pointers |
+| `docs/development/multitable-feishu-rc-todo-20260430.md` | tick RC TODO item + PR/MD pointers |
 | `docs/development/multitable-rc-gantt-smoke-development-20260507.md` | +new |
 | `docs/development/multitable-rc-gantt-smoke-verification-20260507.md` | +new |
 
 ## Known limitations
 
 1. **CI does not provision the dev stack** — same caveat as #1415 / #1417 / #1419. Suite skip-passes by default; promoting to a hard gate is a follow-up CI provisioning task.
-2. **No drag-resize interaction**: the spec does not click and drag bar handles. Drag-resize is covered by `apps/web/tests/multitable-gantt-view.spec.ts:163`.
+2. **No drag-resize interaction**: the spec does not click and drag bar handles. Drag-resize is covered by the existing frontend Gantt view tests.
 3. **Test data not cleaned up** — timestamp + random suffix prevents collision; matches lifecycle / public-form / hierarchy smoke policy.
 
 ## Cross-references
 
-- RC TODO master: `docs/development/multitable-feishu-rc-todo-20260430.md` (line 111)
-- Backend validator: `packages/core-backend/src/routes/univer-meta.ts:2910` (`validateGanttDependencyConfig`)
-- Validator wiring: lines 4748 (POST), 4847 (PATCH)
+- RC TODO master: `docs/development/multitable-feishu-rc-todo-20260430.md`
+- Backend validator: `packages/core-backend/src/routes/univer-meta.ts` (`validateGanttDependencyConfig`)
+- Validator wiring: `POST /views` and `PATCH /views/:viewId`
 - Frontend resolver tests: `apps/web/tests/multitable-gantt-view.spec.ts`
 - Pattern source: PR #1419 (`449cc6353`) — multitable hierarchy smoke
