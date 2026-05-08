@@ -109,7 +109,12 @@ Do not mark an item done if:
   - Verification MD: `docs/development/multitable-feishu-rc-filter-format-ui-smoke-verification-20260507.md`
   - Verification summary: same `140/140` staging run passed `ui.filter-builder.typed-controls-replay`; the runner added select/date/number filters through the toolbar UI, verified saved `filterInfo`, reloaded the view, and confirmed all three controls hydrated from persistence.
 - [ ] Smoke test Gantt view rendering.
-- [ ] Smoke test Hierarchy view rendering and child creation.
+- [x] Smoke test Hierarchy view rendering and child creation.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-rc-hierarchy-smoke-development-20260507.md`
+  - Verification MD: `docs/development/multitable-rc-hierarchy-smoke-verification-20260507.md`
+  - Verification summary: Playwright RC smoke parses three tests for hierarchy view rendering parent + child, self-parent PATCH rejection (`HIERARCHY_CYCLE` 400), and descendant-as-parent PATCH rejection through a 3-level chain (`HIERARCHY_CYCLE` 400) with non-cycle clear-parent reparent succeeding. Exercises `assertNoHierarchyParentCycle` (`packages/core-backend/src/multitable/hierarchy-cycle-guard.ts`) at the HTTP layer. Local `tsc --noEmit` and `git diff --check` pass. Live stack execution remains deferred to staging/dev-stack availability.
 - [x] Smoke test public form submit path.
   - PR: #1417
   - Merge commit: pending
