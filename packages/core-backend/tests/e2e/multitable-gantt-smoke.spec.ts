@@ -28,8 +28,8 @@ import {
   createView,
   ensureServersReachable,
   injectTokenAndGo,
-  loginAsPhase0,
   makeAuthClient,
+  resolveE2EAuthToken,
   uniqueLabel,
   type AuthClient,
   type Entity,
@@ -39,7 +39,7 @@ let token = ''
 
 test.beforeAll(async ({ request }) => {
   await ensureServersReachable(request)
-  token = await loginAsPhase0(request)
+  token = await resolveE2EAuthToken(request)
 })
 
 async function setupGanttSheet(client: AuthClient, label: string): Promise<{
