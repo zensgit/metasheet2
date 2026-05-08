@@ -285,12 +285,7 @@ async function runGate(opts) {
   if (envStatus.exitCode !== 0) {
     addFailure(failures, 'ENV_STATUS_HELPER_FAILED', 'Env status helper failed', { exitCode: envStatus.exitCode })
   }
-  if (envStatus.overallStatus !== 'ready') {
-    addFailure(failures, 'ENV_STATUS_BLOCKED', 'DingTalk work-notification env status is not ready', {
-      overallStatus: envStatus.overallStatus,
-      missingInputs: envStatus.missingInputs.map((item) => item.id),
-    })
-  }
+  const envStatusBlocked = envStatus.overallStatus !== 'ready'
 
   const healthResult = readHealthResult(await fetchJson(opts, '/api/health'))
   if (!healthResult.ok) {
@@ -317,6 +312,17 @@ async function runGate(opts) {
     }
   }
 
+  const runtimeStatusOverridesEnvStatus = envStatusBlocked
+    && !workNotification.skipped
+    && workNotification.ok
+    && workNotification.available
+  if (envStatusBlocked && !runtimeStatusOverridesEnvStatus) {
+    addFailure(failures, 'ENV_STATUS_BLOCKED', 'DingTalk work-notification env status is not ready', {
+      overallStatus: envStatus.overallStatus,
+      missingInputs: envStatus.missingInputs.map((item) => item.id),
+    })
+  }
+
   return {
     tool: 'dingtalk-work-notification-release-gate',
     schemaVersion: SCHEMA_VERSION,
@@ -332,6 +338,7 @@ async function runGate(opts) {
     health: healthResult,
     auth,
     workNotification,
+    runtimeStatusOverridesEnvStatus,
     failures,
     nextCommands: failures.length === 0
       ? [
@@ -340,7 +347,7 @@ async function runGate(opts) {
         ]
       : [
           'Resolve the listed failures, then rerun this release gate.',
-          'If ENV_STATUS_BLOCKED reports agent-id-present, fill the private agent id file and run the apply helper.',
+          'If ENV_STATUS_BLOCKED reports agent-id-present, fill Agent ID in the admin directory page or the private agent id file, then rerun this gate.',
         ],
     notes: [
       'This gate is read-only and does not call DingTalk or send messages.',
@@ -362,6 +369,7 @@ function renderMarkdown(summary) {
     '## Checks',
     '',
     `- Env Status: \`${summary.envStatus.overallStatus || '<unknown>'}\``,
+    `- Runtime Status Overrides Env Status: \`${summary.runtimeStatusOverridesEnvStatus === true}\``,
     `- Health: \`${summary.health.ok}\` (status ${summary.health.status})`,
     `- Auth: \`${summary.auth.skipped ? 'skipped' : summary.auth.ok}\``,
     `- Work Notification Available: \`${summary.workNotification.skipped ? 'skipped' : summary.workNotification.available}\``,
