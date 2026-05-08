@@ -192,6 +192,55 @@ async function main() {
   }
   assert.ok(invalidConfig instanceof AdapterValidationError, 'non-http baseUrl rejected')
 
+  const unsafePaths = [
+    { label: 'absolute http path', healthPath: 'https://evil.example.test/health' },
+    { label: 'protocol-relative path', healthPath: '//evil.example.test/health' },
+    { label: 'non-http scheme path', healthPath: 'file:///tmp/health' },
+    { label: 'backslash path', healthPath: '\\\\evil.example.test\\health' },
+    { label: 'control-character path', healthPath: '/health\nX-Injected: yes' },
+  ]
+  for (const { label, healthPath } of unsafePaths) {
+    const unsafeAdapter = createHttpAdapter({
+      system: createSystem({
+        config: {
+          ...createSystem().config,
+          healthPath,
+        },
+      }),
+      fetchImpl,
+    })
+    const unsafe = await unsafeAdapter.testConnection().catch((error) => error)
+    assert.equal(unsafe.ok, false, `${label} is rejected by testConnection`)
+    assert.equal(unsafe.code, 'HTTP_TEST_FAILED', `${label} reports HTTP_TEST_FAILED`)
+  }
+
+  const unsafeObjectAdapter = createHttpAdapter({
+    system: createSystem({
+      config: {
+        ...createSystem().config,
+        objects: {
+          unsafe_read: {
+            path: '//evil.example.test/materials',
+            operations: ['read'],
+          },
+          unsafe_write: {
+            path: '/api/materials',
+            upsertPath: 'javascript:alert(1)',
+            operations: ['upsert'],
+          },
+        },
+      },
+    }),
+    fetchImpl,
+  })
+  const unsafeRead = await unsafeObjectAdapter.read({ object: 'unsafe_read' }).catch((error) => error)
+  assert.ok(unsafeRead instanceof AdapterValidationError, 'protocol-relative read path is rejected')
+  const unsafeWrite = await unsafeObjectAdapter.upsert({
+    object: 'unsafe_write',
+    records: [{ code: 'A-01' }],
+  }).catch((error) => error)
+  assert.ok(unsafeWrite instanceof AdapterValidationError, 'scheme-bearing upsert path is rejected')
+
   let httpFailure = null
   try {
     await adapter.read({ object: 'failing' })
