@@ -39,7 +39,7 @@ Do not mark an item done if:
   - Verification MD: `docs/development/multitable-feishu-rc-verification-20260430.md`
   - Verification summary: docs-only PR CI passed and merged.
 - [x] Confirm root worktree dirty state is unrelated to this RC stream.
-  - PR: pending
+  - PR: #1379
   - Merge commit: pending
   - Development MD: `docs/development/multitable-feishu-rc-audit-development-20260430.md`
   - Verification MD: `docs/development/multitable-feishu-rc-audit-verification-20260430.md`
@@ -77,15 +77,60 @@ Do not mark an item done if:
   - Development MD: `docs/development/multitable-feishu-rc-142-postdeploy-design-20260506.md`
   - Verification MD: `docs/development/multitable-feishu-rc-142-postdeploy-verification-20260506.md`
   - Verification summary: GitHub Actions run `25435548148` deployed `9464b628479cdff1769c864de05f5ec5b6bf7d94` to 142 after rerunning a transient GHCR `unknown blob` failure; postdeploy health/API probes passed.
-- [ ] Smoke test basic multitable sheet lifecycle: create base, sheet, view, fields, records.
-- [ ] Smoke test xlsx frontend import/export with a real file.
-- [ ] Smoke test field types: currency, percent, rating, url, email, phone, longText, multiSelect.
-- [ ] Smoke test conditional formatting persistence and reload.
-- [ ] Smoke test formula editor: field token insertion, function insertion, diagnostics.
-- [ ] Smoke test filter builder typed controls and saved view behavior.
-- [ ] Smoke test Gantt view rendering.
-- [ ] Smoke test Hierarchy view rendering and child creation.
-- [ ] Smoke test public form submit path.
+- [x] Smoke test basic multitable sheet lifecycle: create base, sheet, view, fields, records.
+  - PR: #1415
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-rc-lifecycle-smoke-development-20260507.md`
+  - Verification MD: `docs/development/multitable-rc-lifecycle-smoke-verification-20260507.md`
+  - Verification summary: Playwright RC smoke parses two tests for base -> sheet -> field -> view -> record -> workbench render plus an HTTP `FIELD_READONLY` autoNumber raw-write regression guard; local `tsc --noEmit` and `git diff --check` pass. Live stack execution remains deferred to staging/dev-stack availability.
+- [x] Smoke test xlsx frontend import/export with a real file.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-xlsx-ui-smoke-design-20260506.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-xlsx-ui-smoke-verification-20260506.md`
+  - Verification summary: `AUTH_TOKEN=... API_BASE=http://142.171.239.56:8081 WEB_BASE=http://142.171.239.56:8081 pnpm verify:multitable-pilot:staging` passed `130/130` checks; new `ui.xlsx.import-file` and `ui.xlsx.export-download` checks passed with a real `.xlsx` file and parsed download.
+- [x] Smoke test field types: currency, percent, rating, url, email, phone, longText, multiSelect.
+  - PR: #1379 + #1384
+  - Merge commit: `e6f6547a1` + #1384 pending
+  - Development MD: `docs/development/multitable-feishu-rc-field-types-ui-smoke-design-20260507.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-field-types-ui-smoke-verification-20260507.md`
+  - Verification summary: `AUTH_TOKEN=... API_BASE=http://142.171.239.56:8081 WEB_BASE=http://142.171.239.56:8081 pnpm verify:multitable-pilot:staging` passed `159/159` checks against main `e6f6547a158361042a42788701d8debef8e1d725`; new `api.field-types.value-normalization` and `ui.field-types.reload-replay` checks covered all 8 field types.
+- [x] Smoke test conditional formatting persistence and reload.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-filter-format-ui-smoke-design-20260507.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-filter-format-ui-smoke-verification-20260507.md`
+  - Verification summary: `AUTH_TOKEN=... API_BASE=http://142.171.239.56:8081 WEB_BASE=http://142.171.239.56:8081 pnpm verify:multitable-pilot:staging` passed `140/140` checks; new `ui.conditional-formatting.reload-replay` persisted a `Score > 90` row-format rule, reloaded it, and verified rendered row background `rgb(214, 235, 255)`.
+- [x] Smoke test formula editor: field token insertion, function insertion, diagnostics.
+  - PR: #1424
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-rc-formula-smoke-development-20260507.md`
+  - Verification MD: `docs/development/multitable-rc-formula-smoke-verification-20260507.md`
+  - Verification summary: Playwright RC smoke parses four tests for formula field create with referencing expression + workbench column header rendering, PATCH expression update persistence, sanitize regression clamping non-string expression to empty, and a tiny envelope-shape contract guard for the shared helpers. Frontend formula-editor suite covers field-token insertion, function insertion, and inline diagnostics (`10/10` passed in Codex review). Same PR extracts `packages/core-backend/tests/e2e/multitable-helpers.ts` and migrates the four prior RC smokes (lifecycle, public-form, hierarchy, gantt) to consume the shared scaffold. Local `tsc --noEmit` and `git diff --check` pass; `playwright test --list` reports 19 tests across the six e2e files. Live stack execution remains deferred to staging/dev-stack availability.
+- [x] Smoke test filter builder typed controls and saved view behavior.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-filter-format-ui-smoke-design-20260507.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-filter-format-ui-smoke-verification-20260507.md`
+  - Verification summary: same `140/140` staging run passed `ui.filter-builder.typed-controls-replay`; the runner added select/date/number filters through the toolbar UI, verified saved `filterInfo`, reloaded the view, and confirmed all three controls hydrated from persistence.
+- [x] Smoke test Gantt view rendering.
+  - PR: #1421
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-rc-gantt-smoke-development-20260507.md`
+  - Verification MD: `docs/development/multitable-rc-gantt-smoke-verification-20260507.md`
+  - Verification summary: Playwright RC smoke parses three tests for gantt bar rendering with date ranges, dependency arrow rendering with a configured self-table link `dependencyFieldId`, and PATCH rejection of a gantt view whose `dependencyFieldId` points at a non-link field (HTTP 400 + `VALIDATION_ERROR` containing `self-table link field`). Exercises `validateGanttDependencyConfig` (`packages/core-backend/src/routes/univer-meta.ts`) at the HTTP layer. Local `tsc --noEmit` and `git diff --check` pass. Live stack execution remains deferred to staging/dev-stack availability.
+- [x] Smoke test Hierarchy view rendering and child creation.
+  - PR: #1419
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-rc-hierarchy-smoke-development-20260507.md`
+  - Verification MD: `docs/development/multitable-rc-hierarchy-smoke-verification-20260507.md`
+  - Verification summary: Playwright RC smoke parses three tests for hierarchy view rendering parent + child, self-parent PATCH rejection (`HIERARCHY_CYCLE` 400), and descendant-as-parent PATCH rejection through a 3-level chain (`HIERARCHY_CYCLE` 400) with non-cycle clear-parent reparent succeeding. Exercises `assertNoHierarchyParentCycle` (`packages/core-backend/src/multitable/hierarchy-cycle-guard.ts`) at the HTTP layer. Local `tsc --noEmit` and `git diff --check` pass. Live stack execution remains deferred to staging/dev-stack availability.
+- [x] Smoke test public form submit path.
+  - PR: #1417
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-rc-public-form-smoke-development-20260507.md`
+  - Verification MD: `docs/development/multitable-rc-public-form-smoke-verification-20260507.md`
+  - Verification summary: Playwright RC smoke parses three tests for public form enable -> anonymous submit -> persisted record, disabled-view 401, and regenerate stale-token 401 plus new-token success. Local `tsc --noEmit` and `git diff --check` pass. Live stack execution remains deferred to staging/dev-stack availability.
 - [ ] Smoke test automation send_email save/execute path.
 - [x] Create executable API smoke helper for repeatable staging evidence.
   - PR: #1359
@@ -237,6 +282,7 @@ Expected docs:
   - Development MD: `docs/development/multitable-auto-number-system-field-design-20260505.md`
   - Verification MD: `docs/development/multitable-auto-number-system-field-verification-20260505.md`
   - Verification summary: persistent per-field sequence table added; create paths allocate `autoNumber` values transactionally; focused backend/frontend tests, backend build, frontend type-check, OpenAPI parity, migration replay, and CI passed.
+  - 2026-05-07 follow-up hardening: `docs/development/multitable-auto-number-hardening-design-20260507.md` and `docs/development/multitable-auto-number-hardening-verification-20260507.md` add prefix/digits/start config, existing-record backfill, advisory locking, helper create-path coverage, and frontend formatting.
 - [x] Add `createdTime` field type mapped to record `created_at`.
   - PR: #1280
   - Merge commit: c45da32c1

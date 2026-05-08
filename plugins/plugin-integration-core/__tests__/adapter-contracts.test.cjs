@@ -102,6 +102,18 @@ async function main() {
   const upsertResult = createUpsertResult({ written: 1, results: [{ id: 'k3_1' }] })
   assert.equal(upsertResult.written, 1)
   assert.equal(upsertResult.failed, 0)
+  const stringCounts = createUpsertResult({ written: '2', skipped: '1', failed: '0' })
+  assert.equal(stringCounts.written, 2)
+  assert.equal(stringCounts.skipped, 1)
+  assert.equal(stringCounts.failed, 0)
+  for (const [field, value] of [
+    ['written', -1],
+    ['written', 1.5],
+    ['skipped', Number.POSITIVE_INFINITY],
+    ['failed', Number.NaN],
+  ]) {
+    assert.throws(() => createUpsertResult({ [field]: value }), AdapterContractError, `${field}=${String(value)} rejected`)
+  }
 
   // --- 6. Unsupported operation helper preserves typed failures ----------
   let unsupported = null
