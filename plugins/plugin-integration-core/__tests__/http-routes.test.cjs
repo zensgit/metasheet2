@@ -70,6 +70,7 @@ function createMockServices(overrides = {}) {
     id: 'sys_1',
     tenantId: 'tenant_1',
     workspaceId: 'workspace_1',
+    projectId: 'project_1',
     name: 'K3 WISE',
     kind: 'erp',
     role: 'target',
@@ -417,6 +418,7 @@ async function testExternalSystemRoutes() {
     id: 'sys_2',
     tenantId: 'tenant_1',
     workspaceId: 'workspace_1',
+    projectId: 'project_1',
     name: 'K3 WISE',
     kind: 'erp',
     role: 'target',
@@ -436,6 +438,7 @@ async function testExternalSystemTestPersistsFailureAndPreservesInactive() {
           id: input.id,
           tenantId: input.tenantId,
           workspaceId: input.workspaceId,
+          projectId: 'project_inactive',
           name: 'Inactive ERP',
           kind: 'erp',
           role: 'target',
@@ -468,6 +471,7 @@ async function testExternalSystemTestPersistsFailureAndPreservesInactive() {
   assert.equal(res.body.data.ok, false)
   assert.equal(res.body.data.system.status, 'error')
   const statusUpdate = findCall(calls, 'upsertExternalSystem')[1]
+  assert.equal(statusUpdate.projectId, 'project_inactive', 'failed connection test preserves project scope')
   assert.equal(statusUpdate.status, 'error')
   assert.equal(statusUpdate.lastError, 'ERP endpoint unavailable')
 
@@ -491,8 +495,60 @@ async function testExternalSystemTestPersistsFailureAndPreservesInactive() {
   assertOkResponse(success, 200)
   assert.equal(success.body.data.ok, true)
   const inactiveUpdate = findCall(calls, 'upsertExternalSystem')[1]
+  assert.equal(inactiveUpdate.projectId, 'project_inactive', 'successful connection test preserves project scope')
   assert.equal(inactiveUpdate.status, 'inactive', 'successful test does not activate inactive systems')
   assert.equal(inactiveUpdate.lastError, null)
+}
+
+async function testExternalSystemTestRedactsAdapterResultSecrets() {
+  const { calls, services } = createMockServices({
+    adapterRegistry: {
+      createAdapter(input) {
+        calls.push(['createAdapter', input])
+        return {
+          async testConnection() {
+            calls.push(['testConnection'])
+            return {
+              ok: false,
+              code: 'ERP_DOWN',
+              message: 'failed https://user:pass@k3.example.test/K3API?access_token=live-token-123456 with Bearer liveBearerToken123456',
+              raw: {
+                credentials: { password: 'raw-password-secret' },
+                headers: { Authorization: 'Bearer rawAuthorizationToken123456' },
+              },
+              headers: {
+                Cookie: 'JSESSIONID=raw-session-secret',
+              },
+            }
+          },
+        }
+      },
+    },
+  })
+  const { routes } = mountRoutes(services)
+
+  const res = await invoke(routes, 'POST', '/api/integration/external-systems/:id/test', {
+    user: WRITE_USER,
+    params: { id: 'sys_secret_result' },
+    query: { workspaceId: 'workspace_1' },
+  })
+
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.ok, false)
+  assert.equal(res.body.data.raw, undefined, 'test response does not echo adapter raw payload')
+  assert.equal(res.body.data.headers, undefined, 'test response does not echo adapter debug headers')
+  const serialized = JSON.stringify(res.body)
+  assert.equal(serialized.includes('raw-password-secret'), false)
+  assert.equal(serialized.includes('rawAuthorizationToken123456'), false)
+  assert.equal(serialized.includes('live-token-123456'), false)
+  assert.equal(serialized.includes('liveBearerToken123456'), false)
+  assert.match(res.body.data.message, /access_token=\[redacted\]/)
+  assert.match(res.body.data.message, /Bearer \[redacted\]/)
+
+  const statusUpdate = findCall(calls, 'upsertExternalSystem')[1]
+  assert.equal(statusUpdate.status, 'error')
+  assert.equal(statusUpdate.lastError.includes('live-token-123456'), false)
+  assert.equal(statusUpdate.lastError.includes('liveBearerToken123456'), false)
 }
 
 async function testPipelineRoutes() {
@@ -1132,6 +1188,7 @@ async function main() {
   await testUnauthenticatedWriteRequestIsRejected()
   await testExternalSystemRoutes()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
+  await testExternalSystemTestRedactsAdapterResultSecrets()
   await testPipelineRoutes()
   await testStagingRoutes()
   await testRunAndDeadLetterRoutes()

@@ -676,6 +676,11 @@ export interface MetaCommentsTable {
   spreadsheet_id: string
   row_id: string
   field_id: string | null
+  target_type: string
+  target_id: string
+  target_field_id: string | null
+  container_type: string
+  container_id: string
   content: string
   author_id: string
   parent_id: string | null

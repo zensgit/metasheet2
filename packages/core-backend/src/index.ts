@@ -984,6 +984,7 @@ export class MetaSheetServer {
     } else {
       this.app.use('/api/plm-workbench', disabledFeatureHandler('PLM workbench is disabled in this deployment'))
       this.app.use('/api/federation/plm', disabledFeatureHandler('PLM federation APIs are disabled in this deployment'))
+      this.app.use('/api/federation/import/plm', disabledFeatureHandler('PLM import APIs are disabled in this deployment'))
     }
 
     // 路由：工作流 Echo/Mock API（用于前端并行开发）

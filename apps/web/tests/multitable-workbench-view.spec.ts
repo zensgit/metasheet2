@@ -699,11 +699,13 @@ vi.mock('../src/multitable/components/MetaGanttView.vue', () => ({
   default: defineComponent({
     name: 'MetaGanttView',
     props: {
+      sheetId: { type: String, default: '' },
       canEdit: { type: Boolean, default: false },
     },
     emits: ['patch-dates'],
     render() {
       return h('div', {
+        'data-gantt-sheet-id': this.$props.sheetId,
         'data-gantt-can-edit': String(this.$props.canEdit),
       }, [
         h(
@@ -1796,6 +1798,7 @@ describe('MultitableWorkbench view wiring', () => {
     workbenchMock.activeViewId.value = 'view_gantt'
     await flushUi()
 
+    expect(container!.querySelector('[data-gantt-sheet-id]')?.getAttribute('data-gantt-sheet-id')).toBe('sheet_orders')
     expect(container!.querySelector('[data-gantt-can-edit]')?.getAttribute('data-gantt-can-edit')).toBe('false')
 
     workbenchMock.activeViewId.value = 'view_hierarchy'
