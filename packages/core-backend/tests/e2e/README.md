@@ -47,3 +47,4 @@ Metasheet user: `phase0@test.local` / `Phase0Test!2026` (role=admin)
 ## What's tested
 
 - `handoff-journey.spec.ts`: source product → documents → open AML doc → return → roundtrip
+- `multitable-lifecycle-smoke.spec.ts`: create base → sheet → field → view → record (REST), then assert workbench frontend renders the value; also includes an autoNumber raw-write rejection regression guard. Closes the `Smoke test basic multitable sheet lifecycle` RC TODO item. Yuantus/PLM is NOT required.

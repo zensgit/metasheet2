@@ -52,6 +52,23 @@ function optionalString(value) {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
 }
 
+function markdownText(value) {
+  return String(value ?? '').replace(/\r?\n|\r/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
+function markdownInlineCode(value) {
+  const text = markdownText(value)
+  const runs = text.match(/`+/g) || ['']
+  const fenceLength = Math.max(1, ...runs.map((run) => run.length + 1))
+  const fence = '`'.repeat(fenceLength)
+  const content = text.startsWith('`') || text.endsWith('`') ? ` ${text} ` : text
+  return `${fence}${content}${fence}`
+}
+
+function markdownTableCodeCell(value) {
+  return markdownInlineCode(value).replace(/\|/g, '\\|')
+}
+
 function optionalObject(value, field) {
   if (value === undefined || value === null) return {}
   if (!isPlainObject(value)) {
@@ -595,36 +612,36 @@ function renderMarkdown(packet) {
     '',
     '## Summary',
     '',
-    `- Status: ${packet.status}`,
-    `- Tenant: ${packet.tenantId}`,
-    `- Workspace: ${packet.workspaceId}`,
-    `- K3 environment: ${packet.safety.environment}`,
-    `- Save-only: ${packet.safety.saveOnly}`,
-    `- Auto Submit: ${packet.safety.autoSubmit}`,
-    `- Auto Audit: ${packet.safety.autoAudit}`,
-    `- SQL Server mode: ${packet.safety.sqlServerMode}`,
+    `- Status: ${markdownInlineCode(packet.status)}`,
+    `- Tenant: ${markdownInlineCode(packet.tenantId)}`,
+    `- Workspace: ${markdownInlineCode(packet.workspaceId)}`,
+    `- K3 environment: ${markdownInlineCode(packet.safety.environment)}`,
+    `- Save-only: ${markdownInlineCode(packet.safety.saveOnly)}`,
+    `- Auto Submit: ${markdownInlineCode(packet.safety.autoSubmit)}`,
+    `- Auto Audit: ${markdownInlineCode(packet.safety.autoAudit)}`,
+    `- SQL Server mode: ${markdownInlineCode(packet.safety.sqlServerMode)}`,
     '',
     '## External Systems',
     '',
     '| Name | Kind | Role | Status | Credential keys |',
     '|---|---|---|---|---|',
-    ...packet.externalSystems.map((system) => `| ${system.name} | ${system.kind} | ${system.role} | ${system.status} | ${(system.requiredCredentialKeys || []).join(', ') || 'none'} |`),
+    ...packet.externalSystems.map((system) => `| ${markdownTableCodeCell(system.name)} | ${markdownTableCodeCell(system.kind)} | ${markdownTableCodeCell(system.role)} | ${markdownTableCodeCell(system.status)} | ${markdownTableCodeCell((system.requiredCredentialKeys || []).join(', ') || 'none')} |`),
     '',
     '## Pipelines',
     '',
     '| Name | Source object | Target object | Mode | Status |',
     '|---|---|---|---|---|',
-    ...packet.pipelines.map((pipeline) => `| ${pipeline.name} | ${pipeline.sourceObject} | ${pipeline.targetObject} | ${pipeline.mode} | ${pipeline.status} |`),
+    ...packet.pipelines.map((pipeline) => `| ${markdownTableCodeCell(pipeline.name)} | ${markdownTableCodeCell(pipeline.sourceObject)} | ${markdownTableCodeCell(pipeline.targetObject)} | ${markdownTableCodeCell(pipeline.mode)} | ${markdownTableCodeCell(pipeline.status)} |`),
     '',
     '## Checklist',
     '',
     '| ID | Status | Check |',
     '|---|---|---|',
-    ...packet.checklist.map((item) => `| ${item.id} | ${item.status} | ${item.check} |`),
+    ...packet.checklist.map((item) => `| ${markdownTableCodeCell(item.id)} | ${markdownTableCodeCell(item.status)} | ${markdownTableCodeCell(item.check)} |`),
     '',
     '## Safety Notes',
     '',
-    ...packet.notes.map((note) => `- ${note}`),
+    ...packet.notes.map((note) => `- ${markdownText(note)}`),
     '',
   ]
   return `${lines.join('\n')}\n`
