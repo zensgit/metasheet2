@@ -216,6 +216,15 @@ function summarizeField(field) {
   if (Array.isArray(field.options) && field.options.length > 0) {
     summary.options = field.options.slice()
   }
+  if (field.property && typeof field.property === 'object' && !Array.isArray(field.property)) {
+    const property = { ...field.property }
+    if (Array.isArray(field.property.validation)) {
+      property.validation = field.property.validation.map((rule) => (
+        rule && typeof rule === 'object' && !Array.isArray(rule) ? { ...rule } : rule
+      ))
+    }
+    if (Object.keys(property).length > 0) summary.property = property
+  }
   return summary
 }
 
