@@ -82,30 +82,45 @@ export async function backfillAutoNumberField(
   await acquireAutoNumberSheetWriteLock(query, sheetId)
   await acquireFieldLock(query, sheetId, fieldId)
 
-  const rows = await query(
-    `SELECT id
-     FROM meta_records
-     WHERE sheet_id = $1
-       AND ($2::boolean OR NOT (data ? $3))
-     ORDER BY created_at ASC, id ASC
-     FOR UPDATE`,
-    [sheetId, opts?.overwrite === true, fieldId],
+  // Single UPDATE assigns sequential values to all eligible records via
+  // ROW_NUMBER() over the same (created_at ASC, id ASC) ordering the
+  // previous SELECT-then-loop-UPDATE implementation used. Replaces N+1
+  // round-trips with one server-side scan + atomic batched UPDATE,
+  // which matters when CREATE FIELD autoNumber runs against an
+  // existing sheet of 10k+ records.
+  //
+  // Concurrency safety is preserved by the advisory locks acquired
+  // above: the sheet-level lock serializes CREATE FIELD backfill
+  // against record-create paths, and the field-level lock excludes
+  // concurrent backfills on the same field. The UPDATE itself takes
+  // row-level locks atomically as it executes, so no separate
+  // SELECT ... FOR UPDATE is required.
+  const overwrite = opts?.overwrite === true
+  const updated = await query(
+    `UPDATE meta_records mr
+     SET data = jsonb_set(
+       COALESCE(mr.data, '{}'::jsonb),
+       ARRAY[$1]::text[],
+       to_jsonb(numbered.value::integer),
+       true
+     )
+     FROM (
+       SELECT
+         id,
+         ($2::integer + (ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC))::integer - 1) AS value
+       FROM meta_records
+       WHERE sheet_id = $3
+         AND ($4::boolean OR NOT (data ? $1))
+     ) numbered
+     WHERE mr.id = numbered.id
+       AND mr.sheet_id = $3
+     RETURNING numbered.value`,
+    [fieldId, config.start, sheetId, overwrite],
   )
 
-  let assigned = 0
-  for (const row of rows.rows as Array<{ id?: unknown }>) {
-    const recordId = typeof row.id === 'string' ? row.id : ''
-    if (!recordId) continue
-    const value = config.start + assigned
-    await query(
-      `UPDATE meta_records
-       SET data = jsonb_set(COALESCE(data, '{}'::jsonb), ARRAY[$1]::text[], to_jsonb($2::integer), true)
-       WHERE sheet_id = $3 AND id = $4`,
-      [fieldId, value, sheetId, recordId],
-    )
-    assigned += 1
-  }
-
+  const assigned = typeof updated.rowCount === 'number' && updated.rowCount >= 0
+    ? updated.rowCount
+    : updated.rows.length
   const nextValue = config.start + assigned
   await query(
     `INSERT INTO meta_field_auto_number_sequences (field_id, sheet_id, next_value)
