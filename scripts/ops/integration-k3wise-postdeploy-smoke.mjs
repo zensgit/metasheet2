@@ -231,6 +231,23 @@ function redactText(value) {
   return String(value).replace(TOKEN_PATTERN, '<redacted-token>')
 }
 
+function markdownText(value) {
+  return String(value ?? '').replace(/\r?\n|\r/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
+function markdownInlineCode(value) {
+  const text = markdownText(value)
+  const runs = text.match(/`+/g) || ['']
+  const fenceLength = Math.max(1, ...runs.map((run) => run.length + 1))
+  const fence = '`'.repeat(fenceLength)
+  const content = text.startsWith('`') || text.endsWith('`') ? ` ${text} ` : text
+  return `${fence}${content}${fence}`
+}
+
+function markdownTableCodeCell(value) {
+  return markdownInlineCode(value).replace(/\|/g, '\\|')
+}
+
 function nowStamp(date = new Date()) {
   return date.toISOString().replace(/[:.]/g, '-')
 }
@@ -613,10 +630,10 @@ function renderMarkdown(evidence) {
   const lines = [
     '# Integration K3 WISE Postdeploy Smoke',
     '',
-    `- Generated at: ${evidence.generatedAt}`,
-    `- Base URL: ${evidence.baseUrl}`,
+    `- Generated at: ${markdownInlineCode(evidence.generatedAt)}`,
+    `- Base URL: ${markdownInlineCode(evidence.baseUrl)}`,
     `- Authenticated checks: ${evidence.authenticated ? 'yes' : 'no'}`,
-    `- Internal trial signoff: ${evidence.signoff?.internalTrial === 'pass' ? 'PASS' : 'BLOCKED'} (${evidence.signoff?.reason || 'unknown'})`,
+    `- Internal trial signoff: ${evidence.signoff?.internalTrial === 'pass' ? 'PASS' : 'BLOCKED'} (${markdownText(evidence.signoff?.reason || 'unknown')})`,
     `- Diagnostic result: ${evidence.ok ? 'PASS' : 'FAIL'}`,
     `- Summary: ${evidence.summary.pass} pass / ${evidence.summary.skipped} skipped / ${evidence.summary.fail} fail`,
     '',
@@ -627,7 +644,7 @@ function renderMarkdown(evidence) {
   ]
   for (const check of evidence.checks) {
     const detail = check.error || check.reason || JSON.stringify({ ...check, id: undefined, status: undefined })
-    lines.push(`| ${check.id} | ${check.status} | ${String(detail).replace(/\|/g, '\\|')} |`)
+    lines.push(`| ${markdownTableCodeCell(check.id)} | ${markdownTableCodeCell(check.status)} | ${markdownTableCodeCell(detail)} |`)
   }
   lines.push('')
   return `${lines.join('\n')}\n`
@@ -670,6 +687,8 @@ export {
   K3WisePostdeploySmokeError,
   assertStagingDescriptors,
   assertStatusRoutes,
+  markdownInlineCode,
+  markdownText,
   parseArgs,
   renderMarkdown,
   runCli,
