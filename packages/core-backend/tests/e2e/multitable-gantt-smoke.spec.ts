@@ -82,7 +82,7 @@ test.describe('Multitable Gantt smoke', () => {
       [endField.id]: '2026-04-12',
     })
 
-    await injectTokenAndGo(page, token, `/multitable/${sheet.id}/${view.id}`)
+    await injectTokenAndGo(page, token, `/multitable/${sheet.id}/${view.id}?mode=gantt`)
     const bars = page.locator('.meta-gantt__bar')
     await expect(bars.first()).toBeVisible({ timeout: 15000 })
     expect(await bars.count()).toBeGreaterThanOrEqual(2)
@@ -125,7 +125,7 @@ test.describe('Multitable Gantt smoke', () => {
       [predecessor.id]: [design.id],
     })
 
-    await injectTokenAndGo(page, token, `/multitable/${sheet.id}/${arrowView.id}`)
+    await injectTokenAndGo(page, token, `/multitable/${sheet.id}/${arrowView.id}?mode=gantt`)
     const arrows = page.locator('.meta-gantt__dependency-arrow')
     await expect(arrows.first()).toBeVisible({ timeout: 15000 })
     expect(await arrows.count()).toBeGreaterThanOrEqual(1)
