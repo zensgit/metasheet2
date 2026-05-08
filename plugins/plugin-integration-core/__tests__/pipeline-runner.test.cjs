@@ -293,6 +293,25 @@ async function main() {
   assert.equal(idemRun2.metrics.rowsWritten, 0)
   assert.equal(idem.targetRows.size, 1)
 
+  // --- 2b. Additional idempotency fields prevent multi-org collisions ----
+  const multiFieldIdem = createRunnerHarness({
+    sourceRecords: [
+      { code: 'a-01', revision: 'r1', org: '100', qty: '3', name: 'Bolt CN', updatedAt: '2026-04-24T01:00:00.000Z' },
+      { code: 'a-01', revision: 'r1', org: '200', qty: '3', name: 'Bolt EU', updatedAt: '2026-04-24T01:01:00.000Z' },
+    ],
+    pipelineOverrides: {
+      idempotencyKeyFields: ['code', 'revision', 'org'],
+    },
+  })
+  const multiFieldRun = await multiFieldIdem.runner.runPipeline({
+    tenantId: 'tenant_1',
+    pipelineId: 'pipe_1',
+    mode: 'full',
+    triggeredBy: 'manual',
+  })
+  assert.equal(multiFieldRun.metrics.rowsWritten, 2, 'same code/revision in different orgs are distinct target writes')
+  assert.equal(multiFieldIdem.targetRows.size, 2, 'third idempotency key field contributes to the target idempotency key')
+
   // --- 3. Incremental runs only read records above stored watermark ------
   const incrementalRecords = [
     { code: 'a-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
