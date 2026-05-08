@@ -70,6 +70,7 @@ function createMockServices(overrides = {}) {
     id: 'sys_1',
     tenantId: 'tenant_1',
     workspaceId: 'workspace_1',
+    projectId: 'project_1',
     name: 'K3 WISE',
     kind: 'erp',
     role: 'target',
@@ -417,6 +418,7 @@ async function testExternalSystemRoutes() {
     id: 'sys_2',
     tenantId: 'tenant_1',
     workspaceId: 'workspace_1',
+    projectId: 'project_1',
     name: 'K3 WISE',
     kind: 'erp',
     role: 'target',
@@ -436,6 +438,7 @@ async function testExternalSystemTestPersistsFailureAndPreservesInactive() {
           id: input.id,
           tenantId: input.tenantId,
           workspaceId: input.workspaceId,
+          projectId: 'project_inactive',
           name: 'Inactive ERP',
           kind: 'erp',
           role: 'target',
@@ -468,6 +471,7 @@ async function testExternalSystemTestPersistsFailureAndPreservesInactive() {
   assert.equal(res.body.data.ok, false)
   assert.equal(res.body.data.system.status, 'error')
   const statusUpdate = findCall(calls, 'upsertExternalSystem')[1]
+  assert.equal(statusUpdate.projectId, 'project_inactive', 'failed connection test preserves project scope')
   assert.equal(statusUpdate.status, 'error')
   assert.equal(statusUpdate.lastError, 'ERP endpoint unavailable')
 
@@ -491,6 +495,7 @@ async function testExternalSystemTestPersistsFailureAndPreservesInactive() {
   assertOkResponse(success, 200)
   assert.equal(success.body.data.ok, true)
   const inactiveUpdate = findCall(calls, 'upsertExternalSystem')[1]
+  assert.equal(inactiveUpdate.projectId, 'project_inactive', 'successful connection test preserves project scope')
   assert.equal(inactiveUpdate.status, 'inactive', 'successful test does not activate inactive systems')
   assert.equal(inactiveUpdate.lastError, null)
 }
