@@ -285,6 +285,110 @@ test('release gate redacts sensitive API error payloads', async () => {
   }
 })
 
+test('release gate can skip env status helper without producing ENV_STATUS_BLOCKED', async () => {
+  const tmpDir = makeTmpDir()
+  const tokenFile = path.join(tmpDir, 'admin.jwt')
+  const outputJson = path.join(tmpDir, 'summary.json')
+  const outputMd = path.join(tmpDir, 'summary.md')
+  const envStatusJson = path.join(tmpDir, 'env-status.json')
+  try {
+    writeFileSync(tokenFile, 'secret-admin-token\n', 'utf8')
+
+    await withServer((req, res) => {
+      if (req.url === '/api/health') return jsonResponse(res, 200, { status: 'ok', success: true })
+      if (req.url === '/api/auth/me') return jsonResponse(res, 200, { success: true, user: { role: 'admin' } })
+      if (req.url === '/api/admin/users/user-1/dingtalk-access') {
+        return jsonResponse(res, 200, {
+          workNotification: {
+            configured: true,
+            available: true,
+            requirements: {
+              appKey: { configured: true, selectedKey: 'DINGTALK_APP_KEY' },
+              appSecret: { configured: true, selectedKey: 'DINGTALK_APP_SECRET' },
+              agentId: { configured: true, selectedKey: 'DINGTALK_AGENT_ID' },
+            },
+          },
+        })
+      }
+      return jsonResponse(res, 404, { error: 'not found' })
+    }, async (apiBase) => {
+      const result = await runScript([
+        '--status-helper', statusHelperPath,
+        '--api-base', apiBase,
+        '--auth-token-file', tokenFile,
+        '--user-id', 'user-1',
+        '--skip-env-status',
+        '--output-json', outputJson,
+        '--output-md', outputMd,
+      ])
+
+      assert.equal(result.status, 0, result.stderr || result.stdout)
+      const summary = readJson(outputJson)
+      assert.equal(summary.status, 'pass')
+      assert.equal(summary.skipEnvStatus, true)
+      assert.equal(summary.envStatus.skipped, true)
+      assert.equal(summary.envStatus.overallStatus, 'not_applicable')
+      assert.equal(summary.runtimeStatusOverridesEnvStatus, false)
+      assert.deepEqual(summary.failures, [])
+      assert.equal(existsSync(envStatusJson), false, 'env-status helper artifact should not exist when skipped')
+      const markdown = readFileSync(outputMd, 'utf8')
+      assert.match(markdown, /Env Status Skipped: `true`/)
+      assert.match(markdown, /Env Status: `skipped`/)
+    })
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('release gate skip-env-status still surfaces work notification failures from runtime', async () => {
+  const tmpDir = makeTmpDir()
+  const tokenFile = path.join(tmpDir, 'admin.jwt')
+  const outputJson = path.join(tmpDir, 'summary.json')
+  const outputMd = path.join(tmpDir, 'summary.md')
+  try {
+    writeFileSync(tokenFile, 'secret-admin-token\n', 'utf8')
+
+    await withServer((req, res) => {
+      if (req.url === '/api/health') return jsonResponse(res, 200, { status: 'ok', success: true })
+      if (req.url === '/api/auth/me') return jsonResponse(res, 200, { success: true, user: { role: 'admin' } })
+      if (req.url === '/api/admin/users/user-1/dingtalk-access') {
+        return jsonResponse(res, 200, {
+          workNotification: {
+            configured: false,
+            available: false,
+            unavailableReason: 'missing_agent_id',
+            requirements: { agentId: { configured: false, selectedKey: null } },
+          },
+        })
+      }
+      return jsonResponse(res, 404, { error: 'not found' })
+    }, async (apiBase) => {
+      const result = await runScript([
+        '--status-helper', statusHelperPath,
+        '--api-base', apiBase,
+        '--auth-token-file', tokenFile,
+        '--user-id', 'user-1',
+        '--skip-env-status',
+        '--allow-blocked',
+        '--output-json', outputJson,
+        '--output-md', outputMd,
+      ])
+
+      assert.equal(result.status, 0, result.stderr || result.stdout)
+      const summary = readJson(outputJson)
+      assert.equal(summary.status, 'blocked')
+      assert.equal(summary.skipEnvStatus, true)
+      assert.equal(summary.envStatus.skipped, true)
+      assert.deepEqual(
+        summary.failures.map((failure) => failure.code).sort(),
+        ['WORK_NOTIFICATION_UNAVAILABLE'],
+      )
+    })
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('release gate can skip admin API checks', async () => {
   const tmpDir = makeTmpDir()
   const envFile = path.join(tmpDir, 'app.env')
