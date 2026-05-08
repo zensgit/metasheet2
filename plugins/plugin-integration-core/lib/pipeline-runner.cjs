@@ -174,6 +174,16 @@ function assertActiveSystem(system, field) {
   }
 }
 
+function assertPipelineLoaded(pipeline, input) {
+  if (!pipeline || typeof pipeline !== 'object' || Array.isArray(pipeline)) {
+    throw new PipelineRunnerError('pipeline not found', {
+      pipelineId: input.pipelineId,
+      tenantId: input.tenantId,
+      workspaceId: input.workspaceId ?? null,
+    })
+  }
+}
+
 function createPipelineRunner(deps = {}) {
   const pipelineRegistry = requireDependency(deps, 'pipelineRegistry', ['getPipeline'])
   const externalSystemRegistry = requireDependency(deps, 'externalSystemRegistry', ['getExternalSystem'])
@@ -202,6 +212,7 @@ function createPipelineRunner(deps = {}) {
       id: input.pipelineId,
       includeFieldMappings: true,
     })
+    assertPipelineLoaded(pipeline, input)
     if (pipeline.status !== 'active' && !coerceTruthyFlag(input.allowInactive, 'input.allowInactive')) {
       throw new PipelineRunnerError('pipeline is not active', {
         pipelineId: pipeline.id,

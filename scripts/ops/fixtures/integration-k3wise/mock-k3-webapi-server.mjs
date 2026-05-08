@@ -13,6 +13,34 @@
 
 import { createServer } from 'node:http'
 
+const REDACTED_VALUE = '<redacted>'
+const SENSITIVE_BODY_KEY_PATTERN = new RegExp([
+  'password',
+  'secret',
+  'token',
+  'session',
+  'credential',
+  'api[-_]?key',
+  'authorization',
+  'acctid',
+  'account[-_]?id',
+].join('|'), 'i')
+
+function sanitizeMockBody(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeMockBody(item))
+  }
+  if (!value || typeof value !== 'object') {
+    return value
+  }
+  return Object.fromEntries(
+    Object.entries(value).map(([key, nestedValue]) => [
+      key,
+      SENSITIVE_BODY_KEY_PATTERN.test(key) ? REDACTED_VALUE : sanitizeMockBody(nestedValue),
+    ]),
+  )
+}
+
 export function createMockK3WebApiServer({ logger = () => {}, knownBadFNumbers = new Set(['BAD']) } = {}) {
   const calls = []
 
@@ -42,8 +70,9 @@ export function createMockK3WebApiServer({ logger = () => {}, knownBadFNumbers =
     }
     const url = new URL(req.url, `http://${req.headers.host || 'mock-k3'}`)
     const pathname = url.pathname
-    calls.push({ method: req.method, pathname, body })
-    logger({ method: req.method, pathname, body })
+    const safeCall = { method: req.method, pathname, body: sanitizeMockBody(body) }
+    calls.push(safeCall)
+    logger(safeCall)
 
     if (pathname === '/K3API/Login') {
       jsonResponse(res, 200, { success: true, sessionId: 'mock-session-1' })
