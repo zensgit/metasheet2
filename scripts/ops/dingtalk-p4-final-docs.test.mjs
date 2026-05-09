@@ -211,16 +211,17 @@ test('dingtalk-p4-final-docs redacts secret-like failure details before writing 
   const rawBearer = 'Bearer abcdefghijklmnopqrstuvwxyz1234567890'
   const rawSecret = 'SECabcdefghijklmnop12345678'
   const rawPublicToken = 'publicToken=abc1234567890xyz'
+  const rawClientSecret = 'DINGTALK_CLIENT_SECRET = abcdefghijklmnopqrstuvwxyz123456'
 
   try {
     const paths = writeReleaseReadySession(tmpDir, {
       statusSummary: {
         handoff: {
-          failures: [`status failure includes ${rawPublicToken}`],
+          failures: [`status failure includes ${rawPublicToken} ${rawClientSecret}`],
         },
       },
       handoffSummary: {
-        failures: [`handoff failure includes ${rawWebhook} ${rawBearer} ${rawSecret}`],
+        failures: [`handoff failure includes ${rawWebhook} ${rawBearer} ${rawSecret} ${rawClientSecret}`],
       },
     })
     const outputDir = path.join(tmpDir, 'docs')
@@ -237,10 +238,12 @@ test('dingtalk-p4-final-docs redacts secret-like failure details before writing 
     assert.doesNotMatch(verificationText, /abcdefghijklmnopqrstuvwxyz1234567890/)
     assert.doesNotMatch(verificationText, /SECabcdefghijklmnop12345678/)
     assert.doesNotMatch(verificationText, /abc1234567890xyz/)
+    assert.doesNotMatch(verificationText, /abcdefghijklmnopqrstuvwxyz123456/)
     assert.match(verificationText, /access_token=<redacted>/)
     assert.match(verificationText, /Bearer <redacted>/)
     assert.match(verificationText, /SEC<redacted>/)
     assert.match(verificationText, /publicToken=<redacted>/)
+    assert.match(verificationText, /DINGTALK_CLIENT_SECRET = <redacted>/)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

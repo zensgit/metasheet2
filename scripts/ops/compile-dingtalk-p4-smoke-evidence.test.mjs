@@ -201,7 +201,7 @@ test('compile-dingtalk-p4-smoke-evidence compiles passing evidence and redacts s
         id,
         status: 'pass',
         evidence: makePassingEvidenceForCheck(id, {
-          notes: `${id} used https://oapi.dingtalk.com/robot/send?access_token=robot-secret&timestamp=1690000000000&sign=robot-sign and SECabcdefgh12345678`,
+          notes: `${id} used https://oapi.dingtalk.com/robot/send?access_token=robot-secret&timestamp=1690000000000&sign=robot-sign, SECabcdefgh12345678, and DINGTALK_CLIENT_SECRET = abcdefghijklmnopqrstuvwxyz123456`,
           publicUrl: 'http://example.test/form?publicToken=pub_secret',
           authorization: 'Bearer abc.def.ghi',
           token: 'raw-token',
@@ -236,11 +236,13 @@ test('compile-dingtalk-p4-smoke-evidence compiles passing evidence and redacts s
     assert.doesNotMatch(redacted, /SECabcdefgh12345678/)
     assert.doesNotMatch(redacted, /pub_secret/)
     assert.doesNotMatch(redacted, /raw-token/)
+    assert.doesNotMatch(redacted, /abcdefghijklmnopqrstuvwxyz123456/)
     assert.match(redacted, /access_token=<redacted>/)
     assert.match(redacted, /timestamp=<redacted>/)
     assert.match(redacted, /sign=<redacted>/)
     assert.match(redacted, /SEC<redacted>/)
     assert.match(redacted, /publicToken=<redacted>/)
+    assert.match(redacted, /DINGTALK_CLIENT_SECRET = <redacted>/)
     assert.match(redacted, /"<redacted>"/)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
@@ -722,4 +724,18 @@ test('compile-dingtalk-p4-smoke-evidence rejects duplicate check ids', () => {
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
+})
+
+test('compile-dingtalk-p4-smoke-evidence redacts spaced client secret assignments in top-level errors', () => {
+  const result = spawnSync(process.execPath, [
+    scriptPath,
+    '--DINGTALK_CLIENT_SECRET = abcdefghijklmnopqrstuvwxyz123456',
+  ], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  })
+
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /DINGTALK_CLIENT_SECRET = <redacted>/)
+  assert.doesNotMatch(result.stderr, /abcdefghijklmnopqrstuvwxyz123456/)
 })
