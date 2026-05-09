@@ -848,6 +848,120 @@ describe('AutomationExecutor', () => {
     expect(insertArgs?.[8]).toContain('signature mismatch')
   })
 
+  it('notifies the rule creator when send_dingtalk_group_message fails', async () => {
+    process.env.DINGTALK_APP_KEY = 'dt-app-key'
+    process.env.DINGTALK_APP_SECRET = 'dt-app-secret'
+    process.env.DINGTALK_AGENT_ID = '123456789'
+
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{ id: 'dt_1', name: 'Ops Group', webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=test', secret: null, enabled: true }],
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ local_user_id: 'user_1', dingtalk_user_id: 'dt-user-1' }] })
+      .mockResolvedValue({ rows: [], rowCount: 1 })
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 310000, errmsg: 'signature mismatch' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'app-access-token' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', task_id: 778899 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'dt_1',
+          titleTemplate: 'Record {{record.title}} ready',
+          bodyTemplate: 'Status: {{record.status}}',
+        },
+      }],
+    })
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { title: 'Incident', status: 'open' },
+      sheetId: 'sheet_1',
+      actorId: 'user_2',
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].output).toEqual(expect.objectContaining({
+      failureAlert: expect.objectContaining({ status: 'success', notifiedUsers: 1 }),
+    }))
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+    const [, notificationInit] = fetchFn.mock.calls[2] as [string, RequestInit]
+    const payload = JSON.parse(notificationInit.body as string)
+    expect(payload.userid_list).toBe('dt-user-1')
+    expect(payload.msg.markdown.text).toContain('MetaSheet DingTalk group delivery failed')
+    expect(payload.msg.markdown.text).toContain('Rule: rule_1')
+    expect(payload.msg.markdown.text).toContain('signature mismatch')
+
+    const personInsertCalls = queryFn.mock.calls.filter((call) => String(call[0]).includes('INSERT INTO dingtalk_person_deliveries'))
+    expect(personInsertCalls).toHaveLength(1)
+    const insertArgs = personInsertCalls[0]?.[1] as unknown[] | undefined
+    expect(insertArgs?.[1]).toBe('user_1')
+    expect(insertArgs?.[2]).toBe('dt-user-1')
+    expect(insertArgs?.[6]).toBe(true)
+    expect(insertArgs?.[7]).toBe('success')
+  })
+
+  it('audits a skipped rule-creator alert when the creator is not linked to DingTalk', async () => {
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{ id: 'dt_1', name: 'Ops Group', webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=test', secret: null, enabled: true }],
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ local_user_id: 'user_1', dingtalk_user_id: null }] })
+      .mockResolvedValue({ rows: [], rowCount: 1 })
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ errcode: 310000, errmsg: 'signature mismatch' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'dt_1',
+          titleTemplate: 'Record {{record.title}} ready',
+          bodyTemplate: 'Status: {{record.status}}',
+        },
+      }],
+    })
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { title: 'Incident', status: 'open' },
+      sheetId: 'sheet_1',
+      actorId: 'user_2',
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].output).toEqual(expect.objectContaining({
+      failureAlert: expect.objectContaining({ status: 'skipped', reason: 'rule_creator_not_linked' }),
+    }))
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    const personInsertCalls = queryFn.mock.calls.filter((call) => String(call[0]).includes('INSERT INTO dingtalk_person_deliveries'))
+    expect(personInsertCalls).toHaveLength(1)
+    const insertArgs = personInsertCalls[0]?.[1] as unknown[] | undefined
+    expect(insertArgs?.[1]).toBe('user_1')
+    expect(insertArgs?.[6]).toBe(false)
+    expect(insertArgs?.[7]).toBe('skipped')
+    expect(insertArgs?.[10]).toContain('not linked')
+  })
+
   it('keeps send_dingtalk_group_message successful when delivery history persistence fails', async () => {
     process.env.APP_BASE_URL = 'https://app.example.com'
     const queryFn = vi.fn()
@@ -965,11 +1079,13 @@ describe('AutomationExecutor', () => {
 
   it('scopes send_dingtalk_group_message destinations to the current sheet and rule creator', async () => {
     const queryFn = vi.fn(async (sql: string, params?: unknown[]) => {
-      expect(sql).toContain('sheet_id = $2')
-      expect(sql).toContain('org_id IS NULL AND created_by = $3')
-      expect(sql).toContain('FROM user_orgs uo')
-      expect(sql).toContain('uo.org_id = dg.org_id')
-      expect(params).toEqual([['dt_other_sheet'], 'sheet_1', 'user_1'])
+      if (sql.includes('FROM dingtalk_group_destinations')) {
+        expect(sql).toContain('sheet_id = $2')
+        expect(sql).toContain('org_id IS NULL AND created_by = $3')
+        expect(sql).toContain('FROM user_orgs uo')
+        expect(sql).toContain('uo.org_id = dg.org_id')
+        expect(params).toEqual([['dt_other_sheet'], 'sheet_1', 'user_1'])
+      }
       return { rows: [], rowCount: 0 }
     })
     deps = createMockDeps({ queryFn })
@@ -997,7 +1113,10 @@ describe('AutomationExecutor', () => {
     expect(result.steps[0].status).toBe('failed')
     expect(result.steps[0].error).toContain('DingTalk destinations not found')
     expect(result.steps[0].error).toContain('dt_other_sheet')
-    expect(queryFn).toHaveBeenCalledTimes(1)
+    expect(result.steps[0].output).toEqual(expect.objectContaining({
+      failureAlert: expect.objectContaining({ status: 'skipped', reason: 'rule_creator_not_linked' }),
+    }))
+    expect(queryFn).toHaveBeenCalledTimes(3)
   })
 
   it('fails send_dingtalk_group_message when dynamic record path resolves no destinations', async () => {
