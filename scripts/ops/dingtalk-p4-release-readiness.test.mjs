@@ -179,6 +179,16 @@ test('dingtalk-p4-release-readiness fails when private env readiness fails even 
   }
 })
 
+test('dingtalk-p4-release-readiness redacts spaced client secret assignments in top-level errors', () => {
+  const result = runScript([
+    '--DINGTALK_CLIENT_SECRET = abcdefghijklmnopqrstuvwxyz123456',
+  ])
+
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /DINGTALK_CLIENT_SECRET = <redacted>/)
+  assert.doesNotMatch(result.stderr, /abcdefghijklmnopqrstuvwxyz123456/)
+})
+
 test('dingtalk-p4-release-readiness passes with complete env and passing regression', () => {
   const tmpDir = makeTmpDir()
   const envFile = path.join(tmpDir, 'dingtalk-p4.env')
