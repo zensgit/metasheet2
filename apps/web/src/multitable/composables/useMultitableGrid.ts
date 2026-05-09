@@ -592,6 +592,36 @@ export function useMultitableGrid(opts: {
     }
   }
 
+  async function bulkPatch(args: {
+    fieldId: string
+    value: unknown
+    recordIds: string[]
+  }): Promise<{ updated: string[]; failed: Array<{ recordId: string; reason: string }> }> {
+    const changes = args.recordIds
+      .map((recordId) => {
+        const row = rows.value.find((r) => r.id === recordId)
+        if (!row) return null
+        return {
+          recordId,
+          fieldId: args.fieldId,
+          value: args.value,
+          expectedVersion: row.version,
+        }
+      })
+      .filter((change): change is { recordId: string; fieldId: string; value: unknown; expectedVersion: number } => change !== null)
+
+    if (changes.length === 0) return { updated: [], failed: [] }
+
+    const result = await client.patchRecords({
+      sheetId: opts.sheetId.value || undefined,
+      viewId: opts.viewId.value || undefined,
+      changes,
+    })
+    applyPatchResult(result)
+    const updated = (result.updated ?? []).map((u) => u.recordId)
+    return { updated, failed: [] }
+  }
+
   function applyPatchResult(result?: PatchResult) {
     if (!result) return
     for (const update of result.updated ?? []) {
@@ -806,7 +836,7 @@ export function useMultitableGrid(opts: {
     addSortRule, removeSortRule,
     addFilterRule, updateFilterRule, removeFilterRule, clearFilters,
     applySortFilter,
-    createRecord, deleteRecord, patchCell,
+    createRecord, deleteRecord, patchCell, bulkPatch,
     mergeRemoteRecord, applyRemoteRecordPatch, removeRemoteRecord,
     undo, redo, clearEditHistory, dismissConflict, retryConflict,
     setColumnWidth, setGroupField,

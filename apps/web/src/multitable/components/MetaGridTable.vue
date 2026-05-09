@@ -2,6 +2,8 @@
   <div class="meta-grid" :class="[rowDensity ? `meta-grid--${rowDensity}` : '']" tabindex="0" role="grid" aria-label="Data grid" @keydown="onKeydown">
     <div v-if="enableMultiSelect && selectedIds.size > 0" class="meta-grid__bulk-bar">
       <span class="meta-grid__bulk-count">{{ selectedIds.size }} selected</span>
+      <button v-if="canBulkEdit" class="meta-grid__bulk-btn" aria-label="Set field on selected records" @click="onBulkEdit('set')">Set field</button>
+      <button v-if="canBulkEdit" class="meta-grid__bulk-btn" aria-label="Clear field on selected records" @click="onBulkEdit('clear')">Clear field</button>
       <button v-if="canDelete" class="meta-grid__bulk-btn meta-grid__bulk-btn--danger" aria-label="Delete selected records" @click="onBulkDelete">Delete selected</button>
       <button class="meta-grid__bulk-btn" aria-label="Clear selection" @click="selectedIds = new Set(); emit('selection-change', [])">Clear</button>
     </div>
@@ -284,6 +286,7 @@ const props = defineProps<{
   selectedRecordId?: string | null
   canEdit: boolean
   canDelete?: boolean
+  canBulkEdit?: boolean
   rowActionOverrides?: Record<string, MetaRowActions>
   fieldReadOnlyIds?: string[]
   columnWidths?: Record<string, number>
@@ -311,6 +314,7 @@ const emit = defineEmits<{
   (e: 'resize-column', fieldId: string, width: number): void
   (e: 'selection-change', recordIds: string[]): void
   (e: 'bulk-delete', recordIds: string[]): void
+  (e: 'bulk-edit', payload: { mode: 'set' | 'clear'; recordIds: string[] }): void
   (e: 'reorder-field', fromFieldId: string, toFieldId: string): void
 }>()
 
@@ -410,6 +414,10 @@ function toggleSelectRow(recordId: string) {
 
 function onBulkDelete() {
   if (selectedIds.value.size > 0) emit('bulk-delete', [...selectedIds.value])
+}
+
+function onBulkEdit(mode: 'set' | 'clear') {
+  if (selectedIds.value.size > 0) emit('bulk-edit', { mode, recordIds: [...selectedIds.value] })
 }
 
 watch(() => props.rows, () => { selectedIds.value = new Set() })
