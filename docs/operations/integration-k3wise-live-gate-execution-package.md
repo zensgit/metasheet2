@@ -171,8 +171,8 @@ next step only after PASS.
 | Step | Name | When | Command / Entry | PASS | FAIL |
 |---|---|---|---|---|---|
 | **C0** | Mock chain smoke (no GATE needed) | Anytime | `pnpm verify:integration-k3wise:poc` | 37 unit tests + 9-step end-to-end mock chain all green (mock K3 WebAPI + mock SQL + Save-only upsert + safety guard rejects core-table INSERT + evidence compiler PASS) | Any sub-step fails |
-| **C1** | On-prem preflight (mock mode) | After deploy, before GATE arrives | `node scripts/ops/integration-k3wise-onprem-preflight.mjs --mock --out-dir <art>` | exit 0; `decision=PASS`; `pg.tcp-reachable` / `pg.migrations-aligned` / `fixtures.k3wise-mock` all `pass`; all K3 / gate checks `skip` | exit 1 (mandatory env defect) |
-| **C2** | On-prem preflight `--live` | Once GATE answers received | `node scripts/ops/integration-k3wise-onprem-preflight.mjs --live --gate-file <path> --out-dir <art>` with `K3_API_URL` / `K3_ACCT_ID` / `K3_USERNAME` / `K3_PASSWORD` injected | exit 0; `k3.live-config` `pass` (4 fields present); `k3.live-reachable` `pass` (TCP to K3 host:port); `gate.file-present` `pass` | exit 1 (mandatory) or exit 2 (`GATE_BLOCKED` — customer field still missing) |
+| **C1** | On-prem preflight (mock mode) | After deploy, before GATE arrives | `node scripts/ops/integration-k3wise-onprem-preflight.mjs --mock --out-dir <art>` (see [C1 prerequisites](#c1-prerequisites) below) | exit 0; `decision=PASS`; `pg.tcp-reachable` / `pg.migrations-aligned` / `fixtures.k3wise-mock` all `pass`; all K3 / gate checks `skip` | exit 1 (mandatory env defect — `env.database-url` and/or `env.jwt-secret` not satisfied; see [C1 prerequisites](#c1-prerequisites)) |
+| **C2** | On-prem preflight `--live` | Once GATE answers received | `node scripts/ops/integration-k3wise-onprem-preflight.mjs --live --gate-file <path> --out-dir <art>` with `K3_API_URL` / `K3_ACCT_ID` / `K3_USERNAME` / `K3_PASSWORD` injected | exit 0; `k3.live-config` `pass` (4 fields present); `k3.live-reachable` `pass` (TCP to K3 host:port); `gate.file-present` `pass` | exit 1 (mandatory) or exit 2 (`GATE_BLOCKED` — customer field still missing). For per-error-code fix recipes (`ECONNREFUSED` / `ENOTFOUND` / `EHOSTUNREACH` / `ETIMEDOUT`) on `pg.tcp-reachable` and `k3.live-reachable`, see `docs/operations/k3-poc-onprem-preflight-runbook.md` § "Per-check failure recipes". |
 | **C3** | Build live PoC packet + GATE contract validation | After C2 PASS | `node scripts/ops/integration-k3wise-live-poc-preflight.mjs --input <gate.json> --out-dir <packet-dir>` | `integration-k3wise-live-poc-packet.{json,md}` written; `safety.saveOnly=true / autoSubmit=false / autoAudit=false`; checklist contains `GATE-01 / CONN-01 / CONN-02 / DRY-01 / SAVE-01 / FAIL-01 / ROLLBACK-01` (plus `BOM-01` when BOM enabled) | `normalizeGate` throws (error includes `field` path of the offending key) |
 | **C4** | testConnection — PLM + K3 (control plane) | After C3 | metasheet console: register both external systems → testConnection | both return `ok=true` | either non-ok (GATE field wrong / customer network / credentials) |
 | **C5** | Material dry-run, 1–3 rows | After C4 PASS | metasheet console: trigger dry-run pipeline | dry-run report shows mappings applied correctly, target record preview matches | mapping incomplete or validation rule mismatch |
@@ -181,6 +181,35 @@ next step only after PASS.
 | **C8** | Dead-letter replay | After C6 PASS | introduce a controlled failure → enters dead-letter → fix → replay | replayed run writes successfully | replay still fails |
 | **C9** | Rollback rehearsal | After C8 PASS | customer K3 admin executes per `rollback.owner` / `rollback.strategy` | test rows identifiable (e.g., `TEST-` prefix) and removed/disabled per strategy | owner unreachable or strategy not exercised |
 | **C10** | **Evidence compiler signoff** | After C9 PASS | `node scripts/ops/integration-k3wise-live-poc-evidence.mjs --packet <packet.json> --evidence <evidence.json>` | `decision=PASS` and `issues=[]` | `decision=FAIL` if any of `SAVE_ONLY_VIOLATED` / `SAVE_ONLY_ROW_COUNT` / `SAVE_ONLY_RUN_ID_REQUIRED` / `K3_RECORD_REQUIRED` / `BOM_PRODUCT_SCOPE_REQUIRED` / `BOM_RUN_ID_REQUIRED` / `BOM_ROW_COUNT` / `BOM_K3_RECORD_REQUIRED` / `BOM_K3_RESPONSE_REQUIRED` / `LEGACY_BOM_PRODUCT_ID_USED` fires; `decision=PARTIAL` when non-fail issues remain (typically checklist gaps) |
+
+### C1 prerequisites
+
+`integration-k3wise-onprem-preflight.mjs` always validates `DATABASE_URL`
+and `JWT_SECRET` first. The C1 PASS criterion above assumes both are
+already present in the operator's shell. Two operating modes:
+
+1. **Real deploy host** (the canonical path). `DATABASE_URL` and
+   `JWT_SECRET` must already be exported. For a Docker-deployed
+   metasheet on-prem box, the bridge-IP recipe in
+   `docs/operations/k3-poc-onprem-preflight-runbook.md` § "Running
+   against a Docker-deployed metasheet" shows how to inherit them
+   safely from the running backend container without printing secret
+   values.
+2. **Workstation rehearsal** (no real deploy host yet). Pass
+   `--skip-tcp --skip-migrations` to bypass the Postgres TCP probe and
+   migration alignment query, and supply synthetic `DATABASE_URL` (any
+   well-formed `postgres://` string) and `JWT_SECRET` (any 32+ char
+   string). Example:
+   ```bash
+   DATABASE_URL='postgres://rehearsal:<fill-outside-git>@127.0.0.1:65432/rehearsal' \
+   JWT_SECRET="$(printf 'r%.0s' {1..40})" \
+   node scripts/ops/integration-k3wise-onprem-preflight.mjs --mock \
+     --skip-tcp --skip-migrations \
+     --out-dir <art>
+   ```
+
+Same prerequisites apply to C2 (which also runs `env.database-url` /
+`env.jwt-secret` first) plus C2's own K3 env requirements.
 
 ---
 
@@ -243,6 +272,29 @@ All four counts must be `0`. Anything else means the artifact has either been
 post-edited or the sanitizer regressed — do not share. The full rationale
 for these checks lives in `docs/operations/k3-poc-onprem-preflight-runbook.md`
 under "Sharing the artifact safely".
+
+### Shell-pipeline exit-code hygiene
+
+When wrapping any preflight script in a shell pipeline (`node … | head -n …`,
+`| grep …`, `| tee …`), set `set -o pipefail` first or capture `$?` before
+the pipe. Without `pipefail`, the pipeline's exit status is `head` / `grep`'s
+(usually `0`) rather than the script's, so an evidence-capture wrapper
+silently records `exit: 0` even when the preflight returned `exit: 1` or
+`exit: 2`. This is a common false-PASS source in custom evidence harnesses.
+
+```bash
+set -o pipefail
+node scripts/ops/integration-k3wise-onprem-preflight.mjs --mock --out-dir <art> | tee preflight.log
+echo "exit=$?"   # now reports the script's actual exit code
+```
+
+Or, equivalently:
+
+```bash
+node scripts/ops/integration-k3wise-onprem-preflight.mjs --mock --out-dir <art>
+EXIT=$?
+# ... pipe / tee / head freely afterward
+```
 
 ---
 
