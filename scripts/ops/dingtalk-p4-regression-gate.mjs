@@ -60,6 +60,11 @@ const OPS_CHECKS = [
     command: ['node', '--test', 'scripts/ops/dingtalk-p4-final-docs.test.mjs'],
   },
   {
+    id: 'ops-mobile-signoff',
+    label: 'DingTalk public form mobile signoff tooling',
+    command: ['node', '--test', 'scripts/ops/dingtalk-public-form-mobile-signoff.test.mjs'],
+  },
+  {
     id: 'ops-diff-check',
     label: 'Git whitespace diff check',
     command: ['git', 'diff', '--check'],
@@ -177,6 +182,20 @@ const PRODUCT_CHECKS = [
       'vitest',
       'run',
       'tests/multitable-form-share-manager.spec.ts',
+      '--watch=false',
+    ],
+  },
+  {
+    id: 'web-public-multitable-form',
+    label: 'Web public multitable form DingTalk runtime UI',
+    command: [
+      'pnpm',
+      '--filter',
+      '@metasheet/web',
+      'exec',
+      'vitest',
+      'run',
+      'tests/public-multitable-form.spec.ts',
       '--watch=false',
     ],
   },

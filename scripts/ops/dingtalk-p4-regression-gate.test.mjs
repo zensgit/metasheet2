@@ -45,10 +45,11 @@ test('dingtalk-p4-regression-gate writes an ops plan without executing checks', 
     assert.equal(summary.profile, 'ops')
     assert.equal(summary.planOnly, true)
     assert.equal(summary.overallStatus, 'plan_only')
-    assert.equal(summary.totals.total, 10)
-    assert.equal(summary.totals.skipped, 10)
+    assert.equal(summary.totals.total, 11)
+    assert.equal(summary.totals.skipped, 11)
     assert.ok(summary.checks.every((check) => check.status === 'skipped'))
     assert.ok(summary.checks.some((check) => check.command.includes('dingtalk-p4-smoke-session.test.mjs')))
+    assert.ok(summary.checks.some((check) => check.command.includes('dingtalk-public-form-mobile-signoff.test.mjs')))
 
     const markdown = readFileSync(markdownPath, 'utf8')
     assert.match(markdown, /DingTalk P4 Regression Gate/)
@@ -74,12 +75,36 @@ test('dingtalk-p4-regression-gate product plan covers org destination catalog ch
     assert.equal(summary.profile, 'product')
     assert.equal(summary.planOnly, true)
     assert.equal(summary.overallStatus, 'plan_only')
-    assert.equal(summary.totals.total, 13)
+    assert.equal(summary.totals.total, 14)
     assert.ok(summary.checks.every((check) => check.status === 'skipped'))
     assert.ok(summary.checks.some((check) => check.command.includes('dingtalk-group-destination-routes.api.test.ts')))
     assert.ok(summary.checks.some((check) => check.command.includes('automation-v1.test.ts')))
+    assert.ok(summary.checks.some((check) => check.command.includes('public-multitable-form.spec.ts')))
     assert.ok(summary.checks.some((check) => check.command.includes('multitable-automation-manager.spec.ts')))
     assert.ok(summary.checks.some((check) => check.command.includes('multitable-automation-rule-editor.spec.ts')))
+  } finally {
+    rmSync(outputDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-regression-gate all plan includes public form runtime and mobile signoff coverage', () => {
+  const outputDir = makeTmpDir()
+
+  try {
+    const result = runScript([
+      '--profile', 'all',
+      '--plan-only',
+      '--output-dir', outputDir,
+    ])
+
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    const summary = readJson(path.join(outputDir, 'summary.json'))
+    assert.equal(summary.profile, 'all')
+    assert.equal(summary.planOnly, true)
+    assert.equal(summary.overallStatus, 'plan_only')
+    assert.equal(summary.totals.total, 25)
+    assert.ok(summary.checks.some((check) => check.id === 'ops-mobile-signoff'))
+    assert.ok(summary.checks.some((check) => check.id === 'web-public-multitable-form'))
   } finally {
     rmSync(outputDir, { recursive: true, force: true })
   }
