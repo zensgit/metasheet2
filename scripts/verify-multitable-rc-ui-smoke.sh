@@ -63,7 +63,21 @@ echo "[rc-ui-smoke] OUTPUT_DIR=$OUTPUT_DIR"
 # below will surface a usable error if the browser is missing.
 pnpm --filter @metasheet/core-backend exec playwright install chromium >/dev/null 2>&1 || true
 
+# AUTH_TOKEN is admin-capable. Playwright `--reporter=list` plus any
+# trace/console output can echo request headers and the raw token, so
+# redact `Authorization: Bearer ...`, bare `Bearer ...`, and the literal
+# AUTH_TOKEN value BEFORE any line reaches the terminal or CI logs.
+# Stderr is merged with stdout for the sign-off (operators want a single
+# pass/fail stream); PIPESTATUS[0] preserves Playwright's exit code so
+# the always-zero sed cannot mask a real failure.
+# JWT base64url uses [A-Za-z0-9_-] joined by `.`; only `.` is regex-special.
+# Bash 3.2-compatible parameter expansion. If AUTH_TOKEN ever takes a non-JWT
+# shape with other regex specials, the `Bearer`/`Authorization:` patterns
+# above remain the primary defense — this is defense-in-depth.
+TOKEN_ESC=${AUTH_TOKEN//./\\.}
+
 EXIT=0
+set +e
 FE_BASE_URL="$FE_BASE_URL" \
 API_BASE_URL="$API_BASE_URL" \
 AUTH_TOKEN="$AUTH_TOKEN" \
@@ -72,7 +86,12 @@ pnpm --filter @metasheet/core-backend exec playwright test \
   multitable-gantt-smoke.spec.ts \
   --workers=1 \
   --reporter=list \
-  || EXIT=$?
+  2>&1 | sed -E \
+    -e 's/([Aa]uthorization:[[:space:]]+[Bb]earer[[:space:]]+)[^[:space:]]+/\1[REDACTED]/g' \
+    -e 's/([Bb]earer[[:space:]]+)[^[:space:]]+/\1[REDACTED]/g' \
+    -e "s,${TOKEN_ESC},[REDACTED],g"
+EXIT=${PIPESTATUS[0]}
+set -e
 
 # Copy Playwright artifacts into OUTPUT_DIR for archival. test-results
 # only exists on failure under the default config; copy when present.

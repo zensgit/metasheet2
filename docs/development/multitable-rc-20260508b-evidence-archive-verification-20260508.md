@@ -3,6 +3,52 @@
 > Date: 2026-05-08
 > Companion to: `multitable-rc-20260508b-evidence-archive-development-20260508.md`
 
+## Token redaction (added in revision after Codex review)
+
+`AUTH_TOKEN` is admin-capable; Playwright `--reporter=list` plus any
+trace/console output can echo request headers and the raw token. The
+wrapper now sed-redacts before any line reaches stdout/stderr:
+
+- `Authorization: Bearer <token>` (case-insensitive on Authorization / Bearer) → `Authorization: Bearer [REDACTED]`
+- bare `Bearer <token>` → `Bearer [REDACTED]`
+- literal `AUTH_TOKEN` value (defense in depth, for trace dumps that print the token without a `Bearer` prefix) → `[REDACTED]`
+
+Streams: stderr is merged into stdout via `2>&1` for redaction (sign-off
+output reads as a single pass/fail stream). Exit code is preserved via
+`set +e` + `${PIPESTATUS[0]}` so the always-zero `sed` cannot mask a
+real Playwright failure.
+
+### End-to-end smoke (stubbed `pnpm` exits 7 + emits all three leak shapes)
+
+```
+$ TMP=$(mktemp -d); cat > "$TMP/pnpm" <<'EOF'
+#!/usr/bin/env bash
+echo "> Authorization: Bearer eyJ.STUB.HEAD"
+echo "> stray Bearer eyJ.STUB.HEAD body"
+echo "> raw eyJ.STUB.HEAD literal"
+exit 7
+EOF
+chmod +x "$TMP/pnpm"
+PATH="$TMP:$PATH" FE_BASE_URL=http://x.example API_BASE_URL=http://x.example \
+  AUTH_TOKEN='eyJ.STUB.HEAD' bash scripts/verify-multitable-rc-ui-smoke.sh
+```
+
+Captured output (after redaction):
+
+```
+[rc-ui-smoke] FE_BASE_URL=http://x.example
+[rc-ui-smoke] API_BASE_URL=http://x.example
+[rc-ui-smoke] OUTPUT_DIR=…
+> Authorization: Bearer [REDACTED]
+> stray Bearer [REDACTED] body
+> raw [REDACTED] literal
+[rc-ui-smoke] FAIL — exit 7; see … for trace artifacts
+```
+
+`grep -F 'eyJ.STUB.HEAD'` against the captured output: **no match** (token
+fully redacted). Wrapper's exit code: **7** (preserved from the stub
+`pnpm`, not masked by `sed` returning 0).
+
 ## Wrapper syntax check
 
 ```bash
