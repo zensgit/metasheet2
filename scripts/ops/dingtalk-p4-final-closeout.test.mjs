@@ -18,6 +18,17 @@ const requiredCheckIds = [
   'delivery-history-group-person',
   'no-email-user-create-bind',
 ]
+const mobileSignoffRequiredCheckIds = [
+  'public-anonymous-submit',
+  'dingtalk-unbound-rejected',
+  'dingtalk-bound-submit',
+  'selected-unbound-rejected',
+  'selected-bound-submit',
+  'selected-unlisted-bound-rejected',
+  'granted-bound-without-grant-rejected',
+  'granted-bound-with-grant-submit',
+  'password-change-bypass-observed',
+]
 const manualClientIds = new Set([
   'send-group-message-form-link',
   'authorized-user-submit',
@@ -97,6 +108,26 @@ function writeReadyForFinalizeSession(sessionDir, overrides = {}) {
     ],
     pendingChecks: [],
     ...overrides.sessionSummary,
+  })
+}
+
+function writeMobileSignoffOutput(signoffDir, overrides = {}) {
+  mkdirSync(signoffDir, { recursive: true })
+  writeJson(path.join(signoffDir, 'summary.json'), {
+    tool: 'dingtalk-public-form-mobile-signoff',
+    generatedAt: '2026-04-29T00:00:00.000Z',
+    strict: true,
+    status: 'pass',
+    errors: [],
+    requiredChecks: mobileSignoffRequiredCheckIds.map((id) => ({ id, status: 'pass' })),
+    ...overrides.summary,
+  })
+  writeFileSync(path.join(signoffDir, 'summary.md'), '# Mobile signoff\n\nStatus: pass\n', 'utf8')
+  writeJson(path.join(signoffDir, 'mobile-signoff.redacted.json'), {
+    tool: 'dingtalk-public-form-mobile-signoff',
+    redacted: true,
+    checks: mobileSignoffRequiredCheckIds.map((id) => ({ id, status: 'pass' })),
+    ...overrides.redacted,
   })
 }
 
@@ -198,6 +229,49 @@ test('dingtalk-p4-final-closeout can stop after release-ready status when docs a
     assert.equal(summary.outputs.verificationMd, '')
     assert.equal(existsSync(path.join(docsDir, 'dingtalk-final-remote-smoke-development-20260423.md')), false)
     assert.equal(existsSync(path.join(docsDir, 'dingtalk-final-remote-smoke-verification-20260423.md')), false)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-final-closeout forwards strict mobile signoff into final handoff', () => {
+  const tmpDir = makeTmpDir()
+  const sessionDir = path.join(tmpDir, '142-session')
+  const mobileSignoffDir = path.join(tmpDir, 'mobile-compiled')
+  const packetDir = path.join(tmpDir, 'packet')
+  const docsDir = path.join(tmpDir, 'docs')
+
+  try {
+    writeReadyForFinalizeSession(sessionDir)
+    writeMobileSignoffOutput(mobileSignoffDir)
+
+    const result = runScript([
+      '--session-dir',
+      sessionDir,
+      '--packet-output-dir',
+      packetDir,
+      '--include-mobile-signoff',
+      mobileSignoffDir,
+      '--require-mobile-signoff-pass',
+      '--docs-output-dir',
+      docsDir,
+      '--date',
+      '20260423',
+      '--skip-docs',
+    ])
+
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    const handoffSummary = JSON.parse(readFileSync(path.join(packetDir, 'handoff-summary.json'), 'utf8'))
+    assert.equal(handoffSummary.status, 'pass')
+    assert.equal(handoffSummary.mobileSignoff.required, true)
+    assert.equal(handoffSummary.mobileSignoff.includedCount, 1)
+    assert.equal(handoffSummary.publishCheck.includedMobileSignoffCount, 1)
+    const closeoutSummary = JSON.parse(readFileSync(path.join(packetDir, 'closeout-summary.json'), 'utf8'))
+    assert.equal(closeoutSummary.status, 'pass')
+    assert.equal(closeoutSummary.final.mobileSignoffRequired, true)
+    assert.equal(closeoutSummary.final.mobileSignoffCount, 1)
+    assert.match(closeoutSummary.steps[1].command, /--require-mobile-signoff-pass/)
+    assert.match(readFileSync(path.join(packetDir, 'closeout-summary.md'), 'utf8'), /Mobile signoff gate: \*\*required\*\*/)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
