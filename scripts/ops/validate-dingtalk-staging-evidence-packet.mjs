@@ -60,6 +60,14 @@ const SECRET_PATTERNS = [
     regex: /\b(?:DINGTALK_CLIENT_SECRET|DINGTALK_STATE_SECRET|client_secret)\s*=\s*(?!<redacted>|replace-me|\$|\s|$)[^\s&"'`<>]{8,}/gi,
   },
   {
+    name: 'auth_token_assignment',
+    regex: /\b(?:DINGTALK_P4_AUTH_TOKEN|ADMIN_TOKEN|AUTH_TOKEN)\s*(?:=|:)\s*["']?(?!<redacted>|redacted|replace-me|changeme|example|\$|\{|<|\s|$)[A-Za-z0-9._~+/=-]{16,}/gi,
+  },
+  {
+    name: 'password_assignment',
+    regex: /\b(?:temporary\s+password|temp(?:orary)?_?password|password)\s*(?:=|:)\s*["']?(?!<redacted>|redacted|replace-me|changeme|example|\$|\{|<|\s|$)[^\s"'`<>]{8,}/gi,
+  },
+  {
     name: 'public_form_token',
     regex: /\bpublicToken=(?!<redacted>|\$)[A-Za-z0-9._~+/=-]{12,}/gi,
   },
