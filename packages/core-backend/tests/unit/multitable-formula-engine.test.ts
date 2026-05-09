@@ -60,6 +60,53 @@ describe('FormulaEngine - new functions', () => {
       const result = await engine.calculate('=CONCAT("val",1)', makeContext())
       expect(result).toBe('val1')
     })
+
+    it('decodes escaped quoted string literals', async () => {
+      const result = await engine.calculate('=CONCAT("A \\"quoted\\" value","\\\\path")', makeContext())
+      expect(result).toBe('A "quoted" value\\path')
+    })
+
+    it('returns #ERROR! for malformed quoted string literals', async () => {
+      const result = await engine.calculate('=CONCAT("bad \\\\","suffix")', makeContext())
+      expect(result).toBe('#ERROR!')
+    })
+
+    it('does not split operators inside quoted string literals', async () => {
+      const plusResult = await engine.calculate('="A+B"', makeContext())
+      const equalsResult = await engine.calculate('="A=B"', makeContext())
+      const comparisonResult = await engine.calculate('="A=B"="A=B"', makeContext())
+
+      expect(plusResult).toBe('A+B')
+      expect(equalsResult).toBe('A=B')
+      expect(comparisonResult).toBe(true)
+    })
+
+    it('does not split operators inside nested function arguments', async () => {
+      const result = await engine.calculate('=IF("a>b"="a>b","ok","bad")', makeContext())
+      expect(result).toBe('ok')
+    })
+  })
+
+  describe('parenthesized expressions', () => {
+    it('evaluates arithmetic groups inside formulas', async () => {
+      const result = await engine.calculate('=(1+2)*3', makeContext())
+      expect(result).toBe(9)
+    })
+
+    it('evaluates nested arithmetic groups', async () => {
+      const result = await engine.calculate('=((1+2)*(4-1))', makeContext())
+      expect(result).toBe(9)
+    })
+
+    it('evaluates parenthesized function arguments', async () => {
+      const result = await engine.calculate('=SUM((1+2),3)', makeContext())
+      expect(result).toBe(6)
+    })
+
+    it('does not strip partial leading parentheses', async () => {
+      const result = await engine.calculate('=(1+2)+(3+4)', makeContext())
+      expect(result).toBe(10)
+    })
   })
 
   describe('DATEDIF', () => {
@@ -115,6 +162,7 @@ describe('MultitableFormulaEngine', () => {
 
   const sampleFields: MultitableField[] = [
     { id: 'fld_price', name: 'Price', type: 'number' },
+    { id: 'fld_fee', name: 'Fee', type: 'number' },
     { id: 'fld_qty', name: 'Quantity', type: 'number' },
     { id: 'fld_total', name: 'Total', type: 'formula', property: { expression: '={fld_price}*{fld_qty}' } },
     { id: 'fld_name', name: 'Name', type: 'string' },
@@ -151,6 +199,33 @@ describe('MultitableFormulaEngine', () => {
       expect(result).toBe(50)
     })
 
+    it('evaluates parenthesized field reference groups', async () => {
+      const result = await mtEngine.evaluateField(
+        '=({fld_price}+{fld_fee})*{fld_qty}',
+        { fld_price: 10, fld_fee: 2, fld_qty: 5 },
+        sampleFields,
+      )
+      expect(result).toBe(60)
+    })
+
+    it('evaluates unary signs for grouped field reference expressions', async () => {
+      const result = await mtEngine.evaluateField(
+        '=-({fld_price}+{fld_fee})*{fld_qty}',
+        { fld_price: 10, fld_fee: 2, fld_qty: 5 },
+        sampleFields,
+      )
+      expect(result).toBe(-60)
+    })
+
+    it('evaluates unary signs for function results', async () => {
+      const result = await mtEngine.evaluateField(
+        '=-SUM({fld_price},{fld_fee})',
+        { fld_price: 10, fld_fee: 2 },
+        sampleFields,
+      )
+      expect(result).toBe(-12)
+    })
+
     it('handles string field references', async () => {
       const result = await mtEngine.evaluateField(
         '=CONCAT({fld_name}," total")',
@@ -158,6 +233,42 @@ describe('MultitableFormulaEngine', () => {
         sampleFields,
       )
       expect(result).toBe('Widget total')
+    })
+
+    it('handles lowercase function names after resolving field references', async () => {
+      const result = await mtEngine.evaluateField(
+        '=concat({fld_name}," x")',
+        { fld_name: 'Widget' },
+        sampleFields,
+      )
+      expect(result).toBe('Widget x')
+    })
+
+    it('escapes quoted string field references before evaluation', async () => {
+      const result = await mtEngine.evaluateField(
+        '=CONCAT({fld_name}," shipped")',
+        { fld_name: 'Widget "Pro"' },
+        sampleFields,
+      )
+      expect(result).toBe('Widget "Pro" shipped')
+    })
+
+    it('escapes backslash and newline string field references', async () => {
+      const result = await mtEngine.evaluateField(
+        '=CONCAT({fld_name}," done")',
+        { fld_name: 'C:\\temp\nline2' },
+        sampleFields,
+      )
+      expect(result).toBe('C:\\temp\nline2 done')
+    })
+
+    it('does not split operators inside string field references', async () => {
+      const result = await mtEngine.evaluateField(
+        '={fld_name}="A+B=C"',
+        { fld_name: 'A+B=C' },
+        sampleFields,
+      )
+      expect(result).toBe(true)
     })
   })
 

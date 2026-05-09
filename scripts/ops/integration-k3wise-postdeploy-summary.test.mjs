@@ -69,6 +69,66 @@ test('renders compact pass summary from evidence JSON', async () => {
   }
 })
 
+test('renders blocked internal signoff for public-only smoke evidence', async () => {
+  const outDir = makeTmpDir()
+  const evidencePath = path.join(outDir, 'evidence.json')
+  try {
+    writeFileSync(evidencePath, `${JSON.stringify({
+      ok: true,
+      baseUrl: 'http://127.0.0.1:8081',
+      authenticated: false,
+      signoff: {
+        internalTrial: 'blocked',
+        reason: 'authenticated checks did not run',
+      },
+      summary: { pass: 2, skipped: 1, fail: 0 },
+      checks: [
+        { id: 'api-health', status: 'pass' },
+        { id: 'authenticated-integration-contract', status: 'skipped' },
+      ],
+    })}\n`)
+
+    const result = await runScript(['--input', evidencePath, '--require-auth-signoff'])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /Internal trial signoff: \*\*BLOCKED\*\*/)
+    assert.match(result.stdout, /Signoff reason: authenticated checks did not run/)
+    assert.match(result.stdout, /Status: \*\*PASS\*\*/)
+  } finally {
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('renders passing internal signoff for authenticated smoke evidence', async () => {
+  const outDir = makeTmpDir()
+  const evidencePath = path.join(outDir, 'evidence.json')
+  try {
+    writeFileSync(evidencePath, `${JSON.stringify({
+      ok: true,
+      baseUrl: 'http://127.0.0.1:8081',
+      authenticated: true,
+      signoff: {
+        internalTrial: 'pass',
+        reason: 'authenticated smoke passed',
+      },
+      summary: { pass: 8, skipped: 0, fail: 0 },
+      checks: [
+        { id: 'api-health', status: 'pass' },
+        { id: 'auth-me', status: 'pass' },
+      ],
+    })}\n`)
+
+    const result = await runScript(['--input', evidencePath, '--require-auth-signoff'])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /Internal trial signoff: \*\*PASS\*\*/)
+    assert.match(result.stdout, /Signoff reason: authenticated smoke passed/)
+    assert.match(result.stdout, /Authenticated checks: `yes`/)
+  } finally {
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
 test('renders fail summary without failing the summary renderer', async () => {
   const outDir = makeTmpDir()
   const evidencePath = path.join(outDir, 'evidence.json')
@@ -147,6 +207,53 @@ test('renders staging missing field details for failed descriptor checks', async
   }
 })
 
+test('escapes markdown-breaking values in postdeploy summary output', async () => {
+  const outDir = makeTmpDir()
+  const evidencePath = path.join(outDir, 'evidence.json')
+  try {
+    writeFileSync(evidencePath, `${JSON.stringify({
+      ok: false,
+      baseUrl: 'http://127.0.0.1:8081/path`with`ticks\nand-newline',
+      authenticated: true,
+      signoff: {
+        internalTrial: 'blocked',
+        reason: 'failed | reason\nsecond line',
+      },
+      summary: { pass: 1, skipped: 0, fail: 1 },
+      checks: [
+        {
+          id: 'integration`route\ncontract',
+          status: 'fail',
+          details: {
+            missingRoutes: ['POST /api/integration/pipelines/:id/run`bad`'],
+            invalidFields: {
+              standard_materials: {
+                status: [
+                  'expected | select\nbut got string',
+                ],
+              },
+            },
+          },
+        },
+        { id: 'nonstandard-status', status: 'fail`state' },
+      ],
+    })}\n`)
+
+    const result = await runScript(['--input', evidencePath, '--require-auth-signoff'])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /Signoff reason: failed \| reason second line/)
+    assert.doesNotMatch(result.stdout, /reason\nsecond line/)
+    assert.match(result.stdout, /Base URL: ``http:\/\/127\.0\.0\.1:8081\/path`with`ticks and-newline``/)
+    assert.match(result.stdout, /``integration`route contract``: `fail`/)
+    assert.match(result.stdout, /`nonstandard-status`: ``fail`state``/)
+    assert.match(result.stdout, /`` POST \/api\/integration\/pipelines\/:id\/run`bad` ``/)
+    assert.match(result.stdout, /`expected \| select but got string`/)
+  } finally {
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
 test('missing evidence can be rendered as not run for always-run workflow summaries', async () => {
   const outDir = makeTmpDir()
   const evidencePath = path.join(outDir, 'missing.json')
@@ -156,6 +263,21 @@ test('missing evidence can be rendered as not run for always-run workflow summar
     assert.equal(result.status, 0, result.stderr)
     assert.match(result.stdout, /Status: \*\*NOT RUN\*\*/)
     assert.match(result.stdout, /evidence file missing/)
+  } finally {
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('missing evidence can render blocked signoff for always-run workflow summaries', async () => {
+  const outDir = makeTmpDir()
+  const evidencePath = path.join(outDir, 'missing.json')
+  try {
+    const result = await runScript(['--input', evidencePath, '--require-auth-signoff', '--missing-ok'])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /Internal trial signoff: \*\*BLOCKED\*\*/)
+    assert.match(result.stdout, /Signoff reason: evidence file missing; authenticated smoke did not run/)
+    assert.match(result.stdout, /Status: \*\*NOT RUN\*\*/)
   } finally {
     rmSync(outDir, { recursive: true, force: true })
   }

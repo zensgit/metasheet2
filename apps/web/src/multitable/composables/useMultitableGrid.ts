@@ -102,6 +102,22 @@ export const FILTER_OPERATORS_BY_TYPE: Record<string, Array<{ value: string; lab
     { value: 'isEmpty', label: 'is empty' },
     { value: 'isNotEmpty', label: 'is not empty' },
   ],
+  barcode: [
+    { value: 'is', label: 'is' },
+    { value: 'isNot', label: 'is not' },
+    { value: 'contains', label: 'contains' },
+    { value: 'doesNotContain', label: 'does not contain' },
+    { value: 'isEmpty', label: 'is empty' },
+    { value: 'isNotEmpty', label: 'is not empty' },
+  ],
+  location: [
+    { value: 'is', label: 'is' },
+    { value: 'isNot', label: 'is not' },
+    { value: 'contains', label: 'contains' },
+    { value: 'doesNotContain', label: 'does not contain' },
+    { value: 'isEmpty', label: 'is empty' },
+    { value: 'isNotEmpty', label: 'is not empty' },
+  ],
   number: [
     { value: 'is', label: '=' },
     { value: 'isNot', label: '\u2260' },
@@ -129,6 +145,14 @@ export const FILTER_OPERATORS_BY_TYPE: Record<string, Array<{ value: string; lab
     { value: 'isNotEmpty', label: 'is not empty' },
   ],
   date: [
+    { value: 'is', label: 'is' },
+    { value: 'isNot', label: 'is not' },
+    { value: 'greater', label: 'after' },
+    { value: 'less', label: 'before' },
+    { value: 'isEmpty', label: 'is empty' },
+    { value: 'isNotEmpty', label: 'is not empty' },
+  ],
+  dateTime: [
     { value: 'is', label: 'is' },
     { value: 'isNot', label: 'is not' },
     { value: 'greater', label: 'after' },

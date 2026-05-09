@@ -3,6 +3,7 @@
 ## Status
 
 - Baseline: `origin/main@08f4ff920`
+- Latest RC worktree base used by Phase 3: `origin/main@751cb8439` after clean rebase.
 - Goal: Feishu-parity RC for staging and internal trial.
 - Current phase: RC audit first, then P0 gaps.
 - Rule: every completed item must be marked `[x]` and linked to PR, commit, development MD, and verification MD.
@@ -38,7 +39,7 @@ Do not mark an item done if:
   - Verification MD: `docs/development/multitable-feishu-rc-verification-20260430.md`
   - Verification summary: docs-only PR CI passed and merged.
 - [x] Confirm root worktree dirty state is unrelated to this RC stream.
-  - PR: pending
+  - PR: #1379
   - Merge commit: pending
   - Development MD: `docs/development/multitable-feishu-rc-audit-development-20260430.md`
   - Verification MD: `docs/development/multitable-feishu-rc-audit-verification-20260430.md`
@@ -70,17 +71,96 @@ Do not mark an item done if:
   - Development MD: `docs/development/multitable-feishu-rc-audit-development-20260430.md`
   - Verification MD: `docs/development/multitable-feishu-rc-audit-verification-20260430.md`
   - Verification summary: checklist added at `docs/development/multitable-feishu-staging-smoke-checklist-20260430.md`.
-- [ ] Verify staging deployment target version and document exact commit.
-- [ ] Smoke test basic multitable sheet lifecycle: create base, sheet, view, fields, records.
-- [ ] Smoke test xlsx frontend import/export with a real file.
-- [ ] Smoke test field types: currency, percent, rating, url, email, phone, longText, multiSelect.
-- [ ] Smoke test conditional formatting persistence and reload.
-- [ ] Smoke test formula editor: field token insertion, function insertion, diagnostics.
-- [ ] Smoke test filter builder typed controls and saved view behavior.
-- [ ] Smoke test Gantt view rendering.
-- [ ] Smoke test Hierarchy view rendering and child creation.
-- [ ] Smoke test public form submit path.
-- [ ] Smoke test automation send_email save/execute path.
+- [x] Verify staging deployment target version and document exact commit.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-142-postdeploy-design-20260506.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-142-postdeploy-verification-20260506.md`
+  - Verification summary: GitHub Actions run `25435548148` deployed `9464b628479cdff1769c864de05f5ec5b6bf7d94` to 142 after rerunning a transient GHCR `unknown blob` failure; postdeploy health/API probes passed.
+- [x] Smoke test basic multitable sheet lifecycle: create base, sheet, view, fields, records.
+  - PR: #1415
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-rc-lifecycle-smoke-development-20260507.md`
+  - Verification MD: `docs/development/multitable-rc-lifecycle-smoke-verification-20260507.md`
+  - Verification summary: Playwright RC smoke parses two tests for base -> sheet -> field -> view -> record -> workbench render plus an HTTP `FIELD_READONLY` autoNumber raw-write regression guard; local `tsc --noEmit` and `git diff --check` pass. Live stack execution remains deferred to staging/dev-stack availability.
+- [x] Smoke test xlsx frontend import/export with a real file.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-xlsx-ui-smoke-design-20260506.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-xlsx-ui-smoke-verification-20260506.md`
+  - Verification summary: `AUTH_TOKEN=... API_BASE=http://142.171.239.56:8081 WEB_BASE=http://142.171.239.56:8081 pnpm verify:multitable-pilot:staging` passed `130/130` checks; new `ui.xlsx.import-file` and `ui.xlsx.export-download` checks passed with a real `.xlsx` file and parsed download.
+- [x] Smoke test field types: currency, percent, rating, url, email, phone, longText, multiSelect.
+  - PR: #1379 + #1384
+  - Merge commit: `e6f6547a1` + #1384 pending
+  - Development MD: `docs/development/multitable-feishu-rc-field-types-ui-smoke-design-20260507.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-field-types-ui-smoke-verification-20260507.md`
+  - Verification summary: `AUTH_TOKEN=... API_BASE=http://142.171.239.56:8081 WEB_BASE=http://142.171.239.56:8081 pnpm verify:multitable-pilot:staging` passed `159/159` checks against main `e6f6547a158361042a42788701d8debef8e1d725`; new `api.field-types.value-normalization` and `ui.field-types.reload-replay` checks covered all 8 field types.
+- [x] Smoke test conditional formatting persistence and reload.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-filter-format-ui-smoke-design-20260507.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-filter-format-ui-smoke-verification-20260507.md`
+  - Verification summary: `AUTH_TOKEN=... API_BASE=http://142.171.239.56:8081 WEB_BASE=http://142.171.239.56:8081 pnpm verify:multitable-pilot:staging` passed `140/140` checks; new `ui.conditional-formatting.reload-replay` persisted a `Score > 90` row-format rule, reloaded it, and verified rendered row background `rgb(214, 235, 255)`.
+- [x] Smoke test formula editor: field token insertion, function insertion, diagnostics.
+  - PR: #1424
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-rc-formula-smoke-development-20260507.md`
+  - Verification MD: `docs/development/multitable-rc-formula-smoke-verification-20260507.md`
+  - Verification summary: Playwright RC smoke parses four tests for formula field create with referencing expression + workbench column header rendering, PATCH expression update persistence, sanitize regression clamping non-string expression to empty, and a tiny envelope-shape contract guard for the shared helpers. Frontend formula-editor suite covers field-token insertion, function insertion, and inline diagnostics (`10/10` passed in Codex review). Same PR extracts `packages/core-backend/tests/e2e/multitable-helpers.ts` and migrates the four prior RC smokes (lifecycle, public-form, hierarchy, gantt) to consume the shared scaffold. Local `tsc --noEmit` and `git diff --check` pass; `playwright test --list` reports 19 tests across the six e2e files. Live stack execution remains deferred to staging/dev-stack availability.
+- [x] Smoke test filter builder typed controls and saved view behavior.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-filter-format-ui-smoke-design-20260507.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-filter-format-ui-smoke-verification-20260507.md`
+  - Verification summary: same `140/140` staging run passed `ui.filter-builder.typed-controls-replay`; the runner added select/date/number filters through the toolbar UI, verified saved `filterInfo`, reloaded the view, and confirmed all three controls hydrated from persistence.
+- [x] Smoke test Gantt view rendering.
+  - PR: #1421
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-rc-gantt-smoke-development-20260507.md`
+  - Verification MD: `docs/development/multitable-rc-gantt-smoke-verification-20260507.md`
+  - Verification summary: Playwright RC smoke parses three tests for gantt bar rendering with date ranges, dependency arrow rendering with a configured self-table link `dependencyFieldId`, and PATCH rejection of a gantt view whose `dependencyFieldId` points at a non-link field (HTTP 400 + `VALIDATION_ERROR` containing `self-table link field`). Exercises `validateGanttDependencyConfig` (`packages/core-backend/src/routes/univer-meta.ts`) at the HTTP layer. Local `tsc --noEmit` and `git diff --check` pass. Live stack execution remains deferred to staging/dev-stack availability.
+- [x] Smoke test Hierarchy view rendering and child creation.
+  - PR: #1419
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-rc-hierarchy-smoke-development-20260507.md`
+  - Verification MD: `docs/development/multitable-rc-hierarchy-smoke-verification-20260507.md`
+  - Verification summary: Playwright RC smoke parses three tests for hierarchy view rendering parent + child, self-parent PATCH rejection (`HIERARCHY_CYCLE` 400), and descendant-as-parent PATCH rejection through a 3-level chain (`HIERARCHY_CYCLE` 400) with non-cycle clear-parent reparent succeeding. Exercises `assertNoHierarchyParentCycle` (`packages/core-backend/src/multitable/hierarchy-cycle-guard.ts`) at the HTTP layer. Local `tsc --noEmit` and `git diff --check` pass. Live stack execution remains deferred to staging/dev-stack availability.
+- [x] Smoke test public form submit path.
+  - PR: #1417
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-rc-public-form-smoke-development-20260507.md`
+  - Verification MD: `docs/development/multitable-rc-public-form-smoke-verification-20260507.md`
+  - Verification summary: Playwright RC smoke parses three tests for public form enable -> anonymous submit -> persisted record, disabled-view 401, and regenerate stale-token 401 plus new-token success. Local `tsc --noEmit` and `git diff --check` pass. Live stack execution remains deferred to staging/dev-stack availability.
+- [x] Smoke test automation send_email save/execute path.
+  - PR: #1428
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-rc-automation-send-email-smoke-development-20260507.md`
+  - Verification MD: `docs/development/multitable-rc-automation-send-email-smoke-verification-20260507.md`
+  - Verification summary: Playwright RC smoke parses three tests for record.created → send_email rule end-to-end execution via the real event chain (eventBus → automation executor → `NotificationService.send` → mock `EmailNotificationChannel`), polling `GET /sheets/:sheetId/automations/:ruleId/logs?limit=10` for up to 12 s and asserting `status === 'success'` + `steps[0].actionType === 'send_email'` + `steps[0].status === 'success'` + `steps[0].output.recipientCount === 2` + `steps[0].output.notificationStatus === 'sent'`; plus two configuration negatives covering `validateSendEmailConfig` for missing `recipients` and missing `subjectTemplate` (400 + `VALIDATION_ERROR` with the specific error message). The logs API flat-shape contract (no `{ ok, data }` envelope) is consumed via a direct `request.get`. Local `tsc --noEmit` and `git diff --check` pass. Live stack execution remains deferred to staging/dev-stack availability.
+- [x] Create executable API smoke helper for repeatable staging evidence.
+  - PR: #1359
+  - Merge commit: `aec377f80`
+  - Development MD: `docs/development/multitable-feishu-rc-api-smoke-design-20260506.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-api-smoke-verification-20260506.md`
+  - Verification summary: `node --test scripts/ops/multitable-feishu-rc-api-smoke.test.mjs`, `node --check` for runner/test, `git diff --check`, and PR CI passed before merge.
+- [x] Run executable API smoke helper against 142 staging.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-142-api-smoke-design-20260506.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-142-api-smoke-verification-20260506.md`
+  - Verification summary: `API_BASE=http://142.171.239.56:8081 CONFIRM_WRITE=1 ALLOW_INSTALL=1 EXPECTED_COMMIT=aec377f80 node scripts/ops/multitable-feishu-rc-api-smoke.mjs` exited 0; 11/11 checks passed; browser-only smoke items remain unchecked.
+- [x] Harden browser staging smoke blockers found on 142.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-142-ui-smoke-hardening-design-20260506.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-142-ui-smoke-hardening-verification-20260506.md`
+  - Verification summary: retry import mapping, exact form attachment labels, scoped record comment selectors, and upgraded-DB comment scope inserts fixed locally; focused backend/comment tests pass; 142 full UI smoke remains pending until this fix is deployed.
+- [x] Run full Playwright 142 UI smoke after `#1365` deploy.
+  - PR: pending
+  - Merge commit: pending
+  - Development MD: `docs/development/multitable-feishu-rc-142-postdeploy-design-20260506.md`
+  - Verification MD: `docs/development/multitable-feishu-rc-142-postdeploy-verification-20260506.md`
+  - Verification summary: `AUTH_TOKEN=... API_BASE=http://142.171.239.56:8081 WEB_BASE=http://142.171.239.56:8081 pnpm verify:multitable-pilot:staging` passed `125/125` checks with no failures; token value was not printed or committed.
 - [x] Produce RC audit result MD with P0/P1/P2 defects.
   - PR: pending
   - Merge commit: pending
@@ -95,15 +175,60 @@ Expected docs:
 
 ## Phase 2 - P0 Gap: Backend XLSX Route Layer
 
-- [ ] Decide backend `xlsx` dependency policy.
-- [ ] Add backend xlsx import adapter or optional dependency seam.
-- [ ] Implement `POST /api/multitable/sheets/:sheetId/import-xlsx`.
-- [ ] Implement `GET /api/multitable/sheets/:sheetId/export-xlsx`.
-- [ ] Ensure import writes go through the authoritative record write path.
-- [ ] Ensure export respects current sheet/view permissions.
-- [ ] Add backend tests for import mapping, invalid file, permission denial, and export.
-- [ ] Update OpenAPI source and generated dist.
-- [ ] Mark frontend-only xlsx limitation as closed or explicitly narrowed.
+- [x] Decide backend `xlsx` dependency policy.
+  - PR: #1275
+  - Merge commit: `5c4130913`
+  - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
+  - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
+  - Verification summary: `xlsx` added as explicit `@metasheet/core-backend` runtime dependency; lockfile updated.
+- [x] Add backend xlsx import adapter or optional dependency seam.
+  - PR: #1275
+  - Merge commit: `5c4130913`
+  - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
+  - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
+  - Verification summary: `xlsx-service.ts` added with parse/build/map helpers; 5 focused unit tests pass.
+- [x] Implement `POST /api/multitable/sheets/:sheetId/import-xlsx`.
+  - PR: #1275
+  - Merge commit: `5c4130913`
+  - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
+  - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
+  - Verification summary: multipart route accepts `file`, optional `sheetName`, and optional JSON `mapping`.
+- [x] Implement `GET /api/multitable/sheets/:sheetId/export-xlsx`.
+  - PR: #1275
+  - Merge commit: `5c4130913`
+  - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
+  - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
+  - Verification summary: route returns XLSX binary with content-disposition and truncation header.
+- [x] Ensure import writes go through the authoritative record write path.
+  - PR: #1275
+  - Merge commit: `5c4130913`
+  - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
+  - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
+  - Verification summary: import delegates row writes to `RecordService.createRecord()`.
+- [x] Ensure export respects current sheet/view permissions.
+  - PR: #1275
+  - Merge commit: `5c4130913`
+  - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
+  - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
+  - Verification summary: export requires `canRead` and `canExport`; optional `viewId` is scope-checked.
+- [x] Add backend tests for import mapping, invalid file, permission denial, and export.
+  - PR: #1275
+  - Merge commit: `5c4130913`
+  - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
+  - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
+  - Verification summary: `multitable-xlsx-routes.test.ts` covers import mapping, invalid input, permission denial, and export.
+- [x] Update OpenAPI source and generated dist.
+  - PR: #1275
+  - Merge commit: `5c4130913`
+  - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
+  - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
+  - Verification summary: OpenAPI source updated and generated dist refreshed.
+- [x] Mark frontend-only xlsx limitation as closed or explicitly narrowed.
+  - PR: #1275
+  - Merge commit: `5c4130913`
+  - Development MD: `docs/development/multitable-xlsx-backend-routes-development-20260430.md`
+  - Verification MD: `docs/development/multitable-xlsx-backend-routes-verification-20260430.md`
+  - Verification summary: limitation narrowed to frontend not yet wired to backend routes; backend capability exists.
 
 Expected docs:
 
@@ -112,12 +237,42 @@ Expected docs:
 
 ## Phase 3 - P0 Gap: OpenAPI / Contract Cleanup
 
-- [ ] Audit OpenAPI coverage for new field types.
-- [ ] Audit OpenAPI coverage for new view types: `gantt`, `hierarchy`.
-- [ ] Audit OpenAPI coverage for xlsx routes after Phase 2.
-- [ ] Regenerate and commit OpenAPI dist artifacts.
-- [ ] Run OpenAPI contract guard.
-- [ ] Add a verification doc listing schema additions and generated outputs.
+- [x] Audit OpenAPI coverage for new field types.
+  - PR: #1277
+  - Merge commit: `e97e22648`
+  - Development MD: `docs/development/multitable-openapi-rc-contract-cleanup-development-20260430.md`
+  - Verification MD: `docs/development/multitable-openapi-rc-contract-cleanup-verification-20260430.md`
+  - Verification summary: `MultitableFieldType` now centralizes all runtime field types including `currency`, `percent`, `rating`, `url`, `email`, and `phone`.
+- [x] Audit OpenAPI coverage for new view types: `gantt`, `hierarchy`.
+  - PR: #1277
+  - Merge commit: `e97e22648`
+  - Development MD: `docs/development/multitable-openapi-rc-contract-cleanup-development-20260430.md`
+  - Verification MD: `docs/development/multitable-openapi-rc-contract-cleanup-verification-20260430.md`
+  - Verification summary: `MultitableViewType` now enumerates `grid`, `form`, `kanban`, `gallery`, `calendar`, `timeline`, `gantt`, and `hierarchy`.
+- [x] Audit OpenAPI coverage for xlsx routes after Phase 2.
+  - PR: #1277
+  - Merge commit: `e97e22648`
+  - Development MD: `docs/development/multitable-openapi-rc-contract-cleanup-development-20260430.md`
+  - Verification MD: `docs/development/multitable-openapi-rc-contract-cleanup-verification-20260430.md`
+  - Verification summary: parity guard checks import/export route presence and export response headers including `Content-Disposition`.
+- [x] Regenerate and commit OpenAPI dist artifacts.
+  - PR: #1277
+  - Merge commit: `e97e22648`
+  - Development MD: `docs/development/multitable-openapi-rc-contract-cleanup-development-20260430.md`
+  - Verification MD: `docs/development/multitable-openapi-rc-contract-cleanup-verification-20260430.md`
+  - Verification summary: `packages/openapi/dist/{combined.openapi.yml,openapi.json,openapi.yaml}` regenerated.
+- [x] Run OpenAPI contract guard.
+  - PR: #1277
+  - Merge commit: `e97e22648`
+  - Development MD: `docs/development/multitable-openapi-rc-contract-cleanup-development-20260430.md`
+  - Verification MD: `docs/development/multitable-openapi-rc-contract-cleanup-verification-20260430.md`
+  - Verification summary: `node --test scripts/ops/multitable-openapi-parity.test.mjs` passes.
+- [x] Add a verification doc listing schema additions and generated outputs.
+  - PR: #1277
+  - Merge commit: `e97e22648`
+  - Development MD: `docs/development/multitable-openapi-rc-contract-cleanup-development-20260430.md`
+  - Verification MD: `docs/development/multitable-openapi-rc-contract-cleanup-verification-20260430.md`
+  - Verification summary: this Phase 3 dev/verification pair records implementation scope and validation commands.
 
 Expected docs:
 
@@ -126,45 +281,162 @@ Expected docs:
 
 ## Phase 4 - P0/P1 Gap: System Fields Batch
 
-- [ ] Add `autoNumber` field type.
-- [ ] Add `createdTime` field type mapped to record `created_at`.
-- [ ] Add `modifiedTime` field type mapped to record `updated_at`.
-- [ ] Add `createdBy` field type mapped to record `created_by`.
-- [ ] Add `modifiedBy` storage if missing, then expose `modifiedBy`.
-- [ ] Make all system fields readonly from normal patch/create payloads.
-- [ ] Add frontend renderer/editor behavior: render-only for readonly system fields.
-- [ ] Add field manager support for creating/configuring allowed system fields.
-- [ ] Add tests for create, patch rejection, render, sorting/filtering where applicable.
-- [ ] Update OpenAPI source and generated dist.
+- [x] Add `autoNumber` field type.
+  - PR: #1321
+  - Merge commit: `9a8f9c1f1`
+  - Development MD: `docs/development/multitable-auto-number-system-field-design-20260505.md`
+  - Verification MD: `docs/development/multitable-auto-number-system-field-verification-20260505.md`
+  - Verification summary: persistent per-field sequence table added; create paths allocate `autoNumber` values transactionally; focused backend/frontend tests, backend build, frontend type-check, OpenAPI parity, migration replay, and CI passed.
+  - 2026-05-07 follow-up hardening: `docs/development/multitable-auto-number-hardening-design-20260507.md` and `docs/development/multitable-auto-number-hardening-verification-20260507.md` add prefix/digits/start config, existing-record backfill, advisory locking, helper create-path coverage, and frontend formatting.
+- [x] Add `createdTime` field type mapped to record `created_at`.
+  - PR: #1280
+  - Merge commit: c45da32c1
+  - Development MD: `docs/development/multitable-system-fields-backend-development-20260430.md`
+  - Verification MD: `docs/development/multitable-system-fields-backend-verification-20260430.md`
+  - Verification summary: query service injects `createdTime` from `meta_records.created_at`.
+- [x] Add `modifiedTime` field type mapped to record `updated_at`.
+  - PR: #1280
+  - Merge commit: c45da32c1
+  - Development MD: `docs/development/multitable-system-fields-backend-development-20260430.md`
+  - Verification MD: `docs/development/multitable-system-fields-backend-verification-20260430.md`
+  - Verification summary: query service injects `modifiedTime` from `meta_records.updated_at`.
+- [x] Add `createdBy` field type mapped to record `created_by`.
+  - PR: #1280
+  - Merge commit: c45da32c1
+  - Development MD: `docs/development/multitable-system-fields-backend-development-20260430.md`
+  - Verification MD: `docs/development/multitable-system-fields-backend-verification-20260430.md`
+  - Verification summary: query service injects `createdBy` from `meta_records.created_by`.
+- [x] Add `modifiedBy` storage if missing, then expose `modifiedBy`.
+  - PR: #1280
+  - Merge commit: c45da32c1
+  - Development MD: `docs/development/multitable-system-fields-backend-development-20260430.md`
+  - Verification MD: `docs/development/multitable-system-fields-backend-verification-20260430.md`
+  - Verification summary: migration adds `meta_records.modified_by`; record write paths set it from the actor and query service injects `modifiedBy`.
+- [x] Make all system fields readonly from normal patch/create payloads.
+  - PR: #1280
+  - Merge commit: c45da32c1
+  - Development MD: `docs/development/multitable-system-fields-backend-development-20260430.md`
+  - Verification MD: `docs/development/multitable-system-fields-backend-verification-20260430.md`
+  - Verification summary: `isFieldAlwaysReadOnly()` treats system field types as readonly, reusing existing write guards.
+- [x] Add frontend renderer/editor behavior: render-only for readonly system fields.
+  - PR: #1283
+  - Merge commit: `8174f26f9`
+  - Development MD: `docs/development/multitable-system-fields-frontend-development-20260430.md`
+  - Verification MD: `docs/development/multitable-system-fields-frontend-verification-20260430.md`
+  - Verification summary: grid, cell editor, record drawer, and form view treat system fields as formatted read-only values.
+- [x] Add field manager support for creating/configuring allowed system fields.
+  - PR: #1283
+  - Merge commit: `8174f26f9`
+  - Development MD: `docs/development/multitable-system-fields-frontend-development-20260430.md`
+  - Verification MD: `docs/development/multitable-system-fields-frontend-verification-20260430.md`
+  - Verification summary: field manager exposes `createdTime`, `modifiedTime`, `createdBy`, and `modifiedBy` as createable no-config fields.
+- [x] Add tests for create, patch rejection, render, sorting/filtering where applicable.
+  - Partial: backend tests cover metadata projection and actor persistence in `docs/development/multitable-system-fields-backend-verification-20260430.md`.
+  - Development MD: `docs/development/multitable-system-fields-frontend-development-20260430.md`
+  - Verification MD: `docs/development/multitable-system-fields-frontend-verification-20260430.md`
+  - Verification summary: frontend tests cover field-manager create payloads, renderer/editor readonly behavior, and grid no-edit behavior; backend tests continue to cover patch rejection.
+- [x] Update OpenAPI source and generated dist.
+  - PR: #1280
+  - Merge commit: c45da32c1
+  - Development MD: `docs/development/multitable-system-fields-backend-development-20260430.md`
+  - Verification MD: `docs/development/multitable-system-fields-backend-verification-20260430.md`
+  - Verification summary: OpenAPI field type enum and generated dist now include system field types.
 
 Expected docs:
 
-- `docs/development/multitable-system-fields-batch-development-20260501.md`
-- `docs/development/multitable-system-fields-batch-verification-20260501.md`
+- `docs/development/multitable-system-fields-backend-development-20260430.md`
+- `docs/development/multitable-system-fields-backend-verification-20260430.md`
+- `docs/development/multitable-system-fields-frontend-development-20260430.md`
+- `docs/development/multitable-system-fields-frontend-verification-20260430.md`
 
 ## Phase 5 - P1 Gap: Record Version History
 
-- [ ] Add record revision persistence table.
-- [ ] Record revision after successful authoritative writes.
-- [ ] Capture actor, source, version, changed fields, and timestamp.
-- [ ] Add API to list record history.
-- [ ] Add record drawer History tab.
-- [ ] Add tests for single-field patch, multi-field patch, actor attribution, and permission denial.
-- [ ] Document retention default: no cleanup in v1.
+- [x] Add record revision persistence table.
+  - PR: #1285
+  - Merge commit: `3371d8b53`
+  - Development MD: `docs/development/multitable-record-history-development-20260430.md`
+  - Verification MD: `docs/development/multitable-record-history-verification-20260430.md`
+  - Verification summary: migration creates `meta_record_revisions` with revision indexes.
+- [x] Record revision after successful authoritative writes.
+  - PR: #1285
+  - Merge commit: `3371d8b53`
+  - Development MD: `docs/development/multitable-record-history-development-20260430.md`
+  - Verification MD: `docs/development/multitable-record-history-verification-20260430.md`
+  - Verification summary: `RecordService` create/patch/delete and `RecordWriteService.patchRecords()` persist revisions in the same transaction.
+- [x] Capture actor, source, version, changed fields, and timestamp.
+  - PR: #1285
+  - Merge commit: `3371d8b53`
+  - Development MD: `docs/development/multitable-record-history-development-20260430.md`
+  - Verification MD: `docs/development/multitable-record-history-verification-20260430.md`
+  - Verification summary: revision rows include actor, source, action, version, changed field ids, patch, snapshot, and server timestamp.
+- [x] Add API to list record history.
+  - PR: #1285
+  - Merge commit: `3371d8b53`
+  - Development MD: `docs/development/multitable-record-history-development-20260430.md`
+  - Verification MD: `docs/development/multitable-record-history-verification-20260430.md`
+  - Verification summary: `GET /api/multitable/sheets/:sheetId/records/:recordId/history` added with auth/read checks; OpenAPI source and dist regenerated.
+- [x] Add record drawer History tab.
+  - PR: #1285
+  - Merge commit: `3371d8b53`
+  - Development MD: `docs/development/multitable-record-history-development-20260430.md`
+  - Verification MD: `docs/development/multitable-record-history-verification-20260430.md`
+  - Verification summary: drawer adds lazy-loaded `Details` and `History` tabs.
+- [x] Add tests for single-field patch, multi-field patch, actor attribution, and permission denial.
+  - PR: #1285
+  - Merge commit: `3371d8b53`
+  - Development MD: `docs/development/multitable-record-history-development-20260430.md`
+  - Verification MD: `docs/development/multitable-record-history-verification-20260430.md`
+  - Verification summary: focused backend/frontend tests pass; DB route permission integration remains a documented follow-up.
+- [x] Document retention default: no cleanup in v1.
+  - PR: #1285
+  - Merge commit: `3371d8b53`
+  - Development MD: `docs/development/multitable-record-history-development-20260430.md`
+  - Verification MD: `docs/development/multitable-record-history-verification-20260430.md`
+  - Verification summary: retention default documented as indefinite/no cleanup in v1.
 
 Expected docs:
 
-- `docs/development/multitable-record-history-development-20260502.md`
-- `docs/development/multitable-record-history-verification-20260502.md`
+- `docs/development/multitable-record-history-development-20260430.md`
+- `docs/development/multitable-record-history-verification-20260430.md`
 
 ## Phase 6 - P1 Gap: Record Subscription Notifications
 
-- [ ] Add record subscription table or reuse existing notification model if already sufficient.
-- [ ] Add subscribe/unsubscribe/list APIs.
-- [ ] Add record drawer watch/unwatch control.
-- [ ] Notify watchers on record update and comment events.
-- [ ] Do not notify the actor for their own write by default.
-- [ ] Add tests for subscribe, unsubscribe, update notification, comment notification, and self-notification suppression.
+- [x] Add record subscription table or reuse existing notification model if already sufficient.
+  - PR: #1290
+  - Merge commit: `6e28cf9fbd79c78d7a1eed92975c74c8d2d45487`
+  - Development MD: `docs/development/multitable-record-subscription-development-20260503.md`
+  - Verification MD: `docs/development/multitable-record-subscription-verification-20260503.md`
+  - Verification summary: migration adds `meta_record_subscriptions` and durable `meta_record_subscription_notifications`.
+- [x] Add subscribe/unsubscribe/list APIs.
+  - PR: #1290
+  - Merge commit: `6e28cf9fbd79c78d7a1eed92975c74c8d2d45487`
+  - Development MD: `docs/development/multitable-record-subscription-development-20260503.md`
+  - Verification MD: `docs/development/multitable-record-subscription-verification-20260503.md`
+  - Verification summary: record-scoped subscription status/list, subscribe, unsubscribe, and current-user notification list APIs added with auth/read checks.
+- [x] Add record drawer watch/unwatch control.
+  - PR: #1290
+  - Merge commit: `6e28cf9fbd79c78d7a1eed92975c74c8d2d45487`
+  - Development MD: `docs/development/multitable-record-subscription-development-20260503.md`
+  - Verification MD: `docs/development/multitable-record-subscription-verification-20260503.md`
+  - Verification summary: drawer loads watch state and toggles Watch/Watching through `MultitableApiClient`.
+- [x] Notify watchers on record update and comment events.
+  - PR: #1290
+  - Merge commit: `6e28cf9fbd79c78d7a1eed92975c74c8d2d45487`
+  - Development MD: `docs/development/multitable-record-subscription-development-20260503.md`
+  - Verification MD: `docs/development/multitable-record-subscription-verification-20260503.md`
+  - Verification summary: `RecordService.patchRecord()`, `RecordWriteService.patchRecords()`, and `CommentService.createComment()` enqueue watcher notifications.
+- [x] Do not notify the actor for their own write by default.
+  - PR: #1290
+  - Merge commit: `6e28cf9fbd79c78d7a1eed92975c74c8d2d45487`
+  - Development MD: `docs/development/multitable-record-subscription-development-20260503.md`
+  - Verification MD: `docs/development/multitable-record-subscription-verification-20260503.md`
+  - Verification summary: subscriber lookup filters `user_id <> actorId` when actor is present.
+- [x] Add tests for subscribe, unsubscribe, update notification, comment notification, and self-notification suppression.
+  - PR: #1290
+  - Merge commit: `6e28cf9fbd79c78d7a1eed92975c74c8d2d45487`
+  - Development MD: `docs/development/multitable-record-subscription-development-20260503.md`
+  - Verification MD: `docs/development/multitable-record-subscription-verification-20260503.md`
+  - Verification summary: focused backend service/write/comment tests and frontend client/drawer tests pass.
 
 Expected docs:
 
@@ -175,16 +447,66 @@ Expected docs:
 
 These are not RC blockers.
 
-- [ ] Gantt dependencies and dependency arrows.
-- [ ] Gantt drag resize.
-- [ ] Hierarchy drag-to-reparent.
-- [ ] Hierarchy server-side cycle prevention.
-- [ ] DateTime field with timezone.
-- [ ] Number format: decimals, thousands, unit.
-- [ ] Template library V1.
-- [ ] Native person field migration.
-- [ ] Barcode field.
-- [ ] Location field.
+- [x] Gantt dependencies and dependency arrows.
+  - PR: #1340
+  - Merge commit: `d8bbab3ca2beda2a29a8330cfaa1a4fe624b9ece`
+  - Development MD: `docs/development/multitable-gantt-dependencies-design-20260506.md`
+  - Verification MD: `docs/development/multitable-gantt-dependencies-verification-20260506.md`
+  - Verification summary: focused Gantt/ViewManager frontend tests, Vue type-check, whitespace guard, and CI passed; Strict E2E was expected skip.
+- [x] Gantt drag resize.
+  - PR: #1343
+  - Merge commit: `7735b3d80a062f72d5f02b386434ca4e09de6623`
+  - Development MD: `docs/development/multitable-gantt-drag-resize-design-20260506.md`
+  - Verification MD: `docs/development/multitable-gantt-drag-resize-verification-20260506.md`
+  - Verification summary: focused Gantt resize and Workbench wiring tests, Vue type-check, whitespace guard, and CI passed; Strict E2E was expected skip.
+- [x] Hierarchy drag-to-reparent.
+  - PR: #1347
+  - Merge commit: `06307c284bcf4b079f351382bfc2595978262525`
+  - Development MD: `docs/development/multitable-hierarchy-drag-reparent-design-20260506.md`
+  - Verification MD: `docs/development/multitable-hierarchy-drag-reparent-verification-20260506.md`
+  - Verification summary: focused Hierarchy drag/drop and Workbench wiring tests, Vue type-check, whitespace guard, and CI passed; Strict E2E was expected skip.
+- [x] Hierarchy server-side cycle prevention.
+  - PR: #1350
+  - Merge commit: `f6ab034d63fb4d9e3700044708711cf10911c397`
+  - Development MD: `docs/development/multitable-hierarchy-cycle-guard-design-20260506.md`
+  - Verification MD: `docs/development/multitable-hierarchy-cycle-guard-verification-20260506.md`
+  - Verification summary: focused RecordWriteService and RecordService unit tests, backend build, whitespace guard, and CI passed; Strict E2E was expected skip.
+- [x] DateTime field with timezone.
+  - PR: #1336
+  - Merge commit: `7ccd5dead503a4b8e12d312859ac817b488154a0`
+  - Development MD: `docs/development/multitable-datetime-field-design-20260506.md`
+  - Verification MD: `docs/development/multitable-datetime-field-verification-20260506.md`
+  - Verification summary: backend dateTime alias/coercion/timezone tests, frontend renderer/editor/form/drawer tests, OpenAPI generation/parity, backend build, frontend type-check, whitespace guard, and CI passed; Strict E2E was expected skip.
+- [x] Number format: decimals, thousands, unit.
+  - PR: #1323
+  - Merge commit: `1e5237439b048d0515a885110134d77024fcf54f`
+  - Development MD: `docs/development/multitable-number-format-design-20260505.md`
+  - Verification MD: `docs/development/multitable-number-format-verification-20260505.md`
+  - Verification summary: backend sanitizer, frontend formatter/field-manager/editor tests, backend build, frontend type-check, whitespace guard, and CI passed; Strict E2E was expected skip.
+- [x] Template library V1.
+  - PR: #1356
+  - Merge commit: `f503af7b2c674f44bf1127be0cc31fb3bde0eeef`
+  - Development MD: `docs/development/multitable-template-library-v1-design-20260506.md`
+  - Verification MD: `docs/development/multitable-template-library-v1-verification-20260506.md`
+  - Verification summary: built-in template catalog plus atomic install route and Workbench entry shipped; focused backend/frontend tests, backend build, frontend type-check, OpenAPI parity, whitespace guard, and CI passed; Strict E2E was expected skip.
+- [x] Native person field migration.
+  - PR: #1353
+  - Merge commit: `58da251dc209e34fbf3a3a5e968aa16d059c759a`
+  - Development MD: `docs/development/multitable-person-field-migration-design-20260506.md`
+  - Verification MD: `docs/development/multitable-person-field-migration-verification-20260506.md`
+  - Verification summary: native `type: person` create/update requests are accepted, normalized to storage-compatible `link + refKind=user`, covered by focused backend integration/frontend tests, backend build, frontend type-check, OpenAPI parity, whitespace guard, and CI; Strict E2E was expected skip.
+- [x] Barcode field.
+  - PR: #1328
+  - Merge commit: `afa48d03e130ddfd6d8b8042c689940d430203d3`
+  - Development MD: `docs/development/multitable-barcode-field-design-20260505.md`
+  - Verification MD: `docs/development/multitable-barcode-field-verification-20260505.md`
+  - Verification summary: backend codec/default-validation tests, frontend renderer/editor/form/drawer tests, OpenAPI generation/parity, backend build, frontend type-check, whitespace guard, and CI passed; Strict E2E was expected skip.
+- [x] Location field.
+  - PR: #1333
+  - Merge commit: `0cf0d8eb5d997b4335a518a235f0104699e9cb8c`
+  - Development MD: `docs/development/multitable-location-field-design-20260506.md`
+  - Verification MD: `docs/development/multitable-location-field-verification-20260506.md`
+  - Verification summary: backend codec/default-validation tests, frontend display/renderer/editor/form/drawer tests, OpenAPI generation/parity, backend build, frontend type-check, whitespace guard, and CI passed; Strict E2E was expected skip.
 
 ## Global Verification Commands
 

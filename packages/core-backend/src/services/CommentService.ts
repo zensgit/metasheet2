@@ -13,6 +13,7 @@ import type { CollabService } from './CollabService'
 import { db } from '../db/db'
 import { nowTimestamp } from '../db/type-helpers'
 import { buildCommentInboxRoom, buildCommentRecordRoom, buildCommentSheetRoom } from './commentRooms'
+import { notifyRecordSubscribersWithKysely } from '../multitable/record-subscription-service'
 
 export class CommentValidationError extends Error {
   constructor(message: string) {
@@ -247,6 +248,11 @@ export class CommentService {
         spreadsheet_id: data.spreadsheetId,
         row_id: data.rowId,
         field_id: effectiveFieldId ?? null,
+        target_type: 'meta_record',
+        target_id: data.rowId,
+        target_field_id: effectiveFieldId ?? null,
+        container_type: 'meta_sheet',
+        container_id: data.spreadsheetId,
         content: data.content,
         author_id: data.authorId,
         parent_id: data.parentId ?? null,
@@ -295,6 +301,17 @@ export class CommentService {
       if (mentionUserId && mentionUserId !== data.authorId) {
         this.collabService.sendTo(mentionUserId, 'comment:mention', createdPayload)
       }
+    }
+    try {
+      await notifyRecordSubscribersWithKysely(db, {
+        sheetId: data.spreadsheetId,
+        recordId: data.rowId,
+        eventType: 'comment.created',
+        actorId: data.authorId,
+        commentId: comment.id,
+      })
+    } catch (error) {
+      this.logger.warn('Failed to notify record subscribers for comment', error as Error)
     }
 
     return comment

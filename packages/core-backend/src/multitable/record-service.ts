@@ -16,6 +16,17 @@ import {
   validateLongTextValue,
   type MultitableField,
 } from './field-codecs'
+import {
+  HierarchyCycleError,
+  assertNoHierarchyParentCycle,
+  buildHierarchyParentOverridesByField,
+  collectSameSheetLinkChangeFieldIds,
+  loadHierarchyParentFieldIds,
+} from './hierarchy-cycle-guard'
+import {
+  acquireAutoNumberSheetWriteLock,
+  allocateAutoNumberValues,
+} from './auto-number-service'
 import { getDefaultValidationRules, validateRecord } from './field-validation-engine'
 import type { FieldValidationConfig } from './field-validation'
 import { loadFieldsForSheet } from './loaders'
@@ -27,6 +38,11 @@ import {
 } from './post-commit-hooks'
 import { isFieldAlwaysReadOnly, isFieldPermissionHidden } from './permission-derivation'
 import { publishMultitableSheetRealtime } from './realtime-publish'
+import { recordRecordRevision } from './record-history-service'
+import {
+  notifyRecordSubscribersBestEffort,
+  type NotifyRecordSubscribersInput,
+} from './record-subscription-service'
 import { ensureRecordWriteAllowed, type AccessInfo, type SheetPermissionScope } from './sheet-capabilities'
 
 export type QueryFn = (
@@ -167,6 +183,7 @@ export type RecordPatchInput = {
   sheetId: string
   data: Record<string, unknown>
   expectedVersion?: number
+  actorId?: string | null
   access: AccessInfo
   capabilities: MultitableCapabilities
   sheetScope?: SheetPermissionScope
@@ -191,7 +208,15 @@ function mapFieldType(type: string): UniverMetaField['type'] {
   const normalized = type.trim().toLowerCase()
   if (normalized === 'number') return 'number'
   if (normalized === 'boolean' || normalized === 'checkbox') return 'boolean'
-  if (normalized === 'date' || normalized === 'datetime') return 'date'
+  if (normalized === 'date') return 'date'
+  if (
+    normalized === 'datetime' ||
+    normalized === 'date_time' ||
+    normalized === 'date-time' ||
+    normalized === 'timestamp'
+  ) {
+    return 'dateTime'
+  }
   if (normalized === 'formula') return 'formula'
   if (normalized === 'select') return 'select'
   if (
@@ -205,6 +230,27 @@ function mapFieldType(type: string): UniverMetaField['type'] {
   if (normalized === 'lookup') return 'lookup'
   if (normalized === 'rollup') return 'rollup'
   if (normalized === 'attachment') return 'attachment'
+  if (normalized === 'currency') return 'currency'
+  if (normalized === 'percent') return 'percent'
+  if (normalized === 'rating') return 'rating'
+  if (normalized === 'url') return 'url'
+  if (normalized === 'email') return 'email'
+  if (normalized === 'phone') return 'phone'
+  if (normalized === 'barcode' || normalized === 'bar_code' || normalized === 'bar-code') return 'barcode'
+  if (
+    normalized === 'location' ||
+    normalized === 'geo' ||
+    normalized === 'geolocation' ||
+    normalized === 'geo_location' ||
+    normalized === 'geo-location'
+  ) {
+    return 'location'
+  }
+  if (normalized === 'autonumber' || normalized === 'auto_number' || normalized === 'auto-number') return 'autoNumber'
+  if (normalized === 'createdtime' || normalized === 'created_time' || normalized === 'created-time') return 'createdTime'
+  if (normalized === 'modifiedtime' || normalized === 'modified_time' || normalized === 'modified-time') return 'modifiedTime'
+  if (normalized === 'createdby' || normalized === 'created_by' || normalized === 'created-by') return 'createdBy'
+  if (normalized === 'modifiedby' || normalized === 'modified_by' || normalized === 'modified-by') return 'modifiedBy'
   if (
     normalized === 'longtext' ||
     normalized === 'long_text' ||
@@ -284,7 +330,12 @@ function buildCreateFieldGuardMap(rows: unknown[]): Map<string, CreateFieldGuard
       continue
     }
 
-    if (BATCH1_FIELD_TYPES.has(type)) {
+  if (BATCH1_FIELD_TYPES.has(type)) {
+      guards.set(fieldId, { type, property: normalizeJson(row.property) })
+      continue
+    }
+
+    if (type === 'autoNumber') {
       guards.set(fieldId, { type, property: normalizeJson(row.property) })
       continue
     }
@@ -365,143 +416,150 @@ export class RecordService {
       throw new RecordPermissionError('Insufficient permissions')
     }
 
-    const fieldRes = await this.pool.query(
-      'SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1',
-      [sheetId],
-    )
-    if (fieldRes.rows.length === 0) {
-      throw new RecordNotFoundError(`Sheet not found: ${sheetId}`)
-    }
-
-    const fieldById = buildCreateFieldGuardMap(fieldRes.rows)
     const patch: Record<string, unknown> = {}
-    const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
+    const recordId = `rec_${randomUUID()}`
+    const recordRes = await this.pool.transaction(async ({ query }) => {
+      await acquireAutoNumberSheetWriteLock(query, sheetId)
 
-    for (const [fieldId, value] of Object.entries(data)) {
-      const field = fieldById.get(fieldId)
-      if (!field) {
-        throw new RecordValidationError(`Unknown fieldId: ${fieldId}`)
+      const fieldRes = await query(
+        'SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1',
+        [sheetId],
+      )
+      if (fieldRes.rows.length === 0) {
+        throw new RecordNotFoundError(`Sheet not found: ${sheetId}`)
       }
 
-      if (field.type === 'lookup' || field.type === 'rollup') {
-        throw new RecordFieldForbiddenError(`Field is readonly: ${fieldId}`, fieldId)
-      }
+      const fieldById = buildCreateFieldGuardMap(fieldRes.rows)
+      const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
 
-      if (field.type === 'select') {
-        if (typeof value !== 'string') {
-          throw new RecordValidationError(`Select value must be string: ${fieldId}`)
+      for (const [fieldId, value] of Object.entries(data)) {
+        const field = fieldById.get(fieldId)
+        if (!field) {
+          throw new RecordValidationError(`Unknown fieldId: ${fieldId}`)
         }
-        const allowed = new Set(field.options ?? [])
-        if (value !== '' && !allowed.has(value)) {
-          throw new RecordValidationError(`Invalid select option for ${fieldId}: ${value}`)
+
+        if (isFieldAlwaysReadOnly(field)) {
+          throw new RecordFieldForbiddenError(`Field is readonly: ${fieldId}`, fieldId)
         }
-      }
-      if (field.type === 'multiSelect') {
-        try {
-          patch[fieldId] = normalizeMultiSelectValue(value, fieldId, field.options ?? [])
-        } catch (error) {
-          throw new RecordValidationError(error instanceof Error ? error.message : String(error))
+
+        if (field.type === 'select') {
+          if (typeof value !== 'string') {
+            throw new RecordValidationError(`Select value must be string: ${fieldId}`)
+          }
+          const allowed = new Set(field.options ?? [])
+          if (value !== '' && !allowed.has(value)) {
+            throw new RecordValidationError(`Invalid select option for ${fieldId}: ${value}`)
+          }
         }
-        continue
-      }
-
-      if (field.type === 'link') {
-        if (field.link) {
-          const ids = normalizeLinkIds(value)
-          if (field.link.limitSingleRecord && ids.length > 1) {
-            throw new RecordValidationError(`Link field only allows a single record: ${fieldId}`)
+        if (field.type === 'multiSelect') {
+          try {
+            patch[fieldId] = normalizeMultiSelectValue(value, fieldId, field.options ?? [])
+          } catch (error) {
+            throw new RecordValidationError(error instanceof Error ? error.message : String(error))
           }
-          const tooLong = ids.find((id) => id.length > 50)
-          if (tooLong) {
-            throw new RecordValidationError(`Link id too long (>50): ${tooLong}`)
-          }
-
-          if (ids.length > 0) {
-            const exists = await this.pool.query(
-              'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
-              [field.link.foreignSheetId, ids],
-            )
-            const found = new Set(
-              (exists.rows as Array<Record<string, unknown>>)
-                .map((row) => (typeof row.id === 'string' ? row.id : ''))
-                .filter((id) => id.length > 0),
-            )
-            const missing = ids.filter((id) => !found.has(id))
-            if (missing.length > 0) {
-              throw new RecordValidationError(
-                `Linked record(s) not found in sheet ${field.link.foreignSheetId}: ${missing.join(', ')}`,
-              )
-            }
-          }
-
-          patch[fieldId] = ids
-          linkUpdates.set(fieldId, { ids, cfg: field.link })
           continue
         }
 
-        if (typeof value !== 'string') {
-          throw new RecordValidationError(`Link value must be string: ${fieldId}`)
+        if (field.type === 'link') {
+          if (field.link) {
+            const ids = normalizeLinkIds(value)
+            if (field.link.limitSingleRecord && ids.length > 1) {
+              throw new RecordValidationError(`Link field only allows a single record: ${fieldId}`)
+            }
+            const tooLong = ids.find((id) => id.length > 50)
+            if (tooLong) {
+              throw new RecordValidationError(`Link id too long (>50): ${tooLong}`)
+            }
+
+            if (ids.length > 0) {
+              const exists = await query(
+                'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+                [field.link.foreignSheetId, ids],
+              )
+              const found = new Set(
+                (exists.rows as Array<Record<string, unknown>>)
+                  .map((row) => (typeof row.id === 'string' ? row.id : ''))
+                  .filter((id) => id.length > 0),
+              )
+              const missing = ids.filter((id) => !found.has(id))
+              if (missing.length > 0) {
+                throw new RecordValidationError(
+                  `Linked record(s) not found in sheet ${field.link.foreignSheetId}: ${missing.join(', ')}`,
+                )
+              }
+            }
+
+            patch[fieldId] = ids
+            linkUpdates.set(fieldId, { ids, cfg: field.link })
+            continue
+          }
+
+          if (typeof value !== 'string') {
+            throw new RecordValidationError(`Link value must be string: ${fieldId}`)
+          }
         }
+
+        if (field.type === 'attachment') {
+          const ids = normalizeAttachmentIdsShared(value)
+          const tooLong = ids.find((id) => id.length > 100)
+          if (tooLong) {
+            throw new RecordValidationError(`Attachment id too long: ${tooLong}`)
+          }
+          const attachmentError = await ensureAttachmentIdsExistShared({
+            query,
+            sheetId,
+            fieldId,
+            attachmentIds: ids,
+          })
+          if (attachmentError) {
+            throw new RecordValidationError(attachmentError)
+          }
+          patch[fieldId] = ids
+          continue
+        }
+
+        if (field.type === 'formula') {
+          if (typeof value !== 'string') continue
+          if (value !== '' && !value.startsWith('=')) continue
+        }
+
+        if (field.type === 'longText') {
+          try {
+            patch[fieldId] = validateLongTextValue(value, fieldId)
+          } catch (error) {
+            throw new RecordValidationError(error instanceof Error ? error.message : String(error))
+          }
+          continue
+        }
+
+        if (BATCH1_FIELD_TYPES.has(field.type)) {
+          try {
+            patch[fieldId] = coerceBatch1Value(field.type, field.property, fieldId, value)
+          } catch (error) {
+            throw new RecordValidationError(error instanceof Error ? error.message : String(error))
+          }
+          continue
+        }
+
+        patch[fieldId] = value
       }
 
-      if (field.type === 'attachment') {
-        const ids = normalizeAttachmentIdsShared(value)
-        const tooLong = ids.find((id) => id.length > 100)
-        if (tooLong) {
-          throw new RecordValidationError(`Attachment id too long: ${tooLong}`)
-        }
-        const attachmentError = await ensureAttachmentIdsExistShared({
-          query: this.pool.query.bind(this.pool),
-          sheetId,
-          fieldId,
-          attachmentIds: ids,
-        })
-        if (attachmentError) {
-          throw new RecordValidationError(attachmentError)
-        }
-        patch[fieldId] = ids
-        continue
+      const directValidationResult = validateRecord(
+        buildDirectValidationFields(fieldRes.rows),
+        patch,
+      )
+      if (!directValidationResult.valid) {
+        throw new RecordValidationFailedError(directValidationResult.errors)
       }
 
-      if (field.type === 'formula') {
-        if (typeof value !== 'string') continue
-        if (value !== '' && !value.startsWith('=')) continue
-      }
-
-      if (field.type === 'longText') {
-        try {
-          patch[fieldId] = validateLongTextValue(value, fieldId)
-        } catch (error) {
-          throw new RecordValidationError(error instanceof Error ? error.message : String(error))
-        }
-        continue
-      }
-
-      if (BATCH1_FIELD_TYPES.has(field.type)) {
-        try {
-          patch[fieldId] = coerceBatch1Value(field.type, field.property, fieldId, value)
-        } catch (error) {
-          throw new RecordValidationError(error instanceof Error ? error.message : String(error))
-        }
-        continue
-      }
-
-      patch[fieldId] = value
-    }
-
-    const directValidationResult = validateRecord(
-      buildDirectValidationFields(fieldRes.rows),
-      patch,
-    )
-    if (!directValidationResult.valid) {
-      throw new RecordValidationFailedError(directValidationResult.errors)
-    }
-
-    const recordId = `rec_${randomUUID()}`
-    const recordRes = await this.pool.transaction(async ({ query }) => {
+      Object.assign(patch, await allocateAutoNumberValues(query, sheetId, Array.from(fieldById, ([id, field]) => ({
+        id,
+        type: field.type,
+        property: field.property,
+      }))))
       const inserted = await query(
-        `INSERT INTO meta_records (id, sheet_id, data, version, created_by)
-         VALUES ($1, $2, $3::jsonb, 1, $4)
+        `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
+         VALUES ($1, $2, $3::jsonb, 1, $4, $4)
          RETURNING version`,
         [recordId, sheetId, JSON.stringify(patch), actorId],
       )
@@ -518,6 +576,19 @@ export class RecordService {
           }
         }
       }
+
+      const version = Number((inserted.rows[0] as { version?: unknown } | undefined)?.version ?? 1)
+      await recordRecordRevision(query, {
+        sheetId,
+        recordId,
+        version,
+        action: 'create',
+        source: 'rest',
+        actorId,
+        changedFieldIds: Object.keys(patch),
+        patch,
+        snapshot: patch,
+      })
 
       return inserted
     })
@@ -578,7 +649,7 @@ export class RecordService {
 
     await this.pool.transaction(async ({ query }) => {
       const lockedRecordRes = await query(
-        'SELECT id, sheet_id, version FROM meta_records WHERE id = $1 FOR UPDATE',
+        'SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1 FOR UPDATE',
         [recordId],
       )
       if (lockedRecordRes.rows.length === 0) {
@@ -590,6 +661,7 @@ export class RecordService {
       if (typeof expectedVersion === 'number' && expectedVersion !== serverVersion) {
         throw new VersionConflictError(recordId, serverVersion)
       }
+      const snapshot = normalizeJson(currentRow.data)
 
       try {
         await query(
@@ -599,6 +671,18 @@ export class RecordService {
       } catch (err) {
         if (!isUndefinedTableError(err, 'meta_links')) throw err
       }
+
+      await recordRecordRevision(query, {
+        sheetId,
+        recordId,
+        version: serverVersion,
+        action: 'delete',
+        source: 'rest',
+        actorId,
+        changedFieldIds: [],
+        patch: {},
+        snapshot,
+      })
 
       await query('DELETE FROM meta_records WHERE id = $1', [recordId])
     })
@@ -629,6 +713,7 @@ export class RecordService {
     if (!capabilities.canEditRecord) {
       throw new RecordPermissionError('Insufficient permissions')
     }
+    const patchActorId = input.actorId ?? access.userId ?? null
 
     const fields = await loadFieldsForSheet(this.pool.query.bind(this.pool), sheetId)
     if (fields.length === 0) {
@@ -753,10 +838,37 @@ export class RecordService {
       throw new RecordPatchFieldValidationError(fieldErrors)
     }
 
+    const changesByRecord = new Map<string, Array<{ fieldId: string; value: unknown }>>([
+      [recordId, Object.entries(data).map(([fieldId, value]) => ({ fieldId, value }))],
+    ])
+    const sameSheetLinkChangeFieldIds = collectSameSheetLinkChangeFieldIds({
+      changesByRecord,
+      fieldById,
+      sheetId,
+    })
+    const hierarchyParentFieldIds = sameSheetLinkChangeFieldIds.size > 0
+      ? await loadHierarchyParentFieldIds({
+          query: this.pool.query.bind(this.pool),
+          sheetId,
+          fields,
+        })
+      : new Set<string>()
+    const guardedHierarchyParentFieldIds = new Set(
+      [...sameSheetLinkChangeFieldIds].filter((fieldId) => hierarchyParentFieldIds.has(fieldId)),
+    )
+    const hierarchyParentOverridesByField = guardedHierarchyParentFieldIds.size > 0
+      ? buildHierarchyParentOverridesByField({
+          changesByRecord,
+          hierarchyParentFieldIds: guardedHierarchyParentFieldIds,
+          normalizeLinkIds,
+        })
+      : new Map<string, Map<string, string[]>>()
+
     let nextVersion = 1
+    let pendingSubscriberNotification: NotifyRecordSubscribersInput | null = null
     await this.pool.transaction(async ({ query }) => {
       const currentRes = await query(
-        'SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
+        'SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
         [recordId, sheetId],
       )
       if (currentRes.rows.length === 0) {
@@ -777,16 +889,57 @@ export class RecordService {
       if (typeof expectedVersion === 'number' && expectedVersion !== serverVersion) {
         throw new VersionConflictError(recordId, serverVersion)
       }
+      const previousData = normalizeJson(currentRow.data)
+
+      for (const [fieldId, { ids, cfg }] of linkUpdates.entries()) {
+        if (ids.length === 0 || !guardedHierarchyParentFieldIds.has(fieldId) || cfg.foreignSheetId !== sheetId) {
+          continue
+        }
+        try {
+          await assertNoHierarchyParentCycle({
+            query,
+            sheetId,
+            recordId,
+            fieldId,
+            parentRecordIds: ids,
+            parentOverridesByRecord: hierarchyParentOverridesByField.get(fieldId) ?? new Map(),
+            normalizeLinkIds,
+          })
+        } catch (error) {
+          if (error instanceof HierarchyCycleError) {
+            throw new RecordValidationError(error.message, error.code)
+          }
+          throw error
+        }
+      }
 
       if (Object.keys(patch).length > 0) {
         const updateRes = await query(
           `UPDATE meta_records
-           SET data = data || $1::jsonb, updated_at = now(), version = version + 1
+           SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
            WHERE id = $2 AND sheet_id = $3
            RETURNING version`,
-          [JSON.stringify(patch), recordId, sheetId],
+          [JSON.stringify(patch), recordId, sheetId, patchActorId],
         )
         nextVersion = Number((updateRes.rows[0] as { version?: unknown } | undefined)?.version ?? serverVersion)
+        const revisionId = await recordRecordRevision(query, {
+          sheetId,
+          recordId,
+          version: nextVersion,
+          action: 'update',
+          source: 'rest',
+          actorId: patchActorId,
+          changedFieldIds: Object.keys(patch),
+          patch,
+          snapshot: { ...previousData, ...patch },
+        })
+        pendingSubscriberNotification = {
+          sheetId,
+          recordId,
+          eventType: 'record.updated',
+          actorId: patchActorId,
+          revisionId,
+        }
       } else {
         nextVersion = serverVersion
       }
@@ -821,6 +974,14 @@ export class RecordService {
         }
       }
     })
+
+    if (pendingSubscriberNotification) {
+      await notifyRecordSubscribersBestEffort(
+        this.pool.query.bind(this.pool),
+        pendingSubscriberNotification,
+        'record-service',
+      )
+    }
 
     if (this.postCommitHooks.length > 0) {
       const context: RecordPostCommitContext = {

@@ -67,6 +67,12 @@ import {
 } from '../multitable/loaders'
 import { ensureLegacyBase as ensureLegacyBaseShared } from '../multitable/provisioning'
 import {
+  MultitableTemplateConflictError,
+  MultitableTemplateNotFoundError,
+  installMultitableTemplate,
+  listMultitableTemplates,
+} from '../multitable/template-library'
+import {
   queryRecordsWithCursor,
   buildRecordsCacheKey,
   type CursorPaginatedResult,
@@ -130,13 +136,37 @@ import {
   RecordPatchFieldValidationError as RecordServicePatchFieldValidationError,
 } from '../multitable/record-service'
 import {
+  acquireAutoNumberSheetWriteLock,
+  allocateAutoNumberValues,
+  backfillAutoNumberField,
+} from '../multitable/auto-number-service'
+import { normalizeAutoNumberProperty } from '../multitable/auto-number-property'
+import {
   createYjsInvalidationPostCommitHook,
   type YjsInvalidator,
 } from '../multitable/post-commit-hooks'
+import { listRecordRevisions } from '../multitable/record-history-service'
+import {
+  getRecordSubscriptionStatus,
+  listRecordSubscriptionNotifications,
+  subscribeRecord,
+  unsubscribeRecord,
+} from '../multitable/record-subscription-service'
 import {
   CONDITIONAL_FORMATTING_RULE_LIMIT,
   sanitizeConditionalFormattingRules,
 } from '../multitable/conditional-formatting-service'
+import {
+  XLSX_MAX_BYTES,
+  XLSX_MAX_ROWS,
+  buildXlsxBuffer,
+  buildXlsxImportRecords,
+  normalizeXlsxColumnMapping,
+  parseXlsxBuffer,
+  serializeXlsxCell,
+  type ParsedXlsxResult,
+  type XlsxModule,
+} from '../multitable/xlsx-service'
 
 const multitableFormulaEngine = new MultitableFormulaEngine()
 
@@ -153,6 +183,42 @@ export function setYjsInvalidatorForRoutes(invalidator: YjsInvalidator | null): 
   yjsInvalidator = invalidator
 }
 
+const MULTITABLE_FIELD_TYPES = [
+  'string',
+  'number',
+  'boolean',
+  'date',
+  'dateTime',
+  'formula',
+  'select',
+  'multiSelect',
+  'link',
+  'lookup',
+  'rollup',
+  'attachment',
+  'currency',
+  'percent',
+  'rating',
+  'url',
+  'email',
+  'phone',
+  'barcode',
+  'location',
+  'longText',
+  'autoNumber',
+  'createdTime',
+  'modifiedTime',
+  'createdBy',
+  'modifiedBy',
+] as const
+
+const MULTITABLE_FIELD_INPUT_TYPES = [
+  ...MULTITABLE_FIELD_TYPES,
+  'person',
+] as const
+
+type MultitableFieldInputType = (typeof MULTITABLE_FIELD_INPUT_TYPES)[number]
+
 type UniverMetaField = {
   id: string
   name: string
@@ -161,6 +227,7 @@ type UniverMetaField = {
     | 'number'
     | 'boolean'
     | 'date'
+    | 'dateTime'
     | 'formula'
     | 'select'
     | 'multiSelect'
@@ -174,7 +241,14 @@ type UniverMetaField = {
     | 'url'
     | 'email'
     | 'phone'
+    | 'barcode'
+    | 'location'
     | 'longText'
+    | 'autoNumber'
+    | 'createdTime'
+    | 'modifiedTime'
+    | 'createdBy'
+    | 'modifiedBy'
   options?: Array<{ value: string; color?: string }>
   order?: number
   property?: Record<string, unknown>
@@ -232,6 +306,7 @@ const ATTACHMENT_PATH = process.env.ATTACHMENT_PATH || path.join(process.cwd(), 
 const ATTACHMENT_UPLOAD_MAX_SIZE = Number.parseInt(process.env.ATTACHMENT_MAX_SIZE ?? '', 10) || 100 * 1024 * 1024
 const multitableMulter = loadMulter()
 const multitableUpload = createUploadMiddleware(multitableMulter, { fileSize: ATTACHMENT_UPLOAD_MAX_SIZE })
+const xlsxUpload = createUploadMiddleware(multitableMulter, { fileSize: XLSX_MAX_BYTES })
 
 let multitableAttachmentStorage: StorageServiceImpl | null = null
 const metaSheetSummaryCache = new Map<string, { id: string; name: string }>()
@@ -991,7 +1066,15 @@ function mapFieldType(type: string): UniverMetaField['type'] {
   const normalized = type.trim().toLowerCase()
   if (normalized === 'number') return 'number'
   if (normalized === 'boolean' || normalized === 'checkbox') return 'boolean'
-  if (normalized === 'date' || normalized === 'datetime') return 'date'
+  if (normalized === 'date') return 'date'
+  if (
+    normalized === 'datetime' ||
+    normalized === 'date_time' ||
+    normalized === 'date-time' ||
+    normalized === 'timestamp'
+  ) {
+    return 'dateTime'
+  }
   if (normalized === 'formula') return 'formula'
   if (normalized === 'select') return 'select'
   if (
@@ -1002,9 +1085,20 @@ function mapFieldType(type: string): UniverMetaField['type'] {
     return 'multiSelect'
   }
   if (normalized === 'link') return 'link'
+  if (normalized === 'person') return 'link'
   if (normalized === 'lookup') return 'lookup'
   if (normalized === 'rollup') return 'rollup'
   if (normalized === 'attachment') return 'attachment'
+  if (BATCH1_FIELD_TYPES.has(normalized as any)) return normalized as UniverMetaField['type']
+  if (normalized === 'autonumber' || normalized === 'auto_number' || normalized === 'auto-number') return 'autoNumber'
+  if (normalized === 'createdtime' || normalized === 'created_time' || normalized === 'created-time') {
+    return 'createdTime'
+  }
+  if (normalized === 'modifiedtime' || normalized === 'modified_time' || normalized === 'modified-time') {
+    return 'modifiedTime'
+  }
+  if (normalized === 'createdby' || normalized === 'created_by' || normalized === 'created-by') return 'createdBy'
+  if (normalized === 'modifiedby' || normalized === 'modified_by' || normalized === 'modified-by') return 'modifiedBy'
   if (
     normalized === 'longtext' ||
     normalized === 'long_text' ||
@@ -1231,6 +1325,31 @@ function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown)
       ...(Number.isFinite(maxFiles) && maxFiles > 0 ? { maxFiles: Math.round(maxFiles) } : {}),
       acceptedMimeTypes: sanitizeStringArray(obj.acceptedMimeTypes),
     }
+  }
+
+  if (type === 'number') {
+    const next: Record<string, unknown> = { ...obj }
+    if ('decimals' in obj) {
+      const decimalsRaw = typeof obj.decimals === 'number' ? obj.decimals : Number(obj.decimals)
+      if (Number.isFinite(decimalsRaw) && decimalsRaw >= 0 && decimalsRaw <= 6) {
+        next.decimals = Math.round(decimalsRaw)
+      } else {
+        delete next.decimals
+      }
+    }
+    next.thousands = obj.thousands === true
+    const unit = typeof obj.unit === 'string' ? obj.unit.trim().slice(0, 24) : ''
+    if (unit) next.unit = unit
+    else delete next.unit
+    return next
+  }
+
+  if (type === 'autoNumber') {
+    return normalizeAutoNumberProperty(obj)
+  }
+
+  if (type === 'createdTime' || type === 'modifiedTime' || type === 'createdBy' || type === 'modifiedBy') {
+    return { ...obj, readOnly: true }
   }
 
   return obj
@@ -1746,6 +1865,7 @@ const DASHBOARD_GROUPABLE_FIELD_TYPES = new Set<UniverMetaField['type']>([
   'number',
   'boolean',
   'date',
+  'dateTime',
   'formula',
   'select',
   'lookup',
@@ -1896,6 +2016,50 @@ function sendForbidden(res: Response, message = 'Insufficient permissions') {
   return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message } })
 }
 
+async function requireRecordReadable(
+  req: Request,
+  query: QueryFn,
+  sheetId: string,
+  recordId: string,
+): Promise<{ access: ResolvedRequestAccess } | { status: number; body: unknown }> {
+  const recordCheck = await query(
+    'SELECT id, sheet_id FROM meta_records WHERE id = $1 AND sheet_id = $2',
+    [recordId, sheetId],
+  )
+  if (recordCheck.rows.length === 0) {
+    return {
+      status: 404,
+      body: { ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } },
+    }
+  }
+
+  const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, sheetId)
+  if (!access.userId) {
+    return { status: 401, body: { error: 'Authentication required' } }
+  }
+  if (!capabilities.canRead) {
+    return {
+      status: 403,
+      body: { ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } },
+    }
+  }
+
+  if (!access.isAdminRole) {
+    const hasRecordPerms = await hasRecordPermissionAssignments(query, sheetId)
+    if (hasRecordPerms) {
+      const recordScopeMap = await loadRecordPermissionScopeMap(query, sheetId, [recordId], access.userId)
+      if (recordScopeMap.size > 0 && !deriveRecordPermissions(recordId, capabilities, recordScopeMap).canRead) {
+        return {
+          status: 403,
+          body: { ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } },
+        }
+      }
+    }
+  }
+
+  return { access }
+}
+
 type FieldMutationGuard = {
   type: UniverMetaField['type']
   options?: string[]
@@ -1938,6 +2102,25 @@ function filterRecordDataByFieldIds(data: unknown, allowedFieldIds: Set<string>)
   return Object.fromEntries(
     Object.entries(data as Record<string, unknown>).filter(([fieldId]) => allowedFieldIds.has(fieldId)),
   )
+}
+
+async function loadXlsxModule(): Promise<XlsxModule> {
+  return await import('xlsx') as unknown as XlsxModule
+}
+
+function parseJsonFormField(value: unknown, fieldName: string): unknown {
+  if (value === undefined || value === null || value === '') return undefined
+  if (typeof value !== 'string') return value
+  try {
+    return JSON.parse(value) as unknown
+  } catch {
+    throw new ValidationError(`${fieldName} must be valid JSON`)
+  }
+}
+
+function buildXlsxAttachmentFilename(sheetName: string): string {
+  const base = sheetName.replace(/[^\w.-]+/g, '_').replace(/^_+|_+$/g, '') || 'multitable'
+  return `${base}.xlsx`
 }
 
 async function loadDashboardSourceRows(args: {
@@ -2318,6 +2501,37 @@ async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<
   }
 }
 
+async function normalizeFieldWriteInput(
+  query: QueryFn,
+  sheetId: string,
+  requestedType: MultitableFieldInputType | UniverMetaField['type'],
+  rawProperty: unknown,
+): Promise<{ type: UniverMetaField['type']; property: Record<string, unknown> }> {
+  if (requestedType !== 'person') {
+    return {
+      type: requestedType as UniverMetaField['type'],
+      property: sanitizeFieldProperty(requestedType as UniverMetaField['type'], rawProperty),
+    }
+  }
+
+  const sourceSheet = await loadSheetRow(query, sheetId)
+  if (!sourceSheet) throw new NotFoundError(`Sheet not found: ${sheetId}`)
+
+  const baseId = sourceSheet.baseId ?? await ensureLegacyBase(query)
+  const preset = await ensurePeopleSheetPreset(query, baseId)
+  const obj = normalizeJson(rawProperty)
+  const limitSingleRecord = obj.limitSingleRecord !== false
+
+  return {
+    type: 'link',
+    property: sanitizeFieldProperty('link', {
+      ...preset.fieldProperty,
+      limitSingleRecord,
+      refKind: 'user',
+    }),
+  }
+}
+
 const loadSheetRow = loadSheetRowShared
 const loadFieldsForSheet = loadFieldsForSheetShared
 
@@ -2685,6 +2899,42 @@ class ValidationError extends Error {
   }
 }
 
+function stringFromRecord(value: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const raw = value[key]
+    if (typeof raw === 'string' && raw.trim()) return raw.trim()
+  }
+  return ''
+}
+
+async function validateGanttDependencyConfig(
+  query: QueryFn,
+  sheetId: string,
+  viewType: string,
+  config: Record<string, unknown>,
+): Promise<string | null> {
+  if (viewType !== 'gantt') return null
+  const dependencyFieldId = typeof config.dependencyFieldId === 'string' ? config.dependencyFieldId.trim() : ''
+  if (!dependencyFieldId) return null
+
+  const fieldRes = await query(
+    'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 AND id = $2',
+    [sheetId, dependencyFieldId],
+  )
+  const fieldRow = (fieldRes.rows as any[])[0]
+  if (!fieldRow) {
+    return `Gantt dependency field must be a self-table link field: ${dependencyFieldId}`
+  }
+
+  const field = serializeFieldRow(fieldRow)
+  const foreignSheetId = stringFromRecord(field.property ?? {}, ['foreignSheetId', 'foreignDatasheetId', 'datasheetId'])
+  if (field.type !== 'link' || foreignSheetId !== sheetId) {
+    return `Gantt dependency field must be a self-table link field: ${dependencyFieldId}`
+  }
+
+  return null
+}
+
 class PermissionError extends Error {
   constructor(public message: string) {
     super(message)
@@ -2784,6 +3034,57 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] create base failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create base' } })
+    }
+  })
+
+  router.get('/templates', rbacGuard('multitable', 'read'), async (_req: Request, res: Response) => {
+    return res.json({ ok: true, data: { templates: listMultitableTemplates() } })
+  })
+
+  router.post('/templates/:templateId/install', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+    const schema = z.object({
+      baseName: z.string().min(1).max(255).optional(),
+      workspaceId: z.string().min(1).max(100).optional(),
+    })
+
+    const parsed = schema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    const templateId = typeof req.params.templateId === 'string' ? req.params.templateId.trim() : ''
+    if (!templateId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'templateId is required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) {
+        return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      }
+
+      const result = await pool.transaction(async ({ query }) => installMultitableTemplate({
+        query: query as unknown as QueryFn,
+        templateId,
+        baseName: parsed.data.baseName,
+        ownerId: access.userId,
+        workspaceId: parsed.data.workspaceId ?? null,
+        idGenerator: (prefix) => buildId(prefix).slice(0, 50),
+      }))
+
+      return res.status(201).json({ ok: true, data: result })
+    } catch (err) {
+      if (err instanceof MultitableTemplateNotFoundError) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+      }
+      if (err instanceof MultitableTemplateConflictError) {
+        return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: err.message } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] install multitable template failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to install template' } })
     }
   })
 
@@ -3551,6 +3852,179 @@ export function univerMetaRouter(): Router {
     }
   })
 
+  router.get('/sheets/:sheetId/records/:recordId/history', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
+    const limitParam = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : 50
+    const offsetParam = typeof req.query.offset === 'string' ? Number.parseInt(req.query.offset, 10) : 0
+    const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 100) : 50
+    const offset = Number.isFinite(offsetParam) ? Math.max(offsetParam, 0) : 0
+    if (!sheetId || !recordId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and recordId are required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const recordCheck = await pool.query(
+        'SELECT id, sheet_id FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        [recordId, sheetId],
+      )
+      if (recordCheck.rows.length === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
+      }
+
+      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      if (!capabilities.canRead) return sendForbidden(res)
+
+      if (!access.isAdminRole) {
+        const hasRecordPerms = await hasRecordPermissionAssignments(pool.query.bind(pool), sheetId)
+        if (hasRecordPerms) {
+          const recordScopeMap = await loadRecordPermissionScopeMap(
+            pool.query.bind(pool),
+            sheetId,
+            [recordId],
+            access.userId,
+          )
+          if (recordScopeMap.size > 0 && !deriveRecordPermissions(recordId, capabilities, recordScopeMap).canRead) {
+            return sendForbidden(res)
+          }
+        }
+      }
+
+      const items = await listRecordRevisions(pool.query.bind(pool), { sheetId, recordId, limit, offset })
+      return res.json({ ok: true, data: { items, limit, offset } })
+    } catch (err) {
+      if (isUndefinedTableError(err, 'meta_record_revisions')) {
+        return res.json({ ok: true, data: { items: [], limit, offset } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list record history failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list record history' } })
+    }
+  })
+
+  router.get('/sheets/:sheetId/records/:recordId/subscriptions', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
+    if (!sheetId || !recordId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and recordId are required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const readable = await requireRecordReadable(req, pool.query.bind(pool), sheetId, recordId)
+      if ('status' in readable) return res.status(readable.status).json(readable.body)
+
+      const status = await getRecordSubscriptionStatus(pool.query.bind(pool), {
+        sheetId,
+        recordId,
+        userId: readable.access.userId,
+      })
+      return res.json({
+        ok: true,
+        data: {
+          subscribed: status.subscribed,
+          subscription: status.subscription,
+        },
+      })
+    } catch (err) {
+      if (isUndefinedTableError(err, 'meta_record_subscriptions')) {
+        return res.json({ ok: true, data: { subscribed: false, subscription: null } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list record subscriptions failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list record subscriptions' } })
+    }
+  })
+
+  router.put('/sheets/:sheetId/records/:recordId/subscriptions/me', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
+    if (!sheetId || !recordId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and recordId are required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const readable = await requireRecordReadable(req, pool.query.bind(pool), sheetId, recordId)
+      if ('status' in readable) return res.status(readable.status).json(readable.body)
+
+      const subscription = await subscribeRecord(pool.query.bind(pool), {
+        sheetId,
+        recordId,
+        userId: readable.access.userId,
+      })
+      return res.json({ ok: true, data: { subscribed: true, subscription } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] subscribe record failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to subscribe record' } })
+    }
+  })
+
+  router.delete('/sheets/:sheetId/records/:recordId/subscriptions/me', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
+    if (!sheetId || !recordId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and recordId are required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const readable = await requireRecordReadable(req, pool.query.bind(pool), sheetId, recordId)
+      if ('status' in readable) return res.status(readable.status).json(readable.body)
+
+      await unsubscribeRecord(pool.query.bind(pool), {
+        sheetId,
+        recordId,
+        userId: readable.access.userId,
+      })
+      return res.json({ ok: true, data: { subscribed: false, subscription: null } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] unsubscribe record failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to unsubscribe record' } })
+    }
+  })
+
+  router.get('/record-subscription-notifications', async (req: Request, res: Response) => {
+    const limitParam = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : 50
+    const offsetParam = typeof req.query.offset === 'string' ? Number.parseInt(req.query.offset, 10) : 0
+    const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 100) : 50
+    const offset = Number.isFinite(offsetParam) ? Math.max(offsetParam, 0) : 0
+    const sheetId = typeof req.query.sheetId === 'string' && req.query.sheetId.trim() ? req.query.sheetId.trim() : undefined
+    const recordId = typeof req.query.recordId === 'string' && req.query.recordId.trim() ? req.query.recordId.trim() : undefined
+
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) return res.status(401).json({ error: 'Authentication required' })
+      const items = await listRecordSubscriptionNotifications(pool.query.bind(pool), {
+        userId: access.userId,
+        sheetId,
+        recordId,
+        limit,
+        offset,
+      })
+      return res.json({ ok: true, data: { items, limit, offset } })
+    } catch (err) {
+      if (isUndefinedTableError(err, 'meta_record_subscription_notifications')) {
+        return res.json({ ok: true, data: { items: [], limit, offset } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list record subscription notifications failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list record subscription notifications' } })
+    }
+  })
+
   router.put('/sheets/:sheetId/records/:recordId/permissions', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
@@ -3691,7 +4165,7 @@ export function univerMetaRouter(): Router {
       id: z.string().min(1).max(50).optional(),
       sheetId: z.string().min(1).max(50),
       name: z.string().min(1).max(255),
-      type: z.enum(['string', 'number', 'boolean', 'date', 'formula', 'select', 'multiSelect', 'link', 'lookup', 'rollup', 'attachment', 'longText']).default('string'),
+      type: z.enum(MULTITABLE_FIELD_INPUT_TYPES).default('string'),
       property: z.record(z.unknown()).optional(),
       order: z.number().int().nonnegative().optional(),
     })
@@ -3704,8 +4178,8 @@ export function univerMetaRouter(): Router {
     const sheetId = parsed.data.sheetId
     const fieldId = parsed.data.id ?? buildId('fld').slice(0, 50)
     const name = parsed.data.name.trim()
-    const type = parsed.data.type
-    const property = sanitizeFieldProperty(type, parsed.data.property ?? {})
+    const requestedType = parsed.data.type
+    const rawProperty = parsed.data.property ?? {}
     const desiredOrder = parsed.data.order
 
     try {
@@ -3717,6 +4191,12 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
       await pool.transaction(async ({ query }) => {
+        const { type, property } = await normalizeFieldWriteInput(
+          query as unknown as QueryFn,
+          sheetId,
+          requestedType,
+          rawProperty,
+        )
         const configError = await validateLookupRollupConfig(req, query, sheetId, type, property)
         if (configError) {
           throw new ValidationError(configError)
@@ -3744,6 +4224,10 @@ export function univerMetaRouter(): Router {
         if (type === 'formula' && property?.expression) {
           const refs = multitableFormulaEngine.extractFieldReferences(String(property.expression))
           await syncFormulaDependencies(query, sheetId, fieldId, refs)
+        }
+
+        if (type === 'autoNumber') {
+          await backfillAutoNumberField(query, sheetId, fieldId, property)
         }
       })
 
@@ -3947,7 +4431,7 @@ export function univerMetaRouter(): Router {
 
     const schema = z.object({
       name: z.string().min(1).max(255).optional(),
-      type: z.enum(['string', 'number', 'boolean', 'date', 'formula', 'select', 'multiSelect', 'link', 'lookup', 'rollup', 'attachment', 'longText']).optional(),
+      type: z.enum(MULTITABLE_FIELD_INPUT_TYPES).optional(),
       property: z.record(z.unknown()).optional(),
       order: z.number().int().nonnegative().optional(),
     }).refine((v) => Object.keys(v).length > 0, { message: 'At least one field must be updated' })
@@ -3978,11 +4462,14 @@ export function univerMetaRouter(): Router {
         const row = (existing as any).rows[0]
         sheetId = String(row.sheet_id)
         const currentOrder = Number(row.order ?? 0)
+        const currentType = mapFieldType(String(row.type))
 
         const nextName = typeof parsed.data.name === 'string' ? parsed.data.name.trim() : String(row.name)
-        const nextType = (parsed.data.type ?? mapFieldType(String(row.type))) as UniverMetaField['type']
-        const nextProperty = sanitizeFieldProperty(
-          nextType,
+        const requestedType = parsed.data.type ?? mapFieldType(String(row.type))
+        const { type: nextType, property: nextProperty } = await normalizeFieldWriteInput(
+          query as unknown as QueryFn,
+          sheetId,
+          requestedType,
           typeof parsed.data.property !== 'undefined' ? parsed.data.property : row.property,
         )
         const desiredOrder = parsed.data.order
@@ -4017,6 +4504,14 @@ export function univerMetaRouter(): Router {
         )
         const updatedRow = (update as any).rows?.[0]
         if (!updatedRow) throw new Error('Update returned no rows')
+
+        if (currentType === 'autoNumber' && nextType !== 'autoNumber') {
+          await query('DELETE FROM meta_field_auto_number_sequences WHERE field_id = $1', [fieldId])
+        }
+
+        if (currentType !== 'autoNumber' && nextType === 'autoNumber') {
+          await backfillAutoNumberField(query, sheetId, fieldId, nextProperty, { overwrite: true })
+        }
 
         // Track formula dependencies on update
         if (nextType === 'formula' && nextProperty?.expression) {
@@ -4091,6 +4586,7 @@ export function univerMetaRouter(): Router {
         const order = Number(row.order ?? 0)
 
         await query('DELETE FROM meta_fields WHERE id = $1', [fieldId])
+        await query('DELETE FROM meta_field_auto_number_sequences WHERE field_id = $1', [fieldId])
 
         try {
           await query('DELETE FROM meta_links WHERE field_id = $1', [fieldId])
@@ -4249,6 +4745,10 @@ export function univerMetaRouter(): Router {
       if (incomingRules !== undefined) {
         incomingConfig.conditionalFormattingRules = sanitizeConditionalFormattingRules(incomingRules)
       }
+      const ganttConfigError = await validateGanttDependencyConfig(pool.query.bind(pool), sheetId, type, incomingConfig)
+      if (ganttConfigError) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: ganttConfigError } })
+      }
 
       await pool.query(
         `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
@@ -4342,6 +4842,17 @@ export function univerMetaRouter(): Router {
       if (incomingRules !== undefined) {
         ;(nextConfig as Record<string, unknown>).conditionalFormattingRules =
           sanitizeConditionalFormattingRules(incomingRules)
+      }
+      if (parsed.data.config !== undefined || parsed.data.type !== undefined) {
+        const ganttConfigError = await validateGanttDependencyConfig(
+          pool.query.bind(pool),
+          String(row.sheet_id),
+          nextType,
+          nextConfig as Record<string, unknown>,
+        )
+        if (ganttConfigError) {
+          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: ganttConfigError } })
+        }
       }
 
       await pool.query(
@@ -4836,6 +5347,198 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] create sheet failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create sheet' } })
+    }
+  })
+
+  router.post('/sheets/:sheetId/import-xlsx', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+    if (!xlsxUpload) {
+      return res.status(500).json({ ok: false, error: { code: 'UPLOAD_UNAVAILABLE', message: 'XLSX upload not available - multer not installed' } })
+    }
+
+    xlsxUpload.single('file')(req, res, async (uploadErr: unknown) => {
+      if (uploadErr) {
+        return res.status(400).json({ ok: false, error: { code: 'UPLOAD_FAILED', message: String(uploadErr) } })
+      }
+
+      const file = (req as RequestWithFile).file
+      if (!file?.buffer || file.buffer.length === 0) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No XLSX file provided. Use "file" as the form field name.' } })
+      }
+
+      try {
+        const pool = poolManager.get()
+        const sheet = await loadSheetRowShared(pool.query.bind(pool), sheetId)
+        if (!sheet) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+        }
+
+        const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+        if (!access.userId) {
+          return res.status(401).json({ error: 'Authentication required' })
+        }
+        if (!capabilities.canCreateRecord) return sendForbidden(res)
+
+        const xlsx = await loadXlsxModule()
+        let parsed: ParsedXlsxResult
+        try {
+          parsed = parseXlsxBuffer(xlsx, file.buffer, {
+            sheetName: typeof req.body.sheetName === 'string' ? req.body.sheetName : undefined,
+          })
+        } catch {
+          throw new ValidationError('Invalid XLSX file')
+        }
+        if (parsed.headers.length === 0) {
+          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'XLSX file has no header row' } })
+        }
+
+        const fields = await loadFieldsForSheetShared(pool.query.bind(pool), sheetId)
+        const rawMapping = parseJsonFormField(req.body.mapping, 'mapping')
+        const columnMapping = normalizeXlsxColumnMapping(rawMapping, parsed.headers, fields)
+        if (Object.keys(columnMapping.mapping).length === 0) {
+          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No XLSX columns map to importable fields' } })
+        }
+
+        const built = buildXlsxImportRecords(parsed, columnMapping.mapping)
+        const recordService = new RecordService(pool, eventBus)
+        if (yjsInvalidator) {
+          recordService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
+        }
+
+        const failures: Array<{ rowIndex: number; message: string; code?: string }> = []
+        const createdRecordIds: string[] = []
+        for (let index = 0; index < built.records.length; index += 1) {
+          const data = built.records[index]
+          const rowIndex = built.rowIndexes[index] ?? index
+          try {
+            const created = await recordService.createRecord({
+              sheetId,
+              capabilities,
+              actorId: getRequestActorId(req),
+              data,
+            })
+            createdRecordIds.push(created.recordId)
+          } catch (error) {
+            if (error instanceof RecordCreateValidationFailedError) {
+              failures.push({ rowIndex, message: 'Record validation failed', code: 'VALIDATION_FAILED' })
+            } else if (error instanceof RecordServiceFieldForbiddenError || error instanceof RecordServiceValidationError) {
+              failures.push({ rowIndex, message: error.message, code: error.code })
+            } else if (error instanceof RecordServicePermissionError) {
+              failures.push({ rowIndex, message: error.message, code: 'FORBIDDEN' })
+            } else {
+              throw error
+            }
+          }
+        }
+
+        return res.json({
+          ok: failures.length === 0,
+          data: {
+            sheetId,
+            sheetName: parsed.sheetName,
+            headers: parsed.headers,
+            mapping: columnMapping.mapping,
+            unmappedHeaders: columnMapping.unmappedHeaders,
+            unmappedFields: columnMapping.unmappedFields,
+            attempted: built.records.length,
+            imported: createdRecordIds.length,
+            failed: failures.length,
+            failures,
+            createdRecordIds,
+            truncated: parsed.truncated,
+          },
+        })
+      } catch (err) {
+        if (err instanceof ValidationError) {
+          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
+        }
+        if (err instanceof RecordServiceNotFoundError || err instanceof NotFoundError) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+        }
+        if (err instanceof RecordServicePermissionError) {
+          return sendForbidden(res, err.message)
+        }
+        if (err instanceof RecordServiceValidationError || err instanceof ServiceValidationError) {
+          return res.status(400).json({ ok: false, error: { code: err.code || 'VALIDATION_ERROR', message: err.message } })
+        }
+        const hint = getDbNotReadyMessage(err)
+        if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+        console.error('[univer-meta] xlsx import failed:', err)
+        return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to import XLSX' } })
+      }
+    })
+  })
+
+  router.get('/sheets/:sheetId/export-xlsx', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const viewId = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRowShared(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      if (viewId) {
+        const view = await tryResolveViewShared(pool.query.bind(pool), viewId)
+        if (!view || view.sheetId !== sheetId) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
+        }
+      }
+
+      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      if (!capabilities.canRead || !capabilities.canExport) return sendForbidden(res)
+
+      const fields = filterVisiblePropertyFields(await loadFieldsForSheetShared(pool.query.bind(pool), sheetId))
+      const fieldIds = new Set(fields.map((field) => field.id))
+      const rows: Array<Array<string | number | boolean | null | undefined>> = []
+      let cursor: string | undefined
+      let truncated = false
+      do {
+        const result = await queryRecordsWithCursor({
+          query: pool.query.bind(pool),
+          sheetId,
+          cursor,
+          limit: Math.min(5000, XLSX_MAX_ROWS - rows.length),
+        })
+        for (const record of result.items) {
+          const data = filterRecordDataByFieldIds(record.data, fieldIds)
+          rows.push(fields.map((field) => serializeXlsxCell(data[field.id])))
+          if (rows.length >= XLSX_MAX_ROWS) {
+            truncated = result.hasMore
+            break
+          }
+        }
+        cursor = result.hasMore && rows.length < XLSX_MAX_ROWS ? result.nextCursor ?? undefined : undefined
+      } while (cursor)
+
+      const xlsx = await loadXlsxModule()
+      const buffer = buildXlsxBuffer(xlsx, {
+        sheetName: sheet.name,
+        headers: fields.map((field) => field.name),
+        rows,
+      })
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+      res.setHeader('Content-Disposition', `attachment; filename="${buildXlsxAttachmentFilename(sheet.name)}"`)
+      res.setHeader('X-MetaSheet-XLSX-Truncated', truncated ? 'true' : 'false')
+      return res.send(buffer)
+    } catch (err) {
+      if (err instanceof ValidationError) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] xlsx export failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to export XLSX' } })
     }
   })
 
@@ -5616,6 +6319,8 @@ export function univerMetaRouter(): Router {
       let nextVersion = 1
 
       await pool.transaction(async ({ query }) => {
+        await acquireAutoNumberSheetWriteLock(query, view.sheetId)
+
         if (recordId) {
           const currentRes = await query(
             'SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
@@ -5636,10 +6341,10 @@ export function univerMetaRouter(): Router {
           if (Object.keys(patch).length > 0) {
             const updateRes = await query(
               `UPDATE meta_records
-               SET data = data || $1::jsonb, updated_at = now(), version = version + 1
+               SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
                WHERE id = $2 AND sheet_id = $3
                RETURNING version`,
-              [JSON.stringify(patch), recordId, view.sheetId],
+              [JSON.stringify(patch), recordId, view.sheetId, getRequestActorId(req)],
             )
             nextVersion = Number((updateRes as any).rows[0]?.version ?? serverVersion)
           } else {
@@ -5678,9 +6383,12 @@ export function univerMetaRouter(): Router {
           return
         }
 
+        const latestFields = await loadFieldsForSheet(query, view.sheetId)
+        Object.assign(patch, await allocateAutoNumberValues(query, view.sheetId, latestFields))
+
         const insertRes = await query(
-          `INSERT INTO meta_records (id, sheet_id, data, version, created_by)
-           VALUES ($1, $2, $3::jsonb, 1, $4)
+          `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
+           VALUES ($1, $2, $3::jsonb, 1, $4, $4)
            RETURNING id, version`,
           [
             resultRecordId,
@@ -5893,6 +6601,7 @@ export function univerMetaRouter(): Router {
         sheetId,
         data: parsed.data.data ?? {},
         expectedVersion: parsed.data.expectedVersion,
+        actorId: getRequestActorId(req),
         access,
         capabilities,
         sheetScope,
@@ -6584,10 +7293,10 @@ export function univerMetaRouter(): Router {
             if (nextIds.length !== currentIds.length) {
               const updateRes = await query(
                 `UPDATE meta_records
-                 SET data = data || $1::jsonb, updated_at = now(), version = version + 1
+                 SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
                  WHERE id = $2 AND sheet_id = $3
                  RETURNING version`,
-                [JSON.stringify({ [fieldId]: nextIds }), recordId, sheetId],
+                [JSON.stringify({ [fieldId]: nextIds }), recordId, sheetId, getRequestActorId(req)],
               )
               updatedRecordRealtimeScope = {
                 sheetId,
@@ -6786,7 +7495,7 @@ export function univerMetaRouter(): Router {
       if (!capabilities.canEditRecord) return sendForbidden(res)
 
       const fieldRes = await pool.query(
-        'SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1',
+        'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC',
         [sheetId],
       )
       if (fieldRes.rows.length === 0) {

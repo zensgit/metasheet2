@@ -1,3 +1,5 @@
+import { isSystemFieldType } from './field-codecs'
+
 /**
  * Extracted permission derivation functions for testability.
  *
@@ -54,6 +56,7 @@ export type FieldLike = {
 
 export function isFieldAlwaysReadOnly(field: Pick<FieldLike, 'type' | 'property'>): boolean {
   if (field.type === 'formula' || field.type === 'lookup' || field.type === 'rollup') return true
+  if (isSystemFieldType(field.type)) return true
   const property = field.property ?? {}
   return property.readonly === true || property.readOnly === true
 }

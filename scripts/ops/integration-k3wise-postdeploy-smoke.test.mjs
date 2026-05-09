@@ -5,7 +5,7 @@ import http from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const scriptPath = path.join(repoRoot, 'scripts', 'ops', 'integration-k3wise-postdeploy-smoke.mjs')
@@ -295,8 +295,16 @@ test('public postdeploy smoke passes without an auth token and skips authenticat
     assert.equal(stdout.summary.fail, 0)
     assert.equal(stdout.summary.skipped, 1)
     assert.equal(stdout.summary.pass, 3)
+    assert.deepEqual(stdout.signoff, {
+      internalTrial: 'blocked',
+      reason: 'authenticated checks did not run',
+    })
 
     const evidence = JSON.parse(readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8'))
+    assert.deepEqual(evidence.signoff, {
+      internalTrial: 'blocked',
+      reason: 'authenticated checks did not run',
+    })
     assert.equal(evidence.checks.find((check) => check.id === 'authenticated-integration-contract').status, 'skipped')
     assert.equal(evidence.checks.find((check) => check.id === 'k3-wise-frontend-route').status, 'pass')
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/health'))
@@ -354,6 +362,15 @@ test('authenticated postdeploy smoke validates route and staging contracts witho
     assert.equal(evidenceText.includes('test.jwt.token'), false)
     const evidence = JSON.parse(evidenceText)
     assert.equal(evidence.authenticated, true)
+    const stdout = JSON.parse(result.stdout)
+    assert.deepEqual(stdout.signoff, {
+      internalTrial: 'pass',
+      reason: 'authenticated smoke passed',
+    })
+    assert.deepEqual(evidence.signoff, {
+      internalTrial: 'pass',
+      reason: 'authenticated smoke passed',
+    })
     assert.equal(evidence.summary.fail, 0)
     const routeCheck = evidence.checks.find((check) => check.id === 'integration-route-contract')
     assert.equal(routeCheck.status, 'pass')
@@ -484,6 +501,10 @@ test('authenticated postdeploy smoke fails when a read-only control-plane endpoi
     assert.equal(evidenceText.includes('test.jwt.token'), false)
     const evidence = JSON.parse(evidenceText)
     assert.equal(evidence.ok, false)
+    assert.deepEqual(evidence.signoff, {
+      internalTrial: 'blocked',
+      reason: 'one or more smoke checks failed',
+    })
     assert.equal(evidence.summary.fail, 1)
     assert.equal(evidence.checks.find((check) => check.id === 'integration-list-external-systems').status, 'pass')
     const pipelinesCheck = evidence.checks.find((check) => check.id === 'integration-list-pipelines')
@@ -669,4 +690,45 @@ test('require-auth turns missing token into a failing check', async () => {
     await fake.close()
     rmSync(outDir, { recursive: true, force: true })
   }
+})
+
+test('postdeploy smoke markdown escapes table-breaking evidence values', async () => {
+  const { renderMarkdown } = await import(pathToFileURL(scriptPath).href)
+  const markdown = renderMarkdown({
+    ok: false,
+    generatedAt: '2026-05-07T09:00:00.000Z\nsecond line',
+    baseUrl: 'https://metasheet.example.test/k3`wise\npreview',
+    authenticated: true,
+    signoff: {
+      internalTrial: 'blocked',
+      reason: 'route check | failed\nsee evidence',
+    },
+    summary: { pass: 1, skipped: 0, fail: 1 },
+    checks: [
+      {
+        id: 'route|check\n`alpha`',
+        status: 'fail\nretry',
+        error: 'line one | line two\n`raw` value',
+      },
+      {
+        id: 'object-detail',
+        status: 'pass',
+        details: {
+          route: '/api/integration/status|debug',
+          note: 'ok\nnext',
+        },
+      },
+    ],
+  })
+
+  assert.match(markdown, /Generated at: `2026-05-07T09:00:00.000Z second line`/)
+  assert.match(markdown, /Base URL: ``https:\/\/metasheet\.example\.test\/k3`wise preview``/)
+  assert.match(markdown, /Internal trial signoff: BLOCKED \(route check \| failed see evidence\)/)
+  assert.equal(markdown.includes('failed\nsee evidence'), false)
+  assert.equal(markdown.includes('line two\n`raw`'), false)
+
+  const tableRows = markdown.split('\n').filter((line) => line.startsWith('| '))
+  assert.equal(tableRows.length, 4)
+  assert.equal(tableRows[2], '| `` route\\|check `alpha` `` | `fail retry` | ``line one \\| line two `raw` value`` |')
+  assert.equal(tableRows[3], '| `object-detail` | `pass` | `{"details":{"route":"/api/integration/status\\|debug","note":"ok\\nnext"}}` |')
 })

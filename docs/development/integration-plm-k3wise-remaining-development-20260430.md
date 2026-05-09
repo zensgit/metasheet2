@@ -9,7 +9,7 @@ Practical remaining volume:
 | Goal | Remaining development | Calendar estimate |
 |---|---:|---:|
 | Run first customer K3 WISE Live PoC on test account set | 2-4 small PRs if customer responses expose gaps; otherwise mostly configuration/evidence | 2-5 engineering days after GATE arrives |
-| Internal pilot deploy for the existing K3 WISE setup/control-plane flow | 1-2 small PRs plus deploy validation | 1-2 days |
+| Internal pilot deploy for the existing K3 WISE setup/control-plane flow | 0-1 small docs/config/signoff PR plus authenticated postdeploy smoke validation | 0.5-1 day if token, tenant, and integration permissions are seeded; 1-2 days if fallback token or permission seeding needs fixes |
 | Production-ready K3 WISE connector | 8-12 PRs | 3-5 weeks, depends on customer K3 workflow complexity |
 | Vendor-platform phase for second ERP/PLM adapter | 10-16 PRs after K3 PoC PASS | 6-10 weeks to useful platform foundation |
 
@@ -53,6 +53,12 @@ Do not start full vendor-platform work until K3 WISE Live PoC PASS. Safe work du
 - reduce CI false-reds
 - improve evidence and diagnostics
 - prepare internal pilot deployment
+
+Internal pilot readiness now requires authenticated postdeploy smoke evidence:
+`authenticated=true`, `signoff.internalTrial=pass`, `summary.fail=0`, and PASS
+for `auth-me`, `integration-route-contract`, the four control-plane list probes,
+and `staging-descriptor-contract`. Mock PASS and public-only smoke PASS do not
+replace this gate.
 
 Defer until after PoC PASS:
 

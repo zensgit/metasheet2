@@ -167,8 +167,9 @@ function createDeadLetterStore({ db, idGenerator = crypto.randomUUID } = {}) {
       tenant_id: tenantId,
       workspace_id: workspaceId,
       id,
+      status: 'open',
     }))
-    if (!rows[0]) throw new DeadLetterError('dead letter not found', { id, tenantId, workspaceId })
+    if (!rows[0]) throw new DeadLetterError('dead letter not found or not open', { id, tenantId, workspaceId })
     return rowToDeadLetter(rows[0])
   }
 

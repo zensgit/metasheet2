@@ -203,6 +203,16 @@
             <span>App Secret</span>
             <input v-model.trim="draft.appSecret" class="directory-admin__input" type="password" placeholder="创建必填，更新可留空" />
           </label>
+          <template v-if="selectedIntegration">
+            <label class="directory-admin__field">
+              <span>工作通知 Agent ID</span>
+              <input v-model.trim="draft.workNotificationAgentId" class="directory-admin__input" type="password" inputmode="numeric" placeholder="不回显已保存值；仅系统管理员填写" />
+            </label>
+            <label class="directory-admin__field">
+              <span>测试接收 DingTalk UserID</span>
+              <input v-model.trim="draft.workNotificationTestUserId" class="directory-admin__input" type="text" placeholder="可选；填写后会发送测试工作通知" />
+            </label>
+          </template>
           <label class="directory-admin__field">
             <span>根部门 ID</span>
             <input v-model.trim="draft.rootDepartmentId" class="directory-admin__input" type="text" placeholder="默认 1" />
@@ -274,6 +284,31 @@
               placeholder="填写命名空间，例如 crm；支持逗号或换行分隔"
             />
           </label>
+          <div class="directory-admin__field directory-admin__field--wide">
+            <span>组织架构同步说明</span>
+            <p class="directory-admin__hint">
+              当前方案会把钉钉部门和成员同步到目录镜像，并可将选定部门投影为平台成员组，用于权限、表单和消息治理；不会自动生成第二套可编辑的本地组织树。
+            </p>
+          </div>
+          <div v-if="selectedIntegration" class="directory-admin__field directory-admin__field--wide">
+            <span>工作通知配置说明</span>
+            <div class="directory-admin__chips">
+              <span class="directory-admin__chip" :class="{ 'directory-admin__chip--success': selectedIntegration?.config.workNotificationAgentIdConfigured, 'directory-admin__chip--danger': selectedIntegration && !selectedIntegration.config.workNotificationAgentIdConfigured }">
+                {{ selectedIntegration?.config.workNotificationAgentIdConfigured ? 'Agent ID 已保存' : 'Agent ID 未保存' }}
+              </span>
+              <span class="directory-admin__chip">不回显敏感值</span>
+              <span class="directory-admin__chip">保存前先验证 AppKey/AppSecret</span>
+            </div>
+            <p class="directory-admin__hint">
+              Agent ID 来自钉钉开放平台企业内部应用，必须与当前 App Key / App Secret 属于同一个应用；未填写测试接收人时，只做基础连通性验证，不发送真实工作通知。
+            </p>
+          </div>
+          <div v-else class="directory-admin__field directory-admin__field--wide">
+            <span>工作通知配置说明</span>
+            <p class="directory-admin__hint">
+              请先创建并选中钉钉目录集成，再通过专用的“测试工作通知”和“保存 Agent ID”按钮配置工作通知，避免敏感值跟随普通目录保存路径写入。
+            </p>
+          </div>
           <label class="directory-admin__field">
             <span>状态</span>
             <select v-model="draft.status" class="directory-admin__input">
@@ -304,6 +339,12 @@
           </button>
           <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy" @click="void testIntegration()">
             测试连通性
+          </button>
+          <button v-if="selectedIntegration" class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy" @click="void testWorkNotificationAgentId()">
+            测试工作通知
+          </button>
+          <button v-if="selectedIntegration" class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || draft.workNotificationAgentId.trim().length === 0" @click="void saveWorkNotificationAgentId()">
+            保存 Agent ID
           </button>
           <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || !selectedIntegration" @click="void syncIntegration()">
             手动同步
@@ -519,12 +560,31 @@
               </label>
               <label class="directory-admin__toggle directory-admin__toggle--compact">
                 <input
-                  :checked="readGrantToggle(item.account.id)"
+                  :checked="readAccountGrantToggle(item.account)"
+                  :disabled="!canEnableDingTalkGrant(item.account)"
                   type="checkbox"
-                  @change="onGrantToggleChange(item.account.id, $event)"
+                  @change="onGrantToggleChange(item.account, $event)"
                 />
                 <span>绑定后同时开通钉钉登录</span>
               </label>
+              <p v-if="shouldWarnMissingOpenIdForGrant(item.account)" class="directory-admin__status directory-admin__status--error">
+                openId 缺失，当前无法同时开通钉钉登录；请重新同步目录或让用户完成钉钉 OAuth 绑定后再开通。
+              </p>
+              <p v-if="shouldWarnMissingOpenIdForGrant(item.account)" class="directory-admin__hint">
+                修复建议：若该成员刚完成钉钉登录/绑定，先刷新当前成员；若刷新后仍缺失 openId，请检查钉钉目录同步返回值，再决定是否重新同步当前集成。
+              </p>
+              <div v-if="shouldWarnMissingOpenIdForGrant(item.account)" class="directory-admin__actions">
+                <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="reviewProcessingAccountId === item.account.id" @click="void refreshSingleReviewItem(item.account.id)">
+                  刷新当前成员
+                </button>
+                <router-link
+                  v-if="item.account.localUser"
+                  class="directory-admin__button directory-admin__button--secondary"
+                  :to="buildUserManagementLocation(item.account.localUser.id, item.account)"
+                >
+                  前往用户管理
+                </router-link>
+              </div>
             </div>
             <div v-if="item.kind === 'pending_binding' && item.recommendations.length > 0" class="directory-admin__search-results">
               <button
@@ -984,6 +1044,7 @@
               <p class="directory-admin__hint"><strong>邮箱：</strong>{{ account.email || '无' }}</p>
               <p class="directory-admin__hint"><strong>手机：</strong>{{ account.mobile || '无' }}</p>
               <p class="directory-admin__hint"><strong>Corp：</strong>{{ account.corpId || '未记录' }}</p>
+              <p class="directory-admin__hint"><strong>最近目录同步：</strong>{{ formatDateTime(account.updatedAt) }}</p>
             </div>
 
             <p class="directory-admin__hint">
@@ -1012,12 +1073,31 @@
               </label>
               <label class="directory-admin__toggle directory-admin__toggle--compact">
                 <input
-                  :checked="readGrantToggle(account.id)"
+                  :checked="readAccountGrantToggle(account)"
+                  :disabled="!canEnableDingTalkGrant(account)"
                   type="checkbox"
-                  @change="onGrantToggleChange(account.id, $event)"
+                  @change="onGrantToggleChange(account, $event)"
                 />
                 <span>绑定后同时开通钉钉登录</span>
               </label>
+              <p v-if="shouldWarnMissingOpenIdForGrant(account)" class="directory-admin__status directory-admin__status--error">
+                openId 缺失，当前无法同时开通钉钉登录；请重新同步目录或让用户完成钉钉 OAuth 绑定后再开通。
+              </p>
+              <p v-if="shouldWarnMissingOpenIdForGrant(account)" class="directory-admin__hint">
+                修复建议：若该成员刚完成钉钉登录/绑定，先刷新当前成员；若刷新后仍缺失 openId，请检查钉钉目录同步返回值，再决定是否重新同步当前集成。
+              </p>
+              <div v-if="shouldWarnMissingOpenIdForGrant(account)" class="directory-admin__actions">
+                <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="bindingAccountId === account.id" @click="void refreshSingleAccount(account.id)">
+                  刷新当前成员
+                </button>
+                <router-link
+                  v-if="account.localUser"
+                  class="directory-admin__button directory-admin__button--secondary"
+                  :to="buildUserManagementLocation(account.localUser.id, account)"
+                >
+                  前往用户管理
+                </router-link>
+              </div>
             </div>
 
             <div class="directory-admin__actions">
@@ -1238,6 +1318,7 @@ type DirectoryIntegration = {
   config: {
     appKey: string
     appSecretConfigured: boolean
+    workNotificationAgentIdConfigured?: boolean
     rootDepartmentId: string
     baseUrl: string | null
     pageSize: number
@@ -1484,6 +1565,8 @@ type DirectoryDraft = {
   corpId: string
   appKey: string
   appSecret: string
+  workNotificationAgentId: string
+  workNotificationTestUserId: string
   rootDepartmentId: string
   baseUrl: string
   pageSize: number
@@ -1585,6 +1668,8 @@ const draft = reactive<DirectoryDraft>({
   corpId: '',
   appKey: '',
   appSecret: '',
+  workNotificationAgentId: '',
+  workNotificationTestUserId: '',
   rootDepartmentId: '1',
   baseUrl: '',
   pageSize: 50,
@@ -1717,7 +1802,7 @@ const selectedRecommendedReviewBindEntries = computed(() => (
     .map((item) => ({
       accountId: item.account.id,
       localUserRef: item.recommendations[0].localUser.id,
-      enableDingTalkGrant: readGrantToggle(item.account.id),
+      enableDingTalkGrant: readAccountGrantToggle(item.account),
     }))
 ))
 const selectedReviewBindEntries = computed(() => (
@@ -1726,7 +1811,7 @@ const selectedReviewBindEntries = computed(() => (
     .map((item) => ({
       accountId: item.account.id,
       localUserRef: readBindingDraft(item.account).trim(),
-      enableDingTalkGrant: readGrantToggle(item.account.id),
+      enableDingTalkGrant: readAccountGrantToggle(item.account),
     }))
     .filter((item) => item.localUserRef.length > 0)
 ))
@@ -1834,6 +1919,8 @@ function resetDraft() {
   draft.corpId = ''
   draft.appKey = ''
   draft.appSecret = ''
+  draft.workNotificationAgentId = ''
+  draft.workNotificationTestUserId = ''
   draft.rootDepartmentId = '1'
   draft.baseUrl = ''
   draft.pageSize = 50
@@ -1855,6 +1942,8 @@ function applyIntegrationToDraft(integration: DirectoryIntegration) {
   draft.corpId = integration.corpId
   draft.appKey = integration.config.appKey
   draft.appSecret = ''
+  draft.workNotificationAgentId = ''
+  draft.workNotificationTestUserId = ''
   draft.rootDepartmentId = integration.config.rootDepartmentId
   draft.baseUrl = integration.config.baseUrl ?? ''
   draft.pageSize = integration.config.pageSize
@@ -2257,13 +2346,30 @@ function readGrantToggle(accountId: string): boolean {
   return grantToggles[accountId] ?? true
 }
 
+function canEnableDingTalkGrant(account: Partial<Pick<DirectoryAccount, 'corpId' | 'openId'>>): boolean {
+  return !((account.corpId?.trim() ?? '').length > 0 && (account.openId?.trim() ?? '').length === 0)
+}
+
+function readAccountGrantToggle(account: DirectoryAccount): boolean {
+  return canEnableDingTalkGrant(account) && readGrantToggle(account.id)
+}
+
+function shouldWarnMissingOpenIdForGrant(account: Partial<Pick<DirectoryAccount, 'corpId' | 'openId'>>): boolean {
+  return !canEnableDingTalkGrant(account)
+}
+
 function updateGrantToggle(accountId: string, value: boolean) {
   grantToggles[accountId] = value
 }
 
-function onGrantToggleChange(accountId: string, event: Event) {
+function onGrantToggleChange(account: DirectoryAccount, event: Event) {
   const target = event.target
-  updateGrantToggle(accountId, target instanceof HTMLInputElement ? target.checked : true)
+  if (!canEnableDingTalkGrant(account)) {
+    updateGrantToggle(account.id, false)
+    setStatus(`目录成员 ${account.name} 缺少 openId，暂不能开通钉钉登录；请重新同步目录或完成钉钉 OAuth 绑定`, 'error')
+    return
+  }
+  updateGrantToggle(account.id, target instanceof HTMLInputElement ? target.checked : true)
 }
 
 function clearBindingSearch(accountId: string) {
@@ -2436,6 +2542,66 @@ async function testIntegration() {
     setStatus('目录连通性测试通过')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '目录连通性测试失败', 'error')
+  } finally {
+    busy.value = false
+  }
+}
+
+function buildWorkNotificationPayload() {
+  return {
+    integrationId: selectedIntegration.value?.id ?? '',
+    agentId: draft.workNotificationAgentId.trim(),
+    recipientUserId: draft.workNotificationTestUserId.trim(),
+  }
+}
+
+async function testWorkNotificationAgentId() {
+  if (!selectedIntegration.value) {
+    setStatus('请先选择或创建钉钉目录集成', 'error')
+    return
+  }
+  busy.value = true
+  try {
+    const response = await apiFetch('/api/admin/directory/dingtalk/work-notification/test', {
+      method: 'POST',
+      body: JSON.stringify(buildWorkNotificationPayload()),
+    })
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '工作通知 Agent ID 测试失败'))
+    const notificationSent = body?.data?.result?.notificationSent === true
+    setStatus(notificationSent
+      ? '工作通知 Agent ID 测试通过，已发送测试消息'
+      : '工作通知 Agent ID 基础测试通过；未填写测试接收人，未发送真实工作通知')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '工作通知 Agent ID 测试失败', 'error')
+  } finally {
+    busy.value = false
+  }
+}
+
+async function saveWorkNotificationAgentId() {
+  if (!selectedIntegration.value) {
+    setStatus('请先选择或创建钉钉目录集成', 'error')
+    return
+  }
+  if (!draft.workNotificationAgentId.trim()) {
+    setStatus('请填写工作通知 Agent ID', 'error')
+    return
+  }
+  busy.value = true
+  try {
+    const response = await apiFetch('/api/admin/directory/dingtalk/work-notification', {
+      method: 'PUT',
+      body: JSON.stringify(buildWorkNotificationPayload()),
+    })
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '保存工作通知 Agent ID 失败'))
+    const currentIntegrationId = selectedIntegration.value.id
+    setStatus('工作通知 Agent ID 已验证并保存')
+    await loadIntegrations()
+    await selectIntegration(currentIntegrationId)
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '保存工作通知 Agent ID 失败', 'error')
   } finally {
     busy.value = false
   }
@@ -2849,7 +3015,7 @@ async function bindAccount(account: DirectoryAccount) {
       method: 'POST',
       body: JSON.stringify({
         localUserRef: readBindingDraft(account).trim(),
-        enableDingTalkGrant: readGrantToggle(account.id),
+        enableDingTalkGrant: readAccountGrantToggle(account),
       }),
     })
     const body = await readJson(response)
@@ -3029,13 +3195,15 @@ async function handleDirectoryNavigationChange(): Promise<void> {
   ])
 }
 
-function buildUserManagementLocation(userId: string, account: Pick<DirectoryAccount, 'id' | 'integrationId'>): string {
-  const params = new URLSearchParams({
-    userId,
-    source: 'directory-sync',
-    integrationId: account.integrationId,
-    accountId: account.id,
-  })
+function buildUserManagementLocation(userId: string, account: Pick<DirectoryAccount, 'id' | 'integrationId'> & Partial<Pick<DirectoryAccount, 'corpId' | 'openId'>>): string {
+  const params = new URLSearchParams()
+  params.set('userId', userId)
+  params.set('source', 'directory-sync')
+  params.set('integrationId', account.integrationId)
+  params.set('accountId', account.id)
+  if (shouldWarnMissingOpenIdForGrant(account)) {
+    params.set('filter', 'dingtalk-openid-missing')
+  }
   return `/admin/users?${params.toString()}`
 }
 
@@ -3138,7 +3306,7 @@ async function handleReviewBind(item: DirectoryReviewItem) {
     await submitReviewBindings([{
       accountId: item.account.id,
       localUserRef: readBindingDraft(item.account).trim(),
-      enableDingTalkGrant: readGrantToggle(item.account.id),
+      enableDingTalkGrant: readAccountGrantToggle(item.account),
     }], `待处理成员 ${item.account.name} 已完成快速绑定`, '快速绑定失败')
   } finally {
     reviewProcessingAccountId.value = ''
@@ -3194,7 +3362,7 @@ async function backfillUserMobileAndBindReviewItem(item: DirectoryReviewItem) {
     await submitReviewBindings([{
       accountId: item.account.id,
       localUserRef: selectedUser.id,
-      enableDingTalkGrant: readGrantToggle(item.account.id),
+      enableDingTalkGrant: readAccountGrantToggle(item.account),
     }], `待处理成员 ${item.account.name} 已回填手机号并完成绑定`, '回填手机号并绑定失败')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '回填手机号并绑定失败', 'error')
@@ -3228,7 +3396,7 @@ async function createAndBindDirectoryAccountUser(account: DirectoryAccount, cont
         email: nextDraft.email || undefined,
         username: nextDraft.username || undefined,
         mobile: nextDraft.mobile || undefined,
-        enableDingTalkGrant: readGrantToggle(account.id),
+        enableDingTalkGrant: readAccountGrantToggle(account),
       }),
     })
     const body = await readJson(response)
@@ -3310,7 +3478,7 @@ async function confirmRecommendedReviewBinding(item: DirectoryReviewItem) {
     await submitReviewBindings([{
       accountId: item.account.id,
       localUserRef: recommendation.localUser.id,
-      enableDingTalkGrant: readGrantToggle(item.account.id),
+      enableDingTalkGrant: readAccountGrantToggle(item.account),
     }], `待处理成员 ${item.account.name} 已确认推荐绑定`, '确认推荐绑定失败')
   } finally {
     reviewProcessingAccountId.value = ''

@@ -312,7 +312,7 @@ const weekdays = computed(() => {
 })
 
 const dateFields = computed(() =>
-  props.fields.filter((f) => f.type === 'date' || f.type === 'string' || f.type === 'number'),
+  props.fields.filter((f) => f.type === 'date' || f.type === 'dateTime' || f.type === 'string' || f.type === 'number'),
 )
 
 const dateField = computed(() =>

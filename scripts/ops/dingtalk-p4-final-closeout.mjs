@@ -27,6 +27,8 @@ session workspace and handoff packet.
 Options:
   --session-dir <dir>                 DingTalk P4 smoke session directory (required)
   --packet-output-dir <dir>           Packet directory, default ${DEFAULT_PACKET_ROOT}/<session-name>-final
+  --include-mobile-signoff <dir>      Optional strict mobile public-form signoff output dir
+  --require-mobile-signoff-pass       Require every included mobile signoff output to be strict passing
   --docs-output-dir <dir>             Final docs directory, default ${DEFAULT_DOCS_DIR}
   --date <yyyymmdd>                   Final docs date suffix, default current UTC date
   --summary-json <file>               Closeout JSON summary, default <packet-output-dir>/closeout-summary.json
@@ -58,6 +60,8 @@ function parseArgs(argv) {
   const opts = {
     sessionDir: '',
     packetOutputDir: '',
+    includeMobileSignoffDirs: [],
+    requireMobileSignoffPass: false,
     docsOutputDir: path.resolve(process.cwd(), DEFAULT_DOCS_DIR),
     date: defaultDate(),
     summaryJson: '',
@@ -76,6 +80,13 @@ function parseArgs(argv) {
       case '--packet-output-dir':
         opts.packetOutputDir = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
         i += 1
+        break
+      case '--include-mobile-signoff':
+        opts.includeMobileSignoffDirs.push(path.resolve(process.cwd(), readRequiredValue(argv, i, arg)))
+        i += 1
+        break
+      case '--require-mobile-signoff-pass':
+        opts.requireMobileSignoffPass = true
         break
       case '--docs-output-dir':
         opts.docsOutputDir = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
@@ -161,10 +172,22 @@ function validatePaths(opts) {
   if (pathsOverlap(opts.packetOutputDir, opts.sessionDir)) {
     throw new Error('--packet-output-dir must not be the session directory or overlap with it')
   }
+  if (opts.requireMobileSignoffPass && opts.includeMobileSignoffDirs.length === 0) {
+    throw new Error('--require-mobile-signoff-pass requires at least one --include-mobile-signoff directory')
+  }
 }
 
 function scriptPath(envName, fallback) {
   return process.env[envName] || fallback
+}
+
+function mobileSignoffHandoffArgs(opts) {
+  const args = []
+  for (const dir of opts.includeMobileSignoffDirs) {
+    args.push('--include-mobile-signoff', dir)
+  }
+  if (opts.requireMobileSignoffPass) args.push('--require-mobile-signoff-pass')
+  return args
 }
 
 function runNodeStep(id, label, script, args) {
@@ -262,6 +285,10 @@ function buildSummary(opts, steps) {
       smokeStatus: status?.overallStatus ?? 'not_available',
       handoffStatus: handoff?.status ?? 'not_available',
       publishStatus: handoff?.publishCheck?.status ?? status?.handoff?.publishStatus ?? 'not_available',
+      mobileSignoffRequired: opts.requireMobileSignoffPass,
+      mobileSignoffCount: handoff?.mobileSignoff?.includedCount
+        ?? handoff?.publishCheck?.includedMobileSignoffCount
+        ?? 0,
       secretFindingCount: Array.isArray(handoff?.publishCheck?.secretFindings)
         ? handoff.publishCheck.secretFindings.length
         : status?.handoff?.secretFindingCount ?? 0,
@@ -316,6 +343,8 @@ ${stepRows.join('\n')}
 - Smoke status: **${summary.final.smokeStatus}**
 - Handoff status: **${summary.final.handoffStatus}**
 - Publish status: **${summary.final.publishStatus}**
+- Mobile signoff gate: **${summary.final.mobileSignoffRequired ? 'required' : 'not_required'}**
+- Included mobile signoff count: **${summary.final.mobileSignoffCount}**
 - Secret findings: **${summary.final.secretFindingCount}**
 
 ## Failures
@@ -366,6 +395,7 @@ function runCloseout(opts) {
         opts.sessionDir,
         '--output-dir',
         opts.packetOutputDir,
+        ...mobileSignoffHandoffArgs(opts),
       ],
     ))
   }

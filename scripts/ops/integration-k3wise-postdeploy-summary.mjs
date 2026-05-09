@@ -20,6 +20,9 @@ smoke evidence JSON file.
 Options:
   --input <path>     Evidence JSON path
   --missing-ok       Render NOT RUN and exit 0 when the evidence file is missing
+  --require-auth-signoff
+                      Render internal-trial signoff as blocked unless the smoke
+                      evidence contains an authenticated PASS
   --help             Show this help
 `)
 }
@@ -36,6 +39,7 @@ function parseArgs(argv = process.argv.slice(2)) {
   const opts = {
     input: '',
     missingOk: false,
+    requireAuthSignoff: false,
     help: false,
   }
 
@@ -48,6 +52,9 @@ function parseArgs(argv = process.argv.slice(2)) {
         break
       case '--missing-ok':
         opts.missingOk = true
+        break
+      case '--require-auth-signoff':
+        opts.requireAuthSignoff = true
         break
       case '--help':
       case '-h':
@@ -65,26 +72,70 @@ function parseArgs(argv = process.argv.slice(2)) {
   return opts
 }
 
-function renderMissingSummary(inputPath) {
-  return [
+function markdownText(value) {
+  return String(value).replace(/\r?\n|\r/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
+function markdownInlineCode(value) {
+  const text = markdownText(value)
+  const runs = text.match(/`+/g) || ['']
+  const fenceLength = Math.max(1, ...runs.map((run) => run.length + 1))
+  const fence = '`'.repeat(fenceLength)
+  const content = text.startsWith('`') || text.endsWith('`') ? ` ${text} ` : text
+  return `${fence}${content}${fence}`
+}
+
+function renderMissingSummary(inputPath, { requireAuthSignoff = false } = {}) {
+  const lines = []
+  if (requireAuthSignoff) {
+    lines.push('- Internal trial signoff: **BLOCKED**')
+    lines.push('- Signoff reason: evidence file missing; authenticated smoke did not run')
+  }
+  lines.push(
     '- Status: **NOT RUN**',
-    `- Reason: evidence file missing at \`${inputPath || 'unknown'}\``,
+    `- Reason: evidence file missing at ${markdownInlineCode(inputPath || 'unknown')}`,
     '',
-  ].join('\n')
+  )
+  return lines.join('\n')
+}
+
+function inferInternalTrialSignoff(evidence) {
+  if (evidence?.signoff?.internalTrial === 'pass') {
+    return { status: 'PASS', reason: evidence.signoff.reason || 'authenticated smoke passed' }
+  }
+  if (evidence?.signoff?.internalTrial === 'blocked') {
+    return { status: 'BLOCKED', reason: evidence.signoff.reason || 'authenticated smoke did not pass' }
+  }
+  if (evidence?.ok && evidence?.authenticated) {
+    return { status: 'PASS', reason: 'authenticated smoke passed' }
+  }
+  if (!evidence?.authenticated) {
+    return { status: 'BLOCKED', reason: 'authenticated checks did not run' }
+  }
+  return { status: 'BLOCKED', reason: 'one or more smoke checks failed' }
+}
+
+function renderSignoffLines(evidence, { requireAuthSignoff = false } = {}) {
+  if (!requireAuthSignoff) return []
+  const signoff = inferInternalTrialSignoff(evidence)
+  return [
+    `- Internal trial signoff: **${signoff.status}**`,
+    `- Signoff reason: ${markdownText(signoff.reason)}`,
+  ]
 }
 
 function formatDetailValue(value) {
   if (Array.isArray(value)) {
-    if (value.length === 0) return '`none`'
-    return value.map((item) => `\`${String(item)}\``).join(', ')
+    if (value.length === 0) return markdownInlineCode('none')
+    return value.map((item) => markdownInlineCode(item)).join(', ')
   }
   if (value && typeof value === 'object') {
     const entries = Object.entries(value)
       .filter(([, child]) => Array.isArray(child) ? child.length > 0 : child !== undefined && child !== null)
-      .map(([key, child]) => `${key}: ${formatDetailValue(child)}`)
-    return entries.length > 0 ? entries.join('; ') : '`none`'
+      .map(([key, child]) => `${markdownText(key)}: ${formatDetailValue(child)}`)
+    return entries.length > 0 ? entries.join('; ') : markdownInlineCode('none')
   }
-  return `\`${String(value)}\``
+  return markdownInlineCode(value)
 }
 
 function summarizeCheckDetails(check) {
@@ -102,19 +153,20 @@ function summarizeCheckDetails(check) {
   return lines
 }
 
-function renderEvidenceSummary(evidence) {
+function renderEvidenceSummary(evidence, options = {}) {
   const summary = evidence && typeof evidence === 'object' ? evidence.summary || {} : {}
   const checks = Array.isArray(evidence?.checks) ? evidence.checks : []
   const status = evidence?.ok ? 'PASS' : 'FAIL'
   const lines = [
+    ...renderSignoffLines(evidence, options),
     `- Status: **${status}**`,
-    `- Base URL: \`${evidence?.baseUrl || 'unknown'}\``,
-    `- Authenticated checks: \`${evidence?.authenticated ? 'yes' : 'no'}\``,
-    `- Summary: \`${Number(summary.pass || 0)} pass / ${Number(summary.skipped || 0)} skipped / ${Number(summary.fail || 0)} fail\``,
+    `- Base URL: ${markdownInlineCode(evidence?.baseUrl || 'unknown')}`,
+    `- Authenticated checks: ${markdownInlineCode(evidence?.authenticated ? 'yes' : 'no')}`,
+    `- Summary: ${markdownInlineCode(`${Number(summary.pass || 0)} pass / ${Number(summary.skipped || 0)} skipped / ${Number(summary.fail || 0)} fail`)}`,
     '- Checks:',
   ]
   for (const check of checks) {
-    lines.push(`  - \`${check?.id || 'unknown'}\`: \`${check?.status || 'unknown'}\``)
+    lines.push(`  - ${markdownInlineCode(check?.id || 'unknown')}: ${markdownInlineCode(check?.status || 'unknown')}`)
     if (check?.status === 'fail') {
       lines.push(...summarizeCheckDetails(check))
     }
@@ -147,11 +199,11 @@ async function runCli(argv = process.argv.slice(2)) {
   const inputPath = path.resolve(opts.input)
   try {
     const evidence = await readEvidence(inputPath)
-    console.log(renderEvidenceSummary(evidence))
+    console.log(renderEvidenceSummary(evidence, { requireAuthSignoff: opts.requireAuthSignoff }))
     return 0
   } catch (error) {
     if (opts.missingOk && error && error.code === 'ENOENT') {
-      console.log(renderMissingSummary(opts.input))
+      console.log(renderMissingSummary(opts.input, { requireAuthSignoff: opts.requireAuthSignoff }))
       return 0
     }
     throw error
@@ -174,9 +226,13 @@ if (entryPath && import.meta.url === entryPath) {
 export {
   K3WisePostdeploySummaryError,
   formatDetailValue,
+  inferInternalTrialSignoff,
+  markdownInlineCode,
+  markdownText,
   parseArgs,
   renderEvidenceSummary,
   renderMissingSummary,
+  renderSignoffLines,
   summarizeCheckDetails,
   runCli,
 }

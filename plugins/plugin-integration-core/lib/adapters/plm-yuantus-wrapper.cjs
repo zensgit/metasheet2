@@ -51,7 +51,8 @@ function isPlainObject(value) {
 
 function normalizeString(value) {
   if (value === undefined || value === null || value === '') return null
-  return String(value)
+  const normalized = String(value).trim()
+  return normalized.length > 0 ? normalized : null
 }
 
 function requireString(value, message, details = {}) {
@@ -62,9 +63,24 @@ function requireString(value, message, details = {}) {
 
 function firstDefined(...values) {
   for (const value of values) {
+    if (typeof value === 'string' && value.trim().length === 0) continue
     if (value !== undefined && value !== null && value !== '') return value
   }
   return null
+}
+
+function normalizeFiniteNumber(value, message, details = {}) {
+  if (typeof value === 'number') {
+    if (Number.isFinite(value)) return value
+    throw new AdapterValidationError(message, details)
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().replace(/,/g, '')
+    if (!normalized) throw new AdapterValidationError(message, details)
+    const numeric = Number(normalized)
+    if (Number.isFinite(numeric)) return numeric
+  }
+  throw new AdapterValidationError(message, details)
 }
 
 function getPath(value, path) {
@@ -159,15 +175,12 @@ function normalizeBomLine(raw = {}, systemId, parent = {}) {
   const childId = normalizeString(firstDefined(raw.childId, raw.child_id, raw.componentId, raw.component_id, raw.itemId, raw.item_id))
   const childCode = normalizeString(firstDefined(raw.childCode, raw.child_code, raw.componentCode, raw.component_code, raw.itemCode, raw.item_code, raw.code))
   const quantityValue = firstDefined(raw.quantity, raw.qty, raw.FQty, raw.amount)
-  const quantity = quantityValue === null ? Number.NaN : Number(quantityValue)
-  if (!Number.isFinite(quantity)) {
-    throw new AdapterValidationError('PLM BOM quantity is required and must be numeric', {
-      object: 'bom',
-      field: 'quantity',
-      parentCode,
-      childCode,
-    })
-  }
+  const quantity = normalizeFiniteNumber(quantityValue, 'PLM BOM quantity is required and must be numeric', {
+    object: 'bom',
+    field: 'quantity',
+    parentCode,
+    childCode,
+  })
   const resolvedParentCode = requireString(parentCode, 'PLM BOM parentCode is required', {
     object: 'bom',
     field: 'parentCode',
@@ -442,6 +455,7 @@ module.exports = {
     flattenBomNode,
     isBomTreeRecord,
     normalizeBomLine,
+    normalizeFiniteNumber,
     normalizeMaterial,
     unwrapQueryResult,
   },

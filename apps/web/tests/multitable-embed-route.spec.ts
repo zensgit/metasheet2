@@ -63,6 +63,16 @@ describe('multitable app shell route wiring', () => {
     })
   })
 
+  it('maps forced non-grid view modes for direct smoke links', async () => {
+    const props = await resolveMultitableProps('/multitable/sheet_orders/view_gantt?mode=gantt')
+
+    expect(props).toMatchObject({
+      sheetId: 'sheet_orders',
+      viewId: 'view_gantt',
+      mode: 'gantt',
+    })
+  })
+
   it('maps comment jump query state into workbench props', async () => {
     const props = await resolveMultitableProps('/multitable/sheet_orders/view_grid?baseId=base_ops&recordId=rec_123&commentId=cmt_42&fieldId=fld_notes&openComments=true')
 

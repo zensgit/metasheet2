@@ -2,6 +2,7 @@ import { createHash } from 'crypto'
 
 import { loadFieldsForSheet, loadSheetRow } from './loaders'
 import { MultitableRecordNotFoundError, MultitableRecordValidationError } from './record-errors'
+import type { MultitableField } from './field-codecs'
 
 export type MultitableRecordsQueryFn = (
   sql: string,
@@ -37,6 +38,10 @@ export type LoadedMultitableRecord = {
   sheetId: string
   version: number
   data: Record<string, unknown>
+  createdBy?: string | null
+  modifiedBy?: string | null
+  createdAt?: string | null
+  updatedAt?: string | null
 }
 
 export type CursorPaginatedResult<T> = {
@@ -172,12 +177,59 @@ async function loadSheetAndFields(
   return { sheet, fields }
 }
 
-function mapRecordRow(row: any): LoadedMultitableRecord {
+function toIsoString(value: unknown): string | null {
+  if (value instanceof Date) return value.toISOString()
+  if (typeof value === 'string' && value.trim()) return value
+  return null
+}
+
+function injectSystemFieldValues(
+  data: Record<string, unknown>,
+  row: any,
+  fields: MultitableField[],
+): Record<string, unknown> {
+  const hasSystemFields = fields.some((field) =>
+    field.type === 'createdTime' ||
+    field.type === 'modifiedTime' ||
+    field.type === 'createdBy' ||
+    field.type === 'modifiedBy',
+  )
+  if (!hasSystemFields) {
+    return data
+  }
+
+  const next = { ...data }
+  const values: Record<string, unknown> = {
+    createdTime: toIsoString(row.created_at),
+    modifiedTime: toIsoString(row.updated_at),
+    createdBy: typeof row.created_by === 'string' ? row.created_by : null,
+    modifiedBy: typeof row.modified_by === 'string' ? row.modified_by : null,
+  }
+
+  for (const field of fields) {
+    if (field.type in values) {
+      next[field.id] = values[field.type]
+    }
+  }
+
+  return next
+}
+
+function mapRecordRow(row: any, fields: MultitableField[]): LoadedMultitableRecord {
+  const data = normalizeRecordData(row.data)
+  const createdBy = typeof row.created_by === 'string' ? row.created_by : null
+  const modifiedBy = typeof row.modified_by === 'string' ? row.modified_by : null
+  const createdAt = toIsoString(row.created_at)
+  const updatedAt = toIsoString(row.updated_at)
   return {
     id: String(row.id),
     sheetId: String(row.sheet_id),
     version: Number(row.version ?? 1),
-    data: normalizeRecordData(row.data),
+    data: injectSystemFieldValues(data, row, fields),
+    ...(createdBy !== null ? { createdBy } : {}),
+    ...(modifiedBy !== null ? { modifiedBy } : {}),
+    ...(createdAt !== null ? { createdAt } : {}),
+    ...(updatedAt !== null ? { updatedAt } : {}),
   }
 }
 
@@ -238,7 +290,7 @@ export async function queryRecords(
   const offsetParamIndex = offset !== undefined ? params.length : null
 
   const sqlParts = [
-    'SELECT id, sheet_id, version, data FROM meta_records',
+    'SELECT id, sheet_id, version, data, created_at, updated_at, created_by, modified_by FROM meta_records',
     `WHERE ${where.join(' AND ')}`,
     orderSql,
   ]
@@ -250,7 +302,7 @@ export async function queryRecords(
   }
 
   const recordRes = await query(sqlParts.join(' '), params)
-  return (recordRes.rows as any[]).map(mapRecordRow)
+  return (recordRes.rows as any[]).map((row) => mapRecordRow(row, fields))
 }
 
 /**
@@ -309,14 +361,14 @@ export async function queryRecordsWithCursor(
     : `ORDER BY id ${direction}`
 
   const sql = [
-    'SELECT id, sheet_id, version, data FROM meta_records',
+    'SELECT id, sheet_id, version, data, created_at, updated_at, created_by, modified_by FROM meta_records',
     `WHERE ${where.join(' AND ')}`,
     orderSql,
     `LIMIT $${fetchLimitIndex}`,
   ].join(' ')
 
   const recordRes = await query(sql, params)
-  const rows = (recordRes.rows as any[]).map(mapRecordRow)
+  const rows = (recordRes.rows as any[]).map((row) => mapRecordRow(row, fields))
 
   const hasMore = rows.length > limit
   const items = hasMore ? rows.slice(0, limit) : rows

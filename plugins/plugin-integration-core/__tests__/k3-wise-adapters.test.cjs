@@ -332,6 +332,47 @@ async function testK3SqlServerChannel() {
   const disallowedRead = await disallowed.read({ object: 'material' }).catch((error) => error)
   assert.ok(disallowedRead instanceof AdapterValidationError, 'read table must be allowlisted')
 
+  const readOnlyScoped = createK3WiseSqlServerChannel({
+    system: createSqlSystem({
+      allowedTables: [],
+      readTables: ['dbo.integration_material_stage'],
+      writeTables: [],
+      objects: {
+        material_stage: {
+          table: 'dbo.integration_material_stage',
+          operations: ['read', 'upsert'],
+          writeMode: 'middle-table',
+          keyField: 'FNumber',
+        },
+      },
+    }),
+    queryExecutor,
+  })
+  const readOnlyWrite = await readOnlyScoped.upsert({
+    object: 'material_stage',
+    records: [{ FNumber: 'MAT-READ-ONLY' }],
+  }).catch((error) => error)
+  assert.ok(readOnlyWrite instanceof AdapterValidationError, 'readTables must not authorize middle-table writes')
+
+  const writeOnlyScoped = createK3WiseSqlServerChannel({
+    system: createSqlSystem({
+      allowedTables: [],
+      readTables: [],
+      writeTables: ['dbo.t_ICItem'],
+      objects: {
+        material: {
+          table: 'dbo.t_ICItem',
+          operations: ['read', 'upsert'],
+          writeMode: 'middle-table',
+          keyField: 'FNumber',
+        },
+      },
+    }),
+    queryExecutor,
+  })
+  const writeOnlyRead = await writeOnlyScoped.read({ object: 'material' }).catch((error) => error)
+  assert.ok(writeOnlyRead instanceof AdapterValidationError, 'writeTables must not authorize reads')
+
   const rawIdentifier = (() => {
     try {
       createK3WiseSqlServerChannel({

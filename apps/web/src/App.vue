@@ -38,7 +38,7 @@
             <router-link v-if="canManageUsers" to="/admin/permissions" class="nav-link">{{ navLabels.permissions }}</router-link>
             <router-link v-if="canManageUsers" to="/admin/audit" class="nav-link">{{ navLabels.adminAudit }}</router-link>
             <router-link v-if="canManageUsers" to="/approvals/metrics" class="nav-link">{{ navLabels.approvalMetrics }}</router-link>
-            <router-link v-if="isAdmin" to="/integrations/k3-wise" class="nav-link">{{ navLabels.erpIntegration }}</router-link>
+            <router-link v-if="canUseIntegration" to="/integrations/k3-wise" class="nav-link">{{ navLabels.erpIntegration }}</router-link>
             <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
             <router-link v-if="canUsePlm" to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
             <router-link v-if="canUsePlm" to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
@@ -86,7 +86,7 @@ import { getApiBase } from './utils/api'
 const route = useRoute()
 const { navItems: pluginNavItems, fetchPlugins } = usePlugins()
 const { isAttendanceFocused, isPlmWorkbenchFocused, hasFeature, loadProductFeatures } = useFeatureFlags()
-const { clearToken, getAccessSnapshot, getToken } = useAuth()
+const { clearToken, getAccessSnapshot, getToken, hasPermission } = useAuth()
 const { locale, isZh, setLocale } = useLocale()
 
 const showNav = computed(() => {
@@ -105,6 +105,10 @@ const isAdmin = computed(() => hasFeature('attendanceAdmin'))
 const canManageUsers = computed(() => {
   void route.fullPath
   return getAccessSnapshot().isAdmin
+})
+const canUseIntegration = computed(() => {
+  void route.fullPath
+  return hasPermission('integration:write')
 })
 const isLoggedIn = computed(() => {
   void route.fullPath

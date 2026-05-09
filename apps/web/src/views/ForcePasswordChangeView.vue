@@ -33,10 +33,14 @@
           />
         </label>
 
-        <button class="force-password-submit" type="submit" :disabled="submitting">
+        <button class="force-password-submit" type="submit" :disabled="submitting || loggingOut">
           {{ submitting ? (isZh ? '提交中...' : 'Submitting...') : (isZh ? '保存并继续' : 'Save and continue') }}
         </button>
       </form>
+
+      <button class="force-password-logout" type="button" :disabled="submitting || loggingOut" @click="void logout()">
+        {{ loggingOut ? (isZh ? '退出中...' : 'Signing out...') : (isZh ? '退出登录' : 'Sign out') }}
+      </button>
 
       <p v-if="error" class="force-password-error">{{ error }}</p>
     </div>
@@ -66,6 +70,7 @@ const { loadProductFeatures, resolveHomePath } = useFeatureFlags()
 const password = ref('')
 const confirmPassword = ref('')
 const submitting = ref(false)
+const loggingOut = ref(false)
 const error = ref('')
 const accountEmail = ref('')
 
@@ -101,7 +106,7 @@ async function ensureEligibleSession(): Promise<boolean> {
 }
 
 async function submit(): Promise<void> {
-  if (submitting.value) return
+  if (submitting.value || loggingOut.value) return
   error.value = ''
 
   if (!password.value || !confirmPassword.value) {
@@ -150,6 +155,29 @@ async function submit(): Promise<void> {
       : (isZh.value ? '修改密码失败，请稍后重试。' : 'Failed to change password. Please try again.')
   } finally {
     submitting.value = false
+  }
+}
+
+async function logout(): Promise<void> {
+  if (loggingOut.value) return
+  loggingOut.value = true
+  error.value = ''
+
+  try {
+    await apiFetch('/api/auth/logout', {
+      method: 'POST',
+      suppressUnauthorizedRedirect: true,
+    })
+  } catch {
+    // Local session cleanup below is still the source of truth for account switching.
+  }
+
+  auth.clearToken()
+  clearStoredAuthState()
+  try {
+    await router.replace(ROUTE_PATHS.LOGIN)
+  } finally {
+    loggingOut.value = false
   }
 }
 
@@ -227,6 +255,27 @@ onMounted(() => {
 }
 
 .force-password-submit:disabled {
+  opacity: 0.7;
+  cursor: wait;
+}
+
+.force-password-logout {
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #334155;
+  background: #fff;
+  cursor: pointer;
+}
+
+.force-password-logout:hover:not(:disabled) {
+  border-color: #94a3b8;
+  background: #f8fafc;
+}
+
+.force-password-logout:disabled {
   opacity: 0.7;
   cursor: wait;
 }

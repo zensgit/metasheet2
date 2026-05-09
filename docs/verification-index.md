@@ -23,6 +23,35 @@ Entry points:
   - Verification: `docs/development/github-stability-summary-polish-verification-20260406.md`
   - Notes: adds machine-readable `summary.json`, failure reasons, and next actions while keeping GitHub in passive recording mode.
 
+## 2026-05-05 GitHub Actions Runtime Readiness
+
+- Runtime readiness for K3 deploy auth and DingTalk Alertmanager self-heal:
+  - Script: `scripts/ops/github-actions-runtime-readiness.mjs`
+  - Tests: `scripts/ops/github-actions-runtime-readiness.test.mjs`
+  - Design: `docs/development/github-actions-runtime-readiness-design-20260505.md`
+  - Verification: `docs/development/github-actions-runtime-readiness-verification-20260505.md`
+  - Notes: checks required GitHub secret names and repo variables without reading or printing secret values.
+
+## 2026-05-05 DingTalk Alertmanager Webhook Secret Ops
+
+- Safe operator path for DingTalk Alertmanager webhook secret setup:
+  - Script: `scripts/ops/set-dingtalk-alertmanager-webhook-secret.mjs`
+  - Tests: `scripts/ops/set-dingtalk-alertmanager-webhook-secret.test.mjs`
+  - Runbook: `docs/operations/dingtalk-alertmanager-webhook-secret-runbook.md`
+  - Design: `docs/development/dingtalk-alertmanager-webhook-secret-ops-design-20260505.md`
+  - Verification: `docs/development/dingtalk-alertmanager-webhook-secret-ops-verification-20260505.md`
+  - Notes: reads the webhook from stdin/env, writes through `gh secret set`, and prints only redacted metadata.
+
+## 2026-05-05 DingTalk Alertmanager Closeout Runner
+
+- One-command closeout for DingTalk Alertmanager stability after webhook secret setup:
+  - Script: `scripts/ops/dingtalk-alertmanager-closeout.mjs`
+  - Tests: `scripts/ops/dingtalk-alertmanager-closeout.test.mjs`
+  - Runbook: `docs/operations/dingtalk-alertmanager-closeout-runbook.md`
+  - Design: `docs/development/dingtalk-alertmanager-closeout-runner-design-20260505.md`
+  - Verification: `docs/development/dingtalk-alertmanager-closeout-runner-verification-20260505.md`
+  - Notes: checks runtime readiness, optionally dispatches the workflow, waits, downloads artifacts, and prints a redacted closeout summary.
+
 ## 2026-04-07 Multitable Staging Profile Baseline
 
 - Multitable staging profile threshold follow-up:

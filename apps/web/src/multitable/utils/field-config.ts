@@ -33,7 +33,7 @@ export type NormalizedAttachmentFieldProperty = {
   acceptedMimeTypes: string[]
 }
 
-// MF2 batch-1 field types (currency / percent / rating / url / email / phone).
+// MF2 batch-1 field types (currency / percent / rating / url / email / phone / barcode / location).
 export type NormalizedCurrencyFieldProperty = {
   code: string
   decimals: number
@@ -45,6 +45,18 @@ export type NormalizedPercentFieldProperty = {
 
 export type NormalizedRatingFieldProperty = {
   max: number
+}
+
+export type NormalizedNumberFieldProperty = {
+  decimals: number | null
+  thousands: boolean
+  unit: string
+}
+
+export type NormalizedAutoNumberFieldProperty = {
+  prefix: string
+  digits: number
+  start: number
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -167,6 +179,32 @@ export function resolveRatingFieldProperty(value: unknown): NormalizedRatingFiel
   return { max }
 }
 
+export function resolveNumberFieldProperty(value: unknown): NormalizedNumberFieldProperty {
+  const property = asRecord(value)
+  const decimalsRaw = typeof property.decimals === 'number' ? property.decimals : Number(property.decimals)
+  const decimals = Number.isFinite(decimalsRaw) && decimalsRaw >= 0 && decimalsRaw <= 6
+    ? Math.round(decimalsRaw)
+    : null
+  const unit = typeof property.unit === 'string' ? property.unit.trim().slice(0, 24) : ''
+  return {
+    decimals,
+    thousands: property.thousands === true,
+    unit,
+  }
+}
+
+export function resolveAutoNumberFieldProperty(value: unknown): NormalizedAutoNumberFieldProperty {
+  const property = asRecord(value)
+  const prefix = typeof property.prefix === 'string' ? property.prefix.trim().slice(0, 32) : ''
+  const digitsRaw = typeof property.digits === 'number' ? property.digits : Number(property.digits)
+  const digits = Number.isFinite(digitsRaw) && digitsRaw >= 0 && digitsRaw <= 12
+    ? Math.floor(digitsRaw)
+    : 0
+  const startRaw = typeof property.start === 'number' ? property.start : Number(property.start ?? property.startAt)
+  const start = Number.isFinite(startRaw) && startRaw > 0 ? Math.floor(startRaw) : 1
+  return { prefix, digits, start }
+}
+
 const CURRENCY_SYMBOL_BY_CODE: Record<string, string> = {
   CNY: '¥',
   USD: '$',
@@ -210,6 +248,27 @@ export function formatPercentValue(value: number, decimals: number): string {
   } catch {
     return `${value.toFixed(decimals)}%`
   }
+}
+
+function splitFixedNumber(value: number, decimals: number | null): { sign: string; integer: string; fraction: string } {
+  const raw = decimals === null ? String(value) : value.toFixed(decimals)
+  const sign = raw.startsWith('-') ? '-' : ''
+  const unsigned = sign ? raw.slice(1) : raw
+  const [integer = '0', fraction = ''] = unsigned.split('.')
+  return { sign, integer, fraction }
+}
+
+function groupThousands(integer: string): string {
+  return integer.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+}
+
+export function formatNumberValue(value: number, property: unknown): string {
+  const { decimals, thousands, unit } = resolveNumberFieldProperty(property)
+  if (decimals === null && !thousands && !unit) return String(value)
+  const { sign, integer, fraction } = splitFixedNumber(value, decimals)
+  const whole = thousands ? groupThousands(integer) : integer
+  const numeric = fraction.length > 0 ? `${sign}${whole}.${fraction}` : `${sign}${whole}`
+  return unit ? `${numeric} ${unit}` : numeric
 }
 
 const URL_REGEX = /^https?:\/\/[^\s]+$/i

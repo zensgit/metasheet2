@@ -13,8 +13,28 @@
       <span class="meta-cell-renderer__date">{{ dateDisplay }}</span>
     </template>
 
+    <!-- datetime -->
+    <template v-else-if="field.type === 'dateTime'">
+      <span class="meta-cell-renderer__date-time">{{ displayValue }}</span>
+    </template>
+
+    <!-- system fields -->
+    <template v-else-if="isSystemField">
+      <span class="meta-cell-renderer__system" :title="displayValue">{{ displayValue }}</span>
+    </template>
+
     <!-- number -->
     <template v-else-if="field.type === 'number'">{{ displayValue }}</template>
+
+    <!-- barcode -->
+    <template v-else-if="field.type === 'barcode'">
+      <code class="meta-cell-renderer__barcode">{{ displayValue }}</code>
+    </template>
+
+    <!-- location -->
+    <template v-else-if="field.type === 'location'">
+      <span class="meta-cell-renderer__location" :title="displayValue">{{ displayValue }}</span>
+    </template>
 
     <!-- boolean -->
     <template v-else-if="field.type === 'boolean'">
@@ -102,6 +122,7 @@ import type { MetaAttachment, MetaField, LinkedRecordSummary } from '../../types
 import MetaAttachmentList from '../MetaAttachmentList.vue'
 import { isPersonField } from '../../utils/link-fields'
 import { formatFieldDisplay } from '../../utils/field-display'
+import { isSystemFieldType } from '../../utils/system-fields'
 
 const props = defineProps<{ field: MetaField; value: unknown; linkSummaries?: LinkedRecordSummary[]; attachmentSummaries?: MetaAttachment[] }>()
 
@@ -113,6 +134,7 @@ const displayValue = computed(() => {
     attachmentSummaries: props.attachmentSummaries,
   })
 })
+const isSystemField = computed(() => isSystemFieldType(props.field.type))
 
 const dateDisplay = computed(() => {
   const v = props.value
@@ -232,6 +254,16 @@ const conditionalClass = computed(() => {
   color: #227447;
 }
 .meta-cell-renderer__date { color: #606266; }
+.meta-cell-renderer__date-time {
+  color: #475569;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
+.meta-cell-renderer__system {
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
 .meta-cell-renderer--empty { color: #ccc; }
 .meta-cell-renderer--positive { color: #67c23a; }
 .meta-cell-renderer--negative { color: #f56c6c; }
@@ -242,6 +274,25 @@ const conditionalClass = computed(() => {
 .meta-cell-renderer__rating {
   color: #f5a623;
   letter-spacing: 1px;
+}
+.meta-cell-renderer__barcode {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  font-size: 12px;
+  background: #f6f8fa;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: #334155;
+}
+.meta-cell-renderer__location {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #0f766e;
+}
+.meta-cell-renderer__location::before {
+  content: '\1F4CD';
+  font-size: 12px;
 }
 .meta-cell-renderer__url,
 .meta-cell-renderer__email,

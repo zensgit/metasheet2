@@ -29,7 +29,19 @@ export interface FormulaContext {
 
 // AST Node Types
 export interface ASTNode {
-  type: 'number' | 'boolean' | 'null' | 'array' | 'string' | 'cell' | 'range' | 'error' | 'function' | 'operator'
+  type:
+    | 'number'
+    | 'boolean'
+    | 'null'
+    | 'array'
+    | 'string'
+    | 'cell'
+    | 'range'
+    | 'error'
+    | 'function'
+    | 'operator'
+    | 'unary'
+    | 'percent'
 }
 
 export interface NumberNode extends ASTNode {
@@ -87,6 +99,17 @@ export interface OperatorNode extends ASTNode {
   right: ASTNodeUnion
 }
 
+export interface UnaryNode extends ASTNode {
+  type: 'unary'
+  operator: '+' | '-'
+  operand: ASTNodeUnion
+}
+
+export interface PercentNode extends ASTNode {
+  type: 'percent'
+  operand: ASTNodeUnion
+}
+
 export type ASTNodeUnion =
   | NumberNode
   | BooleanNode
@@ -98,6 +121,8 @@ export type ASTNodeUnion =
   | ErrorNode
   | FunctionNode
   | OperatorNode
+  | UnaryNode
+  | PercentNode
 
 // Function type for spreadsheet functions
 type SpreadsheetFunction = (...args: unknown[]) => unknown
@@ -232,23 +257,27 @@ export class FormulaEngine {
    * Parse formula string into AST
    */
   private parseFormula(formula: string): ASTNodeUnion {
+    formula = formula.trim()
+
     // Simple tokenizer and parser (simplified for demo)
     // In production, use a proper parser like PEG.js or write a full recursive descent parser
 
     // Check if it's a function call
-    const functionMatch = formula.match(/^([A-Z]+)\((.*)\)$/)
-    if (functionMatch) {
-      const functionName = functionMatch[1]
-      const args = this.parseArguments(functionMatch[2])
+    const functionCall = this.parseFunctionCall(formula)
+    if (functionCall?.type === 'malformed') {
+      return { type: 'error', value: '#ERROR!' }
+    }
+    if (functionCall?.type === 'function') {
+      const args = this.parseArguments(functionCall.argsString)
       return {
         type: 'function',
-        name: functionName,
+        name: functionCall.name,
         arguments: args
       }
     }
 
     // Check if it's a cell reference
-    const cellMatch = formula.match(/^([A-Z]+)(\d+)$/)
+    const cellMatch = formula.match(/^([A-Za-z]+)(\d+)$/)
     if (cellMatch) {
       return {
         type: 'cell',
@@ -258,7 +287,7 @@ export class FormulaEngine {
     }
 
     // Check if it's a range
-    const rangeMatch = formula.match(/^([A-Z]+\d+):([A-Z]+\d+)$/)
+    const rangeMatch = formula.match(/^([A-Za-z]+\d+):([A-Za-z]+\d+)$/)
     if (rangeMatch) {
       const start = this.parseCellReference(rangeMatch[1])
       const end = this.parseCellReference(rangeMatch[2])
@@ -269,18 +298,64 @@ export class FormulaEngine {
       }
     }
 
-    // Check for operators
-    // Sort operators by length descending to match >= before >
-    const operators = ['>=', '<=', '<>', '+', '-', '*', '/', '=', '>', '<']
-    for (const op of operators) {
-      const parts = formula.split(op)
-      if (parts.length === 2) {
+    // Check if it's a number before scanning operators so signed and exponent
+    // literals such as -3 and 1e-3 are not split as binary operations.
+    const strictNum = Number(formula)
+    if (formula.trim().length > 0 && Number.isFinite(strictNum)) {
+      return { type: 'number', value: strictNum }
+    }
+
+    if (this.isWrappedExpression(formula)) {
+      return this.parseFormula(formula.slice(1, -1).trim())
+    }
+
+    // Check for left-associative operators from lowest to highest precedence.
+    // Split on the rightmost top-level operator to recursively keep the left
+    // side grouped first.
+    const operatorGroups = [
+      ['>=', '<=', '<>', '=', '>', '<'],
+      ['&'],
+      ['+', '-'],
+      ['*', '/']
+    ]
+    for (const operators of operatorGroups) {
+      const operatorMatch = this.findTopLevelOperator(formula, operators)
+      if (operatorMatch) {
         return {
           type: 'operator',
-          operator: op,
-          left: this.parseFormula(parts[0].trim()),
-          right: this.parseFormula(parts[1].trim())
+          operator: operatorMatch.operator,
+          left: this.parseFormula(formula.slice(0, operatorMatch.index).trim()),
+          right: this.parseFormula(
+            formula.slice(operatorMatch.index + operatorMatch.operator.length).trim()
+          )
         }
+      }
+    }
+
+    const unaryExpression = this.parseUnaryExpression(formula)
+    if (unaryExpression) {
+      return unaryExpression
+    }
+
+    // Exponentiation is right-associative and binds tighter than unary signs,
+    // so parse it after unary handling and split on the leftmost top-level ^.
+    const exponentMatch = this.findTopLevelOperator(formula, ['^'], 'right')
+    if (exponentMatch) {
+      return {
+        type: 'operator',
+        operator: exponentMatch.operator,
+        left: this.parseFormula(formula.slice(0, exponentMatch.index).trim()),
+        right: this.parseFormula(
+          formula.slice(exponentMatch.index + exponentMatch.operator.length).trim()
+        )
+      }
+    }
+
+    const percentIndex = this.findTrailingTopLevelPercent(formula)
+    if (percentIndex !== null) {
+      return {
+        type: 'percent',
+        operand: this.parseFormula(formula.slice(0, percentIndex).trim())
       }
     }
 
@@ -289,25 +364,13 @@ export class FormulaEngine {
     if (formula.toUpperCase() === 'FALSE') return { type: 'boolean', value: false }
     if (formula.toUpperCase() === 'NULL') return { type: 'null', value: null }
 
-    // Check if it's a number
-    const num = parseFloat(formula)
-    if (!isNaN(num) && isFinite(num) && !formula.includes(' ')) {
-       // Only treat as number if it parses fully and doesn't contain spaces (to avoid "5 + 3" -> 5)
-       // Actually parseFloat("5 + 3") is 5.
-       // We want to avoid treating "5 + 3" as number 5.
-       // If the string contains spaces and parses as number, it might be partial match.
-       // But " 5 " is valid number.
-       // "5 + 3" is NOT a valid number representation in strict sense.
-       // Number() constructor is stricter than parseFloat.
-       const strictNum = Number(formula)
-       if (!isNaN(strictNum)) {
-         return { type: 'number', value: strictNum }
-       }
-    }
-
     // Check if it's a string (quoted)
     if (formula.startsWith('"') && formula.endsWith('"')) {
-      return { type: 'string', value: formula.slice(1, -1) }
+      try {
+        return { type: 'string', value: JSON.parse(formula) as string }
+      } catch {
+        return { type: 'error', value: '#ERROR!' }
+      }
     }
 
     // Check if it's an array literal (e.g. [[1, 2], [3, 4]])
@@ -334,6 +397,198 @@ export class FormulaEngine {
     }
 
     return { type: 'string', value: formula }
+  }
+
+  private parseFunctionCall(
+    formula: string
+  ): { type: 'function'; name: string; argsString: string } | { type: 'malformed' } | null {
+    const nameMatch = formula.match(/^([A-Za-z][A-Za-z0-9_]*)\s*\(/)
+    if (!nameMatch) return null
+
+    const openParenIndex = formula.indexOf('(', nameMatch[1].length)
+    let depth = 0
+    let inQuotes = false
+
+    for (let i = openParenIndex; i < formula.length; i++) {
+      const char = formula[i]
+
+      if (char === '"' && (i === 0 || formula[i - 1] !== '\\')) {
+        inQuotes = !inQuotes
+        continue
+      }
+
+      if (inQuotes) continue
+
+      if (char === '(') {
+        depth++
+        continue
+      }
+
+      if (char === ')') {
+        depth--
+        if (depth === 0) {
+          if (i !== formula.length - 1) return null
+          return {
+            type: 'function',
+            name: nameMatch[1].toUpperCase(),
+            argsString: formula.slice(openParenIndex + 1, i)
+          }
+        }
+      }
+    }
+
+    return { type: 'malformed' }
+  }
+
+  private findTrailingTopLevelPercent(formula: string): number | null {
+    const trimmed = formula.trimEnd()
+    if (!trimmed.endsWith('%')) return null
+
+    let depth = 0
+    let inQuotes = false
+
+    for (let i = 0; i < trimmed.length; i++) {
+      const char = trimmed[i]
+
+      if (char === '"' && (i === 0 || trimmed[i - 1] !== '\\')) {
+        inQuotes = !inQuotes
+        continue
+      }
+
+      if (inQuotes) continue
+
+      if (char === '(' || char === '[') {
+        depth++
+        continue
+      }
+
+      if (char === ')' || char === ']') {
+        depth--
+        continue
+      }
+
+      if (char === '%' && depth === 0 && i === trimmed.length - 1) {
+        return trimmed.slice(0, i).trim().length > 0 ? i : null
+      }
+    }
+
+    return null
+  }
+
+  /**
+   * Find an operator that is not inside quoted strings, function arguments, or arrays.
+   */
+  private findTopLevelOperator(
+    formula: string,
+    operators: string[],
+    associativity: 'left' | 'right' = 'left'
+  ): { index: number; operator: string } | null {
+    let depth = 0
+    let inQuotes = false
+    let match: { index: number; operator: string } | null = null
+    const sortedOperators = [...operators].sort((a, b) => b.length - a.length)
+
+    for (let i = 0; i < formula.length; i++) {
+      const char = formula[i]
+
+      if (char === '"' && (i === 0 || formula[i - 1] !== '\\')) {
+        inQuotes = !inQuotes
+        continue
+      }
+
+      if (inQuotes) continue
+
+      if (char === '(' || char === '[') {
+        depth++
+        continue
+      }
+      if (char === ')' || char === ']') {
+        depth--
+        continue
+      }
+
+      if (depth === 0) {
+        for (const operator of sortedOperators) {
+          if (formula.startsWith(operator, i)) {
+            if ((operator === '+' || operator === '-') && this.isUnarySign(formula, i)) {
+              continue
+            }
+            if (associativity === 'right') {
+              return { index: i, operator }
+            }
+            match = { index: i, operator }
+            i += operator.length - 1
+            break
+          }
+        }
+      }
+    }
+
+    return match
+  }
+
+  private isUnarySign(formula: string, index: number): boolean {
+    let previousIndex = index - 1
+    while (previousIndex >= 0 && /\s/.test(formula[previousIndex])) {
+      previousIndex--
+    }
+
+    if (previousIndex < 0) return true
+    const previous = formula[previousIndex]
+    if (previous === 'e' || previous === 'E') {
+      const exponentIsAdjacent = previousIndex === index - 1
+      const mantissaTail = formula[previousIndex - 1]
+      return exponentIsAdjacent && (/\d/.test(mantissaTail) || mantissaTail === '.')
+    }
+    return ['+', '-', '*', '/', '^', '=', '>', '<', '(', '[', ','].includes(previous)
+  }
+
+  private parseUnaryExpression(formula: string): UnaryNode | null {
+    const firstTokenIndex = formula.search(/\S/)
+    if (firstTokenIndex < 0) return null
+
+    const operator = formula[firstTokenIndex]
+    if (operator !== '+' && operator !== '-') return null
+    if (!this.isUnarySign(formula, firstTokenIndex)) return null
+
+    const operand = formula.slice(firstTokenIndex + 1).trim()
+    if (operand.length === 0) return null
+
+    return {
+      type: 'unary',
+      operator,
+      operand: this.parseFormula(operand),
+    }
+  }
+
+  private isWrappedExpression(formula: string): boolean {
+    if (!formula.startsWith('(') || !formula.endsWith(')')) return false
+
+    let depth = 0
+    let inQuotes = false
+
+    for (let i = 0; i < formula.length; i++) {
+      const char = formula[i]
+
+      if (char === '"' && (i === 0 || formula[i - 1] !== '\\')) {
+        inQuotes = !inQuotes
+        continue
+      }
+
+      if (inQuotes) continue
+
+      if (char === '(') {
+        depth++
+        continue
+      }
+
+      if (char === ')') {
+        depth--
+        if (depth === 0 && i < formula.length - 1) return false
+      }
+    }
+
+    return depth === 0 && !inQuotes
   }
 
   /**
@@ -418,6 +673,17 @@ export class FormulaEngine {
         return this.evaluateOperator(node.operator, left, right)
       }
 
+      case 'unary': {
+        const value = await this.evaluateAST(node.operand, context)
+        const numericValue = Number(value)
+        return node.operator === '-' ? -numericValue : numericValue
+      }
+
+      case 'percent': {
+        const value = await this.evaluateAST(node.operand, context)
+        return Number(value) / 100
+      }
+
       default:
         throw new Error(`Unknown node type: ${(node as ASTNode).type}`)
     }
@@ -428,10 +694,12 @@ export class FormulaEngine {
    */
   private evaluateOperator(operator: string, left: unknown, right: unknown): number | boolean | string {
     switch (operator) {
-      case '+': return (left as number) + (right as number)
+      case '+': return Number(left) + Number(right)
+      case '&': return String(left) + String(right)
       case '-': return (left as number) - (right as number)
       case '*': return (left as number) * (right as number)
       case '/': return right === 0 ? '#DIV/0!' : (left as number) / (right as number)
+      case '^': return Math.pow(Number(left), Number(right))
       case '=': return left === right
       case '>': return (left as number) > (right as number)
       case '<': return (left as number) < (right as number)
@@ -528,7 +796,7 @@ export class FormulaEngine {
    * Parse cell reference string
    */
   private parseCellReference(ref: string): { row: number; col: number } {
-    const match = ref.match(/^([A-Z]+)(\d+)$/)
+    const match = ref.match(/^([A-Za-z]+)(\d+)$/)
     if (!match) throw new Error(`Invalid cell reference: ${ref}`)
 
     return {
@@ -541,7 +809,7 @@ export class FormulaEngine {
    * Convert column letter to index
    */
   private columnLetterToIndex(letter: string): number {
-    return letter
+    return letter.toUpperCase()
       .split('')
       .reduce((acc, char) => acc * 26 + char.charCodeAt(0) - 64, 0) - 1
   }

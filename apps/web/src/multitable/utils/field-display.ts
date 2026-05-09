@@ -1,17 +1,68 @@
 import type { LinkedRecordSummary, MetaAttachment, MetaField } from '../types'
 import {
   formatCurrencyValue,
+  formatNumberValue,
   formatPercentValue,
+  resolveAutoNumberFieldProperty,
   resolveCurrencyFieldProperty,
   resolvePercentFieldProperty,
   resolveRatingFieldProperty,
 } from './field-config'
+import { isSystemFieldType } from './system-fields'
 
 function formatDate(value: unknown): string {
   if (value === null || value === undefined || value === '') return '—'
   const date = new Date(String(value))
   if (Number.isNaN(date.getTime())) return String(value)
   return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
+export function resolveDateTimeTimezone(property?: Record<string, unknown> | null): string {
+  const timezone = typeof property?.timezone === 'string' && property.timezone.trim().length > 0
+    ? property.timezone.trim()
+    : 'UTC'
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(new Date(0))
+    return timezone
+  } catch {
+    return 'UTC'
+  }
+}
+
+export function dateTimeInputValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') return ''
+  const date = new Date(String(value))
+  if (Number.isNaN(date.getTime())) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+export function dateTimeValueFromLocalInput(value: string): string | null {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  const date = new Date(trimmed)
+  return Number.isNaN(date.getTime()) ? null : date.toISOString()
+}
+
+function formatDateTime(value: unknown, timezone?: string): string {
+  if (value === null || value === undefined || value === '') return '—'
+  const date = new Date(String(value))
+  if (Number.isNaN(date.getTime())) return String(value)
+  return date.toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: timezone,
+  })
+}
+
+function formatAutoNumber(value: unknown, property: Record<string, unknown> | undefined): string {
+  const num = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(num)) return String(value)
+  const { prefix, digits } = resolveAutoNumberFieldProperty(property)
+  return `${prefix}${String(Math.trunc(num)).padStart(digits, '0')}`
 }
 
 function summarizeLinkCount(field: MetaField, count: number): string {
@@ -25,6 +76,29 @@ function summarizeAttachmentCount(count: number): string {
   return count === 1 ? '1 attachment' : `${count} attachments`
 }
 
+export function locationAddressValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') return ''
+  if (typeof value === 'string' || typeof value === 'number') return String(value)
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    const obj = value as Record<string, unknown>
+    const rawAddress = obj.address ?? obj.name ?? obj.fullAddress
+    if (rawAddress !== null && rawAddress !== undefined && String(rawAddress).trim().length > 0) {
+      return String(rawAddress)
+    }
+    const latitude = obj.latitude ?? obj.lat
+    const longitude = obj.longitude ?? obj.lng ?? obj.lon
+    if (latitude !== null && latitude !== undefined && longitude !== null && longitude !== undefined) {
+      return `${latitude}, ${longitude}`
+    }
+  }
+  return String(value)
+}
+
+export function locationValueFromAddress(address: string): { address: string } | null {
+  const trimmed = address.trim()
+  return trimmed ? { address: trimmed } : null
+}
+
 export function formatFieldDisplay(params: {
   field: MetaField
   value: unknown
@@ -35,7 +109,17 @@ export function formatFieldDisplay(params: {
   if (value === null || value === undefined || value === '') return '—'
 
   if (field.type === 'date') return formatDate(value)
+  if (field.type === 'dateTime') return formatDateTime(value, resolveDateTimeTimezone(field.property))
+  if (field.type === 'createdTime' || field.type === 'modifiedTime') return formatDateTime(value)
+  if (field.type === 'autoNumber') return formatAutoNumber(value, field.property)
+  if (isSystemFieldType(field.type)) return String(value)
   if (field.type === 'boolean') return value ? 'Yes' : 'No'
+
+  if (field.type === 'number') {
+    const num = typeof value === 'number' ? value : Number(value)
+    if (!Number.isFinite(num)) return String(value)
+    return formatNumberValue(num, field.property)
+  }
 
   if (field.type === 'currency') {
     const num = typeof value === 'number' ? value : Number(value)
@@ -57,6 +141,11 @@ export function formatFieldDisplay(params: {
     const { max } = resolveRatingFieldProperty(field.property)
     const filled = Math.max(0, Math.min(max, Math.round(num)))
     return `${'★'.repeat(filled)}${'☆'.repeat(max - filled)}`
+  }
+
+  if (field.type === 'location') {
+    const location = locationAddressValue(value).trim()
+    return location.length > 0 ? location : '—'
   }
 
   if (field.type === 'select' || field.type === 'multiSelect') {

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   RecordNotFoundError,
+  RecordFieldForbiddenError,
   RecordPatchFieldValidationError,
   RecordPermissionError,
   RecordService,
@@ -60,6 +61,27 @@ function createMockPool(
     if (sql.includes('INSERT INTO meta_records') && sql.includes('RETURNING version')) {
       return responses.INSERT_RECORD ?? { rows: [{ version: 1 }] }
     }
+    if (sql.includes('INSERT INTO meta_record_revisions')) {
+      return responses.INSERT_REVISION ?? { rows: [], rowCount: 1 }
+    }
+    if (sql.includes('FROM meta_record_subscriptions')) {
+      return responses.SELECT_RECORD_SUBSCRIPTIONS ?? { rows: [] }
+    }
+    if (sql.includes('INSERT INTO meta_record_subscription_notifications')) {
+      return responses.INSERT_RECORD_SUBSCRIPTION_NOTIFICATIONS ?? { rows: [], rowCount: 1 }
+    }
+    if (sql.includes('SELECT id, config FROM meta_views WHERE sheet_id = $1 AND type = $2')) {
+      return responses.SELECT_HIERARCHY_VIEWS ?? { rows: [] }
+    }
+    if (sql.includes('SELECT data FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')) {
+      return responses.SELECT_HIERARCHY_PARENT_RECORD ?? { rows: [] }
+    }
+    if (sql.includes('SELECT pg_advisory_xact_lock')) {
+      return responses.ADVISORY_LOCK ?? { rows: [], rowCount: 1 }
+    }
+    if (sql.includes('INSERT INTO meta_field_auto_number_sequences')) {
+      return responses.ALLOCATE_AUTO_NUMBER ?? { rows: [{ start_value: 1 }], rowCount: 1 }
+    }
     if (sql.includes('INSERT INTO meta_links')) {
       return responses.INSERT_LINK ?? { rows: [], rowCount: 1 }
     }
@@ -68,14 +90,14 @@ function createMockPool(
         rows: [{ id: 'rec_existing', sheet_id: 'sheet_ops', created_by: 'user_1' }],
       }
     }
-    if (sql.includes('SELECT id, sheet_id, version FROM meta_records WHERE id = $1 FOR UPDATE')) {
+    if (sql.includes('SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1 FOR UPDATE')) {
       return responses.SELECT_DELETE_FOR_UPDATE ?? {
-        rows: [{ id: 'rec_existing', sheet_id: 'sheet_ops', version: 4 }],
+        rows: [{ id: 'rec_existing', sheet_id: 'sheet_ops', version: 4, data: { fld_title: 'Before' } }],
       }
     }
-    if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
+    if (sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
       return responses.SELECT_PATCH_FOR_UPDATE ?? {
-        rows: [{ id: 'rec_existing', version: 4, created_by: 'user_1' }],
+        rows: [{ id: 'rec_existing', version: 4, data: { fld_title: 'Before' }, created_by: 'user_1' }],
       }
     }
     if (sql.includes('UPDATE meta_records') && sql.includes('RETURNING version')) {
@@ -147,6 +169,21 @@ describe('RecordService', () => {
         fieldIds: ['fld_title'],
       }),
     )
+    expect(pool.queryMock).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO meta_record_revisions'),
+      expect.arrayContaining([
+        expect.any(String),
+        'sheet_ops',
+        result.recordId,
+        1,
+        'create',
+        'rest',
+        'user_1',
+        ['fld_title'],
+        JSON.stringify({ fld_title: 'Alpha' }),
+        JSON.stringify({ fld_title: 'Alpha' }),
+      ]),
+    )
   })
 
   it('creates a record with normalized multiSelect values', async () => {
@@ -174,6 +211,69 @@ describe('RecordService', () => {
       expect.stringContaining('INSERT INTO meta_records'),
       [expect.any(String), 'sheet_ops', JSON.stringify({ fld_tags: ['Urgent', 'VIP'] }), 'user_1'],
     )
+  })
+
+  it('allocates readonly autoNumber values during create', async () => {
+    pool = createMockPool({
+      SELECT_FIELDS: {
+        rows: [
+          { id: 'fld_seq', name: 'No.', type: 'autoNumber', property: { startAt: 10 } },
+          { id: 'fld_title', name: 'Title', type: 'string', property: {} },
+        ],
+      },
+      ALLOCATE_AUTO_NUMBER: { rows: [{ start_value: 10 }] },
+    })
+    const service = new RecordService(pool, eventBus as any)
+
+    const result = await service.createRecord({
+      sheetId: 'sheet_ops',
+      data: { fld_title: 'Alpha' },
+      actorId: 'user_1',
+      capabilities: fullCapabilities,
+    })
+
+    expect(result.data).toEqual({ fld_title: 'Alpha', fld_seq: 10 })
+    expect(pool.queryMock).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO meta_field_auto_number_sequences'),
+      ['fld_seq', 'sheet_ops', 11, 1],
+    )
+    expect(pool.queryMock).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO meta_records'),
+      [expect.any(String), 'sheet_ops', JSON.stringify({ fld_title: 'Alpha', fld_seq: 10 }), 'user_1'],
+    )
+  })
+
+  it('rejects client-supplied autoNumber values during create', async () => {
+    pool = createMockPool({
+      SELECT_FIELDS: {
+        rows: [{ id: 'fld_seq', name: 'No.', type: 'autoNumber', property: {} }],
+      },
+    })
+    const service = new RecordService(pool, eventBus as any)
+
+    await expect(service.createRecord({
+      sheetId: 'sheet_ops',
+      data: { fld_seq: 99 },
+      actorId: 'user_1',
+      capabilities: fullCapabilities,
+    })).rejects.toThrow(RecordFieldForbiddenError)
+  })
+
+  it('preserves not-found priority for missing sheets during create', async () => {
+    pool = createMockPool({
+      SELECT_SHEET: { rows: [] },
+    })
+    const service = new RecordService(pool, eventBus as any)
+
+    await expect(service.createRecord({
+      sheetId: 'sheet_missing',
+      data: { fld_title: 'Alpha' },
+      actorId: 'user_1',
+      capabilities: {
+        ...fullCapabilities,
+        canCreateRecord: false,
+      },
+    })).rejects.toThrow(RecordNotFoundError)
   })
 
   it('rejects create when a linked target record is missing', async () => {
@@ -253,6 +353,78 @@ describe('RecordService', () => {
         recordIds: ['rec_existing'],
       }),
     )
+    expect(pool.queryMock).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO meta_record_revisions'),
+      expect.arrayContaining([
+        expect.any(String),
+        'sheet_ops',
+        'rec_existing',
+        4,
+        'delete',
+        'rest',
+        'user_1',
+        [],
+        JSON.stringify({}),
+        JSON.stringify({ fld_title: 'Before' }),
+      ]),
+    )
+  })
+
+  it('notifies record subscribers after a successful single-record patch and suppresses the actor', async () => {
+    pool = createMockPool({
+      SELECT_RECORD_SUBSCRIPTIONS: {
+        rows: [{ user_id: 'watcher_1' }],
+      },
+    })
+    const service = new RecordService(pool, eventBus as any)
+
+    await service.patchRecord({
+      recordId: 'rec_existing',
+      sheetId: 'sheet_ops',
+      data: { fld_title: 'After' },
+      actorId: 'user_editor',
+      access: { userId: 'user_editor', permissions: [], isAdminRole: false },
+      capabilities: fullCapabilities,
+    })
+
+    expect(pool.queryMock).toHaveBeenCalledWith(
+      expect.stringContaining('FROM meta_record_subscriptions'),
+      ['sheet_ops', 'rec_existing', 'user_editor'],
+    )
+    expect(pool.queryMock).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO meta_record_subscription_notifications'),
+      expect.arrayContaining([
+        expect.stringContaining('"user_id":"watcher_1"'),
+      ]),
+    )
+  })
+
+  it('rejects direct record patches that would create a hierarchy cycle', async () => {
+    pool = createMockPool({
+      SELECT_FIELDS: {
+        rows: [
+          { id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 0 },
+          { id: 'fld_parent', name: 'Parent', type: 'link', property: { foreignSheetId: 'sheet_ops', limitSingleRecord: true }, order: 1 },
+        ],
+      },
+      SELECT_LINK_TARGETS: { rows: [{ id: 'rec_child' }] },
+      SELECT_HIERARCHY_VIEWS: { rows: [{ id: 'view_hierarchy', config: { parentFieldId: 'fld_parent' } }] },
+      SELECT_PATCH_FOR_UPDATE: {
+        rows: [{ id: 'rec_root', version: 4, data: { fld_title: 'Root' }, created_by: 'user_1' }],
+      },
+      SELECT_HIERARCHY_PARENT_RECORD: { rows: [{ data: { fld_parent: ['rec_root'] } }] },
+    })
+    const service = new RecordService(pool, eventBus as any)
+
+    await expect(service.patchRecord({
+      recordId: 'rec_root',
+      sheetId: 'sheet_ops',
+      data: { fld_parent: ['rec_child'] },
+      actorId: 'user_1',
+      access: { userId: 'user_1', permissions: [], isAdminRole: false },
+      capabilities: fullCapabilities,
+    })).rejects.toMatchObject({ code: 'HIERARCHY_CYCLE' })
+    expect(pool.queryMock).not.toHaveBeenCalledWith(expect.stringContaining('UPDATE meta_records'), expect.anything())
   })
 
   it('throws VersionConflictError when delete expectedVersion does not match', async () => {
@@ -352,7 +524,22 @@ describe('RecordService', () => {
     expect(yjsInvalidator).toHaveBeenCalledWith(['rec_existing'])
     expect(pool.queryMock).toHaveBeenCalledWith(
       expect.stringContaining('UPDATE meta_records'),
-      [JSON.stringify({ fld_title: 'Updated', fld_customer: ['rec_customer_2'] }), 'rec_existing', 'sheet_ops'],
+      [JSON.stringify({ fld_title: 'Updated', fld_customer: ['rec_customer_2'] }), 'rec_existing', 'sheet_ops', 'user_1'],
+    )
+    expect(pool.queryMock).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO meta_record_revisions'),
+      expect.arrayContaining([
+        expect.any(String),
+        'sheet_ops',
+        'rec_existing',
+        5,
+        'update',
+        'rest',
+        'user_1',
+        ['fld_title', 'fld_customer'],
+        JSON.stringify({ fld_title: 'Updated', fld_customer: ['rec_customer_2'] }),
+        JSON.stringify({ fld_title: 'Updated', fld_customer: ['rec_customer_2'] }),
+      ]),
     )
     expect(pool.queryMock).toHaveBeenCalledWith(
       expect.stringContaining('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2 AND foreign_record_id = ANY'),
@@ -389,7 +576,7 @@ describe('RecordService', () => {
     expect(result.patch).toEqual({ fld_tags: ['VIP', 'Urgent'] })
     expect(pool.queryMock).toHaveBeenCalledWith(
       expect.stringContaining('UPDATE meta_records'),
-      [JSON.stringify({ fld_tags: ['VIP', 'Urgent'] }), 'rec_existing', 'sheet_ops'],
+      [JSON.stringify({ fld_tags: ['VIP', 'Urgent'] }), 'rec_existing', 'sheet_ops', 'user_1'],
     )
   })
 
