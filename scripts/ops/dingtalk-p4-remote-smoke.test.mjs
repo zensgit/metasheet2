@@ -68,7 +68,14 @@ function createFakeApiServer(options = {}) {
         if (handled) return
       }
 
-      if (req.method === 'GET' && url.pathname === '/health') {
+      if (req.method === 'GET' && url.pathname === '/health' && options.rootHealthHtml) {
+        res.statusCode = 200
+        res.setHeader('Content-Type', 'text/html')
+        res.end('<!doctype html><html><body>frontend health</body></html>')
+        return
+      }
+
+      if (req.method === 'GET' && (url.pathname === '/health' || url.pathname === '/api/health')) {
         sendJson(res, 200, { ok: true })
         return
       }
@@ -150,7 +157,8 @@ function createFakeApiServer(options = {}) {
       const testSendMatch = url.pathname.match(/^\/api\/multitable\/dingtalk-groups\/(dt_group_[12])\/test-send$/)
       if (req.method === 'POST' && testSendMatch) {
         assert.equal(url.searchParams.get('sheetId'), 'sheet_1')
-        assert.match(body.subject, /P4 smoke/)
+        assert.match(body.subject, /P4 metasheet smoke/)
+        assert.match(body.content, /P4 metasheet DingTalk group destination test-send/)
         sendJson(res, 204)
         return
       }
@@ -179,6 +187,8 @@ function createFakeApiServer(options = {}) {
         if (body.actionType === 'send_dingtalk_group_message') {
           assert.deepEqual(body.actionConfig.destinationIds, ['dt_group_1', 'dt_group_2'])
           assert.equal(body.actionConfig.publicFormViewId, 'view_form_1')
+          assert.match(body.actionConfig.titleTemplate, /P4 metasheet/)
+          assert.match(body.actionConfig.bodyTemplate, /P4 metasheet/)
           sendJson(res, 200, { ok: true, data: { rule: { id: 'rule_group_1', actionType: body.actionType } } })
           return
         }
@@ -370,6 +380,43 @@ test('dingtalk-p4-remote-smoke runs API chain, writes pending manual gates, and 
 
     assert.equal(fakeApi.requests.every((request) => request.headers.authorization === 'Bearer secret-admin-token'), true)
     assert.equal(fakeApi.requests.some((request) => request.pathname.endsWith('/dingtalk-person-deliveries')), true)
+  } finally {
+    await fakeApi.close()
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-remote-smoke falls back to API-prefixed health JSON', async () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'smoke')
+  const fakeApi = createFakeApiServer({ rootHealthHtml: true })
+
+  try {
+    const apiRoot = await fakeApi.listen()
+    const result = await runScript([
+      '--api-base',
+      `${apiRoot}/api`,
+      '--web-base',
+      'https://metasheet.example.test',
+      '--auth-token',
+      'secret-admin-token',
+      '--group-a-webhook',
+      'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-a',
+      '--group-b-webhook',
+      'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-b',
+      '--allowed-user',
+      'user_authorized',
+      '--output-dir',
+      outputDir,
+    ])
+
+    assert.equal(result.code, 0, result.stderr || result.stdout)
+    assert.deepEqual(fakeApi.requests.slice(0, 2).map((request) => request.pathname), ['/health', '/api/health'])
+
+    const evidence = JSON.parse(readFileSync(path.join(outputDir, 'evidence.json'), 'utf8'))
+    const healthArtifact = evidence.artifacts.find((artifact) => artifact.kind === 'api-health')
+    assert.equal(healthArtifact.path, '/api/health')
+    assert.equal(evidence.checks.find((check) => check.id === 'create-table-form').status, 'pass')
   } finally {
     await fakeApi.close()
     rmSync(tmpDir, { recursive: true, force: true })

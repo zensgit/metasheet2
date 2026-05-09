@@ -23,7 +23,7 @@ Options:
   --env-file <file>                Optional KEY=VALUE file to read before env/CLI
   --api-base <url>                 Backend API base, default ${DEFAULT_API_BASE}
   --web-base <url>                 Public app base used by DingTalk message links
-  --auth-token <token>             Bearer token presence check only
+  --auth-token <token>             Bearer token used to validate /api/auth/me
   --group-a-webhook <url>          DingTalk group A robot webhook; https://oapi.dingtalk.com/robot/send?access_token=...
   --group-b-webhook <url>          DingTalk group B robot webhook; https://oapi.dingtalk.com/robot/send?access_token=...
   --group-a-secret <secret>        Optional DingTalk group A SEC... secret
@@ -39,7 +39,7 @@ Options:
   --require-person-user            Fail if no person-message local user ID is supplied
   --output-dir <dir>               Output directory, default ${DEFAULT_OUTPUT_ROOT}/<run-id>
   --timeout-ms <ms>                API health timeout, default 10000
-  --skip-api                       Skip GET /health
+  --skip-api                       Skip GET /health and auth token validation
   --help                           Show this help
 
 Environment fallbacks match dingtalk-p4-remote-smoke.mjs:
@@ -278,6 +278,36 @@ function addCheck(summary, id, label, status, details = {}) {
   })
 }
 
+function apiBasePath(value) {
+  try {
+    return new URL(value).pathname.replace(/\/+$/, '')
+  } catch {
+    return ''
+  }
+}
+
+function healthUrlCandidates(apiBase) {
+  const routes = ['/health']
+  const basePath = apiBasePath(apiBase)
+  if (basePath && basePath !== '/' && basePath !== '/health') {
+    routes.push(`${basePath}/health`)
+  }
+  return routes.map((route) => new URL(route, apiBase))
+}
+
+function authMeUrlCandidates(apiBase) {
+  const routes = ['/api/auth/me']
+  const basePath = apiBasePath(apiBase)
+  if (basePath && basePath !== '/') {
+    routes.push(`${basePath}/auth/me`)
+  }
+  return Array.from(new Set(routes)).map((route) => new URL(route, apiBase))
+}
+
+function checkStatus(summary, id) {
+  return summary.checks.find((check) => check.id === id)?.status
+}
+
 function hasFailure(summary) {
   return summary.checks.some((check) => check.status === 'fail')
 }
@@ -432,23 +462,138 @@ async function validateApiHealth(opts, summary) {
     return
   }
 
-  const url = new URL('/health', opts.apiBase)
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), opts.timeoutMs)
+  const healthUrls = healthUrlCandidates(opts.apiBase)
+  let lastFailure = null
   try {
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-      signal: controller.signal,
-    })
-    addCheck(summary, 'api-health', 'Backend /health is reachable', response.status === 200 || response.status === 204 ? 'pass' : 'fail', {
-      statusCode: response.status,
-      url: url.toString(),
+    for (const url of healthUrls) {
+      try {
+        const response = await fetch(url, {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+          signal: controller.signal,
+        })
+        const text = await response.text()
+        if (text) JSON.parse(text)
+        if (response.status === 200 || response.status === 204) {
+          addCheck(summary, 'api-health', 'Backend /health is reachable', 'pass', {
+            statusCode: response.status,
+            url: url.toString(),
+          })
+          return
+        }
+        lastFailure = { statusCode: response.status, url: url.toString() }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        lastFailure = {
+          url: url.toString(),
+          error: redactString(message),
+        }
+      }
+    }
+    addCheck(summary, 'api-health', 'Backend /health is reachable', 'fail', lastFailure ?? {
+      url: healthUrls[0]?.toString() ?? '',
+      error: 'health check failed',
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     addCheck(summary, 'api-health', 'Backend /health is reachable', 'fail', {
-      url: url.toString(),
+      url: healthUrls[0]?.toString() ?? '',
+      error: redactString(message),
+    })
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+async function validateAuthToken(opts, summary) {
+  if (opts.skipApi) {
+    addCheck(summary, 'auth-token-valid', 'Admin/table-owner bearer token can authenticate', 'skipped', { notes: '--skip-api was set' })
+    return
+  }
+
+  if (checkStatus(summary, 'api-base-valid') === 'fail') {
+    addCheck(summary, 'auth-token-valid', 'Admin/table-owner bearer token can authenticate', 'skipped', { notes: 'api-base-valid failed' })
+    return
+  }
+
+  if (checkStatus(summary, 'auth-token-present') !== 'pass') {
+    addCheck(summary, 'auth-token-valid', 'Admin/table-owner bearer token can authenticate', 'skipped', { notes: 'auth-token-present failed' })
+    return
+  }
+
+  if (checkStatus(summary, 'api-health') !== 'pass') {
+    addCheck(summary, 'auth-token-valid', 'Admin/table-owner bearer token can authenticate', 'skipped', { notes: 'api-health did not pass' })
+    return
+  }
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), opts.timeoutMs)
+  const authUrls = authMeUrlCandidates(opts.apiBase)
+  let lastFailure = null
+  try {
+    for (const url of authUrls) {
+      try {
+        const response = await fetch(url, {
+          method: 'GET',
+          headers: {
+            Accept: 'application/json',
+            Authorization: `Bearer ${opts.authToken}`,
+          },
+          signal: controller.signal,
+        })
+        let payload = null
+        const text = await response.text()
+        if (text) {
+          try {
+            payload = JSON.parse(text)
+          } catch {
+            payload = null
+          }
+        }
+
+        const authenticated = response.status === 200 && payload && payload.success !== false && payload.ok !== false
+        if (authenticated) {
+          addCheck(summary, 'auth-token-valid', 'Admin/table-owner bearer token can authenticate', 'pass', {
+            statusCode: response.status,
+            url: url.toString(),
+            role: typeof payload.role === 'string' ? payload.role : undefined,
+            plm: typeof payload.plm === 'boolean' ? payload.plm : undefined,
+          })
+          return
+        }
+
+        const failure = {
+          statusCode: response.status,
+          url: url.toString(),
+          error: response.status === 401
+            ? 'Invalid token'
+            : response.status === 403
+              ? 'Forbidden token'
+              : 'auth check failed',
+        }
+        lastFailure = failure
+        if (response.status === 401 || response.status === 403) {
+          addCheck(summary, 'auth-token-valid', 'Admin/table-owner bearer token can authenticate', 'fail', failure)
+          return
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        lastFailure = {
+          url: url.toString(),
+          error: redactString(message),
+        }
+      }
+    }
+    addCheck(summary, 'auth-token-valid', 'Admin/table-owner bearer token can authenticate', 'fail', lastFailure ?? {
+      url: authUrls[0]?.toString() ?? '',
+      error: 'auth check failed',
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    addCheck(summary, 'auth-token-valid', 'Admin/table-owner bearer token can authenticate', 'fail', {
+      url: authUrls[0]?.toString() ?? '',
       error: redactString(message),
     })
   } finally {
@@ -526,6 +671,7 @@ async function runPreflight(opts) {
   validateAllowlist(opts, summary)
   validateManualTargets(opts, summary)
   await validateApiHealth(opts, summary)
+  await validateAuthToken(opts, summary)
 
   summary.environment = {
     apiBase: opts.apiBase,
