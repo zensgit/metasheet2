@@ -72,19 +72,32 @@ deliberately omitted from this list.
 | K3 WISE version | `k3Wise.version` (audit) | non-empty string |
 | K3 WebAPI URL | `k3Wise.apiUrl` | http or https; URL must NOT contain userinfo and must NOT contain query parameters whose key matches secret patterns (`access_token` / `token` / `password` / `secret` / `sign[ature]` / `api_key` / `session_id` / `auth`) |
 | K3 account id (acctId) | `k3Wise.acctId` | non-empty string |
-| K3 credentials | one of: `credentials.sessionId`, OR `credentials.username` + `credentials.password` | at least one complete pair |
+| K3 credentials | one of: `credentials.sessionId`, OR `credentials.username` + `credentials.password` | C3 (live preflight) accepts either; **C2 (on-prem preflight `--live`) currently requires `K3_USERNAME` + `K3_PASSWORD` env regardless** — see C2-vs-C3 note below |
 | `autoSubmit` | must be `false` (Save-only safety) | enforced — packet build throws if true |
 | `autoAudit` | must be `false` | enforced — packet build throws if true |
+
+**C2 vs C3 K3-credential divergence** (sessionId-only customers): the live PoC
+preflight (`integration-k3wise-live-poc-preflight.mjs`'s `assertK3AuthContract`)
+accepts a `sessionId`-only credential bundle and PASSes. The on-prem preflight
+(`integration-k3wise-onprem-preflight.mjs --live`) does not have an env path
+for sessionId — it always requires `K3_USERNAME` and `K3_PASSWORD` env vars
+and reports `gate-blocked` otherwise. If the customer only supplies a
+sessionId, **C2 will fail with `GATE_BLOCKED` even when the GATE answer is
+contractually complete from C3's perspective.** Workarounds today: provide a
+synthetic placeholder env (not recommended — it lies about what is set), or
+skip C2 in the sessionId-only case and rely on C3 + the postdeploy auth
+smoke. A future on-prem-preflight enhancement would add `K3_SESSION_ID` env
+support.
 
 ### A.3 PLM source (required)
 
 | Field | Purpose | Hard constraint |
 |---|---|---|
-| PLM kind | `plm.kind` (default `plm:yuantus-wrapper`) | non-empty string |
-| Read method | `plm.readMethod` (e.g., `api`, `db`, …) | non-empty string |
-| PLM base URL | `plm.baseUrl` | recommended for `kind` values that talk over HTTP; the live preflight validates it as http/https when supplied |
-| PLM credentials | `plm.credentials.{username,password}` or equivalent | at least one complete pair |
-| Test product id (BOM) | `plm.defaultProductId` or `bom.productId` (one of) | required when `bom.enabled=true` |
+| PLM kind | `plm.kind` (default `plm:yuantus-wrapper`) | optional string in script; defaults applied if missing |
+| Read method | `plm.readMethod` (e.g., `api`, `db`, …) | enforced — `requiredString` throws if missing |
+| PLM base URL | `plm.baseUrl` | optional; the live preflight validates it as http/https when supplied |
+| PLM credentials | `plm.credentials.{username,password}` or equivalent | **customer intake requirement** — needed at C4 (testConnection); **C3 live-preflight does NOT enforce its presence**, so a missing PLM credential will only surface at C4. Operator-review the GATE answer before C4. |
+| Test product id (BOM) | `plm.defaultProductId` or `bom.productId` (one of) | enforced — packet build throws when `bom.enabled=true` and neither is supplied |
 
 ### A.4 Field mappings (required)
 
@@ -99,16 +112,28 @@ If the customer wants the SQL Server side-channel (e.g., for read-only probes
 or middle-table writes), they fill this section. Otherwise leave
 `sqlServer.enabled=false`.
 
+**Script-enforced (build throws if violated)**:
+
 | Field | Purpose | Hard constraint |
 |---|---|---|
-| `sqlServer.enabled` | toggle SQL Server channel | boolean (`true`/`false`/`1`/`0`/`yes`/`no` accepted) |
+| `sqlServer.enabled` | toggle SQL Server channel | accepted booleans: `true`/`false`/`1`/`0`/`yes`/`no` (case-insensitive) |
 | `sqlServer.mode` | `readonly` / `middle-table` / `stored-procedure` | one of those three; otherwise build throws |
-| `sqlServer.server` / `sqlServer.database` | connection target | non-empty when `mode != readonly` |
 | `sqlServer.allowedTables[]` | tables this channel may touch | when `mode != readonly`, must NOT contain K3 core business tables (`t_icitem`, `t_icbom`, `t_icbomchild`); build throws if it does |
-| `sqlServer.middleTables[]` | middle-table targets | required when `mode = middle-table`; same K3-core-table prohibition |
-| `sqlServer.storedProcedures[]` | allowed stored-procedure names | required when `mode = stored-procedure` |
-| `sqlServer.writeCoreTables` | explicit attempt to write K3 core tables | must be `false`; build throws if `true` (Save-only safety) |
-| `sqlServer.credentials` | DB credentials | structured like K3 / PLM credentials |
+| `sqlServer.writeCoreTables` | explicit attempt to write K3 core tables | when `true` and `mode != readonly`, build throws (Save-only safety) |
+
+**Operator-reviewed (NOT script-enforced today)**:
+
+| Field | Purpose | Operator review |
+|---|---|---|
+| `sqlServer.server` / `sqlServer.database` | connection target | Operator must confirm both are present and correct before C4. The script accepts missing values (falls back to `<provided-by-customer>` placeholder when generating the packet). |
+| `sqlServer.middleTables[]` | middle-table targets when `mode = middle-table` | Operator must confirm the table list is non-empty and **does not include K3 core tables**. The script's core-table prohibition only cross-checks `allowedTables`, not `middleTables`; a `middle-table` mode with `t_icitem` in `middleTables` will pass C3 silently. |
+| `sqlServer.storedProcedures[]` | allowed stored-procedure names when `mode = stored-procedure` | Operator must confirm the procedure list is non-empty and matches the customer's stored-procedure interface contract. The script accepts an empty array. |
+| `sqlServer.credentials` | DB credentials | Operator-reviewed at intake; surfaces at C4 testConnection if missing. C3 does not enforce. |
+
+These C3 gaps are intentionally surfaced here so operators do not assume a
+green C3 means the SQL Server channel is fully validated. The on-site review
+of A.5 must be explicit. A future preflight enhancement would extend the
+core-table prohibition to `middleTables` / `storedProcedures` as well.
 
 ### A.6 Rollback contract (required)
 
