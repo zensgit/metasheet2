@@ -61,7 +61,7 @@ async function main() {
   })
   console.log('✓ step 4: mock SQL executor ready (t_ICItem readonly with 1 canned row)')
 
-  let upsertResult, sqlReadResult, sqlWriteRejected
+  let upsertResult, bomUpsertResult, sqlReadResult, sqlWriteRejected
   try {
     // 5a. K3 adapter testConnection
     const k3System = {
@@ -128,6 +128,28 @@ async function main() {
     assert(auditCalls.length === 0, `expected 0 Audit calls (Save-only), got ${auditCalls.length}`)
     console.log(`✓ step 6: K3 Save-only upsert wrote 2 records, 0 Submit, 0 Audit (PoC safety preserved)`)
 
+    // 6b. K3 BOM Save-only upsert with child table payload
+    bomUpsertResult = await k3Adapter.upsert({
+      object: 'bom',
+      records: [
+        {
+          FNumber: 'BOM-MOCK-001',
+          FParentItemNumber: 'MAT-MOCK-001',
+          FChildItems: [
+            { FItemNumber: 'MAT-MOCK-002', FQty: 1 },
+          ],
+        },
+      ],
+      keyFields: ['FNumber'],
+      options: { autoSubmit: false, autoAudit: false },
+    })
+    assert(bomUpsertResult.written === 1, `expected 1 BOM written, got ${bomUpsertResult.written}`)
+    assert(bomUpsertResult.failed === 0, `expected 0 BOM failed, got ${bomUpsertResult.failed}`)
+    const bomSaveCalls = mockK3.calls.filter((call) => call.pathname === '/K3API/BOM/Save')
+    assert(bomSaveCalls.length === 1, `expected 1 BOM Save call, got ${bomSaveCalls.length}`)
+    assert(Array.isArray(bomSaveCalls[0].body?.Model?.FChildItems), 'BOM Save payload must include FChildItems array')
+    console.log('✓ step 6b: K3 BOM Save-only upsert wrote 1 BOM with FChildItems array')
+
     // 7. SQL channel readonly probe + safety check
     try {
       sqlReadResult = await mockSql.query({ sql: 'SELECT FItemID, FNumber, FName FROM dbo.t_ICItem WHERE FNumber = ?', params: ['MAT-EXISTING'] })
@@ -167,7 +189,18 @@ async function main() {
         })),
       },
       deadLetterReplay: { status: 'pass', originalRunId: 'mock-fail-001', replayRunId: 'mock-replay-001' },
-      bomPoC: { status: 'pass', runId: 'mock-bom-001', productId: 'PRODUCT-TEST-001', legacyPipelineOptionsSourceProductId: false },
+      bomPoC: {
+        status: 'pass',
+        runId: 'mock-bom-001',
+        productId: 'PRODUCT-TEST-001',
+        rowsWritten: bomUpsertResult.written,
+        k3Records: bomUpsertResult.results.map((r) => ({
+          bomNumber: r.key,
+          externalId: r.externalId,
+          billNo: r.billNo,
+        })),
+        legacyPipelineOptionsSourceProductId: false,
+      },
       rollback: { status: 'pass', owner: 'mock-admin', evidence: 'TEST-prefixed mock records' },
       customerConfirmation: { status: 'pass', owner: 'mock-customer', confirmedAt: '2026-04-26T01:00:00.000Z' },
     }

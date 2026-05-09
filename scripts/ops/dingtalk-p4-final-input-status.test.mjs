@@ -65,6 +65,7 @@ test('dingtalk-p4-final-input-status reports blocked final inputs without leakin
 
     const summary = JSON.parse(summaryText)
     assert.equal(summary.overallStatus, 'blocked')
+    assert.equal(summary.blockedInputCount, summary.missingInputs.length)
     assert.equal(summary.environment.authTokenPresent, true)
     assert.match(summary.environment.groupAWebhook, /^https:\/\/oapi\.dingtalk\.com\/robot\/send\?<redacted>; \d+ chars$/)
     assert.ok(summary.missingInputs.some((item) => item.id === 'group-b-webhook-present'))
@@ -73,6 +74,7 @@ test('dingtalk-p4-final-input-status reports blocked final inputs without leakin
 
     const markdown = readFileSync(outputMd, 'utf8')
     assert.match(markdown, /Overall Status: `blocked`/)
+    assert.match(markdown, new RegExp(`Blocked Input Count: \`${summary.blockedInputCount}\``))
     assert.doesNotMatch(markdown, /robot-secret-a|secret-admin-token/)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
@@ -110,6 +112,7 @@ test('dingtalk-p4-final-input-status passes complete final inputs', () => {
     const summary = readJson(outputJson)
     assert.equal(summary.overallStatus, 'ready')
     assert.equal(summary.missingInputs.length, 0)
+    assert.equal(summary.blockedInputCount, 0)
     assert.equal(summary.checks.every((check) => check.status === 'pass'), true)
     assert.equal(summary.nextCommands.some((command) => command.includes('--run-smoke-session')), true)
     assert.doesNotMatch(readFileSync(outputMd, 'utf8'), /robot-secret|secret-admin-token/)

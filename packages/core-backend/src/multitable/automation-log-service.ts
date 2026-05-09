@@ -6,6 +6,7 @@
 
 import { sql } from 'kysely'
 import { db } from '../db/db'
+import { toJsonValue } from '../db/type-helpers'
 import type { AutomationExecution, AutomationStepResult } from './automation-executor'
 
 export interface AutomationStats {
@@ -21,6 +22,8 @@ export class AutomationLogService {
    * Record an execution log by inserting into the database.
    */
   async record(execution: AutomationExecution): Promise<void> {
+    // node-postgres treats JS arrays as PostgreSQL array literals unless we cast explicit JSON text.
+    const stepsJsonb = toJsonValue(execution.steps) as unknown as Record<string, unknown>[]
     await db
       .insertInto('multitable_automation_executions')
       .values({
@@ -29,7 +32,7 @@ export class AutomationLogService {
         triggered_by: execution.triggeredBy,
         triggered_at: execution.triggeredAt,
         status: execution.status,
-        steps: execution.steps as unknown as Record<string, unknown>[],
+        steps: stepsJsonb,
         error: execution.error ?? null,
         duration: execution.duration ?? null,
       })

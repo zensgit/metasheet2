@@ -293,6 +293,29 @@ function createApiImplementation(
         autoProvision: false,
         unavailableReason: null,
       },
+      workNotification: {
+        configured: true,
+        available: true,
+        unavailableReason: null,
+        requirements: {
+          appKey: {
+            configured: true,
+            selectedKey: 'DINGTALK_APP_KEY',
+          },
+          appSecret: {
+            configured: true,
+            selectedKey: 'DINGTALK_APP_SECRET',
+          },
+          agentId: {
+            configured: true,
+            selectedKey: 'DINGTALK_AGENT_ID',
+          },
+          baseUrl: {
+            configured: false,
+            selectedKey: null,
+          },
+        },
+      },
       directory: {
         linked: user.directoryLinked,
         linkedCount: user.directoryLinked ? 1 : 0,
@@ -662,6 +685,8 @@ describe('UserManagementView', () => {
     expect(container?.textContent).toContain('插件使用')
     expect(container?.textContent).toContain('服务端已启用钉钉登录')
     expect(container?.textContent).toContain('服务端钉钉登录可用')
+    expect(container?.textContent).toContain('工作通知已配置')
+    expect(container?.textContent).toContain('钉钉工作通知可用')
     expect(container?.textContent).toContain('允许企业：dingcorp、dingcorp-2')
     expect(container?.textContent).toContain('身份 corpId：dingcorp')
     expect(container?.textContent).toContain('Union ID：user-1-union')

@@ -71,3 +71,11 @@ artifacts/dingtalk-staging-evidence-packet/
 # authenticated contract evidence.
 output/integration-k3wise-postdeploy-smoke/
 output/deploy/k3wise-postdeploy-smoke*/
+
+# K3 WISE on-prem preflight artifacts contain deployment topology
+# (docker bridge IPs, migration counts, sanitized DATABASE_URL); operator-only.
+artifacts/integration-k3wise-onprem-preflight/
+
+# K3 WISE internal-trial postdeploy smoke artifacts contain deployment URLs,
+# masked admin signoff metadata, and per-check evidence; operator-only.
+artifacts/integration-k3wise/internal-trial/

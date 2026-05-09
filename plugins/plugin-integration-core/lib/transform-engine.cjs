@@ -33,30 +33,53 @@ function isPlainObject(value) {
 
 function getPath(record, path) {
   if (!path) return undefined
-  return String(path).split('.').reduce((current, key) => {
+  return parsePathSegments(path).reduce((current, part) => {
     if (current === undefined || current === null) return undefined
-    return current[key]
+    const value = current[part.key]
+    return part.array ? (Array.isArray(value) ? value[0] : undefined) : value
   }, record)
 }
 
+function parsePathSegments(path) {
+  return String(path || '').split('.').filter(Boolean).map((part) => {
+    const array = part.endsWith('[]')
+    const key = array ? part.slice(0, -2) : part
+    if (!key) {
+      throw new TransformError('targetField contains an empty path segment', { segment: part })
+    }
+    return { key, array }
+  })
+}
+
 function setPath(record, path, value) {
-  const parts = String(path || '').split('.').filter(Boolean)
+  const parts = parsePathSegments(path)
   if (parts.length === 0) {
     throw new TransformError('targetField is required')
   }
   for (const part of parts) {
-    if (DANGEROUS_PATH_SEGMENTS.has(part)) {
-      throw new TransformError('targetField contains an unsafe path segment', { segment: part })
+    if (DANGEROUS_PATH_SEGMENTS.has(part.key)) {
+      throw new TransformError('targetField contains an unsafe path segment', { segment: part.key })
     }
   }
 
   let current = record
   for (let index = 0; index < parts.length - 1; index += 1) {
-    const key = parts[index]
-    if (!isPlainObject(current[key])) current[key] = {}
-    current = current[key]
+    const part = parts[index]
+    if (part.array) {
+      if (!Array.isArray(current[part.key])) current[part.key] = [{}]
+      if (!isPlainObject(current[part.key][0])) current[part.key][0] = {}
+      current = current[part.key][0]
+      continue
+    }
+    if (!isPlainObject(current[part.key])) current[part.key] = {}
+    current = current[part.key]
   }
-  current[parts[parts.length - 1]] = value
+  const last = parts[parts.length - 1]
+  if (last.array) {
+    current[last.key] = [value]
+    return
+  }
+  current[last.key] = value
 }
 
 function isBlank(value) {
@@ -65,6 +88,20 @@ function isBlank(value) {
 
 function isBlankAfterTrim(value) {
   return typeof value === 'string' && value.trim() === ''
+}
+
+function normalizeFiniteNumber(value) {
+  if (typeof value === 'number') {
+    if (Number.isFinite(value)) return value
+    throw new TransformError('toNumber failed', { value })
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().replace(/,/g, '')
+    if (normalized === '') return ''
+    const numeric = Number(normalized)
+    if (Number.isFinite(numeric)) return numeric
+  }
+  throw new TransformError('toNumber failed', { value })
 }
 
 function normalizeTransformList(transform) {
@@ -116,13 +153,7 @@ function applyTransform(value, step, sourceRecord) {
       return value === undefined || value === null ? value : String(value).toLowerCase()
     case 'toNumber': {
       if (isBlank(value)) return value
-      const normalized = typeof value === 'string' ? value.trim().replace(/,/g, '') : value
-      if (normalized === '') return ''
-      const numeric = Number(normalized)
-      if (!Number.isFinite(numeric)) {
-        throw new TransformError('toNumber failed', { value })
-      }
-      return numeric
+      return normalizeFiniteNumber(value)
     }
     case 'toDate': {
       if (isBlank(value)) return value
@@ -237,5 +268,6 @@ module.exports = {
     isPlainObject,
     normalizeTransformList,
     normalizeTransformStep,
+    normalizeFiniteNumber,
   },
 }

@@ -34,6 +34,28 @@ describe('multitable system fields', () => {
     expect(createdBy).toBe('user_1')
   })
 
+  it('formats autoNumber fields with prefix and zero padding', () => {
+    expect(formatFieldDisplay({
+      field: {
+        id: 'fld_auto',
+        name: 'No.',
+        type: 'autoNumber',
+        property: { prefix: 'INV-', digits: 4 },
+      },
+      value: 42,
+    })).toBe('INV-0042')
+
+    expect(formatFieldDisplay({
+      field: {
+        id: 'fld_auto',
+        name: 'No.',
+        type: 'autoNumber',
+        property: { prefix: '', digits: 0 },
+      },
+      value: 42,
+    })).toBe('42')
+  })
+
   it('renders system fields with the system cell branch', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
@@ -181,7 +203,7 @@ describe('multitable system fields', () => {
     container.remove()
   })
 
-  it('creates autoNumber fields as read-only system fields', async () => {
+  it('creates autoNumber fields with generation config as read-only system fields', async () => {
     const createSpy = vi.fn()
     const container = document.createElement('div')
     document.body.appendChild(container)
@@ -212,6 +234,16 @@ describe('multitable system fields', () => {
 
     expect(container.textContent).toContain('Auto number is generated')
 
+    const configInputs = Array.from(container.querySelectorAll('.meta-field-mgr__config .meta-field-mgr__input')) as HTMLInputElement[]
+    expect(configInputs).toHaveLength(3)
+    configInputs[0].value = 'INV-'
+    configInputs[0].dispatchEvent(new Event('input', { bubbles: true }))
+    configInputs[1].value = '4'
+    configInputs[1].dispatchEvent(new Event('input', { bubbles: true }))
+    configInputs[2].value = '100'
+    configInputs[2].dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
     ;(Array.from(container.querySelectorAll('.meta-field-mgr__btn-add')) as HTMLButtonElement[])
       .find((button) => button.textContent?.includes('+ Add'))
       ?.click()
@@ -221,6 +253,12 @@ describe('multitable system fields', () => {
       sheetId: 'sheet_1',
       name: 'No.',
       type: 'autoNumber',
+      property: {
+        prefix: 'INV-',
+        digits: 4,
+        start: 100,
+        startAt: 100,
+      },
     })
 
     app.unmount()

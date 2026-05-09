@@ -35,19 +35,61 @@ warn_or_fail() {
   exit 0
 }
 
+is_compact_jwt() {
+  [[ "$1" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]]
+}
+
+format_log_value() {
+  printf '%s' "$1" | tr '\r\n' '  '
+}
+
+validate_single_line_value() {
+  local value="$1"
+  local label="$2"
+  if [[ "${value}" == *$'\n'* || "${value}" == *$'\r'* ]]; then
+    warn_or_fail "${label} must be a single-line value"
+  fi
+}
+
+github_env_delimiter() {
+  local value="$1"
+  local delimiter="K3WISE_ENV_EOF"
+  local suffix=0
+  while [[ "${value}" == *"${delimiter}"* ]]; do
+    suffix=$((suffix + 1))
+    delimiter="K3WISE_ENV_EOF_${suffix}"
+  done
+  printf '%s' "${delimiter}"
+}
+
+write_github_env_value() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "${name}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    echo "::error::invalid GitHub env output name: ${name}" >&2
+    exit 1
+  fi
+  local delimiter
+  delimiter="$(github_env_delimiter "${value}")"
+  {
+    printf '%s<<%s\n' "${name}" "${delimiter}"
+    printf '%s\n' "${value}"
+    printf '%s\n' "${delimiter}"
+  } >> "${GITHUB_ENV}"
+}
+
 write_token() {
   local token="$1"
   local source="$2"
   if [[ -z "${token}" ]]; then
     return 1
   fi
+  if ! is_compact_jwt "${token}"; then
+    warn_or_fail "configured K3 WISE smoke token must be a compact JWT and was not exported"
+  fi
   echo "::add-mask::${token}"
   if [[ -n "${GITHUB_ENV:-}" ]]; then
-    {
-      echo "${output_env}<<EOF"
-      echo "${token}"
-      echo "EOF"
-    } >> "${GITHUB_ENV}"
+    write_github_env_value "${output_env}" "${token}"
     echo "K3 WISE smoke token resolved from ${source}"
   else
     echo "K3 WISE smoke token resolved from ${source}; GITHUB_ENV is not set, token was not printed"
@@ -60,11 +102,12 @@ write_resolved_tenant() {
   if [[ -z "${resolved_tenant_id}" ]]; then
     return 0
   fi
+  validate_single_line_value "${resolved_tenant_id}" "K3 WISE smoke tenant scope"
   if [[ -n "${GITHUB_ENV:-}" ]]; then
-    echo "K3_WISE_SMOKE_TENANT_ID=${resolved_tenant_id}" >> "${GITHUB_ENV}"
-    echo "K3 WISE smoke tenant scope resolved from ${source}: ${resolved_tenant_id}"
+    write_github_env_value "K3_WISE_SMOKE_TENANT_ID" "${resolved_tenant_id}"
+    echo "K3 WISE smoke tenant scope resolved from ${source}: $(format_log_value "${resolved_tenant_id}")"
   else
-    echo "K3 WISE smoke tenant scope resolved from ${source}: ${resolved_tenant_id}; GITHUB_ENV is not set"
+    echo "K3 WISE smoke tenant scope resolved from ${source}: $(format_log_value "${resolved_tenant_id}"); GITHUB_ENV is not set"
   fi
 }
 

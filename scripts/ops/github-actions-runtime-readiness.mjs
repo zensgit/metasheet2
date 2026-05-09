@@ -18,8 +18,12 @@ export const SUPPORTED_DINGTALK_WEBHOOK_SECRETS = [
 ]
 
 export const REQUIRED_K3_VARIABLES = [
-  'METASHEET_TENANT_ID',
   'K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH',
+]
+
+export const K3_TENANT_SCOPE_VARIABLES = [
+  'METASHEET_TENANT_ID',
+  'K3_WISE_TOKEN_AUTO_DISCOVER_TENANT',
 ]
 
 export function parseArgs(argv) {
@@ -97,6 +101,14 @@ function normalizeNamedRows(rows) {
     .filter((row) => row.name)
 }
 
+function variableValue(variableByName, name) {
+  return String(variableByName.get(name)?.value || '').trim()
+}
+
+function isTruthy(value) {
+  return ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase())
+}
+
 export function evaluateReadiness({ secrets, variables, repo, checkedAt = new Date().toISOString() }) {
   const secretRows = normalizeNamedRows(secrets)
   const variableRows = normalizeNamedRows(variables)
@@ -106,8 +118,10 @@ export function evaluateReadiness({ secrets, variables, repo, checkedAt = new Da
   const missingDeploySecrets = REQUIRED_DINGTALK_DEPLOY_SECRETS.filter((name) => !secretNames.has(name))
   const presentWebhookSecrets = SUPPORTED_DINGTALK_WEBHOOK_SECRETS.filter((name) => secretNames.has(name))
   const missingK3Variables = REQUIRED_K3_VARIABLES.filter((name) => !variableByName.has(name))
-  const k3HardGateValue = String(variableByName.get('K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH')?.value || '').toLowerCase()
-  const k3HardGateEnabled = ['1', 'true', 'yes', 'on'].includes(k3HardGateValue)
+  const k3HardGateEnabled = isTruthy(variableValue(variableByName, 'K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH'))
+  const tenantConfigured = variableValue(variableByName, 'METASHEET_TENANT_ID').length > 0
+  const tenantAutoDiscoveryEnabled = isTruthy(variableValue(variableByName, 'K3_WISE_TOKEN_AUTO_DISCOVER_TENANT'))
+  const tenantScopeReady = tenantConfigured || tenantAutoDiscoveryEnabled
 
   const checks = {
     dingtalkDeploySecrets: {
@@ -123,12 +137,15 @@ export function evaluateReadiness({ secrets, variables, repo, checkedAt = new Da
       missing: SUPPORTED_DINGTALK_WEBHOOK_SECRETS.filter((name) => !secretNames.has(name)),
     },
     k3DeployAuthGate: {
-      ok: missingK3Variables.length === 0 && k3HardGateEnabled,
+      ok: missingK3Variables.length === 0 && k3HardGateEnabled && tenantScopeReady,
       requiredVariables: REQUIRED_K3_VARIABLES,
+      tenantScopeAlternatives: K3_TENANT_SCOPE_VARIABLES,
       presentVariables: REQUIRED_K3_VARIABLES.filter((name) => variableByName.has(name)),
       missingVariables: missingK3Variables,
+      missingTenantScope: tenantScopeReady ? [] : K3_TENANT_SCOPE_VARIABLES,
       requireAuthEnabled: k3HardGateEnabled,
-      tenantConfigured: variableByName.has('METASHEET_TENANT_ID'),
+      tenantConfigured,
+      tenantAutoDiscoveryEnabled,
     },
   }
 
@@ -141,8 +158,8 @@ export function evaluateReadiness({ secrets, variables, repo, checkedAt = new Da
       `Configure one supported webhook secret for DingTalk Alertmanager self-heal: ${SUPPORTED_DINGTALK_WEBHOOK_SECRETS.join(', ')}.`,
     )
   }
-  if (missingK3Variables.includes('METASHEET_TENANT_ID')) {
-    nextActions.push('Set repository variable METASHEET_TENANT_ID for K3 authenticated smoke tenant scope.')
+  if (!tenantScopeReady) {
+    nextActions.push('Set repository variable METASHEET_TENANT_ID for K3 authenticated smoke tenant scope, or set K3_WISE_TOKEN_AUTO_DISCOVER_TENANT=true for singleton integration tenant auto-discovery.')
   }
   if (missingK3Variables.includes('K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH') || !k3HardGateEnabled) {
     nextActions.push('Set repository variable K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH=true for automatic deploy authenticated smoke gating.')
@@ -184,12 +201,14 @@ export function renderText(summary) {
     lines.push(`- ${name}: ${check.ok ? 'PASS' : 'FAIL'}`)
     if (check.missing?.length) lines.push(`  missing: ${check.missing.join(', ')}`)
     if (check.missingVariables?.length) lines.push(`  missing variables: ${check.missingVariables.join(', ')}`)
+    if (check.missingTenantScope?.length) lines.push(`  missing tenant scope: ${check.missingTenantScope.join(' or ')}`)
     if (name === 'dingtalkWebhookSelfHeal') {
       lines.push(`  present supported webhook secrets: ${check.present.length ? check.present.join(', ') : 'none'}`)
     }
     if (name === 'k3DeployAuthGate') {
       lines.push(`  require auth enabled: ${check.requireAuthEnabled}`)
       lines.push(`  tenant configured: ${check.tenantConfigured}`)
+      lines.push(`  tenant auto-discovery enabled: ${check.tenantAutoDiscoveryEnabled}`)
     }
   }
 
@@ -213,12 +232,14 @@ export function renderMarkdown(summary) {
     lines.push(`- \`${name}\`: **${check.ok ? 'PASS' : 'FAIL'}**`)
     if (check.missing?.length) lines.push(`  - Missing: \`${check.missing.join('`, `')}\``)
     if (check.missingVariables?.length) lines.push(`  - Missing variables: \`${check.missingVariables.join('`, `')}\``)
+    if (check.missingTenantScope?.length) lines.push(`  - Missing tenant scope: \`${check.missingTenantScope.join('` or `')}\``)
     if (name === 'dingtalkWebhookSelfHeal') {
       lines.push(`  - Present supported webhook secrets: \`${check.present.length ? check.present.join('`, `') : 'none'}\``)
     }
     if (name === 'k3DeployAuthGate') {
       lines.push(`  - Require auth enabled: \`${check.requireAuthEnabled}\``)
       lines.push(`  - Tenant configured: \`${check.tenantConfigured}\``)
+      lines.push(`  - Tenant auto-discovery enabled: \`${check.tenantAutoDiscoveryEnabled}\``)
     }
   }
   lines.push('', '## Next Actions', '')

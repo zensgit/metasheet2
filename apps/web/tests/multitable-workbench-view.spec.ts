@@ -699,11 +699,13 @@ vi.mock('../src/multitable/components/MetaGanttView.vue', () => ({
   default: defineComponent({
     name: 'MetaGanttView',
     props: {
+      sheetId: { type: String, default: '' },
       canEdit: { type: Boolean, default: false },
     },
     emits: ['patch-dates'],
     render() {
       return h('div', {
+        'data-gantt-sheet-id': this.$props.sheetId,
         'data-gantt-can-edit': String(this.$props.canEdit),
       }, [
         h(
@@ -1039,8 +1041,8 @@ describe('MultitableWorkbench view wiring', () => {
     vi.clearAllMocks()
   })
 
-  function mountWorkbench(initialProps?: { baseId?: string; sheetId?: string; viewId?: string; recordId?: string; commentId?: string; fieldId?: string; openComments?: boolean }) {
-    let hostState!: { baseId?: string; sheetId?: string; viewId?: string; recordId?: string; commentId?: string; fieldId?: string; openComments?: boolean }
+  function mountWorkbench(initialProps?: { baseId?: string; sheetId?: string; viewId?: string; recordId?: string; commentId?: string; fieldId?: string; openComments?: boolean; mode?: string }) {
+    let hostState!: { baseId?: string; sheetId?: string; viewId?: string; recordId?: string; commentId?: string; fieldId?: string; openComments?: boolean; mode?: string }
     const externalContextResults: Array<{
       status: 'applied' | 'failed' | 'superseded'
       context: { baseId: string; sheetId: string; viewId: string }
@@ -1061,6 +1063,7 @@ describe('MultitableWorkbench view wiring', () => {
           commentId: initialProps?.commentId,
           fieldId: initialProps?.fieldId,
           openComments: initialProps?.openComments,
+          mode: initialProps?.mode,
         })
         return () => h(MultitableWorkbench as Component, {
           ...hostState,
@@ -1796,12 +1799,25 @@ describe('MultitableWorkbench view wiring', () => {
     workbenchMock.activeViewId.value = 'view_gantt'
     await flushUi()
 
+    expect(container!.querySelector('[data-gantt-sheet-id]')?.getAttribute('data-gantt-sheet-id')).toBe('sheet_orders')
     expect(container!.querySelector('[data-gantt-can-edit]')?.getAttribute('data-gantt-can-edit')).toBe('false')
 
     workbenchMock.activeViewId.value = 'view_hierarchy'
     await flushUi()
 
     expect(container!.querySelector('[data-hierarchy-can-edit]')?.getAttribute('data-hierarchy-can-edit')).toBe('false')
+  })
+
+  it('honors forced Gantt mode from direct smoke routes', async () => {
+    workbenchMock.views.value = [
+      { id: 'view_grid', sheetId: 'sheet_orders', name: 'Grid', type: 'grid' },
+    ]
+
+    mountWorkbench({ viewId: 'view_grid', mode: 'gantt' })
+    await flushUi()
+
+    expect(container!.querySelector('[data-gantt-sheet-id]')?.getAttribute('data-gantt-sheet-id')).toBe('sheet_orders')
+    expect(container!.querySelector('[data-select-record="rec_1"]')).toBeNull()
   })
 
   it('patches timeline date updates through patchRecords and refreshes the active page', async () => {

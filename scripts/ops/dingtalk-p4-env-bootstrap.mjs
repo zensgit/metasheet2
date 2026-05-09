@@ -49,7 +49,7 @@ Options:
   --output-dir <dir>        Report output dir, default ${DEFAULT_OUTPUT_ROOT}/<run-id>
   --api-base <url>          Template API base, default ${DEFAULT_API_BASE}
   --web-base <url>          Template web base, default ${DEFAULT_WEB_BASE}
-  --set <KEY=VALUE>         Safely update one known P4 env key without echoing the value
+  --set <KEY=VALUE>         Update one non-secret P4 env key without echoing the value
   --set-from-env <KEY>      Copy one known P4 env key from the current process environment
   --unset <KEY>             Clear one known P4 env key
   --force                   Allow --init to overwrite an existing env file
@@ -157,6 +157,9 @@ function parseEnvAssignment(raw) {
     throw new Error('--set expects KEY=VALUE')
   }
   const key = validateP4EnvKey(raw.slice(0, equalsIndex), '--set')
+  if (SECRET_KEYS.has(key)) {
+    throw new Error(`--set ${key} is unsafe for secret values; export ${key} and use --set-from-env ${key}`)
+  }
   return { key, value: raw.slice(equalsIndex + 1) }
 }
 

@@ -42,6 +42,7 @@ export type DirectoryMemberGroupSyncMode = 'disabled' | 'sync_scoped_departments
 type DirectoryIntegrationConfig = {
   appKey: string
   appSecret: string
+  workNotificationAgentId: string
   rootDepartmentId: string
   baseUrl?: string
   pageSize?: number
@@ -251,6 +252,7 @@ export type DirectoryIntegrationSummary = {
   config: {
     appKey: string
     appSecretConfigured: boolean
+    workNotificationAgentIdConfigured: boolean
     rootDepartmentId: string
     baseUrl: string | null
     pageSize: number
@@ -317,6 +319,7 @@ type NormalizedDirectoryIntegrationInput = Omit<
   corpId: string
   appKey: string
   appSecret: string
+  workNotificationAgentId: string
   rootDepartmentId: string
   admissionMode: DirectoryAdmissionMode
   admissionDepartmentIds: string[]
@@ -892,6 +895,10 @@ function parseIntegrationConfig(row: Pick<DirectoryIntegrationRow, 'config'>): D
   const appKey = normalizeText(config.appKey)
   const rawAppSecret = normalizeText(config.appSecret)
   const appSecret = rawAppSecret ? decryptStoredSecretValue(rawAppSecret) : ''
+  const rawWorkNotificationAgentId = normalizeText(config.workNotificationAgentId ?? config.agentId)
+  const workNotificationAgentId = rawWorkNotificationAgentId
+    ? decryptStoredSecretValue(rawWorkNotificationAgentId)
+    : ''
   const rootDepartmentId = normalizeText(config.rootDepartmentId) || DEFAULT_ROOT_DEPARTMENT_ID
   const baseUrl = normalizeOptionalText(config.baseUrl) ?? undefined
   const pageSize = normalizePageSize(config.pageSize)
@@ -905,6 +912,7 @@ function parseIntegrationConfig(row: Pick<DirectoryIntegrationRow, 'config'>): D
   return {
     appKey,
     appSecret,
+    workNotificationAgentId,
     rootDepartmentId,
     baseUrl,
     pageSize,
@@ -938,6 +946,7 @@ function summarizeIntegration(row: DirectoryIntegrationRow): DirectoryIntegratio
     config: {
       appKey: config.appKey,
       appSecretConfigured: Boolean(config.appSecret),
+      workNotificationAgentIdConfigured: Boolean(config.workNotificationAgentId),
       rootDepartmentId: config.rootDepartmentId,
       baseUrl: config.baseUrl ?? null,
       pageSize: config.pageSize,
@@ -1357,6 +1366,7 @@ function normalizeIntegrationInput(
   const corpId = normalizeText(input.corpId)
   const appKey = normalizeText(input.appKey)
   const appSecret = normalizeText(input.appSecret) || current?.appSecret || ''
+  const workNotificationAgentId = current?.workNotificationAgentId || ''
   const rootDepartmentId = normalizeText(input.rootDepartmentId) || current?.rootDepartmentId || DEFAULT_ROOT_DEPARTMENT_ID
   const admissionMode = normalizeAdmissionMode(input.admissionMode, current?.admissionMode ?? DEFAULT_ADMISSION_MODE)
   const admissionDepartmentIds = normalizeAdmissionDepartmentIds(input.admissionDepartmentIds, current?.admissionDepartmentIds ?? [])
@@ -1380,6 +1390,7 @@ function normalizeIntegrationInput(
     corpId,
     appKey,
     appSecret,
+    workNotificationAgentId,
     rootDepartmentId,
     baseUrl: normalizeOptionalText(input.baseUrl) ?? current?.baseUrl,
     pageSize: normalizePageSize(input.pageSize ?? current?.pageSize),
@@ -1465,6 +1476,9 @@ export async function createDirectoryIntegration(input: DirectoryIntegrationInpu
       JSON.stringify({
         appKey: normalized.appKey,
         appSecret: normalizeStoredSecretValue(normalized.appSecret),
+        workNotificationAgentId: normalized.workNotificationAgentId
+          ? normalizeStoredSecretValue(normalized.workNotificationAgentId)
+          : null,
         rootDepartmentId: normalized.rootDepartmentId,
         baseUrl: normalized.baseUrl ?? null,
         pageSize: normalized.pageSize,
@@ -1519,6 +1533,9 @@ export async function updateDirectoryIntegration(
       JSON.stringify({
         appKey: normalized.appKey,
         appSecret: normalizeStoredSecretValue(normalized.appSecret),
+        workNotificationAgentId: normalized.workNotificationAgentId
+          ? normalizeStoredSecretValue(normalized.workNotificationAgentId)
+          : null,
         rootDepartmentId: normalized.rootDepartmentId,
         baseUrl: normalized.baseUrl ?? null,
         pageSize: normalized.pageSize,
