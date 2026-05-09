@@ -1510,6 +1510,131 @@ components:
         description:
           type: string
           nullable: true
+    MultitableTemplateField:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          $ref: '#/components/schemas/MultitableFieldType'
+        order:
+          type: integer
+        options:
+          type: array
+          items:
+            type: string
+        property:
+          type: object
+          additionalProperties: true
+        description:
+          type: string
+      required:
+        - id
+        - name
+        - type
+    MultitableTemplateView:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          $ref: '#/components/schemas/MultitableViewType'
+        groupByFieldId:
+          type: string
+        dateFieldId:
+          type: string
+        titleFieldId:
+          type: string
+        hiddenFieldIds:
+          type: array
+          items:
+            type: string
+        config:
+          type: object
+          additionalProperties: true
+      required:
+        - id
+        - name
+        - type
+    MultitableTemplateSheet:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableTemplateField'
+        views:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableTemplateView'
+      required:
+        - id
+        - name
+        - fields
+        - views
+    MultitableTemplate:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        category:
+          type: string
+        icon:
+          type: string
+        color:
+          type: string
+        sheets:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableTemplateSheet'
+      required:
+        - id
+        - name
+        - description
+        - category
+        - icon
+        - color
+        - sheets
+    MultitableTemplateInstallResult:
+      type: object
+      properties:
+        template:
+          $ref: '#/components/schemas/MultitableTemplate'
+        base:
+          $ref: '#/components/schemas/MultitableBase'
+        sheets:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableSheet'
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableField'
+        views:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableView'
+      required:
+        - template
+        - base
+        - sheets
+        - fields
+        - views
     MultitableViewType:
       type: string
       enum:
@@ -1528,10 +1653,12 @@ components:
         - number
         - boolean
         - date
+        - dateTime
         - formula
         - select
         - multiSelect
         - link
+        - person
         - lookup
         - rollup
         - attachment
@@ -1541,7 +1668,10 @@ components:
         - url
         - email
         - phone
+        - barcode
+        - location
         - longText
+        - autoNumber
         - createdTime
         - modifiedTime
         - createdBy
@@ -1609,6 +1739,94 @@ components:
         data:
           type: object
           additionalProperties: true
+    MultitableRecordSubscription:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        sheetId:
+          type: string
+        recordId:
+          type: string
+        userId:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - sheetId
+        - recordId
+        - userId
+        - createdAt
+        - updatedAt
+    MultitableRecordSubscriptionStatus:
+      type: object
+      properties:
+        subscribed:
+          type: boolean
+        subscription:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/MultitableRecordSubscription'
+        items:
+          type: array
+          description: Legacy watcher list emitted by older runtimes. Clients should rely on `subscribed` and `subscription` for the current user.
+          items:
+            $ref: '#/components/schemas/MultitableRecordSubscription'
+      required:
+        - subscribed
+        - subscription
+    MultitableRecordSubscriptionNotificationType:
+      type: string
+      enum:
+        - record.updated
+        - comment.created
+    MultitableRecordSubscriptionNotification:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        sheetId:
+          type: string
+        recordId:
+          type: string
+        userId:
+          type: string
+        eventType:
+          $ref: '#/components/schemas/MultitableRecordSubscriptionNotificationType'
+        actorId:
+          type: string
+          nullable: true
+        revisionId:
+          type: string
+          nullable: true
+        commentId:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        readAt:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - id
+        - sheetId
+        - recordId
+        - userId
+        - eventType
+        - actorId
+        - revisionId
+        - commentId
+        - createdAt
+        - readAt
     MultitableXlsxImportResponse:
       type: object
       properties:
@@ -1721,6 +1939,51 @@ components:
       required:
         - recordId
         - version
+    MultitableRecordRevision:
+      type: object
+      properties:
+        id:
+          type: string
+        sheetId:
+          type: string
+        recordId:
+          type: string
+        version:
+          type: integer
+        action:
+          type: string
+          enum: [create, update, delete]
+        source:
+          type: string
+        actorId:
+          type: string
+          nullable: true
+        changedFieldIds:
+          type: array
+          items:
+            type: string
+        patch:
+          type: object
+          additionalProperties: true
+        snapshot:
+          type: object
+          nullable: true
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - sheetId
+        - recordId
+        - version
+        - action
+        - source
+        - actorId
+        - changedFieldIds
+        - patch
+        - snapshot
+        - createdAt
     MultitableComputedRecord:
       type: object
       properties:
@@ -1812,6 +2075,10 @@ components:
           type: array
           items:
             type: string
+        capabilityOrigin:
+          $ref: '#/components/schemas/MultitableCapabilityOrigin'
+        permissions:
+          $ref: '#/components/schemas/MultitableScopedPermissions'
     MultitableCapabilities:
       type: object
       properties:
@@ -1825,11 +2092,15 @@ components:
           type: boolean
         canManageFields:
           type: boolean
+        canManageSheetAccess:
+          type: boolean
         canManageViews:
           type: boolean
         canComment:
           type: boolean
         canManageAutomation:
+          type: boolean
+        canExport:
           type: boolean
       required:
         - canRead
@@ -1837,15 +2108,17 @@ components:
         - canEditRecord
         - canDeleteRecord
         - canManageFields
+        - canManageSheetAccess
         - canManageViews
         - canComment
         - canManageAutomation
+        - canExport
     MultitableSheetPermissionAccessLevel:
       type: string
       enum: [read, write, write-own, admin]
     MultitableSheetPermissionSubjectType:
       type: string
-      enum: [user, role]
+      enum: [user, role, member-group]
     MultitableSheetPermissionEntry:
       type: object
       properties:
@@ -1919,6 +2192,74 @@ components:
       type: object
       additionalProperties:
         $ref: '#/components/schemas/MultitableFieldCapability'
+    MultitableCapabilityOrigin:
+      type: object
+      properties:
+        source:
+          type: string
+          enum: [admin, global-rbac, sheet-grant, sheet-scope]
+        hasSheetAssignments:
+          type: boolean
+      required:
+        - source
+        - hasSheetAssignments
+    MultitableFieldPermission:
+      type: object
+      properties:
+        visible:
+          type: boolean
+        readOnly:
+          type: boolean
+      required:
+        - visible
+        - readOnly
+    MultitableFieldPermissions:
+      type: object
+      additionalProperties:
+        $ref: '#/components/schemas/MultitableFieldPermission'
+    MultitableViewPermission:
+      type: object
+      properties:
+        canAccess:
+          type: boolean
+        canConfigure:
+          type: boolean
+        canDelete:
+          type: boolean
+      required:
+        - canAccess
+        - canConfigure
+        - canDelete
+    MultitableViewPermissions:
+      type: object
+      additionalProperties:
+        $ref: '#/components/schemas/MultitableViewPermission'
+    MultitableRowActions:
+      type: object
+      properties:
+        canEdit:
+          type: boolean
+        canDelete:
+          type: boolean
+        canComment:
+          type: boolean
+      required:
+        - canEdit
+        - canDelete
+        - canComment
+    MultitableScopedPermissions:
+      type: object
+      properties:
+        fieldPermissions:
+          $ref: '#/components/schemas/MultitableFieldPermissions'
+        viewPermissions:
+          $ref: '#/components/schemas/MultitableViewPermissions'
+        rowActions:
+          $ref: '#/components/schemas/MultitableRowActions'
+        rowActionOverrides:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/MultitableRowActions'
     MultitableDependencyNode:
       type: object
       properties:
@@ -2034,10 +2375,19 @@ components:
             $ref: '#/components/schemas/MultitableView'
         capabilities:
           $ref: '#/components/schemas/MultitableCapabilities'
-        fieldCapabilities:
-          allOf:
-            - $ref: '#/components/schemas/MultitableFieldCapabilities'
-          nullable: true
+        capabilityOrigin:
+          $ref: '#/components/schemas/MultitableCapabilityOrigin'
+        fieldPermissions:
+          $ref: '#/components/schemas/MultitableFieldPermissions'
+        viewPermissions:
+          $ref: '#/components/schemas/MultitableViewPermissions'
+      required:
+        - sheets
+        - views
+        - capabilities
+        - capabilityOrigin
+        - fieldPermissions
+        - viewPermissions
     MultitableViewData:
       type: object
       properties:
@@ -2055,14 +2405,6 @@ components:
           $ref: '#/components/schemas/MultitableViewLinkSummaries'
         attachmentSummaries:
           $ref: '#/components/schemas/MultitableViewAttachmentSummaries'
-        fieldCapabilities:
-          allOf:
-            - $ref: '#/components/schemas/MultitableFieldCapabilities'
-          nullable: true
-        dependencyGraph:
-          allOf:
-            - $ref: '#/components/schemas/MultitableDependencyGraph'
-          nullable: true
         view:
           allOf:
             - $ref: '#/components/schemas/MultitableView'
@@ -2092,14 +2434,14 @@ components:
           $ref: '#/components/schemas/MultitableRecord'
         capabilities:
           $ref: '#/components/schemas/MultitableCapabilities'
-        fieldCapabilities:
-          allOf:
-            - $ref: '#/components/schemas/MultitableFieldCapabilities'
-          nullable: true
-        dependencyGraph:
-          allOf:
-            - $ref: '#/components/schemas/MultitableDependencyGraph'
-          nullable: true
+        capabilityOrigin:
+          $ref: '#/components/schemas/MultitableCapabilityOrigin'
+        fieldPermissions:
+          $ref: '#/components/schemas/MultitableFieldPermissions'
+        viewPermissions:
+          $ref: '#/components/schemas/MultitableViewPermissions'
+        rowActions:
+          $ref: '#/components/schemas/MultitableRowActions'
         commentsScope:
           $ref: '#/components/schemas/MultitableCommentsScope'
         linkSummaries:
@@ -2111,6 +2453,9 @@ components:
         - fields
         - record
         - capabilities
+        - capabilityOrigin
+        - fieldPermissions
+        - rowActions
         - commentsScope
         - linkSummaries
     MultitableFormContext:
@@ -2135,14 +2480,14 @@ components:
             $ref: '#/components/schemas/MultitableField'
         capabilities:
           $ref: '#/components/schemas/MultitableCapabilities'
-        fieldCapabilities:
-          allOf:
-            - $ref: '#/components/schemas/MultitableFieldCapabilities'
-          nullable: true
-        dependencyGraph:
-          allOf:
-            - $ref: '#/components/schemas/MultitableDependencyGraph'
-          nullable: true
+        capabilityOrigin:
+          $ref: '#/components/schemas/MultitableCapabilityOrigin'
+        fieldPermissions:
+          $ref: '#/components/schemas/MultitableFieldPermissions'
+        viewPermissions:
+          $ref: '#/components/schemas/MultitableViewPermissions'
+        rowActions:
+          $ref: '#/components/schemas/MultitableRowActions'
         record:
           allOf:
             - $ref: '#/components/schemas/MultitableRecord'
@@ -2160,6 +2505,7 @@ components:
         - sheet
         - fields
         - capabilities
+        - fieldPermissions
     MultitablePersonFieldPrepareResult:
       type: object
       properties:

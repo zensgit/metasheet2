@@ -96,6 +96,7 @@ export interface Database {
   // Meta tables
   meta_sheets: MetaSheetsTable
   meta_fields: MetaFieldsTable
+  meta_field_auto_number_sequences: MetaFieldAutoNumberSequencesTable
   meta_views: MetaViewsTable
   meta_records: MetaRecordsTable
   meta_links: MetaLinksTable
@@ -630,6 +631,14 @@ export interface MetaFieldsTable {
   updated_at: UpdatedAt
 }
 
+export interface MetaFieldAutoNumberSequencesTable {
+  field_id: string
+  sheet_id: string
+  next_value: number
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
 export interface MetaViewsTable {
   id: Generated<string>
   sheet_id: string
@@ -667,6 +676,11 @@ export interface MetaCommentsTable {
   spreadsheet_id: string
   row_id: string
   field_id: string | null
+  target_type: string
+  target_id: string
+  target_field_id: string | null
+  container_type: string
+  container_id: string
   content: string
   author_id: string
   parent_id: string | null

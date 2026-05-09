@@ -135,6 +135,11 @@ export async function optionalJwtAuthMiddleware(req: Request, res: Response, nex
 
   const result = await hydrateAuthenticatedUser(req, token)
   if (isHydrateFailure(result)) {
+    if (isPublicFormAuthBypass(req)) {
+      // Public-form auth is optional. A stale local browser token should not
+      // block anonymous or DingTalk re-authenticated form access.
+      return next()
+    }
     if (result.metricReason) {
       metrics.jwtAuthFail.inc({ reason: result.metricReason })
       metrics.authFailures.inc()

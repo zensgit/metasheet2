@@ -1,3 +1,4 @@
+import { normalizeAutoNumberProperty } from './auto-number-property'
 import { fieldTypeRegistry } from './field-type-registry'
 
 export type MultitableFieldType =
@@ -5,6 +6,7 @@ export type MultitableFieldType =
   | 'number'
   | 'boolean'
   | 'date'
+  | 'dateTime'
   | 'formula'
   | 'select'
   | 'multiSelect'
@@ -18,7 +20,10 @@ export type MultitableFieldType =
   | 'url'
   | 'email'
   | 'phone'
+  | 'barcode'
+  | 'location'
   | 'longText'
+  | 'autoNumber'
   | 'createdTime'
   | 'modifiedTime'
   | 'createdBy'
@@ -77,7 +82,15 @@ export function mapFieldType(type: string): MultitableFieldType | string {
   const normalized = type.trim().toLowerCase()
   if (normalized === 'number') return 'number'
   if (normalized === 'boolean' || normalized === 'checkbox') return 'boolean'
-  if (normalized === 'date' || normalized === 'datetime') return 'date'
+  if (normalized === 'date') return 'date'
+  if (
+    normalized === 'datetime' ||
+    normalized === 'date_time' ||
+    normalized === 'date-time' ||
+    normalized === 'timestamp'
+  ) {
+    return 'dateTime'
+  }
   if (normalized === 'formula') return 'formula'
   if (normalized === 'select') return 'select'
   if (
@@ -88,6 +101,7 @@ export function mapFieldType(type: string): MultitableFieldType | string {
     return 'multiSelect'
   }
   if (normalized === 'link') return 'link'
+  if (normalized === 'person') return 'link'
   if (normalized === 'lookup') return 'lookup'
   if (normalized === 'rollup') return 'rollup'
   if (normalized === 'attachment') return 'attachment'
@@ -97,6 +111,23 @@ export function mapFieldType(type: string): MultitableFieldType | string {
   if (normalized === 'url') return 'url'
   if (normalized === 'email') return 'email'
   if (normalized === 'phone') return 'phone'
+  if (normalized === 'barcode' || normalized === 'bar_code' || normalized === 'bar-code') return 'barcode'
+  if (
+    normalized === 'location' ||
+    normalized === 'geo' ||
+    normalized === 'geolocation' ||
+    normalized === 'geo_location' ||
+    normalized === 'geo-location'
+  ) {
+    return 'location'
+  }
+  if (
+    normalized === 'autonumber' ||
+    normalized === 'auto_number' ||
+    normalized === 'auto-number'
+  ) {
+    return 'autoNumber'
+  }
   if (normalized === 'createdtime' || normalized === 'created_time' || normalized === 'created-time') {
     return 'createdTime'
   }
@@ -287,6 +318,23 @@ export function sanitizeFieldProperty(
     return { ...obj, code, decimals }
   }
 
+  if (type === 'number') {
+    const next: Record<string, unknown> = { ...obj }
+    if ('decimals' in obj) {
+      const decimalsRaw = typeof obj.decimals === 'number' ? obj.decimals : Number(obj.decimals)
+      if (Number.isFinite(decimalsRaw) && decimalsRaw >= 0 && decimalsRaw <= 6) {
+        next.decimals = Math.round(decimalsRaw)
+      } else {
+        delete next.decimals
+      }
+    }
+    next.thousands = obj.thousands === true
+    const unit = typeof obj.unit === 'string' ? obj.unit.trim().slice(0, 24) : ''
+    if (unit) next.unit = unit
+    else delete next.unit
+    return next
+  }
+
   if (type === 'percent') {
     const decimalsRaw = typeof obj.decimals === 'number' ? obj.decimals : Number(obj.decimals)
     const decimals = Number.isFinite(decimalsRaw) && decimalsRaw >= 0 && decimalsRaw <= 6
@@ -301,8 +349,23 @@ export function sanitizeFieldProperty(
     return { ...obj, max }
   }
 
-  if (type === 'url' || type === 'email' || type === 'phone' || type === 'longText') {
+  if (type === 'dateTime') {
+    const rawTimezone = typeof obj.timezone === 'string' ? obj.timezone.trim() : ''
+    let timezone = rawTimezone || 'UTC'
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(new Date(0))
+    } catch {
+      timezone = 'UTC'
+    }
+    return { ...obj, timezone }
+  }
+
+  if (type === 'url' || type === 'email' || type === 'phone' || type === 'barcode' || type === 'location' || type === 'longText') {
     return obj
+  }
+
+  if (type === 'autoNumber') {
+    return normalizeAutoNumberProperty(obj)
   }
 
   if (SYSTEM_FIELD_TYPES.has(type)) {
@@ -333,7 +396,7 @@ export function serializeFieldRow(row: any): MultitableField {
 }
 
 // ---------------------------------------------------------------------------
-// MF2 field-types batch 1: currency / percent / rating / url / email / phone
+// MF2 field-types batch 1: currency / percent / rating / url / email / phone / barcode / location / dateTime
 // ---------------------------------------------------------------------------
 //
 // Validation regex chosen to match Feishu's lenient client-side checks and
@@ -444,6 +507,90 @@ export function validateLongTextValue(value: unknown, fieldId: string): string |
   return value
 }
 
+export function validateBarcodeValue(value: unknown, fieldId: string): string | null {
+  if (value === null || value === undefined || value === '') return null
+  if (typeof value !== 'string' && typeof value !== 'number') {
+    throw new Error(`Barcode value must be a string for ${fieldId}`)
+  }
+  const trimmed = String(value).trim()
+  if (trimmed === '') return null
+  if (trimmed.length > 256) {
+    throw new Error(`Barcode value must be 256 characters or fewer for ${fieldId}`)
+  }
+  return trimmed
+}
+
+export type LocationValue = {
+  address: string
+  latitude?: number
+  longitude?: number
+}
+
+function coerceLocationCoordinate(
+  value: unknown,
+  label: 'latitude' | 'longitude',
+  fieldId: string,
+  min: number,
+  max: number,
+): number | undefined {
+  if (value === null || value === undefined || value === '') return undefined
+  const num = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(num)) {
+    throw new Error(`Location ${label} must be a finite number for ${fieldId}`)
+  }
+  if (num < min || num > max) {
+    throw new Error(`Location ${label} must be between ${min} and ${max} for ${fieldId}`)
+  }
+  return num
+}
+
+export function validateLocationValue(value: unknown, fieldId: string): LocationValue | null {
+  if (value === null || value === undefined || value === '') return null
+  if (typeof value === 'string' || typeof value === 'number') {
+    const address = String(value).trim()
+    if (!address) return null
+    if (address.length > 512) {
+      throw new Error(`Location address must be 512 characters or fewer for ${fieldId}`)
+    }
+    return { address }
+  }
+  if (!isPlainObject(value)) {
+    throw new Error(`Location value must be a string or object for ${fieldId}`)
+  }
+
+  const rawAddress = value.address ?? value.name ?? value.fullAddress
+  const address = rawAddress === null || rawAddress === undefined ? '' : String(rawAddress).trim()
+  if (address.length > 512) {
+    throw new Error(`Location address must be 512 characters or fewer for ${fieldId}`)
+  }
+
+  const rawLatitude = value.latitude ?? value.lat
+  const rawLongitude = value.longitude ?? value.lng ?? value.lon
+  const latitude = coerceLocationCoordinate(rawLatitude, 'latitude', fieldId, -90, 90)
+  const longitude = coerceLocationCoordinate(rawLongitude, 'longitude', fieldId, -180, 180)
+  if ((latitude === undefined) !== (longitude === undefined)) {
+    throw new Error(`Location latitude and longitude must be provided together for ${fieldId}`)
+  }
+  if (!address && latitude === undefined) return null
+
+  return {
+    address,
+    ...(latitude !== undefined && longitude !== undefined ? { latitude, longitude } : {}),
+  }
+}
+
+export function validateDateTimeValue(value: unknown, fieldId: string): string | null {
+  if (value === null || value === undefined || value === '') return null
+  if (typeof value !== 'string' && typeof value !== 'number' && !(value instanceof Date)) {
+    throw new Error(`DateTime value must be a string, number, or Date for ${fieldId}`)
+  }
+  const date = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    throw new Error(`Invalid DateTime for ${fieldId}: ${String(value)}`)
+  }
+  return date.toISOString()
+}
+
 export function normalizeMultiSelectValue(
   value: unknown,
   fieldId: string,
@@ -495,6 +642,9 @@ export function coerceBatch1Value(
   if (fieldType === 'url') return validateUrlValue(value, fieldId)
   if (fieldType === 'email') return validateEmailValue(value, fieldId)
   if (fieldType === 'phone') return validatePhoneValue(value, fieldId)
+  if (fieldType === 'barcode') return validateBarcodeValue(value, fieldId)
+  if (fieldType === 'location') return validateLocationValue(value, fieldId)
+  if (fieldType === 'dateTime') return validateDateTimeValue(value, fieldId)
   return value
 }
 
@@ -505,9 +655,13 @@ export const BATCH1_FIELD_TYPES: ReadonlySet<string> = new Set([
   'url',
   'email',
   'phone',
+  'barcode',
+  'location',
+  'dateTime',
 ])
 
 export const SYSTEM_FIELD_TYPES: ReadonlySet<string> = new Set([
+  'autoNumber',
   'createdTime',
   'modifiedTime',
   'createdBy',

@@ -32,6 +32,8 @@ const DEFAULT_ROOT_DEPARTMENT_ID = '1'
 const DEFAULT_PAGE_SIZE = 50
 const DEFAULT_ADMISSION_MODE = 'manual_only'
 const DEFAULT_MEMBER_GROUP_SYNC_MODE = 'disabled'
+const DINGTALK_OPEN_ID_REQUIRED_FOR_GRANT_ERROR =
+  'Directory account is missing DingTalk openId and cannot enable DingTalk login grant; resync DingTalk directory or complete DingTalk OAuth binding first'
 
 type JsonRecord = Record<string, unknown>
 export type DirectoryAdmissionMode = 'manual_only' | 'auto_for_scoped_departments'
@@ -40,6 +42,7 @@ export type DirectoryMemberGroupSyncMode = 'disabled' | 'sync_scoped_departments
 type DirectoryIntegrationConfig = {
   appKey: string
   appSecret: string
+  workNotificationAgentId: string
   rootDepartmentId: string
   baseUrl?: string
   pageSize?: number
@@ -249,6 +252,7 @@ export type DirectoryIntegrationSummary = {
   config: {
     appKey: string
     appSecretConfigured: boolean
+    workNotificationAgentIdConfigured: boolean
     rootDepartmentId: string
     baseUrl: string | null
     pageSize: number
@@ -315,6 +319,7 @@ type NormalizedDirectoryIntegrationInput = Omit<
   corpId: string
   appKey: string
   appSecret: string
+  workNotificationAgentId: string
   rootDepartmentId: string
   admissionMode: DirectoryAdmissionMode
   admissionDepartmentIds: string[]
@@ -890,6 +895,10 @@ function parseIntegrationConfig(row: Pick<DirectoryIntegrationRow, 'config'>): D
   const appKey = normalizeText(config.appKey)
   const rawAppSecret = normalizeText(config.appSecret)
   const appSecret = rawAppSecret ? decryptStoredSecretValue(rawAppSecret) : ''
+  const rawWorkNotificationAgentId = normalizeText(config.workNotificationAgentId ?? config.agentId)
+  const workNotificationAgentId = rawWorkNotificationAgentId
+    ? decryptStoredSecretValue(rawWorkNotificationAgentId)
+    : ''
   const rootDepartmentId = normalizeText(config.rootDepartmentId) || DEFAULT_ROOT_DEPARTMENT_ID
   const baseUrl = normalizeOptionalText(config.baseUrl) ?? undefined
   const pageSize = normalizePageSize(config.pageSize)
@@ -903,6 +912,7 @@ function parseIntegrationConfig(row: Pick<DirectoryIntegrationRow, 'config'>): D
   return {
     appKey,
     appSecret,
+    workNotificationAgentId,
     rootDepartmentId,
     baseUrl,
     pageSize,
@@ -936,6 +946,7 @@ function summarizeIntegration(row: DirectoryIntegrationRow): DirectoryIntegratio
     config: {
       appKey: config.appKey,
       appSecretConfigured: Boolean(config.appSecret),
+      workNotificationAgentIdConfigured: Boolean(config.workNotificationAgentId),
       rootDepartmentId: config.rootDepartmentId,
       baseUrl: config.baseUrl ?? null,
       pageSize: config.pageSize,
@@ -1075,6 +1086,16 @@ function buildDingTalkIdentityExternalKey(corpId: string | null | undefined, ope
   }
 
   return normalizedUnionId || normalizedOpenId
+}
+
+function assertDirectoryAccountCanEnableDingTalkGrant(
+  account: Pick<DirectoryBindingTargetAccountRow, 'corp_id' | 'open_id'>,
+  enableDingTalkGrant: boolean,
+): void {
+  if (!enableDingTalkGrant) return
+  if (!normalizeText(account.corp_id)) return
+  if (normalizeText(account.open_id)) return
+  throw new Error(DINGTALK_OPEN_ID_REQUIRED_FOR_GRANT_ERROR)
 }
 
 function buildRecommendationScore(reasons: DirectoryBindingRecommendationReason[]): number {
@@ -1345,6 +1366,7 @@ function normalizeIntegrationInput(
   const corpId = normalizeText(input.corpId)
   const appKey = normalizeText(input.appKey)
   const appSecret = normalizeText(input.appSecret) || current?.appSecret || ''
+  const workNotificationAgentId = current?.workNotificationAgentId || ''
   const rootDepartmentId = normalizeText(input.rootDepartmentId) || current?.rootDepartmentId || DEFAULT_ROOT_DEPARTMENT_ID
   const admissionMode = normalizeAdmissionMode(input.admissionMode, current?.admissionMode ?? DEFAULT_ADMISSION_MODE)
   const admissionDepartmentIds = normalizeAdmissionDepartmentIds(input.admissionDepartmentIds, current?.admissionDepartmentIds ?? [])
@@ -1368,6 +1390,7 @@ function normalizeIntegrationInput(
     corpId,
     appKey,
     appSecret,
+    workNotificationAgentId,
     rootDepartmentId,
     baseUrl: normalizeOptionalText(input.baseUrl) ?? current?.baseUrl,
     pageSize: normalizePageSize(input.pageSize ?? current?.pageSize),
@@ -1453,6 +1476,9 @@ export async function createDirectoryIntegration(input: DirectoryIntegrationInpu
       JSON.stringify({
         appKey: normalized.appKey,
         appSecret: normalizeStoredSecretValue(normalized.appSecret),
+        workNotificationAgentId: normalized.workNotificationAgentId
+          ? normalizeStoredSecretValue(normalized.workNotificationAgentId)
+          : null,
         rootDepartmentId: normalized.rootDepartmentId,
         baseUrl: normalized.baseUrl ?? null,
         pageSize: normalized.pageSize,
@@ -1507,6 +1533,9 @@ export async function updateDirectoryIntegration(
       JSON.stringify({
         appKey: normalized.appKey,
         appSecret: normalizeStoredSecretValue(normalized.appSecret),
+        workNotificationAgentId: normalized.workNotificationAgentId
+          ? normalizeStoredSecretValue(normalized.workNotificationAgentId)
+          : null,
         rootDepartmentId: normalized.rootDepartmentId,
         baseUrl: normalized.baseUrl ?? null,
         pageSize: normalized.pageSize,
@@ -2861,6 +2890,7 @@ async function applyDirectoryAccountBindInTransaction(
   if (!identityExternalKey) {
     throw new Error('Directory account is missing DingTalk openId/unionId and cannot be pre-bound for DingTalk login')
   }
+  assertDirectoryAccountCanEnableDingTalkGrant(account, enableDingTalkGrant)
 
   const profile = JSON.stringify({
     source: 'directory_admin_bind',
@@ -3534,6 +3564,7 @@ export async function bindDirectoryAccount(
   if (!buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)) {
     throw new Error('Directory account is missing DingTalk openId/unionId and cannot be pre-bound for DingTalk login')
   }
+  assertDirectoryAccountCanEnableDingTalkGrant(account, enableDingTalkGrant)
 
   const localUser = await resolveDirectoryBindingUser(normalizedLocalUserRef)
   if (!localUser) throw new Error('Local user not found')
@@ -3604,6 +3635,7 @@ export async function admitDirectoryAccountUser(
   if (!buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)) {
     throw new Error('Directory account is missing DingTalk openId/unionId and cannot be pre-bound for DingTalk login')
   }
+  assertDirectoryAccountCanEnableDingTalkGrant(account, enableDingTalkGrant)
 
   const passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
   let userId = ''

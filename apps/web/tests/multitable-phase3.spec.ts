@@ -135,6 +135,39 @@ describe('base management API', () => {
     expect(result.base.name).toBe('New Base')
   })
 
+  it('listTemplates calls the template catalog endpoint', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        ok: true,
+        data: { templates: [{ id: 'project-tracker', name: 'Project Tracker', description: '', category: 'Project management', icon: 'kanban', color: '#2563eb', sheets: [] }] },
+      }), { status: 200 }),
+    )
+    const client = mockClientWithFn(fetchFn)
+    const result = await client.listTemplates()
+    expect(result.templates[0].id).toBe('project-tracker')
+    expect(fetchFn).toHaveBeenCalledWith('/api/multitable/templates')
+  })
+
+  it('installTemplate calls the template install endpoint', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        ok: true,
+        data: {
+          template: { id: 'project-tracker', name: 'Project Tracker', description: '', category: 'Project management', icon: 'kanban', color: '#2563eb', sheets: [] },
+          base: { id: 'base_new', name: 'Project Tracker' },
+          sheets: [],
+          fields: [],
+          views: [],
+        },
+      }), { status: 201 }),
+    )
+    const client = mockClientWithFn(fetchFn)
+    const result = await client.installTemplate('project-tracker', { baseName: 'Launch Base' })
+    expect(result.base.id).toBe('base_new')
+    expect(fetchFn).toHaveBeenCalledWith('/api/multitable/templates/project-tracker/install', expect.objectContaining({ method: 'POST' }))
+    expect(JSON.parse(fetchFn.mock.calls[0][1].body).baseName).toBe('Launch Base')
+  })
+
   it('loadContext calls correct endpoint with params', async () => {
     const fetchFn = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({

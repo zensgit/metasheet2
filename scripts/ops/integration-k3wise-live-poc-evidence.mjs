@@ -4,6 +4,10 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const SECRET_KEY_PATTERN = /password|secret|token|session|credential|api[-_]?key|authorization/i
+const SECRET_TEXT_PATTERN = /(?:access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?id|api[_-]?key|secret|signature|sig|sign|password)=([^&#\s]+)/i
+const AUTH_TEXT_PATTERN = /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/i
+const JWT_TEXT_PATTERN = /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/
+const SECRET_ID_PATTERN = /\bSEC[A-Za-z0-9_-]{12,}\b/
 const SAFE_SECRET_PLACEHOLDERS = new Set(['', '<redacted>', '<set-at-runtime>', 'redacted', '***'])
 const VALID_STATUSES = new Set(['pass', 'partial', 'fail', 'skipped', 'todo', 'blocked'])
 // Customer evidence often spells phase status with localized or English
@@ -94,6 +98,23 @@ function text(value) {
   return ''
 }
 
+function markdownText(value) {
+  return String(value ?? '').replace(/\r?\n|\r/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
+function markdownInlineCode(value) {
+  const rendered = markdownText(value)
+  const runs = rendered.match(/`+/g) || ['']
+  const fenceLength = Math.max(1, ...runs.map((run) => run.length + 1))
+  const fence = '`'.repeat(fenceLength)
+  const content = rendered.startsWith('`') || rendered.endsWith('`') ? ` ${rendered} ` : rendered
+  return `${fence}${content}${fence}`
+}
+
+function markdownTableCodeCell(value) {
+  return markdownInlineCode(value).replace(/\|/g, '\\|')
+}
+
 function normalizeStatus(value) {
   const status = text(value).toLowerCase()
   if (VALID_STATUSES.has(status)) return status
@@ -116,6 +137,10 @@ function findSecretLeaks(value, location = 'root', leaks = []) {
     value.forEach((item, index) => findSecretLeaks(item, `${location}[${index}]`, leaks))
     return leaks
   }
+  if (typeof value === 'string') {
+    if (containsSecretLikeText(value)) leaks.push(location)
+    return leaks
+  }
   if (!isPlainObject(value)) return leaks
   for (const [key, child] of Object.entries(value)) {
     const childPath = `${location}.${key}`
@@ -129,6 +154,24 @@ function findSecretLeaks(value, location = 'root', leaks = []) {
     findSecretLeaks(child, childPath, leaks)
   }
   return leaks
+}
+
+function containsSecretLikeText(value) {
+  const textValue = String(value).trim()
+  if (!textValue) return false
+  if (SECRET_TEXT_PATTERN.test(textValue) || AUTH_TEXT_PATTERN.test(textValue) || JWT_TEXT_PATTERN.test(textValue) || SECRET_ID_PATTERN.test(textValue)) {
+    return true
+  }
+  try {
+    const parsed = new URL(textValue)
+    if (parsed.username || parsed.password) return true
+    for (const [key, val] of parsed.searchParams.entries()) {
+      if (SECRET_KEY_PATTERN.test(key) && val.trim().length >= 4) return true
+    }
+  } catch {
+    // Not a URL; regex checks above are enough for free-form evidence text.
+  }
+  return false
 }
 
 function hasBomPipeline(packet) {
@@ -232,6 +275,24 @@ function evaluateBom(packet, evidence, issues) {
   if (!text(bom.productId)) {
     addIssue(issues, 'fail', 'BOM_PRODUCT_SCOPE_REQUIRED', 'BOM PoC evidence must include productId', 'bomPoC')
   }
+  if (!text(bom.runId)) {
+    addIssue(issues, 'fail', 'BOM_RUN_ID_REQUIRED', 'BOM PoC evidence must include runId', 'bomPoC')
+  }
+  const rowsWritten = Number(bom.rowsWritten)
+  if (!Number.isInteger(rowsWritten) || rowsWritten < 1 || rowsWritten > 3) {
+    addIssue(issues, 'fail', 'BOM_ROW_COUNT', 'BOM PoC Save-only must write between 1 and 3 rows', 'bomPoC')
+  }
+  const k3Records = asArray(bom.k3Records, 'bomPoC.k3Records')
+  if (k3Records.length === 0) {
+    addIssue(issues, 'fail', 'BOM_K3_RECORD_REQUIRED', 'BOM PoC evidence must include at least one K3 test record', 'bomPoC')
+  } else {
+    const hasK3Response = k3Records.some((record) => (
+      isPlainObject(record) && (text(record.externalId) || text(record.billNo))
+    ))
+    if (!hasK3Response) {
+      addIssue(issues, 'fail', 'BOM_K3_RESPONSE_REQUIRED', 'BOM PoC evidence must include K3 externalId or billNo', 'bomPoC')
+    }
+  }
   if (normalizeSafeBoolean(bom.legacyPipelineOptionsSourceProductId, 'bomPoC.legacyPipelineOptionsSourceProductId')) {
     addIssue(issues, 'fail', 'LEGACY_BOM_PRODUCT_ID_USED', 'BOM PoC must not use pipeline.options.source.productId', 'bomPoC')
   }
@@ -304,20 +365,20 @@ function renderMarkdown(report) {
     '',
     '## Decision',
     '',
-    `- Decision: ${report.decision}`,
-    `- Tenant: ${report.packet.tenantId}`,
-    `- Workspace: ${report.packet.workspaceId}`,
-    `- BOM required: ${report.scope.bomRequired}`,
-    `- SQL channel expected: ${report.scope.sqlChannelExpected}`,
-    `- Save-only: ${report.packet.safety.saveOnly}`,
-    `- Auto Submit: ${report.packet.safety.autoSubmit}`,
-    `- Auto Audit: ${report.packet.safety.autoAudit}`,
+    `- Decision: ${markdownInlineCode(report.decision)}`,
+    `- Tenant: ${markdownInlineCode(report.packet.tenantId)}`,
+    `- Workspace: ${markdownInlineCode(report.packet.workspaceId)}`,
+    `- BOM required: ${markdownInlineCode(report.scope.bomRequired)}`,
+    `- SQL channel expected: ${markdownInlineCode(report.scope.sqlChannelExpected)}`,
+    `- Save-only: ${markdownInlineCode(report.packet.safety.saveOnly)}`,
+    `- Auto Submit: ${markdownInlineCode(report.packet.safety.autoSubmit)}`,
+    `- Auto Audit: ${markdownInlineCode(report.packet.safety.autoAudit)}`,
     '',
     '## Phase Results',
     '',
     '| Phase | Required | Status | Evidence |',
     '|---|---:|---|---|',
-    ...report.phases.map((item) => `| ${item.label} | ${item.required ? 'yes' : 'no'} | ${item.status} | ${item.evidence || '-'} |`),
+    ...report.phases.map((item) => `| ${markdownTableCodeCell(item.label)} | ${markdownTableCodeCell(item.required ? 'yes' : 'no')} | ${markdownTableCodeCell(item.status)} | ${markdownTableCodeCell(item.evidence || '-')} |`),
     '',
     '## Issues',
     '',
@@ -327,7 +388,7 @@ function renderMarkdown(report) {
   } else {
     lines.push('| Severity | Code | Phase | Message |', '|---|---|---|---|')
     for (const issue of report.issues) {
-      lines.push(`| ${issue.severity} | ${issue.code} | ${issue.phaseId || '-'} | ${issue.message} |`)
+      lines.push(`| ${markdownTableCodeCell(issue.severity)} | ${markdownTableCodeCell(issue.code)} | ${markdownTableCodeCell(issue.phaseId || '-')} | ${markdownTableCodeCell(issue.message)} |`)
     }
     lines.push('')
   }
@@ -380,6 +441,10 @@ function sampleEvidence() {
       status: 'pass',
       runId: 'run-bom-001',
       productId: 'PRODUCT-TEST-001',
+      rowsWritten: 1,
+      k3Records: [
+        { bomNumber: 'BOM-001', externalId: 'K3-BOM-1001', billNo: 'K3-BOM-BILL-001' },
+      ],
       legacyPipelineOptionsSourceProductId: false,
     },
     rollback: {
@@ -464,6 +529,7 @@ if (entryPath && import.meta.url === entryPath) {
 export {
   LivePocEvidenceError,
   buildEvidenceReport,
+  containsSecretLikeText,
   findSecretLeaks,
   redact,
   renderMarkdown,

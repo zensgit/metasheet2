@@ -63,6 +63,26 @@ function resolveTargetOptions(pipeline = {}) {
   return isPlainObject(targetOptions) ? { ...targetOptions } : {}
 }
 
+function resolveSourceReadOptions(pipeline = {}) {
+  const sourceOptions = pipeline.options && pipeline.options.source
+  if (sourceOptions === undefined || sourceOptions === null) return { filters: {}, options: {} }
+  if (!isPlainObject(sourceOptions)) {
+    throw new PipelineRunnerError('pipeline.options.source must be an object', { field: 'pipeline.options.source' })
+  }
+  if (sourceOptions.filters !== undefined && sourceOptions.filters !== null && !isPlainObject(sourceOptions.filters)) {
+    throw new PipelineRunnerError('pipeline.options.source.filters must be an object', { field: 'pipeline.options.source.filters' })
+  }
+  const filters = isPlainObject(sourceOptions.filters) ? { ...sourceOptions.filters } : {}
+  const options = { ...sourceOptions }
+  delete options.filters
+  delete options.productId
+  delete options.product_id
+  delete options.limit
+  delete options.cursor
+  delete options.watermark
+  return { filters, options }
+}
+
 function requireDependency(deps, name, methods) {
   const value = deps[name]
   if (!value) throw new Error(`createPipelineRunner: ${name} is required`)
@@ -93,16 +113,31 @@ function formatValidationErrors(errors) {
   return errors.map((error) => `${error.field || 'record'}:${error.code}`).join(', ')
 }
 
+function normalizeTargetWriteCount(value, field, invalidCounts) {
+  if (value === undefined || value === null || value === '') return 0
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || !Number.isInteger(numeric) || numeric < 0) {
+    invalidCounts.push({
+      field,
+      received: typeof value === 'number' && !Number.isFinite(value) ? String(value) : value,
+    })
+    return 0
+  }
+  return numeric
+}
+
 function normalizeTargetWriteResult(writeResult = {}, cleanRecords = []) {
   const errors = Array.isArray(writeResult.errors) ? writeResult.errors : []
-  const written = Number(writeResult.written) || 0
-  const skipped = Number(writeResult.skipped) || 0
-  const failed = Number(writeResult.failed) || 0
+  const invalidCounts = []
+  const written = normalizeTargetWriteCount(writeResult.written, 'written', invalidCounts)
+  const skipped = normalizeTargetWriteCount(writeResult.skipped, 'skipped', invalidCounts)
+  const failed = normalizeTargetWriteCount(writeResult.failed, 'failed', invalidCounts)
   const reportedFailed = Math.max(failed, errors.length)
   const reportedAccounted = written + skipped + reportedFailed
   const unaccountedFailed = Math.max(0, cleanRecords.length - reportedAccounted)
   const overReported = reportedAccounted > cleanRecords.length
-  const effectiveFailed = reportedFailed + unaccountedFailed + (overReported && reportedFailed === 0 ? 1 : 0)
+  const malformedCounterFailed = invalidCounts.length > 0 && reportedFailed === 0 && unaccountedFailed === 0 ? 1 : 0
+  const effectiveFailed = reportedFailed + unaccountedFailed + (overReported && reportedFailed === 0 ? 1 : 0) + malformedCounterFailed
   const accounted = written + skipped + effectiveFailed
   return {
     ...writeResult,
@@ -110,7 +145,8 @@ function normalizeTargetWriteResult(writeResult = {}, cleanRecords = []) {
     skipped,
     failed: effectiveFailed,
     errors,
-    inconsistent: reportedAccounted !== cleanRecords.length || failed !== reportedFailed,
+    inconsistent: invalidCounts.length > 0 || reportedAccounted !== cleanRecords.length || failed !== reportedFailed,
+    invalidCounts,
     reportedFailed: failed,
     unaccountedFailed,
     accounted,
@@ -174,6 +210,16 @@ function assertActiveSystem(system, field) {
   }
 }
 
+function assertPipelineLoaded(pipeline, input) {
+  if (!pipeline || typeof pipeline !== 'object' || Array.isArray(pipeline)) {
+    throw new PipelineRunnerError('pipeline not found', {
+      pipelineId: input.pipelineId,
+      tenantId: input.tenantId,
+      workspaceId: input.workspaceId ?? null,
+    })
+  }
+}
+
 function createPipelineRunner(deps = {}) {
   const pipelineRegistry = requireDependency(deps, 'pipelineRegistry', ['getPipeline'])
   const externalSystemRegistry = requireDependency(deps, 'externalSystemRegistry', ['getExternalSystem'])
@@ -202,6 +248,7 @@ function createPipelineRunner(deps = {}) {
       id: input.pipelineId,
       includeFieldMappings: true,
     })
+    assertPipelineLoaded(pipeline, input)
     if (pipeline.status !== 'active' && !coerceTruthyFlag(input.allowInactive, 'input.allowInactive')) {
       throw new PipelineRunnerError('pipeline is not active', {
         pipelineId: pipeline.id,
@@ -441,6 +488,7 @@ function createPipelineRunner(deps = {}) {
 
       while (page < maxPages) {
         page += 1
+        const sourceReadOptions = resolveSourceReadOptions(context.pipeline)
         const readResult = Array.isArray(input.sourceRecords)
           ? {
               records: input.sourceRecords,
@@ -452,6 +500,8 @@ function createPipelineRunner(deps = {}) {
               limit: effectiveBatchSize,
               cursor,
               watermark: currentWatermark ? { [watermarkConfig.field]: currentWatermark.value } : {},
+              filters: sourceReadOptions.filters,
+              options: sourceReadOptions.options,
             })
         const cleanRecords = []
         const records = remainingDryRunSamples === null
@@ -499,6 +549,7 @@ function createPipelineRunner(deps = {}) {
                 reportedFailed: writeResult.reportedFailed,
                 unaccountedFailed: writeResult.unaccountedFailed || 0,
                 inconsistent: writeResult.inconsistent === true,
+                invalidCounts: writeResult.invalidCounts || [],
                 cleanRecords: cleanRecords.length,
               },
               transformedPayload: null,

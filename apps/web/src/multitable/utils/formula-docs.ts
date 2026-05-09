@@ -3,6 +3,7 @@ import type { MetaField } from '../types'
 export type FormulaFunctionCategory =
   | 'aggregate'
   | 'math'
+  | 'operator'
   | 'logic'
   | 'text'
   | 'date'
@@ -16,6 +17,8 @@ export interface FormulaFunctionDoc {
   description: string
   example: string
   insertText?: string
+  minArgs?: number
+  maxArgs?: number
 }
 
 export interface FormulaFunctionCategoryDoc {
@@ -39,6 +42,7 @@ export interface FormulaDiagnostic {
 export const FORMULA_FUNCTION_CATEGORIES: FormulaFunctionCategoryDoc[] = [
   { id: 'aggregate', label: 'Aggregate', description: 'Summarize numeric or non-empty values.' },
   { id: 'math', label: 'Math', description: 'Round, transform, and compare numbers.' },
+  { id: 'operator', label: 'Operators', description: 'Combine values with spreadsheet operators.' },
   { id: 'logic', label: 'Logic', description: 'Branch and combine conditions.' },
   { id: 'text', label: 'Text', description: 'Join, slice, and normalize text.' },
   { id: 'date', label: 'Date', description: 'Create or extract date values.' },
@@ -104,12 +108,116 @@ export const FORMULA_FUNCTION_DOCS: FormulaFunctionDoc[] = [
     insertText: 'ROUND(, 2)',
   },
   {
+    name: 'CEILING',
+    signature: 'CEILING(number)',
+    category: 'math',
+    description: 'Rounds a number up to the nearest integer.',
+    example: '=CEILING({fld_amount})',
+    insertText: 'CEILING()',
+  },
+  {
+    name: 'FLOOR',
+    signature: 'FLOOR(number)',
+    category: 'math',
+    description: 'Rounds a number down to the nearest integer.',
+    example: '=FLOOR({fld_amount})',
+    insertText: 'FLOOR()',
+  },
+  {
+    name: 'POWER',
+    signature: 'POWER(number, power)',
+    category: 'math',
+    description: 'Raises a number to a power.',
+    example: '=POWER({fld_base}, 2)',
+    insertText: 'POWER(, 2)',
+  },
+  {
+    name: 'SQRT',
+    signature: 'SQRT(number)',
+    category: 'math',
+    description: 'Returns the square root of a number.',
+    example: '=SQRT({fld_area})',
+    insertText: 'SQRT()',
+  },
+  {
+    name: 'MOD',
+    signature: 'MOD(number, divisor)',
+    category: 'math',
+    description: 'Returns the remainder after division.',
+    example: '=MOD({fld_index}, 2)',
+    insertText: 'MOD(, )',
+  },
+  {
     name: 'ABS',
     signature: 'ABS(number)',
     category: 'math',
     description: 'Returns the absolute value of a number.',
     example: '=ABS({fld_delta})',
     insertText: 'ABS()',
+  },
+  {
+    name: 'ADD',
+    signature: 'left + right',
+    category: 'operator',
+    description: 'Adds two numeric values. Text numbers are coerced to numbers.',
+    example: '={fld_price} + {fld_tax}',
+    insertText: '+',
+  },
+  {
+    name: 'SUBTRACT',
+    signature: 'left - right',
+    category: 'operator',
+    description: 'Subtracts the right numeric value from the left value.',
+    example: '={fld_budget} - {fld_actual}',
+    insertText: '-',
+  },
+  {
+    name: 'MULTIPLY',
+    signature: 'left * right',
+    category: 'operator',
+    description: 'Multiplies two numeric values.',
+    example: '={fld_qty} * {fld_price}',
+    insertText: '*',
+  },
+  {
+    name: 'DIVIDE',
+    signature: 'left / right',
+    category: 'operator',
+    description: 'Divides the left numeric value by the right value.',
+    example: '={fld_total} / {fld_count}',
+    insertText: '/',
+  },
+  {
+    name: 'POWER_OPERATOR',
+    signature: 'left ^ right',
+    category: 'operator',
+    description: 'Raises the left numeric value to the power of the right value.',
+    example: '={fld_base} ^ 2',
+    insertText: '^',
+  },
+  {
+    name: 'PERCENT_OPERATOR',
+    signature: 'value%',
+    category: 'operator',
+    description: 'Converts a number to a percentage value, for example 50% becomes 0.5.',
+    example: '={fld_price} * 10%',
+    insertText: '10%',
+  },
+  {
+    name: 'CONCAT_OPERATOR',
+    signature: 'left & right',
+    category: 'operator',
+    description: 'Concatenates values as text.',
+    example: '={fld_first_name} & " " & {fld_last_name}',
+    insertText: '&',
+  },
+  {
+    name: 'COMPARISON',
+    signature: '=, <>, >, >=, <, <=',
+    category: 'operator',
+    description: 'Compares two values and returns TRUE or FALSE.',
+    example: '={fld_amount} >= 1000',
+    insertText: '>=',
   },
   {
     name: 'IF',
@@ -136,12 +244,76 @@ export const FORMULA_FUNCTION_DOCS: FormulaFunctionDoc[] = [
     insertText: 'OR()',
   },
   {
+    name: 'NOT',
+    signature: 'NOT(value)',
+    category: 'logic',
+    description: 'Reverses a boolean value.',
+    example: '=NOT({fld_done})',
+    insertText: 'NOT()',
+  },
+  {
+    name: 'TRUE',
+    signature: 'TRUE()',
+    category: 'logic',
+    description: 'Returns the boolean value TRUE.',
+    example: '=TRUE()',
+    insertText: 'TRUE()',
+  },
+  {
+    name: 'FALSE',
+    signature: 'FALSE()',
+    category: 'logic',
+    description: 'Returns the boolean value FALSE.',
+    example: '=FALSE()',
+    insertText: 'FALSE()',
+  },
+  {
+    name: 'SWITCH',
+    signature: 'SWITCH(value, match, result, ..., default)',
+    category: 'logic',
+    description: 'Returns the result for the first matching value, with an optional default.',
+    example: '=SWITCH({fld_status}, "open", "Open", "closed", "Closed", "Other")',
+    insertText: 'SWITCH(, , , )',
+  },
+  {
     name: 'CONCAT',
     signature: 'CONCAT(text, ...)',
     category: 'text',
     description: 'Joins text values together.',
     example: '=CONCAT({fld_first_name}, " ", {fld_last_name})',
     insertText: 'CONCAT()',
+  },
+  {
+    name: 'CONCATENATE',
+    signature: 'CONCATENATE(text, ...)',
+    category: 'text',
+    description: 'Joins text values together.',
+    example: '=CONCATENATE({fld_first_name}, " ", {fld_last_name})',
+    insertText: 'CONCATENATE()',
+  },
+  {
+    name: 'LEFT',
+    signature: 'LEFT(text, chars)',
+    category: 'text',
+    description: 'Returns characters from the start of a text value.',
+    example: '=LEFT({fld_code}, 3)',
+    insertText: 'LEFT(, )',
+  },
+  {
+    name: 'RIGHT',
+    signature: 'RIGHT(text, chars)',
+    category: 'text',
+    description: 'Returns characters from the end of a text value.',
+    example: '=RIGHT({fld_code}, 4)',
+    insertText: 'RIGHT(, )',
+  },
+  {
+    name: 'MID',
+    signature: 'MID(text, start, length)',
+    category: 'text',
+    description: 'Returns characters from the middle of a text value.',
+    example: '=MID({fld_code}, 2, 3)',
+    insertText: 'MID(, , )',
   },
   {
     name: 'LEN',
@@ -160,12 +332,60 @@ export const FORMULA_FUNCTION_DOCS: FormulaFunctionDoc[] = [
     insertText: 'UPPER()',
   },
   {
+    name: 'LOWER',
+    signature: 'LOWER(text)',
+    category: 'text',
+    description: 'Converts text to lowercase.',
+    example: '=LOWER({fld_code})',
+    insertText: 'LOWER()',
+  },
+  {
+    name: 'TRIM',
+    signature: 'TRIM(text)',
+    category: 'text',
+    description: 'Removes leading and trailing whitespace from text.',
+    example: '=TRIM({fld_name})',
+    insertText: 'TRIM()',
+  },
+  {
+    name: 'SUBSTITUTE',
+    signature: 'SUBSTITUTE(text, old_text, new_text)',
+    category: 'text',
+    description: 'Replaces all occurrences of old text with new text.',
+    example: '=SUBSTITUTE({fld_code}, "-", "")',
+    insertText: 'SUBSTITUTE(, , )',
+  },
+  {
+    name: 'NOW',
+    signature: 'NOW()',
+    category: 'date',
+    description: 'Returns the current date and time.',
+    example: '=NOW()',
+    insertText: 'NOW()',
+  },
+  {
     name: 'TODAY',
     signature: 'TODAY()',
     category: 'date',
     description: 'Returns the current date.',
     example: '=TODAY()',
     insertText: 'TODAY()',
+  },
+  {
+    name: 'DATE',
+    signature: 'DATE(year, month, day)',
+    category: 'date',
+    description: 'Creates a date from year, month, and day numbers.',
+    example: '=DATE(2026, 5, 5)',
+    insertText: 'DATE(, , )',
+  },
+  {
+    name: 'DATEDIF',
+    signature: 'DATEDIF(start_date, end_date, unit)',
+    category: 'date',
+    description: 'Returns the difference between two dates using unit D, M, or Y.',
+    example: '=DATEDIF({fld_start_date}, {fld_due_date}, "D")',
+    insertText: 'DATEDIF(, , "D")',
   },
   {
     name: 'DATEDIFF',
@@ -184,12 +404,68 @@ export const FORMULA_FUNCTION_DOCS: FormulaFunctionDoc[] = [
     insertText: 'YEAR()',
   },
   {
+    name: 'MONTH',
+    signature: 'MONTH(date)',
+    category: 'date',
+    description: 'Returns the month from a date value.',
+    example: '=MONTH({fld_due_date})',
+    insertText: 'MONTH()',
+  },
+  {
+    name: 'DAY',
+    signature: 'DAY(date)',
+    category: 'date',
+    description: 'Returns the day of month from a date value.',
+    example: '=DAY({fld_due_date})',
+    insertText: 'DAY()',
+  },
+  {
     name: 'VLOOKUP',
     signature: 'VLOOKUP(value, table, column, approximate)',
     category: 'lookup',
     description: 'Looks up a value in the first column of a table-like range.',
     example: '=VLOOKUP({fld_sku}, {fld_table}, 2, FALSE)',
     insertText: 'VLOOKUP(, , , FALSE)',
+  },
+  {
+    name: 'HLOOKUP',
+    signature: 'HLOOKUP(value, table, row, approximate)',
+    category: 'lookup',
+    description: 'Looks up a value in the first row of a table-like range.',
+    example: '=HLOOKUP({fld_month}, {fld_table}, 2, FALSE)',
+    insertText: 'HLOOKUP(, , , FALSE)',
+  },
+  {
+    name: 'INDEX',
+    signature: 'INDEX(range, row, column)',
+    category: 'lookup',
+    description: 'Returns a value from a range by row and column position.',
+    example: '=INDEX({fld_table}, 2, 1)',
+    insertText: 'INDEX(, , )',
+  },
+  {
+    name: 'MATCH',
+    signature: 'MATCH(value, range, match_type)',
+    category: 'lookup',
+    description: 'Returns the position of a value in a range.',
+    example: '=MATCH({fld_sku}, {fld_table}, 0)',
+    insertText: 'MATCH(, , 0)',
+  },
+  {
+    name: 'STDEV',
+    signature: 'STDEV(number, ...)',
+    category: 'statistical',
+    description: 'Returns the sample standard deviation of numeric values.',
+    example: '=STDEV({fld_score_1}, {fld_score_2})',
+    insertText: 'STDEV()',
+  },
+  {
+    name: 'VAR',
+    signature: 'VAR(number, ...)',
+    category: 'statistical',
+    description: 'Returns the sample variance of numeric values.',
+    example: '=VAR({fld_score_1}, {fld_score_2})',
+    insertText: 'VAR()',
   },
   {
     name: 'MEDIAN',
@@ -199,10 +475,70 @@ export const FORMULA_FUNCTION_DOCS: FormulaFunctionDoc[] = [
     example: '=MEDIAN({fld_score_1}, {fld_score_2})',
     insertText: 'MEDIAN()',
   },
+  {
+    name: 'MODE',
+    signature: 'MODE(number, ...)',
+    category: 'statistical',
+    description: 'Returns the most common numeric value.',
+    example: '=MODE({fld_score_1}, {fld_score_2})',
+    insertText: 'MODE()',
+  },
 ]
 
 const FUNCTION_CALL_PATTERN = /\b([A-Z][A-Z0-9_]*)\s*\(/g
 const FIELD_REF_PATTERN = /\{([^{}]+)\}/g
+const TRAILING_BINARY_OPERATOR_PATTERN = /(?:>=|<=|<>|[+\-*/^&=><])$/
+const IDENTIFIER_START_PATTERN = /[A-Za-z_]/
+const IDENTIFIER_PART_PATTERN = /[A-Za-z0-9_]/
+
+const FORMULA_FUNCTION_ARITY: Record<string, Pick<FormulaFunctionDoc, 'minArgs' | 'maxArgs'>> = {
+  ABS: { minArgs: 1, maxArgs: 1 },
+  AND: { minArgs: 1 },
+  AVERAGE: { minArgs: 1 },
+  CEILING: { minArgs: 1, maxArgs: 1 },
+  CONCAT: { minArgs: 1 },
+  CONCATENATE: { minArgs: 1 },
+  COUNT: { minArgs: 1 },
+  COUNTA: { minArgs: 1 },
+  DATE: { minArgs: 3, maxArgs: 3 },
+  DATEDIF: { minArgs: 3, maxArgs: 3 },
+  DATEDIFF: { minArgs: 2, maxArgs: 2 },
+  DAY: { minArgs: 1, maxArgs: 1 },
+  FALSE: { minArgs: 0, maxArgs: 0 },
+  FLOOR: { minArgs: 1, maxArgs: 1 },
+  HLOOKUP: { minArgs: 3, maxArgs: 4 },
+  IF: { minArgs: 3, maxArgs: 3 },
+  INDEX: { minArgs: 2, maxArgs: 3 },
+  LEFT: { minArgs: 2, maxArgs: 2 },
+  LEN: { minArgs: 1, maxArgs: 1 },
+  LOWER: { minArgs: 1, maxArgs: 1 },
+  MATCH: { minArgs: 2, maxArgs: 3 },
+  MAX: { minArgs: 1 },
+  MEDIAN: { minArgs: 1 },
+  MID: { minArgs: 3, maxArgs: 3 },
+  MIN: { minArgs: 1 },
+  MOD: { minArgs: 2, maxArgs: 2 },
+  MODE: { minArgs: 1 },
+  MONTH: { minArgs: 1, maxArgs: 1 },
+  NOT: { minArgs: 1, maxArgs: 1 },
+  NOW: { minArgs: 0, maxArgs: 0 },
+  OR: { minArgs: 1 },
+  POWER: { minArgs: 2, maxArgs: 2 },
+  RIGHT: { minArgs: 2, maxArgs: 2 },
+  ROUND: { minArgs: 1, maxArgs: 2 },
+  SQRT: { minArgs: 1, maxArgs: 1 },
+  STDEV: { minArgs: 1 },
+  SUBSTITUTE: { minArgs: 3, maxArgs: 3 },
+  SUM: { minArgs: 1 },
+  SWITCH: { minArgs: 3 },
+  TODAY: { minArgs: 0, maxArgs: 0 },
+  TRIM: { minArgs: 1, maxArgs: 1 },
+  TRUE: { minArgs: 0, maxArgs: 0 },
+  UPPER: { minArgs: 1, maxArgs: 1 },
+  VAR: { minArgs: 1 },
+  VLOOKUP: { minArgs: 3, maxArgs: 4 },
+  YEAR: { minArgs: 1, maxArgs: 1 },
+}
 
 export function searchFormulaFunctionDocs(query: string): FormulaFunctionDoc[] {
   const normalized = query.trim().toUpperCase()
@@ -265,6 +601,317 @@ export function extractFormulaFieldRefs(expression: string): string[] {
   return refs
 }
 
+function getFormulaSyntaxDiagnostics(expression: string): FormulaDiagnostic[] {
+  const diagnostics: FormulaDiagnostic[] = []
+  let parenthesesDepth = 0
+  let bracketDepth = 0
+  let braceDepth = 0
+  let inQuotes = false
+  let escaped = false
+
+  for (let i = 0; i < expression.length; i++) {
+    const char = expression[i]
+
+    if (inQuotes) {
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (char === '\\') {
+        escaped = true
+        continue
+      }
+      if (char === '"') {
+        inQuotes = false
+      }
+      continue
+    }
+
+    if (char === '"') {
+      inQuotes = true
+      continue
+    }
+
+    if (char === '(') {
+      parenthesesDepth++
+      continue
+    }
+    if (char === ')') {
+      if (parenthesesDepth === 0) {
+        diagnostics.push({ severity: 'error', message: 'Unexpected closing parenthesis.' })
+      } else {
+        parenthesesDepth--
+      }
+      continue
+    }
+
+    if (char === '[') {
+      bracketDepth++
+      continue
+    }
+    if (char === ']') {
+      if (bracketDepth === 0) {
+        diagnostics.push({ severity: 'error', message: 'Unexpected closing array bracket.' })
+      } else {
+        bracketDepth--
+      }
+      continue
+    }
+
+    if (char === '{') {
+      braceDepth++
+      continue
+    }
+    if (char === '}') {
+      if (braceDepth === 0) {
+        diagnostics.push({ severity: 'error', message: 'Unexpected closing field-reference brace.' })
+      } else {
+        braceDepth--
+      }
+    }
+  }
+
+  if (inQuotes) {
+    diagnostics.push({ severity: 'error', message: 'Quoted string is not closed.' })
+  }
+  if (parenthesesDepth > 0) {
+    diagnostics.push({ severity: 'error', message: 'Parentheses are not balanced.' })
+  }
+  if (bracketDepth > 0) {
+    diagnostics.push({ severity: 'error', message: 'Array brackets are not balanced.' })
+  }
+  if (braceDepth > 0) {
+    diagnostics.push({ severity: 'error', message: 'Field reference braces are not balanced.' })
+  }
+
+  const withoutWhitespace = expression.trimEnd()
+  if (TRAILING_BINARY_OPERATOR_PATTERN.test(withoutWhitespace)) {
+    diagnostics.push({ severity: 'error', message: 'Formula cannot end with a binary operator.' })
+  }
+
+  return diagnostics
+}
+
+interface ParsedFormulaFunctionCall {
+  name: string
+  args: string[]
+}
+
+function findClosingParenthesis(expression: string, openIndex: number): number | null {
+  let depth = 0
+  let inQuotes = false
+  let escaped = false
+
+  for (let i = openIndex; i < expression.length; i++) {
+    const char = expression[i]
+
+    if (inQuotes) {
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (char === '\\') {
+        escaped = true
+        continue
+      }
+      if (char === '"') {
+        inQuotes = false
+      }
+      continue
+    }
+
+    if (char === '"') {
+      inQuotes = true
+      continue
+    }
+    if (char === '(') {
+      depth++
+      continue
+    }
+    if (char === ')') {
+      depth--
+      if (depth === 0) return i
+    }
+  }
+
+  return null
+}
+
+function splitFormulaArguments(source: string): string[] {
+  if (!source.trim()) return []
+
+  const args: string[] = []
+  let current = ''
+  let parenthesesDepth = 0
+  let bracketDepth = 0
+  let braceDepth = 0
+  let inQuotes = false
+  let escaped = false
+
+  for (let i = 0; i < source.length; i++) {
+    const char = source[i]
+
+    if (inQuotes) {
+      current += char
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (char === '\\') {
+        escaped = true
+        continue
+      }
+      if (char === '"') {
+        inQuotes = false
+      }
+      continue
+    }
+
+    if (char === '"') {
+      inQuotes = true
+      current += char
+      continue
+    }
+    if (char === '(') {
+      parenthesesDepth++
+      current += char
+      continue
+    }
+    if (char === ')') {
+      parenthesesDepth = Math.max(0, parenthesesDepth - 1)
+      current += char
+      continue
+    }
+    if (char === '[') {
+      bracketDepth++
+      current += char
+      continue
+    }
+    if (char === ']') {
+      bracketDepth = Math.max(0, bracketDepth - 1)
+      current += char
+      continue
+    }
+    if (char === '{') {
+      braceDepth++
+      current += char
+      continue
+    }
+    if (char === '}') {
+      braceDepth = Math.max(0, braceDepth - 1)
+      current += char
+      continue
+    }
+
+    if (char === ',' && parenthesesDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
+      args.push(current.trim())
+      current = ''
+      continue
+    }
+
+    current += char
+  }
+
+  args.push(current.trim())
+  return args
+}
+
+function collectFormulaFunctionCalls(expression: string): ParsedFormulaFunctionCall[] {
+  const calls: ParsedFormulaFunctionCall[] = []
+  let inQuotes = false
+  let escaped = false
+
+  for (let i = 0; i < expression.length; i++) {
+    const char = expression[i]
+
+    if (inQuotes) {
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (char === '\\') {
+        escaped = true
+        continue
+      }
+      if (char === '"') {
+        inQuotes = false
+      }
+      continue
+    }
+
+    if (char === '"') {
+      inQuotes = true
+      continue
+    }
+
+    if (!IDENTIFIER_START_PATTERN.test(char)) continue
+
+    const start = i
+    i++
+    while (i < expression.length && IDENTIFIER_PART_PATTERN.test(expression[i] ?? '')) {
+      i++
+    }
+
+    const rawName = expression.slice(start, i)
+    let cursor = i
+    while (cursor < expression.length && /\s/.test(expression[cursor] ?? '')) {
+      cursor++
+    }
+    if (expression[cursor] !== '(') {
+      i--
+      continue
+    }
+
+    const closeIndex = findClosingParenthesis(expression, cursor)
+    if (closeIndex === null) {
+      i--
+      continue
+    }
+
+    const argsSource = expression.slice(cursor + 1, closeIndex)
+    const args = splitFormulaArguments(argsSource)
+    calls.push({ name: rawName.toUpperCase(), args })
+    calls.push(...collectFormulaFunctionCalls(argsSource))
+    i = closeIndex
+  }
+
+  return calls
+}
+
+function getFormulaFunctionArgumentDiagnostics(expression: string): FormulaDiagnostic[] {
+  const diagnostics: FormulaDiagnostic[] = []
+  const knownFunctions = new Set(FORMULA_FUNCTION_DOCS.map((doc) => doc.name))
+  for (const call of collectFormulaFunctionCalls(expression)) {
+    if (!knownFunctions.has(call.name)) continue
+
+    const emptyArgument = call.args.some((arg) => !arg)
+    if (emptyArgument) {
+      diagnostics.push({ severity: 'error', message: `${call.name} has an empty argument.` })
+      continue
+    }
+
+    const arity = FORMULA_FUNCTION_ARITY[call.name]
+    if (!arity) continue
+
+    if (typeof arity.minArgs === 'number' && call.args.length < arity.minArgs) {
+      diagnostics.push({
+        severity: 'error',
+        message: `${call.name} expects at least ${arity.minArgs} argument${arity.minArgs === 1 ? '' : 's'}.`,
+      })
+      continue
+    }
+
+    if (typeof arity.maxArgs === 'number' && call.args.length > arity.maxArgs) {
+      diagnostics.push({
+        severity: 'error',
+        message: `${call.name} expects at most ${arity.maxArgs} argument${arity.maxArgs === 1 ? '' : 's'}.`,
+      })
+    }
+  }
+
+  return diagnostics
+}
+
 export function validateFormulaExpression(expression: string, fields: MetaField[]): FormulaDiagnostic[] {
   const diagnostics: FormulaDiagnostic[] = []
   const trimmed = expression.trim()
@@ -273,11 +920,8 @@ export function validateFormulaExpression(expression: string, fields: MetaField[
     return diagnostics
   }
 
-  const openCount = (trimmed.match(/\(/g) ?? []).length
-  const closeCount = (trimmed.match(/\)/g) ?? []).length
-  if (openCount !== closeCount) {
-    diagnostics.push({ severity: 'error', message: 'Parentheses are not balanced.' })
-  }
+  diagnostics.push(...getFormulaSyntaxDiagnostics(trimmed))
+  diagnostics.push(...getFormulaFunctionArgumentDiagnostics(trimmed))
 
   const fieldIds = new Set(fields.map((field) => field.id))
   const fieldNames = new Set(fields.map((field) => field.name))

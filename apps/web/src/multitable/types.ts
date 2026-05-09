@@ -8,10 +8,12 @@ export type MetaFieldType =
   | 'number'
   | 'boolean'
   | 'date'
+  | 'dateTime'
   | 'formula'
   | 'select'
   | 'multiSelect'
   | 'link'
+  | 'person'
   | 'lookup'
   | 'rollup'
   | 'attachment'
@@ -21,9 +23,16 @@ export type MetaFieldType =
   | 'url'
   | 'email'
   | 'phone'
+  | 'barcode'
+  | 'location'
   | 'longText'
+  | 'autoNumber'
+  | 'createdTime'
+  | 'modifiedTime'
+  | 'createdBy'
+  | 'modifiedBy'
 
-export type MetaFieldCreateType = MetaFieldType | 'person'
+export type MetaFieldCreateType = MetaFieldType
 
 export type RowDensity = 'compact' | 'normal' | 'expanded'
 
@@ -192,6 +201,52 @@ export interface MetaRecordContext {
   commentsScope: MetaCommentsScope
   linkSummaries?: Record<string, LinkedRecordSummary[]>
   attachmentSummaries?: Record<string, MetaAttachment[]>
+}
+
+export type MetaRecordRevisionAction = 'create' | 'update' | 'delete'
+
+export interface MetaRecordRevision {
+  id: string
+  sheetId: string
+  recordId: string
+  version: number
+  action: MetaRecordRevisionAction
+  source: string
+  actorId: string | null
+  changedFieldIds: string[]
+  patch: Record<string, unknown>
+  snapshot: Record<string, unknown> | null
+  createdAt: string
+}
+
+export interface MetaRecordSubscription {
+  id: string
+  sheetId: string
+  recordId: string
+  userId: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface MetaRecordSubscriptionStatus {
+  subscribed: boolean
+  subscription: MetaRecordSubscription | null
+  items?: MetaRecordSubscription[]
+}
+
+export type MetaRecordSubscriptionNotificationType = 'record.updated' | 'comment.created'
+
+export interface MetaRecordSubscriptionNotification {
+  id: string
+  sheetId: string
+  recordId: string
+  userId: string
+  eventType: MetaRecordSubscriptionNotificationType
+  actorId: string | null
+  revisionId: string | null
+  commentId: string | null
+  createdAt: string
+  readAt: string | null
 }
 
 // --- Form context (GET /api/multitable/form-context) ---
@@ -436,6 +491,59 @@ export interface RecordSummaryPage {
   page: MetaPage
 }
 
+// --- Template library ---
+export interface MetaTemplateField {
+  id: string
+  name: string
+  type: MetaFieldType
+  order?: number
+  options?: string[]
+  property?: Record<string, unknown>
+  description?: string
+}
+
+export interface MetaTemplateView {
+  id: string
+  name: string
+  type: string
+  groupByFieldId?: string
+  dateFieldId?: string
+  titleFieldId?: string
+  hiddenFieldIds?: string[]
+  config?: Record<string, unknown>
+}
+
+export interface MetaTemplateSheet {
+  id: string
+  name: string
+  description?: string | null
+  fields: MetaTemplateField[]
+  views: MetaTemplateView[]
+}
+
+export interface MetaTemplate {
+  id: string
+  name: string
+  description: string
+  category: string
+  icon: string
+  color: string
+  sheets: MetaTemplateSheet[]
+}
+
+export interface InstallTemplateInput {
+  baseName?: string
+  workspaceId?: string
+}
+
+export interface InstallTemplateResult {
+  template: MetaTemplate
+  base: MetaBase
+  sheets: MetaSheet[]
+  fields: MetaField[]
+  views: MetaView[]
+}
+
 // --- Input types ---
 export interface CreateBaseInput {
   id?: string
@@ -584,6 +692,7 @@ export interface MetaGanttViewConfig {
   titleFieldId?: string | null
   progressFieldId?: string | null
   groupFieldId?: string | null
+  dependencyFieldId?: string | null
   zoom?: 'day' | 'week' | 'month'
 }
 

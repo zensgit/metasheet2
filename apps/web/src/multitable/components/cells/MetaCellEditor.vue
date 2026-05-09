@@ -11,6 +11,17 @@
       @keydown.enter="emit('confirm')"
       @keydown.escape="emit('cancel')"
     />
+    <!-- datetime field type -->
+    <input
+      v-else-if="field.type === 'dateTime'"
+      ref="inputRef"
+      class="meta-cell-editor__input"
+      type="datetime-local"
+      :value="dateTimeInputValue(modelValue)"
+      @input="emit('update:modelValue', dateTimeValueFromLocalInput(($event.target as HTMLInputElement).value))"
+      @keydown.enter="emit('confirm')"
+      @keydown.escape="emit('cancel')"
+    />
     <!-- string: date-like -->
     <input
       v-else-if="field.type === 'string' && isDateLike"
@@ -54,12 +65,40 @@
       @keydown.escape="emit('cancel')"
     />
 
+    <!-- barcode: text-backed field; scanner/image generation is out of scope. -->
+    <input
+      v-else-if="field.type === 'barcode'"
+      ref="inputRef"
+      class="meta-cell-editor__input"
+      type="text"
+      inputmode="text"
+      placeholder="Scan or enter barcode"
+      :value="textControlValue(modelValue)"
+      @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
+      @keydown.enter="emit('confirm')"
+      @keydown.escape="emit('cancel')"
+    />
+
+    <!-- location: address-only editor; coordinates can still be supplied through API. -->
+    <input
+      v-else-if="field.type === 'location'"
+      ref="inputRef"
+      class="meta-cell-editor__input"
+      type="text"
+      placeholder="Enter address"
+      :value="locationAddressValue(modelValue)"
+      @input="emit('update:modelValue', locationValueFromAddress(($event.target as HTMLInputElement).value))"
+      @keydown.enter="emit('confirm')"
+      @keydown.escape="emit('cancel')"
+    />
+
     <!-- number -->
     <input
       v-else-if="field.type === 'number'"
       ref="inputRef"
       class="meta-cell-editor__input"
       type="number"
+      :step="numericStep"
       :value="modelValue ?? ''"
       @input="onNumberInput"
       @keydown.enter="emit('confirm')"
@@ -223,7 +262,7 @@
     </div>
 
     <!-- readonly fallback -->
-    <span v-else class="meta-cell-editor__readonly">{{ modelValue ?? '' }}</span>
+    <span v-else class="meta-cell-editor__readonly">{{ readonlyDisplayValue }}</span>
   </div>
 </template>
 
@@ -236,12 +275,20 @@ import {
   attachmentAcceptAttr,
   resolveAttachmentFieldProperty,
   resolveCurrencyFieldProperty,
+  resolveNumberFieldProperty,
   resolvePercentFieldProperty,
   resolveRatingFieldProperty,
   shouldReplaceAttachmentSelection,
   validateAttachmentSelection,
 } from '../../utils/field-config'
 import { linkActionLabel as formatLinkActionLabel } from '../../utils/link-fields'
+import {
+  dateTimeInputValue,
+  dateTimeValueFromLocalInput,
+  formatFieldDisplay,
+  locationAddressValue,
+  locationValueFromAddress,
+} from '../../utils/field-display'
 import { useYjsCellBinding, type YjsCellBinding } from '../../composables/useYjsCellBinding'
 
 const props = defineProps<{
@@ -281,6 +328,14 @@ const emit = defineEmits<{
    */
   (e: 'yjs-commit'): void
 }>()
+
+const readonlyDisplayValue = computed(() =>
+  formatFieldDisplay({
+    field: props.field,
+    value: props.modelValue,
+    attachmentSummaries: props.attachmentSummaries,
+  }),
+)
 
 function textControlValue(value: unknown): string {
   return value === null || value === undefined ? '' : String(value)
@@ -454,6 +509,10 @@ function onNumberInput(e: Event) {
 }
 
 const numericStep = computed(() => {
+  if (props.field.type === 'number') {
+    const { decimals } = resolveNumberFieldProperty(props.field.property)
+    return decimals && decimals > 0 ? `0.${'0'.repeat(decimals - 1)}1` : 'any'
+  }
   if (props.field.type === 'currency') {
     const { decimals } = resolveCurrencyFieldProperty(props.field.property)
     return decimals > 0 ? `0.${'0'.repeat(decimals - 1)}1` : '1'

@@ -627,7 +627,11 @@ export class AutomationService {
    */
   async executeRule(rule: ExecutorRule, triggerEvent: unknown): Promise<AutomationExecution> {
     const execution = await this.executor.execute(rule, triggerEvent)
-    this.logService.record(execution)
+    try {
+      await this.logService.record(execution)
+    } catch (err) {
+      logger.error('Automation execution log persistence failed', err instanceof Error ? err : undefined)
+    }
     return execution
   }
 

@@ -51,6 +51,35 @@
             @input="formData[field.id] = ($event.target as HTMLTextAreaElement).value"
           />
           <input
+            v-else-if="field.type === 'barcode'"
+            :id="`field_${field.id}`"
+            class="meta-form-view__input"
+            :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
+            type="text"
+            inputmode="text"
+            placeholder="Scan or enter barcode"
+            :disabled="isFieldReadOnly(field.id)"
+            :aria-required="field.required ? 'true' : undefined"
+            :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
+            :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
+            :value="textControlValue(formData[field.id])"
+            @input="formData[field.id] = ($event.target as HTMLInputElement).value"
+          />
+          <input
+            v-else-if="field.type === 'location'"
+            :id="`field_${field.id}`"
+            class="meta-form-view__input"
+            :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
+            type="text"
+            placeholder="Enter address"
+            :disabled="isFieldReadOnly(field.id)"
+            :aria-required="field.required ? 'true' : undefined"
+            :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
+            :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
+            :value="locationAddressValue(formData[field.id])"
+            @input="formData[field.id] = locationValueFromAddress(($event.target as HTMLInputElement).value)"
+          />
+          <input
             v-else-if="field.type === 'number'"
             :id="`field_${field.id}`"
             class="meta-form-view__input"
@@ -79,6 +108,19 @@
             :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
             :value="formData[field.id] ?? ''"
             @input="formData[field.id] = ($event.target as HTMLInputElement).value"
+          />
+          <input
+            v-else-if="field.type === 'dateTime'"
+            :id="`field_${field.id}`"
+            class="meta-form-view__input"
+            :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
+            type="datetime-local"
+            :disabled="isFieldReadOnly(field.id)"
+            :aria-required="field.required ? 'true' : undefined"
+            :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
+            :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
+            :value="dateTimeInputValue(formData[field.id])"
+            @input="formData[field.id] = dateTimeValueFromLocalInput(($event.target as HTMLInputElement).value)"
           />
           <select
             v-else-if="field.type === 'select'"
@@ -204,7 +246,7 @@
             :value="formData[field.id] ?? ''"
             @input="formData[field.id] = ($event.target as HTMLInputElement).value"
           />
-          <span v-else class="meta-form-view__readonly-val">{{ record?.data[field.id] ?? '—' }}</span>
+          <span v-else class="meta-form-view__readonly-val">{{ readonlyFieldDisplay(field) }}</span>
           <div v-if="field.type === 'link' && linkPreview(field.id)" class="meta-form-view__link-summary">{{ linkPreview(field.id) }}</div>
           <div v-if="fieldErrors?.[field.id] || validationErrors[field.id]" :id="`error_${field.id}`" class="meta-form-view__field-error">{{ fieldErrors?.[field.id] || validationErrors[field.id] }}</div>
         </div>
@@ -246,6 +288,14 @@ import {
   validateAttachmentSelection,
 } from '../utils/field-config'
 import { linkActionLabel } from '../utils/link-fields'
+import {
+  dateTimeInputValue,
+  dateTimeValueFromLocalInput,
+  formatFieldDisplay,
+  locationAddressValue,
+  locationValueFromAddress,
+} from '../utils/field-display'
+import { isSystemField } from '../utils/system-fields'
 
 const props = defineProps<{
   fields: MetaField[]
@@ -286,7 +336,8 @@ const editableFields = computed(() => {
 })
 
 function isFieldReadOnly(fieldId: string): boolean {
-  return !!props.readOnly || props.fieldPermissions?.[fieldId]?.readOnly === true || props.rowActions?.canEdit === false
+  const field = props.fields.find((item) => item.id === fieldId) ?? null
+  return !!props.readOnly || props.fieldPermissions?.[fieldId]?.readOnly === true || props.rowActions?.canEdit === false || isSystemField(field)
 }
 
 const hasUnsavedChanges = computed(() => {
@@ -360,7 +411,7 @@ function validate(): boolean {
 
 function onSubmit() {
   if (!validate()) return
-  emit('submit', { ...formData })
+  emit('submit', buildSubmitPayload())
 }
 
 function resetForm() {
@@ -403,6 +454,22 @@ function linkSummaryCount(fieldId: string): number {
   if (summaries.length) return summaries.length
   const raw = formData[fieldId] ?? props.record?.data[fieldId]
   return Array.isArray(raw) ? raw.length : raw ? 1 : 0
+}
+
+function readonlyFieldDisplay(field: MetaField): string {
+  return formatFieldDisplay({
+    field,
+    value: formData[field.id] ?? props.record?.data[field.id],
+    linkSummaries: props.linkSummariesByField?.[field.id],
+    attachmentSummaries: props.attachmentSummariesByField?.[field.id],
+  })
+}
+
+function buildSubmitPayload(): Record<string, unknown> {
+  const systemFieldIds = new Set(props.fields.filter((field) => isSystemField(field)).map((field) => field.id))
+  return Object.fromEntries(
+    Object.entries(formData).filter(([fieldId]) => !systemFieldIds.has(fieldId)),
+  )
 }
 
 function attachmentList(fieldId: string): string[] {

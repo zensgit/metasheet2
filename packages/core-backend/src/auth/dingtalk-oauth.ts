@@ -586,7 +586,10 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
     assertLocalUserLoginAllowed(identityUser)
     const grantEnabled = await readGrantEnabled(identityUser.id)
     if (requireGrant && grantEnabled !== true) {
-      throw new Error('DingTalk login is not enabled for this user')
+      throw createPolicyError('DingTalk login is not enabled for this user', {
+        statusCode: 403,
+        code: 'grant_required',
+      })
     }
     if (grantEnabled === false) {
       throw createPolicyError(DINGTALK_LOGIN_DISABLED_ERROR, {
@@ -604,7 +607,10 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
       assertLocalUserLoginAllowed(emailUser)
       const grantEnabled = await readGrantEnabled(emailUser.id)
       if (requireGrant && grantEnabled !== true) {
-        throw new Error('DingTalk login is not enabled for this user')
+        throw createPolicyError('DingTalk login is not enabled for this user', {
+          statusCode: 403,
+          code: 'grant_required',
+        })
       }
       if (grantEnabled === false) {
         throw createPolicyError(DINGTALK_LOGIN_DISABLED_ERROR, {
@@ -621,10 +627,14 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
   }
 
   if (requireGrant) {
-    throw new Error(
+    throw createPolicyError(
       dtUser.email
         ? `DingTalk account ${dtUser.email} is not linked to an enabled local user`
         : 'DingTalk account is not linked to an enabled local user',
+      {
+        statusCode: 403,
+        code: 'unlinked_enabled_local_user',
+      },
     )
   }
 

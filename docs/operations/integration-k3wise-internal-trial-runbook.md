@@ -41,6 +41,11 @@ For manual signoff, run `K3 WISE Postdeploy Smoke` with:
 - `auto_discover_tenant`: `true` only when the deployment has exactly one
   integration tenant scope.
 
+For the current 142 internal trial deployment, use tenant scope `default`.
+`METASHEET_TENANT_ID=default` is configured as a GitHub repository variable, so
+the manual workflow can be run without filling `tenant_id`; use the input only
+when intentionally testing another tenant.
+
 Token resolution order:
 
 1. `METASHEET_K3WISE_SMOKE_TOKEN` secret.
@@ -49,6 +54,11 @@ Token resolution order:
 
 The manual workflow fails when `require_auth=true` and token resolution or
 authenticated checks fail.
+
+When token resolution fails, the workflow still runs the smoke script without a
+bearer token so it can upload a failure evidence artifact. Treat that artifact
+as a blocked signoff record, not as a passed smoke. The final workflow gate
+still fails on the token resolver return code.
 
 ## CLI Path
 
@@ -69,6 +79,104 @@ node scripts/ops/integration-k3wise-postdeploy-summary.mjs \
   --require-auth-signoff
 ```
 
+## Host-Shell Mint and Smoke (deploy host, no GHA)
+
+When you have shell access to the deploy host and need a one-off internal-trial
+smoke without firing a GHA workflow, you can mint a temporary admin token
+directly inside the running backend container. This bypasses
+`scripts/ops/resolve-k3wise-smoke-token.sh`, which is GHA-shaped (it wants
+`DEPLOY_HOST` / `DEPLOY_USER` / `DEPLOY_SSH_KEY_B64` and is meant to run from a
+control plane SSHing in).
+
+The container-internal mint script below uses the same admin-selection and
+token-mint logic as the resolver's deploy-host fallback, simplified for the
+explicit-tenant case (no `auto_discover_tenant`, no multi-tenant ambiguity
+guard). Treat it as a tested simplified extract, not a maintained mirror;
+re-derive from the resolver when it changes upstream.
+
+```bash
+# 1. Mint a 2-hour admin token via the running backend container.
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+TOKEN_FILE=/tmp/metasheet-host-admin-fresh-${TS}.jwt
+umask 077
+
+RAW=$(docker exec -i \
+  -e K3_WISE_SMOKE_TENANT_ID=default \
+  -e K3_WISE_SMOKE_TENANT_AUTO_DISCOVER=false \
+  -e JWT_EXPIRY=2h \
+  metasheet-backend \
+  node --input-type=module - 2>&1 <<'NODE_END'
+import pg from 'pg'
+import { authService } from '/app/packages/core-backend/dist/src/auth/AuthService.js'
+const tenantId = String(process.env.K3_WISE_SMOKE_TENANT_ID || '').trim()
+const { Client } = pg
+const client = new Client({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+})
+try {
+  await client.connect()
+  if (!tenantId) { console.error('tenant_id required'); process.exit(2) }
+  const r = await client.query(
+    "SELECT u.id, u.email, u.username, u.name, u.mobile, u.role, u.permissions, u.is_active, u.must_change_password, (ur.user_id IS NOT NULL) AS has_rbac_admin FROM users u LEFT JOIN user_roles ur ON ur.user_id = u.id AND ur.role_id = 'admin' WHERE COALESCE(u.is_active,true)=true AND COALESCE(u.must_change_password,false)=false AND (u.role='admin' OR ur.user_id IS NOT NULL) ORDER BY CASE WHEN ur.user_id IS NOT NULL THEN 0 ELSE 1 END, CASE WHEN u.id='admin' THEN 0 ELSE 1 END, u.created_at ASC LIMIT 1"
+  )
+  const row = r.rows[0]
+  if (!row) { console.error('no admin'); process.exit(4) }
+  const token = authService.createToken({
+    id: String(row.id),
+    email: typeof row.email === 'string' ? row.email : '',
+    username: row.username ?? null,
+    name: typeof row.name === 'string' && row.name.trim() ? row.name : 'K3 WISE Smoke Admin',
+    mobile: row.mobile ?? null,
+    role: row.has_rbac_admin ? 'admin' : (typeof row.role === 'string' && row.role.trim() ? row.role : 'admin'),
+    permissions: Array.isArray(row.permissions) ? row.permissions : [],
+    tenantId,
+    is_active: row.is_active,
+    must_change_password: row.must_change_password,
+    created_at: new Date(),
+    updated_at: new Date(),
+  })
+  console.log(token)
+} finally { await client.end().catch(()=>{}) }
+NODE_END
+)
+RC=$?
+TOKEN=$(printf '%s\n' "$RAW" | awk '/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/ {f=$0} END {if(f) print f}')
+unset RAW
+[ -n "$TOKEN" ] || { echo "MINT FAILED rc=$RC"; exit 1; }
+printf '%s' "$TOKEN" > "$TOKEN_FILE"
+chmod 600 "$TOKEN_FILE"
+unset TOKEN
+
+# 2. Run the smoke against the host-internal public URL.
+node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
+  --base-url http://<deploy-host-public-url>:8081 \
+  --token-file "$TOKEN_FILE" \
+  --tenant-id default \
+  --require-auth \
+  --out-dir artifacts/integration-k3wise/internal-trial/postdeploy-smoke
+
+# 3. Render the summary.
+node scripts/ops/integration-k3wise-postdeploy-summary.mjs \
+  --input artifacts/integration-k3wise/internal-trial/postdeploy-smoke/integration-k3wise-postdeploy-smoke.json \
+  --require-auth-signoff
+
+# 4. Optional: shred the token file when done.
+shred -u "$TOKEN_FILE" 2>/dev/null || rm -f "$TOKEN_FILE"
+```
+
+Notes:
+
+- `metasheet-backend` is the backend container name in the default
+  `docker-compose.app.yml`.
+- `JWT_EXPIRY=2h` matches the resolver default.
+- The token value never enters the shell prompt; the heredoc captures
+  container stdout, an `awk` extracts the 3-segment JWT shape, and the value
+  is `unset` from the shell as soon as it is on disk at `0600`.
+- The smoke script's pre-share self-check pattern from
+  `docs/operations/k3-poc-onprem-preflight-runbook.md` (URL query secret
+  check + raw `Bearer` / `eyJ` / token field) applies to this artifact too.
+
 ## Deployment Workflow
 
 The automatic deploy workflow can be made a hard authenticated smoke gate by
@@ -81,3 +189,66 @@ K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH=true
 Keep it unset or `false` only when the deployment is still in diagnostic mode.
 Diagnostic mode can prove the web/API surface is reachable, but cannot sign off
 the internal K3 WISE trial.
+
+## Public Surface Access Posture
+
+The `metasheet-web` container's published HTTP port (e.g., `:8081` on 142) is
+**not openly accessible from arbitrary external networks**. As of 2026-05-08
+142 has been observed with the following posture:
+
+- TCP `connect` to `:8081` succeeds from any source.
+- HTTP requests from sources outside the configured allowlist receive an
+  empty reply at the application layer (`curl: (52) Empty reply from
+  server`). The TCP connection is closed without a status line.
+
+Observed reachable paths:
+
+- `K3 WISE Postdeploy Smoke` GHA workflow — succeeds. GitHub Actions egress IP
+  ranges appear to be allowlisted.
+- The deploy host's own shell (loopback via the host's public IP, or via the
+  docker network) — succeeds.
+
+Observed non-reachable path:
+
+- Ad-hoc workstation `curl` from outside the allowlist — TCP succeeds, HTTP
+  returns empty reply.
+
+Implication for operators: if you want to run an ad-hoc smoke without going
+through GHA, prefer the host-shell pattern (SSH into the deploy host and run
+the smoke locally). Do **not** assume `--base-url http://<deploy-host>:8081`
+works from an unprivileged workstation.
+
+Loosening this posture (e.g., adding additional source networks to the
+`:8081` HTTP allowlist) happens in the `metasheet-web` container's nginx
+config or in any front-door reverse proxy, not in this repo, and is out of
+scope for this runbook.
+
+## 142 Internal Trial Evidence
+
+Latest confirmed signoff runs (newest first):
+
+### 2026-05-08, deploy-host shell
+
+- Path: "Host-Shell Mint and Smoke" section above.
+- Tenant source: `--tenant-id default` (explicit).
+- Token: minted via host-local `docker exec metasheet-backend node` against the
+  running prod container; written to `/tmp/...` at `0600`; never printed in
+  console, logs, or artifact.
+- Result: `signoff.internalTrial=pass`.
+- Summary: `10 pass / 0 skipped / 0 fail`.
+- Artifact: `artifacts/integration-k3wise/internal-trial/postdeploy-smoke/`
+  on the deploy host (gitignored).
+
+### Earlier, GHA
+
+- Workflow: `K3 WISE Postdeploy Smoke`.
+- Run: `https://github.com/zensgit/metasheet2/actions/runs/25157307393`.
+- Tenant source: repository variable `METASHEET_TENANT_ID=default`.
+- Result: `signoff.internalTrial=pass`.
+- Summary: `10 pass / 0 skipped / 0 fail`.
+- Artifact: `integration-k3wise-postdeploy-smoke-25157307393-1`.
+
+Both runs proved the deployed 142 environment can mint a temporary masked
+admin token, reach the K3 setup frontend route, validate the integration
+plugin route contract, list the four tenant-scoped control-plane collections,
+and validate staging descriptors.

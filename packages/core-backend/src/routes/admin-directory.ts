@@ -21,6 +21,11 @@ import {
   unbindDirectoryAccount,
   updateDirectoryIntegration,
 } from '../directory/directory-sync'
+import {
+  getDingTalkWorkNotificationRuntimeStatusFromStore,
+  saveDingTalkWorkNotificationAgentId,
+  testDingTalkWorkNotificationAgentId,
+} from '../integrations/dingtalk/work-notification-settings'
 import { refreshDirectoryIntegrationSchedule } from '../directory/directory-sync-scheduler'
 import { isAdmin as isRbacAdmin } from '../rbac/service'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
@@ -85,6 +90,58 @@ async function ensurePlatformAdmin(req: Request, res: Response): Promise<string 
 
 export function adminDirectoryRouter(): Router {
   const router = Router()
+
+  router.get('/dingtalk/work-notification', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const integrationId = typeof req.query.integrationId === 'string' ? req.query.integrationId : undefined
+      const status = await getDingTalkWorkNotificationRuntimeStatusFromStore(integrationId)
+      jsonOk(res, { status })
+    } catch (error) {
+      jsonError(res, 500, 'DINGTALK_WORK_NOTIFICATION_STATUS_FAILED', readErrorMessage(error, 'Failed to load DingTalk work notification status'))
+    }
+  })
+
+  router.post('/dingtalk/work-notification/test', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const result = await testDingTalkWorkNotificationAgentId(req.body as never)
+      jsonOk(res, { result })
+    } catch (error) {
+      jsonError(res, 400, 'DINGTALK_WORK_NOTIFICATION_TEST_FAILED', readErrorMessage(error, 'Failed to test DingTalk work notification Agent ID'))
+    }
+  })
+
+  router.put('/dingtalk/work-notification', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const result = await saveDingTalkWorkNotificationAgentId(req.body as never)
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'update',
+        resourceType: 'dingtalk-work-notification-config',
+        resourceId: result.integration.id,
+        meta: {
+          integrationId: result.integration.id,
+          integrationName: result.integration.name,
+          agentIdLength: result.agentId.length,
+          agentIdValuePrinted: false,
+          accessTokenVerified: result.accessTokenVerified,
+          notificationSent: result.notificationSent,
+        },
+      })
+      jsonOk(res, { result })
+    } catch (error) {
+      jsonError(res, 400, 'DINGTALK_WORK_NOTIFICATION_SAVE_FAILED', readErrorMessage(error, 'Failed to save DingTalk work notification Agent ID'))
+    }
+  })
 
   router.get('/integrations', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
@@ -353,7 +410,7 @@ export function adminDirectoryRouter(): Router {
         ? 404
         : /already bound|already linked/i.test(message)
           ? 409
-          : /required|cannot be pre-bound/i.test(message)
+          : /required|cannot be pre-bound|missing DingTalk openId/i.test(message)
             ? 400
             : 500
       jsonError(res, statusCode, 'DIRECTORY_BIND_FAILED', message)
@@ -432,7 +489,7 @@ export function adminDirectoryRouter(): Router {
         ? 404
         : /already exists|already bound|already linked/i.test(message)
           ? 409
-          : /required|invalid|password|cannot be pre-bound/i.test(message)
+          : /required|invalid|password|cannot be pre-bound|missing DingTalk openId/i.test(message)
             ? 400
             : 500
       jsonError(res, statusCode, 'DIRECTORY_ADMISSION_FAILED', message)
@@ -485,7 +542,7 @@ export function adminDirectoryRouter(): Router {
         ? 404
         : /already bound|already linked/i.test(message)
           ? 409
-          : /required|cannot be pre-bound/i.test(message)
+          : /required|cannot be pre-bound|missing DingTalk openId/i.test(message)
             ? 400
             : 500
       jsonError(res, statusCode, 'DIRECTORY_BATCH_BIND_FAILED', message)

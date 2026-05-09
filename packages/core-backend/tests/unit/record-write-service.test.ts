@@ -66,11 +66,26 @@ function createMockPool(queryResponses: Record<string, { rows: unknown[] }> = {}
 
   const queryFn = vi.fn(async (sql: string, _params?: unknown[]) => {
     // Match SQL patterns to return the correct responses
-    if (sql.includes('SELECT id, version, created_by FROM meta_records') && sql.includes('FOR UPDATE')) {
-      return queryResponses['SELECT_FOR_UPDATE'] ?? { rows: [{ id: 'rec1', version: 1, created_by: 'user1' }] }
+    if (sql.includes('SELECT id, version, data, created_by FROM meta_records') && sql.includes('FOR UPDATE')) {
+      return queryResponses['SELECT_FOR_UPDATE'] ?? { rows: [{ id: 'rec1', version: 1, data: { fld_name: 'Before' }, created_by: 'user1' }] }
     }
     if (sql.includes('UPDATE meta_records')) {
       return queryResponses['UPDATE'] ?? { rows: [{ version: 2 }] }
+    }
+    if (sql.includes('INSERT INTO meta_record_revisions')) {
+      return queryResponses['INSERT_REVISION'] ?? { rows: [], rowCount: 1 }
+    }
+    if (sql.includes('FROM meta_record_subscriptions')) {
+      return queryResponses['SELECT_RECORD_SUBSCRIPTIONS'] ?? { rows: [] }
+    }
+    if (sql.includes('INSERT INTO meta_record_subscription_notifications')) {
+      return queryResponses['INSERT_RECORD_SUBSCRIPTION_NOTIFICATIONS'] ?? { rows: [], rowCount: 1 }
+    }
+    if (sql.includes('SELECT id, config FROM meta_views WHERE sheet_id = $1 AND type = $2')) {
+      return queryResponses['SELECT_HIERARCHY_VIEWS'] ?? { rows: [] }
+    }
+    if (sql.includes('SELECT data FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')) {
+      return queryResponses['SELECT_HIERARCHY_PARENT_RECORD'] ?? { rows: [] }
     }
     if (sql.includes('SELECT id, version, data FROM meta_records')) {
       return queryResponses['SELECT_UPDATED'] ?? defaultQueryResponse
@@ -207,6 +222,26 @@ describe('RecordWriteService', () => {
     )
   })
 
+  it('creates subscriber notifications for each updated record and skips the actor', async () => {
+    pool = createMockPool({
+      SELECT_RECORD_SUBSCRIPTIONS: { rows: [{ user_id: 'watcher_2' }] },
+    })
+    const service = new RecordWriteService(pool, eventBus as any, helpers)
+
+    await service.patchRecords(buildTestInput({ actorId: 'user_editor' }))
+
+    expect(pool.query).toHaveBeenCalledWith(
+      expect.stringContaining('FROM meta_record_subscriptions'),
+      ['sheet1', 'rec1', 'user_editor'],
+    )
+    expect(pool.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO meta_record_subscription_notifications'),
+      expect.arrayContaining([
+        expect.stringContaining('"user_id":"watcher_2"'),
+      ]),
+    )
+  })
+
   it('persists modified_by with the patch actor', async () => {
     const service = new RecordWriteService(pool, eventBus as any, helpers)
 
@@ -222,6 +257,39 @@ describe('RecordWriteService', () => {
       'rec1',
       'user_editor',
     ])
+  })
+
+  it('writes one record revision for each authoritative patch', async () => {
+    const service = new RecordWriteService(pool, eventBus as any, helpers)
+
+    await service.patchRecords(buildTestInput({ actorId: 'user_editor' }))
+
+    expect(pool.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO meta_record_revisions'),
+      expect.arrayContaining([
+        expect.any(String),
+        'sheet1',
+        'rec1',
+        2,
+        'update',
+        'rest',
+        'user_editor',
+        ['fld_name'],
+        JSON.stringify({ fld_name: 'Alice' }),
+        JSON.stringify({ fld_name: 'Alice' }),
+      ]),
+    )
+  })
+
+  it('preserves yjs-bridge as the record revision source', async () => {
+    const service = new RecordWriteService(pool, eventBus as any, helpers)
+
+    await service.patchRecords(buildTestInput({ source: 'yjs-bridge' }))
+
+    expect(pool.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO meta_record_revisions'),
+      expect.arrayContaining(['yjs-bridge']),
+    )
   })
 
   it('preserves longText multiline values in the shared write path', async () => {
@@ -368,6 +436,78 @@ describe('RecordWriteService', () => {
 
     const service = new RecordWriteService(linkPool, eventBus as any, linkHelpers)
     await expect(service.patchRecords(input)).rejects.toThrow(RecordValidationError)
+  })
+
+  it('rejects hierarchy parent link updates that would create a cycle', async () => {
+    const linkHelpers = createMockHelpers({
+      normalizeLinkIds: (value) => (Array.isArray(value) ? value.map(String) : []),
+      parseLinkFieldConfig: () => ({ foreignSheetId: 'sheet1', limitSingleRecord: true }),
+    })
+    const linkPool = createMockPool({
+      SELECT_FOR_UPDATE: { rows: [{ id: 'rec_root', version: 1, data: { fld_title: 'Root' }, created_by: 'user1' }] },
+      SELECT_LINK_TARGETS: { rows: [{ id: 'rec_child' }] },
+      SELECT_HIERARCHY_VIEWS: { rows: [{ id: 'view_hierarchy', config: { parentFieldId: 'fld_parent' } }] },
+      SELECT_HIERARCHY_PARENT_RECORD: { rows: [{ data: { fld_parent: ['rec_root'] } }] },
+    })
+    const fields: UniverMetaField[] = [
+      { id: 'fld_title', name: 'Title', type: 'string', order: 0 },
+      { id: 'fld_parent', name: 'Parent', type: 'link', order: 1, property: { foreignSheetId: 'sheet1', limitSingleRecord: true } },
+    ]
+    const fieldById = new Map([
+      ['fld_title', { type: 'string' as const, readOnly: false, hidden: false }],
+      ['fld_parent', { type: 'link' as const, readOnly: false, hidden: false, link: { foreignSheetId: 'sheet1', limitSingleRecord: true } }],
+    ])
+    const input = buildTestInput({
+      sheetId: 'sheet1',
+      fields,
+      visiblePropertyFields: fields,
+      visiblePropertyFieldIds: new Set(fields.map((field) => field.id)),
+      fieldById: fieldById as any,
+      changesByRecord: new Map([
+        ['rec_root', [{ fieldId: 'fld_parent', value: ['rec_child'] }]],
+      ]),
+    })
+    const service = new RecordWriteService(linkPool, eventBus as any, linkHelpers)
+
+    await expect(service.patchRecords(input)).rejects.toThrow(RecordValidationError)
+    await expect(service.patchRecords(input)).rejects.toMatchObject({ code: 'HIERARCHY_CYCLE' })
+    expect(linkPool.query).not.toHaveBeenCalledWith(expect.stringContaining('UPDATE meta_records'), expect.anything())
+  })
+
+  it('uses the first link field as the server-side hierarchy parent fallback', async () => {
+    const linkHelpers = createMockHelpers({
+      normalizeLinkIds: (value) => (Array.isArray(value) ? value.map(String) : []),
+      parseLinkFieldConfig: () => ({ foreignSheetId: 'sheet1', limitSingleRecord: true }),
+    })
+    const linkPool = createMockPool({
+      SELECT_FOR_UPDATE: { rows: [{ id: 'rec_root', version: 1, data: { fld_title: 'Root' }, created_by: 'user1' }] },
+      SELECT_LINK_TARGETS: { rows: [{ id: 'rec_child' }] },
+      SELECT_HIERARCHY_VIEWS: { rows: [{ id: 'view_hierarchy', config: {} }] },
+      SELECT_HIERARCHY_PARENT_RECORD: { rows: [{ data: { fld_parent: ['rec_root'] } }] },
+    })
+    const fields: UniverMetaField[] = [
+      { id: 'fld_title', name: 'Title', type: 'string', order: 0 },
+      { id: 'fld_parent', name: 'Parent', type: 'link', order: 1, property: { foreignSheetId: 'sheet1', limitSingleRecord: true } },
+      { id: 'fld_related', name: 'Related', type: 'link', order: 2, property: { foreignSheetId: 'sheet1' } },
+    ]
+    const fieldById = new Map([
+      ['fld_title', { type: 'string' as const, readOnly: false, hidden: false }],
+      ['fld_parent', { type: 'link' as const, readOnly: false, hidden: false, link: { foreignSheetId: 'sheet1', limitSingleRecord: true } }],
+      ['fld_related', { type: 'link' as const, readOnly: false, hidden: false, link: { foreignSheetId: 'sheet1', limitSingleRecord: false } }],
+    ])
+    const input = buildTestInput({
+      sheetId: 'sheet1',
+      fields,
+      visiblePropertyFields: fields,
+      visiblePropertyFieldIds: new Set(fields.map((field) => field.id)),
+      fieldById: fieldById as any,
+      changesByRecord: new Map([
+        ['rec_root', [{ fieldId: 'fld_parent', value: ['rec_child'] }]],
+      ]),
+    })
+    const service = new RecordWriteService(linkPool, eventBus as any, linkHelpers)
+
+    await expect(service.patchRecords(input)).rejects.toMatchObject({ code: 'HIERARCHY_CYCLE' })
   })
 
   it('should trigger computed field recalculation when lookup/rollup fields exist', async () => {

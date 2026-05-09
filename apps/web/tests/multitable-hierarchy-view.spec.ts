@@ -12,11 +12,13 @@ function mountHierarchy(props: {
   rows: MetaRecord[]
   viewConfig?: Record<string, unknown>
   canCreate?: boolean
+  canEdit?: boolean
   canComment?: boolean
   onSelectRecord?: (recordId: string) => void
   onOpenComments?: (recordId: string) => void
   onCreateRecord?: (data: Record<string, unknown>) => void
   onUpdateViewConfig?: (input: { config: Record<string, unknown> }) => void
+  onReparentRecord?: (payload: { recordId: string; version: number; parentFieldId: string; parentRecordId: string | null }) => void
 }) {
   const container = document.createElement('div')
   document.body.appendChild(container)
@@ -115,6 +117,104 @@ describe('MetaHierarchyView', () => {
         orphanMode: 'hidden',
       },
     })
+
+    unmount()
+  })
+
+  it('emits reparent updates from drag and drop interactions', async () => {
+    const reparentSpy = vi.fn()
+    const { container, unmount } = mountHierarchy({
+      rows: [
+        { id: 'rec_root', version: 1, data: { fld_title: 'Root' } },
+        { id: 'rec_child', version: 4, data: { fld_title: 'Child', fld_parent: ['rec_root'] } },
+        { id: 'rec_new_parent', version: 2, data: { fld_title: 'New Parent' } },
+      ],
+      viewConfig: { parentFieldId: 'fld_parent', titleFieldId: 'fld_title', defaultExpandDepth: 2 },
+      canEdit: true,
+      onReparentRecord: reparentSpy,
+    })
+    await nextTick()
+
+    const titleButtons = Array.from(container.querySelectorAll('.meta-hierarchy__title')) as HTMLButtonElement[]
+    const childRow = titleButtons.find((button) => button.textContent === 'Child')?.closest('.meta-hierarchy__row') as HTMLElement | null
+    const newParentRow = titleButtons.find((button) => button.textContent === 'New Parent')?.closest('.meta-hierarchy__row') as HTMLElement | null
+    expect(childRow).not.toBeNull()
+    expect(newParentRow).not.toBeNull()
+
+    childRow?.dispatchEvent(new Event('dragstart', { bubbles: true }))
+    await nextTick()
+    newParentRow?.dispatchEvent(new Event('drop', { bubbles: true }))
+    await nextTick()
+
+    expect(reparentSpy).toHaveBeenCalledWith({
+      recordId: 'rec_child',
+      version: 4,
+      parentFieldId: 'fld_parent',
+      parentRecordId: 'rec_new_parent',
+    })
+
+    unmount()
+  })
+
+  it('supports dropping a child to the root drop zone', async () => {
+    const reparentSpy = vi.fn()
+    const { container, unmount } = mountHierarchy({
+      rows: [
+        { id: 'rec_root', version: 1, data: { fld_title: 'Root' } },
+        { id: 'rec_child', version: 4, data: { fld_title: 'Child', fld_parent: ['rec_root'] } },
+      ],
+      viewConfig: { parentFieldId: 'fld_parent', titleFieldId: 'fld_title', defaultExpandDepth: 2 },
+      canEdit: true,
+      onReparentRecord: reparentSpy,
+    })
+    await nextTick()
+
+    const childRow = (Array.from(container.querySelectorAll('.meta-hierarchy__title')) as HTMLButtonElement[])
+      .find((button) => button.textContent === 'Child')
+      ?.closest('.meta-hierarchy__row') as HTMLElement | null
+    childRow?.dispatchEvent(new Event('dragstart', { bubbles: true }))
+    await nextTick()
+
+    const rootDrop = container.querySelector('.meta-hierarchy__root-drop') as HTMLElement | null
+    expect(rootDrop).not.toBeNull()
+
+    rootDrop?.dispatchEvent(new Event('drop', { bubbles: true }))
+    await nextTick()
+
+    expect(reparentSpy).toHaveBeenCalledWith({
+      recordId: 'rec_child',
+      version: 4,
+      parentFieldId: 'fld_parent',
+      parentRecordId: null,
+    })
+
+    unmount()
+  })
+
+  it('blocks dragging a parent under its own descendant', async () => {
+    const reparentSpy = vi.fn()
+    const { container, unmount } = mountHierarchy({
+      rows: [
+        { id: 'rec_root', version: 1, data: { fld_title: 'Root' } },
+        { id: 'rec_child', version: 2, data: { fld_title: 'Child', fld_parent: ['rec_root'] } },
+      ],
+      viewConfig: { parentFieldId: 'fld_parent', titleFieldId: 'fld_title', defaultExpandDepth: 2 },
+      canEdit: true,
+      onReparentRecord: reparentSpy,
+    })
+    await nextTick()
+
+    const titleButtons = Array.from(container.querySelectorAll('.meta-hierarchy__title')) as HTMLButtonElement[]
+    const rootRow = titleButtons.find((button) => button.textContent === 'Root')?.closest('.meta-hierarchy__row') as HTMLElement | null
+    const childRow = titleButtons.find((button) => button.textContent === 'Child')?.closest('.meta-hierarchy__row') as HTMLElement | null
+
+    rootRow?.dispatchEvent(new Event('dragstart', { bubbles: true }))
+    await nextTick()
+    childRow?.dispatchEvent(new Event('drop', { bubbles: true }))
+    await nextTick()
+
+    expect(reparentSpy).not.toHaveBeenCalled()
+    expect(container.textContent).toContain('Cannot move a record under its own descendant.')
 
     unmount()
   })

@@ -23,6 +23,18 @@ import {
   type YjsInvalidator,
 } from './post-commit-hooks'
 import { BATCH1_FIELD_TYPES, coerceBatch1Value, normalizeMultiSelectValue, validateLongTextValue } from './field-codecs'
+import {
+  HierarchyCycleError,
+  assertNoHierarchyParentCycle,
+  buildHierarchyParentOverridesByField,
+  collectSameSheetLinkChangeFieldIds,
+  loadHierarchyParentFieldIds,
+} from './hierarchy-cycle-guard'
+import { recordRecordRevision } from './record-history-service'
+import {
+  notifyRecordSubscribersBestEffort,
+  type NotifyRecordSubscribersInput,
+} from './record-subscription-service'
 
 // ---------------------------------------------------------------------------
 // Shared types (mirrors the ones in univer-meta.ts to avoid coupling)
@@ -46,6 +58,7 @@ export type UniverMetaField = {
     | 'number'
     | 'boolean'
     | 'date'
+    | 'dateTime'
     | 'formula'
     | 'select'
     | 'multiSelect'
@@ -59,7 +72,10 @@ export type UniverMetaField = {
     | 'url'
     | 'email'
     | 'phone'
+    | 'barcode'
+    | 'location'
     | 'longText'
+    | 'autoNumber'
     | 'createdTime'
     | 'modifiedTime'
     | 'createdBy'
@@ -463,6 +479,7 @@ export class RecordWriteService {
       capabilities,
       sheetScope,
       access,
+      source,
     } = input
 
     const h = this.helpers
@@ -471,10 +488,33 @@ export class RecordWriteService {
     // Step 0: Validate changes (field writability + value constraints)
     // -----------------------------------------------------------------------
     await this.validateChanges({ sheetId, changesByRecord, fieldById })
+    const sameSheetLinkChangeFieldIds = collectSameSheetLinkChangeFieldIds({
+      changesByRecord,
+      fieldById,
+      sheetId,
+    })
+    const hierarchyParentFieldIds = sameSheetLinkChangeFieldIds.size > 0
+      ? await loadHierarchyParentFieldIds({
+          query: this.pool.query.bind(this.pool),
+          sheetId,
+          fields,
+        })
+      : new Set<string>()
+    const guardedHierarchyParentFieldIds = new Set(
+      [...sameSheetLinkChangeFieldIds].filter((fieldId) => hierarchyParentFieldIds.has(fieldId)),
+    )
+    const hierarchyParentOverridesByField = guardedHierarchyParentFieldIds.size > 0
+      ? buildHierarchyParentOverridesByField({
+          changesByRecord,
+          hierarchyParentFieldIds: guardedHierarchyParentFieldIds,
+          normalizeLinkIds: h.normalizeLinkIds,
+        })
+      : new Map<string, Map<string, string[]>>()
 
     // -----------------------------------------------------------------------
     // Step 1: DB transaction
     // -----------------------------------------------------------------------
+    const pendingSubscriberNotifications: NotifyRecordSubscribersInput[] = []
     const updates = await this.pool.transaction(async ({ query }) => {
       const updated: Array<{ recordId: string; version: number }> = []
 
@@ -484,7 +524,7 @@ export class RecordWriteService {
         )[0]
 
         const recordRes = await query(
-          'SELECT id, version, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE',
+          'SELECT id, version, data, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE',
           [sheetId, recordId],
         )
         if ((recordRes.rows as any[]).length === 0) {
@@ -508,6 +548,7 @@ export class RecordWriteService {
         if (typeof expectedVersion === 'number' && expectedVersion !== serverVersion) {
           throw new VersionConflictError(recordId, serverVersion)
         }
+        const previousData = h.normalizeJson(recordRow?.data)
 
         const patch: Record<string, unknown> = {}
         const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
@@ -573,7 +614,7 @@ export class RecordWriteService {
         if (applied === 0) continue
 
         // Validate link targets exist
-        for (const { ids, cfg } of linkUpdates.values()) {
+        for (const [fieldId, { ids, cfg }] of linkUpdates.entries()) {
           if (ids.length === 0) continue
           const exists = await query(
             'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
@@ -585,6 +626,24 @@ export class RecordWriteService {
             throw new RecordValidationError(
               `Linked record(s) not found in sheet ${cfg.foreignSheetId}: ${missing.join(', ')}`,
             )
+          }
+          if (guardedHierarchyParentFieldIds.has(fieldId) && cfg.foreignSheetId === sheetId) {
+            try {
+              await assertNoHierarchyParentCycle({
+                query,
+                sheetId,
+                recordId,
+                fieldId,
+                parentRecordIds: ids,
+                parentOverridesByRecord: hierarchyParentOverridesByField.get(fieldId) ?? new Map(),
+                normalizeLinkIds: h.normalizeLinkIds,
+              })
+            } catch (error) {
+              if (error instanceof HierarchyCycleError) {
+                throw new RecordValidationError(error.message, error.code)
+              }
+              throw error
+            }
           }
         }
 
@@ -599,6 +658,25 @@ export class RecordWriteService {
         if ((updateRes.rows as any[]).length === 0) {
           throw new RecordNotFoundError(`Record not found: ${recordId}`)
         }
+        const nextVersion = Number((updateRes.rows[0] as any).version)
+        const revisionId = await recordRecordRevision(query, {
+          sheetId,
+          recordId,
+          version: nextVersion,
+          action: 'update',
+          source: source ?? 'rest',
+          actorId,
+          changedFieldIds: Object.keys(patch),
+          patch,
+          snapshot: { ...previousData, ...patch },
+        })
+        pendingSubscriberNotifications.push({
+          sheetId,
+          recordId,
+          eventType: 'record.updated',
+          actorId,
+          revisionId,
+        })
 
         // Sync link table
         if (linkUpdates.size > 0) {
@@ -654,14 +732,25 @@ export class RecordWriteService {
           }
         }
 
-        updated.push({ recordId, version: Number((updateRes.rows[0] as any).version) })
+        updated.push({ recordId, version: nextVersion })
       }
 
       return updated
     })
 
     // -----------------------------------------------------------------------
-    // Step 2: Post-commit hooks (best effort, immediately after commit)
+    // Step 2: Subscriber notifications (best effort, after commit)
+    // -----------------------------------------------------------------------
+    for (const notification of pendingSubscriberNotifications) {
+      await notifyRecordSubscribersBestEffort(
+        this.pool.query.bind(this.pool),
+        notification,
+        'record-write',
+      )
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 3: Post-commit hooks (best effort, immediately after commit)
     // -----------------------------------------------------------------------
     if (this.postCommitHooks.length > 0 && updates.length > 0) {
       const context: RecordPostCommitContext = {
@@ -683,7 +772,7 @@ export class RecordWriteService {
     }
 
     // -----------------------------------------------------------------------
-    // Step 3: Computed field recalculation (lookup / rollup)
+    // Step 4: Computed field recalculation (lookup / rollup)
     // -----------------------------------------------------------------------
     let computedRecords: Array<{ recordId: string; data: Record<string, unknown> }> | undefined
     let updatedRowsForSummaries: UniverMetaRecord[] = []

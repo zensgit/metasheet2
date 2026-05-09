@@ -104,6 +104,56 @@ describe('MetaFormView attachment flow', () => {
     container.remove()
   })
 
+  it('omits readonly system fields from submit payloads', async () => {
+    const submitSpy = vi.fn()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaFormView, {
+          fields: [
+            { id: 'fld_title', name: 'Title', type: 'string' },
+            { id: 'fld_created_at', name: 'Created at', type: 'createdTime' },
+          ],
+          record: {
+            id: 'rec_1',
+            version: 1,
+            data: {
+              fld_title: 'Draft',
+              fld_created_at: '2026-04-30T08:15:00.000Z',
+            },
+          },
+          loading: false,
+          readOnly: false,
+          onSubmit: submitSpy,
+          onOpenLinkPicker: vi.fn(),
+        })
+      },
+    })
+
+    app.mount(container)
+    await flushUi()
+
+    expect(container.querySelector('#field_fld_created_at')).toBeNull()
+    expect(container.textContent).toContain('2026')
+
+    const titleInput = container.querySelector('#field_fld_title') as HTMLInputElement | null
+    titleInput!.value = 'Revised'
+    titleInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    container.querySelector('form')?.dispatchEvent(new Event('submit'))
+    await flushUi()
+
+    expect(submitSpy).toHaveBeenCalledWith({
+      fld_title: 'Revised',
+    })
+
+    app.unmount()
+    container.remove()
+  })
+
   it('emits dirty state while the form has unsaved edits', async () => {
     const dirtySpy = vi.fn()
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)

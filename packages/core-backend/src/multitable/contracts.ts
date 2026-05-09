@@ -3,6 +3,7 @@ export type MultitableProvisioningFieldType =
   | 'number'
   | 'boolean'
   | 'date'
+  | 'dateTime'
   | 'formula'
   | 'select'
   | 'multiSelect'
@@ -10,6 +11,8 @@ export type MultitableProvisioningFieldType =
   | 'lookup'
   | 'rollup'
   | 'attachment'
+  | 'barcode'
+  | 'location'
   | 'longText'
 
 export interface MultitableProvisioningFieldDescriptor {

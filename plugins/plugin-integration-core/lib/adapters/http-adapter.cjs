@@ -56,8 +56,11 @@ function assertRelativePath(path, field) {
     throw new AdapterValidationError(`${field} is required`, { field })
   }
   const trimmed = path.trim()
-  if (/^https?:\/\//i.test(trimmed)) {
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed) || trimmed.startsWith('//')) {
     throw new AdapterValidationError(`${field} must be relative to baseUrl`, { field })
+  }
+  if (/[\u0000-\u001F\u007F]/.test(trimmed) || trimmed.includes('\\')) {
+    throw new AdapterValidationError(`${field} must be a safe URL path`, { field })
   }
   return trimmed.startsWith('/') ? trimmed : `/${trimmed}`
 }
@@ -128,6 +131,17 @@ function credentialHeaders(credentials, config) {
 
 function mergeHeaders(...sets) {
   return Object.assign({}, ...sets.filter(Boolean))
+}
+
+function readOptionsQuery(value) {
+  const query = toPlainObject(value, 'options.query')
+  const safe = { ...query }
+  // Pagination is governed by normalizeReadRequest(). Operator-provided
+  // options.query may add vendor filters, but it must not override the guarded
+  // limit/cursor values after they have been normalized.
+  delete safe.limit
+  delete safe.cursor
+  return safe
 }
 
 async function parseResponseBody(response) {
@@ -306,13 +320,14 @@ function createHttpAdapter({ system, fetchImpl = globalThis.fetch, logger } = {}
     const objectConfig = getObjectConfig(request.object)
     ensureOperation(normalizedSystem.kind, request.object, objectConfig, 'read')
     const path = assertRelativePath(objectConfig.path || objectConfig.readPath, 'object.path')
+    const optionsQuery = readOptionsQuery(request.options.query)
     const query = {
       ...toPlainObject(objectConfig.query, 'object.query'),
       ...request.filters,
+      ...request.watermark,
+      ...optionsQuery,
       limit: request.limit,
       cursor: request.cursor,
-      ...request.watermark,
-      ...request.options.query,
     }
     const { data } = await requestJson(path, {
       method: objectConfig.method || objectConfig.readMethod || 'GET',
@@ -393,5 +408,6 @@ module.exports = {
     normalizeBaseUrl,
     normalizeObjects,
     credentialHeaders,
+    readOptionsQuery,
   },
 }

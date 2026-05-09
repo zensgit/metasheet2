@@ -171,6 +171,51 @@ describe('PublicMultitableFormView', () => {
     expect(container.textContent).toContain('Redirecting to DingTalk sign-in…')
   })
 
+  it('offers DingTalk binding when a signed-in user is not bound', async () => {
+    loadFormContextSpy.mockRejectedValue(Object.assign(new Error('DingTalk binding is required for this form'), {
+      code: 'DINGTALK_BIND_REQUIRED',
+    }))
+    apiFetchSpy.mockResolvedValue(new Response(JSON.stringify({
+      success: true,
+      data: { url: 'https://login.dingtalk.com/oauth2/auth?bind=1' },
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    const { default: PublicMultitableFormView } = await import('../src/views/PublicMultitableFormView.vue')
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const Root = defineComponent({
+      render() {
+        return h(PublicMultitableFormView, {
+          sheetId: 'sheet_orders',
+          viewId: 'view_form',
+          publicToken: 'pub_123',
+        })
+      },
+    })
+
+    app = createApp(Root)
+    app.mount(container)
+    await flushUi()
+
+    expect(container.textContent).toContain('This form only accepts users with a bound DingTalk account.')
+    const bindButton = container.querySelector<HTMLButtonElement>('[data-dingtalk-bind]')
+    expect(bindButton?.textContent).toContain('Bind DingTalk and return to this form')
+
+    bindButton?.click()
+    await flushUi()
+
+    expect(apiFetchSpy).toHaveBeenCalledWith(
+      expect.stringContaining('/api/auth/dingtalk/launch?intent=bind&redirect='),
+      expect.objectContaining({ suppressUnauthorizedRedirect: true }),
+    )
+    expect(container.textContent).toContain('Redirecting to DingTalk binding…')
+  })
+
   it('shows an allowlist message when the DingTalk user is not selected for the form', async () => {
     loadFormContextSpy.mockRejectedValue(Object.assign(new Error('Only selected system users or member groups can access this form'), {
       code: 'DINGTALK_FORM_NOT_ALLOWED',

@@ -15,15 +15,32 @@
           <span class="meta-field-mgr__icon">{{ FIELD_ICONS[displayFieldType(field)] ?? '?' }}</span>
 
           <template v-if="editingId === field.id">
-            <input
-              class="meta-field-mgr__rename"
-              :value="editingName"
-              @input="editingName = ($event.target as HTMLInputElement).value"
-              @keydown.enter="confirmRename(field.id)"
-              @keydown.escape="cancelRename"
-            />
-            <button class="meta-field-mgr__action meta-field-mgr__action--ok" @click="confirmRename(field.id)">&#x2713;</button>
-            <button class="meta-field-mgr__action" @click="cancelRename">&#x2717;</button>
+            <div class="meta-field-mgr__rename-wrap">
+              <input
+                class="meta-field-mgr__rename"
+                :class="{ 'meta-field-mgr__rename--invalid': renameNameConflict }"
+                :value="editingName"
+                :aria-invalid="renameNameConflict"
+                :aria-describedby="renameNameConflict ? 'meta-field-mgr-rename-error' : undefined"
+                @input="editingName = ($event.target as HTMLInputElement).value"
+                @keydown.enter="confirmRename(field.id)"
+                @keydown.escape="cancelRename"
+              />
+              <span
+                v-if="renameNameConflict"
+                id="meta-field-mgr-rename-error"
+                class="meta-field-mgr__inline-error"
+                data-test="rename-conflict-error"
+                role="alert"
+              >A field named "{{ editingName.trim() }}" already exists</span>
+            </div>
+            <button
+              class="meta-field-mgr__action meta-field-mgr__action--ok"
+              :disabled="renameNameConflict"
+              :title="renameNameConflict ? 'Resolve the duplicate name to confirm' : 'Confirm rename'"
+              @click="confirmRename(field.id)"
+            >&#x2713;</button>
+            <button class="meta-field-mgr__action" title="Cancel rename" @click="cancelRename">&#x2717;</button>
           </template>
           <template v-else>
             <span class="meta-field-mgr__name" :title="field.name">{{ field.name }}</span>
@@ -170,12 +187,12 @@
             </div>
           </div>
           <div class="meta-field-mgr__field">
-            <span>Function reference</span>
+            <span>Formula reference</span>
             <div class="meta-field-mgr__formula-toolbar">
               <input
                 v-model="formulaFunctionSearch"
                 class="meta-field-mgr__input"
-                placeholder="Search SUM, IF, TODAY..."
+                placeholder="Search SUM, IF, %, ^, &..."
               />
               <select v-model="formulaFunctionCategory" class="meta-field-mgr__select">
                 <option value="all">All categories</option>
@@ -226,6 +243,31 @@
           </div>
         </template>
 
+        <template v-else-if="configTargetType === 'number'">
+          <div class="meta-field-mgr__grid">
+            <label class="meta-field-mgr__field">
+              <span>Decimals</span>
+              <input
+                class="meta-field-mgr__input"
+                type="number"
+                min="0"
+                max="6"
+                placeholder="Preserve"
+                :value="numberDraft.decimals ?? ''"
+                @input="onNumberDecimalsInput"
+              />
+            </label>
+            <label class="meta-field-mgr__field">
+              <span>Unit</span>
+              <input v-model="numberDraft.unit" class="meta-field-mgr__input" maxlength="24" placeholder="kg, hours, pcs..." />
+            </label>
+          </div>
+          <label class="meta-field-mgr__toggle">
+            <input v-model="numberDraft.thousands" type="checkbox" />
+            <span>Use thousands separators</span>
+          </label>
+        </template>
+
         <template v-else-if="configTargetType === 'currency'">
           <div class="meta-field-mgr__grid">
             <label class="meta-field-mgr__field">
@@ -265,6 +307,26 @@
           </label>
         </template>
 
+        <template v-else-if="configTargetType === 'autoNumber'">
+          <div class="meta-field-mgr__grid">
+            <label class="meta-field-mgr__field">
+              <span>Prefix</span>
+              <input v-model="autoNumberDraft.prefix" class="meta-field-mgr__input" maxlength="32" placeholder="INV-" />
+            </label>
+            <label class="meta-field-mgr__field">
+              <span>Digits</span>
+              <input v-model.number="autoNumberDraft.digits" class="meta-field-mgr__input" type="number" min="0" max="12" />
+            </label>
+            <label class="meta-field-mgr__field">
+              <span>Start at</span>
+              <input v-model.number="autoNumberDraft.start" class="meta-field-mgr__input" type="number" min="1" />
+            </label>
+          </div>
+          <div class="meta-field-mgr__hint">
+            Existing records are backfilled once when the field is created or converted.
+          </div>
+        </template>
+
         <MetaFieldValidationPanel
           v-if="configTarget && validationPanelVisible"
           class="meta-field-mgr__validation"
@@ -286,13 +348,30 @@
           <input
             v-model="newFieldName"
             class="meta-field-mgr__input"
+            :class="{ 'meta-field-mgr__input--invalid': addNameConflict }"
             placeholder="Field name"
+            :aria-invalid="addNameConflict"
+            :aria-describedby="addNameConflict ? 'meta-field-mgr-add-error' : undefined"
             @keydown.enter="onAddField"
           />
           <select v-model="newFieldType" class="meta-field-mgr__select" @change="openNewFieldConfigIfNeeded">
             <option v-for="t in FIELD_TYPES" :key="t" :value="t">{{ t }}</option>
           </select>
-          <button class="meta-field-mgr__btn-add" :disabled="!newFieldName.trim()" @click="onAddField">+ Add</button>
+          <button
+            class="meta-field-mgr__btn-add"
+            :disabled="!newFieldName.trim() || addNameConflict"
+            @click="onAddField"
+          >+ Add</button>
+        </div>
+        <div
+          v-if="addNameConflict"
+          id="meta-field-mgr-add-error"
+          class="meta-field-mgr__inline-error"
+          data-test="add-conflict-error"
+          role="alert"
+        >A field named "{{ newFieldName.trim() }}" already exists</div>
+        <div v-if="newFieldTypeIsSystem" class="meta-field-mgr__hint meta-field-mgr__hint--system">
+          {{ systemFieldHint(newFieldType) }}
         </div>
       </div>
 
@@ -322,16 +401,23 @@ import {
 } from '../utils/formula-docs'
 import {
   normalizeStringArray,
+  resolveAutoNumberFieldProperty,
   resolveAttachmentFieldProperty,
   resolveCurrencyFieldProperty,
   resolveFormulaFieldProperty,
   resolveLinkFieldProperty,
   resolveLookupFieldProperty,
+  resolveNumberFieldProperty,
   resolvePercentFieldProperty,
   resolveRatingFieldProperty,
   resolveRollupFieldProperty,
   resolveSelectFieldOptions,
 } from '../utils/field-config'
+import {
+  SYSTEM_FIELD_TYPES,
+  isSystemFieldCreateType,
+  systemFieldHint,
+} from '../utils/system-fields'
 import MetaFieldValidationPanel from './MetaFieldValidationPanel.vue'
 
 /** Field types where the validation panel is configurable. */
@@ -423,14 +509,16 @@ function rulesToProperty(rules: FieldValidationRule[]): Array<Record<string, unk
 }
 
 const FIELD_TYPES: MetaFieldCreateType[] = [
-  'string', 'longText', 'number', 'boolean', 'date', 'select', 'multiSelect', 'link', 'person',
+  'string', 'longText', 'number', 'boolean', 'date', 'dateTime', 'select', 'multiSelect', 'link', 'person',
   'formula', 'lookup', 'rollup', 'attachment',
-  'currency', 'percent', 'rating', 'url', 'email', 'phone',
+  'currency', 'percent', 'rating', 'url', 'email', 'phone', 'barcode', 'location',
+  ...SYSTEM_FIELD_TYPES,
 ]
 const FIELD_ICONS: Record<string, string> = {
-  string: 'Aa', longText: '\u00B6', number: '#', boolean: '\u2611', date: '\u{1F4C5}', select: '\u25CF', multiSelect: '\u25C9',
+  string: 'Aa', longText: '\u00B6', number: '#', boolean: '\u2611', date: '\u{1F4C5}', dateTime: '\u{1F552}', select: '\u25CF', multiSelect: '\u25C9',
   link: '\u21C4', person: '\u{1F464}', lookup: '\u2197', rollup: '\u03A3', formula: 'fx', attachment: '\uD83D\uDCCE',
-  currency: '\u00A4', percent: '%', rating: '\u2605', url: '\u{1F517}', email: '\u2709', phone: '\u260E',
+  currency: '\u00A4', percent: '%', rating: '\u2605', url: '\u{1F517}', email: '\u2709', phone: '\u260E', barcode: '\u25A5', location: '\u{1F4CD}',
+  autoNumber: '#+', createdTime: 'CT', modifiedTime: 'MT', createdBy: 'CB', modifiedBy: 'MB',
 }
 
 const props = defineProps<{
@@ -493,11 +581,21 @@ const currencyDraft = reactive<{ code: string; decimals: number }>({
   code: 'CNY',
   decimals: 2,
 })
+const numberDraft = reactive<{ decimals: number | null; thousands: boolean; unit: string }>({
+  decimals: null,
+  thousands: false,
+  unit: '',
+})
 const percentDraft = reactive<{ decimals: number }>({
   decimals: 1,
 })
 const ratingDraft = reactive<{ max: number }>({
   max: 5,
+})
+const autoNumberDraft = reactive<{ prefix: string; digits: number; start: number }>({
+  prefix: '',
+  digits: 0,
+  start: 1,
 })
 const validationDraft = ref<FieldValidationRule[]>([])
 // True when the field had explicit validation rules stored OR the user
@@ -540,6 +638,32 @@ const fieldConfigBlockingReason = computed(() => {
 const fieldConfigWarningText = computed(() => {
   return fieldConfigBlockingReason.value || 'This field changed in the background. Save keeps your draft, or reload the latest settings.'
 })
+const newFieldTypeIsSystem = computed(() => isSystemFieldCreateType(newFieldType.value))
+
+/**
+ * Compare field names case-insensitively after trimming. Field-name UIs
+ * across the app treat names as user-facing labels, and the friendlier
+ * default for inline conflict detection is to flag "Status" vs "status"
+ * before the user round-trips to the backend.
+ */
+function normalizeFieldName(name: string): string {
+  return name.trim().toLowerCase()
+}
+
+const addNameConflict = computed(() => {
+  const normalized = normalizeFieldName(newFieldName.value)
+  if (!normalized) return false
+  return props.fields.some((field) => normalizeFieldName(field.name) === normalized)
+})
+
+const renameNameConflict = computed(() => {
+  if (!editingId.value) return false
+  const normalized = normalizeFieldName(editingName.value)
+  if (!normalized) return false
+  return props.fields.some(
+    (field) => field.id !== editingId.value && normalizeFieldName(field.name) === normalized,
+  )
+})
 
 const validationPanelVisible = computed(() => {
   const draftType = configDraftType.value
@@ -563,10 +687,15 @@ function onValidationRulesChange(rules: FieldValidationRule[]) {
   validationDraftTouched.value = true
 }
 
+function onNumberDecimalsInput(event: Event) {
+  const value = (event.target as HTMLInputElement).value.trim()
+  numberDraft.decimals = value === '' ? null : Number(value)
+}
+
 function requiresConfig(type: MetaFieldCreateType): boolean {
   return [
     'select', 'multiSelect', 'link', 'person', 'lookup', 'rollup', 'formula', 'attachment',
-    'currency', 'percent', 'rating', 'longText',
+    'number', 'currency', 'percent', 'rating', 'longText', 'autoNumber',
   ].includes(type)
 }
 
@@ -594,8 +723,14 @@ function resetDrafts() {
   attachmentDraft.acceptedMimeTypesText = ''
   currencyDraft.code = 'CNY'
   currencyDraft.decimals = 2
+  numberDraft.decimals = null
+  numberDraft.thousands = false
+  numberDraft.unit = ''
   percentDraft.decimals = 1
   ratingDraft.max = 5
+  autoNumberDraft.prefix = ''
+  autoNumberDraft.digits = 0
+  autoNumberDraft.start = 1
   validationDraft.value = []
   validationDraftTouched.value = false
   fieldConfigError.value = ''
@@ -652,11 +787,27 @@ function serializeFieldDraft(type: string | null): string {
   if (type === 'currency') {
     return JSON.stringify({ code: currencyDraft.code.trim().toUpperCase(), decimals: currencyDraft.decimals })
   }
+  if (type === 'number') {
+    return JSON.stringify({
+      decimals: numberDraft.decimals,
+      thousands: numberDraft.thousands,
+      unit: numberDraft.unit.trim(),
+      validation,
+    })
+  }
   if (type === 'percent') {
     return JSON.stringify({ decimals: percentDraft.decimals })
   }
   if (type === 'rating') {
     return JSON.stringify({ max: ratingDraft.max })
+  }
+  if (type === 'autoNumber') {
+    return JSON.stringify({
+      prefix: autoNumberDraft.prefix.trim(),
+      digits: autoNumberDraft.digits,
+      start: autoNumberDraft.start,
+      startAt: autoNumberDraft.start,
+    })
   }
   if (type === 'string' || type === 'longText' || type === 'number') {
     return JSON.stringify({ validation })
@@ -725,12 +876,22 @@ function hydrateExistingFieldConfig(field: MetaField, options?: { liveRefreshTex
     const property = resolveCurrencyFieldProperty(field.property)
     currencyDraft.code = property.code
     currencyDraft.decimals = property.decimals
+  } else if (fieldType === 'number') {
+    const property = resolveNumberFieldProperty(field.property)
+    numberDraft.decimals = property.decimals
+    numberDraft.thousands = property.thousands
+    numberDraft.unit = property.unit
   } else if (fieldType === 'percent') {
     const property = resolvePercentFieldProperty(field.property)
     percentDraft.decimals = property.decimals
   } else if (fieldType === 'rating') {
     const property = resolveRatingFieldProperty(field.property)
     ratingDraft.max = property.max
+  } else if (fieldType === 'autoNumber') {
+    const property = resolveAutoNumberFieldProperty(field.property)
+    autoNumberDraft.prefix = property.prefix
+    autoNumberDraft.digits = property.digits
+    autoNumberDraft.start = property.start
   }
   if (VALIDATION_PANEL_TYPES.has(fieldType)) {
     const loaded = rulesFromProperty(field.property ?? null)
@@ -799,7 +960,7 @@ function openNewFieldConfigIfNeeded() {
 }
 
 function currentDraftProperty(type: MetaFieldCreateType | string): Record<string, unknown> | undefined {
-  const normalizedType = type === 'link' || type === 'select' || type === 'multiSelect' || type === 'lookup' || type === 'rollup' || type === 'formula' || type === 'attachment' || type === 'person' || type === 'currency' || type === 'percent' || type === 'rating'
+  const normalizedType = type === 'link' || type === 'select' || type === 'multiSelect' || type === 'lookup' || type === 'rollup' || type === 'formula' || type === 'attachment' || type === 'person' || type === 'number' || type === 'currency' || type === 'percent' || type === 'rating' || type === 'autoNumber'
     ? type
     : null
   fieldConfigError.value = ''
@@ -890,6 +1051,25 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
     }
     return { code, decimals: Math.round(decimals) }
   }
+  if (normalizedType === 'number') {
+    const property: Record<string, unknown> = { ...validationProperty }
+    if (numberDraft.decimals !== null) {
+      const decimals = Number(numberDraft.decimals)
+      if (!Number.isFinite(decimals) || decimals < 0 || decimals > 6) {
+        fieldConfigError.value = 'Number decimals must be blank or between 0 and 6'
+        return undefined
+      }
+      property.decimals = Math.round(decimals)
+    }
+    property.thousands = numberDraft.thousands
+    const unit = numberDraft.unit.trim()
+    if (unit.length > 24) {
+      fieldConfigError.value = 'Number unit must be 24 characters or fewer'
+      return undefined
+    }
+    if (unit) property.unit = unit
+    return property
+  }
   if (normalizedType === 'percent') {
     const decimals = Number(percentDraft.decimals)
     if (!Number.isFinite(decimals) || decimals < 0 || decimals > 6) {
@@ -906,7 +1086,31 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
     }
     return { max: Math.round(max) }
   }
-  if (type === 'string' || type === 'longText' || type === 'number') {
+  if (normalizedType === 'autoNumber') {
+    const prefix = autoNumberDraft.prefix.trim()
+    if (prefix.length > 32) {
+      fieldConfigError.value = 'Auto number prefix must be 32 characters or fewer'
+      return undefined
+    }
+    const digits = Number(autoNumberDraft.digits)
+    if (!Number.isFinite(digits) || digits < 0 || digits > 12) {
+      fieldConfigError.value = 'Auto number digits must be between 0 and 12'
+      return undefined
+    }
+    const start = Number(autoNumberDraft.start)
+    if (!Number.isFinite(start) || start < 1) {
+      fieldConfigError.value = 'Auto number start must be at least 1'
+      return undefined
+    }
+    const normalizedStart = Math.floor(start)
+    return {
+      prefix,
+      digits: Math.floor(digits),
+      start: normalizedStart,
+      startAt: normalizedStart,
+    }
+  }
+  if (type === 'string' || type === 'longText') {
     return { ...validationProperty }
   }
   return undefined
@@ -923,6 +1127,7 @@ function insertFormulaFunction(doc: FormulaFunctionDoc) {
 function onAddField() {
   const name = newFieldName.value.trim()
   if (!name) return
+  if (addNameConflict.value) return
   if (requiresConfig(newFieldType.value) && !newFieldConfigVisible.value) {
     openNewFieldConfigIfNeeded()
     return
@@ -953,7 +1158,7 @@ function saveConfig() {
   // an empty `property: {}` would otherwise clobber existing values on
   // the server. Types with mandatory structural config (select/link/
   // lookup/rollup/formula/attachment) always have keys to persist.
-  const onlyValidationSurface = (fieldType === 'string' || fieldType === 'longText' || fieldType === 'number')
+  const onlyValidationSurface = (fieldType === 'string' || fieldType === 'longText')
   if (onlyValidationSurface && !validationDraftTouched.value) {
     closeConfig()
     return
@@ -969,6 +1174,7 @@ function startRename(field: MetaField) {
 }
 
 function confirmRename(fieldId: string) {
+  if (renameNameConflict.value) return
   const name = editingName.value.trim()
   if (name && name !== props.fields.find((field) => field.id === fieldId)?.name) {
     emit('update-field', fieldId, { name })
@@ -1160,4 +1366,8 @@ onBeforeUnmount(() => {
 .meta-field-mgr__btn-delete { padding: 4px 12px; background: #f56c6c; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px; }
 .meta-field-mgr__error { color: #f56c6c; font-size: 12px; }
 .meta-field-mgr__validation { margin-top: 4px; }
+.meta-field-mgr__rename-wrap { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.meta-field-mgr__rename--invalid { border-color: #f56c6c; }
+.meta-field-mgr__input--invalid { border-color: #f56c6c; }
+.meta-field-mgr__inline-error { color: #f56c6c; font-size: 11px; margin-top: 4px; }
 </style>

@@ -249,10 +249,10 @@ test('dingtalk-p4-env-bootstrap safely updates private env values without leakin
       envFile,
       '--set-from-env',
       'DINGTALK_P4_AUTH_TOKEN',
-      '--set',
-      'DINGTALK_P4_GROUP_A_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=robot-secret-a',
-      '--set',
-      'DINGTALK_P4_GROUP_B_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=robot-secret-b',
+      '--set-from-env',
+      'DINGTALK_P4_GROUP_A_WEBHOOK',
+      '--set-from-env',
+      'DINGTALK_P4_GROUP_B_WEBHOOK',
       '--set',
       'DINGTALK_P4_ALLOWED_USER_IDS=user_authorized,user_secondary',
       '--set',
@@ -263,12 +263,17 @@ test('dingtalk-p4-env-bootstrap safely updates private env values without leakin
       'DINGTALK_P4_NO_EMAIL_DINGTALK_EXTERNAL_ID=dt_no_email_001',
     ], {
       DINGTALK_P4_AUTH_TOKEN: 'secret-admin-token',
+      DINGTALK_P4_GROUP_A_WEBHOOK: 'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-a',
+      DINGTALK_P4_GROUP_B_WEBHOOK: 'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-b',
     })
 
     assert.equal(update.status, 0, update.stderr || update.stdout)
     assert.doesNotMatch(update.stdout, /secret-admin-token/)
     assert.doesNotMatch(update.stdout, /robot-secret-a/)
+    assert.doesNotMatch(update.stdout, /robot-secret-b/)
     assert.match(update.stdout, /DINGTALK_P4_AUTH_TOKEN: <redacted>/)
+    assert.match(update.stdout, /DINGTALK_P4_GROUP_A_WEBHOOK: <redacted>/)
+    assert.match(update.stdout, /DINGTALK_P4_GROUP_B_WEBHOOK: <redacted>/)
     assert.match(update.stdout, /DINGTALK_P4_ALLOWED_USER_IDS: 2 entries/)
     if (process.platform !== 'win32') {
       assert.equal(statSync(envFile).mode & 0o777, 0o600)
@@ -298,6 +303,17 @@ test('dingtalk-p4-env-bootstrap rejects unsafe update keys and missing source en
     const unknown = runScript(['--p4-env-file', envFile, '--set', 'UNKNOWN=value'])
     assert.equal(unknown.status, 1)
     assert.match(unknown.stderr, /only supports known DingTalk P4 env keys/)
+
+    const unsafeSecret = runScript([
+      '--p4-env-file',
+      envFile,
+      '--set',
+      'DINGTALK_P4_GROUP_A_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=robot-secret-a',
+    ])
+    assert.equal(unsafeSecret.status, 1)
+    assert.match(unsafeSecret.stderr, /use --set-from-env DINGTALK_P4_GROUP_A_WEBHOOK/)
+    assert.doesNotMatch(unsafeSecret.stderr, /robot-secret-a/)
+    assert.doesNotMatch(readFileSync(envFile, 'utf8'), /robot-secret-a/)
 
     const missing = runScript([
       '--p4-env-file',

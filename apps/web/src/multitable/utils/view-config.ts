@@ -41,6 +41,17 @@ function firstNonMatchingFieldId(fields: MetaField[], excludedIds: Array<string 
   return firstFieldId(candidates, types)
 }
 
+export function isSelfTableLinkField(field: MetaField, sheetId?: string | null): boolean {
+  if (field.type !== 'link') return false
+  const currentSheetId = typeof sheetId === 'string' ? sheetId.trim() : ''
+  if (!currentSheetId) return true
+  const property = field.property ?? {}
+  const foreignSheetId = typeof (property.foreignSheetId ?? property.foreignDatasheetId ?? property.datasheetId) === 'string'
+    ? String(property.foreignSheetId ?? property.foreignDatasheetId ?? property.datasheetId).trim()
+    : ''
+  return foreignSheetId === currentSheetId
+}
+
 export function resolveGalleryViewConfig(
   fields: MetaField[],
   raw?: Record<string, unknown> | null,
@@ -109,9 +120,10 @@ export function resolveTimelineViewConfig(
   fields: MetaField[],
   raw?: Record<string, unknown> | null,
 ): Required<MetaTimelineViewConfig> {
-  const startFieldId = stringOrNull(raw?.startFieldId) ?? firstFieldId(fields, ['date'])
+  const dateFieldTypes = ['date', 'dateTime']
+  const startFieldId = stringOrNull(raw?.startFieldId) ?? firstFieldId(fields, dateFieldTypes)
   const endFieldId = stringOrNull(raw?.endFieldId)
-    ?? firstNonMatchingFieldId(fields, [startFieldId], ['date'])
+    ?? firstNonMatchingFieldId(fields, [startFieldId], dateFieldTypes)
     ?? startFieldId
   return {
     startFieldId,
@@ -125,10 +137,17 @@ export function resolveGanttViewConfig(
   fields: MetaField[],
   raw?: Record<string, unknown> | null,
   groupInfo?: Record<string, unknown> | null,
+  sheetId?: string | null,
 ): Required<MetaGanttViewConfig> {
-  const startFieldId = stringOrNull(raw?.startFieldId) ?? firstFieldId(fields, ['date'])
+  const dateFieldTypes = ['date', 'dateTime']
+  const configuredDependencyFieldId = stringOrNull(raw?.dependencyFieldId)
+  const dependencyFieldId = configuredDependencyFieldId
+    && fields.some((field) => field.id === configuredDependencyFieldId && isSelfTableLinkField(field, sheetId))
+    ? configuredDependencyFieldId
+    : null
+  const startFieldId = stringOrNull(raw?.startFieldId) ?? firstFieldId(fields, dateFieldTypes)
   const endFieldId = stringOrNull(raw?.endFieldId)
-    ?? firstNonMatchingFieldId(fields, [startFieldId], ['date'])
+    ?? firstNonMatchingFieldId(fields, [startFieldId], dateFieldTypes)
     ?? startFieldId
   return {
     startFieldId,
@@ -136,6 +155,7 @@ export function resolveGanttViewConfig(
     titleFieldId: stringOrNull(raw?.titleFieldId) ?? firstNonMatchingFieldId(fields, [startFieldId, endFieldId], ['string']) ?? firstFieldId(fields),
     progressFieldId: stringOrNull(raw?.progressFieldId) ?? firstNonMatchingFieldId(fields, [startFieldId, endFieldId], ['number', 'percent']),
     groupFieldId: stringOrNull(raw?.groupFieldId) ?? stringOrNull(groupInfo?.fieldId),
+    dependencyFieldId,
     zoom: raw?.zoom === 'day' || raw?.zoom === 'month' ? raw.zoom : 'week',
   }
 }

@@ -9,9 +9,9 @@ import {
   DingTalkBusinessError,
   DingTalkRequestError,
   fetchDingTalkAppAccessToken,
-  readDingTalkMessageConfig,
   sendDingTalkWorkNotification,
 } from '../integrations/dingtalk/client'
+import { readDingTalkMessageConfigFromRuntime } from '../integrations/dingtalk/work-notification-settings'
 import type { EventBus } from '../integration/events/event-bus'
 import {
   buildDingTalkMarkdown,
@@ -37,6 +37,7 @@ const logger = new Logger('AutomationExecutor')
 const WEBHOOK_TIMEOUT_MS = 5_000
 const MAX_WEBHOOK_RETRIES = 2
 const DINGTALK_PERSON_BATCH_SIZE = 100
+const DINGTALK_FAILURE_ALERT_CONTENT_LIMIT = 1_000
 
 function readJsonSafely(response: Response): Promise<unknown> {
   return response.json().catch(() => null)
@@ -208,6 +209,29 @@ function stringifyResponseBody(payload: unknown, fallback: string | null = null)
     return JSON.stringify(payload)
   } catch {
     return fallback
+  }
+}
+
+function redactDingTalkFailureAlertText(value: unknown): string {
+  return String(value ?? '')
+    .replace(/https:\/\/oapi\.dingtalk\.com\/robot\/send\?access_token=[A-Za-z0-9._~-]+/gi, '<dingtalk-robot-webhook-redacted>')
+    .replace(/access_token=[A-Za-z0-9._~-]+/gi, 'access_token=<redacted>')
+    .replace(/SEC[A-Za-z0-9+/=_-]{8,}/g, 'SEC<redacted>')
+    .replace(/Bearer\s+[A-Za-z0-9._-]{8,}/gi, 'Bearer <redacted>')
+    .replace(/eyJ[A-Za-z0-9._-]{20,}/g, '<jwt-redacted>')
+    .slice(0, DINGTALK_FAILURE_ALERT_CONTENT_LIMIT)
+}
+
+function mergeFailureAlertOutput(
+  output: unknown,
+  failureAlert: Record<string, unknown>,
+): Record<string, unknown> {
+  const base = output && typeof output === 'object' && !Array.isArray(output)
+    ? output as Record<string, unknown>
+    : {}
+  return {
+    ...base,
+    failureAlert,
   }
 }
 
@@ -603,6 +627,20 @@ export class AutomationExecutor {
       }
 
       result.durationMs = Date.now() - startMs
+
+      if (action.type === 'send_dingtalk_group_message' && result.status === 'failed') {
+        let failureAlert: Record<string, unknown>
+        try {
+          failureAlert = await this.notifyRuleCreatorOfDingTalkGroupFailure(result, context)
+        } catch (error) {
+          failureAlert = {
+            status: 'failed',
+            reason: redactDingTalkFailureAlertText(error instanceof Error ? error.message : String(error)),
+          }
+        }
+        result.output = mergeFailureAlertOutput(result.output, failureAlert)
+      }
+
       results.push(result)
 
       // Stop on failure
@@ -620,6 +658,118 @@ export class AutomationExecutor {
     }
 
     return results
+  }
+
+  private async notifyRuleCreatorOfDingTalkGroupFailure(
+    failedStep: AutomationStepResult,
+    context: ExecutionContext,
+  ): Promise<Record<string, unknown>> {
+    const ruleCreatorId = typeof context.ruleCreatedBy === 'string' ? context.ruleCreatedBy.trim() : ''
+    const subject = 'MetaSheet DingTalk group delivery failed'
+    const content = [
+      'A DingTalk group automation message failed.',
+      `Rule: ${context.ruleId}`,
+      `Sheet: ${context.sheetId}`,
+      context.recordId ? `Record: ${context.recordId}` : '',
+      `Error: ${redactDingTalkFailureAlertText(failedStep.error ?? 'Unknown DingTalk group delivery failure')}`,
+    ].filter(Boolean).join('\n')
+
+    if (!ruleCreatorId) {
+      return { status: 'skipped', reason: 'missing_rule_creator' }
+    }
+
+    const recipientResult = await this.deps.queryFn(
+      `SELECT u.id AS local_user_id,
+              linked.external_user_id AS dingtalk_user_id
+         FROM users u
+         LEFT JOIN LATERAL (
+           SELECT a.external_user_id
+             FROM directory_account_links l
+             JOIN directory_accounts a ON a.id = l.directory_account_id
+            WHERE l.local_user_id = u.id
+              AND l.link_status = 'linked'
+              AND a.provider = 'dingtalk'
+              AND a.is_active = TRUE
+            ORDER BY a.updated_at DESC
+            LIMIT 1
+         ) linked ON TRUE
+        WHERE u.id = $1
+          AND u.is_active = TRUE
+        LIMIT 1`,
+      [ruleCreatorId],
+    )
+    const row = (recipientResult.rows[0] ?? null) as Record<string, unknown> | null
+    const dingtalkUserId = typeof row?.dingtalk_user_id === 'string' ? row.dingtalk_user_id.trim() : ''
+
+    if (!row || !dingtalkUserId) {
+      await recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
+        localUserId: ruleCreatorId,
+        sourceType: 'automation',
+        subject,
+        content,
+        success: false,
+        status: 'skipped',
+        errorMessage: 'Rule creator DingTalk account is not linked or user is inactive',
+        automationRuleId: context.ruleId,
+        recordId: context.recordId,
+        initiatedBy: context.actorId ?? null,
+      })
+      return { status: 'skipped', reason: 'rule_creator_not_linked' }
+    }
+
+    try {
+      const messageConfig = await readDingTalkMessageConfigFromRuntime()
+      const accessToken = await fetchDingTalkAppAccessToken(messageConfig, { fetchFn: this.deps.fetchFn })
+      const result = await sendDingTalkWorkNotification(
+        accessToken,
+        {
+          userIds: [dingtalkUserId],
+          title: subject,
+          content,
+        },
+        messageConfig,
+        { fetchFn: this.deps.fetchFn },
+      )
+      await recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
+        localUserId: ruleCreatorId,
+        dingtalkUserId,
+        sourceType: 'automation',
+        subject,
+        content,
+        success: true,
+        status: 'success',
+        httpStatus: 200,
+        responseBody: stringifyResponseBody(result.raw),
+        automationRuleId: context.ruleId,
+        recordId: context.recordId,
+        initiatedBy: context.actorId ?? null,
+      })
+      return { status: 'success', notifiedUsers: 1 }
+    } catch (error) {
+      const httpStatus = error instanceof DingTalkRequestError ? error.statusCode : error instanceof DingTalkBusinessError ? 200 : null
+      const responseBody = error instanceof DingTalkRequestError
+        ? stringifyResponseBody(error.responseBody)
+        : error instanceof DingTalkBusinessError
+          ? stringifyResponseBody(error.responseBody)
+          : null
+      const errorMessage = redactDingTalkFailureAlertText(error instanceof Error ? error.message : String(error))
+      await recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
+        localUserId: ruleCreatorId,
+        dingtalkUserId,
+        sourceType: 'automation',
+        subject,
+        content,
+        success: false,
+        status: 'failed',
+        httpStatus,
+        responseBody,
+        errorMessage,
+        automationRuleId: context.ruleId,
+        recordId: context.recordId,
+        initiatedBy: context.actorId ?? null,
+      })
+      return { status: 'failed', reason: errorMessage }
+    }
   }
 
   // ── Individual action executors ─────────────────────────────────────────
@@ -1108,7 +1258,7 @@ export class AutomationExecutor {
     const batches = chunkItems(resolvedRecipients, DINGTALK_PERSON_BATCH_SIZE)
 
     try {
-      const messageConfig = readDingTalkMessageConfig()
+      const messageConfig = await readDingTalkMessageConfigFromRuntime()
       const accessToken = await fetchDingTalkAppAccessToken(messageConfig, { fetchFn: this.deps.fetchFn })
       let responseCount = 0
 
