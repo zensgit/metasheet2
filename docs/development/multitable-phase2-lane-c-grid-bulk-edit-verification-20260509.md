@@ -66,19 +66,35 @@ Cases:
 
 ### Codex review fixes (2026-05-10)
 
-Two bugs reported on PR #1451:
+Three bugs reported on PR #1451:
 
-1. **Selection gate too tight** — `:enable-multi-select` was bound to `gridAllowsAnyDelete`, so users with `canEdit=true / canDelete=false` could not select rows for bulk edit. Fix: bind to `gridAllowsAnyDelete || effectiveRowActions.canEdit`. Also added an explanatory HTML comment above the `<MetaGridTable>` element so the gate's intent is durable in code.
-2. **Auto-submit on select/boolean change** — `MetaCellEditor`'s `select` (line 124) and `boolean` (line 113) branches emit `confirm` on native `@change`. The dialog was wiring `@confirm="onApply"`, which would silently bulk-patch the moment a user opened the dropdown or toggled a checkbox. Fix: remove the `@confirm="onApply"` binding so the explicit "Set value" / "Clear" button is the only commit path. Added an HTML comment in the dialog template explaining why the binding is intentionally omitted.
+1. **Selection gate too tight (round 1)** — `:enable-multi-select` was bound to `gridAllowsAnyDelete` in `MultitableWorkbench.vue`. First fix: bind to `gridAllowsAnyDelete || effectiveRowActions.canEdit` so canEdit-only users get the bulk bar at all.
 
-Two new regression tests added to `multitable-bulk-edit-dialog.spec.ts`:
+2. **Selection gate too tight (round 2 — same bug, deeper layer)** — Even with the workbench v-bind opened up, `MetaGridTable.vue` itself filtered selection on `canDelete` in three places (`selectableRowIds`, `toggleSelectRow`, two checkbox `:disabled` bindings). canEdit-only users still saw disabled checkboxes and a no-op header toggle. Second fix: introduced a per-row predicate `rowAllowsAnyBulkAction(recordId)` that returns `actions.canEdit || actions.canDelete`, and replaced all three sites. Also made `onBulkDelete` / `onBulkEdit` action-aware — they now filter the selected set to deletable / editable records before emitting, so:
+   - canEdit-only user clicks `Set field` → emits `bulk-edit` with all selected (all editable) IDs.
+   - Mixed permissions: clicking `Delete selected` only emits the deletable subset; clicking `Set field` only emits the editable subset.
+   - A row with neither permission stays disabled even when sheet-level allows both actions.
+
+3. **Auto-submit on select/boolean change** — `MetaCellEditor`'s `select` (line 124) and `boolean` (line 113) branches emit `confirm` on native `@change`. The dialog was wiring `@confirm="onApply"`, which would silently bulk-patch the moment a user opened the dropdown or toggled a checkbox. Fix: remove the `@confirm="onApply"` binding so the explicit "Set value" / "Clear" button is the only commit path. Added an HTML comment in the dialog template explaining the deliberate omission.
+
+#### Regression tests added
+
+`multitable-bulk-edit-dialog.spec.ts`:
 
 ```
 ✓ does NOT auto-submit when a select-typed editor fires its native change (regression: Codex review on PR #1451)
 ✓ does NOT auto-submit when a boolean editor fires its native change
 ```
 
-Total dialog spec count: 11 → 13.
+`multitable-grid-bulk-edit.spec.ts`:
+
+```
+✓ canEdit=true / canDelete=false: row checkboxes are enabled and bulk-edit emits all editable IDs (regression: PR #1451 review)
+✓ mixed per-row permissions: bulk-delete emits only deletable IDs and bulk-edit emits only editable IDs
+✓ row with neither canEdit nor canDelete keeps its checkbox disabled even when sheet-level allows bulk actions
+```
+
+Spec counts: dialog 11 → 13; grid bulk-edit 5 → 8.
 
 ### MetaBulkEditDialog (new spec)
 

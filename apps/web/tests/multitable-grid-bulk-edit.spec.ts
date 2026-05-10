@@ -130,4 +130,109 @@ describe('MetaGridTable bulk-edit affordances', () => {
     expect(bar).toBeNull()
     app.unmount()
   })
+
+  it('canEdit=true / canDelete=false: row checkboxes are enabled and bulk-edit emits all editable IDs (regression: PR #1451 review)', async () => {
+    const onBulkEdit = vi.fn()
+    const onBulkDelete = vi.fn()
+    const { app, container } = mount({
+      canEdit: true,
+      canDelete: false,
+      canBulkEdit: true,
+      onBulkEdit,
+      onBulkDelete,
+    })
+    await nextTick()
+
+    const rowCheckboxes = Array.from(
+      container.querySelectorAll('tbody .meta-grid__check-col input[type=checkbox]'),
+    ) as HTMLInputElement[]
+    expect(rowCheckboxes.length).toBe(3)
+    for (const cb of rowCheckboxes) {
+      expect(cb.disabled).toBe(false)
+    }
+
+    selectAllRows(container)
+    await nextTick()
+
+    const buttons = Array.from(
+      container.querySelectorAll('.meta-grid__bulk-bar .meta-grid__bulk-btn'),
+    ) as HTMLButtonElement[]
+    const labels = buttons.map((btn) => btn.textContent?.trim())
+    expect(labels).toContain('Set field')
+    expect(labels).toContain('Clear field')
+    expect(labels).not.toContain('Delete selected')
+
+    const setBtn = buttons.find((btn) => btn.textContent?.trim() === 'Set field') as HTMLButtonElement
+    setBtn.click()
+    await nextTick()
+
+    expect(onBulkEdit).toHaveBeenCalledTimes(1)
+    expect(onBulkEdit).toHaveBeenCalledWith({
+      mode: 'set',
+      recordIds: ['rec_1', 'rec_2', 'rec_3'],
+    })
+    expect(onBulkDelete).not.toHaveBeenCalled()
+    app.unmount()
+  })
+
+  it('mixed per-row permissions: bulk-delete emits only deletable IDs and bulk-edit emits only editable IDs', async () => {
+    const onBulkDelete = vi.fn()
+    const onBulkEdit = vi.fn()
+    const { app, container } = mount({
+      canEdit: true,
+      canDelete: true,
+      canBulkEdit: true,
+      rowActionOverrides: {
+        rec_1: { canEdit: true, canDelete: false, canComment: true },
+        rec_2: { canEdit: false, canDelete: true, canComment: true },
+        rec_3: { canEdit: true, canDelete: true, canComment: true },
+      },
+      onBulkDelete,
+      onBulkEdit,
+    })
+    await nextTick()
+
+    selectAllRows(container)
+    await nextTick()
+
+    const buttons = Array.from(
+      container.querySelectorAll('.meta-grid__bulk-bar .meta-grid__bulk-btn'),
+    ) as HTMLButtonElement[]
+
+    const setBtn = buttons.find((btn) => btn.textContent?.trim() === 'Set field') as HTMLButtonElement
+    setBtn.click()
+    await nextTick()
+
+    expect(onBulkEdit).toHaveBeenCalledWith({
+      mode: 'set',
+      recordIds: ['rec_1', 'rec_3'],
+    })
+
+    const deleteBtn = buttons.find((btn) => btn.textContent?.trim() === 'Delete selected') as HTMLButtonElement
+    deleteBtn.click()
+    await nextTick()
+
+    expect(onBulkDelete).toHaveBeenCalledWith(['rec_2', 'rec_3'])
+    app.unmount()
+  })
+
+  it('row with neither canEdit nor canDelete keeps its checkbox disabled even when sheet allows bulk actions', async () => {
+    const { app, container } = mount({
+      canEdit: true,
+      canDelete: true,
+      canBulkEdit: true,
+      rowActionOverrides: {
+        rec_2: { canEdit: false, canDelete: false, canComment: true },
+      },
+    })
+    await nextTick()
+
+    const rowCheckboxes = Array.from(
+      container.querySelectorAll('tbody .meta-grid__check-col input[type=checkbox]'),
+    ) as HTMLInputElement[]
+    expect(rowCheckboxes[0].disabled).toBe(false)
+    expect(rowCheckboxes[1].disabled).toBe(true)
+    expect(rowCheckboxes[2].disabled).toBe(false)
+    app.unmount()
+  })
 })
