@@ -19,6 +19,33 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
 jobs:
+  dingtalk-p4-ops-regression-gate:
+    name: DingTalk P4 ops regression gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Run DingTalk P4 ops regression gate
+        run: |
+          node scripts/ops/dingtalk-p4-regression-gate.mjs \
+            --profile ops \
+            --output-dir output/dingtalk-p4-regression-gate/ci
+
+      - name: Upload DingTalk P4 ops regression gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dingtalk-p4-ops-regression-gate
+          path: output/dingtalk-p4-regression-gate/ci/
+          if-no-files-found: ignore
+
   k3wise-offline-poc:
     name: K3 WISE offline PoC
     runs-on: ubuntu-latest
