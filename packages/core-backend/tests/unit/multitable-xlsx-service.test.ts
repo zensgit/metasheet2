@@ -78,4 +78,19 @@ describe('multitable xlsx service', () => {
     expect(serializeXlsxCell({ id: 'att_1', filename: 'a.pdf' })).toBe('{"id":"att_1","filename":"a.pdf"}')
     expect(serializeXlsxCell(null)).toBe('')
   })
+
+  test('round-trips embedded newlines for longText cells', () => {
+    const multiline = 'first line\nsecond line\n  indented third line'
+
+    expect(serializeXlsxCell(multiline)).toBe(multiline)
+
+    const buffer = buildXlsxBuffer(xlsx, {
+      sheetName: 'Notes',
+      headers: ['Notes'],
+      rows: [[multiline]],
+    })
+
+    const parsed = parseXlsxBuffer(xlsx, buffer)
+    expect(parsed.rows).toEqual([[multiline]])
+  })
 })

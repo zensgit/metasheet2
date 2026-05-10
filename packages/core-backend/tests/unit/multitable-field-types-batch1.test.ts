@@ -75,8 +75,10 @@ describe('mapFieldType — MF2 batch-1', () => {
   it('recognises longText aliases without falling back to string', () => {
     expect(mapFieldType('longText')).toBe('longText')
     expect(mapFieldType('long_text')).toBe('longText')
+    expect(mapFieldType('long-text')).toBe('longText')
     expect(mapFieldType('textarea')).toBe('longText')
     expect(mapFieldType('multi_line_text')).toBe('longText')
+    expect(mapFieldType('multiline')).toBe('longText')
   })
 
   it('recognises location aliases without falling back to string', () => {
