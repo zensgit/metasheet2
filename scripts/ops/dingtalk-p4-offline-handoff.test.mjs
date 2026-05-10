@@ -24,6 +24,10 @@ function makeTmpDir() {
 }
 
 function readRequestBody(req) {
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    return Promise.resolve(null)
+  }
+
   return new Promise((resolve, reject) => {
     let raw = ''
     req.setEncoding('utf8')
@@ -64,6 +68,16 @@ function createFakeApiServer() {
 
       if (req.method === 'GET' && url.pathname === '/health') {
         sendJson(res, 200, { ok: true })
+        return
+      }
+
+      if (req.method === 'GET' && url.pathname === '/api/auth/me') {
+        sendJson(res, 200, {
+          success: true,
+          email: 'qa@example.test',
+          role: 'admin',
+          plm: true,
+        })
         return
       }
 
