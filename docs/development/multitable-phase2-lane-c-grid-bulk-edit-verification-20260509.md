@@ -64,6 +64,22 @@ Cases:
 ✓ does not render Set/Clear buttons when there is no selection
 ```
 
+### Codex review fixes (2026-05-10)
+
+Two bugs reported on PR #1451:
+
+1. **Selection gate too tight** — `:enable-multi-select` was bound to `gridAllowsAnyDelete`, so users with `canEdit=true / canDelete=false` could not select rows for bulk edit. Fix: bind to `gridAllowsAnyDelete || effectiveRowActions.canEdit`. Also added an explanatory HTML comment above the `<MetaGridTable>` element so the gate's intent is durable in code.
+2. **Auto-submit on select/boolean change** — `MetaCellEditor`'s `select` (line 124) and `boolean` (line 113) branches emit `confirm` on native `@change`. The dialog was wiring `@confirm="onApply"`, which would silently bulk-patch the moment a user opened the dropdown or toggled a checkbox. Fix: remove the `@confirm="onApply"` binding so the explicit "Set value" / "Clear" button is the only commit path. Added an HTML comment in the dialog template explaining why the binding is intentionally omitted.
+
+Two new regression tests added to `multitable-bulk-edit-dialog.spec.ts`:
+
+```
+✓ does NOT auto-submit when a select-typed editor fires its native change (regression: Codex review on PR #1451)
+✓ does NOT auto-submit when a boolean editor fires its native change
+```
+
+Total dialog spec count: 11 → 13.
+
 ### MetaBulkEditDialog (new spec)
 
 ```

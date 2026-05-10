@@ -31,11 +31,17 @@
           <div v-if="mode === 'set' && selectedField" class="meta-bulk-edit__row">
             <span class="meta-bulk-edit__label">Value</span>
             <div class="meta-bulk-edit__value-wrap">
+              <!--
+                Intentionally NOT wiring @confirm to onApply: MetaCellEditor
+                fires `confirm` on select/boolean `@change` (cells/MetaCellEditor.vue:113,124),
+                which would silently submit the bulk patch the moment the
+                user opens the select dropdown or toggles a checkbox. Bulk
+                edit must require an explicit "Set value" click.
+              -->
               <MetaCellEditor
                 :field="selectedField"
                 :model-value="value"
                 @update:modelValue="value = $event"
-                @confirm="onApply"
                 @cancel="onCancel"
               />
             </div>

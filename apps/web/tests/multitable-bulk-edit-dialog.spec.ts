@@ -7,7 +7,7 @@ const baseFields: MetaField[] = [
   { id: 'fld_name', name: 'Name', type: 'string', property: {} },
   { id: 'fld_notes', name: 'Notes', type: 'longText', property: {} },
   { id: 'fld_amount', name: 'Amount', type: 'number', property: {} },
-  { id: 'fld_status', name: 'Status', type: 'select', property: { options: [{ value: 'Open' }] } },
+  { id: 'fld_status', name: 'Status', type: 'select', options: [{ value: 'Open' }, { value: 'Closed' }], property: {} },
   { id: 'fld_link', name: 'Linked', type: 'link', property: {} },
   { id: 'fld_attach', name: 'Files', type: 'attachment', property: {} },
   { id: 'fld_formula', name: 'Calc', type: 'formula', property: {} },
@@ -221,6 +221,66 @@ describe('MetaBulkEditDialog', () => {
 
     const submit = Array.from(root.querySelectorAll('.meta-bulk-edit__btn--primary'))[0] as HTMLButtonElement
     expect(submit.disabled).toBe(true)
+    app.unmount()
+  })
+
+  it('does NOT auto-submit when a select-typed editor fires its native change (regression: Codex review on PR #1451)', async () => {
+    // MetaCellEditor emits `confirm` on select/boolean `@change` for ergonomic
+    // single-cell edits. The bulk dialog must NOT bind that to onApply, or
+    // opening the dropdown would silently bulk-patch every selected record
+    // without the explicit "Set value" click.
+    const onApply = vi.fn()
+    const { app, root } = mountDialog({ mode: 'set', onApply })
+    await nextTick()
+
+    const fieldSelect = root.querySelector('.meta-bulk-edit__select') as HTMLSelectElement
+    fieldSelect.value = 'fld_status'
+    fieldSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    const valueSelect = root.querySelector('.meta-bulk-edit__value-wrap select') as HTMLSelectElement | null
+    expect(valueSelect).not.toBeNull()
+    valueSelect!.value = 'Open'
+    valueSelect!.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    expect(onApply).not.toHaveBeenCalled()
+
+    const submit = Array.from(root.querySelectorAll('.meta-bulk-edit__btn--primary'))[0] as HTMLButtonElement
+    submit.click()
+    await nextTick()
+
+    expect(onApply).toHaveBeenCalledTimes(1)
+    expect(onApply).toHaveBeenCalledWith({
+      mode: 'set',
+      fieldId: 'fld_status',
+      value: 'Open',
+      recordIds: ['rec_1', 'rec_2', 'rec_3'],
+    })
+    app.unmount()
+  })
+
+  it('does NOT auto-submit when a boolean editor fires its native change', async () => {
+    const onApply = vi.fn()
+    const { app, root } = mountDialog({
+      mode: 'set',
+      fields: [{ id: 'fld_done', name: 'Done', type: 'boolean', property: {} }],
+      onApply,
+    })
+    await nextTick()
+
+    const fieldSelect = root.querySelector('.meta-bulk-edit__select') as HTMLSelectElement
+    fieldSelect.value = 'fld_done'
+    fieldSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    const checkbox = root.querySelector('.meta-bulk-edit__value-wrap input[type=checkbox]') as HTMLInputElement | null
+    expect(checkbox).not.toBeNull()
+    checkbox!.checked = true
+    checkbox!.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    expect(onApply).not.toHaveBeenCalled()
     app.unmount()
   })
 

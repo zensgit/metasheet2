@@ -224,6 +224,12 @@
           @reparent-record="onHierarchyReparentRecord"
           @update-view-config="onPersistActiveViewConfig"
         />
+        <!--
+          MetaGridTable: enable-multi-select must be canDelete OR canEdit so
+          canEdit-only users (no delete permission) can still select rows
+          for bulk edit. Gating selection solely on delete-capability
+          locks them out. See PR #1451 review.
+        -->
         <MetaGridTable
           v-else
           :rows="grid.rows.value" :visible-fields="scopedGridFields" :sort-rules="grid.sortRules.value"
@@ -232,7 +238,7 @@
           :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :field-read-only-ids="readOnlyFieldIds" :column-widths="grid.columnWidths.value"
           :row-action-overrides="grid.rowActionOverrides.value"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
-          :enable-multi-select="gridAllowsAnyDelete"
+          :enable-multi-select="gridAllowsAnyDelete || effectiveRowActions.canEdit"
           :group-field="grid.groupField.value"
           :search-text="searchText" :row-density="rowDensity"
           :upload-fn="uploadAttachmentFn"
