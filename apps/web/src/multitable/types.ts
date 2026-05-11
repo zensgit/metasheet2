@@ -468,8 +468,16 @@ export interface RecordVersion {
   version: number
 }
 
+export interface PatchFailure {
+  recordId: string
+  code: string
+  message: string
+  serverVersion?: number
+}
+
 export interface PatchResult {
   updated: RecordVersion[]
+  failed?: PatchFailure[]
   records?: Array<{ recordId: string; data: Record<string, unknown> }>
   linkSummaries?: Record<string, Record<string, LinkedRecordSummary[]>>
   attachmentSummaries?: Record<string, Record<string, MetaAttachment[]>>
@@ -614,6 +622,7 @@ export interface CreateRecordInput {
 export interface PatchRecordsInput {
   viewId?: string
   sheetId?: string
+  partialSuccess?: boolean
   changes: CellChange[]
 }
 

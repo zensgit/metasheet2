@@ -615,11 +615,16 @@ export function useMultitableGrid(opts: {
     const result = await client.patchRecords({
       sheetId: opts.sheetId.value || undefined,
       viewId: opts.viewId.value || undefined,
+      partialSuccess: true,
       changes,
     })
     applyPatchResult(result)
     const updated = (result.updated ?? []).map((u) => u.recordId)
-    return { updated, failed: [] }
+    const failed = (result.failed ?? []).map((failure) => ({
+      recordId: failure.recordId,
+      reason: failure.message || failure.code || 'Patch failed',
+    }))
+    return { updated, failed }
   }
 
   function applyPatchResult(result?: PatchResult) {

@@ -2899,6 +2899,40 @@ class ValidationError extends Error {
   }
 }
 
+type PatchFailurePayload = {
+  recordId: string
+  code: string
+  message: string
+  serverVersion?: number
+}
+
+function serializePatchFailure(recordId: string, err: unknown): PatchFailurePayload | null {
+  if (err instanceof ConflictError) {
+    return { recordId, code: 'CONFLICT', message: err.message }
+  }
+  if (err instanceof VersionConflictError || err instanceof ServiceVersionConflictError) {
+    return {
+      recordId,
+      code: 'VERSION_CONFLICT',
+      message: err.message,
+      serverVersion: err.serverVersion,
+    }
+  }
+  if (err instanceof NotFoundError || err instanceof ServiceNotFoundError) {
+    return { recordId, code: 'NOT_FOUND', message: err.message }
+  }
+  if (err instanceof ServiceFieldForbiddenError) {
+    return { recordId, code: err.code, message: err.message }
+  }
+  if (err instanceof ValidationError) {
+    return { recordId, code: 'VALIDATION_ERROR', message: err.message }
+  }
+  if (err instanceof ServiceValidationError) {
+    return { recordId, code: err.code || 'VALIDATION_ERROR', message: err.message }
+  }
+  return null
+}
+
 function stringFromRecord(value: Record<string, unknown>, keys: string[]): string {
   for (const key of keys) {
     const raw = value[key]
@@ -7468,6 +7502,7 @@ export function univerMetaRouter(): Router {
     const schema = z.object({
       viewId: z.string().min(1).optional(),
       sheetId: z.string().min(1).optional(),
+      partialSuccess: z.boolean().optional(),
       changes: z.array(z.object({
         recordId: z.string().min(1),
         fieldId: z.string().min(1),
@@ -7539,6 +7574,58 @@ export function univerMetaRouter(): Router {
       const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers)
       if (yjsInvalidator) {
         recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
+      }
+
+      if (parsed.data.partialSuccess === true) {
+        const updated: Array<{ recordId: string; version: number }> = []
+        const records: Array<{ recordId: string; data: Record<string, unknown> }> = []
+        const relatedRecords: Array<{ sheetId: string; recordId: string; data: Record<string, unknown> }> = []
+        const failures: PatchFailurePayload[] = []
+        let linkSummaries: Record<string, unknown> | undefined
+        let attachmentSummaries: Record<string, unknown> | undefined
+
+        for (const [recordId, recordChanges] of changesByRecord.entries()) {
+          try {
+            const result = await recordWriteService.patchRecords({
+              sheetId,
+              changesByRecord: new Map([[recordId, recordChanges]]) as Map<string, Array<{ fieldId: string; value: unknown; expectedVersion?: number }>>,
+              actorId: getRequestActorId(req),
+              fields,
+              visiblePropertyFields,
+              visiblePropertyFieldIds,
+              attachmentFields,
+              fieldById,
+              capabilities,
+              sheetScope,
+              access,
+            })
+            updated.push(...result.updated)
+            if (result.records) records.push(...(result.records as Array<{ recordId: string; data: Record<string, unknown> }>))
+            if (result.relatedRecords) relatedRecords.push(...(result.relatedRecords as Array<{ sheetId: string; recordId: string; data: Record<string, unknown> }>))
+            if (result.linkSummaries) {
+              linkSummaries = { ...(linkSummaries ?? {}), ...(result.linkSummaries as Record<string, unknown>) }
+            }
+            if (result.attachmentSummaries) {
+              attachmentSummaries = { ...(attachmentSummaries ?? {}), ...(result.attachmentSummaries as Record<string, unknown>) }
+            }
+          } catch (err) {
+            const failure = serializePatchFailure(recordId, err)
+            if (!failure) throw err
+            failures.push(failure)
+          }
+        }
+
+        return res.json({
+          ok: true,
+          data: {
+            updated,
+            failed: failures,
+            ...(records.length > 0 ? { records } : {}),
+            ...(linkSummaries ? { linkSummaries } : {}),
+            ...(attachmentSummaries ? { attachmentSummaries } : {}),
+            ...(relatedRecords.length > 0 ? { relatedRecords } : {}),
+          },
+        })
       }
 
       const result = await recordWriteService.patchRecords({
