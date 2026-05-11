@@ -115,6 +115,13 @@ B2 artifacts:
 - Development MD: `docs/development/multitable-phase2-lane-b2-email-smtp-transport-development-20260511.md`
 - Verification MD: `docs/development/multitable-phase2-lane-b2-email-smtp-transport-verification-20260511.md`
 
+B3 artifacts:
+
+- Development MD: `docs/development/multitable-phase2-lane-b3-email-real-send-smoke-development-20260511.md`
+- Verification MD: `docs/development/multitable-phase2-lane-b3-email-real-send-smoke-verification-20260511.md`
+- PR: #1465
+- Command: `pnpm verify:multitable-email:real-send`
+
 ### Objective
 
 Move `send_email` automation from "default mock channel proves the wire path" toward an env-gated real transport path. The first acceptable slice is a safe transport seam plus readiness gate; the second slice may add actual SMTP delivery if dependency and operations policy are approved.
@@ -166,8 +173,11 @@ Likely frontend files:
 - [x] B2: SMTP mode calls the provider transport instead of returning mock success.
 - [x] B2: invalid SMTP port / timeout config is blocked before runtime.
 - [x] B2: provider errors return controlled failed notification results with secrets redacted.
+- [x] B3: guarded operator command exists for real mailbox receipt smoke and is fail-closed by default.
+- [x] B3: blocked command artifacts redact SMTP secrets and recipient addresses.
 - [ ] B2: real mailbox receipt smoke on staging with production-like SMTP credentials.
-  - Not run in source verification; requires real credentials and operator-controlled environment.
+  - Not run in source verification; requires real credentials, a dedicated test recipient, and operator-controlled environment.
+  - Use `pnpm verify:multitable-email:real-send` after configuring SMTP env, `MULTITABLE_EMAIL_REAL_SEND_SMOKE=1`, `CONFIRM_SEND_EMAIL=1`, and `MULTITABLE_EMAIL_SMOKE_TO`.
 
 ### Suggested PR Split
 
@@ -175,6 +185,8 @@ Likely frontend files:
 - B1 title: `feat(multitable): add env-gated email transport readiness`
 - B2 branch: `codex/multitable-phase2-email-smtp-transport-20260509`
 - B2 title: `feat(multitable): add SMTP email notification transport`
+- B3 branch: `codex/multitable-phase2-email-real-smoke-20260511`
+- B3 title: `test(multitable): add SMTP real-send smoke harness`
 
 Do B2 only after B1 lands and dependency choice is agreed.
 
