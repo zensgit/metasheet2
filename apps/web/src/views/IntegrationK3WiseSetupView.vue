@@ -286,6 +286,17 @@
               <input v-model.trim="form.baseUrl" placeholder="https://k3.example.test/K3API/" autocomplete="off" />
             </label>
             <label class="k3-setup__field">
+              <span>认证模式</span>
+              <select v-model="form.webApiAuthMode">
+                <option value="authority-code">授权码 Token</option>
+                <option value="login">账套登录</option>
+              </select>
+            </label>
+            <label v-if="form.webApiAuthMode === 'authority-code'" class="k3-setup__field">
+              <span>Token Path</span>
+              <input v-model.trim="form.tokenPath" autocomplete="off" />
+            </label>
+            <label v-if="form.webApiAuthMode === 'login'" class="k3-setup__field">
               <span>Login Path</span>
               <input v-model.trim="form.loginPath" autocomplete="off" />
             </label>
@@ -310,15 +321,19 @@
             <span>{{ form.webApiHasCredentials ? '已有凭据，留空则保留' : '需要填写' }}</span>
           </div>
           <div class="k3-setup__grid">
-            <label class="k3-setup__field">
+            <label v-if="form.webApiAuthMode === 'authority-code'" class="k3-setup__field k3-setup__field--wide">
+              <span>授权码</span>
+              <input v-model="form.authorityCode" type="password" autocomplete="new-password" />
+            </label>
+            <label v-if="form.webApiAuthMode === 'login'" class="k3-setup__field">
               <span>Acct ID</span>
               <input v-model.trim="form.acctId" autocomplete="off" />
             </label>
-            <label class="k3-setup__field">
+            <label v-if="form.webApiAuthMode === 'login'" class="k3-setup__field">
               <span>用户名</span>
               <input v-model.trim="form.username" autocomplete="off" />
             </label>
-            <label class="k3-setup__field">
+            <label v-if="form.webApiAuthMode === 'login'" class="k3-setup__field">
               <span>密码</span>
               <input v-model="form.password" type="password" autocomplete="new-password" />
             </label>

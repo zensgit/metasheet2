@@ -37,10 +37,21 @@ function createK3FetchMock() {
     const body = options.body ? JSON.parse(options.body) : undefined
     calls.push({
       pathname: parsed.pathname,
+      query: Object.fromEntries(parsed.searchParams.entries()),
       options,
       body,
     })
 
+    if (parsed.pathname === '/K3API/Token/Create') {
+      if (parsed.searchParams.get('authorityCode') !== 'auth-code-1') {
+        return jsonResponse(200, { StatusCode: 401, Message: 'invalid authority code', Data: { Code: 'N' } })
+      }
+      return jsonResponse(200, {
+        StatusCode: 200,
+        Message: 'Token request succeeded',
+        Data: { Code: 'Y', Token: 'k3-token-1', Validity: 3600 },
+      })
+    }
     if (parsed.pathname === '/K3API/Login') {
       return jsonResponse(200, { success: true, sessionId: 'k3-session-1' })
     }
@@ -48,10 +59,18 @@ function createK3FetchMock() {
       return jsonResponse(200, { ok: true })
     }
     if (parsed.pathname === '/K3API/Material/Save') {
-      if (body.Model.FNumber === 'BAD') {
+      const record = body.Model || body.Data
+      if (record.FNumber === 'BAD') {
         return jsonResponse(200, { success: false, message: 'invalid material' })
       }
-      return jsonResponse(200, { success: true, externalId: `item-${body.Model.FNumber}`, billNo: body.Model.FNumber })
+      if (parsed.searchParams.get('Token')) {
+        return jsonResponse(200, {
+          StatusCode: 200,
+          Message: 'Material saved',
+          Data: { Code: 'Y', FItemID: `item-${record.FNumber}`, FNumber: record.FNumber },
+        })
+      }
+      return jsonResponse(200, { success: true, externalId: `item-${record.FNumber}`, billNo: record.FNumber })
     }
     if (parsed.pathname === '/K3API/Material/Submit') {
       return jsonResponse(200, { success: true, submitted: body.Number })
@@ -161,7 +180,7 @@ async function testK3WebApiAdapter() {
   assert.equal(submitCalls.length, 1, 'submit runs only after successful save')
   assert.equal(auditCalls.length, 1, 'audit runs only after successful save')
   assert.equal(saveCalls[0].options.headers['X-K3-Session'], 'k3-session-1')
-  assert.deepEqual(saveCalls[0].body, { Model: { FNumber: 'MAT-001', FName: 'Bolt' } })
+  assert.deepEqual(saveCalls[0].body, { Data: { FNumber: 'MAT-001', FName: 'Bolt' } })
   assert.deepEqual(submitCalls[0].body, { Number: 'MAT-001' })
 
   const targetOnlyRead = await adapter.read({ object: 'material' }).catch((error) => error)
@@ -210,6 +229,8 @@ async function testK3WebApiAdapter() {
   assert.match(missingAcctIdStatus.message, /acctId/)
 
   assert.equal(webApiInternals.businessSuccess({ success: true }, {}), true)
+  assert.equal(webApiInternals.businessSuccess({ StatusCode: 200, Data: { Code: 'Y' } }, {}), true)
+  assert.equal(webApiInternals.businessSuccess({ StatusCode: 500, Data: { Code: 'N' } }, {}), false)
   assert.equal(webApiInternals.businessSuccess({ Result: { ResponseStatus: { IsSuccess: true } } }, {}), true)
   assert.equal(webApiInternals.businessSuccess({ Result: { ResponseStatus: { IsSuccess: false } } }, {}), false)
   assert.equal(webApiInternals.businessSuccess({ id: 'silent-success' }, {}), false)
@@ -228,6 +249,46 @@ async function testK3WebApiAdapter() {
   assert.ok(invalidBaseUrl instanceof AdapterValidationError, 'non-http K3 baseUrl rejected')
 
   assert.equal(K3WiseWebApiAdapterError.name, 'K3WiseWebApiAdapterError')
+}
+
+async function testK3WebApiAuthorityCodeToken() {
+  const { calls, fetchImpl } = createK3FetchMock()
+  const adapter = createK3WiseWebApiAdapter({
+    system: createK3WebApiSystem({
+      credentials: {
+        authorityCode: 'auth-code-1',
+      },
+      config: {
+        baseUrl: 'https://k3.example.test',
+        authMode: 'authority-code',
+        tokenPath: '/K3API/Token/Create',
+        autoSubmit: false,
+        autoAudit: false,
+      },
+    }),
+    fetchImpl,
+  })
+
+  const connection = await adapter.testConnection({ skipHealth: true })
+  assert.equal(connection.ok, true, 'authorityCode token testConnection succeeds')
+  assert.equal(connection.authenticated, true, 'query-token auth counts as authenticated')
+
+  const upsert = await adapter.upsert({
+    object: 'material',
+    records: [{ FNumber: 'MAT-TOKEN-001', FName: 'Token material' }],
+    keyFields: ['FNumber'],
+  })
+
+  const tokenCalls = calls.filter((call) => call.pathname === '/K3API/Token/Create')
+  const saveCalls = calls.filter((call) => call.pathname === '/K3API/Material/Save')
+  assert.equal(tokenCalls.length, 1, 'authorityCode token is cached across testConnection and upsert')
+  assert.equal(tokenCalls[0].query.authorityCode, 'auth-code-1')
+  assert.equal(saveCalls.length, 1)
+  assert.equal(saveCalls[0].query.Token, 'k3-token-1', 'K3 API token is sent as query parameter')
+  assert.deepEqual(saveCalls[0].body, { Data: { FNumber: 'MAT-TOKEN-001', FName: 'Token material' } })
+  assert.equal(upsert.written, 1)
+  assert.equal(upsert.results[0].externalId, 'item-MAT-TOKEN-001')
+  assert.equal(upsert.results[0].billNo, 'MAT-TOKEN-001')
 }
 
 async function testK3SqlServerChannel() {
@@ -514,6 +575,7 @@ async function testK3WebApiAutoFlagCoercion() {
 
 async function main() {
   await testK3WebApiAdapter()
+  await testK3WebApiAuthorityCodeToken()
   await testK3SqlServerChannel()
   await testK3WebApiAutoFlagCoercion()
   console.log('✓ k3-wise-adapters: WebAPI, SQL Server channel, and auto-flag coercion tests passed')

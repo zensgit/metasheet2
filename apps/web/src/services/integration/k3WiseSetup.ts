@@ -2,6 +2,7 @@ import { apiFetch } from '../../utils/api'
 
 export type IntegrationSystemStatus = 'active' | 'inactive' | 'error'
 export type K3SqlServerMode = 'readonly' | 'middle-table' | 'stored-procedure'
+export type K3WiseWebApiAuthMode = 'authority-code' | 'login'
 export type IntegrationPipelineRunMode = 'manual' | 'incremental' | 'full'
 export type K3WisePipelineTarget = 'material' | 'bom'
 export type IntegrationPipelineRunStatus = 'pending' | 'running' | 'succeeded' | 'partial' | 'failed' | 'cancelled'
@@ -132,8 +133,11 @@ export interface K3WiseSetupForm {
   version: string
   environment: 'test' | 'uat' | 'staging' | 'production' | 'other'
   baseUrl: string
+  webApiAuthMode: K3WiseWebApiAuthMode
+  tokenPath: string
   loginPath: string
   healthPath: string
+  authorityCode: string
   acctId: string
   username: string
   password: string
@@ -246,6 +250,11 @@ function optionalString(value: string): string | undefined {
   return normalized.length > 0 ? normalized : undefined
 }
 
+function getLocalStorageValue(key: string): string {
+  if (typeof localStorage === 'undefined' || typeof localStorage.getItem !== 'function') return ''
+  return localStorage.getItem(key) || ''
+}
+
 export function splitList(value: string): string[] {
   return value
     .split(/\r?\n|,/)
@@ -304,8 +313,8 @@ function validateHttpUrl(value: string, field: keyof K3WiseSetupForm, issues: K3
 }
 
 export function createDefaultK3WiseSetupForm(): K3WiseSetupForm {
-  const tenantId = typeof localStorage === 'undefined' ? '' : localStorage.getItem('tenantId') || ''
-  const workspaceId = typeof localStorage === 'undefined' ? '' : localStorage.getItem('workspaceId') || ''
+  const tenantId = getLocalStorageValue('tenantId')
+  const workspaceId = getLocalStorageValue('workspaceId')
   return {
     tenantId,
     workspaceId,
@@ -317,8 +326,11 @@ export function createDefaultK3WiseSetupForm(): K3WiseSetupForm {
     version: '',
     environment: 'test',
     baseUrl: '',
+    webApiAuthMode: 'authority-code',
+    tokenPath: '/K3API/Token/Create',
     loginPath: '/K3API/Login',
-    healthPath: '/K3API/Health',
+    healthPath: '',
+    authorityCode: '',
     acctId: '',
     username: '',
     password: '',
@@ -363,12 +375,21 @@ export function validateK3WiseSetupForm(form: K3WiseSetupForm): K3WiseSetupValid
   if (!trim(form.tenantId)) issues.push({ field: 'tenantId', message: 'tenantId is required' })
   if (!trim(form.webApiName)) issues.push({ field: 'webApiName', message: 'WebAPI system name is required' })
   if (!trim(form.version)) issues.push({ field: 'version', message: 'K3 WISE version is required' })
-  const webApiCredentialTouched = Boolean(trim(form.username) || trim(form.password) || trim(form.acctId))
+  const webApiCredentialTouched = Boolean(trim(form.authorityCode) || trim(form.username) || trim(form.password) || trim(form.acctId))
   const webApiCredentialRequired = !form.webApiSystemId || !form.webApiHasCredentials || webApiCredentialTouched
-  if (webApiCredentialRequired && !trim(form.acctId)) issues.push({ field: 'acctId', message: 'acctId is required' })
-  if (webApiCredentialRequired && !trim(form.username)) issues.push({ field: 'username', message: 'K3 WISE username is required' })
-  if (webApiCredentialRequired && !trim(form.password)) {
-    issues.push({ field: 'password', message: 'K3 WISE password is required when credentials are created or replaced' })
+  if (!['authority-code', 'login'].includes(form.webApiAuthMode)) {
+    issues.push({ field: 'webApiAuthMode', message: 'WebAPI auth mode must be authority-code or login' })
+  }
+  if (form.webApiAuthMode === 'authority-code') {
+    if (webApiCredentialRequired && !trim(form.authorityCode)) {
+      issues.push({ field: 'authorityCode', message: 'K3 WISE authority code is required' })
+    }
+  } else {
+    if (webApiCredentialRequired && !trim(form.acctId)) issues.push({ field: 'acctId', message: 'acctId is required' })
+    if (webApiCredentialRequired && !trim(form.username)) issues.push({ field: 'username', message: 'K3 WISE username is required' })
+    if (webApiCredentialRequired && !trim(form.password)) {
+      issues.push({ field: 'password', message: 'K3 WISE password is required when credentials are created or replaced' })
+    }
   }
   if (!isPositiveIntegerText(form.lcid)) {
     issues.push({ field: 'lcid', message: 'lcid must be a positive integer' })
@@ -377,6 +398,7 @@ export function validateK3WiseSetupForm(form: K3WiseSetupForm): K3WiseSetupValid
     issues.push({ field: 'timeoutMs', message: 'timeoutMs must be a positive integer' })
   }
   validateHttpUrl(form.baseUrl, 'baseUrl', issues)
+  assertRelativePath(form.tokenPath, 'tokenPath', issues)
   assertRelativePath(form.loginPath, 'loginPath', issues)
   if (trim(form.healthPath)) assertRelativePath(form.healthPath, 'healthPath', issues)
   assertRelativePath(form.materialSavePath, 'materialSavePath', issues)
@@ -490,11 +512,13 @@ function gateItem(
 }
 
 export function buildK3WiseDeployGateChecklist(form: K3WiseSetupForm): K3WiseDeployGateItem[] {
-  const webApiCredentialTouched = Boolean(trim(form.username) || trim(form.password) || trim(form.acctId))
+  const webApiCredentialTouched = Boolean(trim(form.authorityCode) || trim(form.username) || trim(form.password) || trim(form.acctId))
   const webApiCredentialsReady = form.webApiHasCredentials && !webApiCredentialTouched
     ? true
-    : Boolean(trim(form.acctId) && trim(form.username) && trim(form.password))
-  const webApiConfigReady = Boolean(trim(form.tenantId) && trim(form.version) && trim(form.baseUrl) && trim(form.loginPath))
+    : form.webApiAuthMode === 'authority-code'
+      ? Boolean(trim(form.authorityCode))
+      : Boolean(trim(form.acctId) && trim(form.username) && trim(form.password))
+  const webApiConfigReady = Boolean(trim(form.tenantId) && trim(form.version) && trim(form.baseUrl) && trim(form.tokenPath) && trim(form.loginPath))
   const stagingReady = Boolean(trim(form.tenantId) && trim(form.projectId))
   const pipelineTemplateReady = Boolean(trim(form.sourceSystemId) && trim(form.webApiSystemId) && trim(form.materialStagingObjectId) && trim(form.bomStagingObjectId))
   const materialDryRunReady = Boolean(trim(form.materialPipelineId))
@@ -518,8 +542,8 @@ export function buildK3WiseDeployGateChecklist(form: K3WiseSetupForm): K3WiseDep
       'K3 WISE WebAPI',
       webApiConfigReady ? 'ready' : 'missing',
       webApiConfigReady
-        ? '版本、环境、Base URL 和接口路径已具备'
-        : '部署后可在页面填写 K3 WISE 版本、环境、WebAPI Base URL 和相对接口路径',
+        ? '版本、环境、Base URL、Token Path 和接口路径已具备'
+        : '部署后可在页面填写 K3 WISE 版本、环境、WebAPI Base URL、Token Path 和相对接口路径',
       webApiConfigReady ? undefined : 'baseUrl',
     ),
     gateItem(
@@ -529,9 +553,13 @@ export function buildK3WiseDeployGateChecklist(form: K3WiseSetupForm): K3WiseDep
       webApiCredentialsReady
         ? form.webApiHasCredentials && !webApiCredentialTouched
           ? '已保存凭据会保留，页面不会回显密码'
-          : 'Acct ID、用户名和密码已可用于保存或替换凭据'
-        : '部署后可在页面填写 acctId、用户名和密码；密码只会提交保存，不会回显',
-      webApiCredentialsReady ? undefined : 'acctId',
+          : form.webApiAuthMode === 'authority-code'
+            ? '授权码已可用于申请 K3 API Token'
+            : 'Acct ID、用户名和密码已可用于保存或替换凭据'
+        : form.webApiAuthMode === 'authority-code'
+          ? '部署后可在页面填写 K3 API 授权码；授权码只会提交保存，不会回显'
+          : '部署后可在页面填写 acctId、用户名和密码；密码只会提交保存，不会回显',
+      webApiCredentialsReady ? undefined : form.webApiAuthMode === 'authority-code' ? 'authorityCode' : 'acctId',
     ),
     gateItem(
       'submit-audit-policy',
@@ -743,10 +771,11 @@ export function buildK3WiseSetupPayloads(form: K3WiseSetupForm): K3WiseSetupPayl
     status: 'active',
   }
   const webApiCredentials: Record<string, unknown> = {}
-  if (trim(form.username) || trim(form.acctId) || trim(form.password)) {
-    webApiCredentials.username = trim(form.username)
-    webApiCredentials.acctId = trim(form.acctId)
-    webApiCredentials.password = form.password
+  if (trim(form.authorityCode) || trim(form.username) || trim(form.acctId) || trim(form.password)) {
+    if (trim(form.authorityCode)) webApiCredentials.authorityCode = trim(form.authorityCode)
+    if (trim(form.username)) webApiCredentials.username = trim(form.username)
+    if (trim(form.acctId)) webApiCredentials.acctId = trim(form.acctId)
+    if (form.password) webApiCredentials.password = form.password
   }
   const webApi = {
     ...baseSystem,
@@ -758,6 +787,9 @@ export function buildK3WiseSetupPayloads(form: K3WiseSetupForm): K3WiseSetupPayl
       version: trim(form.version),
       environment: form.environment,
       baseUrl: trim(form.baseUrl),
+      authMode: form.webApiAuthMode,
+      tokenPath: trim(form.tokenPath),
+      tokenQueryParam: 'Token',
       loginPath: trim(form.loginPath),
       ...(optionalString(form.healthPath) ? { healthPath: trim(form.healthPath) } : {}),
       lcid: parseRequiredPositiveInteger(form.lcid, 'lcid'),
@@ -1028,6 +1060,11 @@ export function applyExternalSystemToForm(form: K3WiseSetupForm, system: Integra
     next.version = typeof config.version === 'string' ? config.version : next.version
     next.environment = typeof config.environment === 'string' ? config.environment as K3WiseSetupForm['environment'] : next.environment
     next.baseUrl = typeof config.baseUrl === 'string' ? config.baseUrl : next.baseUrl
+    const legacyLoginConfig = config.authMode === undefined &&
+      typeof config.loginPath === 'string' &&
+      typeof config.tokenPath !== 'string'
+    next.webApiAuthMode = config.authMode === 'login' || legacyLoginConfig ? 'login' : 'authority-code'
+    next.tokenPath = typeof config.tokenPath === 'string' ? config.tokenPath : next.tokenPath
     next.loginPath = typeof config.loginPath === 'string' ? config.loginPath : next.loginPath
     next.healthPath = typeof config.healthPath === 'string' ? config.healthPath : next.healthPath
     next.lcid = config.lcid === undefined ? next.lcid : String(config.lcid)

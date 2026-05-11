@@ -68,7 +68,7 @@ function createK3FetchMock() {
     }
 
     if (parsed.pathname === '/K3API/Material/Save') {
-      const number = body.Model.FNumber
+      const number = (body.Model || body.Data).FNumber
       if (number === 'BAD-02') {
         return jsonResponse(200, {
           success: false,
@@ -666,7 +666,7 @@ async function main() {
 
   const saveCalls = harness.k3FetchMock.calls.filter((call) => call.pathname === '/K3API/Material/Save')
   assert.equal(saveCalls.length, 2)
-  assert.deepEqual(saveCalls.map((call) => call.body.Model.FNumber), ['GOOD-01', 'BAD-02'])
+  assert.deepEqual(saveCalls.map((call) => (call.body.Model || call.body.Data).FNumber), ['GOOD-01', 'BAD-02'])
   assert.equal(harness.k3FetchMock.calls.some((call) => call.pathname === '/K3API/Material/Submit'), false)
   assert.equal(harness.k3FetchMock.calls.some((call) => call.pathname === '/K3API/Material/Audit'), false)
 

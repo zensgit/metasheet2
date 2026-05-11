@@ -31,6 +31,7 @@ describe('K3 WISE setup helpers', () => {
       webApiName: 'K3 WISE WebAPI',
       version: 'K3 WISE 15.x test',
       baseUrl: 'https://k3.example.test/K3API/',
+      webApiAuthMode: 'login',
       acctId: 'AIS_TEST',
       username: 'k3-user',
       password: 'secret',
@@ -56,6 +57,7 @@ describe('K3 WISE setup helpers', () => {
       },
       config: {
         baseUrl: 'https://k3.example.test/K3API/',
+        authMode: 'login',
         autoSubmit: false,
         autoAudit: false,
       },
@@ -66,6 +68,38 @@ describe('K3 WISE setup helpers', () => {
       config: {
         allowedTables: ['dbo.t_ICItem', 'dbo.t_ICBOM', 'dbo.t_ICBomChild'],
         middleTables: ['dbo.integration_material_stage'],
+      },
+    })
+  })
+
+  it('builds K3 API authority-code token payloads from the setup form', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      webApiName: 'K3 WISE WebAPI',
+      version: 'K3 WISE 15.x test',
+      baseUrl: 'http://k3.local/K3API/',
+      authorityCode: 'auth-code-from-k3-admin',
+    })
+
+    expect(validateK3WiseSetupForm(form)).toEqual([])
+    const payloads = buildK3WiseSetupPayloads(form)
+
+    expect(payloads.webApi).toMatchObject({
+      kind: 'erp:k3-wise-webapi',
+      role: 'target',
+      credentials: {
+        authorityCode: 'auth-code-from-k3-admin',
+      },
+      config: {
+        authMode: 'authority-code',
+        tokenPath: '/K3API/Token/Create',
+        tokenQueryParam: 'Token',
+      },
+    })
+    expect(payloads.webApi).not.toMatchObject({
+      credentials: {
+        username: expect.any(String),
       },
     })
   })
@@ -186,6 +220,7 @@ describe('K3 WISE setup helpers', () => {
       webApiName: 'K3 WISE WebAPI',
       version: 'K3 WISE 15.x test',
       baseUrl: 'https://k3.example.test/K3API/',
+      webApiAuthMode: 'login',
       username: 'new-user',
       password: '',
       acctId: 'AIS_TEST',
@@ -204,6 +239,7 @@ describe('K3 WISE setup helpers', () => {
       webApiName: 'K3 WISE WebAPI',
       version: 'K3 WISE 15.x test',
       baseUrl: 'https://k3.example.test/K3API/',
+      webApiAuthMode: 'login',
       acctId: 'AIS_TEST',
       username: 'k3-user',
       password: 'secret',
@@ -498,9 +534,7 @@ describe('K3 WISE setup helpers', () => {
       tenantId: 'tenant_1',
       version: 'K3 WISE 15.x test',
       baseUrl: 'https://k3.example.test/K3API/',
-      acctId: 'AIS_TEST',
-      username: 'k3-user',
-      password: 'secret',
+      authorityCode: 'auth-code-from-k3-admin',
     })
 
     const checklist = buildK3WiseDeployGateChecklist(form)

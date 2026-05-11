@@ -35,7 +35,7 @@ function createK3FetchMock() {
       return jsonResponse(200, { success: true, sessionId: 'session_1' })
     }
     if (parsed.pathname === '/K3API/Material/Save') {
-      const number = body.Model.FNumber
+      const number = (body.Model || body.Data).FNumber
       if (number === 'BAD-02') {
         return jsonResponse(200, { success: false, code: 'K3_MATERIAL_INVALID', message: 'material code rejected' })
       }

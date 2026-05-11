@@ -83,7 +83,7 @@ export function createMockK3WebApiServer({ logger = () => {}, knownBadFNumbers =
       return
     }
     if (pathname === '/K3API/Material/Save') {
-      const fNumber = body?.Model?.FNumber
+      const fNumber = (body?.Model || body?.Data)?.FNumber
       if (knownBadFNumbers.has(fNumber)) {
         jsonResponse(res, 200, { success: false, message: `mock K3 rejects ${fNumber}: invalid material code` })
         return
@@ -100,7 +100,7 @@ export function createMockK3WebApiServer({ logger = () => {}, knownBadFNumbers =
       return
     }
     if (pathname === '/K3API/BOM/Save') {
-      const fNumber = body?.Model?.FNumber
+      const fNumber = (body?.Model || body?.Data)?.FNumber
       if (knownBadFNumbers.has(fNumber)) {
         jsonResponse(res, 200, { success: false, message: `mock K3 BOM rejects ${fNumber}` })
         return

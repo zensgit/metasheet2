@@ -34,7 +34,7 @@ const DEFAULT_OBJECTS = {
     savePath: '/K3API/Material/Save',
     submitPath: '/K3API/Material/Submit',
     auditPath: '/K3API/Material/Audit',
-    bodyKey: 'Model',
+    bodyKey: 'Data',
     keyField: 'FNumber',
     keyParam: 'Number',
     schema: [
@@ -50,7 +50,7 @@ const DEFAULT_OBJECTS = {
     savePath: '/K3API/BOM/Save',
     submitPath: '/K3API/BOM/Submit',
     auditPath: '/K3API/BOM/Audit',
-    bodyKey: 'Model',
+    bodyKey: 'Data',
     keyField: 'FNumber',
     keyParam: 'Number',
     schema: [
@@ -180,6 +180,15 @@ function responseOk(response) {
   return response.status >= 200 && response.status < 300
 }
 
+function toPositiveNumber(value) {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value.trim())
+    if (Number.isFinite(parsed) && parsed > 0) return parsed
+  }
+  return null
+}
+
 function normalizeObjects(config) {
   const configured = toPlainObject(config.objects, 'config.objects')
   const normalized = {}
@@ -229,7 +238,7 @@ function buildSaveBody(record, request, objectConfig) {
   if (typeof objectConfig.buildBody === 'function') {
     return objectConfig.buildBody(record, request)
   }
-  const bodyKey = objectConfig.bodyKey || 'Model'
+  const bodyKey = objectConfig.bodyKey || 'Data'
   const base = isPlainObject(objectConfig.bodyTemplate) ? { ...objectConfig.bodyTemplate } : {}
   base[bodyKey] = record
   return base
@@ -246,6 +255,11 @@ function buildLifecycleBody(record, request, objectConfig, operation) {
 
 function businessSuccess(data, config) {
   if (config.successPath) return Boolean(getPath(data, config.successPath))
+  const statusCode = toPositiveNumber(firstDefined(getPath(data, 'StatusCode'), getPath(data, 'statusCode')))
+  const dataCode = firstDefined(getPath(data, 'Data.Code'), getPath(data, 'data.code'))
+  if (typeof dataCode === 'string' && ['N', 'NO', 'FALSE', 'FAILED', 'ERROR'].includes(dataCode.trim().toUpperCase())) return false
+  if (typeof dataCode === 'string' && ['Y', 'YES', 'TRUE', 'SUCCESS', 'OK'].includes(dataCode.trim().toUpperCase())) return true
+  if (statusCode !== null) return statusCode >= 200 && statusCode < 300
   const candidates = [
     getPath(data, 'success'),
     getPath(data, 'ok'),
@@ -279,6 +293,8 @@ function responseCode(data, config, fallback = 'OK') {
     getPath(data, 'Code'),
     getPath(data, 'errorCode'),
     getPath(data, 'ErrorCode'),
+    getPath(data, 'StatusCode'),
+    getPath(data, 'Data.Code'),
     getPath(data, 'Result.ResponseStatus.ErrorCode'),
     fallback,
   )
@@ -291,6 +307,8 @@ function responseBillNo(data, config) {
     getPath(data, 'BillNo'),
     getPath(data, 'number'),
     getPath(data, 'Number'),
+    getPath(data, 'Data.FBillNo'),
+    getPath(data, 'Data.FNumber'),
     getPath(data, 'Result.Number'),
     getPath(data, 'Result.ResponseStatus.SuccessEntitys.0.Number'),
   )
@@ -303,6 +321,8 @@ function responseExternalId(data, config) {
     getPath(data, 'id'),
     getPath(data, 'Id'),
     getPath(data, 'FItemID'),
+    getPath(data, 'Data.FItemID'),
+    getPath(data, 'Data.Id'),
     getPath(data, 'Result.Id'),
     getPath(data, 'Result.ResponseStatus.SuccessEntitys.0.Id'),
   )
@@ -316,8 +336,12 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
   const objects = normalizeObjects(config)
   const timeoutMs = Number.isInteger(config.timeoutMs) && config.timeoutMs > 0 ? config.timeoutMs : 30000
   const loginPath = assertRelativePath(config.loginPath || '/K3API/Login', 'config.loginPath')
+  const tokenPath = assertRelativePath(config.tokenPath || '/K3API/Token/Create', 'config.tokenPath')
+  const tokenQueryParam = typeof config.tokenQueryParam === 'string' && config.tokenQueryParam.trim()
+    ? config.tokenQueryParam.trim()
+    : 'Token'
   const healthPath = config.healthPath ? assertRelativePath(config.healthPath, 'config.healthPath') : null
-  let cachedAuthHeaders = null
+  let cachedAuthContext = null
 
   if (typeof fetchImpl !== 'function') {
     throw new AdapterValidationError('K3 WISE WebAPI adapter requires fetch implementation', {
@@ -325,8 +349,17 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     })
   }
 
-  async function requestJson(path, { method = 'GET', headers, body } = {}) {
-    const url = new URL(assertRelativePath(path, 'path'), baseUrl).toString()
+  function buildUrl(path, query) {
+    const url = new URL(assertRelativePath(path, 'path'), baseUrl)
+    for (const [key, value] of Object.entries(query || {})) {
+      if (value === undefined || value === null || value === '') continue
+      url.searchParams.set(key, String(value))
+    }
+    return url.toString()
+  }
+
+  async function requestJson(path, { method = 'GET', query, headers, body } = {}) {
+    const url = buildUrl(path, query)
     const controller = typeof AbortController === 'function' ? new AbortController() : null
     const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null
     const requestHeaders = mergeHeaders(
@@ -372,12 +405,59 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     }
   }
 
+  function isFreshAuthContext(context) {
+    return Boolean(context && (!context.expiresAt || context.expiresAt > Date.now() + 60000))
+  }
+
+  async function loginWithAuthorityCode(authorityCode) {
+    const { data } = await requestJson(tokenPath, {
+      method: config.tokenMethod || 'GET',
+      query: { authorityCode },
+    })
+    const token = firstDefined(
+      config.tokenPathInResponse ? getPath(data, config.tokenPathInResponse) : undefined,
+      getPath(data, 'Data.Token'),
+      getPath(data, 'data.token'),
+      getPath(data, 'token'),
+      getPath(data, 'Token'),
+    )
+    if (!token || !businessSuccess(data, config)) {
+      throw new K3WiseWebApiAdapterError(String(responseMessage(data, config, 'K3 WISE token request failed')), {
+        code: 'K3_WISE_TOKEN_FAILED',
+        body: data,
+      })
+    }
+    const validitySeconds = toPositiveNumber(firstDefined(
+      getPath(data, 'Data.Validity'),
+      getPath(data, 'data.validity'),
+      getPath(data, 'validity'),
+      getPath(data, 'Validity'),
+    ))
+    return {
+      headers: {},
+      query: { [tokenQueryParam]: String(token) },
+      expiresAt: validitySeconds ? Date.now() + (validitySeconds * 1000) : null,
+    }
+  }
+
   async function login() {
-    if (cachedAuthHeaders) return cachedAuthHeaders
+    if (isFreshAuthContext(cachedAuthContext)) return cachedAuthContext
     if (credentials.sessionId) {
       const header = config.sessionHeader || 'X-K3-Session'
-      cachedAuthHeaders = { [header]: String(credentials.sessionId) }
-      return cachedAuthHeaders
+      cachedAuthContext = { headers: { [header]: String(credentials.sessionId) }, query: {}, expiresAt: null }
+      return cachedAuthContext
+    }
+
+    const authorityCode = firstDefined(credentials.authorityCode, credentials.authCode, config.authorityCode)
+    const authMode = firstDefined(config.authMode, authorityCode ? 'authority-code' : null, 'login')
+    if (authMode === 'authority-code' || authMode === 'authorityCode' || authMode === 'token') {
+      if (!authorityCode) {
+        throw new K3WiseWebApiAdapterError('K3 WISE WebAPI authorityCode is required for token authentication', {
+          code: 'K3_WISE_CREDENTIALS_MISSING',
+        })
+      }
+      cachedAuthContext = await loginWithAuthorityCode(String(authorityCode))
+      return cachedAuthContext
     }
 
     const username = firstDefined(credentials.username, credentials.userName)
@@ -419,21 +499,30 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     )
     if (cookie) authHeaders.Cookie = cookie
     if (sessionId) authHeaders[config.sessionHeader || 'X-K3-Session'] = String(sessionId)
-    cachedAuthHeaders = authHeaders
-    return cachedAuthHeaders
+    cachedAuthContext = { headers: authHeaders, query: {}, expiresAt: null }
+    return cachedAuthContext
   }
 
   async function testConnection(input = {}) {
     try {
-      const authHeaders = await login()
+      const authContext = await login()
       if (input.skipHealth || !healthPath) {
-        return { ok: true, status: 200, authenticated: Object.keys(authHeaders).length > 0 }
+        return {
+          ok: true,
+          status: 200,
+          authenticated: Object.keys(authContext.headers || {}).length > 0 || Object.keys(authContext.query || {}).length > 0,
+        }
       }
       const { response } = await requestJson(healthPath, {
         method: input.method || 'GET',
-        headers: authHeaders,
+        query: authContext.query,
+        headers: authContext.headers,
       })
-      return { ok: true, status: response.status, authenticated: Object.keys(authHeaders).length > 0 }
+      return {
+        ok: true,
+        status: response.status,
+        authenticated: Object.keys(authContext.headers || {}).length > 0 || Object.keys(authContext.query || {}).length > 0,
+      }
     } catch (error) {
       return {
         ok: false,
@@ -478,7 +567,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     const auditPath = objectConfig.auditPath ? assertRelativePath(objectConfig.auditPath, 'object.auditPath') : null
     const autoSubmit = resolveAutoFlag(request.options.autoSubmit, config.autoSubmit, 'autoSubmit')
     const autoAudit = resolveAutoFlag(request.options.autoAudit, config.autoAudit, 'autoAudit')
-    const authHeaders = await login()
+    const authContext = await login()
     const results = []
     const errors = []
     const raw = []
@@ -489,7 +578,8 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       try {
         const save = await requestJson(savePath, {
           method: objectConfig.saveMethod || 'POST',
-          headers: authHeaders,
+          query: authContext.query,
+          headers: authContext.headers,
           body: buildSaveBody(record, request, objectConfig),
         })
         raw.push({ index, operation: 'save', body: save.data })
@@ -512,7 +602,8 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
           }
           const submit = await requestJson(submitPath, {
             method: objectConfig.submitMethod || 'POST',
-            headers: authHeaders,
+            query: authContext.query,
+            headers: authContext.headers,
             body: buildLifecycleBody(record, request, objectConfig, 'submit'),
           })
           raw.push({ index, operation: 'submit', body: submit.data })
@@ -536,7 +627,8 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
           }
           const audit = await requestJson(auditPath, {
             method: objectConfig.auditMethod || 'POST',
-            headers: authHeaders,
+            query: authContext.query,
+            headers: authContext.headers,
             body: buildLifecycleBody(record, request, objectConfig, 'audit'),
           })
           raw.push({ index, operation: 'audit', body: audit.data })
