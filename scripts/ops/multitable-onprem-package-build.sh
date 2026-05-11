@@ -36,6 +36,7 @@ REQUIRED_PATHS=(
   # post-build SQL schema changes such as users.must_change_password.
   "packages/core-backend/migrations"
   "plugins/plugin-attendance"
+  "plugins/plugin-integration-core"
   "scripts/ops/attendance-onprem-bootstrap.sh"
   "scripts/ops/attendance-onprem-bootstrap-admin.sh"
   "scripts/ops/attendance-onprem-env-check.sh"
@@ -56,12 +57,10 @@ REQUIRED_PATHS=(
   "scripts/ops/multitable-onprem-healthcheck.sh"
   # K3 WISE PoC operator tooling — preflight (C1/C2), live PoC packet builder
   # (C3), evidence compiler (C10), postdeploy smoke + summary, mock fixtures,
-  # and the three K3 operator runbooks. Note: run-mock-poc-demo.mjs inside the
-  # fixtures dir needs plugins/plugin-integration-core (not shipped in this
-  # package) to actually execute; it is bundled only so the preflight's
-  # fixtures.k3wise-mock file-existence check passes. The live PoC sequence
-  # (C2 onward) is the operator's workflow on a customer box and does not need
-  # the mock chain.
+  # and the three K3 operator runbooks. The package also ships
+  # plugins/plugin-integration-core above so the backend registers
+  # /api/integration/* routes and the offline mock chain can resolve its
+  # adapter imports from the package root.
   "scripts/ops/integration-k3wise-onprem-preflight.mjs"
   "scripts/ops/integration-k3wise-live-poc-preflight.mjs"
   "scripts/ops/integration-k3wise-live-poc-evidence.mjs"
@@ -266,6 +265,9 @@ Server-side apply helpers:
   bootstrap-admin-${PACKAGE_RUN_LABEL}.bat <admin-email> <admin-password> [admin-name]
 
 K3 WISE PoC operator tools (Node only; no Docker needed to run these):
+  Runtime plugin:
+    plugins/plugin-integration-core
+      -> registers /api/integration/* routes used by the K3 WISE setup page.
   node scripts/ops/integration-k3wise-onprem-preflight.mjs --mock --out-dir <art>
     -> deployment readiness preflight (env / Postgres / migrations / fixtures).
        Add --live --gate-file <gate.json> once the customer GATE answers arrive.
@@ -277,6 +279,12 @@ K3 WISE PoC operator tools (Node only; no Docker needed to run these):
     docs/operations/k3-poc-onprem-preflight-runbook.md           (per-check fix recipes)
     docs/operations/integration-k3wise-internal-trial-runbook.md  (post-deploy auth smoke)
     docs/operations/integration-k3wise-live-gate-execution-package.md (C0-C10 sequence + customer GATE fields)
+
+Runtime dependencies:
+  node_modules are intentionally not bundled. deploy.bat defaults to
+  InstallDeps=1 and runs pnpm install --frozen-lockfile when node_modules is
+  missing. If applying files manually without deploy.bat, run pnpm install
+  --frozen-lockfile from the package root before migrations/bootstrap.
 EOF
 
 run rm -f "$ARCHIVE_TGZ_TMP_PATH" "$ARCHIVE_ZIP_TMP_PATH" "$ARCHIVE_TGZ_SHA_TMP_PATH" "$ARCHIVE_ZIP_SHA_TMP_PATH" "$METADATA_JSON_TMP_PATH"
@@ -301,7 +309,7 @@ cat > "${METADATA_JSON_TMP_PATH}" <<EOF
   "tag": "${PACKAGE_TAG}",
   "attendanceOnly": false,
   "productMode": "platform",
-  "includedPlugins": ["plugin-attendance"],
+  "includedPlugins": ["plugin-attendance", "plugin-integration-core"],
   "archive": "$(basename "$ARCHIVE_TGZ_PATH")",
   "archiveZip": "$(basename "$ARCHIVE_ZIP_PATH")",
   "checksumFile": "$(basename "$CHECKSUM_FILE")",
