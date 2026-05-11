@@ -298,5 +298,9 @@ write_optional_report
 info "Package verify OK"
 info "  package: ${PACKAGE_FILE}"
 info "  root: ${pkg_root}"
-[[ -n "$VERIFY_REPORT_JSON" ]] && info "  verify_report_json: ${VERIFY_REPORT_JSON}"
-[[ -n "$VERIFY_REPORT_MD" ]] && info "  verify_report_md: ${VERIFY_REPORT_MD}"
+if [[ -n "$VERIFY_REPORT_JSON" ]]; then
+  info "  verify_report_json: ${VERIFY_REPORT_JSON}"
+fi
+if [[ -n "$VERIFY_REPORT_MD" ]]; then
+  info "  verify_report_md: ${VERIFY_REPORT_MD}"
+fi
