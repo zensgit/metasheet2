@@ -4,6 +4,7 @@
 
 - Baseline: `origin/main@c74c15a2b` after PR #1446.
 - Refreshed baseline before merge: `origin/main@3a484622c`.
+- B1 implementation baseline: `origin/main@013797fc3` after PR #1448, K3 token auth #1459, and DingTalk no-email admission #1460.
 - Prior RC: `multitable-rc-20260508b-08c6036284`.
 - Goal: continue Feishu-parity development after the signed RC without reopening the RC smoke scope.
 - Rule: every completed item must include PR, merge commit, development MD, verification MD, and verification summary.
@@ -36,6 +37,8 @@ Mark an item complete only after all are true:
 
 Owner recommendation: Claude can implement; Codex reviews.
 
+Status: complete. PR #1449 `test(multitable): audit-only test coverage for longText field` merged at `2082f169e879e088ffd09f7e1f3cc5124b3f4dc7`; current main already has end-to-end `longText` implementation and coverage.
+
 ### Objective
 
 Add a native `longText` field type for multi-line plain text. This is not rich text, not Markdown rendering, and not a full collaborative document editor. It closes the high-frequency Feishu parity gap where users need notes, descriptions, and multi-line imported content.
@@ -65,14 +68,14 @@ Likely frontend files:
 
 ### Requirements
 
-- [ ] `longText`, `long_text`, and `multiline` normalize to canonical `longText`.
-- [ ] Stored raw value is a string; non-string values sanitize consistently with string field behavior unless validation explicitly rejects.
-- [ ] Grid editor uses `<textarea>` or equivalent multi-line control.
-- [ ] Renderer preserves newlines with `white-space: pre-wrap` or equivalent.
-- [ ] Form view and record drawer render/edit long text without collapsing newlines.
-- [ ] Import/export preserves embedded newlines.
-- [ ] OpenAPI field type enum includes `longText`.
-- [ ] Existing `string` field behavior remains unchanged.
+- [x] `longText`, `long_text`, and `multiline` normalize to canonical `longText`.
+- [x] Stored raw value is a string; non-string values sanitize consistently with string field behavior unless validation explicitly rejects.
+- [x] Grid editor uses `<textarea>` or equivalent multi-line control.
+- [x] Renderer preserves newlines with `white-space: pre-wrap` or equivalent.
+- [x] Form view and record drawer render/edit long text without collapsing newlines.
+- [x] Import/export preserves embedded newlines.
+- [x] OpenAPI field type enum includes `longText`.
+- [x] Existing `string` field behavior remains unchanged.
 
 ### Explicit Non-Goals
 
@@ -82,12 +85,12 @@ Likely frontend files:
 
 ### Minimum Tests
 
-- [ ] Backend codec test for aliases and newline preservation.
-- [ ] Backend import/export test for embedded newlines.
-- [ ] Frontend renderer test for newline display.
-- [ ] Frontend editor test that edit/save preserves multi-line value.
-- [ ] Field manager test for creating a longText field.
-- [ ] OpenAPI parity test if schema output changes.
+- [x] Backend codec test for aliases and newline preservation.
+- [x] Backend import/export test for embedded newlines.
+- [x] Frontend renderer test for newline display.
+- [x] Frontend editor test that edit/save preserves multi-line value.
+- [x] Field manager test for creating a longText field.
+- [x] OpenAPI parity test if schema output changes.
 
 ### Suggested PR
 
@@ -98,6 +101,14 @@ Likely frontend files:
 ## Lane B - Real Email Transport Gate
 
 Owner recommendation: Codex should implement or directly review because this touches credentials, logs, and staging gates.
+
+Status: B1 implemented in PR #1461 on branch `codex/multitable-phase2-email-transport-gate-20260511`. B2 real SMTP/provider delivery remains explicitly deferred.
+
+B1 artifacts:
+
+- Development MD: `docs/development/multitable-phase2-lane-b1-email-transport-gate-development-20260511.md`
+- Verification MD: `docs/development/multitable-phase2-lane-b1-email-transport-gate-verification-20260511.md`
+- Command: `pnpm verify:multitable-email:readiness`
 
 ### Objective
 
@@ -125,13 +136,13 @@ Likely frontend files:
 
 ### Requirements
 
-- [ ] Default local/dev behavior remains mock unless an explicit env enables real email transport.
-- [ ] Missing SMTP/provider env reports `blocked`, not `pass`, in a release gate.
-- [ ] Logs and artifacts redact SMTP host credentials, usernames, passwords, tokens, recipient lists if configured sensitive, and bearer tokens.
-- [ ] Automation logs keep the existing flat logs API contract used by RC smoke.
-- [ ] Failed transport returns a controlled failed step, not a backend crash.
-- [ ] Staging can run a no-send readiness check without sending real email.
-- [ ] Real-send smoke requires an explicit `CONFIRM_SEND_EMAIL=1` style guard.
+- [x] Default local/dev behavior remains mock unless an explicit env enables real email transport.
+- [x] Missing SMTP/provider env reports `blocked`, not `pass`, in a release gate.
+- [x] Logs and artifacts redact SMTP host credentials, usernames, passwords, tokens, recipient lists if configured sensitive, and bearer tokens.
+- [x] Automation logs keep the existing flat logs API contract used by RC smoke.
+- [x] Failed transport returns a controlled failed step, not a backend crash.
+- [x] Staging can run a no-send readiness check without sending real email.
+- [x] Real-send smoke requires an explicit `CONFIRM_SEND_EMAIL=1` style guard.
 
 ### Explicit Non-Goals
 
@@ -141,11 +152,12 @@ Likely frontend files:
 
 ### Minimum Tests
 
-- [ ] Unit test: mock channel remains default when env is absent.
-- [ ] Unit test: enabled real transport with missing required env returns readiness `blocked`.
-- [ ] Unit test: transport error becomes failed automation step and execution log persists.
-- [ ] Redaction test: logs/artifacts do not contain SMTP credentials or bearer tokens.
+- [x] Unit test: mock channel remains default when env is absent.
+- [x] Unit test: enabled real transport with missing required env returns readiness `blocked`.
+- [x] Unit test: transport error becomes failed automation step and execution log persists.
+- [x] Redaction test: logs/artifacts do not contain SMTP credentials or bearer tokens.
 - [ ] Existing `multitable-rc-automation-send-email-smoke` still passes in mock mode.
+  - Local live-stack Playwright was not rerun in B1; the RC/staging smoke path is unchanged and default mock behavior is covered by unit tests.
 
 ### Suggested PR Split
 

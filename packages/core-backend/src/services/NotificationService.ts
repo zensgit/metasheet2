@@ -27,6 +27,11 @@ import {
   DingTalkRobotResponseError,
   validateDingTalkRobotResponse,
 } from '../integrations/dingtalk/robot'
+import {
+  resolveEmailTransportReadiness,
+  type EmailTransportEnv,
+  type EmailTransportReadinessReport,
+} from './email-transport-readiness'
 
 /**
  * Email notification payload
@@ -159,10 +164,12 @@ export class EmailNotificationChannel implements NotificationChannel {
   type = 'email' as const
   config: NotificationChannelConfig
   private logger: Logger
+  private readiness: EmailTransportReadinessReport
 
   constructor(config: NotificationChannelConfig) {
     this.config = config
     this.logger = new Logger('EmailChannel')
+    this.readiness = resolveEmailTransportReadiness(resolveEmailTransportEnv(config))
   }
 
   async sender(notification: Notification, recipients: NotificationRecipient[]): Promise<NotificationResult> {
@@ -204,12 +211,36 @@ export class EmailNotificationChannel implements NotificationChannel {
   }
 
   private async sendEmail(params: EmailPayload): Promise<void> {
-    // 实际邮件发送实现
-    this.logger.info(`Sending email to ${params.to}: ${params.subject}`)
+    if (this.readiness.mode === 'smtp') {
+      if (!this.readiness.ok) {
+        throw new Error(`SMTP email transport blocked: ${this.readiness.messages.join(' ')}`)
+      }
+      throw new Error('SMTP email transport is configured but not implemented in this build')
+    }
+    if (this.readiness.mode === 'unsupported') {
+      throw new Error(`Email transport configuration is unsupported: ${this.readiness.messages.join(' ')}`)
+    }
+
+    this.logger.info('Mock email channel accepted notification', {
+      channel: 'email',
+      transport: 'mock',
+      metadata: params.metadata,
+    })
 
     // 模拟异步发送
     await new Promise(resolve => setTimeout(resolve, 100))
   }
+}
+
+function resolveEmailTransportEnv(config: NotificationChannelConfig): EmailTransportEnv {
+  const candidate = config.env
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return process.env
+
+  const env: EmailTransportEnv = {}
+  for (const [key, value] of Object.entries(candidate as Record<string, unknown>)) {
+    if (typeof value === 'string') env[key] = value
+  }
+  return env
 }
 
 /**

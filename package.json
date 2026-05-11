@@ -47,6 +47,7 @@
     "verify:multitable-pilot:staging": "bash scripts/ops/multitable-pilot-staging.sh",
     "verify:multitable-rc:staging": "node scripts/verify-multitable-rc-staging-smoke.mjs",
     "verify:multitable-rc:ui": "bash scripts/verify-multitable-rc-ui-smoke.sh",
+    "verify:multitable-email:readiness": "tsx scripts/ops/multitable-email-transport-readiness.ts",
     "verify:multitable-pilot:staging:test": "node --test scripts/ops/multitable-pilot-staging.test.mjs",
     "verify:multitable-pilot:readiness": "node scripts/ops/multitable-pilot-readiness.mjs",
     "verify:multitable-pilot:readiness:test": "node --test scripts/ops/multitable-pilot-readiness.test.mjs",

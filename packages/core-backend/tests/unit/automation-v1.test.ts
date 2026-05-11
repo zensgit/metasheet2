@@ -446,6 +446,44 @@ describe('AutomationExecutor', () => {
     }))
   })
 
+  it('converts send_email transport failures into failed automation steps', async () => {
+    const send = vi.fn(async () => ({
+      id: 'notif_1',
+      status: 'failed' as const,
+      failedReason: 'SMTP email transport blocked: missing provider env',
+    }))
+    deps = createMockDeps({ notificationService: { send } })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_email',
+        config: {
+          recipients: ['ops@example.com'],
+          subjectTemplate: 'Record {{record.title}} changed',
+          bodyTemplate: 'Status: {{record.status}}',
+        },
+      }],
+    })
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { title: 'Incident', status: 'open' },
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.steps[0]).toEqual(expect.objectContaining({
+      actionType: 'send_email',
+      status: 'failed',
+      error: 'SMTP email transport blocked: missing provider env',
+    }))
+    expect(result.steps[0].output).toEqual(expect.objectContaining({
+      status: 'failed',
+      failedReason: 'SMTP email transport blocked: missing provider env',
+    }))
+  })
+
   it('fails send_email with no recipients', async () => {
     const send = vi.fn(async () => ({ id: 'notif_1', status: 'sent' as const }))
     deps = createMockDeps({ notificationService: { send } })
@@ -2280,6 +2318,47 @@ describe('AutomationService — Rule CRUD', () => {
     expect(logFailure).toHaveBeenCalledOnce()
     expect(execution.status).toBe('success')
     expect(execution.steps).toEqual([])
+  })
+
+  it('executeRule records failed send_email transport executions', async () => {
+    const send = vi.fn(async () => ({
+      id: 'notif_1',
+      status: 'failed' as const,
+      failedReason: 'SMTP email transport blocked: missing provider env',
+    }))
+    service = new AutomationService(eventBus, makeMockDb() as never, queryFn, undefined, null, {}, { send })
+    const logSpy = vi.spyOn(service.logs, 'record').mockResolvedValueOnce()
+
+    const execution = await service.executeRule(
+      createMockRule({
+        actions: [{
+          type: 'send_email',
+          config: {
+            recipients: ['ops@example.com'],
+            subjectTemplate: 'Record {{record.title}} changed',
+            bodyTemplate: 'Status: {{record.status}}',
+          },
+        }],
+      }),
+      {
+        sheetId: 'sheet_1',
+        recordId: 'rec_1',
+        data: { title: 'Incident', status: 'open' },
+        _triggeredBy: 'test',
+      },
+    )
+
+    expect(execution.status).toBe('failed')
+    expect(logSpy).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed',
+      steps: [
+        expect.objectContaining({
+          actionType: 'send_email',
+          status: 'failed',
+          error: 'SMTP email transport blocked: missing provider env',
+        }),
+      ],
+    }))
   })
 
   it('getRule returns null when not found', async () => {
