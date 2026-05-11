@@ -88,8 +88,11 @@
               @click="draft.conditions.conjunction = 'OR'"
             >OR</button>
           </div>
+          <div v-if="hasNestedConditionGroups" class="meta-rule-editor__hint" data-field="nestedConditionNotice">
+            Nested condition groups are preserved when saving, but this editor only changes top-level conditions.
+          </div>
           <div
-            v-for="(cond, idx) in draft.conditions.conditions"
+            v-for="{ condition: cond, index: idx } in editableConditionEntries"
             :key="idx"
             class="meta-rule-editor__condition-row"
             :data-condition-index="idx"
@@ -106,7 +109,7 @@
               v-model="cond.value"
               class="meta-rule-editor__input meta-rule-editor__input--sm"
               type="text"
-              placeholder="Value"
+              :placeholder="conditionValuePlaceholder(cond.operator)"
             />
             <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeCondition(idx)" title="Remove condition">&times;</button>
           </div>
@@ -837,6 +840,8 @@ import type {
   ConditionOperator,
   AutomationAction,
   AutomationCondition,
+  AutomationConditionNode,
+  ConditionGroup,
   DingTalkGroupDestination,
   MetaSheetPermissionCandidate,
   MetaView,
@@ -906,7 +911,7 @@ interface Draft {
   name: string
   triggerType: AutomationTriggerType
   triggerConfig: Record<string, unknown>
-  conditions: { conjunction: 'AND' | 'OR'; conditions: AutomationCondition[] }
+  conditions: ConditionGroup & { conjunction: 'AND' | 'OR' }
   actions: DraftAction[]
 }
 
@@ -973,10 +978,113 @@ const conditionOperators: Array<{ value: ConditionOperator; label: string }> = [
   { value: 'less_or_equal', label: 'Less or equal' },
   { value: 'is_empty', label: 'Is empty' },
   { value: 'is_not_empty', label: 'Is not empty' },
+  { value: 'in', label: 'In list' },
+  { value: 'not_in', label: 'Not in list' },
 ]
 
 function isUnaryOperator(op: ConditionOperator): boolean {
   return op === 'is_empty' || op === 'is_not_empty'
+}
+
+function isArrayOperator(op: ConditionOperator): boolean {
+  return op === 'in' || op === 'not_in'
+}
+
+function conditionValuePlaceholder(op: ConditionOperator): string {
+  return isArrayOperator(op) ? 'Comma-separated values' : 'Value'
+}
+
+function isConditionGroupNode(node: AutomationConditionNode): node is ConditionGroup {
+  return Array.isArray((node as ConditionGroup).conditions)
+}
+
+function normalizeConditionConjunction(group: ConditionGroup | undefined): 'AND' | 'OR' {
+  if (group?.conjunction === 'OR') return 'OR'
+  if (group?.conjunction === 'AND') return 'AND'
+  return group?.logic === 'or' ? 'OR' : 'AND'
+}
+
+function cloneConditionLeaf(condition: AutomationCondition): AutomationCondition {
+  const cloned: AutomationCondition = {
+    fieldId: condition.fieldId,
+    operator: condition.operator,
+  }
+  if (condition.value !== undefined) {
+    cloned.value = isArrayOperator(condition.operator) && Array.isArray(condition.value)
+      ? condition.value.join(', ')
+      : condition.value
+  }
+  return cloned
+}
+
+function cloneConditionNode(node: AutomationConditionNode): AutomationConditionNode {
+  if (isConditionGroupNode(node)) {
+    const cloned: ConditionGroup = {
+      conditions: node.conditions.map(cloneConditionNode),
+    }
+    if (node.conjunction === 'AND' || node.conjunction === 'OR') cloned.conjunction = node.conjunction
+    if (node.logic === 'and' || node.logic === 'or') cloned.logic = node.logic
+    return cloned
+  }
+  return cloneConditionLeaf(node)
+}
+
+function conditionGroupFromRule(group: ConditionGroup | undefined): Draft['conditions'] {
+  return {
+    conjunction: normalizeConditionConjunction(group),
+    conditions: group?.conditions.map(cloneConditionNode) ?? [],
+  }
+}
+
+function parseConditionArrayValue(value: unknown): unknown[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => typeof entry === 'string' ? entry.trim() : entry)
+      .filter((entry) => typeof entry === 'string' ? entry.length > 0 : entry !== null && entry !== undefined)
+  }
+  if (typeof value !== 'string') return []
+  return value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+}
+
+function isConditionLeafComplete(condition: AutomationCondition): boolean {
+  if (!condition.fieldId.trim()) return false
+  if (isUnaryOperator(condition.operator)) return true
+  if (isArrayOperator(condition.operator)) return parseConditionArrayValue(condition.value).length > 0
+  return typeof condition.value === 'string'
+    ? condition.value.trim().length > 0
+    : condition.value !== undefined && condition.value !== null
+}
+
+function areConditionsComplete(node: AutomationConditionNode): boolean {
+  if (isConditionGroupNode(node)) return node.conditions.every(areConditionsComplete)
+  return isConditionLeafComplete(node)
+}
+
+function buildConditionNodePayload(node: AutomationConditionNode): AutomationConditionNode {
+  if (isConditionGroupNode(node)) {
+    const group: ConditionGroup = {
+      conditions: node.conditions.map(buildConditionNodePayload),
+    }
+    if (node.conjunction === 'AND' || node.conjunction === 'OR') group.conjunction = node.conjunction
+    if (node.logic === 'and' || node.logic === 'or') group.logic = node.logic
+    return group
+  }
+
+  const condition: AutomationCondition = {
+    fieldId: node.fieldId.trim(),
+    operator: node.operator,
+  }
+  if (!isUnaryOperator(node.operator)) {
+    condition.value = isArrayOperator(node.operator)
+      ? parseConditionArrayValue(node.value)
+      : typeof node.value === 'string'
+        ? node.value.trim()
+        : node.value
+  }
+  return condition
 }
 
 function emptyDraft(): Draft {
@@ -1040,9 +1148,7 @@ function draftFromRule(rule: AutomationRule): Draft {
     name: rule.name,
     triggerType: rule.triggerType,
     triggerConfig: { ...rule.triggerConfig, ...(rule.trigger?.config ?? {}) },
-    conditions: rule.conditions
-      ? { conjunction: rule.conditions.conjunction, conditions: rule.conditions.conditions.map((c) => ({ ...c })) }
-      : { conjunction: 'AND', conditions: [] },
+    conditions: conditionGroupFromRule(rule.conditions),
     actions: rule.actions && rule.actions.length
       ? rule.actions.map((a) => ({ type: a.type, config: draftConfigFromAction(a.type, a.config) }))
       : [{ type: rule.actionType, config: draftConfigFromAction(rule.actionType, rule.actionConfig) }],
@@ -1050,6 +1156,14 @@ function draftFromRule(rule: AutomationRule): Draft {
 }
 
 const draft = ref<Draft>(emptyDraft())
+const editableConditionEntries = computed(() =>
+  draft.value.conditions.conditions
+    .map((condition, index) => ({ condition, index }))
+    .filter((entry): entry is { condition: AutomationCondition; index: number } => !isConditionGroupNode(entry.condition)),
+)
+const hasNestedConditionGroups = computed(() =>
+  draft.value.conditions.conditions.some(isConditionGroupNode),
+)
 
 watch(
   () => props.visible,
@@ -1080,6 +1194,7 @@ watch(
 const canSave = computed(() => {
   if (!draft.value.name.trim()) return false
   if (draft.value.actions.length < 1) return false
+  if (!draft.value.conditions.conditions.every(areConditionsComplete)) return false
   for (const action of draft.value.actions) {
     if (action.type === 'send_dingtalk_group_message') {
       const destinationIds = parseGroupDestinationIds(action.config.destinationIds ?? action.config.destinationId)
@@ -1797,7 +1912,12 @@ function buildPayload(): Partial<AutomationRule> {
     triggerType: d.triggerType,
     triggerConfig,
     trigger: { type: d.triggerType, config: triggerConfig },
-    conditions: d.conditions.conditions.length > 0 ? d.conditions : undefined,
+    conditions: d.conditions.conditions.length > 0
+      ? {
+        conjunction: d.conditions.conjunction,
+        conditions: d.conditions.conditions.map(buildConditionNodePayload),
+      }
+      : undefined,
     actions,
     actionType: actions[0]?.type ?? 'update_record',
     actionConfig: actions[0]?.config ?? {},

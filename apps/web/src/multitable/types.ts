@@ -753,6 +753,8 @@ export type ConditionOperator =
   | 'less_or_equal'
   | 'is_empty'
   | 'is_not_empty'
+  | 'in'
+  | 'not_in'
 
 export interface AutomationCondition {
   fieldId: string
@@ -760,9 +762,12 @@ export interface AutomationCondition {
   value?: unknown
 }
 
+export type AutomationConditionNode = AutomationCondition | ConditionGroup
+
 export interface ConditionGroup {
-  conjunction: 'AND' | 'OR'
-  conditions: AutomationCondition[]
+  conjunction?: 'AND' | 'OR'
+  logic?: 'and' | 'or'
+  conditions: AutomationConditionNode[]
 }
 
 export type AutomationActionType =
