@@ -12,7 +12,27 @@ const fields = [
   { id: 'fld_1', name: 'Status', type: 'select' },
   { id: 'fld_2', name: 'Name', type: 'string' },
   { id: 'fld_score', name: 'Score', type: 'number' },
+  { id: 'fld_done', name: 'Done', type: 'boolean' },
+  { id: 'fld_due', name: 'Due date', type: 'date' },
   { id: 'fld_files', name: 'Files', type: 'attachment' },
+  {
+    id: 'fld_priority',
+    name: 'Priority',
+    type: 'select',
+    options: [
+      { value: 'low', label: 'Low' },
+      { value: 'high', label: 'High' },
+    ],
+  },
+  {
+    id: 'fld_tags',
+    name: 'Tags',
+    type: 'multiSelect',
+    options: [
+      { value: 'red', label: 'Red' },
+      { value: 'blue', label: 'Blue' },
+    ],
+  },
   { id: 'assigneeUserIds', name: 'Assignees', type: 'user' },
   { id: 'reviewerUserId', name: 'Reviewer', type: 'user' },
   { id: 'watcherGroupIds', name: 'Watcher groups', type: 'link', property: { refKind: 'member-group' } },
@@ -306,6 +326,181 @@ describe('MetaAutomationRuleEditor', () => {
     expect(saved.mock.calls[0][0].conditions).toEqual({
       conjunction: 'AND',
       conditions: [{ fieldId: 'fld_files', operator: 'is_empty' }],
+    })
+  })
+
+  it('serializes numeric condition values as numbers', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Score condition'
+    nameInput.dispatchEvent(new Event('input'))
+
+    ;(container.querySelector('[data-action="add-condition"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
+    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
+    fieldSelect.value = 'fld_score'
+    fieldSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const valueInput = conditionRow.querySelector('input') as HTMLInputElement
+    expect(valueInput.type).toBe('number')
+    valueInput.value = '42.5'
+    valueInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].conditions).toEqual({
+      conjunction: 'AND',
+      conditions: [{ fieldId: 'fld_score', operator: 'equals', value: 42.5 }],
+    })
+  })
+
+  it('serializes boolean condition values as booleans', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Done condition'
+    nameInput.dispatchEvent(new Event('input'))
+
+    ;(container.querySelector('[data-action="add-condition"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
+    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
+    fieldSelect.value = 'fld_done'
+    fieldSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const valueSelect = conditionRow.querySelector('[data-condition-value="boolean"]') as HTMLSelectElement
+    expect(valueSelect).toBeTruthy()
+    valueSelect.value = 'false'
+    valueSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].conditions).toEqual({
+      conjunction: 'AND',
+      conditions: [{ fieldId: 'fld_done', operator: 'equals', value: false }],
+    })
+  })
+
+  it('uses configured select options for single-value conditions', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Priority condition'
+    nameInput.dispatchEvent(new Event('input'))
+
+    ;(container.querySelector('[data-action="add-condition"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
+    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
+    fieldSelect.value = 'fld_priority'
+    fieldSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const valueSelect = conditionRow.querySelector('[data-condition-value="select"]') as HTMLSelectElement
+    expect(Array.from(valueSelect.options).map((option) => option.textContent)).toEqual(['-- value --', 'Low', 'High'])
+    valueSelect.value = 'high'
+    valueSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].conditions).toEqual({
+      conjunction: 'AND',
+      conditions: [{ fieldId: 'fld_priority', operator: 'equals', value: 'high' }],
+    })
+  })
+
+  it('uses configured select options for list membership conditions', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Tag list condition'
+    nameInput.dispatchEvent(new Event('input'))
+
+    ;(container.querySelector('[data-action="add-condition"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
+    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
+    fieldSelect.value = 'fld_tags'
+    fieldSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const operatorSelect = Array.from(conditionRow.querySelectorAll('select'))[1] as HTMLSelectElement
+    operatorSelect.value = 'in'
+    operatorSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const valueSelect = conditionRow.querySelector('[data-condition-value="multi-select"]') as HTMLSelectElement
+    valueSelect.options[0].selected = true
+    valueSelect.options[1].selected = true
+    valueSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].conditions).toEqual({
+      conjunction: 'AND',
+      conditions: [{ fieldId: 'fld_tags', operator: 'in', value: ['red', 'blue'] }],
+    })
+  })
+
+  it('renders date conditions with a date input and preserves ISO date values', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Date condition'
+    nameInput.dispatchEvent(new Event('input'))
+
+    ;(container.querySelector('[data-action="add-condition"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
+    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
+    fieldSelect.value = 'fld_due'
+    fieldSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const valueInput = conditionRow.querySelector('input') as HTMLInputElement
+    expect(valueInput.type).toBe('date')
+    valueInput.value = '2026-05-11'
+    valueInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].conditions).toEqual({
+      conjunction: 'AND',
+      conditions: [{ fieldId: 'fld_due', operator: 'equals', value: '2026-05-11' }],
     })
   })
 
