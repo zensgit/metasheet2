@@ -30,6 +30,11 @@ REQUIRED_PATHS=(
   "apps/web/package.json"
   "packages/core-backend/dist"
   "packages/core-backend/package.json"
+  # The packaged migration runner loads SQL migrations from
+  # packages/core-backend/migrations via migration-provider.ts. Keep this
+  # source directory in the package so Windows/on-prem installs apply
+  # post-build SQL schema changes such as users.must_change_password.
+  "packages/core-backend/migrations"
   "plugins/plugin-attendance"
   "scripts/ops/attendance-onprem-bootstrap.sh"
   "scripts/ops/attendance-onprem-bootstrap-admin.sh"
