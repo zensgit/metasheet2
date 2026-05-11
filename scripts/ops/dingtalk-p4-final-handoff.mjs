@@ -18,6 +18,10 @@ Options:
                                Optional strict mobile public-form signoff output dir
   --require-mobile-signoff-pass
                                Require every included mobile signoff output to be strict passing
+  --include-screenshot-archive <dir>
+                               Optional DingTalk screenshot archive output dir
+  --require-screenshot-archive-pass
+                               Require every included screenshot archive to be strict passing
   --publish-check-json <file>  Validator JSON output, default <output-dir>/publish-check.json
   --summary-json <file>        Handoff JSON summary, default <output-dir>/handoff-summary.json
   --summary-md <file>          Handoff Markdown summary, default <output-dir>/handoff-summary.md
@@ -46,6 +50,8 @@ function parseArgs(argv) {
     outputDir: '',
     includeMobileSignoffDirs: [],
     requireMobileSignoffPass: false,
+    includeScreenshotArchiveDirs: [],
+    requireScreenshotArchivePass: false,
     publishCheckJson: '',
     summaryJson: '',
     summaryMd: '',
@@ -68,6 +74,13 @@ function parseArgs(argv) {
         break
       case '--require-mobile-signoff-pass':
         opts.requireMobileSignoffPass = true
+        break
+      case '--include-screenshot-archive':
+        opts.includeScreenshotArchiveDirs.push(path.resolve(process.cwd(), readRequiredValue(argv, i, arg)))
+        i += 1
+        break
+      case '--require-screenshot-archive-pass':
+        opts.requireScreenshotArchivePass = true
         break
       case '--publish-check-json':
         opts.publishCheckJson = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
@@ -189,6 +202,12 @@ function validateMobileSignoffArgs(opts) {
   }
 }
 
+function validateScreenshotArchiveArgs(opts) {
+  if (opts.requireScreenshotArchivePass && opts.includeScreenshotArchiveDirs.length === 0) {
+    throw new Error('--require-screenshot-archive-pass requires at least one --include-screenshot-archive directory')
+  }
+}
+
 function clearGeneratedHandoffMarkers(opts) {
   for (const file of [opts.publishCheckJson, opts.summaryJson, opts.summaryMd]) {
     rmSync(file, { force: true })
@@ -201,6 +220,15 @@ function mobileSignoffExportArgs(opts) {
     args.push('--include-mobile-signoff', relativePath(dir))
   }
   if (opts.requireMobileSignoffPass) args.push('--require-mobile-signoff-pass')
+  return args
+}
+
+function screenshotArchiveExportArgs(opts) {
+  const args = []
+  for (const dir of opts.includeScreenshotArchiveDirs) {
+    args.push('--include-screenshot-archive', relativePath(dir))
+  }
+  if (opts.requireScreenshotArchivePass) args.push('--require-screenshot-archive-pass')
   return args
 }
 
@@ -248,6 +276,10 @@ Publish check status: **${publishStatus}**
 Mobile signoff gate: **${summary.mobileSignoff.required ? 'required' : 'not_required'}**
 
 Included mobile signoff count: **${summary.mobileSignoff.includedCount}**
+
+Screenshot archive gate: **${summary.screenshotArchive.required ? 'required' : 'not_required'}**
+
+Included screenshot archive count: **${summary.screenshotArchive.includedCount}**
 
 ## Steps
 
@@ -307,6 +339,11 @@ function buildSummary(opts, steps) {
       includedCount: publishCheck?.includedMobileSignoffCount ?? 0,
       sources: opts.includeMobileSignoffDirs.map((dir) => displayPath(dir)),
     },
+    screenshotArchive: {
+      required: opts.requireScreenshotArchivePass,
+      includedCount: publishCheck?.includedScreenshotArchiveCount ?? 0,
+      sources: opts.includeScreenshotArchiveDirs.map((dir) => displayPath(dir)),
+    },
     failures,
     outputs: {
       manifest: displayPath(path.join(opts.outputDir, 'manifest.json')),
@@ -327,6 +364,7 @@ async function main() {
     validateOutputDir(opts)
     clearGeneratedHandoffMarkers(opts)
     validateMobileSignoffArgs(opts)
+    validateScreenshotArchiveArgs(opts)
 
     const exportStep = runNodeStep('export-packet', 'Export final gated packet', [
       'scripts/ops/export-dingtalk-staging-evidence-packet.mjs',
@@ -334,6 +372,7 @@ async function main() {
       relativePath(opts.sessionDir),
       '--require-dingtalk-p4-pass',
       ...mobileSignoffExportArgs(opts),
+      ...screenshotArchiveExportArgs(opts),
       '--output-dir',
       relativePath(opts.outputDir),
     ])
