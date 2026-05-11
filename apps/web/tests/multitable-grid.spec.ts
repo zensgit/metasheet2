@@ -525,6 +525,108 @@ describe('useMultitableGrid', () => {
     expect(grid.error.value).toBe('Row changed elsewhere')
   })
 
+  it('bulkPatch sends one patchRecords request with expectedVersion per selected row', async () => {
+    const patchCalls: Array<{ url: string; body: any }> = []
+    const fetchFn = vi.fn(async (input: string, init?: RequestInit) => {
+      if (!input.startsWith('/api/multitable/patch')) throw new Error(`Unexpected request: ${input}`)
+      patchCalls.push({ url: input, body: JSON.parse(init?.body as string) })
+      return new Response(JSON.stringify({
+        ok: true,
+        data: {
+          updated: [
+            { recordId: 'r1', version: 4 },
+            { recordId: 'r2', version: 4 },
+            { recordId: 'r3', version: 4 },
+          ],
+        },
+      }), { status: 200 })
+    })
+
+    const grid = useMultitableGrid({
+      sheetId: ref(''),
+      viewId: ref(''),
+      client: new MultitableApiClient({ fetchFn }),
+    })
+
+    grid.rows.value = [
+      { id: 'r1', version: 3, data: { f1: 'a' } },
+      { id: 'r2', version: 3, data: { f1: 'b' } },
+      { id: 'r3', version: 3, data: { f1: 'c' } },
+    ]
+
+    const result = await grid.bulkPatch({
+      fieldId: 'f1',
+      value: 'set-by-bulk',
+      recordIds: ['r1', 'r2', 'r3'],
+    })
+
+    expect(patchCalls).toHaveLength(1)
+    expect(patchCalls[0].body.changes).toEqual([
+      { recordId: 'r1', fieldId: 'f1', value: 'set-by-bulk', expectedVersion: 3 },
+      { recordId: 'r2', fieldId: 'f1', value: 'set-by-bulk', expectedVersion: 3 },
+      { recordId: 'r3', fieldId: 'f1', value: 'set-by-bulk', expectedVersion: 3 },
+    ])
+    expect(result.updated).toEqual(['r1', 'r2', 'r3'])
+    expect(result.failed).toEqual([])
+    for (const row of grid.rows.value) {
+      expect(row.version).toBe(4)
+    }
+  })
+
+  it('bulkPatch propagates a VERSION_CONFLICT error so the caller can surface it', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      if (!input.startsWith('/api/multitable/patch')) throw new Error(`Unexpected request: ${input}`)
+      return new Response(JSON.stringify({
+        ok: false,
+        error: { code: 'VERSION_CONFLICT', message: 'Row changed elsewhere' },
+      }), { status: 409 })
+    })
+
+    const grid = useMultitableGrid({
+      sheetId: ref(''),
+      viewId: ref(''),
+      client: new MultitableApiClient({ fetchFn }),
+    })
+
+    grid.rows.value = [
+      { id: 'r1', version: 3, data: { f1: 'a' } },
+      { id: 'r2', version: 3, data: { f1: 'b' } },
+    ]
+
+    await expect(
+      grid.bulkPatch({ fieldId: 'f1', value: 'x', recordIds: ['r1', 'r2'] }),
+    ).rejects.toMatchObject({ code: 'VERSION_CONFLICT' })
+  })
+
+  it('bulkPatch skips recordIds not present in rows.value (no version available)', async () => {
+    const patchCalls: Array<{ body: any }> = []
+    const fetchFn = vi.fn(async (input: string, init?: RequestInit) => {
+      if (!input.startsWith('/api/multitable/patch')) throw new Error(`Unexpected request: ${input}`)
+      patchCalls.push({ body: JSON.parse(init?.body as string) })
+      return new Response(JSON.stringify({
+        ok: true,
+        data: { updated: [{ recordId: 'r1', version: 4 }] },
+      }), { status: 200 })
+    })
+
+    const grid = useMultitableGrid({
+      sheetId: ref(''),
+      viewId: ref(''),
+      client: new MultitableApiClient({ fetchFn }),
+    })
+
+    grid.rows.value = [{ id: 'r1', version: 3, data: { f1: 'a' } }]
+
+    const result = await grid.bulkPatch({
+      fieldId: 'f1',
+      value: 'x',
+      recordIds: ['r1', 'r2_offscreen'],
+    })
+
+    expect(patchCalls[0].body.changes.map((c: any) => c.recordId)).toEqual(['r1'])
+    expect(result.updated).toEqual(['r1'])
+  })
+
   it('rejects deleteRecord when scoped rowActions disallow deletes', async () => {
     const fetchFn = vi.fn(async (input: string) => {
       if (!input.startsWith('/api/multitable/records/')) throw new Error(`Unexpected request: ${input}`)

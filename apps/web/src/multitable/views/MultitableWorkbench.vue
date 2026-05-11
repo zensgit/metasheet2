@@ -224,15 +224,21 @@
           @reparent-record="onHierarchyReparentRecord"
           @update-view-config="onPersistActiveViewConfig"
         />
+        <!--
+          MetaGridTable: enable-multi-select must be canDelete OR canEdit so
+          canEdit-only users (no delete permission) can still select rows
+          for bulk edit. Gating selection solely on delete-capability
+          locks them out. See PR #1451 review.
+        -->
         <MetaGridTable
           v-else
           :rows="grid.rows.value" :visible-fields="scopedGridFields" :sort-rules="grid.sortRules.value"
           :loading="grid.loading.value" :current-page="grid.currentPage.value" :total-pages="grid.totalPages.value"
           :start-index="pageStartIndex" :selected-record-id="selectedRecordId" :can-edit="effectiveRowActions.canEdit"
-          :can-delete="gridAllowsAnyDelete" :field-read-only-ids="readOnlyFieldIds" :column-widths="grid.columnWidths.value"
+          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :field-read-only-ids="readOnlyFieldIds" :column-widths="grid.columnWidths.value"
           :row-action-overrides="grid.rowActionOverrides.value"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
-          :enable-multi-select="gridAllowsAnyDelete"
+          :enable-multi-select="gridAllowsAnyDelete || effectiveRowActions.canEdit"
           :group-field="grid.groupField.value"
           :search-text="searchText" :row-density="rowDensity"
           :upload-fn="uploadAttachmentFn"
@@ -242,7 +248,7 @@
           :conditional-formatting="conditionalFormattingByRecord"
           @select-record="onSelectRecord" @toggle-sort="onToggleSort" @patch-cell="onPatchCell"
           @go-to-page="grid.goToPage" @open-link-picker="onGridLinkPicker" @resize-column="grid.setColumnWidth"
-          @bulk-delete="onBulkDelete" @reorder-field="onReorderField"
+          @bulk-delete="onBulkDelete" @bulk-edit="onBulkEditRequest" @reorder-field="onReorderField"
           @open-comments="onOpenRecordComments"
           @open-field-comments="onOpenGridFieldComments"
         />
@@ -301,6 +307,19 @@
         </div>
       </div>
     </div>
+    <MetaBulkEditDialog
+      :visible="bulkEditDialog.visible"
+      :mode="bulkEditDialog.mode"
+      :fields="scopedAllFields"
+      :can-edit="effectiveRowActions.canEdit"
+      :field-permissions="effectiveFieldPermissions"
+      :record-ids="bulkEditDialog.recordIds"
+      :busy="bulkEditDialog.busy"
+      :error="bulkEditDialog.error"
+      :result-message="bulkEditDialog.resultMessage"
+      @apply="onBulkEditApply"
+      @cancel="onBulkEditCancel"
+    />
     <MetaImportModal
       :visible="showImportModal"
       :sheet-id="workbench.activeSheetId.value"
@@ -368,7 +387,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuth } from '../../composables/useAuth'
 import type {
@@ -426,6 +445,7 @@ import MetaGanttView from '../components/MetaGanttView.vue'
 import MetaHierarchyView from '../components/MetaHierarchyView.vue'
 import MetaToast from '../components/MetaToast.vue'
 import MetaImportModal from '../components/MetaImportModal.vue'
+import MetaBulkEditDialog from '../components/MetaBulkEditDialog.vue'
 import MetaMentionPopover from '../components/MetaMentionPopover.vue'
 import MetaDashboardView from '../components/MetaDashboardView.vue'
 import type { MetaBase } from '../types'
@@ -2402,6 +2422,67 @@ async function onBulkDelete(recordIds: string[]) {
     if (selectedRecordId.value && recordIds.includes(selectedRecordId.value)) selectedRecordId.value = null
     showSuccess(`${recordIds.length} record(s) deleted`)
   } catch (e: any) { showError(e.message ?? 'Bulk delete failed') }
+}
+
+const bulkEditDialog = reactive<{
+  visible: boolean
+  mode: 'set' | 'clear'
+  recordIds: string[]
+  busy: boolean
+  error: string | null
+  resultMessage: string | null
+}>({ visible: false, mode: 'set', recordIds: [], busy: false, error: null, resultMessage: null })
+
+function onBulkEditRequest(payload: { mode: 'set' | 'clear'; recordIds: string[] }) {
+  if (!effectiveRowActions.value.canEdit) return
+  bulkEditDialog.visible = true
+  bulkEditDialog.mode = payload.mode
+  bulkEditDialog.recordIds = payload.recordIds
+  bulkEditDialog.busy = false
+  bulkEditDialog.error = null
+  bulkEditDialog.resultMessage = null
+}
+
+function onBulkEditCancel() {
+  bulkEditDialog.visible = false
+  bulkEditDialog.busy = false
+  bulkEditDialog.error = null
+  bulkEditDialog.resultMessage = null
+}
+
+async function onBulkEditApply(payload: { mode: 'set' | 'clear'; fieldId: string; value: unknown; recordIds: string[] }) {
+  bulkEditDialog.busy = true
+  bulkEditDialog.error = null
+  bulkEditDialog.resultMessage = null
+  try {
+    const result = await grid.bulkPatch({
+      fieldId: payload.fieldId,
+      value: payload.mode === 'clear' ? null : payload.value,
+      recordIds: payload.recordIds,
+    })
+    const updatedCount = result.updated.length
+    const requestedCount = payload.recordIds.length
+    if (result.failed.length > 0) {
+      bulkEditDialog.error = `${result.failed.length} of ${requestedCount} record(s) failed`
+    } else if (updatedCount < requestedCount) {
+      bulkEditDialog.resultMessage = `${updatedCount} of ${requestedCount} record(s) updated`
+    } else {
+      bulkEditDialog.resultMessage = `${updatedCount} record(s) ${payload.mode === 'clear' ? 'cleared' : 'updated'}`
+    }
+    if (updatedCount > 0 && bulkEditDialog.resultMessage) showSuccess(bulkEditDialog.resultMessage)
+    if (result.failed.length === 0 && updatedCount === requestedCount) {
+      bulkEditDialog.visible = false
+    }
+  } catch (e: any) {
+    const message = e?.message ?? 'Bulk edit failed'
+    const errorMessage = e?.code === 'VERSION_CONFLICT'
+      ? `Some records were modified elsewhere. Reload and retry. (${message})`
+      : message
+    bulkEditDialog.error = errorMessage
+    showError(errorMessage)
+  } finally {
+    bulkEditDialog.busy = false
+  }
 }
 
 // --- Deep-link record fetch (when record not in current page) ---

@@ -2,6 +2,8 @@
   <div class="meta-grid" :class="[rowDensity ? `meta-grid--${rowDensity}` : '']" tabindex="0" role="grid" aria-label="Data grid" @keydown="onKeydown">
     <div v-if="enableMultiSelect && selectedIds.size > 0" class="meta-grid__bulk-bar">
       <span class="meta-grid__bulk-count">{{ selectedIds.size }} selected</span>
+      <button v-if="canBulkEdit" class="meta-grid__bulk-btn" aria-label="Set field on selected records" @click="onBulkEdit('set')">Set field</button>
+      <button v-if="canBulkEdit" class="meta-grid__bulk-btn" aria-label="Clear field on selected records" @click="onBulkEdit('clear')">Clear field</button>
       <button v-if="canDelete" class="meta-grid__bulk-btn meta-grid__bulk-btn--danger" aria-label="Delete selected records" @click="onBulkDelete">Delete selected</button>
       <button class="meta-grid__bulk-btn" aria-label="Clear selection" @click="selectedIds = new Set(); emit('selection-change', [])">Clear</button>
     </div>
@@ -47,7 +49,7 @@
                 @click="emit('select-record', row.id)"
               >
                 <td v-if="enableMultiSelect" class="meta-grid__check-col" @click.stop>
-                  <input type="checkbox" :checked="selectedIds.has(row.id)" :disabled="!resolveRowActions(row.id).canDelete" @change="toggleSelectRow(row.id)" />
+                  <input type="checkbox" :checked="selectedIds.has(row.id)" :disabled="!rowAllowsAnyBulkAction(row.id)" @change="toggleSelectRow(row.id)" />
                 </td>
                 <td class="meta-grid__row-num">
                   <span>{{ startIndex + flatIndex(group, ri) + 1 }}</span>
@@ -126,7 +128,7 @@
               @click="emit('select-record', row.id)"
             >
               <td v-if="enableMultiSelect" class="meta-grid__check-col" @click.stop>
-                <input type="checkbox" :checked="selectedIds.has(row.id)" :disabled="!resolveRowActions(row.id).canDelete" @change="toggleSelectRow(row.id)" />
+                <input type="checkbox" :checked="selectedIds.has(row.id)" :disabled="!rowAllowsAnyBulkAction(row.id)" @change="toggleSelectRow(row.id)" />
               </td>
               <td class="meta-grid__row-num">
                 <button class="meta-grid__expand-btn" :class="{ 'meta-grid__expand-btn--open': expandedRowIds.has(row.id) }" :aria-label="expandedRowIds.has(row.id) ? 'Collapse row' : 'Expand row'" @click.stop="toggleRowExpand(row.id)">&#x25B6;</button>
@@ -284,6 +286,7 @@ const props = defineProps<{
   selectedRecordId?: string | null
   canEdit: boolean
   canDelete?: boolean
+  canBulkEdit?: boolean
   rowActionOverrides?: Record<string, MetaRowActions>
   fieldReadOnlyIds?: string[]
   columnWidths?: Record<string, number>
@@ -311,6 +314,7 @@ const emit = defineEmits<{
   (e: 'resize-column', fieldId: string, width: number): void
   (e: 'selection-change', recordIds: string[]): void
   (e: 'bulk-delete', recordIds: string[]): void
+  (e: 'bulk-edit', payload: { mode: 'set' | 'clear'; recordIds: string[] }): void
   (e: 'reorder-field', fromFieldId: string, toFieldId: string): void
 }>()
 
@@ -340,9 +344,14 @@ function toggleRowExpand(rowId: string) {
   expandedRowIds.value = s
 }
 
+function rowAllowsAnyBulkAction(recordId: string): boolean {
+  const actions = resolveRowActions(recordId)
+  return actions.canEdit === true || actions.canDelete === true
+}
+
 const selectableRowIds = computed(() =>
   filteredRows.value
-    .filter((row) => resolveRowActions(row.id).canDelete)
+    .filter((row) => rowAllowsAnyBulkAction(row.id))
     .map((row) => row.id),
 )
 const allSelected = computed(() =>
@@ -400,7 +409,7 @@ function toggleSelectAll() {
 }
 
 function toggleSelectRow(recordId: string) {
-  if (!resolveRowActions(recordId).canDelete) return
+  if (!rowAllowsAnyBulkAction(recordId)) return
   const s = new Set(selectedIds.value)
   if (s.has(recordId)) s.delete(recordId)
   else s.add(recordId)
@@ -408,8 +417,20 @@ function toggleSelectRow(recordId: string) {
   emit('selection-change', [...s])
 }
 
+// Bulk actions filter the selection to rows that actually permit the
+// requested action — so canEdit-only users selecting from a mixed grid
+// can still bulk-edit, and canDelete-only buttons silently skip
+// edit-only rows. This matches the per-action gating pattern in
+// MultitableWorkbench.onBulkDelete which calls ensureCanDeleteRecord
+// per row before issuing deletes.
 function onBulkDelete() {
-  if (selectedIds.value.size > 0) emit('bulk-delete', [...selectedIds.value])
+  const deletable = [...selectedIds.value].filter((id) => resolveRowActions(id).canDelete)
+  if (deletable.length > 0) emit('bulk-delete', deletable)
+}
+
+function onBulkEdit(mode: 'set' | 'clear') {
+  const editable = [...selectedIds.value].filter((id) => resolveRowActions(id).canEdit)
+  if (editable.length > 0) emit('bulk-edit', { mode, recordIds: editable })
 }
 
 watch(() => props.rows, () => { selectedIds.value = new Set() })
