@@ -21,6 +21,37 @@ export type ConditionOperator =
   | 'in'
   | 'not_in'
 
+const VALID_CONDITION_OPERATORS = new Set<ConditionOperator>([
+  'equals',
+  'not_equals',
+  'contains',
+  'not_contains',
+  'greater_than',
+  'less_than',
+  'greater_or_equal',
+  'less_or_equal',
+  'is_empty',
+  'is_not_empty',
+  'in',
+  'not_in',
+])
+
+const VALUE_REQUIRED_OPERATORS = new Set<ConditionOperator>([
+  'equals',
+  'not_equals',
+  'contains',
+  'not_contains',
+  'greater_than',
+  'less_than',
+  'greater_or_equal',
+  'less_or_equal',
+  'in',
+  'not_in',
+])
+
+const ARRAY_VALUE_OPERATORS = new Set<ConditionOperator>(['in', 'not_in'])
+const MAX_CONDITION_GROUP_DEPTH = 5
+
 export interface AutomationCondition {
   fieldId: string
   operator: ConditionOperator
@@ -35,8 +66,19 @@ export interface ConditionGroup {
   conditions: AutomationConditionNode[]
 }
 
+export class ConditionGroupValidationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ConditionGroupValidationError'
+  }
+}
+
 function isConditionGroup(node: AutomationConditionNode): node is ConditionGroup {
   return typeof (node as ConditionGroup).conditions !== 'undefined'
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
 }
 
 function resolveGroupLogic(conditionGroup: ConditionGroup): 'and' | 'or' {
@@ -47,6 +89,97 @@ function resolveGroupLogic(conditionGroup: ConditionGroup): 'and' | 'or' {
   if (conjunction === 'and' || conjunction === 'or') return conjunction
 
   return 'and'
+}
+
+function normalizeLogicToken(value: unknown, path: string): 'and' | 'or' | null {
+  if (value === undefined) return null
+  if (typeof value !== 'string') {
+    throw new ConditionGroupValidationError(`${path} must be "and" or "or"`)
+  }
+  const normalized = value.toLowerCase()
+  if (normalized === 'and' || normalized === 'or') return normalized
+  throw new ConditionGroupValidationError(`${path} must be "and" or "or"`)
+}
+
+function normalizeConjunctionToken(value: unknown, path: string): 'AND' | 'OR' | null {
+  if (value === undefined) return null
+  if (typeof value !== 'string') {
+    throw new ConditionGroupValidationError(`${path} must be "AND" or "OR"`)
+  }
+  const normalized = value.toUpperCase()
+  if (normalized === 'AND' || normalized === 'OR') return normalized
+  throw new ConditionGroupValidationError(`${path} must be "AND" or "OR"`)
+}
+
+function normalizeConditionLeaf(value: unknown, path: string): AutomationCondition {
+  if (!isPlainObject(value)) {
+    throw new ConditionGroupValidationError(`${path} must be an object`)
+  }
+
+  const fieldId = typeof value.fieldId === 'string' ? value.fieldId.trim() : ''
+  if (!fieldId) {
+    throw new ConditionGroupValidationError(`${path}.fieldId is required`)
+  }
+
+  const operator = value.operator
+  if (typeof operator !== 'string' || !VALID_CONDITION_OPERATORS.has(operator as ConditionOperator)) {
+    throw new ConditionGroupValidationError(`${path}.operator is invalid`)
+  }
+
+  const normalizedOperator = operator as ConditionOperator
+  if (VALUE_REQUIRED_OPERATORS.has(normalizedOperator) && value.value === undefined) {
+    throw new ConditionGroupValidationError(`${path}.value is required for ${normalizedOperator}`)
+  }
+  if (ARRAY_VALUE_OPERATORS.has(normalizedOperator) && !Array.isArray(value.value)) {
+    throw new ConditionGroupValidationError(`${path}.value must be an array for ${normalizedOperator}`)
+  }
+
+  const condition: AutomationCondition = { fieldId, operator: normalizedOperator }
+  if (value.value !== undefined) condition.value = value.value
+  return condition
+}
+
+function normalizeConditionNodeInput(
+  value: unknown,
+  path: string,
+  depth: number,
+): AutomationConditionNode {
+  if (isPlainObject(value) && Object.prototype.hasOwnProperty.call(value, 'conditions')) {
+    return normalizeConditionGroupInput(value, path, depth)
+  }
+  return normalizeConditionLeaf(value, path)
+}
+
+export function normalizeConditionGroupInput(
+  value: unknown,
+  path = 'conditions',
+  depth = 0,
+): ConditionGroup {
+  if (depth > MAX_CONDITION_GROUP_DEPTH) {
+    throw new ConditionGroupValidationError(`${path} exceeds maximum nesting depth ${MAX_CONDITION_GROUP_DEPTH}`)
+  }
+  if (!isPlainObject(value)) {
+    throw new ConditionGroupValidationError(`${path} must be an object`)
+  }
+
+  const logic = normalizeLogicToken(value.logic, `${path}.logic`)
+  const conjunction = normalizeConjunctionToken(value.conjunction, `${path}.conjunction`)
+  if (!logic && !conjunction) {
+    throw new ConditionGroupValidationError(`${path}.logic or ${path}.conjunction is required`)
+  }
+  if (logic && conjunction && logic !== conjunction.toLowerCase()) {
+    throw new ConditionGroupValidationError(`${path}.logic and ${path}.conjunction must agree`)
+  }
+  if (!Array.isArray(value.conditions)) {
+    throw new ConditionGroupValidationError(`${path}.conditions must be an array`)
+  }
+
+  const conditions = value.conditions.map((condition, index) =>
+    normalizeConditionNodeInput(condition, `${path}.conditions[${index}]`, depth + 1),
+  )
+
+  if (conjunction) return { conjunction, conditions }
+  return { logic: logic ?? 'and', conditions }
 }
 
 /**
