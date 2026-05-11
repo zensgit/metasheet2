@@ -2908,12 +2908,12 @@ async function applyDirectoryAccountBindInTransaction(
   const conflictingIdentityResult = await client.query(
     `SELECT local_user_id
      FROM user_external_identities
-     WHERE provider = $1
-       AND local_user_id <> $5
+     WHERE provider = $1::text
+       AND local_user_id <> $5::text
        AND (
-         external_key = $2
-         OR ($3 IS NOT NULL AND provider_union_id = $3 AND corp_id IS NOT DISTINCT FROM $4)
-         OR ($6 IS NOT NULL AND provider_open_id = $6 AND corp_id IS NOT DISTINCT FROM $4)
+         external_key = $2::text
+         OR ($3::text IS NOT NULL AND provider_union_id = $3::text AND corp_id IS NOT DISTINCT FROM $4::text)
+         OR ($6::text IS NOT NULL AND provider_open_id = $6::text AND corp_id IS NOT DISTINCT FROM $4::text)
      )
      LIMIT 1`,
     [account.provider, identityExternalKey, account.union_id, account.corp_id, localUser.id, account.open_id],
@@ -2926,10 +2926,10 @@ async function applyDirectoryAccountBindInTransaction(
     `SELECT l.directory_account_id
      FROM directory_account_links l
      JOIN directory_accounts a ON a.id = l.directory_account_id
-     WHERE a.provider = $1
-       AND l.local_user_id = $2
+     WHERE a.provider = $1::text
+       AND l.local_user_id = $2::text
        AND l.link_status = 'linked'
-       AND l.directory_account_id <> $3
+       AND l.directory_account_id <> $3::uuid
      LIMIT 1`,
     [account.provider, localUser.id, normalizedAccountId],
   )
@@ -2940,7 +2940,7 @@ async function applyDirectoryAccountBindInTransaction(
   const existingIdentityResult = await client.query(
     `SELECT id
      FROM user_external_identities
-     WHERE provider = $1 AND local_user_id = $2
+     WHERE provider = $1::text AND local_user_id = $2::text
      LIMIT 1`,
     [account.provider, localUser.id],
   )
@@ -2948,14 +2948,14 @@ async function applyDirectoryAccountBindInTransaction(
   if (existingIdentityResult.rows.length > 0) {
     await client.query(
       `UPDATE user_external_identities
-       SET external_key = $3,
-           provider_union_id = $4,
-           provider_open_id = $5,
-           corp_id = $6,
+       SET external_key = $3::text,
+           provider_union_id = $4::text,
+           provider_open_id = $5::text,
+           corp_id = $6::text,
            profile = $7::jsonb,
-           bound_by = COALESCE(bound_by, $8),
+           bound_by = COALESCE(bound_by, $8::text),
            updated_at = NOW()
-       WHERE provider = $1 AND local_user_id = $2`,
+       WHERE provider = $1::text AND local_user_id = $2::text`,
       [
         account.provider,
         localUser.id,
@@ -2981,7 +2981,7 @@ async function applyDirectoryAccountBindInTransaction(
          created_at,
          updated_at
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, NOW(), NOW())`,
+       VALUES ($1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::jsonb, $8::text, NOW(), NOW())`,
       [
         account.provider,
         identityExternalKey,
@@ -2998,7 +2998,7 @@ async function applyDirectoryAccountBindInTransaction(
   if (enableDingTalkGrant) {
     await client.query(
       `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
-       VALUES ($1, $2, TRUE, $3, NOW(), NOW())
+       VALUES ($1::text, $2::text, TRUE, $3::text, NOW(), NOW())
        ON CONFLICT (provider, local_user_id)
        DO UPDATE SET enabled = TRUE, granted_by = EXCLUDED.granted_by, updated_at = NOW()`,
       [account.provider, localUser.id, normalizedAdminUserId],
@@ -3009,7 +3009,7 @@ async function applyDirectoryAccountBindInTransaction(
     `INSERT INTO directory_account_links (
        directory_account_id, local_user_id, link_status, match_strategy, reviewed_by, review_note, created_at, updated_at
      )
-     VALUES ($1, $2, 'linked', 'manual_admin', $3, NULL, NOW(), NOW())
+     VALUES ($1::uuid, $2::text, 'linked', 'manual_admin', $3::text, NULL, NOW(), NOW())
      ON CONFLICT (directory_account_id)
      DO UPDATE SET
        local_user_id = EXCLUDED.local_user_id,
@@ -3052,7 +3052,7 @@ async function createDirectoryAdmittedUserInTransaction(
     const existingUserResult = await client.query(
       `SELECT id
        FROM users
-       WHERE email = $1
+       WHERE email = $1::text
        LIMIT 1`,
       [options.email],
     )
@@ -3065,7 +3065,7 @@ async function createDirectoryAdmittedUserInTransaction(
     const existingUsernameResult = await client.query(
       `SELECT id
        FROM users
-       WHERE lower(username) = lower($1)
+       WHERE lower(username) = lower($1::text)
        LIMIT 1`,
       [options.username],
     )
@@ -3078,7 +3078,7 @@ async function createDirectoryAdmittedUserInTransaction(
     const existingMobileResult = await client.query(
       `SELECT id
        FROM users
-       WHERE mobile = $1
+       WHERE mobile = $1::text
        LIMIT 1`,
       [options.mobile],
     )
@@ -3089,7 +3089,7 @@ async function createDirectoryAdmittedUserInTransaction(
 
   await client.query(
     `INSERT INTO users (id, email, username, name, mobile, password_hash, must_change_password, role, permissions, is_active, is_admin, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, 'user', $8::jsonb, TRUE, FALSE, NOW(), NOW())`,
+     VALUES ($1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::boolean, 'user', $8::jsonb, TRUE, FALSE, NOW(), NOW())`,
     [userId, options.email, options.username, options.name, options.mobile, options.passwordHash, options.mustChangePassword, JSON.stringify([])],
   )
 

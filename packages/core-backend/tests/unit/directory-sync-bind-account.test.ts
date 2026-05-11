@@ -701,6 +701,99 @@ describe('bindDirectoryAccount', () => {
     expect(inviteTokenMocks.issueInviteToken).not.toHaveBeenCalled()
   })
 
+  it('admits a no-email union-only DingTalk account when grant is disabled', async () => {
+    const clientQuery = vi.fn().mockResolvedValue({ rows: [] })
+    pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'account-admit-union-only',
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          external_user_id: '0447654442691100',
+          union_id: 'union-only',
+          open_id: null,
+          external_key: 'union-only',
+          name: 'ddzz',
+          email: null,
+          mobile: null,
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          local_user_id: null,
+          local_user_email: null,
+          local_user_username: null,
+          local_user_name: null,
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          directory_account_id: 'account-admit-union-only',
+          external_user_id: '0447654442691100',
+          union_id: 'union-only',
+          open_id: null,
+          external_key: 'union-only',
+          account_name: 'ddzz',
+          account_email: null,
+          account_mobile: null,
+          account_is_active: true,
+          account_updated_at: '2026-04-11T08:00:00.000Z',
+          link_status: 'linked',
+          match_strategy: 'manual_admin',
+          reviewed_by: 'admin-1',
+          review_note: null,
+          link_updated_at: '2026-04-11T08:00:00.000Z',
+          local_user_id: 'user-created-union-only',
+          local_user_email: null,
+          local_user_username: 'ddzz142',
+          local_user_name: 'ddzz',
+          department_paths: ['DingTalk CN'],
+        }],
+      })
+
+    const result = await admitDirectoryAccountUser('account-admit-union-only', {
+      adminUserId: 'admin-1',
+      name: 'ddzz',
+      username: 'ddzz142',
+      enableDingTalkGrant: false,
+    })
+
+    const createUserCall = clientQuery.mock.calls.find((entry) => String(entry[0]).includes('INSERT INTO users'))
+    const conflictIdentityCall = clientQuery.mock.calls.find((entry) => String(entry[0]).includes('SELECT local_user_id'))
+    const conflictLinkCall = clientQuery.mock.calls.find((entry) => String(entry[0]).includes('JOIN directory_accounts'))
+    const linkCall = clientQuery.mock.calls.find((entry) => String(entry[0]).includes('INSERT INTO directory_account_links'))
+
+    expect(createUserCall?.[1]).toEqual(expect.arrayContaining([
+      null,
+      'ddzz142',
+      'ddzz',
+      null,
+      JSON.stringify([]),
+    ]))
+    expect(String(conflictIdentityCall?.[0])).toContain('$3::text IS NOT NULL')
+    expect(String(conflictIdentityCall?.[0])).toContain('provider_union_id = $3::text')
+    expect(String(conflictIdentityCall?.[0])).toContain('$6::text IS NOT NULL')
+    expect(String(conflictLinkCall?.[0])).toContain('l.directory_account_id <> $3::uuid')
+    expect(String(linkCall?.[0])).toContain('VALUES ($1::uuid, $2::text')
+    expect(clientQuery).not.toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO user_external_auth_grants'),
+      expect.anything(),
+    )
+    expect(result).toMatchObject({
+      user: {
+        email: null,
+        username: 'ddzz142',
+        mobile: null,
+      },
+      inviteToken: null,
+    })
+  })
+
   it('rejects manual admission with DingTalk grant when the directory account is missing openId', async () => {
     pgMocks.query
       .mockResolvedValueOnce({
