@@ -10,6 +10,16 @@ import {
 } from '../src/multitable/composables/useMultitableGrid'
 import { MultitableApiClient } from '../src/multitable/api/client'
 
+type PatchRequestBody = {
+  partialSuccess?: boolean
+  changes: Array<{
+    recordId: string
+    fieldId?: string
+    value?: unknown
+    expectedVersion?: number
+  }>
+}
+
 function createMockClient() {
   return new MultitableApiClient({
     fetchFn: vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data: {} }), { status: 200 })),
@@ -526,10 +536,10 @@ describe('useMultitableGrid', () => {
   })
 
   it('bulkPatch sends one patchRecords request with expectedVersion per selected row', async () => {
-    const patchCalls: Array<{ url: string; body: any }> = []
+    const patchCalls: Array<{ url: string; body: PatchRequestBody }> = []
     const fetchFn = vi.fn(async (input: string, init?: RequestInit) => {
       if (!input.startsWith('/api/multitable/patch')) throw new Error(`Unexpected request: ${input}`)
-      patchCalls.push({ url: input, body: JSON.parse(init?.body as string) })
+      patchCalls.push({ url: input, body: JSON.parse(init?.body as string) as PatchRequestBody })
       return new Response(JSON.stringify({
         ok: true,
         data: {
@@ -561,6 +571,7 @@ describe('useMultitableGrid', () => {
     })
 
     expect(patchCalls).toHaveLength(1)
+    expect(patchCalls[0].body.partialSuccess).toBe(true)
     expect(patchCalls[0].body.changes).toEqual([
       { recordId: 'r1', fieldId: 'f1', value: 'set-by-bulk', expectedVersion: 3 },
       { recordId: 'r2', fieldId: 'f1', value: 'set-by-bulk', expectedVersion: 3 },
@@ -598,11 +609,52 @@ describe('useMultitableGrid', () => {
     ).rejects.toMatchObject({ code: 'VERSION_CONFLICT' })
   })
 
+  it('bulkPatch applies successful rows and returns per-row failures from partialSuccess responses', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      if (!input.startsWith('/api/multitable/patch')) throw new Error(`Unexpected request: ${input}`)
+      return new Response(JSON.stringify({
+        ok: true,
+        data: {
+          updated: [{ recordId: 'r1', version: 4 }],
+          records: [{ recordId: 'r1', data: { f1: 'patched' } }],
+          failed: [{
+            recordId: 'r2',
+            code: 'VERSION_CONFLICT',
+            message: 'Version conflict for r2',
+            serverVersion: 8,
+          }],
+        },
+      }), { status: 200 })
+    })
+
+    const grid = useMultitableGrid({
+      sheetId: ref(''),
+      viewId: ref(''),
+      client: new MultitableApiClient({ fetchFn }),
+    })
+
+    grid.rows.value = [
+      { id: 'r1', version: 3, data: { f1: 'a' } },
+      { id: 'r2', version: 3, data: { f1: 'b' } },
+    ]
+
+    const result = await grid.bulkPatch({
+      fieldId: 'f1',
+      value: 'patched',
+      recordIds: ['r1', 'r2'],
+    })
+
+    expect(result.updated).toEqual(['r1'])
+    expect(result.failed).toEqual([{ recordId: 'r2', reason: 'Version conflict for r2' }])
+    expect(grid.rows.value[0]).toMatchObject({ version: 4, data: { f1: 'patched' } })
+    expect(grid.rows.value[1]).toMatchObject({ version: 3, data: { f1: 'b' } })
+  })
+
   it('bulkPatch skips recordIds not present in rows.value (no version available)', async () => {
-    const patchCalls: Array<{ body: any }> = []
+    const patchCalls: Array<{ body: PatchRequestBody }> = []
     const fetchFn = vi.fn(async (input: string, init?: RequestInit) => {
       if (!input.startsWith('/api/multitable/patch')) throw new Error(`Unexpected request: ${input}`)
-      patchCalls.push({ body: JSON.parse(init?.body as string) })
+      patchCalls.push({ body: JSON.parse(init?.body as string) as PatchRequestBody })
       return new Response(JSON.stringify({
         ok: true,
         data: { updated: [{ recordId: 'r1', version: 4 }] },
@@ -623,7 +675,8 @@ describe('useMultitableGrid', () => {
       recordIds: ['r1', 'r2_offscreen'],
     })
 
-    expect(patchCalls[0].body.changes.map((c: any) => c.recordId)).toEqual(['r1'])
+    expect(patchCalls[0].body.partialSuccess).toBe(true)
+    expect(patchCalls[0].body.changes.map((change) => change.recordId)).toEqual(['r1'])
     expect(result.updated).toEqual(['r1'])
   })
 

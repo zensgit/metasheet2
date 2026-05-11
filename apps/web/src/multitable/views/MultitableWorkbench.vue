@@ -2463,13 +2463,21 @@ async function onBulkEditApply(payload: { mode: 'set' | 'clear'; fieldId: string
     const updatedCount = result.updated.length
     const requestedCount = payload.recordIds.length
     if (result.failed.length > 0) {
-      bulkEditDialog.error = `${result.failed.length} of ${requestedCount} record(s) failed`
+      const sampleFailures = result.failed
+        .slice(0, 3)
+        .map((failure) => `${failure.recordId}: ${failure.reason}`)
+        .join('; ')
+      bulkEditDialog.error = `${result.failed.length} of ${requestedCount} record(s) failed${sampleFailures ? ` (${sampleFailures})` : ''}`
+      if (updatedCount > 0) {
+        bulkEditDialog.resultMessage = `${updatedCount} of ${requestedCount} record(s) ${payload.mode === 'clear' ? 'cleared' : 'updated'}`
+      }
     } else if (updatedCount < requestedCount) {
       bulkEditDialog.resultMessage = `${updatedCount} of ${requestedCount} record(s) updated`
     } else {
       bulkEditDialog.resultMessage = `${updatedCount} record(s) ${payload.mode === 'clear' ? 'cleared' : 'updated'}`
     }
     if (updatedCount > 0 && bulkEditDialog.resultMessage) showSuccess(bulkEditDialog.resultMessage)
+    if (result.failed.length > 0 && bulkEditDialog.error) showError(bulkEditDialog.error)
     if (result.failed.length === 0 && updatedCount === requestedCount) {
       bulkEditDialog.visible = false
     }
