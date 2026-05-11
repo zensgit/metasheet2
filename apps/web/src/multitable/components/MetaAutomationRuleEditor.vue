@@ -97,12 +97,20 @@
             class="meta-rule-editor__condition-row"
             :data-condition-index="idx"
           >
-            <select v-model="cond.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm">
+            <select
+              :value="cond.fieldId"
+              class="meta-rule-editor__select meta-rule-editor__select--sm"
+              @change="onConditionFieldChange(cond, ($event.target as HTMLSelectElement).value)"
+            >
               <option value="">-- field --</option>
               <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
             </select>
-            <select v-model="cond.operator" class="meta-rule-editor__select meta-rule-editor__select--sm">
-              <option v-for="op in conditionOperators" :key="op.value" :value="op.value">{{ op.label }}</option>
+            <select
+              :value="cond.operator"
+              class="meta-rule-editor__select meta-rule-editor__select--sm"
+              @change="onConditionOperatorChange(cond, ($event.target as HTMLSelectElement).value as ConditionOperator)"
+            >
+              <option v-for="op in conditionOperatorsForField(cond.fieldId)" :key="op.value" :value="op.value">{{ op.label }}</option>
             </select>
             <input
               v-if="!isUnaryOperator(cond.operator)"
@@ -967,7 +975,9 @@ const savedRuleHasDingTalkActions = computed(() => ruleHasDingTalkActions(props.
 const DINGTALK_TEST_RUN_CONFIRM_MESSAGE =
   'Test Run executes the saved rule and can send real DingTalk messages to configured groups or users. Unsaved changes are not included. Continue?'
 
-const conditionOperators: Array<{ value: ConditionOperator; label: string }> = [
+type ConditionOperatorOption = { value: ConditionOperator; label: string }
+
+const conditionOperators: ConditionOperatorOption[] = [
   { value: 'equals', label: 'Equals' },
   { value: 'not_equals', label: 'Not equals' },
   { value: 'contains', label: 'Contains' },
@@ -981,6 +991,109 @@ const conditionOperators: Array<{ value: ConditionOperator; label: string }> = [
   { value: 'in', label: 'In list' },
   { value: 'not_in', label: 'Not in list' },
 ]
+
+const CONDITION_OPERATOR_LOOKUP = new Map(conditionOperators.map((operator) => [operator.value, operator]))
+const EMPTY_VALUE_OPERATOR_OPTIONS = ['is_empty', 'is_not_empty'] as const
+const EQUALITY_OPERATOR_OPTIONS = ['equals', 'not_equals', 'in', 'not_in', 'is_empty', 'is_not_empty'] as const
+const TEXT_OPERATOR_OPTIONS = [
+  'equals',
+  'not_equals',
+  'contains',
+  'not_contains',
+  'in',
+  'not_in',
+  'is_empty',
+  'is_not_empty',
+] as const
+const COMPARABLE_OPERATOR_OPTIONS = [
+  'equals',
+  'not_equals',
+  'greater_than',
+  'less_than',
+  'greater_or_equal',
+  'less_or_equal',
+  'in',
+  'not_in',
+  'is_empty',
+  'is_not_empty',
+] as const
+const MULTI_VALUE_OPERATOR_OPTIONS = [
+  'contains',
+  'not_contains',
+  'in',
+  'not_in',
+  'is_empty',
+  'is_not_empty',
+] as const
+
+function optionsFromOperators(operators: readonly ConditionOperator[]): ConditionOperatorOption[] {
+  return operators
+    .map((operator) => CONDITION_OPERATOR_LOOKUP.get(operator))
+    .filter((operator): operator is ConditionOperatorOption => !!operator)
+}
+
+function conditionOperatorsForField(fieldId: string): ConditionOperatorOption[] {
+  const fieldType = props.fields.find((field) => field.id === fieldId)?.type
+  if (!fieldType) return optionsFromOperators(EMPTY_VALUE_OPERATOR_OPTIONS)
+
+  switch (fieldType) {
+    case 'number':
+    case 'currency':
+    case 'percent':
+    case 'rating':
+    case 'date':
+    case 'dateTime':
+    case 'createdTime':
+    case 'modifiedTime':
+    case 'autoNumber':
+      return optionsFromOperators(COMPARABLE_OPERATOR_OPTIONS)
+    case 'boolean':
+      return optionsFromOperators(EQUALITY_OPERATOR_OPTIONS)
+    case 'select':
+    case 'person':
+    case 'link':
+    case 'lookup':
+    case 'rollup':
+    case 'createdBy':
+    case 'modifiedBy':
+      return optionsFromOperators(EQUALITY_OPERATOR_OPTIONS)
+    case 'multiSelect':
+      return optionsFromOperators(MULTI_VALUE_OPERATOR_OPTIONS)
+    case 'attachment':
+      return optionsFromOperators(EMPTY_VALUE_OPERATOR_OPTIONS)
+    default:
+      return optionsFromOperators(TEXT_OPERATOR_OPTIONS)
+  }
+}
+
+function firstOperatorForField(fieldId: string): ConditionOperator {
+  return conditionOperatorsForField(fieldId)[0]?.value ?? 'is_empty'
+}
+
+function resetConditionValue(condition: AutomationCondition) {
+  if (isUnaryOperator(condition.operator)) {
+    delete condition.value
+  } else if (isArrayOperator(condition.operator)) {
+    condition.value = ''
+  } else {
+    condition.value = ''
+  }
+}
+
+function onConditionFieldChange(condition: AutomationCondition, fieldId: string) {
+  const previousFieldId = condition.fieldId
+  condition.fieldId = fieldId
+  const allowedOperators = conditionOperatorsForField(fieldId)
+  if (!previousFieldId || !allowedOperators.some((operator) => operator.value === condition.operator)) {
+    condition.operator = firstOperatorForField(fieldId)
+    resetConditionValue(condition)
+  }
+}
+
+function onConditionOperatorChange(condition: AutomationCondition, operator: ConditionOperator) {
+  condition.operator = operator
+  resetConditionValue(condition)
+}
 
 function isUnaryOperator(op: ConditionOperator): boolean {
   return op === 'is_empty' || op === 'is_not_empty'

@@ -11,6 +11,8 @@ import type { AutomationRule, ConditionGroup } from '../src/multitable/types'
 const fields = [
   { id: 'fld_1', name: 'Status', type: 'select' },
   { id: 'fld_2', name: 'Name', type: 'string' },
+  { id: 'fld_score', name: 'Score', type: 'number' },
+  { id: 'fld_files', name: 'Files', type: 'attachment' },
   { id: 'assigneeUserIds', name: 'Assignees', type: 'user' },
   { id: 'reviewerUserId', name: 'Reviewer', type: 'user' },
   { id: 'watcherGroupIds', name: 'Watcher groups', type: 'link', property: { refKind: 'member-group' } },
@@ -243,6 +245,70 @@ describe('MetaAutomationRuleEditor', () => {
     expect(container.querySelectorAll('[data-condition-index]').length).toBe(0)
   })
 
+  it('filters condition operators by selected field type and resets incompatible choices', async () => {
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="add-condition"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
+    const [fieldSelect, operatorSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
+
+    fieldSelect.value = 'fld_2'
+    fieldSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    expect(Array.from(operatorSelect.options).map((option) => option.value)).toContain('contains')
+    expect(Array.from(operatorSelect.options).map((option) => option.value)).not.toContain('greater_than')
+
+    operatorSelect.value = 'contains'
+    operatorSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+    expect(operatorSelect.value).toBe('contains')
+
+    fieldSelect.value = 'fld_score'
+    fieldSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const numericOperatorValues = Array.from(operatorSelect.options).map((option) => option.value)
+    expect(numericOperatorValues).toContain('greater_than')
+    expect(numericOperatorValues).not.toContain('contains')
+    expect(operatorSelect.value).toBe('equals')
+  })
+
+  it('limits attachment field conditions to empty-state operators', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Files condition'
+    nameInput.dispatchEvent(new Event('input'))
+
+    ;(container.querySelector('[data-action="add-condition"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
+    const [fieldSelect, operatorSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
+    fieldSelect.value = 'fld_files'
+    fieldSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    expect(Array.from(operatorSelect.options).map((option) => option.value)).toEqual(['is_empty', 'is_not_empty'])
+    expect(operatorSelect.value).toBe('is_empty')
+    expect(conditionRow.querySelector('input')).toBeNull()
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].conditions).toEqual({
+      conjunction: 'AND',
+      conditions: [{ fieldId: 'fld_files', operator: 'is_empty' }],
+    })
+  })
+
   it('serializes list membership conditions as arrays', async () => {
     const saved = vi.fn()
     const { container } = mount({
@@ -261,9 +327,12 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
-    const [fieldSelect, operatorSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
+    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
     fieldSelect.value = 'fld_1'
     fieldSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const operatorSelect = Array.from(conditionRow.querySelectorAll('select'))[1] as HTMLSelectElement
     operatorSelect.value = 'in'
     operatorSelect.dispatchEvent(new Event('change'))
     await flushPromises()
