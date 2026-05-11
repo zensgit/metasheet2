@@ -30,7 +30,7 @@ $ sed -n '/^REQUIRED_PATHS=(/,/^)/p' scripts/ops/multitable-onprem-package-build
     done
 ```
 
-Result: **44/44 EXIST**, 0 `MISS`. The nine K3 additions all resolve on
+Result: **45/45 EXIST**, 0 `MISS`. The nine K3 additions all resolve on
 `origin/main` at this commit:
 
 ```
