@@ -1,7 +1,10 @@
 /**
- * Automation Condition Engine — V1
- * Simple condition evaluation for "if/then" logic on record data.
- * No nested groups for V1 — flat condition list with AND/OR logic.
+ * Automation Condition Engine
+ *
+ * Evaluates record predicates for "if/then" automation rules. The evaluator
+ * accepts both the older backend `logic: 'and' | 'or'` shape and the current
+ * frontend `conjunction: 'AND' | 'OR'` shape, then recurses through nested
+ * groups when API clients send them.
  */
 
 export type ConditionOperator =
@@ -11,6 +14,8 @@ export type ConditionOperator =
   | 'not_contains'
   | 'greater_than'
   | 'less_than'
+  | 'greater_or_equal'
+  | 'less_or_equal'
   | 'is_empty'
   | 'is_not_empty'
   | 'in'
@@ -22,9 +27,26 @@ export interface AutomationCondition {
   value?: unknown
 }
 
+export type AutomationConditionNode = AutomationCondition | ConditionGroup
+
 export interface ConditionGroup {
-  logic: 'and' | 'or'
-  conditions: AutomationCondition[]
+  logic?: 'and' | 'or'
+  conjunction?: 'AND' | 'OR' | 'and' | 'or'
+  conditions: AutomationConditionNode[]
+}
+
+function isConditionGroup(node: AutomationConditionNode): node is ConditionGroup {
+  return typeof (node as ConditionGroup).conditions !== 'undefined'
+}
+
+function resolveGroupLogic(conditionGroup: ConditionGroup): 'and' | 'or' {
+  const logic = conditionGroup.logic?.toLowerCase()
+  if (logic === 'and' || logic === 'or') return logic
+
+  const conjunction = conditionGroup.conjunction?.toLowerCase()
+  if (conjunction === 'and' || conjunction === 'or') return conjunction
+
+  return 'and'
 }
 
 /**
@@ -83,6 +105,26 @@ export function evaluateCondition(
       return false
     }
 
+    case 'greater_or_equal': {
+      if (typeof fieldValue === 'number' && typeof condition.value === 'number') {
+        return fieldValue >= condition.value
+      }
+      if (typeof fieldValue === 'string' && typeof condition.value === 'string') {
+        return fieldValue >= condition.value
+      }
+      return false
+    }
+
+    case 'less_or_equal': {
+      if (typeof fieldValue === 'number' && typeof condition.value === 'number') {
+        return fieldValue <= condition.value
+      }
+      if (typeof fieldValue === 'string' && typeof condition.value === 'string') {
+        return fieldValue <= condition.value
+      }
+      return false
+    }
+
     case 'is_empty':
       return fieldValue === null || fieldValue === undefined || fieldValue === ''
 
@@ -104,6 +146,15 @@ export function evaluateCondition(
   }
 }
 
+function evaluateConditionNode(
+  node: AutomationConditionNode,
+  recordData: Record<string, unknown>,
+): boolean {
+  return isConditionGroup(node)
+    ? evaluateConditions(node, recordData)
+    : evaluateCondition(node, recordData)
+}
+
 /**
  * Evaluate a condition group against record data.
  * AND: all conditions must pass.
@@ -113,16 +164,17 @@ export function evaluateConditions(
   conditionGroup: ConditionGroup,
   recordData: Record<string, unknown>,
 ): boolean {
-  const { logic, conditions } = conditionGroup
+  const { conditions } = conditionGroup
 
   if (!conditions || conditions.length === 0) {
     return true // no conditions means always pass
   }
 
+  const logic = resolveGroupLogic(conditionGroup)
   if (logic === 'and') {
-    return conditions.every((c) => evaluateCondition(c, recordData))
+    return conditions.every((c) => evaluateConditionNode(c, recordData))
   }
 
   // logic === 'or'
-  return conditions.some((c) => evaluateCondition(c, recordData))
+  return conditions.some((c) => evaluateConditionNode(c, recordData))
 }
