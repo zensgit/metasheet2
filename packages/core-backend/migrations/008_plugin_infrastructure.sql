@@ -24,6 +24,60 @@ CREATE TABLE IF NOT EXISTS plugin_registry (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Compatibility guard for databases that already ran the newer TypeScript
+-- plugin management migration before this legacy SQL migration was packaged.
+-- That migration created plugin_registry with jsonb capabilities/permissions,
+-- while this SQL migration's views and seed data expect text[] arrays.
+CREATE OR REPLACE FUNCTION __metasheet_plugin_jsonb_to_text_array(input JSONB)
+RETURNS TEXT[] AS $$
+  SELECT CASE
+    WHEN input IS NULL THEN ARRAY[]::TEXT[]
+    WHEN jsonb_typeof(input) = 'array' THEN ARRAY(SELECT jsonb_array_elements_text(input))
+    WHEN jsonb_typeof(input) = 'object' THEN ARRAY(SELECT jsonb_object_keys(input))
+    WHEN jsonb_typeof(input) = 'string' THEN ARRAY[input #>> '{}']
+    ELSE ARRAY[]::TEXT[]
+  END
+$$ LANGUAGE SQL IMMUTABLE;
+
+ALTER TABLE plugin_registry ADD COLUMN IF NOT EXISTS error TEXT;
+ALTER TABLE plugin_registry ADD COLUMN IF NOT EXISTS error_message TEXT;
+ALTER TABLE plugin_registry ADD COLUMN IF NOT EXISTS capabilities TEXT[] DEFAULT '{}'::TEXT[];
+ALTER TABLE plugin_registry ADD COLUMN IF NOT EXISTS permissions TEXT[] DEFAULT '{}'::TEXT[];
+DROP INDEX IF EXISTS idx_plugin_registry_capabilities;
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'plugin_registry'
+      AND column_name = 'capabilities'
+      AND udt_name = 'jsonb'
+  ) THEN
+    ALTER TABLE plugin_registry ALTER COLUMN capabilities DROP DEFAULT;
+    ALTER TABLE plugin_registry
+      ALTER COLUMN capabilities TYPE TEXT[]
+      USING __metasheet_plugin_jsonb_to_text_array(capabilities);
+    ALTER TABLE plugin_registry ALTER COLUMN capabilities SET DEFAULT '{}'::TEXT[];
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'plugin_registry'
+      AND column_name = 'permissions'
+      AND udt_name = 'jsonb'
+  ) THEN
+    ALTER TABLE plugin_registry ALTER COLUMN permissions DROP DEFAULT;
+    ALTER TABLE plugin_registry
+      ALTER COLUMN permissions TYPE TEXT[]
+      USING __metasheet_plugin_jsonb_to_text_array(permissions);
+    ALTER TABLE plugin_registry ALTER COLUMN permissions SET DEFAULT '{}'::TEXT[];
+  END IF;
+END $$;
+
+DROP FUNCTION IF EXISTS __metasheet_plugin_jsonb_to_text_array(JSONB);
+
 -- Plugin Key-Value Storage Table
 -- Provides persistent storage for plugin data
 CREATE TABLE IF NOT EXISTS plugin_kv (
@@ -64,6 +118,31 @@ CREATE TABLE IF NOT EXISTS plugin_configs (
     FOREIGN KEY (plugin_name) REFERENCES plugin_registry(name) ON DELETE CASCADE
 );
 
+-- Compatibility guard for older plugin_configs tables created by
+-- 20250924180000_create_plugin_management_tables.ts. Those tables stored one
+-- JSON config blob per plugin and did not have config_key/scope columns, so the
+-- partial indexes below failed on upgraded on-prem databases.
+ALTER TABLE plugin_configs ADD COLUMN IF NOT EXISTS config_key VARCHAR(255) NOT NULL DEFAULT 'default';
+ALTER TABLE plugin_configs ADD COLUMN IF NOT EXISTS value TEXT;
+ALTER TABLE plugin_configs ADD COLUMN IF NOT EXISTS encrypted BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE plugin_configs ADD COLUMN IF NOT EXISTS scope VARCHAR(50) NOT NULL DEFAULT 'global';
+ALTER TABLE plugin_configs ADD COLUMN IF NOT EXISTS user_id VARCHAR(255);
+ALTER TABLE plugin_configs ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(255);
+ALTER TABLE plugin_configs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE plugin_configs ADD COLUMN IF NOT EXISTS updated_by VARCHAR(255);
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'plugin_configs'
+      AND column_name = 'config'
+  ) THEN
+    EXECUTE 'UPDATE plugin_configs SET value = config::TEXT WHERE value IS NULL AND config IS NOT NULL';
+  END IF;
+END $$;
+
 -- Unique constraints using partial indexes for each scope
 -- Global scope: only plugin_name and config_key matter
 CREATE UNIQUE INDEX IF NOT EXISTS idx_plugin_configs_global
@@ -79,6 +158,12 @@ WHERE scope = 'user';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_plugin_configs_tenant
 ON plugin_configs (plugin_name, config_key, tenant_id)
 WHERE scope = 'tenant';
+
+-- Matches PluginConfigManager's ON CONFLICT target, including NULL-safe user
+-- and tenant identity. PostgreSQL supports expression unique indexes, while the
+-- earlier table-level UNIQUE attempt with COALESCE was invalid.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_plugin_configs_scoped_identity
+ON plugin_configs (plugin_name, config_key, scope, COALESCE(user_id, ''), COALESCE(tenant_id, ''));
 
 -- Plugin Capabilities Table
 -- Tracks capability registrations and implementations
@@ -174,6 +259,8 @@ CREATE TABLE IF NOT EXISTS plugin_cache (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE plugin_cache ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
 CREATE INDEX IF NOT EXISTS idx_plugin_cache_plugin_name ON plugin_cache(plugin_name);
 CREATE INDEX IF NOT EXISTS idx_plugin_cache_expires_at ON plugin_cache(expires_at);
@@ -273,6 +360,45 @@ CREATE TABLE IF NOT EXISTS plugin_security_audit (
     severity VARCHAR(50) NOT NULL DEFAULT 'info' CHECK (severity IN ('info', 'warning', 'error', 'critical')),
     timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Compatibility guard for older plugin_security_audit tables created by the
+-- TypeScript plugin management migration. The legacy table used event_type and
+-- resource columns; the SQL migration indexes operation/result below.
+ALTER TABLE plugin_security_audit ADD COLUMN IF NOT EXISTS operation VARCHAR(100);
+ALTER TABLE plugin_security_audit ADD COLUMN IF NOT EXISTS resource_type VARCHAR(100);
+ALTER TABLE plugin_security_audit ADD COLUMN IF NOT EXISTS resource_id VARCHAR(255);
+ALTER TABLE plugin_security_audit ADD COLUMN IF NOT EXISTS result VARCHAR(50);
+ALTER TABLE plugin_security_audit ADD COLUMN IF NOT EXISTS request_data JSONB DEFAULT '{}';
+ALTER TABLE plugin_security_audit ADD COLUMN IF NOT EXISTS response_data JSONB DEFAULT '{}';
+ALTER TABLE plugin_security_audit ADD COLUMN IF NOT EXISTS error_message TEXT;
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'plugin_security_audit'
+      AND column_name = 'event_type'
+  ) THEN
+    EXECUTE 'UPDATE plugin_security_audit SET operation = event_type WHERE operation IS NULL AND event_type IS NOT NULL';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_name = 'plugin_security_audit'
+      AND column_name = 'resource'
+  ) THEN
+    EXECUTE 'UPDATE plugin_security_audit SET resource_type = resource WHERE resource_type IS NULL AND resource IS NOT NULL';
+  END IF;
+END $$;
+
+UPDATE plugin_security_audit SET operation = COALESCE(operation, 'unknown');
+UPDATE plugin_security_audit SET result = COALESCE(result, 'allowed');
+ALTER TABLE plugin_security_audit ALTER COLUMN operation SET DEFAULT 'unknown';
+ALTER TABLE plugin_security_audit ALTER COLUMN operation SET NOT NULL;
+ALTER TABLE plugin_security_audit ALTER COLUMN result SET DEFAULT 'allowed';
+ALTER TABLE plugin_security_audit ALTER COLUMN result SET NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_plugin_security_audit_plugin_name ON plugin_security_audit(plugin_name);
 CREATE INDEX IF NOT EXISTS idx_plugin_security_audit_operation ON plugin_security_audit(operation);
