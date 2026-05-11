@@ -106,6 +106,7 @@ import {
   parseCreateRuleInput,
   parseDingTalkAutomationDeliveryLimit,
   parseUpdateRuleInput,
+  preflightAutomationConditionFields,
   preflightDingTalkAutomationCreate,
   preflightDingTalkAutomationUpdate,
   serializeAutomationRule,
@@ -7728,6 +7729,7 @@ export function univerMetaRouter(): Router {
 
       const parsed = parseCreateRuleInput(req.body as Record<string, unknown> | undefined, access.userId)
       const input = await preflightDingTalkAutomationCreate(pool.query.bind(pool), sheetId, parsed)
+      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions)
       const rule = await automationService.createRule(sheetId, input)
 
       return res.json({
@@ -7776,6 +7778,7 @@ export function univerMetaRouter(): Router {
       if (!input) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
       }
+      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions)
 
       const updated = await automationService.updateRule(ruleId, sheetId, input)
       if (!updated) {

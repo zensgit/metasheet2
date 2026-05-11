@@ -4,6 +4,7 @@ import {
   evaluateCondition,
   evaluateConditions,
   normalizeConditionGroupInput,
+  validateConditionGroupAgainstFields,
   type ConditionGroup,
 } from '../../src/multitable/automation-conditions'
 
@@ -138,5 +139,61 @@ describe('multitable automation conditions', () => {
       conjunction: 'AND',
       conditions: [{ fieldId: 'status', operator: 'in', value: 'Ready' }],
     })).toThrow('conditions.conditions[0].value must be an array for in')
+  })
+
+  it('validates condition operators and scalar values against field types', () => {
+    const fields = [
+      { id: 'status', type: 'string' },
+      { id: 'score', type: 'number' },
+      { id: 'done', type: 'boolean' },
+      { id: 'files', type: 'attachment' },
+    ]
+
+    expect(() => validateConditionGroupAgainstFields({
+      conjunction: 'AND',
+      conditions: [
+        { fieldId: 'status', operator: 'contains', value: 'Ready' },
+        { fieldId: 'score', operator: 'greater_or_equal', value: 3 },
+        { fieldId: 'done', operator: 'equals', value: false },
+        { fieldId: 'files', operator: 'is_not_empty' },
+      ],
+    }, fields)).not.toThrow()
+
+    expect(() => validateConditionGroupAgainstFields({
+      conjunction: 'AND',
+      conditions: [{ fieldId: 'score', operator: 'contains', value: '3' }],
+    }, fields)).toThrow('conditions.conditions[0].operator contains is not supported for field type number')
+
+    expect(() => validateConditionGroupAgainstFields({
+      conjunction: 'AND',
+      conditions: [{ fieldId: 'score', operator: 'greater_than', value: '3' }],
+    }, fields)).toThrow('conditions.conditions[0].value must be a number')
+
+    expect(() => validateConditionGroupAgainstFields({
+      conjunction: 'AND',
+      conditions: [{ fieldId: 'done', operator: 'equals', value: 'false' }],
+    }, fields)).toThrow('conditions.conditions[0].value must be a boolean')
+
+    expect(() => validateConditionGroupAgainstFields({
+      conjunction: 'AND',
+      conditions: [{ fieldId: 'files', operator: 'equals', value: 'file_1' }],
+    }, fields)).toThrow('conditions.conditions[0].operator equals is not supported for field type attachment')
+  })
+
+  it('reports unknown fields and nested validation paths', () => {
+    const fields = [{ id: 'score', type: 'number' }]
+
+    expect(() => validateConditionGroupAgainstFields({
+      conjunction: 'AND',
+      conditions: [{ fieldId: 'missing', operator: 'equals', value: 'x' }],
+    }, fields)).toThrow('conditions.conditions[0].fieldId does not exist on sheet: missing')
+
+    expect(() => validateConditionGroupAgainstFields({
+      conjunction: 'AND',
+      conditions: [{
+        conjunction: 'OR',
+        conditions: [{ fieldId: 'score', operator: 'in', value: [] }],
+      }],
+    }, fields)).toThrow('conditions.conditions[0].conditions[0].value must not be empty for in')
   })
 })
