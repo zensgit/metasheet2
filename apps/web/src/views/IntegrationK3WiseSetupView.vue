@@ -4,7 +4,7 @@
       <div>
         <p class="k3-setup__eyebrow">ERP Integration</p>
         <h1>K3 WISE 对接配置</h1>
-        <p class="k3-setup__lead">维护 WebAPI、账套、凭据和 SQL Server 通道信息。</p>
+        <p class="k3-setup__lead">先接通 K3 WISE，再把 PLM 数据放进多维表清洗，最后 dry-run 后推送 ERP。</p>
       </div>
       <div class="k3-setup__header-actions">
         <button class="k3-setup__btn" type="button" :disabled="loading" @click="loadSystems">
@@ -17,6 +17,25 @@
     </header>
 
     <p v-if="statusMessage" class="k3-setup__status" :data-kind="statusKind">{{ statusMessage }}</p>
+
+    <nav class="k3-setup__journey" aria-label="K3 WISE setup path">
+      <div class="k3-setup__journey-step">
+        <strong>1. 接通 K3</strong>
+        <span>填写地址和授权码</span>
+      </div>
+      <div class="k3-setup__journey-step">
+        <strong>2. 准备多维表</strong>
+        <span>安装 staging 表并清洗数据</span>
+      </div>
+      <div class="k3-setup__journey-step">
+        <strong>3. 创建链路</strong>
+        <span>生成物料和 BOM pipeline</span>
+      </div>
+      <div class="k3-setup__journey-step">
+        <strong>4. Dry-run 后推送</strong>
+        <span>先验证，再打开真实执行</span>
+      </div>
+    </nav>
 
     <section class="k3-setup__layout">
       <aside class="k3-setup__rail">
@@ -132,11 +151,11 @@
           <pre v-if="pipelineResult" class="k3-setup__test-result">{{ pipelineResult }}</pre>
         </div>
 
-        <div class="k3-setup__panel">
-          <div class="k3-setup__panel-head">
-            <h2>执行 Pipeline</h2>
-            <span>{{ form.allowLivePipelineRun ? 'run enabled' : 'dry-run first' }}</span>
-          </div>
+        <details class="k3-setup__panel k3-setup__collapsible-panel">
+          <summary class="k3-setup__panel-summary">
+            <span>执行 Pipeline</span>
+            <small>{{ form.allowLivePipelineRun ? 'run enabled' : 'dry-run first' }}</small>
+          </summary>
           <button
             class="k3-setup__btn k3-setup__btn--full"
             type="button"
@@ -175,13 +194,13 @@
             </li>
           </ul>
           <pre v-if="pipelineRunResult" class="k3-setup__test-result">{{ pipelineRunResult }}</pre>
-        </div>
+        </details>
 
-        <div class="k3-setup__panel">
-          <div class="k3-setup__panel-head">
-            <h2>运行观察</h2>
-            <span>{{ observationSummary }}</span>
-          </div>
+        <details class="k3-setup__panel k3-setup__collapsible-panel">
+          <summary class="k3-setup__panel-summary">
+            <span>运行观察</span>
+            <small>{{ observationSummary }}</small>
+          </summary>
           <button
             class="k3-setup__btn k3-setup__btn--full"
             type="button"
@@ -236,14 +255,14 @@
               </div>
             </template>
           </div>
-        </div>
+        </details>
       </aside>
 
       <form class="k3-setup__form" @submit.prevent="saveConfiguration">
-        <section class="k3-setup__section">
+        <section class="k3-setup__section k3-setup__section--primary">
           <div class="k3-setup__section-head">
-            <h2>作用域</h2>
-            <span>tenant / workspace</span>
+            <h2>基础连接</h2>
+            <span>首次部署只需先完成这些字段</span>
           </div>
           <div class="k3-setup__grid">
             <label class="k3-setup__field">
@@ -254,17 +273,8 @@
               <span>Workspace ID</span>
               <input v-model.trim="form.workspaceId" autocomplete="off" />
             </label>
-          </div>
-        </section>
-
-        <section class="k3-setup__section">
-          <div class="k3-setup__section-head">
-            <h2>K3 WISE WebAPI</h2>
-            <span>{{ form.webApiSystemId ? '编辑现有系统' : '新建系统' }}</span>
-          </div>
-          <div class="k3-setup__grid">
             <label class="k3-setup__field">
-              <span>名称</span>
+              <span>系统名称</span>
               <input v-model.trim="form.webApiName" autocomplete="off" />
             </label>
             <label class="k3-setup__field">
@@ -292,6 +302,35 @@
                 <option value="login">账套登录</option>
               </select>
             </label>
+            <label v-if="form.webApiAuthMode === 'authority-code'" class="k3-setup__field k3-setup__field--wide">
+              <span>授权码</span>
+              <input v-model="form.authorityCode" type="password" autocomplete="new-password" />
+              <small>只用于保存凭据，不会回显。</small>
+            </label>
+            <label v-if="form.webApiAuthMode === 'login'" class="k3-setup__field">
+              <span>Acct ID</span>
+              <input v-model.trim="form.acctId" autocomplete="off" />
+            </label>
+            <label v-if="form.webApiAuthMode === 'login'" class="k3-setup__field">
+              <span>用户名</span>
+              <input v-model.trim="form.username" autocomplete="off" />
+            </label>
+            <label v-if="form.webApiAuthMode === 'login'" class="k3-setup__field">
+              <span>密码</span>
+              <input v-model="form.password" type="password" autocomplete="new-password" />
+            </label>
+            <p v-if="form.webApiHasCredentials" class="k3-setup__field-note k3-setup__field-note--wide">
+              已保存凭据会保留；留空不会清除旧凭据。
+            </p>
+          </div>
+        </section>
+
+        <details class="k3-setup__section k3-setup__details">
+          <summary class="k3-setup__section-summary">
+            <span>高级 WebAPI 设置</span>
+            <small>路径、语言、超时和 Submit/Audit 策略；默认值通常可直接使用</small>
+          </summary>
+          <div class="k3-setup__grid">
             <label v-if="form.webApiAuthMode === 'authority-code'" class="k3-setup__field">
               <span>Token Path</span>
               <input v-model.trim="form.tokenPath" autocomplete="off" />
@@ -312,31 +351,6 @@
               <span>Timeout ms</span>
               <input v-model.trim="form.timeoutMs" inputmode="numeric" autocomplete="off" />
             </label>
-          </div>
-        </section>
-
-        <section class="k3-setup__section">
-          <div class="k3-setup__section-head">
-            <h2>WebAPI 凭据</h2>
-            <span>{{ form.webApiHasCredentials ? '已有凭据，留空则保留' : '需要填写' }}</span>
-          </div>
-          <div class="k3-setup__grid">
-            <label v-if="form.webApiAuthMode === 'authority-code'" class="k3-setup__field k3-setup__field--wide">
-              <span>授权码</span>
-              <input v-model="form.authorityCode" type="password" autocomplete="new-password" />
-            </label>
-            <label v-if="form.webApiAuthMode === 'login'" class="k3-setup__field">
-              <span>Acct ID</span>
-              <input v-model.trim="form.acctId" autocomplete="off" />
-            </label>
-            <label v-if="form.webApiAuthMode === 'login'" class="k3-setup__field">
-              <span>用户名</span>
-              <input v-model.trim="form.username" autocomplete="off" />
-            </label>
-            <label v-if="form.webApiAuthMode === 'login'" class="k3-setup__field">
-              <span>密码</span>
-              <input v-model="form.password" type="password" autocomplete="new-password" />
-            </label>
             <label class="k3-setup__check">
               <input v-model="form.autoSubmit" type="checkbox" />
               <span>Save 后自动 Submit</span>
@@ -345,15 +359,6 @@
               <input v-model="form.autoAudit" type="checkbox" />
               <span>Submit 后自动 Audit</span>
             </label>
-          </div>
-        </section>
-
-        <section class="k3-setup__section">
-          <div class="k3-setup__section-head">
-            <h2>物料 / BOM 接口</h2>
-            <span>relative paths</span>
-          </div>
-          <div class="k3-setup__grid">
             <label class="k3-setup__field">
               <span>Material Save</span>
               <input v-model.trim="form.materialSavePath" autocomplete="off" />
@@ -379,11 +384,14 @@
               <input v-model.trim="form.bomAuditPath" autocomplete="off" />
             </label>
           </div>
-        </section>
+        </details>
 
-        <section class="k3-setup__section">
-          <div class="k3-setup__section-head">
-            <h2>SQL Server 通道</h2>
+        <details class="k3-setup__section k3-setup__details">
+          <summary class="k3-setup__section-summary">
+            <span>SQL Server 通道</span>
+            <small>默认关闭；需要读取 K3 表或写中间表时再启用</small>
+          </summary>
+          <div class="k3-setup__details-toolbar">
             <label class="k3-setup__switch">
               <input v-model="form.sqlEnabled" type="checkbox" />
               <span>{{ form.sqlEnabled ? '启用' : '关闭' }}</span>
@@ -431,7 +439,7 @@
               <textarea v-model="form.sqlStoredProcedures" rows="4" spellcheck="false" />
             </label>
           </div>
-        </section>
+        </details>
 
         <section v-if="validationIssues.length" class="k3-setup__section k3-setup__section--issues">
           <div class="k3-setup__section-head">
@@ -445,10 +453,10 @@
           </ul>
         </section>
 
-        <section class="k3-setup__section">
+        <section class="k3-setup__section k3-setup__section--primary">
           <div class="k3-setup__section-head">
-            <h2>PLM → K3 清洗链路</h2>
-            <span>multitable staging + pipeline runner</span>
+            <h2>多维表清洗准备</h2>
+            <span>PLM 数据先进入 staging 多维表</span>
           </div>
           <div class="k3-setup__grid">
             <label class="k3-setup__field">
@@ -472,10 +480,6 @@
               <input v-model.trim="form.materialPipelineName" autocomplete="off" />
             </label>
             <label class="k3-setup__field">
-              <span>物料 Pipeline ID</span>
-              <input v-model.trim="form.materialPipelineId" autocomplete="off" />
-            </label>
-            <label class="k3-setup__field">
               <span>物料 Staging 对象</span>
               <select v-if="stagingDescriptors.length" v-model="form.materialStagingObjectId">
                 <option v-for="descriptor in stagingDescriptors" :key="`material:${descriptor.id}`" :value="descriptor.id">
@@ -489,10 +493,6 @@
               <input v-model.trim="form.bomPipelineName" autocomplete="off" />
             </label>
             <label class="k3-setup__field">
-              <span>BOM Pipeline ID</span>
-              <input v-model.trim="form.bomPipelineId" autocomplete="off" />
-            </label>
-            <label class="k3-setup__field">
               <span>BOM Staging 对象</span>
               <select v-if="stagingDescriptors.length" v-model="form.bomStagingObjectId">
                 <option v-for="descriptor in stagingDescriptors" :key="`bom:${descriptor.id}`" :value="descriptor.id">
@@ -500,6 +500,23 @@
                 </option>
               </select>
               <input v-else v-model.trim="form.bomStagingObjectId" autocomplete="off" />
+            </label>
+          </div>
+        </section>
+
+        <details class="k3-setup__section k3-setup__details">
+          <summary class="k3-setup__section-summary">
+            <span>Pipeline 执行参数</span>
+            <small>创建 pipeline 后会回填 ID；真实执行默认关闭</small>
+          </summary>
+          <div class="k3-setup__grid">
+            <label class="k3-setup__field">
+              <span>物料 Pipeline ID</span>
+              <input v-model.trim="form.materialPipelineId" autocomplete="off" />
+            </label>
+            <label class="k3-setup__field">
+              <span>BOM Pipeline ID</span>
+              <input v-model.trim="form.bomPipelineId" autocomplete="off" />
             </label>
             <label class="k3-setup__field">
               <span>执行模式</span>
@@ -522,7 +539,7 @@
               <span>允许真实执行 Pipeline</span>
             </label>
           </div>
-        </section>
+        </details>
       </form>
     </section>
   </section>
@@ -886,6 +903,38 @@ onMounted(() => {
   justify-content: flex-end;
 }
 
+.k3-setup__journey {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.k3-setup__journey-step {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #d9e1ec;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.k3-setup__journey-step strong,
+.k3-setup__journey-step span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.k3-setup__journey-step strong {
+  color: #111827;
+  font-size: 14px;
+}
+
+.k3-setup__journey-step span {
+  margin-top: 4px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .k3-setup__layout {
   display: grid;
   grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
@@ -906,6 +955,93 @@ onMounted(() => {
   border: 1px solid #d9e1ec;
   border-radius: 8px;
   background: #fff;
+}
+
+.k3-setup__section--primary {
+  border-color: #99f6e4;
+}
+
+.k3-setup__details[open] {
+  border-color: #cbd5e1;
+}
+
+.k3-setup__collapsible-panel {
+  padding: 0;
+}
+
+.k3-setup__collapsible-panel[open] {
+  padding: 0 16px 16px;
+}
+
+.k3-setup__panel-summary,
+.k3-setup__section-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  cursor: pointer;
+  list-style: none;
+}
+
+.k3-setup__panel-summary {
+  padding: 16px;
+}
+
+.k3-setup__collapsible-panel[open] .k3-setup__panel-summary {
+  margin: 0 -16px 14px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.k3-setup__section-summary {
+  margin: -2px 0 0;
+}
+
+.k3-setup__details[open] .k3-setup__section-summary {
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.k3-setup__panel-summary::-webkit-details-marker,
+.k3-setup__section-summary::-webkit-details-marker {
+  display: none;
+}
+
+.k3-setup__panel-summary::after,
+.k3-setup__section-summary::after {
+  content: '+';
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  color: #334155;
+  font-weight: 700;
+}
+
+.k3-setup__collapsible-panel[open] .k3-setup__panel-summary::after,
+.k3-setup__details[open] .k3-setup__section-summary::after {
+  content: '-';
+}
+
+.k3-setup__panel-summary span,
+.k3-setup__section-summary span {
+  color: #111827;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.k3-setup__panel-summary small,
+.k3-setup__section-summary small {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.k3-setup__details-toolbar {
+  margin-bottom: 12px;
 }
 
 .k3-setup__panel-head,
@@ -956,6 +1092,21 @@ onMounted(() => {
   color: #334155;
   font-size: 13px;
   font-weight: 600;
+}
+
+.k3-setup__field small,
+.k3-setup__field-note {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.k3-setup__field-note {
+  margin: 0;
+}
+
+.k3-setup__field-note--wide {
+  grid-column: 1 / -1;
 }
 
 .k3-setup__field input,
@@ -1240,6 +1391,10 @@ onMounted(() => {
     grid-template-columns: 1fr;
   }
 
+  .k3-setup__journey {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .k3-setup__rail {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1258,6 +1413,10 @@ onMounted(() => {
   .k3-setup__header-actions,
   .k3-setup__rail {
     display: flex;
+  }
+
+  .k3-setup__journey {
+    grid-template-columns: 1fr;
   }
 
   .k3-setup__grid {
