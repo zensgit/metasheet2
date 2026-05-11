@@ -543,7 +543,7 @@ export class AutomationExecutor {
     }
 
     // Evaluate conditions
-    if (rule.conditions && rule.conditions.conditions.length > 0) {
+    if (rule.conditions) {
       const conditionsPassed = evaluateConditions(rule.conditions, context.recordData)
       if (!conditionsPassed) {
         execution.status = 'skipped'
