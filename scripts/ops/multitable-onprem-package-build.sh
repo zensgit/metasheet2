@@ -49,6 +49,23 @@ REQUIRED_PATHS=(
   "scripts/ops/multitable-onprem-package-install.sh"
   "scripts/ops/multitable-onprem-package-upgrade.sh"
   "scripts/ops/multitable-onprem-healthcheck.sh"
+  # K3 WISE PoC operator tooling — preflight (C1/C2), live PoC packet builder
+  # (C3), evidence compiler (C10), postdeploy smoke + summary, mock fixtures,
+  # and the three K3 operator runbooks. Note: run-mock-poc-demo.mjs inside the
+  # fixtures dir needs plugins/plugin-integration-core (not shipped in this
+  # package) to actually execute; it is bundled only so the preflight's
+  # fixtures.k3wise-mock file-existence check passes. The live PoC sequence
+  # (C2 onward) is the operator's workflow on a customer box and does not need
+  # the mock chain.
+  "scripts/ops/integration-k3wise-onprem-preflight.mjs"
+  "scripts/ops/integration-k3wise-live-poc-preflight.mjs"
+  "scripts/ops/integration-k3wise-live-poc-evidence.mjs"
+  "scripts/ops/integration-k3wise-postdeploy-smoke.mjs"
+  "scripts/ops/integration-k3wise-postdeploy-summary.mjs"
+  "scripts/ops/fixtures/integration-k3wise"
+  "docs/operations/k3-poc-onprem-preflight-runbook.md"
+  "docs/operations/integration-k3wise-internal-trial-runbook.md"
+  "docs/operations/integration-k3wise-live-gate-execution-package.md"
   "docker/app.env.example"
   "docker/app.env.multitable-onprem.template"
   "ops/nginx/multitable-onprem.conf.example"
@@ -242,6 +259,19 @@ Server-side apply helpers:
   deploy-${PACKAGE_RUN_LABEL}.bat <package.zip|package.tgz>
   bootstrap-admin.bat <admin-email> <admin-password> [admin-name]
   bootstrap-admin-${PACKAGE_RUN_LABEL}.bat <admin-email> <admin-password> [admin-name]
+
+K3 WISE PoC operator tools (Node only; no Docker needed to run these):
+  node scripts/ops/integration-k3wise-onprem-preflight.mjs --mock --out-dir <art>
+    -> deployment readiness preflight (env / Postgres / migrations / fixtures).
+       Add --live --gate-file <gate.json> once the customer GATE answers arrive.
+  node scripts/ops/integration-k3wise-live-poc-preflight.mjs --input <gate.json> --out-dir <packet-dir>
+    -> builds the Save-only live PoC packet from the GATE answer JSON.
+  node scripts/ops/integration-k3wise-live-poc-evidence.mjs --packet <packet.json> --evidence <evidence.json>
+    -> compiles the live PoC evidence into a PASS / PARTIAL / FAIL signoff.
+  Runbooks:
+    docs/operations/k3-poc-onprem-preflight-runbook.md           (per-check fix recipes)
+    docs/operations/integration-k3wise-internal-trial-runbook.md  (post-deploy auth smoke)
+    docs/operations/integration-k3wise-live-gate-execution-package.md (C0-C10 sequence + customer GATE fields)
 EOF
 
 run rm -f "$ARCHIVE_TGZ_TMP_PATH" "$ARCHIVE_ZIP_TMP_PATH" "$ARCHIVE_TGZ_SHA_TMP_PATH" "$ARCHIVE_ZIP_SHA_TMP_PATH" "$METADATA_JSON_TMP_PATH"
