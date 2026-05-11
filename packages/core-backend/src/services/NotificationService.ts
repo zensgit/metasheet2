@@ -4,6 +4,7 @@
  */
 
 import { EventEmitter } from 'eventemitter3'
+import nodemailer from 'nodemailer'
 import type {
   NotificationService,
   Notification,
@@ -28,7 +29,9 @@ import {
   validateDingTalkRobotResponse,
 } from '../integrations/dingtalk/robot'
 import {
+  redactEmailTransportText,
   resolveEmailTransportReadiness,
+  resolveEmailSmtpTransportConfig,
   type EmailTransportEnv,
   type EmailTransportReadinessReport,
 } from './email-transport-readiness'
@@ -41,6 +44,34 @@ interface EmailPayload {
   subject: string
   content: string
   metadata?: Record<string, unknown>
+}
+
+interface EmailSmtpTransportOptions {
+  host: string
+  port: number
+  secure: boolean
+  auth: {
+    user: string
+    pass: string
+  }
+  connectionTimeout: number
+  greetingTimeout: number
+}
+
+interface EmailSmtpSendMailOptions {
+  from: string
+  to: string
+  subject: string
+  text: string
+  headers?: Record<string, string>
+}
+
+interface EmailSmtpTransport {
+  sendMail(options: EmailSmtpSendMailOptions): Promise<unknown>
+}
+
+interface EmailSmtpTransportFactory {
+  createTransport(options: EmailSmtpTransportOptions): EmailSmtpTransport
 }
 
 /**
@@ -165,11 +196,16 @@ export class EmailNotificationChannel implements NotificationChannel {
   config: NotificationChannelConfig
   private logger: Logger
   private readiness: EmailTransportReadinessReport
+  private env: EmailTransportEnv
+  private smtpTransportFactory: EmailSmtpTransportFactory
+  private smtpTransport: EmailSmtpTransport | null = null
 
   constructor(config: NotificationChannelConfig) {
     this.config = config
     this.logger = new Logger('EmailChannel')
-    this.readiness = resolveEmailTransportReadiness(resolveEmailTransportEnv(config))
+    this.env = resolveEmailTransportEnv(config)
+    this.readiness = resolveEmailTransportReadiness(this.env)
+    this.smtpTransportFactory = resolveEmailSmtpTransportFactory(config)
   }
 
   async sender(notification: Notification, recipients: NotificationRecipient[]): Promise<NotificationResult> {
@@ -198,11 +234,15 @@ export class EmailNotificationChannel implements NotificationChannel {
         }
       }
     } catch (error) {
-      this.logger.error('Failed to send email notification', error as Error)
+      const failedReason = redactEmailTransportText(
+        error instanceof Error ? error.message : String(error),
+        this.env,
+      )
+      this.logger.error('Failed to send email notification', new Error(failedReason))
       return {
         id,
         status: 'failed',
-        failedReason: (error as Error).message,
+        failedReason,
         metadata: {
           channel: 'email'
         }
@@ -215,7 +255,8 @@ export class EmailNotificationChannel implements NotificationChannel {
       if (!this.readiness.ok) {
         throw new Error(`SMTP email transport blocked: ${this.readiness.messages.join(' ')}`)
       }
-      throw new Error('SMTP email transport is configured but not implemented in this build')
+      await this.sendSmtpEmail(params)
+      return
     }
     if (this.readiness.mode === 'unsupported') {
       throw new Error(`Email transport configuration is unsupported: ${this.readiness.messages.join(' ')}`)
@@ -230,6 +271,33 @@ export class EmailNotificationChannel implements NotificationChannel {
     // 模拟异步发送
     await new Promise(resolve => setTimeout(resolve, 100))
   }
+
+  private async sendSmtpEmail(params: EmailPayload): Promise<void> {
+    const smtpConfig = resolveEmailSmtpTransportConfig(this.env)
+    const transport = this.smtpTransport ?? this.smtpTransportFactory.createTransport({
+      host: smtpConfig.host,
+      port: smtpConfig.port,
+      secure: smtpConfig.secure,
+      auth: {
+        user: smtpConfig.authUser,
+        pass: smtpConfig.authPass,
+      },
+      connectionTimeout: smtpConfig.connectionTimeoutMs,
+      greetingTimeout: smtpConfig.greetingTimeoutMs,
+    })
+    this.smtpTransport = transport
+
+    await transport.sendMail({
+      from: smtpConfig.from,
+      to: params.to,
+      subject: params.subject,
+      text: params.content,
+      headers: {
+        'X-MetaSheet-Notification-Channel': 'email',
+        'X-MetaSheet-Notification-Source': 'automation',
+      },
+    })
+  }
 }
 
 function resolveEmailTransportEnv(config: NotificationChannelConfig): EmailTransportEnv {
@@ -241,6 +309,24 @@ function resolveEmailTransportEnv(config: NotificationChannelConfig): EmailTrans
     if (typeof value === 'string') env[key] = value
   }
   return env
+}
+
+function resolveEmailSmtpTransportFactory(config: NotificationChannelConfig): EmailSmtpTransportFactory {
+  const candidate = config.smtpTransportFactory
+  if (
+    candidate &&
+    typeof candidate === 'object' &&
+    !Array.isArray(candidate) &&
+    typeof (candidate as { createTransport?: unknown }).createTransport === 'function'
+  ) {
+    return candidate as EmailSmtpTransportFactory
+  }
+
+  return {
+    createTransport(options) {
+      return nodemailer.createTransport(options) as EmailSmtpTransport
+    },
+  }
 }
 
 /**

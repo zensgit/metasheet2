@@ -1,6 +1,9 @@
 export const EMAIL_TRANSPORT_ENV = 'MULTITABLE_EMAIL_TRANSPORT'
 export const EMAIL_REAL_SEND_SMOKE_ENV = 'MULTITABLE_EMAIL_REAL_SEND_SMOKE'
 export const EMAIL_CONFIRM_SEND_ENV = 'CONFIRM_SEND_EMAIL'
+export const EMAIL_SMTP_SECURE_ENV = 'MULTITABLE_EMAIL_SMTP_SECURE'
+export const EMAIL_SMTP_CONNECTION_TIMEOUT_ENV = 'MULTITABLE_EMAIL_SMTP_CONNECTION_TIMEOUT_MS'
+export const EMAIL_SMTP_GREETING_TIMEOUT_ENV = 'MULTITABLE_EMAIL_SMTP_GREETING_TIMEOUT_MS'
 
 export const EMAIL_SMTP_REQUIRED_ENV = [
   'MULTITABLE_EMAIL_SMTP_HOST',
@@ -27,10 +30,22 @@ export interface EmailTransportReadinessReport {
   realSendRequested: boolean
   confirmSend: boolean
   requiredEnv: EmailTransportEnvStatus[]
+  optionalEnv: EmailTransportEnvStatus[]
   messages: string[]
 }
 
 export type EmailTransportEnv = Record<string, string | undefined>
+
+export interface EmailSmtpTransportConfig {
+  host: string
+  port: number
+  secure: boolean
+  authUser: string
+  authPass: string
+  from: string
+  connectionTimeoutMs: number
+  greetingTimeoutMs: number
+}
 
 function envString(env: EmailTransportEnv, name: string): string {
   const value = env[name]
@@ -39,6 +54,10 @@ function envString(env: EmailTransportEnv, name: string): string {
 
 function isTruthyEnv(value: string): boolean {
   return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase())
+}
+
+function isExplicitFalseEnv(value: string): boolean {
+  return ['0', 'false', 'no', 'off'].includes(value.trim().toLowerCase())
 }
 
 function resolveMode(value: string): EmailTransportMode {
@@ -58,7 +77,29 @@ export function redactEmailTransportValue(name: string, value: string): string {
   }
   if (upper.endsWith('_PORT') && /^\d+$/.test(value)) return value
   if (upper.endsWith('_SECURE')) return isTruthyEnv(value) ? 'true' : 'false'
+  if (upper.endsWith('_TIMEOUT_MS')) return /^\d+$/.test(value) ? value : '<set>'
   return '<set>'
+}
+
+export function redactEmailTransportText(
+  value: string,
+  env: EmailTransportEnv = process.env,
+): string {
+  let redacted = value
+  for (const name of [
+    'MULTITABLE_EMAIL_SMTP_HOST',
+    'MULTITABLE_EMAIL_SMTP_USER',
+    'MULTITABLE_EMAIL_SMTP_PASSWORD',
+    'MULTITABLE_EMAIL_SMTP_FROM',
+  ]) {
+    const raw = envString(env, name)
+    if (raw) redacted = redacted.split(raw).join('<redacted>')
+  }
+  return redacted
+    .replace(/smtps?:\/\/[^@\s]+@/gi, 'smtp://<redacted>@')
+    .replace(/([?&](?:token|access_token|password|pass|secret)=)[^&\s]+/gi, '$1<redacted>')
+    .replace(/Bearer\s+[A-Za-z0-9._-]{8,}/gi, 'Bearer <redacted>')
+    .replace(/eyJ[A-Za-z0-9._-]{20,}/g, '<jwt-redacted>')
 }
 
 function envStatus(env: EmailTransportEnv, name: string): EmailTransportEnvStatus {
@@ -80,7 +121,17 @@ export function resolveEmailTransportReadiness(
   const requiredEnv = mode === 'smtp'
     ? EMAIL_SMTP_REQUIRED_ENV.map((name) => envStatus(env, name))
     : []
+  const optionalEnv = mode === 'smtp'
+    ? [
+      EMAIL_SMTP_SECURE_ENV,
+      EMAIL_SMTP_CONNECTION_TIMEOUT_ENV,
+      EMAIL_SMTP_GREETING_TIMEOUT_ENV,
+    ].map((name) => envStatus(env, name))
+    : []
   const missing = requiredEnv.filter((item) => !item.present).map((item) => item.name)
+  const validationErrors = mode === 'smtp'
+    ? validateSmtpTransportConfig(env)
+    : []
   const messages: string[] = []
 
   if (mode === 'unsupported') {
@@ -90,6 +141,8 @@ export function resolveEmailTransportReadiness(
   } else {
     if (missing.length > 0) {
       messages.push(`SMTP transport is enabled but missing required env: ${missing.join(', ')}.`)
+    } else if (validationErrors.length > 0) {
+      messages.push(...validationErrors)
     } else {
       messages.push('SMTP transport env is present; readiness check does not send email.')
     }
@@ -99,7 +152,7 @@ export function resolveEmailTransportReadiness(
     messages.push(`${EMAIL_REAL_SEND_SMOKE_ENV}=1 requires ${EMAIL_CONFIRM_SEND_ENV}=1.`)
   }
 
-  const blocked = mode === 'unsupported' || missing.length > 0 || (realSendRequested && !confirmSend)
+  const blocked = mode === 'unsupported' || missing.length > 0 || validationErrors.length > 0 || (realSendRequested && !confirmSend)
 
   return {
     ok: !blocked,
@@ -109,6 +162,7 @@ export function resolveEmailTransportReadiness(
     realSendRequested,
     confirmSend,
     requiredEnv,
+    optionalEnv,
     messages,
   }
 }
@@ -136,7 +190,7 @@ export function renderEmailTransportReadinessMarkdown(report: EmailTransportRead
   ]
 
   if (report.requiredEnv.length > 0) {
-    lines.push(...report.requiredEnv.map((item) =>
+    lines.push(...[...report.requiredEnv, ...report.optionalEnv].map((item) =>
       `| ${item.name} | ${item.present ? 'yes' : 'no'} | \`${item.value}\` |`,
     ))
   }
@@ -150,4 +204,79 @@ export function renderEmailTransportReadinessMarkdown(report: EmailTransportRead
   )
 
   return `${lines.join('\n')}\n`
+}
+
+export function resolveEmailSmtpTransportConfig(
+  env: EmailTransportEnv = process.env,
+): EmailSmtpTransportConfig {
+  const readiness = resolveEmailTransportReadiness(env)
+  if (readiness.mode !== 'smtp') {
+    throw new Error('SMTP email transport is not enabled')
+  }
+  if (!readiness.ok) {
+    throw new Error(`SMTP email transport blocked: ${readiness.messages.join(' ')}`)
+  }
+
+  const port = parsePort(envString(env, 'MULTITABLE_EMAIL_SMTP_PORT'))
+  const secureRaw = envString(env, EMAIL_SMTP_SECURE_ENV)
+  const secure = secureRaw
+    ? isTruthyEnv(secureRaw)
+    : port === 465
+
+  return {
+    host: envString(env, 'MULTITABLE_EMAIL_SMTP_HOST'),
+    port,
+    secure,
+    authUser: envString(env, 'MULTITABLE_EMAIL_SMTP_USER'),
+    authPass: envString(env, 'MULTITABLE_EMAIL_SMTP_PASSWORD'),
+    from: envString(env, 'MULTITABLE_EMAIL_SMTP_FROM'),
+    connectionTimeoutMs: parseOptionalTimeout(envString(env, EMAIL_SMTP_CONNECTION_TIMEOUT_ENV), 10_000),
+    greetingTimeoutMs: parseOptionalTimeout(envString(env, EMAIL_SMTP_GREETING_TIMEOUT_ENV), 10_000),
+  }
+}
+
+function validateSmtpTransportConfig(env: EmailTransportEnv): string[] {
+  const errors: string[] = []
+  const portRaw = envString(env, 'MULTITABLE_EMAIL_SMTP_PORT')
+  if (portRaw && !isValidPort(portRaw)) {
+    errors.push('MULTITABLE_EMAIL_SMTP_PORT must be an integer between 1 and 65535.')
+  }
+  const secureRaw = envString(env, EMAIL_SMTP_SECURE_ENV)
+  if (secureRaw && !isTruthyEnv(secureRaw) && !isExplicitFalseEnv(secureRaw)) {
+    errors.push(`${EMAIL_SMTP_SECURE_ENV} must be a boolean-like value.`)
+  }
+  for (const name of [EMAIL_SMTP_CONNECTION_TIMEOUT_ENV, EMAIL_SMTP_GREETING_TIMEOUT_ENV]) {
+    const raw = envString(env, name)
+    if (raw && !isValidTimeout(raw)) {
+      errors.push(`${name} must be an integer between 1000 and 60000.`)
+    }
+  }
+  return errors
+}
+
+function isValidPort(value: string): boolean {
+  const port = Number(value)
+  return Number.isInteger(port) && port >= 1 && port <= 65535
+}
+
+function parsePort(value: string): number {
+  const port = Number(value)
+  if (!isValidPort(value)) {
+    throw new Error('MULTITABLE_EMAIL_SMTP_PORT must be an integer between 1 and 65535.')
+  }
+  return port
+}
+
+function isValidTimeout(value: string): boolean {
+  const timeout = Number(value)
+  return Number.isInteger(timeout) && timeout >= 1_000 && timeout <= 60_000
+}
+
+function parseOptionalTimeout(value: string, fallback: number): number {
+  if (!value) return fallback
+  const timeout = Number(value)
+  if (!isValidTimeout(value)) {
+    throw new Error('SMTP timeout must be an integer between 1000 and 60000.')
+  }
+  return timeout
 }
