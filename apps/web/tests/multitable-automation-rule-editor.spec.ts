@@ -6,7 +6,7 @@ function flushPromises() {
 }
 
 import MetaAutomationRuleEditor from '../src/multitable/components/MetaAutomationRuleEditor.vue'
-import type { AutomationRule } from '../src/multitable/types'
+import type { AutomationRule, ConditionGroup } from '../src/multitable/types'
 
 const fields = [
   { id: 'fld_1', name: 'Status', type: 'select' },
@@ -241,6 +241,93 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     expect(container.querySelectorAll('[data-condition-index]').length).toBe(0)
+  })
+
+  it('serializes list membership conditions as arrays', async () => {
+    const saved = vi.fn()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      onSave: saved,
+    })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'List condition'
+    nameInput.dispatchEvent(new Event('input'))
+
+    ;(container.querySelector('[data-action="add-condition"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
+    const [fieldSelect, operatorSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
+    fieldSelect.value = 'fld_1'
+    fieldSelect.dispatchEvent(new Event('change'))
+    operatorSelect.value = 'in'
+    operatorSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(true)
+
+    const valueInput = conditionRow.querySelector('input') as HTMLInputElement
+    valueInput.value = 'Ready, Blocked'
+    valueInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].conditions).toEqual({
+      conjunction: 'AND',
+      conditions: [{ fieldId: 'fld_1', operator: 'in', value: ['Ready', 'Blocked'] }],
+    })
+  })
+
+  it('preserves nested condition groups while editing other rule fields', async () => {
+    const saved = vi.fn()
+    const nestedConditions: ConditionGroup = {
+      logic: 'or',
+      conditions: [
+        { fieldId: 'fld_1', operator: 'equals', value: 'Ready' },
+        {
+          logic: 'and',
+          conditions: [
+            { fieldId: 'fld_2', operator: 'contains', value: 'VIP' },
+            { fieldId: 'assigneeUserIds', operator: 'in', value: ['user_1', 'user_2'] },
+          ],
+        },
+      ],
+    }
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      rule: fakeRule({ conditions: nestedConditions }),
+      onSave: saved,
+    })
+    await flushPromises()
+
+    expect(container.querySelector('[data-field="nestedConditionNotice"]')?.textContent)
+      .toContain('Nested condition groups are preserved')
+    expect(container.querySelectorAll('[data-condition-index]').length).toBe(1)
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Preserve nested'
+    nameInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].conditions).toEqual({
+      conjunction: 'OR',
+      conditions: nestedConditions.conditions,
+    })
   })
 
   it('can add actions up to max 3', async () => {
