@@ -6,6 +6,8 @@ import { matchesTrigger, TRIGGER_TYPE_BY_EVENT, type AutomationTriggerType } fro
 import {
   ConditionGroupValidationError,
   normalizeConditionGroupInput,
+  validateConditionGroupAgainstFields,
+  type AutomationConditionField,
   type ConditionGroup,
 } from './automation-conditions'
 import { AutomationExecutor, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps } from './automation-executor'
@@ -144,6 +146,18 @@ export type AutomationEventPayload = {
   actorId?: string | null
   _automationDepth?: number
   _triggeredBy?: string
+}
+
+function serializeAutomationConditionFieldRows(rows: unknown[]): AutomationConditionField[] {
+  return rows
+    .map((row) => {
+      if (!row || typeof row !== 'object') return null
+      const record = row as Record<string, unknown>
+      const id = typeof record.id === 'string' ? record.id : ''
+      const type = typeof record.type === 'string' ? record.type : ''
+      return id && type ? { id, type } : null
+    })
+    .filter((field): field is AutomationConditionField => !!field)
 }
 
 /** Input for creating a rule */
@@ -911,6 +925,36 @@ export async function preflightDingTalkAutomationCreate(
   if (linkErr) throw new AutomationRuleValidationError(linkErr)
 
   return { ...input, actionConfig, actions }
+}
+
+/**
+ * Validate automation conditions against the sheet's current fields. The
+ * route parser only validates JSON shape; this preflight closes the API gap
+ * where direct clients could persist unknown fields, unsupported operators, or
+ * frontend-incompatible scalar value types.
+ */
+export async function preflightAutomationConditionFields(
+  queryFn: AutomationQueryFn,
+  sheetId: string,
+  conditions: ConditionGroup | null | undefined,
+): Promise<void> {
+  if (!conditions) return
+
+  const fieldRes = await queryFn(
+    'SELECT id, type FROM meta_fields WHERE sheet_id = $1',
+    [sheetId],
+  )
+  try {
+    validateConditionGroupAgainstFields(
+      conditions,
+      serializeAutomationConditionFieldRows(fieldRes.rows),
+    )
+  } catch (error) {
+    if (error instanceof ConditionGroupValidationError) {
+      throw new AutomationRuleValidationError(error.message)
+    }
+    throw error
+  }
 }
 
 /**

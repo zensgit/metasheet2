@@ -27,6 +27,12 @@ type ViewRow = {
   config: Record<string, unknown> | string
 }
 
+type FieldRow = {
+  id: string
+  sheet_id: string
+  type: string
+}
+
 function makePublicFormConfig(options: {
   enabled?: boolean
   token?: string
@@ -78,8 +84,19 @@ function makeViewRows(nowMs = Date.now()): ViewRow[] {
   ]
 }
 
-function createDingTalkLinkQueryHandler(views = makeViewRows()): QueryHandler {
+function createDingTalkLinkQueryHandler(views = makeViewRows(), fields: FieldRow[] = []): QueryHandler {
   return (sql, params) => {
+    if (sql.includes('FROM meta_fields') && sql.includes('sheet_id = $1')) {
+      const sheetId = typeof params?.[0] === 'string' ? params[0] : ''
+      const rows = fields
+        .filter((field) => field.sheet_id === sheetId)
+        .map((field) => ({
+          id: field.id,
+          type: field.type,
+        }))
+      return { rows, rowCount: rows.length }
+    }
+
     if (sql.includes('FROM meta_views') && sql.includes('id::text = ANY')) {
       const sheetId = typeof params?.[0] === 'string' ? params[0] : ''
       const ids = Array.isArray(params?.[1]) ? params[1].map(String) : []
@@ -533,6 +550,91 @@ describe('DingTalk automation link route validation', () => {
     ])
     expect(res.body.data.rule).not.toHaveProperty('sheet_id')
     expect(res.body.data.rule).not.toHaveProperty('action_type')
+  })
+
+  it('rejects an unknown automation condition field before persisting the rule', async () => {
+    const { app, automationService } = await createApp()
+
+    const res = await request(app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/automations`)
+      .send({
+        name: 'Condition guard',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'send_notification',
+        actionConfig: {},
+        conditions: {
+          conjunction: 'AND',
+          conditions: [{ fieldId: 'fld_missing', operator: 'equals', value: 'Ready' }],
+        },
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toEqual({
+      code: 'VALIDATION_ERROR',
+      message: 'conditions.conditions[0].fieldId does not exist on sheet: fld_missing',
+    })
+    expect(automationService.createRule).not.toHaveBeenCalled()
+  })
+
+  it('persists an automation rule with field-compatible conditions', async () => {
+    const { app, automationService } = await createApp({
+      queryHandler: createDingTalkLinkQueryHandler(makeViewRows(), [
+        { id: 'fld_score', sheet_id: SHEET_ID, type: 'number' },
+        { id: 'fld_done', sheet_id: SHEET_ID, type: 'boolean' },
+      ]),
+    })
+
+    const conditions = {
+      conjunction: 'AND',
+      conditions: [
+        { fieldId: 'fld_score', operator: 'greater_or_equal', value: 10 },
+        { fieldId: 'fld_done', operator: 'equals', value: false },
+      ],
+    }
+
+    const res = await request(app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/automations`)
+      .send({
+        name: 'Condition guard',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'send_notification',
+        actionConfig: {},
+        conditions,
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(automationService.createRule).toHaveBeenCalledWith(SHEET_ID, expect.objectContaining({
+      conditions,
+    }))
+  })
+
+  it('rejects field-incompatible automation conditions on update before persisting', async () => {
+    const automationService = createMockAutomationService()
+    const { app } = await createApp({
+      automationService,
+      queryHandler: createDingTalkLinkQueryHandler(makeViewRows(), [
+        { id: 'fld_score', sheet_id: SHEET_ID, type: 'number' },
+      ]),
+    })
+
+    const res = await request(app)
+      .patch(`/api/multitable/sheets/${SHEET_ID}/automations/${RULE_ID}`)
+      .send({
+        conditions: {
+          conjunction: 'AND',
+          conditions: [{ fieldId: 'fld_score', operator: 'contains', value: '10' }],
+        },
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toEqual({
+      code: 'VALIDATION_ERROR',
+      message: 'conditions.conditions[0].operator contains is not supported for field type number',
+    })
+    expect(automationService.updateRule).not.toHaveBeenCalled()
   })
 
   it('persists a V1 DingTalk person action when public form and internal links are valid', async () => {
