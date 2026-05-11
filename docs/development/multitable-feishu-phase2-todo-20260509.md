@@ -102,13 +102,18 @@ Likely frontend files:
 
 Owner recommendation: Codex should implement or directly review because this touches credentials, logs, and staging gates.
 
-Status: B1 implemented in PR #1461 on branch `codex/multitable-phase2-email-transport-gate-20260511`. B2 real SMTP/provider delivery remains explicitly deferred.
+Status: B1 implemented in PR #1461. B2 implemented in PR #1462 on branch `codex/multitable-phase2-email-smtp-transport-20260511`.
 
 B1 artifacts:
 
 - Development MD: `docs/development/multitable-phase2-lane-b1-email-transport-gate-development-20260511.md`
 - Verification MD: `docs/development/multitable-phase2-lane-b1-email-transport-gate-verification-20260511.md`
 - Command: `pnpm verify:multitable-email:readiness`
+
+B2 artifacts:
+
+- Development MD: `docs/development/multitable-phase2-lane-b2-email-smtp-transport-development-20260511.md`
+- Verification MD: `docs/development/multitable-phase2-lane-b2-email-smtp-transport-verification-20260511.md`
 
 ### Objective
 
@@ -158,6 +163,11 @@ Likely frontend files:
 - [x] Redaction test: logs/artifacts do not contain SMTP credentials or bearer tokens.
 - [ ] Existing `multitable-rc-automation-send-email-smoke` still passes in mock mode.
   - Local live-stack Playwright was not rerun in B1; the RC/staging smoke path is unchanged and default mock behavior is covered by unit tests.
+- [x] B2: SMTP mode calls the provider transport instead of returning mock success.
+- [x] B2: invalid SMTP port / timeout config is blocked before runtime.
+- [x] B2: provider errors return controlled failed notification results with secrets redacted.
+- [ ] B2: real mailbox receipt smoke on staging with production-like SMTP credentials.
+  - Not run in source verification; requires real credentials and operator-controlled environment.
 
 ### Suggested PR Split
 
