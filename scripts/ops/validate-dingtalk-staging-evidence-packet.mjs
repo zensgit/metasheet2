@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import crypto from 'node:crypto'
 import {
   existsSync,
   closeSync,
@@ -142,6 +143,10 @@ function readJsonFile(file, label) {
   }
 }
 
+function sha256File(file) {
+  return crypto.createHash('sha256').update(readFileSync(file)).digest('hex')
+}
+
 function resolveInside(baseDir, relativeFile, label) {
   if (!relativeFile || path.isAbsolute(relativeFile)) {
     throw new Error(`${label} must be a relative path inside the packet`)
@@ -174,6 +179,13 @@ function mobileSignoffTopLevelName(destination) {
   if (typeof destination !== 'string') return ''
   const parts = destination.replaceAll('\\', '/').split('/').filter(Boolean)
   if (parts[0] !== 'mobile-signoff' || !parts[1]) return ''
+  return parts[1]
+}
+
+function screenshotArchiveTopLevelName(destination) {
+  if (typeof destination !== 'string') return ''
+  const parts = destination.replaceAll('\\', '/').split('/').filter(Boolean)
+  if (parts[0] !== 'screenshot-archive' || !parts[1]) return ''
   return parts[1]
 }
 
@@ -213,6 +225,26 @@ function validateRegisteredMobileSignoffEntries(packetDir, includedMobileSignoff
   for (const entry of readdirSync(mobileSignoffDir, { withFileTypes: true })) {
     if (!registered.has(entry.name)) {
       failures.push(`mobile-signoff/${entry.name} is not registered in manifest includedMobileSignoff`)
+    }
+  }
+}
+
+function validateRegisteredScreenshotArchiveEntries(packetDir, includedScreenshotArchive, failures) {
+  const screenshotArchiveDir = path.join(packetDir, 'screenshot-archive')
+  if (!existsSync(screenshotArchiveDir)) return
+  if (!statSync(screenshotArchiveDir).isDirectory()) {
+    failures.push('screenshot-archive is not a directory')
+    return
+  }
+
+  const registered = new Set(
+    Array.isArray(includedScreenshotArchive)
+      ? includedScreenshotArchive.map((entry) => screenshotArchiveTopLevelName(entry?.destination)).filter(Boolean)
+      : [],
+  )
+  for (const entry of readdirSync(screenshotArchiveDir, { withFileTypes: true })) {
+    if (!registered.has(entry.name)) {
+      failures.push(`screenshot-archive/${entry.name} is not registered in manifest includedScreenshotArchive`)
     }
   }
 }
@@ -370,6 +402,75 @@ function validateIncludedMobileSignoff(packetDir, entry, index, failures) {
   }
 }
 
+function validateIncludedScreenshotArchive(packetDir, entry, index, failures) {
+  const label = `includedScreenshotArchive[${index}]`
+  let archiveDir
+  try {
+    archiveDir = resolveInside(packetDir, entry?.destination, `${label}.destination`)
+  } catch (error) {
+    failures.push(error.message)
+    return
+  }
+  if (!existsSync(archiveDir) || !statSync(archiveDir).isDirectory()) {
+    failures.push(`${label}.destination directory does not exist`)
+    return
+  }
+
+  const status = entry.screenshotArchiveStatus
+  if (status?.status !== 'pass') failures.push(`${label}.screenshotArchiveStatus.status is not pass`)
+  if (!Number.isInteger(status?.screenshotCount) || status.screenshotCount <= 0) {
+    failures.push(`${label}.screenshotArchiveStatus.screenshotCount is not greater than 0`)
+  }
+
+  let manifest
+  try {
+    manifest = readJsonFile(path.join(archiveDir, 'manifest.json'), `${label}/manifest.json`)
+  } catch (error) {
+    failures.push(error.message)
+    return
+  }
+
+  if (!existsSync(path.join(archiveDir, 'README.md'))) {
+    failures.push(`${label}/README.md does not exist`)
+  }
+  if (manifest.tool !== 'dingtalk-screenshot-archive') failures.push(`${label}/manifest.json tool is not dingtalk-screenshot-archive`)
+  if (manifest.status !== 'pass') failures.push(`${label}/manifest.json status is not pass`)
+  if (!Number.isInteger(manifest.screenshotCount) || manifest.screenshotCount <= 0) {
+    failures.push(`${label}/manifest.json screenshotCount is not greater than 0`)
+  }
+  if (
+    Number.isInteger(status?.screenshotCount)
+    && Number.isInteger(manifest.screenshotCount)
+    && status.screenshotCount !== manifest.screenshotCount
+  ) {
+    failures.push(`${label}.screenshotArchiveStatus.screenshotCount does not match manifest`)
+  }
+  if (!Array.isArray(manifest.copiedScreenshots)) {
+    failures.push(`${label}/manifest.json copiedScreenshots is not an array`)
+    return
+  }
+  if (manifest.copiedScreenshots.length !== manifest.screenshotCount) {
+    failures.push(`${label}/manifest.json copiedScreenshots length does not match screenshotCount`)
+  }
+  for (const [screenshotIndex, screenshot] of manifest.copiedScreenshots.entries()) {
+    let screenshotFile
+    try {
+      screenshotFile = resolveInside(archiveDir, screenshot?.archivePath, `${label}.copiedScreenshots[${screenshotIndex}].archivePath`)
+    } catch (error) {
+      failures.push(error.message)
+      continue
+    }
+    if (!existsSync(screenshotFile) || !statSync(screenshotFile).isFile()) {
+      failures.push(`${label}.copiedScreenshots[${screenshotIndex}].archivePath file does not exist`)
+    }
+    if (!screenshot?.sha256 || !/^[a-f0-9]{64}$/.test(screenshot.sha256)) {
+      failures.push(`${label}.copiedScreenshots[${screenshotIndex}].sha256 is not a SHA-256 hex digest`)
+    } else if (existsSync(screenshotFile) && statSync(screenshotFile).isFile() && sha256File(screenshotFile) !== screenshot.sha256) {
+      failures.push(`${label}.copiedScreenshots[${screenshotIndex}].sha256 does not match archive file`)
+    }
+  }
+}
+
 function isLikelyText(buffer) {
   return !buffer.includes(0)
 }
@@ -464,6 +565,7 @@ function validatePacket(packetDir) {
   const readmePath = path.join(packetDir, 'README.md')
   const manifest = readJsonFile(manifestPath, 'manifest.json')
   const includedMobileSignoff = Array.isArray(manifest.includedMobileSignoff) ? manifest.includedMobileSignoff : []
+  const includedScreenshotArchive = Array.isArray(manifest.includedScreenshotArchive) ? manifest.includedScreenshotArchive : []
 
   if (!existsSync(readmePath) || !statSync(readmePath).isFile()) {
     failures.push('README.md does not exist')
@@ -480,8 +582,13 @@ function validatePacket(packetDir) {
   if (manifest.requireMobileSignoffPass === true && includedMobileSignoff.length === 0) {
     failures.push('manifest requireMobileSignoffPass is true but includedMobileSignoff is empty')
   }
+  if (manifest.requireScreenshotArchivePass === true && includedScreenshotArchive.length === 0) {
+    failures.push('manifest requireScreenshotArchivePass is true but includedScreenshotArchive is empty')
+  }
   validateRegisteredMobileSignoffEntries(packetDir, includedMobileSignoff, failures)
   includedMobileSignoff.forEach((entry, index) => validateIncludedMobileSignoff(packetDir, entry, index, failures))
+  validateRegisteredScreenshotArchiveEntries(packetDir, includedScreenshotArchive, failures)
+  includedScreenshotArchive.forEach((entry, index) => validateIncludedScreenshotArchive(packetDir, entry, index, failures))
 
   let scannedFiles = 0
   walkFiles(packetDir, (file) => {
@@ -499,6 +606,7 @@ function validatePacket(packetDir) {
     status: failures.length === 0 ? 'pass' : 'fail',
     includedEvidenceCount: Array.isArray(manifest.includedEvidence) ? manifest.includedEvidence.length : 0,
     includedMobileSignoffCount: includedMobileSignoff.length,
+    includedScreenshotArchiveCount: includedScreenshotArchive.length,
     scannedFiles,
     secretFindings,
     failures,

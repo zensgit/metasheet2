@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import crypto from 'node:crypto'
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
@@ -148,6 +149,11 @@ const requiredPacketFiles = [
     description: 'builds, records, TODO-tracks, and strict-compiles real DingTalk mobile public-form signoff evidence',
   },
   {
+    path: 'scripts/ops/dingtalk-screenshot-archive.mjs',
+    kind: 'script',
+    description: 'packages DingTalk mobile/manual screenshots into a redaction-safe screenshot archive',
+  },
+  {
     path: 'scripts/ops/validate-dingtalk-staging-evidence-packet.mjs',
     kind: 'script',
     description: 'validates final gated evidence packets and scans for secret-like raw evidence before handoff',
@@ -165,6 +171,10 @@ Options:
   --require-dingtalk-p4-pass      Require every included output to be a finalized passing P4 session
   --include-mobile-signoff <dir>  Optional strict mobile signoff output dir to copy into mobile-signoff/
   --require-mobile-signoff-pass   Require every included mobile signoff output to be strict passing
+  --include-screenshot-archive <dir>
+                                  Optional redaction-safe screenshot archive dir to copy into screenshot-archive/
+  --require-screenshot-archive-pass
+                                  Require every included screenshot archive to contain passing screenshot evidence
   --help                          Show this help
 
 Examples:
@@ -178,7 +188,9 @@ Examples:
     --include-output output/dingtalk-p4-remote-smoke-session/142-session \\
     --require-dingtalk-p4-pass \\
     --include-mobile-signoff output/dingtalk-public-form-mobile-signoff/142-compiled \\
-    --require-mobile-signoff-pass
+    --require-mobile-signoff-pass \\
+    --include-screenshot-archive artifacts/dingtalk-screenshot-archive/live-acceptance \\
+    --require-screenshot-archive-pass
 `)
 }
 
@@ -197,6 +209,8 @@ function parseArgs(argv) {
     requireDingTalkP4Pass: false,
     includeMobileSignoffDirs: [],
     requireMobileSignoffPass: false,
+    includeScreenshotArchiveDirs: [],
+    requireScreenshotArchivePass: false,
   }
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -220,6 +234,13 @@ function parseArgs(argv) {
         break
       case '--require-mobile-signoff-pass':
         opts.requireMobileSignoffPass = true
+        break
+      case '--include-screenshot-archive':
+        opts.includeScreenshotArchiveDirs.push(path.resolve(process.cwd(), readRequiredValue(argv, i, arg)))
+        i += 1
+        break
+      case '--require-screenshot-archive-pass':
+        opts.requireScreenshotArchivePass = true
         break
       case '--help':
         printHelp()
@@ -265,6 +286,10 @@ function readJsonFile(file, label) {
   } catch (error) {
     throw new Error(`${label} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`)
   }
+}
+
+function sha256File(file) {
+  return crypto.createHash('sha256').update(readFileSync(file)).digest('hex')
 }
 
 function getArray(value, field, failures) {
@@ -399,6 +424,68 @@ function validateMobileSignoffDir(sourceDir, opts) {
   return opts.requireMobileSignoffPass ? validateMobileSignoffPass(sourceDir) : null
 }
 
+function validateScreenshotArchivePass(sourceDir) {
+  const manifestPath = path.join(sourceDir, 'manifest.json')
+  const readmePath = path.join(sourceDir, 'README.md')
+  const manifest = readJsonFile(manifestPath, 'screenshot archive manifest.json')
+  const failures = []
+
+  if (manifest.tool !== 'dingtalk-screenshot-archive') failures.push('manifest.json tool is not dingtalk-screenshot-archive')
+  if (manifest.status !== 'pass') failures.push('manifest.json status is not pass')
+  if (!Number.isInteger(manifest.screenshotCount) || manifest.screenshotCount <= 0) {
+    failures.push('manifest.json screenshotCount is not greater than 0')
+  }
+  if (!existsSync(readmePath) || !statSync(readmePath).isFile()) {
+    failures.push('README.md does not exist')
+  }
+  if (!Array.isArray(manifest.copiedScreenshots)) {
+    failures.push('manifest.json copiedScreenshots is not an array')
+  } else {
+    if (manifest.copiedScreenshots.length !== manifest.screenshotCount) {
+      failures.push('manifest.json copiedScreenshots length does not match screenshotCount')
+    }
+    for (const [index, screenshot] of manifest.copiedScreenshots.entries()) {
+      const archivePath = screenshot?.archivePath
+      if (!archivePath || path.isAbsolute(archivePath)) {
+        failures.push(`copiedScreenshots[${index}].archivePath must be relative`)
+        continue
+      }
+      const resolved = path.resolve(sourceDir, archivePath)
+      const normalizedSource = path.resolve(sourceDir)
+      if (resolved !== normalizedSource && !resolved.startsWith(`${normalizedSource}${path.sep}`)) {
+        failures.push(`copiedScreenshots[${index}].archivePath escapes the screenshot archive`)
+        continue
+      }
+      if (!existsSync(resolved) || !statSync(resolved).isFile()) {
+        failures.push(`copiedScreenshots[${index}].archivePath file does not exist`)
+      }
+      if (!screenshot?.sha256 || !/^[a-f0-9]{64}$/.test(screenshot.sha256)) {
+        failures.push(`copiedScreenshots[${index}].sha256 is not a SHA-256 hex digest`)
+      } else if (existsSync(resolved) && statSync(resolved).isFile() && sha256File(resolved) !== screenshot.sha256) {
+        failures.push(`copiedScreenshots[${index}].sha256 does not match archive file`)
+      }
+    }
+  }
+
+  if (failures.length > 0) {
+    throw new Error(`included screenshot archive is not strict pass: ${path.relative(process.cwd(), sourceDir).replaceAll('\\', '/')} (${failures.join('; ')})`)
+  }
+
+  return {
+    status: 'pass',
+    manifest: path.relative(sourceDir, manifestPath).replaceAll('\\', '/'),
+    readme: path.relative(sourceDir, readmePath).replaceAll('\\', '/'),
+    screenshotCount: manifest.screenshotCount,
+  }
+}
+
+function validateScreenshotArchiveDir(sourceDir, opts) {
+  if (!existsSync(sourceDir) || !statSync(sourceDir).isDirectory()) {
+    throw new Error(`--include-screenshot-archive must point to an existing directory: ${sourceDir}`)
+  }
+  return opts.requireScreenshotArchivePass ? validateScreenshotArchivePass(sourceDir) : null
+}
+
 function inspectExistingPacketOutputDir(outputDir) {
   if (!existsSync(outputDir)) return { exists: false, isExistingPacket: false, entryCount: 0 }
   if (!statSync(outputDir).isDirectory()) {
@@ -434,6 +521,7 @@ function clearGeneratedPacketMarkers(outputDir) {
   if (!inspected.exists || inspected.entryCount === 0) return
   if (inspected.isExistingPacket) {
     rmSync(path.join(outputDir, 'evidence'), { recursive: true, force: true })
+    rmSync(path.join(outputDir, 'screenshot-archive'), { recursive: true, force: true })
   }
   for (const file of ['manifest.json', 'README.md']) {
     rmSync(path.join(outputDir, file), { force: true })
@@ -466,11 +554,25 @@ function copyMobileSignoffDir(sourceDir, outputDir, index, mobileSignoffStatus) 
   }
 }
 
+function copyScreenshotArchiveDir(sourceDir, outputDir, index, screenshotArchiveStatus) {
+  const destinationName = `${String(index + 1).padStart(2, '0')}-${sanitizeEvidenceName(sourceDir)}`
+  const destination = path.join(outputDir, 'screenshot-archive', destinationName)
+  mkdirSync(path.dirname(destination), { recursive: true })
+  rmSync(destination, { recursive: true, force: true })
+  cpSync(sourceDir, destination, { recursive: true })
+  return {
+    source: path.relative(process.cwd(), sourceDir).replaceAll('\\', '/'),
+    destination: path.relative(outputDir, destination).replaceAll('\\', '/'),
+    ...(screenshotArchiveStatus ? { screenshotArchiveStatus } : {}),
+  }
+}
+
 function renderReadme(manifest) {
   const docs = manifest.files.filter((file) => file.kind !== 'script')
   const scripts = manifest.files.filter((file) => file.kind === 'script')
   const evidence = manifest.includedEvidence
   const mobileSignoff = Array.isArray(manifest.includedMobileSignoff) ? manifest.includedMobileSignoff : []
+  const screenshotArchive = Array.isArray(manifest.includedScreenshotArchive) ? manifest.includedScreenshotArchive : []
 
   const fileLine = (file) => `- \`${file.path}\` — ${file.description}`
   const evidenceLines = evidence.length
@@ -479,12 +581,18 @@ function renderReadme(manifest) {
   const mobileSignoffLines = mobileSignoff.length
     ? mobileSignoff.map((entry) => `- \`${entry.destination}\` copied from \`${entry.source}\``).join('\n')
     : '- No mobile public-form signoff directory was included. Re-run with `--include-mobile-signoff <dir>` after real DingTalk mobile signoff.'
+  const screenshotArchiveLines = screenshotArchive.length
+    ? screenshotArchive.map((entry) => `- \`${entry.destination}\` copied from \`${entry.source}\``).join('\n')
+    : '- No screenshot archive was included. Re-run with `--include-screenshot-archive <dir>` after packaging DingTalk screenshots.'
   const gateLine = manifest.requireDingTalkP4Pass
     ? '- DingTalk P4 final-pass gate was enabled; every included output was validated before copy.'
     : '- DingTalk P4 final-pass gate was not enabled. Use `--require-dingtalk-p4-pass` for release evidence handoff.'
   const mobileGateLine = manifest.requireMobileSignoffPass
     ? '- DingTalk mobile public-form signoff gate was enabled; every included mobile signoff output was validated before copy.'
     : '- DingTalk mobile public-form signoff gate was not enabled. Use `--require-mobile-signoff-pass` for release evidence handoff.'
+  const screenshotGateLine = manifest.requireScreenshotArchivePass
+    ? '- DingTalk screenshot archive gate was enabled; every included screenshot archive was validated before copy.'
+    : '- DingTalk screenshot archive gate was not enabled. Use `--require-screenshot-archive-pass` for release evidence handoff when screenshots are required.'
 
   return `# DingTalk Staging Evidence Packet
 
@@ -510,10 +618,15 @@ ${evidenceLines}
 
 ${mobileSignoffLines}
 
+## Included Screenshot Archive
+
+${screenshotArchiveLines}
+
 ## Evidence Gates
 
 ${gateLine}
 ${mobileGateLine}
+${screenshotGateLine}
 
 ## Recommended Order
 
@@ -536,7 +649,8 @@ ${mobileGateLine}
 17. For public-form mobile acceptance, create a kit with \`node scripts/ops/dingtalk-public-form-mobile-signoff.mjs --init-kit <mobile-kit-dir>\`.
 18. Track remaining checks with \`node scripts/ops/dingtalk-public-form-mobile-signoff.mjs --todo <mobile-kit-dir>/mobile-signoff.json --output-dir <mobile-kit-dir>/todo\`.
 19. Record each real DingTalk mobile result with the suggested \`--record ... --compile-when-ready\` command until strict output is written.
-20. If debugging manually, re-export with \`--include-output <session-dir> --require-dingtalk-p4-pass --include-mobile-signoff <mobile-compiled-dir> --require-mobile-signoff-pass\`, then validate with \`validate-dingtalk-staging-evidence-packet.mjs\`.
+20. Package screenshots with \`node scripts/ops/dingtalk-screenshot-archive.mjs --input <screenshot-dir> --output-dir <screenshot-archive-dir>\`.
+21. If debugging manually, re-export with \`--include-output <session-dir> --require-dingtalk-p4-pass --include-mobile-signoff <mobile-compiled-dir> --require-mobile-signoff-pass --include-screenshot-archive <screenshot-archive-dir> --require-screenshot-archive-pass\`, then validate with \`validate-dingtalk-staging-evidence-packet.mjs\`.
 
 ## Non-Goals
 
@@ -557,8 +671,12 @@ async function main() {
     if (opts.requireMobileSignoffPass && opts.includeMobileSignoffDirs.length === 0) {
       throw new Error('--require-mobile-signoff-pass requires at least one --include-mobile-signoff directory')
     }
+    if (opts.requireScreenshotArchivePass && opts.includeScreenshotArchiveDirs.length === 0) {
+      throw new Error('--require-screenshot-archive-pass requires at least one --include-screenshot-archive directory')
+    }
     const evidenceValidations = opts.includeOutputDirs.map((dir) => validateEvidenceDir(dir, opts))
     const mobileSignoffValidations = opts.includeMobileSignoffDirs.map((dir) => validateMobileSignoffDir(dir, opts))
+    const screenshotArchiveValidations = opts.includeScreenshotArchiveDirs.map((dir) => validateScreenshotArchiveDir(dir, opts))
     mkdirSync(opts.outputDir, { recursive: true })
 
     const copiedFiles = requiredPacketFiles.map((entry) => {
@@ -582,15 +700,23 @@ async function main() {
       return copied
     })
 
+    const includedScreenshotArchive = opts.includeScreenshotArchiveDirs.map((dir, index) => {
+      const copied = copyScreenshotArchiveDir(dir, opts.outputDir, index, screenshotArchiveValidations[index])
+      console.log(`Copied screenshot archive ${copied.source}`)
+      return copied
+    })
+
     const manifest = {
       packet: 'dingtalk-staging-evidence-packet',
       generatedAt: new Date().toISOString(),
       repoRoot: process.cwd(),
       requireDingTalkP4Pass: opts.requireDingTalkP4Pass,
       requireMobileSignoffPass: opts.requireMobileSignoffPass,
+      requireScreenshotArchivePass: opts.requireScreenshotArchivePass,
       files: copiedFiles,
       includedEvidence,
       includedMobileSignoff,
+      includedScreenshotArchive,
     }
 
     const manifestPath = path.join(opts.outputDir, 'manifest.json')

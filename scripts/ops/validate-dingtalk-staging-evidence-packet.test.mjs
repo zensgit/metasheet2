@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import crypto from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -101,6 +102,38 @@ function writeMobileSignoffOutput(signoffDir, overrides = {}) {
   })
 }
 
+function writeScreenshotArchiveOutput(archiveDir, overrides = {}) {
+  mkdirSync(path.join(archiveDir, 'screenshots'), { recursive: true })
+  const screenshotBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x03])
+  const screenshotPath = path.join(archiveDir, 'screenshots', 'screenshot-001.png')
+  writeFileSync(screenshotPath, screenshotBytes)
+  const sha256 = crypto.createHash('sha256').update(screenshotBytes).digest('hex')
+  writeJson(path.join(archiveDir, 'manifest.json'), {
+    tool: 'dingtalk-screenshot-archive',
+    generatedAt: '2026-05-11T00:00:00.000Z',
+    status: 'pass',
+    allowEmpty: false,
+    outputDir: path.relative(repoRoot, archiveDir).replaceAll('\\', '/'),
+    manifestJson: path.relative(repoRoot, path.join(archiveDir, 'manifest.json')).replaceAll('\\', '/'),
+    readmeMd: path.relative(repoRoot, path.join(archiveDir, 'README.md')).replaceAll('\\', '/'),
+    inputCount: 1,
+    screenshotCount: 1,
+    copiedScreenshots: [
+      {
+        index: 1,
+        sourceLabel: 'mobile-dingtalk-form.png',
+        archivePath: 'screenshots/screenshot-001.png',
+        extension: '.png',
+        sizeBytes: screenshotBytes.length,
+        sha256,
+      },
+    ],
+    warnings: [],
+    ...overrides.manifest,
+  })
+  writeFileSync(path.join(archiveDir, 'README.md'), '# DingTalk Screenshot Evidence Archive\n\n- Status: **pass**\n', 'utf8')
+}
+
 function writePacket(packetDir, overrides = {}) {
   const evidenceDestination = overrides.destination ?? 'evidence/01-142-session'
   const evidenceDir = path.join(packetDir, evidenceDestination)
@@ -162,6 +195,32 @@ function addMobileSignoffToPacket(packetDir, overrides = {}) {
   ]
   writeJson(manifestPath, manifest)
   return signoffDir
+}
+
+function addScreenshotArchiveToPacket(packetDir, overrides = {}) {
+  const destination = overrides.destination ?? 'screenshot-archive/01-screenshot-archive-compiled'
+  const archiveDir = path.join(packetDir, destination)
+  writeScreenshotArchiveOutput(archiveDir, overrides)
+
+  const manifestPath = path.join(packetDir, 'manifest.json')
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  const screenshotManifest = JSON.parse(readFileSync(path.join(archiveDir, 'manifest.json'), 'utf8'))
+  manifest.requireScreenshotArchivePass = overrides.requireScreenshotArchivePass ?? true
+  manifest.includedScreenshotArchive = [
+    {
+      source: 'artifacts/dingtalk-screenshot-archive/142-compiled',
+      destination,
+      screenshotArchiveStatus: {
+        status: 'pass',
+        manifest: 'manifest.json',
+        readme: 'README.md',
+        screenshotCount: screenshotManifest.screenshotCount,
+        ...overrides.screenshotArchiveStatus,
+      },
+    },
+  ]
+  writeJson(manifestPath, manifest)
+  return archiveDir
 }
 
 function runValidator(args) {
@@ -248,6 +307,57 @@ test('validate-dingtalk-staging-evidence-packet accepts final mobile signoff evi
     const report = JSON.parse(readFileSync(reportPath, 'utf8'))
     assert.equal(report.status, 'pass')
     assert.equal(report.includedMobileSignoffCount, 1)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('validate-dingtalk-staging-evidence-packet accepts final screenshot archive evidence', () => {
+  const tmpDir = makeTmpDir()
+  const packetDir = path.join(tmpDir, 'packet')
+  const reportPath = path.join(tmpDir, 'publish-check.json')
+
+  try {
+    writePacket(packetDir)
+    addScreenshotArchiveToPacket(packetDir)
+
+    const result = runValidator(['--packet-dir', packetDir, '--output-json', reportPath])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /publish check passed/)
+    const report = JSON.parse(readFileSync(reportPath, 'utf8'))
+    assert.equal(report.status, 'pass')
+    assert.equal(report.includedScreenshotArchiveCount, 1)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('validate-dingtalk-staging-evidence-packet rejects screenshot archive hash mismatch', () => {
+  const tmpDir = makeTmpDir()
+  const packetDir = path.join(tmpDir, 'packet')
+
+  try {
+    writePacket(packetDir)
+    addScreenshotArchiveToPacket(packetDir, {
+      manifest: {
+        copiedScreenshots: [
+          {
+            index: 1,
+            sourceLabel: 'mobile-dingtalk-form.png',
+            archivePath: 'screenshots/screenshot-001.png',
+            extension: '.png',
+            sizeBytes: 6,
+            sha256: '0'.repeat(64),
+          },
+        ],
+      },
+    })
+
+    const result = runValidator(['--packet-dir', packetDir])
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /sha256 does not match archive file/)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

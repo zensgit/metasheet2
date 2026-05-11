@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import crypto from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -99,6 +100,38 @@ function writeMobileSignoffOutput(dir, overrides = {}) {
     checks: mobileSignoffRequiredCheckIds.map((id) => ({ id, status: 'pass' })),
     ...overrides.redactedEvidence,
   }, null, 2)}\n`, 'utf8')
+}
+
+function writeScreenshotArchiveOutput(dir, overrides = {}) {
+  mkdirSync(path.join(dir, 'screenshots'), { recursive: true })
+  const screenshotBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x09])
+  const screenshotPath = path.join(dir, 'screenshots', 'screenshot-001.png')
+  writeFileSync(screenshotPath, screenshotBytes)
+  const sha256 = crypto.createHash('sha256').update(screenshotBytes).digest('hex')
+  writeFileSync(path.join(dir, 'manifest.json'), `${JSON.stringify({
+    tool: 'dingtalk-screenshot-archive',
+    generatedAt: '2026-05-11T00:00:00.000Z',
+    status: 'pass',
+    allowEmpty: false,
+    outputDir: path.relative(repoRoot, dir).replaceAll('\\', '/'),
+    manifestJson: path.relative(repoRoot, path.join(dir, 'manifest.json')).replaceAll('\\', '/'),
+    readmeMd: path.relative(repoRoot, path.join(dir, 'README.md')).replaceAll('\\', '/'),
+    inputCount: 1,
+    screenshotCount: 1,
+    copiedScreenshots: [
+      {
+        index: 1,
+        sourceLabel: 'mobile-dingtalk-form.png',
+        archivePath: 'screenshots/screenshot-001.png',
+        extension: '.png',
+        sizeBytes: screenshotBytes.length,
+        sha256,
+      },
+    ],
+    warnings: [],
+    ...overrides.manifest,
+  }, null, 2)}\n`, 'utf8')
+  writeFileSync(path.join(dir, 'README.md'), '# DingTalk Screenshot Evidence Archive\n\n- Status: **pass**\n', 'utf8')
 }
 
 test('export-dingtalk-staging-evidence-packet copies required handoff files and writes manifest', () => {
@@ -242,13 +275,16 @@ test('export-dingtalk-staging-evidence-packet copies required handoff files and 
     assert.match(readme, /dingtalk-p4-final-docs\.mjs/)
     assert.match(readme, /dingtalk-p4-final-closeout\.mjs/)
     assert.match(readme, /dingtalk-public-form-mobile-signoff\.mjs/)
+    assert.match(readme, /dingtalk-screenshot-archive\.mjs/)
     assert.match(readme, /dingtalk-p4-smoke-status\.mjs --session-dir <session-dir> --handoff-summary <packet-dir>\/handoff-summary\.json --require-release-ready/)
     assert.match(readme, /validate-dingtalk-staging-evidence-packet\.mjs/)
     assert.match(readme, /compile-dingtalk-p4-smoke-evidence\.mjs/)
     assert.match(readme, /No runtime evidence directory was included/)
     assert.match(readme, /No mobile public-form signoff directory was included/)
+    assert.match(readme, /No screenshot archive was included/)
     assert.match(readme, /DingTalk P4 final-pass gate was not enabled/)
     assert.match(readme, /DingTalk mobile public-form signoff gate was not enabled/)
+    assert.match(readme, /DingTalk screenshot archive gate was not enabled/)
     assert.match(readme, /does not generate secrets/)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
@@ -301,6 +337,99 @@ test('export-dingtalk-staging-evidence-packet accepts strict mobile signoff pass
     assert.match(readme, /Included Mobile Public-Form Signoff/)
     assert.match(readme, /DingTalk mobile public-form signoff gate was enabled/)
     assert.match(readme, /--include-mobile-signoff <mobile-compiled-dir> --require-mobile-signoff-pass/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('export-dingtalk-staging-evidence-packet accepts strict screenshot archive evidence when required', () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'packet')
+  const evidenceDir = path.join(tmpDir, '142-session')
+  const screenshotArchiveDir = path.join(tmpDir, 'screenshot-archive-compiled')
+
+  try {
+    writeDingTalkP4Session(evidenceDir)
+    writeScreenshotArchiveOutput(screenshotArchiveDir)
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        scriptPath,
+        '--output-dir',
+        outputDir,
+        '--include-output',
+        evidenceDir,
+        '--require-dingtalk-p4-pass',
+        '--include-screenshot-archive',
+        screenshotArchiveDir,
+        '--require-screenshot-archive-pass',
+      ],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      },
+    )
+
+    assert.equal(result.status, 0, result.stderr)
+    const manifest = JSON.parse(readFileSync(path.join(outputDir, 'manifest.json'), 'utf8'))
+    assert.equal(manifest.requireScreenshotArchivePass, true)
+    assert.equal(manifest.includedScreenshotArchive.length, 1)
+    assert.equal(manifest.includedScreenshotArchive[0].destination, 'screenshot-archive/01-screenshot-archive-compiled')
+    assert.equal(manifest.includedScreenshotArchive[0].screenshotArchiveStatus.status, 'pass')
+    assert.equal(manifest.includedScreenshotArchive[0].screenshotArchiveStatus.screenshotCount, 1)
+    assert.equal(
+      existsSync(path.join(outputDir, 'screenshot-archive/01-screenshot-archive-compiled/screenshots/screenshot-001.png')),
+      true,
+    )
+
+    const readme = readFileSync(path.join(outputDir, 'README.md'), 'utf8')
+    assert.match(readme, /Included Screenshot Archive/)
+    assert.match(readme, /DingTalk screenshot archive gate was enabled/)
+    assert.match(readme, /--include-screenshot-archive <screenshot-archive-dir> --require-screenshot-archive-pass/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('export-dingtalk-staging-evidence-packet rejects empty screenshot archive when required', () => {
+  const tmpDir = makeTmpDir()
+  const outputDir = path.join(tmpDir, 'packet')
+  const evidenceDir = path.join(tmpDir, '142-session')
+  const screenshotArchiveDir = path.join(tmpDir, 'screenshot-archive-empty')
+
+  try {
+    writeDingTalkP4Session(evidenceDir)
+    writeScreenshotArchiveOutput(screenshotArchiveDir, {
+      manifest: {
+        status: 'pass',
+        screenshotCount: 0,
+        copiedScreenshots: [],
+      },
+    })
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        scriptPath,
+        '--output-dir',
+        outputDir,
+        '--include-output',
+        evidenceDir,
+        '--require-dingtalk-p4-pass',
+        '--include-screenshot-archive',
+        screenshotArchiveDir,
+        '--require-screenshot-archive-pass',
+      ],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      },
+    )
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /screenshotCount is not greater than 0/)
+    assert.equal(existsSync(path.join(outputDir, 'manifest.json')), false)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

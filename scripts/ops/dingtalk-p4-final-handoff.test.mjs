@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import crypto from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -102,6 +103,39 @@ function writeMobileSignoffOutput(signoffDir, overrides = {}) {
   })
 }
 
+function writeScreenshotArchiveOutput(archiveDir, overrides = {}) {
+  mkdirSync(path.join(archiveDir, 'screenshots'), { recursive: true })
+  const screenshotBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02, 0x03])
+  const screenshotPath = path.join(archiveDir, 'screenshots', 'screenshot-001.png')
+  writeFileSync(screenshotPath, screenshotBytes)
+  const sha256 = crypto.createHash('sha256').update(screenshotBytes).digest('hex')
+  const manifest = {
+    tool: 'dingtalk-screenshot-archive',
+    generatedAt: '2026-05-11T00:00:00.000Z',
+    status: 'pass',
+    allowEmpty: false,
+    outputDir: path.relative(repoRoot, archiveDir).replaceAll('\\', '/'),
+    manifestJson: path.relative(repoRoot, path.join(archiveDir, 'manifest.json')).replaceAll('\\', '/'),
+    readmeMd: path.relative(repoRoot, path.join(archiveDir, 'README.md')).replaceAll('\\', '/'),
+    inputCount: 1,
+    screenshotCount: 1,
+    copiedScreenshots: [
+      {
+        index: 1,
+        sourceLabel: 'mobile-dingtalk-form.png',
+        archivePath: 'screenshots/screenshot-001.png',
+        extension: '.png',
+        sizeBytes: screenshotBytes.length,
+        sha256,
+      },
+    ],
+    warnings: [],
+    ...overrides.manifest,
+  }
+  writeJson(path.join(archiveDir, 'manifest.json'), manifest)
+  writeFileSync(path.join(archiveDir, 'README.md'), '# DingTalk Screenshot Evidence Archive\n\n- Status: **pass**\n', 'utf8')
+}
+
 function runScript(args) {
   return spawnSync(process.execPath, [scriptPath, ...args], {
     cwd: repoRoot,
@@ -176,6 +210,46 @@ test('dingtalk-p4-final-handoff includes strict mobile signoff in final packet',
   }
 })
 
+test('dingtalk-p4-final-handoff includes strict screenshot archive in final packet', () => {
+  const tmpDir = makeTmpDir()
+  const sessionDir = path.join(tmpDir, '142-session')
+  const screenshotArchiveDir = path.join(tmpDir, 'screenshot-archive-compiled')
+  const outputDir = path.join(tmpDir, 'packet')
+
+  try {
+    writeFinalSession(sessionDir)
+    writeScreenshotArchiveOutput(screenshotArchiveDir)
+
+    const result = runScript([
+      '--session-dir',
+      sessionDir,
+      '--output-dir',
+      outputDir,
+      '--include-screenshot-archive',
+      screenshotArchiveDir,
+      '--require-screenshot-archive-pass',
+    ])
+
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    const manifest = JSON.parse(readFileSync(path.join(outputDir, 'manifest.json'), 'utf8'))
+    assert.equal(manifest.requireScreenshotArchivePass, true)
+    assert.equal(manifest.includedScreenshotArchive.length, 1)
+    assert.equal(manifest.includedScreenshotArchive[0].screenshotArchiveStatus.screenshotCount, 1)
+    assert.equal(existsSync(path.join(outputDir, 'screenshot-archive', '01-screenshot-archive-compiled', 'screenshots', 'screenshot-001.png')), true)
+    const publishCheck = JSON.parse(readFileSync(path.join(outputDir, 'publish-check.json'), 'utf8'))
+    assert.equal(publishCheck.status, 'pass')
+    assert.equal(publishCheck.includedScreenshotArchiveCount, 1)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'handoff-summary.json'), 'utf8'))
+    assert.equal(summary.status, 'pass')
+    assert.equal(summary.screenshotArchive.required, true)
+    assert.equal(summary.screenshotArchive.includedCount, 1)
+    assert.deepEqual(summary.screenshotArchive.sources, [path.relative(repoRoot, screenshotArchiveDir).replaceAll('\\', '/')])
+    assert.match(readFileSync(path.join(outputDir, 'handoff-summary.md'), 'utf8'), /Screenshot archive gate: \*\*required\*\*/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('dingtalk-p4-final-handoff rejects required mobile signoff without input', () => {
   const tmpDir = makeTmpDir()
   const sessionDir = path.join(tmpDir, '142-session')
@@ -191,6 +265,27 @@ test('dingtalk-p4-final-handoff rejects required mobile signoff without input', 
     const summary = JSON.parse(readFileSync(path.join(outputDir, 'handoff-summary.json'), 'utf8'))
     assert.equal(summary.status, 'fail')
     assert.equal(summary.failures.some((failure) => failure.includes('--require-mobile-signoff-pass requires')), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-final-handoff rejects required screenshot archive without input', () => {
+  const tmpDir = makeTmpDir()
+  const sessionDir = path.join(tmpDir, '142-session')
+  const outputDir = path.join(tmpDir, 'packet')
+
+  try {
+    writeFinalSession(sessionDir)
+
+    const result = runScript(['--session-dir', sessionDir, '--output-dir', outputDir, '--require-screenshot-archive-pass'])
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /--require-screenshot-archive-pass requires at least one --include-screenshot-archive directory/)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'handoff-summary.json'), 'utf8'))
+    assert.equal(summary.status, 'fail')
+    assert.equal(summary.screenshotArchive.includedCount, 0)
+    assert.equal(summary.failures.some((failure) => failure.includes('--require-screenshot-archive-pass requires')), true)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
