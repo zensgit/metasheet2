@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   evaluateCondition,
   evaluateConditions,
+  normalizeConditionGroupInput,
   type ConditionGroup,
 } from '../../src/multitable/automation-conditions'
 
@@ -94,5 +95,48 @@ describe('multitable automation conditions', () => {
       { fieldId: 'name', operator: 'less_or_equal', value: 'm' },
       { name: 'alpha' },
     )).toBe(true)
+  })
+
+  it('normalizes nested condition groups from untrusted route payloads', () => {
+    const group = normalizeConditionGroupInput({
+      conjunction: 'and',
+      conditions: [
+        { fieldId: ' status ', operator: 'is_not_empty' },
+        {
+          logic: 'OR',
+          conditions: [
+            { fieldId: 'owner', operator: 'equals', value: 'Alice' },
+            { fieldId: 'score', operator: 'in', value: [1, 2, 3] },
+          ],
+        },
+      ],
+    })
+
+    expect(group).toEqual({
+      conjunction: 'AND',
+      conditions: [
+        { fieldId: 'status', operator: 'is_not_empty' },
+        {
+          logic: 'or',
+          conditions: [
+            { fieldId: 'owner', operator: 'equals', value: 'Alice' },
+            { fieldId: 'score', operator: 'in', value: [1, 2, 3] },
+          ],
+        },
+      ],
+    })
+  })
+
+  it('rejects invalid route condition payloads', () => {
+    expect(() => normalizeConditionGroupInput({ conjunction: 'X', conditions: [] }))
+      .toThrow('conditions.conjunction must be "AND" or "OR"')
+    expect(() => normalizeConditionGroupInput({
+      conjunction: 'AND',
+      conditions: [{ fieldId: 'status', operator: 'missing' }],
+    })).toThrow('conditions.conditions[0].operator is invalid')
+    expect(() => normalizeConditionGroupInput({
+      conjunction: 'AND',
+      conditions: [{ fieldId: 'status', operator: 'in', value: 'Ready' }],
+    })).toThrow('conditions.conditions[0].value must be an array for in')
   })
 })

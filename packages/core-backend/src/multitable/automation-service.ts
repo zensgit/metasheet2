@@ -3,7 +3,11 @@ import type { Kysely } from 'kysely'
 import type { EventBus } from '../integration/events/event-bus'
 import { Logger } from '../core/logger'
 import { matchesTrigger, TRIGGER_TYPE_BY_EVENT, type AutomationTriggerType } from './automation-triggers'
-import type { ConditionGroup } from './automation-conditions'
+import {
+  ConditionGroupValidationError,
+  normalizeConditionGroupInput,
+  type ConditionGroup,
+} from './automation-conditions'
 import { AutomationExecutor, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps } from './automation-executor'
 import type { AutomationAction } from './automation-actions'
 import type { AutomationTrigger } from './automation-triggers'
@@ -93,6 +97,17 @@ function validateSendEmailActionConfigs(
     if (error) return error
   }
   return null
+}
+
+function parseConditionGroupInput(value: unknown): ConditionGroup {
+  try {
+    return normalizeConditionGroupInput(value)
+  } catch (error) {
+    if (error instanceof ConditionGroupValidationError) {
+      throw new AutomationRuleValidationError(error.message)
+    }
+    throw error
+  }
 }
 
 /**
@@ -787,9 +802,9 @@ export function parseCreateRuleInput(
     throw new AutomationRuleValidationError(`Invalid action_type: ${actionType}`)
   }
 
-  const conditions = body?.conditions && typeof body.conditions === 'object'
-    ? body.conditions as ConditionGroup
-    : null
+  const conditions = body?.conditions === undefined || body.conditions === null
+    ? null
+    : parseConditionGroupInput(body.conditions)
 
   return {
     name,
@@ -846,7 +861,7 @@ export function parseUpdateRuleInput(body: Record<string, unknown> | undefined):
     touched = true
   }
   if (body?.conditions !== undefined) {
-    input.conditions = body.conditions ? (body.conditions as ConditionGroup) : null
+    input.conditions = body.conditions === null ? null : parseConditionGroupInput(body.conditions)
     touched = true
   }
   if (body?.actions !== undefined) {

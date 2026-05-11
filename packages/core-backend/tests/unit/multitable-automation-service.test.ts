@@ -439,6 +439,26 @@ describe('M5 — Automation route helpers', () => {
       expect(input.conditions).toEqual({ logic: 'and', conditions: [] })
     })
 
+    it('normalizes frontend condition conjunctions at the route boundary', () => {
+      const input = parseCreateRuleInput({
+        triggerType: 'record.created',
+        actionType: 'send_notification',
+        conditions: {
+          conjunction: 'and',
+          conditions: [
+            { fieldId: ' status ', operator: 'equals', value: 'Ready' },
+          ],
+        },
+      }, null)
+
+      expect(input.conditions).toEqual({
+        conjunction: 'AND',
+        conditions: [
+          { fieldId: 'status', operator: 'equals', value: 'Ready' },
+        ],
+      })
+    })
+
     it('falls back to first action when actionType / actionConfig are absent', () => {
       const body = {
         triggerType: 'record.created',
@@ -468,6 +488,29 @@ describe('M5 — Automation route helpers', () => {
           null,
         ),
       ).toThrow(AutomationRuleValidationError)
+    })
+
+    it('throws AutomationRuleValidationError for malformed condition payloads', () => {
+      expect(() =>
+        parseCreateRuleInput(
+          {
+            triggerType: 'record.created',
+            actionType: 'send_notification',
+            conditions: { conjunction: 'AND', conditions: [{ fieldId: '', operator: 'equals', value: 'x' }] },
+          },
+          null,
+        ),
+      ).toThrow(AutomationRuleValidationError)
+      expect(() =>
+        parseCreateRuleInput(
+          {
+            triggerType: 'record.created',
+            actionType: 'send_notification',
+            conditions: { conjunction: 'AND', conditions: [{ fieldId: 'status', operator: 'in', value: 'Ready' }] },
+          },
+          null,
+        ),
+      ).toThrow('conditions.conditions[0].value must be an array for in')
     })
 
     it('defaults enabled to true and treats missing optional fields safely', () => {
@@ -508,6 +551,27 @@ describe('M5 — Automation route helpers', () => {
       const out = parseUpdateRuleInput({ conditions: null, actions: null })
       expect(out?.conditions).toBeNull()
       expect(out?.actions).toBeNull()
+    })
+
+    it('validates condition payloads on update', () => {
+      expect(parseUpdateRuleInput({
+        conditions: {
+          conjunction: 'OR',
+          conditions: [
+            { fieldId: 'status', operator: 'equals', value: 'Ready' },
+            { fieldId: 'priority', operator: 'greater_or_equal', value: 2 },
+          ],
+        },
+      })?.conditions).toEqual({
+        conjunction: 'OR',
+        conditions: [
+          { fieldId: 'status', operator: 'equals', value: 'Ready' },
+          { fieldId: 'priority', operator: 'greater_or_equal', value: 2 },
+        ],
+      })
+
+      expect(() => parseUpdateRuleInput({ conditions: { conditions: [] } }))
+        .toThrow('conditions.logic or conditions.conjunction is required')
     })
 
     it('rejects an invalid trigger type', () => {
