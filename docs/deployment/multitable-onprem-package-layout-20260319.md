@@ -76,7 +76,9 @@ metasheet/
   deploy-remote.bat
   apps/web/dist/
   packages/core-backend/dist/
+  packages/core-backend/migrations/
   plugins/plugin-attendance/
+  plugins/plugin-integration-core/
   scripts/ops/
     multitable-onprem-bootstrap-admin.ps1
     multitable-onprem-apply-package.sh
@@ -101,6 +103,7 @@ This package is:
 Current plugin policy:
 
 - ships `plugin-attendance` alongside the core app
+- ships `plugin-integration-core` so K3 WISE setup and `/api/integration/*` routes work in packaged deployments
 - does not restrict the app shell to `/attendance`
 
 ## Customer delivery checklist
@@ -125,5 +128,10 @@ For Windows Server, these wrappers delegate to `scripts/ops/multitable-onprem-ap
 2. copies the package contents into the current deploy root,
 3. installs dependencies if needed, runs migrations, and restarts PM2,
 4. preserves the existing `docker/app.env`.
+
+`node_modules` is intentionally excluded from the archive. The apply helper's
+default `InstallDeps=1` runs `pnpm install --frozen-lockfile` when
+`node_modules` is missing; manual file-copy deployments must run the same
+command before migrations, PM2 restart, or admin bootstrap.
 
 For a fresh Windows-only install, use `bootstrap-admin.bat` after `deploy.bat` so the customer can create the first admin account without needing bash or WSL.
