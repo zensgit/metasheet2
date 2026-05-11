@@ -147,7 +147,8 @@ async function main() {
     assert(bomUpsertResult.failed === 0, `expected 0 BOM failed, got ${bomUpsertResult.failed}`)
     const bomSaveCalls = mockK3.calls.filter((call) => call.pathname === '/K3API/BOM/Save')
     assert(bomSaveCalls.length === 1, `expected 1 BOM Save call, got ${bomSaveCalls.length}`)
-    assert(Array.isArray(bomSaveCalls[0].body?.Model?.FChildItems), 'BOM Save payload must include FChildItems array')
+    const bomPayload = bomSaveCalls[0].body?.Model || bomSaveCalls[0].body?.Data
+    assert(Array.isArray(bomPayload?.FChildItems), 'BOM Save payload must include FChildItems array')
     console.log('✓ step 6b: K3 BOM Save-only upsert wrote 1 BOM with FChildItems array')
 
     // 7. SQL channel readonly probe + safety check
