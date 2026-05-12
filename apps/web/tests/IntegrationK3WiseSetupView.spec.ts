@@ -81,6 +81,12 @@ describe('IntegrationK3WiseSetupView', () => {
     expect(container.textContent).toContain('1. 接通 K3')
     expect(container.textContent).toContain('2. 准备多维表')
     expect(container.textContent).toContain('基础连接')
+    expect(container.textContent).toContain('Tenant ID（作用域）')
+    expect(container.textContent).toContain('单租户实体机测试使用 default')
+    expect(container.textContent).toContain('Workspace ID（可选）')
+    expect(container.textContent).toContain('不要带 /K3API')
+    expect(container.textContent).toContain('WebAPI 状态')
+    expect(container.textContent).toContain('not saved')
     expect(container.textContent).toContain('多维表清洗准备')
     expect(container.textContent).toContain('K3 单据模板')
     expect(container.textContent).toContain('K3 WISE 物料')
@@ -95,5 +101,12 @@ describe('IntegrationK3WiseSetupView', () => {
     const sideRailSections = Array.from(container.querySelectorAll('details.k3-setup__collapsible-panel')) as HTMLDetailsElement[]
     expect(sideRailSections).toHaveLength(2)
     expect(sideRailSections.every((section) => section.open === false)).toBe(true)
+
+    const baseUrlInput = Array.from(container.querySelectorAll('input')).find((input) => input.placeholder === 'http://k3-server:port') as HTMLInputElement
+    baseUrlInput.value = 'http://k3.local/K3API/'
+    baseUrlInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    expect(container.textContent).toContain('当前 Base URL 含 /K3API')
   })
 })

@@ -25,6 +25,13 @@ import {
 } from '../src/services/integration/k3WiseSetup'
 
 describe('K3 WISE setup helpers', () => {
+  it('defaults tenant scope to default for single-tenant on-prem setup', () => {
+    const form = createDefaultK3WiseSetupForm()
+
+    expect(form.tenantId).toBe('default')
+    expect(form.workspaceId).toBe('')
+  })
+
   it('builds WebAPI and SQL Server external-system payloads from the setup form', () => {
     const form = createDefaultK3WiseSetupForm()
     Object.assign(form, {
