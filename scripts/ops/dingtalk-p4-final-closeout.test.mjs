@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -129,6 +130,37 @@ function writeMobileSignoffOutput(signoffDir, overrides = {}) {
     checks: mobileSignoffRequiredCheckIds.map((id) => ({ id, status: 'pass' })),
     ...overrides.redacted,
   })
+}
+
+function writeScreenshotArchiveOutput(archiveDir, overrides = {}) {
+  mkdirSync(path.join(archiveDir, 'screenshots'), { recursive: true })
+  const screenshotBytes = Buffer.from('not-a-real-png-but-stable-test-bytes\n')
+  const screenshotPath = path.join(archiveDir, 'screenshots', 'screenshot-001.png')
+  writeFileSync(screenshotPath, screenshotBytes)
+  const sha256 = createHash('sha256').update(screenshotBytes).digest('hex')
+
+  writeJson(path.join(archiveDir, 'manifest.json'), {
+    tool: 'dingtalk-screenshot-archive',
+    generatedAt: '2026-05-11T00:00:00.000Z',
+    status: 'pass',
+    allowEmpty: false,
+    outputDir: 'artifacts/dingtalk-screenshot-archive/test',
+    manifestJson: 'artifacts/dingtalk-screenshot-archive/test/manifest.json',
+    readmeMd: 'artifacts/dingtalk-screenshot-archive/test/README.md',
+    inputCount: 1,
+    screenshotCount: 1,
+    copiedScreenshots: [{
+      index: 1,
+      sourceLabel: 'operator-screenshot.png',
+      archivePath: 'screenshots/screenshot-001.png',
+      extension: '.png',
+      sizeBytes: screenshotBytes.length,
+      sha256,
+    }],
+    warnings: [],
+    ...overrides.manifest,
+  })
+  writeFileSync(path.join(archiveDir, 'README.md'), '# Screenshot archive\n\nStatus: pass\n', 'utf8')
 }
 
 function runScript(args) {
@@ -272,6 +304,49 @@ test('dingtalk-p4-final-closeout forwards strict mobile signoff into final hando
     assert.equal(closeoutSummary.final.mobileSignoffCount, 1)
     assert.match(closeoutSummary.steps[1].command, /--require-mobile-signoff-pass/)
     assert.match(readFileSync(path.join(packetDir, 'closeout-summary.md'), 'utf8'), /Mobile signoff gate: \*\*required\*\*/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-final-closeout forwards strict screenshot archive into final handoff', () => {
+  const tmpDir = makeTmpDir()
+  const sessionDir = path.join(tmpDir, '142-session')
+  const screenshotArchiveDir = path.join(tmpDir, 'screenshot-archive')
+  const packetDir = path.join(tmpDir, 'packet')
+  const docsDir = path.join(tmpDir, 'docs')
+
+  try {
+    writeReadyForFinalizeSession(sessionDir)
+    writeScreenshotArchiveOutput(screenshotArchiveDir)
+
+    const result = runScript([
+      '--session-dir',
+      sessionDir,
+      '--packet-output-dir',
+      packetDir,
+      '--include-screenshot-archive',
+      screenshotArchiveDir,
+      '--require-screenshot-archive-pass',
+      '--docs-output-dir',
+      docsDir,
+      '--date',
+      '20260423',
+      '--skip-docs',
+    ])
+
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    const handoffSummary = JSON.parse(readFileSync(path.join(packetDir, 'handoff-summary.json'), 'utf8'))
+    assert.equal(handoffSummary.status, 'pass')
+    assert.equal(handoffSummary.screenshotArchive.required, true)
+    assert.equal(handoffSummary.screenshotArchive.includedCount, 1)
+    assert.equal(handoffSummary.publishCheck.includedScreenshotArchiveCount, 1)
+    const closeoutSummary = JSON.parse(readFileSync(path.join(packetDir, 'closeout-summary.json'), 'utf8'))
+    assert.equal(closeoutSummary.status, 'pass')
+    assert.equal(closeoutSummary.final.screenshotArchiveRequired, true)
+    assert.equal(closeoutSummary.final.screenshotArchiveCount, 1)
+    assert.match(closeoutSummary.steps[1].command, /--require-screenshot-archive-pass/)
+    assert.match(readFileSync(path.join(packetDir, 'closeout-summary.md'), 'utf8'), /Screenshot archive gate: \*\*required\*\*/)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
