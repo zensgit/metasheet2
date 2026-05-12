@@ -88,9 +88,21 @@
           <div class="k3-setup__panel-head">
             <h2>连接测试</h2>
           </div>
+          <div class="k3-setup__connection-state">
+            <div class="k3-setup__record-main">
+              <strong>WebAPI 状态</strong>
+              <span class="k3-setup__badge" :data-status="webApiConnectionStatus.status">
+                {{ webApiConnectionStatus.label }}
+              </span>
+            </div>
+            <small>{{ webApiConnectionStatus.message }}</small>
+          </div>
           <button class="k3-setup__btn k3-setup__btn--full" type="button" :disabled="testingWebApi || !form.webApiSystemId" @click="testWebApi">
             {{ testingWebApi ? '测试中' : '测试 WebAPI' }}
           </button>
+          <p class="k3-setup__field-note">
+            先保存配置，再测试 WebAPI；测试通过后这里会显示已连接和最近测试时间。
+          </p>
           <button class="k3-setup__btn k3-setup__btn--full" type="button" :disabled="testingSql || !form.sqlSystemId" @click="testSqlServer">
             {{ testingSql ? '测试中' : '测试 SQL Server' }}
           </button>
@@ -266,12 +278,14 @@
           </div>
           <div class="k3-setup__grid">
             <label class="k3-setup__field">
-              <span>Tenant ID</span>
-              <input v-model.trim="form.tenantId" autocomplete="off" />
+              <span>Tenant ID（作用域）</span>
+              <input v-model.trim="form.tenantId" placeholder="default" autocomplete="off" />
+              <small>单租户实体机测试使用 default；它不是 K3 账套号。</small>
             </label>
             <label class="k3-setup__field">
-              <span>Workspace ID</span>
+              <span>Workspace ID（可选）</span>
               <input v-model.trim="form.workspaceId" autocomplete="off" />
+              <small>单工作区 PoC 建议留空；需要多工作区隔离时再填真实 ID。</small>
             </label>
             <label class="k3-setup__field">
               <span>系统名称</span>
@@ -293,7 +307,11 @@
             </label>
             <label class="k3-setup__field k3-setup__field--wide">
               <span>WebAPI Base URL</span>
-              <input v-model.trim="form.baseUrl" placeholder="https://k3.example.test/K3API/" autocomplete="off" />
+              <input v-model.trim="form.baseUrl" placeholder="http://k3-server:port" autocomplete="off" />
+              <small>只填协议、主机和端口；不要带 /K3API，下面的路径已包含 /K3API。</small>
+              <small v-if="baseUrlHasK3ApiPath" class="k3-setup__hint-warning">
+                当前 Base URL 含 /K3API；建议改为只到主机端口，保留高级路径的 /K3API/... 默认值。
+              </small>
             </label>
             <label class="k3-setup__field">
               <span>认证模式</span>
@@ -330,6 +348,9 @@
             <span>高级 WebAPI 设置</span>
             <small>路径、语言、超时和 Submit/Audit 策略；默认值通常可直接使用</small>
           </summary>
+          <p class="k3-setup__field-note k3-setup__field-note--wide">
+            这些路径会相对 WebAPI Base URL 请求。实体机 PoC 推荐 Base URL 只写 http://K3主机:端口，Token/Save/BOM 路径保留 /K3API/...。
+          </p>
           <div class="k3-setup__grid">
             <label v-if="form.webApiAuthMode === 'authority-code'" class="k3-setup__field">
               <span>Token Path</span>
@@ -664,6 +685,44 @@ const deployGateSummary = computed(() => summarizeK3WiseDeployGateChecklist(depl
 const observationSummary = computed(() => `${pipelineRuns.value.length} runs / ${deadLetters.value.length} open`)
 const stagingDescriptorLabel = computed(() => stagingDescriptors.value.length > 0 ? `${stagingDescriptors.value.length} descriptors` : 'not loaded')
 const templatePreviewJson = computed(() => JSON.stringify(buildK3WiseDocumentPayloadPreview(templatePreviewTarget.value), null, 2))
+const selectedWebApiSystem = computed(() => webApiSystems.value.find((system) => system.id === form.webApiSystemId) || null)
+const baseUrlHasK3ApiPath = computed(() => /\/k3api(?:\/|$)/i.test(form.baseUrl.trim()))
+const webApiConnectionStatus = computed(() => {
+  if (testingWebApi.value) {
+    return {
+      status: 'partial',
+      label: 'testing',
+      message: '正在向已保存的 K3 WISE WebAPI 配置发起连接测试。',
+    }
+  }
+  if (!form.webApiSystemId) {
+    return {
+      status: 'open',
+      label: 'not saved',
+      message: '还没有保存 K3 WISE WebAPI 配置；保存后才能测试连接。',
+    }
+  }
+  const system = selectedWebApiSystem.value
+  if (system?.lastError) {
+    return {
+      status: 'failed',
+      label: 'failed',
+      message: `上次连接测试失败：${system.lastError}`,
+    }
+  }
+  if (system?.lastTestedAt) {
+    return {
+      status: 'succeeded',
+      label: 'connected',
+      message: `已连接 K3 WISE WebAPI；最近测试 ${formatTimestamp(system.lastTestedAt)}。`,
+    }
+  }
+  return {
+    status: 'open',
+    label: 'untested',
+    message: '配置已保存，但尚未测试；点击“测试 WebAPI”确认是否连上 K3。',
+  }
+})
 
 function setStatus(message: string, kind: 'info' | 'success' | 'error' = 'info'): void {
   statusMessage.value = message
@@ -1172,6 +1231,10 @@ onMounted(() => {
   grid-column: 1 / -1;
 }
 
+.k3-setup__hint-warning {
+  color: #92400e;
+}
+
 .k3-setup__field input,
 .k3-setup__field select,
 .k3-setup__field textarea {
@@ -1281,6 +1344,24 @@ onMounted(() => {
 
 .k3-setup__saved-error {
   color: #9f1239;
+  overflow-wrap: anywhere;
+}
+
+.k3-setup__connection-state {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 10px;
+  background: #f8fafc;
+}
+
+.k3-setup__connection-state small {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
   overflow-wrap: anywhere;
 }
 

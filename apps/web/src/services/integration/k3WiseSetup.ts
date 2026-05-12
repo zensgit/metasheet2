@@ -418,6 +418,10 @@ function getLocalStorageValue(key: string): string {
   return localStorage.getItem(key) || ''
 }
 
+function getDefaultTenantId(): string {
+  return getLocalStorageValue('tenantId') || 'default'
+}
+
 export function splitList(value: string): string[] {
   return value
     .split(/\r?\n|,/)
@@ -586,7 +590,7 @@ function validateHttpUrl(value: string, field: keyof K3WiseSetupForm, issues: K3
 }
 
 export function createDefaultK3WiseSetupForm(): K3WiseSetupForm {
-  const tenantId = getLocalStorageValue('tenantId')
+  const tenantId = getDefaultTenantId()
   const workspaceId = getLocalStorageValue('workspaceId')
   return {
     tenantId,
