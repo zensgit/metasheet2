@@ -644,6 +644,46 @@ test('compile-dingtalk-p4-smoke-evidence strict mode requires structured no-emai
   }
 })
 
+test('compile-dingtalk-p4-smoke-evidence strict mode rejects no-email admin evidence for a different target account', () => {
+  const tmpDir = makeTmpDir()
+  const evidencePath = path.join(tmpDir, 'evidence.json')
+  const outputDir = path.join(tmpDir, 'compiled')
+
+  try {
+    writeEvidence(evidencePath, {
+      checks: requiredIds.map((id) => ({
+        id,
+        status: 'pass',
+        evidence: makePassingEvidenceForCheck(id, id === 'no-email-user-create-bind'
+          ? {
+              adminEvidence: {
+                emailWasBlank: true,
+                createdLocalUserId: 'local_no_email_001',
+                targetDingTalkExternalId: 'dt_no_email_expected',
+                boundDingTalkExternalId: 'dt_no_email_other',
+                accountLinkedAfterRefresh: true,
+                temporaryPasswordRedacted: true,
+              },
+            }
+          : {}),
+      })),
+    })
+
+    const result = spawnSync(process.execPath, [scriptPath, '--input', evidencePath, '--output-dir', outputDir, '--strict'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /bound_dingtalk_external_id_mismatch/)
+    const summary = JSON.parse(readFileSync(path.join(outputDir, 'summary.json'), 'utf8'))
+    assert.equal(summary.overallStatus, 'fail')
+    assert.equal(summary.manualEvidenceIssues.some((issue) => issue.code === 'bound_dingtalk_external_id_mismatch'), true)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('compile-dingtalk-p4-smoke-evidence strict mode fails when required checks are not passed', () => {
   const tmpDir = makeTmpDir()
   const evidencePath = path.join(tmpDir, 'evidence.json')

@@ -84,7 +84,8 @@ Options:
   --admin-created-local-user-id <id>
                              Set evidence.adminEvidence.createdLocalUserId
   --admin-bound-dingtalk-external-id <id>
-                             Set evidence.adminEvidence.boundDingTalkExternalId
+                             Set evidence.adminEvidence.boundDingTalkExternalId;
+                             must match targetDingTalkExternalId when the smoke template has one
   --admin-account-linked-after-refresh
                              Set evidence.adminEvidence.accountLinkedAfterRefresh=true
   --no-refresh-status        Skip automatic smoke-status refresh after write
@@ -470,6 +471,20 @@ function validateNoEmailAdminPass(opts) {
   }
 }
 
+function normalizeComparableId(value) {
+  return isNonEmptyString(value) ? value.trim() : ''
+}
+
+function validateNoEmailTargetMatch(previousEvidence, opts) {
+  if (opts.checkId !== 'no-email-user-create-bind' || opts.status !== 'pass') return
+  const targetDingTalkExternalId = normalizeComparableId(previousEvidence?.adminEvidence?.targetDingTalkExternalId)
+  if (!targetDingTalkExternalId) return
+  const boundDingTalkExternalId = normalizeComparableId(opts.adminBoundDingTalkExternalId)
+  if (boundDingTalkExternalId !== targetDingTalkExternalId) {
+    throw new Error('no-email-user-create-bind pass evidence requires --admin-bound-dingtalk-external-id to match evidence.adminEvidence.targetDingTalkExternalId')
+  }
+}
+
 function validateInputs(opts) {
   for (const [label, value] of [
     ['--source', opts.source],
@@ -699,6 +714,7 @@ function updateEvidence(evidence, opts) {
   const previousEvidence = check.evidence && typeof check.evidence === 'object' && !Array.isArray(check.evidence)
     ? check.evidence
     : {}
+  validateNoEmailTargetMatch(previousEvidence, opts)
   const updatedCheck = {
     ...check,
     status: opts.status,
