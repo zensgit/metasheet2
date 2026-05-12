@@ -363,6 +363,82 @@ describe('MetaAutomationRuleEditor', () => {
     })
   })
 
+  it('serializes numeric list condition values as numbers', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Score list condition'
+    nameInput.dispatchEvent(new Event('input'))
+
+    ;(container.querySelector('[data-action="add-condition"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
+    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
+    fieldSelect.value = 'fld_score'
+    fieldSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const operatorSelect = Array.from(conditionRow.querySelectorAll('select'))[1] as HTMLSelectElement
+    operatorSelect.value = 'in'
+    operatorSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const valueInput = conditionRow.querySelector('input') as HTMLInputElement
+    expect(valueInput.type).toBe('text')
+    expect(valueInput.placeholder).toBe('Comma-separated values')
+    valueInput.value = '1, 2.5, -3'
+    valueInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].conditions).toEqual({
+      conjunction: 'AND',
+      conditions: [{ fieldId: 'fld_score', operator: 'in', value: [1, 2.5, -3] }],
+    })
+  })
+
+  it('keeps save disabled for invalid numeric list condition values', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Invalid score list condition'
+    nameInput.dispatchEvent(new Event('input'))
+
+    ;(container.querySelector('[data-action="add-condition"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
+    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
+    fieldSelect.value = 'fld_score'
+    fieldSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const operatorSelect = Array.from(conditionRow.querySelectorAll('select'))[1] as HTMLSelectElement
+    operatorSelect.value = 'not_in'
+    operatorSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const valueInput = conditionRow.querySelector('input') as HTMLInputElement
+    valueInput.value = '1, nope'
+    valueInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(true)
+    saveBtn.click()
+    await flushPromises()
+
+    expect(saved).not.toHaveBeenCalled()
+  })
+
   it('serializes boolean condition values as booleans', async () => {
     const saved = vi.fn()
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })

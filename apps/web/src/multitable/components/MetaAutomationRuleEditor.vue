@@ -1144,6 +1144,7 @@ function conditionValueWidget(condition: AutomationCondition): ConditionValueWid
 }
 
 function conditionValueInputType(condition: AutomationCondition): string {
+  if (isArrayOperator(condition.operator)) return 'text'
   const widget = conditionValueWidget(condition)
   if (widget === 'number') return 'number'
   if (widget === 'date') return 'date'
@@ -1152,6 +1153,7 @@ function conditionValueInputType(condition: AutomationCondition): string {
 }
 
 function conditionValueInputMode(condition: AutomationCondition): 'decimal' | undefined {
+  if (isArrayOperator(condition.operator)) return undefined
   return conditionValueWidget(condition) === 'number' ? 'decimal' : undefined
 }
 
@@ -1298,6 +1300,13 @@ function parseNumberConditionValue(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null
 }
 
+function parseNumericConditionArrayValue(value: unknown): number[] | null {
+  const values = parseConditionArrayValue(value)
+  if (!values.length) return null
+  const numbers = values.map(parseNumberConditionValue)
+  return numbers.every((entry): entry is number => entry !== null) ? numbers : null
+}
+
 function parseBooleanConditionValue(value: unknown): boolean | null {
   if (value === true || value === false) return value
   if (value === 'true') return true
@@ -1310,9 +1319,12 @@ function conditionFieldType(fieldId: string): string | undefined {
 }
 
 function buildConditionValuePayload(condition: AutomationCondition): unknown {
-  if (isArrayOperator(condition.operator)) return parseConditionArrayValue(condition.value)
-
   const fieldType = conditionFieldType(condition.fieldId)
+  if (isArrayOperator(condition.operator)) {
+    return isNumericConditionFieldType(fieldType)
+      ? parseNumericConditionArrayValue(condition.value) ?? []
+      : parseConditionArrayValue(condition.value)
+  }
   if (isNumericConditionFieldType(fieldType)) {
     return parseNumberConditionValue(condition.value)
   }
@@ -1325,8 +1337,12 @@ function buildConditionValuePayload(condition: AutomationCondition): unknown {
 function isConditionLeafComplete(condition: AutomationCondition): boolean {
   if (!condition.fieldId.trim()) return false
   if (isUnaryOperator(condition.operator)) return true
-  if (isArrayOperator(condition.operator)) return parseConditionArrayValue(condition.value).length > 0
   const fieldType = conditionFieldType(condition.fieldId)
+  if (isArrayOperator(condition.operator)) {
+    return isNumericConditionFieldType(fieldType)
+      ? parseNumericConditionArrayValue(condition.value) !== null
+      : parseConditionArrayValue(condition.value).length > 0
+  }
   if (isNumericConditionFieldType(fieldType)) return parseNumberConditionValue(condition.value) !== null
   if (fieldType === 'boolean') return parseBooleanConditionValue(condition.value) !== null
   return typeof condition.value === 'string'
