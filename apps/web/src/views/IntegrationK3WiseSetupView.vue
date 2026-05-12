@@ -7,7 +7,7 @@
         <p class="k3-setup__lead">先接通 K3 WISE，再把 PLM 数据放进多维表清洗，最后 dry-run 后推送 ERP。</p>
       </div>
       <div class="k3-setup__header-actions">
-        <button class="k3-setup__btn" type="button" :disabled="loading" @click="loadSystems">
+        <button class="k3-setup__btn" type="button" :disabled="loading" @click="loadSystems(false)">
           {{ loading ? '刷新中' : '刷新' }}
         </button>
         <button class="k3-setup__btn k3-setup__btn--primary" type="button" :disabled="saving" @click="saveConfiguration">
@@ -668,6 +668,12 @@ const testResult = ref('')
 const stagingResult = ref('')
 const pipelineResult = ref('')
 const pipelineRunResult = ref('')
+const webApiLastTest = ref<{
+  systemId: string
+  ok: boolean
+  lastTestedAt: string
+  lastError: string | null
+} | null>(null)
 const pipelineRuns = ref<IntegrationPipelineRun[]>([])
 const deadLetters = ref<IntegrationDeadLetter[]>([])
 const stagingDescriptors = ref<IntegrationStagingDescriptor[]>([])
@@ -700,6 +706,20 @@ const webApiConnectionStatus = computed(() => {
       status: 'open',
       label: 'not saved',
       message: '还没有保存 K3 WISE WebAPI 配置；保存后才能测试连接。',
+    }
+  }
+  if (webApiLastTest.value?.systemId === form.webApiSystemId) {
+    if (webApiLastTest.value.ok) {
+      return {
+        status: 'succeeded',
+        label: 'connected',
+        message: `已连接 K3 WISE WebAPI；最近测试 ${formatTimestamp(webApiLastTest.value.lastTestedAt)}。`,
+      }
+    }
+    return {
+      status: 'failed',
+      label: 'failed',
+      message: `上次连接测试失败：${webApiLastTest.value.lastError || 'K3 WISE WebAPI returned an unsuccessful test result'}`,
     }
   }
   const system = selectedWebApiSystem.value
@@ -766,13 +786,42 @@ function isTemplateMappingRequired(mapping: K3WiseDocumentTemplateMapping): bool
   return validation.some((item) => Boolean(item && typeof item === 'object' && (item as { type?: unknown }).type === 'required'))
 }
 
+function getTestResultSystem(result: Record<string, unknown>): IntegrationExternalSystem | null {
+  const system = result.system
+  if (!system || typeof system !== 'object' || Array.isArray(system)) return null
+  const candidate = system as Partial<IntegrationExternalSystem>
+  if (typeof candidate.id !== 'string' || typeof candidate.name !== 'string' || typeof candidate.kind !== 'string') return null
+  return candidate as IntegrationExternalSystem
+}
+
+function upsertLocalWebApiSystem(system: IntegrationExternalSystem): void {
+  if (system.kind !== K3_WISE_WEBAPI_KIND) return
+  const index = webApiSystems.value.findIndex((item) => item.id === system.id)
+  if (index === -1) {
+    webApiSystems.value = [system, ...webApiSystems.value]
+    return
+  }
+  const next = [...webApiSystems.value]
+  next[index] = { ...next[index], ...system }
+  webApiSystems.value = next
+}
+
+function buildConnectionTestPayload(): Record<string, unknown> {
+  return {
+    tenantId: form.tenantId.trim(),
+    workspaceId: form.workspaceId.trim() || null,
+    skipHealth: !form.healthPath.trim(),
+  }
+}
+
 function loadSystemIntoForm(system: IntegrationExternalSystem): void {
   Object.assign(form, applyExternalSystemToForm(form, system))
   testResult.value = ''
+  webApiLastTest.value = null
   setStatus(`已载入 ${system.name}`, 'info')
 }
 
-async function loadSystems(): Promise<void> {
+async function loadSystems(silent = false): Promise<void> {
   loading.value = true
   try {
     const [webApi, sql] = await Promise.all([
@@ -783,9 +832,9 @@ async function loadSystems(): Promise<void> {
     sqlSystems.value = sql
     if (!form.webApiSystemId && webApi[0]) loadSystemIntoForm(webApi[0])
     if (!form.sqlSystemId && sql[0]) loadSystemIntoForm(sql[0])
-    setStatus('K3 WISE 配置已刷新', 'success')
+    if (!silent) setStatus('K3 WISE 配置已刷新', 'success')
   } catch (error) {
-    setStatus(formatError(error), 'error')
+    if (!silent) setStatus(formatError(error), 'error')
   } finally {
     loading.value = false
   }
@@ -798,6 +847,7 @@ async function saveConfiguration(): Promise<void> {
     return
   }
   saving.value = true
+  webApiLastTest.value = null
   try {
     const payloads = buildK3WiseSetupPayloads(form)
     const webApi = await upsertIntegrationSystem(payloads.webApi)
@@ -808,7 +858,7 @@ async function saveConfiguration(): Promise<void> {
       form.sqlSystemId = sql.id
       form.sqlHasCredentials = sql.hasCredentials === true
     }
-    await loadSystems()
+    await loadSystems(true)
     setStatus('K3 WISE 对接配置已保存', 'success')
   } catch (error) {
     setStatus(formatError(error), 'error')
@@ -822,11 +872,28 @@ async function testWebApi(): Promise<void> {
   testingWebApi.value = true
   testResult.value = ''
   try {
-    const result = await testIntegrationSystem(form.webApiSystemId, { skipHealth: !form.healthPath.trim() })
+    const result = await testIntegrationSystem(form.webApiSystemId, buildConnectionTestPayload())
     testResult.value = JSON.stringify(result, null, 2)
-    await loadSystems()
-    setStatus('WebAPI 连接测试完成', 'success')
+    const testedSystem = getTestResultSystem(result)
+    if (testedSystem) upsertLocalWebApiSystem(testedSystem)
+    const lastTestedAt = testedSystem?.lastTestedAt || new Date().toISOString()
+    const lastError = typeof result.message === 'string' ? result.message : testedSystem?.lastError || null
+    webApiLastTest.value = {
+      systemId: form.webApiSystemId,
+      ok: result.ok === true,
+      lastTestedAt,
+      lastError,
+    }
+    testingWebApi.value = false
+    void loadSystems(true)
+    setStatus(result.ok === true ? 'WebAPI 连接测试完成' : 'WebAPI 连接测试失败', result.ok === true ? 'success' : 'error')
   } catch (error) {
+    webApiLastTest.value = {
+      systemId: form.webApiSystemId,
+      ok: false,
+      lastTestedAt: new Date().toISOString(),
+      lastError: formatError(error),
+    }
     setStatus(formatError(error), 'error')
   } finally {
     testingWebApi.value = false
@@ -838,9 +905,9 @@ async function testSqlServer(): Promise<void> {
   testingSql.value = true
   testResult.value = ''
   try {
-    const result = await testIntegrationSystem(form.sqlSystemId)
+    const result = await testIntegrationSystem(form.sqlSystemId, buildConnectionTestPayload())
     testResult.value = JSON.stringify(result, null, 2)
-    await loadSystems()
+    await loadSystems(true)
     setStatus('SQL Server 通道测试完成', 'success')
   } catch (error) {
     setStatus(formatError(error), 'error')
@@ -974,7 +1041,7 @@ async function executePipeline(target: K3WisePipelineTarget, dryRun: boolean): P
 }
 
 onMounted(() => {
-  void loadSystems()
+  void loadSystems(true)
   void loadStagingDescriptors(true)
 })
 </script>

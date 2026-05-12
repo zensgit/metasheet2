@@ -109,4 +109,68 @@ describe('IntegrationK3WiseSetupView', () => {
 
     expect(container.textContent).toContain('当前 Base URL 含 /K3API')
   })
+
+  it('sends tenant scope when testing the saved WebAPI system', async () => {
+    const system = {
+      id: 'k3_sys_1',
+      tenantId: 'default',
+      workspaceId: null,
+      name: 'K3 WISE WebAPI',
+      kind: 'erp:k3-wise-webapi',
+      role: 'target',
+      status: 'active',
+      hasCredentials: true,
+      config: {
+        version: 'K3 WISE 15.x',
+        baseUrl: 'http://k3.local',
+      },
+      capabilities: {},
+    }
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.startsWith('/api/integration/external-systems?kind=erp%3Ak3-wise-webapi')) {
+        return jsonResponse([system])
+      }
+      if (url.startsWith('/api/integration/external-systems?kind=erp%3Ak3-wise-sqlserver')) {
+        return jsonResponse([])
+      }
+      if (url === '/api/integration/external-systems/k3_sys_1/test') {
+        const body = JSON.parse(String(init?.body || '{}'))
+        expect(body).toMatchObject({
+          tenantId: 'default',
+          workspaceId: null,
+          skipHealth: true,
+        })
+        return jsonResponse({
+          ok: true,
+          status: 200,
+          authenticated: true,
+          system: {
+            ...system,
+            lastTestedAt: '2026-05-12T10:00:00.000Z',
+            lastError: null,
+          },
+        })
+      }
+      if (url === '/api/integration/staging/descriptors') {
+        return jsonResponse([])
+      }
+      return jsonResponse({})
+    })
+
+    const View = (await import('../src/views/IntegrationK3WiseSetupView.vue')).default
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.mount(container)
+    await flushUi()
+
+    const button = Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('测试 WebAPI')) as HTMLButtonElement
+    expect(button.disabled).toBe(false)
+    button.click()
+    await flushUi(8)
+
+    expect(container.textContent).toContain('connected')
+    expect(container.textContent).toContain('WebAPI 连接测试完成')
+  })
 })
