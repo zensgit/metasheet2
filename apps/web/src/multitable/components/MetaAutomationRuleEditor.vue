@@ -1232,6 +1232,8 @@ function onConditionFieldChange(condition: AutomationCondition, fieldId: string)
   const allowedOperators = conditionOperatorsForField(fieldId)
   if (!previousFieldId || !allowedOperators.some((operator) => operator.value === condition.operator)) {
     condition.operator = firstOperatorForField(fieldId)
+  }
+  if (previousFieldId !== fieldId) {
     resetConditionValue(condition)
   }
 }

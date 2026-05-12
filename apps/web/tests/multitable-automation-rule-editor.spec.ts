@@ -581,6 +581,70 @@ describe('MetaAutomationRuleEditor', () => {
     })
   })
 
+  it('clears stale condition values when switching between compatible fields', async () => {
+    const saved = vi.fn()
+    const fieldsWithSecondSelect = [
+      ...fields,
+      {
+        id: 'fld_stage',
+        name: 'Stage',
+        type: 'select',
+        options: [
+          { value: 'todo', label: 'Todo' },
+          { value: 'done', label: 'Done' },
+        ],
+      },
+    ]
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields: fieldsWithSecondSelect,
+      onSave: saved,
+    })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Stage condition'
+    nameInput.dispatchEvent(new Event('input'))
+
+    ;(container.querySelector('[data-action="add-condition"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
+    const [fieldSelect, operatorSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
+    fieldSelect.value = 'fld_priority'
+    fieldSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const priorityValueSelect = conditionRow.querySelector('[data-condition-value="select"]') as HTMLSelectElement
+    priorityValueSelect.value = 'high'
+    priorityValueSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+    expect((container.querySelector('[data-action="save"]') as HTMLButtonElement).disabled).toBe(false)
+
+    fieldSelect.value = 'fld_stage'
+    fieldSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const stageValueSelect = conditionRow.querySelector('[data-condition-value="select"]') as HTMLSelectElement
+    expect(operatorSelect.value).toBe('equals')
+    expect(stageValueSelect.value).toBe('')
+    expect((container.querySelector('[data-action="save"]') as HTMLButtonElement).disabled).toBe(true)
+
+    stageValueSelect.value = 'todo'
+    stageValueSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].conditions).toEqual({
+      conjunction: 'AND',
+      conditions: [{ fieldId: 'fld_stage', operator: 'equals', value: 'todo' }],
+    })
+  })
+
   it('uses configured select options for list membership conditions', async () => {
     const saved = vi.fn()
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
