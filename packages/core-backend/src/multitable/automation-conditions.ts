@@ -100,6 +100,7 @@ export interface AutomationCondition {
 export type AutomationConditionField = {
   id: string
   type: string
+  property?: unknown
 }
 
 export type AutomationConditionNode = AutomationCondition | ConditionGroup
@@ -123,6 +124,38 @@ function isConditionGroup(node: AutomationConditionNode): node is ConditionGroup
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function normalizeJsonObject(value: unknown): Record<string, unknown> {
+  if (isPlainObject(value)) return value
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value) as unknown
+      return isPlainObject(parsed) ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+  return {}
+}
+
+function configuredOptionValuesForField(field: AutomationConditionField): Set<string> | null {
+  if (field.type !== 'select' && field.type !== 'multiSelect') return null
+
+  const property = normalizeJsonObject(field.property)
+  const options = property.options
+  if (!Array.isArray(options)) return null
+
+  const values: string[] = []
+  for (const option of options) {
+    if (!isPlainObject(option)) continue
+    const value = option.value
+    if (typeof value === 'string' || typeof value === 'number') {
+      values.push(String(value))
+    }
+  }
+
+  return values.length > 0 ? new Set(values) : null
 }
 
 function resolveGroupLogic(conditionGroup: ConditionGroup): 'and' | 'or' {
@@ -320,6 +353,33 @@ function assertConditionValueType(
   })
 }
 
+function assertConditionOptionValues(
+  condition: AutomationCondition,
+  field: AutomationConditionField,
+  path: string,
+): void {
+  if (!VALUE_REQUIRED_OPERATORS.has(condition.operator)) return
+
+  const optionValues = configuredOptionValuesForField(field)
+  if (!optionValues) return
+
+  const values = ARRAY_VALUE_OPERATORS.has(condition.operator)
+    ? condition.value as unknown[]
+    : [condition.value]
+
+  values.forEach((value, index) => {
+    if (typeof value !== 'string') return
+    if (optionValues.has(value)) return
+
+    const valuePath = ARRAY_VALUE_OPERATORS.has(condition.operator)
+      ? `${path}.value[${index}]`
+      : `${path}.value`
+    throw new ConditionGroupValidationError(
+      `${valuePath} is not a configured option for field ${field.id}: ${value}`,
+    )
+  })
+}
+
 function validateConditionNodeAgainstFields(
   node: AutomationConditionNode,
   fieldsById: Map<string, AutomationConditionField>,
@@ -345,6 +405,7 @@ function validateConditionNodeAgainstFields(
   }
 
   assertConditionValueType(node, field.type, path)
+  assertConditionOptionValues(node, field, path)
 }
 
 export function validateConditionGroupAgainstFields(

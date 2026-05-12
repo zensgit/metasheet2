@@ -155,7 +155,8 @@ function serializeAutomationConditionFieldRows(rows: unknown[]): AutomationCondi
       const record = row as Record<string, unknown>
       const id = typeof record.id === 'string' ? record.id : ''
       const type = typeof record.type === 'string' ? record.type : ''
-      return id && type ? { id, type } : null
+      const property = Object.prototype.hasOwnProperty.call(record, 'property') ? record.property : undefined
+      return id && type ? { id, type, ...(property !== undefined ? { property } : {}) } : null
     })
     .filter((field): field is AutomationConditionField => !!field)
 }
@@ -941,7 +942,7 @@ export async function preflightAutomationConditionFields(
   if (!conditions) return
 
   const fieldRes = await queryFn(
-    'SELECT id, type FROM meta_fields WHERE sheet_id = $1',
+    'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1',
     [sheetId],
   )
   try {

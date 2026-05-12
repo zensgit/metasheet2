@@ -196,4 +196,54 @@ describe('multitable automation conditions', () => {
       }],
     }, fields)).toThrow('conditions.conditions[0].conditions[0].value must not be empty for in')
   })
+
+  it('validates select and multiSelect condition values against configured options', () => {
+    const fields = [
+      {
+        id: 'status',
+        type: 'select',
+        property: { options: [{ value: 'Ready' }, { value: 'Blocked' }] },
+      },
+      {
+        id: 'tags',
+        type: 'multiSelect',
+        property: { options: [{ value: 'VIP' }, { value: 'Internal' }] },
+      },
+    ]
+
+    expect(() => validateConditionGroupAgainstFields({
+      conjunction: 'AND',
+      conditions: [
+        { fieldId: 'status', operator: 'equals', value: 'Ready' },
+        { fieldId: 'status', operator: 'in', value: ['Ready', 'Blocked'] },
+        { fieldId: 'tags', operator: 'contains', value: 'VIP' },
+        { fieldId: 'tags', operator: 'not_in', value: ['Internal'] },
+      ],
+    }, fields)).not.toThrow()
+
+    expect(() => validateConditionGroupAgainstFields({
+      conjunction: 'AND',
+      conditions: [{ fieldId: 'status', operator: 'equals', value: 'Done' }],
+    }, fields)).toThrow('conditions.conditions[0].value is not a configured option for field status: Done')
+
+    expect(() => validateConditionGroupAgainstFields({
+      conjunction: 'AND',
+      conditions: [{ fieldId: 'tags', operator: 'not_in', value: ['VIP', 'External'] }],
+    }, fields)).toThrow('conditions.conditions[0].value[1] is not a configured option for field tags: External')
+  })
+
+  it('keeps select-like fields without configured options backward compatible', () => {
+    const fields = [
+      { id: 'status', type: 'select', property: { options: [] } },
+      { id: 'tags', type: 'multiSelect', property: {} },
+    ]
+
+    expect(() => validateConditionGroupAgainstFields({
+      conjunction: 'AND',
+      conditions: [
+        { fieldId: 'status', operator: 'equals', value: 'Legacy status' },
+        { fieldId: 'tags', operator: 'in', value: ['Legacy tag'] },
+      ],
+    }, fields)).not.toThrow()
+  })
 })
