@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { readFile } from 'node:fs/promises'
 import {
   applyExternalSystemToForm,
+  buildK3WiseDocumentPayloadPreview,
   buildK3WiseDeployGateChecklist,
   buildK3WisePipelineObservationQuery,
   buildK3WisePipelinePayloads,
@@ -12,6 +13,7 @@ import {
   formatIntegrationStagingDescriptorFieldSummary,
   getIntegrationStagingFieldCount,
   getK3WisePipelineId,
+  listK3WiseDocumentTemplates,
   splitList,
   summarizeK3WiseDeployGateChecklist,
   validateK3WisePipelineObservationForm,
@@ -299,6 +301,11 @@ describe('K3 WISE setup helpers', () => {
       status: 'draft',
       idempotencyKeyFields: ['sourceId', 'revision'],
       options: {
+        k3Template: {
+          id: 'k3wise.material.v1',
+          version: '2026.05.v1',
+          documentType: 'material',
+        },
         target: {
           autoSubmit: false,
           autoAudit: false,
@@ -320,6 +327,11 @@ describe('K3 WISE setup helpers', () => {
       targetObject: 'bom',
       mode: 'manual',
       options: {
+        k3Template: {
+          id: 'k3wise.bom.v1',
+          version: '2026.05.v1',
+          documentType: 'bom',
+        },
         target: {
           autoSubmit: false,
           autoAudit: false,
@@ -335,6 +347,33 @@ describe('K3 WISE setup helpers', () => {
         expect.objectContaining({ sourceField: 'quantity', targetField: 'FQty' }),
       ]),
     )
+  })
+
+  it('renders K3 document template payload previews without internal or secret fields', () => {
+    const templates = listK3WiseDocumentTemplates()
+    expect(templates.map((template) => template.targetObject)).toEqual(['material', 'bom'])
+
+    const materialPreview = buildK3WiseDocumentPayloadPreview('material')
+    const bomPreview = buildK3WiseDocumentPayloadPreview('bom')
+
+    expect(materialPreview).toEqual({
+      Data: {
+        FNumber: 'MAT-001',
+        FName: 'Bolt',
+        FModel: 'M6 x 20',
+        FBaseUnitID: 'Pcs',
+      },
+    })
+    expect(bomPreview).toEqual({
+      Data: {
+        FParentItemNumber: 'FG-001',
+        FChildItemNumber: 'MAT-001',
+        FQty: 2,
+        FUnitID: 'PCS',
+        FEntryID: 1,
+      },
+    })
+    expect(JSON.stringify(materialPreview)).not.toMatch(/authorityCode|Token|password|sourceId|revision|_integration/i)
   })
 
   it('requires saved PLM source and K3 target systems before pipeline template creation', () => {

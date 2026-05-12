@@ -17,6 +17,12 @@ const {
   normalizeUpsertRequest,
   unsupportedAdapterOperation,
 } = require('../contracts.cjs')
+const {
+  getK3WiseDocumentObjectDefaults,
+  listK3WiseDocumentTemplates,
+  mergeK3WiseDocumentObject,
+  normalizeTemplate,
+} = require('./k3-wise-document-templates.cjs')
 
 class K3WiseWebApiAdapterError extends Error {
   constructor(message, details = {}) {
@@ -27,39 +33,7 @@ class K3WiseWebApiAdapterError extends Error {
   }
 }
 
-const DEFAULT_OBJECTS = {
-  material: {
-    label: 'K3 WISE Material',
-    operations: ['upsert'],
-    savePath: '/K3API/Material/Save',
-    submitPath: '/K3API/Material/Submit',
-    auditPath: '/K3API/Material/Audit',
-    bodyKey: 'Data',
-    keyField: 'FNumber',
-    keyParam: 'Number',
-    schema: [
-      { name: 'FNumber', label: 'Material code', type: 'string', required: true },
-      { name: 'FName', label: 'Material name', type: 'string', required: true },
-      { name: 'FModel', label: 'Specification', type: 'string' },
-      { name: 'FBaseUnitID', label: 'Base unit', type: 'string' },
-    ],
-  },
-  bom: {
-    label: 'K3 WISE BOM',
-    operations: ['upsert'],
-    savePath: '/K3API/BOM/Save',
-    submitPath: '/K3API/BOM/Submit',
-    auditPath: '/K3API/BOM/Audit',
-    bodyKey: 'Data',
-    keyField: 'FNumber',
-    keyParam: 'Number',
-    schema: [
-      { name: 'FNumber', label: 'BOM code', type: 'string', required: true },
-      { name: 'FParentItemNumber', label: 'Parent material code', type: 'string', required: true },
-      { name: 'FChildItems', label: 'BOM children', type: 'array', required: true },
-    ],
-  },
-}
+const DEFAULT_OBJECTS = getK3WiseDocumentObjectDefaults()
 
 function isPlainObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
@@ -193,7 +167,17 @@ function normalizeObjects(config) {
   const configured = toPlainObject(config.objects, 'config.objects')
   const normalized = {}
   for (const [name, defaults] of Object.entries(DEFAULT_OBJECTS)) {
-    normalized[name] = { ...defaults, ...(isPlainObject(configured[name]) ? configured[name] : {}) }
+    try {
+      normalized[name] = mergeK3WiseDocumentObject(
+        defaults,
+        isPlainObject(configured[name]) ? configured[name] : {},
+        `config.objects.${name}`,
+      )
+    } catch (error) {
+      throw new AdapterValidationError(error.message, {
+        field: `config.objects.${name}`,
+      })
+    }
   }
   for (const [name, value] of Object.entries(configured)) {
     if (normalized[name]) continue
@@ -202,7 +186,13 @@ function normalizeObjects(config) {
         field: `config.objects.${name}`,
       })
     }
-    normalized[name] = { operations: ['upsert'], ...value }
+    try {
+      normalized[name] = normalizeTemplate({ operations: ['upsert'], ...value }, `config.objects.${name}`)
+    } catch (error) {
+      throw new AdapterValidationError(error.message, {
+        field: `config.objects.${name}`,
+      })
+    }
   }
   return normalized
 }
@@ -240,8 +230,26 @@ function buildSaveBody(record, request, objectConfig) {
   }
   const bodyKey = objectConfig.bodyKey || 'Data'
   const base = isPlainObject(objectConfig.bodyTemplate) ? { ...objectConfig.bodyTemplate } : {}
-  base[bodyKey] = record
+  base[bodyKey] = projectRecordForBody(record, objectConfig)
   return base
+}
+
+function projectRecordForBody(record, objectConfig) {
+  if (objectConfig.passThroughBody === true) return record
+  if (!isPlainObject(record)) return record
+  const schemaFields = Array.isArray(objectConfig.schema)
+    ? objectConfig.schema
+      .map((field) => field && field.name)
+      .filter((name) => typeof name === 'string' && name.trim().length > 0)
+    : []
+  if (schemaFields.length === 0) return record
+  const projected = {}
+  for (const field of schemaFields) {
+    if (Object.prototype.hasOwnProperty.call(record, field)) {
+      projected[field] = record[field]
+    }
+  }
+  return projected
 }
 
 function buildLifecycleBody(record, request, objectConfig, operation) {
@@ -551,6 +559,37 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     return {
       object,
       fields: Array.isArray(objectConfig.schema) ? objectConfig.schema.map((field) => ({ ...field })) : [],
+      k3Template: objectConfig.k3Template ? { ...objectConfig.k3Template } : undefined,
+    }
+  }
+
+  async function previewUpsert(input = {}) {
+    const request = normalizeUpsertRequest(input)
+    const objectConfig = objects[request.object]
+    if (!objectConfig) {
+      throw new AdapterValidationError(`K3 WISE object is not configured: ${request.object}`, { object: request.object })
+    }
+    ensureOperation(normalizedSystem.kind, request.object, objectConfig, 'upsert')
+    const savePath = assertRelativePath(objectConfig.savePath || objectConfig.path, 'object.savePath')
+    const autoSubmit = resolveAutoFlag(request.options.autoSubmit, config.autoSubmit, 'autoSubmit')
+    const autoAudit = resolveAutoFlag(request.options.autoAudit, config.autoAudit, 'autoAudit')
+    return {
+      object: request.object,
+      records: request.records.map((record, index) => ({
+        index,
+        key: extractRecordKey(record, request, objectConfig),
+        operation: 'save',
+        method: objectConfig.saveMethod || 'POST',
+        path: savePath,
+        query: { [tokenQueryParam]: '<redacted>' },
+        body: buildSaveBody(record, request, objectConfig),
+      })),
+      metadata: {
+        object: request.object,
+        autoSubmit,
+        autoAudit,
+        k3Template: objectConfig.k3Template ? { ...objectConfig.k3Template } : undefined,
+      },
     }
   }
 
@@ -674,6 +713,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
         object: request.object,
         autoSubmit,
         autoAudit,
+        k3Template: objectConfig.k3Template ? { ...objectConfig.k3Template } : undefined,
       },
     })
   }
@@ -684,6 +724,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     testConnection,
     listObjects,
     getSchema,
+    previewUpsert,
     read: unsupportedAdapterOperation(normalizedSystem.kind, 'read'),
     upsert,
   }
@@ -701,7 +742,9 @@ module.exports = {
     DEFAULT_OBJECTS,
     businessSuccess,
     extractRecordKey,
+    listK3WiseDocumentTemplates,
     normalizeObjects,
+    projectRecordForBody,
     responseBillNo,
     responseCode,
     responseExternalId,

@@ -338,6 +338,13 @@ async function main() {
   assert.equal(result.metrics.rowsWritten, 1)
   assert.equal(result.metrics.rowsFailed, 1)
   assert.equal(harness.k3FetchMock.calls.filter((call) => call.pathname === '/K3API/Material/Save').length, 2)
+  const firstSaveBody = harness.k3FetchMock.calls.find((call) => call.pathname === '/K3API/Material/Save').body
+  assert.deepEqual(firstSaveBody, {
+    Data: {
+      FNumber: 'GOOD-01',
+      FName: 'Good material',
+    },
+  })
   assert.equal(harness.k3FetchMock.calls.some((call) => call.pathname === '/K3API/Material/Submit'), false)
   assert.equal(harness.k3FetchMock.calls.some((call) => call.pathname === '/K3API/Material/Audit'), false)
 
@@ -387,6 +394,10 @@ async function main() {
   })
   assert.equal(dryRun.metrics.rowsRead, 2)
   assert.equal(dryRun.metrics.rowsWritten, 0)
+  assert.equal(dryRun.preview.records[0].targetPayload.Data.FNumber, 'GOOD-01')
+  assert.equal(dryRun.preview.records[0].targetPayload.Data.FName, 'Good material')
+  assert.equal(dryRun.preview.records[0].targetPayload.Data.sourceId, undefined)
+  assert.equal(dryRun.preview.records[0].targetRequest.query.Token, '[redacted]')
   assert.equal(dryHarness.k3FetchMock.calls.some((call) => call.pathname === '/K3API/Material/Save'), false)
   assert.equal(dryHarness.db.tables.get('integration_dead_letters').length, 0)
   assert.equal(dryHarness.feedbackUpdates.length, 0)

@@ -504,6 +504,48 @@
           </div>
         </section>
 
+        <section class="k3-setup__section">
+          <div class="k3-setup__section-head">
+            <h2>K3 单据模板</h2>
+            <span>表单映射生成 K3 Data JSON</span>
+          </div>
+          <div class="k3-setup__template-grid">
+            <article v-for="template in documentTemplates" :key="template.id" class="k3-setup__template-card">
+              <div class="k3-setup__record-main">
+                <strong>{{ template.label }}</strong>
+                <span class="k3-setup__badge" data-status="succeeded">{{ template.documentType }}</span>
+              </div>
+              <small>{{ template.id }} · {{ template.version }}</small>
+              <table class="k3-setup__mapping-table">
+                <thead>
+                  <tr>
+                    <th>PLM 字段</th>
+                    <th>K3 字段</th>
+                    <th>转换</th>
+                    <th>必填</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="mapping in template.fieldMappings" :key="`${template.id}:${mapping.sourceField}:${mapping.targetField}`">
+                    <td>{{ mapping.sourceField }}</td>
+                    <td>{{ mapping.targetField }}</td>
+                    <td>{{ formatTemplateTransform(mapping.transform) }}</td>
+                    <td>{{ isTemplateMappingRequired(mapping) ? '是' : '-' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+              <button class="k3-setup__btn" type="button" @click="templatePreviewTarget = template.targetObject">
+                预览 {{ template.documentType }} JSON
+              </button>
+            </article>
+          </div>
+          <div class="k3-setup__preview-head">
+            <strong>{{ templatePreviewTarget === 'material' ? '物料' : 'BOM' }} K3 Data JSON 预览</strong>
+            <span>不包含授权码、Token 或密码</span>
+          </div>
+          <pre class="k3-setup__json-preview">{{ templatePreviewJson }}</pre>
+        </section>
+
         <details class="k3-setup__section k3-setup__details">
           <summary class="k3-setup__section-summary">
             <span>Pipeline 执行参数</span>
@@ -551,6 +593,7 @@ import {
   K3_WISE_SQLSERVER_KIND,
   K3_WISE_WEBAPI_KIND,
   applyExternalSystemToForm,
+  buildK3WiseDocumentPayloadPreview,
   buildK3WiseDeployGateChecklist,
   buildK3WisePipelineObservationQuery,
   buildK3WisePipelinePayloads,
@@ -562,6 +605,7 @@ import {
   getIntegrationStagingFieldCount,
   getK3WisePipelineId,
   installIntegrationStaging,
+  listK3WiseDocumentTemplates,
   listIntegrationDeadLetters,
   listIntegrationPipelineRuns,
   listIntegrationStagingDescriptors,
@@ -580,6 +624,7 @@ import {
   type IntegrationExternalSystem,
   type IntegrationPipelineRun,
   type IntegrationStagingDescriptor,
+  type K3WiseDocumentTemplateMapping,
   type K3WisePipelineTarget,
 } from '../services/integration/k3WiseSetup'
 
@@ -605,8 +650,10 @@ const pipelineRunResult = ref('')
 const pipelineRuns = ref<IntegrationPipelineRun[]>([])
 const deadLetters = ref<IntegrationDeadLetter[]>([])
 const stagingDescriptors = ref<IntegrationStagingDescriptor[]>([])
+const templatePreviewTarget = ref<K3WisePipelineTarget>('material')
 
 const savedSystems = computed(() => [...webApiSystems.value, ...sqlSystems.value])
+const documentTemplates = listK3WiseDocumentTemplates()
 const validationIssues = computed(() => validateK3WiseSetupForm(form))
 const stagingIssues = computed(() => validateK3WiseStagingInstallForm(form))
 const pipelineIssues = computed(() => validateK3WisePipelineTemplateForm(form, stagingDescriptors.value))
@@ -616,6 +663,7 @@ const deployGateChecklist = computed(() => buildK3WiseDeployGateChecklist(form))
 const deployGateSummary = computed(() => summarizeK3WiseDeployGateChecklist(deployGateChecklist.value))
 const observationSummary = computed(() => `${pipelineRuns.value.length} runs / ${deadLetters.value.length} open`)
 const stagingDescriptorLabel = computed(() => stagingDescriptors.value.length > 0 ? `${stagingDescriptors.value.length} descriptors` : 'not loaded')
+const templatePreviewJson = computed(() => JSON.stringify(buildK3WiseDocumentPayloadPreview(templatePreviewTarget.value), null, 2))
 
 function setStatus(message: string, kind: 'info' | 'success' | 'error' = 'info'): void {
   statusMessage.value = message
@@ -642,6 +690,21 @@ function formatDeployGateStatus(status: string): string {
   if (status === 'missing') return 'failed'
   if (status === 'warning') return 'partial'
   return 'open'
+}
+
+function formatTemplateTransform(transform: unknown): string {
+  if (!transform) return '-'
+  const list = Array.isArray(transform) ? transform : [transform]
+  return list.map((item) => {
+    if (typeof item === 'string') return item
+    if (item && typeof item === 'object' && 'fn' in item) return String((item as { fn?: unknown }).fn)
+    return String(item)
+  }).join(' + ')
+}
+
+function isTemplateMappingRequired(mapping: K3WiseDocumentTemplateMapping): boolean {
+  const validation = Array.isArray(mapping.validation) ? mapping.validation : []
+  return validation.some((item) => Boolean(item && typeof item === 'object' && (item as { type?: unknown }).type === 'required'))
 }
 
 function loadSystemIntoForm(system: IntegrationExternalSystem): void {
@@ -1370,6 +1433,73 @@ onMounted(() => {
   font-size: 12px;
 }
 
+.k3-setup__template-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.k3-setup__template-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 12px;
+  background: #f8fafc;
+}
+
+.k3-setup__template-card small {
+  color: #64748b;
+  overflow-wrap: anywhere;
+}
+
+.k3-setup__mapping-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 12px;
+}
+
+.k3-setup__mapping-table th,
+.k3-setup__mapping-table td {
+  border-bottom: 1px solid #e2e8f0;
+  padding: 7px 6px;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.k3-setup__mapping-table th {
+  color: #475569;
+  font-weight: 700;
+}
+
+.k3-setup__preview-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  color: #334155;
+  font-size: 13px;
+}
+
+.k3-setup__preview-head span {
+  color: #64748b;
+}
+
+.k3-setup__json-preview {
+  overflow: auto;
+  max-height: 260px;
+  margin: 8px 0 0;
+  padding: 10px;
+  border-radius: 6px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-size: 12px;
+}
+
 .k3-setup__section--issues {
   border-color: #fed7aa;
   background: #fff7ed;
@@ -1398,6 +1528,10 @@ onMounted(() => {
   .k3-setup__rail {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .k3-setup__template-grid {
+    grid-template-columns: 1fr;
   }
 }
 

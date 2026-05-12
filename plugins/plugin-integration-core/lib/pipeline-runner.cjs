@@ -425,6 +425,39 @@ function createPipelineRunner(deps = {}) {
     metrics.rowsCleaned += 1
   }
 
+  async function attachDryRunTargetPreview({ context, cleanRecords, metrics, preview }) {
+    if (!preview || cleanRecords.length === 0 || typeof context.targetAdapter.previewUpsert !== 'function') return
+    try {
+      const targetPreview = await context.targetAdapter.previewUpsert({
+        object: context.pipeline.targetObject,
+        records: cleanRecords.map((item) => item.targetRecord),
+        keyFields: ['_integration_idempotency_key'],
+        options: resolveTargetOptions(context.pipeline),
+      })
+      const previewOffset = Math.max(0, preview.records.length - cleanRecords.length)
+      const records = Array.isArray(targetPreview.records) ? targetPreview.records : []
+      for (let index = 0; index < cleanRecords.length; index += 1) {
+        const previewRecord = preview.records[previewOffset + index]
+        if (!previewRecord) continue
+        const targetRecord = records[index] || {}
+        previewRecord.targetPayload = sanitizeIntegrationPayload(targetRecord.body || null)
+        previewRecord.targetRequest = sanitizeIntegrationPayload({
+          operation: targetRecord.operation || 'save',
+          method: targetRecord.method || 'POST',
+          path: targetRecord.path || null,
+          query: targetRecord.query || {},
+        })
+      }
+    } catch (error) {
+      metrics.rowsFailed += cleanRecords.length
+      preview.errors.push({
+        pipelineId: context.pipeline.id,
+        errorCode: 'TARGET_PREVIEW_FAILED',
+        errorMessage: error && error.message ? error.message : String(error),
+      })
+    }
+  }
+
   async function runPipeline(input) {
     const context = await loadPipelineContext(input)
     const mode = input.mode || context.pipeline.mode || 'manual'
@@ -510,6 +543,10 @@ function createPipelineRunner(deps = {}) {
         for (const sourceRecord of records) {
           await processRecord({ context, run, sourceRecord, cleanRecords, metrics, preview, dryRun })
           if (remainingDryRunSamples !== null) remainingDryRunSamples -= 1
+        }
+
+        if (dryRun) {
+          await attachDryRunTargetPreview({ context, cleanRecords, metrics, preview })
         }
 
         if (!dryRun && cleanRecords.length > 0) {

@@ -128,28 +128,33 @@ async function main() {
     assert(auditCalls.length === 0, `expected 0 Audit calls (Save-only), got ${auditCalls.length}`)
     console.log(`✓ step 6: K3 Save-only upsert wrote 2 records, 0 Submit, 0 Audit (PoC safety preserved)`)
 
-    // 6b. K3 BOM Save-only upsert with child table payload
+    // 6b. K3 BOM Save-only upsert with v1 template fields.
     bomUpsertResult = await k3Adapter.upsert({
       object: 'bom',
       records: [
         {
-          FNumber: 'BOM-MOCK-001',
           FParentItemNumber: 'MAT-MOCK-001',
-          FChildItems: [
-            { FItemNumber: 'MAT-MOCK-002', FQty: 1 },
-          ],
+          FChildItemNumber: 'MAT-MOCK-002',
+          FQty: 1,
+          FUnitID: 'PCS',
+          FEntryID: 1,
         },
       ],
-      keyFields: ['FNumber'],
+      keyFields: ['FParentItemNumber'],
       options: { autoSubmit: false, autoAudit: false },
     })
     assert(bomUpsertResult.written === 1, `expected 1 BOM written, got ${bomUpsertResult.written}`)
     assert(bomUpsertResult.failed === 0, `expected 0 BOM failed, got ${bomUpsertResult.failed}`)
     const bomSaveCalls = mockK3.calls.filter((call) => call.pathname === '/K3API/BOM/Save')
     assert(bomSaveCalls.length === 1, `expected 1 BOM Save call, got ${bomSaveCalls.length}`)
-    const bomPayload = bomSaveCalls[0].body?.Model || bomSaveCalls[0].body?.Data
-    assert(Array.isArray(bomPayload?.FChildItems), 'BOM Save payload must include FChildItems array')
-    console.log('✓ step 6b: K3 BOM Save-only upsert wrote 1 BOM with FChildItems array')
+    const bomPayload = bomSaveCalls[0].body?.Data
+    assert(bomPayload?.FParentItemNumber === 'MAT-MOCK-001', 'BOM Save payload must include FParentItemNumber')
+    assert(bomPayload?.FChildItemNumber === 'MAT-MOCK-002', 'BOM Save payload must include FChildItemNumber')
+    assert(bomPayload?.FQty === 1, 'BOM Save payload must include FQty')
+    assert(bomPayload?.FUnitID === 'PCS', 'BOM Save payload must include FUnitID')
+    assert(bomPayload?.FEntryID === 1, 'BOM Save payload must include FEntryID')
+    assert(bomPayload?.sourceId === undefined, 'BOM Save payload must not include internal source fields')
+    console.log('✓ step 6b: K3 BOM Save-only upsert wrote 1 BOM with v1 Data template fields')
 
     // 7. SQL channel readonly probe + safety check
     try {

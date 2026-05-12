@@ -230,6 +230,27 @@ docker inspect metasheet-backend --format \
 docker ps --format '{{.Names}}' | grep postgres
 ```
 
+## After preflight PASS: K3 template dry-run
+
+Once the on-prem preflight passes, continue with the product UI in this order:
+
+1. Open the K3 WISE setup page and save the K3 WebAPI configuration.
+2. Review the `K3 单据模板` section. v1 intentionally exposes only two
+   templates: material and BOM. The tables show PLM/staging fields on the
+   left and K3 `Data` fields on the right.
+3. Use the JSON preview before creating or running pipelines. The preview is
+   generated from template metadata and shows the exact `{ "Data": ... }`
+   shape sent to K3, without tokens, passwords, authority codes, or SQL
+   connection strings.
+4. Create the material/BOM cleansing pipelines. They remain `draft` until an
+   operator explicitly activates them.
+5. Run dry-run first. Dry-run now returns per-record K3 payload previews under
+   `preview.records[].targetPayload`, so operators can verify `FNumber`,
+   `FName`, `FParentItemNumber`, `FChildItemNumber`, and `FQty` before any
+   live K3 write.
+6. Keep Save-only as the default live policy. Submit/Audit must stay off until
+   the customer has approved a lifecycle policy for the test account set.
+
 ### Alternatives, and when to prefer them
 
 - **`docker cp` + `docker exec` into the running prod backend.** Possible
