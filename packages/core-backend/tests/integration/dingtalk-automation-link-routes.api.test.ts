@@ -31,6 +31,7 @@ type FieldRow = {
   id: string
   sheet_id: string
   type: string
+  property?: Record<string, unknown> | string | null
 }
 
 function makePublicFormConfig(options: {
@@ -93,6 +94,7 @@ function createDingTalkLinkQueryHandler(views = makeViewRows(), fields: FieldRow
         .map((field) => ({
           id: field.id,
           type: field.type,
+          property: field.property,
         }))
       return { rows, rowCount: rows.length }
     }
@@ -611,6 +613,40 @@ describe('DingTalk automation link route validation', () => {
     }))
   })
 
+  it('rejects unknown select options before persisting the rule', async () => {
+    const { app, automationService } = await createApp({
+      queryHandler: createDingTalkLinkQueryHandler(makeViewRows(), [
+        {
+          id: 'fld_status',
+          sheet_id: SHEET_ID,
+          type: 'select',
+          property: { options: [{ value: 'Ready' }, { value: 'Blocked' }] },
+        },
+      ]),
+    })
+
+    const res = await request(app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/automations`)
+      .send({
+        name: 'Condition option guard',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'send_notification',
+        actionConfig: {},
+        conditions: {
+          conjunction: 'AND',
+          conditions: [{ fieldId: 'fld_status', operator: 'equals', value: 'Done' }],
+        },
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toEqual({
+      code: 'VALIDATION_ERROR',
+      message: 'conditions.conditions[0].value is not a configured option for field fld_status: Done',
+    })
+    expect(automationService.createRule).not.toHaveBeenCalled()
+  })
+
   it('rejects field-incompatible automation conditions on update before persisting', async () => {
     const automationService = createMockAutomationService()
     const { app } = await createApp({
@@ -633,6 +669,37 @@ describe('DingTalk automation link route validation', () => {
     expect(res.body.error).toEqual({
       code: 'VALIDATION_ERROR',
       message: 'conditions.conditions[0].operator contains is not supported for field type number',
+    })
+    expect(automationService.updateRule).not.toHaveBeenCalled()
+  })
+
+  it('rejects unknown multiSelect options on update before persisting', async () => {
+    const automationService = createMockAutomationService()
+    const { app } = await createApp({
+      automationService,
+      queryHandler: createDingTalkLinkQueryHandler(makeViewRows(), [
+        {
+          id: 'fld_tags',
+          sheet_id: SHEET_ID,
+          type: 'multiSelect',
+          property: { options: [{ value: 'VIP' }, { value: 'Internal' }] },
+        },
+      ]),
+    })
+
+    const res = await request(app)
+      .patch(`/api/multitable/sheets/${SHEET_ID}/automations/${RULE_ID}`)
+      .send({
+        conditions: {
+          conjunction: 'AND',
+          conditions: [{ fieldId: 'fld_tags', operator: 'in', value: ['VIP', 'External'] }],
+        },
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toEqual({
+      code: 'VALIDATION_ERROR',
+      message: 'conditions.conditions[0].value[1] is not a configured option for field fld_tags: External',
     })
     expect(automationService.updateRule).not.toHaveBeenCalled()
   })
