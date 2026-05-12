@@ -154,6 +154,34 @@ async function testK3WebApiAdapter() {
   assert.deepEqual(objects.map((object) => object.name), ['material', 'bom'])
   const materialSchema = await adapter.getSchema({ object: 'material' })
   assert.deepEqual(materialSchema.fields.map((field) => field.name).slice(0, 2), ['FNumber', 'FName'])
+  assert.deepEqual(materialSchema.k3Template, {
+    id: 'k3wise.material.v1',
+    version: '2026.05.v1',
+    documentType: 'material',
+  })
+
+  const preview = await adapter.previewUpsert({
+    object: 'material',
+    records: [
+      {
+        FNumber: 'MAT-PREVIEW-001',
+        FName: 'Preview bolt',
+        sourceId: 'plm-1',
+        revision: 'A',
+        _integration_idempotency_key: 'tenant:k3:MAT-PREVIEW-001',
+      },
+    ],
+    keyFields: ['FNumber'],
+  })
+  assert.deepEqual(preview.records[0].body, {
+    Data: {
+      FNumber: 'MAT-PREVIEW-001',
+      FName: 'Preview bolt',
+    },
+  })
+  assert.equal(preview.records[0].query.Token, '<redacted>')
+  assert.equal(preview.metadata.autoSubmit, true)
+  assert.equal(preview.metadata.autoAudit, true)
 
   const upsert = await adapter.upsert({
     object: 'material',
@@ -247,6 +275,28 @@ async function testK3WebApiAdapter() {
     }
   })()
   assert.ok(invalidBaseUrl instanceof AdapterValidationError, 'non-http K3 baseUrl rejected')
+
+  const invalidObjectEndpoint = (() => {
+    try {
+      createK3WiseWebApiAdapter({
+        system: createK3WebApiSystem({
+          config: {
+            baseUrl: 'https://k3.example.test',
+            objects: {
+              material: {
+                savePath: 'https://evil.example.test/K3API/Material/Save',
+              },
+            },
+          },
+        }),
+        fetchImpl,
+      })
+      return null
+    } catch (error) {
+      return error
+    }
+  })()
+  assert.ok(invalidObjectEndpoint instanceof AdapterValidationError, 'absolute object endpoint is rejected')
 
   assert.equal(K3WiseWebApiAdapterError.name, 'K3WiseWebApiAdapterError')
 }

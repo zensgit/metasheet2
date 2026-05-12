@@ -186,6 +186,32 @@ export interface K3WisePipelinePayloads {
   bom: Record<string, unknown>
 }
 
+export interface K3WiseDocumentTemplateMapping {
+  sourceField: string
+  targetField: string
+  transform?: unknown
+  validation?: Array<Record<string, unknown>>
+  defaultValue?: unknown
+}
+
+export interface K3WiseDocumentTemplate {
+  id: string
+  version: string
+  documentType: K3WisePipelineTarget
+  targetObject: K3WisePipelineTarget
+  label: string
+  bodyKey: string
+  keyField: string
+  fieldMappings: K3WiseDocumentTemplateMapping[]
+  schema: Array<{
+    name: string
+    label: string
+    type: string
+    required?: boolean
+  }>
+  sampleSource: Record<string, unknown>
+}
+
 export interface K3WiseStagingInstallPayload {
   tenantId: string
   workspaceId: string | null
@@ -240,6 +266,139 @@ const WEBAPI_KIND = 'erp:k3-wise-webapi'
 const SQLSERVER_KIND = 'erp:k3-wise-sqlserver'
 const K3_WISE_POC_MIN_SAMPLE_LIMIT = 1
 const K3_WISE_POC_MAX_SAMPLE_LIMIT = 3
+const K3_WISE_DOCUMENT_TEMPLATE_VERSION = '2026.05.v1'
+
+const K3_WISE_DOCUMENT_TEMPLATES: Record<K3WisePipelineTarget, K3WiseDocumentTemplate> = {
+  material: {
+    id: 'k3wise.material.v1',
+    version: K3_WISE_DOCUMENT_TEMPLATE_VERSION,
+    documentType: 'material',
+    targetObject: 'material',
+    label: 'K3 WISE 物料',
+    bodyKey: 'Data',
+    keyField: 'FNumber',
+    schema: [
+      { name: 'FNumber', label: '物料编码', type: 'string', required: true },
+      { name: 'FName', label: '物料名称', type: 'string', required: true },
+      { name: 'FModel', label: '规格型号', type: 'string' },
+      { name: 'FBaseUnitID', label: '基本单位', type: 'string' },
+    ],
+    sampleSource: {
+      code: 'MAT-001',
+      name: 'Bolt',
+      spec: 'M6 x 20',
+      uom: 'PCS',
+      sourceId: 'plm-material-001',
+      revision: 'A',
+    },
+    fieldMappings: [
+      {
+        sourceField: 'code',
+        targetField: 'FNumber',
+        transform: ['trim', 'upper'],
+        validation: [{ type: 'required' }],
+      },
+      {
+        sourceField: 'name',
+        targetField: 'FName',
+        transform: { fn: 'trim' },
+        validation: [{ type: 'required' }],
+      },
+      {
+        sourceField: 'spec',
+        targetField: 'FModel',
+        transform: { fn: 'trim' },
+      },
+      {
+        sourceField: 'uom',
+        targetField: 'FBaseUnitID',
+        transform: {
+          fn: 'dictMap',
+          map: {
+            PCS: 'Pcs',
+            EA: 'Pcs',
+            KG: 'Kg',
+          },
+        },
+      },
+      {
+        sourceField: 'sourceId',
+        targetField: 'sourceId',
+        validation: [{ type: 'required' }],
+      },
+      {
+        sourceField: 'revision',
+        targetField: 'revision',
+        defaultValue: 'A',
+      },
+    ],
+  },
+  bom: {
+    id: 'k3wise.bom.v1',
+    version: K3_WISE_DOCUMENT_TEMPLATE_VERSION,
+    documentType: 'bom',
+    targetObject: 'bom',
+    label: 'K3 WISE BOM',
+    bodyKey: 'Data',
+    keyField: 'FParentItemNumber',
+    schema: [
+      { name: 'FParentItemNumber', label: '父项物料编码', type: 'string', required: true },
+      { name: 'FChildItemNumber', label: '子项物料编码', type: 'string', required: true },
+      { name: 'FQty', label: '用量', type: 'number', required: true },
+      { name: 'FUnitID', label: '单位', type: 'string' },
+      { name: 'FEntryID', label: '行号', type: 'number' },
+    ],
+    sampleSource: {
+      parentCode: 'FG-001',
+      childCode: 'MAT-001',
+      quantity: 2,
+      uom: 'PCS',
+      sequence: 1,
+      sourceId: 'plm-bom-001',
+      revision: 'A',
+    },
+    fieldMappings: [
+      {
+        sourceField: 'parentCode',
+        targetField: 'FParentItemNumber',
+        transform: ['trim', 'upper'],
+        validation: [{ type: 'required' }],
+      },
+      {
+        sourceField: 'childCode',
+        targetField: 'FChildItemNumber',
+        transform: ['trim', 'upper'],
+        validation: [{ type: 'required' }],
+      },
+      {
+        sourceField: 'quantity',
+        targetField: 'FQty',
+        transform: { fn: 'toNumber' },
+        validation: [{ type: 'min', value: 0.000001 }],
+      },
+      {
+        sourceField: 'uom',
+        targetField: 'FUnitID',
+        transform: { fn: 'trim' },
+      },
+      {
+        sourceField: 'sequence',
+        targetField: 'FEntryID',
+        transform: { fn: 'toNumber' },
+      },
+      {
+        sourceField: 'sourceId',
+        targetField: 'sourceId',
+        validation: [{ type: 'required' }],
+      },
+      {
+        sourceField: 'revision',
+        targetField: 'revision',
+        defaultValue: 'A',
+      },
+    ],
+  },
+}
 
 function trim(value: string): string {
   return value.trim()
@@ -248,6 +407,10 @@ function trim(value: string): string {
 function optionalString(value: string): string | undefined {
   const normalized = trim(value)
   return normalized.length > 0 ? normalized : undefined
+}
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
 }
 
 function getLocalStorageValue(key: string): string {
@@ -260,6 +423,36 @@ export function splitList(value: string): string[] {
     .split(/\r?\n|,/)
     .map((item) => item.trim())
     .filter(Boolean)
+}
+
+export function listK3WiseDocumentTemplates(): K3WiseDocumentTemplate[] {
+  return (Object.keys(K3_WISE_DOCUMENT_TEMPLATES) as K3WisePipelineTarget[])
+    .map((target) => cloneJson(K3_WISE_DOCUMENT_TEMPLATES[target]))
+}
+
+export function getK3WiseDocumentTemplate(target: K3WisePipelineTarget): K3WiseDocumentTemplate {
+  return cloneJson(K3_WISE_DOCUMENT_TEMPLATES[target])
+}
+
+export function getK3WiseDocumentTemplateFieldMappings(target: K3WisePipelineTarget): K3WiseDocumentTemplateMapping[] {
+  return cloneJson(K3_WISE_DOCUMENT_TEMPLATES[target].fieldMappings)
+}
+
+export function getK3WiseDocumentTemplateMeta(target: K3WisePipelineTarget): Record<string, string> {
+  const template = K3_WISE_DOCUMENT_TEMPLATES[target]
+  return {
+    id: template.id,
+    version: template.version,
+    documentType: template.documentType,
+  }
+}
+
+export function buildK3WiseDocumentPayloadPreview(target: K3WisePipelineTarget): Record<string, unknown> {
+  const template = K3_WISE_DOCUMENT_TEMPLATES[target]
+  const targetRecord = buildTargetRecordFromTemplate(template)
+  return {
+    [template.bodyKey]: projectTargetRecordForTemplate(template, targetRecord),
+  }
 }
 
 function isPositiveIntegerText(value: string): boolean {
@@ -294,6 +487,86 @@ function assertRelativePath(value: string, field: keyof K3WiseSetupForm, issues:
   if (/^https?:\/\//i.test(normalized)) {
     issues.push({ field, message: `${field} must be relative to the K3 WISE base URL` })
   }
+}
+
+function getPath(source: Record<string, unknown>, path: unknown): unknown {
+  if (typeof path !== 'string' || path.trim().length === 0) return undefined
+  return path.split('.').reduce<unknown>((current, key) => {
+    if (!current || typeof current !== 'object') return undefined
+    return (current as Record<string, unknown>)[key]
+  }, source)
+}
+
+function setPath(target: Record<string, unknown>, path: unknown, value: unknown): void {
+  if (typeof path !== 'string' || path.trim().length === 0) return
+  const parts = path.split('.')
+  let current = target
+  parts.slice(0, -1).forEach((part) => {
+    const existing = current[part]
+    if (!existing || typeof existing !== 'object' || Array.isArray(existing)) current[part] = {}
+    current = current[part] as Record<string, unknown>
+  })
+  current[parts[parts.length - 1]] = value
+}
+
+function isBlank(value: unknown): boolean {
+  return value === undefined || value === null || (typeof value === 'string' && value.trim().length === 0)
+}
+
+function normalizeTransformSteps(transform: unknown): Array<Record<string, unknown>> {
+  if (!transform) return []
+  const list = Array.isArray(transform) ? transform : [transform]
+  return list.map((step) => {
+    if (typeof step === 'string') return { fn: step }
+    return step && typeof step === 'object' && !Array.isArray(step)
+      ? step as Record<string, unknown>
+      : { fn: String(step) }
+  })
+}
+
+function applyPreviewTransform(value: unknown, transform: unknown): unknown {
+  return normalizeTransformSteps(transform).reduce((current, step) => {
+    const fn = typeof step.fn === 'string' ? step.fn : ''
+    if (fn === 'trim') return typeof current === 'string' ? current.trim() : current
+    if (fn === 'upper') return typeof current === 'string' ? current.toUpperCase() : current
+    if (fn === 'toNumber') {
+      const numeric = typeof current === 'number' ? current : Number(current)
+      return Number.isFinite(numeric) ? numeric : current
+    }
+    if (fn === 'dictMap') {
+      const map = step.map && typeof step.map === 'object' && !Array.isArray(step.map)
+        ? step.map as Record<string, unknown>
+        : {}
+      const key = current === undefined || current === null ? '' : String(current)
+      return Object.prototype.hasOwnProperty.call(map, key) ? map[key] : current
+    }
+    return current
+  }, value)
+}
+
+function buildTargetRecordFromTemplate(template: K3WiseDocumentTemplate): Record<string, unknown> {
+  const target: Record<string, unknown> = {}
+  template.fieldMappings.forEach((mapping) => {
+    const sourceField = mapping.sourceField
+    const targetField = mapping.targetField
+    if (typeof targetField !== 'string' || !targetField.trim()) return
+    let value = getPath(template.sampleSource, sourceField)
+    if (isBlank(value) && Object.prototype.hasOwnProperty.call(mapping, 'defaultValue')) {
+      value = mapping.defaultValue
+    }
+    setPath(target, targetField, applyPreviewTransform(value, mapping.transform))
+  })
+  return target
+}
+
+function projectTargetRecordForTemplate(template: K3WiseDocumentTemplate, record: Record<string, unknown>): Record<string, unknown> {
+  const projected: Record<string, unknown> = {}
+  template.schema.forEach((field) => {
+    if (Object.prototype.hasOwnProperty.call(record, field.name)) {
+      projected[field.name] = record[field.name]
+    }
+  })
+  return projected
 }
 
 function validateHttpUrl(value: string, field: keyof K3WiseSetupForm, issues: K3WiseSetupValidationIssue[]): void {
@@ -802,12 +1075,14 @@ export function buildK3WiseSetupPayloads(form: K3WiseSetupForm): K3WiseSetupPayl
           ...(optionalString(form.materialSubmitPath) ? { submitPath: trim(form.materialSubmitPath) } : {}),
           ...(optionalString(form.materialAuditPath) ? { auditPath: trim(form.materialAuditPath) } : {}),
           keyField: 'FNumber',
+          k3Template: getK3WiseDocumentTemplateMeta('material'),
         },
         bom: {
           savePath: trim(form.bomSavePath),
           ...(optionalString(form.bomSubmitPath) ? { submitPath: trim(form.bomSubmitPath) } : {}),
           ...(optionalString(form.bomAuditPath) ? { auditPath: trim(form.bomAuditPath) } : {}),
-          keyField: 'FNumber',
+          keyField: 'FParentItemNumber',
+          k3Template: getK3WiseDocumentTemplateMeta('bom'),
         },
       },
     },
@@ -927,6 +1202,7 @@ export function buildK3WisePipelinePayloads(form: K3WiseSetupForm): K3WisePipeli
       idempotencyKeyFields: ['sourceId', 'revision'],
       options: {
         batchSize: 100,
+        k3Template: getK3WiseDocumentTemplateMeta('material'),
         target: {
           autoSubmit: false,
           autoAudit: false,
@@ -940,47 +1216,7 @@ export function buildK3WisePipelinePayloads(form: K3WiseSetupForm): K3WisePipeli
           keyField: '_integration_idempotency_key',
         },
       },
-      fieldMappings: [
-        {
-          sourceField: 'code',
-          targetField: 'FNumber',
-          transform: ['trim', 'upper'],
-          validation: [{ type: 'required' }],
-        },
-        {
-          sourceField: 'name',
-          targetField: 'FName',
-          transform: { fn: 'trim' },
-          validation: [{ type: 'required' }],
-        },
-        {
-          sourceField: 'spec',
-          targetField: 'FModel',
-          transform: { fn: 'trim' },
-        },
-        {
-          sourceField: 'uom',
-          targetField: 'FBaseUnitID',
-          transform: {
-            fn: 'dictMap',
-            map: {
-              PCS: 'Pcs',
-              EA: 'Pcs',
-              KG: 'Kg',
-            },
-          },
-        },
-        {
-          sourceField: 'sourceId',
-          targetField: 'sourceId',
-          validation: [{ type: 'required' }],
-        },
-        {
-          sourceField: 'revision',
-          targetField: 'revision',
-          defaultValue: 'A',
-        },
-      ],
+      fieldMappings: getK3WiseDocumentTemplateFieldMappings('material'),
     },
     bom: {
       ...base,
@@ -992,6 +1228,7 @@ export function buildK3WisePipelinePayloads(form: K3WiseSetupForm): K3WisePipeli
       idempotencyKeyFields: ['sourceId', 'revision'],
       options: {
         batchSize: 50,
+        k3Template: getK3WiseDocumentTemplateMeta('bom'),
         target: {
           autoSubmit: false,
           autoAudit: false,
@@ -1001,46 +1238,7 @@ export function buildK3WisePipelinePayloads(form: K3WiseSetupForm): K3WisePipeli
           keyField: '_integration_idempotency_key',
         },
       },
-      fieldMappings: [
-        {
-          sourceField: 'parentCode',
-          targetField: 'FParentItemNumber',
-          transform: ['trim', 'upper'],
-          validation: [{ type: 'required' }],
-        },
-        {
-          sourceField: 'childCode',
-          targetField: 'FChildItemNumber',
-          transform: ['trim', 'upper'],
-          validation: [{ type: 'required' }],
-        },
-        {
-          sourceField: 'quantity',
-          targetField: 'FQty',
-          transform: { fn: 'toNumber' },
-          validation: [{ type: 'min', value: 0.000001 }],
-        },
-        {
-          sourceField: 'uom',
-          targetField: 'FUnitID',
-          transform: { fn: 'trim' },
-        },
-        {
-          sourceField: 'sequence',
-          targetField: 'FEntryID',
-          transform: { fn: 'toNumber' },
-        },
-        {
-          sourceField: 'sourceId',
-          targetField: 'sourceId',
-          validation: [{ type: 'required' }],
-        },
-        {
-          sourceField: 'revision',
-          targetField: 'revision',
-          defaultValue: 'A',
-        },
-      ],
+      fieldMappings: getK3WiseDocumentTemplateFieldMappings('bom'),
     },
   }
 }

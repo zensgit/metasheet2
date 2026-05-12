@@ -82,6 +82,11 @@ describe('IntegrationK3WiseSetupView', () => {
     expect(container.textContent).toContain('2. 准备多维表')
     expect(container.textContent).toContain('基础连接')
     expect(container.textContent).toContain('多维表清洗准备')
+    expect(container.textContent).toContain('K3 单据模板')
+    expect(container.textContent).toContain('K3 WISE 物料')
+    expect(container.textContent).toContain('FNumber')
+    expect(container.textContent).toContain('"Data"')
+    expect(container.textContent).not.toContain('authorityCode')
 
     const advancedSections = Array.from(container.querySelectorAll('details.k3-setup__details')) as HTMLDetailsElement[]
     expect(advancedSections).toHaveLength(3)
