@@ -15,7 +15,40 @@ interface CreateCoreBackendMigrationProviderOptions {
   pathImpl?: NodePathLike
   runtimeDir?: string
   excludedNames?: string[]
+  includeSupersededLegacySqlMigrations?: boolean
 }
+
+const SUPERSEDED_LEGACY_SQL_MIGRATIONS = [
+  '032_create_approval_records',
+  '033_create_rbac_core',
+  '034_create_spreadsheets',
+  '035_create_files',
+  '036_create_spreadsheet_permissions',
+  '037_add_gallery_form_support',
+  '038_config_and_secrets',
+  '040_data_sources',
+  '041_script_sandbox',
+  '042_core_model_completion',
+  '042a_core_model_views',
+  '042b_external_data_model',
+  '042c_audit_placeholder',
+  '042d_audit_and_cache',
+  '042d_plugins_and_templates',
+  '043_core_model_views',
+  '044_external_data_model',
+  '045_audit_placeholder',
+  '046_plugins_and_templates',
+  '047_audit_and_cache',
+  '047_create_event_bus_tables',
+  '048_create_event_bus_tables',
+  '049_create_bpmn_workflow_tables',
+  '050_create_snapshot_core',
+  '051_create_minimal_views',
+  '052_recreate_minimal_views',
+  '053_create_protection_rules',
+  '054_create_users_table',
+  '055_create_attendance_import_tokens',
+]
 
 function dedupe(values: string[]): string[] {
   return [...new Set(values)]
@@ -141,12 +174,20 @@ export function createCoreBackendMigrationProvider(
   const runtimeDir = options.runtimeDir ?? __dirname
   const providerFolders = getProviderFolderCandidates(runtimeDir, pathImpl)
   const sqlFolders = getSqlFolderCandidates(runtimeDir, pathImpl)
-  const excludedNames = getExcludedNames(
+  const includeSupersededLegacySql =
+    options.includeSupersededLegacySqlMigrations ??
+    process.env.MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL === 'true'
+  const configuredExcludedNames =
     options.excludedNames ??
-      (process.env.MIGRATION_EXCLUDE || '')
-        .split(',')
-        .map((value) => value.trim())
-        .filter(Boolean)
+    (process.env.MIGRATION_EXCLUDE || '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean)
+  const excludedNames = getExcludedNames(
+    [
+      ...(includeSupersededLegacySql ? [] : SUPERSEDED_LEGACY_SQL_MIGRATIONS),
+      ...configuredExcludedNames,
+    ]
   )
 
   return {

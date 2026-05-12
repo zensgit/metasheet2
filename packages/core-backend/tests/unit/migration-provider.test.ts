@@ -88,6 +88,73 @@ describe('createCoreBackendMigrationProvider', () => {
     ])
   })
 
+  it('skips superseded legacy core sql migrations by default', async () => {
+    const projectRoot = await createTempProjectRoot()
+    const runtimeDir = path.join(projectRoot, 'src/db')
+    const sourceMigrationsDir = path.join(runtimeDir, 'migrations')
+    const legacySqlDir = path.join(projectRoot, 'migrations')
+
+    await writeFile(
+      path.join(sourceMigrationsDir, 'zzzz20260119100000_create_users_table.mjs'),
+      'export async function up() {}\n'
+    )
+    await writeFile(
+      path.join(legacySqlDir, '032_create_approval_records.sql'),
+      'create table if not exists approval_records (id uuid primary key);'
+    )
+    await writeFile(
+      path.join(legacySqlDir, '037_add_gallery_form_support.sql'),
+      'alter table form_responses add column if not exists form_id uuid;'
+    )
+    await writeFile(
+      path.join(legacySqlDir, '055_create_attendance_import_tokens.sql'),
+      'create table if not exists attendance_import_tokens (id text primary key);'
+    )
+    await writeFile(
+      path.join(legacySqlDir, '056_add_users_must_change_password.sql'),
+      'alter table users add column if not exists must_change_password boolean not null default false;'
+    )
+    await writeFile(
+      path.join(legacySqlDir, '057_create_integration_core_tables.sql'),
+      'create table if not exists integration_external_systems (id uuid primary key);'
+    )
+
+    const provider = createCoreBackendMigrationProvider({ runtimeDir })
+    const migrations = await provider.getMigrations()
+
+    expect(Object.keys(migrations).sort()).toEqual([
+      '056_add_users_must_change_password',
+      '057_create_integration_core_tables',
+      'zzzz20260119100000_create_users_table',
+    ])
+  })
+
+  it('can include superseded legacy sql migrations for explicit compatibility audits', async () => {
+    const projectRoot = await createTempProjectRoot()
+    const runtimeDir = path.join(projectRoot, 'src/db')
+    const legacySqlDir = path.join(projectRoot, 'migrations')
+
+    await writeFile(
+      path.join(legacySqlDir, '037_add_gallery_form_support.sql'),
+      'alter table form_responses add column if not exists form_id uuid;'
+    )
+    await writeFile(
+      path.join(legacySqlDir, '056_add_users_must_change_password.sql'),
+      'alter table users add column if not exists must_change_password boolean not null default false;'
+    )
+
+    const provider = createCoreBackendMigrationProvider({
+      runtimeDir,
+      includeSupersededLegacySqlMigrations: true,
+    })
+    const migrations = await provider.getMigrations()
+
+    expect(Object.keys(migrations).sort()).toEqual([
+      '037_add_gallery_form_support',
+      '056_add_users_must_change_password',
+    ])
+  })
+
   it('honors MIGRATION_EXCLUDE-style names with or without file extensions', async () => {
     const projectRoot = await createTempProjectRoot()
     const runtimeDir = path.join(projectRoot, 'src/db')
