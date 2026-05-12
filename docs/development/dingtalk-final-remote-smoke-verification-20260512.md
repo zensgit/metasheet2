@@ -5,8 +5,10 @@ Date: 2026-05-12
 ## Environment
 
 - Target: 142 deployment
-- Backend image: `ghcr.io/zensgit/metasheet2-backend:e40ac3f909a2c5cad5072bc0e75f351c89513d10`
-- Web image: `ghcr.io/zensgit/metasheet2-web:e40ac3f909a2c5cad5072bc0e75f351c89513d10`
+- Acceptance backend image: `ghcr.io/zensgit/metasheet2-backend:e40ac3f909a2c5cad5072bc0e75f351c89513d10`
+- Acceptance web image: `ghcr.io/zensgit/metasheet2-web:e40ac3f909a2c5cad5072bc0e75f351c89513d10`
+- Post-merge observed backend image: `ghcr.io/zensgit/metasheet2-backend:3e59d6a4c83a7aabd0c4d66006f62661f3b0bd21`
+- Post-merge observed web image: `ghcr.io/zensgit/metasheet2-web:3e59d6a4c83a7aabd0c4d66006f62661f3b0bd21`
 - Smoke session: `142-session-e40ac3f9-ddzz-20260512`
 
 ## Commands Run
@@ -73,8 +75,10 @@ node scripts/ops/validate-dingtalk-staging-evidence-packet.mjs \
 | Backend `/api/health` | `200` |
 | Web `/` | `200` |
 | Unauthenticated `/api/auth/me` | `401` |
-| Backend image tag | `e40ac3f909a2c5cad5072bc0e75f351c89513d10` |
-| Web image tag | `e40ac3f909a2c5cad5072bc0e75f351c89513d10` |
+| Acceptance backend image tag | `e40ac3f909a2c5cad5072bc0e75f351c89513d10` |
+| Acceptance web image tag | `e40ac3f909a2c5cad5072bc0e75f351c89513d10` |
+| Post-merge observed backend image tag | `3e59d6a4c83a7aabd0c4d66006f62661f3b0bd21` |
+| Post-merge observed web image tag | `3e59d6a4c83a7aabd0c4d66006f62661f3b0bd21` |
 
 ## Smoke Verification Results
 
@@ -105,6 +109,24 @@ rg -n -P "(access_token=(?!<redacted>|\\.\\.\\.)[A-Za-z0-9._~+/=-]{16,}|SEC[A-Za
 ```
 
 Result: no matches.
+
+## Post-Merge Runtime Drift Check
+
+```bash
+git diff --name-only \
+  e40ac3f909a2c5cad5072bc0e75f351c89513d10..3e59d6a4c83a7aabd0c4d66006f62661f3b0bd21
+```
+
+Result:
+
+```text
+apps/web/src/multitable/components/MetaAutomationRuleEditor.vue
+apps/web/tests/multitable-automation-rule-editor.spec.ts
+docs/development/multitable-phase3-automation-builder-development-20260512.md
+docs/development/multitable-phase3-automation-builder-verification-20260512.md
+```
+
+No DingTalk auth, delivery, public-form, backend route, or P4 smoke helper files changed between the live acceptance image and the post-merge observed 142 image.
 
 ## Conclusion
 
