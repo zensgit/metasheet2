@@ -15,8 +15,9 @@ timestamp migration schema.
 ## Decision
 
 The provider now treats legacy numeric core SQL migrations `032` through `055`
-as superseded by the modern timestamp migration stream and excludes them from
-the default migration set.
+as superseded by the modern timestamp migration stream. By default it keeps
+their names visible to Kysely as no-op history markers instead of executing the
+legacy SQL bodies.
 
 The default skip list covers:
 
@@ -73,6 +74,11 @@ the failure occurs. The package verifier can continue asserting that K3/on-prem
 SQL migrations are present in the archive, while the migrator stops applying
 legacy core migrations that have already been replaced by timestamp migrations.
 
+Keeping no-op history markers is required for upgraded databases that already
+have `032` through `055` in `kysely_migration`. Hiding those names completely
+makes Kysely reject the database as a corrupted migration history even though
+the runtime schema is healthy.
+
 The approach avoids three bad outcomes:
 
 - no more one-by-one emergency patching of obsolete SQL assumptions;
@@ -101,9 +107,12 @@ The approach avoids three bad outcomes:
 This is a migration-provider policy change. It affects which pending migrations
 are visible to `db:migrate` and `db:list`.
 
-Existing databases that already applied any skipped legacy migration are not
-rolled back. New or upgraded on-prem databases should now follow the modern
-timestamp migration stream plus the on-prem SQL tail (`056` and later).
+Existing databases that already applied any superseded legacy migration are not
+rolled back and no longer trip Kysely's missing-provider corruption check. New
+or upgraded on-prem databases should now follow the modern timestamp migration
+stream plus the on-prem SQL tail (`056` and later); `032` through `055` are
+recorded only as no-op superseded markers unless the explicit compatibility
+audit flag is enabled.
 
 ## GATE Impact
 

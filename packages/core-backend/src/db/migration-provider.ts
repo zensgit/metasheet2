@@ -111,6 +111,15 @@ function createSqlFileMigration(
   }
 }
 
+function createNoopMigration(): Migration {
+  return {
+    async up() {
+      // Superseded legacy SQL migrations remain visible so Kysely can validate
+      // existing migration history, but they must not replay on fresh installs.
+    },
+  }
+}
+
 async function addProviderMigrations(
   destination: Record<string, Migration>,
   provider: MigrationProvider
@@ -183,12 +192,10 @@ export function createCoreBackendMigrationProvider(
       .split(',')
       .map((value) => value.trim())
       .filter(Boolean)
-  const excludedNames = getExcludedNames(
-    [
-      ...(includeSupersededLegacySql ? [] : SUPERSEDED_LEGACY_SQL_MIGRATIONS),
-      ...configuredExcludedNames,
-    ]
+  const supersededLegacySqlNames = getExcludedNames(
+    includeSupersededLegacySql ? [] : SUPERSEDED_LEGACY_SQL_MIGRATIONS
   )
+  const excludedNames = getExcludedNames(configuredExcludedNames)
 
   return {
     async getMigrations() {
@@ -213,6 +220,12 @@ export function createCoreBackendMigrationProvider(
 
       for (const folder of sqlFolders) {
         await addSqlFileMigrations(migrations, folder, fsImpl, pathImpl)
+      }
+
+      for (const name of Object.keys(migrations)) {
+        if (supersededLegacySqlNames.has(name)) {
+          migrations[name] = createNoopMigration()
+        }
       }
 
       return Object.fromEntries(
