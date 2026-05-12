@@ -203,6 +203,10 @@ function buildModel(opts) {
   const secretFindingCount = Array.isArray(handoffSummary.publishCheck?.secretFindings)
     ? handoffSummary.publishCheck.secretFindings.length
     : statusSummary.handoff?.secretFindingCount ?? 0
+  const screenshotArchiveRequired = Boolean(handoffSummary.screenshotArchive?.required)
+  const screenshotArchiveCount = Number.isFinite(handoffSummary.screenshotArchive?.includedCount)
+    ? handoffSummary.screenshotArchive.includedCount
+    : handoffSummary.publishCheck?.includedScreenshotArchiveCount ?? 0
 
   return {
     date: opts.date,
@@ -225,6 +229,8 @@ function buildModel(opts) {
     remoteSmokePhase: statusOf(statusSummary.remoteSmokePhase ?? compiledSummary.remoteSmokePhase),
     handoffStatus: statusOf(handoffStatus),
     publishStatus: statusOf(publishStatus),
+    screenshotArchiveRequired,
+    screenshotArchiveCount,
     secretFindingCount,
     requiredChecks: checks,
     totals: {
@@ -253,6 +259,9 @@ function validateReleaseReady(model, requireReleaseReady) {
   if (model.smokeStatus !== 'release_ready') failures.push('smoke status is not release_ready')
   if (model.handoffStatus !== 'pass') failures.push('handoff status is not pass')
   if (model.publishStatus !== 'pass') failures.push('publish status is not pass')
+  if (model.screenshotArchiveRequired && model.screenshotArchiveCount === 0) {
+    failures.push('screenshot archive is required but not included')
+  }
   if (model.totals.remainingChecks !== 0) failures.push('not all required checks passed')
   if (model.totals.manualEvidenceIssues !== 0) failures.push('manual evidence issues remain')
   if (model.secretFindingCount !== 0) failures.push('publish check reported secret findings')
@@ -295,6 +304,8 @@ function renderDevelopment(model) {
 - Smoke status: **${model.smokeStatus}**
 - Handoff status: **${model.handoffStatus}**
 - Publish status: **${model.publishStatus}**
+- Screenshot archive gate: **${model.screenshotArchiveRequired ? 'required' : 'not_required'}**
+- Included screenshot archive count: **${model.screenshotArchiveCount}**
 
 ## Required Checks
 
@@ -355,6 +366,8 @@ node scripts/ops/dingtalk-p4-final-docs.mjs \\
 - Smoke status: **${model.smokeStatus}**
 - Handoff status: **${model.handoffStatus}**
 - Publish status: **${model.publishStatus}**
+- Screenshot archive gate: **${model.screenshotArchiveRequired ? 'required' : 'not_required'}**
+- Included screenshot archive count: **${model.screenshotArchiveCount}**
 
 ## Required Checks
 

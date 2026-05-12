@@ -178,6 +178,76 @@ test('dingtalk-p4-final-docs generates release-ready development and verificatio
   }
 })
 
+test('dingtalk-p4-final-docs records screenshot archive gate status from handoff summary', () => {
+  const tmpDir = makeTmpDir()
+
+  try {
+    const paths = writeReleaseReadySession(tmpDir, {
+      handoffSummary: {
+        publishCheck: {
+          includedScreenshotArchiveCount: 1,
+        },
+        screenshotArchive: {
+          required: true,
+          includedCount: 1,
+          sources: ['artifacts/dingtalk-screenshot-archive/live'],
+        },
+      },
+    })
+    const outputDir = path.join(tmpDir, 'docs')
+    const result = runScript([
+      '--session-dir', paths.sessionDir,
+      '--handoff-summary', paths.handoffSummary,
+      '--output-dir', outputDir,
+      '--date', '20260423',
+      '--require-release-ready',
+    ])
+
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    const developmentText = readFileSync(path.join(outputDir, 'dingtalk-final-remote-smoke-development-20260423.md'), 'utf8')
+    const verificationText = readFileSync(path.join(outputDir, 'dingtalk-final-remote-smoke-verification-20260423.md'), 'utf8')
+    assert.match(developmentText, /Screenshot archive gate: \*\*required\*\*/)
+    assert.match(developmentText, /Included screenshot archive count: \*\*1\*\*/)
+    assert.match(verificationText, /Screenshot archive gate: \*\*required\*\*/)
+    assert.match(verificationText, /Included screenshot archive count: \*\*1\*\*/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-final-docs rejects missing screenshot archive when the gate is required', () => {
+  const tmpDir = makeTmpDir()
+
+  try {
+    const paths = writeReleaseReadySession(tmpDir, {
+      handoffSummary: {
+        publishCheck: {
+          includedScreenshotArchiveCount: 0,
+        },
+        screenshotArchive: {
+          required: true,
+          includedCount: 0,
+          sources: [],
+        },
+      },
+    })
+    const outputDir = path.join(tmpDir, 'docs')
+    const result = runScript([
+      '--session-dir', paths.sessionDir,
+      '--handoff-summary', paths.handoffSummary,
+      '--output-dir', outputDir,
+      '--date', '20260423',
+      '--require-release-ready',
+    ])
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /screenshot archive is required but not included/)
+    assert.equal(existsSync(path.join(outputDir, 'dingtalk-final-remote-smoke-development-20260423.md')), false)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('dingtalk-p4-final-docs rejects non-release-ready sessions when required', () => {
   const tmpDir = makeTmpDir()
 

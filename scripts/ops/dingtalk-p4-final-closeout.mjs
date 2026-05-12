@@ -29,6 +29,8 @@ Options:
   --packet-output-dir <dir>           Packet directory, default ${DEFAULT_PACKET_ROOT}/<session-name>-final
   --include-mobile-signoff <dir>      Optional strict mobile public-form signoff output dir
   --require-mobile-signoff-pass       Require every included mobile signoff output to be strict passing
+  --include-screenshot-archive <dir>  Optional DingTalk screenshot archive output dir
+  --require-screenshot-archive-pass   Require every included screenshot archive to be strict passing
   --docs-output-dir <dir>             Final docs directory, default ${DEFAULT_DOCS_DIR}
   --date <yyyymmdd>                   Final docs date suffix, default current UTC date
   --summary-json <file>               Closeout JSON summary, default <packet-output-dir>/closeout-summary.json
@@ -62,6 +64,8 @@ function parseArgs(argv) {
     packetOutputDir: '',
     includeMobileSignoffDirs: [],
     requireMobileSignoffPass: false,
+    includeScreenshotArchiveDirs: [],
+    requireScreenshotArchivePass: false,
     docsOutputDir: path.resolve(process.cwd(), DEFAULT_DOCS_DIR),
     date: defaultDate(),
     summaryJson: '',
@@ -87,6 +91,13 @@ function parseArgs(argv) {
         break
       case '--require-mobile-signoff-pass':
         opts.requireMobileSignoffPass = true
+        break
+      case '--include-screenshot-archive':
+        opts.includeScreenshotArchiveDirs.push(path.resolve(process.cwd(), readRequiredValue(argv, i, arg)))
+        i += 1
+        break
+      case '--require-screenshot-archive-pass':
+        opts.requireScreenshotArchivePass = true
         break
       case '--docs-output-dir':
         opts.docsOutputDir = path.resolve(process.cwd(), readRequiredValue(argv, i, arg))
@@ -175,6 +186,9 @@ function validatePaths(opts) {
   if (opts.requireMobileSignoffPass && opts.includeMobileSignoffDirs.length === 0) {
     throw new Error('--require-mobile-signoff-pass requires at least one --include-mobile-signoff directory')
   }
+  if (opts.requireScreenshotArchivePass && opts.includeScreenshotArchiveDirs.length === 0) {
+    throw new Error('--require-screenshot-archive-pass requires at least one --include-screenshot-archive directory')
+  }
 }
 
 function scriptPath(envName, fallback) {
@@ -187,6 +201,15 @@ function mobileSignoffHandoffArgs(opts) {
     args.push('--include-mobile-signoff', dir)
   }
   if (opts.requireMobileSignoffPass) args.push('--require-mobile-signoff-pass')
+  return args
+}
+
+function screenshotArchiveHandoffArgs(opts) {
+  const args = []
+  for (const dir of opts.includeScreenshotArchiveDirs) {
+    args.push('--include-screenshot-archive', dir)
+  }
+  if (opts.requireScreenshotArchivePass) args.push('--require-screenshot-archive-pass')
   return args
 }
 
@@ -289,6 +312,10 @@ function buildSummary(opts, steps) {
       mobileSignoffCount: handoff?.mobileSignoff?.includedCount
         ?? handoff?.publishCheck?.includedMobileSignoffCount
         ?? 0,
+      screenshotArchiveRequired: opts.requireScreenshotArchivePass,
+      screenshotArchiveCount: handoff?.screenshotArchive?.includedCount
+        ?? handoff?.publishCheck?.includedScreenshotArchiveCount
+        ?? 0,
       secretFindingCount: Array.isArray(handoff?.publishCheck?.secretFindings)
         ? handoff.publishCheck.secretFindings.length
         : status?.handoff?.secretFindingCount ?? 0,
@@ -345,6 +372,8 @@ ${stepRows.join('\n')}
 - Publish status: **${summary.final.publishStatus}**
 - Mobile signoff gate: **${summary.final.mobileSignoffRequired ? 'required' : 'not_required'}**
 - Included mobile signoff count: **${summary.final.mobileSignoffCount}**
+- Screenshot archive gate: **${summary.final.screenshotArchiveRequired ? 'required' : 'not_required'}**
+- Included screenshot archive count: **${summary.final.screenshotArchiveCount}**
 - Secret findings: **${summary.final.secretFindingCount}**
 
 ## Failures
@@ -396,6 +425,7 @@ function runCloseout(opts) {
         '--output-dir',
         opts.packetOutputDir,
         ...mobileSignoffHandoffArgs(opts),
+        ...screenshotArchiveHandoffArgs(opts),
       ],
     ))
   }
