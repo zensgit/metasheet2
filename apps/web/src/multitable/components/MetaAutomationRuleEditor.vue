@@ -88,89 +88,127 @@
               @click="draft.conditions.conjunction = 'OR'"
             >OR</button>
           </div>
-          <div v-if="hasNestedConditionGroups" class="meta-rule-editor__hint" data-field="nestedConditionNotice">
-            Nested condition groups are preserved when saving, but this editor only changes top-level conditions.
-          </div>
-          <div
-            v-for="{ condition: cond, index: idx } in editableConditionEntries"
-            :key="idx"
-            class="meta-rule-editor__condition-row"
-            :data-condition-index="idx"
-          >
-            <select
-              :value="cond.fieldId"
-              class="meta-rule-editor__select meta-rule-editor__select--sm"
-              @change="onConditionFieldChange(cond, ($event.target as HTMLSelectElement).value)"
-            >
-              <option value="">-- field --</option>
-              <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
-            </select>
-            <select
-              :value="cond.operator"
-              class="meta-rule-editor__select meta-rule-editor__select--sm"
-              @change="onConditionOperatorChange(cond, ($event.target as HTMLSelectElement).value as ConditionOperator)"
-            >
-              <option v-for="op in conditionOperatorsForField(cond.fieldId)" :key="op.value" :value="op.value">{{ op.label }}</option>
-            </select>
-            <template v-if="!isUnaryOperator(cond.operator)">
-              <select
-                v-if="conditionValueWidget(cond) === 'booleanMultiSelect'"
-                :value="booleanMultiSelectConditionValues(cond)"
-                class="meta-rule-editor__select meta-rule-editor__select--sm"
-                data-condition-value="boolean-multi-select"
-                multiple
-                @change="onBooleanMultiSelectConditionValueChange(cond, $event)"
+          <div class="meta-rule-editor__condition-list">
+            <template v-for="entry in conditionEditorEntries" :key="entry.pathKey">
+              <div
+                v-if="entry.kind === 'group'"
+                class="meta-rule-editor__condition-group"
+                :style="conditionIndentStyle(entry.depth)"
+                :data-condition-group-path="entry.pathKey"
               >
-                <option value="true">true</option>
-                <option value="false">false</option>
-              </select>
-              <select
-                v-else-if="conditionValueWidget(cond) === 'boolean'"
-                :value="booleanConditionValue(cond)"
-                class="meta-rule-editor__select meta-rule-editor__select--sm"
-                data-condition-value="boolean"
-                @change="onBooleanConditionValueChange(cond, ($event.target as HTMLSelectElement).value)"
-              >
-                <option value="">-- value --</option>
-                <option value="true">true</option>
-                <option value="false">false</option>
-              </select>
-              <select
-                v-else-if="conditionValueWidget(cond) === 'select'"
-                :value="singleSelectConditionValue(cond)"
-                class="meta-rule-editor__select meta-rule-editor__select--sm"
-                data-condition-value="select"
-                @change="cond.value = ($event.target as HTMLSelectElement).value"
-              >
-                <option value="">-- value --</option>
-                <option v-for="option in conditionFieldOptions(cond)" :key="option.value" :value="option.value">
-                  {{ optionLabel(option) }}
-                </option>
-              </select>
-              <select
-                v-else-if="conditionValueWidget(cond) === 'multiSelect'"
-                :value="multiSelectConditionValues(cond)"
-                class="meta-rule-editor__select meta-rule-editor__select--sm"
-                data-condition-value="multi-select"
-                multiple
-                @change="onMultiSelectConditionValueChange(cond, $event)"
-              >
-                <option v-for="option in conditionFieldOptions(cond)" :key="option.value" :value="option.value">
-                  {{ optionLabel(option) }}
-                </option>
-              </select>
-              <input
+                <span class="meta-rule-editor__group-label">Group</span>
+                <div class="meta-rule-editor__conjunction">
+                  <button
+                    type="button"
+                    class="meta-rule-editor__toggle-btn"
+                    :class="{ 'meta-rule-editor__toggle-btn--active': normalizeConditionConjunction(entry.group) === 'AND' }"
+                    @click="setGroupConjunction(entry.group, 'AND')"
+                  >AND</button>
+                  <button
+                    type="button"
+                    class="meta-rule-editor__toggle-btn"
+                    :class="{ 'meta-rule-editor__toggle-btn--active': normalizeConditionConjunction(entry.group) === 'OR' }"
+                    @click="setGroupConjunction(entry.group, 'OR')"
+                  >OR</button>
+                </div>
+                <div class="meta-rule-editor__condition-actions">
+                  <button class="meta-rule-editor__btn" type="button" data-action="add-nested-condition" @click="addConditionToGroup(entry.path)">+ Condition</button>
+                  <button
+                    class="meta-rule-editor__btn"
+                    type="button"
+                    data-action="add-condition-group"
+                    :disabled="!entry.canAddGroup"
+                    @click="addGroupToGroup(entry.path)"
+                  >+ Group</button>
+                  <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeConditionNode(entry.path)" title="Remove group">&times;</button>
+                </div>
+              </div>
+              <div
                 v-else
-                v-model="cond.value"
-                class="meta-rule-editor__input meta-rule-editor__input--sm"
-                :type="conditionValueInputType(cond)"
-                :inputmode="conditionValueInputMode(cond)"
-                :placeholder="conditionValuePlaceholder(cond)"
-              />
+                class="meta-rule-editor__condition-row"
+                :style="conditionIndentStyle(entry.depth)"
+                :data-condition-index="entry.pathKey"
+                :data-condition-path="entry.pathKey"
+              >
+                <select
+                  :value="entry.condition.fieldId"
+                  class="meta-rule-editor__select meta-rule-editor__select--sm"
+                  @change="onConditionFieldChange(entry.condition, ($event.target as HTMLSelectElement).value)"
+                >
+                  <option value="">-- field --</option>
+                  <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
+                </select>
+                <select
+                  :value="entry.condition.operator"
+                  class="meta-rule-editor__select meta-rule-editor__select--sm"
+                  @change="onConditionOperatorChange(entry.condition, ($event.target as HTMLSelectElement).value as ConditionOperator)"
+                >
+                  <option v-for="op in conditionOperatorsForField(entry.condition.fieldId)" :key="op.value" :value="op.value">{{ op.label }}</option>
+                </select>
+                <template v-if="!isUnaryOperator(entry.condition.operator)">
+                  <select
+                    v-if="conditionValueWidget(entry.condition) === 'booleanMultiSelect'"
+                    :value="booleanMultiSelectConditionValues(entry.condition)"
+                    class="meta-rule-editor__select meta-rule-editor__select--sm"
+                    data-condition-value="boolean-multi-select"
+                    multiple
+                    @change="onBooleanMultiSelectConditionValueChange(entry.condition, $event)"
+                  >
+                    <option value="true">true</option>
+                    <option value="false">false</option>
+                  </select>
+                  <select
+                    v-else-if="conditionValueWidget(entry.condition) === 'boolean'"
+                    :value="booleanConditionValue(entry.condition)"
+                    class="meta-rule-editor__select meta-rule-editor__select--sm"
+                    data-condition-value="boolean"
+                    @change="onBooleanConditionValueChange(entry.condition, ($event.target as HTMLSelectElement).value)"
+                  >
+                    <option value="">-- value --</option>
+                    <option value="true">true</option>
+                    <option value="false">false</option>
+                  </select>
+                  <select
+                    v-else-if="conditionValueWidget(entry.condition) === 'select'"
+                    :value="singleSelectConditionValue(entry.condition)"
+                    class="meta-rule-editor__select meta-rule-editor__select--sm"
+                    data-condition-value="select"
+                    @change="entry.condition.value = ($event.target as HTMLSelectElement).value"
+                  >
+                    <option value="">-- value --</option>
+                    <option v-for="option in conditionFieldOptions(entry.condition)" :key="option.value" :value="option.value">
+                      {{ optionLabel(option) }}
+                    </option>
+                  </select>
+                  <select
+                    v-else-if="conditionValueWidget(entry.condition) === 'multiSelect'"
+                    :value="multiSelectConditionValues(entry.condition)"
+                    class="meta-rule-editor__select meta-rule-editor__select--sm"
+                    data-condition-value="multi-select"
+                    multiple
+                    @change="onMultiSelectConditionValueChange(entry.condition, $event)"
+                  >
+                    <option v-for="option in conditionFieldOptions(entry.condition)" :key="option.value" :value="option.value">
+                      {{ optionLabel(option) }}
+                    </option>
+                  </select>
+                  <input
+                    v-else
+                    v-model="entry.condition.value"
+                    class="meta-rule-editor__input meta-rule-editor__input--sm"
+                    :type="conditionValueInputType(entry.condition)"
+                    :inputmode="conditionValueInputMode(entry.condition)"
+                    :placeholder="conditionValuePlaceholder(entry.condition)"
+                  />
+                </template>
+                <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeConditionNode(entry.path)" title="Remove condition">&times;</button>
+              </div>
             </template>
-            <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeCondition(idx)" title="Remove condition">&times;</button>
           </div>
-          <button class="meta-rule-editor__btn" type="button" data-action="add-condition" @click="addCondition">+ Add condition</button>
+          <div class="meta-rule-editor__condition-actions">
+            <button class="meta-rule-editor__btn" type="button" data-action="add-condition" @click="addCondition">+ Add condition</button>
+            <button class="meta-rule-editor__btn" type="button" data-action="add-condition-group" @click="addGroupToGroup([])">+ Add group</button>
+          </div>
         </section>
 
         <!-- 3. Actions -->
@@ -1035,6 +1073,23 @@ const DINGTALK_TEST_RUN_CONFIRM_MESSAGE =
 
 type ConditionOperatorOption = { value: ConditionOperator; label: string }
 type ConditionValueWidget = 'text' | 'number' | 'date' | 'dateTime' | 'boolean' | 'booleanMultiSelect' | 'select' | 'multiSelect'
+type ConditionPath = number[]
+type ConditionEditorEntry =
+  | {
+    kind: 'group'
+    group: ConditionGroup
+    path: ConditionPath
+    pathKey: string
+    depth: number
+    canAddGroup: boolean
+  }
+  | {
+    kind: 'condition'
+    condition: AutomationCondition
+    path: ConditionPath
+    pathKey: string
+    depth: number
+  }
 
 const conditionOperators: ConditionOperatorOption[] = [
   { value: 'equals', label: 'Equals' },
@@ -1084,6 +1139,7 @@ const MULTI_VALUE_OPERATOR_OPTIONS = [
   'is_empty',
   'is_not_empty',
 ] as const
+const MAX_CONDITION_GROUP_DEPTH = 5
 
 function optionsFromOperators(operators: readonly ConditionOperator[]): ConditionOperatorOption[] {
   return operators
@@ -1285,10 +1341,9 @@ function cloneConditionLeaf(condition: AutomationCondition): AutomationCondition
 function cloneConditionNode(node: AutomationConditionNode): AutomationConditionNode {
   if (isConditionGroupNode(node)) {
     const cloned: ConditionGroup = {
+      conjunction: normalizeConditionConjunction(node),
       conditions: node.conditions.map(cloneConditionNode),
     }
-    if (node.conjunction === 'AND' || node.conjunction === 'OR') cloned.conjunction = node.conjunction
-    if (node.logic === 'and' || node.logic === 'or') cloned.logic = node.logic
     return cloned
   }
   return cloneConditionLeaf(node)
@@ -1381,17 +1436,16 @@ function isConditionLeafComplete(condition: AutomationCondition): boolean {
 }
 
 function areConditionsComplete(node: AutomationConditionNode): boolean {
-  if (isConditionGroupNode(node)) return node.conditions.every(areConditionsComplete)
+  if (isConditionGroupNode(node)) return node.conditions.length > 0 && node.conditions.every(areConditionsComplete)
   return isConditionLeafComplete(node)
 }
 
 function buildConditionNodePayload(node: AutomationConditionNode): AutomationConditionNode {
   if (isConditionGroupNode(node)) {
     const group: ConditionGroup = {
+      conjunction: normalizeConditionConjunction(node),
       conditions: node.conditions.map(buildConditionNodePayload),
     }
-    if (node.conjunction === 'AND' || node.conjunction === 'OR') group.conjunction = node.conjunction
-    if (node.logic === 'and' || node.logic === 'or') group.logic = node.logic
     return group
   }
 
@@ -1474,14 +1528,84 @@ function draftFromRule(rule: AutomationRule): Draft {
 }
 
 const draft = ref<Draft>(emptyDraft())
-const editableConditionEntries = computed(() =>
-  draft.value.conditions.conditions
-    .map((condition, index) => ({ condition, index }))
-    .filter((entry): entry is { condition: AutomationCondition; index: number } => !isConditionGroupNode(entry.condition)),
-)
-const hasNestedConditionGroups = computed(() =>
-  draft.value.conditions.conditions.some(isConditionGroupNode),
-)
+const conditionEditorEntries = computed(() => collectConditionEditorEntries(draft.value.conditions.conditions))
+
+function conditionPathKey(path: ConditionPath): string {
+  return path.join('-') || 'root'
+}
+
+function conditionIndentStyle(depth: number): Record<string, string> {
+  return { '--condition-depth': String(Math.max(0, depth)) }
+}
+
+function createBlankCondition(): AutomationCondition {
+  return { fieldId: '', operator: 'equals', value: '' }
+}
+
+function createBlankConditionGroup(): ConditionGroup {
+  return {
+    conjunction: 'AND',
+    conditions: [createBlankCondition()],
+  }
+}
+
+function collectConditionEditorEntries(
+  nodes: AutomationConditionNode[],
+  parentPath: ConditionPath = [],
+): ConditionEditorEntry[] {
+  const entries: ConditionEditorEntry[] = []
+  nodes.forEach((node, index) => {
+    const path = [...parentPath, index]
+    const pathKey = conditionPathKey(path)
+    const depth = Math.max(0, path.length - 1)
+    if (isConditionGroupNode(node)) {
+      entries.push({
+        kind: 'group',
+        group: node,
+        path,
+        pathKey,
+        depth,
+        canAddGroup: canAddGroupToPath(path),
+      })
+      entries.push(...collectConditionEditorEntries(node.conditions, path))
+      return
+    }
+    entries.push({
+      kind: 'condition',
+      condition: node,
+      path,
+      pathKey,
+      depth,
+    })
+  })
+  return entries
+}
+
+function canAddGroupToPath(path: ConditionPath): boolean {
+  return path.length < MAX_CONDITION_GROUP_DEPTH
+}
+
+function groupAtPath(path: ConditionPath): ConditionGroup | null {
+  let group: ConditionGroup = draft.value.conditions
+  for (const index of path) {
+    const node = group.conditions[index]
+    if (!node || !isConditionGroupNode(node)) return null
+    group = node
+  }
+  return group
+}
+
+function parentGroupForPath(path: ConditionPath): { group: ConditionGroup; index: number } | null {
+  const index = path[path.length - 1]
+  if (index === undefined) return null
+  const group = groupAtPath(path.slice(0, -1))
+  return group ? { group, index } : null
+}
+
+function setGroupConjunction(group: ConditionGroup, conjunction: 'AND' | 'OR') {
+  group.conjunction = conjunction
+  delete group.logic
+}
 
 watch(
   () => props.visible,
@@ -1545,11 +1669,30 @@ const canSave = computed(() => {
 })
 
 function addCondition() {
-  draft.value.conditions.conditions.push({ fieldId: '', operator: 'equals', value: '' })
+  addConditionToGroup([])
+}
+
+function addConditionToGroup(path: ConditionPath) {
+  const group = groupAtPath(path)
+  if (!group) return
+  group.conditions.push(createBlankCondition())
+}
+
+function addGroupToGroup(path: ConditionPath) {
+  if (!canAddGroupToPath(path)) return
+  const group = groupAtPath(path)
+  if (!group) return
+  group.conditions.push(createBlankConditionGroup())
 }
 
 function removeCondition(idx: number) {
-  draft.value.conditions.conditions.splice(idx, 1)
+  removeConditionNode([idx])
+}
+
+function removeConditionNode(path: ConditionPath) {
+  const parent = parentGroupForPath(path)
+  if (!parent) return
+  parent.group.conditions.splice(parent.index, 1)
 }
 
 function addAction() {
@@ -2399,6 +2542,40 @@ function onTestRun() {
   display: flex;
   gap: 6px;
   align-items: center;
+}
+
+.meta-rule-editor__condition-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.meta-rule-editor__condition-row,
+.meta-rule-editor__condition-group {
+  margin-left: calc(var(--condition-depth, 0) * 18px);
+}
+
+.meta-rule-editor__condition-group {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.meta-rule-editor__group-label {
+  color: #475569;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.meta-rule-editor__condition-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
 }
 
 .meta-rule-editor__conjunction { display: flex; gap: 4px; }

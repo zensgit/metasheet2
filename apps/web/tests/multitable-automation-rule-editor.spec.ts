@@ -765,7 +765,7 @@ describe('MetaAutomationRuleEditor', () => {
     })
   })
 
-  it('preserves nested condition groups while editing other rule fields', async () => {
+  it('edits existing nested condition groups and saves canonical conjunctions', async () => {
     const saved = vi.fn()
     const nestedConditions: ConditionGroup = {
       logic: 'or',
@@ -789,12 +789,18 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    expect(container.querySelector('[data-field="nestedConditionNotice"]')?.textContent)
-      .toContain('Nested condition groups are preserved')
-    expect(container.querySelectorAll('[data-condition-index]').length).toBe(1)
+    expect(container.querySelector('[data-field="nestedConditionNotice"]')).toBeNull()
+    expect(container.querySelectorAll('[data-condition-index]').length).toBe(3)
+    expect(container.querySelector('[data-condition-group-path="1"]')).toBeTruthy()
+
+    const nestedNameRow = container.querySelector('[data-condition-path="1-0"]') as HTMLElement
+    const nestedValueInput = nestedNameRow.querySelector('input') as HTMLInputElement
+    nestedValueInput.value = 'Enterprise'
+    nestedValueInput.dispatchEvent(new Event('input'))
+    await flushPromises()
 
     const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
-    nameInput.value = 'Preserve nested'
+    nameInput.value = 'Edit nested'
     nameInput.dispatchEvent(new Event('input'))
     await flushPromises()
 
@@ -804,8 +810,120 @@ describe('MetaAutomationRuleEditor', () => {
     expect(saved).toHaveBeenCalledTimes(1)
     expect(saved.mock.calls[0][0].conditions).toEqual({
       conjunction: 'OR',
-      conditions: nestedConditions.conditions,
+      conditions: [
+        { fieldId: 'fld_1', operator: 'equals', value: 'Ready' },
+        {
+          conjunction: 'AND',
+          conditions: [
+            { fieldId: 'fld_2', operator: 'contains', value: 'Enterprise' },
+            { fieldId: 'assigneeUserIds', operator: 'in', value: ['user_1', 'user_2'] },
+          ],
+        },
+      ],
     })
+  })
+
+  it('creates nested condition groups from the visual builder', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'Nested builder'
+    nameInput.dispatchEvent(new Event('input'))
+
+    ;(container.querySelector('[data-action="add-condition"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const rootConditionRow = container.querySelector('[data-condition-path="0"]') as HTMLElement
+    const rootSelects = Array.from(rootConditionRow.querySelectorAll('select')) as HTMLSelectElement[]
+    rootSelects[0].value = 'fld_1'
+    rootSelects[0].dispatchEvent(new Event('change'))
+    await flushPromises()
+    const rootValueInput = rootConditionRow.querySelector('input') as HTMLInputElement
+    rootValueInput.value = 'Ready'
+    rootValueInput.dispatchEvent(new Event('input'))
+
+    ;(container.querySelector('[data-action="add-condition-group"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const nestedGroup = container.querySelector('[data-condition-group-path="1"]') as HTMLElement
+    const groupToggleButtons = Array.from(nestedGroup.querySelectorAll('.meta-rule-editor__toggle-btn')) as HTMLButtonElement[]
+    groupToggleButtons[1].click()
+    await flushPromises()
+
+    const nestedConditionRow = container.querySelector('[data-condition-path="1-0"]') as HTMLElement
+    const nestedSelects = Array.from(nestedConditionRow.querySelectorAll('select')) as HTMLSelectElement[]
+    nestedSelects[0].value = 'fld_2'
+    nestedSelects[0].dispatchEvent(new Event('change'))
+    await flushPromises()
+    nestedSelects[1].value = 'contains'
+    nestedSelects[1].dispatchEvent(new Event('change'))
+    await flushPromises()
+    const nestedValueInput = nestedConditionRow.querySelector('input') as HTMLInputElement
+    nestedValueInput.value = 'VIP'
+    nestedValueInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].conditions).toEqual({
+      conjunction: 'AND',
+      conditions: [
+        { fieldId: 'fld_1', operator: 'equals', value: 'Ready' },
+        {
+          conjunction: 'OR',
+          conditions: [{ fieldId: 'fld_2', operator: 'contains', value: 'VIP' }],
+        },
+      ],
+    })
+  })
+
+  it('prevents creating condition groups deeper than the backend limit', async () => {
+    const deepestCondition = { fieldId: 'fld_1', operator: 'equals', value: 'Ready' } as const
+    const deepConditions: ConditionGroup = {
+      conjunction: 'AND',
+      conditions: [
+        {
+          conjunction: 'AND',
+          conditions: [
+            {
+              conjunction: 'AND',
+              conditions: [
+                {
+                  conjunction: 'AND',
+                  conditions: [
+                    {
+                      conjunction: 'AND',
+                      conditions: [
+                        {
+                          conjunction: 'AND',
+                          conditions: [deepestCondition],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    }
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      rule: fakeRule({ conditions: deepConditions }),
+    })
+    await flushPromises()
+
+    const deepestGroup = container.querySelector('[data-condition-group-path="0-0-0-0-0"]') as HTMLElement
+    const addGroupButton = deepestGroup.querySelector('[data-action="add-condition-group"]') as HTMLButtonElement
+
+    expect(addGroupButton.disabled).toBe(true)
   })
 
   it('can add actions up to max 3', async () => {
