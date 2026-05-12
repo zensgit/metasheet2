@@ -3,8 +3,9 @@
 ## Goal
 
 Prove that the migration provider no longer applies superseded legacy numeric
-core SQL migrations by default, while preserving the on-prem/K3 SQL migrations
-needed by packaged deployments.
+core SQL migrations by default, while preserving their names as Kysely-visible
+no-op history markers and keeping the on-prem/K3 SQL migrations needed by
+packaged deployments.
 
 ## Local Commands
 
@@ -18,8 +19,8 @@ Expected result:
 
 - migration provider unit tests pass;
 - `032_create_approval_records`, `037_add_gallery_form_support`, and
-  `055_create_attendance_import_tokens` are absent from the default migration
-  set;
+  `055_create_attendance_import_tokens` are present as no-op history markers in
+  the default migration set;
 - `056_add_users_must_change_password` and
   `057_create_integration_core_tables` remain present.
 
@@ -70,15 +71,15 @@ Observed:
 
 ```json
 {
-  "has032": false,
-  "has037": false,
-  "has055": false,
+  "has032": true,
+  "has037": true,
+  "has055": true,
   "has056": true,
   "hasModernMustChange": true,
   "has057": true,
   "has058": true,
   "has059": true,
-  "total": 131
+  "total": 160
 }
 ```
 
@@ -88,11 +89,11 @@ Observed:
 | --- | --- |
 | Source-style runtime loads timestamp code migration plus `056` | Present |
 | Dist-style runtime loads timestamp SQL migration plus `056` | Present |
-| Default provider sees `032`, `037`, `055`, `056`, `057` in legacy folder | Only `056` and `057` remain |
+| Default provider sees `032`, `037`, `055`, `056`, `057` in legacy folder | `032`, `037`, and `055` remain visible as no-op markers; `056` and `057` remain executable |
 | Fresh replay applies `056` before timestamp `users` creation | `056` is guarded and does not fail |
 | Timestamp users migration has run | `zzzz20260512100000_add_users_must_change_password` adds the required column |
 | Legacy event-bus SQL is skipped | CI allows `20250924200000_create_event_bus_tables` to run so later event-bus alignment has tables to alter |
-| `includeSupersededLegacySqlMigrations: true` | `037` is visible for explicit audits |
+| `includeSupersededLegacySqlMigrations: true` | `037` is visible with its real SQL body for explicit audits |
 | `MIGRATION_EXCLUDE` / `excludedNames` excludes `056` | Existing exclusion behavior preserved |
 | Duplicate migration names across provider folders | Still fails fast |
 
@@ -117,7 +118,7 @@ The package should still include the required K3/on-prem SQL files:
 For the Windows/on-prem deployment that hit issue `#651`, acceptance is:
 
 1. deploy package built from the merged SHA;
-2. migration step no longer attempts superseded legacy SQL `032` through `055`;
+2. migration step no longer executes superseded legacy SQL `032` through `055`;
 3. `056` still supplies `users.must_change_password`;
 4. `057` through `059` still supply integration runtime tables and indexes;
 5. service starts without manual database patching.

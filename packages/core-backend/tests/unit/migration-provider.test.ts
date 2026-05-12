@@ -88,7 +88,7 @@ describe('createCoreBackendMigrationProvider', () => {
     ])
   })
 
-  it('skips superseded legacy core sql migrations by default', async () => {
+  it('exposes superseded legacy core sql migrations as no-op markers by default', async () => {
     const projectRoot = await createTempProjectRoot()
     const runtimeDir = path.join(projectRoot, 'src/db')
     const sourceMigrationsDir = path.join(runtimeDir, 'migrations')
@@ -123,10 +123,16 @@ describe('createCoreBackendMigrationProvider', () => {
     const migrations = await provider.getMigrations()
 
     expect(Object.keys(migrations).sort()).toEqual([
+      '032_create_approval_records',
+      '037_add_gallery_form_support',
+      '055_create_attendance_import_tokens',
       '056_add_users_must_change_password',
       '057_create_integration_core_tables',
       'zzzz20260119100000_create_users_table',
     ])
+    await expect(
+      migrations['032_create_approval_records']?.up({} as never)
+    ).resolves.toBeUndefined()
   })
 
   it('can include superseded legacy sql migrations for explicit compatibility audits', async () => {
@@ -169,10 +175,18 @@ describe('createCoreBackendMigrationProvider', () => {
       path.join(legacySqlDir, '056_add_users_must_change_password.sql'),
       'alter table users add column must_change_password boolean not null default false;'
     )
+    await writeFile(
+      path.join(legacySqlDir, '032_create_approval_records.sql'),
+      'create table if not exists approval_records (id uuid primary key);'
+    )
 
     const provider = createCoreBackendMigrationProvider({
       runtimeDir,
-      excludedNames: ['056_add_users_must_change_password.sql', '20260101000000_code.ts'],
+      excludedNames: [
+        '032_create_approval_records.sql',
+        '056_add_users_must_change_password.sql',
+        '20260101000000_code.ts',
+      ],
     })
     const migrations = await provider.getMigrations()
 
