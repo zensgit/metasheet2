@@ -4,7 +4,7 @@ Date: 2026-05-12
 
 ## Scope
 
-This closeout documents the final DingTalk P4 live acceptance pass for the 142 deployment after the backend/web images were updated to the immutable `e40ac3f909a2c5cad5072bc0e75f351c89513d10` tag.
+This closeout documents the final DingTalk P4 live acceptance pass for the 142 deployment. The strict live acceptance run was executed against the immutable `e40ac3f909a2c5cad5072bc0e75f351c89513d10` image tag.
 
 The goal was to close the remaining manual gates without committing raw secrets, webhook URLs, JWTs, temporary passwords, or screenshot originals.
 
@@ -21,9 +21,23 @@ The goal was to close the remaining manual gates without committing raw secrets,
 ## Smoke Session
 
 - Session: `142-session-e40ac3f9-ddzz-20260512`
+- Acceptance runtime image: `e40ac3f909a2c5cad5072bc0e75f351c89513d10`
 - Local session path: `/tmp/metasheet2-migration-provider-superseded-noop-20260512/output/dingtalk-p4-remote-smoke-session/142-session-e40ac3f9-ddzz-20260512`
 - Local evidence packet path: `/tmp/metasheet2-migration-provider-superseded-noop-20260512/artifacts/dingtalk-staging-evidence-packet/142-session-e40ac3f9-ddzz-20260512-final`
 - Final status: `release_ready`
+
+## Post-Merge Runtime Note
+
+After PR #1494 was merged, the 142 deployment was observed running `3e59d6a4c83a7aabd0c4d66006f62661f3b0bd21`.
+
+Diff review from `e40ac3f909a2c5cad5072bc0e75f351c89513d10` to `3e59d6a4c83a7aabd0c4d66006f62661f3b0bd21` showed only:
+
+- `apps/web/src/multitable/components/MetaAutomationRuleEditor.vue`
+- `apps/web/tests/multitable-automation-rule-editor.spec.ts`
+- `docs/development/multitable-phase3-automation-builder-development-20260512.md`
+- `docs/development/multitable-phase3-automation-builder-verification-20260512.md`
+
+No DingTalk auth, delivery, public-form, backend route, or P4 smoke helper files changed in that runtime drift window.
 
 ## Completed Checks
 
@@ -47,4 +61,4 @@ The goal was to close the remaining manual gates without committing raw secrets,
 ## Follow-up
 
 - If the release owner wants auditable screenshot archival in Git, run the existing screenshot archive workflow separately with a redaction review first.
-- The 142 deployment remains on the `e40ac3f909a2c5cad5072bc0e75f351c89513d10` runtime image while this docs-only closeout is reviewed.
+- The post-merge 142 runtime remains healthy on `3e59d6a4c83a7aabd0c4d66006f62661f3b0bd21`; the DingTalk acceptance evidence remains tied to the stricter live smoke run on `e40ac3f909a2c5cad5072bc0e75f351c89513d10`.
