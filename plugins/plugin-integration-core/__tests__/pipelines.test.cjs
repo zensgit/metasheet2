@@ -244,6 +244,60 @@ async function main() {
   assert.ok(badRole instanceof PipelineValidationError, 'source-only system cannot be target')
   assert.equal(badRole.details.field, 'targetSystemId')
 
+  // --- 6b. Same external system can bridge different objects only when bidirectional.
+  {
+    const sameSystemDb = createMockDb()
+    sameSystemDb.seed('integration_external_systems', [
+      {
+        id: 'crm_bidirectional',
+        tenant_id: 'tenant_1',
+        workspace_id: null,
+        name: 'CRM bidirectional',
+        role: 'bidirectional',
+        kind: 'http',
+      },
+      {
+        id: 'crm_source_only',
+        tenant_id: 'tenant_1',
+        workspace_id: null,
+        name: 'CRM source only',
+        role: 'source',
+        kind: 'http',
+      },
+    ])
+    const sameSystemRegistry = createPipelineRegistry({
+      db: sameSystemDb,
+      idGenerator: createIdGenerator(),
+    })
+
+    const sameSystemPipeline = await sameSystemRegistry.upsertPipeline({
+      tenantId: 'tenant_1',
+      name: 'CRM customer cleanse in-place',
+      sourceSystemId: 'crm_bidirectional',
+      sourceObject: 'customers_raw',
+      targetSystemId: 'crm_bidirectional',
+      targetObject: 'customers_clean',
+      fieldMappings: [
+        { sourceField: 'rawName', targetField: 'name', transform: { fn: 'trim' } },
+      ],
+    })
+    assert.equal(sameSystemPipeline.sourceSystemId, 'crm_bidirectional')
+    assert.equal(sameSystemPipeline.targetSystemId, 'crm_bidirectional')
+    assert.equal(sameSystemPipeline.sourceObject, 'customers_raw')
+    assert.equal(sameSystemPipeline.targetObject, 'customers_clean')
+
+    const sameSystemBadRole = await sameSystemRegistry.upsertPipeline({
+      tenantId: 'tenant_1',
+      name: 'CRM bad in-place target',
+      sourceSystemId: 'crm_source_only',
+      sourceObject: 'customers_raw',
+      targetSystemId: 'crm_source_only',
+      targetObject: 'customers_clean',
+    }).catch((error) => error)
+    assert.ok(sameSystemBadRole instanceof PipelineValidationError, 'same source-only system cannot be target')
+    assert.equal(sameSystemBadRole.details.field, 'targetSystemId')
+  }
+
   // --- 7. Validation + not-found errors ---------------------------------
   let badMapping = null
   try {

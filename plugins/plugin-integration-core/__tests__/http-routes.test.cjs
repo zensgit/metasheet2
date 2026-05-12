@@ -551,6 +551,262 @@ async function testExternalSystemTestRedactsAdapterResultSecrets() {
   assert.equal(statusUpdate.lastError.includes('liveBearerToken123456'), false)
 }
 
+async function testDiscoveryRoutes() {
+  const { calls, services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        calls.push(['getExternalSystemForAdapter', input])
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          workspaceId: input.workspaceId,
+          name: 'Bidirectional CRM',
+          kind: 'http',
+          role: 'bidirectional',
+          config: {
+            documentTemplates: [
+              {
+                id: 'custom.supplier.v1',
+                version: '2026.05.v1',
+                object: 'supplier',
+                label: 'Supplier',
+                endpointPath: '/api/suppliers/save',
+                bodyKey: 'Data',
+                schema: [
+                  { name: 'FNumber', label: 'Supplier code', type: 'string', required: true },
+                  { name: 'FName', label: 'Supplier name', type: 'string', required: true },
+                ],
+                password: 'template-secret-should-not-leak',
+              },
+            ],
+          },
+          credentials: { bearerToken: 'secret-token' },
+        }
+      },
+    },
+    adapterRegistry: {
+      listAdapterKinds() {
+        calls.push(['listAdapterKinds'])
+        return ['http', 'erp:k3-wise-sqlserver', 'custom:unknown']
+      },
+      createAdapter(input) {
+        calls.push(['createAdapter', input])
+        return {
+          async listObjects() {
+            calls.push(['listObjects'])
+            return [
+              {
+                name: 'customers_raw',
+                label: 'Customers raw',
+                operations: ['read'],
+                schema: [
+                  { name: 'rawName', label: 'Raw name', type: 'string' },
+                ],
+              },
+            ]
+          },
+          async getSchema(input) {
+            calls.push(['getSchema', input])
+            return {
+              object: input.object,
+              fields: [
+                { name: 'rawName', label: 'Raw name', type: 'string' },
+                { name: 'accessToken', label: 'Token-like source field', type: 'string' },
+              ],
+              raw: {
+                credentials: { password: 'schema-secret-should-not-leak' },
+              },
+            }
+          },
+        }
+      },
+    },
+  })
+  const { routes, registered } = mountRoutes(services)
+
+  assert.ok(registered.includes('GET /api/integration/adapters'), 'adapter discovery route registered')
+  assert.ok(registered.includes('GET /api/integration/external-systems/:id/objects'), 'object discovery route registered')
+  assert.ok(registered.includes('GET /api/integration/external-systems/:id/schema'), 'schema discovery route registered')
+
+  let res = await invoke(routes, 'GET', '/api/integration/adapters', {
+    user: READ_USER,
+  })
+  assertOkResponse(res, 200)
+  const sqlMetadata = res.body.data.find((adapter) => adapter.kind === 'erp:k3-wise-sqlserver')
+  assert.equal(sqlMetadata.label, 'K3 WISE SQL Server Channel')
+  assert.equal(sqlMetadata.advanced, true, 'SQL Server channel is marked as advanced')
+  assert.deepEqual(sqlMetadata.guardrails, {
+    read: {
+      requiresTableAllowlist: true,
+      allowlistKeys: ['readTables', 'allowedTables'],
+    },
+    write: {
+      requiresMiddleTableMode: true,
+      requiresTableAllowlist: true,
+      allowlistKeys: ['writeTables', 'allowedTables'],
+      writeModes: ['middle-table'],
+    },
+    ui: {
+      hiddenByDefault: true,
+      normalUiDirectCoreTableWrites: false,
+    },
+  })
+  const unknownMetadata = res.body.data.find((adapter) => adapter.kind === 'custom:unknown')
+  assert.equal(unknownMetadata.label, 'custom:unknown')
+  assert.equal(unknownMetadata.advanced, false)
+  assert.equal(unknownMetadata.guardrails, undefined)
+
+  res = await invoke(routes, 'GET', '/api/integration/external-systems/:id/objects', {
+    user: READ_USER,
+    params: { id: 'crm_1' },
+    query: { workspaceId: 'workspace_1' },
+  })
+  assertOkResponse(res, 200)
+  assert.deepEqual(findCall(calls, 'getExternalSystemForAdapter')[1], {
+    id: 'crm_1',
+    tenantId: 'tenant_1',
+    workspaceId: 'workspace_1',
+  })
+  assert.deepEqual(res.body.data.map((object) => object.name), ['customers_raw', 'supplier'])
+  const supplierObject = res.body.data.find((object) => object.name === 'supplier')
+  assert.equal(supplierObject.id, 'custom.supplier.v1')
+  assert.equal(supplierObject.label, 'Supplier')
+  assert.equal(supplierObject.object, 'supplier')
+  assert.equal(supplierObject.source, 'documentTemplate')
+  assert.deepEqual(supplierObject.operations, ['upsert'])
+  assert.equal(supplierObject.template.bodyKey, 'Data')
+  assert.equal(supplierObject.template.id, 'custom.supplier.v1')
+  assert.equal(supplierObject.template.endpointPath, '/api/suppliers/save')
+  assert.equal(JSON.stringify(res.body).includes('template-secret-should-not-leak'), false)
+  assert.equal(JSON.stringify(res.body).includes('secret-token'), false)
+
+  calls.length = 0
+  res = await invoke(routes, 'GET', '/api/integration/external-systems/:id/schema', {
+    user: READ_USER,
+    params: { id: 'crm_1' },
+    query: { workspaceId: 'workspace_1', object: 'customers_raw' },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.object, 'customers_raw')
+  assert.deepEqual(findCall(calls, 'getSchema')[1], { object: 'customers_raw' })
+  assert.equal(JSON.stringify(res.body).includes('schema-secret-should-not-leak'), false)
+  assert.equal(res.body.data.raw.credentials, '[redacted]')
+
+  calls.length = 0
+  res = await invoke(routes, 'GET', '/api/integration/external-systems/:id/schema', {
+    user: READ_USER,
+    params: { id: 'crm_1' },
+    query: { workspaceId: 'workspace_1', object: 'supplier' },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.object, 'supplier')
+  assert.deepEqual(res.body.data.fields.map((field) => field.name), ['FNumber', 'FName'])
+  assert.equal(findCalls(calls, 'getSchema').length, 0, 'template schema does not call adapter getSchema')
+
+  const missingObject = await invoke(routes, 'GET', '/api/integration/external-systems/:id/schema', {
+    user: READ_USER,
+    params: { id: 'crm_1' },
+    query: { workspaceId: 'workspace_1' },
+  })
+  assert.equal(missingObject.statusCode, 400)
+  assert.equal(missingObject.body.error.code, 'OBJECT_REQUIRED')
+}
+
+async function testDiscoveryRoutesRejectUnknownSystem() {
+  const { calls, services } = createMockServices()
+  services.externalSystemRegistry.getExternalSystemForAdapter = async (input) => {
+    calls.push(['getExternalSystemForAdapter', input])
+    const error = new Error('external system missing')
+    error.name = 'ExternalSystemNotFoundError'
+    throw error
+  }
+  const { routes } = mountRoutes(services)
+
+  let res = await invoke(routes, 'GET', '/api/integration/external-systems/:id/objects', {
+    user: READ_USER,
+    params: { id: 'missing_sys' },
+    query: { workspaceId: 'workspace_1' },
+  })
+  assert.equal(res.statusCode, 404)
+  assert.equal(res.body.error.code, 'ExternalSystemNotFoundError')
+  assert.deepEqual(findCall(calls, 'getExternalSystemForAdapter')[1], {
+    id: 'missing_sys',
+    tenantId: 'tenant_1',
+    workspaceId: 'workspace_1',
+  })
+  assert.equal(findCalls(calls, 'createAdapter').length, 0, 'unknown system does not create an adapter')
+
+  calls.length = 0
+  res = await invoke(routes, 'GET', '/api/integration/external-systems/:id/schema', {
+    user: READ_USER,
+    params: { id: 'missing_sys' },
+    query: { workspaceId: 'workspace_1', object: 'material' },
+  })
+  assert.equal(res.statusCode, 404)
+  assert.equal(res.body.error.code, 'ExternalSystemNotFoundError')
+  assert.equal(findCalls(calls, 'createAdapter').length, 0, 'unknown system schema lookup does not create an adapter')
+}
+
+async function testDocumentTemplateValidation() {
+  const cases = [
+    {
+      name: 'missing id',
+      template: { label: 'Supplier', object: 'supplier', schema: [{ name: 'FNumber' }] },
+      field: 'config.documentTemplates[0].id',
+    },
+    {
+      name: 'missing label',
+      template: { id: 'custom.supplier.v1', object: 'supplier', schema: [{ name: 'FNumber' }] },
+      field: 'config.documentTemplates[0].label',
+    },
+    {
+      name: 'missing object',
+      template: { id: 'custom.supplier.v1', label: 'Supplier', targetObject: 'supplier', schema: [{ name: 'FNumber' }] },
+      field: 'config.documentTemplates[0].object',
+    },
+  ]
+
+  for (const { name, template, field } of cases) {
+    const { services } = createMockServices({
+      externalSystemRegistry: {
+        async getExternalSystemForAdapter(input) {
+          return {
+            id: input.id,
+            tenantId: input.tenantId,
+            workspaceId: input.workspaceId,
+            name: 'Template Host',
+            kind: 'http',
+            role: 'bidirectional',
+            config: {
+              documentTemplates: [template],
+            },
+          }
+        },
+      },
+      adapterRegistry: {
+        createAdapter() {
+          return {
+            async listObjects() {
+              return []
+            },
+          }
+        },
+      },
+    })
+    const { routes } = mountRoutes(services)
+
+    const res = await invoke(routes, 'GET', '/api/integration/external-systems/:id/objects', {
+      user: READ_USER,
+      params: { id: `template_${name.replace(/\s+/g, '_')}` },
+      query: { workspaceId: 'workspace_1' },
+    })
+
+    assert.equal(res.statusCode, 400, `${name} should reject with 400`)
+    assert.equal(res.body.error.code, 'INVALID_DOCUMENT_TEMPLATE')
+    assert.equal(res.body.error.details.field, field)
+  }
+}
+
 async function testPipelineRoutes() {
   const { calls, services } = createMockServices()
   const { routes } = mountRoutes(services)
@@ -676,6 +932,222 @@ async function testPipelineRoutes() {
   })
   assert.equal(dryModeRes.statusCode, 400, "mode 'replay' must be rejected on dry-run too")
   assert.equal(dryModeRes.body.error.code, 'INVALID_RUN_MODE')
+}
+
+async function testTemplatePreviewRoute() {
+  const { calls, services } = createMockServices()
+  const { routes, registered } = mountRoutes(services)
+
+  assert.ok(
+    registered.includes('POST /api/integration/templates/preview'),
+    'template preview route registered',
+  )
+
+  let res = await invoke(routes, 'POST', '/api/integration/templates/preview', {
+    user: WRITE_USER,
+    body: {
+      sourceRecord: {
+        code: ' mat-001 ',
+        name: ' Bolt ',
+        uom: 'EA',
+        quantity: '2',
+        password: 'source-secret-should-not-leak',
+      },
+      fieldMappings: [
+        {
+          sourceField: 'code',
+          targetField: 'FNumber',
+          transform: ['trim', 'upper'],
+          validation: [{ type: 'required' }],
+        },
+        {
+          sourceField: 'name',
+          targetField: 'FName',
+          transform: { fn: 'trim' },
+          validation: [{ type: 'required' }],
+        },
+        {
+          sourceField: 'uom',
+          targetField: 'FBaseUnitID',
+          transform: {
+            fn: 'dictMap',
+            map: { EA: 'Pcs', PCS: 'Pcs', KG: 'Kg' },
+          },
+        },
+        {
+          sourceField: 'quantity',
+          targetField: 'FQty',
+          transform: { fn: 'toNumber' },
+          validation: [{ type: 'min', value: 0.000001 }],
+        },
+      ],
+      template: {
+        id: 'k3wise.material.preview',
+        version: '2026.05.v1',
+        documentType: 'material',
+        bodyKey: 'Data',
+        endpointPath: '/K3API/Material/Save',
+        schema: [
+          { name: 'FNumber', label: 'Material code', type: 'string', required: true },
+          { name: 'FName', label: 'Material name', type: 'string', required: true },
+          { name: 'FBaseUnitID', label: 'Base unit', type: 'string' },
+          { name: 'FQty', label: 'Quantity', type: 'number' },
+        ],
+      },
+    },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.valid, true)
+  assert.deepEqual(JSON.parse(JSON.stringify(res.body.data.payload)), {
+    Data: {
+      FNumber: 'MAT-001',
+      FName: 'Bolt',
+      FBaseUnitID: 'Pcs',
+      FQty: 2,
+    },
+  })
+  assert.deepEqual(res.body.data.errors, [])
+  assert.equal(JSON.stringify(res.body).includes('source-secret-should-not-leak'), false)
+  assert.equal(calls.length, 0, 'template preview does not call integration services')
+
+  res = await invoke(routes, 'POST', '/api/integration/templates/preview', {
+    user: WRITE_USER,
+    body: {
+      sourceRecord: {
+        parentCode: ' bom-parent-001 ',
+        childCode: ' mat-child-002 ',
+        quantity: '2.5',
+        scrapRate: '0.03',
+        password: 'bom-secret-should-not-leak',
+      },
+      fieldMappings: [
+        {
+          sourceField: 'parentCode',
+          targetField: 'FParentItemNumber',
+          transform: ['trim', 'upper'],
+          validation: [{ type: 'required' }],
+        },
+        {
+          sourceField: 'childCode',
+          targetField: 'FChildItemNumber',
+          transform: ['trim', 'upper'],
+          validation: [{ type: 'required' }],
+        },
+        {
+          sourceField: 'quantity',
+          targetField: 'FQty',
+          transform: { fn: 'toNumber' },
+          validation: [{ type: 'min', value: 0.000001 }],
+        },
+        {
+          sourceField: 'scrapRate',
+          targetField: 'FScrapRate',
+          transform: { fn: 'toNumber' },
+        },
+      ],
+      template: {
+        id: 'k3wise.bom.preview',
+        version: '2026.05.v1',
+        documentType: 'bom',
+        bodyKey: 'Data',
+        endpointPath: '/K3API/BOM/Save',
+        schema: [
+          { name: 'FParentItemNumber', label: 'Parent material', type: 'string', required: true },
+          { name: 'FChildItemNumber', label: 'Child material', type: 'string', required: true },
+          { name: 'FQty', label: 'Quantity', type: 'number', required: true },
+          { name: 'FScrapRate', label: 'Scrap rate', type: 'number' },
+        ],
+      },
+    },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.valid, true)
+  assert.deepEqual(JSON.parse(JSON.stringify(res.body.data.payload)), {
+    Data: {
+      FParentItemNumber: 'BOM-PARENT-001',
+      FChildItemNumber: 'MAT-CHILD-002',
+      FQty: 2.5,
+      FScrapRate: 0.03,
+    },
+  })
+  assert.deepEqual(res.body.data.errors, [])
+  assert.equal(JSON.stringify(res.body).includes('bom-secret-should-not-leak'), false)
+  assert.equal(calls.length, 0, 'BOM template preview does not call integration services')
+
+  res = await invoke(routes, 'POST', '/api/integration/templates/preview', {
+    user: WRITE_USER,
+    body: {
+      sourceRecord: {
+        code: '',
+      },
+      fieldMappings: [
+        {
+          sourceField: 'code',
+          targetField: 'FNumber',
+          transform: { fn: 'trim' },
+          validation: [{ type: 'required' }],
+        },
+      ],
+      template: {
+        bodyKey: 'Data',
+        schema: [
+          { name: 'FNumber', label: 'Material code', required: true },
+          { name: 'FName', label: 'Material name', required: true },
+        ],
+      },
+    },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.valid, false)
+  assert.ok(res.body.data.errors.some((error) => error.field === 'FNumber' && error.code === 'REQUIRED'))
+  assert.ok(res.body.data.errors.some((error) => error.field === 'FName' && error.code === 'REQUIRED'))
+
+  res = await invoke(routes, 'POST', '/api/integration/templates/preview', {
+    user: WRITE_USER,
+    body: {
+      sourceRecord: {
+        code: 'MAT-001',
+      },
+      fieldMappings: [
+        {
+          sourceField: 'code',
+          targetField: 'FNumber',
+          transform: { fn: 'unsafeUserScript' },
+        },
+      ],
+      template: {
+        bodyKey: 'Data',
+        schema: [
+          { name: 'FNumber', label: 'Material code', required: true },
+        ],
+      },
+    },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.valid, false)
+  assert.ok(res.body.data.transformErrors.some((error) => /unsupported transform/.test(error.message)))
+
+  const unsafeTemplate = await invoke(routes, 'POST', '/api/integration/templates/preview', {
+    user: WRITE_USER,
+    body: {
+      sourceRecord: {},
+      fieldMappings: [],
+      template: {
+        bodyKey: '__proto__',
+      },
+    },
+  })
+  assert.equal(unsafeTemplate.statusCode, 400)
+  assert.equal(unsafeTemplate.body.error.code, 'INVALID_TEMPLATE_PREVIEW')
+
+  const readOnlyPreview = await invoke(routes, 'POST', '/api/integration/templates/preview', {
+    user: READ_USER,
+    body: {
+      sourceRecord: {},
+      fieldMappings: [],
+    },
+  })
+  assert.equal(readOnlyPreview.statusCode, 403, 'preview is restricted to integration write users')
 }
 
 async function testStagingRoutes() {
@@ -1189,7 +1661,11 @@ async function main() {
   await testExternalSystemRoutes()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
   await testExternalSystemTestRedactsAdapterResultSecrets()
+  await testDiscoveryRoutes()
+  await testDiscoveryRoutesRejectUnknownSystem()
+  await testDocumentTemplateValidation()
   await testPipelineRoutes()
+  await testTemplatePreviewRoute()
   await testStagingRoutes()
   await testRunAndDeadLetterRoutes()
   await testErrorResponseShape()

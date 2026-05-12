@@ -10,15 +10,19 @@
 
 const ROUTES = [
   ['GET', '/api/integration/status', 'status'],
+  ['GET', '/api/integration/adapters', 'adaptersList'],
   ['GET', '/api/integration/external-systems', 'externalSystemsList'],
   ['POST', '/api/integration/external-systems', 'externalSystemsUpsert'],
   ['GET', '/api/integration/external-systems/:id', 'externalSystemsGet'],
   ['POST', '/api/integration/external-systems/:id/test', 'externalSystemsTest'],
+  ['GET', '/api/integration/external-systems/:id/objects', 'externalSystemObjects'],
+  ['GET', '/api/integration/external-systems/:id/schema', 'externalSystemSchema'],
   ['GET', '/api/integration/pipelines', 'pipelinesList'],
   ['POST', '/api/integration/pipelines', 'pipelinesUpsert'],
   ['GET', '/api/integration/pipelines/:id', 'pipelinesGet'],
   ['POST', '/api/integration/pipelines/:id/run', 'pipelinesRun'],
   ['POST', '/api/integration/pipelines/:id/dry-run', 'pipelinesDryRun'],
+  ['POST', '/api/integration/templates/preview', 'templatesPreview'],
   ['GET', '/api/integration/staging/descriptors', 'stagingDescriptors'],
   ['POST', '/api/integration/staging/install', 'stagingInstall'],
   ['GET', '/api/integration/runs', 'runsList'],
@@ -26,6 +30,8 @@ const ROUTES = [
   ['POST', '/api/integration/dead-letters/:id/replay', 'deadLettersReplay'],
 ]
 const { sanitizeIntegrationPayload } = require('./payload-redaction.cjs')
+const { getPath, setPath, transformRecord } = require('./transform-engine.cjs')
+const { validateRecord } = require('./validator.cjs')
 
 class HttpRouteError extends Error {
   constructor(status, code, message, details = {}) {
@@ -260,6 +266,47 @@ const SECRET_TEXT_PATTERN = /(?:access[_-]?token|refresh[_-]?token|id[_-]?token|
 const AUTH_TEXT_PATTERN = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/ig
 const JWT_TEXT_PATTERN = /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g
 const SECRET_ID_PATTERN = /\bSEC[A-Za-z0-9_-]{12,}\b/g
+const DEFAULT_ADAPTER_SUPPORTS = ['testConnection', 'listObjects', 'getSchema', 'read', 'upsert']
+const DEFAULT_ADAPTER_ROLES = ['source', 'target', 'bidirectional']
+const DANGEROUS_JSON_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
+const ADAPTER_METADATA = {
+  http: {
+    label: 'HTTP API',
+    roles: DEFAULT_ADAPTER_ROLES,
+    advanced: false,
+  },
+  'plm:yuantus-wrapper': {
+    label: 'Yuantus PLM',
+    roles: ['source'],
+    advanced: false,
+  },
+  'erp:k3-wise-webapi': {
+    label: 'K3 WISE WebAPI',
+    roles: ['target'],
+    advanced: false,
+  },
+  'erp:k3-wise-sqlserver': {
+    label: 'K3 WISE SQL Server Channel',
+    roles: ['source', 'target'],
+    advanced: true,
+    guardrails: {
+      read: {
+        requiresTableAllowlist: true,
+        allowlistKeys: ['readTables', 'allowedTables'],
+      },
+      write: {
+        requiresMiddleTableMode: true,
+        requiresTableAllowlist: true,
+        allowlistKeys: ['writeTables', 'allowedTables'],
+        writeModes: ['middle-table'],
+      },
+      ui: {
+        hiddenByDefault: true,
+        normalUiDirectCoreTableWrites: false,
+      },
+    },
+  },
+}
 
 function redactSecretText(value) {
   if (typeof value !== 'string') return value
@@ -272,6 +319,237 @@ function redactSecretText(value) {
     .replace(AUTH_TEXT_PATTERN, '$1 [redacted]')
     .replace(JWT_TEXT_PATTERN, '[redacted-jwt]')
     .replace(SECRET_ID_PATTERN, '[redacted-secret-id]')
+}
+
+function isPlainObject(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+function cloneJson(value) {
+  return value === undefined ? undefined : JSON.parse(JSON.stringify(value))
+}
+
+function describeAdapterKind(kind) {
+  const metadata = ADAPTER_METADATA[kind] || {}
+  return {
+    kind,
+    label: metadata.label || kind,
+    roles: Array.isArray(metadata.roles) ? [...metadata.roles] : [...DEFAULT_ADAPTER_ROLES],
+    supports: Array.isArray(metadata.supports) ? [...metadata.supports] : [...DEFAULT_ADAPTER_SUPPORTS],
+    advanced: metadata.advanced === true,
+    ...(metadata.guardrails ? { guardrails: cloneJson(metadata.guardrails) } : {}),
+  }
+}
+
+function assertRelativeTemplatePath(value, field) {
+  if (value === undefined || value === null || value === '') return null
+  if (typeof value !== 'string') {
+    throw new HttpRouteError(400, 'INVALID_DOCUMENT_TEMPLATE', `${field} must be a string`, { field })
+  }
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed) || trimmed.startsWith('//')) {
+    throw new HttpRouteError(400, 'INVALID_DOCUMENT_TEMPLATE', `${field} must be relative to the external-system base URL`, { field })
+  }
+  if (/[\u0000-\u001F\u007F]/.test(trimmed) || trimmed.includes('\\')) {
+    throw new HttpRouteError(400, 'INVALID_DOCUMENT_TEMPLATE', `${field} must be a safe URL path`, { field })
+  }
+  return trimmed.startsWith('/') ? trimmed : `/${trimmed}`
+}
+
+function normalizeTemplateSchema(schema, field) {
+  if (schema === undefined || schema === null) return []
+  if (!Array.isArray(schema)) {
+    throw new HttpRouteError(400, 'INVALID_DOCUMENT_TEMPLATE', `${field}.schema must be an array`, { field: `${field}.schema` })
+  }
+  return schema.map((item, index) => {
+    if (!isPlainObject(item)) {
+      throw new HttpRouteError(400, 'INVALID_DOCUMENT_TEMPLATE', `${field}.schema[${index}] must be an object`, {
+        field: `${field}.schema[${index}]`,
+      })
+    }
+    const name = firstString(item.name)
+    if (!name) {
+      throw new HttpRouteError(400, 'INVALID_DOCUMENT_TEMPLATE', `${field}.schema[${index}].name is required`, {
+        field: `${field}.schema[${index}].name`,
+      })
+    }
+    return {
+      ...sanitizeIntegrationPayload(item),
+      name,
+      label: firstString(item.label) || name,
+      type: firstString(item.type) || 'string',
+      required: item.required === true,
+    }
+  })
+}
+
+function normalizeDocumentTemplate(template, index) {
+  const field = `config.documentTemplates[${index}]`
+  if (!isPlainObject(template)) {
+    throw new HttpRouteError(400, 'INVALID_DOCUMENT_TEMPLATE', `${field} must be an object`, { field })
+  }
+  const id = firstString(template.id)
+  if (!id) {
+    throw new HttpRouteError(400, 'INVALID_DOCUMENT_TEMPLATE', `${field}.id is required`, { field: `${field}.id` })
+  }
+  const label = firstString(template.label)
+  if (!label) {
+    throw new HttpRouteError(400, 'INVALID_DOCUMENT_TEMPLATE', `${field}.label is required`, { field: `${field}.label` })
+  }
+  const object = firstString(template.object)
+  if (!object) {
+    throw new HttpRouteError(400, 'INVALID_DOCUMENT_TEMPLATE', `${field}.object is required`, { field: `${field}.object` })
+  }
+  const bodyKey = firstString(template.bodyKey) || 'Data'
+  const endpointPath = assertRelativeTemplatePath(
+    firstString(template.endpointPath, template.savePath, template.path),
+    `${field}.endpointPath`,
+  )
+  const operations = Array.isArray(template.operations) && template.operations.length > 0
+    ? template.operations.map((operation) => firstString(operation)).filter(Boolean)
+    : ['upsert']
+  return {
+    id,
+    name: object,
+    object,
+    label,
+    operations: operations.length > 0 ? operations : ['upsert'],
+    schema: normalizeTemplateSchema(template.schema, field),
+    source: 'documentTemplate',
+    template: sanitizeIntegrationPayload({
+      id,
+      version: firstString(template.version),
+      bodyKey,
+      endpointPath,
+      source: 'custom',
+    }),
+  }
+}
+
+function listDocumentTemplates(system) {
+  const templates = system && system.config ? system.config.documentTemplates : undefined
+  if (templates === undefined || templates === null) return []
+  if (!Array.isArray(templates)) {
+    throw new HttpRouteError(400, 'INVALID_DOCUMENT_TEMPLATES', 'config.documentTemplates must be an array', {
+      field: 'config.documentTemplates',
+    })
+  }
+  return templates.map((template, index) => normalizeDocumentTemplate(template, index))
+}
+
+function findDocumentTemplate(system, object) {
+  return listDocumentTemplates(system).find((template) => template.object === object || template.name === object) || null
+}
+
+function normalizePreviewFieldMappings(value) {
+  if (!Array.isArray(value)) {
+    throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', 'fieldMappings must be an array', { field: 'fieldMappings' })
+  }
+  return value
+}
+
+function normalizePreviewBodyKey(value) {
+  const bodyKey = firstString(value) || 'Data'
+  if (DANGEROUS_JSON_KEYS.has(bodyKey)) {
+    throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', 'template.bodyKey is unsafe', { field: 'template.bodyKey' })
+  }
+  if (/[\u0000-\u001F\u007F]/.test(bodyKey)) {
+    throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', 'template.bodyKey must be a safe JSON key', { field: 'template.bodyKey' })
+  }
+  return bodyKey
+}
+
+function normalizePreviewTemplate(value) {
+  if (value === undefined || value === null) {
+    return {
+      bodyKey: 'Data',
+      schema: [],
+      meta: { bodyKey: 'Data' },
+    }
+  }
+  if (!isPlainObject(value)) {
+    throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', 'template must be an object', { field: 'template' })
+  }
+  const endpointPath = assertRelativeTemplatePath(
+    firstString(value.endpointPath, value.savePath, value.path),
+    'template.endpointPath',
+  )
+  const bodyKey = normalizePreviewBodyKey(value.bodyKey)
+  return {
+    bodyKey,
+    schema: normalizeTemplateSchema(value.schema, 'template'),
+    meta: sanitizeIntegrationPayload({
+      id: firstString(value.id),
+      version: firstString(value.version),
+      documentType: firstString(value.documentType, value.object, value.targetObject),
+      bodyKey,
+      endpointPath,
+    }),
+  }
+}
+
+function schemaRequiredErrors(record, schema) {
+  const errors = []
+  for (const field of schema || []) {
+    if (field && field.required === true) {
+      const value = getPath(record, field.name)
+      if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) {
+        errors.push({
+          field: field.name,
+          code: 'REQUIRED',
+          message: `${field.label || field.name} is required`,
+          value,
+          rule: 'required',
+          details: { source: 'template.schema' },
+        })
+      }
+    }
+  }
+  return errors
+}
+
+function projectRecordForTemplate(record, schema) {
+  if (!Array.isArray(schema) || schema.length === 0) return record
+  const projected = {}
+  for (const field of schema) {
+    const value = getPath(record, field.name)
+    if (value !== undefined) setPath(projected, field.name, value)
+  }
+  return projected
+}
+
+function buildTemplatePreview(input) {
+  if (!isPlainObject(input)) {
+    throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', 'input must be an object')
+  }
+  if (!isPlainObject(input.sourceRecord)) {
+    throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', 'sourceRecord must be an object', { field: 'sourceRecord' })
+  }
+  const fieldMappings = normalizePreviewFieldMappings(input.fieldMappings)
+  const template = normalizePreviewTemplate(input.template)
+  const transformed = transformRecord(input.sourceRecord, fieldMappings)
+  const validation = transformed.ok ? validateRecord(transformed.value, fieldMappings) : { ok: true, valid: true, errors: [] }
+  const requiredErrors = transformed.ok ? schemaRequiredErrors(transformed.value, template.schema) : []
+  const targetRecord = projectRecordForTemplate(transformed.value, template.schema)
+  const payload = {
+    [template.bodyKey]: cloneJson(targetRecord),
+  }
+  const errors = [
+    ...transformed.errors,
+    ...validation.errors,
+    ...requiredErrors,
+  ].map((error) => cloneJson(error))
+  return sanitizeIntegrationPayload({
+    valid: errors.length === 0,
+    payload,
+    targetRecord: cloneJson(targetRecord),
+    errors,
+    transformErrors: transformed.errors.map((error) => cloneJson(error)),
+    validationErrors: validation.errors.map((error) => cloneJson(error)),
+    schemaErrors: requiredErrors.map((error) => cloneJson(error)),
+    template: template.meta,
+  })
 }
 
 function sanitizeTestConnectionResult(result) {
@@ -360,6 +638,11 @@ function createHandlers(services) {
       })
     },
 
+    async adaptersList(req, res) {
+      requireAccess(req, 'read')
+      return sendOk(res, adapterRegistry.listAdapterKinds().map(describeAdapterKind))
+    },
+
     async externalSystemsList(req, res) {
       requireAccess(req, 'read')
       const query = requestQuery(req)
@@ -399,6 +682,49 @@ function createHandlers(services) {
         ...result,
         system: redactSystemForTest(updatedSystem),
       })
+    },
+
+    async externalSystemObjects(req, res) {
+      requireAccess(req, 'read')
+      const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
+        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
+        : externalSystems.getExternalSystem.bind(externalSystems)
+      const system = await loadSystem(scopedInput(req, { id: requestParams(req).id }))
+      const adapter = adapterRegistry.createAdapter(system)
+      const adapterObjects = typeof adapter.listObjects === 'function'
+        ? await adapter.listObjects()
+        : []
+      const documentTemplateObjects = listDocumentTemplates(system)
+      return sendOk(res, sanitizeIntegrationPayload([
+        ...(Array.isArray(adapterObjects) ? adapterObjects : []),
+        ...documentTemplateObjects,
+      ]))
+    },
+
+    async externalSystemSchema(req, res) {
+      requireAccess(req, 'read')
+      const query = requestQuery(req)
+      const object = firstString(query.object, query.name)
+      if (!object) {
+        throw new HttpRouteError(400, 'OBJECT_REQUIRED', 'object is required')
+      }
+      const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
+        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
+        : externalSystems.getExternalSystem.bind(externalSystems)
+      const system = await loadSystem(scopedInput(req, { id: requestParams(req).id }))
+      const template = findDocumentTemplate(system, object)
+      if (template) {
+        return sendOk(res, sanitizeIntegrationPayload({
+          object: template.object,
+          fields: template.schema,
+          template: template.template,
+        }))
+      }
+      const adapter = adapterRegistry.createAdapter(system)
+      const schema = typeof adapter.getSchema === 'function'
+        ? await adapter.getSchema({ object })
+        : { object, fields: [] }
+      return sendOk(res, sanitizeIntegrationPayload(schema))
     },
 
     async pipelinesList(req, res) {
@@ -451,6 +777,11 @@ function createHandlers(services) {
         triggeredBy: 'api',
         dryRun: true,
       })), 200)
+    },
+
+    async templatesPreview(req, res) {
+      requireAccess(req, 'write')
+      return sendOk(res, buildTemplatePreview(requestBody(req)))
     },
 
     async stagingDescriptors(req, res) {

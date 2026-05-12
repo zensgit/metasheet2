@@ -7,6 +7,9 @@
         <p class="k3-setup__lead">先接通 K3 WISE，再把 PLM 数据放进多维表清洗，最后 dry-run 后推送 ERP。</p>
       </div>
       <div class="k3-setup__header-actions">
+        <router-link class="k3-setup__btn" data-testid="generic-workbench-link" to="/integrations/workbench">
+          打开通用工作台
+        </router-link>
         <button class="k3-setup__btn" type="button" :disabled="loading" @click="loadSystems(false)">
           {{ loading ? '刷新中' : '刷新' }}
         </button>
@@ -1340,6 +1343,9 @@ onMounted(() => {
 }
 
 .k3-setup__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 1px solid #cbd5e1;
   border-radius: 6px;
   padding: 9px 12px;
@@ -1347,6 +1353,7 @@ onMounted(() => {
   color: #172033;
   font: inherit;
   cursor: pointer;
+  text-decoration: none;
 }
 
 .k3-setup__btn--primary {
