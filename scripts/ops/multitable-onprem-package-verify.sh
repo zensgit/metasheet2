@@ -72,6 +72,18 @@ function verify_root_runtime_dependencies() {
   search_fixed_string '"bcryptjs"' "$package_json" || die "root package.json must include bcryptjs for Windows bootstrap compatibility"
 }
 
+function verify_migration_bridge_contract() {
+  local root="$1"
+  local provider="${root}/packages/core-backend/dist/src/db/migration-provider.js"
+  local legacy_must_change="${root}/packages/core-backend/migrations/056_add_users_must_change_password.sql"
+  local timestamp_must_change="${root}/packages/core-backend/dist/src/db/migrations/zzzz20260512100000_add_users_must_change_password.js"
+
+  search_fixed_string 'MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL' "$provider" || die "migration-provider.js must expose the superseded legacy SQL opt-in"
+  search_fixed_string '032_create_approval_records' "$provider" || die "migration-provider.js must carry the superseded legacy SQL skip list"
+  search_fixed_string "to_regclass('public.users') IS NOT NULL" "$legacy_must_change" || die "056_add_users_must_change_password.sql must no-op when users table is absent"
+  search_fixed_string 'must_change_password' "$timestamp_must_change" || die "timestamp users must_change_password bridge migration must be packaged"
+}
+
 function write_optional_report() {
   local checksum_status="SKIPPED"
   local link_status="SKIPPED"
@@ -255,6 +267,8 @@ required=(
   "apps/web/package.json"
   "packages/core-backend/dist/src/index.js"
   "packages/core-backend/dist/src/db/migrate.js"
+  "packages/core-backend/dist/src/db/migration-provider.js"
+  "packages/core-backend/dist/src/db/migrations/zzzz20260512100000_add_users_must_change_password.js"
   "packages/core-backend/package.json"
   "packages/core-backend/migrations/056_add_users_must_change_password.sql"
   "packages/core-backend/migrations/057_create_integration_core_tables.sql"
@@ -304,6 +318,7 @@ bootstrap_run_wrapper="$(find "$pkg_root" -maxdepth 1 -type f -name 'bootstrap-a
 [[ -n "$bootstrap_run_wrapper" ]] || die "Required package content missing: bootstrap-admin-<run>.bat"
 verify_windows_entrypoints "$pkg_root"
 verify_root_runtime_dependencies "$pkg_root"
+verify_migration_bridge_contract "$pkg_root"
 
 if [[ "$VERIFY_NO_GITHUB_LINKS" == "1" ]]; then
   verify_no_github_links "$pkg_root"
