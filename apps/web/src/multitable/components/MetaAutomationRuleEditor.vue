@@ -114,7 +114,18 @@
             </select>
             <template v-if="!isUnaryOperator(cond.operator)">
               <select
-                v-if="conditionValueWidget(cond) === 'boolean'"
+                v-if="conditionValueWidget(cond) === 'booleanMultiSelect'"
+                :value="booleanMultiSelectConditionValues(cond)"
+                class="meta-rule-editor__select meta-rule-editor__select--sm"
+                data-condition-value="boolean-multi-select"
+                multiple
+                @change="onBooleanMultiSelectConditionValueChange(cond, $event)"
+              >
+                <option value="true">true</option>
+                <option value="false">false</option>
+              </select>
+              <select
+                v-else-if="conditionValueWidget(cond) === 'boolean'"
                 :value="booleanConditionValue(cond)"
                 class="meta-rule-editor__select meta-rule-editor__select--sm"
                 data-condition-value="boolean"
@@ -1023,7 +1034,7 @@ const DINGTALK_TEST_RUN_CONFIRM_MESSAGE =
   'Test Run executes the saved rule and can send real DingTalk messages to configured groups or users. Unsaved changes are not included. Continue?'
 
 type ConditionOperatorOption = { value: ConditionOperator; label: string }
-type ConditionValueWidget = 'text' | 'number' | 'date' | 'dateTime' | 'boolean' | 'select' | 'multiSelect'
+type ConditionValueWidget = 'text' | 'number' | 'date' | 'dateTime' | 'boolean' | 'booleanMultiSelect' | 'select' | 'multiSelect'
 
 const conditionOperators: ConditionOperatorOption[] = [
   { value: 'equals', label: 'Equals' },
@@ -1133,7 +1144,7 @@ function optionLabel(option: FieldOption): string {
 function conditionValueWidget(condition: AutomationCondition): ConditionValueWidget {
   const field = conditionField(condition)
   if (!field) return 'text'
-  if (field.type === 'boolean') return 'boolean'
+  if (field.type === 'boolean') return isArrayOperator(condition.operator) ? 'booleanMultiSelect' : 'boolean'
   if (isNumericConditionFieldType(field.type)) return 'number'
   if (field.type === 'date') return 'date'
   if (field.type === 'dateTime' || field.type === 'createdTime' || field.type === 'modifiedTime') return 'dateTime'
@@ -1164,6 +1175,11 @@ function booleanConditionValue(condition: AutomationCondition): string {
   return ''
 }
 
+function booleanMultiSelectConditionValues(condition: AutomationCondition): string[] {
+  return (parseBooleanConditionArrayValue(condition.value) ?? [])
+    .map((entry) => entry ? 'true' : 'false')
+}
+
 function singleSelectConditionValue(condition: AutomationCondition): string {
   return typeof condition.value === 'string' ? condition.value : ''
 }
@@ -1180,6 +1196,11 @@ function onBooleanConditionValueChange(condition: AutomationCondition, value: st
   } else {
     condition.value = ''
   }
+}
+
+function onBooleanMultiSelectConditionValueChange(condition: AutomationCondition, event: Event) {
+  const select = event.target as HTMLSelectElement
+  condition.value = Array.from(select.selectedOptions).map((option) => option.value)
 }
 
 function onMultiSelectConditionValueChange(condition: AutomationCondition, event: Event) {
@@ -1314,6 +1335,13 @@ function parseBooleanConditionValue(value: unknown): boolean | null {
   return null
 }
 
+function parseBooleanConditionArrayValue(value: unknown): boolean[] | null {
+  const values = parseConditionArrayValue(value)
+  if (!values.length) return null
+  const booleans = values.map(parseBooleanConditionValue)
+  return booleans.every((entry): entry is boolean => entry !== null) ? booleans : null
+}
+
 function conditionFieldType(fieldId: string): string | undefined {
   return props.fields.find((field) => field.id === fieldId)?.type
 }
@@ -1321,9 +1349,9 @@ function conditionFieldType(fieldId: string): string | undefined {
 function buildConditionValuePayload(condition: AutomationCondition): unknown {
   const fieldType = conditionFieldType(condition.fieldId)
   if (isArrayOperator(condition.operator)) {
-    return isNumericConditionFieldType(fieldType)
-      ? parseNumericConditionArrayValue(condition.value) ?? []
-      : parseConditionArrayValue(condition.value)
+    if (isNumericConditionFieldType(fieldType)) return parseNumericConditionArrayValue(condition.value) ?? []
+    if (fieldType === 'boolean') return parseBooleanConditionArrayValue(condition.value) ?? []
+    return parseConditionArrayValue(condition.value)
   }
   if (isNumericConditionFieldType(fieldType)) {
     return parseNumberConditionValue(condition.value)
@@ -1339,9 +1367,9 @@ function isConditionLeafComplete(condition: AutomationCondition): boolean {
   if (isUnaryOperator(condition.operator)) return true
   const fieldType = conditionFieldType(condition.fieldId)
   if (isArrayOperator(condition.operator)) {
-    return isNumericConditionFieldType(fieldType)
-      ? parseNumericConditionArrayValue(condition.value) !== null
-      : parseConditionArrayValue(condition.value).length > 0
+    if (isNumericConditionFieldType(fieldType)) return parseNumericConditionArrayValue(condition.value) !== null
+    if (fieldType === 'boolean') return parseBooleanConditionArrayValue(condition.value) !== null
+    return parseConditionArrayValue(condition.value).length > 0
   }
   if (isNumericConditionFieldType(fieldType)) return parseNumberConditionValue(condition.value) !== null
   if (fieldType === 'boolean') return parseBooleanConditionValue(condition.value) !== null
