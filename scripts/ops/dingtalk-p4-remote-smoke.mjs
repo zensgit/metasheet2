@@ -700,7 +700,7 @@ ${renderManualTargets(evidence)}
 - Use the admin directory sync page to create a local user from a synced DingTalk account with the email field left blank.
 - Capture the create-and-bind result panel without exposing the temporary password.
 - Capture the refreshed account row showing the local user link.
-- Record \`evidence.adminEvidence.emailWasBlank: true\`, \`createdLocalUserId\`, \`boundDingTalkExternalId\`, and \`accountLinkedAfterRefresh: true\` when updating \`evidence.json\`.
+- Record \`evidence.adminEvidence.emailWasBlank: true\`, \`createdLocalUserId\`, \`boundDingTalkExternalId\`, and \`accountLinkedAfterRefresh: true\` when updating \`evidence.json\`; \`boundDingTalkExternalId\` must match the smoke target \`targetDingTalkExternalId\`.
 
 ## Fill Rules
 

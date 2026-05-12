@@ -232,6 +232,7 @@ function makeTemplateEvidence(checkId) {
             adminEvidence: {
               emailWasBlank: null,
               createdLocalUserId: '',
+              targetDingTalkExternalId: '',
               boundDingTalkExternalId: '',
               accountLinkedAfterRefresh: null,
               temporaryPasswordRedacted: true,
@@ -302,7 +303,7 @@ ${rows.join('\n')}
 - Create a local user from a synced DingTalk account while leaving email empty.
 - Capture the create-and-bind result panel without exposing the temporary password.
 - Capture the refreshed account row showing the local user link.
-- Record \`evidence.adminEvidence.emailWasBlank: true\`, \`createdLocalUserId\`, \`boundDingTalkExternalId\`, and \`accountLinkedAfterRefresh: true\` when updating \`evidence.json\`.
+- Record \`evidence.adminEvidence.emailWasBlank: true\`, \`createdLocalUserId\`, \`boundDingTalkExternalId\`, and \`accountLinkedAfterRefresh: true\` when updating \`evidence.json\`; when \`targetDingTalkExternalId\` is present, \`boundDingTalkExternalId\` must match it.
 
 ## Fill Rules
 
@@ -678,6 +679,15 @@ function validateNoEmailAdminEvidence(evidence) {
       id: 'no-email-user-create-bind',
       code: 'bound_dingtalk_external_id_required',
       message: 'no-email-user-create-bind pass evidence requires evidence.adminEvidence.boundDingTalkExternalId',
+    })
+  } else if (
+    isNonEmptyString(adminEvidence.targetDingTalkExternalId)
+    && adminEvidence.boundDingTalkExternalId.trim() !== adminEvidence.targetDingTalkExternalId.trim()
+  ) {
+    issues.push({
+      id: 'no-email-user-create-bind',
+      code: 'bound_dingtalk_external_id_mismatch',
+      message: 'no-email-user-create-bind pass evidence requires evidence.adminEvidence.boundDingTalkExternalId to match evidence.adminEvidence.targetDingTalkExternalId',
     })
   }
   if (adminEvidence.accountLinkedAfterRefresh !== true) {

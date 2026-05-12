@@ -49,6 +49,20 @@ function writeArtifact(sessionDir, checkId, name = 'evidence.txt', content = 'ma
   return artifactRef
 }
 
+function setNoEmailTarget(sessionDir, targetDingTalkExternalId) {
+  const evidencePath = path.join(sessionDir, 'workspace', 'evidence.json')
+  const evidence = JSON.parse(readFileSync(evidencePath, 'utf8'))
+  const check = evidence.checks.find((entry) => entry.id === 'no-email-user-create-bind')
+  check.evidence = {
+    ...check.evidence,
+    adminEvidence: {
+      ...(check.evidence?.adminEvidence ?? {}),
+      targetDingTalkExternalId,
+    },
+  }
+  writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, 'utf8')
+}
+
 function runScript(args, options = {}) {
   return spawnSync(process.execPath, [scriptPath, ...args], {
     cwd: repoRoot,
@@ -804,6 +818,48 @@ test('dingtalk-p4-evidence-record rejects no-email admin pass evidence without s
 
     assert.equal(result.status, 1)
     assert.match(result.stderr, /requires --admin-email-was-blank/)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('dingtalk-p4-evidence-record rejects no-email admin evidence for a different target account', () => {
+  const tmpDir = makeTmpDir()
+  const sessionDir = path.join(tmpDir, 'session')
+
+  try {
+    writeEvidence(sessionDir)
+    setNoEmailTarget(sessionDir, 'dt_no_email_expected')
+    const artifactRefA = writeArtifact(sessionDir, 'no-email-user-create-bind', 'admin-create-bind-result.png')
+    const artifactRefB = writeArtifact(sessionDir, 'no-email-user-create-bind', 'account-linked-after-refresh.png')
+
+    const result = runScript([
+      '--session-dir',
+      sessionDir,
+      '--check-id',
+      'no-email-user-create-bind',
+      '--status',
+      'pass',
+      '--source',
+      'manual-admin',
+      '--operator',
+      'qa-admin',
+      '--summary',
+      'No-email user was created and bound.',
+      '--artifact',
+      artifactRefA,
+      '--artifact',
+      artifactRefB,
+      '--admin-email-was-blank',
+      '--admin-created-local-user-id',
+      'local_no_email_001',
+      '--admin-bound-dingtalk-external-id',
+      'dt_no_email_other',
+      '--admin-account-linked-after-refresh',
+    ])
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /to match evidence\.adminEvidence\.targetDingTalkExternalId/)
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
