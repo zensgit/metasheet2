@@ -4,11 +4,11 @@
 
 This document tracks database migrations that are currently excluded from automated replay testing. These migrations require manual review and fixing before they can be re-enabled.
 
-**Current Exclude Count**: 12 files
+**Current Exclude Count**: 11 files
 
-**Default Exclude in CI**: `008_plugin_infrastructure.sql, 048_create_event_bus_tables.sql, 049_create_bpmn_workflow_tables.sql, 042a_core_model_views.sql, 20250924120000_create_views_view_states.ts, 20250924140000_create_gantt_tables.ts, 20250924200000_create_event_bus_tables.ts, 20250925_create_view_tables.sql, 20251117000001_add_snapshot_labels.ts, 20251117000002_create_protection_rules.ts, 20251201000001_create_change_management_tables.ts, zzzz20260114110000_create_user_orgs_table.ts`
+**Default Exclude in CI**: `008_plugin_infrastructure.sql, 048_create_event_bus_tables.sql, 049_create_bpmn_workflow_tables.sql, 042a_core_model_views.sql, 20250924120000_create_views_view_states.ts, 20250924140000_create_gantt_tables.ts, 20250925_create_view_tables.sql, 20251117000001_add_snapshot_labels.ts, 20251117000002_create_protection_rules.ts, 20251201000001_create_change_management_tables.ts, zzzz20260114110000_create_user_orgs_table.ts`
 
-**Last Updated**: 2026-04-19
+**Last Updated**: 2026-05-12
 
 ---
 
@@ -27,10 +27,6 @@ This document tracks database migrations that are currently excluded from automa
 #### `20250924140000_create_gantt_tables.ts`
 **Status**: ❌ Excluded
 **Issue**: Creates gantt foreign keys against the same pre-fix `text` view ids and fails with `uuid` vs `text` FK incompatibility during replay paths.
-
-#### `20250924200000_create_event_bus_tables.ts`
-**Status**: ❌ Excluded
-**Issue**: Recreates runtime event bus tables that already exist through the earlier event bus SQL path, causing replay environments to fail with duplicate `event_types` relations.
 
 #### `20250925_create_view_tables.sql`
 **Status**: ❌ Excluded
