@@ -1349,8 +1349,18 @@ export async function upsertIntegrationSystem(payload: Record<string, unknown>):
   return parseIntegrationResponse<IntegrationExternalSystem>(response)
 }
 
+function buildScopeQuery(input: Record<string, unknown>): string {
+  const params = new URLSearchParams()
+  const tenantId = typeof input.tenantId === 'string' ? input.tenantId.trim() : ''
+  const workspaceId = typeof input.workspaceId === 'string' ? input.workspaceId.trim() : ''
+  if (tenantId) params.set('tenantId', tenantId)
+  if (workspaceId) params.set('workspaceId', workspaceId)
+  return params.toString()
+}
+
 export async function testIntegrationSystem(systemId: string, input: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
-  const response = await apiFetch(`/api/integration/external-systems/${encodeURIComponent(systemId)}/test`, {
+  const query = buildScopeQuery(input)
+  const response = await apiFetch(`/api/integration/external-systems/${encodeURIComponent(systemId)}/test${query ? `?${query}` : ''}`, {
     method: 'POST',
     body: JSON.stringify(input),
   })

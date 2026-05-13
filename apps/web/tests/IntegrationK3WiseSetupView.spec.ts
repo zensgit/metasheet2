@@ -147,7 +147,7 @@ describe('IntegrationK3WiseSetupView', () => {
       if (url.startsWith('/api/integration/external-systems?kind=erp%3Ak3-wise-sqlserver')) {
         return jsonResponse([])
       }
-      if (url === '/api/integration/external-systems/k3_sys_1/test') {
+      if (url === '/api/integration/external-systems/k3_sys_1/test?tenantId=default') {
         const body = JSON.parse(String(init?.body || '{}'))
         expect(body).toMatchObject({
           tenantId: 'default',
