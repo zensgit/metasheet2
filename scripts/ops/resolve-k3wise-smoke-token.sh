@@ -115,6 +115,14 @@ shell_quote() {
   printf '%q' "$1"
 }
 
+tmp_ssh_key=""
+
+cleanup_tmp_key() {
+  if [[ -n "${tmp_ssh_key}" && -f "${tmp_ssh_key}" ]]; then
+    rm -f "${tmp_ssh_key}"
+  fi
+}
+
 if [[ -n "${secret_token}" ]]; then
   write_resolved_tenant "${tenant_id}" "METASHEET_TENANT_ID"
   write_token "${secret_token}" "METASHEET_K3WISE_SMOKE_TOKEN"
@@ -132,13 +140,14 @@ if [[ -z "${DEPLOY_HOST:-}" || -z "${DEPLOY_USER:-}" || -z "${DEPLOY_SSH_KEY_B64
   warn_or_fail "METASHEET_K3WISE_SMOKE_TOKEN is not set and DEPLOY_HOST/DEPLOY_USER/DEPLOY_SSH_KEY_B64 are incomplete"
 fi
 
-mkdir -p ~/.ssh
-if ! printf '%s' "${DEPLOY_SSH_KEY_B64}" | base64 -d > ~/.ssh/deploy_key; then
+tmp_ssh_key="$(mktemp "${TMPDIR:-/tmp}/k3wise-smoke-ssh-key.XXXXXX")"
+trap cleanup_tmp_key EXIT
+if ! printf '%s' "${DEPLOY_SSH_KEY_B64}" | base64 -d > "${tmp_ssh_key}"; then
   warn_or_fail "failed to decode DEPLOY_SSH_KEY_B64 for K3 WISE smoke token fallback"
 fi
-chmod 600 ~/.ssh/deploy_key
+chmod 600 "${tmp_ssh_key}"
 
-ssh_opts="-o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
+ssh_opts=(-o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i "${tmp_ssh_key}")
 quoted_deploy_path="$(shell_quote "${deploy_path}")"
 quoted_compose_file="$(shell_quote "${deploy_compose_file}")"
 quoted_tenant_id="$(shell_quote "${tenant_id}")"
@@ -147,7 +156,7 @@ quoted_auto_discover_tenant="$(shell_quote "${auto_discover_tenant}")"
 
 set +e
 token="$(
-  ssh ${ssh_opts} "${DEPLOY_USER}@${DEPLOY_HOST}" \
+  ssh "${ssh_opts[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
     "DEPLOY_PATH=${quoted_deploy_path} DEPLOY_COMPOSE_FILE=${quoted_compose_file} K3_WISE_SMOKE_TENANT_ID=${quoted_tenant_id} K3_WISE_SMOKE_TOKEN_EXPIRY=${quoted_token_expiry} K3_WISE_SMOKE_TENANT_AUTO_DISCOVER=${quoted_auto_discover_tenant} bash -s" <<'EOF'
 set -euo pipefail
 if [[ "${DEPLOY_PATH}" == /* ]]; then
