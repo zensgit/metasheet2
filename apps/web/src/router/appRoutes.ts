@@ -185,6 +185,12 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Admin Audit', requiresAuth: true }
   },
   {
+    path: '/integrations/workbench',
+    name: AppRouteNames.INTEGRATION_WORKBENCH,
+    component: () => import('../views/IntegrationWorkbenchView.vue'),
+    meta: { title: 'Integration Workbench', titleZh: '数据集成工作台', requiresAuth: true, permissions: ['integration:write'] }
+  },
+  {
     path: '/integrations/k3-wise',
     name: AppRouteNames.INTEGRATION_K3_WISE,
     component: () => import('../views/IntegrationK3WiseSetupView.vue'),

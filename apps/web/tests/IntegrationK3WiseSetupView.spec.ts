@@ -52,6 +52,13 @@ async function flushUi(cycles = 4): Promise<void> {
   }
 }
 
+function registerRouterLinkStub(app: VueApp<Element>): void {
+  app.component('router-link', {
+    props: ['to'],
+    template: '<a :href="to"><slot /></a>',
+  })
+}
+
 describe('IntegrationK3WiseSetupView', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -75,9 +82,13 @@ describe('IntegrationK3WiseSetupView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    registerRouterLinkStub(app)
     app.mount(container)
     await flushUi()
 
+    const workbenchLink = container.querySelector('[data-testid="generic-workbench-link"]') as HTMLAnchorElement
+    expect(workbenchLink?.getAttribute('href')).toBe('/integrations/workbench')
+    expect(workbenchLink?.textContent).toContain('打开通用工作台')
     expect(container.textContent).toContain('1. 接通 K3')
     expect(container.textContent).toContain('2. 准备多维表')
     expect(container.textContent).toContain('基础连接')
@@ -162,6 +173,7 @@ describe('IntegrationK3WiseSetupView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    registerRouterLinkStub(app)
     app.mount(container)
     await flushUi()
 
