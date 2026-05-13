@@ -29,6 +29,8 @@ Result:
 | `scripts/ops/multitable-onprem-package-verify.sh output/releases/multitable-onprem/metasheet-multitable-onprem-v2.5.0-workbench-package-proof-20260513.tgz` | PASS | Verifier passed with the new frontend route and workbench contract checks. |
 | `scripts/ops/multitable-onprem-package-verify.sh output/releases/multitable-onprem/metasheet-multitable-onprem-v2.5.0-workbench-package-proof-20260513.zip` | PASS | Windows zip verifier passed with the new frontend route and workbench contract checks. |
 | `PACKAGE_JSON=output/releases/multitable-onprem/metasheet-multitable-onprem-v2.5.0-workbench-package-proof-20260513.json DELIVERY_OUTPUT_ROOT=output/delivery/multitable-onprem/workbench-package-proof-20260513 node scripts/ops/multitable-onprem-delivery-bundle.mjs` | PASS | Customer delivery bundle was generated from the package metadata. |
+| `find output/delivery/multitable-onprem/workbench-package-proof-20260513/metasheet-multitable-onprem-v2.5.0-workbench-package-proof-20260513/docs -maxdepth 1 -type f \| sort \| rg 'k3\|integration-k3wise\|multitable-windows\|onprem-customer'` | PASS | Confirmed the delivery bundle contains the K3 internal-trial, live-gate, preflight, Windows easy-start, and customer checklist docs. |
+| `git diff --check` | PASS | No whitespace errors in tracked changes. |
 
 ## Contract Assertions
 
