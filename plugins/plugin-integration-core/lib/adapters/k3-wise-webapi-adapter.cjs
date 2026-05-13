@@ -67,10 +67,29 @@ function assertRelativePath(path, field) {
     throw new AdapterValidationError(`${field} is required`, { field })
   }
   const trimmed = path.trim()
-  if (/^https?:\/\//i.test(trimmed)) {
+  const hasScheme = /^[A-Za-z][A-Za-z0-9+.-]*:/.test(trimmed)
+  const isProtocolRelative = trimmed.startsWith('//')
+  const hasBackslash = trimmed.includes('\\')
+  if (hasScheme || isProtocolRelative || hasBackslash) {
     throw new AdapterValidationError(`${field} must be relative to baseUrl`, { field })
   }
   return trimmed.startsWith('/') ? trimmed : `/${trimmed}`
+}
+
+function buildEndpointUrl(baseUrl, path) {
+  const endpointPath = assertRelativePath(path, 'path')
+  const url = new URL(baseUrl)
+  const basePath = url.pathname && url.pathname !== '/'
+    ? url.pathname.replace(/\/+$/, '')
+    : ''
+  if (basePath && endpointPath !== basePath && !endpointPath.startsWith(`${basePath}/`)) {
+    url.pathname = `${basePath}${endpointPath}`
+  } else {
+    url.pathname = endpointPath
+  }
+  url.search = ''
+  url.hash = ''
+  return url
 }
 
 function normalizeHeaders(value, field) {
@@ -358,7 +377,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
   }
 
   function buildUrl(path, query) {
-    const url = new URL(assertRelativePath(path, 'path'), baseUrl)
+    const url = buildEndpointUrl(baseUrl, path)
     for (const [key, value] of Object.entries(query || {})) {
       if (value === undefined || value === null || value === '') continue
       url.searchParams.set(key, String(value))
@@ -507,6 +526,12 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     )
     if (cookie) authHeaders.Cookie = cookie
     if (sessionId) authHeaders[config.sessionHeader || 'X-K3-Session'] = String(sessionId)
+    if (Object.keys(authHeaders).length === 0) {
+      throw new K3WiseWebApiAdapterError('K3 WISE WebAPI login succeeded but did not return a session cookie or session id', {
+        code: 'K3_WISE_AUTH_TRANSPORT_MISSING',
+        body: data,
+      })
+    }
     cachedAuthContext = { headers: authHeaders, query: {}, expiresAt: null }
     return cachedAuthContext
   }
