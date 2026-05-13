@@ -155,6 +155,10 @@
 - [x] Update package verify script if new docs/routes must be included.
 - [x] Run K3 offline PoC.
 - [x] Run frontend build.
+- [x] Generate on-prem package archive for Workbench/K3 docs closeout.
+- [x] Verify on-prem package `.tgz` and `.zip` include required K3 runbooks and postdeploy smoke scripts.
+- [x] Add package-level verifier proof for packaged Workbench/K3 frontend routes and mapping editor copy.
+- [x] Generate customer delivery bundle and confirm K3 runbooks are included.
 
 ## Suggested Verification Commands
 
