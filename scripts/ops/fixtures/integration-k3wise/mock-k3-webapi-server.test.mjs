@@ -6,13 +6,18 @@ import test from 'node:test'
 import { createMockK3WebApiServer } from './mock-k3-webapi-server.mjs'
 
 async function postJson(baseUrl, pathname, payload) {
-  const response = await fetch(`${baseUrl}${pathname}`, {
+  return fetchJson(baseUrl, pathname, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(payload),
   })
+}
+
+async function fetchJson(baseUrl, pathname, options = {}) {
+  const response = await fetch(`${baseUrl}${pathname}`, options)
   return {
     status: response.status,
+    headers: response.headers,
     body: await response.json(),
   }
 }
@@ -83,6 +88,63 @@ test('mock K3 still evaluates material payloads with the raw request body', asyn
     assert.match(result.body.message, /BAD/)
     assert.equal(mock.calls.length, 1)
     assert.equal(mock.calls[0].body.Model.FNumber, 'BAD')
+  } finally {
+    await mock.stop()
+  }
+})
+
+test('mock K3 WebAPI rejects methods that real K3 endpoints would not accept', async () => {
+  const mock = createMockK3WebApiServer()
+  const baseUrl = await mock.start()
+  try {
+    const cases = [
+      { pathname: '/K3API/Login', method: 'GET', expectedMethod: 'POST' },
+      { pathname: '/K3API/Health', method: 'POST', expectedMethod: 'GET' },
+      { pathname: '/K3API/Material/Save', method: 'GET', expectedMethod: 'POST' },
+      { pathname: '/K3API/Material/Submit', method: 'GET', expectedMethod: 'POST' },
+      { pathname: '/K3API/Material/Audit', method: 'GET', expectedMethod: 'POST' },
+      { pathname: '/K3API/BOM/Save', method: 'GET', expectedMethod: 'POST' },
+      { pathname: '/K3API/BOM/Submit', method: 'GET', expectedMethod: 'POST' },
+      { pathname: '/K3API/BOM/Audit', method: 'GET', expectedMethod: 'POST' },
+    ]
+
+    for (const item of cases) {
+      const result = await fetchJson(baseUrl, item.pathname, { method: item.method })
+      assert.equal(result.status, 405, `${item.method} ${item.pathname} should be rejected`)
+      assert.equal(result.headers.get('allow'), item.expectedMethod)
+      assert.deepEqual(result.body, {
+        success: false,
+        message: `mock K3 method not allowed: ${item.method} ${item.pathname}`,
+        expectedMethod: item.expectedMethod,
+      })
+    }
+
+    assert.deepEqual(
+      mock.calls.map((call) => `${call.method} ${call.pathname}`),
+      cases.map((item) => `${item.method} ${item.pathname}`),
+      'rejected calls remain visible for debugging',
+    )
+  } finally {
+    await mock.stop()
+  }
+})
+
+test('mock K3 WebAPI can model successful login responses without usable auth transport', async () => {
+  const mock = createMockK3WebApiServer({
+    includeSessionCookie: false,
+    includeSessionId: false,
+  })
+  const baseUrl = await mock.start()
+  try {
+    const login = await postJson(baseUrl, '/K3API/Login', {
+      username: 'demo',
+      password: 'demo',
+      acctId: 'AIS_TEST',
+    })
+
+    assert.equal(login.status, 200)
+    assert.equal(login.headers.get('set-cookie'), null)
+    assert.deepEqual(login.body, { success: true })
   } finally {
     await mock.stop()
   }

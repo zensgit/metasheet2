@@ -256,6 +256,53 @@ async function testK3WebApiAdapter() {
   assert.equal(missingAcctIdStatus.code, 'K3_WISE_CREDENTIALS_MISSING')
   assert.match(missingAcctIdStatus.message, /acctId/)
 
+  const loginWithoutAuthTransportCalls = []
+  const loginWithoutAuthTransport = createK3WiseWebApiAdapter({
+    system: createK3WebApiSystem(),
+    fetchImpl: async (url, options = {}) => {
+      const parsed = new URL(url)
+      loginWithoutAuthTransportCalls.push({ pathname: parsed.pathname, options })
+      if (parsed.pathname === '/K3API/Login') {
+        return jsonResponse(200, { success: true })
+      }
+      return jsonResponse(200, { ok: true })
+    },
+  })
+  const missingAuthTransportStatus = await loginWithoutAuthTransport.testConnection({ skipHealth: true })
+  assert.equal(missingAuthTransportStatus.ok, false)
+  assert.equal(missingAuthTransportStatus.code, 'K3_WISE_AUTH_TRANSPORT_MISSING')
+  assert.match(missingAuthTransportStatus.message, /session cookie or session id/)
+  assert.deepEqual(
+    loginWithoutAuthTransportCalls.map((call) => call.pathname),
+    ['/K3API/Login'],
+    'missing auth transport fails at login and does not continue to health checks',
+  )
+
+  const contextPathCalls = []
+  const contextPathAdapter = createK3WiseWebApiAdapter({
+    system: createK3WebApiSystem({
+      config: {
+        baseUrl: 'https://k3.example.test/K3API',
+        loginPath: '/login',
+        healthPath: '/health',
+      },
+    }),
+    fetchImpl: async (url) => {
+      const parsed = new URL(url)
+      contextPathCalls.push(parsed.pathname)
+      if (parsed.pathname === '/K3API/login') {
+        return jsonResponse(200, { success: true, sessionId: 'k3-context-session' })
+      }
+      if (parsed.pathname === '/K3API/health') {
+        return jsonResponse(200, { ok: true })
+      }
+      return jsonResponse(404, { success: false, message: 'not found' })
+    },
+  })
+  const contextPathStatus = await contextPathAdapter.testConnection()
+  assert.equal(contextPathStatus.ok, true, 'baseUrl context path is preserved for relative K3 paths')
+  assert.deepEqual(contextPathCalls, ['/K3API/login', '/K3API/health'])
+
   assert.equal(webApiInternals.businessSuccess({ success: true }, {}), true)
   assert.equal(webApiInternals.businessSuccess({ StatusCode: 200, Data: { Code: 'Y' } }, {}), true)
   assert.equal(webApiInternals.businessSuccess({ StatusCode: 500, Data: { Code: 'N' } }, {}), false)
@@ -275,6 +322,42 @@ async function testK3WebApiAdapter() {
     }
   })()
   assert.ok(invalidBaseUrl instanceof AdapterValidationError, 'non-http K3 baseUrl rejected')
+
+  const protocolRelativeLoginPath = (() => {
+    try {
+      createK3WiseWebApiAdapter({
+        system: createK3WebApiSystem({
+          config: {
+            baseUrl: 'https://k3.example.test',
+            loginPath: '//evil.example.test/K3API/Login',
+          },
+        }),
+        fetchImpl,
+      })
+      return null
+    } catch (error) {
+      return error
+    }
+  })()
+  assert.ok(protocolRelativeLoginPath instanceof AdapterValidationError, 'protocol-relative K3 paths are rejected')
+
+  const backslashLoginPath = (() => {
+    try {
+      createK3WiseWebApiAdapter({
+        system: createK3WebApiSystem({
+          config: {
+            baseUrl: 'https://k3.example.test',
+            loginPath: '\\\\evil.example.test\\K3API\\Login',
+          },
+        }),
+        fetchImpl,
+      })
+      return null
+    } catch (error) {
+      return error
+    }
+  })()
+  assert.ok(backslashLoginPath instanceof AdapterValidationError, 'backslash-normalized K3 paths are rejected')
 
   const invalidObjectEndpoint = (() => {
     try {
