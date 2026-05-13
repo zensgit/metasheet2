@@ -30,6 +30,44 @@ If the evidence says `signoff.internalTrial=blocked`, the environment is not
 ready for internal trial signoff even when the diagnostic result is otherwise
 green.
 
+## Operator UI Flow
+
+Use the K3 WISE setup page as the quick-start preset:
+
+```text
+/integrations/k3-wise
+```
+
+Use the generic integration workbench when the integration needs cross-system
+mapping beyond the K3 Material/BOM preset:
+
+```text
+/integrations/workbench
+```
+
+Current operator contract:
+
+- The K3 WISE setup page is the guided preset for WebAPI credentials, SQL
+  channel gating, staging table install, Material/BOM template preview, and
+  draft pipeline creation.
+- The generic workbench is the configurable surface for source/target object
+  selection, field mappings, whitelisted transforms, dictionary maps,
+  validation rules, payload preview, dry-run, Save-only run, and run/dead-letter
+  observation.
+- Blank tenant scope resolves to `default`. Only override Tenant ID in the
+  advanced context when testing a different tenant.
+- Workspace ID is optional and belongs to advanced context. Leave it blank for
+  single-workspace on-prem PoC unless the deployment explicitly uses workspace
+  isolation.
+- WebAPI Base URL should stop at protocol, host, and port, for example
+  `http://k3-server:port`. Keep `/K3API/...` in endpoint paths. A Base URL that
+  also contains `/K3API` can produce duplicate request paths.
+- SQL Server is an advanced channel. Reads must use allowlisted tables or
+  views; writes must target middle tables or controlled stored procedures. Do
+  not expose direct K3 core-table writes to ordinary operators.
+- Material and BOM preview cards must remain secret-free. The preview is JSON
+  shape verification only; it must not call K3 or write MetaSheet records.
+
 ## GitHub Actions Path
 
 For manual signoff, run `K3 WISE Postdeploy Smoke` with:
