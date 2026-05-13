@@ -22,6 +22,9 @@ Include these docs with the package:
 2. `/Users/huazhou/Downloads/Github/metasheet2-multitable/docs/deployment/multitable-onprem-package-layout-20260319.md`
 3. `/Users/huazhou/Downloads/Github/metasheet2-multitable/docs/deployment/multitable-internal-pilot-runbook-20260319.md`
 4. `/Users/huazhou/Downloads/Github/metasheet2-multitable/docs/deployment/multitable-pilot-quickstart-20260319.md`
+5. `/Users/huazhou/Downloads/Github/metasheet2-multitable/docs/operations/k3-poc-onprem-preflight-runbook.md`
+6. `/Users/huazhou/Downloads/Github/metasheet2-multitable/docs/operations/integration-k3wise-internal-trial-runbook.md`
+7. `/Users/huazhou/Downloads/Github/metasheet2-multitable/docs/operations/integration-k3wise-live-gate-execution-package.md`
 
 ## 3. Environment Assumptions
 
@@ -32,6 +35,9 @@ Confirm these before delivery:
 3. Customer understands this is full-app deployment, not attendance-only shell
 4. Customer has PostgreSQL and Redis available locally
 5. Customer can run Node.js 20, pnpm, pm2, nginx on the Ubuntu side
+6. K3 WISE operators know whether they are using the quick-start preset
+   (`/integrations/k3-wise`) or the generic integration workbench
+   (`/integrations/workbench`)
 
 ## 4. Runtime Paths To Confirm
 
@@ -143,6 +149,8 @@ Make these explicit:
 3. The package still contains `plugin-attendance`, but the shell is not restricted to attendance
 4. This package is intended for internal or controlled rollout first, not broad public rollout
 5. If people import shows a mismatch in the result panel, use `Select person` or `Select people` there first before asking users to rewrite the CSV
+6. K3 WISE Base URL should be protocol + host + port only; keep `/K3API/...` in endpoint paths to avoid duplicate path segments
+7. K3 SQL Server channel is advanced: reads require allowlisted tables/views and writes must go through middle tables or controlled stored procedures
 
 ## 7. Sign-Off
 

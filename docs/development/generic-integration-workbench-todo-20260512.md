@@ -150,10 +150,10 @@
 - [x] Add verification MD for Workbench mapping rule editors.
 - [x] Add development MD for K3 WISE preset convergence.
 - [x] Add verification MD for K3 WISE preset convergence.
-- [ ] Update Windows on-prem runbook.
-- [ ] Update K3 WISE runbook.
-- [ ] Update package verify script if new docs/routes must be included.
-- [ ] Run K3 offline PoC.
+- [x] Update Windows on-prem runbook.
+- [x] Update K3 WISE runbook.
+- [x] Update package verify script if new docs/routes must be included.
+- [x] Run K3 offline PoC.
 - [x] Run frontend build.
 
 ## Suggested Verification Commands

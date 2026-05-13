@@ -137,6 +137,73 @@ scripts/ops/multitable-onprem-healthcheck.sh
 
 - Web: `http://<your-server-host>/`
 - Multitable route example: `http://<your-server-host>/multitable`
+- Generic integration workbench: `http://<your-server-host>/integrations/workbench`
+- K3 WISE quick-start preset: `http://<your-server-host>/integrations/k3-wise`
+
+## 9.1) Generic Integration and K3 WISE Setup
+
+The package includes `plugin-integration-core`, which registers the
+`/api/integration/*` control-plane routes used by both integration pages.
+
+Use `/integrations/k3-wise` when the field team is setting up the standard K3
+WISE Material/BOM path:
+
+1. Fill K3 WISE WebAPI system name, version, environment, Base URL, and
+   credential mode.
+2. Leave Tenant ID and Workspace ID alone for a single-tenant PoC. Blank Tenant
+   ID resolves to `default`; Workspace ID is optional.
+3. Keep Base URL at protocol, host, and port only, for example
+   `http://k3-server:port`.
+4. Keep `/K3API/...` in the advanced endpoint paths. If both Base URL and
+   endpoint paths contain `/K3API`, the UI warns because requests may be built
+   with duplicate path segments.
+5. Enable SQL Server only for implementation users. SQL reads must use
+   allowlisted tables or views; SQL writes must target middle tables or
+   controlled stored procedures. Do not expose direct K3 core-table writes in
+   normal UI operation.
+6. Use the Material/BOM preview cards to verify K3 `Data` JSON shape. Preview
+   is local calculation only and does not write DB rows or call K3.
+7. Save the K3 WebAPI system, test WebAPI, then install staging tables and
+   create draft pipelines.
+
+Use `/integrations/workbench` when the customer needs configurable mapping
+beyond the K3 preset:
+
+1. Select source and target systems.
+2. Load source and target objects or document templates.
+3. Configure field mappings using only the whitelisted transforms
+   (`trim`, `upper`, `lower`, `toNumber`, `dictMap`).
+4. Add dictionary mappings and required/min/max validation rules as needed.
+5. Generate payload preview first, then save the pipeline, run dry-run, and only
+   then opt into Save-only execution.
+
+Operator evidence for K3:
+
+```bash
+pnpm verify:integration-k3wise:onprem-preflight
+pnpm verify:integration-k3wise:poc
+```
+
+Post-deploy internal-trial signoff uses:
+
+```bash
+node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
+  --base-url "http://<your-server-host>" \
+  --token-file "<admin-token-file>" \
+  --tenant-id default \
+  --require-auth \
+  --out-dir artifacts/integration-k3wise/internal-trial/postdeploy-smoke
+
+node scripts/ops/integration-k3wise-postdeploy-summary.mjs \
+  --input artifacts/integration-k3wise/internal-trial/postdeploy-smoke/integration-k3wise-postdeploy-smoke.json \
+  --require-auth-signoff
+```
+
+Detailed operator runbooks included in the package:
+
+- `docs/operations/k3-poc-onprem-preflight-runbook.md`
+- `docs/operations/integration-k3wise-internal-trial-runbook.md`
+- `docs/operations/integration-k3wise-live-gate-execution-package.md`
 
 ## 10) Upgrade later
 
