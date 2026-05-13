@@ -70,6 +70,7 @@ describe('IntegrationWorkbenchView', () => {
           fields: [
             { name: 'code', label: 'Code', type: 'string' },
             { name: 'name', label: 'Name', type: 'string' },
+            { name: 'quantity', label: 'Quantity', type: 'number' },
           ],
         })
       }
@@ -107,6 +108,7 @@ describe('IntegrationWorkbenchView', () => {
             { name: 'FNumber', label: 'Material code', type: 'string', required: true },
             { name: 'FName', label: 'Material name', type: 'string', required: true },
             { name: 'FBaseUnitID', label: 'Base unit', type: 'string' },
+            { name: 'FQty', label: 'Quantity', type: 'number', required: true },
           ],
         })
       }
@@ -273,7 +275,26 @@ describe('IntegrationWorkbenchView', () => {
 
     expect((container.querySelector('[data-testid="source-field-0"]') as HTMLInputElement).value).toBe('code')
     expect((container.querySelector('[data-testid="target-field-0"]') as HTMLInputElement).value).toBe('FNumber')
+    expect((container.querySelector('[data-testid="transform-fn-0"]') as HTMLSelectElement).value).toBe('trim')
+    expect((container.querySelector('[data-testid="transform-fn-3"]') as HTMLSelectElement).value).toBe('toNumber')
     expect(container.textContent).toContain('Material code')
+
+    const firstTransform = container.querySelector('[data-testid="transform-fn-0"]') as HTMLSelectElement
+    firstTransform.value = 'upper'
+    firstTransform.dispatchEvent(new Event('change'))
+
+    const unitTransform = container.querySelector('[data-testid="transform-fn-2"]') as HTMLSelectElement
+    unitTransform.value = 'dictMap'
+    unitTransform.dispatchEvent(new Event('change'))
+    await flushUi()
+    const unitDict = container.querySelector('[data-testid="dict-map-2"]') as HTMLTextAreaElement
+    unitDict.value = 'EA=Pcs\nKG=Kg'
+    unitDict.dispatchEvent(new Event('input'))
+
+    const quantityMin = container.querySelector('[data-testid="validation-min-3"]') as HTMLInputElement
+    quantityMin.value = '0.000001'
+    quantityMin.dispatchEvent(new Event('input'))
+    await flushUi()
 
     ;(container.querySelector('[data-testid="preview-payload"]') as HTMLButtonElement).click()
     await flushUi()
@@ -285,9 +306,15 @@ describe('IntegrationWorkbenchView', () => {
         bodyKey: 'Data',
       },
       fieldMappings: [
-        { sourceField: 'code', targetField: 'FNumber' },
-        { sourceField: 'name', targetField: 'FName' },
-        { sourceField: 'uom', targetField: 'FBaseUnitID' },
+        { sourceField: 'code', targetField: 'FNumber', transform: { fn: 'upper' }, validation: [{ type: 'required' }] },
+        { sourceField: 'name', targetField: 'FName', transform: { fn: 'trim' }, validation: [{ type: 'required' }] },
+        { sourceField: 'uom', targetField: 'FBaseUnitID', transform: { fn: 'dictMap', map: { EA: 'Pcs', KG: 'Kg' } } },
+        {
+          sourceField: 'quantity',
+          targetField: 'FQty',
+          transform: { fn: 'toNumber' },
+          validation: [{ type: 'required' }, { type: 'min', value: 0.000001 }],
+        },
       ],
     })
     expect(container.textContent).toContain('"FNumber": "MAT-001"')

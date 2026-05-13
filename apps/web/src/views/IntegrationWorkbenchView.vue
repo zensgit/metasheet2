@@ -159,7 +159,7 @@
             <th>源字段</th>
             <th>目标字段</th>
             <th>转换</th>
-            <th>必填</th>
+            <th>校验</th>
             <th></th>
           </tr>
         </thead>
@@ -167,8 +167,29 @@
           <tr v-for="(mapping, index) in mappings" :key="mapping.id">
             <td><input v-model="mapping.sourceField" :data-testid="`source-field-${index}`" /></td>
             <td><input v-model="mapping.targetField" :data-testid="`target-field-${index}`" /></td>
-            <td><input v-model="mapping.transformText" :data-testid="`transform-${index}`" placeholder="trim,upper" /></td>
-            <td><input v-model="mapping.required" type="checkbox" :data-testid="`required-${index}`" /></td>
+            <td>
+              <select v-model="mapping.transformFn" :data-testid="`transform-fn-${index}`">
+                <option v-for="option in transformOptions" :key="option.value" :value="option.value">
+                  {{ option.label }}
+                </option>
+              </select>
+              <textarea
+                v-if="mapping.transformFn === 'dictMap'"
+                v-model="mapping.dictMapText"
+                :data-testid="`dict-map-${index}`"
+                placeholder="EA=Pcs&#10;KG=Kg"
+              ></textarea>
+            </td>
+            <td>
+              <label class="integration-workbench__mapping-check">
+                <input v-model="mapping.required" type="checkbox" :data-testid="`required-${index}`" />
+                <span>必填</span>
+              </label>
+              <div class="integration-workbench__mapping-rules">
+                <input v-model="mapping.minValueText" :data-testid="`validation-min-${index}`" placeholder="min" />
+                <input v-model="mapping.maxValueText" :data-testid="`validation-max-${index}`" placeholder="max" />
+              </div>
+            </td>
             <td>
               <button type="button" class="integration-workbench__icon-button" @click="removeMapping(index)">删除</button>
             </td>
@@ -338,14 +359,27 @@ import {
 } from '../services/integration/workbench'
 
 type WorkbenchSide = 'source' | 'target'
+type TransformFn = '' | 'trim' | 'upper' | 'lower' | 'toNumber' | 'dictMap'
 
 interface EditableMapping {
   id: string
   sourceField: string
   targetField: string
-  transformText: string
+  transformFn: TransformFn
+  dictMapText: string
   required: boolean
+  minValueText: string
+  maxValueText: string
 }
+
+const transformOptions: Array<{ value: TransformFn, label: string }> = [
+  { value: '', label: '无转换' },
+  { value: 'trim', label: 'trim 去空格' },
+  { value: 'upper', label: 'upper 转大写' },
+  { value: 'lower', label: 'lower 转小写' },
+  { value: 'toNumber', label: 'toNumber 转数字' },
+  { value: 'dictMap', label: 'dictMap 字典映射' },
+]
 
 const defaultScope = getDefaultIntegrationScope()
 const scope = reactive({
@@ -572,8 +606,11 @@ function seedMappingsFromTargetSchema(fields: IntegrationObjectSchemaField[]): v
     id: `mapping_${index}_${field.name}`,
     sourceField: guessSourceField(field.name),
     targetField: field.name,
-    transformText: field.type === 'number' ? 'toNumber' : 'trim',
+    transformFn: field.type === 'number' ? 'toNumber' : 'trim',
+    dictMapText: '',
     required: field.required === true,
+    minValueText: '',
+    maxValueText: '',
   }))
 }
 
@@ -582,8 +619,11 @@ function addMapping(): void {
     id: `mapping_${Date.now()}_${mappings.value.length}`,
     sourceField: '',
     targetField: '',
-    transformText: '',
+    transformFn: '',
+    dictMapText: '',
     required: false,
+    minValueText: '',
+    maxValueText: '',
   })
 }
 
@@ -591,22 +631,65 @@ function removeMapping(index: number): void {
   mappings.value.splice(index, 1)
 }
 
-function parseTransform(text: string): unknown {
-  const steps = text.split(',').map((item) => item.trim()).filter(Boolean)
-  if (steps.length === 0) return undefined
-  return steps.length === 1 ? { fn: steps[0] } : steps
+function parseDictionaryMap(text: string): Record<string, string> {
+  const trimmed = text.trim()
+  if (!trimmed) throw new Error('dictMap 字典映射不能为空')
+  if (trimmed.startsWith('{')) {
+    const parsed = JSON.parse(trimmed) as unknown
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('dictMap JSON 必须是对象')
+    }
+    return Object.fromEntries(Object.entries(parsed).map(([key, value]) => [key, String(value)]))
+  }
+  const entries = trimmed.split(/\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+    const separatorIndex = line.indexOf('=')
+    if (separatorIndex <= 0) throw new Error('dictMap 每行必须使用 source=target 格式')
+    const key = line.slice(0, separatorIndex).trim()
+    const value = line.slice(separatorIndex + 1).trim()
+    if (!key || !value) throw new Error('dictMap 每行必须同时包含 source 和 target')
+    return [key, value] as const
+  })
+  return Object.fromEntries(entries)
+}
+
+function parseTransform(mapping: EditableMapping): unknown {
+  if (!mapping.transformFn) return undefined
+  if (mapping.transformFn === 'dictMap') {
+    return {
+      fn: 'dictMap',
+      map: parseDictionaryMap(mapping.dictMapText),
+    }
+  }
+  return { fn: mapping.transformFn }
+}
+
+function parseOptionalNumber(value: string, label: string): number | undefined {
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  const numeric = Number(trimmed)
+  if (!Number.isFinite(numeric)) throw new Error(`${label} 必须是数字`)
+  return numeric
+}
+
+function buildValidationRules(mapping: EditableMapping): Array<Record<string, unknown>> | undefined {
+  const validation: Array<Record<string, unknown>> = []
+  if (mapping.required) validation.push({ type: 'required' })
+  const min = parseOptionalNumber(mapping.minValueText, 'min')
+  const max = parseOptionalNumber(mapping.maxValueText, 'max')
+  if (min !== undefined) validation.push({ type: 'min', value: min })
+  if (max !== undefined) validation.push({ type: 'max', value: max })
+  return validation.length > 0 ? validation : undefined
 }
 
 function buildMappings(): IntegrationFieldMapping[] {
   return mappings.value
     .filter((mapping) => mapping.sourceField.trim() && mapping.targetField.trim())
     .map((mapping, index) => {
-      const validation = mapping.required ? [{ type: 'required' }] : undefined
       return {
         sourceField: mapping.sourceField.trim(),
         targetField: mapping.targetField.trim(),
-        transform: parseTransform(mapping.transformText),
-        validation,
+        transform: parseTransform(mapping),
+        validation: buildValidationRules(mapping),
         sortOrder: index,
       }
     })
@@ -1068,6 +1151,25 @@ watch(showAdvancedConnectors, () => {
 
 .integration-workbench__mapping-table input[type="checkbox"] {
   width: auto;
+}
+
+.integration-workbench__mapping-table textarea {
+  min-height: 68px;
+  margin-top: 6px;
+}
+
+.integration-workbench__mapping-check {
+  display: flex;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 6px;
+}
+
+.integration-workbench__mapping-rules {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(72px, 1fr));
+  gap: 6px;
+  margin-top: 6px;
 }
 
 .integration-workbench__inline-check {

@@ -92,12 +92,15 @@ describe('IntegrationK3WiseSetupView', () => {
     expect(container.textContent).toContain('1. 接通 K3')
     expect(container.textContent).toContain('2. 准备多维表')
     expect(container.textContent).toContain('基础连接')
-    expect(container.textContent).toContain('Tenant ID（作用域）')
-    expect(container.textContent).toContain('单租户实体机测试使用 default')
-    expect(container.textContent).toContain('Workspace ID（可选）')
-    expect(container.textContent).toContain('不要带 /K3API')
+    expect(container.textContent).toContain('K3 WebAPI 快速预设')
+    expect(container.textContent).toContain('Tenant ID（高级上下文）')
+    expect(container.textContent).toContain('普通单租户部署可留空或使用 default')
+    expect(container.textContent).toContain('Workspace ID（高级，可选）')
+    expect(container.textContent).toContain('endpoint path 在高级设置中维护')
     expect(container.textContent).toContain('WebAPI 状态')
     expect(container.textContent).toContain('not saved')
+    expect(container.textContent).toContain('高级 SQL Server 通道')
+    expect(container.textContent).toContain('allowlist 表/视图')
     expect(container.textContent).toContain('多维表清洗准备')
     expect(container.textContent).toContain('K3 单据模板')
     expect(container.textContent).toContain('K3 WISE 物料')
@@ -118,7 +121,7 @@ describe('IntegrationK3WiseSetupView', () => {
     baseUrlInput.dispatchEvent(new Event('input', { bubbles: true }))
     await flushUi()
 
-    expect(container.textContent).toContain('当前 Base URL 含 /K3API')
+    expect(container.textContent).toContain('当前 Base URL 和 endpoint path 都含 /K3API')
   })
 
   it('sends tenant scope when testing the saved WebAPI system', async () => {

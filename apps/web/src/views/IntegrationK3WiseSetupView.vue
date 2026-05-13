@@ -277,19 +277,9 @@
         <section class="k3-setup__section k3-setup__section--primary">
           <div class="k3-setup__section-head">
             <h2>基础连接</h2>
-            <span>首次部署只需先完成这些字段</span>
+            <span>K3 WebAPI 快速预设；高级上下文默认使用 tenant=default</span>
           </div>
           <div class="k3-setup__grid">
-            <label class="k3-setup__field">
-              <span>Tenant ID（作用域）</span>
-              <input v-model.trim="form.tenantId" placeholder="default" autocomplete="off" />
-              <small>单租户实体机测试使用 default；它不是 K3 账套号。</small>
-            </label>
-            <label class="k3-setup__field">
-              <span>Workspace ID（可选）</span>
-              <input v-model.trim="form.workspaceId" autocomplete="off" />
-              <small>单工作区 PoC 建议留空；需要多工作区隔离时再填真实 ID。</small>
-            </label>
             <label class="k3-setup__field">
               <span>系统名称</span>
               <input v-model.trim="form.webApiName" autocomplete="off" />
@@ -311,9 +301,9 @@
             <label class="k3-setup__field k3-setup__field--wide">
               <span>WebAPI Base URL</span>
               <input v-model.trim="form.baseUrl" placeholder="http://k3-server:port" autocomplete="off" />
-              <small>只填协议、主机和端口；不要带 /K3API，下面的路径已包含 /K3API。</small>
-              <small v-if="baseUrlHasK3ApiPath" class="k3-setup__hint-warning">
-                当前 Base URL 含 /K3API；建议改为只到主机端口，保留高级路径的 /K3API/... 默认值。
+              <small>Base URL 只填协议、主机和端口；endpoint path 在高级设置中维护，默认已包含 /K3API/...。</small>
+              <small v-if="baseUrlEndpointOverlapWarning" class="k3-setup__hint-warning">
+                当前 Base URL 和 endpoint path 都含 /K3API；请求会拼成重复路径。请把 Base URL 改为只到主机端口。
               </small>
             </label>
             <label class="k3-setup__field">
@@ -355,6 +345,16 @@
             这些路径会相对 WebAPI Base URL 请求。实体机 PoC 推荐 Base URL 只写 http://K3主机:端口，Token/Save/BOM 路径保留 /K3API/...。
           </p>
           <div class="k3-setup__grid">
+            <label class="k3-setup__field">
+              <span>Tenant ID（高级上下文）</span>
+              <input v-model.trim="form.tenantId" placeholder="default" autocomplete="off" />
+              <small>普通单租户部署可留空或使用 default；它不是 K3 账套号。</small>
+            </label>
+            <label class="k3-setup__field">
+              <span>Workspace ID（高级，可选）</span>
+              <input v-model.trim="form.workspaceId" autocomplete="off" />
+              <small>单工作区 PoC 建议留空；需要多工作区隔离时再填真实 ID。</small>
+            </label>
             <label v-if="form.webApiAuthMode === 'authority-code'" class="k3-setup__field">
               <span>Token Path</span>
               <input v-model.trim="form.tokenPath" autocomplete="off" />
@@ -412,9 +412,12 @@
 
         <details class="k3-setup__section k3-setup__details">
           <summary class="k3-setup__section-summary">
-            <span>SQL Server 通道</span>
+            <span>高级 SQL Server 通道</span>
             <small>默认关闭；需要读取 K3 表或写中间表时再启用</small>
           </summary>
+          <p class="k3-setup__field-note k3-setup__field-note--wide">
+            SQL 通道是高级实施能力：读取必须走 allowlist 表/视图，写入只能走中间表或受控存储过程，不在普通 UI 暴露 K3 核心表直写。
+          </p>
           <div class="k3-setup__details-toolbar">
             <label class="k3-setup__switch">
               <input v-model="form.sqlEnabled" type="checkbox" />
@@ -696,6 +699,18 @@ const stagingDescriptorLabel = computed(() => stagingDescriptors.value.length > 
 const templatePreviewJson = computed(() => JSON.stringify(buildK3WiseDocumentPayloadPreview(templatePreviewTarget.value), null, 2))
 const selectedWebApiSystem = computed(() => webApiSystems.value.find((system) => system.id === form.webApiSystemId) || null)
 const baseUrlHasK3ApiPath = computed(() => /\/k3api(?:\/|$)/i.test(form.baseUrl.trim()))
+const endpointPathHasK3ApiPath = computed(() => [
+  form.tokenPath,
+  form.loginPath,
+  form.healthPath,
+  form.materialSavePath,
+  form.materialSubmitPath,
+  form.materialAuditPath,
+  form.bomSavePath,
+  form.bomSubmitPath,
+  form.bomAuditPath,
+].some((path) => /\/k3api(?:\/|$)/i.test(path.trim())))
+const baseUrlEndpointOverlapWarning = computed(() => baseUrlHasK3ApiPath.value && endpointPathHasK3ApiPath.value)
 const webApiConnectionStatus = computed(() => {
   if (testingWebApi.value) {
     return {
@@ -811,7 +826,7 @@ function upsertLocalWebApiSystem(system: IntegrationExternalSystem): void {
 
 function buildConnectionTestPayload(): Record<string, unknown> {
   return {
-    tenantId: form.tenantId.trim(),
+    tenantId: form.tenantId.trim() || 'default',
     workspaceId: form.workspaceId.trim() || null,
     skipHealth: !form.healthPath.trim(),
   }
