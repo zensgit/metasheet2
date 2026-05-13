@@ -422,6 +422,10 @@ function getDefaultTenantId(): string {
   return getLocalStorageValue('tenantId') || 'default'
 }
 
+function resolveTenantId(form: K3WiseSetupForm): string {
+  return optionalString(form.tenantId) ?? 'default'
+}
+
 export function splitList(value: string): string[] {
   return value
     .split(/\r?\n|,/)
@@ -649,7 +653,6 @@ export function createDefaultK3WiseSetupForm(): K3WiseSetupForm {
 
 export function validateK3WiseSetupForm(form: K3WiseSetupForm): K3WiseSetupValidationIssue[] {
   const issues: K3WiseSetupValidationIssue[] = []
-  if (!trim(form.tenantId)) issues.push({ field: 'tenantId', message: 'tenantId is required' })
   if (!trim(form.webApiName)) issues.push({ field: 'webApiName', message: 'WebAPI system name is required' })
   if (!trim(form.version)) issues.push({ field: 'version', message: 'K3 WISE version is required' })
   const webApiCredentialTouched = Boolean(trim(form.authorityCode) || trim(form.username) || trim(form.password) || trim(form.acctId))
@@ -707,7 +710,6 @@ export function validateK3WisePipelineTemplateForm(
   descriptors: IntegrationStagingDescriptor[] = [],
 ): K3WiseSetupValidationIssue[] {
   const issues: K3WiseSetupValidationIssue[] = []
-  if (!trim(form.tenantId)) issues.push({ field: 'tenantId', message: 'tenantId is required' })
   if (!trim(form.sourceSystemId)) issues.push({ field: 'sourceSystemId', message: 'PLM source system ID is required' })
   if (!trim(form.webApiSystemId)) issues.push({ field: 'webApiSystemId', message: 'Save or select a K3 WISE WebAPI system before creating pipelines' })
   if (!trim(form.materialPipelineName)) issues.push({ field: 'materialPipelineName', message: 'Material pipeline name is required' })
@@ -728,7 +730,6 @@ export function validateK3WisePipelineTemplateForm(
 
 export function validateK3WiseStagingInstallForm(form: K3WiseSetupForm): K3WiseSetupValidationIssue[] {
   const issues: K3WiseSetupValidationIssue[] = []
-  if (!trim(form.tenantId)) issues.push({ field: 'tenantId', message: 'tenantId is required' })
   if (!trim(form.projectId)) issues.push({ field: 'projectId', message: 'projectId is required before installing staging tables' })
   return issues
 }
@@ -740,7 +741,6 @@ export function validateK3WisePipelineRunForm(
   const issues: K3WiseSetupValidationIssue[] = []
   const pipelineField: keyof K3WiseSetupForm = target === 'material' ? 'materialPipelineId' : 'bomPipelineId'
   const pipelineId = trim(form[pipelineField])
-  if (!trim(form.tenantId)) issues.push({ field: 'tenantId', message: 'tenantId is required' })
   if (!pipelineId) {
     issues.push({
       field: pipelineField,
@@ -768,7 +768,6 @@ export function validateK3WisePipelineObservationForm(
 ): K3WiseSetupValidationIssue[] {
   const issues: K3WiseSetupValidationIssue[] = []
   const pipelineField: keyof K3WiseSetupForm = target === 'material' ? 'materialPipelineId' : 'bomPipelineId'
-  if (!trim(form.tenantId)) issues.push({ field: 'tenantId', message: 'tenantId is required' })
   if (!trim(form[pipelineField])) {
     issues.push({
       field: pipelineField,
@@ -795,8 +794,9 @@ export function buildK3WiseDeployGateChecklist(form: K3WiseSetupForm): K3WiseDep
     : form.webApiAuthMode === 'authority-code'
       ? Boolean(trim(form.authorityCode))
       : Boolean(trim(form.acctId) && trim(form.username) && trim(form.password))
-  const webApiConfigReady = Boolean(trim(form.tenantId) && trim(form.version) && trim(form.baseUrl) && trim(form.tokenPath) && trim(form.loginPath))
-  const stagingReady = Boolean(trim(form.tenantId) && trim(form.projectId))
+  const tenantId = resolveTenantId(form)
+  const webApiConfigReady = Boolean(trim(form.version) && trim(form.baseUrl) && trim(form.tokenPath) && trim(form.loginPath))
+  const stagingReady = Boolean(trim(form.projectId))
   const pipelineTemplateReady = Boolean(trim(form.sourceSystemId) && trim(form.webApiSystemId) && trim(form.materialStagingObjectId) && trim(form.bomStagingObjectId))
   const materialDryRunReady = Boolean(trim(form.materialPipelineId))
   const bomDryRunReady = Boolean(trim(form.bomPipelineId))
@@ -808,10 +808,10 @@ export function buildK3WiseDeployGateChecklist(form: K3WiseSetupForm): K3WiseDep
     gateItem(
       'tenant-scope',
       '租户作用域',
-      trim(form.tenantId) ? 'ready' : 'missing',
-      trim(form.tenantId)
-        ? 'Tenant 已可用于保存 K3 WISE 外部系统配置'
-        : '部署后可在页面填写 tenantId；缺 tenantId 时不能保存配置',
+      'ready',
+      optionalString(form.tenantId)
+        ? `Tenant ${tenantId} 已可用于保存 K3 WISE 外部系统配置`
+        : '未填写 Tenant 时自动使用 default；多租户隔离可在高级上下文中覆盖',
       'tenantId',
     ),
     gateItem(
@@ -963,7 +963,7 @@ export function buildK3WiseStagingInstallPayload(form: K3WiseSetupForm): K3WiseS
     throw new Error(issues[0].message)
   }
   return {
-    tenantId: trim(form.tenantId),
+    tenantId: resolveTenantId(form),
     workspaceId: optionalString(form.workspaceId) ?? null,
     projectId: trim(form.projectId),
     ...(optionalString(form.baseId) ? { baseId: trim(form.baseId) } : {}),
@@ -1007,7 +1007,7 @@ export function buildK3WisePipelineRunPayload(form: K3WiseSetupForm, target: K3W
   }
 
   const payload: K3WisePipelineRunPayload = {
-    tenantId: trim(form.tenantId),
+    tenantId: resolveTenantId(form),
     workspaceId: optionalString(form.workspaceId) ?? null,
     mode: form.pipelineRunMode,
   }
@@ -1031,7 +1031,7 @@ export function buildK3WisePipelineObservationQuery(
   const limit = options.limit
   const offset = options.offset
   return {
-    tenantId: trim(form.tenantId),
+    tenantId: resolveTenantId(form),
     workspaceId: optionalString(form.workspaceId) ?? null,
     pipelineId: getK3WisePipelineId(form, target),
     ...(options.status ? { status: options.status } : {}),
@@ -1043,7 +1043,7 @@ export function buildK3WisePipelineObservationQuery(
 export function buildK3WiseSetupPayloads(form: K3WiseSetupForm): K3WiseSetupPayloads {
   const workspaceId = optionalString(form.workspaceId) ?? null
   const baseSystem = {
-    tenantId: trim(form.tenantId),
+    tenantId: resolveTenantId(form),
     workspaceId,
     status: 'active',
   }
@@ -1104,7 +1104,7 @@ export function buildK3WiseSetupPayloads(form: K3WiseSetupForm): K3WiseSetupPayl
       return {
         webApi,
         sqlServer: {
-          tenantId: trim(form.tenantId),
+          tenantId: resolveTenantId(form),
           workspaceId,
           id: sqlSystemId,
           name: optionalString(form.sqlName) ?? 'K3 WISE SQL Server',
@@ -1181,7 +1181,7 @@ export function buildK3WisePipelinePayloads(form: K3WiseSetupForm): K3WisePipeli
     throw new Error(issues[0].message)
   }
 
-  const tenantId = trim(form.tenantId)
+  const tenantId = resolveTenantId(form)
   const workspaceId = optionalString(form.workspaceId) ?? null
   const projectId = optionalString(form.projectId) ?? null
   const sourceSystemId = trim(form.sourceSystemId)

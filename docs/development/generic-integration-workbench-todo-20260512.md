@@ -100,9 +100,9 @@
 - [x] Add target object/template selector.
 - [x] Add staging table selector.
 - [x] Add field mapping grid.
-- [ ] Add transform selector from whitelist.
-- [ ] Add dictionary mapping editor.
-- [ ] Add validation rule editor.
+- [x] Add transform selector from whitelist.
+- [x] Add dictionary mapping editor.
+- [x] Add validation rule editor.
 - [x] Add payload preview panel.
 - [x] Add dry-run button.
 - [x] Add Save-only run button.
@@ -111,16 +111,16 @@
 
 ## M8 - K3 WISE Page Convergence
 
-- [ ] Keep K3 setup page as a quick-start preset.
+- [x] Keep K3 setup page as a quick-start preset.
 - [x] Add link to generic workbench.
-- [ ] Remove tenant ID from ordinary required input.
-- [ ] Move workspace ID to advanced context.
-- [ ] Explain Base URL vs endpoint path clearly.
-- [ ] Warn when Base URL and endpoint both include `/K3API/`.
-- [ ] Keep WebAPI connected status after successful test.
-- [ ] Keep SQL channel as advanced.
-- [ ] Preserve Material/BOM template preview.
-- [ ] Preserve current K3 WISE tests.
+- [x] Remove tenant ID from ordinary required input.
+- [x] Move workspace ID to advanced context.
+- [x] Explain Base URL vs endpoint path clearly.
+- [x] Warn when Base URL and endpoint both include `/K3API/`.
+- [x] Keep WebAPI connected status after successful test.
+- [x] Keep SQL channel as advanced.
+- [x] Preserve Material/BOM template preview.
+- [x] Preserve current K3 WISE tests.
 
 ## M9 - Documentation and Delivery
 
@@ -146,6 +146,10 @@
 - [x] Add verification MD for backend contract closeout.
 - [x] Add development MD for SQL advanced guardrails.
 - [x] Add verification MD for SQL advanced guardrails.
+- [x] Add development MD for Workbench mapping rule editors.
+- [x] Add verification MD for Workbench mapping rule editors.
+- [x] Add development MD for K3 WISE preset convergence.
+- [x] Add verification MD for K3 WISE preset convergence.
 - [ ] Update Windows on-prem runbook.
 - [ ] Update K3 WISE runbook.
 - [ ] Update package verify script if new docs/routes must be included.

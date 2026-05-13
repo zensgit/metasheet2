@@ -113,6 +113,29 @@ describe('K3 WISE setup helpers', () => {
     })
   })
 
+  it('defaults blank advanced tenant scope to default in payload builders', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: '',
+      projectId: 'project_1',
+      webApiName: 'K3 WISE WebAPI',
+      version: 'K3 WISE 15.x test',
+      baseUrl: 'http://k3.local',
+      authorityCode: 'auth-code-from-k3-admin',
+      sourceSystemId: 'plm_1',
+      webApiSystemId: 'k3_1',
+      materialPipelineId: 'pipe_material',
+      bomPipelineId: 'pipe_bom',
+    })
+
+    expect(validateK3WiseSetupForm(form)).toEqual([])
+    expect(buildK3WiseSetupPayloads(form).webApi).toMatchObject({ tenantId: 'default' })
+    expect(buildK3WiseStagingInstallPayload(form)).toMatchObject({ tenantId: 'default' })
+    expect(buildK3WisePipelinePayloads(form).material).toMatchObject({ tenantId: 'default' })
+    expect(buildK3WisePipelineRunPayload(form, 'material')).toMatchObject({ tenantId: 'default' })
+    expect(buildK3WisePipelineObservationQuery(form, 'bom')).toMatchObject({ tenantId: 'default' })
+  })
+
   it('preserves existing credential storage when editing without replacement fields', () => {
     const form = createDefaultK3WiseSetupForm()
     Object.assign(form, {
@@ -513,7 +536,7 @@ describe('K3 WISE setup helpers', () => {
     })
   })
 
-  it('requires tenant, pipeline id, and positive sample limit before pipeline execution', () => {
+  it('requires pipeline id and positive sample limit before pipeline execution', () => {
     const form = createDefaultK3WiseSetupForm()
     Object.assign(form, {
       tenantId: '',
@@ -522,10 +545,9 @@ describe('K3 WISE setup helpers', () => {
     })
 
     const messages = validateK3WisePipelineRunForm(form, 'material').map((issue) => issue.message)
-    expect(messages).toContain('tenantId is required')
     expect(messages).toContain('Material pipeline ID is required before dry-run or run')
     expect(messages).toContain('Sample limit must be a positive integer')
-    expect(() => buildK3WisePipelineRunPayload(form, 'material')).toThrow('tenantId is required')
+    expect(() => buildK3WisePipelineRunPayload(form, 'material')).toThrow('Material pipeline ID is required before dry-run or run')
   })
 
   it('caps K3 WISE live PoC pipeline sample limit at three rows', () => {
@@ -561,7 +583,7 @@ describe('K3 WISE setup helpers', () => {
     })
   })
 
-  it('requires tenant and pipeline id before loading run history', () => {
+  it('requires pipeline id before loading run history', () => {
     const form = createDefaultK3WiseSetupForm()
     Object.assign(form, {
       tenantId: '',
@@ -569,9 +591,8 @@ describe('K3 WISE setup helpers', () => {
     })
 
     const messages = validateK3WisePipelineObservationForm(form, 'bom').map((issue) => issue.message)
-    expect(messages).toContain('tenantId is required')
     expect(messages).toContain('BOM pipeline ID is required before loading run history')
-    expect(() => buildK3WisePipelineObservationQuery(form, 'bom')).toThrow('tenantId is required')
+    expect(() => buildK3WisePipelineObservationQuery(form, 'bom')).toThrow('BOM pipeline ID is required before loading run history')
   })
 
   it('summarizes deploy readiness fields that can be filled after deployment', () => {
