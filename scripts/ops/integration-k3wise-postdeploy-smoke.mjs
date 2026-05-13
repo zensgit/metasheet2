@@ -106,6 +106,7 @@ const REQUIRED_STAGING_FIELD_DETAILS = {
   },
 }
 const TOKEN_PATTERN = /([A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._-]{16,})/g
+const URL_PATTERN = /\bhttps?:\/\/[^\s"'<>]+/gi
 
 class K3WisePostdeploySmokeError extends Error {
   constructor(message, details = {}) {
@@ -224,11 +225,38 @@ function normalizeBaseUrl(value) {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new K3WisePostdeploySmokeError('--base-url must use http or https', { baseUrl: value })
   }
+  if (url.username || url.password) {
+    throw new K3WisePostdeploySmokeError('--base-url must not contain inline credentials', { baseUrl: redactText(value) })
+  }
+  if (url.search || url.hash) {
+    throw new K3WisePostdeploySmokeError('--base-url must not contain query string or hash', { baseUrl: redactText(value) })
+  }
   return url.toString().replace(/\/+$/, '')
 }
 
 function redactText(value) {
-  return String(value).replace(TOKEN_PATTERN, '<redacted-token>')
+  return String(value)
+    .replace(TOKEN_PATTERN, '<redacted-token>')
+    .replace(URL_PATTERN, redactUrl)
+}
+
+function redactUrl(value) {
+  try {
+    const url = new URL(value)
+    if (url.username || url.password) {
+      url.username = '<redacted-credentials>'
+      url.password = ''
+    }
+    for (const key of Array.from(url.searchParams.keys())) {
+      url.searchParams.set(key, '<redacted>')
+    }
+    if (url.hash) {
+      url.hash = '#<redacted>'
+    }
+    return url.toString()
+  } catch {
+    return value
+  }
 }
 
 function markdownText(value) {

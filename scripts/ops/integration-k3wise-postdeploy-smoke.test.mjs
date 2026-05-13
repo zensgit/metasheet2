@@ -692,6 +692,37 @@ test('require-auth turns missing token into a failing check', async () => {
   }
 })
 
+test('postdeploy smoke rejects inline base URL credentials without leaking them', async () => {
+  const secretPassword = 'super-secret-inline-password'
+  const result = await runScript([
+    '--base-url',
+    `https://admin:${secretPassword}@metasheet.example.test`,
+  ])
+
+  assert.equal(result.status, 1)
+  assert.equal(result.stdout, '')
+  assert.match(result.stderr, /--base-url must not contain inline credentials/)
+  assert.doesNotMatch(result.stderr, new RegExp(secretPassword))
+  assert.match(result.stderr, /%3Credacted-credentials%3E/)
+})
+
+test('postdeploy smoke rejects query and hash base URLs without leaking them', async () => {
+  const secretQuery = 'super-secret-query-value'
+  const secretHash = 'super-secret-hash-value'
+  const result = await runScript([
+    '--base-url',
+    `https://metasheet.example.test?token=${secretQuery}#${secretHash}`,
+  ])
+
+  assert.equal(result.status, 1)
+  assert.equal(result.stdout, '')
+  assert.match(result.stderr, /--base-url must not contain query string or hash/)
+  assert.doesNotMatch(result.stderr, new RegExp(secretQuery))
+  assert.doesNotMatch(result.stderr, new RegExp(secretHash))
+  assert.match(result.stderr, /token=%3Credacted%3E/)
+  assert.match(result.stderr, /#%3Credacted%3E/)
+})
+
 test('postdeploy smoke markdown escapes table-breaking evidence values', async () => {
   const { renderMarkdown } = await import(pathToFileURL(scriptPath).href)
   const markdown = renderMarkdown({
