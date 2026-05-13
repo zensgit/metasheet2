@@ -11,6 +11,7 @@ Verification for the refreshed K3 WISE postdeploy smoke base URL guard.
 | `node --check scripts/ops/integration-k3wise-postdeploy-smoke.mjs` | PASS | Script syntax check passed. |
 | `node --test scripts/ops/integration-k3wise-postdeploy-smoke.test.mjs` | PASS | 15/15 tests passed, including new inline-credential and query/hash rejection regressions. |
 | `node --test scripts/ops/integration-k3wise-postdeploy-workflow-contract.test.mjs scripts/ops/integration-k3wise-postdeploy-summary.test.mjs` | PASS | 12/12 tests passed; workflow wiring and summary rendering stayed stable. |
+| `pnpm verify:integration-k3wise:poc` | PASS | K3 live PoC preflight tests 20/20, evidence tests 37/37, and mock WebAPI/SQL chain PASS. |
 | `git diff --check` | PASS | No whitespace errors. |
 
 ## Regression Assertions
