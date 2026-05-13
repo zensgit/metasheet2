@@ -84,6 +84,21 @@ function verify_migration_bridge_contract() {
   search_fixed_string 'must_change_password' "$timestamp_must_change" || die "timestamp users must_change_password bridge migration must be packaged"
 }
 
+function verify_generic_integration_workbench_contract() {
+  local root="$1"
+  local web_dist="${root}/apps/web/dist"
+  local easy_start="${root}/docs/deployment/multitable-windows-onprem-easy-start-20260319.md"
+  local k3_runbook="${root}/docs/operations/integration-k3wise-internal-trial-runbook.md"
+
+  search_fixed_string '/integrations/workbench' "$web_dist" || die "web dist must include the generic integration workbench route"
+  search_fixed_string '/integrations/k3-wise' "$web_dist" || die "web dist must include the K3 WISE setup route"
+  search_fixed_string 'dictMap' "$web_dist" || die "web dist must include the workbench dictionary mapping editor"
+  search_fixed_string 'Save-only' "$web_dist" || die "web dist must keep Save-only execution copy"
+  search_fixed_string '/integrations/workbench' "$easy_start" || die "Windows on-prem guide must document the generic integration workbench route"
+  search_fixed_string '/integrations/k3-wise' "$easy_start" || die "Windows on-prem guide must document the K3 WISE setup route"
+  search_fixed_string 'SQL Server is an advanced channel' "$k3_runbook" || die "K3 runbook must document SQL Server as an advanced channel"
+}
+
 function write_optional_report() {
   local checksum_status="SKIPPED"
   local link_status="SKIPPED"
@@ -322,6 +337,7 @@ bootstrap_run_wrapper="$(find "$pkg_root" -maxdepth 1 -type f -name 'bootstrap-a
 verify_windows_entrypoints "$pkg_root"
 verify_root_runtime_dependencies "$pkg_root"
 verify_migration_bridge_contract "$pkg_root"
+verify_generic_integration_workbench_contract "$pkg_root"
 
 if [[ "$VERIFY_NO_GITHUB_LINKS" == "1" ]]; then
   verify_no_github_links "$pkg_root"
