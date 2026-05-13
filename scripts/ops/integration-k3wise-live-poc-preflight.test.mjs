@@ -204,6 +204,17 @@ test('buildPacket rejects secret-bearing URL and free-text values before packet 
     (error) => error instanceof LivePocPreflightError && error.details.location === 'plm.baseUrl',
     'PLM baseUrl with signed query must be rejected',
   )
+
+  const packet = buildPacket(gate({
+    plm: {
+      baseUrl: 'https://plm.example.test/api?tenant=demo',
+    },
+  }))
+  assert.equal(
+    packet.externalSystems.find((system) => system.kind === 'plm:yuantus-wrapper').config.baseUrl,
+    'https://plm.example.test/api?tenant=demo',
+    'non-secret query parameters remain available for customer routing metadata',
+  )
 })
 
 test('buildPacket requires minimum K3 material target mappings', () => {

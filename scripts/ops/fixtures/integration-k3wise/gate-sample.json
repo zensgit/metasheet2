@@ -1,5 +1,5 @@
 {
-  "_comment": "Customer GATE answer template. Copy this file outside Git, fill in real values, run: node scripts/ops/integration-k3wise-live-poc-preflight.mjs --input <path>. All fields below are accepted as: real boolean true/false, string 'true'/'false'/'yes'/'no'/'on'/'off', Chinese 是/否/启用/禁用, or numeric 0/1. Unknown values throw with the field name. Strings/numbers/Chinese for productId / runId are also accepted.",
+  "_comment": "Customer GATE answer template. Copy this file outside Git, fill in real values, run: node scripts/ops/integration-k3wise-live-poc-preflight.mjs --input <path>. All fields below are accepted as: real boolean true/false, string 'true'/'false'/'yes'/'no'/'on'/'off', Chinese 是/否/启用/禁用, or numeric 0/1. Unknown values throw with the field name. Strings/numbers/Chinese for productId / runId are also accepted. Do not put username/password/token/api_key values into k3Wise.apiUrl or plm.baseUrl; use credentials fields instead.",
   "tenantId": "tenant-test",
   "workspaceId": "workspace-test",
   "operator": "integration-admin",
