@@ -367,8 +367,16 @@ they do not include actual values.
 
 ## Current Known State From Development Machine
 
+- This handoff branch was rebased onto current `origin/main` after:
+  - `da1fca4de` / PR #1509: ERP feedback evidence is now required before K3
+    live PoC evidence can return PASS.
+  - `b72b1038b` / PR #1511: saved K3 setup `autoSubmit` / `autoAudit`
+    booleans hydrate correctly from common string, numeric, and Chinese
+    variants.
 - Latest 142 deployment was performed through GitHub Actions, not local SSH.
-- Latest successful deployed commit observed: `cfa9d2a14`.
+- Latest successful deployed commit observed at the time of the bridge handoff:
+  `cfa9d2a14`. Treat this as the last verified 142 deployment snapshot, not as
+  the current repository HEAD.
 - 142 deploy run `25784749891`: remote preflight, deploy, migrate, and smoke
   all passed.
 - K3 WISE manual postdeploy smoke run `25785420343`: authenticated signoff
