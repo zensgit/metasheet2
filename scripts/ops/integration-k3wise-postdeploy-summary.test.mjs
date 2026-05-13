@@ -129,6 +129,123 @@ test('renders passing internal signoff for authenticated smoke evidence', async 
   }
 })
 
+test('blocks explicit pass when signoff evidence says top-level ok is false', async () => {
+  const outDir = makeTmpDir()
+  const evidencePath = path.join(outDir, 'evidence.json')
+  try {
+    writeFileSync(evidencePath, `${JSON.stringify({
+      ok: false,
+      baseUrl: 'http://127.0.0.1:8081',
+      authenticated: true,
+      signoff: {
+        internalTrial: 'pass',
+        reason: 'authenticated smoke passed',
+      },
+      summary: { pass: 8, skipped: 0, fail: 0 },
+      checks: [
+        { id: 'api-health', status: 'pass' },
+        { id: 'auth-me', status: 'pass' },
+      ],
+    })}\n`)
+
+    const result = await runScript(['--input', evidencePath, '--require-auth-signoff'])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /Internal trial signoff: \*\*BLOCKED\*\*/)
+    assert.match(result.stdout, /authenticated signoff evidence is inconsistent: top-level ok is not true/)
+    assert.match(result.stdout, /Status: \*\*FAIL\*\*/)
+  } finally {
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('blocks explicit pass when signoff evidence is not authenticated', async () => {
+  const outDir = makeTmpDir()
+  const evidencePath = path.join(outDir, 'evidence.json')
+  try {
+    writeFileSync(evidencePath, `${JSON.stringify({
+      ok: true,
+      baseUrl: 'http://127.0.0.1:8081',
+      authenticated: false,
+      signoff: {
+        internalTrial: 'pass',
+        reason: 'authenticated smoke passed',
+      },
+      summary: { pass: 8, skipped: 0, fail: 0 },
+      checks: [
+        { id: 'api-health', status: 'pass' },
+        { id: 'auth-me', status: 'pass' },
+      ],
+    })}\n`)
+
+    const result = await runScript(['--input', evidencePath, '--require-auth-signoff'])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /Internal trial signoff: \*\*BLOCKED\*\*/)
+    assert.match(result.stdout, /authenticated signoff evidence is inconsistent: authenticated checks did not run/)
+    assert.match(result.stdout, /Authenticated checks: `no`/)
+  } finally {
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('blocks explicit pass when signoff evidence has failed checks', async () => {
+  const outDir = makeTmpDir()
+  const evidencePath = path.join(outDir, 'evidence.json')
+  try {
+    writeFileSync(evidencePath, `${JSON.stringify({
+      ok: true,
+      baseUrl: 'http://127.0.0.1:8081',
+      authenticated: true,
+      signoff: {
+        internalTrial: 'pass',
+        reason: 'authenticated smoke passed',
+      },
+      summary: { pass: 8, skipped: 0, fail: 1 },
+      checks: [
+        { id: 'api-health', status: 'pass' },
+        { id: 'auth-me', status: 'pass' },
+        { id: 'integration-route-contract', status: 'fail' },
+      ],
+    })}\n`)
+
+    const result = await runScript(['--input', evidencePath, '--require-auth-signoff'])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /Internal trial signoff: \*\*BLOCKED\*\*/)
+    assert.match(result.stdout, /authenticated signoff evidence is inconsistent: summary\.fail is not 0/)
+    assert.match(result.stdout, /Summary: `8 pass \/ 0 skipped \/ 1 fail`/)
+  } finally {
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('blocks inferred pass when authenticated evidence has failed checks', async () => {
+  const outDir = makeTmpDir()
+  const evidencePath = path.join(outDir, 'evidence.json')
+  try {
+    writeFileSync(evidencePath, `${JSON.stringify({
+      ok: true,
+      baseUrl: 'http://127.0.0.1:8081',
+      authenticated: true,
+      summary: { pass: 8, skipped: 0, fail: 1 },
+      checks: [
+        { id: 'api-health', status: 'pass' },
+        { id: 'auth-me', status: 'pass' },
+        { id: 'integration-route-contract', status: 'fail' },
+      ],
+    })}\n`)
+
+    const result = await runScript(['--input', evidencePath, '--require-auth-signoff'])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /Internal trial signoff: \*\*BLOCKED\*\*/)
+    assert.match(result.stdout, /Signoff reason: one or more smoke checks failed/)
+  } finally {
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
 test('renders fail summary without failing the summary renderer', async () => {
   const outDir = makeTmpDir()
   const evidencePath = path.join(outDir, 'evidence.json')
