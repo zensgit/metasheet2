@@ -72,6 +72,46 @@ describe('useAttendanceAdminProvisioning', () => {
     expect(adminForbidden.value).toBe(false)
   })
 
+  it('grants importer permissions through the legacy fallback endpoint', async () => {
+    const validUserId = '11111111-1111-4111-8111-111111111111'
+    const adminForbidden = ref(false)
+    const provisioning = useAttendanceAdminProvisioning({ adminForbidden, tr })
+    const apiFetchMock = vi.mocked(apiFetch)
+    const grantedPermissions: string[] = []
+
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      const url = String(path)
+      if (url === `/api/attendance-admin/users/${encodeURIComponent(validUserId)}/roles/assign`) {
+        return jsonResponse(404, {
+          ok: false,
+          error: { message: 'not found' },
+        })
+      }
+      if (url === '/api/permissions/grant') {
+        const body = JSON.parse(String(init?.body || '{}')) as { permission?: string }
+        grantedPermissions.push(String(body.permission || ''))
+        return jsonResponse(200, { ok: true })
+      }
+      if (url === `/api/permissions/user/${encodeURIComponent(validUserId)}`) {
+        return jsonResponse(200, {
+          userId: validUserId,
+          permissions: ['attendance:read', 'attendance:import'],
+          isAdmin: false,
+        })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+
+    provisioning.provisionForm.userId = validUserId
+    provisioning.provisionForm.role = 'importer'
+    await provisioning.grantProvisioningRole()
+
+    expect(grantedPermissions).toEqual(['attendance:read', 'attendance:import'])
+    expect(provisioning.provisionPermissions.value).toEqual(['attendance:read', 'attendance:import'])
+    expect(provisioning.provisionStatusMessage.value).toContain("Role 'importer' granted")
+    expect(adminForbidden.value).toBe(false)
+  })
+
   it('normalizes batch preview payload and clears stale preview rows after input changes', async () => {
     const validA = '11111111-1111-4111-8111-111111111111'
     const validB = '22222222-2222-4222-8222-222222222222'

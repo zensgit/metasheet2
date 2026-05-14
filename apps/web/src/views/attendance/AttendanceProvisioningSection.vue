@@ -89,6 +89,7 @@
         <select id="attendance-provision-role" v-model="provisionForm.role" name="provisionRole">
           <option value="employee">{{ tr('employee', '员工') }}</option>
           <option value="approver">{{ tr('approver', '审批人') }}</option>
+          <option value="importer">{{ tr('importer', '导入员') }}</option>
           <option value="admin">{{ tr('admin', '管理员') }}</option>
         </select>
       </label>
@@ -162,6 +163,7 @@
         <select id="attendance-provision-batch-role" v-model="provisionBatchRole" name="provisionBatchRole">
           <option value="employee">{{ tr('employee', '员工') }}</option>
           <option value="approver">{{ tr('approver', '审批人') }}</option>
+          <option value="importer">{{ tr('importer', '导入员') }}</option>
           <option value="admin">{{ tr('admin', '管理员') }}</option>
         </select>
       </label>
@@ -221,7 +223,7 @@ import type { Ref } from 'vue'
 import AttendanceUserPickerField from './AttendanceUserPickerField.vue'
 
 type Translate = (en: string, zh: string) => string
-type ProvisionRole = 'employee' | 'approver' | 'admin'
+type ProvisionRole = 'employee' | 'approver' | 'importer' | 'admin'
 type ProvisionStatusKind = 'info' | 'error'
 type MaybePromise<T> = T | Promise<T>
 

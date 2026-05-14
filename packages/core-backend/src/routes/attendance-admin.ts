@@ -5,7 +5,7 @@ import { isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
 import { query } from '../db/pg'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 
-type AttendanceRoleTemplateId = 'employee' | 'approver' | 'admin'
+type AttendanceRoleTemplateId = 'employee' | 'approver' | 'importer' | 'admin'
 
 const ATTENDANCE_ROLE_TEMPLATES: Record<AttendanceRoleTemplateId, {
   id: AttendanceRoleTemplateId
@@ -25,10 +25,16 @@ const ATTENDANCE_ROLE_TEMPLATES: Record<AttendanceRoleTemplateId, {
     permissions: ['attendance:read', 'attendance:approve'],
     description: 'Approve or reject attendance adjustment requests.',
   },
+  importer: {
+    id: 'importer',
+    roleId: 'attendance_importer',
+    permissions: ['attendance:read', 'attendance:import'],
+    description: 'Import attendance files, run import sync, and inspect import batches.',
+  },
   admin: {
     id: 'admin',
     roleId: 'attendance_admin',
-    permissions: ['attendance:read', 'attendance:write', 'attendance:approve', 'attendance:admin'],
+    permissions: ['attendance:read', 'attendance:write', 'attendance:approve', 'attendance:import', 'attendance:admin'],
     description: 'Full attendance administration (rules, imports, holidays, groups).',
   },
 }
@@ -189,6 +195,7 @@ async function ensureAttendanceRoleTemplates(): Promise<void> {
       ('attendance:read', 'Attendance Read', 'Read attendance records and summaries'),
       ('attendance:write', 'Attendance Write', 'Create attendance punches and adjustment requests'),
       ('attendance:approve', 'Attendance Approve', 'Approve or reject attendance adjustments'),
+      ('attendance:import', 'Attendance Import', 'Import attendance records and manage import batches'),
       ('attendance:admin', 'Attendance Admin', 'Manage attendance rules, settings, and schedules')
      ON CONFLICT (code) DO NOTHING`,
   )

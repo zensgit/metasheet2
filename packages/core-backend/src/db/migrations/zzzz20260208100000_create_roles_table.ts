@@ -20,9 +20,14 @@ const attendanceRoles: SeedRole[] = [
     permissions: ['attendance:read', 'attendance:approve'],
   },
   {
+    id: 'attendance_importer',
+    name: 'Attendance Importer',
+    permissions: ['attendance:read', 'attendance:import'],
+  },
+  {
     id: 'attendance_admin',
     name: 'Attendance Admin',
-    permissions: ['attendance:read', 'attendance:write', 'attendance:approve', 'attendance:admin'],
+    permissions: ['attendance:read', 'attendance:write', 'attendance:approve', 'attendance:import', 'attendance:admin'],
   },
 ]
 
@@ -68,6 +73,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     VALUES
       ('attendance_employee', 'Attendance Employee'),
       ('attendance_approver', 'Attendance Approver'),
+      ('attendance_importer', 'Attendance Importer'),
       ('attendance_admin', 'Attendance Admin')
     ON CONFLICT (id) DO NOTHING;
   `.execute(db)

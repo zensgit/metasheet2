@@ -7048,7 +7048,10 @@ function createRbacHelpers(db, logger) {
         if (!admin) {
           let allowed = false
           for (const permission of permissions) {
-            if (permission === 'attendance:approve' && await userHasPermission(userId, 'attendance:admin')) {
+            if (
+              (permission === 'attendance:approve' || permission === 'attendance:import')
+              && await userHasPermission(userId, 'attendance:admin')
+            ) {
               allowed = true
               break
             }
@@ -7141,6 +7144,7 @@ module.exports = {
     const db = context.api.database
     const logger = context.logger
     const { hasAttendanceAdminAccess, withAnyPermission, withPermission, canAccessOtherUsers } = createRbacHelpers(db, logger)
+    const withAttendanceImportPermission = (handler) => withAnyPermission(['attendance:import', 'attendance:admin'], handler)
     const emitEvent = (type, data) => {
       if (context.api?.events?.emit) {
         context.api.events.emit(type, data)
@@ -13321,7 +13325,7 @@ module.exports = {
 	    context.api.http.addRoute(
 	      'GET',
 	      '/api/attendance/import/template',
-	      withPermission('attendance:admin', async (req, res) => {
+	      withAttendanceImportPermission(async (req, res) => {
         const { profile, error } = resolveImportTemplateProfile(req.query?.profileId)
         if (error) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: error } })
@@ -13351,7 +13355,7 @@ module.exports = {
 	    context.api.http.addRoute(
 	      'GET',
 	      '/api/attendance/import/template.csv',
-	      withPermission('attendance:admin', async (req, res) => {
+	      withAttendanceImportPermission(async (req, res) => {
         const { profile, error } = resolveImportTemplateProfile(req.query?.profileId)
         if (error) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: error } })
@@ -13375,7 +13379,7 @@ module.exports = {
 	    context.api.http.addRoute(
 	      'POST',
 	      '/api/attendance/import/upload',
-	      withPermission('attendance:admin', async (req, res) => {
+	      withAttendanceImportPermission(async (req, res) => {
 	        const orgId = getOrgId(req)
 	        const requesterId = getUserId(req)
 	        if (!requesterId) {
@@ -13441,7 +13445,7 @@ module.exports = {
 	    context.api.http.addRoute(
 	      'POST',
 	      '/api/attendance/import/prepare',
-      withPermission('attendance:admin', async (req, res) => {
+      withAttendanceImportPermission(async (req, res) => {
         const orgId = getOrgId(req)
         const requesterId = getUserId(req)
         if (!requesterId) {
@@ -13473,7 +13477,7 @@ module.exports = {
     context.api.http.addRoute(
       'POST',
       '/api/attendance/import/preview',
-      withPermission('attendance:admin', async (req, res) => {
+      withAttendanceImportPermission(async (req, res) => {
         const parsed = importPayloadSchema.safeParse(normalizeImportPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
@@ -13995,7 +13999,7 @@ module.exports = {
     context.api.http.addRoute(
       'POST',
       '/api/attendance/import/commit',
-      withPermission('attendance:admin', async (req, res) => {
+      withAttendanceImportPermission(async (req, res) => {
         const parsed = importPayloadSchema.safeParse(normalizeImportPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
@@ -15004,7 +15008,7 @@ module.exports = {
     context.api.http.addRoute(
       'POST',
       '/api/attendance/import/preview-async',
-      withPermission('attendance:admin', async (req, res) => {
+      withAttendanceImportPermission(async (req, res) => {
         if (!ATTENDANCE_IMPORT_PREVIEW_ASYNC_ENABLED) {
           res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Async preview disabled' } })
           return
@@ -15157,7 +15161,7 @@ module.exports = {
     context.api.http.addRoute(
       'POST',
       '/api/attendance/import/commit-async',
-      withPermission('attendance:admin', async (req, res) => {
+      withAttendanceImportPermission(async (req, res) => {
         if (!ATTENDANCE_IMPORT_ASYNC_ENABLED) {
           res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Async import disabled' } })
           return
@@ -15312,7 +15316,7 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/import/jobs/:id',
-      withPermission('attendance:admin', async (req, res) => {
+      withAttendanceImportPermission(async (req, res) => {
         const orgId = getOrgId(req)
         const jobId = String(req.params?.id ?? '').trim()
         if (!jobId) {
@@ -15340,7 +15344,7 @@ module.exports = {
     context.api.http.addRoute(
       'POST',
       '/api/attendance/import',
-      withPermission('attendance:admin', async (req, res) => {
+      withAttendanceImportPermission(async (req, res) => {
         const parsed = importPayloadSchema.safeParse(normalizeImportPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
@@ -15875,7 +15879,7 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/integrations',
-      withPermission('attendance:admin', async (req, res) => {
+      withAttendanceImportPermission(async (req, res) => {
         const orgId = getOrgId(req)
         const { page, pageSize, offset } = parsePagination(req.query)
         const status = typeof req.query.status === 'string' ? req.query.status : null
@@ -16046,7 +16050,7 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/integrations/:id/runs',
-      withPermission('attendance:admin', async (req, res) => {
+      withAttendanceImportPermission(async (req, res) => {
         const orgId = getOrgId(req)
         const integrationId = req.params.id
         const { page, pageSize, offset } = parsePagination(req.query)
@@ -16086,7 +16090,7 @@ module.exports = {
     context.api.http.addRoute(
       'POST',
       '/api/attendance/integrations/:id/sync',
-      withPermission('attendance:admin', async (req, res) => {
+      withAttendanceImportPermission(async (req, res) => {
         const parsed = integrationSyncSchema.safeParse(req.body ?? {})
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
@@ -16599,7 +16603,7 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/import/batches',
-      withPermission('attendance:admin', async (req, res) => {
+      withAttendanceImportPermission(async (req, res) => {
         const orgId = getOrgId(req)
         const { page, pageSize, offset } = parsePagination(req.query)
 
@@ -16639,7 +16643,7 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/import/batches/:id',
-      withPermission('attendance:admin', async (req, res) => {
+      withAttendanceImportPermission(async (req, res) => {
         const orgId = getOrgId(req)
         const batchId = req.params.id
         try {
@@ -16666,7 +16670,7 @@ module.exports = {
 	    context.api.http.addRoute(
 	      'GET',
 	      '/api/attendance/import/batches/:id/items',
-	      withPermission('attendance:admin', async (req, res) => {
+	      withAttendanceImportPermission(async (req, res) => {
         const orgId = getOrgId(req)
         const batchId = req.params.id
         const { page, pageSize, offset } = parsePagination(req.query)
@@ -16706,7 +16710,7 @@ module.exports = {
 	    context.api.http.addRoute(
 	      'GET',
 	      '/api/attendance/import/batches/:id/export.csv',
-	      withPermission('attendance:admin', async (req, res) => {
+	      withAttendanceImportPermission(async (req, res) => {
 	        const orgId = getOrgId(req)
 	        const batchId = req.params.id
 	        const rawType = String(req.query?.type ?? req.query?.kind ?? '').toLowerCase()
@@ -16846,7 +16850,7 @@ module.exports = {
 	    context.api.http.addRoute(
 	      'POST',
 	      '/api/attendance/import/rollback/:id',
-      withPermission('attendance:admin', async (req, res) => {
+      withAttendanceImportPermission(async (req, res) => {
         const orgId = getOrgId(req)
         const batchId = req.params.id
         try {
