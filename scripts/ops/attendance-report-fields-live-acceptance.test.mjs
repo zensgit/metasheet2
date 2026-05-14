@@ -101,9 +101,11 @@ function catalogPayload() {
 
 async function startMockServer() {
   const calls = []
+  const hostHeaders = []
   const server = http.createServer((req, res) => {
     const url = new URL(req.url || '/', 'http://127.0.0.1')
     calls.push(`${req.method} ${url.pathname}`)
+    hostHeaders.push(req.headers.host || '')
 
     if (url.pathname === '/api/health') {
       send(res, 200, { ok: true, status: 'healthy' })
@@ -167,6 +169,7 @@ async function startMockServer() {
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
     calls,
+    hostHeaders,
     close: () => new Promise((resolve) => server.close(resolve)),
   }
 }
@@ -201,6 +204,18 @@ test('validateConfig accepts an auth token file for live mode', () => {
   })
   assert.equal(config.authTokenFile, '/tmp/metasheet-admin.jwt')
   assert.deepEqual(validateConfig(config), [])
+})
+
+test('validateConfig rejects invalid API host headers', () => {
+  const config = parseConfig({
+    API_BASE: 'https://staging.example.test/',
+    API_HOST_HEADER: 'http://localhost',
+    AUTH_TOKEN: 'jwt-from-env',
+    CONFIRM_SYNC: '1',
+    FROM_DATE: '2026-05-01',
+    TO_DATE: '2026-05-13',
+  })
+  assert.deepEqual(validateConfig(config), ['API_HOST_HEADER host[:port]'])
 })
 
 test('validateConfig allows preflight without auth or sync confirmation', () => {
@@ -282,6 +297,7 @@ test('renderHelp documents preflight and live-mode configuration', () => {
   const help = renderHelp()
   assert.match(help, /AUTH_TOKEN=<token>, AUTH_TOKEN_FILE=<path>, or ALLOW_DEV_TOKEN=1/)
   assert.match(help, /CONFIRM_SYNC=1/)
+  assert.match(help, /API_HOST_HEADER=localhost/)
   assert.match(help, /PREFLIGHT_ONLY=1/)
 })
 
@@ -303,6 +319,27 @@ test('preflight mode checks backend reachability without sync or auth', async ()
     assert.equal(server.calls.includes('GET /api/auth/me'), false)
     assert.ok(fs.existsSync(path.join(outputDir, 'report.json')))
     assert.ok(fs.existsSync(path.join(outputDir, 'report.md')))
+  } finally {
+    await server.close()
+  }
+})
+
+test('preflight mode applies the configured API host header', async () => {
+  const server = await startMockServer()
+  const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'attendance-report-fields-preflight-host-'))
+  try {
+    const report = await runAttendanceReportFieldsAcceptance(parseConfig({
+      API_BASE: server.baseUrl,
+      API_HOST_HEADER: 'metasheet.local',
+      PREFLIGHT_ONLY: '1',
+      OUTPUT_DIR: outputDir,
+    }))
+
+    assert.equal(report.ok, true)
+    assert.equal(report.hostHeader, 'metasheet.local')
+    assert.equal(server.hostHeaders[0], 'metasheet.local')
+    const markdown = fs.readFileSync(path.join(outputDir, 'report.md'), 'utf8')
+    assert.match(markdown, /Host header: `metasheet\.local`/)
   } finally {
     await server.close()
   }
