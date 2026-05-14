@@ -2,9 +2,11 @@
 
 ## Result
 
-Status: `PASS - source verified; live prod rerun pending after merge`
+Status: `PASS - source verified and merged; live prod rerun is blocked by missing/invalid credentials`
 
 The workflow now uses the shared attendance auth resolver before running the zh-locale smoke. The latest observed production failure was caused by stale token configuration plus missing login fallback fields. This change makes that failure path deterministic and redacted, while allowing valid token, refresh, or login fallback to proceed to the real smoke.
+
+Post-merge update: PR `#1531` was squash-merged to `main` at `6ebd91e65fc06c24d90fe2b184450f716bd30362`. A later `main` commit (`c4e026efbcc741fa8764587dad33171dbd494c87`) was present when the live workflow was rerun; the auth resolver change remains included in that head.
 
 ## Baseline Failure Evidence
 
@@ -98,6 +100,37 @@ After this branch is merged:
 - If `auth-error.txt` reports missing login fields and invalid token, rotate or configure `ATTENDANCE_ADMIN_JWT` or `ATTENDANCE_ADMIN_EMAIL` plus `ATTENDANCE_ADMIN_PASSWORD` in GitHub Secrets or Variables.
 - Run `/admin/directory` page verification through SSH tunnel or server-side curl and append the redacted result to the DingTalk directory verification record.
 
+## Post-Merge Live Workflow Rerun
+
+- Workflow: `Attendance Locale zh Smoke (Prod)`
+- Run: `25843193505`
+- Trigger: `workflow_dispatch`
+- Head branch: `main`
+- Head SHA: `c4e026efbcc741fa8764587dad33171dbd494c87`
+- Result: `failure`
+- Failed step: `Resolve valid auth token`
+- Smoke step: skipped, because no valid attendance admin token was resolved.
+- Artifact downloaded: `attendance-locale-zh-smoke-prod-25843193505-1/auth-error.txt`
+
+Redacted diagnostic:
+
+```text
+auth_me_last_http=401
+refresh_last_http=401
+login_last_http=unknown
+login_email_present=false
+login_password_present=false
+API_BASE=http://142.171.239.56:8081/api
+```
+
+Interpretation:
+
+- The workflow now fails in the intended resolver step instead of entering Playwright with a stale token.
+- The configured token is still invalid for `/api/auth/me`.
+- Refresh also returns `401`.
+- GitHub Secrets/Variables do not currently expose login fallback values to this workflow.
+- This is an ops credential blocker. Configure or rotate `ATTENDANCE_ADMIN_JWT`, or configure `ATTENDANCE_ADMIN_EMAIL` and `ATTENDANCE_ADMIN_PASSWORD`, then rerun the workflow.
+
 ## Conclusion
 
-The workflow implementation is ready for PR review. Full operational closure still needs one live post-merge workflow rerun and one `/admin/directory` page/API check from an environment with working 142 access.
+The workflow implementation is merged and behaving as designed. Full operational closure still needs valid production attendance credentials and one `/admin/directory` page/API check from an environment with working 142 access.
