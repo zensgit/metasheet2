@@ -7,7 +7,7 @@
 为避免污染原工作区未跟踪文件，本轮创建了独立 worktree：
 
 ```text
-/Users/chouhua/Downloads/Github/metasheet2-attendance-directory-delivery-20260514
+<repo-worktree>
 ```
 
 并基于最新 `origin/main` 新建分支：

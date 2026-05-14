@@ -3,7 +3,7 @@
 ## 验证环境
 
 - 日期：2026-05-14
-- Worktree：`/Users/chouhua/Downloads/Github/metasheet2-attendance-directory-delivery-20260514`
+- Worktree：`<repo-worktree>`
 - 分支：`codex/attendance-directory-delivery-20260514`
 - PR：`https://github.com/zensgit/metasheet2/pull/1546`
 

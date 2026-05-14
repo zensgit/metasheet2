@@ -75,7 +75,7 @@ http://127.0.0.1:8900/api/health
 执行命令：
 
 ```bash
-PREFLIGHT_ONLY=1 API_BASE=http://127.0.0.1:8900 OUTPUT_DIR=/tmp/metasheet-attendance-directory-live-preflight-20260514 pnpm run verify:attendance-report-fields:live
+PREFLIGHT_ONLY=1 API_BASE=http://127.0.0.1:8900 OUTPUT_DIR=<artifact-dir> pnpm run verify:attendance-report-fields:live
 ```
 
 结果：脚本按预期输出环境阻塞，不进入真实同步或写配置流程。
@@ -83,8 +83,8 @@ PREFLIGHT_ONLY=1 API_BASE=http://127.0.0.1:8900 OUTPUT_DIR=/tmp/metasheet-attend
 生成证据：
 
 ```text
-/tmp/metasheet-attendance-directory-live-preflight-20260514/report.json
-/tmp/metasheet-attendance-directory-live-preflight-20260514/report.md
+<artifact-dir>/report.json
+<artifact-dir>/report.md
 ```
 
 阻塞码：

@@ -3,8 +3,8 @@
 ## 验证环境
 
 - 日期：2026-05-14
-- 原工作区：`/Users/chouhua/Downloads/Github/metasheet2`
-- 验证 worktree：`/Users/chouhua/Downloads/Github/metasheet2-attendance-directory-delivery-20260514`
+- 原工作区：`<primary-worktree>`
+- 验证 worktree：`<repo-worktree>`
 - 验证分支：`codex/attendance-directory-delivery-20260514`
 - 基线：最新 `origin/main`
 

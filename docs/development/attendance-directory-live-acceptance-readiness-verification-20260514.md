@@ -3,7 +3,7 @@
 ## 验证环境
 
 - 日期：2026-05-14
-- Worktree：`/Users/chouhua/Downloads/Github/metasheet2-attendance-directory-delivery-20260514`
+- Worktree：`<repo-worktree>`
 - 分支：`codex/attendance-directory-delivery-20260514`
 - PR：`https://github.com/zensgit/metasheet2/pull/1546`
 
@@ -17,7 +17,7 @@ git status --short
 
 结果：验证 worktree 在新增本轮文档前为干净状态。
 
-原工作区 `/Users/chouhua/Downloads/Github/metasheet2` 仍只有此前已知的未跟踪 `.claude/`、`output/` 和历史 integration/K3/staging 文档；本轮未移动、删除或纳入这些文件。
+原工作区 `<primary-worktree>` 仍只有此前已知的未跟踪 `.claude/`、`output/` 和历史 integration/K3/staging 文档；本轮未移动、删除或纳入这些文件。
 
 ## PR 远端状态
 
@@ -78,7 +78,7 @@ curl: (7) Failed to connect to 127.0.0.1 port 8900 after 0 ms: Couldn't connect 
 执行：
 
 ```bash
-PREFLIGHT_ONLY=1 API_BASE=http://127.0.0.1:8900 OUTPUT_DIR=/tmp/metasheet-attendance-directory-live-preflight-20260514 pnpm run verify:attendance-report-fields:live || true
+PREFLIGHT_ONLY=1 API_BASE=http://127.0.0.1:8900 OUTPUT_DIR=<artifact-dir> pnpm run verify:attendance-report-fields:live || true
 ```
 
 结果：
@@ -91,8 +91,8 @@ PREFLIGHT_ONLY=1 API_BASE=http://127.0.0.1:8900 OUTPUT_DIR=/tmp/metasheet-attend
 脚本生成证据：
 
 ```text
-/tmp/metasheet-attendance-directory-live-preflight-20260514/report.json
-/tmp/metasheet-attendance-directory-live-preflight-20260514/report.md
+<artifact-dir>/report.json
+<artifact-dir>/report.md
 ```
 
 报告摘要：
