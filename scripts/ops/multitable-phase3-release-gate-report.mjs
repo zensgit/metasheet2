@@ -31,6 +31,9 @@ export function renderMarkdown(report) {
   if (report.completedAt) lines.push(`- Completed at: \`${report.completedAt}\``)
   if (report.deferral) lines.push(`- Deferral: ${report.deferral}`)
   if (report.reason) lines.push(`- Reason: ${report.reason}`)
+  if (report.delegatedCommand) lines.push(`- Delegated command: \`${report.delegatedCommand}\``)
+  if (report.childReportJson) lines.push(`- Child JSON report: \`${report.childReportJson}\``)
+  if (report.childReportMd) lines.push(`- Child Markdown report: \`${report.childReportMd}\``)
 
   if (Array.isArray(report.requiredEnv) && report.requiredEnv.length) {
     lines.push('', '## Required env', '')
@@ -41,9 +44,17 @@ export function renderMarkdown(report) {
     for (const name of report.missingEnv) lines.push(`- \`${name}\``)
   }
   if (Array.isArray(report.children) && report.children.length) {
-    lines.push('', '## Children', '', '| Gate | Status | Exit code |', '| --- | --- | ---: |')
+    lines.push(
+      '',
+      '## Children',
+      '',
+      '| Gate | Status | Exit code | Delegated command | Child JSON report |',
+      '| --- | --- | ---: | --- | --- |',
+    )
     for (const child of report.children) {
-      lines.push(`| \`${child.gate}\` | ${child.status} | ${child.exitCode} |`)
+      lines.push(
+        `| \`${child.gate}\` | ${child.status} | ${child.exitCode} | ${child.delegatedCommand ? `\`${child.delegatedCommand}\`` : ''} | ${child.childReportJson ? `\`${child.childReportJson}\`` : ''} |`,
+      )
     }
   }
   return `${lines.join('\n')}\n`

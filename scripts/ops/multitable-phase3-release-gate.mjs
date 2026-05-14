@@ -4,51 +4,71 @@
  * Phase 3 release gate skeleton.
  *
  * Routing + blocked-mode + shared redaction + JSON+MD report writer.
- * All sub-gates are blocked at this PR's stage (D0). Real harnesses
- * land in subsequent PRs (R3 D1 SMTP, R4 D4 automation soak). D2/D3
- * stay blocked under the K3 PoC stage-1 lock.
+ * D1 binds the existing guarded email real-send smoke into this
+ * aggregator. Remaining skeleton gates stay blocked until their
+ * dedicated follow-up PRs land. D2/D3 stay blocked under the K3 PoC
+ * stage-1 lock.
  *
  * Exit codes:
  *   0  PASS
  *   1  FAIL
  *   2  BLOCKED — never collapsed into FAIL.
  *
- * Email real-send is NOT routed here at D0; the existing
- * `verify:multitable-email:real-send` script (
- * `scripts/ops/multitable-email-real-send-smoke.ts`) is left untouched
- * and will be bound into the aggregator in PR R3.
+ * Email real-send is delegated to the existing
+ * `verify:multitable-email:real-send` script
+ * (`scripts/ops/multitable-email-real-send-smoke.ts`) so the Phase 3
+ * release gate has a single GO/NO-GO aggregation surface without
+ * duplicating SMTP send logic.
  *
  * See:
  *   docs/development/multitable-feishu-phase3-ai-hardening-plan-20260514.md
  *   docs/development/multitable-feishu-phase3-ai-hardening-review-20260514.md
  */
 
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { redactString } from './multitable-phase3-release-gate-redact.mjs'
 import { buildReport, writeReport } from './multitable-phase3-release-gate-report.mjs'
 
 const TOOL = 'multitable-phase3-release-gate'
 const DEFAULT_OUTPUT_DIR = 'output/multitable-phase3-release-gate'
+const EMAIL_REAL_SEND_GATE = 'email:real-send'
+const EMAIL_REAL_SEND_COMMAND = 'pnpm verify:multitable-email:real-send'
 
 const EXIT_PASS = 0
 const EXIT_FAIL = 1
 const EXIT_BLOCKED = 2
 
 const SUB_GATES = {
+  [EMAIL_REAL_SEND_GATE]: {
+    kind: 'delegate',
+    requiredEnv: [
+      'MULTITABLE_EMAIL_TRANSPORT',
+      'MULTITABLE_EMAIL_REAL_SEND_SMOKE',
+      'CONFIRM_SEND_EMAIL',
+      'MULTITABLE_EMAIL_SMOKE_TO',
+    ],
+    deferral: 'D1 — Real SMTP Gate',
+    blockedReason:
+      'Lane D1 delegates to verify:multitable-email:real-send and stays BLOCKED until SMTP mode, explicit real-send smoke, explicit send confirmation, and a dedicated test recipient are configured.',
+  },
   'perf:large-table': {
+    kind: 'skeleton',
     requiredEnv: ['MULTITABLE_PERF_LARGE_TABLE_CONFIRM', 'MULTITABLE_PERF_TARGET_DB'],
     deferral: 'D2 — Large Table Performance Gate',
     blockedReason:
       'Lane D2 deferred under K3 PoC stage-1 lock. Requires K3-free staging plus T4 closure before activation.',
   },
   'permissions:matrix': {
+    kind: 'skeleton',
     requiredEnv: ['MULTITABLE_PERM_MATRIX_CONFIRM'],
     deferral: 'D3 — Permission Matrix Gate',
     blockedReason:
       'Lane D3 deferred. Requires explicit snapshot-vs-golden-matrix semantics decision (T5) before activation.',
   },
   'automation:soak': {
+    kind: 'skeleton',
     requiredEnv: ['MULTITABLE_AUTOMATION_SOAK_CONFIRM'],
     deferral: 'D4 — Automation Soak Gate',
     blockedReason:
@@ -63,8 +83,9 @@ function printHelp() {
   console.log(`Usage: node scripts/ops/multitable-phase3-release-gate.mjs --gate <id> [options]
 
 Runs the Phase 3 release gate skeleton. All sub-gates are blocked at
-the D0 PR stage; only routing, redaction, and report writing are
-exercised.
+the D0/D1 PR stage unless their real harness is explicitly wired and
+configured. D1 delegates \`email:real-send\` to the existing guarded
+SMTP smoke harness.
 
 Gates:
   ${PUBLIC_GATES.map((g) => `\`${g}\``).join(', ')}
@@ -145,8 +166,108 @@ function parseArgs(argv) {
   return opts
 }
 
-function runSubGate(gate, env) {
+function statusFromExitCode(exitCode) {
+  if (exitCode === EXIT_PASS) return 'pass'
+  if (exitCode === EXIT_BLOCKED) return 'blocked'
+  return 'fail'
+}
+
+function keepProcessEnvForChild(env, extraEnv) {
+  const passthroughKeys = [
+    'PATH',
+    'HOME',
+    'USER',
+    'LOGNAME',
+    'SHELL',
+    'TMPDIR',
+    'TEMP',
+    'TMP',
+    'NODE_OPTIONS',
+    'PNPM_HOME',
+    'COREPACK_HOME',
+  ]
+  const childEnv = {}
+  for (const key of passthroughKeys) {
+    if (process.env[key]) childEnv[key] = process.env[key]
+  }
+  return {
+    ...childEnv,
+    ...env,
+    ...extraEnv,
+  }
+}
+
+function safeReadJson(file) {
+  if (!existsSync(file)) return null
+  try {
+    return JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+function runEmailRealSendGate(env, options = {}) {
+  const config = SUB_GATES[EMAIL_REAL_SEND_GATE]
+  const startedAt = new Date().toISOString()
+  const outputDir =
+    options.outputDir ??
+    path.resolve(process.cwd(), DEFAULT_OUTPUT_DIR, EMAIL_REAL_SEND_GATE.replace(/:/g, '-'))
+  const childDir = path.join(outputDir, 'real-send-smoke')
+  const childReportJson = path.join(childDir, 'report.json')
+  const childReportMd = path.join(childDir, 'report.md')
+  mkdirSync(childDir, { recursive: true })
+
+  const child = spawnSync('pnpm', ['verify:multitable-email:real-send'], {
+    cwd: options.cwd ?? process.cwd(),
+    env: keepProcessEnvForChild(env, {
+      EMAIL_REAL_SEND_JSON: childReportJson,
+      EMAIL_REAL_SEND_MD: childReportMd,
+    }),
+    encoding: 'utf8',
+  })
+
+  const childExitCode = typeof child.status === 'number' ? child.status : EXIT_FAIL
+  const status = child.error ? 'fail' : statusFromExitCode(childExitCode)
+  const exitCode = status === 'pass' ? EXIT_PASS : status === 'blocked' ? EXIT_BLOCKED : EXIT_FAIL
+  const childReport = safeReadJson(childReportJson)
+  const missingEnv = config.requiredEnv.filter((name) => !env[name] || env[name] === '')
+
+  let reason = 'Real SMTP send smoke passed.'
+  if (child.error) {
+    reason = `Failed to launch delegated real-send smoke: ${child.error.message}`
+  } else if (status === 'blocked') {
+    reason =
+      'Delegated real-send smoke is BLOCKED. Configure SMTP mode, explicit real-send smoke, explicit send confirmation, and a dedicated test recipient before treating this gate as GO.'
+  } else if (status === 'fail') {
+    reason = 'Delegated real-send smoke returned FAIL.'
+  }
+
+  return {
+    tool: TOOL,
+    gate: EMAIL_REAL_SEND_GATE,
+    status,
+    exitCode,
+    reason,
+    requiredEnv: config.requiredEnv,
+    missingEnv,
+    deferral: config.deferral,
+    startedAt,
+    completedAt: new Date().toISOString(),
+    delegatedCommand: EMAIL_REAL_SEND_COMMAND,
+    childExitCode,
+    childReportJson,
+    childReportMd,
+    childStatus: childReport?.status ?? status,
+    childOk: childReport?.ok ?? status === 'pass',
+    childMode: childReport?.mode,
+    childNotificationStatus: childReport?.notificationStatus,
+    childFailedReason: childReport?.failedReason,
+  }
+}
+
+function runSubGate(gate, env, options = {}) {
   const config = SUB_GATES[gate]
+  if (gate === EMAIL_REAL_SEND_GATE) return runEmailRealSendGate(env, options)
   const startedAt = new Date().toISOString()
   const missingEnv = config.requiredEnv.filter((name) => !env[name] || env[name] === '')
   const baseReport = {
@@ -174,16 +295,25 @@ function runSubGate(gate, env) {
   }
 }
 
-function runAggregate(env) {
+function runAggregate(env, options = {}) {
   const startedAt = new Date().toISOString()
   const children = []
   for (const gate of Object.keys(SUB_GATES)) {
-    const child = runSubGate(gate, env)
+    const childOutputDir = options.outputDir
+      ? path.join(options.outputDir, 'children', gate.replace(/:/g, '-'))
+      : undefined
+    const child = runSubGate(gate, env, {
+      ...options,
+      outputDir: childOutputDir,
+    })
     children.push({
       gate: child.gate,
       status: child.status,
       exitCode: child.exitCode,
       deferral: child.deferral,
+      delegatedCommand: child.delegatedCommand,
+      childReportJson: child.childReportJson,
+      childReportMd: child.childReportMd,
     })
   }
   const anyFail = children.some((c) => c.status === 'fail')
@@ -214,15 +344,18 @@ function runAggregate(env) {
   }
 }
 
-export function executeGate(gate, env) {
-  if (gate === AGGREGATE_GATE) return runAggregate(env)
-  return runSubGate(gate, env)
+export function executeGate(gate, env, options = {}) {
+  if (gate === AGGREGATE_GATE) return runAggregate(env, options)
+  return runSubGate(gate, env, options)
 }
 
 function main(argv) {
   const opts = parseArgs(argv)
   mkdirSync(opts.outputDir, { recursive: true })
-  const result = executeGate(opts.gate, process.env)
+  const result = executeGate(opts.gate, process.env, {
+    cwd: process.cwd(),
+    outputDir: opts.outputDir,
+  })
   const report = buildReport(result)
   writeReport({ outputJson: opts.outputJson, outputMd: opts.outputMd, report })
   const summary = redactString(
