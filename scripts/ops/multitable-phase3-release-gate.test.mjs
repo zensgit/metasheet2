@@ -20,7 +20,13 @@ function runGate(gate, { env = {}, allowBlocked = false } = {}) {
     'MULTITABLE_PERF_LARGE_TABLE_CONFIRM',
     'MULTITABLE_PERF_TARGET_DB',
     'MULTITABLE_PERM_MATRIX_CONFIRM',
+    'API_BASE',
+    'AUTH_TOKEN',
     'MULTITABLE_AUTOMATION_SOAK_CONFIRM',
+    'MULTITABLE_AUTOMATION_SOAK_EMAIL_SAFE_MODE',
+    'MULTITABLE_AUTOMATION_SOAK_WEBHOOK_URL',
+    'MULTITABLE_AUTOMATION_SOAK_FAIL_WEBHOOK_URL',
+    'MULTITABLE_AUTOMATION_SOAK_ITERATIONS',
     'MULTITABLE_EMAIL_TRANSPORT',
     'MULTITABLE_EMAIL_SMTP_HOST',
     'MULTITABLE_EMAIL_SMTP_PORT',
@@ -133,6 +139,10 @@ test('automation:soak exits 2 (blocked) by default via spawn', () => {
     assert.equal(r.exitCode, 2)
     const obj = JSON.parse(r.json)
     assert.equal(obj.status, 'blocked')
+    assert.equal(obj.delegatedCommand, 'pnpm verify:multitable-automation:soak')
+    assert.equal(obj.childExitCode, 2)
+    assert.equal(obj.childStatus, 'blocked')
+    assert.match(obj.childReportJson, /automation-soak\/report\.json$/)
   } finally {
     cleanup(r.dir)
   }
@@ -169,6 +179,10 @@ test('release:phase3 aggregator exits 2 (blocked) not 1 (fail) via spawn', () =>
     assert.equal(emailChild.delegatedCommand, 'pnpm verify:multitable-email:real-send')
     assert.match(emailChild.childReportJson, /children\/email-real-send\/real-send-smoke\/report\.json$/)
     assert.ok(obj.children.every((c) => c.status === 'blocked' && c.exitCode === 2))
+    const automationChild = obj.children.find((c) => c.gate === 'automation:soak')
+    assert.ok(automationChild)
+    assert.equal(automationChild.delegatedCommand, 'pnpm verify:multitable-automation:soak')
+    assert.match(automationChild.childReportJson, /children\/automation-soak\/automation-soak\/report\.json$/)
     assert.match(obj.reason, /BLOCKED/)
   } finally {
     cleanup(r.dir)
@@ -259,6 +273,24 @@ test('artifact integrity — email:real-send delegate output paths and summary d
     assert.doesNotMatch(all, /emailGatePrivatePw99/)
     assert.doesNotMatch(all, /email-gate-from-address/)
     assert.doesNotMatch(all, /email-gate-to-address/)
+  } finally {
+    cleanup(r.dir)
+  }
+})
+
+test('artifact integrity — automation:soak delegate does not leak auth token or webhook URLs', () => {
+  const env = {
+    API_BASE: 'https://metasheet-soak.example.com',
+    AUTH_TOKEN: 'automation-soak-private-token',
+    MULTITABLE_AUTOMATION_SOAK_WEBHOOK_URL: 'https://sink-soak.example.com/success/private-success',
+    MULTITABLE_AUTOMATION_SOAK_FAIL_WEBHOOK_URL: 'https://sink-soak.example.com/fail/private-fail',
+  }
+  const r = runGate('automation:soak', { env })
+  try {
+    const all = `${r.stdout}\n${r.stderr}\n${r.json ?? ''}\n${r.md ?? ''}`
+    assert.doesNotMatch(all, /automation-soak-private-token/)
+    assert.doesNotMatch(all, /private-success/)
+    assert.doesNotMatch(all, /private-fail/)
   } finally {
     cleanup(r.dir)
   }

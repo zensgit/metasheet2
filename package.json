@@ -71,7 +71,7 @@
     "verify:multitable-release:phase3": "node scripts/ops/multitable-phase3-release-gate.mjs --gate release:phase3",
     "verify:multitable-perf:large-table": "node scripts/ops/multitable-phase3-release-gate.mjs --gate perf:large-table",
     "verify:multitable-permissions:matrix": "node scripts/ops/multitable-phase3-release-gate.mjs --gate permissions:matrix",
-    "verify:multitable-automation:soak": "node scripts/ops/multitable-phase3-release-gate.mjs --gate automation:soak",
+    "verify:multitable-automation:soak": "node scripts/ops/multitable-automation-soak.mjs",
     "prepare:multitable-pilot:handoff": "node scripts/ops/multitable-pilot-handoff.mjs",
     "prepare:multitable-pilot:handoff:release-bound": "bash scripts/ops/multitable-pilot-handoff-release-bound.sh",
     "prepare:multitable-pilot:handoff:staging:release-bound": "RUN_MODE=staging bash scripts/ops/multitable-pilot-handoff-release-bound.sh",
