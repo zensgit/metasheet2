@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs'
+import http from 'node:http'
+import https from 'node:https'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -20,6 +22,15 @@ export function parseBoolean(value) {
 export function normalizeBaseUrl(value) {
   const normalized = String(value || '').trim().replace(/\/+$/, '')
   return normalized || DEFAULT_API_BASE
+}
+
+export function normalizeHostHeader(value) {
+  return String(value || '').trim()
+}
+
+function isValidHostHeader(value) {
+  if (!value) return true
+  return /^[A-Za-z0-9.-]+(?::\d+)?$/.test(value)
 }
 
 function toDateOnly(date) {
@@ -43,6 +54,7 @@ export function parseConfig(env = process.env, now = new Date()) {
   const timeoutMs = Number(env.TIMEOUT_MS || DEFAULT_TIMEOUT_MS)
   return {
     apiBase: normalizeBaseUrl(env.API_BASE || env.BASE_URL),
+    hostHeader: normalizeHostHeader(env.API_HOST_HEADER || env.HOST_HEADER),
     authToken: String(env.AUTH_TOKEN || env.TOKEN || '').trim(),
     authTokenFile: String(env.AUTH_TOKEN_FILE || env.TOKEN_FILE || '').trim(),
     allowDevToken: parseBoolean(env.ALLOW_DEV_TOKEN),
@@ -69,6 +81,7 @@ export function validateConfig(config) {
   }
   if (!config.preflightOnly && !config.confirmSync) missing.push('CONFIRM_SYNC=1')
   if (!config.orgId) missing.push('ORG_ID')
+  if (!isValidHostHeader(config.hostHeader)) missing.push('API_HOST_HEADER host[:port]')
   if (!/^\d{4}-\d{2}-\d{2}$/.test(config.from)) missing.push('FROM_DATE yyyy-mm-dd')
   if (!/^\d{4}-\d{2}-\d{2}$/.test(config.to)) missing.push('TO_DATE yyyy-mm-dd')
   return missing
@@ -91,6 +104,7 @@ function createReport(config) {
     ok: true,
     runMode: config.preflightOnly ? 'preflight' : 'live',
     apiBase: config.apiBase,
+    hostHeader: config.hostHeader || 'default',
     orgId: config.orgId,
     userId: config.userId || 'token-user',
     from: config.from,
@@ -186,24 +200,76 @@ function resolveConfiguredAuthToken(config, record) {
   return { token, source: 'AUTH_TOKEN_FILE' }
 }
 
-async function fetchJson(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    const res = await fetch(url, { ...options, signal: controller.signal })
-    const text = await res.text()
-    let json = null
-    if (text) {
-      try {
-        json = JSON.parse(text)
-      } catch {
-        json = { raw: text }
-      }
-    }
-    return { res, json, text }
-  } finally {
-    clearTimeout(timer)
+function responseHeaderAccessor(headers) {
+  return {
+    get(name) {
+      const value = headers[String(name || '').toLowerCase()]
+      if (Array.isArray(value)) return value.join(', ')
+      return value || ''
+    },
   }
+}
+
+async function fetchJson(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS, hostHeader = '') {
+  const target = new URL(url)
+  const transport = target.protocol === 'https:' ? https : http
+  if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+    throw new Error(`Unsupported protocol: ${target.protocol}`)
+  }
+
+  const body = options.body === undefined || options.body === null
+    ? null
+    : typeof options.body === 'string' || Buffer.isBuffer(options.body)
+      ? options.body
+      : String(options.body)
+  const headers = { ...(options.headers || {}) }
+  if (hostHeader) headers.Host = hostHeader
+  if (body !== null && !Object.keys(headers).some(key => key.toLowerCase() === 'content-length')) {
+    headers['Content-Length'] = Buffer.byteLength(body)
+  }
+
+  return new Promise((resolve, reject) => {
+    const req = transport.request({
+      protocol: target.protocol,
+      hostname: target.hostname,
+      port: target.port,
+      path: `${target.pathname}${target.search}`,
+      method: options.method || 'GET',
+      headers,
+    }, (res) => {
+      const chunks = []
+      res.setEncoding('utf8')
+      res.on('data', chunk => chunks.push(chunk))
+      res.on('end', () => {
+        const text = chunks.join('')
+        let json = null
+        if (text) {
+          try {
+            json = JSON.parse(text)
+          } catch {
+            json = { raw: text }
+          }
+        }
+        resolve({
+          res: {
+            ok: Number(res.statusCode) >= 200 && Number(res.statusCode) < 300,
+            status: res.statusCode ?? 0,
+            statusText: res.statusMessage || '',
+            headers: responseHeaderAccessor(res.headers),
+          },
+          json,
+          text,
+        })
+      })
+    })
+
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`Request timed out after ${timeoutMs}ms`))
+    })
+    req.on('error', reject)
+    if (body !== null) req.write(body)
+    req.end()
+  })
 }
 
 async function requestJson(config, token, route, options = {}) {
@@ -215,7 +281,7 @@ async function requestJson(config, token, route, options = {}) {
       ...(options.body ? { 'Content-Type': 'application/json' } : {}),
       ...(options.headers || {}),
     },
-  }, config.timeoutMs)
+  }, config.timeoutMs, config.hostHeader)
 }
 
 async function checkedRequest(config, token, route, checkName, label, record, options = {}) {
@@ -364,12 +430,21 @@ function csvReportFieldBacking(result) {
 function classifyBlocker(error, config) {
   const message = stringifyError(error)
   const lower = message.toLowerCase()
-  if (lower.includes('econnrefused') || lower.includes('enotfound') || lower.includes('eai_again') || lower.includes('fetch failed')) {
+  if (
+    lower.includes('econnrefused')
+    || lower.includes('enotfound')
+    || lower.includes('eai_again')
+    || lower.includes('fetch failed')
+    || lower.includes('socket hang up')
+    || lower.includes('other side closed')
+    || lower.includes('timed out')
+  ) {
     return {
       code: 'BACKEND_UNREACHABLE',
       message,
       nextActions: [
         `确认 API_BASE 是否正确：${config.apiBase}`,
+        config.hostHeader ? `确认 API_HOST_HEADER 是否正确：${config.hostHeader}` : '如果反代按 Host 分流，设置 API_HOST_HEADER=<host>',
         '启动后端服务：pnpm --filter @metasheet/core-backend dev',
         '如果依赖本地 Postgres/Redis，先启动 Docker daemon 后执行 pnpm docker:dev',
       ],
@@ -444,6 +519,7 @@ export function renderHelp() {
     '',
     'Common options:',
     '  API_BASE=http://127.0.0.1:8900',
+    '  API_HOST_HEADER=localhost',
     '  ORG_ID=default',
     '  USER_ID=<optional-user-id>',
     '  FROM_DATE=2026-05-01',
@@ -538,6 +614,7 @@ export function renderAcceptanceMarkdown(report) {
     `- Overall: **${report?.ok === false ? 'FAIL' : 'PASS'}**`,
     `- Run mode: \`${report?.runMode || 'live'}\``,
     `- API base: \`${report?.apiBase || 'missing'}\``,
+    `- Host header: \`${report?.hostHeader || 'default'}\``,
     `- Org ID: \`${report?.orgId || 'missing'}\``,
     `- User scope: \`${report?.userId || 'token-user'}\``,
     `- Date range: \`${report?.from || 'missing'}..${report?.to || 'missing'}\``,
@@ -646,7 +723,7 @@ export async function runAttendanceReportFieldsAcceptance(config) {
       apiBase: config.apiBase,
       envToken: configuredAuth.token,
       tokenSource: configuredAuth.source === 'AUTH_TOKEN_FILE' ? 'AUTH_TOKEN_FILE' : 'AUTH_TOKEN',
-      fetchJson: (url) => fetchJson(url, {}, config.timeoutMs),
+      fetchJson: (url) => fetchJson(url, {}, config.timeoutMs, config.hostHeader),
       record,
       perms: 'attendance:admin,attendance:read,multitable:read,multitable:write',
       userId: config.devUserId,
