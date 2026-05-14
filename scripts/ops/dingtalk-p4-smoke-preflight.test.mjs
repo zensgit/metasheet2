@@ -153,6 +153,9 @@ test('dingtalk-p4-smoke-preflight passes with valid inputs and redacts secrets',
 
     const summary = JSON.parse(summaryText)
     assert.equal(summary.overallStatus, 'pass')
+    assert.deepEqual(summary.totals, { total: 11, passed: 11, failed: 0, skipped: 0 })
+    const summaryMarkdown = readFileSync(path.join(outputDir, 'preflight-summary.md'), 'utf8')
+    assert.match(summaryMarkdown, /Check totals: \*\*11\/11\*\* passed, \*\*0\*\* failed, \*\*0\*\* skipped\./)
     const byId = new Map(summary.checks.map((check) => [check.id, check]))
     assert.equal(byId.get('local-tools-present').status, 'pass')
     assert.equal(byId.get('api-health').status, 'pass')
@@ -286,6 +289,7 @@ test('dingtalk-p4-smoke-preflight can require manual target identities', () => {
     const summary = JSON.parse(readFileSync(path.join(outputDir, 'preflight-summary.json'), 'utf8'))
     const check = summary.checks.find((entry) => entry.id === 'manual-targets-declared')
     assert.equal(summary.overallStatus, 'fail')
+    assert.deepEqual(summary.totals, { total: 11, passed: 7, failed: 1, skipped: 3 })
     assert.equal(check.status, 'fail')
     assert.deepEqual(check.details.missing, ['unauthorized user', 'no-email DingTalk external id'])
   } finally {
