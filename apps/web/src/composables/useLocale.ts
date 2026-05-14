@@ -18,7 +18,9 @@ function normalizeLocale(value: unknown): AppLocale {
 
 function resolveInitialLocale(): AppLocale {
   if (typeof window === 'undefined') return 'en'
-  const fromStorage = window.localStorage.getItem(LOCALE_STORAGE_KEY)
+  const fromStorage = typeof window.localStorage?.getItem === 'function'
+    ? window.localStorage.getItem(LOCALE_STORAGE_KEY)
+    : null
   if (fromStorage) return normalizeLocale(fromStorage)
   if (typeof navigator !== 'undefined') {
     return normalizeLocale(navigator.language)
@@ -33,6 +35,7 @@ function setDocumentLang(locale: AppLocale): void {
 
 function persistLocale(locale: AppLocale): void {
   if (typeof window === 'undefined') return
+  if (typeof window.localStorage?.setItem !== 'function') return
   window.localStorage.setItem(LOCALE_STORAGE_KEY, locale)
 }
 
@@ -71,4 +74,3 @@ export function useLocale() {
     supportedLocales: ['en', 'zh-CN'] as const,
   }
 }
-

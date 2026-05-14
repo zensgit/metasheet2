@@ -22,6 +22,7 @@ export const ATTENDANCE_ADMIN_SECTION_IDS = {
   groupMembers: 'attendance-admin-group-members',
   import: 'attendance-admin-import',
   importBatches: 'attendance-admin-import-batches',
+  reportFields: 'attendance-admin-report-fields',
   payrollTemplates: 'attendance-admin-payroll-templates',
   payrollCycles: 'attendance-admin-payroll-cycles',
   leaveTypes: 'attendance-admin-leave-types',
@@ -167,6 +168,7 @@ export function useAttendanceAdminRail({
     { id: ATTENDANCE_ADMIN_SECTION_IDS.groupMembers, label: tr('Group members', '分组成员') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.import, label: tr('Import', '导入') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.importBatches, label: tr('Import batches', '导入批次') },
+    { id: ATTENDANCE_ADMIN_SECTION_IDS.reportFields, label: tr('Report fields', '统计字段') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.payrollTemplates, label: tr('Payroll Templates', '计薪模板') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.payrollCycles, label: tr('Payroll Cycles', '计薪周期') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.leaveTypes, label: tr('Leave Types', '请假类型') },
@@ -228,6 +230,7 @@ export function useAttendanceAdminRail({
       itemIds: [
         ATTENDANCE_ADMIN_SECTION_IDS.import,
         ATTENDANCE_ADMIN_SECTION_IDS.importBatches,
+        ATTENDANCE_ADMIN_SECTION_IDS.reportFields,
         ATTENDANCE_ADMIN_SECTION_IDS.payrollTemplates,
         ATTENDANCE_ADMIN_SECTION_IDS.payrollCycles,
       ],

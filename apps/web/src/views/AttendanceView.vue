@@ -898,6 +898,17 @@
           <h3>{{ tr('Records', '记录') }}</h3>
           <div class="attendance__records-actions">
             <button class="attendance__btn" :disabled="loading" @click="reloadRecordsWithStatus">{{ tr('Reload', '重载') }}</button>
+            <label class="attendance__field attendance__field--compact" for="attendance-record-export-header">
+              <span>{{ tr('CSV header', 'CSV 表头') }}</span>
+              <select
+                id="attendance-record-export-header"
+                name="recordExportHeader"
+                v-model="exportCsvHeaderMode"
+              >
+                <option value="label">{{ tr('Field names', '字段名称') }}</option>
+                <option value="code">{{ tr('Field codes', '字段编码') }}</option>
+              </select>
+            </label>
             <button class="attendance__btn" :disabled="exporting || loading" @click="exportCsv">
               {{ exporting ? tr('Exporting...', '导出中...') : tr('Export CSV', '导出 CSV') }}
             </button>
@@ -912,6 +923,38 @@
             )
           }}
         </p>
+        <div
+          v-if="recordReportConfigDetails.length > 0"
+          class="attendance__report-config"
+          data-record-report-config
+        >
+          <span
+            v-for="detail in recordReportConfigDetails"
+            :key="detail.key"
+            :class="detail.tone ? `attendance__report-config-item--${detail.tone}` : ''"
+            :data-record-report-config-detail="detail.key"
+          >
+            <strong>{{ detail.label }}</strong>
+            <code v-if="detail.monospace">{{ detail.value }}</code>
+            <span v-else>{{ detail.value }}</span>
+          </span>
+        </div>
+        <div
+          v-if="lastRecordCsvExportDetails.length > 0"
+          class="attendance__report-config"
+          data-record-export-config
+        >
+          <span
+            v-for="detail in lastRecordCsvExportDetails"
+            :key="detail.key"
+            :class="detail.tone ? `attendance__report-config-item--${detail.tone}` : ''"
+            :data-record-export-config-detail="detail.key"
+          >
+            <strong>{{ detail.label }}</strong>
+            <code v-if="detail.monospace">{{ detail.value }}</code>
+            <span v-else>{{ detail.value }}</span>
+          </span>
+        </div>
         <div v-if="records.length === 0" class="attendance__empty">{{ tr('No records.', '暂无记录。') }}</div>
         <div v-else-if="filteredRecords.length === 0" class="attendance__empty">
           {{ tr('No records match the current filters on this page.', '当前页筛选条件下没有匹配的记录。') }}
@@ -920,30 +963,18 @@
           <table class="attendance__table attendance__table--records">
             <thead>
               <tr>
-                <th>{{ tr('Date', '日期') }}</th>
-                <th>{{ tr('First in', '首次打卡') }}</th>
-                <th>{{ tr('Last out', '最后打卡') }}</th>
-                <th>{{ tr('Work (min)', '工时（分钟）') }}</th>
-                <th>{{ tr('Late', '迟到') }}</th>
-                <th>{{ tr('Early leave', '早退') }}</th>
-                <th>{{ tr('Leave', '请假') }}</th>
-                <th>{{ tr('Overtime', '加班') }}</th>
-                <th>{{ tr('Status', '状态') }}</th>
+                <th v-for="column in recordReportColumns" :key="column.code">
+                  {{ column.label }}
+                </th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
               <template v-for="record in filteredRecords" :key="record.id">
                 <tr>
-                  <td>{{ record.work_date }}</td>
-                  <td>{{ formatDateTime(record.first_in_at) }}</td>
-                  <td>{{ formatDateTime(record.last_out_at) }}</td>
-                  <td>{{ record.work_minutes }}</td>
-                  <td>{{ record.late_minutes }}</td>
-                  <td>{{ record.early_leave_minutes }}</td>
-                  <td>{{ formatMetaMinutes(record.meta, 'leave') }}</td>
-                  <td>{{ formatMetaMinutes(record.meta, 'overtime') }}</td>
-                  <td>{{ formatStatus(record.status) }}</td>
+                  <td v-for="column in recordReportColumns" :key="`${record.id}-${column.code}`">
+                    {{ formatRecordReportCell(record, column.code) }}
+                  </td>
                   <td class="attendance__table-actions">
                     <button
                       class="attendance__btn"
@@ -3371,6 +3402,17 @@
             </div>
 
             <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.reportFields)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.reportFields)"
+            >
+              <AttendanceReportFieldsSection
+                :tr="tr"
+                :org-id="normalizedOrgId()"
+              />
+            </div>
+
+            <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.payrollTemplates)"
               class="attendance__admin-section"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.payrollTemplates)"
@@ -4577,6 +4619,7 @@ import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
 import AttendanceImportBatchesSection from './attendance/AttendanceImportBatchesSection.vue'
 import AttendanceHolidayDataSection from './attendance/AttendanceHolidayDataSection.vue'
 import AttendanceUserPickerField from './attendance/AttendanceUserPickerField.vue'
+import AttendanceReportFieldsSection from './attendance/AttendanceReportFieldsSection.vue'
 import { useAttendanceAdminImportBatches } from './attendance/useAttendanceAdminImportBatches'
 import {
   buildRuleSetPreviewRecommendations,
@@ -4707,6 +4750,9 @@ interface AttendanceSummary {
 interface AttendanceRecord {
   id: string
   work_date: string
+  user_id?: string
+  user_name?: string | null
+  username?: string | null
   first_in_at: string | null
   last_out_at: string | null
   work_minutes: number
@@ -4715,6 +4761,59 @@ interface AttendanceRecord {
   status: string
   is_workday?: boolean
   meta?: Record<string, any>
+  workday_context?: {
+    shiftName?: string | null
+  } | null
+}
+
+interface AttendanceRecordReportField {
+  code: string
+  name: string
+  category?: string
+  categoryLabel?: string
+  unit?: string
+  sortOrder?: number
+}
+
+interface AttendanceRecordReportFieldConfig {
+  multitable?: {
+    available?: boolean
+    degraded?: boolean
+    projectId?: string
+    objectId?: string
+    sheetId?: string
+    viewId?: string
+    reason?: string
+  }
+  fieldsFingerprint?: {
+    algorithm?: string
+    value?: string
+    fieldCount?: number
+    codes?: string[]
+  }
+}
+
+interface AttendanceRecordReportConfigDetail {
+  key: string
+  label: string
+  value: string
+  monospace?: boolean
+  tone?: 'ok' | 'warn'
+}
+
+interface AttendanceRecordCsvExportConfig {
+  headerMode: 'label' | 'code'
+  filename: string
+  from: string
+  to: string
+  fingerprintAlgorithm?: string
+  fingerprint?: string
+  fieldCount?: number
+  fieldCodes?: string[]
+  projectId?: string
+  objectId?: string
+  sheetId?: string
+  viewId?: string
 }
 
 interface AttendancePunchEvent {
@@ -5337,6 +5436,9 @@ const punching = ref(false)
 const requestSubmitting = ref(false)
 const summary = ref<AttendanceSummary | null>(null)
 const records = ref<AttendanceRecord[]>([])
+const recordReportFields = ref<AttendanceRecordReportField[]>([])
+const recordReportFieldConfig = ref<AttendanceRecordReportFieldConfig | null>(null)
+const lastRecordCsvExportConfig = ref<AttendanceRecordCsvExportConfig | null>(null)
 const expandedRecordId = ref('')
 const recordTimelineLoadingId = ref('')
 const recordTimelineById = ref<Record<string, AttendancePunchEvent[]>>({})
@@ -5351,6 +5453,7 @@ const statusMeta = ref<AttendanceStatusMeta | null>(null)
 const calendarMonth = ref(new Date())
 const pluginsLoaded = ref(false)
 const exporting = ref(false)
+const exportCsvHeaderMode = ref<'label' | 'code'>('label')
 const settingsLoading = ref(false)
 const holidaySyncLoading = ref(false)
 const provisionLoading = ref(false)
@@ -5448,7 +5551,6 @@ const payrollCycleGenerating = ref(false)
 const payrollCycleGenerateResult = ref<{ created: number; skipped: number } | null>(null)
 const importLoading = ref(false)
 const adminForbidden = ref(false)
-const recordsTableColumnCount = 10
 const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 const timezoneOptions = computed(() =>
   buildTimezoneOptions([defaultTimezone, 'UTC', 'Asia/Shanghai', 'America/Los_Angeles', 'America/New_York'])
@@ -5683,6 +5785,293 @@ const filteredRequestReportTotal = computed(() =>
 const filteredRequestReportMinutesTotal = computed(() =>
   filteredRequestReport.value.reduce((sum, row) => sum + (Number(row.minutes) || 0), 0)
 )
+
+const fallbackRecordReportFields = computed<AttendanceRecordReportField[]>(() => [
+  { code: 'work_date', name: tr('Date', '日期'), sortOrder: 1000 },
+  { code: 'punch_times', name: tr('Punch times', '打卡时间'), sortOrder: 2000 },
+  { code: 'work_duration', name: tr('Work (min)', '工时（分钟）'), sortOrder: 3000 },
+  { code: 'late_duration', name: tr('Late', '迟到'), sortOrder: 4000 },
+  { code: 'early_leave_duration', name: tr('Early leave', '早退'), sortOrder: 5000 },
+  { code: 'leave_duration', name: tr('Leave', '请假'), sortOrder: 6000 },
+  { code: 'overtime_approval_duration', name: tr('Overtime', '加班'), sortOrder: 7000 },
+  { code: 'attendance_result', name: tr('Status', '状态'), sortOrder: 8000 },
+])
+
+const recordReportColumns = computed(() => {
+  const source = recordReportFields.value.length > 0 ? recordReportFields.value : fallbackRecordReportFields.value
+  return source
+    .map(field => ({
+      ...field,
+      label: formatRecordReportFieldLabel(field),
+      sortOrder: Number(field.sortOrder) || 0,
+    }))
+    .sort((left, right) => {
+      if (left.sortOrder !== right.sortOrder) return left.sortOrder - right.sortOrder
+      return left.code.localeCompare(right.code)
+    })
+})
+
+const recordReportConfigDetails = computed<AttendanceRecordReportConfigDetail[]>(() => {
+  const config = recordReportFieldConfig.value
+  if (!config && recordReportFields.value.length === 0) return []
+
+  const rows: AttendanceRecordReportConfigDetail[] = []
+  const multitable = config?.multitable ?? {}
+  const fingerprint = config?.fieldsFingerprint ?? {}
+  const fieldCount = Number.isFinite(Number(fingerprint.fieldCount))
+    ? Number(fingerprint.fieldCount)
+    : recordReportColumns.value.length
+  const backing = multitable.degraded
+    ? tr('Degraded', '已降级')
+    : multitable.available
+      ? tr('Connected', '已连接')
+      : tr('Built-in', '内置')
+
+  rows.push({
+    key: 'backing',
+    label: tr('Field config', '字段配置'),
+    value: backing,
+  })
+  rows.push({
+    key: 'fieldCount',
+    label: tr('Fields', '字段数'),
+    value: String(fieldCount),
+  })
+
+  const algorithm = String(fingerprint.algorithm || '').trim()
+  const value = String(fingerprint.value || '').trim()
+  const fieldCodes = Array.isArray(fingerprint.codes)
+    ? fingerprint.codes.map(code => String(code || '').trim()).filter(Boolean)
+    : []
+  const projectId = String(multitable.projectId || '').trim()
+  if (algorithm) {
+    rows.push({
+      key: 'fingerprintAlgorithm',
+      label: tr('Algorithm', '算法'),
+      value: algorithm,
+      monospace: true,
+    })
+  }
+  if (value) {
+    rows.push({
+      key: 'fingerprint',
+      label: tr('Fingerprint', '指纹'),
+      value,
+      monospace: true,
+    })
+  }
+  if (fieldCodes.length > 0) {
+    rows.push({
+      key: 'fieldCodes',
+      label: tr('Field codes', '字段编码'),
+      value: fieldCodes.join(', '),
+      monospace: true,
+    })
+  }
+  if (projectId) {
+    rows.push({
+      key: 'projectId',
+      label: tr('Project', '项目'),
+      value: projectId,
+      monospace: true,
+    })
+  }
+
+  return rows
+})
+
+const lastRecordCsvExportDetails = computed<AttendanceRecordReportConfigDetail[]>(() => {
+  const config = lastRecordCsvExportConfig.value
+  if (!config) return []
+  const recordFingerprint = String(recordReportFieldConfig.value?.fieldsFingerprint?.value || '').trim()
+  const exportFingerprint = String(config.fingerprint || '').trim()
+  const configMatch = recordFingerprint && exportFingerprint
+    ? recordFingerprint === exportFingerprint
+    : null
+  const recordFieldCountRaw = Number(recordReportFieldConfig.value?.fieldsFingerprint?.fieldCount)
+  const recordFieldCount = Number.isFinite(recordFieldCountRaw)
+    ? recordFieldCountRaw
+    : recordReportColumns.value.length
+  const exportFieldCount = Number(config.fieldCount)
+  const fieldCountMatch = Number.isFinite(exportFieldCount) && Number.isFinite(recordFieldCount)
+    ? recordFieldCount === exportFieldCount
+    : null
+  const recordFieldCodes = Array.isArray(recordReportFieldConfig.value?.fieldsFingerprint?.codes)
+    ? recordReportFieldConfig.value.fieldsFingerprint.codes.map(code => String(code || '').trim()).filter(Boolean)
+    : []
+  const exportFieldCodes = Array.isArray(config.fieldCodes)
+    ? config.fieldCodes.map(code => String(code || '').trim()).filter(Boolean)
+    : []
+  const fieldCodesMatch = recordFieldCodes.length > 0 && exportFieldCodes.length > 0
+    ? recordFieldCodes.join('|') === exportFieldCodes.join('|')
+    : null
+  const recordBackingParts = [
+    recordReportFieldConfig.value?.multitable?.projectId,
+    recordReportFieldConfig.value?.multitable?.objectId,
+    recordReportFieldConfig.value?.multitable?.sheetId,
+    recordReportFieldConfig.value?.multitable?.viewId,
+  ].map(value => String(value || '').trim())
+  const exportBackingParts = [
+    config.projectId,
+    config.objectId,
+    config.sheetId,
+    config.viewId,
+  ].map(value => String(value || '').trim())
+  const hasRecordBacking = recordBackingParts.every(Boolean)
+  const hasExportBacking = exportBackingParts.every(Boolean)
+  const backingMatch = hasRecordBacking && hasExportBacking
+    ? recordBackingParts.join('|') === exportBackingParts.join('|')
+    : null
+  const missingEvidenceLabels: string[] = []
+  if (!Number.isFinite(exportFieldCount)) missingEvidenceLabels.push(tr('field count', '字段数量'))
+  if (!exportFingerprint) missingEvidenceLabels.push(tr('fingerprint', '字段指纹'))
+  if (exportFieldCodes.length === 0) missingEvidenceLabels.push(tr('field codes', '字段编码'))
+  const rangeMatch = config.from === fromDate.value && config.to === toDate.value
+  const rows: AttendanceRecordReportConfigDetail[] = [
+    {
+      key: 'headerMode',
+      label: tr('Last CSV export', '最近 CSV 导出'),
+      value: config.headerMode === 'code'
+        ? tr('Field codes', '字段编码')
+        : tr('Field names', '字段名称'),
+    },
+  ]
+  rows.push({
+    key: 'evidenceStatus',
+    label: tr('Export evidence', '导出证据'),
+    value: missingEvidenceLabels.length === 0
+      ? tr('Complete', '完整')
+      : `${tr('Missing', '缺少')}: ${missingEvidenceLabels.join(', ')}`,
+    tone: missingEvidenceLabels.length === 0 ? 'ok' : 'warn',
+  })
+  rows.push({
+    key: 'range',
+    label: tr('Range', '区间'),
+    value: `${formatShortDate(config.from)} - ${formatShortDate(config.to)}`,
+  })
+  rows.push({
+    key: 'rangeMatch',
+    label: tr('Range match', '区间一致性'),
+    value: rangeMatch
+      ? tr('Current range', '当前区间')
+      : tr('Different range', '不同区间'),
+    tone: rangeMatch ? 'ok' : 'warn',
+  })
+  if (Number.isFinite(Number(config.fieldCount))) {
+    rows.push({
+      key: 'fieldCount',
+      label: tr('Fields', '字段数'),
+      value: String(config.fieldCount),
+    })
+  }
+  if (fieldCountMatch !== null) {
+    rows.push({
+      key: 'fieldCountMatch',
+      label: tr('Field count match', '字段数量一致性'),
+      value: fieldCountMatch
+        ? tr('Matches records', '与记录表一致')
+        : tr('Differs from records', '与记录表不一致'),
+      tone: fieldCountMatch ? 'ok' : 'warn',
+    })
+  }
+  if (configMatch !== null) {
+    rows.push({
+      key: 'configMatch',
+      label: tr('Config match', '配置一致性'),
+      value: configMatch
+        ? tr('Matches records', '与记录表一致')
+        : tr('Differs from records', '与记录表不一致'),
+      tone: configMatch ? 'ok' : 'warn',
+    })
+  }
+  if (fieldCodesMatch !== null) {
+    rows.push({
+      key: 'fieldCodesMatch',
+      label: tr('Field codes match', '字段编码一致性'),
+      value: fieldCodesMatch
+        ? tr('Matches records', '与记录表一致')
+        : tr('Differs from records', '与记录表不一致'),
+      tone: fieldCodesMatch ? 'ok' : 'warn',
+    })
+  }
+  if (backingMatch !== null) {
+    rows.push({
+      key: 'backingMatch',
+      label: tr('Backing match', '底座一致性'),
+      value: backingMatch
+        ? tr('Matches records', '与记录表一致')
+        : tr('Differs from records', '与记录表不一致'),
+      tone: backingMatch ? 'ok' : 'warn',
+    })
+  }
+  if (config.projectId) {
+    rows.push({
+      key: 'projectId',
+      label: tr('Project', '项目'),
+      value: config.projectId,
+      monospace: true,
+    })
+  }
+  if (config.objectId) {
+    rows.push({
+      key: 'objectId',
+      label: tr('Object', '对象'),
+      value: config.objectId,
+      monospace: true,
+    })
+  }
+  if (config.sheetId) {
+    rows.push({
+      key: 'sheetId',
+      label: tr('Sheet', '表格'),
+      value: config.sheetId,
+      monospace: true,
+    })
+  }
+  if (config.viewId) {
+    rows.push({
+      key: 'viewId',
+      label: tr('View', '视图'),
+      value: config.viewId,
+      monospace: true,
+    })
+  }
+  if (config.fingerprintAlgorithm) {
+    rows.push({
+      key: 'fingerprintAlgorithm',
+      label: tr('Algorithm', '算法'),
+      value: config.fingerprintAlgorithm,
+      monospace: true,
+    })
+  }
+  if (config.fingerprint) {
+    rows.push({
+      key: 'fingerprint',
+      label: tr('Fingerprint', '指纹'),
+      value: config.fingerprint,
+      monospace: true,
+    })
+  }
+  if (Array.isArray(config.fieldCodes) && config.fieldCodes.length > 0) {
+    rows.push({
+      key: 'fieldCodes',
+      label: tr('Field codes', '字段编码'),
+      value: config.fieldCodes.join(', '),
+      monospace: true,
+    })
+  }
+  if (config.filename) {
+    rows.push({
+      key: 'filename',
+      label: tr('File', '文件'),
+      value: config.filename,
+      monospace: true,
+    })
+  }
+  return rows
+})
+
+const recordsTableColumnCount = computed(() => Math.max(1, recordReportColumns.value.length) + 1)
 
 const filteredRecords = computed(() =>
   records.value.filter((record) => {
@@ -7517,6 +7906,158 @@ function formatMetaMinutes(meta: Record<string, any> | undefined, key: 'leave' |
   const overtimeMinutes = Number(meta.overtime_minutes ?? meta.overtimeMinutes ?? 0)
   const value = key === 'leave' ? leaveMinutes : overtimeMinutes
   return Number.isFinite(value) && value > 0 ? String(value) : '--'
+}
+
+function recordMetaValue(record: AttendanceRecord, keys: string[]): unknown {
+  const meta = record.meta ?? {}
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(meta, key)) return meta[key]
+  }
+  return undefined
+}
+
+function firstRecordValue(...values: unknown[]): string {
+  for (const value of values) {
+    if (Array.isArray(value)) {
+      const joined = value.map(item => String(item ?? '').trim()).filter(Boolean).join(', ')
+      if (joined) return joined
+      continue
+    }
+    const normalized = String(value ?? '').trim()
+    if (normalized) return normalized
+  }
+  return '--'
+}
+
+function recordMetaMinutes(record: AttendanceRecord, keys: string[]): number {
+  const value = recordMetaValue(record, keys)
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function formatRecordMinutes(value: unknown): string {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed === 0) return '--'
+  return String(parsed)
+}
+
+function formatRecordReportFieldLabel(field: AttendanceRecordReportField): string {
+  const labels: Record<string, string> = {
+    work_date: tr('Date', '日期'),
+    employee_name: tr('Name', '姓名'),
+    employee_no: tr('Employee No.', '工号'),
+    department: tr('Department', '部门'),
+    position: tr('Position', '职位'),
+    attendance_group: tr('Attendance group', '考勤组'),
+    punch_times: tr('Punch times', '打卡时间'),
+    punch_result: tr('Punch result', '打卡结果'),
+    approval_forms: tr('Approval forms', '关联的审批单'),
+    expected_attendance_days: tr('Expected days', '应出勤天数'),
+    correction_count: tr('Corrections', '补卡次数'),
+    attendance_shift: tr('Attendance shift', '出勤班次'),
+    attendance_days: tr('Attendance days', '出勤天数'),
+    rest_days: tr('Rest days', '休息天数'),
+    work_duration: tr('Work (min)', '工时（分钟）'),
+    business_trip_duration: tr('Business trip (min)', '出差时长'),
+    outing_duration: tr('Outing (min)', '外出时长'),
+    attendance_result: tr('Status', '考勤结果'),
+    shift: tr('Shift', '班次'),
+    late_count: tr('Late count', '迟到次数'),
+    late_duration: tr('Late', '迟到'),
+    severe_late_count: tr('Severe late count', '严重迟到次数'),
+    severe_late_duration: tr('Severe late (min)', '严重迟到时长'),
+    absence_late_count: tr('Absence-late count', '旷工迟到次数'),
+    early_leave_count: tr('Early leave count', '早退次数'),
+    early_leave_duration: tr('Early leave', '早退'),
+    missing_clock_in_count: tr('Missing in', '上班缺卡次数'),
+    missing_clock_out_count: tr('Missing out', '下班缺卡次数'),
+    absenteeism_days: tr('Absence days', '旷工天数'),
+    leave_duration: tr('Leave', '请假'),
+    overtime_approval_duration: tr('Overtime', '加班'),
+    workday_overtime_duration: tr('Workday OT', '工作日加班'),
+    restday_overtime_duration: tr('Rest day OT', '休息日加班'),
+    holiday_overtime_duration: tr('Holiday OT', '节假日加班'),
+  }
+  return labels[field.code] ?? field.name ?? field.code
+}
+
+function formatRecordReportCell(record: AttendanceRecord, code: string): string {
+  const isWorkday = record.is_workday !== false
+  const status = String(record.status || '')
+  const leaveMinutes = recordMetaMinutes(record, ['leave_minutes', 'leaveMinutes'])
+  const overtimeMinutes = recordMetaMinutes(record, ['overtime_minutes', 'overtimeMinutes'])
+
+  switch (code) {
+    case 'work_date':
+      return record.work_date
+    case 'employee_name':
+      return firstRecordValue(record.user_name, record.username, record.user_id)
+    case 'employee_no':
+      return firstRecordValue(recordMetaValue(record, ['empNo', 'employeeNo', 'employee_no', '工号']), record.user_id)
+    case 'department':
+      return firstRecordValue(recordMetaValue(record, ['department', '部门']))
+    case 'position':
+      return firstRecordValue(recordMetaValue(record, ['position', 'role', 'roleTags', 'role_tags', '职位']))
+    case 'attendance_group':
+      return firstRecordValue(recordMetaValue(record, ['attendanceGroup', 'attendance_group', '考勤组']))
+    case 'punch_times':
+      return [formatDateTime(record.first_in_at), formatDateTime(record.last_out_at)].filter(item => item !== '--').join(' / ') || '--'
+    case 'punch_result':
+    case 'attendance_result':
+      return formatStatus(status)
+    case 'approval_forms':
+      return firstRecordValue(recordMetaValue(record, ['approvalSummary', 'approval_summary', 'attendance_approve', '关联的审批单']))
+    case 'expected_attendance_days':
+      return isWorkday ? '1' : '0'
+    case 'correction_count':
+      return String(Number(recordMetaValue(record, ['correction_count', 'correctionCount']) ?? (status === 'adjusted' ? 1 : 0)))
+    case 'attendance_shift':
+      return firstRecordValue(recordMetaValue(record, ['attendanceClass', 'attendance_class', '出勤班次']))
+    case 'attendance_days':
+      return isWorkday && !['absent', 'off'].includes(status) ? '1' : '0'
+    case 'rest_days':
+      return isWorkday ? '0' : '1'
+    case 'work_duration':
+      return formatRecordMinutes(record.work_minutes)
+    case 'business_trip_duration':
+      return formatRecordMinutes(recordMetaMinutes(record, ['business_trip_minutes', 'businessTripMinutes', 'businessTripDuration']))
+    case 'outing_duration':
+      return formatRecordMinutes(recordMetaMinutes(record, ['outing_minutes', 'outingMinutes', 'outingDuration']))
+    case 'shift':
+      return firstRecordValue(recordMetaValue(record, ['shiftName', 'shift_name', '班次']), record.workday_context?.shiftName)
+    case 'late_count':
+      return Number(record.late_minutes) > 0 ? '1' : '0'
+    case 'late_duration':
+      return formatRecordMinutes(record.late_minutes)
+    case 'severe_late_count':
+      return String(Number(recordMetaValue(record, ['severe_late_count', 'severeLateCount']) ?? 0))
+    case 'severe_late_duration':
+      return formatRecordMinutes(recordMetaMinutes(record, ['severe_late_minutes', 'severeLateMinutes']))
+    case 'absence_late_count':
+      return String(Number(recordMetaValue(record, ['absence_late_count', 'absenceLateCount']) ?? 0))
+    case 'early_leave_count':
+      return Number(record.early_leave_minutes) > 0 ? '1' : '0'
+    case 'early_leave_duration':
+      return formatRecordMinutes(record.early_leave_minutes)
+    case 'missing_clock_in_count':
+      return isWorkday && !record.first_in_at ? '1' : '0'
+    case 'missing_clock_out_count':
+      return isWorkday && !record.last_out_at ? '1' : '0'
+    case 'absenteeism_days':
+      return status === 'absent' ? '1' : '0'
+    case 'leave_duration':
+      return formatRecordMinutes(leaveMinutes)
+    case 'overtime_approval_duration':
+      return formatRecordMinutes(overtimeMinutes)
+    case 'workday_overtime_duration':
+      return formatRecordMinutes(isWorkday ? overtimeMinutes : 0)
+    case 'restday_overtime_duration':
+      return formatRecordMinutes(!isWorkday ? overtimeMinutes : 0)
+    case 'holiday_overtime_duration':
+      return formatRecordMinutes(recordMetaMinutes(record, ['holiday_overtime_minutes', 'holidayOvertimeMinutes']))
+    default:
+      return '--'
+  }
 }
 
 function parseJsonConfig(value: string): Record<string, any> | null {
@@ -11028,6 +11569,8 @@ async function loadRecords() {
   resetRecordTimelineState()
   records.value = data.data.items
   recordsTotal.value = data.data.total
+  recordReportFields.value = Array.isArray(data.data.reportFields) ? data.data.reportFields : []
+  recordReportFieldConfig.value = data.data.reportFieldConfig ?? null
 }
 
 async function toggleRecordTimeline(record: AttendanceRecord): Promise<void> {
@@ -11432,6 +11975,7 @@ async function exportCsv() {
       to: toDate.value,
       orgId: normalizedOrgId(),
       userId: normalizedUserId(),
+      header: exportCsvHeaderMode.value,
     })
     const response = await apiFetch(`/api/attendance/export?${query.toString()}`)
     const text = await response.text()
@@ -11457,6 +12001,32 @@ async function exportCsv() {
     link.click()
     link.remove()
     URL.revokeObjectURL(url)
+    const fingerprintAlgorithm = response.headers.get('x-attendance-report-fields-fingerprint-algorithm') || undefined
+    const fingerprint = response.headers.get('x-attendance-report-fields-fingerprint') || undefined
+    const fieldCountHeader = String(response.headers.get('x-attendance-report-fields-count') || '').trim()
+    const fieldCount = Number(fieldCountHeader)
+    const fieldCodes = (response.headers.get('x-attendance-report-fields-codes') || '')
+      .split(',')
+      .map(code => code.trim())
+      .filter(Boolean)
+    const projectId = response.headers.get('x-attendance-report-fields-project-id') || undefined
+    const objectId = response.headers.get('x-attendance-report-fields-object-id') || undefined
+    const sheetId = response.headers.get('x-attendance-report-fields-sheet-id') || undefined
+    const viewId = response.headers.get('x-attendance-report-fields-view-id') || undefined
+    lastRecordCsvExportConfig.value = {
+      headerMode: exportCsvHeaderMode.value,
+      filename,
+      from: fromDate.value,
+      to: toDate.value,
+      fingerprintAlgorithm,
+      fingerprint,
+      fieldCount: fieldCountHeader && Number.isFinite(fieldCount) ? fieldCount : undefined,
+      fieldCodes,
+      projectId,
+      objectId,
+      sheetId,
+      viewId,
+    }
     setStatus(appendStatusContext(tr('Export ready.', '导出完成。'), recordsTimezoneContextHint.value))
   } catch (error: any) {
     setStatus(
@@ -13739,6 +14309,14 @@ const holidaySectionBindings = {
   flex: 1;
 }
 
+.attendance__field--compact {
+  min-width: 136px;
+}
+
+.attendance__field--compact select {
+  min-width: 136px;
+}
+
 .attendance__field--checkbox {
   flex-direction: row;
   align-items: center;
@@ -14427,7 +15005,37 @@ const holidaySectionBindings = {
 
 .attendance__records-actions {
   display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
+}
+
+.attendance__report-config {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 8px 0 12px;
+  color: #555;
+  font-size: 12px;
+}
+
+.attendance__report-config span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.attendance__report-config code {
+  overflow-wrap: anywhere;
+}
+
+.attendance__report-config-item--ok {
+  color: #17633a;
+}
+
+.attendance__report-config-item--warn {
+  color: #9a3412;
 }
 
 .attendance__timeline-list {
