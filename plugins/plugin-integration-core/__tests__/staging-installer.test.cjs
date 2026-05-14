@@ -37,7 +37,9 @@ const EXPECTED_IDS = [
 
 function createMockContext({ failOn = new Set() } = {}) {
   const calls = []
+  const viewCalls = []
   const sheetIdsByDescriptor = new Map()
+  const viewIdsByDescriptor = new Map()
   return {
     context: {
       api: {
@@ -65,12 +67,29 @@ function createMockContext({ failOn = new Set() } = {}) {
                 })),
               }
             },
+            async ensureView({ projectId, sheetId, descriptor }) {
+              viewCalls.push({ projectId, sheetId, descriptor })
+              if (!viewIdsByDescriptor.has(descriptor.objectId)) {
+                viewIdsByDescriptor.set(descriptor.objectId, `view_${descriptor.objectId}`)
+              }
+              return {
+                id: viewIdsByDescriptor.get(descriptor.objectId),
+                sheetId,
+                name: descriptor.name,
+                type: descriptor.type,
+                filterInfo: {},
+                sortInfo: {},
+                groupInfo: {},
+                hiddenFieldIds: [],
+                config: descriptor.config || {},
+              }
+            },
           },
         },
       },
       logger: { info: () => {}, warn: () => {}, error: () => {} },
     },
-    inspect: { calls, sheetIdsByDescriptor },
+    inspect: { calls, viewCalls, sheetIdsByDescriptor, viewIdsByDescriptor },
   }
 }
 
@@ -167,32 +186,84 @@ async function main() {
   const { context: ctx1, inspect: inspect1 } = createMockContext()
   const res1 = await installStaging({ context: ctx1, projectId: 'proj1' })
   assert.equal(inspect1.calls.length, 5, 'called once per descriptor')
+  assert.equal(inspect1.viewCalls.length, 5, 'ensured one default view per descriptor')
   assert.deepEqual(inspect1.calls.map((c) => c.descriptorId), EXPECTED_IDS)
+  assert.deepEqual(inspect1.viewCalls.map((c) => c.descriptor.objectId), EXPECTED_IDS)
+  assert.deepEqual(inspect1.viewCalls.map((c) => c.descriptor.id), Array(5).fill('default_grid'))
   assert.equal(Object.keys(res1.sheetIds).length, 5, 'all 5 sheet ids returned')
+  assert.equal(Object.keys(res1.viewIds).length, 5, 'all 5 view ids returned')
+  assert.equal(Object.keys(res1.openLinks).length, 5, 'all 5 open links returned')
+  assert.equal(res1.targets.length, 5, 'all 5 open targets returned')
   assert.equal(res1.warnings.length, 0, 'no warnings on happy path')
   for (const id of EXPECTED_IDS) {
     assert.equal(res1.sheetIds[id], `sheet_${id}`, `sheetId mapped for ${id}`)
+    assert.equal(res1.viewIds[id], `view_${id}`, `viewId mapped for ${id}`)
+    assert.equal(
+      res1.openLinks[id],
+      `/multitable/sheet_${id}/view_${id}?baseId=base_default`,
+      `openLink mapped for ${id}`,
+    )
   }
+  assert.deepEqual(res1.targets[0], {
+    id: 'plm_raw_items',
+    name: 'PLM Raw Items',
+    sheetId: 'sheet_plm_raw_items',
+    viewId: 'view_plm_raw_items',
+    baseId: 'base_default',
+    openLink: '/multitable/sheet_plm_raw_items/view_plm_raw_items?baseId=base_default',
+  })
 
   // --- 5. Idempotency: second install returns same sheet ids -----------
   const res2 = await installStaging({ context: ctx1, projectId: 'proj1' })
   assert.equal(inspect1.calls.length, 10, '5 more calls on second install (ensureObject is idempotent upstream)')
+  assert.equal(inspect1.viewCalls.length, 10, '5 more view calls on second install (ensureView is idempotent upstream)')
   assert.deepEqual(res1.sheetIds, res2.sheetIds, 'same sheet ids on re-install')
+  assert.deepEqual(res1.viewIds, res2.viewIds, 'same view ids on re-install')
+  assert.deepEqual(res1.openLinks, res2.openLinks, 'same open links on re-install')
 
   // --- 6. Partial failure: one descriptor fails, others continue ------
   const { context: ctx2, inspect: inspect2 } = createMockContext({ failOn: new Set(['bom_cleanse']) })
   const res3 = await installStaging({ context: ctx2, projectId: 'proj2' })
   assert.equal(inspect2.calls.length, 5, 'still attempted all 5 descriptors')
+  assert.equal(inspect2.viewCalls.length, 4, 'ensured views only for successfully provisioned sheets')
   assert.equal(Object.keys(res3.sheetIds).length, 4, '4 sheets provisioned')
+  assert.equal(Object.keys(res3.viewIds).length, 4, '4 views provisioned')
   assert.equal(res3.warnings.length, 1, 'one warning collected')
   assert.match(res3.warnings[0], /bom_cleanse/, 'warning names the failing descriptor')
   assert.ok(!('bom_cleanse' in res3.sheetIds), 'failing descriptor absent from sheetIds')
+  assert.ok(!('bom_cleanse' in res3.viewIds), 'failing descriptor absent from viewIds')
 
-  // --- 7. Internal helper ----------------------------------------------
+  // --- 7. View provisioning is optional for legacy plugin host tests ----
+  const legacyCtx = createMockContext().context
+  delete legacyCtx.api.multitable.provisioning.ensureView
+  const legacyRes = await installStaging({ context: legacyCtx, projectId: 'proj-legacy' })
+  assert.equal(Object.keys(legacyRes.sheetIds).length, 5, 'legacy context still provisions sheets')
+  assert.equal(Object.keys(legacyRes.viewIds).length, 0, 'legacy context has no views')
+  assert.equal(Object.keys(legacyRes.openLinks).length, 0, 'legacy context has no open links')
+  assert.match(legacyRes.warnings[0], /ensureView not available/, 'legacy context reports missing open links')
+
+  // --- 8. Internal helper ----------------------------------------------
   assert.equal(__internals.isProvisioningAvailable({ api: {} }), false)
   assert.equal(__internals.isProvisioningAvailable(ctx1), true)
+  assert.equal(__internals.isViewProvisioningAvailable({ api: {} }), false)
+  assert.equal(__internals.isViewProvisioningAvailable(ctx1), true)
+  assert.deepEqual(__internals.buildDefaultViewDescriptor({ id: 'standard_materials' }), {
+    id: 'default_grid',
+    objectId: 'standard_materials',
+    name: 'All records',
+    type: 'grid',
+    config: {
+      integrationStaging: true,
+      stagingObjectId: 'standard_materials',
+    },
+  })
+  assert.equal(
+    __internals.buildMultitableOpenLink({ sheetId: 'sheet A', viewId: 'view/B', baseId: 'base C' }),
+    '/multitable/sheet%20A/view%2FB?baseId=base%20C',
+    'open links encode route segments and baseId',
+  )
 
-  console.log('✓ staging-installer: all 7 assertions passed')
+  console.log('✓ staging-installer: all 8 assertions passed')
 }
 
 main().catch((err) => {

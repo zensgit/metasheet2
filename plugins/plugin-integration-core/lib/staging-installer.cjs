@@ -167,10 +167,41 @@ function isProvisioningAvailable(context) {
   )
 }
 
+function isViewProvisioningAvailable(context) {
+  return Boolean(
+    isProvisioningAvailable(context)
+    && typeof context.api.multitable.provisioning.ensureView === 'function',
+  )
+}
+
+function buildDefaultViewDescriptor(descriptor) {
+  return {
+    id: 'default_grid',
+    objectId: descriptor.id,
+    name: 'All records',
+    type: 'grid',
+    config: {
+      integrationStaging: true,
+      stagingObjectId: descriptor.id,
+    },
+  }
+}
+
+function encodeRoutePart(value) {
+  return encodeURIComponent(String(value))
+}
+
+function buildMultitableOpenLink({ sheetId, viewId, baseId }) {
+  const path = `/multitable/${encodeRoutePart(sheetId)}/${encodeRoutePart(viewId)}`
+  if (!baseId) return path
+  return `${path}?baseId=${encodeRoutePart(baseId)}`
+}
+
 /**
  * Install the full staging sheet set for a given project.
  * Idempotent — re-invoking does not duplicate sheets.
- * Returns a map of `{ [descriptorId]: sheetId }` for downstream modules.
+ * Returns sheet/view/link maps so the UI can open the created multitable
+ * surfaces directly instead of asking operators to copy technical ids.
  */
 async function installStaging({ context, projectId, baseId = null, logger } = {}) {
   if (!isProvisioningAvailable(context)) {
@@ -181,8 +212,12 @@ async function installStaging({ context, projectId, baseId = null, logger } = {}
   }
 
   const log = logger && typeof logger.info === 'function' ? logger : console
-  const result = {}
+  const sheetIds = {}
+  const viewIds = {}
+  const openLinks = {}
+  const targets = []
   const warnings = []
+  const canEnsureView = isViewProvisioningAvailable(context)
 
   for (const descriptor of STAGING_DESCRIPTORS) {
     try {
@@ -192,7 +227,35 @@ async function installStaging({ context, projectId, baseId = null, logger } = {}
         descriptor,
       })
       if (provisioned && provisioned.sheet && provisioned.sheet.id) {
-        result[descriptor.id] = provisioned.sheet.id
+        const sheetId = provisioned.sheet.id
+        const resolvedBaseId = provisioned.baseId || provisioned.sheet.baseId || baseId || null
+        sheetIds[descriptor.id] = sheetId
+        if (canEnsureView) {
+          try {
+            const view = await context.api.multitable.provisioning.ensureView({
+              projectId,
+              sheetId,
+              descriptor: buildDefaultViewDescriptor(descriptor),
+            })
+            if (view && view.id) {
+              const openLink = buildMultitableOpenLink({ sheetId, viewId: view.id, baseId: resolvedBaseId })
+              viewIds[descriptor.id] = view.id
+              openLinks[descriptor.id] = openLink
+              targets.push({
+                id: descriptor.id,
+                name: descriptor.name,
+                sheetId,
+                viewId: view.id,
+                baseId: resolvedBaseId,
+                openLink,
+              })
+            } else {
+              warnings.push(`ensureView returned no view id for ${descriptor.id}`)
+            }
+          } catch (err) {
+            warnings.push(`failed to ensure default view for ${descriptor.id}: ${err && err.message ? err.message : err}`)
+          }
+        }
       } else {
         warnings.push(`ensureObject returned no sheet id for ${descriptor.id}`)
       }
@@ -201,10 +264,14 @@ async function installStaging({ context, projectId, baseId = null, logger } = {}
     }
   }
 
+  if (!canEnsureView) {
+    warnings.push('context.api.multitable.provisioning.ensureView not available; staging sheets installed without open links')
+  }
+
   log.info(
-    `[plugin-integration-core] staging install done. sheets=${Object.keys(result).length}/${STAGING_DESCRIPTORS.length} warnings=${warnings.length}`,
+    `[plugin-integration-core] staging install done. sheets=${Object.keys(sheetIds).length}/${STAGING_DESCRIPTORS.length} views=${Object.keys(viewIds).length}/${STAGING_DESCRIPTORS.length} warnings=${warnings.length}`,
   )
-  return { sheetIds: result, warnings }
+  return { sheetIds, viewIds, openLinks, targets, warnings }
 }
 
 function summarizeField(field) {
@@ -243,6 +310,9 @@ module.exports = {
   STAGING_DESCRIPTORS,
   __internals: {
     isProvisioningAvailable,
+    isViewProvisioningAvailable,
+    buildDefaultViewDescriptor,
+    buildMultitableOpenLink,
     materializeField,
     materializeDescriptor,
     summarizeField,

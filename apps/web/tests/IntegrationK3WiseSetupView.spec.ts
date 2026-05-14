@@ -41,6 +41,50 @@ function mockIntegrationApi(): void {
         },
       ])
     }
+    if (url === '/api/integration/staging/install') {
+      return jsonResponse({
+        sheetIds: {
+          plm_raw_items: 'sheet_plm_raw_items',
+          standard_materials: 'sheet_standard_materials',
+          bom_cleanse: 'sheet_bom_cleanse',
+          integration_exceptions: 'sheet_integration_exceptions',
+          integration_run_log: 'sheet_integration_run_log',
+        },
+        viewIds: {
+          plm_raw_items: 'view_plm_raw_items',
+          standard_materials: 'view_standard_materials',
+          bom_cleanse: 'view_bom_cleanse',
+          integration_exceptions: 'view_integration_exceptions',
+          integration_run_log: 'view_integration_run_log',
+        },
+        openLinks: {
+          plm_raw_items: '/multitable/sheet_plm_raw_items/view_plm_raw_items?baseId=base_k3',
+          standard_materials: '/multitable/sheet_standard_materials/view_standard_materials?baseId=base_k3',
+          bom_cleanse: '/multitable/sheet_bom_cleanse/view_bom_cleanse?baseId=base_k3',
+          integration_exceptions: '/multitable/sheet_integration_exceptions/view_integration_exceptions?baseId=base_k3',
+          integration_run_log: '/multitable/sheet_integration_run_log/view_integration_run_log?baseId=base_k3',
+        },
+        targets: [
+          {
+            id: 'standard_materials',
+            name: 'Standard Materials',
+            sheetId: 'sheet_standard_materials',
+            viewId: 'view_standard_materials',
+            baseId: 'base_k3',
+            openLink: '/multitable/sheet_standard_materials/view_standard_materials?baseId=base_k3',
+          },
+          {
+            id: 'bom_cleanse',
+            name: 'BOM Cleanse',
+            sheetId: 'sheet_bom_cleanse',
+            viewId: 'view_bom_cleanse',
+            baseId: 'base_k3',
+            openLink: '/multitable/sheet_bom_cleanse/view_bom_cleanse?baseId=base_k3',
+          },
+        ],
+        warnings: [],
+      })
+    }
     return jsonResponse({})
   })
 }
@@ -57,6 +101,13 @@ function registerRouterLinkStub(app: VueApp<Element>): void {
     props: ['to'],
     template: '<a :href="to"><slot /></a>',
   })
+}
+
+function inputByLabel(container: HTMLElement, labelText: string): HTMLInputElement {
+  const label = Array.from(container.querySelectorAll('label')).find((item) => item.textContent?.includes(labelText))
+  const input = label?.querySelector('input')
+  if (!(input instanceof HTMLInputElement)) throw new Error(`input not found for label: ${labelText}`)
+  return input
 }
 
 describe('IntegrationK3WiseSetupView', () => {
@@ -187,5 +238,44 @@ describe('IntegrationK3WiseSetupView', () => {
 
     expect(container.textContent).toContain('connected')
     expect(container.textContent).toContain('WebAPI 连接测试完成')
+  })
+
+  it('opens installed staging multitable sheets from the setup page', async () => {
+    const View = (await import('../src/views/IntegrationK3WiseSetupView.vue')).default
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    registerRouterLinkStub(app)
+    app.mount(container)
+    await flushUi()
+
+    const projectInput = inputByLabel(container, 'Project ID')
+    projectInput.value = 'k3-poc'
+    projectInput.dispatchEvent(new Event('input', { bubbles: true }))
+    const baseInput = inputByLabel(container, 'Base ID')
+    baseInput.value = 'base_k3'
+    baseInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    const button = Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('安装 Staging 多维表')) as HTMLButtonElement
+    expect(button.disabled).toBe(false)
+    button.click()
+    await flushUi(8)
+
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/integration/staging/install', expect.objectContaining({
+      method: 'POST',
+      body: expect.stringContaining('"projectId":"k3-poc"'),
+    }))
+    expect(container.textContent).toContain('物料清洗')
+    expect(container.textContent).toContain('BOM 清洗')
+    expect(container.textContent).toContain('业务主要在这里修正物料编码')
+    expect(container.textContent).not.toContain('sheet_standard_materials / view_standard_materials')
+
+    const materialLink = container.querySelector('[data-testid="open-staging-standard_materials"]') as HTMLAnchorElement
+    const bomLink = container.querySelector('[data-testid="open-staging-bom_cleanse"]') as HTMLAnchorElement
+    expect(materialLink?.getAttribute('href')).toBe('/multitable/sheet_standard_materials/view_standard_materials?baseId=base_k3')
+    expect(materialLink?.textContent).toContain('打开多维表')
+    expect(bomLink?.getAttribute('href')).toBe('/multitable/sheet_bom_cleanse/view_bom_cleanse?baseId=base_k3')
   })
 })

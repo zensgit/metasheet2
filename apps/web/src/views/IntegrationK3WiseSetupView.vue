@@ -151,6 +151,21 @@
               {{ issue.message }}
             </li>
           </ul>
+          <div v-if="stagingOpenTargets.length" class="k3-setup__open-targets" data-testid="staging-open-targets">
+            <div v-for="target in stagingOpenTargets" :key="target.id" class="k3-setup__open-target">
+              <div>
+                <strong>{{ target.name }}</strong>
+                <small>{{ target.description }}</small>
+              </div>
+              <router-link
+                class="k3-setup__btn k3-setup__btn--compact"
+                :to="target.openLink"
+                :data-testid="`open-staging-${target.id}`"
+              >
+                打开多维表
+              </router-link>
+            </div>
+          </div>
           <pre v-if="stagingResult" class="k3-setup__test-result">{{ stagingResult }}</pre>
           <button
             class="k3-setup__btn k3-setup__btn--full"
@@ -657,6 +672,7 @@ import {
   type IntegrationExternalSystem,
   type IntegrationPipelineRun,
   type IntegrationStagingDescriptor,
+  type IntegrationStagingInstallResult,
   type K3WiseDocumentTemplateMapping,
   type K3WisePipelineTarget,
 } from '../services/integration/k3WiseSetup'
@@ -678,6 +694,7 @@ const statusMessage = ref('')
 const statusKind = ref<'info' | 'success' | 'error'>('info')
 const testResult = ref('')
 const stagingResult = ref('')
+const stagingInstallResult = ref<IntegrationStagingInstallResult | null>(null)
 const pipelineResult = ref('')
 const pipelineRunResult = ref('')
 const webApiLastTest = ref<{
@@ -703,6 +720,7 @@ const deployGateSummary = computed(() => summarizeK3WiseDeployGateChecklist(depl
 const observationSummary = computed(() => `${pipelineRuns.value.length} runs / ${deadLetters.value.length} open`)
 const stagingDescriptorLabel = computed(() => stagingDescriptors.value.length > 0 ? `${stagingDescriptors.value.length} descriptors` : 'not loaded')
 const templatePreviewJson = computed(() => JSON.stringify(buildK3WiseDocumentPayloadPreview(templatePreviewTarget.value), null, 2))
+const stagingOpenTargets = computed(() => buildStagingOpenTargets(stagingInstallResult.value, form.baseId))
 const selectedWebApiSystem = computed(() => webApiSystems.value.find((system) => system.id === form.webApiSystemId) || null)
 const selectedSqlSystem = computed(() => sqlSystems.value.find((system) => system.id === form.sqlSystemId) || null)
 const hasUnsavedWebApiConnectionDraft = computed(() => {
@@ -780,6 +798,75 @@ const webApiConnectionStatus = computed(() => {
     message: '配置已保存，但尚未测试；点击“测试 WebAPI”确认是否连上 K3。',
   }
 })
+
+type StagingOpenTargetView = {
+  id: string
+  name: string
+  description: string
+  sheetId: string
+  viewId: string
+  openLink: string
+}
+
+const STAGING_OPEN_TARGET_COPY: Record<string, { name: string; description: string }> = {
+  plm_raw_items: {
+    name: '原始数据',
+    description: '来源系统拉取后的只读追溯表，先确认数据是否进来。',
+  },
+  standard_materials: {
+    name: '物料清洗',
+    description: '业务主要在这里修正物料编码、名称、规格、单位和同步状态。',
+  },
+  bom_cleanse: {
+    name: 'BOM 清洗',
+    description: '业务主要在这里修正父子件、数量、单位、序号和版本。',
+  },
+  integration_exceptions: {
+    name: '异常处理',
+    description: '缺字段、非法数量、单位映射失败等问题先在这里处理。',
+  },
+  integration_run_log: {
+    name: '运行日志',
+    description: '查看 dry-run、Save-only 推送和回写结果。',
+  },
+}
+
+const STAGING_OPEN_TARGET_ORDER = [
+  'standard_materials',
+  'bom_cleanse',
+  'integration_exceptions',
+  'plm_raw_items',
+  'integration_run_log',
+] as const
+
+function buildMultitableOpenLink(sheetId: string, viewId: string, baseId?: string | null): string {
+  const path = `/multitable/${encodeURIComponent(sheetId)}/${encodeURIComponent(viewId)}`
+  const normalizedBaseId = typeof baseId === 'string' && baseId.trim() ? baseId.trim() : ''
+  return normalizedBaseId ? `${path}?baseId=${encodeURIComponent(normalizedBaseId)}` : path
+}
+
+function buildStagingOpenTargets(
+  result: IntegrationStagingInstallResult | null,
+  fallbackBaseId?: string,
+): StagingOpenTargetView[] {
+  if (!result) return []
+  const targetsById = new Map((result.targets ?? []).map((target) => [target.id, target]))
+  return STAGING_OPEN_TARGET_ORDER.flatMap((id) => {
+    const target = targetsById.get(id)
+    const sheetId = target?.sheetId ?? result.sheetIds?.[id]
+    const viewId = target?.viewId ?? result.viewIds?.[id]
+    if (!sheetId || !viewId) return []
+    const copy = STAGING_OPEN_TARGET_COPY[id]
+    return [{
+      id,
+      name: copy.name,
+      description: copy.description,
+      sheetId,
+      viewId,
+      openLink: target?.openLink ?? result.openLinks?.[id] ?? buildMultitableOpenLink(sheetId, viewId, target?.baseId ?? fallbackBaseId),
+    }]
+  })
+}
 
 function setStatus(message: string, kind: 'info' | 'success' | 'error' = 'info'): void {
   statusMessage.value = message
@@ -979,8 +1066,10 @@ async function installStagingTables(): Promise<void> {
   }
   installingStaging.value = true
   stagingResult.value = ''
+  stagingInstallResult.value = null
   try {
     const result = await installIntegrationStaging(buildK3WiseStagingInstallPayload(form))
+    stagingInstallResult.value = result
     stagingResult.value = JSON.stringify(result, null, 2)
     await loadStagingDescriptors(true)
     setStatus('Staging 多维表已安装或确认存在', result.warnings.length > 0 ? 'info' : 'success')
@@ -1414,6 +1503,11 @@ onMounted(() => {
   margin-top: 8px;
 }
 
+.k3-setup__btn--compact {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .k3-setup__btn:disabled {
   cursor: not-allowed;
   opacity: 0.55;
@@ -1556,6 +1650,48 @@ onMounted(() => {
 .k3-setup__descriptor small {
   color: #64748b;
   font-size: 12px;
+}
+
+.k3-setup__open-targets {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.k3-setup__open-target {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  border: 1px solid #ccfbf1;
+  border-radius: 6px;
+  padding: 10px;
+  background: #f0fdfa;
+}
+
+.k3-setup__open-target div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.k3-setup__open-target strong,
+.k3-setup__open-target small {
+  overflow-wrap: anywhere;
+}
+
+.k3-setup__open-target strong {
+  color: #115e59;
+  font-size: 13px;
+}
+
+.k3-setup__open-target small {
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .k3-setup__record-head,
