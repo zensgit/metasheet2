@@ -10,6 +10,7 @@ import { resolveMultitableAuthToken } from '../multitable-auth.mjs'
 const DEFAULT_API_BASE = 'http://127.0.0.1:8900'
 const DEFAULT_TIMEOUT_MS = 15_000
 const REQUIRED_CATEGORY_IDS = ['fixed', 'basic', 'attendance', 'anomaly', 'leave', 'overtime']
+const AUTH_SOURCE_CHOICES = Object.freeze(['AUTH_TOKEN', 'AUTH_TOKEN_FILE', 'ALLOW_DEV_TOKEN'])
 
 function timestampSlug(date = new Date()) {
   return date.toISOString().replace(/[:.]/g, '-')
@@ -31,6 +32,15 @@ export function normalizeHostHeader(value) {
 function isValidHostHeader(value) {
   if (!value) return true
   return /^[A-Za-z0-9.-]+(?::\d+)?$/.test(value)
+}
+
+function normalizeAuthSource(value) {
+  const normalized = String(value || '').trim().toUpperCase().replace(/[-\s]+/g, '_')
+  if (!normalized) return ''
+  if (normalized === 'TOKEN') return 'AUTH_TOKEN'
+  if (normalized === 'TOKEN_FILE') return 'AUTH_TOKEN_FILE'
+  if (normalized === 'DEV_TOKEN') return 'ALLOW_DEV_TOKEN'
+  return normalized
 }
 
 function toDateOnly(date) {
@@ -55,6 +65,7 @@ export function parseConfig(env = process.env, now = new Date()) {
   return {
     apiBase: normalizeBaseUrl(env.API_BASE || env.BASE_URL),
     hostHeader: normalizeHostHeader(env.API_HOST_HEADER || env.HOST_HEADER),
+    authSource: normalizeAuthSource(env.AUTH_SOURCE || env.TOKEN_SOURCE),
     authToken: String(env.AUTH_TOKEN || env.TOKEN || '').trim(),
     authTokenFile: String(env.AUTH_TOKEN_FILE || env.TOKEN_FILE || '').trim(),
     allowDevToken: parseBoolean(env.ALLOW_DEV_TOKEN),
@@ -76,8 +87,20 @@ export function parseConfig(env = process.env, now = new Date()) {
 
 export function validateConfig(config) {
   const missing = []
+  if (config.authSource && !AUTH_SOURCE_CHOICES.includes(config.authSource)) {
+    missing.push('AUTH_SOURCE one of AUTH_TOKEN, AUTH_TOKEN_FILE, ALLOW_DEV_TOKEN')
+  }
   if (!config.preflightOnly && !config.authToken && !config.authTokenFile && !config.allowDevToken) {
     missing.push('AUTH_TOKEN/AUTH_TOKEN_FILE or ALLOW_DEV_TOKEN=1')
+  }
+  if (!config.preflightOnly && config.authSource === 'AUTH_TOKEN' && !config.authToken) {
+    missing.push('AUTH_SOURCE=AUTH_TOKEN requires AUTH_TOKEN/TOKEN')
+  }
+  if (!config.preflightOnly && config.authSource === 'AUTH_TOKEN_FILE' && !config.authTokenFile) {
+    missing.push('AUTH_SOURCE=AUTH_TOKEN_FILE requires AUTH_TOKEN_FILE/TOKEN_FILE')
+  }
+  if (!config.preflightOnly && config.authSource === 'ALLOW_DEV_TOKEN' && !config.allowDevToken) {
+    missing.push('AUTH_SOURCE=ALLOW_DEV_TOKEN requires ALLOW_DEV_TOKEN=1')
   }
   if (!config.preflightOnly && !config.confirmSync) missing.push('CONFIRM_SYNC=1')
   if (!config.orgId) missing.push('ORG_ID')
@@ -145,15 +168,48 @@ function redactTokenFileReason(value, tokenFile) {
   return String(value || '').split(tokenFile).join(redactHomePath(tokenFile))
 }
 
+function configuredAuthSources(config) {
+  return [
+    config.authToken ? 'AUTH_TOKEN' : '',
+    config.authTokenFile ? 'AUTH_TOKEN_FILE' : '',
+    config.allowDevToken ? 'ALLOW_DEV_TOKEN' : '',
+  ].filter(Boolean)
+}
+
+function recordConfiguredAuthSource(record, selected, presentSources, requested = '') {
+  const ignored = presentSources.filter(source => source !== selected)
+  const details = {
+    selected,
+    present: presentSources.join(',') || 'none',
+    ignored: ignored.join(',') || 'none',
+  }
+  if (requested) details.requested = requested
+  record('config.auth-source', true, details)
+}
+
 function resolveConfiguredAuthToken(config, record) {
-  if (config.authToken) {
+  const presentSources = configuredAuthSources(config)
+  const selectedSource = config.authSource || (
+    config.authToken
+      ? 'AUTH_TOKEN'
+      : config.authTokenFile
+        ? 'AUTH_TOKEN_FILE'
+        : config.allowDevToken
+          ? 'ALLOW_DEV_TOKEN'
+          : 'none'
+  )
+
+  if (selectedSource === 'AUTH_TOKEN') {
+    recordConfiguredAuthSource(record, 'AUTH_TOKEN', presentSources, config.authSource)
     return { token: config.authToken, source: 'AUTH_TOKEN' }
   }
 
-  if (!config.authTokenFile) {
-    return { token: '', source: config.allowDevToken ? 'ALLOW_DEV_TOKEN' : 'none' }
+  if (selectedSource === 'ALLOW_DEV_TOKEN' || selectedSource === 'none') {
+    recordConfiguredAuthSource(record, selectedSource, presentSources, config.authSource)
+    return { token: '', source: selectedSource }
   }
 
+  recordConfiguredAuthSource(record, 'AUTH_TOKEN_FILE', presentSources, config.authSource)
   const tokenFile = path.resolve(config.authTokenFile)
   const tokenFileDisplay = redactHomePath(tokenFile)
   let stat = null
@@ -526,6 +582,7 @@ export function renderHelp() {
     '  TO_DATE=2026-05-13',
     '  EXPECT_VISIBLE_CODE=work_date',
     '  EXPECT_HIDDEN_CODE=<field_code>',
+    '  AUTH_SOURCE=AUTH_TOKEN|AUTH_TOKEN_FILE|ALLOW_DEV_TOKEN',
     '  OUTPUT_DIR=output/attendance-report-fields-live-acceptance/<run>',
     '',
     'Preflight only:',
@@ -549,6 +606,10 @@ const MARKDOWN_CHECK_DETAIL_KEYS = Object.freeze([
   'csvCodeBacking',
   'exportBacking',
   'fieldCount',
+  'selected',
+  'present',
+  'ignored',
+  'requested',
 ])
 
 function formatMarkdownInlineValue(value) {
@@ -571,6 +632,7 @@ function renderMarkdownCheckDetailLines(details) {
 }
 
 const EVIDENCE_SUMMARY_METADATA_KEYS = Object.freeze([
+  ['Auth source', 'authSource'],
   ['Catalog fingerprint', 'catalogFieldFingerprint'],
   ['Records fingerprint', 'recordsFieldFingerprint'],
   ['Export fingerprint', 'exportFieldFingerprint'],
@@ -708,6 +770,12 @@ export async function runAttendanceReportFieldsAcceptance(config) {
   record('config.required', true, { apiBase: config.apiBase, orgId: config.orgId })
 
   try {
+    let configuredAuth = { token: '', source: 'preflight' }
+    if (!config.preflightOnly) {
+      configuredAuth = resolveConfiguredAuthToken(config, record)
+      report.metadata.authSource = configuredAuth.source
+    }
+
     const healthData = await checkedRequest(config, '', '/api/health', 'api.health', 'GET /api/health', record)
     report.metadata.healthStatus = healthData?.status || healthData?.data?.status || 'ok'
 
@@ -717,8 +785,6 @@ export async function runAttendanceReportFieldsAcceptance(config) {
       return report
     }
 
-    const configuredAuth = resolveConfiguredAuthToken(config, record)
-    report.metadata.authSource = configuredAuth.source
     const token = await resolveMultitableAuthToken({
       apiBase: config.apiBase,
       envToken: configuredAuth.token,

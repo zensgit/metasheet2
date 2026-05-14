@@ -197,13 +197,43 @@ test('validateConfig requires explicit auth and sync confirmation', () => {
 test('validateConfig accepts an auth token file for live mode', () => {
   const config = parseConfig({
     API_BASE: 'https://staging.example.test/',
+    AUTH_SOURCE: 'token-file',
     AUTH_TOKEN_FILE: '/tmp/metasheet-admin.jwt',
     CONFIRM_SYNC: '1',
     FROM_DATE: '2026-05-01',
     TO_DATE: '2026-05-13',
   })
+  assert.equal(config.authSource, 'AUTH_TOKEN_FILE')
   assert.equal(config.authTokenFile, '/tmp/metasheet-admin.jwt')
   assert.deepEqual(validateConfig(config), [])
+})
+
+test('validateConfig rejects an unavailable requested auth source', () => {
+  const config = parseConfig({
+    API_BASE: 'https://staging.example.test/',
+    AUTH_SOURCE: 'AUTH_TOKEN_FILE',
+    AUTH_TOKEN: 'unit-test-env-token',
+    CONFIRM_SYNC: '1',
+    FROM_DATE: '2026-05-01',
+    TO_DATE: '2026-05-13',
+  })
+  assert.deepEqual(validateConfig(config), [
+    'AUTH_SOURCE=AUTH_TOKEN_FILE requires AUTH_TOKEN_FILE/TOKEN_FILE',
+  ])
+})
+
+test('validateConfig rejects an unknown requested auth source', () => {
+  const config = parseConfig({
+    API_BASE: 'https://staging.example.test/',
+    AUTH_SOURCE: 'cookie',
+    AUTH_TOKEN: 'unit-test-env-token',
+    CONFIRM_SYNC: '1',
+    FROM_DATE: '2026-05-01',
+    TO_DATE: '2026-05-13',
+  })
+  assert.deepEqual(validateConfig(config), [
+    'AUTH_SOURCE one of AUTH_TOKEN, AUTH_TOKEN_FILE, ALLOW_DEV_TOKEN',
+  ])
 })
 
 test('validateConfig rejects invalid API host headers', () => {
@@ -226,6 +256,55 @@ test('validateConfig allows preflight without auth or sync confirmation', () => 
     TO_DATE: '2026-05-13',
   })
   assert.deepEqual(validateConfig(config), [])
+})
+
+test('live mode honors AUTH_SOURCE=AUTH_TOKEN_FILE over AUTH_TOKEN', async () => {
+  const server = await startMockServer()
+  const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'attendance-report-fields-auth-source-forced-file-'))
+  const tokenFile = path.join(outputDir, 'admin.jwt')
+  fs.writeFileSync(tokenFile, 'unit-test-file-token\n', { mode: 0o600 })
+  try {
+    const report = await runAttendanceReportFieldsAcceptance(parseConfig({
+      API_BASE: server.baseUrl,
+      AUTH_SOURCE: 'AUTH_TOKEN_FILE',
+      AUTH_TOKEN: 'unit-test-env-token',
+      AUTH_TOKEN_FILE: tokenFile,
+      CONFIRM_SYNC: '1',
+      ORG_ID: 'default',
+      FROM_DATE: '2026-05-01',
+      TO_DATE: '2026-05-13',
+      OUTPUT_DIR: outputDir,
+    }))
+
+    assert.equal(report.ok, true)
+    assert.equal(report.metadata.authSource, 'AUTH_TOKEN_FILE')
+    assert.ok(report.checks.some((check) => (
+      check.name === 'config.auth-source'
+      && check.ok
+      && check.details.requested === 'AUTH_TOKEN_FILE'
+      && check.details.selected === 'AUTH_TOKEN_FILE'
+      && check.details.present === 'AUTH_TOKEN,AUTH_TOKEN_FILE'
+      && check.details.ignored === 'AUTH_TOKEN'
+    )))
+    assert.ok(report.checks.some((check) => (
+      check.name === 'config.auth-token-file'
+      && check.ok
+      && check.details.status === 'loaded'
+    )))
+    assert.ok(report.checks.some((check) => (
+      check.name === 'api.auth-token'
+      && check.ok
+      && check.details.source === 'AUTH_TOKEN_FILE'
+    )))
+    const markdown = fs.readFileSync(path.join(outputDir, 'report.md'), 'utf8')
+    assert.match(markdown, /Auth source: `AUTH_TOKEN_FILE`/)
+    assert.match(markdown, /requested: `AUTH_TOKEN_FILE`/)
+    assert.match(markdown, /ignored: `AUTH_TOKEN`/)
+    assert.doesNotMatch(markdown, /unit-test-env-token/)
+    assert.doesNotMatch(markdown, /unit-test-file-token/)
+  } finally {
+    await server.close()
+  }
 })
 
 test('renderAcceptanceMarkdown summarizes checks without leaking auth material', () => {
@@ -296,6 +375,7 @@ test('renderAcceptanceMarkdown summarizes checks without leaking auth material',
 test('renderHelp documents preflight and live-mode configuration', () => {
   const help = renderHelp()
   assert.match(help, /AUTH_TOKEN=<token>, AUTH_TOKEN_FILE=<path>, or ALLOW_DEV_TOKEN=1/)
+  assert.match(help, /AUTH_SOURCE=AUTH_TOKEN\|AUTH_TOKEN_FILE\|ALLOW_DEV_TOKEN/)
   assert.match(help, /CONFIRM_SYNC=1/)
   assert.match(help, /API_HOST_HEADER=localhost/)
   assert.match(help, /PREFLIGHT_ONLY=1/)
@@ -308,6 +388,7 @@ test('preflight mode checks backend reachability without sync or auth', async ()
     const report = await runAttendanceReportFieldsAcceptance(parseConfig({
       API_BASE: server.baseUrl,
       PREFLIGHT_ONLY: '1',
+      AUTH_TOKEN_FILE: path.join(outputDir, 'missing.jwt'),
       OUTPUT_DIR: outputDir,
     }))
 
@@ -315,6 +396,7 @@ test('preflight mode checks backend reachability without sync or auth', async ()
     assert.equal(report.runMode, 'preflight')
     assert.ok(report.checks.some((check) => check.name === 'api.health' && check.ok))
     assert.ok(report.checks.some((check) => check.name === 'preflight.completed' && check.ok))
+    assert.equal(report.checks.some((check) => check.name === 'config.auth-token-file'), false)
     assert.equal(server.calls.includes('POST /api/attendance/report-fields/sync'), false)
     assert.equal(server.calls.includes('GET /api/auth/me'), false)
     assert.ok(fs.existsSync(path.join(outputDir, 'report.json')))
@@ -373,8 +455,9 @@ test('live mode classifies an unreadable auth token file as a configuration bloc
 
     assert.equal(report.ok, false)
     assert.equal(report.blocker.code, 'AUTH_TOKEN_FILE_INVALID')
-    assert.ok(report.checks.some((check) => check.name === 'api.health' && check.ok))
+    assert.equal(report.checks.some((check) => check.name === 'api.health'), false)
     assert.ok(report.checks.some((check) => check.name === 'config.auth-token-file' && !check.ok))
+    assert.equal(server.calls.includes('GET /api/health'), false)
     assert.equal(server.calls.includes('POST /api/attendance/report-fields/sync'), false)
     assert.ok(fs.existsSync(path.join(outputDir, 'report.json')))
     assert.ok(fs.existsSync(path.join(outputDir, 'report.md')))
@@ -402,6 +485,8 @@ test('live mode redacts home directory auth token file paths in artifacts', asyn
     assert.match(report.blocker.message, /~\/\.tokens\/admin\.jwt/)
     const tokenFileCheck = report.checks.find((check) => check.name === 'config.auth-token-file')
     assert.equal(tokenFileCheck?.details?.tokenFile, '~/.tokens/admin.jwt')
+    assert.equal(report.checks.some((check) => check.name === 'api.health'), false)
+    assert.equal(server.calls.includes('GET /api/health'), false)
     assert.equal(server.calls.includes('POST /api/attendance/report-fields/sync'), false)
 
     const json = fs.readFileSync(path.join(outputDir, 'report.json'), 'utf8')
@@ -440,6 +525,8 @@ test('live mode blocks auth token files with group or other permissions', async 
       && !check.ok
       && check.details.mode === '0644'
     )))
+    assert.equal(report.checks.some((check) => check.name === 'api.health'), false)
+    assert.equal(server.calls.includes('GET /api/health'), false)
     assert.equal(server.calls.includes('POST /api/attendance/report-fields/sync'), false)
     const markdown = fs.readFileSync(path.join(outputDir, 'report.md'), 'utf8')
     assert.doesNotMatch(markdown, /unit-test-token/)
@@ -467,6 +554,13 @@ test('runAttendanceReportFieldsAcceptance verifies catalog, records, export, and
     assert.equal(report.ok, true)
     assert.equal(report.metadata.authSource, 'AUTH_TOKEN_FILE')
     assert.equal(report.metadata.projectId, 'default:attendance')
+    assert.ok(report.checks.some((check) => (
+      check.name === 'config.auth-source'
+      && check.ok
+      && check.details.selected === 'AUTH_TOKEN_FILE'
+      && check.details.present === 'AUTH_TOKEN_FILE'
+      && check.details.ignored === 'none'
+    )))
     assert.ok(report.checks.some((check) => (
       check.name === 'config.auth-token-file'
       && check.ok
@@ -524,7 +618,49 @@ test('runAttendanceReportFieldsAcceptance verifies catalog, records, export, and
     assert.ok(markdown.includes('- CSV field codes: `work_date,employee_name,late_minutes`'))
     assert.ok(markdown.includes('- CSV backing: `default:attendance|attendance_report_field_catalog|sheet_attendance_report_fields|fields_by_category`'))
     assert.ok(markdown.includes('- CSV code backing: `default:attendance|attendance_report_field_catalog|sheet_attendance_report_fields|fields_by_category`'))
+    assert.match(markdown, /Auth source: `AUTH_TOKEN_FILE`/)
     assert.doesNotMatch(markdown, /unit-test-token/)
+  } finally {
+    await server.close()
+  }
+})
+
+test('live mode records selected auth source when multiple auth sources are present', async () => {
+  const server = await startMockServer()
+  const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'attendance-report-fields-auth-source-'))
+  try {
+    const report = await runAttendanceReportFieldsAcceptance(parseConfig({
+      API_BASE: server.baseUrl,
+      AUTH_TOKEN: 'unit-test-env-token',
+      AUTH_TOKEN_FILE: path.join(outputDir, 'missing-and-ignored.jwt'),
+      ALLOW_DEV_TOKEN: '1',
+      CONFIRM_SYNC: '1',
+      ORG_ID: 'default',
+      FROM_DATE: '2026-05-01',
+      TO_DATE: '2026-05-13',
+      OUTPUT_DIR: outputDir,
+    }))
+
+    assert.equal(report.ok, true)
+    assert.equal(report.metadata.authSource, 'AUTH_TOKEN')
+    assert.ok(report.checks.some((check) => (
+      check.name === 'config.auth-source'
+      && check.ok
+      && check.details.selected === 'AUTH_TOKEN'
+      && check.details.present === 'AUTH_TOKEN,AUTH_TOKEN_FILE,ALLOW_DEV_TOKEN'
+      && check.details.ignored === 'AUTH_TOKEN_FILE,ALLOW_DEV_TOKEN'
+    )))
+    assert.equal(report.checks.some((check) => check.name === 'config.auth-token-file'), false)
+    assert.ok(report.checks.some((check) => (
+      check.name === 'api.auth-token'
+      && check.ok
+      && check.details.source === 'AUTH_TOKEN'
+    )))
+    const markdown = fs.readFileSync(path.join(outputDir, 'report.md'), 'utf8')
+    assert.match(markdown, /Auth source: `AUTH_TOKEN`/)
+    assert.match(markdown, /selected: `AUTH_TOKEN`/)
+    assert.match(markdown, /ignored: `AUTH_TOKEN_FILE,ALLOW_DEV_TOKEN`/)
+    assert.doesNotMatch(markdown, /unit-test-env-token/)
   } finally {
     await server.close()
   }
