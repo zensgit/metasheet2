@@ -324,6 +324,26 @@ const ADAPTER_METADATA = {
       },
     },
   },
+  'metasheet:multitable': {
+    label: 'MetaSheet multitable',
+    roles: ['target'],
+    supports: ['testConnection', 'listObjects', 'getSchema', 'upsert'],
+    advanced: false,
+    guardrails: {
+      read: {
+        supported: false,
+      },
+      write: {
+        hostOwned: true,
+        pluginScopedSheetsOnly: true,
+        supportsAppend: true,
+        supportsUpsertByKey: true,
+      },
+      ui: {
+        recommendedForCleansedOutput: true,
+      },
+    },
+  },
 }
 
 function redactSecretText(value) {

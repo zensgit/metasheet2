@@ -176,6 +176,7 @@ async function main() {
   assert.ok(statusResult.adapters.includes('erp:k3-wise-webapi'), 'status reports K3 WISE WebAPI adapter')
   assert.ok(statusResult.adapters.includes('erp:k3-wise-sqlserver'), 'status reports K3 WISE SQL Server adapter')
   assert.ok(statusResult.adapters.includes('metasheet:staging'), 'status reports MetaSheet staging source adapter')
+  assert.ok(statusResult.adapters.includes('metasheet:multitable'), 'status reports MetaSheet multitable target adapter')
   assert.equal(statusResult.deadLetters, true, 'status reports dead-letter store')
   assert.equal(statusResult.deadLetterReplay, true, 'status reports dead-letter replay')
   assert.deepEqual(statusResult.capabilities, {
