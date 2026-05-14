@@ -117,8 +117,20 @@ export interface IntegrationStagingDescriptor {
   fieldDetails?: IntegrationStagingFieldDetail[]
 }
 
+export interface IntegrationStagingOpenTarget {
+  id: string
+  name: string
+  sheetId: string
+  viewId: string
+  baseId?: string | null
+  openLink: string
+}
+
 export interface IntegrationStagingInstallResult {
   sheetIds: Record<string, string>
+  viewIds?: Record<string, string>
+  openLinks?: Record<string, string>
+  targets?: IntegrationStagingOpenTarget[]
   warnings: string[]
 }
 
