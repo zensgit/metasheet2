@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, nextTick, type App as VueApp, type Component } from 'vue'
+import { createApp, h, nextTick, type App as VueApp, type Component } from 'vue'
 
 const apiFetchMock = vi.fn()
 
@@ -81,7 +81,16 @@ describe('IntegrationWorkbenchView', () => {
           { id: 'plm_1', tenantId: 'default', workspaceId: null, name: 'PLM Source', kind: 'http', role: 'source', status: 'active' },
           { id: 'k3_1', tenantId: 'default', workspaceId: null, name: 'K3 Target', kind: 'erp:k3-wise-webapi', role: 'target', status: 'active' },
           { id: 'crm_1', tenantId: 'default', workspaceId: null, name: 'CRM Bidirectional', kind: 'http', role: 'bidirectional', status: 'active' },
-          { id: 'k3_sql', tenantId: 'default', workspaceId: null, name: 'K3 SQL Read Channel', kind: 'erp:k3-wise-sqlserver', role: 'source', status: 'active' },
+          {
+            id: 'k3_sql',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'K3 SQL Read Channel',
+            kind: 'erp:k3-wise-sqlserver',
+            role: 'source',
+            status: 'error',
+            lastError: 'K3 WISE SQL Server channel requires an injected queryExecutor',
+          },
         ])
       }
       if (url === '/api/integration/staging/descriptors') {
@@ -314,14 +323,17 @@ describe('IntegrationWorkbenchView', () => {
     app = createApp(View as Component)
     app.component('router-link', {
       props: ['to'],
-      render() {
-        return null
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
       },
     })
     app.mount(container)
     await flushUi()
 
     expect(container.textContent).toContain('数据工厂')
+    expect(container.textContent).toContain('连接新系统')
+    expect(container.textContent).toContain('使用 K3 WISE 预设')
+    expect(container.textContent).toContain('已加载 4 个连接 · 2 个适配器 · 3 个 staging 表')
     expect(container.textContent).toContain('连接系统')
     expect(container.textContent).toContain('选择数据集')
     expect(container.textContent).toContain('多维表清洗')
@@ -338,6 +350,12 @@ describe('IntegrationWorkbenchView', () => {
     expect(Array.from((container.querySelector('[data-testid="source-system"]') as HTMLSelectElement).options).map((option) => option.textContent))
       .not.toContain('K3 SQL Read Channel · erp:k3-wise-sqlserver')
 
+    ;(container.querySelector('[data-testid="toggle-inventory-overview"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container.textContent).toContain('已配置连接')
+    expect(container.textContent).toContain('可用适配器')
+    expect(container.textContent).toContain('SQL 连接已配置，但当前部署未注入 SQL 执行器')
+
     ;(container.querySelector('[data-testid="show-advanced-connectors"]') as HTMLInputElement).click()
     await flushUi()
     expect(container.textContent).toContain('K3 WISE SQL Server Channel')
@@ -353,6 +371,7 @@ describe('IntegrationWorkbenchView', () => {
     sourceSystemSelect.dispatchEvent(new Event('change'))
     await flushUi()
     expect(container.textContent).toContain('SQL read channel 作为来源，WebAPI Save channel 作为目标')
+    expect(container.textContent).toContain('暂不能作为可读 source 执行 dry-run')
 
     sourceSystemSelect.value = 'crm_1'
     sourceSystemSelect.dispatchEvent(new Event('change'))
@@ -466,6 +485,7 @@ describe('IntegrationWorkbenchView', () => {
     })
     expect((container.querySelector('[data-testid="pipeline-id"]') as HTMLInputElement).value).toBe('pipe_1')
     expect(container.textContent).toContain('Pipeline 已保存：pipe_1')
+    expect(container.textContent).toContain('已满足 dry-run 前置条件')
 
     ;(container.querySelector('[data-testid="run-dry-run"]') as HTMLButtonElement).click()
     await flushUi(16)
@@ -514,5 +534,51 @@ describe('IntegrationWorkbenchView', () => {
       },
     })
     expect(container.textContent).toContain('Save-only 推送已提交')
+  })
+
+  it('shows actionable source-empty and dry-run readiness guidance when no readable source exists', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'erp:k3-wise-webapi', label: 'K3 WISE WebAPI', roles: ['target'], supports: ['upsert'], advanced: false },
+          { kind: 'erp:k3-wise-sqlserver', label: 'K3 WISE SQL Server Channel', roles: ['source'], supports: ['read'], advanced: true },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') {
+        return jsonResponse([
+          { id: 'k3_target', tenantId: 'default', workspaceId: null, name: 'K3 Target', kind: 'erp:k3-wise-webapi', role: 'target', status: 'active' },
+        ])
+      }
+      if (url === '/api/integration/staging/descriptors') {
+        return jsonResponse([])
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi()
+
+    expect(container.textContent).toContain('还没有可读取的数据源')
+    expect(container.textContent).toContain('连接 PLM、HTTP API 或启用 SQL 只读通道')
+    expect(container.textContent).toContain('还缺')
+    expect(container.textContent).toContain('选择可读取的数据源')
+    expect(container.textContent).toContain('Payload 预览通过不等于 pipeline dry-run')
+    expect((container.querySelector('[data-testid="run-dry-run"]') as HTMLButtonElement).disabled).toBe(true)
+
+    ;(container.querySelector('[data-testid="show-sql-setup"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect((container.querySelector('[data-testid="show-advanced-connectors"]') as HTMLInputElement).checked).toBe(true)
+    expect(container.textContent).toContain('SQL source 需要部署 allowlist queryExecutor 后才能读取')
   })
 })
