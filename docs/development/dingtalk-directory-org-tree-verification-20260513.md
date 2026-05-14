@@ -2,9 +2,11 @@
 
 ## Result
 
-Status: `PASS`
+Status: `PASS - merged and deployed`
 
 The DingTalk organization tree slice was implemented and validated with targeted backend route tests, frontend view tests, backend build, web build, and whitespace checks. Follow-up quick-action, reference-check, inline-cleanup, bulk-cleanup, filtering, clear-filter, clipboard-copy, visible-department report copy, draft-scope-change report copy, configuration-reference report copy, stale-reference report copy, binding-gap filtering/reporting, inactive-department filtering/reporting, mirror sync-observation reporting, scope-view filtering, visible-row bulk add/remove action, saved-scope restore, and manual department-ID slices were added so administrators can copy department IDs from the tree into scoped DingTalk configuration drafts, copy IDs and visible/draft-change/configuration/issue/binding-gap/inactive-department/mirror-observation reports to external review material, detect stale references, remove stale IDs, find target departments, reset narrowed views, focus on configured/problematic/inactive/not-fully-bound/not-latest-batch rows, bulk-add or bulk-remove narrowed rows, review or revert pending scope changes before save, and handle known departments before the local mirror catches up.
+
+Post-merge update: PR `#1524` was merged to `main` at `94c4694599f91819539a4ee2f4dd1fc07fbf87fa` and published through the GHCR deployment workflow. A later `main` commit (`e8eb9b212`) was already present when this verification note was updated; the DingTalk directory slice remains included in that `main` head.
 
 ## Verification Commands
 
@@ -14,6 +16,9 @@ pnpm --filter @metasheet/web exec vitest run tests/directoryManagementView.spec.
 git diff --check -- packages/core-backend/src/directory/directory-sync.ts packages/core-backend/src/routes/admin-directory.ts packages/core-backend/tests/unit/admin-directory-routes.test.ts apps/web/src/views/DirectoryManagementView.vue apps/web/tests/directoryManagementView.spec.ts docs/development/dingtalk-directory-org-tree-development-20260513.md docs/development/dingtalk-directory-org-tree-verification-20260513.md
 pnpm --filter @metasheet/core-backend build
 pnpm --filter @metasheet/web build
+gh pr view 1524 --json state,mergedAt,mergeCommit,url
+gh run view 25839874962 --json status,conclusion,headSha,workflowName,url,createdAt,updatedAt
+gh run download 25839874962 -n deploy-logs-25839874962-1 -D /tmp/ms2-deploy-25839874962
 ```
 
 ## Test Evidence
@@ -65,6 +70,8 @@ pnpm --filter @metasheet/web build
 
 - The wider worktree still contains unrelated attendance/K3 changes. This verification only scopes the DingTalk directory files listed in the command block.
 - The frontend targeted Vitest run emitted a local test WebSocket port-in-use warning, but the suite completed successfully with `41 passed`; this did not affect the directory page assertions.
+- After deployment, the current Codex local environment could open a TCP connection to `142.171.239.56:8081` but received `Empty reply from server` for direct public HTTP GETs to `/` and `/api/health`. SSH-based deploy evidence and server-side smoke passed, so this was treated as a local/public-network verification boundary rather than a product regression. If page-level confirmation is needed from this workstation, use an SSH tunnel or run curl from the 142 host.
+- `Attendance Locale zh Smoke (Prod)` failed on the same deployed commit because its `AUTH_TOKEN` was invalid and `LOGIN_EMAIL` / `LOGIN_PASSWORD` were not configured. That failure is outside this DingTalk directory slice and did not block the Build/Deploy/Plugin/DingTalk gates.
 
 ## First Command Correction
 
@@ -80,7 +87,31 @@ An initial targeted Vitest command used `--runInBand`, which this Vitest version
 
 ## Deployment Status
 
-Not deployed in this slice. This was a source-level implementation and local validation pass. Deploy should follow the existing GHCR/main pipeline after review/merge.
+Deployed through the existing GHCR/main pipeline.
+
+- PR: `#1524`
+- Merge commit: `94c4694599f91819539a4ee2f4dd1fc07fbf87fa`
+- Merge time: `2026-05-14T03:27:05Z`
+- Build + deploy run: `25839874962`
+- Workflow result: `success`
+- Deployed backend image: `ghcr.io/zensgit/metasheet2-backend:94c4694599f91819539a4ee2f4dd1fc07fbf87fa`
+- Deployed web image: `ghcr.io/zensgit/metasheet2-web:94c4694599f91819539a4ee2f4dd1fc07fbf87fa`
+- Remote preflight: `PASS`
+- Remote deploy stage: `PASS`
+- Remote migrate stage: `PASS`
+- Remote smoke stage: `PASS`
+- Authenticated postdeploy smoke: `PASS`, `10 pass / 0 skipped / 0 fail`
+- Remote smoke checks included: `api-health`, `integration-plugin-health`, `k3-wise-frontend-route`, `auth-me`, `integration-route-contract`, `integration-list-external-systems`, `integration-list-pipelines`, `integration-list-runs`, `integration-list-dead-letters`, and `staging-descriptor-contract`.
+
+Main workflow status for merge commit `94c4694599f91819539a4ee2f4dd1fc07fbf87fa`:
+
+- `Build and Push Docker Images`: `success`
+- `Deploy to Production`: `success`
+- `Plugin System Tests`: `success`
+- `Phase 5 Production Flags Guard`: `success`
+- `Observability E2E`: `success`
+- `monitoring-alert`: `success`
+- `Attendance Locale zh Smoke (Prod)`: `failure`, non-DingTalk-directory blocker caused by invalid smoke auth token configuration.
 
 ## Conclusion
 
