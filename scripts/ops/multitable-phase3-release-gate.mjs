@@ -174,10 +174,96 @@ function parseArgs(argv) {
   return opts
 }
 
-function statusFromExitCode(exitCode) {
-  if (exitCode === EXIT_PASS) return 'pass'
-  if (exitCode === EXIT_BLOCKED) return 'blocked'
-  return 'fail'
+const SAMPLE_MAX_LENGTH = 1200
+
+/**
+ * Per-delegate translation requirements. Delegates that produce an
+ * `ok` field in their child report (e.g. the email smoke harness)
+ * must report `ok === true` for a pass — required for strict
+ * mismatch detection.
+ */
+const DELEGATE_TRANSLATIONS = {
+  [EMAIL_REAL_SEND_GATE]: { requiresOkField: true },
+  [AUTOMATION_SOAK_GATE]: { requiresOkField: false },
+}
+
+/**
+ * Strict fail-closed status translation for delegated gates.
+ *
+ * Rules (each must hold; otherwise fail-closed):
+ *   - PASS    iff child exit=0 AND report.status='pass'
+ *             AND (delegate.requiresOkField ? report.ok === true : true)
+ *   - BLOCKED iff child exit=2 AND report.status='blocked'
+ *   - FAIL    in every other case, including:
+ *               spawn launch error,
+ *               non-numeric exit (signal kill / aborted),
+ *               missing or unparseable child report.json,
+ *               exit / status / ok inconsistency.
+ *
+ * The function returns `{ status, exitCode, mismatchReason }`. When
+ * status is 'pass' or 'blocked', mismatchReason is null. Otherwise
+ * mismatchReason carries a redaction-safe explanation of which signals
+ * disagreed.
+ */
+export function translateDelegateStatus({ gate, childExitCode, childError, childReport }) {
+  const config = DELEGATE_TRANSLATIONS[gate] ?? { requiresOkField: false }
+  if (childError) {
+    const message = childError instanceof Error ? childError.message : String(childError)
+    return {
+      status: 'fail',
+      exitCode: EXIT_FAIL,
+      mismatchReason: `Spawn launch error: ${redactString(message ?? '')}`,
+    }
+  }
+  if (typeof childExitCode !== 'number') {
+    const display = childExitCode === null || childExitCode === undefined
+      ? 'null'
+      : String(childExitCode)
+    return {
+      status: 'fail',
+      exitCode: EXIT_FAIL,
+      mismatchReason: `Child exit code was not numeric (signal kill or spawn aborted): ${display}.`,
+    }
+  }
+  if (!childReport || typeof childReport !== 'object') {
+    return {
+      status: 'fail',
+      exitCode: EXIT_FAIL,
+      mismatchReason:
+        'Child report.json missing or unparseable; release gate cannot verify exit-code / report consistency.',
+    }
+  }
+  const reportStatus = childReport.status ?? null
+  const reportOk = childReport.ok
+  const passMatch =
+    childExitCode === EXIT_PASS &&
+    reportStatus === 'pass' &&
+    (config.requiresOkField ? reportOk === true : true)
+  const blockedMatch =
+    childExitCode === EXIT_BLOCKED && reportStatus === 'blocked'
+  if (passMatch) {
+    return { status: 'pass', exitCode: EXIT_PASS, mismatchReason: null }
+  }
+  if (blockedMatch) {
+    return { status: 'blocked', exitCode: EXIT_BLOCKED, mismatchReason: null }
+  }
+  const okClause = config.requiresOkField ? ', ok=true' : ''
+  const okSuffix = config.requiresOkField ? ` ok=${reportOk}` : ''
+  return {
+    status: 'fail',
+    exitCode: EXIT_FAIL,
+    mismatchReason:
+      `Fail-closed: child exit=${childExitCode} report.status=${reportStatus}${okSuffix} — ` +
+      `did not match pass (exit=0, status=pass${okClause}) or blocked (exit=2, status=blocked) contracts.`,
+  }
+}
+
+function compactSample(value) {
+  const redacted = redactString(value ?? '')
+  if (!redacted) return ''
+  return redacted.length > SAMPLE_MAX_LENGTH
+    ? `${redacted.slice(0, SAMPLE_MAX_LENGTH - 3)}...`
+    : redacted
 }
 
 function keepProcessEnvForChild(env, extraEnv) {
@@ -225,7 +311,8 @@ function runEmailRealSendGate(env, options = {}) {
   const childReportMd = path.join(childDir, 'report.md')
   mkdirSync(childDir, { recursive: true })
 
-  const child = spawnSync('pnpm', ['verify:multitable-email:real-send'], {
+  const spawnFn = options.spawnFn ?? spawnSync
+  const child = spawnFn('pnpm', ['verify:multitable-email:real-send'], {
     cwd: options.cwd ?? process.cwd(),
     env: keepProcessEnvForChild(env, {
       EMAIL_REAL_SEND_JSON: childReportJson,
@@ -234,20 +321,25 @@ function runEmailRealSendGate(env, options = {}) {
     encoding: 'utf8',
   })
 
-  const childExitCode = typeof child.status === 'number' ? child.status : EXIT_FAIL
-  const status = child.error ? 'fail' : statusFromExitCode(childExitCode)
-  const exitCode = status === 'pass' ? EXIT_PASS : status === 'blocked' ? EXIT_BLOCKED : EXIT_FAIL
   const childReport = safeReadJson(childReportJson)
+  const childStdoutSample = compactSample(child?.stdout)
+  const childStderrSample = compactSample(child?.stderr)
+  const { status, exitCode, mismatchReason } = translateDelegateStatus({
+    gate: EMAIL_REAL_SEND_GATE,
+    childExitCode: child?.status,
+    childError: child?.error,
+    childReport,
+  })
   const missingEnv = config.requiredEnv.filter((name) => !env[name] || env[name] === '')
 
-  let reason = 'Real SMTP send smoke passed.'
-  if (child.error) {
-    reason = `Failed to launch delegated real-send smoke: ${child.error.message}`
-  } else if (status === 'blocked') {
+  let reason
+  if (mismatchReason) {
+    reason = mismatchReason
+  } else if (status === 'pass') {
+    reason = 'Real SMTP send smoke passed (child exit=0, report.status=pass, ok=true).'
+  } else {
     reason =
-      'Delegated real-send smoke is BLOCKED. Configure SMTP mode, explicit real-send smoke, explicit send confirmation, and a dedicated test recipient before treating this gate as GO.'
-  } else if (status === 'fail') {
-    reason = 'Delegated real-send smoke returned FAIL.'
+      'Delegated real-send smoke is BLOCKED (child exit=2, report.status=blocked). Configure SMTP mode, explicit real-send smoke, explicit send confirmation, and a dedicated test recipient before treating this gate as GO.'
   }
 
   return {
@@ -262,14 +354,16 @@ function runEmailRealSendGate(env, options = {}) {
     startedAt,
     completedAt: new Date().toISOString(),
     delegatedCommand: EMAIL_REAL_SEND_COMMAND,
-    childExitCode,
+    childExitCode: typeof child?.status === 'number' ? child.status : null,
     childReportJson,
     childReportMd,
-    childStatus: childReport?.status ?? status,
-    childOk: childReport?.ok ?? status === 'pass',
+    childStatus: childReport?.status ?? null,
+    childOk: typeof childReport?.ok === 'boolean' ? childReport.ok : null,
     childMode: childReport?.mode,
     childNotificationStatus: childReport?.notificationStatus,
     childFailedReason: childReport?.failedReason,
+    childStdoutSample,
+    childStderrSample,
   }
 }
 
@@ -284,7 +378,8 @@ function runAutomationSoakGate(env, options = {}) {
   const childReportMd = path.join(childDir, 'report.md')
   mkdirSync(childDir, { recursive: true })
 
-  const child = spawnSync('pnpm', ['verify:multitable-automation:soak'], {
+  const spawnFn = options.spawnFn ?? spawnSync
+  const child = spawnFn('pnpm', ['verify:multitable-automation:soak'], {
     cwd: options.cwd ?? process.cwd(),
     env: keepProcessEnvForChild(env, {
       AUTOMATION_SOAK_OUTPUT_DIR: childDir,
@@ -294,20 +389,25 @@ function runAutomationSoakGate(env, options = {}) {
     encoding: 'utf8',
   })
 
-  const childExitCode = typeof child.status === 'number' ? child.status : EXIT_FAIL
-  const status = child.error ? 'fail' : statusFromExitCode(childExitCode)
-  const exitCode = status === 'pass' ? EXIT_PASS : status === 'blocked' ? EXIT_BLOCKED : EXIT_FAIL
   const childReport = safeReadJson(childReportJson)
+  const childStdoutSample = compactSample(child?.stdout)
+  const childStderrSample = compactSample(child?.stderr)
+  const { status, exitCode, mismatchReason } = translateDelegateStatus({
+    gate: AUTOMATION_SOAK_GATE,
+    childExitCode: child?.status,
+    childError: child?.error,
+    childReport,
+  })
   const missingEnv = config.requiredEnv.filter((name) => !env[name] || env[name] === '')
 
-  let reason = 'Automation soak passed.'
-  if (child.error) {
-    reason = `Failed to launch delegated automation soak: ${child.error.message}`
-  } else if (status === 'blocked') {
+  let reason
+  if (mismatchReason) {
+    reason = mismatchReason
+  } else if (status === 'pass') {
+    reason = 'Automation soak passed (child exit=0, report.status=pass).'
+  } else {
     reason =
-      'Delegated automation soak is BLOCKED. Configure API/auth, explicit soak confirmation, mock email safe-mode acknowledgement, and controlled webhook sinks before treating this gate as GO.'
-  } else if (status === 'fail') {
-    reason = 'Delegated automation soak returned FAIL.'
+      'Delegated automation soak is BLOCKED (child exit=2, report.status=blocked). Configure API/auth, explicit soak confirmation, mock email safe-mode acknowledgement, and controlled webhook sinks before treating this gate as GO.'
   }
 
   return {
@@ -322,12 +422,14 @@ function runAutomationSoakGate(env, options = {}) {
     startedAt,
     completedAt: new Date().toISOString(),
     delegatedCommand: AUTOMATION_SOAK_COMMAND,
-    childExitCode,
+    childExitCode: typeof child?.status === 'number' ? child.status : null,
     childReportJson,
     childReportMd,
-    childStatus: childReport?.status ?? status,
+    childStatus: childReport?.status ?? null,
     childIterations: childReport?.iterations,
     childEvidence: childReport?.evidence,
+    childStdoutSample,
+    childStderrSample,
   }
 }
 
