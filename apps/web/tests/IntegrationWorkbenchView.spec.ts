@@ -69,11 +69,13 @@ describe('IntegrationWorkbenchView', () => {
     const previewBodies: Array<Record<string, unknown>> = []
     const pipelineBodies: Array<Record<string, unknown>> = []
     const runBodies: Array<{ url: string; body: Record<string, unknown> }> = []
+    const externalSystemBodies: Array<Record<string, unknown>> = []
     apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
       if (url === '/api/integration/adapters') {
         return jsonResponse([
           { kind: 'http', label: 'HTTP API', roles: ['bidirectional'], supports: ['read', 'upsert'], advanced: false },
           { kind: 'erp:k3-wise-sqlserver', label: 'K3 WISE SQL Server Channel', roles: ['source', 'target'], supports: ['read'], advanced: true },
+          { kind: 'metasheet:staging', label: 'MetaSheet staging multitable', roles: ['source'], supports: ['read'], advanced: false },
         ])
       }
       if (url === '/api/integration/external-systems?tenantId=default') {
@@ -92,6 +94,22 @@ describe('IntegrationWorkbenchView', () => {
             lastError: 'K3 WISE SQL Server channel requires an injected queryExecutor',
           },
         ])
+      }
+      if (url === '/api/integration/external-systems' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body || '{}')) as Record<string, unknown>
+        externalSystemBodies.push(body)
+        return jsonResponse({
+          id: body.id,
+          tenantId: body.tenantId,
+          workspaceId: body.workspaceId ?? null,
+          projectId: body.projectId,
+          name: body.name,
+          kind: body.kind,
+          role: body.role,
+          status: body.status,
+          config: body.config,
+          capabilities: body.capabilities,
+        })
       }
       if (url === '/api/integration/staging/descriptors') {
         return jsonResponse([
@@ -150,6 +168,38 @@ describe('IntegrationWorkbenchView', () => {
             { name: 'code', label: 'Code', type: 'string' },
             { name: 'name', label: 'Name', type: 'string' },
             { name: 'quantity', label: 'Quantity', type: 'number' },
+          ],
+        })
+      }
+      if (url === '/api/integration/external-systems/metasheet_staging_project_1/objects?tenantId=default') {
+        return jsonResponse([
+          {
+            name: 'standard_materials',
+            label: '物料清洗',
+            operations: ['read'],
+            source: 'metasheet:staging',
+            schema: [
+              { name: 'code', label: 'code', type: 'string' },
+              { name: 'name', label: 'name', type: 'string' },
+              { name: 'uom', label: 'uom', type: 'string' },
+              { name: 'quantity', label: 'quantity', type: 'number' },
+            ],
+          },
+        ])
+      }
+      if (url === '/api/integration/external-systems/metasheet_staging_project_1/schema?tenantId=default&object=standard_materials') {
+        return jsonResponse({
+          object: 'standard_materials',
+          raw: {
+            sheetId: 'sheet_materials',
+            viewId: 'view_materials',
+            openLink: '/multitable/sheet_materials/view_materials',
+          },
+          fields: [
+            { name: 'code', label: 'code', type: 'string' },
+            { name: 'name', label: 'name', type: 'string' },
+            { name: 'uom', label: 'uom', type: 'string' },
+            { name: 'quantity', label: 'quantity', type: 'number' },
           ],
         })
       }
@@ -333,7 +383,7 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).toContain('数据工厂')
     expect(container.textContent).toContain('连接新系统')
     expect(container.textContent).toContain('使用 K3 WISE 预设')
-    expect(container.textContent).toContain('已加载 4 个连接 · 2 个适配器 · 3 个 staging 表')
+    expect(container.textContent).toContain('已加载 4 个连接 · 3 个适配器 · 3 个 staging 表')
     expect(container.textContent).toContain('连接系统')
     expect(container.textContent).toContain('选择数据集')
     expect(container.textContent).toContain('多维表清洗')
@@ -406,6 +456,39 @@ describe('IntegrationWorkbenchView', () => {
     expect((container.querySelector('[data-testid="open-staging-standard_materials"]') as HTMLAnchorElement).getAttribute('href'))
       .toBe('/multitable/sheet_materials/view_materials')
 
+    ;(container.querySelector('[data-testid="use-staging-source-standard_materials"]') as HTMLButtonElement).click()
+    await flushUi(10)
+    expect(externalSystemBodies).toHaveLength(1)
+    expect(externalSystemBodies[0]).toMatchObject({
+      id: 'metasheet_staging_project_1',
+      tenantId: 'default',
+      workspaceId: null,
+      projectId: 'project_1',
+      name: 'MetaSheet staging 多维表',
+      kind: 'metasheet:staging',
+      role: 'source',
+      status: 'active',
+      capabilities: {
+        read: true,
+        stagingSource: true,
+        dryRunFriendly: true,
+      },
+    })
+    expect(externalSystemBodies[0].config).toMatchObject({
+      projectId: 'project_1',
+      objects: {
+        standard_materials: {
+          sheetId: 'sheet_materials',
+          viewId: 'view_materials',
+          openLink: '/multitable/sheet_materials/view_materials',
+          fields: ['code', 'name'],
+        },
+      },
+    })
+    expect((container.querySelector('[data-testid="source-system"]') as HTMLSelectElement).value).toBe('metasheet_staging_project_1')
+    expect((container.querySelector('[data-testid="source-object"]') as HTMLSelectElement).value).toBe('standard_materials')
+    expect(container.textContent).toContain('已将 物料清洗 设为 Dry-run 来源')
+
     ;(container.querySelector('[data-testid="load-source-objects"]') as HTMLButtonElement).click()
     await flushUi(8)
     ;(container.querySelector('[data-testid="load-target-objects"]') as HTMLButtonElement).click()
@@ -464,8 +547,8 @@ describe('IntegrationWorkbenchView', () => {
     expect(pipelineBodies).toHaveLength(1)
     expect(pipelineBodies[0]).toMatchObject({
       tenantId: 'default',
-      sourceSystemId: 'plm_1',
-      sourceObject: 'materials',
+      sourceSystemId: 'metasheet_staging_project_1',
+      sourceObject: 'standard_materials',
       targetSystemId: 'k3_1',
       targetObject: 'material',
       stagingSheetId: 'standard_materials',

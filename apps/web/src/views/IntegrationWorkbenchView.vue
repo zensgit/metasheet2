@@ -275,16 +275,27 @@
             <p>{{ descriptor.description }}</p>
             <small>{{ descriptor.id }} · {{ descriptor.fieldCount }} 个字段 · {{ descriptor.area }}</small>
           </div>
-          <a
-            v-if="descriptor.openLink"
-            class="integration-workbench__button"
-            :href="descriptor.openLink"
-            target="_blank"
-            rel="noopener noreferrer"
-            :data-testid="`open-staging-${descriptor.id}`"
-          >
-            打开多维表
-          </a>
+          <div class="integration-workbench__actions integration-workbench__actions--inline">
+            <a
+              v-if="descriptor.openLink"
+              class="integration-workbench__button"
+              :href="descriptor.openLink"
+              target="_blank"
+              rel="noopener noreferrer"
+              :data-testid="`open-staging-${descriptor.id}`"
+            >
+              打开多维表
+            </a>
+            <button
+              type="button"
+              class="integration-workbench__button"
+              :disabled="!descriptor.openLink"
+              :data-testid="`use-staging-source-${descriptor.id}`"
+              @click="useStagingAsSource(descriptor.id)"
+            >
+              作为 Dry-run 来源
+            </button>
+          </div>
         </article>
       </div>
       <div v-else class="integration-workbench__empty" data-testid="staging-empty">
@@ -555,6 +566,7 @@ import {
   previewIntegrationTemplate,
   runIntegrationPipeline,
   testExternalSystemConnection,
+  upsertWorkbenchExternalSystem,
   upsertIntegrationPipeline,
   type IntegrationAdapterMetadata,
   type IntegrationFieldMapping,
@@ -593,6 +605,16 @@ interface StagingDatasetCard {
   description: string
   fieldCount: number
   openLink: string
+}
+
+interface StagingObjectConfig {
+  name: string
+  sheetId: string
+  viewId?: string
+  baseId?: string | null
+  openLink?: string
+  fields: string[]
+  fieldDetails?: IntegrationStagingDescriptor['fieldDetails']
 }
 
 type ExportCell = string | number | boolean | null
@@ -878,6 +900,60 @@ function getStagingAreaLabel(id: string): string {
   return stagingDatasetCopy[id]?.area || '数据集'
 }
 
+function stagingSourceSystemId(projectId: string): string {
+  const suffix = (projectId || 'default').replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'default'
+  return `metasheet_staging_${suffix}`
+}
+
+function descriptorToSchemaFields(descriptor: IntegrationStagingDescriptor | null): IntegrationObjectSchemaField[] {
+  if (!descriptor) return []
+  if (Array.isArray(descriptor.fieldDetails) && descriptor.fieldDetails.length > 0) {
+    return descriptor.fieldDetails.map((field) => ({
+      name: field.id,
+      label: field.name,
+      type: field.type,
+      ...(Array.isArray(field.options) ? { options: field.options } : {}),
+    }))
+  }
+  return descriptor.fields.map((field) => ({
+    name: field,
+    label: field,
+    type: 'string',
+  }))
+}
+
+function buildStagingSourceObjectsConfig(): Record<string, StagingObjectConfig> {
+  const objects: Record<string, StagingObjectConfig> = {}
+  for (const descriptor of stagingDescriptors.value) {
+    const target = stagingOpenTargetById.value.get(descriptor.id)
+    if (!target?.sheetId) continue
+    objects[descriptor.id] = {
+      name: stagingDatasetCopy[descriptor.id]?.name || descriptor.name,
+      sheetId: target.sheetId,
+      viewId: target.viewId,
+      baseId: target.baseId || stagingBaseId.value.trim() || null,
+      openLink: target.openLink,
+      fields: descriptor.fields,
+      fieldDetails: descriptor.fieldDetails,
+    }
+  }
+  return objects
+}
+
+function buildStagingSourceObjects(): IntegrationSystemObject[] {
+  return stagingDescriptors.value.flatMap((descriptor) => {
+    const target = stagingOpenTargetById.value.get(descriptor.id)
+    if (!target?.sheetId) return []
+    return [{
+      name: descriptor.id,
+      label: stagingDatasetCopy[descriptor.id]?.name || descriptor.name,
+      operations: ['read'],
+      source: 'metasheet:staging',
+      schema: descriptorToSchemaFields(descriptor),
+    }]
+  })
+}
+
 function buildMultitableOpenLink(sheetId: string, viewId: string, baseId?: string | null): string {
   const path = `/multitable/${encodeURIComponent(sheetId)}/${encodeURIComponent(viewId)}`
   const normalizedBaseId = typeof baseId === 'string' && baseId.trim() ? baseId.trim() : ''
@@ -1150,6 +1226,58 @@ async function installStagingTables(): Promise<void> {
     setStatus(error instanceof Error ? error.message : String(error), 'error')
   } finally {
     installingStaging.value = false
+  }
+}
+
+async function useStagingAsSource(objectId: string): Promise<void> {
+  const descriptor = stagingDescriptors.value.find((item) => item.id === objectId) || null
+  const target = stagingOpenTargetById.value.get(objectId)
+  if (!descriptor || !target?.sheetId) {
+    setStatus('请先创建清洗表，确认该 staging 表已有 sheetId / open link 后再作为来源。', 'error')
+    return
+  }
+  const projectId = stagingProjectId.value.trim() || 'default'
+  const objects = buildStagingSourceObjectsConfig()
+  if (!objects[objectId]) {
+    setStatus('当前 staging 表缺少 sheetId，不能作为 dry-run 来源。', 'error')
+    return
+  }
+  try {
+    const system = await upsertWorkbenchExternalSystem({
+      ...currentScope(),
+      id: stagingSourceSystemId(projectId),
+      projectId,
+      name: 'MetaSheet staging 多维表',
+      kind: 'metasheet:staging',
+      role: 'source',
+      status: 'active',
+      config: {
+        projectId,
+        baseId: stagingBaseId.value.trim() || target.baseId || null,
+        objects,
+      },
+      capabilities: {
+        read: true,
+        stagingSource: true,
+        dryRunFriendly: true,
+      },
+    })
+    replaceSystem(system)
+    sourceSystemId.value = system.id
+    sourceObjects.value = buildStagingSourceObjects()
+    sourceObjectName.value = objectId
+    sourceSchema.value = {
+      object: objectId,
+      fields: descriptorToSchemaFields(descriptor),
+      raw: {
+        sheetId: target.sheetId,
+        viewId: target.viewId,
+        openLink: target.openLink,
+      },
+    }
+    setStatus(`已将 ${stagingDatasetCopy[objectId]?.name || descriptor.name} 设为 Dry-run 来源`, 'success')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), 'error')
   }
 }
 
@@ -1950,6 +2078,11 @@ watch(showAdvancedConnectors, () => {
   flex-wrap: wrap;
   gap: 10px;
   margin-top: 14px;
+}
+
+.integration-workbench__actions--inline {
+  justify-content: flex-end;
+  margin-top: 0;
 }
 
 .integration-workbench__readiness {
