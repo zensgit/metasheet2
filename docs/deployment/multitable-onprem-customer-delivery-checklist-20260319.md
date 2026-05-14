@@ -36,7 +36,7 @@ Confirm these before delivery:
 4. Customer has PostgreSQL and Redis available locally
 5. Customer can run Node.js 20, pnpm, pm2, nginx on the Ubuntu side
 6. K3 WISE operators know whether they are using the quick-start preset
-   (`/integrations/k3-wise`) or the generic integration workbench
+   (`/integrations/k3-wise`) or Data Factory
    (`/integrations/workbench`)
 
 ## 4. Runtime Paths To Confirm

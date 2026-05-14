@@ -137,10 +137,10 @@ scripts/ops/multitable-onprem-healthcheck.sh
 
 - Web: `http://<your-server-host>/`
 - Multitable route example: `http://<your-server-host>/multitable`
-- Generic integration workbench: `http://<your-server-host>/integrations/workbench`
+- Data Factory: `http://<your-server-host>/integrations/workbench`
 - K3 WISE quick-start preset: `http://<your-server-host>/integrations/k3-wise`
 
-## 9.1) Generic Integration and K3 WISE Setup
+## 9.1) Data Factory and K3 WISE Setup
 
 The package includes `plugin-integration-core`, which registers the
 `/api/integration/*` control-plane routes used by both integration pages.
@@ -166,15 +166,18 @@ WISE Material/BOM path:
 7. Save the K3 WebAPI system, test WebAPI, then install staging tables and
    create draft pipelines.
 
-Use `/integrations/workbench` when the customer needs configurable mapping
+Use `/integrations/workbench` as the default Data Factory surface when the
+customer needs configurable CRM / PLM / ERP / SRM / HTTP / SQL data movement
 beyond the K3 preset:
 
-1. Select source and target systems.
-2. Load source and target objects or document templates.
-3. Configure field mappings using only the whitelisted transforms
+1. Select source and target systems as data sources.
+2. Load source and target datasets or document templates.
+3. Create or open staging multitable sheets for raw data, cleansing, feedback,
+   and run logs.
+4. Configure cleansing mapping rules using only the whitelisted transforms
    (`trim`, `upper`, `lower`, `toNumber`, `dictMap`).
-4. Add dictionary mappings and required/min/max validation rules as needed.
-5. Generate payload preview first, then save the pipeline, run dry-run, and only
+5. Add dictionary mappings and required/min/max validation rules as needed.
+6. Generate payload preview first, then save the pipeline, run dry-run, and only
    then opt into Save-only execution.
 
 Operator evidence for K3:

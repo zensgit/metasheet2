@@ -59,7 +59,49 @@ describe('IntegrationWorkbenchView', () => {
       if (url === '/api/integration/staging/descriptors') {
         return jsonResponse([
           { id: 'standard_materials', name: 'Standard Materials', fields: ['code', 'name'] },
+          { id: 'bom_cleanse', name: 'BOM Cleanse', fields: ['parentCode', 'childCode', 'quantity'] },
+          { id: 'integration_exceptions', name: 'Integration Exceptions', fields: ['errorCode', 'errorMessage'] },
         ])
+      }
+      if (url === '/api/integration/staging/install') {
+        const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        expect(body).toMatchObject({
+          tenantId: 'default',
+          workspaceId: null,
+          projectId: 'project_1',
+          baseId: null,
+        })
+        return jsonResponse({
+          sheetIds: {
+            standard_materials: 'sheet_materials',
+            bom_cleanse: 'sheet_bom',
+          },
+          viewIds: {
+            standard_materials: 'view_materials',
+            bom_cleanse: 'view_bom',
+          },
+          openLinks: {
+            standard_materials: '/multitable/sheet_materials/view_materials',
+            bom_cleanse: '/multitable/sheet_bom/view_bom',
+          },
+          targets: [
+            {
+              id: 'standard_materials',
+              name: '物料清洗',
+              sheetId: 'sheet_materials',
+              viewId: 'view_materials',
+              openLink: '/multitable/sheet_materials/view_materials',
+            },
+            {
+              id: 'bom_cleanse',
+              name: 'BOM 清洗',
+              sheetId: 'sheet_bom',
+              viewId: 'view_bom',
+              openLink: '/multitable/sheet_bom/view_bom',
+            },
+          ],
+          warnings: [],
+        })
       }
       if (url === '/api/integration/external-systems/plm_1/objects?tenantId=default') {
         return jsonResponse([{ name: 'materials', label: 'Materials', operations: ['read'] }])
@@ -220,8 +262,15 @@ describe('IntegrationWorkbenchView', () => {
     app.mount(container)
     await flushUi()
 
-    expect(container.textContent).toContain('系统对接')
-    expect(container.textContent).toContain('默认的通用系统对接页面')
+    expect(container.textContent).toContain('数据工厂')
+    expect(container.textContent).toContain('连接系统')
+    expect(container.textContent).toContain('选择数据集')
+    expect(container.textContent).toContain('多维表清洗')
+    expect(container.textContent).toContain('Dry-run / 推送')
+    expect(container.textContent).toContain('数据集与多维表清洗')
+    expect(container.textContent).toContain('物料清洗')
+    expect(container.textContent).toContain('BOM 清洗')
+    expect(container.textContent).toContain('回写区')
     expect(container.textContent).toContain('HTTP API')
     expect(container.textContent).not.toContain('K3 WISE SQL Server Channel')
     expect(container.textContent).toContain('已隐藏 1 个高级连接')
@@ -261,13 +310,22 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).toContain('可用')
     ;(container.querySelector('[data-testid="test-source-system"]') as HTMLButtonElement).click()
     await flushUi(8)
-    expect(container.textContent).toContain('来源连接测试通过')
+    expect(container.textContent).toContain('数据源连接测试通过')
     expect(container.textContent).toContain('已连接')
 
     ;(container.querySelector('[data-testid="test-target-system"]') as HTMLButtonElement).click()
     await flushUi(8)
     expect(container.textContent).toContain('目标连接测试失败：ERP endpoint unavailable')
     expect(container.textContent).toContain('异常：ERP endpoint unavailable')
+
+    const projectId = container.querySelector('[data-testid="staging-project-id"]') as HTMLInputElement
+    projectId.value = 'project_1'
+    projectId.dispatchEvent(new Event('input'))
+    ;(container.querySelector('[data-testid="install-staging"]') as HTMLButtonElement).click()
+    await flushUi(10)
+    expect(container.textContent).toContain('清洗表已创建，可打开多维表处理数据')
+    expect((container.querySelector('[data-testid="open-staging-standard_materials"]') as HTMLAnchorElement).getAttribute('href'))
+      .toBe('/multitable/sheet_materials/view_materials')
 
     ;(container.querySelector('[data-testid="load-source-objects"]') as HTMLButtonElement).click()
     await flushUi(8)

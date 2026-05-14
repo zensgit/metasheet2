@@ -188,13 +188,13 @@ export const appRoutes: RouteRecordRaw[] = [
     path: '/integrations/workbench',
     name: AppRouteNames.INTEGRATION_WORKBENCH,
     component: () => import('../views/IntegrationWorkbenchView.vue'),
-    meta: { title: 'System Integration', titleZh: '系统对接', requiresAuth: true, permissions: ['integration:write'] }
+    meta: { title: 'Data Factory', titleZh: '数据工厂', requiresAuth: true, permissions: ['integration:write'] }
   },
   {
     path: '/integrations/k3-wise',
     name: AppRouteNames.INTEGRATION_K3_WISE,
     component: () => import('../views/IntegrationK3WiseSetupView.vue'),
-    meta: { title: 'K3 WISE Setup Preset', titleZh: 'K3 WISE 预设向导', requiresAuth: true, permissions: ['integration:write'] }
+    meta: { title: 'K3 WISE Preset', titleZh: 'K3 WISE 预设', requiresAuth: true, permissions: ['integration:write'] }
   },
   {
     path: '/workflows',
