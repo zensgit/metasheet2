@@ -241,6 +241,11 @@ jobs:
       LOGIN_EMAIL: ${{ secrets.ATTENDANCE_ADMIN_EMAIL || vars.ATTENDANCE_ADMIN_EMAIL || '' }}
       LOGIN_PASSWORD: ${{ secrets.ATTENDANCE_ADMIN_PASSWORD || vars.ATTENDANCE_ADMIN_PASSWORD || '' }}
       AUTH_RESOLVE_ALLOW_INSECURE_HTTP: ${{ vars.ATTENDANCE_ALLOW_INSECURE_HTTP || 'true' }}
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+      DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
       COMMIT_ASYNC: 'true'
       UPLOAD_CSV: ${{ inputs.upload_csv || vars.ATTENDANCE_PERF_UPLOAD_CSV || 'true' }}
       PAYLOAD_SOURCE: ${{ inputs.payload_source || vars.ATTENDANCE_PERF_PAYLOAD_SOURCE || 'auto' }}
@@ -267,8 +272,11 @@ jobs:
           set -euo pipefail
           mkdir -p "output/playwright/attendance-import-perf-longrun/current/${{ matrix.id }}"
           meta_file="output/playwright/attendance-import-perf-longrun/current/${{ matrix.id }}/auth-resolve-meta.txt"
+          fallback_log="output/playwright/attendance-import-perf-longrun/current/${{ matrix.id }}/deploy-host-auth-fallback.log"
 
-          if ! resolved_token="$(
+          resolved_token=""
+          set +e
+          resolved_token="$(
             API_BASE="${API_BASE}" \
             AUTH_TOKEN="${AUTH_TOKEN}" \
             LOGIN_EMAIL="${LOGIN_EMAIL}" \
@@ -276,7 +284,43 @@ jobs:
             AUTH_RESOLVE_ALLOW_INSECURE_HTTP="${AUTH_RESOLVE_ALLOW_INSECURE_HTTP}" \
             AUTH_RESOLVE_META_FILE="${meta_file}" \
             ./scripts/ops/attendance-resolve-auth.sh
-          )"; then
+          )"
+          resolve_rc=$?
+          set -e
+
+          if [[ "${resolve_rc}" != "0" ]]; then
+            echo "[attendance-import-perf-longrun] configured auth failed; trying deploy-host token fallback" | tee "${fallback_log}"
+            set +e
+            fallback_token="$(
+              ATTENDANCE_TOKEN_RESOLVE_REQUIRED=false \
+              DEPLOY_HOST="${DEPLOY_HOST}" \
+              DEPLOY_USER="${DEPLOY_USER}" \
+              DEPLOY_SSH_KEY_B64="${DEPLOY_SSH_KEY_B64}" \
+              DEPLOY_PATH="${DEPLOY_PATH}" \
+              DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE}" \
+              ./scripts/ops/resolve-attendance-smoke-token.sh 2> >(tee -a "${fallback_log}" >&2)
+            )"
+            fallback_rc=$?
+            set -e
+
+            if [[ "${fallback_rc}" == "0" && -n "${fallback_token}" ]]; then
+              echo "::add-mask::${fallback_token}"
+              set +e
+              resolved_token="$(
+                API_BASE="${API_BASE}" \
+                AUTH_TOKEN="${fallback_token}" \
+                LOGIN_EMAIL="" \
+                LOGIN_PASSWORD="" \
+                AUTH_RESOLVE_ALLOW_INSECURE_HTTP="${AUTH_RESOLVE_ALLOW_INSECURE_HTTP}" \
+                AUTH_RESOLVE_META_FILE="${meta_file}" \
+                ./scripts/ops/attendance-resolve-auth.sh
+              )"
+              resolve_rc=$?
+              set -e
+            fi
+          fi
+
+          if [[ "${resolve_rc}" != "0" || -z "${resolved_token}" ]]; then
             API_BASE="${API_BASE}" \
             ./scripts/ops/attendance-write-auth-error.sh \
               "${meta_file}" \
@@ -475,7 +519,17 @@ jobs:
       - name: Add trend markdown to summary
         if: always()
         run: |
-          cat "${{ steps.trend.outputs.report_markdown }}" >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          report_markdown="${{ steps.trend.outputs.report_markdown }}"
+          if [[ -n "${report_markdown}" && -f "${report_markdown}" ]]; then
+            cat "${report_markdown}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## Attendance Import Perf Long Run"
+              echo ""
+              echo "Trend report markdown was not produced. Check scenario artifacts and auth diagnostics."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload trend artifacts
         if: always()
