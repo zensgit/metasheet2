@@ -1,6 +1,7 @@
 export async function resolveMultitableAuthToken({
   apiBase,
   envToken = process.env.AUTH_TOKEN || '',
+  tokenSource = 'AUTH_TOKEN',
   fetchJson,
   record = () => {},
   perms = '',
@@ -9,7 +10,7 @@ export async function resolveMultitableAuthToken({
 }) {
   const trimmedToken = String(envToken || '').trim()
   if (trimmedToken) {
-    record('api.auth-token', true, { source: 'AUTH_TOKEN' })
+    record('api.auth-token', true, { source: tokenSource })
     return trimmedToken
   }
 
