@@ -4,6 +4,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const SECRET_KEY_PATTERN = /password|secret|token|session|credential|api[-_]?key|authorization/i
+const SECRET_METADATA_KEY_PATTERN = /^(requiredCredentialKeys|credentialKeys|credentialFieldKeys)$/i
 const SECRET_TEXT_PATTERN = /(?:access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?id|api[_-]?key|secret|signature|sig|sign|password)=([^&#\s]+)/i
 const AUTH_TEXT_PATTERN = /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/i
 const JWT_TEXT_PATTERN = /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/
@@ -134,6 +135,25 @@ function redact(value) {
   return result
 }
 
+function findSecretValueLeaks(value, location, leaks) {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => findSecretValueLeaks(item, `${location}[${index}]`, leaks))
+    return leaks
+  }
+  if (isPlainObject(value)) {
+    for (const [key, child] of Object.entries(value)) {
+      findSecretValueLeaks(child, `${location}.${key}`, leaks)
+    }
+    return leaks
+  }
+  if (typeof value !== 'string') return leaks
+  const normalized = value.trim()
+  if (normalized.length >= 4 && !SAFE_SECRET_PLACEHOLDERS.has(normalized.toLowerCase())) {
+    leaks.push(location)
+  }
+  return leaks
+}
+
 function findSecretLeaks(value, location = 'root', leaks = []) {
   if (Array.isArray(value)) {
     value.forEach((item, index) => findSecretLeaks(item, `${location}[${index}]`, leaks))
@@ -146,11 +166,9 @@ function findSecretLeaks(value, location = 'root', leaks = []) {
   if (!isPlainObject(value)) return leaks
   for (const [key, child] of Object.entries(value)) {
     const childPath = `${location}.${key}`
-    if (SECRET_KEY_PATTERN.test(key) && typeof child === 'string') {
-      const normalized = child.trim()
-      if (normalized.length >= 4 && !SAFE_SECRET_PLACEHOLDERS.has(normalized.toLowerCase())) {
-        leaks.push(childPath)
-      }
+    if (SECRET_KEY_PATTERN.test(key)) {
+      if (SECRET_METADATA_KEY_PATTERN.test(key)) continue
+      findSecretValueLeaks(child, childPath, leaks)
       continue
     }
     findSecretLeaks(child, childPath, leaks)
@@ -227,6 +245,20 @@ function phase(statusSource, id, label, required = true) {
 
 function addIssue(issues, severity, code, message, phaseId = null) {
   issues.push({ severity, code, message, phaseId })
+}
+
+function evaluateMaterialDryRun(evidence, issues) {
+  const dryRun = asObject(evidence.materialDryRun, 'evidence.materialDryRun')
+  const status = normalizeStatus(dryRun.status)
+  if (status !== 'pass') return
+
+  if (!text(dryRun.runId)) {
+    addIssue(issues, 'fail', 'MATERIAL_DRY_RUN_ID_REQUIRED', 'material dry-run evidence must include runId', 'materialDryRun')
+  }
+  const rowsPreviewed = Number(dryRun.rowsPreviewed)
+  if (!Number.isInteger(rowsPreviewed) || rowsPreviewed < 1 || rowsPreviewed > 3) {
+    addIssue(issues, 'fail', 'MATERIAL_DRY_RUN_ROW_COUNT', 'material dry-run must preview between 1 and 3 rows', 'materialDryRun')
+  }
 }
 
 function evaluatePhases(packet, evidence) {
@@ -353,7 +385,7 @@ function evaluateBom(packet, evidence, issues) {
 
 function determineDecision(phases, issues) {
   if (issues.some((issue) => issue.severity === 'fail')) return 'FAIL'
-  if (phases.some((item) => item.required && item.status === 'fail')) return 'FAIL'
+  if (phases.some((item) => item.status === 'fail')) return 'FAIL'
   if (phases.some((item) => item.status === 'blocked')) return 'PARTIAL'
   if (phases.some((item) => item.required && item.status !== 'pass')) return 'PARTIAL'
   if (issues.length > 0) return 'PARTIAL'
@@ -377,6 +409,7 @@ function buildEvidenceReport(packet, evidence, { generatedAt = new Date().toISOS
 
   const issues = []
   const phases = evaluatePhases(packet, evidence)
+  evaluateMaterialDryRun(evidence, issues)
   evaluateMaterialSaveOnly(evidence, issues)
   evaluateErpFeedback(evidence, issues)
   evaluateBom(packet, evidence, issues)
@@ -497,6 +530,15 @@ function sampleEvidence() {
           erpSyncStatus: 'synced',
           erpExternalId: 'K3-1001',
           erpBillNo: 'K3-BILL-001',
+          erpResponseCode: 'OK',
+          erpResponseMessage: 'K3 WISE save succeeded',
+          lastSyncedAt: '2026-04-25T10:05:00.000Z',
+        },
+        {
+          materialCode: 'MAT-002',
+          erpSyncStatus: 'synced',
+          erpExternalId: 'K3-1002',
+          erpBillNo: 'K3-BILL-002',
           erpResponseCode: 'OK',
           erpResponseMessage: 'K3 WISE save succeeded',
           lastSyncedAt: '2026-04-25T10:05:00.000Z',
