@@ -9,6 +9,7 @@
 
 import fs from 'fs/promises'
 import path from 'path'
+import { fileURLToPath } from 'url'
 import { assertImportTelemetry, coerceNonNegativeNumber } from './attendance-import-telemetry-utils.mjs'
 
 const apiBase = String(process.env.API_BASE || '').replace(/\/+$/, '')
@@ -433,6 +434,21 @@ function normalizeRecordUpsertStrategy(value) {
   return ''
 }
 
+export function sanitizeImportTemplatePayloadExample(payloadExample) {
+  if (!payloadExample || typeof payloadExample !== 'object' || Array.isArray(payloadExample)) {
+    return {}
+  }
+
+  const sanitized = { ...payloadExample }
+  if (Array.isArray(sanitized.columns) && sanitized.columns.some((column) => {
+    return !column || typeof column !== 'object' || Array.isArray(column)
+  })) {
+    delete sanitized.columns
+  }
+  delete sanitized.requiredFields
+  return sanitized
+}
+
 function resolveSyntheticImportShape(totalRows) {
   const normalizedRows = Math.max(1, Math.floor(Number(totalRows) || 1))
   if (perfUserPoolSize) {
@@ -732,6 +748,10 @@ async function run() {
   assertOk(template, 'GET /attendance/import/template')
   const payloadExample = template.body?.data?.payloadExample
   if (!payloadExample || typeof payloadExample !== 'object') die('payloadExample missing')
+  const templateMapping = template.body?.data?.mapping && typeof template.body.data.mapping === 'object'
+    ? template.body.data.mapping
+    : null
+  const payloadExampleBase = sanitizeImportTemplatePayloadExample(payloadExample)
   const resolvedMappingProfileId =
     mappingProfileIdOverride ||
     String(payloadExample.mappingProfileId || '') ||
@@ -789,7 +809,8 @@ async function run() {
   }
 
   const basePayload = {
-    ...payloadExample,
+    ...payloadExampleBase,
+    ...(payloadExampleBase.mapping || !templateMapping ? {} : { mapping: templateMapping }),
     orgId,
     userId,
     timezone: payloadExample.timezone || timezone,
@@ -1385,8 +1406,10 @@ async function run() {
   }
 }
 
-run().catch((error) => {
-  const msg = error instanceof Error ? error.message : String(error)
-  console.error(`[attendance-import-perf] Failed: ${msg}`)
-  process.exit(1)
-})
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  run().catch((error) => {
+    const msg = error instanceof Error ? error.message : String(error)
+    console.error(`[attendance-import-perf] Failed: ${msg}`)
+    process.exit(1)
+  })
+}
