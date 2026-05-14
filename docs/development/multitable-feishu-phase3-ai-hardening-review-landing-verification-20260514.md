@@ -146,11 +146,22 @@ paths, mostly Attendance work).
 
 ## Open follow-ups after this PR merges
 
-- The plan and TODO files do not currently reflect the review's
-  recommended deferrals. A follow-up PR should add an Activation
-  Constraints section to the plan and mark Lane A/B/C/D sub-tasks
-  with `now` / `deferred` status in the TODO, per the review's
-  Recommended Re-Scope and Suggested PR Sequence sections.
+- Plan and TODO Activation Constraints — **resolved in this same
+  PR** by the second commit on
+  `codex/multitable-feishu-phase3-plan-review-20260514`:
+  - Plan gained an `## Activation Constraints` section with an
+    active-queue table (D0 / D1 / D4), a deferred-lanes table (Lane
+    A / B / C / D2 / D3), and a T1-T7 blocker list with per-lane
+    re-entry conditions.
+  - Plan's "Suggested PR Sequence" was re-scoped: active queue is
+    PR 1 (this PR, landed as #1537) + PR R2 (D0) + PR R3 (D1) +
+    PR R4 (D4); the other seven original PRs are listed under a
+    Deferred table with defer reasons.
+  - TODO gained an `## Activation Gate` section above Phase 0 plus
+    a per-lane `Status:` line on every `## Lane …` heading (D0 /
+    D1 / D4 = pending in active queue; A1 / A2 / A3 / B1 / B2 =
+    deferred pending K3 GATE PASS; C1 / C2 = pending PM / SME; D2
+    / D3 = deferred under T4 / T5).
 - The operator's root checkout still carries ≈146 unrelated dirty
   paths (Attendance work, DingTalk org-tree dev/verification, six
   4-26 integration-core docs). These remain outside this PR's scope

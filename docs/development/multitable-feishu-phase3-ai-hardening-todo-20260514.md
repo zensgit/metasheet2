@@ -20,6 +20,39 @@ Mark an item complete only after all are true:
 - Staging claims include artifact paths or redacted command transcripts.
 - AI provider keys, SMTP credentials, JWTs, bearer tokens, webhook URLs, and real recipient lists are not written to docs or logs.
 
+## Activation Gate
+
+The K3 PoC stage-1 lock recorded in
+`docs/development/integration-erp-platform-roadmap-20260425.md` §4-§5
+is in effect. Under that lock, lanes carry one of three statuses:
+
+- `pending` — in the active queue. Implementation may start once
+  Phase 0 hygiene is complete.
+- `deferred pending K3 GATE PASS` — blocked by the stage-1 lock. The
+  lane re-enters `pending` only after the operator announces K3 GATE
+  PASSED (or explicitly invokes "打破阶段一约束" per
+  `project_k3_poc_stage1_lock.md`) **and** the lane's T-numbered
+  blockers from
+  `docs/development/multitable-feishu-phase3-ai-hardening-review-20260514.md`
+  are closed.
+- `pending PM / SME assignment` — blocked by missing non-engineering
+  inputs. The lane re-enters `pending` only after PM / PD ownership
+  and domain SME availability are confirmed, and rollback budget
+  (T7) is settled.
+
+Active queue at the time this TODO lands: Lane D0, Lane D1, Lane D4.
+
+Deferred under stage-1 lock: Lane A1 / A2 / A3, Lane B1 / B2, Lane
+D2, Lane D3.
+
+Deferred under PM / SME assignment: Lane C1, Lane C2.
+
+Re-entering a deferred lane to `pending` requires a follow-up commit
+to this TODO that flips the Status field and updates the active-queue
+roster, plus a matching update to the Active queue / Deferred lanes
+tables in
+`docs/development/multitable-feishu-phase3-ai-hardening-plan-20260514.md`.
+
 ## Phase 0 - Planning and Hygiene
 
 - [ ] Create Phase 3 plan and TODO docs.
@@ -48,6 +81,8 @@ Mark an item complete only after all are true:
   - Verification summary:
 
 ## Lane D0 - Release Gate Skeleton
+
+Status: pending — active queue (kernel polish, allowed under stage-1 lock).
 
 Owner recommendation: Codex.
 
@@ -96,6 +131,8 @@ Reason: this lane defines artifact shape, redaction, and release safety constrai
 
 ## Lane A1 - AI Provider Readiness Contract
 
+Status: deferred pending K3 GATE PASS — also blocked by T1 (cost ledger / rate limit) and T6 (provider state enum).
+
 Owner recommendation: Codex.
 
 Reason: provider config, redaction, and blocked-state behavior are security-sensitive.
@@ -132,6 +169,8 @@ Reason: provider config, redaction, and blocked-state behavior are security-sens
   - Verification summary:
 
 ## Lane A2 - AI Field Shortcut Backend
+
+Status: deferred pending K3 GATE PASS — also blocked by T1, T2 (automation-service boundary), T3 (SLO numbers).
 
 Owner recommendation: Claude can implement; Codex reviews security and contracts.
 
@@ -198,6 +237,8 @@ Owner recommendation: Claude can implement; Codex reviews security and contracts
 
 ## Lane A3 - AI Field Shortcut Frontend
 
+Status: deferred pending K3 GATE PASS — also blocked by T3 (SLO numbers, cancel / streaming UX) and T6 (provider state enum).
+
 Owner recommendation: Claude can implement; Codex reviews blocked/error states.
 
 - [ ] Add Field Manager entry for AI field shortcuts.
@@ -251,6 +292,8 @@ Owner recommendation: Claude can implement; Codex reviews blocked/error states.
 
 ## Lane B1 - Formula Dry-Run Diagnostics
 
+Status: deferred pending K3 GATE PASS — non-AI dry-run path could ship sooner, but stays deferred to keep Lane B coherent with B2.
+
 Owner recommendation: Codex or Claude; Codex reviews API contract.
 
 - [ ] Add formula dry-run endpoint.
@@ -298,6 +341,8 @@ Owner recommendation: Codex or Claude; Codex reviews API contract.
 
 ## Lane B2 - Formula AI Assist
 
+Status: deferred pending K3 GATE PASS — also blocked by T1, T3, T6, and depends on Lane A1 + Lane B1 landing first.
+
 Owner recommendation: Claude can implement after Lane A1 and B1 land; Codex reviews provider and persistence boundaries.
 
 - [ ] Add formula AI suggest endpoint.
@@ -344,6 +389,8 @@ Owner recommendation: Claude can implement after Lane A1 and B1 land; Codex revi
   - Verification summary:
 
 ## Lane C1 - Template Preview and Dry-Run
+
+Status: pending PM / SME assignment — five industry templates need domain SME input before engineering builds shell.
 
 Owner recommendation: Claude.
 
@@ -404,6 +451,8 @@ Owner recommendation: Claude.
 
 ## Lane C2 - Template Install and Onboarding
 
+Status: pending PM / SME assignment — also blocked by T7 (rollback budget upgrade or downgrade decision).
+
 Owner recommendation: Claude; Codex reviews rollback and no-overwrite behavior.
 
 - [ ] Harden template install flow to create all objects through authoritative services.
@@ -445,6 +494,8 @@ Owner recommendation: Claude; Codex reviews rollback and no-overwrite behavior.
 
 ## Lane D1 - Real SMTP Gate
 
+Status: pending — active queue (kernel polish on shipped automation send_email path).
+
 Owner recommendation: Codex.
 
 - [ ] Implement guarded real-send smoke.
@@ -479,6 +530,8 @@ Owner recommendation: Codex.
   - Verification summary:
 
 ## Lane D2 - Large Table Performance Gate
+
+Status: deferred — D2 perf-gate must not run on 142 during K3 PoC live window (T4). Re-entry requires K3-free staging or K3 GATE PASS.
 
 Owner recommendation: Codex or Claude.
 
@@ -515,6 +568,8 @@ Owner recommendation: Codex or Claude.
 
 ## Lane D3 - Permission Matrix Gate
 
+Status: deferred — D3 must explicitly choose snapshot vs golden matrix semantics for sheet / view / field / record / export paths (T5) before activation.
+
 Owner recommendation: Codex.
 
 - [ ] Cover sheet read/write/admin matrix.
@@ -549,6 +604,8 @@ Owner recommendation: Codex.
   - Verification summary:
 
 ## Lane D4 - Automation Soak Gate
+
+Status: pending — active queue (kernel polish on shipped automation execution paths).
 
 Owner recommendation: Codex.
 

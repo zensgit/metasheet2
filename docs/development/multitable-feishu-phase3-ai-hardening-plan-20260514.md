@@ -34,13 +34,87 @@ Reference URLs:
 
 Move MetaSheet multitable from "feature parity usable" to "customer-trial ready against modern Feishu Base expectations".
 
-The preferred implementation order is:
+The original preferred implementation order — preserved here as
+authorial intent — is:
 
 1. Phase 3D0 - release gate skeleton and evidence contract.
 2. Phase 3A - AI field shortcuts V1.
 3. Phase 3B - formula AI assist and diagnostics.
 4. Phase 3C - template and industry solution center V2.
 5. Phase 3D1 - commercial hardening gates on 142 staging.
+
+The Activation Constraints section below supersedes the active-queue
+portion of this order under the K3 PoC stage-1 lock.
+
+## Activation Constraints
+
+The K3 PoC stage-1 lock recorded in
+`docs/development/integration-erp-platform-roadmap-20260425.md` §4-§5
+is in effect at the time this plan lands. Under that lock, only kernel
+polish on already-shipped multitable features may proceed; new product
+战线 (AI surface, industry solution center, marketplace) must wait
+until K3 GATE PASS.
+
+### Active queue (allowed under stage-1 lock)
+
+| Lane | Status | Re-entry condition |
+| --- | --- | --- |
+| D0 - Release Gate Skeleton | active | none — kernel polish |
+| D1 - Real SMTP Gate | active | none — kernel polish |
+| D4 - Automation Soak Gate | active | none — kernel polish |
+
+These three sub-lanes harden code that is already live on `main` and
+already deployed on 142. They do not open a new product战线 and they
+do not touch `plugins/plugin-integration-core/*` or any K3 PoC path.
+
+### Deferred lanes
+
+| Lane | Status | Re-entry condition |
+| --- | --- | --- |
+| Lane A - AI Field Shortcuts V1 (A1 / A2 / A3) | deferred pending K3 GATE PASS | K3 GATE PASS plus T1, T2, T3, T6 closed |
+| Lane B - Formula AI Assist and Diagnostics (B1 / B2) | deferred pending K3 GATE PASS | K3 GATE PASS plus T1, T3, T6 closed |
+| Lane C - Template / Industry Solution Center V2 (C1 / C2) | pending PM / SME assignment | PM / PD ownership plus domain SME for at least three of the five industry templates, plus T7 closed |
+| D2 - Large Table Performance Gate | deferred | K3-free staging environment available, or K3 GATE PASS; plus T4 closed |
+| D3 - Permission Matrix Gate | deferred | K3-free staging environment available, or K3 GATE PASS; plus T5 closed |
+
+### Activation blockers — T1 through T7
+
+The independent review at
+`docs/development/multitable-feishu-phase3-ai-hardening-review-20260514.md`
+enumerates seven pre-launch technical blockers. Until each blocker is
+closed, the corresponding lane stays deferred:
+
+- T1 — AI cost ledger, per-tenant token budget, daily / weekly cap,
+  burst rate-limit. Blocks Lane A and Lane B activation.
+- T2 — Explicit boundary statement against
+  `packages/core-backend/src/multitable/automation-service.ts`.
+  Blocks Lane A activation.
+- T3 — Concrete SLO numbers — max wall-clock per preview call, max
+  wall-clock per run row, cancel and streaming semantics. Blocks
+  Lane A and Lane B activation.
+- T4 — D2 perf-gate runs must not run on 142 during the K3 PoC
+  live window. Blocks D2 activation.
+- T5 — D3 must explicitly choose snapshot semantics versus golden
+  matrix semantics for sheet / view / field / record / export
+  permission paths. Blocks D3 activation.
+- T6 — Full AI provider state enumeration (`disabled`,
+  `rate_limited`, `quota_exhausted`, `provider_error`,
+  `unsafe_input`) in addition to `blocked`. Blocks Lane A and
+  Lane B activation.
+- T7 — Lane C install rollback budget upgraded to its own sub-lane,
+  or downgraded to "best-effort no-rollback with explicit
+  partial-state report". Blocks Lane C activation.
+
+### Re-entry process
+
+When the stage-1 lock lifts — operator announces K3 GATE PASSED, or
+explicitly invokes "打破阶段一约束" per
+`project_k3_poc_stage1_lock.md` — the relevant lane becomes eligible
+for activation after closing its T-numbered blocker(s). Each
+activation must be recorded in this plan as a follow-up commit that
+moves the lane row from the Deferred table to the Active queue, and
+in the companion TODO as a Status field update from `deferred` to
+`pending`.
 
 ## Worktree Rule
 
@@ -375,20 +449,33 @@ Cover:
 
 ## Suggested PR Sequence
 
-### PR 1 - docs only
+Under the Activation Constraints above, only the docs-only landing
+PR plus three implementation PRs are in the active queue. The
+remaining seven PRs from the original sequence stay deferred. The
+original numbering is preserved for cross-reference; active PRs
+carry an `R`-prefix to mark them as re-scoped.
+
+### Active queue
+
+#### PR 1 — docs only (landed as #1537)
 
 Title:
 
 ```text
-docs(multitable): plan phase3 ai parity and hardening
+docs(multitable): land feishu phase 3 plan, todo, and review
 ```
 
 Contents:
 
 - Phase 3 plan MD.
 - Phase 3 TODO MD.
+- Independent review MD.
+- Landing development and verification MDs.
 
-### PR 2 - release gate skeleton
+Status: landed. Commit `087b8e6fb` on
+`codex/multitable-feishu-phase3-plan-review-20260514`.
+
+#### PR R2 — D0 release gate skeleton
 
 Title:
 
@@ -398,123 +485,77 @@ test(multitable): add phase3 release gate skeleton
 
 Contents:
 
-- Empty or blocked-mode gate runners.
-- Shared report writer.
-- Redaction tests.
+- Blocked-mode `pnpm verify:multitable-release:phase3` runner.
+- Shared JSON + Markdown report writer.
+- Shared secret redaction helper covering AI provider keys, SMTP
+  credentials, JWTs, bearer tokens, webhook URLs, and recipient-like
+  values.
+- Unit tests proving blocked gates exit non-zero when required env
+  is missing, and that artifacts do not leak token-like or
+  credential-like values.
 
-### PR 3 - AI provider readiness
+Status: pending activation. No new product战线; kernel polish on
+already-shipped automation and release-evidence paths.
 
-Title:
-
-```text
-feat(multitable): add ai provider readiness contract
-```
-
-Contents:
-
-- Provider resolver.
-- Disabled/blocked contract.
-- Redaction.
-- Unit tests.
-
-### PR 4 - AI field shortcut backend
+#### PR R3 — D1 real SMTP gate
 
 Title:
 
 ```text
-feat(multitable): add ai field shortcut execution service
+test(multitable): add phase3 real smtp send gate
 ```
 
 Contents:
 
-- Preview API.
-- Run API.
-- Execution audit.
-- Backend tests.
+- `pnpm verify:multitable-email:real-send` guarded by
+  `CONFIRM_SEND_EMAIL=1` plus dedicated test recipient env.
+- Mail send result tied to automation execution log.
+- Redacted artifact: no SMTP host credential leakage and no real
+  recipient list in the report.
 
-### PR 5 - AI field shortcut frontend
+Status: pending activation. Depends on PR R2 (D0 skeleton).
+
+#### PR R4 — D4 automation soak gate
 
 Title:
 
 ```text
-feat(multitable): add ai field shortcut authoring
+test(multitable): add phase3 automation soak gate
 ```
 
 Contents:
 
-- Field Manager entry.
-- Preview/run UI.
-- Blocked/error states.
+- `pnpm verify:multitable-automation:soak` exercising
+  `record.created` / `update_record` / `send_email` /
+  `send_webhook` repeat-fire against shipped automation actions
+  only.
+- Execution-log persistence assertions.
+- Controlled-failure behavior assertions.
 
-### PR 6 - formula diagnostics
+Status: pending activation. Depends on PR R2 (D0 skeleton).
 
-Title:
+### Deferred — not in active queue
 
-```text
-feat(multitable): add formula dry-run diagnostics
-```
+The following PRs from the original sequence are deferred under the
+Activation Constraints above. They re-enter the active queue only
+after stage-1 lock lifts and the corresponding T-numbered blockers
+are closed.
 
-Contents:
+| Original PR | Lane | Defer reason |
+| --- | --- | --- |
+| PR 3 — AI provider readiness | Lane A1 | Stage-1 lock plus T1 / T6 open |
+| PR 4 — AI field shortcut backend | Lane A2 | Stage-1 lock plus T1 / T2 / T3 open |
+| PR 5 — AI field shortcut frontend | Lane A3 | Stage-1 lock plus T3 / T6 open |
+| PR 6 — formula diagnostics | Lane B1 | Stage-1 lock |
+| PR 7 — formula AI assist | Lane B2 | Stage-1 lock plus T1 / T3 / T6 open |
+| PR 8 — template center preview | Lane C1 | Stage-1 lock plus PM / SME unassigned |
+| PR 9 — template onboarding | Lane C2 | Stage-1 lock plus T7 unbudgeted |
+| (Original PR 10 sub-gate) — large-table perf | D2 | T4 open; risk to 142 K3 PoC integrity |
+| (Original PR 10 sub-gate) — permission matrix | D3 | T5 open |
 
-- Dry-run API.
-- Typed diagnostics.
-- UI diagnostics.
-
-### PR 7 - formula AI assist
-
-Title:
-
-```text
-feat(multitable): add formula ai assist
-```
-
-Contents:
-
-- Formula suggestion API.
-- Manual accept flow.
-- Provider blocked fallback.
-
-### PR 8 - template center preview
-
-Title:
-
-```text
-feat(multitable): add template preview and dry-run
-```
-
-Contents:
-
-- Preview API.
-- Dry-run API.
-- Template detail UI.
-
-### PR 9 - template onboarding
-
-Title:
-
-```text
-feat(multitable): add template onboarding checklist
-```
-
-Contents:
-
-- Install hardening.
-- Post-install checklist.
-
-### PR 10 - commercial gates
-
-Title:
-
-```text
-test(multitable): add phase3 commercial release gates
-```
-
-Contents:
-
-- Real SMTP gate.
-- Large table performance gate.
-- Permission matrix gate.
-- Automation soak gate.
+The original PR 10 grouped D1, D2, D3, D4 into a single PR. Under the
+Activation Constraints above, D1 and D4 are split into PR R3 and
+PR R4 (active), while D2 and D3 are deferred separately.
 
 ## Final Acceptance Criteria
 
