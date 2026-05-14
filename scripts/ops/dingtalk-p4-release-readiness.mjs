@@ -376,11 +376,21 @@ function computeOverallStatus(checks) {
   return 'pass'
 }
 
+function summarizeGateTotals(gates) {
+  return {
+    total: gates.length,
+    passed: gates.filter((gate) => gate.status === 'pass').length,
+    failed: gates.filter((gate) => gate.status === 'fail').length,
+    skipped: gates.filter((gate) => gate.status === 'skipped').length,
+  }
+}
+
 function renderMarkdown(summary) {
   const lines = [
     '# DingTalk P4 Release Readiness',
     '',
     `- Overall status: **${summary.overallStatus}**`,
+    `- Gate totals: **${summary.gateTotals.passed}/${summary.gateTotals.total}** passed, **${summary.gateTotals.failed}** failed, **${summary.gateTotals.skipped}** skipped`,
     `- Generated at: \`${summary.generatedAt}\``,
     `- Env file: \`${summary.p4EnvFile}\``,
     `- Regression profile: \`${summary.regressionProfile}\``,
@@ -469,6 +479,7 @@ function run(opts) {
     runEnvReadiness(opts, envDir),
     runRegressionGate(opts, regressionDir),
   ]
+  const gateTotals = summarizeGateTotals(gates)
   const readinessStatus = computeOverallStatus(gates)
   let smokeSession = {
     requested: opts.runSmokeSession,
@@ -507,6 +518,7 @@ function run(opts) {
     },
     defaultSmokeOutputDir: DEFAULT_SMOKE_OUTPUT_DIR,
     overallStatus,
+    gateTotals,
     gates,
     smokeSession,
   })

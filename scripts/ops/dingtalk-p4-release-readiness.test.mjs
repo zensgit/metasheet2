@@ -171,6 +171,7 @@ test('dingtalk-p4-release-readiness fails when private env readiness fails even 
 
     const summary = JSON.parse(summaryText)
     assert.equal(summary.overallStatus, 'fail')
+    assert.deepEqual(summary.gateTotals, { total: 2, passed: 1, failed: 1, skipped: 0 })
     assert.equal(summary.gates.find((gate) => gate.id === 'env-readiness').status, 'fail')
     assert.equal(summary.gates.find((gate) => gate.id === 'regression-gate').status, 'pass')
     assert.ok(summary.gates.find((gate) => gate.id === 'env-readiness').details.failedChecks.includes('dingtalk_p4_auth_token'))
@@ -206,8 +207,10 @@ test('dingtalk-p4-release-readiness passes with complete env and passing regress
     assert.equal(result.status, 0, result.stderr || result.stdout)
     const summary = readSummary(outputDir)
     assert.equal(summary.overallStatus, 'pass')
+    assert.deepEqual(summary.gateTotals, { total: 2, passed: 2, failed: 0, skipped: 0 })
     assert.equal(summary.gates.every((gate) => gate.status === 'pass'), true)
     const markdown = readFileSync(path.join(outputDir, 'release-readiness-summary.md'), 'utf8')
+    assert.match(markdown, /Gate totals: \*\*2\/2\*\* passed, \*\*0\*\* failed, \*\*0\*\* skipped/)
     assert.match(markdown, /dingtalk-p4-smoke-session\.mjs/)
     assert.match(markdown, /--require-manual-targets/)
   } finally {
@@ -266,6 +269,7 @@ test('dingtalk-p4-release-readiness reports manual_pending when regression is pl
     assert.equal(result.status, 1)
     const summary = readSummary(outputDir)
     assert.equal(summary.overallStatus, 'manual_pending')
+    assert.deepEqual(summary.gateTotals, { total: 2, passed: 1, failed: 0, skipped: 1 })
     assert.equal(summary.gates.find((gate) => gate.id === 'regression-gate').status, 'skipped')
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
