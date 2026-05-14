@@ -248,6 +248,7 @@ describe('DirectoryManagementView', () => {
       configurable: true,
       value: originalScrollIntoView,
     })
+    Reflect.deleteProperty(navigator, 'clipboard')
     window.history.replaceState({}, '', '/')
     app = null
     container = null
@@ -342,6 +343,639 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('0447654442691174')
     expect(container?.textContent).toContain('最近目录同步')
     expect(container?.textContent).toContain('第 1 / 3 页')
+  })
+
+  it('loads the DingTalk organization tree on demand', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [
+            {
+              id: 'dept-row-1',
+              integrationId: 'dir-1',
+              provider: 'dingtalk',
+              externalDepartmentId: '1',
+              parentExternalDepartmentId: null,
+              name: '信息化团队',
+              fullPath: '信息化团队',
+              orderIndex: 1,
+              isActive: true,
+              lastSeenAt: '2026-05-13T00:00:00.000Z',
+              updatedAt: '2026-05-13T00:00:00.000Z',
+              accountCount: 3,
+              linkedAccountCount: 2,
+              childCount: 1,
+            },
+            {
+              id: 'dept-row-2',
+              integrationId: 'dir-1',
+              provider: 'dingtalk',
+              externalDepartmentId: '2',
+              parentExternalDepartmentId: '1',
+              name: '项目组',
+              fullPath: '信息化团队 / 项目组',
+              orderIndex: 2,
+              isActive: false,
+              lastSeenAt: '2026-05-12T00:00:00.000Z',
+              updatedAt: '2026-05-13T00:00:00.000Z',
+              accountCount: 1,
+              linkedAccountCount: 1,
+              childCount: 0,
+            },
+          ],
+          total: 2,
+        },
+      }))
+
+    const clipboardWriteText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: clipboardWriteText },
+    })
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    expect(container?.textContent).toContain('组织架构镜像')
+    expect(container?.textContent).toContain('点击“加载组织架构”')
+
+    const loadButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('加载组织架构'))
+    expect(loadButton).toBeTruthy()
+
+    loadButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations/dir-1/departments')
+    expect(container?.textContent).toContain('信息化团队')
+    expect(container?.textContent).toContain('项目组')
+    expect(container?.textContent).toContain('部门 ID 1')
+    expect(container?.textContent).toContain('成员 4')
+    expect(container?.textContent).toContain('已绑定 3')
+    expect(container?.textContent).toContain('未绑定 1')
+    expect(container?.textContent).toContain('组织镜像同步观测')
+    expect(container?.textContent).toContain('批次部门 1')
+    expect(container?.textContent).toContain('未在最新批次出现 1')
+
+    const copyMirrorObservationReportButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('复制同步观测报告'))
+    expect(copyMirrorObservationReportButton).toBeTruthy()
+    copyMirrorObservationReportButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('DingTalk organization mirror observation report'))
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('Current batch departments: 1'))
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('Not seen in latest batch: 1'))
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('[not_seen_in_latest_batch]'))
+    expect(container?.textContent).toContain('已复制 2 个部门的同步观测报告')
+
+    const focusStaleBatchButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('查看非最新批次'))
+    expect(focusStaleBatchButton).toBeTruthy()
+    focusStaleBatchButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(container?.textContent).toContain('部门 ID 2')
+    expect(container?.textContent).toContain('非最新批次')
+    expect(container?.textContent).not.toContain('部门 ID 1')
+
+    const focusInactiveButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('查看停用部门'))
+    expect(focusInactiveButton).toBeTruthy()
+    const focusUnlinkedButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('查看未绑定部门'))
+    expect(focusUnlinkedButton).toBeTruthy()
+
+    const allDepartmentsButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.trim() === '全部部门')
+    expect(allDepartmentsButton).toBeTruthy()
+    allDepartmentsButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(container?.textContent).toContain('部门 ID 1')
+    expect(container?.textContent).toContain('部门 ID 2')
+
+    const staleBatchScopeButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('只看非最新批次'))
+    expect(staleBatchScopeButton?.textContent).toContain('(1)')
+    staleBatchScopeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(container?.textContent).toContain('部门 ID 2')
+    expect(container?.textContent).toContain('非最新批次')
+    expect(container?.textContent).not.toContain('部门 ID 1')
+
+    const copyVisibleDepartmentReportButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('复制当前可见部门报告'))
+    expect(copyVisibleDepartmentReportButton).toBeTruthy()
+    copyVisibleDepartmentReportButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('DingTalk organization visible department report'))
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('Scope filter: 只看非最新批次'))
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('Visible department count: 1'))
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('[inactive_department; not_latest_batch] 2'))
+    expect(container?.textContent).toContain('已复制 1 个当前可见部门报告')
+
+    allDepartmentsButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(container?.textContent).toContain('部门 ID 1')
+    expect(container?.textContent).toContain('部门 ID 2')
+
+    const copyBindingGapReportButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('复制未绑定部门报告'))
+    expect(copyBindingGapReportButton).toBeTruthy()
+    copyBindingGapReportButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('Unlinked member count: 1'))
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('Departments with gaps: 1'))
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('members=3 · linked=2 · unlinked=1'))
+    expect(container?.textContent).toContain('已复制 1 个未全绑定部门报告')
+
+    const unlinkedScopeButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('只看未全绑定'))
+    expect(unlinkedScopeButton?.textContent).toContain('(1)')
+    unlinkedScopeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(container?.textContent).toContain('部门 ID 1')
+    expect(container?.textContent).not.toContain('部门 ID 2')
+
+    allDepartmentsButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(container?.textContent).toContain('部门 ID 1')
+    expect(container?.textContent).toContain('部门 ID 2')
+
+    const copyInactiveDepartmentReportButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('复制停用部门报告'))
+    expect(copyInactiveDepartmentReportButton).toBeTruthy()
+    copyInactiveDepartmentReportButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('Inactive department count: 1'))
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('[inactive_department] 2'))
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('members=1 · linked=1 · unlinked=0'))
+    expect(container?.textContent).toContain('已复制 1 个停用部门报告')
+
+    const inactiveScopeButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('只看停用部门'))
+    expect(inactiveScopeButton?.textContent).toContain('(1)')
+    inactiveScopeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(container?.textContent).toContain('部门 ID 2')
+    expect(container?.textContent).toContain('已停用')
+    expect(container?.textContent).not.toContain('部门 ID 1')
+
+    allDepartmentsButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(container?.textContent).toContain('部门 ID 1')
+    expect(container?.textContent).toContain('部门 ID 2')
+
+    const departmentSearch = Array.from(container!.querySelectorAll('input'))
+      .find((input) => input.getAttribute('placeholder')?.includes('部门名')) as HTMLInputElement | undefined
+    expect(departmentSearch).toBeTruthy()
+    departmentSearch!.value = '2'
+    departmentSearch!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    expect(container?.textContent).toContain('匹配 1')
+    expect(container?.textContent).toContain('部门 ID 2')
+    expect(container?.textContent).toContain('当前可见 1 个部门')
+    const visibleDepartmentPreview = container!.querySelector('.directory-admin__visible-department-preview') as HTMLTextAreaElement | null
+    expect(visibleDepartmentPreview?.value).toBe('2')
+
+    const copyVisibleDepartmentIdsButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('复制当前可见部门 ID'))
+    expect(copyVisibleDepartmentIdsButton).toBeTruthy()
+    copyVisibleDepartmentIdsButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(clipboardWriteText).toHaveBeenCalledWith('2')
+    expect(container?.textContent).toContain('已复制 1 个当前可见部门 ID')
+
+    const bulkMemberGroupButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('批量加入当前可见到成员组同步'))
+    expect(bulkMemberGroupButton).toBeTruthy()
+    bulkMemberGroupButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    const textareas = Array.from(container!.querySelectorAll('textarea')) as HTMLTextAreaElement[]
+    expect(textareas[2].value).toBe('2')
+    expect(container?.textContent).toContain('已将 1 个当前可见部门加入成员组同步部门')
+    expect(container?.textContent).toContain('部门范围草稿变更')
+    expect(container?.textContent).toContain('成员组同步部门')
+    expect(container?.textContent).toContain('新增 2')
+
+    const copyDraftScopeChangeReportButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('复制草稿变更报告'))
+    expect(copyDraftScopeChangeReportButton).toBeTruthy()
+    copyDraftScopeChangeReportButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('DingTalk organization draft scope change report'))
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('Added department references: 1'))
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('[成员组同步部门]'))
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('- 2 · inactive_department · 信息化团队 / 项目组'))
+    expect(container?.textContent).toContain('已复制 1 个部门范围草稿变更报告')
+
+    const restoreSingleScopeButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('还原此范围'))
+    expect(restoreSingleScopeButton).toBeTruthy()
+    restoreSingleScopeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(textareas[2].value).toBe('')
+    expect(container?.textContent).toContain('已还原成员组同步部门为已保存配置')
+    expect(container?.textContent).not.toContain('部门范围草稿变更')
+
+    bulkMemberGroupButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(textareas[2].value).toBe('2')
+    expect(container?.textContent).toContain('已将 1 个当前可见部门加入成员组同步部门')
+
+    const restoreSavedScopeButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('还原已保存范围'))
+    expect(restoreSavedScopeButton).toBeTruthy()
+    restoreSavedScopeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(textareas[2].value).toBe('')
+    expect(container?.textContent).toContain('已还原部门范围草稿为已保存配置')
+    expect(container?.textContent).not.toContain('部门范围草稿变更')
+
+    bulkMemberGroupButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(textareas[2].value).toBe('2')
+    expect(container?.textContent).toContain('已将 1 个当前可见部门加入成员组同步部门')
+
+    bulkMemberGroupButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(textareas[2].value).toBe('2')
+    expect(container?.textContent).toContain('当前可见部门均已在成员组同步部门中')
+
+    const removeVisibleMemberGroupButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('从成员组同步移除当前可见'))
+    expect(removeVisibleMemberGroupButton).toBeTruthy()
+    removeVisibleMemberGroupButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(textareas[2].value).toBe('')
+    expect(container?.textContent).toContain('已从成员组同步部门移除 1 个当前可见部门')
+
+    removeVisibleMemberGroupButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(textareas[2].value).toBe('')
+    expect(container?.textContent).toContain('当前可见部门不在成员组同步部门中')
+
+    departmentSearch!.value = 'no-match'
+    departmentSearch!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    expect(container?.textContent).toContain('没有匹配“no-match”的部门')
+
+    const clearDepartmentFilterButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('清空部门筛选'))
+    expect(clearDepartmentFilterButton).toBeTruthy()
+    clearDepartmentFilterButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(departmentSearch!.value).toBe('')
+    expect(container?.textContent).toContain('部门 ID 1')
+    expect(container?.textContent).toContain('部门 ID 2')
+    expect(container?.textContent).not.toContain('当前可见 1 个部门')
+
+    const copyDepartmentIdButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.trim() === '复制部门 ID')
+    expect(copyDepartmentIdButton).toBeTruthy()
+    copyDepartmentIdButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(clipboardWriteText).toHaveBeenCalledWith('1')
+    expect(container?.textContent).toContain('已复制部门 信息化团队 (1) 的 ID')
+
+    const admissionButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.trim() === '加入准入白名单')
+    const excludeButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.trim() === '加入排除部门')
+    const memberGroupButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.trim() === '加入成员组同步')
+    expect(admissionButton).toBeTruthy()
+    expect(excludeButton).toBeTruthy()
+    expect(memberGroupButton).toBeTruthy()
+
+    admissionButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(textareas[0].value).toBe('1')
+    expect(container?.textContent).toContain('加入准入白名单')
+
+    admissionButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(textareas[0].value).toBe('1')
+    expect(container?.textContent).toContain('已在准入白名单中')
+
+    excludeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    memberGroupButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(textareas[1].value).toBe('1')
+    expect(textareas[2].value).toBe('1')
+
+    const manualDepartmentIdInput = Array.from(container!.querySelectorAll('input'))
+      .find((input) => input.getAttribute('placeholder') === '例如 123456') as HTMLInputElement | undefined
+    const manualDepartmentNameInput = Array.from(container!.querySelectorAll('input'))
+      .find((input) => input.getAttribute('placeholder') === '例如 财务共享中心') as HTMLInputElement | undefined
+    expect(manualDepartmentIdInput).toBeTruthy()
+    expect(manualDepartmentNameInput).toBeTruthy()
+
+    manualDepartmentIdInput!.value = 'manual-42'
+    manualDepartmentIdInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    manualDepartmentNameInput!.value = '外部协作组'
+    manualDepartmentNameInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    const manualAdmissionButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('手动加入准入白名单'))
+    expect(manualAdmissionButton).toBeTruthy()
+    expect(manualAdmissionButton).not.toHaveProperty('disabled', true)
+
+    manualAdmissionButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(textareas[0].value).toBe('1\nmanual-42')
+    expect(container?.textContent).toContain('已将手动部门 外部协作组 (manual-42) 加入准入白名单')
+    expect(container?.textContent).toContain('未同步')
+    expect(container?.textContent).toContain('准入白名单引用不存在的部门 ID manual-42')
+
+    manualAdmissionButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(textareas[0].value).toBe('1\nmanual-42')
+    expect(container?.textContent).toContain('外部协作组 (manual-42) 已在准入白名单中')
+    expect(container?.textContent).toContain('已配置 2')
+    expect(container?.textContent).toContain('异常引用 1')
+
+    const configuredScopeButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('只看已配置'))
+    expect(configuredScopeButton?.textContent).toContain('(1)')
+    configuredScopeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(container?.textContent).toContain('部门 ID 1')
+    expect(container?.textContent).not.toContain('部门 ID 2')
+
+    const issueScopeButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('只看异常'))
+    expect(issueScopeButton).toBeTruthy()
+    issueScopeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(container?.textContent).toContain('当前没有可在组织架构镜像中展示的异常部门')
+  })
+
+  it('flags stale department references in DingTalk organization scope drafts', async () => {
+    const scopedIntegration = createIntegration({
+      config: {
+        ...createIntegration().config,
+        admissionDepartmentIds: ['missing-dept'],
+        excludeDepartmentIds: ['2'],
+        memberGroupDepartmentIds: ['1'],
+      },
+    })
+
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [scopedIntegration],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [
+            {
+              id: 'dept-row-1',
+              integrationId: 'dir-1',
+              provider: 'dingtalk',
+              externalDepartmentId: '1',
+              parentExternalDepartmentId: null,
+              name: '信息化团队',
+              fullPath: '信息化团队',
+              orderIndex: 1,
+              isActive: true,
+              lastSeenAt: '2026-05-13T00:00:00.000Z',
+              updatedAt: '2026-05-13T00:00:00.000Z',
+              accountCount: 3,
+              linkedAccountCount: 2,
+              childCount: 1,
+            },
+            {
+              id: 'dept-row-2',
+              integrationId: 'dir-1',
+              provider: 'dingtalk',
+              externalDepartmentId: '2',
+              parentExternalDepartmentId: '1',
+              name: '项目组',
+              fullPath: '信息化团队 / 项目组',
+              orderIndex: 2,
+              isActive: false,
+              lastSeenAt: '2026-05-13T00:00:00.000Z',
+              updatedAt: '2026-05-13T00:00:00.000Z',
+              accountCount: 1,
+              linkedAccountCount: 1,
+              childCount: 0,
+            },
+          ],
+          total: 2,
+        },
+      }))
+
+    const clipboardWriteText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: clipboardWriteText },
+    })
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const loadButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('加载组织架构'))
+    expect(loadButton).toBeTruthy()
+
+    loadButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+
+    expect(container?.textContent).toContain('配置引用检查')
+    expect(container?.textContent).toContain('准入白名单引用不存在的部门 ID missing-dept')
+    expect(container?.textContent).toContain('排除部门引用已停用部门 项目组 (2)')
+    expect(container?.textContent).toContain('成员组同步')
+    expect(container?.textContent).toContain('准入白名单')
+    expect(container?.textContent).toContain('排除部门')
+    expect(container?.textContent).toContain('清理全部异常引用')
+    expect(container?.textContent).toContain('已配置 3')
+    expect(container?.textContent).toContain('异常引用 2')
+
+    const copyConfigReportButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('复制配置引用报告'))
+    expect(copyConfigReportButton).toBeTruthy()
+    copyConfigReportButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('Configured unique department IDs: 3'))
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('[准入白名单]'))
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('missing_from_mirror'))
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('inactive_department'))
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('active_department'))
+    expect(container?.textContent).toContain('已复制 3 个配置部门引用报告')
+
+    const copyIssueReportButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('复制异常引用报告'))
+    expect(copyIssueReportButton).toBeTruthy()
+    copyIssueReportButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('Issue count: 2'))
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('missing-dept'))
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining('inactive_department'))
+    expect(container?.textContent).toContain('已复制 2 条异常引用报告')
+
+    const issueScopeButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('只看异常'))
+    expect(issueScopeButton?.textContent).toContain('(1)')
+    issueScopeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(container?.textContent).toContain('部门 ID 2')
+    expect(container?.textContent).not.toContain('部门 ID 1')
+
+    const configuredScopeButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('只看已配置'))
+    expect(configuredScopeButton?.textContent).toContain('(2)')
+    configuredScopeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(container?.textContent).toContain('部门 ID 1')
+    expect(container?.textContent).toContain('部门 ID 2')
+
+    const excludeScopeButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('只看排除'))
+    expect(excludeScopeButton?.textContent).toContain('(1)')
+    excludeScopeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(container?.textContent).toContain('部门 ID 2')
+    expect(container?.textContent).not.toContain('部门 ID 1')
+
+    const memberGroupScopeButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('只看成员组同步'))
+    expect(memberGroupScopeButton?.textContent).toContain('(1)')
+    memberGroupScopeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(container?.textContent).toContain('部门 ID 1')
+    expect(container?.textContent).not.toContain('部门 ID 2')
+
+    const textareas = Array.from(container!.querySelectorAll('textarea')) as HTMLTextAreaElement[]
+    const removeAdmissionButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.trim() === '从准入白名单移除')
+    const removeExcludeButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.trim() === '从排除部门移除')
+    expect(removeAdmissionButton).toBeTruthy()
+    expect(removeExcludeButton).toBeTruthy()
+
+    removeAdmissionButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(textareas[0].value).toBe('')
+    expect(container?.textContent).not.toContain('准入白名单引用不存在的部门 ID missing-dept')
+
+    removeExcludeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(textareas[1].value).toBe('')
+    expect(container?.textContent).toContain('当前准入、排除和成员组同步配置中的部门 ID 均能匹配已同步的有效部门')
+  })
+
+  it('cleans all stale department references from DingTalk organization scope drafts', async () => {
+    const scopedIntegration = createIntegration({
+      config: {
+        ...createIntegration().config,
+        admissionDepartmentIds: ['missing-dept', '1'],
+        excludeDepartmentIds: ['2'],
+        memberGroupDepartmentIds: ['1'],
+      },
+    })
+
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [scopedIntegration],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [
+            {
+              id: 'dept-row-1',
+              integrationId: 'dir-1',
+              provider: 'dingtalk',
+              externalDepartmentId: '1',
+              parentExternalDepartmentId: null,
+              name: '信息化团队',
+              fullPath: '信息化团队',
+              orderIndex: 1,
+              isActive: true,
+              lastSeenAt: '2026-05-13T00:00:00.000Z',
+              updatedAt: '2026-05-13T00:00:00.000Z',
+              accountCount: 3,
+              linkedAccountCount: 2,
+              childCount: 1,
+            },
+            {
+              id: 'dept-row-2',
+              integrationId: 'dir-1',
+              provider: 'dingtalk',
+              externalDepartmentId: '2',
+              parentExternalDepartmentId: '1',
+              name: '项目组',
+              fullPath: '信息化团队 / 项目组',
+              orderIndex: 2,
+              isActive: false,
+              lastSeenAt: '2026-05-13T00:00:00.000Z',
+              updatedAt: '2026-05-13T00:00:00.000Z',
+              accountCount: 1,
+              linkedAccountCount: 1,
+              childCount: 0,
+            },
+          ],
+          total: 2,
+        },
+      }))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const loadButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('加载组织架构'))
+    expect(loadButton).toBeTruthy()
+
+    loadButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+
+    const cleanupButton = Array.from(container!.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('清理全部异常引用'))
+    expect(cleanupButton).toBeTruthy()
+
+    cleanupButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+
+    const textareas = Array.from(container!.querySelectorAll('textarea')) as HTMLTextAreaElement[]
+    expect(textareas[0].value).toBe('1')
+    expect(textareas[1].value).toBe('')
+    expect(textareas[2].value).toBe('1')
+    expect(container?.textContent).toContain('已清理 2 个异常部门引用')
+    expect(container?.textContent).toContain('当前准入、排除和成员组同步配置中的部门 ID 均能匹配已同步的有效部门')
   })
 
   it('warns and disables DingTalk grant toggles when a directory account is missing openId', async () => {

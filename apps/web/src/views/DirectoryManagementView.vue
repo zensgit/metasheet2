@@ -370,6 +370,500 @@
         <section v-if="selectedIntegration" class="directory-admin__section">
           <div class="directory-admin__section-head">
             <div>
+              <h3>组织架构镜像</h3>
+              <p class="directory-admin__hint">
+                按需读取已同步的钉钉部门树；这里只展示本地目录镜像，不反写钉钉。
+              </p>
+            </div>
+            <button
+              class="directory-admin__button directory-admin__button--secondary"
+              type="button"
+              :disabled="loadingDepartments"
+              @click="void loadDepartments(selectedIntegration.id, { force: true })"
+            >
+              {{ loadingDepartments ? '加载中...' : departmentsLoaded ? '刷新组织架构' : '加载组织架构' }}
+            </button>
+          </div>
+          <div v-if="departmentsLoaded" class="directory-admin__chips">
+            <span class="directory-admin__chip">部门 {{ departmentRows.length }}</span>
+            <span v-if="departmentFilterActive" class="directory-admin__chip">匹配 {{ visibleDepartmentRows.length }}</span>
+            <span v-if="hasScopedDepartmentConfig" class="directory-admin__chip">
+              已配置 {{ configuredDepartmentCount }}
+            </span>
+            <span
+              v-if="departmentConfigReferenceIssues.length > 0"
+              class="directory-admin__chip directory-admin__chip--warning"
+            >
+              异常引用 {{ departmentConfigReferenceIssues.length }}
+            </span>
+            <span class="directory-admin__chip">成员 {{ departmentAccountCount }}</span>
+            <span class="directory-admin__chip">已绑定 {{ departmentLinkedAccountCount }}</span>
+            <span v-if="departmentUnlinkedAccountCount > 0" class="directory-admin__chip directory-admin__chip--warning">
+              未绑定 {{ departmentUnlinkedAccountCount }}
+            </span>
+            <span v-if="inactiveDepartmentCount > 0" class="directory-admin__chip directory-admin__chip--warning">
+              停用部门 {{ inactiveDepartmentCount }}
+            </span>
+          </div>
+          <div
+            v-if="departmentsLoaded && departmentRows.length > 0"
+            class="directory-admin__mirror-observation"
+            :class="{ 'directory-admin__mirror-observation--warning': departmentMirrorObservationHasWarnings }"
+          >
+            <div class="directory-admin__alert-head">
+              <div>
+                <strong>组织镜像同步观测</strong>
+                <p class="directory-admin__hint">
+                  {{ departmentMirrorObservationMessage }}
+                </p>
+              </div>
+              <button
+                class="directory-admin__link-button"
+                type="button"
+                @click="void copyDepartmentMirrorObservationReport()"
+              >
+                复制同步观测报告
+              </button>
+            </div>
+            <div class="directory-admin__chips">
+              <span
+                class="directory-admin__chip"
+                :class="departmentMirrorObservationHasWarnings ? 'directory-admin__chip--warning' : 'directory-admin__chip--success'"
+              >
+                最新批次 {{ formatDateTime(departmentMirrorLatestSeenAt) }}
+              </span>
+              <span class="directory-admin__chip">批次部门 {{ departmentMirrorCurrentBatchCount }}</span>
+              <span
+                v-if="departmentMirrorStaleSeenCount > 0"
+                class="directory-admin__chip directory-admin__chip--warning"
+              >
+                未在最新批次出现 {{ departmentMirrorStaleSeenCount }}
+              </span>
+              <span class="directory-admin__chip">最近更新 {{ formatDateTime(departmentMirrorLatestUpdatedAt) }}</span>
+              <span class="directory-admin__chip">集成上次成功 {{ formatDateTime(selectedIntegration.lastSuccessAt) }}</span>
+            </div>
+            <div class="directory-admin__department-actions">
+              <button
+                v-if="departmentMirrorStaleSeenCount > 0"
+                class="directory-admin__link-button"
+                type="button"
+                @click="focusDepartmentScopeFilter('staleBatch')"
+              >
+                查看非最新批次
+              </button>
+              <button
+                v-if="inactiveDepartmentCount > 0"
+                class="directory-admin__link-button"
+                type="button"
+                @click="focusDepartmentScopeFilter('inactive')"
+              >
+                查看停用部门
+              </button>
+              <button
+                v-if="departmentUnlinkedAccountCount > 0"
+                class="directory-admin__link-button"
+                type="button"
+                @click="focusDepartmentScopeFilter('unlinked')"
+              >
+                查看未绑定部门
+              </button>
+            </div>
+          </div>
+          <div
+            v-if="departmentsLoaded && departmentRows.length > 0"
+            class="directory-admin__department-scope-filters"
+          >
+            <button
+              v-for="option in departmentScopeFilterOptions"
+              :key="option.value"
+              class="directory-admin__button directory-admin__button--secondary"
+              :class="{ 'directory-admin__button--active': departmentScopeFilter === option.value }"
+              type="button"
+              @click="departmentScopeFilter = option.value"
+            >
+              {{ option.label }}{{ readDepartmentScopeFilterCount(option.value) }}
+            </button>
+            <button
+              v-if="departmentUnlinkedAccountCount > 0"
+              class="directory-admin__button directory-admin__button--secondary"
+              type="button"
+              @click="void copyDepartmentBindingGapReport()"
+            >
+              复制未绑定部门报告
+            </button>
+            <button
+              v-if="inactiveDepartmentCount > 0"
+              class="directory-admin__button directory-admin__button--secondary"
+              type="button"
+              @click="void copyInactiveDepartmentReport()"
+            >
+              复制停用部门报告
+            </button>
+          </div>
+          <label
+            v-if="departmentsLoaded && departmentRows.length > 0"
+            class="directory-admin__field directory-admin__field--wide directory-admin__department-search"
+          >
+            <span>筛选部门</span>
+            <input
+              v-model.trim="departmentQuery"
+              class="directory-admin__input"
+              type="search"
+              placeholder="输入部门名、部门 ID 或完整路径"
+            />
+          </label>
+          <div
+            v-if="departmentViewFilterActive"
+            class="directory-admin__department-filter-reset"
+          >
+            <button
+              class="directory-admin__link-button"
+              type="button"
+              @click="resetDepartmentViewFilters()"
+            >
+              清空部门筛选
+            </button>
+          </div>
+          <div
+            v-if="showVisibleDepartmentBulkActions"
+            class="directory-admin__visible-department-actions"
+          >
+            <p class="directory-admin__hint">
+              当前可见 {{ visibleDepartmentRows.length }} 个部门；批量增删仅更新当前草稿，保存前仍可继续检查和清理。
+            </p>
+            <label class="directory-admin__field directory-admin__field--wide">
+              <span>当前可见部门 ID 预览</span>
+              <textarea
+                class="directory-admin__input directory-admin__textarea directory-admin__visible-department-preview"
+                :rows="Math.min(visibleDepartmentRows.length, 6)"
+                :value="visibleDepartmentIdPreview"
+                readonly
+              />
+            </label>
+            <div class="directory-admin__department-actions">
+              <button
+                class="directory-admin__link-button"
+                type="button"
+                @click="void copyVisibleDepartmentIds()"
+              >
+                复制当前可见部门 ID
+              </button>
+              <button
+                class="directory-admin__link-button"
+                type="button"
+                @click="void copyVisibleDepartmentReport()"
+              >
+                复制当前可见部门报告
+              </button>
+              <button
+                class="directory-admin__link-button"
+                type="button"
+                @click="addVisibleDepartmentsToTarget('admission')"
+              >
+                批量加入当前可见到准入白名单
+              </button>
+              <button
+                class="directory-admin__link-button"
+                type="button"
+                @click="removeVisibleDepartmentsFromTarget('admission')"
+              >
+                从准入白名单移除当前可见
+              </button>
+              <button
+                class="directory-admin__link-button"
+                type="button"
+                @click="addVisibleDepartmentsToTarget('exclude')"
+              >
+                批量加入当前可见到排除部门
+              </button>
+              <button
+                class="directory-admin__link-button"
+                type="button"
+                @click="removeVisibleDepartmentsFromTarget('exclude')"
+              >
+                从排除部门移除当前可见
+              </button>
+              <button
+                class="directory-admin__link-button"
+                type="button"
+                @click="addVisibleDepartmentsToTarget('memberGroup')"
+              >
+                批量加入当前可见到成员组同步
+              </button>
+              <button
+                class="directory-admin__link-button"
+                type="button"
+                @click="removeVisibleDepartmentsFromTarget('memberGroup')"
+              >
+                从成员组同步移除当前可见
+              </button>
+            </div>
+          </div>
+          <div class="directory-admin__manual-department">
+            <div>
+              <strong>手动部门 ID</strong>
+              <p class="directory-admin__hint">
+                适用于钉钉部门暂未同步到本地镜像、但管理员已确认部门 ID 的场景；这里仍只写入当前配置草稿。
+              </p>
+            </div>
+            <div class="directory-admin__manual-department-fields">
+              <label class="directory-admin__field">
+                <span>部门 ID</span>
+                <input
+                  v-model.trim="manualDepartmentId"
+                  class="directory-admin__input"
+                  type="text"
+                  placeholder="例如 123456"
+                />
+              </label>
+              <label class="directory-admin__field">
+                <span>备注名称（可选）</span>
+                <input
+                  v-model.trim="manualDepartmentName"
+                  class="directory-admin__input"
+                  type="text"
+                  placeholder="例如 财务共享中心"
+                />
+              </label>
+            </div>
+            <div class="directory-admin__department-actions">
+              <button
+                class="directory-admin__link-button"
+                type="button"
+                :disabled="manualDepartmentId.trim().length === 0"
+                @click="addManualDepartmentToTarget('admission')"
+              >
+                手动加入准入白名单
+              </button>
+              <button
+                class="directory-admin__link-button"
+                type="button"
+                :disabled="manualDepartmentId.trim().length === 0"
+                @click="addManualDepartmentToTarget('exclude')"
+              >
+                手动加入排除部门
+              </button>
+              <button
+                class="directory-admin__link-button"
+                type="button"
+                :disabled="manualDepartmentId.trim().length === 0"
+                @click="addManualDepartmentToTarget('memberGroup')"
+              >
+                手动加入成员组同步
+              </button>
+            </div>
+          </div>
+          <div
+            v-if="hasDepartmentDraftScopeChanges"
+            class="directory-admin__draft-scope-changes"
+          >
+            <div class="directory-admin__alert-head">
+              <div>
+                <strong>部门范围草稿变更</strong>
+                <p class="directory-admin__hint">
+                  当前草稿与已保存配置不一致；保存前可复制报告给管理员复核。
+                </p>
+              </div>
+              <button
+                class="directory-admin__link-button"
+                type="button"
+                @click="void copyDepartmentDraftScopeChangeReport()"
+              >
+                复制草稿变更报告
+              </button>
+              <button
+                class="directory-admin__link-button"
+                type="button"
+                @click="restoreDepartmentScopeDraftsToSavedConfig()"
+              >
+                还原已保存范围
+              </button>
+            </div>
+            <div class="directory-admin__chips">
+              <span v-if="departmentDraftScopeAddedCount > 0" class="directory-admin__chip directory-admin__chip--success">
+                新增 {{ departmentDraftScopeAddedCount }}
+              </span>
+              <span v-if="departmentDraftScopeRemovedCount > 0" class="directory-admin__chip directory-admin__chip--warning">
+                移除 {{ departmentDraftScopeRemovedCount }}
+              </span>
+            </div>
+            <ul>
+              <li v-for="change in departmentDraftScopeChanges" :key="change.field">
+                <strong>{{ change.fieldLabel }}</strong>
+                <span v-if="change.added.length > 0" class="directory-admin__chip directory-admin__chip--success">
+                  新增 {{ change.added.join('、') }}
+                </span>
+                <span v-if="change.removed.length > 0" class="directory-admin__chip directory-admin__chip--warning">
+                  移除 {{ change.removed.join('、') }}
+                </span>
+                <button
+                  class="directory-admin__link-button"
+                  type="button"
+                  @click="restoreDepartmentScopeDraftToSavedConfig(change.field)"
+                >
+                  还原此范围
+                </button>
+              </li>
+            </ul>
+          </div>
+          <div
+            v-if="departmentsLoaded && hasScopedDepartmentConfig"
+            class="directory-admin__reference-issues"
+            :class="{ 'directory-admin__reference-issues--ok': departmentConfigReferenceIssues.length === 0 }"
+          >
+            <strong>配置引用检查</strong>
+            <div class="directory-admin__reference-actions">
+              <button
+                class="directory-admin__link-button"
+                type="button"
+                @click="void copyDepartmentConfigReferenceReport()"
+              >
+                复制配置引用报告
+              </button>
+            </div>
+            <p v-if="departmentConfigReferenceIssues.length === 0" class="directory-admin__hint">
+              当前准入、排除和成员组同步配置中的部门 ID 均能匹配已同步的有效部门。
+            </p>
+            <div v-else>
+              <div class="directory-admin__reference-actions">
+                <button
+                  class="directory-admin__link-button"
+                  type="button"
+                  @click="void copyDepartmentReferenceIssueReport()"
+                >
+                  复制异常引用报告
+                </button>
+                <button
+                  class="directory-admin__link-button"
+                  type="button"
+                  @click="removeAllDepartmentReferenceIssues()"
+                >
+                  清理全部异常引用
+                </button>
+              </div>
+              <ul>
+                <li v-for="issue in departmentConfigReferenceIssues" :key="issue.key">
+                  <span
+                    class="directory-admin__chip"
+                    :class="issue.kind === 'missing' ? 'directory-admin__chip--danger' : 'directory-admin__chip--warning'"
+                  >
+                    {{ issue.kind === 'missing' ? '未同步' : '已停用' }}
+                  </span>
+                  {{ readDepartmentReferenceIssueLabel(issue) }}
+                  <button
+                    class="directory-admin__link-button"
+                    type="button"
+                    @click="removeDepartmentFromTarget(issue.departmentId, issue.field)"
+                  >
+                    从{{ issue.fieldLabel }}移除
+                  </button>
+                </li>
+              </ul>
+            </div>
+          </div>
+          <p v-if="departmentLoadError" class="directory-admin__status directory-admin__status--error">
+            {{ departmentLoadError }}
+          </p>
+          <div v-if="loadingDepartments" class="directory-admin__empty">组织架构加载中...</div>
+          <div v-else-if="!departmentsLoaded" class="directory-admin__empty">
+            点击“加载组织架构”查看当前钉钉部门树、成员数量和本地绑定覆盖情况。
+          </div>
+          <div v-else-if="departmentRows.length === 0" class="directory-admin__empty">
+            暂无已同步部门；请先执行手动同步或检查根部门 ID。
+          </div>
+          <div v-else-if="visibleDepartmentRows.length === 0" class="directory-admin__empty">
+            {{ departmentTreeEmptyMessage }}
+          </div>
+          <div v-else class="directory-admin__department-tree">
+            <article
+              v-for="department in visibleDepartmentRows"
+              :key="department.id"
+              class="directory-admin__department-node"
+              :class="{ 'directory-admin__department-node--inactive': !department.isActive }"
+              :style="readDepartmentIndentStyle(department)"
+            >
+              <div>
+                <strong>{{ department.name }}</strong>
+                <p class="directory-admin__hint">
+                  {{ department.fullPath || department.name }} · 部门 ID {{ department.externalDepartmentId }}
+                </p>
+                <p class="directory-admin__hint">
+                  上级：{{ describeDepartmentParent(department) }} · 最近同步：{{ formatDateTime(department.updatedAt) }}
+                </p>
+              </div>
+              <div class="directory-admin__chips">
+                <span class="directory-admin__chip">成员 {{ department.accountCount }}</span>
+                <span class="directory-admin__chip">已绑定 {{ department.linkedAccountCount }}</span>
+                <span
+                  v-if="readDepartmentUnlinkedAccountCount(department) > 0"
+                  class="directory-admin__chip directory-admin__chip--warning"
+                >
+                  未绑定 {{ readDepartmentUnlinkedAccountCount(department) }}
+                </span>
+                <span v-if="department.childCount > 0" class="directory-admin__chip">子部门 {{ department.childCount }}</span>
+                <span v-if="!department.isActive" class="directory-admin__chip directory-admin__chip--warning">已停用</span>
+                <span
+                  v-if="!isDepartmentInLatestMirrorBatch(department)"
+                  class="directory-admin__chip directory-admin__chip--warning"
+                >
+                  非最新批次
+                </span>
+                <span
+                  v-if="departmentConfigScope.admission.has(department.externalDepartmentId)"
+                  class="directory-admin__chip directory-admin__chip--success"
+                >
+                  准入白名单
+                </span>
+                <span
+                  v-if="departmentConfigScope.exclude.has(department.externalDepartmentId)"
+                  class="directory-admin__chip directory-admin__chip--warning"
+                >
+                  排除部门
+                </span>
+                <span
+                  v-if="departmentConfigScope.memberGroup.has(department.externalDepartmentId)"
+                  class="directory-admin__chip directory-admin__chip--success"
+                >
+                  成员组同步
+                </span>
+              </div>
+              <div class="directory-admin__department-actions">
+                <button
+                  class="directory-admin__link-button"
+                  type="button"
+                  @click="void copyDepartmentId(department)"
+                >
+                  复制部门 ID
+                </button>
+                <button
+                  class="directory-admin__link-button"
+                  type="button"
+                  @click="addDepartmentToTarget(department, 'admission')"
+                >
+                  加入准入白名单
+                </button>
+                <button
+                  class="directory-admin__link-button"
+                  type="button"
+                  @click="addDepartmentToTarget(department, 'exclude')"
+                >
+                  加入排除部门
+                </button>
+                <button
+                  class="directory-admin__link-button"
+                  type="button"
+                  @click="addDepartmentToTarget(department, 'memberGroup')"
+                >
+                  加入成员组同步
+                </button>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section v-if="selectedIntegration" class="directory-admin__section">
+          <div class="directory-admin__section-head">
+            <div>
               <h3>待处理队列</h3>
               <p class="directory-admin__hint">展示待绑定、目录停用待停权、缺少钉钉身份标识的成员。</p>
               <p class="directory-admin__hint">
@@ -1385,6 +1879,7 @@ type DirectoryScheduleSnapshot = {
 }
 
 type DirectoryAlertFilter = 'all' | 'pending' | 'acknowledged'
+type DirectoryDepartmentScopeFilter = 'all' | 'configured' | 'issues' | 'inactive' | 'unlinked' | 'staleBatch' | DirectoryDepartmentTargetField
 
 type DirectorySyncAlert = {
   id: string
@@ -1475,6 +1970,45 @@ type DirectoryAccount = {
     name: string | null
   } | null
   departmentPaths: string[]
+}
+
+type DirectoryDepartment = {
+  id: string
+  integrationId: string
+  provider: string
+  externalDepartmentId: string
+  parentExternalDepartmentId: string | null
+  name: string
+  fullPath: string | null
+  orderIndex: number
+  isActive: boolean
+  lastSeenAt: string
+  updatedAt: string
+  accountCount: number
+  linkedAccountCount: number
+  childCount: number
+}
+
+type DirectoryDepartmentTreeRow = DirectoryDepartment & {
+  depth: number
+}
+
+type DirectoryDepartmentTargetField = 'admission' | 'exclude' | 'memberGroup'
+
+type DirectoryDepartmentReferenceIssue = {
+  key: string
+  field: DirectoryDepartmentTargetField
+  fieldLabel: string
+  kind: 'missing' | 'inactive'
+  departmentId: string
+  departmentName: string
+}
+
+type DirectoryDepartmentScopeChange = {
+  field: DirectoryDepartmentTargetField
+  fieldLabel: string
+  added: string[]
+  removed: string[]
 }
 
 type LocalUserOption = {
@@ -1586,6 +2120,7 @@ type DirectoryDraft = {
 const integrations = ref<DirectoryIntegration[]>([])
 const runs = ref<DirectoryRun[]>([])
 const accounts = ref<DirectoryAccount[]>([])
+const departments = ref<DirectoryDepartment[]>([])
 const scheduleSnapshot = ref<DirectoryScheduleSnapshot | null>(null)
 const alerts = ref<DirectorySyncAlert[]>([])
 const reviewItems = ref<DirectoryReviewItem[]>([])
@@ -1604,6 +2139,7 @@ const loadingAlerts = ref(false)
 const loadingReviewItems = ref(false)
 const loadingMoreReviewItems = ref(false)
 const loadingAccounts = ref(false)
+const loadingDepartments = ref(false)
 const busy = ref(false)
 const bindingAccountId = ref('')
 const unbindingAccountId = ref('')
@@ -1616,6 +2152,12 @@ const statusTone = ref<'info' | 'error'>('info')
 const routeNavigationFailureNotice = ref<DirectoryRouteNavigationFailureNotice | null>(null)
 const routeNavigationFailureAction = ref<'retry' | 'clear' | ''>('')
 const testResult = ref<TestResult | null>(null)
+const departmentsLoaded = ref(false)
+const departmentLoadError = ref('')
+const departmentQuery = ref('')
+const departmentScopeFilter = ref<DirectoryDepartmentScopeFilter>('all')
+const manualDepartmentId = ref('')
+const manualDepartmentName = ref('')
 const accountQuery = ref('')
 const alertFilter = ref<DirectoryAlertFilter>('all')
 const reviewFilter = ref<DirectoryReviewItemFilter>('all')
@@ -1661,6 +2203,18 @@ const pendingBindingManualReasonOptions = [
   { value: 'no_exact_match' as const, label: '无精确匹配' },
   { value: 'conflict' as const, label: '冲突待复核' },
 ]
+const departmentScopeFilterOptions = [
+  { value: 'all' as const, label: '全部部门' },
+  { value: 'unlinked' as const, label: '只看未全绑定' },
+  { value: 'inactive' as const, label: '只看停用部门' },
+  { value: 'staleBatch' as const, label: '只看非最新批次' },
+  { value: 'configured' as const, label: '只看已配置' },
+  { value: 'issues' as const, label: '只看异常' },
+  { value: 'admission' as const, label: '只看准入' },
+  { value: 'exclude' as const, label: '只看排除' },
+  { value: 'memberGroup' as const, label: '只看成员组同步' },
+]
+const departmentTargetFields: DirectoryDepartmentTargetField[] = ['admission', 'exclude', 'memberGroup']
 const directoryNavigation = ref(readInitialDirectoryNavigation())
 
 const draft = reactive<DirectoryDraft>({
@@ -1752,6 +2306,146 @@ const showPendingBindingManualReasonFilters = computed(() => (
 const focusedVisibleAccount = computed(() => (
   accounts.value.find((account) => account.id === focusedAccountId.value) ?? null
 ))
+const departmentRows = computed(() => buildDirectoryDepartmentTreeRows(departments.value))
+const departmentFilterActive = computed(() => departmentQuery.value.trim().length > 0)
+const departmentAccountCount = computed(() =>
+  departmentRows.value.reduce((sum, department) => sum + department.accountCount, 0),
+)
+const departmentLinkedAccountCount = computed(() =>
+  departmentRows.value.reduce((sum, department) => sum + department.linkedAccountCount, 0),
+)
+const departmentUnlinkedAccountCount = computed(() =>
+  departmentRows.value.reduce((sum, department) => sum + readDepartmentUnlinkedAccountCount(department), 0),
+)
+const departmentUnlinkedMirrorCount = computed(() =>
+  departmentRows.value.filter((department) => readDepartmentUnlinkedAccountCount(department) > 0).length,
+)
+const inactiveDepartmentCount = computed(() =>
+  departmentRows.value.filter((department) => !department.isActive).length,
+)
+const departmentMirrorLatestSeenAt = computed(() =>
+  readLatestDepartmentTimestamp(departmentRows.value, 'lastSeenAt'),
+)
+const departmentMirrorLatestUpdatedAt = computed(() =>
+  readLatestDepartmentTimestamp(departmentRows.value, 'updatedAt'),
+)
+const departmentMirrorCurrentBatchCount = computed(() => {
+  const latestSeenAtMs = readTimestampMs(departmentMirrorLatestSeenAt.value)
+  if (latestSeenAtMs === null) return departmentRows.value.length
+  return departmentRows.value.filter((department) => readTimestampMs(department.lastSeenAt) === latestSeenAtMs).length
+})
+const departmentMirrorStaleSeenCount = computed(() =>
+  Math.max(0, departmentRows.value.length - departmentMirrorCurrentBatchCount.value),
+)
+const departmentMirrorObservationHasWarnings = computed(() =>
+  departmentMirrorStaleSeenCount.value > 0 || inactiveDepartmentCount.value > 0,
+)
+const departmentMirrorObservationMessage = computed(() => {
+  if (departmentMirrorStaleSeenCount.value > 0) {
+    return `有 ${departmentMirrorStaleSeenCount.value} 个部门未出现在最新同步批次，建议复核是否为钉钉侧停用或本地镜像滞后。`
+  }
+  if (inactiveDepartmentCount.value > 0) {
+    return `最新镜像中存在 ${inactiveDepartmentCount.value} 个停用部门，建议复核配置引用后再清理。`
+  }
+  return '本地组织镜像批次一致，未发现停用或跨批次部门。'
+})
+const departmentConfigScope = computed<Record<DirectoryDepartmentTargetField, Set<string>>>(() => ({
+  admission: new Set(parseAdmissionDepartmentIdsText(draft.admissionDepartmentIdsText)),
+  exclude: new Set(parseAdmissionDepartmentIdsText(draft.excludeDepartmentIdsText)),
+  memberGroup: new Set(parseAdmissionDepartmentIdsText(draft.memberGroupDepartmentIdsText)),
+}))
+const departmentSavedConfigScope = computed<Record<DirectoryDepartmentTargetField, Set<string>>>(() => ({
+  admission: new Set(readSavedDepartmentTargetIds('admission')),
+  exclude: new Set(readSavedDepartmentTargetIds('exclude')),
+  memberGroup: new Set(readSavedDepartmentTargetIds('memberGroup')),
+}))
+const departmentDraftScopeChanges = computed(() =>
+  buildDepartmentScopeChanges(departmentConfigScope.value, departmentSavedConfigScope.value),
+)
+const hasDepartmentDraftScopeChanges = computed(() => departmentDraftScopeChanges.value.length > 0)
+const departmentDraftScopeAddedCount = computed(() =>
+  departmentDraftScopeChanges.value.reduce((sum, change) => sum + change.added.length, 0),
+)
+const departmentDraftScopeRemovedCount = computed(() =>
+  departmentDraftScopeChanges.value.reduce((sum, change) => sum + change.removed.length, 0),
+)
+const hasScopedDepartmentConfig = computed(() =>
+  departmentTargetFields.some((field) => departmentConfigScope.value[field].size > 0),
+)
+const departmentConfigReferenceIssues = computed(() =>
+  buildDepartmentConfigReferenceIssues(departments.value, departmentConfigScope.value),
+)
+const configuredDepartmentIds = computed(() => buildConfiguredDepartmentIdSet(departmentConfigScope.value))
+const configuredDepartmentCount = computed(() => configuredDepartmentIds.value.size)
+const departmentReferenceIssueIds = computed(() => new Set(
+  departmentConfigReferenceIssues.value.map((issue) => issue.departmentId),
+))
+const configuredDepartmentMirrorCount = computed(() => departmentRows.value.filter((department) =>
+  configuredDepartmentIds.value.has(department.externalDepartmentId),
+).length)
+const issueDepartmentMirrorCount = computed(() => departmentRows.value.filter((department) =>
+  departmentReferenceIssueIds.value.has(department.externalDepartmentId),
+).length)
+const scopeFilteredDepartmentRows = computed(() =>
+  filterDirectoryDepartmentRowsByScope(
+    departmentRows.value,
+    departmentScopeFilter.value,
+    configuredDepartmentIds.value,
+    departmentReferenceIssueIds.value,
+    departmentConfigScope.value,
+  ),
+)
+const visibleDepartmentRows = computed(() =>
+  filterDirectoryDepartmentRows(scopeFilteredDepartmentRows.value, departmentQuery.value),
+)
+const visibleDepartmentIdPreview = computed(() =>
+  visibleDepartmentRows.value.map((department) => department.externalDepartmentId).join('\n'),
+)
+const departmentViewFilterActive = computed(() =>
+  departmentFilterActive.value || departmentScopeFilter.value !== 'all',
+)
+const showVisibleDepartmentBulkActions = computed(() =>
+  visibleDepartmentRows.value.length > 0
+  && departmentViewFilterActive.value,
+)
+const departmentTreeEmptyMessage = computed(() => {
+  const query = departmentQuery.value.trim()
+  const hasQuery = query.length > 0
+  if (departmentScopeFilter.value === 'configured') {
+    return hasQuery
+      ? `没有匹配“${query}”的已配置部门；可清空筛选或切回全部部门。`
+      : '当前草稿没有可在组织架构镜像中展示的已配置部门；未同步引用请查看配置引用检查。'
+  }
+  if (departmentScopeFilter.value === 'issues') {
+    return hasQuery
+      ? `没有匹配“${query}”的异常部门；未同步引用请查看配置引用检查。`
+      : '当前没有可在组织架构镜像中展示的异常部门；未同步引用请查看配置引用检查。'
+  }
+  if (departmentScopeFilter.value === 'unlinked') {
+    return hasQuery
+      ? `没有匹配“${query}”的未全绑定部门；可清空筛选或切回全部部门。`
+      : '当前没有未完全绑定的部门。'
+  }
+  if (departmentScopeFilter.value === 'inactive') {
+    return hasQuery
+      ? `没有匹配“${query}”的停用部门；可清空筛选或切回全部部门。`
+      : '当前没有停用部门。'
+  }
+  if (departmentScopeFilter.value === 'staleBatch') {
+    return hasQuery
+      ? `没有匹配“${query}”的非最新批次部门；可清空筛选或切回全部部门。`
+      : '当前没有非最新批次部门。'
+  }
+  if (departmentTargetFields.includes(departmentScopeFilter.value as DirectoryDepartmentTargetField)) {
+    const targetLabel = readDepartmentTargetLabel(departmentScopeFilter.value as DirectoryDepartmentTargetField)
+    return hasQuery
+      ? `没有匹配“${query}”的${targetLabel}部门；可清空筛选或切回全部部门。`
+      : `当前草稿没有可在组织架构镜像中展示的${targetLabel}部门；未同步引用请查看配置引用检查。`
+  }
+  return hasQuery
+    ? `没有匹配“${query}”的部门；可按部门名、部门 ID 或完整路径筛选。`
+    : '没有可展示的部门。'
+})
 const focusedVisibleAccountBindDraft = computed(() => {
   if (!focusedVisibleAccount.value) return ''
   return readBindingDraft(focusedVisibleAccount.value).trim()
@@ -1889,6 +2583,13 @@ function resetDraft() {
   testResult.value = null
   runs.value = []
   accounts.value = []
+  departments.value = []
+  departmentsLoaded.value = false
+  departmentLoadError.value = ''
+  departmentQuery.value = ''
+  departmentScopeFilter.value = 'all'
+  manualDepartmentId.value = ''
+  manualDepartmentName.value = ''
   reviewBatchProgress.value = null
   scheduleSnapshot.value = null
   alerts.value = []
@@ -1969,6 +2670,628 @@ function parseAdmissionDepartmentIdsText(value: string): string[] {
   ))
 }
 
+function readDepartmentTargetText(field: DirectoryDepartmentTargetField): string {
+  if (field === 'exclude') return draft.excludeDepartmentIdsText
+  if (field === 'memberGroup') return draft.memberGroupDepartmentIdsText
+  return draft.admissionDepartmentIdsText
+}
+
+function writeDepartmentTargetText(field: DirectoryDepartmentTargetField, ids: string[]): void {
+  const nextValue = ids.join('\n')
+  if (field === 'exclude') {
+    draft.excludeDepartmentIdsText = nextValue
+    return
+  }
+  if (field === 'memberGroup') {
+    draft.memberGroupDepartmentIdsText = nextValue
+    return
+  }
+  draft.admissionDepartmentIdsText = nextValue
+}
+
+function readDepartmentTargetLabel(field: DirectoryDepartmentTargetField): string {
+  if (field === 'exclude') return '排除部门'
+  if (field === 'memberGroup') return '成员组同步部门'
+  return '准入白名单'
+}
+
+function readSavedDepartmentTargetIds(field: DirectoryDepartmentTargetField): string[] {
+  const integration = selectedIntegration.value
+  if (!integration) return []
+  if (field === 'exclude') return integration.config.excludeDepartmentIds
+  if (field === 'memberGroup') return integration.config.memberGroupDepartmentIds
+  return integration.config.admissionDepartmentIds
+}
+
+function buildConfiguredDepartmentIdSet(
+  scope: Record<DirectoryDepartmentTargetField, Set<string>>,
+): Set<string> {
+  const ids = new Set<string>()
+  for (const field of departmentTargetFields) {
+    for (const departmentId of scope[field]) ids.add(departmentId)
+  }
+  return ids
+}
+
+function buildDepartmentScopeChanges(
+  draftScope: Record<DirectoryDepartmentTargetField, Set<string>>,
+  savedScope: Record<DirectoryDepartmentTargetField, Set<string>>,
+): DirectoryDepartmentScopeChange[] {
+  return departmentTargetFields
+    .map((field) => {
+      const added = Array.from(draftScope[field]).filter((departmentId) => !savedScope[field].has(departmentId))
+      const removed = Array.from(savedScope[field]).filter((departmentId) => !draftScope[field].has(departmentId))
+      return {
+        field,
+        fieldLabel: readDepartmentTargetLabel(field),
+        added,
+        removed,
+      }
+    })
+    .filter((change) => change.added.length > 0 || change.removed.length > 0)
+}
+
+function readTimestampMs(value: string | null | undefined): number | null {
+  if (!value) return null
+  const timestamp = Date.parse(value)
+  return Number.isNaN(timestamp) ? null : timestamp
+}
+
+function readLatestDepartmentTimestamp(
+  rows: DirectoryDepartment[],
+  field: 'lastSeenAt' | 'updatedAt',
+): string | null {
+  let latestValue: string | null = null
+  let latestTimestamp: number | null = null
+  for (const department of rows) {
+    const timestamp = readTimestampMs(department[field])
+    if (timestamp === null) continue
+    if (latestTimestamp === null || timestamp > latestTimestamp) {
+      latestTimestamp = timestamp
+      latestValue = department[field]
+    }
+  }
+  return latestValue
+}
+
+function isDepartmentInLatestMirrorBatch(department: DirectoryDepartment): boolean {
+  const latestSeenAtMs = readTimestampMs(departmentMirrorLatestSeenAt.value)
+  if (latestSeenAtMs === null) return true
+  return readTimestampMs(department.lastSeenAt) === latestSeenAtMs
+}
+
+function readDepartmentUnlinkedAccountCount(department: DirectoryDepartment): number {
+  return Math.max(0, department.accountCount - department.linkedAccountCount)
+}
+
+function filterDirectoryDepartmentRowsByScope(
+  rows: DirectoryDepartmentTreeRow[],
+  filter: DirectoryDepartmentScopeFilter,
+  configuredIds: Set<string>,
+  issueIds: Set<string>,
+  scope: Record<DirectoryDepartmentTargetField, Set<string>>,
+): DirectoryDepartmentTreeRow[] {
+  if (filter === 'unlinked') {
+    return rows.filter((department) => readDepartmentUnlinkedAccountCount(department) > 0)
+  }
+  if (filter === 'inactive') {
+    return rows.filter((department) => !department.isActive)
+  }
+  if (filter === 'staleBatch') {
+    return rows.filter((department) => !isDepartmentInLatestMirrorBatch(department))
+  }
+  if (filter === 'configured') {
+    return rows.filter((department) => configuredIds.has(department.externalDepartmentId))
+  }
+  if (filter === 'issues') {
+    return rows.filter((department) => issueIds.has(department.externalDepartmentId))
+  }
+  if (departmentTargetFields.includes(filter as DirectoryDepartmentTargetField)) {
+    const field = filter as DirectoryDepartmentTargetField
+    return rows.filter((department) => scope[field].has(department.externalDepartmentId))
+  }
+  return rows
+}
+
+function readDepartmentScopeFilterCount(filter: DirectoryDepartmentScopeFilter): string {
+  if (filter === 'unlinked') return departmentUnlinkedMirrorCount.value > 0 ? ` (${departmentUnlinkedMirrorCount.value})` : ''
+  if (filter === 'inactive') return inactiveDepartmentCount.value > 0 ? ` (${inactiveDepartmentCount.value})` : ''
+  if (filter === 'staleBatch') return departmentMirrorStaleSeenCount.value > 0 ? ` (${departmentMirrorStaleSeenCount.value})` : ''
+  if (filter === 'configured') return configuredDepartmentMirrorCount.value > 0 ? ` (${configuredDepartmentMirrorCount.value})` : ''
+  if (filter === 'issues') return issueDepartmentMirrorCount.value > 0 ? ` (${issueDepartmentMirrorCount.value})` : ''
+  if (departmentTargetFields.includes(filter as DirectoryDepartmentTargetField)) {
+    const field = filter as DirectoryDepartmentTargetField
+    const count = departmentRows.value.filter((department) =>
+      departmentConfigScope.value[field].has(department.externalDepartmentId),
+    ).length
+    return count > 0 ? ` (${count})` : ''
+  }
+  return ''
+}
+
+function readDepartmentScopeFilterLabel(filter: DirectoryDepartmentScopeFilter): string {
+  return departmentScopeFilterOptions.find((option) => option.value === filter)?.label ?? '全部部门'
+}
+
+function resetDepartmentViewFilters(): void {
+  departmentQuery.value = ''
+  departmentScopeFilter.value = 'all'
+}
+
+function focusDepartmentScopeFilter(filter: DirectoryDepartmentScopeFilter): void {
+  departmentQuery.value = ''
+  departmentScopeFilter.value = filter
+}
+
+function restoreDepartmentScopeDraftsToSavedConfig(): void {
+  draft.admissionDepartmentIdsText = readSavedDepartmentTargetIds('admission').join('\n')
+  draft.excludeDepartmentIdsText = readSavedDepartmentTargetIds('exclude').join('\n')
+  draft.memberGroupDepartmentIdsText = readSavedDepartmentTargetIds('memberGroup').join('\n')
+  setStatus('已还原部门范围草稿为已保存配置')
+}
+
+function restoreDepartmentScopeDraftToSavedConfig(field: DirectoryDepartmentTargetField): void {
+  writeDepartmentTargetText(field, readSavedDepartmentTargetIds(field))
+  setStatus(`已还原${readDepartmentTargetLabel(field)}为已保存配置`)
+}
+
+async function writeClipboardText(
+  value: string,
+  successMessage: string,
+  options: {
+    emptyMessage?: string
+    unsupportedMessage?: string
+    failureMessage?: string
+  } = {},
+): Promise<void> {
+  const text = value.trim()
+  if (text.length === 0) {
+    setStatus(options.emptyMessage ?? '没有可复制的部门 ID', 'error')
+    return
+  }
+  if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) {
+    setStatus(options.unsupportedMessage ?? '当前浏览器不支持自动复制，请从预览框手动复制部门 ID', 'error')
+    return
+  }
+  try {
+    await navigator.clipboard.writeText(text)
+    setStatus(successMessage)
+  } catch {
+    setStatus(options.failureMessage ?? '复制部门 ID 失败，请从预览框手动复制', 'error')
+  }
+}
+
+async function copyVisibleDepartmentIds(): Promise<void> {
+  await writeClipboardText(
+    visibleDepartmentIdPreview.value,
+    `已复制 ${visibleDepartmentRows.value.length} 个当前可见部门 ID`,
+  )
+}
+
+function buildVisibleDepartmentReport(): string {
+  if (visibleDepartmentRows.value.length === 0) return ''
+  const integrationName = selectedIntegration.value?.name ?? '未选择集成'
+  const query = departmentQuery.value.trim()
+  const lines = [
+    'DingTalk organization visible department report',
+    `Integration: ${integrationName}`,
+    `Scope filter: ${readDepartmentScopeFilterLabel(departmentScopeFilter.value)}`,
+    `Search query: ${query.length > 0 ? query : 'none'}`,
+    `Visible department count: ${visibleDepartmentRows.value.length}`,
+    `Latest mirror batch: ${departmentMirrorLatestSeenAt.value ?? 'not_recorded'}`,
+    '',
+    ...visibleDepartmentRows.value.map((department, index) => {
+      const name = department.fullPath || department.name
+      const activeStatus = department.isActive ? 'active_department' : 'inactive_department'
+      const batchStatus = isDepartmentInLatestMirrorBatch(department) ? 'latest_batch' : 'not_latest_batch'
+      const gapCount = readDepartmentUnlinkedAccountCount(department)
+      return `${index + 1}. [${activeStatus}; ${batchStatus}] ${department.externalDepartmentId} · ${name} · members=${department.accountCount} · linked=${department.linkedAccountCount} · unlinked=${gapCount}`
+    }),
+  ]
+  return lines.join('\n')
+}
+
+async function copyVisibleDepartmentReport(): Promise<void> {
+  await writeClipboardText(
+    buildVisibleDepartmentReport(),
+    `已复制 ${visibleDepartmentRows.value.length} 个当前可见部门报告`,
+    {
+      emptyMessage: '当前没有可复制的可见部门',
+      unsupportedMessage: '当前浏览器不支持自动复制，请手动复制当前可见部门内容',
+      failureMessage: '复制当前可见部门报告失败，请手动复制当前可见部门内容',
+    },
+  )
+}
+
+async function copyDepartmentId(department: DirectoryDepartment): Promise<void> {
+  await writeClipboardText(
+    department.externalDepartmentId,
+    `已复制部门 ${department.name} (${department.externalDepartmentId}) 的 ID`,
+  )
+}
+
+function buildDepartmentReferenceIssueReport(): string {
+  const issues = departmentConfigReferenceIssues.value
+  if (issues.length === 0) return ''
+  const integrationName = selectedIntegration.value?.name ?? '未选择集成'
+  const lines = [
+    'DingTalk organization reference issue report',
+    `Integration: ${integrationName}`,
+    `Issue count: ${issues.length}`,
+    '',
+    ...issues.map((issue, index) => {
+      const status = issue.kind === 'missing' ? 'missing_from_mirror' : 'inactive_department'
+      return `${index + 1}. [${status}] ${readDepartmentReferenceIssueLabel(issue)}`
+    }),
+  ]
+  return lines.join('\n')
+}
+
+function describeDepartmentConfigReference(
+  departmentId: string,
+  departmentByExternalId: Map<string, DirectoryDepartment>,
+): string {
+  const department = departmentByExternalId.get(departmentId)
+  if (!department) return `${departmentId} · missing_from_mirror`
+  const status = department.isActive ? 'active_department' : 'inactive_department'
+  const name = department.fullPath || department.name
+  return `${departmentId} · ${status} · ${name}`
+}
+
+function buildDepartmentConfigReferenceReport(): string {
+  const departmentByExternalId = new Map(departments.value.map((department) => [department.externalDepartmentId, department]))
+  const integrationName = selectedIntegration.value?.name ?? '未选择集成'
+  const lines = [
+    'DingTalk organization configuration reference report',
+    `Integration: ${integrationName}`,
+    `Configured unique department IDs: ${configuredDepartmentCount.value}`,
+    `Mirror departments loaded: ${departments.value.length}`,
+    `Reference issue count: ${departmentConfigReferenceIssues.value.length}`,
+  ]
+  for (const field of departmentTargetFields) {
+    const ids = parseAdmissionDepartmentIdsText(readDepartmentTargetText(field))
+    lines.push('', `[${readDepartmentTargetLabel(field)}]`)
+    if (ids.length === 0) {
+      lines.push('- none')
+      continue
+    }
+    for (const departmentId of ids) {
+      lines.push(`- ${describeDepartmentConfigReference(departmentId, departmentByExternalId)}`)
+    }
+  }
+  return lines.join('\n')
+}
+
+function buildDepartmentBindingGapReport(): string {
+  const gapDepartments = departmentRows.value.filter((department) => readDepartmentUnlinkedAccountCount(department) > 0)
+  if (gapDepartments.length === 0) return ''
+  const integrationName = selectedIntegration.value?.name ?? '未选择集成'
+  const lines = [
+    'DingTalk organization binding gap report',
+    `Integration: ${integrationName}`,
+    `Unlinked member count: ${departmentUnlinkedAccountCount.value}`,
+    `Departments with gaps: ${gapDepartments.length}`,
+    '',
+    ...gapDepartments.map((department, index) => {
+      const status = department.isActive ? 'active_department' : 'inactive_department'
+      const name = department.fullPath || department.name
+      const gapCount = readDepartmentUnlinkedAccountCount(department)
+      return `${index + 1}. [${status}] ${department.externalDepartmentId} · ${name} · members=${department.accountCount} · linked=${department.linkedAccountCount} · unlinked=${gapCount}`
+    }),
+  ]
+  return lines.join('\n')
+}
+
+function buildInactiveDepartmentReport(): string {
+  const inactiveDepartments = departmentRows.value.filter((department) => !department.isActive)
+  if (inactiveDepartments.length === 0) return ''
+  const integrationName = selectedIntegration.value?.name ?? '未选择集成'
+  const lines = [
+    'DingTalk organization inactive department report',
+    `Integration: ${integrationName}`,
+    `Inactive department count: ${inactiveDepartments.length}`,
+    '',
+    ...inactiveDepartments.map((department, index) => {
+      const name = department.fullPath || department.name
+      const gapCount = readDepartmentUnlinkedAccountCount(department)
+      return `${index + 1}. [inactive_department] ${department.externalDepartmentId} · ${name} · members=${department.accountCount} · linked=${department.linkedAccountCount} · unlinked=${gapCount}`
+    }),
+  ]
+  return lines.join('\n')
+}
+
+function buildDepartmentMirrorObservationReport(): string {
+  if (departmentRows.value.length === 0) return ''
+  const integrationName = selectedIntegration.value?.name ?? '未选择集成'
+  const staleDepartments = departmentRows.value.filter((department) => !isDepartmentInLatestMirrorBatch(department))
+  const lines = [
+    'DingTalk organization mirror observation report',
+    `Integration: ${integrationName}`,
+    `Latest mirror batch: ${departmentMirrorLatestSeenAt.value ?? 'not_recorded'}`,
+    `Latest mirror update: ${departmentMirrorLatestUpdatedAt.value ?? 'not_recorded'}`,
+    `Integration last successful sync: ${selectedIntegration.value?.lastSuccessAt ?? 'not_recorded'}`,
+    `Mirror department count: ${departmentRows.value.length}`,
+    `Current batch departments: ${departmentMirrorCurrentBatchCount.value}`,
+    `Not seen in latest batch: ${departmentMirrorStaleSeenCount.value}`,
+    `Inactive departments: ${inactiveDepartmentCount.value}`,
+    `Unlinked member count: ${departmentUnlinkedAccountCount.value}`,
+  ]
+  if (staleDepartments.length > 0) {
+    lines.push('', '[not_seen_in_latest_batch]')
+    for (const department of staleDepartments) {
+      const name = department.fullPath || department.name
+      lines.push(`- ${department.externalDepartmentId} · ${name} · active=${department.isActive ? 'yes' : 'no'} · lastSeenAt=${department.lastSeenAt}`)
+    }
+  }
+  return lines.join('\n')
+}
+
+function buildDepartmentDraftScopeChangeReport(): string {
+  if (departmentDraftScopeChanges.value.length === 0) return ''
+  const departmentByExternalId = new Map(departments.value.map((department) => [department.externalDepartmentId, department]))
+  const integrationName = selectedIntegration.value?.name ?? '未选择集成'
+  const lines = [
+    'DingTalk organization draft scope change report',
+    `Integration: ${integrationName}`,
+    `Changed fields: ${departmentDraftScopeChanges.value.length}`,
+    `Added department references: ${departmentDraftScopeAddedCount.value}`,
+    `Removed department references: ${departmentDraftScopeRemovedCount.value}`,
+  ]
+  for (const change of departmentDraftScopeChanges.value) {
+    lines.push('', `[${change.fieldLabel}]`)
+    if (change.added.length > 0) {
+      lines.push('added:')
+      for (const departmentId of change.added) {
+        lines.push(`- ${describeDepartmentConfigReference(departmentId, departmentByExternalId)}`)
+      }
+    }
+    if (change.removed.length > 0) {
+      lines.push('removed:')
+      for (const departmentId of change.removed) {
+        lines.push(`- ${describeDepartmentConfigReference(departmentId, departmentByExternalId)}`)
+      }
+    }
+  }
+  return lines.join('\n')
+}
+
+async function copyDepartmentReferenceIssueReport(): Promise<void> {
+  await writeClipboardText(
+    buildDepartmentReferenceIssueReport(),
+    `已复制 ${departmentConfigReferenceIssues.value.length} 条异常引用报告`,
+    {
+      emptyMessage: '当前没有可复制的异常引用',
+      unsupportedMessage: '当前浏览器不支持自动复制，请手动复制异常引用内容',
+      failureMessage: '复制异常引用报告失败，请手动复制异常引用内容',
+    },
+  )
+}
+
+async function copyDepartmentConfigReferenceReport(): Promise<void> {
+  await writeClipboardText(
+    buildDepartmentConfigReferenceReport(),
+    `已复制 ${configuredDepartmentCount.value} 个配置部门引用报告`,
+    {
+      emptyMessage: '当前没有可复制的部门配置引用',
+      unsupportedMessage: '当前浏览器不支持自动复制，请手动复制配置引用内容',
+      failureMessage: '复制配置引用报告失败，请手动复制配置引用内容',
+    },
+  )
+}
+
+async function copyDepartmentBindingGapReport(): Promise<void> {
+  await writeClipboardText(
+    buildDepartmentBindingGapReport(),
+    `已复制 ${departmentUnlinkedMirrorCount.value} 个未全绑定部门报告`,
+    {
+      emptyMessage: '当前没有可复制的未绑定部门',
+      unsupportedMessage: '当前浏览器不支持自动复制，请手动复制未绑定部门内容',
+      failureMessage: '复制未绑定部门报告失败，请手动复制未绑定部门内容',
+    },
+  )
+}
+
+async function copyInactiveDepartmentReport(): Promise<void> {
+  await writeClipboardText(
+    buildInactiveDepartmentReport(),
+    `已复制 ${inactiveDepartmentCount.value} 个停用部门报告`,
+    {
+      emptyMessage: '当前没有可复制的停用部门',
+      unsupportedMessage: '当前浏览器不支持自动复制，请手动复制停用部门内容',
+      failureMessage: '复制停用部门报告失败，请手动复制停用部门内容',
+    },
+  )
+}
+
+async function copyDepartmentMirrorObservationReport(): Promise<void> {
+  await writeClipboardText(
+    buildDepartmentMirrorObservationReport(),
+    `已复制 ${departmentRows.value.length} 个部门的同步观测报告`,
+    {
+      emptyMessage: '当前没有可复制的同步观测数据',
+      unsupportedMessage: '当前浏览器不支持自动复制，请手动复制同步观测内容',
+      failureMessage: '复制同步观测报告失败，请手动复制同步观测内容',
+    },
+  )
+}
+
+async function copyDepartmentDraftScopeChangeReport(): Promise<void> {
+  await writeClipboardText(
+    buildDepartmentDraftScopeChangeReport(),
+    `已复制 ${departmentDraftScopeChanges.value.length} 个部门范围草稿变更报告`,
+    {
+      emptyMessage: '当前没有可复制的部门范围草稿变更',
+      unsupportedMessage: '当前浏览器不支持自动复制，请手动复制草稿变更内容',
+      failureMessage: '复制部门范围草稿变更报告失败，请手动复制草稿变更内容',
+    },
+  )
+}
+
+function buildDepartmentConfigReferenceIssues(
+  items: DirectoryDepartment[],
+  scope: Record<DirectoryDepartmentTargetField, Set<string>>,
+): DirectoryDepartmentReferenceIssue[] {
+  const hasConfiguredScope = departmentTargetFields.some((field) => scope[field].size > 0)
+  if (items.length === 0 && !hasConfiguredScope) return []
+  const departmentByExternalId = new Map(items.map((item) => [item.externalDepartmentId, item]))
+  const issues: DirectoryDepartmentReferenceIssue[] = []
+  for (const field of departmentTargetFields) {
+    const fieldLabel = readDepartmentTargetLabel(field)
+    for (const departmentId of scope[field]) {
+      const department = departmentByExternalId.get(departmentId)
+      if (!department) {
+        issues.push({
+          key: `${field}:missing:${departmentId}`,
+          field,
+          fieldLabel,
+          kind: 'missing',
+          departmentId,
+          departmentName: '',
+        })
+        continue
+      }
+      if (!department.isActive) {
+        issues.push({
+          key: `${field}:inactive:${departmentId}`,
+          field,
+          fieldLabel,
+          kind: 'inactive',
+          departmentId,
+          departmentName: department.name,
+        })
+      }
+    }
+  }
+  return issues
+}
+
+function readDepartmentReferenceIssueLabel(issue: DirectoryDepartmentReferenceIssue): string {
+  if (issue.kind === 'missing') {
+    return `${issue.fieldLabel}引用不存在的部门 ID ${issue.departmentId}`
+  }
+  return `${issue.fieldLabel}引用已停用部门 ${issue.departmentName} (${issue.departmentId})`
+}
+
+function addDepartmentIdToTarget(
+  departmentId: string,
+  departmentName: string,
+  field: DirectoryDepartmentTargetField,
+  options: { manual?: boolean } = {},
+): boolean {
+  const normalizedDepartmentId = departmentId.trim()
+  const normalizedDepartmentName = departmentName.trim() || (options.manual ? '手动部门' : '部门')
+  const targetLabel = readDepartmentTargetLabel(field)
+  if (normalizedDepartmentId.length === 0) {
+    setStatus(`${normalizedDepartmentName}缺少部门 ID，无法加入${targetLabel}`, 'error')
+    return false
+  }
+  const currentIds = parseAdmissionDepartmentIdsText(readDepartmentTargetText(field))
+  if (currentIds.includes(normalizedDepartmentId)) {
+    setStatus(`${normalizedDepartmentName} (${normalizedDepartmentId}) 已在${targetLabel}中`)
+    return false
+  }
+  writeDepartmentTargetText(field, [...currentIds, normalizedDepartmentId])
+  setStatus(`已将${options.manual ? '手动部门' : '部门'} ${normalizedDepartmentName} (${normalizedDepartmentId}) 加入${targetLabel}`)
+  return true
+}
+
+function addDepartmentToTarget(department: DirectoryDepartment, field: DirectoryDepartmentTargetField): void {
+  addDepartmentIdToTarget(department.externalDepartmentId, department.name, field)
+}
+
+function addVisibleDepartmentsToTarget(field: DirectoryDepartmentTargetField): void {
+  const targetLabel = readDepartmentTargetLabel(field)
+  const departmentIds = visibleDepartmentRows.value
+    .map((department) => department.externalDepartmentId.trim())
+    .filter((departmentId) => departmentId.length > 0)
+  if (departmentIds.length === 0) {
+    setStatus(`当前没有可加入${targetLabel}的可见部门`, 'error')
+    return
+  }
+  const currentIds = parseAdmissionDepartmentIdsText(readDepartmentTargetText(field))
+  const currentSet = new Set(currentIds)
+  const nextIds = [...currentIds]
+  for (const departmentId of departmentIds) {
+    if (currentSet.has(departmentId)) continue
+    currentSet.add(departmentId)
+    nextIds.push(departmentId)
+  }
+  const addedCount = nextIds.length - currentIds.length
+  if (addedCount === 0) {
+    setStatus(`当前可见部门均已在${targetLabel}中`)
+    return
+  }
+  writeDepartmentTargetText(field, nextIds)
+  setStatus(`已将 ${addedCount} 个当前可见部门加入${targetLabel}`)
+}
+
+function removeVisibleDepartmentsFromTarget(field: DirectoryDepartmentTargetField): void {
+  const targetLabel = readDepartmentTargetLabel(field)
+  const departmentIds = new Set(
+    visibleDepartmentRows.value
+      .map((department) => department.externalDepartmentId.trim())
+      .filter((departmentId) => departmentId.length > 0),
+  )
+  if (departmentIds.size === 0) {
+    setStatus(`当前没有可从${targetLabel}移除的可见部门`, 'error')
+    return
+  }
+  const currentIds = parseAdmissionDepartmentIdsText(readDepartmentTargetText(field))
+  const nextIds = currentIds.filter((departmentId) => !departmentIds.has(departmentId))
+  const removedCount = currentIds.length - nextIds.length
+  if (removedCount === 0) {
+    setStatus(`当前可见部门不在${targetLabel}中`)
+    return
+  }
+  writeDepartmentTargetText(field, nextIds)
+  setStatus(`已从${targetLabel}移除 ${removedCount} 个当前可见部门`)
+}
+
+function addManualDepartmentToTarget(field: DirectoryDepartmentTargetField): void {
+  addDepartmentIdToTarget(manualDepartmentId.value, manualDepartmentName.value, field, { manual: true })
+}
+
+function removeDepartmentFromTarget(departmentId: string, field: DirectoryDepartmentTargetField): void {
+  const normalizedDepartmentId = departmentId.trim()
+  const targetLabel = readDepartmentTargetLabel(field)
+  if (normalizedDepartmentId.length === 0) {
+    setStatus(`缺少部门 ID，无法从${targetLabel}移除`, 'error')
+    return
+  }
+  const currentIds = parseAdmissionDepartmentIdsText(readDepartmentTargetText(field))
+  const nextIds = currentIds.filter((id) => id !== normalizedDepartmentId)
+  if (nextIds.length === currentIds.length) {
+    setStatus(`部门 ${normalizedDepartmentId} 不在${targetLabel}中`)
+    return
+  }
+  writeDepartmentTargetText(field, nextIds)
+  setStatus(`已将部门 ${normalizedDepartmentId} 从${targetLabel}移除`)
+}
+
+function removeAllDepartmentReferenceIssues(): void {
+  const issues = departmentConfigReferenceIssues.value
+  if (issues.length === 0) {
+    setStatus('当前没有需要清理的异常部门引用')
+    return
+  }
+  const removeIdsByField: Record<DirectoryDepartmentTargetField, Set<string>> = {
+    admission: new Set(),
+    exclude: new Set(),
+    memberGroup: new Set(),
+  }
+  for (const issue of issues) {
+    removeIdsByField[issue.field].add(issue.departmentId)
+  }
+  for (const field of departmentTargetFields) {
+    const removeIds = removeIdsByField[field]
+    if (removeIds.size === 0) continue
+    const nextIds = parseAdmissionDepartmentIdsText(readDepartmentTargetText(field))
+      .filter((id) => !removeIds.has(id))
+    writeDepartmentTargetText(field, nextIds)
+  }
+  setStatus(`已清理 ${issues.length} 个异常部门引用`)
+}
+
 function readAdmissionModeLabel(integration: DirectoryIntegration): string {
   if (integration.config.admissionMode === 'auto_for_scoped_departments') {
     const includeCount = integration.config.admissionDepartmentIds.length
@@ -1996,9 +3319,93 @@ function readMemberGroupSyncLabel(integration: DirectoryIntegration): string {
   return '成员组同步已关闭'
 }
 
+function buildDirectoryDepartmentTreeRows(items: DirectoryDepartment[]): DirectoryDepartmentTreeRow[] {
+  if (items.length === 0) return []
+  const byExternalId = new Map(items.map((item) => [item.externalDepartmentId, item]))
+  const childrenByParent = new Map<string, DirectoryDepartment[]>()
+  const roots: DirectoryDepartment[] = []
+
+  for (const item of items) {
+    const parentId = item.parentExternalDepartmentId?.trim() || ''
+    if (!parentId || !byExternalId.has(parentId)) {
+      roots.push(item)
+      continue
+    }
+    const children = childrenByParent.get(parentId) ?? []
+    children.push(item)
+    childrenByParent.set(parentId, children)
+  }
+
+  const sortDepartments = (left: DirectoryDepartment, right: DirectoryDepartment) => (
+    left.orderIndex - right.orderIndex
+    || left.name.localeCompare(right.name, 'zh-Hans-CN')
+    || left.externalDepartmentId.localeCompare(right.externalDepartmentId)
+  )
+  roots.sort(sortDepartments)
+  for (const children of childrenByParent.values()) {
+    children.sort(sortDepartments)
+  }
+
+  const rows: DirectoryDepartmentTreeRow[] = []
+  const visit = (item: DirectoryDepartment, depth: number, seen: Set<string>) => {
+    if (seen.has(item.externalDepartmentId)) return
+    rows.push({ ...item, depth })
+    const nextSeen = new Set(seen)
+    nextSeen.add(item.externalDepartmentId)
+    for (const child of childrenByParent.get(item.externalDepartmentId) ?? []) {
+      visit(child, depth + 1, nextSeen)
+    }
+  }
+  for (const root of roots) visit(root, 0, new Set())
+  return rows
+}
+
+function normalizeDepartmentSearchValue(value: unknown): string {
+  return String(value ?? '').trim().toLocaleLowerCase('zh-Hans-CN')
+}
+
+function filterDirectoryDepartmentRows(
+  rows: DirectoryDepartmentTreeRow[],
+  query: string,
+): DirectoryDepartmentTreeRow[] {
+  const normalizedQuery = normalizeDepartmentSearchValue(query)
+  if (normalizedQuery.length === 0) return rows
+  return rows.filter((department) => {
+    const searchable = [
+      department.name,
+      department.fullPath,
+      department.externalDepartmentId,
+      department.parentExternalDepartmentId,
+    ]
+      .map(normalizeDepartmentSearchValue)
+      .join(' ')
+    return searchable.includes(normalizedQuery)
+  })
+}
+
+function readDepartmentIndentStyle(department: DirectoryDepartmentTreeRow): Record<string, string> {
+  return {
+    paddingLeft: `${Math.min(department.depth, 8) * 18 + 14}px`,
+  }
+}
+
+function describeDepartmentParent(department: DirectoryDepartment): string {
+  const parentId = department.parentExternalDepartmentId?.trim()
+  if (!parentId) return '根部门'
+  const parent = departments.value.find((item) => item.externalDepartmentId === parentId)
+  return parent ? `${parent.name} (${parent.externalDepartmentId})` : parentId
+}
+
 async function selectIntegration(integrationId: string): Promise<void> {
   selectedIntegrationId.value = integrationId
   testResult.value = null
+  departments.value = []
+  departmentsLoaded.value = false
+  departmentLoadError.value = ''
+  departmentQuery.value = ''
+  departmentScopeFilter.value = 'all'
+  manualDepartmentId.value = ''
+  manualDepartmentName.value = ''
   clearAutoAdmissionOnboardingPackets()
   clearFocusedAccount()
   accountPage.value = 1
@@ -2668,6 +4075,7 @@ async function syncIntegration() {
       loadAlerts(selectedIntegration.value.id),
       loadReviewItems(selectedIntegration.value.id),
       loadAccounts(selectedIntegration.value.id),
+      departmentsLoaded.value ? loadDepartments(selectedIntegration.value.id, { force: true }) : Promise.resolve(),
     ])
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '目录同步失败', 'error')
@@ -2753,6 +4161,26 @@ async function loadAccounts(integrationId: string) {
     setStatus(error instanceof Error ? error.message : '加载目录成员失败', 'error')
   } finally {
     loadingAccounts.value = false
+  }
+}
+
+async function loadDepartments(integrationId: string, options: { force?: boolean } = {}) {
+  if (departmentsLoaded.value && options.force !== true) return
+  loadingDepartments.value = true
+  departmentLoadError.value = ''
+  try {
+    const response = await apiFetch(`/api/admin/directory/integrations/${integrationId}/departments`)
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '加载组织架构失败'))
+    departments.value = Array.isArray(body?.data?.items) ? body.data.items : []
+    departmentsLoaded.value = true
+  } catch (error) {
+    departments.value = []
+    departmentsLoaded.value = true
+    departmentLoadError.value = error instanceof Error ? error.message : '加载组织架构失败'
+    setStatus(departmentLoadError.value, 'error')
+  } finally {
+    loadingDepartments.value = false
   }
 }
 
@@ -3791,6 +5219,16 @@ onUnmounted(() => {
   color: #1e3a8a;
 }
 
+.directory-admin__link-button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: #1d4ed8;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
 .directory-admin__section {
   display: flex;
   flex-direction: column;
@@ -3958,6 +5396,128 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.directory-admin__department-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.directory-admin__department-node {
+  border: 1px solid #dbeafe;
+  border-radius: 14px;
+  padding: 12px 14px;
+  background: linear-gradient(180deg, #f8fbff 0%, #eff6ff 100%);
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.directory-admin__department-node--inactive {
+  border-color: #fde68a;
+  background: linear-gradient(180deg, #fffbeb 0%, #fef3c7 100%);
+}
+
+.directory-admin__department-search {
+  margin-top: 4px;
+}
+
+.directory-admin__department-scope-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.directory-admin__department-filter-reset {
+  margin-top: -4px;
+}
+
+.directory-admin__visible-department-actions {
+  border: 1px solid #bfdbfe;
+  border-radius: 14px;
+  padding: 10px 12px;
+  background: #eff6ff;
+}
+
+.directory-admin__mirror-observation {
+  border: 1px solid #bbf7d0;
+  border-radius: 14px;
+  padding: 12px 14px;
+  background: #f0fdf4;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.directory-admin__mirror-observation--warning {
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+
+.directory-admin__manual-department {
+  border: 1px dashed #93c5fd;
+  border-radius: 14px;
+  padding: 12px 14px;
+  background: #f8fbff;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.directory-admin__manual-department-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.directory-admin__department-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex-basis: 100%;
+}
+
+.directory-admin__reference-issues {
+  border: 1px solid #fecaca;
+  border-radius: 14px;
+  padding: 12px 14px;
+  background: #fef2f2;
+}
+
+.directory-admin__draft-scope-changes {
+  border: 1px solid #bfdbfe;
+  border-radius: 14px;
+  padding: 12px 14px;
+  background: #eff6ff;
+}
+
+.directory-admin__reference-issues--ok {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.directory-admin__draft-scope-changes ul,
+.directory-admin__reference-issues ul {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.directory-admin__draft-scope-changes li,
+.directory-admin__reference-issues li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.directory-admin__reference-actions {
+  margin-top: 8px;
 }
 
 .directory-admin__review-admission {

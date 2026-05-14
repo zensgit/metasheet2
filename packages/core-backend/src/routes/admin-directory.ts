@@ -12,6 +12,7 @@ import {
   getDirectoryAccountSummary,
   getDirectoryReviewItem,
   listDirectoryIntegrationAccounts,
+  listDirectoryIntegrationDepartments,
   listDirectoryIntegrations,
   listDirectoryReviewItems,
   listDirectorySyncAlerts,
@@ -332,6 +333,22 @@ export function adminDirectoryRouter(): Router {
     } catch (error) {
       const message = readErrorMessage(error, 'Failed to load directory accounts')
       jsonError(res, /required|invalid/i.test(message) ? 400 : 500, 'DIRECTORY_ACCOUNTS_FAILED', message)
+    }
+  })
+
+  router.get('/integrations/:integrationId/departments', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const result = await listDirectoryIntegrationDepartments(req.params.integrationId)
+      jsonOk(res, {
+        items: result.items,
+        total: result.total,
+      })
+    } catch (error) {
+      const message = readErrorMessage(error, 'Failed to load directory departments')
+      jsonError(res, /required|invalid/i.test(message) ? 400 : 500, 'DIRECTORY_DEPARTMENTS_FAILED', message)
     }
   })
 
