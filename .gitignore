@@ -67,6 +67,13 @@ output/dingtalk-p4-regression-gate/
 output/dingtalk-p4-release-readiness/
 artifacts/dingtalk-staging-evidence-packet/
 
+# DingTalk live acceptance artifacts are generated operator evidence and can
+# contain sanitized but environment-specific delivery IDs or probe summaries.
+output/dingtalk-live-acceptance/
+
+# Local Claude/Codex scratch state must stay outside the repository.
+.claude/
+
 # K3 WISE postdeploy smoke artifacts can include deployment topology and
 # authenticated contract evidence.
 output/integration-k3wise-postdeploy-smoke/
@@ -79,3 +86,8 @@ artifacts/integration-k3wise-onprem-preflight/
 # K3 WISE internal-trial postdeploy smoke artifacts contain deployment URLs,
 # masked admin signoff metadata, and per-check evidence; operator-only.
 artifacts/integration-k3wise/internal-trial/
+
+# Multitable on-prem release bundles are generated delivery artifacts. Keep
+# source manifests/runbooks in Git, not built archives and verification output.
+output/delivery/multitable-onprem/
+output/releases/
