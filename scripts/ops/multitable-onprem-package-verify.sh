@@ -92,6 +92,7 @@ function verify_generic_integration_workbench_contract() {
   local easy_start="${root}/docs/deployment/multitable-windows-onprem-easy-start-20260319.md"
   local k3_runbook="${root}/docs/operations/integration-k3wise-internal-trial-runbook.md"
   local postdeploy_smoke="${root}/scripts/ops/integration-k3wise-postdeploy-smoke.mjs"
+  local postdeploy_summary="${root}/scripts/ops/integration-k3wise-postdeploy-summary.mjs"
 
   search_fixed_string '/integrations/workbench' "$web_dist" || die "web dist must include the Data Factory route"
   search_fixed_string '/integrations/k3-wise' "$web_dist" || die "web dist must include the K3 WISE setup route"
@@ -106,6 +107,7 @@ function verify_generic_integration_workbench_contract() {
   search_fixed_string 'SQL Server is an advanced channel' "$k3_runbook" || die "K3 runbook must document SQL Server as an advanced channel"
   search_fixed_string 'data-factory-frontend-route' "$postdeploy_smoke" || die "postdeploy smoke must check the Data Factory frontend route"
   search_fixed_string 'data-factory-adapter-discovery' "$postdeploy_smoke" || die "postdeploy smoke must check Data Factory adapter discovery"
+  search_fixed_string 'invalidAdapters' "$postdeploy_summary" || die "postdeploy summary must render Data Factory adapter drift details"
 }
 
 function write_optional_report() {
@@ -339,6 +341,8 @@ required=(
   "docs/development/data-factory-postdeploy-smoke-verification-20260514.md"
   "docs/development/data-factory-adapter-discovery-postdeploy-development-20260514.md"
   "docs/development/data-factory-adapter-discovery-postdeploy-verification-20260514.md"
+  "docs/development/data-factory-postdeploy-summary-adapter-details-development-20260514.md"
+  "docs/development/data-factory-postdeploy-summary-adapter-details-verification-20260514.md"
   "docs/development/onprem-migration-gap-guard-development-20260514.md"
   "docs/development/onprem-migration-gap-guard-verification-20260514.md"
   "docs/deployment/multitable-platform-rc-notes-20260404.md"

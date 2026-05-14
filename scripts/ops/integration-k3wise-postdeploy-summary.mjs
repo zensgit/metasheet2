@@ -167,7 +167,7 @@ function formatDetailValue(value) {
 function summarizeCheckDetails(check) {
   const details = check && check.details && typeof check.details === 'object' ? check.details : {}
   const lines = []
-  for (const key of ['missingAdapters', 'missingRoutes', 'missingFields', 'invalidFields']) {
+  for (const key of ['missingAdapters', 'invalidAdapters', 'missingRoutes', 'missingFields', 'invalidFields']) {
     const value = details[key]
     const hasValue = Array.isArray(value)
       ? value.length > 0
