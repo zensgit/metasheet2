@@ -1,13 +1,49 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 
-import { executeGate } from './multitable-phase3-release-gate.mjs'
+import { executeGate, summarizeAggregateChildren } from './multitable-phase3-release-gate.mjs'
 
 const SCRIPT = 'scripts/ops/multitable-phase3-release-gate.mjs'
+
+function newOutputDir() {
+  return mkdtempSync(path.join(tmpdir(), 'mt-phase3-gate-inproc-'))
+}
+
+/**
+ * Build a mock runScript for the email bridge that writes the
+ * specified report shape and returns the requested exit code.
+ */
+function mockEmailRunScript({ exitCode, status, ok = status === 'pass' }) {
+  return ({ jsonPath, mdPath }) => {
+    mkdirSync(path.dirname(jsonPath), { recursive: true })
+    writeFileSync(
+      jsonPath,
+      JSON.stringify({ ok, status, mode: 'smtp', messages: [] }),
+    )
+    writeFileSync(mdPath, `# mock ${status}\n`)
+    return { status: exitCode, stdout: '', stderr: '' }
+  }
+}
+
+const EMAIL_PASS_MOCK = mockEmailRunScript({ exitCode: 0, status: 'pass', ok: true })
+const EMAIL_BLOCKED_MOCK = mockEmailRunScript({ exitCode: 2, status: 'blocked' })
+const EMAIL_FAIL_MOCK = mockEmailRunScript({ exitCode: 1, status: 'failed', ok: false })
+
+/**
+ * Spawn-based tests that invoke `pnpm verify:multitable-email:real-send`
+ * via the email bridge require node_modules/.bin/tsx to be present.
+ * In CI, pnpm install runs before tests; in a fresh worktree it may
+ * not yet have run. Use this to skip those tests in the latter case
+ * while still asserting the rest of the suite.
+ */
+const BRIDGE_SPAWN_SKIP =
+  existsSync(path.resolve(process.cwd(), 'node_modules/.bin/tsx'))
+    ? undefined
+    : 'requires node_modules/.bin/tsx (run `pnpm install` to enable)'
 
 function runGate(gate, { env = {}, allowBlocked = false } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), 'mt-phase3-gate-'))
@@ -72,18 +108,141 @@ test('executeGate (in-process) still blocks even when env is present at D0', () 
   assert.match(result.reason, /D0 skeleton/)
 })
 
-test('executeGate aggregator returns BLOCKED, never FAIL, when children are blocked', () => {
-  const result = executeGate('release:phase3', {})
-  assert.equal(result.status, 'blocked')
+test('executeGate aggregator returns BLOCKED, never FAIL, when all four children are blocked', () => {
+  const dir = newOutputDir()
+  try {
+    const result = executeGate('release:phase3', {}, {
+      outputDir: dir,
+      emailRunScript: EMAIL_BLOCKED_MOCK,
+    })
+    assert.equal(result.status, 'blocked')
+    assert.equal(result.exitCode, 2)
+    assert.notEqual(result.status, 'fail', 'aggregator status must not be fail')
+    assert.notEqual(result.exitCode, 1, 'aggregator must not collapse BLOCKED into FAIL=1')
+    assert.equal(result.children.length, 4)
+    assert.ok(result.children.every((c) => c.status === 'blocked'))
+    assert.ok(result.children.every((c) => c.exitCode === 2))
+    assert.match(result.reason, /BLOCKED/)
+    // email is the first child
+    assert.equal(result.children[0].gate, 'email:real-send')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('aggregator: email PASS + 3 others blocked → status=blocked exit=2 (does NOT collapse to PASS)', () => {
+  const dir = newOutputDir()
+  try {
+    const result = executeGate('release:phase3', {}, {
+      outputDir: dir,
+      emailRunScript: EMAIL_PASS_MOCK,
+    })
+    assert.equal(result.status, 'blocked', 'partial PASS must not collapse aggregate to PASS')
+    assert.equal(result.exitCode, 2)
+    assert.equal(result.children.length, 4)
+    const emailChild = result.children.find((c) => c.gate === 'email:real-send')
+    assert.equal(emailChild.status, 'pass')
+    assert.equal(emailChild.exitCode, 0)
+    const others = result.children.filter((c) => c.gate !== 'email:real-send')
+    assert.ok(others.every((c) => c.status === 'blocked'))
+    assert.match(result.reason, /BLOCKED/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('aggregator: email FAIL + 3 others blocked → status=fail exit=1', () => {
+  const dir = newOutputDir()
+  try {
+    const result = executeGate('release:phase3', {}, {
+      outputDir: dir,
+      emailRunScript: EMAIL_FAIL_MOCK,
+    })
+    assert.equal(result.status, 'fail', 'any FAIL child must propagate to FAIL aggregate')
+    assert.equal(result.exitCode, 1)
+    assert.equal(result.children.length, 4)
+    const emailChild = result.children.find((c) => c.gate === 'email:real-send')
+    assert.equal(emailChild.status, 'fail')
+    assert.match(result.reason, /FAIL/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('summarizeAggregateChildren: every child PASS → status=pass exit=0 (synthetic)', () => {
+  // D2/D3/D4 are hard-coded blocked, so executeGate cannot drive an
+  // all-pass aggregate end-to-end. We test the summarizer branch
+  // directly with synthesized children.
+  const result = summarizeAggregateChildren([
+    { gate: 'email:real-send', status: 'pass', exitCode: 0 },
+    { gate: 'perf:large-table', status: 'pass', exitCode: 0 },
+    { gate: 'permissions:matrix', status: 'pass', exitCode: 0 },
+    { gate: 'automation:soak', status: 'pass', exitCode: 0 },
+  ])
+  assert.equal(result.status, 'pass')
+  assert.equal(result.exitCode, 0)
+})
+
+test('summarizeAggregateChildren: any FAIL beats any number of BLOCKED → status=fail', () => {
+  const result = summarizeAggregateChildren([
+    { gate: 'email:real-send', status: 'pass', exitCode: 0 },
+    { gate: 'perf:large-table', status: 'blocked', exitCode: 2 },
+    { gate: 'permissions:matrix', status: 'fail', exitCode: 1 },
+    { gate: 'automation:soak', status: 'blocked', exitCode: 2 },
+  ])
+  assert.equal(result.status, 'fail')
+  assert.equal(result.exitCode, 1)
+})
+
+test('summarizeAggregateChildren: pass + blocked but no fail → status=blocked', () => {
+  const result = summarizeAggregateChildren([
+    { gate: 'email:real-send', status: 'pass', exitCode: 0 },
+    { gate: 'perf:large-table', status: 'blocked', exitCode: 2 },
+    { gate: 'permissions:matrix', status: 'blocked', exitCode: 2 },
+    { gate: 'automation:soak', status: 'blocked', exitCode: 2 },
+  ])
+  assert.equal(result.status, 'blocked', 'partial PASS with BLOCKED present must stay BLOCKED')
   assert.equal(result.exitCode, 2)
-  assert.notEqual(result.status, 'fail', 'aggregator status must not be fail')
-  assert.notEqual(result.exitCode, 1, 'aggregator must not collapse BLOCKED into FAIL=1')
-  assert.equal(result.children.length, 3)
-  assert.ok(result.children.every((c) => c.status === 'blocked'))
-  assert.ok(result.children.every((c) => c.exitCode === 2))
-  // The reason text explicitly references both BLOCKED and FAIL to document the
-  // non-collapse rule; substring guard is intentionally narrow.
-  assert.match(result.reason, /BLOCKED/)
+})
+
+test('email:real-send standalone gate routes through bridge (pass case)', () => {
+  const dir = newOutputDir()
+  try {
+    const result = executeGate('email:real-send', {}, {
+      outputDir: dir,
+      emailRunScript: EMAIL_PASS_MOCK,
+    })
+    assert.equal(result.gate, 'email:real-send')
+    assert.equal(result.status, 'pass')
+    assert.equal(result.exitCode, 0)
+    assert.equal(result.sourceExitCode, 0)
+    assert.equal(result.sourceStatus, 'pass')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('email:real-send standalone gate routes through bridge (blocked case)', () => {
+  const dir = newOutputDir()
+  try {
+    const result = executeGate('email:real-send', {}, {
+      outputDir: dir,
+      emailRunScript: EMAIL_BLOCKED_MOCK,
+    })
+    assert.equal(result.gate, 'email:real-send')
+    assert.equal(result.status, 'blocked')
+    assert.equal(result.exitCode, 2)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('executeGate throws when aggregator is invoked without outputDir', () => {
+  assert.throws(() => executeGate('release:phase3', {}), /outputDir/)
+})
+
+test('executeGate throws when email:real-send is invoked without outputDir', () => {
+  assert.throws(() => executeGate('email:real-send', {}), /outputDir/)
 })
 
 test('perf:large-table exits 2 (blocked) by default via spawn', () => {
@@ -122,20 +281,24 @@ test('automation:soak exits 2 (blocked) by default via spawn', () => {
   }
 })
 
-test('release:phase3 aggregator exits 2 (blocked) not 1 (fail) via spawn', () => {
-  const r = runGate('release:phase3')
-  try {
-    assert.equal(r.exitCode, 2, 'aggregator must exit 2, not 1')
-    const obj = JSON.parse(r.json)
-    assert.equal(obj.status, 'blocked')
-    assert.equal(obj.exitCode, 2)
-    assert.ok(Array.isArray(obj.children) && obj.children.length === 3)
-    assert.ok(obj.children.every((c) => c.status === 'blocked' && c.exitCode === 2))
-    assert.match(obj.reason, /BLOCKED/)
-  } finally {
-    cleanup(r.dir)
-  }
-})
+test(
+  'release:phase3 aggregator exits 2 (blocked) not 1 (fail) via spawn — all 4 children blocked',
+  { skip: BRIDGE_SPAWN_SKIP },
+  () => {
+    const r = runGate('release:phase3')
+    try {
+      assert.equal(r.exitCode, 2, 'aggregator must exit 2, not 1')
+      const obj = JSON.parse(r.json)
+      assert.equal(obj.status, 'blocked')
+      assert.equal(obj.exitCode, 2)
+      assert.ok(Array.isArray(obj.children) && obj.children.length === 4)
+      assert.ok(obj.children.every((c) => c.status === 'blocked' && c.exitCode === 2))
+      assert.match(obj.reason, /BLOCKED/)
+    } finally {
+      cleanup(r.dir)
+    }
+  },
+)
 
 test('--allow-blocked overrides exit code to 0 but keeps status field as blocked', () => {
   const r = runGate('perf:large-table', { allowBlocked: true })

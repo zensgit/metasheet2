@@ -1,32 +1,48 @@
 #!/usr/bin/env node
 
 /**
- * Phase 3 release gate skeleton.
+ * Phase 3 release gate.
  *
  * Routing + blocked-mode + shared redaction + JSON+MD report writer.
- * All sub-gates are blocked at this PR's stage (D0). Real harnesses
- * land in subsequent PRs (R3 D1 SMTP, R4 D4 automation soak). D2/D3
- * stay blocked under the K3 PoC stage-1 lock.
+ * The aggregator (`release:phase3`) iterates over four sub-gates:
+ *
+ *   - `email:real-send`     — wired via a fail-closed bridge to the
+ *                             existing `verify:multitable-email:real-send`
+ *                             package script (added in PR R3).
+ *   - `perf:large-table`    — D2 deferred (always blocked).
+ *   - `permissions:matrix`  — D3 deferred (always blocked).
+ *   - `automation:soak`     — D4 stub (always blocked until PR R4).
+ *
+ * The aggregator never collapses BLOCKED into FAIL, and never lets a
+ * partial PASS (e.g. email pass + others blocked) collapse the
+ * aggregate to PASS — that remains BLOCKED.
  *
  * Exit codes:
  *   0  PASS
  *   1  FAIL
  *   2  BLOCKED — never collapsed into FAIL.
  *
- * Email real-send is NOT routed here at D0; the existing
- * `verify:multitable-email:real-send` script (
- * `scripts/ops/multitable-email-real-send-smoke.ts`) is left untouched
- * and will be bound into the aggregator in PR R3.
+ * The existing `verify:multitable-email:real-send` package script and
+ * `scripts/ops/multitable-email-real-send-smoke.ts` are left
+ * untouched. The bridge invokes them via `pnpm` and injects
+ * EMAIL_REAL_SEND_JSON / EMAIL_REAL_SEND_MD output paths under
+ * `<outputDir>/children/email-real-send/` so reports never collide
+ * with the email script's default output location.
  *
  * See:
  *   docs/development/multitable-feishu-phase3-ai-hardening-plan-20260514.md
  *   docs/development/multitable-feishu-phase3-ai-hardening-review-20260514.md
+ *   docs/development/multitable-phase3-email-bridge-development-20260514.md
  */
 
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { redactString } from './multitable-phase3-release-gate-redact.mjs'
 import { buildReport, writeReport } from './multitable-phase3-release-gate-report.mjs'
+import {
+  EMAIL_SUB_GATE_ID,
+  runEmailRealSendSubGate,
+} from './multitable-phase3-release-gate-email-bridge.mjs'
 
 const TOOL = 'multitable-phase3-release-gate'
 const DEFAULT_OUTPUT_DIR = 'output/multitable-phase3-release-gate'
@@ -57,14 +73,15 @@ const SUB_GATES = {
 }
 
 const AGGREGATE_GATE = 'release:phase3'
-const PUBLIC_GATES = [AGGREGATE_GATE, ...Object.keys(SUB_GATES)]
+const PUBLIC_GATES = [AGGREGATE_GATE, EMAIL_SUB_GATE_ID, ...Object.keys(SUB_GATES)]
 
 function printHelp() {
   console.log(`Usage: node scripts/ops/multitable-phase3-release-gate.mjs --gate <id> [options]
 
-Runs the Phase 3 release gate skeleton. All sub-gates are blocked at
-the D0 PR stage; only routing, redaction, and report writing are
-exercised.
+Runs the Phase 3 release gate. The email:real-send sub-gate is wired
+to the existing pnpm verify:multitable-email:real-send script via a
+fail-closed bridge; other sub-gates remain blocked under the K3 PoC
+stage-1 lock and Lane D4 stub.
 
 Gates:
   ${PUBLIC_GATES.map((g) => `\`${g}\``).join(', ')}
@@ -174,34 +191,61 @@ function runSubGate(gate, env) {
   }
 }
 
-function runAggregate(env) {
-  const startedAt = new Date().toISOString()
-  const children = []
-  for (const gate of Object.keys(SUB_GATES)) {
-    const child = runSubGate(gate, env)
-    children.push({
-      gate: child.gate,
-      status: child.status,
-      exitCode: child.exitCode,
-      deferral: child.deferral,
-    })
-  }
+export function summarizeAggregateChildren(children) {
   const anyFail = children.some((c) => c.status === 'fail')
   const anyBlocked = children.some((c) => c.status === 'blocked')
-  let status = 'pass'
-  let exitCode = EXIT_PASS
-  let reason = 'All sub-gates passed.'
   if (anyFail) {
-    status = 'fail'
-    exitCode = EXIT_FAIL
-    reason = 'One or more child sub-gates returned FAIL.'
-  } else if (anyBlocked) {
-    // Critical: BLOCKED must NOT collapse into FAIL. Aggregator returns 2.
-    status = 'blocked'
-    exitCode = EXIT_BLOCKED
-    reason =
-      'One or more child sub-gates are BLOCKED. Aggregator exits 2 (BLOCKED); it does not collapse into 1 (FAIL).'
+    return {
+      status: 'fail',
+      exitCode: EXIT_FAIL,
+      reason:
+        'One or more child sub-gates returned FAIL. Aggregator exits 1 (FAIL).',
+    }
   }
+  if (anyBlocked) {
+    // Critical: BLOCKED must NOT collapse into FAIL. Aggregator returns 2.
+    return {
+      status: 'blocked',
+      exitCode: EXIT_BLOCKED,
+      reason:
+        'One or more child sub-gates are BLOCKED. Aggregator exits 2 (BLOCKED); it does not collapse into 1 (FAIL) or 0 (PASS).',
+    }
+  }
+  return {
+    status: 'pass',
+    exitCode: EXIT_PASS,
+    reason: 'All sub-gates passed.',
+  }
+}
+
+function summarizeChild(child) {
+  return {
+    gate: child.gate,
+    status: child.status,
+    exitCode: child.exitCode,
+    reason: child.reason ?? null,
+    deferral: child.deferral ?? null,
+    sourceExitCode: child.sourceExitCode ?? null,
+    sourceStatus: child.sourceStatus ?? null,
+  }
+}
+
+function runAggregate(env, { outputDir, emailRunScript } = {}) {
+  const startedAt = new Date().toISOString()
+  const children = []
+  // Email sub-gate first so a real PASS signal can surface even when
+  // every other sub-gate is BLOCKED.
+  const emailChild = runEmailRealSendSubGate({
+    outputDir,
+    env,
+    runScript: emailRunScript,
+  })
+  children.push(summarizeChild(emailChild))
+  for (const gate of Object.keys(SUB_GATES)) {
+    const child = runSubGate(gate, env)
+    children.push(summarizeChild(child))
+  }
+  const { status, exitCode, reason } = summarizeAggregateChildren(children)
   return {
     tool: TOOL,
     gate: AGGREGATE_GATE,
@@ -214,15 +258,26 @@ function runAggregate(env) {
   }
 }
 
-export function executeGate(gate, env) {
-  if (gate === AGGREGATE_GATE) return runAggregate(env)
+export function executeGate(gate, env, { outputDir = '', emailRunScript } = {}) {
+  if (gate === AGGREGATE_GATE) {
+    if (!outputDir) {
+      throw new Error('executeGate: outputDir is required when invoking the aggregator')
+    }
+    return runAggregate(env, { outputDir, emailRunScript })
+  }
+  if (gate === EMAIL_SUB_GATE_ID) {
+    if (!outputDir) {
+      throw new Error(`executeGate: outputDir is required when invoking ${EMAIL_SUB_GATE_ID}`)
+    }
+    return runEmailRealSendSubGate({ outputDir, env, runScript: emailRunScript })
+  }
   return runSubGate(gate, env)
 }
 
 function main(argv) {
   const opts = parseArgs(argv)
   mkdirSync(opts.outputDir, { recursive: true })
-  const result = executeGate(opts.gate, process.env)
+  const result = executeGate(opts.gate, process.env, { outputDir: opts.outputDir })
   const report = buildReport(result)
   writeReport({ outputJson: opts.outputJson, outputMd: opts.outputMd, report })
   const summary = redactString(
