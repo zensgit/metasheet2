@@ -683,11 +683,23 @@ function buildRemoteSmokeTodos(requiredChecks, opts) {
       evidenceRecordCommand: completed ? '' : evidenceRecordCommandForCheck(opts, check),
     }
   })
+  const manualItems = items.filter((item) => item.manual)
+  const automatedItems = items.filter((item) => !item.manual)
 
   return {
     total: items.length,
     completed: items.filter((item) => item.completed).length,
     remaining: items.filter((item) => !item.completed).length,
+    manualEvidence: {
+      total: manualItems.length,
+      completed: manualItems.filter((item) => item.completed).length,
+      remaining: manualItems.filter((item) => !item.completed).length,
+    },
+    automatedChecks: {
+      total: automatedItems.length,
+      completed: automatedItems.filter((item) => item.completed).length,
+      remaining: automatedItems.filter((item) => !item.completed).length,
+    },
     items,
   }
 }
@@ -931,6 +943,10 @@ ${checkRows.join('\n')}
 
 Progress: **${summary.remoteSmokeTodos.completed}/${summary.remoteSmokeTodos.total}** complete, **${summary.remoteSmokeTodos.remaining}** remaining.
 
+Manual evidence: **${summary.remoteSmokeTodos.manualEvidence.completed}/${summary.remoteSmokeTodos.manualEvidence.total}** complete, **${summary.remoteSmokeTodos.manualEvidence.remaining}** remaining.
+
+Automated/API checks: **${summary.remoteSmokeTodos.automatedChecks.completed}/${summary.remoteSmokeTodos.automatedChecks.total}** complete, **${summary.remoteSmokeTodos.automatedChecks.remaining}** remaining.
+
 | State | Check | Status | Manual | TODO |
 | --- | --- | --- | --- | --- |
 ${todoRows.join('\n')}
@@ -1010,6 +1026,10 @@ Overall status: **${summary.overallStatus}**
 Remote smoke phase: **${summary.remoteSmokePhase}**
 
 Progress: **${summary.remoteSmokeTodos.completed}/${summary.remoteSmokeTodos.total}** complete, **${summary.remoteSmokeTodos.remaining}** remaining.
+
+Manual evidence: **${summary.remoteSmokeTodos.manualEvidence.completed}/${summary.remoteSmokeTodos.manualEvidence.total}** complete, **${summary.remoteSmokeTodos.manualEvidence.remaining}** remaining.
+
+Automated/API checks: **${summary.remoteSmokeTodos.automatedChecks.completed}/${summary.remoteSmokeTodos.automatedChecks.total}** complete, **${summary.remoteSmokeTodos.automatedChecks.remaining}** remaining.
 
 ## Current Focus
 
