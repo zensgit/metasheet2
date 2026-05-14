@@ -89,6 +89,7 @@ function verify_generic_integration_workbench_contract() {
   local web_dist="${root}/apps/web/dist"
   local easy_start="${root}/docs/deployment/multitable-windows-onprem-easy-start-20260319.md"
   local k3_runbook="${root}/docs/operations/integration-k3wise-internal-trial-runbook.md"
+  local postdeploy_smoke="${root}/scripts/ops/integration-k3wise-postdeploy-smoke.mjs"
 
   search_fixed_string '/integrations/workbench' "$web_dist" || die "web dist must include the Data Factory route"
   search_fixed_string '/integrations/k3-wise' "$web_dist" || die "web dist must include the K3 WISE setup route"
@@ -101,6 +102,7 @@ function verify_generic_integration_workbench_contract() {
   search_fixed_string '/integrations/workbench' "$easy_start" || die "Windows on-prem guide must document the Data Factory route"
   search_fixed_string '/integrations/k3-wise' "$easy_start" || die "Windows on-prem guide must document the K3 WISE setup route"
   search_fixed_string 'SQL Server is an advanced channel' "$k3_runbook" || die "K3 runbook must document SQL Server as an advanced channel"
+  search_fixed_string 'data-factory-frontend-route' "$postdeploy_smoke" || die "postdeploy smoke must check the Data Factory frontend route"
 }
 
 function write_optional_report() {
@@ -330,6 +332,8 @@ required=(
   "docs/development/data-factory-workbench-verification-20260514.md"
   "docs/development/data-factory-cleansed-export-development-20260514.md"
   "docs/development/data-factory-cleansed-export-verification-20260514.md"
+  "docs/development/data-factory-postdeploy-smoke-development-20260514.md"
+  "docs/development/data-factory-postdeploy-smoke-verification-20260514.md"
   "docs/deployment/multitable-platform-rc-notes-20260404.md"
   "docs/deployment/multitable-windows-onprem-easy-start-20260319.md"
   "docs/deployment/multitable-onprem-package-layout-20260319.md"

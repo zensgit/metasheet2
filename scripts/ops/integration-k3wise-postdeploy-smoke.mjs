@@ -512,6 +512,16 @@ function assertListResponse(body, probeId) {
   return { rows: data.length }
 }
 
+function assertFrontendAppShell(page, label) {
+  if (!/id=["']app["']/.test(page.text) && !/MetaSheet|metasheet/i.test(page.text)) {
+    throw new K3WisePostdeploySmokeError(`${label} frontend route did not look like the app shell`)
+  }
+  return {
+    httpStatus: page.status,
+    bytes: page.text.length,
+  }
+}
+
 function extractTenantId(authBody) {
   const candidates = [
     authBody?.tenantId,
@@ -571,15 +581,16 @@ async function runSmoke(opts) {
 
   try {
     const page = await requestText(opts.baseUrl, '/integrations/k3-wise', { timeoutMs: opts.timeoutMs })
-    if (!/id=["']app["']/.test(page.text) && !/K3 WISE|MetaSheet|metasheet/i.test(page.text)) {
-      throw new K3WisePostdeploySmokeError('K3 WISE frontend route did not look like the app shell')
-    }
-    checks.push(result('k3-wise-frontend-route', 'pass', {
-      httpStatus: page.status,
-      bytes: page.text.length,
-    }))
+    checks.push(result('k3-wise-frontend-route', 'pass', assertFrontendAppShell(page, 'K3 WISE')))
   } catch (error) {
     checks.push(failResult('k3-wise-frontend-route', error))
+  }
+
+  try {
+    const page = await requestText(opts.baseUrl, '/integrations/workbench', { timeoutMs: opts.timeoutMs })
+    checks.push(result('data-factory-frontend-route', 'pass', assertFrontendAppShell(page, 'Data Factory')))
+  } catch (error) {
+    checks.push(failResult('data-factory-frontend-route', error))
   }
 
   if (!token) {

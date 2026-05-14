@@ -204,6 +204,11 @@ function createFakeServer(options = {}) {
       return
     }
 
+    if (req.method === 'GET' && url.pathname === '/integrations/workbench') {
+      sendHtml(res, 200, '<!doctype html><html><body><div id="app"></div><script src="/assets/app.js"></script></body></html>')
+      return
+    }
+
     if (req.method === 'GET' && url.pathname === '/api/auth/me') {
       if (req.headers.authorization !== 'Bearer test.jwt.token') {
         sendJson(res, 401, { ok: false, error: { message: 'bad token' } })
@@ -294,7 +299,7 @@ test('public postdeploy smoke passes without an auth token and skips authenticat
     assert.equal(stdout.authenticated, false)
     assert.equal(stdout.summary.fail, 0)
     assert.equal(stdout.summary.skipped, 1)
-    assert.equal(stdout.summary.pass, 3)
+    assert.equal(stdout.summary.pass, 4)
     assert.deepEqual(stdout.signoff, {
       internalTrial: 'blocked',
       reason: 'authenticated checks did not run',
@@ -307,8 +312,10 @@ test('public postdeploy smoke passes without an auth token and skips authenticat
     })
     assert.equal(evidence.checks.find((check) => check.id === 'authenticated-integration-contract').status, 'skipped')
     assert.equal(evidence.checks.find((check) => check.id === 'k3-wise-frontend-route').status, 'pass')
+    assert.equal(evidence.checks.find((check) => check.id === 'data-factory-frontend-route').status, 'pass')
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/health'))
     assert.ok(fake.requests.some((request) => request.pathname === '/integrations/k3-wise'))
+    assert.ok(fake.requests.some((request) => request.pathname === '/integrations/workbench'))
   } finally {
     await fake.close()
     rmSync(outDir, { recursive: true, force: true })
@@ -334,6 +341,7 @@ test('public postdeploy smoke skips plugin health when the deployment protects i
     const evidence = JSON.parse(readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8'))
     assert.equal(evidence.checks.find((check) => check.id === 'integration-plugin-health').status, 'skipped')
     assert.equal(evidence.checks.find((check) => check.id === 'k3-wise-frontend-route').status, 'pass')
+    assert.equal(evidence.checks.find((check) => check.id === 'data-factory-frontend-route').status, 'pass')
   } finally {
     await fake.close()
     rmSync(outDir, { recursive: true, force: true })
