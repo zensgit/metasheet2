@@ -42,3 +42,30 @@ Low. The patch is test-only and preserves existing assertions for:
 
 Remaining CI expectation: normal repository checks should pass because no
 production code or generated contract artifacts changed.
+
+## Current-Main Refresh - 2026-05-14
+
+After rebasing the PR diff onto `origin/main@b128936c`, the targeted integration
+suite exposed one additional fixture gap from the later AutoNumber rollout:
+
+```text
+Unhandled SQL in test: SELECT pg_advisory_xact_lock(hashtext($1))
+```
+
+The fixture now treats the advisory lock as a no-op acknowledgement in the mock
+pool. This preserves production behavior and keeps the patch test-only.
+
+Commands rerun after the refresh:
+
+```bash
+pnpm install --frozen-lockfile
+pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/multitable-sheet-permissions.api.test.ts --reporter=dot
+git diff --check origin/main..HEAD
+```
+
+Current-main rerun result:
+
+```text
+Test Files  1 passed (1)
+Tests       39 passed (39)
+```

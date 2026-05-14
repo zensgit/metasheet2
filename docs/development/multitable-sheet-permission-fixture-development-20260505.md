@@ -43,6 +43,8 @@ Added generic fixture handlers for:
 - Bulk role permission lookup by role id array, bridged to the tests' existing
   single-role lookup handlers.
 - Legacy `users.permissions` fallback eligibility.
+- AutoNumber sheet advisory-lock acknowledgements for create-record paths that
+  now pass through `RecordService.createRecord()`.
 - `meta_record_revisions` insert acknowledgements.
 - Formula dependency recalculation probes with no dependent formula fields.
 - `meta_record_subscriptions` best-effort notification lookups with no

@@ -27,6 +27,9 @@ function createMockPool(
       return { rows: [], rowCount: 0 }
     }
     if (sql.includes('FROM record_permissions') && !sql.includes('FROM record_permissions rp')) return { rows: [], rowCount: 0 }
+    if (sql.includes('SELECT pg_advisory_xact_lock(hashtext($1))')) {
+      return { rows: [], rowCount: 1 }
+    }
     if (
       sql.includes('FROM user_permissions up')
       && sql.includes('JOIN role_permissions rp ON rp.role_id = ur.role_id')
