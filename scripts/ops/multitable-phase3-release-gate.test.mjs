@@ -199,3 +199,54 @@ test('artifact integrity — release:phase3 aggregator does not leak env-supplie
     cleanup(r.dir)
   }
 })
+
+test('artifact integrity — MULTITABLE_EMAIL_SMTP_HOST/USER/FROM/PASSWORD real env names never leak (perf:large-table sub-gate)', () => {
+  // These are the actual env var names consumed by
+  // scripts/ops/multitable-email-real-send-smoke.ts. Even though the
+  // Phase 3 D0 gate does not invoke that script, a future regression
+  // that leaks these into stdout / stderr / report.json / report.md
+  // must be caught by the redaction layer.
+  const env = {
+    MULTITABLE_EMAIL_SMTP_HOST: 'smtp.privateops.example.com',
+    MULTITABLE_EMAIL_SMTP_USER: 'privateops-smtp-user',
+    MULTITABLE_EMAIL_SMTP_PASSWORD: 'privateOpsSmtpPw99',
+    MULTITABLE_EMAIL_SMTP_FROM: 'private-from-addr@example.com',
+    MULTITABLE_EMAIL_SMTP_PORT: '465',
+    MULTITABLE_EMAIL_SMOKE_TO: 'private-recipient@example.com',
+  }
+  const r = runGate('perf:large-table', { env })
+  try {
+    const all = `${r.stdout}\n${r.stderr}\n${r.json ?? ''}\n${r.md ?? ''}`
+    assert.doesNotMatch(all, /smtp\.privateops\.example\.com/, 'leak: SMTP_HOST value')
+    assert.doesNotMatch(all, /privateops-smtp-user/, 'leak: SMTP_USER value')
+    assert.doesNotMatch(all, /privateOpsSmtpPw99/, 'leak: SMTP_PASSWORD value')
+    assert.doesNotMatch(all, /private-from-addr@example\.com/, 'leak: SMTP_FROM value')
+    assert.doesNotMatch(all, /private-recipient@example\.com/, 'leak: SMOKE_TO recipient value')
+  } finally {
+    cleanup(r.dir)
+  }
+})
+
+test('artifact integrity — MULTITABLE_EMAIL_SMTP_HOST/USER/FROM/PASSWORD real env names never leak (release:phase3 aggregator)', () => {
+  // Cross-check the aggregator path: same env vars should not survive
+  // into the aggregator artifact either, even though aggregator output
+  // adds a children array on top of sub-gate state.
+  const env = {
+    MULTITABLE_EMAIL_SMTP_HOST: 'smtp-aggregator-leak.example.com',
+    MULTITABLE_EMAIL_SMTP_USER: 'aggregator-smtp-user',
+    MULTITABLE_EMAIL_SMTP_PASSWORD: 'aggregatorSmtpPw88',
+    MULTITABLE_EMAIL_SMTP_FROM: 'aggregator-from@example.com',
+    MULTITABLE_EMAIL_SMOKE_TO: 'aggregator-to@example.com',
+  }
+  const r = runGate('release:phase3', { env })
+  try {
+    const all = `${r.stdout}\n${r.stderr}\n${r.json ?? ''}\n${r.md ?? ''}`
+    assert.doesNotMatch(all, /smtp-aggregator-leak\.example\.com/)
+    assert.doesNotMatch(all, /aggregator-smtp-user/)
+    assert.doesNotMatch(all, /aggregatorSmtpPw88/)
+    assert.doesNotMatch(all, /aggregator-from@example\.com/)
+    assert.doesNotMatch(all, /aggregator-to@example\.com/)
+  } finally {
+    cleanup(r.dir)
+  }
+})

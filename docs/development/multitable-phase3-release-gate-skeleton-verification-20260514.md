@@ -14,7 +14,7 @@
 
 **PASS / skeleton landing**.
 
-- 33 / 33 focused tests PASS via `node --test`.
+- 37 / 37 focused tests PASS via `node --test`.
 - Four new `verify:multitable-*` package scripts wired up and each
   exits **2** (BLOCKED) on a clean env, as required by the
   Activation Constraints in the plan.
@@ -49,33 +49,38 @@ node --test \
 Result:
 
 ```text
-ℹ tests 33
-ℹ pass 33
+ℹ tests 37
+ℹ pass 37
 ℹ fail 0
-ℹ duration_ms ~280
+ℹ duration_ms ~350
 ```
 
 Test breakdown:
 
-- `multitable-phase3-release-gate-redact.test.mjs` — 16 tests:
+- `multitable-phase3-release-gate-redact.test.mjs` — 19 tests:
   Bearer, JWT, DingTalk `SEC`, `sk-` API key, `access_token=` URL,
   env-style `*_API_KEY` / `*_CLIENT_SECRET` / `*_TOKEN` / `*_SECRET`
-  / `*_PASSWORD`, SMTP credentials, DingTalk robot webhook URL,
-  postgres URI, mysql URI, structured-field masking by key name,
-  recipient arrays, nested objects, no-leak via free-text fields,
-  null / undefined safety.
+  / `*_PASSWORD`, SMTP credentials (bare form), **project-prefixed
+  `MULTITABLE_EMAIL_SMTP_HOST/USER/PASSWORD/FROM/PORT`**,
+  **`MULTITABLE_EMAIL_SMOKE_TO/SUBJECT` recipient envelope**,
+  DingTalk robot webhook URL, postgres URI, mysql URI,
+  structured-field masking by key name, recipient arrays, nested
+  objects, no-leak via free-text fields, null / undefined safety.
 - `multitable-phase3-release-gate-report.test.mjs` — 5 tests:
   schema version stamp, redaction integration in buildReport, MD
   rendering for sub-gates and aggregators, disk-output integrity
   (read back report.json + report.md, assert no leaks of original
   secret values, assert replacement markers present).
-- `multitable-phase3-release-gate.test.mjs` — 12 tests: in-process
+- `multitable-phase3-release-gate.test.mjs` — 14 tests: in-process
   blocked behavior, in-process "env present but still blocked"
   D0 behavior, in-process aggregator BLOCKED-not-FAIL invariant,
   spawn-based per-sub-gate exit code, spawn-based aggregator exit
   code, `--allow-blocked` override semantics, unknown-gate
   rejection, artifact-integrity for sub-gate, artifact-integrity
-  for aggregator.
+  for aggregator, **artifact-integrity for
+  `MULTITABLE_EMAIL_SMTP_HOST/USER/PASSWORD/FROM` plus
+  `MULTITABLE_EMAIL_SMOKE_TO` real env names — perf:large-table
+  sub-gate path**, **same for release:phase3 aggregator path**.
 
 ## V3 — Exit-code contract (end-to-end via spawn)
 
@@ -112,14 +117,38 @@ Result:
 ```text
 ✔ artifact integrity — stdout + stderr + report.json + report.md never leak env-supplied secrets
 ✔ artifact integrity — release:phase3 aggregator does not leak env-supplied secrets
+✔ artifact integrity — MULTITABLE_EMAIL_SMTP_HOST/USER/FROM/PASSWORD real env names never leak (perf:large-table sub-gate)
+✔ artifact integrity — MULTITABLE_EMAIL_SMTP_HOST/USER/FROM/PASSWORD real env names never leak (release:phase3 aggregator)
 ```
 
-The artifact-integrity tests inject five secret-shaped env vars
-(`MULTITABLE_PERF_TARGET_DB`, `OPENAI_API_KEY`,
+The first two artifact-integrity tests inject five secret-shaped env
+vars (`MULTITABLE_PERF_TARGET_DB`, `OPENAI_API_KEY`,
 `DINGTALK_CLIENT_SECRET`, `SMTP_PASSWORD`, `SMTP_HOST`, `SMTP_USER`),
 spawn the gate, capture stdout + stderr + report.json + report.md,
-concatenate, and assert that no original secret value substring
-appears anywhere.
+concatenate, and assert no original secret value substring appears
+anywhere.
+
+The third and fourth tests use the **real env var names** consumed by
+`scripts/ops/multitable-email-real-send-smoke.ts`:
+
+- `MULTITABLE_EMAIL_SMTP_HOST=smtp.privateops.example.com`
+- `MULTITABLE_EMAIL_SMTP_USER=privateops-smtp-user`
+- `MULTITABLE_EMAIL_SMTP_PASSWORD=privateOpsSmtpPw99`
+- `MULTITABLE_EMAIL_SMTP_FROM=private-from-addr@example.com`
+- `MULTITABLE_EMAIL_SMTP_PORT=465`
+- `MULTITABLE_EMAIL_SMOKE_TO=private-recipient@example.com`
+
+The third test asserts these values do not appear in the
+`perf:large-table` sub-gate artifact stream; the fourth makes the
+same assertion against the `release:phase3` aggregator artifact
+stream. This closes the gap surfaced during pre-implementation
+review where the original SMTP pattern only matched the bare
+`SMTP_*` prefix (because of a `\b` word-boundary tie between
+underscores) and missed the project's `MULTITABLE_EMAIL_SMTP_*`
+namespace. The redaction helper now accepts any uppercase namespace
+prefix terminating in `SMTP_<HOST|USER|PASSWORD|PORT|FROM>`, plus
+adds a dedicated `MULTITABLE_EMAIL_SMOKE_(?:TO|FROM|SUBJECT)`
+pattern for the recipient and subject envelope fields.
 
 ## V5 — Sample blocked aggregator artifact (release:phase3)
 

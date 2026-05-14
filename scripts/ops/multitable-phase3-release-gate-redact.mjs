@@ -23,7 +23,17 @@ const STRING_PATTERNS = [
     '$1$2$3<redacted>$3',
   ],
   [
-    /\b(SMTP_(?:USER|PASS|PASSWORD|HOST|PORT|FROM))(\s*[:=]\s*)("?)([^&\s"'<>]+)\3/g,
+    // Matches SMTP_*, MULTITABLE_EMAIL_SMTP_*, and any other uppercase
+    // env namespace prefix terminating in SMTP_<HOST|USER|PASS|PASSWORD|PORT|FROM>.
+    // The optional prefix is greedy on word chars; the SMTP_ segment is
+    // required so unrelated env vars are not redacted.
+    /\b((?:[A-Z][A-Z0-9_]*_)?SMTP_(?:USER|PASS|PASSWORD|HOST|PORT|FROM))(\s*[:=]\s*)("?)([^&\s"'<>]+)\3/g,
+    '$1$2$3<redacted>$3',
+  ],
+  [
+    // Matches MULTITABLE_EMAIL_SMOKE_TO / FROM / SUBJECT for the recipient
+    // and subject envelope fields used by the email real-send smoke harness.
+    /\b(MULTITABLE_EMAIL_SMOKE_(?:TO|FROM|SUBJECT))(\s*[:=]\s*)("?)([^&\s"'<>]+)\3/g,
     '$1$2$3<redacted>$3',
   ],
   [

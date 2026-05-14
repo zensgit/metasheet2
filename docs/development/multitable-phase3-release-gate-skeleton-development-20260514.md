@@ -32,10 +32,14 @@ queue. Provides:
   `scripts/ops/multitable-phase3-release-gate-report.mjs` that runs
   every report through the redaction helper before persisting to
   disk.
-- Three test files exercising redaction (16 cases), report writer
-  (5 cases), and the runner end-to-end (12 cases including the
-  artifact-integrity test that concatenates stdout + stderr +
-  report.json + report.md and asserts no env-supplied secret leaks).
+- Three test files exercising redaction (19 cases), report writer
+  (5 cases), and the runner end-to-end (14 cases including four
+  artifact-integrity tests that concatenate stdout + stderr +
+  report.json + report.md and assert no env-supplied secret leaks
+  for both generic secret-shaped env vars and the real
+  `MULTITABLE_EMAIL_SMTP_HOST/USER/PASSWORD/FROM` plus
+  `MULTITABLE_EMAIL_SMOKE_TO` env names used by the existing
+  `multitable-email-real-send-smoke.ts` harness).
 - Four new `package.json` scripts:
   - `verify:multitable-release:phase3`
   - `verify:multitable-perf:large-table`
@@ -108,7 +112,7 @@ is wired in by a follow-up PR.
 
 ## Redaction coverage
 
-The shared helper covers 11 string-pattern classes:
+The shared helper covers 12 string-pattern classes:
 
 1. `Bearer <token>` HTTP auth header
 2. JWT (`eyJ...`-prefixed)
@@ -120,9 +124,15 @@ The shared helper covers 11 string-pattern classes:
 8. Generic env-style `*_API_KEY` / `*_CLIENT_SECRET` / `*_TOKEN` /
    `*_SECRET` / `*_PASSWORD` assignments
 9. `SMTP_USER` / `SMTP_PASS` / `SMTP_PASSWORD` / `SMTP_HOST` /
-   `SMTP_PORT` / `SMTP_FROM` assignments
-10. `postgres://user:pass@host` URI credentials
-11. `mysql://user:pass@host` URI credentials
+   `SMTP_PORT` / `SMTP_FROM` assignments — also matches when prefixed
+   by any uppercase namespace (e.g.
+   `MULTITABLE_EMAIL_SMTP_HOST`, the real env name used by
+   `scripts/ops/multitable-email-real-send-smoke.ts`)
+10. `MULTITABLE_EMAIL_SMOKE_TO` / `MULTITABLE_EMAIL_SMOKE_FROM` /
+    `MULTITABLE_EMAIL_SMOKE_SUBJECT` recipient and subject envelope
+    fields used by the email real-send smoke harness
+11. `postgres://user:pass@host` URI credentials
+12. `mysql://user:pass@host` URI credentials
 
 Plus a structured-field allowlist masking 19 well-known sensitive
 object keys (`authToken`, `apiKey`, `clientSecret`, `password`,

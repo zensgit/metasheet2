@@ -71,6 +71,36 @@ test('redactString masks SMTP credentials in env format', () => {
   assert.doesNotMatch(out, /mySmtpPw99|admin@example\.com|smtp\.example\.com/)
 })
 
+test('redactString masks MULTITABLE_EMAIL_SMTP_* project-prefixed env names', () => {
+  const out = redactString(
+    [
+      'MULTITABLE_EMAIL_SMTP_HOST=smtp.example.com',
+      'MULTITABLE_EMAIL_SMTP_USER=smtp-user',
+      'MULTITABLE_EMAIL_SMTP_PASSWORD=smtp-password-secret',
+      'MULTITABLE_EMAIL_SMTP_FROM=ops-private@example.com',
+      'MULTITABLE_EMAIL_SMTP_PORT=587',
+    ].join('\n'),
+  )
+  assert.match(out, /MULTITABLE_EMAIL_SMTP_HOST=<redacted>/)
+  assert.match(out, /MULTITABLE_EMAIL_SMTP_USER=<redacted>/)
+  assert.match(out, /MULTITABLE_EMAIL_SMTP_PASSWORD=<redacted>/)
+  assert.match(out, /MULTITABLE_EMAIL_SMTP_FROM=<redacted>/)
+  assert.match(out, /MULTITABLE_EMAIL_SMTP_PORT=<redacted>/)
+  assert.doesNotMatch(
+    out,
+    /smtp\.example\.com|smtp-user|smtp-password-secret|ops-private@example\.com/,
+  )
+})
+
+test('redactString masks MULTITABLE_EMAIL_SMOKE_TO recipient env name', () => {
+  const out = redactString(
+    'MULTITABLE_EMAIL_SMOKE_TO=recipient-private@example.com\nMULTITABLE_EMAIL_SMOKE_SUBJECT=hello world',
+  )
+  assert.match(out, /MULTITABLE_EMAIL_SMOKE_TO=<redacted>/)
+  assert.match(out, /MULTITABLE_EMAIL_SMOKE_SUBJECT=<redacted>/)
+  assert.doesNotMatch(out, /recipient-private@example\.com|hello world/)
+})
+
 test('redactString masks DingTalk robot webhook URL', () => {
   const out = redactString(
     'webhook=https://oapi.dingtalk.com/robot/send?access_token=abc123xyz456',
