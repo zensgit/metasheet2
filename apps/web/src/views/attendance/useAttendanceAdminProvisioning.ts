@@ -1,7 +1,7 @@
 import { computed, reactive, ref, watch, type Ref } from 'vue'
 import { apiFetch } from '../../utils/api'
 
-type ProvisionRole = 'employee' | 'approver' | 'admin'
+type ProvisionRole = 'employee' | 'approver' | 'importer' | 'admin'
 type ProvisionStatusKind = 'info' | 'error'
 type Translate = (en: string, zh: string) => string
 
@@ -61,7 +61,8 @@ const PROVISION_STATUS_TIMEOUT_MS = 6000
 const PROVISION_ROLE_PERMISSIONS: Record<ProvisionRole, string[]> = {
   employee: ['attendance:read', 'attendance:write'],
   approver: ['attendance:read', 'attendance:approve'],
-  admin: ['attendance:read', 'attendance:write', 'attendance:approve', 'attendance:admin'],
+  importer: ['attendance:read', 'attendance:import'],
+  admin: ['attendance:read', 'attendance:write', 'attendance:approve', 'attendance:import', 'attendance:admin'],
 }
 
 function setTimedMessage(messageRef: Ref<string>, kindRef: Ref<ProvisionStatusKind>, message: string, kind: ProvisionStatusKind) {

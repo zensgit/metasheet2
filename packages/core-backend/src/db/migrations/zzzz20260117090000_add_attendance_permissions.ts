@@ -14,6 +14,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
           ('attendance:read', 'Attendance Read', 'Read attendance records and summaries'),
           ('attendance:write', 'Attendance Write', 'Create attendance punches and adjustment requests'),
           ('attendance:approve', 'Attendance Approve', 'Approve or reject attendance adjustments'),
+          ('attendance:import', 'Attendance Import', 'Import attendance records and manage import batches'),
           ('attendance:admin', 'Attendance Admin', 'Manage attendance rules, settings, and schedules')
         ON CONFLICT (code) DO NOTHING;
       END IF;
@@ -37,6 +38,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
           ('admin', 'attendance:read'),
           ('admin', 'attendance:write'),
           ('admin', 'attendance:approve'),
+          ('admin', 'attendance:import'),
           ('admin', 'attendance:admin')
         ON CONFLICT DO NOTHING;
       END IF;
@@ -57,6 +59,7 @@ export async function down(db: Kysely<unknown>): Promise<void> {
           'attendance:read',
           'attendance:write',
           'attendance:approve',
+          'attendance:import',
           'attendance:admin'
         );
       END IF;
@@ -75,6 +78,7 @@ export async function down(db: Kysely<unknown>): Promise<void> {
           'attendance:read',
           'attendance:write',
           'attendance:approve',
+          'attendance:import',
           'attendance:admin'
         );
       END IF;

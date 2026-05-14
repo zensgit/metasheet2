@@ -30,6 +30,7 @@ async function main() {
       ['attendance:read', 'Attendance Read', 'Read attendance data'],
       ['attendance:write', 'Attendance Write', 'Create attendance punches and requests'],
       ['attendance:approve', 'Attendance Approve', 'Approve attendance adjustment requests'],
+      ['attendance:import', 'Attendance Import', 'Import attendance records and batches'],
       ['attendance:admin', 'Attendance Admin', 'Manage attendance rules'],
     ]
     for (const [code, name, desc] of perms) {
