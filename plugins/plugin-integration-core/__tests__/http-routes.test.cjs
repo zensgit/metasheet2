@@ -634,7 +634,7 @@ async function testDiscoveryRoutes() {
     adapterRegistry: {
       listAdapterKinds() {
         calls.push(['listAdapterKinds'])
-        return ['http', 'erp:k3-wise-sqlserver', 'custom:unknown']
+        return ['http', 'erp:k3-wise-sqlserver', 'metasheet:staging', 'custom:unknown']
       },
       createAdapter(input) {
         calls.push(['createAdapter', input])
@@ -697,6 +697,15 @@ async function testDiscoveryRoutes() {
       hiddenByDefault: true,
       normalUiDirectCoreTableWrites: false,
     },
+  })
+  const stagingMetadata = res.body.data.find((adapter) => adapter.kind === 'metasheet:staging')
+  assert.equal(stagingMetadata.label, 'MetaSheet staging multitable')
+  assert.equal(stagingMetadata.advanced, false, 'MetaSheet staging source is not hidden as advanced')
+  assert.deepEqual(stagingMetadata.roles, ['source'])
+  assert.deepEqual(stagingMetadata.guardrails.read, {
+    hostOwned: true,
+    dryRunFriendly: true,
+    noExternalNetwork: true,
   })
   const unknownMetadata = res.body.data.find((adapter) => adapter.kind === 'custom:unknown')
   assert.equal(unknownMetadata.label, 'custom:unknown')

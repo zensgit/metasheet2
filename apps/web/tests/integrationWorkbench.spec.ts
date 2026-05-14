@@ -11,6 +11,7 @@ import {
   previewIntegrationTemplate,
   runIntegrationPipeline,
   testExternalSystemConnection,
+  upsertWorkbenchExternalSystem,
   upsertIntegrationPipeline,
 } from '../src/services/integration/workbench'
 
@@ -47,6 +48,45 @@ describe('integration workbench service', () => {
       }
       if (url === '/api/integration/external-systems?tenantId=default') {
         return jsonResponse([{ id: 'sys_1', name: 'HTTP source', kind: 'http', role: 'bidirectional', status: 'active' }])
+      }
+      if (url === '/api/integration/external-systems') {
+        expect(init?.method).toBe('POST')
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          tenantId: 'default',
+          workspaceId: null,
+          projectId: 'project_1',
+          id: 'metasheet_staging_project_1',
+          name: 'MetaSheet staging 多维表',
+          kind: 'metasheet:staging',
+          role: 'source',
+          status: 'active',
+          config: {
+            projectId: 'project_1',
+            objects: {
+              standard_materials: {
+                sheetId: 'sheet_materials',
+                fields: ['code', 'name'],
+              },
+            },
+          },
+          capabilities: {
+            read: true,
+            stagingSource: true,
+            dryRunFriendly: true,
+          },
+        })
+        return jsonResponse({
+          id: 'metasheet_staging_project_1',
+          tenantId: 'default',
+          workspaceId: null,
+          projectId: 'project_1',
+          name: 'MetaSheet staging 多维表',
+          kind: 'metasheet:staging',
+          role: 'source',
+          status: 'active',
+          config: JSON.parse(String(init?.body)).config,
+          capabilities: JSON.parse(String(init?.body)).capabilities,
+        })
       }
       if (url === '/api/integration/external-systems/sys%201/objects?tenantId=default') {
         return jsonResponse([{ name: 'materials', label: 'Materials', operations: ['read'] }])
@@ -143,6 +183,34 @@ describe('integration workbench service', () => {
 
     await expect(listIntegrationAdapters()).resolves.toHaveLength(1)
     await expect(listWorkbenchExternalSystems({ tenantId: 'default' })).resolves.toHaveLength(1)
+    await expect(upsertWorkbenchExternalSystem({
+      tenantId: 'default',
+      workspaceId: null,
+      projectId: 'project_1',
+      id: 'metasheet_staging_project_1',
+      name: 'MetaSheet staging 多维表',
+      kind: 'metasheet:staging',
+      role: 'source',
+      status: 'active',
+      config: {
+        projectId: 'project_1',
+        objects: {
+          standard_materials: {
+            sheetId: 'sheet_materials',
+            fields: ['code', 'name'],
+          },
+        },
+      },
+      capabilities: {
+        read: true,
+        stagingSource: true,
+        dryRunFriendly: true,
+      },
+    })).resolves.toMatchObject({
+      id: 'metasheet_staging_project_1',
+      kind: 'metasheet:staging',
+      role: 'source',
+    })
     await expect(listExternalSystemObjects('sys 1', { tenantId: 'default' })).resolves.toHaveLength(1)
     await expect(getExternalSystemSchema('sys 1', { tenantId: 'default', object: 'materials' })).resolves.toMatchObject({
       object: 'materials',

@@ -44,6 +44,18 @@ export interface WorkbenchExternalSystem {
   lastError?: string | null
 }
 
+export interface WorkbenchExternalSystemUpsertRequest extends IntegrationScope {
+  id?: string
+  projectId?: string | null
+  name: string
+  kind: string
+  role: 'source' | 'target' | 'bidirectional'
+  status?: 'active' | 'inactive' | 'error'
+  config?: Record<string, unknown>
+  capabilities?: Record<string, unknown>
+  credentials?: unknown
+}
+
 export interface IntegrationConnectionTestResult {
   ok: boolean
   status?: string | number
@@ -310,6 +322,16 @@ export async function listWorkbenchExternalSystems(scope: IntegrationScope = {})
   const response = await apiFetch(`/api/integration/external-systems${query ? `?${query}` : ''}`)
   const data = await parseIntegrationResponse<WorkbenchExternalSystem[]>(response)
   return Array.isArray(data) ? data : []
+}
+
+export async function upsertWorkbenchExternalSystem(
+  payload: WorkbenchExternalSystemUpsertRequest,
+): Promise<WorkbenchExternalSystem> {
+  const response = await apiFetch('/api/integration/external-systems', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+  return parseIntegrationResponse<WorkbenchExternalSystem>(response)
 }
 
 export async function listExternalSystemObjects(

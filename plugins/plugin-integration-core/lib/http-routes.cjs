@@ -306,6 +306,24 @@ const ADAPTER_METADATA = {
       },
     },
   },
+  'metasheet:staging': {
+    label: 'MetaSheet staging multitable',
+    roles: ['source'],
+    advanced: false,
+    guardrails: {
+      read: {
+        hostOwned: true,
+        dryRunFriendly: true,
+        noExternalNetwork: true,
+      },
+      write: {
+        supported: false,
+      },
+      ui: {
+        recommendedForPreSourceDryRun: true,
+      },
+    },
+  },
 }
 
 function redactSecretText(value) {
