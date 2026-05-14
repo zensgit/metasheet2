@@ -26,7 +26,7 @@ Result:
 
 ```text
 Test Files  2 passed (2)
-Tests       5 passed (5)
+Tests       6 passed (6)
 ```
 
 Coverage:
@@ -41,8 +41,24 @@ Coverage:
 - Source-empty state explains PLM / HTTP / SQL source onboarding.
 - Dry-run readiness checklist reports missing prerequisites.
 - Dry-run is disabled when no readable source exists.
+- Error-state source and target systems are not treated as dry-run ready.
 - Saved pipeline path reports `已满足 dry-run 前置条件`.
 - K3 WISE setup page tests remain green.
+
+## Review Hardening Coverage
+
+The focused workbench test now includes an error-state source and an
+error-state target:
+
+- source system `status: error` with a generic network timeout is shown as
+  `异常：network timeout`;
+- target system `status: error` with a generic ERP endpoint failure is shown as
+  `异常：ERP endpoint unavailable`;
+- neither selected system satisfies dry-run readiness;
+- the dry-run button remains disabled.
+
+This covers the reviewer concern that selected-but-broken systems should not be
+reported as ready.
 
 ## Production Build
 

@@ -581,4 +581,63 @@ describe('IntegrationWorkbenchView', () => {
     expect((container.querySelector('[data-testid="show-advanced-connectors"]') as HTMLInputElement).checked).toBe(true)
     expect(container.textContent).toContain('SQL source 需要部署 allowlist queryExecutor 后才能读取')
   })
+
+  it('does not mark error-state source or target systems as dry-run ready', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'http', label: 'HTTP API', roles: ['source', 'target'], supports: ['read', 'upsert'], advanced: false },
+          { kind: 'erp:k3-wise-webapi', label: 'K3 WISE WebAPI', roles: ['target'], supports: ['upsert'], advanced: false },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') {
+        return jsonResponse([
+          {
+            id: 'plm_error',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'PLM Source Error',
+            kind: 'http',
+            role: 'source',
+            status: 'error',
+            lastError: 'network timeout',
+          },
+          {
+            id: 'k3_error',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'K3 Target Error',
+            kind: 'erp:k3-wise-webapi',
+            role: 'target',
+            status: 'error',
+            lastError: 'ERP endpoint unavailable',
+          },
+        ])
+      }
+      if (url === '/api/integration/staging/descriptors') {
+        return jsonResponse([])
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi()
+
+    expect(container.textContent).toContain('异常：network timeout')
+    expect(container.textContent).toContain('异常：ERP endpoint unavailable')
+    expect(container.textContent).toContain('还缺')
+    expect(container.textContent).not.toContain('已满足 dry-run 前置条件')
+    expect((container.querySelector('[data-testid="run-dry-run"]') as HTMLButtonElement).disabled).toBe(true)
+  })
 })

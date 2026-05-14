@@ -47,7 +47,7 @@ The existing loaded counts are now clickable. Expanding the overview shows:
 
 - configured external systems, their roles, kinds, and connection states;
 - available adapters, including whether each is advanced;
-- staging multitable descriptors and whether each has an open link.
+- staging multitable descriptors and whether each has an `打开多维表` link.
 
 When a configured system has a known runtime blocker, the overview shows it
 inline instead of letting the operator infer it from a failed dry-run.
@@ -97,6 +97,20 @@ message:
 
 The dry-run button and Save-only button are disabled until the checklist is
 complete. Save-only still also requires explicit operator opt-in.
+
+### Review hardening
+
+Reviewer feedback tightened this slice in three places:
+
+- selected source and target systems must be `active` before they can satisfy
+  dry-run readiness;
+- error-state systems show their actual connection status instead of a generic
+  selected-state message;
+- SQL executor-missing guidance is only applied to K3 SQL Server connections
+  whose error text specifically indicates a missing executor/injection issue.
+
+The visible field-count labels in the Data Factory cards and inventory overview
+were also normalized to Chinese copy.
 
 ## Files Changed
 

@@ -86,8 +86,8 @@
           <ul class="integration-workbench__inventory-list">
             <li v-for="descriptor in stagingDatasetCards" :key="descriptor.id">
               <strong>{{ descriptor.name }}</strong>
-              <span>{{ descriptor.area }} · {{ descriptor.fieldCount }} fields</span>
-              <small>{{ descriptor.openLink ? '可打开多维表' : '等待安装后返回 open link' }}</small>
+              <span>{{ descriptor.area }} · {{ descriptor.fieldCount }} 个字段</span>
+              <small>{{ descriptor.openLink ? '可打开多维表' : '等待安装后返回打开链接' }}</small>
             </li>
           </ul>
         </div>
@@ -238,7 +238,7 @@
           </div>
           <p>{{ sourceDatasetDescription }}</p>
           <div class="integration-workbench__metric-row">
-            <span>{{ sourceSchema.fields.length }} fields</span>
+            <span>{{ sourceSchema.fields.length }} 个字段</span>
             <span>{{ sourceConnectionLabel }}</span>
           </div>
         </article>
@@ -250,7 +250,7 @@
           </div>
           <p>原始区、清洗区和回写区都在多维表中呈现，业务人员不需要直接维护 JSON。</p>
           <div class="integration-workbench__metric-row">
-            <span>{{ stagingDescriptors.length }} tables</span>
+            <span>{{ stagingDescriptors.length }} 张表</span>
             <span>{{ selectedStagingDescriptor ? getStagingAreaLabel(selectedStagingDescriptor.id) : '待选择' }}</span>
           </div>
         </article>
@@ -262,8 +262,8 @@
           </div>
           <p>{{ targetDatasetDescription }}</p>
           <div class="integration-workbench__metric-row">
-            <span>{{ targetSchema.fields.length }} fields</span>
-            <span>{{ requiredTargetFieldCount }} required</span>
+            <span>{{ targetSchema.fields.length }} 个字段</span>
+            <span>{{ requiredTargetFieldCount }} 个必填</span>
           </div>
         </article>
       </div>
@@ -273,7 +273,7 @@
           <div>
             <strong>{{ descriptor.name }}</strong>
             <p>{{ descriptor.description }}</p>
-            <small>{{ descriptor.id }} · {{ descriptor.fieldCount }} fields · {{ descriptor.area }}</small>
+            <small>{{ descriptor.id }} · {{ descriptor.fieldCount }} 个字段 · {{ descriptor.area }}</small>
           </div>
           <a
             v-if="descriptor.openLink"
@@ -772,8 +772,11 @@ const dryRunReadinessItems = computed(() => [
   {
     id: 'source-system',
     label: '选择可读取的数据源',
-    ready: Boolean(sourceSystemId.value && selectedSourceSystem.value && !sourceRuntimeBlocker.value),
-    detail: sourceRuntimeBlocker.value || (sourceSystemId.value ? '数据源已选择' : '还没有选择数据源；也可以先使用 K3 预设配置目标，再补来源。'),
+    ready: Boolean(sourceSystemId.value && selectedSourceSystem.value?.status === 'active' && !sourceRuntimeBlocker.value),
+    detail: sourceRuntimeBlocker.value
+      || (selectedSourceSystem.value && selectedSourceSystem.value.status !== 'active'
+        ? connectionStatusLabel(selectedSourceSystem.value)
+        : (sourceSystemId.value ? '数据源已选择且状态可用' : '还没有选择数据源；也可以先使用 K3 预设配置目标，再补来源。')),
   },
   {
     id: 'source-object',
@@ -784,8 +787,10 @@ const dryRunReadinessItems = computed(() => [
   {
     id: 'target-system',
     label: '选择目标系统',
-    ready: Boolean(targetSystemId.value),
-    detail: targetSystemId.value ? '目标系统已选择' : '请选择 K3 WebAPI 或其他可写目标。',
+    ready: Boolean(targetSystemId.value && selectedTargetSystem.value?.status === 'active'),
+    detail: selectedTargetSystem.value && selectedTargetSystem.value.status !== 'active'
+      ? connectionStatusLabel(selectedTargetSystem.value)
+      : (targetSystemId.value ? '目标系统已选择且状态可用' : '请选择 K3 WebAPI 或其他可写目标。'),
   },
   {
     id: 'target-object',
@@ -838,10 +843,10 @@ function isAdvancedSystem(system: WorkbenchExternalSystem): boolean {
 function runtimeBlockerForSystem(system: WorkbenchExternalSystem | null): string {
   if (!system) return ''
   const errorText = system.lastError || ''
-  if (/queryExecutor/i.test(errorText)) {
+  if (system.kind === 'erp:k3-wise-sqlserver' && /queryExecutor|executor|injected|注入|执行器/i.test(errorText)) {
     return 'SQL 连接已配置，但当前部署未注入 SQL 执行器；可保留为高级连接，暂不能作为可读 source 执行 dry-run。'
   }
-  if (system.kind === 'erp:k3-wise-sqlserver' && system.status === 'error') {
+  if (system.kind === 'erp:k3-wise-sqlserver' && system.status === 'error' && !errorText) {
     return 'K3 SQL Server 只读通道需要部署 allowlist queryExecutor 后才能读取样本或作为 source。'
   }
   return ''
