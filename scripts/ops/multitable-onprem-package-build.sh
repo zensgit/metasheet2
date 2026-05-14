@@ -79,6 +79,8 @@ REQUIRED_PATHS=(
   "docs/development/data-factory-postdeploy-smoke-verification-20260514.md"
   "docs/development/data-factory-adapter-discovery-postdeploy-development-20260514.md"
   "docs/development/data-factory-adapter-discovery-postdeploy-verification-20260514.md"
+  "docs/development/data-factory-postdeploy-summary-adapter-details-development-20260514.md"
+  "docs/development/data-factory-postdeploy-summary-adapter-details-verification-20260514.md"
   "docs/development/onprem-migration-gap-guard-development-20260514.md"
   "docs/development/onprem-migration-gap-guard-verification-20260514.md"
   "docker/app.env.example"

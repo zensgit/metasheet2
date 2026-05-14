@@ -324,6 +324,44 @@ test('renders staging missing field details for failed descriptor checks', async
   }
 })
 
+test('renders Data Factory adapter metadata drift details', async () => {
+  const outDir = makeTmpDir()
+  const evidencePath = path.join(outDir, 'evidence.json')
+  try {
+    writeFileSync(evidencePath, `${JSON.stringify({
+      ok: false,
+      baseUrl: 'http://127.0.0.1:8081',
+      authenticated: true,
+      summary: { pass: 6, skipped: 0, fail: 1 },
+      checks: [
+        {
+          id: 'data-factory-adapter-discovery',
+          status: 'fail',
+          details: {
+            invalidAdapters: {
+              'metasheet:staging': {
+                'guardrails.write.supported': 'expected false but got true',
+              },
+              'metasheet:multitable': {
+                roles: 'missing target',
+              },
+            },
+          },
+        },
+      ],
+    })}\n`)
+
+    const result = await runScript(['--input', evidencePath])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /`data-factory-adapter-discovery`: `fail`/)
+    assert.match(result.stdout, /invalidAdapters: metasheet:staging: guardrails\.write\.supported: `expected false but got true`/)
+    assert.match(result.stdout, /metasheet:multitable: roles: `missing target`/)
+  } finally {
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
 test('escapes markdown-breaking values in postdeploy summary output', async () => {
   const outDir = makeTmpDir()
   const evidencePath = path.join(outDir, 'evidence.json')
