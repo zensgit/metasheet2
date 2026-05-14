@@ -21,6 +21,16 @@ function runGate(gate, { env = {}, allowBlocked = false } = {}) {
     'MULTITABLE_PERF_TARGET_DB',
     'MULTITABLE_PERM_MATRIX_CONFIRM',
     'MULTITABLE_AUTOMATION_SOAK_CONFIRM',
+    'MULTITABLE_EMAIL_TRANSPORT',
+    'MULTITABLE_EMAIL_SMTP_HOST',
+    'MULTITABLE_EMAIL_SMTP_PORT',
+    'MULTITABLE_EMAIL_SMTP_USER',
+    'MULTITABLE_EMAIL_SMTP_PASSWORD',
+    'MULTITABLE_EMAIL_SMTP_FROM',
+    'MULTITABLE_EMAIL_REAL_SEND_SMOKE',
+    'CONFIRM_SEND_EMAIL',
+    'MULTITABLE_EMAIL_SMOKE_TO',
+    'MULTITABLE_EMAIL_SMOKE_SUBJECT',
   ]) {
     if (!(key in env)) delete childEnv[key]
   }
@@ -73,17 +83,23 @@ test('executeGate (in-process) still blocks even when env is present at D0', () 
 })
 
 test('executeGate aggregator returns BLOCKED, never FAIL, when children are blocked', () => {
-  const result = executeGate('release:phase3', {})
-  assert.equal(result.status, 'blocked')
-  assert.equal(result.exitCode, 2)
-  assert.notEqual(result.status, 'fail', 'aggregator status must not be fail')
-  assert.notEqual(result.exitCode, 1, 'aggregator must not collapse BLOCKED into FAIL=1')
-  assert.equal(result.children.length, 3)
-  assert.ok(result.children.every((c) => c.status === 'blocked'))
-  assert.ok(result.children.every((c) => c.exitCode === 2))
-  // The reason text explicitly references both BLOCKED and FAIL to document the
-  // non-collapse rule; substring guard is intentionally narrow.
-  assert.match(result.reason, /BLOCKED/)
+  const dir = mkdtempSync(path.join(tmpdir(), 'mt-phase3-gate-inproc-'))
+  try {
+    const result = executeGate('release:phase3', {}, { outputDir: dir })
+    assert.equal(result.status, 'blocked')
+    assert.equal(result.exitCode, 2)
+    assert.notEqual(result.status, 'fail', 'aggregator status must not be fail')
+    assert.notEqual(result.exitCode, 1, 'aggregator must not collapse BLOCKED into FAIL=1')
+    assert.equal(result.children.length, 4)
+    assert.ok(result.children.some((c) => c.gate === 'email:real-send'))
+    assert.ok(result.children.every((c) => c.status === 'blocked'))
+    assert.ok(result.children.every((c) => c.exitCode === 2))
+    // The reason text explicitly references both BLOCKED and FAIL to document the
+    // non-collapse rule; substring guard is intentionally narrow.
+    assert.match(result.reason, /BLOCKED/)
+  } finally {
+    cleanup(dir)
+  }
 })
 
 test('perf:large-table exits 2 (blocked) by default via spawn', () => {
@@ -122,6 +138,24 @@ test('automation:soak exits 2 (blocked) by default via spawn', () => {
   }
 })
 
+test('email:real-send delegates to the existing real-send smoke and exits 2 (blocked) by default via spawn', () => {
+  const r = runGate('email:real-send')
+  try {
+    assert.equal(r.exitCode, 2)
+    const obj = JSON.parse(r.json)
+    assert.equal(obj.status, 'blocked')
+    assert.equal(obj.exitCode, 2)
+    assert.equal(obj.delegatedCommand, 'pnpm verify:multitable-email:real-send')
+    assert.equal(obj.childExitCode, 2)
+    assert.equal(obj.childStatus, 'blocked')
+    assert.match(obj.childReportJson, /real-send-smoke\/report\.json$/)
+    assert.match(obj.childReportMd, /real-send-smoke\/report\.md$/)
+    assert.ok(obj.missingEnv.includes('MULTITABLE_EMAIL_SMOKE_TO'))
+  } finally {
+    cleanup(r.dir)
+  }
+})
+
 test('release:phase3 aggregator exits 2 (blocked) not 1 (fail) via spawn', () => {
   const r = runGate('release:phase3')
   try {
@@ -129,7 +163,11 @@ test('release:phase3 aggregator exits 2 (blocked) not 1 (fail) via spawn', () =>
     const obj = JSON.parse(r.json)
     assert.equal(obj.status, 'blocked')
     assert.equal(obj.exitCode, 2)
-    assert.ok(Array.isArray(obj.children) && obj.children.length === 3)
+    assert.ok(Array.isArray(obj.children) && obj.children.length === 4)
+    const emailChild = obj.children.find((c) => c.gate === 'email:real-send')
+    assert.ok(emailChild)
+    assert.equal(emailChild.delegatedCommand, 'pnpm verify:multitable-email:real-send')
+    assert.match(emailChild.childReportJson, /children\/email-real-send\/real-send-smoke\/report\.json$/)
     assert.ok(obj.children.every((c) => c.status === 'blocked' && c.exitCode === 2))
     assert.match(obj.reason, /BLOCKED/)
   } finally {
@@ -195,6 +233,32 @@ test('artifact integrity — release:phase3 aggregator does not leak env-supplie
     assert.doesNotMatch(all, /sk-aggregatorleak1234567890abcdef/)
     assert.doesNotMatch(all, /aggregatorClientSecretValue/)
     assert.doesNotMatch(all, /aggregatorSmtpPw/)
+  } finally {
+    cleanup(r.dir)
+  }
+})
+
+test('artifact integrity — email:real-send delegate output paths and summary do not leak env-supplied SMTP values', () => {
+  const env = {
+    MULTITABLE_EMAIL_TRANSPORT: 'smtp',
+    MULTITABLE_EMAIL_SMTP_HOST: 'smtp.email-gate-private.example.com',
+    MULTITABLE_EMAIL_SMTP_PORT: '70000',
+    MULTITABLE_EMAIL_SMTP_USER: 'email-gate-private-user',
+    MULTITABLE_EMAIL_SMTP_PASSWORD: 'emailGatePrivatePw99',
+    MULTITABLE_EMAIL_SMTP_FROM: 'email-gate-from-address',
+    MULTITABLE_EMAIL_REAL_SEND_SMOKE: '1',
+    CONFIRM_SEND_EMAIL: '1',
+    MULTITABLE_EMAIL_SMOKE_TO: 'email-gate-to-address',
+  }
+  const r = runGate('email:real-send', { env })
+  try {
+    assert.equal(r.exitCode, 2)
+    const all = `${r.stdout}\n${r.stderr}\n${r.json ?? ''}\n${r.md ?? ''}`
+    assert.doesNotMatch(all, /smtp\.email-gate-private\.example\.com/)
+    assert.doesNotMatch(all, /email-gate-private-user/)
+    assert.doesNotMatch(all, /emailGatePrivatePw99/)
+    assert.doesNotMatch(all, /email-gate-from-address/)
+    assert.doesNotMatch(all, /email-gate-to-address/)
   } finally {
     cleanup(r.dir)
   }
