@@ -299,10 +299,10 @@
               type="button"
               class="integration-workbench__button"
               :disabled="!descriptor.openLink"
-              :data-testid="`use-staging-target-${descriptor.id}`"
+              :data-testid="`use-multitable-target-${descriptor.id}`"
               @click="useStagingAsTarget(descriptor.id)"
             >
-              作为写入目标
+              作为目标多维表
             </button>
           </div>
         </article>
@@ -916,7 +916,7 @@ function stagingSourceSystemId(projectId: string): string {
   return `metasheet_staging_${suffix}`
 }
 
-function stagingTargetSystemId(projectId: string): string {
+function multitableTargetSystemId(projectId: string): string {
   const suffix = (projectId || 'default').replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'default'
   return `metasheet_target_${suffix}`
 }
@@ -938,12 +938,14 @@ function descriptorToSchemaFields(descriptor: IntegrationStagingDescriptor | nul
   }))
 }
 
-function defaultTargetKeyFields(descriptor: IntegrationStagingDescriptor): string[] {
-  const fields = new Set(descriptor.fields)
-  if (descriptor.id === 'bom_cleanse' && fields.has('parentCode') && fields.has('childCode')) return ['parentCode', 'childCode']
-  if (fields.has('code')) return ['code']
-  if (fields.has('externalId')) return ['externalId']
-  if (fields.has('id')) return ['id']
+function defaultMultitableTargetKeyFields(descriptor: IntegrationStagingDescriptor): string[] {
+  const fieldNames = new Set(descriptorToSchemaFields(descriptor).map((field) => field.name))
+  if (fieldNames.has('code')) return ['code']
+  if (fieldNames.has('parentCode') && fieldNames.has('childCode')) {
+    return ['parentCode', 'childCode', ...(fieldNames.has('sequence') ? ['sequence'] : [])]
+  }
+  if (fieldNames.has('externalId')) return ['externalId']
+  if (fieldNames.has('id')) return ['id']
   return []
 }
 
@@ -965,12 +967,12 @@ function buildStagingSourceObjectsConfig(): Record<string, StagingObjectConfig> 
   return objects
 }
 
-function buildStagingTargetObjectsConfig(): Record<string, StagingObjectConfig> {
+function buildMultitableTargetObjectsConfig(): Record<string, StagingObjectConfig> {
   const objects: Record<string, StagingObjectConfig> = {}
   for (const descriptor of stagingDescriptors.value) {
     const target = stagingOpenTargetById.value.get(descriptor.id)
     if (!target?.sheetId) continue
-    const keyFields = defaultTargetKeyFields(descriptor)
+    const keyFields = defaultMultitableTargetKeyFields(descriptor)
     objects[descriptor.id] = {
       name: stagingDatasetCopy[descriptor.id]?.name || descriptor.name,
       sheetId: target.sheetId,
@@ -1000,7 +1002,7 @@ function buildStagingSourceObjects(): IntegrationSystemObject[] {
   })
 }
 
-function buildStagingTargetObjects(): IntegrationSystemObject[] {
+function buildMultitableTargetObjects(): IntegrationSystemObject[] {
   return stagingDescriptors.value.flatMap((descriptor) => {
     const target = stagingOpenTargetById.value.get(descriptor.id)
     if (!target?.sheetId) return []
@@ -1008,7 +1010,7 @@ function buildStagingTargetObjects(): IntegrationSystemObject[] {
       name: descriptor.id,
       label: stagingDatasetCopy[descriptor.id]?.name || descriptor.name,
       operations: ['upsert'],
-      source: 'metasheet:multitable',
+      target: 'metasheet:multitable',
       schema: descriptorToSchemaFields(descriptor),
     }]
   })
@@ -1345,21 +1347,22 @@ async function useStagingAsTarget(objectId: string): Promise<void> {
   const descriptor = stagingDescriptors.value.find((item) => item.id === objectId) || null
   const target = stagingOpenTargetById.value.get(objectId)
   if (!descriptor || !target?.sheetId) {
-    setStatus('请先创建清洗表，确认该 staging 表已有 sheetId / open link 后再作为写入目标。', 'error')
+    setStatus('请先创建清洗表，确认该多维表已有 sheetId / open link 后再作为目标。', 'error')
     return
   }
   const projectId = stagingProjectId.value.trim() || 'default'
-  const objects = buildStagingTargetObjectsConfig()
-  if (!objects[objectId]) {
-    setStatus('当前 staging 表缺少 sheetId，不能作为写入目标。', 'error')
+  const objects = buildMultitableTargetObjectsConfig()
+  const objectConfig = objects[objectId]
+  if (!objectConfig) {
+    setStatus('当前多维表缺少 sheetId，不能作为写回目标。', 'error')
     return
   }
   try {
     const system = await upsertWorkbenchExternalSystem({
       ...currentScope(),
-      id: stagingTargetSystemId(projectId),
+      id: multitableTargetSystemId(projectId),
       projectId,
-      name: 'MetaSheet 写入多维表',
+      name: 'MetaSheet 目标多维表',
       kind: 'metasheet:multitable',
       role: 'target',
       status: 'active',
@@ -1371,12 +1374,13 @@ async function useStagingAsTarget(objectId: string): Promise<void> {
       capabilities: {
         write: true,
         multitableTarget: true,
-        saveOnly: true,
+        append: true,
+        upsert: true,
       },
     })
     replaceSystem(system)
     targetSystemId.value = system.id
-    targetObjects.value = buildStagingTargetObjects()
+    targetObjects.value = buildMultitableTargetObjects()
     targetObjectName.value = objectId
     targetSchema.value = {
       object: objectId,
@@ -1385,12 +1389,12 @@ async function useStagingAsTarget(objectId: string): Promise<void> {
         sheetId: target.sheetId,
         viewId: target.viewId,
         openLink: target.openLink,
-        keyFields: objects[objectId].keyFields || [],
-        mode: objects[objectId].mode || 'append',
+        keyFields: objectConfig.keyFields || [],
+        mode: objectConfig.mode || 'append',
       },
     }
-    seedMappingsFromTargetSchema(targetSchema.value.fields)
-    setStatus(`已将 ${stagingDatasetCopy[objectId]?.name || descriptor.name} 设为写入目标`, 'success')
+    if (mappings.value.length === 0) seedMappingsFromTargetSchema(targetSchema.value.fields)
+    setStatus(`已将 ${stagingDatasetCopy[objectId]?.name || descriptor.name} 设为写回目标`, 'success')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), 'error')
   }

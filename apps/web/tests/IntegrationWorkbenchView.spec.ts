@@ -76,7 +76,7 @@ describe('IntegrationWorkbenchView', () => {
           { kind: 'http', label: 'HTTP API', roles: ['bidirectional'], supports: ['read', 'upsert'], advanced: false },
           { kind: 'erp:k3-wise-sqlserver', label: 'K3 WISE SQL Server Channel', roles: ['source', 'target'], supports: ['read'], advanced: true },
           { kind: 'metasheet:staging', label: 'MetaSheet staging multitable', roles: ['source'], supports: ['read'], advanced: false },
-          { kind: 'metasheet:multitable', label: 'MetaSheet multitable', roles: ['target'], supports: ['upsert'], advanced: false },
+          { kind: 'metasheet:multitable', label: 'MetaSheet multitable', roles: ['target'], supports: ['testConnection', 'listObjects', 'getSchema', 'upsert'], advanced: false },
         ])
       }
       if (url === '/api/integration/external-systems?tenantId=default') {
@@ -395,6 +395,7 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).toContain('BOM 清洗')
     expect(container.textContent).toContain('回写区')
     expect(container.textContent).toContain('HTTP API')
+    expect(container.textContent).toContain('MetaSheet multitable')
     expect(container.textContent).not.toContain('K3 WISE SQL Server Channel')
     expect(container.textContent).toContain('已隐藏 1 个高级连接')
     expect((container.querySelector('[data-testid="staging-sheet"]') as HTMLSelectElement).value).toBe('standard_materials')
@@ -619,7 +620,7 @@ describe('IntegrationWorkbenchView', () => {
     })
     expect(container.textContent).toContain('Save-only 推送已提交')
 
-    ;(container.querySelector('[data-testid="use-staging-target-bom_cleanse"]') as HTMLButtonElement).click()
+    ;(container.querySelector('[data-testid="use-multitable-target-standard_materials"]') as HTMLButtonElement).click()
     await flushUi(10)
     expect(externalSystemBodies).toHaveLength(2)
     expect(externalSystemBodies[1]).toMatchObject({
@@ -627,32 +628,33 @@ describe('IntegrationWorkbenchView', () => {
       tenantId: 'default',
       workspaceId: null,
       projectId: 'project_1',
-      name: 'MetaSheet 写入多维表',
+      name: 'MetaSheet 目标多维表',
       kind: 'metasheet:multitable',
       role: 'target',
       status: 'active',
       capabilities: {
         write: true,
         multitableTarget: true,
-        saveOnly: true,
+        append: true,
+        upsert: true,
       },
     })
     expect(externalSystemBodies[1].config).toMatchObject({
       projectId: 'project_1',
       objects: {
-        bom_cleanse: {
-          sheetId: 'sheet_bom',
-          viewId: 'view_bom',
-          openLink: '/multitable/sheet_bom/view_bom',
-          fields: ['parentCode', 'childCode', 'quantity'],
-          keyFields: ['parentCode', 'childCode'],
+        standard_materials: {
+          sheetId: 'sheet_materials',
+          viewId: 'view_materials',
+          openLink: '/multitable/sheet_materials/view_materials',
+          fields: ['code', 'name'],
+          keyFields: ['code'],
           mode: 'upsert',
         },
       },
     })
     expect((container.querySelector('[data-testid="target-system"]') as HTMLSelectElement).value).toBe('metasheet_target_project_1')
-    expect((container.querySelector('[data-testid="target-object"]') as HTMLSelectElement).value).toBe('bom_cleanse')
-    expect(container.textContent).toContain('已将 BOM 清洗 设为写入目标')
+    expect((container.querySelector('[data-testid="target-object"]') as HTMLSelectElement).value).toBe('standard_materials')
+    expect(container.textContent).toContain('已将 物料清洗 设为写回目标')
   })
 
   it('shows actionable source-empty and dry-run readiness guidance when no readable source exists', async () => {
