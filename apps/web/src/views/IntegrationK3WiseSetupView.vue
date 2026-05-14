@@ -100,15 +100,17 @@
             </div>
             <small>{{ webApiConnectionStatus.message }}</small>
           </div>
-          <button class="k3-setup__btn k3-setup__btn--full" type="button" :disabled="testingWebApi || !form.webApiSystemId" @click="testWebApi">
+          <button class="k3-setup__btn k3-setup__btn--full" type="button" :disabled="webApiTestDisabled" @click="testWebApi">
             {{ testingWebApi ? '测试中' : '测试 WebAPI' }}
           </button>
+          <p v-if="hasUnsavedWebApiConnectionDraft" class="k3-setup__hint">WebAPI 连接配置有未保存改动，请先保存再测试。</p>
           <p class="k3-setup__field-note">
             先保存配置，再测试 WebAPI；测试通过后这里会显示已连接和最近测试时间。
           </p>
-          <button class="k3-setup__btn k3-setup__btn--full" type="button" :disabled="testingSql || !form.sqlSystemId" @click="testSqlServer">
+          <button class="k3-setup__btn k3-setup__btn--full" type="button" :disabled="sqlTestDisabled" @click="testSqlServer">
             {{ testingSql ? '测试中' : '测试 SQL Server' }}
           </button>
+          <p v-if="hasUnsavedSqlConnectionDraft" class="k3-setup__hint">SQL Server 通道配置有未保存改动，请先保存再测试。</p>
           <pre v-if="testResult" class="k3-setup__test-result">{{ testResult }}</pre>
         </div>
 
@@ -622,6 +624,10 @@ import {
   applyExternalSystemToForm,
   buildK3WiseDocumentPayloadPreview,
   buildK3WiseDeployGateChecklist,
+  buildK3WiseSqlConnectionFingerprint,
+  buildK3WiseSqlSystemConnectionFingerprint,
+  buildK3WiseWebApiConnectionFingerprint,
+  buildK3WiseWebApiSystemConnectionFingerprint,
   buildK3WisePipelineObservationQuery,
   buildK3WisePipelinePayloads,
   buildK3WisePipelineRunPayload,
@@ -698,6 +704,19 @@ const observationSummary = computed(() => `${pipelineRuns.value.length} runs / $
 const stagingDescriptorLabel = computed(() => stagingDescriptors.value.length > 0 ? `${stagingDescriptors.value.length} descriptors` : 'not loaded')
 const templatePreviewJson = computed(() => JSON.stringify(buildK3WiseDocumentPayloadPreview(templatePreviewTarget.value), null, 2))
 const selectedWebApiSystem = computed(() => webApiSystems.value.find((system) => system.id === form.webApiSystemId) || null)
+const selectedSqlSystem = computed(() => sqlSystems.value.find((system) => system.id === form.sqlSystemId) || null)
+const hasUnsavedWebApiConnectionDraft = computed(() => {
+  const system = selectedWebApiSystem.value
+  if (!system) return Boolean(form.webApiSystemId)
+  return buildK3WiseWebApiConnectionFingerprint(form) !== buildK3WiseWebApiSystemConnectionFingerprint(system)
+})
+const hasUnsavedSqlConnectionDraft = computed(() => {
+  const system = selectedSqlSystem.value
+  if (!system) return Boolean(form.sqlSystemId)
+  return buildK3WiseSqlConnectionFingerprint(form) !== buildK3WiseSqlSystemConnectionFingerprint(system)
+})
+const webApiTestDisabled = computed(() => Boolean(testingWebApi.value || !form.webApiSystemId || hasUnsavedWebApiConnectionDraft.value))
+const sqlTestDisabled = computed(() => Boolean(testingSql.value || !form.sqlSystemId || hasUnsavedSqlConnectionDraft.value))
 const baseUrlHasK3ApiPath = computed(() => /\/k3api(?:\/|$)/i.test(form.baseUrl.trim()))
 const endpointPathHasK3ApiPath = computed(() => [
   form.tokenPath,
@@ -871,10 +890,16 @@ async function saveConfiguration(): Promise<void> {
     const webApi = await upsertIntegrationSystem(payloads.webApi)
     form.webApiSystemId = webApi.id
     form.webApiHasCredentials = webApi.hasCredentials === true
+    form.authorityCode = ''
+    form.acctId = ''
+    form.username = ''
+    form.password = ''
     if (payloads.sqlServer) {
       const sql = await upsertIntegrationSystem(payloads.sqlServer)
       form.sqlSystemId = sql.id
       form.sqlHasCredentials = sql.hasCredentials === true
+      form.sqlUsername = ''
+      form.sqlPassword = ''
     }
     await loadSystems(true)
     setStatus('K3 WISE 预设配置已保存', 'success')
@@ -886,7 +911,7 @@ async function saveConfiguration(): Promise<void> {
 }
 
 async function testWebApi(): Promise<void> {
-  if (!form.webApiSystemId) return
+  if (!form.webApiSystemId || hasUnsavedWebApiConnectionDraft.value) return
   testingWebApi.value = true
   testResult.value = ''
   try {
@@ -919,7 +944,7 @@ async function testWebApi(): Promise<void> {
 }
 
 async function testSqlServer(): Promise<void> {
-  if (!form.sqlSystemId) return
+  if (!form.sqlSystemId || hasUnsavedSqlConnectionDraft.value) return
   testingSql.value = true
   testResult.value = ''
   try {
@@ -1314,6 +1339,13 @@ onMounted(() => {
 
 .k3-setup__field-note--wide {
   grid-column: 1 / -1;
+}
+
+.k3-setup__hint {
+  margin: 6px 0 0;
+  color: #9a3412;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .k3-setup__hint-warning {
