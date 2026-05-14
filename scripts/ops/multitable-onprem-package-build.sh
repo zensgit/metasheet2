@@ -73,6 +73,8 @@ REQUIRED_PATHS=(
   "docs/development/data-factory-workbench-todo-20260514.md"
   "docs/development/data-factory-workbench-development-20260514.md"
   "docs/development/data-factory-workbench-verification-20260514.md"
+  "docs/development/data-factory-cleansed-export-development-20260514.md"
+  "docs/development/data-factory-cleansed-export-verification-20260514.md"
   "docker/app.env.example"
   "docker/app.env.multitable-onprem.template"
   "ops/nginx/multitable-onprem.conf.example"

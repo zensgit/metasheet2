@@ -361,6 +361,33 @@
         </button>
       </div>
 
+      <div class="integration-workbench__export">
+        <div>
+          <strong>导出清洗结果</strong>
+          <p data-testid="cleansed-export-summary">{{ cleansedExportSummary }}</p>
+        </div>
+        <label>
+          <span>导出格式</span>
+          <select v-model="cleansedExportFormat" data-testid="cleansed-export-format">
+            <option value="csv">CSV</option>
+            <option value="xlsx">Excel (.xlsx)</option>
+          </select>
+        </label>
+        <button
+          type="button"
+          class="integration-workbench__button"
+          data-testid="export-cleansed-result"
+          :disabled="!canExportCleansedResult"
+          @click="exportCleansedResult"
+        >
+          导出
+        </button>
+      </div>
+
+      <div class="integration-workbench__hint" data-testid="data-service-placeholder">
+        发布 API 数据服务暂不开放。本阶段先用多维表清洗、dry-run、CSV / Excel 导出或 Save-only 推送完成闭环。
+      </div>
+
       <pre data-testid="pipeline-result">{{ pipelineResultText }}</pre>
     </section>
 
@@ -425,6 +452,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { buildXlsxBuffer } from '../multitable/import/xlsx-mapping'
 import {
   canReadFromSystem,
   canWriteToSystem,
@@ -448,6 +476,7 @@ import {
   type IntegrationDeadLetter,
   type IntegrationPipelineMode,
   type IntegrationPipelineRun,
+  type IntegrationPipelineRunResult,
   type IntegrationStagingDescriptor,
   type IntegrationStagingInstallResult,
   type IntegrationStagingOpenTarget,
@@ -457,6 +486,7 @@ import {
 
 type WorkbenchSide = 'source' | 'target'
 type TransformFn = '' | 'trim' | 'upper' | 'lower' | 'toNumber' | 'dictMap'
+type ExportFormat = 'csv' | 'xlsx'
 
 interface EditableMapping {
   id: string
@@ -477,6 +507,9 @@ interface StagingDatasetCard {
   fieldCount: number
   openLink: string
 }
+
+type ExportCell = string | number | boolean | null
+type ExportRow = Record<string, ExportCell>
 
 const flowSteps = [
   { title: '1. 连接系统', description: '接入 CRM / PLM / ERP / SRM / HTTP / SQL' },
@@ -550,6 +583,7 @@ const targetSchema = ref<IntegrationObjectSchema>({ object: '', fields: [] })
 const mappings = ref<EditableMapping[]>([])
 const previewText = ref('尚未生成预览')
 const pipelineResultText = ref('尚未执行')
+const lastDryRunResult = ref<IntegrationPipelineRunResult | null>(null)
 const pipelineRuns = ref<IntegrationPipelineRun[]>([])
 const deadLetters = ref<IntegrationDeadLetter[]>([])
 const statusMessage = ref('')
@@ -569,6 +603,7 @@ const installingStaging = ref(false)
 const runningPipeline = ref<'dry-run' | 'run' | ''>('')
 const observingPipeline = ref(false)
 const allowSaveOnlyRun = ref(false)
+const cleansedExportFormat = ref<ExportFormat>('csv')
 const sampleRecordText = ref(JSON.stringify({
   code: ' mat-001 ',
   name: ' Bolt ',
@@ -616,6 +651,12 @@ const stagingDatasetCards = computed<StagingDatasetCard[]>(() => stagingDescript
   }
 }))
 const observationSummary = computed(() => `${pipelineRuns.value.length} runs / ${deadLetters.value.length} open dead letters`)
+const cleansedExportRows = computed(() => buildCleansedExportRows(lastDryRunResult.value))
+const canExportCleansedResult = computed(() => cleansedExportRows.value.length > 0)
+const cleansedExportSummary = computed(() => {
+  if (cleansedExportRows.value.length === 0) return '先运行 dry-run。导出只使用 dry-run preview，不会触发外部系统写入。'
+  return `可导出 ${cleansedExportRows.value.length} 条 dry-run 清洗记录；内容来自已脱敏 preview。`
+})
 const sameSystemNotice = computed(() => {
   if (!sourceSystemId.value || sourceSystemId.value !== targetSystemId.value) return ''
   if (selectedSourceSystem.value?.role === 'bidirectional') {
@@ -690,6 +731,126 @@ function normalizeStagingOpenTargets(result: IntegrationStagingInstallResult): I
       openLink: openLink || buildMultitableOpenLink(sheetId, viewId, target?.baseId || stagingBaseId.value.trim() || null),
     }]
   })
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+const SECRET_EXPORT_KEY_PATTERN = /(^|[._-])(password|passwd|pwd|token|access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?id|api[_-]?key|secret|signature|sign|auth|authorization)([._-]|$)/i
+const SECRET_EXPORT_TEXT_PATTERNS = [
+  /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/ig,
+  /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g,
+  /([?&](?:access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?id|api[_-]?key|secret|signature|sign|auth|password)=)([^&#\s]+)/ig,
+]
+
+function sanitizeExportCell(key: string, value: unknown): ExportCell {
+  if (value === undefined) return null
+  if (SECRET_EXPORT_KEY_PATTERN.test(key)) return '[redacted]'
+  if (value === null || typeof value === 'number' || typeof value === 'boolean') return value
+  const text = typeof value === 'string' ? value : JSON.stringify(value)
+  return SECRET_EXPORT_TEXT_PATTERNS.reduce((current, pattern) => current.replace(pattern, (_match, prefix) => {
+    if (prefix === 'Bearer' || prefix === 'Basic') return `${prefix} [redacted]`
+    if (typeof prefix === 'string' && prefix.startsWith('&')) return `${prefix}[redacted]`
+    if (typeof prefix === 'string' && prefix.startsWith('?')) return `${prefix}[redacted]`
+    return `${prefix || ''}[redacted]`
+  }), text)
+}
+
+function flattenForExport(value: unknown, prefix: string, output: ExportRow = {}): ExportRow {
+  if (!isRecord(value)) {
+    output[prefix] = sanitizeExportCell(prefix, value)
+    return output
+  }
+  for (const [key, child] of Object.entries(value)) {
+    const path = prefix ? `${prefix}.${key}` : key
+    if (isRecord(child)) {
+      flattenForExport(child, path, output)
+    } else if (Array.isArray(child)) {
+      output[path] = sanitizeExportCell(path, child)
+    } else {
+      output[path] = sanitizeExportCell(path, child)
+    }
+  }
+  return output
+}
+
+function buildCleansedExportRows(result: IntegrationPipelineRunResult | null): ExportRow[] {
+  const preview = isRecord(result?.preview) ? result.preview : null
+  const records = Array.isArray(preview?.records) ? preview.records : []
+  return records.filter(isRecord).map((record, index) => ({
+    recordIndex: index + 1,
+    ...flattenForExport(record.source, 'source'),
+    ...flattenForExport(record.transformed, 'cleaned'),
+    ...flattenForExport(record.targetPayload, 'payload'),
+    ...flattenForExport(record.targetRequest, 'request'),
+  }))
+}
+
+function buildExportHeaders(rows: ExportRow[]): string[] {
+  const headers = new Set<string>()
+  for (const row of rows) {
+    for (const key of Object.keys(row)) headers.add(key)
+  }
+  return Array.from(headers)
+}
+
+function csvEscape(value: ExportCell): string {
+  if (value === null || value === undefined) return ''
+  const text = String(value)
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
+}
+
+function downloadBlob(blob: Blob, fileName: string): void {
+  if (typeof document === 'undefined' || typeof URL.createObjectURL !== 'function') {
+    throw new Error('当前环境不支持浏览器下载')
+  }
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = fileName
+  anchor.rel = 'noopener'
+  anchor.style.display = 'none'
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  if (typeof URL.revokeObjectURL === 'function') {
+    window.setTimeout(() => URL.revokeObjectURL(url), 0)
+  }
+}
+
+function timestampForFileName(): string {
+  return new Date().toISOString().replace(/[:.]/g, '-')
+}
+
+async function exportCleansedResult(): Promise<void> {
+  const rows = cleansedExportRows.value
+  if (rows.length === 0) {
+    setStatus('请先运行 dry-run 生成可导出的清洗 preview', 'error')
+    return
+  }
+  const headers = buildExportHeaders(rows)
+  const baseName = `data-factory-cleansed-${savedPipelineId.value.trim() || stagingSheetId.value || 'preview'}-${timestampForFileName()}`
+  try {
+    if (cleansedExportFormat.value === 'xlsx') {
+      const xlsxModule = (await import('xlsx')) as unknown as Parameters<typeof buildXlsxBuffer>[0]
+      const buffer = buildXlsxBuffer(xlsxModule, {
+        sheetName: 'cleansed-preview',
+        headers,
+        rows: rows.map((row) => headers.map((header) => row[header])),
+      })
+      downloadBlob(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `${baseName}.xlsx`)
+    } else {
+      const csv = [
+        headers.map(csvEscape).join(','),
+        ...rows.map((row) => headers.map((header) => csvEscape(row[header])).join(',')),
+      ].join('\n')
+      downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `${baseName}.csv`)
+    }
+    setStatus(`已导出 ${rows.length} 条清洗结果`, 'success')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), 'error')
+  }
 }
 
 function normalizeSystemSelections(): void {
@@ -1066,6 +1227,11 @@ async function executePipeline(dryRun: boolean): Promise<void> {
       sampleLimit: parseOptionalPositiveInteger(pipelineSampleLimit.value),
     }
     const result = await runIntegrationPipeline(pipelineId, payload, dryRun)
+    if (dryRun) {
+      lastDryRunResult.value = result
+    } else {
+      lastDryRunResult.value = null
+    }
     pipelineResultText.value = JSON.stringify({
       action: dryRun ? 'dry-run' : 'save-only-run',
       pipelineId,
@@ -1529,6 +1695,30 @@ watch(showAdvancedConnectors, () => {
   margin-top: 14px;
 }
 
+.integration-workbench__export {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(160px, 220px) auto;
+  align-items: end;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid #d7deea;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.integration-workbench__export strong,
+.integration-workbench__export p {
+  margin: 0;
+}
+
+.integration-workbench__export p {
+  margin-top: 4px;
+  color: #5c6878;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .integration-workbench__observation {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1597,6 +1787,7 @@ watch(showAdvancedConnectors, () => {
   .integration-workbench__flow,
   .integration-workbench__dataset-grid,
   .integration-workbench__staging-list,
+  .integration-workbench__export,
   .integration-workbench__grid {
     grid-template-columns: 1fr;
   }

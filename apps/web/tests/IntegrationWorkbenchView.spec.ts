@@ -21,18 +21,46 @@ async function flushUi(cycles = 5): Promise<void> {
   }
 }
 
+async function readBlobText(blob: Blob): Promise<string> {
+  if (typeof blob.text === 'function') return blob.text()
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result ?? ''))
+    reader.onerror = () => reject(reader.error)
+    reader.readAsText(blob)
+  })
+}
+
 describe('IntegrationWorkbenchView', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
+  let originalCreateObjectURL: typeof URL.createObjectURL | undefined
+  let originalRevokeObjectURL: typeof URL.revokeObjectURL | undefined
+  let originalAnchorClick: typeof HTMLAnchorElement.prototype.click | undefined
+  let createObjectURLMock: ReturnType<typeof vi.fn>
+  let revokeObjectURLMock: ReturnType<typeof vi.fn>
+  let anchorClickMock: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
     apiFetchMock.mockReset()
     if (typeof localStorage?.clear === 'function') localStorage.clear()
+    originalCreateObjectURL = URL.createObjectURL
+    originalRevokeObjectURL = URL.revokeObjectURL
+    originalAnchorClick = HTMLAnchorElement.prototype.click
+    createObjectURLMock = vi.fn(() => 'blob:data-factory-cleansed-export')
+    revokeObjectURLMock = vi.fn()
+    anchorClickMock = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURLMock })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURLMock })
+    Object.defineProperty(HTMLAnchorElement.prototype, 'click', { configurable: true, value: anchorClickMock })
   })
 
   afterEach(() => {
     if (app) app.unmount()
     if (container) container.remove()
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
+    Object.defineProperty(HTMLAnchorElement.prototype, 'click', { configurable: true, value: originalAnchorClick })
     app = null
     container = null
   })
@@ -211,6 +239,37 @@ describe('IntegrationWorkbenchView', () => {
           metrics: url.endsWith('/dry-run')
             ? { rowsRead: 1, rowsCleaned: 1, rowsWritten: 0 }
             : { rowsRead: 1, rowsCleaned: 1, rowsWritten: 1 },
+          preview: url.endsWith('/dry-run')
+            ? {
+                records: [
+                  {
+                    source: {
+                      code: ' mat-001 ',
+                      name: 'Bolt',
+                      password: 'raw-source-secret',
+                    },
+                    transformed: {
+                      FNumber: 'MAT-001',
+                      FName: 'Bolt',
+                      FQty: 2,
+                    },
+                    targetPayload: {
+                      Data: {
+                        FNumber: 'MAT-001',
+                        FName: 'Bolt',
+                      },
+                    },
+                    targetRequest: {
+                      method: 'POST',
+                      path: '/K3API/Material/Save',
+                      query: {
+                        access_token: 'raw-query-secret',
+                      },
+                    },
+                  },
+                ],
+              }
+            : null,
         })
       }
       if (url === '/api/integration/runs?tenantId=default&pipelineId=pipe_1&limit=5') {
@@ -268,6 +327,7 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).toContain('多维表清洗')
     expect(container.textContent).toContain('Dry-run / 推送')
     expect(container.textContent).toContain('数据集与多维表清洗')
+    expect(container.textContent).toContain('发布 API 数据服务暂不开放')
     expect(container.textContent).toContain('物料清洗')
     expect(container.textContent).toContain('BOM 清洗')
     expect(container.textContent).toContain('回写区')
@@ -422,6 +482,23 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).toContain('succeeded')
     expect(container.textContent).toContain('VALIDATION_FAILED')
     expect(container.textContent).toContain('1 runs / 1 open dead letters')
+    expect(container.textContent).toContain('可导出 1 条 dry-run 清洗记录')
+
+    ;(container.querySelector('[data-testid="export-cleansed-result"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+    expect(anchorClickMock).toHaveBeenCalledTimes(1)
+    const exportedBlob = createObjectURLMock.mock.calls[0]?.[0] as Blob
+    const exportedCsv = await readBlobText(exportedBlob)
+    expect(exportedCsv).toContain('cleaned.FNumber')
+    expect(exportedCsv).toContain('payload.Data.FNumber')
+    expect(exportedCsv).toContain('MAT-001')
+    expect(exportedCsv).not.toContain('raw-source-secret')
+    expect(exportedCsv).not.toContain('raw-query-secret')
+    expect(exportedCsv).toContain('[redacted]')
+    expect(container.textContent).toContain('已导出 1 条清洗结果')
+    await new Promise((resolve) => window.setTimeout(resolve, 0))
+    expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:data-factory-cleansed-export')
 
     ;(container.querySelector('[data-testid="allow-save-only-run"]') as HTMLInputElement).click()
     await flushUi()
