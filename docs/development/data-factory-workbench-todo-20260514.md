@@ -59,8 +59,8 @@ adapter templates, and debugging.
 - [x] Preserve dry-run before Save-only execution.
 - [x] Preserve explicit Save-only opt-in.
 - [x] Preserve run and open dead-letter observation.
-- [ ] Add CSV / Excel export for cleansed staging data.
-- [ ] Keep "data service publishing" as a later-stage placeholder only.
+- [x] Add CSV / Excel export for cleansed staging dry-run preview data.
+- [x] Keep "data service publishing" as a later-stage placeholder only.
 
 ## DF-M5 - K3 WISE as preset template
 
