@@ -530,7 +530,7 @@ guards.
   - Verification summary: intentionally not claimed by this transport-level D1 aggregation slice; the shipped RC automation smoke covers execution-log behavior with the default mock channel, and D4 remains the correct place for repeat-fire automation-log soak semantics.
 - [x] Redact SMTP credentials and recipients in artifacts.
   - PR: #1544
-  - Merge commit: pending.
+  - Merge commit: `1f9061f56`
   - Development MD: `docs/development/multitable-phase3-real-smtp-gate-development-20260514.md`
   - Verification MD: `docs/development/multitable-phase3-real-smtp-gate-verification-20260514.md`
   - Verification summary: D1 adds email delegate artifact-integrity coverage for SMTP host/user/password/from and smoke recipient values.
@@ -615,36 +615,36 @@ Status: pending — active queue (kernel polish on shipped automation execution 
 
 Owner recommendation: Codex.
 
-- [ ] Exercise `record.created` trigger repeatedly.
-  - PR:
-  - Merge commit:
-  - Development MD:
-  - Verification MD:
-  - Verification summary:
-- [ ] Exercise `update_record` action repeatedly.
-  - PR:
-  - Merge commit:
-  - Development MD:
-  - Verification MD:
-  - Verification summary:
-- [ ] Exercise `send_email` action repeatedly in safe mode.
-  - PR:
-  - Merge commit:
-  - Development MD:
-  - Verification MD:
-  - Verification summary:
-- [ ] Exercise `send_webhook` action against a controlled local/staging sink.
-  - PR:
-  - Merge commit:
-  - Development MD:
-  - Verification MD:
-  - Verification summary:
-- [ ] Verify execution log persistence and failure handling.
-  - PR:
-  - Merge commit:
-  - Development MD:
-  - Verification MD:
-  - Verification summary:
+- [x] Exercise `record.created` trigger repeatedly.
+  - PR: #1547
+  - Merge commit: pending.
+  - Development MD: `docs/development/multitable-phase3-automation-soak-gate-development-20260514.md`
+  - Verification MD: `docs/development/multitable-phase3-automation-soak-gate-verification-20260514.md`
+  - Verification summary: `MULTITABLE_AUTOMATION_SOAK_ITERATIONS` controls repeated record creation; fake-fetch tests cover two iterations and the default remote gate blocks until configured.
+- [x] Exercise `update_record` action repeatedly.
+  - PR: #1547
+  - Merge commit: pending.
+  - Development MD: `docs/development/multitable-phase3-automation-soak-gate-development-20260514.md`
+  - Verification MD: `docs/development/multitable-phase3-automation-soak-gate-verification-20260514.md`
+  - Verification summary: soak rule updates a status field on each created record and verifies read-back state.
+- [x] Exercise `send_email` action repeatedly in safe mode.
+  - PR: #1547
+  - Merge commit: pending.
+  - Development MD: `docs/development/multitable-phase3-automation-soak-gate-development-20260514.md`
+  - Verification MD: `docs/development/multitable-phase3-automation-soak-gate-verification-20260514.md`
+  - Verification summary: soak requires `MULTITABLE_AUTOMATION_SOAK_EMAIL_SAFE_MODE=mock` and uses reserved test-local recipient identifiers; tests validate execution-log shape without real SMTP.
+- [x] Exercise `send_webhook` action against a controlled local/staging sink.
+  - PR: #1547
+  - Merge commit: pending.
+  - Development MD: `docs/development/multitable-phase3-automation-soak-gate-development-20260514.md`
+  - Verification MD: `docs/development/multitable-phase3-automation-soak-gate-verification-20260514.md`
+  - Verification summary: soak requires both success and expected-failure webhook sink URLs before it can PASS.
+- [x] Verify execution log persistence and failure handling.
+  - PR: #1547
+  - Merge commit: pending.
+  - Development MD: `docs/development/multitable-phase3-automation-soak-gate-development-20260514.md`
+  - Verification MD: `docs/development/multitable-phase3-automation-soak-gate-verification-20260514.md`
+  - Verification summary: soak polls automation logs for every rule and treats the controlled failing webhook as PASS only when failed executions are persisted with step errors.
 
 ## Final Phase 3 Acceptance
 

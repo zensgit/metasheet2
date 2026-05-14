@@ -5,9 +5,8 @@
  *
  * Routing + blocked-mode + shared redaction + JSON+MD report writer.
  * D1 binds the existing guarded email real-send smoke into this
- * aggregator. Remaining skeleton gates stay blocked until their
- * dedicated follow-up PRs land. D2/D3 stay blocked under the K3 PoC
- * stage-1 lock.
+ * aggregator. D4 binds the guarded automation soak harness. D2/D3
+ * stay blocked under the K3 PoC stage-1 lock.
  *
  * Exit codes:
  *   0  PASS
@@ -35,6 +34,8 @@ const TOOL = 'multitable-phase3-release-gate'
 const DEFAULT_OUTPUT_DIR = 'output/multitable-phase3-release-gate'
 const EMAIL_REAL_SEND_GATE = 'email:real-send'
 const EMAIL_REAL_SEND_COMMAND = 'pnpm verify:multitable-email:real-send'
+const AUTOMATION_SOAK_GATE = 'automation:soak'
+const AUTOMATION_SOAK_COMMAND = 'pnpm verify:multitable-automation:soak'
 
 const EXIT_PASS = 0
 const EXIT_FAIL = 1
@@ -67,12 +68,19 @@ const SUB_GATES = {
     blockedReason:
       'Lane D3 deferred. Requires explicit snapshot-vs-golden-matrix semantics decision (T5) before activation.',
   },
-  'automation:soak': {
-    kind: 'skeleton',
-    requiredEnv: ['MULTITABLE_AUTOMATION_SOAK_CONFIRM'],
+  [AUTOMATION_SOAK_GATE]: {
+    kind: 'delegate',
+    requiredEnv: [
+      'API_BASE',
+      'AUTH_TOKEN',
+      'MULTITABLE_AUTOMATION_SOAK_CONFIRM',
+      'MULTITABLE_AUTOMATION_SOAK_EMAIL_SAFE_MODE',
+      'MULTITABLE_AUTOMATION_SOAK_WEBHOOK_URL',
+      'MULTITABLE_AUTOMATION_SOAK_FAIL_WEBHOOK_URL',
+    ],
     deferral: 'D4 — Automation Soak Gate',
     blockedReason:
-      'Lane D4 implementation stub. D0 skeleton only; real soak harness lands in PR R4.',
+      'Lane D4 delegates to verify:multitable-automation:soak and stays BLOCKED until API/auth/confirm/email-safe-mode/webhook sink env is configured.',
   },
 }
 
@@ -82,10 +90,10 @@ const PUBLIC_GATES = [AGGREGATE_GATE, ...Object.keys(SUB_GATES)]
 function printHelp() {
   console.log(`Usage: node scripts/ops/multitable-phase3-release-gate.mjs --gate <id> [options]
 
-Runs the Phase 3 release gate skeleton. All sub-gates are blocked at
-the D0/D1 PR stage unless their real harness is explicitly wired and
-configured. D1 delegates \`email:real-send\` to the existing guarded
-SMTP smoke harness.
+Runs the Phase 3 release gate. D1 delegates \`email:real-send\` to
+the existing guarded SMTP smoke harness. D4 delegates
+\`automation:soak\` to the guarded automation soak harness. Deferred
+or unconfigured gates return BLOCKED.
 
 Gates:
   ${PUBLIC_GATES.map((g) => `\`${g}\``).join(', ')}
@@ -265,9 +273,68 @@ function runEmailRealSendGate(env, options = {}) {
   }
 }
 
+function runAutomationSoakGate(env, options = {}) {
+  const config = SUB_GATES[AUTOMATION_SOAK_GATE]
+  const startedAt = new Date().toISOString()
+  const outputDir =
+    options.outputDir ??
+    path.resolve(process.cwd(), DEFAULT_OUTPUT_DIR, AUTOMATION_SOAK_GATE.replace(/:/g, '-'))
+  const childDir = path.join(outputDir, 'automation-soak')
+  const childReportJson = path.join(childDir, 'report.json')
+  const childReportMd = path.join(childDir, 'report.md')
+  mkdirSync(childDir, { recursive: true })
+
+  const child = spawnSync('pnpm', ['verify:multitable-automation:soak'], {
+    cwd: options.cwd ?? process.cwd(),
+    env: keepProcessEnvForChild(env, {
+      AUTOMATION_SOAK_OUTPUT_DIR: childDir,
+      AUTOMATION_SOAK_JSON: childReportJson,
+      AUTOMATION_SOAK_MD: childReportMd,
+    }),
+    encoding: 'utf8',
+  })
+
+  const childExitCode = typeof child.status === 'number' ? child.status : EXIT_FAIL
+  const status = child.error ? 'fail' : statusFromExitCode(childExitCode)
+  const exitCode = status === 'pass' ? EXIT_PASS : status === 'blocked' ? EXIT_BLOCKED : EXIT_FAIL
+  const childReport = safeReadJson(childReportJson)
+  const missingEnv = config.requiredEnv.filter((name) => !env[name] || env[name] === '')
+
+  let reason = 'Automation soak passed.'
+  if (child.error) {
+    reason = `Failed to launch delegated automation soak: ${child.error.message}`
+  } else if (status === 'blocked') {
+    reason =
+      'Delegated automation soak is BLOCKED. Configure API/auth, explicit soak confirmation, mock email safe-mode acknowledgement, and controlled webhook sinks before treating this gate as GO.'
+  } else if (status === 'fail') {
+    reason = 'Delegated automation soak returned FAIL.'
+  }
+
+  return {
+    tool: TOOL,
+    gate: AUTOMATION_SOAK_GATE,
+    status,
+    exitCode,
+    reason,
+    requiredEnv: config.requiredEnv,
+    missingEnv,
+    deferral: config.deferral,
+    startedAt,
+    completedAt: new Date().toISOString(),
+    delegatedCommand: AUTOMATION_SOAK_COMMAND,
+    childExitCode,
+    childReportJson,
+    childReportMd,
+    childStatus: childReport?.status ?? status,
+    childIterations: childReport?.iterations,
+    childEvidence: childReport?.evidence,
+  }
+}
+
 function runSubGate(gate, env, options = {}) {
   const config = SUB_GATES[gate]
   if (gate === EMAIL_REAL_SEND_GATE) return runEmailRealSendGate(env, options)
+  if (gate === AUTOMATION_SOAK_GATE) return runAutomationSoakGate(env, options)
   const startedAt = new Date().toISOString()
   const missingEnv = config.requiredEnv.filter((name) => !env[name] || env[name] === '')
   const baseReport = {
