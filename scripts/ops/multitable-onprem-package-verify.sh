@@ -105,6 +105,7 @@ function verify_generic_integration_workbench_contract() {
   search_fixed_string '/integrations/k3-wise' "$easy_start" || die "Windows on-prem guide must document the K3 WISE setup route"
   search_fixed_string 'SQL Server is an advanced channel' "$k3_runbook" || die "K3 runbook must document SQL Server as an advanced channel"
   search_fixed_string 'data-factory-frontend-route' "$postdeploy_smoke" || die "postdeploy smoke must check the Data Factory frontend route"
+  search_fixed_string 'data-factory-adapter-discovery' "$postdeploy_smoke" || die "postdeploy smoke must check Data Factory adapter discovery"
 }
 
 function write_optional_report() {
@@ -336,6 +337,8 @@ required=(
   "docs/development/data-factory-cleansed-export-verification-20260514.md"
   "docs/development/data-factory-postdeploy-smoke-development-20260514.md"
   "docs/development/data-factory-postdeploy-smoke-verification-20260514.md"
+  "docs/development/data-factory-adapter-discovery-postdeploy-development-20260514.md"
+  "docs/development/data-factory-adapter-discovery-postdeploy-verification-20260514.md"
   "docs/development/onprem-migration-gap-guard-development-20260514.md"
   "docs/development/onprem-migration-gap-guard-verification-20260514.md"
   "docs/deployment/multitable-platform-rc-notes-20260404.md"

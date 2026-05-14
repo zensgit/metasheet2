@@ -10,9 +10,12 @@ const REQUIRED_ADAPTERS = [
   'plm:yuantus-wrapper',
   'erp:k3-wise-webapi',
   'erp:k3-wise-sqlserver',
+  'metasheet:staging',
+  'metasheet:multitable',
 ]
 const REQUIRED_ROUTES = [
   ['GET', '/api/integration/status'],
+  ['GET', '/api/integration/adapters'],
   ['GET', '/api/integration/external-systems'],
   ['POST', '/api/integration/external-systems'],
   ['GET', '/api/integration/external-systems/:id'],
@@ -28,6 +31,38 @@ const REQUIRED_ROUTES = [
   ['GET', '/api/integration/staging/descriptors'],
   ['POST', '/api/integration/staging/install'],
 ]
+const REQUIRED_DATA_FACTORY_ADAPTER_METADATA = {
+  'metasheet:staging': {
+    roles: ['source'],
+    advanced: false,
+    guardrails: {
+      read: {
+        hostOwned: true,
+        dryRunFriendly: true,
+        noExternalNetwork: true,
+      },
+      write: {
+        supported: false,
+      },
+    },
+  },
+  'metasheet:multitable': {
+    roles: ['target'],
+    supports: ['testConnection', 'listObjects', 'getSchema', 'upsert'],
+    advanced: false,
+    guardrails: {
+      read: {
+        supported: false,
+      },
+      write: {
+        hostOwned: true,
+        pluginScopedSheetsOnly: true,
+        supportsAppend: true,
+        supportsUpsertByKey: true,
+      },
+    },
+  },
+}
 const CONTROL_PLANE_LIST_PROBES = [
   ['integration-list-external-systems', '/api/integration/external-systems'],
   ['integration-list-pipelines', '/api/integration/pipelines'],
@@ -412,6 +447,81 @@ function assertStatusRoutes(statusBody) {
   return { adapters, adaptersChecked: REQUIRED_ADAPTERS.length, routesChecked: REQUIRED_ROUTES.length }
 }
 
+function valueAtPath(value, path) {
+  return path.split('.').reduce((current, segment) => {
+    if (!current || typeof current !== 'object') return undefined
+    return current[segment]
+  }, value)
+}
+
+function addInvalidAdapterField(invalidAdapters, kind, path, message) {
+  if (!invalidAdapters[kind]) invalidAdapters[kind] = {}
+  invalidAdapters[kind][path] = message
+}
+
+function assertArrayIncludes(actual, expected, invalidAdapters, kind, path) {
+  if (!Array.isArray(actual)) {
+    addInvalidAdapterField(invalidAdapters, kind, path, 'expected array')
+    return
+  }
+  const missing = expected.filter((item) => !actual.includes(item))
+  if (missing.length > 0) {
+    addInvalidAdapterField(invalidAdapters, kind, path, `missing ${missing.join(', ')}`)
+  }
+}
+
+function assertBooleanFields(adapter, expectedFields, invalidAdapters, kind, prefix) {
+  for (const [field, expected] of Object.entries(expectedFields || {})) {
+    const path = prefix ? `${prefix}.${field}` : field
+    if (expected && typeof expected === 'object' && !Array.isArray(expected)) {
+      assertBooleanFields(adapter, expected, invalidAdapters, kind, path)
+      continue
+    }
+    const actual = valueAtPath(adapter, path)
+    if (actual !== expected) {
+      addInvalidAdapterField(invalidAdapters, kind, path, `expected ${String(expected)} but got ${String(actual)}`)
+    }
+  }
+}
+
+function assertDataFactoryAdapterDiscovery(body) {
+  const data = body && body.data !== undefined ? body.data : body
+  if (!Array.isArray(data)) {
+    throw new K3WisePostdeploySmokeError('adapter discovery response data must be an array', {
+      received: Array.isArray(data) ? 'array' : typeof data,
+    })
+  }
+  const adaptersByKind = new Map()
+  for (const adapter of data) {
+    if (adapter && typeof adapter.kind === 'string') adaptersByKind.set(adapter.kind, adapter)
+  }
+  const missingAdapters = []
+  const invalidAdapters = {}
+  for (const [kind, expected] of Object.entries(REQUIRED_DATA_FACTORY_ADAPTER_METADATA)) {
+    const adapter = adaptersByKind.get(kind)
+    if (!adapter) {
+      missingAdapters.push(kind)
+      continue
+    }
+    assertArrayIncludes(adapter.roles, expected.roles || [], invalidAdapters, kind, 'roles')
+    if (expected.supports) assertArrayIncludes(adapter.supports, expected.supports, invalidAdapters, kind, 'supports')
+    if (Object.prototype.hasOwnProperty.call(expected, 'advanced') && adapter.advanced !== expected.advanced) {
+      addInvalidAdapterField(invalidAdapters, kind, 'advanced', `expected ${String(expected.advanced)} but got ${String(adapter.advanced)}`)
+    }
+    assertBooleanFields(adapter, expected.guardrails || {}, invalidAdapters, kind, 'guardrails')
+  }
+  if (missingAdapters.length > 0 || Object.keys(invalidAdapters).length > 0) {
+    throw new K3WisePostdeploySmokeError('adapter discovery is missing required Data Factory multitable metadata', {
+      missingAdapters,
+      invalidAdapters,
+    })
+  }
+  return {
+    adapters: Array.from(adaptersByKind.keys()),
+    adaptersChecked: Object.keys(REQUIRED_DATA_FACTORY_ADAPTER_METADATA).length,
+  }
+}
+
 function collectDescriptorFields(descriptor) {
   const fieldIds = new Set()
   const fieldDetailsById = new Map()
@@ -620,6 +730,13 @@ async function runSmoke(opts) {
       checks.push(failResult('integration-route-contract', error))
     }
 
+    try {
+      const adapterDiscovery = await requestJson(opts.baseUrl, '/api/integration/adapters', { token, timeoutMs: opts.timeoutMs })
+      checks.push(result('data-factory-adapter-discovery', 'pass', assertDataFactoryAdapterDiscovery(adapterDiscovery.body)))
+    } catch (error) {
+      checks.push(failResult('data-factory-adapter-discovery', error))
+    }
+
     for (const [id, pathname] of CONTROL_PLANE_LIST_PROBES) {
       try {
         const response = await requestJson(opts.baseUrl, withQuery(pathname, {
@@ -740,6 +857,7 @@ if (entryPath && import.meta.url === entryPath) {
 
 export {
   K3WisePostdeploySmokeError,
+  assertDataFactoryAdapterDiscovery,
   assertStagingDescriptors,
   assertStatusRoutes,
   markdownInlineCode,

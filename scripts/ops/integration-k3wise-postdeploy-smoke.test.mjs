@@ -14,9 +14,12 @@ const DEFAULT_ADAPTERS = [
   'plm:yuantus-wrapper',
   'erp:k3-wise-webapi',
   'erp:k3-wise-sqlserver',
+  'metasheet:staging',
+  'metasheet:multitable',
 ]
 const DEFAULT_ROUTES = [
   ['GET', '/api/integration/status'],
+  ['GET', '/api/integration/adapters'],
   ['GET', '/api/integration/external-systems'],
   ['POST', '/api/integration/external-systems'],
   ['GET', '/api/integration/external-systems/:id'],
@@ -31,6 +34,71 @@ const DEFAULT_ROUTES = [
   ['POST', '/api/integration/dead-letters/:id/replay'],
   ['GET', '/api/integration/staging/descriptors'],
   ['POST', '/api/integration/staging/install'],
+]
+const DEFAULT_ADAPTER_METADATA = [
+  {
+    kind: 'http',
+    label: 'HTTP API',
+    roles: ['source', 'target', 'bidirectional'],
+    supports: ['testConnection', 'listObjects', 'getSchema', 'read', 'upsert'],
+    advanced: false,
+  },
+  {
+    kind: 'plm:yuantus-wrapper',
+    label: 'Yuantus PLM',
+    roles: ['source'],
+    supports: ['testConnection', 'listObjects', 'getSchema', 'read'],
+    advanced: false,
+  },
+  {
+    kind: 'erp:k3-wise-webapi',
+    label: 'K3 WISE WebAPI',
+    roles: ['target'],
+    supports: ['testConnection', 'listObjects', 'getSchema', 'upsert'],
+    advanced: false,
+  },
+  {
+    kind: 'erp:k3-wise-sqlserver',
+    label: 'K3 WISE SQL Server Channel',
+    roles: ['source', 'target'],
+    supports: ['testConnection', 'listObjects', 'getSchema', 'read', 'upsert'],
+    advanced: true,
+  },
+  {
+    kind: 'metasheet:staging',
+    label: 'MetaSheet staging multitable',
+    roles: ['source'],
+    supports: ['testConnection', 'listObjects', 'getSchema', 'read'],
+    advanced: false,
+    guardrails: {
+      read: {
+        hostOwned: true,
+        dryRunFriendly: true,
+        noExternalNetwork: true,
+      },
+      write: {
+        supported: false,
+      },
+    },
+  },
+  {
+    kind: 'metasheet:multitable',
+    label: 'MetaSheet multitable',
+    roles: ['target'],
+    supports: ['testConnection', 'listObjects', 'getSchema', 'upsert'],
+    advanced: false,
+    guardrails: {
+      read: {
+        supported: false,
+      },
+      write: {
+        hostOwned: true,
+        pluginScopedSheetsOnly: true,
+        supportsAppend: true,
+        supportsUpsertByKey: true,
+      },
+    },
+  },
 ]
 const DEFAULT_STAGING_FIELD_DETAILS = {
   plm_raw_items: {
@@ -234,6 +302,18 @@ function createFakeServer(options = {}) {
       return
     }
 
+    if (req.method === 'GET' && url.pathname === '/api/integration/adapters') {
+      if (req.headers.authorization !== 'Bearer test.jwt.token') {
+        sendJson(res, 401, { ok: false, error: { message: 'bad token' } })
+        return
+      }
+      sendJson(res, 200, {
+        ok: true,
+        data: options.integrationAdapterMetadata || DEFAULT_ADAPTER_METADATA,
+      })
+      return
+    }
+
     if (
       req.method === 'GET' &&
       [
@@ -383,6 +463,12 @@ test('authenticated postdeploy smoke validates route and staging contracts witho
     const routeCheck = evidence.checks.find((check) => check.id === 'integration-route-contract')
     assert.equal(routeCheck.status, 'pass')
     assert.equal(routeCheck.routesChecked, DEFAULT_ROUTES.length)
+    assert.equal(routeCheck.adaptersChecked, DEFAULT_ADAPTERS.length)
+    const adapterDiscoveryCheck = evidence.checks.find((check) => check.id === 'data-factory-adapter-discovery')
+    assert.equal(adapterDiscoveryCheck.status, 'pass')
+    assert.equal(adapterDiscoveryCheck.adaptersChecked, 2)
+    assert.ok(adapterDiscoveryCheck.adapters.includes('metasheet:staging'))
+    assert.ok(adapterDiscoveryCheck.adapters.includes('metasheet:multitable'))
     for (const id of [
       'integration-list-external-systems',
       'integration-list-pipelines',
@@ -401,6 +487,7 @@ test('authenticated postdeploy smoke validates route and staging contracts witho
     )
     assert.equal(stagingCheck.fieldDetailsChecked, stagingCheck.fieldsChecked)
     assert.ok(fake.requests.some((request) => request.pathname === '/api/auth/me' && request.authorization === 'Bearer test.jwt.token'))
+    assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/adapters'))
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/external-systems'))
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/pipelines'))
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/runs'))
@@ -543,6 +630,45 @@ test('authenticated postdeploy smoke fails when status omits a required source a
     const routeCheck = evidence.checks.find((check) => check.id === 'integration-route-contract')
     assert.equal(routeCheck.status, 'fail')
     assert.match(routeCheck.error, /missing required adapters or routes/)
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('authenticated postdeploy smoke fails when Data Factory adapter metadata loses staging write guardrails', async () => {
+  const fake = createFakeServer({
+    integrationAdapterMetadata: DEFAULT_ADAPTER_METADATA.map((adapter) => {
+      if (adapter.kind !== 'metasheet:staging') return adapter
+      return {
+        ...adapter,
+        guardrails: {
+          read: adapter.guardrails.read,
+          write: { supported: true },
+        },
+      }
+    }),
+  })
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--auth-token', 'test.jwt.token',
+      '--require-auth',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 1)
+    const evidence = JSON.parse(readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8'))
+    const adapterCheck = evidence.checks.find((check) => check.id === 'data-factory-adapter-discovery')
+    assert.equal(adapterCheck.status, 'fail')
+    assert.match(adapterCheck.error, /adapter discovery is missing required Data Factory multitable metadata/)
+    assert.deepEqual(adapterCheck.details.invalidAdapters, {
+      'metasheet:staging': {
+        'guardrails.write.supported': 'expected false but got true',
+      },
+    })
   } finally {
     await fake.close()
     rmSync(outDir, { recursive: true, force: true })
