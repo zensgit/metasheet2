@@ -33,6 +33,17 @@ function jsonResponse(status: number, payload: unknown): Response {
   } as unknown as Response
 }
 
+function textResponse(status: number, text: string, headers: Record<string, string> = {}): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: new Headers(headers),
+    json: async () => JSON.parse(text),
+    text: async () => text,
+    blob: async () => new Blob([text], { type: headers['Content-Type'] || 'text/plain' }),
+  } as unknown as Response
+}
+
 async function flushUi(cycles = 6): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
     await Promise.resolve()
@@ -63,9 +74,23 @@ describe('Attendance admin regressions', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
   let originalScrollIntoView: typeof HTMLElement.prototype.scrollIntoView | undefined
+  let exportReportFieldFingerprint = 'records-unit-test-fingerprint'
+  let exportReportFieldCodes = 'work_date,employee_name'
+  let exportReportFieldCount = '2'
+  let exportReportFieldProjectId = 'default:attendance'
+  let exportReportFieldObjectId = 'attendance_report_field_catalog'
+  let exportReportFieldSheetId = 'sheet-1'
+  let exportReportFieldViewId = 'fields_by_category'
 
   beforeEach(() => {
     vi.clearAllMocks()
+    exportReportFieldFingerprint = 'records-unit-test-fingerprint'
+    exportReportFieldCodes = 'work_date,employee_name'
+    exportReportFieldCount = '2'
+    exportReportFieldProjectId = 'default:attendance'
+    exportReportFieldObjectId = 'attendance_report_field_catalog'
+    exportReportFieldSheetId = 'sheet-1'
+    exportReportFieldViewId = 'fields_by_category'
     window.localStorage.clear()
     window.localStorage.setItem('metasheet_locale', 'en')
     window.history.replaceState({}, '', '/attendance')
@@ -282,6 +307,64 @@ describe('Attendance admin regressions', () => {
           },
         })
       }
+      if (url.includes('/api/attendance/records')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'record-1',
+                work_date: '2026-05-13',
+                user_id: 'user-1',
+                user_name: 'Ada',
+                first_in_at: '2026-05-13T09:00:00.000Z',
+                last_out_at: '2026-05-13T18:00:00.000Z',
+                work_minutes: 480,
+                late_minutes: 0,
+                early_leave_minutes: 0,
+                status: 'normal',
+                is_workday: true,
+                meta: {},
+              },
+            ],
+            total: 1,
+            reportFields: [
+              { code: 'work_date', name: '日期', sortOrder: 1000 },
+              { code: 'employee_name', name: '姓名', sortOrder: 1010 },
+            ],
+            reportFieldConfig: {
+              multitable: {
+                available: true,
+                degraded: false,
+                projectId: 'default:attendance',
+                objectId: 'attendance_report_field_catalog',
+                sheetId: 'sheet-1',
+                viewId: 'fields_by_category',
+              },
+              fieldsFingerprint: {
+                algorithm: 'sha1',
+                value: 'records-unit-test-fingerprint',
+                fieldCount: 2,
+                codes: ['work_date', 'employee_name'],
+              },
+            },
+          },
+        })
+      }
+      if (url.includes('/api/attendance/export')) {
+        return textResponse(200, '日期,姓名\n2026-05-13,Ada\n', {
+          'Content-Type': 'text/csv',
+          'Content-Disposition': 'attachment; filename="attendance-export.csv"',
+          'X-Attendance-Report-Fields-Fingerprint-Algorithm': 'sha1',
+          'X-Attendance-Report-Fields-Fingerprint': exportReportFieldFingerprint,
+          'X-Attendance-Report-Fields-Count': exportReportFieldCount,
+          'X-Attendance-Report-Fields-Codes': exportReportFieldCodes,
+          'X-Attendance-Report-Fields-Project-Id': exportReportFieldProjectId,
+          'X-Attendance-Report-Fields-Object-Id': exportReportFieldObjectId,
+          'X-Attendance-Report-Fields-Sheet-Id': exportReportFieldSheetId,
+          'X-Attendance-Report-Fields-View-Id': exportReportFieldViewId,
+        })
+      }
       return emptyAttendanceResponse()
     })
 
@@ -330,6 +413,279 @@ describe('Attendance admin regressions', () => {
     expect(container!.querySelector('[data-admin-shortcut="attendance-admin-group-members"]')?.textContent).toContain('Organization · Group members')
     expect(container!.textContent).toContain('User picker')
     expect(container!.textContent).toContain('Append selected user')
+  })
+
+  it('passes the selected CSV header mode when exporting report records', async () => {
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    const createObjectURL = vi.fn(() => 'blob:attendance-export')
+    const revokeObjectURL = vi.fn()
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
+
+    try {
+      app = createApp(AttendanceView, { mode: 'reports' })
+      app.mount(container!)
+      await flushUi()
+
+      const headerSelect = container!.querySelector<HTMLSelectElement>('#attendance-record-export-header')
+      expect(headerSelect).toBeTruthy()
+      expect(headerSelect!.value).toBe('label')
+      headerSelect!.value = 'code'
+      headerSelect!.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi(2)
+      expect(headerSelect!.value).toBe('code')
+
+      const exportButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+        .find(button => button.textContent?.includes('Export CSV'))
+      expect(exportButton).toBeTruthy()
+      exportButton!.click()
+      await flushUi(6)
+
+      const exportCall = vi.mocked(apiFetch).mock.calls
+        .map(call => String(call[0]))
+        .find(url => url.includes('/api/attendance/export?'))
+      expect(exportCall).toContain('header=code')
+      expect(createObjectURL).toHaveBeenCalledTimes(1)
+      expect(clickSpy).toHaveBeenCalledTimes(1)
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:attendance-export')
+      expect(container!.querySelector('[data-record-export-config]')?.textContent).toContain('Last CSV export')
+      expect(container!.querySelector('[data-record-export-config-detail="headerMode"]')?.textContent).toContain('Field codes')
+      expect(container!.querySelector('[data-record-export-config-detail="evidenceStatus"]')?.textContent).toContain('Complete')
+      expect(container!.querySelector('[data-record-export-config-detail="evidenceStatus"]')?.classList.contains('attendance__report-config-item--ok')).toBe(true)
+      expect(container!.querySelector('[data-record-export-config-detail="range"]')?.textContent).toContain(' - ')
+      expect(container!.querySelector('[data-record-export-config-detail="rangeMatch"]')?.textContent).toContain('Current range')
+      expect(container!.querySelector('[data-record-export-config-detail="rangeMatch"]')?.classList.contains('attendance__report-config-item--ok')).toBe(true)
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCount"]')?.textContent).toContain('2')
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCountMatch"]')?.textContent).toContain('Matches records')
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCountMatch"]')?.classList.contains('attendance__report-config-item--ok')).toBe(true)
+      expect(container!.querySelector('[data-record-export-config-detail="configMatch"]')?.textContent).toContain('Matches records')
+      expect(container!.querySelector('[data-record-export-config-detail="configMatch"]')?.classList.contains('attendance__report-config-item--ok')).toBe(true)
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCodesMatch"]')?.textContent).toContain('Matches records')
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCodesMatch"]')?.classList.contains('attendance__report-config-item--ok')).toBe(true)
+      expect(container!.querySelector('[data-record-export-config-detail="backingMatch"]')?.textContent).toContain('Matches records')
+      expect(container!.querySelector('[data-record-export-config-detail="backingMatch"]')?.classList.contains('attendance__report-config-item--ok')).toBe(true)
+      expect(container!.querySelector('[data-record-export-config-detail="projectId"]')?.textContent).toContain('default:attendance')
+      expect(container!.querySelector('[data-record-export-config-detail="objectId"]')?.textContent).toContain('attendance_report_field_catalog')
+      expect(container!.querySelector('[data-record-export-config-detail="sheetId"]')?.textContent).toContain('sheet-1')
+      expect(container!.querySelector('[data-record-export-config-detail="viewId"]')?.textContent).toContain('fields_by_category')
+      expect(container!.querySelector('[data-record-export-config-detail="fingerprintAlgorithm"]')?.textContent).toContain('sha1')
+      expect(container!.querySelector('[data-record-export-config-detail="fingerprint"]')?.textContent).toContain('records-unit-test-fingerprint')
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCodes"]')?.textContent).toContain('work_date, employee_name')
+      expect(container!.querySelector('[data-record-export-config-detail="filename"]')?.textContent).toContain('attendance-export.csv')
+
+      const fromInput = container!.querySelector<HTMLInputElement>('#attendance-from-date')
+      expect(fromInput).toBeTruthy()
+      fromInput!.value = '2026-01-01'
+      fromInput!.dispatchEvent(new Event('input', { bubbles: true }))
+      fromInput!.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi(2)
+      expect(container!.querySelector('[data-record-export-config-detail="rangeMatch"]')?.textContent).toContain('Different range')
+      expect(container!.querySelector('[data-record-export-config-detail="rangeMatch"]')?.classList.contains('attendance__report-config-item--warn')).toBe(true)
+    } finally {
+      clickSpy.mockRestore()
+      Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
+      Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
+    }
+  })
+
+  it('warns when the CSV export field config differs from the loaded records', async () => {
+    exportReportFieldFingerprint = 'csv-mismatch-fingerprint'
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    const createObjectURL = vi.fn(() => 'blob:attendance-export')
+    const revokeObjectURL = vi.fn()
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
+
+    try {
+      app = createApp(AttendanceView, { mode: 'reports' })
+      app.mount(container!)
+      await flushUi()
+
+      const exportButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+        .find(button => button.textContent?.includes('Export CSV'))
+      expect(exportButton).toBeTruthy()
+      exportButton!.click()
+      await flushUi(6)
+
+      expect(createObjectURL).toHaveBeenCalledTimes(1)
+      expect(clickSpy).toHaveBeenCalledTimes(1)
+      expect(container!.querySelector('[data-record-export-config-detail="configMatch"]')?.textContent).toContain('Differs from records')
+      expect(container!.querySelector('[data-record-export-config-detail="configMatch"]')?.classList.contains('attendance__report-config-item--warn')).toBe(true)
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCountMatch"]')?.textContent).toContain('Matches records')
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCountMatch"]')?.classList.contains('attendance__report-config-item--ok')).toBe(true)
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCodesMatch"]')?.textContent).toContain('Matches records')
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCodesMatch"]')?.classList.contains('attendance__report-config-item--ok')).toBe(true)
+      expect(container!.querySelector('[data-record-export-config-detail="fingerprint"]')?.textContent).toContain('csv-mismatch-fingerprint')
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCodes"]')?.textContent).toContain('work_date, employee_name')
+    } finally {
+      clickSpy.mockRestore()
+      Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
+      Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
+    }
+  })
+
+  it('warns when the CSV export field codes differ from the loaded records', async () => {
+    exportReportFieldCodes = 'employee_name,work_date'
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    const createObjectURL = vi.fn(() => 'blob:attendance-export')
+    const revokeObjectURL = vi.fn()
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
+
+    try {
+      app = createApp(AttendanceView, { mode: 'reports' })
+      app.mount(container!)
+      await flushUi()
+
+      const exportButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+        .find(button => button.textContent?.includes('Export CSV'))
+      expect(exportButton).toBeTruthy()
+      exportButton!.click()
+      await flushUi(6)
+
+      expect(createObjectURL).toHaveBeenCalledTimes(1)
+      expect(clickSpy).toHaveBeenCalledTimes(1)
+      expect(container!.querySelector('[data-record-export-config-detail="configMatch"]')?.textContent).toContain('Matches records')
+      expect(container!.querySelector('[data-record-export-config-detail="configMatch"]')?.classList.contains('attendance__report-config-item--ok')).toBe(true)
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCountMatch"]')?.textContent).toContain('Matches records')
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCountMatch"]')?.classList.contains('attendance__report-config-item--ok')).toBe(true)
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCodesMatch"]')?.textContent).toContain('Differs from records')
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCodesMatch"]')?.classList.contains('attendance__report-config-item--warn')).toBe(true)
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCodes"]')?.textContent).toContain('employee_name, work_date')
+    } finally {
+      clickSpy.mockRestore()
+      Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
+      Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
+    }
+  })
+
+  it('warns when the CSV export field count differs from the loaded records', async () => {
+    exportReportFieldCount = '3'
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    const createObjectURL = vi.fn(() => 'blob:attendance-export')
+    const revokeObjectURL = vi.fn()
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
+
+    try {
+      app = createApp(AttendanceView, { mode: 'reports' })
+      app.mount(container!)
+      await flushUi()
+
+      const exportButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+        .find(button => button.textContent?.includes('Export CSV'))
+      expect(exportButton).toBeTruthy()
+      exportButton!.click()
+      await flushUi(6)
+
+      expect(createObjectURL).toHaveBeenCalledTimes(1)
+      expect(clickSpy).toHaveBeenCalledTimes(1)
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCount"]')?.textContent).toContain('3')
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCountMatch"]')?.textContent).toContain('Differs from records')
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCountMatch"]')?.classList.contains('attendance__report-config-item--warn')).toBe(true)
+      expect(container!.querySelector('[data-record-export-config-detail="configMatch"]')?.textContent).toContain('Matches records')
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCodesMatch"]')?.textContent).toContain('Matches records')
+    } finally {
+      clickSpy.mockRestore()
+      Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
+      Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
+    }
+  })
+
+  it('warns when the CSV export backing differs from the loaded records', async () => {
+    exportReportFieldSheetId = 'sheet-from-other-catalog'
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    const createObjectURL = vi.fn(() => 'blob:attendance-export')
+    const revokeObjectURL = vi.fn()
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
+
+    try {
+      app = createApp(AttendanceView, { mode: 'reports' })
+      app.mount(container!)
+      await flushUi()
+
+      const exportButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+        .find(button => button.textContent?.includes('Export CSV'))
+      expect(exportButton).toBeTruthy()
+      exportButton!.click()
+      await flushUi(6)
+
+      expect(createObjectURL).toHaveBeenCalledTimes(1)
+      expect(clickSpy).toHaveBeenCalledTimes(1)
+      expect(container!.querySelector('[data-record-export-config-detail="configMatch"]')?.textContent).toContain('Matches records')
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCountMatch"]')?.textContent).toContain('Matches records')
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCodesMatch"]')?.textContent).toContain('Matches records')
+      expect(container!.querySelector('[data-record-export-config-detail="backingMatch"]')?.textContent).toContain('Differs from records')
+      expect(container!.querySelector('[data-record-export-config-detail="backingMatch"]')?.classList.contains('attendance__report-config-item--warn')).toBe(true)
+      expect(container!.querySelector('[data-record-export-config-detail="sheetId"]')?.textContent).toContain('sheet-from-other-catalog')
+    } finally {
+      clickSpy.mockRestore()
+      Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
+      Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
+    }
+  })
+
+  it('warns when CSV export field evidence headers are incomplete', async () => {
+    exportReportFieldFingerprint = ''
+    exportReportFieldCount = ''
+    exportReportFieldCodes = ''
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    const createObjectURL = vi.fn(() => 'blob:attendance-export')
+    const revokeObjectURL = vi.fn()
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
+
+    try {
+      app = createApp(AttendanceView, { mode: 'reports' })
+      app.mount(container!)
+      await flushUi()
+
+      const exportButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+        .find(button => button.textContent?.includes('Export CSV'))
+      expect(exportButton).toBeTruthy()
+      exportButton!.click()
+      await flushUi(6)
+
+      expect(createObjectURL).toHaveBeenCalledTimes(1)
+      expect(clickSpy).toHaveBeenCalledTimes(1)
+      expect(container!.querySelector('[data-record-export-config-detail="evidenceStatus"]')?.textContent).toContain('Missing: field count, fingerprint, field codes')
+      expect(container!.querySelector('[data-record-export-config-detail="evidenceStatus"]')?.classList.contains('attendance__report-config-item--warn')).toBe(true)
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCount"]')).toBeNull()
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCountMatch"]')).toBeNull()
+      expect(container!.querySelector('[data-record-export-config-detail="configMatch"]')).toBeNull()
+      expect(container!.querySelector('[data-record-export-config-detail="fieldCodesMatch"]')).toBeNull()
+    } finally {
+      clickSpy.mockRestore()
+      Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
+      Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
+    }
+  })
+
+  it('shows the active record report field config fingerprint', async () => {
+    app = createApp(AttendanceView, { mode: 'reports' })
+    app.mount(container!)
+    await flushUi()
+
+    expect(container!.querySelector('[data-record-report-config]')?.textContent).toContain('Field config')
+    expect(container!.querySelector('[data-record-report-config-detail="backing"]')?.textContent).toContain('Connected')
+    expect(container!.querySelector('[data-record-report-config-detail="fieldCount"]')?.textContent).toContain('2')
+    expect(container!.querySelector('[data-record-report-config-detail="fingerprintAlgorithm"]')?.textContent).toContain('sha1')
+    expect(container!.querySelector('[data-record-report-config-detail="fingerprint"]')?.textContent).toContain('records-unit-test-fingerprint')
+    expect(container!.querySelector('[data-record-report-config-detail="fieldCodes"]')?.textContent).toContain('work_date, employee_name')
+    expect(container!.querySelector('[data-record-report-config-detail="projectId"]')?.textContent).toContain('default:attendance')
   })
 
   it('keeps edit buttons visible for the active section while focused mode hides inactive sections', async () => {

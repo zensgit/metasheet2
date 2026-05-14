@@ -248,6 +248,1132 @@ const IMPORT_REQUIRED_FIELD_ALIASES = {
   '下班2打卡时间': ['2_off_duty_user_check_time', 'clockOut2'],
 }
 
+const ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID = 'attendance_report_field_catalog'
+const ATTENDANCE_REPORT_FIELD_CATALOG_VIEW_ID = 'fields_by_category'
+const ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS = Object.freeze({
+  fieldCode: 'field_code',
+  fieldName: 'field_name',
+  category: 'category',
+  source: 'source',
+  unit: 'unit',
+  enabled: 'enabled',
+  reportVisible: 'report_visible',
+  sortOrder: 'sort_order',
+  dingtalkFieldName: 'dingtalk_field_name',
+  description: 'description',
+  internalKey: 'internal_key',
+})
+
+const ATTENDANCE_REPORT_FIELD_CATEGORIES = Object.freeze([
+  { id: 'fixed', label: '固定字段', sortOrder: 10 },
+  { id: 'basic', label: '基础字段', sortOrder: 20 },
+  { id: 'attendance', label: '出勤统计字段', sortOrder: 30 },
+  { id: 'anomaly', label: '异常统计字段', sortOrder: 40 },
+  { id: 'leave', label: '请假统计字段', sortOrder: 50 },
+  { id: 'overtime', label: '加班统计字段', sortOrder: 60 },
+])
+
+const ATTENDANCE_REPORT_FIELD_SOURCE_OPTIONS = Object.freeze(['system', 'dingtalk', 'multitable', 'custom'])
+const ATTENDANCE_REPORT_FIELD_UNIT_OPTIONS = Object.freeze(['text', 'dateTime', 'days', 'minutes', 'count', 'hours'])
+
+const ATTENDANCE_REPORT_FIELD_DEFINITIONS = Object.freeze([
+  {
+    code: 'work_date',
+    name: '日期',
+    category: 'fixed',
+    source: 'system',
+    unit: 'text',
+    dingtalkFieldName: '日期',
+    description: '考勤记录所属工作日期。',
+    internalKey: 'attendanceRecords.workDate',
+  },
+  {
+    code: 'employee_name',
+    name: '姓名',
+    category: 'fixed',
+    source: 'system',
+    unit: 'text',
+    dingtalkFieldName: '姓名',
+    description: '员工在考勤报表中的展示姓名。',
+    internalKey: 'user.name',
+  },
+  {
+    code: 'attendance_group',
+    name: '考勤组',
+    category: 'fixed',
+    source: 'system',
+    unit: 'text',
+    dingtalkFieldName: '考勤组',
+    description: '员工当前匹配的考勤组名称。',
+    internalKey: 'attendanceGroup.name',
+  },
+  {
+    code: 'department',
+    name: '部门',
+    category: 'fixed',
+    source: 'system',
+    unit: 'text',
+    dingtalkFieldName: '部门',
+    description: '员工所属组织或部门路径。',
+    internalKey: 'user.department',
+  },
+  {
+    code: 'employee_no',
+    name: '工号',
+    category: 'fixed',
+    source: 'system',
+    unit: 'text',
+    dingtalkFieldName: '工号',
+    description: '员工唯一工号或外部人员编号。',
+    internalKey: 'user.employeeNo',
+  },
+  {
+    code: 'position',
+    name: '职位',
+    category: 'fixed',
+    source: 'system',
+    unit: 'text',
+    dingtalkFieldName: '职位',
+    description: '员工职位、岗位或角色标签。',
+    internalKey: 'user.position',
+  },
+  {
+    code: 'punch_times',
+    name: '打卡时间',
+    category: 'basic',
+    source: 'system',
+    unit: 'dateTime',
+    dingtalkFieldName: '打卡时间',
+    description: '上下班打卡时间集合，来自考勤记录和导入明细。',
+    internalKey: 'attendanceRecords.punchTimes',
+  },
+  {
+    code: 'punch_result',
+    name: '打卡结果',
+    category: 'basic',
+    source: 'system',
+    unit: 'text',
+    dingtalkFieldName: '打卡结果',
+    description: '单次或当日打卡是否正常、迟到、早退、缺卡等结果。',
+    internalKey: 'attendanceRecords.status',
+  },
+  {
+    code: 'approval_forms',
+    name: '关联的审批单',
+    category: 'basic',
+    source: 'system',
+    unit: 'text',
+    dingtalkFieldName: '关联的审批单',
+    description: '补卡、请假、外出或加班等与考勤结果关联的审批摘要。',
+    internalKey: 'attendanceRequests.approvalSummary',
+  },
+  {
+    code: 'expected_attendance_days',
+    name: '应出勤天数',
+    category: 'attendance',
+    source: 'system',
+    unit: 'days',
+    dingtalkFieldName: '应出勤天数',
+    description: '按排班、工作日和节假日规则计算的应出勤天数。',
+    internalKey: 'summary.expectedAttendanceDays',
+  },
+  {
+    code: 'correction_count',
+    name: '补卡次数',
+    category: 'attendance',
+    source: 'system',
+    unit: 'count',
+    dingtalkFieldName: '补卡次数',
+    description: '统计周期内通过补卡或更正审批调整的次数。',
+    internalKey: 'requests.correctionCount',
+  },
+  {
+    code: 'attendance_shift',
+    name: '出勤班次',
+    category: 'attendance',
+    source: 'system',
+    unit: 'text',
+    dingtalkFieldName: '出勤班次',
+    description: '员工当日实际归属的出勤班次。',
+    internalKey: 'workContext.attendanceShift',
+  },
+  {
+    code: 'attendance_days',
+    name: '出勤天数',
+    category: 'attendance',
+    source: 'system',
+    unit: 'days',
+    dingtalkFieldName: '出勤天数',
+    description: '统计周期内有效出勤天数。',
+    internalKey: 'summary.attendanceDays',
+  },
+  {
+    code: 'rest_days',
+    name: '休息天数',
+    category: 'attendance',
+    source: 'system',
+    unit: 'days',
+    dingtalkFieldName: '休息天数',
+    description: '统计周期内休息日或非工作日天数。',
+    internalKey: 'summary.restDays',
+  },
+  {
+    code: 'work_duration',
+    name: '工作时长',
+    category: 'attendance',
+    source: 'system',
+    unit: 'minutes',
+    dingtalkFieldName: '工作时长',
+    description: '统计周期内累计工作分钟数。',
+    internalKey: 'summary.workMinutes',
+  },
+  {
+    code: 'business_trip_duration',
+    name: '出差时长',
+    category: 'attendance',
+    source: 'system',
+    unit: 'minutes',
+    dingtalkFieldName: '出差时长',
+    description: '由审批或导入字段归集的出差时长。',
+    internalKey: 'requests.businessTripMinutes',
+  },
+  {
+    code: 'outing_duration',
+    name: '外出时长',
+    category: 'attendance',
+    source: 'system',
+    unit: 'minutes',
+    dingtalkFieldName: '外出时长',
+    description: '由审批或导入字段归集的外出时长。',
+    internalKey: 'requests.outingMinutes',
+  },
+  {
+    code: 'attendance_result',
+    name: '考勤结果',
+    category: 'attendance',
+    source: 'system',
+    unit: 'text',
+    dingtalkFieldName: '考勤结果',
+    description: '按日或周期汇总后的考勤结果。',
+    internalKey: 'summary.attendanceResult',
+  },
+  {
+    code: 'shift',
+    name: '班次',
+    category: 'attendance',
+    source: 'system',
+    unit: 'text',
+    dingtalkFieldName: '班次',
+    description: '排班计划中的班次名称。',
+    internalKey: 'shift.name',
+  },
+  {
+    code: 'late_count',
+    name: '迟到次数',
+    category: 'anomaly',
+    source: 'system',
+    unit: 'count',
+    dingtalkFieldName: '迟到次数',
+    description: '统计周期内迟到发生次数。',
+    internalKey: 'summary.lateCount',
+  },
+  {
+    code: 'late_duration',
+    name: '迟到时长',
+    category: 'anomaly',
+    source: 'system',
+    unit: 'minutes',
+    dingtalkFieldName: '迟到时长',
+    description: '统计周期内累计迟到分钟数。',
+    internalKey: 'summary.lateMinutes',
+  },
+  {
+    code: 'severe_late_count',
+    name: '严重迟到次数',
+    category: 'anomaly',
+    source: 'system',
+    unit: 'count',
+    dingtalkFieldName: '严重迟到次数',
+    description: '超过严重迟到阈值的迟到次数。',
+    internalKey: 'summary.severeLateCount',
+  },
+  {
+    code: 'severe_late_duration',
+    name: '严重迟到时长',
+    category: 'anomaly',
+    source: 'system',
+    unit: 'minutes',
+    dingtalkFieldName: '严重迟到时长',
+    description: '超过严重迟到阈值后的累计迟到分钟数。',
+    internalKey: 'summary.severeLateMinutes',
+  },
+  {
+    code: 'absence_late_count',
+    name: '旷工迟到次数',
+    category: 'anomaly',
+    source: 'system',
+    unit: 'count',
+    dingtalkFieldName: '旷工迟到次数',
+    description: '按规则被识别为旷工级迟到的次数。',
+    internalKey: 'summary.absenceLateCount',
+  },
+  {
+    code: 'early_leave_count',
+    name: '早退次数',
+    category: 'anomaly',
+    source: 'system',
+    unit: 'count',
+    dingtalkFieldName: '早退次数',
+    description: '统计周期内早退发生次数。',
+    internalKey: 'summary.earlyLeaveCount',
+  },
+  {
+    code: 'early_leave_duration',
+    name: '早退时长',
+    category: 'anomaly',
+    source: 'system',
+    unit: 'minutes',
+    dingtalkFieldName: '早退时长',
+    description: '统计周期内累计早退分钟数。',
+    internalKey: 'summary.earlyLeaveMinutes',
+  },
+  {
+    code: 'missing_clock_in_count',
+    name: '上班缺卡次数',
+    category: 'anomaly',
+    source: 'system',
+    unit: 'count',
+    dingtalkFieldName: '上班缺卡次数',
+    description: '统计周期内上班卡缺失次数。',
+    internalKey: 'summary.missingClockInCount',
+  },
+  {
+    code: 'missing_clock_out_count',
+    name: '下班缺卡次数',
+    category: 'anomaly',
+    source: 'system',
+    unit: 'count',
+    dingtalkFieldName: '下班缺卡次数',
+    description: '统计周期内下班卡缺失次数。',
+    internalKey: 'summary.missingClockOutCount',
+  },
+  {
+    code: 'absenteeism_days',
+    name: '旷工天数',
+    category: 'anomaly',
+    source: 'system',
+    unit: 'days',
+    dingtalkFieldName: '旷工天数',
+    description: '统计周期内被识别为旷工的天数。',
+    internalKey: 'summary.absentDays',
+  },
+  {
+    code: 'leave_duration',
+    name: '请假时长',
+    category: 'leave',
+    source: 'system',
+    unit: 'minutes',
+    dingtalkFieldName: '请假时长',
+    description: '统计周期内审批或导入归集的请假分钟数。',
+    internalKey: 'summary.leaveMinutes',
+  },
+  {
+    code: 'overtime_approval_duration',
+    name: '加班审批时长',
+    category: 'overtime',
+    source: 'system',
+    unit: 'minutes',
+    dingtalkFieldName: '加班审批时长',
+    description: '统计周期内审批确认的加班分钟数。',
+    internalKey: 'requests.overtimeApprovalMinutes',
+  },
+  {
+    code: 'workday_overtime_duration',
+    name: '工作日加班时长',
+    category: 'overtime',
+    source: 'system',
+    unit: 'minutes',
+    dingtalkFieldName: '工作日加班时长',
+    description: '工作日规则下归集的加班分钟数。',
+    internalKey: 'summary.workdayOvertimeMinutes',
+  },
+  {
+    code: 'restday_overtime_duration',
+    name: '休息日加班时长',
+    category: 'overtime',
+    source: 'system',
+    unit: 'minutes',
+    dingtalkFieldName: '休息日加班时长',
+    description: '休息日规则下归集的加班分钟数。',
+    internalKey: 'summary.restdayOvertimeMinutes',
+  },
+  {
+    code: 'holiday_overtime_duration',
+    name: '节假日加班时长',
+    category: 'overtime',
+    source: 'system',
+    unit: 'minutes',
+    dingtalkFieldName: '节假日加班时长',
+    description: '法定节假日或节假日规则下归集的加班分钟数。',
+    internalKey: 'summary.holidayOvertimeMinutes',
+  },
+].map((field, index) => ({
+  enabled: true,
+  reportVisible: true,
+  sortOrder: (ATTENDANCE_REPORT_FIELD_CATEGORIES.find(category => category.id === field.category)?.sortOrder ?? 90) * 100 + index,
+  ...field,
+})))
+
+function normalizeAttendanceReportFieldOrgId(orgId) {
+  const normalized = typeof orgId === 'string' ? orgId.trim() : ''
+  return normalized || DEFAULT_ORG_ID
+}
+
+function getAttendanceReportFieldProjectId(orgId) {
+  return `${normalizeAttendanceReportFieldOrgId(orgId)}:attendance`
+}
+
+function stableAttendanceMultitableId(prefix, ...parts) {
+  const digest = crypto
+    .createHash('sha1')
+    .update(parts.join(':'))
+    .digest('hex')
+    .slice(0, 24)
+  return `${prefix}_${digest}`.slice(0, 50)
+}
+
+function getAttendanceReportFieldCatalogViewId(projectId) {
+  return stableAttendanceMultitableId(
+    'view',
+    projectId,
+    ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID,
+    ATTENDANCE_REPORT_FIELD_CATALOG_VIEW_ID,
+  )
+}
+
+function getAttendanceReportFieldCategory(value) {
+  const normalized = String(value ?? '').trim()
+  if (!normalized) return ATTENDANCE_REPORT_FIELD_CATEGORIES[0]
+  return ATTENDANCE_REPORT_FIELD_CATEGORIES.find(category => (
+    category.id === normalized || category.label === normalized
+  )) ?? ATTENDANCE_REPORT_FIELD_CATEGORIES[0]
+}
+
+function cloneAttendanceReportFieldCategories() {
+  return ATTENDANCE_REPORT_FIELD_CATEGORIES.map(category => ({ ...category }))
+}
+
+function cloneAttendanceReportFieldDefinitions() {
+  return ATTENDANCE_REPORT_FIELD_DEFINITIONS.map(field => ({ ...field }))
+}
+
+function getAttendanceReportFieldCatalogDescriptor() {
+  return {
+    id: ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID,
+    name: '考勤统计字段目录',
+    description: '考勤插件私有字段目录：用于对标钉钉考勤统计字段说明并管理报表字段可见性。',
+    fields: [
+      { id: ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.fieldCode, name: '字段编码', type: 'string', order: 10, property: { validation: { required: true }, width: 160 } },
+      { id: ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.fieldName, name: '字段名称', type: 'string', order: 20, property: { validation: { required: true }, width: 160 } },
+      { id: ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.category, name: '分类', type: 'select', order: 30, options: ATTENDANCE_REPORT_FIELD_CATEGORIES.map(category => category.label), property: { validation: { required: true } } },
+      { id: ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.source, name: '来源', type: 'select', order: 40, options: ATTENDANCE_REPORT_FIELD_SOURCE_OPTIONS },
+      { id: ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.unit, name: '单位', type: 'select', order: 50, options: ATTENDANCE_REPORT_FIELD_UNIT_OPTIONS },
+      { id: ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.enabled, name: '是否启用', type: 'boolean', order: 60 },
+      { id: ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.reportVisible, name: '报表可见', type: 'boolean', order: 70 },
+      { id: ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.sortOrder, name: '排序', type: 'number', order: 80 },
+      { id: ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.dingtalkFieldName, name: '钉钉原字段名', type: 'string', order: 90, property: { width: 180 } },
+      { id: ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.description, name: '说明', type: 'longText', order: 100, property: { width: 360 } },
+      { id: ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.internalKey, name: '内部计算键', type: 'string', order: 110, property: { width: 220 } },
+    ],
+  }
+}
+
+function getAttendanceReportFieldCatalogViewDescriptor(fieldIds = {}) {
+  const categoryFieldId = fieldIds[ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.category] || ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.category
+  const sortOrderFieldId = fieldIds[ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.sortOrder] || ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.sortOrder
+  return {
+    id: ATTENDANCE_REPORT_FIELD_CATALOG_VIEW_ID,
+    objectId: ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID,
+    name: '按分类查看',
+    type: 'grid',
+    sortInfo: {
+      rules: [
+        { fieldId: categoryFieldId, direction: 'asc' },
+        { fieldId: sortOrderFieldId, direction: 'asc' },
+      ],
+    },
+    groupInfo: {
+      fieldId: categoryFieldId,
+      direction: 'asc',
+    },
+    config: {
+      purpose: 'attendance-report-field-catalog',
+    },
+  }
+}
+
+function buildAttendanceReportFieldCatalogRecordData(field, fieldIds) {
+  const data = {}
+  const assign = (logicalFieldId, value) => {
+    data[fieldIds?.[logicalFieldId] || logicalFieldId] = value
+  }
+  const category = getAttendanceReportFieldCategory(field.category)
+  assign(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.fieldCode, field.code)
+  assign(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.fieldName, field.name)
+  assign(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.category, category.label)
+  assign(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.source, field.source || 'system')
+  assign(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.unit, field.unit || 'text')
+  assign(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.enabled, field.enabled !== false)
+  assign(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.reportVisible, field.reportVisible !== false)
+  assign(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.sortOrder, Number(field.sortOrder) || 0)
+  assign(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.dingtalkFieldName, field.dingtalkFieldName || field.name)
+  assign(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.description, field.description || '')
+  assign(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.internalKey, field.internalKey || field.code)
+  return data
+}
+
+function readAttendanceReportFieldCatalogCell(record, fieldIds, logicalFieldId) {
+  const data = record?.data && typeof record.data === 'object' ? record.data : record
+  if (!data || typeof data !== 'object') return undefined
+  const physicalFieldId = fieldIds?.[logicalFieldId]
+  if (physicalFieldId && Object.prototype.hasOwnProperty.call(data, physicalFieldId)) {
+    return data[physicalFieldId]
+  }
+  if (Object.prototype.hasOwnProperty.call(data, logicalFieldId)) {
+    return data[logicalFieldId]
+  }
+  return undefined
+}
+
+function normalizeCatalogString(value, fallback = '') {
+  const normalized = typeof value === 'string' ? value.trim() : ''
+  return normalized || fallback
+}
+
+function normalizeCatalogBoolean(value, fallback) {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value !== 0
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (['true', '1', 'yes', 'y', 'enabled', 'on'].includes(normalized)) return true
+    if (['false', '0', 'no', 'n', 'disabled', 'off'].includes(normalized)) return false
+  }
+  return fallback
+}
+
+function normalizeCatalogNumber(value, fallback = 0) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+function mapAttendanceReportFieldConfigRecord(record, fieldIds) {
+  const read = (fieldId) => readAttendanceReportFieldCatalogCell(record, fieldIds, fieldId)
+  const code = normalizeCatalogString(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.fieldCode))
+  if (!code) return null
+  const category = getAttendanceReportFieldCategory(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.category))
+  return {
+    recordId: record?.id || '',
+    code,
+    name: normalizeCatalogString(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.fieldName), code),
+    category: category.id,
+    categoryLabel: category.label,
+    source: normalizeCatalogString(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.source), 'custom'),
+    unit: normalizeCatalogString(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.unit), 'text'),
+    enabled: normalizeCatalogBoolean(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.enabled), true),
+    reportVisible: normalizeCatalogBoolean(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.reportVisible), true),
+    sortOrder: normalizeCatalogNumber(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.sortOrder), category.sortOrder * 100),
+    dingtalkFieldName: normalizeCatalogString(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.dingtalkFieldName)),
+    description: normalizeCatalogString(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.description)),
+    internalKey: normalizeCatalogString(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.internalKey), code),
+  }
+}
+
+function mergeAttendanceReportFieldDefinitions(configRecords, fieldIds) {
+  const categories = new Map(ATTENDANCE_REPORT_FIELD_CATEGORIES.map(category => [category.id, category]))
+  const configsByCode = new Map()
+  for (const record of configRecords || []) {
+    const config = mapAttendanceReportFieldConfigRecord(record, fieldIds)
+    if (config) configsByCode.set(config.code, config)
+  }
+
+  const systemCodes = new Set()
+  const items = cloneAttendanceReportFieldDefinitions().map((field) => {
+    systemCodes.add(field.code)
+    const category = getAttendanceReportFieldCategory(field.category)
+    const config = configsByCode.get(field.code)
+    const mergedCategory = getAttendanceReportFieldCategory(config?.category ?? category.id)
+    return {
+      code: field.code,
+      name: config?.name || field.name,
+      category: mergedCategory.id,
+      categoryLabel: mergedCategory.label,
+      source: config?.source || field.source || 'system',
+      unit: config?.unit || field.unit || 'text',
+      enabled: config ? config.enabled : field.enabled !== false,
+      reportVisible: config ? config.reportVisible : field.reportVisible !== false,
+      sortOrder: config?.sortOrder ?? field.sortOrder,
+      dingtalkFieldName: config?.dingtalkFieldName || field.dingtalkFieldName || field.name,
+      description: config?.description || field.description || '',
+      internalKey: config?.internalKey || field.internalKey || field.code,
+      recordId: config?.recordId || null,
+      configured: Boolean(config),
+      systemDefined: true,
+    }
+  })
+
+  for (const config of configsByCode.values()) {
+    if (systemCodes.has(config.code)) continue
+    items.push({
+      ...config,
+      configured: true,
+      systemDefined: false,
+    })
+  }
+
+  return items.sort((left, right) => {
+    const leftCategory = categories.get(left.category)?.sortOrder ?? 999
+    const rightCategory = categories.get(right.category)?.sortOrder ?? 999
+    if (leftCategory !== rightCategory) return leftCategory - rightCategory
+    if (left.sortOrder !== right.sortOrder) return left.sortOrder - right.sortOrder
+    return left.code.localeCompare(right.code)
+  })
+}
+
+async function seedAttendanceReportFieldCatalogRecords(multitable, sheetId, fieldIds, logger) {
+  const records = multitable?.records
+  if (!records?.queryRecords || !records?.createRecord) {
+    return { skipped: true, seeded: 0, existing: 0 }
+  }
+
+  const existingRecords = await records.queryRecords({
+    sheetId,
+    orderBy: {
+      fieldId: fieldIds?.[ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.sortOrder] || ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.sortOrder,
+      direction: 'asc',
+    },
+    limit: 1000,
+  })
+  const existingCodes = new Set(
+    existingRecords
+      .map(record => normalizeCatalogString(readAttendanceReportFieldCatalogCell(
+        record,
+        fieldIds,
+        ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.fieldCode,
+      )))
+      .filter(Boolean),
+  )
+
+  let seeded = 0
+  for (const field of ATTENDANCE_REPORT_FIELD_DEFINITIONS) {
+    if (existingCodes.has(field.code)) continue
+    try {
+      await records.createRecord({
+        sheetId,
+        data: buildAttendanceReportFieldCatalogRecordData(field, fieldIds),
+      })
+      seeded += 1
+    } catch (error) {
+      logger?.warn?.('Failed to seed attendance report field catalog record', {
+        code: field.code,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  return { skipped: false, seeded, existing: existingRecords.length }
+}
+
+async function ensureAttendanceReportFieldCatalog(context, orgId, logger, options = {}) {
+  const projectId = getAttendanceReportFieldProjectId(orgId)
+  const multitable = context?.api?.multitable
+  if (!multitable?.provisioning?.ensureObject) {
+    return {
+      available: false,
+      reason: 'MULTITABLE_API_UNAVAILABLE',
+      projectId,
+      objectId: ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID,
+      sheetId: null,
+      viewId: null,
+      fieldIds: {},
+      seeded: 0,
+      existing: 0,
+    }
+  }
+
+  const descriptor = getAttendanceReportFieldCatalogDescriptor()
+  const provisioned = await multitable.provisioning.ensureObject({
+    projectId,
+    descriptor,
+  })
+  const logicalFieldIds = Object.values(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS)
+  let fieldIds = {}
+  if (typeof multitable.provisioning.resolveFieldIds === 'function') {
+    fieldIds = await multitable.provisioning.resolveFieldIds({
+      projectId,
+      objectId: ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID,
+      fieldIds: logicalFieldIds,
+    })
+  } else if (typeof multitable.provisioning.getFieldId === 'function') {
+    fieldIds = Object.fromEntries(logicalFieldIds.map(fieldId => [
+      fieldId,
+      multitable.provisioning.getFieldId(projectId, ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID, fieldId),
+    ]))
+  }
+
+  let viewId = null
+  if (typeof multitable.provisioning.ensureView === 'function') {
+    try {
+      const view = await multitable.provisioning.ensureView({
+        projectId,
+        sheetId: provisioned.sheet.id,
+        descriptor: getAttendanceReportFieldCatalogViewDescriptor(fieldIds),
+      })
+      viewId = view?.id || null
+    } catch (error) {
+      logger?.warn?.('Failed to ensure attendance report field catalog view', error)
+    }
+  }
+
+  const seedResult = options.seedRecords === false
+    ? { skipped: true, seeded: 0, existing: 0 }
+    : await seedAttendanceReportFieldCatalogRecords(multitable, provisioned.sheet.id, fieldIds, logger)
+
+  return {
+    available: true,
+    reason: null,
+    projectId,
+    objectId: ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID,
+    baseId: provisioned.baseId,
+    sheetId: provisioned.sheet.id,
+    viewId,
+    fieldIds,
+    seeded: seedResult.seeded,
+    existing: seedResult.existing,
+    seedSkipped: seedResult.skipped,
+  }
+}
+
+async function loadAttendanceReportFieldCatalog(context, orgId) {
+  const projectId = getAttendanceReportFieldProjectId(orgId)
+  const multitable = context?.api?.multitable
+  const provisioning = multitable?.provisioning
+  if (!provisioning?.findObjectSheet || !multitable?.records?.queryRecords) {
+    return {
+      available: false,
+      reason: 'MULTITABLE_API_UNAVAILABLE',
+      projectId,
+      objectId: ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID,
+      sheetId: null,
+      viewId: null,
+      fieldIds: {},
+    }
+  }
+
+  const sheet = await provisioning.findObjectSheet({
+    projectId,
+    objectId: ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID,
+  })
+  if (!sheet) {
+    return {
+      available: false,
+      reason: 'CATALOG_NOT_PROVISIONED',
+      projectId,
+      objectId: ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID,
+      sheetId: null,
+      viewId: null,
+      fieldIds: {},
+    }
+  }
+
+  const logicalFieldIds = Object.values(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS)
+  let fieldIds = {}
+  if (typeof provisioning.resolveFieldIds === 'function') {
+    fieldIds = await provisioning.resolveFieldIds({
+      projectId,
+      objectId: ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID,
+      fieldIds: logicalFieldIds,
+    })
+  } else if (typeof provisioning.getFieldId === 'function') {
+    fieldIds = Object.fromEntries(logicalFieldIds.map(fieldId => [
+      fieldId,
+      provisioning.getFieldId(projectId, ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID, fieldId),
+    ]))
+  }
+
+  return {
+    available: true,
+    reason: null,
+    projectId,
+    objectId: ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID,
+    baseId: sheet.baseId || null,
+    sheetId: sheet.id,
+    viewId: getAttendanceReportFieldCatalogViewId(projectId),
+    fieldIds,
+    seeded: 0,
+    existing: 0,
+    seedSkipped: true,
+  }
+}
+
+function buildAttendanceReportFieldCatalogFallback(orgId, reason, error) {
+  const projectId = getAttendanceReportFieldProjectId(orgId)
+  const items = mergeAttendanceReportFieldDefinitions([], {})
+  const multitable = {
+    available: false,
+    degraded: true,
+    reason,
+    error: error instanceof Error ? error.message : undefined,
+    projectId,
+    objectId: ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID,
+    sheetId: null,
+    viewId: null,
+    seeded: 0,
+    existing: 0,
+  }
+  return {
+    categories: cloneAttendanceReportFieldCategories(),
+    items,
+    multitable,
+    reportFieldConfig: buildAttendanceReportFieldConfig({
+      fields: resolveAttendanceRecordReportFields(items),
+      multitable,
+    }),
+  }
+}
+
+async function buildAttendanceReportFieldCatalogResponse(context, orgId, logger, options = {}) {
+  let catalog
+  try {
+    catalog = options.provision === true
+      ? await ensureAttendanceReportFieldCatalog(context, orgId, logger, { seedRecords: options.seedRecords !== false })
+      : await loadAttendanceReportFieldCatalog(context, orgId, logger)
+  } catch (error) {
+    logger?.warn?.('Attendance report field catalog provisioning degraded', error)
+    return buildAttendanceReportFieldCatalogFallback(orgId, 'PROVISIONING_FAILED', error)
+  }
+
+  if (!catalog.available) {
+    return buildAttendanceReportFieldCatalogFallback(orgId, catalog.reason || 'MULTITABLE_UNAVAILABLE')
+  }
+
+  try {
+    const records = context.api.multitable.records?.queryRecords
+      ? await context.api.multitable.records.queryRecords({
+        sheetId: catalog.sheetId,
+        orderBy: {
+          fieldId: catalog.fieldIds?.[ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.sortOrder] || ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.sortOrder,
+          direction: 'asc',
+        },
+        limit: 1000,
+      })
+      : []
+    const items = mergeAttendanceReportFieldDefinitions(records, catalog.fieldIds)
+    const multitable = {
+      available: true,
+      degraded: false,
+      projectId: catalog.projectId,
+      objectId: catalog.objectId,
+      baseId: catalog.baseId || null,
+      sheetId: catalog.sheetId,
+      viewId: catalog.viewId,
+      seeded: catalog.seeded,
+      existing: catalog.existing,
+      recordCount: records.length,
+    }
+    return {
+      categories: cloneAttendanceReportFieldCategories(),
+      items,
+      multitable,
+      reportFieldConfig: buildAttendanceReportFieldConfig({
+        fields: resolveAttendanceRecordReportFields(items),
+        multitable,
+      }),
+    }
+  } catch (error) {
+    logger?.warn?.('Attendance report field catalog read degraded', error)
+    return buildAttendanceReportFieldCatalogFallback(orgId, 'READ_FAILED', error)
+  }
+}
+
+const ATTENDANCE_RECORD_REPORT_FIELD_CODES = Object.freeze([
+  'work_date',
+  'employee_name',
+  'employee_no',
+  'department',
+  'position',
+  'attendance_group',
+  'punch_times',
+  'punch_result',
+  'approval_forms',
+  'expected_attendance_days',
+  'correction_count',
+  'attendance_shift',
+  'attendance_days',
+  'rest_days',
+  'work_duration',
+  'business_trip_duration',
+  'outing_duration',
+  'attendance_result',
+  'shift',
+  'late_count',
+  'late_duration',
+  'severe_late_count',
+  'severe_late_duration',
+  'absence_late_count',
+  'early_leave_count',
+  'early_leave_duration',
+  'missing_clock_in_count',
+  'missing_clock_out_count',
+  'absenteeism_days',
+  'leave_duration',
+  'overtime_approval_duration',
+  'workday_overtime_duration',
+  'restday_overtime_duration',
+  'holiday_overtime_duration',
+])
+
+const ATTENDANCE_RECORD_REPORT_FIELD_CODE_SET = new Set(ATTENDANCE_RECORD_REPORT_FIELD_CODES)
+
+function resolveAttendanceRecordReportFields(items) {
+  const sourceItems = Array.isArray(items) && items.length > 0
+    ? items
+    : mergeAttendanceReportFieldDefinitions([], {})
+  return sourceItems
+    .filter(field => (
+      field
+      && field.enabled !== false
+      && field.reportVisible !== false
+      && ATTENDANCE_RECORD_REPORT_FIELD_CODE_SET.has(field.code)
+    ))
+    .map(field => ({
+      code: field.code,
+      name: field.name || field.code,
+      category: field.category || 'attendance',
+      categoryLabel: field.categoryLabel || getAttendanceReportFieldCategory(field.category).label,
+      unit: field.unit || 'text',
+      sortOrder: Number(field.sortOrder) || 0,
+      source: field.source || 'system',
+      description: field.description || '',
+      systemDefined: field.systemDefined !== false,
+      configured: Boolean(field.configured),
+      exportKey: field.code,
+    }))
+    .sort((left, right) => {
+      if (left.sortOrder !== right.sortOrder) return left.sortOrder - right.sortOrder
+      return left.code.localeCompare(right.code)
+    })
+}
+
+async function loadAttendanceRecordReportFields(context, orgId, logger) {
+  const catalog = await buildAttendanceReportFieldCatalogResponse(context, orgId, logger, { provision: false })
+  return {
+    fields: resolveAttendanceRecordReportFields(catalog.items),
+    multitable: catalog.multitable,
+  }
+}
+
+function buildAttendanceReportFieldConfigFingerprint(fields) {
+  const normalized = Array.isArray(fields)
+    ? fields
+      .map(field => ({
+        code: String(field?.code || ''),
+        name: String(field?.name || ''),
+        category: String(field?.category || ''),
+        unit: String(field?.unit || ''),
+        sortOrder: Number(field?.sortOrder) || 0,
+        source: String(field?.source || ''),
+        configured: Boolean(field?.configured),
+        systemDefined: field?.systemDefined !== false,
+      }))
+      .filter(field => field.code)
+      .sort((left, right) => {
+        if (left.sortOrder !== right.sortOrder) return left.sortOrder - right.sortOrder
+        return left.code.localeCompare(right.code)
+      })
+    : []
+  const value = crypto
+    .createHash('sha1')
+    .update(JSON.stringify(normalized))
+    .digest('hex')
+  return {
+    algorithm: 'sha1',
+    value,
+    fieldCount: normalized.length,
+    codes: normalized.map(field => field.code),
+  }
+}
+
+function buildAttendanceReportFieldConfig(reportFields) {
+  const fields = Array.isArray(reportFields?.fields) ? reportFields.fields : []
+  return {
+    multitable: reportFields?.multitable || {
+      available: false,
+      degraded: true,
+      reason: 'REPORT_FIELD_CONFIG_UNAVAILABLE',
+    },
+    fieldsFingerprint: buildAttendanceReportFieldConfigFingerprint(fields),
+  }
+}
+
+function buildAttendanceReportFieldConfigHeaders(reportFieldConfig) {
+  const fingerprint = reportFieldConfig?.fieldsFingerprint || {}
+  const multitable = reportFieldConfig?.multitable || {}
+  const headers = {}
+  const algorithm = String(fingerprint.algorithm || '').trim()
+  const value = String(fingerprint.value || '').trim()
+  const fieldCount = Number(fingerprint.fieldCount)
+  const codes = Array.isArray(fingerprint.codes)
+    ? fingerprint.codes.map(code => String(code || '').trim()).filter(Boolean)
+    : []
+  if (algorithm) headers['X-Attendance-Report-Fields-Fingerprint-Algorithm'] = algorithm
+  if (value) headers['X-Attendance-Report-Fields-Fingerprint'] = value
+  if (Number.isFinite(fieldCount)) headers['X-Attendance-Report-Fields-Count'] = String(fieldCount)
+  if (codes.length > 0) headers['X-Attendance-Report-Fields-Codes'] = codes.join(',')
+  const projectId = String(multitable.projectId || '').trim()
+  const objectId = String(multitable.objectId || '').trim()
+  const sheetId = String(multitable.sheetId || '').trim()
+  const viewId = String(multitable.viewId || '').trim()
+  if (projectId) headers['X-Attendance-Report-Fields-Project-Id'] = projectId
+  if (objectId) headers['X-Attendance-Report-Fields-Object-Id'] = objectId
+  if (sheetId) headers['X-Attendance-Report-Fields-Sheet-Id'] = sheetId
+  if (viewId) headers['X-Attendance-Report-Fields-View-Id'] = viewId
+  return headers
+}
+
+function setAttendanceReportFieldConfigHeaders(res, reportFieldConfig) {
+  for (const [key, value] of Object.entries(buildAttendanceReportFieldConfigHeaders(reportFieldConfig))) {
+    res.setHeader(key, value)
+  }
+}
+
+function firstNonEmptyValue(...values) {
+  for (const value of values) {
+    if (Array.isArray(value)) {
+      const joined = value.map(item => String(item ?? '').trim()).filter(Boolean).join(', ')
+      if (joined) return joined
+      continue
+    }
+    const normalized = typeof value === 'string' ? value.trim() : value
+    if (normalized !== undefined && normalized !== null && normalized !== '') return normalized
+  }
+  return ''
+}
+
+function readAttendanceRecordMeta(row, keys) {
+  const meta = normalizeMetadata(row?.meta)
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(meta, key)) {
+      return meta[key]
+    }
+  }
+  return undefined
+}
+
+function readAttendanceRecordMinutes(row, keys, fallback = 0) {
+  const value = readAttendanceRecordMeta(row, keys)
+  const parsed = Number(value)
+  if (Number.isFinite(parsed)) return parsed
+  return fallback
+}
+
+function formatAttendanceRecordReportDateTime(value, timezone) {
+  return value ? formatDateTimeForCsv(value, timezone) : ''
+}
+
+function getAttendanceRecordReportFieldValue(row, fieldCode) {
+  const timezone = row?.timezone
+  const workDate = normalizeDateOnly(row?.work_date) ?? String(row?.work_date ?? '').slice(0, 10)
+  const status = String(row?.status ?? '')
+  const isWorkday = row?.is_workday !== false
+  const workMinutes = Number(row?.work_minutes ?? 0)
+  const lateMinutes = Number(row?.late_minutes ?? 0)
+  const earlyLeaveMinutes = Number(row?.early_leave_minutes ?? 0)
+  const leaveMinutes = readAttendanceRecordMinutes(row, ['leave_minutes', 'leaveMinutes'], 0)
+  const overtimeMinutes = readAttendanceRecordMinutes(row, ['overtime_minutes', 'overtimeMinutes'], 0)
+
+  switch (fieldCode) {
+    case 'work_date':
+      return workDate
+    case 'employee_name':
+      return firstNonEmptyValue(row?.user_name, row?.username, row?.user_id)
+    case 'employee_no':
+      return firstNonEmptyValue(readAttendanceRecordMeta(row, ['empNo', 'employeeNo', 'employee_no', '工号']), row?.user_id)
+    case 'department':
+      return firstNonEmptyValue(readAttendanceRecordMeta(row, ['department', '部门']))
+    case 'position':
+      return firstNonEmptyValue(readAttendanceRecordMeta(row, ['position', 'role', 'roleTags', 'role_tags', '职位']))
+    case 'attendance_group':
+      return firstNonEmptyValue(readAttendanceRecordMeta(row, ['attendanceGroup', 'attendance_group', '考勤组']))
+    case 'punch_times':
+      return [
+        formatAttendanceRecordReportDateTime(row?.first_in_at, timezone),
+        formatAttendanceRecordReportDateTime(row?.last_out_at, timezone),
+      ].filter(Boolean).join(' / ')
+    case 'punch_result':
+    case 'attendance_result':
+      return status
+    case 'approval_forms':
+      return firstNonEmptyValue(readAttendanceRecordMeta(row, ['approvalSummary', 'approval_summary', 'attendance_approve', '关联的审批单']))
+    case 'expected_attendance_days':
+      return isWorkday ? 1 : 0
+    case 'correction_count':
+      return Number(readAttendanceRecordMeta(row, ['correction_count', 'correctionCount']) ?? (status === 'adjusted' ? 1 : 0))
+    case 'attendance_shift':
+      return firstNonEmptyValue(readAttendanceRecordMeta(row, ['attendanceClass', 'attendance_class', '出勤班次']))
+    case 'attendance_days':
+      return isWorkday && !['absent', 'off'].includes(status) ? 1 : 0
+    case 'rest_days':
+      return isWorkday ? 0 : 1
+    case 'work_duration':
+      return workMinutes
+    case 'business_trip_duration':
+      return readAttendanceRecordMinutes(row, ['business_trip_minutes', 'businessTripMinutes', 'businessTripDuration'], 0)
+    case 'outing_duration':
+      return readAttendanceRecordMinutes(row, ['outing_minutes', 'outingMinutes', 'outingDuration'], 0)
+    case 'shift':
+      return firstNonEmptyValue(readAttendanceRecordMeta(row, ['shiftName', 'shift_name', '班次']), row?.workday_context?.shiftName)
+    case 'late_count':
+      return lateMinutes > 0 ? 1 : 0
+    case 'late_duration':
+      return lateMinutes
+    case 'severe_late_count':
+      return Number(readAttendanceRecordMeta(row, ['severe_late_count', 'severeLateCount']) ?? 0)
+    case 'severe_late_duration':
+      return readAttendanceRecordMinutes(row, ['severe_late_minutes', 'severeLateMinutes'], 0)
+    case 'absence_late_count':
+      return Number(readAttendanceRecordMeta(row, ['absence_late_count', 'absenceLateCount']) ?? 0)
+    case 'early_leave_count':
+      return earlyLeaveMinutes > 0 ? 1 : 0
+    case 'early_leave_duration':
+      return earlyLeaveMinutes
+    case 'missing_clock_in_count':
+      return isWorkday && !row?.first_in_at ? 1 : 0
+    case 'missing_clock_out_count':
+      return isWorkday && !row?.last_out_at ? 1 : 0
+    case 'absenteeism_days':
+      return status === 'absent' ? 1 : 0
+    case 'leave_duration':
+      return leaveMinutes
+    case 'overtime_approval_duration':
+      return overtimeMinutes
+    case 'workday_overtime_duration':
+      return isWorkday ? overtimeMinutes : 0
+    case 'restday_overtime_duration':
+      return !isWorkday ? overtimeMinutes : 0
+    case 'holiday_overtime_duration':
+      return Number(readAttendanceRecordMeta(row, ['holiday_overtime_minutes', 'holidayOvertimeMinutes']) ?? 0)
+    default:
+      return ''
+  }
+}
+
+function buildAttendanceRecordReportExportItem(row, reportFields) {
+  return Object.fromEntries(reportFields.map(field => [
+    field.exportKey || field.code,
+    getAttendanceRecordReportFieldValue(row, field.code),
+  ]))
+}
+
 function findImportProfile(profileId) {
   if (!profileId) return null
   return IMPORT_MAPPING_PROFILES.find((profile) => profile.id === profileId) ?? null
@@ -6733,6 +7859,31 @@ function buildCsv(rows, headers) {
   return lines.join('\n')
 }
 
+function buildCsvWithColumns(rows, columns) {
+  const normalizedColumns = Array.isArray(columns)
+    ? columns.filter(column => column && column.key)
+    : []
+  const lines = [
+    normalizedColumns.map(column => formatCsvValue(column.label || column.key)).join(','),
+  ]
+  for (const row of rows) {
+    const line = normalizedColumns.map(column => formatCsvValue(row[column.key])).join(',')
+    lines.push(line)
+  }
+  return lines.join('\n')
+}
+
+function buildAttendanceRecordReportCsv(rows, reportFields, options = {}) {
+  const headerMode = options.headerMode === 'code' ? 'code' : 'label'
+  const columns = reportFields.map(field => ({
+    key: field.exportKey || field.code,
+    label: headerMode === 'code'
+      ? (field.exportKey || field.code)
+      : (field.name || field.exportKey || field.code),
+  }))
+  return buildCsvWithColumns(rows, columns)
+}
+
 function buildPayrollSummaryCsv(summary, cycle) {
   const headers = ['cycle_id', 'cycle_name', 'start_date', 'end_date', 'metric', 'value']
   const rows = [
@@ -7140,6 +8291,28 @@ async function isApproverAllowed(db, userId, step, logger) {
 }
 
 module.exports = {
+  __attendanceReportFieldCatalogForTests: {
+    ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS,
+    ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID,
+    ATTENDANCE_REPORT_FIELD_CATALOG_VIEW_ID,
+    buildAttendanceReportFieldCatalogRecordData,
+    buildAttendanceReportFieldCatalogResponse,
+    cloneAttendanceReportFieldCategories,
+    cloneAttendanceReportFieldDefinitions,
+    ensureAttendanceReportFieldCatalog,
+    getAttendanceRecordReportFieldValue,
+    getAttendanceReportFieldCatalogDescriptor,
+    getAttendanceReportFieldProjectId,
+    loadAttendanceReportFieldCatalog,
+    mergeAttendanceReportFieldDefinitions,
+    resolveAttendanceRecordReportFields,
+    buildAttendanceRecordReportExportItem,
+    buildAttendanceRecordReportCsv,
+    buildAttendanceReportFieldConfig,
+    buildAttendanceReportFieldConfigHeaders,
+    buildAttendanceReportFieldConfigFingerprint,
+  },
+
   async activate(context) {
     const db = context.api.database
     const logger = context.logger
@@ -9883,9 +11056,11 @@ module.exports = {
           const total = Number(countRows[0]?.total ?? 0)
 
           const rows = await db.query(
-            `SELECT * FROM attendance_records
-             WHERE user_id = $1 AND org_id = $2 AND work_date BETWEEN $3 AND $4
-             ORDER BY work_date DESC
+            `SELECT ar.*, u.name AS user_name, u.username AS username
+             FROM attendance_records ar
+             LEFT JOIN users u ON u.id = ar.user_id
+             WHERE ar.user_id = $1 AND ar.org_id = $2 AND ar.work_date BETWEEN $3 AND $4
+             ORDER BY ar.work_date DESC
              LIMIT $5 OFFSET $6`,
             [targetUserId, orgId, from, to, pageSize, offset]
           )
@@ -9896,6 +11071,7 @@ module.exports = {
             workDates: rows.map((row) => row.work_date),
           })
           const approvedMap = await loadApprovedMinutesRange(db, orgId, targetUserId, from, to)
+          const reportFields = await loadAttendanceRecordReportFields(context, orgId, logger)
           const records = rows.map((row) => {
             const workDate = normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10)
             const meta = normalizeMetadata(row.meta)
@@ -9931,6 +11107,8 @@ module.exports = {
               total,
               page,
               pageSize,
+              reportFields: reportFields.fields,
+              reportFieldConfig: buildAttendanceReportFieldConfig(reportFields),
             },
           })
         } catch (error) {
@@ -19107,6 +20285,36 @@ module.exports = {
 
     context.api.http.addRoute(
       'GET',
+      '/api/attendance/report-fields',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const data = await buildAttendanceReportFieldCatalogResponse(context, orgId, logger, { provision: false })
+        res.json({ ok: true, data })
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/report-fields/sync',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const data = await buildAttendanceReportFieldCatalogResponse(context, orgId, logger, {
+          provision: true,
+          seedRecords: true,
+        })
+        emitEvent('attendance.report_fields.synced', {
+          orgId,
+          projectId: data.multitable?.projectId,
+          sheetId: data.multitable?.sheetId,
+          recordCount: data.multitable?.recordCount,
+          syncedAt: new Date().toISOString(),
+        })
+        res.json({ ok: true, data })
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
       '/api/attendance/settings',
       withPermission('attendance:admin', async (_req, res) => {
         try {
@@ -19165,6 +20373,7 @@ module.exports = {
           to: z.string().optional(),
           limit: z.string().optional(),
           format: z.enum(['csv', 'json']).optional(),
+          header: z.enum(['label', 'code']).optional(),
         })
 
         const parsed = schema.safeParse({
@@ -19174,6 +20383,7 @@ module.exports = {
           to: typeof req.query.to === 'string' ? req.query.to : undefined,
           limit: typeof req.query.limit === 'string' ? req.query.limit : undefined,
           format: typeof req.query.format === 'string' ? req.query.format.toLowerCase() : undefined,
+          header: typeof req.query.header === 'string' ? req.query.header.toLowerCase() : undefined,
         })
 
         if (!parsed.success) {
@@ -19208,41 +20418,34 @@ module.exports = {
 
         try {
           const rows = await db.query(
-            `SELECT user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes,
-                    early_leave_minutes, status, is_workday
-             FROM attendance_records
-             WHERE user_id = $1 AND org_id = $2 AND work_date BETWEEN $3 AND $4
-             ORDER BY work_date DESC
+            `SELECT ar.user_id, ar.org_id, ar.work_date, ar.timezone, ar.first_in_at, ar.last_out_at,
+                    ar.work_minutes, ar.late_minutes, ar.early_leave_minutes, ar.status, ar.is_workday,
+                    ar.meta, u.name AS user_name, u.username AS username
+             FROM attendance_records ar
+             LEFT JOIN users u ON u.id = ar.user_id
+             WHERE ar.user_id = $1 AND ar.org_id = $2 AND ar.work_date BETWEEN $3 AND $4
+             ORDER BY ar.work_date DESC
              LIMIT $5`,
             [targetUserId, orgId, from, to, limit]
           )
 
-          const headers = [
-            'user_id',
-            'org_id',
-            'work_date',
-            'timezone',
-            'first_in_at',
-            'last_out_at',
-            'work_minutes',
-            'late_minutes',
-            'early_leave_minutes',
-            'status',
-            'is_workday',
-          ]
-          const exportItems = rows.map((row) => ({
-            user_id: row.user_id ?? '',
-            org_id: row.org_id ?? '',
-            work_date: formatDateOnlyForCsv(row.work_date),
-            timezone: row.timezone ?? '',
-            first_in_at: formatDateTimeForCsv(row.first_in_at, row.timezone),
-            last_out_at: formatDateTimeForCsv(row.last_out_at, row.timezone),
-            work_minutes: row.work_minutes ?? 0,
-            late_minutes: row.late_minutes ?? 0,
-            early_leave_minutes: row.early_leave_minutes ?? 0,
-            status: row.status ?? '',
-            is_workday: row.is_workday ?? '',
-          }))
+          const approvedMap = await loadApprovedMinutesRange(db, orgId, targetUserId, from, to)
+          const reportFields = await loadAttendanceRecordReportFields(context, orgId, logger)
+          const exportRows = rows.map((row) => {
+            const workDate = normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10)
+            const approved = approvedMap.get(workDate) ?? { leaveMinutes: 0, overtimeMinutes: 0 }
+            return {
+              ...row,
+              work_date: workDate,
+              meta: {
+                ...normalizeMetadata(row.meta),
+                leave_minutes: approved.leaveMinutes,
+                overtime_minutes: approved.overtimeMinutes,
+              },
+            }
+          })
+          const exportItems = exportRows.map(row => buildAttendanceRecordReportExportItem(row, reportFields.fields))
+          const reportFieldConfig = buildAttendanceReportFieldConfig(reportFields)
           if (parsed.data.format === 'json') {
             emitEvent('attendance.exported', {
               orgId,
@@ -19261,11 +20464,15 @@ module.exports = {
                 from,
                 to,
                 format: 'json',
+                reportFields: reportFields.fields,
+                reportFieldConfig,
               },
             })
             return
           }
-          const csv = buildCsv(exportItems, headers)
+          const csv = buildAttendanceRecordReportCsv(exportItems, reportFields.fields, {
+            headerMode: parsed.data.header || 'label',
+          })
           const filename = `attendance-${orgId}-${from}-to-${to}.csv`
 
           emitEvent('attendance.exported', {
@@ -19277,6 +20484,7 @@ module.exports = {
           })
           res.setHeader('Content-Type', 'text/csv')
           res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+          setAttendanceReportFieldConfigHeaders(res, reportFieldConfig)
           res.status(200).send(csv)
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
@@ -19296,6 +20504,12 @@ module.exports = {
 	      scheduleImportUploadCleanup()
 	    } catch (error) {
 	      logger.warn('Attendance settings preload failed', error)
+	    }
+
+	    try {
+	      await ensureAttendanceReportFieldCatalog(context, DEFAULT_ORG_ID, logger)
+	    } catch (error) {
+	      logger.warn('Attendance report field catalog preload failed', error)
 	    }
 
     logger.info('Attendance plugin activated')
