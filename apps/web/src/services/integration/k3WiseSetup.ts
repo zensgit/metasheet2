@@ -7,6 +7,7 @@ export type IntegrationPipelineRunMode = 'manual' | 'incremental' | 'full'
 export type K3WisePipelineTarget = 'material' | 'bom'
 export type IntegrationPipelineRunStatus = 'pending' | 'running' | 'succeeded' | 'partial' | 'failed' | 'cancelled'
 export type IntegrationDeadLetterStatus = 'open' | 'replayed' | 'discarded'
+export type PlmReadMethod = 'api' | 'database' | 'table' | 'file' | 'manual'
 
 export interface IntegrationApiEnvelope<T> {
   ok: boolean
@@ -139,6 +140,7 @@ export interface K3WiseSetupForm {
   workspaceId: string
   projectId: string
   baseId: string
+  operator: string
   webApiSystemId: string
   webApiHasCredentials: boolean
   webApiName: string
@@ -175,6 +177,16 @@ export interface K3WiseSetupForm {
   sqlAllowedTables: string
   sqlMiddleTables: string
   sqlStoredProcedures: string
+  plmKind: string
+  plmReadMethod: PlmReadMethod
+  plmBaseUrl: string
+  plmDefaultProductId: string
+  plmUsername: string
+  plmPassword: string
+  rollbackOwner: string
+  rollbackStrategy: string
+  bomEnabled: boolean
+  bomProductId: string
   sourceSystemId: string
   materialPipelineName: string
   materialPipelineId: string
@@ -274,11 +286,26 @@ export interface K3WiseDeployGateSummary {
   canRunLive: boolean
 }
 
+export interface K3WisePocCommandSet {
+  postdeploySmoke: string
+  postdeploySummary: string
+  preflight: string
+  offlineMock: string
+  evidence: string
+}
+
+export interface K3WiseGateJsonImportResult {
+  form: K3WiseSetupForm
+  warnings: string[]
+}
+
 const WEBAPI_KIND = 'erp:k3-wise-webapi'
 const SQLSERVER_KIND = 'erp:k3-wise-sqlserver'
 const K3_WISE_POC_MIN_SAMPLE_LIMIT = 1
 const K3_WISE_POC_MAX_SAMPLE_LIMIT = 3
 const K3_WISE_DOCUMENT_TEMPLATE_VERSION = '2026.05.v1'
+const IMPORT_SECRET_KEY_PATTERN =
+  /(password|passwd|pwd|secret|sessionid|session_id|cookie|accesskey|access_key|privatekey|private_key|clientsecret|client_secret|authoritycode|authority_code|^token$|access[_-]?token|bearer[_-]?token)/i
 
 const K3_WISE_DOCUMENT_TEMPLATES: Record<K3WisePipelineTarget, K3WiseDocumentTemplate> = {
   material: {
@@ -443,6 +470,16 @@ export function splitList(value: string): string[] {
     .split(/\r?\n|,/)
     .map((item) => item.trim())
     .filter(Boolean)
+}
+
+function normalizeSqlObjectLeaf(value: string): string {
+  const normalized = value.trim().replace(/[[\]"'`]/g, '')
+  const parts = normalized.split('.').map((part) => part.trim()).filter(Boolean)
+  return (parts.at(-1) || normalized).toLowerCase()
+}
+
+function isK3CoreBusinessTable(value: string): boolean {
+  return new Set(['t_icitem', 't_icbom', 't_icbomchild']).has(normalizeSqlObjectLeaf(value))
 }
 
 export function listK3WiseDocumentTemplates(): K3WiseDocumentTemplate[] {
@@ -690,6 +727,7 @@ export function createDefaultK3WiseSetupForm(): K3WiseSetupForm {
     workspaceId,
     projectId: '',
     baseId: '',
+    operator: '',
     webApiSystemId: '',
     webApiHasCredentials: false,
     webApiName: 'K3 WISE WebAPI',
@@ -726,6 +764,16 @@ export function createDefaultK3WiseSetupForm(): K3WiseSetupForm {
     sqlAllowedTables: 't_ICItem\nt_ICBOM\nt_ICBomChild',
     sqlMiddleTables: '',
     sqlStoredProcedures: '',
+    plmKind: 'plm:yuantus-wrapper',
+    plmReadMethod: 'api',
+    plmBaseUrl: '',
+    plmDefaultProductId: '',
+    plmUsername: '',
+    plmPassword: '',
+    rollbackOwner: '',
+    rollbackStrategy: 'disable-test-records',
+    bomEnabled: true,
+    bomProductId: '',
     sourceSystemId: '',
     materialPipelineName: 'PLM Material to K3 WISE',
     materialPipelineId: '',
@@ -790,6 +838,38 @@ export function validateK3WiseSetupForm(form: K3WiseSetupForm): K3WiseSetupValid
     if (sqlCredentialTouched && (!trim(form.sqlUsername) || !trim(form.sqlPassword))) {
       issues.push({ field: 'sqlPassword', message: 'SQL Server credentials must include both username and password' })
     }
+  }
+  return issues
+}
+
+export function validateK3WiseGateDraftForm(form: K3WiseSetupForm): K3WiseSetupValidationIssue[] {
+  const issues: K3WiseSetupValidationIssue[] = []
+  if (!trim(form.tenantId)) issues.push({ field: 'tenantId', message: 'tenantId is required' })
+  if (!trim(form.workspaceId)) issues.push({ field: 'workspaceId', message: 'workspaceId is required for live PoC GATE' })
+  if (!trim(form.operator)) issues.push({ field: 'operator', message: 'operator is required for live PoC GATE' })
+  if (!trim(form.version)) issues.push({ field: 'version', message: 'K3 WISE version is required' })
+  validateHttpUrl(form.baseUrl, 'baseUrl', issues)
+  if (form.webApiAuthMode === 'login' && !trim(form.acctId)) {
+    issues.push({ field: 'acctId', message: 'acctId is required for login-mode live PoC GATE' })
+  }
+  if (form.environment === 'production') {
+    issues.push({ field: 'environment', message: 'Live PoC GATE must target a non-production K3 WISE environment' })
+  } else if (!['test', 'uat', 'staging'].includes(form.environment)) {
+    issues.push({ field: 'environment', message: 'Live PoC GATE environment must be test, uat, or staging' })
+  }
+  if (form.autoSubmit || form.autoAudit) {
+    issues.push({ field: 'form', message: 'Live PoC GATE must stay Save-only: autoSubmit and autoAudit must be false' })
+  }
+  if (!trim(form.plmKind)) issues.push({ field: 'plmKind', message: 'PLM kind is required' })
+  if (!trim(form.plmReadMethod)) issues.push({ field: 'plmReadMethod', message: 'PLM read method is required' })
+  if (trim(form.plmBaseUrl)) validateHttpUrl(form.plmBaseUrl, 'plmBaseUrl', issues)
+  if (!trim(form.rollbackOwner)) issues.push({ field: 'rollbackOwner', message: 'Rollback owner is required' })
+  if (!trim(form.rollbackStrategy)) issues.push({ field: 'rollbackStrategy', message: 'Rollback strategy is required' })
+  if (form.bomEnabled && !trim(form.bomProductId) && !trim(form.plmDefaultProductId)) {
+    issues.push({ field: 'bomProductId', message: 'BOM PoC requires BOM product ID or PLM default product ID' })
+  }
+  if (form.sqlEnabled && form.sqlMode !== 'readonly' && splitList(form.sqlMiddleTables).some(isK3CoreBusinessTable)) {
+    issues.push({ field: 'sqlMiddleTables', message: 'Live PoC may not write K3 WISE core business tables' })
   }
   return issues
 }
@@ -1083,6 +1163,417 @@ export function formatIntegrationStagingDescriptorFieldSummary(descriptor: Integ
   return selectFields.length > 0
     ? `${details.length} fields · ${typeText} · select ${selectFields.join(', ')}`
     : `${details.length} fields · ${typeText}`
+}
+
+function credentialPlaceholder(): string {
+  return '<fill-outside-git>'
+}
+
+function buildMaterialGateMappings(): Array<Record<string, unknown>> {
+  return [
+    { sourceField: 'code', targetField: 'FNumber', transform: { type: 'upperTrim' }, validation: [{ type: 'required' }] },
+    { sourceField: 'name', targetField: 'FName', validation: [{ type: 'required' }] },
+    { sourceField: 'uom', targetField: 'FBaseUnitID', transform: { type: 'dictMap', dictionary: 'unit' } },
+    { sourceField: 'spec', targetField: 'FModel', transform: { type: 'trim' } },
+  ]
+}
+
+function buildBomGateMappings(): Array<Record<string, unknown>> {
+  return [
+    { sourceField: 'parentCode', targetField: 'FParentItemNumber', validation: [{ type: 'required' }] },
+    { sourceField: 'childCode', targetField: 'FChildItems[].FItemNumber', validation: [{ type: 'required' }] },
+    { sourceField: 'quantity', targetField: 'FChildItems[].FQty', transform: { type: 'toNumber' } },
+  ]
+}
+
+export function buildK3WiseGateDraft(form: K3WiseSetupForm): Record<string, unknown> {
+  const issues = validateK3WiseGateDraftForm(form)
+  if (issues.length > 0) {
+    throw new Error(issues[0].message)
+  }
+
+  const plmConfig: Record<string, unknown> = {}
+  if (trim(form.plmDefaultProductId)) plmConfig.defaultProductId = trim(form.plmDefaultProductId)
+
+  const k3Credentials = form.webApiAuthMode === 'authority-code'
+    ? { authorityCode: credentialPlaceholder() }
+    : {
+      username: trim(form.username) || credentialPlaceholder(),
+      password: credentialPlaceholder(),
+    }
+
+  return {
+    tenantId: resolveTenantId(form),
+    workspaceId: trim(form.workspaceId),
+    ...(optionalString(form.projectId) ? { projectId: trim(form.projectId) } : {}),
+    operator: trim(form.operator),
+    k3Wise: {
+      version: trim(form.version),
+      apiUrl: trim(form.baseUrl),
+      environment: form.environment,
+      authMode: form.webApiAuthMode,
+      ...(form.webApiAuthMode === 'authority-code' ? { tokenPath: trim(form.tokenPath) } : { loginPath: trim(form.loginPath), acctId: trim(form.acctId) }),
+      credentials: k3Credentials,
+      autoSubmit: false,
+      autoAudit: false,
+    },
+    plm: {
+      kind: trim(form.plmKind),
+      readMethod: form.plmReadMethod,
+      ...(optionalString(form.plmBaseUrl) ? { baseUrl: trim(form.plmBaseUrl) } : {}),
+      ...(Object.keys(plmConfig).length > 0 ? { config: plmConfig } : {}),
+      credentials: {
+        username: trim(form.plmUsername) || credentialPlaceholder(),
+        password: credentialPlaceholder(),
+      },
+    },
+    sqlServer: {
+      enabled: form.sqlEnabled,
+      mode: form.sqlEnabled ? form.sqlMode : 'readonly',
+      ...(optionalString(form.sqlServer) ? { server: trim(form.sqlServer) } : {}),
+      ...(optionalString(form.sqlDatabase) ? { database: trim(form.sqlDatabase) } : {}),
+      allowedTables: splitList(form.sqlAllowedTables),
+      middleTables: splitList(form.sqlMiddleTables),
+      storedProcedures: splitList(form.sqlStoredProcedures),
+      writeCoreTables: false,
+    },
+    rollback: {
+      owner: trim(form.rollbackOwner),
+      strategy: trim(form.rollbackStrategy),
+    },
+    bom: {
+      enabled: form.bomEnabled,
+      ...(form.bomEnabled ? { productId: trim(form.bomProductId) || trim(form.plmDefaultProductId) } : {}),
+    },
+    fieldMappings: {
+      material: buildMaterialGateMappings(),
+      ...(form.bomEnabled ? { bom: buildBomGateMappings() } : {}),
+    },
+  }
+}
+
+export function stringifyK3WiseGateDraft(form: K3WiseSetupForm): string {
+  return JSON.stringify(buildK3WiseGateDraft(form), null, 2)
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function hasOwn(record: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key)
+}
+
+function recordAt(record: Record<string, unknown>, key: string): Record<string, unknown> | null {
+  const value = record[key]
+  return isPlainRecord(value) ? value : null
+}
+
+function importedString(value: unknown): string {
+  if (typeof value === 'string') return trim(value)
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return ''
+}
+
+function firstImportedString(record: Record<string, unknown> | null, keys: string[]): string {
+  if (!record) return ''
+  for (const key of keys) {
+    if (!hasOwn(record, key)) continue
+    const value = importedString(record[key])
+    if (value) return value
+  }
+  return ''
+}
+
+function firstImportedValue(record: Record<string, unknown> | null, keys: string[]): unknown {
+  if (!record) return undefined
+  for (const key of keys) {
+    if (hasOwn(record, key)) return record[key]
+  }
+  return undefined
+}
+
+function importedListText(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value.map((item) => importedString(item)).filter(Boolean).join('\n')
+  }
+  if (typeof value === 'string') {
+    return splitList(value).join('\n')
+  }
+  return ''
+}
+
+function normalizeImportedBoolean(
+  value: unknown,
+  fallback: boolean,
+  field: string,
+  warnings: Set<string>,
+): boolean {
+  if (value === undefined || value === null || value === '') return fallback
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') {
+    if (value === 0 || value === 1) return value === 1
+    warnings.add(`${field} ignored because it is not a boolean-like value`)
+    return fallback
+  }
+  if (typeof value !== 'string') {
+    warnings.add(`${field} ignored because it is not a boolean-like value`)
+    return fallback
+  }
+
+  const normalized = trim(value).toLowerCase()
+  if (BOOLEAN_TRUE_TEXT.has(normalized) || ['yes', 'y', 'on', '是', '启用', '开启', '开'].includes(normalized)) return true
+  if (BOOLEAN_FALSE_TEXT.has(normalized) || ['no', 'n', 'off', '否', '禁用', '关闭', '关'].includes(normalized)) return false
+  warnings.add(`${field} ignored because it is not a boolean-like value`)
+  return fallback
+}
+
+function normalizeImportedEnvironment(
+  value: unknown,
+  fallback: K3WiseSetupForm['environment'],
+  warnings: Set<string>,
+): K3WiseSetupForm['environment'] {
+  const normalized = importedString(value).toLowerCase()
+  if (!normalized) return fallback
+  if (['test', 'testing', '测试'].includes(normalized)) return 'test'
+  if (['uat', '用户验收'].includes(normalized)) return 'uat'
+  if (['staging', 'stage', 'pre', '预发'].includes(normalized)) return 'staging'
+  if (['production', 'prod', '生产'].includes(normalized)) return 'production'
+  if (normalized === 'other') return 'other'
+  warnings.add(`k3Wise.environment "${importedString(value)}" mapped to other`)
+  return 'other'
+}
+
+function normalizeImportedWebApiAuthMode(
+  value: unknown,
+  fallback: K3WiseWebApiAuthMode,
+  warnings: Set<string>,
+): K3WiseWebApiAuthMode {
+  const normalized = importedString(value)
+    .toLowerCase()
+    .replace(/[\s_]+/g, '-')
+  if (!normalized) return fallback
+  if (['authority-code', 'auth-code', 'token', 'authorization-code', '授权码'].includes(normalized)) return 'authority-code'
+  if (['login', 'password', 'account-login', '账套登录'].includes(normalized)) return 'login'
+  warnings.add(`k3Wise.authMode "${importedString(value)}" ignored; kept ${fallback}`)
+  return fallback
+}
+
+function normalizeImportedSqlMode(
+  value: unknown,
+  fallback: K3SqlServerMode,
+  warnings: Set<string>,
+): K3SqlServerMode {
+  const normalized = importedString(value)
+    .toLowerCase()
+    .replace(/[\s_]+/g, '-')
+  if (!normalized) return fallback
+  if (['readonly', 'read-only', 'ro', '只读'].includes(normalized)) return 'readonly'
+  if (['middle-table', 'integration-table', 'staging-table', '中间表'].includes(normalized)) return 'middle-table'
+  if (['stored-procedure', 'procedure', 'proc', 'sp', '存储过程'].includes(normalized)) return 'stored-procedure'
+  warnings.add(`sqlServer.mode "${importedString(value)}" ignored; kept ${fallback}`)
+  return fallback
+}
+
+function normalizeImportedPlmReadMethod(
+  value: unknown,
+  fallback: PlmReadMethod,
+  warnings: Set<string>,
+): PlmReadMethod {
+  const normalized = importedString(value)
+    .toLowerCase()
+    .replace(/[\s_]+/g, '-')
+  if (!normalized) return fallback
+  if (['api', 'rest', 'webapi', 'interface', '接口'].includes(normalized)) return 'api'
+  if (['database', 'db', 'sql', '数据库'].includes(normalized)) return 'database'
+  if (['table', 'data-table', '数据表', '表'].includes(normalized)) return 'table'
+  if (['file', 'excel', 'csv', '文件'].includes(normalized)) return 'file'
+  if (['manual', 'hand', '手工', '手动'].includes(normalized)) return 'manual'
+  warnings.add(`plm.readMethod "${importedString(value)}" ignored; mapped to manual`)
+  return 'manual'
+}
+
+function hasPresentSecretValue(value: unknown): boolean {
+  if (typeof value === 'string') return trim(value).length > 0
+  if (Array.isArray(value)) return value.length > 0
+  if (isPlainRecord(value)) return Object.keys(value).length > 0
+  return value !== undefined && value !== null
+}
+
+function collectIgnoredSecretWarnings(value: unknown, path: string, warnings: Set<string>): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => collectIgnoredSecretWarnings(item, `${path}[${index}]`, warnings))
+    return
+  }
+  if (!isPlainRecord(value)) return
+
+  for (const [key, child] of Object.entries(value)) {
+    const nextPath = path ? `${path}.${key}` : key
+    if (IMPORT_SECRET_KEY_PATTERN.test(key) && hasPresentSecretValue(child)) {
+      warnings.add(`${nextPath} ignored; enter it in the credential form if needed`)
+      continue
+    }
+    collectIgnoredSecretWarnings(child, nextPath, warnings)
+  }
+}
+
+function hasImportedSqlConfig(sqlServer: Record<string, unknown>): boolean {
+  return ['mode', 'server', 'database', 'allowedTables', 'middleTables', 'storedProcedures'].some((key) => {
+    if (!hasOwn(sqlServer, key)) return false
+    const value = sqlServer[key]
+    if (Array.isArray(value)) return value.length > 0
+    if (isPlainRecord(value)) return Object.keys(value).length > 0
+    return importedString(value).length > 0 || typeof value === 'boolean'
+  })
+}
+
+export function parseK3WiseGateJsonText(jsonText: string): Record<string, unknown> {
+  const normalized = trim(jsonText)
+  if (!normalized) {
+    throw new Error('GATE JSON is required')
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(normalized)
+  } catch {
+    throw new Error('GATE JSON must be valid JSON')
+  }
+  if (!isPlainRecord(parsed)) {
+    throw new Error('GATE JSON must be an object')
+  }
+  return parsed
+}
+
+export function applyK3WiseGateJsonToForm(form: K3WiseSetupForm, jsonText: string): K3WiseGateJsonImportResult {
+  const draft = parseK3WiseGateJsonText(jsonText)
+  const warnings = new Set<string>()
+  collectIgnoredSecretWarnings(draft, '', warnings)
+
+  const k3Wise = recordAt(draft, 'k3Wise')
+  const k3Credentials = recordAt(k3Wise || {}, 'credentials')
+  const plm = recordAt(draft, 'plm')
+  const plmCredentials = recordAt(plm || {}, 'credentials')
+  const plmConfig = recordAt(plm || {}, 'config')
+  const sqlServer = recordAt(draft, 'sqlServer')
+  const sqlCredentials = recordAt(sqlServer || {}, 'credentials')
+  const rollback = recordAt(draft, 'rollback')
+  const bom = recordAt(draft, 'bom')
+
+  const next: K3WiseSetupForm = {
+    ...form,
+    authorityCode: '',
+    password: '',
+    plmPassword: '',
+    sqlPassword: '',
+  }
+
+  const tenantId = firstImportedString(draft, ['tenantId'])
+  if (tenantId) next.tenantId = tenantId
+  const workspaceId = firstImportedString(draft, ['workspaceId'])
+  if (workspaceId) next.workspaceId = workspaceId
+  const projectId = firstImportedString(draft, ['projectId'])
+  if (projectId) next.projectId = projectId
+  const operator = firstImportedString(draft, ['operator'])
+  if (operator) next.operator = operator
+
+  const version = firstImportedString(k3Wise, ['version'])
+  if (version) next.version = version
+  const baseUrl = firstImportedString(k3Wise, ['apiUrl', 'baseUrl', 'url'])
+  if (baseUrl) next.baseUrl = baseUrl
+  next.webApiAuthMode = normalizeImportedWebApiAuthMode(firstImportedValue(k3Wise, ['authMode']), next.webApiAuthMode, warnings)
+  const tokenPath = firstImportedString(k3Wise, ['tokenPath'])
+  if (tokenPath) next.tokenPath = tokenPath
+  const loginPath = firstImportedString(k3Wise, ['loginPath'])
+  if (loginPath) next.loginPath = loginPath
+  const acctId = firstImportedString(k3Wise, ['acctId', 'accountId', 'account'])
+  if (acctId) next.acctId = acctId
+  next.environment = normalizeImportedEnvironment(firstImportedValue(k3Wise, ['environment']), next.environment, warnings)
+  const username = firstImportedString(k3Credentials, ['username', 'userName', 'user']) || firstImportedString(k3Wise, ['username', 'userName', 'user'])
+  if (username) next.username = username
+  next.autoSubmit = normalizeImportedBoolean(firstImportedValue(k3Wise, ['autoSubmit']), next.autoSubmit, 'k3Wise.autoSubmit', warnings)
+  next.autoAudit = normalizeImportedBoolean(firstImportedValue(k3Wise, ['autoAudit']), next.autoAudit, 'k3Wise.autoAudit', warnings)
+
+  const plmKind = firstImportedString(plm, ['kind', 'type'])
+  if (plmKind) next.plmKind = plmKind
+  next.plmReadMethod = normalizeImportedPlmReadMethod(firstImportedValue(plm, ['readMethod']), next.plmReadMethod, warnings)
+  const plmBaseUrl = firstImportedString(plm, ['baseUrl', 'apiUrl', 'url'])
+  if (plmBaseUrl) next.plmBaseUrl = plmBaseUrl
+  const plmDefaultProductId =
+    firstImportedString(plm, ['defaultProductId', 'productId']) ||
+    firstImportedString(plmConfig, ['defaultProductId', 'productId'])
+  if (plmDefaultProductId) next.plmDefaultProductId = plmDefaultProductId
+  const plmUsername = firstImportedString(plmCredentials, ['username', 'userName', 'user']) || firstImportedString(plm, ['username', 'userName', 'user'])
+  if (plmUsername) next.plmUsername = plmUsername
+
+  if (sqlServer) {
+    const enabledValue = firstImportedValue(sqlServer, ['enabled'])
+    next.sqlEnabled = enabledValue === undefined
+      ? (hasImportedSqlConfig(sqlServer) || next.sqlEnabled)
+      : normalizeImportedBoolean(enabledValue, next.sqlEnabled, 'sqlServer.enabled', warnings)
+    next.sqlMode = normalizeImportedSqlMode(firstImportedValue(sqlServer, ['mode']), next.sqlMode, warnings)
+    const sqlHost = firstImportedString(sqlServer, ['server', 'host'])
+    if (sqlHost) next.sqlServer = sqlHost
+    const database = firstImportedString(sqlServer, ['database', 'dbName'])
+    if (database) next.sqlDatabase = database
+    const sqlUsername = firstImportedString(sqlCredentials, ['username', 'userName', 'user']) || firstImportedString(sqlServer, ['username', 'userName', 'user'])
+    if (sqlUsername) next.sqlUsername = sqlUsername
+    if (hasOwn(sqlServer, 'allowedTables')) next.sqlAllowedTables = importedListText(sqlServer.allowedTables)
+    if (hasOwn(sqlServer, 'middleTables')) next.sqlMiddleTables = importedListText(sqlServer.middleTables)
+    if (hasOwn(sqlServer, 'storedProcedures')) next.sqlStoredProcedures = importedListText(sqlServer.storedProcedures)
+  }
+
+  const rollbackOwner = firstImportedString(rollback, ['owner'])
+  if (rollbackOwner) next.rollbackOwner = rollbackOwner
+  const rollbackStrategy = firstImportedString(rollback, ['strategy'])
+  if (rollbackStrategy) next.rollbackStrategy = rollbackStrategy
+
+  if (bom) {
+    next.bomEnabled = normalizeImportedBoolean(firstImportedValue(bom, ['enabled']), next.bomEnabled, 'bom.enabled', warnings)
+    const bomProductId = firstImportedString(bom, ['productId'])
+    if (bomProductId) next.bomProductId = bomProductId
+  }
+
+  return {
+    form: next,
+    warnings: Array.from(warnings),
+  }
+}
+
+export function buildK3WisePocCommandSet(gatePath = 'artifacts/integration-live-poc/gate.json'): K3WisePocCommandSet {
+  return {
+    postdeploySmoke: 'node scripts/ops/integration-k3wise-postdeploy-smoke.mjs --base-url "$METASHEET_BASE_URL" --token-file "$METASHEET_AUTH_TOKEN_FILE" --tenant-id "$METASHEET_TENANT_ID" --require-auth --out-dir artifacts/integration-live-poc/postdeploy-smoke',
+    postdeploySummary: 'node scripts/ops/integration-k3wise-postdeploy-summary.mjs --input artifacts/integration-live-poc/postdeploy-smoke/integration-k3wise-postdeploy-smoke.json --require-auth-signoff',
+    preflight: `node scripts/ops/integration-k3wise-live-poc-preflight.mjs --input ${gatePath} --out-dir artifacts/integration-live-poc`,
+    offlineMock: 'pnpm run verify:integration-k3wise:poc',
+    evidence: 'node scripts/ops/integration-k3wise-live-poc-evidence.mjs --packet artifacts/integration-live-poc/packet.json --evidence artifacts/integration-live-poc/evidence.json --out-dir artifacts/integration-live-poc/evidence',
+  }
+}
+
+function shellDoubleQuote(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/`/g, '\\`')}"`
+}
+
+export function buildK3WisePocEnvironmentTemplate(form: Pick<K3WiseSetupForm, 'tenantId'>): string {
+  const tenantId = trim(form.tenantId) || '<tenant-id>'
+  return [
+    `export METASHEET_BASE_URL=${shellDoubleQuote('https://metasheet.example.test')}`,
+    `export METASHEET_AUTH_TOKEN_FILE=${shellDoubleQuote('/secure/path/metasheet-admin.jwt')}`,
+    `export METASHEET_TENANT_ID=${shellDoubleQuote(tenantId)}`,
+  ].join('\n')
+}
+
+export function buildK3WisePostdeploySignoffBundle(
+  form: Pick<K3WiseSetupForm, 'tenantId'>,
+  commands: Pick<K3WisePocCommandSet, 'postdeploySmoke' | 'postdeploySummary'> = buildK3WisePocCommandSet(),
+): string {
+  return [
+    '# K3 WISE postdeploy signoff - replace placeholders outside Git before running',
+    'set -euo pipefail',
+    buildK3WisePocEnvironmentTemplate(form),
+    '',
+    commands.postdeploySmoke,
+    commands.postdeploySummary,
+  ].join('\n')
 }
 
 export function getK3WisePipelineId(form: K3WiseSetupForm, target: K3WisePipelineTarget): string {
