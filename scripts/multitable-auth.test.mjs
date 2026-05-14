@@ -22,6 +22,23 @@ test('resolveMultitableAuthToken prefers AUTH_TOKEN without requesting dev-token
   assert.deepEqual(records, [{ name: 'api.auth-token', ok: true, source: 'AUTH_TOKEN' }])
 })
 
+test('resolveMultitableAuthToken records the provided token source', async () => {
+  const records = []
+  const token = await resolveMultitableAuthToken({
+    apiBase: 'http://example.test/api',
+    envToken: 'jwt-from-file',
+    tokenSource: 'AUTH_TOKEN_FILE',
+    perms: 'multitable:read,multitable:write',
+    fetchJson: async () => {
+      throw new Error('dev-token should not be requested when token is provided')
+    },
+    record: (name, ok, details = {}) => records.push({ name, ok, ...details }),
+  })
+
+  assert.equal(token, 'jwt-from-file')
+  assert.deepEqual(records, [{ name: 'api.auth-token', ok: true, source: 'AUTH_TOKEN_FILE' }])
+})
+
 test('resolveMultitableAuthToken falls back to dev-token when AUTH_TOKEN is missing', async () => {
   const records = []
   let requestedUrl = ''
