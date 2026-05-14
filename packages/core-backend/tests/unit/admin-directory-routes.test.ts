@@ -20,6 +20,7 @@ const directoryMocks = vi.hoisted(() => ({
   getDirectoryAccountSummary: vi.fn(),
   getDirectoryReviewItem: vi.fn(),
   listDirectoryIntegrationAccounts: vi.fn(),
+  listDirectoryIntegrationDepartments: vi.fn(),
   listDirectoryIntegrations: vi.fn(),
   listDirectoryReviewItems: vi.fn(),
   listDirectorySyncAlerts: vi.fn(),
@@ -59,6 +60,7 @@ vi.mock('../../src/directory/directory-sync', () => ({
   getDirectoryAccountSummary: directoryMocks.getDirectoryAccountSummary,
   getDirectoryReviewItem: directoryMocks.getDirectoryReviewItem,
   listDirectoryIntegrationAccounts: directoryMocks.listDirectoryIntegrationAccounts,
+  listDirectoryIntegrationDepartments: directoryMocks.listDirectoryIntegrationDepartments,
   listDirectoryIntegrations: directoryMocks.listDirectoryIntegrations,
   listDirectoryReviewItems: directoryMocks.listDirectoryReviewItems,
   listDirectorySyncAlerts: directoryMocks.listDirectorySyncAlerts,
@@ -162,6 +164,7 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.getDirectoryAccountSummary.mockReset()
     directoryMocks.getDirectoryReviewItem.mockReset()
     directoryMocks.listDirectoryIntegrationAccounts.mockReset()
+    directoryMocks.listDirectoryIntegrationDepartments.mockReset()
     directoryMocks.listDirectoryIntegrations.mockReset()
     directoryMocks.listDirectoryReviewItems.mockReset()
     directoryMocks.listDirectorySyncAlerts.mockReset()
@@ -595,6 +598,47 @@ describe('adminDirectoryRouter', () => {
       data: {
         total: 1,
         query: '0447',
+      },
+    })
+  })
+
+  it('lists directory departments for an integration', async () => {
+    directoryMocks.listDirectoryIntegrationDepartments.mockResolvedValue({
+      items: [
+        {
+          id: 'dept-row-1',
+          integrationId: 'dir-1',
+          externalDepartmentId: '1',
+          parentExternalDepartmentId: null,
+          name: '总部',
+          fullPath: '总部',
+          accountCount: 3,
+          linkedAccountCount: 2,
+          childCount: 1,
+        },
+      ],
+      total: 1,
+    })
+
+    const response = await invokeRoute('get', '/integrations/:integrationId/departments', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(directoryMocks.listDirectoryIntegrationDepartments).toHaveBeenCalledWith('dir-1')
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        total: 1,
+        items: [
+          {
+            externalDepartmentId: '1',
+            name: '总部',
+            accountCount: 3,
+            linkedAccountCount: 2,
+          },
+        ],
       },
     })
   })

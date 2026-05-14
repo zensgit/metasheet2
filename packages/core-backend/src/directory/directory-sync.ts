@@ -114,6 +114,23 @@ type DirectoryDepartmentRow = {
   full_path?: string | null
 }
 
+type DirectoryDepartmentSummaryRow = {
+  directory_department_id: string
+  integration_id: string
+  provider: string
+  external_department_id: string
+  external_parent_department_id: string | null
+  name: string
+  full_path: string | null
+  order_index: number
+  is_active: boolean
+  last_seen_at: string
+  updated_at: string
+  account_count: number
+  linked_account_count: number
+  child_count: number
+}
+
 type DirectoryAccountRow = {
   id: string
   corp_id: string | null
@@ -271,6 +288,23 @@ export type DirectoryIntegrationSummary = {
     linkedCount: number
     lastRunStatus: string | null
   }
+}
+
+export type DirectoryDepartmentSummary = {
+  id: string
+  integrationId: string
+  provider: string
+  externalDepartmentId: string
+  parentExternalDepartmentId: string | null
+  name: string
+  fullPath: string | null
+  orderIndex: number
+  isActive: boolean
+  lastSeenAt: string
+  updatedAt: string
+  accountCount: number
+  linkedAccountCount: number
+  childCount: number
 }
 
 export type DirectoryIntegrationInput = {
@@ -998,6 +1032,25 @@ function summarizeAlert(row: DirectorySyncAlertRow): DirectorySyncAlertSummary {
     acknowledgedBy: row.acknowledged_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  }
+}
+
+function summarizeDirectoryDepartment(row: DirectoryDepartmentSummaryRow): DirectoryDepartmentSummary {
+  return {
+    id: row.directory_department_id,
+    integrationId: row.integration_id,
+    provider: row.provider,
+    externalDepartmentId: row.external_department_id,
+    parentExternalDepartmentId: row.external_parent_department_id,
+    name: row.name,
+    fullPath: row.full_path,
+    orderIndex: Number(row.order_index ?? 0),
+    isActive: Boolean(row.is_active),
+    lastSeenAt: row.last_seen_at,
+    updatedAt: row.updated_at,
+    accountCount: Number(row.account_count ?? 0),
+    linkedAccountCount: Number(row.linked_account_count ?? 0),
+    childCount: Number(row.child_count ?? 0),
   }
 }
 
@@ -3539,6 +3592,54 @@ export async function listDirectoryIntegrationAccounts(
   return {
     items: rowsResult.rows.map(summarizeDirectoryAccount),
     total: Number(countResult.rows[0]?.total ?? 0),
+  }
+}
+
+export async function listDirectoryIntegrationDepartments(
+  integrationId: string,
+): Promise<{ items: DirectoryDepartmentSummary[]; total: number }> {
+  const normalizedIntegrationId = normalizeText(integrationId)
+  if (!normalizedIntegrationId) throw new Error('integrationId is required')
+
+  const result = await query<DirectoryDepartmentSummaryRow>(
+    `SELECT
+        d.id AS directory_department_id,
+        d.integration_id,
+        d.provider,
+        d.external_department_id,
+        d.external_parent_department_id,
+        d.name,
+        d.full_path,
+        d.order_index,
+        d.is_active,
+        d.last_seen_at,
+        d.updated_at,
+        COUNT(DISTINCT ad.directory_account_id) FILTER (WHERE a.is_active = true) AS account_count,
+        COUNT(DISTINCT ad.directory_account_id) FILTER (
+          WHERE a.is_active = true
+            AND l.local_user_id IS NOT NULL
+            AND COALESCE(l.link_status, '') = 'linked'
+        ) AS linked_account_count,
+        COUNT(DISTINCT child.id) FILTER (WHERE child.is_active = true) AS child_count
+     FROM directory_departments d
+     LEFT JOIN directory_account_departments ad ON ad.directory_department_id = d.id
+     LEFT JOIN directory_accounts a ON a.id = ad.directory_account_id
+     LEFT JOIN directory_account_links l ON l.directory_account_id = a.id
+     LEFT JOIN directory_departments child
+       ON child.integration_id = d.integration_id
+      AND child.external_parent_department_id = d.external_department_id
+     WHERE d.integration_id = $1
+     GROUP BY
+       d.id, d.integration_id, d.provider, d.external_department_id, d.external_parent_department_id,
+       d.name, d.full_path, d.order_index, d.is_active, d.last_seen_at, d.updated_at
+     ORDER BY d.is_active DESC, COALESCE(d.full_path, d.name) ASC, d.order_index ASC, d.external_department_id ASC`,
+    [normalizedIntegrationId],
+  )
+
+  const items = result.rows.map(summarizeDirectoryDepartment)
+  return {
+    items,
+    total: items.length,
   }
 }
 
