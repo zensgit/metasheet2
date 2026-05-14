@@ -228,6 +228,109 @@
           <pre v-if="pipelineRunResult" class="k3-setup__test-result">{{ pipelineRunResult }}</pre>
         </details>
 
+        <div class="k3-setup__panel">
+          <div class="k3-setup__panel-head">
+            <h2>PoC 准备</h2>
+            <span>{{ gateIssues.length ? `${gateIssues.length} gaps` : 'ready' }}</span>
+          </div>
+          <button
+            class="k3-setup__btn k3-setup__btn--full"
+            type="button"
+            data-testid="k3-wise-gate-copy-button"
+            :disabled="gateIssues.length > 0 || !gateDraftText"
+            @click="copyGateDraft"
+          >
+            复制 GATE JSON
+          </button>
+          <button
+            class="k3-setup__btn k3-setup__btn--full"
+            type="button"
+            data-testid="k3-wise-gate-download-button"
+            :disabled="gateIssues.length > 0 || !gateDraftText"
+            @click="downloadGateDraft"
+          >
+            下载 GATE JSON
+          </button>
+          <label class="k3-setup__field k3-setup__gate-import">
+            <span>导入客户 GATE JSON</span>
+            <textarea
+              v-model="gateImportText"
+              data-testid="k3-wise-gate-import-textarea"
+              rows="6"
+              spellcheck="false"
+              placeholder="粘贴客户回传的 GATE JSON，导入后会清空输入框和密码字段"
+            />
+          </label>
+          <button
+            class="k3-setup__btn k3-setup__btn--full"
+            type="button"
+            data-testid="k3-wise-gate-import-button"
+            :disabled="!gateImportText.trim()"
+            @click="importGateJson"
+          >
+            导入 GATE JSON
+          </button>
+          <ul v-if="gateImportWarnings.length" class="k3-setup__issues k3-setup__issues--compact" data-testid="k3-wise-gate-import-warnings">
+            <li v-for="warning in gateImportWarnings" :key="`gate-import:${warning}`">
+              {{ warning }}
+            </li>
+          </ul>
+          <ul v-if="gateIssues.length" class="k3-setup__issues k3-setup__issues--compact">
+            <li v-for="issue in gateIssues" :key="`gate:${issue.field}:${issue.message}`">
+              {{ issue.message }}
+            </li>
+          </ul>
+          <div class="k3-setup__commands" data-testid="k3-wise-gate-commands">
+            <div class="k3-setup__command k3-setup__command--env" data-testid="k3-wise-env-template">
+              <div class="k3-setup__command-head">
+                <strong>Deploy env</strong>
+                <button
+                  class="k3-setup__command-copy"
+                  type="button"
+                  data-testid="k3-wise-copy-env-template"
+                  @click="copyGateCommand('Deploy env', gateEnvTemplate)"
+                >
+                  复制
+                </button>
+              </div>
+              <code>{{ gateEnvTemplate }}</code>
+            </div>
+            <div class="k3-setup__command k3-setup__command--env" data-testid="k3-wise-postdeploy-bundle">
+              <div class="k3-setup__command-head">
+                <strong>Deploy signoff bundle</strong>
+                <button
+                  class="k3-setup__command-copy"
+                  type="button"
+                  data-testid="k3-wise-copy-postdeploy-bundle"
+                  @click="copyGateCommand('Deploy signoff bundle', postdeploySignoffBundle)"
+                >
+                  复制
+                </button>
+              </div>
+              <code>{{ postdeploySignoffBundle }}</code>
+            </div>
+            <div
+              v-for="command in gateCommandItems"
+              :key="command.key"
+              class="k3-setup__command"
+            >
+              <div class="k3-setup__command-head">
+                <strong>{{ command.label }}</strong>
+                <button
+                  class="k3-setup__command-copy"
+                  type="button"
+                  :data-testid="`k3-wise-copy-command-${command.key}`"
+                  @click="copyGateCommand(command.label, command.value)"
+                >
+                  复制
+                </button>
+              </div>
+              <code>{{ command.value }}</code>
+            </div>
+          </div>
+          <pre v-if="gateDraftText" class="k3-setup__test-result">{{ gateDraftText }}</pre>
+        </div>
+
         <details class="k3-setup__panel k3-setup__collapsible-panel">
           <summary class="k3-setup__panel-summary">
             <span>运行观察</span>
@@ -485,6 +588,66 @@
           </div>
         </details>
 
+        <section class="k3-setup__section">
+          <div class="k3-setup__section-head">
+            <h2>客户 GATE / PLM Source</h2>
+            <span>preflight JSON</span>
+          </div>
+          <div class="k3-setup__grid">
+            <label class="k3-setup__field">
+              <span>Operator</span>
+              <input v-model.trim="form.operator" autocomplete="off" />
+            </label>
+            <label class="k3-setup__field">
+              <span>PLM Kind</span>
+              <input v-model.trim="form.plmKind" autocomplete="off" />
+            </label>
+            <label class="k3-setup__field">
+              <span>PLM Read Method</span>
+              <select v-model="form.plmReadMethod">
+                <option value="api">api</option>
+                <option value="database">database</option>
+                <option value="table">table</option>
+                <option value="file">file</option>
+                <option value="manual">manual</option>
+              </select>
+            </label>
+            <label class="k3-setup__field k3-setup__field--wide">
+              <span>PLM Base URL</span>
+              <input v-model.trim="form.plmBaseUrl" placeholder="https://plm.example.test/" autocomplete="off" />
+            </label>
+            <label class="k3-setup__field">
+              <span>PLM Default Product ID</span>
+              <input v-model.trim="form.plmDefaultProductId" autocomplete="off" />
+            </label>
+            <label class="k3-setup__field">
+              <span>PLM 用户名</span>
+              <input v-model.trim="form.plmUsername" autocomplete="off" />
+            </label>
+            <label class="k3-setup__field">
+              <span>PLM 密码</span>
+              <input v-model="form.plmPassword" type="password" autocomplete="new-password" />
+              <small>只作为导入客户 GATE 后的本地草稿；导出 JSON 永远使用占位符。</small>
+            </label>
+            <label class="k3-setup__field">
+              <span>Rollback Owner</span>
+              <input v-model.trim="form.rollbackOwner" autocomplete="off" />
+            </label>
+            <label class="k3-setup__field">
+              <span>Rollback Strategy</span>
+              <input v-model.trim="form.rollbackStrategy" autocomplete="off" />
+            </label>
+            <label class="k3-setup__check">
+              <input v-model="form.bomEnabled" type="checkbox" />
+              <span>启用 BOM PoC</span>
+            </label>
+            <label v-if="form.bomEnabled" class="k3-setup__field">
+              <span>BOM Product ID</span>
+              <input v-model.trim="form.bomProductId" autocomplete="off" />
+            </label>
+          </div>
+        </section>
+
         <section v-if="validationIssues.length" class="k3-setup__section k3-setup__section--issues">
           <div class="k3-setup__section-head">
             <h2>待补字段</h2>
@@ -637,8 +800,12 @@ import {
   K3_WISE_SQLSERVER_KIND,
   K3_WISE_WEBAPI_KIND,
   applyExternalSystemToForm,
+  applyK3WiseGateJsonToForm,
   buildK3WiseDocumentPayloadPreview,
   buildK3WiseDeployGateChecklist,
+  buildK3WisePocCommandSet,
+  buildK3WisePocEnvironmentTemplate,
+  buildK3WisePostdeploySignoffBundle,
   buildK3WiseSqlConnectionFingerprint,
   buildK3WiseSqlSystemConnectionFingerprint,
   buildK3WiseWebApiConnectionFingerprint,
@@ -659,10 +826,12 @@ import {
   listIntegrationStagingDescriptors,
   listIntegrationSystems,
   runIntegrationPipeline,
+  stringifyK3WiseGateDraft,
   summarizeK3WiseDeployGateChecklist,
   testIntegrationSystem,
   upsertIntegrationPipeline,
   upsertIntegrationSystem,
+  validateK3WiseGateDraftForm,
   validateK3WisePipelineTemplateForm,
   validateK3WisePipelineObservationForm,
   validateK3WisePipelineRunForm,
@@ -697,6 +866,8 @@ const stagingResult = ref('')
 const stagingInstallResult = ref<IntegrationStagingInstallResult | null>(null)
 const pipelineResult = ref('')
 const pipelineRunResult = ref('')
+const gateImportText = ref('')
+const gateImportWarnings = ref<string[]>([])
 const webApiLastTest = ref<{
   systemId: string
   ok: boolean
@@ -715,8 +886,27 @@ const stagingIssues = computed(() => validateK3WiseStagingInstallForm(form))
 const pipelineIssues = computed(() => validateK3WisePipelineTemplateForm(form, stagingDescriptors.value))
 const materialRunIssues = computed(() => validateK3WisePipelineRunForm(form, 'material'))
 const bomRunIssues = computed(() => validateK3WisePipelineRunForm(form, 'bom'))
+const gateIssues = computed(() => validateK3WiseGateDraftForm(form))
 const deployGateChecklist = computed(() => buildK3WiseDeployGateChecklist(form))
 const deployGateSummary = computed(() => summarizeK3WiseDeployGateChecklist(deployGateChecklist.value))
+const gateCommands = buildK3WisePocCommandSet()
+const gateEnvTemplate = computed(() => buildK3WisePocEnvironmentTemplate(form))
+const postdeploySignoffBundle = computed(() => buildK3WisePostdeploySignoffBundle(form, gateCommands))
+const gateCommandItems = [
+  { key: 'postdeploy-smoke', label: 'Postdeploy smoke', value: gateCommands.postdeploySmoke },
+  { key: 'postdeploy-summary', label: 'Postdeploy summary', value: gateCommands.postdeploySummary },
+  { key: 'preflight', label: 'Preflight', value: gateCommands.preflight },
+  { key: 'offline-mock', label: 'Offline mock', value: gateCommands.offlineMock },
+  { key: 'evidence', label: 'Evidence', value: gateCommands.evidence },
+]
+const gateDraftText = computed(() => {
+  if (gateIssues.value.length > 0) return ''
+  try {
+    return stringifyK3WiseGateDraft(form)
+  } catch {
+    return ''
+  }
+})
 const observationSummary = computed(() => `${pipelineRuns.value.length} runs / ${deadLetters.value.length} open`)
 const stagingDescriptorLabel = computed(() => stagingDescriptors.value.length > 0 ? `${stagingDescriptors.value.length} descriptors` : 'not loaded')
 const templatePreviewJson = computed(() => JSON.stringify(buildK3WiseDocumentPayloadPreview(templatePreviewTarget.value), null, 2))
@@ -893,6 +1083,59 @@ function formatDeployGateStatus(status: string): string {
   if (status === 'missing') return 'failed'
   if (status === 'warning') return 'partial'
   return 'open'
+}
+
+async function copyGateDraft(): Promise<void> {
+  if (!gateDraftText.value) return
+  try {
+    await navigator.clipboard.writeText(gateDraftText.value)
+    setStatus('GATE JSON 已复制', 'success')
+  } catch (error) {
+    setStatus(formatError(error), 'error')
+  }
+}
+
+async function copyGateCommand(label: string, command: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(command)
+    setStatus(`${label} 命令已复制`, 'success')
+  } catch (error) {
+    setStatus(formatError(error), 'error')
+  }
+}
+
+function downloadGateDraft(): void {
+  if (!gateDraftText.value || typeof document === 'undefined' || typeof URL.createObjectURL !== 'function') return
+  const blob = new Blob([gateDraftText.value], { type: 'application/json;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = 'k3-wise-live-poc-gate.json'
+  anchor.rel = 'noopener'
+  anchor.style.display = 'none'
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 0)
+  setStatus('GATE JSON 已生成', 'success')
+}
+
+function importGateJson(): void {
+  try {
+    const result = applyK3WiseGateJsonToForm(form, gateImportText.value)
+    Object.assign(form, result.form)
+    gateImportWarnings.value = result.warnings
+    gateImportText.value = ''
+    setStatus(
+      result.warnings.length > 0
+        ? `GATE JSON 已导入，${result.warnings.length} 项需要人工确认`
+        : 'GATE JSON 已导入',
+      result.warnings.length > 0 ? 'info' : 'success',
+    )
+  } catch (error) {
+    gateImportWarnings.value = []
+    setStatus(formatError(error), 'error')
+  }
 }
 
 function formatTemplateTransform(transform: unknown): string {
@@ -1589,6 +1832,60 @@ onMounted(() => {
   flex-direction: column;
   gap: 8px;
   margin-top: 12px;
+}
+
+.k3-setup__commands {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.k3-setup__command {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.k3-setup__command-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.k3-setup__command-head strong {
+  color: #334155;
+  font-size: 12px;
+}
+
+.k3-setup__command-copy {
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 3px 8px;
+  background: #fff;
+  color: #334155;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.k3-setup__command-copy:hover {
+  border-color: #94a3b8;
+  background: #f8fafc;
+}
+
+.k3-setup__commands code {
+  display: block;
+  overflow-wrap: anywhere;
+  border-radius: 6px;
+  padding: 8px;
+  background: #f1f5f9;
+  color: #172033;
+  font-size: 12px;
+}
+
+.k3-setup__command--env code {
+  white-space: pre-wrap;
 }
 
 .k3-setup__descriptor-list {

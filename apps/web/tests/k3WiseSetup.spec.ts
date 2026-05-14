@@ -2,8 +2,13 @@ import { describe, expect, it } from 'vitest'
 import { readFile } from 'node:fs/promises'
 import {
   applyExternalSystemToForm,
+  applyK3WiseGateJsonToForm,
   buildK3WiseDocumentPayloadPreview,
   buildK3WiseDeployGateChecklist,
+  buildK3WiseGateDraft,
+  buildK3WisePocCommandSet,
+  buildK3WisePocEnvironmentTemplate,
+  buildK3WisePostdeploySignoffBundle,
   buildK3WiseSqlConnectionFingerprint,
   buildK3WiseSqlSystemConnectionFingerprint,
   buildK3WiseWebApiConnectionFingerprint,
@@ -19,7 +24,9 @@ import {
   getK3WisePipelineId,
   listK3WiseDocumentTemplates,
   splitList,
+  stringifyK3WiseGateDraft,
   summarizeK3WiseDeployGateChecklist,
+  validateK3WiseGateDraftForm,
   validateK3WisePipelineObservationForm,
   validateK3WisePipelineTemplateForm,
   validateK3WisePipelineRunForm,
@@ -585,6 +592,259 @@ describe('K3 WISE setup helpers', () => {
       },
     })
     expect(JSON.stringify(materialPreview)).not.toMatch(/authorityCode|Token|password|sourceId|revision|_integration/i)
+  })
+
+  it('builds a redacted authority-code customer GATE draft and command set', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      projectId: 'project_1',
+      operator: 'customer-k3-admin',
+      version: 'K3 WISE 15.x test',
+      environment: 'uat',
+      baseUrl: 'https://k3.example.test/',
+      authorityCode: 'real-authority-code',
+      plmKind: 'plm:yuantus-wrapper',
+      plmReadMethod: 'api',
+      plmBaseUrl: 'https://plm.example.test/',
+      plmDefaultProductId: 'PRODUCT-TEST-001',
+      plmUsername: 'plm-user',
+      plmPassword: 'real-plm-password',
+      rollbackOwner: 'customer-k3-admin',
+      sqlEnabled: true,
+      sqlMode: 'middle-table',
+      sqlServer: '10.0.0.10',
+      sqlDatabase: 'AIS_TEST',
+      sqlMiddleTables: 'dbo.integration_material_stage',
+    })
+
+    expect(validateK3WiseGateDraftForm(form)).toEqual([])
+    const draft = buildK3WiseGateDraft(form)
+
+    expect(draft).toMatchObject({
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      projectId: 'project_1',
+      operator: 'customer-k3-admin',
+      k3Wise: {
+        version: 'K3 WISE 15.x test',
+        apiUrl: 'https://k3.example.test/',
+        environment: 'uat',
+        authMode: 'authority-code',
+        tokenPath: '/K3API/Token/Create',
+        credentials: {
+          authorityCode: '<fill-outside-git>',
+        },
+        autoSubmit: false,
+        autoAudit: false,
+      },
+      plm: {
+        kind: 'plm:yuantus-wrapper',
+        readMethod: 'api',
+        baseUrl: 'https://plm.example.test/',
+        config: {
+          defaultProductId: 'PRODUCT-TEST-001',
+        },
+        credentials: {
+          username: 'plm-user',
+          password: '<fill-outside-git>',
+        },
+      },
+      sqlServer: {
+        enabled: true,
+        mode: 'middle-table',
+        server: '10.0.0.10',
+        database: 'AIS_TEST',
+        middleTables: ['dbo.integration_material_stage'],
+        writeCoreTables: false,
+      },
+      rollback: {
+        owner: 'customer-k3-admin',
+        strategy: 'disable-test-records',
+      },
+      bom: {
+        enabled: true,
+        productId: 'PRODUCT-TEST-001',
+      },
+    })
+    expect(JSON.stringify(draft)).not.toContain('real-authority-code')
+    expect(JSON.stringify(draft)).not.toContain('real-plm-password')
+    expect(stringifyK3WiseGateDraft(form)).toContain('"fieldMappings"')
+
+    const commands = buildK3WisePocCommandSet()
+    expect(commands.postdeploySmoke).toContain('integration-k3wise-postdeploy-smoke.mjs')
+    expect(commands.postdeploySmoke).toContain('--require-auth')
+    expect(commands.postdeploySummary).toContain('integration-k3wise-postdeploy-summary.mjs')
+    expect(commands.preflight).toContain('integration-k3wise-live-poc-preflight.mjs')
+    expect(commands.offlineMock).toBe('pnpm run verify:integration-k3wise:poc')
+    expect(commands.evidence).toContain('integration-k3wise-live-poc-evidence.mjs')
+  })
+
+  it('builds redacted postdeploy environment and signoff command bundles', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+    })
+
+    const env = buildK3WisePocEnvironmentTemplate(form)
+    expect(env).toContain('METASHEET_BASE_URL')
+    expect(env).toContain('METASHEET_AUTH_TOKEN_FILE')
+    expect(env).toContain('METASHEET_TENANT_ID="tenant_1"')
+    expect(env).not.toMatch(/eyJ|Bearer|password/i)
+
+    const bundle = buildK3WisePostdeploySignoffBundle(form)
+    expect(bundle).toContain('set -euo pipefail')
+    expect(bundle).toContain('integration-k3wise-postdeploy-smoke.mjs')
+    expect(bundle).toContain('integration-k3wise-postdeploy-summary.mjs')
+    expect(bundle).not.toMatch(/eyJ|Bearer|password/i)
+  })
+
+  it('blocks unsafe live PoC GATE drafts before preflight JSON is copied', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      operator: 'customer-k3-admin',
+      version: 'K3 WISE prod',
+      environment: 'production',
+      baseUrl: 'https://k3.example.test/',
+      autoSubmit: true,
+      sqlEnabled: true,
+      sqlMode: 'middle-table',
+      sqlMiddleTables: 'dbo.t_ICItem',
+      rollbackOwner: 'customer-k3-admin',
+      plmKind: 'plm:yuantus-wrapper',
+      plmDefaultProductId: '',
+      bomProductId: '',
+    })
+
+    const messages = validateK3WiseGateDraftForm(form).map((issue) => issue.message)
+    expect(messages).toContain('Live PoC GATE must target a non-production K3 WISE environment')
+    expect(messages).toContain('Live PoC GATE must stay Save-only: autoSubmit and autoAudit must be false')
+    expect(messages).toContain('BOM PoC requires BOM product ID or PLM default product ID')
+    expect(messages).toContain('Live PoC may not write K3 WISE core business tables')
+    expect(() => buildK3WiseGateDraft(form)).toThrow('Live PoC GATE must target a non-production K3 WISE environment')
+  })
+
+  it('imports customer GATE JSON public fields without credential secrets', () => {
+    const form = createDefaultK3WiseSetupForm()
+    Object.assign(form, {
+      authorityCode: 'old-authority-code',
+      password: 'old-k3-secret',
+      plmPassword: 'old-plm-secret',
+      sqlPassword: 'old-sql-secret',
+    })
+
+    const result = applyK3WiseGateJsonToForm(form, JSON.stringify({
+      tenantId: 'tenant_customer',
+      workspaceId: 'workspace_customer',
+      projectId: 'project_customer',
+      operator: 'customer-k3-admin',
+      k3Wise: {
+        version: 'K3 WISE 15.x',
+        apiUrl: 'https://k3.customer.test/',
+        environment: 'staging',
+        authMode: 'authority-code',
+        tokenPath: '/K3API/Token/Create',
+        credentials: {
+          authorityCode: 'customer-authority-code',
+          username: 'ignored-for-authority-code',
+        },
+        autoSubmit: 'false',
+        autoAudit: 'false',
+      },
+      plm: {
+        kind: 'plm:third-party',
+        readMethod: 'database',
+        baseUrl: 'https://plm.example.test/',
+        config: {
+          defaultProductId: 'PRODUCT-001',
+        },
+        credentials: {
+          username: 'plm-user',
+          password: 'plm-secret',
+          token: 'plm-token',
+        },
+      },
+      sqlServer: {
+        enabled: true,
+        mode: 'middle-table',
+        server: '10.0.0.10',
+        database: 'AIS_TEST',
+        username: 'sql-user',
+        password: 'sql-secret',
+        allowedTables: ['dbo.t_ICItem', 'dbo.t_ICBOM'],
+        middleTables: 'dbo.integration_material_stage',
+      },
+      rollback: {
+        owner: 'rollback-owner',
+        strategy: 'delete-test-records',
+      },
+      bom: {
+        enabled: true,
+        productId: 'PRODUCT-BOM-001',
+      },
+    }))
+
+    expect(result.form).toMatchObject({
+      tenantId: 'tenant_customer',
+      workspaceId: 'workspace_customer',
+      projectId: 'project_customer',
+      operator: 'customer-k3-admin',
+      version: 'K3 WISE 15.x',
+      baseUrl: 'https://k3.customer.test/',
+      webApiAuthMode: 'authority-code',
+      tokenPath: '/K3API/Token/Create',
+      environment: 'staging',
+      authorityCode: '',
+      password: '',
+      plmKind: 'plm:third-party',
+      plmReadMethod: 'database',
+      plmBaseUrl: 'https://plm.example.test/',
+      plmDefaultProductId: 'PRODUCT-001',
+      plmUsername: 'plm-user',
+      plmPassword: '',
+      sqlEnabled: true,
+      sqlMode: 'middle-table',
+      sqlServer: '10.0.0.10',
+      sqlDatabase: 'AIS_TEST',
+      sqlUsername: 'sql-user',
+      sqlPassword: '',
+      sqlAllowedTables: 'dbo.t_ICItem\ndbo.t_ICBOM',
+      sqlMiddleTables: 'dbo.integration_material_stage',
+      rollbackOwner: 'rollback-owner',
+      rollbackStrategy: 'delete-test-records',
+      bomEnabled: true,
+      bomProductId: 'PRODUCT-BOM-001',
+    })
+    expect(result.warnings).toContain('k3Wise.credentials.authorityCode ignored; enter it in the credential form if needed')
+    expect(result.warnings).toContain('plm.credentials.password ignored; enter it in the credential form if needed')
+    expect(result.warnings).toContain('plm.credentials.token ignored; enter it in the credential form if needed')
+    expect(result.warnings).toContain('sqlServer.password ignored; enter it in the credential form if needed')
+    expect(result.warnings).not.toContain('k3Wise.tokenPath ignored; enter it in the credential form if needed')
+  })
+
+  it('rejects invalid customer GATE JSON before applying it to the form', () => {
+    const form = createDefaultK3WiseSetupForm()
+
+    expect(() => applyK3WiseGateJsonToForm(form, '')).toThrow('GATE JSON is required')
+    expect(() => applyK3WiseGateJsonToForm(form, '{broken')).toThrow('GATE JSON must be valid JSON')
+    expect(() => applyK3WiseGateJsonToForm(form, '[]')).toThrow('GATE JSON must be an object')
+  })
+
+  it('exposes customer GATE copy, download, import, and postdeploy controls in the setup page', async () => {
+    const source = await readFile('src/views/IntegrationK3WiseSetupView.vue', 'utf8')
+
+    expect(source).toContain('data-testid="k3-wise-gate-copy-button"')
+    expect(source).toContain('data-testid="k3-wise-gate-download-button"')
+    expect(source).toContain('data-testid="k3-wise-gate-import-textarea"')
+    expect(source).toContain('data-testid="k3-wise-gate-import-button"')
+    expect(source).toContain('data-testid="k3-wise-postdeploy-bundle"')
+    expect(source).toContain('copyGateDraft')
+    expect(source).toContain('downloadGateDraft')
+    expect(source).toContain('importGateJson')
+    expect(source).toContain('buildK3WisePostdeploySignoffBundle')
   })
 
   it('requires saved PLM source and K3 target systems before pipeline template creation', () => {
