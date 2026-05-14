@@ -80,6 +80,8 @@ function verify_migration_bridge_contract() {
 
   search_fixed_string 'MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL' "$provider" || die "migration-provider.js must expose the superseded legacy SQL opt-in"
   search_fixed_string '032_create_approval_records' "$provider" || die "migration-provider.js must carry the superseded legacy SQL skip list"
+  search_fixed_string '037_add_gallery_form_support' "$provider" || die "migration-provider.js must no-op superseded gallery/form SQL on upgraded on-prem DBs"
+  search_fixed_string '038_config_and_secrets' "$provider" || die "migration-provider.js must no-op superseded config/secrets SQL on upgraded on-prem DBs"
   search_fixed_string "to_regclass('public.users') IS NOT NULL" "$legacy_must_change" || die "056_add_users_must_change_password.sql must no-op when users table is absent"
   search_fixed_string 'must_change_password' "$timestamp_must_change" || die "timestamp users must_change_password bridge migration must be packaged"
 }
@@ -334,6 +336,8 @@ required=(
   "docs/development/data-factory-cleansed-export-verification-20260514.md"
   "docs/development/data-factory-postdeploy-smoke-development-20260514.md"
   "docs/development/data-factory-postdeploy-smoke-verification-20260514.md"
+  "docs/development/onprem-migration-gap-guard-development-20260514.md"
+  "docs/development/onprem-migration-gap-guard-verification-20260514.md"
   "docs/deployment/multitable-platform-rc-notes-20260404.md"
   "docs/deployment/multitable-windows-onprem-easy-start-20260319.md"
   "docs/deployment/multitable-onprem-package-layout-20260319.md"

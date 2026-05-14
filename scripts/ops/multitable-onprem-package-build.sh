@@ -77,6 +77,8 @@ REQUIRED_PATHS=(
   "docs/development/data-factory-cleansed-export-verification-20260514.md"
   "docs/development/data-factory-postdeploy-smoke-development-20260514.md"
   "docs/development/data-factory-postdeploy-smoke-verification-20260514.md"
+  "docs/development/onprem-migration-gap-guard-development-20260514.md"
+  "docs/development/onprem-migration-gap-guard-verification-20260514.md"
   "docker/app.env.example"
   "docker/app.env.multitable-onprem.template"
   "ops/nginx/multitable-onprem.conf.example"

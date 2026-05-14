@@ -107,6 +107,10 @@ describe('createCoreBackendMigrationProvider', () => {
       'alter table form_responses add column if not exists form_id uuid;'
     )
     await writeFile(
+      path.join(legacySqlDir, '038_config_and_secrets.sql'),
+      'create index if not exists idx_configs_category on system_configs(category);'
+    )
+    await writeFile(
       path.join(legacySqlDir, '055_create_attendance_import_tokens.sql'),
       'create table if not exists attendance_import_tokens (id text primary key);'
     )
@@ -125,6 +129,7 @@ describe('createCoreBackendMigrationProvider', () => {
     expect(Object.keys(migrations).sort()).toEqual([
       '032_create_approval_records',
       '037_add_gallery_form_support',
+      '038_config_and_secrets',
       '055_create_attendance_import_tokens',
       '056_add_users_must_change_password',
       '057_create_integration_core_tables',
@@ -132,6 +137,12 @@ describe('createCoreBackendMigrationProvider', () => {
     ])
     await expect(
       migrations['032_create_approval_records']?.up({} as never)
+    ).resolves.toBeUndefined()
+    await expect(
+      migrations['037_add_gallery_form_support']?.up({} as never)
+    ).resolves.toBeUndefined()
+    await expect(
+      migrations['038_config_and_secrets']?.up({} as never)
     ).resolves.toBeUndefined()
   })
 
@@ -143,6 +154,10 @@ describe('createCoreBackendMigrationProvider', () => {
     await writeFile(
       path.join(legacySqlDir, '037_add_gallery_form_support.sql'),
       'alter table form_responses add column if not exists form_id uuid;'
+    )
+    await writeFile(
+      path.join(legacySqlDir, '038_config_and_secrets.sql'),
+      'create index if not exists idx_configs_category on system_configs(category);'
     )
     await writeFile(
       path.join(legacySqlDir, '056_add_users_must_change_password.sql'),
@@ -157,6 +172,7 @@ describe('createCoreBackendMigrationProvider', () => {
 
     expect(Object.keys(migrations).sort()).toEqual([
       '037_add_gallery_form_support',
+      '038_config_and_secrets',
       '056_add_users_must_change_password',
     ])
   })
