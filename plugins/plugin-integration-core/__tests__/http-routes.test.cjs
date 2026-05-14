@@ -634,7 +634,7 @@ async function testDiscoveryRoutes() {
     adapterRegistry: {
       listAdapterKinds() {
         calls.push(['listAdapterKinds'])
-        return ['http', 'erp:k3-wise-sqlserver', 'metasheet:staging', 'custom:unknown']
+        return ['http', 'erp:k3-wise-sqlserver', 'metasheet:staging', 'metasheet:multitable', 'custom:unknown']
       },
       createAdapter(input) {
         calls.push(['createAdapter', input])
@@ -707,11 +707,21 @@ async function testDiscoveryRoutes() {
     dryRunFriendly: true,
     noExternalNetwork: true,
   })
+  const multitableMetadata = res.body.data.find((adapter) => adapter.kind === 'metasheet:multitable')
+  assert.equal(multitableMetadata.label, 'MetaSheet multitable')
+  assert.equal(multitableMetadata.advanced, false)
+  assert.deepEqual(multitableMetadata.roles, ['target'])
+  assert.deepEqual(multitableMetadata.supports, ['testConnection', 'listObjects', 'getSchema', 'upsert'])
+  assert.deepEqual(multitableMetadata.guardrails.write, {
+    hostOwned: true,
+    pluginScopedSheetsOnly: true,
+    supportsAppend: true,
+    supportsUpsertByKey: true,
+  })
   const unknownMetadata = res.body.data.find((adapter) => adapter.kind === 'custom:unknown')
   assert.equal(unknownMetadata.label, 'custom:unknown')
   assert.equal(unknownMetadata.advanced, false)
   assert.equal(unknownMetadata.guardrails, undefined)
-
   res = await invoke(routes, 'GET', '/api/integration/external-systems/:id/objects', {
     user: READ_USER,
     params: { id: 'crm_1' },
