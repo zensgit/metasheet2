@@ -220,7 +220,8 @@ describe('IntegrationWorkbenchView', () => {
     app.mount(container)
     await flushUi()
 
-    expect(container.textContent).toContain('通用数据集成工作台')
+    expect(container.textContent).toContain('系统对接')
+    expect(container.textContent).toContain('默认的通用系统对接页面')
     expect(container.textContent).toContain('HTTP API')
     expect(container.textContent).not.toContain('K3 WISE SQL Server Channel')
     expect(container.textContent).toContain('已隐藏 1 个高级连接')

@@ -2,9 +2,9 @@
   <section class="k3-setup" data-testid="k3-wise-setup">
     <header class="k3-setup__header">
       <div>
-        <p class="k3-setup__eyebrow">ERP Integration</p>
-        <h1>K3 WISE 对接配置</h1>
-        <p class="k3-setup__lead">先接通 K3 WISE，再把 PLM 数据放进多维表清洗，最后 dry-run 后推送 ERP。</p>
+        <p class="k3-setup__eyebrow">System Integration Preset</p>
+        <h1>K3 WISE 预设向导</h1>
+        <p class="k3-setup__lead">这是系统对接里的 K3 WISE 快速预设。先接通 K3 WISE，再把 PLM 数据放进多维表清洗，最后 dry-run 后 Save-only 推送。</p>
       </div>
       <div class="k3-setup__header-actions">
         <router-link class="k3-setup__btn" data-testid="generic-workbench-link" to="/integrations/workbench">
@@ -877,7 +877,7 @@ async function saveConfiguration(): Promise<void> {
       form.sqlHasCredentials = sql.hasCredentials === true
     }
     await loadSystems(true)
-    setStatus('K3 WISE 对接配置已保存', 'success')
+    setStatus('K3 WISE 预设配置已保存', 'success')
   } catch (error) {
     setStatus(formatError(error), 'error')
   } finally {

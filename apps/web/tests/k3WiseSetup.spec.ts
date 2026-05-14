@@ -357,7 +357,7 @@ describe('K3 WISE setup helpers', () => {
     const routeBlock = source.slice(routeStart, routeEnd)
 
     expect(routeBlock).toContain("path: '/integrations/k3-wise'")
-    expect(routeBlock).toContain("titleZh: 'K3 WISE 对接'")
+    expect(routeBlock).toContain("titleZh: 'K3 WISE 预设向导'")
     expect(routeBlock).toContain("permissions: ['integration:write']")
     expect(routeBlock).not.toContain("requiredFeature: 'attendanceAdmin'")
     expect(mainSource).toContain('to.meta?.permissions')

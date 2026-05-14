@@ -2,9 +2,9 @@
   <section class="integration-workbench">
     <header class="integration-workbench__header">
       <div>
-        <p class="integration-workbench__eyebrow">Integration Workbench</p>
-        <h1>通用数据集成工作台</h1>
-        <p class="integration-workbench__lead">选择来源系统和目标系统，把数据在多维表中清洗后，先预览 payload，再 dry-run 和 Save-only 推送。</p>
+        <p class="integration-workbench__eyebrow">System Integration</p>
+        <h1>系统对接</h1>
+        <p class="integration-workbench__lead">这是默认的通用系统对接页面。选择任意来源系统和目标系统，把数据在多维表中清洗后，先预览 payload，再 dry-run 和 Save-only 推送。</p>
       </div>
       <router-link class="integration-workbench__k3-link" to="/integrations/k3-wise">K3 WISE 预设向导</router-link>
     </header>
