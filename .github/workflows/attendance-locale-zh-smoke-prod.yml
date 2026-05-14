@@ -60,9 +60,10 @@ jobs:
       VERIFY_HOLIDAY: ${{ inputs.verify_holiday || 'true' }}
       REQUIRE_TOGGLE_CHECKS: ${{ inputs.require_toggle_checks || vars.ATTENDANCE_LOCALE_ZH_REQUIRE_TOGGLE_CHECKS || 'false' }}
       REQUIRE_SHELL_TAB_CHECKS: ${{ inputs.require_shell_tab_checks || vars.ATTENDANCE_LOCALE_ZH_REQUIRE_SHELL_TAB_CHECKS || 'false' }}
-      AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
-      LOGIN_EMAIL: ${{ secrets.ATTENDANCE_ADMIN_EMAIL }}
-      LOGIN_PASSWORD: ${{ secrets.ATTENDANCE_ADMIN_PASSWORD }}
+      AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT || vars.ATTENDANCE_ADMIN_JWT || '' }}
+      LOGIN_EMAIL: ${{ secrets.ATTENDANCE_ADMIN_EMAIL || vars.ATTENDANCE_ADMIN_EMAIL || '' }}
+      LOGIN_PASSWORD: ${{ secrets.ATTENDANCE_ADMIN_PASSWORD || vars.ATTENDANCE_ADMIN_PASSWORD || '' }}
+      AUTH_RESOLVE_ALLOW_INSECURE_HTTP: ${{ vars.ATTENDANCE_ALLOW_INSECURE_HTTP || 'true' }}
       HEADLESS: 'true'
       OUTPUT_DIR: output/playwright/attendance-locale-zh-smoke
       DRILL_FAIL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.drill_fail == 'true' }}
@@ -106,8 +107,44 @@ jobs:
         if: ${{ env.DRILL_FAIL != 'true' }}
         run: pnpm exec playwright install chromium --with-deps
 
+      - name: Resolve valid auth token
+        if: ${{ env.DRILL_FAIL != 'true' }}
+        id: resolve-auth-token
+        run: |
+          set -euo pipefail
+          mkdir -p output/playwright/attendance-locale-zh-smoke
+          meta_file="output/playwright/attendance-locale-zh-smoke/auth-resolve-meta.txt"
+
+          if ! resolved_token="$(
+            API_BASE="${API_BASE}" \
+            AUTH_TOKEN="${AUTH_TOKEN}" \
+            LOGIN_EMAIL="${LOGIN_EMAIL}" \
+            LOGIN_PASSWORD="${LOGIN_PASSWORD}" \
+            AUTH_RESOLVE_ALLOW_INSECURE_HTTP="${AUTH_RESOLVE_ALLOW_INSECURE_HTTP}" \
+            AUTH_RESOLVE_META_FILE="${meta_file}" \
+            ./scripts/ops/attendance-resolve-auth.sh
+          )"; then
+            API_BASE="${API_BASE}" \
+            ./scripts/ops/attendance-write-auth-error.sh \
+              "${meta_file}" \
+              "output/playwright/attendance-locale-zh-smoke/auth-error.txt"
+            echo "::error::No valid attendance admin token; see auth-error.txt artifact."
+            exit 1
+          fi
+
+          echo "::add-mask::${resolved_token}"
+          echo "AUTH_TOKEN_EFFECTIVE=${resolved_token}" >> "$GITHUB_ENV"
+
+          auth_source="unknown"
+          if [[ -f "${meta_file}" ]]; then
+            auth_source="$(awk -F= '/^AUTH_SOURCE=/{print $2}' "${meta_file}" | tail -n1)"
+          fi
+          echo "auth_source=${auth_source}" >> "$GITHUB_OUTPUT"
+
       - name: Run zh locale smoke
         if: ${{ env.DRILL_FAIL != 'true' }}
+        env:
+          AUTH_TOKEN: ${{ env.AUTH_TOKEN_EFFECTIVE }}
         run: pnpm verify:attendance-locale-zh
 
       - name: Write step summary
@@ -128,6 +165,9 @@ jobs:
             zh_admin_tab="$(jq -r '.zhLabels.adminTab // "unknown"' output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-summary.json 2>/dev/null || echo 'unknown')"
             zh_workflow_tab="$(jq -r '.zhLabels.workflowTab // "unknown"' output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-summary.json 2>/dev/null || echo 'unknown')"
           fi
+          if [[ "${auth_source}" == 'unknown' && -f output/playwright/attendance-locale-zh-smoke/auth-resolve-meta.txt ]]; then
+            auth_source="$(awk -F= '/^AUTH_SOURCE=/{print $2}' output/playwright/attendance-locale-zh-smoke/auth-resolve-meta.txt | tail -n1)"
+          fi
           {
             echo "## Attendance Locale zh Smoke (Prod)"
             echo ""
@@ -144,6 +184,9 @@ jobs:
             echo ""
             echo "Expected screenshot:"
             echo "- \`output/playwright/attendance-locale-zh-smoke/attendance-zh-locale-calendar.png\`"
+            echo ""
+            echo "Auth diagnostics on resolver failure:"
+            echo "- \`output/playwright/attendance-locale-zh-smoke/auth-error.txt\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload artifacts
