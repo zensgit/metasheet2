@@ -295,6 +295,15 @@
             >
               作为 Dry-run 来源
             </button>
+            <button
+              type="button"
+              class="integration-workbench__button"
+              :disabled="!descriptor.openLink"
+              :data-testid="`use-staging-target-${descriptor.id}`"
+              @click="useStagingAsTarget(descriptor.id)"
+            >
+              作为写入目标
+            </button>
           </div>
         </article>
       </div>
@@ -615,6 +624,8 @@ interface StagingObjectConfig {
   openLink?: string
   fields: string[]
   fieldDetails?: IntegrationStagingDescriptor['fieldDetails']
+  keyFields?: string[]
+  mode?: 'append' | 'upsert'
 }
 
 type ExportCell = string | number | boolean | null
@@ -905,6 +916,11 @@ function stagingSourceSystemId(projectId: string): string {
   return `metasheet_staging_${suffix}`
 }
 
+function stagingTargetSystemId(projectId: string): string {
+  const suffix = (projectId || 'default').replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'default'
+  return `metasheet_target_${suffix}`
+}
+
 function descriptorToSchemaFields(descriptor: IntegrationStagingDescriptor | null): IntegrationObjectSchemaField[] {
   if (!descriptor) return []
   if (Array.isArray(descriptor.fieldDetails) && descriptor.fieldDetails.length > 0) {
@@ -920,6 +936,15 @@ function descriptorToSchemaFields(descriptor: IntegrationStagingDescriptor | nul
     label: field,
     type: 'string',
   }))
+}
+
+function defaultTargetKeyFields(descriptor: IntegrationStagingDescriptor): string[] {
+  const fields = new Set(descriptor.fields)
+  if (descriptor.id === 'bom_cleanse' && fields.has('parentCode') && fields.has('childCode')) return ['parentCode', 'childCode']
+  if (fields.has('code')) return ['code']
+  if (fields.has('externalId')) return ['externalId']
+  if (fields.has('id')) return ['id']
+  return []
 }
 
 function buildStagingSourceObjectsConfig(): Record<string, StagingObjectConfig> {
@@ -940,6 +965,27 @@ function buildStagingSourceObjectsConfig(): Record<string, StagingObjectConfig> 
   return objects
 }
 
+function buildStagingTargetObjectsConfig(): Record<string, StagingObjectConfig> {
+  const objects: Record<string, StagingObjectConfig> = {}
+  for (const descriptor of stagingDescriptors.value) {
+    const target = stagingOpenTargetById.value.get(descriptor.id)
+    if (!target?.sheetId) continue
+    const keyFields = defaultTargetKeyFields(descriptor)
+    objects[descriptor.id] = {
+      name: stagingDatasetCopy[descriptor.id]?.name || descriptor.name,
+      sheetId: target.sheetId,
+      viewId: target.viewId,
+      baseId: target.baseId || stagingBaseId.value.trim() || null,
+      openLink: target.openLink,
+      fields: descriptor.fields,
+      fieldDetails: descriptor.fieldDetails,
+      keyFields,
+      mode: keyFields.length > 0 ? 'upsert' : 'append',
+    }
+  }
+  return objects
+}
+
 function buildStagingSourceObjects(): IntegrationSystemObject[] {
   return stagingDescriptors.value.flatMap((descriptor) => {
     const target = stagingOpenTargetById.value.get(descriptor.id)
@@ -949,6 +995,20 @@ function buildStagingSourceObjects(): IntegrationSystemObject[] {
       label: stagingDatasetCopy[descriptor.id]?.name || descriptor.name,
       operations: ['read'],
       source: 'metasheet:staging',
+      schema: descriptorToSchemaFields(descriptor),
+    }]
+  })
+}
+
+function buildStagingTargetObjects(): IntegrationSystemObject[] {
+  return stagingDescriptors.value.flatMap((descriptor) => {
+    const target = stagingOpenTargetById.value.get(descriptor.id)
+    if (!target?.sheetId) return []
+    return [{
+      name: descriptor.id,
+      label: stagingDatasetCopy[descriptor.id]?.name || descriptor.name,
+      operations: ['upsert'],
+      source: 'metasheet:multitable',
       schema: descriptorToSchemaFields(descriptor),
     }]
   })
@@ -1276,6 +1336,61 @@ async function useStagingAsSource(objectId: string): Promise<void> {
       },
     }
     setStatus(`已将 ${stagingDatasetCopy[objectId]?.name || descriptor.name} 设为 Dry-run 来源`, 'success')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), 'error')
+  }
+}
+
+async function useStagingAsTarget(objectId: string): Promise<void> {
+  const descriptor = stagingDescriptors.value.find((item) => item.id === objectId) || null
+  const target = stagingOpenTargetById.value.get(objectId)
+  if (!descriptor || !target?.sheetId) {
+    setStatus('请先创建清洗表，确认该 staging 表已有 sheetId / open link 后再作为写入目标。', 'error')
+    return
+  }
+  const projectId = stagingProjectId.value.trim() || 'default'
+  const objects = buildStagingTargetObjectsConfig()
+  if (!objects[objectId]) {
+    setStatus('当前 staging 表缺少 sheetId，不能作为写入目标。', 'error')
+    return
+  }
+  try {
+    const system = await upsertWorkbenchExternalSystem({
+      ...currentScope(),
+      id: stagingTargetSystemId(projectId),
+      projectId,
+      name: 'MetaSheet 写入多维表',
+      kind: 'metasheet:multitable',
+      role: 'target',
+      status: 'active',
+      config: {
+        projectId,
+        baseId: stagingBaseId.value.trim() || target.baseId || null,
+        objects,
+      },
+      capabilities: {
+        write: true,
+        multitableTarget: true,
+        saveOnly: true,
+      },
+    })
+    replaceSystem(system)
+    targetSystemId.value = system.id
+    targetObjects.value = buildStagingTargetObjects()
+    targetObjectName.value = objectId
+    targetSchema.value = {
+      object: objectId,
+      fields: descriptorToSchemaFields(descriptor),
+      raw: {
+        sheetId: target.sheetId,
+        viewId: target.viewId,
+        openLink: target.openLink,
+        keyFields: objects[objectId].keyFields || [],
+        mode: objects[objectId].mode || 'append',
+      },
+    }
+    seedMappingsFromTargetSchema(targetSchema.value.fields)
+    setStatus(`已将 ${stagingDatasetCopy[objectId]?.name || descriptor.name} 设为写入目标`, 'success')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), 'error')
   }
