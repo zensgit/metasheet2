@@ -204,6 +204,28 @@ export interface IntegrationStagingDescriptor {
   }>
 }
 
+export interface IntegrationStagingOpenTarget {
+  id: string
+  name: string
+  sheetId: string
+  viewId: string
+  baseId?: string | null
+  openLink: string
+}
+
+export interface IntegrationStagingInstallPayload extends IntegrationScope {
+  projectId: string
+  baseId?: string | null
+}
+
+export interface IntegrationStagingInstallResult {
+  sheetIds: Record<string, string>
+  viewIds?: Record<string, string>
+  openLinks?: Record<string, string>
+  targets?: IntegrationStagingOpenTarget[]
+  warnings: string[]
+}
+
 export interface IntegrationTemplatePreviewRequest {
   sourceRecord: Record<string, unknown>
   fieldMappings: IntegrationFieldMapping[]
@@ -390,6 +412,16 @@ export async function listIntegrationStagingDescriptors(): Promise<IntegrationSt
   const response = await apiFetch('/api/integration/staging/descriptors')
   const data = await parseIntegrationResponse<IntegrationStagingDescriptor[]>(response)
   return Array.isArray(data) ? data : []
+}
+
+export async function installIntegrationStaging(
+  payload: IntegrationStagingInstallPayload,
+): Promise<IntegrationStagingInstallResult> {
+  const response = await apiFetch('/api/integration/staging/install', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+  return parseIntegrationResponse<IntegrationStagingInstallResult>(response)
 }
 
 export function canReadFromSystem(system: WorkbenchExternalSystem): boolean {

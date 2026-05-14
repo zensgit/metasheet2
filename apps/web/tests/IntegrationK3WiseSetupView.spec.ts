@@ -139,7 +139,8 @@ describe('IntegrationK3WiseSetupView', () => {
 
     const workbenchLink = container.querySelector('[data-testid="generic-workbench-link"]') as HTMLAnchorElement
     expect(workbenchLink?.getAttribute('href')).toBe('/integrations/workbench')
-    expect(workbenchLink?.textContent).toContain('打开通用工作台')
+    expect(workbenchLink?.textContent).toContain('进入数据工厂')
+    expect(container.textContent).toContain('K3 WISE 是数据工厂里的物料 / BOM 预设模板')
     expect(container.textContent).toContain('1. 接通 K3')
     expect(container.textContent).toContain('2. 准备多维表')
     expect(container.textContent).toContain('基础连接')

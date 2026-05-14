@@ -2,12 +2,19 @@
   <section class="integration-workbench">
     <header class="integration-workbench__header">
       <div>
-        <p class="integration-workbench__eyebrow">System Integration</p>
-        <h1>系统对接</h1>
-        <p class="integration-workbench__lead">这是默认的通用系统对接页面。选择任意来源系统和目标系统，把数据在多维表中清洗后，先预览 payload，再 dry-run 和 Save-only 推送。</p>
+        <p class="integration-workbench__eyebrow">Data Factory</p>
+        <h1>数据工厂</h1>
+        <p class="integration-workbench__lead">连接任意 CRM / PLM / ERP / SRM / HTTP / SQL 系统，把数据落到多维表清洗后，先 dry-run，再导出或 Save-only 推送。</p>
       </div>
-      <router-link class="integration-workbench__k3-link" to="/integrations/k3-wise">K3 WISE 预设向导</router-link>
+      <router-link class="integration-workbench__k3-link" to="/integrations/k3-wise">K3 WISE 预设模板</router-link>
     </header>
+
+    <nav class="integration-workbench__flow" aria-label="data factory flow" data-testid="data-factory-flow">
+      <div v-for="step in flowSteps" :key="step.title" class="integration-workbench__flow-step">
+        <strong>{{ step.title }}</strong>
+        <span>{{ step.description }}</span>
+      </div>
+    </nav>
 
     <div v-if="statusMessage" class="integration-workbench__status" :data-kind="statusKind">
       {{ statusMessage }}
@@ -16,8 +23,8 @@
     <section class="integration-workbench__panel">
       <div class="integration-workbench__panel-head">
         <div>
-          <h2>连接系统</h2>
-          <p>SQL 通道标记为高级能力，适合实施人员配置只读表、视图或中间表。</p>
+          <h2>连接系统 / 数据源</h2>
+          <p>普通用户选择已配置连接；SQL 通道是高级连接，只用于 allowlist 表、视图或中间表。</p>
         </div>
         <button type="button" class="integration-workbench__button" data-testid="refresh-systems" @click="refreshBootstrap">
           刷新连接
@@ -62,11 +69,11 @@
     <section class="integration-workbench__panel">
       <div class="integration-workbench__grid integration-workbench__grid--systems">
         <div class="integration-workbench__system-column">
-          <h2>来源</h2>
+          <h2>数据源</h2>
           <label>
-            <span>来源系统</span>
+            <span>数据源系统</span>
             <select v-model="sourceSystemId" data-testid="source-system">
-              <option value="">请选择来源系统</option>
+              <option value="">请选择数据源系统</option>
               <option v-for="system in sourceSystems" :key="system.id" :value="system.id">
                 {{ system.name }} · {{ system.kind }}
               </option>
@@ -78,13 +85,13 @@
               测试来源连接
             </button>
             <button type="button" class="integration-workbench__button" data-testid="load-source-objects" @click="loadObjects('source')">
-              加载来源对象
+              加载来源数据集
             </button>
           </div>
           <label>
-            <span>来源对象</span>
+            <span>来源数据集</span>
             <select v-model="sourceObjectName" data-testid="source-object" @change="loadSchema('source')">
-              <option value="">请选择来源对象</option>
+              <option value="">请选择来源数据集</option>
               <option v-for="object in sourceObjects" :key="object.name" :value="object.name">
                 {{ object.label || object.name }}
               </option>
@@ -114,13 +121,13 @@
               测试目标连接
             </button>
             <button type="button" class="integration-workbench__button" data-testid="load-target-objects" @click="loadObjects('target')">
-              加载目标对象
+              加载目标数据集
             </button>
           </div>
           <label>
-            <span>目标对象 / 模板</span>
+            <span>目标数据集 / 模板</span>
             <select v-model="targetObjectName" data-testid="target-object" @change="loadSchema('target')">
-              <option value="">请选择目标对象</option>
+              <option value="">请选择目标数据集</option>
               <option v-for="object in targetObjects" :key="object.name" :value="object.name">
                 {{ object.label || object.name }}
               </option>
@@ -145,7 +152,94 @@
     <section class="integration-workbench__panel">
       <div class="integration-workbench__panel-head">
         <div>
-          <h2>字段映射</h2>
+          <h2>数据集与多维表清洗</h2>
+          <p>数据源和目标系统只负责读写；业务清洗、审核、修正发生在多维表里。未安装清洗表时，可在这里创建 staging 多维表。</p>
+        </div>
+      </div>
+
+      <div class="integration-workbench__dataset-grid" data-testid="dataset-cards">
+        <article class="integration-workbench__dataset-card" data-testid="source-dataset-card">
+          <div class="integration-workbench__dataset-head">
+            <span class="integration-workbench__dataset-kind">数据源</span>
+            <strong>{{ sourceDatasetTitle }}</strong>
+          </div>
+          <p>{{ sourceDatasetDescription }}</p>
+          <div class="integration-workbench__metric-row">
+            <span>{{ sourceSchema.fields.length }} fields</span>
+            <span>{{ sourceConnectionLabel }}</span>
+          </div>
+        </article>
+
+        <article class="integration-workbench__dataset-card" data-testid="staging-dataset-card">
+          <div class="integration-workbench__dataset-head">
+            <span class="integration-workbench__dataset-kind">多维表清洗区</span>
+            <strong>{{ selectedStagingDescriptor?.name || '未绑定 staging 表' }}</strong>
+          </div>
+          <p>原始区、清洗区和回写区都在多维表中呈现，业务人员不需要直接维护 JSON。</p>
+          <div class="integration-workbench__metric-row">
+            <span>{{ stagingDescriptors.length }} tables</span>
+            <span>{{ selectedStagingDescriptor ? getStagingAreaLabel(selectedStagingDescriptor.id) : '待选择' }}</span>
+          </div>
+        </article>
+
+        <article class="integration-workbench__dataset-card" data-testid="target-dataset-card">
+          <div class="integration-workbench__dataset-head">
+            <span class="integration-workbench__dataset-kind">目标系统</span>
+            <strong>{{ targetDatasetTitle }}</strong>
+          </div>
+          <p>{{ targetDatasetDescription }}</p>
+          <div class="integration-workbench__metric-row">
+            <span>{{ targetSchema.fields.length }} fields</span>
+            <span>{{ requiredTargetFieldCount }} required</span>
+          </div>
+        </article>
+      </div>
+
+      <div v-if="stagingDescriptors.length" class="integration-workbench__staging-list" data-testid="staging-dataset-list">
+        <article v-for="descriptor in stagingDatasetCards" :key="descriptor.id" class="integration-workbench__staging-card">
+          <div>
+            <strong>{{ descriptor.name }}</strong>
+            <p>{{ descriptor.description }}</p>
+            <small>{{ descriptor.id }} · {{ descriptor.fieldCount }} fields · {{ descriptor.area }}</small>
+          </div>
+          <a
+            v-if="descriptor.openLink"
+            class="integration-workbench__button"
+            :href="descriptor.openLink"
+            target="_blank"
+            rel="noopener noreferrer"
+            :data-testid="`open-staging-${descriptor.id}`"
+          >
+            打开多维表
+          </a>
+        </article>
+      </div>
+      <div v-else class="integration-workbench__empty" data-testid="staging-empty">
+        暂未加载 staging 契约。可先刷新连接，或填写 Project ID 后创建清洗表。
+      </div>
+
+      <div class="integration-workbench__grid integration-workbench__grid--compact">
+        <label>
+          <span>Project ID（创建清洗表时必填）</span>
+          <input v-model="stagingProjectId" data-testid="staging-project-id" placeholder="例如 project_default" />
+        </label>
+        <label>
+          <span>Base ID（可选）</span>
+          <input v-model="stagingBaseId" data-testid="staging-base-id" placeholder="留空使用默认 base" />
+        </label>
+      </div>
+      <div class="integration-workbench__actions">
+        <button type="button" class="integration-workbench__button" data-testid="install-staging" :disabled="installingStaging" @click="installStagingTables">
+          {{ installingStaging ? '创建中' : '创建清洗表' }}
+        </button>
+      </div>
+      <pre v-if="stagingInstallResultText" data-testid="staging-install-result">{{ stagingInstallResultText }}</pre>
+    </section>
+
+    <section class="integration-workbench__panel">
+      <div class="integration-workbench__panel-head">
+        <div>
+          <h2>清洗映射规则</h2>
           <p>这里只允许白名单转换函数；复杂逻辑应进入 adapter 或后端模板，而不是用户脚本。</p>
         </div>
         <button type="button" class="integration-workbench__button" data-testid="add-mapping" @click="addMapping">
@@ -336,6 +430,7 @@ import {
   canWriteToSystem,
   getDefaultIntegrationScope,
   getExternalSystemSchema,
+  installIntegrationStaging,
   listIntegrationDeadLetters,
   listIntegrationPipelineRuns,
   listIntegrationStagingDescriptors,
@@ -354,6 +449,8 @@ import {
   type IntegrationPipelineMode,
   type IntegrationPipelineRun,
   type IntegrationStagingDescriptor,
+  type IntegrationStagingInstallResult,
+  type IntegrationStagingOpenTarget,
   type IntegrationSystemObject,
   type WorkbenchExternalSystem,
 } from '../services/integration/workbench'
@@ -370,6 +467,50 @@ interface EditableMapping {
   required: boolean
   minValueText: string
   maxValueText: string
+}
+
+interface StagingDatasetCard {
+  id: string
+  name: string
+  area: string
+  description: string
+  fieldCount: number
+  openLink: string
+}
+
+const flowSteps = [
+  { title: '1. 连接系统', description: '接入 CRM / PLM / ERP / SRM / HTTP / SQL' },
+  { title: '2. 选择数据集', description: '选择来源对象、清洗表和目标模板' },
+  { title: '3. 多维表清洗', description: '业务人员在表格里修正、审核、补字段' },
+  { title: '4. Dry-run / 推送', description: '预览 payload 后导出或 Save-only 写回' },
+]
+
+const stagingDatasetCopy: Record<string, { area: string; name: string; description: string }> = {
+  plm_raw_items: {
+    area: '原始区',
+    name: 'PLM 原始数据',
+    description: '保留第三方系统读入的原始物料、版本和来源字段，避免清洗过程覆盖原始证据。',
+  },
+  standard_materials: {
+    area: '清洗区',
+    name: '物料清洗',
+    description: '业务主要在这里补齐物料编码、名称、规格、单位和 ERP 回写状态。',
+  },
+  bom_cleanse: {
+    area: '清洗区',
+    name: 'BOM 清洗',
+    description: '业务主要在这里修正父子件、数量、单位、序号和版本。',
+  },
+  integration_exceptions: {
+    area: '回写区',
+    name: '异常处理',
+    description: '缺字段、非法数量、单位映射失败等问题会进入这里处理。',
+  },
+  integration_run_log: {
+    area: '回写区',
+    name: '运行日志',
+    description: '记录 dry-run、Save-only 推送、外部 ID、单据号和错误摘要。',
+  },
 }
 
 const transformOptions: Array<{ value: TransformFn, label: string }> = [
@@ -420,6 +561,11 @@ const idempotencyFieldsText = ref('code')
 const pipelineSampleLimit = ref('20')
 const savedPipelineId = ref('')
 const savingPipeline = ref(false)
+const stagingProjectId = ref('')
+const stagingBaseId = ref('')
+const stagingOpenTargets = ref<IntegrationStagingOpenTarget[]>([])
+const stagingInstallResultText = ref('')
+const installingStaging = ref(false)
 const runningPipeline = ref<'dry-run' | 'run' | ''>('')
 const observingPipeline = ref(false)
 const allowSaveOnlyRun = ref(false)
@@ -439,10 +585,36 @@ const targetSystems = computed(() => visibleSystems.value.filter(canWriteToSyste
 const selectedTargetObject = computed(() => targetObjects.value.find((object) => object.name === targetObjectName.value) || null)
 const selectedSourceSystem = computed(() => systems.value.find((system) => system.id === sourceSystemId.value) || null)
 const selectedTargetSystem = computed(() => systems.value.find((system) => system.id === targetSystemId.value) || null)
+const selectedStagingDescriptor = computed(() => stagingDescriptors.value.find((descriptor) => descriptor.id === stagingSheetId.value) || null)
 const sourceConnectionStatus = computed(() => selectedSourceSystem.value?.status || 'inactive')
 const targetConnectionStatus = computed(() => selectedTargetSystem.value?.status || 'inactive')
 const sourceConnectionLabel = computed(() => connectionStatusLabel(selectedSourceSystem.value))
 const targetConnectionLabel = computed(() => connectionStatusLabel(selectedTargetSystem.value))
+const sourceDatasetTitle = computed(() => selectedObjectLabel('source') || '请选择来源数据集')
+const targetDatasetTitle = computed(() => selectedObjectLabel('target') || '请选择目标数据集')
+const sourceDatasetDescription = computed(() => selectedSourceSystem.value
+  ? `${selectedSourceSystem.value.name} · ${sourceObjectName.value || '尚未加载对象'}`
+  : '先选择一个可读取的数据源系统。')
+const targetDatasetDescription = computed(() => selectedTargetSystem.value
+  ? `${selectedTargetSystem.value.name} · ${targetObjectName.value || '尚未加载模板'}`
+  : '先选择一个可写入的目标系统。')
+const requiredTargetFieldCount = computed(() => targetSchema.value.fields.filter((field) => field.required === true).length)
+const stagingOpenTargetById = computed(() => new Map(stagingOpenTargets.value.map((target) => [target.id, target])))
+const stagingDatasetCards = computed<StagingDatasetCard[]>(() => stagingDescriptors.value.map((descriptor) => {
+  const copy = stagingDatasetCopy[descriptor.id] || {
+    area: '数据集',
+    name: descriptor.name,
+    description: '该 staging 多维表可作为清洗、观察或回写数据集。',
+  }
+  return {
+    id: descriptor.id,
+    name: copy.name || descriptor.name,
+    area: copy.area,
+    description: copy.description,
+    fieldCount: Array.isArray(descriptor.fields) ? descriptor.fields.length : 0,
+    openLink: stagingOpenTargetById.value.get(descriptor.id)?.openLink || '',
+  }
+}))
 const observationSummary = computed(() => `${pipelineRuns.value.length} runs / ${deadLetters.value.length} open dead letters`)
 const sameSystemNotice = computed(() => {
   if (!sourceSystemId.value || sourceSystemId.value !== targetSystemId.value) return ''
@@ -482,6 +654,42 @@ function isAdvancedSystem(system: WorkbenchExternalSystem): boolean {
 
 function isK3WiseSystem(system: WorkbenchExternalSystem): boolean {
   return system.kind.startsWith('erp:k3-wise')
+}
+
+function selectedObjectLabel(side: WorkbenchSide): string {
+  const objectName = side === 'source' ? sourceObjectName.value : targetObjectName.value
+  const objects = side === 'source' ? sourceObjects.value : targetObjects.value
+  const object = objects.find((item) => item.name === objectName)
+  return object?.label || objectName
+}
+
+function getStagingAreaLabel(id: string): string {
+  return stagingDatasetCopy[id]?.area || '数据集'
+}
+
+function buildMultitableOpenLink(sheetId: string, viewId: string, baseId?: string | null): string {
+  const path = `/multitable/${encodeURIComponent(sheetId)}/${encodeURIComponent(viewId)}`
+  const normalizedBaseId = typeof baseId === 'string' && baseId.trim() ? baseId.trim() : ''
+  return normalizedBaseId ? `${path}?baseId=${encodeURIComponent(normalizedBaseId)}` : path
+}
+
+function normalizeStagingOpenTargets(result: IntegrationStagingInstallResult): IntegrationStagingOpenTarget[] {
+  const targetsById = new Map((result.targets ?? []).map((target) => [target.id, target]))
+  return Object.entries(result.sheetIds || {}).flatMap(([id, sheetId]) => {
+    const target = targetsById.get(id)
+    const viewId = target?.viewId || result.viewIds?.[id]
+    const openLink = target?.openLink || result.openLinks?.[id]
+    if (!sheetId || !viewId) return []
+    const copy = stagingDatasetCopy[id]
+    return [{
+      id,
+      name: target?.name || copy?.name || id,
+      sheetId,
+      viewId,
+      baseId: target?.baseId || stagingBaseId.value.trim() || null,
+      openLink: openLink || buildMultitableOpenLink(sheetId, viewId, target?.baseId || stagingBaseId.value.trim() || null),
+    }]
+  })
 }
 
 function normalizeSystemSelections(): void {
@@ -533,13 +741,13 @@ function replaceSystem(updated: WorkbenchExternalSystem): void {
 async function testSystem(side: WorkbenchSide): Promise<void> {
   const systemId = side === 'source' ? sourceSystemId.value : targetSystemId.value
   if (!systemId) {
-    setStatus(`${side === 'source' ? '来源' : '目标'}系统未选择`, 'error')
+    setStatus(`${side === 'source' ? '数据源' : '目标'}系统未选择`, 'error')
     return
   }
   try {
     const result = await testExternalSystemConnection(systemId, currentScope())
     if (result.system) replaceSystem(result.system)
-    const label = side === 'source' ? '来源' : '目标'
+    const label = side === 'source' ? '数据源' : '目标'
     setStatus(result.ok ? `${label}连接测试通过` : `${label}连接测试失败：${result.message || result.code || 'unknown error'}`, result.ok ? 'success' : 'error')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), 'error')
@@ -549,7 +757,7 @@ async function testSystem(side: WorkbenchSide): Promise<void> {
 async function loadObjects(side: WorkbenchSide): Promise<void> {
   const systemId = side === 'source' ? sourceSystemId.value : targetSystemId.value
   if (!systemId) {
-    setStatus(`${side === 'source' ? '来源' : '目标'}系统未选择`, 'error')
+    setStatus(`${side === 'source' ? '数据源' : '目标'}系统未选择`, 'error')
     return
   }
   try {
@@ -562,7 +770,7 @@ async function loadObjects(side: WorkbenchSide): Promise<void> {
       targetObjectName.value = objects[0]?.name || ''
     }
     if (objects.length > 0) await loadSchema(side)
-    setStatus(`已加载 ${objects.length} 个${side === 'source' ? '来源' : '目标'}对象`, 'success')
+    setStatus(`已加载 ${objects.length} 个${side === 'source' ? '来源' : '目标'}数据集`, 'success')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), 'error')
   }
@@ -581,6 +789,36 @@ async function loadSchema(side: WorkbenchSide): Promise<void> {
   } else {
     targetSchema.value = schema
     seedMappingsFromTargetSchema(schema.fields)
+  }
+}
+
+async function installStagingTables(): Promise<void> {
+  const projectId = stagingProjectId.value.trim()
+  if (!projectId) {
+    setStatus('创建清洗表前请填写 Project ID', 'error')
+    return
+  }
+  installingStaging.value = true
+  stagingInstallResultText.value = ''
+  try {
+    const result = await installIntegrationStaging({
+      ...currentScope(),
+      projectId,
+      baseId: stagingBaseId.value.trim() || null,
+    })
+    stagingOpenTargets.value = normalizeStagingOpenTargets(result)
+    stagingInstallResultText.value = JSON.stringify({
+      sheetIds: result.sheetIds,
+      viewIds: result.viewIds || {},
+      targets: stagingOpenTargets.value,
+      warnings: result.warnings,
+    }, null, 2)
+    await refreshBootstrap()
+    setStatus(result.warnings.length > 0 ? `清洗表已创建，存在 ${result.warnings.length} 条警告` : '清洗表已创建，可打开多维表处理数据', result.warnings.length > 0 ? 'idle' : 'success')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), 'error')
+  } finally {
+    installingStaging.value = false
   }
 }
 
@@ -730,11 +968,11 @@ function buildPipelinePayload() {
   const resolvedScope = currentScope()
   const fieldMappings = buildMappings()
   const idempotencyKeyFields = parseList(idempotencyFieldsText.value)
-  if (!sourceSystemId.value) throw new Error('请选择来源系统')
+  if (!sourceSystemId.value) throw new Error('请选择数据源系统')
   if (!targetSystemId.value) throw new Error('请选择目标系统')
-  if (!sourceObjectName.value) throw new Error('请选择来源对象')
-  if (!targetObjectName.value) throw new Error('请选择目标对象')
-  if (fieldMappings.length === 0) throw new Error('请至少配置一条字段映射')
+  if (!sourceObjectName.value) throw new Error('请选择来源数据集')
+  if (!targetObjectName.value) throw new Error('请选择目标数据集')
+  if (fieldMappings.length === 0) throw new Error('请至少配置一条清洗映射规则')
   if (idempotencyKeyFields.length === 0) throw new Error('请至少配置一个幂等字段')
 
   const templateMeta = selectedTemplateMeta()
@@ -743,7 +981,7 @@ function buildPipelinePayload() {
     ...(savedPipelineId.value.trim() ? { id: savedPipelineId.value.trim() } : {}),
     ...resolvedScope,
     name: pipelineName.value.trim() || defaultPipelineName(),
-    description: 'Generic integration workbench pipeline. Business data is cleansed in MetaSheet tables; this pipeline stores mapping and execution policy only.',
+    description: 'Data factory pipeline. Business data is cleansed in MetaSheet tables; this pipeline stores mapping and execution policy only.',
     sourceSystemId: sourceSystemId.value,
     sourceObject: sourceObjectName.value,
     targetSystemId: targetSystemId.value,
@@ -894,6 +1132,38 @@ watch(showAdvancedConnectors, () => {
 
 .integration-workbench__header {
   margin-bottom: 18px;
+}
+
+.integration-workbench__flow {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.integration-workbench__flow-step,
+.integration-workbench__dataset-card,
+.integration-workbench__staging-card {
+  border: 1px solid #d8e0e8;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.integration-workbench__flow-step {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+}
+
+.integration-workbench__flow-step strong {
+  color: #1f3551;
+  font-size: 13px;
+}
+
+.integration-workbench__flow-step span {
+  color: #5c6878;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .integration-workbench__eyebrow {
@@ -1069,6 +1339,74 @@ watch(showAdvancedConnectors, () => {
 
 .integration-workbench__grid--systems {
   align-items: start;
+}
+
+.integration-workbench__grid--compact {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.integration-workbench__dataset-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.integration-workbench__dataset-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+}
+
+.integration-workbench__dataset-head {
+  display: grid;
+  gap: 4px;
+}
+
+.integration-workbench__dataset-kind {
+  color: #5c6878;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.integration-workbench__dataset-card strong,
+.integration-workbench__staging-card strong {
+  color: #1f3551;
+}
+
+.integration-workbench__dataset-card p,
+.integration-workbench__staging-card p {
+  margin: 0;
+  color: #5c6878;
+  line-height: 1.5;
+}
+
+.integration-workbench__metric-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.integration-workbench__metric-row span,
+.integration-workbench__staging-card small {
+  display: inline-flex;
+  color: #5c6878;
+  font-size: 12px;
+}
+
+.integration-workbench__staging-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.integration-workbench__staging-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
 }
 
 .integration-workbench__system-column {
@@ -1256,6 +1594,9 @@ watch(showAdvancedConnectors, () => {
   .integration-workbench__panel-head,
   .integration-workbench__preview,
   .integration-workbench__observation,
+  .integration-workbench__flow,
+  .integration-workbench__dataset-grid,
+  .integration-workbench__staging-list,
   .integration-workbench__grid {
     grid-template-columns: 1fr;
   }

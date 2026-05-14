@@ -110,7 +110,7 @@ describe('platform shell navigation', () => {
     expect(links.some((link) => link.href === '/integrations/k3-wise')).toBe(false)
   })
 
-  it('shows ERP integration navigation for integration write permission without attendance admin', async () => {
+  it('shows data factory navigation for integration write permission without attendance admin', async () => {
     vi.doMock('vue-router', () => ({
       useRoute: () => ({
         path: '/grid',
@@ -188,7 +188,7 @@ describe('platform shell navigation', () => {
     }))
 
     expect(links).toEqual(expect.arrayContaining([
-      expect.objectContaining({ href: '/integrations/workbench', text: '系统对接' }),
+      expect.objectContaining({ href: '/integrations/workbench', text: '数据工厂' }),
     ]))
     expect(links.some((link) => link.href === '/admin/users')).toBe(false)
   })

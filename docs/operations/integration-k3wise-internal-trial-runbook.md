@@ -38,8 +38,8 @@ Use the K3 WISE setup page as the quick-start preset:
 /integrations/k3-wise
 ```
 
-Use the generic integration workbench when the integration needs cross-system
-mapping beyond the K3 Material/BOM preset:
+Use Data Factory when the integration needs cross-system mapping beyond the K3
+Material/BOM preset:
 
 ```text
 /integrations/workbench
@@ -50,8 +50,8 @@ Current operator contract:
 - The K3 WISE setup page is the guided preset for WebAPI credentials, SQL
   channel gating, staging table install, Material/BOM template preview, and
   draft pipeline creation.
-- The generic workbench is the configurable surface for source/target object
-  selection, field mappings, whitelisted transforms, dictionary maps,
+- Data Factory is the configurable surface for source/target dataset
+  selection, multitable cleansing, whitelisted transforms, dictionary maps,
   validation rules, payload preview, dry-run, Save-only run, and run/dead-letter
   observation.
 - Blank tenant scope resolves to `default`. Only override Tenant ID in the
