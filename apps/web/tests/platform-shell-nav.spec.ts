@@ -188,7 +188,7 @@ describe('platform shell navigation', () => {
     }))
 
     expect(links).toEqual(expect.arrayContaining([
-      expect.objectContaining({ href: '/integrations/k3-wise', text: 'ERP 对接' }),
+      expect.objectContaining({ href: '/integrations/workbench', text: '系统对接' }),
     ]))
     expect(links.some((link) => link.href === '/admin/users')).toBe(false)
   })
