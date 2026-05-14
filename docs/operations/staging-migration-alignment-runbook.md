@@ -20,7 +20,7 @@ and a real human is at the keyboard.
 
 ### Required access
 
-- SSH to the host (e.g. `tempadmin142@142.171.239.56`)
+- SSH to the host (e.g. `<staging-ssh-user>@<staging-host>`)
 - `sudo` for `docker exec` against postgres + backend
 - A reachable, healthy prod-track stack with a known-good
   `kysely_migration` table to use as the canonical reference
@@ -42,8 +42,8 @@ Save `$CURRENT_IMAGE` somewhere persistent (paste into a memo / chat).
 PG=<staging-postgres-container>  # may be hash-prefixed if compose v1 renamed it
 TS=$(date -u +%Y%m%dT%H%M%SZ)
 sudo docker exec "$PG" pg_dump -U metasheet -d metasheet -Fc \
-  > /tmp/metasheet-staging-pgdump-$TS.dump
-ls -la /tmp/metasheet-staging-pgdump-$TS.dump  # confirm size > 0
+  > <artifact-dir>/metasheet-staging-pgdump-$TS.dump
+ls -la <artifact-dir>/metasheet-staging-pgdump-$TS.dump  # confirm size > 0
 ```
 
 `-Fc` = custom format = compressed, restorable via `pg_restore`. If
@@ -68,8 +68,8 @@ SQL was applied long ago via the old runner).
 PROD_PG=<prod-track-postgres-container>
 sudo docker exec "$PROD_PG" psql -U metasheet -d metasheet -tA -c \
   "SELECT name, timestamp FROM kysely_migration ORDER BY name;" \
-  > /tmp/prod-kysely_migration.tsv
-wc -l /tmp/prod-kysely_migration.tsv  # expect ~152 lines (Apr 2026 baseline)
+  > <artifact-dir>/prod-kysely_migration.tsv
+wc -l <artifact-dir>/prod-kysely_migration.tsv  # expect ~152 lines (Apr 2026 baseline)
 ```
 
 #### A.2 Compute the diff (entries in prod, not in staging)
@@ -77,17 +77,17 @@ wc -l /tmp/prod-kysely_migration.tsv  # expect ~152 lines (Apr 2026 baseline)
 ```bash
 sudo docker exec "$STAGING_PG" psql -U metasheet -d metasheet -tA -c \
   "SELECT name FROM kysely_migration ORDER BY name;" \
-  > /tmp/stg-kysely_migration.tsv
+  > <artifact-dir>/stg-kysely_migration.tsv
 
 # Lines in prod, not in staging — the candidate insert set
-diff /tmp/prod-kysely_migration.tsv /tmp/stg-kysely_migration.tsv \
-  | grep '^<' | sed 's/^< //' > /tmp/missing-from-staging.tsv
-wc -l /tmp/missing-from-staging.tsv
+diff <artifact-dir>/prod-kysely_migration.tsv <artifact-dir>/stg-kysely_migration.tsv \
+  | grep '^<' | sed 's/^< //' > <artifact-dir>/missing-from-staging.tsv
+wc -l <artifact-dir>/missing-from-staging.tsv
 ```
 
 #### A.3 Audit the diff before inserting
 
-For each entry in `/tmp/missing-from-staging.tsv`:
+For each entry in `<artifact-dir>/missing-from-staging.tsv`:
 
 - **Legacy numeric migrations** (e.g. `008_plugin_infrastructure`,
   `032-057_*`, `20250925_create_view_tables`,
@@ -103,11 +103,11 @@ For each entry in `/tmp/missing-from-staging.tsv`:
   insert. They need to run for real via `pnpm migrate` after the
   synthetic catch-up completes.
 
-Split `/tmp/missing-from-staging.tsv` into two files:
+Split `<artifact-dir>/missing-from-staging.tsv` into two files:
 
-- `/tmp/synthetic-mark-applied.tsv` — schema is already in place
+- `<artifact-dir>/synthetic-mark-applied.tsv` — schema is already in place
   (legacy + early-modern)
-- `/tmp/genuinely-pending.tsv` — must actually run
+- `<artifact-dir>/genuinely-pending.tsv` — must actually run
 
 For the 2026-04-26 baseline this is roughly:
 - ~28 entries → synthetic (legacy 008-057, 20250925, 20250926)
@@ -123,13 +123,13 @@ For the 2026-04-26 baseline this is roughly:
     # Use prod's timestamp if available, otherwise epoch zero (any non-null is fine)
     [ -z "$ts" ] && ts=0
     echo "INSERT INTO kysely_migration (name, timestamp) VALUES ('$name', $ts);"
-  done < /tmp/synthetic-mark-applied.tsv
+  done < <artifact-dir>/synthetic-mark-applied.tsv
   echo "COMMIT;"
-} > /tmp/synthetic-mark-applied.sql
+} > <artifact-dir>/synthetic-mark-applied.sql
 
 # Apply
 sudo docker exec -i "$STAGING_PG" psql -U metasheet -d metasheet \
-  < /tmp/synthetic-mark-applied.sql
+  < <artifact-dir>/synthetic-mark-applied.sql
 ```
 
 Verify count:
@@ -145,7 +145,7 @@ sudo docker exec "$STAGING_PG" psql -U metasheet -d metasheet -c \
 ```bash
 sudo docker exec -w /app/packages/core-backend <staging-backend> \
   node dist/src/db/migrate.js --list
-# Confirms the only pending entries match /tmp/genuinely-pending.tsv
+# Confirms the only pending entries match <artifact-dir>/genuinely-pending.tsv
 
 sudo docker exec -w /app/packages/core-backend <staging-backend> \
   node dist/src/db/migrate.js
@@ -165,7 +165,7 @@ staging and what the missing migrations would have produced.
 ```bash
 # 1. Take a fresh prod-track dump
 sudo docker exec "$PROD_PG" pg_dump -U metasheet -d metasheet -Fc \
-  > /tmp/prod-source.dump
+  > <artifact-dir>/prod-source.dump
 
 # 2. (If needed) sanitize PII — out of scope for this runbook;
 #    likely not required if staging is already non-prod data
@@ -178,7 +178,7 @@ sudo docker exec "$STAGING_PG" psql -U metasheet -d postgres -c \
 
 # 4. Restore
 sudo docker exec -i "$STAGING_PG" pg_restore -U metasheet -d metasheet -c \
-  < /tmp/prod-source.dump
+  < <artifact-dir>/prod-source.dump
 ```
 
 After this, staging's schema + `kysely_migration` table both match
@@ -217,28 +217,28 @@ curl -s -w '%{http_code}\n' -H "Authorization: Bearer $TOKEN" \
 ### "Insert failed: duplicate key"
 
 You're trying to insert a name that's already present. Adjust
-`/tmp/synthetic-mark-applied.tsv` to exclude already-tracked entries:
+`<artifact-dir>/synthetic-mark-applied.tsv` to exclude already-tracked entries:
 
 ```bash
 sudo docker exec "$STAGING_PG" psql -U metasheet -d metasheet -tA -c \
   "SELECT name FROM kysely_migration ORDER BY name;" \
-  > /tmp/stg-current.tsv
+  > <artifact-dir>/stg-current.tsv
 comm -23 \
-  <(sort /tmp/synthetic-mark-applied.tsv | cut -f1) \
-  <(sort /tmp/stg-current.tsv) \
-  > /tmp/synthetic-mark-applied-clean.tsv
+  <(sort <artifact-dir>/synthetic-mark-applied.tsv | cut -f1) \
+  <(sort <artifact-dir>/stg-current.tsv) \
+  > <artifact-dir>/synthetic-mark-applied-clean.tsv
 ```
 
 ### "Migration failed: column already exists" mid-`pnpm migrate`
 
-A migration in `/tmp/genuinely-pending.tsv` overlaps with schema that
+A migration in `<artifact-dir>/genuinely-pending.tsv` overlaps with schema that
 was already applied via a non-tracked path. Move that name from
-`/tmp/genuinely-pending.tsv` to `/tmp/synthetic-mark-applied-extra.tsv`,
+`<artifact-dir>/genuinely-pending.tsv` to `<artifact-dir>/synthetic-mark-applied-extra.tsv`,
 insert it as synthetic-applied, then resume `pnpm migrate`.
 
 ### "I changed something I shouldn't have"
 
-Restore from `/tmp/metasheet-staging-pgdump-$TS.dump`:
+Restore from `<artifact-dir>/metasheet-staging-pgdump-$TS.dump`:
 
 ```bash
 sudo docker exec "$STAGING_PG" psql -U metasheet -d postgres -c \
@@ -246,7 +246,7 @@ sudo docker exec "$STAGING_PG" psql -U metasheet -d postgres -c \
 sudo docker exec "$STAGING_PG" psql -U metasheet -d postgres -c \
   "CREATE DATABASE metasheet;"
 sudo docker exec -i "$STAGING_PG" pg_restore -U metasheet -d metasheet \
-  < /tmp/metasheet-staging-pgdump-$TS.dump
+  < <artifact-dir>/metasheet-staging-pgdump-$TS.dump
 ```
 
 This is why the §Pre-flight pg_dump is non-negotiable.
@@ -256,7 +256,7 @@ This is why the §Pre-flight pg_dump is non-negotiable.
 - Diagnosis: `docs/development/staging-deploy-d88ad587b-postmortem-20260426.md`
 - Original deploy MD: `docs/development/staging-deploy-d88ad587b-20260426.md`
 - Triggering staging gap: 86 → 152 in `kysely_migration` between
-  staging and prod-track stacks on host `142.171.239.56`
+  staging and prod-track stacks on host `<staging-host>`
 - Memory entry tracking the deferred task:
   `~/.claude/.../memory/project_staging_migration_alignment.md`
 
