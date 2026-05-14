@@ -31,6 +31,68 @@
         </button>
       </div>
 
+      <div class="integration-workbench__onboarding" data-testid="connection-onboarding">
+        <div>
+          <strong>连接新系统</strong>
+          <p>从这里开始接入 PLM、ERP、CRM、SRM、HTTP API 或 SQL 数据源；已配置连接会回到下方数据源/目标选择器。</p>
+        </div>
+        <div class="integration-workbench__onboarding-actions">
+          <router-link class="integration-workbench__button" to="/integrations/k3-wise" data-testid="k3-preset-entry">
+            使用 K3 WISE 预设
+          </router-link>
+          <button type="button" class="integration-workbench__button" data-testid="connect-new-system" @click="showConnectionGuide">
+            连接新系统
+          </button>
+          <button type="button" class="integration-workbench__button" data-testid="show-sql-setup" @click="showSqlSetup">
+            查看 SQL / 高级连接
+          </button>
+        </div>
+      </div>
+
+      <button
+        type="button"
+        class="integration-workbench__inventory-toggle"
+        data-testid="toggle-inventory-overview"
+        :aria-expanded="inventoryExpanded ? 'true' : 'false'"
+        @click="inventoryExpanded = !inventoryExpanded"
+      >
+        {{ inventorySummary }} <span>{{ inventoryExpanded ? '收起' : '展开' }}</span>
+      </button>
+
+      <div v-if="inventoryExpanded" class="integration-workbench__inventory" data-testid="inventory-overview">
+        <div>
+          <h3>已配置连接</h3>
+          <div v-if="systems.length === 0" class="integration-workbench__empty">暂无连接。请使用 K3 WISE 预设或后续连接向导创建。</div>
+          <ul v-else class="integration-workbench__inventory-list">
+            <li v-for="system in systems" :key="system.id">
+              <strong>{{ system.name }}</strong>
+              <span>{{ system.kind }} · {{ system.role }} · {{ connectionStatusLabel(system) }}</span>
+              <small v-if="runtimeBlockerForSystem(system)">{{ runtimeBlockerForSystem(system) }}</small>
+            </li>
+          </ul>
+        </div>
+        <div>
+          <h3>可用适配器</h3>
+          <ul class="integration-workbench__inventory-list">
+            <li v-for="adapter in adapters" :key="adapter.kind">
+              <strong>{{ adapter.label }}</strong>
+              <span>{{ adapter.kind }} · {{ adapter.roles.join('/') }}</span>
+              <small>{{ adapter.advanced ? '高级 / 实施人员使用' : '普通连接' }}</small>
+            </li>
+          </ul>
+        </div>
+        <div>
+          <h3>Staging 多维表</h3>
+          <ul class="integration-workbench__inventory-list">
+            <li v-for="descriptor in stagingDatasetCards" :key="descriptor.id">
+              <strong>{{ descriptor.name }}</strong>
+              <span>{{ descriptor.area }} · {{ descriptor.fieldCount }} 个字段</span>
+              <small>{{ descriptor.openLink ? '可打开多维表' : '等待安装后返回打开链接' }}</small>
+            </li>
+          </ul>
+        </div>
+      </div>
+
       <div class="integration-workbench__adapter-list">
         <span
           v-for="adapter in visibleAdapters"
@@ -79,6 +141,17 @@
               </option>
             </select>
           </label>
+          <div v-if="sourceSystems.length === 0" class="integration-workbench__empty integration-workbench__empty--actionable" data-testid="source-empty-state">
+            <strong>还没有可读取的数据源。</strong>
+            <p>连接 PLM、HTTP API 或启用 SQL 只读通道后，可将数据导入 staging 多维表再清洗。</p>
+            <div class="integration-workbench__actions">
+              <router-link class="integration-workbench__button" to="/integrations/k3-wise">使用 K3 WISE 预设</router-link>
+              <button type="button" class="integration-workbench__button" @click="showSqlSetup">启用 SQL 只读通道</button>
+            </div>
+          </div>
+          <div v-if="sourceRuntimeBlocker" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="source-runtime-blocker">
+            {{ sourceRuntimeBlocker }}
+          </div>
           <div class="integration-workbench__connection-row">
             <span class="integration-workbench__badge" :data-status="sourceConnectionStatus">{{ sourceConnectionLabel }}</span>
             <button type="button" class="integration-workbench__button" data-testid="test-source-system" @click="testSystem('source')">
@@ -165,7 +238,7 @@
           </div>
           <p>{{ sourceDatasetDescription }}</p>
           <div class="integration-workbench__metric-row">
-            <span>{{ sourceSchema.fields.length }} fields</span>
+            <span>{{ sourceSchema.fields.length }} 个字段</span>
             <span>{{ sourceConnectionLabel }}</span>
           </div>
         </article>
@@ -177,7 +250,7 @@
           </div>
           <p>原始区、清洗区和回写区都在多维表中呈现，业务人员不需要直接维护 JSON。</p>
           <div class="integration-workbench__metric-row">
-            <span>{{ stagingDescriptors.length }} tables</span>
+            <span>{{ stagingDescriptors.length }} 张表</span>
             <span>{{ selectedStagingDescriptor ? getStagingAreaLabel(selectedStagingDescriptor.id) : '待选择' }}</span>
           </div>
         </article>
@@ -189,8 +262,8 @@
           </div>
           <p>{{ targetDatasetDescription }}</p>
           <div class="integration-workbench__metric-row">
-            <span>{{ targetSchema.fields.length }} fields</span>
-            <span>{{ requiredTargetFieldCount }} required</span>
+            <span>{{ targetSchema.fields.length }} 个字段</span>
+            <span>{{ requiredTargetFieldCount }} 个必填</span>
           </div>
         </article>
       </div>
@@ -200,7 +273,7 @@
           <div>
             <strong>{{ descriptor.name }}</strong>
             <p>{{ descriptor.description }}</p>
-            <small>{{ descriptor.id }} · {{ descriptor.fieldCount }} fields · {{ descriptor.area }}</small>
+            <small>{{ descriptor.id }} · {{ descriptor.fieldCount }} 个字段 · {{ descriptor.area }}</small>
           </div>
           <a
             v-if="descriptor.openLink"
@@ -352,11 +425,25 @@
         <span>允许本次 Save-only 推送。保持 Submit / Audit 关闭。</span>
       </label>
 
+      <div class="integration-workbench__readiness" data-testid="pipeline-readiness">
+        <div>
+          <strong>Dry-run 前置条件</strong>
+          <p>{{ dryRunBlockedSummary }}</p>
+        </div>
+        <ul>
+          <li v-for="item in dryRunReadinessItems" :key="item.id" :data-ready="item.ready ? 'true' : 'false'">
+            <span>{{ item.ready ? '已完成' : '待处理' }}</span>
+            <strong>{{ item.label }}</strong>
+            <small>{{ item.detail }}</small>
+          </li>
+        </ul>
+      </div>
+
       <div class="integration-workbench__actions">
-        <button type="button" class="integration-workbench__button" data-testid="run-dry-run" :disabled="runningPipeline !== ''" @click="executePipeline(true)">
+        <button type="button" class="integration-workbench__button" data-testid="run-dry-run" :disabled="runningPipeline !== '' || !canRunDryRun" @click="executePipeline(true)">
           {{ runningPipeline === 'dry-run' ? 'Dry-run 中' : 'Dry-run' }}
         </button>
-        <button type="button" class="integration-workbench__button integration-workbench__button--danger" data-testid="run-save-only" :disabled="runningPipeline !== '' || !allowSaveOnlyRun" @click="executePipeline(false)">
+        <button type="button" class="integration-workbench__button integration-workbench__button--danger" data-testid="run-save-only" :disabled="runningPipeline !== '' || !allowSaveOnlyRun || !canRunDryRun" @click="executePipeline(false)">
           {{ runningPipeline === 'run' ? '推送中' : 'Save-only 推送' }}
         </button>
       </div>
@@ -570,6 +657,7 @@ const workspaceInput = computed({
 const adapters = ref<IntegrationAdapterMetadata[]>([])
 const systems = ref<WorkbenchExternalSystem[]>([])
 const showAdvancedConnectors = ref(false)
+const inventoryExpanded = ref(false)
 const sourceSystemId = ref('')
 const targetSystemId = ref('')
 const sourceObjects = ref<IntegrationSystemObject[]>([])
@@ -612,6 +700,7 @@ const sampleRecordText = ref(JSON.stringify({
 }, null, 2))
 
 const adapterMetadataByKind = computed(() => new Map(adapters.value.map((adapter) => [adapter.kind, adapter])))
+const inventorySummary = computed(() => `已加载 ${systems.value.length} 个连接 · ${adapters.value.length} 个适配器 · ${stagingDescriptors.value.length} 个 staging 表`)
 const visibleAdapters = computed(() => adapters.value.filter((adapter) => showAdvancedConnectors.value || !adapter.advanced))
 const hiddenAdvancedSystemCount = computed(() => systems.value.filter((system) => isAdvancedSystem(system)).length)
 const visibleSystems = computed(() => systems.value.filter((system) => showAdvancedConnectors.value || !isAdvancedSystem(system)))
@@ -625,6 +714,7 @@ const sourceConnectionStatus = computed(() => selectedSourceSystem.value?.status
 const targetConnectionStatus = computed(() => selectedTargetSystem.value?.status || 'inactive')
 const sourceConnectionLabel = computed(() => connectionStatusLabel(selectedSourceSystem.value))
 const targetConnectionLabel = computed(() => connectionStatusLabel(selectedTargetSystem.value))
+const sourceRuntimeBlocker = computed(() => runtimeBlockerForSystem(selectedSourceSystem.value))
 const sourceDatasetTitle = computed(() => selectedObjectLabel('source') || '请选择来源数据集')
 const targetDatasetTitle = computed(() => selectedObjectLabel('target') || '请选择目标数据集')
 const sourceDatasetDescription = computed(() => selectedSourceSystem.value
@@ -676,6 +766,63 @@ const protocolSplitNotice = computed(() => {
   }
   return ''
 })
+const hasMappingRules = computed(() => mappings.value.some((mapping) => mapping.sourceField.trim() && mapping.targetField.trim()))
+const hasIdempotencyFields = computed(() => parseList(idempotencyFieldsText.value).length > 0)
+const dryRunReadinessItems = computed(() => [
+  {
+    id: 'source-system',
+    label: '选择可读取的数据源',
+    ready: Boolean(sourceSystemId.value && selectedSourceSystem.value?.status === 'active' && !sourceRuntimeBlocker.value),
+    detail: sourceRuntimeBlocker.value
+      || (selectedSourceSystem.value && selectedSourceSystem.value.status !== 'active'
+        ? connectionStatusLabel(selectedSourceSystem.value)
+        : (sourceSystemId.value ? '数据源已选择且状态可用' : '还没有选择数据源；也可以先使用 K3 预设配置目标，再补来源。')),
+  },
+  {
+    id: 'source-object',
+    label: '选择来源数据集',
+    ready: Boolean(sourceObjectName.value),
+    detail: sourceObjectName.value || '加载来源数据集后才能保存 pipeline。',
+  },
+  {
+    id: 'target-system',
+    label: '选择目标系统',
+    ready: Boolean(targetSystemId.value && selectedTargetSystem.value?.status === 'active'),
+    detail: selectedTargetSystem.value && selectedTargetSystem.value.status !== 'active'
+      ? connectionStatusLabel(selectedTargetSystem.value)
+      : (targetSystemId.value ? '目标系统已选择且状态可用' : '请选择 K3 WebAPI 或其他可写目标。'),
+  },
+  {
+    id: 'target-object',
+    label: '选择目标数据集 / 模板',
+    ready: Boolean(targetObjectName.value),
+    detail: targetObjectName.value || '加载目标数据集后才能生成 payload 或保存 pipeline。',
+  },
+  {
+    id: 'mapping',
+    label: '配置清洗映射规则',
+    ready: hasMappingRules.value,
+    detail: hasMappingRules.value ? '至少一条 source -> target 映射已配置。' : '请先加载目标 schema 或手工新增映射。',
+  },
+  {
+    id: 'idempotency',
+    label: '填写幂等字段',
+    ready: hasIdempotencyFields.value,
+    detail: hasIdempotencyFields.value ? '幂等字段已填写。' : '例如 code 或 sourceId,revision。',
+  },
+  {
+    id: 'pipeline-id',
+    label: '保存 Pipeline',
+    ready: Boolean(savedPipelineId.value.trim()),
+    detail: savedPipelineId.value.trim() || 'Payload 预览通过不等于 pipeline dry-run；请先保存 pipeline。',
+  },
+])
+const canRunDryRun = computed(() => dryRunReadinessItems.value.every((item) => item.ready))
+const dryRunBlockedSummary = computed(() => {
+  const missing = dryRunReadinessItems.value.filter((item) => !item.ready)
+  if (missing.length === 0) return '已满足 dry-run 前置条件。Dry-run 只生成 preview，不写外部系统。'
+  return `还缺 ${missing.length} 项：${missing.map((item) => item.label).join('、')}`
+})
 
 function setStatus(message: string, kind: 'success' | 'error' | 'idle' = 'idle'): void {
   statusMessage.value = message
@@ -693,8 +840,31 @@ function isAdvancedSystem(system: WorkbenchExternalSystem): boolean {
   return adapterMetadataByKind.value.get(system.kind)?.advanced === true
 }
 
+function runtimeBlockerForSystem(system: WorkbenchExternalSystem | null): string {
+  if (!system) return ''
+  const errorText = system.lastError || ''
+  if (system.kind === 'erp:k3-wise-sqlserver' && /queryExecutor|executor|injected|注入|执行器/i.test(errorText)) {
+    return 'SQL 连接已配置，但当前部署未注入 SQL 执行器；可保留为高级连接，暂不能作为可读 source 执行 dry-run。'
+  }
+  if (system.kind === 'erp:k3-wise-sqlserver' && system.status === 'error' && !errorText) {
+    return 'K3 SQL Server 只读通道需要部署 allowlist queryExecutor 后才能读取样本或作为 source。'
+  }
+  return ''
+}
+
 function isK3WiseSystem(system: WorkbenchExternalSystem): boolean {
   return system.kind.startsWith('erp:k3-wise')
+}
+
+function showConnectionGuide(): void {
+  inventoryExpanded.value = true
+  setStatus('连接新系统第一步：优先使用 K3 WISE 预设；PLM/HTTP/SQL 连接向导会在后续版本补齐。', 'idle')
+}
+
+function showSqlSetup(): void {
+  showAdvancedConnectors.value = true
+  inventoryExpanded.value = true
+  setStatus('已显示 SQL / 高级连接。SQL source 需要部署 allowlist queryExecutor 后才能读取。', 'idle')
 }
 
 function selectedObjectLabel(side: WorkbenchSide): string {
@@ -1425,6 +1595,93 @@ watch(showAdvancedConnectors, () => {
   margin-top: 14px;
 }
 
+.integration-workbench__onboarding,
+.integration-workbench__readiness {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid #d7deea;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.integration-workbench__onboarding strong,
+.integration-workbench__readiness strong {
+  color: #1f3551;
+}
+
+.integration-workbench__onboarding p,
+.integration-workbench__readiness p {
+  margin: 4px 0 0;
+  color: #5c6878;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.integration-workbench__onboarding-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.integration-workbench__inventory-toggle {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px solid #d8e0e8;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #233246;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+  text-align: left;
+}
+
+.integration-workbench__inventory-toggle span {
+  color: #357abd;
+  font-size: 13px;
+}
+
+.integration-workbench__inventory {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.integration-workbench__inventory-list {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.integration-workbench__inventory-list li {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid #e4ebf2;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.integration-workbench__inventory-list span,
+.integration-workbench__inventory-list small {
+  color: #5c6878;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .integration-workbench__adapter {
   display: inline-flex;
   align-items: center;
@@ -1695,6 +1952,50 @@ watch(showAdvancedConnectors, () => {
   margin-top: 14px;
 }
 
+.integration-workbench__readiness {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.4fr) minmax(0, 1fr);
+}
+
+.integration-workbench__readiness ul {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.integration-workbench__readiness li {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid #e4ebf2;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.integration-workbench__readiness li[data-ready="true"] {
+  border-color: #b9dfc4;
+  background: #f3fbf5;
+}
+
+.integration-workbench__readiness li > span {
+  color: #7a4a00;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.integration-workbench__readiness li[data-ready="true"] > span {
+  color: #17622f;
+}
+
+.integration-workbench__readiness small {
+  color: #5c6878;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .integration-workbench__export {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(160px, 220px) auto;
@@ -1736,6 +2037,18 @@ watch(showAdvancedConnectors, () => {
   border: 1px dashed #cbd5e1;
   border-radius: 6px;
   color: #5c6878;
+}
+
+.integration-workbench__empty--actionable {
+  margin-top: 10px;
+}
+
+.integration-workbench__empty strong {
+  color: #1f3551;
+}
+
+.integration-workbench__empty p {
+  margin: 6px 0 0;
 }
 
 .integration-workbench__record-list {
@@ -1786,6 +2099,10 @@ watch(showAdvancedConnectors, () => {
   .integration-workbench__observation,
   .integration-workbench__flow,
   .integration-workbench__dataset-grid,
+  .integration-workbench__inventory,
+  .integration-workbench__onboarding,
+  .integration-workbench__readiness,
+  .integration-workbench__readiness ul,
   .integration-workbench__staging-list,
   .integration-workbench__export,
   .integration-workbench__grid {
@@ -1795,6 +2112,15 @@ watch(showAdvancedConnectors, () => {
   .integration-workbench__header,
   .integration-workbench__panel-head {
     display: grid;
+  }
+
+  .integration-workbench__onboarding,
+  .integration-workbench__readiness {
+    display: grid;
+  }
+
+  .integration-workbench__onboarding-actions {
+    justify-content: flex-start;
   }
 }
 </style>
