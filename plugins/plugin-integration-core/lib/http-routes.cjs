@@ -309,6 +309,7 @@ const ADAPTER_METADATA = {
   'metasheet:staging': {
     label: 'MetaSheet staging multitable',
     roles: ['source'],
+    supports: ['testConnection', 'listObjects', 'getSchema', 'read'],
     advanced: false,
     guardrails: {
       read: {

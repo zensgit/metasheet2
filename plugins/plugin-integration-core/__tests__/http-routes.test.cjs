@@ -702,11 +702,13 @@ async function testDiscoveryRoutes() {
   assert.equal(stagingMetadata.label, 'MetaSheet staging multitable')
   assert.equal(stagingMetadata.advanced, false, 'MetaSheet staging source is not hidden as advanced')
   assert.deepEqual(stagingMetadata.roles, ['source'])
+  assert.deepEqual(stagingMetadata.supports, ['testConnection', 'listObjects', 'getSchema', 'read'])
   assert.deepEqual(stagingMetadata.guardrails.read, {
     hostOwned: true,
     dryRunFriendly: true,
     noExternalNetwork: true,
   })
+  assert.deepEqual(stagingMetadata.guardrails.write, { supported: false })
   const multitableMetadata = res.body.data.find((adapter) => adapter.kind === 'metasheet:multitable')
   assert.equal(multitableMetadata.label, 'MetaSheet multitable')
   assert.equal(multitableMetadata.advanced, false)
