@@ -26,7 +26,8 @@ preflight and Save-only PoC, which they only touch tangentially.
   signed off.
 - After the downloaded on-prem package has produced a package verifier JSON
   report.
-- Before sending the GATE intake template to the customer.
+- Before sending `scripts/ops/fixtures/integration-k3wise/gate-intake-template.json`
+  to the customer for completion outside Git.
 - During customer answer review (does the answer satisfy the hard contracts?).
 - During live PoC execution (which command runs when, what counts as PASS).
 
@@ -46,6 +47,11 @@ preflight and Save-only PoC, which they only touch tangentially.
   any artifact path under `artifacts/integration-k3wise/`. The schema uses
   `<fill-outside-git>` as the only sanctioned placeholder for credential
   values.
+- The customer-facing intake template is
+  `scripts/ops/fixtures/integration-k3wise/gate-intake-template.json`.
+  It is a fillable wrapper around the script sample: it keeps the same
+  accepted JSON shape, adds A.1–A.6 review notes, defaults SQL Server to
+  disabled, and must be copied outside Git before real values are entered.
 - **Live preflight (Stage C step C2 onward) is gated by customer GATE
   arrival**. Until the customer has supplied A.1–A.6 answers,
   `--live` runs return `exit 2 / decision=GATE_BLOCKED` by design (the
@@ -59,6 +65,17 @@ preflight and Save-only PoC, which they only touch tangentially.
 The customer must answer all rows below. Operator-side fields
 (`DATABASE_URL`, `JWT_SECRET`, etc.) are **not** customer-facing and are
 deliberately omitted from this list.
+
+Start from the checked-in customer template:
+
+```bash
+cp scripts/ops/fixtures/integration-k3wise/gate-intake-template.json \
+  /secure/customer-gate/k3wise-gate.json
+```
+
+Only the copied file should receive real customer values. Keep the checked-in
+template free of real hosts, account ids, passwords, tokens, and SQL
+credentials.
 
 ### A.1 Test scope (required)
 
@@ -268,6 +285,7 @@ Same prerequisites apply to C2 (which also runs `env.database-url` /
 | Resource | Path / entry | What it covers | Gap |
 |---|---|---|---|
 | GATE schema (authoritative) | `node scripts/ops/integration-k3wise-live-poc-preflight.mjs --print-sample` | Complete JSON template for A.1–A.6 | It's a schema, not a guide; raw JSON is unfriendly to a customer reviewer |
+| Customer-facing intake template | `scripts/ops/fixtures/integration-k3wise/gate-intake-template.json` | Fillable A.1–A.6 wrapper with inline review notes, secret placeholders, Save-only defaults, and SQL disabled by default | None for pre-answer intake; filled copies must stay outside Git |
 | GATE field semantics | `scripts/ops/integration-k3wise-live-poc-preflight.mjs` (`normalizeGate()` and its throws) | The exact text of every hard-constraint failure | No human-readable (especially Chinese) explanation for non-engineer reviewers |
 | On-prem preflight runbook | `docs/operations/k3-poc-onprem-preflight-runbook.md` (PR #1437) | C1 / C2 operations, fix recipes for all 8 check IDs, Docker bridge-IP recipe | Does not explain field semantics — points at the schema |
 | Internal-trial postdeploy | `docs/operations/integration-k3wise-internal-trial-runbook.md` | Post-deploy auth smoke (control plane) before K3 enters the picture; host-shell mint pattern | Concerns metasheet itself, not K3 / PLM |
@@ -277,22 +295,18 @@ Same prerequisites apply to C2 (which also runs `env.database-url` /
 
 **Remaining gaps (priority order)**:
 
-1. **Customer-facing GATE intake template** — semi-structured (e.g., a fillable
-   YAML or wiki page) carrying A.1–A.6 in plain language, with constraint
-   notes inline ("environment must not be production", "BOM mapping must
-   include FParentItemNumber"), and the `<fill-outside-git>` placeholder
-   convention for secrets. Useful **before** the customer answers.
-2. **On-site evidence collection template** — slot-per-step JSON skeleton
+1. **On-site evidence collection template** — slot-per-step JSON skeleton
    covering C4–C9 (runId, externalId / billNo, dead-letter row id, rollback
    evidence). Drops directly into `--evidence <file>` of the compiler.
    Useful **during** PoC execution.
-3. **Field-semantics explainer** (Chinese) — design intent behind each hard
+2. **Field-semantics explainer** (Chinese) — design intent behind each hard
    constraint ("why production is forbidden", "why BOM requires product
    scope", "why core-table writes are blocked"). Best written **after** the
    first real PoC, driven by actual customer questions.
 
-Items 1 and 2 are non-blocking but high-leverage; item 3 is best deferred
-until there is real friction to capture.
+The customer-facing GATE intake template is now covered by the checked-in
+fixture above. The remaining two items are non-blocking; the field-semantics
+explainer is best deferred until there is real friction to capture.
 
 ---
 
@@ -352,6 +366,7 @@ EXIT=$?
 ## See also
 
 - `scripts/ops/integration-k3wise-live-poc-preflight.mjs` — packet builder and `--print-sample` schema source.
+- `scripts/ops/fixtures/integration-k3wise/gate-intake-template.json` — customer-facing fillable GATE intake template.
 - `scripts/ops/integration-k3wise-live-poc-evidence.mjs` — evidence compiler with the C10 contract.
 - `scripts/ops/integration-k3wise-delivery-readiness.mjs` — final readiness compiler that consumes postdeploy smoke, package verify, preflight packet, and optional live evidence.
 - `scripts/ops/multitable-onprem-package-verify.sh` — package-content verifier; set `VERIFY_REPORT_JSON` to feed C11.

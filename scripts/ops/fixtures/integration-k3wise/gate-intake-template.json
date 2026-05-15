@@ -1,0 +1,87 @@
+{
+  "_comment": "Customer-facing K3 WISE live GATE intake template. Copy this file outside Git, replace the example non-secret values with customer values, put real credentials only in the credential fields, then run: node scripts/ops/integration-k3wise-live-poc-preflight.mjs --input <path> --out-dir <packet-dir>. Do not place password, token, api_key, sign, session_id, or auth query values in apiUrl/baseUrl fields.",
+  "_instructions": {
+    "owner": "Implementation operator fills this with the customer K3/PLM administrator. Keep the filled copy outside Git.",
+    "secretPlaceholder": "<fill-outside-git>",
+    "saveOnlyPolicy": "autoSubmit and autoAudit must remain false until a separately approved production change window.",
+    "acceptedCredentialShapes": [
+      "k3Wise.credentials.sessionId",
+      "k3Wise.credentials.username + k3Wise.credentials.password"
+    ],
+    "reviewBeforeLive": [
+      "environment is not production",
+      "K3 WebAPI URL has no secret query parameters",
+      "BOM product scope is present when bom.enabled=true",
+      "SQL Server mode is readonly unless the customer explicitly approved a middle-table/stored-procedure path",
+      "rollback.owner and rollback.strategy are named and testable"
+    ]
+  },
+  "_sections": {
+    "A.1": "Test scope: tenantId, workspaceId, operator, k3Wise.environment.",
+    "A.2": "K3 WISE connection: version, WebAPI URL, acctId, credentials, Save-only policy.",
+    "A.3": "PLM source: kind, read method, base URL, product scope, credentials.",
+    "A.4": "Field mappings: material and optional BOM mappings into K3 field names.",
+    "A.5": "SQL Server channel: optional advanced channel; readonly is the safe default.",
+    "A.6": "Rollback contract: named owner and rollback strategy."
+  },
+  "tenantId": "default",
+  "workspaceId": "customer-test-workspace",
+  "operator": "customer-k3-admin-and-metasheet-operator",
+  "k3Wise": {
+    "version": "K3 WISE 15.x test",
+    "apiUrl": "https://k3.example.test/K3API/",
+    "acctId": "AIS_TEST",
+    "environment": "test",
+    "credentials": {
+      "username": "k3-test-user",
+      "password": "<fill-outside-git>"
+    },
+    "autoSubmit": false,
+    "autoAudit": false,
+    "sampleLimit": 3
+  },
+  "plm": {
+    "kind": "plm:yuantus-wrapper",
+    "readMethod": "api",
+    "baseUrl": "https://plm.example.test/",
+    "defaultProductId": "PRODUCT-TEST-001",
+    "credentials": {
+      "username": "plm-test-user",
+      "password": "<fill-outside-git>"
+    }
+  },
+  "sqlServer": {
+    "enabled": false,
+    "mode": "disabled",
+    "server": "<customer-sqlserver-host>",
+    "database": "AIS_TEST",
+    "allowedTables": [],
+    "middleTables": [],
+    "storedProcedures": [],
+    "writeCoreTables": false
+  },
+  "rollback": {
+    "owner": "customer-k3-admin",
+    "strategy": "disable-test-records"
+  },
+  "bom": {
+    "enabled": true,
+    "productId": "PRODUCT-TEST-001"
+  },
+  "fieldMappings": {
+    "material": [
+      { "sourceField": "code", "targetField": "FNumber", "transform": ["trim", "upper"], "validation": [{ "type": "required" }] },
+      { "sourceField": "name", "targetField": "FName", "validation": [{ "type": "required" }] },
+      { "sourceField": "spec", "targetField": "FModel" },
+      { "sourceField": "uom", "targetField": "FBaseUnitID" }
+    ],
+    "bom": [
+      { "sourceField": "bomNumber", "targetField": "FNumber", "defaultValue": "BOM-TEST-001", "validation": [{ "type": "required" }] },
+      { "sourceField": "parentCode", "targetField": "FParentItemNumber", "validation": [{ "type": "required" }] },
+      { "sourceField": "childCode", "targetField": "FChildItems[].FItemNumber", "validation": [{ "type": "required" }] },
+      { "sourceField": "quantity", "targetField": "FChildItems[].FQty", "transform": { "type": "toNumber" }, "validation": [{ "type": "required" }] },
+      { "sourceField": "uom", "targetField": "FChildItems[].FUnitID" },
+      { "sourceField": "sequence", "targetField": "FChildItems[].FEntryID" }
+    ]
+  }
+}
