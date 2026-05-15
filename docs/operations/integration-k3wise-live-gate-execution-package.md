@@ -197,7 +197,7 @@ next step only after PASS.
 | **C7** | (Optional) BOM Save-only PoC | When `bom.enabled=true` and C6 PASS | manual BOM pipeline | 1–3 BOMs written; dry-run preview used the BOM template (`FParentItemNumber`, `FChildItemNumber`, `FQty`, optional `FUnitID`, `FEntryID`); product scope sourced from `bom.productId` or `plm.defaultProductId` (NOT `pipeline.options.source.productId`) | evidence compiler raises `LEGACY_BOM_PRODUCT_ID_USED` |
 | **C8** | Dead-letter replay | After C6 PASS | introduce a controlled failure → enters dead-letter → fix → replay | replayed run writes successfully | replay still fails |
 | **C9** | Rollback rehearsal | After C8 PASS | customer K3 admin executes per `rollback.owner` / `rollback.strategy` | test rows identifiable (e.g., `TEST-` prefix) and removed/disabled per strategy | owner unreachable or strategy not exercised |
-| **C10** | **Evidence compiler signoff** | After C9 PASS | `node scripts/ops/integration-k3wise-live-poc-evidence.mjs --packet <packet.json> --evidence <evidence.json>` | `decision=PASS` and `issues=[]` | `decision=FAIL` if any of `SAVE_ONLY_VIOLATED` / `SAVE_ONLY_ROW_COUNT` / `SAVE_ONLY_RUN_ID_REQUIRED` / `K3_RECORD_REQUIRED` / `BOM_PRODUCT_SCOPE_REQUIRED` / `BOM_RUN_ID_REQUIRED` / `BOM_ROW_COUNT` / `BOM_K3_RECORD_REQUIRED` / `BOM_K3_RESPONSE_REQUIRED` / `LEGACY_BOM_PRODUCT_ID_USED` fires; `decision=PARTIAL` when non-fail issues remain (typically checklist gaps) |
+| **C10** | **Evidence compiler signoff** | After C9 PASS | copy `scripts/ops/fixtures/integration-k3wise/evidence-onsite-c4-c9-template.json` outside Git, fill it, then run `node scripts/ops/integration-k3wise-live-poc-evidence.mjs --packet <packet.json> --evidence <filled-evidence.json>` | `decision=PASS` and `issues=[]` | `decision=FAIL` if any of `SAVE_ONLY_VIOLATED` / `SAVE_ONLY_ROW_COUNT` / `SAVE_ONLY_RUN_ID_REQUIRED` / `K3_RECORD_REQUIRED` / `BOM_PRODUCT_SCOPE_REQUIRED` / `BOM_RUN_ID_REQUIRED` / `BOM_ROW_COUNT` / `BOM_K3_RECORD_REQUIRED` / `BOM_K3_RESPONSE_REQUIRED` / `LEGACY_BOM_PRODUCT_ID_USED` fires; `decision=PARTIAL` when non-fail issues remain (typically checklist gaps) |
 | **C11** | **Delivery readiness compiler** | After C10 PASS, or earlier to show what remains blocked | see [C11 delivery readiness compiler](#c11-delivery-readiness-compiler) | before C10: `decision=CUSTOMER_TRIAL_READY`; after C10: `decision=CUSTOMER_TRIAL_SIGNED_OFF`; `productionUse.ready=false` remains explicit | `decision=BLOCKED`, missing package verify JSON, failed postdeploy smoke, failed preflight packet, or failed live evidence |
 
 ### C0.5 package verify report
@@ -249,6 +249,31 @@ The output files are `integration-k3wise-delivery-readiness.json` and
 production approval. Production use still requires customer signoff,
 backup/rollback approval, and a scheduled change window.
 
+### C4-C9 on-site evidence worksheet
+
+Start the live evidence package from the checked-in worksheet:
+
+```bash
+cp scripts/ops/fixtures/integration-k3wise/evidence-onsite-c4-c9-template.json \
+  /secure/customer-gate/k3wise-onsite-evidence.json
+```
+
+The checked-in worksheet is intentionally incomplete. Before it is filled,
+it should compile to `PARTIAL`, not `FAIL`:
+
+```bash
+node scripts/ops/integration-k3wise-live-poc-evidence.mjs \
+  --packet <packet-dir>/integration-k3wise-live-poc-packet.json \
+  --evidence scripts/ops/fixtures/integration-k3wise/evidence-onsite-c4-c9-template.json \
+  --out-dir artifacts/integration-k3wise/live-evidence/template-smoke
+```
+
+During C4-C9, update only the copied file outside Git. Fill run ids, request
+ids, K3 external ids / bill numbers, staging feedback rows, replay proof,
+rollback proof, and customer confirmation. Do not paste credentials, bearer
+headers, signed URLs, K3 session values, SQL connection strings, or passwords
+into evidence fields.
+
 ### C1 prerequisites
 
 `integration-k3wise-onprem-preflight.mjs` always validates `DATABASE_URL`
@@ -291,21 +316,18 @@ Same prerequisites apply to C2 (which also runs `env.database-url` /
 | Internal-trial postdeploy | `docs/operations/integration-k3wise-internal-trial-runbook.md` | Post-deploy auth smoke (control plane) before K3 enters the picture; host-shell mint pattern | Concerns metasheet itself, not K3 / PLM |
 | Package verifier + delivery readiness | `scripts/ops/multitable-onprem-package-verify.sh` + `scripts/ops/integration-k3wise-delivery-readiness.mjs` | C0.5 package evidence and C11 readiness decisions (`INTERNAL_READY_WAITING_CUSTOMER_GATE` / `CUSTOMER_TRIAL_READY` / `CUSTOMER_TRIAL_SIGNED_OFF`) | Does not replace customer evidence; it compiles existing evidence into one signoff artifact |
 | Mock chain | `scripts/ops/fixtures/integration-k3wise/run-mock-poc-demo.mjs` + `pnpm verify:integration-k3wise:poc` | C0 end-to-end | Already complete |
-| Evidence compiler | `scripts/ops/integration-k3wise-live-poc-evidence.mjs` (`evaluateMaterialSaveOnly` / `evaluateBom` / `determineDecision`) | C10 issue codes and their triggers | No on-site evidence-collection template |
+| Evidence compiler | `scripts/ops/integration-k3wise-live-poc-evidence.mjs` (`evaluateMaterialSaveOnly` / `evaluateBom` / `determineDecision`) | C10 issue codes and their triggers plus `--print-onsite-evidence-template` | Covered by `scripts/ops/fixtures/integration-k3wise/evidence-onsite-c4-c9-template.json` for C4-C9 collection |
 
 **Remaining gaps (priority order)**:
 
-1. **On-site evidence collection template** — slot-per-step JSON skeleton
-   covering C4–C9 (runId, externalId / billNo, dead-letter row id, rollback
-   evidence). Drops directly into `--evidence <file>` of the compiler.
-   Useful **during** PoC execution.
-2. **Field-semantics explainer** (Chinese) — design intent behind each hard
+1. **Field-semantics explainer** (Chinese) — design intent behind each hard
    constraint ("why production is forbidden", "why BOM requires product
    scope", "why core-table writes are blocked"). Best written **after** the
    first real PoC, driven by actual customer questions.
 
 The customer-facing GATE intake template is now covered by the checked-in
-fixture above. The remaining two items are non-blocking; the field-semantics
+fixture above. The on-site evidence collection template is also covered by
+`evidence-onsite-c4-c9-template.json`. The remaining field-semantics
 explainer is best deferred until there is real friction to capture.
 
 ---
@@ -367,6 +389,7 @@ EXIT=$?
 
 - `scripts/ops/integration-k3wise-live-poc-preflight.mjs` — packet builder and `--print-sample` schema source.
 - `scripts/ops/fixtures/integration-k3wise/gate-intake-template.json` — customer-facing fillable GATE intake template.
+- `scripts/ops/fixtures/integration-k3wise/evidence-onsite-c4-c9-template.json` — operator-facing fillable C4-C9 evidence worksheet.
 - `scripts/ops/integration-k3wise-live-poc-evidence.mjs` — evidence compiler with the C10 contract.
 - `scripts/ops/integration-k3wise-delivery-readiness.mjs` — final readiness compiler that consumes postdeploy smoke, package verify, preflight packet, and optional live evidence.
 - `scripts/ops/multitable-onprem-package-verify.sh` — package-content verifier; set `VERIFY_REPORT_JSON` to feed C11.
