@@ -205,6 +205,7 @@ node scripts/ops/integration-k3wise-postdeploy-summary.mjs \
 Detailed operator runbooks included in the package:
 
 - `docs/operations/k3-poc-onprem-preflight-runbook.md`
+- `docs/operations/integration-k3wise-onprem-operator-handoff-checklist.md`
 - `docs/operations/integration-k3wise-internal-trial-runbook.md`
 - `docs/operations/integration-k3wise-live-gate-execution-package.md`
 
