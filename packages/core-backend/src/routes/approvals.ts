@@ -1145,6 +1145,75 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
+  r.post('/api/approvals/:id/jump', authenticate, rbacGuard('approvals:admin'), async (req: Request, res: Response) => {
+    try {
+      const productService = getProductService()
+      const userId = resolveApprovalActorId(req)
+      if (!userId) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+
+      const requestedVersion = normalizeApprovalVersion(req.body?.version)
+      if (requestedVersion === null) {
+        return res.status(400).json({
+          ok: false,
+          error: {
+            code: 'APPROVAL_VERSION_REQUIRED',
+            message: 'Approval version is required',
+          },
+        })
+      }
+
+      const targetNodeKey = normalizeApprovalText(req.body?.targetNodeKey)
+      if (!targetNodeKey) {
+        return res.status(400).json(
+          approvalErrorResponse('VALIDATION_ERROR', 'targetNodeKey is required'),
+        )
+      }
+      const reason = normalizeApprovalText(req.body?.reason) ?? normalizeApprovalText(req.body?.comment)
+      if (!reason) {
+        return res.status(400).json(
+          approvalErrorResponse('VALIDATION_ERROR', 'reason is required'),
+        )
+      }
+
+      const actor = {
+        userId,
+        userName: resolveApprovalActorName(req, userId),
+        roles: resolveApprovalActorRoles(req),
+        permissions: resolveApprovalActorPermissions(req),
+        tenantId: resolveApprovalTenantId(req),
+        ip: req.ip || null,
+        userAgent: req.get('user-agent') || null,
+      }
+      const approval = await productService.adminJump(
+        req.params.id,
+        { version: requestedVersion, targetNodeKey, reason },
+        actor,
+      )
+
+      const activeDirectAssignees = await listDirectApprovalAssigneeIds(req.params.id)
+      await publishApprovalCountsForUsers(
+        options,
+        [
+          { userId, roles: actor.roles },
+          ...activeDirectAssignees.map((assigneeId) => ({ userId: assigneeId })),
+        ],
+        'admin-jump',
+      )
+      res.json(approval)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_ADMIN_JUMP_FAILED',
+        'Failed to jump approval',
+      )
+    }
+  })
+
   r.post('/api/approvals/:id/actions', authenticate, rbacGuard('approvals', 'act'), async (req: Request, res: Response) => {
     try {
       const bridgeService = getBridgeService(options)

@@ -1,6 +1,6 @@
 # Approval PR3 admin-jump-node Development 2026-05-15
 
-PR: `admin-jump-node` · Branch: `flow/admin-jump-node-20260515` · Base: `origin/main` @ `0eb8c9639`
+PR: `admin-jump-node` · Branch: `flow/admin-jump-node-20260515` · Base: `origin/main` @ `e0721ed25`
 Gating scope gate: `docs/development/approval-pr3-scope-gate-response-20260515.md` (revised; verdict GO-after-prerequisites)
 Worksplit spec: `docs/development/approval-phase1-codex-claude-worksplit-todo-20260515.md` §5 PR3
 
@@ -10,7 +10,7 @@ This document records the prerequisite decisions and test commitment. Implementa
 
 ### PD1 — `approval_records.action` gains `'jump'` via new migration (option a)
 
-New migration `zzzz<ts>_add_jump_action_to_approval_records.ts`:
+New migration `zzzz20260515130000_add_jump_action_to_approval_records.ts`:
 
 - `up()`:
   - `ALTER TABLE approval_records DROP CONSTRAINT IF EXISTS approval_records_action_check`
@@ -31,7 +31,7 @@ Same new migration (or a sibling migration) also:
 
 Route gated: `r.post('/api/approvals/:id/jump', authenticate, rbacGuard('approvals:admin'), handler)`.
 
-`approvals` is in `NON_NAMESPACED_PERMISSION_RESOURCES` (`rbac/namespace-admission.ts`) → no namespace-admission entry/switch needed. Exact permission code: `approvals:admin`. Migration location: recorded here once the migration filename is created.
+`approvals` is in `NON_NAMESPACED_PERMISSION_RESOURCES` (`rbac/namespace-admission.ts`) → no namespace-admission entry/switch needed. Exact permission code: `approvals:admin`. Migration location: `packages/core-backend/src/db/migrations/zzzz20260515130000_add_jump_action_to_approval_records.ts`.
 
 ### PD3 — Parallel-region jump boundary (MVP)
 
@@ -62,7 +62,7 @@ Acceptance: `grep -rn "approval_records_action_check"` shows only the new migrat
 
 - `packages/core-backend/src/services/ApprovalProductService.ts` — new `adminJump(...)` + graph-local downstream-validation helper.
 - `packages/core-backend/src/routes/approvals.ts` — one new `POST /api/approvals/:id/jump`.
-- `packages/core-backend/src/db/migrations/zzzz<ts>_add_jump_action_to_approval_records.ts` — action constraint + `approvals:admin` permission/role_permission rows.
+- `packages/core-backend/src/db/migrations/zzzz20260515130000_add_jump_action_to_approval_records.ts` — action constraint + `approvals:admin` permission/role_permission rows.
 - `packages/core-backend/tests/helpers/approval-schema-bootstrap.ts` — CHECK sync (add `'jump'`).
 - `packages/core-backend/tests/unit/**/*approval*`, `packages/core-backend/tests/integration/**/*approval*` — test matrix below.
 - This dev doc + `approval-pr3-admin-jump-node-verification-20260515.md`.
@@ -99,10 +99,35 @@ pnpm type-check
 
 Migration rollback (T11) requires a scratch DB. If the local integration env remains DB-gated, the verification doc must explicitly state T11/T-bootstrap as DB-required and not silently skip (avoid [[feedback_metasheet2_skip_when_unreachable_blind_spot]]).
 
+## Implementation Record
+
+Implemented on top of `origin/main@e0721ed25` after two rebase checks (`behind > 0` was resolved before final docs). The implementation stayed inside the expected files plus this PR's verification/review docs.
+
+- Service: `ApprovalProductService.adminJump()` locks the instance with `FOR UPDATE`, checks optimistic `version`, rejects terminal/non-pending instances, loads the frozen runtime graph by `instance.published_definition_id`, validates approval-node targets, enforces forward-only reachability, clears parallel state, deactivates old assignments, inserts target assignments, writes a `jump` audit record with the real admin actor, emits `approval.admin_jumped`, and returns the refreshed approval DTO.
+- Parallel MVP: `parallelBranchStates` changes the reachability base to `joinNodeKey`; branch-contained targets return `APPROVAL_JUMP_PARALLEL_BRANCH_TARGET_UNSUPPORTED`; valid post-join jumps clear `parallelBranchStates`.
+- Route: `POST /api/approvals/:id/jump` is gated by `authenticate` + `rbacGuard('approvals:admin')` and requires `version`, `targetNodeKey`, and `reason` (or `comment` as a compatibility alias).
+- Migration/bootstrap: the new migration adds `jump` and `approvals:admin`; `down()` deletes `role_permissions` before `permissions` and restores the old action CHECK with `NOT VALID`. `approval-schema-bootstrap.ts` was bumped and synced with `'jump'`.
+
+## Test Coverage Map
+
+| ID | Local coverage |
+|---|---|
+| T1 | `approval-rbac-boundary.test.ts` covers no auth, `approvals:act` without admin, `approval-templates:manage` without admin, and `approvals:admin` handler reachability. |
+| T2/T3 | `approval-admin-jump-service.test.ts` rejects terminal state and stale version before mutation/runtime load. |
+| T4 | Service unit asserts frozen `approval_published_definitions` query uses `instance.published_definition_id` and no `approval_templates`/`approval_template_versions`/`active_version_id` SQL appears. |
+| T5 | Service unit covers nonexistent target and existing non-approval `cc` target. |
+| T6 | Service unit covers backward non-downstream target rejection. |
+| T7/T10/T13 | Service unit covers deactivation, target assignment insert, admin actor audit, event payload, and no template binding mutation. |
+| T8 | Service unit verifies the prior assignee cannot `approve` once only the target-node assignment remains active. |
+| T9 | Service unit covers in-branch target rejection and post-join jump state clear. |
+| T11 | Source/unit coverage asserts migration up/down shape, `NOT VALID`, and FK-safe delete order. Data-bearing up/down/up remains DB-required and is explicitly recorded in verification. |
+| T12 | Service unit covers stale second jump behavior (`version` mismatch -> 409) plus implementation uses `SELECT ... FOR UPDATE`. |
+| T-bootstrap | Source/unit coverage asserts bootstrap version bump and CHECK includes `'jump'`. |
+
 ## Out Of Scope
 
 Jump-into-specific-branch (separate ADR); backward jump (separate ADR, worksplit §8); add-sign (PR4); any PR2 auto-approval region; historical migration edits; UI.
 
 ## Status
 
-Prerequisites recorded. Ready for implementation on explicit opt-in ([[feedback_staged_optin_lineage]]).
+Implementation complete locally. Ready for §7.2 independent review after verification doc + review request are committed.
