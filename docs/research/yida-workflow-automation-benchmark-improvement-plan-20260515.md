@@ -1,8 +1,8 @@
 # 宜搭流程与集成自动化对标改善方案
 
-生成日期：2026-05-15  
-适用仓库：`metasheet2`  
-文档性质：对标改善方案，供后续 TODO、开发设计和验证拆分使用  
+生成日期：2026-05-15
+适用仓库：`metasheet2`
+文档性质：对标改善方案，供后续 TODO、开发设计和验证拆分使用
 前置对照文档：`docs/research/yida-workflow-vs-metasheet2-comparison-20260514.md`
 
 ## 1. 结论
