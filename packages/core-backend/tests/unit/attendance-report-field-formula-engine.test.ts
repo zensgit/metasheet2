@@ -593,6 +593,79 @@ describe('attendance report field formula engine wrapper', () => {
     expect(context.api.formula.calculateFormula).toHaveBeenCalledTimes(1)
   })
 
+  it('can globally disable raw alias references without touching field enabled state', async () => {
+    expect(helpers.readAttendanceFormulaRawAliasesEnvOverride({
+      ATTENDANCE_FORMULA_ALLOW_RAW_ALIASES: 'off',
+    })).toBe(false)
+    expect(helpers.resolveAttendanceFormulaRawAliasesAllowed({
+      formula: { allowRawAliases: true },
+    }, {
+      ATTENDANCE_FORMULA_ALLOW_RAW_ALIASES: 'false',
+    })).toBe(false)
+    expect(helpers.resolveAttendanceFormulaRawAliasesAllowed({
+      formula: { allowRawAliases: false },
+    }, {
+      ATTENDANCE_FORMULA_ALLOW_RAW_ALIASES: 'true',
+    })).toBe(true)
+
+    const merged = helpers.mergeAttendanceReportFieldDefinitions([
+      {
+        id: 'rec-raw-late-plus-one',
+        data: {
+          fld_code: 'raw_late_plus_one',
+          fld_name: '迟到分钟+1（raw alias）',
+          fld_category: '异常统计字段',
+          fld_source: 'custom',
+          fld_unit: 'minutes',
+          fld_enabled: true,
+          fld_visible: true,
+          fld_sort: 4501,
+          fld_formula_enabled: true,
+          fld_formula_expression: '={late_minutes}+1',
+          fld_formula_scope: 'record',
+          fld_formula_output_type: 'duration_minutes',
+        },
+      },
+    ], fieldIds, { rawAliasesAllowed: false })
+
+    const rawFormula = merged.find((field: { code: string }) => field.code === 'raw_late_plus_one')
+    expect(rawFormula).toMatchObject({
+      formulaValid: false,
+      formulaError: 'Raw alias reference late_minutes is disabled by attendance formula settings.',
+      formulaReferences: ['late_minutes'],
+    })
+
+    expect(helpers.validateAttendanceReportFormulaExpression('={late_minutes}+1', {
+      fields: merged,
+      rawAliasesAllowed: false,
+    })).toMatchObject({
+      valid: false,
+      error: 'Raw alias reference late_minutes is disabled by attendance formula settings.',
+    })
+
+    const context = {
+      api: {
+        formula: {
+          calculateFormula: vi.fn(),
+        },
+      },
+    }
+    const outputFields = helpers.resolveAttendanceRecordReportFields(merged)
+    const formulaSourceFields = helpers.resolveAttendanceFormulaSourceFields(merged)
+    await expect(helpers.buildAttendanceRecordReportExportItemAsync(context, {
+      work_date: '2026-05-13',
+      status: 'late',
+      late_minutes: 12,
+      early_leave_minutes: 0,
+      work_minutes: 460,
+      is_workday: true,
+      meta: {},
+    }, outputFields, formulaSourceFields, { rawAliasesAllowed: false })).resolves.toMatchObject({
+      raw_late_plus_one: '#ERROR!',
+    })
+    expect(context.api.formula.calculateFormula).not.toHaveBeenCalled()
+  })
+
   it('catalog fields with raw alias codes are dropped (raw aliases are reserved)', async () => {
     const merged = helpers.mergeAttendanceReportFieldDefinitions([
       {
@@ -703,6 +776,30 @@ describe('attendance report field formula engine wrapper', () => {
       ok: false,
       value: null,
       error: 'Unknown attendance report field reference: phantom_field.',
+    })
+    expect(context.api.formula.calculateFormula).not.toHaveBeenCalled()
+  })
+
+  it('preview rejects raw alias references when the global gate is disabled', async () => {
+    const context = {
+      api: {
+        formula: {
+          calculateFormula: vi.fn(),
+        },
+      },
+    }
+
+    await expect(helpers.previewAttendanceReportFormula(
+      context,
+      '={late_minutes}+1',
+      { late_minutes: 12 },
+      helpers.cloneAttendanceReportFieldDefinitions(),
+      { rawAliasesAllowed: false },
+    )).resolves.toMatchObject({
+      ok: false,
+      value: null,
+      references: ['late_minutes'],
+      error: 'Raw alias reference late_minutes is disabled by attendance formula settings.',
     })
     expect(context.api.formula.calculateFormula).not.toHaveBeenCalled()
   })
