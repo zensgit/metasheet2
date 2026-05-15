@@ -164,6 +164,53 @@ Create a local GATE file on the bridge machine. Do not commit it.
 If the customer uses `authorityCode` authentication, store it in a local file
 and do not paste the value into chat or markdown.
 
+## SQL Server executor handoff
+
+Direct K3 WISE SQL Server source execution is an advanced bridge-machine task.
+The normal package registers `erp:k3-wise-sqlserver`, but it does not inject a
+production SQL Server executor. Until the bridge machine wires one, Data Factory
+and postdeploy smoke may report `SQLSERVER_EXECUTOR_MISSING`.
+
+This state is expected before SQL work is explicitly approved:
+
+- Use `metasheet:staging` as the source for Data Factory retests.
+- Do not mark the SQL source as runnable.
+- Do not copy the mock SQL executor into production registration.
+- Do not store SQL credentials in Git, chat, or `external_systems.config`.
+
+When SQL source testing is approved, the bridge implementation must inject an
+executor into `createK3WiseSqlServerChannelFactory({ queryExecutor })`. The
+minimum contract is:
+
+- `queryExecutor.testConnection({ system, input })`
+  - verifies reachability and credentials;
+  - returns no raw connection string or secret values.
+- `queryExecutor.select({ table, columns, limit, cursor, filters, watermark, orderBy, options, system })`
+  - reads only configured allowlist views/tables;
+  - uses parameterized values and structured filters;
+  - accepts no user-written raw SQL.
+- `queryExecutor.insertMany({ table, records, keyFields, mode, options, system })`
+  - writes only to approved middle tables or controlled procedures;
+  - never writes directly to K3 core tables such as `t_ICItem`,
+    `t_ICBOM`, or `t_ICBomChild`.
+
+After wiring the executor, rerun the authenticated postdeploy smoke. A configured
+SQL source should move from:
+
+```text
+sqlserver-executor-availability=skipped
+code=SQLSERVER_EXECUTOR_MISSING
+```
+
+to:
+
+```text
+sqlserver-executor-availability=pass
+```
+
+For the method-level contract and operator acceptance checklist, see
+`docs/operations/integration-k3wise-sql-executor-bridge-handoff.md`.
+
 ## Test Sequence
 
 ### 1. Confirm MetaSheet Deployment
