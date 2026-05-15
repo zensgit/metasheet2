@@ -31,6 +31,10 @@ function scrubEnv(extra = {}) {
     REQUIRE_AUTH: '',
     K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH: '',
     K3_WISE_PRE_SMOKE_REQUIRE_TENANT: '',
+    K3_WISE_SMOKE_ISSUE1542_WORKBENCH_SMOKE: '',
+    K3_WISE_DEPLOY_SMOKE_ISSUE1542_WORKBENCH_SMOKE: '',
+    K3_WISE_SMOKE_ISSUE1542_INSTALL_STAGING: '',
+    K3_WISE_DEPLOY_SMOKE_ISSUE1542_INSTALL_STAGING: '',
     ...extra,
   }
 }
@@ -193,6 +197,72 @@ test('accepts K3_WISE_SMOKE_TOKEN without leaking the token', async () => {
     assert.doesNotMatch(result.stdout, new RegExp(secretToken))
     assert.doesNotMatch(result.stderr, new RegExp(secretToken))
     assert.doesNotMatch(md, new RegExp(secretToken))
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('issue1542 install-staging command includes workbench flags and does not leak token', async () => {
+  const tmpDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url',
+      'https://metasheet.example.test',
+      '--tenant-id',
+      'tenant_1',
+      '--require-auth',
+      '--issue1542-install-staging',
+      '--out-dir',
+      tmpDir,
+    ], {
+      env: {
+        K3_WISE_SMOKE_TOKEN: secretToken,
+      },
+    })
+    const summary = parseStdout(result.stdout)
+    const evidenceText = readFileSync(summary.jsonPath, 'utf8')
+    const evidence = JSON.parse(evidenceText)
+    const md = readFileSync(summary.mdPath, 'utf8')
+
+    assert.equal(result.status, 0)
+    assert.equal(summary.ok, true)
+    assert.equal(summary.issue1542WorkbenchSmoke, true)
+    assert.equal(summary.issue1542InstallStaging, true)
+    assert.equal(evidence.issue1542WorkbenchSmoke, true)
+    assert.equal(evidence.issue1542InstallStaging, true)
+    assert.match(evidence.smokeCommand, /--issue1542-workbench-smoke/)
+    assert.match(evidence.smokeCommand, /--issue1542-install-staging/)
+    assert.equal(evidence.checks.find((check) => check.id === 'issue1542-install-staging')?.status, 'pass')
+    assert.doesNotMatch(result.stdout, new RegExp(secretToken))
+    assert.doesNotMatch(result.stderr, new RegExp(secretToken))
+    assert.doesNotMatch(evidenceText, new RegExp(secretToken))
+    assert.doesNotMatch(md, new RegExp(secretToken))
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('issue1542 install-staging precheck requires authenticated tenant scope', async () => {
+  const tmpDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url',
+      'https://metasheet.example.test',
+      '--issue1542-install-staging',
+      '--out-dir',
+      tmpDir,
+    ])
+    const summary = parseStdout(result.stdout)
+    const evidence = JSON.parse(readFileSync(summary.jsonPath, 'utf8'))
+
+    assert.equal(result.status, 1)
+    assert.equal(summary.ok, false)
+    assert.equal(evidence.issue1542WorkbenchSmoke, true)
+    assert.equal(evidence.issue1542InstallStaging, true)
+    assert.equal(evidence.checks.find((check) => check.id === 'tenant-id')?.status, 'fail')
+    assert.equal(evidence.checks.find((check) => check.id === 'issue1542-install-staging')?.status, 'fail')
+    assert.match(evidence.checks.find((check) => check.id === 'issue1542-install-staging')?.message || '', /requires --require-auth/)
+    assert.equal(evidence.smokeCommand, '')
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
