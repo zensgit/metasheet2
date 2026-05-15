@@ -110,6 +110,9 @@ function verify_generic_integration_workbench_contract() {
   search_fixed_string '发布 API 数据服务暂不开放' "$web_dist" || die "web dist must include data-service placeholder copy"
   search_fixed_string 'dictMap' "$web_dist" || die "web dist must include the workbench dictionary mapping editor"
   search_fixed_string 'Save-only' "$web_dist" || die "web dist must keep Save-only execution copy"
+  # issue #1526 P2 (#1595): staging project ID scope UX must ship in the bundle.
+  search_fixed_string '规范化为 integration 作用域' "$web_dist" || die "web dist must include the staging project ID one-click normalize action (#1526 P2)"
+  search_fixed_string '否则会触发 plugin-scope 警告' "$web_dist" || die "web dist must include the K3 setup project ID scope hint (#1526 P2)"
   search_fixed_string '/integrations/workbench' "$easy_start" || die "Windows on-prem guide must document the Data Factory route"
   search_fixed_string '/integrations/k3-wise' "$easy_start" || die "Windows on-prem guide must document the K3 WISE setup route"
   search_fixed_string 'SQL Server is an advanced channel' "$k3_runbook" || die "K3 runbook must document SQL Server as an advanced channel"
