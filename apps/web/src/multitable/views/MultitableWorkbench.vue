@@ -1342,6 +1342,7 @@ async function onHierarchyReparentRecord(payload: {
 async function onAddRecord() {
   if (!ensureCanCreateRecord()) return
   await grid.createRecord()
+  if (grid.error.value) showError(grid.error.value)
 }
 async function onKanbanCreateRecord(data: Record<string, unknown>) {
   if (!ensureCanCreateRecord()) return
