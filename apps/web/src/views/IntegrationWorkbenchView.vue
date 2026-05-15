@@ -136,21 +136,32 @@
             <span>数据源系统</span>
             <select v-model="sourceSystemId" data-testid="source-system">
               <option value="">请选择数据源系统</option>
-              <option v-for="system in sourceSystems" :key="system.id" :value="system.id">
+              <option
+                v-for="system in sourceSystems"
+                :key="system.id"
+                :value="system.id"
+                :disabled="isSourceOptionDisabled(system)"
+                :data-disabled="isSourceOptionDisabled(system) ? 'true' : 'false'"
+                :data-testid="`source-system-option-${system.id}`"
+              >
                 {{ system.name }} · {{ system.kind }}
               </option>
             </select>
           </label>
-          <div v-if="sourceSystems.length === 0" class="integration-workbench__empty integration-workbench__empty--actionable" data-testid="source-empty-state">
+          <div v-if="!hasRunnableSourceSystem" class="integration-workbench__empty integration-workbench__empty--actionable" data-testid="source-empty-state">
             <strong>还没有可读取的数据源。</strong>
             <p>连接 PLM、HTTP API 或启用 SQL 只读通道后，可将数据导入 staging 多维表再清洗。</p>
             <div class="integration-workbench__actions">
               <router-link class="integration-workbench__button" to="/integrations/k3-wise">使用 K3 WISE 预设</router-link>
+              <button type="button" class="integration-workbench__button" data-testid="show-staging-setup" @click="showStagingSetup">创建 staging 多维表作为来源</button>
               <button type="button" class="integration-workbench__button" @click="showSqlSetup">启用 SQL 只读通道</button>
             </div>
           </div>
           <div v-if="sourceRuntimeBlocker" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="source-runtime-blocker">
             {{ sourceRuntimeBlocker }}
+          </div>
+          <div v-if="sqlChannelDisabledHint" class="integration-workbench__hint" data-testid="sql-channel-disabled-hint">
+            {{ sqlChannelDisabledHint }}
           </div>
           <div class="integration-workbench__connection-row">
             <span class="integration-workbench__badge" :data-status="sourceConnectionStatus">{{ sourceConnectionLabel }}</span>
@@ -307,8 +318,12 @@
           </div>
         </article>
       </div>
-      <div v-else class="integration-workbench__empty" data-testid="staging-empty">
-        暂未加载 staging 契约。可先刷新连接，或填写 Project ID 后创建清洗表。
+      <div v-else class="integration-workbench__empty integration-workbench__empty--actionable" data-testid="staging-empty">
+        <strong>暂未加载 staging 契约。</strong>
+        <p>填写下方 Project ID 后点击「创建清洗表」即可生成 staging 多维表；创建完成后可在 staging 卡片上「作为 Dry-run 来源」。</p>
+        <div class="integration-workbench__actions">
+          <button type="button" class="integration-workbench__button" data-testid="staging-empty-focus-install" @click="focusStagingInstall">填写 Project ID 创建清洗表</button>
+        </div>
       </div>
 
       <div class="integration-workbench__grid integration-workbench__grid--compact">
@@ -739,6 +754,8 @@ const hiddenAdvancedSystemCount = computed(() => systems.value.filter((system) =
 const visibleSystems = computed(() => systems.value.filter((system) => showAdvancedConnectors.value || !isAdvancedSystem(system)))
 const sourceSystems = computed(() => visibleSystems.value.filter(canReadFromSystem))
 const targetSystems = computed(() => visibleSystems.value.filter(canWriteToSystem))
+const runnableSourceSystems = computed(() => sourceSystems.value.filter((system) => !isSourceOptionDisabled(system)))
+const hasRunnableSourceSystem = computed(() => runnableSourceSystems.value.length > 0)
 const selectedTargetObject = computed(() => targetObjects.value.find((object) => object.name === targetObjectName.value) || null)
 const selectedSourceSystem = computed(() => systems.value.find((system) => system.id === sourceSystemId.value) || null)
 const selectedTargetSystem = computed(() => systems.value.find((system) => system.id === targetSystemId.value) || null)
@@ -748,6 +765,10 @@ const targetConnectionStatus = computed(() => selectedTargetSystem.value?.status
 const sourceConnectionLabel = computed(() => connectionStatusLabel(selectedSourceSystem.value))
 const targetConnectionLabel = computed(() => connectionStatusLabel(selectedTargetSystem.value))
 const sourceRuntimeBlocker = computed(() => runtimeBlockerForSystem(selectedSourceSystem.value))
+const sqlChannelDisabledHint = computed(() => {
+  const hasDisabledSql = systems.value.some((system) => system.kind === 'erp:k3-wise-sqlserver' && runtimeBlockerForSystem(system) !== '')
+  return hasDisabledSql ? '高级 SQL 通道未启用 / 需要部署侧注入 queryExecutor。已有 SQL 连接配置会保留但暂不能作为 Dry-run 来源。' : ''
+})
 const sourceDatasetTitle = computed(() => selectedObjectLabel('source') || '请选择来源数据集')
 const targetDatasetTitle = computed(() => selectedObjectLabel('target') || '请选择目标数据集')
 const sourceDatasetDescription = computed(() => selectedSourceSystem.value
@@ -900,6 +921,28 @@ function showSqlSetup(): void {
   setStatus('已显示 SQL / 高级连接。SQL source 需要部署 allowlist queryExecutor 后才能读取。', 'idle')
 }
 
+function isSourceOptionDisabled(system: WorkbenchExternalSystem): boolean {
+  return runtimeBlockerForSystem(system) !== ''
+}
+
+function focusStagingInstall(): void {
+  if (typeof document === 'undefined') return
+  const input = document.querySelector('[data-testid="staging-project-id"]')
+  if (input && 'focus' in (input as HTMLElement)) {
+    try { (input as HTMLElement).focus() } catch { /* jsdom may not support focus */ }
+  }
+  const installButton = document.querySelector('[data-testid="install-staging"]')
+  if (installButton && 'scrollIntoView' in (installButton as HTMLElement)) {
+    try { (installButton as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'center' }) } catch { /* jsdom: no-op */ }
+  }
+}
+
+function showStagingSetup(): void {
+  inventoryExpanded.value = true
+  setStatus('创建 staging 多维表后即可在 staging 卡片上「作为 Dry-run 来源」。请先填写 Project ID 再点击「创建清洗表」。', 'idle')
+  focusStagingInstall()
+}
+
 function selectedObjectLabel(side: WorkbenchSide): string {
   const objectName = side === 'source' ? sourceObjectName.value : targetObjectName.value
   const objects = side === 'source' ? sourceObjects.value : targetObjects.value
@@ -1000,6 +1043,21 @@ function buildStagingSourceObjects(): IntegrationSystemObject[] {
       schema: descriptorToSchemaFields(descriptor),
     }]
   })
+}
+
+function preferredStagingSourceObjectId(): string {
+  const candidates = [
+    stagingSheetId.value,
+    'standard_materials',
+    stagingOpenTargets.value[0]?.id || '',
+  ]
+  for (const objectId of candidates) {
+    if (!objectId) continue
+    if (!stagingOpenTargetById.value.get(objectId)?.sheetId) continue
+    if (!stagingDescriptors.value.some((descriptor) => descriptor.id === objectId)) continue
+    return objectId
+  }
+  return ''
 }
 
 function buildMultitableTargetObjects(): IntegrationSystemObject[] {
@@ -1162,13 +1220,14 @@ async function exportCleansedResult(): Promise<void> {
 }
 
 function normalizeSystemSelections(): void {
+  const runnableSources = runnableSourceSystems.value
   if (sourceSystemId.value && !sourceSystems.value.some((system) => system.id === sourceSystemId.value)) {
-    sourceSystemId.value = sourceSystems.value[0]?.id || ''
+    sourceSystemId.value = runnableSources[0]?.id || ''
   }
   if (targetSystemId.value && !targetSystems.value.some((system) => system.id === targetSystemId.value)) {
     targetSystemId.value = targetSystems.value[0]?.id || ''
   }
-  if (!sourceSystemId.value) sourceSystemId.value = sourceSystems.value[0]?.id || ''
+  if (!sourceSystemId.value) sourceSystemId.value = runnableSources[0]?.id || ''
   if (!targetSystemId.value) targetSystemId.value = targetSystems.value[0]?.id || ''
 }
 
@@ -1283,7 +1342,17 @@ async function installStagingTables(): Promise<void> {
       warnings: result.warnings,
     }, null, 2)
     await refreshBootstrap()
-    setStatus(result.warnings.length > 0 ? `清洗表已创建，存在 ${result.warnings.length} 条警告` : '清洗表已创建，可打开多维表处理数据', result.warnings.length > 0 ? 'idle' : 'success')
+    const preferredSourceId = preferredStagingSourceObjectId()
+    if (preferredSourceId) {
+      await activateStagingAsSource(
+        preferredSourceId,
+        result.warnings.length > 0
+          ? `清洗表已创建，存在 ${result.warnings.length} 条警告；已自动设置 staging 多维表为 Dry-run 来源`
+          : '清洗表已创建，并已自动设置 staging 多维表为 Dry-run 来源',
+      )
+    } else {
+      setStatus(result.warnings.length > 0 ? `清洗表已创建，存在 ${result.warnings.length} 条警告` : '清洗表已创建，可打开多维表处理数据', result.warnings.length > 0 ? 'idle' : 'success')
+    }
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), 'error')
   } finally {
@@ -1292,6 +1361,10 @@ async function installStagingTables(): Promise<void> {
 }
 
 async function useStagingAsSource(objectId: string): Promise<void> {
+  await activateStagingAsSource(objectId)
+}
+
+async function activateStagingAsSource(objectId: string, successMessage?: string): Promise<void> {
   const descriptor = stagingDescriptors.value.find((item) => item.id === objectId) || null
   const target = stagingOpenTargetById.value.get(objectId)
   if (!descriptor || !target?.sheetId) {
@@ -1337,7 +1410,7 @@ async function useStagingAsSource(objectId: string): Promise<void> {
         openLink: target.openLink,
       },
     }
-    setStatus(`已将 ${stagingDatasetCopy[objectId]?.name || descriptor.name} 设为 Dry-run 来源`, 'success')
+    setStatus(successMessage || `已将 ${stagingDatasetCopy[objectId]?.name || descriptor.name} 设为 Dry-run 来源`, 'success')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), 'error')
   }
