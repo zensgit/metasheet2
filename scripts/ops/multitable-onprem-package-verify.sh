@@ -92,6 +92,7 @@ function verify_generic_integration_workbench_contract() {
   local easy_start="${root}/docs/deployment/multitable-windows-onprem-easy-start-20260319.md"
   local k3_runbook="${root}/docs/operations/integration-k3wise-internal-trial-runbook.md"
   local postdeploy_smoke="${root}/scripts/ops/integration-k3wise-postdeploy-smoke.mjs"
+  local issue1542_seed="${root}/scripts/ops/integration-issue1542-seed-workbench-systems.mjs"
   local postdeploy_summary="${root}/scripts/ops/integration-k3wise-postdeploy-summary.mjs"
 
   search_fixed_string '/integrations/workbench' "$web_dist" || die "web dist must include the Data Factory route"
@@ -109,6 +110,9 @@ function verify_generic_integration_workbench_contract() {
   search_fixed_string 'data-factory-adapter-discovery' "$postdeploy_smoke" || die "postdeploy smoke must check Data Factory adapter discovery"
   search_fixed_string '--issue1542-workbench-smoke' "$postdeploy_smoke" || die "postdeploy smoke must include Data Factory issue #1542 workbench retest flag"
   search_fixed_string '--issue1542-workbench-smoke' "$k3_runbook" || die "K3 runbook must document the Data Factory issue #1542 workbench retest"
+  search_fixed_string 'integration-issue1542-seed-workbench-systems.mjs' "$k3_runbook" || die "K3 runbook must document the issue #1542 metadata seed helper"
+  search_fixed_string 'metasheet:staging' "$issue1542_seed" || die "issue #1542 seed helper must create the staging source system"
+  search_fixed_string 'erp:k3-wise-webapi' "$issue1542_seed" || die "issue #1542 seed helper must create the K3 target system"
   search_fixed_string 'invalidAdapters' "$postdeploy_summary" || die "postdeploy summary must render Data Factory adapter drift details"
 }
 
@@ -317,6 +321,7 @@ required=(
   "scripts/ops/integration-k3wise-live-poc-preflight.mjs"
   "scripts/ops/integration-k3wise-live-poc-evidence.mjs"
   "scripts/ops/integration-k3wise-postdeploy-smoke.mjs"
+  "scripts/ops/integration-issue1542-seed-workbench-systems.mjs"
   "scripts/ops/integration-k3wise-postdeploy-summary.mjs"
   "scripts/ops/fixtures/integration-k3wise/run-mock-poc-demo.mjs"
   "scripts/ops/multitable-onprem-bootstrap-admin.ps1"
