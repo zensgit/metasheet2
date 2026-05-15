@@ -406,7 +406,7 @@
           <h2>Pipeline 执行</h2>
           <p>先保存 pipeline，再 dry-run。Save-only 推送必须显式勾选，默认不会 Submit / Audit。</p>
         </div>
-        <button type="button" class="integration-workbench__button" data-testid="save-pipeline" :disabled="savingPipeline" @click="savePipeline">
+        <button type="button" class="integration-workbench__button" data-testid="save-pipeline" :disabled="savingPipeline || !canSavePipeline" @click="savePipeline">
           {{ savingPipeline ? '保存中' : '保存 Pipeline' }}
         </button>
       </div>
@@ -462,8 +462,10 @@
 
       <div class="integration-workbench__readiness" data-testid="pipeline-readiness">
         <div>
+          <strong>保存 Pipeline 前置条件</strong>
+          <p data-testid="save-readiness-summary">{{ savePipelineBlockedSummary }}</p>
           <strong>Dry-run 前置条件</strong>
-          <p>{{ dryRunBlockedSummary }}</p>
+          <p data-testid="dry-run-readiness-summary">{{ dryRunBlockedSummary }}</p>
         </div>
         <ul>
           <li v-for="item in dryRunReadinessItems" :key="item.id" :data-ready="item.ready ? 'true' : 'false'">
@@ -822,6 +824,50 @@ const protocolSplitNotice = computed(() => {
 })
 const hasMappingRules = computed(() => mappings.value.some((mapping) => mapping.sourceField.trim() && mapping.targetField.trim()))
 const hasIdempotencyFields = computed(() => parseList(idempotencyFieldsText.value).length > 0)
+const savePipelineReadinessItems = computed(() => [
+  {
+    id: 'source-system',
+    label: '选择数据源系统',
+    ready: Boolean(sourceSystemId.value),
+    detail: sourceSystemId.value ? '数据源系统已选择。' : '请选择已有数据源，或先创建 staging 多维表作为来源。',
+  },
+  {
+    id: 'source-object',
+    label: '选择来源数据集',
+    ready: Boolean(sourceObjectName.value),
+    detail: sourceObjectName.value || '加载来源数据集后才能保存 pipeline。',
+  },
+  {
+    id: 'target-system',
+    label: '选择目标系统',
+    ready: Boolean(targetSystemId.value),
+    detail: targetSystemId.value ? '目标系统已选择。' : '请选择 K3 WebAPI、多维表或其他可写目标。',
+  },
+  {
+    id: 'target-object',
+    label: '选择目标数据集 / 模板',
+    ready: Boolean(targetObjectName.value),
+    detail: targetObjectName.value || '加载目标数据集后才能生成 payload 或保存 pipeline。',
+  },
+  {
+    id: 'mapping',
+    label: '配置清洗映射规则',
+    ready: hasMappingRules.value,
+    detail: hasMappingRules.value ? '至少一条 source -> target 映射已配置。' : '请先加载目标 schema 或手工新增映射。',
+  },
+  {
+    id: 'idempotency',
+    label: '填写幂等字段',
+    ready: hasIdempotencyFields.value,
+    detail: hasIdempotencyFields.value ? '幂等字段已填写。' : '例如 code 或 sourceId,revision。',
+  },
+])
+const canSavePipeline = computed(() => savePipelineReadinessItems.value.every((item) => item.ready))
+const savePipelineBlockedSummary = computed(() => {
+  const missing = savePipelineReadinessItems.value.filter((item) => !item.ready)
+  if (missing.length === 0) return '已满足保存条件。保存只写入 pipeline 配置，不调用外部系统。'
+  return `还缺 ${missing.length} 项：${missing.map((item) => item.label).join('、')}`
+})
 const dryRunReadinessItems = computed(() => [
   {
     id: 'source-system',

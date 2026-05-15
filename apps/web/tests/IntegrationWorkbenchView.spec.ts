@@ -399,6 +399,8 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).not.toContain('K3 WISE SQL Server Channel')
     expect(container.textContent).toContain('已隐藏 1 个高级连接')
     expect((container.querySelector('[data-testid="staging-sheet"]') as HTMLSelectElement).value).toBe('standard_materials')
+    expect((container.querySelector('[data-testid="save-pipeline"]') as HTMLButtonElement).disabled).toBe(true)
+    expect(container.querySelector('[data-testid="save-readiness-summary"]')?.textContent).toContain('选择来源数据集')
     expect(Array.from((container.querySelector('[data-testid="source-system"]') as HTMLSelectElement).options).map((option) => option.textContent))
       .not.toContain('K3 SQL Read Channel · erp:k3-wise-sqlserver')
 
@@ -501,6 +503,8 @@ describe('IntegrationWorkbenchView', () => {
     expect((container.querySelector('[data-testid="transform-fn-0"]') as HTMLSelectElement).value).toBe('trim')
     expect((container.querySelector('[data-testid="transform-fn-3"]') as HTMLSelectElement).value).toBe('toNumber')
     expect(container.textContent).toContain('Material code')
+    expect((container.querySelector('[data-testid="save-pipeline"]') as HTMLButtonElement).disabled).toBe(false)
+    expect(container.querySelector('[data-testid="save-readiness-summary"]')?.textContent).toContain('已满足保存条件')
 
     const firstTransform = container.querySelector('[data-testid="transform-fn-0"]') as HTMLSelectElement
     firstTransform.value = 'upper'
@@ -694,7 +698,9 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).toContain('连接 PLM、HTTP API 或启用 SQL 只读通道')
     expect(container.textContent).toContain('还缺')
     expect(container.textContent).toContain('选择可读取的数据源')
+    expect(container.querySelector('[data-testid="save-readiness-summary"]')?.textContent).toContain('选择数据源系统')
     expect(container.textContent).toContain('Payload 预览通过不等于 pipeline dry-run')
+    expect((container.querySelector('[data-testid="save-pipeline"]') as HTMLButtonElement).disabled).toBe(true)
     expect((container.querySelector('[data-testid="run-dry-run"]') as HTMLButtonElement).disabled).toBe(true)
 
     ;(container.querySelector('[data-testid="show-sql-setup"]') as HTMLButtonElement).click()
