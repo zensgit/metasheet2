@@ -111,6 +111,31 @@ Result before code:
   - Extract `APPROVAL_TERMINAL_STATUSES`.
   - Add a short comment on the delete guard OR predicate.
 
+## R3 Chain Semantics
+
+Auto-completed approval nodes count as valid adjacent predecessors for later
+`mergeAdjacentApprover` checks in the same `dispatchAction`.
+
+Example:
+
+- `A(U)` is approved by human `U`.
+- `B(U)` has `mergeAdjacentApprover = true`, so B auto-approves against A.
+- `C(U)` also has `mergeAdjacentApprover = true`, so C auto-approves against B.
+
+This transitive behavior is intentional. It matches the customer expectation
+that repeated consecutive approvals by the same person collapse after the first
+human decision. The bounded loop is per dispatch and guarded by
+`APPROVAL_MAX_AUTO_STEPS = 50`; exceeding the guard throws
+`APPROVAL_AUTO_STEP_LIMIT_EXCEEDED` and rolls back the transaction.
+
+When multiple rules match the same assignment, precedence is deterministic:
+
+1. `mergeWithRequester`
+2. `mergeAdjacentApprover`
+3. `dedupeHistoricalApprover`
+
+The selected reason is the one persisted to `approval_records.metadata.reason`.
+
 ## Test Matrix
 
 Codex will cover the original PR2 scope tests plus Claude additions T17-T25:
