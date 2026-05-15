@@ -18,6 +18,8 @@ const docsToCopy = [
   'docs/operations/k3-poc-onprem-preflight-runbook.md',
   'docs/operations/integration-k3wise-internal-trial-runbook.md',
   'docs/operations/integration-k3wise-live-gate-execution-package.md',
+  'docs/operations/integration-k3wise-sql-executor-bridge-handoff.md',
+  'docs/development/k3wise-bridge-machine-codex-handoff-20260513.md',
   'docs/deployment/multitable-internal-pilot-runbook-20260319.md',
   'docs/deployment/multitable-pilot-quickstart-20260319.md',
   'docs/deployment/multitable-pilot-team-checklist-20260319.md',

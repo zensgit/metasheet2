@@ -166,7 +166,9 @@ Use `metasheet:staging` as the source for Data Factory retests until the bridge
 deployment wires a query executor with the expected `testConnection`, `select`,
 and `insertMany` methods. After wiring the executor, retest the SQL source from
 the workbench and rerun this smoke; the diagnostic should move from `skipped`
-to `pass`.
+to `pass`. See
+`docs/operations/integration-k3wise-sql-executor-bridge-handoff.md` for the
+bridge-machine implementation contract.
 
 Then render the summary:
 
