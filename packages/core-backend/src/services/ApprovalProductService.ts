@@ -523,7 +523,11 @@ function validateFormFieldVisibilityRules(
   fields.forEach((field) => visit(field.id, []))
 }
 
-function normalizeApprovalGraph(value: unknown, context: ValidationContext): ApprovalGraph {
+function normalizeApprovalGraph(
+  value: unknown,
+  context: ValidationContext,
+  options: { allowParallelDuplicateAssignees?: boolean } = {},
+): ApprovalGraph {
   if (!isRecord(value) || !Array.isArray(value.nodes) || !Array.isArray(value.edges)) {
     failValidation(context, 'approvalGraph must contain nodes and edges')
   }
@@ -728,16 +732,18 @@ function normalizeApprovalGraph(value: unknown, context: ValidationContext): App
       )
       assigneesPerBranch.push(branchAssignees)
     }
-    const seen = new Set<string>()
-    for (const branchAssignees of assigneesPerBranch) {
-      for (const assignee of branchAssignees) {
-        if (seen.has(assignee)) {
-          failValidation(
-            context,
-            `approvalGraph parallel node ${node.key} has duplicate approver '${assignee}' across branches`,
-          )
+    if (!options.allowParallelDuplicateAssignees) {
+      const seen = new Set<string>()
+      for (const branchAssignees of assigneesPerBranch) {
+        for (const assignee of branchAssignees) {
+          if (seen.has(assignee)) {
+            failValidation(
+              context,
+              `approvalGraph parallel node ${node.key} has duplicate approver '${assignee}' across branches`,
+            )
+          }
+          seen.add(assignee)
         }
-        seen.add(assignee)
       }
     }
   }
@@ -1080,8 +1086,12 @@ function applyTemplateVisibilityFilter(
   return index
 }
 
-function assertApprovalGraph(value: unknown, context: ValidationContext = REQUEST_VALIDATION_CONTEXT): ApprovalGraph {
-  return normalizeApprovalGraph(value, context)
+function assertApprovalGraph(
+  value: unknown,
+  context: ValidationContext = REQUEST_VALIDATION_CONTEXT,
+  options?: { allowParallelDuplicateAssignees?: boolean },
+): ApprovalGraph {
+  return normalizeApprovalGraph(value, context, options)
 }
 
 function asFormSchema(value: Record<string, unknown>): FormSchema {
@@ -1118,14 +1128,17 @@ function asRuntimeGraph(value: Record<string, unknown>): RuntimeGraph {
     failValidation(STORED_RUNTIME_CONTEXT, 'runtimeGraph must be an object')
   }
 
+  const policy = assertRuntimePolicy(value.policy, STORED_RUNTIME_CONTEXT)
   const graph = assertApprovalGraph(
     {
       nodes: value.nodes,
       edges: value.edges,
     },
     STORED_RUNTIME_CONTEXT,
+    {
+      allowParallelDuplicateAssignees: policy.autoApproval?.mergeAdjacentApprover === true,
+    },
   )
-  const policy = assertRuntimePolicy(value.policy, STORED_RUNTIME_CONTEXT)
 
   return deepFreeze({
     ...graph,
@@ -1269,6 +1282,32 @@ function buildAutoApprovalEvent(
   }
 }
 
+function buildSkippedAutoApprovalEvent(
+  assignment: ApprovalGraphAssignment,
+  approvalMode: ApprovalMode,
+  policy: EffectiveAutoApprovalPolicy,
+  conflictBranches: string[],
+): ApprovalGraphAutoApprovalEvent {
+  const actorMode = getAutoApprovalActorMode(policy.policy)
+  return {
+    nodeKey: assignment.nodeKey,
+    sourceStep: assignment.sourceStep,
+    approvalMode,
+    reason: 'auto-merge-adjacent',
+    metadata: {
+      skipped: true,
+      skipReason: 'cross_branch_adjacency_conflict',
+      conflictBranches,
+      policySource: policy.source,
+      originalApprover: {
+        type: assignment.assignmentType,
+        id: assignment.assigneeId,
+      },
+      actorMode,
+    },
+  }
+}
+
 function evaluateAutoApprovalAssignment(
   runtimeGraph: RuntimeGraph,
   executor: ApprovalGraphExecutor,
@@ -1334,6 +1373,23 @@ function evaluateAutoApprovalAssignment(
   }
 
   return null
+}
+
+function evaluateSkippedCrossBranchAdjacent(
+  runtimeGraph: RuntimeGraph,
+  executor: ApprovalGraphExecutor,
+  assignment: ApprovalGraphAssignment,
+  conflictBranches: string[],
+): ApprovalGraphAutoApprovalEvent | null {
+  if (assignment.assignmentType !== 'user') return null
+  const effectivePolicy = getEffectiveAutoApprovalPolicy(runtimeGraph, assignment.nodeKey)
+  if (!effectivePolicy?.policy.mergeAdjacentApprover) return null
+  return buildSkippedAutoApprovalEvent(
+    assignment,
+    executor.getApprovalMode(assignment.nodeKey),
+    effectivePolicy,
+    conflictBranches,
+  )
 }
 
 function actorIdForAutoApprovalEvent(event: ApprovalGraphAutoApprovalEvent): string {
@@ -1423,9 +1479,29 @@ export class ApprovalProductService {
       reasonChain.push(event.reason)
       appendAutoApprovalHistory(history, event)
     }
+    const blockedAutoAssignmentKeys = new Set<string>()
 
     while (resolution.status === 'pending' && resolution.assignments.length > 0) {
       const candidateNodeKeys = Array.from(new Set(resolution.assignments.map((assignment) => assignment.nodeKey)))
+      if (resolution.parallelState && resolution.currentNodeKey === resolution.parallelState.parallelNodeKey) {
+        const parallelStep = this.applyParallelAutoApprovalStep(
+          runtimeGraph,
+          executor,
+          resolution,
+          requesterId,
+          history,
+          autoSteps,
+          reasonChain,
+          instanceId,
+          blockedAutoAssignmentKeys,
+        )
+        if (!parallelStep.changed) {
+          return resolution
+        }
+        resolution = parallelStep.resolution
+        autoSteps = parallelStep.autoSteps
+        continue
+      }
       if (candidateNodeKeys.length !== 1) {
         return resolution
       }
@@ -1435,6 +1511,8 @@ export class ApprovalProductService {
       }
 
       const evaluations = resolution.assignments
+        .filter((assignment) =>
+          !blockedAutoAssignmentKeys.has(`${assignment.nodeKey}:${assignment.assignmentType}:${assignment.assigneeId}`))
         .map((assignment) => evaluateAutoApprovalAssignment(runtimeGraph, executor, assignment, requesterId, history))
         .filter((entry): entry is AutoApprovalEvaluation => Boolean(entry))
       if (evaluations.length === 0) {
@@ -1507,6 +1585,126 @@ export class ApprovalProductService {
     }
 
     return resolution
+  }
+
+  private applyParallelAutoApprovalStep(
+    runtimeGraph: RuntimeGraph,
+    executor: ApprovalGraphExecutor,
+    resolution: ApprovalGraphResolution,
+    requesterId: string | null,
+    history: ApprovalHistoryEntry[],
+    autoSteps: number,
+    reasonChain: ApprovalAutoApprovalReason[],
+    instanceId: string,
+    blockedAutoAssignmentKeys: Set<string>,
+  ): { changed: boolean; resolution: ApprovalGraphResolution; autoSteps: number } {
+    if (!resolution.parallelState) {
+      return { changed: false, resolution, autoSteps }
+    }
+
+    const evaluations = resolution.assignments
+      .filter((assignment) =>
+        !blockedAutoAssignmentKeys.has(`${assignment.nodeKey}:${assignment.assignmentType}:${assignment.assigneeId}`))
+      .map((assignment) => evaluateAutoApprovalAssignment(runtimeGraph, executor, assignment, requesterId, history))
+      .filter((entry): entry is AutoApprovalEvaluation => Boolean(entry))
+    if (evaluations.length === 0) {
+      return { changed: false, resolution, autoSteps }
+    }
+
+    const firstByAssignee = new Map<string, AutoApprovalEvaluation>()
+    const skippedEvents: ApprovalGraphAutoApprovalEvent[] = []
+    for (const evaluation of evaluations) {
+      const key = `${evaluation.assignment.assignmentType}:${evaluation.assignment.assigneeId}`
+      const existing = firstByAssignee.get(key)
+      if (!existing) {
+        firstByAssignee.set(key, evaluation)
+        continue
+      }
+      const skipped = evaluateSkippedCrossBranchAdjacent(
+        runtimeGraph,
+        executor,
+        evaluation.assignment,
+        [existing.assignment.nodeKey, evaluation.assignment.nodeKey],
+      )
+      if (skipped) {
+        skippedEvents.push(skipped)
+        blockedAutoAssignmentKeys.add(
+          `${evaluation.assignment.nodeKey}:${evaluation.assignment.assignmentType}:${evaluation.assignment.assigneeId}`,
+        )
+      }
+    }
+
+    if (skippedEvents.length > 0) {
+      resolution = {
+        ...resolution,
+        autoApprovalEvents: [...resolution.autoApprovalEvents, ...skippedEvents],
+      }
+    }
+
+    const evaluation = [...firstByAssignee.values()][0]
+    if (!evaluation) {
+      return { changed: skippedEvents.length > 0, resolution, autoSteps }
+    }
+
+    autoSteps += 1
+    reasonChain.push(evaluation.event.reason)
+    if (autoSteps > APPROVAL_MAX_AUTO_STEPS) {
+      throw new ServiceError(
+        'Approval auto-approval step limit exceeded',
+        500,
+        'APPROVAL_AUTO_STEP_LIMIT_EXCEEDED',
+        {
+          instanceId,
+          autoSteps,
+          lastNodeKey: evaluation.assignment.nodeKey,
+          reasonChain,
+        },
+      )
+    }
+    appendAutoApprovalHistory(history, evaluation.event)
+
+    const branchResolution = executor.resolveAfterApproveInParallel(
+      evaluation.assignment.nodeKey,
+      resolution.parallelState,
+    )
+    autoSteps += branchResolution.autoApprovalEvents.length
+    reasonChain.push(...branchResolution.autoApprovalEvents.map((event) => event.reason))
+    if (autoSteps > APPROVAL_MAX_AUTO_STEPS) {
+      throw new ServiceError(
+        'Approval auto-approval step limit exceeded',
+        500,
+        'APPROVAL_AUTO_STEP_LIMIT_EXCEEDED',
+        {
+          instanceId,
+          autoSteps,
+          lastNodeKey: branchResolution.currentNodeKey,
+          reasonChain,
+        },
+      )
+    }
+    for (const event of branchResolution.autoApprovalEvents) {
+      appendAutoApprovalHistory(history, event)
+    }
+
+    const remainingAssignments = resolution.assignments.filter((assignment) =>
+      assignment.nodeKey !== evaluation.assignment.nodeKey
+      || assignment.assignmentType !== evaluation.assignment.assignmentType
+      || assignment.assigneeId !== evaluation.assignment.assigneeId)
+
+    return {
+      changed: true,
+      autoSteps,
+      resolution: {
+        ...branchResolution,
+        assignments: [...remainingAssignments, ...branchResolution.assignments],
+        ccEvents: [...resolution.ccEvents, ...branchResolution.ccEvents],
+        autoApprovalEvents: [
+          ...resolution.autoApprovalEvents,
+          evaluation.event,
+          ...branchResolution.autoApprovalEvents,
+        ],
+      },
+    }
   }
 
   async listTemplates(query: ApprovalTemplateListQuery): Promise<{ data: ApprovalTemplateListItemDTO[]; total: number }> {
@@ -2974,8 +3172,9 @@ export class ApprovalProductService {
     autoApprovalEvents: ApprovalGraphAutoApprovalEvent[],
   ): Promise<void> {
     for (const event of autoApprovalEvents) {
+      const skipped = event.metadata?.skipped === true
       await this.insertApprovalRecord(client, instanceId, {
-        action: 'approve',
+        action: skipped ? 'sign' : 'approve',
         actorId: actorIdForAutoApprovalEvent(event),
         actorName: actorNameForAutoApprovalEvent(event),
         comment: null,
