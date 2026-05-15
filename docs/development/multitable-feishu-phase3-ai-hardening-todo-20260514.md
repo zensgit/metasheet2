@@ -522,12 +522,12 @@ guards.
   - Development MD: `docs/development/multitable-phase3-real-smtp-gate-development-20260514.md`
   - Verification MD: `docs/development/multitable-phase3-real-smtp-gate-verification-20260514.md`
   - Verification summary: existing real-send harness exits 2 unless `MULTITABLE_EMAIL_SMOKE_TO` is configured; D1 tests prove recipient values are redacted from aggregate artifacts.
-- [ ] Tie send result to automation execution log.
-  - PR:
-  - Merge commit:
-  - Development MD:
-  - Verification MD:
-  - Verification summary: intentionally not claimed by this transport-level D1 aggregation slice; the shipped RC automation smoke covers execution-log behavior with the default mock channel, and D4 remains the correct place for repeat-fire automation-log soak semantics.
+- [x] Tie send result to automation execution log.
+  - PR: #1554
+  - Merge commit: pending until squash merge
+  - Development MD: `docs/development/multitable-phase3-email-log-closeout-development-20260514.md`
+  - Verification MD: `docs/development/multitable-phase3-email-log-closeout-verification-20260514.md`
+  - Verification summary: `AutomationService.executeRule` now has unit-level coverage proving successful `send_email` steps are persisted through `AutomationLogService.record` with `notificationId`, `notificationStatus`, and `recipientCount`; the pre-existing RC E2E smoke continues to cover the HTTP/logs API path.
 - [x] Redact SMTP credentials and recipients in artifacts.
   - PR: #1544
   - Merge commit: `1f9061f56`

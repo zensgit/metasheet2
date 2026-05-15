@@ -2361,6 +2361,50 @@ describe('AutomationService — Rule CRUD', () => {
     }))
   })
 
+  it('executeRule records successful send_email notification results', async () => {
+    const send = vi.fn(async () => ({
+      id: 'notif_success_1',
+      status: 'sent' as const,
+    }))
+    service = new AutomationService(eventBus, makeMockDb() as never, queryFn, undefined, null, {}, { send })
+    const logSpy = vi.spyOn(service.logs, 'record').mockResolvedValueOnce()
+
+    const execution = await service.executeRule(
+      createMockRule({
+        actions: [{
+          type: 'send_email',
+          config: {
+            recipients: ['ops@example.com', 'owner@example.com'],
+            subjectTemplate: 'Record {{record.title}} changed',
+            bodyTemplate: 'Status: {{record.status}}',
+          },
+        }],
+      }),
+      {
+        sheetId: 'sheet_1',
+        recordId: 'rec_1',
+        data: { title: 'Incident', status: 'open' },
+        _triggeredBy: 'test',
+      },
+    )
+
+    expect(execution.status).toBe('success')
+    expect(logSpy).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'success',
+      steps: [
+        expect.objectContaining({
+          actionType: 'send_email',
+          status: 'success',
+          output: expect.objectContaining({
+            notificationId: 'notif_success_1',
+            notificationStatus: 'sent',
+            recipientCount: 2,
+          }),
+        }),
+      ],
+    }))
+  })
+
   it('getRule returns null when not found', async () => {
     dbExecuteTakeFirstResults.push(undefined)
     const rule = await service.getRule('nonexistent')
