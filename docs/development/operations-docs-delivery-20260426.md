@@ -45,7 +45,7 @@ which made parallel-development sense for this slice.
 ### staging-deploy-sop.md
 
 **Audience**: human operator running a manual `docker-compose pull && up -d`
-deploy on a shared host (e.g. 142.171.239.56). NOT for the bootstrap
+deploy on a shared host (e.g. <staging-host>). NOT for the bootstrap
 script `scripts/deploy-ghcr.sh` — that one auto-migrates and is
 covered by the existing `deploy-ghcr.md`.
 

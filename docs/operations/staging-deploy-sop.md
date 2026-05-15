@@ -1,7 +1,7 @@
 # Staging Deploy SOP — Manual image-pull mode
 
 This SOP applies to **manual deploys** on shared hosts (e.g.
-`142.171.239.56` running `docker-compose.app.staging.yml`) where you
+`<staging-host>` running `docker-compose.app.staging.yml`) where you
 update the running stack by editing `.env` and running
 `docker-compose pull && up -d`. For the **bootstrap script** that
 clones + builds + auto-migrates, see [`deploy-ghcr.md`](./deploy-ghcr.md)
@@ -102,7 +102,6 @@ sudo docker exec -w /app/packages/core-backend <backend-container> \
   node dist/src/db/migrate.js --list
 ```
 
-After [PR #1190](https://github.com/zensgit/metasheet2/pull/1190) lands,
 `--list` shows pending migrations without applying them. Review the
 list, then:
 

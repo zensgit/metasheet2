@@ -130,7 +130,7 @@ Names also lost the `@metasheet/` scope prefix in display (cosmetic — same plu
 | Web container | Up, image `d88ad587b2c17402f861e1cf712f9de8e0148a0a` |
 | Postgres | Up 2h healthy, image cd848ee12e8e (untouched) |
 | Redis | Up 2h healthy, image aa189b5a1954 (untouched) |
-| `/home/mainuser/...staging/.env IMAGE_TAG` | `d88ad587b2c17402f861e1cf712f9de8e0148a0a` (changed) |
+| `<staging-stack-dir>/.env IMAGE_TAG` | `d88ad587b2c17402f861e1cf712f9de8e0148a0a` (changed) |
 | `.env` backup files | `.env.bak.before-d88ad587b-20260426` and `.env.bak.before-d88ad587b-20260426` (rollback path preserved) |
 | Wave 8 / 9 / M-Feishu-1 routes | Mounted (verified by 401 not 404 transition) |
 | Existing staging admin JWT | Invalidated by new backend |
@@ -138,7 +138,7 @@ Names also lost the `@metasheet/` scope prefix in display (cosmetic — same plu
 
 ## Next steps (user-driven)
 
-1. **Re-issue staging admin JWT**: run `scripts/gen-staging-token.js` (or equivalent) against the new backend container to issue a fresh 72h token signed with whatever the current JWT_SECRET is. Save under `/tmp/metasheet-142-staging-admin-72h.jwt`.
+1. **Re-issue staging admin JWT**: run `scripts/gen-staging-token.js` (or equivalent) against the new backend container to issue a fresh 72h token signed with whatever the current JWT_SECRET is. Save under `<artifact-dir>/staging-admin-72h.jwt`.
 2. **Authorize me to re-probe** with the new JWT to confirm `/api/approvals/metrics/summary`, MF1/MF2/MF3 backend paths, and other Wave-protected routes return 200 (not 401).
 3. **(Optional) Investigate plugin count drop**:
    - Diff `plugins/` directory between the two image SHAs.
