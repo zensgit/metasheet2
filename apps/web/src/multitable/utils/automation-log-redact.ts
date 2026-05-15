@@ -43,6 +43,17 @@ const STRING_PATTERNS: Array<[RegExp, string]> = [
   // Postgres / MySQL connection URI credentials
   [/\b(postgres(?:ql)?:\/\/)[^@\s"'<>]+@/gi, '$1<redacted>@'],
   [/\b(mysql:\/\/)[^@\s"'<>]+@/gi, '$1<redacted>@'],
+  // Bare email addresses surfaced in free-text fields (error messages,
+  // step output strings, audit lines). Runs AFTER env-style and
+  // SMTP_*/SMOKE_* patterns so legitimate `KEY=value` assignments are
+  // redacted at the assignment level first; this rule catches the
+  // remaining bare addresses (e.g. `delivery failed to qa@example.com`).
+  // Replaced with `<email:redacted>` so operators can still see that an
+  // email-shaped value was redacted without seeing the address itself.
+  [
+    /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}\b/g,
+    '<email:redacted>',
+  ],
 ]
 
 /**

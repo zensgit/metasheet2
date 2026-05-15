@@ -97,6 +97,46 @@ describe('redactString', () => {
     expect(b).toContain('mysql://<redacted>@')
     expect(b).not.toContain('root:rootpw')
   })
+
+  it('masks bare email addresses in free text', () => {
+    const out = redactString('Notification delivery failed to qa-private@example.com after 3 retries')
+    expect(out).toContain('<email:redacted>')
+    expect(out).not.toContain('qa-private@example.com')
+  })
+
+  it('masks multiple bare emails in a single string', () => {
+    const out = redactString('To: alice@acme.co, cc: bob+filter@sub.example.io')
+    expect(out).toContain('<email:redacted>')
+    // both emails redacted
+    expect(out).not.toContain('alice@acme.co')
+    expect(out).not.toContain('bob+filter@sub.example.io')
+    const matches = out.match(/<email:redacted>/g)
+    expect(matches).toHaveLength(2)
+  })
+
+  it('does not falsely match strings that look email-shaped but lack a TLD', () => {
+    // Hostname-only is fine to render; only addresses with a TLD-like
+    // suffix are redacted.
+    const out = redactString('user@localhost')
+    expect(out).toBe('user@localhost')
+  })
+
+  it('does not falsely match version-like strings', () => {
+    const out = redactString('upgrading from 1.2.3 to 1.2.4')
+    expect(out).toBe('upgrading from 1.2.3 to 1.2.4')
+  })
+
+  it('still routes through SMTP_USER assignment before falling back to bare email', () => {
+    // SMTP_USER=admin@example.com must produce SMTP_USER=<redacted>,
+    // NOT SMTP_USER=<email:redacted>. Tests SMTP rule wins because it
+    // appears earlier in the patterns list.
+    const out = redactString('SMTP_USER=admin@example.com\nMULTITABLE_EMAIL_SMTP_USER=ops@example.com')
+    expect(out).toMatch(/SMTP_USER=<redacted>/)
+    expect(out).toMatch(/MULTITABLE_EMAIL_SMTP_USER=<redacted>/)
+    // both emails are gone, neither as <email:redacted> nor raw
+    expect(out).not.toContain('admin@example.com')
+    expect(out).not.toContain('ops@example.com')
+  })
 })
 
 describe('redactValue (structured object masking)', () => {
@@ -181,6 +221,23 @@ describe('summarizeStepOutput', () => {
   it('handles non-object output by stringifying through redactString', () => {
     expect(summarizeStepOutput('Bearer abcdefghijklmnopqrstuvwx12345 leaked')).toContain('Bearer <redacted>')
   })
+
+  it('redacts bare email addresses in free-text step output strings', () => {
+    const out = summarizeStepOutput('Delivery succeeded for qa-private@example.com')
+    expect(out).toContain('<email:redacted>')
+    expect(out).not.toContain('qa-private@example.com')
+  })
+
+  it('redacts bare email addresses inside object output free-text fields', () => {
+    // `note` is NOT in STRUCTURED_FIELDS_TO_REDACT, so it falls through
+    // to redactString which must redact the embedded bare email.
+    const out = summarizeStepOutput({
+      note: 'forwarded to handler-private@example.com for triage',
+      ok: true,
+    })
+    expect(out).toContain('<email:redacted>')
+    expect(out).not.toContain('handler-private@example.com')
+  })
 })
 
 describe('summarizeStepError', () => {
@@ -199,5 +256,21 @@ describe('summarizeStepError', () => {
   it('passes through clean error messages unchanged', () => {
     const out = summarizeStepError('Action failed: connection refused')
     expect(out).toBe('Action failed: connection refused')
+  })
+
+  it('redacts bare email addresses in free-text step error strings', () => {
+    const out = summarizeStepError('Failed to deliver to recipient-private@example.com: connection refused')
+    expect(out).toContain('<email:redacted>')
+    expect(out).not.toContain('recipient-private@example.com')
+  })
+
+  it('redacts multiple bare emails in a multi-recipient error', () => {
+    const out = summarizeStepError(
+      'Failed to deliver to alice-private@example.com and bob-private@sub.example.io: timeout',
+    )
+    expect(out).not.toContain('alice-private@example.com')
+    expect(out).not.toContain('bob-private@sub.example.io')
+    const matches = out.match(/<email:redacted>/g)
+    expect(matches).toHaveLength(2)
   })
 })
