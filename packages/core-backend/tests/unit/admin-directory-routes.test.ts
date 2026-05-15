@@ -408,6 +408,11 @@ describe('adminDirectoryRouter', () => {
         sampledRootDepartmentUsers: [{ userId: '0447654442691174', name: '林岚' }],
         sampledRootDepartmentUsersWithAccessLimit: [{ userId: '0447654442691174', name: '林岚' }],
       },
+      summary: {
+        code: 'scope_or_root_misconfigured',
+        title: '通讯录范围或根部门疑似配置不当',
+        nextAction: '请检查应用「通讯录管理」权限范围是否覆盖全员，并确认根部门 ID 是否正确。',
+      },
       warnings: ['根部门 1 未返回任何子部门。'],
     })
 
@@ -436,6 +441,11 @@ describe('adminDirectoryRouter', () => {
       data: {
         diagnostics: {
           rootDepartmentDirectUserCount: 1,
+        },
+        summary: {
+          code: 'scope_or_root_misconfigured',
+          title: '通讯录范围或根部门疑似配置不当',
+          nextAction: '请检查应用「通讯录管理」权限范围是否覆盖全员，并确认根部门 ID 是否正确。',
         },
         warnings: ['根部门 1 未返回任何子部门。'],
       },

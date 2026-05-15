@@ -1736,6 +1736,10 @@
 
         <section v-if="testResult" class="directory-admin__section">
           <h3>连通性测试</h3>
+          <div v-if="testResult.summary" class="directory-admin__diagnostic-summary">
+            <strong>{{ testResult.summary.title }}</strong>
+            <p class="directory-admin__hint">{{ testResult.summary.nextAction }}</p>
+          </div>
           <div class="directory-admin__chips">
             <span class="directory-admin__chip">部门样本 {{ testResult.departmentSampleCount }}</span>
             <span class="directory-admin__chip">用户样本 {{ testResult.userSampleCount }}</span>
@@ -1784,6 +1788,22 @@
             <p class="directory-admin__hint">
               账号 {{ readNumericStat(run.stats, 'accountsSynced') }} / 部门 {{ readNumericStat(run.stats, 'departmentsSynced') }} /
               待确认 {{ readNumericStat(run.stats, 'pendingCount') }} / 已链接 {{ readNumericStat(run.stats, 'linkedCount') }}
+            </p>
+            <p v-if="readStringStat(run.stats, 'diagnosticTitle')" class="directory-admin__hint">
+              诊断：{{ readStringStat(run.stats, 'diagnosticTitle') }}
+              · 子部门 {{ readNumericStat(run.stats, 'rootDepartmentChildCount') }}
+              · 根部门直属成员 {{ readNumericStat(run.stats, 'rootDepartmentDirectUserCount') }}
+              · 含受限 {{ readNumericStat(run.stats, 'rootDepartmentDirectUserCountWithAccessLimit') }}
+            </p>
+            <p v-if="readStringStat(run.stats, 'diagnosticNextAction')" class="directory-admin__hint">
+              建议：{{ readStringStat(run.stats, 'diagnosticNextAction') }}
+            </p>
+            <p
+              v-for="warning in readStringArrayStat(run.stats, 'diagnosticWarnings')"
+              :key="warning"
+              class="directory-admin__status directory-admin__status--error"
+            >
+              {{ warning }}
             </p>
             <p v-if="run.errorMessage" class="directory-admin__status directory-admin__status--error">{{ run.errorMessage }}</p>
           </article>
@@ -2090,6 +2110,11 @@ type TestResult = {
     rootDepartmentDirectUserHasMoreWithAccessLimit: boolean
     sampledRootDepartmentUsers: Array<{ userId: string; name: string }>
     sampledRootDepartmentUsersWithAccessLimit: Array<{ userId: string; name: string }>
+  }
+  summary?: {
+    code: string
+    title: string
+    nextAction: string
   }
   warnings: string[]
 }
@@ -5055,6 +5080,17 @@ function readNumericStat(stats: Record<string, unknown>, key: string): number {
   if (typeof value === 'number') return value
   if (typeof value === 'string' && value.trim().length > 0 && !Number.isNaN(Number(value))) return Number(value)
   return 0
+}
+
+function readStringStat(stats: Record<string, unknown>, key: string): string {
+  const value = stats[key]
+  return typeof value === 'string' ? value : ''
+}
+
+function readStringArrayStat(stats: Record<string, unknown>, key: string): string[] {
+  const value = stats[key]
+  if (!Array.isArray(value)) return []
+  return value.filter((item): item is string => typeof item === 'string')
 }
 
 function formatSampleUsers(users: Array<{ userId: string; name: string }>, hasMore: boolean): string {
