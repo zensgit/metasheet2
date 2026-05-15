@@ -92,7 +92,7 @@ describe('IntegrationWorkbenchView', () => {
             kind: 'erp:k3-wise-sqlserver',
             role: 'source',
             status: 'error',
-            lastError: 'K3 WISE SQL Server channel requires an injected queryExecutor',
+            lastError: 'SQLSERVER_EXECUTOR_MISSING: inject queryExecutor when creating K3WiseSqlServerChannel',
           },
         ])
       }
@@ -822,7 +822,8 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.querySelector('[data-testid="source-empty-state"]')?.textContent).toContain('还没有可读取的数据源')
     expect(container.querySelector('[data-testid="show-staging-setup"]')).not.toBeNull()
 
-    expect(container.textContent).toContain('高级 SQL 通道未启用 / 需要部署侧注入 queryExecutor')
+    expect(container.textContent).toContain('高级 SQL 通道未启用 / SQLSERVER_EXECUTOR_MISSING / 需要部署侧注入 queryExecutor')
+    expect(container.textContent).toContain('SQLSERVER_EXECUTOR_MISSING')
   })
 
   it('surfaces staging-creation CTA in source-empty and staging-empty when no readable source exists', async () => {

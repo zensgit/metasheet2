@@ -5,7 +5,7 @@
 Verifies the rendering changes in `apps/web/src/views/IntegrationWorkbenchView.vue` that collate issue #1542's P1 UX gap:
 
 1. `metasheet:staging` source - actionable CTA in source-empty and clearer staging-empty pointing back to the install controls.
-2. SQL Server source option - disabled when backend has no `queryExecutor`, with the required `高级 SQL 通道未启用 / 需要部署侧注入 queryExecutor` hint.
+2. SQL Server source option - disabled when backend has no `queryExecutor`, with the required `高级 SQL 通道未启用 / SQLSERVER_EXECUTOR_MISSING / 需要部署侧注入 queryExecutor` hint.
 
 No backend / migration / route changes; no `plugins/plugin-integration-core` touch.
 
@@ -57,7 +57,7 @@ The new test `marks SQL Server source option as disabled when queryExecutor is m
 - the option carries `data-disabled="true"`,
 - the disabled SQL source is not auto-selected as the default source,
 - the source-empty CTA remains visible because there is still no runnable source,
-- the page contains the exact phrase `高级 SQL 通道未启用 / 需要部署侧注入 queryExecutor`.
+- the page contains the exact phrase `高级 SQL 通道未启用 / SQLSERVER_EXECUTOR_MISSING / 需要部署侧注入 queryExecutor`.
 
 The new test `surfaces staging-creation CTA ...` asserts:
 

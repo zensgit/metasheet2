@@ -197,7 +197,7 @@ function createK3WiseSqlServerChannel({ system, queryExecutor, logger } = {}) {
       return {
         ok: false,
         code: 'SQLSERVER_EXECUTOR_MISSING',
-        message: 'K3 WISE SQL Server channel requires an injected queryExecutor',
+        message: 'SQLSERVER_EXECUTOR_MISSING: inject queryExecutor when creating K3WiseSqlServerChannel; expected executor methods include testConnection/select/insertMany for allowlisted SQL Server access.',
       }
     }
     try {

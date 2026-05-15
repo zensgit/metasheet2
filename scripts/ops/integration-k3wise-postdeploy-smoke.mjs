@@ -6,6 +6,8 @@ import { pathToFileURL } from 'node:url'
 const DEFAULT_BASE_URL = 'http://142.171.239.56:8081'
 const DEFAULT_OUTPUT_ROOT = 'output/integration-k3wise-postdeploy-smoke'
 const ISSUE1542_SMOKE_PIPELINE_ID = 'issue1542_postdeploy_staging_material_smoke'
+const SQLSERVER_SYSTEM_KIND = 'erp:k3-wise-sqlserver'
+const SQLSERVER_EXECUTOR_MISSING_PATTERN = /SQLSERVER_EXECUTOR_MISSING|queryExecutor|executor|injected|注入|执行器/i
 const REQUIRED_ADAPTERS = [
   'http',
   'plm:yuantus-wrapper',
@@ -356,6 +358,50 @@ function failResult(id, error) {
   return result(id, 'fail', {
     error: error && error.message ? redactText(error.message) : redactText(String(error)),
     ...details,
+  })
+}
+
+function systemSummary(system) {
+  return {
+    id: typeof system?.id === 'string' ? system.id : null,
+    name: typeof system?.name === 'string' ? system.name : null,
+    role: typeof system?.role === 'string' ? system.role : null,
+    status: typeof system?.status === 'string' ? system.status : null,
+  }
+}
+
+function sqlServerExecutorAvailabilityCheck(body) {
+  const data = responseData(body)
+  if (!Array.isArray(data)) {
+    throw new K3WisePostdeploySmokeError('external systems response data must be an array for SQL executor diagnostic', {
+      received: Array.isArray(data) ? 'array' : typeof data,
+    })
+  }
+  const sqlSystems = data.filter((system) => system && system.kind === SQLSERVER_SYSTEM_KIND)
+  if (sqlSystems.length === 0) return null
+
+  const unavailableSystems = sqlSystems.filter((system) => {
+    const lastError = typeof system.lastError === 'string' ? system.lastError : ''
+    return system.status === 'error' || SQLSERVER_EXECUTOR_MISSING_PATTERN.test(lastError)
+  })
+  if (unavailableSystems.length > 0) {
+    const missingExecutorSystems = unavailableSystems.filter((system) => {
+      const lastError = typeof system.lastError === 'string' ? system.lastError : ''
+      return SQLSERVER_EXECUTOR_MISSING_PATTERN.test(lastError)
+    })
+    return result('sqlserver-executor-availability', 'skipped', {
+      code: missingExecutorSystems.length > 0 ? 'SQLSERVER_EXECUTOR_MISSING' : 'SQLSERVER_CHANNEL_UNAVAILABLE',
+      reason: missingExecutorSystems.length > 0
+        ? 'K3 WISE SQL Server source is configured but the deployment has not injected the allowlisted queryExecutor; staging-to-K3 smoke signoff can still pass.'
+        : 'K3 WISE SQL Server source is configured but currently unavailable; staging-to-K3 smoke signoff can still pass.',
+      systemsChecked: sqlSystems.length,
+      blockedSystems: unavailableSystems.map(systemSummary),
+    })
+  }
+
+  return result('sqlserver-executor-availability', 'pass', {
+    systemsChecked: sqlSystems.length,
+    readySystems: sqlSystems.map(systemSummary),
   })
 }
 
@@ -1201,6 +1247,20 @@ async function runSmoke(opts) {
       } catch (error) {
         checks.push(failResult(id, error))
       }
+    }
+
+    try {
+      const systemsResponse = await requestJson(opts.baseUrl, withQuery('/api/integration/external-systems', {
+        tenantId,
+        limit: 100,
+      }), { token, timeoutMs: opts.timeoutMs })
+      const diagnostic = sqlServerExecutorAvailabilityCheck(systemsResponse.body)
+      if (diagnostic) checks.push(diagnostic)
+    } catch (error) {
+      checks.push(result('sqlserver-executor-availability', 'skipped', {
+        reason: 'could not inspect external systems for SQL executor availability; the control-plane list probe carries the blocking failure if the endpoint is down',
+        details: error && error.message ? redactText(error.message) : redactText(String(error)),
+      }))
     }
 
     try {
