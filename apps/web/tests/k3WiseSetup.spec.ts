@@ -1055,7 +1055,10 @@ describe('K3 WISE setup helpers', () => {
     expect(byId['webapi-credentials']?.status).toBe('ready')
     expect(byId['sql-channel']?.status).toBe('warning')
     expect(byId['plm-source']?.status).toBe('external')
-    expect(byId.staging?.status).toBe('missing')
+    // Post-#1572 an empty projectId is valid: the server auto-scopes to
+    // tenant:integration-core, so the staging gate is READY (not missing).
+    expect(byId.staging?.status).toBe('ready')
+    expect(byId.staging?.message).toContain('自动使用 tenant:integration-core')
     expect(summary).toMatchObject({
       external: 1,
       canSaveConfiguration: true,
@@ -1065,12 +1068,28 @@ describe('K3 WISE setup helpers', () => {
     })
   })
 
+  it('flags a non-integration-scoped projectId as a warning and accepts a scoped one', () => {
+    const plainForm = createDefaultK3WiseSetupForm()
+    Object.assign(plainForm, { tenantId: 'tenant_1', projectId: 'project_default' })
+    const plainStaging = buildK3WiseDeployGateChecklist(plainForm).find((item) => item.id === 'staging')
+    expect(plainStaging?.status).toBe('warning')
+    expect(plainStaging?.message).toContain('不是 integration 作用域')
+    expect(plainStaging?.field).toBe('projectId')
+
+    const scopedForm = createDefaultK3WiseSetupForm()
+    Object.assign(scopedForm, { tenantId: 'tenant_1', projectId: 'tenant_1:integration-core' })
+    const scopedStaging = buildK3WiseDeployGateChecklist(scopedForm).find((item) => item.id === 'staging')
+    expect(scopedStaging?.status).toBe('ready')
+    expect(scopedStaging?.message).toContain('已是 integration 作用域')
+    expect(scopedStaging?.field).toBeUndefined()
+  })
+
   it('marks internal dry-run ready only after source, target, staging, and pipeline ids exist', () => {
     const form = createDefaultK3WiseSetupForm()
     Object.assign(form, {
       tenantId: 'tenant_1',
       workspaceId: 'workspace_1',
-      projectId: 'project_1',
+      projectId: 'tenant_1:integration-core',
       webApiSystemId: 'k3_1',
       webApiHasCredentials: true,
       version: 'K3 WISE 15.x test',
@@ -1097,7 +1116,7 @@ describe('K3 WISE setup helpers', () => {
     const form = createDefaultK3WiseSetupForm()
     Object.assign(form, {
       tenantId: 'tenant_1',
-      projectId: 'project_1',
+      projectId: 'tenant_1:integration-core',
       webApiSystemId: 'k3_1',
       webApiHasCredentials: true,
       version: 'K3 WISE 15.x test',

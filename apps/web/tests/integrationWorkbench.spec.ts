@@ -13,6 +13,8 @@ import {
   testExternalSystemConnection,
   upsertWorkbenchExternalSystem,
   upsertIntegrationPipeline,
+  isIntegrationScopedProjectId,
+  normalizeIntegrationProjectId,
 } from '../src/services/integration/workbench'
 
 const apiFetchMock = vi.fn()
@@ -27,6 +29,42 @@ function jsonResponse(data: unknown): Response {
     headers: { 'Content-Type': 'application/json' },
   })
 }
+
+describe('integration project-scope helpers', () => {
+  it.each([
+    ['', false],
+    ['integration-core', true],
+    ['plugin-integration-core', true],
+    ['tenant:integration-core', true],
+    ['default:integration-core', true],
+    ['myproject:integration-core', true],
+    ['project_default', false],
+    ['tenant:integration-core:extra', false],
+    ['  tenant:integration-core  ', true],
+    ['tenant:plugin-integration-core', true],
+  ])('isIntegrationScopedProjectId(%j) -> %s', (input, expected) => {
+    expect(isIntegrationScopedProjectId(input)).toBe(expected)
+  })
+
+  it.each([
+    ['', 'tenant_1', 'tenant_1:integration-core'],
+    ['', '', 'default:integration-core'],
+    ['   ', 'tenant_1', 'tenant_1:integration-core'],
+    ['tenant_1:integration-core', 'tenant_1', 'tenant_1:integration-core'],
+    ['myproject', 'tenant_1', 'myproject:integration-core'],
+    ['project_default', 'tenant_1', 'project_default:integration-core'],
+    ['tenant:integration-core:extra', 'tenant_1', 'tenant:integration-core:extra:integration-core'],
+    ['  myproject  ', 'tenant_1', 'myproject:integration-core'],
+  ])('normalizeIntegrationProjectId(%j, %j) -> %j', (input, tenant, expected) => {
+    expect(normalizeIntegrationProjectId(input, tenant)).toBe(expected)
+  })
+
+  it('normalize output is always integration-scoped', () => {
+    for (const sample of ['', 'x', 'a:b', 'project_default', 'tenant:integration-core:extra']) {
+      expect(isIntegrationScopedProjectId(normalizeIntegrationProjectId(sample, 'tenant_1'))).toBe(true)
+    }
+  })
+})
 
 describe('integration workbench service', () => {
   beforeEach(() => {

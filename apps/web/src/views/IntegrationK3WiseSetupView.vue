@@ -668,7 +668,10 @@
           <div class="k3-setup__grid">
             <label class="k3-setup__field">
               <span>Project ID（高级，可选）</span>
-              <input v-model.trim="form.projectId" autocomplete="off" />
+              <input v-model.trim="form.projectId" autocomplete="off" data-testid="k3-setup-project-id" placeholder="留空自动使用 tenant:integration-core" />
+              <small class="k3-setup__hint" data-testid="k3-setup-project-id-hint">
+                留空时安装会自动使用插件专用作用域 <code>tenant:integration-core</code>；若自定义，结尾必须是 <code>:integration-core</code>，否则会触发 plugin-scope 警告。
+              </small>
             </label>
             <label class="k3-setup__field">
               <span>Base ID</span>

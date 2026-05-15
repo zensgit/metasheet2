@@ -1,4 +1,5 @@
 import { apiFetch } from '../../utils/api'
+import { isIntegrationScopedProjectId } from './workbench'
 
 export type IntegrationSystemStatus = 'active' | 'inactive' | 'error'
 export type K3SqlServerMode = 'readonly' | 'middle-table' | 'stored-procedure'
@@ -964,7 +965,9 @@ export function buildK3WiseDeployGateChecklist(form: K3WiseSetupForm): K3WiseDep
       : Boolean(trim(form.acctId) && trim(form.username) && trim(form.password))
   const tenantId = resolveTenantId(form)
   const webApiConfigReady = Boolean(trim(form.version) && trim(form.baseUrl) && trim(form.tokenPath) && trim(form.loginPath))
-  const stagingReady = Boolean(trim(form.projectId))
+  const stagingProjectIdValue = trim(form.projectId)
+  const stagingProjectScoped = !stagingProjectIdValue || isIntegrationScopedProjectId(stagingProjectIdValue)
+  const stagingReady = stagingProjectScoped
   const pipelineTemplateReady = Boolean(trim(form.sourceSystemId) && trim(form.webApiSystemId) && trim(form.materialStagingObjectId) && trim(form.bomStagingObjectId))
   const materialDryRunReady = Boolean(trim(form.materialPipelineId))
   const bomDryRunReady = Boolean(trim(form.bomPipelineId))
@@ -1063,10 +1066,12 @@ export function buildK3WiseDeployGateChecklist(form: K3WiseSetupForm): K3WiseDep
     gateItem(
       'staging',
       'Staging 多维表',
-      stagingReady ? 'ready' : 'missing',
+      stagingReady ? 'ready' : 'warning',
       stagingReady
-        ? '可在页面安装或确认 staging 多维表'
-        : '部署后可在页面填写 projectId，再点击安装 staging 多维表',
+        ? (stagingProjectIdValue
+          ? `Project ID 已是 integration 作用域（${stagingProjectIdValue}），可安装 staging 多维表`
+          : 'Project ID 留空，安装时后端自动使用 tenant:integration-core 作用域')
+        : `Project ID「${stagingProjectIdValue}」不是 integration 作用域；留空可自动作用域，或规范化为以 :integration-core 结尾后再安装`,
       stagingReady ? undefined : 'projectId',
     ),
     gateItem(
