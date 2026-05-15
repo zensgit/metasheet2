@@ -6,7 +6,7 @@ Date: 2026-05-15
 
 | Area | Command | Expected |
 | --- | --- | --- |
-| Seed helper unit coverage | `pnpm verify:integration-issue1542:seed-workbench` | PASS: 4/4 |
+| Seed helper unit coverage | `pnpm verify:integration-issue1542:seed-workbench` | PASS: 5/5 |
 | Existing postdeploy smoke regression | `node --test scripts/ops/integration-k3wise-postdeploy-smoke.test.mjs` | PASS: 20/20 |
 | K3 offline PoC regression | `pnpm verify:integration-k3wise:poc` | PASS: preflight/evidence/fixture/mock chain |
 | Syntax | `node --check scripts/ops/integration-issue1542-seed-workbench-systems.mjs` | PASS |
@@ -23,8 +23,10 @@ Date: 2026-05-15
    - no `credentials` property in the K3 target payload.
 2. `--install-staging` calls `POST /api/integration/staging/install` and uses
    the returned `sheetIds.standard_materials`.
-3. Missing sheet id without `--install-staging` fails before any network write.
-4. JSON and Markdown artifacts are written with mode `0600` and do not contain
+3. `--install-staging` with empty `sheetIds` fails before any external-system
+   writes and prints the metadata-only fallback command.
+4. Missing sheet id without `--install-staging` fails before any network write.
+5. JSON and Markdown artifacts are written with mode `0600` and do not contain
    bearer tokens or raw URL userinfo/query secrets.
 
 ## Manual 142 Retest Plan
@@ -50,6 +52,25 @@ Mode: install-staging-and-seed
 Staging source: metasheet_staging_default
 K3 target: issue1542_k3wise_webapi_metadata_target
 ```
+
+If the install route returns no `sheetIds.standard_materials`, use the
+metadata-only fallback that was validated on 142:
+
+```bash
+node scripts/ops/integration-issue1542-seed-workbench-systems.mjs \
+  --base-url http://127.0.0.1:8081 \
+  --token-file "$TOKEN_FILE" \
+  --tenant-id default \
+  --project-id default \
+  --standard-materials-sheet-id issue1542_metadata_standard_materials \
+  --standard-materials-view-id issue1542_metadata_view \
+  --standard-materials-open-link /multitable/issue1542_metadata_standard_materials/issue1542_metadata_view \
+  --out-dir artifacts/integration-k3wise/internal-trial/issue1542-seed
+```
+
+This fallback is only for the #1542 schema and draft-pipeline-save smoke. It
+does not prove real staging records can be read; fix multitable provisioning
+before dry-run.
 
 Then rerun:
 
