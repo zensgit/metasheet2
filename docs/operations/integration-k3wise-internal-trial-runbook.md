@@ -178,6 +178,38 @@ node scripts/ops/integration-k3wise-postdeploy-summary.mjs \
   --require-auth-signoff
 ```
 
+## Delivery Readiness Handoff
+
+The postdeploy smoke proves the deployed MetaSheet control plane is usable.
+Before customer GATE work starts, pair that smoke artifact with the package
+verifier JSON and let the delivery-readiness compiler produce the handoff
+record.
+
+First verify the exact on-prem package that was installed or will be installed:
+
+```bash
+VERIFY_REPORT_JSON=artifacts/integration-k3wise/delivery-readiness/package-verify.json \
+VERIFY_REPORT_MD=artifacts/integration-k3wise/delivery-readiness/package-verify.md \
+  scripts/ops/multitable-onprem-package-verify.sh <metasheet-multitable-onprem.zip-or.tgz>
+```
+
+Then compile readiness. Before customer GATE answers arrive this usually ends
+at `INTERNAL_READY_WAITING_CUSTOMER_GATE`; after the live preflight packet is
+available it can advance to `CUSTOMER_TRIAL_READY`.
+
+```bash
+node scripts/ops/integration-k3wise-delivery-readiness.mjs \
+  --postdeploy-smoke artifacts/integration-k3wise/internal-trial/postdeploy-smoke/integration-k3wise-postdeploy-smoke.json \
+  --package-verify artifacts/integration-k3wise/delivery-readiness/package-verify.json \
+  --preflight-packet <packet-dir>/integration-k3wise-live-poc-packet.json \
+  --out-dir artifacts/integration-k3wise/delivery-readiness/customer-ready \
+  --fail-on-blocked
+```
+
+After the live PoC evidence compiler returns `decision=PASS`, rerun with
+`--live-evidence-report` to produce `CUSTOMER_TRIAL_SIGNED_OFF`. The output is
+still a customer-trial signoff only; it does not approve production use.
+
 ## Host-Shell Mint and Smoke (deploy host, no GHA)
 
 When you have shell access to the deploy host and need a one-off internal-trial

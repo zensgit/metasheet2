@@ -94,8 +94,10 @@ function verify_generic_integration_workbench_contract() {
   local sql_executor_handoff="${root}/docs/operations/integration-k3wise-sql-executor-bridge-handoff.md"
   local bridge_codex_handoff="${root}/docs/development/k3wise-bridge-machine-codex-handoff-20260513.md"
   local postdeploy_smoke="${root}/scripts/ops/integration-k3wise-postdeploy-smoke.mjs"
+  local delivery_readiness="${root}/scripts/ops/integration-k3wise-delivery-readiness.mjs"
   local issue1542_seed="${root}/scripts/ops/integration-issue1542-seed-workbench-systems.mjs"
   local postdeploy_summary="${root}/scripts/ops/integration-k3wise-postdeploy-summary.mjs"
+  local live_gate_package="${root}/docs/operations/integration-k3wise-live-gate-execution-package.md"
 
   search_fixed_string '/integrations/workbench' "$web_dist" || die "web dist must include the Data Factory route"
   search_fixed_string '/integrations/k3-wise' "$web_dist" || die "web dist must include the K3 WISE setup route"
@@ -122,6 +124,8 @@ function verify_generic_integration_workbench_contract() {
   search_fixed_string 'data-factory-frontend-route' "$postdeploy_smoke" || die "postdeploy smoke must check the Data Factory frontend route"
   search_fixed_string 'data-factory-adapter-discovery' "$postdeploy_smoke" || die "postdeploy smoke must check Data Factory adapter discovery"
   search_fixed_string 'sqlserver-executor-availability' "$postdeploy_smoke" || die "postdeploy smoke must report SQL executor availability"
+  search_fixed_string '--package-verify' "$delivery_readiness" || die "delivery readiness must consume package verify evidence"
+  search_fixed_string 'CUSTOMER_TRIAL_READY' "$delivery_readiness" || die "delivery readiness must still emit customer-trial ready decision"
   search_fixed_string '--issue1542-workbench-smoke' "$postdeploy_smoke" || die "postdeploy smoke must include Data Factory issue #1542 workbench retest flag"
   search_fixed_string '--issue1542-install-staging' "$postdeploy_smoke" || die "postdeploy smoke must include Data Factory issue #1542 install-staging retest flag"
   search_fixed_string '--issue1542-workbench-smoke' "$k3_runbook" || die "K3 runbook must document the Data Factory issue #1542 workbench retest"
@@ -130,6 +134,9 @@ function verify_generic_integration_workbench_contract() {
   search_fixed_string 'metasheet:staging' "$issue1542_seed" || die "issue #1542 seed helper must create the staging source system"
   search_fixed_string 'erp:k3-wise-webapi' "$issue1542_seed" || die "issue #1542 seed helper must create the K3 target system"
   search_fixed_string 'invalidAdapters' "$postdeploy_summary" || die "postdeploy summary must render Data Factory adapter drift details"
+  search_fixed_string 'integration-k3wise-delivery-readiness.mjs' "$live_gate_package" || die "live GATE package must document delivery readiness compiler"
+  search_fixed_string 'VERIFY_REPORT_JSON' "$live_gate_package" || die "live GATE package must document package verifier report capture"
+  search_fixed_string '--package-verify' "$live_gate_package" || die "live GATE package must document the package verify readiness gate"
 }
 
 function write_optional_report() {
@@ -336,6 +343,7 @@ required=(
   "scripts/ops/integration-k3wise-onprem-preflight.mjs"
   "scripts/ops/integration-k3wise-live-poc-preflight.mjs"
   "scripts/ops/integration-k3wise-live-poc-evidence.mjs"
+  "scripts/ops/integration-k3wise-delivery-readiness.mjs"
   "scripts/ops/integration-k3wise-postdeploy-smoke.mjs"
   "scripts/ops/integration-issue1542-seed-workbench-systems.mjs"
   "scripts/ops/integration-k3wise-postdeploy-summary.mjs"
@@ -372,6 +380,10 @@ required=(
   "docs/development/data-factory-issue1542-seed-workbench-systems-verification-20260515.md"
   "docs/development/data-factory-issue1542-install-smoke-development-20260515.md"
   "docs/development/data-factory-issue1542-install-smoke-verification-20260515.md"
+  "docs/development/data-factory-delivery-readiness-evidence-gates-development-20260515.md"
+  "docs/development/data-factory-delivery-readiness-evidence-gates-verification-20260515.md"
+  "docs/development/data-factory-readiness-package-verify-delivery-development-20260515.md"
+  "docs/development/data-factory-readiness-package-verify-delivery-verification-20260515.md"
   "docs/development/onprem-migration-gap-guard-development-20260514.md"
   "docs/development/onprem-migration-gap-guard-verification-20260514.md"
   "docs/deployment/multitable-platform-rc-notes-20260404.md"

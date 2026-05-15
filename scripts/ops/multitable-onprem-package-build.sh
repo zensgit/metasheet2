@@ -56,8 +56,9 @@ REQUIRED_PATHS=(
   "scripts/ops/multitable-onprem-package-upgrade.sh"
   "scripts/ops/multitable-onprem-healthcheck.sh"
   # K3 WISE PoC operator tooling — preflight (C1/C2), live PoC packet builder
-  # (C3), evidence compiler (C10), postdeploy smoke + summary, the #1542
-  # metadata seed helper, mock fixtures, and the three K3 operator runbooks.
+  # (C3), evidence compiler (C10), delivery readiness compiler, postdeploy
+  # smoke + summary, the #1542 metadata seed helper, mock fixtures, and the
+  # K3 operator runbooks.
   # The package also ships
   # plugins/plugin-integration-core above so the backend registers
   # /api/integration/* routes and the offline mock chain can resolve its
@@ -65,6 +66,7 @@ REQUIRED_PATHS=(
   "scripts/ops/integration-k3wise-onprem-preflight.mjs"
   "scripts/ops/integration-k3wise-live-poc-preflight.mjs"
   "scripts/ops/integration-k3wise-live-poc-evidence.mjs"
+  "scripts/ops/integration-k3wise-delivery-readiness.mjs"
   "scripts/ops/integration-k3wise-postdeploy-smoke.mjs"
   "scripts/ops/integration-issue1542-seed-workbench-systems.mjs"
   "scripts/ops/integration-k3wise-postdeploy-summary.mjs"
@@ -95,6 +97,10 @@ REQUIRED_PATHS=(
   "docs/development/data-factory-sql-executor-diagnostic-verification-20260515.md"
   "docs/development/data-factory-sql-executor-bridge-handoff-development-20260515.md"
   "docs/development/data-factory-sql-executor-bridge-handoff-verification-20260515.md"
+  "docs/development/data-factory-delivery-readiness-evidence-gates-development-20260515.md"
+  "docs/development/data-factory-delivery-readiness-evidence-gates-verification-20260515.md"
+  "docs/development/data-factory-readiness-package-verify-delivery-development-20260515.md"
+  "docs/development/data-factory-readiness-package-verify-delivery-verification-20260515.md"
   "docs/development/onprem-migration-gap-guard-development-20260514.md"
   "docs/development/onprem-migration-gap-guard-verification-20260514.md"
   "docker/app.env.example"
