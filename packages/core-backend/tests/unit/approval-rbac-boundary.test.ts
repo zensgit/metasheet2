@@ -82,6 +82,10 @@ function templateManager() {
   return { id: 'u-mgr', name: 'Manager', permissions: ['approvals:read', 'approval-templates:manage'] }
 }
 
+function approvalAdminUser() {
+  return { id: 'u-approval-admin', name: 'Approval Admin', permissions: ['approvals:admin'] }
+}
+
 function adminUser() {
   return { id: 'u-admin', name: 'Admin', role: 'admin', permissions: [] }
 }
@@ -154,6 +158,13 @@ describe('Approval RBAC boundary verification', () => {
       const res = await request(app)
         .post('/api/approvals/apr-1/actions')
         .send({ action: 'approve', version: 0 })
+      expect(res.status).toBe(401)
+    })
+
+    it('POST /api/approvals/:id/jump without auth → 401', async () => {
+      const res = await request(app)
+        .post('/api/approvals/apr-1/jump')
+        .send({ version: 0, targetNodeKey: 'finance_review', reason: 'ops recovery' })
       expect(res.status).toBe(401)
     })
   })
@@ -311,6 +322,42 @@ describe('Approval RBAC boundary verification', () => {
   })
 
   // =========================================================================
+  // Admin jump boundary: only approvals:admin can reach the handler
+  // =========================================================================
+  describe('PR3: Admin jump boundary', () => {
+    it('POST /api/approvals/:id/jump with approvals:act but no approvals:admin → 403', async () => {
+      authState.user = actorUser()
+
+      const res = await request(app)
+        .post('/api/approvals/apr-1/jump')
+        .send({ version: 0, targetNodeKey: 'finance_review', reason: 'ops recovery' })
+
+      expect(res.status).toBe(403)
+    })
+
+    it('POST /api/approvals/:id/jump with template manage but no approvals:admin → 403', async () => {
+      authState.user = templateManager()
+
+      const res = await request(app)
+        .post('/api/approvals/apr-1/jump')
+        .send({ version: 0, targetNodeKey: 'finance_review', reason: 'ops recovery' })
+
+      expect(res.status).toBe(403)
+    })
+
+    it('POST /api/approvals/:id/jump with approvals:admin reaches the handler', async () => {
+      authState.user = approvalAdminUser()
+
+      const res = await request(app)
+        .post('/api/approvals/apr-1/jump')
+        .send({ version: 0, targetNodeKey: 'finance_review', reason: 'ops recovery' })
+
+      expect(res.status).not.toBe(401)
+      expect(res.status).not.toBe(403)
+    })
+  })
+
+  // =========================================================================
   // Permission matrix integration
   // =========================================================================
   describe('Permission matrix integration', () => {
@@ -324,6 +371,7 @@ describe('Approval RBAC boundary verification', () => {
         request(app).get('/api/approvals/a'),
         request(app).post('/api/approvals').send({ templateId: 't', formData: {} }),
         request(app).post('/api/approvals/a/actions').send({ action: 'approve', version: 0 }),
+        request(app).post('/api/approvals/a/jump').send({ version: 0, targetNodeKey: 'n2', reason: 'ops recovery' }),
       ])
 
       for (const res of results) {

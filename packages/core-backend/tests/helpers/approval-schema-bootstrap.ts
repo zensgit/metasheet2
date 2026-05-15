@@ -1,7 +1,7 @@
 import { poolManager } from '../../src/integration/db/connection-pool'
 
 const APPROVAL_SCHEMA_BOOTSTRAP_KEY = 'approval-schema-bootstrap'
-const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260426-wp5-breach-notified-at'
+const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260515-pr3-admin-jump-action'
 
 /**
  * Ensures the approval schema (tables, constraints, indexes, sequences) is
@@ -177,7 +177,7 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
     await client.query(`
       ALTER TABLE approval_records
       ADD CONSTRAINT approval_records_action_check
-      CHECK (action IN ('created', 'approve', 'reject', 'return', 'revoke', 'transfer', 'sign', 'comment', 'cc', 'remind'))
+      CHECK (action IN ('created', 'approve', 'reject', 'return', 'revoke', 'transfer', 'sign', 'comment', 'cc', 'remind', 'jump'))
     `)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_records_instance ON approval_records(instance_id)`)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_records_instance_action_time ON approval_records(instance_id, action, occurred_at DESC)`)

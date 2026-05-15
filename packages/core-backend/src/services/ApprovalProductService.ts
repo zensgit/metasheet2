@@ -44,6 +44,7 @@ import { APPROVAL_ERROR_CODES } from './approval-bridge-types'
 import { ServiceError } from './ApprovalBridgeService'
 import { getApprovalMetricsService, type ApprovalMetricsService, type ApprovalTerminalState } from './ApprovalMetricsService'
 import { Logger } from '../core/logger'
+import { eventBus } from '../integration/events/event-bus'
 
 const metricsLogger = new Logger('ApprovalMetricsHook')
 
@@ -189,6 +190,33 @@ type AutoApprovalEvaluation = {
 type EffectiveAutoApprovalPolicy = {
   policy: AutoApprovalPolicy
   source: AutoApprovalPolicySource
+}
+
+type ApprovalAdminJumpRequest = {
+  version: number
+  targetNodeKey: string
+  reason: string
+}
+
+type AdminJumpAuditAssignee = {
+  assignmentType: string
+  assigneeId: string
+  nodeKey: string | null
+  sourceStep: number | null
+}
+
+type AdminJumpEventPayload = {
+  instanceId: string
+  fromNodeKey: string | null
+  toNodeKey: string
+  oldAssignees: AdminJumpAuditAssignee[]
+  newAssignees: AdminJumpAuditAssignee[]
+  actorId: string
+  actorName: string
+  reason: string
+  fromVersion: number
+  toVersion: number
+  publishedDefinitionId: string
 }
 
 type ApprovalDbClient = {
@@ -1205,6 +1233,67 @@ function readParallelBranchStates(metadata: unknown): ParallelInstanceState | nu
     joinMode: states.joinMode as 'all' | 'any',
     branches,
   }
+}
+
+function findRuntimeGraphNode(runtimeGraph: RuntimeGraph, nodeKey: string): RuntimeGraph['nodes'][number] | null {
+  return runtimeGraph.nodes.find((node) => node.key === nodeKey) ?? null
+}
+
+function listOutgoingNodeKeys(runtimeGraph: RuntimeGraph, nodeKey: string): string[] {
+  return runtimeGraph.edges
+    .filter((edge) => edge.source === nodeKey)
+    .map((edge) => edge.target)
+}
+
+function isReachableDownstream(runtimeGraph: RuntimeGraph, fromNodeKey: string, targetNodeKey: string): boolean {
+  const visited = new Set<string>([fromNodeKey])
+  const queue = listOutgoingNodeKeys(runtimeGraph, fromNodeKey)
+  while (queue.length > 0) {
+    const next = queue.shift()!
+    if (next === targetNodeKey) return true
+    if (visited.has(next)) continue
+    visited.add(next)
+    queue.push(...listOutgoingNodeKeys(runtimeGraph, next))
+  }
+  return false
+}
+
+function collectParallelBranchNodeKeys(runtimeGraph: RuntimeGraph, parallelState: ParallelInstanceState): Set<string> {
+  const branchNodeKeys = new Set<string>()
+  for (const branch of Object.values(parallelState.branches)) {
+    const edge = runtimeGraph.edges.find((candidate) => candidate.key === branch.edgeKey)
+    if (!edge) continue
+    const queue = [edge.target]
+    const visitedNodes = new Set<string>()
+    while (queue.length > 0) {
+      const nodeKey = queue.shift()!
+      if (nodeKey === parallelState.joinNodeKey || visitedNodes.has(nodeKey)) continue
+      visitedNodes.add(nodeKey)
+      branchNodeKeys.add(nodeKey)
+      for (const outgoing of runtimeGraph.edges.filter((candidate) => candidate.source === nodeKey)) {
+        queue.push(outgoing.target)
+      }
+    }
+  }
+  return branchNodeKeys
+}
+
+function assignmentRowsForAudit(assignments: ApprovalAssignmentRow[]): AdminJumpAuditAssignee[] {
+  return assignments.map((assignment) => ({
+    assignmentType: assignment.assignment_type,
+    assigneeId: assignment.assignee_id,
+    nodeKey: assignment.node_key ?? null,
+    sourceStep: assignment.source_step ?? null,
+  }))
+}
+
+function graphAssignmentsForAudit(assignments: ApprovalGraphAssignment[]): AdminJumpAuditAssignee[] {
+  return assignments.map((assignment) => ({
+    assignmentType: assignment.assignmentType,
+    assigneeId: assignment.assigneeId,
+    nodeKey: assignment.nodeKey,
+    sourceStep: assignment.sourceStep,
+  }))
 }
 
 function hasEnabledAutoApprovalRule(policy: AutoApprovalPolicy | undefined): policy is AutoApprovalPolicy {
@@ -2369,6 +2458,204 @@ export class ApprovalProductService {
     const approval = await this.getApproval(instanceId)
     if (!approval) {
       throw new ServiceError('Approval not found after creation', 500, 'APPROVAL_CREATE_FAILED')
+    }
+    return approval
+  }
+
+  async adminJump(
+    id: string,
+    request: ApprovalAdminJumpRequest,
+    actor: CreateApprovalActor & { ip?: string | null; userAgent?: string | null },
+  ): Promise<UnifiedApprovalDTO> {
+    if (!pool) throw new Error('Database not available')
+
+    let jumpEvent: AdminJumpEventPayload | null = null
+    let client: ApprovalDbClient | null = null
+    try {
+      client = await pool.connect()
+      await client.query('BEGIN')
+
+      const instanceResult = await client.query<ApprovalInstanceRow>(
+        `SELECT * FROM approval_instances WHERE id = $1 AND COALESCE(source_system, 'platform') = 'platform' FOR UPDATE`,
+        [id],
+      )
+      const instance = instanceResult.rows[0]
+      if (!instance) {
+        throw new ServiceError('Approval not found', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
+      }
+      if (instance.version !== request.version) {
+        throw new ServiceError(
+          'Approval instance version mismatch',
+          409,
+          'APPROVAL_VERSION_CONFLICT',
+          { currentVersion: instance.version },
+        )
+      }
+      if (APPROVAL_TERMINAL_STATUSES.includes(instance.status as typeof APPROVAL_TERMINAL_STATUSES[number])) {
+        throw new ServiceError(
+          `Cannot jump: current status is ${instance.status}`,
+          409,
+          APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION,
+        )
+      }
+      if (instance.status !== 'pending') {
+        throw new ServiceError(
+          `Cannot jump: current status is ${instance.status}`,
+          409,
+          APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION,
+        )
+      }
+      if (!instance.published_definition_id) {
+        throw new ServiceError('Approval is not managed by the template runtime', 409, 'APPROVAL_RUNTIME_UNSUPPORTED')
+      }
+      if (!instance.current_node_key) {
+        throw new ServiceError('Approval does not have an active node', 409, APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION)
+      }
+
+      const runtimeResult = await client.query<PublishedDefinitionRow>(
+        `SELECT * FROM approval_published_definitions WHERE id = $1`,
+        [instance.published_definition_id],
+      )
+      const runtime = runtimeResult.rows[0]
+      if (!runtime) {
+        throw new ServiceError('Published definition not found', 404, 'APPROVAL_PUBLISHED_DEFINITION_NOT_FOUND')
+      }
+
+      const targetNodeKey = request.targetNodeKey.trim()
+      const runtimeGraph = asRuntimeGraph(runtime.runtime_graph)
+      const targetNode = findRuntimeGraphNode(runtimeGraph, targetNodeKey)
+      if (!targetNode) {
+        throw new ServiceError('Jump target node not found', 400, 'APPROVAL_JUMP_TARGET_INVALID')
+      }
+      if (targetNode.type !== 'approval') {
+        throw new ServiceError('Jump target must be an approval node', 400, 'APPROVAL_JUMP_TARGET_INVALID')
+      }
+
+      const parallelState = readParallelBranchStates(instance.metadata)
+      let reachabilityBaseNodeKey = instance.current_node_key
+      let targetMatchesReachabilityBase = false
+      if (parallelState) {
+        const branchNodeKeys = collectParallelBranchNodeKeys(runtimeGraph, parallelState)
+        if (branchNodeKeys.has(targetNodeKey)) {
+          throw new ServiceError(
+            'Jump target cannot be inside a parallel branch',
+            400,
+            'APPROVAL_JUMP_PARALLEL_BRANCH_TARGET_UNSUPPORTED',
+          )
+        }
+        reachabilityBaseNodeKey = parallelState.joinNodeKey
+        targetMatchesReachabilityBase = targetNodeKey === parallelState.joinNodeKey
+      }
+      if (!targetMatchesReachabilityBase && !isReachableDownstream(runtimeGraph, reachabilityBaseNodeKey, targetNodeKey)) {
+        throw new ServiceError(
+          'Jump target must be downstream of the current approval node',
+          400,
+          'APPROVAL_JUMP_TARGET_NOT_FORWARD',
+        )
+      }
+
+      const activeAssignments = await client.query<ApprovalAssignmentRow>(
+        `SELECT * FROM approval_assignments WHERE instance_id = $1 AND is_active = TRUE ORDER BY created_at ASC`,
+        [id],
+      )
+      const oldAssignees = assignmentRowsForAudit(activeAssignments.rows)
+      const executor = new ApprovalGraphExecutor(runtimeGraph, toNullableRecord(instance.form_snapshot) || {})
+      const jumpResolution = executor.resolveReturnToNode(targetNodeKey)
+      const requesterId = toNullableRecord(instance.requester_snapshot)?.id
+      // Admin jump enters the target through the same node-entry path as create/advance,
+      // so PR2 auto-approval policies intentionally compose after the jump.
+      const resolution = runtimeGraphHasAutoApprovalPolicy(runtimeGraph)
+        ? this.applyAutoApprovalCascade(
+            id,
+            runtimeGraph,
+            executor,
+            jumpResolution,
+            typeof requesterId === 'string' ? requesterId : null,
+            await this.loadApprovalHistory(client, id),
+          )
+        : jumpResolution
+      const nextVersion = instance.version + 1
+      const newAssignees = graphAssignmentsForAudit(resolution.assignments)
+
+      await this.deactivateAllActiveAssignments(client, id)
+      await client.query(
+        `UPDATE approval_instances
+         SET status = $2,
+             version = $3,
+             current_node_key = $4,
+             current_step = $5,
+             total_steps = $6,
+             metadata = COALESCE(metadata, '{}'::jsonb) - 'parallelBranchStates',
+             updated_at = now()
+         WHERE id = $1`,
+        [
+          id,
+          resolution.status,
+          nextVersion,
+          resolution.currentNodeKey,
+          // Terminal cascades can return a null step; keep a stable numeric
+          // snapshot instead of writing NULL to the legacy progress column.
+          resolution.currentStep ?? instance.total_steps,
+          resolution.totalSteps,
+        ],
+      )
+      await this.insertAssignments(client, id, resolution.assignments)
+      await this.insertApprovalRecord(client, id, {
+        action: 'jump',
+        actorId: actor.userId,
+        actorName: actor.userName || actor.userId,
+        comment: request.reason,
+        fromStatus: instance.status,
+        toStatus: resolution.status,
+        fromVersion: instance.version,
+        toVersion: nextVersion,
+        metadata: {
+          adminJump: true,
+          instanceId: id,
+          fromNodeKey: instance.current_node_key,
+          toNodeKey: targetNodeKey,
+          nextNodeKey: resolution.currentNodeKey,
+          oldAssignees,
+          newAssignees,
+          reason: request.reason,
+          actorId: actor.userId,
+          parallelStateCleared: Boolean(parallelState),
+        },
+      }, actor)
+      await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents)
+      await this.insertCcEvents(client, id, nextVersion, resolution.status, resolution.ccEvents)
+      await client.query('COMMIT')
+
+      jumpEvent = {
+        instanceId: id,
+        fromNodeKey: instance.current_node_key,
+        toNodeKey: targetNodeKey,
+        oldAssignees,
+        newAssignees,
+        actorId: actor.userId,
+        actorName: actor.userName || actor.userId,
+        reason: request.reason,
+        fromVersion: instance.version,
+        toVersion: nextVersion,
+        publishedDefinitionId: instance.published_definition_id,
+      }
+
+      if (resolution.currentNodeKey) {
+        this.emitNodeActivationMetric(id, resolution.currentNodeKey)
+      }
+    } catch (error) {
+      await rollbackQuietly(client)
+      throw error
+    } finally {
+      client?.release()
+    }
+
+    if (jumpEvent) {
+      eventBus.emit('approval.admin_jumped', jumpEvent)
+    }
+    const approval = await this.getApproval(id)
+    if (!approval) {
+      throw new ServiceError('Approval not found after jump', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
     }
     return approval
   }
