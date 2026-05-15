@@ -83,6 +83,25 @@ async function main() {
   assert.deepEqual(schema.fields.map((field) => field.name), ['code', 'name', 'quantity'])
   assert.equal(schema.raw.sheetId, 'sheet_materials')
 
+  const manualConfigAdapter = createMetaSheetStagingSourceAdapter({
+    system: createSystem({
+      objects: {
+        standard_materials: {
+          sheetId: 'sheet_materials',
+        },
+      },
+    }),
+    context,
+  })
+  const fallbackObjects = await manualConfigAdapter.listObjects()
+  assert.ok(
+    fallbackObjects[0].schema.some((field) => field.name === 'code'),
+    'manual staging source config derives schema from built-in descriptors',
+  )
+  const fallbackSchema = await manualConfigAdapter.getSchema({ object: 'standard_materials' })
+  assert.ok(fallbackSchema.fields.length > 0, 'manual staging source schema is not empty')
+  assert.ok(fallbackSchema.fields.some((field) => field.name === 'name'), 'descriptor fallback includes material name field')
+
   const firstPage = await adapter.read({ object: 'standard_materials', limit: 1 })
   assert.equal(firstPage.records.length, 1)
   assert.equal(firstPage.records[0].code, 'MAT-001')

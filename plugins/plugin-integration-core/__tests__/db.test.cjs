@@ -130,6 +130,18 @@ async function main() {
   assert.match(q6.sql, /^INSERT INTO "integration_pipelines" \("id", "name", "status"\) VALUES \(\$1, \$2, \$3\) RETURNING \*$/)
   assert.deepEqual(q6.params, ['p1', 'X', 'draft'])
 
+  await db6.insertOne('integration_pipelines', {
+    id: 'p_json',
+    idempotency_key_fields: ['sourceId', 'revision'],
+    options: { k3Template: { id: 'material', version: 1 } },
+  })
+  const q6b = mockDb6.calls[1]
+  assert.deepEqual(
+    q6b.params,
+    ['p_json', '["sourceId","revision"]', '{"k3Template":{"id":"material","version":1}}'],
+    'arrays/plain objects are serialized as JSON text before reaching node-postgres',
+  )
+
   // insertMany with consistent keys
   const mockDb7 = mockDatabase()
   const db7 = createDb({ database: mockDb7 })

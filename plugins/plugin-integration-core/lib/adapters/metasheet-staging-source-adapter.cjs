@@ -15,6 +15,7 @@ const {
   normalizeReadRequest,
   unsupportedAdapterOperation,
 } = require('../contracts.cjs')
+const { listStagingDescriptors } = require('../staging-installer.cjs')
 
 function isPlainObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
@@ -47,10 +48,19 @@ function normalizeField(field) {
   }
 }
 
-function normalizeFields(config = {}) {
+function descriptorFieldsForObject(objectId) {
+  const descriptor = listStagingDescriptors().find((item) => item.id === objectId)
+  if (!descriptor) return []
+  return Array.isArray(descriptor.fieldDetails) && descriptor.fieldDetails.length > 0
+    ? descriptor.fieldDetails
+    : descriptor.fields || []
+}
+
+function normalizeFields(config = {}, objectId = null) {
   const detailed = Array.isArray(config.fieldDetails) ? config.fieldDetails : null
   const fields = detailed || (Array.isArray(config.fields) ? config.fields : [])
-  return fields.map(normalizeField)
+  const fallbackFields = fields.length > 0 ? fields : descriptorFieldsForObject(objectId)
+  return fallbackFields.map(normalizeField)
 }
 
 function targetArrayToObjects(targets) {
@@ -92,7 +102,7 @@ function normalizeObjects(config = {}) {
       viewId: optionalString(objectConfig.viewId),
       baseId: optionalString(objectConfig.baseId),
       openLink: optionalString(objectConfig.openLink),
-      fields: normalizeFields(objectConfig),
+      fields: normalizeFields(objectConfig, objectId),
     }
   }
   return objects
@@ -222,6 +232,7 @@ module.exports = {
   __internals: {
     normalizeObjects,
     normalizeFields,
+    descriptorFieldsForObject,
     parseOffsetCursor,
     recordData,
   },

@@ -141,7 +141,7 @@ async function main() {
     status: 'active',
     createdBy: 'admin',
     fieldMappings: [
-      { sourceField: 'code', targetField: 'FNumber', sortOrder: 0 },
+      { sourceField: 'code', targetField: 'FNumber', defaultValue: 'PCS', sortOrder: 0 },
       { sourceField: 'name', targetField: 'FName', transform: { fn: 'trim' }, validation: [{ type: 'required' }], sortOrder: 1 },
     ],
   })
@@ -153,12 +153,26 @@ async function main() {
   assert.equal(created.status, 'active')
   assert.equal(created.fieldMappings.length, 2)
   assert.deepEqual(created.fieldMappings.map(mapping => mapping.id), ['id_2', 'id_3'])
+  assert.equal(created.fieldMappings[0].defaultValue, 'PCS')
   assert.ok(db.calls.some(([name]) => name === 'transaction'), 'field mapping writes are transactional')
+  const pipelineInsert = db.calls.find(call => call[0] === 'insertOne' && call[1] === 'integration_pipelines')
+  assert.equal(pipelineInsert[2].idempotency_key_fields, '["sourceId","revision"]',
+    'pipeline idempotency JSONB array is stored as JSON text')
+  assert.equal(pipelineInsert[2].options, '{"batchSize":100}',
+    'pipeline options JSONB object is stored as JSON text')
+  const mappingInsert = db.calls.find(call => call[0] === 'insertMany' && call[1] === 'integration_field_mappings')
+  assert.equal(mappingInsert[2][0].default_value, '"PCS"',
+    'field mapping JSONB string default is stored as valid JSON text')
+  assert.equal(mappingInsert[2][1].transform, '{"fn":"trim"}',
+    'field mapping transform JSONB object is stored as JSON text')
+  assert.equal(mappingInsert[2][1].validation, '[{"type":"required"}]',
+    'field mapping validation JSONB array is stored as JSON text')
 
   // --- 2. getPipeline returns mappings and safe definition shape ---------
   const fetched = await registry.getPipeline({ tenantId: 'tenant_1', workspaceId: null, id: 'id_1' })
   assert.equal(fetched.id, 'id_1')
   assert.equal(fetched.fieldMappings.length, 2)
+  assert.equal(fetched.fieldMappings[0].defaultValue, 'PCS')
   assert.equal(fetched.fieldMappings[1].transform.fn, 'trim')
   assert.equal(fetched.credentials, undefined, 'pipeline output never includes credentials')
   assert.equal(fetched.credentialsEncrypted, undefined, 'pipeline output never includes ciphertext')
@@ -337,6 +351,9 @@ async function main() {
   assert.equal(run.status, 'pending')
   assert.equal(run.rowsRead, 0)
   assert.deepEqual(run.details, { dryRun: true })
+  const runInsert = db.calls.find(call => call[0] === 'insertOne' && call[1] === 'integration_runs')
+  assert.equal(runInsert[2].details, '{"dryRun":true}',
+    'pipeline run details JSONB object is stored as JSON text')
 
   const completedRun = await registry.updatePipelineRun({
     tenantId: 'tenant_1',
