@@ -109,6 +109,25 @@ node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
   --out-dir artifacts/integration-k3wise/internal-trial/postdeploy-smoke
 ```
 
+For the Data Factory issue #1542 deployment retest, add the opt-in workbench
+smoke flag:
+
+```bash
+node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
+  --base-url "$METASHEET_BASE_URL" \
+  --token-file "$METASHEET_AUTH_TOKEN_FILE" \
+  --tenant-id "$METASHEET_TENANT_ID" \
+  --require-auth \
+  --issue1542-workbench-smoke \
+  --out-dir artifacts/integration-k3wise/internal-trial/postdeploy-smoke-issue1542
+```
+
+This extra smoke verifies that a configured `metasheet:staging` source exposes
+non-empty `standard_materials` schema, the K3 target exposes the `material`
+template schema, and a fixed draft pipeline ID can be saved without PostgreSQL
+JSONB `22P02`. It writes pipeline metadata only and never runs dry-run,
+Save-only, Submit, or Audit.
+
 Then render the summary:
 
 ```bash

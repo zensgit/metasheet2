@@ -107,6 +107,8 @@ function verify_generic_integration_workbench_contract() {
   search_fixed_string 'SQL Server is an advanced channel' "$k3_runbook" || die "K3 runbook must document SQL Server as an advanced channel"
   search_fixed_string 'data-factory-frontend-route' "$postdeploy_smoke" || die "postdeploy smoke must check the Data Factory frontend route"
   search_fixed_string 'data-factory-adapter-discovery' "$postdeploy_smoke" || die "postdeploy smoke must check Data Factory adapter discovery"
+  search_fixed_string '--issue1542-workbench-smoke' "$postdeploy_smoke" || die "postdeploy smoke must include Data Factory issue #1542 workbench retest flag"
+  search_fixed_string '--issue1542-workbench-smoke' "$k3_runbook" || die "K3 runbook must document the Data Factory issue #1542 workbench retest"
   search_fixed_string 'invalidAdapters' "$postdeploy_summary" || die "postdeploy summary must render Data Factory adapter drift details"
 }
 

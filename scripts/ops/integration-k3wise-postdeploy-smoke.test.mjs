@@ -180,6 +180,46 @@ const DEFAULT_STAGING_DESCRIPTORS = [
   { id: 'integration_exceptions', name: 'Integration Exceptions', fields: DEFAULT_STAGING_FIELDS.integration_exceptions, fieldDetails: makeFieldDetails('integration_exceptions') },
   { id: 'integration_run_log', name: 'Integration Run Log', fields: DEFAULT_STAGING_FIELDS.integration_run_log, fieldDetails: makeFieldDetails('integration_run_log') },
 ]
+const DEFAULT_SYSTEMS = [
+  {
+    id: 'staging_source_1',
+    tenantId: 'tenant-smoke',
+    workspaceId: null,
+    name: 'MetaSheet Staging Source',
+    kind: 'metasheet:staging',
+    role: 'source',
+    status: 'active',
+  },
+  {
+    id: 'k3_target_1',
+    tenantId: 'tenant-smoke',
+    workspaceId: null,
+    name: 'K3 WISE WebAPI',
+    kind: 'erp:k3-wise-webapi',
+    role: 'target',
+    status: 'active',
+  },
+]
+const DEFAULT_STAGING_OBJECTS = [
+  {
+    name: 'standard_materials',
+    label: 'Standard Materials',
+    operations: ['read'],
+    schema: makeFieldDetails('standard_materials').map((field) => ({ name: field.id, ...field })),
+  },
+]
+const DEFAULT_K3_OBJECTS = [
+  {
+    name: 'material',
+    label: 'K3 WISE Material',
+    operations: ['upsert'],
+    schema: [
+      { name: 'FNumber', label: 'Material Code', type: 'string', required: true },
+      { name: 'FName', label: 'Material Name', type: 'string', required: true },
+      { name: 'FBaseUnitID', label: 'Base Unit', type: 'string' },
+    ],
+  },
+]
 
 function makeTmpDir() {
   return mkdtempSync(path.join(tmpdir(), 'integration-k3wise-postdeploy-smoke-'))
@@ -232,9 +272,30 @@ function sendHtml(res, status, body) {
   res.end(body)
 }
 
+function readRequestBody(req) {
+  return new Promise((resolve) => {
+    let body = ''
+    req.setEncoding('utf8')
+    req.on('data', (chunk) => {
+      body += chunk
+    })
+    req.on('end', () => {
+      if (!body) {
+        resolve(null)
+        return
+      }
+      try {
+        resolve(JSON.parse(body))
+      } catch {
+        resolve({ raw: body })
+      }
+    })
+  })
+}
+
 function createFakeServer(options = {}) {
   const requests = []
-  const server = http.createServer((req, res) => {
+  const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://127.0.0.1')
     requests.push({
       method: req.method,
@@ -314,10 +375,22 @@ function createFakeServer(options = {}) {
       return
     }
 
+    if (req.method === 'GET' && url.pathname === '/api/integration/external-systems') {
+      if (req.headers.authorization !== 'Bearer test.jwt.token') {
+        sendJson(res, 401, { ok: false, error: { message: 'bad token' } })
+        return
+      }
+      if (options.failControlPlanePath === url.pathname) {
+        sendJson(res, 500, { ok: false, error: { message: `${url.pathname} unavailable` } })
+        return
+      }
+      sendJson(res, 200, { ok: true, data: options.externalSystems || [] })
+      return
+    }
+
     if (
       req.method === 'GET' &&
       [
-        '/api/integration/external-systems',
         '/api/integration/pipelines',
         '/api/integration/runs',
         '/api/integration/dead-letters',
@@ -332,6 +405,76 @@ function createFakeServer(options = {}) {
         return
       }
       sendJson(res, 200, { ok: true, data: [] })
+      return
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/integration/external-systems/staging_source_1/objects') {
+      if (req.headers.authorization !== 'Bearer test.jwt.token') {
+        sendJson(res, 401, { ok: false, error: { message: 'bad token' } })
+        return
+      }
+      sendJson(res, 200, { ok: true, data: options.stagingObjects || DEFAULT_STAGING_OBJECTS })
+      return
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/integration/external-systems/staging_source_1/schema') {
+      if (req.headers.authorization !== 'Bearer test.jwt.token') {
+        sendJson(res, 401, { ok: false, error: { message: 'bad token' } })
+        return
+      }
+      sendJson(res, 200, {
+        ok: true,
+        data: options.stagingSchema || {
+          object: url.searchParams.get('object') || 'standard_materials',
+          fields: DEFAULT_STAGING_OBJECTS[0].schema,
+        },
+      })
+      return
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/integration/external-systems/k3_target_1/objects') {
+      if (req.headers.authorization !== 'Bearer test.jwt.token') {
+        sendJson(res, 401, { ok: false, error: { message: 'bad token' } })
+        return
+      }
+      sendJson(res, 200, { ok: true, data: options.k3Objects || DEFAULT_K3_OBJECTS })
+      return
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/integration/external-systems/k3_target_1/schema') {
+      if (req.headers.authorization !== 'Bearer test.jwt.token') {
+        sendJson(res, 401, { ok: false, error: { message: 'bad token' } })
+        return
+      }
+      sendJson(res, 200, {
+        ok: true,
+        data: options.k3Schema || {
+          object: url.searchParams.get('object') || 'material',
+          fields: DEFAULT_K3_OBJECTS[0].schema,
+          template: { id: 'material', bodyKey: 'Data' },
+        },
+      })
+      return
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/integration/pipelines') {
+      if (req.headers.authorization !== 'Bearer test.jwt.token') {
+        sendJson(res, 401, { ok: false, error: { message: 'bad token' } })
+        return
+      }
+      if (options.failPipelineSave) {
+        sendJson(res, 500, { ok: false, error: { code: '22P02', message: '类型json的输入语法无效' } })
+        return
+      }
+      const body = await readRequestBody(req)
+      sendJson(res, 201, {
+        ok: true,
+        data: {
+          ...body,
+          id: body?.id || 'pipe_smoke',
+          fieldMappings: Array.isArray(body?.fieldMappings) ? body.fieldMappings : [],
+        },
+      })
       return
     }
 
@@ -492,6 +635,106 @@ test('authenticated postdeploy smoke validates route and staging contracts witho
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/pipelines'))
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/runs'))
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/dead-letters'))
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('issue1542 workbench smoke verifies staging schema and draft pipeline save', async () => {
+  const fake = createFakeServer({ externalSystems: DEFAULT_SYSTEMS })
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--auth-token', 'test.jwt.token',
+      '--require-auth',
+      '--issue1542-workbench-smoke',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout.includes('test.jwt.token'), false)
+    const evidenceText = readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8')
+    assert.equal(evidenceText.includes('test.jwt.token'), false)
+    const evidence = JSON.parse(evidenceText)
+    assert.equal(evidence.summary.fail, 0)
+    assert.equal(evidence.checks.find((check) => check.id === 'issue1542-system-readiness').status, 'pass')
+    const stagingSchema = evidence.checks.find((check) => check.id === 'issue1542-staging-source-schema')
+    assert.equal(stagingSchema.status, 'pass')
+    assert.equal(stagingSchema.object, 'standard_materials')
+    assert.ok(stagingSchema.fieldCount >= 3)
+    const k3Schema = evidence.checks.find((check) => check.id === 'issue1542-k3-material-schema')
+    assert.equal(k3Schema.status, 'pass')
+    assert.equal(k3Schema.object, 'material')
+    const pipelineSave = evidence.checks.find((check) => check.id === 'issue1542-pipeline-save')
+    assert.equal(pipelineSave.status, 'pass')
+    assert.equal(pipelineSave.pipelineId, 'issue1542_postdeploy_staging_material_smoke')
+    assert.equal(pipelineSave.fieldMappings, 3)
+
+    const pipelineRequest = fake.requests.find((request) => request.method === 'POST' && request.pathname === '/api/integration/pipelines')
+    assert.ok(pipelineRequest, 'issue1542 smoke saves a draft pipeline metadata record')
+    assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/external-systems/staging_source_1/schema'))
+    assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/external-systems/k3_target_1/schema'))
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('issue1542 workbench smoke fails when staging schema is empty', async () => {
+  const fake = createFakeServer({
+    externalSystems: DEFAULT_SYSTEMS,
+    stagingSchema: { object: 'standard_materials', fields: [] },
+  })
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--auth-token', 'test.jwt.token',
+      '--require-auth',
+      '--issue1542-workbench-smoke',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 1)
+    const evidence = JSON.parse(readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8'))
+    const stagingSchema = evidence.checks.find((check) => check.id === 'issue1542-staging-source-schema')
+    assert.equal(stagingSchema.status, 'fail')
+    assert.match(stagingSchema.error, /schema is missing required fields/)
+    assert.equal(stagingSchema.details.fieldCount, 0)
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('issue1542 workbench smoke fails clearly when pipeline save still hits JSONB 22P02', async () => {
+  const fake = createFakeServer({
+    externalSystems: DEFAULT_SYSTEMS,
+    failPipelineSave: true,
+  })
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--auth-token', 'test.jwt.token',
+      '--require-auth',
+      '--issue1542-workbench-smoke',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 1)
+    assert.equal(result.stdout.includes('test.jwt.token'), false)
+    assert.equal(result.stderr.includes('test.jwt.token'), false)
+    const evidence = JSON.parse(readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8'))
+    const pipelineSave = evidence.checks.find((check) => check.id === 'issue1542-pipeline-save')
+    assert.equal(pipelineSave.status, 'fail')
+    assert.match(pipelineSave.error, /\/api\/integration\/pipelines returned HTTP 500/)
+    assert.equal(pipelineSave.details.body.error.code, '22P02')
   } finally {
     await fake.close()
     rmSync(outDir, { recursive: true, force: true })

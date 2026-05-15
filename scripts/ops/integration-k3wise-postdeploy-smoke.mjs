@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url'
 
 const DEFAULT_BASE_URL = 'http://142.171.239.56:8081'
 const DEFAULT_OUTPUT_ROOT = 'output/integration-k3wise-postdeploy-smoke'
+const ISSUE1542_SMOKE_PIPELINE_ID = 'issue1542_postdeploy_staging_material_smoke'
 const REQUIRED_ADAPTERS = [
   'http',
   'plm:yuantus-wrapper',
@@ -163,9 +164,14 @@ Options:
   --auth-token <token>   Optional bearer token for authenticated checks
   --token-file <path>    Optional file containing bearer token
   --tenant-id <id>       Optional tenant scope for authenticated list probes
+  --workspace-id <id>    Optional workspace scope for authenticated probes
   --require-auth         Fail when no token is supplied or auth checks are skipped
   --out-dir <dir>        Output directory, default ${DEFAULT_OUTPUT_ROOT}/<timestamp>
   --timeout-ms <ms>      Per-request timeout, default 10000
+  --issue1542-workbench-smoke
+                          Opt-in Data Factory #1542 smoke: verify staging schema
+                          discovery and draft pipeline save. Writes metadata only;
+                          never runs dry-run or Save-only.
   --help                 Show this help
 
 Environment fallbacks:
@@ -198,7 +204,9 @@ function parseArgs(argv = process.argv.slice(2)) {
     authToken: envValue('METASHEET_AUTH_TOKEN', 'ADMIN_TOKEN', 'AUTH_TOKEN'),
     tokenFile: envValue('METASHEET_AUTH_TOKEN_FILE', 'AUTH_TOKEN_FILE'),
     tenantId: envValue('METASHEET_TENANT_ID', 'TENANT_ID'),
+    workspaceId: envValue('METASHEET_WORKSPACE_ID', 'WORKSPACE_ID'),
     requireAuth: false,
+    issue1542WorkbenchSmoke: false,
     outDir: '',
     timeoutMs: 10_000,
     help: false,
@@ -223,8 +231,15 @@ function parseArgs(argv = process.argv.slice(2)) {
         opts.tenantId = readRequiredValue(argv, i, arg)
         i += 1
         break
+      case '--workspace-id':
+        opts.workspaceId = readRequiredValue(argv, i, arg)
+        i += 1
+        break
       case '--require-auth':
         opts.requireAuth = true
+        break
+      case '--issue1542-workbench-smoke':
+        opts.issue1542WorkbenchSmoke = true
         break
       case '--out-dir':
         opts.outDir = readRequiredValue(argv, i, arg)
@@ -367,10 +382,21 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 10_000) {
   }
 }
 
-async function requestJson(baseUrl, pathname, { token = '', timeoutMs = 10_000, acceptStatuses = [200] } = {}) {
+async function requestJson(baseUrl, pathname, {
+  token = '',
+  timeoutMs = 10_000,
+  acceptStatuses = [200],
+  method = 'GET',
+  requestBody,
+} = {}) {
   const headers = { Accept: 'application/json' }
+  const request = { headers, method }
+  if (requestBody !== undefined) {
+    headers['Content-Type'] = 'application/json'
+    request.body = JSON.stringify(requestBody)
+  }
   if (token) headers.Authorization = `Bearer ${token}`
-  const response = await fetchWithTimeout(`${baseUrl}${pathname}`, { headers }, timeoutMs)
+  const response = await fetchWithTimeout(`${baseUrl}${pathname}`, request, timeoutMs)
   const text = await response.text()
   let body = null
   if (text) {
@@ -622,6 +648,257 @@ function assertListResponse(body, probeId) {
   return { rows: data.length }
 }
 
+function responseData(body) {
+  return body && Object.prototype.hasOwnProperty.call(body, 'data') ? body.data : body
+}
+
+function requireSystem(systems, { kind, role, label }) {
+  const system = systems.find((candidate) => {
+    if (!candidate || candidate.kind !== kind) return false
+    return !role || candidate.role === role || candidate.role === 'bidirectional'
+  })
+  if (!system) {
+    throw new K3WisePostdeploySmokeError(`${label || kind} system is not configured`, {
+      kind,
+      role: role || null,
+      configuredKinds: systems
+        .filter((candidate) => candidate && typeof candidate.kind === 'string')
+        .map((candidate) => `${candidate.kind}:${candidate.role || 'unknown'}`),
+    })
+  }
+  return system
+}
+
+function assertObjectListed(body, objectName, label) {
+  const data = responseData(body)
+  if (!Array.isArray(data)) {
+    throw new K3WisePostdeploySmokeError(`${label} object list response data must be an array`, {
+      received: Array.isArray(data) ? 'array' : typeof data,
+    })
+  }
+  const object = data.find((item) => item && (item.name === objectName || item.object === objectName))
+  if (!object) {
+    throw new K3WisePostdeploySmokeError(`${label} does not list required object ${objectName}`, {
+      objectName,
+      listedObjects: data
+        .filter((item) => item && (typeof item.name === 'string' || typeof item.object === 'string'))
+        .map((item) => item.name || item.object),
+    })
+  }
+  return object
+}
+
+function assertSchemaFields(body, objectName, requiredFields, label) {
+  const data = responseData(body)
+  const fields = Array.isArray(data?.fields) ? data.fields : []
+  const fieldNames = fields
+    .map((field) => (field && typeof field === 'object' ? field.name || field.id : field))
+    .filter((field) => typeof field === 'string' && field)
+  const missingFields = requiredFields.filter((field) => !fieldNames.includes(field))
+  if (fields.length === 0 || missingFields.length > 0) {
+    throw new K3WisePostdeploySmokeError(`${label} schema is missing required fields`, {
+      objectName,
+      fieldCount: fields.length,
+      requiredFields,
+      missingFields,
+      fieldNames,
+    })
+  }
+  return {
+    object: data?.object || objectName,
+    fieldCount: fields.length,
+    requiredFields,
+  }
+}
+
+function issue1542PipelinePayload({ tenantId, workspaceId, sourceSystemId, targetSystemId }) {
+  return {
+    id: ISSUE1542_SMOKE_PIPELINE_ID,
+    tenantId,
+    workspaceId: workspaceId || null,
+    name: 'Issue 1542 postdeploy smoke: staging material to K3',
+    description: 'Draft metadata-only smoke. Verifies Data Factory pipeline save without running dry-run or Save-only.',
+    sourceSystemId,
+    sourceObject: 'standard_materials',
+    targetSystemId,
+    targetObject: 'material',
+    mode: 'manual',
+    status: 'draft',
+    idempotencyKeyFields: ['code'],
+    options: {
+      target: {
+        autoSubmit: false,
+        autoAudit: false,
+      },
+      workbench: {
+        source: 'integration-k3wise-postdeploy-smoke',
+        issue: '#1542',
+      },
+      k3Template: {
+        id: 'material',
+        version: '1',
+        documentType: 'material',
+        bodyKey: 'Data',
+      },
+    },
+    fieldMappings: [
+      {
+        sourceField: 'code',
+        targetField: 'FNumber',
+        validation: [{ type: 'required' }],
+        sortOrder: 0,
+      },
+      {
+        sourceField: 'name',
+        targetField: 'FName',
+        validation: [{ type: 'required' }],
+        sortOrder: 1,
+      },
+      {
+        sourceField: 'uom',
+        targetField: 'FBaseUnitID',
+        defaultValue: 'PCS',
+        sortOrder: 2,
+      },
+    ],
+  }
+}
+
+function assertPipelineSaveResponse(body) {
+  const data = responseData(body)
+  if (!data || typeof data !== 'object' || !data.id) {
+    throw new K3WisePostdeploySmokeError('pipeline save did not return a pipeline id', {
+      body: sanitizeBody(body),
+    })
+  }
+  if (data.id !== ISSUE1542_SMOKE_PIPELINE_ID) {
+    throw new K3WisePostdeploySmokeError('pipeline save returned an unexpected id', {
+      expected: ISSUE1542_SMOKE_PIPELINE_ID,
+      actual: data.id,
+    })
+  }
+  if (!Array.isArray(data.idempotencyKeyFields) || !data.idempotencyKeyFields.includes('code')) {
+    throw new K3WisePostdeploySmokeError('pipeline save did not hydrate idempotencyKeyFields as an array', {
+      idempotencyKeyFields: data.idempotencyKeyFields,
+    })
+  }
+  if (!data.options || typeof data.options !== 'object' || data.options?.k3Template?.id !== 'material') {
+    throw new K3WisePostdeploySmokeError('pipeline save did not hydrate options.k3Template', {
+      options: sanitizeBody(data.options),
+    })
+  }
+  if (!Array.isArray(data.fieldMappings) || data.fieldMappings.length < 3) {
+    throw new K3WisePostdeploySmokeError('pipeline save did not return field mappings', {
+      fieldMappingsLength: Array.isArray(data.fieldMappings) ? data.fieldMappings.length : null,
+    })
+  }
+  return {
+    pipelineId: data.id,
+    status: data.status || null,
+    fieldMappings: data.fieldMappings.length,
+  }
+}
+
+async function runIssue1542WorkbenchSmoke({ baseUrl, token, tenantId, workspaceId, timeoutMs }) {
+  const checks = []
+  let systems = []
+  let stagingSystem = null
+  let k3TargetSystem = null
+
+  try {
+    const systemsResponse = await requestJson(baseUrl, withQuery('/api/integration/external-systems', {
+      tenantId,
+      workspaceId,
+      limit: 100,
+    }), { token, timeoutMs })
+    const data = responseData(systemsResponse.body)
+    if (!Array.isArray(data)) {
+      throw new K3WisePostdeploySmokeError('external systems response data must be an array', {
+        received: Array.isArray(data) ? 'array' : typeof data,
+      })
+    }
+    systems = data
+    stagingSystem = requireSystem(systems, {
+      kind: 'metasheet:staging',
+      role: 'source',
+      label: 'MetaSheet staging source',
+    })
+    k3TargetSystem = requireSystem(systems, {
+      kind: 'erp:k3-wise-webapi',
+      role: 'target',
+      label: 'K3 WISE WebAPI target',
+    })
+    checks.push(result('issue1542-system-readiness', 'pass', {
+      stagingSourceId: stagingSystem.id,
+      targetSystemId: k3TargetSystem.id,
+      systemsChecked: systems.length,
+    }))
+  } catch (error) {
+    return [failResult('issue1542-system-readiness', error)]
+  }
+
+  try {
+    const objects = await requestJson(baseUrl, withQuery(`/api/integration/external-systems/${encodeURIComponent(stagingSystem.id)}/objects`, {
+      tenantId,
+      workspaceId,
+    }), { token, timeoutMs })
+    assertObjectListed(objects.body, 'standard_materials', 'MetaSheet staging source')
+
+    const schema = await requestJson(baseUrl, withQuery(`/api/integration/external-systems/${encodeURIComponent(stagingSystem.id)}/schema`, {
+      tenantId,
+      workspaceId,
+      object: 'standard_materials',
+    }), { token, timeoutMs })
+    checks.push(result('issue1542-staging-source-schema', 'pass', {
+      systemId: stagingSystem.id,
+      ...assertSchemaFields(schema.body, 'standard_materials', ['code', 'name', 'uom'], 'MetaSheet staging source'),
+    }))
+  } catch (error) {
+    checks.push(failResult('issue1542-staging-source-schema', error))
+  }
+
+  try {
+    const objects = await requestJson(baseUrl, withQuery(`/api/integration/external-systems/${encodeURIComponent(k3TargetSystem.id)}/objects`, {
+      tenantId,
+      workspaceId,
+    }), { token, timeoutMs })
+    assertObjectListed(objects.body, 'material', 'K3 WISE target')
+
+    const schema = await requestJson(baseUrl, withQuery(`/api/integration/external-systems/${encodeURIComponent(k3TargetSystem.id)}/schema`, {
+      tenantId,
+      workspaceId,
+      object: 'material',
+    }), { token, timeoutMs })
+    checks.push(result('issue1542-k3-material-schema', 'pass', {
+      systemId: k3TargetSystem.id,
+      ...assertSchemaFields(schema.body, 'material', ['FNumber', 'FName', 'FBaseUnitID'], 'K3 WISE target'),
+    }))
+  } catch (error) {
+    checks.push(failResult('issue1542-k3-material-schema', error))
+  }
+
+  try {
+    const payload = issue1542PipelinePayload({
+      tenantId,
+      workspaceId,
+      sourceSystemId: stagingSystem.id,
+      targetSystemId: k3TargetSystem.id,
+    })
+    const saved = await requestJson(baseUrl, '/api/integration/pipelines', {
+      token,
+      timeoutMs,
+      method: 'POST',
+      requestBody: payload,
+      acceptStatuses: [200, 201],
+    })
+    checks.push(result('issue1542-pipeline-save', 'pass', assertPipelineSaveResponse(saved.body)))
+  } catch (error) {
+    checks.push(failResult('issue1542-pipeline-save', error))
+  }
+
+  return checks
+}
+
 function assertFrontendAppShell(page, label) {
   if (!/id=["']app["']/.test(page.text) && !/MetaSheet|metasheet/i.test(page.text)) {
     throw new K3WisePostdeploySmokeError(`${label} frontend route did not look like the app shell`)
@@ -708,6 +985,11 @@ async function runSmoke(opts) {
       reason: 'no bearer token supplied',
     })
     checks.push(skipped)
+    if (opts.issue1542WorkbenchSmoke) {
+      checks.push(result('issue1542-workbench-smoke', 'fail', {
+        reason: '--issue1542-workbench-smoke requires an auth token because it probes configured systems and saves draft pipeline metadata',
+      }))
+    }
   } else {
     let tenantId = opts.tenantId
     try {
@@ -758,6 +1040,22 @@ async function runSmoke(opts) {
       checks.push(result('staging-descriptor-contract', 'pass', assertStagingDescriptors(descriptors.body)))
     } catch (error) {
       checks.push(failResult('staging-descriptor-contract', error))
+    }
+
+    if (opts.issue1542WorkbenchSmoke) {
+      if (!tenantId) {
+        checks.push(result('issue1542-workbench-smoke', 'fail', {
+          reason: 'tenantId could not be resolved from --tenant-id, environment, or /api/auth/me',
+        }))
+      } else {
+        checks.push(...await runIssue1542WorkbenchSmoke({
+          baseUrl: opts.baseUrl,
+          token,
+          tenantId,
+          workspaceId: opts.workspaceId || '',
+          timeoutMs: opts.timeoutMs,
+        }))
+      }
     }
   }
 
