@@ -14,6 +14,8 @@ export type ParallelJoinMode = 'all' | 'any'
 export type EmptyAssigneePolicy = 'error' | 'auto-approve'
 export type ApprovalActionType = 'approve' | 'reject' | 'transfer' | 'revoke' | 'comment' | 'return'
 export type ApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'revoked' | 'cancelled'
+export const APPROVAL_TERMINAL_STATUSES = ['approved', 'rejected', 'revoked', 'cancelled'] as const
+export type ApprovalTerminalStatus = typeof APPROVAL_TERMINAL_STATUSES[number]
 export type ApprovalTemplateStatus = 'draft' | 'published' | 'archived'
 export type ApprovalTemplateVisibilityType = 'all' | 'dept' | 'role' | 'user'
 export type FormFieldVisibilityOperator = 'eq' | 'neq' | 'in' | 'isEmpty' | 'notEmpty'
@@ -45,6 +47,7 @@ export interface ApprovalNodeConfig {
   assigneeIds: string[]
   approvalMode?: ApprovalMode
   emptyAssigneePolicy?: EmptyAssigneePolicy
+  autoApprovalPolicy?: AutoApprovalPolicy
 }
 
 export interface ConditionNodeConfig {
@@ -95,7 +98,23 @@ export interface ApprovalGraph {
 export interface RuntimePolicy {
   allowRevoke: boolean
   revokeBeforeNodeKeys?: string[]
+  autoApproval?: AutoApprovalPolicy
 }
+
+export interface AutoApprovalPolicy {
+  mergeWithRequester?: boolean
+  mergeAdjacentApprover?: boolean
+  dedupeHistoricalApprover?: boolean
+  actorMode?: AutoApprovalActorMode
+}
+
+export type AutoApprovalActorMode = 'system' | 'original_approver'
+export type AutoApprovalPolicySource = 'node' | 'template'
+export type AutoApprovalMergeReason =
+  | 'auto-merge-requester'
+  | 'auto-merge-adjacent'
+  | 'auto-dedupe-historical'
+export type ApprovalAutoApprovalReason = 'empty-assignee' | AutoApprovalMergeReason
 
 export interface RuntimeGraph extends ApprovalGraph {
   policy: RuntimePolicy

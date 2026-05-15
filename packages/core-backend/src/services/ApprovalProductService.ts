@@ -2,6 +2,11 @@ import crypto from 'crypto'
 import { pool } from '../db/pg'
 import type {
   ApprovalActionRequest,
+  ApprovalAutoApprovalReason,
+  AutoApprovalActorMode,
+  AutoApprovalMergeReason,
+  AutoApprovalPolicy,
+  AutoApprovalPolicySource,
   ApprovalTemplateDetailDTO,
   ApprovalTemplateListItemDTO,
   ApprovalTemplateVisibilityScope,
@@ -19,9 +24,12 @@ import type {
   RuntimePolicy,
   UpdateApprovalTemplateRequest,
 } from '../types/approval-product'
+import { APPROVAL_TERMINAL_STATUSES } from '../types/approval-product'
 import {
   ApprovalGraphExecutor,
+  type ApprovalGraphAssignment,
   type ApprovalGraphAutoApprovalEvent,
+  type ApprovalGraphResolution,
   type ParallelInstanceState,
   pruneHiddenFormData,
   validateApprovalFormData,
@@ -166,6 +174,23 @@ type ApprovalRecordInsert = {
   targetUserId?: string | null
 }
 
+type ApprovalHistoryEntry = {
+  nodeKey: string
+  actorId: string
+  recordId?: string
+  reason?: ApprovalAutoApprovalReason | string
+}
+
+type AutoApprovalEvaluation = {
+  assignment: ApprovalGraphAssignment
+  event: ApprovalGraphAutoApprovalEvent
+}
+
+type EffectiveAutoApprovalPolicy = {
+  policy: AutoApprovalPolicy
+  source: AutoApprovalPolicySource
+}
+
 type ApprovalDbClient = {
   query: typeof pool.query
   release: () => void
@@ -213,6 +238,8 @@ const CONDITION_OPERATORS = new Set(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in'
 const APPROVAL_MODES = new Set<ApprovalMode>(['single', 'all', 'any'])
 const PARALLEL_JOIN_MODES = new Set(['all', 'any'])
 const EMPTY_ASSIGNEE_POLICIES = new Set<EmptyAssigneePolicy>(['error', 'auto-approve'])
+const AUTO_APPROVAL_ACTOR_MODES = new Set<AutoApprovalActorMode>(['system', 'original_approver'])
+const APPROVAL_MAX_AUTO_STEPS = 50
 
 function toNullableRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -246,6 +273,56 @@ function normalizeEmptyAssigneePolicy(
     failValidation(context, `${path} must be error or auto-approve`)
   }
   return value as EmptyAssigneePolicy
+}
+
+function normalizeOptionalBoolean(
+  value: unknown,
+  context: ValidationContext,
+  path: string,
+): boolean | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'boolean') {
+    failValidation(context, `${path} must be a boolean`)
+  }
+  return value
+}
+
+function normalizeAutoApprovalPolicy(
+  value: unknown,
+  context: ValidationContext,
+  path: string,
+): AutoApprovalPolicy | undefined {
+  if (value === undefined) return undefined
+  if (!isRecord(value)) {
+    failValidation(context, `${path} must be an object`)
+  }
+
+  const mergeWithRequester = normalizeOptionalBoolean(
+    value.mergeWithRequester,
+    context,
+    `${path}.mergeWithRequester`,
+  )
+  const mergeAdjacentApprover = normalizeOptionalBoolean(
+    value.mergeAdjacentApprover,
+    context,
+    `${path}.mergeAdjacentApprover`,
+  )
+  const dedupeHistoricalApprover = normalizeOptionalBoolean(
+    value.dedupeHistoricalApprover,
+    context,
+    `${path}.dedupeHistoricalApprover`,
+  )
+  if (value.actorMode !== undefined
+    && (typeof value.actorMode !== 'string' || !AUTO_APPROVAL_ACTOR_MODES.has(value.actorMode as AutoApprovalActorMode))) {
+    failValidation(context, `${path}.actorMode must be system or original_approver`)
+  }
+
+  return {
+    ...(mergeWithRequester !== undefined ? { mergeWithRequester } : {}),
+    ...(mergeAdjacentApprover !== undefined ? { mergeAdjacentApprover } : {}),
+    ...(dedupeHistoricalApprover !== undefined ? { dedupeHistoricalApprover } : {}),
+    ...(value.actorMode ? { actorMode: value.actorMode as AutoApprovalActorMode } : {}),
+  }
 }
 
 function failValidation(context: ValidationContext, message: string): never {
@@ -446,7 +523,11 @@ function validateFormFieldVisibilityRules(
   fields.forEach((field) => visit(field.id, []))
 }
 
-function normalizeApprovalGraph(value: unknown, context: ValidationContext): ApprovalGraph {
+function normalizeApprovalGraph(
+  value: unknown,
+  context: ValidationContext,
+  options: { allowParallelDuplicateAssignees?: boolean } = {},
+): ApprovalGraph {
   if (!isRecord(value) || !Array.isArray(value.nodes) || !Array.isArray(value.edges)) {
     failValidation(context, 'approvalGraph must contain nodes and edges')
   }
@@ -490,11 +571,17 @@ function normalizeApprovalGraph(value: unknown, context: ValidationContext): App
             context,
             `approvalGraph.nodes[${index}].config.emptyAssigneePolicy`,
           )
+          const autoApprovalPolicy = normalizeAutoApprovalPolicy(
+            node.config.autoApprovalPolicy,
+            context,
+            `approvalGraph.nodes[${index}].config.autoApprovalPolicy`,
+          )
           normalizedNode.config = {
             assigneeType: node.config.assigneeType,
             assigneeIds: node.config.assigneeIds.map((entry) => entry.trim()),
             ...(approvalMode ? { approvalMode } : {}),
             ...(emptyAssigneePolicy ? { emptyAssigneePolicy } : {}),
+            ...(autoApprovalPolicy ? { autoApprovalPolicy } : {}),
           }
         }
         break
@@ -645,16 +732,18 @@ function normalizeApprovalGraph(value: unknown, context: ValidationContext): App
       )
       assigneesPerBranch.push(branchAssignees)
     }
-    const seen = new Set<string>()
-    for (const branchAssignees of assigneesPerBranch) {
-      for (const assignee of branchAssignees) {
-        if (seen.has(assignee)) {
-          failValidation(
-            context,
-            `approvalGraph parallel node ${node.key} has duplicate approver '${assignee}' across branches`,
-          )
+    if (!options.allowParallelDuplicateAssignees) {
+      const seen = new Set<string>()
+      for (const branchAssignees of assigneesPerBranch) {
+        for (const assignee of branchAssignees) {
+          if (seen.has(assignee)) {
+            failValidation(
+              context,
+              `approvalGraph parallel node ${node.key} has duplicate approver '${assignee}' across branches`,
+            )
+          }
+          seen.add(assignee)
         }
-        seen.add(assignee)
       }
     }
   }
@@ -997,8 +1086,12 @@ function applyTemplateVisibilityFilter(
   return index
 }
 
-function assertApprovalGraph(value: unknown, context: ValidationContext = REQUEST_VALIDATION_CONTEXT): ApprovalGraph {
-  return normalizeApprovalGraph(value, context)
+function assertApprovalGraph(
+  value: unknown,
+  context: ValidationContext = REQUEST_VALIDATION_CONTEXT,
+  options?: { allowParallelDuplicateAssignees?: boolean },
+): ApprovalGraph {
+  return normalizeApprovalGraph(value, context, options)
 }
 
 function asFormSchema(value: Record<string, unknown>): FormSchema {
@@ -1009,7 +1102,7 @@ function assertRuntimePolicy(
   value: unknown,
   context: ValidationContext = REQUEST_VALIDATION_CONTEXT,
 ): RuntimePolicy {
-  const policy = value as { allowRevoke?: unknown; revokeBeforeNodeKeys?: unknown } | null
+  const policy = value as { allowRevoke?: unknown; revokeBeforeNodeKeys?: unknown; autoApproval?: unknown } | null
   if (typeof value !== 'object' || value === null || typeof policy?.allowRevoke !== 'boolean') {
     failValidation(context, 'policy.allowRevoke is required')
   }
@@ -1020,11 +1113,13 @@ function assertRuntimePolicy(
   ) {
     failValidation(context, 'policy.revokeBeforeNodeKeys must be a string array')
   }
+  const autoApproval = normalizeAutoApprovalPolicy(policy.autoApproval, context, 'policy.autoApproval')
   return {
     allowRevoke: policy.allowRevoke,
     revokeBeforeNodeKeys: Array.isArray(policy.revokeBeforeNodeKeys)
       ? policy.revokeBeforeNodeKeys.map((item) => item.trim())
       : undefined,
+    ...(autoApproval ? { autoApproval } : {}),
   }
 }
 
@@ -1033,14 +1128,17 @@ function asRuntimeGraph(value: Record<string, unknown>): RuntimeGraph {
     failValidation(STORED_RUNTIME_CONTEXT, 'runtimeGraph must be an object')
   }
 
+  const policy = assertRuntimePolicy(value.policy, STORED_RUNTIME_CONTEXT)
   const graph = assertApprovalGraph(
     {
       nodes: value.nodes,
       edges: value.edges,
     },
     STORED_RUNTIME_CONTEXT,
+    {
+      allowParallelDuplicateAssignees: policy.autoApproval?.mergeAdjacentApprover === true,
+    },
   )
-  const policy = assertRuntimePolicy(value.policy, STORED_RUNTIME_CONTEXT)
 
   return deepFreeze({
     ...graph,
@@ -1055,6 +1153,7 @@ function buildRuntimeGraph(approvalGraph: ApprovalGraph, policy: RuntimePolicy):
     policy: {
       allowRevoke: policy.allowRevoke,
       ...(policy.revokeBeforeNodeKeys ? { revokeBeforeNodeKeys: [...policy.revokeBeforeNodeKeys] } : {}),
+      ...(policy.autoApproval ? { autoApproval: { ...policy.autoApproval } } : {}),
     },
   })
 }
@@ -1108,12 +1207,509 @@ function readParallelBranchStates(metadata: unknown): ParallelInstanceState | nu
   }
 }
 
+function hasEnabledAutoApprovalRule(policy: AutoApprovalPolicy | undefined): policy is AutoApprovalPolicy {
+  return Boolean(
+    policy?.mergeWithRequester ||
+    policy?.mergeAdjacentApprover ||
+    policy?.dedupeHistoricalApprover,
+  )
+}
+
+function getApprovalNodeConfig(runtimeGraph: RuntimeGraph, nodeKey: string): ApprovalGraph['nodes'][number]['config'] | null {
+  const node = runtimeGraph.nodes.find((entry) => entry.key === nodeKey)
+  return node?.type === 'approval' ? node.config : null
+}
+
+function getEffectiveAutoApprovalPolicy(
+  runtimeGraph: RuntimeGraph,
+  nodeKey: string,
+): EffectiveAutoApprovalPolicy | null {
+  const nodeConfig = getApprovalNodeConfig(runtimeGraph, nodeKey)
+  if (isRecord(nodeConfig) && nodeConfig.autoApprovalPolicy !== undefined) {
+    const policy = nodeConfig.autoApprovalPolicy as AutoApprovalPolicy
+    return hasEnabledAutoApprovalRule(policy) ? { policy, source: 'node' } : null
+  }
+  return hasEnabledAutoApprovalRule(runtimeGraph.policy.autoApproval)
+    ? { policy: runtimeGraph.policy.autoApproval, source: 'template' }
+    : null
+}
+
+function runtimeGraphHasAutoApprovalPolicy(runtimeGraph: RuntimeGraph): boolean {
+  return hasEnabledAutoApprovalRule(runtimeGraph.policy.autoApproval)
+    || runtimeGraph.nodes.some((node) => {
+      if (node.type !== 'approval' || !isRecord(node.config)) return false
+      return hasEnabledAutoApprovalRule(node.config.autoApprovalPolicy as AutoApprovalPolicy | undefined)
+    })
+}
+
+function getAutoApprovalActorMode(policy: AutoApprovalPolicy): AutoApprovalActorMode {
+  return policy.actorMode ?? 'system'
+}
+
+function findLatestApprovalHistory(
+  history: ApprovalHistoryEntry[],
+  predicate: (entry: ApprovalHistoryEntry) => boolean,
+): ApprovalHistoryEntry | null {
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const entry = history[index]
+    if (predicate(entry)) return entry
+  }
+  return null
+}
+
+function buildAutoApprovalEvent(
+  assignment: ApprovalGraphAssignment,
+  approvalMode: ApprovalMode,
+  reason: AutoApprovalMergeReason,
+  policy: EffectiveAutoApprovalPolicy,
+  matchedAgainst?: { nodeKey: string; recordId?: string },
+): ApprovalGraphAutoApprovalEvent {
+  const actorMode = getAutoApprovalActorMode(policy.policy)
+  return {
+    nodeKey: assignment.nodeKey,
+    sourceStep: assignment.sourceStep,
+    approvalMode,
+    reason,
+    metadata: {
+      policySource: policy.source,
+      originalApprover: {
+        type: assignment.assignmentType,
+        id: assignment.assigneeId,
+      },
+      ...(matchedAgainst ? { matchedAgainst } : {}),
+      actorMode,
+    },
+  }
+}
+
+function buildSkippedAutoApprovalEvent(
+  assignment: ApprovalGraphAssignment,
+  approvalMode: ApprovalMode,
+  policy: EffectiveAutoApprovalPolicy,
+  conflictBranches: string[],
+): ApprovalGraphAutoApprovalEvent {
+  const actorMode = getAutoApprovalActorMode(policy.policy)
+  return {
+    nodeKey: assignment.nodeKey,
+    sourceStep: assignment.sourceStep,
+    approvalMode,
+    reason: 'auto-merge-adjacent',
+    metadata: {
+      skipped: true,
+      skipReason: 'cross_branch_adjacency_conflict',
+      conflictBranches,
+      policySource: policy.source,
+      originalApprover: {
+        type: assignment.assignmentType,
+        id: assignment.assigneeId,
+      },
+      actorMode,
+    },
+  }
+}
+
+function evaluateAutoApprovalAssignment(
+  runtimeGraph: RuntimeGraph,
+  executor: ApprovalGraphExecutor,
+  assignment: ApprovalGraphAssignment,
+  requesterId: string | null,
+  history: ApprovalHistoryEntry[],
+): AutoApprovalEvaluation | null {
+  if (assignment.assignmentType !== 'user') return null
+
+  const effectivePolicy = getEffectiveAutoApprovalPolicy(runtimeGraph, assignment.nodeKey)
+  if (!effectivePolicy) return null
+
+  const approvalMode = executor.getApprovalMode(assignment.nodeKey)
+  if (effectivePolicy.policy.mergeWithRequester && requesterId && assignment.assigneeId === requesterId) {
+    return {
+      assignment,
+      event: buildAutoApprovalEvent(assignment, approvalMode, 'auto-merge-requester', effectivePolicy),
+    }
+  }
+
+  if (effectivePolicy.policy.mergeAdjacentApprover) {
+    const adjacent = findLatestApprovalHistory(
+      history,
+      (entry) => entry.nodeKey !== assignment.nodeKey,
+    )
+    if (adjacent?.actorId === assignment.assigneeId) {
+      return {
+        assignment,
+        event: buildAutoApprovalEvent(
+          assignment,
+          approvalMode,
+          'auto-merge-adjacent',
+          effectivePolicy,
+          {
+            nodeKey: adjacent.nodeKey,
+            ...(adjacent.recordId ? { recordId: adjacent.recordId } : {}),
+          },
+        ),
+      }
+    }
+  }
+
+  if (effectivePolicy.policy.dedupeHistoricalApprover) {
+    const historical = findLatestApprovalHistory(
+      history,
+      (entry) => entry.nodeKey !== assignment.nodeKey && entry.actorId === assignment.assigneeId,
+    )
+    if (historical) {
+      return {
+        assignment,
+        event: buildAutoApprovalEvent(
+          assignment,
+          approvalMode,
+          'auto-dedupe-historical',
+          effectivePolicy,
+          {
+            nodeKey: historical.nodeKey,
+            ...(historical.recordId ? { recordId: historical.recordId } : {}),
+          },
+        ),
+      }
+    }
+  }
+
+  return null
+}
+
+function evaluateSkippedCrossBranchAdjacent(
+  runtimeGraph: RuntimeGraph,
+  executor: ApprovalGraphExecutor,
+  assignment: ApprovalGraphAssignment,
+  conflictBranches: string[],
+): ApprovalGraphAutoApprovalEvent | null {
+  if (assignment.assignmentType !== 'user') return null
+  const effectivePolicy = getEffectiveAutoApprovalPolicy(runtimeGraph, assignment.nodeKey)
+  if (!effectivePolicy?.policy.mergeAdjacentApprover) return null
+  return buildSkippedAutoApprovalEvent(
+    assignment,
+    executor.getApprovalMode(assignment.nodeKey),
+    effectivePolicy,
+    conflictBranches,
+  )
+}
+
+function actorIdForAutoApprovalEvent(event: ApprovalGraphAutoApprovalEvent): string {
+  const metadata = event.metadata ?? {}
+  if (metadata.actorMode === 'original_approver' && isRecord(metadata.originalApprover)) {
+    const id = metadata.originalApprover.id
+    if (typeof id === 'string' && id.trim().length > 0) return id
+  }
+  return 'system:auto-approval'
+}
+
+function actorNameForAutoApprovalEvent(event: ApprovalGraphAutoApprovalEvent): string {
+  return actorIdForAutoApprovalEvent(event) === 'system:auto-approval'
+    ? 'System Auto Approval'
+    : actorIdForAutoApprovalEvent(event)
+}
+
+function appendAutoApprovalHistory(history: ApprovalHistoryEntry[], event: ApprovalGraphAutoApprovalEvent): void {
+  const originalApprover = isRecord(event.metadata?.originalApprover)
+    ? event.metadata.originalApprover
+    : null
+  const originalApproverId = typeof originalApprover?.id === 'string' ? originalApprover.id : null
+  history.push({
+    nodeKey: event.nodeKey,
+    // Keep the in-memory chain keyed by the business approver even when the
+    // audit row is persisted under the system automation actor.
+    actorId: originalApproverId || actorIdForAutoApprovalEvent(event),
+    reason: event.reason,
+  })
+}
+
 export class ApprovalProductService {
   /**
    * Wave 2 WP5 slice 1 — optional metrics service injection so tests can
    * pass a stub. Production default uses the process-wide singleton.
    */
   constructor(private readonly metrics: ApprovalMetricsService = getApprovalMetricsService()) {}
+
+  private async loadApprovalHistory(
+    client: { query: typeof pool.query },
+    instanceId: string,
+  ): Promise<ApprovalHistoryEntry[]> {
+    const result = await client.query<{
+      id: string | number
+      actor_id: string
+      metadata: Record<string, unknown> | null
+    }>(
+      `SELECT id, actor_id, metadata
+       FROM approval_records
+       WHERE instance_id = $1
+         AND action = 'approve'
+       ORDER BY occurred_at ASC, id ASC`,
+      [instanceId],
+    )
+
+    const entries: Array<ApprovalHistoryEntry | null> = result.rows
+      .map((row): ApprovalHistoryEntry | null => {
+        const metadata = toNullableRecord(row.metadata)
+        const nodeKey = typeof metadata?.nodeKey === 'string' ? metadata.nodeKey : null
+        if (!nodeKey) return null
+        const originalApprover = toNullableRecord(metadata?.originalApprover)
+        const originalApproverId = typeof originalApprover?.id === 'string' ? originalApprover.id : null
+        return {
+          nodeKey,
+          // Persisted actor_id may be the system automation actor; adjacency
+          // matching must use the original approver captured in metadata.
+          actorId: originalApproverId || row.actor_id,
+          recordId: String(row.id),
+          reason: typeof metadata?.reason === 'string' ? metadata.reason : undefined,
+        }
+      })
+    return entries.filter((entry): entry is ApprovalHistoryEntry => Boolean(entry))
+  }
+
+  private applyAutoApprovalCascade(
+    instanceId: string,
+    runtimeGraph: RuntimeGraph,
+    executor: ApprovalGraphExecutor,
+    initialResolution: ApprovalGraphResolution,
+    requesterId: string | null,
+    history: ApprovalHistoryEntry[],
+  ): ApprovalGraphResolution {
+    let resolution: ApprovalGraphResolution = {
+      ...initialResolution,
+      autoApprovalEvents: [...initialResolution.autoApprovalEvents],
+      assignments: [...initialResolution.assignments],
+    }
+    let autoSteps = resolution.autoApprovalEvents.length
+    const reasonChain: ApprovalAutoApprovalReason[] = []
+    for (const event of resolution.autoApprovalEvents) {
+      reasonChain.push(event.reason)
+      appendAutoApprovalHistory(history, event)
+    }
+    const blockedAutoAssignmentKeys = new Set<string>()
+
+    while (resolution.status === 'pending' && resolution.assignments.length > 0) {
+      const candidateNodeKeys = Array.from(new Set(resolution.assignments.map((assignment) => assignment.nodeKey)))
+      if (resolution.parallelState && resolution.currentNodeKey === resolution.parallelState.parallelNodeKey) {
+        const parallelStep = this.applyParallelAutoApprovalStep(
+          runtimeGraph,
+          executor,
+          resolution,
+          requesterId,
+          history,
+          autoSteps,
+          reasonChain,
+          instanceId,
+          blockedAutoAssignmentKeys,
+        )
+        if (!parallelStep.changed) {
+          return resolution
+        }
+        resolution = parallelStep.resolution
+        autoSteps = parallelStep.autoSteps
+        continue
+      }
+      if (candidateNodeKeys.length !== 1) {
+        return resolution
+      }
+      const nodeKey = candidateNodeKeys[0]
+      if (resolution.currentNodeKey !== nodeKey) {
+        return resolution
+      }
+
+      const evaluations = resolution.assignments
+        .filter((assignment) =>
+          !blockedAutoAssignmentKeys.has(`${assignment.nodeKey}:${assignment.assignmentType}:${assignment.assigneeId}`))
+        .map((assignment) => evaluateAutoApprovalAssignment(runtimeGraph, executor, assignment, requesterId, history))
+        .filter((entry): entry is AutoApprovalEvaluation => Boolean(entry))
+      if (evaluations.length === 0) {
+        return resolution
+      }
+
+      autoSteps += evaluations.length
+      reasonChain.push(...evaluations.map((entry) => entry.event.reason))
+      if (autoSteps > APPROVAL_MAX_AUTO_STEPS) {
+        throw new ServiceError(
+          'Approval auto-approval step limit exceeded',
+          500,
+          'APPROVAL_AUTO_STEP_LIMIT_EXCEEDED',
+          {
+            instanceId,
+            autoSteps,
+            lastNodeKey: nodeKey,
+            reasonChain,
+          },
+        )
+      }
+
+      const autoAssignmentKeys = new Set(
+        evaluations.map((entry) => `${entry.assignment.assignmentType}:${entry.assignment.assigneeId}`),
+      )
+      const remainingAssignments = resolution.assignments.filter((assignment) =>
+        !autoAssignmentKeys.has(`${assignment.assignmentType}:${assignment.assigneeId}`))
+      resolution = {
+        ...resolution,
+        autoApprovalEvents: [...resolution.autoApprovalEvents, ...evaluations.map((entry) => entry.event)],
+      }
+      for (const evaluation of evaluations) {
+        appendAutoApprovalHistory(history, evaluation.event)
+      }
+
+      const approvalMode = executor.getApprovalMode(nodeKey)
+      if (approvalMode === 'all' && remainingAssignments.length > 0) {
+        return {
+          ...resolution,
+          assignments: remainingAssignments,
+        }
+      }
+
+      const nextResolution = executor.resolveAfterApprove(nodeKey)
+      autoSteps += nextResolution.autoApprovalEvents.length
+      reasonChain.push(...nextResolution.autoApprovalEvents.map((event) => event.reason))
+      if (autoSteps > APPROVAL_MAX_AUTO_STEPS) {
+        throw new ServiceError(
+          'Approval auto-approval step limit exceeded',
+          500,
+          'APPROVAL_AUTO_STEP_LIMIT_EXCEEDED',
+          {
+            instanceId,
+            autoSteps,
+            lastNodeKey: nextResolution.currentNodeKey,
+            reasonChain,
+          },
+        )
+      }
+      for (const event of nextResolution.autoApprovalEvents) {
+        appendAutoApprovalHistory(history, event)
+      }
+      resolution = {
+        ...nextResolution,
+        autoApprovalEvents: [
+          ...resolution.autoApprovalEvents,
+          ...nextResolution.autoApprovalEvents,
+        ],
+      }
+    }
+
+    return resolution
+  }
+
+  private applyParallelAutoApprovalStep(
+    runtimeGraph: RuntimeGraph,
+    executor: ApprovalGraphExecutor,
+    resolution: ApprovalGraphResolution,
+    requesterId: string | null,
+    history: ApprovalHistoryEntry[],
+    autoSteps: number,
+    reasonChain: ApprovalAutoApprovalReason[],
+    instanceId: string,
+    blockedAutoAssignmentKeys: Set<string>,
+  ): { changed: boolean; resolution: ApprovalGraphResolution; autoSteps: number } {
+    if (!resolution.parallelState) {
+      return { changed: false, resolution, autoSteps }
+    }
+
+    const evaluations = resolution.assignments
+      .filter((assignment) =>
+        !blockedAutoAssignmentKeys.has(`${assignment.nodeKey}:${assignment.assignmentType}:${assignment.assigneeId}`))
+      .map((assignment) => evaluateAutoApprovalAssignment(runtimeGraph, executor, assignment, requesterId, history))
+      .filter((entry): entry is AutoApprovalEvaluation => Boolean(entry))
+    if (evaluations.length === 0) {
+      return { changed: false, resolution, autoSteps }
+    }
+
+    const firstByAssignee = new Map<string, AutoApprovalEvaluation>()
+    const skippedEvents: ApprovalGraphAutoApprovalEvent[] = []
+    for (const evaluation of evaluations) {
+      const key = `${evaluation.assignment.assignmentType}:${evaluation.assignment.assigneeId}`
+      const existing = firstByAssignee.get(key)
+      if (!existing) {
+        firstByAssignee.set(key, evaluation)
+        continue
+      }
+      const skipped = evaluateSkippedCrossBranchAdjacent(
+        runtimeGraph,
+        executor,
+        evaluation.assignment,
+        [existing.assignment.nodeKey, evaluation.assignment.nodeKey],
+      )
+      if (skipped) {
+        skippedEvents.push(skipped)
+        blockedAutoAssignmentKeys.add(
+          `${evaluation.assignment.nodeKey}:${evaluation.assignment.assignmentType}:${evaluation.assignment.assigneeId}`,
+        )
+      }
+    }
+
+    if (skippedEvents.length > 0) {
+      resolution = {
+        ...resolution,
+        autoApprovalEvents: [...resolution.autoApprovalEvents, ...skippedEvents],
+      }
+    }
+
+    const evaluation = [...firstByAssignee.values()][0]
+    if (!evaluation) {
+      return { changed: skippedEvents.length > 0, resolution, autoSteps }
+    }
+
+    autoSteps += 1
+    reasonChain.push(evaluation.event.reason)
+    if (autoSteps > APPROVAL_MAX_AUTO_STEPS) {
+      throw new ServiceError(
+        'Approval auto-approval step limit exceeded',
+        500,
+        'APPROVAL_AUTO_STEP_LIMIT_EXCEEDED',
+        {
+          instanceId,
+          autoSteps,
+          lastNodeKey: evaluation.assignment.nodeKey,
+          reasonChain,
+        },
+      )
+    }
+    appendAutoApprovalHistory(history, evaluation.event)
+
+    const branchResolution = executor.resolveAfterApproveInParallel(
+      evaluation.assignment.nodeKey,
+      resolution.parallelState,
+    )
+    autoSteps += branchResolution.autoApprovalEvents.length
+    reasonChain.push(...branchResolution.autoApprovalEvents.map((event) => event.reason))
+    if (autoSteps > APPROVAL_MAX_AUTO_STEPS) {
+      throw new ServiceError(
+        'Approval auto-approval step limit exceeded',
+        500,
+        'APPROVAL_AUTO_STEP_LIMIT_EXCEEDED',
+        {
+          instanceId,
+          autoSteps,
+          lastNodeKey: branchResolution.currentNodeKey,
+          reasonChain,
+        },
+      )
+    }
+    for (const event of branchResolution.autoApprovalEvents) {
+      appendAutoApprovalHistory(history, event)
+    }
+
+    const remainingAssignments = resolution.assignments.filter((assignment) =>
+      assignment.nodeKey !== evaluation.assignment.nodeKey
+      || assignment.assignmentType !== evaluation.assignment.assignmentType
+      || assignment.assigneeId !== evaluation.assignment.assigneeId)
+
+    return {
+      changed: true,
+      autoSteps,
+      resolution: {
+        ...branchResolution,
+        assignments: [...remainingAssignments, ...branchResolution.assignments],
+        ccEvents: [...resolution.ccEvents, ...branchResolution.ccEvents],
+        autoApprovalEvents: [
+          ...resolution.autoApprovalEvents,
+          evaluation.event,
+          ...branchResolution.autoApprovalEvents,
+        ],
+      },
+    }
+  }
 
   async listTemplates(query: ApprovalTemplateListQuery): Promise<{ data: ApprovalTemplateListItemDTO[]; total: number }> {
     if (!pool) throw new Error('Database not available')
@@ -1456,6 +2052,47 @@ export class ApprovalProductService {
     }
   }
 
+  async assertTemplateVersionDeletable(templateVersionId: string): Promise<void> {
+    if (!pool) throw new Error('Database not available')
+
+    const result = await pool.query<{
+      unfinished_count: string
+      sample_instance_id: string | null
+    }>(
+      `SELECT COUNT(*)::text AS unfinished_count,
+              MIN(id)::text AS sample_instance_id
+       FROM approval_instances
+       WHERE status <> ALL($2::text[])
+         AND (
+           template_version_id = $1
+           -- Defend historical rows where only one version reference column was backfilled.
+           OR published_definition_id IN (
+             SELECT id
+             FROM approval_published_definitions
+             WHERE template_version_id = $1
+           )
+         )`,
+      [templateVersionId, [...APPROVAL_TERMINAL_STATUSES]],
+    )
+
+    const row = result.rows[0]
+    const unfinishedCount = Number.parseInt(row?.unfinished_count ?? '0', 10)
+    if (unfinishedCount > 0) {
+      const sampleInstanceId = row?.sample_instance_id ?? null
+      const message = [
+        `Approval template version cannot be deleted or archived because ${unfinishedCount} `
+          + 'unfinished approval instance(s) still reference it.',
+        `Sample instance id: ${sampleInstanceId ?? 'unknown'}.`,
+      ].join(' ')
+      throw new ServiceError(
+        message,
+        409,
+        'APPROVAL_TEMPLATE_VERSION_IN_USE',
+        { unfinishedCount, sampleInstanceId },
+      )
+    }
+  }
+
   /**
    * Wave 2 WP4 slice 1 — list distinct, non-null categories used by templates
    * in `approval_templates`. Drives the template center dropdown filter.
@@ -1624,8 +2261,11 @@ export class ApprovalProductService {
 
     const runtimeGraph = asRuntimeGraph(bundle.publishedDefinition.runtime_graph)
     const executor = new ApprovalGraphExecutor(runtimeGraph, normalizedFormData)
-    const initial = executor.resolveInitialState()
     const instanceId = crypto.randomUUID()
+    const initialResolution = executor.resolveInitialState()
+    const initial = runtimeGraphHasAutoApprovalPolicy(runtimeGraph)
+      ? this.applyAutoApprovalCascade(instanceId, runtimeGraph, executor, initialResolution, actor.userId, [])
+      : initialResolution
     const requestNo = await this.allocateRequestNo()
 
     const requesterSnapshot = {
@@ -1956,7 +2596,18 @@ export class ApprovalProductService {
         }
 
         await this.deactivateAllActiveAssignments(client, id)
-        const resolution = executor.resolveReturnToNode(targetNodeKey)
+        const returnResolution = executor.resolveReturnToNode(targetNodeKey)
+        const requesterId = toNullableRecord(instance.requester_snapshot)?.id
+        const resolution = runtimeGraphHasAutoApprovalPolicy(runtimeGraph)
+          ? this.applyAutoApprovalCascade(
+              id,
+              runtimeGraph,
+              executor,
+              returnResolution,
+              typeof requesterId === 'string' ? requesterId : null,
+              await this.loadApprovalHistory(client, id),
+            )
+          : returnResolution
         await client.query(
           `UPDATE approval_instances
            SET status = $2,
@@ -2108,9 +2759,25 @@ export class ApprovalProductService {
         }
       }
 
-      const resolution = isInParallelRegion && parallelState && actorBranchNodeKey
+      let resolution = isInParallelRegion && parallelState && actorBranchNodeKey
         ? executor.resolveAfterApproveInParallel(actorBranchNodeKey, parallelState)
         : executor.resolveAfterApprove(currentNodeKey)
+      if (runtimeGraphHasAutoApprovalPolicy(runtimeGraph)) {
+        const approvalHistory = await this.loadApprovalHistory(client, id)
+        approvalHistory.push({
+          nodeKey: currentNodeKey,
+          actorId: actor.userId,
+        })
+        const requesterId = toNullableRecord(instance.requester_snapshot)?.id
+        resolution = this.applyAutoApprovalCascade(
+          id,
+          runtimeGraph,
+          executor,
+          resolution,
+          typeof requesterId === 'string' ? requesterId : null,
+          approvalHistory,
+        )
+      }
 
       const parallelAnyWinner =
         isInParallelRegion
@@ -2399,6 +3066,12 @@ export class ApprovalProductService {
     return this.loadTemplateBundleWithClient(pool, templateId, explicitVersionId, preferredVersion, actor)
   }
 
+  /**
+   * Loads template authoring/creation bundles where choosing the active or
+   * latest template version is intentional. Existing approval instances must
+   * not use this helper to advance; `dispatchAction()` loads the runtime graph
+   * from `instance.published_definition_id` to preserve version-freeze semantics.
+   */
   private async loadTemplateBundleWithClient(
     client: { query: typeof pool.query },
     templateId: string,
@@ -2503,10 +3176,13 @@ export class ApprovalProductService {
     autoApprovalEvents: ApprovalGraphAutoApprovalEvent[],
   ): Promise<void> {
     for (const event of autoApprovalEvents) {
+      const skipped = event.metadata?.skipped === true
+      // The legacy audit action enum has no "skipped automation" value; keep
+      // these informational warnings distinct through metadata.skipReason.
       await this.insertApprovalRecord(client, instanceId, {
-        action: 'approve',
-        actorId: 'system',
-        actorName: 'System',
+        action: skipped ? 'sign' : 'approve',
+        actorId: actorIdForAutoApprovalEvent(event),
+        actorName: actorNameForAutoApprovalEvent(event),
         comment: null,
         fromStatus: status,
         toStatus: status,
@@ -2518,6 +3194,7 @@ export class ApprovalProductService {
           approvalMode: event.approvalMode,
           autoApproved: true,
           reason: event.reason,
+          ...(event.metadata ?? {}),
         },
       })
     }

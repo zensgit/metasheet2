@@ -1,4 +1,5 @@
 import type {
+  ApprovalAutoApprovalReason,
   ApprovalEdge,
   ApprovalMode,
   ApprovalNode,
@@ -29,7 +30,8 @@ export interface ApprovalGraphAutoApprovalEvent {
   nodeKey: string
   sourceStep: number
   approvalMode: ApprovalMode
-  reason: 'empty-assignee'
+  reason: ApprovalAutoApprovalReason
+  metadata?: Record<string, unknown>
 }
 
 /**

@@ -97,6 +97,95 @@ function buildApprovalDto(overrides: Record<string, unknown> = {}) {
   }
 }
 
+function buildNoopMetrics() {
+  return {
+    recordInstanceStart: vi.fn().mockResolvedValue(undefined),
+    recordTerminal: vi.fn().mockResolvedValue(undefined),
+    recordNodeActivation: vi.fn().mockResolvedValue(undefined),
+    recordNodeDecision: vi.fn().mockResolvedValue(undefined),
+    checkSlaBreaches: vi.fn().mockResolvedValue([]),
+    getMetricsSummary: vi.fn(),
+    getInstanceMetrics: vi.fn(),
+    listActiveBreaches: vi.fn(),
+  }
+}
+
+function mockPublishedTemplatePool(runtimeGraph: Record<string, unknown>, requestNo = 'AP-101100') {
+  pgState.pool.query.mockImplementation(async (sql: string) => {
+    const statement = normalize(sql)
+    if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1')) {
+      return {
+        rows: [{
+          id: 'tpl-1',
+          key: 'travel',
+          name: 'Travel Approval',
+          description: null,
+          category: null,
+          visibility_scope: { type: 'all', ids: [] },
+          sla_hours: null,
+          status: 'published',
+          active_version_id: 'ver-1',
+          latest_version_id: 'ver-1',
+          created_at: new Date(),
+          updated_at: new Date(),
+        }],
+        rowCount: 1,
+      }
+    }
+    if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
+      return {
+        rows: [{
+          id: 'ver-1',
+          template_id: 'tpl-1',
+          version: 1,
+          status: 'published',
+          form_schema: { fields: [] },
+          approval_graph: runtimeGraph,
+          created_at: new Date(),
+          updated_at: new Date(),
+        }],
+        rowCount: 1,
+      }
+    }
+    if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
+      return {
+        rows: [{
+          id: 'pub-1',
+          template_id: 'tpl-1',
+          template_version_id: 'ver-1',
+          runtime_graph: runtimeGraph,
+          is_active: true,
+          published_at: new Date(),
+        }],
+        rowCount: 1,
+      }
+    }
+    if (statement.startsWith(`SELECT 'AP-' || nextval('approval_request_no_seq')::text AS request_no`)) {
+      return { rows: [{ request_no: requestNo }], rowCount: 1 }
+    }
+    throw new Error(`Unhandled pool query: ${statement}`)
+  })
+}
+
+function mockInsertOnlyClient() {
+  pgState.client.query.mockImplementation(async (sql: string) => {
+    const statement = normalize(sql)
+    if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+      return { rows: [], rowCount: 0 }
+    }
+    if (statement.startsWith('INSERT INTO approval_instances')) {
+      return { rows: [], rowCount: 1 }
+    }
+    if (statement.startsWith('INSERT INTO approval_assignments')) {
+      return { rows: [], rowCount: 1 }
+    }
+    if (statement.startsWith('INSERT INTO approval_records')) {
+      return { rows: [], rowCount: 1 }
+    }
+    throw new Error(`Unhandled client query: ${statement}`)
+  })
+}
+
 describe('ApprovalProductService', () => {
   beforeEach(() => {
     pgState.pool.connect.mockReset()
@@ -398,6 +487,9 @@ describe('ApprovalProductService', () => {
         }
       }
       if (statement.startsWith('UPDATE approval_assignments SET is_active = FALSE')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('UPDATE approval_instances SET metadata = COALESCE')) {
         return { rows: [], rowCount: 1 }
       }
       if (statement.startsWith('UPDATE approval_instances SET status = $2')) {
@@ -1007,5 +1099,1855 @@ describe('ApprovalProductService', () => {
         terminalState: 'approved',
       }))
     })
+  })
+
+  it('creates new approvals from the currently active published definition', async () => {
+    const runtimeGraph = buildRuntimeGraph()
+
+    pgState.pool.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'tpl-1',
+            key: 'travel',
+            name: 'Travel Approval',
+            description: null,
+            category: null,
+            visibility_scope: { type: 'all', ids: [] },
+            sla_hours: null,
+            status: 'published',
+            active_version_id: 'ver-2',
+            latest_version_id: 'ver-2',
+            created_at: new Date(),
+            updated_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'ver-2',
+            template_id: 'tpl-1',
+            version: 2,
+            status: 'published',
+            form_schema: { fields: [] },
+            approval_graph: runtimeGraph,
+            created_at: new Date(),
+            updated_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
+        return {
+          rows: [{
+            id: 'pub-2',
+            template_id: 'tpl-1',
+            template_version_id: 'ver-2',
+            runtime_graph: runtimeGraph,
+            is_active: true,
+            published_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith(`SELECT 'AP-' || nextval('approval_request_no_seq')::text AS request_no`)) {
+        return { rows: [{ request_no: 'AP-101001' }], rowCount: 1 }
+      }
+      throw new Error(`Unhandled pool query: ${statement}`)
+    })
+
+    pgState.client.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('INSERT INTO approval_instances')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_assignments')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_records')) {
+        return { rows: [], rowCount: 1 }
+      }
+      throw new Error(`Unhandled client query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({
+      templateVersionId: 'ver-2',
+      publishedDefinitionId: 'pub-2',
+    }))
+
+    await service.createApproval(
+      { templateId: 'tpl-1', formData: {} },
+      { userId: 'requester-1' },
+    )
+
+    const versionSelect = pgState.pool.query.mock.calls.find(([sql]) =>
+      normalize(sql as string).startsWith('SELECT * FROM approval_template_versions WHERE id = $1'))
+    expect(versionSelect?.[1]).toEqual(['ver-2', 'tpl-1'])
+
+    const insertInstance = pgState.client.query.mock.calls.find(([sql]) =>
+      normalize(sql as string).startsWith('INSERT INTO approval_instances'))
+    expect(insertInstance?.[1]?.[11]).toBe('ver-2')
+    expect(insertInstance?.[1]?.[12]).toBe('pub-2')
+  })
+
+  it('auto-approves requester-owned initial nodes from the runtime policy snapshot', async () => {
+    const runtimeGraph = buildRuntimeGraph({
+      autoApproval: {
+        mergeWithRequester: true,
+      },
+    })
+
+    pgState.pool.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'tpl-1',
+            key: 'travel',
+            name: 'Travel Approval',
+            description: null,
+            category: null,
+            visibility_scope: { type: 'all', ids: [] },
+            sla_hours: null,
+            status: 'published',
+            active_version_id: 'ver-1',
+            latest_version_id: 'ver-1',
+            created_at: new Date(),
+            updated_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'ver-1',
+            template_id: 'tpl-1',
+            version: 1,
+            status: 'published',
+            form_schema: { fields: [] },
+            approval_graph: runtimeGraph,
+            created_at: new Date(),
+            updated_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
+        return {
+          rows: [{
+            id: 'pub-1',
+            template_id: 'tpl-1',
+            template_version_id: 'ver-1',
+            runtime_graph: runtimeGraph,
+            is_active: true,
+            published_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith(`SELECT 'AP-' || nextval('approval_request_no_seq')::text AS request_no`)) {
+        return { rows: [{ request_no: 'AP-101002' }], rowCount: 1 }
+      }
+      throw new Error(`Unhandled pool query: ${statement}`)
+    })
+
+    pgState.client.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('INSERT INTO approval_instances')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_assignments')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_records')) {
+        return { rows: [], rowCount: 1 }
+      }
+      throw new Error(`Unhandled client query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({
+      status: 'approved',
+      currentStep: 1,
+      currentNodeKey: null,
+      assignments: [],
+    }))
+
+    await service.createApproval(
+      { templateId: 'tpl-1', formData: {} },
+      { userId: 'manager-1' },
+    )
+
+    expect(pgState.client.query.mock.calls.some(([sql]) =>
+      normalize(sql as string).startsWith('INSERT INTO approval_assignments'))).toBe(false)
+    const insertInstance = pgState.client.query.mock.calls.find(([sql]) =>
+      normalize(sql as string).startsWith('INSERT INTO approval_instances'))
+    expect(insertInstance?.[1]?.[1]).toBe('approved')
+    expect(insertInstance?.[1]?.[15]).toBeNull()
+
+    const autoRecordCall = pgState.client.query.mock.calls.find(([sql, params]) =>
+      normalize(sql as string).startsWith('INSERT INTO approval_records') &&
+      JSON.parse(String(params?.[9])).reason === 'auto-merge-requester')
+    expect(autoRecordCall?.[1]?.[2]).toBe('system:auto-approval')
+    expect(JSON.parse(String(autoRecordCall?.[1]?.[9]))).toMatchObject({
+      nodeKey: 'approval_1',
+      autoApproved: true,
+      reason: 'auto-merge-requester',
+      policySource: 'template',
+      originalApprover: {
+        type: 'user',
+        id: 'manager-1',
+      },
+      actorMode: 'system',
+    })
+  })
+
+  it('lets node auto-approval override disable an enabled template policy', async () => {
+    const runtimeGraph = {
+      ...buildRuntimeGraph({
+        autoApproval: {
+          mergeWithRequester: true,
+        },
+      }),
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'approval_1',
+          type: 'approval',
+          config: {
+            assigneeType: 'user',
+            assigneeIds: ['manager-1'],
+            autoApprovalPolicy: { mergeWithRequester: false },
+          },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+    }
+
+    pgState.pool.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'tpl-1',
+            key: 'travel',
+            name: 'Travel Approval',
+            description: null,
+            category: null,
+            visibility_scope: { type: 'all', ids: [] },
+            sla_hours: null,
+            status: 'published',
+            active_version_id: 'ver-1',
+            latest_version_id: 'ver-1',
+            created_at: new Date(),
+            updated_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'ver-1',
+            template_id: 'tpl-1',
+            version: 1,
+            status: 'published',
+            form_schema: { fields: [] },
+            approval_graph: runtimeGraph,
+            created_at: new Date(),
+            updated_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
+        return {
+          rows: [{
+            id: 'pub-1',
+            template_id: 'tpl-1',
+            template_version_id: 'ver-1',
+            runtime_graph: runtimeGraph,
+            is_active: true,
+            published_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith(`SELECT 'AP-' || nextval('approval_request_no_seq')::text AS request_no`)) {
+        return { rows: [{ request_no: 'AP-101003' }], rowCount: 1 }
+      }
+      throw new Error(`Unhandled pool query: ${statement}`)
+    })
+
+    pgState.client.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('INSERT INTO approval_instances')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_assignments')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_records')) {
+        return { rows: [], rowCount: 1 }
+      }
+      throw new Error(`Unhandled client query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({
+      currentNodeKey: 'approval_1',
+      assignments: [{
+        id: 'asg-manager-1',
+        type: 'user',
+        assigneeId: 'manager-1',
+        sourceStep: 1,
+        nodeKey: 'approval_1',
+        isActive: true,
+        metadata: {},
+      }],
+    }))
+
+    await service.createApproval(
+      { templateId: 'tpl-1', formData: {} },
+      { userId: 'manager-1' },
+    )
+
+    expect(pgState.client.query.mock.calls.some(([sql]) =>
+      normalize(sql as string).startsWith('INSERT INTO approval_assignments'))).toBe(true)
+    expect(pgState.client.query.mock.calls.some(([sql, params]) =>
+      normalize(sql as string).startsWith('INSERT INTO approval_records') &&
+      JSON.parse(String(params?.[9])).reason === 'auto-merge-requester')).toBe(false)
+  })
+
+  it('lets node auto-approval override enable a disabled template policy', async () => {
+    const runtimeGraph = {
+      ...buildRuntimeGraph(),
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'approval_1',
+          type: 'approval',
+          config: {
+            assigneeType: 'user',
+            assigneeIds: ['manager-1'],
+            autoApprovalPolicy: { mergeWithRequester: true },
+          },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+    }
+
+    pgState.pool.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'tpl-1',
+            key: 'travel',
+            name: 'Travel Approval',
+            description: null,
+            category: null,
+            visibility_scope: { type: 'all', ids: [] },
+            sla_hours: null,
+            status: 'published',
+            active_version_id: 'ver-1',
+            latest_version_id: 'ver-1',
+            created_at: new Date(),
+            updated_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'ver-1',
+            template_id: 'tpl-1',
+            version: 1,
+            status: 'published',
+            form_schema: { fields: [] },
+            approval_graph: runtimeGraph,
+            created_at: new Date(),
+            updated_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
+        return {
+          rows: [{
+            id: 'pub-1',
+            template_id: 'tpl-1',
+            template_version_id: 'ver-1',
+            runtime_graph: runtimeGraph,
+            is_active: true,
+            published_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith(`SELECT 'AP-' || nextval('approval_request_no_seq')::text AS request_no`)) {
+        return { rows: [{ request_no: 'AP-101004' }], rowCount: 1 }
+      }
+      throw new Error(`Unhandled pool query: ${statement}`)
+    })
+
+    pgState.client.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('INSERT INTO approval_instances')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_assignments')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_records')) {
+        return { rows: [], rowCount: 1 }
+      }
+      throw new Error(`Unhandled client query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({
+      status: 'approved',
+      currentNodeKey: null,
+      assignments: [],
+    }))
+
+    await service.createApproval(
+      { templateId: 'tpl-1', formData: {} },
+      { userId: 'manager-1' },
+    )
+
+    const autoRecordCall = pgState.client.query.mock.calls.find(([sql, params]) =>
+      normalize(sql as string).startsWith('INSERT INTO approval_records') &&
+      JSON.parse(String(params?.[9])).reason === 'auto-merge-requester')
+    expect(JSON.parse(String(autoRecordCall?.[1]?.[9]))).toMatchObject({
+      policySource: 'node',
+      originalApprover: {
+        type: 'user',
+        id: 'manager-1',
+      },
+    })
+  })
+
+  it('uses deterministic requester precedence when multiple auto-approval rules match', async () => {
+    const runtimeGraph = buildRuntimeGraph({
+      autoApproval: {
+        mergeWithRequester: true,
+        dedupeHistoricalApprover: true,
+      },
+    })
+    mockPublishedTemplatePool(runtimeGraph, 'AP-101005')
+    mockInsertOnlyClient()
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({
+      status: 'approved',
+      currentNodeKey: null,
+      assignments: [],
+    }))
+
+    await service.createApproval(
+      { templateId: 'tpl-1', formData: {} },
+      { userId: 'manager-1' },
+    )
+
+    const autoRecordCall = pgState.client.query.mock.calls.find(([sql, params]) =>
+      normalize(sql as string).startsWith('INSERT INTO approval_records') &&
+      JSON.parse(String(params?.[9])).autoApproved === true)
+    expect(JSON.parse(String(autoRecordCall?.[1]?.[9]))).toMatchObject({
+      reason: 'auto-merge-requester',
+      policySource: 'template',
+      originalApprover: {
+        type: 'user',
+        id: 'manager-1',
+      },
+    })
+  })
+
+  it('does not double-emit when empty-assignee auto approval coexists with requester merge policy', async () => {
+    const runtimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'approval_1',
+          type: 'approval',
+          config: {
+            assigneeType: 'user',
+            assigneeIds: [],
+            emptyAssigneePolicy: 'auto-approve',
+            autoApprovalPolicy: { mergeWithRequester: true },
+          },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-approval', source: 'start', target: 'approval_1' },
+        { key: 'edge-approval-end', source: 'approval_1', target: 'end' },
+      ],
+      policy: {
+        allowRevoke: true,
+        autoApproval: {
+          mergeWithRequester: true,
+        },
+      },
+    }
+    mockPublishedTemplatePool(runtimeGraph, 'AP-101006')
+    mockInsertOnlyClient()
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({
+      status: 'approved',
+      currentNodeKey: null,
+      assignments: [],
+    }))
+
+    await service.createApproval(
+      { templateId: 'tpl-1', formData: {} },
+      { userId: 'manager-1' },
+    )
+
+    const autoRecordCalls = pgState.client.query.mock.calls
+      .filter(([sql, params]) =>
+        normalize(sql as string).startsWith('INSERT INTO approval_records') &&
+        JSON.parse(String(params?.[9])).autoApproved === true)
+    const autoRecords = autoRecordCalls.map(([, params]) => JSON.parse(String(params?.[9])))
+
+    expect(autoRecords).toHaveLength(1)
+    expect(autoRecordCalls[0]?.[1]?.[2]).toBe('system:auto-approval')
+    expect(autoRecords[0]).toMatchObject({
+      reason: 'empty-assignee',
+      nodeKey: 'approval_1',
+    })
+  })
+
+  it('keeps pre-pr2 runtime graphs without autoApproval behavior unchanged', async () => {
+    const runtimeGraph = buildRuntimeGraph()
+    mockPublishedTemplatePool(runtimeGraph, 'AP-101007')
+    mockInsertOnlyClient()
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({
+      currentNodeKey: 'approval_1',
+      assignments: [{
+        id: 'asg-manager-1',
+        type: 'user',
+        assigneeId: 'manager-1',
+        sourceStep: 1,
+        nodeKey: 'approval_1',
+        isActive: true,
+        metadata: {},
+      }],
+    }))
+
+    await service.createApproval(
+      { templateId: 'tpl-1', formData: {} },
+      { userId: 'manager-1' },
+    )
+
+    expect(pgState.client.query.mock.calls.some(([sql]) =>
+      normalize(sql as string).startsWith('INSERT INTO approval_assignments'))).toBe(true)
+    expect(pgState.client.query.mock.calls.some(([sql, params]) =>
+      normalize(sql as string).startsWith('INSERT INTO approval_records') &&
+      JSON.parse(String(params?.[9])).autoApproved === true)).toBe(false)
+  })
+
+  it('keeps all-mode approvals pending when requester auto-merge leaves human assignees', async () => {
+    const runtimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'approval_1',
+          type: 'approval',
+          config: {
+            assigneeType: 'user',
+            assigneeIds: ['manager-1', 'manager-2'],
+            approvalMode: 'all',
+          },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-approval', source: 'start', target: 'approval_1' },
+        { key: 'edge-approval-end', source: 'approval_1', target: 'end' },
+      ],
+      policy: {
+        allowRevoke: true,
+        autoApproval: {
+          mergeWithRequester: true,
+        },
+      },
+    }
+    mockPublishedTemplatePool(runtimeGraph, 'AP-101008')
+    mockInsertOnlyClient()
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({
+      currentNodeKey: 'approval_1',
+      assignments: [{
+        id: 'asg-manager-2',
+        type: 'user',
+        assigneeId: 'manager-2',
+        sourceStep: 1,
+        nodeKey: 'approval_1',
+        isActive: true,
+        metadata: {},
+      }],
+    }))
+
+    await service.createApproval(
+      { templateId: 'tpl-1', formData: {} },
+      { userId: 'manager-1' },
+    )
+
+    const assignmentInserts = pgState.client.query.mock.calls.filter(([sql]) =>
+      normalize(sql as string).startsWith('INSERT INTO approval_assignments'))
+    expect(assignmentInserts).toHaveLength(1)
+    expect(assignmentInserts[0]?.[1]).toEqual([expect.any(String), 'user', 'manager-2', 1, 'approval_1'])
+
+    const autoRecordCall = pgState.client.query.mock.calls.find(([sql, params]) =>
+      normalize(sql as string).startsWith('INSERT INTO approval_records') &&
+      JSON.parse(String(params?.[9])).reason === 'auto-merge-requester')
+    expect(JSON.parse(String(autoRecordCall?.[1]?.[9]))).toMatchObject({
+      approvalMode: 'all',
+      originalApprover: {
+        id: 'manager-1',
+      },
+    })
+  })
+
+  it('auto-approves adjacent same-user chains transitively after a human approval', async () => {
+    const runtimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'approval_a', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['manager-1'] } },
+        { key: 'approval_b', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['manager-1'] } },
+        { key: 'approval_c', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['manager-1'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-a', source: 'start', target: 'approval_a' },
+        { key: 'edge-a-b', source: 'approval_a', target: 'approval_b' },
+        { key: 'edge-b-c', source: 'approval_b', target: 'approval_c' },
+        { key: 'edge-c-end', source: 'approval_c', target: 'end' },
+      ],
+      policy: {
+        allowRevoke: true,
+        autoApproval: {
+          mergeAdjacentApprover: true,
+          actorMode: 'original_approver',
+        },
+      },
+    }
+
+    pgState.client.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
+        return {
+          rows: [buildInstanceRow({
+            current_node_key: 'approval_a',
+            current_step: 1,
+            total_steps: 3,
+          })],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_published_definitions WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'pub-1',
+            template_id: 'tpl-1',
+            template_version_id: 'ver-1',
+            runtime_graph: runtimeGraph,
+            is_active: true,
+            published_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
+        return {
+          rows: [{
+            id: 'asg-a',
+            instance_id: 'apr-1',
+            assignment_type: 'user',
+            assignee_id: 'manager-1',
+            source_step: 1,
+            node_key: 'approval_a',
+            is_active: true,
+            metadata: {},
+            created_at: new Date(),
+            updated_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT id, actor_id, metadata FROM approval_records')) {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('UPDATE approval_assignments SET is_active = FALSE')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('UPDATE approval_instances SET metadata = COALESCE')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('UPDATE approval_instances SET status = $2')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_assignments')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_records')) {
+        return { rows: [], rowCount: 1 }
+      }
+      throw new Error(`Unhandled query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({
+      status: 'approved',
+      currentStep: 3,
+      totalSteps: 3,
+      currentNodeKey: null,
+      assignments: [],
+    }))
+
+    const result = await service.dispatchAction(
+      'apr-1',
+      { action: 'approve' },
+      { userId: 'manager-1' },
+    )
+
+    expect(result.status).toBe('approved')
+    expect(pgState.client.query.mock.calls.some(([sql]) =>
+      normalize(sql as string).startsWith('INSERT INTO approval_assignments'))).toBe(false)
+    const updateCall = pgState.client.query.mock.calls.find(([sql]) =>
+      normalize(sql as string).startsWith('UPDATE approval_instances SET status = $2'))
+    expect(updateCall?.[1]).toEqual(['apr-1', 'approved', 3, null, 3, 3])
+
+    const autoRecordCalls = pgState.client.query.mock.calls
+      .filter(([sql, params]) =>
+        normalize(sql as string).startsWith('INSERT INTO approval_records') &&
+        JSON.parse(String(params?.[9])).reason === 'auto-merge-adjacent')
+    const autoRecords = autoRecordCalls.map(([, params]) => JSON.parse(String(params?.[9])))
+
+    expect(autoRecords).toHaveLength(2)
+    expect(autoRecordCalls.map(([, params]) => params?.[2])).toEqual(['manager-1', 'manager-1'])
+    expect(autoRecords[0]).toMatchObject({
+      nodeKey: 'approval_b',
+      reason: 'auto-merge-adjacent',
+      actorMode: 'original_approver',
+      matchedAgainst: { nodeKey: 'approval_a' },
+    })
+    expect(autoRecords[1]).toMatchObject({
+      nodeKey: 'approval_c',
+      reason: 'auto-merge-adjacent',
+      actorMode: 'original_approver',
+      matchedAgainst: { nodeKey: 'approval_b' },
+    })
+  })
+
+  it('uses the instance-bound runtime policy snapshot when auto-approving old instances', async () => {
+    const frozenRuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'approval_1', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['manager-1'] } },
+        { key: 'approval_2', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-1'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-approval-1', source: 'start', target: 'approval_1' },
+        { key: 'edge-approval-1-approval-2', source: 'approval_1', target: 'approval_2' },
+        { key: 'edge-approval-2-end', source: 'approval_2', target: 'end' },
+      ],
+      policy: {
+        allowRevoke: true,
+        autoApproval: {
+          mergeWithRequester: true,
+        },
+      },
+    }
+
+    pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
+        return {
+          rows: [buildInstanceRow({
+            template_version_id: 'ver-old',
+            published_definition_id: 'pub-old-policy',
+            current_step: 1,
+            total_steps: 2,
+            current_node_key: 'approval_1',
+          })],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_published_definitions WHERE id = $1')) {
+        expect(params).toEqual(['pub-old-policy'])
+        return {
+          rows: [{
+            id: 'pub-old-policy',
+            template_id: 'tpl-1',
+            template_version_id: 'ver-old',
+            runtime_graph: frozenRuntimeGraph,
+            is_active: false,
+            published_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
+        return {
+          rows: [{
+            id: 'asg-manager-1',
+            instance_id: 'apr-1',
+            assignment_type: 'user',
+            assignee_id: 'manager-1',
+            source_step: 1,
+            node_key: 'approval_1',
+            is_active: true,
+            metadata: {},
+            created_at: new Date(),
+            updated_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT id, actor_id, metadata FROM approval_records')) {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('UPDATE approval_assignments SET is_active = FALSE')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('UPDATE approval_instances SET status = $2')) {
+        expect(params).toEqual(['apr-1', 'approved', 3, null, 2, 2])
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_assignments')) {
+        throw new Error('auto-merged requester should not create a human assignment')
+      }
+      if (statement.startsWith('INSERT INTO approval_records')) {
+        return { rows: [], rowCount: 1 }
+      }
+      throw new Error(`Unhandled query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({
+      status: 'approved',
+      templateVersionId: 'ver-old',
+      publishedDefinitionId: 'pub-old-policy',
+      currentStep: 2,
+      totalSteps: 2,
+      currentNodeKey: null,
+      assignments: [],
+    }))
+
+    const result = await service.dispatchAction(
+      'apr-1',
+      { action: 'approve' },
+      { userId: 'manager-1' },
+    )
+
+    expect(result.status).toBe('approved')
+    const statements = [
+      ...pgState.client.query.mock.calls,
+      ...pgState.pool.query.mock.calls,
+    ].map(([sql]) => normalize(sql as string))
+    expect(statements.some((statement) => statement.includes('approval_templates'))).toBe(false)
+    expect(statements.some((statement) => statement.includes('approval_template_versions'))).toBe(false)
+    expect(statements.some((statement) => statement.includes('active_version_id'))).toBe(false)
+
+    const autoRecordCall = pgState.client.query.mock.calls.find(([sql, params]) =>
+      normalize(sql as string).startsWith('INSERT INTO approval_records') &&
+      JSON.parse(String(params?.[9])).reason === 'auto-merge-requester')
+    expect(JSON.parse(String(autoRecordCall?.[1]?.[9]))).toMatchObject({
+      nodeKey: 'approval_2',
+      policySource: 'template',
+      originalApprover: {
+        type: 'user',
+        id: 'user-1',
+      },
+    })
+  })
+
+  it('rolls back when chained auto-approval exceeds the per-dispatch guard', async () => {
+    const approvalNodes = Array.from({ length: 52 }, (_, index) => ({
+      key: `approval_${index + 1}`,
+      type: 'approval',
+      config: { assigneeType: 'user', assigneeIds: ['manager-1'] },
+    }))
+    const runtimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        ...approvalNodes,
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-approval-1', source: 'start', target: 'approval_1' },
+        ...Array.from({ length: 51 }, (_, index) => ({
+          key: `edge-approval-${index + 1}-${index + 2}`,
+          source: `approval_${index + 1}`,
+          target: `approval_${index + 2}`,
+        })),
+        { key: 'edge-approval-52-end', source: 'approval_52', target: 'end' },
+      ],
+      policy: {
+        allowRevoke: true,
+        autoApproval: {
+          mergeAdjacentApprover: true,
+        },
+      },
+    }
+
+    pgState.client.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement === 'COMMIT') {
+        throw new Error('guard breach should not commit')
+      }
+      if (statement.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
+        return {
+          rows: [buildInstanceRow({
+            current_node_key: 'approval_1',
+            current_step: 1,
+            total_steps: 52,
+          })],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_published_definitions WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'pub-1',
+            template_id: 'tpl-1',
+            template_version_id: 'ver-1',
+            runtime_graph: runtimeGraph,
+            is_active: true,
+            published_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
+        return {
+          rows: [{
+            id: 'asg-approval-1',
+            instance_id: 'apr-1',
+            assignment_type: 'user',
+            assignee_id: 'manager-1',
+            source_step: 1,
+            node_key: 'approval_1',
+            is_active: true,
+            metadata: {},
+            created_at: new Date(),
+            updated_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT id, actor_id, metadata FROM approval_records')) {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('UPDATE approval_assignments SET is_active = FALSE')) {
+        return { rows: [], rowCount: 1 }
+      }
+      throw new Error(`Unhandled query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+
+    await expect(service.dispatchAction(
+      'apr-1',
+      { action: 'approve' },
+      { userId: 'manager-1' },
+    )).rejects.toMatchObject({
+      code: 'APPROVAL_AUTO_STEP_LIMIT_EXCEEDED',
+      details: {
+        autoSteps: 51,
+        lastNodeKey: 'approval_52',
+      },
+    })
+
+    const statements = pgState.client.query.mock.calls.map(([sql]) => normalize(sql as string))
+    expect(statements).toContain('ROLLBACK')
+    expect(statements).not.toContain('COMMIT')
+    expect(statements.some((statement) =>
+      statement.startsWith('UPDATE approval_instances SET status = $2'))).toBe(false)
+    expect(statements.some((statement) =>
+      statement.startsWith('INSERT INTO approval_records'))).toBe(false)
+  })
+
+  it('auto-approves independent parallel branches without duplicate active assignments', async () => {
+    const runtimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'approval_gate', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['lead-1'] } },
+        {
+          key: 'parallel_fork',
+          type: 'parallel',
+          config: {
+            branches: ['edge-fork-legal', 'edge-fork-compliance'],
+            joinMode: 'all',
+            joinNodeKey: 'end',
+          },
+        },
+        { key: 'legal-review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['manager-1'] } },
+        { key: 'compliance-review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['manager-2'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-gate', source: 'start', target: 'approval_gate' },
+        { key: 'edge-gate-fork', source: 'approval_gate', target: 'parallel_fork' },
+        { key: 'edge-fork-legal', source: 'parallel_fork', target: 'legal-review' },
+        { key: 'edge-fork-compliance', source: 'parallel_fork', target: 'compliance-review' },
+        { key: 'edge-legal-end', source: 'legal-review', target: 'end' },
+        { key: 'edge-compliance-end', source: 'compliance-review', target: 'end' },
+      ],
+      policy: {
+        allowRevoke: true,
+        autoApproval: {
+          dedupeHistoricalApprover: true,
+        },
+      },
+    }
+
+    pgState.client.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
+        return {
+          rows: [buildInstanceRow({
+            current_node_key: 'approval_gate',
+            current_step: 1,
+            total_steps: 3,
+          })],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_published_definitions WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'pub-1',
+            template_id: 'tpl-1',
+            template_version_id: 'ver-1',
+            runtime_graph: runtimeGraph,
+            is_active: true,
+            published_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
+        return {
+          rows: [{
+            id: 'asg-gate',
+            instance_id: 'apr-1',
+            assignment_type: 'user',
+            assignee_id: 'lead-1',
+            source_step: 1,
+            node_key: 'approval_gate',
+            is_active: true,
+            metadata: {},
+            created_at: new Date(),
+            updated_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT id, actor_id, metadata FROM approval_records')) {
+        return {
+          rows: [
+            { id: 10, actor_id: 'manager-1', metadata: { nodeKey: 'prior-legal' } },
+            { id: 11, actor_id: 'manager-2', metadata: { nodeKey: 'prior-compliance' } },
+          ],
+          rowCount: 2,
+        }
+      }
+      if (statement.startsWith('UPDATE approval_assignments SET is_active = FALSE')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('UPDATE approval_instances SET status = $2')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_assignments')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_records')) {
+        return { rows: [], rowCount: 1 }
+      }
+      throw new Error(`Unhandled query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({
+      status: 'approved',
+      currentStep: 3,
+      totalSteps: 3,
+      currentNodeKey: null,
+      assignments: [],
+    }))
+
+    const result = await service.dispatchAction(
+      'apr-1',
+      { action: 'approve' },
+      { userId: 'lead-1' },
+    )
+
+    expect(result.status).toBe('approved')
+    expect(pgState.client.query.mock.calls.some(([sql]) =>
+      normalize(sql as string).startsWith('INSERT INTO approval_assignments'))).toBe(false)
+
+    const autoRecords = pgState.client.query.mock.calls
+      .filter(([sql, params]) =>
+        normalize(sql as string).startsWith('INSERT INTO approval_records') &&
+        JSON.parse(String(params?.[9])).reason === 'auto-dedupe-historical')
+      .map(([, params]) => JSON.parse(String(params?.[9])))
+
+    expect(autoRecords).toHaveLength(2)
+    expect(autoRecords.map((entry) => entry.nodeKey)).toEqual(['legal-review', 'compliance-review'])
+    expect(autoRecords.map((entry) => entry.matchedAgainst.nodeKey)).toEqual(['prior-legal', 'prior-compliance'])
+  })
+
+  it('refuses and warns when adjacent merge would auto-approve duplicate parallel assignees', async () => {
+    const runtimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'approval_gate', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['manager-1'] } },
+        {
+          key: 'parallel_fork',
+          type: 'parallel',
+          config: {
+            branches: ['edge-fork-legal', 'edge-fork-compliance'],
+            joinMode: 'all',
+            joinNodeKey: 'end',
+          },
+        },
+        { key: 'legal-review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['manager-1'] } },
+        { key: 'compliance-review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['manager-1'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-gate', source: 'start', target: 'approval_gate' },
+        { key: 'edge-gate-fork', source: 'approval_gate', target: 'parallel_fork' },
+        { key: 'edge-fork-legal', source: 'parallel_fork', target: 'legal-review' },
+        { key: 'edge-fork-compliance', source: 'parallel_fork', target: 'compliance-review' },
+        { key: 'edge-legal-end', source: 'legal-review', target: 'end' },
+        { key: 'edge-compliance-end', source: 'compliance-review', target: 'end' },
+      ],
+      policy: {
+        allowRevoke: true,
+        autoApproval: {
+          mergeAdjacentApprover: true,
+        },
+      },
+    }
+
+    pgState.client.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
+        return {
+          rows: [buildInstanceRow({
+            current_node_key: 'approval_gate',
+            current_step: 1,
+            total_steps: 3,
+          })],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_published_definitions WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'pub-1',
+            template_id: 'tpl-1',
+            template_version_id: 'ver-1',
+            runtime_graph: runtimeGraph,
+            is_active: true,
+            published_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
+        return {
+          rows: [{
+            id: 'asg-gate',
+            instance_id: 'apr-1',
+            assignment_type: 'user',
+            assignee_id: 'manager-1',
+            source_step: 1,
+            node_key: 'approval_gate',
+            is_active: true,
+            metadata: {},
+            created_at: new Date(),
+            updated_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT id, actor_id, metadata FROM approval_records')) {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('UPDATE approval_assignments SET is_active = FALSE')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('UPDATE approval_instances SET metadata = COALESCE')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('UPDATE approval_instances SET status = $2')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_assignments')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_records')) {
+        return { rows: [], rowCount: 1 }
+      }
+      throw new Error(`Unhandled query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({
+      status: 'pending',
+      currentNodeKey: 'parallel_fork',
+      currentNodeKeys: ['compliance-review'],
+      assignments: [{
+        id: 'asg-compliance',
+        type: 'user',
+        assigneeId: 'manager-1',
+        sourceStep: 2,
+        nodeKey: 'compliance-review',
+        isActive: true,
+        metadata: {},
+      }],
+    }))
+
+    const result = await service.dispatchAction(
+      'apr-1',
+      { action: 'approve' },
+      { userId: 'manager-1' },
+    )
+
+    expect(result.status).toBe('pending')
+    const assignmentInserts = pgState.client.query.mock.calls.filter(([sql]) =>
+      normalize(sql as string).startsWith('INSERT INTO approval_assignments'))
+    expect(assignmentInserts).toHaveLength(1)
+    expect(assignmentInserts[0]?.[1]).toEqual(['apr-1', 'user', 'manager-1', 3, 'compliance-review'])
+
+    const skippedRecord = pgState.client.query.mock.calls.find(([sql, params]) =>
+      normalize(sql as string).startsWith('INSERT INTO approval_records') &&
+      JSON.parse(String(params?.[9])).skipReason === 'cross_branch_adjacency_conflict')
+    expect(skippedRecord?.[1]?.[1]).toBe('sign')
+    expect(JSON.parse(String(skippedRecord?.[1]?.[9]))).toMatchObject({
+      nodeKey: 'compliance-review',
+      reason: 'auto-merge-adjacent',
+      skipped: true,
+      skipReason: 'cross_branch_adjacency_conflict',
+      conflictBranches: ['legal-review', 'compliance-review'],
+      originalApprover: {
+        type: 'user',
+        id: 'manager-1',
+      },
+    })
+
+    const autoRecord = pgState.client.query.mock.calls.find(([sql, params]) =>
+      normalize(sql as string).startsWith('INSERT INTO approval_records') &&
+      JSON.parse(String(params?.[9])).reason === 'auto-merge-adjacent' &&
+      JSON.parse(String(params?.[9])).skipped !== true)
+    expect(JSON.parse(String(autoRecord?.[1]?.[9]))).toMatchObject({
+      nodeKey: 'legal-review',
+      reason: 'auto-merge-adjacent',
+    })
+  })
+
+  it('advances existing approvals from the instance-bound stale published definition and form snapshot', async () => {
+    const frozenRuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'approval_1', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['manager-1'] } },
+        {
+          key: 'legacy_condition',
+          type: 'condition',
+          config: {
+            branches: [{
+              edgeKey: 'edge-condition-old-high',
+              rules: [{ fieldId: 'legacyAmount', operator: 'gt', value: 100 }],
+            }],
+            defaultEdgeKey: 'edge-condition-old-low',
+          },
+        },
+        { key: 'approval_old_high', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['legacy-manager'] } },
+        { key: 'approval_old_low', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['fallback-manager'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-approval', source: 'start', target: 'approval_1' },
+        { key: 'edge-approval-condition', source: 'approval_1', target: 'legacy_condition' },
+        { key: 'edge-condition-old-high', source: 'legacy_condition', target: 'approval_old_high' },
+        { key: 'edge-condition-old-low', source: 'legacy_condition', target: 'approval_old_low' },
+        { key: 'edge-old-high-end', source: 'approval_old_high', target: 'end' },
+        { key: 'edge-old-low-end', source: 'approval_old_low', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
+        return {
+          rows: [buildInstanceRow({
+            template_version_id: 'ver-old',
+            published_definition_id: 'pub-old',
+            form_snapshot: { legacyAmount: 250 },
+            current_step: 1,
+            total_steps: 3,
+            current_node_key: 'approval_1',
+          })],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_published_definitions WHERE id = $1')) {
+        expect(params).toEqual(['pub-old'])
+        return {
+          rows: [{
+            id: 'pub-old',
+            template_id: 'tpl-1',
+            template_version_id: 'ver-old',
+            runtime_graph: frozenRuntimeGraph,
+            is_active: false,
+            published_at: new Date('2026-04-11T00:00:00.000Z'),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
+        return {
+          rows: [{
+            id: 'asg-manager-1',
+            instance_id: 'apr-1',
+            assignment_type: 'user',
+            assignee_id: 'manager-1',
+            source_step: 1,
+            node_key: 'approval_1',
+            is_active: true,
+            metadata: {},
+            created_at: new Date('2026-04-11T00:00:00.000Z'),
+            updated_at: new Date('2026-04-11T00:00:00.000Z'),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('UPDATE approval_assignments SET is_active = FALSE')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('UPDATE approval_instances SET status = $2')) {
+        expect(params).toEqual(['apr-1', 'pending', 3, 'approval_old_high', 2, 3])
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_assignments')) {
+        expect(params).toEqual(['apr-1', 'user', 'legacy-manager', 2, 'approval_old_high'])
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_records')) {
+        return { rows: [], rowCount: 1 }
+      }
+      throw new Error(`Unhandled query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({
+      templateVersionId: 'ver-old',
+      publishedDefinitionId: 'pub-old',
+      formSnapshot: { legacyAmount: 250 },
+      currentStep: 2,
+      totalSteps: 3,
+      currentNodeKey: 'approval_old_high',
+      assignments: [{
+        id: 'asg-legacy',
+        type: 'user',
+        assigneeId: 'legacy-manager',
+        sourceStep: 2,
+        nodeKey: 'approval_old_high',
+        isActive: true,
+        metadata: {},
+      }],
+    }))
+
+    const result = await service.dispatchAction(
+      'apr-1',
+      { action: 'approve', comment: 'use frozen runtime' },
+      { userId: 'manager-1' },
+    )
+
+    expect(result.templateVersionId).toBe('ver-old')
+    expect(result.publishedDefinitionId).toBe('pub-old')
+    expect(result.currentNodeKey).toBe('approval_old_high')
+
+    const statements = [
+      ...pgState.client.query.mock.calls,
+      ...pgState.pool.query.mock.calls,
+    ].map(([sql]) => normalize(sql as string))
+    expect(statements.some((statement) => statement.includes('approval_templates'))).toBe(false)
+    expect(statements.some((statement) => statement.includes('active_version_id'))).toBe(false)
+
+    const recordCall = pgState.client.query.mock.calls.find(([sql]) =>
+      normalize(sql as string).startsWith('INSERT INTO approval_records'))
+    expect(JSON.parse(String(recordCall?.[1]?.[9]))).toMatchObject({
+      nodeKey: 'approval_1',
+      nextNodeKey: 'approval_old_high',
+      aggregateComplete: true,
+    })
+  })
+
+  it('allows template version delete/archive checks when no unfinished instance references remain', async () => {
+    pgState.pool.query.mockResolvedValue({
+      rows: [{ unfinished_count: '0', sample_instance_id: null }],
+      rowCount: 1,
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService()
+
+    await expect(service.assertTemplateVersionDeletable('ver-archive-safe')).resolves.toBeUndefined()
+
+    const statement = normalize(pgState.pool.query.mock.calls[0]?.[0] as string)
+    expect(statement).toContain('status <> ALL($2::text[])')
+    expect(statement).toContain('published_definition_id IN')
+    expect(pgState.pool.query.mock.calls[0]?.[1]).toEqual([
+      'ver-archive-safe',
+      ['approved', 'rejected', 'revoked', 'cancelled'],
+    ])
+  })
+
+  it('blocks template version delete/archive checks with unfinished count and sample id', async () => {
+    pgState.pool.query.mockResolvedValue({
+      rows: [{ unfinished_count: '2', sample_instance_id: 'apr-pending-1' }],
+      rowCount: 1,
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService()
+
+    await expect(service.assertTemplateVersionDeletable('ver-in-use')).rejects.toMatchObject({
+      message: expect.stringContaining('2 unfinished approval instance(s)'),
+      statusCode: 409,
+      code: 'APPROVAL_TEMPLATE_VERSION_IN_USE',
+      details: {
+        unfinishedCount: 2,
+        sampleInstanceId: 'apr-pending-1',
+      },
+    })
+    await expect(service.assertTemplateVersionDeletable('ver-in-use')).rejects.toThrow('apr-pending-1')
+  })
+
+  it('serializes publish with a template row lock and template-scoped active definition swap', async () => {
+    const runtimeGraph = buildRuntimeGraph()
+    const template = {
+      id: 'tpl-1',
+      key: 'travel',
+      name: 'Travel Approval',
+      description: null,
+      category: null,
+      visibility_scope: { type: 'all', ids: [] },
+      sla_hours: null,
+      status: 'draft',
+      active_version_id: 'ver-1',
+      latest_version_id: 'ver-2',
+      created_at: new Date(),
+      updated_at: new Date(),
+    }
+    const version = {
+      id: 'ver-2',
+      template_id: 'tpl-1',
+      version: 2,
+      status: 'draft',
+      form_schema: { fields: [] },
+      approval_graph: runtimeGraph,
+      created_at: new Date(),
+      updated_at: new Date(),
+    }
+
+    pgState.client.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) {
+        return { rows: [template], rowCount: 1 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
+        return { rows: [version], rowCount: 1 }
+      }
+      if (statement.startsWith('UPDATE approval_published_definitions SET is_active = FALSE')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_published_definitions')) {
+        return {
+          rows: [{
+            id: 'pub-2',
+            template_id: 'tpl-1',
+            template_version_id: 'ver-2',
+            runtime_graph: runtimeGraph,
+            is_active: true,
+            published_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith("UPDATE approval_template_versions SET status = 'published'")) {
+        return { rows: [{ ...version, status: 'published' }], rowCount: 1 }
+      }
+      if (statement.startsWith("UPDATE approval_templates SET status = 'published'")) {
+        return { rows: [], rowCount: 1 }
+      }
+      throw new Error(`Unhandled query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService()
+
+    const result = await service.publishTemplate('tpl-1', { policy: { allowRevoke: true } } as never)
+
+    expect(result.publishedDefinitionId).toBe('pub-2')
+    const statements = pgState.client.query.mock.calls.map(([sql]) => normalize(sql as string))
+    const lockIndex = statements.findIndex((statement) =>
+      statement.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE'))
+    const deactivateIndex = statements.findIndex((statement) =>
+      statement.startsWith('UPDATE approval_published_definitions SET is_active = FALSE'))
+    const insertIndex = statements.findIndex((statement) =>
+      statement.startsWith('INSERT INTO approval_published_definitions'))
+    expect(lockIndex).toBeGreaterThanOrEqual(0)
+    expect(deactivateIndex).toBeGreaterThan(lockIndex)
+    expect(insertIndex).toBeGreaterThan(deactivateIndex)
+    expect(statements.filter((statement) => statement === 'COMMIT')).toHaveLength(1)
+  })
+
+  it('snapshots publish-time auto-approval policy into runtime_graph without a migration column', async () => {
+    const runtimeGraph = buildRuntimeGraph()
+    const template = {
+      id: 'tpl-1',
+      key: 'travel',
+      name: 'Travel Approval',
+      description: null,
+      category: null,
+      visibility_scope: { type: 'all', ids: [] },
+      sla_hours: null,
+      status: 'draft',
+      active_version_id: 'ver-1',
+      latest_version_id: 'ver-2',
+      created_at: new Date(),
+      updated_at: new Date(),
+    }
+    const version = {
+      id: 'ver-2',
+      template_id: 'tpl-1',
+      version: 2,
+      status: 'draft',
+      form_schema: { fields: [] },
+      approval_graph: runtimeGraph,
+      created_at: new Date(),
+      updated_at: new Date(),
+    }
+
+    pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) {
+        return { rows: [template], rowCount: 1 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
+        return { rows: [version], rowCount: 1 }
+      }
+      if (statement.startsWith('UPDATE approval_published_definitions SET is_active = FALSE')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_published_definitions')) {
+        const insertedRuntimeGraph = JSON.parse(String(params?.[2]))
+        expect(insertedRuntimeGraph.policy.autoApproval).toEqual({
+          mergeWithRequester: true,
+          mergeAdjacentApprover: true,
+          actorMode: 'system',
+        })
+        return {
+          rows: [{
+            id: 'pub-2',
+            template_id: 'tpl-1',
+            template_version_id: 'ver-2',
+            runtime_graph: insertedRuntimeGraph,
+            is_active: true,
+            published_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith("UPDATE approval_template_versions SET status = 'published'")) {
+        return { rows: [{ ...version, status: 'published' }], rowCount: 1 }
+      }
+      if (statement.startsWith("UPDATE approval_templates SET status = 'published'")) {
+        return { rows: [], rowCount: 1 }
+      }
+      throw new Error(`Unhandled query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService()
+
+    await service.publishTemplate('tpl-1', {
+      policy: {
+        allowRevoke: true,
+        autoApproval: {
+          mergeWithRequester: true,
+          mergeAdjacentApprover: true,
+          actorMode: 'system',
+        },
+      },
+    } as never)
+
+    const statements = pgState.client.query.mock.calls.map(([sql]) => normalize(sql as string))
+    expect(statements.some((statement) => statement.includes('auto_approval_policy'))).toBe(false)
+    expect(statements.some((statement) => statement.includes('ALTER TABLE'))).toBe(false)
+  })
+
+  it('keeps only one active published definition across concurrent publish calls', async () => {
+    const runtimeGraph = buildRuntimeGraph()
+    const template = {
+      id: 'tpl-1',
+      key: 'travel',
+      name: 'Travel Approval',
+      description: null,
+      category: null,
+      visibility_scope: { type: 'all', ids: [] },
+      sla_hours: null,
+      status: 'draft',
+      active_version_id: 'ver-1',
+      latest_version_id: 'ver-2',
+      created_at: new Date(),
+      updated_at: new Date(),
+    }
+    const version = {
+      id: 'ver-2',
+      template_id: 'tpl-1',
+      version: 2,
+      status: 'draft',
+      form_schema: { fields: [] },
+      approval_graph: runtimeGraph,
+      created_at: new Date(),
+      updated_at: new Date(),
+    }
+    const publishedDefinitions = [
+      {
+        id: 'pub-1',
+        template_id: 'tpl-1',
+        template_version_id: 'ver-1',
+        runtime_graph: runtimeGraph,
+        is_active: true,
+        published_at: new Date(),
+      },
+    ]
+    let publishSequence = 1
+    let lockTail = Promise.resolve()
+    let releaseCurrentLock: (() => void) | null = null
+
+    async function acquireTemplateLock(): Promise<void> {
+      const previous = lockTail
+      let release!: () => void
+      lockTail = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      await previous
+      releaseCurrentLock = release
+    }
+
+    function releaseTemplateLock(): void {
+      releaseCurrentLock?.()
+      releaseCurrentLock = null
+    }
+
+    function buildClient() {
+      const client = {
+        query: vi.fn(),
+        release: vi.fn(),
+      }
+      client.query.mockImplementation(async (sql: string) => {
+        const statement = normalize(sql)
+        if (statement === 'BEGIN') {
+          return { rows: [], rowCount: 0 }
+        }
+        if (statement === 'COMMIT' || statement === 'ROLLBACK') {
+          releaseTemplateLock()
+          return { rows: [], rowCount: 0 }
+        }
+        if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) {
+          await acquireTemplateLock()
+          return { rows: [template], rowCount: 1 }
+        }
+        if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
+          return { rows: [version], rowCount: 1 }
+        }
+        if (statement.startsWith('UPDATE approval_published_definitions SET is_active = FALSE')) {
+          for (const definition of publishedDefinitions) {
+            if (definition.template_id === 'tpl-1') {
+              definition.is_active = false
+            }
+          }
+          return { rows: [], rowCount: publishedDefinitions.length }
+        }
+        if (statement.startsWith('INSERT INTO approval_published_definitions')) {
+          publishSequence += 1
+          const definition = {
+            id: `pub-${publishSequence}`,
+            template_id: 'tpl-1',
+            template_version_id: 'ver-2',
+            runtime_graph: runtimeGraph,
+            is_active: true,
+            published_at: new Date(),
+          }
+          publishedDefinitions.push(definition)
+          return { rows: [definition], rowCount: 1 }
+        }
+        if (statement.startsWith("UPDATE approval_template_versions SET status = 'published'")) {
+          return { rows: [{ ...version, status: 'published' }], rowCount: 1 }
+        }
+        if (statement.startsWith("UPDATE approval_templates SET status = 'published'")) {
+          template.status = 'published'
+          template.active_version_id = 'ver-2'
+          return { rows: [], rowCount: 1 }
+        }
+        throw new Error(`Unhandled query: ${statement}`)
+      })
+      return client
+    }
+
+    const clientA = buildClient()
+    const clientB = buildClient()
+    pgState.pool.connect
+      .mockResolvedValueOnce(clientA)
+      .mockResolvedValueOnce(clientB)
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService()
+
+    await Promise.all([
+      service.publishTemplate('tpl-1', { policy: { allowRevoke: true } } as never),
+      service.publishTemplate('tpl-1', { policy: { allowRevoke: true } } as never),
+    ])
+
+    expect(publishedDefinitions.filter((definition) => definition.is_active)).toHaveLength(1)
+    expect(publishedDefinitions.at(-1)).toMatchObject({
+      template_version_id: 'ver-2',
+      is_active: true,
+    })
+    expect(clientA.release).toHaveBeenCalledTimes(1)
+    expect(clientB.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('rolls back publish when the active definition insert fails', async () => {
+    const runtimeGraph = buildRuntimeGraph()
+    const template = {
+      id: 'tpl-1',
+      key: 'travel',
+      name: 'Travel Approval',
+      description: null,
+      category: null,
+      visibility_scope: { type: 'all', ids: [] },
+      sla_hours: null,
+      status: 'draft',
+      active_version_id: 'ver-1',
+      latest_version_id: 'ver-2',
+      created_at: new Date(),
+      updated_at: new Date(),
+    }
+    const version = {
+      id: 'ver-2',
+      template_id: 'tpl-1',
+      version: 2,
+      status: 'draft',
+      form_schema: { fields: [] },
+      approval_graph: runtimeGraph,
+      created_at: new Date(),
+      updated_at: new Date(),
+    }
+
+    pgState.client.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) {
+        return { rows: [template], rowCount: 1 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
+        return { rows: [version], rowCount: 1 }
+      }
+      if (statement.startsWith('UPDATE approval_published_definitions SET is_active = FALSE')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_published_definitions')) {
+        throw new Error('insert failed')
+      }
+      throw new Error(`Unhandled query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService()
+
+    await expect(service.publishTemplate('tpl-1', { policy: { allowRevoke: true } } as never))
+      .rejects.toThrow('insert failed')
+
+    const statements = pgState.client.query.mock.calls.map(([sql]) => normalize(sql as string))
+    expect(statements).toContain('ROLLBACK')
+    expect(statements).not.toContain('COMMIT')
+    expect(statements.some((statement) =>
+      statement.startsWith("UPDATE approval_templates SET status = 'published'"))).toBe(false)
+    expect(pgState.client.release).toHaveBeenCalledTimes(1)
   })
 })

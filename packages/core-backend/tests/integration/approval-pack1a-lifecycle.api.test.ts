@@ -447,7 +447,9 @@ describe('Approval Pack 1A lifecycle API', () => {
       [createdApproval.id],
     )
     const autoApproveRecord = historyResult.rows.find((row) =>
-      row.action === 'approve' && row.actor_id === 'system' && row.metadata?.autoApproved === true)
+      row.action === 'approve'
+      && row.metadata?.autoApproved === true
+      && row.metadata?.reason === 'empty-assignee')
     expect(autoApproveRecord).toBeTruthy()
     expect(autoApproveRecord?.to_status).toBe('pending')
     expect(autoApproveRecord?.metadata).toMatchObject({
