@@ -52,7 +52,8 @@ F7. `namespace-admission.ts` `NON_NAMESPACED_PERMISSION_RESOURCES` includes `'ap
 
 ### PD2. `approvals:admin` — ACCEPTED, concrete registration
 
-- New migration inserts `permissions(code='approvals:admin', ...)` and `role_permissions` linking it to the admin role.
+- New migration `up()` inserts `permissions(code='approvals:admin', ...)` then `role_permissions` linking it to the admin role.
+- New migration `down()` (FK-safe order, mandatory): DELETE `role_permissions` for `approvals:admin` FIRST, THEN DELETE the `permissions` row (reverse order violates the `role_permissions → permissions` FK).
 - Route gated `authenticate, rbacGuard('approvals:admin')`, consistent with the `approvals:` family.
 - `approvals` is non-namespaced (F7) — no namespace-admission entry/switch required. Record exact permission code + migration location in the dev doc.
 
@@ -78,7 +79,7 @@ T1. Authorization separation (STRENGTHENED): plain non-admin → 403; AND a user
 T2. Terminal instance → rejected.
 T3. Stale `version` → 409.
 T4. Jump uses instance-bound runtime graph (mock-pool: published-def query keys on `instance.published_definition_id`; zero `approval_templates`/`active_version_id` read).
-T5. Invalid target nodeKey → 400.
+T5. Invalid target → 400, covering BOTH (a) nonexistent nodeKey AND (b) existing node whose type is not `approval` (start/end/condition/cc/parallel-fork/join). Target MUST be an `approval`-type node — only those create human assignments.
 T6. Backward / lateral (non-downstream) target → 400.
 T7. Valid forward jump: old assignments deactivated; target assignments created from bound graph; advances from target.
 T8. Old assignee cannot act post-jump → rejected.
