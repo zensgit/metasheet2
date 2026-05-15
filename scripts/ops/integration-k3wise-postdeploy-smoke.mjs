@@ -172,6 +172,10 @@ Options:
                           Opt-in Data Factory #1542 smoke: verify staging schema
                           discovery and draft pipeline save. Writes metadata only;
                           never runs dry-run or Save-only.
+  --issue1542-install-staging
+                          With --issue1542-workbench-smoke, first install staging
+                          multitables and upsert a MetaSheet staging source
+                          connection. Writes staging/source metadata only.
   --help                 Show this help
 
 Environment fallbacks:
@@ -207,6 +211,7 @@ function parseArgs(argv = process.argv.slice(2)) {
     workspaceId: envValue('METASHEET_WORKSPACE_ID', 'WORKSPACE_ID'),
     requireAuth: false,
     issue1542WorkbenchSmoke: false,
+    issue1542InstallStaging: false,
     outDir: '',
     timeoutMs: 10_000,
     help: false,
@@ -241,6 +246,9 @@ function parseArgs(argv = process.argv.slice(2)) {
       case '--issue1542-workbench-smoke':
         opts.issue1542WorkbenchSmoke = true
         break
+      case '--issue1542-install-staging':
+        opts.issue1542InstallStaging = true
+        break
       case '--out-dir':
         opts.outDir = readRequiredValue(argv, i, arg)
         i += 1
@@ -260,6 +268,9 @@ function parseArgs(argv = process.argv.slice(2)) {
 
   if (!Number.isInteger(opts.timeoutMs) || opts.timeoutMs <= 0) {
     throw new K3WisePostdeploySmokeError('--timeout-ms must be a positive integer', { timeoutMs: opts.timeoutMs })
+  }
+  if (opts.issue1542InstallStaging && !opts.issue1542WorkbenchSmoke) {
+    throw new K3WisePostdeploySmokeError('--issue1542-install-staging requires --issue1542-workbench-smoke')
   }
   opts.baseUrl = normalizeBaseUrl(opts.baseUrl)
   return opts
@@ -652,18 +663,21 @@ function responseData(body) {
   return body && Object.prototype.hasOwnProperty.call(body, 'data') ? body.data : body
 }
 
-function requireSystem(systems, { kind, role, label }) {
+function requireSystem(systems, { id, kind, role, label }) {
   const system = systems.find((candidate) => {
-    if (!candidate || candidate.kind !== kind) return false
+    if (!candidate) return false
+    if (id && candidate.id !== id) return false
+    if (kind && candidate.kind !== kind) return false
     return !role || candidate.role === role || candidate.role === 'bidirectional'
   })
   if (!system) {
     throw new K3WisePostdeploySmokeError(`${label || kind} system is not configured`, {
+      id: id || null,
       kind,
       role: role || null,
       configuredKinds: systems
         .filter((candidate) => candidate && typeof candidate.kind === 'string')
-        .map((candidate) => `${candidate.kind}:${candidate.role || 'unknown'}`),
+        .map((candidate) => `${candidate.id || 'unknown'}:${candidate.kind}:${candidate.role || 'unknown'}`),
     })
   }
   return system
@@ -799,11 +813,164 @@ function assertPipelineSaveResponse(body) {
   }
 }
 
-async function runIssue1542WorkbenchSmoke({ baseUrl, token, tenantId, workspaceId, timeoutMs }) {
+function safeSystemIdSuffix(value) {
+  return String(value || 'default')
+    .replace(/[^A-Za-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '') || 'default'
+}
+
+function issue1542StagingSourceSystemId(projectId) {
+  return `metasheet_staging_${safeSystemIdSuffix(projectId)}`
+}
+
+function objectConfigFromInstallTarget(target, descriptor) {
+  const fields = Array.isArray(descriptor?.fields) ? descriptor.fields : []
+  const fieldDetails = Array.isArray(descriptor?.fieldDetails) ? descriptor.fieldDetails : []
+  return {
+    name: target.name || descriptor?.name || target.id,
+    sheetId: target.sheetId,
+    viewId: target.viewId || null,
+    baseId: target.baseId || null,
+    openLink: target.openLink || null,
+    fields,
+    fieldDetails,
+  }
+}
+
+function buildStagingSourceObjectsFromInstall(installResult, descriptorList) {
+  const descriptorsById = new Map(
+    (Array.isArray(descriptorList) ? descriptorList : [])
+      .filter((descriptor) => descriptor && typeof descriptor.id === 'string')
+      .map((descriptor) => [descriptor.id, descriptor]),
+  )
+  const targets = Array.isArray(installResult?.targets) ? installResult.targets : []
+  const objects = {}
+  for (const target of targets) {
+    if (!target || typeof target.id !== 'string' || typeof target.sheetId !== 'string' || !target.sheetId) continue
+    objects[target.id] = objectConfigFromInstallTarget(target, descriptorsById.get(target.id))
+  }
+  if (Object.keys(objects).length > 0) return objects
+
+  const sheetIds = installResult?.sheetIds && typeof installResult.sheetIds === 'object' ? installResult.sheetIds : {}
+  const viewIds = installResult?.viewIds && typeof installResult.viewIds === 'object' ? installResult.viewIds : {}
+  const openLinks = installResult?.openLinks && typeof installResult.openLinks === 'object' ? installResult.openLinks : {}
+  for (const [objectId, sheetId] of Object.entries(sheetIds)) {
+    if (typeof sheetId !== 'string' || !sheetId) continue
+    const descriptor = descriptorsById.get(objectId)
+    objects[objectId] = objectConfigFromInstallTarget({
+      id: objectId,
+      name: descriptor?.name || objectId,
+      sheetId,
+      viewId: viewIds[objectId] || null,
+      baseId: installResult?.baseId || null,
+      openLink: openLinks[objectId] || null,
+    }, descriptor)
+  }
+  return objects
+}
+
+async function installIssue1542StagingSource({ baseUrl, token, tenantId, workspaceId, timeoutMs }) {
+  const descriptorResponse = await requestJson(baseUrl, '/api/integration/staging/descriptors', {
+    token,
+    timeoutMs,
+  })
+  const descriptorList = responseData(descriptorResponse.body)
+  if (!Array.isArray(descriptorList)) {
+    throw new K3WisePostdeploySmokeError('staging descriptors response data must be an array', {
+      received: Array.isArray(descriptorList) ? 'array' : typeof descriptorList,
+    })
+  }
+
+  const installResponse = await requestJson(baseUrl, '/api/integration/staging/install', {
+    token,
+    timeoutMs,
+    method: 'POST',
+    acceptStatuses: [200, 201],
+    requestBody: {
+      tenantId,
+      workspaceId: workspaceId || null,
+    },
+  })
+  const installResult = responseData(installResponse.body)
+  const sheetIds = installResult?.sheetIds && typeof installResult.sheetIds === 'object' ? installResult.sheetIds : {}
+  if (!sheetIds.standard_materials) {
+    throw new K3WisePostdeploySmokeError('staging install did not return standard_materials sheetId', {
+      sheetIds,
+      warnings: Array.isArray(installResult?.warnings) ? installResult.warnings : [],
+    })
+  }
+
+  const projectId = typeof installResult?.projectId === 'string' && installResult.projectId.trim()
+    ? installResult.projectId.trim()
+    : `${tenantId}:integration-core`
+  const sourceSystemId = issue1542StagingSourceSystemId(projectId)
+  const objects = buildStagingSourceObjectsFromInstall(installResult, descriptorList)
+  if (!objects.standard_materials?.sheetId) {
+    throw new K3WisePostdeploySmokeError('staging source config could not be built from install result', {
+      projectId,
+      objectIds: Object.keys(objects),
+    })
+  }
+
+  const sourceSystemPayload = {
+    id: sourceSystemId,
+    tenantId,
+    workspaceId: workspaceId || null,
+    projectId,
+    name: 'MetaSheet staging source',
+    kind: 'metasheet:staging',
+    role: 'source',
+    status: 'active',
+    config: {
+      projectId,
+      objects,
+    },
+    capabilities: {
+      read: true,
+      stagingSource: true,
+      dryRunFriendly: true,
+    },
+  }
+  const upsertResponse = await requestJson(baseUrl, '/api/integration/external-systems', {
+    token,
+    timeoutMs,
+    method: 'POST',
+    acceptStatuses: [200, 201],
+    requestBody: sourceSystemPayload,
+  })
+  const savedSystem = responseData(upsertResponse.body)
+  return {
+    projectId,
+    sourceSystemId: savedSystem?.id || sourceSystemId,
+    sheetIds: Object.keys(sheetIds),
+    targets: Array.isArray(installResult?.targets) ? installResult.targets.length : 0,
+    objects: Object.keys(objects),
+    warnings: Array.isArray(installResult?.warnings) ? installResult.warnings.length : 0,
+  }
+}
+
+async function runIssue1542WorkbenchSmoke({ baseUrl, token, tenantId, workspaceId, timeoutMs, installStaging = false }) {
   const checks = []
   let systems = []
   let stagingSystem = null
   let k3TargetSystem = null
+  let installedStagingSourceId = ''
+
+  if (installStaging) {
+    try {
+      const installDetails = await installIssue1542StagingSource({
+        baseUrl,
+        token,
+        tenantId,
+        workspaceId,
+        timeoutMs,
+      })
+      installedStagingSourceId = installDetails.sourceSystemId
+      checks.push(result('issue1542-staging-install', 'pass', installDetails))
+    } catch (error) {
+      return [failResult('issue1542-staging-install', error)]
+    }
+  }
 
   try {
     const systemsResponse = await requestJson(baseUrl, withQuery('/api/integration/external-systems', {
@@ -819,6 +986,7 @@ async function runIssue1542WorkbenchSmoke({ baseUrl, token, tenantId, workspaceI
     }
     systems = data
     stagingSystem = requireSystem(systems, {
+      id: installedStagingSourceId || undefined,
       kind: 'metasheet:staging',
       role: 'source',
       label: 'MetaSheet staging source',
@@ -1054,6 +1222,7 @@ async function runSmoke(opts) {
           tenantId,
           workspaceId: opts.workspaceId || '',
           timeoutMs: opts.timeoutMs,
+          installStaging: opts.issue1542InstallStaging,
         }))
       }
     }

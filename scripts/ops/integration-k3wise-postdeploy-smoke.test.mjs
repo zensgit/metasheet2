@@ -221,6 +221,47 @@ const DEFAULT_K3_OBJECTS = [
   },
 ]
 
+function defaultStagingInstallResult(projectId = 'tenant-smoke:integration-core') {
+  const targets = [
+    {
+      id: 'standard_materials',
+      name: 'Standard Materials',
+      sheetId: 'sheet_standard_materials',
+      viewId: 'view_standard_materials',
+      baseId: 'base_integration_core',
+      openLink: '/multitable/sheet_standard_materials/view_standard_materials?baseId=base_integration_core',
+    },
+    {
+      id: 'bom_cleanse',
+      name: 'BOM Cleanse',
+      sheetId: 'sheet_bom_cleanse',
+      viewId: 'view_bom_cleanse',
+      baseId: 'base_integration_core',
+      openLink: '/multitable/sheet_bom_cleanse/view_bom_cleanse?baseId=base_integration_core',
+    },
+  ]
+  return {
+    projectId,
+    sheetIds: {
+      plm_raw_items: 'sheet_plm_raw_items',
+      standard_materials: 'sheet_standard_materials',
+      bom_cleanse: 'sheet_bom_cleanse',
+      integration_exceptions: 'sheet_integration_exceptions',
+      integration_run_log: 'sheet_integration_run_log',
+    },
+    viewIds: {
+      standard_materials: 'view_standard_materials',
+      bom_cleanse: 'view_bom_cleanse',
+    },
+    openLinks: {
+      standard_materials: '/multitable/sheet_standard_materials/view_standard_materials?baseId=base_integration_core',
+      bom_cleanse: '/multitable/sheet_bom_cleanse/view_bom_cleanse?baseId=base_integration_core',
+    },
+    targets,
+    warnings: [],
+  }
+}
+
 function makeTmpDir() {
   return mkdtempSync(path.join(tmpdir(), 'integration-k3wise-postdeploy-smoke-'))
 }
@@ -295,6 +336,9 @@ function readRequestBody(req) {
 
 function createFakeServer(options = {}) {
   const requests = []
+  const externalSystems = Array.isArray(options.externalSystems)
+    ? options.externalSystems.map((system) => ({ ...system }))
+    : []
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://127.0.0.1')
     requests.push({
@@ -384,7 +428,7 @@ function createFakeServer(options = {}) {
         sendJson(res, 500, { ok: false, error: { message: `${url.pathname} unavailable` } })
         return
       }
-      sendJson(res, 200, { ok: true, data: options.externalSystems || [] })
+      sendJson(res, 200, { ok: true, data: externalSystems })
       return
     }
 
@@ -408,52 +452,65 @@ function createFakeServer(options = {}) {
       return
     }
 
-    if (req.method === 'GET' && url.pathname === '/api/integration/external-systems/staging_source_1/objects') {
+    const externalSystemRoute = url.pathname.match(/^\/api\/integration\/external-systems\/([^/]+)\/(objects|schema)$/)
+    if (req.method === 'GET' && externalSystemRoute) {
       if (req.headers.authorization !== 'Bearer test.jwt.token') {
         sendJson(res, 401, { ok: false, error: { message: 'bad token' } })
         return
       }
-      sendJson(res, 200, { ok: true, data: options.stagingObjects || DEFAULT_STAGING_OBJECTS })
+      const systemId = decodeURIComponent(externalSystemRoute[1])
+      const action = externalSystemRoute[2]
+      const system = externalSystems.find((candidate) => candidate.id === systemId)
+      if (!system) {
+        sendJson(res, 404, { ok: false, error: { message: `system not found: ${systemId}` } })
+        return
+      }
+      if (system.kind === 'metasheet:staging' && action === 'objects') {
+        sendJson(res, 200, { ok: true, data: options.stagingObjects || DEFAULT_STAGING_OBJECTS })
+        return
+      }
+      if (system.kind === 'metasheet:staging' && action === 'schema') {
+        sendJson(res, 200, {
+          ok: true,
+          data: options.stagingSchema || {
+            object: url.searchParams.get('object') || 'standard_materials',
+            fields: DEFAULT_STAGING_OBJECTS[0].schema,
+          },
+        })
+        return
+      }
+      if (system.kind === 'erp:k3-wise-webapi' && action === 'objects') {
+        sendJson(res, 200, { ok: true, data: options.k3Objects || DEFAULT_K3_OBJECTS })
+        return
+      }
+      if (system.kind === 'erp:k3-wise-webapi' && action === 'schema') {
+        sendJson(res, 200, {
+          ok: true,
+          data: options.k3Schema || {
+            object: url.searchParams.get('object') || 'material',
+            fields: DEFAULT_K3_OBJECTS[0].schema,
+            template: { id: 'material', bodyKey: 'Data' },
+          },
+        })
+        return
+      }
+      sendJson(res, 400, { ok: false, error: { message: `unsupported system action: ${system.kind}/${action}` } })
       return
     }
 
-    if (req.method === 'GET' && url.pathname === '/api/integration/external-systems/staging_source_1/schema') {
+    if (req.method === 'POST' && url.pathname === '/api/integration/external-systems') {
       if (req.headers.authorization !== 'Bearer test.jwt.token') {
         sendJson(res, 401, { ok: false, error: { message: 'bad token' } })
         return
       }
-      sendJson(res, 200, {
-        ok: true,
-        data: options.stagingSchema || {
-          object: url.searchParams.get('object') || 'standard_materials',
-          fields: DEFAULT_STAGING_OBJECTS[0].schema,
-        },
-      })
-      return
-    }
-
-    if (req.method === 'GET' && url.pathname === '/api/integration/external-systems/k3_target_1/objects') {
-      if (req.headers.authorization !== 'Bearer test.jwt.token') {
-        sendJson(res, 401, { ok: false, error: { message: 'bad token' } })
-        return
-      }
-      sendJson(res, 200, { ok: true, data: options.k3Objects || DEFAULT_K3_OBJECTS })
-      return
-    }
-
-    if (req.method === 'GET' && url.pathname === '/api/integration/external-systems/k3_target_1/schema') {
-      if (req.headers.authorization !== 'Bearer test.jwt.token') {
-        sendJson(res, 401, { ok: false, error: { message: 'bad token' } })
-        return
-      }
-      sendJson(res, 200, {
-        ok: true,
-        data: options.k3Schema || {
-          object: url.searchParams.get('object') || 'material',
-          fields: DEFAULT_K3_OBJECTS[0].schema,
-          template: { id: 'material', bodyKey: 'Data' },
-        },
-      })
+      const body = await readRequestBody(req)
+      requests[requests.length - 1].body = body
+      const id = body?.id || `system_${externalSystems.length + 1}`
+      const saved = { ...body, id }
+      const index = externalSystems.findIndex((system) => system.id === id)
+      if (index >= 0) externalSystems[index] = saved
+      else externalSystems.push(saved)
+      sendJson(res, 201, { ok: true, data: saved })
       return
     }
 
@@ -462,11 +519,12 @@ function createFakeServer(options = {}) {
         sendJson(res, 401, { ok: false, error: { message: 'bad token' } })
         return
       }
+      const body = await readRequestBody(req)
+      requests[requests.length - 1].body = body
       if (options.failPipelineSave) {
         sendJson(res, 500, { ok: false, error: { code: '22P02', message: '类型json的输入语法无效' } })
         return
       }
-      const body = await readRequestBody(req)
       sendJson(res, 201, {
         ok: true,
         data: {
@@ -475,6 +533,22 @@ function createFakeServer(options = {}) {
           fieldMappings: Array.isArray(body?.fieldMappings) ? body.fieldMappings : [],
         },
       })
+      return
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/integration/staging/install') {
+      if (req.headers.authorization !== 'Bearer test.jwt.token') {
+        sendJson(res, 401, { ok: false, error: { message: 'bad token' } })
+        return
+      }
+      const body = await readRequestBody(req)
+      requests[requests.length - 1].body = body
+      if (options.failStagingInstall) {
+        sendJson(res, 500, { ok: false, error: { code: 'STAGING_INSTALL_EMPTY', message: 'no staging sheets provisioned' } })
+        return
+      }
+      const projectId = body?.projectId || `${body?.tenantId || 'tenant-smoke'}:integration-core`
+      sendJson(res, 201, { ok: true, data: options.stagingInstallResult || defaultStagingInstallResult(projectId) })
       return
     }
 
@@ -677,6 +751,85 @@ test('issue1542 workbench smoke verifies staging schema and draft pipeline save'
     assert.ok(pipelineRequest, 'issue1542 smoke saves a draft pipeline metadata record')
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/external-systems/staging_source_1/schema'))
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/external-systems/k3_target_1/schema'))
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('issue1542 install-staging smoke creates and uses the installed staging source before schema and pipeline checks', async () => {
+  const fake = createFakeServer({ externalSystems: DEFAULT_SYSTEMS })
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--auth-token', 'test.jwt.token',
+      '--tenant-id', 'tenant-smoke',
+      '--require-auth',
+      '--issue1542-workbench-smoke',
+      '--issue1542-install-staging',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 0, result.stderr)
+    const evidence = JSON.parse(readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8'))
+    const installCheck = evidence.checks.find((check) => check.id === 'issue1542-staging-install')
+    assert.equal(installCheck.status, 'pass')
+    assert.equal(installCheck.projectId, 'tenant-smoke:integration-core')
+    assert.equal(installCheck.sourceSystemId, 'metasheet_staging_tenant-smoke_integration-core')
+    assert.ok(installCheck.objects.includes('standard_materials'))
+
+    assert.equal(evidence.checks.find((check) => check.id === 'issue1542-system-readiness').status, 'pass')
+    assert.equal(evidence.checks.find((check) => check.id === 'issue1542-system-readiness').stagingSourceId, 'metasheet_staging_tenant-smoke_integration-core')
+    assert.equal(evidence.checks.find((check) => check.id === 'issue1542-staging-source-schema').status, 'pass')
+    assert.equal(evidence.checks.find((check) => check.id === 'issue1542-pipeline-save').status, 'pass')
+
+    const stagingInstallRequest = fake.requests.find((request) => request.method === 'POST' && request.pathname === '/api/integration/staging/install')
+    assert.ok(stagingInstallRequest, 'install-staging flag calls staging install')
+    assert.deepEqual(stagingInstallRequest.body, { tenantId: 'tenant-smoke', workspaceId: null })
+
+    const externalSystemRequest = fake.requests.find((request) => request.method === 'POST' && request.pathname === '/api/integration/external-systems')
+    assert.ok(externalSystemRequest, 'install-staging flag upserts a staging source system')
+    assert.equal(externalSystemRequest.body.kind, 'metasheet:staging')
+    assert.equal(externalSystemRequest.body.projectId, 'tenant-smoke:integration-core')
+    assert.equal(externalSystemRequest.body.config.objects.standard_materials.sheetId, 'sheet_standard_materials')
+    assert.ok(Array.isArray(externalSystemRequest.body.config.objects.standard_materials.fieldDetails))
+
+    const pipelineRequest = fake.requests.find((request) => request.method === 'POST' && request.pathname === '/api/integration/pipelines')
+    assert.equal(pipelineRequest.body.sourceSystemId, 'metasheet_staging_tenant-smoke_integration-core')
+    assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/external-systems/metasheet_staging_tenant-smoke_integration-core/schema'))
+    assert.equal(fake.requests.some((request) => request.pathname === '/api/integration/external-systems/staging_source_1/schema'), false)
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('issue1542 install-staging smoke fails clearly when staging install fails', async () => {
+  const fake = createFakeServer({
+    externalSystems: DEFAULT_SYSTEMS.filter((system) => system.kind !== 'metasheet:staging'),
+    failStagingInstall: true,
+  })
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--auth-token', 'test.jwt.token',
+      '--tenant-id', 'tenant-smoke',
+      '--require-auth',
+      '--issue1542-workbench-smoke',
+      '--issue1542-install-staging',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 1)
+    const evidence = JSON.parse(readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8'))
+    const installCheck = evidence.checks.find((check) => check.id === 'issue1542-staging-install')
+    assert.equal(installCheck.status, 'fail')
+    assert.match(installCheck.error, /\/api\/integration\/staging\/install returned HTTP 500/)
+    assert.equal(evidence.checks.some((check) => check.id === 'issue1542-pipeline-save'), false)
   } finally {
     await fake.close()
     rmSync(outDir, { recursive: true, force: true })

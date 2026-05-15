@@ -110,39 +110,18 @@ node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
 ```
 
 For the Data Factory issue #1542 deployment retest, add the opt-in workbench
-smoke flag. If the deployment has no Data Factory external systems yet, seed
-metadata-only systems first. This writes a `metasheet:staging` source and a
-K3 WebAPI target for schema/pipeline-save verification only; it does not write
-real K3 credentials and does not run dry-run, Save-only, Submit, or Audit.
+smoke flags. `--issue1542-install-staging` first calls
+`/api/integration/staging/install`, then upserts a `metasheet:staging` source
+from the returned sheet/open-link metadata. This verifies the same one-click
+staging setup path that the UI uses. It does not run dry-run, Save-only,
+Submit, or Audit.
 
-```bash
-node scripts/ops/integration-issue1542-seed-workbench-systems.mjs \
-  --base-url "$METASHEET_BASE_URL" \
-  --token-file "$METASHEET_AUTH_TOKEN_FILE" \
-  --tenant-id "$METASHEET_TENANT_ID" \
-  --project-id "${METASHEET_PROJECT_ID:-default}" \
-  --install-staging \
-  --out-dir artifacts/integration-k3wise/internal-trial/issue1542-seed
-```
-
-If this fails with `staging install did not return sheetIds.standard_materials`,
-the deployment can still run the metadata-only #1542 retest by supplying an
-explicit placeholder sheet id. Use this fallback only for schema/pipeline-save
-smoke evidence; fix multitable provisioning before real dry-run testing.
-
-```bash
-node scripts/ops/integration-issue1542-seed-workbench-systems.mjs \
-  --base-url "$METASHEET_BASE_URL" \
-  --token-file "$METASHEET_AUTH_TOKEN_FILE" \
-  --tenant-id "$METASHEET_TENANT_ID" \
-  --project-id "${METASHEET_PROJECT_ID:-default}" \
-  --standard-materials-sheet-id issue1542_metadata_standard_materials \
-  --standard-materials-view-id issue1542_metadata_view \
-  --standard-materials-open-link /multitable/issue1542_metadata_standard_materials/issue1542_metadata_view \
-  --out-dir artifacts/integration-k3wise/internal-trial/issue1542-seed
-```
-
-Then run the smoke:
+This path assumes the K3 WISE WebAPI target has already been saved through the
+K3 preset page or Data Factory target-system form. It creates the MetaSheet
+staging source only. If you need a metadata-only target for an isolated smoke
+where no K3 target has been configured, run
+`scripts/ops/integration-issue1542-seed-workbench-systems.mjs` first and then
+run the smoke below.
 
 ```bash
 node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
@@ -151,14 +130,16 @@ node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
   --tenant-id "$METASHEET_TENANT_ID" \
   --require-auth \
   --issue1542-workbench-smoke \
+  --issue1542-install-staging \
   --out-dir artifacts/integration-k3wise/internal-trial/postdeploy-smoke-issue1542
 ```
 
-This extra smoke verifies that a configured `metasheet:staging` source exposes
+This extra smoke verifies that staging installation returns
+`standard_materials` sheet metadata, a `metasheet:staging` source exposes
 non-empty `standard_materials` schema, the K3 target exposes the `material`
 template schema, and a fixed draft pipeline ID can be saved without PostgreSQL
-JSONB `22P02`. It writes pipeline metadata only and never runs dry-run,
-Save-only, Submit, or Audit.
+JSONB `22P02`. It writes staging/source/pipeline metadata only and never runs
+dry-run, Save-only, Submit, or Audit.
 
 Then render the summary:
 
