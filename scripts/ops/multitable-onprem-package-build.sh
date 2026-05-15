@@ -56,8 +56,9 @@ REQUIRED_PATHS=(
   "scripts/ops/multitable-onprem-package-upgrade.sh"
   "scripts/ops/multitable-onprem-healthcheck.sh"
   # K3 WISE PoC operator tooling — preflight (C1/C2), live PoC packet builder
-  # (C3), evidence compiler (C10), postdeploy smoke + summary, mock fixtures,
-  # and the three K3 operator runbooks. The package also ships
+  # (C3), evidence compiler (C10), postdeploy smoke + summary, the #1542
+  # metadata seed helper, mock fixtures, and the three K3 operator runbooks.
+  # The package also ships
   # plugins/plugin-integration-core above so the backend registers
   # /api/integration/* routes and the offline mock chain can resolve its
   # adapter imports from the package root.
@@ -65,6 +66,7 @@ REQUIRED_PATHS=(
   "scripts/ops/integration-k3wise-live-poc-preflight.mjs"
   "scripts/ops/integration-k3wise-live-poc-evidence.mjs"
   "scripts/ops/integration-k3wise-postdeploy-smoke.mjs"
+  "scripts/ops/integration-issue1542-seed-workbench-systems.mjs"
   "scripts/ops/integration-k3wise-postdeploy-summary.mjs"
   "scripts/ops/fixtures/integration-k3wise"
   "docs/operations/k3-poc-onprem-preflight-runbook.md"
@@ -81,6 +83,12 @@ REQUIRED_PATHS=(
   "docs/development/data-factory-adapter-discovery-postdeploy-verification-20260514.md"
   "docs/development/data-factory-postdeploy-summary-adapter-details-development-20260514.md"
   "docs/development/data-factory-postdeploy-summary-adapter-details-verification-20260514.md"
+  "docs/development/data-factory-issue1542-postdeploy-smoke-design-20260515.md"
+  "docs/development/data-factory-issue1542-postdeploy-smoke-verification-20260515.md"
+  "docs/development/data-factory-issue1542-seed-workbench-systems-development-20260515.md"
+  "docs/development/data-factory-issue1542-seed-workbench-systems-verification-20260515.md"
+  "docs/development/data-factory-issue1542-install-smoke-development-20260515.md"
+  "docs/development/data-factory-issue1542-install-smoke-verification-20260515.md"
   "docs/development/onprem-migration-gap-guard-development-20260514.md"
   "docs/development/onprem-migration-gap-guard-verification-20260514.md"
   "docker/app.env.example"
