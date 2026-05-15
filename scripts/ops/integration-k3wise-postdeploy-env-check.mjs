@@ -30,6 +30,11 @@ Options:
   --tenant-id <id>        Tenant scope for authenticated control-plane list probes
   --require-auth          Fail when no token source is supplied
   --require-tenant        Fail when tenant id is empty
+  --issue1542-workbench-smoke
+                          Include Data Factory issue #1542 schema/pipeline smoke flags
+  --issue1542-install-staging
+                          Include issue #1542 staging install smoke flags; requires
+                          auth + tenant and implies --issue1542-workbench-smoke
   --timeout-ms <ms>       Per-request timeout for the generated smoke command
   --smoke-out-dir <dir>   Output directory for the generated smoke command
   --out-dir <dir>         Env-check report output directory
@@ -102,6 +107,8 @@ function parseArgs(argv = process.argv.slice(2)) {
     tenantId: envValue('K3_WISE_SMOKE_TENANT_ID', 'METASHEET_TENANT_ID', 'TENANT_ID'),
     requireAuth: envBoolean(false, 'REQUIRE_AUTH', 'K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH'),
     requireTenant: envBoolean(false, 'K3_WISE_PRE_SMOKE_REQUIRE_TENANT'),
+    issue1542WorkbenchSmoke: envBoolean(false, 'K3_WISE_SMOKE_ISSUE1542_WORKBENCH_SMOKE', 'K3_WISE_DEPLOY_SMOKE_ISSUE1542_WORKBENCH_SMOKE'),
+    issue1542InstallStaging: envBoolean(false, 'K3_WISE_SMOKE_ISSUE1542_INSTALL_STAGING', 'K3_WISE_DEPLOY_SMOKE_ISSUE1542_INSTALL_STAGING'),
     timeoutMs: 10_000,
     smokeOutDir: DEFAULT_SMOKE_OUTPUT_ROOT,
     outDir: '',
@@ -133,6 +140,13 @@ function parseArgs(argv = process.argv.slice(2)) {
       case '--require-tenant':
         opts.requireTenant = true
         break
+      case '--issue1542-workbench-smoke':
+        opts.issue1542WorkbenchSmoke = true
+        break
+      case '--issue1542-install-staging':
+        opts.issue1542InstallStaging = true
+        opts.issue1542WorkbenchSmoke = true
+        break
       case '--timeout-ms':
         opts.timeoutMs = Number(readRequiredValue(argv, i, arg))
         i += 1
@@ -162,6 +176,7 @@ function parseArgs(argv = process.argv.slice(2)) {
   opts.tokenFile = opts.tokenFile.trim()
   opts.tenantId = opts.tenantId.trim()
   opts.smokeOutDir = opts.smokeOutDir.trim()
+  if (opts.issue1542InstallStaging) opts.issue1542WorkbenchSmoke = true
   return opts
 }
 
@@ -289,6 +304,8 @@ function buildSmokeCommand(opts, normalizedBaseUrl, tokenInfo) {
   ]
   if (opts.requireAuth) args.push('--require-auth')
   if (opts.tenantId) args.push('--tenant-id', quoteShell(opts.tenantId))
+  if (opts.issue1542WorkbenchSmoke) args.push('--issue1542-workbench-smoke')
+  if (opts.issue1542InstallStaging) args.push('--issue1542-install-staging')
   if (tokenInfo.source === 'token-file') args.push('--token-file', quoteShell(tokenInfo.tokenFile))
   if (tokenInfo.source === 'auth-token') args.push('--auth-token', '<redacted-token>')
   return args.join(' ')
@@ -329,10 +346,20 @@ async function runEnvCheck(opts) {
 
   if (opts.tenantId) {
     checks.push(makeCheck('tenant-id', 'pass', 'tenant id supplied', { tenantId: opts.tenantId }))
-  } else if (opts.requireTenant) {
+  } else if (opts.requireTenant || opts.issue1542InstallStaging) {
     checks.push(makeCheck('tenant-id', 'fail', 'tenant id is required; set --tenant-id or METASHEET_TENANT_ID'))
   } else {
     checks.push(makeCheck('tenant-id', 'warn', 'tenant id is empty; smoke may infer it from /api/auth/me or run unscoped list probes'))
+  }
+
+  if (opts.issue1542InstallStaging) {
+    if (!opts.requireAuth) {
+      checks.push(makeCheck('issue1542-install-staging', 'fail', 'issue #1542 install-staging smoke requires --require-auth'))
+    } else {
+      checks.push(makeCheck('issue1542-install-staging', 'pass', 'issue #1542 install-staging smoke will run after input checks'))
+    }
+  } else if (opts.issue1542WorkbenchSmoke) {
+    checks.push(makeCheck('issue1542-workbench-smoke', 'pass', 'issue #1542 workbench smoke will run after input checks'))
   }
 
   if (opts.smokeOutDir) {
@@ -353,6 +380,8 @@ async function runEnvCheck(opts) {
     baseUrl: normalizedBaseUrl || redactText(opts.baseUrl || ''),
     requireAuth: opts.requireAuth,
     requireTenant: opts.requireTenant,
+    issue1542WorkbenchSmoke: opts.issue1542WorkbenchSmoke,
+    issue1542InstallStaging: opts.issue1542InstallStaging,
     tenantId: opts.tenantId || null,
     tokenSource: tokenInfo.source,
     smokeCommand: failCount === 0 ? buildSmokeCommand(opts, normalizedBaseUrl, tokenInfo) : '',
@@ -374,6 +403,8 @@ function renderMarkdown(evidence) {
     `- Result: ${evidence.ok ? 'PASS' : 'FAIL'}`,
     `- Base URL: ${evidence.baseUrl || 'not set'}`,
     `- Require auth: ${evidence.requireAuth ? 'yes' : 'no'}`,
+    `- Issue #1542 workbench smoke: ${evidence.issue1542WorkbenchSmoke ? 'yes' : 'no'}`,
+    `- Issue #1542 install staging: ${evidence.issue1542InstallStaging ? 'yes' : 'no'}`,
     `- Tenant ID: ${evidence.tenantId || 'not set'}`,
     `- Token source: ${evidence.tokenSource}`,
     `- Summary: ${evidence.summary.pass} pass / ${evidence.summary.warn} warn / ${evidence.summary.fail} fail`,
@@ -422,6 +453,8 @@ async function runCli(argv = process.argv.slice(2)) {
     ok: evidence.ok,
     baseUrl: evidence.baseUrl,
     requireAuth: evidence.requireAuth,
+    issue1542WorkbenchSmoke: evidence.issue1542WorkbenchSmoke,
+    issue1542InstallStaging: evidence.issue1542InstallStaging,
     tenantId: evidence.tenantId,
     tokenSource: evidence.tokenSource,
     summary: evidence.summary,

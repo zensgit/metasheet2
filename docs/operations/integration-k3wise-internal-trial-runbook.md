@@ -78,6 +78,9 @@ For manual signoff, run `K3 WISE Postdeploy Smoke` with:
   explicitly safe.
 - `auto_discover_tenant`: `true` only when the deployment has exactly one
   integration tenant scope.
+- `issue1542_install_staging`: `true` only for the Data Factory issue #1542
+  retest after a K3 WebAPI target already exists; it runs the staging install
+  + workbench smoke path and requires auth + tenant scope.
 
 For the current 142 internal trial deployment, use tenant scope `default`.
 `METASHEET_TENANT_ID=default` is configured as a GitHub repository variable, so
@@ -92,6 +95,12 @@ Token resolution order:
 
 The manual workflow fails when `require_auth=true` and token resolution or
 authenticated checks fail.
+
+When `issue1542_install_staging=true`, the workflow appends both
+`--issue1542-workbench-smoke` and `--issue1542-install-staging` during the input
+check and the real smoke. The input check fails early if auth or tenant scope is
+missing, so the workflow does not produce a misleading partial issue #1542
+smoke artifact.
 
 When token resolution fails, the workflow still runs the smoke script without a
 bearer token so it can upload a failure evidence artifact. Treat that artifact
