@@ -1456,6 +1456,46 @@ export class ApprovalProductService {
     }
   }
 
+  async assertTemplateVersionDeletable(templateVersionId: string): Promise<void> {
+    if (!pool) throw new Error('Database not available')
+
+    const result = await pool.query<{
+      unfinished_count: string
+      sample_instance_id: string | null
+    }>(
+      `SELECT COUNT(*)::text AS unfinished_count,
+              MIN(id)::text AS sample_instance_id
+       FROM approval_instances
+       WHERE status NOT IN ('approved', 'rejected', 'revoked', 'cancelled')
+         AND (
+           template_version_id = $1
+           OR published_definition_id IN (
+             SELECT id
+             FROM approval_published_definitions
+             WHERE template_version_id = $1
+           )
+         )`,
+      [templateVersionId],
+    )
+
+    const row = result.rows[0]
+    const unfinishedCount = Number.parseInt(row?.unfinished_count ?? '0', 10)
+    if (unfinishedCount > 0) {
+      const sampleInstanceId = row?.sample_instance_id ?? null
+      const message = [
+        `Approval template version cannot be deleted or archived because ${unfinishedCount} `
+          + 'unfinished approval instance(s) still reference it.',
+        `Sample instance id: ${sampleInstanceId ?? 'unknown'}.`,
+      ].join(' ')
+      throw new ServiceError(
+        message,
+        409,
+        'APPROVAL_TEMPLATE_VERSION_IN_USE',
+        { unfinishedCount, sampleInstanceId },
+      )
+    }
+  }
+
   /**
    * Wave 2 WP4 slice 1 — list distinct, non-null categories used by templates
    * in `approval_templates`. Drives the template center dropdown filter.
@@ -2399,6 +2439,12 @@ export class ApprovalProductService {
     return this.loadTemplateBundleWithClient(pool, templateId, explicitVersionId, preferredVersion, actor)
   }
 
+  /**
+   * Loads template authoring/creation bundles where choosing the active or
+   * latest template version is intentional. Existing approval instances must
+   * not use this helper to advance; `dispatchAction()` loads the runtime graph
+   * from `instance.published_definition_id` to preserve version-freeze semantics.
+   */
   private async loadTemplateBundleWithClient(
     client: { query: typeof pool.query },
     templateId: string,

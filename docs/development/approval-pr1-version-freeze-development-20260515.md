@@ -49,9 +49,9 @@ Known baseline invariants:
 
 Expected code changes:
 
-- Add an internal version delete/archive guard helper.
-- Add a clear doc comment or small naming guard around `loadTemplateBundle` usage so it is not reused for existing-instance advancement.
-- Add regression tests for version freeze, snapshot independence, rollback, and concurrent publish.
+- [x] Add an internal version delete/archive guard helper.
+- [x] Add a clear doc comment or small naming guard around `loadTemplateBundle` usage so it is not reused for existing-instance advancement.
+- [x] Add regression tests for version freeze, snapshot independence, rollback, and concurrent publish.
 
 Out of scope:
 
@@ -61,3 +61,34 @@ Out of scope:
 - `routes/approvals.ts` changes.
 - Automation/SLA/add-sign/admin-jump work.
 
+## Implementation Result
+
+Code changes:
+
+- `packages/core-backend/src/services/ApprovalProductService.ts`
+  - Added `assertTemplateVersionDeletable(templateVersionId)`.
+  - The guard checks unfinished instances by both direct `approval_instances.template_version_id` and indirect `approval_instances.published_definition_id -> approval_published_definitions.template_version_id`.
+  - Terminal statuses treated as safe: `approved`, `rejected`, `revoked`, `cancelled`.
+  - The 409 error includes `unfinishedCount` and `sampleInstanceId`.
+  - Added a `loadTemplateBundleWithClient()` comment that explicitly forbids reuse for existing-instance advancement.
+- `packages/core-backend/tests/unit/approval-product-service.test.ts`
+  - Added regression coverage for active-version create, stale published-definition advance, form snapshot routing, delete/archive guard, publish row-lock ordering, and publish rollback.
+
+No migration was added. `down()` rollback verification is not applicable for this PR.
+
+## Test Mapping
+
+| ID | Coverage | Evidence |
+|---|---|---|
+| T1 | Old instance advances with original `published_definition_id` after a new template version is published. | `advances existing approvals from the instance-bound stale published definition and form snapshot` uses `pub-old` / `ver-old` and asserts result stays bound to them. |
+| T2 | Old instance keeps original form snapshot semantics after schema change. | Same test routes by stored `form_snapshot.legacyAmount`, not a live template schema lookup. |
+| T3 | New instance uses latest active published definition after publish. | `creates new approvals from the currently active published definition` asserts inserted instance uses `ver-2` / `pub-2`. |
+| T4 | Delete/archive of referenced version blocked. | `blocks template version delete/archive checks with unfinished count and sample id`. |
+| T5 | Stale published definition remains readable after another version is active. | Stale `pub-old` row is returned with `is_active: false` and still advances. |
+| T6 | Publish failure rollback leaves no orphaned active definition row. | `rolls back publish when the active definition insert fails` asserts `ROLLBACK`, no `COMMIT`, and no template status update. |
+| T7 | `dispatchAction` reads by `instance.published_definition_id`, not `active_version_id`. | Stale advance test asserts the published definition query param is `pub-old` and no SQL mentions `approval_templates` or `active_version_id`. |
+| T8 | Concurrent publish leaves one active definition. | `serializes publish with a template row lock and template-scoped active definition swap` pins `FOR UPDATE` plus deactivate-before-insert order; `keeps only one active published definition across concurrent publish calls` simulates two concurrent publishes over a virtual lock-backed DB state. |
+| T9 | Form snapshot independence after schema update and republish. | Same snapshot routing test; no existing old-instance form resubmit path was found. |
+| T10 | Runtime graph independence after graph update and republish. | Same stale advance test uses frozen runtime graph to route to `approval_old_high`. |
+| T11 | Guard error includes unfinished instance count and sample ID. | Guard rejection test asserts `unfinishedCount: 2` and `sampleInstanceId: apr-pending-1`. |
+| T12 | Static/AST call-site guard for `preferredVersion: 'active'`. | Not implemented; PR1 used a code comment guard instead of call-site splitting, per P2 optional scope. |
