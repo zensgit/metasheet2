@@ -310,6 +310,30 @@ export function getDefaultIntegrationScope(): Required<IntegrationScope> {
   }
 }
 
+// Staging install project IDs are scoped to the integration-core plugin. The
+// backend (assertProjectIdAllowedForPlugin) only inspects the final ":"-segment
+// and requires it to be exactly one of these namespaces.
+const INTEGRATION_PROJECT_NAMESPACES = ['integration-core', 'plugin-integration-core']
+
+export function isIntegrationScopedProjectId(projectId: string): boolean {
+  const trimmed = typeof projectId === 'string' ? projectId.trim() : ''
+  if (!trimmed) return false
+  const suffix = trimmed.split(':').pop()?.trim() ?? ''
+  return INTEGRATION_PROJECT_NAMESPACES.includes(suffix)
+}
+
+// Deterministic, backend-correct normalize: empty -> tenant-scoped default
+// (matches the server auto-scope used when projectId is omitted); already
+// scoped -> returned untouched; otherwise the user's input is preserved as a
+// prefix and the required ":integration-core" suffix is appended.
+export function normalizeIntegrationProjectId(projectId: string, tenantId: string): string {
+  const trimmedTenant = (typeof tenantId === 'string' && tenantId.trim()) || 'default'
+  const trimmed = typeof projectId === 'string' ? projectId.trim() : ''
+  if (!trimmed) return `${trimmedTenant}:integration-core`
+  if (isIntegrationScopedProjectId(trimmed)) return trimmed
+  return `${trimmed}:integration-core`
+}
+
 export async function listIntegrationAdapters(): Promise<IntegrationAdapterMetadata[]> {
   const response = await apiFetch('/api/integration/adapters')
   const data = await parseIntegrationResponse<IntegrationAdapterMetadata[]>(response)

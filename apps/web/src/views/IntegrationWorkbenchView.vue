@@ -336,6 +336,12 @@
           <input v-model="stagingBaseId" data-testid="staging-base-id" placeholder="留空使用默认 base" />
         </label>
       </div>
+      <div v-if="stagingProjectIdScopeWarning" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="staging-project-id-scope-warning">
+        {{ stagingProjectIdScopeWarning }}
+        <button type="button" class="integration-workbench__button" data-testid="normalize-staging-project-id" @click="normalizeStagingProjectIdToScope">
+          规范化为 integration 作用域
+        </button>
+      </div>
       <div class="integration-workbench__actions">
         <button type="button" class="integration-workbench__button" data-testid="install-staging" :disabled="installingStaging" @click="installStagingTables">
           {{ installingStaging ? '创建中' : '创建清洗表' }}
@@ -581,6 +587,8 @@ import {
   canReadFromSystem,
   canWriteToSystem,
   getDefaultIntegrationScope,
+  isIntegrationScopedProjectId,
+  normalizeIntegrationProjectId,
   getExternalSystemSchema,
   installIntegrationStaging,
   listIntegrationDeadLetters,
@@ -1016,6 +1024,18 @@ function defaultStagingProjectId(): string {
 
 function effectiveStagingProjectId(): string {
   return stagingProjectId.value.trim() || defaultStagingProjectId()
+}
+
+const stagingProjectIdScopeWarning = computed(() => {
+  const value = stagingProjectId.value.trim()
+  if (!value || isIntegrationScopedProjectId(value)) return ''
+  return `Project ID「${value}」不是 integration 作用域，安装会触发 plugin-scope 警告。留空可自动作用域，或一键规范化为以 :integration-core 结尾。`
+})
+
+function normalizeStagingProjectIdToScope(): void {
+  const normalized = normalizeIntegrationProjectId(stagingProjectId.value, currentScope().tenantId)
+  stagingProjectId.value = normalized
+  setStatus(`Project ID 已规范化为 ${normalized}`, 'idle')
 }
 
 function descriptorToSchemaFields(descriptor: IntegrationStagingDescriptor | null): IntegrationObjectSchemaField[] {

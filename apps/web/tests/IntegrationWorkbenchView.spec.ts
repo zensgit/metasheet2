@@ -874,4 +874,58 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).toContain('创建 staging 多维表后即可在 staging 卡片上')
     expect((container.querySelector('[data-testid="inventory-overview"]'))).not.toBeNull()
   })
+
+  it('warns and one-click normalizes a non-integration-scoped staging project ID', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'metasheet:staging', label: 'MetaSheet staging multitable', roles: ['source'], supports: ['read'], advanced: false },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') {
+        return jsonResponse([])
+      }
+      if (url === '/api/integration/staging/descriptors') {
+        return jsonResponse([])
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi()
+
+    const projectIdInput = container.querySelector('[data-testid="staging-project-id"]') as HTMLInputElement
+    expect(container.querySelector('[data-testid="staging-project-id-scope-warning"]')).toBeNull()
+
+    projectIdInput.value = 'project_default'
+    projectIdInput.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    const warning = container.querySelector('[data-testid="staging-project-id-scope-warning"]') as HTMLElement | null
+    expect(warning).not.toBeNull()
+    expect(warning!.textContent).toContain('不是 integration 作用域')
+
+    ;(container.querySelector('[data-testid="normalize-staging-project-id"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(projectIdInput.value).toBe('project_default:integration-core')
+    expect(container.querySelector('[data-testid="staging-project-id-scope-warning"]')).toBeNull()
+    expect(container.textContent).toContain('Project ID 已规范化为 project_default:integration-core')
+
+    projectIdInput.value = ''
+    projectIdInput.dispatchEvent(new Event('input'))
+    await flushUi()
+    expect(container.querySelector('[data-testid="staging-project-id-scope-warning"]')).toBeNull()
+  })
 })
