@@ -150,6 +150,24 @@ template schema, and a fixed draft pipeline ID can be saved without PostgreSQL
 JSONB `22P02`. It writes staging/source/pipeline metadata only and never runs
 dry-run, Save-only, Submit, or Audit.
 
+### SQL Server executor diagnostic
+
+The postdeploy smoke reports configured K3 WISE SQL Server sources through the
+non-blocking `sqlserver-executor-availability` check:
+
+- `pass` means a configured `erp:k3-wise-sqlserver` source is not currently
+  marked unavailable by the backend.
+- `skipped` with `code=SQLSERVER_EXECUTOR_MISSING` means the SQL source exists,
+  but the deployment has not injected the allowlisted `queryExecutor`.
+
+`SQLSERVER_EXECUTOR_MISSING` does not invalidate the #1542 staging-to-K3
+metadata signoff. It means direct SQL Server source execution is still blocked.
+Use `metasheet:staging` as the source for Data Factory retests until the bridge
+deployment wires a query executor with the expected `testConnection`, `select`,
+and `insertMany` methods. After wiring the executor, retest the SQL source from
+the workbench and rerun this smoke; the diagnostic should move from `skipped`
+to `pass`.
+
 Then render the summary:
 
 ```bash

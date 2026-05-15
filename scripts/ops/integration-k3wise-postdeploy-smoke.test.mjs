@@ -200,6 +200,21 @@ const DEFAULT_SYSTEMS = [
     status: 'active',
   },
 ]
+const SQL_EXECUTOR_MISSING_SYSTEM = {
+  id: 'k3_sql_source_1',
+  tenantId: 'tenant-smoke',
+  workspaceId: null,
+  name: 'K3 SQL Read Channel',
+  kind: 'erp:k3-wise-sqlserver',
+  role: 'source',
+  status: 'error',
+  lastError: 'SQLSERVER_EXECUTOR_MISSING: inject queryExecutor when creating K3WiseSqlServerChannel',
+}
+const SQL_EXECUTOR_READY_SYSTEM = {
+  ...SQL_EXECUTOR_MISSING_SYSTEM,
+  status: 'active',
+  lastError: null,
+}
 const DEFAULT_STAGING_OBJECTS = [
   {
     name: 'standard_materials',
@@ -709,6 +724,82 @@ test('authenticated postdeploy smoke validates route and staging contracts witho
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/pipelines'))
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/runs'))
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/dead-letters'))
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('authenticated postdeploy smoke records missing SQL executor as a non-blocking diagnostic', async () => {
+  const fake = createFakeServer({ externalSystems: [...DEFAULT_SYSTEMS, SQL_EXECUTOR_MISSING_SYSTEM] })
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--auth-token', 'test.jwt.token',
+      '--require-auth',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 0, result.stderr)
+    const evidenceText = readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8')
+    assert.equal(evidenceText.includes('test.jwt.token'), false)
+    const evidence = JSON.parse(evidenceText)
+    assert.equal(evidence.summary.fail, 0)
+    assert.deepEqual(evidence.signoff, {
+      internalTrial: 'pass',
+      reason: 'authenticated smoke passed',
+    })
+    const sqlDiagnostic = evidence.checks.find((check) => check.id === 'sqlserver-executor-availability')
+    assert.equal(sqlDiagnostic.status, 'skipped')
+    assert.equal(sqlDiagnostic.code, 'SQLSERVER_EXECUTOR_MISSING')
+    assert.equal(sqlDiagnostic.systemsChecked, 1)
+    assert.deepEqual(sqlDiagnostic.blockedSystems, [
+      {
+        id: 'k3_sql_source_1',
+        name: 'K3 SQL Read Channel',
+        role: 'source',
+        status: 'error',
+      },
+    ])
+    assert.doesNotMatch(JSON.stringify(sqlDiagnostic.blockedSystems), /lastError|queryExecutor/)
+    assert.ok(fake.requests.some((request) => (
+      request.pathname === '/api/integration/external-systems' &&
+      request.query.tenantId === 'tenant-smoke' &&
+      request.query.limit === '100'
+    )))
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('authenticated postdeploy smoke passes SQL executor diagnostic when SQL source is active', async () => {
+  const fake = createFakeServer({ externalSystems: [...DEFAULT_SYSTEMS, SQL_EXECUTOR_READY_SYSTEM] })
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--auth-token', 'test.jwt.token',
+      '--require-auth',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 0, result.stderr)
+    const evidence = JSON.parse(readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8'))
+    const sqlDiagnostic = evidence.checks.find((check) => check.id === 'sqlserver-executor-availability')
+    assert.equal(sqlDiagnostic.status, 'pass')
+    assert.equal(sqlDiagnostic.systemsChecked, 1)
+    assert.deepEqual(sqlDiagnostic.readySystems, [
+      {
+        id: 'k3_sql_source_1',
+        name: 'K3 SQL Read Channel',
+        role: 'source',
+        status: 'active',
+      },
+    ])
   } finally {
     await fake.close()
     rmSync(outDir, { recursive: true, force: true })

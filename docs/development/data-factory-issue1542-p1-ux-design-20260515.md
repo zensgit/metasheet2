@@ -32,7 +32,7 @@ Out of scope (deliberate, per Stage 1 Lock):
 
 `runtimeBlockerForSystem(system)` already detects two non-runnable cases for `erp:k3-wise-sqlserver`:
 
-- `lastError` matches `queryExecutor|executor|injected|注入|执行器`.
+- `lastError` matches `SQLSERVER_EXECUTOR_MISSING|queryExecutor|executor|injected|注入|执行器`.
 - `status === 'error'` with no error message (operator must wire allowlist `queryExecutor`).
 
 The source dropdown previously rendered every entry in `sourceSystems` as a freely selectable `<option>`. We now bind:
@@ -59,7 +59,7 @@ Behavior:
 A new computed `sqlChannelDisabledHint` renders the exact phrasing required by the issue intake:
 
 ```text
-高级 SQL 通道未启用 / 需要部署侧注入 queryExecutor。已有 SQL 连接配置会保留但暂不能作为 Dry-run 来源。
+高级 SQL 通道未启用 / SQLSERVER_EXECUTOR_MISSING / 需要部署侧注入 queryExecutor。已有 SQL 连接配置会保留但暂不能作为 Dry-run 来源。
 ```
 
 It surfaces whenever the loaded `systems` list contains at least one `erp:k3-wise-sqlserver` system that `runtimeBlockerForSystem` flags. The hint is below `source-runtime-blocker` so a selected disabled SQL system shows both the selection-level runtime blocker and the dropdown-level hint.

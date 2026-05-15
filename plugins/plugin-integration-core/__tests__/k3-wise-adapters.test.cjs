@@ -510,6 +510,8 @@ async function testK3SqlServerChannel() {
   const missingExecutorStatus = await missingExecutor.testConnection()
   assert.equal(missingExecutorStatus.ok, false)
   assert.equal(missingExecutorStatus.code, 'SQLSERVER_EXECUTOR_MISSING')
+  assert.match(missingExecutorStatus.message, /SQLSERVER_EXECUTOR_MISSING/)
+  assert.match(missingExecutorStatus.message, /queryExecutor/)
 
   const disallowed = createK3WiseSqlServerChannel({
     system: createSqlSystem({

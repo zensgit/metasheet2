@@ -769,7 +769,7 @@ const targetConnectionLabel = computed(() => connectionStatusLabel(selectedTarge
 const sourceRuntimeBlocker = computed(() => runtimeBlockerForSystem(selectedSourceSystem.value))
 const sqlChannelDisabledHint = computed(() => {
   const hasDisabledSql = systems.value.some((system) => system.kind === 'erp:k3-wise-sqlserver' && runtimeBlockerForSystem(system) !== '')
-  return hasDisabledSql ? '高级 SQL 通道未启用 / 需要部署侧注入 queryExecutor。已有 SQL 连接配置会保留但暂不能作为 Dry-run 来源。' : ''
+  return hasDisabledSql ? '高级 SQL 通道未启用 / SQLSERVER_EXECUTOR_MISSING / 需要部署侧注入 queryExecutor。已有 SQL 连接配置会保留但暂不能作为 Dry-run 来源。' : ''
 })
 const sourceDatasetTitle = computed(() => selectedObjectLabel('source') || '请选择来源数据集')
 const targetDatasetTitle = computed(() => selectedObjectLabel('target') || '请选择目标数据集')
@@ -943,8 +943,8 @@ function isAdvancedSystem(system: WorkbenchExternalSystem): boolean {
 function runtimeBlockerForSystem(system: WorkbenchExternalSystem | null): string {
   if (!system) return ''
   const errorText = system.lastError || ''
-  if (system.kind === 'erp:k3-wise-sqlserver' && /queryExecutor|executor|injected|注入|执行器/i.test(errorText)) {
-    return 'SQL 连接已配置，但当前部署未注入 SQL 执行器；可保留为高级连接，暂不能作为可读 source 执行 dry-run。'
+  if (system.kind === 'erp:k3-wise-sqlserver' && /SQLSERVER_EXECUTOR_MISSING|queryExecutor|executor|injected|注入|执行器/i.test(errorText)) {
+    return 'SQL 连接已配置，但当前部署未注入 SQL 执行器（SQLSERVER_EXECUTOR_MISSING）；可保留为高级连接，暂不能作为可读 source 执行 dry-run。'
   }
   if (system.kind === 'erp:k3-wise-sqlserver' && system.status === 'error' && !errorText) {
     return 'K3 SQL Server 只读通道需要部署 allowlist queryExecutor 后才能读取样本或作为 source。'
