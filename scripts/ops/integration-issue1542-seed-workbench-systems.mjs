@@ -307,8 +307,10 @@ function sheetTargetFromInstallResult(result) {
   const data = responseData(result)
   const sheetId = data?.sheetIds?.standard_materials
   if (!sheetId) {
-    throw new Issue1542SeedError('staging install did not return sheetIds.standard_materials', {
+    throw new Issue1542SeedError('staging install did not return sheetIds.standard_materials; for the metadata-only issue #1542 smoke, rerun with --standard-materials-sheet-id issue1542_metadata_standard_materials, or fix multitable provisioning before real dry-run testing', {
       sheetIds: data?.sheetIds || {},
+      warnings: Array.isArray(data?.warnings) ? data.warnings : [],
+      fallback: '--standard-materials-sheet-id issue1542_metadata_standard_materials --standard-materials-view-id issue1542_metadata_view',
     })
   }
   const target = Array.isArray(data.targets)

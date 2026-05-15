@@ -188,6 +188,47 @@ test('can install staging first and use returned standard_materials sheet id', a
   })
 })
 
+test('install-staging explains metadata-only fallback when no sheet id is returned', async () => {
+  await withFakeServer(async (req, res, calls) => {
+    const url = new URL(req.url, 'http://127.0.0.1')
+    if (req.method === 'GET' && url.pathname === '/api/integration/staging/descriptors') {
+      calls.push({ method: req.method, path: url.pathname })
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ data: [descriptor()] }))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/api/integration/staging/install') {
+      calls.push({ method: req.method, path: url.pathname, body: await readJson(req) })
+      res.writeHead(201, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({
+        data: {
+          sheetIds: {},
+          viewIds: {},
+          warnings: ['context.api.multitable.provisioning.ensureObject not available'],
+        },
+      }))
+      return
+    }
+    res.writeHead(404, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ error: { code: 'NOT_FOUND' } }))
+  }, async (baseUrl, calls) => {
+    const result = await runScript([
+      '--base-url',
+      baseUrl,
+      '--tenant-id',
+      'default',
+      '--project-id',
+      'project_b',
+      '--install-staging',
+    ])
+    assert.equal(result.code, 1)
+    assert.match(result.stderr, /staging install did not return sheetIds\.standard_materials/)
+    assert.match(result.stderr, /--standard-materials-sheet-id issue1542_metadata_standard_materials/)
+    assert.equal(calls.filter((call) => call.path === '/api/integration/external-systems').length, 0)
+    await rm(result.dir, { recursive: true, force: true })
+  })
+})
+
 test('rejects missing sheet id unless install-staging is supplied', async () => {
   const result = await new Promise((resolve) => {
     const child = spawn(process.execPath, [

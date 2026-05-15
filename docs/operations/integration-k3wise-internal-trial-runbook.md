@@ -125,6 +125,23 @@ node scripts/ops/integration-issue1542-seed-workbench-systems.mjs \
   --out-dir artifacts/integration-k3wise/internal-trial/issue1542-seed
 ```
 
+If this fails with `staging install did not return sheetIds.standard_materials`,
+the deployment can still run the metadata-only #1542 retest by supplying an
+explicit placeholder sheet id. Use this fallback only for schema/pipeline-save
+smoke evidence; fix multitable provisioning before real dry-run testing.
+
+```bash
+node scripts/ops/integration-issue1542-seed-workbench-systems.mjs \
+  --base-url "$METASHEET_BASE_URL" \
+  --token-file "$METASHEET_AUTH_TOKEN_FILE" \
+  --tenant-id "$METASHEET_TENANT_ID" \
+  --project-id "${METASHEET_PROJECT_ID:-default}" \
+  --standard-materials-sheet-id issue1542_metadata_standard_materials \
+  --standard-materials-view-id issue1542_metadata_view \
+  --standard-materials-open-link /multitable/issue1542_metadata_standard_materials/issue1542_metadata_view \
+  --out-dir artifacts/integration-k3wise/internal-trial/issue1542-seed
+```
+
 Then run the smoke:
 
 ```bash
