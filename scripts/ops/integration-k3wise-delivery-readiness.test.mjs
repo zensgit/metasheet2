@@ -26,6 +26,45 @@ function postdeployPass() {
   }
 }
 
+function postdeployPassWithSqlExecutorMissing() {
+  return {
+    ...postdeployPass(),
+    summary: { pass: 12, skipped: 1, fail: 0 },
+    checks: [
+      {
+        id: 'sqlserver-executor-availability',
+        status: 'skipped',
+        code: 'SQLSERVER_EXECUTOR_MISSING',
+        reason: 'K3 WISE SQL Server source is configured but the deployment has not injected the allowlisted queryExecutor; staging-to-K3 smoke signoff can still pass.',
+        systemsChecked: 1,
+        blockedSystems: [
+          {
+            id: 'sys_sql',
+              name: 'K3 SQL Source',
+              role: 'source',
+              status: 'error',
+              rawConnectionString: 'server=hidden;credential=should-not-copy',
+            },
+          ],
+        },
+    ],
+  }
+}
+
+function packageVerifyPass(overrides = {}) {
+  return {
+    ok: true,
+    packageName: 'metasheet-multitable-onprem-v2.5.0-k3wise.zip',
+    archiveType: 'zip',
+    checks: [
+      { name: 'checksum', status: 'PASS' },
+      { name: 'required-content', status: 'PASS', requiredCount: 48 },
+      { name: 'no-github-links', status: 'PASS' },
+    ],
+    ...overrides,
+  }
+}
+
 function preflightReadyPacket(overrides = {}) {
   return {
     status: 'preflight-ready',
@@ -60,13 +99,37 @@ test('reports internal readiness after authenticated postdeploy smoke passes', (
 
   assert.equal(report.decision, INTERNAL_READY_DECISION)
   assert.equal(report.gates.find((gate) => gate.id === 'postdeploy-smoke').status, 'pass')
+  assert.equal(report.gates.find((gate) => gate.id === 'package-verify').status, 'pending')
   assert.equal(report.gates.find((gate) => gate.id === 'preflight-packet').status, 'pending')
-  assert.match(report.nextAction, /Wait for customer GATE/)
+  assert.match(report.nextAction, /Run the on-prem package verifier/)
+})
+
+test('carries optional SQL executor diagnostic without blocking readiness', () => {
+  const report = buildReadinessReport({
+    postdeploySmoke: postdeployPassWithSqlExecutorMissing(),
+  }, { generatedAt: '2026-05-06T00:00:00.000Z' })
+
+  assert.equal(report.decision, INTERNAL_READY_DECISION)
+  const postdeploy = report.gates.find((gate) => gate.id === 'postdeploy-smoke')
+  assert.equal(postdeploy.status, 'pass')
+  assert.equal(postdeploy.advancedSqlSource.status, 'skipped')
+  assert.equal(postdeploy.advancedSqlSource.code, 'SQLSERVER_EXECUTOR_MISSING')
+  assert.equal(postdeploy.advancedSqlSource.systemsChecked, 1)
+  assert.deepEqual(postdeploy.advancedSqlSource.blockedSystems, [
+    {
+      id: 'sys_sql',
+      name: 'K3 SQL Source',
+      role: 'source',
+      status: 'error',
+    },
+  ])
+  assert.equal(JSON.stringify(postdeploy).includes('should-not-copy'), false)
 })
 
 test('reports customer trial ready after postdeploy and preflight pass', () => {
   const report = buildReadinessReport({
     postdeploySmoke: postdeployPass(),
+    packageVerify: packageVerifyPass(),
     preflightPacket: preflightReadyPacket(),
   }, { generatedAt: '2026-05-06T00:00:00.000Z' })
 
@@ -78,6 +141,7 @@ test('reports customer trial ready after postdeploy and preflight pass', () => {
 test('reports customer trial signed off after live evidence report passes', () => {
   const report = buildReadinessReport({
     postdeploySmoke: postdeployPass(),
+    packageVerify: packageVerifyPass(),
     preflightPacket: preflightReadyPacket(),
     liveEvidenceReport: liveEvidencePass(),
   }, { generatedAt: '2026-05-06T00:00:00.000Z' })
@@ -90,6 +154,7 @@ test('reports customer trial signed off after live evidence report passes', () =
 test('blocks readiness when preflight packet loses Save-only safety', () => {
   const report = buildReadinessReport({
     postdeploySmoke: postdeployPass(),
+    packageVerify: packageVerifyPass(),
     preflightPacket: preflightReadyPacket({
       safety: {
         saveOnly: true,
@@ -106,9 +171,39 @@ test('blocks readiness when preflight packet loses Save-only safety', () => {
   assert.match(preflight.reason, /autoSubmit must be false/)
 })
 
+test('blocks customer trial readiness when package verify report is failing', () => {
+  const report = buildReadinessReport({
+    postdeploySmoke: postdeployPass(),
+    packageVerify: packageVerifyPass({
+      checks: [
+        { name: 'checksum', status: 'PASS' },
+        { name: 'required-content', status: 'FAIL' },
+      ],
+    }),
+    preflightPacket: preflightReadyPacket(),
+  }, { generatedAt: '2026-05-06T00:00:00.000Z' })
+
+  assert.equal(report.decision, BLOCKED_DECISION)
+  const packageGate = report.gates.find((gate) => gate.id === 'package-verify')
+  assert.equal(packageGate.status, 'fail')
+  assert.match(packageGate.reason, /required-content:FAIL/)
+})
+
+test('keeps customer trial pending until package verify report is provided', () => {
+  const report = buildReadinessReport({
+    postdeploySmoke: postdeployPass(),
+    preflightPacket: preflightReadyPacket(),
+  }, { generatedAt: '2026-05-06T00:00:00.000Z' })
+
+  assert.equal(report.decision, INTERNAL_READY_DECISION)
+  assert.equal(report.gates.find((gate) => gate.id === 'package-verify').status, 'pending')
+  assert.match(report.nextAction, /Run the on-prem package verifier/)
+})
+
 test('blocks readiness when live evidence is partial or failed', () => {
   const report = buildReadinessReport({
     postdeploySmoke: postdeployPass(),
+    packageVerify: packageVerifyPass(),
     preflightPacket: preflightReadyPacket(),
     liveEvidenceReport: {
       decision: 'PARTIAL',
@@ -124,7 +219,8 @@ test('blocks readiness when live evidence is partial or failed', () => {
 
 test('renders markdown gate table and production caveat', () => {
   const report = buildReadinessReport({
-    postdeploySmoke: postdeployPass(),
+    postdeploySmoke: postdeployPassWithSqlExecutorMissing(),
+    packageVerify: packageVerifyPass(),
     preflightPacket: preflightReadyPacket(),
   }, { generatedAt: '2026-05-06T00:00:00.000Z' })
 
@@ -132,22 +228,29 @@ test('renders markdown gate table and production caveat', () => {
 
   assert.match(md, /Readiness: \*\*CUSTOMER_TRIAL_READY\*\*/)
   assert.match(md, /Production use ready: \*\*no\*\*/)
+  assert.match(md, /\| On-prem package verification \| pass \|/)
   assert.match(md, /\| Customer GATE preflight packet \| pass \|/)
+  assert.match(md, /Advanced Diagnostics/)
+  assert.match(md, /SQLSERVER_EXECUTOR_MISSING/)
+  assert.doesNotMatch(md, /should-not-copy/)
 })
 
 test('CLI writes JSON and Markdown readiness artifacts', async () => {
   const outDir = makeTmpDir()
   try {
     const postdeployPath = path.join(outDir, 'postdeploy.json')
+    const packageVerifyPath = path.join(outDir, 'package-verify.json')
     const packetPath = path.join(outDir, 'packet.json')
     const reportPath = path.join(outDir, 'evidence-report.json')
     const readinessOut = path.join(outDir, 'readiness')
     writeFileSync(postdeployPath, `${JSON.stringify(postdeployPass())}\n`)
+    writeFileSync(packageVerifyPath, `${JSON.stringify(packageVerifyPass())}\n`)
     writeFileSync(packetPath, `${JSON.stringify(preflightReadyPacket())}\n`)
     writeFileSync(reportPath, `${JSON.stringify(liveEvidencePass())}\n`)
 
     const code = await runCli([
       '--postdeploy-smoke', postdeployPath,
+      '--package-verify', packageVerifyPath,
       '--preflight-packet', packetPath,
       '--live-evidence-report', reportPath,
       '--out-dir', readinessOut,
