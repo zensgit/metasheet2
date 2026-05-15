@@ -1,10 +1,10 @@
-# Multitable Feishu Phase 3 — Unlock Checklist (Read-Only Draft)
+# Multitable Feishu Phase 3 — Unlock Checklist
 
 - Date: 2026-05-15
-- Author: Claude (Opus 4.7, 1M context), interactive harness; read-only draft, no code change, no TODO Status change
-- Companion to: `/tmp/multitable-phase3-staging-verification-20260515.md`
-- Status: **Draft only. Not committed.** Awaiting Codex review and operator authorization.
-- Intent: enumerate the explicit conditions that must be met before each currently-deferred Phase 3 lane can re-enter the active queue. Does NOT propose flipping any lane today.
+- Author: Claude (Opus 4.7, 1M context), interactive harness; landed via docs-only PR after operator review
+- Companion to: `docs/development/multitable-phase3-staging-verification-20260515.md`
+- Status: **Landed.** Read-only checklist of the explicit conditions that must be met before each currently-deferred Phase 3 lane can re-enter the active queue. Does NOT propose flipping any lane.
+- Intent: durable record of unlock conditions per lane; subsequent revisions land via follow-up commits once any lane unlocks.
 
 ## 1. Charter
 
@@ -187,7 +187,7 @@ Two checkpoint questions for the operator, neither of which requires implementat
 | Q1: Is K3 GATE PASSED, OR are you explicitly breaking the lock? | A1 / A2 / A3 / B1 / B2 / D2 / D3 become eligible (each still needs T-closure). |
 | Q2: Do you have PM ownership + SME availability for at least 3 of the 5 industry templates, AND a rollback strategy choice for T7? | C1 / C2 become eligible regardless of Q1. |
 
-If both Q1 and Q2 answer NO, the only Phase 3 work eligible to ship is `pending` items already in the active queue — which are all closed as of `4743ba44d`.
+If both Q1 and Q2 answer NO, the only Phase 3 work eligible to ship is `pending` items already in the active queue — and that queue's implementation is merged on `main` as of `4743ba44d` (rechecked at `b49505c10` — the new commit `#1566` is Data Factory only, no Phase 3 drift). Until either Q1 or Q2 answers YES, no further Phase 3 lane can ship.
 
 If Q1 answers YES but Q2 answers NO, the AI / Formula / Hardening (D2/D3) lanes become eligible.
 
@@ -203,22 +203,22 @@ If Q2 answers YES but Q1 answers NO, only Lane C becomes eligible.
    - Implementation PRs follow the established stage-1 lock discipline (clean worktree, scoped diff, redaction tests, dev + verification MDs).
 4. This unlock checklist may be revised once any lane unlocks; subsequent revisions extend the dependency graph in §5.
 
-## 8. What this draft did NOT do
+## 8. What this checklist authored under
 
-- No file under `apps/`, `packages/`, `plugins/`, `scripts/`, `.github/workflows/`, or any migration directory was modified.
-- No worktree branch was created; the verification used a detached HEAD on `origin/main`.
+- No file under `apps/`, `packages/`, `plugins/`, `scripts/`, `.github/workflows/`, or any migration directory was modified to author this checklist.
+- The verification that informed this checklist used a detached HEAD on `origin/main`.
 - No real provider credential, SMTP secret, JWT, bearer token, or DingTalk webhook value was used.
-- No TODO Status line was modified.
-- No memory entry was added or modified.
-- No PR was opened.
+- No TODO Status line was modified by this checklist (Status flips remain the operator's call once a lane unlocks).
+- No memory entry was added or modified by this checklist.
+- The PR that landed this checklist is docs-only.
 
 ## 9. References
 
-- `/tmp/multitable-phase3-staging-verification-20260515.md` (companion)
+- `docs/development/multitable-phase3-staging-verification-20260515.md` (companion)
 - `docs/development/multitable-feishu-phase3-ai-hardening-plan-20260514.md`
 - `docs/development/multitable-feishu-phase3-ai-hardening-todo-20260514.md`
 - `docs/development/multitable-feishu-phase3-ai-hardening-review-20260514.md`
 - `docs/development/multitable-phase3-active-queue-closeout-development-20260515.md`
 - `project_k3_poc_stage1_lock.md` (memory)
 - `docs/development/integration-erp-platform-roadmap-20260425.md` §4-§5
-- `/tmp/multitable-phase3-lane-a1-implementation-design-20260515.md` (Claude's read-only A1 design draft)
+- `/tmp/multitable-phase3-lane-a1-implementation-design-20260515.md` (Claude's read-only A1 design draft — **still in `/tmp/`, not committed to `docs/development/`, awaiting K3 GATE PASS or explicit lock-break before ratification**)

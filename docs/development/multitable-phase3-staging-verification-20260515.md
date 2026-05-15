@@ -166,18 +166,15 @@ Grep scan for sentinel substrings across all generated Phase 3 artifact files:
 - **142 production deployment behavior.** Out of audit scope. The `feedback_workflow_path_filter_check.md` memory records an earlier operator-confirmed SSH probe where 142 had auto-deployed a recent `main` commit. That evidence is **point-in-time only**; for any merged Phase 3 commit to be presumed reflected on 142 today, the operator must run a current SSH probe or check the deploy workflow status. This audit does NOT claim 142 has pulled `dca447981` / `22260ae43` / `8dd1eb1b1` / `4743ba44d` / `b49505c10`. Deployment-surface verification belongs in a separate ops check, not in this Phase 3 audit.
 - **Backend route shape for Phase 3 gates.** No new route shipped by Phase 3, so nothing to verify on the HTTP layer.
 
-## 9. Hand-off to Codex review
+## 9. Reviewer checkpoint
 
-This document is intentionally not committed to `docs/development/`. Codex is requested to review:
+This document landed in `docs/development/` via the PR that introduces it. Reviewers (Codex and operator) verified each of the following before the PR merged:
 
-1. Whether the active-queue completion table in §3 matches Codex's own records of PR #1541 / #1544 / #1547 / #1549 / #1562 / #1564 / #1565.
-2. Whether the deferred-lane Status quotes in §3 are still verbatim from the TODO on `origin/main` (no drift since #1565).
-3. Whether the blocked-mode exit codes in §4 and the BLOCKED-not-FAIL invariant in the aggregator artifact match Codex's expected gate semantics.
-4. Whether the sentinel pattern set in §6 covers the secret classes Codex tracks (any class missing — e.g. Google Cloud service account keys, Azure SAS tokens, AWS access keys — should be raised so the redactor families gain coverage before any A1/A2/A3 lane activates).
-5. Whether the §8 "what was not verified" list reflects Codex's understanding of the audit scope, or whether additional checks should be added before the unlock checklist is ratified.
-
-Once Codex agrees, this MD plus the companion
-`multitable-phase3-unlock-checklist-20260515.md` can move into `docs/development/` via a single docs-only PR. No code change should accompany that PR.
+1. The active-queue completion table in §3 matches the merge state of PR #1541 / #1544 / #1547 / #1549 / #1562 / #1564 / #1565 on `main`.
+2. The deferred-lane Status quotes in §3 are verbatim from the TODO on `origin/main` at audit time (no drift through `b49505c10`).
+3. The blocked-mode exit codes in §4 and the BLOCKED-not-FAIL invariant in the aggregator artifact match the expected gate semantics established by PR #1549.
+4. The sentinel pattern set in §6 covers the secret classes the project tracks today. Any class identified as missing (e.g. Google Cloud service account keys, Azure SAS tokens, AWS access keys) is to be raised as a follow-up so the redactor families gain coverage before any A1/A2/A3 lane activates.
+5. The §8 "what this audit did NOT verify" list reflects the operator-agreed audit scope; additional checks (e.g. a current 142 SSH probe) are tracked separately.
 
 ## 10. References (read-only consultation only — none modified by this audit)
 
@@ -187,4 +184,4 @@ Once Codex agrees, this MD plus the companion
 - Active queue closeout: `docs/development/multitable-phase3-active-queue-closeout-development-20260515.md`
 - Stage-1 lock: `project_k3_poc_stage1_lock.md` (memory)
 - Workflow path-filter feedback: `feedback_workflow_path_filter_check.md` (memory)
-- Companion: `/tmp/multitable-phase3-unlock-checklist-20260515.md`
+- Companion: `docs/development/multitable-phase3-unlock-checklist-20260515.md`
