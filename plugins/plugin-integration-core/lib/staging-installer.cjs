@@ -268,10 +268,20 @@ async function installStaging({ context, projectId, baseId = null, logger } = {}
     warnings.push('context.api.multitable.provisioning.ensureView not available; staging sheets installed without open links')
   }
 
+  if (Object.keys(sheetIds).length === 0) {
+    const error = new Error(`staging-installer: no staging sheets provisioned; warnings=${warnings.length}`)
+    error.code = 'STAGING_INSTALL_EMPTY'
+    error.details = {
+      attempted: STAGING_DESCRIPTORS.length,
+      warnings: warnings.slice(),
+    }
+    throw error
+  }
+
   log.info(
     `[plugin-integration-core] staging install done. sheets=${Object.keys(sheetIds).length}/${STAGING_DESCRIPTORS.length} views=${Object.keys(viewIds).length}/${STAGING_DESCRIPTORS.length} warnings=${warnings.length}`,
   )
-  return { sheetIds, viewIds, openLinks, targets, warnings }
+  return { projectId, sheetIds, viewIds, openLinks, targets, warnings }
 }
 
 function summarizeField(field) {

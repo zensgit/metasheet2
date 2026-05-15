@@ -667,7 +667,7 @@
           </div>
           <div class="k3-setup__grid">
             <label class="k3-setup__field">
-              <span>Project ID</span>
+              <span>Project ID（高级，可选）</span>
               <input v-model.trim="form.projectId" autocomplete="off" />
             </label>
             <label class="k3-setup__field">
@@ -1312,6 +1312,7 @@ async function installStagingTables(): Promise<void> {
   stagingInstallResult.value = null
   try {
     const result = await installIntegrationStaging(buildK3WiseStagingInstallPayload(form))
+    if (result.projectId) form.projectId = result.projectId
     stagingInstallResult.value = result
     stagingResult.value = JSON.stringify(result, null, 2)
     await loadStagingDescriptors(true)

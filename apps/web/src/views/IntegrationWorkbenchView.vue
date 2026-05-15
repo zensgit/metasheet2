@@ -320,16 +320,16 @@
       </div>
       <div v-else class="integration-workbench__empty integration-workbench__empty--actionable" data-testid="staging-empty">
         <strong>暂未加载 staging 契约。</strong>
-        <p>填写下方 Project ID 后点击「创建清洗表」即可生成 staging 多维表；创建完成后可在 staging 卡片上「作为 Dry-run 来源」。</p>
+        <p>点击「创建清洗表」即可生成 staging 多维表；创建完成后可在 staging 卡片上「作为 Dry-run 来源」。</p>
         <div class="integration-workbench__actions">
-          <button type="button" class="integration-workbench__button" data-testid="staging-empty-focus-install" @click="focusStagingInstall">填写 Project ID 创建清洗表</button>
+          <button type="button" class="integration-workbench__button" data-testid="staging-empty-focus-install" @click="focusStagingInstall">创建清洗表</button>
         </div>
       </div>
 
       <div class="integration-workbench__grid integration-workbench__grid--compact">
         <label>
-          <span>Project ID（创建清洗表时必填）</span>
-          <input v-model="stagingProjectId" data-testid="staging-project-id" placeholder="例如 project_default" />
+          <span>Project ID（高级，可选）</span>
+          <input v-model="stagingProjectId" data-testid="staging-project-id" placeholder="留空自动使用 tenant:integration-core" />
         </label>
         <label>
           <span>Base ID（可选）</span>
@@ -985,7 +985,7 @@ function focusStagingInstall(): void {
 
 function showStagingSetup(): void {
   inventoryExpanded.value = true
-  setStatus('创建 staging 多维表后即可在 staging 卡片上「作为 Dry-run 来源」。请先填写 Project ID 再点击「创建清洗表」。', 'idle')
+  setStatus('创建 staging 多维表后即可在 staging 卡片上「作为 Dry-run 来源」。Project ID 留空时后端会自动使用插件专用作用域。', 'idle')
   focusStagingInstall()
 }
 
@@ -1008,6 +1008,14 @@ function stagingSourceSystemId(projectId: string): string {
 function multitableTargetSystemId(projectId: string): string {
   const suffix = (projectId || 'default').replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'default'
   return `metasheet_target_${suffix}`
+}
+
+function defaultStagingProjectId(): string {
+  return `${currentScope().tenantId}:integration-core`
+}
+
+function effectiveStagingProjectId(): string {
+  return stagingProjectId.value.trim() || defaultStagingProjectId()
 }
 
 function descriptorToSchemaFields(descriptor: IntegrationStagingDescriptor | null): IntegrationObjectSchemaField[] {
@@ -1367,21 +1375,20 @@ async function loadSchema(side: WorkbenchSide): Promise<void> {
 }
 
 async function installStagingTables(): Promise<void> {
-  const projectId = stagingProjectId.value.trim()
-  if (!projectId) {
-    setStatus('创建清洗表前请填写 Project ID', 'error')
-    return
-  }
+  const requestedProjectId = stagingProjectId.value.trim()
   installingStaging.value = true
   stagingInstallResultText.value = ''
   try {
     const result = await installIntegrationStaging({
       ...currentScope(),
-      projectId,
+      ...(requestedProjectId ? { projectId: requestedProjectId } : {}),
       baseId: stagingBaseId.value.trim() || null,
     })
+    const resolvedProjectId = (result.projectId || requestedProjectId || defaultStagingProjectId()).trim()
+    if (resolvedProjectId) stagingProjectId.value = resolvedProjectId
     stagingOpenTargets.value = normalizeStagingOpenTargets(result)
     stagingInstallResultText.value = JSON.stringify({
+      projectId: result.projectId || resolvedProjectId,
       sheetIds: result.sheetIds,
       viewIds: result.viewIds || {},
       targets: stagingOpenTargets.value,
@@ -1417,7 +1424,7 @@ async function activateStagingAsSource(objectId: string, successMessage?: string
     setStatus('请先创建清洗表，确认该 staging 表已有 sheetId / open link 后再作为来源。', 'error')
     return
   }
-  const projectId = stagingProjectId.value.trim() || 'default'
+  const projectId = effectiveStagingProjectId()
   const objects = buildStagingSourceObjectsConfig()
   if (!objects[objectId]) {
     setStatus('当前 staging 表缺少 sheetId，不能作为 dry-run 来源。', 'error')
@@ -1469,7 +1476,7 @@ async function useStagingAsTarget(objectId: string): Promise<void> {
     setStatus('请先创建清洗表，确认该多维表已有 sheetId / open link 后再作为目标。', 'error')
     return
   }
-  const projectId = stagingProjectId.value.trim() || 'default'
+  const projectId = effectiveStagingProjectId()
   const objects = buildMultitableTargetObjectsConfig()
   const objectConfig = objects[objectId]
   if (!objectConfig) {

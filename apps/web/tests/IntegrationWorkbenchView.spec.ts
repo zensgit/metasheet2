@@ -864,7 +864,7 @@ describe('IntegrationWorkbenchView', () => {
 
     const stagingEmpty = container.querySelector('[data-testid="staging-empty"]') as HTMLElement | null
     expect(stagingEmpty).not.toBeNull()
-    expect(stagingEmpty!.textContent).toContain('填写下方 Project ID 后点击「创建清洗表」')
+    expect(stagingEmpty!.textContent).toContain('点击「创建清洗表」即可生成 staging 多维表')
     const stagingFocusButton = stagingEmpty!.querySelector('[data-testid="staging-empty-focus-install"]') as HTMLButtonElement | null
     expect(stagingFocusButton).not.toBeNull()
 

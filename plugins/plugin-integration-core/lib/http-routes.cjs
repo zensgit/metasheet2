@@ -154,6 +154,17 @@ function scopedInput(req, input = {}) {
   }
 }
 
+function isIntegrationCoreProjectId(projectId) {
+  if (typeof projectId !== 'string') return false
+  const suffix = projectId.trim().split(':').pop()
+  return suffix === 'integration-core' || suffix === 'plugin-integration-core'
+}
+
+function resolveIntegrationStagingProjectId(tenantId, requestedProjectId) {
+  if (isIntegrationCoreProjectId(requestedProjectId)) return requestedProjectId.trim()
+  return `${tenantId}:integration-core`
+}
+
 function requestBody(req) {
   return req.body && typeof req.body === 'object' ? req.body : {}
 }
@@ -831,13 +842,13 @@ function createHandlers(services) {
     async stagingInstall(req, res) {
       requireAccess(req, 'write')
       const body = requestBody(req)
-      const projectId = firstString(body.projectId, requestQuery(req).projectId)
-      if (!projectId) {
-        throw new HttpRouteError(400, 'PROJECT_REQUIRED', 'projectId is required')
-      }
+      const query = requestQuery(req)
+      const tenantId = resolveTenantId(req, body)
+      const requestedProjectId = firstString(body.projectId, query.projectId)
+      const projectId = resolveIntegrationStagingProjectId(tenantId, requestedProjectId)
       const baseId = firstString(body.baseId, requestQuery(req).baseId)
       return sendOk(res, await stagingInstaller.installStaging(scopedInput(req, {
-        tenantId: body.tenantId,
+        tenantId,
         workspaceId: body.workspaceId,
         projectId,
         baseId,

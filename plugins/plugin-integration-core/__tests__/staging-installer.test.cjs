@@ -12,6 +12,8 @@
 //      same input shapes, returning the same sheet ids. No duplicate state.
 //   6. Partial failure — one descriptor throws, others still provisioned,
 //      warnings collected.
+//   7. Total failure — all descriptor failures reject instead of returning
+//      an apparently successful empty sheetIds map.
 //
 // Run:
 //   node plugins/plugin-integration-core/__tests__/staging-installer.test.cjs
@@ -194,6 +196,7 @@ async function main() {
   assert.equal(Object.keys(res1.viewIds).length, 5, 'all 5 view ids returned')
   assert.equal(Object.keys(res1.openLinks).length, 5, 'all 5 open links returned')
   assert.equal(res1.targets.length, 5, 'all 5 open targets returned')
+  assert.equal(res1.projectId, 'proj1', 'result includes resolved projectId')
   assert.equal(res1.warnings.length, 0, 'no warnings on happy path')
   for (const id of EXPECTED_IDS) {
     assert.equal(res1.sheetIds[id], `sheet_${id}`, `sheetId mapped for ${id}`)
@@ -233,7 +236,21 @@ async function main() {
   assert.ok(!('bom_cleanse' in res3.sheetIds), 'failing descriptor absent from sheetIds')
   assert.ok(!('bom_cleanse' in res3.viewIds), 'failing descriptor absent from viewIds')
 
-  // --- 7. View provisioning is optional for legacy plugin host tests ----
+  // --- 7. Total failure rejects instead of returning empty sheetIds -----
+  const { context: allFailCtx } = createMockContext({ failOn: new Set(EXPECTED_IDS) })
+  let allFailError = null
+  try {
+    await installStaging({ context: allFailCtx, projectId: 'proj-all-fail' })
+  } catch (e) {
+    allFailError = e
+  }
+  assert.ok(allFailError, 'total provisioning failure rejects')
+  assert.equal(allFailError.code, 'STAGING_INSTALL_EMPTY')
+  assert.match(allFailError.message, /no staging sheets provisioned/)
+  assert.equal(allFailError.details.attempted, EXPECTED_IDS.length)
+  assert.equal(allFailError.details.warnings.length, EXPECTED_IDS.length)
+
+  // --- 8. View provisioning is optional for legacy plugin host tests ----
   const legacyCtx = createMockContext().context
   delete legacyCtx.api.multitable.provisioning.ensureView
   const legacyRes = await installStaging({ context: legacyCtx, projectId: 'proj-legacy' })
@@ -242,7 +259,7 @@ async function main() {
   assert.equal(Object.keys(legacyRes.openLinks).length, 0, 'legacy context has no open links')
   assert.match(legacyRes.warnings[0], /ensureView not available/, 'legacy context reports missing open links')
 
-  // --- 8. Internal helper ----------------------------------------------
+  // --- 9. Internal helper ----------------------------------------------
   assert.equal(__internals.isProvisioningAvailable({ api: {} }), false)
   assert.equal(__internals.isProvisioningAvailable(ctx1), true)
   assert.equal(__internals.isViewProvisioningAvailable({ api: {} }), false)
@@ -263,7 +280,7 @@ async function main() {
     'open links encode route segments and baseId',
   )
 
-  console.log('✓ staging-installer: all 8 assertions passed')
+  console.log('✓ staging-installer: all 9 assertions passed')
 }
 
 main().catch((err) => {
