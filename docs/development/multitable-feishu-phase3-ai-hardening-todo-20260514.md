@@ -506,19 +506,19 @@ guards.
 
 - [x] Implement guarded real-send smoke.
   - PR: pre-existing before Phase 3; aggregated by #1544.
-  - Merge commit: pre-existing before Phase 3; D1 aggregation merge pending.
+  - Merge commit: `1f9061f56`
   - Development MD: `docs/development/multitable-phase3-real-smtp-gate-development-20260514.md`
   - Verification MD: `docs/development/multitable-phase3-real-smtp-gate-verification-20260514.md`
   - Verification summary: `email:real-send` delegates to `pnpm verify:multitable-email:real-send` and reports child status/path in Phase 3 artifacts.
 - [x] Require `CONFIRM_SEND_EMAIL=1`.
   - PR: pre-existing before Phase 3; aggregated by #1544.
-  - Merge commit: pre-existing before Phase 3; D1 aggregation merge pending.
+  - Merge commit: `1f9061f56`
   - Development MD: `docs/development/multitable-phase3-real-smtp-gate-development-20260514.md`
   - Verification MD: `docs/development/multitable-phase3-real-smtp-gate-verification-20260514.md`
   - Verification summary: existing real-send harness exits 2 unless `CONFIRM_SEND_EMAIL=1` and `MULTITABLE_EMAIL_REAL_SEND_SMOKE=1` are both present.
 - [x] Require dedicated test recipient env.
   - PR: pre-existing before Phase 3; aggregated by #1544.
-  - Merge commit: pre-existing before Phase 3; D1 aggregation merge pending.
+  - Merge commit: `1f9061f56`
   - Development MD: `docs/development/multitable-phase3-real-smtp-gate-development-20260514.md`
   - Verification MD: `docs/development/multitable-phase3-real-smtp-gate-verification-20260514.md`
   - Verification summary: existing real-send harness exits 2 unless `MULTITABLE_EMAIL_SMOKE_TO` is configured; D1 tests prove recipient values are redacted from aggregate artifacts.
@@ -617,34 +617,40 @@ Owner recommendation: Codex.
 
 - [x] Exercise `record.created` trigger repeatedly.
   - PR: #1547
-  - Merge commit: pending.
+  - Merge commit: `855ba871e`
   - Development MD: `docs/development/multitable-phase3-automation-soak-gate-development-20260514.md`
   - Verification MD: `docs/development/multitable-phase3-automation-soak-gate-verification-20260514.md`
   - Verification summary: `MULTITABLE_AUTOMATION_SOAK_ITERATIONS` controls repeated record creation; fake-fetch tests cover two iterations and the default remote gate blocks until configured.
 - [x] Exercise `update_record` action repeatedly.
   - PR: #1547
-  - Merge commit: pending.
+  - Merge commit: `855ba871e`
   - Development MD: `docs/development/multitable-phase3-automation-soak-gate-development-20260514.md`
   - Verification MD: `docs/development/multitable-phase3-automation-soak-gate-verification-20260514.md`
   - Verification summary: soak rule updates a status field on each created record and verifies read-back state.
 - [x] Exercise `send_email` action repeatedly in safe mode.
   - PR: #1547
-  - Merge commit: pending.
+  - Merge commit: `855ba871e`
   - Development MD: `docs/development/multitable-phase3-automation-soak-gate-development-20260514.md`
   - Verification MD: `docs/development/multitable-phase3-automation-soak-gate-verification-20260514.md`
   - Verification summary: soak requires `MULTITABLE_AUTOMATION_SOAK_EMAIL_SAFE_MODE=mock` and uses reserved test-local recipient identifiers; tests validate execution-log shape without real SMTP.
 - [x] Exercise `send_webhook` action against a controlled local/staging sink.
   - PR: #1547
-  - Merge commit: pending.
+  - Merge commit: `855ba871e`
   - Development MD: `docs/development/multitable-phase3-automation-soak-gate-development-20260514.md`
   - Verification MD: `docs/development/multitable-phase3-automation-soak-gate-verification-20260514.md`
   - Verification summary: soak requires both success and expected-failure webhook sink URLs before it can PASS.
 - [x] Verify execution log persistence and failure handling.
   - PR: #1547
-  - Merge commit: pending.
+  - Merge commit: `855ba871e`
   - Development MD: `docs/development/multitable-phase3-automation-soak-gate-development-20260514.md`
   - Verification MD: `docs/development/multitable-phase3-automation-soak-gate-verification-20260514.md`
   - Verification summary: soak polls automation logs for every rule and treats the controlled failing webhook as PASS only when failed executions are persisted with step errors.
+- [x] Add redacted execution support packet copy/download actions to the shipped run-history UI.
+  - PR: #1564
+  - Merge commit: pending.
+  - Development MD: `docs/development/multitable-automation-log-support-packet-development-20260515.md`
+  - Verification MD: `docs/development/multitable-automation-log-support-packet-verification-20260515.md`
+  - Verification summary: `MetaAutomationLogViewer` exposes copy/download actions for each expanded execution; generated Markdown/JSON packets use the shared automation log redactor and summarize step output/error without raw recipient, token, SMTP, webhook, or DingTalk receiver values.
 
 ## Final Phase 3 Acceptance
 

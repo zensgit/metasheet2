@@ -76,6 +76,25 @@
             <span class="meta-log-viewer__log-duration">{{ log.duration ?? '-' }}ms</span>
           </div>
           <div v-if="expandedId === log.id && log.steps" class="meta-log-viewer__log-detail" data-detail="true">
+            <div class="meta-log-viewer__support-actions">
+              <button
+                class="meta-log-viewer__btn meta-log-viewer__btn--support"
+                type="button"
+                data-action="copy-support-packet"
+                @click.stop="copySupportPacket(log)"
+              >Copy redacted packet</button>
+              <button
+                class="meta-log-viewer__btn meta-log-viewer__btn--support"
+                type="button"
+                data-action="download-support-packet"
+                @click.stop="downloadSupportPacket(log)"
+              >Download JSON</button>
+              <span
+                v-if="supportPacketStatus[log.id]"
+                class="meta-log-viewer__support-status"
+                data-field="support-packet-status"
+              >{{ supportPacketStatus[log.id] }}</span>
+            </div>
             <div
               v-for="(step, idx) in log.steps"
               :key="idx"
@@ -115,6 +134,11 @@ import {
   summarizeStepError,
   summarizeStepOutput,
 } from '../utils/automation-log-redact'
+import {
+  createAutomationLogSupportPacketFilename,
+  renderAutomationLogSupportPacketJson,
+  renderAutomationLogSupportPacketMarkdown,
+} from '../utils/automation-log-support-packet'
 
 const props = defineProps<{
   sheetId: string
@@ -133,6 +157,7 @@ const stats = ref<AutomationStats | null>(null)
 const statusFilter = ref('')
 const expandedId = ref<string | null>(null)
 const loadError = ref<string | null>(null)
+const supportPacketStatus = ref<Record<string, string>>({})
 
 const filteredLogs = computed(() => {
   if (!statusFilter.value) return logs.value
@@ -148,6 +173,45 @@ function formatTime(ts: string): string {
     return new Date(ts).toLocaleString()
   } catch {
     return ts
+  }
+}
+
+function setSupportPacketStatus(executionId: string, message: string) {
+  supportPacketStatus.value = {
+    ...supportPacketStatus.value,
+    [executionId]: message,
+  }
+}
+
+async function copySupportPacket(log: AutomationExecution) {
+  try {
+    const clipboard = navigator?.clipboard
+    if (!clipboard?.writeText) {
+      throw new Error('Clipboard unavailable')
+    }
+    await clipboard.writeText(renderAutomationLogSupportPacketMarkdown(log))
+    setSupportPacketStatus(log.id, 'Redacted packet copied.')
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    setSupportPacketStatus(log.id, redactString(`Copy failed: ${message}`))
+  }
+}
+
+function downloadSupportPacket(log: AutomationExecution) {
+  try {
+    const blob = new Blob([renderAutomationLogSupportPacketJson(log)], {
+      type: 'application/json',
+    })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = createAutomationLogSupportPacketFilename(log)
+    link.click()
+    URL.revokeObjectURL(url)
+    setSupportPacketStatus(log.id, 'Redacted JSON downloaded.')
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    setSupportPacketStatus(log.id, redactString(`Download failed: ${message}`))
   }
 }
 
@@ -183,6 +247,7 @@ watch(
       expandedId.value = null
       statusFilter.value = ''
       loadError.value = null
+      supportPacketStatus.value = {}
       void loadData()
     }
   },
@@ -329,6 +394,24 @@ watch(
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.meta-log-viewer__support-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 4px 0 2px;
+}
+
+.meta-log-viewer__btn--support {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.meta-log-viewer__support-status {
+  font-size: 12px;
+  color: #64748b;
 }
 
 .meta-log-viewer__step { display: flex; align-items: center; gap: 8px; font-size: 12px; flex-wrap: wrap; }
