@@ -1098,6 +1098,18 @@ function mergeAttendanceReportFieldDefinitions(configRecords, fieldIds) {
   return applyAttendanceReportFormulaValidation(sorted)
 }
 
+function getAttendanceReportFieldDroppedReservedCodes(configRecords, fieldIds) {
+  const systemCodes = new Set(cloneAttendanceReportFieldDefinitions().map(field => field.code))
+  const dropped = new Set()
+  for (const record of configRecords || []) {
+    const config = mapAttendanceReportFieldConfigRecord(record, fieldIds)
+    if (!config) continue
+    if (systemCodes.has(config.code)) continue
+    if (ATTENDANCE_REPORT_FORMULA_RESERVED_CODES.has(config.code)) dropped.add(config.code)
+  }
+  return Array.from(dropped).sort()
+}
+
 async function seedAttendanceReportFieldCatalogRecords(multitable, sheetId, fieldIds, logger) {
   const records = multitable?.records
   if (!records?.queryRecords || !records?.createRecord) {
@@ -1292,6 +1304,7 @@ function buildAttendanceReportFieldCatalogFallback(orgId, reason, error) {
   return {
     categories: cloneAttendanceReportFieldCategories(),
     items,
+    droppedReservedCodes: [],
     multitable,
     reportFieldConfig: buildAttendanceReportFieldConfig({
       fields: resolveAttendanceRecordReportFields(items),
@@ -1327,6 +1340,7 @@ async function buildAttendanceReportFieldCatalogResponse(context, orgId, logger,
       })
       : []
     const items = mergeAttendanceReportFieldDefinitions(records, catalog.fieldIds)
+    const droppedReservedCodes = getAttendanceReportFieldDroppedReservedCodes(records, catalog.fieldIds)
     const multitable = {
       available: true,
       degraded: false,
@@ -1342,6 +1356,7 @@ async function buildAttendanceReportFieldCatalogResponse(context, orgId, logger,
     return {
       categories: cloneAttendanceReportFieldCategories(),
       items,
+      droppedReservedCodes,
       multitable,
       reportFieldConfig: buildAttendanceReportFieldConfig({
         fields: resolveAttendanceRecordReportFields(items),
@@ -8726,6 +8741,7 @@ module.exports = {
     getAttendanceReportFieldProjectId,
     loadAttendanceReportFieldCatalog,
     mergeAttendanceReportFieldDefinitions,
+    getAttendanceReportFieldDroppedReservedCodes,
     resolveAttendanceRecordReportFields,
     resolveAttendanceFormulaSourceFields,
     validateAttendanceReportFormulaExpression,

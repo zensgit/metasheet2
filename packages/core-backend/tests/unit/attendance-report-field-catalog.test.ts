@@ -198,6 +198,57 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(fallback.items.some((field: { code: string }) => field.code === 'employee_name')).toBe(true)
   })
 
+  it('reports dropped reserved-code shadow fields', async () => {
+    const fieldIds = {
+      field_code: 'fld_code',
+      field_name: 'fld_name',
+      category: 'fld_category',
+      source: 'fld_source',
+      unit: 'fld_unit',
+      enabled: 'fld_enabled',
+      report_visible: 'fld_visible',
+      sort_order: 'fld_sort',
+      dingtalk_field_name: 'fld_dingtalk',
+      description: 'fld_description',
+      internal_key: 'fld_internal',
+      formula_enabled: 'fld_formula_enabled',
+      formula_expression: 'fld_formula_expression',
+      formula_scope: 'fld_formula_scope',
+      formula_output_type: 'fld_formula_output_type',
+    }
+    const records = [
+      {
+        id: 'rec-shadow-late-minutes',
+        data: { fld_code: 'late_minutes', fld_name: '违规公式', fld_category: '异常统计字段', fld_source: 'custom', fld_unit: 'minutes', fld_enabled: true, fld_visible: true, fld_sort: 4002, fld_formula_enabled: true, fld_formula_expression: '={attendance_days}*0', fld_formula_scope: 'record', fld_formula_output_type: 'duration_minutes' },
+      },
+      {
+        id: 'rec-shadow-work-minutes',
+        data: { fld_code: 'work_minutes', fld_name: '违规非公式', fld_category: '出勤统计字段', fld_source: 'custom', fld_unit: 'minutes', fld_enabled: true, fld_visible: true, fld_sort: 3501 },
+      },
+      {
+        id: 'rec-ok-custom',
+        data: { fld_code: 'ok_custom_metric', fld_name: '正常自定义', fld_category: '出勤统计字段', fld_source: 'custom', fld_unit: 'minutes', fld_enabled: true, fld_visible: true, fld_sort: 3502 },
+      },
+    ]
+
+    const dropped = helpers.getAttendanceReportFieldDroppedReservedCodes(records, fieldIds)
+    expect(dropped).toEqual(['late_minutes', 'work_minutes'])
+
+    const merged = helpers.mergeAttendanceReportFieldDefinitions(records, fieldIds)
+    expect(merged.find((field: { code: string }) => field.code === 'late_minutes')).toBeUndefined()
+    expect(merged.find((field: { code: string }) => field.code === 'work_minutes')).toBeUndefined()
+    expect(merged.find((field: { code: string }) => field.code === 'ok_custom_metric')).toBeTruthy()
+
+    expect(helpers.getAttendanceReportFieldDroppedReservedCodes([], {})).toEqual([])
+
+    const fallback = await helpers.buildAttendanceReportFieldCatalogResponse(
+      { api: { multitable: null } },
+      'org-z',
+      { warn: vi.fn() },
+    )
+    expect(fallback.droppedReservedCodes).toEqual([])
+  })
+
   it('applies enabled/reportVisible/sortOrder to record report fields and export values', () => {
     const fields = helpers.resolveAttendanceRecordReportFields([
       {

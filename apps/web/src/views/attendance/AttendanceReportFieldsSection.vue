@@ -56,6 +56,17 @@
     >
       {{ tr('Using built-in report field definitions because multitable configuration is not available.', '多维表配置暂不可用，当前使用内置统计字段定义。') }}
     </div>
+    <div
+      v-if="droppedReservedCodes.length > 0"
+      class="attendance__status attendance__status--warn"
+      role="alert"
+      data-report-field-dropped-reserved
+    >
+      {{ tr(
+        `These catalog fields were dropped because their code collides with reserved formula raw-alias names: ${droppedReservedCodes.join(', ')}. Rename them in the multitable catalog to a non-reserved code so they appear again.`,
+        `以下字段因 code 与公式 raw alias 保留字冲突已被丢弃：${droppedReservedCodes.join('、')}。请在多维表字段目录里把它们改成非保留 code 后才会重新出现。`
+      ) }}
+    </div>
 
     <div v-if="reportFields.length === 0 && !loading" class="attendance__empty">
       {{ tr('No report fields loaded yet.', '尚未加载统计字段。') }}
@@ -308,6 +319,7 @@ interface AttendanceReportFieldItem {
 interface AttendanceReportFieldsPayload {
   categories?: AttendanceReportFieldCategory[]
   items?: AttendanceReportFieldItem[]
+  droppedReservedCodes?: string[]
   reportFieldConfig?: {
     fieldsFingerprint?: {
       algorithm?: string
@@ -367,6 +379,7 @@ const reportFieldsPayload = ref<AttendanceReportFieldsPayload>({
 })
 
 const reportFields = computed(() => reportFieldsPayload.value.items ?? [])
+const droppedReservedCodes = computed(() => reportFieldsPayload.value.droppedReservedCodes ?? [])
 const enabledCount = computed(() => reportFields.value.filter(field => field.enabled).length)
 const visibleCount = computed(() => reportFields.value.filter(field => field.reportVisible).length)
 const configuredCount = computed(() => reportFields.value.filter(field => field.configured).length)
@@ -783,6 +796,12 @@ watch(
   border: 1px solid #fecaca;
   background: #fff1f2;
   color: #b91c1c;
+}
+
+.attendance__status--warn {
+  border: 1px solid #fde68a;
+  background: #fffbeb;
+  color: #92400e;
 }
 
 .attendance__table-wrapper {
