@@ -216,7 +216,7 @@ vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
     props: {
       fields: { type: Array, default: () => [] },
     },
-    emits: ['import', 'export-csv'],
+    emits: ['add-record', 'import', 'export-csv'],
     render() {
       const fieldIds = (this.$props.fields as Array<{ id?: string }>)
         .map((field) => field.id ?? '')
@@ -226,6 +226,14 @@ vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
         'div',
         { 'data-toolbar-field-ids': fieldIds },
         [
+          h(
+            'button',
+            {
+              'data-add-record': 'true',
+              onClick: () => this.$emit('add-record'),
+            },
+            'add-record',
+          ),
           h(
             'button',
             {
@@ -1219,6 +1227,21 @@ describe('MultitableWorkbench view wiring', () => {
     expect(banner?.getAttribute('data-capability-origin-source')).toBe('sheet-scope')
     expect(banner?.textContent).toContain('Restricted sheet access')
     expect(banner?.textContent).toContain('record creation, editing, deletion, field changes, and sheet access changes are limited on this sheet')
+  })
+
+  it('surfaces create-record validation failures from required-field sheets', async () => {
+    gridMock.createRecord.mockImplementation(async () => {
+      gridMock.error.value = 'Material Code is required'
+    })
+
+    mountWorkbench()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-add-record="true"]')!.click()
+    await flushUi()
+
+    expect(gridMock.createRecord).toHaveBeenCalledTimes(1)
+    expect(showErrorSpy).toHaveBeenCalledWith('Material Code is required')
   })
 
   it('shows an explicit admin access banner for administrator contexts', async () => {
