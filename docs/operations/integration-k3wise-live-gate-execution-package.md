@@ -76,22 +76,16 @@ deliberately omitted from this list.
 | K3 WISE version | `k3Wise.version` (audit) | non-empty string |
 | K3 WebAPI URL | `k3Wise.apiUrl` | http or https; URL must NOT contain userinfo and must NOT contain query parameters whose key matches secret patterns (`access_token` / `token` / `password` / `secret` / `sign[ature]` / `api_key` / `session_id` / `auth`) |
 | K3 account id (acctId) | `k3Wise.acctId` | non-empty string |
-| K3 credentials | one of: `credentials.sessionId`, OR `credentials.username` + `credentials.password` | C3 (live preflight) accepts either; **C2 (on-prem preflight `--live`) currently requires `K3_USERNAME` + `K3_PASSWORD` env regardless** — see C2-vs-C3 note below |
+| K3 credentials | one of: `credentials.sessionId`, OR `credentials.username` + `credentials.password` | C2 and C3 both accept either credential shape. For C2, inject `K3_SESSION_ID` for sessionId-only customers, or `K3_USERNAME` + `K3_PASSWORD` for username/password customers. |
 | `autoSubmit` | must be `false` (Save-only safety) | enforced — packet build throws if true |
 | `autoAudit` | must be `false` | enforced — packet build throws if true |
 
-**C2 vs C3 K3-credential divergence** (sessionId-only customers): the live PoC
-preflight (`integration-k3wise-live-poc-preflight.mjs`'s `assertK3AuthContract`)
-accepts a `sessionId`-only credential bundle and PASSes. The on-prem preflight
-(`integration-k3wise-onprem-preflight.mjs --live`) does not have an env path
-for sessionId — it always requires `K3_USERNAME` and `K3_PASSWORD` env vars
-and reports `gate-blocked` otherwise. If the customer only supplies a
-sessionId, **C2 will fail with `GATE_BLOCKED` even when the GATE answer is
-contractually complete from C3's perspective.** Workarounds today: provide a
-synthetic placeholder env (not recommended — it lies about what is set), or
-skip C2 in the sessionId-only case and rely on C3 + the postdeploy auth
-smoke. A future on-prem-preflight enhancement would add `K3_SESSION_ID` env
-support.
+**C2/C3 credential parity**: the live PoC preflight
+(`integration-k3wise-live-poc-preflight.mjs`'s `assertK3AuthContract`) and the
+on-prem preflight (`integration-k3wise-onprem-preflight.mjs --live`) now accept
+the same two credential shapes: `sessionId`, or `username` + `password`. C2 only
+records presence booleans such as `sessionIdPresent=true`; it never writes the
+raw session id, username password, or password into artifacts.
 
 ### A.3 PLM source (required)
 
@@ -157,6 +151,7 @@ different points; the same answer feeds both.
 |---|---|---|
 | `k3Wise.apiUrl` | `K3_API_URL` (or `K3_BASE_URL`) | TCP-probe in C2; configured in K3 external system in C4 |
 | `k3Wise.acctId` | `K3_ACCT_ID` | preflight presence check; recorded in packet |
+| `k3Wise.credentials.sessionId` | `K3_SESSION_ID` | presence check only — value never persisted |
 | `k3Wise.credentials.username` | `K3_USERNAME` | presence check only — value never persisted |
 | `k3Wise.credentials.password` | `K3_PASSWORD` | presence check only — value never persisted |
 | `tenantId` | (consumed by metasheet runtime, not preflight env) | tenant scope for control-plane lists |
@@ -177,7 +172,7 @@ next step only after PASS.
 | **C0** | Mock chain smoke (no GATE needed) | Anytime | `pnpm verify:integration-k3wise:poc` | 37 unit tests + 9-step end-to-end mock chain all green (mock K3 WebAPI + mock SQL + Save-only upsert + safety guard rejects core-table INSERT + evidence compiler PASS) | Any sub-step fails |
 | **C0.5** | Package verify report | After downloading the on-prem zip/tgz and before deploy signoff | see [C0.5 package verify report](#c05-package-verify-report) | verifier exits 0 and writes `package-verify.json` with `ok=true`; `required-content` / `checksum` / `no-github-links` PASS | verifier exits non-zero, missing K3 readiness scripts/docs, checksum mismatch, or delivery docs contain forbidden GitHub links |
 | **C1** | On-prem preflight (mock mode) | After deploy, before GATE arrives | `node scripts/ops/integration-k3wise-onprem-preflight.mjs --mock --out-dir <art>` (see [C1 prerequisites](#c1-prerequisites) below) | exit 0; `decision=PASS`; `pg.tcp-reachable` / `pg.migrations-aligned` / `fixtures.k3wise-mock` all `pass`; all K3 / gate checks `skip` | exit 1 (mandatory env defect — `env.database-url` and/or `env.jwt-secret` not satisfied; see [C1 prerequisites](#c1-prerequisites)) |
-| **C2** | On-prem preflight `--live` | Once GATE answers received | `node scripts/ops/integration-k3wise-onprem-preflight.mjs --live --gate-file <path> --out-dir <art>` with `K3_API_URL` / `K3_ACCT_ID` / `K3_USERNAME` / `K3_PASSWORD` injected | exit 0; `k3.live-config` `pass` (4 fields present); `k3.live-reachable` `pass` (TCP to K3 host:port); `gate.file-present` `pass` | exit 1 (mandatory) or exit 2 (`GATE_BLOCKED` — customer field still missing). For per-error-code fix recipes (`ECONNREFUSED` / `ENOTFOUND` / `EHOSTUNREACH` / `ETIMEDOUT`) on `pg.tcp-reachable` and `k3.live-reachable`, see `docs/operations/k3-poc-onprem-preflight-runbook.md` § "Per-check failure recipes". |
+| **C2** | On-prem preflight `--live` | Once GATE answers received | `node scripts/ops/integration-k3wise-onprem-preflight.mjs --live --gate-file <path> --out-dir <art>` with `K3_API_URL` / `K3_ACCT_ID` plus either `K3_SESSION_ID` or `K3_USERNAME` + `K3_PASSWORD` injected | exit 0; `k3.live-config` `pass` (endpoint, acctId, and one credential shape present); `k3.live-reachable` `pass` (TCP to K3 host:port); `gate.file-present` `pass` | exit 1 (mandatory) or exit 2 (`GATE_BLOCKED` — customer field still missing). For per-error-code fix recipes (`ECONNREFUSED` / `ENOTFOUND` / `EHOSTUNREACH` / `ETIMEDOUT`) on `pg.tcp-reachable` and `k3.live-reachable`, see `docs/operations/k3-poc-onprem-preflight-runbook.md` § "Per-check failure recipes". |
 | **C3** | Build live PoC packet + GATE contract validation | After C2 PASS | `node scripts/ops/integration-k3wise-live-poc-preflight.mjs --input <gate.json> --out-dir <packet-dir>` | `integration-k3wise-live-poc-packet.{json,md}` written; `safety.saveOnly=true / autoSubmit=false / autoAudit=false`; checklist contains `GATE-01 / CONN-01 / CONN-02 / DRY-01 / SAVE-01 / FAIL-01 / ROLLBACK-01` (plus `BOM-01` when BOM enabled) | `normalizeGate` throws (error includes `field` path of the offending key) |
 | **C4** | testConnection — PLM + K3 (control plane) | After C3 | metasheet console: register both external systems → testConnection | both return `ok=true` | either non-ok (GATE field wrong / customer network / credentials) |
 | **C5** | Material dry-run, 1–3 rows | After C4 PASS | metasheet console: trigger dry-run pipeline | dry-run report shows mappings applied correctly; `preview.records[].targetPayload.Data` matches the material template (`FNumber`, `FName`, optional `FModel`, `FBaseUnitID`) and contains no secret fields | mapping incomplete or validation rule mismatch |
