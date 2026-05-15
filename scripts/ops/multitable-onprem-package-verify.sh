@@ -99,6 +99,7 @@ function verify_generic_integration_workbench_contract() {
   local postdeploy_summary="${root}/scripts/ops/integration-k3wise-postdeploy-summary.mjs"
   local live_gate_package="${root}/docs/operations/integration-k3wise-live-gate-execution-package.md"
   local gate_intake_template="${root}/scripts/ops/fixtures/integration-k3wise/gate-intake-template.json"
+  local onsite_evidence_template="${root}/scripts/ops/fixtures/integration-k3wise/evidence-onsite-c4-c9-template.json"
 
   search_fixed_string '/integrations/workbench' "$web_dist" || die "web dist must include the Data Factory route"
   search_fixed_string '/integrations/k3-wise' "$web_dist" || die "web dist must include the K3 WISE setup route"
@@ -144,6 +145,12 @@ function verify_generic_integration_workbench_contract() {
   search_fixed_string '<fill-outside-git>' "$gate_intake_template" || die "GATE intake template must keep credential placeholders out of Git"
   search_fixed_string '"autoSubmit": false' "$gate_intake_template" || die "GATE intake template must default autoSubmit=false"
   search_fixed_string '"autoAudit": false' "$gate_intake_template" || die "GATE intake template must default autoAudit=false"
+  search_fixed_string 'evidence-onsite-c4-c9-template.json' "$live_gate_package" || die "live GATE package must document the on-site C4-C9 evidence template"
+  search_fixed_string '"C4"' "$onsite_evidence_template" || die "on-site evidence template must document C4"
+  search_fixed_string '"C9"' "$onsite_evidence_template" || die "on-site evidence template must document C9"
+  search_fixed_string '"initialDecision": "The checked-in template intentionally compiles to PARTIAL before it is filled."' "$onsite_evidence_template" || die "on-site evidence template must document initial PARTIAL behavior"
+  search_fixed_string '"autoSubmit": false' "$onsite_evidence_template" || die "on-site evidence template must default autoSubmit=false"
+  search_fixed_string '"autoAudit": false' "$onsite_evidence_template" || die "on-site evidence template must default autoAudit=false"
 }
 
 function write_optional_report() {
@@ -355,6 +362,7 @@ required=(
   "scripts/ops/integration-issue1542-seed-workbench-systems.mjs"
   "scripts/ops/integration-k3wise-postdeploy-summary.mjs"
   "scripts/ops/fixtures/integration-k3wise/gate-intake-template.json"
+  "scripts/ops/fixtures/integration-k3wise/evidence-onsite-c4-c9-template.json"
   "scripts/ops/fixtures/integration-k3wise/run-mock-poc-demo.mjs"
   "scripts/ops/multitable-onprem-bootstrap-admin.ps1"
   "scripts/ops/multitable-onprem-apply-package.sh"

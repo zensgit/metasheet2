@@ -1,0 +1,99 @@
+{
+  "_comment": "Customer/operator-facing C4-C9 on-site evidence worksheet. Copy this file outside Git, fill status/run ids/record ids after each live PoC step, then run: node scripts/ops/integration-k3wise-live-poc-evidence.mjs --packet <preflight-packet.json> --evidence <filled-template.json> --out-dir <evidence-dir>. Do not paste credentials, bearer headers, signed URLs, K3 session values, SQL connection strings, or passwords into evidence fields.",
+  "_instructions": {
+    "owner": "Implementation operator fills this with the customer K3/PLM administrator during live PoC execution.",
+    "initialDecision": "The checked-in template intentionally compiles to PARTIAL before it is filled.",
+    "statusValues": ["todo", "pass", "partial", "fail", "blocked", "skipped"],
+    "safetyRules": [
+      "C5/C6/C7 row counts must stay between 1 and 3 for the live PoC.",
+      "materialSaveOnly.autoSubmit and materialSaveOnly.autoAudit must remain false.",
+      "bomPoC.legacyPipelineOptionsSourceProductId must remain false.",
+      "erpFeedback must prove staging writeback fields were updated."
+    ]
+  },
+  "_sections": {
+    "C4": "testConnection for PLM and K3 WISE; SQL Server only when the packet expects the SQL channel.",
+    "C5": "Material dry-run with 1 to 3 preview rows.",
+    "C6": "Material Save-only write with K3 response ids and MetaSheet feedback writeback.",
+    "C7": "Optional BOM Save-only write when the packet contains a BOM pipeline.",
+    "C8": "Dead-letter replay rehearsal.",
+    "C9": "Rollback or cleanup rehearsal plus customer confirmation."
+  },
+  "gate": {
+    "status": "todo",
+    "archivePath": ""
+  },
+  "connections": {
+    "plm": {
+      "status": "todo",
+      "requestId": "",
+      "operator": "",
+      "observedAt": "",
+      "notes": ""
+    },
+    "k3Wise": {
+      "status": "todo",
+      "requestId": "",
+      "operator": "",
+      "observedAt": "",
+      "notes": ""
+    },
+    "sqlServer": {
+      "status": "todo",
+      "requestId": "",
+      "operator": "",
+      "observedAt": "",
+      "notes": "Use skipped when the preflight packet does not include the K3 SQL Server channel."
+    }
+  },
+  "materialDryRun": {
+    "status": "todo",
+    "runId": "",
+    "rowsPreviewed": 0,
+    "notes": "Set status=pass only after the dry-run preview shows 1 to 3 material payloads."
+  },
+  "materialSaveOnly": {
+    "status": "todo",
+    "runId": "",
+    "rowsWritten": 0,
+    "autoSubmit": false,
+    "autoAudit": false,
+    "k3Records": [],
+    "notes": "Add K3 material response records only after Save-only write returns externalId or billNo."
+  },
+  "erpFeedback": {
+    "status": "todo",
+    "runId": "",
+    "rowsUpdated": 0,
+    "fieldsUpdated": ["erpSyncStatus", "erpExternalId", "erpBillNo", "erpResponseCode", "erpResponseMessage", "lastSyncedAt"],
+    "updatedRows": [],
+    "notes": "Evidence must include updated staging rows or rowsUpdated>0 plus the required feedback fields."
+  },
+  "deadLetterReplay": {
+    "status": "todo",
+    "originalRunId": "",
+    "replayRunId": "",
+    "notes": "Create one controlled failure, confirm dead-letter capture, fix it, then replay successfully."
+  },
+  "bomPoC": {
+    "status": "todo",
+    "runId": "",
+    "productId": "",
+    "rowsWritten": 0,
+    "k3Records": [],
+    "legacyPipelineOptionsSourceProductId": false,
+    "notes": "Required only when the preflight packet contains a BOM pipeline."
+  },
+  "rollback": {
+    "status": "todo",
+    "owner": "",
+    "evidence": "",
+    "notes": "Customer K3 administrator verifies test rows can be removed, disabled, or ignored by the agreed strategy."
+  },
+  "customerConfirmation": {
+    "status": "todo",
+    "owner": "",
+    "confirmedAt": "",
+    "notes": "Customer owner confirms the C4-C9 evidence package is acceptable for PoC signoff."
+  }
+}

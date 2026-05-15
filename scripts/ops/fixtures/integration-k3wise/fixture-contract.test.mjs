@@ -11,12 +11,14 @@ import {
 import {
   buildEvidenceReport,
   sampleEvidence,
+  sampleOnsiteEvidenceTemplate,
 } from '../../integration-k3wise-live-poc-evidence.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const gateFixturePath = path.join(__dirname, 'gate-sample.json')
 const gateIntakeTemplatePath = path.join(__dirname, 'gate-intake-template.json')
 const evidenceFixturePath = path.join(__dirname, 'evidence-sample.json')
+const onsiteEvidenceTemplatePath = path.join(__dirname, 'evidence-onsite-c4-c9-template.json')
 
 async function readJson(filePath) {
   return JSON.parse(await readFile(filePath, 'utf8'))
@@ -77,4 +79,26 @@ test('evidence-sample.json stays equivalent to the exported evidence sample', as
   assert.equal(report.issues.length, 0)
   assert.equal(report.scope.bomRequired, true)
   assert.equal(report.scope.sqlChannelExpected, true)
+})
+
+test('evidence-onsite-c4-c9-template.json is fillable and safe before completion', async () => {
+  const gateFixture = await readJson(gateFixturePath)
+  const onsiteTemplate = await readJson(onsiteEvidenceTemplatePath)
+  assert.deepEqual(onsiteTemplate, sampleOnsiteEvidenceTemplate())
+  assert.match(onsiteTemplate._sections.C4, /testConnection/)
+  assert.match(onsiteTemplate._sections.C9, /Rollback/)
+
+  const packet = buildPacket(gateFixture, { generatedAt: '2026-05-15T00:00:00.000Z' })
+  const initialReport = buildEvidenceReport(packet, onsiteTemplate, { generatedAt: '2026-05-15T01:00:00.000Z' })
+  assert.equal(initialReport.decision, 'PARTIAL')
+  assert.equal(initialReport.issues.length, 0)
+  assert.equal(initialReport.phases.find((phase) => phase.id === 'materialSaveOnly').status, 'todo')
+  assert.equal(initialReport.phases.find((phase) => phase.id === 'bomPoC').status, 'todo')
+
+  const completedReport = buildEvidenceReport(packet, {
+    ...onsiteTemplate,
+    ...sampleEvidence(),
+  }, { generatedAt: '2026-05-15T02:00:00.000Z' })
+  assert.equal(completedReport.decision, 'PASS')
+  assert.equal(completedReport.issues.length, 0)
 })

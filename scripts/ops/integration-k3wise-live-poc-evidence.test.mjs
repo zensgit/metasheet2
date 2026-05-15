@@ -14,6 +14,7 @@ import {
   renderMarkdown,
   runCli,
   sampleEvidence,
+  sampleOnsiteEvidenceTemplate,
 } from './integration-k3wise-live-poc-evidence.mjs'
 
 function packet(overrides = {}) {
@@ -608,6 +609,37 @@ test('CLI writes redacted JSON and Markdown reports', async () => {
     assert.equal(json.includes('password'), false)
     assert.equal(md.includes('sessionToken'), false)
   } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('CLI prints on-site C4-C9 evidence template that compiles to PARTIAL', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'integration-onsite-evidence-'))
+  const writes = []
+  const originalLog = console.log
+  try {
+    console.log = (value) => writes.push(String(value))
+    await runCli(['--print-onsite-evidence-template'])
+    const printed = JSON.parse(writes.join('\n'))
+    assert.deepEqual(printed, sampleOnsiteEvidenceTemplate())
+    assert.match(printed._sections.C4, /testConnection/)
+    assert.match(printed._sections.C9, /Rollback/)
+
+    const report = buildEvidenceReport(packet(), printed)
+    assert.equal(report.decision, 'PARTIAL')
+    assert.equal(report.issues.length, 0)
+    assert.equal(JSON.stringify(printed).includes('Bearer '), false)
+    assert.equal(JSON.stringify(printed).includes('access_token='), false)
+
+    const packetPath = path.join(dir, 'packet.json')
+    const evidencePath = path.join(dir, 'evidence.json')
+    await writeFile(packetPath, `${JSON.stringify(packet(), null, 2)}\n`)
+    await writeFile(evidencePath, `${JSON.stringify(printed, null, 2)}\n`)
+    await runCli(['--packet', packetPath, '--evidence', evidencePath, '--out-dir', dir])
+    const json = await readFile(path.join(dir, 'integration-k3wise-live-poc-evidence-report.json'), 'utf8')
+    assert.match(json, /"decision": "PARTIAL"/)
+  } finally {
+    console.log = originalLog
     await rm(dir, { recursive: true, force: true })
   }
 })
