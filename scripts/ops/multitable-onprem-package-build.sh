@@ -72,6 +72,7 @@ REQUIRED_PATHS=(
   "scripts/ops/integration-k3wise-postdeploy-summary.mjs"
   "scripts/ops/fixtures/integration-k3wise"
   "docs/operations/k3-poc-onprem-preflight-runbook.md"
+  "docs/operations/integration-k3wise-onprem-operator-handoff-checklist.md"
   "docs/operations/integration-k3wise-internal-trial-runbook.md"
   "docs/operations/integration-k3wise-live-gate-execution-package.md"
   "docs/operations/integration-k3wise-sql-executor-bridge-handoff.md"
@@ -310,6 +311,7 @@ K3 WISE PoC operator tools (Node only; no Docker needed to run these):
     -> compiles the live PoC evidence into a PASS / PARTIAL / FAIL signoff.
   Runbooks:
     docs/operations/k3-poc-onprem-preflight-runbook.md           (per-check fix recipes)
+    docs/operations/integration-k3wise-onprem-operator-handoff-checklist.md (deploy-to-live handoff checklist)
     docs/operations/integration-k3wise-internal-trial-runbook.md  (post-deploy auth smoke)
     docs/operations/integration-k3wise-live-gate-execution-package.md (C0-C10 sequence + customer GATE fields)
 

@@ -16,6 +16,7 @@ const docsToCopy = [
   'docs/deployment/multitable-onprem-package-layout-20260319.md',
   'docs/deployment/multitable-onprem-customer-delivery-checklist-20260319.md',
   'docs/operations/k3-poc-onprem-preflight-runbook.md',
+  'docs/operations/integration-k3wise-onprem-operator-handoff-checklist.md',
   'docs/operations/integration-k3wise-internal-trial-runbook.md',
   'docs/operations/integration-k3wise-live-gate-execution-package.md',
   'docs/operations/integration-k3wise-sql-executor-bridge-handoff.md',
