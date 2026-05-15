@@ -153,7 +153,9 @@ function renderSignoffLines(evidence, { requireAuthSignoff = false } = {}) {
 function formatDetailValue(value) {
   if (Array.isArray(value)) {
     if (value.length === 0) return markdownInlineCode('none')
-    return value.map((item) => markdownInlineCode(item)).join(', ')
+    return value.map((item) => (
+      item && typeof item === 'object' ? formatDetailValue(item) : markdownInlineCode(item)
+    )).join(', ')
   }
   if (value && typeof value === 'object') {
     const entries = Object.entries(value)
@@ -169,6 +171,22 @@ function summarizeCheckDetails(check) {
   const lines = []
   for (const key of ['missingAdapters', 'invalidAdapters', 'missingRoutes', 'missingFields', 'invalidFields']) {
     const value = details[key]
+    const hasValue = Array.isArray(value)
+      ? value.length > 0
+      : value && typeof value === 'object'
+        ? Object.keys(value).length > 0
+        : value !== undefined && value !== null && value !== ''
+    if (hasValue) lines.push(`    - ${key}: ${formatDetailValue(value)}`)
+  }
+  return lines
+}
+
+function summarizeSkippedCheckDetails(check) {
+  if (check?.id !== 'sqlserver-executor-availability') return []
+
+  const lines = []
+  for (const key of ['code', 'reason', 'systemsChecked', 'blockedSystems']) {
+    const value = check[key]
     const hasValue = Array.isArray(value)
       ? value.length > 0
       : value && typeof value === 'object'
@@ -195,6 +213,8 @@ function renderEvidenceSummary(evidence, options = {}) {
     lines.push(`  - ${markdownInlineCode(check?.id || 'unknown')}: ${markdownInlineCode(check?.status || 'unknown')}`)
     if (check?.status === 'fail') {
       lines.push(...summarizeCheckDetails(check))
+    } else if (check?.status === 'skipped') {
+      lines.push(...summarizeSkippedCheckDetails(check))
     }
   }
   if (checks.length === 0) {
@@ -262,5 +282,6 @@ export {
   renderMissingSummary,
   renderSignoffLines,
   summarizeCheckDetails,
+  summarizeSkippedCheckDetails,
   runCli,
 }

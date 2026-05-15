@@ -69,6 +69,53 @@ test('renders compact pass summary from evidence JSON', async () => {
   }
 })
 
+test('renders skipped SQL executor diagnostic details without failing signoff summary', async () => {
+  const outDir = makeTmpDir()
+  const evidencePath = path.join(outDir, 'evidence.json')
+  try {
+    writeFileSync(evidencePath, `${JSON.stringify({
+      ok: true,
+      baseUrl: 'http://127.0.0.1:8081',
+      authenticated: true,
+      signoff: {
+        internalTrial: 'pass',
+        reason: 'authenticated smoke passed',
+      },
+      summary: { pass: 10, skipped: 1, fail: 0 },
+      checks: [
+        { id: 'api-health', status: 'pass' },
+        {
+          id: 'sqlserver-executor-availability',
+          status: 'skipped',
+          code: 'SQLSERVER_EXECUTOR_MISSING',
+          reason: 'K3 WISE SQL Server source is configured but the deployment has not injected the allowlisted queryExecutor; staging-to-K3 smoke signoff can still pass.',
+          systemsChecked: 1,
+          blockedSystems: [
+            {
+              id: 'sys_sql',
+              name: 'K3 SQL Source',
+              role: 'source',
+              status: 'error',
+            },
+          ],
+        },
+      ],
+    })}\n`)
+
+    const result = await runScript(['--input', evidencePath, '--require-auth-signoff'])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /Internal trial signoff: \*\*PASS\*\*/)
+    assert.match(result.stdout, /`sqlserver-executor-availability`: `skipped`/)
+    assert.match(result.stdout, /code: `SQLSERVER_EXECUTOR_MISSING`/)
+    assert.match(result.stdout, /reason: `K3 WISE SQL Server source is configured but the deployment has not injected the allowlisted queryExecutor; staging-to-K3 smoke signoff can still pass\.`/)
+    assert.match(result.stdout, /systemsChecked: `1`/)
+    assert.match(result.stdout, /blockedSystems: id: `sys_sql`; name: `K3 SQL Source`; role: `source`; status: `error`/)
+  } finally {
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
 test('renders blocked internal signoff for public-only smoke evidence', async () => {
   const outDir = makeTmpDir()
   const evidencePath = path.join(outDir, 'evidence.json')

@@ -89,6 +89,44 @@ test('passes authenticated postdeploy evidence with all required checks', async 
   }
 })
 
+test('passes authenticated postdeploy evidence with skipped optional SQL executor diagnostic', async () => {
+  const outDir = makeTmpDir()
+  try {
+    const evidencePath = writeEvidence(outDir, {
+      checks: [
+        ...requiredPassChecks.map((id) => ({ id, status: 'pass' })),
+        {
+          id: 'sqlserver-executor-availability',
+          status: 'skipped',
+          code: 'SQLSERVER_EXECUTOR_MISSING',
+          reason: 'K3 WISE SQL Server source is configured but the deployment has not injected the allowlisted queryExecutor; staging-to-K3 smoke signoff can still pass.',
+          systemsChecked: 1,
+          blockedSystems: [
+            {
+              id: 'sys_sql',
+              name: 'K3 SQL Source',
+              role: 'source',
+              status: 'error',
+            },
+          ],
+        },
+      ],
+      summary: { pass: requiredPassChecks.length + 3, skipped: 1, fail: 0 },
+    })
+
+    const result = await runScript(['--input', evidencePath])
+
+    assert.equal(result.status, 0, result.stderr)
+    const body = JSON.parse(result.stdout)
+    assert.equal(body.ok, true)
+    assert.equal(body.status, 'PASS')
+    assert.equal(body.summary.skipped, 1)
+    assert.equal(body.reason, 'authenticated postdeploy smoke satisfies internal-trial gate')
+  } finally {
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
 test('blocks public-only evidence even when diagnostic smoke passed', async () => {
   const outDir = makeTmpDir()
   try {
