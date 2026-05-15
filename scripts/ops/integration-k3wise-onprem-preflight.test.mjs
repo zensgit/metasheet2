@@ -15,6 +15,7 @@ const VALID_JWT = 'a'.repeat(48)
 const SHORT_JWT = 'shortsecret'
 const LIVE_K3_PASSWORD = 'k3-password-hunter2'
 const LIVE_K3_USERNAME = 'k3-test-user'
+const LIVE_K3_SESSION_ID = 'k3-session-id-secret-value'
 const LIVE_K3_ACCT_ID = 'AIS_TEST_LIVE'
 const LIVE_K3_URL = 'http://127.0.0.1:65431/K3API/'
 
@@ -148,7 +149,7 @@ test('exit 2 (GATE_BLOCKED) when --live and K3 env is missing', () => {
     assert.equal(liveConfig.status, 'gate-blocked')
     assert.deepEqual(
       liveConfig.details.missing.sort(),
-      ['K3_ACCT_ID', 'K3_API_URL', 'K3_PASSWORD', 'K3_USERNAME'].sort(),
+      ['K3_ACCT_ID', 'K3_API_URL', 'K3_USERNAME+K3_PASSWORD or K3_SESSION_ID'].sort(),
     )
     const gate = findCheck(json, 'gate.file-present')
     assert.equal(gate.status, 'gate-blocked')
@@ -281,10 +282,46 @@ test('output redacts real secret values in stdout, JSON, and MD', () => {
     assert.equal(liveConfig.details.acctId, LIVE_K3_ACCT_ID)
     assert.equal(liveConfig.details.passwordPresent, true)
     assert.equal(liveConfig.details.usernamePresent, true)
+    assert.equal(liveConfig.details.sessionIdPresent, false)
+    assert.equal(liveConfig.details.authMode, 'usernamePassword')
     assert.equal(liveConfig.details.apiUrl, LIVE_K3_URL)
     // The username field must be a presence boolean, not the value
     assert.ok(!('username' in liveConfig.details))
     assert.ok(!('password' in liveConfig.details))
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+test('live preflight accepts K3_SESSION_ID without username/password and does not leak it', () => {
+  const tmp = makeTmpDir()
+  try {
+    const out = path.join(tmp, 'r')
+    const result = runScript(
+      ['--live', '--skip-tcp', '--skip-migrations', '--out-dir', out],
+      {
+        DATABASE_URL: VALID_DB_URL,
+        JWT_SECRET: VALID_JWT,
+        K3_API_URL: LIVE_K3_URL,
+        K3_ACCT_ID: LIVE_K3_ACCT_ID,
+        K3_SESSION_ID: LIVE_K3_SESSION_ID,
+      },
+    )
+    const { json, md } = readOutputs(out)
+    const jsonText = JSON.stringify(json)
+
+    assertNoLeak(result.stdout, [LIVE_K3_SESSION_ID])
+    assertNoLeak(jsonText, [LIVE_K3_SESSION_ID])
+    assertNoLeak(md, [LIVE_K3_SESSION_ID])
+
+    const liveConfig = findCheck(json, 'k3.live-config')
+    assert.equal(liveConfig.status, 'pass')
+    assert.equal(liveConfig.details.acctId, LIVE_K3_ACCT_ID)
+    assert.equal(liveConfig.details.authMode, 'sessionId')
+    assert.equal(liveConfig.details.sessionIdPresent, true)
+    assert.equal(liveConfig.details.usernamePresent, false)
+    assert.equal(liveConfig.details.passwordPresent, false)
+    assert.ok(!('sessionId' in liveConfig.details))
   } finally {
     rmSync(tmp, { recursive: true, force: true })
   }

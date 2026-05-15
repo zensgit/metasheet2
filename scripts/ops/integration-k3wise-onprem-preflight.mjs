@@ -378,12 +378,15 @@ function checkLiveK3Config(env, mode, summary) {
   const acctId = (env.K3_ACCT_ID || '').trim()
   const username = (env.K3_USERNAME || '').trim()
   const passwordPresent = Boolean((env.K3_PASSWORD || '').trim())
+  const sessionIdPresent = Boolean((env.K3_SESSION_ID || '').trim())
+  const usernamePasswordPresent = Boolean(username && passwordPresent)
 
   const missing = []
   if (!apiUrl) missing.push('K3_API_URL')
   if (!acctId) missing.push('K3_ACCT_ID')
-  if (!username) missing.push('K3_USERNAME')
-  if (!passwordPresent) missing.push('K3_PASSWORD')
+  if (!sessionIdPresent && !usernamePasswordPresent) {
+    missing.push('K3_USERNAME+K3_PASSWORD or K3_SESSION_ID')
+  }
 
   let parsedUrl = null
   if (apiUrl) {
@@ -415,8 +418,10 @@ function checkLiveK3Config(env, mode, summary) {
     // parsedUrl.hostname/port; it is never persisted.
     apiUrl: sanitizeUrl(apiUrl),
     acctId,
-    usernamePresent: true,
-    passwordPresent: true,
+    authMode: sessionIdPresent ? 'sessionId' : 'usernamePassword',
+    usernamePresent: Boolean(username),
+    passwordPresent,
+    sessionIdPresent,
   })
   return parsedUrl
 }
@@ -508,7 +513,7 @@ function renderMarkdown(summary) {
     '- Read-only: no DB writes, no migration runs, no K3 write calls.',
     '- Mock mode does not require any K3 endpoint or credentials.',
     '- Live mode performs only a TCP-level reachability probe on the K3 endpoint host:port; it does NOT call the K3 API.',
-    '- Secrets are redacted in all output paths — stdout/MD via `redactString` and preflight.json via `sanitizeUrl` at storage time. Covered: DATABASE_URL / K3_API_URL userinfo password; query params keyed `access_token` / `token` / `password` / `secret` / `sign(ature)` / `api_key` / `session_id` / `auth`; `Bearer …` headers; `eyJ…` JWT-shaped tokens; K3_PASSWORD value.',
+    '- Secrets are redacted in all output paths — stdout/MD via `redactString` and preflight.json via `sanitizeUrl` at storage time. Covered: DATABASE_URL / K3_API_URL userinfo password; query params keyed `access_token` / `token` / `password` / `secret` / `sign(ature)` / `api_key` / `session_id` / `auth`; `Bearer …` headers; `eyJ…` JWT-shaped tokens; K3_PASSWORD and K3_SESSION_ID values.',
     '',
   )
   return lines.join('\n') + '\n'
@@ -550,7 +555,8 @@ GATE has supplied real K3 answers.
 
 Options:
   --mock                  (default) skip live K3 endpoint and gate-file checks
-  --live                  require K3_API_URL/K3_ACCT_ID/K3_USERNAME/K3_PASSWORD
+  --live                  require K3_API_URL/K3_ACCT_ID plus either
+                          K3_USERNAME+K3_PASSWORD or K3_SESSION_ID
                           and TCP-reach the K3 endpoint host:port
   --gate-file <path>      Path to GATE answer JSON (required for --live)
   --out-dir <dir>         Override artifact directory
