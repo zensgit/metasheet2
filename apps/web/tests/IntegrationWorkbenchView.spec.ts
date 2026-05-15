@@ -453,13 +453,13 @@ describe('IntegrationWorkbenchView', () => {
     projectId.value = 'project_1'
     projectId.dispatchEvent(new Event('input'))
     ;(container.querySelector('[data-testid="install-staging"]') as HTMLButtonElement).click()
-    await flushUi(10)
-    expect(container.textContent).toContain('清洗表已创建，可打开多维表处理数据')
+    await flushUi(20)
+    expect(container.textContent).toContain('清洗表已创建，并已自动设置 staging 多维表为 Dry-run 来源')
     expect((container.querySelector('[data-testid="open-staging-standard_materials"]') as HTMLAnchorElement).getAttribute('href'))
       .toBe('/multitable/sheet_materials/view_materials')
 
-    ;(container.querySelector('[data-testid="use-staging-source-standard_materials"]') as HTMLButtonElement).click()
-    await flushUi(10)
+    const stagingSourceButton = container.querySelector('[data-testid="use-staging-source-standard_materials"]') as HTMLButtonElement
+    expect(stagingSourceButton.disabled).toBe(false)
     expect(externalSystemBodies).toHaveLength(1)
     expect(externalSystemBodies[0]).toMatchObject({
       id: 'metasheet_staging_project_1',
@@ -489,7 +489,7 @@ describe('IntegrationWorkbenchView', () => {
     })
     expect((container.querySelector('[data-testid="source-system"]') as HTMLSelectElement).value).toBe('metasheet_staging_project_1')
     expect((container.querySelector('[data-testid="source-object"]') as HTMLSelectElement).value).toBe('standard_materials')
-    expect(container.textContent).toContain('已将 物料清洗 设为 Dry-run 来源')
+    expect(container.textContent).toContain('清洗表已创建，并已自动设置 staging 多维表为 Dry-run 来源')
 
     ;(container.querySelector('[data-testid="load-source-objects"]') as HTMLButtonElement).click()
     await flushUi(8)
@@ -760,5 +760,111 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).toContain('还缺')
     expect(container.textContent).not.toContain('已满足 dry-run 前置条件')
     expect((container.querySelector('[data-testid="run-dry-run"]') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('marks SQL Server source option as disabled when queryExecutor is missing', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'erp:k3-wise-sqlserver', label: 'K3 WISE SQL Server Channel', roles: ['source'], supports: ['read'], advanced: true },
+          { kind: 'erp:k3-wise-webapi', label: 'K3 WISE WebAPI', roles: ['target'], supports: ['upsert'], advanced: false },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') {
+        return jsonResponse([
+          {
+            id: 'k3_sql',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'K3 SQL Read Channel',
+            kind: 'erp:k3-wise-sqlserver',
+            role: 'source',
+            status: 'error',
+            lastError: 'K3 WISE SQL Server channel requires an injected queryExecutor',
+          },
+          { id: 'k3_target', tenantId: 'default', workspaceId: null, name: 'K3 Target', kind: 'erp:k3-wise-webapi', role: 'target', status: 'active' },
+        ])
+      }
+      if (url === '/api/integration/staging/descriptors') {
+        return jsonResponse([])
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi()
+
+    ;(container.querySelector('[data-testid="show-advanced-connectors"]') as HTMLInputElement).click()
+    await flushUi()
+
+    const sqlOption = container.querySelector('[data-testid="source-system-option-k3_sql"]') as HTMLOptionElement | null
+    expect(sqlOption).not.toBeNull()
+    expect(sqlOption!.disabled).toBe(true)
+    expect(sqlOption!.getAttribute('data-disabled')).toBe('true')
+    expect((container.querySelector('[data-testid="source-system"]') as HTMLSelectElement).value).toBe('')
+    expect(container.querySelector('[data-testid="source-empty-state"]')?.textContent).toContain('还没有可读取的数据源')
+    expect(container.querySelector('[data-testid="show-staging-setup"]')).not.toBeNull()
+
+    expect(container.textContent).toContain('高级 SQL 通道未启用 / 需要部署侧注入 queryExecutor')
+  })
+
+  it('surfaces staging-creation CTA in source-empty and staging-empty when no readable source exists', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'metasheet:staging', label: 'MetaSheet staging multitable', roles: ['source'], supports: ['read'], advanced: false },
+          { kind: 'erp:k3-wise-webapi', label: 'K3 WISE WebAPI', roles: ['target'], supports: ['upsert'], advanced: false },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') {
+        return jsonResponse([
+          { id: 'k3_target', tenantId: 'default', workspaceId: null, name: 'K3 Target', kind: 'erp:k3-wise-webapi', role: 'target', status: 'active' },
+        ])
+      }
+      if (url === '/api/integration/staging/descriptors') {
+        return jsonResponse([])
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi()
+
+    const stagingCtaInSourceEmpty = container.querySelector('[data-testid="show-staging-setup"]') as HTMLButtonElement | null
+    expect(stagingCtaInSourceEmpty).not.toBeNull()
+    expect(stagingCtaInSourceEmpty!.textContent).toContain('创建 staging 多维表作为来源')
+
+    const stagingEmpty = container.querySelector('[data-testid="staging-empty"]') as HTMLElement | null
+    expect(stagingEmpty).not.toBeNull()
+    expect(stagingEmpty!.textContent).toContain('填写下方 Project ID 后点击「创建清洗表」')
+    const stagingFocusButton = stagingEmpty!.querySelector('[data-testid="staging-empty-focus-install"]') as HTMLButtonElement | null
+    expect(stagingFocusButton).not.toBeNull()
+
+    stagingCtaInSourceEmpty!.click()
+    await flushUi()
+    expect(container.textContent).toContain('创建 staging 多维表后即可在 staging 卡片上')
+    expect((container.querySelector('[data-testid="inventory-overview"]'))).not.toBeNull()
   })
 })
