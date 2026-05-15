@@ -110,7 +110,22 @@ node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
 ```
 
 For the Data Factory issue #1542 deployment retest, add the opt-in workbench
-smoke flag:
+smoke flag. If the deployment has no Data Factory external systems yet, seed
+metadata-only systems first. This writes a `metasheet:staging` source and a
+K3 WebAPI target for schema/pipeline-save verification only; it does not write
+real K3 credentials and does not run dry-run, Save-only, Submit, or Audit.
+
+```bash
+node scripts/ops/integration-issue1542-seed-workbench-systems.mjs \
+  --base-url "$METASHEET_BASE_URL" \
+  --token-file "$METASHEET_AUTH_TOKEN_FILE" \
+  --tenant-id "$METASHEET_TENANT_ID" \
+  --project-id "${METASHEET_PROJECT_ID:-default}" \
+  --install-staging \
+  --out-dir artifacts/integration-k3wise/internal-trial/issue1542-seed
+```
+
+Then run the smoke:
 
 ```bash
 node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \

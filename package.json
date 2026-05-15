@@ -89,6 +89,7 @@
     "verify:integration-k3wise:delivery": "node --test scripts/ops/integration-k3wise-delivery-readiness.test.mjs",
     "verify:integration-k3wise:onprem-preflight": "node --test scripts/ops/integration-k3wise-onprem-preflight.test.mjs",
     "verify:integration-k3wise:postdeploy-env-check": "node --test scripts/ops/integration-k3wise-postdeploy-env-check.test.mjs",
+    "verify:integration-issue1542:seed-workbench": "node --test scripts/ops/integration-issue1542-seed-workbench-systems.test.mjs",
     "phase5:run-all": "bash scripts/phase5-run-all.sh",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
