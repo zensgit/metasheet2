@@ -647,7 +647,7 @@ Owner recommendation: Codex.
   - Verification summary: soak polls automation logs for every rule and treats the controlled failing webhook as PASS only when failed executions are persisted with step errors.
 - [x] Add redacted execution support packet copy/download actions to the shipped run-history UI.
   - PR: #1564
-  - Merge commit: pending.
+  - Merge commit: `8dd1eb1b1`
   - Development MD: `docs/development/multitable-automation-log-support-packet-development-20260515.md`
   - Verification MD: `docs/development/multitable-automation-log-support-packet-verification-20260515.md`
   - Verification summary: `MetaAutomationLogViewer` exposes copy/download actions for each expanded execution; generated Markdown/JSON packets use the shared automation log redactor and summarize step output/error without raw recipient, token, SMTP, webhook, or DingTalk receiver values.
