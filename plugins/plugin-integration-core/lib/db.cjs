@@ -70,6 +70,26 @@ function quoteIdent(name) {
   return `"${name}"`
 }
 
+function isPlainObject(value) {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && !(value instanceof Date)
+    && !(typeof Buffer !== 'undefined' && Buffer.isBuffer(value))
+  )
+}
+
+function prepareParamValue(value) {
+  // node-postgres treats JavaScript arrays as PostgreSQL array literals. That
+  // breaks JSONB columns such as integration_pipelines.idempotency_key_fields
+  // with 22P02 "invalid input syntax for type json". The integration_* schema
+  // stores structured values as JSONB, so send arrays/plain objects as JSON
+  // text and let PostgreSQL cast them to JSONB.
+  if (Array.isArray(value) || isPlainObject(value)) return JSON.stringify(value)
+  return value
+}
+
 function buildWhereClause(where, startParamIndex) {
   if (where === undefined || where === null) {
     return { sql: '', params: [], nextIndex: startParamIndex }
@@ -88,7 +108,7 @@ function buildWhereClause(where, startParamIndex) {
       continue
     }
     parts.push(`${quoteIdent(col)} = $${idx}`)
-    params.push(val)
+    params.push(prepareParamValue(val))
     idx += 1
   }
   return {
@@ -147,7 +167,7 @@ function createDb({ database, logger } = {}) {
     if (cols.length === 0) throw new Error('insertOne: row must have at least one column')
     const colIdents = cols.map((c) => quoteIdent(assertColumn(c))).join(', ')
     const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ')
-    const values = cols.map((c) => row[c])
+    const values = cols.map((c) => prepareParamValue(row[c]))
     const sql = `INSERT INTO ${tableIdent} (${colIdents}) VALUES (${placeholders}) RETURNING *`
     return database.query(sql, values)
   }
@@ -173,7 +193,7 @@ function createDb({ database, logger } = {}) {
         throw new Error(`insertMany: rows[${rowIdx}] has inconsistent keys`)
       }
       const placeholders = cols.map((c) => {
-        params.push(row[c])
+        params.push(prepareParamValue(row[c]))
         return `$${params.length}`
       })
       return `(${placeholders.join(', ')})`
@@ -193,7 +213,7 @@ function createDb({ database, logger } = {}) {
     const setCols = Object.keys(set)
     const params = []
     const setPairs = setCols.map((col) => {
-      params.push(set[col])
+      params.push(prepareParamValue(set[col]))
       return `${quoteIdent(assertColumn(col))} = $${params.length}`
     })
     const whereClause = buildWhereClause(where, params.length + 1)
@@ -275,6 +295,7 @@ module.exports = {
     assertColumn,
     buildWhereClause,
     quoteIdent,
+    prepareParamValue,
     IDENT_RE,
   },
 }

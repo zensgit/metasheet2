@@ -100,6 +100,20 @@ function optionalJson(value, field) {
   return Array.isArray(value) ? value.slice() : { ...value }
 }
 
+function jsonbParam(value) {
+  return JSON.stringify(value)
+}
+
+function parseJsonbValue(value, fallback) {
+  if (value === undefined || value === null) return fallback
+  if (typeof value !== 'string') return value
+  try {
+    return JSON.parse(value)
+  } catch {
+    return value
+  }
+}
+
 function validateIsoTimestamp(value, field) {
   if (value === undefined || value === null || value === '') return null
   const text = requiredString(value, field)
@@ -241,7 +255,7 @@ function normalizeUpdateRunInput(input, now) {
     finished_at: finishedAt,
     duration_ms: input.durationMs === undefined || input.durationMs === null ? null : nonNegativeInteger(input.durationMs, 'durationMs'),
     error_summary: optionalString(input.errorSummary, 'errorSummary'),
-    details: input.details === undefined ? undefined : jsonObject(input.details, 'details'),
+    details: input.details === undefined ? undefined : jsonbParam(jsonObject(input.details, 'details')),
   }
   for (const key of Object.keys(set)) {
     if (set[key] === undefined || set[key] === null) delete set[key]
@@ -269,8 +283,8 @@ function rowToPipeline(row, fieldMappings) {
     targetObject: row.target_object,
     stagingSheetId: row.staging_sheet_id ?? null,
     mode: row.mode,
-    idempotencyKeyFields: row.idempotency_key_fields ?? [],
-    options: row.options ?? {},
+    idempotencyKeyFields: parseJsonbValue(row.idempotency_key_fields, []),
+    options: parseJsonbValue(row.options, {}),
     status: row.status,
     createdBy: row.created_by ?? null,
     createdAt: row.created_at ?? null,
@@ -286,9 +300,9 @@ function rowToFieldMapping(row) {
     pipelineId: row.pipeline_id,
     sourceField: row.source_field,
     targetField: row.target_field,
-    transform: row.transform ?? null,
-    validation: row.validation ?? null,
-    defaultValue: row.default_value ?? null,
+    transform: parseJsonbValue(row.transform, null),
+    validation: parseJsonbValue(row.validation, null),
+    defaultValue: parseJsonbValue(row.default_value, null),
     sortOrder: row.sort_order ?? 0,
     createdAt: row.created_at ?? null,
   }
@@ -311,7 +325,7 @@ function rowToPipelineRun(row) {
     finishedAt: row.finished_at ?? null,
     durationMs: row.duration_ms ?? null,
     errorSummary: row.error_summary ?? null,
-    details: row.details ?? {},
+    details: parseJsonbValue(row.details, {}),
     createdAt: row.created_at ?? null,
   }
 }
@@ -402,9 +416,9 @@ async function replaceFieldMappings(db, pipelineId, mappings, idGenerator) {
     pipeline_id: pipelineId,
     source_field: mapping.sourceField,
     target_field: mapping.targetField,
-    transform: mapping.transform,
-    validation: mapping.validation,
-    default_value: mapping.defaultValue,
+    transform: mapping.transform === null ? null : jsonbParam(mapping.transform),
+    validation: mapping.validation === null ? null : jsonbParam(mapping.validation),
+    default_value: mapping.defaultValue === null ? null : jsonbParam(mapping.defaultValue),
     sort_order: mapping.sortOrder,
   }))
   return unwrapRows(await db.insertMany(FIELD_MAPPINGS_TABLE, rows)).map(rowToFieldMapping)
@@ -465,8 +479,8 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
         target_object: normalized.targetObject,
         staging_sheet_id: normalized.stagingSheetId,
         mode: normalized.mode,
-        idempotency_key_fields: normalized.idempotencyKeyFields,
-        options: normalized.options,
+        idempotency_key_fields: jsonbParam(normalized.idempotencyKeyFields),
+        options: jsonbParam(normalized.options),
         status: normalized.status,
       }
 
@@ -596,7 +610,7 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
         finished_at: normalized.finishedAt,
         duration_ms: normalized.durationMs,
         error_summary: normalized.errorSummary,
-        details: normalized.details,
+        details: jsonbParam(normalized.details),
       }
       try {
         const rows = unwrapRows(await db.insertOne(RUNS_TABLE, insertRow))
@@ -719,6 +733,8 @@ module.exports = {
     normalizeFieldMappings,
     normalizeCreateRunInput,
     normalizeUpdateRunInput,
+    jsonbParam,
+    parseJsonbValue,
     rowToPipeline,
     rowToFieldMapping,
     rowToPipelineRun,
