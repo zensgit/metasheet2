@@ -39,7 +39,7 @@ function populatedCatalogPayload() {
         { code: 'employee_name', name: '姓名', category: 'fixed', categoryLabel: '固定字段', source: 'system', unit: 'text', enabled: true, reportVisible: true, sortOrder: 1001, dingtalkFieldName: '姓名', description: '员工姓名', internalKey: 'employee.name', systemDefined: true },
         { code: 'punch_result', name: '打卡结果', category: 'basic', categoryLabel: '基础字段', source: 'system', unit: 'text', enabled: true, reportVisible: true, sortOrder: 2001, dingtalkFieldName: '打卡结果', description: '打卡是否正常', internalKey: 'record.punchResult', systemDefined: true },
         { code: 'attendance_days', name: '出勤天数', category: 'attendance', categoryLabel: '出勤统计字段', source: 'system', unit: 'days', enabled: true, reportVisible: true, sortOrder: 3001, dingtalkFieldName: '出勤天数', description: '有效出勤天数', internalKey: 'summary.attendanceDays', systemDefined: true },
-        { code: 'late_count', name: '迟到次数', category: 'anomaly', categoryLabel: '异常统计字段', source: 'system', unit: 'count', enabled: true, reportVisible: false, sortOrder: 4001, dingtalkFieldName: '迟到次数', description: '迟到次数', internalKey: 'summary.lateCount', configured: true, systemDefined: true },
+        { code: 'late_count', name: '迟到次数', category: 'anomaly', categoryLabel: '异常统计字段', source: 'system', unit: 'count', enabled: true, reportVisible: false, sortOrder: 4001, dingtalkFieldName: '迟到次数', description: '迟到次数', internalKey: 'summary.lateCount', configured: true, systemDefined: true, formulaEnabled: true, formulaExpression: '={late_duration}+{early_leave_duration}', formulaScope: 'record', formulaOutputType: 'number', formulaValid: true, formulaError: null, formulaReferences: ['early_leave_duration', 'late_duration'] },
         { code: 'leave_duration', name: '请假时长', category: 'leave', categoryLabel: '请假统计字段', source: 'system', unit: 'minutes', enabled: true, reportVisible: true, sortOrder: 5001, dingtalkFieldName: '请假时长', description: '请假分钟数', internalKey: 'summary.leaveMinutes', systemDefined: true },
         { code: 'workday_overtime_duration', name: '工作日加班时长', category: 'overtime', categoryLabel: '加班统计字段', source: 'system', unit: 'minutes', enabled: false, reportVisible: true, sortOrder: 6001, dingtalkFieldName: '工作日加班时长', description: '工作日加班分钟数', internalKey: 'summary.workdayOvertimeMinutes', systemDefined: true },
       ],
@@ -114,9 +114,11 @@ describe('AttendanceReportFieldsSection', () => {
     expect(container!.textContent).toContain('请假统计字段')
     expect(container!.textContent).toContain('加班统计字段')
     expect(container!.textContent).toContain('Configured: 1')
+    expect(container!.textContent).toContain('Formula: 1')
     expect(container!.textContent).toContain('Disabled: 1')
     expect(container!.textContent).toContain('Hidden: 1')
     expect(container!.textContent).toContain('Configuration')
+    expect(container!.textContent).toContain('Formula')
     expect(container!.textContent).toContain('Mapping')
     expect(container!.textContent).toContain('Built-in')
     expect(container!.textContent).toContain('Configured')
@@ -125,6 +127,8 @@ describe('AttendanceReportFieldsSection', () => {
     expect(container!.textContent).toContain('summary.lateCount')
     expect(container!.textContent).toContain('Order')
     expect(container!.textContent).toContain('4001')
+    expect(container!.textContent).toContain('={late_duration}+{early_leave_duration}')
+    expect(container!.textContent).toContain('References: early_leave_duration, late_duration')
     expect(container!.querySelector<HTMLAnchorElement>('a.attendance__btn')?.getAttribute('href')).toBe('/multitable/sheet-1/view-1?baseId=base-1')
     expect(container!.querySelector('[data-report-field-multitable-status]')?.textContent).toContain('Connected')
     expect(container!.querySelector('[data-report-field-multitable-detail="projectId"]')?.textContent).toContain('org-1:attendance')
@@ -214,6 +218,14 @@ describe('AttendanceReportFieldsSection', () => {
     await flushUi()
     expect(container!.textContent).toContain('Filtered fields: 1 / 6')
     expect(container!.textContent).toContain('workday_overtime_duration')
+    expect(container!.textContent).not.toContain('employee_name')
+
+    statusSelect!.value = 'formula'
+    statusSelect!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(container!.textContent).toContain('Filtered fields: 1 / 6')
+    expect(container!.querySelector('[data-report-field-active-filters]')?.textContent).toContain('State: Formula fields')
+    expect(container!.textContent).toContain('late_count')
     expect(container!.textContent).not.toContain('employee_name')
 
     statusSelect!.value = 'hidden'

@@ -8,6 +8,8 @@
           <span v-if="enabledCount"> · {{ tr('Enabled', '已启用') }}: {{ enabledCount }}</span>
           <span v-if="visibleCount"> · {{ tr('Report visible', '报表展示') }}: {{ visibleCount }}</span>
           <span v-if="configuredCount"> · {{ tr('Configured', '已配置') }}: {{ configuredCount }}</span>
+          <span v-if="formulaCount"> · {{ tr('Formula', '公式') }}: {{ formulaCount }}</span>
+          <span v-if="formulaErrorCount"> · {{ tr('Formula errors', '公式错误') }}: {{ formulaErrorCount }}</span>
           <span v-if="disabledCount"> · {{ tr('Disabled', '已停用') }}: {{ disabledCount }}</span>
           <span v-if="hiddenCount"> · {{ tr('Hidden', '已隐藏') }}: {{ hiddenCount }}</span>
           <span v-if="multitableProjectId"> · Project: <code>{{ multitableProjectId }}</code></span>
@@ -81,6 +83,8 @@
         >
           <option value="all">{{ tr('All fields', '全部字段') }}</option>
           <option value="configured">{{ tr('Configured', '已配置') }}</option>
+          <option value="formula">{{ tr('Formula fields', '公式字段') }}</option>
+          <option value="formula_error">{{ tr('Formula errors', '公式错误') }}</option>
           <option value="disabled">{{ tr('Disabled', '已停用') }}</option>
           <option value="hidden">{{ tr('Hidden', '已隐藏') }}</option>
         </select>
@@ -190,6 +194,7 @@
                 <th>{{ tr('Report', '报表') }}</th>
                 <th>{{ tr('Source', '来源') }}</th>
                 <th>{{ tr('Configuration', '配置') }}</th>
+                <th>{{ tr('Formula', '公式') }}</th>
                 <th>{{ tr('Mapping', '映射') }}</th>
               </tr>
             </thead>
@@ -220,6 +225,28 @@
                     {{ formatConfigurationSource(field) }}
                   </span>
                 </td>
+                <td class="attendance-report-fields__formula">
+                  <template v-if="field.formulaEnabled">
+                    <span
+                      class="attendance-report-fields__pill attendance-report-fields__pill--formula"
+                      :class="{ 'attendance-report-fields__pill--error': field.formulaValid === false }"
+                    >
+                      {{ field.formulaValid === false ? tr('Invalid', '异常') : tr('Formula', '公式') }}
+                    </span>
+                    <code v-if="field.formulaExpression">{{ field.formulaExpression }}</code>
+                    <div class="attendance__field-hint">
+                      {{ formatFormulaMeta(field) }}
+                    </div>
+                    <div
+                      v-if="field.formulaError"
+                      class="attendance-report-fields__formula-error"
+                      role="status"
+                    >
+                      {{ field.formulaError }}
+                    </div>
+                  </template>
+                  <span v-else class="attendance__field-hint">{{ tr('No formula', '无公式') }}</span>
+                </td>
                 <td class="attendance-report-fields__mapping">
                   <div
                     v-for="row in fieldMappingRows(field)"
@@ -246,7 +273,7 @@ import { apiFetch } from '../../utils/api'
 import { readErrorMessage } from '../../utils/error'
 
 type TranslateFn = (en: string, zh: string) => string
-type ReportFieldStatusFilter = 'all' | 'configured' | 'disabled' | 'hidden'
+type ReportFieldStatusFilter = 'all' | 'configured' | 'formula' | 'formula_error' | 'disabled' | 'hidden'
 
 interface AttendanceReportFieldCategory {
   id: string
@@ -269,6 +296,13 @@ interface AttendanceReportFieldItem {
   internalKey?: string
   configured?: boolean
   systemDefined?: boolean
+  formulaEnabled?: boolean
+  formulaExpression?: string
+  formulaScope?: string
+  formulaOutputType?: string
+  formulaValid?: boolean
+  formulaError?: string | null
+  formulaReferences?: string[]
 }
 
 interface AttendanceReportFieldsPayload {
@@ -336,6 +370,8 @@ const reportFields = computed(() => reportFieldsPayload.value.items ?? [])
 const enabledCount = computed(() => reportFields.value.filter(field => field.enabled).length)
 const visibleCount = computed(() => reportFields.value.filter(field => field.reportVisible).length)
 const configuredCount = computed(() => reportFields.value.filter(field => field.configured).length)
+const formulaCount = computed(() => reportFields.value.filter(field => field.formulaEnabled).length)
+const formulaErrorCount = computed(() => reportFields.value.filter(field => field.formulaEnabled && field.formulaValid === false).length)
 const disabledCount = computed(() => reportFields.value.filter(field => field.enabled === false).length)
 const hiddenCount = computed(() => reportFields.value.filter(field => field.reportVisible === false).length)
 const hasActiveFieldFilters = computed(() => (
@@ -359,6 +395,11 @@ const filteredReportFields = computed(() => {
       field.dingtalkFieldName,
       field.description,
       field.internalKey,
+      field.formulaExpression,
+      field.formulaScope,
+      field.formulaOutputType,
+      field.formulaError,
+      ...(field.formulaReferences ?? []),
     ].map(value => String(value ?? '').toLowerCase())
     return haystack.some(value => value.includes(search))
   })
@@ -481,6 +522,8 @@ function categoryStats(categoryId: string) {
 
 function matchesFieldStatusFilter(field: AttendanceReportFieldItem): boolean {
   if (fieldStatusFilter.value === 'configured') return Boolean(field.configured)
+  if (fieldStatusFilter.value === 'formula') return Boolean(field.formulaEnabled)
+  if (fieldStatusFilter.value === 'formula_error') return Boolean(field.formulaEnabled && field.formulaValid === false)
   if (fieldStatusFilter.value === 'disabled') return field.enabled === false
   if (fieldStatusFilter.value === 'hidden') return field.reportVisible === false
   return true
@@ -488,6 +531,8 @@ function matchesFieldStatusFilter(field: AttendanceReportFieldItem): boolean {
 
 function formatStatusFilterLabel(value: ReportFieldStatusFilter): string {
   if (value === 'configured') return tr('Configured', '已配置')
+  if (value === 'formula') return tr('Formula fields', '公式字段')
+  if (value === 'formula_error') return tr('Formula errors', '公式错误')
   if (value === 'disabled') return tr('Disabled', '已停用')
   if (value === 'hidden') return tr('Hidden', '已隐藏')
   return tr('All fields', '全部字段')
@@ -532,6 +577,38 @@ function configurationPillClass(field: AttendanceReportFieldItem): Record<string
     'attendance-report-fields__pill--configured': Boolean(field.configured && field.systemDefined !== false),
     'attendance-report-fields__pill--custom': field.systemDefined === false,
   }
+}
+
+function formatFormulaScope(scope?: string): string {
+  const normalized = String(scope || 'record').trim()
+  if (normalized === 'record') return tr('Record scope', '单记录')
+  return normalized || '--'
+}
+
+function formatFormulaOutputType(outputType?: string): string {
+  const normalized = String(outputType || '').trim()
+  const labels: Record<string, string> = {
+    number: tr('Number', '数字'),
+    duration_minutes: tr('Duration minutes', '分钟时长'),
+    text: tr('Text', '文本'),
+    boolean: tr('Boolean', '布尔'),
+    date: tr('Date', '日期'),
+  }
+  return labels[normalized] ?? (normalized || '--')
+}
+
+function formatFormulaMeta(field: AttendanceReportFieldItem): string {
+  const parts = [
+    formatFormulaScope(field.formulaScope),
+    formatFormulaOutputType(field.formulaOutputType),
+  ]
+  const references = Array.isArray(field.formulaReferences)
+    ? field.formulaReferences.filter(Boolean)
+    : []
+  if (references.length > 0) {
+    parts.push(`${tr('References', '引用')}: ${references.join(', ')}`)
+  }
+  return parts.filter(Boolean).join(' · ')
 }
 
 function fieldMappingRows(field: AttendanceReportFieldItem): FieldMappingRow[] {
@@ -894,6 +971,37 @@ watch(
 .attendance-report-fields__pill--custom {
   background: #fef3c7;
   color: #92400e;
+}
+
+.attendance-report-fields__pill--formula {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.attendance-report-fields__pill--error {
+  background: #fff1f2;
+  color: #be123c;
+}
+
+.attendance-report-fields__formula {
+  min-width: 220px;
+}
+
+.attendance-report-fields__formula code {
+  display: block;
+  margin-top: 6px;
+  color: #1f2937;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.attendance-report-fields__formula-error {
+  margin-top: 6px;
+  color: #be123c;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .attendance-report-fields__mapping {
