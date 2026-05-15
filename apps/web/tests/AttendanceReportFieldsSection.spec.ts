@@ -307,4 +307,30 @@ describe('AttendanceReportFieldsSection', () => {
     await flushUi()
     expect(container!.querySelector('[data-report-field-dropped-reserved]')).toBeNull()
   })
+
+  it('renders the DingTalk punch split fields in the grid', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse(200, {
+      ok: true,
+      data: {
+        categories: [{ id: 'basic', label: '基础字段', sortOrder: 20 }],
+        items: [
+          { code: 'punch_in_1', name: '上班1打卡时间', category: 'basic', categoryLabel: '基础字段', source: 'system', unit: 'dateTime', enabled: true, reportVisible: true, sortOrder: 2010, dingtalkFieldName: '上班1打卡时间', description: '第1次上班打卡时间', systemDefined: true },
+          { code: 'punch_out_3', name: '下班3打卡时间', category: 'basic', categoryLabel: '基础字段', source: 'system', unit: 'dateTime', enabled: true, reportVisible: true, sortOrder: 2060, dingtalkFieldName: '下班3打卡时间', description: '第3次下班打卡时间', systemDefined: true },
+          { code: 'punch_result_in_1', name: '上班1打卡结果', category: 'basic', categoryLabel: '基础字段', source: 'system', unit: 'text', enabled: true, reportVisible: true, sortOrder: 2070, dingtalkFieldName: '上班1打卡结果', description: '第1次上班打卡结果', systemDefined: true },
+        ],
+        droppedReservedCodes: [],
+        multitable: { available: true, degraded: false, projectId: 'org-1:attendance', recordCount: 3 },
+      },
+    }))
+
+    mountSection()
+    await flushUi()
+
+    const text = container!.textContent ?? ''
+    expect(text).toContain('上班1打卡时间')
+    expect(text).toContain('下班3打卡时间')
+    expect(text).toContain('上班1打卡结果')
+    const codes = Array.from(container!.querySelectorAll('code')).map(node => node.textContent)
+    expect(codes).toEqual(expect.arrayContaining(['punch_in_1', 'punch_out_3', 'punch_result_in_1']))
+  })
 })

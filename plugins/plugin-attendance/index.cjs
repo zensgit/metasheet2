@@ -416,6 +416,126 @@ const ATTENDANCE_REPORT_FIELD_DEFINITIONS = Object.freeze([
     internalKey: 'attendanceRecords.status',
   },
   {
+    code: 'punch_in_1',
+    name: '上班1打卡时间',
+    category: 'basic',
+    source: 'system',
+    unit: 'dateTime',
+    dingtalkFieldName: '上班1打卡时间',
+    description: '第1次上班打卡时间，来自考勤记录 first_in_at。',
+    internalKey: 'attendanceRecords.firstInAt',
+  },
+  {
+    code: 'punch_out_1',
+    name: '下班1打卡时间',
+    category: 'basic',
+    source: 'system',
+    unit: 'dateTime',
+    dingtalkFieldName: '下班1打卡时间',
+    description: '第1次下班打卡时间，来自考勤记录 last_out_at。',
+    internalKey: 'attendanceRecords.lastOutAt',
+  },
+  {
+    code: 'punch_in_2',
+    name: '上班2打卡时间',
+    category: 'basic',
+    source: 'system',
+    unit: 'dateTime',
+    dingtalkFieldName: '上班2打卡时间',
+    description: '第2次上班打卡时间，读 record.meta；当前导入未持久化多段打卡，多为空，待 ingest-persist P2。',
+    internalKey: 'attendanceRecords.meta.clockIn2',
+  },
+  {
+    code: 'punch_out_2',
+    name: '下班2打卡时间',
+    category: 'basic',
+    source: 'system',
+    unit: 'dateTime',
+    dingtalkFieldName: '下班2打卡时间',
+    description: '第2次下班打卡时间，读 record.meta；当前导入未持久化多段打卡，多为空，待 ingest-persist P2。',
+    internalKey: 'attendanceRecords.meta.clockOut2',
+  },
+  {
+    code: 'punch_in_3',
+    name: '上班3打卡时间',
+    category: 'basic',
+    source: 'system',
+    unit: 'dateTime',
+    dingtalkFieldName: '上班3打卡时间',
+    description: '第3次上班打卡时间，读 record.meta；当前导入未持久化多段打卡，多为空，待 ingest-persist P2。',
+    internalKey: 'attendanceRecords.meta.clockIn3',
+  },
+  {
+    code: 'punch_out_3',
+    name: '下班3打卡时间',
+    category: 'basic',
+    source: 'system',
+    unit: 'dateTime',
+    dingtalkFieldName: '下班3打卡时间',
+    description: '第3次下班打卡时间，读 record.meta；当前导入未持久化多段打卡，多为空，待 ingest-persist P2。',
+    internalKey: 'attendanceRecords.meta.clockOut3',
+  },
+  {
+    code: 'punch_result_in_1',
+    name: '上班1打卡结果',
+    category: 'basic',
+    source: 'system',
+    unit: 'text',
+    dingtalkFieldName: '上班1打卡结果',
+    description: '第1次上班打卡结果（正常/迟到/缺卡等），读 record.meta；不复用日级 status，当前为空 placeholder，待 ingest-persist P2。',
+    internalKey: 'attendanceRecords.meta.punchResultIn1',
+  },
+  {
+    code: 'punch_result_out_1',
+    name: '下班1打卡结果',
+    category: 'basic',
+    source: 'system',
+    unit: 'text',
+    dingtalkFieldName: '下班1打卡结果',
+    description: '第1次下班打卡结果，读 record.meta；不复用日级 status，当前为空 placeholder，待 ingest-persist P2。',
+    internalKey: 'attendanceRecords.meta.punchResultOut1',
+  },
+  {
+    code: 'punch_result_in_2',
+    name: '上班2打卡结果',
+    category: 'basic',
+    source: 'system',
+    unit: 'text',
+    dingtalkFieldName: '上班2打卡结果',
+    description: '第2次上班打卡结果，读 record.meta；不复用日级 status，当前为空 placeholder，待 ingest-persist P2。',
+    internalKey: 'attendanceRecords.meta.punchResultIn2',
+  },
+  {
+    code: 'punch_result_out_2',
+    name: '下班2打卡结果',
+    category: 'basic',
+    source: 'system',
+    unit: 'text',
+    dingtalkFieldName: '下班2打卡结果',
+    description: '第2次下班打卡结果，读 record.meta；不复用日级 status，当前为空 placeholder，待 ingest-persist P2。',
+    internalKey: 'attendanceRecords.meta.punchResultOut2',
+  },
+  {
+    code: 'punch_result_in_3',
+    name: '上班3打卡结果',
+    category: 'basic',
+    source: 'system',
+    unit: 'text',
+    dingtalkFieldName: '上班3打卡结果',
+    description: '第3次上班打卡结果，读 record.meta；不复用日级 status，当前为空 placeholder，待 ingest-persist P2。',
+    internalKey: 'attendanceRecords.meta.punchResultIn3',
+  },
+  {
+    code: 'punch_result_out_3',
+    name: '下班3打卡结果',
+    category: 'basic',
+    source: 'system',
+    unit: 'text',
+    dingtalkFieldName: '下班3打卡结果',
+    description: '第3次下班打卡结果，读 record.meta；不复用日级 status，当前为空 placeholder，待 ingest-persist P2。',
+    internalKey: 'attendanceRecords.meta.punchResultOut3',
+  },
+  {
     code: 'approval_forms',
     name: '关联的审批单',
     category: 'basic',
@@ -1427,6 +1547,18 @@ const ATTENDANCE_RECORD_REPORT_FIELD_CODES = Object.freeze([
   'attendance_group',
   'punch_times',
   'punch_result',
+  'punch_in_1',
+  'punch_out_1',
+  'punch_in_2',
+  'punch_out_2',
+  'punch_in_3',
+  'punch_out_3',
+  'punch_result_in_1',
+  'punch_result_out_1',
+  'punch_result_in_2',
+  'punch_result_out_2',
+  'punch_result_in_3',
+  'punch_result_out_3',
   'approval_forms',
   'expected_attendance_days',
   'correction_count',
@@ -1670,6 +1802,30 @@ function getAttendanceRecordReportFieldValue(row, fieldCode) {
     case 'punch_result':
     case 'attendance_result':
       return status
+    case 'punch_in_1':
+      return formatAttendanceRecordReportDateTime(row?.first_in_at, timezone)
+    case 'punch_out_1':
+      return formatAttendanceRecordReportDateTime(row?.last_out_at, timezone)
+    case 'punch_in_2':
+      return formatAttendanceRecordReportDateTime(readAttendanceRecordMeta(row, ['clockIn2', 'clock_in_2', '上班2打卡时间']), timezone)
+    case 'punch_out_2':
+      return formatAttendanceRecordReportDateTime(readAttendanceRecordMeta(row, ['clockOut2', 'clock_out_2', '下班2打卡时间']), timezone)
+    case 'punch_in_3':
+      return formatAttendanceRecordReportDateTime(readAttendanceRecordMeta(row, ['clockIn3', 'clock_in_3', '上班3打卡时间']), timezone)
+    case 'punch_out_3':
+      return formatAttendanceRecordReportDateTime(readAttendanceRecordMeta(row, ['clockOut3', 'clock_out_3', '下班3打卡时间']), timezone)
+    case 'punch_result_in_1':
+      return firstNonEmptyValue(readAttendanceRecordMeta(row, ['punchResultIn1', 'punch_result_in_1', '上班1打卡结果']))
+    case 'punch_result_out_1':
+      return firstNonEmptyValue(readAttendanceRecordMeta(row, ['punchResultOut1', 'punch_result_out_1', '下班1打卡结果']))
+    case 'punch_result_in_2':
+      return firstNonEmptyValue(readAttendanceRecordMeta(row, ['punchResultIn2', 'punch_result_in_2', '上班2打卡结果']))
+    case 'punch_result_out_2':
+      return firstNonEmptyValue(readAttendanceRecordMeta(row, ['punchResultOut2', 'punch_result_out_2', '下班2打卡结果']))
+    case 'punch_result_in_3':
+      return firstNonEmptyValue(readAttendanceRecordMeta(row, ['punchResultIn3', 'punch_result_in_3', '上班3打卡结果']))
+    case 'punch_result_out_3':
+      return firstNonEmptyValue(readAttendanceRecordMeta(row, ['punchResultOut3', 'punch_result_out_3', '下班3打卡结果']))
     case 'approval_forms':
       return firstNonEmptyValue(readAttendanceRecordMeta(row, ['approvalSummary', 'approval_summary', 'attendance_approve', '关联的审批单']))
     case 'expected_attendance_days':

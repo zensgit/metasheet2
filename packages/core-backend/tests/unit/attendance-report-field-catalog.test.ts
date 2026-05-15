@@ -400,6 +400,69 @@ describe('attendance report field catalog multitable foundation', () => {
     })
   })
 
+  it('splits DingTalk punch time/result into 12 catalog fields without polluting result slots with day status', () => {
+    const defs = helpers.cloneAttendanceReportFieldDefinitions()
+    const byCode = new Map(defs.map((field: { code: string }) => [field.code, field]))
+    const newCodes = [
+      'punch_in_1', 'punch_out_1', 'punch_in_2', 'punch_out_2', 'punch_in_3', 'punch_out_3',
+      'punch_result_in_1', 'punch_result_out_1', 'punch_result_in_2', 'punch_result_out_2', 'punch_result_in_3', 'punch_result_out_3',
+    ]
+    for (const code of newCodes) {
+      expect(byCode.has(code)).toBe(true)
+    }
+    expect(byCode.get('punch_in_1')).toMatchObject({ dingtalkFieldName: '上班1打卡时间', unit: 'dateTime', source: 'system' })
+    expect(byCode.get('punch_result_out_3')).toMatchObject({ dingtalkFieldName: '下班3打卡结果', unit: 'text' })
+    // aggregate fields retained (additive)
+    expect(byCode.has('punch_times')).toBe(true)
+    expect(byCode.has('punch_result')).toBe(true)
+
+    const row = {
+      work_date: '2026-05-13',
+      status: 'late',
+      first_in_at: '2026-05-13T09:05:00.000Z',
+      last_out_at: '2026-05-13T18:30:00.000Z',
+      late_minutes: 5,
+      early_leave_minutes: 0,
+      work_minutes: 480,
+      is_workday: true,
+      timezone: 'UTC',
+      meta: { clockIn2: '2026-05-13T13:00:00.000Z' },
+    }
+
+    // slot-1 carries real first/last punch
+    expect(String(helpers.getAttendanceRecordReportFieldValue(row, 'punch_in_1'))).toContain('2026-05-13')
+    expect(String(helpers.getAttendanceRecordReportFieldValue(row, 'punch_out_1'))).toContain('2026-05-13')
+    // slot-2 reads meta when present
+    expect(String(helpers.getAttendanceRecordReportFieldValue(row, 'punch_in_2'))).toContain('2026-05-13')
+    // slot-3 + missing meta resolves to empty string, not #ERROR!
+    expect(helpers.getAttendanceRecordReportFieldValue(row, 'punch_out_2')).toBe('')
+    expect(helpers.getAttendanceRecordReportFieldValue(row, 'punch_in_3')).toBe('')
+    expect(helpers.getAttendanceRecordReportFieldValue(row, 'punch_out_3')).toBe('')
+    // CRITICAL invariant: punch_result_* must NEVER echo day-level status
+    for (const code of ['punch_result_in_1', 'punch_result_out_1', 'punch_result_in_2', 'punch_result_out_2', 'punch_result_in_3', 'punch_result_out_3']) {
+      const value = helpers.getAttendanceRecordReportFieldValue(row, code)
+      expect(value).toBe('')
+      expect(value).not.toBe('late')
+    }
+    // result reads its own meta key when a future ingest-persist provides it
+    expect(helpers.getAttendanceRecordReportFieldValue({ ...row, meta: { punchResultIn1: '正常' } }, 'punch_result_in_1')).toBe('正常')
+
+    // new codes are valid formula sources (registered in ATTENDANCE_RECORD_REPORT_FIELD_CODES)
+    const sources = helpers.resolveAttendanceFormulaSourceFields(defs)
+    expect(sources.some((field: { code: string }) => field.code === 'punch_in_1')).toBe(true)
+    expect(helpers.validateAttendanceReportFormulaExpression('={punch_in_1}', { fields: defs }))
+      .toMatchObject({ valid: true, error: null })
+
+    // export carries the new columns with DingTalk display names
+    const reportFields = helpers.resolveAttendanceRecordReportFields(defs)
+    const item = helpers.buildAttendanceRecordReportExportItem(row, reportFields)
+    expect(Object.prototype.hasOwnProperty.call(item, 'punch_in_1')).toBe(true)
+    expect(Object.prototype.hasOwnProperty.call(item, 'punch_result_out_3')).toBe(true)
+    const csv = helpers.buildAttendanceRecordReportCsv([item], reportFields)
+    expect(csv.split('\n')[0]).toContain('上班1打卡时间')
+    expect(csv.split('\n')[0]).toContain('下班3打卡结果')
+  })
+
   it('does not add direct meta table writes to the attendance plugin', () => {
     const source = readFileSync(
       new URL('../../../../plugins/plugin-attendance/index.cjs', import.meta.url),
