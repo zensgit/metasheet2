@@ -80,6 +80,9 @@ const DEFAULT_SETTINGS = {
   ipAllowlist: [],
   geoFence: null,
   minPunchIntervalMinutes: 1,
+  formula: {
+    allowRawAliases: true,
+  },
 }
 
 const allowRbacDegradation = process.env.RBAC_OPTIONAL === '1'
@@ -329,6 +332,7 @@ const ATTENDANCE_REPORT_FORMULA_RAW_REFERENCE_KEYS = Object.freeze([
   'overtime_minutes',
 ])
 const ATTENDANCE_REPORT_FORMULA_RESERVED_CODES = new Set(ATTENDANCE_REPORT_FORMULA_RAW_REFERENCE_KEYS)
+const ATTENDANCE_FORMULA_ALLOW_RAW_ALIASES_ENV = 'ATTENDANCE_FORMULA_ALLOW_RAW_ALIASES'
 
 const ATTENDANCE_REPORT_FIELD_DEFINITIONS = Object.freeze([
   {
@@ -937,9 +941,25 @@ function extractAttendanceReportFormulaFunctions(expression) {
   return Array.from(functions).sort()
 }
 
-function getAttendanceReportFormulaReferenceCodes(fields) {
+function readAttendanceFormulaRawAliasesEnvOverride(env = process.env) {
+  const value = env?.[ATTENDANCE_FORMULA_ALLOW_RAW_ALIASES_ENV]
+  if (value === undefined || value === null || String(value).trim() === '') return null
+  const normalized = String(value).trim().toLowerCase()
+  if (['true', '1', 'yes', 'on', 'enabled'].includes(normalized)) return true
+  if (['false', '0', 'no', 'off', 'disabled'].includes(normalized)) return false
+  return null
+}
+
+function resolveAttendanceFormulaRawAliasesAllowed(settings, env = process.env) {
+  const envOverride = readAttendanceFormulaRawAliasesEnvOverride(env)
+  if (envOverride !== null) return envOverride
+  return settings?.formula?.allowRawAliases !== false
+}
+
+function getAttendanceReportFormulaReferenceCodes(fields, options = {}) {
   const formulaFieldCodes = new Set()
-  const codes = new Set(ATTENDANCE_REPORT_FORMULA_RAW_REFERENCE_KEYS)
+  const rawAliasesAllowed = options.rawAliasesAllowed !== false
+  const codes = new Set(rawAliasesAllowed ? ATTENDANCE_REPORT_FORMULA_RAW_REFERENCE_KEYS : [])
   for (const field of fields || []) {
     const code = normalizeCatalogString(field?.code)
     if (!code) continue
@@ -959,7 +979,10 @@ function validateAttendanceReportFormulaExpression(expression, options = {}) {
   const formulaExpression = normalizeAttendanceReportFormulaExpression(expression)
   const references = extractAttendanceReportFormulaReferences(formulaExpression)
   const functions = extractAttendanceReportFormulaFunctions(formulaExpression)
-  const { codes, formulaFieldCodes } = getAttendanceReportFormulaReferenceCodes(options.fields)
+  const rawAliasesAllowed = options.rawAliasesAllowed !== false
+  const { codes, formulaFieldCodes } = getAttendanceReportFormulaReferenceCodes(options.fields, {
+    rawAliasesAllowed,
+  })
 
   if (!formulaExpression) {
     return {
@@ -1000,6 +1023,18 @@ function validateAttendanceReportFormulaExpression(expression, options = {}) {
     }
   }
 
+  const disabledRawAliasReference = rawAliasesAllowed
+    ? null
+    : references.find(reference => ATTENDANCE_REPORT_FORMULA_RESERVED_CODES.has(reference))
+  if (disabledRawAliasReference) {
+    return {
+      valid: false,
+      references,
+      functions,
+      error: `Raw alias reference ${disabledRawAliasReference} is disabled by attendance formula settings.`,
+    }
+  }
+
   const unknownReference = references.find(reference => !codes.has(reference))
   if (unknownReference) {
     return {
@@ -1018,7 +1053,7 @@ function validateAttendanceReportFormulaExpression(expression, options = {}) {
   }
 }
 
-function applyAttendanceReportFormulaValidation(items) {
+function applyAttendanceReportFormulaValidation(items, options = {}) {
   return items.map((field) => {
     const formulaConfig = normalizeAttendanceReportFormulaConfig(field, field.unit)
     if (!formulaConfig.formulaEnabled) {
@@ -1031,6 +1066,7 @@ function applyAttendanceReportFormulaValidation(items) {
     }
     const validation = validateAttendanceReportFormulaExpression(formulaConfig.formulaExpression, {
       fields: items,
+      rawAliasesAllowed: options.rawAliasesAllowed,
     })
     return {
       ...field,
@@ -1042,7 +1078,7 @@ function applyAttendanceReportFormulaValidation(items) {
   })
 }
 
-function mergeAttendanceReportFieldDefinitions(configRecords, fieldIds) {
+function mergeAttendanceReportFieldDefinitions(configRecords, fieldIds, options = {}) {
   const categories = new Map(ATTENDANCE_REPORT_FIELD_CATEGORIES.map(category => [category.id, category]))
   const configsByCode = new Map()
   for (const record of configRecords || []) {
@@ -1095,7 +1131,9 @@ function mergeAttendanceReportFieldDefinitions(configRecords, fieldIds) {
     if (left.sortOrder !== right.sortOrder) return left.sortOrder - right.sortOrder
     return left.code.localeCompare(right.code)
   })
-  return applyAttendanceReportFormulaValidation(sorted)
+  return applyAttendanceReportFormulaValidation(sorted, {
+    rawAliasesAllowed: options.rawAliasesAllowed,
+  })
 }
 
 function getAttendanceReportFieldDroppedReservedCodes(configRecords, fieldIds) {
@@ -1286,9 +1324,11 @@ async function loadAttendanceReportFieldCatalog(context, orgId) {
   }
 }
 
-function buildAttendanceReportFieldCatalogFallback(orgId, reason, error) {
+function buildAttendanceReportFieldCatalogFallback(orgId, reason, error, options = {}) {
   const projectId = getAttendanceReportFieldProjectId(orgId)
-  const items = mergeAttendanceReportFieldDefinitions([], {})
+  const items = mergeAttendanceReportFieldDefinitions([], {}, {
+    rawAliasesAllowed: options.rawAliasesAllowed,
+  })
   const multitable = {
     available: false,
     degraded: true,
@@ -1314,6 +1354,7 @@ function buildAttendanceReportFieldCatalogFallback(orgId, reason, error) {
 }
 
 async function buildAttendanceReportFieldCatalogResponse(context, orgId, logger, options = {}) {
+  const rawAliasesAllowed = options.rawAliasesAllowed !== false
   let catalog
   try {
     catalog = options.provision === true
@@ -1321,11 +1362,15 @@ async function buildAttendanceReportFieldCatalogResponse(context, orgId, logger,
       : await loadAttendanceReportFieldCatalog(context, orgId, logger)
   } catch (error) {
     logger?.warn?.('Attendance report field catalog provisioning degraded', error)
-    return buildAttendanceReportFieldCatalogFallback(orgId, 'PROVISIONING_FAILED', error)
+    return buildAttendanceReportFieldCatalogFallback(orgId, 'PROVISIONING_FAILED', error, {
+      rawAliasesAllowed,
+    })
   }
 
   if (!catalog.available) {
-    return buildAttendanceReportFieldCatalogFallback(orgId, catalog.reason || 'MULTITABLE_UNAVAILABLE')
+    return buildAttendanceReportFieldCatalogFallback(orgId, catalog.reason || 'MULTITABLE_UNAVAILABLE', undefined, {
+      rawAliasesAllowed,
+    })
   }
 
   try {
@@ -1339,7 +1384,9 @@ async function buildAttendanceReportFieldCatalogResponse(context, orgId, logger,
         limit: 1000,
       })
       : []
-    const items = mergeAttendanceReportFieldDefinitions(records, catalog.fieldIds)
+    const items = mergeAttendanceReportFieldDefinitions(records, catalog.fieldIds, {
+      rawAliasesAllowed,
+    })
     const droppedReservedCodes = getAttendanceReportFieldDroppedReservedCodes(records, catalog.fieldIds)
     const multitable = {
       available: true,
@@ -1365,7 +1412,9 @@ async function buildAttendanceReportFieldCatalogResponse(context, orgId, logger,
     }
   } catch (error) {
     logger?.warn?.('Attendance report field catalog read degraded', error)
-    return buildAttendanceReportFieldCatalogFallback(orgId, 'READ_FAILED', error)
+    return buildAttendanceReportFieldCatalogFallback(orgId, 'READ_FAILED', error, {
+      rawAliasesAllowed,
+    })
   }
 }
 
@@ -1464,8 +1513,11 @@ function resolveAttendanceFormulaSourceFields(items) {
     }))
 }
 
-async function loadAttendanceRecordReportFields(context, orgId, logger) {
-  const catalog = await buildAttendanceReportFieldCatalogResponse(context, orgId, logger, { provision: false })
+async function loadAttendanceRecordReportFields(context, orgId, logger, options = {}) {
+  const catalog = await buildAttendanceReportFieldCatalogResponse(context, orgId, logger, {
+    provision: false,
+    rawAliasesAllowed: options.rawAliasesAllowed,
+  })
   return {
     fields: resolveAttendanceRecordReportFields(catalog.items),
     formulaSourceFields: resolveAttendanceFormulaSourceFields(catalog.items),
@@ -1683,17 +1735,19 @@ function attendanceFormulaLiteral(value) {
   return JSON.stringify(String(value))
 }
 
-function buildAttendanceReportFormulaValueMap(row, formulaSourceFields) {
+function buildAttendanceReportFormulaValueMap(row, formulaSourceFields, options = {}) {
   const values = {}
   for (const field of formulaSourceFields || []) {
     if (!field?.code) continue
     values[field.code] = getAttendanceRecordReportFieldValue(row, field.code)
   }
-  values.work_minutes = Number(row?.work_minutes ?? 0)
-  values.late_minutes = Number(row?.late_minutes ?? 0)
-  values.early_leave_minutes = Number(row?.early_leave_minutes ?? 0)
-  values.leave_minutes = readAttendanceRecordMinutes(row, ['leave_minutes', 'leaveMinutes'], 0)
-  values.overtime_minutes = readAttendanceRecordMinutes(row, ['overtime_minutes', 'overtimeMinutes'], 0)
+  if (options.rawAliasesAllowed !== false) {
+    values.work_minutes = Number(row?.work_minutes ?? 0)
+    values.late_minutes = Number(row?.late_minutes ?? 0)
+    values.early_leave_minutes = Number(row?.early_leave_minutes ?? 0)
+    values.leave_minutes = readAttendanceRecordMinutes(row, ['leave_minutes', 'leaveMinutes'], 0)
+    values.overtime_minutes = readAttendanceRecordMinutes(row, ['overtime_minutes', 'overtimeMinutes'], 0)
+  }
   return values
 }
 
@@ -1719,11 +1773,21 @@ function formatAttendanceReportFormulaValue(value, outputType) {
   return value === null || value === undefined ? '' : String(value)
 }
 
-async function evaluateAttendanceReportFormulaField(context, row, field, formulaSourceFields) {
+async function evaluateAttendanceReportFormulaField(context, row, field, formulaSourceFields, options = {}) {
   if (!field?.formulaEnabled) return getAttendanceRecordReportFieldValue(row, field?.code)
   if (field.formulaValid === false) return ATTENDANCE_REPORT_FORMULA_ERROR_VALUE
+  if (options.rawAliasesAllowed === false) {
+    const references = Array.isArray(field.formulaReferences) && field.formulaReferences.length > 0
+      ? field.formulaReferences
+      : extractAttendanceReportFormulaReferences(field.formulaExpression)
+    if (references.some(reference => ATTENDANCE_REPORT_FORMULA_RESERVED_CODES.has(reference))) {
+      return ATTENDANCE_REPORT_FORMULA_ERROR_VALUE
+    }
+  }
 
-  const values = buildAttendanceReportFormulaValueMap(row, formulaSourceFields)
+  const values = buildAttendanceReportFormulaValueMap(row, formulaSourceFields, {
+    rawAliasesAllowed: options.rawAliasesAllowed,
+  })
   const expression = resolveAttendanceReportFormulaExpression(field.formulaExpression, values)
   const formulaApi = context?.api?.formula
   if (!formulaApi?.calculateFormula) return ATTENDANCE_REPORT_FORMULA_ERROR_VALUE
@@ -1736,9 +1800,12 @@ async function evaluateAttendanceReportFormulaField(context, row, field, formula
   }
 }
 
-async function previewAttendanceReportFormula(context, expression, sample, fields) {
+async function previewAttendanceReportFormula(context, expression, sample, fields, options = {}) {
   const sampleValues = sample && typeof sample === 'object' && !Array.isArray(sample) ? sample : {}
-  const validation = validateAttendanceReportFormulaExpression(expression, { fields })
+  const validation = validateAttendanceReportFormulaExpression(expression, {
+    fields,
+    rawAliasesAllowed: options.rawAliasesAllowed,
+  })
   if (!validation.valid) {
     return {
       ok: false,
@@ -1798,12 +1865,14 @@ function buildAttendanceRecordReportExportItem(row, reportFields) {
   ]))
 }
 
-async function buildAttendanceRecordReportExportItemAsync(context, row, reportFields, formulaSourceFields) {
+async function buildAttendanceRecordReportExportItemAsync(context, row, reportFields, formulaSourceFields, options = {}) {
   const entries = []
   for (const field of reportFields || []) {
     const key = field.exportKey || field.code
     const value = field.formulaEnabled
-      ? await evaluateAttendanceReportFormulaField(context, row, field, formulaSourceFields)
+      ? await evaluateAttendanceReportFormulaField(context, row, field, formulaSourceFields, {
+          rawAliasesAllowed: options.rawAliasesAllowed,
+        })
       : getAttendanceRecordReportFieldValue(row, field.code)
     entries.push([key, value])
   }
@@ -6253,6 +6322,7 @@ function normalizeSettings(raw) {
   const holidaySync = raw.holidaySync ?? {}
   const holidaySyncAuto = holidaySync.auto ?? {}
   const holidaySyncLastRun = holidaySync.lastRun ?? null
+  const formula = raw.formula ?? {}
   const ipAllowlist = Array.isArray(raw.ipAllowlist) ? raw.ipAllowlist.filter(Boolean) : []
   const geoFence = raw.geoFence && typeof raw.geoFence === 'object' ? raw.geoFence : null
   const overtimeSourceRaw = typeof holidayPolicy.overtimeSource === 'string'
@@ -6338,6 +6408,9 @@ function normalizeSettings(raw) {
     ipAllowlist,
     geoFence,
     minPunchIntervalMinutes: Math.max(0, parseNumber(raw.minPunchIntervalMinutes, DEFAULT_SETTINGS.minPunchIntervalMinutes)),
+    formula: {
+      allowRawAliases: parseBoolean(formula.allowRawAliases, DEFAULT_SETTINGS.formula.allowRawAliases),
+    },
   }
 }
 
@@ -6356,6 +6429,10 @@ function mergeSettings(base, update) {
     holidaySync: {
       ...(base?.holidaySync || {}),
       ...(update?.holidaySync || {}),
+    },
+    formula: {
+      ...(base?.formula || {}),
+      ...(update?.formula || {}),
     },
   })
 }
@@ -6379,6 +6456,13 @@ async function getSettings(db) {
   const next = await loadSettings(db)
   settingsCache = { value: next, loadedAt: Date.now() }
   return next
+}
+
+async function getAttendanceFormulaRuntimeOptions(db) {
+  const settings = await getSettings(db)
+  return {
+    rawAliasesAllowed: resolveAttendanceFormulaRawAliasesAllowed(settings),
+  }
 }
 
 async function saveSettings(db, settings) {
@@ -8739,6 +8823,8 @@ module.exports = {
     getAttendanceRecordReportFieldValue,
     getAttendanceReportFieldCatalogDescriptor,
     getAttendanceReportFieldProjectId,
+    resolveAttendanceFormulaRawAliasesAllowed,
+    readAttendanceFormulaRawAliasesEnvOverride,
     loadAttendanceReportFieldCatalog,
     mergeAttendanceReportFieldDefinitions,
     getAttendanceReportFieldDroppedReservedCodes,
@@ -8827,6 +8913,9 @@ module.exports = {
         radiusMeters: z.number().int().min(1),
       }).nullable().optional(),
       minPunchIntervalMinutes: z.number().int().min(0).optional(),
+      formula: z.object({
+        allowRawAliases: z.boolean().optional(),
+      }).optional(),
     })
 
     const punchSchema = z.object({
@@ -11512,7 +11601,8 @@ module.exports = {
             workDates: rows.map((row) => row.work_date),
           })
           const approvedMap = await loadApprovedMinutesRange(db, orgId, targetUserId, from, to)
-          const reportFields = await loadAttendanceRecordReportFields(context, orgId, logger)
+          const formulaOptions = await getAttendanceFormulaRuntimeOptions(db)
+          const reportFields = await loadAttendanceRecordReportFields(context, orgId, logger, formulaOptions)
           const records = await Promise.all(rows.map(async (row) => {
             const workDate = normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10)
             const meta = normalizeMetadata(row.meta)
@@ -11540,7 +11630,13 @@ module.exports = {
             }
             return {
               ...record,
-              report_values: await buildAttendanceRecordReportExportItemAsync(context, record, reportFields.fields, reportFields.formulaSourceFields),
+              report_values: await buildAttendanceRecordReportExportItemAsync(
+                context,
+                record,
+                reportFields.fields,
+                reportFields.formulaSourceFields,
+                formulaOptions,
+              ),
             }
           }))
 
@@ -20733,7 +20829,11 @@ module.exports = {
       '/api/attendance/report-fields',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const data = await buildAttendanceReportFieldCatalogResponse(context, orgId, logger, { provision: false })
+        const formulaOptions = await getAttendanceFormulaRuntimeOptions(db)
+        const data = await buildAttendanceReportFieldCatalogResponse(context, orgId, logger, {
+          provision: false,
+          ...formulaOptions,
+        })
         res.json({ ok: true, data })
       })
     )
@@ -20743,9 +20843,11 @@ module.exports = {
       '/api/attendance/report-fields/sync',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
+        const formulaOptions = await getAttendanceFormulaRuntimeOptions(db)
         const data = await buildAttendanceReportFieldCatalogResponse(context, orgId, logger, {
           provision: true,
           seedRecords: true,
+          ...formulaOptions,
         })
         emitEvent('attendance.report_fields.synced', {
           orgId,
@@ -20772,12 +20874,17 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const catalog = await buildAttendanceReportFieldCatalogResponse(context, orgId, logger, { provision: false })
+        const formulaOptions = await getAttendanceFormulaRuntimeOptions(db)
+        const catalog = await buildAttendanceReportFieldCatalogResponse(context, orgId, logger, {
+          provision: false,
+          ...formulaOptions,
+        })
         const data = await previewAttendanceReportFormula(
           context,
           parsed.data.expression,
           parsed.data.sample,
           catalog.items,
+          formulaOptions,
         )
         res.json({ ok: true, data })
       })
@@ -20900,7 +21007,8 @@ module.exports = {
           )
 
           const approvedMap = await loadApprovedMinutesRange(db, orgId, targetUserId, from, to)
-          const reportFields = await loadAttendanceRecordReportFields(context, orgId, logger)
+          const formulaOptions = await getAttendanceFormulaRuntimeOptions(db)
+          const reportFields = await loadAttendanceRecordReportFields(context, orgId, logger, formulaOptions)
           const exportRows = rows.map((row) => {
             const workDate = normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10)
             const approved = approvedMap.get(workDate) ?? { leaveMinutes: 0, overtimeMinutes: 0 }
@@ -20915,7 +21023,13 @@ module.exports = {
             }
           })
           const exportItems = await Promise.all(
-            exportRows.map(row => buildAttendanceRecordReportExportItemAsync(context, row, reportFields.fields, reportFields.formulaSourceFields)),
+            exportRows.map(row => buildAttendanceRecordReportExportItemAsync(
+              context,
+              row,
+              reportFields.fields,
+              reportFields.formulaSourceFields,
+              formulaOptions,
+            )),
           )
           const reportFieldConfig = buildAttendanceReportFieldConfig(reportFields)
           if (parsed.data.format === 'json') {
