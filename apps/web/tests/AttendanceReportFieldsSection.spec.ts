@@ -277,4 +277,34 @@ describe('AttendanceReportFieldsSection', () => {
       .find(element => element.textContent?.includes('Report field catalog synchronized.'))
     expect(syncStatus?.textContent).toContain('Status: Degraded')
   })
+
+  it('shows a warning banner when droppedReservedCodes is present and hides it otherwise', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse(200, {
+      ok: true,
+      data: {
+        categories: [{ id: 'fixed', label: '固定字段', sortOrder: 10 }],
+        items: [
+          { code: 'employee_name', name: '姓名', category: 'fixed', categoryLabel: '固定字段', source: 'system', unit: 'text', enabled: true, reportVisible: true, sortOrder: 1001, systemDefined: true },
+        ],
+        droppedReservedCodes: ['late_minutes', 'work_minutes'],
+        multitable: { available: true, degraded: false, projectId: 'org-1:attendance', recordCount: 3 },
+      },
+    }))
+
+    mountSection()
+    await flushUi()
+
+    const banner = container!.querySelector('[data-report-field-dropped-reserved]')
+    expect(banner).toBeTruthy()
+    expect(banner?.getAttribute('role')).toBe('alert')
+    expect(banner?.textContent).toContain('late_minutes, work_minutes')
+    expect(banner?.textContent).toContain('Rename them in the multitable catalog')
+
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse(200, populatedCatalogPayload()))
+    if (app) app.unmount()
+    container!.innerHTML = ''
+    mountSection()
+    await flushUi()
+    expect(container!.querySelector('[data-report-field-dropped-reserved]')).toBeNull()
+  })
 })
