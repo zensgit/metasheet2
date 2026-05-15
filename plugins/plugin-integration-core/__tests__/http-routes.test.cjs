@@ -1261,7 +1261,7 @@ async function testStagingRoutes() {
   assert.deepEqual(findCall(calls, 'installStaging')[1], {
     tenantId: 'tenant_1',
     workspaceId: 'workspace_1',
-    projectId: 'project_1',
+    projectId: 'tenant_1:integration-core',
     baseId: 'base_1',
   })
 
@@ -1272,7 +1272,23 @@ async function testStagingRoutes() {
       workspaceId: 'workspace_1',
     },
   })
-  assertErrorResponse(missingProject, [400])
+  assertOkResponse(missingProject, 201)
+  assert.equal(findCalls(calls, 'installStaging')[1][1].projectId, 'tenant_1:integration-core')
+
+  const scopedProject = await invoke(routes, 'POST', '/api/integration/staging/install', {
+    user: WRITE_USER,
+    body: {
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      projectId: 'tenant_1:plugin-integration-core',
+    },
+  })
+  assertOkResponse(scopedProject, 201)
+  assert.equal(
+    findCalls(calls, 'installStaging')[2][1].projectId,
+    'tenant_1:plugin-integration-core',
+    'already plugin-scoped project ids are preserved',
+  )
 }
 
 async function testRunAndDeadLetterRoutes() {

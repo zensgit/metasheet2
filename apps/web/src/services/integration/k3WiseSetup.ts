@@ -128,6 +128,7 @@ export interface IntegrationStagingOpenTarget {
 }
 
 export interface IntegrationStagingInstallResult {
+  projectId?: string | null
   sheetIds: Record<string, string>
   viewIds?: Record<string, string>
   openLinks?: Record<string, string>
@@ -239,7 +240,7 @@ export interface K3WiseDocumentTemplate {
 export interface K3WiseStagingInstallPayload {
   tenantId: string
   workspaceId: string | null
-  projectId: string
+  projectId?: string
   baseId?: string
 }
 
@@ -897,10 +898,8 @@ export function validateK3WisePipelineTemplateForm(
   return issues
 }
 
-export function validateK3WiseStagingInstallForm(form: K3WiseSetupForm): K3WiseSetupValidationIssue[] {
-  const issues: K3WiseSetupValidationIssue[] = []
-  if (!trim(form.projectId)) issues.push({ field: 'projectId', message: 'projectId is required before installing staging tables' })
-  return issues
+export function validateK3WiseStagingInstallForm(_form: K3WiseSetupForm): K3WiseSetupValidationIssue[] {
+  return []
 }
 
 export function validateK3WisePipelineRunForm(
@@ -1134,7 +1133,7 @@ export function buildK3WiseStagingInstallPayload(form: K3WiseSetupForm): K3WiseS
   return {
     tenantId: resolveTenantId(form),
     workspaceId: optionalString(form.workspaceId) ?? null,
-    projectId: trim(form.projectId),
+    ...(optionalString(form.projectId) ? { projectId: trim(form.projectId) } : {}),
     ...(optionalString(form.baseId) ? { baseId: trim(form.baseId) } : {}),
   }
 }

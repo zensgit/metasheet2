@@ -227,11 +227,12 @@ export interface IntegrationStagingOpenTarget {
 }
 
 export interface IntegrationStagingInstallPayload extends IntegrationScope {
-  projectId: string
+  projectId?: string | null
   baseId?: string | null
 }
 
 export interface IntegrationStagingInstallResult {
+  projectId?: string | null
   sheetIds: Record<string, string>
   viewIds?: Record<string, string>
   openLinks?: Record<string, string>

@@ -481,7 +481,7 @@ describe('K3 WISE setup helpers', () => {
     const routeBlock = source.slice(routeStart, routeEnd)
 
     expect(routeBlock).toContain("path: '/integrations/k3-wise'")
-    expect(routeBlock).toContain("titleZh: 'K3 WISE 预设向导'")
+    expect(routeBlock).toContain("titleZh: 'K3 WISE 预设'")
     expect(routeBlock).toContain("permissions: ['integration:write']")
     expect(routeBlock).not.toContain("requiredFeature: 'attendanceAdmin'")
     expect(mainSource).toContain('to.meta?.permissions')
@@ -940,16 +940,18 @@ describe('K3 WISE setup helpers', () => {
     expect(formatIntegrationStagingDescriptorFieldSummary(descriptor)).toBe('2 fields')
   })
 
-  it('requires project scope before staging install', () => {
+  it('allows staging install without an operator-entered project scope', () => {
     const form = createDefaultK3WiseSetupForm()
     Object.assign(form, {
       tenantId: 'tenant_1',
       projectId: '',
     })
 
-    const messages = validateK3WiseStagingInstallForm(form).map((issue) => issue.message)
-    expect(messages).toContain('projectId is required before installing staging tables')
-    expect(() => buildK3WiseStagingInstallPayload(form)).toThrow('projectId is required before installing staging tables')
+    expect(validateK3WiseStagingInstallForm(form)).toEqual([])
+    expect(buildK3WiseStagingInstallPayload(form)).toEqual({
+      tenantId: 'tenant_1',
+      workspaceId: null,
+    })
   })
 
   it('builds pipeline dry-run and run payloads with only public run fields', () => {
