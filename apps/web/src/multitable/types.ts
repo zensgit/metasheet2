@@ -822,11 +822,26 @@ export interface AutomationExecution {
   id: string
   ruleId: string
   status: 'success' | 'failed' | 'skipped'
-  triggerType: AutomationTriggerType
-  startedAt: string
+  /**
+   * Source / actor that fired the rule. Backend column `triggered_by`
+   * (see `multitable_automation_executions` migration). Common values
+   * include `event`, `scheduler`, `manual`, or a username when invoked
+   * interactively.
+   */
+  triggeredBy: string
+  /**
+   * ISO timestamp when the execution started. Backend column
+   * `triggered_at`.
+   */
+  triggeredAt: string
   completedAt?: string
+  /**
+   * Execution duration in milliseconds. Backend column `duration` is
+   * already stored in ms; UI no longer carries a separate `durationMs`
+   * alias to avoid the field-name drift that previously left the
+   * column blank in `MetaAutomationLogViewer`.
+   */
   duration?: number
-  durationMs?: number
   steps?: AutomationStepResult[]
   error?: string
 }
@@ -836,7 +851,12 @@ export interface AutomationStats {
   success: number
   failed: number
   skipped: number
-  avgDurationMs: number
+  /**
+   * Average execution duration across all matching executions, in
+   * milliseconds. Backend service alias `avg_duration` → `avgDuration`.
+   * UI no longer reads a separate `avgDurationMs` alias.
+   */
+  avgDuration: number
 }
 
 // --- Charts ---

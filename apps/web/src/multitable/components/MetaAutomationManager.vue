@@ -1578,11 +1578,7 @@ function isDingTalkActionType(actionType: AutomationActionType): boolean {
 
 function describeTestRunExecution(execution: AutomationExecution): AutomationTestRunState {
   const failedStep = execution.steps?.find((step) => step.status === 'failed')
-  const durationMs = typeof execution.durationMs === 'number'
-    ? execution.durationMs
-    : typeof execution.duration === 'number'
-      ? execution.duration
-      : undefined
+  const durationMs = typeof execution.duration === 'number' ? execution.duration : undefined
   const duration = typeof durationMs === 'number' ? ` (${Math.round(durationMs)} ms)` : ''
   if (execution.status === 'failed' || failedStep) {
     return {
