@@ -215,6 +215,11 @@ function createTestResultPayload(overrides: Record<string, unknown> = {}) {
           { userId: '0447654442691174', name: '林岚' },
         ],
       },
+      summary: {
+        code: 'scope_or_root_misconfigured',
+        title: '通讯录范围或根部门疑似配置不当',
+        nextAction: '请检查应用「通讯录管理」权限范围是否覆盖全员，并确认根部门 ID 是否正确。',
+      },
       warnings: [
         '根部门 1 未返回任何子部门。',
         '根部门 1 当前仅返回 1 个直属成员；如果钉钉企业通讯录里实际成员更多，通常是应用通讯录接口范围未覆盖，或根部门 ID 配置不正确。',
@@ -5373,6 +5378,55 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('根部门子部门 0')
     expect(container?.textContent).toContain('根部门直属成员 1')
     expect(container?.textContent).toContain('根部门 1 当前仅返回 1 个直属成员')
+    expect(container?.querySelector('.directory-admin__diagnostic-summary')).toBeTruthy()
+    expect(container?.textContent).toContain('通讯录范围或根部门疑似配置不当')
+    expect(container?.textContent).toContain('请检查应用「通讯录管理」权限范围是否覆盖全员，并确认根部门 ID 是否正确。')
+  })
+
+  it('renders connectivity diagnostics without a summary for legacy responses', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([createAccount()]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createTestResultPayload({ summary: undefined }),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    app.component('RouterLink', {
+      props: ['to'],
+      template: '<a><slot /></a>',
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const testButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('测试连通性'))
+    expect(testButton).toBeTruthy()
+    testButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(6)
+
+    expect(container?.textContent).toContain('根部门子部门 0')
+    expect(container?.textContent).toContain('根部门 1 当前仅返回 1 个直属成员')
+    expect(container?.querySelector('.directory-admin__diagnostic-summary')).toBeNull()
   })
 
   it('tests and saves DingTalk work notification Agent ID from the directory page', async () => {

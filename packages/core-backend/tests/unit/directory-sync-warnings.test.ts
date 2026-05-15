@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { buildDirectoryIntegrationTestWarnings } from '../../src/directory/directory-sync'
+import {
+  buildDirectoryIntegrationDiagnosticSummary,
+  buildDirectoryIntegrationTestWarnings,
+} from '../../src/directory/directory-sync'
 
 describe('buildDirectoryIntegrationTestWarnings', () => {
   it('keeps scope warnings when the root department returns no child departments', () => {
@@ -30,5 +33,49 @@ describe('buildDirectoryIntegrationTestWarnings', () => {
         rootDepartmentDirectUserHasMoreWithAccessLimit: false,
       }),
     ).toEqual([])
+  })
+})
+
+describe('buildDirectoryIntegrationDiagnosticSummary', () => {
+  it('flags scope/root misconfiguration when no child departments and sparse root members', () => {
+    expect(
+      buildDirectoryIntegrationDiagnosticSummary({
+        departmentSampleCount: 0,
+        rootDepartmentDirectUserCount: 1,
+        rootDepartmentDirectUserHasMore: false,
+      }),
+    ).toEqual({
+      code: 'scope_or_root_misconfigured',
+      title: '通讯录范围或根部门疑似配置不当',
+      nextAction: '请检查应用「通讯录管理」权限范围是否覆盖全员，并确认根部门 ID 是否正确。',
+    })
+  })
+
+  it('reports missing child departments when root members look healthy', () => {
+    expect(
+      buildDirectoryIntegrationDiagnosticSummary({
+        departmentSampleCount: 0,
+        rootDepartmentDirectUserCount: 42,
+        rootDepartmentDirectUserHasMore: true,
+      }),
+    ).toEqual({
+      code: 'no_child_departments',
+      title: '根部门未返回子部门',
+      nextAction: '如企业通讯录确有部门层级，请检查应用通讯录可见范围配置。',
+    })
+  })
+
+  it('reports healthy connectivity when child departments are present', () => {
+    expect(
+      buildDirectoryIntegrationDiagnosticSummary({
+        departmentSampleCount: 4,
+        rootDepartmentDirectUserCount: 1,
+        rootDepartmentDirectUserHasMore: false,
+      }),
+    ).toEqual({
+      code: 'healthy',
+      title: '通讯录连通正常',
+      nextAction: '通讯录范围正常，可执行目录同步。',
+    })
   })
 })

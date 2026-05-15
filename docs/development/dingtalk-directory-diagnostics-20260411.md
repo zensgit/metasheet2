@@ -67,6 +67,39 @@
 - 根部门配置
 - 还是本地同步逻辑
 
+### 3. 结构化诊断结论与同步运行历史持久化
+
+在第 2 节原始计数/告警的基础上，进一步补充：
+
+后端 `testDirectoryIntegration` 现在额外返回结构化结论 `summary`：
+
+- `code`：稳定字符串枚举（落库后重命名需迁移），当前取值固定为：
+  - `healthy`：通讯录连通正常
+  - `no_child_departments`：根部门未返回子部门，但根直属成员看起来正常
+  - `scope_or_root_misconfigured`：无子部门且根直属成员稀少，疑似权限范围或根部门配置不当
+- `title`：人类可读结论标题
+- `nextAction`：建议的下一步动作
+
+`code` 由 `buildDirectoryIntegrationDiagnosticSummary` 从既有计数派生，与第 2 节诊断告警同源，不引入新的判定条件。
+
+手动同步（`triggerSource === 'manual'`）时，`syncDirectoryIntegration` 以 best-effort 方式采样一次根部门诊断，并写入该次运行的 `directory_sync_runs.stats`：
+
+- `rootDepartmentChildCount`
+- `rootDepartmentDirectUserCount`
+- `rootDepartmentDirectUserHasMore`
+- `rootDepartmentDirectUserCountWithAccessLimit`
+- `rootDepartmentDirectUserHasMoreWithAccessLimit`
+- `diagnosticCode` / `diagnosticTitle` / `diagnosticNextAction`
+- `diagnosticWarnings`
+- 两组根部门成员样本
+
+约束：
+
+- 诊断采样失败不影响同步本身（吞掉异常并 `logger.warn`，运行状态不因采样失败而判负）。
+- 仅在手动触发时采样；定时同步（`scheduler`）不采样，避免给每次自动同步增加额外钉钉调用。
+- 前端在运行记录卡片中渲染 `diagnosticTitle`、计数摘要、`diagnosticNextAction` 与诊断告警，管理员无需重跑连通性测试即可回看历史结论。
+- 前端连通性测试区在 `summary` 缺失时（旧响应）自动跳过结构化结论块，保持向后兼容。
+
 ## 操作建议
 
 部署后，在 `/admin/directory` 中执行：

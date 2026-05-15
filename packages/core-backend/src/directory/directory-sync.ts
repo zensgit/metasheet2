@@ -383,7 +383,14 @@ export type DirectoryIntegrationTestResult = {
     sampledRootDepartmentUsers: Array<{ userId: string; name: string }>
     sampledRootDepartmentUsersWithAccessLimit: Array<{ userId: string; name: string }>
   }
+  summary: DirectoryIntegrationDiagnosticSummary
   warnings: string[]
+}
+
+export type DirectoryIntegrationDiagnosticSummary = {
+  code: string
+  title: string
+  nextAction: string
 }
 
 export type DirectorySyncRunSummary = {
@@ -1656,6 +1663,111 @@ export function buildDirectoryIntegrationTestWarnings(result: {
   return warnings
 }
 
+export function buildDirectoryIntegrationDiagnosticSummary(result: {
+  departmentSampleCount: number
+  rootDepartmentDirectUserCount: number
+  rootDepartmentDirectUserHasMore: boolean
+}): DirectoryIntegrationDiagnosticSummary {
+  const hasNoChildDepartments = result.departmentSampleCount === 0
+  const hasSuspiciouslySparseRootMembers =
+    result.rootDepartmentDirectUserCount <= 1 && !result.rootDepartmentDirectUserHasMore
+
+  if (hasNoChildDepartments && hasSuspiciouslySparseRootMembers) {
+    return {
+      code: 'scope_or_root_misconfigured',
+      title: '通讯录范围或根部门疑似配置不当',
+      nextAction: '请检查应用「通讯录管理」权限范围是否覆盖全员，并确认根部门 ID 是否正确。',
+    }
+  }
+
+  if (hasNoChildDepartments) {
+    return {
+      code: 'no_child_departments',
+      title: '根部门未返回子部门',
+      nextAction: '如企业通讯录确有部门层级，请检查应用通讯录可见范围配置。',
+    }
+  }
+
+  return {
+    code: 'healthy',
+    title: '通讯录连通正常',
+    nextAction: '通讯录范围正常，可执行目录同步。',
+  }
+}
+
+export type DirectoryRootDepartmentDiagnosticSample = {
+  rootDepartmentChildCount: number
+  rootDepartmentDirectUserCount: number
+  rootDepartmentDirectUserHasMore: boolean
+  rootDepartmentDirectUserCountWithAccessLimit: number
+  rootDepartmentDirectUserHasMoreWithAccessLimit: boolean
+  sampledRootDepartmentUsers: Array<{ userId: string; name: string }>
+  sampledRootDepartmentUsersWithAccessLimit: Array<{ userId: string; name: string }>
+  summary: DirectoryIntegrationDiagnosticSummary
+  warnings: string[]
+}
+
+export async function sampleRootDepartmentDiagnostics(
+  config: DirectoryIntegrationConfig,
+): Promise<DirectoryRootDepartmentDiagnosticSample> {
+  const accessToken = await fetchDingTalkAppAccessToken({
+    appKey: config.appKey,
+    appSecret: config.appSecret,
+    baseUrl: config.baseUrl,
+  })
+  const departments = await listDingTalkDepartments(accessToken, config.rootDepartmentId, {
+    baseUrl: config.baseUrl,
+  })
+  const rootUsers = await listDingTalkDepartmentUsers(
+    accessToken,
+    config.rootDepartmentId,
+    0,
+    Math.min(config.pageSize ?? DEFAULT_PAGE_SIZE, 100),
+    { baseUrl: config.baseUrl },
+  )
+  const rootUsersWithAccessLimit = await listDingTalkDepartmentUsers(
+    accessToken,
+    config.rootDepartmentId,
+    0,
+    Math.min(config.pageSize ?? DEFAULT_PAGE_SIZE, 100),
+    { baseUrl: config.baseUrl, containAccessLimit: true },
+  )
+
+  const rootDepartmentChildCount = departments.length
+  const rootDepartmentDirectUserCount = rootUsers.users.length
+  const rootDepartmentDirectUserHasMore = rootUsers.hasMore
+  const rootDepartmentDirectUserCountWithAccessLimit = rootUsersWithAccessLimit.users.length
+  const rootDepartmentDirectUserHasMoreWithAccessLimit = rootUsersWithAccessLimit.hasMore
+
+  const warnings = buildDirectoryIntegrationTestWarnings({
+    rootDepartmentId: config.rootDepartmentId,
+    departmentSampleCount: rootDepartmentChildCount,
+    rootDepartmentDirectUserCount,
+    rootDepartmentDirectUserHasMore,
+    rootDepartmentDirectUserCountWithAccessLimit,
+    rootDepartmentDirectUserHasMoreWithAccessLimit,
+  })
+  const summary = buildDirectoryIntegrationDiagnosticSummary({
+    departmentSampleCount: rootDepartmentChildCount,
+    rootDepartmentDirectUserCount,
+    rootDepartmentDirectUserHasMore,
+  })
+
+  return {
+    rootDepartmentChildCount,
+    rootDepartmentDirectUserCount,
+    rootDepartmentDirectUserHasMore,
+    rootDepartmentDirectUserCountWithAccessLimit,
+    rootDepartmentDirectUserHasMoreWithAccessLimit,
+    sampledRootDepartmentUsers: rootUsers.users.slice(0, 10).map((user) => ({ userId: user.userId, name: user.name })),
+    sampledRootDepartmentUsersWithAccessLimit: rootUsersWithAccessLimit.users
+      .slice(0, 10)
+      .map((user) => ({ userId: user.userId, name: user.name })),
+    summary,
+    warnings,
+  }
+}
+
 export async function testDirectoryIntegration(input: DirectoryIntegrationTestInput): Promise<DirectoryIntegrationTestResult> {
   const current = await resolveDirectoryTestCurrentConfig(input)
   const normalized = normalizeIntegrationInput(input, current)
@@ -1715,6 +1827,11 @@ export async function testDirectoryIntegration(input: DirectoryIntegrationTestIn
     userSampleCount: users.length,
     sampledUsers: users.slice(0, 5).map((user) => ({ userId: user.userId, name: user.name })),
     diagnostics,
+    summary: buildDirectoryIntegrationDiagnosticSummary({
+      departmentSampleCount: departments.length,
+      rootDepartmentDirectUserCount: diagnostics.rootDepartmentDirectUserCount,
+      rootDepartmentDirectUserHasMore: diagnostics.rootDepartmentDirectUserHasMore,
+    }),
     warnings: buildDirectoryIntegrationTestWarnings({
       rootDepartmentId: normalized.rootDepartmentId,
       departmentSampleCount: departments.length,
@@ -1999,6 +2116,33 @@ export async function syncDirectoryIntegration(
     const departments = await fetchAllDepartments(config, integration.name)
     const departmentPathMap = buildDepartmentPathMap(departments)
     const users = await fetchAllUsers(config, departments)
+
+    let directoryDiagnosticStats: JsonRecord = {}
+    if (triggerSource === 'manual') {
+      try {
+        const diagnosticSample = await sampleRootDepartmentDiagnostics(config)
+        directoryDiagnosticStats = {
+          rootDepartmentChildCount: diagnosticSample.rootDepartmentChildCount,
+          rootDepartmentDirectUserCount: diagnosticSample.rootDepartmentDirectUserCount,
+          rootDepartmentDirectUserHasMore: diagnosticSample.rootDepartmentDirectUserHasMore,
+          rootDepartmentDirectUserCountWithAccessLimit: diagnosticSample.rootDepartmentDirectUserCountWithAccessLimit,
+          rootDepartmentDirectUserHasMoreWithAccessLimit:
+            diagnosticSample.rootDepartmentDirectUserHasMoreWithAccessLimit,
+          diagnosticCode: diagnosticSample.summary.code,
+          diagnosticTitle: diagnosticSample.summary.title,
+          diagnosticNextAction: diagnosticSample.summary.nextAction,
+          diagnosticWarnings: diagnosticSample.warnings,
+          sampledRootDepartmentUsers: diagnosticSample.sampledRootDepartmentUsers,
+          sampledRootDepartmentUsersWithAccessLimit: diagnosticSample.sampledRootDepartmentUsersWithAccessLimit,
+        }
+      } catch (error) {
+        directoryDiagnosticStats = {}
+        logger.warn(
+          `Failed to sample directory diagnostics for integration ${integrationId}: ${readErrorMessage(error, 'unknown error')}`,
+        )
+      }
+    }
+
     const syncTimestamp = new Date().toISOString()
     const autoAdmissionInvites: Array<{ userId: string; email: string; inviteToken: string }> = []
     const autoAdmissionOnboardingPackets: DirectoryAutoAdmissionOnboardingPacket[] = []
@@ -2395,6 +2539,7 @@ export async function syncDirectoryIntegration(
         memberGroupGovernedUserCount: memberGroupProjection.memberGroupGovernedUserCount,
         memberGroupDefaultRoleAssignmentsCount: memberGroupProjection.memberGroupDefaultRoleAssignmentsCount,
         memberGroupDefaultNamespaceAdmissionsCount: memberGroupProjection.memberGroupDefaultNamespaceAdmissionsCount,
+        ...directoryDiagnosticStats,
       }
 
       await client.query(
