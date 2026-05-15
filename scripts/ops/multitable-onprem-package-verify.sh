@@ -98,6 +98,7 @@ function verify_generic_integration_workbench_contract() {
   local issue1542_seed="${root}/scripts/ops/integration-issue1542-seed-workbench-systems.mjs"
   local postdeploy_summary="${root}/scripts/ops/integration-k3wise-postdeploy-summary.mjs"
   local live_gate_package="${root}/docs/operations/integration-k3wise-live-gate-execution-package.md"
+  local gate_intake_template="${root}/scripts/ops/fixtures/integration-k3wise/gate-intake-template.json"
 
   search_fixed_string '/integrations/workbench' "$web_dist" || die "web dist must include the Data Factory route"
   search_fixed_string '/integrations/k3-wise' "$web_dist" || die "web dist must include the K3 WISE setup route"
@@ -137,6 +138,12 @@ function verify_generic_integration_workbench_contract() {
   search_fixed_string 'integration-k3wise-delivery-readiness.mjs' "$live_gate_package" || die "live GATE package must document delivery readiness compiler"
   search_fixed_string 'VERIFY_REPORT_JSON' "$live_gate_package" || die "live GATE package must document package verifier report capture"
   search_fixed_string '--package-verify' "$live_gate_package" || die "live GATE package must document the package verify readiness gate"
+  search_fixed_string 'gate-intake-template.json' "$live_gate_package" || die "live GATE package must document the customer-facing GATE intake template"
+  search_fixed_string '"_sections"' "$gate_intake_template" || die "GATE intake template must carry A.1-A.6 customer-facing sections"
+  search_fixed_string '"A.6"' "$gate_intake_template" || die "GATE intake template must document rollback contract section A.6"
+  search_fixed_string '<fill-outside-git>' "$gate_intake_template" || die "GATE intake template must keep credential placeholders out of Git"
+  search_fixed_string '"autoSubmit": false' "$gate_intake_template" || die "GATE intake template must default autoSubmit=false"
+  search_fixed_string '"autoAudit": false' "$gate_intake_template" || die "GATE intake template must default autoAudit=false"
 }
 
 function write_optional_report() {
@@ -347,6 +354,7 @@ required=(
   "scripts/ops/integration-k3wise-postdeploy-smoke.mjs"
   "scripts/ops/integration-issue1542-seed-workbench-systems.mjs"
   "scripts/ops/integration-k3wise-postdeploy-summary.mjs"
+  "scripts/ops/fixtures/integration-k3wise/gate-intake-template.json"
   "scripts/ops/fixtures/integration-k3wise/run-mock-poc-demo.mjs"
   "scripts/ops/multitable-onprem-bootstrap-admin.ps1"
   "scripts/ops/multitable-onprem-apply-package.sh"

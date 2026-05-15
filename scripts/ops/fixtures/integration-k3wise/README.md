@@ -9,7 +9,8 @@ Fixtures and mock server for the K3 WISE Live PoC chain. Used to:
 
 | File | Purpose |
 |---|---|
-| `gate-sample.json` | Customer GATE answer template. Customer copies, fills in real values (K3 version, URLs, credentials placeholders), saves outside Git. Endpoint URLs must not include inline username/password or secret-like query params; use credential fields instead. |
+| `gate-sample.json` | Engineer-facing sample that stays equivalent to `integration-k3wise-live-poc-preflight.mjs --print-sample`. Endpoint URLs must not include inline username/password or secret-like query params; use credential fields instead. |
+| `gate-intake-template.json` | Customer-facing GATE intake template. It wraps the same accepted JSON shape with A.1-A.6 review notes, Save-only defaults, SQL disabled by default, and `<fill-outside-git>` credential placeholders. Copy it outside Git before entering real customer values. |
 | `evidence-sample.json` | Customer-side evidence template after live PoC. Customer fills in run IDs, K3 record IDs, statuses, etc. |
 | `mock-k3-webapi-server.mjs` | Minimal in-process HTTP mock for K3 WISE WebAPI: Login / Health / Material / BOM Save / Submit / Audit. NOT a full K3 simulator. |
 | `mock-sqlserver-executor.mjs` | Mock SQL executor: implements the real K3 SQL channel `select()` / `insertMany()` contract, keeps legacy `query()` / `exec()` probes, and rejects core-table writes. |

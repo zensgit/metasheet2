@@ -15,6 +15,7 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const gateFixturePath = path.join(__dirname, 'gate-sample.json')
+const gateIntakeTemplatePath = path.join(__dirname, 'gate-intake-template.json')
 const evidenceFixturePath = path.join(__dirname, 'evidence-sample.json')
 
 async function readJson(filePath) {
@@ -44,6 +45,24 @@ test('gate-sample.json stays equivalent to the exported preflight sample', async
   assert.equal(packet.safety.autoAudit, false)
   assert.equal(packet.externalSystems.length, 3)
   assert.equal(packet.pipelines.length, 2)
+  assert.equal(JSON.stringify(packet).includes('<fill-outside-git>'), false)
+})
+
+test('gate-intake-template.json is customer-facing and accepted by live preflight', async () => {
+  const template = await readJson(gateIntakeTemplatePath)
+  assert.equal(template._instructions.secretPlaceholder, '<fill-outside-git>')
+  assert.match(template._sections['A.1'], /Test scope/)
+  assert.match(template._sections['A.6'], /Rollback contract/)
+
+  const packet = buildPacket(template, { generatedAt: '2026-05-15T00:00:00.000Z' })
+  assert.equal(packet.status, 'preflight-ready')
+  assert.equal(packet.safety.saveOnly, true)
+  assert.equal(packet.safety.autoSubmit, false)
+  assert.equal(packet.safety.autoAudit, false)
+  assert.equal(packet.safety.sqlServerMode, 'disabled')
+  assert.equal(packet.pipelines.some((pipeline) => pipeline.targetObject === 'material'), true)
+  assert.equal(packet.pipelines.some((pipeline) => pipeline.targetObject === 'bom'), true)
+  assert.equal(packet.externalSystems.some((system) => system.kind === 'erp:k3-wise-sqlserver'), false)
   assert.equal(JSON.stringify(packet).includes('<fill-outside-git>'), false)
 })
 
