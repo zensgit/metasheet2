@@ -2562,6 +2562,8 @@ export class ApprovalProductService {
       const executor = new ApprovalGraphExecutor(runtimeGraph, toNullableRecord(instance.form_snapshot) || {})
       const jumpResolution = executor.resolveReturnToNode(targetNodeKey)
       const requesterId = toNullableRecord(instance.requester_snapshot)?.id
+      // Admin jump enters the target through the same node-entry path as create/advance,
+      // so PR2 auto-approval policies intentionally compose after the jump.
       const resolution = runtimeGraphHasAutoApprovalPolicy(runtimeGraph)
         ? this.applyAutoApprovalCascade(
             id,
@@ -2591,6 +2593,8 @@ export class ApprovalProductService {
           resolution.status,
           nextVersion,
           resolution.currentNodeKey,
+          // Terminal cascades can return a null step; keep a stable numeric
+          // snapshot instead of writing NULL to the legacy progress column.
           resolution.currentStep ?? instance.total_steps,
           resolution.totalSteps,
         ],

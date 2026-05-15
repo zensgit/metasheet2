@@ -4,6 +4,7 @@ Requesting §7.2 independent review for PR3 `admin-jump-node`.
 
 Branch: `flow/admin-jump-node-20260515`  
 Base: `origin/main@e0721ed25`  
+Base recheck after §7.2 review: `git rev-list --count HEAD..origin/main` returned `0`.
 Worktree: `/Users/chouhua/Downloads/Github/metasheet2-flow-admin-jump-node-20260515`
 
 ## Diff Summary
@@ -12,6 +13,7 @@ Adds backend-only admin jump support for platform approvals:
 
 - New `POST /api/approvals/:id/jump` route gated by `approvals:admin`.
 - New `ApprovalProductService.adminJump()` that locks the instance, validates stale version/terminal state, validates forward-only approval-node targets on the frozen runtime graph, deactivates old assignments, creates target assignments, clears parallel state when needed, writes a `jump` audit record, emits `approval.admin_jumped`, and returns the refreshed approval.
+- PR2 auto-approval composition is intentional: after jump node-entry, enabled requester/adjacent/historical auto policies can advance the target node through the same cascade used by create/advance.
 - New migration adding `approval_records.action = 'jump'` and seeding `approvals:admin`.
 - Bootstrap CHECK sync and unit coverage for T1-T13 / T-bootstrap boundaries.
 
@@ -57,9 +59,9 @@ pnpm type-check
 
 Results:
 
-- Target units: PASS (`6 + 5 + 24` tests).
+- Target units: PASS (`7 + 5 + 24` tests).
 - Backend build: PASS.
-- Full backend unit: PASS (`168 files / 2192 tests`).
+- Full backend unit: PASS (`168 files / 2193 tests`).
 - Workspace type-check: PASS.
 - Integration: FAIL (`11 failed / 20 passed / 11 skipped` files) due local DB/baseline blockers, including `DATABASE_URL is required` and `database "chouhua" does not exist`; see verification doc.
 

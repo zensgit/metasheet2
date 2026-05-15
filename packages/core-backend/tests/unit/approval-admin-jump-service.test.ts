@@ -106,6 +106,24 @@ function buildLinearGraph() {
   }
 }
 
+function buildRequesterMergeGraph() {
+  return {
+    ...buildLinearGraph(),
+    nodes: [
+      { key: 'start', type: 'start', config: {} },
+      { key: 'manager_review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['manager-1'] } },
+      { key: 'finance_review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['requester-1'] } },
+      { key: 'cc_notify', type: 'cc', config: { targetType: 'user', targetIds: ['audit-1'] } },
+      { key: 'director_review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['director-1'] } },
+      { key: 'end', type: 'end', config: {} },
+    ],
+    policy: {
+      allowRevoke: true,
+      autoApproval: { mergeWithRequester: true },
+    },
+  }
+}
+
 function buildParallelGraph() {
   return {
     nodes: [
@@ -373,6 +391,66 @@ describe('ApprovalProductService adminJump', () => {
       actorId: 'admin-1',
       publishedDefinitionId: 'pub-frozen',
     }))
+  })
+
+  it('NB1 composes admin jump with PR2 requester auto-approval at the target node', async () => {
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    installGetApprovalStub(service)
+    mockAdminJumpQueries({ runtimeGraph: buildRequesterMergeGraph() })
+
+    await service.adminJump(
+      'apr-1',
+      { version: 2, targetNodeKey: 'finance_review', reason: 'jump into requester merge' },
+      adminActor(),
+    )
+
+    const updateCall = findInstanceUpdate()
+    expect(updateCall?.[1]).toEqual([
+      'apr-1',
+      'pending',
+      3,
+      'director_review',
+      3,
+      3,
+    ])
+
+    const assignmentInsert = pgState.client.query.mock.calls.find(([sql, params]) =>
+      normalize(String(sql)).startsWith('INSERT INTO approval_assignments')
+      && Array.isArray(params)
+      && params[4] === 'director_review')
+    expect(assignmentInsert?.[1]).toEqual([
+      'apr-1',
+      'user',
+      'director-1',
+      3,
+      'director_review',
+    ])
+
+    const autoRecordCall = findRecordInsert('approve')
+    expect(autoRecordCall?.[1]?.[2]).toBe('system:auto-approval')
+    const autoMetadata = JSON.parse(String((autoRecordCall?.[1] as unknown[])[9])) as Record<string, unknown>
+    expect(autoMetadata).toMatchObject({
+      autoApproved: true,
+      nodeKey: 'finance_review',
+      reason: 'auto-merge-requester',
+      policySource: 'template',
+      originalApprover: { type: 'user', id: 'requester-1' },
+      actorMode: 'system',
+    })
+
+    const jumpRecordCall = findRecordInsert('jump')
+    const jumpMetadata = JSON.parse(String((jumpRecordCall?.[1] as unknown[])[9])) as Record<string, unknown>
+    expect(jumpMetadata).toMatchObject({
+      toNodeKey: 'finance_review',
+      nextNodeKey: 'director_review',
+      newAssignees: [{
+        assignmentType: 'user',
+        assigneeId: 'director-1',
+        nodeKey: 'director_review',
+        sourceStep: 3,
+      }],
+    })
   })
 
   it('T5 rejects missing targets and existing non-approval target nodes', async () => {

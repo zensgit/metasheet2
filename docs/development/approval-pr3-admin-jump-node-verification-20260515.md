@@ -2,6 +2,7 @@
 
 Branch: `flow/admin-jump-node-20260515`  
 Base: `origin/main@e0721ed25`  
+Base recheck after §7.2 review: `git rev-list --count HEAD..origin/main` returned `0`.
 Scope: PR3 `admin-jump-node`
 
 ## Summary
@@ -10,6 +11,7 @@ Implemented and locally verified the PR3 admin jump backend slice:
 
 - `POST /api/approvals/:id/jump` with `approvals:admin`.
 - `ApprovalProductService.adminJump()` using the instance-bound frozen runtime graph.
+- Intentional composition with PR2 auto-approval policies when the jumped-to approval node qualifies for auto merge.
 - New `approval_records.action = 'jump'` migration plus `approvals:admin` RBAC seed.
 - `approval-schema-bootstrap.ts` action CHECK sync.
 - Unit coverage for T1-T13 semantics except the DB-required data-bearing rollback cycle, which is explicitly blocked by the local integration DB environment.
@@ -31,11 +33,11 @@ pnpm type-check
 
 | Command | Result |
 |---|---|
-| Target service unit | PASS: 1 file / 6 tests |
+| Target service unit | PASS: 1 file / 7 tests |
 | Target migration/bootstrap unit | PASS: 1 file / 5 tests |
 | Target RBAC unit | PASS: 1 file / 24 tests |
 | `@metasheet/core-backend build` | PASS: `tsc` clean |
-| `@metasheet/core-backend test:unit` | PASS: 168 files / 2192 tests |
+| `@metasheet/core-backend test:unit` | PASS: 168 files / 2193 tests |
 | `pnpm type-check` | PASS: workspace type-check completed |
 | `@metasheet/core-backend test:integration` | FAIL: 42 files = 11 failed / 20 passed / 11 skipped; local DB/integration baseline blockers, not PR3-specific |
 
@@ -61,6 +63,17 @@ T-bootstrap was verified by source/unit check:
 
 - `approval-schema-bootstrap.ts` version was bumped to `20260515-pr3-admin-jump-action`.
 - The rebuilt `approval_records_action_check` includes `'jump'`.
+
+## Review Follow-ups
+
+NB1 was handled in this PR:
+
+- `adminJump()` now has an inline comment documenting that jump node-entry intentionally composes with PR2 auto-approval.
+- `approval-admin-jump-service.test.ts` includes a jump-to-requester-merge test. It verifies that jumping to an approval node whose assignee is the requester auto-approves that target node, records an `auto-merge-requester` approval record, and persists the next active assignment.
+
+NB2 was handled with an inline comment explaining the `currentStep ?? instance.total_steps` fallback for terminal cascades.
+
+NB3 was rechecked after review. The branch is still based on `origin/main@e0721ed25` with `behind 0`, so the existing base string is current.
 
 ## Noise Handling
 

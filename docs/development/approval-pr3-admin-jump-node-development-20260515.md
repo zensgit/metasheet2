@@ -104,6 +104,7 @@ Migration rollback (T11) requires a scratch DB. If the local integration env rem
 Implemented on top of `origin/main@e0721ed25` after two rebase checks (`behind > 0` was resolved before final docs). The implementation stayed inside the expected files plus this PR's verification/review docs.
 
 - Service: `ApprovalProductService.adminJump()` locks the instance with `FOR UPDATE`, checks optimistic `version`, rejects terminal/non-pending instances, loads the frozen runtime graph by `instance.published_definition_id`, validates approval-node targets, enforces forward-only reachability, clears parallel state, deactivates old assignments, inserts target assignments, writes a `jump` audit record with the real admin actor, emits `approval.admin_jumped`, and returns the refreshed approval DTO.
+- Auto-approval composition: after the admin jump resolves the target approval node, PR2 auto-approval policy is intentionally applied through the existing cascade path so node-entry behavior is consistent with create/advance.
 - Parallel MVP: `parallelBranchStates` changes the reachability base to `joinNodeKey`; branch-contained targets return `APPROVAL_JUMP_PARALLEL_BRANCH_TARGET_UNSUPPORTED`; valid post-join jumps clear `parallelBranchStates`.
 - Route: `POST /api/approvals/:id/jump` is gated by `authenticate` + `rbacGuard('approvals:admin')` and requires `version`, `targetNodeKey`, and `reason` (or `comment` as a compatibility alias).
 - Migration/bootstrap: the new migration adds `jump` and `approvals:admin`; `down()` deletes `role_permissions` before `permissions` and restores the old action CHECK with `NOT VALID`. `approval-schema-bootstrap.ts` was bumped and synced with `'jump'`.
@@ -120,6 +121,7 @@ Implemented on top of `origin/main@e0721ed25` after two rebase checks (`behind >
 | T7/T10/T13 | Service unit covers deactivation, target assignment insert, admin actor audit, event payload, and no template binding mutation. |
 | T8 | Service unit verifies the prior assignee cannot `approve` once only the target-node assignment remains active. |
 | T9 | Service unit covers in-branch target rejection and post-join jump state clear. |
+| NB1 | Service unit covers jump into a requester-merge target node and verifies the target auto-approval record plus next active assignment. |
 | T11 | Source/unit coverage asserts migration up/down shape, `NOT VALID`, and FK-safe delete order. Data-bearing up/down/up remains DB-required and is explicitly recorded in verification. |
 | T12 | Service unit covers stale second jump behavior (`version` mismatch -> 409) plus implementation uses `SELECT ... FOR UPDATE`. |
 | T-bootstrap | Source/unit coverage asserts bootstrap version bump and CHECK includes `'jump'`. |
