@@ -14,6 +14,8 @@ This document does **not** repeat content already covered by:
 - `docs/operations/integration-k3wise-internal-trial-runbook.md` — post-deploy
   authenticated smoke (signoff that the metasheet control plane is alive
   before any K3 conversation begins).
+- `scripts/ops/multitable-onprem-package-verify.sh` — package-content verifier
+  that proves the deployed zip/tgz contains the K3 operator scripts and docs.
 
 Read this package alongside those two; this one focuses on the live PoC
 preflight and Save-only PoC, which they only touch tangentially.
@@ -22,6 +24,8 @@ preflight and Save-only PoC, which they only touch tangentially.
 
 - After the on-prem deploy is up and the internal-trial postdeploy smoke
   signed off.
+- After the downloaded on-prem package has produced a package verifier JSON
+  report.
 - Before sending the GATE intake template to the customer.
 - During customer answer review (does the answer satisfy the hard contracts?).
 - During live PoC execution (which command runs when, what counts as PASS).
@@ -171,6 +175,7 @@ next step only after PASS.
 | Step | Name | When | Command / Entry | PASS | FAIL |
 |---|---|---|---|---|---|
 | **C0** | Mock chain smoke (no GATE needed) | Anytime | `pnpm verify:integration-k3wise:poc` | 37 unit tests + 9-step end-to-end mock chain all green (mock K3 WebAPI + mock SQL + Save-only upsert + safety guard rejects core-table INSERT + evidence compiler PASS) | Any sub-step fails |
+| **C0.5** | Package verify report | After downloading the on-prem zip/tgz and before deploy signoff | see [C0.5 package verify report](#c05-package-verify-report) | verifier exits 0 and writes `package-verify.json` with `ok=true`; `required-content` / `checksum` / `no-github-links` PASS | verifier exits non-zero, missing K3 readiness scripts/docs, checksum mismatch, or delivery docs contain forbidden GitHub links |
 | **C1** | On-prem preflight (mock mode) | After deploy, before GATE arrives | `node scripts/ops/integration-k3wise-onprem-preflight.mjs --mock --out-dir <art>` (see [C1 prerequisites](#c1-prerequisites) below) | exit 0; `decision=PASS`; `pg.tcp-reachable` / `pg.migrations-aligned` / `fixtures.k3wise-mock` all `pass`; all K3 / gate checks `skip` | exit 1 (mandatory env defect — `env.database-url` and/or `env.jwt-secret` not satisfied; see [C1 prerequisites](#c1-prerequisites)) |
 | **C2** | On-prem preflight `--live` | Once GATE answers received | `node scripts/ops/integration-k3wise-onprem-preflight.mjs --live --gate-file <path> --out-dir <art>` with `K3_API_URL` / `K3_ACCT_ID` / `K3_USERNAME` / `K3_PASSWORD` injected | exit 0; `k3.live-config` `pass` (4 fields present); `k3.live-reachable` `pass` (TCP to K3 host:port); `gate.file-present` `pass` | exit 1 (mandatory) or exit 2 (`GATE_BLOCKED` — customer field still missing). For per-error-code fix recipes (`ECONNREFUSED` / `ENOTFOUND` / `EHOSTUNREACH` / `ETIMEDOUT`) on `pg.tcp-reachable` and `k3.live-reachable`, see `docs/operations/k3-poc-onprem-preflight-runbook.md` § "Per-check failure recipes". |
 | **C3** | Build live PoC packet + GATE contract validation | After C2 PASS | `node scripts/ops/integration-k3wise-live-poc-preflight.mjs --input <gate.json> --out-dir <packet-dir>` | `integration-k3wise-live-poc-packet.{json,md}` written; `safety.saveOnly=true / autoSubmit=false / autoAudit=false`; checklist contains `GATE-01 / CONN-01 / CONN-02 / DRY-01 / SAVE-01 / FAIL-01 / ROLLBACK-01` (plus `BOM-01` when BOM enabled) | `normalizeGate` throws (error includes `field` path of the offending key) |
@@ -181,6 +186,56 @@ next step only after PASS.
 | **C8** | Dead-letter replay | After C6 PASS | introduce a controlled failure → enters dead-letter → fix → replay | replayed run writes successfully | replay still fails |
 | **C9** | Rollback rehearsal | After C8 PASS | customer K3 admin executes per `rollback.owner` / `rollback.strategy` | test rows identifiable (e.g., `TEST-` prefix) and removed/disabled per strategy | owner unreachable or strategy not exercised |
 | **C10** | **Evidence compiler signoff** | After C9 PASS | `node scripts/ops/integration-k3wise-live-poc-evidence.mjs --packet <packet.json> --evidence <evidence.json>` | `decision=PASS` and `issues=[]` | `decision=FAIL` if any of `SAVE_ONLY_VIOLATED` / `SAVE_ONLY_ROW_COUNT` / `SAVE_ONLY_RUN_ID_REQUIRED` / `K3_RECORD_REQUIRED` / `BOM_PRODUCT_SCOPE_REQUIRED` / `BOM_RUN_ID_REQUIRED` / `BOM_ROW_COUNT` / `BOM_K3_RECORD_REQUIRED` / `BOM_K3_RESPONSE_REQUIRED` / `LEGACY_BOM_PRODUCT_ID_USED` fires; `decision=PARTIAL` when non-fail issues remain (typically checklist gaps) |
+| **C11** | **Delivery readiness compiler** | After C10 PASS, or earlier to show what remains blocked | see [C11 delivery readiness compiler](#c11-delivery-readiness-compiler) | before C10: `decision=CUSTOMER_TRIAL_READY`; after C10: `decision=CUSTOMER_TRIAL_SIGNED_OFF`; `productionUse.ready=false` remains explicit | `decision=BLOCKED`, missing package verify JSON, failed postdeploy smoke, failed preflight packet, or failed live evidence |
+
+### C0.5 package verify report
+
+Run this against the exact package that will be installed. Capture both JSON
+and Markdown reports; the JSON report becomes an input to the delivery
+readiness compiler.
+
+```bash
+VERIFY_REPORT_JSON=artifacts/integration-k3wise/delivery-readiness/package-verify.json \
+VERIFY_REPORT_MD=artifacts/integration-k3wise/delivery-readiness/package-verify.md \
+  scripts/ops/multitable-onprem-package-verify.sh <metasheet-multitable-onprem.zip-or.tgz>
+```
+
+The verifier must find `scripts/ops/integration-k3wise-delivery-readiness.mjs`
+inside the package and must prove this runbook documents the
+`--package-verify` readiness gate. If either check fails, do not deploy the
+package for customer GATE work.
+
+### C11 delivery readiness compiler
+
+After C3, run the compiler without live evidence to get a customer-trial-ready
+record:
+
+```bash
+node scripts/ops/integration-k3wise-delivery-readiness.mjs \
+  --postdeploy-smoke artifacts/integration-k3wise/internal-trial/postdeploy-smoke/integration-k3wise-postdeploy-smoke.json \
+  --package-verify artifacts/integration-k3wise/delivery-readiness/package-verify.json \
+  --preflight-packet <packet-dir>/integration-k3wise-live-poc-packet.json \
+  --out-dir artifacts/integration-k3wise/delivery-readiness/customer-ready \
+  --fail-on-blocked
+```
+
+After C10 PASS, add the live evidence report to produce the final customer
+trial signoff artifact:
+
+```bash
+node scripts/ops/integration-k3wise-delivery-readiness.mjs \
+  --postdeploy-smoke artifacts/integration-k3wise/internal-trial/postdeploy-smoke/integration-k3wise-postdeploy-smoke.json \
+  --package-verify artifacts/integration-k3wise/delivery-readiness/package-verify.json \
+  --preflight-packet <packet-dir>/integration-k3wise-live-poc-packet.json \
+  --live-evidence-report <evidence-dir>/integration-k3wise-live-poc-evidence-report.json \
+  --out-dir artifacts/integration-k3wise/delivery-readiness/customer-signed-off \
+  --fail-on-blocked
+```
+
+The output files are `integration-k3wise-delivery-readiness.json` and
+`integration-k3wise-delivery-readiness.md`. They are readiness records, not
+production approval. Production use still requires customer signoff,
+backup/rollback approval, and a scheduled change window.
 
 ### C1 prerequisites
 
@@ -221,6 +276,7 @@ Same prerequisites apply to C2 (which also runs `env.database-url` /
 | GATE field semantics | `scripts/ops/integration-k3wise-live-poc-preflight.mjs` (`normalizeGate()` and its throws) | The exact text of every hard-constraint failure | No human-readable (especially Chinese) explanation for non-engineer reviewers |
 | On-prem preflight runbook | `docs/operations/k3-poc-onprem-preflight-runbook.md` (PR #1437) | C1 / C2 operations, fix recipes for all 8 check IDs, Docker bridge-IP recipe | Does not explain field semantics — points at the schema |
 | Internal-trial postdeploy | `docs/operations/integration-k3wise-internal-trial-runbook.md` | Post-deploy auth smoke (control plane) before K3 enters the picture; host-shell mint pattern | Concerns metasheet itself, not K3 / PLM |
+| Package verifier + delivery readiness | `scripts/ops/multitable-onprem-package-verify.sh` + `scripts/ops/integration-k3wise-delivery-readiness.mjs` | C0.5 package evidence and C11 readiness decisions (`INTERNAL_READY_WAITING_CUSTOMER_GATE` / `CUSTOMER_TRIAL_READY` / `CUSTOMER_TRIAL_SIGNED_OFF`) | Does not replace customer evidence; it compiles existing evidence into one signoff artifact |
 | Mock chain | `scripts/ops/fixtures/integration-k3wise/run-mock-poc-demo.mjs` + `pnpm verify:integration-k3wise:poc` | C0 end-to-end | Already complete |
 | Evidence compiler | `scripts/ops/integration-k3wise-live-poc-evidence.mjs` (`evaluateMaterialSaveOnly` / `evaluateBom` / `determineDecision`) | C10 issue codes and their triggers | No on-site evidence-collection template |
 
@@ -302,6 +358,8 @@ EXIT=$?
 
 - `scripts/ops/integration-k3wise-live-poc-preflight.mjs` — packet builder and `--print-sample` schema source.
 - `scripts/ops/integration-k3wise-live-poc-evidence.mjs` — evidence compiler with the C10 contract.
+- `scripts/ops/integration-k3wise-delivery-readiness.mjs` — final readiness compiler that consumes postdeploy smoke, package verify, preflight packet, and optional live evidence.
+- `scripts/ops/multitable-onprem-package-verify.sh` — package-content verifier; set `VERIFY_REPORT_JSON` to feed C11.
 - `scripts/ops/integration-k3wise-onprem-preflight.mjs` — on-prem preflight (C1 / C2).
 - `scripts/ops/integration-k3wise-postdeploy-smoke.mjs` — internal-trial smoke (after backend boot, before K3 conversation).
 - `scripts/ops/fixtures/integration-k3wise/run-mock-poc-demo.mjs` — mock chain (C0).
