@@ -8,6 +8,7 @@ const BLOCKED_DECISION = 'BLOCKED'
 const INTERNAL_READY_DECISION = 'INTERNAL_READY_WAITING_CUSTOMER_GATE'
 const CUSTOMER_READY_DECISION = 'CUSTOMER_TRIAL_READY'
 const CUSTOMER_SIGNED_OFF_DECISION = 'CUSTOMER_TRIAL_SIGNED_OFF'
+const SQL_EXECUTOR_CHECK_ID = 'sqlserver-executor-availability'
 
 class K3WiseDeliveryReadinessError extends Error {
   constructor(message, details = {}) {
@@ -36,6 +37,7 @@ function readRequiredValue(argv, index, flag) {
 function parseArgs(argv = process.argv.slice(2)) {
   const opts = {
     postdeploySmoke: '',
+    packageVerify: '',
     preflightPacket: '',
     liveEvidenceReport: '',
     outDir: '',
@@ -48,6 +50,10 @@ function parseArgs(argv = process.argv.slice(2)) {
     switch (arg) {
       case '--postdeploy-smoke':
         opts.postdeploySmoke = readRequiredValue(argv, i, arg)
+        i += 1
+        break
+      case '--package-verify':
+        opts.packageVerify = readRequiredValue(argv, i, arg)
         i += 1
         break
       case '--preflight-packet':
@@ -84,6 +90,7 @@ Combines K3 WISE delivery evidence into one readiness decision.
 
 Options:
   --postdeploy-smoke <path>      integration-k3wise-postdeploy-smoke.json
+  --package-verify <path>        multitable-onprem-package-verify report JSON
   --preflight-packet <path>      packet.json from live PoC preflight
   --live-evidence-report <path>  integration-k3wise-live-poc-evidence-report.json
   --out-dir <dir>                Output directory, default ${DEFAULT_OUTPUT_ROOT}/<timestamp>
@@ -99,6 +106,47 @@ function gate(id, label, status, details = {}) {
     status,
     ...details,
   }
+}
+
+function summarizeSystem(system) {
+  if (!isPlainObject(system)) return null
+  return {
+    id: typeof system.id === 'string' ? system.id : null,
+    name: typeof system.name === 'string' ? system.name : null,
+    role: typeof system.role === 'string' ? system.role : null,
+    status: typeof system.status === 'string' ? system.status : null,
+  }
+}
+
+function compactSqlExecutorDiagnostic(evidence) {
+  const checks = Array.isArray(evidence?.checks) ? evidence.checks : []
+  const check = checks.find((item) => item?.id === SQL_EXECUTOR_CHECK_ID)
+  if (!check) return null
+
+  const diagnostic = {
+    checkId: SQL_EXECUTOR_CHECK_ID,
+    status: typeof check.status === 'string' ? check.status : 'unknown',
+  }
+  if (typeof check.code === 'string' && check.code) diagnostic.code = check.code
+  if (typeof check.reason === 'string' && check.reason) diagnostic.reason = check.reason
+  if (Number.isFinite(Number(check.systemsChecked))) diagnostic.systemsChecked = Number(check.systemsChecked)
+
+  const blockedSystems = Array.isArray(check.blockedSystems)
+    ? check.blockedSystems.map(summarizeSystem).filter(Boolean)
+    : []
+  if (blockedSystems.length > 0) diagnostic.blockedSystems = blockedSystems
+
+  const readySystems = Array.isArray(check.readySystems)
+    ? check.readySystems.map(summarizeSystem).filter(Boolean)
+    : []
+  if (readySystems.length > 0) diagnostic.readySystems = readySystems
+
+  return diagnostic
+}
+
+function postdeployDetails(evidence, details = {}) {
+  const sqlExecutor = compactSqlExecutorDiagnostic(evidence)
+  return sqlExecutor ? { ...details, advancedSqlSource: sqlExecutor } : details
 }
 
 function evaluatePostdeploySmoke(evidence) {
@@ -117,22 +165,73 @@ function evaluatePostdeploySmoke(evidence) {
   const authenticated = evidence.authenticated === true
   const signoff = evidence.signoff && typeof evidence.signoff === 'object' ? evidence.signoff : {}
   if (evidence.ok === true && authenticated && signoff.internalTrial === 'pass') {
-    return gate('postdeploy-smoke', 'Deployed MetaSheet K3 WISE smoke', 'pass', {
+    return gate('postdeploy-smoke', 'Deployed MetaSheet K3 WISE smoke', 'pass', postdeployDetails(evidence, {
       reason: signoff.reason || 'authenticated postdeploy smoke passed',
       summary: evidence.summary || {},
-    })
+    }))
   }
   if (evidence.ok === true && authenticated && signoff.internalTrial === undefined) {
-    return gate('postdeploy-smoke', 'Deployed MetaSheet K3 WISE smoke', 'pass', {
+    return gate('postdeploy-smoke', 'Deployed MetaSheet K3 WISE smoke', 'pass', postdeployDetails(evidence, {
       reason: 'authenticated postdeploy smoke passed; legacy evidence has no signoff block',
       summary: evidence.summary || {},
       warning: 'missing signoff.internalTrial in postdeploy evidence',
-    })
+    }))
   }
-  return gate('postdeploy-smoke', 'Deployed MetaSheet K3 WISE smoke', 'fail', {
+  return gate('postdeploy-smoke', 'Deployed MetaSheet K3 WISE smoke', 'fail', postdeployDetails(evidence, {
     reason: signoff.reason || (authenticated ? 'postdeploy smoke did not pass' : 'authenticated checks did not run'),
     authenticated,
     summary: evidence.summary || {},
+  }))
+}
+
+function evaluatePackageVerify(report) {
+  if (!report) {
+    return gate('package-verify', 'On-prem package verification', 'pending', {
+      reason: 'package verify report not provided',
+      requiredFor: CUSTOMER_READY_DECISION,
+    })
+  }
+  if (!isPlainObject(report)) {
+    return gate('package-verify', 'On-prem package verification', 'fail', {
+      reason: 'package verify report must be a JSON object',
+    })
+  }
+
+  const checks = Array.isArray(report.checks) ? report.checks : []
+  const nonPassingChecks = checks
+    .filter((check) => !isPlainObject(check) || check.status !== 'PASS')
+    .map((check) => {
+      if (!isPlainObject(check)) return 'unknown:invalid'
+      return `${check.name || 'unknown'}:${check.status || 'missing'}`
+    })
+
+  if (report.ok !== true) {
+    return gate('package-verify', 'On-prem package verification', 'fail', {
+      reason: 'package verify ok must be true',
+      packageName: report.packageName || null,
+      archiveType: report.archiveType || null,
+    })
+  }
+  if (checks.length === 0) {
+    return gate('package-verify', 'On-prem package verification', 'fail', {
+      reason: 'package verify report must include checks',
+      packageName: report.packageName || null,
+      archiveType: report.archiveType || null,
+    })
+  }
+  if (nonPassingChecks.length > 0) {
+    return gate('package-verify', 'On-prem package verification', 'fail', {
+      reason: `package verify checks not passing: ${nonPassingChecks.join(', ')}`,
+      packageName: report.packageName || null,
+      archiveType: report.archiveType || null,
+    })
+  }
+
+  return gate('package-verify', 'On-prem package verification', 'pass', {
+    reason: 'package verifier passed all checks',
+    packageName: report.packageName || null,
+    archiveType: report.archiveType || null,
+    checkCount: checks.length,
   })
 }
 
@@ -197,14 +296,15 @@ function evaluateLiveEvidenceReport(report) {
 
 function decide(gates) {
   if (gates.some((item) => item.status === 'fail')) return BLOCKED_DECISION
+  const packageVerify = gates.find((item) => item.id === 'package-verify')
   const postdeploy = gates.find((item) => item.id === 'postdeploy-smoke')
   const preflight = gates.find((item) => item.id === 'preflight-packet')
   const live = gates.find((item) => item.id === 'live-evidence')
 
-  if (postdeploy?.status === 'pass' && preflight?.status === 'pass' && live?.status === 'pass') {
+  if (postdeploy?.status === 'pass' && packageVerify?.status === 'pass' && preflight?.status === 'pass' && live?.status === 'pass') {
     return CUSTOMER_SIGNED_OFF_DECISION
   }
-  if (postdeploy?.status === 'pass' && preflight?.status === 'pass') {
+  if (postdeploy?.status === 'pass' && packageVerify?.status === 'pass' && preflight?.status === 'pass') {
     return CUSTOMER_READY_DECISION
   }
   if (postdeploy?.status === 'pass') {
@@ -213,13 +313,22 @@ function decide(gates) {
   return BLOCKED_DECISION
 }
 
-function nextAction(decision) {
+function nextAction(decision, gates = []) {
+  const packageVerify = gates.find((item) => item.id === 'package-verify')
+  const preflight = gates.find((item) => item.id === 'preflight-packet')
+
   switch (decision) {
     case CUSTOMER_SIGNED_OFF_DECISION:
       return 'Customer trial is signed off. Production use still requires customer change approval, backup/rollback confirmation, and an agreed go-live window.'
     case CUSTOMER_READY_DECISION:
       return 'Start the customer K3 WISE test-account live PoC: create systems, run dry-run, run Save-only, compile live evidence.'
     case INTERNAL_READY_DECISION:
+      if (packageVerify?.status === 'pending') {
+        return 'Run the on-prem package verifier and capture its JSON report, then wait for customer GATE answers.'
+      }
+      if (preflight?.status === 'pending') {
+        return 'Wait for customer GATE answers, then run live preflight to produce a preflight-ready packet.'
+      }
       return 'Wait for customer GATE answers, then run live preflight to produce a preflight-ready packet.'
     default:
       return 'Do not start customer live work. Fix failing gates or run the missing internal postdeploy smoke first.'
@@ -229,6 +338,7 @@ function nextAction(decision) {
 function buildReadinessReport(inputs = {}, { generatedAt = new Date().toISOString() } = {}) {
   const gates = [
     evaluatePostdeploySmoke(inputs.postdeploySmoke),
+    evaluatePackageVerify(inputs.packageVerify),
     evaluatePreflightPacket(inputs.preflightPacket),
     evaluateLiveEvidenceReport(inputs.liveEvidenceReport),
   ]
@@ -242,11 +352,14 @@ function buildReadinessReport(inputs = {}, { generatedAt = new Date().toISOStrin
       ready: false,
       reason: 'production go-live requires explicit customer signoff, backup/rollback approval, and a scheduled change window',
     },
-    nextAction: nextAction(decision),
+    nextAction: nextAction(decision, gates),
   }
 }
 
 function renderMarkdown(report) {
+  const advancedDiagnostics = report.gates
+    .map((item) => item.advancedSqlSource ? { gate: item.label, ...item.advancedSqlSource } : null)
+    .filter(Boolean)
   const lines = [
     `# K3 WISE Delivery Readiness - ${report.generatedAt.slice(0, 10)}`,
     '',
@@ -264,6 +377,16 @@ function renderMarkdown(report) {
     ...report.gates.map((item) => `| ${item.label} | ${item.status} | ${item.reason || '-'} |`),
     '',
   ]
+  if (advancedDiagnostics.length > 0) {
+    lines.push(
+      '## Advanced Diagnostics',
+      '',
+      '| Gate | Check | Status | Code | Reason | Systems checked |',
+      '|---|---|---|---|---|---|',
+      ...advancedDiagnostics.map((item) => `| ${item.gate} | ${item.checkId} | ${item.status} | ${item.code || '-'} | ${item.reason || '-'} | ${item.systemsChecked ?? '-'} |`),
+      '',
+    )
+  }
   return `${lines.join('\n')}\n`
 }
 
@@ -295,12 +418,13 @@ async function runCli(argv = process.argv.slice(2)) {
     printHelp()
     return 0
   }
-  const [postdeploySmoke, preflightPacket, liveEvidenceReport] = await Promise.all([
+  const [postdeploySmoke, packageVerify, preflightPacket, liveEvidenceReport] = await Promise.all([
     readJsonFile(opts.postdeploySmoke, 'postdeploy smoke'),
+    readJsonFile(opts.packageVerify, 'package verify'),
     readJsonFile(opts.preflightPacket, 'preflight packet'),
     readJsonFile(opts.liveEvidenceReport, 'live evidence report'),
   ])
-  const report = buildReadinessReport({ postdeploySmoke, preflightPacket, liveEvidenceReport })
+  const report = buildReadinessReport({ postdeploySmoke, packageVerify, preflightPacket, liveEvidenceReport })
   const outDir = path.resolve(opts.outDir || path.join(DEFAULT_OUTPUT_ROOT, nowStamp()))
   await mkdir(outDir, { recursive: true })
   const jsonPath = path.join(outDir, 'integration-k3wise-delivery-readiness.json')
@@ -336,8 +460,10 @@ export {
   INTERNAL_READY_DECISION,
   K3WiseDeliveryReadinessError,
   buildReadinessReport,
+  compactSqlExecutorDiagnostic,
   decide,
   evaluateLiveEvidenceReport,
+  evaluatePackageVerify,
   evaluatePostdeploySmoke,
   evaluatePreflightPacket,
   parseArgs,
