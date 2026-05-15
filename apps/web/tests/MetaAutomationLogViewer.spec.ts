@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 
 import MetaAutomationLogViewer from '../src/multitable/components/MetaAutomationLogViewer.vue'
@@ -194,6 +194,48 @@ describe('MetaAutomationLogViewer — step output redaction', () => {
     const outputCell = item.querySelector('[data-field="step-output"]')
     expect(outputCell).not.toBeNull()
     expect(outputCell?.textContent ?? '').toContain('<redacted>')
+  })
+})
+
+describe('MetaAutomationLogViewer — redacted support packet actions', () => {
+  it('renders copy and download actions for an expanded execution', async () => {
+    const client = makeMockClient({ logs: [PASS_EXECUTION] })
+    mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client })
+    await flushPromises()
+    const item = mounted.container.querySelector('[data-log-id="exec-pass"]') as HTMLElement
+    item.click()
+    await nextTick()
+
+    expect(item.querySelector('[data-action="copy-support-packet"]')).not.toBeNull()
+    expect(item.querySelector('[data-action="download-support-packet"]')).not.toBeNull()
+  })
+
+  it('copies a redacted Markdown support packet to the clipboard', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    })
+    const client = makeMockClient({ logs: [LEAKY_EXECUTION] })
+    mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client })
+    await flushPromises()
+    const item = mounted.container.querySelector('[data-log-id="exec-leaky"]') as HTMLElement
+    item.click()
+    await nextTick()
+
+    const copyButton = item.querySelector('[data-action="copy-support-packet"]') as HTMLButtonElement
+    copyButton.click()
+    await flushPromises()
+
+    expect(writeText).toHaveBeenCalledTimes(1)
+    const copied = String(writeText.mock.calls[0]?.[0] ?? '')
+    expect(copied).toContain('# Automation Execution Support Packet')
+    expect(copied).toContain('<redacted>')
+    expect(copied).not.toContain('raw-leak-token-12345')
+    expect(copied).not.toContain('user-001')
+    expect(copied).not.toContain('Customer Order 12345')
+    const status = item.querySelector('[data-field="support-packet-status"]')
+    expect(status?.textContent ?? '').toContain('copied')
   })
 })
 
