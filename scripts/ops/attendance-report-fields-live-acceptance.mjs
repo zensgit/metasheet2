@@ -77,6 +77,7 @@ export function parseConfig(env = process.env, now = new Date()) {
     to: String(env.TO_DATE || env.TO || range.to).trim(),
     expectVisibleCode: String(env.EXPECT_VISIBLE_CODE || 'work_date').trim(),
     expectHiddenCode: String(env.EXPECT_HIDDEN_CODE || '').trim(),
+    expectFormulaCode: String(env.EXPECT_FORMULA_CODE || '').trim(),
     devUserId: String(env.DEV_USER_ID || 'dev-admin').trim(),
     outputDir,
     reportPath: String(env.REPORT_JSON || path.join(outputDir, 'report.json')),
@@ -134,6 +135,7 @@ function createReport(config) {
     to: config.to,
     expectedVisibleCode: config.expectVisibleCode || 'not-set',
     expectedHiddenCode: config.expectHiddenCode || 'not-set',
+    expectedFormulaCode: config.expectFormulaCode || 'not-set',
     reportPath: path.resolve(config.reportPath),
     reportMdPath: path.resolve(config.reportMdPath),
     startedAt: new Date().toISOString(),
@@ -403,6 +405,23 @@ function visibilityDetails(fields, config) {
   }
 }
 
+function formulaDetails(fields, config) {
+  const formulas = Array.isArray(fields)
+    ? fields.filter(field => field?.formulaEnabled === true)
+    : []
+  const codes = extractFieldCodes(formulas)
+  const expectedFormulaCode = config.expectFormulaCode || ''
+  return {
+    codes,
+    expectedFormulaCode: expectedFormulaCode || 'not-set',
+    expectedOk: !expectedFormulaCode || codes.includes(expectedFormulaCode),
+    invalidCodes: formulas
+      .filter(field => field?.formulaValid === false)
+      .map(field => String(field?.code || ''))
+      .filter(Boolean),
+  }
+}
+
 function exportedKeys(items) {
   if (!Array.isArray(items) || !items[0] || typeof items[0] !== 'object') return []
   return Object.keys(items[0])
@@ -582,6 +601,7 @@ export function renderHelp() {
     '  TO_DATE=2026-05-13',
     '  EXPECT_VISIBLE_CODE=work_date',
     '  EXPECT_HIDDEN_CODE=<field_code>',
+    '  EXPECT_FORMULA_CODE=<formula_field_code>',
     '  AUTH_SOURCE=AUTH_TOKEN|AUTH_TOKEN_FILE|ALLOW_DEV_TOKEN',
     '  OUTPUT_DIR=output/attendance-report-fields-live-acceptance/<run>',
     '',
@@ -610,6 +630,9 @@ const MARKDOWN_CHECK_DETAIL_KEYS = Object.freeze([
   'present',
   'ignored',
   'requested',
+  'code',
+  'codes',
+  'invalidCodes',
 ])
 
 function formatMarkdownInlineValue(value) {
@@ -644,6 +667,8 @@ const EVIDENCE_SUMMARY_METADATA_KEYS = Object.freeze([
   ['CSV field count', 'csvFieldCount'],
   ['CSV field codes', 'csvFieldCodes'],
   ['CSV code field codes', 'csvCodeFieldCodes'],
+  ['Formula field codes', 'formulaFieldCodes'],
+  ['Formula invalid codes', 'formulaInvalidCodes'],
   ['CSV backing', 'csvBacking'],
   ['CSV code backing', 'csvCodeBacking'],
 ])
@@ -682,6 +707,7 @@ export function renderAcceptanceMarkdown(report) {
     `- Date range: \`${report?.from || 'missing'}..${report?.to || 'missing'}\``,
     `- Expected visible field: \`${report?.expectedVisibleCode || 'not-set'}\``,
     `- Expected hidden field: \`${report?.expectedHiddenCode || 'not-set'}\``,
+    `- Expected formula field: \`${report?.expectedFormulaCode || 'not-set'}\``,
     `- Started at: \`${report?.startedAt || 'missing'}\``,
     `- Finished at: \`${report?.finishedAt || 'missing'}\``,
     `- JSON report: \`${report?.reportPath || 'missing'}\``,
@@ -846,6 +872,15 @@ export async function runAttendanceReportFieldsAcceptance(config) {
       code: catalogVisibility.expectedHiddenCode,
       skipped: !config.expectHiddenCode,
     })
+    const catalogFormula = formulaDetails(catalogData.items, config)
+    record('catalog.formula-field.expected', catalogFormula.expectedOk, {
+      code: catalogFormula.expectedFormulaCode,
+      codes: catalogFormula.codes.join(','),
+      skipped: !config.expectFormulaCode,
+    })
+    record('catalog.formula-fields.valid', catalogFormula.invalidCodes.length === 0, {
+      invalidCodes: catalogFormula.invalidCodes.join(',') || 'none',
+    })
 
     const recordsQuery = buildQuery(config, {
       from: config.from,
@@ -868,6 +903,12 @@ export async function runAttendanceReportFieldsAcceptance(config) {
     record('records.report-fields.expected-hidden', recordVisibility.hiddenOk, {
       code: recordVisibility.expectedHiddenCode,
       skipped: !config.expectHiddenCode,
+    })
+    const recordsFormula = formulaDetails(recordsData.reportFields, config)
+    record('records.report-fields.formula-expected', recordsFormula.expectedOk, {
+      code: recordsFormula.expectedFormulaCode,
+      codes: recordsFormula.codes.join(','),
+      skipped: !config.expectFormulaCode,
     })
 
     const exportQuery = buildQuery(config, {
@@ -892,6 +933,12 @@ export async function runAttendanceReportFieldsAcceptance(config) {
     record('export.report-fields.expected-hidden', exportVisibility.hiddenOk, {
       code: exportVisibility.expectedHiddenCode,
       skipped: !config.expectHiddenCode,
+    })
+    const exportFormula = formulaDetails(exportData.reportFields, config)
+    record('export.report-fields.formula-expected', exportFormula.expectedOk, {
+      code: exportFormula.expectedFormulaCode,
+      codes: exportFormula.codes.join(','),
+      skipped: !config.expectFormulaCode,
     })
 
     const recordCodes = extractFieldCodes(recordsData.reportFields)
@@ -951,6 +998,8 @@ export async function runAttendanceReportFieldsAcceptance(config) {
     report.metadata.recordsTotal = recordsData.total ?? 0
     report.metadata.exportTotal = exportData.total ?? 0
     report.metadata.exportSampleKeys = exportedKeys(exportData.items).join(',')
+    report.metadata.formulaFieldCodes = exportFormula.codes.join(',')
+    report.metadata.formulaInvalidCodes = catalogFormula.invalidCodes.join(',')
 
     const csvQuery = buildQuery(config, {
       from: config.from,

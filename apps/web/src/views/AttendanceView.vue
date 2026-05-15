@@ -973,7 +973,7 @@
               <template v-for="record in filteredRecords" :key="record.id">
                 <tr>
                   <td v-for="column in recordReportColumns" :key="`${record.id}-${column.code}`">
-                    {{ formatRecordReportCell(record, column.code) }}
+                    {{ formatRecordReportCell(record, column) }}
                   </td>
                   <td class="attendance__table-actions">
                     <button
@@ -4761,6 +4761,8 @@ interface AttendanceRecord {
   status: string
   is_workday?: boolean
   meta?: Record<string, any>
+  report_values?: Record<string, unknown>
+  reportValues?: Record<string, unknown>
   workday_context?: {
     shiftName?: string | null
   } | null
@@ -4773,6 +4775,12 @@ interface AttendanceRecordReportField {
   categoryLabel?: string
   unit?: string
   sortOrder?: number
+  formulaEnabled?: boolean
+  formulaExpression?: string
+  formulaScope?: string
+  formulaOutputType?: string
+  formulaValid?: boolean
+  formulaError?: string | null
 }
 
 interface AttendanceRecordReportFieldConfig {
@@ -7941,6 +7949,13 @@ function formatRecordMinutes(value: unknown): string {
   return String(parsed)
 }
 
+function formatRecordReportValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '--'
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : '--'
+  if (typeof value === 'boolean') return value ? tr('Yes', '是') : tr('No', '否')
+  return String(value)
+}
+
 function formatRecordReportFieldLabel(field: AttendanceRecordReportField): string {
   const labels: Record<string, string> = {
     work_date: tr('Date', '日期'),
@@ -7981,7 +7996,18 @@ function formatRecordReportFieldLabel(field: AttendanceRecordReportField): strin
   return labels[field.code] ?? field.name ?? field.code
 }
 
-function formatRecordReportCell(record: AttendanceRecord, code: string): string {
+function readRecordReportValue(record: AttendanceRecord, code: string): unknown {
+  const reportValues = record.report_values ?? record.reportValues
+  if (!reportValues || typeof reportValues !== 'object') return undefined
+  return Object.prototype.hasOwnProperty.call(reportValues, code) ? reportValues[code] : undefined
+}
+
+function formatRecordReportCell(record: AttendanceRecord, field: AttendanceRecordReportField | string): string {
+  const code = typeof field === 'string' ? field : field.code
+  const serverValue = readRecordReportValue(record, code)
+  if (typeof field !== 'string' && field.formulaEnabled) {
+    return formatRecordReportValue(serverValue)
+  }
   const isWorkday = record.is_workday !== false
   const status = String(record.status || '')
   const leaveMinutes = recordMetaMinutes(record, ['leave_minutes', 'leaveMinutes'])
@@ -8056,7 +8082,7 @@ function formatRecordReportCell(record: AttendanceRecord, code: string): string 
     case 'holiday_overtime_duration':
       return formatRecordMinutes(recordMetaMinutes(record, ['holiday_overtime_minutes', 'holidayOvertimeMinutes']))
     default:
-      return '--'
+      return serverValue !== undefined ? formatRecordReportValue(serverValue) : '--'
   }
 }
 

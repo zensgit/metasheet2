@@ -36,6 +36,19 @@ const reportFields = [
   { code: 'work_date', name: '日期', category: 'fixed', reportVisible: true, exportKey: 'work_date' },
   { code: 'employee_name', name: '姓名', category: 'fixed', reportVisible: true, exportKey: 'employee_name' },
   { code: 'late_minutes', name: '迟到时长', category: 'anomaly', reportVisible: true, exportKey: 'late_minutes' },
+  {
+    code: 'net_work_minutes',
+    name: '净工作时长',
+    category: 'attendance',
+    reportVisible: true,
+    exportKey: 'net_work_minutes',
+    formulaEnabled: true,
+    formulaExpression: '={work_minutes}-{late_minutes}',
+    formulaScope: 'record',
+    formulaOutputType: 'duration_minutes',
+    formulaValid: true,
+    formulaError: null,
+  },
 ]
 
 function reportFieldConfigPayload() {
@@ -141,17 +154,17 @@ async function startMockServer() {
     if (url.pathname === '/api/attendance/export') {
       if (url.searchParams.get('format') === 'csv') {
         if (url.searchParams.get('header') === 'code') {
-          sendText(res, 200, 'work_date,employee_name,late_minutes\n2026-05-13,Admin,0\n', 'text/csv; charset=utf-8', csvReportFieldHeaders())
+          sendText(res, 200, 'work_date,employee_name,late_minutes,net_work_minutes\n2026-05-13,Admin,0,480\n', 'text/csv; charset=utf-8', csvReportFieldHeaders())
           return
         }
-        sendText(res, 200, '日期,姓名,迟到时长\n2026-05-13,Admin,0\n', 'text/csv; charset=utf-8', csvReportFieldHeaders())
+        sendText(res, 200, '日期,姓名,迟到时长,净工作时长\n2026-05-13,Admin,0,480\n', 'text/csv; charset=utf-8', csvReportFieldHeaders())
         return
       }
       send(res, 200, {
         ok: true,
         success: true,
         data: {
-          items: [{ work_date: '2026-05-13', employee_name: 'Admin', late_minutes: 0 }],
+          items: [{ work_date: '2026-05-13', employee_name: 'Admin', late_minutes: 0, net_work_minutes: 480 }],
           total: 1,
           format: 'json',
           reportFields,
@@ -327,9 +340,11 @@ test('renderAcceptanceMarkdown summarizes checks without leaking auth material',
       exportFieldFingerprint: 'unit-test-fingerprint',
       csvFieldFingerprint: 'unit-test-fingerprint',
       csvCodeFieldFingerprint: 'unit-test-fingerprint',
-      csvFieldCount: 3,
-      csvFieldCodes: 'work_date,employee_name,late_minutes',
-      csvCodeFieldCodes: 'work_date,employee_name,late_minutes',
+      csvFieldCount: 4,
+      csvFieldCodes: 'work_date,employee_name,late_minutes,net_work_minutes',
+      csvCodeFieldCodes: 'work_date,employee_name,late_minutes,net_work_minutes',
+      formulaFieldCodes: 'net_work_minutes',
+      formulaInvalidCodes: '',
       csvBacking: 'default:attendance|attendance_report_field_catalog|sheet_attendance_report_fields|fields_by_category',
       csvCodeBacking: 'default:attendance|attendance_report_field_catalog|sheet_attendance_report_fields|fields_by_category',
     },
@@ -364,7 +379,8 @@ test('renderAcceptanceMarkdown summarizes checks without leaking auth material',
   assert.match(markdown, /export: `unit-test-fingerprint`/)
   assert.match(markdown, /algorithm: `sha1`/)
   assert.match(markdown, /## Evidence Summary/)
-  assert.ok(markdown.includes('- CSV field codes: `work_date,employee_name,late_minutes`'))
+  assert.ok(markdown.includes('- CSV field codes: `work_date,employee_name,late_minutes,net_work_minutes`'))
+  assert.ok(markdown.includes('- Formula field codes: `net_work_minutes`'))
   assert.ok(markdown.includes('- CSV backing: `default:attendance|attendance_report_field_catalog|sheet_attendance_report_fields|fields_by_category`'))
   assert.ok(markdown.includes('- CSV code backing: `default:attendance|attendance_report_field_catalog|sheet_attendance_report_fields|fields_by_category`'))
   assert.match(markdown, /## Next Actions/)
@@ -375,6 +391,7 @@ test('renderAcceptanceMarkdown summarizes checks without leaking auth material',
 test('renderHelp documents preflight and live-mode configuration', () => {
   const help = renderHelp()
   assert.match(help, /AUTH_TOKEN=<token>, AUTH_TOKEN_FILE=<path>, or ALLOW_DEV_TOKEN=1/)
+  assert.match(help, /EXPECT_FORMULA_CODE=<formula_field_code>/)
   assert.match(help, /AUTH_SOURCE=AUTH_TOKEN\|AUTH_TOKEN_FILE\|ALLOW_DEV_TOKEN/)
   assert.match(help, /CONFIRM_SYNC=1/)
   assert.match(help, /API_HOST_HEADER=localhost/)
@@ -548,6 +565,7 @@ test('runAttendanceReportFieldsAcceptance verifies catalog, records, export, and
       ORG_ID: 'default',
       FROM_DATE: '2026-05-01',
       TO_DATE: '2026-05-13',
+      EXPECT_FORMULA_CODE: 'net_work_minutes',
       OUTPUT_DIR: outputDir,
     }))
 
@@ -577,6 +595,10 @@ test('runAttendanceReportFieldsAcceptance verifies catalog, records, export, and
       && check.details.source === 'AUTH_TOKEN_FILE'
     )))
     assert.ok(report.checks.some((check) => check.name === 'catalog.required-categories' && check.ok))
+    assert.ok(report.checks.some((check) => check.name === 'catalog.formula-field.expected' && check.ok))
+    assert.ok(report.checks.some((check) => check.name === 'catalog.formula-fields.valid' && check.ok))
+    assert.ok(report.checks.some((check) => check.name === 'records.report-fields.formula-expected' && check.ok))
+    assert.ok(report.checks.some((check) => check.name === 'export.report-fields.formula-expected' && check.ok))
     assert.ok(report.checks.some((check) => check.name === 'records-export.report-field-codes-match' && check.ok))
     assert.ok(report.checks.some((check) => check.name === 'records-export.report-field-config-match' && check.ok))
     assert.ok(report.checks.some((check) => check.name === 'catalog-records.report-field-fingerprint-match' && check.ok))
@@ -598,15 +620,17 @@ test('runAttendanceReportFieldsAcceptance verifies catalog, records, export, and
     assert.equal(report.metadata.catalogFieldFingerprint, 'unit-test-report-fields-fingerprint')
     assert.equal(report.metadata.recordsFieldFingerprint, 'unit-test-report-fields-fingerprint')
     assert.equal(report.metadata.exportFieldFingerprint, 'unit-test-report-fields-fingerprint')
-    assert.equal(report.metadata.csvHeader, '日期,姓名,迟到时长')
+    assert.equal(report.metadata.csvHeader, '日期,姓名,迟到时长,净工作时长')
     assert.equal(report.metadata.csvFieldFingerprint, 'unit-test-report-fields-fingerprint')
     assert.equal(report.metadata.csvFieldFingerprintAlgorithm, 'sha1')
     assert.equal(report.metadata.csvFieldCount, reportFields.length)
-    assert.equal(report.metadata.csvFieldCodes, 'work_date,employee_name,late_minutes')
+    assert.equal(report.metadata.csvFieldCodes, 'work_date,employee_name,late_minutes,net_work_minutes')
     assert.equal(report.metadata.csvBacking, 'default:attendance|attendance_report_field_catalog|sheet_attendance_report_fields|fields_by_category')
-    assert.equal(report.metadata.csvCodeHeader, 'work_date,employee_name,late_minutes')
+    assert.equal(report.metadata.csvCodeHeader, 'work_date,employee_name,late_minutes,net_work_minutes')
     assert.equal(report.metadata.csvCodeFieldFingerprint, 'unit-test-report-fields-fingerprint')
-    assert.equal(report.metadata.csvCodeFieldCodes, 'work_date,employee_name,late_minutes')
+    assert.equal(report.metadata.csvCodeFieldCodes, 'work_date,employee_name,late_minutes,net_work_minutes')
+    assert.equal(report.metadata.formulaFieldCodes, 'net_work_minutes')
+    assert.equal(report.metadata.formulaInvalidCodes, '')
     assert.equal(report.metadata.csvCodeBacking, 'default:attendance|attendance_report_field_catalog|sheet_attendance_report_fields|fields_by_category')
     assert.ok(server.calls.includes('POST /api/attendance/report-fields/sync'))
     assert.ok(server.calls.includes('GET /api/attendance/records'))
@@ -615,7 +639,8 @@ test('runAttendanceReportFieldsAcceptance verifies catalog, records, export, and
     assert.ok(fs.existsSync(path.join(outputDir, 'report.md')))
     const markdown = fs.readFileSync(path.join(outputDir, 'report.md'), 'utf8')
     assert.match(markdown, /## Evidence Summary/)
-    assert.ok(markdown.includes('- CSV field codes: `work_date,employee_name,late_minutes`'))
+    assert.ok(markdown.includes('- CSV field codes: `work_date,employee_name,late_minutes,net_work_minutes`'))
+    assert.ok(markdown.includes('- Formula field codes: `net_work_minutes`'))
     assert.ok(markdown.includes('- CSV backing: `default:attendance|attendance_report_field_catalog|sheet_attendance_report_fields|fields_by_category`'))
     assert.ok(markdown.includes('- CSV code backing: `default:attendance|attendance_report_field_catalog|sheet_attendance_report_fields|fields_by_category`'))
     assert.match(markdown, /Auth source: `AUTH_TOKEN_FILE`/)

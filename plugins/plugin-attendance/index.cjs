@@ -262,6 +262,10 @@ const ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS = Object.freeze({
   dingtalkFieldName: 'dingtalk_field_name',
   description: 'description',
   internalKey: 'internal_key',
+  formulaEnabled: 'formula_enabled',
+  formulaExpression: 'formula_expression',
+  formulaScope: 'formula_scope',
+  formulaOutputType: 'formula_output_type',
 })
 
 const ATTENDANCE_REPORT_FIELD_CATEGORIES = Object.freeze([
@@ -275,6 +279,56 @@ const ATTENDANCE_REPORT_FIELD_CATEGORIES = Object.freeze([
 
 const ATTENDANCE_REPORT_FIELD_SOURCE_OPTIONS = Object.freeze(['system', 'dingtalk', 'multitable', 'custom'])
 const ATTENDANCE_REPORT_FIELD_UNIT_OPTIONS = Object.freeze(['text', 'dateTime', 'days', 'minutes', 'count', 'hours'])
+const ATTENDANCE_REPORT_FIELD_FORMULA_SCOPE_OPTIONS = Object.freeze(['record'])
+const ATTENDANCE_REPORT_FIELD_FORMULA_OUTPUT_TYPE_OPTIONS = Object.freeze([
+  'number',
+  'duration_minutes',
+  'text',
+  'boolean',
+  'date',
+])
+const ATTENDANCE_REPORT_FORMULA_ERROR_VALUE = '#ERROR!'
+const ATTENDANCE_REPORT_FORMULA_REFERENCE_PATTERN = /\{([A-Za-z][A-Za-z0-9_]*)\}/g
+const ATTENDANCE_REPORT_FORMULA_CELL_REFERENCE_PATTERN = /(?<![A-Za-z0-9_])([A-Za-z]+\d+(?::[A-Za-z]+\d+)?)(?![A-Za-z0-9_])/g
+const ATTENDANCE_REPORT_FORMULA_ALLOWED_FUNCTIONS = new Set([
+  'IF',
+  'AND',
+  'OR',
+  'NOT',
+  'ROUND',
+  'CEILING',
+  'FLOOR',
+  'ABS',
+  'MIN',
+  'MAX',
+  'SUM',
+  'AVERAGE',
+  'COUNT',
+  'COUNTA',
+  'DATEDIF',
+  'DATEDIFF',
+  'DATE',
+  'YEAR',
+  'MONTH',
+  'DAY',
+  'CONCAT',
+  'CONCATENATE',
+  'LEFT',
+  'RIGHT',
+  'MID',
+  'LEN',
+  'TRIM',
+  'UPPER',
+  'LOWER',
+])
+const ATTENDANCE_REPORT_FORMULA_RAW_REFERENCE_KEYS = Object.freeze([
+  'work_minutes',
+  'late_minutes',
+  'early_leave_minutes',
+  'leave_minutes',
+  'overtime_minutes',
+])
+const ATTENDANCE_REPORT_FORMULA_RESERVED_CODES = new Set(ATTENDANCE_REPORT_FORMULA_RAW_REFERENCE_KEYS)
 
 const ATTENDANCE_REPORT_FIELD_DEFINITIONS = Object.freeze([
   {
@@ -684,6 +738,10 @@ function getAttendanceReportFieldCatalogDescriptor() {
       { id: ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.dingtalkFieldName, name: '钉钉原字段名', type: 'string', order: 90, property: { width: 180 } },
       { id: ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.description, name: '说明', type: 'longText', order: 100, property: { width: 360 } },
       { id: ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.internalKey, name: '内部计算键', type: 'string', order: 110, property: { width: 220 } },
+      { id: ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.formulaEnabled, name: '启用公式', type: 'boolean', order: 120 },
+      { id: ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.formulaExpression, name: '公式表达式', type: 'longText', order: 130, property: { width: 360 } },
+      { id: ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.formulaScope, name: '公式范围', type: 'select', order: 140, options: ATTENDANCE_REPORT_FIELD_FORMULA_SCOPE_OPTIONS },
+      { id: ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.formulaOutputType, name: '公式输出类型', type: 'select', order: 150, options: ATTENDANCE_REPORT_FIELD_FORMULA_OUTPUT_TYPE_OPTIONS },
     ],
   }
 }
@@ -729,6 +787,13 @@ function buildAttendanceReportFieldCatalogRecordData(field, fieldIds) {
   assign(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.dingtalkFieldName, field.dingtalkFieldName || field.name)
   assign(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.description, field.description || '')
   assign(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.internalKey, field.internalKey || field.code)
+  assign(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.formulaEnabled, Boolean(field.formulaEnabled))
+  assign(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.formulaExpression, field.formulaExpression || '')
+  assign(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.formulaScope, normalizeAttendanceReportFormulaScope(field.formulaScope))
+  assign(
+    ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.formulaOutputType,
+    normalizeAttendanceReportFormulaOutputType(field.formulaOutputType, field.unit),
+  )
   return data
 }
 
@@ -766,11 +831,42 @@ function normalizeCatalogNumber(value, fallback = 0) {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
+function normalizeAttendanceReportFormulaScope(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  return normalized === 'record' ? 'record' : 'record'
+}
+
+function normalizeAttendanceReportFormulaOutputType(value, unit = 'text') {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (ATTENDANCE_REPORT_FIELD_FORMULA_OUTPUT_TYPE_OPTIONS.includes(normalized)) return normalized
+  const unitKey = String(unit || '').trim()
+  if (unitKey === 'minutes') return 'duration_minutes'
+  if (['days', 'hours', 'count'].includes(unitKey)) return 'number'
+  if (unitKey === 'dateTime') return 'date'
+  return 'text'
+}
+
+function normalizeAttendanceReportFormulaExpression(value) {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function normalizeAttendanceReportFormulaConfig(raw, unit = 'text') {
+  const formulaEnabled = normalizeCatalogBoolean(raw?.formulaEnabled, false)
+  const formulaExpression = normalizeAttendanceReportFormulaExpression(raw?.formulaExpression)
+  return {
+    formulaEnabled,
+    formulaExpression,
+    formulaScope: normalizeAttendanceReportFormulaScope(raw?.formulaScope),
+    formulaOutputType: normalizeAttendanceReportFormulaOutputType(raw?.formulaOutputType, unit),
+  }
+}
+
 function mapAttendanceReportFieldConfigRecord(record, fieldIds) {
   const read = (fieldId) => readAttendanceReportFieldCatalogCell(record, fieldIds, fieldId)
   const code = normalizeCatalogString(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.fieldCode))
   if (!code) return null
   const category = getAttendanceReportFieldCategory(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.category))
+  const unit = normalizeCatalogString(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.unit), 'text')
   return {
     recordId: record?.id || '',
     code,
@@ -778,14 +874,172 @@ function mapAttendanceReportFieldConfigRecord(record, fieldIds) {
     category: category.id,
     categoryLabel: category.label,
     source: normalizeCatalogString(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.source), 'custom'),
-    unit: normalizeCatalogString(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.unit), 'text'),
+    unit,
     enabled: normalizeCatalogBoolean(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.enabled), true),
     reportVisible: normalizeCatalogBoolean(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.reportVisible), true),
     sortOrder: normalizeCatalogNumber(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.sortOrder), category.sortOrder * 100),
     dingtalkFieldName: normalizeCatalogString(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.dingtalkFieldName)),
     description: normalizeCatalogString(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.description)),
     internalKey: normalizeCatalogString(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.internalKey), code),
+    formulaEnabled: normalizeCatalogBoolean(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.formulaEnabled), false),
+    formulaExpression: normalizeAttendanceReportFormulaExpression(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.formulaExpression)),
+    formulaScope: normalizeAttendanceReportFormulaScope(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.formulaScope)),
+    formulaOutputType: normalizeAttendanceReportFormulaOutputType(
+      read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.formulaOutputType),
+      unit,
+    ),
   }
+}
+
+function stripAttendanceReportFormulaStrings(expression) {
+  const text = String(expression || '')
+  let output = ''
+  let inQuotes = false
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]
+    const escaped = index > 0 && text[index - 1] === '\\'
+    if (char === '"' && !escaped) {
+      inQuotes = !inQuotes
+      output += ' '
+      continue
+    }
+    output += inQuotes ? ' ' : char
+  }
+  return output
+}
+
+function extractAttendanceReportFormulaReferences(expression) {
+  const normalized = stripAttendanceReportFormulaStrings(expression)
+  const references = new Set()
+  for (const match of normalized.matchAll(ATTENDANCE_REPORT_FORMULA_REFERENCE_PATTERN)) {
+    references.add(match[1])
+  }
+  return Array.from(references).sort()
+}
+
+function extractAttendanceReportFormulaCellReferences(expression) {
+  const withoutStrings = stripAttendanceReportFormulaStrings(expression)
+  const withoutCurly = withoutStrings.replace(/\{[^}]*\}/g, ' ')
+  const matches = []
+  for (const match of withoutCurly.matchAll(ATTENDANCE_REPORT_FORMULA_CELL_REFERENCE_PATTERN)) {
+    matches.push(match[1])
+  }
+  return matches
+}
+
+function extractAttendanceReportFormulaFunctions(expression) {
+  const normalized = stripAttendanceReportFormulaStrings(expression)
+  const functions = new Set()
+  const pattern = /\b([A-Za-z][A-Za-z0-9_]*)\s*\(/g
+  for (const match of normalized.matchAll(pattern)) {
+    functions.add(match[1].toUpperCase())
+  }
+  return Array.from(functions).sort()
+}
+
+function getAttendanceReportFormulaReferenceCodes(fields) {
+  const formulaFieldCodes = new Set()
+  const codes = new Set(ATTENDANCE_REPORT_FORMULA_RAW_REFERENCE_KEYS)
+  for (const field of fields || []) {
+    const code = normalizeCatalogString(field?.code)
+    if (!code) continue
+    if (ATTENDANCE_REPORT_FORMULA_RESERVED_CODES.has(code)) continue
+    if (field.formulaEnabled) {
+      formulaFieldCodes.add(code)
+      continue
+    }
+    if (field.enabled === false) continue
+    if (field.systemDefined === false) continue
+    codes.add(code)
+  }
+  return { codes, formulaFieldCodes }
+}
+
+function validateAttendanceReportFormulaExpression(expression, options = {}) {
+  const formulaExpression = normalizeAttendanceReportFormulaExpression(expression)
+  const references = extractAttendanceReportFormulaReferences(formulaExpression)
+  const functions = extractAttendanceReportFormulaFunctions(formulaExpression)
+  const { codes, formulaFieldCodes } = getAttendanceReportFormulaReferenceCodes(options.fields)
+
+  if (!formulaExpression) {
+    return {
+      valid: false,
+      references,
+      functions,
+      error: 'Formula expression is required when formula is enabled.',
+    }
+  }
+
+  const cellReferences = extractAttendanceReportFormulaCellReferences(formulaExpression)
+  if (cellReferences.length > 0) {
+    return {
+      valid: false,
+      references,
+      functions,
+      error: `Spreadsheet cell reference ${cellReferences[0]} is not allowed; use {field_code} to reference attendance fields.`,
+    }
+  }
+
+  const disallowedFunction = functions.find(name => !ATTENDANCE_REPORT_FORMULA_ALLOWED_FUNCTIONS.has(name))
+  if (disallowedFunction) {
+    return {
+      valid: false,
+      references,
+      functions,
+      error: `Function ${disallowedFunction} is not allowed for attendance report formulas.`,
+    }
+  }
+
+  const formulaFieldReference = references.find(reference => formulaFieldCodes.has(reference))
+  if (formulaFieldReference) {
+    return {
+      valid: false,
+      references,
+      functions,
+      error: `Formula field reference ${formulaFieldReference} is not supported in v1.`,
+    }
+  }
+
+  const unknownReference = references.find(reference => !codes.has(reference))
+  if (unknownReference) {
+    return {
+      valid: false,
+      references,
+      functions,
+      error: `Unknown attendance report field reference: ${unknownReference}.`,
+    }
+  }
+
+  return {
+    valid: true,
+    references,
+    functions,
+    error: null,
+  }
+}
+
+function applyAttendanceReportFormulaValidation(items) {
+  return items.map((field) => {
+    const formulaConfig = normalizeAttendanceReportFormulaConfig(field, field.unit)
+    if (!formulaConfig.formulaEnabled) {
+      return {
+        ...field,
+        ...formulaConfig,
+        formulaValid: true,
+        formulaError: null,
+      }
+    }
+    const validation = validateAttendanceReportFormulaExpression(formulaConfig.formulaExpression, {
+      fields: items,
+    })
+    return {
+      ...field,
+      ...formulaConfig,
+      formulaValid: validation.valid,
+      formulaError: validation.error,
+      formulaReferences: validation.references,
+    }
+  })
 }
 
 function mergeAttendanceReportFieldDefinitions(configRecords, fieldIds) {
@@ -802,6 +1056,7 @@ function mergeAttendanceReportFieldDefinitions(configRecords, fieldIds) {
     const category = getAttendanceReportFieldCategory(field.category)
     const config = configsByCode.get(field.code)
     const mergedCategory = getAttendanceReportFieldCategory(config?.category ?? category.id)
+    const formulaConfig = normalizeAttendanceReportFormulaConfig(config ?? field, config?.unit || field.unit)
     return {
       code: field.code,
       name: config?.name || field.name,
@@ -815,6 +1070,7 @@ function mergeAttendanceReportFieldDefinitions(configRecords, fieldIds) {
       dingtalkFieldName: config?.dingtalkFieldName || field.dingtalkFieldName || field.name,
       description: config?.description || field.description || '',
       internalKey: config?.internalKey || field.internalKey || field.code,
+      ...formulaConfig,
       recordId: config?.recordId || null,
       configured: Boolean(config),
       systemDefined: true,
@@ -823,20 +1079,23 @@ function mergeAttendanceReportFieldDefinitions(configRecords, fieldIds) {
 
   for (const config of configsByCode.values()) {
     if (systemCodes.has(config.code)) continue
+    if (ATTENDANCE_REPORT_FORMULA_RESERVED_CODES.has(config.code)) continue
     items.push({
       ...config,
+      ...normalizeAttendanceReportFormulaConfig(config, config.unit),
       configured: true,
       systemDefined: false,
     })
   }
 
-  return items.sort((left, right) => {
+  const sorted = items.sort((left, right) => {
     const leftCategory = categories.get(left.category)?.sortOrder ?? 999
     const rightCategory = categories.get(right.category)?.sortOrder ?? 999
     if (leftCategory !== rightCategory) return leftCategory - rightCategory
     if (left.sortOrder !== right.sortOrder) return left.sortOrder - right.sortOrder
     return left.code.localeCompare(right.code)
   })
+  return applyAttendanceReportFormulaValidation(sorted)
 }
 
 async function seedAttendanceReportFieldCatalogRecords(multitable, sheetId, fieldIds, logger) {
@@ -1143,7 +1402,7 @@ function resolveAttendanceRecordReportFields(items) {
       field
       && field.enabled !== false
       && field.reportVisible !== false
-      && ATTENDANCE_RECORD_REPORT_FIELD_CODE_SET.has(field.code)
+      && (ATTENDANCE_RECORD_REPORT_FIELD_CODE_SET.has(field.code) || field.formulaEnabled === true)
     ))
     .map(field => ({
       code: field.code,
@@ -1156,6 +1415,13 @@ function resolveAttendanceRecordReportFields(items) {
       description: field.description || '',
       systemDefined: field.systemDefined !== false,
       configured: Boolean(field.configured),
+      formulaEnabled: Boolean(field.formulaEnabled),
+      formulaExpression: field.formulaExpression || '',
+      formulaScope: normalizeAttendanceReportFormulaScope(field.formulaScope),
+      formulaOutputType: normalizeAttendanceReportFormulaOutputType(field.formulaOutputType, field.unit),
+      formulaValid: field.formulaValid !== false,
+      formulaError: field.formulaError || null,
+      formulaReferences: Array.isArray(field.formulaReferences) ? field.formulaReferences : [],
       exportKey: field.code,
     }))
     .sort((left, right) => {
@@ -1164,10 +1430,30 @@ function resolveAttendanceRecordReportFields(items) {
     })
 }
 
+function resolveAttendanceFormulaSourceFields(items) {
+  const sourceItems = Array.isArray(items) && items.length > 0
+    ? items
+    : mergeAttendanceReportFieldDefinitions([], {})
+  return sourceItems
+    .filter(field => (
+      field
+      && field.code
+      && field.enabled !== false
+      && field.formulaEnabled !== true
+      && field.systemDefined !== false
+    ))
+    .map(field => ({
+      code: field.code,
+      source: field.source || 'system',
+      systemDefined: true,
+    }))
+}
+
 async function loadAttendanceRecordReportFields(context, orgId, logger) {
   const catalog = await buildAttendanceReportFieldCatalogResponse(context, orgId, logger, { provision: false })
   return {
     fields: resolveAttendanceRecordReportFields(catalog.items),
+    formulaSourceFields: resolveAttendanceFormulaSourceFields(catalog.items),
     multitable: catalog.multitable,
   }
 }
@@ -1184,6 +1470,11 @@ function buildAttendanceReportFieldConfigFingerprint(fields) {
         source: String(field?.source || ''),
         configured: Boolean(field?.configured),
         systemDefined: field?.systemDefined !== false,
+        formulaEnabled: Boolean(field?.formulaEnabled),
+        formulaExpression: String(field?.formulaExpression || ''),
+        formulaScope: String(field?.formulaScope || ''),
+        formulaOutputType: String(field?.formulaOutputType || ''),
+        formulaValid: field?.formulaValid !== false,
       }))
       .filter(field => field.code)
       .sort((left, right) => {
@@ -1367,11 +1658,141 @@ function getAttendanceRecordReportFieldValue(row, fieldCode) {
   }
 }
 
+function attendanceFormulaLiteral(value) {
+  if (value === null || value === undefined || value === '') return '0'
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : '0'
+  if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE'
+  if (value instanceof Date) return JSON.stringify(value.toISOString())
+  const parsed = Number(value)
+  if (Number.isFinite(parsed) && String(value).trim() !== '') return String(parsed)
+  return JSON.stringify(String(value))
+}
+
+function buildAttendanceReportFormulaValueMap(row, formulaSourceFields) {
+  const values = {}
+  for (const field of formulaSourceFields || []) {
+    if (!field?.code) continue
+    values[field.code] = getAttendanceRecordReportFieldValue(row, field.code)
+  }
+  values.work_minutes = Number(row?.work_minutes ?? 0)
+  values.late_minutes = Number(row?.late_minutes ?? 0)
+  values.early_leave_minutes = Number(row?.early_leave_minutes ?? 0)
+  values.leave_minutes = readAttendanceRecordMinutes(row, ['leave_minutes', 'leaveMinutes'], 0)
+  values.overtime_minutes = readAttendanceRecordMinutes(row, ['overtime_minutes', 'overtimeMinutes'], 0)
+  return values
+}
+
+function resolveAttendanceReportFormulaExpression(expression, values) {
+  return normalizeAttendanceReportFormulaExpression(expression)
+    .replace(ATTENDANCE_REPORT_FORMULA_REFERENCE_PATTERN, (_match, reference) => (
+      attendanceFormulaLiteral(Object.prototype.hasOwnProperty.call(values, reference) ? values[reference] : 0)
+    ))
+}
+
+function formatAttendanceReportFormulaValue(value, outputType) {
+  if (typeof value === 'string' && value.startsWith('#')) return ATTENDANCE_REPORT_FORMULA_ERROR_VALUE
+  const type = normalizeAttendanceReportFormulaOutputType(outputType)
+  if (type === 'number' || type === 'duration_minutes') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : ATTENDANCE_REPORT_FORMULA_ERROR_VALUE
+  }
+  if (type === 'boolean') return Boolean(value)
+  if (type === 'date') {
+    if (value instanceof Date) return value.toISOString()
+    return String(value ?? '')
+  }
+  return value === null || value === undefined ? '' : String(value)
+}
+
+async function evaluateAttendanceReportFormulaField(context, row, field, formulaSourceFields) {
+  if (!field?.formulaEnabled) return getAttendanceRecordReportFieldValue(row, field?.code)
+  if (field.formulaValid === false) return ATTENDANCE_REPORT_FORMULA_ERROR_VALUE
+
+  const values = buildAttendanceReportFormulaValueMap(row, formulaSourceFields)
+  const expression = resolveAttendanceReportFormulaExpression(field.formulaExpression, values)
+  const formulaApi = context?.api?.formula
+  if (!formulaApi?.calculateFormula) return ATTENDANCE_REPORT_FORMULA_ERROR_VALUE
+
+  try {
+    const result = await Promise.resolve(formulaApi.calculateFormula(expression))
+    return formatAttendanceReportFormulaValue(result, field.formulaOutputType)
+  } catch {
+    return ATTENDANCE_REPORT_FORMULA_ERROR_VALUE
+  }
+}
+
+async function previewAttendanceReportFormula(context, expression, sample, fields) {
+  const sampleValues = sample && typeof sample === 'object' && !Array.isArray(sample) ? sample : {}
+  const validation = validateAttendanceReportFormulaExpression(expression, { fields })
+  if (!validation.valid) {
+    return {
+      ok: false,
+      value: null,
+      references: validation.references,
+      error: validation.error,
+    }
+  }
+
+  const values = {}
+  for (const reference of validation.references) {
+    values[reference] = Object.prototype.hasOwnProperty.call(sampleValues, reference)
+      ? sampleValues[reference]
+      : 0
+  }
+  const resolvedExpression = resolveAttendanceReportFormulaExpression(expression, values)
+  const formulaApi = context?.api?.formula
+  if (!formulaApi?.calculateFormula) {
+    return {
+      ok: false,
+      value: null,
+      references: validation.references,
+      error: 'Formula API is unavailable.',
+    }
+  }
+
+  try {
+    const value = await Promise.resolve(formulaApi.calculateFormula(resolvedExpression))
+    if (typeof value === 'string' && value.startsWith('#')) {
+      return {
+        ok: false,
+        value: ATTENDANCE_REPORT_FORMULA_ERROR_VALUE,
+        references: validation.references,
+        error: 'Formula evaluation failed.',
+      }
+    }
+    return {
+      ok: true,
+      value,
+      references: validation.references,
+      error: null,
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      value: null,
+      references: validation.references,
+      error: error instanceof Error ? error.message : 'Formula evaluation failed.',
+    }
+  }
+}
+
 function buildAttendanceRecordReportExportItem(row, reportFields) {
   return Object.fromEntries(reportFields.map(field => [
     field.exportKey || field.code,
     getAttendanceRecordReportFieldValue(row, field.code),
   ]))
+}
+
+async function buildAttendanceRecordReportExportItemAsync(context, row, reportFields, formulaSourceFields) {
+  const entries = []
+  for (const field of reportFields || []) {
+    const key = field.exportKey || field.code
+    const value = field.formulaEnabled
+      ? await evaluateAttendanceReportFormulaField(context, row, field, formulaSourceFields)
+      : getAttendanceRecordReportFieldValue(row, field.code)
+    entries.push([key, value])
+  }
+  return Object.fromEntries(entries)
 }
 
 function findImportProfile(profileId) {
@@ -8306,7 +8727,11 @@ module.exports = {
     loadAttendanceReportFieldCatalog,
     mergeAttendanceReportFieldDefinitions,
     resolveAttendanceRecordReportFields,
+    resolveAttendanceFormulaSourceFields,
+    validateAttendanceReportFormulaExpression,
+    previewAttendanceReportFormula,
     buildAttendanceRecordReportExportItem,
+    buildAttendanceRecordReportExportItemAsync,
     buildAttendanceRecordReportCsv,
     buildAttendanceReportFieldConfig,
     buildAttendanceReportFieldConfigHeaders,
@@ -11072,7 +11497,7 @@ module.exports = {
           })
           const approvedMap = await loadApprovedMinutesRange(db, orgId, targetUserId, from, to)
           const reportFields = await loadAttendanceRecordReportFields(context, orgId, logger)
-          const records = rows.map((row) => {
+          const records = await Promise.all(rows.map(async (row) => {
             const workDate = normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10)
             const meta = normalizeMetadata(row.meta)
             const approved = approvedMap.get(workDate) ?? { leaveMinutes: 0, overtimeMinutes: 0 }
@@ -11083,7 +11508,7 @@ module.exports = {
               defaultRule: workContextPrefetch.defaultRule,
               prefetched: workContextPrefetch.prefetched,
             })
-            return {
+            const record = {
               ...row,
               work_date: workDate,
               workday_context: buildWorkdayContextSummary({
@@ -11097,7 +11522,11 @@ module.exports = {
                 overtime_minutes: approved.overtimeMinutes,
               },
             }
-          })
+            return {
+              ...record,
+              report_values: await buildAttendanceRecordReportExportItemAsync(context, record, reportFields.fields, reportFields.formulaSourceFields),
+            }
+          }))
 
 			          res.json({
 			            ok: true,
@@ -20314,6 +20743,31 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'POST',
+      '/api/attendance/report-fields/formula/preview',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = z.object({
+          expression: z.string().min(1).max(4000),
+          sample: z.record(z.unknown()).optional(),
+        }).safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const catalog = await buildAttendanceReportFieldCatalogResponse(context, orgId, logger, { provision: false })
+        const data = await previewAttendanceReportFormula(
+          context,
+          parsed.data.expression,
+          parsed.data.sample,
+          catalog.items,
+        )
+        res.json({ ok: true, data })
+      })
+    )
+
+    context.api.http.addRoute(
       'GET',
       '/api/attendance/settings',
       withPermission('attendance:admin', async (_req, res) => {
@@ -20444,7 +20898,9 @@ module.exports = {
               },
             }
           })
-          const exportItems = exportRows.map(row => buildAttendanceRecordReportExportItem(row, reportFields.fields))
+          const exportItems = await Promise.all(
+            exportRows.map(row => buildAttendanceRecordReportExportItemAsync(context, row, reportFields.fields, reportFields.formulaSourceFields)),
+          )
           const reportFieldConfig = buildAttendanceReportFieldConfig(reportFields)
           if (parsed.data.format === 'json') {
             emitEvent('attendance.exported', {

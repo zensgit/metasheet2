@@ -34,6 +34,10 @@ describe('attendance report field catalog multitable foundation', () => {
       'dingtalk_field_name',
       'description',
       'internal_key',
+      'formula_enabled',
+      'formula_expression',
+      'formula_scope',
+      'formula_output_type',
     ])
   })
 
@@ -148,6 +152,10 @@ describe('attendance report field catalog multitable foundation', () => {
       dingtalk_field_name: 'fld_dingtalk',
       description: 'fld_description',
       internal_key: 'fld_internal',
+      formula_enabled: 'fld_formula_enabled',
+      formula_expression: 'fld_formula_expression',
+      formula_scope: 'fld_formula_scope',
+      formula_output_type: 'fld_formula_output_type',
     }
     const merged = helpers.mergeAttendanceReportFieldDefinitions([
       {
@@ -164,6 +172,10 @@ describe('attendance report field catalog multitable foundation', () => {
           fld_dingtalk: '迟到次数',
           fld_description: '运营侧关闭该字段',
           fld_internal: 'summary.lateCount',
+          fld_formula_enabled: false,
+          fld_formula_expression: '',
+          fld_formula_scope: 'record',
+          fld_formula_output_type: 'number',
         },
       },
     ], fieldIds)
