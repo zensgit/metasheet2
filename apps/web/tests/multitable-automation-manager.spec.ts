@@ -127,8 +127,8 @@ function mockClient(
         id: 'exec_1',
         ruleId: 'rule_1',
         status: 'success',
-        triggerType: 'record.created',
-        startedAt: '2026-04-21T00:00:00.000Z',
+        triggeredBy: 'test',
+        triggeredAt: '2026-04-21T00:00:00.000Z',
         duration: 32,
         steps: [],
       }))
@@ -143,7 +143,7 @@ function mockClient(
         return ok({ deliveries: personDeliveries })
       }
       if (url.endsWith('/stats')) {
-        return ok(options.stats ?? { total: 1, success: 1, failed: 0, skipped: 0, avgDurationMs: 32 })
+        return ok(options.stats ?? { total: 1, success: 1, failed: 0, skipped: 0, avgDuration: 32 })
       }
       return ok({ rules })
     }
@@ -2304,9 +2304,9 @@ describe('MetaAutomationManager', () => {
       id: 'exec_1',
       ruleId: 'rule_1',
       status: 'success',
-      triggerType: 'record.created',
-      startedAt: '2026-04-21T00:00:00.000Z',
-      durationMs: 32,
+      triggeredBy: 'test',
+      triggeredAt: '2026-04-21T00:00:00.000Z',
+      duration: 32,
       steps: [],
     })
     await flushPromises()
@@ -2380,8 +2380,8 @@ describe('MetaAutomationManager', () => {
       id: 'exec_1',
       ruleId: 'rule_1',
       status: 'success',
-      triggerType: 'record.created',
-      startedAt: '2026-04-21T00:00:00.000Z',
+      triggeredBy: 'test',
+      triggeredAt: '2026-04-21T00:00:00.000Z',
       duration: 10,
       steps: [],
     })
@@ -2402,8 +2402,8 @@ describe('MetaAutomationManager', () => {
         id: 'exec_failed',
         ruleId: 'rule_1',
         status: 'failed',
-        triggerType: 'record.created',
-        startedAt: '2026-04-21T00:00:00.000Z',
+        triggeredBy: 'test',
+        triggeredAt: '2026-04-21T00:00:00.000Z',
         steps: [{
           actionType: 'send_dingtalk_group_message',
           status: 'failed',

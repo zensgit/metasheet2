@@ -23,7 +23,7 @@
           </div>
           <div class="meta-log-viewer__stat">
             <span class="meta-log-viewer__stat-label">Avg duration</span>
-            <span class="meta-log-viewer__stat-value">{{ stats.avgDurationMs }}ms</span>
+            <span class="meta-log-viewer__stat-value">{{ stats.avgDuration }}ms</span>
           </div>
         </div>
 
@@ -38,9 +38,26 @@
           <button class="meta-log-viewer__btn" type="button" data-action="refresh" @click="loadData">Refresh</button>
         </div>
 
+        <!-- Load error (replaces previous silent catch) -->
+        <div
+          v-if="loadError"
+          class="meta-log-viewer__error"
+          data-error="true"
+          role="alert"
+        >
+          <span class="meta-log-viewer__error-label">Failed to load logs:</span>
+          <span class="meta-log-viewer__error-message" data-field="error-message">{{ loadError }}</span>
+          <button
+            type="button"
+            class="meta-log-viewer__btn meta-log-viewer__btn--retry"
+            data-action="retry"
+            @click="loadData"
+          >Retry</button>
+        </div>
+
         <!-- Log list -->
         <div v-if="loading" class="meta-log-viewer__empty">Loading logs...</div>
-        <div v-else-if="filteredLogs.length === 0" class="meta-log-viewer__empty" data-empty="true">No execution logs found.</div>
+        <div v-else-if="!loadError && filteredLogs.length === 0" class="meta-log-viewer__empty" data-empty="true">No execution logs found.</div>
         <div
           v-for="log in filteredLogs"
           :key="log.id"
@@ -49,14 +66,14 @@
           @click="toggleExpand(log.id)"
         >
           <div class="meta-log-viewer__log-summary">
-            <span class="meta-log-viewer__log-time">{{ formatTime(log.startedAt) }}</span>
+            <span class="meta-log-viewer__log-time">{{ formatTime(log.triggeredAt) }}</span>
             <span
               class="meta-log-viewer__badge"
               :class="`meta-log-viewer__badge--${log.status}`"
               :data-status="log.status"
             >{{ log.status }}</span>
-            <span class="meta-log-viewer__log-trigger">{{ log.triggerType }}</span>
-            <span class="meta-log-viewer__log-duration">{{ log.durationMs ?? '-' }}ms</span>
+            <span class="meta-log-viewer__log-trigger" data-field="triggeredBy">{{ log.triggeredBy }}</span>
+            <span class="meta-log-viewer__log-duration">{{ log.duration ?? '-' }}ms</span>
           </div>
           <div v-if="expandedId === log.id && log.steps" class="meta-log-viewer__log-detail" data-detail="true">
             <div
@@ -71,8 +88,16 @@
                 :class="`meta-log-viewer__badge--${step.status}`"
               >{{ step.status }}</span>
               <span v-if="step.durationMs" class="meta-log-viewer__step-dur">{{ step.durationMs }}ms</span>
-              <div v-if="step.error" class="meta-log-viewer__step-error">{{ step.error }}</div>
-              <div v-if="step.output" class="meta-log-viewer__step-output">{{ JSON.stringify(step.output) }}</div>
+              <div
+                v-if="step.error"
+                class="meta-log-viewer__step-error"
+                data-field="step-error"
+              >{{ summarizeStepError(step.error) }}</div>
+              <div
+                v-if="step.output"
+                class="meta-log-viewer__step-output"
+                data-field="step-output"
+              >{{ summarizeStepOutput(step.output) }}</div>
             </div>
           </div>
         </div>
@@ -85,6 +110,11 @@
 import { ref, computed, watch } from 'vue'
 import type { AutomationExecution, AutomationStats } from '../types'
 import type { MultitableApiClient } from '../api/client'
+import {
+  redactString,
+  summarizeStepError,
+  summarizeStepOutput,
+} from '../utils/automation-log-redact'
 
 const props = defineProps<{
   sheetId: string
@@ -102,6 +132,7 @@ const logs = ref<AutomationExecution[]>([])
 const stats = ref<AutomationStats | null>(null)
 const statusFilter = ref('')
 const expandedId = ref<string | null>(null)
+const loadError = ref<string | null>(null)
 
 const filteredLogs = computed(() => {
   if (!statusFilter.value) return logs.value
@@ -123,6 +154,7 @@ function formatTime(ts: string): string {
 async function loadData() {
   if (!props.client || !props.sheetId || !props.ruleId) return
   loading.value = true
+  loadError.value = null
   try {
     const [logsResult, statsResult] = await Promise.all([
       props.client.getAutomationLogs(props.sheetId, props.ruleId, 50),
@@ -130,8 +162,15 @@ async function loadData() {
     ])
     logs.value = logsResult
     stats.value = statsResult
-  } catch {
-    // silently fail
+  } catch (err: unknown) {
+    // Surface a redacted error to the operator. Previous behaviour was a
+    // silent catch which left the panel showing "No execution logs found"
+    // when fetches actually failed (the user could not tell the difference
+    // between an empty rule and a backend / network error).
+    const message = err instanceof Error ? err.message : String(err)
+    loadError.value = redactString(message) || 'Unknown error'
+    logs.value = []
+    stats.value = null
   } finally {
     loading.value = false
   }
@@ -143,6 +182,7 @@ watch(
     if (v) {
       expandedId.value = null
       statusFilter.value = ''
+      loadError.value = null
       void loadData()
     }
   },
@@ -232,6 +272,26 @@ watch(
   font-size: 13px;
   background: #f8fafc;
   color: #64748b;
+}
+
+.meta-log-viewer__error {
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 13px;
+  background: #fef2f2;
+  color: #b91c1c;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.meta-log-viewer__error-label { font-weight: 600; }
+.meta-log-viewer__error-message { flex: 1; word-break: break-word; }
+.meta-log-viewer__btn--retry {
+  border-color: #fecaca;
+  color: #b91c1c;
+  background: #fff;
 }
 
 .meta-log-viewer__log-item {
