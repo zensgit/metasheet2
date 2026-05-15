@@ -1630,13 +1630,14 @@ describe('ApprovalProductService', () => {
       { userId: 'manager-1' },
     )
 
-    const autoRecords = pgState.client.query.mock.calls
+    const autoRecordCalls = pgState.client.query.mock.calls
       .filter(([sql, params]) =>
         normalize(sql as string).startsWith('INSERT INTO approval_records') &&
         JSON.parse(String(params?.[9])).autoApproved === true)
-      .map(([, params]) => JSON.parse(String(params?.[9])))
+    const autoRecords = autoRecordCalls.map(([, params]) => JSON.parse(String(params?.[9])))
 
     expect(autoRecords).toHaveLength(1)
+    expect(autoRecordCalls[0]?.[1]?.[2]).toBe('system:auto-approval')
     expect(autoRecords[0]).toMatchObject({
       reason: 'empty-assignee',
       nodeKey: 'approval_1',
@@ -1759,6 +1760,7 @@ describe('ApprovalProductService', () => {
         allowRevoke: true,
         autoApproval: {
           mergeAdjacentApprover: true,
+          actorMode: 'original_approver',
         },
       },
     }
@@ -1852,21 +1854,24 @@ describe('ApprovalProductService', () => {
       normalize(sql as string).startsWith('UPDATE approval_instances SET status = $2'))
     expect(updateCall?.[1]).toEqual(['apr-1', 'approved', 3, null, 3, 3])
 
-    const autoRecords = pgState.client.query.mock.calls
+    const autoRecordCalls = pgState.client.query.mock.calls
       .filter(([sql, params]) =>
         normalize(sql as string).startsWith('INSERT INTO approval_records') &&
         JSON.parse(String(params?.[9])).reason === 'auto-merge-adjacent')
-      .map(([, params]) => JSON.parse(String(params?.[9])))
+    const autoRecords = autoRecordCalls.map(([, params]) => JSON.parse(String(params?.[9])))
 
     expect(autoRecords).toHaveLength(2)
+    expect(autoRecordCalls.map(([, params]) => params?.[2])).toEqual(['manager-1', 'manager-1'])
     expect(autoRecords[0]).toMatchObject({
       nodeKey: 'approval_b',
       reason: 'auto-merge-adjacent',
+      actorMode: 'original_approver',
       matchedAgainst: { nodeKey: 'approval_a' },
     })
     expect(autoRecords[1]).toMatchObject({
       nodeKey: 'approval_c',
       reason: 'auto-merge-adjacent',
+      actorMode: 'original_approver',
       matchedAgainst: { nodeKey: 'approval_b' },
     })
   })

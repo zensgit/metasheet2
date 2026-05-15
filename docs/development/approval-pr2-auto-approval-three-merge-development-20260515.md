@@ -136,6 +136,19 @@ When multiple rules match the same assignment, precedence is deterministic:
 
 The selected reason is the one persisted to `approval_records.metadata.reason`.
 
+Node-level `autoApprovalPolicy` is an explicit override. A present but empty
+object (`autoApprovalPolicy: {}`) disables auto-approval for that node instead
+of inheriting the template-level policy.
+
+`asRuntimeGraph` validates `policy` before full graph validation so it can decide
+whether historical runtime snapshots may contain duplicate active approvers
+across parallel branches. This is behavior-equivalent for valid stored graphs.
+
+Cross-branch refused auto-merge warnings are stored as audit records with
+`action = 'sign'` because the legacy action enum has no skipped-automation
+action. Consumers must key off `metadata.skipped === true` and
+`metadata.skipReason === 'cross_branch_adjacency_conflict'`.
+
 ## Test Matrix
 
 Codex will cover the original PR2 scope tests plus Claude additions T17-T25:

@@ -11,6 +11,17 @@ Latest implementation commits:
 - `298a939e1 test(approval): cover auto approval guardrails`
 - `5d6395df2 feat(approval): handle parallel auto approval conflicts`
 
+Post-review fix:
+
+- B1 corrected `approval-pack1a-lifecycle.api.test.ts` to find the
+  empty-assignee auto approval by `metadata.autoApproved` +
+  `metadata.reason = 'empty-assignee'` rather than the old
+  `actor_id = 'system'` literal.
+- M-T1 added unit assertions for persisted auto-approval actors:
+  `empty-assignee` records use `system:auto-approval`, and
+  `actorMode = 'original_approver'` records persist the original approver id.
+- M1/M2/M4 were handled with code comments and development-doc notes.
+
 ## Commands Run
 
 ```bash
@@ -70,6 +81,9 @@ Covered in `approval-product-service.test.ts`:
 - node override enabled over template disabled.
 - deterministic precedence: requester > adjacent > historical.
 - `empty-assignee` does not double-emit with requester merge.
+- `empty-assignee` persists the S3 automation actor id `system:auto-approval`.
+- `actorMode = 'original_approver'` persists the original approver id while the
+  in-memory chain continues to use the business approver for adjacency.
 - old runtime graphs with no `policy.autoApproval` behave unchanged.
 - all-mode requester auto-merge leaves remaining human assignees pending.
 - adjacent transitive chain semantics.
@@ -89,6 +103,9 @@ Migration rollback is N/A.
 ## Known Gaps
 
 - Full integration suite remains subject to the baseline DB environment issue recorded before PR1.
+- `approval-pack1a-lifecycle.api.test.ts` remains DB-gated locally, but its
+  empty-assignee assertion is now aligned with the S3 actor taxonomy and no
+  longer depends on the obsolete `actor_id = 'system'` literal.
 - PR2 intentionally adds no frontend policy authoring UI.
 - PR2 intentionally adds no `approval_template_versions.auto_approval_policy` authoring column.
 - Normal template authoring still rejects duplicate approvers across parallel branches. The runtime duplicate refuse-and-warn path is a defensive compatibility path for historical or otherwise pre-existing runtime snapshots.

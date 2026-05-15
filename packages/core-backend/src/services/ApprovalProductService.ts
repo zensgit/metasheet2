@@ -1414,6 +1414,8 @@ function appendAutoApprovalHistory(history: ApprovalHistoryEntry[], event: Appro
   const originalApproverId = typeof originalApprover?.id === 'string' ? originalApprover.id : null
   history.push({
     nodeKey: event.nodeKey,
+    // Keep the in-memory chain keyed by the business approver even when the
+    // audit row is persisted under the system automation actor.
     actorId: originalApproverId || actorIdForAutoApprovalEvent(event),
     reason: event.reason,
   })
@@ -1452,6 +1454,8 @@ export class ApprovalProductService {
         const originalApproverId = typeof originalApprover?.id === 'string' ? originalApprover.id : null
         return {
           nodeKey,
+          // Persisted actor_id may be the system automation actor; adjacency
+          // matching must use the original approver captured in metadata.
           actorId: originalApproverId || row.actor_id,
           recordId: String(row.id),
           reason: typeof metadata?.reason === 'string' ? metadata.reason : undefined,
@@ -3173,6 +3177,8 @@ export class ApprovalProductService {
   ): Promise<void> {
     for (const event of autoApprovalEvents) {
       const skipped = event.metadata?.skipped === true
+      // The legacy audit action enum has no "skipped automation" value; keep
+      // these informational warnings distinct through metadata.skipReason.
       await this.insertApprovalRecord(client, instanceId, {
         action: skipped ? 'sign' : 'approve',
         actorId: actorIdForAutoApprovalEvent(event),
