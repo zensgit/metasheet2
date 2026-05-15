@@ -59,11 +59,26 @@ jobs:
           pkg_tgz="$(ls -1 output/releases/multitable-onprem/*.tgz | sort | tail -n 1)"
           pkg_zip="$(ls -1 output/releases/multitable-onprem/*.zip | sort | tail -n 1)"
           pkg_meta="${pkg_tgz%.tgz}.json"
-          scripts/ops/multitable-onprem-package-verify.sh "$pkg_tgz"
-          scripts/ops/multitable-onprem-package-verify.sh "$pkg_zip"
+          pkg_name="$(basename "${pkg_tgz%.tgz}")"
+          verify_dir="output/releases/multitable-onprem/verify"
+          mkdir -p "$verify_dir"
+          verify_tgz_json="${verify_dir}/${pkg_name}.tgz.verify.json"
+          verify_tgz_md="${verify_dir}/${pkg_name}.tgz.verify.md"
+          verify_zip_json="${verify_dir}/${pkg_name}.zip.verify.json"
+          verify_zip_md="${verify_dir}/${pkg_name}.zip.verify.md"
+          VERIFY_REPORT_JSON="$verify_tgz_json" \
+          VERIFY_REPORT_MD="$verify_tgz_md" \
+            scripts/ops/multitable-onprem-package-verify.sh "$pkg_tgz"
+          VERIFY_REPORT_JSON="$verify_zip_json" \
+          VERIFY_REPORT_MD="$verify_zip_md" \
+            scripts/ops/multitable-onprem-package-verify.sh "$pkg_zip"
           echo "PACKAGE_FILE=$pkg_tgz" >> "$GITHUB_ENV"
           echo "PACKAGE_FILE_ZIP=$pkg_zip" >> "$GITHUB_ENV"
           echo "PACKAGE_META_FILE=$pkg_meta" >> "$GITHUB_ENV"
+          echo "PACKAGE_VERIFY_TGZ_JSON=$verify_tgz_json" >> "$GITHUB_ENV"
+          echo "PACKAGE_VERIFY_TGZ_MD=$verify_tgz_md" >> "$GITHUB_ENV"
+          echo "PACKAGE_VERIFY_ZIP_JSON=$verify_zip_json" >> "$GITHUB_ENV"
+          echo "PACKAGE_VERIFY_ZIP_MD=$verify_zip_md" >> "$GITHUB_ENV"
 
       - name: Publish GitHub Release
         if: ${{ inputs.publish_release == 'true' }}
@@ -86,6 +101,10 @@ jobs:
             "${PACKAGE_FILE_ZIP}.sha256"
             "output/releases/multitable-onprem/SHA256SUMS"
             "$PACKAGE_META_FILE"
+            "$PACKAGE_VERIFY_TGZ_JSON"
+            "$PACKAGE_VERIFY_TGZ_MD"
+            "$PACKAGE_VERIFY_ZIP_JSON"
+            "$PACKAGE_VERIFY_ZIP_MD"
           )
 
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
@@ -106,6 +125,8 @@ jobs:
             output/releases/multitable-onprem/*.sha256
             output/releases/multitable-onprem/SHA256SUMS
             output/releases/multitable-onprem/*.json
+            output/releases/multitable-onprem/verify/*.json
+            output/releases/multitable-onprem/verify/*.md
           retention-days: 14
 
       - name: Step summary
@@ -115,6 +136,8 @@ jobs:
             echo ""
             echo "- Package (.tgz): \`${PACKAGE_FILE}\`"
             echo "- Package (.zip): \`${PACKAGE_FILE_ZIP}\`"
+            echo "- Verify (.tgz JSON): \`${PACKAGE_VERIFY_TGZ_JSON}\`"
+            echo "- Verify (.zip JSON): \`${PACKAGE_VERIFY_ZIP_JSON}\`"
             echo "- Artifact: \`multitable-onprem-package-${{ github.run_id }}-${{ github.run_attempt }}\`"
             if [[ "${{ inputs.publish_release }}" == "true" ]]; then
               echo "- Release tag: \`${{ inputs.release_tag }}\`"
