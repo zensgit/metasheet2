@@ -80,6 +80,7 @@ export interface IntegrationSystemObject {
   label?: string
   operations?: string[]
   source?: string
+  target?: string
   schema?: IntegrationObjectSchemaField[]
   template?: Record<string, unknown>
   advanced?: boolean
