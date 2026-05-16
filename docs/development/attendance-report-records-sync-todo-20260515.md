@@ -128,6 +128,9 @@ skip  iff  existing.source_fingerprint === next.source_fingerprint
 - 考勤管理中心「同步到多维表报表」按钮 + 最近 syncedAt/记录数/fingerprint 展示 + 「打开多维表」入口
 - mock acceptance：catalog → records → multitable rows 一致性（fingerprint 链）
 - 一个 Vue 文件 + 一个 spec
+- 落地记录：
+  - development: `docs/development/attendance-report-records-sync-pr3-development-20260516.md`
+  - verification: `docs/development/attendance-report-records-sync-pr3-verification-20260516.md`
 
 ## 测试矩阵（钉死）
 
@@ -171,17 +174,17 @@ skip  iff  existing.source_fingerprint === next.source_fingerprint
 ## Claude Code TODO
 
 ### PR1
-- [ ] 本 TODO MD + development + verification MD
-- [ ] `ATTENDANCE_REPORT_RECORDS_OBJECT_ID` + `ATTENDANCE_REPORT_RECORDS_FIELDS` + `getAttendanceReportRecordsDescriptor()`
-- [ ] `ensureAttendanceReportRecords(context,orgId,logger)` + test surface 导出
-- [ ] 单测：descriptor 稳定 / ensure 幂等 / provisioning 不可用降级
-- [ ] orientation 子项：实测 ensureObject 补字段行为，结论写进 development MD
+- [x] 本 TODO MD + development + verification MD
+- [x] `ATTENDANCE_REPORT_RECORDS_OBJECT_ID` + `ATTENDANCE_REPORT_RECORDS_FIELDS` + `getAttendanceReportRecordsDescriptor()`
+- [x] `ensureAttendanceReportRecords(context,orgId,logger)` + test surface 导出
+- [x] 单测：descriptor 稳定 / ensure 幂等 / provisioning 不可用降级
+- [x] orientation 子项：实测 ensureObject 补字段行为，结论写进 development MD
 
 ### PR2（待 PR1 合并后）
-- [ ] `POST /api/attendance/report-records/sync` 路由 + writer（复用 export 路径）
-- [ ] upsert（queryRecords→patch/create）+ skip 仅当 source_fingerprint && field_fingerprint 双等
-- [ ] 单测矩阵（upsert/幂等/字段/fingerprint/降级/边界）
+- [x] `POST /api/attendance/report-records/sync` 路由 + writer（复用 export 路径）
+- [x] upsert（queryRecords→patch/create）+ skip 仅当 source_fingerprint && field_fingerprint 双等
+- [x] 单测矩阵（upsert/幂等/字段/fingerprint/降级/边界）
 
 ### PR3（待 PR2 合并后）
-- [ ] 前端同步入口 + syncedAt/数/fingerprint 展示 + 打开多维表
-- [ ] mock acceptance fingerprint 链一致性
+- [x] 前端同步入口 + syncedAt/数/fingerprint 展示 + 打开多维表
+- [x] mock acceptance fingerprint 链一致性

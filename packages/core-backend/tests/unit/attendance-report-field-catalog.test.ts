@@ -611,6 +611,12 @@ describe('attendance report field catalog multitable foundation', () => {
               ensureCalls.push(input)
               return { baseId: 'base_legacy', sheet: { id: 'sheet_report_records' } }
             },
+            ensureView: vi.fn().mockResolvedValue({
+              id: 'view_report_records',
+              sheetId: 'sheet_report_records',
+              name: '按日期查看',
+              type: 'grid',
+            }),
             resolveFieldIds: async ({ fieldIds }: { fieldIds: string[] }) =>
               Object.fromEntries(fieldIds.map(fid => [fid, `fld_${fid}`])),
           },
@@ -624,9 +630,21 @@ describe('attendance report field catalog multitable foundation', () => {
       reason: null,
       objectId: 'attendance_report_records',
       sheetId: 'sheet_report_records',
+      viewId: 'view_report_records',
     })
     expect(r1.fieldIds.row_key).toBe('fld_row_key')
     expect(r1.fieldIds.synced_at).toBe('fld_synced_at')
+    expect(helpers.getAttendanceReportRecordsViewDescriptor(r1.fieldIds)).toMatchObject({
+      id: helpers.ATTENDANCE_REPORT_RECORDS_VIEW_ID,
+      objectId: 'attendance_report_records',
+      sortInfo: {
+        rules: [
+          { fieldId: 'fld_work_date', direction: 'desc' },
+          { fieldId: 'fld_user_id', direction: 'asc' },
+          { fieldId: 'fld_synced_at', direction: 'desc' },
+        ],
+      },
+    })
     // idempotent: second ensure returns equivalent result, descriptor passed unchanged
     expect(JSON.stringify(r2)).toBe(JSON.stringify(r1))
     expect(JSON.stringify((ensureCalls[0] as { descriptor: unknown }).descriptor))
@@ -757,6 +775,11 @@ describe('attendance report field catalog multitable foundation', () => {
     // sync #1 → all created
     const r1 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
     expect(r1).toMatchObject({ synced: 2, created: 2, patched: 0, skipped: 0, failed: 0, duplicateRowKeys: 0 })
+    expect(r1.multitable).toMatchObject({
+      available: true,
+      objectId: 'attendance_report_records',
+      sheetId: 'sheet_rr',
+    })
     expect(store.length).toBe(2)
     // Fix-1 integration: the descriptor handed to ensureObject (value-columns ensure) must
     // carry work_date exactly once and still as type 'date' (no string overwrite collision)
@@ -788,6 +811,96 @@ describe('attendance report field catalog multitable foundation', () => {
     const r4 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
     expect(r4.duplicateRowKeys).toBeGreaterThanOrEqual(1)
     expect(store.filter(r => r.data[rowKeyFid] === 'org-1:u-1:2026-05-13').length).toBe(2) // not auto-deleted (v1)
+  })
+
+  it('report-records sync: disabled managed value columns are patched to null', async () => {
+    const catalogFieldIds = Object.fromEntries(
+      Object.values(helpers.ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS).map((fieldId) => [fieldId, `fld_${fieldId}`]),
+    )
+    const disabledLateDurationRecord = {
+      id: 'cfg-late-duration',
+      data: {
+        fld_field_code: 'late_duration',
+        fld_field_name: '迟到时长',
+        fld_category: '异常统计字段',
+        fld_source: 'system',
+        fld_unit: 'minutes',
+        fld_enabled: false,
+        fld_report_visible: true,
+        fld_sort_order: 4010,
+        fld_dingtalk_field_name: '迟到时长',
+        fld_description: '已停用字段应该清空报表记录旧值',
+        fld_internal_key: 'summary.lateMinutes',
+        fld_formula_enabled: false,
+        fld_formula_expression: '',
+        fld_formula_scope: 'record',
+        fld_formula_output_type: 'duration_minutes',
+      },
+    }
+
+    const store = [{
+      id: 'rec-existing',
+      data: {
+        fld_row_key: 'org-1:u-1:2026-05-13',
+        fld_field_fingerprint: 'STALE-FIELD',
+        fld_source_fingerprint: 'STALE-SOURCE',
+        fld_late_duration: 12,
+      },
+    }]
+    const records = {
+      queryRecords: async ({ sheetId, filters }: { sheetId: string; filters?: Record<string, unknown> }) => {
+        if (sheetId === 'sheet_catalog') return [disabledLateDurationRecord]
+        const want = filters?.fld_row_key
+        return store.filter(r => r.data.fld_row_key === want)
+      },
+      createRecord: vi.fn(),
+      patchRecord: vi.fn(async ({ recordId, changes }: { recordId: string; changes: Record<string, unknown> }) => {
+        const rec = store.find(r => r.id === recordId)
+        if (rec) rec.data = { ...rec.data, ...changes }
+        return rec
+      }),
+    }
+    const provisioning = {
+      ensureObject: async () => ({ baseId: 'base_rr', sheet: { id: 'sheet_rr' } }),
+      ensureView: async () => ({ id: 'view_rr', sheetId: 'sheet_rr' }),
+      findObjectSheet: async ({ objectId }: { objectId: string }) => (
+        objectId === 'attendance_report_field_catalog'
+          ? { id: 'sheet_catalog', baseId: 'base_catalog' }
+          : null
+      ),
+      resolveFieldIds: async ({ objectId, fieldIds }: { objectId: string; fieldIds: string[] }) => (
+        objectId === 'attendance_report_field_catalog'
+          ? Object.fromEntries(fieldIds.map(fieldId => [fieldId, catalogFieldIds[fieldId] || `fld_${fieldId}`]))
+          : Object.fromEntries(fieldIds.map(fieldId => [fieldId, `fld_${fieldId}`]))
+      ),
+    }
+    const attendanceRows = [
+      { user_id: 'u-1', org_id: 'org-1', work_date: '2026-05-13', timezone: 'UTC', first_in_at: '2026-05-13T09:00:00Z', last_out_at: '2026-05-13T18:00:00Z', work_minutes: 480, late_minutes: 12, early_leave_minutes: 0, status: 'late', is_workday: true, meta: {}, user_name: '张三', username: 'zhangsan' },
+    ]
+    const db = {
+      query: async (sql: string) => {
+        if (/FROM attendance_records ar/.test(sql)) return attendanceRows
+        return []
+      },
+    }
+    const context = { api: { multitable: { provisioning, records }, database: db } }
+
+    const result = await helpers.syncAttendanceReportRecords(
+      context,
+      db,
+      'org-1',
+      { warn: vi.fn() },
+      { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' },
+    )
+
+    expect(result).toMatchObject({ synced: 1, patched: 1, created: 0, skipped: 0, failed: 0 })
+    expect(records.createRecord).not.toHaveBeenCalled()
+    expect(records.patchRecord).toHaveBeenCalledTimes(1)
+    const patch = records.patchRecord.mock.calls[0]?.[0]
+    expect(patch.changes.fld_late_duration).toBeNull()
+    expect(store[0].data.fld_late_duration).toBeNull()
+    expect(store[0].data.fld_field_fingerprint).not.toBe('STALE-FIELD')
+    expect(store[0].data.fld_source_fingerprint).not.toBe('STALE-SOURCE')
   })
 
   it('does not add direct meta table writes to the attendance plugin', () => {

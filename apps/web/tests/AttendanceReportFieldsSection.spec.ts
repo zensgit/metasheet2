@@ -360,4 +360,109 @@ describe('AttendanceReportFieldsSection', () => {
     const codes = Array.from(container!.querySelectorAll('code')).map(node => node.textContent)
     expect(codes).toEqual(expect.arrayContaining(['leave_type_annual_duration', 'overtime_rule_ota_duration']))
   })
+
+  it('syncs report records into the multitable object and shows the fingerprint chain', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonResponse(200, populatedCatalogPayload()))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        data: {
+          synced: 2,
+          created: 1,
+          patched: 1,
+          skipped: 0,
+          failed: 0,
+          duplicateRowKeys: 0,
+          fieldFingerprint: 'rr-field-fingerprint',
+          syncedAt: '2026-05-16T12:00:00.000Z',
+          multitable: {
+            available: true,
+            degraded: false,
+            projectId: 'org-1:attendance',
+            objectId: 'attendance_report_records',
+            baseId: 'base-rr',
+            sheetId: 'sheet-rr',
+            viewId: 'view-rr',
+          },
+        },
+      }))
+
+    mountSection()
+    await flushUi()
+
+    const fromInput = container!.querySelector<HTMLInputElement>('[data-report-record-sync-from]')
+    const toInput = container!.querySelector<HTMLInputElement>('[data-report-record-sync-to]')
+    const userInput = container!.querySelector<HTMLInputElement>('[data-report-record-sync-user]')
+    const syncButton = container!.querySelector<HTMLButtonElement>('[data-report-record-sync-button]')
+    expect(fromInput).toBeTruthy()
+    expect(toInput).toBeTruthy()
+    expect(userInput).toBeTruthy()
+    expect(syncButton).toBeTruthy()
+    expect(syncButton!.disabled).toBe(true)
+
+    fromInput!.value = '2026-05-01'
+    fromInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    toInput!.value = '2026-05-31'
+    toInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    userInput!.value = 'u-1'
+    userInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    expect(syncButton!.disabled).toBe(false)
+
+    syncButton!.click()
+    await flushUi()
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance/report-records/sync?orgId=org-1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: '2026-05-01', to: '2026-05-31', userId: 'u-1' }),
+    })
+    const status = container!.querySelector('[data-report-record-sync-status]')
+    expect(status?.textContent).toContain('Report records synchronized.')
+    expect(status?.textContent).toContain('Rows: 2')
+    expect(status?.textContent).toContain('Created: 1')
+    expect(status?.textContent).toContain('Patched: 1')
+    expect(container!.querySelector('[data-report-record-sync-detail="fieldFingerprint"]')?.textContent).toContain('rr-field-fingerprint')
+    expect(container!.querySelector('[data-report-record-sync-detail="syncedAt"]')?.textContent).toContain('2026-05-16T12:00:00.000Z')
+    expect(container!.querySelector('[data-report-record-sync-detail="objectId"]')?.textContent).toContain('attendance_report_records')
+    expect(container!.querySelector<HTMLAnchorElement>('[data-report-record-open-multitable]')?.getAttribute('href'))
+      .toBe('/multitable/sheet-rr/view-rr?baseId=base-rr')
+  })
+
+  it('shows degraded report-records sync as a non-blocking warning', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonResponse(200, populatedCatalogPayload()))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        data: {
+          degraded: true,
+          reason: 'MULTITABLE_RECORDS_API_UNAVAILABLE',
+          synced: 0,
+        },
+      }))
+
+    mountSection()
+    await flushUi()
+
+    const fromInput = container!.querySelector<HTMLInputElement>('[data-report-record-sync-from]')!
+    const toInput = container!.querySelector<HTMLInputElement>('[data-report-record-sync-to]')!
+    const userInput = container!.querySelector<HTMLInputElement>('[data-report-record-sync-user]')!
+    fromInput.value = '2026-05-01'
+    fromInput.dispatchEvent(new Event('input', { bubbles: true }))
+    toInput.value = '2026-05-31'
+    toInput.dispatchEvent(new Event('input', { bubbles: true }))
+    userInput.value = 'u-1'
+    userInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-report-record-sync-button]')!.click()
+    await flushUi()
+
+    const status = container!.querySelector('[data-report-record-sync-status]')
+    expect(status?.textContent).toContain('Report records sync degraded.')
+    expect(status?.textContent).toContain('MULTITABLE_RECORDS_API_UNAVAILABLE')
+    expect(status?.className).toContain('attendance__status--warn')
+    expect(container!.querySelector('[data-report-record-open-multitable]')).toBeNull()
+    expect(container!.textContent).toContain('Report fields')
+  })
 })

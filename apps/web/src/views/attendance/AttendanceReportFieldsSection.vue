@@ -173,6 +173,98 @@
       </dl>
     </div>
 
+    <div
+      class="attendance-report-fields__basis attendance-report-fields__record-sync"
+      data-report-record-sync-panel
+    >
+      <div class="attendance-report-fields__basis-header">
+        <div>
+          <div class="attendance-report-fields__basis-title">
+            {{ tr('Report records sync', '报表记录同步') }}
+          </div>
+        </div>
+        <a
+          v-if="reportRecordsMultitableHref"
+          class="attendance__btn"
+          :href="reportRecordsMultitableHref"
+          target="_blank"
+          rel="noreferrer"
+          data-report-record-open-multitable
+        >
+          {{ tr('Open report records', '打开报表多维表') }}
+        </a>
+      </div>
+      <div class="attendance-report-fields__record-sync-form">
+        <label class="attendance-report-fields__filter" for="attendance-report-record-sync-from">
+          <span>{{ tr('From date', '开始日期') }}</span>
+          <input
+            id="attendance-report-record-sync-from"
+            v-model="recordSyncFrom"
+            type="date"
+            data-report-record-sync-from
+          >
+        </label>
+        <label class="attendance-report-fields__filter" for="attendance-report-record-sync-to">
+          <span>{{ tr('To date', '结束日期') }}</span>
+          <input
+            id="attendance-report-record-sync-to"
+            v-model="recordSyncTo"
+            type="date"
+            data-report-record-sync-to
+          >
+        </label>
+        <label class="attendance-report-fields__filter" for="attendance-report-record-sync-user">
+          <span>{{ tr('User ID', '员工 ID') }}</span>
+          <input
+            id="attendance-report-record-sync-user"
+            v-model="recordSyncUserId"
+            type="text"
+            :placeholder="tr('Required in v1', 'v1 必填')"
+            data-report-record-sync-user
+          >
+        </label>
+        <button
+          class="attendance__btn"
+          type="button"
+          :disabled="recordSyncing || !canSyncReportRecords"
+          data-report-record-sync-button
+          @click="syncReportRecords"
+        >
+          {{ recordSyncing ? tr('Syncing...', '同步中...') : tr('Sync report records', '同步报表记录') }}
+        </button>
+      </div>
+      <div
+        v-if="recordSyncStatusMessage"
+        class="attendance__status"
+        :class="{
+          'attendance__status--error': recordSyncStatusKind === 'error',
+          'attendance__status--warn': recordSyncStatusKind === 'warn',
+        }"
+        role="status"
+        data-report-record-sync-status
+      >
+        {{ recordSyncStatusMessage }}
+      </div>
+      <dl
+        v-if="reportRecordSyncDetailRows.length > 0"
+        class="attendance-report-fields__basis-details"
+        data-report-record-sync-details
+      >
+        <div
+          v-for="row in reportRecordSyncDetailRows"
+          :key="row.key"
+          class="attendance-report-fields__basis-detail"
+          :data-report-record-sync-detail="row.key"
+        >
+          <dt>{{ row.label }}</dt>
+          <dd>
+            <code v-if="row.monospace">{{ row.value }}</code>
+            <span v-else>{{ row.value }}</span>
+          </dd>
+        </div>
+      </dl>
+    </div>
+
     <div v-if="reportFields.length > 0 && filteredReportFields.length === 0" class="attendance__empty">
       {{ tr('No report fields match the current filters.', '当前筛选条件下没有匹配的统计字段。') }}
     </div>
@@ -351,6 +443,28 @@ interface MultitableDetailRow {
   monospace?: boolean
 }
 
+interface AttendanceReportRecordsSyncResult {
+  degraded?: boolean
+  reason?: string | null
+  synced?: number
+  patched?: number
+  created?: number
+  skipped?: number
+  failed?: number
+  duplicateRowKeys?: number
+  fieldFingerprint?: string
+  syncedAt?: string
+  multitable?: {
+    available?: boolean
+    degraded?: boolean
+    projectId?: string
+    objectId?: string | null
+    baseId?: string | null
+    sheetId?: string | null
+    viewId?: string | null
+  }
+}
+
 interface FieldMappingRow {
   key: string
   label: string
@@ -369,6 +483,13 @@ const syncing = ref(false)
 const loadError = ref('')
 const syncStatusMessage = ref('')
 const syncStatusKind = ref<'info' | 'error'>('info')
+const recordSyncing = ref(false)
+const recordSyncStatusMessage = ref('')
+const recordSyncStatusKind = ref<'info' | 'warn' | 'error'>('info')
+const recordSyncFrom = ref(dateInputValue(-30))
+const recordSyncTo = ref(dateInputValue(0))
+const recordSyncUserId = ref('')
+const reportRecordsSyncResult = ref<AttendanceReportRecordsSyncResult | null>(null)
 const fieldSearchTerm = ref('')
 const fieldStatusFilter = ref<ReportFieldStatusFilter>('all')
 const fieldCategoryFilter = ref('all')
@@ -493,6 +614,45 @@ const multitableDetailRows = computed<MultitableDetailRow[]>(() => {
   addId('reason', tr('Reason', '原因'), multitable.reason)
   const error = String(multitable.error ?? '').trim()
   if (error) rows.push({ key: 'error', label: tr('Error', '错误'), value: error })
+  return rows
+})
+const canSyncReportRecords = computed(() => (
+  recordSyncFrom.value.trim() !== ''
+  && recordSyncTo.value.trim() !== ''
+  && recordSyncUserId.value.trim() !== ''
+))
+const reportRecordsMultitableHref = computed(() => {
+  const multitable = reportRecordsSyncResult.value?.multitable
+  if (!multitable?.sheetId || !multitable.viewId) return ''
+  const params = new URLSearchParams()
+  if (multitable.baseId) params.set('baseId', multitable.baseId)
+  const suffix = params.toString()
+  return `/multitable/${encodeURIComponent(multitable.sheetId)}/${encodeURIComponent(multitable.viewId)}${suffix ? `?${suffix}` : ''}`
+})
+const reportRecordSyncDetailRows = computed<MultitableDetailRow[]>(() => {
+  const result = reportRecordsSyncResult.value
+  if (!result) return []
+  const rows: MultitableDetailRow[] = []
+  const addNumber = (key: string, label: string, value?: number) => {
+    if (Number.isFinite(value)) rows.push({ key, label, value: String(value) })
+  }
+  const addText = (key: string, label: string, value?: string | null, monospace = false) => {
+    const normalized = String(value ?? '').trim()
+    if (normalized) rows.push({ key, label, value: normalized, monospace })
+  }
+  addNumber('synced', tr('Rows read', '读取行数'), result.synced)
+  addNumber('created', tr('Created', '新建'), result.created)
+  addNumber('patched', tr('Patched', '更新'), result.patched)
+  addNumber('skipped', tr('Skipped', '跳过'), result.skipped)
+  addNumber('failed', tr('Failed', '失败'), result.failed)
+  addNumber('duplicateRowKeys', tr('Duplicate row keys', '重复行键'), result.duplicateRowKeys)
+  addText('fieldFingerprint', tr('Field fingerprint', '字段指纹'), result.fieldFingerprint, true)
+  addText('syncedAt', tr('Synced at', '同步时间'), result.syncedAt)
+  addText('projectId', tr('Project ID', '项目 ID'), result.multitable?.projectId, true)
+  addText('objectId', tr('Object ID', '对象 ID'), result.multitable?.objectId, true)
+  addText('sheetId', tr('Sheet ID', '表格 ID'), result.multitable?.sheetId, true)
+  addText('viewId', tr('View ID', '视图 ID'), result.multitable?.viewId, true)
+  addText('reason', tr('Reason', '原因'), result.reason)
   return rows
 })
 
@@ -677,6 +837,34 @@ function buildSyncStatusMessage(data: AttendanceReportFieldsPayload): string {
   return `${tr('Report field catalog synchronized.', '统计字段目录已同步。')}${summary}`
 }
 
+function dateInputValue(offsetDays: number): string {
+  const date = new Date()
+  date.setDate(date.getDate() + offsetDays)
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function buildReportRecordsSyncStatusMessage(data: AttendanceReportRecordsSyncResult): string {
+  if (data.degraded) {
+    const reason = String(data.reason ?? '').trim()
+    return reason
+      ? `${tr('Report records sync degraded.', '报表记录同步已降级。')} ${reason}`
+      : tr('Report records sync degraded.', '报表记录同步已降级。')
+  }
+  const details = [
+    syncStatusMetric('Rows', '行数', data.synced),
+    syncStatusMetric('Created', '新建', data.created),
+    syncStatusMetric('Patched', '更新', data.patched),
+    syncStatusMetric('Skipped', '跳过', data.skipped),
+    syncStatusMetric('Failed', '失败', data.failed),
+    syncStatusMetric('Duplicate row keys', '重复行键', data.duplicateRowKeys),
+  ].filter(Boolean)
+  const summary = details.length > 0 ? ` ${details.join(' · ')}` : ''
+  return `${tr('Report records synchronized.', '报表记录已同步。')}${summary}`
+}
+
 async function loadReportFields(): Promise<void> {
   loading.value = true
   loadError.value = ''
@@ -722,6 +910,41 @@ async function syncReportFields(): Promise<void> {
     syncStatusMessage.value = readErrorMessage(error, tr('Failed to sync report fields', '同步统计字段失败'))
   } finally {
     syncing.value = false
+  }
+}
+
+async function syncReportRecords(): Promise<void> {
+  if (!canSyncReportRecords.value) return
+  recordSyncing.value = true
+  recordSyncStatusMessage.value = ''
+  recordSyncStatusKind.value = 'info'
+  try {
+    const params = new URLSearchParams()
+    const orgId = props.orgId?.trim()
+    if (orgId) params.set('orgId', orgId)
+    const suffix = params.toString()
+    const response = await apiFetch(`/api/attendance/report-records/sync${suffix ? `?${suffix}` : ''}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: recordSyncFrom.value.trim(),
+        to: recordSyncTo.value.trim(),
+        userId: recordSyncUserId.value.trim(),
+      }),
+    })
+    const payload = await response.json()
+    if (!response.ok || payload?.ok === false) {
+      throw payload
+    }
+    const data = payload?.data ?? {}
+    reportRecordsSyncResult.value = data
+    recordSyncStatusKind.value = data.degraded ? 'warn' : 'info'
+    recordSyncStatusMessage.value = buildReportRecordsSyncStatusMessage(data)
+  } catch (error) {
+    recordSyncStatusKind.value = 'error'
+    recordSyncStatusMessage.value = readErrorMessage(error, tr('Failed to sync report records', '同步报表记录失败'))
+  } finally {
+    recordSyncing.value = false
   }
 }
 
@@ -930,6 +1153,21 @@ watch(
 
 .attendance-report-fields__basis-detail code {
   font-size: 12px;
+}
+
+.attendance-report-fields__record-sync {
+  gap: 12px;
+}
+
+.attendance-report-fields__record-sync-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: end;
+}
+
+.attendance-report-fields__record-sync-form .attendance-report-fields__filter {
+  flex: 1 1 180px;
 }
 
 .attendance-report-fields__category {

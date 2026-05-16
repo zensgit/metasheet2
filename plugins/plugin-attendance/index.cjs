@@ -253,6 +253,7 @@ const IMPORT_REQUIRED_FIELD_ALIASES = {
 
 const ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID = 'attendance_report_field_catalog'
 const ATTENDANCE_REPORT_FIELD_CATALOG_VIEW_ID = 'fields_by_category'
+const ATTENDANCE_REPORT_RECORDS_VIEW_ID = 'records_by_date'
 const ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS = Object.freeze({
   fieldCode: 'field_code',
   fieldName: 'field_name',
@@ -932,6 +933,15 @@ function getAttendanceReportFieldCatalogViewId(projectId) {
   )
 }
 
+function getAttendanceReportRecordsViewId(projectId) {
+  return stableAttendanceMultitableId(
+    'view',
+    projectId,
+    ATTENDANCE_REPORT_RECORDS_OBJECT_ID,
+    ATTENDANCE_REPORT_RECORDS_VIEW_ID,
+  )
+}
+
 function getAttendanceReportFieldCategory(value) {
   const normalized = String(value ?? '').trim()
   if (!normalized) return ATTENDANCE_REPORT_FIELD_CATEGORIES[0]
@@ -1525,6 +1535,28 @@ function getAttendanceReportRecordsDescriptor() {
   }
 }
 
+function getAttendanceReportRecordsViewDescriptor(fieldIds = {}) {
+  const workDateFieldId = fieldIds[ATTENDANCE_REPORT_RECORDS_FIELDS.workDate] || ATTENDANCE_REPORT_RECORDS_FIELDS.workDate
+  const userIdFieldId = fieldIds[ATTENDANCE_REPORT_RECORDS_FIELDS.userId] || ATTENDANCE_REPORT_RECORDS_FIELDS.userId
+  const syncedAtFieldId = fieldIds[ATTENDANCE_REPORT_RECORDS_FIELDS.syncedAt] || ATTENDANCE_REPORT_RECORDS_FIELDS.syncedAt
+  return {
+    id: ATTENDANCE_REPORT_RECORDS_VIEW_ID,
+    objectId: ATTENDANCE_REPORT_RECORDS_OBJECT_ID,
+    name: '按日期查看',
+    type: 'grid',
+    sortInfo: {
+      rules: [
+        { fieldId: workDateFieldId, direction: 'desc' },
+        { fieldId: userIdFieldId, direction: 'asc' },
+        { fieldId: syncedAtFieldId, direction: 'desc' },
+      ],
+    },
+    config: {
+      purpose: 'attendance-report-records',
+    },
+  }
+}
+
 // PR1 ships the fixed identity/provenance skeleton only. Value columns (static stat /
 // dynamic subtype / formula) are ensured at sync time in PR2 via the same ensureObject
 // upsert (ensureFields = INSERT ON CONFLICT DO UPDATE, never deletes — confirmed in
@@ -1542,6 +1574,7 @@ async function ensureAttendanceReportRecords(context, orgId, logger) {
       objectId: ATTENDANCE_REPORT_RECORDS_OBJECT_ID,
       baseId: null,
       sheetId: null,
+      viewId: null,
       fieldIds: {},
     }
   }
@@ -1562,6 +1595,21 @@ async function ensureAttendanceReportRecords(context, orgId, logger) {
         multitable.provisioning.getFieldId(projectId, ATTENDANCE_REPORT_RECORDS_OBJECT_ID, fieldId),
       ]))
     }
+
+    let viewId = null
+    if (typeof multitable.provisioning.ensureView === 'function') {
+      try {
+        const view = await multitable.provisioning.ensureView({
+          projectId,
+          sheetId: provisioned.sheet.id,
+          descriptor: getAttendanceReportRecordsViewDescriptor(fieldIds),
+        })
+        viewId = view?.id || null
+      } catch (error) {
+        logger?.warn?.('Failed to ensure attendance report records view', error)
+      }
+    }
+
     return {
       available: true,
       reason: null,
@@ -1569,6 +1617,7 @@ async function ensureAttendanceReportRecords(context, orgId, logger) {
       objectId: ATTENDANCE_REPORT_RECORDS_OBJECT_ID,
       baseId: provisioned.baseId || null,
       sheetId: provisioned.sheet?.id || null,
+      viewId,
       fieldIds,
     }
   } catch (error) {
@@ -1581,6 +1630,7 @@ async function ensureAttendanceReportRecords(context, orgId, logger) {
       objectId: ATTENDANCE_REPORT_RECORDS_OBJECT_ID,
       baseId: null,
       sheetId: null,
+      viewId: null,
       fieldIds: {},
     }
   }
@@ -1773,7 +1823,20 @@ async function syncAttendanceReportRecords(context, db, orgId, logger, params) {
       })
     }
   }
-  return { ...result, fieldFingerprint, syncedAt }
+  return {
+    ...result,
+    fieldFingerprint,
+    syncedAt,
+    multitable: {
+      available: true,
+      degraded: false,
+      projectId: ensured.projectId,
+      objectId: ensured.objectId,
+      baseId: ensured.baseId || null,
+      sheetId: ensured.sheetId || null,
+      viewId: ensured.viewId || null,
+    },
+  }
 }
 
 async function loadAttendanceReportFieldCatalog(context, orgId) {
@@ -9472,6 +9535,7 @@ module.exports = {
     ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS,
     ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID,
     ATTENDANCE_REPORT_FIELD_CATALOG_VIEW_ID,
+    ATTENDANCE_REPORT_RECORDS_VIEW_ID,
     buildAttendanceReportFieldCatalogRecordData,
     buildAttendanceReportFieldCatalogResponse,
     cloneAttendanceReportFieldCategories,
@@ -9480,6 +9544,8 @@ module.exports = {
     getAttendanceRecordReportFieldValue,
     getAttendanceReportFieldCatalogDescriptor,
     getAttendanceReportFieldProjectId,
+    getAttendanceReportRecordsViewDescriptor,
+    getAttendanceReportRecordsViewId,
     resolveAttendanceFormulaRawAliasesAllowed,
     readAttendanceFormulaRawAliasesEnvOverride,
     loadAttendanceReportFieldCatalog,
