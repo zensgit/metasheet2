@@ -1600,9 +1600,19 @@ function mapReportFieldToMultitableType(field) {
 // Stable superset of value columns from the FULL catalog (incl. disabled) so the managed
 // column set is deterministic across syncs and disabled fields' columns can be nulled on
 // patch (stale-null). Truly-removed-from-catalog codes leave orphan columns = P2 cleanup.
+// MUST exclude fixed-skeleton field ids: a catalog code like `work_date` shares the
+// logical id of the skeleton column, and since ensureFields is INSERT ON CONFLICT DO
+// UPDATE the later (string) value column would overwrite the skeleton type (date). The
+// skeleton already carries work_date/employee_name/department/attendance_group values.
 function buildAttendanceReportRecordsValueColumns(catalogItems) {
+  const skeletonIds = new Set(Object.values(ATTENDANCE_REPORT_RECORDS_FIELDS))
   return (Array.isArray(catalogItems) ? catalogItems : [])
-    .filter(field => field && field.code && !ATTENDANCE_REPORT_FORMULA_RESERVED_CODES.has(field.code))
+    .filter(field => (
+      field
+      && field.code
+      && !ATTENDANCE_REPORT_FORMULA_RESERVED_CODES.has(field.code)
+      && !skeletonIds.has(field.code)
+    ))
     .map((field, index) => ({
       id: field.code,
       name: field.name || field.code,
@@ -21538,7 +21548,16 @@ module.exports = {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
-        const result = await syncAttendanceReportRecords(context, db, orgId, logger, parsed.data)
+        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+        if (!dateRange.ok) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+          return
+        }
+        const result = await syncAttendanceReportRecords(context, db, orgId, logger, {
+          from: dateRange.from,
+          to: dateRange.to,
+          userId: parsed.data.userId,
+        })
         if (result.degraded) {
           res.json({ ok: true, data: { degraded: true, reason: result.reason, synced: 0 } })
           return
@@ -21546,8 +21565,8 @@ module.exports = {
         emitEvent('attendance.report_records.synced', {
           orgId,
           userId: parsed.data.userId,
-          from: parsed.data.from,
-          to: parsed.data.to,
+          from: dateRange.from,
+          to: dateRange.to,
           synced: result.synced,
           patched: result.patched,
           created: result.created,

@@ -662,6 +662,10 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(helpers.attendanceReportRecordRowKey('org-1', 'u-1', '2026-05-13')).toBe('org-1:u-1:2026-05-13')
 
     const cols = helpers.buildAttendanceReportRecordsValueColumns([
+      { code: 'work_date', name: '工作日期', unit: 'dateTime' }, // fixed skeleton id → excluded
+      { code: 'employee_name', name: '姓名', unit: 'text' }, // skeleton → excluded
+      { code: 'department', name: '部门', unit: 'text' }, // skeleton → excluded
+      { code: 'attendance_group', name: '考勤组', unit: 'text' }, // skeleton → excluded
       { code: 'work_duration', name: '工作时长', unit: 'minutes' },
       { code: 'late_minutes', name: '迟到分钟(reserved)', unit: 'minutes' }, // raw alias reserved → skipped
       { code: 'leave_type_annual_duration', name: '年假时长', unit: 'minutes' },
@@ -670,6 +674,17 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(cols.every((c: { type: string }) => c.type === 'number')).toBe(true)
     // deterministic order preserved (sortOrder upstream → index here), reserved excluded
     expect(cols.find((c: { id: string }) => c.id === 'late_minutes')).toBeUndefined()
+    // Fix-1 regression: value columns have ZERO intersection with the fixed skeleton ids
+    const skeletonIds = new Set(Object.values(helpers.ATTENDANCE_REPORT_RECORDS_FIELDS) as string[])
+    expect(cols.some((c: { id: string }) => skeletonIds.has(c.id))).toBe(false)
+    // composing [skeleton, ...valueColumns] for ensureObject: work_date appears ONCE, type stays 'date'
+    const composed = [...helpers.getAttendanceReportRecordsDescriptor().fields, ...cols]
+    const workDateFields = composed.filter((f: { id: string }) => f.id === 'work_date')
+    expect(workDateFields).toHaveLength(1)
+    expect(workDateFields[0].type).toBe('date')
+    for (const sk of ['employee_name', 'department', 'attendance_group']) {
+      expect(composed.filter((f: { id: string }) => f.id === sk)).toHaveLength(1)
+    }
 
     // source fingerprint: excludes synced_at + both fingerprints, key-sorted (order-independent)
     const a = helpers.buildAttendanceReportRecordSourceFingerprint({ b: 2, a: 1, synced_at: 'X', source_fingerprint: 'S', field_fingerprint: 'F' })
@@ -717,8 +732,12 @@ describe('attendance report field catalog multitable foundation', () => {
         return rec
       },
     }
+    const ensureObjectDescriptors: Array<{ fields: Array<{ id: string; type: string }> }> = []
     const provisioning = {
-      ensureObject: async () => ({ baseId: 'base_legacy', sheet: { id: 'sheet_rr' } }),
+      ensureObject: async (input: { descriptor?: { fields?: Array<{ id: string; type: string }> } }) => {
+        if (input?.descriptor?.fields) ensureObjectDescriptors.push({ fields: input.descriptor.fields })
+        return { baseId: 'base_legacy', sheet: { id: 'sheet_rr' } }
+      },
       resolveFieldIds: async ({ fieldIds }: { fieldIds: string[] }) =>
         Object.fromEntries(fieldIds.map(f => [f, `fld_${f}`])),
       // NO findObjectSheet → catalog falls back to deterministic built-in field set
@@ -739,6 +758,15 @@ describe('attendance report field catalog multitable foundation', () => {
     const r1 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
     expect(r1).toMatchObject({ synced: 2, created: 2, patched: 0, skipped: 0, failed: 0, duplicateRowKeys: 0 })
     expect(store.length).toBe(2)
+    // Fix-1 integration: the descriptor handed to ensureObject (value-columns ensure) must
+    // carry work_date exactly once and still as type 'date' (no string overwrite collision)
+    const valueEnsure = ensureObjectDescriptors[ensureObjectDescriptors.length - 1]
+    const wd = valueEnsure.fields.filter(f => f.id === 'work_date')
+    expect(wd).toHaveLength(1)
+    expect(wd[0].type).toBe('date')
+    for (const sk of ['employee_name', 'department', 'attendance_group', 'row_key']) {
+      expect(valueEnsure.fields.filter(f => f.id === sk)).toHaveLength(1)
+    }
     expect(store[0].data[rowKeyFid]).toBe('org-1:u-1:2026-05-13')
     expect(typeof store[0].data['fld_field_fingerprint']).toBe('string')
     expect(typeof store[0].data['fld_source_fingerprint']).toBe('string')

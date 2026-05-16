@@ -70,3 +70,14 @@ git diff --check
 ## Live Status
 
 writer 单测全绿。真实多维表 provision + sync + fingerprint 链一致性 + stale-null 负路径 = PR3 mock acceptance + staging 凭据后补强（无凭据不伪造）。
+
+## Patch addendum verification (review round, 2026-05-16)
+
+| Fix | 回归断言 | 结果 |
+| --- | --- | --- |
+| valueColumns 排除 skeleton id | `cols.some(c=>skeletonIds.has(c.id))===false`；`work_date/employee_name/department/attendance_group` 不在 value columns | PASS |
+| 组合 descriptor 无碰撞 | `[getAttendanceReportRecordsDescriptor().fields, ...cols]` 中 `work_date` 仅 1 个且 `type==='date'`；3 个 skeleton text 列各仅 1 个 | PASS |
+| writer 实测 ensureObject descriptor | 捕获传给 `provisioning.ensureObject` 的 fields：`work_date` 仅 1 个 `type:'date'`，`row_key`/`employee_name`/`department`/`attendance_group` 各仅 1 个 | PASS |
+| 路由 dateRange 400 | 镜像既有 export-endpoint `resolveAttendanceDateRange` idiom（8 call sites 在用，helper 久经验证）；`!ok`→400，writer 用 normalized from/to | 代码对齐（既有 helper 不补冗余单测） |
+
+backend 30 全绿（含上述新回归断言），frontend / type-check / build / diff 重跑见下。

@@ -61,3 +61,12 @@ stale-null 正路径（active value 列取 exportItem 值、无 spurious null）
 - PR3 前端同步入口 + fingerprint 链 mock acceptance（含 stale-null 负路径完整单测、disabled 字段 fixture）
 - period 汇总行 / 全员同步分页 / orphan 列 + 重复行 dedup cleanup / 内联公式编辑器
 - staging 真实 sync evidence（P1 补强，无凭据不伪造）
+
+## Patch addendum (review round, 2026-05-16)
+
+Review 抓到 2 个具体问题，已小补丁修复（同 PR2 分支新 commit）：
+
+1. **valueColumns × fixed skeleton 碰撞（真 schema 覆盖 bug）**：`buildAttendanceReportRecordsValueColumns(catalog.items)` 原会把 `work_date`/`employee_name`/`department`/`attendance_group`（catalog 里也有这些 code）加成 value column。固定骨架 `work_date` 是 `date`，value column 会是 `string`；`[...skeleton, ...valueColumns]` 传给 `ensureObject`→`ensureFields`（INSERT ON CONFLICT DO UPDATE，同 logical id→同 stableMetaId 物理 id），后出现的 value column 会把 `work_date` 类型从 `date` 覆盖成 `string`。修法：`buildAttendanceReportRecordsValueColumns` 过滤掉 `Object.values(ATTENDANCE_REPORT_RECORDS_FIELDS)`（骨架已承载这 4 个 identity 值，value 列不应重复）。
+2. **路由未用 `resolveAttendanceDateRange`（契约/实现不一致）**：原路由仅 `z.string().min(1)`，TODO 要求非法 from-to → 400。修法：路由调 `resolveAttendanceDateRange(from,to)`，`!ok`→`400 VALIDATION_ERROR`，writer 用 normalized `from/to`，emitEvent 用 normalized 值。镜像既有 export-endpoint 同款 idiom（8 处在用、`resolveAttendanceDateRange` 久经验证），故不为该 pre-existing helper 补冗余单测。
+
+新增回归断言（catalog test）：value columns 与 skeleton 零交集；`[skeleton,...valueColumns]` 组合后 `work_date` 仅一次且 `type:'date'`、`employee_name/department/attendance_group` 各仅一次；writer 实测捕获传给 `ensureObject` 的 descriptor，`work_date` 仅一次且 `type:'date'`、`row_key` 等 skeleton 无重复。
