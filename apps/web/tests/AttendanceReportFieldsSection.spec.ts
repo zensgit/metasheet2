@@ -333,4 +333,31 @@ describe('AttendanceReportFieldsSection', () => {
     const codes = Array.from(container!.querySelectorAll('code')).map(node => node.textContent)
     expect(codes).toEqual(expect.arrayContaining(['punch_in_1', 'punch_out_3', 'punch_result_in_1']))
   })
+
+  it('renders dynamic leave/overtime subtype fields in the grid', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse(200, {
+      ok: true,
+      data: {
+        categories: [
+          { id: 'leave', label: '请假统计字段', sortOrder: 50 },
+          { id: 'overtime', label: '加班统计字段', sortOrder: 60 },
+        ],
+        items: [
+          { code: 'leave_type_annual_duration', name: '年假时长', category: 'leave', categoryLabel: '请假统计字段', source: 'system', unit: 'minutes', enabled: true, reportVisible: true, sortOrder: 5010, dingtalkFieldName: '年假时长', description: '已审批年假时长', systemDefined: true },
+          { code: 'overtime_rule_ota_duration', name: '工作日加班加班时长', category: 'overtime', categoryLabel: '加班统计字段', source: 'system', unit: 'minutes', enabled: true, reportVisible: true, sortOrder: 6010, dingtalkFieldName: '工作日加班加班时长', description: '已审批工作日加班时长', systemDefined: true },
+        ],
+        droppedReservedCodes: [],
+        multitable: { available: true, degraded: false, projectId: 'org-1:attendance', recordCount: 2 },
+      },
+    }))
+
+    mountSection()
+    await flushUi()
+
+    const text = container!.textContent ?? ''
+    expect(text).toContain('年假时长')
+    expect(text).toContain('工作日加班加班时长')
+    const codes = Array.from(container!.querySelectorAll('code')).map(node => node.textContent)
+    expect(codes).toEqual(expect.arrayContaining(['leave_type_annual_duration', 'overtime_rule_ota_duration']))
+  })
 })

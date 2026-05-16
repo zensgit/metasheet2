@@ -463,6 +463,124 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(csv.split('\n')[0]).toContain('下班3打卡结果')
   })
 
+  it('generates dynamic leave/overtime subtype fields with collision-safe stable codes', () => {
+    const used = new Set(['leave_type_annual_duration'])
+    const leave = helpers.buildAttendanceLeaveSubtypeReportFieldDefinitions([
+      { id: 'lt-1', code: 'annual', name: '年假', is_active: true },
+      { id: 'lt-2', code: 'sick', name: '病假', is_active: true },
+      { id: 'lt-3', code: 'annual-1', name: '年假补', is_active: true },
+      { id: 'lt-4', code: 'expired', name: '失效假', is_active: false },
+    ], used)
+    const leaveCodes = leave.definitions.map((d: { code: string }) => d.code)
+    // inactive excluded
+    expect(leave.definitions.some((d: { name: string }) => d.name.includes('失效假'))).toBe(false)
+    // `annual` collides with pre-seeded used code → deterministic suffix, not dropped
+    expect(leaveCodes).toContain('leave_type_sick_duration')
+    expect(leaveCodes.some((c: string) => c.startsWith('leave_type_annual_') && c !== 'leave_type_annual_duration')).toBe(true)
+    // `annual-1` normalizes to `annual_1` (distinct from `annual`)
+    expect(leaveCodes).toContain('leave_type_annual_1_duration')
+    // all generated codes match the predicate and are unique
+    for (const c of leaveCodes) expect(helpers.isAttendanceLeaveSubtypeCode(c)).toBe(true)
+    expect(new Set(leaveCodes).size).toBe(leaveCodes.length)
+    expect(leave.leaveTypeCodeToFieldCode.sick).toBe('leave_type_sick_duration')
+
+    const overtime = helpers.buildAttendanceOvertimeSubtypeReportFieldDefinitions([
+      { id: 'OT-Rule-A', name: '工作日加班', is_active: true },
+      { id: 'ot_rule_b', name: '周末加班', is_active: false },
+    ], new Set())
+    const otCodes = overtime.definitions.map((d: { code: string }) => d.code)
+    expect(otCodes).toEqual(['overtime_rule_otrulea_duration'])
+    expect(helpers.isAttendanceOvertimeSubtypeCode(otCodes[0])).toBe(true)
+    expect(overtime.overtimeRuleIdToFieldCode['OT-Rule-A']).toBe('overtime_rule_otrulea_duration')
+
+    // generated codes never collide with static report codes or raw alias reserved codes
+    const staticDefs = helpers.cloneAttendanceReportFieldDefinitions()
+    const staticCodes = new Set(staticDefs.map((d: { code: string }) => d.code))
+    for (const c of [...leaveCodes, ...otCodes]) {
+      expect(staticCodes.has(c)).toBe(false)
+      expect(['work_minutes', 'late_minutes', 'early_leave_minutes', 'leave_minutes', 'overtime_minutes']).not.toContain(c)
+    }
+  })
+
+  it('dynamic subtype fields: report-field gate, formula source, value resolution, and invariants', async () => {
+    const dynamicDefs = [
+      { code: 'leave_type_annual_duration', name: '年假时长', category: 'leave', source: 'system', unit: 'minutes', dingtalkFieldName: '年假时长', description: '年假', internalKey: 'requests.leaveType.annual.minutes' },
+      { code: 'overtime_rule_ota_duration', name: '工作日加班加班时长', category: 'overtime', source: 'system', unit: 'minutes', dingtalkFieldName: '工作日加班加班时长', description: 'OT', internalKey: 'requests.overtimeRule.ot-a.minutes' },
+    ]
+    const merged = helpers.mergeAttendanceReportFieldDefinitions([], {}, { extraSystemDefinitions: dynamicDefs })
+    const annual = merged.find((f: { code: string }) => f.code === 'leave_type_annual_duration')
+    expect(annual).toMatchObject({ systemDefined: true, category: 'leave', enabled: true })
+
+    // gap-1: dynamic subtype enters report output fields
+    const reportFields = helpers.resolveAttendanceRecordReportFields(merged)
+    expect(reportFields.some((f: { code: string }) => f.code === 'leave_type_annual_duration')).toBe(true)
+    expect(reportFields.some((f: { code: string }) => f.code === 'overtime_rule_ota_duration')).toBe(true)
+
+    // formula source via existing systemDefined path (no over-threaded predicate)
+    const sources = helpers.resolveAttendanceFormulaSourceFields(merged)
+    expect(sources.some((f: { code: string }) => f.code === 'leave_type_annual_duration')).toBe(true)
+    expect(helpers.validateAttendanceReportFormulaExpression('={leave_type_annual_duration}+1', { fields: merged }))
+      .toMatchObject({ valid: true, error: null })
+
+    // INVARIANT #3: a custom (systemDefined:false) field matching the dynamic pattern is NOT promoted
+    const fieldIds = {
+      field_code: 'fld_code', field_name: 'fld_name', category: 'fld_category', source: 'fld_source',
+      unit: 'fld_unit', enabled: 'fld_enabled', report_visible: 'fld_visible', sort_order: 'fld_sort',
+      dingtalk_field_name: 'fld_dingtalk', description: 'fld_description', internal_key: 'fld_internal',
+      formula_enabled: 'fld_formula_enabled', formula_expression: 'fld_formula_expression',
+      formula_scope: 'fld_formula_scope', formula_output_type: 'fld_formula_output_type',
+    }
+    const mergedWithCustom = helpers.mergeAttendanceReportFieldDefinitions([
+      { id: 'rec-x', data: { fld_code: 'leave_type_fake_duration', fld_name: '伪造', fld_category: '请假统计字段', fld_source: 'custom', fld_unit: 'minutes', fld_enabled: true, fld_visible: true, fld_sort: 9000 } },
+    ], fieldIds)
+    const fake = mergedWithCustom.find((f: { code: string }) => f.code === 'leave_type_fake_duration')
+    expect(fake).toMatchObject({ systemDefined: false })
+    expect(helpers.resolveAttendanceRecordReportFields(mergedWithCustom).some((f: { code: string }) => f.code === 'leave_type_fake_duration')).toBe(false)
+    expect(helpers.resolveAttendanceFormulaSourceFields(mergedWithCustom).some((f: { code: string }) => f.code === 'leave_type_fake_duration')).toBe(false)
+
+    // gap-2: value resolution from meta.reportSubtypeMinutes; missing → 0 (not #ERROR!)
+    const row = { work_date: '2026-05-13', status: 'normal', is_workday: true, meta: { reportSubtypeMinutes: { leave_type_annual_duration: 240 } } }
+    expect(helpers.getAttendanceRecordReportFieldValue(row, 'leave_type_annual_duration')).toBe(240)
+    expect(helpers.getAttendanceRecordReportFieldValue(row, 'overtime_rule_ota_duration')).toBe(0)
+    expect(helpers.getAttendanceRecordReportFieldValue({ work_date: '2026-05-13', meta: {} }, 'leave_type_annual_duration')).toBe(0)
+  })
+
+  it('loadApprovedMinutesRange aggregates subtypes while keeping aggregate totals unchanged', async () => {
+    const calls: string[] = []
+    const db = {
+      query: async (sql: string) => {
+        calls.push(sql)
+        if (/FROM attendance_leave_types/.test(sql)) return [{ id: 'lt-1', code: 'annual', name: '年假', is_active: true }]
+        if (/FROM attendance_overtime_rules/.test(sql)) return [{ id: 'ot-1', name: '工作日加班', is_active: true }]
+        if (/GROUP BY work_date, request_type, subtype_key/.test(sql)) {
+          return [
+            { work_date: '2026-05-13', request_type: 'leave', subtype_key: 'annual', total_minutes: 240 },
+            { work_date: '2026-05-13', request_type: 'leave', subtype_key: null, total_minutes: 60 },
+            { work_date: '2026-05-13', request_type: 'overtime', subtype_key: 'ot-1', total_minutes: 120 },
+          ]
+        }
+        // base aggregate query
+        return [
+          { work_date: '2026-05-13', request_type: 'leave', total_minutes: 300 },
+          { work_date: '2026-05-13', request_type: 'overtime', total_minutes: 120 },
+        ]
+      },
+    }
+    const map = await helpers.loadApprovedMinutesRange(db, 'default', 'user-1', '2026-05-01', '2026-05-31')
+    const entry = map.get('2026-05-13')
+    // aggregate totals unchanged (INVARIANT #4): base query value, not the subtype sum
+    expect(entry.leaveMinutes).toBe(300)
+    expect(entry.overtimeMinutes).toBe(120)
+    // subtype map populated; unmatched/null subtype_key NOT added (INVARIANT #2 reconciliation)
+    expect(entry.reportSubtypeMinutes.leave_type_annual_duration).toBe(240)
+    expect(entry.reportSubtypeMinutes.overtime_rule_ot1_duration).toBe(120)
+    // aggregate >= sum(subtypes): leave 300 >= 240 (60 unclassified counts only in aggregate)
+    const leaveSubtypeSum = Object.entries(entry.reportSubtypeMinutes)
+      .filter(([k]) => k.startsWith('leave_type_'))
+      .reduce((acc, [, v]) => acc + (v as number), 0)
+    expect(entry.leaveMinutes).toBeGreaterThanOrEqual(leaveSubtypeSum)
+  })
+
   it('does not add direct meta table writes to the attendance plugin', () => {
     const source = readFileSync(
       new URL('../../../../plugins/plugin-attendance/index.cjs', import.meta.url),

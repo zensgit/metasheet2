@@ -334,6 +334,109 @@ const ATTENDANCE_REPORT_FORMULA_RAW_REFERENCE_KEYS = Object.freeze([
 const ATTENDANCE_REPORT_FORMULA_RESERVED_CODES = new Set(ATTENDANCE_REPORT_FORMULA_RAW_REFERENCE_KEYS)
 const ATTENDANCE_FORMULA_ALLOW_RAW_ALIASES_ENV = 'ATTENDANCE_FORMULA_ALLOW_RAW_ALIASES'
 
+const ATTENDANCE_LEAVE_SUBTYPE_CODE_PATTERN = /^leave_type_[a-z0-9_]+_duration$/
+const ATTENDANCE_OVERTIME_SUBTYPE_CODE_PATTERN = /^overtime_rule_[a-z0-9]+_duration$/
+
+function isAttendanceLeaveSubtypeCode(code) {
+  return typeof code === 'string' && ATTENDANCE_LEAVE_SUBTYPE_CODE_PATTERN.test(code)
+}
+
+function isAttendanceOvertimeSubtypeCode(code) {
+  return typeof code === 'string' && ATTENDANCE_OVERTIME_SUBTYPE_CODE_PATTERN.test(code)
+}
+
+function isAttendanceDynamicSubtypeCode(code) {
+  return isAttendanceLeaveSubtypeCode(code) || isAttendanceOvertimeSubtypeCode(code)
+}
+
+function attendanceSubtypeShortId(rawId) {
+  return String(rawId ?? '').replace(/[^A-Za-z0-9]/g, '').toLowerCase().slice(0, 8)
+}
+
+function normalizeAttendanceLeaveTypeCodeSegment(code, fallbackId) {
+  const normalized = String(code ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+  if (normalized) return normalized
+  const shortId = attendanceSubtypeShortId(fallbackId)
+  return `id_${shortId || 'unknown'}`
+}
+
+function compactAttendanceOvertimeRuleId(ruleId) {
+  const compact = String(ruleId ?? '').replace(/[^a-z0-9]/gi, '').toLowerCase()
+  return compact || `id${attendanceSubtypeShortId(ruleId) || 'unknown'}`
+}
+
+function buildAttendanceLeaveSubtypeReportFieldDefinitions(leaveTypes, usedCodes) {
+  const used = usedCodes instanceof Set ? usedCodes : new Set(usedCodes || [])
+  const sorted = [...(leaveTypes || [])]
+    .filter(type => type && type.is_active !== false)
+    .sort((a, b) => (
+      String(a.name ?? '').localeCompare(String(b.name ?? ''))
+      || String(a.code ?? '').localeCompare(String(b.code ?? ''))
+      || String(a.id ?? '').localeCompare(String(b.id ?? ''))
+    ))
+  const definitions = []
+  const leaveTypeCodeToFieldCode = {}
+  for (const type of sorted) {
+    const segment = normalizeAttendanceLeaveTypeCodeSegment(type.code, type.id)
+    let code = `leave_type_${segment}_duration`
+    if (used.has(code)) {
+      const suffixed = `leave_type_${segment}_${attendanceSubtypeShortId(type.id)}_duration`
+      code = used.has(suffixed)
+        ? `leave_type_${segment}_${compactAttendanceOvertimeRuleId(type.id)}_duration`
+        : suffixed
+    }
+    if (used.has(code)) continue
+    used.add(code)
+    const typeCode = String(type.code ?? '')
+    if (typeCode) leaveTypeCodeToFieldCode[typeCode] = code
+    definitions.push({
+      code,
+      name: `${type.name ?? type.code ?? '请假'}时长`,
+      category: 'leave',
+      source: 'system',
+      unit: 'minutes',
+      dingtalkFieldName: `${type.name ?? type.code ?? '请假'}时长`,
+      description: `已审批「${type.name ?? type.code ?? ''}」请假时长（按 attendance_requests metadata.leaveType.code 聚合）。`,
+      internalKey: `requests.leaveType.${typeCode || type.id}.minutes`,
+    })
+  }
+  return { definitions, leaveTypeCodeToFieldCode }
+}
+
+function buildAttendanceOvertimeSubtypeReportFieldDefinitions(overtimeRules, usedCodes) {
+  const used = usedCodes instanceof Set ? usedCodes : new Set(usedCodes || [])
+  const sorted = [...(overtimeRules || [])]
+    .filter(rule => rule && rule.is_active !== false)
+    .sort((a, b) => (
+      String(a.name ?? '').localeCompare(String(b.name ?? ''))
+      || String(a.id ?? '').localeCompare(String(b.id ?? ''))
+    ))
+  const definitions = []
+  const overtimeRuleIdToFieldCode = {}
+  for (const rule of sorted) {
+    const compact = compactAttendanceOvertimeRuleId(rule.id)
+    let code = `overtime_rule_${compact}_duration`
+    if (used.has(code)) continue
+    used.add(code)
+    const ruleId = String(rule.id ?? '')
+    if (ruleId) overtimeRuleIdToFieldCode[ruleId] = code
+    definitions.push({
+      code,
+      name: `${rule.name ?? rule.id ?? '加班'}加班时长`,
+      category: 'overtime',
+      source: 'system',
+      unit: 'minutes',
+      dingtalkFieldName: `${rule.name ?? rule.id ?? '加班'}加班时长`,
+      description: `已审批「${rule.name ?? rule.id ?? ''}」加班时长（按 attendance_requests metadata.overtimeRule.id 聚合）。`,
+      internalKey: `requests.overtimeRule.${ruleId}.minutes`,
+    })
+  }
+  return { definitions, overtimeRuleIdToFieldCode }
+}
+
 const ATTENDANCE_REPORT_FIELD_DEFINITIONS = Object.freeze([
   {
     code: 'work_date',
@@ -1206,8 +1309,12 @@ function mergeAttendanceReportFieldDefinitions(configRecords, fieldIds, options 
     if (config) configsByCode.set(config.code, config)
   }
 
+  const systemDefinitions = [
+    ...cloneAttendanceReportFieldDefinitions(),
+    ...(Array.isArray(options.extraSystemDefinitions) ? options.extraSystemDefinitions : []),
+  ]
   const systemCodes = new Set()
-  const items = cloneAttendanceReportFieldDefinitions().map((field) => {
+  const items = systemDefinitions.map((field) => {
     systemCodes.add(field.code)
     const category = getAttendanceReportFieldCategory(field.category)
     const config = configsByCode.get(field.code)
@@ -1448,6 +1555,7 @@ function buildAttendanceReportFieldCatalogFallback(orgId, reason, error, options
   const projectId = getAttendanceReportFieldProjectId(orgId)
   const items = mergeAttendanceReportFieldDefinitions([], {}, {
     rawAliasesAllowed: options.rawAliasesAllowed,
+    extraSystemDefinitions: options.extraSystemDefinitions,
   })
   const multitable = {
     available: false,
@@ -1473,8 +1581,62 @@ function buildAttendanceReportFieldCatalogFallback(orgId, reason, error, options
   }
 }
 
+const ATTENDANCE_EMPTY_DYNAMIC_SUBTYPE_CONTEXT = Object.freeze({
+  definitions: Object.freeze([]),
+  leaveTypeCodeToFieldCode: Object.freeze({}),
+  overtimeRuleIdToFieldCode: Object.freeze({}),
+  degraded: false,
+})
+
+async function loadAttendanceReportDynamicSubtypeContext(db, orgId, logger) {
+  if (!db || typeof db.query !== 'function') {
+    return ATTENDANCE_EMPTY_DYNAMIC_SUBTYPE_CONTEXT
+  }
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  let leaveTypes = []
+  let overtimeRules = []
+  try {
+    leaveTypes = await db.query(
+      `SELECT id, code, name, is_active
+       FROM attendance_leave_types
+       WHERE org_id = $1 AND is_active = true`,
+      [targetOrg],
+    )
+    overtimeRules = await db.query(
+      `SELECT id, name, is_active
+       FROM attendance_overtime_rules
+       WHERE org_id = $1 AND is_active = true`,
+      [targetOrg],
+    )
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) {
+      logger?.warn?.('Attendance dynamic subtype fields degraded: schema unavailable')
+      return { ...ATTENDANCE_EMPTY_DYNAMIC_SUBTYPE_CONTEXT, degraded: true }
+    }
+    logger?.warn?.('Attendance dynamic subtype fields degraded', error)
+    return { ...ATTENDANCE_EMPTY_DYNAMIC_SUBTYPE_CONTEXT, degraded: true }
+  }
+
+  const usedCodes = new Set(ATTENDANCE_REPORT_FORMULA_RESERVED_CODES)
+  for (const field of cloneAttendanceReportFieldDefinitions()) usedCodes.add(field.code)
+
+  const leave = buildAttendanceLeaveSubtypeReportFieldDefinitions(leaveTypes, usedCodes)
+  const overtime = buildAttendanceOvertimeSubtypeReportFieldDefinitions(overtimeRules, usedCodes)
+  return {
+    definitions: [...leave.definitions, ...overtime.definitions],
+    leaveTypeCodeToFieldCode: leave.leaveTypeCodeToFieldCode,
+    overtimeRuleIdToFieldCode: overtime.overtimeRuleIdToFieldCode,
+    degraded: false,
+  }
+}
+
 async function buildAttendanceReportFieldCatalogResponse(context, orgId, logger, options = {}) {
   const rawAliasesAllowed = options.rawAliasesAllowed !== false
+  const dynamicSubtype = await loadAttendanceReportDynamicSubtypeContext(
+    context?.api?.database,
+    orgId,
+    logger,
+  )
   let catalog
   try {
     catalog = options.provision === true
@@ -1484,12 +1646,14 @@ async function buildAttendanceReportFieldCatalogResponse(context, orgId, logger,
     logger?.warn?.('Attendance report field catalog provisioning degraded', error)
     return buildAttendanceReportFieldCatalogFallback(orgId, 'PROVISIONING_FAILED', error, {
       rawAliasesAllowed,
+      extraSystemDefinitions: dynamicSubtype.definitions,
     })
   }
 
   if (!catalog.available) {
     return buildAttendanceReportFieldCatalogFallback(orgId, catalog.reason || 'MULTITABLE_UNAVAILABLE', undefined, {
       rawAliasesAllowed,
+      extraSystemDefinitions: dynamicSubtype.definitions,
     })
   }
 
@@ -1506,6 +1670,7 @@ async function buildAttendanceReportFieldCatalogResponse(context, orgId, logger,
       : []
     const items = mergeAttendanceReportFieldDefinitions(records, catalog.fieldIds, {
       rawAliasesAllowed,
+      extraSystemDefinitions: dynamicSubtype.definitions,
     })
     const droppedReservedCodes = getAttendanceReportFieldDroppedReservedCodes(records, catalog.fieldIds)
     const multitable = {
@@ -1534,6 +1699,7 @@ async function buildAttendanceReportFieldCatalogResponse(context, orgId, logger,
     logger?.warn?.('Attendance report field catalog read degraded', error)
     return buildAttendanceReportFieldCatalogFallback(orgId, 'READ_FAILED', error, {
       rawAliasesAllowed,
+      extraSystemDefinitions: dynamicSubtype.definitions,
     })
   }
 }
@@ -1598,7 +1764,11 @@ function resolveAttendanceRecordReportFields(items) {
       field
       && field.enabled !== false
       && field.reportVisible !== false
-      && (ATTENDANCE_RECORD_REPORT_FIELD_CODE_SET.has(field.code) || field.formulaEnabled === true)
+      && (
+        ATTENDANCE_RECORD_REPORT_FIELD_CODE_SET.has(field.code)
+        || field.formulaEnabled === true
+        || (field.systemDefined !== false && isAttendanceDynamicSubtypeCode(field.code))
+      )
     ))
     .map(field => ({
       code: field.code,
@@ -1780,6 +1950,12 @@ function getAttendanceRecordReportFieldValue(row, fieldCode) {
   const earlyLeaveMinutes = Number(row?.early_leave_minutes ?? 0)
   const leaveMinutes = readAttendanceRecordMinutes(row, ['leave_minutes', 'leaveMinutes'], 0)
   const overtimeMinutes = readAttendanceRecordMinutes(row, ['overtime_minutes', 'overtimeMinutes'], 0)
+
+  if (isAttendanceDynamicSubtypeCode(fieldCode)) {
+    const subtypeMap = readAttendanceRecordMeta(row, ['reportSubtypeMinutes', 'report_subtype_minutes'])
+    const value = subtypeMap && typeof subtypeMap === 'object' ? Number(subtypeMap[fieldCode]) : 0
+    return Number.isFinite(value) ? value : 0
+  }
 
   switch (fieldCode) {
     case 'work_date':
@@ -7529,13 +7705,51 @@ async function loadApprovedMinutesRange(db, orgId, userId, fromDate, toDate) {
   for (const row of rows) {
     const workDate = row.work_date
     if (!map.has(workDate)) {
-      map.set(workDate, { leaveMinutes: 0, overtimeMinutes: 0 })
+      map.set(workDate, { leaveMinutes: 0, overtimeMinutes: 0, reportSubtypeMinutes: {} })
     }
     const entry = map.get(workDate)
     if (row.request_type === 'leave') {
       entry.leaveMinutes = Number(row.total_minutes ?? 0)
     } else if (row.request_type === 'overtime') {
       entry.overtimeMinutes = Number(row.total_minutes ?? 0)
+    }
+  }
+
+  const dynamicSubtype = await loadAttendanceReportDynamicSubtypeContext(db, orgId)
+  const leaveMap = dynamicSubtype.leaveTypeCodeToFieldCode || {}
+  const overtimeMap = dynamicSubtype.overtimeRuleIdToFieldCode || {}
+  if (Object.keys(leaveMap).length > 0 || Object.keys(overtimeMap).length > 0) {
+    const subtypeRows = await db.query(
+      `SELECT work_date,
+              request_type,
+              CASE WHEN request_type = 'leave' THEN metadata->'leaveType'->>'code'
+                   WHEN request_type = 'overtime' THEN metadata->'overtimeRule'->>'id'
+              END AS subtype_key,
+              COALESCE(SUM(CASE WHEN (metadata->>'minutes') ~ '^[0-9]+' THEN (metadata->>'minutes')::int ELSE 0 END), 0)::int AS total_minutes
+       FROM attendance_requests
+       WHERE user_id = $1
+         AND org_id = $2
+         AND work_date BETWEEN $3 AND $4
+         AND status = 'approved'
+         AND request_type IN ('leave', 'overtime')
+       GROUP BY work_date, request_type, subtype_key
+       ORDER BY work_date`,
+      [userId, orgId, fromDate, toDate],
+    )
+    for (const row of subtypeRows) {
+      const subtypeKey = row.subtype_key
+      if (!subtypeKey) continue
+      const fieldCode = row.request_type === 'leave'
+        ? leaveMap[subtypeKey]
+        : overtimeMap[subtypeKey]
+      if (!fieldCode) continue
+      const workDate = row.work_date
+      if (!map.has(workDate)) {
+        map.set(workDate, { leaveMinutes: 0, overtimeMinutes: 0, reportSubtypeMinutes: {} })
+      }
+      const entry = map.get(workDate)
+      if (!entry.reportSubtypeMinutes) entry.reportSubtypeMinutes = {}
+      entry.reportSubtypeMinutes[fieldCode] = (entry.reportSubtypeMinutes[fieldCode] ?? 0) + Number(row.total_minutes ?? 0)
     }
   }
   return map
@@ -8984,6 +9198,13 @@ module.exports = {
     loadAttendanceReportFieldCatalog,
     mergeAttendanceReportFieldDefinitions,
     getAttendanceReportFieldDroppedReservedCodes,
+    isAttendanceDynamicSubtypeCode,
+    isAttendanceLeaveSubtypeCode,
+    isAttendanceOvertimeSubtypeCode,
+    buildAttendanceLeaveSubtypeReportFieldDefinitions,
+    buildAttendanceOvertimeSubtypeReportFieldDefinitions,
+    loadAttendanceReportDynamicSubtypeContext,
+    loadApprovedMinutesRange,
     resolveAttendanceRecordReportFields,
     resolveAttendanceFormulaSourceFields,
     validateAttendanceReportFormulaExpression,
@@ -11762,7 +11983,7 @@ module.exports = {
           const records = await Promise.all(rows.map(async (row) => {
             const workDate = normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10)
             const meta = normalizeMetadata(row.meta)
-            const approved = approvedMap.get(workDate) ?? { leaveMinutes: 0, overtimeMinutes: 0 }
+            const approved = approvedMap.get(workDate) ?? { leaveMinutes: 0, overtimeMinutes: 0, reportSubtypeMinutes: {} }
             const resolvedContext = resolveWorkContextFromPrefetch({
               orgId,
               userId: targetUserId,
@@ -11782,6 +12003,7 @@ module.exports = {
                 ...meta,
                 leave_minutes: approved.leaveMinutes,
                 overtime_minutes: approved.overtimeMinutes,
+                reportSubtypeMinutes: approved.reportSubtypeMinutes ?? {},
               },
             }
             return {
@@ -21167,7 +21389,7 @@ module.exports = {
           const reportFields = await loadAttendanceRecordReportFields(context, orgId, logger, formulaOptions)
           const exportRows = rows.map((row) => {
             const workDate = normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10)
-            const approved = approvedMap.get(workDate) ?? { leaveMinutes: 0, overtimeMinutes: 0 }
+            const approved = approvedMap.get(workDate) ?? { leaveMinutes: 0, overtimeMinutes: 0, reportSubtypeMinutes: {} }
             return {
               ...row,
               work_date: workDate,
@@ -21175,6 +21397,7 @@ module.exports = {
                 ...normalizeMetadata(row.meta),
                 leave_minutes: approved.leaveMinutes,
                 overtime_minutes: approved.overtimeMinutes,
+                reportSubtypeMinutes: approved.reportSubtypeMinutes ?? {},
               },
             }
           })
