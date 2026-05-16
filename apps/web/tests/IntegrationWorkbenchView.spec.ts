@@ -911,26 +911,34 @@ describe('IntegrationWorkbenchView', () => {
     await flushUi()
 
     const projectIdInput = container.querySelector('[data-testid="staging-project-id"]') as HTMLInputElement
+    const scopeStatus = container.querySelector('[data-testid="staging-project-id-scope-status"]') as HTMLElement
     expect(container.querySelector('[data-testid="staging-project-id-scope-warning"]')).toBeNull()
+    expect(scopeStatus.textContent).toContain('default:integration-core')
 
     projectIdInput.value = 'project_default'
-    projectIdInput.dispatchEvent(new Event('input'))
+    projectIdInput.dispatchEvent(new Event('input', { bubbles: true }))
+    projectIdInput.dispatchEvent(new Event('change', { bubbles: true }))
+    projectIdInput.dispatchEvent(new Event('blur', { bubbles: true }))
     await flushUi()
 
     const warning = container.querySelector('[data-testid="staging-project-id-scope-warning"]') as HTMLElement | null
     expect(warning).not.toBeNull()
     expect(warning!.textContent).toContain('不是 integration 作用域')
+    expect(scopeStatus.textContent).toContain('当前为非 integration 作用域：project_default')
 
     ;(container.querySelector('[data-testid="normalize-staging-project-id"]') as HTMLButtonElement).click()
     await flushUi()
 
     expect(projectIdInput.value).toBe('project_default:integration-core')
     expect(container.querySelector('[data-testid="staging-project-id-scope-warning"]')).toBeNull()
+    expect(scopeStatus.textContent).toContain('project_default:integration-core')
     expect(container.textContent).toContain('Project ID 已规范化为 project_default:integration-core')
 
     projectIdInput.value = ''
-    projectIdInput.dispatchEvent(new Event('input'))
+    projectIdInput.dispatchEvent(new Event('input', { bubbles: true }))
+    projectIdInput.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi()
     expect(container.querySelector('[data-testid="staging-project-id-scope-warning"]')).toBeNull()
+    expect(scopeStatus.textContent).toContain('default:integration-core')
   })
 })

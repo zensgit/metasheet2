@@ -345,7 +345,17 @@
       <div class="integration-workbench__grid integration-workbench__grid--compact">
         <label>
           <span>Project ID（高级，可选）</span>
-          <input v-model="stagingProjectId" data-testid="staging-project-id" placeholder="留空自动使用 tenant:integration-core" />
+          <input
+            :value="stagingProjectId"
+            data-testid="staging-project-id"
+            placeholder="留空自动使用 tenant:integration-core"
+            @input="onStagingProjectIdInput"
+            @change="onStagingProjectIdInput"
+            @blur="onStagingProjectIdInput"
+          />
+          <small class="integration-workbench__staging-note" data-testid="staging-project-id-scope-status">
+            {{ stagingProjectIdScopeStatus }}
+          </small>
         </label>
         <label>
           <span>Base ID（可选）</span>
@@ -1047,6 +1057,18 @@ const stagingProjectIdScopeWarning = computed(() => {
   if (!value || isIntegrationScopedProjectId(value)) return ''
   return `Project ID「${value}」不是 integration 作用域，安装会触发 plugin-scope 警告。留空可自动作用域，或一键规范化为以 :integration-core 结尾。`
 })
+
+const stagingProjectIdScopeStatus = computed(() => {
+  const value = stagingProjectId.value.trim()
+  if (!value) return `当前将使用 ${defaultStagingProjectId()}`
+  if (isIntegrationScopedProjectId(value)) return `当前将使用 ${value}`
+  return `当前为非 integration 作用域：${value}`
+})
+
+function onStagingProjectIdInput(event: Event): void {
+  const target = event.target as HTMLInputElement | null
+  stagingProjectId.value = target?.value ?? ''
+}
 
 function normalizeStagingProjectIdToScope(): void {
   const normalized = normalizeIntegrationProjectId(stagingProjectId.value, currentScope().tenantId)

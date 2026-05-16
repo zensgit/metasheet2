@@ -129,6 +129,9 @@ export class RecordPermissionError extends Error {
 }
 
 export class RecordValidationFailedError extends Error {
+  public readonly code = 'VALIDATION_ERROR'
+  public readonly statusCode = 422
+
   constructor(public fieldErrors: unknown) {
     super('Record validation failed')
     this.name = 'RecordValidationFailedError'
