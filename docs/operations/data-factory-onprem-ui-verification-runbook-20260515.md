@@ -49,6 +49,10 @@ are present in the bundled `apps/web/dist`:
 
 - `规范化为 integration 作用域` (Workbench one-click normalize)
 - `否则会触发 plugin-scope 警告` (K3 setup project ID scope hint)
+- `新建记录入口` (staging multitable open-link copy; prevents operators from
+  testing `/grid` or `/spreadsheets/<object>` by mistake)
+- `normalize-k3-setup-project-id` (K3 setup now has the same one-click
+  normalize affordance as Workbench)
 
 If Gate A fails on these strings, the package was built from a `main` that does
 **not** contain #1595 (or the web bundle was not rebuilt) - stop and rebuild;
@@ -80,9 +84,9 @@ look broken (a false negative wrongly blamed on #1590/#1595).
 
 | ID | Route | Steps | Expected (PASS) | FAIL |
 | --- | --- | --- | --- | --- |
-| C1 (#1590) | `/integrations/workbench` (or any staging multitable with required fields, e.g. `Standard Materials`) | Click `+ New Record` without filling required fields | A toast appears carrying the server field-validation message (e.g. `Material Code is required`) | No toast, no row, no console error (the original silent failure) |
+| C1 (#1590) | `/integrations/workbench` -> staging card `打开多维表（新建记录入口）` -> generated `/multitable/<sheetId>/<viewId>?baseId=...` link | If the staging card does not yet show an open link, click `生成打开链接` / `创建清洗表` first. Then open the generated `/multitable/...` link and click `+ New Record` without filling required fields. | A toast appears carrying the server field-validation message (e.g. `Material Code is required`) | Testing `/grid` or `/spreadsheets/<objectId>` instead of the generated `/multitable/...` link, or no toast/no row/no console error from the true multitable toolbar path |
 | C2 (#1572+#1595) | `/integrations/workbench` | Leave staging **Project ID** blank | Field copy reads optional + states blank auto-uses `tenant:integration-core`; **no** `必填` wording; no scope warning shown | Copy still implies Project ID is required, or warns while blank |
-| C3 (#1595) | `/integrations/workbench` | Type a plain Project ID, e.g. `project_default` | Inline warning `Project ID「project_default」不是 integration 作用域 ...`; a `规范化为 integration 作用域` button is shown; clicking it sets the field to `project_default:integration-core` and the warning clears; status line confirms the normalized value | No warning for the plain value, or normalize button missing/no-op |
+| C3 (#1595 + #651) | `/integrations/workbench` **and** `/integrations/k3-wise` | Type a plain Project ID, e.g. `project_default` | Inline warning `Project ID「project_default」不是 integration 作用域 ...`; a `规范化为 integration 作用域` button is shown; clicking it sets the field to `project_default:integration-core` and the warning clears; status line confirms the normalized value | No warning for the plain value, or normalize button missing/no-op on either page |
 | C4 (#1595) | `/integrations/k3-wise` (K3 WISE setup) | Inspect the **Project ID** field hint | Hint states: blank -> auto `tenant:integration-core`; custom must end with `:integration-core`, else triggers plugin-scope warning. Deploy-gate "Staging" item is `ready` when blank, `warning` for a plain value (not `missing`) | Old copy that tells the user they must fill Project ID (the pre-#1572 misleading text) |
 
 ## Result recording
