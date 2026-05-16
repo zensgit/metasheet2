@@ -295,8 +295,18 @@
               rel="noopener noreferrer"
               :data-testid="`open-staging-${descriptor.id}`"
             >
-              打开多维表
+              打开多维表（新建记录入口）
             </a>
+            <button
+              v-else
+              type="button"
+              class="integration-workbench__button"
+              :disabled="installingStaging"
+              :data-testid="`refresh-staging-link-${descriptor.id}`"
+              @click="installStagingTables"
+            >
+              {{ installingStaging ? '生成中' : '生成打开链接' }}
+            </button>
             <button
               type="button"
               class="integration-workbench__button"
@@ -316,6 +326,12 @@
               作为目标多维表
             </button>
           </div>
+          <small v-if="descriptor.openLink" class="integration-workbench__staging-note">
+            使用此 /multitable 链接进入真正的多维表工具栏，再点击 + New Record 验证必填字段 toast。
+          </small>
+          <small v-else class="integration-workbench__staging-note integration-workbench__staging-note--warning">
+            不要手写 /grid 或 /spreadsheets/{{ descriptor.id }}；先生成后端返回的 /multitable sheet/view 打开链接。
+          </small>
         </article>
       </div>
       <div v-else class="integration-workbench__empty integration-workbench__empty--actionable" data-testid="staging-empty">
@@ -2218,11 +2234,22 @@ watch(showAdvancedConnectors, () => {
 }
 
 .integration-workbench__staging-card {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: flex-start;
-  justify-content: space-between;
   gap: 12px;
   padding: 12px;
+}
+
+.integration-workbench__staging-note {
+  grid-column: 1 / -1;
+  display: block;
+  color: #5c6878;
+  line-height: 1.45;
+}
+
+.integration-workbench__staging-note--warning {
+  color: #92400e;
 }
 
 .integration-workbench__system-column {

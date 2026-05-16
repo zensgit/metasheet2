@@ -162,7 +162,7 @@
                 :to="target.openLink"
                 :data-testid="`open-staging-${target.id}`"
               >
-                打开多维表
+                打开多维表（新建记录入口）
               </router-link>
             </div>
           </div>
@@ -673,6 +673,22 @@
                 留空时安装会自动使用插件专用作用域 <code>tenant:integration-core</code>；若自定义，结尾必须是 <code>:integration-core</code>，否则会触发 plugin-scope 警告。
               </small>
             </label>
+            <div
+              v-if="k3SetupProjectIdScopeWarning"
+              class="k3-setup__hint k3-setup__hint--strong k3-setup__field-note--wide"
+              role="alert"
+              data-testid="k3-setup-project-id-scope-warning"
+            >
+              <span>{{ k3SetupProjectIdScopeWarning }}</span>
+              <button
+                class="k3-setup__btn k3-setup__btn--compact"
+                type="button"
+                data-testid="normalize-k3-setup-project-id"
+                @click="normalizeK3SetupProjectIdToScope"
+              >
+                规范化为 integration 作用域
+              </button>
+            </div>
             <label class="k3-setup__field">
               <span>Base ID</span>
               <input v-model.trim="form.baseId" autocomplete="off" />
@@ -848,6 +864,10 @@ import {
   type K3WiseDocumentTemplateMapping,
   type K3WisePipelineTarget,
 } from '../services/integration/k3WiseSetup'
+import {
+  isIntegrationScopedProjectId,
+  normalizeIntegrationProjectId,
+} from '../services/integration/workbench'
 
 const form = reactive(createDefaultK3WiseSetupForm())
 const webApiSystems = ref<IntegrationExternalSystem[]>([])
@@ -941,6 +961,11 @@ const endpointPathHasK3ApiPath = computed(() => [
   form.bomAuditPath,
 ].some((path) => /\/k3api(?:\/|$)/i.test(path.trim())))
 const baseUrlEndpointOverlapWarning = computed(() => baseUrlHasK3ApiPath.value && endpointPathHasK3ApiPath.value)
+const k3SetupProjectIdScopeWarning = computed(() => {
+  const value = form.projectId.trim()
+  if (!value || isIntegrationScopedProjectId(value)) return ''
+  return `Project ID「${value}」不是 integration 作用域，安装会触发 plugin-scope 警告。留空可自动作用域，或一键规范化为以 :integration-core 结尾。`
+})
 const webApiConnectionStatus = computed(() => {
   if (testingWebApi.value) {
     return {
@@ -1059,6 +1084,12 @@ function buildStagingOpenTargets(
       openLink: target?.openLink ?? result.openLinks?.[id] ?? buildMultitableOpenLink(sheetId, viewId, target?.baseId ?? fallbackBaseId),
     }]
   })
+}
+
+function normalizeK3SetupProjectIdToScope(): void {
+  const normalized = normalizeIntegrationProjectId(form.projectId, form.tenantId || 'default')
+  form.projectId = normalized
+  setStatus(`Project ID 已规范化为 ${normalized}`, 'info')
 }
 
 function setStatus(message: string, kind: 'info' | 'success' | 'error' = 'info'): void {
@@ -1682,6 +1713,23 @@ onMounted(() => {
   color: #9a3412;
   font-size: 12px;
   line-height: 1.4;
+}
+
+.k3-setup__hint--strong {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid #facc15;
+  border-radius: 6px;
+  padding: 10px;
+  background: #fefce8;
+  color: #744600;
+}
+
+.k3-setup__hint--strong span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .k3-setup__hint-warning {

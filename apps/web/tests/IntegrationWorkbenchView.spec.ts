@@ -450,6 +450,10 @@ describe('IntegrationWorkbenchView', () => {
     await flushUi(8)
     expect(container.textContent).toContain('目标连接测试失败：ERP endpoint unavailable')
     expect(container.textContent).toContain('异常：ERP endpoint unavailable')
+    expect(container.textContent).toContain('不要手写 /grid 或 /spreadsheets/standard_materials')
+    const refreshStagingLinkButton = container.querySelector('[data-testid="refresh-staging-link-standard_materials"]') as HTMLButtonElement
+    expect(refreshStagingLinkButton.disabled).toBe(false)
+    expect(refreshStagingLinkButton.textContent).toContain('生成打开链接')
 
     const projectId = container.querySelector('[data-testid="staging-project-id"]') as HTMLInputElement
     projectId.value = 'project_1'
@@ -459,6 +463,7 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).toContain('清洗表已创建，并已自动设置 staging 多维表为 Dry-run 来源')
     expect((container.querySelector('[data-testid="open-staging-standard_materials"]') as HTMLAnchorElement).getAttribute('href'))
       .toBe('/multitable/sheet_materials/view_materials')
+    expect(container.textContent).toContain('使用此 /multitable 链接进入真正的多维表工具栏')
 
     const stagingSourceButton = container.querySelector('[data-testid="use-staging-source-standard_materials"]') as HTMLButtonElement
     expect(stagingSourceButton.disabled).toBe(false)

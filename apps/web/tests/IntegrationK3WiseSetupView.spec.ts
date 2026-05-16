@@ -241,6 +241,36 @@ describe('IntegrationK3WiseSetupView', () => {
     expect(container.textContent).toContain('WebAPI 连接测试完成')
   })
 
+  it('warns and normalizes a plain Project ID on the K3 setup page', async () => {
+    const View = (await import('../src/views/IntegrationK3WiseSetupView.vue')).default
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    registerRouterLinkStub(app)
+    app.mount(container)
+    await flushUi()
+
+    const projectInput = inputByLabel(container, 'Project ID')
+    expect(container.querySelector('[data-testid="k3-setup-project-id-scope-warning"]')).toBeNull()
+
+    projectInput.value = 'project_default'
+    projectInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    const warning = container.querySelector('[data-testid="k3-setup-project-id-scope-warning"]') as HTMLElement | null
+    expect(warning).not.toBeNull()
+    expect(warning!.textContent).toContain('不是 integration 作用域')
+    expect(warning!.textContent).toContain('规范化为 integration 作用域')
+
+    ;(container.querySelector('[data-testid="normalize-k3-setup-project-id"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(projectInput.value).toBe('project_default:integration-core')
+    expect(container.querySelector('[data-testid="k3-setup-project-id-scope-warning"]')).toBeNull()
+    expect(container.textContent).toContain('Project ID 已规范化为 project_default:integration-core')
+  })
+
   it('opens installed staging multitable sheets from the setup page', async () => {
     const View = (await import('../src/views/IntegrationK3WiseSetupView.vue')).default
 
