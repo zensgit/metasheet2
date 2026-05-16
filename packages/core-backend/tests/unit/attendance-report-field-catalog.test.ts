@@ -581,6 +581,75 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(entry.leaveMinutes).toBeGreaterThanOrEqual(leaveSubtypeSum)
   })
 
+  it('attendance_report_records: stable descriptor + idempotent ensure + degraded fallback', async () => {
+    const d1 = helpers.getAttendanceReportRecordsDescriptor()
+    const d2 = helpers.getAttendanceReportRecordsDescriptor()
+    expect(d1.id).toBe('attendance_report_records')
+    expect(helpers.ATTENDANCE_REPORT_RECORDS_OBJECT_ID).toBe('attendance_report_records')
+    // descriptor stable across calls (same field ids/types/order)
+    expect(JSON.stringify(d1)).toBe(JSON.stringify(d2))
+    const ids = d1.fields.map((f: { id: string }) => f.id)
+    expect(ids).toEqual([
+      'row_key', 'org_id', 'user_id', 'employee_name', 'department',
+      'attendance_group', 'work_date', 'field_fingerprint', 'source_fingerprint', 'synced_at',
+    ])
+    // provisioning field-type contract: string/date/dateTime only (no "text")
+    const typeByCode = Object.fromEntries(d1.fields.map((f: { id: string, type: string }) => [f.id, f.type]))
+    expect(typeByCode.row_key).toBe('string')
+    expect(typeByCode.work_date).toBe('date')
+    expect(typeByCode.synced_at).toBe('dateTime')
+    expect(d1.fields.some((f: { type: string }) => f.type === 'text')).toBe(false)
+    expect(d1.fields.find((f: { id: string }) => f.id === 'row_key')?.property?.validation?.required).toBe(true)
+
+    // idempotent ensure: ensureObject called once per ensure, same descriptor each time
+    const ensureCalls: unknown[] = []
+    const context = {
+      api: {
+        multitable: {
+          provisioning: {
+            ensureObject: async (input: unknown) => {
+              ensureCalls.push(input)
+              return { baseId: 'base_legacy', sheet: { id: 'sheet_report_records' } }
+            },
+            resolveFieldIds: async ({ fieldIds }: { fieldIds: string[] }) =>
+              Object.fromEntries(fieldIds.map(fid => [fid, `fld_${fid}`])),
+          },
+        },
+      },
+    }
+    const r1 = await helpers.ensureAttendanceReportRecords(context, 'org-a', { warn: vi.fn() })
+    const r2 = await helpers.ensureAttendanceReportRecords(context, 'org-a', { warn: vi.fn() })
+    expect(r1).toMatchObject({
+      available: true,
+      reason: null,
+      objectId: 'attendance_report_records',
+      sheetId: 'sheet_report_records',
+    })
+    expect(r1.fieldIds.row_key).toBe('fld_row_key')
+    expect(r1.fieldIds.synced_at).toBe('fld_synced_at')
+    // idempotent: second ensure returns equivalent result, descriptor passed unchanged
+    expect(JSON.stringify(r2)).toBe(JSON.stringify(r1))
+    expect(JSON.stringify((ensureCalls[0] as { descriptor: unknown }).descriptor))
+      .toBe(JSON.stringify((ensureCalls[1] as { descriptor: unknown }).descriptor))
+
+    // degraded: provisioning API unavailable → no throw, available:false
+    const degraded = await helpers.ensureAttendanceReportRecords({ api: { multitable: null } }, 'org-z', { warn: vi.fn() })
+    expect(degraded).toMatchObject({
+      available: false,
+      reason: 'MULTITABLE_API_UNAVAILABLE',
+      objectId: 'attendance_report_records',
+      sheetId: null,
+    })
+    expect(degraded.fieldIds).toEqual({})
+
+    // degraded: ensureObject throws → caught, available:false PROVISIONING_FAILED, no throw
+    const throwing = {
+      api: { multitable: { provisioning: { ensureObject: async () => { throw new Error('boom') } } } },
+    }
+    const failed = await helpers.ensureAttendanceReportRecords(throwing, 'org-z', { warn: vi.fn() })
+    expect(failed).toMatchObject({ available: false, reason: 'PROVISIONING_FAILED', sheetId: null })
+  })
+
   it('does not add direct meta table writes to the attendance plugin', () => {
     const source = readFileSync(
       new URL('../../../../plugins/plugin-attendance/index.cjs', import.meta.url),

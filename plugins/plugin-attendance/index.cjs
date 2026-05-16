@@ -1489,6 +1489,103 @@ async function ensureAttendanceReportFieldCatalog(context, orgId, logger, option
   }
 }
 
+// ── attendance_report_records 同步层 (PR1: descriptor + ensure only; no writer/route/frontend) ──
+// 边界: attendance_* 仍是唯一事实源; 本对象只存可重建报表快照, 经 multitable 插件 API, 不裸写 meta_*.
+const ATTENDANCE_REPORT_RECORDS_OBJECT_ID = 'attendance_report_records'
+const ATTENDANCE_REPORT_RECORDS_FIELDS = Object.freeze({
+  rowKey: 'row_key',
+  orgId: 'org_id',
+  userId: 'user_id',
+  employeeName: 'employee_name',
+  department: 'department',
+  attendanceGroup: 'attendance_group',
+  workDate: 'work_date',
+  fieldFingerprint: 'field_fingerprint',
+  sourceFingerprint: 'source_fingerprint',
+  syncedAt: 'synced_at',
+})
+
+function getAttendanceReportRecordsDescriptor() {
+  return {
+    id: ATTENDANCE_REPORT_RECORDS_OBJECT_ID,
+    name: '考勤报表记录（多维表报表层）',
+    description: '考勤插件私有报表快照对象：考勤算好的统计结果同步至此，供多维表二次公式/视图/筛选/权限。可重建，非事实源；attendance_* 仍是唯一事实源。',
+    fields: [
+      { id: ATTENDANCE_REPORT_RECORDS_FIELDS.rowKey, name: '行键', type: 'string', order: 10, property: { validation: { required: true }, width: 240 } },
+      { id: ATTENDANCE_REPORT_RECORDS_FIELDS.orgId, name: '组织', type: 'string', order: 20, property: { width: 120 } },
+      { id: ATTENDANCE_REPORT_RECORDS_FIELDS.userId, name: '员工ID', type: 'string', order: 30, property: { width: 160 } },
+      { id: ATTENDANCE_REPORT_RECORDS_FIELDS.employeeName, name: '姓名', type: 'string', order: 40, property: { width: 120 } },
+      { id: ATTENDANCE_REPORT_RECORDS_FIELDS.department, name: '部门', type: 'string', order: 50, property: { width: 140 } },
+      { id: ATTENDANCE_REPORT_RECORDS_FIELDS.attendanceGroup, name: '考勤组', type: 'string', order: 60, property: { width: 140 } },
+      { id: ATTENDANCE_REPORT_RECORDS_FIELDS.workDate, name: '工作日期', type: 'date', order: 70 },
+      { id: ATTENDANCE_REPORT_RECORDS_FIELDS.fieldFingerprint, name: '字段配置指纹', type: 'string', order: 80, property: { width: 200 } },
+      { id: ATTENDANCE_REPORT_RECORDS_FIELDS.sourceFingerprint, name: '源数据指纹', type: 'string', order: 90, property: { width: 200 } },
+      { id: ATTENDANCE_REPORT_RECORDS_FIELDS.syncedAt, name: '同步时间', type: 'dateTime', order: 100 },
+    ],
+  }
+}
+
+// PR1 ships the fixed identity/provenance skeleton only. Value columns (static stat /
+// dynamic subtype / formula) are ensured at sync time in PR2 via the same ensureObject
+// upsert (ensureFields = INSERT ON CONFLICT DO UPDATE, never deletes — confirmed in
+// packages/core-backend/src/multitable/provisioning.ts ensureFields). Driving the value
+// columns from the live catalog at sync time avoids a hardcoded PR1 stat list drifting
+// from the catalog and keeps column-set / fld id / fingerprint deterministic.
+async function ensureAttendanceReportRecords(context, orgId, logger) {
+  const projectId = getAttendanceReportFieldProjectId(orgId)
+  const multitable = context?.api?.multitable
+  if (!multitable?.provisioning?.ensureObject) {
+    return {
+      available: false,
+      reason: 'MULTITABLE_API_UNAVAILABLE',
+      projectId,
+      objectId: ATTENDANCE_REPORT_RECORDS_OBJECT_ID,
+      baseId: null,
+      sheetId: null,
+      fieldIds: {},
+    }
+  }
+  try {
+    const descriptor = getAttendanceReportRecordsDescriptor()
+    const provisioned = await multitable.provisioning.ensureObject({ projectId, descriptor })
+    const logicalFieldIds = Object.values(ATTENDANCE_REPORT_RECORDS_FIELDS)
+    let fieldIds = {}
+    if (typeof multitable.provisioning.resolveFieldIds === 'function') {
+      fieldIds = await multitable.provisioning.resolveFieldIds({
+        projectId,
+        objectId: ATTENDANCE_REPORT_RECORDS_OBJECT_ID,
+        fieldIds: logicalFieldIds,
+      })
+    } else if (typeof multitable.provisioning.getFieldId === 'function') {
+      fieldIds = Object.fromEntries(logicalFieldIds.map(fieldId => [
+        fieldId,
+        multitable.provisioning.getFieldId(projectId, ATTENDANCE_REPORT_RECORDS_OBJECT_ID, fieldId),
+      ]))
+    }
+    return {
+      available: true,
+      reason: null,
+      projectId,
+      objectId: ATTENDANCE_REPORT_RECORDS_OBJECT_ID,
+      baseId: provisioned.baseId || null,
+      sheetId: provisioned.sheet?.id || null,
+      fieldIds,
+    }
+  } catch (error) {
+    logger?.warn?.('Attendance report records provisioning degraded', error)
+    return {
+      available: false,
+      reason: 'PROVISIONING_FAILED',
+      error: error instanceof Error ? error.message : String(error),
+      projectId,
+      objectId: ATTENDANCE_REPORT_RECORDS_OBJECT_ID,
+      baseId: null,
+      sheetId: null,
+      fieldIds: {},
+    }
+  }
+}
+
 async function loadAttendanceReportFieldCatalog(context, orgId) {
   const projectId = getAttendanceReportFieldProjectId(orgId)
   const multitable = context?.api?.multitable
@@ -9196,6 +9293,10 @@ module.exports = {
     resolveAttendanceFormulaRawAliasesAllowed,
     readAttendanceFormulaRawAliasesEnvOverride,
     loadAttendanceReportFieldCatalog,
+    getAttendanceReportRecordsDescriptor,
+    ensureAttendanceReportRecords,
+    ATTENDANCE_REPORT_RECORDS_OBJECT_ID,
+    ATTENDANCE_REPORT_RECORDS_FIELDS,
     mergeAttendanceReportFieldDefinitions,
     getAttendanceReportFieldDroppedReservedCodes,
     isAttendanceDynamicSubtypeCode,
