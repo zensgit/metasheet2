@@ -252,22 +252,28 @@ describe('IntegrationK3WiseSetupView', () => {
     await flushUi()
 
     const projectInput = inputByLabel(container, 'Project ID')
+    const scopeStatus = container.querySelector('[data-testid="k3-setup-project-id-scope-status"]') as HTMLElement
     expect(container.querySelector('[data-testid="k3-setup-project-id-scope-warning"]')).toBeNull()
+    expect(scopeStatus.textContent).toContain('default:integration-core')
 
     projectInput.value = 'project_default'
     projectInput.dispatchEvent(new Event('input', { bubbles: true }))
+    projectInput.dispatchEvent(new Event('change', { bubbles: true }))
+    projectInput.dispatchEvent(new Event('blur', { bubbles: true }))
     await flushUi()
 
     const warning = container.querySelector('[data-testid="k3-setup-project-id-scope-warning"]') as HTMLElement | null
     expect(warning).not.toBeNull()
     expect(warning!.textContent).toContain('不是 integration 作用域')
     expect(warning!.textContent).toContain('规范化为 integration 作用域')
+    expect(scopeStatus.textContent).toContain('当前为非 integration 作用域：project_default')
 
     ;(container.querySelector('[data-testid="normalize-k3-setup-project-id"]') as HTMLButtonElement).click()
     await flushUi()
 
     expect(projectInput.value).toBe('project_default:integration-core')
     expect(container.querySelector('[data-testid="k3-setup-project-id-scope-warning"]')).toBeNull()
+    expect(scopeStatus.textContent).toContain('project_default:integration-core')
     expect(container.textContent).toContain('Project ID 已规范化为 project_default:integration-core')
   })
 

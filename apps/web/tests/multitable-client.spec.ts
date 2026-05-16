@@ -556,6 +556,31 @@ describe('MultitableApiClient', () => {
     })
   })
 
+  it('normalizes legacy createRecord validation arrays into field errors', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: 'VALIDATION_FAILED',
+      message: 'Record validation failed',
+      fieldErrors: [
+        { fieldId: 'fld_code', message: 'Material Code is required' },
+      ],
+    }), { status: 422 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    await expect(client.createRecord({
+      sheetId: 'sheet_standard_materials',
+      viewId: 'view_grid',
+      data: {},
+    })).rejects.toMatchObject({
+      name: 'MultitableApiError',
+      status: 422,
+      code: 'VALIDATION_FAILED',
+      message: 'Material Code is required',
+      fieldErrors: {
+        fld_code: 'Material Code is required',
+      },
+    })
+  })
+
   it('loads and normalizes record history entries', async () => {
     const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       ok: true,

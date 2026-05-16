@@ -1948,6 +1948,43 @@ function getDbNotReadyMessage(err: unknown): string | null {
   return null
 }
 
+function isRecordCreateValidationError(err: unknown): err is { fieldErrors: unknown } {
+  if (err instanceof RecordCreateValidationFailedError) return true
+  if (!err || typeof err !== 'object') return false
+  const candidate = err as { name?: unknown; fieldErrors?: unknown }
+  return candidate.name === 'RecordValidationFailedError' && 'fieldErrors' in candidate
+}
+
+function normalizeRecordCreateFieldErrors(fieldErrors: unknown): Record<string, string> {
+  if (Array.isArray(fieldErrors)) {
+    const normalized: Record<string, string> = {}
+    fieldErrors.forEach((entry, index) => {
+      if (!entry || typeof entry !== 'object') return
+      const error = entry as { fieldId?: unknown; message?: unknown }
+      const fieldId = typeof error.fieldId === 'string' && error.fieldId.trim()
+        ? error.fieldId.trim()
+        : `field_${index + 1}`
+      const message = typeof error.message === 'string' && error.message.trim()
+        ? error.message.trim()
+        : 'Validation failed'
+      normalized[fieldId] = message
+    })
+    return normalized
+  }
+
+  if (fieldErrors && typeof fieldErrors === 'object') {
+    return Object.fromEntries(
+      Object.entries(fieldErrors as Record<string, unknown>)
+        .map(([fieldId, message]) => [
+          fieldId,
+          typeof message === 'string' && message.trim() ? message.trim() : 'Validation failed',
+        ]),
+    )
+  }
+
+  return {}
+}
+
 function invalidateSheetSummaryCache(sheetId: string): void {
   metaSheetSummaryCache.delete(sheetId)
 }
@@ -7421,11 +7458,15 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
-      if (err instanceof RecordCreateValidationFailedError) {
+      if (isRecordCreateValidationError(err)) {
+        const fieldErrors = normalizeRecordCreateFieldErrors(err.fieldErrors)
         return res.status(422).json({
-          error: 'VALIDATION_FAILED',
-          message: 'Record validation failed',
-          fieldErrors: err.fieldErrors,
+          ok: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'Record validation failed',
+            fieldErrors,
+          },
         })
       }
       if (err instanceof RecordServiceFieldForbiddenError) {

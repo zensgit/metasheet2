@@ -137,10 +137,59 @@ function normalizeApiErrorPayload(body: unknown): ApiErrorPayload {
   if (!body || typeof body !== 'object') return {}
   const record = body as Record<string, unknown>
   const error = record.error
-  if (typeof error === 'string') return { message: error }
-  if (error && typeof error === 'object') return error as ApiErrorPayload
-  if (typeof record.message === 'string') return { message: record.message }
+  if (typeof error === 'string') {
+    return {
+      code: error,
+      message: typeof record.message === 'string' ? record.message : error,
+      fieldErrors: normalizeFieldErrors(record.fieldErrors),
+    }
+  }
+  if (error && typeof error === 'object') {
+    const payload = error as ApiErrorPayload & { fieldErrors?: unknown }
+    return {
+      ...payload,
+      fieldErrors: normalizeFieldErrors(payload.fieldErrors),
+    }
+  }
+  if (typeof record.message === 'string') {
+    return {
+      message: record.message,
+      fieldErrors: normalizeFieldErrors(record.fieldErrors),
+    }
+  }
   return {}
+}
+
+function normalizeFieldErrors(fieldErrors: unknown): Record<string, string> | undefined {
+  if (Array.isArray(fieldErrors)) {
+    const normalized: Record<string, string> = {}
+    fieldErrors.forEach((entry, index) => {
+      if (!entry || typeof entry !== 'object') return
+      const candidate = entry as { fieldId?: unknown; message?: unknown }
+      const fieldId = typeof candidate.fieldId === 'string' && candidate.fieldId.trim()
+        ? candidate.fieldId.trim()
+        : `field_${index + 1}`
+      const message = typeof candidate.message === 'string' && candidate.message.trim()
+        ? candidate.message.trim()
+        : 'Validation failed'
+      normalized[fieldId] = message
+    })
+    return Object.keys(normalized).length > 0 ? normalized : undefined
+  }
+
+  if (fieldErrors && typeof fieldErrors === 'object') {
+    const normalized = Object.fromEntries(
+      Object.entries(fieldErrors as Record<string, unknown>)
+        .filter(([fieldId]) => fieldId.trim().length > 0)
+        .map(([fieldId, message]) => [
+          fieldId,
+          typeof message === 'string' && message.trim() ? message.trim() : 'Validation failed',
+        ]),
+    )
+    return Object.keys(normalized).length > 0 ? normalized : undefined
+  }
+
+  return undefined
 }
 
 function defaultApiErrorMessage(code: string | undefined, status: number): string {

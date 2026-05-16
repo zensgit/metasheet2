@@ -668,9 +668,20 @@
           <div class="k3-setup__grid">
             <label class="k3-setup__field">
               <span>Project ID（高级，可选）</span>
-              <input v-model.trim="form.projectId" autocomplete="off" data-testid="k3-setup-project-id" placeholder="留空自动使用 tenant:integration-core" />
+              <input
+                :value="form.projectId"
+                autocomplete="off"
+                data-testid="k3-setup-project-id"
+                placeholder="留空自动使用 tenant:integration-core"
+                @input="onK3SetupProjectIdInput"
+                @change="onK3SetupProjectIdInput"
+                @blur="onK3SetupProjectIdInput"
+              />
               <small class="k3-setup__hint" data-testid="k3-setup-project-id-hint">
                 留空时安装会自动使用插件专用作用域 <code>tenant:integration-core</code>；若自定义，结尾必须是 <code>:integration-core</code>，否则会触发 plugin-scope 警告。
+              </small>
+              <small class="k3-setup__hint" data-testid="k3-setup-project-id-scope-status">
+                {{ k3SetupProjectIdScopeStatus }}
               </small>
             </label>
             <div
@@ -966,6 +977,12 @@ const k3SetupProjectIdScopeWarning = computed(() => {
   if (!value || isIntegrationScopedProjectId(value)) return ''
   return `Project ID「${value}」不是 integration 作用域，安装会触发 plugin-scope 警告。留空可自动作用域，或一键规范化为以 :integration-core 结尾。`
 })
+const k3SetupProjectIdScopeStatus = computed(() => {
+  const value = form.projectId.trim()
+  if (!value) return `当前将使用 ${(form.tenantId.trim() || 'default')}:integration-core`
+  if (isIntegrationScopedProjectId(value)) return `当前将使用 ${value}`
+  return `当前为非 integration 作用域：${value}`
+})
 const webApiConnectionStatus = computed(() => {
   if (testingWebApi.value) {
     return {
@@ -1090,6 +1107,11 @@ function normalizeK3SetupProjectIdToScope(): void {
   const normalized = normalizeIntegrationProjectId(form.projectId, form.tenantId || 'default')
   form.projectId = normalized
   setStatus(`Project ID 已规范化为 ${normalized}`, 'info')
+}
+
+function onK3SetupProjectIdInput(event: Event): void {
+  const target = event.target as HTMLInputElement | null
+  form.projectId = target?.value ?? ''
 }
 
 function setStatus(message: string, kind: 'info' | 'success' | 'error' = 'info'): void {

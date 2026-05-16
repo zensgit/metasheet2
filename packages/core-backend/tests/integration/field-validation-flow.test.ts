@@ -445,3 +445,41 @@ describe('Field validation — form submit', () => {
     expect(resTooLow.body.fieldErrors[0].rule).toBe('min')
   })
 })
+
+describe('Field validation — direct record create', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+  })
+
+  test('create with required field missing returns multitable error envelope', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read', 'multitable:write'],
+      queryHandler: defaultQueryHandler([
+        {
+          id: 'fld_code',
+          name: 'Material Code',
+          type: 'string',
+          property: { validation: [{ type: 'required', message: 'Material Code is required' }] },
+          order: 1,
+        },
+      ]),
+    })
+
+    const res = await request(app)
+      .post('/api/multitable/records')
+      .send({ sheetId: SHEET_ID, data: {} })
+
+    expect(res.status).toBe(422)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'Record validation failed',
+        fieldErrors: {
+          fld_code: 'Material Code is required',
+        },
+      },
+    })
+  })
+})
