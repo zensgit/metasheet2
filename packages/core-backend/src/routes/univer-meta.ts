@@ -1938,8 +1938,12 @@ function getDbNotReadyMessage(err: unknown): string | null {
     msg.includes('meta_sheets') ||
     msg.includes('meta_fields') ||
     msg.includes('meta_records') ||
+    msg.includes('meta_record_revisions') ||
+    msg.includes('meta_record_subscriptions') ||
+    msg.includes('meta_record_subscription_notifications') ||
     msg.includes('meta_views') ||
     msg.includes('meta_links') ||
+    msg.includes('plugin_multitable_object_registry') ||
     msg.includes('base_id')
   ) {
     return 'Database schema not ready (meta tables missing). Run `pnpm --filter @metasheet/core-backend migrate` and ensure `DATABASE_URL` points to the dev DB.'

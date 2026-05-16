@@ -77,6 +77,7 @@ function verify_migration_bridge_contract() {
   local provider="${root}/packages/core-backend/dist/src/db/migration-provider.js"
   local legacy_must_change="${root}/packages/core-backend/migrations/056_add_users_must_change_password.sql"
   local timestamp_must_change="${root}/packages/core-backend/dist/src/db/migrations/zzzz20260512100000_add_users_must_change_password.js"
+  local onprem_record_create_repair="${root}/packages/core-backend/dist/src/db/migrations/zzzz20260516113000_repair_onprem_multitable_record_create.js"
 
   search_fixed_string 'MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL' "$provider" || die "migration-provider.js must expose the superseded legacy SQL opt-in"
   search_fixed_string '032_create_approval_records' "$provider" || die "migration-provider.js must carry the superseded legacy SQL skip list"
@@ -84,6 +85,8 @@ function verify_migration_bridge_contract() {
   search_fixed_string '038_config_and_secrets' "$provider" || die "migration-provider.js must no-op superseded config/secrets SQL on upgraded on-prem DBs"
   search_fixed_string "to_regclass('public.users') IS NOT NULL" "$legacy_must_change" || die "056_add_users_must_change_password.sql must no-op when users table is absent"
   search_fixed_string 'must_change_password' "$timestamp_must_change" || die "timestamp users must_change_password bridge migration must be packaged"
+  search_fixed_string 'meta_record_revisions' "$onprem_record_create_repair" || die "on-prem record-create repair migration must create meta_record_revisions"
+  search_fixed_string 'plugin_multitable_object_registry' "$onprem_record_create_repair" || die "on-prem record-create repair migration must repair integration staging field validation"
 }
 
 function verify_generic_integration_workbench_contract() {
@@ -349,6 +352,7 @@ required=(
   "packages/core-backend/dist/src/db/migrate.js"
   "packages/core-backend/dist/src/db/migration-provider.js"
   "packages/core-backend/dist/src/db/migrations/zzzz20260512100000_add_users_must_change_password.js"
+  "packages/core-backend/dist/src/db/migrations/zzzz20260516113000_repair_onprem_multitable_record_create.js"
   "packages/core-backend/package.json"
   "packages/core-backend/migrations/056_add_users_must_change_password.sql"
   "packages/core-backend/migrations/057_create_integration_core_tables.sql"

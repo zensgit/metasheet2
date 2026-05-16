@@ -482,4 +482,33 @@ describe('Field validation — direct record create', () => {
       },
     })
   })
+
+  test('create maps missing record revision schema to DB_NOT_READY instead of generic 500', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read', 'multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('INSERT INTO meta_record_revisions')) {
+          const err = new Error('relation "meta_record_revisions" does not exist') as Error & { code?: string }
+          err.code = '42P01'
+          throw err
+        }
+        return defaultQueryHandler([
+          { id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 },
+        ])(sql, params)
+      },
+    })
+
+    const res = await request(app)
+      .post('/api/multitable/records')
+      .send({ sheetId: SHEET_ID, data: {} })
+
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'DB_NOT_READY',
+        message: expect.stringContaining('Database schema not ready'),
+      },
+    })
+  })
 })
