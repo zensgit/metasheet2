@@ -64,6 +64,47 @@ T-bootstrap was verified by source/unit check:
 - `approval-schema-bootstrap.ts` version was bumped to `20260515-pr3-admin-jump-action`.
 - The rebuilt `approval_records_action_check` includes `'jump'`.
 
+## T11 Scratch-PG Data Cycle — EXECUTED 2026-05-15 (closes #1600)
+
+The DB-required residual was resolved. A bounded scratch PostgreSQL verification slice was run on a local Homebrew PostgreSQL 15.17 (scratch DB `ms2_phase1_verify`, `DATABASE_URL=postgresql://chouhua@localhost:5432/ms2_phase1_verify`). Scope strictly limited to approval Phase 1 — no multitable/spreadsheet/kanban/snapshot/admin-user work.
+
+### Migrations on clean PG
+
+`pnpm --filter @metasheet/core-backend migrate` applied ALL migrations on a fresh DB with zero errors, through the final migration `zzzz20260515130000_add_jump_action_to_approval_records`. Post-migrate schema verified:
+
+- `approval_records_action_check` = `... 'cc','remind','jump'` (PR3 up() applied).
+- `permissions` has `approvals:admin`; `role_permissions` has `(admin, approvals:admin)` (PD2 up()).
+- PR1 freeze tables `approval_published_definitions` + `approval_template_versions` present.
+
+### T11 data-bearing cycle (6/6 PASS)
+
+Relevant FK confirmed present: `role_permissions_permission_code_fkey FOREIGN KEY (permission_code) REFERENCES permissions(code) ON DELETE CASCADE` — so the Fix1 FK-safe `down()` order is materially relevant and correctly handled.
+
+| Step | Action | Result |
+|---|---|---|
+| 1 up | migrate applied jump migration | constraint includes `'jump'` ✅ |
+| 2 insert | `INSERT approval_records(... action='jump' ...)` | `INSERT 0 1`, jump_rows=1 ✅ |
+| 3 down | `migrate rollback` (PR3 jump migration down(), with jump row present) | succeeded despite existing jump row; constraint → no-jump `NOT VALID`; `permissions`=0, `role_permissions`=0, **existing jump row survived (=1)** ✅ |
+| 4 reject | fresh `action='jump'` insert post-down | `ERROR ... violates check constraint "approval_records_action_check"` ✅ |
+| 5 up | `migrate` re-applied jump migration | constraint includes `'jump'`; `approvals:admin` perm+role_permission re-seeded (1/1) ✅ |
+| 6 accept | fresh `action='jump'` insert | `INSERT 0 1`, total jump rows=2 ✅ |
+
+NOT VALID semantics confirmed: existing `jump` rows do not block rollback; new `jump` inserts are rejected post-down; re-up restores acceptance. FK-safe down order confirmed effective (role_permissions deleted before permissions; FK exists).
+
+### Approval-scoped integration (8 files / 44 tests — ALL PASS)
+
+`vitest --config vitest.integration.config.ts run` on the 8 approval specs against the scratch DB:
+
+`approval-pack1a-lifecycle` (3) · `approval-wp1-any-mode` (—) · `approval-wp1-parallel-gateway` (4) · `approval-wp2-source-filter` · `approval-wp3-pending-count` · `approval-wp3-reads` · `approval-wp3-remind` · `approval-wp4-template-categories` (10) → **8 files / 44 tests PASS**.
+
+Notably `approval-pack1a-lifecycle.api.test.ts` PASSES on real DB — this empirically confirms the PR2 **B1** fix (auto-approval audit matched by `metadata.autoApproved + reason` instead of the brittle `actor_id` literal) works end-to-end, closing the DB-gated blind spot that was deferred across PR2/PR3.
+
+Out of scope (left untouched, NOT failures of this slice): multitable/spreadsheet/kanban/snapshot/admin-user integration red items — explicitly excluded per the bounded-slice constraint.
+
+### Disposition
+
+T11 / T-bootstrap and the cross-PR DB-verification debt for approval Phase 1 are **closed by execution**. Issue #1600 may be closed once this backfilled doc lands on `origin/main`.
+
 ## Review Follow-ups
 
 NB1 was handled in this PR:
@@ -81,4 +122,4 @@ NB3 was rechecked after review. The branch is still based on `origin/main@e0721e
 
 ## Residual Risk
 
-The remaining risk is DB-only: the migration's data-bearing rollback sequence must be run on a scratch PostgreSQL database before merge if the reviewer requires strict T11 completion. The unit/source checks make the intended DDL explicit, but they are not a substitute for the data-cycle run.
+RESOLVED for approval Phase 1. The data-bearing T11 cycle was executed on a scratch PostgreSQL (see "T11 Scratch-PG Data Cycle — EXECUTED" above): all 6 steps pass, FK-safe `down()` order confirmed against a real `role_permissions → permissions` FK, and the 8 approval integration specs (44 tests) are green on real DB. The earlier DB-only residual no longer applies to PR1/PR2/PR3. Remaining out-of-scope items (non-approval integration red: multitable/spreadsheet/kanban/snapshot/admin-user) were deliberately not addressed — they are unrelated to approval Phase 1 and tracked elsewhere, not by this slice.
