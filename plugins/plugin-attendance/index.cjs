@@ -1586,6 +1586,196 @@ async function ensureAttendanceReportRecords(context, orgId, logger) {
   }
 }
 
+// ── attendance_report_records sync writer (PR2) ──
+// 复用既有 per-user export 构建路径; 不重写聚合; 全程经 multitable 插件 API; attendance_* 仍是唯一事实源.
+function mapReportFieldToMultitableType(field) {
+  const t = field?.formulaEnabled ? field.formulaOutputType : field?.unit
+  if (['number', 'duration_minutes', 'count', 'days', 'hours', 'minutes'].includes(t)) return 'number'
+  if (t === 'date') return 'date'
+  if (t === 'dateTime') return 'dateTime'
+  if (t === 'boolean') return 'boolean'
+  return 'string'
+}
+
+// Stable superset of value columns from the FULL catalog (incl. disabled) so the managed
+// column set is deterministic across syncs and disabled fields' columns can be nulled on
+// patch (stale-null). Truly-removed-from-catalog codes leave orphan columns = P2 cleanup.
+// MUST exclude fixed-skeleton field ids: a catalog code like `work_date` shares the
+// logical id of the skeleton column, and since ensureFields is INSERT ON CONFLICT DO
+// UPDATE the later (string) value column would overwrite the skeleton type (date). The
+// skeleton already carries work_date/employee_name/department/attendance_group values.
+function buildAttendanceReportRecordsValueColumns(catalogItems) {
+  const skeletonIds = new Set(Object.values(ATTENDANCE_REPORT_RECORDS_FIELDS))
+  return (Array.isArray(catalogItems) ? catalogItems : [])
+    .filter(field => (
+      field
+      && field.code
+      && !ATTENDANCE_REPORT_FORMULA_RESERVED_CODES.has(field.code)
+      && !skeletonIds.has(field.code)
+    ))
+    .map((field, index) => ({
+      id: field.code,
+      name: field.name || field.code,
+      type: mapReportFieldToMultitableType(field),
+      order: 1000 + index,
+    }))
+}
+
+function attendanceReportRecordRowKey(orgId, userId, workDate) {
+  return `${orgId}:${userId}:${workDate}`
+}
+
+function buildAttendanceReportRecordSourceFingerprint(logicalPayload) {
+  const excluded = new Set([
+    ATTENDANCE_REPORT_RECORDS_FIELDS.syncedAt,
+    ATTENDANCE_REPORT_RECORDS_FIELDS.fieldFingerprint,
+    ATTENDANCE_REPORT_RECORDS_FIELDS.sourceFingerprint,
+  ])
+  const canonical = Object.keys(logicalPayload)
+    .filter(key => !excluded.has(key))
+    .sort()
+    .map(key => [key, logicalPayload[key]])
+  return crypto.createHash('sha1').update(JSON.stringify(canonical)).digest('hex')
+}
+
+async function syncAttendanceReportRecords(context, db, orgId, logger, params) {
+  const userId = String(params?.userId || '').trim()
+  const from = String(params?.from || '').trim()
+  const to = String(params?.to || '').trim()
+  const empty = { synced: 0, patched: 0, created: 0, skipped: 0, failed: 0, duplicateRowKeys: 0 }
+
+  const ensured = await ensureAttendanceReportRecords(context, orgId, logger)
+  if (!ensured.available) {
+    return { degraded: true, reason: ensured.reason, ...empty }
+  }
+  const records = context?.api?.multitable?.records
+  const provisioning = context?.api?.multitable?.provisioning
+  if (!records?.queryRecords || !records?.createRecord || !records?.patchRecord || !provisioning?.ensureObject) {
+    return { degraded: true, reason: 'MULTITABLE_RECORDS_API_UNAVAILABLE', ...empty }
+  }
+
+  const formulaOptions = await getAttendanceFormulaRuntimeOptions(db)
+  const catalog = await buildAttendanceReportFieldCatalogResponse(context, orgId, logger, {
+    provision: false,
+    ...formulaOptions,
+  })
+  const reportFields = await loadAttendanceRecordReportFields(context, orgId, logger, formulaOptions)
+  const reportFieldConfig = buildAttendanceReportFieldConfig(reportFields)
+  const fieldFingerprint = reportFieldConfig?.fieldsFingerprint?.value || ''
+
+  // ensure value columns (stable superset) via the same ensureObject upsert (idempotent, never deletes)
+  const valueColumns = buildAttendanceReportRecordsValueColumns(catalog.items)
+  const baseDescriptor = getAttendanceReportRecordsDescriptor()
+  await provisioning.ensureObject({
+    projectId: ensured.projectId,
+    descriptor: { ...baseDescriptor, fields: [...baseDescriptor.fields, ...valueColumns] },
+  })
+  const logicalIds = [
+    ...Object.values(ATTENDANCE_REPORT_RECORDS_FIELDS),
+    ...valueColumns.map(column => column.id),
+  ]
+  const fieldIds = typeof provisioning.resolveFieldIds === 'function'
+    ? await provisioning.resolveFieldIds({
+      projectId: ensured.projectId,
+      objectId: ATTENDANCE_REPORT_RECORDS_OBJECT_ID,
+      fieldIds: logicalIds,
+    })
+    : Object.fromEntries(logicalIds.map(id => [id, id]))
+  const physical = logicalId => fieldIds?.[logicalId] || logicalId
+
+  const rows = await db.query(
+    `SELECT ar.user_id, ar.org_id, ar.work_date, ar.timezone, ar.first_in_at, ar.last_out_at,
+            ar.work_minutes, ar.late_minutes, ar.early_leave_minutes, ar.status, ar.is_workday,
+            ar.meta, u.name AS user_name, u.username AS username
+     FROM attendance_records ar
+     LEFT JOIN users u ON u.id = ar.user_id
+     WHERE ar.user_id = $1 AND ar.org_id = $2 AND ar.work_date BETWEEN $3 AND $4
+     ORDER BY ar.work_date DESC
+     LIMIT 5000`,
+    [userId, orgId, from, to]
+  )
+  const approvedMap = await loadApprovedMinutesRange(db, orgId, userId, from, to)
+
+  const result = { ...empty, synced: rows.length }
+  const syncedAt = new Date().toISOString()
+  for (const row of rows) {
+    try {
+      const workDate = normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10)
+      const approved = approvedMap.get(workDate) ?? { leaveMinutes: 0, overtimeMinutes: 0, reportSubtypeMinutes: {} }
+      const enrichedRow = {
+        ...row,
+        work_date: workDate,
+        meta: {
+          ...normalizeMetadata(row.meta),
+          leave_minutes: approved.leaveMinutes,
+          overtime_minutes: approved.overtimeMinutes,
+          reportSubtypeMinutes: approved.reportSubtypeMinutes ?? {},
+        },
+      }
+      const exportItem = await buildAttendanceRecordReportExportItemAsync(
+        context,
+        enrichedRow,
+        reportFields.fields,
+        reportFields.formulaSourceFields,
+        formulaOptions,
+      )
+      const rowKey = attendanceReportRecordRowKey(orgId, userId, workDate)
+      const logical = {
+        [ATTENDANCE_REPORT_RECORDS_FIELDS.rowKey]: rowKey,
+        [ATTENDANCE_REPORT_RECORDS_FIELDS.orgId]: orgId,
+        [ATTENDANCE_REPORT_RECORDS_FIELDS.userId]: userId,
+        [ATTENDANCE_REPORT_RECORDS_FIELDS.employeeName]: firstNonEmptyValue(row.user_name, row.username, userId),
+        [ATTENDANCE_REPORT_RECORDS_FIELDS.department]: firstNonEmptyValue(readAttendanceRecordMeta(enrichedRow, ['department', '部门'])),
+        [ATTENDANCE_REPORT_RECORDS_FIELDS.attendanceGroup]: firstNonEmptyValue(readAttendanceRecordMeta(enrichedRow, ['attendanceGroup', 'attendance_group', '考勤组'])),
+        [ATTENDANCE_REPORT_RECORDS_FIELDS.workDate]: workDate,
+      }
+      for (const column of valueColumns) {
+        // active output → value; managed but not active (disabled etc.) → null (stale clear)
+        logical[column.id] = Object.prototype.hasOwnProperty.call(exportItem, column.id)
+          ? exportItem[column.id]
+          : null
+      }
+      const sourceFingerprint = buildAttendanceReportRecordSourceFingerprint(logical)
+
+      const data = {}
+      for (const [logicalId, value] of Object.entries(logical)) {
+        data[physical(logicalId)] = value
+      }
+      data[physical(ATTENDANCE_REPORT_RECORDS_FIELDS.fieldFingerprint)] = fieldFingerprint
+      data[physical(ATTENDANCE_REPORT_RECORDS_FIELDS.sourceFingerprint)] = sourceFingerprint
+      data[physical(ATTENDANCE_REPORT_RECORDS_FIELDS.syncedAt)] = syncedAt
+
+      const existing = await records.queryRecords({
+        sheetId: ensured.sheetId,
+        filters: { [physical(ATTENDANCE_REPORT_RECORDS_FIELDS.rowKey)]: rowKey },
+        limit: 50,
+      })
+      if (!Array.isArray(existing) || existing.length === 0) {
+        await records.createRecord({ sheetId: ensured.sheetId, data })
+        result.created += 1
+        continue
+      }
+      if (existing.length > 1) result.duplicateRowKeys += existing.length - 1
+      const target = existing[0]
+      const existingData = (target && target.data && typeof target.data === 'object') ? target.data : {}
+      const existingSource = existingData[physical(ATTENDANCE_REPORT_RECORDS_FIELDS.sourceFingerprint)]
+      const existingField = existingData[physical(ATTENDANCE_REPORT_RECORDS_FIELDS.fieldFingerprint)]
+      if (existingSource === sourceFingerprint && existingField === fieldFingerprint) {
+        result.skipped += 1
+        continue
+      }
+      await records.patchRecord({ sheetId: ensured.sheetId, recordId: target.id, changes: data })
+      result.patched += 1
+    } catch (error) {
+      result.failed += 1
+      logger?.warn?.('attendance report record sync row failed', {
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+  return { ...result, fieldFingerprint, syncedAt }
+}
+
 async function loadAttendanceReportFieldCatalog(context, orgId) {
   const projectId = getAttendanceReportFieldProjectId(orgId)
   const multitable = context?.api?.multitable
@@ -9295,6 +9485,11 @@ module.exports = {
     loadAttendanceReportFieldCatalog,
     getAttendanceReportRecordsDescriptor,
     ensureAttendanceReportRecords,
+    syncAttendanceReportRecords,
+    buildAttendanceReportRecordsValueColumns,
+    mapReportFieldToMultitableType,
+    buildAttendanceReportRecordSourceFingerprint,
+    attendanceReportRecordRowKey,
     ATTENDANCE_REPORT_RECORDS_OBJECT_ID,
     ATTENDANCE_REPORT_RECORDS_FIELDS,
     mergeAttendanceReportFieldDefinitions,
@@ -21336,6 +21531,51 @@ module.exports = {
           syncedAt: new Date().toISOString(),
         })
         res.json({ ok: true, data })
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/report-records/sync',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const parsed = z.object({
+          from: z.string().min(1),
+          to: z.string().min(1),
+          userId: z.string().min(1),
+        }).safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+        if (!dateRange.ok) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+          return
+        }
+        const result = await syncAttendanceReportRecords(context, db, orgId, logger, {
+          from: dateRange.from,
+          to: dateRange.to,
+          userId: parsed.data.userId,
+        })
+        if (result.degraded) {
+          res.json({ ok: true, data: { degraded: true, reason: result.reason, synced: 0 } })
+          return
+        }
+        emitEvent('attendance.report_records.synced', {
+          orgId,
+          userId: parsed.data.userId,
+          from: dateRange.from,
+          to: dateRange.to,
+          synced: result.synced,
+          patched: result.patched,
+          created: result.created,
+          skipped: result.skipped,
+          failed: result.failed,
+          duplicateRowKeys: result.duplicateRowKeys,
+          syncedAt: result.syncedAt,
+        })
+        res.json({ ok: true, data: result })
       })
     )
 

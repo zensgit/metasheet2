@@ -650,6 +650,146 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(failed).toMatchObject({ available: false, reason: 'PROVISIONING_FAILED', sheetId: null })
   })
 
+  it('report-records sync: pure helpers (type map / value columns / row key / source fingerprint)', () => {
+    expect(helpers.mapReportFieldToMultitableType({ unit: 'minutes' })).toBe('number')
+    expect(helpers.mapReportFieldToMultitableType({ unit: 'count' })).toBe('number')
+    expect(helpers.mapReportFieldToMultitableType({ unit: 'text' })).toBe('string')
+    expect(helpers.mapReportFieldToMultitableType({ unit: 'dateTime' })).toBe('dateTime')
+    expect(helpers.mapReportFieldToMultitableType({ formulaEnabled: true, formulaOutputType: 'duration_minutes' })).toBe('number')
+    expect(helpers.mapReportFieldToMultitableType({ formulaEnabled: true, formulaOutputType: 'boolean' })).toBe('boolean')
+    expect(helpers.mapReportFieldToMultitableType({ formulaEnabled: true, formulaOutputType: 'date' })).toBe('date')
+
+    expect(helpers.attendanceReportRecordRowKey('org-1', 'u-1', '2026-05-13')).toBe('org-1:u-1:2026-05-13')
+
+    const cols = helpers.buildAttendanceReportRecordsValueColumns([
+      { code: 'work_date', name: '工作日期', unit: 'dateTime' }, // fixed skeleton id → excluded
+      { code: 'employee_name', name: '姓名', unit: 'text' }, // skeleton → excluded
+      { code: 'department', name: '部门', unit: 'text' }, // skeleton → excluded
+      { code: 'attendance_group', name: '考勤组', unit: 'text' }, // skeleton → excluded
+      { code: 'work_duration', name: '工作时长', unit: 'minutes' },
+      { code: 'late_minutes', name: '迟到分钟(reserved)', unit: 'minutes' }, // raw alias reserved → skipped
+      { code: 'leave_type_annual_duration', name: '年假时长', unit: 'minutes' },
+    ])
+    expect(cols.map((c: { id: string }) => c.id)).toEqual(['work_duration', 'leave_type_annual_duration'])
+    expect(cols.every((c: { type: string }) => c.type === 'number')).toBe(true)
+    // deterministic order preserved (sortOrder upstream → index here), reserved excluded
+    expect(cols.find((c: { id: string }) => c.id === 'late_minutes')).toBeUndefined()
+    // Fix-1 regression: value columns have ZERO intersection with the fixed skeleton ids
+    const skeletonIds = new Set(Object.values(helpers.ATTENDANCE_REPORT_RECORDS_FIELDS) as string[])
+    expect(cols.some((c: { id: string }) => skeletonIds.has(c.id))).toBe(false)
+    // composing [skeleton, ...valueColumns] for ensureObject: work_date appears ONCE, type stays 'date'
+    const composed = [...helpers.getAttendanceReportRecordsDescriptor().fields, ...cols]
+    const workDateFields = composed.filter((f: { id: string }) => f.id === 'work_date')
+    expect(workDateFields).toHaveLength(1)
+    expect(workDateFields[0].type).toBe('date')
+    for (const sk of ['employee_name', 'department', 'attendance_group']) {
+      expect(composed.filter((f: { id: string }) => f.id === sk)).toHaveLength(1)
+    }
+
+    // source fingerprint: excludes synced_at + both fingerprints, key-sorted (order-independent)
+    const a = helpers.buildAttendanceReportRecordSourceFingerprint({ b: 2, a: 1, synced_at: 'X', source_fingerprint: 'S', field_fingerprint: 'F' })
+    const b = helpers.buildAttendanceReportRecordSourceFingerprint({ a: 1, b: 2, synced_at: 'Y', source_fingerprint: 'Z', field_fingerprint: 'Q' })
+    expect(a).toBe(b) // synced_at + fingerprints excluded, key order irrelevant
+    const c = helpers.buildAttendanceReportRecordSourceFingerprint({ a: 1, b: 3 })
+    expect(c).not.toBe(a) // payload value change → different fingerprint
+  })
+
+  it('report-records sync: upsert / skip / duplicate / degraded / export decoupling', async () => {
+    // degraded: no multitable provisioning → {degraded:true}, no throw
+    const degraded = await helpers.syncAttendanceReportRecords(
+      { api: { multitable: null, database: { query: async () => [] } } },
+      { query: async () => [] },
+      'org-1',
+      { warn: vi.fn() },
+      { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' },
+    )
+    expect(degraded).toMatchObject({ degraded: true, synced: 0, created: 0, patched: 0 })
+
+    // export decoupling: a degraded sync must not break the independent export builder
+    const exportFields = helpers.resolveAttendanceRecordReportFields(
+      helpers.mergeAttendanceReportFieldDefinitions([], {}),
+    )
+    const exportRow = { work_date: '2026-05-13', status: 'normal', is_workday: true, meta: {}, work_minutes: 480 }
+    expect(() => helpers.buildAttendanceRecordReportExportItem(exportRow, exportFields)).not.toThrow()
+
+    // store-backed records mock (Map by physical row_key value) for upsert/skip/duplicate
+    const store: Array<{ id: string; data: Record<string, unknown> }> = []
+    let seq = 0
+    const rowKeyFid = 'fld_row_key'
+    const records = {
+      queryRecords: async ({ filters }: { filters?: Record<string, unknown> }) => {
+        const want = filters?.[rowKeyFid]
+        return store.filter(r => r.data[rowKeyFid] === want)
+      },
+      createRecord: async ({ data }: { data: Record<string, unknown> }) => {
+        const rec = { id: `rec-${++seq}`, data: { ...data } }
+        store.push(rec)
+        return rec
+      },
+      patchRecord: async ({ recordId, changes }: { recordId: string; changes: Record<string, unknown> }) => {
+        const rec = store.find(r => r.id === recordId)
+        if (rec) rec.data = { ...rec.data, ...changes }
+        return rec
+      },
+    }
+    const ensureObjectDescriptors: Array<{ fields: Array<{ id: string; type: string }> }> = []
+    const provisioning = {
+      ensureObject: async (input: { descriptor?: { fields?: Array<{ id: string; type: string }> } }) => {
+        if (input?.descriptor?.fields) ensureObjectDescriptors.push({ fields: input.descriptor.fields })
+        return { baseId: 'base_legacy', sheet: { id: 'sheet_rr' } }
+      },
+      resolveFieldIds: async ({ fieldIds }: { fieldIds: string[] }) =>
+        Object.fromEntries(fieldIds.map(f => [f, `fld_${f}`])),
+      // NO findObjectSheet → catalog falls back to deterministic built-in field set
+    }
+    const attendanceRows = [
+      { user_id: 'u-1', org_id: 'org-1', work_date: '2026-05-13', timezone: 'UTC', first_in_at: '2026-05-13T09:00:00Z', last_out_at: '2026-05-13T18:00:00Z', work_minutes: 480, late_minutes: 0, early_leave_minutes: 0, status: 'normal', is_workday: true, meta: {}, user_name: '张三', username: 'zhangsan' },
+      { user_id: 'u-1', org_id: 'org-1', work_date: '2026-05-14', timezone: 'UTC', first_in_at: '2026-05-14T09:10:00Z', last_out_at: '2026-05-14T18:00:00Z', work_minutes: 470, late_minutes: 10, early_leave_minutes: 0, status: 'late', is_workday: true, meta: {}, user_name: '张三', username: 'zhangsan' },
+    ]
+    const db = {
+      query: async (sql: string) => {
+        if (/FROM attendance_records ar/.test(sql)) return attendanceRows
+        return [] // system_configs / leave_types / overtime_rules / approved → empty (tolerated)
+      },
+    }
+    const context = { api: { multitable: { provisioning, records }, database: db } }
+
+    // sync #1 → all created
+    const r1 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
+    expect(r1).toMatchObject({ synced: 2, created: 2, patched: 0, skipped: 0, failed: 0, duplicateRowKeys: 0 })
+    expect(store.length).toBe(2)
+    // Fix-1 integration: the descriptor handed to ensureObject (value-columns ensure) must
+    // carry work_date exactly once and still as type 'date' (no string overwrite collision)
+    const valueEnsure = ensureObjectDescriptors[ensureObjectDescriptors.length - 1]
+    const wd = valueEnsure.fields.filter(f => f.id === 'work_date')
+    expect(wd).toHaveLength(1)
+    expect(wd[0].type).toBe('date')
+    for (const sk of ['employee_name', 'department', 'attendance_group', 'row_key']) {
+      expect(valueEnsure.fields.filter(f => f.id === sk)).toHaveLength(1)
+    }
+    expect(store[0].data[rowKeyFid]).toBe('org-1:u-1:2026-05-13')
+    expect(typeof store[0].data['fld_field_fingerprint']).toBe('string')
+    expect(typeof store[0].data['fld_source_fingerprint']).toBe('string')
+
+    // sync #2 same data → all skipped (source+field fingerprint 双等)
+    const r2 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
+    expect(r2).toMatchObject({ synced: 2, created: 0, skipped: 2, patched: 0 })
+    expect(store.length).toBe(2)
+
+    // skip-boundary: source unchanged but field_fingerprint stale → must patch, not skip
+    store[0].data['fld_field_fingerprint'] = 'STALE-FIELD-FP'
+    const r3 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
+    expect(r3.patched).toBe(1)
+    expect(r3.skipped).toBe(1)
+    expect(store[0].data['fld_field_fingerprint']).not.toBe('STALE-FIELD-FP') // rewritten
+
+    // duplicate row_key fuse: inject a 2nd record same row_key → patch first, count duplicate
+    store.push({ id: 'rec-dup', data: { ...store[0].data } })
+    const r4 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
+    expect(r4.duplicateRowKeys).toBeGreaterThanOrEqual(1)
+    expect(store.filter(r => r.data[rowKeyFid] === 'org-1:u-1:2026-05-13').length).toBe(2) // not auto-deleted (v1)
+  })
+
   it('does not add direct meta table writes to the attendance plugin', () => {
     const source = readFileSync(
       new URL('../../../../plugins/plugin-attendance/index.cjs', import.meta.url),
