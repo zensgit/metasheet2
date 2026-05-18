@@ -714,6 +714,153 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).toContain('SQL source 需要部署 allowlist queryExecutor 后才能读取')
   })
 
+  it('explains source/target connector split and supports safe connection draft management', async () => {
+    const upsertBodies: Array<Record<string, unknown>> = []
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'http', label: 'HTTP API', roles: ['source', 'target', 'bidirectional'], supports: ['read', 'upsert'], advanced: false },
+          { kind: 'erp:k3-wise-webapi', label: 'K3 WISE WebAPI', roles: ['target'], supports: ['upsert'], advanced: false },
+          { kind: 'erp:k3-wise-sqlserver', label: 'K3 WISE SQL Server Channel', roles: ['source'], supports: ['read'], advanced: true },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') {
+        return jsonResponse([
+          {
+            id: 'plm_source',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'PLM Source',
+            kind: 'http',
+            role: 'source',
+            status: 'active',
+            config: { baseUrl: 'https://plm.example.test/api' },
+            capabilities: { read: true },
+          },
+          {
+            id: 'k3_target',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'K3 Target',
+            kind: 'erp:k3-wise-webapi',
+            role: 'target',
+            status: 'active',
+            config: {
+              baseUrl: 'http://k3.example.test/K3API/',
+              objects: { material: { endpointPath: '/Material/Save' } },
+            },
+            capabilities: { write: true },
+          },
+        ])
+      }
+      if (url === '/api/integration/external-systems' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body || '{}')) as Record<string, unknown>
+        upsertBodies.push(body)
+        return jsonResponse({
+          id: body.id || 'k3_target_copy',
+          tenantId: body.tenantId,
+          workspaceId: body.workspaceId ?? null,
+          name: body.name,
+          kind: body.kind,
+          role: body.role,
+          status: body.status,
+          config: body.config,
+          capabilities: body.capabilities,
+        })
+      }
+      if (url === '/api/integration/staging/descriptors') {
+        return jsonResponse([])
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    // eslint-disable-next-line vue/one-component-per-file
+    app.component('RouterLink', {
+      props: {
+        to: {
+          type: [String, Object],
+          required: false,
+          default: '',
+        },
+      },
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi()
+
+    const sourceOptions = Array.from((container.querySelector('[data-testid="source-system"]') as HTMLSelectElement).options).map((option) => option.textContent)
+    const targetOptions = Array.from((container.querySelector('[data-testid="target-system"]') as HTMLSelectElement).options).map((option) => option.textContent)
+    expect(sourceOptions).toContain('PLM Source · http')
+    expect(sourceOptions).not.toContain('K3 Target · erp:k3-wise-webapi')
+    expect(targetOptions).toContain('K3 Target · erp:k3-wise-webapi')
+    expect(container.querySelector('[data-testid="source-selector-explanation"]')?.textContent).toContain('K3 WISE WebAPI 现阶段只在目标侧出现')
+    expect(container.querySelector('[data-testid="k3-webapi-read-gate-notice"]')?.textContent).toContain('GATE-front contract')
+    expect(container.querySelector('[data-testid="target-selector-explanation"]')?.textContent).toContain('Save-only')
+
+    ;(container.querySelector('[data-testid="toggle-inventory-overview"]') as HTMLButtonElement).click()
+    await flushUi()
+    const deleteButton = container.querySelector('[data-testid="delete-connection-k3_target"]') as HTMLButtonElement
+    expect(deleteButton.disabled).toBe(true)
+    expect(deleteButton.textContent).toContain('删除待接口')
+
+    ;(container.querySelector('[data-testid="copy-connection-k3_target"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect((container.querySelector('[data-testid="connection-draft-name"]') as HTMLInputElement).value).toBe('K3 Target copy')
+    expect((container.querySelector('[data-testid="connection-draft-status"]') as HTMLSelectElement).value).toBe('inactive')
+    expect(container.querySelector('[data-testid="connection-duplicate-warning"]')?.textContent).toContain('已有同类型同角色连接')
+
+    ;(container.querySelector('[data-testid="save-connection-draft"]') as HTMLButtonElement).click()
+    await flushUi(8)
+    expect(upsertBodies[0]).toMatchObject({
+      tenantId: 'default',
+      workspaceId: null,
+      name: 'K3 Target copy',
+      kind: 'erp:k3-wise-webapi',
+      role: 'target',
+      status: 'inactive',
+      config: {
+        baseUrl: 'http://k3.example.test/K3API/',
+      },
+      capabilities: {
+        write: true,
+      },
+    })
+    expect(container.textContent).toContain('连接已保存：K3 Target copy')
+
+    ;(container.querySelector('[data-testid="edit-connection-k3_target"]') as HTMLButtonElement).click()
+    await flushUi()
+    const draftName = container.querySelector('[data-testid="connection-draft-name"]') as HTMLInputElement
+    draftName.value = 'K3 Target Edited'
+    draftName.dispatchEvent(new Event('input', { bubbles: true }))
+    ;(container.querySelector('[data-testid="save-connection-draft"]') as HTMLButtonElement).click()
+    await flushUi(8)
+    expect(upsertBodies[1]).toMatchObject({
+      id: 'k3_target',
+      name: 'K3 Target Edited',
+      kind: 'erp:k3-wise-webapi',
+      role: 'target',
+      status: 'active',
+    })
+
+    ;(container.querySelector('[data-testid="deactivate-connection-plm_source"]') as HTMLButtonElement).click()
+    await flushUi(8)
+    expect(upsertBodies[2]).toMatchObject({
+      id: 'plm_source',
+      name: 'PLM Source',
+      kind: 'http',
+      role: 'source',
+      status: 'inactive',
+    })
+    expect(container.textContent).toContain('连接已停用：PLM Source')
+  })
+
   it('does not mark error-state source or target systems as dry-run ready', async () => {
     apiFetchMock.mockImplementation(async (url: string) => {
       if (url === '/api/integration/adapters') {
