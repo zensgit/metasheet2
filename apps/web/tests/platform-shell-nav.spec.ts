@@ -108,6 +108,10 @@ describe('platform shell navigation', () => {
     ]))
     expect(links.some((link) => link.href === '/grid')).toBe(false)
     expect(links.some((link) => link.href === '/spreadsheets')).toBe(false)
+    expect(links.some((link) => link.href === '/kanban')).toBe(false)
+    expect(links.some((link) => link.href === '/calendar')).toBe(false)
+    expect(links.some((link) => link.href === '/gallery')).toBe(false)
+    expect(links.some((link) => link.href === '/form')).toBe(false)
     expect(links.some((link) => link.href === '/plm')).toBe(false)
     expect(links.some((link) => link.href === '/plm/audit')).toBe(false)
     expect(links.some((link) => link.href === '/integrations/k3-wise')).toBe(false)
@@ -196,7 +200,23 @@ describe('platform shell navigation', () => {
     ]))
     expect(links.some((link) => link.href === '/grid')).toBe(false)
     expect(links.some((link) => link.href === '/spreadsheets')).toBe(false)
+    expect(links.some((link) => link.href === '/kanban')).toBe(false)
+    expect(links.some((link) => link.href === '/calendar')).toBe(false)
+    expect(links.some((link) => link.href === '/gallery')).toBe(false)
+    expect(links.some((link) => link.href === '/form')).toBe(false)
     expect(links.some((link) => link.href === '/admin/users')).toBe(false)
+  })
+
+  it('marks legacy table/view routes as deprecated while keeping deep links registered', async () => {
+    const source = await readFile(resolve(process.cwd(), 'src/router/appRoutes.ts'), 'utf8')
+    const deprecatedPaths = ['/grid', '/kanban', '/calendar', '/gallery', '/form']
+
+    for (const path of deprecatedPaths) {
+      const routePattern = new RegExp(
+        `path:\\s*'${path.replace('/', '\\/')}'[\\s\\S]*?meta:\\s*\\{[^}]*requiresAuth:\\s*true[^}]*deprecated:\\s*true`,
+      )
+      expect(source, `Expected ${path} route to remain registered and deprecated`).toMatch(routePattern)
+    }
   })
 
   it('keeps a dedicated approvals route in the platform shell', async () => {
