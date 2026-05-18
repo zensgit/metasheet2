@@ -446,6 +446,25 @@ const ATTENDANCE_SUMMARY_FORMULA_SOURCE_FIELDS = Object.freeze([
 const ATTENDANCE_SUMMARY_FORMULA_SOURCE_CODE_SET = new Set(
   ATTENDANCE_SUMMARY_FORMULA_SOURCE_FIELDS.map(field => field.code)
 )
+const ATTENDANCE_PAYROLL_SUMMARY_DEFAULT_FIELD_CODES = Object.freeze([
+  'total_minutes',
+  'leave_minutes',
+  'overtime_minutes',
+  'total_late_minutes',
+  'total_early_leave_minutes',
+  'total_days',
+  'normal_days',
+  'late_days',
+  'early_leave_days',
+  'late_early_days',
+  'partial_days',
+  'absent_days',
+  'adjusted_days',
+  'off_days',
+])
+const ATTENDANCE_SUMMARY_FORMULA_SOURCE_FIELD_MAP = new Map(
+  ATTENDANCE_SUMMARY_FORMULA_SOURCE_FIELDS.map(field => [field.code, field])
+)
 
 const ATTENDANCE_LEAVE_SUBTYPE_CODE_PATTERN = /^leave_type_[a-z0-9_]+_duration$/
 const ATTENDANCE_OVERTIME_SUBTYPE_CODE_PATTERN = /^overtime_rule_[a-z0-9]+_duration$/
@@ -3187,6 +3206,105 @@ async function enrichAttendanceSummaryWithFormulaValues(context, summary, formul
       formulaReferences: field.formulaReferences,
     })),
   }
+}
+
+function normalizeAttendancePayrollSummaryFieldTemplateConfig(config) {
+  const payload = normalizeMetadata(config)
+  const rawFields = firstDefinedValue(
+    payload.summaryFieldCodes,
+    payload.summaryFields,
+    payload.payrollSummaryFieldCodes,
+    payload.payrollSummaryFields,
+    payload.summary_field_codes,
+    payload.summary_fields,
+  )
+  if (!Array.isArray(rawFields)) {
+    return { configured: false, fieldCodes: [] }
+  }
+  const seen = new Set()
+  const fieldCodes = []
+  for (const item of rawFields) {
+    const source = item && typeof item === 'object'
+      ? firstDefinedValue(item.code, item.fieldCode, item.field_code, item.metric)
+      : item
+    if (item && typeof item === 'object' && item.enabled === false) continue
+    const code = typeof source === 'string' ? source.trim() : ''
+    if (!code || seen.has(code)) continue
+    seen.add(code)
+    fieldCodes.push(code)
+  }
+  return { configured: true, fieldCodes }
+}
+
+function getAttendancePayrollSummaryFieldValue(summary, code) {
+  if (!summary || !code) return ''
+  const formulaValues = summary.formula_values && typeof summary.formula_values === 'object'
+    ? summary.formula_values
+    : {}
+  if (Object.prototype.hasOwnProperty.call(formulaValues, code)) return formulaValues[code]
+  if (Object.prototype.hasOwnProperty.call(summary, code)) return summary[code]
+  const valueMap = buildAttendanceSummaryFormulaValueMap(summary)
+  if (Object.prototype.hasOwnProperty.call(valueMap, code)) return valueMap[code]
+  return ''
+}
+
+function buildAttendancePayrollSummaryFieldTemplate(summary, formulaFields, config) {
+  const normalized = normalizeAttendancePayrollSummaryFieldTemplateConfig(config)
+  const formulaFieldMap = new Map(
+    (Array.isArray(formulaFields) ? formulaFields : [])
+      .filter(field => field?.code)
+      .map(field => [field.code, field])
+  )
+  const requestedCodes = normalized.configured
+    ? normalized.fieldCodes
+    : [
+        ...ATTENDANCE_PAYROLL_SUMMARY_DEFAULT_FIELD_CODES,
+        ...[...formulaFieldMap.keys()].filter(code => !ATTENDANCE_PAYROLL_SUMMARY_DEFAULT_FIELD_CODES.includes(code)),
+      ]
+  const fields = []
+  const droppedFieldCodes = []
+  for (const code of requestedCodes) {
+    const formulaField = formulaFieldMap.get(code)
+    if (formulaField) {
+      fields.push({
+        code,
+        name: formulaField.name || code,
+        unit: formulaField.unit || 'text',
+        formulaOutputType: formulaField.formulaOutputType || 'text',
+        formulaEnabled: true,
+        value: getAttendancePayrollSummaryFieldValue(summary, code),
+      })
+      continue
+    }
+    const baseField = ATTENDANCE_SUMMARY_FORMULA_SOURCE_FIELD_MAP.get(code)
+    if (baseField) {
+      fields.push({
+        code,
+        name: baseField.name || code,
+        unit: baseField.unit || 'number',
+        formulaOutputType: normalizeAttendanceReportFormulaOutputType(null, baseField.unit),
+        formulaEnabled: false,
+        value: getAttendancePayrollSummaryFieldValue(summary, code),
+      })
+      continue
+    }
+    droppedFieldCodes.push(code)
+  }
+  return {
+    configured: normalized.configured,
+    fieldCodes: fields.map(field => field.code),
+    fields,
+    droppedFieldCodes,
+  }
+}
+
+async function loadPayrollTemplateForCycle(db, orgId, cycle) {
+  if (!cycle?.templateId) return null
+  const rows = await db.query(
+    'SELECT * FROM attendance_payroll_templates WHERE id = $1 AND org_id = $2',
+    [cycle.templateId, orgId]
+  )
+  return rows.length ? mapPayrollTemplateRow(rows[0]) : null
 }
 
 function findImportProfile(profileId) {
@@ -9754,30 +9872,27 @@ function buildAttendanceRecordReportCsv(rows, reportFields, options = {}) {
 
 function buildPayrollSummaryCsv(summary, cycle, options = {}) {
   const headers = ['cycle_id', 'cycle_name', 'start_date', 'end_date', 'metric', 'value']
-  const rows = [
-    ['total_minutes', summary.total_minutes ?? 0],
-    ['leave_minutes', summary.leave_minutes ?? 0],
-    ['overtime_minutes', summary.overtime_minutes ?? 0],
-    ['total_late_minutes', summary.total_late_minutes ?? 0],
-    ['total_early_leave_minutes', summary.total_early_leave_minutes ?? 0],
-    ['total_days', summary.total_days ?? 0],
-    ['normal_days', summary.normal_days ?? 0],
-    ['late_days', summary.late_days ?? 0],
-    ['early_leave_days', summary.early_leave_days ?? 0],
-    ['late_early_days', summary.late_early_days ?? 0],
-    ['partial_days', summary.partial_days ?? 0],
-    ['absent_days', summary.absent_days ?? 0],
-    ['adjusted_days', summary.adjusted_days ?? 0],
-    ['off_days', summary.off_days ?? 0],
-  ]
-  const formulaValues = summary?.formula_values && typeof summary.formula_values === 'object'
-    ? summary.formula_values
-    : {}
-  for (const field of options.formulaFields || []) {
-    if (!field?.code) continue
-    rows.push([field.code, Object.prototype.hasOwnProperty.call(formulaValues, field.code)
-      ? formulaValues[field.code]
-      : ATTENDANCE_REPORT_FORMULA_ERROR_VALUE])
+  const templateFields = Array.isArray(options.summaryFields) ? options.summaryFields : null
+  const rows = templateFields
+    ? templateFields
+        .filter(field => field?.code)
+        .map(field => [field.code, Object.prototype.hasOwnProperty.call(field, 'value')
+          ? field.value
+          : getAttendancePayrollSummaryFieldValue(summary, field.code)])
+    : ATTENDANCE_PAYROLL_SUMMARY_DEFAULT_FIELD_CODES.map(code => [
+        code,
+        getAttendancePayrollSummaryFieldValue(summary, code),
+      ])
+  if (!templateFields) {
+    const formulaValues = summary?.formula_values && typeof summary.formula_values === 'object'
+      ? summary.formula_values
+      : {}
+    for (const field of options.formulaFields || []) {
+      if (!field?.code) continue
+      rows.push([field.code, Object.prototype.hasOwnProperty.call(formulaValues, field.code)
+        ? formulaValues[field.code]
+        : ATTENDANCE_REPORT_FORMULA_ERROR_VALUE])
+    }
   }
   const csvRows = rows.map(([metric, value]) => ({
     cycle_id: cycle.id,
@@ -10217,6 +10332,9 @@ module.exports = {
     buildAttendanceSummaryFormulaValueMap,
     buildAttendanceSummaryFormulaValues,
     enrichAttendanceSummaryWithFormulaValues,
+    normalizeAttendancePayrollSummaryFieldTemplateConfig,
+    buildAttendancePayrollSummaryFieldTemplate,
+    getAttendancePayrollSummaryFieldValue,
     buildAttendanceRecordReportExportItem,
     buildAttendanceRecordReportExportItemAsync,
     buildAttendanceRecordReportCsv,
@@ -20811,12 +20929,19 @@ module.exports = {
           const formulaOptions = await getAttendanceFormulaRuntimeOptions(db)
           const summaryFormulaFields = await loadAttendanceSummaryFormulaFields(context, orgId, logger, formulaOptions)
           const summaryWithFormulas = await enrichAttendanceSummaryWithFormulaValues(context, summary, summaryFormulaFields)
+          const payrollTemplate = await loadPayrollTemplateForCycle(db, orgId, cycle)
+          const summaryFieldTemplate = buildAttendancePayrollSummaryFieldTemplate(
+            summaryWithFormulas,
+            summaryFormulaFields,
+            payrollTemplate?.config,
+          )
 
           res.json({
             ok: true,
             data: {
               cycle,
               summary: summaryWithFormulas,
+              summaryFieldTemplate,
             },
           })
         } catch (error) {
@@ -20878,7 +21003,16 @@ module.exports = {
           const formulaOptions = await getAttendanceFormulaRuntimeOptions(db)
           const summaryFormulaFields = await loadAttendanceSummaryFormulaFields(context, orgId, logger, formulaOptions)
           const summaryWithFormulas = await enrichAttendanceSummaryWithFormulaValues(context, summary, summaryFormulaFields)
-          const csv = buildPayrollSummaryCsv(summaryWithFormulas, cycle, { formulaFields: summaryFormulaFields })
+          const payrollTemplate = await loadPayrollTemplateForCycle(db, orgId, cycle)
+          const summaryFieldTemplate = buildAttendancePayrollSummaryFieldTemplate(
+            summaryWithFormulas,
+            summaryFormulaFields,
+            payrollTemplate?.config,
+          )
+          const csv = buildPayrollSummaryCsv(summaryWithFormulas, cycle, {
+            formulaFields: summaryFormulaFields,
+            summaryFields: summaryFieldTemplate.fields,
+          })
           const filename = `payroll-cycle-${cycle.id}.csv`
 
           res.setHeader('Content-Type', 'text/csv; charset=utf-8')

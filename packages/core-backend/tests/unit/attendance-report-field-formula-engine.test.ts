@@ -371,6 +371,75 @@ describe('attendance report field formula engine wrapper', () => {
     expect(context.api.formula.calculateFormula).toHaveBeenCalledTimes(2)
   })
 
+  it('applies payroll template summary field codes to summary CSV order', () => {
+    const summary = {
+      total_days: 20,
+      total_minutes: 9600,
+      total_late_minutes: 45,
+      total_early_leave_minutes: 15,
+      normal_days: 18,
+      late_days: 1,
+      early_leave_days: 0,
+      late_early_days: 1,
+      partial_days: 0,
+      absent_days: 1,
+      adjusted_days: 0,
+      off_days: 8,
+      leave_minutes: 120,
+      overtime_minutes: 60,
+      formula_values: {
+        period_net_minutes: 9540,
+      },
+    }
+    const formulaFields = [
+      {
+        code: 'period_net_minutes',
+        name: '周期净时长',
+        unit: 'minutes',
+        formulaOutputType: 'duration_minutes',
+      },
+    ]
+
+    const template = helpers.buildAttendancePayrollSummaryFieldTemplate(summary, formulaFields, {
+      summaryFields: [
+        'period_net_minutes',
+        { fieldCode: 'work_duration' },
+        { code: 'leave_duration', enabled: false },
+        'late_days',
+        'record_only_formula',
+        'unknown_metric',
+        'period_net_minutes',
+      ],
+    })
+
+    expect(template).toMatchObject({
+      configured: true,
+      fieldCodes: ['period_net_minutes', 'work_duration', 'late_days'],
+      droppedFieldCodes: ['record_only_formula', 'unknown_metric'],
+    })
+    expect(template.fields.map((field: { value: unknown }) => field.value)).toEqual([9540, 9600, 1])
+
+    const csv = helpers.buildPayrollSummaryCsv(summary, {
+      id: 'cycle-1',
+      name: 'May cycle',
+      startDate: '2026-05-01',
+      endDate: '2026-05-31',
+    }, { summaryFields: template.fields })
+
+    const lines = csv.split('\n')
+    expect(lines).toHaveLength(4)
+    expect(lines[1]).toContain('period_net_minutes,9540')
+    expect(lines[2]).toContain('work_duration,9600')
+    expect(lines[3]).toContain('late_days,1')
+    expect(csv).not.toContain('unknown_metric')
+    expect(csv).not.toContain('total_minutes')
+
+    const fallback = helpers.buildAttendancePayrollSummaryFieldTemplate(summary, formulaFields, {})
+    expect(fallback.configured).toBe(false)
+    expect(fallback.fieldCodes).toEqual(expect.arrayContaining(['total_minutes', 'period_net_minutes']))
+    expect(fallback.droppedFieldCodes).toEqual([])
+  })
+
   it('validates summary formulas against summary metrics only', async () => {
     const systemFields = helpers.cloneAttendanceReportFieldDefinitions()
 
