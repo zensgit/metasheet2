@@ -202,35 +202,133 @@ function decodeRoutePart(value: string | undefined): string | undefined {
   }
 }
 
-function readCurrentPathname(): string {
+type RecordCreateLocationSnapshot = {
+  pathname?: string
+  search?: string
+  hash?: string
+  href?: string
+}
+
+type RecordCreateRouteContext = {
+  sheetId?: string
+  viewId?: string
+  isPublicFormRoute?: boolean
+}
+
+function readCurrentLocationSnapshot(): RecordCreateLocationSnapshot {
   try {
-    return globalThis.location?.pathname ?? ''
+    const location = globalThis.location
+    return {
+      pathname: location?.pathname ?? '',
+      search: location?.search ?? '',
+      hash: location?.hash ?? '',
+      href: location?.href ?? '',
+    }
   } catch {
-    return ''
+    return {}
+  }
+}
+
+function parseCreateRecordRouteContext(value: string | undefined): RecordCreateRouteContext {
+  const raw = typeof value === 'string' ? value.trim() : ''
+  if (!raw) return {}
+
+  const candidates = [raw]
+  try {
+    const url = new URL(raw, 'http://metasheet.local')
+    candidates.push(url.pathname)
+    if (url.hash) candidates.push(url.hash.slice(1))
+  } catch {
+    const hashIndex = raw.indexOf('#')
+    if (hashIndex >= 0) candidates.push(raw.slice(hashIndex + 1))
+  }
+
+  for (const candidate of candidates) {
+    const normalized = candidate.replace(/^#/, '').split(/[?#]/)[0]
+    const segments = normalized.split('/').filter(Boolean)
+    const multitableIndex = segments.lastIndexOf('multitable')
+    if (multitableIndex < 0) continue
+    if (segments[multitableIndex + 1] === 'public-form') {
+      return { isPublicFormRoute: true }
+    }
+    return {
+      sheetId: decodeRoutePart(segments[multitableIndex + 1]),
+      viewId: decodeRoutePart(segments[multitableIndex + 2]),
+    }
+  }
+
+  return {}
+}
+
+function parseCreateRecordQueryContext(value: string | undefined): { sheetId?: string; viewId?: string } {
+  const raw = typeof value === 'string' ? value.trim() : ''
+  if (!raw) return {}
+  try {
+    const url = raw.includes('?')
+      ? new URL(raw, 'http://metasheet.local')
+      : null
+    const search = url?.search ?? (raw.startsWith('?') ? raw : `?${raw}`)
+    const params = new URLSearchParams(search)
+    return {
+      sheetId: decodeRoutePart(params.get('sheetId') ?? undefined),
+      viewId: decodeRoutePart(params.get('viewId') ?? undefined),
+    }
+  } catch {
+    return {}
   }
 }
 
 export function resolveCreateRecordContext(args: {
   sheetId?: string | null
   viewId?: string | null
+  href?: string
+  hash?: string
   pathname?: string
+  search?: string
 }): { sheetId?: string; viewId?: string } {
   const sheetId = normalizeRecordContextId(args.sheetId)
   const viewId = normalizeRecordContextId(args.viewId)
-  const pathname = args.pathname ?? readCurrentPathname()
-  const segments = pathname.split('/').filter(Boolean)
-  const multitableIndex = segments.lastIndexOf('multitable')
-  const isPublicFormRoute = multitableIndex >= 0 && segments[multitableIndex + 1] === 'public-form'
-  const routeSheetId = !sheetId && !isPublicFormRoute && multitableIndex >= 0
-    ? decodeRoutePart(segments[multitableIndex + 1])
-    : undefined
-  const routeViewId = !viewId && !isPublicFormRoute && multitableIndex >= 0
-    ? decodeRoutePart(segments[multitableIndex + 2])
-    : undefined
+  if (sheetId && viewId) return { sheetId, viewId }
+
+  const location = readCurrentLocationSnapshot()
+  const routeCandidates = [
+    args.href,
+    args.pathname,
+    args.hash,
+    location.href,
+    location.pathname,
+    location.hash,
+  ]
+  let routeSheetId: string | undefined
+  let routeViewId: string | undefined
+  for (const candidate of routeCandidates) {
+    const routeContext = parseCreateRecordRouteContext(candidate)
+    if (routeContext.isPublicFormRoute) return { sheetId, viewId }
+    routeSheetId = routeSheetId ?? routeContext.sheetId
+    routeViewId = routeViewId ?? routeContext.viewId
+    if (routeSheetId && routeViewId) break
+  }
+
+  const queryCandidates = [
+    args.search,
+    args.href,
+    args.hash,
+    location.search,
+    location.href,
+    location.hash,
+  ]
+  let querySheetId: string | undefined
+  let queryViewId: string | undefined
+  for (const candidate of queryCandidates) {
+    const queryContext = parseCreateRecordQueryContext(candidate)
+    querySheetId = querySheetId ?? queryContext.sheetId
+    queryViewId = queryViewId ?? queryContext.viewId
+    if (querySheetId && queryViewId) break
+  }
 
   return {
-    sheetId: sheetId ?? routeSheetId,
-    viewId: viewId ?? routeViewId,
+    sheetId: sheetId ?? routeSheetId ?? querySheetId,
+    viewId: viewId ?? routeViewId ?? queryViewId,
   }
 }
 
