@@ -189,10 +189,11 @@
             class="attendance-report-fields__formula-reference-chips"
             data-report-field-formula-reference-chips
           >
-            <code>{field_code}</code>
-            <code>{late_duration}</code>
-            <code>{leave_type_annual_duration}</code>
-            <code>{total_minutes}</code>
+            <code
+              v-for="code in formulaStaticReferenceChips"
+              :key="'static-' + code"
+              :data-report-field-formula-static-chip="code"
+            >{{ '{' + code + '}' }}</code>
             <code
               v-for="code in (hasActiveFieldFilters ? [] : formulaReferenceableCodes)"
               :key="code"
@@ -1061,17 +1062,23 @@ const setFormulaReferenceScope = (scope: 'record' | 'summary') => {
 
 const formulaReferenceScopeHint = computed(() => (formulaReferenceScope.value === 'record'
   ? tr('Record scope — {field_code} reads the row value directly. Stick to math, text, date, and IF/AND/OR helpers.', '单记录范围 —— `{field_code}` 直接读取当行值。请使用数学/文本/日期/IF 等函数。')
-  : tr('Summary scope — wrap field references in SUM, AVERAGE, COUNT, or COUNTA to aggregate over the period.', '周期汇总范围 —— 请用 SUM/AVERAGE/COUNT/COUNTA 将字段引用包裹起来,对周期内的记录聚合。')))
+  : tr('Summary scope — wrap field references in SUM, AVERAGE, COUNT, or COUNTA, or use documented summary aliases (e.g. {total_minutes}, {leave_minutes}). Preview validates against the active backend.', '周期汇总范围 —— 请用 SUM/AVERAGE/COUNT/COUNTA 包裹字段引用,或使用 documented summary aliases(如 `{total_minutes}`、`{leave_minutes}`)。最终由后端 Preview 校验。')))
 
-const STATIC_FORMULA_REFERENCE_CHIPS = new Set(['field_code', 'late_duration', 'leave_type_annual_duration', 'total_minutes'])
+const formulaStaticReferenceChips = computed<string[]>(() => (
+  formulaReferenceScope.value === 'summary'
+    ? ['total_minutes', 'leave_minutes', 'overtime_minutes', 'work_duration', 'late_duration', 'early_leave_duration']
+    : ['field_code', 'late_duration', 'leave_type_annual_duration', 'total_minutes']
+))
 
 const formulaReferenceableCodes = computed<string[]>(() => {
+  if (formulaReferenceScope.value === 'summary') return []
+  const staticSet = new Set(formulaStaticReferenceChips.value)
   const seen = new Set<string>()
   for (const field of reportFields.value) {
     if (!field || !field.code) continue
     if (field.enabled === false) continue
     if (field.formulaEnabled) continue
-    if (STATIC_FORMULA_REFERENCE_CHIPS.has(field.code)) continue
+    if (staticSet.has(field.code)) continue
     seen.add(field.code)
   }
   return Array.from(seen).sort()

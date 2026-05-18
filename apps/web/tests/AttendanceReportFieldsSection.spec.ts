@@ -315,6 +315,40 @@ describe('AttendanceReportFieldsSection', () => {
     expect(codes).not.toContain('workday_overtime_duration')
   })
 
+  it('switches static chips to summary aliases and hides catalog-derived chips in summary scope', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse(200, populatedCatalogPayload()))
+
+    mountSection()
+    await flushUi()
+
+    const recordStatic = Array.from(container!.querySelectorAll('[data-report-field-formula-static-chip]'))
+      .map((el) => el.getAttribute('data-report-field-formula-static-chip'))
+    expect(recordStatic).toEqual(['field_code', 'late_duration', 'leave_type_annual_duration', 'total_minutes'])
+    expect(container!.querySelectorAll('[data-report-field-formula-reference-code]').length).toBeGreaterThan(0)
+
+    container!.querySelector<HTMLButtonElement>('[data-report-field-formula-reference-scope-option="summary"]')!.click()
+    await flushUi()
+
+    const summaryStatic = Array.from(container!.querySelectorAll('[data-report-field-formula-static-chip]'))
+      .map((el) => el.getAttribute('data-report-field-formula-static-chip'))
+    expect(summaryStatic).toEqual(['total_minutes', 'leave_minutes', 'overtime_minutes', 'work_duration', 'late_duration', 'early_leave_duration'])
+    expect(summaryStatic).toContain('total_minutes')
+    expect(summaryStatic).toContain('leave_minutes')
+    expect(container!.querySelectorAll('[data-report-field-formula-reference-code]')).toHaveLength(0)
+
+    const summaryHint = container!.querySelector('[data-report-field-formula-reference-scope-hint]')!
+    expect(summaryHint.textContent).toContain('summary aliases')
+    expect(summaryHint.textContent).toContain('Preview validates')
+
+    container!.querySelector<HTMLButtonElement>('[data-report-field-formula-reference-scope-option="record"]')!.click()
+    await flushUi()
+
+    const recordStaticAgain = Array.from(container!.querySelectorAll('[data-report-field-formula-static-chip]'))
+      .map((el) => el.getAttribute('data-report-field-formula-static-chip'))
+    expect(recordStaticAgain).toEqual(['field_code', 'late_duration', 'leave_type_annual_duration', 'total_minutes'])
+    expect(container!.querySelectorAll('[data-report-field-formula-reference-code]').length).toBeGreaterThan(0)
+  })
+
   it('shows the inline editor help line pointing to the reference panel when editing', async () => {
     vi.mocked(apiFetch).mockResolvedValueOnce(jsonResponse(200, formulaEditorPayload()))
 

@@ -16,7 +16,7 @@ git diff --check
 
 | Check | Result |
 | --- | --- |
-| `AttendanceReportFieldsSection.spec.ts`(19 tests:13 baseline + 6 new) | **PASS,19/19** |
+| `AttendanceReportFieldsSection.spec.ts`(20 tests:13 baseline + 7 new) | **PASS,20/20** |
 | `attendance-admin-regressions.spec.ts`(11 tests) | PRE-EXISTING FAIL,`window.localStorage.clear is not a function`(happy-dom env 问题,与本 slice 无关——验证方法:checkout `origin/main` 同步运行同样 11 全失败) |
 | `vue-tsc --noEmit`(web 类型检查) | PASS,exit 0 |
 | `pnpm --filter @metasheet/web build` | PASS,6.35s built |
@@ -75,6 +75,22 @@ git diff --check
 2. 点击 `[data-report-field-formula-edit="net_anomaly_minutes"]` → help 出现
 3. 文案含 `function reference panel above` + `Preview before saving`
 
+### Augmentation #4b — scope-aware static + catalog-derived chips（post-review fix）
+
+`switches static chips to summary aliases and hides catalog-derived chips in summary scope`
+
+针对 Codex 评论"summary scope still shows record-only/catalog-derived field chips"——把 chip 集合做成 scope-aware:
+
+1. **Record scope**:
+   - `[data-report-field-formula-static-chip]` = `[field_code, late_duration, leave_type_annual_duration, total_minutes]`(既有 4 个静态 chip)
+   - `[data-report-field-formula-reference-code]` 数量 > 0(catalog-derived 渲染)
+2. **切到 summary scope**:
+   - 静态 chip 改为 `[total_minutes, leave_minutes, overtime_minutes, work_duration, late_duration, early_leave_duration]`——documented summary aliases
+   - catalog-derived chips 数量为 0(隐藏 per-record 字段,避免误导)
+   - hint 文案改为 "Summary scope — wrap field references in SUM, AVERAGE, COUNT, or COUNTA, or use documented summary aliases (e.g. {total_minutes}, {leave_minutes}). Preview validates against the active backend."——校验权显式交给后端
+3. **切回 record scope**:静态 chips + catalog-derived 完全恢复
+4. 前端不引入 client-side validator,真理仍由后端 `POST /formula/preview` 承担
+
 ### Augmentation #5 — preview error state surfacing
 
 `surfaces preview errors from the existing formula preview endpoint`
@@ -94,7 +110,7 @@ git diff --check
 | `creates a new custom formula field from the reference panel` | 创建公式字段流程 | PASS |
 | 其余 9 项(分类/审批/同步状态/依赖图/源模式...) | 既有行为 | PASS |
 
-合计 13 + 6 = 19 项全绿。
+合计 13 + 7 = 20 项全绿。
 
 ## Acceptance Criteria
 
@@ -107,7 +123,8 @@ git diff --check
 - preview 错误路径在 UI 上对用户可见(锁定计划中 "error states show" 第六项) ✓
 - 未触碰 `plugins/plugin-attendance/index.cjs`,未新增 `attendance_*` 迁移,未直接写 `meta_*` ✓
 - web 类型检查 + build + `git diff --check` 全部 PASS ✓
-- 19 项 spec 全绿,环境级 `attendance-admin-regressions` 失败已确认为 happy-dom pre-existing,与本 slice 无关 ✓
+- 静态 chips + catalog-derived chips 均按 scope 切换,summary scope 不再误导 admin 引用 per-record 字段(回应 Codex post-review findings) ✓
+- 20 项 spec 全绿,环境级 `attendance-admin-regressions` 失败已确认为 happy-dom pre-existing,与本 slice 无关 ✓
 
 ## Out of scope (future)
 
