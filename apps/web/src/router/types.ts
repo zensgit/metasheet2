@@ -283,6 +283,7 @@ export interface RouteMeta {
   keepAlive?: boolean
   transition?: string
   deprecated?: boolean
+  retireBy?: string
 
   // Product capability guard
   requiredFeature?: 'attendance' | 'workflow' | 'attendanceAdmin' | 'attendanceImport' | 'plm'
