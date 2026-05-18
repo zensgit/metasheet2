@@ -72,6 +72,29 @@ function verify_root_runtime_dependencies() {
   search_fixed_string '"bcryptjs"' "$package_json" || die "root package.json must include bcryptjs for Windows bootstrap compatibility"
 }
 
+function verify_deployable_artifact_contract() {
+  local root="$1"
+  local deployment_txt="${root}/DEPLOYMENT.txt"
+  local install_txt="${root}/INSTALL.txt"
+  local metadata_json="${root}/PACKAGE-METADATA.json"
+
+  search_fixed_string 'deployable on-prem application package' "$deployment_txt" || die "DEPLOYMENT.txt must say the archive is deployable"
+  search_fixed_string 'source-only archive' "$deployment_txt" || die "DEPLOYMENT.txt must explain that the workspace layout is not source-only"
+  search_fixed_string 'not direct-replace-safe' "$deployment_txt" || die "DEPLOYMENT.txt must warn against direct replacement of a running install"
+  search_fixed_string 'deploy.bat <downloaded-package.zip>' "$deployment_txt" || die "DEPLOYMENT.txt must show the Windows upgrade entrypoint"
+  search_fixed_string 'node_modules are intentionally not bundled' "$deployment_txt" || die "DEPLOYMENT.txt must document node_modules policy"
+
+  search_fixed_string 'DEPLOYMENT.txt' "$install_txt" || die "INSTALL.txt must point operators at DEPLOYMENT.txt"
+  search_fixed_string 'deployable-onprem-app-package' "$install_txt" || die "INSTALL.txt must identify the artifact type"
+  search_fixed_string 'not a source-only archive' "$install_txt" || die "INSTALL.txt must distinguish deployable package from source-only archive"
+
+  search_fixed_string '"artifactKind": "deployable-onprem-app-package"' "$metadata_json" || die "PACKAGE-METADATA.json must identify deployable artifact kind"
+  search_fixed_string '"deployMode": "fresh-extract-or-existing-root-apply"' "$metadata_json" || die "PACKAGE-METADATA.json must document deploy mode"
+  search_fixed_string '"directReplaceSafe": false' "$metadata_json" || die "PACKAGE-METADATA.json must mark direct replacement unsafe"
+  search_fixed_string '"nodeModulesBundled": false' "$metadata_json" || die "PACKAGE-METADATA.json must document node_modules policy"
+  search_fixed_string '"windowsEntryPoint": "deploy.bat <package.zip|package.tgz>"' "$metadata_json" || die "PACKAGE-METADATA.json must document the Windows entrypoint"
+}
+
 function verify_migration_bridge_contract() {
   local root="$1"
   local provider="${root}/packages/core-backend/dist/src/db/migration-provider.js"
@@ -237,6 +260,14 @@ function write_optional_report() {
       "      \"requiredCount\": ${#required[@]}" \
       '    },' \
       '    {' \
+      '      "name": "deployability-contract",' \
+      '      "status": "PASS",' \
+      '      "artifactKind": "deployable-onprem-app-package",' \
+      '      "deployMode": "fresh-extract-or-existing-root-apply",' \
+      '      "directReplaceSafe": false,' \
+      '      "nodeModulesBundled": false' \
+      '    },' \
+      '    {' \
       '      "name": "no-github-links",' \
       "      \"status\": \"${link_status}\"" \
       '    }' \
@@ -266,6 +297,7 @@ function write_optional_report() {
       echo
       echo "- Checksum: \`${checksum_status}\`"
       echo "- Required content: \`PASS\` (${#required[@]} paths)"
+      echo "- Deployability contract: \`PASS\` (deployable-onprem-app-package, directReplaceSafe=false, nodeModulesBundled=false)"
       echo "- No GitHub links in delivery docs: \`${link_status}\`"
     } > "$report_md_tmp"
     mv "$report_md_tmp" "$VERIFY_REPORT_MD"
@@ -278,6 +310,7 @@ function verify_no_github_links() {
   local targets=()
 
   [[ -f "${root}/INSTALL.txt" ]] && targets+=("${root}/INSTALL.txt")
+  [[ -f "${root}/DEPLOYMENT.txt" ]] && targets+=("${root}/DEPLOYMENT.txt")
   [[ -d "${root}/docs/deployment" ]] && targets+=("${root}/docs/deployment")
 
   if [[ ${#targets[@]} -eq 0 ]]; then
@@ -374,6 +407,8 @@ pkg_name="$(head -n 1 "$list_file" | cut -d/ -f1)"
 pkg_root="${EXTRACT_ROOT}/${pkg_name}"
 
 required=(
+  "DEPLOYMENT.txt"
+  "PACKAGE-METADATA.json"
   "apps/web/dist/index.html"
   "apps/web/package.json"
   "packages/core-backend/dist/src/index.js"
@@ -474,6 +509,7 @@ bootstrap_run_wrapper="$(find "$pkg_root" -maxdepth 1 -type f -name 'bootstrap-a
 [[ -n "$bootstrap_run_wrapper" ]] || die "Required package content missing: bootstrap-admin-<run>.bat"
 verify_windows_entrypoints "$pkg_root"
 verify_root_runtime_dependencies "$pkg_root"
+verify_deployable_artifact_contract "$pkg_root"
 verify_migration_bridge_contract "$pkg_root"
 verify_generic_integration_workbench_contract "$pkg_root"
 

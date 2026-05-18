@@ -42,6 +42,38 @@ The workflow builds:
 
 The workflow already supports GitHub Release publishing through `publish_release=true`.
 
+## Artifact type
+
+The `.zip` and `.tgz` assets are deployable on-prem application packages, not
+source-only archives. They intentionally preserve workspace-style runtime
+paths, because the app resolves built frontend/backend output, plugins,
+migrations, scripts, and deployment templates from those directories:
+
+- `apps/web/dist`
+- `packages/core-backend/dist`
+- `packages/core-backend/migrations`
+- `plugins/`
+- `scripts/ops/`
+- `docker/`
+- `ops/`
+- `docs/`
+
+That structure can look like a source tree after extraction, but the release
+asset is still the deployable package. It is not a single binary and it does
+not bundle `node_modules`.
+
+For upgrades, do not hand-copy selected directories over a running install.
+Copy the downloaded archive to the target host and run the apply entrypoint
+from the existing deploy root:
+
+```bat
+deploy.bat <downloaded-package.zip>
+```
+
+The package root includes `DEPLOYMENT.txt` and `PACKAGE-METADATA.json` so field
+operators can distinguish deployable packages from source/documentation assets
+without consulting GitHub issue history.
+
 For a corrective reroll such as `v2.5.1`, set:
 
 - `package_version=2.5.1`
@@ -69,6 +101,8 @@ pnpm verify:multitable-onprem:release-gate
 
 ```text
 metasheet/
+  DEPLOYMENT.txt
+  PACKAGE-METADATA.json
   bootstrap-admin.bat
   bootstrap-admin-runXX.bat
   deploy.bat
