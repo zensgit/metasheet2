@@ -204,6 +204,28 @@ describe('useMultitableGrid', () => {
     })
   })
 
+  it('resolves record-create context from a hash-backed multitable route', () => {
+    expect(resolveCreateRecordContext({
+      sheetId: '',
+      viewId: '',
+      hash: '#/multitable/sheet_hash_materials/view_hash_grid?baseId=base_legacy',
+    })).toEqual({
+      sheetId: 'sheet_hash_materials',
+      viewId: 'view_hash_grid',
+    })
+  })
+
+  it('resolves record-create context from sheet and view query parameters', () => {
+    expect(resolveCreateRecordContext({
+      sheetId: '',
+      viewId: '',
+      href: 'http://localhost/grid?sheetId=sheet_query_materials&viewId=view_query_grid',
+    })).toEqual({
+      sheetId: 'sheet_query_materials',
+      viewId: 'view_query_grid',
+    })
+  })
+
   it('does not borrow public-form route ids for authenticated record creation', () => {
     expect(resolveCreateRecordContext({
       sheetId: '',

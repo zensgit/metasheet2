@@ -2776,6 +2776,53 @@ async function resolveMetaSheetId(
   return { sheetId: viewId, view: null }
 }
 
+function normalizeRecordCreateContextId(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
+}
+
+function decodeRecordCreateRoutePart(value: string | undefined): string | undefined {
+  if (!value) return undefined
+  try {
+    return normalizeRecordCreateContextId(decodeURIComponent(value))
+  } catch {
+    return normalizeRecordCreateContextId(value)
+  }
+}
+
+export function extractMultitableRecordCreateContextFromUrl(value: unknown): { sheetId?: string; viewId?: string } {
+  const raw = typeof value === 'string' ? value.trim() : ''
+  if (!raw) return {}
+
+  const candidates = [raw]
+  let queryContext: { sheetId?: string; viewId?: string } = {}
+  try {
+    const url = new URL(raw, 'http://metasheet.local')
+    candidates.push(url.pathname)
+    if (url.hash) candidates.push(url.hash.slice(1))
+    queryContext = {
+      sheetId: decodeRecordCreateRoutePart(url.searchParams.get('sheetId') ?? undefined),
+      viewId: decodeRecordCreateRoutePart(url.searchParams.get('viewId') ?? undefined),
+    }
+  } catch {
+    const hashIndex = raw.indexOf('#')
+    if (hashIndex >= 0) candidates.push(raw.slice(hashIndex + 1))
+  }
+
+  for (const candidate of candidates) {
+    const pathname = candidate.replace(/^#/, '').split(/[?#]/)[0]
+    const segments = pathname.split('/').filter(Boolean)
+    const multitableIndex = segments.lastIndexOf('multitable')
+    if (multitableIndex < 0) continue
+    if (segments[multitableIndex + 1] === 'public-form') return {}
+    const sheetId = decodeRecordCreateRoutePart(segments[multitableIndex + 1])
+    const viewId = decodeRecordCreateRoutePart(segments[multitableIndex + 2])
+    if (sheetId || viewId) return { sheetId, viewId }
+  }
+
+  if (queryContext.sheetId || queryContext.viewId) return queryContext
+  return {}
+}
+
 async function createSeededSheet(args: { sheetId: string; name: string; description?: string | null; query?: QueryFn }): Promise<void> {
   const pool = poolManager.get()
 
@@ -4347,9 +4394,12 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
+      const refererContext = extractMultitableRecordCreateContextFromUrl(
+        req.get('referer') ?? req.get('referrer'),
+      )
       const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
-        sheetId: parsed.data.sheetId,
-        viewId: parsed.data.viewId,
+        sheetId: parsed.data.sheetId ?? refererContext.sheetId,
+        viewId: parsed.data.viewId ?? refererContext.viewId,
       })
       const sheetId = resolved.sheetId
       const viewConfig = resolved.view
