@@ -31,6 +31,14 @@ class ExternalSystemNotFoundError extends Error {
   }
 }
 
+class ExternalSystemConflictError extends Error {
+  constructor(message, details = {}) {
+    super(message)
+    this.name = 'ExternalSystemConflictError'
+    this.details = details
+  }
+}
+
 function requiredString(value, field) {
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new ExternalSystemValidationError(`${field} is required`, { field })
@@ -198,7 +206,9 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
     typeof db.selectOne !== 'function' ||
     typeof db.insertOne !== 'function' ||
     typeof db.updateRow !== 'function' ||
-    typeof db.select !== 'function'
+    typeof db.select !== 'function' ||
+    typeof db.deleteRows !== 'function' ||
+    typeof db.countRows !== 'function'
   ) {
     throw new Error('createExternalSystemRegistry: scoped db helper is required')
   }
@@ -316,6 +326,66 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
     return rowToAdapterExternalSystem(row, credentials)
   }
 
+  async function countPipelineReferences({ tenantId, workspaceId, id }) {
+    const where = scopeWhere({ tenantId, workspaceId })
+    const [sourcePipelineCount, targetPipelineCount] = await Promise.all([
+      db.countRows('integration_pipelines', {
+        ...where,
+        source_system_id: id,
+      }),
+      db.countRows('integration_pipelines', {
+        ...where,
+        target_system_id: id,
+      }),
+    ])
+    return {
+      sourcePipelineCount: Number(sourcePipelineCount) || 0,
+      targetPipelineCount: Number(targetPipelineCount) || 0,
+    }
+  }
+
+  async function deleteExternalSystem(input) {
+    const tenantId = requiredString(input?.tenantId, 'tenantId')
+    const workspaceId = normalizeWorkspaceId(input?.workspaceId)
+    const id = requiredString(input?.id, 'id')
+    const where = {
+      tenant_id: tenantId,
+      workspace_id: workspaceId,
+      id,
+    }
+    const row = await db.selectOne(TABLE, where)
+    if (!row) {
+      throw new ExternalSystemNotFoundError('external system not found', { id, tenantId, workspaceId })
+    }
+
+    const references = await countPipelineReferences({ tenantId, workspaceId, id })
+    const referencedPipelineCount = references.sourcePipelineCount + references.targetPipelineCount
+    if (referencedPipelineCount > 0) {
+      throw new ExternalSystemConflictError('external system is used by pipelines', {
+        id,
+        tenantId,
+        workspaceId,
+        referencedPipelineCount,
+        ...references,
+      })
+    }
+
+    const deleted = await publicRow(credentialStore, row)
+    const deleteResult = await db.deleteRows(TABLE, where)
+    const deletedCount = Array.isArray(deleteResult)
+      ? deleteResult.length
+      : Array.isArray(deleteResult?.rows)
+        ? deleteResult.rows.length
+        : Number(deleteResult) || 0
+    if (deletedCount < 1) {
+      throw new ExternalSystemNotFoundError('external system not found during delete', { id, tenantId, workspaceId })
+    }
+    return {
+      deleted: true,
+      system: deleted,
+    }
+  }
+
   async function listExternalSystems(input = {}) {
     const tenantId = requiredString(input.tenantId, 'tenantId')
     const workspaceId = normalizeWorkspaceId(input.workspaceId)
@@ -342,6 +412,7 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
     upsertExternalSystem,
     getExternalSystem,
     getExternalSystemForAdapter,
+    deleteExternalSystem,
     listExternalSystems,
   }
 }
@@ -350,6 +421,7 @@ module.exports = {
   createExternalSystemRegistry,
   ExternalSystemValidationError,
   ExternalSystemNotFoundError,
+  ExternalSystemConflictError,
   __internals: {
     TABLE,
     VALID_ROLES,

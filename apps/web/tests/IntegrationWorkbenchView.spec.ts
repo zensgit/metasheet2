@@ -37,9 +37,11 @@ describe('IntegrationWorkbenchView', () => {
   let originalCreateObjectURL: typeof URL.createObjectURL | undefined
   let originalRevokeObjectURL: typeof URL.revokeObjectURL | undefined
   let originalAnchorClick: typeof HTMLAnchorElement.prototype.click | undefined
+  let originalConfirm: typeof window.confirm | undefined
   let createObjectURLMock: ReturnType<typeof vi.fn>
   let revokeObjectURLMock: ReturnType<typeof vi.fn>
   let anchorClickMock: ReturnType<typeof vi.fn>
+  let confirmMock: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
     apiFetchMock.mockReset()
@@ -47,12 +49,15 @@ describe('IntegrationWorkbenchView', () => {
     originalCreateObjectURL = URL.createObjectURL
     originalRevokeObjectURL = URL.revokeObjectURL
     originalAnchorClick = HTMLAnchorElement.prototype.click
+    originalConfirm = window.confirm
     createObjectURLMock = vi.fn(() => 'blob:data-factory-cleansed-export')
     revokeObjectURLMock = vi.fn()
     anchorClickMock = vi.fn()
+    confirmMock = vi.fn(() => true)
     Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURLMock })
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURLMock })
     Object.defineProperty(HTMLAnchorElement.prototype, 'click', { configurable: true, value: anchorClickMock })
+    Object.defineProperty(window, 'confirm', { configurable: true, value: confirmMock })
   })
 
   afterEach(() => {
@@ -61,6 +66,7 @@ describe('IntegrationWorkbenchView', () => {
     Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
     Object.defineProperty(HTMLAnchorElement.prototype, 'click', { configurable: true, value: originalAnchorClick })
+    Object.defineProperty(window, 'confirm', { configurable: true, value: originalConfirm })
     app = null
     container = null
   })
@@ -716,6 +722,7 @@ describe('IntegrationWorkbenchView', () => {
 
   it('explains source/target connector split and supports safe connection draft management', async () => {
     const upsertBodies: Array<Record<string, unknown>> = []
+    const deleteUrls: string[] = []
     apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
       if (url === '/api/integration/adapters') {
         return jsonResponse([
@@ -768,6 +775,21 @@ describe('IntegrationWorkbenchView', () => {
           capabilities: body.capabilities,
         })
       }
+      if (url === '/api/integration/external-systems/k3_target?tenantId=default' && init?.method === 'DELETE') {
+        deleteUrls.push(url)
+        return jsonResponse({
+          deleted: true,
+          system: {
+            id: 'k3_target',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'K3 Target',
+            kind: 'erp:k3-wise-webapi',
+            role: 'target',
+            status: 'active',
+          },
+        })
+      }
       if (url === '/api/integration/staging/descriptors') {
         return jsonResponse([])
       }
@@ -807,8 +829,8 @@ describe('IntegrationWorkbenchView', () => {
     ;(container.querySelector('[data-testid="toggle-inventory-overview"]') as HTMLButtonElement).click()
     await flushUi()
     const deleteButton = container.querySelector('[data-testid="delete-connection-k3_target"]') as HTMLButtonElement
-    expect(deleteButton.disabled).toBe(true)
-    expect(deleteButton.textContent).toContain('删除待接口')
+    expect(deleteButton.disabled).toBe(false)
+    expect(deleteButton.textContent).toContain('删除')
 
     ;(container.querySelector('[data-testid="copy-connection-k3_target"]') as HTMLButtonElement).click()
     await flushUi()
@@ -859,6 +881,13 @@ describe('IntegrationWorkbenchView', () => {
       status: 'inactive',
     })
     expect(container.textContent).toContain('连接已停用：PLM Source')
+
+    ;(container.querySelector('[data-testid="delete-connection-k3_target"]') as HTMLButtonElement).click()
+    await flushUi(8)
+    expect(confirmMock).toHaveBeenCalledWith(expect.stringContaining('删除连接'))
+    expect(deleteUrls).toEqual(['/api/integration/external-systems/k3_target?tenantId=default'])
+    expect(container.textContent).toContain('连接已删除：K3 Target Edited')
+    expect(container.textContent).not.toContain('K3 Target · erp:k3-wise-webapi')
   })
 
   it('does not mark error-state source or target systems as dry-run ready', async () => {

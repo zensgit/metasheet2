@@ -14,6 +14,7 @@ const ROUTES = [
   ['GET', '/api/integration/external-systems', 'externalSystemsList'],
   ['POST', '/api/integration/external-systems', 'externalSystemsUpsert'],
   ['GET', '/api/integration/external-systems/:id', 'externalSystemsGet'],
+  ['DELETE', '/api/integration/external-systems/:id', 'externalSystemsDelete'],
   ['POST', '/api/integration/external-systems/:id/test', 'externalSystemsTest'],
   ['GET', '/api/integration/external-systems/:id/objects', 'externalSystemObjects'],
   ['GET', '/api/integration/external-systems/:id/schema', 'externalSystemSchema'],
@@ -672,7 +673,7 @@ function createHandlers(services) {
     return service
   }
 
-  const externalSystems = requireService('externalSystemRegistry', ['upsertExternalSystem', 'getExternalSystem', 'listExternalSystems'])
+  const externalSystems = requireService('externalSystemRegistry', ['upsertExternalSystem', 'getExternalSystem', 'deleteExternalSystem', 'listExternalSystems'])
   const adapterRegistry = requireService('adapterRegistry', ['createAdapter', 'listAdapterKinds'])
   const pipelineRegistry = requireService('pipelineRegistry', ['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns'])
   const runner = requireService('pipelineRunner', ['runPipeline'])
@@ -712,6 +713,11 @@ function createHandlers(services) {
     async externalSystemsGet(req, res) {
       requireAccess(req, 'read')
       return sendOk(res, await externalSystems.getExternalSystem(scopedInput(req, { id: requestParams(req).id })))
+    },
+
+    async externalSystemsDelete(req, res) {
+      requireAccess(req, 'write')
+      return sendOk(res, await externalSystems.deleteExternalSystem(scopedInput(req, { id: requestParams(req).id })))
     },
 
     async externalSystemsTest(req, res) {

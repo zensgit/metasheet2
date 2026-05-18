@@ -129,6 +129,10 @@ function createMockServices(overrides = {}) {
         calls.push(['getExternalSystem', input])
         return { ...system, id: input.id }
       },
+      async deleteExternalSystem(input) {
+        calls.push(['deleteExternalSystem', input])
+        return { deleted: true, system: { ...system, id: input.id } }
+      },
       async getExternalSystemForAdapter(input) {
         calls.push(['getExternalSystemForAdapter', input])
         return { ...system, id: input.id, credentials: { bearerToken: 'secret-token' } }
@@ -334,6 +338,10 @@ async function testExternalSystemRoutes() {
     registered.includes('GET /api/integration/external-systems'),
     'external systems list route registered',
   )
+  assert.ok(
+    registered.includes('DELETE /api/integration/external-systems/:id'),
+    'external systems delete route registered',
+  )
 
   let res = await invoke(routes, 'GET', '/api/integration/external-systems', {
     user: READ_USER,
@@ -395,6 +403,20 @@ async function testExternalSystemRoutes() {
     workspaceId: 'workspace_1',
   })
 
+  res = await invoke(routes, 'DELETE', '/api/integration/external-systems/:id', {
+    user: WRITE_USER,
+    params: { id: 'sys_2' },
+    query: { workspaceId: 'workspace_1' },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.deleted, true)
+  assert.equal(res.body.data.system.id, 'sys_2')
+  assert.deepEqual(findCall(calls, 'deleteExternalSystem')[1], {
+    id: 'sys_2',
+    tenantId: 'tenant_1',
+    workspaceId: 'workspace_1',
+  })
+
   res = await invoke(routes, 'POST', '/api/integration/external-systems/:id/test', {
     user: WRITE_USER,
     params: { id: 'sys_2' },
@@ -427,6 +449,31 @@ async function testExternalSystemRoutes() {
     lastError: null,
   })
   assert.ok(!Number.isNaN(Date.parse(statusUpdates[1][1].lastTestedAt)), 'test status update stores ISO timestamp')
+
+  calls.length = 0
+  const { routes: conflictRoutes } = mountRoutes(createMockServices({
+    externalSystemRegistry: {
+      async deleteExternalSystem(input) {
+        calls.push(['deleteExternalSystem', input])
+        const error = new Error('external system is used by pipelines')
+        error.name = 'ExternalSystemConflictError'
+        error.details = {
+          referencedPipelineCount: 2,
+          sourcePipelineCount: 1,
+          targetPipelineCount: 1,
+        }
+        throw error
+      },
+    },
+  }).services)
+  const conflict = await invoke(conflictRoutes, 'DELETE', '/api/integration/external-systems/:id', {
+    user: WRITE_USER,
+    params: { id: 'sys_referenced' },
+    query: { workspaceId: 'workspace_1' },
+  })
+  assertErrorResponse(conflict, [409])
+  assert.equal(conflict.body.error.code, 'ExternalSystemConflictError')
+  assert.equal(conflict.body.error.details.referencedPipelineCount, 2)
 }
 
 async function testExternalSystemTestPersistsFailureAndPreservesInactive() {
