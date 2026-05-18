@@ -3507,6 +3507,73 @@
                     placeholder="{}"
                   />
                 </label>
+                <section class="attendance__field attendance__field--full attendance__payroll-summary-fields">
+                  <div class="attendance__payroll-summary-header">
+                    <div>
+                      <span>{{ tr('Summary field template', '汇总字段模板') }}</span>
+                      <small class="attendance__field-hint">
+                        {{ tr('Choose and order payroll summary/export fields. Empty selection keeps the backend default.', '选择并排序计薪汇总/导出字段；未选择时保持后端默认字段。') }}
+                      </small>
+                    </div>
+                    <button
+                      class="attendance__btn"
+                      type="button"
+                      :disabled="payrollSummaryFieldOptionsLoading"
+                      @click="loadPayrollSummaryFieldOptions"
+                    >
+                      {{ payrollSummaryFieldOptionsLoading ? tr('Loading...', '加载中...') : tr('Reload fields', '重载字段') }}
+                    </button>
+                  </div>
+                  <div class="attendance__summary-field-options" data-payroll-summary-field-options>
+                    <label
+                      v-for="option in payrollSummaryFieldOptions"
+                      :key="option.code"
+                      class="attendance__summary-field-option"
+                      :data-payroll-summary-field-option="option.code"
+                    >
+                      <input
+                        type="checkbox"
+                        :checked="isPayrollSummaryFieldSelected(option.code)"
+                        @change="togglePayrollSummaryFieldCode(option.code, ($event.target as HTMLInputElement).checked)"
+                      />
+                      <span>
+                        <strong>{{ option.name }}</strong>
+                        <code>{{ option.code }}</code>
+                        <small>{{ option.unit }}{{ option.formula ? ` · ${tr('formula', '公式')}` : '' }}</small>
+                      </span>
+                    </label>
+                  </div>
+                  <div class="attendance__summary-field-order" data-payroll-summary-field-order>
+                    <span class="attendance__field-hint">{{ tr('Selected order', '已选顺序') }}</span>
+                    <ol v-if="payrollSummarySelectedFieldOptions.length > 0">
+                      <li v-for="(option, index) in payrollSummarySelectedFieldOptions" :key="option.code">
+                        <span>
+                          <strong>{{ option.name }}</strong>
+                          <code>{{ option.code }}</code>
+                        </span>
+                        <button
+                          class="attendance__btn attendance__btn--compact"
+                          type="button"
+                          :disabled="index === 0"
+                          @click="movePayrollSummaryFieldCode(option.code, -1)"
+                        >
+                          {{ tr('Up', '上移') }}
+                        </button>
+                        <button
+                          class="attendance__btn attendance__btn--compact"
+                          type="button"
+                          :disabled="index === payrollSummarySelectedFieldOptions.length - 1"
+                          @click="movePayrollSummaryFieldCode(option.code, 1)"
+                        >
+                          {{ tr('Down', '下移') }}
+                        </button>
+                      </li>
+                    </ol>
+                    <span v-else class="attendance__empty">
+                      {{ tr('No custom field template selected; backend default will be used.', '未选择自定义字段模板，将使用后端默认字段。') }}
+                    </span>
+                  </div>
+                </section>
               </div>
               <div class="attendance__admin-actions">
                 <button
@@ -4636,6 +4703,13 @@ import {
   useAttendanceAdminRail,
 } from './attendance/useAttendanceAdminRail'
 import { useAttendanceAdminRailNavigation } from './attendance/useAttendanceAdminRailNavigation'
+import {
+  applyPayrollSummaryFieldsToConfig,
+  buildPayrollSummaryFieldOptionsFromReportFields,
+  extractPayrollSummaryFieldCodes,
+  mergePayrollSummaryFieldOptions,
+  type AttendancePayrollSummaryFieldOption,
+} from './attendance/useAttendanceAdminPayroll'
 import { useLocale } from '../composables/useLocale'
 import { usePlugins } from '../composables/usePlugins'
 import { apiFetch } from '../utils/api'
@@ -5553,6 +5627,7 @@ const attendanceGroupMemberLoading = ref(false)
 const attendanceGroupMemberSaving = ref(false)
 const payrollTemplateLoading = ref(false)
 const payrollTemplateSaving = ref(false)
+const payrollSummaryFieldOptionsLoading = ref(false)
 const payrollCycleLoading = ref(false)
 const payrollCycleSaving = ref(false)
 const payrollCycleGenerating = ref(false)
@@ -5598,6 +5673,15 @@ const importPreviewTimezoneHint = computed(() =>
   `${tr('Preview timezone', '预览时区')}: ${importTimezoneLabel.value} · ${tr('Group timezone', '分组时区')}: ${importGroupTimezoneLabel.value}`
 )
 const payrollTemplateTimezoneLabel = computed(() => displayTimezone(payrollTemplateForm.timezone))
+const payrollSummarySelectedFieldOptions = computed(() => {
+  const optionMap = new Map(payrollSummaryFieldOptions.value.map(option => [option.code, option]))
+  return payrollTemplateForm.summaryFieldCodes.map(code => optionMap.get(code) ?? {
+    code,
+    name: code,
+    unit: 'text',
+    source: 'template',
+  })
+})
 const payrollCycleTemplateTimezoneHint = computed(() =>
   `${tr('Cycle template timezone', '周期模板时区')}: ${resolvePayrollTemplateTimezoneLabel(payrollCycleForm.templateId, 'manual')}`
 )
@@ -6483,6 +6567,9 @@ const attendanceGroups = ref<AttendanceGroup[]>([])
 const attendanceGroupMembers = ref<AttendanceGroupMember[]>([])
 const payrollTemplates = ref<AttendancePayrollTemplate[]>([])
 const payrollCycles = ref<AttendancePayrollCycle[]>([])
+const payrollSummaryFieldOptions = ref<AttendancePayrollSummaryFieldOption[]>(
+  mergePayrollSummaryFieldOptions([]),
+)
 const importPreview = ref<AttendanceImportPreviewItem[]>([])
 const importCsvWarnings = ref<string[]>([])
 const importPreviewTask = ref<AttendanceImportPreviewTask | null>(null)
@@ -7396,6 +7483,7 @@ const payrollTemplateForm = reactive({
   autoGenerate: true,
   isDefault: false,
   config: '{}',
+  summaryFieldCodes: [] as string[],
 })
 
 const payrollCycleForm = reactive({
@@ -13792,6 +13880,63 @@ function copySystemTemplates() {
   setStatus(tr('System templates copied to library.', '系统模板已复制到模板库。'))
 }
 
+function isPayrollSummaryFieldSelected(code: string): boolean {
+  return payrollTemplateForm.summaryFieldCodes.includes(code)
+}
+
+function togglePayrollSummaryFieldCode(code: string, checked?: boolean) {
+  const normalized = code.trim()
+  if (!normalized) return
+  const selected = isPayrollSummaryFieldSelected(normalized)
+  const shouldSelect = checked ?? !selected
+  if (shouldSelect && !selected) {
+    payrollTemplateForm.summaryFieldCodes = [...payrollTemplateForm.summaryFieldCodes, normalized]
+    return
+  }
+  if (!shouldSelect && selected) {
+    payrollTemplateForm.summaryFieldCodes = payrollTemplateForm.summaryFieldCodes.filter(item => item !== normalized)
+  }
+}
+
+function movePayrollSummaryFieldCode(code: string, direction: -1 | 1) {
+  const index = payrollTemplateForm.summaryFieldCodes.indexOf(code)
+  if (index < 0) return
+  const nextIndex = index + direction
+  if (nextIndex < 0 || nextIndex >= payrollTemplateForm.summaryFieldCodes.length) return
+  const next = [...payrollTemplateForm.summaryFieldCodes]
+  const current = next[index]
+  const target = next[nextIndex]
+  if (!current || !target) return
+  next[index] = target
+  next[nextIndex] = current
+  payrollTemplateForm.summaryFieldCodes = next
+}
+
+async function loadPayrollSummaryFieldOptions() {
+  payrollSummaryFieldOptionsLoading.value = true
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId() })
+    const suffix = query.toString()
+    const response = await apiFetch(`/api/attendance/report-fields${suffix ? `?${suffix}` : ''}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to load payroll summary fields', '加载计薪汇总字段失败')))
+    }
+    adminForbidden.value = false
+    payrollSummaryFieldOptions.value = mergePayrollSummaryFieldOptions(
+      buildPayrollSummaryFieldOptionsFromReportFields(data.data),
+    )
+  } catch (error: any) {
+    setStatus(readErrorMessage(error, tr('Failed to load payroll summary fields', '加载计薪汇总字段失败')), 'error')
+  } finally {
+    payrollSummaryFieldOptionsLoading.value = false
+  }
+}
+
 function resetPayrollTemplateForm() {
   payrollTemplateEditingId.value = null
   payrollTemplateForm.name = ''
@@ -13802,6 +13947,7 @@ function resetPayrollTemplateForm() {
   payrollTemplateForm.autoGenerate = true
   payrollTemplateForm.isDefault = false
   payrollTemplateForm.config = '{}'
+  payrollTemplateForm.summaryFieldCodes = []
 }
 
 function editPayrollTemplate(item: AttendancePayrollTemplate) {
@@ -13814,6 +13960,7 @@ function editPayrollTemplate(item: AttendancePayrollTemplate) {
   payrollTemplateForm.autoGenerate = item.autoGenerate
   payrollTemplateForm.isDefault = item.isDefault
   payrollTemplateForm.config = JSON.stringify(item.config ?? {}, null, 2)
+  payrollTemplateForm.summaryFieldCodes = extractPayrollSummaryFieldCodes(item.config)
 }
 
 async function loadPayrollTemplates() {
@@ -13846,6 +13993,11 @@ async function savePayrollTemplate() {
       throw new Error(tr('Payroll template config must be valid JSON', '计薪模板配置必须是合法 JSON'))
     }
 
+    const configWithSummaryFields = applyPayrollSummaryFieldsToConfig(
+      config,
+      payrollTemplateForm.summaryFieldCodes,
+    )
+
     const payload = {
       name: payrollTemplateForm.name.trim(),
       timezone: payrollTemplateForm.timezone.trim() || defaultTimezone,
@@ -13854,7 +14006,7 @@ async function savePayrollTemplate() {
       endMonthOffset: Number(payrollTemplateForm.endMonthOffset) || 0,
       autoGenerate: payrollTemplateForm.autoGenerate,
       isDefault: payrollTemplateForm.isDefault,
-      config,
+      config: configWithSummaryFields,
       orgId: normalizedOrgId(),
     }
 
@@ -14162,6 +14314,7 @@ async function loadAdminData() {
       loadRuleTemplates(),
       loadAttendanceGroups(),
       reloadAttendanceImportBatches(),
+      loadPayrollSummaryFieldOptions(),
       loadPayrollTemplates(),
       loadPayrollCycles(),
       loadLeaveTypes(),
@@ -14380,6 +14533,11 @@ const holidaySectionBindings = {
 .attendance__btn--danger {
   border-color: #e53935;
   color: #e53935;
+}
+
+.attendance__btn--compact {
+  padding: 4px 8px;
+  font-size: 12px;
 }
 
 .attendance__btn:disabled {
@@ -15062,6 +15220,77 @@ const holidaySectionBindings = {
 
 .attendance__report-config-item--warn {
   color: #9a3412;
+}
+
+.attendance__payroll-summary-fields {
+  border: 1px solid #e4e7eb;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fafbfc;
+}
+
+.attendance__payroll-summary-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.attendance__summary-field-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.attendance__summary-field-option {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px;
+  border: 1px solid #e4e7eb;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.attendance__summary-field-option span,
+.attendance__summary-field-order li span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.attendance__summary-field-option code,
+.attendance__summary-field-order code {
+  color: #555;
+  overflow-wrap: anywhere;
+}
+
+.attendance__summary-field-option small {
+  color: #777;
+}
+
+.attendance__summary-field-order {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.attendance__summary-field-order ol {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.attendance__summary-field-order li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 6px;
+  align-items: center;
 }
 
 .attendance__timeline-list {

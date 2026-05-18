@@ -123,6 +123,115 @@ describe('useAttendanceAdminPayroll', () => {
     expect(options.setStatus).toHaveBeenCalledWith('Payroll template saved.')
   })
 
+  it('loads summary formula field options and keeps only visible summary formulas', async () => {
+    const apiFetch = vi.fn(async (input: string) => {
+      if (input === '/api/attendance/report-fields?orgId=org-1') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                code: 'period_net_minutes',
+                name: '周期净时长',
+                unit: 'minutes',
+                enabled: true,
+                reportVisible: true,
+                formulaEnabled: true,
+                formulaScope: 'summary',
+              },
+              {
+                code: 'record_net_minutes',
+                name: '记录净时长',
+                enabled: true,
+                reportVisible: true,
+                formulaEnabled: true,
+                formulaScope: 'record',
+              },
+              {
+                code: 'hidden_period_metric',
+                name: '隐藏周期字段',
+                enabled: true,
+                reportVisible: false,
+                formulaEnabled: true,
+                formulaScope: 'summary',
+              },
+            ],
+          },
+        })
+      }
+      throw new Error(`Unexpected request: ${input}`)
+    })
+    const payroll = useAttendanceAdminPayroll(createOptions({ apiFetch }))
+
+    await payroll.loadPayrollSummaryFieldOptions()
+
+    expect(payroll.payrollSummaryFieldOptions.value.map(option => option.code)).toEqual(
+      expect.arrayContaining(['total_minutes', 'work_duration', 'period_net_minutes']),
+    )
+    expect(payroll.payrollSummaryFieldOptions.value.map(option => option.code)).not.toContain('record_net_minutes')
+    expect(payroll.payrollSummaryFieldOptions.value.map(option => option.code)).not.toContain('hidden_period_metric')
+  })
+
+  it('saves ordered summary fields into payroll template config', async () => {
+    const apiFetch = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input === '/api/attendance/payroll-templates' && init?.method === 'POST') {
+        return jsonResponse(200, { ok: true, data: { id: 'tpl-summary' } })
+      }
+      if (input === '/api/attendance/payroll-templates?orgId=org-1') {
+        return jsonResponse(200, { ok: true, data: { items: [] } })
+      }
+      throw new Error(`Unexpected request: ${input}`)
+    })
+    const payroll = useAttendanceAdminPayroll(createOptions({ apiFetch }))
+
+    payroll.payrollTemplateForm.name = 'Field ordered'
+    payroll.payrollTemplateForm.config = JSON.stringify({
+      region: 'CN',
+      summaryFieldCodes: ['legacy_metric'],
+      payrollSummaryFields: ['legacy_alias'],
+    })
+    payroll.togglePayrollSummaryFieldCode('work_duration', true)
+    payroll.togglePayrollSummaryFieldCode('period_net_minutes', true)
+    payroll.togglePayrollSummaryFieldCode('late_days', true)
+    payroll.movePayrollSummaryFieldCode('late_days', -1)
+
+    await payroll.savePayrollTemplate()
+
+    const [, init] = apiFetch.mock.calls[0]!
+    const payload = JSON.parse(String(init?.body || '{}'))
+    expect(payload.config).toEqual({
+      region: 'CN',
+      summaryFields: ['work_duration', 'late_days', 'period_net_minutes'],
+    })
+    expect(payroll.payrollTemplateForm.summaryFieldCodes).toEqual([])
+  })
+
+  it('hydrates summary field selections when editing a payroll template', () => {
+    const payroll = useAttendanceAdminPayroll(createOptions())
+
+    payroll.editPayrollTemplate({
+      id: 'tpl-3',
+      name: 'Configured',
+      timezone: 'Asia/Shanghai',
+      startDay: 1,
+      endDay: 30,
+      endMonthOffset: 0,
+      autoGenerate: true,
+      isDefault: false,
+      config: {
+        summaryFields: [
+          'period_net_minutes',
+          { fieldCode: 'work_duration' },
+          { code: 'disabled_metric', enabled: false },
+          'period_net_minutes',
+        ],
+      },
+    })
+
+    expect(payroll.payrollTemplateForm.summaryFieldCodes).toEqual(['period_net_minutes', 'work_duration'])
+    expect(payroll.isPayrollSummaryFieldSelected('work_duration')).toBe(true)
+  })
+
   it('requires a payroll template name before saving', async () => {
     const options = createOptions()
     const payroll = useAttendanceAdminPayroll(options)
