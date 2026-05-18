@@ -80,7 +80,7 @@
         <div>
           <h2>可访问的 Base</h2>
           <p v-if="bases.length" class="multitable-home__panel-subtitle">
-            {{ baseSearch.trim() ? `匹配 ${filteredBases.length} / ${bases.length} 个` : `${bases.length} 个` }}
+            {{ baseSearch.trim() ? `匹配 ${visibleBases.length} / ${bases.length} 个` : `${bases.length} 个` }}
           </p>
         </div>
         <label v-if="bases.length" class="multitable-home__search">
@@ -98,18 +98,35 @@
       <div v-else-if="!bases.length" class="multitable-home__empty">
         暂无可访问的 Base。你可以新建一个，或从数据工厂/考勤等业务入口生成多维表。
       </div>
-      <div v-else-if="!filteredBases.length" class="multitable-home__empty">
+      <div v-else-if="!visibleBases.length" class="multitable-home__empty">
         没有匹配的 Base。请调整搜索关键词。
       </div>
       <div v-else class="multitable-home__grid">
-        <article v-for="base in filteredBases" :key="base.id" class="multitable-home__card">
+        <article v-for="base in visibleBases" :key="base.id" class="multitable-home__card">
           <div class="multitable-home__card-icon" :style="{ background: base.color || '#2563eb' }">
             {{ base.icon || base.name.slice(0, 1).toUpperCase() }}
           </div>
           <div class="multitable-home__card-body">
             <h3>{{ base.name }}</h3>
             <small>{{ base.id }}</small>
+            <div
+              v-if="base.isFavorite || base.lastOpenedAt"
+              class="multitable-home__badges"
+              aria-label="Base quick access state"
+            >
+              <span v-if="base.isFavorite">收藏</span>
+              <span v-if="base.lastOpenedAt">最近打开</span>
+            </div>
           </div>
+          <button
+            type="button"
+            class="multitable-home__favorite"
+            :aria-pressed="base.isFavorite"
+            :aria-label="base.isFavorite ? `取消收藏 ${base.name}` : `收藏 ${base.name}`"
+            @click="toggleFavoriteBase(base.id)"
+          >
+            {{ base.isFavorite ? '已收藏' : '收藏' }}
+          </button>
           <button
             class="multitable-home__open"
             :disabled="openingBaseId === base.id"
@@ -135,6 +152,14 @@ import type {
   MetaTemplate,
   MetaView,
 } from '../multitable/types'
+import {
+  decorateAndSortBases,
+  type DecoratedBase,
+  readFavoriteBaseIds,
+  readRecentBaseOpens,
+  rememberRecentBaseOpen,
+  toggleFavoriteBaseId,
+} from '../multitable/utils/base-local-state'
 import { AppRouteNames } from '../router/types'
 
 const router = useRouter()
@@ -151,13 +176,30 @@ const templateError = ref('')
 const newBaseName = ref('')
 const baseSearch = ref('')
 
-const filteredBases = computed(() => {
+const favoriteBaseIds = ref<string[]>(readFavoriteBaseIds())
+const recentBaseOpens = ref(readRecentBaseOpens())
+
+const decoratedBases = computed(() => {
+  return decorateAndSortBases(bases.value, favoriteBaseIds.value, recentBaseOpens.value)
+})
+
+const searchedBases = computed<DecoratedBase[]>(() => {
   const query = baseSearch.value.trim().toLowerCase()
-  if (!query) return bases.value
-  return bases.value.filter((base) => {
+  if (!query) return decoratedBases.value
+  return decoratedBases.value.filter((base) => {
     return base.name.toLowerCase().includes(query) || base.id.toLowerCase().includes(query)
   })
 })
+
+const visibleBases = computed(() => searchedBases.value)
+
+function toggleFavoriteBase(baseId: string): void {
+  favoriteBaseIds.value = toggleFavoriteBaseId(baseId)
+}
+
+function rememberRecentBase(baseId: string): void {
+  recentBaseOpens.value = rememberRecentBaseOpen(baseId)
+}
 
 function resolveOpenTarget(context: MetaContext): { sheet: MetaSheet; view: MetaView } | null {
   const sheet = context.sheet ?? context.sheets[0] ?? null
@@ -217,6 +259,7 @@ async function openBase(base: MetaBase): Promise<void> {
       errorMessage.value = '这个 Base 还没有可打开的 Sheet 或 View。'
       return
     }
+    rememberRecentBase(base.id)
     await router.push({
       name: AppRouteNames.MULTITABLE,
       params: { sheetId: target.sheet.id, viewId: target.view.id },
@@ -244,6 +287,7 @@ async function installTemplateAndOpen(template: MetaTemplate): Promise<void> {
       await loadBases()
       return
     }
+    rememberRecentBase(result.base.id)
     await router.push({
       name: AppRouteNames.MULTITABLE,
       params: { sheetId: target.sheet.id, viewId: target.view.id },
@@ -271,6 +315,7 @@ async function createBaseAndOpen(): Promise<void> {
       await loadBases()
       return
     }
+    rememberRecentBase(base.id)
     await router.push({
       name: AppRouteNames.MULTITABLE,
       params: { sheetId: target.sheet.id, viewId: target.view.id },
@@ -513,7 +558,7 @@ onMounted(loadHomeData)
 
 .multitable-home__card {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto 1fr auto auto;
   gap: 12px;
   align-items: center;
   border: 1px solid #e2e8f0;
@@ -539,6 +584,38 @@ onMounted(loadHomeData)
 
 .multitable-home__card-body small {
   color: #64748b;
+}
+
+.multitable-home__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.multitable-home__badges span {
+  border-radius: 999px;
+  padding: 3px 7px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.multitable-home__favorite {
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  padding: 9px 12px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.multitable-home__favorite[aria-pressed='true'] {
+  border-color: #f59e0b;
+  background: #fffbeb;
+  color: #92400e;
 }
 
 .multitable-home__error {
