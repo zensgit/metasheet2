@@ -156,6 +156,16 @@ const IMPORT_MAPPING_COLUMNS = [
   { sourceField: '上班2打卡时间', targetField: 'clockIn2', dataType: 'time' },
   { sourceField: '2_off_duty_user_check_time', targetField: 'clockOut2', dataType: 'time' },
   { sourceField: '下班2打卡时间', targetField: 'clockOut2', dataType: 'time' },
+  { sourceField: '3_on_duty_user_check_time', targetField: 'clockIn3', dataType: 'time' },
+  { sourceField: '上班3打卡时间', targetField: 'clockIn3', dataType: 'time' },
+  { sourceField: '3_off_duty_user_check_time', targetField: 'clockOut3', dataType: 'time' },
+  { sourceField: '下班3打卡时间', targetField: 'clockOut3', dataType: 'time' },
+  { sourceField: '上班1打卡结果', targetField: 'punchResultIn1', dataType: 'string' },
+  { sourceField: '下班1打卡结果', targetField: 'punchResultOut1', dataType: 'string' },
+  { sourceField: '上班2打卡结果', targetField: 'punchResultIn2', dataType: 'string' },
+  { sourceField: '下班2打卡结果', targetField: 'punchResultOut2', dataType: 'string' },
+  { sourceField: '上班3打卡结果', targetField: 'punchResultIn3', dataType: 'string' },
+  { sourceField: '下班3打卡结果', targetField: 'punchResultOut3', dataType: 'string' },
   { sourceField: 'attend_result', targetField: 'status', dataType: 'string' },
   { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
   { sourceField: '当天考勤情况', targetField: 'status', dataType: 'string' },
@@ -249,6 +259,70 @@ const IMPORT_REQUIRED_FIELD_ALIASES = {
   '下班1打卡时间': ['1_off_duty_user_check_time', 'lastOutAt', 'clockOut1', 'check_out'],
   '上班2打卡时间': ['2_on_duty_user_check_time', 'clockIn2'],
   '下班2打卡时间': ['2_off_duty_user_check_time', 'clockOut2'],
+  '上班3打卡时间': ['3_on_duty_user_check_time', 'clockIn3'],
+  '下班3打卡时间': ['3_off_duty_user_check_time', 'clockOut3'],
+}
+
+const ATTENDANCE_MULTI_PUNCH_TIME_SOURCES = Object.freeze([
+  { metaKey: 'clockIn2', aliases: ['clockIn2', 'clock_in_2', '2_on_duty_user_check_time', '上班2打卡时间'] },
+  { metaKey: 'clockOut2', aliases: ['clockOut2', 'clock_out_2', '2_off_duty_user_check_time', '下班2打卡时间'] },
+  { metaKey: 'clockIn3', aliases: ['clockIn3', 'clock_in_3', '3_on_duty_user_check_time', '上班3打卡时间'] },
+  { metaKey: 'clockOut3', aliases: ['clockOut3', 'clock_out_3', '3_off_duty_user_check_time', '下班3打卡时间'] },
+])
+
+const ATTENDANCE_MULTI_PUNCH_RESULT_SOURCES = Object.freeze([
+  { metaKey: 'punchResultIn1', aliases: ['punchResultIn1', 'punch_result_in_1', '1_on_duty_check_result', '上班1打卡结果'] },
+  { metaKey: 'punchResultOut1', aliases: ['punchResultOut1', 'punch_result_out_1', '1_off_duty_check_result', '下班1打卡结果'] },
+  { metaKey: 'punchResultIn2', aliases: ['punchResultIn2', 'punch_result_in_2', '2_on_duty_check_result', '上班2打卡结果'] },
+  { metaKey: 'punchResultOut2', aliases: ['punchResultOut2', 'punch_result_out_2', '2_off_duty_check_result', '下班2打卡结果'] },
+  { metaKey: 'punchResultIn3', aliases: ['punchResultIn3', 'punch_result_in_3', '3_on_duty_check_result', '上班3打卡结果'] },
+  { metaKey: 'punchResultOut3', aliases: ['punchResultOut3', 'punch_result_out_3', '3_off_duty_check_result', '下班3打卡结果'] },
+])
+
+function resolveImportMultiPunchSourceValue(valueFor, aliases) {
+  if (typeof valueFor !== 'function') return undefined
+  for (const alias of aliases) {
+    const value = valueFor(alias)
+    if (value !== undefined && value !== null && String(value).trim() !== '') return value
+  }
+  return undefined
+}
+
+function normalizeImportMultiPunchDateTime(value, workDate, timezone) {
+  const parsed = parseImportedDateTime(value, workDate, timezone)
+  if (parsed instanceof Date && !Number.isNaN(parsed.getTime())) return parsed.toISOString()
+  return typeof value === 'string' ? value.trim() : value
+}
+
+function buildAttendanceImportMultiPunchMeta(options = {}) {
+  const { valueFor, workDate, timezone, clearMissing = true } = options
+  const meta = {}
+  for (const source of ATTENDANCE_MULTI_PUNCH_TIME_SOURCES) {
+    const value = resolveImportMultiPunchSourceValue(valueFor, source.aliases)
+    if (value !== undefined) {
+      meta[source.metaKey] = normalizeImportMultiPunchDateTime(value, workDate, timezone)
+    } else if (clearMissing) {
+      meta[source.metaKey] = null
+    }
+  }
+  for (const source of ATTENDANCE_MULTI_PUNCH_RESULT_SOURCES) {
+    const value = resolveImportMultiPunchSourceValue(valueFor, source.aliases)
+    if (value !== undefined) {
+      meta[source.metaKey] = String(value).trim()
+    } else if (clearMissing) {
+      meta[source.metaKey] = null
+    }
+  }
+  return meta
+}
+
+function attachAttendanceImportMultiPunchMeta(meta, options = {}) {
+  const punchMeta = buildAttendanceImportMultiPunchMeta(options)
+  if (Object.keys(punchMeta).length === 0) return meta
+  return {
+    ...(meta && typeof meta === 'object' ? meta : {}),
+    ...punchMeta,
+  }
 }
 
 const ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID = 'attendance_report_field_catalog'
@@ -546,7 +620,7 @@ const ATTENDANCE_REPORT_FIELD_DEFINITIONS = Object.freeze([
     source: 'system',
     unit: 'dateTime',
     dingtalkFieldName: '上班2打卡时间',
-    description: '第2次上班打卡时间，读 record.meta；当前导入未持久化多段打卡，多为空，待 ingest-persist P2。',
+    description: '第2次上班打卡时间，读 record.meta；由导入持久化多段打卡字段时点亮，缺失时为空。',
     internalKey: 'attendanceRecords.meta.clockIn2',
   },
   {
@@ -556,7 +630,7 @@ const ATTENDANCE_REPORT_FIELD_DEFINITIONS = Object.freeze([
     source: 'system',
     unit: 'dateTime',
     dingtalkFieldName: '下班2打卡时间',
-    description: '第2次下班打卡时间，读 record.meta；当前导入未持久化多段打卡，多为空，待 ingest-persist P2。',
+    description: '第2次下班打卡时间，读 record.meta；由导入持久化多段打卡字段时点亮，缺失时为空。',
     internalKey: 'attendanceRecords.meta.clockOut2',
   },
   {
@@ -566,7 +640,7 @@ const ATTENDANCE_REPORT_FIELD_DEFINITIONS = Object.freeze([
     source: 'system',
     unit: 'dateTime',
     dingtalkFieldName: '上班3打卡时间',
-    description: '第3次上班打卡时间，读 record.meta；当前导入未持久化多段打卡，多为空，待 ingest-persist P2。',
+    description: '第3次上班打卡时间，读 record.meta；由导入持久化多段打卡字段时点亮，缺失时为空。',
     internalKey: 'attendanceRecords.meta.clockIn3',
   },
   {
@@ -576,7 +650,7 @@ const ATTENDANCE_REPORT_FIELD_DEFINITIONS = Object.freeze([
     source: 'system',
     unit: 'dateTime',
     dingtalkFieldName: '下班3打卡时间',
-    description: '第3次下班打卡时间，读 record.meta；当前导入未持久化多段打卡，多为空，待 ingest-persist P2。',
+    description: '第3次下班打卡时间，读 record.meta；由导入持久化多段打卡字段时点亮，缺失时为空。',
     internalKey: 'attendanceRecords.meta.clockOut3',
   },
   {
@@ -586,7 +660,7 @@ const ATTENDANCE_REPORT_FIELD_DEFINITIONS = Object.freeze([
     source: 'system',
     unit: 'text',
     dingtalkFieldName: '上班1打卡结果',
-    description: '第1次上班打卡结果（正常/迟到/缺卡等），读 record.meta；不复用日级 status，当前为空 placeholder，待 ingest-persist P2。',
+    description: '第1次上班打卡结果（正常/迟到/缺卡等），读 record.meta；不复用日级 status，缺失时为空。',
     internalKey: 'attendanceRecords.meta.punchResultIn1',
   },
   {
@@ -596,7 +670,7 @@ const ATTENDANCE_REPORT_FIELD_DEFINITIONS = Object.freeze([
     source: 'system',
     unit: 'text',
     dingtalkFieldName: '下班1打卡结果',
-    description: '第1次下班打卡结果，读 record.meta；不复用日级 status，当前为空 placeholder，待 ingest-persist P2。',
+    description: '第1次下班打卡结果，读 record.meta；不复用日级 status，缺失时为空。',
     internalKey: 'attendanceRecords.meta.punchResultOut1',
   },
   {
@@ -606,7 +680,7 @@ const ATTENDANCE_REPORT_FIELD_DEFINITIONS = Object.freeze([
     source: 'system',
     unit: 'text',
     dingtalkFieldName: '上班2打卡结果',
-    description: '第2次上班打卡结果，读 record.meta；不复用日级 status，当前为空 placeholder，待 ingest-persist P2。',
+    description: '第2次上班打卡结果，读 record.meta；不复用日级 status，缺失时为空。',
     internalKey: 'attendanceRecords.meta.punchResultIn2',
   },
   {
@@ -616,7 +690,7 @@ const ATTENDANCE_REPORT_FIELD_DEFINITIONS = Object.freeze([
     source: 'system',
     unit: 'text',
     dingtalkFieldName: '下班2打卡结果',
-    description: '第2次下班打卡结果，读 record.meta；不复用日级 status，当前为空 placeholder，待 ingest-persist P2。',
+    description: '第2次下班打卡结果，读 record.meta；不复用日级 status，缺失时为空。',
     internalKey: 'attendanceRecords.meta.punchResultOut2',
   },
   {
@@ -626,7 +700,7 @@ const ATTENDANCE_REPORT_FIELD_DEFINITIONS = Object.freeze([
     source: 'system',
     unit: 'text',
     dingtalkFieldName: '上班3打卡结果',
-    description: '第3次上班打卡结果，读 record.meta；不复用日级 status，当前为空 placeholder，待 ingest-persist P2。',
+    description: '第3次上班打卡结果，读 record.meta；不复用日级 status，缺失时为空。',
     internalKey: 'attendanceRecords.meta.punchResultIn3',
   },
   {
@@ -636,7 +710,7 @@ const ATTENDANCE_REPORT_FIELD_DEFINITIONS = Object.freeze([
     source: 'system',
     unit: 'text',
     dingtalkFieldName: '下班3打卡结果',
-    description: '第3次下班打卡结果，读 record.meta；不复用日级 status，当前为空 placeholder，待 ingest-persist P2。',
+    description: '第3次下班打卡结果，读 record.meta；不复用日级 status，缺失时为空。',
     internalKey: 'attendanceRecords.meta.punchResultOut3',
   },
   {
@@ -9556,6 +9630,8 @@ module.exports = {
     mapReportFieldToMultitableType,
     buildAttendanceReportRecordSourceFingerprint,
     attendanceReportRecordRowKey,
+    buildAttendanceImportMultiPunchMeta,
+    computeAttendanceRecordUpsertValues,
     ATTENDANCE_REPORT_RECORDS_OBJECT_ID,
     ATTENDANCE_REPORT_RECORDS_FIELDS,
     mergeAttendanceReportFieldDefinitions,
@@ -11780,6 +11856,12 @@ module.exports = {
 	            source: payload.source ?? null,
 	            mappingProfileId: payload.mappingProfileId ?? null,
 	          }
+	          meta = attachAttendanceImportMultiPunchMeta(meta, {
+	            valueFor,
+	            workDate,
+	            timezone: ruleForMetrics.timezone,
+	            clearMissing: (payload.mode ?? 'override') === 'override',
+	          })
 	          if (engineResult && (engineResult.appliedRules.length || engineResult.warnings.length || engineResult.reasons.length)) {
 	            meta = meta ?? {}
 	            meta.engine = {
@@ -17257,6 +17339,12 @@ module.exports = {
                 source: parsed.data.source ?? null,
                 mappingProfileId: parsed.data.mappingProfileId ?? null,
               }
+              meta = attachAttendanceImportMultiPunchMeta(meta, {
+                valueFor,
+                workDate,
+                timezone: ruleForMetrics.timezone,
+                clearMissing: (parsed.data.mode ?? 'override') === 'override',
+              })
 	              if (engineResult && (engineResult.appliedRules.length || engineResult.warnings.length || engineResult.reasons.length)) {
 	                meta = meta ?? {}
 	                meta.engine = {
@@ -18235,6 +18323,12 @@ module.exports = {
                 source: parsed.data.source ?? null,
                 mappingProfileId: parsed.data.mappingProfileId ?? null,
               }
+              meta = attachAttendanceImportMultiPunchMeta(meta, {
+                valueFor,
+                workDate,
+                timezone: ruleForMetrics.timezone,
+                clearMissing: (parsed.data.mode ?? 'override') === 'override',
+              })
               if (engineResult && (engineResult.appliedRules.length || engineResult.warnings.length || engineResult.reasons.length)) {
                 meta = meta ?? {}
                 meta.engine = {
@@ -18924,6 +19018,12 @@ module.exports = {
                       mappingProfileId: payload.mappingProfileId ?? null,
                       integrationId,
                     }
+                    meta = attachAttendanceImportMultiPunchMeta(meta, {
+                      valueFor,
+                      workDate,
+                      timezone: ruleForMetrics.timezone,
+                      clearMissing: (parsedImport.data.mode ?? 'override') === 'override',
+                    })
 
                     const record = await upsertAttendanceRecord({
                       userId: rowUserId,
