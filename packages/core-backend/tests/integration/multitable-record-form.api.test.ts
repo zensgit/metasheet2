@@ -79,6 +79,23 @@ describe('Multitable record and form context API', () => {
     vi.resetModules()
   })
 
+  test('returns validation error when record create omits sheet and view context', async () => {
+    const { app } = await createApp({})
+
+    const response = await request(app)
+      .post('/api/multitable/records')
+      .send({ data: {} })
+      .expect(400)
+
+    expect(response.body).toEqual({
+      ok: false,
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'sheetId or viewId is required',
+      },
+    })
+  })
+
   test('returns record drawer context with link summaries', async () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:read', 'comments:write'],

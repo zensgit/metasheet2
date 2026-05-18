@@ -188,6 +188,52 @@ export const FILTER_OPERATORS_BY_TYPE: Record<string, Array<{ value: string; lab
 const DEFAULT_PAGE_SIZE = 50
 const SEARCH_DEBOUNCE_MS = 150
 
+function normalizeRecordContextId(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function decodeRoutePart(value: string | undefined): string | undefined {
+  if (!value) return undefined
+  try {
+    const decoded = decodeURIComponent(value)
+    return normalizeRecordContextId(decoded)
+  } catch {
+    return normalizeRecordContextId(value)
+  }
+}
+
+function readCurrentPathname(): string {
+  try {
+    return globalThis.location?.pathname ?? ''
+  } catch {
+    return ''
+  }
+}
+
+export function resolveCreateRecordContext(args: {
+  sheetId?: string | null
+  viewId?: string | null
+  pathname?: string
+}): { sheetId?: string; viewId?: string } {
+  const sheetId = normalizeRecordContextId(args.sheetId)
+  const viewId = normalizeRecordContextId(args.viewId)
+  const pathname = args.pathname ?? readCurrentPathname()
+  const segments = pathname.split('/').filter(Boolean)
+  const multitableIndex = segments.lastIndexOf('multitable')
+  const isPublicFormRoute = multitableIndex >= 0 && segments[multitableIndex + 1] === 'public-form'
+  const routeSheetId = !sheetId && !isPublicFormRoute && multitableIndex >= 0
+    ? decodeRoutePart(segments[multitableIndex + 1])
+    : undefined
+  const routeViewId = !viewId && !isPublicFormRoute && multitableIndex >= 0
+    ? decodeRoutePart(segments[multitableIndex + 2])
+    : undefined
+
+  return {
+    sheetId: sheetId ?? routeSheetId,
+    viewId: viewId ?? routeViewId,
+  }
+}
+
 export function useMultitableGrid(opts: {
   sheetId: Ref<string>
   viewId: Ref<string>
@@ -466,10 +512,20 @@ export function useMultitableGrid(opts: {
 
   async function createRecord(data?: Record<string, unknown>) {
     error.value = null
+    const context = resolveCreateRecordContext({
+      sheetId: opts.sheetId.value,
+      viewId: opts.viewId.value,
+    })
+    if (!context.sheetId && !context.viewId) {
+      error.value = 'sheetId or viewId is required'
+      return
+    }
+    if (!opts.sheetId.value && context.sheetId) opts.sheetId.value = context.sheetId
+    if (!opts.viewId.value && context.viewId) opts.viewId.value = context.viewId
     try {
       await client.createRecord({
-        sheetId: opts.sheetId.value || undefined,
-        viewId: opts.viewId.value || undefined,
+        sheetId: context.sheetId,
+        viewId: context.viewId,
         data,
       })
       await loadViewData(page.value.offset)
