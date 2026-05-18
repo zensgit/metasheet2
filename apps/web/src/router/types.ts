@@ -282,6 +282,7 @@ export interface RouteMeta {
   icon?: string
   keepAlive?: boolean
   transition?: string
+  deprecated?: boolean
 
   // Product capability guard
   requiredFeature?: 'attendance' | 'workflow' | 'attendanceAdmin' | 'attendanceImport' | 'plm'
@@ -467,7 +468,7 @@ export const RouteGuards = {
   /**
    * Check if user is authenticated
    */
-  requiresAuth: (to: TypedRouteLocation, from: TypedRouteLocation) => {
+  requiresAuth: (to: TypedRouteLocation, _from: TypedRouteLocation) => {
     const token = localStorage.getItem('auth_token')
     if (!token && to.meta.requiresAuth) {
       return { name: AppRouteNames.LOGIN, query: { redirect: to.fullPath } }
@@ -478,7 +479,7 @@ export const RouteGuards = {
   /**
    * Check if user is guest (not authenticated)
    */
-  requiresGuest: (to: TypedRouteLocation, from: TypedRouteLocation) => {
+  requiresGuest: (to: TypedRouteLocation, _from: TypedRouteLocation) => {
     const token = localStorage.getItem('auth_token')
     if (token && to.meta.requiresGuest) {
       return { name: AppRouteNames.DASHBOARD }
@@ -489,7 +490,7 @@ export const RouteGuards = {
   /**
    * Check if user has required permissions
    */
-  requiresPermissions: (to: TypedRouteLocation, from: TypedRouteLocation) => {
+  requiresPermissions: (to: TypedRouteLocation, _from: TypedRouteLocation) => {
     const requiredPermissions = to.meta.permissions || []
     if (requiredPermissions.length === 0) return true
 
@@ -511,7 +512,7 @@ export const RouteGuards = {
   /**
    * Check if user has required roles
    */
-  requiresRoles: (to: TypedRouteLocation, from: TypedRouteLocation) => {
+  requiresRoles: (to: TypedRouteLocation, _from: TypedRouteLocation) => {
     const requiredRoles = to.meta.roles || []
     if (requiredRoles.length === 0) return true
 

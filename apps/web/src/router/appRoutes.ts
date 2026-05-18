@@ -55,31 +55,31 @@ export const appRoutes: RouteRecordRaw[] = [
     path: '/grid',
     name: 'grid',
     component: GridView,
-    meta: { title: 'Grid View', requiresAuth: true }
+    meta: { title: 'Grid View', requiresAuth: true, deprecated: true }
   },
   {
     path: '/kanban',
     name: 'kanban',
     component: KanbanView,
-    meta: { title: 'Kanban View', requiresAuth: true }
+    meta: { title: 'Kanban View', requiresAuth: true, deprecated: true }
   },
   {
     path: '/calendar',
     name: 'calendar',
     component: CalendarView,
-    meta: { title: 'Calendar View', requiresAuth: true }
+    meta: { title: 'Calendar View', requiresAuth: true, deprecated: true }
   },
   {
     path: '/gallery',
     name: 'gallery',
     component: GalleryView,
-    meta: { title: 'Gallery View', requiresAuth: true }
+    meta: { title: 'Gallery View', requiresAuth: true, deprecated: true }
   },
   {
     path: '/form',
     name: 'form',
     component: FormView,
-    meta: { title: 'Form View', requiresAuth: true }
+    meta: { title: 'Form View', requiresAuth: true, deprecated: true }
   },
   {
     path: '/attendance',

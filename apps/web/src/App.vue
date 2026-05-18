@@ -18,10 +18,6 @@
             <router-link v-if="hasFeature('attendance')" to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
             <router-link to="/apps" class="nav-link">{{ navLabels.apps }}</router-link>
             <router-link to="/multitable" class="nav-link">{{ navLabels.multitable }}</router-link>
-            <router-link to="/kanban" class="nav-link">{{ navLabels.kanban }}</router-link>
-            <router-link to="/calendar" class="nav-link">{{ navLabels.calendar }}</router-link>
-            <router-link to="/gallery" class="nav-link">{{ navLabels.gallery }}</router-link>
-            <router-link to="/form" class="nav-link">{{ navLabels.form }}</router-link>
             <router-link v-if="hasFeature('workflow')" to="/workflows" class="nav-link">{{ navLabels.workflows }}</router-link>
             <router-link to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
             <router-link
@@ -119,10 +115,6 @@ const navLabels = computed(() => {
     return {
       attendance: '考勤',
       multitable: '多维表',
-      kanban: '看板',
-      calendar: '日历',
-      gallery: '画廊',
-      form: '表单',
       workflows: '流程',
       approvals: '审批中心',
       apps: '应用',
@@ -144,10 +136,6 @@ const navLabels = computed(() => {
   return {
     attendance: 'Attendance',
     multitable: 'Multitable',
-    kanban: 'Kanban',
-    calendar: 'Calendar',
-    gallery: 'Gallery',
-    form: 'Form',
     workflows: 'Workflows',
     approvals: 'Approvals',
     apps: 'Apps',
