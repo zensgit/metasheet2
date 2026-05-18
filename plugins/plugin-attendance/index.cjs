@@ -344,6 +344,7 @@ const ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS = Object.freeze({
   formulaExpression: 'formula_expression',
   formulaScope: 'formula_scope',
   formulaOutputType: 'formula_output_type',
+  formulaSourceMode: 'formula_source_mode',
 })
 
 const ATTENDANCE_REPORT_FIELD_CATEGORIES = Object.freeze([
@@ -364,6 +365,12 @@ const ATTENDANCE_REPORT_FIELD_FORMULA_OUTPUT_TYPE_OPTIONS = Object.freeze([
   'text',
   'boolean',
   'date',
+])
+const ATTENDANCE_REPORT_FIELD_FORMULA_SOURCE_MODE_OPTIONS = Object.freeze([
+  'none',
+  'meta',
+  'internal_key',
+  'alias',
 ])
 const ATTENDANCE_REPORT_FORMULA_ERROR_VALUE = '#ERROR!'
 const ATTENDANCE_REPORT_CUSTOM_FORMULA_CODE_PATTERN = /^[a-z][a-z0-9_]{1,79}$/
@@ -1054,6 +1061,7 @@ function getAttendanceReportFieldCatalogDescriptor() {
       { id: ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.formulaExpression, name: '公式表达式', type: 'longText', order: 130, property: { width: 360 } },
       { id: ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.formulaScope, name: '公式范围', type: 'select', order: 140, options: ATTENDANCE_REPORT_FIELD_FORMULA_SCOPE_OPTIONS },
       { id: ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.formulaOutputType, name: '公式输出类型', type: 'select', order: 150, options: ATTENDANCE_REPORT_FIELD_FORMULA_OUTPUT_TYPE_OPTIONS },
+      { id: ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.formulaSourceMode, name: '公式源模式', type: 'select', order: 160, options: ATTENDANCE_REPORT_FIELD_FORMULA_SOURCE_MODE_OPTIONS },
     ],
   }
 }
@@ -1106,6 +1114,7 @@ function buildAttendanceReportFieldCatalogRecordData(field, fieldIds) {
     ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.formulaOutputType,
     normalizeAttendanceReportFormulaOutputType(field.formulaOutputType, field.unit),
   )
+  assign(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.formulaSourceMode, normalizeAttendanceReportFormulaSourceMode(field.formulaSourceMode))
   return data
 }
 
@@ -1158,6 +1167,11 @@ function normalizeAttendanceReportFormulaOutputType(value, unit = 'text') {
   return 'text'
 }
 
+function normalizeAttendanceReportFormulaSourceMode(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  return ATTENDANCE_REPORT_FIELD_FORMULA_SOURCE_MODE_OPTIONS.includes(normalized) ? normalized : 'none'
+}
+
 function normalizeAttendanceReportFormulaExpression(value) {
   return typeof value === 'string' ? value.trim() : ''
 }
@@ -1200,6 +1214,7 @@ function mapAttendanceReportFieldConfigRecord(record, fieldIds) {
       read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.formulaOutputType),
       unit,
     ),
+    formulaSourceMode: normalizeAttendanceReportFormulaSourceMode(read(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.formulaSourceMode)),
   }
 }
 
@@ -1264,6 +1279,61 @@ function resolveAttendanceFormulaRawAliasesAllowed(settings, env = process.env) 
   return settings?.formula?.allowRawAliases !== false
 }
 
+function isCustomAttendanceFormulaSourceField(field) {
+  const mode = normalizeAttendanceReportFormulaSourceMode(field?.formulaSourceMode)
+  if (mode === 'none') return false
+  if (mode === 'internal_key' && !isSafeAttendanceFormulaSourcePath(field?.internalKey)) return false
+  if (mode === 'alias') {
+    const alias = normalizeCatalogString(field?.internalKey, field?.code)
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) return false
+  }
+  return Boolean(
+    field
+    && field.code
+    && field.enabled !== false
+    && field.formulaEnabled !== true
+    && field.systemDefined === false
+  )
+}
+
+function isSafeAttendanceFormulaSourcePath(pathValue) {
+  const normalized = normalizeCatalogString(pathValue)
+  if (!normalized) return false
+  const parts = normalized.split('.')
+  if (parts.some(part => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(part))) return false
+  const blockedRoots = new Set(['report_values', 'reportValues', 'formula', 'formulas'])
+  return !blockedRoots.has(parts[0])
+}
+
+function readAttendanceFormulaPathValue(target, pathValue) {
+  if (!isSafeAttendanceFormulaSourcePath(pathValue)) return undefined
+  const parts = normalizeCatalogString(pathValue).split('.')
+  let current = target
+  for (const part of parts) {
+    if (current === null || current === undefined || typeof current !== 'object') return undefined
+    if (!Object.prototype.hasOwnProperty.call(current, part)) return undefined
+    current = current[part]
+  }
+  return current
+}
+
+function readAttendanceCustomFormulaAliasValue(row, aliasValue) {
+  const alias = normalizeCatalogString(aliasValue)
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) return undefined
+  const meta = normalizeMetadata(row?.meta)
+  const buckets = [
+    meta.attendanceFormulaSources,
+    meta.formulaSources,
+    meta.formula_sources,
+    meta.aliases,
+  ]
+  for (const bucket of buckets) {
+    if (!bucket || typeof bucket !== 'object' || Array.isArray(bucket)) continue
+    if (Object.prototype.hasOwnProperty.call(bucket, alias)) return bucket[alias]
+  }
+  return undefined
+}
+
 function getAttendanceReportFormulaReferenceCodes(fields, options = {}) {
   const formulaFieldCodes = new Set()
   const rawAliasesAllowed = options.rawAliasesAllowed !== false
@@ -1277,7 +1347,7 @@ function getAttendanceReportFormulaReferenceCodes(fields, options = {}) {
       continue
     }
     if (field.enabled === false) continue
-    if (field.systemDefined === false) continue
+    if (field.systemDefined === false && !isCustomAttendanceFormulaSourceField(field)) continue
     codes.add(code)
   }
   return { codes, formulaFieldCodes }
@@ -1577,6 +1647,7 @@ function mergeAttendanceReportFieldDefinitions(configRecords, fieldIds, options 
       description: config?.description || field.description || '',
       internalKey: config?.internalKey || field.internalKey || field.code,
       ...formulaConfig,
+      formulaSourceMode: normalizeAttendanceReportFormulaSourceMode(config?.formulaSourceMode || field.formulaSourceMode),
       recordId: config?.recordId || null,
       configured: Boolean(config),
       systemDefined: true,
@@ -1589,6 +1660,7 @@ function mergeAttendanceReportFieldDefinitions(configRecords, fieldIds, options 
     items.push({
       ...config,
       ...normalizeAttendanceReportFormulaConfig(config, config.unit),
+      formulaSourceMode: normalizeAttendanceReportFormulaSourceMode(config.formulaSourceMode),
       configured: true,
       systemDefined: false,
     })
@@ -2159,6 +2231,7 @@ function buildAttendanceReportFieldCatalogFallback(orgId, reason, error, options
     multitable,
     reportFieldConfig: buildAttendanceReportFieldConfig({
       fields: resolveAttendanceRecordReportFields(items),
+      formulaSourceFields: resolveAttendanceFormulaSourceFields(items),
       multitable,
     }),
   }
@@ -2275,6 +2348,7 @@ async function buildAttendanceReportFieldCatalogResponse(context, orgId, logger,
       multitable,
       reportFieldConfig: buildAttendanceReportFieldConfig({
         fields: resolveAttendanceRecordReportFields(items),
+        formulaSourceFields: resolveAttendanceFormulaSourceFields(items),
         multitable,
       }),
     }
@@ -2389,12 +2463,14 @@ function resolveAttendanceFormulaSourceFields(items) {
       && field.code
       && field.enabled !== false
       && field.formulaEnabled !== true
-      && field.systemDefined !== false
+      && (field.systemDefined !== false || isCustomAttendanceFormulaSourceField(field))
     ))
     .map(field => ({
       code: field.code,
       source: field.source || 'system',
-      systemDefined: true,
+      systemDefined: field.systemDefined !== false,
+      internalKey: field.internalKey || field.code,
+      formulaSourceMode: normalizeAttendanceReportFormulaSourceMode(field.formulaSourceMode),
     }))
 }
 
@@ -2410,8 +2486,8 @@ async function loadAttendanceRecordReportFields(context, orgId, logger, options 
   }
 }
 
-function buildAttendanceReportFieldConfigFingerprint(fields) {
-  const normalized = Array.isArray(fields)
+function normalizeAttendanceReportFieldFingerprintItems(fields) {
+  return Array.isArray(fields)
     ? fields
       .map(field => ({
         code: String(field?.code || ''),
@@ -2434,9 +2510,35 @@ function buildAttendanceReportFieldConfigFingerprint(fields) {
         return left.code.localeCompare(right.code)
       })
     : []
+}
+
+function normalizeAttendanceFormulaSourceFingerprintItems(fields) {
+  return Array.isArray(fields)
+    ? fields
+      .filter(field => field?.systemDefined === false)
+      .map(field => ({
+        code: String(field?.code || ''),
+        source: String(field?.source || ''),
+        systemDefined: false,
+        internalKey: String(field?.internalKey || ''),
+        formulaSourceMode: normalizeAttendanceReportFormulaSourceMode(field?.formulaSourceMode),
+      }))
+      .filter(field => field.code && field.formulaSourceMode !== 'none')
+      .sort((left, right) => left.code.localeCompare(right.code))
+    : []
+}
+
+function buildAttendanceReportFieldConfigFingerprint(fields, options = {}) {
+  const normalized = Array.isArray(fields)
+    ? normalizeAttendanceReportFieldFingerprintItems(fields)
+    : []
+  const formulaSourceFields = normalizeAttendanceFormulaSourceFingerprintItems(options.formulaSourceFields)
+  const fingerprintPayload = formulaSourceFields.length > 0
+    ? { fields: normalized, formulaSourceFields }
+    : normalized
   const value = crypto
     .createHash('sha1')
-    .update(JSON.stringify(normalized))
+    .update(JSON.stringify(fingerprintPayload))
     .digest('hex')
   return {
     algorithm: 'sha1',
@@ -2448,13 +2550,16 @@ function buildAttendanceReportFieldConfigFingerprint(fields) {
 
 function buildAttendanceReportFieldConfig(reportFields) {
   const fields = Array.isArray(reportFields?.fields) ? reportFields.fields : []
+  const formulaSourceFields = Array.isArray(reportFields?.formulaSourceFields)
+    ? reportFields.formulaSourceFields
+    : []
   return {
     multitable: reportFields?.multitable || {
       available: false,
       degraded: true,
       reason: 'REPORT_FIELD_CONFIG_UNAVAILABLE',
     },
-    fieldsFingerprint: buildAttendanceReportFieldConfigFingerprint(fields),
+    fieldsFingerprint: buildAttendanceReportFieldConfigFingerprint(fields, { formulaSourceFields }),
   }
 }
 
@@ -2654,6 +2759,10 @@ function buildAttendanceReportFormulaValueMap(row, formulaSourceFields, options 
   const values = {}
   for (const field of formulaSourceFields || []) {
     if (!field?.code) continue
+    if (field.systemDefined === false) {
+      values[field.code] = getAttendanceCustomFormulaSourceValue(row, field)
+      continue
+    }
     values[field.code] = getAttendanceRecordReportFieldValue(row, field.code)
   }
   if (options.rawAliasesAllowed !== false) {
@@ -2664,6 +2773,19 @@ function buildAttendanceReportFormulaValueMap(row, formulaSourceFields, options 
     values.overtime_minutes = readAttendanceRecordMinutes(row, ['overtime_minutes', 'overtimeMinutes'], 0)
   }
   return values
+}
+
+function getAttendanceCustomFormulaSourceValue(row, field) {
+  const mode = normalizeAttendanceReportFormulaSourceMode(field?.formulaSourceMode)
+  if (mode === 'meta') return readAttendanceRecordMeta(row, [field.code])
+  if (mode === 'internal_key') return readAttendanceFormulaPathValue(row, field.internalKey)
+  if (mode === 'alias') {
+    return readAttendanceCustomFormulaAliasValue(
+      row,
+      normalizeCatalogString(field.internalKey, field.code),
+    )
+  }
+  return undefined
 }
 
 function resolveAttendanceReportFormulaExpression(expression, values) {

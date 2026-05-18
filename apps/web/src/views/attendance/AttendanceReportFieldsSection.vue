@@ -639,6 +639,7 @@ interface AttendanceReportFieldItem {
   formulaExpression?: string
   formulaScope?: string
   formulaOutputType?: string
+  formulaSourceMode?: string
   formulaValid?: boolean
   formulaError?: string | null
   formulaReferences?: string[]
@@ -837,6 +838,7 @@ const filteredReportFields = computed(() => {
       field.formulaExpression,
       field.formulaScope,
       field.formulaOutputType,
+      field.formulaSourceMode,
       field.formulaError,
       ...(field.formulaReferences ?? []),
     ].map(value => String(value ?? '').toLowerCase())
@@ -1258,6 +1260,17 @@ function formatFormulaOutputType(outputType?: string): string {
   return labels[normalized] ?? (normalized || '--')
 }
 
+function formatFormulaSourceMode(mode?: string): string {
+  const normalized = String(mode || 'none').trim()
+  const labels: Record<string, string> = {
+    none: tr('Not a formula source', '不作为公式源'),
+    meta: tr('Record meta by code', '按编码读取记录 meta'),
+    internal_key: tr('Record path by internal key', '按内部键读取记录路径'),
+    alias: tr('Named formula source alias', '按命名别名读取公式源'),
+  }
+  return labels[normalized] ?? (normalized || '--')
+}
+
 function formatFormulaMeta(field: AttendanceReportFieldItem): string {
   const parts = [
     formatFormulaScope(field.formulaScope),
@@ -1291,6 +1304,16 @@ function fieldMappingRows(field: AttendanceReportFieldItem): FieldMappingRow[] {
       value: internalKey,
       monospace: true,
     })
+  }
+  if (field.systemDefined === false && field.formulaEnabled !== true) {
+    const formulaSourceMode = String(field.formulaSourceMode ?? 'none').trim()
+    if (formulaSourceMode && formulaSourceMode !== 'none') {
+      rows.push({
+        key: 'formulaSourceMode',
+        label: tr('Formula source', '公式源'),
+        value: formatFormulaSourceMode(formulaSourceMode),
+      })
+    }
   }
   if (Number.isFinite(sortOrder)) {
     rows.push({

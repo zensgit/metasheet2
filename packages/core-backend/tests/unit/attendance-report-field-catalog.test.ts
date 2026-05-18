@@ -38,6 +38,7 @@ describe('attendance report field catalog multitable foundation', () => {
       'formula_expression',
       'formula_scope',
       'formula_output_type',
+      'formula_source_mode',
     ])
   })
 
@@ -156,6 +157,7 @@ describe('attendance report field catalog multitable foundation', () => {
       formula_expression: 'fld_formula_expression',
       formula_scope: 'fld_formula_scope',
       formula_output_type: 'fld_formula_output_type',
+      formula_source_mode: 'fld_formula_source_mode',
     }
     const merged = helpers.mergeAttendanceReportFieldDefinitions([
       {
@@ -215,6 +217,7 @@ describe('attendance report field catalog multitable foundation', () => {
       formula_expression: 'fld_formula_expression',
       formula_scope: 'fld_formula_scope',
       formula_output_type: 'fld_formula_output_type',
+      formula_source_mode: 'fld_formula_source_mode',
     }
     const records = [
       {
@@ -605,6 +608,7 @@ describe('attendance report field catalog multitable foundation', () => {
       dingtalk_field_name: 'fld_dingtalk', description: 'fld_description', internal_key: 'fld_internal',
       formula_enabled: 'fld_formula_enabled', formula_expression: 'fld_formula_expression',
       formula_scope: 'fld_formula_scope', formula_output_type: 'fld_formula_output_type',
+      formula_source_mode: 'fld_formula_source_mode',
     }
     const mergedWithCustom = helpers.mergeAttendanceReportFieldDefinitions([
       { id: 'rec-x', data: { fld_code: 'leave_type_fake_duration', fld_name: '伪造', fld_category: '请假统计字段', fld_source: 'custom', fld_unit: 'minutes', fld_enabled: true, fld_visible: true, fld_sort: 9000 } },
