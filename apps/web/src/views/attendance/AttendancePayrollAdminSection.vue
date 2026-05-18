@@ -100,6 +100,73 @@
           {{ tr('Use JSON for payroll-specific settings such as summary formulas, allowance flags, or export metadata.', '可用 JSON 配置计薪专属设置，例如汇总公式、补贴开关或导出元数据。') }}
         </small>
       </label>
+      <section class="attendance__field attendance__field--full attendance__payroll-summary-fields">
+        <div class="attendance__payroll-summary-header">
+          <div>
+            <span>{{ tr('Summary field template', '汇总字段模板') }}</span>
+            <small class="attendance__field-hint">
+              {{ tr('Choose and order payroll summary/export fields. Empty selection keeps the backend default.', '选择并排序计薪汇总/导出字段；未选择时保持后端默认字段。') }}
+            </small>
+          </div>
+          <button
+            class="attendance__btn"
+            type="button"
+            :disabled="payrollSummaryFieldOptionsLoading"
+            @click="loadPayrollSummaryFieldOptions"
+          >
+            {{ payrollSummaryFieldOptionsLoading ? tr('Loading...', '加载中...') : tr('Reload fields', '重载字段') }}
+          </button>
+        </div>
+        <div class="attendance__summary-field-options" data-payroll-summary-field-options>
+          <label
+            v-for="option in payrollSummaryFieldOptions"
+            :key="option.code"
+            class="attendance__summary-field-option"
+            :data-payroll-summary-field-option="option.code"
+          >
+            <input
+              type="checkbox"
+              :checked="isPayrollSummaryFieldSelected(option.code)"
+              @change="togglePayrollSummaryFieldCode(option.code, ($event.target as HTMLInputElement).checked)"
+            />
+            <span>
+              <strong>{{ option.name }}</strong>
+              <code>{{ option.code }}</code>
+              <small>{{ option.unit }}{{ option.formula ? ` · ${tr('formula', '公式')}` : '' }}</small>
+            </span>
+          </label>
+        </div>
+        <div class="attendance__summary-field-order" data-payroll-summary-field-order>
+          <span class="attendance__field-hint">{{ tr('Selected order', '已选顺序') }}</span>
+          <ol v-if="payrollSummarySelectedFieldOptions.length > 0">
+            <li v-for="(option, index) in payrollSummarySelectedFieldOptions" :key="option.code">
+              <span>
+                <strong>{{ option.name }}</strong>
+                <code>{{ option.code }}</code>
+              </span>
+              <button
+                class="attendance__btn attendance__btn--compact"
+                type="button"
+                :disabled="index === 0"
+                @click="movePayrollSummaryFieldCode(option.code, -1)"
+              >
+                {{ tr('Up', '上移') }}
+              </button>
+              <button
+                class="attendance__btn attendance__btn--compact"
+                type="button"
+                :disabled="index === payrollSummarySelectedFieldOptions.length - 1"
+                @click="movePayrollSummaryFieldCode(option.code, 1)"
+              >
+                {{ tr('Down', '下移') }}
+              </button>
+            </li>
+          </ol>
+          <span v-else class="attendance__empty">
+            {{ tr('No custom field template selected; backend default will be used.', '未选择自定义字段模板，将使用后端默认字段。') }}
+          </span>
+        </div>
+      </section>
     </div>
     <div class="attendance__admin-actions">
       <button class="attendance__btn attendance__btn--primary" :disabled="payrollTemplateSaving" @click="savePayrollTemplate">
@@ -386,6 +453,7 @@
 import { computed, type Ref } from 'vue'
 import type {
   AttendancePayrollCycle,
+  AttendancePayrollSummaryFieldOption,
   AttendancePayrollSummary,
   AttendancePayrollTemplate,
 } from './useAttendanceAdminPayroll'
@@ -406,6 +474,7 @@ interface PayrollTemplateFormState {
   autoGenerate: boolean
   isDefault: boolean
   config: string
+  summaryFieldCodes: string[]
 }
 
 interface PayrollCycleFormState {
@@ -435,6 +504,9 @@ interface PayrollBindings {
   payrollCycleGenerateResult: Ref<{ created: number; skipped: number } | null>
   payrollTemplates: Ref<AttendancePayrollTemplate[]>
   payrollCycles: Ref<AttendancePayrollCycle[]>
+  payrollSummaryFieldOptions: Ref<AttendancePayrollSummaryFieldOption[]>
+  payrollSummaryFieldOptionsLoading: Ref<boolean>
+  payrollSummarySelectedFieldOptions: Ref<AttendancePayrollSummaryFieldOption[]>
   payrollTemplateEditingId: Ref<string | null>
   payrollCycleEditingId: Ref<string | null>
   payrollCycleSummary: Ref<AttendancePayrollSummary | null>
@@ -444,6 +516,10 @@ interface PayrollBindings {
   payrollTemplateName: (templateId?: string | null) => string
   resetPayrollTemplateForm: () => MaybePromise<void>
   editPayrollTemplate: (item: AttendancePayrollTemplate) => MaybePromise<void>
+  isPayrollSummaryFieldSelected: (code: string) => boolean
+  togglePayrollSummaryFieldCode: (code: string, checked?: boolean) => MaybePromise<void>
+  movePayrollSummaryFieldCode: (code: string, direction: -1 | 1) => MaybePromise<void>
+  loadPayrollSummaryFieldOptions: () => MaybePromise<void>
   loadPayrollTemplates: () => MaybePromise<void>
   savePayrollTemplate: () => MaybePromise<void>
   deletePayrollTemplate: (id: string) => MaybePromise<void>
@@ -474,6 +550,9 @@ const payrollCycleGenerating = props.payroll.payrollCycleGenerating
 const payrollCycleGenerateResult = props.payroll.payrollCycleGenerateResult
 const payrollTemplates = props.payroll.payrollTemplates
 const payrollCycles = props.payroll.payrollCycles
+const payrollSummaryFieldOptions = props.payroll.payrollSummaryFieldOptions
+const payrollSummaryFieldOptionsLoading = props.payroll.payrollSummaryFieldOptionsLoading
+const payrollSummarySelectedFieldOptions = props.payroll.payrollSummarySelectedFieldOptions
 const payrollTemplateEditingId = props.payroll.payrollTemplateEditingId
 const payrollCycleEditingId = props.payroll.payrollCycleEditingId
 const payrollCycleSummary = props.payroll.payrollCycleSummary
@@ -484,6 +563,10 @@ const payrollTemplateTimezoneOptionGroups = computed(() => buildTimezoneOptionGr
 const payrollTemplateName = props.payroll.payrollTemplateName
 const resetPayrollTemplateForm = () => props.payroll.resetPayrollTemplateForm()
 const editPayrollTemplate = (item: AttendancePayrollTemplate) => props.payroll.editPayrollTemplate(item)
+const isPayrollSummaryFieldSelected = (code: string) => props.payroll.isPayrollSummaryFieldSelected(code)
+const togglePayrollSummaryFieldCode = (code: string, checked?: boolean) => props.payroll.togglePayrollSummaryFieldCode(code, checked)
+const movePayrollSummaryFieldCode = (code: string, direction: -1 | 1) => props.payroll.movePayrollSummaryFieldCode(code, direction)
+const loadPayrollSummaryFieldOptions = () => props.payroll.loadPayrollSummaryFieldOptions()
 const loadPayrollTemplates = () => props.payroll.loadPayrollTemplates()
 const savePayrollTemplate = () => props.payroll.savePayrollTemplate()
 const deletePayrollTemplate = (id: string) => props.payroll.deletePayrollTemplate(id)
@@ -561,6 +644,10 @@ const exportPayrollCycleSummary = () => props.payroll.exportPayrollCycleSummary(
   color: #c62828;
 }
 
+.attendance__btn--compact {
+  padding: 4px 8px;
+}
+
 .attendance__btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
@@ -622,6 +709,77 @@ const exportPayrollCycleSummary = () => props.payroll.exportPayrollCycleSummary(
 .attendance__field-hint {
   color: #666;
   font-size: 12px;
+}
+
+.attendance__payroll-summary-fields {
+  border: 1px solid #e4e7eb;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fafbfc;
+}
+
+.attendance__payroll-summary-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.attendance__summary-field-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.attendance__summary-field-option {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px;
+  border: 1px solid #e4e7eb;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.attendance__summary-field-option span,
+.attendance__summary-field-order li span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.attendance__summary-field-option code,
+.attendance__summary-field-order code {
+  color: #555;
+  overflow-wrap: anywhere;
+}
+
+.attendance__summary-field-option small {
+  color: #777;
+}
+
+.attendance__summary-field-order {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.attendance__summary-field-order ol {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.attendance__summary-field-order li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 6px;
+  align-items: center;
 }
 
 .attendance__empty {

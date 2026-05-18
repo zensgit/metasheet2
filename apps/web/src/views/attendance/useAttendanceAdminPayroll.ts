@@ -1,4 +1,4 @@
-import { reactive, ref, type Ref } from 'vue'
+import { computed, reactive, ref, type Ref } from 'vue'
 import { apiFetch as baseApiFetch } from '../../utils/api'
 
 type ApiFetchFn = typeof baseApiFetch
@@ -48,6 +48,18 @@ export interface AttendancePayrollSummary {
   overtime_minutes?: number
 }
 
+export interface AttendancePayrollSummaryFieldOption {
+  code: string
+  name: string
+  unit: string
+  formula?: boolean
+  source?: string
+}
+
+interface AttendanceReportFieldPayload {
+  items?: unknown[]
+}
+
 interface ApiEnvelope<T> {
   ok?: boolean
   data?: T
@@ -79,6 +91,7 @@ interface PayrollTemplateFormState {
   autoGenerate: boolean
   isDefault: boolean
   config: string
+  summaryFieldCodes: string[]
 }
 
 interface PayrollCycleFormState {
@@ -153,6 +166,127 @@ function parseJsonConfig(value: string): Record<string, any> | null {
   }
 }
 
+export const ATTENDANCE_PAYROLL_SUMMARY_BASE_FIELD_OPTIONS: readonly AttendancePayrollSummaryFieldOption[] = Object.freeze([
+  { code: 'total_minutes', name: '总工作分钟', unit: 'minutes', source: 'system' },
+  { code: 'leave_minutes', name: '请假分钟', unit: 'minutes', source: 'system' },
+  { code: 'overtime_minutes', name: '加班分钟', unit: 'minutes', source: 'system' },
+  { code: 'total_late_minutes', name: '总迟到分钟', unit: 'minutes', source: 'system' },
+  { code: 'total_early_leave_minutes', name: '总早退分钟', unit: 'minutes', source: 'system' },
+  { code: 'total_days', name: '应出勤天数', unit: 'days', source: 'system' },
+  { code: 'normal_days', name: '正常天数', unit: 'days', source: 'system' },
+  { code: 'late_days', name: '迟到天数', unit: 'days', source: 'system' },
+  { code: 'early_leave_days', name: '早退天数', unit: 'days', source: 'system' },
+  { code: 'late_early_days', name: '迟到早退天数', unit: 'days', source: 'system' },
+  { code: 'partial_days', name: '不完整天数', unit: 'days', source: 'system' },
+  { code: 'absent_days', name: '旷工天数', unit: 'days', source: 'system' },
+  { code: 'adjusted_days', name: '调整天数', unit: 'days', source: 'system' },
+  { code: 'off_days', name: '休息天数', unit: 'days', source: 'system' },
+  { code: 'expected_attendance_days', name: '应出勤天数', unit: 'days', source: 'system' },
+  { code: 'attendance_days', name: '出勤天数', unit: 'days', source: 'system' },
+  { code: 'rest_days', name: '休息天数', unit: 'days', source: 'system' },
+  { code: 'work_duration', name: '工作时长', unit: 'minutes', source: 'system' },
+  { code: 'late_count', name: '迟到次数', unit: 'count', source: 'system' },
+  { code: 'late_duration', name: '迟到时长', unit: 'minutes', source: 'system' },
+  { code: 'early_leave_count', name: '早退次数', unit: 'count', source: 'system' },
+  { code: 'early_leave_duration', name: '早退时长', unit: 'minutes', source: 'system' },
+  { code: 'absenteeism_days', name: '旷工天数', unit: 'days', source: 'system' },
+  { code: 'leave_duration', name: '请假时长', unit: 'minutes', source: 'system' },
+  { code: 'overtime_approval_duration', name: '加班审批时长', unit: 'minutes', source: 'system' },
+])
+
+function objectValue(source: unknown, key: string): unknown {
+  if (!source || typeof source !== 'object') return undefined
+  return (source as Record<string, unknown>)[key]
+}
+
+function uniquePayrollSummaryFieldCodes(values: unknown[]): string[] {
+  const seen = new Set<string>()
+  const codes: string[] = []
+  values.forEach((item) => {
+    const candidate = item && typeof item === 'object'
+      ? objectValue(item, 'code')
+        ?? objectValue(item, 'fieldCode')
+        ?? objectValue(item, 'field_code')
+        ?? objectValue(item, 'metric')
+      : item
+    if (item && typeof item === 'object' && objectValue(item, 'enabled') === false) return
+    const code = typeof candidate === 'string' ? candidate.trim() : ''
+    if (!code || seen.has(code)) return
+    seen.add(code)
+    codes.push(code)
+  })
+  return codes
+}
+
+export function extractPayrollSummaryFieldCodes(config: Record<string, unknown> | null | undefined): string[] {
+  const raw = objectValue(config, 'summaryFieldCodes')
+    ?? objectValue(config, 'summaryFields')
+    ?? objectValue(config, 'payrollSummaryFieldCodes')
+    ?? objectValue(config, 'payrollSummaryFields')
+    ?? objectValue(config, 'summary_field_codes')
+    ?? objectValue(config, 'summary_fields')
+  return Array.isArray(raw) ? uniquePayrollSummaryFieldCodes(raw) : []
+}
+
+export function applyPayrollSummaryFieldsToConfig(
+  config: Record<string, unknown>,
+  fieldCodes: string[],
+): Record<string, unknown> {
+  const next = { ...config }
+  delete next.summaryFieldCodes
+  delete next.summaryFields
+  delete next.payrollSummaryFieldCodes
+  delete next.payrollSummaryFields
+  delete next.summary_field_codes
+  delete next.summary_fields
+  const codes = uniquePayrollSummaryFieldCodes(fieldCodes)
+  if (codes.length > 0) {
+    next.summaryFields = codes
+  }
+  return next
+}
+
+export function buildPayrollSummaryFieldOptionsFromReportFields(payload: unknown): AttendancePayrollSummaryFieldOption[] {
+  const items = Array.isArray(objectValue(payload, 'items'))
+    ? objectValue(payload, 'items') as unknown[]
+    : []
+  return items.flatMap((item) => {
+    if (!item || typeof item !== 'object') return []
+    const formulaEnabled = objectValue(item, 'formulaEnabled') === true
+    const formulaScope = String(objectValue(item, 'formulaScope') || '').trim()
+    const enabled = objectValue(item, 'enabled') !== false
+    const visible = objectValue(item, 'reportVisible') !== false
+    if (!formulaEnabled || formulaScope !== 'summary' || !enabled || !visible) return []
+    const code = String(objectValue(item, 'code') || '').trim()
+    if (!code) return []
+    return [{
+      code,
+      name: String(objectValue(item, 'name') || code),
+      unit: String(objectValue(item, 'unit') || objectValue(item, 'formulaOutputType') || 'text'),
+      formula: true,
+      source: String(objectValue(item, 'source') || 'formula'),
+    }]
+  })
+}
+
+export function mergePayrollSummaryFieldOptions(
+  options: AttendancePayrollSummaryFieldOption[],
+): AttendancePayrollSummaryFieldOption[] {
+  const merged = new Map<string, AttendancePayrollSummaryFieldOption>()
+  ATTENDANCE_PAYROLL_SUMMARY_BASE_FIELD_OPTIONS.forEach(option => merged.set(option.code, { ...option }))
+  options.forEach((option) => {
+    if (!option.code) return
+    merged.set(option.code, {
+      code: option.code,
+      name: option.name || option.code,
+      unit: option.unit || 'text',
+      formula: option.formula === true,
+      source: option.source || (option.formula ? 'formula' : 'system'),
+    })
+  })
+  return [...merged.values()]
+}
+
 function defaultConfirm(message: string): boolean {
   if (typeof window === 'undefined' || typeof window.confirm !== 'function') return false
   return window.confirm(message)
@@ -193,6 +327,10 @@ export function useAttendanceAdminPayroll({
 
   const payrollTemplates = ref<AttendancePayrollTemplate[]>([])
   const payrollCycles = ref<AttendancePayrollCycle[]>([])
+  const payrollSummaryFieldOptions = ref<AttendancePayrollSummaryFieldOption[]>(
+    mergePayrollSummaryFieldOptions([]),
+  )
+  const payrollSummaryFieldOptionsLoading = ref(false)
 
   const payrollTemplateEditingId = ref<string | null>(null)
   const payrollCycleEditingId = ref<string | null>(null)
@@ -207,6 +345,17 @@ export function useAttendanceAdminPayroll({
     autoGenerate: true,
     isDefault: false,
     config: '{}',
+    summaryFieldCodes: [],
+  })
+
+  const payrollSummarySelectedFieldOptions = computed(() => {
+    const optionMap = new Map(payrollSummaryFieldOptions.value.map(option => [option.code, option]))
+    return payrollTemplateForm.summaryFieldCodes.map(code => optionMap.get(code) ?? {
+      code,
+      name: code,
+      unit: 'text',
+      source: 'template',
+    })
   })
 
   const payrollCycleForm = reactive<PayrollCycleFormState>({
@@ -237,6 +386,7 @@ export function useAttendanceAdminPayroll({
     payrollTemplateForm.autoGenerate = true
     payrollTemplateForm.isDefault = false
     payrollTemplateForm.config = '{}'
+    payrollTemplateForm.summaryFieldCodes = []
   }
 
   function editPayrollTemplate(item: AttendancePayrollTemplate) {
@@ -249,6 +399,65 @@ export function useAttendanceAdminPayroll({
     payrollTemplateForm.autoGenerate = item.autoGenerate
     payrollTemplateForm.isDefault = item.isDefault
     payrollTemplateForm.config = JSON.stringify(item.config ?? {}, null, 2)
+    payrollTemplateForm.summaryFieldCodes = extractPayrollSummaryFieldCodes(item.config)
+  }
+
+  function isPayrollSummaryFieldSelected(code: string): boolean {
+    return payrollTemplateForm.summaryFieldCodes.includes(code)
+  }
+
+  function togglePayrollSummaryFieldCode(code: string, checked?: boolean) {
+    const normalized = code.trim()
+    if (!normalized) return
+    const selected = isPayrollSummaryFieldSelected(normalized)
+    const shouldSelect = checked ?? !selected
+    if (shouldSelect && !selected) {
+      payrollTemplateForm.summaryFieldCodes = [...payrollTemplateForm.summaryFieldCodes, normalized]
+      return
+    }
+    if (!shouldSelect && selected) {
+      payrollTemplateForm.summaryFieldCodes = payrollTemplateForm.summaryFieldCodes.filter(item => item !== normalized)
+    }
+  }
+
+  function movePayrollSummaryFieldCode(code: string, direction: -1 | 1) {
+    const index = payrollTemplateForm.summaryFieldCodes.indexOf(code)
+    if (index < 0) return
+    const nextIndex = index + direction
+    if (nextIndex < 0 || nextIndex >= payrollTemplateForm.summaryFieldCodes.length) return
+    const next = [...payrollTemplateForm.summaryFieldCodes]
+    const current = next[index]
+    next[index] = next[nextIndex]
+    next[nextIndex] = current
+    payrollTemplateForm.summaryFieldCodes = next
+  }
+
+  async function loadPayrollSummaryFieldOptions() {
+    payrollSummaryFieldOptionsLoading.value = true
+    try {
+      const query = buildQuery({ orgId: getOrgId() })
+      const suffix = query.toString()
+      const response = await apiFetch(`/api/attendance/report-fields${suffix ? `?${suffix}` : ''}`)
+      if (response.status === 403) {
+        adminForbidden.value = true
+        return
+      }
+      const data = await readJson<ApiEnvelope<AttendanceReportFieldPayload>>(response)
+      if (!response.ok || !data?.ok) {
+        throw new Error(extractErrorMessage(data, tr('Failed to load payroll summary fields', '加载计薪汇总字段失败')))
+      }
+      adminForbidden.value = false
+      payrollSummaryFieldOptions.value = mergePayrollSummaryFieldOptions(
+        buildPayrollSummaryFieldOptionsFromReportFields(data.data),
+      )
+    } catch (error) {
+      const message = error instanceof Error && error.message
+        ? error.message
+        : tr('Failed to load payroll summary fields', '加载计薪汇总字段失败')
+      setStatus(message, 'error')
+    } finally {
+      payrollSummaryFieldOptionsLoading.value = false
+    }
   }
 
   async function loadPayrollTemplates() {
@@ -286,6 +495,10 @@ export function useAttendanceAdminPayroll({
       if (!config) {
         throw new Error(tr('Payroll template config must be valid JSON', '计薪模板配置必须是合法 JSON'))
       }
+      const configWithSummaryFields = applyPayrollSummaryFieldsToConfig(
+        config,
+        payrollTemplateForm.summaryFieldCodes,
+      )
       const payload = {
         name: payrollTemplateForm.name.trim(),
         timezone: payrollTemplateForm.timezone.trim() || defaultTimezone,
@@ -294,7 +507,7 @@ export function useAttendanceAdminPayroll({
         endMonthOffset: Number(payrollTemplateForm.endMonthOffset) || 0,
         autoGenerate: payrollTemplateForm.autoGenerate,
         isDefault: payrollTemplateForm.isDefault,
-        config,
+        config: configWithSummaryFields,
         orgId: getOrgId(),
       }
       const isEditing = Boolean(payrollTemplateEditingId.value)
@@ -592,6 +805,9 @@ export function useAttendanceAdminPayroll({
     payrollCycleGenerateResult,
     payrollTemplates,
     payrollCycles,
+    payrollSummaryFieldOptions,
+    payrollSummaryFieldOptionsLoading,
+    payrollSummarySelectedFieldOptions,
     payrollTemplateEditingId,
     payrollCycleEditingId,
     payrollCycleSummary,
@@ -601,6 +817,10 @@ export function useAttendanceAdminPayroll({
     payrollTemplateName,
     resetPayrollTemplateForm,
     editPayrollTemplate,
+    isPayrollSummaryFieldSelected,
+    togglePayrollSummaryFieldCode,
+    movePayrollSummaryFieldCode,
+    loadPayrollSummaryFieldOptions,
     loadPayrollTemplates,
     savePayrollTemplate,
     deletePayrollTemplate,
