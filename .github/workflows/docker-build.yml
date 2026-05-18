@@ -395,6 +395,7 @@ jobs:
         continue-on-error: true
         env:
           METASHEET_BASE_URL: ${{ vars.METASHEET_BASE_URL || vars.PUBLIC_APP_URL || 'http://142.171.239.56:8081' }}
+          METASHEET_FRONTEND_BASE_URL: ${{ vars.METASHEET_FRONTEND_BASE_URL || vars.PUBLIC_APP_URL || vars.METASHEET_BASE_URL || '' }}
           METASHEET_TENANT_ID: ${{ vars.METASHEET_TENANT_ID || '' }}
           K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH: ${{ vars.K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH || 'false' }}
         run: |
@@ -410,6 +411,9 @@ jobs:
             --out-dir "$env_check_out_dir"
             --smoke-out-dir "$smoke_out_dir"
           )
+          if [[ -n "${METASHEET_FRONTEND_BASE_URL:-}" ]]; then
+            args+=(--frontend-base-url "$METASHEET_FRONTEND_BASE_URL")
+          fi
           case "${require_auth}" in
             true|TRUE|True|1|yes|YES|Yes)
               args+=(--require-auth)
@@ -436,6 +440,7 @@ jobs:
         continue-on-error: true
         env:
           METASHEET_BASE_URL: ${{ vars.METASHEET_BASE_URL || vars.PUBLIC_APP_URL || 'http://142.171.239.56:8081' }}
+          METASHEET_FRONTEND_BASE_URL: ${{ vars.METASHEET_FRONTEND_BASE_URL || vars.PUBLIC_APP_URL || vars.METASHEET_BASE_URL || '' }}
           METASHEET_TENANT_ID: ${{ vars.METASHEET_TENANT_ID || '' }}
           K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH: ${{ vars.K3_WISE_DEPLOY_SMOKE_REQUIRE_AUTH || 'false' }}
         run: |
@@ -449,6 +454,9 @@ jobs:
             --base-url "$METASHEET_BASE_URL"
             --out-dir "$smoke_out_dir"
           )
+          if [[ -n "${METASHEET_FRONTEND_BASE_URL:-}" ]]; then
+            args+=(--frontend-base-url "$METASHEET_FRONTEND_BASE_URL")
+          fi
           case "${require_auth}" in
             true|TRUE|True|1|yes|YES|Yes)
               args+=(--require-auth)

@@ -24,7 +24,9 @@ Validates local inputs before running the K3 WISE authenticated postdeploy smoke
 This does not contact the deployment host.
 
 Options:
-  --base-url <url>        MetaSheet base URL to smoke
+  --base-url <url>        MetaSheet API/control-plane base URL to smoke
+  --frontend-base-url <url>
+                          Optional frontend/nginx SPA base URL for route checks
   --auth-token <token>    Bearer token value; prefer --token-file for local use
   --token-file <path>     File containing bearer token
   --tenant-id <id>        Tenant scope for authenticated control-plane list probes
@@ -41,7 +43,8 @@ Options:
   --help                  Show this help
 
 Environment fallbacks:
-  METASHEET_BASE_URL, PUBLIC_APP_URL
+  METASHEET_BASE_URL
+  METASHEET_FRONTEND_BASE_URL, PUBLIC_APP_URL, FRONTEND_BASE_URL
   METASHEET_AUTH_TOKEN, ADMIN_TOKEN, AUTH_TOKEN
   METASHEET_AUTH_TOKEN_FILE, AUTH_TOKEN_FILE
   METASHEET_TENANT_ID, TENANT_ID
@@ -101,7 +104,8 @@ function readRequiredValue(argv, index, flag) {
 
 function parseArgs(argv = process.argv.slice(2)) {
   const opts = {
-    baseUrl: envValue('METASHEET_BASE_URL', 'PUBLIC_APP_URL'),
+    baseUrl: envValue('METASHEET_BASE_URL'),
+    frontendBaseUrl: envValue('METASHEET_FRONTEND_BASE_URL', 'PUBLIC_APP_URL', 'FRONTEND_BASE_URL'),
     authToken: envValue('K3_WISE_SMOKE_TOKEN', 'METASHEET_AUTH_TOKEN', 'ADMIN_TOKEN', 'AUTH_TOKEN'),
     tokenFile: envValue('METASHEET_AUTH_TOKEN_FILE', 'AUTH_TOKEN_FILE'),
     tenantId: envValue('K3_WISE_SMOKE_TENANT_ID', 'METASHEET_TENANT_ID', 'TENANT_ID'),
@@ -120,6 +124,10 @@ function parseArgs(argv = process.argv.slice(2)) {
     switch (arg) {
       case '--base-url':
         opts.baseUrl = readRequiredValue(argv, i, arg)
+        i += 1
+        break
+      case '--frontend-base-url':
+        opts.frontendBaseUrl = readRequiredValue(argv, i, arg)
         i += 1
         break
       case '--auth-token':
@@ -172,6 +180,7 @@ function parseArgs(argv = process.argv.slice(2)) {
     throw new K3WisePostdeployEnvCheckError('--timeout-ms must be a positive integer', { timeoutMs: opts.timeoutMs })
   }
   opts.baseUrl = opts.baseUrl.trim()
+  opts.frontendBaseUrl = opts.frontendBaseUrl.trim()
   opts.authToken = opts.authToken.trim()
   opts.tokenFile = opts.tokenFile.trim()
   opts.tenantId = opts.tenantId.trim()
@@ -212,7 +221,7 @@ function makeCheck(id, status, message, details = {}) {
   return { id, status, message, ...details }
 }
 
-function normalizeBaseUrl(value) {
+function normalizeBaseUrl(value, label = '--base-url') {
   if (!value) {
     throw new K3WisePostdeployEnvCheckError('base URL is required; set --base-url or METASHEET_BASE_URL', {
       field: 'baseUrl',
@@ -222,16 +231,16 @@ function normalizeBaseUrl(value) {
   try {
     url = new URL(value)
   } catch {
-    throw new K3WisePostdeployEnvCheckError('--base-url must be a valid URL', { baseUrl: value })
+    throw new K3WisePostdeployEnvCheckError(`${label} must be a valid URL`, { baseUrl: value })
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new K3WisePostdeployEnvCheckError('--base-url must use http or https', { baseUrl: value })
+    throw new K3WisePostdeployEnvCheckError(`${label} must use http or https`, { baseUrl: value })
   }
   if (url.username || url.password) {
-    throw new K3WisePostdeployEnvCheckError('--base-url must not contain inline credentials', { baseUrl: redactText(value) })
+    throw new K3WisePostdeployEnvCheckError(`${label} must not contain inline credentials`, { baseUrl: redactText(value) })
   }
   if (url.search || url.hash) {
-    throw new K3WisePostdeployEnvCheckError('--base-url must not contain query string or hash', { baseUrl: redactText(value) })
+    throw new K3WisePostdeployEnvCheckError(`${label} must not contain query string or hash`, { baseUrl: redactText(value) })
   }
   return url.toString().replace(/\/+$/, '')
 }
@@ -291,7 +300,7 @@ function quoteShell(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`
 }
 
-function buildSmokeCommand(opts, normalizedBaseUrl, tokenInfo) {
+function buildSmokeCommand(opts, normalizedBaseUrl, tokenInfo, normalizedFrontendBaseUrl = normalizedBaseUrl) {
   const args = [
     'node',
     'scripts/ops/integration-k3wise-postdeploy-smoke.mjs',
@@ -302,6 +311,9 @@ function buildSmokeCommand(opts, normalizedBaseUrl, tokenInfo) {
     '--timeout-ms',
     quoteShell(String(opts.timeoutMs)),
   ]
+  if (normalizedFrontendBaseUrl && normalizedFrontendBaseUrl !== normalizedBaseUrl) {
+    args.push('--frontend-base-url', quoteShell(normalizedFrontendBaseUrl))
+  }
   if (opts.requireAuth) args.push('--require-auth')
   if (opts.tenantId) args.push('--tenant-id', quoteShell(opts.tenantId))
   if (opts.issue1542WorkbenchSmoke) args.push('--issue1542-workbench-smoke')
@@ -314,6 +326,7 @@ function buildSmokeCommand(opts, normalizedBaseUrl, tokenInfo) {
 async function runEnvCheck(opts) {
   const checks = []
   let normalizedBaseUrl = ''
+  let normalizedFrontendBaseUrl = ''
   try {
     normalizedBaseUrl = normalizeBaseUrl(opts.baseUrl)
     checks.push(makeCheck('base-url', 'pass', 'base URL is valid', { baseUrl: normalizedBaseUrl }))
@@ -321,6 +334,29 @@ async function runEnvCheck(opts) {
     if (pathWarning) checks.push(makeCheck('base-url-path', 'warn', pathWarning, { baseUrl: normalizedBaseUrl }))
   } catch (error) {
     checks.push(makeCheck('base-url', 'fail', error.message, { details: error.details || {} }))
+  }
+
+  if (normalizedBaseUrl) {
+    try {
+      normalizedFrontendBaseUrl = opts.frontendBaseUrl
+        ? normalizeBaseUrl(opts.frontendBaseUrl, '--frontend-base-url')
+        : normalizedBaseUrl
+      checks.push(makeCheck('frontend-base-url', 'pass', opts.frontendBaseUrl
+        ? 'frontend base URL is valid'
+        : 'frontend base URL defaults to API base URL', {
+        frontendBaseUrl: normalizedFrontendBaseUrl,
+      }))
+      if (normalizedFrontendBaseUrl !== normalizedBaseUrl) {
+        checks.push(makeCheck('frontend-base-url-split', 'pass', 'frontend route checks will use a separate frontend/nginx URL', {
+          baseUrl: normalizedBaseUrl,
+          frontendBaseUrl: normalizedFrontendBaseUrl,
+        }))
+      }
+    } catch (error) {
+      checks.push(makeCheck('frontend-base-url', 'fail', error.message, { details: error.details || {} }))
+    }
+  } else if (opts.frontendBaseUrl) {
+    checks.push(makeCheck('frontend-base-url', 'warn', 'frontend base URL was supplied but API base URL must be fixed first'))
   }
 
   let tokenInfo = { source: 'none', present: false, length: 0, jwtLike: false }
@@ -378,13 +414,14 @@ async function runEnvCheck(opts) {
     ok: failCount === 0,
     generatedAt: new Date().toISOString(),
     baseUrl: normalizedBaseUrl || redactText(opts.baseUrl || ''),
+    frontendBaseUrl: normalizedFrontendBaseUrl || redactText(opts.frontendBaseUrl || normalizedBaseUrl || opts.baseUrl || ''),
     requireAuth: opts.requireAuth,
     requireTenant: opts.requireTenant,
     issue1542WorkbenchSmoke: opts.issue1542WorkbenchSmoke,
     issue1542InstallStaging: opts.issue1542InstallStaging,
     tenantId: opts.tenantId || null,
     tokenSource: tokenInfo.source,
-    smokeCommand: failCount === 0 ? buildSmokeCommand(opts, normalizedBaseUrl, tokenInfo) : '',
+    smokeCommand: failCount === 0 ? buildSmokeCommand(opts, normalizedBaseUrl, tokenInfo, normalizedFrontendBaseUrl) : '',
     checks,
     summary: {
       pass: checks.filter((check) => check.status === 'pass').length,
@@ -401,7 +438,8 @@ function renderMarkdown(evidence) {
     '',
     `- Generated at: ${evidence.generatedAt}`,
     `- Result: ${evidence.ok ? 'PASS' : 'FAIL'}`,
-    `- Base URL: ${evidence.baseUrl || 'not set'}`,
+    `- API base URL: ${evidence.baseUrl || 'not set'}`,
+    `- Frontend base URL: ${evidence.frontendBaseUrl || evidence.baseUrl || 'not set'}`,
     `- Require auth: ${evidence.requireAuth ? 'yes' : 'no'}`,
     `- Issue #1542 workbench smoke: ${evidence.issue1542WorkbenchSmoke ? 'yes' : 'no'}`,
     `- Issue #1542 install staging: ${evidence.issue1542InstallStaging ? 'yes' : 'no'}`,
@@ -452,6 +490,7 @@ async function runCli(argv = process.argv.slice(2)) {
   console.log(JSON.stringify({
     ok: evidence.ok,
     baseUrl: evidence.baseUrl,
+    frontendBaseUrl: evidence.frontendBaseUrl,
     requireAuth: evidence.requireAuth,
     issue1542WorkbenchSmoke: evidence.issue1542WorkbenchSmoke,
     issue1542InstallStaging: evidence.issue1542InstallStaging,

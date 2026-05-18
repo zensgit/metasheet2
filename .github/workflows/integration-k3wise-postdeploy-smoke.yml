@@ -4,9 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       base_url:
-        description: 'MetaSheet base URL to smoke'
+        description: 'MetaSheet API/control-plane base URL to smoke'
         required: false
         default: 'http://142.171.239.56:8081'
+      frontend_base_url:
+        description: 'Optional frontend/nginx SPA base URL for /integrations/* route checks'
+        required: false
+        default: ''
       require_auth:
         description: 'Require authenticated integration contract checks; keep true for internal-trial signoff'
         required: false
@@ -75,6 +79,7 @@ jobs:
         continue-on-error: true
         env:
           METASHEET_BASE_URL: ${{ github.event.inputs.base_url || 'http://142.171.239.56:8081' }}
+          METASHEET_FRONTEND_BASE_URL: ${{ github.event.inputs.frontend_base_url || '' }}
           METASHEET_TENANT_ID: ${{ github.event.inputs.tenant_id || vars.METASHEET_TENANT_ID || '' }}
           REQUIRE_AUTH: ${{ github.event.inputs.require_auth || 'true' }}
           ISSUE1542_INSTALL_STAGING: ${{ github.event.inputs.issue1542_install_staging || 'false' }}
@@ -93,6 +98,9 @@ jobs:
             --smoke-out-dir "$smoke_out_dir"
             --timeout-ms "$TIMEOUT_MS"
           )
+          if [[ -n "${METASHEET_FRONTEND_BASE_URL:-}" ]]; then
+            args+=(--frontend-base-url "$METASHEET_FRONTEND_BASE_URL")
+          fi
           if [[ "$REQUIRE_AUTH" == "true" ]]; then
             args+=(--require-auth)
           fi
@@ -123,6 +131,7 @@ jobs:
         continue-on-error: true
         env:
           METASHEET_BASE_URL: ${{ github.event.inputs.base_url || 'http://142.171.239.56:8081' }}
+          METASHEET_FRONTEND_BASE_URL: ${{ github.event.inputs.frontend_base_url || '' }}
           METASHEET_TENANT_ID: ${{ github.event.inputs.tenant_id || vars.METASHEET_TENANT_ID || '' }}
           REQUIRE_AUTH: ${{ github.event.inputs.require_auth || 'true' }}
           ISSUE1542_INSTALL_STAGING: ${{ github.event.inputs.issue1542_install_staging || 'false' }}
@@ -139,6 +148,9 @@ jobs:
             --out-dir "$smoke_out_dir"
             --timeout-ms "$TIMEOUT_MS"
           )
+          if [[ -n "${METASHEET_FRONTEND_BASE_URL:-}" ]]; then
+            args+=(--frontend-base-url "$METASHEET_FRONTEND_BASE_URL")
+          fi
           if [[ "$REQUIRE_AUTH" == "true" ]]; then
             args+=(--require-auth)
           fi

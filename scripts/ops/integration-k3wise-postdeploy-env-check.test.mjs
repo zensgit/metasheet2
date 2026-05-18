@@ -18,7 +18,9 @@ function scrubEnv(extra = {}) {
   return {
     ...process.env,
     METASHEET_BASE_URL: '',
+    METASHEET_FRONTEND_BASE_URL: '',
     PUBLIC_APP_URL: '',
+    FRONTEND_BASE_URL: '',
     K3_WISE_SMOKE_TOKEN: '',
     METASHEET_AUTH_TOKEN: '',
     ADMIN_TOKEN: '',
@@ -242,6 +244,47 @@ test('issue1542 install-staging command includes workbench flags and does not le
   }
 })
 
+test('generated smoke command includes split frontend base URL when supplied', async () => {
+  const tmpDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url',
+      'https://api.metasheet.example.test',
+      '--frontend-base-url',
+      'https://app.metasheet.example.test',
+      '--tenant-id',
+      'tenant_1',
+      '--require-auth',
+      '--out-dir',
+      tmpDir,
+    ], {
+      env: {
+        K3_WISE_SMOKE_TOKEN: secretToken,
+      },
+    })
+    const summary = parseStdout(result.stdout)
+    const evidenceText = readFileSync(summary.jsonPath, 'utf8')
+    const evidence = JSON.parse(evidenceText)
+    const md = readFileSync(summary.mdPath, 'utf8')
+
+    assert.equal(result.status, 0)
+    assert.equal(summary.ok, true)
+    assert.equal(summary.baseUrl, 'https://api.metasheet.example.test')
+    assert.equal(summary.frontendBaseUrl, 'https://app.metasheet.example.test')
+    assert.equal(evidence.frontendBaseUrl, 'https://app.metasheet.example.test')
+    assert.match(evidence.smokeCommand, /--base-url 'https:\/\/api\.metasheet\.example\.test'/)
+    assert.match(evidence.smokeCommand, /--frontend-base-url 'https:\/\/app\.metasheet\.example\.test'/)
+    assert.equal(evidence.checks.find((check) => check.id === 'frontend-base-url')?.status, 'pass')
+    assert.equal(evidence.checks.find((check) => check.id === 'frontend-base-url-split')?.status, 'pass')
+    assert.doesNotMatch(result.stdout, new RegExp(secretToken))
+    assert.doesNotMatch(result.stderr, new RegExp(secretToken))
+    assert.doesNotMatch(evidenceText, new RegExp(secretToken))
+    assert.doesNotMatch(md, new RegExp(secretToken))
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
 test('issue1542 install-staging precheck requires authenticated tenant scope', async () => {
   const tmpDir = makeTmpDir()
   try {
@@ -310,6 +353,32 @@ test('rejects invalid base URL and query/hash URLs', async () => {
     assert.doesNotMatch(withQuery.stdout, new RegExp(secretQueryValue))
     assert.doesNotMatch(withQuery.stderr, new RegExp(secretQueryValue))
     assert.doesNotMatch(queryEvidenceText, new RegExp(secretQueryValue))
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('rejects invalid frontend base URL without leaking query secrets', async () => {
+  const tmpDir = makeTmpDir()
+  const secretQueryValue = 'frontend-secret-query-value'
+  try {
+    const result = await runScript([
+      '--base-url',
+      'https://api.metasheet.example.test',
+      '--frontend-base-url',
+      `https://app.metasheet.example.test/integrations?access_token=${secretQueryValue}`,
+      '--out-dir',
+      tmpDir,
+    ])
+    const summary = parseStdout(result.stdout)
+    const evidenceText = readFileSync(summary.jsonPath, 'utf8')
+    const evidence = JSON.parse(evidenceText)
+
+    assert.equal(result.status, 1)
+    assert.match(evidence.checks.find((check) => check.id === 'frontend-base-url')?.message || '', /must not contain query string or hash/)
+    assert.doesNotMatch(result.stdout, new RegExp(secretQueryValue))
+    assert.doesNotMatch(result.stderr, new RegExp(secretQueryValue))
+    assert.doesNotMatch(evidenceText, new RegExp(secretQueryValue))
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }

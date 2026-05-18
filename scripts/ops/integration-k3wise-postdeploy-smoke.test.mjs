@@ -705,6 +705,43 @@ test('postdeploy smoke diagnoses backend-only base URL when frontend routes retu
   }
 })
 
+test('postdeploy smoke can split API and frontend base URLs', async () => {
+  const api = createFakeServer({ frontendRoutesNotFound: true })
+  const frontend = createFakeServer()
+  const apiBaseUrl = await api.listen()
+  const frontendBaseUrl = await frontend.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', apiBaseUrl,
+      '--frontend-base-url', frontendBaseUrl,
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 0, result.stderr)
+    const stdout = JSON.parse(result.stdout)
+    assert.equal(stdout.ok, true)
+    assert.equal(stdout.baseUrl, apiBaseUrl)
+    assert.equal(stdout.frontendBaseUrl, frontendBaseUrl)
+    assert.equal(stdout.summary.fail, 0)
+
+    const evidence = JSON.parse(readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8'))
+    assert.equal(evidence.baseUrl, apiBaseUrl)
+    assert.equal(evidence.frontendBaseUrl, frontendBaseUrl)
+    assert.equal(evidence.checks.find((check) => check.id === 'api-health').status, 'pass')
+    assert.equal(evidence.checks.find((check) => check.id === 'k3-wise-frontend-route').status, 'pass')
+    assert.equal(evidence.checks.find((check) => check.id === 'data-factory-frontend-route').status, 'pass')
+    assert.ok(api.requests.some((request) => request.pathname === '/api/health'))
+    assert.ok(api.requests.every((request) => !request.pathname.startsWith('/integrations/')))
+    assert.ok(frontend.requests.some((request) => request.pathname === '/integrations/k3-wise'))
+    assert.ok(frontend.requests.some((request) => request.pathname === '/integrations/workbench'))
+  } finally {
+    await api.close()
+    await frontend.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
 test('authenticated postdeploy smoke validates route and staging contracts without leaking token', async () => {
   const fake = createFakeServer()
   const baseUrl = await fake.listen()
@@ -1459,7 +1496,8 @@ test('postdeploy smoke markdown escapes table-breaking evidence values', async (
   })
 
   assert.match(markdown, /Generated at: `2026-05-07T09:00:00.000Z second line`/)
-  assert.match(markdown, /Base URL: ``https:\/\/metasheet\.example\.test\/k3`wise preview``/)
+  assert.match(markdown, /API base URL: ``https:\/\/metasheet\.example\.test\/k3`wise preview``/)
+  assert.match(markdown, /Frontend base URL: ``https:\/\/metasheet\.example\.test\/k3`wise preview``/)
   assert.match(markdown, /Internal trial signoff: BLOCKED \(route check \| failed see evidence\)/)
   assert.equal(markdown.includes('failed\nsee evidence'), false)
   assert.equal(markdown.includes('line two\n`raw`'), false)

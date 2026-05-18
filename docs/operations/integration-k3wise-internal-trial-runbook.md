@@ -112,11 +112,18 @@ still fails on the token resolver return code.
 ```bash
 node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
   --base-url "$METASHEET_BASE_URL" \
+  --frontend-base-url "${METASHEET_FRONTEND_BASE_URL:-$METASHEET_BASE_URL}" \
   --token-file "$METASHEET_AUTH_TOKEN_FILE" \
   --tenant-id "$METASHEET_TENANT_ID" \
   --require-auth \
   --out-dir artifacts/integration-k3wise/internal-trial/postdeploy-smoke
 ```
+
+Use `METASHEET_BASE_URL` for the API/control-plane origin. Use
+`METASHEET_FRONTEND_BASE_URL` for the nginx/front-door origin that serves the
+SPA and history fallback. If both surfaces share the same origin, omit
+`--frontend-base-url`; the smoke defaults frontend route checks to
+`--base-url`.
 
 For the Data Factory issue #1542 deployment retest, add the opt-in workbench
 smoke flags. `--issue1542-install-staging` first calls
@@ -135,6 +142,7 @@ run the smoke below.
 ```bash
 node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
   --base-url "$METASHEET_BASE_URL" \
+  --frontend-base-url "${METASHEET_FRONTEND_BASE_URL:-$METASHEET_BASE_URL}" \
   --token-file "$METASHEET_AUTH_TOKEN_FILE" \
   --tenant-id "$METASHEET_TENANT_ID" \
   --require-auth \
@@ -285,9 +293,10 @@ printf '%s' "$TOKEN" > "$TOKEN_FILE"
 chmod 600 "$TOKEN_FILE"
 unset TOKEN
 
-# 2. Run the smoke against the host-internal public URL.
+# 2. Run the smoke against the host-internal API URL and frontend/nginx URL.
 node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
-  --base-url http://<deploy-host-public-url>:8081 \
+  --base-url http://<deploy-host-api-url>:8081 \
+  --frontend-base-url http://<deploy-host-frontend-url>:8081 \
   --token-file "$TOKEN_FILE" \
   --tenant-id default \
   --require-auth \
@@ -313,6 +322,11 @@ Notes:
 - The smoke script's pre-share self-check pattern from
   `docs/operations/k3-poc-onprem-preflight-runbook.md` (URL query secret
   check + raw `Bearer` / `eyJ` / token field) applies to this artifact too.
+- If API/auth/staging checks pass but `/integrations/k3-wise` and
+  `/integrations/workbench` return 404, rerun the smoke with
+  `--frontend-base-url` pointing at the frontend/nginx origin that serves `/`
+  and falls back `/integrations/*` to `index.html`. Do not point frontend
+  route checks at a backend-only API port.
 
 ## Deployment Workflow
 
@@ -353,7 +367,9 @@ Observed non-reachable path:
 Implication for operators: if you want to run an ad-hoc smoke without going
 through GHA, prefer the host-shell pattern (SSH into the deploy host and run
 the smoke locally). Do **not** assume `--base-url http://<deploy-host>:8081`
-works from an unprivileged workstation.
+works from an unprivileged workstation. Also do not assume the API/control-plane
+origin and frontend/nginx origin are identical; use `--frontend-base-url` when
+the API checks and SPA route checks require different front doors.
 
 Loosening this posture (e.g., adding additional source networks to the
 `:8081` HTTP allowlist) happens in the `metasheet-web` container's nginx
