@@ -26,7 +26,22 @@
           @click="onSelect(base.id)"
         >
           <span class="meta-base-picker__item-icon" :style="{ background: base.color ?? '#409eff' }">{{ base.icon ?? '📋' }}</span>
-          <span class="meta-base-picker__item-name">{{ base.name }}</span>
+          <span class="meta-base-picker__item-copy">
+            <span class="meta-base-picker__item-name">{{ base.name }}</span>
+            <span v-if="base.isFavorite || base.lastOpenedAt" class="meta-base-picker__badges">
+              <span v-if="base.isFavorite">收藏</span>
+              <span v-if="base.lastOpenedAt">最近打开</span>
+            </span>
+          </span>
+          <button
+            type="button"
+            class="meta-base-picker__favorite"
+            :aria-pressed="base.isFavorite"
+            :aria-label="base.isFavorite ? `取消收藏 ${base.name}` : `收藏 ${base.name}`"
+            @click.stop="onToggleFavorite(base.id)"
+          >
+            {{ base.isFavorite ? '★' : '☆' }}
+          </button>
         </div>
         <div v-if="!filteredBases.length" class="meta-base-picker__empty">No bases found</div>
       </div>
@@ -45,10 +60,10 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import type { MetaBase } from '../types'
+import type { DecoratedBase } from '../utils/base-local-state'
 
 const props = defineProps<{
-  bases: MetaBase[]
+  bases: DecoratedBase[]
   activeBaseId: string
   canCreate?: boolean
 }>()
@@ -56,6 +71,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'select', baseId: string): void
   (e: 'create', name: string): void
+  (e: 'toggle-favorite', baseId: string): void
 }>()
 
 const open = ref(false)
@@ -82,6 +98,10 @@ function onCreate() {
   emit('create', name)
   newBaseName.value = ''
 }
+
+function onToggleFavorite(baseId: string) {
+  emit('toggle-favorite', baseId)
+}
 </script>
 
 <style scoped>
@@ -99,7 +119,12 @@ function onCreate() {
 .meta-base-picker__item:hover { background: #f5f7fa; }
 .meta-base-picker__item--active { background: #ecf5ff; }
 .meta-base-picker__item-icon { width: 20px; height: 20px; border-radius: 3px; display: flex; align-items: center; justify-content: center; font-size: 12px; color: #fff; flex-shrink: 0; }
+.meta-base-picker__item-copy { min-width: 0; flex: 1; display: grid; gap: 4px; }
 .meta-base-picker__item-name { font-size: 13px; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta-base-picker__badges { display: flex; flex-wrap: wrap; gap: 4px; }
+.meta-base-picker__badges span { border-radius: 999px; padding: 2px 6px; background: #eff6ff; color: #1d4ed8; font-size: 10px; font-weight: 700; }
+.meta-base-picker__favorite { flex-shrink: 0; width: 28px; height: 28px; border: 1px solid #dbeafe; border-radius: 999px; background: #f8fbff; color: #2563eb; cursor: pointer; font-size: 14px; line-height: 1; }
+.meta-base-picker__favorite[aria-pressed='true'] { border-color: #f59e0b; background: #fffbeb; color: #92400e; }
 .meta-base-picker__empty { padding: 16px; text-align: center; color: #999; font-size: 12px; }
 .meta-base-picker__create { display: flex; gap: 6px; padding: 8px; border-top: 1px solid #eee; }
 .meta-base-picker__create-input { flex: 1; padding: 4px 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; }

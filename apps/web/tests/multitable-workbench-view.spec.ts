@@ -17,6 +17,9 @@ const { authAccessSnapshot, bulkImportRecordsMock } = vi.hoisted(() => ({
   bulkImportRecordsMock: vi.fn(),
 }))
 
+const FAVORITE_BASES_KEY = 'metasheet:multitable:favorite-base-ids:v1'
+const RECENT_BASES_KEY = 'metasheet:multitable:recent-base-opens:v1'
+
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
   return {
@@ -811,12 +814,29 @@ vi.mock('../src/multitable/components/MetaBasePicker.vue', () => ({
   default: defineComponent({
     name: 'MetaBasePicker',
     props: {
+      bases: { type: Array, default: () => [] },
       activeBaseId: { type: String, default: '' },
       canCreate: { type: Boolean, default: false },
     },
-    emits: ['select', 'create'],
+    emits: ['select', 'create', 'toggle-favorite'],
     render() {
+      const bases = this.$props.bases as Array<{ id: string; name: string; isFavorite?: boolean; lastOpenedAt?: string | null }>
       return h('div', [
+        h(
+          'div',
+          { 'data-base-picker-order': 'true' },
+          bases.map((base) => `${base.id}:${base.isFavorite ? 'favorite' : 'normal'}:${base.lastOpenedAt ? 'recent' : 'stale'}`).join('|'),
+        ),
+        ...bases.map((base) =>
+          h(
+            'button',
+            {
+              'data-toggle-favorite-base': base.id,
+              onClick: () => this.$emit('toggle-favorite', base.id),
+            },
+            `favorite-${base.id}`,
+          ),
+        ),
         h(
           'button',
           {
@@ -1018,6 +1038,8 @@ describe('MultitableWorkbench view wiring', () => {
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
+    localStorage.removeItem(FAVORITE_BASES_KEY)
+    localStorage.removeItem(RECENT_BASES_KEY)
     loadCommentsSpy = vi.fn()
     addCommentSpy = vi.fn()
     resolveCommentSpy = vi.fn()
@@ -1046,6 +1068,8 @@ describe('MultitableWorkbench view wiring', () => {
     showErrorSpy.mockReset()
     showSuccessSpy.mockReset()
     pushSpy.mockReset()
+    localStorage.removeItem(FAVORITE_BASES_KEY)
+    localStorage.removeItem(RECENT_BASES_KEY)
     vi.clearAllMocks()
   })
 
@@ -1627,6 +1651,44 @@ describe('MultitableWorkbench view wiring', () => {
 
     expect(workbenchMock.switchBase).toHaveBeenCalledWith('base_sales')
     expect(showErrorSpy).toHaveBeenCalledWith('base switch failed')
+    expect(localStorage.getItem(RECENT_BASES_KEY)).not.toContain('base_sales')
+  })
+
+  it('records successful workbench base switches as recent opens', async () => {
+    mountWorkbench()
+    await flushUi()
+
+    workbenchMock.switchBase.mockImplementation(async (baseId: string) => {
+      workbenchMock.activeBaseId.value = baseId
+      return true
+    })
+
+    container!.querySelector<HTMLButtonElement>('[data-select-base="base_sales"]')!.click()
+    await flushUi()
+
+    const recent = JSON.parse(localStorage.getItem(RECENT_BASES_KEY) ?? '[]') as Array<{ baseId: string }>
+    expect(recent.map((entry) => entry.baseId)).toEqual(['base_sales', 'base_ops'])
+    expect(container!.querySelector('[data-base-picker-order]')?.textContent).toContain('base_sales:normal:recent')
+  })
+
+  it('sorts workbench base picker favorites and toggles them without switching base', async () => {
+    localStorage.setItem(FAVORITE_BASES_KEY, JSON.stringify(['base_sales']))
+
+    mountWorkbench()
+    await flushUi()
+
+    expect(container!.querySelector('[data-base-picker-order]')?.textContent).toBe(
+      'base_sales:favorite:stale|base_ops:normal:recent',
+    )
+
+    container!.querySelector<HTMLButtonElement>('[data-toggle-favorite-base="base_sales"]')!.click()
+    await flushUi()
+
+    expect(workbenchMock.switchBase).not.toHaveBeenCalled()
+    expect(JSON.parse(localStorage.getItem(FAVORITE_BASES_KEY) ?? '[]')).toEqual([])
+    expect(container!.querySelector('[data-base-picker-order]')?.textContent).toBe(
+      'base_ops:normal:recent|base_sales:normal:stale',
+    )
   })
 
   it('prompts before switching sheets when context-level drafts are present', async () => {
