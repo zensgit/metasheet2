@@ -209,7 +209,7 @@ describe('platform shell navigation', () => {
 
   it('marks legacy table/view routes as deprecated while keeping deep links registered', async () => {
     const source = await readFile(resolve(process.cwd(), 'src/router/appRoutes.ts'), 'utf8')
-    const deprecatedPaths = ['/grid', '/kanban', '/calendar', '/gallery', '/form']
+    const deprecatedPaths = ['/kanban', '/calendar', '/gallery', '/form']
 
     for (const path of deprecatedPaths) {
       const routePattern = new RegExp(
@@ -217,6 +217,14 @@ describe('platform shell navigation', () => {
       )
       expect(source, `Expected ${path} route to remain registered and deprecated`).toMatch(routePattern)
     }
+  })
+
+  it('redirects /grid to /multitable as part of Grid retirement (Phase B)', async () => {
+    const source = await readFile(resolve(process.cwd(), 'src/router/appRoutes.ts'), 'utf8')
+    const gridRedirectPattern = /path:\s*'\/grid'[\s\S]*?redirect:\s*'\/multitable'[\s\S]*?deprecated:\s*true/
+    expect(source, 'Expected /grid to redirect to /multitable with deprecated meta').toMatch(gridRedirectPattern)
+    // GridView.vue and its formula engine have been removed; the route must not import them
+    expect(source).not.toContain("import GridView from '../views/GridView.vue'")
   })
 
   it('keeps a dedicated approvals route in the platform shell', async () => {

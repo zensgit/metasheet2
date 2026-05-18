@@ -2,9 +2,11 @@
  * Optimistic-lock tests for `PUT /api/spreadsheets/:id/sheets/:sheetId/cells`.
  *
  * Reviewer finding #526 (Pilot R1, 2026-03-20): the handler silently
- * last-write-wins on the legacy cells endpoint. Both `GridView.vue` and
- * `SpreadsheetDetailView.vue` still target it via App.vue's navbar, so
- * concurrent edits could overwrite each other with no feedback.
+ * last-write-wins on the legacy cells endpoint. `SpreadsheetDetailView.vue`
+ * targets it from `/spreadsheets/:id`, so concurrent edits could overwrite
+ * each other with no feedback.
+ * (Historical note: `GridView.vue` also consumed this endpoint until Phase B
+ * Grid retirement removed `/grid` and the GridView component itself.)
  *
  * The fix:
  *   - `cells.version` is now read on update, bumped on successful write.
