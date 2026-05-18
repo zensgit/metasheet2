@@ -104,3 +104,19 @@ write template); confirm or correct in O4-BOM.
 Return Part A inline (redacted) and Part B as the four `*.redacted.json` files
 through the secure channel. On receipt and customer GATE PASS, the runtime slice
 proceeds per the post-GATE plan in the design and verification docs.
+
+## Machine check before runtime
+
+Before opening the post-GATE runtime PR, copy the customer answers and the four
+sample files into a local packet outside Git, then run:
+
+```bash
+node scripts/ops/integration-k3wise-gate-contract-check.mjs \
+  --input /path/outside-git/k3wise-gate-contract-packet.json \
+  --out-dir artifacts/integration-k3wise/gate-contract-check
+```
+
+The checker must return `PASS` before runtime work starts. `GATE_BLOCKED` means
+the packet is incomplete; `FAIL` means a safety issue such as a secret-shaped
+value or unsafe endpoint path was found. The checker does not contact K3 WISE or
+MetaSheet and does not lift the broader customer GATE by itself.
