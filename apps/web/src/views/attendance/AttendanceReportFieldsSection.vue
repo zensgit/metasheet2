@@ -198,6 +198,96 @@
           </div>
         </div>
       </div>
+      <div class="attendance-report-fields__formula-create" data-report-field-formula-create>
+        <div class="attendance-report-fields__formula-reference-label">
+          {{ tr('Create formula field', '创建公式字段') }}
+        </div>
+        <div class="attendance-report-fields__formula-create-grid">
+          <label class="attendance-report-fields__filter" for="attendance-formula-create-code">
+            <span>{{ tr('Code', '编码') }}</span>
+            <input
+              id="attendance-formula-create-code"
+              v-model="newFormulaDraft.code"
+              type="text"
+              placeholder="net_work_minutes"
+              data-report-field-formula-create-code
+            >
+          </label>
+          <label class="attendance-report-fields__filter" for="attendance-formula-create-name">
+            <span>{{ tr('Name', '名称') }}</span>
+            <input
+              id="attendance-formula-create-name"
+              v-model="newFormulaDraft.name"
+              type="text"
+              :placeholder="tr('Net work minutes', '净工作时长')"
+              data-report-field-formula-create-name
+            >
+          </label>
+          <label class="attendance-report-fields__filter" for="attendance-formula-create-category">
+            <span>{{ tr('Category', '分类') }}</span>
+            <select
+              id="attendance-formula-create-category"
+              v-model="newFormulaDraft.category"
+              data-report-field-formula-create-category
+            >
+              <option
+                v-for="category in allCategoryOptions"
+                :key="category.id"
+                :value="category.id"
+              >
+                {{ category.label }}
+              </option>
+            </select>
+          </label>
+          <label class="attendance-report-fields__filter" for="attendance-formula-create-output">
+            <span>{{ tr('Output', '输出') }}</span>
+            <select
+              id="attendance-formula-create-output"
+              v-model="newFormulaDraft.formulaOutputType"
+              data-report-field-formula-create-output
+            >
+              <option
+                v-for="option in formulaOutputTypeOptions"
+                :key="option.value"
+                :value="option.value"
+              >
+                {{ option.label }}
+              </option>
+            </select>
+          </label>
+          <label class="attendance-report-fields__filter attendance-report-fields__formula-create-expression" for="attendance-formula-create-expression">
+            <span>{{ tr('Expression', '表达式') }}</span>
+            <textarea
+              id="attendance-formula-create-expression"
+              v-model="newFormulaDraft.formulaExpression"
+              rows="2"
+              placeholder="={work_duration}-{late_duration}"
+              data-report-field-formula-create-expression
+            />
+          </label>
+          <button
+            class="attendance__btn"
+            type="button"
+            :disabled="savingFormulaCode === newFormulaDraft.code.trim()"
+            data-report-field-formula-create-save
+            @click="saveNewFormulaField"
+          >
+            {{ savingFormulaCode === newFormulaDraft.code.trim() ? tr('Saving...', '保存中...') : tr('Create formula', '创建公式') }}
+          </button>
+        </div>
+        <div
+          v-if="formulaDraftStatusMessage"
+          class="attendance__status"
+          :class="{
+            'attendance__status--error': formulaDraftStatusKind === 'error',
+            'attendance__status--warn': formulaDraftStatusKind === 'warn',
+          }"
+          role="status"
+          data-report-field-formula-status
+        >
+          {{ formulaDraftStatusMessage }}
+        </div>
+      </div>
     </div>
 
     <div
@@ -412,6 +502,89 @@
                     </div>
                   </template>
                   <span v-else class="attendance__field-hint">{{ tr('No formula', '无公式') }}</span>
+                  <div class="attendance-report-fields__formula-actions">
+                    <button
+                      v-if="canEditFormulaField(field)"
+                      class="attendance__btn attendance-report-fields__formula-button"
+                      type="button"
+                      :disabled="savingFormulaCode === field.code"
+                      :data-report-field-formula-edit="field.code"
+                      @click="startFormulaEdit(field)"
+                    >
+                      {{ editingFormulaCode === field.code ? tr('Editing', '编辑中') : tr('Edit', '编辑') }}
+                    </button>
+                    <span
+                      v-else-if="field.formulaEnabled"
+                      class="attendance__field-hint"
+                    >
+                      {{ tr('Read-only formula', '只读公式') }}
+                    </span>
+                  </div>
+                  <div
+                    v-if="editingFormulaCode === field.code"
+                    class="attendance-report-fields__formula-editor"
+                    :data-report-field-formula-editor="field.code"
+                  >
+                    <label class="attendance-report-fields__formula-editor-field">
+                      <span>{{ tr('Expression', '表达式') }}</span>
+                      <textarea
+                        v-model="formulaDraft.formulaExpression"
+                        rows="3"
+                        :data-report-field-formula-expression="field.code"
+                      />
+                    </label>
+                    <label class="attendance-report-fields__formula-editor-field">
+                      <span>{{ tr('Output', '输出') }}</span>
+                      <select
+                        v-model="formulaDraft.formulaOutputType"
+                        :data-report-field-formula-output="field.code"
+                      >
+                        <option
+                          v-for="option in formulaOutputTypeOptions"
+                          :key="option.value"
+                          :value="option.value"
+                        >
+                          {{ option.label }}
+                        </option>
+                      </select>
+                    </label>
+                    <div class="attendance-report-fields__formula-editor-actions">
+                      <button
+                        class="attendance__btn attendance-report-fields__formula-button"
+                        type="button"
+                        :disabled="previewingFormulaCode === field.code"
+                        :data-report-field-formula-preview="field.code"
+                        @click="previewFormulaDraft"
+                      >
+                        {{ previewingFormulaCode === field.code ? tr('Previewing...', '预览中...') : tr('Preview', '预览') }}
+                      </button>
+                      <button
+                        class="attendance__btn attendance-report-fields__formula-button"
+                        type="button"
+                        :disabled="savingFormulaCode === field.code"
+                        :data-report-field-formula-save="field.code"
+                        @click="saveEditingFormulaField"
+                      >
+                        {{ savingFormulaCode === field.code ? tr('Saving...', '保存中...') : tr('Save', '保存') }}
+                      </button>
+                      <button
+                        class="attendance__btn attendance-report-fields__formula-button"
+                        type="button"
+                        :disabled="savingFormulaCode === field.code"
+                        :data-report-field-formula-cancel="field.code"
+                        @click="cancelFormulaEdit"
+                      >
+                        {{ tr('Cancel', '取消') }}
+                      </button>
+                    </div>
+                    <div
+                      v-if="formulaPreviewMessage"
+                      class="attendance__field-hint"
+                      data-report-field-formula-preview-result
+                    >
+                      {{ formulaPreviewMessage }}
+                    </div>
+                  </div>
                 </td>
                 <td class="attendance-report-fields__mapping">
                   <div
@@ -541,6 +714,42 @@ interface FormulaReferenceGroup {
   functions: string[]
 }
 
+interface FormulaOption {
+  value: string
+  label: string
+}
+
+interface FormulaDraft {
+  code: string
+  name: string
+  category: string
+  unit: string
+  enabled: boolean
+  reportVisible: boolean
+  sortOrder: number
+  dingtalkFieldName: string
+  description: string
+  internalKey: string
+  formulaEnabled: boolean
+  formulaExpression: string
+  formulaScope: string
+  formulaOutputType: string
+}
+
+interface FormulaPreviewResult {
+  ok?: boolean
+  value?: unknown
+  references?: string[]
+  error?: string | null
+}
+
+interface FormulaSavePayload {
+  field?: AttendanceReportFieldItem
+  catalog?: AttendanceReportFieldsPayload
+  operation?: string
+  duplicateRowKeys?: number
+}
+
 const props = defineProps<{
   tr: TranslateFn
   orgId?: string
@@ -562,11 +771,26 @@ const reportRecordsSyncResult = ref<AttendanceReportRecordsSyncResult | null>(nu
 const fieldSearchTerm = ref('')
 const fieldStatusFilter = ref<ReportFieldStatusFilter>('all')
 const fieldCategoryFilter = ref('all')
+const editingFormulaCode = ref('')
+const previewingFormulaCode = ref('')
+const savingFormulaCode = ref('')
+const formulaDraft = ref<FormulaDraft>(createBlankFormulaDraft())
+const newFormulaDraft = ref<FormulaDraft>(createBlankFormulaDraft())
+const formulaPreviewResult = ref<FormulaPreviewResult | null>(null)
+const formulaDraftStatusMessage = ref('')
+const formulaDraftStatusKind = ref<'info' | 'warn' | 'error'>('info')
 const reportFieldsPayload = ref<AttendanceReportFieldsPayload>({
   categories: [],
   items: [],
   multitable: { available: false },
 })
+const formulaOutputTypeOptions = computed<FormulaOption[]>(() => [
+  { value: 'number', label: tr('Number', '数字') },
+  { value: 'duration_minutes', label: tr('Duration minutes', '分钟时长') },
+  { value: 'text', label: tr('Text', '文本') },
+  { value: 'boolean', label: tr('Boolean', '布尔') },
+  { value: 'date', label: tr('Date', '日期') },
+])
 const formulaReferenceGroups = computed<FormulaReferenceGroup[]>(() => [
   { id: 'condition', label: tr('Condition', '条件'), functions: ['IF'] },
   { id: 'logical', label: tr('Logical', '逻辑'), functions: ['AND', 'OR', 'NOT'] },
@@ -638,6 +862,13 @@ const categoryFilterOptions = computed<AttendanceReportFieldCategory[]>(() => {
     }
   }
   return Array.from(fallback.values()).sort((left, right) => left.sortOrder - right.sortOrder)
+})
+const allCategoryOptions = computed<AttendanceReportFieldCategory[]>(() => {
+  const categories = reportFieldsPayload.value.categories ?? []
+  if (categories.length > 0) {
+    return [...categories].sort((left, right) => left.sortOrder - right.sortOrder)
+  }
+  return categoryFilterOptions.value
 })
 const activeFieldFilterLabels = computed(() => {
   const labels: string[] = []
@@ -736,6 +967,16 @@ const reportRecordSyncDetailRows = computed<MultitableDetailRow[]>(() => {
   addText('reason', tr('Reason', '原因'), result.reason)
   return rows
 })
+const formulaPreviewMessage = computed(() => {
+  const result = formulaPreviewResult.value
+  if (!result) return ''
+  if (result.error) return `${tr('Preview error', '预览错误')}: ${result.error}`
+  const value = typeof result.value === 'string' ? result.value : JSON.stringify(result.value)
+  const references = Array.isArray(result.references) && result.references.length > 0
+    ? ` · ${tr('References', '引用')}: ${result.references.join(', ')}`
+    : ''
+  return `${tr('Preview value', '预览值')}: ${value ?? ''}${references}`
+})
 
 const visibleCategories = computed<AttendanceReportFieldCategory[]>(() => {
   const categoryIdsWithFields = new Set(filteredReportFields.value.map(field => field.category))
@@ -830,6 +1071,172 @@ function configurationPillClass(field: AttendanceReportFieldItem): Record<string
   return {
     'attendance-report-fields__pill--configured': Boolean(field.configured && field.systemDefined !== false),
     'attendance-report-fields__pill--custom': field.systemDefined === false,
+  }
+}
+
+function createBlankFormulaDraft(): FormulaDraft {
+  return {
+    code: '',
+    name: '',
+    category: 'anomaly',
+    unit: 'minutes',
+    enabled: true,
+    reportVisible: true,
+    sortOrder: 4500,
+    dingtalkFieldName: '',
+    description: '',
+    internalKey: '',
+    formulaEnabled: true,
+    formulaExpression: '',
+    formulaScope: 'record',
+    formulaOutputType: 'duration_minutes',
+  }
+}
+
+function canEditFormulaField(field: AttendanceReportFieldItem): boolean {
+  return field.systemDefined === false && field.formulaEnabled === true
+}
+
+function buildFormulaDraftFromField(field: AttendanceReportFieldItem): FormulaDraft {
+  return {
+    code: field.code,
+    name: field.name,
+    category: field.category,
+    unit: field.unit || 'minutes',
+    enabled: field.enabled !== false,
+    reportVisible: field.reportVisible !== false,
+    sortOrder: Number.isFinite(Number(field.sortOrder)) ? Number(field.sortOrder) : 4500,
+    dingtalkFieldName: field.dingtalkFieldName || field.name,
+    description: field.description || '',
+    internalKey: field.internalKey || `formula.${field.code}`,
+    formulaEnabled: true,
+    formulaExpression: field.formulaExpression || '',
+    formulaScope: field.formulaScope || 'record',
+    formulaOutputType: field.formulaOutputType || 'duration_minutes',
+  }
+}
+
+function attendanceOrgQuerySuffix(): string {
+  const params = new URLSearchParams()
+  const orgId = props.orgId?.trim()
+  if (orgId) params.set('orgId', orgId)
+  const suffix = params.toString()
+  return suffix ? `?${suffix}` : ''
+}
+
+function startFormulaEdit(field: AttendanceReportFieldItem): void {
+  if (!canEditFormulaField(field)) return
+  editingFormulaCode.value = field.code
+  formulaDraft.value = buildFormulaDraftFromField(field)
+  formulaPreviewResult.value = null
+  formulaDraftStatusMessage.value = ''
+  formulaDraftStatusKind.value = 'info'
+}
+
+function cancelFormulaEdit(): void {
+  editingFormulaCode.value = ''
+  formulaDraft.value = createBlankFormulaDraft()
+  formulaPreviewResult.value = null
+}
+
+function buildFormulaSaveBody(draft: FormulaDraft): Record<string, unknown> {
+  return {
+    name: draft.name.trim() || draft.code.trim(),
+    category: draft.category,
+    unit: draft.unit,
+    enabled: draft.enabled,
+    reportVisible: draft.reportVisible,
+    sortOrder: draft.sortOrder,
+    dingtalkFieldName: draft.dingtalkFieldName.trim() || draft.name.trim() || draft.code.trim(),
+    description: draft.description.trim(),
+    internalKey: draft.internalKey.trim() || `formula.${draft.code.trim()}`,
+    formulaEnabled: draft.formulaEnabled,
+    formulaExpression: draft.formulaExpression.trim(),
+    formulaScope: draft.formulaScope,
+    formulaOutputType: draft.formulaOutputType,
+  }
+}
+
+function applyFormulaSavePayload(data: FormulaSavePayload): void {
+  if (data.catalog) {
+    reportFieldsPayload.value = data.catalog
+    return
+  }
+  if (!data.field) return
+  const next = reportFields.value.map(field => (field.code === data.field?.code ? data.field : field))
+  if (!next.some(field => field.code === data.field?.code)) next.push(data.field)
+  reportFieldsPayload.value = {
+    ...reportFieldsPayload.value,
+    items: next,
+  }
+}
+
+async function previewFormulaDraft(): Promise<void> {
+  if (!editingFormulaCode.value) return
+  previewingFormulaCode.value = editingFormulaCode.value
+  formulaPreviewResult.value = null
+  formulaDraftStatusMessage.value = ''
+  formulaDraftStatusKind.value = 'info'
+  try {
+    const response = await apiFetch(`/api/attendance/report-fields/formula/preview${attendanceOrgQuerySuffix()}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expression: formulaDraft.value.formulaExpression.trim() }),
+    })
+    const payload = await response.json()
+    if (!response.ok || payload?.ok === false) {
+      throw payload
+    }
+    formulaPreviewResult.value = payload?.data ?? null
+  } catch (error) {
+    formulaDraftStatusKind.value = 'error'
+    formulaDraftStatusMessage.value = readErrorMessage(error, tr('Failed to preview formula', '公式预览失败'))
+  } finally {
+    previewingFormulaCode.value = ''
+  }
+}
+
+async function saveFormulaDraft(draft: FormulaDraft): Promise<void> {
+  const code = draft.code.trim()
+  if (!code) {
+    formulaDraftStatusKind.value = 'error'
+    formulaDraftStatusMessage.value = tr('Formula field code is required.', '公式字段编码必填。')
+    return
+  }
+  savingFormulaCode.value = code
+  formulaDraftStatusMessage.value = ''
+  formulaDraftStatusKind.value = 'info'
+  try {
+    const response = await apiFetch(`/api/attendance/report-fields/${encodeURIComponent(code)}/formula${attendanceOrgQuerySuffix()}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildFormulaSaveBody({ ...draft, code })),
+    })
+    const payload = await response.json()
+    if (!response.ok || payload?.ok === false) {
+      throw payload
+    }
+    applyFormulaSavePayload(payload?.data ?? {})
+    formulaDraftStatusMessage.value = tr('Formula field saved.', '公式字段已保存。')
+    formulaDraftStatusKind.value = 'info'
+    cancelFormulaEdit()
+  } catch (error) {
+    formulaDraftStatusKind.value = 'error'
+    formulaDraftStatusMessage.value = readErrorMessage(error, tr('Failed to save formula field', '保存公式字段失败'))
+  } finally {
+    savingFormulaCode.value = ''
+  }
+}
+
+async function saveEditingFormulaField(): Promise<void> {
+  if (!editingFormulaCode.value) return
+  await saveFormulaDraft({ ...formulaDraft.value, code: editingFormulaCode.value })
+}
+
+async function saveNewFormulaField(): Promise<void> {
+  await saveFormulaDraft(newFormulaDraft.value)
+  if (formulaDraftStatusKind.value !== 'error') {
+    newFormulaDraft.value = createBlankFormulaDraft()
   }
 }
 
@@ -1159,7 +1566,8 @@ watch(
 }
 
 .attendance-report-fields__filter input,
-.attendance-report-fields__filter select {
+.attendance-report-fields__filter select,
+.attendance-report-fields__filter textarea {
   min-height: 34px;
   padding: 6px 9px;
   border: 1px solid #cbd5e1;
@@ -1167,6 +1575,11 @@ watch(
   background: #fff;
   color: #1f2937;
   font-size: 13px;
+}
+
+.attendance-report-fields__filter textarea {
+  min-height: 58px;
+  resize: vertical;
 }
 
 .attendance-report-fields__filter-summary {
@@ -1306,6 +1719,24 @@ watch(
   overflow-wrap: anywhere;
 }
 
+.attendance-report-fields__formula-create {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid #edf1f5;
+}
+
+.attendance-report-fields__formula-create-grid {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.8fr) minmax(150px, 1fr) minmax(140px, 0.8fr) minmax(150px, 0.8fr) minmax(260px, 1.6fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.attendance-report-fields__formula-create-expression {
+  min-width: 260px;
+}
+
 .attendance-report-fields__category {
   border: 1px solid #d8dee8;
   border-radius: 8px;
@@ -1397,6 +1828,56 @@ watch(
   overflow-wrap: anywhere;
 }
 
+.attendance-report-fields__formula-actions {
+  margin-top: 8px;
+}
+
+.attendance-report-fields__formula-button {
+  min-height: 28px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.attendance-report-fields__formula-editor {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.attendance-report-fields__formula-editor-field {
+  display: grid;
+  gap: 4px;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.attendance-report-fields__formula-editor-field textarea,
+.attendance-report-fields__formula-editor-field select {
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  color: #1f2937;
+  font-size: 12px;
+}
+
+.attendance-report-fields__formula-editor-field textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
+.attendance-report-fields__formula-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .attendance-report-fields__mapping {
   min-width: 180px;
 }
@@ -1455,6 +1936,10 @@ watch(
 
 @media (max-width: 900px) {
   .attendance-report-fields__formula-reference-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .attendance-report-fields__formula-create-grid {
     grid-template-columns: 1fr;
   }
 }
