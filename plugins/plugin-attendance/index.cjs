@@ -366,6 +366,7 @@ const ATTENDANCE_REPORT_FIELD_FORMULA_OUTPUT_TYPE_OPTIONS = Object.freeze([
   'date',
 ])
 const ATTENDANCE_REPORT_FORMULA_ERROR_VALUE = '#ERROR!'
+const ATTENDANCE_REPORT_CUSTOM_FORMULA_CODE_PATTERN = /^[a-z][a-z0-9_]{1,79}$/
 const ATTENDANCE_REPORT_FORMULA_REFERENCE_PATTERN = /\{([A-Za-z][A-Za-z0-9_]*)\}/g
 const ATTENDANCE_REPORT_FORMULA_CELL_REFERENCE_PATTERN = /(?<![A-Za-z0-9_])([A-Za-z]+\d+(?::[A-Za-z]+\d+)?)(?![A-Za-z0-9_])/g
 const ATTENDANCE_REPORT_FORMULA_ALLOWED_FUNCTIONS = new Set([
@@ -1383,6 +1384,164 @@ function applyAttendanceReportFormulaValidation(items, options = {}) {
       formulaReferences: validation.references,
     }
   })
+}
+
+function createAttendanceReportFormulaSaveError(status, code, message) {
+  const error = new Error(message)
+  error.status = status
+  error.code = code
+  return error
+}
+
+function normalizeAttendanceReportFormulaSaveInput(code, input = {}) {
+  const normalizedCode = normalizeCatalogString(code)
+  if (!ATTENDANCE_REPORT_CUSTOM_FORMULA_CODE_PATTERN.test(normalizedCode)) {
+    throw createAttendanceReportFormulaSaveError(
+      400,
+      'INVALID_FIELD_CODE',
+      'Formula field code must start with a lowercase letter and contain only lowercase letters, numbers, and underscores.',
+    )
+  }
+  if (ATTENDANCE_REPORT_FORMULA_RESERVED_CODES.has(normalizedCode)) {
+    throw createAttendanceReportFormulaSaveError(400, 'RESERVED_FIELD_CODE', `Formula field code ${normalizedCode} is reserved.`)
+  }
+  if (cloneAttendanceReportFieldDefinitions().some(field => field.code === normalizedCode) || isAttendanceDynamicSubtypeCode(normalizedCode)) {
+    throw createAttendanceReportFormulaSaveError(400, 'READ_ONLY_FIELD', `Field ${normalizedCode} is read-only for formula editing.`)
+  }
+
+  const category = getAttendanceReportFieldCategory(input.category)
+  const unit = normalizeCatalogString(input.unit, 'minutes')
+  const formulaEnabled = normalizeCatalogBoolean(input.formulaEnabled, true)
+  const formulaExpression = normalizeAttendanceReportFormulaExpression(input.formulaExpression)
+  const formulaScope = normalizeAttendanceReportFormulaScope(input.formulaScope)
+  const formulaOutputType = normalizeAttendanceReportFormulaOutputType(input.formulaOutputType, unit)
+  const name = normalizeCatalogString(input.name, normalizedCode)
+  return {
+    code: normalizedCode,
+    name,
+    category: category.id,
+    source: 'custom',
+    unit,
+    enabled: normalizeCatalogBoolean(input.enabled, true),
+    reportVisible: normalizeCatalogBoolean(input.reportVisible, true),
+    sortOrder: normalizeCatalogNumber(input.sortOrder, category.sortOrder * 100 + 90),
+    dingtalkFieldName: normalizeCatalogString(input.dingtalkFieldName, name),
+    description: normalizeCatalogString(input.description, 'Custom attendance report formula field.'),
+    internalKey: normalizeCatalogString(input.internalKey, `formula.${normalizedCode}`),
+    formulaEnabled,
+    formulaExpression,
+    formulaScope,
+    formulaOutputType,
+  }
+}
+
+function mergeAttendanceReportFormulaSaveRecord(existingConfig, saveInput) {
+  const category = getAttendanceReportFieldCategory(saveInput.category || existingConfig?.category)
+  const unit = normalizeCatalogString(saveInput.unit, existingConfig?.unit || 'minutes')
+  const name = normalizeCatalogString(saveInput.name, existingConfig?.name || saveInput.code)
+  return {
+    code: saveInput.code,
+    name,
+    category: category.id,
+    source: 'custom',
+    unit,
+    enabled: saveInput.enabled !== false,
+    reportVisible: saveInput.reportVisible !== false,
+    sortOrder: normalizeCatalogNumber(saveInput.sortOrder, existingConfig?.sortOrder ?? category.sortOrder * 100 + 90),
+    dingtalkFieldName: normalizeCatalogString(saveInput.dingtalkFieldName, existingConfig?.dingtalkFieldName || name),
+    description: normalizeCatalogString(saveInput.description, existingConfig?.description || 'Custom attendance report formula field.'),
+    internalKey: normalizeCatalogString(saveInput.internalKey, existingConfig?.internalKey || `formula.${saveInput.code}`),
+    formulaEnabled: saveInput.formulaEnabled !== false,
+    formulaExpression: saveInput.formulaExpression,
+    formulaScope: saveInput.formulaScope,
+    formulaOutputType: saveInput.formulaOutputType,
+  }
+}
+
+async function saveAttendanceReportFormulaField(context, orgId, logger, code, input = {}, options = {}) {
+  const multitable = context?.api?.multitable
+  const recordsApi = multitable?.records
+  if (!recordsApi?.queryRecords || !recordsApi?.createRecord || !recordsApi?.patchRecord || !multitable?.provisioning?.ensureObject) {
+    throw createAttendanceReportFormulaSaveError(503, 'MULTITABLE_API_UNAVAILABLE', 'Multitable records API is not available.')
+  }
+
+  const saveInput = normalizeAttendanceReportFormulaSaveInput(code, input)
+  const catalog = await ensureAttendanceReportFieldCatalog(context, orgId, logger, {
+    seedRecords: false,
+  })
+  if (!catalog.available) {
+    throw createAttendanceReportFormulaSaveError(503, catalog.reason || 'MULTITABLE_UNAVAILABLE', 'Attendance report field catalog is not available.')
+  }
+
+  const dynamicSubtype = await loadAttendanceReportDynamicSubtypeContext(context?.api?.database, orgId, logger)
+  const codeFieldId = catalog.fieldIds?.[ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.fieldCode] || ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.fieldCode
+  const sortFieldId = catalog.fieldIds?.[ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.sortOrder] || ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.sortOrder
+  const records = await recordsApi.queryRecords({
+    sheetId: catalog.sheetId,
+    orderBy: { fieldId: sortFieldId, direction: 'asc' },
+    limit: 1000,
+  })
+  const matchingRecords = records.filter((record) => (
+    normalizeCatalogString(readAttendanceReportFieldCatalogCell(record, catalog.fieldIds, ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.fieldCode)) === saveInput.code
+  ))
+  const targetRecord = matchingRecords[0] || null
+  const existingConfig = targetRecord ? mapAttendanceReportFieldConfigRecord(targetRecord, catalog.fieldIds) : null
+  if (existingConfig && existingConfig.systemDefined !== false && cloneAttendanceReportFieldDefinitions().some(field => field.code === existingConfig.code)) {
+    throw createAttendanceReportFormulaSaveError(400, 'READ_ONLY_FIELD', `Field ${saveInput.code} is read-only for formula editing.`)
+  }
+
+  const formulaField = mergeAttendanceReportFormulaSaveRecord(existingConfig, saveInput)
+  const data = buildAttendanceReportFieldCatalogRecordData(formulaField, catalog.fieldIds)
+  const candidateRecord = {
+    id: targetRecord?.id || `candidate-${saveInput.code}`,
+    sheetId: catalog.sheetId,
+    version: targetRecord?.version || 1,
+    data,
+  }
+  const candidateRecords = [
+    ...records.filter(record => normalizeCatalogString(readAttendanceReportFieldCatalogCell(
+      record,
+      catalog.fieldIds,
+      ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS.fieldCode,
+    )) !== saveInput.code),
+    candidateRecord,
+  ]
+  const candidateItems = mergeAttendanceReportFieldDefinitions(candidateRecords, catalog.fieldIds, {
+    rawAliasesAllowed: options.rawAliasesAllowed,
+    extraSystemDefinitions: dynamicSubtype.definitions,
+  })
+  const candidateField = candidateItems.find(field => field.code === saveInput.code)
+  if (!candidateField || candidateField.systemDefined !== false) {
+    throw createAttendanceReportFormulaSaveError(400, 'READ_ONLY_FIELD', `Field ${saveInput.code} is read-only for formula editing.`)
+  }
+  if (candidateField.formulaEnabled && candidateField.formulaValid === false) {
+    throw createAttendanceReportFormulaSaveError(400, 'INVALID_FORMULA', candidateField.formulaError || 'Formula expression is invalid.')
+  }
+
+  if (targetRecord) {
+    await recordsApi.patchRecord({
+      sheetId: catalog.sheetId,
+      recordId: targetRecord.id,
+      changes: data,
+    })
+  } else {
+    await recordsApi.createRecord({
+      sheetId: catalog.sheetId,
+      data,
+    })
+  }
+
+  const response = await buildAttendanceReportFieldCatalogResponse(context, orgId, logger, {
+    provision: false,
+    rawAliasesAllowed: options.rawAliasesAllowed,
+  })
+  const savedField = response.items.find(field => field.code === saveInput.code)
+  return {
+    field: savedField || candidateField,
+    catalog: response,
+    operation: targetRecord ? 'patched' : 'created',
+    duplicateRowKeys: Math.max(0, matchingRecords.length - 1),
+  }
 }
 
 function mergeAttendanceReportFieldDefinitions(configRecords, fieldIds, options = {}) {
@@ -9647,6 +9806,8 @@ module.exports = {
     resolveAttendanceFormulaSourceFields,
     validateAttendanceReportFormulaExpression,
     previewAttendanceReportFormula,
+    saveAttendanceReportFormulaField,
+    normalizeAttendanceReportFormulaSaveInput,
     buildAttendanceRecordReportExportItem,
     buildAttendanceRecordReportExportItemAsync,
     buildAttendanceRecordReportCsv,
@@ -21772,6 +21933,60 @@ module.exports = {
           formulaOptions,
         )
         res.json({ ok: true, data })
+      })
+    )
+
+    context.api.http.addRoute(
+      'PATCH',
+      '/api/attendance/report-fields/:code/formula',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = z.object({
+          name: z.string().min(1).max(120).optional(),
+          category: z.string().min(1).max(80).optional(),
+          unit: z.enum(ATTENDANCE_REPORT_FIELD_UNIT_OPTIONS).optional(),
+          enabled: z.boolean().optional(),
+          reportVisible: z.boolean().optional(),
+          sortOrder: z.number().finite().optional(),
+          dingtalkFieldName: z.string().max(160).optional(),
+          description: z.string().max(1000).optional(),
+          internalKey: z.string().max(160).optional(),
+          formulaEnabled: z.boolean().optional(),
+          formulaExpression: z.string().max(4000).optional(),
+          formulaScope: z.enum(ATTENDANCE_REPORT_FIELD_FORMULA_SCOPE_OPTIONS).optional(),
+          formulaOutputType: z.enum(ATTENDANCE_REPORT_FIELD_FORMULA_OUTPUT_TYPE_OPTIONS).optional(),
+        }).safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        try {
+          const orgId = getOrgId(req)
+          const formulaOptions = await getAttendanceFormulaRuntimeOptions(db)
+          const data = await saveAttendanceReportFormulaField(
+            context,
+            orgId,
+            logger,
+            req.params.code,
+            parsed.data,
+            formulaOptions,
+          )
+          emitEvent('attendance.report_fields.formula_saved', {
+            orgId,
+            code: data.field?.code || req.params.code,
+            operation: data.operation,
+            formulaEnabled: data.field?.formulaEnabled,
+            formulaValid: data.field?.formulaValid,
+            savedAt: new Date().toISOString(),
+          })
+          res.json({ ok: true, data })
+        } catch (error) {
+          const status = Number.isInteger(error?.status) ? error.status : 500
+          const code = error?.code || (status >= 500 ? 'INTERNAL_ERROR' : 'VALIDATION_ERROR')
+          const message = error instanceof Error ? error.message : String(error)
+          if (status >= 500) logger.error('Attendance report formula save failed', error)
+          res.status(status).json({ ok: false, error: { code, message } })
+        }
       })
     )
 
