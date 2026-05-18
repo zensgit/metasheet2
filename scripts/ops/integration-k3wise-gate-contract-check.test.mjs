@@ -192,3 +192,40 @@ test('secret-looking sample values fail and evidence does not echo raw secret', 
   assert.equal(evidenceText.includes('RAW-PASSWORD-SHOULD-NOT-LEAK'), false)
   assert.equal(evidenceText.includes('RAW-TOKEN-SHOULD-NOT-LEAK'), false)
 })
+
+test('init-template writes a safe fillable packet that is blocked until customer answers are filled', async () => {
+  const dir = await makeDir()
+
+  const initResult = runCli(['--init-template', dir])
+  assert.equal(initResult.status, 0, initResult.stderr)
+  assert.match(initResult.stdout, /"decision": "TEMPLATE_CREATED"/)
+  assert.match(initResult.stdout, /"sampleCount": 8/)
+
+  const packetPath = path.join(dir, 'k3wise-gate-contract-packet.template.json')
+  const packet = JSON.parse(await readFile(packetPath, 'utf8'))
+  assert.equal(packet.webapiReadList.answers['O1-MAT'], '<fill-outside-git>')
+  assert.equal(packet.relationshipMapping.answers.R1, '<fill-outside-git>')
+
+  for (const samplePath of [
+    ...Object.values(packet.webapiReadList.samples),
+    ...Object.values(packet.relationshipMapping.samples),
+  ]) {
+    const sampleText = await readFile(path.join(dir, samplePath), 'utf8')
+    assert.doesNotMatch(sampleText, /Bearer\s+[A-Za-z0-9._-]{16,}/i)
+    assert.doesNotMatch(sampleText, /[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/)
+    assert.doesNotMatch(sampleText, /\b(postgres|postgresql|mysql|mssql|sqlserver|jdbc):\/\/[^/\s:]+:[^@\s]+@/i)
+    assert.doesNotMatch(sampleText, /[?&](access[_-]?token|api[_-]?key|auth|authorization|credential|jwt|password|secret|session[_-]?id|sign|signature|token)=([^&#\s]+)/i)
+  }
+
+  const outDir = path.join(dir, 'out')
+  const checkResult = runCli(['--input', packetPath, '--out-dir', outDir])
+  assert.equal(checkResult.status, 2, checkResult.stderr)
+  assert.match(checkResult.stdout, /"decision": "GATE_BLOCKED"/)
+
+  const evidence = JSON.parse(await readFile(path.join(outDir, 'integration-k3wise-gate-contract-check.json'), 'utf8'))
+  assert.equal(evidence.decision, 'GATE_BLOCKED')
+  assert.equal(evidence.sections.webapiReadList.answered, 0)
+  assert.equal(evidence.sections.relationshipMapping.answered, 0)
+  assert.equal(evidence.sections.webapiReadList.samples.filter((sample) => sample.status === 'present').length, 4)
+  assert.equal(evidence.sections.relationshipMapping.samples.filter((sample) => sample.status === 'present').length, 4)
+})

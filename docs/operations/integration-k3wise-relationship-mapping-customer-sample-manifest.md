@@ -156,11 +156,20 @@ Runtime work should start only when:
 ## Machine check before runtime
 
 After the customer returns R1-R7 and cases A-D, include those relationship files
-in the same local GATE contract packet used for WebAPI read/list, then run:
+in the same local GATE contract packet used for WebAPI read/list. If the packet
+does not exist yet, initialize it outside Git first:
 
 ```bash
 node scripts/ops/integration-k3wise-gate-contract-check.mjs \
-  --input /path/outside-git/k3wise-gate-contract-packet.json \
+  --init-template /path/outside-git/k3wise-gate-contract
+```
+
+Then replace the relationship placeholders and the four relationship sample
+files with redacted customer-approved evidence. When the packet is filled, run:
+
+```bash
+node scripts/ops/integration-k3wise-gate-contract-check.mjs \
+  --input /path/outside-git/k3wise-gate-contract/k3wise-gate-contract-packet.template.json \
   --out-dir artifacts/integration-k3wise/gate-contract-check
 ```
 

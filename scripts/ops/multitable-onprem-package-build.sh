@@ -105,6 +105,8 @@ REQUIRED_PATHS=(
   "docs/development/data-factory-delivery-readiness-evidence-gates-verification-20260515.md"
   "docs/development/data-factory-issue1526-gate-contract-check-design-20260518.md"
   "docs/development/data-factory-issue1526-gate-contract-check-verification-20260518.md"
+  "docs/development/data-factory-issue1526-gate-contract-template-init-design-20260518.md"
+  "docs/development/data-factory-issue1526-gate-contract-template-init-verification-20260518.md"
   "docs/development/data-factory-issue1526-gate-contract-package-verify-design-20260518.md"
   "docs/development/data-factory-issue1526-gate-contract-package-verify-verification-20260518.md"
   "docs/development/data-factory-issue1526-delivery-readiness-gate-contract-design-20260518.md"

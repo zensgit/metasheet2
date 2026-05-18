@@ -107,12 +107,24 @@ proceeds per the post-GATE plan in the design and verification docs.
 
 ## Machine check before runtime
 
-Before opening the post-GATE runtime PR, copy the customer answers and the four
-sample files into a local packet outside Git, then run:
+Before opening the post-GATE runtime PR, create the local packet skeleton outside
+Git:
 
 ```bash
 node scripts/ops/integration-k3wise-gate-contract-check.mjs \
-  --input /path/outside-git/k3wise-gate-contract-packet.json \
+  --init-template /path/outside-git/k3wise-gate-contract
+```
+
+Then replace the WebAPI read/list placeholders and the four sample files with
+the customer-approved, redacted evidence. Keep the directory outside Git and do
+not paste tokens, passwords, session IDs, authority codes, or SQL connection
+strings into any sample.
+
+When the packet is filled, run:
+
+```bash
+node scripts/ops/integration-k3wise-gate-contract-check.mjs \
+  --input /path/outside-git/k3wise-gate-contract/k3wise-gate-contract-packet.template.json \
   --out-dir artifacts/integration-k3wise/gate-contract-check
 ```
 
