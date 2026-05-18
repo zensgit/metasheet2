@@ -1,14 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick, type App as VueApp, type Component } from 'vue'
+import { createApp, nextTick, type App as VueApp, type Component } from 'vue'
 import MultitableHomeView from '../src/views/MultitableHomeView.vue'
 import { AppRouteNames } from '../src/router/types'
 
 const mocks = vi.hoisted(() => ({
   push: vi.fn(),
   listBases: vi.fn(),
+  listTemplates: vi.fn(),
   loadContext: vi.fn(),
   createBase: vi.fn(),
   createSheet: vi.fn(),
+  installTemplate: vi.fn(),
 }))
 
 vi.mock('vue-router', async () => {
@@ -24,9 +26,11 @@ vi.mock('vue-router', async () => {
 vi.mock('../src/multitable/api/client', () => ({
   multitableClient: {
     listBases: mocks.listBases,
+    listTemplates: mocks.listTemplates,
     loadContext: mocks.loadContext,
     createBase: mocks.createBase,
     createSheet: mocks.createSheet,
+    installTemplate: mocks.installTemplate,
   },
 }))
 
@@ -65,12 +69,6 @@ describe('MultitableHomeView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(MultitableHomeView as Component)
-    app.component('router-link', {
-      props: ['to'],
-      render() {
-        return h('a', { href: this.$props.to }, this.$slots.default ? this.$slots.default() : [])
-      },
-    })
     app.mount(container)
     return container
   }
@@ -79,6 +77,7 @@ describe('MultitableHomeView', () => {
     mocks.listBases.mockResolvedValue({
       bases: [{ id: 'base_ops', name: 'Ops Base', color: '#0f766e' }],
     })
+    mocks.listTemplates.mockResolvedValue({ templates: [] })
     mocks.loadContext.mockResolvedValue({
       base: { id: 'base_ops', name: 'Ops Base' },
       sheet: { id: 'sheet_ops', baseId: 'base_ops', name: 'Orders' },
@@ -105,6 +104,7 @@ describe('MultitableHomeView', () => {
 
   it('creates a base with a seeded sheet before opening multitable', async () => {
     mocks.listBases.mockResolvedValue({ bases: [] })
+    mocks.listTemplates.mockResolvedValue({ templates: [] })
     mocks.createBase.mockResolvedValue({ base: { id: 'base_new', name: 'Project Tracker' } })
     mocks.createSheet.mockResolvedValue({ sheet: { id: 'sheet_new', baseId: 'base_new', name: 'Sheet 1', seeded: true } })
     mocks.loadContext.mockResolvedValue({
@@ -133,6 +133,56 @@ describe('MultitableHomeView', () => {
       name: AppRouteNames.MULTITABLE,
       params: { sheetId: 'sheet_new', viewId: 'view_new' },
       query: { baseId: 'base_new' },
+    })
+  })
+
+  it('loads templates and opens an installed template base', async () => {
+    mocks.listBases.mockResolvedValue({ bases: [] })
+    mocks.listTemplates.mockResolvedValue({
+      templates: [
+        {
+          id: 'project-tracker',
+          name: 'Project Tracker',
+          description: 'Track launch tasks and owners.',
+          category: 'Project management',
+          icon: 'P',
+          color: '#2563eb',
+          sheets: [
+            {
+              id: 'template-sheet',
+              name: 'Tasks',
+              fields: [],
+              views: [
+                { id: 'template-view-grid', name: 'Grid', type: 'grid' },
+                { id: 'template-view-kanban', name: 'Kanban', type: 'kanban' },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    mocks.installTemplate.mockResolvedValue({
+      template: { id: 'project-tracker', name: 'Project Tracker' },
+      base: { id: 'base_template', name: 'Project Tracker Base' },
+      sheets: [{ id: 'sheet_template', baseId: 'base_template', name: 'Tasks' }],
+      fields: [],
+      views: [{ id: 'view_template', sheetId: 'sheet_template', name: 'Grid', type: 'grid' }],
+    })
+
+    const root = mountView()
+    await flushUi()
+
+    expect(root.textContent).toContain('Project Tracker')
+    expect(root.textContent).toContain('1 个 Sheet · 2 个视图')
+
+    findButton(root, '使用模板').click()
+    await flushUi()
+
+    expect(mocks.installTemplate).toHaveBeenCalledWith('project-tracker', { baseName: 'Project Tracker Base' })
+    expect(mocks.push).toHaveBeenCalledWith({
+      name: AppRouteNames.MULTITABLE,
+      params: { sheetId: 'sheet_template', viewId: 'view_template' },
+      query: { baseId: 'base_template' },
     })
   })
 })
