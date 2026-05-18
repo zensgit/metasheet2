@@ -102,6 +102,40 @@ describe('MultitableHomeView', () => {
     })
   })
 
+  it('filters visible bases by name or id without changing the loaded list', async () => {
+    mocks.listBases.mockResolvedValue({
+      bases: [
+        { id: 'base_ops', name: 'Ops Base', color: '#0f766e' },
+        { id: 'base_sales', name: 'Sales Pipeline', color: '#f97316' },
+      ],
+    })
+    mocks.listTemplates.mockResolvedValue({ templates: [] })
+
+    const root = mountView()
+    await flushUi()
+
+    expect(root.textContent).toContain('Ops Base')
+    expect(root.textContent).toContain('Sales Pipeline')
+    expect(root.textContent).toContain('2 个')
+
+    const search = root.querySelector('input[aria-label="Search bases"]')
+    expect(search).toBeInstanceOf(HTMLInputElement)
+    ;(search as HTMLInputElement).value = 'sales'
+    search?.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    expect(root.textContent).not.toContain('Ops Base')
+    expect(root.textContent).toContain('Sales Pipeline')
+    expect(root.textContent).toContain('匹配 1 / 2 个')
+
+    ;(search as HTMLInputElement).value = 'missing'
+    search?.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    expect(root.textContent).toContain('没有匹配的 Base')
+    expect(root.textContent).not.toContain('暂无可访问的 Base')
+  })
+
   it('creates a base with a seeded sheet before opening multitable', async () => {
     mocks.listBases.mockResolvedValue({ bases: [] })
     mocks.listTemplates.mockResolvedValue({ templates: [] })
