@@ -152,3 +152,20 @@ Runtime work should start only when:
 - K3 live policy still says Save-only, no Submit/Audit;
 - unresolved relationship policy is explicit;
 - the accepted K3 BOM body shape is confirmed.
+
+## Machine check before runtime
+
+After the customer returns R1-R7 and cases A-D, include those relationship files
+in the same local GATE contract packet used for WebAPI read/list, then run:
+
+```bash
+node scripts/ops/integration-k3wise-gate-contract-check.mjs \
+  --input /path/outside-git/k3wise-gate-contract-packet.json \
+  --out-dir artifacts/integration-k3wise/gate-contract-check
+```
+
+The checker must return `PASS` before relationship resolver runtime work starts.
+It verifies that R1-R7 are answered, the sample shapes are parseable, the K3 BOM
+body shape is explicit, and no token/password/connection-string shaped values
+were included. It is a pre-runtime evidence gate only; it does not contact K3
+WISE and does not enable Save/Submit/Audit.
