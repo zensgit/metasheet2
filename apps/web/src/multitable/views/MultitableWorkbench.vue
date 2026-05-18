@@ -12,8 +12,15 @@
         <button class="mt-workbench__conflict-btn" @click="grid.dismissConflict()">Dismiss</button>
       </div>
     </div>
-    <div v-if="bases.length" class="mt-workbench__base-bar">
-      <MetaBasePicker :bases="bases" :active-base-id="activeBaseId" :can-create="canCreateBasesAndSheets" @select="onSelectBase" @create="onCreateBase" />
+    <div v-if="basePickerBases.length" class="mt-workbench__base-bar">
+      <MetaBasePicker
+        :bases="basePickerBases"
+        :active-base-id="activeBaseId"
+        :can-create="canCreateBasesAndSheets"
+        @select="onSelectBase"
+        @create="onCreateBase"
+        @toggle-favorite="onToggleFavoriteBase"
+      />
     </div>
     <MetaViewTabBar :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" />
     <div class="mt-workbench__actions">
@@ -456,6 +463,13 @@ import { filterPropertyVisibleFields } from '../utils/field-permissions'
 import { isLinkField, isPersonField } from '../utils/link-fields'
 import { addPeopleLookupToken, inferPeopleLookupKind, resolvePeopleImportValue } from '../utils/people-import'
 import { buildRecordFormattingMap, extractRulesFromConfig } from '../utils/conditional-formatting'
+import {
+  decorateAndSortBases,
+  readFavoriteBaseIds,
+  readRecentBaseOpens,
+  rememberRecentBaseOpen,
+  toggleFavoriteBaseId,
+} from '../utils/base-local-state'
 
 const props = defineProps<{ sheetId?: string; viewId?: string; baseId?: string; recordId?: string; commentId?: string; fieldId?: string; openComments?: boolean; mode?: string; role?: MultitableRole }>()
 const emit = defineEmits<{
@@ -504,6 +518,9 @@ const fieldPermissionEntries = ref<MetaFieldPermissionEntry[]>([])
 const viewPermissionEntries = ref<MetaViewPermissionEntry[]>([])
 const showViewManager = ref(false)
 const bases = ref<MetaBase[]>([])
+const favoriteBaseIds = ref<string[]>(readFavoriteBaseIds())
+const recentBaseOpens = ref(readRecentBaseOpens())
+const basePickerBases = computed(() => decorateAndSortBases(bases.value, favoriteBaseIds.value, recentBaseOpens.value))
 const activeBaseId = computed(() => workbench.activeBaseId.value)
 const toastRef = ref<InstanceType<typeof MetaToast> | null>(null)
 const commentDraft = ref('')
@@ -1762,7 +1779,19 @@ async function onSelectBase(baseId: string) {
   if (baseId === workbench.activeBaseId.value) return
   if (!confirmDiscardContextChanges()) return
   const ok = await workbench.switchBase(baseId)
-  if (!ok) showError(workbench.error.value ?? 'Failed to load base')
+  if (!ok) {
+    showError(workbench.error.value ?? 'Failed to load base')
+    return
+  }
+  rememberWorkbenchBaseOpen(baseId)
+}
+
+function onToggleFavoriteBase(baseId: string) {
+  favoriteBaseIds.value = toggleFavoriteBaseId(baseId)
+}
+
+function rememberWorkbenchBaseOpen(baseId: string) {
+  recentBaseOpens.value = rememberRecentBaseOpen(baseId)
 }
 
 function onSelectSheet(sheetId: string) {
@@ -2104,6 +2133,7 @@ async function onInstallTemplate(template: MetaTemplate) {
       showError(workbench.error.value ?? 'Installed template but failed to refresh workbench context')
       return
     }
+    rememberWorkbenchBaseOpen(result.base.id)
     showTemplateLibrary.value = false
     showSuccess(`Installed ${result.template.name}`)
   } catch (e: any) {
@@ -2807,8 +2837,9 @@ onMounted(async () => {
   }).catch(() => undefined)
   try {
     await loadBases()
+    let contextLoaded = false
     if (workbench.activeBaseId.value) {
-      await workbench.loadBaseContext(workbench.activeBaseId.value, {
+      contextLoaded = await workbench.loadBaseContext(workbench.activeBaseId.value, {
         sheetId: props.sheetId,
         viewId: props.viewId,
       })
@@ -2816,9 +2847,13 @@ onMounted(async () => {
       // Sheet-anchored URL with no baseId: let /context derive the
       // owning base from the sheet itself. syncContextState then sets
       // activeBaseId from ctx.sheet.baseId.
-      await workbench.loadSheetMeta(props.sheetId, { viewId: props.viewId })
+      contextLoaded = await workbench.loadSheetMeta(props.sheetId, { viewId: props.viewId })
     } else {
       await workbench.loadSheets()
+      contextLoaded = !workbench.error.value
+    }
+    if (contextLoaded && workbench.activeBaseId.value) {
+      rememberWorkbenchBaseOpen(workbench.activeBaseId.value)
     }
     await commentInboxState.refreshUnreadCount().catch(() => undefined)
     const deepRecordId = props.recordId ?? parseDeepLink()
