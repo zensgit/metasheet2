@@ -148,11 +148,11 @@
             {{ tr('Formula reference', '公式参考') }}
           </div>
           <div class="attendance__section-meta">
-            {{ tr('Record-scope only; deterministic functions only.', '仅支持单记录公式；只开放确定性函数。') }}
+            {{ tr('Record and summary scopes; deterministic functions only.', '支持单记录与周期汇总公式；只开放确定性函数。') }}
           </div>
         </div>
         <span class="attendance-report-fields__status-pill attendance-report-fields__status-pill--ok">
-          {{ tr('Record scope', '单记录') }}
+          {{ tr('Record + summary', '单记录 + 汇总') }}
         </span>
       </div>
       <div class="attendance-report-fields__formula-reference-layout">
@@ -164,6 +164,7 @@
             <code>{field_code}</code>
             <code>{late_duration}</code>
             <code>{leave_type_annual_duration}</code>
+            <code>{total_minutes}</code>
           </div>
         </div>
         <div class="attendance-report-fields__formula-reference-block">
@@ -248,6 +249,22 @@
             >
               <option
                 v-for="option in formulaOutputTypeOptions"
+                :key="option.value"
+                :value="option.value"
+              >
+                {{ option.label }}
+              </option>
+            </select>
+          </label>
+          <label class="attendance-report-fields__filter" for="attendance-formula-create-scope">
+            <span>{{ tr('Scope', '范围') }}</span>
+            <select
+              id="attendance-formula-create-scope"
+              v-model="newFormulaDraft.formulaScope"
+              data-report-field-formula-create-scope
+            >
+              <option
+                v-for="option in formulaScopeOptions"
                 :key="option.value"
                 :value="option.value"
               >
@@ -623,6 +640,21 @@
                         </option>
                       </select>
                     </label>
+                    <label class="attendance-report-fields__formula-editor-field">
+                      <span>{{ tr('Scope', '范围') }}</span>
+                      <select
+                        v-model="formulaDraft.formulaScope"
+                        :data-report-field-formula-scope="field.code"
+                      >
+                        <option
+                          v-for="option in formulaScopeOptions"
+                          :key="option.value"
+                          :value="option.value"
+                        >
+                          {{ option.label }}
+                        </option>
+                      </select>
+                    </label>
                     <div class="attendance-report-fields__formula-editor-actions">
                       <button
                         class="attendance__btn attendance-report-fields__formula-button"
@@ -893,6 +925,10 @@ const formulaOutputTypeOptions = computed<FormulaOption[]>(() => [
   { value: 'boolean', label: tr('Boolean', '布尔') },
   { value: 'date', label: tr('Date', '日期') },
 ])
+const formulaScopeOptions = computed<FormulaOption[]>(() => [
+  { value: 'record', label: tr('Record scope', '单记录') },
+  { value: 'summary', label: tr('Summary scope', '周期汇总') },
+])
 const formulaReferenceGroups = computed<FormulaReferenceGroup[]>(() => [
   { id: 'condition', label: tr('Condition', '条件'), functions: ['IF'] },
   { id: 'logical', label: tr('Logical', '逻辑'), functions: ['AND', 'OR', 'NOT'] },
@@ -904,6 +940,7 @@ const formulaReferenceGroups = computed<FormulaReferenceGroup[]>(() => [
 const formulaReferenceExamples = [
   '={late_duration}+{early_leave_duration}',
   '=IF({attendance_days}>0,{work_duration},0)',
+  '={total_minutes}-{leave_minutes}',
 ]
 
 const reportFields = computed(() => reportFieldsPayload.value.items ?? [])
@@ -1285,7 +1322,10 @@ async function previewFormulaDraft(): Promise<void> {
     const response = await apiFetch(`/api/attendance/report-fields/formula/preview${attendanceOrgQuerySuffix()}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ expression: formulaDraft.value.formulaExpression.trim() }),
+      body: JSON.stringify({
+        expression: formulaDraft.value.formulaExpression.trim(),
+        formulaScope: formulaDraft.value.formulaScope,
+      }),
     })
     const payload = await response.json()
     if (!response.ok || payload?.ok === false) {
@@ -1347,6 +1387,7 @@ async function saveNewFormulaField(): Promise<void> {
 function formatFormulaScope(scope?: string): string {
   const normalized = String(scope || 'record').trim()
   if (normalized === 'record') return tr('Record scope', '单记录')
+  if (normalized === 'summary') return tr('Summary scope', '周期汇总')
   return normalized || '--'
 }
 

@@ -287,6 +287,131 @@ describe('attendance report field formula engine wrapper', () => {
     expect(context.api.formula.calculateFormula).toHaveBeenCalledTimes(1)
   })
 
+  it('evaluates summary-scope formulas without exposing them as record report fields', async () => {
+    const merged = helpers.mergeAttendanceReportFieldDefinitions([
+      {
+        id: 'rec-period-net',
+        data: {
+          fld_code: 'period_net_minutes',
+          fld_name: '周期净时长',
+          fld_category: '出勤统计字段',
+          fld_source: 'custom',
+          fld_unit: 'minutes',
+          fld_enabled: true,
+          fld_visible: true,
+          fld_sort: 3500,
+          fld_formula_enabled: true,
+          fld_formula_expression: '={work_duration}-{leave_duration}+{overtime_minutes}',
+          fld_formula_scope: 'summary',
+          fld_formula_output_type: 'duration_minutes',
+        },
+      },
+    ], fieldIds)
+    const formulaField = merged.find((field: { code: string }) => field.code === 'period_net_minutes')
+
+    expect(formulaField).toMatchObject({
+      formulaEnabled: true,
+      formulaScope: 'summary',
+      formulaValid: true,
+      formulaReferences: ['leave_duration', 'overtime_minutes', 'work_duration'],
+    })
+    expect(helpers.resolveAttendanceRecordReportFields(merged).some((field: { code: string }) => field.code === 'period_net_minutes'))
+      .toBe(false)
+
+    const summaryFormulaFields = helpers.resolveAttendanceSummaryFormulaFields(merged)
+    expect(summaryFormulaFields).toHaveLength(1)
+    expect(summaryFormulaFields[0]).toMatchObject({ code: 'period_net_minutes', formulaScope: 'summary' })
+
+    const context = {
+      api: {
+        formula: {
+          calculateFormula: vi.fn(async (expression: string) => {
+            expect(expression).toBe('=9600-120+60')
+            return 9540
+          }),
+        },
+      },
+    }
+    const summary = {
+      total_days: 20,
+      total_minutes: 9600,
+      total_late_minutes: 45,
+      total_early_leave_minutes: 15,
+      normal_days: 18,
+      late_days: 1,
+      early_leave_days: 0,
+      late_early_days: 1,
+      partial_days: 0,
+      absent_days: 1,
+      adjusted_days: 0,
+      off_days: 8,
+      leave_minutes: 120,
+      overtime_minutes: 60,
+    }
+
+    await expect(helpers.buildAttendanceSummaryFormulaValues(context, summary, summaryFormulaFields))
+      .resolves.toEqual({ period_net_minutes: 9540 })
+    await expect(helpers.enrichAttendanceSummaryWithFormulaValues(context, summary, summaryFormulaFields))
+      .resolves.toMatchObject({
+        formula_values: { period_net_minutes: 9540 },
+        formula_fields: [{ code: 'period_net_minutes', formulaOutputType: 'duration_minutes' }],
+      })
+
+    const csv = helpers.buildPayrollSummaryCsv({
+      ...summary,
+      formula_values: { period_net_minutes: 9540 },
+    }, {
+      id: 'cycle-1',
+      name: 'May cycle',
+      startDate: '2026-05-01',
+      endDate: '2026-05-31',
+    }, { formulaFields: summaryFormulaFields })
+    expect(csv).toContain('period_net_minutes')
+    expect(csv).toContain('9540')
+    expect(context.api.formula.calculateFormula).toHaveBeenCalledTimes(2)
+  })
+
+  it('validates summary formulas against summary metrics only', async () => {
+    const systemFields = helpers.cloneAttendanceReportFieldDefinitions()
+
+    expect(helpers.validateAttendanceReportFormulaExpression('={total_minutes}-{leave_minutes}', {
+      fields: systemFields,
+      scope: 'summary',
+      rawAliasesAllowed: false,
+    })).toMatchObject({
+      valid: true,
+      error: null,
+      references: ['leave_minutes', 'total_minutes'],
+    })
+    expect(helpers.validateAttendanceReportFormulaExpression('={punch_times}+1', {
+      fields: systemFields,
+      scope: 'summary',
+    })).toMatchObject({
+      valid: false,
+      error: 'Unknown attendance report field reference: punch_times.',
+    })
+
+    const context = {
+      api: {
+        formula: {
+          calculateFormula: vi.fn(async (expression: string) => {
+            expect(expression).toBe('=100-20')
+            return 80
+          }),
+        },
+      },
+    }
+    await expect(helpers.previewAttendanceReportFormula(context, '={total_minutes}-{leave_minutes}', {
+      total_minutes: 100,
+      leave_minutes: 20,
+    }, systemFields, { scope: 'summary' })).resolves.toEqual({
+      ok: true,
+      value: 80,
+      references: ['leave_minutes', 'total_minutes'],
+      error: null,
+    })
+  })
+
   it('rejects unknown references, volatile functions, and formula-to-formula references', () => {
     const systemFields = helpers.cloneAttendanceReportFieldDefinitions()
     expect(helpers.validateAttendanceReportFormulaExpression('={not_a_field}+1', { fields: systemFields }))
