@@ -228,7 +228,7 @@ export interface Spreadsheet {
   name: string
   description?: string
   ownerId: string
-  data: any // x-data-spreadsheet format
+  data: any
   permissions: Permission[]
   createdAt: Date
   updatedAt: Date

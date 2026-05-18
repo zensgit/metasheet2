@@ -1,7 +1,6 @@
 type ViewLoader = () => Promise<unknown>
 
 const viewLoaders: Record<string, ViewLoader> = {
-  GridView: () => import('./views/GridView.vue'),
   KanbanView: () => import('./views/KanbanView.vue'),
   CalendarView: () => import('./views/CalendarView.vue'),
   GalleryView: () => import('./views/GalleryView.vue'),

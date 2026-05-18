@@ -1,7 +1,6 @@
 import type { RouteRecordRaw } from 'vue-router'
 import { AppRouteNames, ROUTE_PATHS } from './types'
 import { buildMultitableRoute, buildPublicMultitableFormRoute } from './multitableRoute'
-import GridView from '../views/GridView.vue'
 import KanbanView from '../views/KanbanView.vue'
 import CalendarView from '../views/CalendarView.vue'
 import GalleryView from '../views/GalleryView.vue'
@@ -53,9 +52,8 @@ export const appRoutes: RouteRecordRaw[] = [
   },
   {
     path: '/grid',
-    name: 'grid',
-    component: GridView,
-    meta: { title: 'Grid View', requiresAuth: true, deprecated: true }
+    redirect: '/multitable',
+    meta: { title: 'Grid View', deprecated: true, retireBy: '2026-06-30' }
   },
   {
     path: '/kanban',
