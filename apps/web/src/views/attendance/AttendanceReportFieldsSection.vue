@@ -160,11 +160,45 @@
           <div class="attendance-report-fields__formula-reference-label">
             {{ tr('Field references', '字段引用') }}
           </div>
-          <div class="attendance-report-fields__formula-reference-chips">
-            <code>{field_code}</code>
-            <code>{late_duration}</code>
-            <code>{leave_type_annual_duration}</code>
-            <code>{total_minutes}</code>
+          <div
+            class="attendance-report-fields__formula-reference-scope"
+            role="group"
+            :aria-label="tr('Reference scope', '引用范围')"
+            data-report-field-formula-reference-scope
+          >
+            <button
+              v-for="option in formulaScopeOptions"
+              :key="option.value"
+              type="button"
+              class="attendance-report-fields__formula-reference-scope-btn"
+              :class="{ 'attendance-report-fields__formula-reference-scope-btn--active': formulaReferenceScope === option.value }"
+              :aria-pressed="formulaReferenceScope === option.value"
+              :data-report-field-formula-reference-scope-option="option.value"
+              @click="setFormulaReferenceScope(option.value as 'record' | 'summary')"
+            >
+              {{ option.label }}
+            </button>
+          </div>
+          <div
+            class="attendance__section-meta"
+            data-report-field-formula-reference-scope-hint
+          >
+            {{ formulaReferenceScopeHint }}
+          </div>
+          <div
+            class="attendance-report-fields__formula-reference-chips"
+            data-report-field-formula-reference-chips
+          >
+            <code
+              v-for="code in formulaStaticReferenceChips"
+              :key="'static-' + code"
+              :data-report-field-formula-static-chip="code"
+            >{{ '{' + code + '}' }}</code>
+            <code
+              v-for="code in (hasActiveFieldFilters ? [] : formulaReferenceableCodes)"
+              :key="code"
+              :data-report-field-formula-reference-code="code"
+            >{{ '{' + code + '}' }}</code>
           </div>
         </div>
         <div class="attendance-report-fields__formula-reference-block">
@@ -176,9 +210,15 @@
               v-for="group in formulaReferenceGroups"
               :key="group.id"
               class="attendance-report-fields__formula-reference-group"
+              :data-report-field-formula-reference-group="group.id"
             >
               <span>{{ group.label }}</span>
-              <code v-for="fn in group.functions" :key="fn">{{ fn }}</code>
+              <code
+                v-for="fn in group.functions"
+                :key="fn"
+                :title="formulaFunctionTooltip(fn)"
+                :data-report-field-formula-function="fn"
+              >{{ fn }}</code>
             </div>
           </div>
         </div>
@@ -197,6 +237,24 @@
           <div class="attendance__field-hint">
             {{ tr('NOW, TODAY, lookup functions, spreadsheet cell references, and scripts are blocked.', '禁用 NOW、TODAY、查找函数、电子表格单元格引用和脚本。') }}
           </div>
+        </div>
+        <div
+          class="attendance-report-fields__formula-reference-block"
+          data-report-field-formula-reference-disabled
+        >
+          <div class="attendance-report-fields__formula-reference-label">
+            {{ tr('Disabled functions', '禁用函数') }}
+          </div>
+          <ul class="attendance-report-fields__formula-reference-disabled">
+            <li
+              v-for="entry in formulaReferenceDisabled"
+              :key="entry.id"
+              :data-report-field-formula-disabled-id="entry.id"
+            >
+              <code>{{ entry.name }}</code>
+              <span>{{ entry.description }}</span>
+            </li>
+          </ul>
         </div>
       </div>
       <div class="attendance-report-fields__formula-create" data-report-field-formula-create>
@@ -617,6 +675,12 @@
                     class="attendance-report-fields__formula-editor"
                     :data-report-field-formula-editor="field.code"
                   >
+                    <div
+                      class="attendance__field-hint attendance-report-fields__formula-editor-help"
+                      :data-report-field-formula-editor-help="field.code"
+                    >
+                      {{ tr('See the function reference panel above for syntax, allowed functions, and disabled functions. Preview before saving.', '上方公式参考面板列出可用函数与禁用函数,保存前请先预览。') }}
+                    </div>
                     <label class="attendance-report-fields__formula-editor-field">
                       <span>{{ tr('Expression', '表达式') }}</span>
                       <textarea
@@ -944,6 +1008,82 @@ const formulaReferenceExamples = [
 ]
 
 const reportFields = computed(() => reportFieldsPayload.value.items ?? [])
+
+const formulaReferenceDisabled = computed<Array<{ id: string; name: string; description: string }>>(() => [
+  { id: 'now', name: 'NOW', description: tr('Non-deterministic; produces a different value on each evaluation.', '非确定性,每次评估都会变。') },
+  { id: 'today', name: 'TODAY', description: tr('Non-deterministic; resolves to the current date when evaluated.', '非确定性,评估时解析为当前日期。') },
+  { id: 'lookup', name: tr('lookup functions', '查找函数'), description: tr('Cross-row lookups (VLOOKUP / INDEX / MATCH) are blocked in v1.', 'v1 阻止跨行查找(VLOOKUP / INDEX / MATCH 等)。') },
+  { id: 'cross-table', name: tr('cross-table refs', '跨表引用'), description: tr('Spreadsheet-style references that reach into other tables are not allowed.', '不允许跨表的电子表格式单元格引用。') },
+  { id: 'scripts', name: tr('custom scripts', '自定义脚本'), description: tr('Free-form scripts (JS / macros) are not supported; only the function whitelist is evaluated.', '不支持自定义脚本(JS / 宏);只执行白名单函数。') },
+])
+
+const formulaFunctionDocs: Record<string, { description: string; example: string }> = {
+  IF: { description: tr('Conditional branch.', '条件分支。'), example: 'IF({attendance_days}>0,1,0)' },
+  AND: { description: tr('Logical AND across conditions.', '所有条件成立时为真。'), example: 'AND({late_count}>0,{early_leave_count}>0)' },
+  OR: { description: tr('Logical OR across conditions.', '任一条件成立即为真。'), example: 'OR({late_count}>0,{early_leave_count}>0)' },
+  NOT: { description: tr('Logical negation of a boolean.', '取反。'), example: 'NOT({late_count}>0)' },
+  ROUND: { description: tr('Round a number to N digits.', '四舍五入到 N 位。'), example: 'ROUND({work_duration}/60,2)' },
+  CEILING: { description: tr('Round up to the nearest integer or step.', '向上取整。'), example: 'CEILING({work_duration}/60)' },
+  FLOOR: { description: tr('Round down to the nearest integer or step.', '向下取整。'), example: 'FLOOR({work_duration}/60)' },
+  ABS: { description: tr('Absolute value of a number.', '绝对值。'), example: 'ABS({late_duration}-{early_leave_duration})' },
+  MIN: { description: tr('Minimum across arguments.', '取最小值。'), example: 'MIN({work_duration},480)' },
+  MAX: { description: tr('Maximum across arguments.', '取最大值。'), example: 'MAX({work_duration},0)' },
+  SUM: { description: tr('Sum — typically used in summary scope.', '求和,通常用于汇总范围。'), example: 'SUM({work_duration})' },
+  AVERAGE: { description: tr('Average — summary scope aggregator.', '平均,汇总范围。'), example: 'AVERAGE({work_duration})' },
+  COUNT: { description: tr('Count numeric values — summary scope.', '计数(只数数值),汇总范围。'), example: 'COUNT({work_duration})' },
+  COUNTA: { description: tr('Count non-empty values — summary scope.', '计数(非空),汇总范围。'), example: 'COUNTA({punch_result})' },
+  DATEDIF: { description: tr('Whole units between two dates: "D" / "M" / "Y".', '两日期之间整数单位差:"D"/"M"/"Y"。'), example: 'DATEDIF({work_date},DATE(2026,12,31),"D")' },
+  DATEDIFF: { description: tr('Days between two dates.', '两日期相差天数。'), example: 'DATEDIFF({work_date},DATE(2026,12,31))' },
+  DATE: { description: tr('Construct a date from year, month, day.', '由年/月/日构造日期。'), example: 'DATE(2026,1,1)' },
+  YEAR: { description: tr('Extract the year from a date.', '提取年份。'), example: 'YEAR({work_date})' },
+  MONTH: { description: tr('Extract the month from a date.', '提取月份。'), example: 'MONTH({work_date})' },
+  DAY: { description: tr('Extract the day-of-month from a date.', '提取日。'), example: 'DAY({work_date})' },
+  CONCAT: { description: tr('Concatenate strings.', '拼接字符串。'), example: 'CONCAT({employee_name},"@",{department})' },
+  CONCATENATE: { description: tr('Concatenate strings (alias of CONCAT).', 'CONCAT 的别名。'), example: 'CONCATENATE({employee_name},"@",{department})' },
+  LEFT: { description: tr('Leftmost N characters of a string.', '左侧 N 个字符。'), example: 'LEFT({employee_name},2)' },
+  RIGHT: { description: tr('Rightmost N characters of a string.', '右侧 N 个字符。'), example: 'RIGHT({employee_name},2)' },
+  MID: { description: tr('Substring at offset with length.', '从指定位置截取子串。'), example: 'MID({employee_name},1,3)' },
+  LEN: { description: tr('Length of a string.', '字符串长度。'), example: 'LEN({employee_name})' },
+  TRIM: { description: tr('Trim leading and trailing whitespace.', '去除首尾空白。'), example: 'TRIM({employee_name})' },
+  UPPER: { description: tr('Uppercase a string.', '转为大写。'), example: 'UPPER({employee_name})' },
+  LOWER: { description: tr('Lowercase a string.', '转为小写。'), example: 'LOWER({employee_name})' },
+}
+
+const formulaFunctionTooltip = (fn: string): string => {
+  const doc = formulaFunctionDocs[fn]
+  return doc ? `${fn} — ${doc.description} ${tr('Example:', '示例:')} ${doc.example}` : fn
+}
+
+const formulaReferenceScope = ref<'record' | 'summary'>('record')
+
+const setFormulaReferenceScope = (scope: 'record' | 'summary') => {
+  formulaReferenceScope.value = scope
+}
+
+const formulaReferenceScopeHint = computed(() => (formulaReferenceScope.value === 'record'
+  ? tr('Record scope — {field_code} reads the row value directly. Stick to math, text, date, and IF/AND/OR helpers.', '单记录范围 —— `{field_code}` 直接读取当行值。请使用数学/文本/日期/IF 等函数。')
+  : tr('Summary scope — wrap field references in SUM, AVERAGE, COUNT, or COUNTA, or use documented summary aliases (e.g. {total_minutes}, {leave_minutes}). Preview validates against the active backend.', '周期汇总范围 —— 请用 SUM/AVERAGE/COUNT/COUNTA 包裹字段引用,或使用 documented summary aliases(如 `{total_minutes}`、`{leave_minutes}`)。最终由后端 Preview 校验。')))
+
+const formulaStaticReferenceChips = computed<string[]>(() => (
+  formulaReferenceScope.value === 'summary'
+    ? ['total_minutes', 'leave_minutes', 'overtime_minutes', 'work_duration', 'late_duration', 'early_leave_duration']
+    : ['field_code', 'late_duration', 'leave_type_annual_duration', 'total_minutes']
+))
+
+const formulaReferenceableCodes = computed<string[]>(() => {
+  if (formulaReferenceScope.value === 'summary') return []
+  const staticSet = new Set(formulaStaticReferenceChips.value)
+  const seen = new Set<string>()
+  for (const field of reportFields.value) {
+    if (!field || !field.code) continue
+    if (field.enabled === false) continue
+    if (field.formulaEnabled) continue
+    if (staticSet.has(field.code)) continue
+    seen.add(field.code)
+  }
+  return Array.from(seen).sort()
+})
+
 const formulaDependencyGraph = computed(() => reportFieldsPayload.value.reportFieldConfig?.formulaDependencyGraph ?? null)
 const droppedReservedCodes = computed(() => reportFieldsPayload.value.droppedReservedCodes ?? [])
 const enabledCount = computed(() => reportFields.value.filter(field => field.enabled).length)
@@ -1883,6 +2023,55 @@ watch(
   font-size: 12px;
   line-height: 1.35;
   overflow-wrap: anywhere;
+}
+
+.attendance-report-fields__formula-reference-scope {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.attendance-report-fields__formula-reference-scope-btn {
+  padding: 3px 10px;
+  border: 1px solid #d8dee8;
+  border-radius: 999px;
+  background: #fff;
+  color: #475569;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.attendance-report-fields__formula-reference-scope-btn--active {
+  border-color: #1d4ed8;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-weight: 600;
+}
+
+.attendance-report-fields__formula-reference-disabled {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.attendance-report-fields__formula-reference-disabled li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.attendance-report-fields__formula-reference-disabled li code {
+  flex: 0 0 auto;
+}
+
+.attendance-report-fields__formula-editor-help {
+  margin-bottom: 4px;
+  color: #475569;
 }
 
 .attendance-report-fields__formula-create {

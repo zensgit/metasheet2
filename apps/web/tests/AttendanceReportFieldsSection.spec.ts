@@ -227,6 +227,179 @@ describe('AttendanceReportFieldsSection', () => {
     expect(panel?.textContent).toContain('NOW, TODAY, lookup functions')
   })
 
+  it('renders all six function reference groups with descriptions and examples in tooltips', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse(200, populatedCatalogPayload()))
+
+    mountSection()
+    await flushUi()
+
+    const panel = container!.querySelector('[data-report-field-formula-reference]')!
+    const groupIds = Array.from(panel.querySelectorAll('[data-report-field-formula-reference-group]'))
+      .map((el) => el.getAttribute('data-report-field-formula-reference-group'))
+    expect(groupIds).toEqual(['condition', 'logical', 'math', 'aggregate', 'date', 'text'])
+
+    expect(panel.querySelectorAll('[data-report-field-formula-function]')).toHaveLength(29)
+
+    const ifTitle = panel.querySelector('[data-report-field-formula-function="IF"]')!.getAttribute('title') ?? ''
+    expect(ifTitle).toContain('IF')
+    expect(ifTitle).toContain('Conditional branch')
+    expect(ifTitle).toContain('Example:')
+    expect(ifTitle).toContain('IF({attendance_days}>0,1,0)')
+
+    const sumTitle = panel.querySelector('[data-report-field-formula-function="SUM"]')!.getAttribute('title') ?? ''
+    expect(sumTitle).toContain('summary scope')
+
+    const datedifTitle = panel.querySelector('[data-report-field-formula-function="DATEDIF"]')!.getAttribute('title') ?? ''
+    expect(datedifTitle).toContain('DATEDIF({work_date},DATE(2026,12,31),"D")')
+  })
+
+  it('renders the dedicated disabled-functions block with five entries', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse(200, populatedCatalogPayload()))
+
+    mountSection()
+    await flushUi()
+
+    const block = container!.querySelector('[data-report-field-formula-reference-disabled]')!
+    expect(block.textContent).toContain('Disabled functions')
+    const items = Array.from(block.querySelectorAll('[data-report-field-formula-disabled-id]'))
+      .map((el) => el.getAttribute('data-report-field-formula-disabled-id'))
+    expect(items).toEqual(['now', 'today', 'lookup', 'cross-table', 'scripts'])
+    expect(block.textContent).toContain('Non-deterministic')
+    expect(block.textContent).toContain('VLOOKUP')
+    expect(block.textContent).toContain('Spreadsheet-style references')
+    expect(block.textContent).toContain('Free-form scripts')
+  })
+
+  it('toggles the formula reference scope and updates the scope hint', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse(200, populatedCatalogPayload()))
+
+    mountSection()
+    await flushUi()
+
+    const recordBtn = container!.querySelector<HTMLButtonElement>('[data-report-field-formula-reference-scope-option="record"]')!
+    const summaryBtn = container!.querySelector<HTMLButtonElement>('[data-report-field-formula-reference-scope-option="summary"]')!
+    expect(recordBtn.getAttribute('aria-pressed')).toBe('true')
+    expect(summaryBtn.getAttribute('aria-pressed')).toBe('false')
+
+    const hint = container!.querySelector('[data-report-field-formula-reference-scope-hint]')!
+    expect(hint.textContent).toContain('Record scope')
+    expect(hint.textContent).toContain('reads the row value directly')
+
+    summaryBtn.click()
+    await flushUi()
+
+    expect(recordBtn.getAttribute('aria-pressed')).toBe('false')
+    expect(summaryBtn.getAttribute('aria-pressed')).toBe('true')
+    expect(hint.textContent).toContain('Summary scope')
+    expect(hint.textContent).toContain('SUM, AVERAGE, COUNT, or COUNTA')
+
+    recordBtn.click()
+    await flushUi()
+    expect(recordBtn.getAttribute('aria-pressed')).toBe('true')
+    expect(hint.textContent).toContain('Record scope')
+  })
+
+  it('renders catalog-derived referenceable chips, excluding formula and disabled fields', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse(200, populatedCatalogPayload()))
+
+    mountSection()
+    await flushUi()
+
+    const codes = Array.from(container!.querySelectorAll('[data-report-field-formula-reference-code]'))
+      .map((el) => el.getAttribute('data-report-field-formula-reference-code'))
+    expect(codes).toContain('employee_name')
+    expect(codes).toContain('punch_result')
+    expect(codes).toContain('attendance_days')
+    expect(codes).toContain('leave_duration')
+    expect(codes).not.toContain('late_count')
+    expect(codes).not.toContain('workday_overtime_duration')
+  })
+
+  it('switches static chips to summary aliases and hides catalog-derived chips in summary scope', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse(200, populatedCatalogPayload()))
+
+    mountSection()
+    await flushUi()
+
+    const recordStatic = Array.from(container!.querySelectorAll('[data-report-field-formula-static-chip]'))
+      .map((el) => el.getAttribute('data-report-field-formula-static-chip'))
+    expect(recordStatic).toEqual(['field_code', 'late_duration', 'leave_type_annual_duration', 'total_minutes'])
+    expect(container!.querySelectorAll('[data-report-field-formula-reference-code]').length).toBeGreaterThan(0)
+
+    container!.querySelector<HTMLButtonElement>('[data-report-field-formula-reference-scope-option="summary"]')!.click()
+    await flushUi()
+
+    const summaryStatic = Array.from(container!.querySelectorAll('[data-report-field-formula-static-chip]'))
+      .map((el) => el.getAttribute('data-report-field-formula-static-chip'))
+    expect(summaryStatic).toEqual(['total_minutes', 'leave_minutes', 'overtime_minutes', 'work_duration', 'late_duration', 'early_leave_duration'])
+    expect(summaryStatic).toContain('total_minutes')
+    expect(summaryStatic).toContain('leave_minutes')
+    expect(container!.querySelectorAll('[data-report-field-formula-reference-code]')).toHaveLength(0)
+
+    const summaryHint = container!.querySelector('[data-report-field-formula-reference-scope-hint]')!
+    expect(summaryHint.textContent).toContain('summary aliases')
+    expect(summaryHint.textContent).toContain('Preview validates')
+
+    container!.querySelector<HTMLButtonElement>('[data-report-field-formula-reference-scope-option="record"]')!.click()
+    await flushUi()
+
+    const recordStaticAgain = Array.from(container!.querySelectorAll('[data-report-field-formula-static-chip]'))
+      .map((el) => el.getAttribute('data-report-field-formula-static-chip'))
+    expect(recordStaticAgain).toEqual(['field_code', 'late_duration', 'leave_type_annual_duration', 'total_minutes'])
+    expect(container!.querySelectorAll('[data-report-field-formula-reference-code]').length).toBeGreaterThan(0)
+  })
+
+  it('shows the inline editor help line pointing to the reference panel when editing', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(jsonResponse(200, formulaEditorPayload()))
+
+    mountSection()
+    await flushUi()
+
+    expect(container!.querySelector('[data-report-field-formula-editor-help="net_anomaly_minutes"]')).toBeNull()
+
+    container!.querySelector<HTMLButtonElement>('[data-report-field-formula-edit="net_anomaly_minutes"]')!.click()
+    await flushUi()
+
+    const help = container!.querySelector('[data-report-field-formula-editor-help="net_anomaly_minutes"]')!
+    expect(help.textContent).toContain('function reference panel above')
+    expect(help.textContent).toContain('Preview before saving')
+  })
+
+  it('surfaces preview errors from the existing formula preview endpoint', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonResponse(200, formulaEditorPayload()))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        data: {
+          ok: false,
+          error: 'Reference {foo} is not allowed in v1.',
+        },
+      }))
+
+    mountSection()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-report-field-formula-edit="net_anomaly_minutes"]')!.click()
+    await flushUi()
+
+    const textarea = container!.querySelector<HTMLTextAreaElement>('[data-report-field-formula-expression="net_anomaly_minutes"]')!
+    textarea.value = '={foo}+1'
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-report-field-formula-preview="net_anomaly_minutes"]')!.click()
+    await flushUi()
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance/report-fields/formula/preview?orgId=org-1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expression: '={foo}+1', formulaScope: 'record' }),
+    })
+    const message = container!.querySelector('[data-report-field-formula-preview-result]')!
+    expect(message.textContent).toContain('Preview error')
+    expect(message.textContent).toContain('Reference {foo} is not allowed in v1.')
+  })
+
   it('renders formula dependency graph summary and blocked formula references', async () => {
     const payload = formulaEditorPayload('={late_count}+1') as any
     payload.data.reportFieldConfig.formulaDependencyGraph = {
