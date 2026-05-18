@@ -89,7 +89,7 @@ function populatedCatalogPayload() {
   }
 }
 
-function formulaEditorPayload(expression = '={late_duration}+1') {
+function formulaEditorPayload(expression = '={late_duration}+1', scope = 'record') {
   const payload = populatedCatalogPayload() as any
   payload.data.items = [
     ...payload.data.items,
@@ -110,7 +110,7 @@ function formulaEditorPayload(expression = '={late_duration}+1') {
       systemDefined: false,
       formulaEnabled: true,
       formulaExpression: expression,
-      formulaScope: 'record',
+      formulaScope: scope,
       formulaOutputType: 'duration_minutes',
       formulaValid: true,
       formulaError: null,
@@ -213,10 +213,11 @@ describe('AttendanceReportFieldsSection', () => {
     expect(panel).toBeTruthy()
     expect(container!.querySelectorAll('[data-report-field-formula-reference]')).toHaveLength(1)
     expect(panel?.textContent).toContain('Formula reference')
-    expect(panel?.textContent).toContain('Record-scope only')
+    expect(panel?.textContent).toContain('Record and summary scopes')
     expect(panel?.textContent).toContain('{field_code}')
     expect(panel?.textContent).toContain('{late_duration}')
     expect(panel?.textContent).toContain('{leave_type_annual_duration}')
+    expect(panel?.textContent).toContain('{total_minutes}')
     expect(panel?.textContent).toContain('IF')
     expect(panel?.textContent).toContain('SUM')
     expect(panel?.textContent).toContain('DATEDIF')
@@ -337,7 +338,7 @@ describe('AttendanceReportFieldsSection', () => {
     expect(apiFetch).toHaveBeenCalledWith('/api/attendance/report-fields/formula/preview?orgId=org-1', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ expression: '={late_duration}+{early_leave_duration}' }),
+      body: JSON.stringify({ expression: '={late_duration}+{early_leave_duration}', formulaScope: 'record' }),
     })
     expect(container!.querySelector('[data-report-field-formula-preview-result]')?.textContent).toContain('Preview value: 17')
     expect(container!.querySelector('[data-report-field-formula-preview-result]')?.textContent).toContain('early_leave_duration, late_duration')
@@ -356,7 +357,7 @@ describe('AttendanceReportFieldsSection', () => {
   })
 
   it('creates a new custom formula field from the reference panel', async () => {
-    const updated = formulaEditorPayload('={work_duration}-{late_duration}')
+    const updated = formulaEditorPayload('={total_minutes}-{leave_minutes}', 'summary')
     const newField = updated.data.items.find((item: { code: string }) => item.code === 'net_anomaly_minutes')
     vi.mocked(apiFetch)
       .mockResolvedValueOnce(jsonResponse(200, populatedCatalogPayload()))
@@ -376,7 +377,11 @@ describe('AttendanceReportFieldsSection', () => {
     container!.querySelector<HTMLInputElement>('[data-report-field-formula-create-code]')!.dispatchEvent(new Event('input', { bubbles: true }))
     container!.querySelector<HTMLInputElement>('[data-report-field-formula-create-name]')!.value = '异常净时长'
     container!.querySelector<HTMLInputElement>('[data-report-field-formula-create-name]')!.dispatchEvent(new Event('input', { bubbles: true }))
-    container!.querySelector<HTMLTextAreaElement>('[data-report-field-formula-create-expression]')!.value = '={work_duration}-{late_duration}'
+    const scopeSelect = container!.querySelector<HTMLSelectElement>('[data-report-field-formula-create-scope]')!
+    expect(scopeSelect).toBeTruthy()
+    scopeSelect.value = 'summary'
+    scopeSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    container!.querySelector<HTMLTextAreaElement>('[data-report-field-formula-create-expression]')!.value = '={total_minutes}-{leave_minutes}'
     container!.querySelector<HTMLTextAreaElement>('[data-report-field-formula-create-expression]')!.dispatchEvent(new Event('input', { bubbles: true }))
     await flushUi()
 
@@ -386,11 +391,12 @@ describe('AttendanceReportFieldsSection', () => {
     expect(apiFetch).toHaveBeenCalledWith('/api/attendance/report-fields/net_anomaly_minutes/formula?orgId=org-1', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: expect.stringContaining('"name":"异常净时长"'),
+      body: expect.stringContaining('"formulaScope":"summary"'),
     })
     expect(container!.textContent).toContain('Formula field saved.')
     expect(container!.textContent).toContain('net_anomaly_minutes')
-    expect(container!.textContent).toContain('={work_duration}-{late_duration}')
+    expect(container!.textContent).toContain('={total_minutes}-{leave_minutes}')
+    expect(container!.textContent).toContain('Summary scope')
   })
 
   it('filters report fields by text and operational state', async () => {

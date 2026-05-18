@@ -358,7 +358,7 @@ const ATTENDANCE_REPORT_FIELD_CATEGORIES = Object.freeze([
 
 const ATTENDANCE_REPORT_FIELD_SOURCE_OPTIONS = Object.freeze(['system', 'dingtalk', 'multitable', 'custom'])
 const ATTENDANCE_REPORT_FIELD_UNIT_OPTIONS = Object.freeze(['text', 'dateTime', 'days', 'minutes', 'count', 'hours'])
-const ATTENDANCE_REPORT_FIELD_FORMULA_SCOPE_OPTIONS = Object.freeze(['record'])
+const ATTENDANCE_REPORT_FIELD_FORMULA_SCOPE_OPTIONS = Object.freeze(['record', 'summary'])
 const ATTENDANCE_REPORT_FIELD_FORMULA_OUTPUT_TYPE_OPTIONS = Object.freeze([
   'number',
   'duration_minutes',
@@ -416,6 +416,36 @@ const ATTENDANCE_REPORT_FORMULA_RAW_REFERENCE_KEYS = Object.freeze([
 ])
 const ATTENDANCE_REPORT_FORMULA_RESERVED_CODES = new Set(ATTENDANCE_REPORT_FORMULA_RAW_REFERENCE_KEYS)
 const ATTENDANCE_FORMULA_ALLOW_RAW_ALIASES_ENV = 'ATTENDANCE_FORMULA_ALLOW_RAW_ALIASES'
+const ATTENDANCE_SUMMARY_FORMULA_SOURCE_FIELDS = Object.freeze([
+  { code: 'total_days', name: '应出勤天数', unit: 'days' },
+  { code: 'total_minutes', name: '总工作分钟', unit: 'minutes' },
+  { code: 'total_late_minutes', name: '总迟到分钟', unit: 'minutes' },
+  { code: 'total_early_leave_minutes', name: '总早退分钟', unit: 'minutes' },
+  { code: 'normal_days', name: '正常天数', unit: 'days' },
+  { code: 'late_days', name: '迟到天数', unit: 'days' },
+  { code: 'early_leave_days', name: '早退天数', unit: 'days' },
+  { code: 'late_early_days', name: '迟到早退天数', unit: 'days' },
+  { code: 'partial_days', name: '不完整天数', unit: 'days' },
+  { code: 'absent_days', name: '旷工天数', unit: 'days' },
+  { code: 'adjusted_days', name: '调整天数', unit: 'days' },
+  { code: 'off_days', name: '休息天数', unit: 'days' },
+  { code: 'leave_minutes', name: '请假分钟', unit: 'minutes' },
+  { code: 'overtime_minutes', name: '加班分钟', unit: 'minutes' },
+  { code: 'expected_attendance_days', name: '应出勤天数', unit: 'days' },
+  { code: 'attendance_days', name: '出勤天数', unit: 'days' },
+  { code: 'rest_days', name: '休息天数', unit: 'days' },
+  { code: 'work_duration', name: '工作时长', unit: 'minutes' },
+  { code: 'late_count', name: '迟到次数', unit: 'count' },
+  { code: 'late_duration', name: '迟到时长', unit: 'minutes' },
+  { code: 'early_leave_count', name: '早退次数', unit: 'count' },
+  { code: 'early_leave_duration', name: '早退时长', unit: 'minutes' },
+  { code: 'absenteeism_days', name: '旷工天数', unit: 'days' },
+  { code: 'leave_duration', name: '请假时长', unit: 'minutes' },
+  { code: 'overtime_approval_duration', name: '加班审批时长', unit: 'minutes' },
+])
+const ATTENDANCE_SUMMARY_FORMULA_SOURCE_CODE_SET = new Set(
+  ATTENDANCE_SUMMARY_FORMULA_SOURCE_FIELDS.map(field => field.code)
+)
 
 const ATTENDANCE_LEAVE_SUBTYPE_CODE_PATTERN = /^leave_type_[a-z0-9_]+_duration$/
 const ATTENDANCE_OVERTIME_SUBTYPE_CODE_PATTERN = /^overtime_rule_[a-z0-9]+_duration$/
@@ -1154,7 +1184,7 @@ function normalizeCatalogNumber(value, fallback = 0) {
 
 function normalizeAttendanceReportFormulaScope(value) {
   const normalized = String(value || '').trim().toLowerCase()
-  return normalized === 'record' ? 'record' : 'record'
+  return ATTENDANCE_REPORT_FIELD_FORMULA_SCOPE_OPTIONS.includes(normalized) ? normalized : 'record'
 }
 
 function normalizeAttendanceReportFormulaOutputType(value, unit = 'text') {
@@ -1336,7 +1366,8 @@ function readAttendanceCustomFormulaAliasValue(row, aliasValue) {
 
 function getAttendanceReportFormulaReferenceCodes(fields, options = {}) {
   const formulaFieldCodes = new Set()
-  const rawAliasesAllowed = options.rawAliasesAllowed !== false
+  const scope = normalizeAttendanceReportFormulaScope(options.scope)
+  const rawAliasesAllowed = scope === 'summary' ? false : options.rawAliasesAllowed !== false
   const codes = new Set(rawAliasesAllowed ? ATTENDANCE_REPORT_FORMULA_RAW_REFERENCE_KEYS : [])
   for (const field of fields || []) {
     const code = normalizeCatalogString(field?.code)
@@ -1346,9 +1377,13 @@ function getAttendanceReportFormulaReferenceCodes(fields, options = {}) {
       formulaFieldCodes.add(code)
       continue
     }
+    if (scope === 'summary') continue
     if (field.enabled === false) continue
     if (field.systemDefined === false && !isCustomAttendanceFormulaSourceField(field)) continue
     codes.add(code)
+  }
+  if (scope === 'summary') {
+    for (const field of ATTENDANCE_SUMMARY_FORMULA_SOURCE_FIELDS) codes.add(field.code)
   }
   return { codes, formulaFieldCodes }
 }
@@ -1357,9 +1392,11 @@ function validateAttendanceReportFormulaExpression(expression, options = {}) {
   const formulaExpression = normalizeAttendanceReportFormulaExpression(expression)
   const references = extractAttendanceReportFormulaReferences(formulaExpression)
   const functions = extractAttendanceReportFormulaFunctions(formulaExpression)
-  const rawAliasesAllowed = options.rawAliasesAllowed !== false
+  const scope = normalizeAttendanceReportFormulaScope(options.scope)
+  const rawAliasesAllowed = scope === 'summary' ? false : options.rawAliasesAllowed !== false
   const { codes, formulaFieldCodes } = getAttendanceReportFormulaReferenceCodes(options.fields, {
     rawAliasesAllowed,
+    scope,
   })
 
   if (!formulaExpression) {
@@ -1401,7 +1438,7 @@ function validateAttendanceReportFormulaExpression(expression, options = {}) {
     }
   }
 
-  const disabledRawAliasReference = rawAliasesAllowed
+  const disabledRawAliasReference = rawAliasesAllowed || scope === 'summary'
     ? null
     : references.find(reference => ATTENDANCE_REPORT_FORMULA_RESERVED_CODES.has(reference))
   if (disabledRawAliasReference) {
@@ -1445,6 +1482,7 @@ function applyAttendanceReportFormulaValidation(items, options = {}) {
     const validation = validateAttendanceReportFormulaExpression(formulaConfig.formulaExpression, {
       fields: items,
       rawAliasesAllowed: options.rawAliasesAllowed,
+      scope: formulaConfig.formulaScope,
     })
     return {
       ...field,
@@ -1582,6 +1620,9 @@ function normalizeAttendanceReportFormulaSaveInput(code, input = {}) {
   }
   if (cloneAttendanceReportFieldDefinitions().some(field => field.code === normalizedCode) || isAttendanceDynamicSubtypeCode(normalizedCode)) {
     throw createAttendanceReportFormulaSaveError(400, 'READ_ONLY_FIELD', `Field ${normalizedCode} is read-only for formula editing.`)
+  }
+  if (ATTENDANCE_SUMMARY_FORMULA_SOURCE_CODE_SET.has(normalizedCode)) {
+    throw createAttendanceReportFormulaSaveError(400, 'RESERVED_FIELD_CODE', `Formula field code ${normalizedCode} is reserved.`)
   }
 
   const category = getAttendanceReportFieldCategory(input.category)
@@ -1761,7 +1802,7 @@ function mergeAttendanceReportFieldDefinitions(configRecords, fieldIds, options 
 
   for (const config of configsByCode.values()) {
     if (systemCodes.has(config.code)) continue
-    if (ATTENDANCE_REPORT_FORMULA_RESERVED_CODES.has(config.code)) continue
+    if (ATTENDANCE_REPORT_FORMULA_RESERVED_CODES.has(config.code) || ATTENDANCE_SUMMARY_FORMULA_SOURCE_CODE_SET.has(config.code)) continue
     items.push({
       ...config,
       ...normalizeAttendanceReportFormulaConfig(config, config.unit),
@@ -1790,7 +1831,7 @@ function getAttendanceReportFieldDroppedReservedCodes(configRecords, fieldIds) {
     const config = mapAttendanceReportFieldConfigRecord(record, fieldIds)
     if (!config) continue
     if (systemCodes.has(config.code)) continue
-    if (ATTENDANCE_REPORT_FORMULA_RESERVED_CODES.has(config.code)) dropped.add(config.code)
+    if (ATTENDANCE_REPORT_FORMULA_RESERVED_CODES.has(config.code) || ATTENDANCE_SUMMARY_FORMULA_SOURCE_CODE_SET.has(config.code)) dropped.add(config.code)
   }
   return Array.from(dropped).sort()
 }
@@ -2532,7 +2573,7 @@ function resolveAttendanceRecordReportFields(items) {
       && field.reportVisible !== false
       && (
         ATTENDANCE_RECORD_REPORT_FIELD_CODE_SET.has(field.code)
-        || field.formulaEnabled === true
+        || (field.formulaEnabled === true && normalizeAttendanceReportFormulaScope(field.formulaScope) === 'record')
         || (field.systemDefined !== false && isAttendanceDynamicSubtypeCode(field.code))
       )
     ))
@@ -2953,6 +2994,7 @@ async function previewAttendanceReportFormula(context, expression, sample, field
   const validation = validateAttendanceReportFormulaExpression(expression, {
     fields,
     rawAliasesAllowed: options.rawAliasesAllowed,
+    scope: options.scope,
   })
   if (!validation.valid) {
     return {
@@ -3025,6 +3067,126 @@ async function buildAttendanceRecordReportExportItemAsync(context, row, reportFi
     entries.push([key, value])
   }
   return Object.fromEntries(entries)
+}
+
+function resolveAttendanceSummaryFormulaFields(items) {
+  const sourceItems = Array.isArray(items) ? items : []
+  return sourceItems
+    .filter(field => (
+      field
+      && field.code
+      && field.enabled !== false
+      && field.reportVisible !== false
+      && field.formulaEnabled === true
+      && normalizeAttendanceReportFormulaScope(field.formulaScope) === 'summary'
+    ))
+    .map(field => ({
+      code: field.code,
+      name: field.name || field.code,
+      unit: field.unit || 'text',
+      sortOrder: Number(field.sortOrder) || 0,
+      formulaEnabled: true,
+      formulaExpression: field.formulaExpression || '',
+      formulaScope: 'summary',
+      formulaOutputType: normalizeAttendanceReportFormulaOutputType(field.formulaOutputType, field.unit),
+      formulaValid: field.formulaValid !== false,
+      formulaError: field.formulaError || null,
+      formulaReferences: Array.isArray(field.formulaReferences) ? field.formulaReferences : [],
+    }))
+    .sort((left, right) => {
+      if (left.sortOrder !== right.sortOrder) return left.sortOrder - right.sortOrder
+      return left.code.localeCompare(right.code)
+    })
+}
+
+function attendanceSummaryNumber(summary, key) {
+  const parsed = Number(summary?.[key] ?? 0)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function buildAttendanceSummaryFormulaValueMap(summary) {
+  const totalDays = attendanceSummaryNumber(summary, 'total_days')
+  const absentDays = attendanceSummaryNumber(summary, 'absent_days')
+  const lateDays = attendanceSummaryNumber(summary, 'late_days')
+  const lateEarlyDays = attendanceSummaryNumber(summary, 'late_early_days')
+  const earlyLeaveDays = attendanceSummaryNumber(summary, 'early_leave_days')
+  return {
+    total_days: totalDays,
+    total_minutes: attendanceSummaryNumber(summary, 'total_minutes'),
+    total_late_minutes: attendanceSummaryNumber(summary, 'total_late_minutes'),
+    total_early_leave_minutes: attendanceSummaryNumber(summary, 'total_early_leave_minutes'),
+    normal_days: attendanceSummaryNumber(summary, 'normal_days'),
+    late_days: lateDays,
+    early_leave_days: earlyLeaveDays,
+    late_early_days: lateEarlyDays,
+    partial_days: attendanceSummaryNumber(summary, 'partial_days'),
+    absent_days: absentDays,
+    adjusted_days: attendanceSummaryNumber(summary, 'adjusted_days'),
+    off_days: attendanceSummaryNumber(summary, 'off_days'),
+    leave_minutes: attendanceSummaryNumber(summary, 'leave_minutes'),
+    overtime_minutes: attendanceSummaryNumber(summary, 'overtime_minutes'),
+    expected_attendance_days: totalDays,
+    attendance_days: Math.max(0, totalDays - absentDays),
+    rest_days: attendanceSummaryNumber(summary, 'off_days'),
+    work_duration: attendanceSummaryNumber(summary, 'total_minutes'),
+    late_count: lateDays + lateEarlyDays,
+    late_duration: attendanceSummaryNumber(summary, 'total_late_minutes'),
+    early_leave_count: earlyLeaveDays + lateEarlyDays,
+    early_leave_duration: attendanceSummaryNumber(summary, 'total_early_leave_minutes'),
+    absenteeism_days: absentDays,
+    leave_duration: attendanceSummaryNumber(summary, 'leave_minutes'),
+    overtime_approval_duration: attendanceSummaryNumber(summary, 'overtime_minutes'),
+  }
+}
+
+async function evaluateAttendanceSummaryFormulaField(context, summary, field) {
+  if (!field?.formulaEnabled) return ''
+  if (field.formulaValid === false) return ATTENDANCE_REPORT_FORMULA_ERROR_VALUE
+  const values = buildAttendanceSummaryFormulaValueMap(summary)
+  const expression = resolveAttendanceReportFormulaExpression(field.formulaExpression, values)
+  const formulaApi = context?.api?.formula
+  if (!formulaApi?.calculateFormula) return ATTENDANCE_REPORT_FORMULA_ERROR_VALUE
+
+  try {
+    const result = await Promise.resolve(formulaApi.calculateFormula(expression))
+    return formatAttendanceReportFormulaValue(result, field.formulaOutputType)
+  } catch {
+    return ATTENDANCE_REPORT_FORMULA_ERROR_VALUE
+  }
+}
+
+async function buildAttendanceSummaryFormulaValues(context, summary, formulaFields) {
+  const entries = []
+  for (const field of formulaFields || []) {
+    entries.push([field.code, await evaluateAttendanceSummaryFormulaField(context, summary, field)])
+  }
+  return Object.fromEntries(entries)
+}
+
+async function loadAttendanceSummaryFormulaFields(context, orgId, logger, options = {}) {
+  const catalog = await buildAttendanceReportFieldCatalogResponse(context, orgId, logger, {
+    provision: false,
+    rawAliasesAllowed: options.rawAliasesAllowed,
+  })
+  return resolveAttendanceSummaryFormulaFields(catalog.items)
+}
+
+async function enrichAttendanceSummaryWithFormulaValues(context, summary, formulaFields) {
+  const formulaValues = await buildAttendanceSummaryFormulaValues(context, summary, formulaFields)
+  if (Object.keys(formulaValues).length === 0) return summary
+  return {
+    ...summary,
+    formula_values: formulaValues,
+    formula_fields: formulaFields.map(field => ({
+      code: field.code,
+      name: field.name,
+      unit: field.unit,
+      formulaOutputType: field.formulaOutputType,
+      formulaValid: field.formulaValid,
+      formulaError: field.formulaError,
+      formulaReferences: field.formulaReferences,
+    })),
+  }
 }
 
 function findImportProfile(profileId) {
@@ -9590,7 +9752,7 @@ function buildAttendanceRecordReportCsv(rows, reportFields, options = {}) {
   return buildCsvWithColumns(rows, columns)
 }
 
-function buildPayrollSummaryCsv(summary, cycle) {
+function buildPayrollSummaryCsv(summary, cycle, options = {}) {
   const headers = ['cycle_id', 'cycle_name', 'start_date', 'end_date', 'metric', 'value']
   const rows = [
     ['total_minutes', summary.total_minutes ?? 0],
@@ -9608,6 +9770,15 @@ function buildPayrollSummaryCsv(summary, cycle) {
     ['adjusted_days', summary.adjusted_days ?? 0],
     ['off_days', summary.off_days ?? 0],
   ]
+  const formulaValues = summary?.formula_values && typeof summary.formula_values === 'object'
+    ? summary.formula_values
+    : {}
+  for (const field of options.formulaFields || []) {
+    if (!field?.code) continue
+    rows.push([field.code, Object.prototype.hasOwnProperty.call(formulaValues, field.code)
+      ? formulaValues[field.code]
+      : ATTENDANCE_REPORT_FORMULA_ERROR_VALUE])
+  }
   const csvRows = rows.map(([metric, value]) => ({
     cycle_id: cycle.id,
     cycle_name: cycle.name ?? '',
@@ -10037,14 +10208,19 @@ module.exports = {
     loadApprovedMinutesRange,
     resolveAttendanceRecordReportFields,
     resolveAttendanceFormulaSourceFields,
+    resolveAttendanceSummaryFormulaFields,
     buildAttendanceReportFormulaDependencyGraph,
     validateAttendanceReportFormulaExpression,
     previewAttendanceReportFormula,
     saveAttendanceReportFormulaField,
     normalizeAttendanceReportFormulaSaveInput,
+    buildAttendanceSummaryFormulaValueMap,
+    buildAttendanceSummaryFormulaValues,
+    enrichAttendanceSummaryWithFormulaValues,
     buildAttendanceRecordReportExportItem,
     buildAttendanceRecordReportExportItemAsync,
     buildAttendanceRecordReportCsv,
+    buildPayrollSummaryCsv,
     buildAttendanceReportFieldConfig,
     buildAttendanceReportFieldConfigHeaders,
     buildAttendanceReportFieldConfigFingerprint,
@@ -13139,7 +13315,10 @@ module.exports = {
 
 	        try {
 	          const summary = await loadAttendanceSummary(db, orgId, targetUserId, from, to)
-	          res.json({ ok: true, success: true, data: summary })
+          const formulaOptions = await getAttendanceFormulaRuntimeOptions(db)
+          const summaryFormulaFields = await loadAttendanceSummaryFormulaFields(context, orgId, logger, formulaOptions)
+          const data = await enrichAttendanceSummaryWithFormulaValues(context, summary, summaryFormulaFields)
+	          res.json({ ok: true, success: true, data })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -20629,12 +20808,15 @@ module.exports = {
           }
           const cycle = mapPayrollCycleRow(cycleRows[0])
           const summary = await loadAttendanceSummary(db, orgId, targetUserId, cycle.startDate, cycle.endDate)
+          const formulaOptions = await getAttendanceFormulaRuntimeOptions(db)
+          const summaryFormulaFields = await loadAttendanceSummaryFormulaFields(context, orgId, logger, formulaOptions)
+          const summaryWithFormulas = await enrichAttendanceSummaryWithFormulaValues(context, summary, summaryFormulaFields)
 
           res.json({
             ok: true,
             data: {
               cycle,
-              summary,
+              summary: summaryWithFormulas,
             },
           })
         } catch (error) {
@@ -20693,7 +20875,10 @@ module.exports = {
           }
           const cycle = mapPayrollCycleRow(cycleRows[0])
           const summary = await loadAttendanceSummary(db, orgId, targetUserId, cycle.startDate, cycle.endDate)
-          const csv = buildPayrollSummaryCsv(summary, cycle)
+          const formulaOptions = await getAttendanceFormulaRuntimeOptions(db)
+          const summaryFormulaFields = await loadAttendanceSummaryFormulaFields(context, orgId, logger, formulaOptions)
+          const summaryWithFormulas = await enrichAttendanceSummaryWithFormulaValues(context, summary, summaryFormulaFields)
+          const csv = buildPayrollSummaryCsv(summaryWithFormulas, cycle, { formulaFields: summaryFormulaFields })
           const filename = `payroll-cycle-${cycle.id}.csv`
 
           res.setHeader('Content-Type', 'text/csv; charset=utf-8')
@@ -22146,6 +22331,7 @@ module.exports = {
       withPermission('attendance:admin', async (req, res) => {
         const parsed = z.object({
           expression: z.string().min(1).max(4000),
+          formulaScope: z.enum(ATTENDANCE_REPORT_FIELD_FORMULA_SCOPE_OPTIONS).optional(),
           sample: z.record(z.unknown()).optional(),
         }).safeParse(req.body ?? {})
         if (!parsed.success) {
@@ -22164,7 +22350,10 @@ module.exports = {
           parsed.data.expression,
           parsed.data.sample,
           catalog.items,
-          formulaOptions,
+          {
+            ...formulaOptions,
+            scope: parsed.data.formulaScope,
+          },
         )
         res.json({ ok: true, data })
       })
