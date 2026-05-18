@@ -68,6 +68,20 @@
               <strong>{{ system.name }}</strong>
               <span>{{ system.kind }} · {{ system.role }} · {{ connectionStatusLabel(system) }}</span>
               <small v-if="runtimeBlockerForSystem(system)">{{ runtimeBlockerForSystem(system) }}</small>
+              <div class="integration-workbench__actions integration-workbench__actions--inline">
+                <button type="button" class="integration-workbench__icon-button" :data-testid="`edit-connection-${system.id}`" @click="editConnection(system)">
+                  编辑
+                </button>
+                <button type="button" class="integration-workbench__icon-button" :data-testid="`copy-connection-${system.id}`" @click="copyConnection(system)">
+                  复制
+                </button>
+                <button type="button" class="integration-workbench__icon-button" :data-testid="`deactivate-connection-${system.id}`" :disabled="system.status === 'inactive'" @click="deactivateConnection(system)">
+                  停用
+                </button>
+                <button type="button" class="integration-workbench__icon-button" :data-testid="`delete-connection-${system.id}`" disabled title="当前后端未提供 DELETE /api/integration/external-systems/:id">
+                  删除待接口
+                </button>
+              </div>
             </li>
           </ul>
         </div>
@@ -116,6 +130,74 @@
         高级连接只用于 allowlist 表/视图读取或中间表写入；不要把核心业务表直写暴露给普通用户。
       </div>
 
+      <div class="integration-workbench__connection-manager" data-testid="connection-manager">
+        <div>
+          <strong>{{ connectionDraftTitle }}</strong>
+          <p>这里管理的是已保存连接的元数据和非凭证配置。真实账号、密码、Token 仍通过各系统预设向导或后端凭证库处理。</p>
+        </div>
+        <div class="integration-workbench__grid integration-workbench__grid--compact">
+          <label>
+            <span>连接名称</span>
+            <input v-model="connectionDraft.name" data-testid="connection-draft-name" placeholder="例如 K3 WISE WebAPI" />
+          </label>
+          <label>
+            <span>连接类型</span>
+            <select v-model="connectionDraft.kind" data-testid="connection-draft-kind">
+              <option value="">请选择 adapter</option>
+              <option v-for="adapter in connectionDraftAdapterOptions" :key="adapter.kind" :value="adapter.kind">
+                {{ adapter.label }} · {{ adapter.kind }}
+              </option>
+            </select>
+          </label>
+          <label>
+            <span>连接角色</span>
+            <select v-model="connectionDraft.role" data-testid="connection-draft-role">
+              <option value="source">数据源 source</option>
+              <option value="target">目标 target</option>
+              <option value="bidirectional">双向 bidirectional</option>
+            </select>
+          </label>
+          <label>
+            <span>状态</span>
+            <select v-model="connectionDraft.status" data-testid="connection-draft-status">
+              <option value="active">active</option>
+              <option value="inactive">inactive</option>
+              <option value="error">error</option>
+            </select>
+          </label>
+        </div>
+        <div v-if="connectionDraftDuplicateWarning" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="connection-duplicate-warning">
+          {{ connectionDraftDuplicateWarning }}
+        </div>
+        <div v-if="connectionDraftRoleWarning" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="connection-role-warning">
+          {{ connectionDraftRoleWarning }}
+        </div>
+        <details class="integration-workbench__details">
+          <summary>高级 JSON 配置（不会显示或保存凭证）</summary>
+          <div class="integration-workbench__grid integration-workbench__grid--compact">
+            <label>
+              <span>config JSON</span>
+              <textarea v-model="connectionDraft.configText" data-testid="connection-draft-config"></textarea>
+            </label>
+            <label>
+              <span>capabilities JSON</span>
+              <textarea v-model="connectionDraft.capabilitiesText" data-testid="connection-draft-capabilities"></textarea>
+            </label>
+          </div>
+        </details>
+        <div v-if="connectionDraftJsonError" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="connection-json-error">
+          {{ connectionDraftJsonError }}
+        </div>
+        <div class="integration-workbench__actions">
+          <button type="button" class="integration-workbench__button" data-testid="save-connection-draft" :disabled="savingConnectionDraft || !canSaveConnectionDraft" @click="saveConnectionDraft">
+            {{ savingConnectionDraft ? '保存中' : '保存连接草稿' }}
+          </button>
+          <button type="button" class="integration-workbench__button" data-testid="reset-connection-draft" @click="resetConnectionDraft">
+            清空草稿
+          </button>
+        </div>
+      </div>
+
       <div class="integration-workbench__grid">
         <label>
           <span>Tenant ID</span>
@@ -148,6 +230,9 @@
               </option>
             </select>
           </label>
+          <div class="integration-workbench__hint" data-testid="source-selector-explanation">
+            {{ sourceSelectorExplanation }}
+          </div>
           <div v-if="!hasRunnableSourceSystem" class="integration-workbench__empty integration-workbench__empty--actionable" data-testid="source-empty-state">
             <strong>还没有可读取的数据源。</strong>
             <p>连接 PLM、HTTP API 或启用 SQL 只读通道后，可将数据导入 staging 多维表再清洗。</p>
@@ -159,6 +244,9 @@
           </div>
           <div v-if="sourceRuntimeBlocker" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="source-runtime-blocker">
             {{ sourceRuntimeBlocker }}
+          </div>
+          <div v-if="k3WebApiReadGateNotice" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="k3-webapi-read-gate-notice">
+            {{ k3WebApiReadGateNotice }}
           </div>
           <div v-if="sqlChannelDisabledHint" class="integration-workbench__hint" data-testid="sql-channel-disabled-hint">
             {{ sqlChannelDisabledHint }}
@@ -199,6 +287,9 @@
               </option>
             </select>
           </label>
+          <div class="integration-workbench__hint" data-testid="target-selector-explanation">
+            {{ targetSelectorExplanation }}
+          </div>
           <div class="integration-workbench__connection-row">
             <span class="integration-workbench__badge" :data-status="targetConnectionStatus">{{ targetConnectionLabel }}</span>
             <button type="button" class="integration-workbench__button" data-testid="test-target-system" @click="testSystem('target')">
@@ -679,6 +770,19 @@ interface StagingObjectConfig {
   mode?: 'append' | 'upsert'
 }
 
+type ConnectionDraftRole = WorkbenchExternalSystem['role']
+type ConnectionDraftStatus = WorkbenchExternalSystem['status']
+
+interface ConnectionDraft {
+  id: string
+  name: string
+  kind: string
+  role: ConnectionDraftRole
+  status: ConnectionDraftStatus
+  configText: string
+  capabilitiesText: string
+}
+
 type ExportCell = string | number | boolean | null
 type ExportRow = Record<string, ExportCell>
 
@@ -782,14 +886,33 @@ const sampleRecordText = ref(JSON.stringify({
   uom: 'EA',
   quantity: '2',
 }, null, 2))
+const connectionDraft = reactive<ConnectionDraft>({
+  id: '',
+  name: '',
+  kind: '',
+  role: 'source',
+  status: 'active',
+  configText: '{}',
+  capabilitiesText: '{}',
+})
+const connectionDraftMode = ref<'new' | 'edit' | 'copy'>('new')
+const savingConnectionDraft = ref(false)
 
 const adapterMetadataByKind = computed(() => new Map(adapters.value.map((adapter) => [adapter.kind, adapter])))
 const inventorySummary = computed(() => `已加载 ${systems.value.length} 个连接 · ${adapters.value.length} 个适配器 · ${stagingDescriptors.value.length} 个 staging 表`)
 const visibleAdapters = computed(() => adapters.value.filter((adapter) => showAdvancedConnectors.value || !adapter.advanced))
+const connectionDraftAdapterOptions = computed(() => {
+  const options = [...visibleAdapters.value]
+  if (connectionDraft.kind && !options.some((adapter) => adapter.kind === connectionDraft.kind)) {
+    const selectedHiddenAdapter = adapterMetadataByKind.value.get(connectionDraft.kind)
+    if (selectedHiddenAdapter) options.push(selectedHiddenAdapter)
+  }
+  return options
+})
 const hiddenAdvancedSystemCount = computed(() => systems.value.filter((system) => isAdvancedSystem(system)).length)
 const visibleSystems = computed(() => systems.value.filter((system) => showAdvancedConnectors.value || !isAdvancedSystem(system)))
-const sourceSystems = computed(() => visibleSystems.value.filter(canReadFromSystem))
-const targetSystems = computed(() => visibleSystems.value.filter(canWriteToSystem))
+const sourceSystems = computed(() => visibleSystems.value.filter((system) => canUseSystemForSide(system, 'source')))
+const targetSystems = computed(() => visibleSystems.value.filter((system) => canUseSystemForSide(system, 'target')))
 const runnableSourceSystems = computed(() => sourceSystems.value.filter((system) => !isSourceOptionDisabled(system)))
 const hasRunnableSourceSystem = computed(() => runnableSourceSystems.value.length > 0)
 const selectedTargetObject = computed(() => targetObjects.value.find((object) => object.name === targetObjectName.value) || null)
@@ -801,9 +924,85 @@ const targetConnectionStatus = computed(() => selectedTargetSystem.value?.status
 const sourceConnectionLabel = computed(() => connectionStatusLabel(selectedSourceSystem.value))
 const targetConnectionLabel = computed(() => connectionStatusLabel(selectedTargetSystem.value))
 const sourceRuntimeBlocker = computed(() => runtimeBlockerForSystem(selectedSourceSystem.value))
+const k3WebApiReadGateNotice = computed(() => {
+  const targetOnlyK3WebApi = visibleSystems.value.some((system) => system.kind === 'erp:k3-wise-webapi' && canWriteToSystem(system) && !canReadFromSystem(system))
+  if (!targetOnlyK3WebApi) return ''
+  return 'K3 WISE WebAPI 当前作为目标写入连接显示；WebAPI read/list runtime 仍受 GATE-front contract 约束，客户返回 O1-O6 与脱敏样例前不会作为数据源显示。'
+})
+const sourceSelectorExplanation = computed(() => {
+  if (k3WebApiReadGateNotice.value) {
+    return '这里显示已保存且具备读取能力的连接，不是全部 adapter。K3 WISE WebAPI 现阶段只在目标侧出现；读取 K3 可用 SQL 只读通道或 staging 多维表。'
+  }
+  return '这里显示已保存且具备读取能力的连接，不是全部 adapter。若只看到目标系统，请先创建 staging 来源或启用可读连接。'
+})
+const targetSelectorExplanation = computed(() => {
+  if (targetSystems.value.length === 1 && targetSystems.value[0]?.kind === 'erp:k3-wise-webapi') {
+    return '当前只有 K3 WISE WebAPI 目标连接可写入。创建清洗表后，也可把 MetaSheet 多维表设为目标输出；真实推送仍按 Save-only 显式确认。'
+  }
+  return '这里显示已保存且具备写入能力的连接。Save-only 推送仍需显式勾选，不会自动 Submit / Audit。'
+})
 const sqlChannelDisabledHint = computed(() => {
   const hasDisabledSql = systems.value.some((system) => system.kind === 'erp:k3-wise-sqlserver' && runtimeBlockerForSystem(system) !== '')
   return hasDisabledSql ? '高级 SQL 通道未启用 / SQLSERVER_EXECUTOR_MISSING / 需要部署侧注入 queryExecutor。已有 SQL 连接配置会保留但暂不能作为 Dry-run 来源。' : ''
+})
+const connectionDraftTitle = computed(() => {
+  if (connectionDraftMode.value === 'edit') return `编辑连接${connectionDraft.id ? `：${connectionDraft.id}` : ''}`
+  if (connectionDraftMode.value === 'copy') return '复制为新连接'
+  return '连接管理草稿'
+})
+const connectionDraftAdapter = computed(() => adapterMetadataByKind.value.get(connectionDraft.kind) || null)
+const connectionDraftDuplicateWarning = computed(() => {
+  const name = connectionDraft.name.trim()
+  const duplicatesByName = systems.value.filter((system) => system.id !== connectionDraft.id && name && system.name.trim().toLowerCase() === name.toLowerCase())
+  if (duplicatesByName.length > 0) {
+    return `已有同名连接：${duplicatesByName.map((system) => system.id).join('、')}。请改名，避免业务人员选错来源/目标。`
+  }
+  const duplicatesByKindRole = systems.value.filter((system) => (
+    system.id !== connectionDraft.id
+    && connectionDraft.kind
+    && system.kind === connectionDraft.kind
+    && system.role === connectionDraft.role
+  ))
+  if (duplicatesByKindRole.length > 0) {
+    return `已有同类型同角色连接：${duplicatesByKindRole.map((system) => system.name).join('、')}。如果是同一物理系统，请在名称中标明协议、数据集或用途。`
+  }
+  return ''
+})
+const connectionDraftRoleWarning = computed(() => {
+  if (!connectionDraft.kind || !connectionDraftAdapter.value) return ''
+  if (connectionDraft.role === 'source' && !adapterSupportsSide(connectionDraft.kind, 'source')) {
+    return `${connectionDraftAdapter.value.label} 当前 adapter metadata 不支持 source/read；不会出现在数据源下拉框。`
+  }
+  if (connectionDraft.role === 'target' && !adapterSupportsSide(connectionDraft.kind, 'target')) {
+    return `${connectionDraftAdapter.value.label} 当前 adapter metadata 不支持 target/upsert；不会出现在目标下拉框。`
+  }
+  if (connectionDraft.role === 'bidirectional' && (!adapterSupportsSide(connectionDraft.kind, 'source') || !adapterSupportsSide(connectionDraft.kind, 'target'))) {
+    return `${connectionDraftAdapter.value.label} 当前不是完整双向 adapter；请拆成 source / target 两条逻辑连接。`
+  }
+  return ''
+})
+const connectionDraftJsonError = computed(() => {
+  try {
+    const config = parseConnectionDraftJson(connectionDraft.configText, 'config JSON')
+    const capabilities = parseConnectionDraftJson(connectionDraft.capabilitiesText, 'capabilities JSON')
+    if (hasUnsafeConnectionDraftSecret(config) || hasUnsafeConnectionDraftSecret(capabilities)) {
+      return '连接草稿不能包含 password、token、secret、api_key、authorization 或 URL query secret；凭证请留在系统预设向导 / 后端凭证库。'
+    }
+    if (connectionDraft.configText.includes('<redacted>') || connectionDraft.capabilitiesText.includes('<redacted>')) {
+      return '草稿包含 <redacted> 占位，不能直接保存覆盖原连接；请回系统预设向导重新填写凭证或清理该字段。'
+    }
+    return ''
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
+})
+const canSaveConnectionDraft = computed(() => {
+  return Boolean(
+    connectionDraft.name.trim()
+    && connectionDraft.kind
+    && !connectionDraftRoleWarning.value
+    && !connectionDraftJsonError.value,
+  )
 })
 const sourceDatasetTitle = computed(() => selectedObjectLabel('source') || '请选择来源数据集')
 const targetDatasetTitle = computed(() => selectedObjectLabel('target') || '请选择目标数据集')
@@ -974,6 +1173,23 @@ function isAdvancedSystem(system: WorkbenchExternalSystem): boolean {
   return adapterMetadataByKind.value.get(system.kind)?.advanced === true
 }
 
+function adapterSupportsSide(kind: string, side: WorkbenchSide): boolean {
+  const metadata = adapterMetadataByKind.value.get(kind)
+  if (!metadata) return true
+  const roles = new Set(metadata.roles)
+  if (!roles.has(side) && !roles.has('bidirectional')) return false
+  const supports = new Set(metadata.supports || [])
+  if (side === 'source') {
+    return supports.size === 0 || supports.has('read') || supports.has('listObjects') || supports.has('getSchema')
+  }
+  return supports.size === 0 || supports.has('upsert') || supports.has('write') || supports.has('create') || supports.has('update')
+}
+
+function canUseSystemForSide(system: WorkbenchExternalSystem, side: WorkbenchSide): boolean {
+  if (side === 'source') return canReadFromSystem(system) && adapterSupportsSide(system.kind, 'source')
+  return canWriteToSystem(system) && adapterSupportsSide(system.kind, 'target')
+}
+
 function runtimeBlockerForSystem(system: WorkbenchExternalSystem | null): string {
   if (!system) return ''
   const errorText = system.lastError || ''
@@ -1021,6 +1237,130 @@ function showStagingSetup(): void {
   inventoryExpanded.value = true
   setStatus('创建 staging 多维表后即可在 staging 卡片上「作为 Dry-run 来源」。Project ID 留空时后端会自动使用插件专用作用域。', 'idle')
   focusStagingInstall()
+}
+
+function stringifyConnectionDraftJson(value: unknown): string {
+  return JSON.stringify(value && typeof value === 'object' ? value : {}, null, 2)
+}
+
+function resetConnectionDraft(): void {
+  connectionDraft.id = ''
+  connectionDraft.name = ''
+  connectionDraft.kind = adapters.value.find((adapter) => !adapter.advanced)?.kind || ''
+  connectionDraft.role = 'source'
+  connectionDraft.status = 'active'
+  connectionDraft.configText = '{}'
+  connectionDraft.capabilitiesText = '{}'
+  connectionDraftMode.value = 'new'
+}
+
+function editConnection(system: WorkbenchExternalSystem): void {
+  connectionDraft.id = system.id
+  connectionDraft.name = system.name
+  connectionDraft.kind = system.kind
+  connectionDraft.role = system.role
+  connectionDraft.status = system.status
+  connectionDraft.configText = stringifyConnectionDraftJson(system.config)
+  connectionDraft.capabilitiesText = stringifyConnectionDraftJson(system.capabilities)
+  connectionDraftMode.value = 'edit'
+  inventoryExpanded.value = true
+  setStatus(`已载入连接草稿：${system.name}`, 'idle')
+}
+
+function copyConnection(system: WorkbenchExternalSystem): void {
+  connectionDraft.id = ''
+  connectionDraft.name = `${system.name} copy`
+  connectionDraft.kind = system.kind
+  connectionDraft.role = system.role
+  connectionDraft.status = 'inactive'
+  connectionDraft.configText = stringifyConnectionDraftJson(system.config)
+  connectionDraft.capabilitiesText = stringifyConnectionDraftJson(system.capabilities)
+  connectionDraftMode.value = 'copy'
+  inventoryExpanded.value = true
+  setStatus(`已复制 ${system.name} 为新连接草稿；保存前请改名并确认用途。`, 'idle')
+}
+
+async function deactivateConnection(system: WorkbenchExternalSystem): Promise<void> {
+  try {
+    const updated = await upsertWorkbenchExternalSystem({
+      ...currentScope(),
+      id: system.id,
+      name: system.name,
+      kind: system.kind,
+      role: system.role,
+      status: 'inactive',
+    })
+    replaceSystem(updated)
+    normalizeSystemSelections()
+    setStatus(`连接已停用：${system.name}`, 'success')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), 'error')
+  }
+}
+
+function parseConnectionDraftJson(text: string, label: string): Record<string, unknown> {
+  const trimmed = text.trim()
+  if (!trimmed) return {}
+  const parsed = JSON.parse(trimmed) as unknown
+  if (!isRecord(parsed)) throw new Error(`${label} 必须是 JSON object`)
+  return parsed
+}
+
+const CONNECTION_DRAFT_SECRET_KEY_PATTERN = /(^|[._-])(password|passwd|pwd|token|access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?id|api[_-]?key|secret|signature|sign|auth|authorization)([._-]|$)/i
+const CONNECTION_DRAFT_SECRET_TEXT_PATTERN = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b|[?&](?:access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?id|api[_-]?key|secret|signature|sign|auth|password)=[^&#\s]+/i
+
+function hasUnsafeConnectionDraftSecret(value: unknown, keyPath = ''): boolean {
+  if (value === null || value === undefined) return false
+  if (typeof value === 'string') {
+    if (value === '<redacted>' || value === '%3Credacted%3E') return false
+    if (CONNECTION_DRAFT_SECRET_KEY_PATTERN.test(keyPath) && value.trim()) return true
+    return CONNECTION_DRAFT_SECRET_TEXT_PATTERN.test(value)
+  }
+  if (Array.isArray(value)) {
+    return value.some((item, index) => hasUnsafeConnectionDraftSecret(item, `${keyPath}.${index}`))
+  }
+  if (isRecord(value)) {
+    return Object.entries(value).some(([key, child]) => hasUnsafeConnectionDraftSecret(child, keyPath ? `${keyPath}.${key}` : key))
+  }
+  return false
+}
+
+async function saveConnectionDraft(): Promise<void> {
+  const error = connectionDraftJsonError.value
+  if (error) {
+    setStatus(error, 'error')
+    return
+  }
+  if (!canSaveConnectionDraft.value) {
+    setStatus('连接草稿还缺名称、adapter 或合法角色。', 'error')
+    return
+  }
+  savingConnectionDraft.value = true
+  try {
+    const system = await upsertWorkbenchExternalSystem({
+      ...currentScope(),
+      ...(connectionDraft.id ? { id: connectionDraft.id } : {}),
+      name: connectionDraft.name.trim(),
+      kind: connectionDraft.kind,
+      role: connectionDraft.role,
+      status: connectionDraft.status,
+      config: parseConnectionDraftJson(connectionDraft.configText, 'config JSON'),
+      capabilities: parseConnectionDraftJson(connectionDraft.capabilitiesText, 'capabilities JSON'),
+    })
+    replaceSystem(system)
+    connectionDraft.id = system.id
+    connectionDraft.name = system.name
+    connectionDraft.kind = system.kind
+    connectionDraft.role = system.role
+    connectionDraft.status = system.status
+    connectionDraftMode.value = 'edit'
+    normalizeSystemSelections()
+    setStatus(`连接已保存：${system.name}`, 'success')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), 'error')
+  } finally {
+    savingConnectionDraft.value = false
+  }
 }
 
 function selectedObjectLabel(side: WorkbenchSide): string {
@@ -1352,6 +1692,9 @@ async function refreshBootstrap(): Promise<void> {
       listIntegrationStagingDescriptors(),
     ])
     adapters.value = adapterList
+    if (!connectionDraft.kind) {
+      connectionDraft.kind = adapterList.find((adapter) => !adapter.advanced)?.kind || adapterList[0]?.kind || ''
+    }
     systems.value = systemList
     stagingDescriptors.value = descriptorList
     normalizeSystemSelections()
@@ -1988,6 +2331,12 @@ watch(showAdvancedConnectors, () => {
   border-color: #357abd;
 }
 
+.integration-workbench__button:disabled,
+.integration-workbench__icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .integration-workbench__button--danger {
   border-color: #c77777;
   color: #8f1d1d;
@@ -2057,6 +2406,38 @@ watch(showAdvancedConnectors, () => {
   flex-wrap: wrap;
   gap: 8px;
   justify-content: flex-end;
+}
+
+.integration-workbench__connection-manager {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid #d7deea;
+  border-radius: 8px;
+  background: #fbfcfe;
+}
+
+.integration-workbench__connection-manager strong {
+  color: #1f3551;
+}
+
+.integration-workbench__connection-manager p {
+  margin: 4px 0 0;
+  color: #5c6878;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.integration-workbench__details {
+  border-top: 1px solid #e4ebf2;
+  padding-top: 10px;
+}
+
+.integration-workbench__details summary {
+  cursor: pointer;
+  color: #1f3551;
+  font-weight: 700;
 }
 
 .integration-workbench__inventory-toggle {
