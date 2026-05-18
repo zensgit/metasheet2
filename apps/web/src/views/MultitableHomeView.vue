@@ -77,16 +77,32 @@
 
     <section class="multitable-home__panel">
       <div class="multitable-home__panel-head">
-        <h2>可访问的 Base</h2>
-        <span>{{ bases.length }} 个</span>
+        <div>
+          <h2>可访问的 Base</h2>
+          <p v-if="bases.length" class="multitable-home__panel-subtitle">
+            {{ baseSearch.trim() ? `匹配 ${filteredBases.length} / ${bases.length} 个` : `${bases.length} 个` }}
+          </p>
+        </div>
+        <label v-if="bases.length" class="multitable-home__search">
+          <span>搜索 Base</span>
+          <input
+            v-model="baseSearch"
+            type="search"
+            placeholder="按名称或 ID 搜索"
+            aria-label="Search bases"
+          />
+        </label>
       </div>
 
       <div v-if="loading" class="multitable-home__state">正在加载多维表...</div>
       <div v-else-if="!bases.length" class="multitable-home__empty">
         暂无可访问的 Base。你可以新建一个，或从数据工厂/考勤等业务入口生成多维表。
       </div>
+      <div v-else-if="!filteredBases.length" class="multitable-home__empty">
+        没有匹配的 Base。请调整搜索关键词。
+      </div>
       <div v-else class="multitable-home__grid">
-        <article v-for="base in bases" :key="base.id" class="multitable-home__card">
+        <article v-for="base in filteredBases" :key="base.id" class="multitable-home__card">
           <div class="multitable-home__card-icon" :style="{ background: base.color || '#2563eb' }">
             {{ base.icon || base.name.slice(0, 1).toUpperCase() }}
           </div>
@@ -108,7 +124,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { multitableClient } from '../multitable/api/client'
 import type {
@@ -133,6 +149,15 @@ const installingTemplateId = ref<string | null>(null)
 const errorMessage = ref('')
 const templateError = ref('')
 const newBaseName = ref('')
+const baseSearch = ref('')
+
+const filteredBases = computed(() => {
+  const query = baseSearch.value.trim().toLowerCase()
+  if (!query) return bases.value
+  return bases.value.filter((base) => {
+    return base.name.toLowerCase().includes(query) || base.id.toLowerCase().includes(query)
+  })
+})
 
 function resolveOpenTarget(context: MetaContext): { sheet: MetaSheet; view: MetaView } | null {
   const sheet = context.sheet ?? context.sheets[0] ?? null
@@ -382,6 +407,7 @@ onMounted(loadHomeData)
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 16px;
   padding: 22px 24px;
   border-bottom: 1px solid #e2e8f0;
 }
@@ -389,6 +415,29 @@ onMounted(loadHomeData)
 .multitable-home__panel-head h2 {
   margin: 0;
   font-size: 18px;
+}
+
+.multitable-home__panel-subtitle {
+  margin: 6px 0 0;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.multitable-home__search {
+  display: grid;
+  gap: 6px;
+  min-width: min(300px, 100%);
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.multitable-home__search input {
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  padding: 10px 14px;
+  color: #0f172a;
+  font-size: 14px;
 }
 
 .multitable-home__state,
@@ -527,7 +576,8 @@ button:disabled {
   }
 
   .multitable-home__hero,
-  .multitable-home__create {
+  .multitable-home__create,
+  .multitable-home__panel-head {
     display: grid;
   }
 
