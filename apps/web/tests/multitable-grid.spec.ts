@@ -5,6 +5,7 @@ import {
   buildSortInfo,
   buildFilterInfo,
   FILTER_OPERATORS_BY_TYPE,
+  resolveCreateRecordContext,
   type SortRule,
   type FilterRule,
 } from '../src/multitable/composables/useMultitableGrid'
@@ -190,6 +191,86 @@ describe('useMultitableGrid', () => {
     grid.page.value = { offset: 20, limit: 10, total: 55, hasMore: true }
     expect(grid.currentPage.value).toBe(3)
     expect(grid.totalPages.value).toBe(6)
+  })
+
+  it('resolves record-create context from the multitable route when refs are temporarily blank', () => {
+    expect(resolveCreateRecordContext({
+      sheetId: '',
+      viewId: '',
+      pathname: '/multitable/sheet_standard_materials/view_grid',
+    })).toEqual({
+      sheetId: 'sheet_standard_materials',
+      viewId: 'view_grid',
+    })
+  })
+
+  it('does not borrow public-form route ids for authenticated record creation', () => {
+    expect(resolveCreateRecordContext({
+      sheetId: '',
+      viewId: '',
+      pathname: '/multitable/public-form/sheet_public/view_public',
+    })).toEqual({})
+  })
+
+  it('sends route-derived sheet and view ids when creating a record from a direct multitable URL', async () => {
+    const originalPath = `${window.location.pathname}${window.location.search}${window.location.hash}`
+    window.history.pushState({}, '', '/multitable/sheet_standard_materials/view_grid?baseId=base_legacy')
+    const fetchFn = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input === '/api/multitable/records') {
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          sheetId: 'sheet_standard_materials',
+          viewId: 'view_grid',
+          data: {},
+        })
+        return new Response(JSON.stringify({
+          ok: true,
+          data: { record: { id: 'rec_1', version: 1, data: {} } },
+        }), { status: 200 })
+      }
+      if (input.startsWith('/api/multitable/view')) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            fields: [],
+            rows: [],
+            page: { offset: 0, limit: 50, total: 0, hasMore: false },
+          },
+        }), { status: 200 })
+      }
+      throw new Error(`Unexpected request: ${input}`)
+    })
+    const sheetId = ref('')
+    const viewId = ref('')
+    const grid = useMultitableGrid({
+      sheetId,
+      viewId,
+      client: new MultitableApiClient({ fetchFn }),
+    })
+
+    try {
+      await grid.createRecord({})
+    } finally {
+      window.history.pushState({}, '', originalPath || '/')
+    }
+
+    expect(fetchFn).toHaveBeenCalledWith('/api/multitable/records', expect.objectContaining({ method: 'POST' }))
+    expect(sheetId.value).toBe('sheet_standard_materials')
+    expect(viewId.value).toBe('view_grid')
+    expect(grid.error.value).toBeNull()
+  })
+
+  it('blocks record creation locally when no sheet or view context exists', async () => {
+    const fetchFn = vi.fn()
+    const grid = useMultitableGrid({
+      sheetId: ref(''),
+      viewId: ref(''),
+      client: new MultitableApiClient({ fetchFn }),
+    })
+
+    await grid.createRecord({})
+
+    expect(fetchFn).not.toHaveBeenCalled()
+    expect(grid.error.value).toBe('sheetId or viewId is required')
   })
 
   it('falls back to the last non-empty page when a load lands beyond the new total', async () => {

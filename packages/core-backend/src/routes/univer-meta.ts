@@ -7479,6 +7479,9 @@ export function univerMetaRouter(): Router {
       if (err instanceof RecordServiceValidationError || err instanceof ServiceValidationError) {
         return res.status(400).json({ ok: false, error: { code: err.code || 'VALIDATION_ERROR', message: err.message } })
       }
+      if (err instanceof ValidationError) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
+      }
       if (err instanceof RecordServiceNotFoundError || err instanceof ServiceNotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
       }
