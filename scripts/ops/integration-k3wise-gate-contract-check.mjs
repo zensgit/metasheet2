@@ -56,6 +56,17 @@ const RELATIONSHIP_SAMPLES = {
     validator: assertK3BomSaveShape,
   },
 }
+const TEMPLATE_PACKET_FILE = 'k3wise-gate-contract-packet.template.json'
+const TEMPLATE_SAMPLE_FILES = {
+  materialList: 'sample-material-list.redacted.json',
+  materialDetail: 'sample-material-detail.redacted.json',
+  bomList: 'sample-bom-list.redacted.json',
+  bomDetail: 'sample-bom-detail.redacted.json',
+  flatBomLines: 'relationship-flat-bom-lines.redacted.json',
+  treeBom: 'relationship-tree-bom.redacted.json',
+  unresolvedChild: 'relationship-unresolved-child.redacted.json',
+  k3BomSaveShape: 'relationship-k3-bom-save-shape.redacted.json',
+}
 const PLACEHOLDER_PATTERN = /^(|<fill>|<fill-outside-git>|todo|tbd|\?|待填写|待确认)$/i
 const JWT_PATTERN = /[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/
 const BEARER_PATTERN = /Bearer\s+[A-Za-z0-9._-]{16,}/i
@@ -73,7 +84,9 @@ class GateContractCheckError extends Error {
 }
 
 function printHelp() {
-  console.log(`Usage: node scripts/ops/integration-k3wise-gate-contract-check.mjs --input <packet.json> [options]
+  console.log(`Usage:
+  node scripts/ops/integration-k3wise-gate-contract-check.mjs --input <packet.json> [options]
+  node scripts/ops/integration-k3wise-gate-contract-check.mjs --init-template <dir>
 
 Validates the customer GATE-front packet for #1526 before any K3 WISE read/list,
 SQL sample, or relationship runtime work starts. The checker is read-only and
@@ -81,6 +94,8 @@ does not contact MetaSheet or K3.
 
 Options:
   --input <path>      JSON packet with WebAPI read/list and relationship answers
+  --init-template <dir>
+                      Create a fillable packet + redacted sample skeleton outside Git
   --out-dir <dir>    Evidence output directory, default ${DEFAULT_OUTPUT_ROOT}/<timestamp>
   --help             Show this help
 
@@ -118,6 +133,7 @@ function readRequiredValue(argv, index, flag) {
 function parseArgs(argv = process.argv.slice(2)) {
   const opts = {
     input: '',
+    initTemplate: '',
     outDir: '',
     help: false,
   }
@@ -126,6 +142,10 @@ function parseArgs(argv = process.argv.slice(2)) {
     switch (arg) {
       case '--input':
         opts.input = readRequiredValue(argv, i, arg)
+        i += 1
+        break
+      case '--init-template':
+        opts.initTemplate = readRequiredValue(argv, i, arg)
         i += 1
         break
       case '--out-dir':
@@ -140,8 +160,11 @@ function parseArgs(argv = process.argv.slice(2)) {
         throw new GateContractCheckError(`unknown option: ${arg}`, { arg })
     }
   }
-  if (!opts.help && !opts.input) {
-    throw new GateContractCheckError('--input is required')
+  if (!opts.help && !opts.input && !opts.initTemplate) {
+    throw new GateContractCheckError('--input or --init-template is required')
+  }
+  if (opts.input && opts.initTemplate) {
+    throw new GateContractCheckError('--input and --init-template cannot be used together')
   }
   return opts
 }
@@ -475,10 +498,171 @@ async function writeOutputs(report, outDir) {
   return { jsonPath, mdPath }
 }
 
+function buildTemplatePacket() {
+  return {
+    _instructions: [
+      'Fill this packet outside Git with customer-approved K3 WISE evidence.',
+      'Replace every <fill-outside-git> placeholder before requesting runtime work.',
+      'Keep tokens, passwords, session IDs, authority codes, and SQL connection strings out of this file.',
+      'Run this checker with --input against the filled packet; this template intentionally returns GATE_BLOCKED as-is.',
+    ],
+    webapiReadList: {
+      answers: Object.fromEntries(READ_ANSWER_IDS.map((id) => [id, '<fill-outside-git>'])),
+      samples: {
+        materialList: TEMPLATE_SAMPLE_FILES.materialList,
+        materialDetail: TEMPLATE_SAMPLE_FILES.materialDetail,
+        bomList: TEMPLATE_SAMPLE_FILES.bomList,
+        bomDetail: TEMPLATE_SAMPLE_FILES.bomDetail,
+      },
+    },
+    relationshipMapping: {
+      answers: Object.fromEntries(RELATIONSHIP_ANSWER_IDS.map((id) => [id, '<fill-outside-git>'])),
+      samples: {
+        flatBomLines: TEMPLATE_SAMPLE_FILES.flatBomLines,
+        treeBom: TEMPLATE_SAMPLE_FILES.treeBom,
+        unresolvedChild: TEMPLATE_SAMPLE_FILES.unresolvedChild,
+        k3BomSaveShape: TEMPLATE_SAMPLE_FILES.k3BomSaveShape,
+      },
+    },
+  }
+}
+
+function buildTemplateSamples() {
+  return {
+    [TEMPLATE_SAMPLE_FILES.materialList]: {
+      ResponseStatus: { IsSuccess: true },
+      Data: [
+        {
+          FNumber: 'MAT-EXAMPLE-001',
+          FName: 'Example material name',
+          FModel: 'Example specification',
+          FBaseUnitID: '<redacted>',
+        },
+      ],
+      _customerAction: 'Replace with one redacted customer material list response. Do not include token/session/password values.',
+    },
+    [TEMPLATE_SAMPLE_FILES.materialDetail]: {
+      ResponseStatus: { IsSuccess: true },
+      Data: {
+        FNumber: 'MAT-EXAMPLE-001',
+        FName: 'Example material name',
+        FModel: 'Example specification',
+        FBaseUnitID: '<redacted>',
+      },
+      _customerAction: 'Replace with one redacted customer material detail response.',
+    },
+    [TEMPLATE_SAMPLE_FILES.bomList]: {
+      ResponseStatus: { IsSuccess: true },
+      Data: [
+        {
+          FParentItemNumber: 'FG-EXAMPLE-001',
+          FChildItemNumber: 'MAT-EXAMPLE-001',
+          FQty: 2,
+          FUnitID: '<redacted>',
+          FEntryID: 1,
+        },
+      ],
+      _customerAction: 'Replace with one redacted customer BOM list response.',
+    },
+    [TEMPLATE_SAMPLE_FILES.bomDetail]: {
+      ResponseStatus: { IsSuccess: true },
+      Data: {
+        FParentItemNumber: 'FG-EXAMPLE-001',
+        FChildItems: [
+          {
+            FItemNumber: 'MAT-EXAMPLE-001',
+            FQty: 2,
+            FUnitID: '<redacted>',
+            FEntryID: 1,
+          },
+        ],
+      },
+      _customerAction: 'Replace with one redacted customer BOM detail response.',
+    },
+    [TEMPLATE_SAMPLE_FILES.flatBomLines]: {
+      case: 'flat-bom-lines',
+      records: [
+        {
+          parentCode: 'FG-EXAMPLE-001',
+          childCode: 'MAT-EXAMPLE-001',
+          quantity: 2,
+          sequence: 1,
+        },
+      ],
+      _customerAction: 'Replace with a redacted PLM flat BOM line sample.',
+    },
+    [TEMPLATE_SAMPLE_FILES.treeBom]: {
+      case: 'tree-bom',
+      root: {
+        code: 'FG-EXAMPLE-001',
+        children: [
+          {
+            code: 'MAT-EXAMPLE-001',
+            quantity: 2,
+          },
+        ],
+      },
+      _customerAction: 'Replace with a redacted PLM tree BOM sample if the customer uses tree-shaped BOM data.',
+    },
+    [TEMPLATE_SAMPLE_FILES.unresolvedChild]: {
+      case: 'unresolved-child-material',
+      record: {
+        parentCode: 'FG-EXAMPLE-001',
+        childCode: 'MAT-MISSING-EXAMPLE',
+      },
+      expectedCustomerPolicy: '<fill-outside-git>',
+      _customerAction: 'Replace with a redacted unresolved-child example and the customer-approved policy.',
+    },
+    [TEMPLATE_SAMPLE_FILES.k3BomSaveShape]: {
+      Data: {
+        FParentItemNumber: 'FG-EXAMPLE-001',
+        FChildItems: [
+          {
+            FItemNumber: 'MAT-EXAMPLE-001',
+            FQty: 2,
+            FUnitID: '<redacted>',
+            FEntryID: 1,
+          },
+        ],
+      },
+      _customerAction: 'Replace with the redacted K3 BOM Save shape the customer accepts for the PoC.',
+    },
+  }
+}
+
+async function writeTemplateJson(filePath, value) {
+  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, { flag: 'wx' })
+}
+
+async function initTemplateDirectory(targetDir) {
+  const resolvedDir = path.resolve(targetDir)
+  await mkdir(resolvedDir, { recursive: true })
+  const packetPath = path.join(resolvedDir, TEMPLATE_PACKET_FILE)
+  await writeTemplateJson(packetPath, buildTemplatePacket())
+  const samples = buildTemplateSamples()
+  for (const [fileName, value] of Object.entries(samples)) {
+    await writeTemplateJson(path.join(resolvedDir, fileName), value)
+  }
+  return {
+    templateDir: resolvedDir,
+    packetPath,
+    sampleCount: Object.keys(samples).length,
+  }
+}
+
 async function main() {
   const opts = parseArgs()
   if (opts.help) {
     printHelp()
+    return 0
+  }
+  if (opts.initTemplate) {
+    const template = await initTemplateDirectory(opts.initTemplate)
+    console.log(JSON.stringify({
+      ok: true,
+      decision: 'TEMPLATE_CREATED',
+      ...template,
+    }, null, 2))
     return 0
   }
   const packet = await readJsonFile(opts.input)
