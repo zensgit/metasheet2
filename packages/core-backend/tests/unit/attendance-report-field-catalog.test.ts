@@ -463,6 +463,82 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(csv.split('\n')[0]).toContain('下班3打卡结果')
   })
 
+  it('persists imported multi-punch values into attendance record meta and clears stale managed punch keys on override', () => {
+    const sourceValues: Record<string, unknown> = {
+      clockIn2: '13:00',
+      '下班2打卡时间': '18:30',
+      '3_on_duty_user_check_time': '19:00',
+      punchResultIn1: '正常',
+      '下班2打卡结果': '早退',
+      status: 'late',
+    }
+    const valueFor = (key: string) => sourceValues[key]
+    const punchMeta = helpers.buildAttendanceImportMultiPunchMeta({
+      valueFor,
+      workDate: '2026-05-13',
+      timezone: 'UTC',
+      clearMissing: true,
+    })
+
+    expect(punchMeta).toMatchObject({
+      clockIn2: '2026-05-13T13:00:00.000Z',
+      clockOut2: '2026-05-13T18:30:00.000Z',
+      clockIn3: '2026-05-13T19:00:00.000Z',
+      clockOut3: null,
+      punchResultIn1: '正常',
+      punchResultOut2: '早退',
+      punchResultOut3: null,
+    })
+    expect(punchMeta.punchResultIn1).not.toBe('late')
+
+    const values = helpers.computeAttendanceRecordUpsertValues({
+      existingRow: {
+        first_in_at: null,
+        last_out_at: null,
+        source_batch_id: null,
+        meta: {
+          clockOut3: '2026-05-13T21:00:00.000Z',
+          punchResultOut3: '旧结果',
+        },
+      },
+      updateFirstInAt: null,
+      updateLastOutAt: null,
+      workDate: '2026-05-13',
+      mode: 'override',
+      statusOverride: null,
+      overrideMetrics: { workMinutes: 0, lateMinutes: 0, earlyLeaveMinutes: 0, status: 'normal' },
+      isWorkday: true,
+      meta: punchMeta,
+      sourceBatchId: '00000000-0000-0000-0000-000000000000',
+      rule: {
+        timezone: 'UTC',
+        workStart: '09:00',
+        workEnd: '18:00',
+        lateGraceMinutes: 0,
+        earlyLeaveGraceMinutes: 0,
+      },
+      leaveMinutes: 0,
+      overtimeMinutes: 0,
+    })
+    const storedMeta = JSON.parse(values.metaJson)
+    expect(storedMeta.clockIn2).toBe('2026-05-13T13:00:00.000Z')
+    expect(storedMeta.clockOut3).toBeNull()
+    expect(storedMeta.punchResultOut3).toBeNull()
+
+    const row = {
+      work_date: '2026-05-13',
+      status: 'late',
+      timezone: 'UTC',
+      first_in_at: '2026-05-13T09:05:00.000Z',
+      last_out_at: '2026-05-13T18:00:00.000Z',
+      meta: storedMeta,
+    }
+    expect(String(helpers.getAttendanceRecordReportFieldValue(row, 'punch_in_2'))).toContain('2026-05-13T13:00:00')
+    expect(helpers.getAttendanceRecordReportFieldValue(row, 'punch_result_in_1')).toBe('正常')
+    expect(helpers.getAttendanceRecordReportFieldValue(row, 'punch_result_out_2')).toBe('早退')
+    expect(helpers.getAttendanceRecordReportFieldValue(row, 'punch_result_out_3')).toBe('')
+  })
+
   it('generates dynamic leave/overtime subtype fields with collision-safe stable codes', () => {
     const used = new Set(['leave_type_annual_duration'])
     const leave = helpers.buildAttendanceLeaveSubtypeReportFieldDefinitions([

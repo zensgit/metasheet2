@@ -10,6 +10,7 @@
 | Web type-check | `pnpm --filter @metasheet/web type-check` | PASS |
 | Core backend build | `pnpm --filter @metasheet/core-backend build` | PASS |
 | Diff hygiene | `git diff --check -- <slice files>` | PASS |
+| Real staging sync | 8082 staging, `POST /api/attendance/report-records/sync?orgId=default`, sample user/date fixture | PASS, 3 created then 3 skipped on rerun |
 
 ## Evidence
 
@@ -33,6 +34,16 @@
   - report-records multitable open link when `sheetId + viewId` are present
 - Degraded sync returns warning UI and does not break report-field rendering.
 - Stale-null full path is locked: if `late_duration` is disabled but an existing report-record row has old `fld_late_duration`, sync patches it to `null`.
+- Real 8082 staging evidence was completed after merge:
+  - health/auth OK after staging-only compatibility repair for missing `users.username` and `meta_records.modified_by`
+  - seeded a 3-row staging-only attendance fixture for one sample admin user over `2026-05-15..2026-05-17`
+  - first sync returned `synced=3`, `created=3`, `patched=0`, `skipped=0`, `failed=0`, `duplicateRowKeys=0`
+  - field fingerprint: `78a97d437d9fb64ab8cff63c6c935d4ea9085f78`
+  - multitable locator: `projectId=default:attendance`, `objectId=attendance_report_records`, `sheetId=sheet_90fd4bdebbaabe12b76556bf`, `viewId=view_f764653146213b44d955d2b1`
+  - readback found 3 records, 3 distinct row keys, no duplicates, `field_fingerprint`/`source_fingerprint`/`synced_at` present on all rows
+  - row values matched fixture: `480/12/0/late`, `450/0/30/early_leave`, `0/0/0/absent`
+  - rerun returned `created=0`, `patched=0`, `skipped=3`, `failed=0`, `duplicateRowKeys=0`
+  - evidence was also posted to PR #1609 as comment `4473388994`
 
 ## Boundaries Checked
 
@@ -43,4 +54,4 @@
 
 ## Pending Evidence
 
-- Real staging sync evidence is not run in this slice. It needs a short-lived admin JWT plus a sample tenant with attendance records; without credentials this remains a follow-up and is not marked as passed.
+- None for daily report-records sync. Period sync remains out of scope by design.
