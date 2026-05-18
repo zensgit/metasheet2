@@ -341,6 +341,60 @@ describe('attendance report field formula engine wrapper', () => {
         formulaValid: false,
         formulaError: 'Formula field reference formula_a is not supported in v1.',
       })
+    const graph = helpers.buildAttendanceReportFormulaDependencyGraph(merged)
+    expect(graph).toMatchObject({
+      formulaFieldCount: 2,
+      edgeCount: 2,
+      blockedFormulaReferenceCount: 1,
+      hasCycles: false,
+      blockedFormulaReferences: [{ from: 'formula_b', to: 'formula_a' }],
+    })
+    expect(graph.edges).toEqual([
+      { from: 'formula_a', to: 'late_duration', type: 'field' },
+      { from: 'formula_b', to: 'formula_a', type: 'formula' },
+    ])
+  })
+
+  it('detects formula dependency cycles in read-only graph diagnostics', () => {
+    const graph = helpers.buildAttendanceReportFormulaDependencyGraph([
+      {
+        code: 'formula_a',
+        name: '公式 A',
+        formulaEnabled: true,
+        formulaValid: false,
+        formulaExpression: '={formula_b}+1',
+        formulaReferences: ['formula_b'],
+      },
+      {
+        code: 'formula_b',
+        name: '公式 B',
+        formulaEnabled: true,
+        formulaValid: false,
+        formulaExpression: '={formula_a}+1',
+        formulaReferences: ['formula_a'],
+      },
+      {
+        code: 'formula_c',
+        name: '公式 C',
+        formulaEnabled: true,
+        formulaValid: true,
+        formulaExpression: '={late_duration}+1',
+        formulaReferences: ['late_duration'],
+      },
+    ])
+
+    expect(graph).toMatchObject({
+      formulaFieldCount: 3,
+      edgeCount: 3,
+      blockedFormulaReferenceCount: 2,
+      hasCycles: true,
+      cycles: [['formula_a', 'formula_b', 'formula_a']],
+    })
+    expect(graph.edges).toEqual([
+      { from: 'formula_a', to: 'formula_b', type: 'formula' },
+      { from: 'formula_b', to: 'formula_a', type: 'formula' },
+      { from: 'formula_c', to: 'late_duration', type: 'field' },
+    ])
   })
 
   it('allows representative formula functions from each whitelist category', () => {
