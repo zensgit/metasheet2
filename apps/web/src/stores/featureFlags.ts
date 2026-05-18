@@ -338,7 +338,7 @@ function resolveHomePath(): string {
   if (isAttendanceFocused()) return '/attendance'
   if (isPlmWorkbenchFocused()) return '/plm'
   if (state.features.attendance && !state.features.plm) return '/attendance'
-  return '/grid'
+  return '/multitable'
 }
 
 export function useFeatureFlags() {

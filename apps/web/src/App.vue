@@ -17,8 +17,7 @@
           <template v-else>
             <router-link v-if="hasFeature('attendance')" to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
             <router-link to="/apps" class="nav-link">{{ navLabels.apps }}</router-link>
-            <router-link to="/grid" class="nav-link">{{ navLabels.grid }}</router-link>
-            <router-link to="/spreadsheets" class="nav-link">{{ navLabels.spreadsheets }}</router-link>
+            <router-link to="/multitable" class="nav-link">{{ navLabels.multitable }}</router-link>
             <router-link to="/kanban" class="nav-link">{{ navLabels.kanban }}</router-link>
             <router-link to="/calendar" class="nav-link">{{ navLabels.calendar }}</router-link>
             <router-link to="/gallery" class="nav-link">{{ navLabels.gallery }}</router-link>
@@ -119,8 +118,7 @@ const navLabels = computed(() => {
   if (isZh.value) {
     return {
       attendance: '考勤',
-      grid: '表格',
-      spreadsheets: '电子表格',
+      multitable: '多维表',
       kanban: '看板',
       calendar: '日历',
       gallery: '画廊',
@@ -145,8 +143,7 @@ const navLabels = computed(() => {
   }
   return {
     attendance: 'Attendance',
-    grid: 'Grid',
-    spreadsheets: 'Spreadsheets',
+    multitable: 'Multitable',
     kanban: 'Kanban',
     calendar: 'Calendar',
     gallery: 'Gallery',

@@ -72,6 +72,7 @@ export const AppRouteNames = {
 
   // Attendance routes
   ATTENDANCE: 'attendance',
+  MULTITABLE_HOME: 'multitable-home',
   MULTITABLE: 'multitable',
   MULTITABLE_PUBLIC_FORM: 'multitable-public-form',
   MULTITABLE_COMMENT_INBOX: 'multitable-comment-inbox',
@@ -433,6 +434,7 @@ export const ROUTE_PATHS = {
 
   // Attendance
   ATTENDANCE: '/attendance',
+  MULTITABLE_HOME: '/multitable',
   MULTITABLE: '/multitable/:sheetId/:viewId',
   MULTITABLE_PUBLIC_FORM: '/multitable/public-form/:sheetId/:viewId',
   MULTITABLE_COMMENT_INBOX: '/multitable/comments/inbox',

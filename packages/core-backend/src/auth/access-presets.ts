@@ -34,10 +34,10 @@ const ACCESS_PRESETS: AccessPresetDefinition[] = [
     description: '适用于多维表与基础流程协作成员。',
     productMode: 'platform',
     role: 'user',
-    permissions: ['spreadsheet:read', 'spreadsheet:write', 'spreadsheets:read', 'spreadsheets:write', 'workflow:read'],
-    homePath: '/grid',
+    permissions: ['multitable:read', 'multitable:write', 'spreadsheet:read', 'spreadsheet:write', 'spreadsheets:read', 'spreadsheets:write', 'workflow:read'],
+    homePath: '/multitable',
     welcomeTitle: 'MetaSheet 平台协作',
-    checklist: ['登录后进入表格主页', '确认可访问表格与流程入口', '如需审批权限再由管理员追加授权'],
+    checklist: ['登录后进入多维表主页', '确认可访问多维表与流程入口', '如需审批权限再由管理员追加授权'],
   },
   {
     id: 'platform-viewer',
@@ -45,8 +45,8 @@ const ACCESS_PRESETS: AccessPresetDefinition[] = [
     description: '适用于只读查看表格与流程状态。',
     productMode: 'platform',
     role: 'user',
-    permissions: ['spreadsheet:read', 'spreadsheets:read', 'workflow:read'],
-    homePath: '/grid',
+    permissions: ['multitable:read', 'spreadsheet:read', 'spreadsheets:read', 'workflow:read'],
+    homePath: '/multitable',
     welcomeTitle: 'MetaSheet 平台只读访问',
     checklist: ['登录后确认只读访问范围', '如需编辑能力需管理员提升权限'],
   },
@@ -137,7 +137,7 @@ export function buildOnboardingPacket(options: {
   inviteToken?: string | null
 }): OnboardingPacket {
   const productMode = options.preset?.productMode || 'platform'
-  const homePath = options.preset?.homePath || '/grid'
+  const homePath = options.preset?.homePath || '/multitable'
   const loginPath = '/login'
   const acceptInvitePath = '/accept-invite'
   const appBase = resolvePublicAppBase()

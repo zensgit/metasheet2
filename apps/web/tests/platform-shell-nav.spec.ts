@@ -103,8 +103,11 @@ describe('platform shell navigation', () => {
 
     expect(links).toEqual(expect.arrayContaining([
       expect.objectContaining({ href: '/attendance', text: '考勤' }),
+      expect.objectContaining({ href: '/multitable', text: '多维表' }),
       expect.objectContaining({ href: '/approvals', text: '审批中心' }),
     ]))
+    expect(links.some((link) => link.href === '/grid')).toBe(false)
+    expect(links.some((link) => link.href === '/spreadsheets')).toBe(false)
     expect(links.some((link) => link.href === '/plm')).toBe(false)
     expect(links.some((link) => link.href === '/plm/audit')).toBe(false)
     expect(links.some((link) => link.href === '/integrations/k3-wise')).toBe(false)
@@ -188,8 +191,11 @@ describe('platform shell navigation', () => {
     }))
 
     expect(links).toEqual(expect.arrayContaining([
+      expect.objectContaining({ href: '/multitable', text: '多维表' }),
       expect.objectContaining({ href: '/integrations/workbench', text: '数据工厂' }),
     ]))
+    expect(links.some((link) => link.href === '/grid')).toBe(false)
+    expect(links.some((link) => link.href === '/spreadsheets')).toBe(false)
     expect(links.some((link) => link.href === '/admin/users')).toBe(false)
   })
 

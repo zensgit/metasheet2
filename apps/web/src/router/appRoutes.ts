@@ -9,6 +9,7 @@ import FormView from '../views/FormView.vue'
 import PlmProductView from '../views/PlmProductView.vue'
 import SpreadsheetsView from '../views/SpreadsheetsView.vue'
 import SpreadsheetDetailView from '../views/SpreadsheetDetailView.vue'
+import MultitableHomeView from '../views/MultitableHomeView.vue'
 import MultitableCommentInboxView from '../views/MultitableCommentInboxView.vue'
 import PluginManagerView from '../views/PluginManagerView.vue'
 import PluginViewHost from '../views/PluginViewHost.vue'
@@ -109,6 +110,12 @@ export const appRoutes: RouteRecordRaw[] = [
     name: 'plugin-attendance-legacy-view',
     redirect: '/attendance',
     meta: { title: 'Attendance', titleZh: '考勤', requiresAuth: true, requiredFeature: 'attendance' },
+  },
+  {
+    path: ROUTE_PATHS.MULTITABLE_HOME,
+    name: AppRouteNames.MULTITABLE_HOME,
+    component: MultitableHomeView,
+    meta: { title: 'Multitable', titleZh: '多维表', requiresAuth: true },
   },
   buildPublicMultitableFormRoute(() => import('../views/PublicMultitableFormView.vue')),
   buildMultitableRoute(() => import('../multitable/views/MultitableEmbedHost.vue')),
