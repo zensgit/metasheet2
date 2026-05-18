@@ -56,6 +56,11 @@ export interface WorkbenchExternalSystemUpsertRequest extends IntegrationScope {
   credentials?: unknown
 }
 
+export interface WorkbenchExternalSystemDeleteResult {
+  deleted: true
+  system: WorkbenchExternalSystem
+}
+
 export interface IntegrationConnectionTestResult {
   ok: boolean
   status?: string | number
@@ -358,6 +363,20 @@ export async function upsertWorkbenchExternalSystem(
     body: JSON.stringify(payload),
   })
   return parseIntegrationResponse<WorkbenchExternalSystem>(response)
+}
+
+export async function deleteWorkbenchExternalSystem(
+  systemId: string,
+  scope: IntegrationScope = {},
+): Promise<WorkbenchExternalSystemDeleteResult> {
+  const query = buildQueryString({
+    tenantId: scope.tenantId,
+    workspaceId: scope.workspaceId,
+  })
+  const response = await apiFetch(`/api/integration/external-systems/${encodeURIComponent(systemId)}${query ? `?${query}` : ''}`, {
+    method: 'DELETE',
+  })
+  return parseIntegrationResponse<WorkbenchExternalSystemDeleteResult>(response)
 }
 
 export async function listExternalSystemObjects(

@@ -78,8 +78,8 @@
                 <button type="button" class="integration-workbench__icon-button" :data-testid="`deactivate-connection-${system.id}`" :disabled="system.status === 'inactive'" @click="deactivateConnection(system)">
                   停用
                 </button>
-                <button type="button" class="integration-workbench__icon-button" :data-testid="`delete-connection-${system.id}`" disabled title="当前后端未提供 DELETE /api/integration/external-systems/:id">
-                  删除待接口
+                <button type="button" class="integration-workbench__icon-button" :data-testid="`delete-connection-${system.id}`" :disabled="deletingConnectionId === system.id" title="只能删除未被 pipeline 引用的连接" @click="deleteConnection(system)">
+                  {{ deletingConnectionId === system.id ? '删除中' : '删除' }}
                 </button>
               </div>
             </li>
@@ -703,6 +703,7 @@ import { buildXlsxBuffer } from '../multitable/import/xlsx-mapping'
 import {
   canReadFromSystem,
   canWriteToSystem,
+  deleteWorkbenchExternalSystem,
   getDefaultIntegrationScope,
   isIntegrationScopedProjectId,
   normalizeIntegrationProjectId,
@@ -897,6 +898,7 @@ const connectionDraft = reactive<ConnectionDraft>({
 })
 const connectionDraftMode = ref<'new' | 'edit' | 'copy'>('new')
 const savingConnectionDraft = ref(false)
+const deletingConnectionId = ref('')
 
 const adapterMetadataByKind = computed(() => new Map(adapters.value.map((adapter) => [adapter.kind, adapter])))
 const inventorySummary = computed(() => `已加载 ${systems.value.length} 个连接 · ${adapters.value.length} 个适配器 · ${stagingDescriptors.value.length} 个 staging 表`)
@@ -1295,6 +1297,33 @@ async function deactivateConnection(system: WorkbenchExternalSystem): Promise<vo
     setStatus(`连接已停用：${system.name}`, 'success')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), 'error')
+  }
+}
+
+function confirmConnectionDelete(system: WorkbenchExternalSystem): boolean {
+  if (typeof window === 'undefined' || typeof window.confirm !== 'function') return true
+  return window.confirm(`删除连接「${system.name}」？只有未被 pipeline 引用的连接会被后端删除。`)
+}
+
+function clearDeletedSystemState(systemId: string): void {
+  systems.value = systems.value.filter((system) => system.id !== systemId)
+  if (sourceSystemId.value === systemId) sourceSystemId.value = ''
+  if (targetSystemId.value === systemId) targetSystemId.value = ''
+  if (connectionDraft.id === systemId) resetConnectionDraft()
+  normalizeSystemSelections()
+}
+
+async function deleteConnection(system: WorkbenchExternalSystem): Promise<void> {
+  if (!confirmConnectionDelete(system)) return
+  deletingConnectionId.value = system.id
+  try {
+    await deleteWorkbenchExternalSystem(system.id, currentScope())
+    clearDeletedSystemState(system.id)
+    setStatus(`连接已删除：${system.name}`, 'success')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), 'error')
+  } finally {
+    deletingConnectionId.value = ''
   }
 }
 

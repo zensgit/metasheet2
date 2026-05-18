@@ -4,6 +4,7 @@ const assert = require('node:assert/strict')
 const path = require('node:path')
 const {
   createExternalSystemRegistry,
+  ExternalSystemConflictError,
   ExternalSystemNotFoundError,
   ExternalSystemValidationError,
   __internals,
@@ -31,6 +32,7 @@ function createMockCredentialStore() {
 
 function createMockDb() {
   const rows = []
+  const pipelineRows = []
   const calls = []
 
   function matchesWhere(row, where) {
@@ -42,6 +44,7 @@ function createMockDb() {
 
   return {
     rows,
+    pipelineRows,
     calls,
     async selectOne(table, where) {
       calls.push(['selectOne', table, { ...where }])
@@ -66,8 +69,23 @@ function createMockDb() {
     },
     async select(table, options = {}) {
       calls.push(['select', table, JSON.parse(JSON.stringify(options))])
-      const filtered = rows.filter(row => matchesWhere(row, options.where || {}))
+      const tableRows = table === 'integration_pipelines' ? pipelineRows : rows
+      const filtered = tableRows.filter(row => matchesWhere(row, options.where || {}))
       return filtered.slice(options.offset || 0, (options.offset || 0) + (options.limit || 1000))
+    },
+    async countRows(table, where) {
+      calls.push(['countRows', table, { ...where }])
+      const tableRows = table === 'integration_pipelines' ? pipelineRows : rows
+      return tableRows.filter(row => matchesWhere(row, where)).length
+    },
+    async deleteRows(table, where) {
+      calls.push(['deleteRows', table, { ...where }])
+      const tableRows = table === 'integration_pipelines' ? pipelineRows : rows
+      const before = tableRows.length
+      for (let index = tableRows.length - 1; index >= 0; index -= 1) {
+        if (matchesWhere(tableRows[index], where)) tableRows.splice(index, 1)
+      }
+      return before - tableRows.length
     },
   }
 }
@@ -280,6 +298,16 @@ async function main() {
   }
   assert.ok(badDb, 'db helper without select rejected')
 
+  const dbWithoutDelete = { ...db }
+  delete dbWithoutDelete.deleteRows
+  let badDeleteDb = null
+  try {
+    createExternalSystemRegistry({ db: dbWithoutDelete, credentialStore })
+  } catch (error) {
+    badDeleteDb = error
+  }
+  assert.ok(badDeleteDb, 'db helper without deleteRows rejected')
+
   const raceDb = createMockDb()
   const raceRegistry = createExternalSystemRegistry({
     db: {
@@ -452,6 +480,75 @@ async function main() {
   })
   assert.equal(sameKindRole.name, 'immutable-sys renamed', 'update with unchanged kind/role succeeds')
   assert.equal(sameKindRole.status, 'inactive', 'status update applied')
+
+  // --- 10. delete protects referenced systems and returns public shape ----
+  const deleteDb = createMockDb()
+  const deleteRegistry = createExternalSystemRegistry({
+    db: deleteDb,
+    credentialStore,
+    idGenerator: () => 'sys_delete',
+  })
+  await deleteRegistry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    name: 'delete-me',
+    kind: 'http',
+    role: 'source',
+    credentials: { token: 'delete-secret' },
+  })
+  deleteDb.pipelineRows.push({
+    id: 'pipe_source',
+    tenant_id: 'tenant_1',
+    workspace_id: null,
+    source_system_id: 'sys_delete',
+    target_system_id: 'target_1',
+  })
+  deleteDb.pipelineRows.push({
+    id: 'pipe_other_workspace',
+    tenant_id: 'tenant_1',
+    workspace_id: 'other',
+    source_system_id: 'sys_delete',
+    target_system_id: 'target_1',
+  })
+
+  let deleteConflict = null
+  try {
+    await deleteRegistry.deleteExternalSystem({
+      tenantId: 'tenant_1',
+      workspaceId: null,
+      id: 'sys_delete',
+    })
+  } catch (error) {
+    deleteConflict = error
+  }
+  assert.ok(deleteConflict instanceof ExternalSystemConflictError, 'referenced external system cannot be deleted')
+  assert.equal(deleteConflict.details.referencedPipelineCount, 1, 'conflict counts only matching tenant/workspace references')
+  assert.equal(deleteConflict.details.sourcePipelineCount, 1)
+  assert.equal(deleteConflict.details.targetPipelineCount, 0)
+  assert.equal(deleteDb.rows.length, 1, 'conflict does not delete the system')
+
+  deleteDb.pipelineRows.length = 0
+  const deleteResult = await deleteRegistry.deleteExternalSystem({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    id: 'sys_delete',
+  })
+  assert.equal(deleteResult.deleted, true)
+  assert.equal(deleteResult.system.id, 'sys_delete')
+  assert.equal(deleteResult.system.credentials, undefined, 'deleted public system does not expose credentials')
+  assert.equal(deleteDb.rows.length, 0, 'unused external system is removed')
+
+  let deleteMissing = null
+  try {
+    await deleteRegistry.deleteExternalSystem({
+      tenantId: 'tenant_1',
+      workspaceId: null,
+      id: 'sys_delete',
+    })
+  } catch (error) {
+    deleteMissing = error
+  }
+  assert.ok(deleteMissing instanceof ExternalSystemNotFoundError, 'deleting missing external system reports not found')
 
   console.log('✓ external-systems: registry + credential boundary tests passed')
 }
