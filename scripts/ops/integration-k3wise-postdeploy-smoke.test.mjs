@@ -388,11 +388,19 @@ function createFakeServer(options = {}) {
     }
 
     if (req.method === 'GET' && url.pathname === '/integrations/k3-wise') {
+      if (options.frontendRoutesNotFound) {
+        sendJson(res, 404, { ok: false, error: { message: 'not found: /integrations/k3-wise' } })
+        return
+      }
       sendHtml(res, 200, '<!doctype html><html><body><div id="app"></div><script src="/assets/app.js"></script></body></html>')
       return
     }
 
     if (req.method === 'GET' && url.pathname === '/integrations/workbench') {
+      if (options.frontendRoutesNotFound) {
+        sendJson(res, 404, { ok: false, error: { message: 'not found: /integrations/workbench' } })
+        return
+      }
       sendHtml(res, 200, '<!doctype html><html><body><div id="app"></div><script src="/assets/app.js"></script></body></html>')
       return
     }
@@ -654,6 +662,43 @@ test('public postdeploy smoke skips plugin health when the deployment protects i
     assert.equal(evidence.checks.find((check) => check.id === 'integration-plugin-health').status, 'skipped')
     assert.equal(evidence.checks.find((check) => check.id === 'k3-wise-frontend-route').status, 'pass')
     assert.equal(evidence.checks.find((check) => check.id === 'data-factory-frontend-route').status, 'pass')
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('postdeploy smoke diagnoses backend-only base URL when frontend routes return 404', async () => {
+  const fake = createFakeServer({ frontendRoutesNotFound: true })
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 1)
+    const stdout = JSON.parse(result.stdout)
+    assert.equal(stdout.ok, false)
+    assert.equal(stdout.summary.fail, 2)
+
+    const evidence = JSON.parse(readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8'))
+    assert.equal(evidence.checks.find((check) => check.id === 'api-health').status, 'pass')
+    const k3Route = evidence.checks.find((check) => check.id === 'k3-wise-frontend-route')
+    const workbenchRoute = evidence.checks.find((check) => check.id === 'data-factory-frontend-route')
+    for (const check of [k3Route, workbenchRoute]) {
+      assert.equal(check.status, 'fail')
+      assert.equal(check.details.status, 404)
+      assert.equal(check.code, 'FRONTEND_ROUTE_NOT_FOUND')
+      assert.match(check.likelyCause, /backend API/)
+      assert.match(check.hint, /frontend\/nginx URL/)
+      assert.match(check.hint, /index\.html/)
+    }
+
+    const markdown = readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.md'), 'utf8')
+    assert.match(markdown, /FRONTEND_ROUTE_NOT_FOUND/)
+    assert.match(markdown, /frontend\/nginx URL/)
   } finally {
     await fake.close()
     rmSync(outDir, { recursive: true, force: true })

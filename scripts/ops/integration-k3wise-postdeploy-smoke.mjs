@@ -351,14 +351,27 @@ function result(id, status, details = {}) {
   }
 }
 
-function failResult(id, error) {
+function failResult(id, error, extra = {}) {
   const details = error && error.details && typeof error.details === 'object'
     ? { details: sanitizeBody(error.details) }
     : {}
   return result(id, 'fail', {
     error: error && error.message ? redactText(error.message) : redactText(String(error)),
     ...details,
+    ...extra,
   })
+}
+
+function isHttpStatusError(error, status) {
+  return Boolean(error && error.details && Number(error.details.status) === status)
+}
+
+function frontendRouteNotFoundHint(baseUrl) {
+  return {
+    code: 'FRONTEND_ROUTE_NOT_FOUND',
+    likelyCause: 'The base URL reaches the backend API, but frontend SPA routes return 404. The smoke may be pointed at the backend/API port instead of the frontend/nginx entry, or the reverse proxy lacks SPA history fallback.',
+    hint: `Use the frontend/nginx URL for --base-url, not the backend API port. Verify ${baseUrl}/ and ${baseUrl}/login return the app shell, and ensure the frontend proxy falls back to index.html for /integrations/* routes.`,
+  }
 }
 
 function systemSummary(system) {
@@ -1138,6 +1151,7 @@ function extractTenantId(authBody) {
 
 async function runSmoke(opts) {
   const checks = []
+  let apiHealthPassed = false
   const resolvedToken = await resolveToken(opts)
   const token = resolvedToken.token
   if (resolvedToken.check) checks.push(resolvedToken.check)
@@ -1155,6 +1169,7 @@ async function runSmoke(opts) {
       plugins: health.body?.plugins ?? null,
       pluginsSummary: summary,
     }))
+    apiHealthPassed = true
   } catch (error) {
     checks.push(failResult('api-health', error))
   }
@@ -1184,14 +1199,22 @@ async function runSmoke(opts) {
     const page = await requestText(opts.baseUrl, '/integrations/k3-wise', { timeoutMs: opts.timeoutMs })
     checks.push(result('k3-wise-frontend-route', 'pass', assertFrontendAppShell(page, 'K3 WISE')))
   } catch (error) {
-    checks.push(failResult('k3-wise-frontend-route', error))
+    checks.push(failResult(
+      'k3-wise-frontend-route',
+      error,
+      apiHealthPassed && isHttpStatusError(error, 404) ? frontendRouteNotFoundHint(opts.baseUrl) : {},
+    ))
   }
 
   try {
     const page = await requestText(opts.baseUrl, '/integrations/workbench', { timeoutMs: opts.timeoutMs })
     checks.push(result('data-factory-frontend-route', 'pass', assertFrontendAppShell(page, 'Data Factory')))
   } catch (error) {
-    checks.push(failResult('data-factory-frontend-route', error))
+    checks.push(failResult(
+      'data-factory-frontend-route',
+      error,
+      apiHealthPassed && isHttpStatusError(error, 404) ? frontendRouteNotFoundHint(opts.baseUrl) : {},
+    ))
   }
 
   if (!token) {
@@ -1342,11 +1365,26 @@ function renderMarkdown(evidence) {
     '| --- | --- | --- |',
   ]
   for (const check of evidence.checks) {
-    const detail = check.error || check.reason || JSON.stringify({ ...check, id: undefined, status: undefined })
+    const detail = markdownCheckDetail(check)
     lines.push(`| ${markdownTableCodeCell(check.id)} | ${markdownTableCodeCell(check.status)} | ${markdownTableCodeCell(detail)} |`)
   }
   lines.push('')
   return `${lines.join('\n')}\n`
+}
+
+function markdownCheckDetail(check) {
+  const hasDiagnosticFields = ['code', 'likelyCause', 'hint'].some((key) => typeof check[key] === 'string' && check[key].trim())
+  if (!hasDiagnosticFields && typeof check.error === 'string' && check.error.trim()) return check.error
+  if (!hasDiagnosticFields && typeof check.reason === 'string' && check.reason.trim()) return check.reason
+
+  const parts = []
+  for (const key of ['code', 'error', 'reason', 'likelyCause', 'hint']) {
+    if (typeof check[key] === 'string' && check[key].trim()) {
+      parts.push(`${key}: ${check[key].trim()}`)
+    }
+  }
+  if (parts.length > 0) return parts.join(' | ')
+  return JSON.stringify({ ...check, id: undefined, status: undefined })
 }
 
 async function runCli(argv = process.argv.slice(2)) {
