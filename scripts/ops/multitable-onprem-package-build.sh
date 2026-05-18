@@ -70,12 +70,15 @@ REQUIRED_PATHS=(
   "scripts/ops/integration-k3wise-postdeploy-smoke.mjs"
   "scripts/ops/integration-issue1542-seed-workbench-systems.mjs"
   "scripts/ops/integration-k3wise-postdeploy-summary.mjs"
+  "scripts/ops/integration-k3wise-gate-contract-check.mjs"
   "scripts/ops/fixtures/integration-k3wise"
   "docs/operations/k3-poc-onprem-preflight-runbook.md"
   "docs/operations/integration-k3wise-onprem-operator-handoff-checklist.md"
   "docs/operations/integration-k3wise-internal-trial-runbook.md"
   "docs/operations/integration-k3wise-live-gate-execution-package.md"
   "docs/operations/integration-k3wise-sql-executor-bridge-handoff.md"
+  "docs/operations/integration-k3wise-webapi-read-list-customer-sample-manifest.md"
+  "docs/operations/integration-k3wise-relationship-mapping-customer-sample-manifest.md"
   "docs/development/k3wise-bridge-machine-codex-handoff-20260513.md"
   "docs/development/data-factory-workbench-todo-20260514.md"
   "docs/development/data-factory-workbench-development-20260514.md"
@@ -100,6 +103,10 @@ REQUIRED_PATHS=(
   "docs/development/data-factory-sql-executor-bridge-handoff-verification-20260515.md"
   "docs/development/data-factory-delivery-readiness-evidence-gates-development-20260515.md"
   "docs/development/data-factory-delivery-readiness-evidence-gates-verification-20260515.md"
+  "docs/development/data-factory-issue1526-gate-contract-check-design-20260518.md"
+  "docs/development/data-factory-issue1526-gate-contract-check-verification-20260518.md"
+  "docs/development/data-factory-issue1526-gate-contract-package-verify-design-20260518.md"
+  "docs/development/data-factory-issue1526-gate-contract-package-verify-verification-20260518.md"
   "docs/development/data-factory-readiness-package-verify-delivery-development-20260515.md"
   "docs/development/data-factory-readiness-package-verify-delivery-verification-20260515.md"
   "docs/development/onprem-migration-gap-guard-development-20260514.md"
@@ -307,6 +314,9 @@ K3 WISE PoC operator tools (Node only; no Docker needed to run these):
        Add --live --gate-file <gate.json> once the customer GATE answers arrive.
   node scripts/ops/integration-k3wise-live-poc-preflight.mjs --input <gate.json> --out-dir <packet-dir>
     -> builds the Save-only live PoC packet from the GATE answer JSON.
+  node scripts/ops/integration-k3wise-gate-contract-check.mjs --input <contract.json> --out-dir <art>
+    -> verifies O1-O6 and R1-R7 customer evidence before WebAPI read/list or
+       relationship runtime work starts.
   node scripts/ops/integration-k3wise-live-poc-evidence.mjs --packet <packet.json> --evidence <evidence.json>
     -> compiles the live PoC evidence into a PASS / PARTIAL / FAIL signoff.
   Runbooks:
