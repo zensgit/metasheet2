@@ -149,6 +149,7 @@ export interface AppRouteParams {
   'approval-pending': Record<string, never>
   'approval-history': Record<string, never>
   'attendance': Record<string, never>
+  'multitable-home': Record<string, never>
   'multitable': { sheetId: string; viewId: string }
   'multitable-public-form': { sheetId: string; viewId: string }
   'multitable-comment-inbox': Record<string, never>
