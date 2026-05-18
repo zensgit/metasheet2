@@ -155,6 +155,29 @@ describe('AttendanceReportFieldsSection', () => {
     expect(syncStatus?.textContent).toContain('Status: Connected')
   })
 
+  it('renders the formula function reference panel', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse(200, populatedCatalogPayload()))
+
+    mountSection()
+    await flushUi()
+
+    const panel = container!.querySelector('[data-report-field-formula-reference]')
+    expect(panel).toBeTruthy()
+    expect(container!.querySelectorAll('[data-report-field-formula-reference]')).toHaveLength(1)
+    expect(panel?.textContent).toContain('Formula reference')
+    expect(panel?.textContent).toContain('Record-scope only')
+    expect(panel?.textContent).toContain('{field_code}')
+    expect(panel?.textContent).toContain('{late_duration}')
+    expect(panel?.textContent).toContain('{leave_type_annual_duration}')
+    expect(panel?.textContent).toContain('IF')
+    expect(panel?.textContent).toContain('SUM')
+    expect(panel?.textContent).toContain('DATEDIF')
+    expect(panel?.textContent).toContain('CONCAT')
+    expect(panel?.textContent).toContain('={late_duration}+{early_leave_duration}')
+    expect(panel?.textContent).toContain('=IF({attendance_days}>0,{work_duration},0)')
+    expect(panel?.textContent).toContain('NOW, TODAY, lookup functions')
+  })
+
   it('filters report fields by text and operational state', async () => {
     vi.mocked(apiFetch).mockResolvedValue(jsonResponse(200, populatedCatalogPayload()))
 

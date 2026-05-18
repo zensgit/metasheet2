@@ -138,6 +138,69 @@
     </div>
 
     <div
+      v-if="reportFields.length > 0"
+      class="attendance-report-fields__basis attendance-report-fields__formula-reference"
+      data-report-field-formula-reference
+    >
+      <div class="attendance-report-fields__basis-header">
+        <div>
+          <div class="attendance-report-fields__basis-title">
+            {{ tr('Formula reference', '公式参考') }}
+          </div>
+          <div class="attendance__section-meta">
+            {{ tr('Record-scope only; deterministic functions only.', '仅支持单记录公式；只开放确定性函数。') }}
+          </div>
+        </div>
+        <span class="attendance-report-fields__status-pill attendance-report-fields__status-pill--ok">
+          {{ tr('Record scope', '单记录') }}
+        </span>
+      </div>
+      <div class="attendance-report-fields__formula-reference-layout">
+        <div class="attendance-report-fields__formula-reference-block">
+          <div class="attendance-report-fields__formula-reference-label">
+            {{ tr('Field references', '字段引用') }}
+          </div>
+          <div class="attendance-report-fields__formula-reference-chips">
+            <code>{field_code}</code>
+            <code>{late_duration}</code>
+            <code>{leave_type_annual_duration}</code>
+          </div>
+        </div>
+        <div class="attendance-report-fields__formula-reference-block">
+          <div class="attendance-report-fields__formula-reference-label">
+            {{ tr('Allowed functions', '允许函数') }}
+          </div>
+          <div class="attendance-report-fields__formula-reference-groups">
+            <div
+              v-for="group in formulaReferenceGroups"
+              :key="group.id"
+              class="attendance-report-fields__formula-reference-group"
+            >
+              <span>{{ group.label }}</span>
+              <code v-for="fn in group.functions" :key="fn">{{ fn }}</code>
+            </div>
+          </div>
+        </div>
+        <div class="attendance-report-fields__formula-reference-block">
+          <div class="attendance-report-fields__formula-reference-label">
+            {{ tr('Examples', '示例') }}
+          </div>
+          <div class="attendance-report-fields__formula-reference-examples">
+            <code
+              v-for="example in formulaReferenceExamples"
+              :key="example"
+            >
+              {{ example }}
+            </code>
+          </div>
+          <div class="attendance__field-hint">
+            {{ tr('NOW, TODAY, lookup functions, spreadsheet cell references, and scripts are blocked.', '禁用 NOW、TODAY、查找函数、电子表格单元格引用和脚本。') }}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div
       v-if="multitableDetailRows.length > 0"
       class="attendance-report-fields__basis"
       data-report-field-multitable-status
@@ -472,6 +535,12 @@ interface FieldMappingRow {
   monospace?: boolean
 }
 
+interface FormulaReferenceGroup {
+  id: string
+  label: string
+  functions: string[]
+}
+
 const props = defineProps<{
   tr: TranslateFn
   orgId?: string
@@ -498,6 +567,18 @@ const reportFieldsPayload = ref<AttendanceReportFieldsPayload>({
   items: [],
   multitable: { available: false },
 })
+const formulaReferenceGroups = computed<FormulaReferenceGroup[]>(() => [
+  { id: 'condition', label: tr('Condition', '条件'), functions: ['IF'] },
+  { id: 'logical', label: tr('Logical', '逻辑'), functions: ['AND', 'OR', 'NOT'] },
+  { id: 'math', label: tr('Math', '数学'), functions: ['ROUND', 'CEILING', 'FLOOR', 'ABS', 'MIN', 'MAX'] },
+  { id: 'aggregate', label: tr('Aggregate', '聚合'), functions: ['SUM', 'AVERAGE', 'COUNT', 'COUNTA'] },
+  { id: 'date', label: tr('Date', '日期'), functions: ['DATEDIF', 'DATEDIFF', 'DATE', 'YEAR', 'MONTH', 'DAY'] },
+  { id: 'text', label: tr('Text', '文本'), functions: ['CONCAT', 'CONCATENATE', 'LEFT', 'RIGHT', 'MID', 'LEN', 'TRIM', 'UPPER', 'LOWER'] },
+])
+const formulaReferenceExamples = [
+  '={late_duration}+{early_leave_duration}',
+  '=IF({attendance_days}>0,{work_duration},0)',
+]
 
 const reportFields = computed(() => reportFieldsPayload.value.items ?? [])
 const droppedReservedCodes = computed(() => reportFieldsPayload.value.droppedReservedCodes ?? [])
@@ -1170,6 +1251,61 @@ watch(
   flex: 1 1 180px;
 }
 
+.attendance-report-fields__formula-reference-layout {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.75fr) minmax(260px, 1.5fr) minmax(220px, 1fr);
+  gap: 12px;
+}
+
+.attendance-report-fields__formula-reference-block {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.attendance-report-fields__formula-reference-label {
+  color: #475569;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.attendance-report-fields__formula-reference-chips,
+.attendance-report-fields__formula-reference-groups,
+.attendance-report-fields__formula-reference-examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.attendance-report-fields__formula-reference-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+.attendance-report-fields__formula-reference-group span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.attendance-report-fields__formula-reference code {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: #f8fafc;
+  color: #1f2937;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 .attendance-report-fields__category {
   border: 1px solid #d8dee8;
   border-radius: 8px;
@@ -1315,5 +1451,11 @@ watch(
 .attendance-report-fields__status-pill--off {
   background: #f1f5f9;
   color: #64748b;
+}
+
+@media (max-width: 900px) {
+  .attendance-report-fields__formula-reference-layout {
+    grid-template-columns: 1fr;
+  }
 }
 </style>
