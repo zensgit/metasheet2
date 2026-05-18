@@ -211,6 +211,39 @@ describe('AttendanceReportFieldsSection', () => {
     expect(panel?.textContent).toContain('NOW, TODAY, lookup functions')
   })
 
+  it('renders opt-in custom formula source mode metadata', async () => {
+    const payload = populatedCatalogPayload() as any
+    payload.data.items.push({
+      code: 'manual_credit_minutes',
+      name: '手工抵扣分钟',
+      category: 'attendance',
+      categoryLabel: '出勤统计字段',
+      source: 'custom',
+      unit: 'minutes',
+      enabled: true,
+      reportVisible: false,
+      sortOrder: 3002,
+      description: '只作为公式源',
+      internalKey: 'manualCredit',
+      configured: true,
+      systemDefined: false,
+      formulaEnabled: false,
+      formulaSourceMode: 'alias',
+    })
+    payload.data.multitable.recordCount = payload.data.items.length
+    payload.data.reportFieldConfig.fieldsFingerprint.fieldCount = payload.data.items.length
+    payload.data.reportFieldConfig.fieldsFingerprint.codes = payload.data.items.map((item: { code: string }) => item.code)
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse(200, payload))
+
+    mountSection()
+    await flushUi()
+
+    expect(container!.textContent).toContain('手工抵扣分钟')
+    expect(container!.textContent).toContain('Formula source')
+    expect(container!.textContent).toContain('Named formula source alias')
+    expect(container!.textContent).toContain('manualCredit')
+  })
+
   it('previews and saves an existing custom formula field inline', async () => {
     const initial = formulaEditorPayload()
     const updated = formulaEditorPayload('={late_duration}+{early_leave_duration}')

@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module'
+import { createHash } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 
 const require = createRequire(import.meta.url)
@@ -22,6 +23,7 @@ describe('attendance report field formula engine wrapper', () => {
     formula_expression: 'fld_formula_expression',
     formula_scope: 'fld_formula_scope',
     formula_output_type: 'fld_formula_output_type',
+    formula_source_mode: 'fld_formula_source_mode',
   }
 
   function createFormulaCatalogContext(recordsSeed: Array<{ id: string; data: Record<string, unknown> }> = []) {
@@ -455,6 +457,35 @@ describe('attendance report field formula engine wrapper', () => {
     ])
 
     expect(left.value).not.toBe(right.value)
+
+    const legacyPayload = [{
+      code: 'net_anomaly_minutes',
+      name: '异常净时长',
+      category: 'anomaly',
+      unit: 'minutes',
+      sortOrder: 4500,
+      source: 'custom',
+      configured: false,
+      systemDefined: true,
+      formulaEnabled: true,
+      formulaExpression: '={late_duration}',
+      formulaScope: 'record',
+      formulaOutputType: 'duration_minutes',
+      formulaValid: true,
+    }]
+    expect(right.value).toBe(createHash('sha1').update(JSON.stringify(legacyPayload)).digest('hex'))
+
+    const sourceFieldsLeft = helpers.buildAttendanceReportFieldConfigFingerprint([
+      { ...baseField, formulaExpression: '={custom_metric}+1' },
+    ], {
+      formulaSourceFields: [{ code: 'custom_metric', systemDefined: false, formulaSourceMode: 'meta', internalKey: 'custom_metric' }],
+    })
+    const sourceFieldsRight = helpers.buildAttendanceReportFieldConfigFingerprint([
+      { ...baseField, formulaExpression: '={custom_metric}+1' },
+    ], {
+      formulaSourceFields: [{ code: 'custom_metric', systemDefined: false, formulaSourceMode: 'alias', internalKey: 'manualCredit' }],
+    })
+    expect(sourceFieldsLeft.value).not.toBe(sourceFieldsRight.value)
   })
 
   it('previews formulas against supplied sample values', async () => {
@@ -664,7 +695,7 @@ describe('attendance report field formula engine wrapper', () => {
     expect(context.api.formula.calculateFormula).not.toHaveBeenCalled()
   })
 
-  it('v1 rejects custom non-formula fields as formula sources', () => {
+  it('defaults to rejecting custom non-formula fields as formula sources', () => {
     const merged = helpers.mergeAttendanceReportFieldDefinitions([
       {
         id: 'rec-custom-metric',
@@ -711,6 +742,199 @@ describe('attendance report field formula engine wrapper', () => {
     const formulaSourceFields = helpers.resolveAttendanceFormulaSourceFields(merged)
     expect(formulaSourceFields.some((field: { code: string }) => field.code === 'custom_metric')).toBe(false)
     expect(formulaSourceFields.every((field: { systemDefined: boolean }) => field.systemDefined === true)).toBe(true)
+  })
+
+  it('allows opt-in custom non-formula fields as record formula sources', async () => {
+    const merged = helpers.mergeAttendanceReportFieldDefinitions([
+      {
+        id: 'rec-custom-meta',
+        data: {
+          fld_code: 'custom_meta_minutes',
+          fld_name: '手工调整分钟',
+          fld_category: '出勤统计字段',
+          fld_source: 'custom',
+          fld_unit: 'minutes',
+          fld_enabled: true,
+          fld_visible: true,
+          fld_sort: 3000,
+          fld_formula_source_mode: 'meta',
+        },
+      },
+      {
+        id: 'rec-custom-path',
+        data: {
+          fld_code: 'custom_path_minutes',
+          fld_name: '路径调整分钟',
+          fld_category: '出勤统计字段',
+          fld_source: 'custom',
+          fld_unit: 'minutes',
+          fld_enabled: true,
+          fld_visible: true,
+          fld_sort: 3001,
+          fld_internal: 'meta.adjustments.pathMinutes',
+          fld_formula_source_mode: 'internal_key',
+        },
+      },
+      {
+        id: 'rec-custom-alias',
+        data: {
+          fld_code: 'custom_alias_minutes',
+          fld_name: '别名调整分钟',
+          fld_category: '出勤统计字段',
+          fld_source: 'custom',
+          fld_unit: 'minutes',
+          fld_enabled: true,
+          fld_visible: true,
+          fld_sort: 3002,
+          fld_internal: 'manualCredit',
+          fld_formula_source_mode: 'alias',
+        },
+      },
+      {
+        id: 'rec-uses-custom',
+        data: {
+          fld_code: 'uses_custom_sources',
+          fld_name: '使用自定义源',
+          fld_category: '出勤统计字段',
+          fld_source: 'custom',
+          fld_unit: 'minutes',
+          fld_enabled: true,
+          fld_visible: true,
+          fld_sort: 3003,
+          fld_formula_enabled: true,
+          fld_formula_expression: '={custom_meta_minutes}+{custom_path_minutes}+{custom_alias_minutes}',
+          fld_formula_scope: 'record',
+          fld_formula_output_type: 'duration_minutes',
+        },
+      },
+    ], fieldIds)
+
+    const formulaField = merged.find((field: { code: string }) => field.code === 'uses_custom_sources')
+    expect(formulaField).toMatchObject({
+      formulaEnabled: true,
+      formulaValid: true,
+      formulaError: null,
+      formulaReferences: ['custom_alias_minutes', 'custom_meta_minutes', 'custom_path_minutes'],
+    })
+
+    const outputFields = helpers.resolveAttendanceRecordReportFields(merged)
+    expect(outputFields.some((field: { code: string }) => field.code === 'custom_meta_minutes')).toBe(false)
+    expect(outputFields.some((field: { code: string }) => field.code === 'uses_custom_sources')).toBe(true)
+
+    const formulaSourceFields = helpers.resolveAttendanceFormulaSourceFields(merged)
+    expect(formulaSourceFields).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'custom_meta_minutes', systemDefined: false, formulaSourceMode: 'meta' }),
+      expect.objectContaining({ code: 'custom_path_minutes', systemDefined: false, formulaSourceMode: 'internal_key', internalKey: 'meta.adjustments.pathMinutes' }),
+      expect.objectContaining({ code: 'custom_alias_minutes', systemDefined: false, formulaSourceMode: 'alias', internalKey: 'manualCredit' }),
+    ]))
+
+    const context = {
+      api: {
+        formula: {
+          calculateFormula: vi.fn(async (expression: string) => {
+            expect(expression).toBe('=7+5+4')
+            return 16
+          }),
+        },
+      },
+    }
+
+    await expect(helpers.buildAttendanceRecordReportExportItemAsync(context, {
+      work_date: '2026-05-13',
+      status: 'normal',
+      late_minutes: 0,
+      early_leave_minutes: 0,
+      work_minutes: 460,
+      is_workday: true,
+      meta: {
+        custom_meta_minutes: 7,
+        adjustments: { pathMinutes: 5 },
+        formulaSources: { manualCredit: 4 },
+      },
+    }, outputFields, formulaSourceFields)).resolves.toMatchObject({
+      uses_custom_sources: 16,
+    })
+    expect(context.api.formula.calculateFormula).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects disabled or unsafe custom formula sources before evaluation', () => {
+    const merged = helpers.mergeAttendanceReportFieldDefinitions([
+      {
+        id: 'rec-disabled-custom',
+        data: {
+          fld_code: 'disabled_custom_metric',
+          fld_name: '停用自定义指标',
+          fld_category: '出勤统计字段',
+          fld_source: 'custom',
+          fld_unit: 'minutes',
+          fld_enabled: false,
+          fld_visible: true,
+          fld_sort: 3000,
+          fld_formula_source_mode: 'meta',
+        },
+      },
+      {
+        id: 'rec-unsafe-custom',
+        data: {
+          fld_code: 'unsafe_custom_metric',
+          fld_name: '危险路径指标',
+          fld_category: '出勤统计字段',
+          fld_source: 'custom',
+          fld_unit: 'minutes',
+          fld_enabled: true,
+          fld_visible: true,
+          fld_sort: 3001,
+          fld_internal: 'report_values.net_minutes',
+          fld_formula_source_mode: 'internal_key',
+        },
+      },
+      {
+        id: 'rec-uses-disabled',
+        data: {
+          fld_code: 'uses_disabled_custom',
+          fld_name: '使用停用自定义',
+          fld_category: '出勤统计字段',
+          fld_source: 'custom',
+          fld_unit: 'minutes',
+          fld_enabled: true,
+          fld_visible: true,
+          fld_sort: 3002,
+          fld_formula_enabled: true,
+          fld_formula_expression: '={disabled_custom_metric}+1',
+          fld_formula_scope: 'record',
+          fld_formula_output_type: 'duration_minutes',
+        },
+      },
+      {
+        id: 'rec-uses-unsafe',
+        data: {
+          fld_code: 'uses_unsafe_custom',
+          fld_name: '使用危险自定义',
+          fld_category: '出勤统计字段',
+          fld_source: 'custom',
+          fld_unit: 'minutes',
+          fld_enabled: true,
+          fld_visible: true,
+          fld_sort: 3003,
+          fld_formula_enabled: true,
+          fld_formula_expression: '={unsafe_custom_metric}+1',
+          fld_formula_scope: 'record',
+          fld_formula_output_type: 'duration_minutes',
+        },
+      },
+    ], fieldIds)
+
+    expect(helpers.resolveAttendanceFormulaSourceFields(merged)
+      .some((field: { code: string }) => ['disabled_custom_metric', 'unsafe_custom_metric'].includes(field.code)))
+      .toBe(false)
+    expect(merged.find((field: { code: string }) => field.code === 'uses_disabled_custom')).toMatchObject({
+      formulaValid: false,
+      formulaError: 'Unknown attendance report field reference: disabled_custom_metric.',
+    })
+    expect(merged.find((field: { code: string }) => field.code === 'uses_unsafe_custom')).toMatchObject({
+      formulaValid: false,
+      formulaError: 'Unknown attendance report field reference: unsafe_custom_metric.',
+    })
   })
 
   it('raw alias references bypass catalog enable/visibility state', async () => {
