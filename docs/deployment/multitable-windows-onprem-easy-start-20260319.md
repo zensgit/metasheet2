@@ -10,6 +10,24 @@ PRODUCT_MODE=platform
 
 ## 1) Build or download the package
 
+The release `.zip` and `.tgz` assets are deployable on-prem application
+packages. They are not source-only archives, even though extracting them shows
+workspace-style directories such as `apps/`, `packages/`, `plugins/`,
+`scripts/`, `docker/`, `ops/`, and `docs/`. Those paths are part of the runtime
+layout and are required by the deploy helpers.
+
+Each package root includes:
+
+- `DEPLOYMENT.txt` — operator-facing explanation of fresh install vs upgrade.
+- `PACKAGE-METADATA.json` — machine-readable artifact kind and deploy mode.
+
+For upgrades, do not hand-copy selected directories over a running install. Use
+the existing deploy root's apply entrypoint:
+
+```bat
+deploy.bat <downloaded-package.zip>
+```
+
 Local build on the release machine:
 
 ```bash

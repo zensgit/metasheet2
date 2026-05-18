@@ -241,6 +241,79 @@ exit /b %ERRORLEVEL%
 EOF
 }
 
+function write_deployment_guides() {
+  cat > "${PACKAGE_ROOT}/DEPLOYMENT.txt" <<EOF
+MetaSheet Multitable On-Prem Deployable Package
+Version: ${PACKAGE_VERSION}
+Tag: ${PACKAGE_TAG}
+
+What this archive is:
+  This is a deployable on-prem application package. It contains the built
+  frontend bundle, built backend dist, migrations, packaged plugins, deploy
+  scripts, environment templates, nginx/systemd examples, and operator docs.
+
+Why it looks like a source tree:
+  The runtime uses workspace-relative paths, so the archive intentionally keeps
+  directories such as apps/web/dist, packages/core-backend/dist, plugins,
+  scripts, docker, ops, and docs. That layout does not mean this is a
+  source-only archive.
+
+What this archive is not:
+  It is not a single binary.
+  It is not a node_modules snapshot.
+  It is not meant to be applied by hand-copying only selected source folders.
+  It is not direct-replace-safe for a running installation without the apply
+  helper or documented install flow.
+
+Fresh install:
+  Extract the archive into a new deploy root, create docker/app.env from the
+  template, then follow:
+    docs/deployment/multitable-windows-onprem-easy-start-20260319.md
+
+Upgrade / corrective reroll:
+  Copy the downloaded package archive to the target host. From the existing
+  deploy root, run:
+    deploy.bat <downloaded-package.zip>
+
+  Or run the PowerShell helper directly:
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts\ops\multitable-onprem-apply-package.ps1 -RootDir . -PackageArchive <downloaded-package.zip>
+
+Dependency policy:
+  node_modules are intentionally not bundled. The apply helper defaults to
+  InstallDeps=1 and runs pnpm install --frozen-lockfile when node_modules is
+  missing. Manual deployments must run the same command before migrations,
+  PM2 restart, or admin bootstrap.
+
+Verification:
+  A valid delivery asset passes:
+    scripts/ops/multitable-onprem-package-verify.sh <package.zip|package.tgz>
+EOF
+
+  cat > "${PACKAGE_ROOT}/PACKAGE-METADATA.json" <<EOF
+{
+  "name": "${PACKAGE_NAME}",
+  "version": "${PACKAGE_VERSION}",
+  "tag": "${PACKAGE_TAG}",
+  "artifactKind": "deployable-onprem-app-package",
+  "deployMode": "fresh-extract-or-existing-root-apply",
+  "directReplaceSafe": false,
+  "nodeModulesBundled": false,
+  "windowsEntryPoint": "deploy.bat <package.zip|package.tgz>",
+  "linuxEntryPoint": "scripts/ops/multitable-onprem-package-install.sh",
+  "includedRuntimeRoots": [
+    "apps/web/dist",
+    "packages/core-backend/dist",
+    "packages/core-backend/migrations",
+    "plugins",
+    "scripts/ops",
+    "docker",
+    "ops",
+    "docs"
+  ]
+}
+EOF
+}
+
 function cleanup() {
   [[ -n "$checksum_tmp" ]] && rm -f "$checksum_tmp" || true
   rm -rf "$TMP_OUTPUT_DIR" || true
@@ -292,11 +365,26 @@ done
 stamp_packaged_version "package.json"
 stamp_packaged_version "packages/core-backend/package.json"
 write_windows_entrypoints
+write_deployment_guides
 
 cat > "${PACKAGE_ROOT}/INSTALL.txt" <<EOF
 MetaSheet Multitable On-Prem Package
 Version: ${PACKAGE_VERSION}
 Tag: ${PACKAGE_TAG}
+
+Artifact type:
+  deployable-onprem-app-package
+
+Read first:
+  DEPLOYMENT.txt
+
+Important:
+  This archive is a deployable on-prem package, not a source-only archive.
+  It intentionally preserves workspace-style runtime paths because the backend,
+  frontend, plugins, migrations, and ops scripts are resolved from those
+  locations. Do not hand-copy selected directories into a running installation.
+  For upgrades, run deploy.bat <package.zip|package.tgz> from the existing
+  deploy root, or use scripts/ops/multitable-onprem-apply-package.ps1.
 
 Install quickstart:
   docs/deployment/multitable-windows-onprem-easy-start-20260319.md
@@ -362,6 +450,11 @@ cat > "${METADATA_JSON_TMP_PATH}" <<EOF
   "name": "${PACKAGE_NAME}",
   "version": "${PACKAGE_VERSION}",
   "tag": "${PACKAGE_TAG}",
+  "artifactKind": "deployable-onprem-app-package",
+  "deployMode": "fresh-extract-or-existing-root-apply",
+  "directReplaceSafe": false,
+  "nodeModulesBundled": false,
+  "windowsEntryPoint": "deploy.bat <package.zip|package.tgz>",
   "attendanceOnly": false,
   "productMode": "platform",
   "includedPlugins": ["plugin-attendance", "plugin-integration-core"],
