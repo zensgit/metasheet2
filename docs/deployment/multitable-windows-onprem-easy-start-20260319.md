@@ -210,6 +210,7 @@ Post-deploy internal-trial signoff uses:
 ```bash
 node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
   --base-url "http://<your-server-host>" \
+  --frontend-base-url "http://<your-frontend-nginx-host>" \
   --token-file "<admin-token-file>" \
   --tenant-id default \
   --require-auth \
@@ -219,6 +220,11 @@ node scripts/ops/integration-k3wise-postdeploy-summary.mjs \
   --input artifacts/integration-k3wise/internal-trial/postdeploy-smoke/integration-k3wise-postdeploy-smoke.json \
   --require-auth-signoff
 ```
+
+If the same nginx origin serves both `/api/*` and the SPA routes, omit
+`--frontend-base-url`. If `--base-url` points at a backend/API-only surface,
+set `--frontend-base-url` to the front door where `/`, `/login`,
+`/integrations/workbench`, and `/integrations/k3-wise` return the web app.
 
 Detailed operator runbooks included in the package:
 

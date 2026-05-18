@@ -162,7 +162,11 @@ surface. Public checks always run; authenticated integration-route checks run
 when a bearer token is supplied.
 
 Options:
-  --base-url <url>       MetaSheet base URL, default ${DEFAULT_BASE_URL}
+  --base-url <url>       MetaSheet API/control-plane base URL, default ${DEFAULT_BASE_URL}
+  --frontend-base-url <url>
+                          Optional frontend/nginx SPA base URL. Defaults to
+                          --base-url. Use this when API and web routes are
+                          exposed on different ports or front doors.
   --auth-token <token>   Optional bearer token for authenticated checks
   --token-file <path>    Optional file containing bearer token
   --tenant-id <id>       Optional tenant scope for authenticated list probes
@@ -181,7 +185,8 @@ Options:
   --help                 Show this help
 
 Environment fallbacks:
-  METASHEET_BASE_URL, PUBLIC_APP_URL
+  METASHEET_BASE_URL
+  METASHEET_FRONTEND_BASE_URL, PUBLIC_APP_URL, FRONTEND_BASE_URL
   METASHEET_AUTH_TOKEN, ADMIN_TOKEN, AUTH_TOKEN
   METASHEET_AUTH_TOKEN_FILE, AUTH_TOKEN_FILE
   METASHEET_TENANT_ID, TENANT_ID
@@ -206,7 +211,8 @@ function readRequiredValue(argv, index, flag) {
 
 function parseArgs(argv = process.argv.slice(2)) {
   const opts = {
-    baseUrl: envValue('METASHEET_BASE_URL', 'PUBLIC_APP_URL') || DEFAULT_BASE_URL,
+    baseUrl: envValue('METASHEET_BASE_URL') || DEFAULT_BASE_URL,
+    frontendBaseUrl: envValue('METASHEET_FRONTEND_BASE_URL', 'PUBLIC_APP_URL', 'FRONTEND_BASE_URL'),
     authToken: envValue('METASHEET_AUTH_TOKEN', 'ADMIN_TOKEN', 'AUTH_TOKEN'),
     tokenFile: envValue('METASHEET_AUTH_TOKEN_FILE', 'AUTH_TOKEN_FILE'),
     tenantId: envValue('METASHEET_TENANT_ID', 'TENANT_ID'),
@@ -224,6 +230,10 @@ function parseArgs(argv = process.argv.slice(2)) {
     switch (arg) {
       case '--base-url':
         opts.baseUrl = readRequiredValue(argv, i, arg)
+        i += 1
+        break
+      case '--frontend-base-url':
+        opts.frontendBaseUrl = readRequiredValue(argv, i, arg)
         i += 1
         break
       case '--auth-token':
@@ -274,25 +284,26 @@ function parseArgs(argv = process.argv.slice(2)) {
   if (opts.issue1542InstallStaging && !opts.issue1542WorkbenchSmoke) {
     throw new K3WisePostdeploySmokeError('--issue1542-install-staging requires --issue1542-workbench-smoke')
   }
-  opts.baseUrl = normalizeBaseUrl(opts.baseUrl)
+  opts.baseUrl = normalizeBaseUrl(opts.baseUrl, '--base-url')
+  opts.frontendBaseUrl = normalizeBaseUrl(opts.frontendBaseUrl || opts.baseUrl, '--frontend-base-url')
   return opts
 }
 
-function normalizeBaseUrl(value) {
+function normalizeBaseUrl(value, label = '--base-url') {
   let url
   try {
     url = new URL(value)
   } catch {
-    throw new K3WisePostdeploySmokeError('--base-url must be a valid URL', { baseUrl: value })
+    throw new K3WisePostdeploySmokeError(`${label} must be a valid URL`, { baseUrl: value })
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new K3WisePostdeploySmokeError('--base-url must use http or https', { baseUrl: value })
+    throw new K3WisePostdeploySmokeError(`${label} must use http or https`, { baseUrl: value })
   }
   if (url.username || url.password) {
-    throw new K3WisePostdeploySmokeError('--base-url must not contain inline credentials', { baseUrl: redactText(value) })
+    throw new K3WisePostdeploySmokeError(`${label} must not contain inline credentials`, { baseUrl: redactText(value) })
   }
   if (url.search || url.hash) {
-    throw new K3WisePostdeploySmokeError('--base-url must not contain query string or hash', { baseUrl: redactText(value) })
+    throw new K3WisePostdeploySmokeError(`${label} must not contain query string or hash`, { baseUrl: redactText(value) })
   }
   return url.toString().replace(/\/+$/, '')
 }
@@ -366,11 +377,14 @@ function isHttpStatusError(error, status) {
   return Boolean(error && error.details && Number(error.details.status) === status)
 }
 
-function frontendRouteNotFoundHint(baseUrl) {
+function frontendRouteNotFoundHint(frontendBaseUrl, apiBaseUrl) {
+  const splitHint = frontendBaseUrl !== apiBaseUrl
+    ? ` API base URL is ${apiBaseUrl}; frontend base URL is ${frontendBaseUrl}.`
+    : ''
   return {
     code: 'FRONTEND_ROUTE_NOT_FOUND',
     likelyCause: 'The base URL reaches the backend API, but frontend SPA routes return 404. The smoke may be pointed at the backend/API port instead of the frontend/nginx entry, or the reverse proxy lacks SPA history fallback.',
-    hint: `Use the frontend/nginx URL for --base-url, not the backend API port. Verify ${baseUrl}/ and ${baseUrl}/login return the app shell, and ensure the frontend proxy falls back to index.html for /integrations/* routes.`,
+    hint: `Use --frontend-base-url for the frontend/nginx URL when it differs from --base-url.${splitHint} Verify ${frontendBaseUrl}/ and ${frontendBaseUrl}/login return the app shell, and ensure the frontend proxy falls back to index.html for /integrations/* routes.`,
   }
 }
 
@@ -1196,24 +1210,24 @@ async function runSmoke(opts) {
   }
 
   try {
-    const page = await requestText(opts.baseUrl, '/integrations/k3-wise', { timeoutMs: opts.timeoutMs })
+    const page = await requestText(opts.frontendBaseUrl, '/integrations/k3-wise', { timeoutMs: opts.timeoutMs })
     checks.push(result('k3-wise-frontend-route', 'pass', assertFrontendAppShell(page, 'K3 WISE')))
   } catch (error) {
     checks.push(failResult(
       'k3-wise-frontend-route',
       error,
-      apiHealthPassed && isHttpStatusError(error, 404) ? frontendRouteNotFoundHint(opts.baseUrl) : {},
+      apiHealthPassed && isHttpStatusError(error, 404) ? frontendRouteNotFoundHint(opts.frontendBaseUrl, opts.baseUrl) : {},
     ))
   }
 
   try {
-    const page = await requestText(opts.baseUrl, '/integrations/workbench', { timeoutMs: opts.timeoutMs })
+    const page = await requestText(opts.frontendBaseUrl, '/integrations/workbench', { timeoutMs: opts.timeoutMs })
     checks.push(result('data-factory-frontend-route', 'pass', assertFrontendAppShell(page, 'Data Factory')))
   } catch (error) {
     checks.push(failResult(
       'data-factory-frontend-route',
       error,
-      apiHealthPassed && isHttpStatusError(error, 404) ? frontendRouteNotFoundHint(opts.baseUrl) : {},
+      apiHealthPassed && isHttpStatusError(error, 404) ? frontendRouteNotFoundHint(opts.frontendBaseUrl, opts.baseUrl) : {},
     ))
   }
 
@@ -1322,6 +1336,7 @@ async function runSmoke(opts) {
     ok: failed.length === 0,
     generatedAt: new Date().toISOString(),
     baseUrl: opts.baseUrl,
+    frontendBaseUrl: opts.frontendBaseUrl,
     authenticated: Boolean(token),
     requireAuth: opts.requireAuth,
     signoff: {
@@ -1353,7 +1368,8 @@ function renderMarkdown(evidence) {
     '# Integration K3 WISE Postdeploy Smoke',
     '',
     `- Generated at: ${markdownInlineCode(evidence.generatedAt)}`,
-    `- Base URL: ${markdownInlineCode(evidence.baseUrl)}`,
+    `- API base URL: ${markdownInlineCode(evidence.baseUrl)}`,
+    `- Frontend base URL: ${markdownInlineCode(evidence.frontendBaseUrl || evidence.baseUrl)}`,
     `- Authenticated checks: ${evidence.authenticated ? 'yes' : 'no'}`,
     `- Internal trial signoff: ${evidence.signoff?.internalTrial === 'pass' ? 'PASS' : 'BLOCKED'} (${markdownText(evidence.signoff?.reason || 'unknown')})`,
     `- Diagnostic result: ${evidence.ok ? 'PASS' : 'FAIL'}`,
@@ -1398,6 +1414,7 @@ async function runCli(argv = process.argv.slice(2)) {
   console.log(JSON.stringify({
     ok: evidence.ok,
     baseUrl: evidence.baseUrl,
+    frontendBaseUrl: evidence.frontendBaseUrl,
     authenticated: evidence.authenticated,
     signoff: evidence.signoff,
     summary: evidence.summary,
