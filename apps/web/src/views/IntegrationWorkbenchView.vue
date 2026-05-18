@@ -15,6 +15,10 @@
         <span>{{ step.description }}</span>
       </div>
     </nav>
+    <div class="integration-workbench__quick-flow" data-testid="data-factory-quick-flow">
+      <strong>操作路径</strong>
+      <span>1. 选来源系统 -> 2. 选来源数据集 -> 3. 选目标系统 -> 4. 选目标数据集 -> 5. 配映射 -> 6. Dry-run -> 7. 推送</span>
+    </div>
 
     <div v-if="statusMessage" class="integration-workbench__status" :data-kind="statusKind">
       {{ statusMessage }}
@@ -211,9 +215,15 @@
     </section>
 
     <section class="integration-workbench__panel">
+      <div class="integration-workbench__panel-head">
+        <div>
+          <h2>选择系统与数据集</h2>
+          <p>这里就是数据集选择入口：先选系统，再点加载数据集，最后在下拉框里选择来源数据集和目标数据集。</p>
+        </div>
+      </div>
       <div class="integration-workbench__grid integration-workbench__grid--systems">
         <div class="integration-workbench__system-column">
-          <h2>数据源</h2>
+          <h2>1. 选来源系统与数据集</h2>
           <label>
             <span>数据源系统</span>
             <select v-model="sourceSystemId" data-testid="source-system">
@@ -277,7 +287,7 @@
         </div>
 
         <div class="integration-workbench__system-column">
-          <h2>目标</h2>
+          <h2>2. 选目标系统与数据集</h2>
           <label>
             <span>目标系统</span>
             <select v-model="targetSystemId" data-testid="target-system">
@@ -526,21 +536,21 @@
     <section class="integration-workbench__panel">
       <div class="integration-workbench__panel-head">
         <div>
-          <h2>Pipeline 执行</h2>
-          <p>先保存 pipeline，再 dry-run。Save-only 推送必须显式勾选，默认不会 Submit / Audit。</p>
+          <h2>运行与推送</h2>
+          <p>先保存清洗流程，再做 dry-run；确认无误后才 Save-only 推送到目标系统。</p>
         </div>
         <button type="button" class="integration-workbench__button" data-testid="save-pipeline" :disabled="savingPipeline || !canSavePipeline" @click="savePipeline">
-          {{ savingPipeline ? '保存中' : '保存 Pipeline' }}
+          {{ savingPipeline ? '保存中' : '保存清洗流程' }}
         </button>
       </div>
 
       <div class="integration-workbench__grid">
         <label>
-          <span>Pipeline 名称</span>
+          <span>清洗流程名称</span>
           <input v-model="pipelineName" data-testid="pipeline-name" placeholder="例如 PLM material to K3 material" />
         </label>
         <label>
-          <span>Pipeline 模式</span>
+          <span>清洗流程模式</span>
           <select v-model="pipelineMode" data-testid="pipeline-mode">
             <option value="manual">manual</option>
             <option value="incremental">incremental</option>
@@ -561,7 +571,7 @@
           </select>
         </label>
         <label>
-          <span>已保存 Pipeline ID</span>
+          <span>已保存流程 ID</span>
           <input v-model="savedPipelineId" data-testid="pipeline-id" placeholder="保存后自动回填，也可粘贴已有 ID" />
         </label>
         <label>
@@ -585,9 +595,9 @@
 
       <div class="integration-workbench__readiness" data-testid="pipeline-readiness">
         <div>
-          <strong>保存 Pipeline 前置条件</strong>
+          <strong>保存清洗流程前置条件</strong>
           <p data-testid="save-readiness-summary">{{ savePipelineBlockedSummary }}</p>
-          <strong>Dry-run 前置条件</strong>
+          <strong>运行前置条件</strong>
           <p data-testid="dry-run-readiness-summary">{{ dryRunBlockedSummary }}</p>
         </div>
         <ul>
@@ -2303,6 +2313,29 @@ watch(showAdvancedConnectors, () => {
   color: #5c6878;
   font-size: 12px;
   line-height: 1.4;
+}
+
+.integration-workbench__quick-flow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: -4px 0 16px;
+  padding: 10px 12px;
+  border: 1px solid #d8e0e8;
+  border-radius: 8px;
+  background: #f8fbff;
+  color: #3c4b60;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.integration-workbench__quick-flow strong {
+  color: #1f3551;
+}
+
+.integration-workbench__quick-flow span {
+  overflow-wrap: anywhere;
 }
 
 .integration-workbench__eyebrow {
