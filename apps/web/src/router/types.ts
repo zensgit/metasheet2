@@ -72,6 +72,7 @@ export const AppRouteNames = {
 
   // Attendance routes
   ATTENDANCE: 'attendance',
+  MULTITABLE_HOME: 'multitable-home',
   MULTITABLE: 'multitable',
   MULTITABLE_PUBLIC_FORM: 'multitable-public-form',
   MULTITABLE_COMMENT_INBOX: 'multitable-comment-inbox',
@@ -148,6 +149,7 @@ export interface AppRouteParams {
   'approval-pending': Record<string, never>
   'approval-history': Record<string, never>
   'attendance': Record<string, never>
+  'multitable-home': Record<string, never>
   'multitable': { sheetId: string; viewId: string }
   'multitable-public-form': { sheetId: string; viewId: string }
   'multitable-comment-inbox': Record<string, never>
@@ -433,6 +435,7 @@ export const ROUTE_PATHS = {
 
   // Attendance
   ATTENDANCE: '/attendance',
+  MULTITABLE_HOME: '/multitable',
   MULTITABLE: '/multitable/:sheetId/:viewId',
   MULTITABLE_PUBLIC_FORM: '/multitable/public-form/:sheetId/:viewId',
   MULTITABLE_COMMENT_INBOX: '/multitable/comments/inbox',
