@@ -13,6 +13,9 @@ const mocks = vi.hoisted(() => ({
   installTemplate: vi.fn(),
 }))
 
+const FAVORITE_BASES_KEY = 'metasheet:multitable:favorite-base-ids:v1'
+const RECENT_BASES_KEY = 'metasheet:multitable:recent-base-opens:v1'
+
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
   return {
@@ -53,6 +56,20 @@ function findButton(container: HTMLElement, text: string, opts: { exact?: boolea
   return button
 }
 
+function findCardButton(container: HTMLElement, cardTitle: string, buttonText: string): HTMLButtonElement {
+  const card = Array.from(container.querySelectorAll('.multitable-home__card'))
+    .find((node) => node.textContent?.includes(cardTitle))
+  if (!(card instanceof HTMLElement)) {
+    throw new Error(`Card not found: ${cardTitle}`)
+  }
+  return findButton(card, buttonText, { exact: true })
+}
+
+function readBaseCardNames(container: HTMLElement): string[] {
+  return Array.from(container.querySelectorAll('.multitable-home__card h3'))
+    .map((node) => node.textContent?.trim() ?? '')
+}
+
 describe('MultitableHomeView', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -62,6 +79,8 @@ describe('MultitableHomeView', () => {
     if (container) container.remove()
     app = null
     container = null
+    localStorage.removeItem(FAVORITE_BASES_KEY)
+    localStorage.removeItem(RECENT_BASES_KEY)
     vi.clearAllMocks()
   })
 
@@ -134,6 +153,61 @@ describe('MultitableHomeView', () => {
 
     expect(root.textContent).toContain('没有匹配的 Base')
     expect(root.textContent).not.toContain('暂无可访问的 Base')
+  })
+
+  it('promotes favorite bases and persists the favorite marker', async () => {
+    mocks.listBases.mockResolvedValue({
+      bases: [
+        { id: 'base_ops', name: 'Ops Base', color: '#0f766e' },
+        { id: 'base_sales', name: 'Sales Pipeline', color: '#f97316' },
+      ],
+    })
+    mocks.listTemplates.mockResolvedValue({ templates: [] })
+
+    const root = mountView()
+    await flushUi()
+
+    expect(readBaseCardNames(root)).toEqual(['Ops Base', 'Sales Pipeline'])
+
+    findCardButton(root, 'Sales Pipeline', '收藏').click()
+    await flushUi()
+
+    expect(readBaseCardNames(root)).toEqual(['Sales Pipeline', 'Ops Base'])
+    expect(root.textContent).toContain('已收藏')
+    expect(JSON.parse(localStorage.getItem(FAVORITE_BASES_KEY) ?? '[]')).toEqual(['base_sales'])
+  })
+
+  it('promotes recently opened bases without pinning them above favorites', async () => {
+    mocks.listBases.mockResolvedValue({
+      bases: [
+        { id: 'base_ops', name: 'Ops Base', color: '#0f766e' },
+        { id: 'base_sales', name: 'Sales Pipeline', color: '#f97316' },
+        { id: 'base_hr', name: 'Hiring Base', color: '#9333ea' },
+      ],
+    })
+    mocks.listTemplates.mockResolvedValue({ templates: [] })
+    mocks.loadContext.mockResolvedValue({
+      base: { id: 'base_sales', name: 'Sales Pipeline' },
+      sheet: { id: 'sheet_sales', baseId: 'base_sales', name: 'Deals' },
+      sheets: [{ id: 'sheet_sales', baseId: 'base_sales', name: 'Deals' }],
+      views: [{ id: 'view_sales', sheetId: 'sheet_sales', name: 'Grid', type: 'grid' }],
+      capabilities: {},
+    })
+    localStorage.setItem(FAVORITE_BASES_KEY, JSON.stringify(['base_hr']))
+
+    const root = mountView()
+    await flushUi()
+
+    expect(readBaseCardNames(root)).toEqual(['Hiring Base', 'Ops Base', 'Sales Pipeline'])
+
+    findCardButton(root, 'Sales Pipeline', '打开').click()
+    await flushUi()
+
+    expect(readBaseCardNames(root)).toEqual(['Hiring Base', 'Sales Pipeline', 'Ops Base'])
+    expect(root.textContent).toContain('最近打开')
+    expect(JSON.parse(localStorage.getItem(RECENT_BASES_KEY) ?? '[]')).toEqual([
+      expect.objectContaining({ baseId: 'base_sales' }),
+    ])
   })
 
   it('creates a base with a seeded sheet before opening multitable', async () => {
