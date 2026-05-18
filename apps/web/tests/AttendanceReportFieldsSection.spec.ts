@@ -74,6 +74,39 @@ function populatedCatalogPayload() {
   }
 }
 
+function formulaEditorPayload(expression = '={late_duration}+1') {
+  const payload = populatedCatalogPayload() as any
+  payload.data.items = [
+    ...payload.data.items,
+    {
+      code: 'net_anomaly_minutes',
+      name: '异常净时长',
+      category: 'anomaly',
+      categoryLabel: '异常统计字段',
+      source: 'custom',
+      unit: 'minutes',
+      enabled: true,
+      reportVisible: true,
+      sortOrder: 4500,
+      dingtalkFieldName: '异常净时长',
+      description: '自定义公式字段',
+      internalKey: 'formula.net_anomaly_minutes',
+      configured: true,
+      systemDefined: false,
+      formulaEnabled: true,
+      formulaExpression: expression,
+      formulaScope: 'record',
+      formulaOutputType: 'duration_minutes',
+      formulaValid: true,
+      formulaError: null,
+      formulaReferences: ['late_duration'],
+    },
+  ]
+  payload.data.reportFieldConfig.fieldsFingerprint.fieldCount = payload.data.items.length
+  payload.data.reportFieldConfig.fieldsFingerprint.codes = payload.data.items.map((item: { code: string }) => item.code)
+  return payload
+}
+
 describe('AttendanceReportFieldsSection', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -176,6 +209,104 @@ describe('AttendanceReportFieldsSection', () => {
     expect(panel?.textContent).toContain('={late_duration}+{early_leave_duration}')
     expect(panel?.textContent).toContain('=IF({attendance_days}>0,{work_duration},0)')
     expect(panel?.textContent).toContain('NOW, TODAY, lookup functions')
+  })
+
+  it('previews and saves an existing custom formula field inline', async () => {
+    const initial = formulaEditorPayload()
+    const updated = formulaEditorPayload('={late_duration}+{early_leave_duration}')
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonResponse(200, initial))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        data: {
+          ok: true,
+          value: 17,
+          references: ['early_leave_duration', 'late_duration'],
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        data: {
+          operation: 'patched',
+          field: updated.data.items.find((item: { code: string }) => item.code === 'net_anomaly_minutes'),
+          catalog: updated.data,
+        },
+      }))
+
+    mountSection()
+    await flushUi()
+
+    expect(container!.querySelector('[data-report-field-formula-edit="late_count"]')).toBeNull()
+    const editButton = container!.querySelector<HTMLButtonElement>('[data-report-field-formula-edit="net_anomaly_minutes"]')
+    expect(editButton).toBeTruthy()
+    editButton!.click()
+    await flushUi()
+
+    const textarea = container!.querySelector<HTMLTextAreaElement>('[data-report-field-formula-expression="net_anomaly_minutes"]')
+    expect(textarea).toBeTruthy()
+    textarea!.value = '={late_duration}+{early_leave_duration}'
+    textarea!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-report-field-formula-preview="net_anomaly_minutes"]')!.click()
+    await flushUi()
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance/report-fields/formula/preview?orgId=org-1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expression: '={late_duration}+{early_leave_duration}' }),
+    })
+    expect(container!.querySelector('[data-report-field-formula-preview-result]')?.textContent).toContain('Preview value: 17')
+    expect(container!.querySelector('[data-report-field-formula-preview-result]')?.textContent).toContain('early_leave_duration, late_duration')
+
+    container!.querySelector<HTMLButtonElement>('[data-report-field-formula-save="net_anomaly_minutes"]')!.click()
+    await flushUi()
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance/report-fields/net_anomaly_minutes/formula?orgId=org-1', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: expect.stringContaining('={late_duration}+{early_leave_duration}'),
+    })
+    expect(container!.textContent).toContain('Formula field saved.')
+    expect(container!.textContent).toContain('={late_duration}+{early_leave_duration}')
+    expect(container!.querySelector('[data-report-field-formula-editor="net_anomaly_minutes"]')).toBeNull()
+  })
+
+  it('creates a new custom formula field from the reference panel', async () => {
+    const updated = formulaEditorPayload('={work_duration}-{late_duration}')
+    const newField = updated.data.items.find((item: { code: string }) => item.code === 'net_anomaly_minutes')
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonResponse(200, populatedCatalogPayload()))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        data: {
+          operation: 'created',
+          field: newField,
+          catalog: updated.data,
+        },
+      }))
+
+    mountSection()
+    await flushUi()
+
+    container!.querySelector<HTMLInputElement>('[data-report-field-formula-create-code]')!.value = 'net_anomaly_minutes'
+    container!.querySelector<HTMLInputElement>('[data-report-field-formula-create-code]')!.dispatchEvent(new Event('input', { bubbles: true }))
+    container!.querySelector<HTMLInputElement>('[data-report-field-formula-create-name]')!.value = '异常净时长'
+    container!.querySelector<HTMLInputElement>('[data-report-field-formula-create-name]')!.dispatchEvent(new Event('input', { bubbles: true }))
+    container!.querySelector<HTMLTextAreaElement>('[data-report-field-formula-create-expression]')!.value = '={work_duration}-{late_duration}'
+    container!.querySelector<HTMLTextAreaElement>('[data-report-field-formula-create-expression]')!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-report-field-formula-create-save]')!.click()
+    await flushUi()
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance/report-fields/net_anomaly_minutes/formula?orgId=org-1', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: expect.stringContaining('"name":"异常净时长"'),
+    })
+    expect(container!.textContent).toContain('Formula field saved.')
+    expect(container!.textContent).toContain('net_anomaly_minutes')
+    expect(container!.textContent).toContain('={work_duration}-{late_duration}')
   })
 
   it('filters report fields by text and operational state', async () => {

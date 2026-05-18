@@ -24,6 +24,199 @@ describe('attendance report field formula engine wrapper', () => {
     formula_output_type: 'fld_formula_output_type',
   }
 
+  function createFormulaCatalogContext(recordsSeed: Array<{ id: string; data: Record<string, unknown> }> = []) {
+    const records = [...recordsSeed]
+    const context = {
+      api: {
+        database: null,
+        multitable: {
+          provisioning: {
+            ensureObject: vi.fn().mockResolvedValue({
+              baseId: 'base-1',
+              sheet: { id: 'sheet-1', baseId: 'base-1', name: '考勤统计字段目录' },
+              fields: [],
+            }),
+            ensureView: vi.fn().mockResolvedValue({ id: 'view-1' }),
+            findObjectSheet: vi.fn().mockResolvedValue({
+              id: 'sheet-1',
+              baseId: 'base-1',
+              name: '考勤统计字段目录',
+            }),
+            resolveFieldIds: vi.fn().mockResolvedValue(fieldIds),
+          },
+          records: {
+            queryRecords: vi.fn().mockImplementation(async () => records.map(record => ({
+              sheetId: 'sheet-1',
+              version: 1,
+              ...record,
+            }))),
+            createRecord: vi.fn().mockImplementation(async (input: { sheetId: string; data: Record<string, unknown> }) => {
+              const record = {
+                id: `rec-${records.length + 1}`,
+                sheetId: input.sheetId,
+                version: 1,
+                data: input.data,
+              }
+              records.push(record)
+              return record
+            }),
+            patchRecord: vi.fn().mockImplementation(async (input: { sheetId: string; recordId: string; changes: Record<string, unknown> }) => {
+              const target = records.find(record => record.id === input.recordId)
+              if (!target) throw new Error(`Record not found: ${input.recordId}`)
+              target.data = { ...target.data, ...input.changes }
+              return {
+                id: target.id,
+                sheetId: input.sheetId,
+                version: 2,
+                data: target.data,
+              }
+            }),
+          },
+        },
+      },
+    }
+    return { context, records }
+  }
+
+  it('creates a custom formula field through physical multitable field ids', async () => {
+    const { context } = createFormulaCatalogContext()
+
+    const result = await helpers.saveAttendanceReportFormulaField(
+      context,
+      'org-a',
+      { warn: vi.fn(), error: vi.fn() },
+      'net_anomaly_minutes',
+      {
+        name: '异常净时长',
+        category: 'anomaly',
+        unit: 'minutes',
+        reportVisible: true,
+        formulaEnabled: true,
+        formulaExpression: '={late_duration}+{early_leave_duration}',
+        formulaOutputType: 'duration_minutes',
+      },
+      { rawAliasesAllowed: true },
+    )
+
+    expect(result.operation).toBe('created')
+    expect(result.field).toMatchObject({
+      code: 'net_anomaly_minutes',
+      name: '异常净时长',
+      systemDefined: false,
+      formulaEnabled: true,
+      formulaExpression: '={late_duration}+{early_leave_duration}',
+      formulaValid: true,
+      formulaReferences: ['early_leave_duration', 'late_duration'],
+    })
+    expect(context.api.multitable.records.createRecord).toHaveBeenCalledWith({
+      sheetId: 'sheet-1',
+      data: expect.objectContaining({
+        fld_code: 'net_anomaly_minutes',
+        fld_name: '异常净时长',
+        fld_category: '异常统计字段',
+        fld_source: 'custom',
+        fld_formula_enabled: true,
+        fld_formula_expression: '={late_duration}+{early_leave_duration}',
+        fld_formula_scope: 'record',
+        fld_formula_output_type: 'duration_minutes',
+      }),
+    })
+    expect(context.api.multitable.records.patchRecord).not.toHaveBeenCalled()
+  })
+
+  it('patches an existing custom formula field and rejects invalid saves before writing', async () => {
+    const { context } = createFormulaCatalogContext([
+      {
+        id: 'rec-formula',
+        data: {
+          fld_code: 'net_anomaly_minutes',
+          fld_name: '异常净时长',
+          fld_category: '异常统计字段',
+          fld_source: 'custom',
+          fld_unit: 'minutes',
+          fld_enabled: true,
+          fld_visible: true,
+          fld_sort: 4500,
+          fld_formula_enabled: true,
+          fld_formula_expression: '={late_duration}+1',
+          fld_formula_scope: 'record',
+          fld_formula_output_type: 'duration_minutes',
+        },
+      },
+    ])
+
+    const result = await helpers.saveAttendanceReportFormulaField(
+      context,
+      'org-a',
+      { warn: vi.fn(), error: vi.fn() },
+      'net_anomaly_minutes',
+      {
+        formulaEnabled: true,
+        formulaExpression: '={late_duration}+{early_leave_duration}',
+        formulaOutputType: 'duration_minutes',
+      },
+      { rawAliasesAllowed: true },
+    )
+
+    expect(result.operation).toBe('patched')
+    expect(result.field).toMatchObject({
+      code: 'net_anomaly_minutes',
+      formulaExpression: '={late_duration}+{early_leave_duration}',
+      formulaValid: true,
+    })
+    expect(context.api.multitable.records.patchRecord).toHaveBeenCalledWith({
+      sheetId: 'sheet-1',
+      recordId: 'rec-formula',
+      changes: expect.objectContaining({
+        fld_code: 'net_anomaly_minutes',
+        fld_formula_enabled: true,
+        fld_formula_expression: '={late_duration}+{early_leave_duration}',
+      }),
+    })
+    expect(context.api.multitable.records.createRecord).not.toHaveBeenCalled()
+
+    await expect(helpers.saveAttendanceReportFormulaField(
+      context,
+      'org-a',
+      { warn: vi.fn(), error: vi.fn() },
+      'net_anomaly_minutes',
+      {
+        formulaEnabled: true,
+        formulaExpression: '={missing_reference}+1',
+        formulaOutputType: 'duration_minutes',
+      },
+      { rawAliasesAllowed: true },
+    )).rejects.toMatchObject({
+      status: 400,
+      code: 'INVALID_FORMULA',
+      message: 'Unknown attendance report field reference: missing_reference.',
+    })
+    expect(context.api.multitable.records.patchRecord).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects system, dynamic subtype, reserved, and malformed formula field codes', async () => {
+    const { context } = createFormulaCatalogContext()
+    const logger = { warn: vi.fn(), error: vi.fn() }
+    const input = {
+      formulaEnabled: true,
+      formulaExpression: '={late_duration}+1',
+      formulaOutputType: 'duration_minutes',
+    }
+
+    await expect(helpers.saveAttendanceReportFormulaField(context, 'org-a', logger, 'late_duration', input))
+      .rejects.toMatchObject({ status: 400, code: 'READ_ONLY_FIELD' })
+    await expect(helpers.saveAttendanceReportFormulaField(context, 'org-a', logger, 'leave_type_annual_duration', input))
+      .rejects.toMatchObject({ status: 400, code: 'READ_ONLY_FIELD' })
+    await expect(helpers.saveAttendanceReportFormulaField(context, 'org-a', logger, 'late_minutes', input))
+      .rejects.toMatchObject({ status: 400, code: 'RESERVED_FIELD_CODE' })
+    await expect(helpers.saveAttendanceReportFormulaField(context, 'org-a', logger, 'Bad-Code', input))
+      .rejects.toMatchObject({ status: 400, code: 'INVALID_FIELD_CODE' })
+
+    expect(context.api.multitable.provisioning.ensureObject).not.toHaveBeenCalled()
+    expect(context.api.multitable.records.createRecord).not.toHaveBeenCalled()
+    expect(context.api.multitable.records.patchRecord).not.toHaveBeenCalled()
+  })
+
   it('merges custom formula fields and evaluates them through the formula API', async () => {
     const merged = helpers.mergeAttendanceReportFieldDefinitions([
       {
