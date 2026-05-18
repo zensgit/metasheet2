@@ -8,7 +8,7 @@
           打开 Base、继续清洗表或从模板开始。Grid 和 Spreadsheets 仍保留旧链接，但默认工作入口收敛到多维表。
         </p>
       </div>
-      <button class="multitable-home__refresh" :disabled="loading" @click="loadBases">
+      <button class="multitable-home__refresh" :disabled="loading" @click="loadHomeData">
         {{ loading ? '刷新中...' : '刷新' }}
       </button>
     </header>
@@ -33,6 +33,47 @@
     </section>
 
     <p v-if="errorMessage" class="multitable-home__error" role="alert">{{ errorMessage }}</p>
+    <p v-if="templateError" class="multitable-home__warning" role="status">{{ templateError }}</p>
+
+    <section class="multitable-home__panel" aria-label="Template quick start">
+      <div class="multitable-home__panel-head">
+        <h2>模板快速开始</h2>
+        <span>{{ templates.length }} 个</span>
+      </div>
+
+      <div v-if="templateLoading" class="multitable-home__state">正在加载模板...</div>
+      <div v-else-if="!templates.length" class="multitable-home__empty">
+        暂无可用模板。你仍可直接新建空白 Base。
+      </div>
+      <div v-else class="multitable-home__template-grid">
+        <article
+          v-for="template in templates"
+          :key="template.id"
+          class="multitable-home__template-card"
+          :style="{ borderColor: template.color || '#cbd5e1' }"
+        >
+          <div class="multitable-home__template-top">
+            <span class="multitable-home__template-icon" :style="{ background: template.color || '#2563eb' }">
+              {{ template.icon || template.name.slice(0, 1).toUpperCase() }}
+            </span>
+            <span class="multitable-home__template-category">{{ template.category }}</span>
+          </div>
+          <h3>{{ template.name }}</h3>
+          <p>{{ template.description }}</p>
+          <small>
+            {{ template.sheets.length }} 个 Sheet ·
+            {{ countTemplateViews(template) }} 个视图
+          </small>
+          <button
+            class="multitable-home__open multitable-home__open--wide"
+            :disabled="installingTemplateId === template.id"
+            @click="installTemplateAndOpen(template)"
+          >
+            {{ installingTemplateId === template.id ? '创建中...' : '使用模板' }}
+          </button>
+        </article>
+      </div>
+    </section>
 
     <section class="multitable-home__panel">
       <div class="multitable-home__panel-head">
@@ -70,16 +111,27 @@
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { multitableClient } from '../multitable/api/client'
-import type { MetaBase, MetaContext, MetaSheet, MetaView } from '../multitable/types'
+import type {
+  InstallTemplateResult,
+  MetaBase,
+  MetaContext,
+  MetaSheet,
+  MetaTemplate,
+  MetaView,
+} from '../multitable/types'
 import { AppRouteNames } from '../router/types'
 
 const router = useRouter()
 
 const bases = ref<MetaBase[]>([])
+const templates = ref<MetaTemplate[]>([])
 const loading = ref(false)
+const templateLoading = ref(false)
 const creating = ref(false)
 const openingBaseId = ref<string | null>(null)
+const installingTemplateId = ref<string | null>(null)
 const errorMessage = ref('')
+const templateError = ref('')
 const newBaseName = ref('')
 
 function resolveOpenTarget(context: MetaContext): { sheet: MetaSheet; view: MetaView } | null {
@@ -87,6 +139,17 @@ function resolveOpenTarget(context: MetaContext): { sheet: MetaSheet; view: Meta
   if (!sheet) return null
   const view = context.views.find((candidate) => candidate.sheetId === sheet.id) ?? context.views[0] ?? null
   return view ? { sheet, view } : null
+}
+
+function resolveTemplateTarget(result: InstallTemplateResult): { sheet: MetaSheet; view: MetaView } | null {
+  const sheet = result.sheets[0] ?? null
+  if (!sheet) return null
+  const view = result.views.find((candidate) => candidate.sheetId === sheet.id) ?? result.views[0] ?? null
+  return view ? { sheet, view } : null
+}
+
+function countTemplateViews(template: MetaTemplate): number {
+  return template.sheets.reduce((sum, sheet) => sum + sheet.views.length, 0)
 }
 
 async function loadBases(): Promise<void> {
@@ -100,6 +163,23 @@ async function loadBases(): Promise<void> {
   } finally {
     loading.value = false
   }
+}
+
+async function loadTemplates(): Promise<void> {
+  templateLoading.value = true
+  templateError.value = ''
+  try {
+    const data = await multitableClient.listTemplates()
+    templates.value = data.templates ?? []
+  } catch (error) {
+    templateError.value = error instanceof Error ? error.message : '模板加载失败，可继续新建空白 Base。'
+  } finally {
+    templateLoading.value = false
+  }
+}
+
+async function loadHomeData(): Promise<void> {
+  await Promise.all([loadBases(), loadTemplates()])
 }
 
 async function openBase(base: MetaBase): Promise<void> {
@@ -121,6 +201,33 @@ async function openBase(base: MetaBase): Promise<void> {
     errorMessage.value = error instanceof Error ? error.message : '打开多维表失败'
   } finally {
     openingBaseId.value = null
+  }
+}
+
+async function installTemplateAndOpen(template: MetaTemplate): Promise<void> {
+  if (installingTemplateId.value) return
+  installingTemplateId.value = template.id
+  errorMessage.value = ''
+  try {
+    const result = await multitableClient.installTemplate(template.id, { baseName: `${template.name} Base` })
+    if (!bases.value.some((base) => base.id === result.base.id)) {
+      bases.value = [result.base, ...bases.value]
+    }
+    const target = resolveTemplateTarget(result)
+    if (!target) {
+      errorMessage.value = '模板已创建，但默认视图尚未就绪。请刷新后重试。'
+      await loadBases()
+      return
+    }
+    await router.push({
+      name: AppRouteNames.MULTITABLE,
+      params: { sheetId: target.sheet.id, viewId: target.view.id },
+      query: { baseId: result.base.id },
+    })
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '模板创建失败'
+  } finally {
+    installingTemplateId.value = null
   }
 }
 
@@ -151,7 +258,7 @@ async function createBaseAndOpen(): Promise<void> {
   }
 }
 
-onMounted(loadBases)
+onMounted(loadHomeData)
 </script>
 
 <style scoped>
@@ -297,6 +404,64 @@ onMounted(loadBases)
   padding: 18px;
 }
 
+.multitable-home__template-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+  padding: 18px;
+}
+
+.multitable-home__template-card {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  border: 1px solid #cbd5e1;
+  border-radius: 20px;
+  padding: 16px;
+  background: linear-gradient(180deg, #fff 0%, #f8fafc 100%);
+}
+
+.multitable-home__template-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.multitable-home__template-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 14px;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-weight: 800;
+}
+
+.multitable-home__template-category {
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: #e0f2fe;
+  color: #0369a1;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.multitable-home__template-card h3,
+.multitable-home__template-card p {
+  margin: 0;
+}
+
+.multitable-home__template-card p {
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.multitable-home__template-card small {
+  color: #64748b;
+}
+
 .multitable-home__card {
   display: grid;
   grid-template-columns: auto 1fr auto;
@@ -335,6 +500,20 @@ onMounted(loadBases)
   padding: 12px 14px;
   background: #fef2f2;
   color: #b91c1c;
+}
+
+.multitable-home__warning {
+  max-width: 1120px;
+  margin: 18px auto 0;
+  border: 1px solid #fde68a;
+  border-radius: 16px;
+  padding: 12px 14px;
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.multitable-home__open--wide {
+  justify-self: start;
 }
 
 button:disabled {
