@@ -38,6 +38,7 @@ function parseArgs(argv = process.argv.slice(2)) {
   const opts = {
     postdeploySmoke: '',
     packageVerify: '',
+    gateContractCheck: '',
     preflightPacket: '',
     liveEvidenceReport: '',
     outDir: '',
@@ -54,6 +55,10 @@ function parseArgs(argv = process.argv.slice(2)) {
         break
       case '--package-verify':
         opts.packageVerify = readRequiredValue(argv, i, arg)
+        i += 1
+        break
+      case '--gate-contract-check':
+        opts.gateContractCheck = readRequiredValue(argv, i, arg)
         i += 1
         break
       case '--preflight-packet':
@@ -91,6 +96,7 @@ Combines K3 WISE delivery evidence into one readiness decision.
 Options:
   --postdeploy-smoke <path>      integration-k3wise-postdeploy-smoke.json
   --package-verify <path>        multitable-onprem-package-verify report JSON
+  --gate-contract-check <path>   integration-k3wise-gate-contract-check.json
   --preflight-packet <path>      packet.json from live PoC preflight
   --live-evidence-report <path>  integration-k3wise-live-poc-evidence-report.json
   --out-dir <dir>                Output directory, default ${DEFAULT_OUTPUT_ROOT}/<timestamp>
@@ -235,6 +241,70 @@ function evaluatePackageVerify(report) {
   })
 }
 
+function compactGateContractDetails(report, details = {}) {
+  const summary = isPlainObject(report?.summary) ? report.summary : {}
+  const sections = isPlainObject(report?.sections) ? report.sections : {}
+  const webapiReadList = isPlainObject(sections.webapiReadList) ? sections.webapiReadList : {}
+  const relationshipMapping = isPlainObject(sections.relationshipMapping) ? sections.relationshipMapping : {}
+  return {
+    ...details,
+    summary: {
+      pass: Number.isFinite(Number(summary.pass)) ? Number(summary.pass) : 0,
+      blocked: Number.isFinite(Number(summary.blocked)) ? Number(summary.blocked) : 0,
+      fail: Number.isFinite(Number(summary.fail)) ? Number(summary.fail) : 0,
+    },
+    webapiReadList: {
+      answered: Number.isFinite(Number(webapiReadList.answered)) ? Number(webapiReadList.answered) : 0,
+      requiredAnswers: Number.isFinite(Number(webapiReadList.requiredAnswers)) ? Number(webapiReadList.requiredAnswers) : 0,
+    },
+    relationshipMapping: {
+      answered: Number.isFinite(Number(relationshipMapping.answered)) ? Number(relationshipMapping.answered) : 0,
+      requiredAnswers: Number.isFinite(Number(relationshipMapping.requiredAnswers)) ? Number(relationshipMapping.requiredAnswers) : 0,
+    },
+  }
+}
+
+function evaluateGateContractCheck(report) {
+  if (!report) {
+    return gate('gate-contract-check', 'K3 read/list and relationship GATE contract', 'pending', {
+      reason: 'GATE contract check report not provided',
+      requiredFor: 'post-GATE read/list and relationship runtime work',
+    })
+  }
+  if (!isPlainObject(report)) {
+    return gate('gate-contract-check', 'K3 read/list and relationship GATE contract', 'fail', {
+      reason: 'GATE contract check report must be a JSON object',
+    })
+  }
+
+  const stage1Lock = isPlainObject(report.stage1Lock) ? report.stage1Lock : {}
+  if (stage1Lock.status !== 'held') {
+    return gate('gate-contract-check', 'K3 read/list and relationship GATE contract', 'fail', compactGateContractDetails(report, {
+      reason: 'GATE contract check must keep the Stage 1 Lock held',
+      decision: report.decision || null,
+    }))
+  }
+
+  if (report.ok === true && report.decision === 'PASS') {
+    return gate('gate-contract-check', 'K3 read/list and relationship GATE contract', 'pass', compactGateContractDetails(report, {
+      reason: 'O1-O6 and R1-R7 customer evidence passed the machine check',
+      decision: 'PASS',
+    }))
+  }
+
+  if (report.decision === 'GATE_BLOCKED') {
+    return gate('gate-contract-check', 'K3 read/list and relationship GATE contract', 'fail', compactGateContractDetails(report, {
+      reason: 'GATE contract check returned GATE_BLOCKED; customer O/R evidence is incomplete',
+      decision: 'GATE_BLOCKED',
+    }))
+  }
+
+  return gate('gate-contract-check', 'K3 read/list and relationship GATE contract', 'fail', compactGateContractDetails(report, {
+    reason: `GATE contract check decision is ${report.decision || 'missing'}`,
+    decision: report.decision || null,
+  }))
+}
+
 function evaluatePreflightPacket(packet) {
   if (!packet) {
     return gate('preflight-packet', 'Customer GATE preflight packet', 'pending', {
@@ -315,6 +385,7 @@ function decide(gates) {
 
 function nextAction(decision, gates = []) {
   const packageVerify = gates.find((item) => item.id === 'package-verify')
+  const gateContract = gates.find((item) => item.id === 'gate-contract-check')
   const preflight = gates.find((item) => item.id === 'preflight-packet')
 
   switch (decision) {
@@ -325,6 +396,9 @@ function nextAction(decision, gates = []) {
     case INTERNAL_READY_DECISION:
       if (packageVerify?.status === 'pending') {
         return 'Run the on-prem package verifier and capture its JSON report, then wait for customer GATE answers.'
+      }
+      if (gateContract?.status === 'pending') {
+        return 'When customer O1-O6/R1-R7 evidence arrives, run the GATE contract checker, then run live preflight to produce a preflight-ready packet.'
       }
       if (preflight?.status === 'pending') {
         return 'Wait for customer GATE answers, then run live preflight to produce a preflight-ready packet.'
@@ -339,6 +413,7 @@ function buildReadinessReport(inputs = {}, { generatedAt = new Date().toISOStrin
   const gates = [
     evaluatePostdeploySmoke(inputs.postdeploySmoke),
     evaluatePackageVerify(inputs.packageVerify),
+    evaluateGateContractCheck(inputs.gateContractCheck),
     evaluatePreflightPacket(inputs.preflightPacket),
     evaluateLiveEvidenceReport(inputs.liveEvidenceReport),
   ]
@@ -418,13 +493,14 @@ async function runCli(argv = process.argv.slice(2)) {
     printHelp()
     return 0
   }
-  const [postdeploySmoke, packageVerify, preflightPacket, liveEvidenceReport] = await Promise.all([
+  const [postdeploySmoke, packageVerify, gateContractCheck, preflightPacket, liveEvidenceReport] = await Promise.all([
     readJsonFile(opts.postdeploySmoke, 'postdeploy smoke'),
     readJsonFile(opts.packageVerify, 'package verify'),
+    readJsonFile(opts.gateContractCheck, 'GATE contract check'),
     readJsonFile(opts.preflightPacket, 'preflight packet'),
     readJsonFile(opts.liveEvidenceReport, 'live evidence report'),
   ])
-  const report = buildReadinessReport({ postdeploySmoke, packageVerify, preflightPacket, liveEvidenceReport })
+  const report = buildReadinessReport({ postdeploySmoke, packageVerify, gateContractCheck, preflightPacket, liveEvidenceReport })
   const outDir = path.resolve(opts.outDir || path.join(DEFAULT_OUTPUT_ROOT, nowStamp()))
   await mkdir(outDir, { recursive: true })
   const jsonPath = path.join(outDir, 'integration-k3wise-delivery-readiness.json')
@@ -462,6 +538,7 @@ export {
   buildReadinessReport,
   compactSqlExecutorDiagnostic,
   decide,
+  evaluateGateContractCheck,
   evaluateLiveEvidenceReport,
   evaluatePackageVerify,
   evaluatePostdeploySmoke,

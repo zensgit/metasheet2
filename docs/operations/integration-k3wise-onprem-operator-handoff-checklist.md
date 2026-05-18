@@ -241,6 +241,7 @@ Compile the handoff record before and after live evidence:
 node scripts/ops/integration-k3wise-delivery-readiness.mjs \
   --postdeploy-smoke artifacts/integration-k3wise/internal-trial/postdeploy-smoke/integration-k3wise-postdeploy-smoke.json \
   --package-verify artifacts/integration-k3wise/delivery-readiness/package-verify.zip.json \
+  --gate-contract-check artifacts/integration-k3wise/gate-contract-check/integration-k3wise-gate-contract-check.json \
   --preflight-packet artifacts/integration-k3wise/live-poc/packet/integration-k3wise-live-poc-packet.json \
   --live-evidence-report artifacts/integration-k3wise/live-poc/evidence/integration-k3wise-live-poc-evidence-report.json \
   --out-dir artifacts/integration-k3wise/delivery-readiness/customer-signed-off \

@@ -201,10 +201,16 @@ available it can advance to `CUSTOMER_TRIAL_READY`.
 node scripts/ops/integration-k3wise-delivery-readiness.mjs \
   --postdeploy-smoke artifacts/integration-k3wise/internal-trial/postdeploy-smoke/integration-k3wise-postdeploy-smoke.json \
   --package-verify artifacts/integration-k3wise/delivery-readiness/package-verify.json \
+  --gate-contract-check artifacts/integration-k3wise/gate-contract-check/integration-k3wise-gate-contract-check.json \
   --preflight-packet <packet-dir>/integration-k3wise-live-poc-packet.json \
   --out-dir artifacts/integration-k3wise/delivery-readiness/customer-ready \
   --fail-on-blocked
 ```
+
+The `--gate-contract-check` input is the JSON report written by
+`scripts/ops/integration-k3wise-gate-contract-check.mjs`. If O1-O6/R1-R7
+customer evidence is not back yet, omit that flag; readiness remains an internal
+or customer-trial status and the GATE-contract row stays `pending`.
 
 After the live PoC evidence compiler returns `decision=PASS`, rerun with
 `--live-evidence-report` to produce `CUSTOMER_TRIAL_SIGNED_OFF`. The output is
