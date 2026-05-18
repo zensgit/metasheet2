@@ -291,6 +291,81 @@
     </div>
 
     <div
+      v-if="formulaDependencyGraph && reportFields.length > 0 && !hasActiveFieldFilters"
+      class="attendance-report-fields__basis attendance-report-fields__formula-dependencies"
+      data-report-field-formula-dependency-graph
+    >
+      <div class="attendance-report-fields__basis-header">
+        <div>
+          <div class="attendance-report-fields__basis-title">
+            {{ tr('Formula dependencies', '公式依赖') }}
+          </div>
+          <div class="attendance__section-meta">
+            {{ tr('Formula fields', '公式字段') }}: {{ formulaDependencyGraph.formulaFieldCount }}
+            <span> · {{ tr('References', '引用') }}: {{ formulaDependencyGraph.edgeCount }}</span>
+            <span v-if="formulaDependencyGraph.blockedFormulaReferenceCount"> · {{ tr('Blocked formula refs', '已阻止公式互引') }}: {{ formulaDependencyGraph.blockedFormulaReferenceCount }}</span>
+          </div>
+        </div>
+        <span
+          class="attendance-report-fields__status-pill"
+          :class="formulaDependencyGraph.hasCycles ? 'attendance-report-fields__status-pill--warn' : 'attendance-report-fields__status-pill--ok'"
+        >
+          {{ formulaDependencyGraph.hasCycles ? tr('Cycle detected', '检测到循环') : tr('No cycles', '无循环') }}
+        </span>
+      </div>
+      <div
+        v-if="formulaDependencyGraph.hasCycles"
+        class="attendance__status attendance__status--warn"
+        role="alert"
+        data-report-field-formula-dependency-cycles
+      >
+        {{ tr('Formula-to-formula cycles are blocked in v1:', 'v1 已阻止公式字段互引循环：') }}
+        <code
+          v-for="cycle in formulaDependencyGraph.cycles"
+          :key="cycle.join('>')"
+        >
+          {{ cycle.join(' -> ') }}
+        </code>
+      </div>
+      <div
+        v-else-if="formulaDependencyGraph.blockedFormulaReferenceCount > 0"
+        class="attendance__status attendance__status--warn"
+        role="status"
+        data-report-field-formula-dependency-blocked
+      >
+        {{ tr('Formula-to-formula references are blocked in v1:', 'v1 已阻止公式字段互相引用：') }}
+        <code
+          v-for="edge in formulaDependencyGraph.blockedFormulaReferences"
+          :key="`${edge.from}->${edge.to}`"
+        >
+          {{ edge.from }} -> {{ edge.to }}
+        </code>
+      </div>
+      <div
+        v-else
+        class="attendance__field-hint"
+        data-report-field-formula-dependency-ok
+      >
+        {{ tr('Current formulas only reference system/custom source fields. Formula-to-formula references remain blocked.', '当前公式只引用系统/自定义源字段；公式字段互引仍保持禁用。') }}
+      </div>
+      <div
+        v-if="formulaDependencyGraph.edges.length > 0"
+        class="attendance-report-fields__formula-dependency-edges"
+      >
+        <span
+          v-for="edge in formulaDependencyGraph.edges.slice(0, 10)"
+          :key="`${edge.from}->${edge.to}`"
+          class="attendance-report-fields__formula-dependency-edge"
+          :class="{ 'attendance-report-fields__formula-dependency-edge--formula': edge.type === 'formula' }"
+        >
+          <code>{{ edge.from }}</code>
+          <span>→</span>
+          <code>{{ edge.to }}</code>
+        </span>
+      </div>
+    </div>
+
+    <div
       v-if="multitableDetailRows.length > 0"
       class="attendance-report-fields__basis"
       data-report-field-multitable-status
@@ -645,6 +720,31 @@ interface AttendanceReportFieldItem {
   formulaReferences?: string[]
 }
 
+interface FormulaDependencyNode {
+  code: string
+  name?: string
+  formulaValid?: boolean
+  formulaError?: string | null
+  referenceCount?: number
+}
+
+interface FormulaDependencyEdge {
+  from: string
+  to: string
+  type: 'formula' | 'field' | string
+}
+
+interface FormulaDependencyGraph {
+  formulaFieldCount: number
+  edgeCount: number
+  blockedFormulaReferenceCount: number
+  hasCycles: boolean
+  nodes: FormulaDependencyNode[]
+  edges: FormulaDependencyEdge[]
+  blockedFormulaReferences: FormulaDependencyEdge[]
+  cycles: string[][]
+}
+
 interface AttendanceReportFieldsPayload {
   categories?: AttendanceReportFieldCategory[]
   items?: AttendanceReportFieldItem[]
@@ -656,6 +756,7 @@ interface AttendanceReportFieldsPayload {
       fieldCount?: number
       codes?: string[]
     }
+    formulaDependencyGraph?: FormulaDependencyGraph
   }
   multitable?: {
     available?: boolean
@@ -806,6 +907,7 @@ const formulaReferenceExamples = [
 ]
 
 const reportFields = computed(() => reportFieldsPayload.value.items ?? [])
+const formulaDependencyGraph = computed(() => reportFieldsPayload.value.reportFieldConfig?.formulaDependencyGraph ?? null)
 const droppedReservedCodes = computed(() => reportFieldsPayload.value.droppedReservedCodes ?? [])
 const enabledCount = computed(() => reportFields.value.filter(field => field.enabled).length)
 const visibleCount = computed(() => reportFields.value.filter(field => field.reportVisible).length)
@@ -1758,6 +1860,36 @@ watch(
 
 .attendance-report-fields__formula-create-expression {
   min-width: 260px;
+}
+
+.attendance-report-fields__formula-dependency-edges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.attendance-report-fields__formula-dependency-edge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border: 1px solid #d8dee8;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 12px;
+}
+
+.attendance-report-fields__formula-dependency-edge--formula {
+  border-color: #fdba74;
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.attendance-report-fields__formula-dependencies .attendance__status code {
+  display: inline-block;
+  margin-left: 6px;
 }
 
 .attendance-report-fields__category {

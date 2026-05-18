@@ -1456,6 +1456,111 @@ function applyAttendanceReportFormulaValidation(items, options = {}) {
   })
 }
 
+function buildAttendanceReportFormulaDependencyGraph(items) {
+  const sourceItems = Array.isArray(items) ? items : []
+  const formulaFields = sourceItems
+    .filter(field => field?.formulaEnabled)
+    .map(field => ({
+      code: normalizeCatalogString(field.code),
+      name: field.name || field.code,
+      formulaValid: field.formulaValid !== false,
+      formulaError: field.formulaError || null,
+      references: Array.from(new Set(
+        Array.isArray(field.formulaReferences)
+          ? field.formulaReferences.map(reference => normalizeCatalogString(reference)).filter(Boolean)
+          : extractAttendanceReportFormulaReferences(field.formulaExpression),
+      )).sort(),
+    }))
+    .filter(field => field.code)
+    .sort((left, right) => left.code.localeCompare(right.code))
+  const formulaCodes = new Set(formulaFields.map(field => field.code))
+  const edges = []
+  const blockedFormulaReferences = []
+  for (const field of formulaFields) {
+    for (const reference of field.references) {
+      const edge = {
+        from: field.code,
+        to: reference,
+        type: formulaCodes.has(reference) ? 'formula' : 'field',
+      }
+      edges.push(edge)
+      if (edge.type === 'formula') {
+        blockedFormulaReferences.push({ from: field.code, to: reference })
+      }
+    }
+  }
+  edges.sort((left, right) => {
+    const fromOrder = left.from.localeCompare(right.from)
+    return fromOrder !== 0 ? fromOrder : left.to.localeCompare(right.to)
+  })
+  blockedFormulaReferences.sort((left, right) => {
+    const fromOrder = left.from.localeCompare(right.from)
+    return fromOrder !== 0 ? fromOrder : left.to.localeCompare(right.to)
+  })
+
+  const adjacency = new Map()
+  for (const field of formulaFields) adjacency.set(field.code, [])
+  for (const edge of blockedFormulaReferences) {
+    adjacency.get(edge.from)?.push(edge.to)
+  }
+  for (const refs of adjacency.values()) refs.sort()
+
+  const cycles = []
+  const seenCycles = new Set()
+  const visited = new Set()
+  const visiting = new Set()
+
+  function rememberCycle(path, target) {
+    const start = path.indexOf(target)
+    if (start === -1) return
+    const cycle = [...path.slice(start), target]
+    const body = cycle.slice(0, -1)
+    const rotations = body.map((_, index) => {
+      const rotated = [...body.slice(index), ...body.slice(0, index)]
+      return [...rotated, rotated[0]].join('>')
+    })
+    const key = rotations.sort()[0]
+    if (seenCycles.has(key)) return
+    seenCycles.add(key)
+    cycles.push(cycle)
+  }
+
+  function visit(code, path) {
+    if (visiting.has(code)) {
+      rememberCycle(path, code)
+      return
+    }
+    if (visited.has(code)) return
+    visiting.add(code)
+    const nextPath = [...path, code]
+    for (const next of adjacency.get(code) || []) {
+      visit(next, nextPath)
+    }
+    visiting.delete(code)
+    visited.add(code)
+  }
+
+  for (const field of formulaFields) visit(field.code, [])
+  cycles.sort((left, right) => left.join('>').localeCompare(right.join('>')))
+
+  return {
+    formulaFieldCount: formulaFields.length,
+    edgeCount: edges.length,
+    blockedFormulaReferenceCount: blockedFormulaReferences.length,
+    hasCycles: cycles.length > 0,
+    nodes: formulaFields.map(field => ({
+      code: field.code,
+      name: field.name,
+      formulaValid: field.formulaValid,
+      formulaError: field.formulaError,
+      referenceCount: field.references.length,
+    })),
+    edges,
+    blockedFormulaReferences,
+    cycles,
+  }
+}
+
 function createAttendanceReportFormulaSaveError(status, code, message) {
   const error = new Error(message)
   error.status = status
@@ -2224,6 +2329,7 @@ function buildAttendanceReportFieldCatalogFallback(orgId, reason, error, options
     seeded: 0,
     existing: 0,
   }
+  const formulaDependencyGraph = buildAttendanceReportFormulaDependencyGraph(items)
   return {
     categories: cloneAttendanceReportFieldCategories(),
     items,
@@ -2232,6 +2338,7 @@ function buildAttendanceReportFieldCatalogFallback(orgId, reason, error, options
     reportFieldConfig: buildAttendanceReportFieldConfig({
       fields: resolveAttendanceRecordReportFields(items),
       formulaSourceFields: resolveAttendanceFormulaSourceFields(items),
+      formulaDependencyGraph,
       multitable,
     }),
   }
@@ -2329,6 +2436,7 @@ async function buildAttendanceReportFieldCatalogResponse(context, orgId, logger,
       extraSystemDefinitions: dynamicSubtype.definitions,
     })
     const droppedReservedCodes = getAttendanceReportFieldDroppedReservedCodes(records, catalog.fieldIds)
+    const formulaDependencyGraph = buildAttendanceReportFormulaDependencyGraph(items)
     const multitable = {
       available: true,
       degraded: false,
@@ -2349,6 +2457,7 @@ async function buildAttendanceReportFieldCatalogResponse(context, orgId, logger,
       reportFieldConfig: buildAttendanceReportFieldConfig({
         fields: resolveAttendanceRecordReportFields(items),
         formulaSourceFields: resolveAttendanceFormulaSourceFields(items),
+        formulaDependencyGraph,
         multitable,
       }),
     }
@@ -2553,6 +2662,7 @@ function buildAttendanceReportFieldConfig(reportFields) {
   const formulaSourceFields = Array.isArray(reportFields?.formulaSourceFields)
     ? reportFields.formulaSourceFields
     : []
+  const formulaDependencyGraph = reportFields?.formulaDependencyGraph || buildAttendanceReportFormulaDependencyGraph([])
   return {
     multitable: reportFields?.multitable || {
       available: false,
@@ -2560,6 +2670,7 @@ function buildAttendanceReportFieldConfig(reportFields) {
       reason: 'REPORT_FIELD_CONFIG_UNAVAILABLE',
     },
     fieldsFingerprint: buildAttendanceReportFieldConfigFingerprint(fields, { formulaSourceFields }),
+    formulaDependencyGraph,
   }
 }
 
@@ -9926,6 +10037,7 @@ module.exports = {
     loadApprovedMinutesRange,
     resolveAttendanceRecordReportFields,
     resolveAttendanceFormulaSourceFields,
+    buildAttendanceReportFormulaDependencyGraph,
     validateAttendanceReportFormulaExpression,
     previewAttendanceReportFormula,
     saveAttendanceReportFormulaField,

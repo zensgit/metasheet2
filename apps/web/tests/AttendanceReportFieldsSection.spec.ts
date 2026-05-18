@@ -69,6 +69,21 @@ function populatedCatalogPayload() {
             'workday_overtime_duration',
           ],
         },
+        formulaDependencyGraph: {
+          formulaFieldCount: 1,
+          edgeCount: 2,
+          blockedFormulaReferenceCount: 0,
+          hasCycles: false,
+          nodes: [
+            { code: 'late_count', name: '迟到次数', formulaValid: true, formulaError: null, referenceCount: 2 },
+          ],
+          edges: [
+            { from: 'late_count', to: 'early_leave_duration', type: 'field' },
+            { from: 'late_count', to: 'late_duration', type: 'field' },
+          ],
+          blockedFormulaReferences: [],
+          cycles: [],
+        },
       },
     },
   }
@@ -209,6 +224,42 @@ describe('AttendanceReportFieldsSection', () => {
     expect(panel?.textContent).toContain('={late_duration}+{early_leave_duration}')
     expect(panel?.textContent).toContain('=IF({attendance_days}>0,{work_duration},0)')
     expect(panel?.textContent).toContain('NOW, TODAY, lookup functions')
+  })
+
+  it('renders formula dependency graph summary and blocked formula references', async () => {
+    const payload = formulaEditorPayload('={late_count}+1') as any
+    payload.data.reportFieldConfig.formulaDependencyGraph = {
+      formulaFieldCount: 2,
+      edgeCount: 3,
+      blockedFormulaReferenceCount: 1,
+      hasCycles: false,
+      nodes: [
+        { code: 'late_count', name: '迟到次数', formulaValid: true, formulaError: null, referenceCount: 2 },
+        { code: 'net_anomaly_minutes', name: '异常净时长', formulaValid: false, formulaError: 'Formula field reference late_count is not supported in v1.', referenceCount: 1 },
+      ],
+      edges: [
+        { from: 'late_count', to: 'early_leave_duration', type: 'field' },
+        { from: 'late_count', to: 'late_duration', type: 'field' },
+        { from: 'net_anomaly_minutes', to: 'late_count', type: 'formula' },
+      ],
+      blockedFormulaReferences: [
+        { from: 'net_anomaly_minutes', to: 'late_count', type: 'formula' },
+      ],
+      cycles: [],
+    }
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse(200, payload))
+
+    mountSection()
+    await flushUi()
+
+    const graph = container!.querySelector('[data-report-field-formula-dependency-graph]')
+    expect(graph).toBeTruthy()
+    expect(graph?.textContent).toContain('Formula dependencies')
+    expect(graph?.textContent).toContain('Formula fields: 2')
+    expect(graph?.textContent).toContain('References: 3')
+    expect(graph?.textContent).toContain('Blocked formula refs: 1')
+    expect(graph?.textContent).toContain('No cycles')
+    expect(container!.querySelector('[data-report-field-formula-dependency-blocked]')?.textContent).toContain('net_anomaly_minutes -> late_count')
   })
 
   it('renders opt-in custom formula source mode metadata', async () => {

@@ -198,6 +198,11 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(fallback.multitable.available).toBe(false)
     expect(fallback.multitable.projectId).toBe('org-z:attendance')
     expect(fallback.items.some((field: { code: string }) => field.code === 'employee_name')).toBe(true)
+    expect(fallback.reportFieldConfig.formulaDependencyGraph).toMatchObject({
+      formulaFieldCount: 0,
+      edgeCount: 0,
+      hasCycles: false,
+    })
   })
 
   it('reports dropped reserved-code shadow fields', async () => {
@@ -250,6 +255,71 @@ describe('attendance report field catalog multitable foundation', () => {
       { warn: vi.fn() },
     )
     expect(fallback.droppedReservedCodes).toEqual([])
+  })
+
+  it('returns formula dependency graph in catalog response report config', async () => {
+    const fieldIds = {
+      field_code: 'fld_code',
+      field_name: 'fld_name',
+      category: 'fld_category',
+      source: 'fld_source',
+      unit: 'fld_unit',
+      enabled: 'fld_enabled',
+      report_visible: 'fld_visible',
+      sort_order: 'fld_sort',
+      dingtalk_field_name: 'fld_dingtalk',
+      description: 'fld_description',
+      internal_key: 'fld_internal',
+      formula_enabled: 'fld_formula_enabled',
+      formula_expression: 'fld_formula_expression',
+      formula_scope: 'fld_formula_scope',
+      formula_output_type: 'fld_formula_output_type',
+      formula_source_mode: 'fld_formula_source_mode',
+    }
+    const context = {
+      api: {
+        database: null,
+        multitable: {
+          provisioning: {
+            findObjectSheet: vi.fn().mockResolvedValue({ id: 'sheet-1', baseId: 'base-1' }),
+            resolveFieldIds: vi.fn().mockResolvedValue(fieldIds),
+          },
+          records: {
+            queryRecords: vi.fn().mockResolvedValue([
+              {
+                id: 'rec-formula',
+                data: {
+                  fld_code: 'net_anomaly_minutes',
+                  fld_name: '异常净时长',
+                  fld_category: '异常统计字段',
+                  fld_source: 'custom',
+                  fld_unit: 'minutes',
+                  fld_enabled: true,
+                  fld_visible: true,
+                  fld_sort: 4500,
+                  fld_formula_enabled: true,
+                  fld_formula_expression: '={late_duration}+{early_leave_duration}',
+                  fld_formula_scope: 'record',
+                  fld_formula_output_type: 'duration_minutes',
+                },
+              },
+            ]),
+          },
+        },
+      },
+    }
+
+    const result = await helpers.buildAttendanceReportFieldCatalogResponse(context, 'org-a', { warn: vi.fn() })
+    expect(result.reportFieldConfig.formulaDependencyGraph).toMatchObject({
+      formulaFieldCount: 1,
+      edgeCount: 2,
+      blockedFormulaReferenceCount: 0,
+      hasCycles: false,
+    })
+    expect(result.reportFieldConfig.formulaDependencyGraph.edges).toEqual([
+      { from: 'net_anomaly_minutes', to: 'early_leave_duration', type: 'field' },
+      { from: 'net_anomaly_minutes', to: 'late_duration', type: 'field' },
+    ])
   })
 
   it('applies enabled/reportVisible/sortOrder to record report fields and export values', () => {
@@ -362,6 +432,16 @@ describe('attendance report field catalog multitable foundation', () => {
         fieldCount: 2,
         codes: ['work_date', 'late_duration'],
       },
+      formulaDependencyGraph: {
+        formulaFieldCount: 0,
+        edgeCount: 0,
+        blockedFormulaReferenceCount: 0,
+        hasCycles: false,
+        nodes: [],
+        edges: [],
+        blockedFormulaReferences: [],
+        cycles: [],
+      },
     })
 
     expect(helpers.buildAttendanceReportFieldConfig(null)).toEqual({
@@ -375,6 +455,16 @@ describe('attendance report field catalog multitable foundation', () => {
         value: helpers.buildAttendanceReportFieldConfigFingerprint([]).value,
         fieldCount: 0,
         codes: [],
+      },
+      formulaDependencyGraph: {
+        formulaFieldCount: 0,
+        edgeCount: 0,
+        blockedFormulaReferenceCount: 0,
+        hasCycles: false,
+        nodes: [],
+        edges: [],
+        blockedFormulaReferences: [],
+        cycles: [],
       },
     })
 
