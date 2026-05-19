@@ -72,6 +72,7 @@ import {
   installMultitableTemplate,
   listMultitableTemplates,
 } from '../multitable/template-library'
+import { Logger } from '../core/logger'
 import {
   queryRecordsWithCursor,
   buildRecordsCacheKey,
@@ -170,6 +171,13 @@ import {
 } from '../multitable/xlsx-service'
 
 const multitableFormulaEngine = new MultitableFormulaEngine()
+
+// Observation-readiness logger for the multitable H-series. Emits the stable
+// `[multitable.template.install]` event consumed by the H-series observation
+// SOP (docs/operations/multitable-h-series-observation-sop-20260519.md).
+// Structured fields only — never logs baseName / request body / token / email
+// / template content / arbitrary user text.
+const templateInstallLogger = new Logger('MultitableTemplates')
 
 /**
  * Module-level Yjs invalidator set by `index.ts` when the Yjs collab
@@ -3180,12 +3188,16 @@ export function univerMetaRouter(): Router {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'templateId is required' } })
     }
 
+    // Hoisted so the catch block can attribute failures to the same user
+    // (access is block-scoped to the try). null = failure before auth resolved.
+    let userId: string | null = null
     try {
       const pool = poolManager.get()
       const access = await resolveRequestAccess(req)
       if (!access.userId) {
         return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
       }
+      userId = access.userId
 
       const result = await pool.transaction(async ({ query }) => installMultitableTemplate({
         query: query as unknown as QueryFn,
@@ -3196,18 +3208,55 @@ export function univerMetaRouter(): Router {
         idGenerator: (prefix) => buildId(prefix).slice(0, 50),
       }))
 
+      templateInstallLogger.info('[multitable.template.install]', {
+        templateId,
+        ok: true,
+        userId,
+        baseId: result.base.id,
+        sheetId: result.sheets[0]?.id ?? null,
+      })
       return res.status(201).json({ ok: true, data: result })
     } catch (err) {
+      let statusCode: number
+      let errorCode: string
+      let message: string
       if (err instanceof MultitableTemplateNotFoundError) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+        statusCode = 404
+        errorCode = 'NOT_FOUND'
+        message = err.message
+      } else if (err instanceof MultitableTemplateConflictError) {
+        statusCode = 409
+        errorCode = 'CONFLICT'
+        message = err.message
+      } else {
+        const hint = getDbNotReadyMessage(err)
+        if (hint) {
+          statusCode = 503
+          errorCode = 'DB_NOT_READY'
+          message = hint
+        } else {
+          statusCode = 500
+          errorCode = 'INTERNAL_ERROR'
+          message = 'Failed to install template'
+          // Raw exception/stack kept separate from the structured event
+          // (Logger.error only carries an Error, not arbitrary meta).
+          // Message intentionally omits the stable `[multitable.template.install]`
+          // token so the SOP's event-name grep is not double-counted on the
+          // 500 path (this line + the structured ok:false event below).
+          templateInstallLogger.error(
+            'Install multitable template failed',
+            err instanceof Error ? err : new Error(String(err)),
+          )
+        }
       }
-      if (err instanceof MultitableTemplateConflictError) {
-        return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: err.message } })
-      }
-      const hint = getDbNotReadyMessage(err)
-      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
-      console.error('[univer-meta] install multitable template failed:', err)
-      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to install template' } })
+      templateInstallLogger.info('[multitable.template.install]', {
+        templateId,
+        ok: false,
+        userId,
+        statusCode,
+        errorCode,
+      })
+      return res.status(statusCode).json({ ok: false, error: { code: errorCode, message } })
     }
   })
 
