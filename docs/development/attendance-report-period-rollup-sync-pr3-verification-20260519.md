@@ -4,7 +4,7 @@ Date: 2026-05-19
 
 ## Summary
 
-本轮验证覆盖周期汇总同步入口的前端行为：date range、payroll cycle、single user、userIds、all users pagination、成功结果、degraded warning、API error。未运行真实 staging live evidence，因为 PR3 前端尚未合并部署到 staging；后续部署后可用真实 admin 会话补证据。
+本轮验证覆盖周期汇总同步入口的前端行为：date range、payroll cycle、single user、userIds、all users pagination、成功结果、degraded warning、API error。PR3 合并并部署到 staging 后已补真实 live evidence，见 `docs/development/attendance-report-period-rollup-sync-live-closeout-verification-20260519.md`。
 
 ## Commands
 
@@ -46,7 +46,7 @@ git diff --check PASS
 | degraded | `degraded:true` 显示 warn，保留页面 |
 | error | HTTP 400 / `ok:false` 显示 error，保留页面 |
 
-## Deferred Evidence
+## Live Evidence
 
-- Staging live evidence: pending after PR3 is merged and deployed to staging.
+- Staging live evidence: completed after PR3 was merged and deployed to staging. See `docs/development/attendance-report-period-rollup-sync-live-closeout-verification-20260519.md`.
 - No production write was performed in this verification.
