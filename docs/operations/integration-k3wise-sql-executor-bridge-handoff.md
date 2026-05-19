@@ -143,12 +143,16 @@ Data Factory previews, smoke artifacts, or `external_systems.config`.
 
 ## Operator Verification Flow
 
-1. Deploy the current package and let `pnpm install --frozen-lockfile` install
-   the packaged `mssql` dependency.
+1. Deploy the current package with `deploy.bat` / the apply helper's default
+   `InstallDeps=1`, or manually run `pnpm install --frozen-lockfile` from the
+   deploy root. Upgrade installs must refresh dependencies even when
+   `node_modules` already exists, because packages can add workspace runtime
+   dependencies such as `mssql`.
 2. Configure the SQL Server source with `server`, `database`, credentials, and
    read allowlist.
 3. In Data Factory, test the `erp:k3-wise-sqlserver` source.
-4. Confirm the system reports connected instead of `SQLSERVER_EXECUTOR_MISSING`.
+4. Confirm the system reports connected instead of `SQLSERVER_EXECUTOR_MISSING`
+   or `SQLSERVER_DRIVER_MISSING`.
 5. Run the postdeploy smoke:
 
 ```bash
@@ -170,6 +174,10 @@ If `sqlserver-executor-availability.status=skipped` with
 `code=SQLSERVER_EXECUTOR_MISSING`, the package wiring or dependency install is
 incomplete. The staging-to-K3 path can remain signed off, but direct SQL Server
 source execution is not ready.
+
+If the code is `SQLSERVER_DRIVER_MISSING`, runtime injection is working but the
+deploy root is missing `mssql`. Re-apply the package with `InstallDeps=1` or run
+`pnpm install --frozen-lockfile` from the deploy root, restart PM2, then retest.
 
 ## What Claude Code Should Do On The Bridge Machine
 

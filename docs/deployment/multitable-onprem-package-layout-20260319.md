@@ -160,12 +160,14 @@ For Windows Server, these wrappers delegate to `scripts/ops/multitable-onprem-ap
 
 1. extracts the archive into a temporary directory,
 2. copies the package contents into the current deploy root,
-3. installs dependencies if needed, runs migrations, and restarts PM2,
+3. refreshes dependencies, runs migrations, and restarts PM2,
 4. preserves the existing `docker/app.env`.
 
 `node_modules` is intentionally excluded from the archive. The apply helper's
-default `InstallDeps=1` runs `pnpm install --frozen-lockfile` when
-`node_modules` is missing; manual file-copy deployments must run the same
-command before migrations, PM2 restart, or admin bootstrap.
+default `InstallDeps=1` refreshes dependencies with
+`pnpm install --frozen-lockfile` on every package apply. This keeps corrective
+rerolls safe when the deploy root already has `node_modules` but the new package
+adds a workspace runtime dependency. Manual file-copy deployments must run the
+same command before migrations, PM2 restart, or admin bootstrap.
 
 For a fresh Windows-only install, use `bootstrap-admin.bat` after `deploy.bat` so the customer can create the first admin account without needing bash or WSL.

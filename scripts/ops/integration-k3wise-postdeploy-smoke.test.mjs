@@ -215,6 +215,10 @@ const SQL_EXECUTOR_READY_SYSTEM = {
   status: 'active',
   lastError: null,
 }
+const SQL_DRIVER_MISSING_SYSTEM = {
+  ...SQL_EXECUTOR_MISSING_SYSTEM,
+  lastError: 'SQLSERVER_DRIVER_MISSING: mssql dependency is not available; run pnpm install from the deploy root',
+}
 const DEFAULT_STAGING_OBJECTS = [
   {
     name: 'standard_materials',
@@ -851,6 +855,41 @@ test('authenticated postdeploy smoke records missing SQL executor as a non-block
       request.query.tenantId === 'tenant-smoke' &&
       request.query.limit === '100'
     )))
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('authenticated postdeploy smoke diagnoses missing SQL Server driver dependency', async () => {
+  const fake = createFakeServer({ externalSystems: [...DEFAULT_SYSTEMS, SQL_DRIVER_MISSING_SYSTEM] })
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--auth-token', 'test.jwt.token',
+      '--require-auth',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 0, result.stderr)
+    const evidence = JSON.parse(readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8'))
+    assert.equal(evidence.summary.fail, 0)
+    const sqlDiagnostic = evidence.checks.find((check) => check.id === 'sqlserver-executor-availability')
+    assert.equal(sqlDiagnostic.status, 'skipped')
+    assert.equal(sqlDiagnostic.code, 'SQLSERVER_DRIVER_MISSING')
+    assert.match(sqlDiagnostic.reason, /pnpm install --frozen-lockfile/)
+    assert.equal(sqlDiagnostic.systemsChecked, 1)
+    assert.deepEqual(sqlDiagnostic.blockedSystems, [
+      {
+        id: 'k3_sql_source_1',
+        name: 'K3 SQL Read Channel',
+        role: 'source',
+        status: 'error',
+      },
+    ])
+    assert.doesNotMatch(JSON.stringify(sqlDiagnostic.blockedSystems), /lastError|mssql dependency/)
   } finally {
     await fake.close()
     rmSync(outDir, { recursive: true, force: true })

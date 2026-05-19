@@ -48,6 +48,12 @@ function verify_windows_entrypoints() {
     die "deploy.bat must not require bash or the .sh apply helper"
   fi
 
+  local apply_helper="${root}/scripts/ops/multitable-onprem-apply-package.ps1"
+  search_fixed_string 'Refresh dependencies (pnpm install --frozen-lockfile)' "$apply_helper" || die "PowerShell apply helper must refresh dependencies on package apply"
+  if search_fixed_string "-not (Test-Path -LiteralPath (Join-Path \$resolvedRoot 'node_modules'))" "$apply_helper"; then
+    die "PowerShell apply helper must not skip dependency refresh just because root node_modules already exists"
+  fi
+
   if ! search_fixed_string 'deploy-remote.log' "$remote_script"; then
     die "deploy-remote.bat must continue writing output\\logs\\deploy-remote.log"
   fi
@@ -105,6 +111,7 @@ function verify_deployable_artifact_contract() {
   search_fixed_string '"deployMode": "fresh-extract-or-existing-root-apply"' "$metadata_json" || die "PACKAGE-METADATA.json must document deploy mode"
   search_fixed_string '"directReplaceSafe": false' "$metadata_json" || die "PACKAGE-METADATA.json must mark direct replacement unsafe"
   search_fixed_string '"nodeModulesBundled": false' "$metadata_json" || die "PACKAGE-METADATA.json must document node_modules policy"
+  search_fixed_string '"dependencyInstallMode": "refresh-on-apply"' "$metadata_json" || die "PACKAGE-METADATA.json must document dependency refresh policy"
   search_fixed_string '"windowsEntryPoint": "deploy.bat <package.zip|package.tgz>"' "$metadata_json" || die "PACKAGE-METADATA.json must document the Windows entrypoint"
 }
 
@@ -506,6 +513,8 @@ required=(
   "docs/development/data-factory-issue1526-delivery-readiness-gate-contract-verification-20260518.md"
   "docs/development/data-factory-sqlserver-readonly-executor-design-20260519.md"
   "docs/development/data-factory-sqlserver-readonly-executor-verification-20260519.md"
+  "docs/development/onprem-package-dependency-refresh-design-20260519.md"
+  "docs/development/onprem-package-dependency-refresh-verification-20260519.md"
   "docs/development/data-factory-readiness-package-verify-delivery-development-20260515.md"
   "docs/development/data-factory-readiness-package-verify-delivery-verification-20260515.md"
   "docs/development/onprem-migration-gap-guard-development-20260514.md"

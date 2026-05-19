@@ -167,9 +167,13 @@ non-blocking `sqlserver-executor-availability` check:
   marked unavailable by the backend.
 - `skipped` with `code=SQLSERVER_EXECUTOR_MISSING` means the SQL source exists,
   but the package has not completed SQL executor wiring or dependency install.
+- `skipped` with `code=SQLSERVER_DRIVER_MISSING` means the built-in executor is
+  wired, but the deploy root did not install the packaged `mssql` dependency.
+  Re-apply the package with `InstallDeps=1` or run
+  `pnpm install --frozen-lockfile` from the deploy root before restarting PM2.
 
-`SQLSERVER_EXECUTOR_MISSING` does not invalidate the #1542 staging-to-K3
-metadata signoff. It means direct SQL Server source execution is still blocked.
+These SQL diagnostic states do not invalidate the #1542 staging-to-K3 metadata
+signoff. They mean direct SQL Server source execution is still blocked.
 Use `metasheet:staging` as the source for Data Factory retests until the package
 runtime can load the built-in read-only executor and the SQL source has been
 tested successfully. After fixing the runtime/dependency issue, retest the SQL
