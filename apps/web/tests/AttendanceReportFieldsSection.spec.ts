@@ -1240,4 +1240,161 @@ describe('AttendanceReportFieldsSection', () => {
     expect(status?.className).toContain('attendance__status--error')
     expect(container!.textContent).toContain('Report fields')
   })
+
+  it('creates a daily report sync job and runs the next page', async () => {
+    const jobId = '44444444-4444-4444-8444-444444444444'
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonResponse(200, populatedCatalogPayload()))
+      .mockResolvedValueOnce(jsonResponse(201, {
+        ok: true,
+        data: {
+          id: jobId,
+          kind: 'daily_records',
+          status: 'queued',
+          periodSource: { from: '2026-05-01', to: '2026-05-31' },
+          userSelection: { userId: 'u-1' },
+          cursor: { nextPage: 1, pageSize: 25, hasNextPage: true },
+          totals: { synced: 0, created: 0, patched: 0, skipped: 0, failed: 0 },
+          createdAt: '2026-05-19T08:00:00.000Z',
+          updatedAt: '2026-05-19T08:00:00.000Z',
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        data: {
+          job: {
+            id: jobId,
+            kind: 'daily_records',
+            status: 'completed',
+            periodSource: { from: '2026-05-01', to: '2026-05-31' },
+            userSelection: { userId: 'u-1' },
+            cursor: { nextPage: 1, pageSize: 25, hasNextPage: false },
+            totals: { usersScanned: 1, usersSynced: 1, synced: 2, created: 1, patched: 1, skipped: 0, failed: 0 },
+            lastResult: {
+              synced: 2,
+              fieldFingerprint: 'job-field-fingerprint',
+              multitable: {
+                baseId: 'base-rr',
+                sheetId: 'sheet-rr',
+                viewId: 'view-rr',
+              },
+            },
+            updatedAt: '2026-05-19T08:01:00.000Z',
+          },
+          pageResult: { synced: 2, hasNextPage: false },
+        },
+      }))
+
+    mountSection()
+    await flushUi()
+
+    const fromInput = container!.querySelector<HTMLInputElement>('[data-report-sync-job-from]')!
+    const toInput = container!.querySelector<HTMLInputElement>('[data-report-sync-job-to]')!
+    const userInput = container!.querySelector<HTMLInputElement>('[data-report-sync-job-user]')!
+    const pageSizeInput = container!.querySelector<HTMLInputElement>('[data-report-sync-job-page-size]')!
+    const createButton = container!.querySelector<HTMLButtonElement>('[data-report-sync-job-create]')!
+
+    fromInput.value = '2026-05-01'
+    fromInput.dispatchEvent(new Event('input', { bubbles: true }))
+    toInput.value = '2026-05-31'
+    toInput.dispatchEvent(new Event('input', { bubbles: true }))
+    userInput.value = 'u-1'
+    userInput.dispatchEvent(new Event('input', { bubbles: true }))
+    pageSizeInput.value = '25'
+    pageSizeInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    expect(createButton.disabled).toBe(false)
+
+    createButton.click()
+    await flushUi()
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance/report-sync-jobs?orgId=org-1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        kind: 'daily_records',
+        mode: 'manual_step',
+        pageSize: 25,
+        periodSource: { from: '2026-05-01', to: '2026-05-31' },
+        userSelection: { userId: 'u-1' },
+      }),
+    })
+    expect(container!.querySelector('[data-report-sync-job-status]')?.textContent).toContain('Report sync job created.')
+    expect(container!.querySelector(`[data-report-sync-job-row="${jobId}"]`)?.textContent).toContain('Queued')
+    expect(container!.querySelector(`[data-report-sync-job-row="${jobId}"]`)?.textContent).toContain('2026-05-01..2026-05-31')
+
+    container!.querySelector<HTMLButtonElement>(`[data-report-sync-job-run="${jobId}"]`)!.click()
+    await flushUi()
+
+    expect(apiFetch).toHaveBeenCalledWith(`/api/attendance/report-sync-jobs/${jobId}/run-next-page?orgId=org-1`, {
+      method: 'POST',
+    })
+    expect(container!.querySelector('[data-report-sync-job-status]')?.textContent).toContain('Report sync job page completed.')
+    expect(container!.querySelector(`[data-report-sync-job-row="${jobId}"]`)?.textContent).toContain('Completed')
+    expect(container!.querySelector(`[data-report-sync-job-row="${jobId}"]`)?.textContent).toContain('Rows: 2')
+    expect(container!.querySelector<HTMLAnchorElement>(`[data-report-sync-job-open-multitable="${jobId}"]`)?.getAttribute('href'))
+      .toBe('/multitable/sheet-rr/view-rr?baseId=base-rr')
+  })
+
+  it('loads report sync jobs and cancels a queued period job', async () => {
+    const jobId = '55555555-5555-4555-8555-555555555555'
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonResponse(200, populatedCatalogPayload()))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        data: {
+          items: [
+            {
+              id: jobId,
+              kind: 'period_summaries',
+              status: 'queued',
+              periodSource: { cycleId: '11111111-1111-4111-8111-111111111111' },
+              userSelection: { allUsers: true },
+              cursor: { nextPage: 3, pageSize: 50, hasNextPage: true },
+              totals: { usersScanned: 100, synced: 98, failed: 2 },
+              error: null,
+              updatedAt: '2026-05-19T08:10:00.000Z',
+            },
+          ],
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        data: {
+          id: jobId,
+          kind: 'period_summaries',
+          status: 'canceled',
+          periodSource: { cycleId: '11111111-1111-4111-8111-111111111111' },
+          userSelection: { allUsers: true },
+          cursor: { nextPage: 3, pageSize: 50, hasNextPage: true },
+          totals: { usersScanned: 100, synced: 98, failed: 2 },
+          finishedAt: '2026-05-19T08:11:00.000Z',
+          updatedAt: '2026-05-19T08:11:00.000Z',
+        },
+      }))
+
+    mountSection()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-report-sync-job-load]')!.click()
+    await flushUi()
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance/report-sync-jobs?orgId=org-1')
+    const row = container!.querySelector(`[data-report-sync-job-row="${jobId}"]`)
+    expect(row?.textContent).toContain('Period summaries')
+    expect(row?.textContent).toContain('cycle:11111111-1111-4111-8111-111111111111')
+    expect(row?.textContent).toContain('All active users')
+    expect(row?.textContent).toContain('Next page: 3')
+
+    container!.querySelector<HTMLButtonElement>(`[data-report-sync-job-cancel="${jobId}"]`)!.click()
+    await flushUi()
+
+    expect(apiFetch).toHaveBeenCalledWith(`/api/attendance/report-sync-jobs/${jobId}/cancel?orgId=org-1`, {
+      method: 'POST',
+    })
+    expect(container!.querySelector('[data-report-sync-job-status]')?.textContent).toContain('Report sync job canceled.')
+    expect(container!.querySelector(`[data-report-sync-job-row="${jobId}"]`)?.textContent).toContain('Canceled')
+    expect(container!.querySelector<HTMLButtonElement>(`[data-report-sync-job-run="${jobId}"]`)?.disabled).toBe(true)
+    expect(container!.querySelector<HTMLButtonElement>(`[data-report-sync-job-cancel="${jobId}"]`)?.disabled).toBe(true)
+  })
 })
