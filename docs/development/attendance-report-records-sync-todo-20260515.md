@@ -194,3 +194,5 @@ skip  iff  existing.source_fingerprint === next.source_fingerprint
 - [x] `allUsers` 分页同步入口 + page/pageSize 汇总
 - [x] 前端单员工/全员分页模式切换
 - [x] development / verification MD：`attendance-report-records-bulk-sync-development-20260518.md`、`attendance-report-records-bulk-sync-verification-20260518.md`
+- [x] staging runtime 更新 + live explicit sync/readback/rerun skip evidence：见 `attendance-report-records-bulk-sync-live-closeout-development-20260519.md`、`attendance-report-records-bulk-sync-live-closeout-verification-20260519.md`
+- [ ] active-membership `allUsers` bulk write evidence：当前 staging `user_orgs` 为空，`allUsers` 分页返回空页；待 staging 准备 active membership 样本后补

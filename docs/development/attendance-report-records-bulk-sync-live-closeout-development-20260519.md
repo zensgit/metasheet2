@@ -2,7 +2,7 @@
 
 ## Summary
 
-本 slice 不新增功能代码，只收口 `attendance_report_records` 批量同步 PR #1648 的部署与 live evidence 状态，并修正 TODO 文档中残留的旧范围表述。
+本 slice 不新增功能代码，只收口 `attendance_report_records` 批量同步 PR #1648 的部署与 live evidence 状态，并修正 TODO 文档中残留的旧范围表述。2026-05-19 追加 staging runtime 更新和 live sync 实测证据。
 
 PR #1648 已将 `POST /api/attendance/report-records/sync` 从单员工 v1 扩展为：
 
@@ -41,19 +41,45 @@ metasheet-backend ghcr.io/zensgit/metasheet2-backend:2f211d161a301bc632165f9909b
 - #1648 的 deploy 已经在 production 确认。
 - allUsers/pageSize 是写入派生多维表的管理员动作，即使是可重建报表层，也不应在 production 上无明确样本授权地触发。
 
-尝试 staging live 前置时发现：
+初次尝试 staging live 前置时发现：
 
 - 8082 SSH tunnel 可达，`/api/health` 正常。
 - 当前 staging backend 仍运行旧镜像 `5ca91630307603eacbbb13ae8209721f1b4d5bf3`，早于 #1648。
 - 本地 staging admin JWT 文件已过期，`/api/auth/me` 返回 401。
 
-因此 staging allUsers/pageSize live sync 暂不可真实执行。该状态写入 verification MD，不伪造通过。
+该状态先写入 verification MD，未伪造通过。
 
-## Next Step
+## Staging Runtime Update
 
-若要补真实 live sync evidence，需要先满足：
+后续收到新的短期 staging admin JWT，并被明确授权更新 staging 后，执行了 staging runtime 更新：
 
-1. 将 staging backend 更新到包含 #1648 的镜像，或提供一个已更新的测试环境。
-2. 生成新的短期 staging admin JWT 文件。
-3. 使用小 pageSize（建议 `pageSize=1`）触发 `allUsers` 分页 sync。
-4. 核对 `attendance_report_records` 中的 `field_fingerprint`、`source_fingerprint`、`synced_at` 和 row count。
+- 尝试拉取最新 `origin/main` docs-only SHA `55f0c949...` 的 GHCR backend/web 镜像，结果为 `manifest unknown`。
+- 选择最新可用 runtime main 镜像 `01d4134017febcdac5a95f6ce8898e66a81aa9aa`，该 SHA 是 `55f0c949...` 的祖先且包含 #1648。
+- 更新 `/home/mainuser/metasheet2-dingtalk-staging/.env` 的 `IMAGE_TAG`。
+- `docker compose pull backend web` 成功。
+- 常规 `docker compose up -d backend web` 触发历史 Postgres/Redis 容器名冲突；随后使用 `up -d --no-deps backend web` 仅重建 web/backend，避免触碰 DB/Redis。
+
+更新后 staging 容器：
+
+```text
+metasheet-staging-web ghcr.io/zensgit/metasheet2-web:01d4134017febcdac5a95f6ce8898e66a81aa9aa
+metasheet-staging-backend ghcr.io/zensgit/metasheet2-backend:01d4134017febcdac5a95f6ce8898e66a81aa9aa
+```
+
+## Live Sync Result
+
+使用 staging 上已有的真实 fixture：
+
+- `orgId=default`
+- `userId=8b35cbe1-9fd6-4650-9d16-42b2c4d028d1`
+- `from=2026-05-15`
+- `to=2026-05-17`
+
+结果：
+
+- 首次 sync：`synced=3`、`patched=3`、`failed=0`、`duplicateRowKeys=0`
+- 多维表读回：3 行、3 个 distinct row key、`field_fingerprint`/`source_fingerprint`/`synced_at` 全部存在
+- 值核对：三天分别为 `480/12/0/late`、`450/0/30/early_leave`、`0/0/0/absent`
+- 重跑：`skipped=3`、`created=0`、`patched=0`、`failed=0`
+
+`allUsers` 分页入口也执行了一次，返回 `ok=true`、`userSelection=allUsers`、`totalUsers=0`。这是 staging 环境事实：`user_orgs` 当前为空表，因此无法形成 active-membership bulk write 样本；该限制已在 verification MD 中明确标注。
