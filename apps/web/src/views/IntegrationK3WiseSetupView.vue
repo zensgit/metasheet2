@@ -111,7 +111,13 @@
             {{ testingSql ? '测试中' : '测试 SQL Server' }}
           </button>
           <p v-if="hasUnsavedSqlConnectionDraft" class="k3-setup__hint">SQL Server 通道配置有未保存改动，请先保存再测试。</p>
-          <pre v-if="testResult" class="k3-setup__test-result">{{ testResult }}</pre>
+          <p v-if="testResultSummary" class="k3-setup__test-summary" data-testid="connection-test-summary">
+            {{ testResultSummary }}
+          </p>
+          <details v-if="testResult" class="k3-setup__diagnostics" data-testid="connection-test-diagnostics">
+            <summary>展开原始诊断 JSON（排障用）</summary>
+            <pre class="k3-setup__test-result">{{ testResult }}</pre>
+          </details>
         </div>
 
         <div class="k3-setup__panel">
@@ -707,6 +713,9 @@
             <label class="k3-setup__field">
               <span>PLM Source System ID</span>
               <input v-model.trim="form.sourceSystemId" autocomplete="off" />
+              <small class="k3-setup__hint" data-testid="plm-source-fallback-hint">
+                K3 预设页是 PLM-first 创建器；如果当前只有 MetaSheet staging 多维表，请进入数据工厂，选择 MetaSheet staging 来源后创建清洗流程。
+              </small>
             </label>
             <label class="k3-setup__field">
               <span>K3 Target System ID</span>
@@ -896,6 +905,7 @@ const observedPipelineTarget = ref<K3WisePipelineTarget>('material')
 const statusMessage = ref('')
 const statusKind = ref<'info' | 'success' | 'error'>('info')
 const testResult = ref('')
+const testResultSummary = ref('')
 const stagingResult = ref('')
 const stagingInstallResult = ref<IntegrationStagingInstallResult | null>(null)
 const pipelineResult = ref('')
@@ -1240,8 +1250,23 @@ function buildConnectionTestPayload(): Record<string, unknown> {
 function loadSystemIntoForm(system: IntegrationExternalSystem): void {
   Object.assign(form, applyExternalSystemToForm(form, system))
   testResult.value = ''
+  testResultSummary.value = ''
   webApiLastTest.value = null
   setStatus(`已载入 ${system.name}`, 'info')
+}
+
+function summarizeConnectionTestResult(result: Record<string, unknown>, label: string): string {
+  const ok = result.ok === true
+  const code = typeof result.code === 'string' ? result.code : ''
+  const message = typeof result.message === 'string' ? result.message : ''
+  const testedSystem = getTestResultSystem(result)
+  const lastError = typeof testedSystem?.lastError === 'string' ? testedSystem.lastError : ''
+  if (ok) return `${label} 测试通过。原始响应已收起，可展开排障 JSON。`
+  const errorText = message || lastError || code || 'unknown error'
+  const concise = /SQLSERVER_EXECUTOR_MISSING|queryExecutor|executor|执行器|注入/i.test(errorText)
+    ? 'SQLSERVER_EXECUTOR_MISSING：当前部署未注入 SQL 执行器，SQL 只读通道暂不能作为数据源。'
+    : `${label} 测试失败：${errorText}`
+  return `${concise} 原始响应已收起，可展开排障 JSON。`
 }
 
 async function loadSystems(silent = false): Promise<void> {
@@ -1300,9 +1325,11 @@ async function testWebApi(): Promise<void> {
   if (!form.webApiSystemId || hasUnsavedWebApiConnectionDraft.value) return
   testingWebApi.value = true
   testResult.value = ''
+  testResultSummary.value = ''
   try {
     const result = await testIntegrationSystem(form.webApiSystemId, buildConnectionTestPayload())
     testResult.value = JSON.stringify(result, null, 2)
+    testResultSummary.value = summarizeConnectionTestResult(result, 'WebAPI')
     const testedSystem = getTestResultSystem(result)
     if (testedSystem) upsertLocalWebApiSystem(testedSystem)
     const lastTestedAt = testedSystem?.lastTestedAt || new Date().toISOString()
@@ -1317,6 +1344,7 @@ async function testWebApi(): Promise<void> {
     void loadSystems(true)
     setStatus(result.ok === true ? 'WebAPI 连接测试完成' : 'WebAPI 连接测试失败', result.ok === true ? 'success' : 'error')
   } catch (error) {
+    testResultSummary.value = `WebAPI 测试失败：${formatError(error)}`
     webApiLastTest.value = {
       systemId: form.webApiSystemId,
       ok: false,
@@ -1333,12 +1361,15 @@ async function testSqlServer(): Promise<void> {
   if (!form.sqlSystemId || hasUnsavedSqlConnectionDraft.value) return
   testingSql.value = true
   testResult.value = ''
+  testResultSummary.value = ''
   try {
     const result = await testIntegrationSystem(form.sqlSystemId, buildConnectionTestPayload())
     testResult.value = JSON.stringify(result, null, 2)
+    testResultSummary.value = summarizeConnectionTestResult(result, 'SQL Server')
     await loadSystems(true)
     setStatus('SQL Server 通道测试完成', 'success')
   } catch (error) {
+    testResultSummary.value = `SQL Server 测试失败：${formatError(error)}`
     setStatus(formatError(error), 'error')
   } finally {
     testingSql.value = false
@@ -2140,6 +2171,27 @@ onMounted(() => {
   background: #0f172a;
   color: #e2e8f0;
   font-size: 12px;
+}
+
+.k3-setup__test-summary,
+.k3-setup__diagnostics {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.k3-setup__test-summary {
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 8px;
+  background: #f8fafc;
+  color: #334155;
+  overflow-wrap: anywhere;
+}
+
+.k3-setup__diagnostics summary {
+  color: #475569;
+  cursor: pointer;
 }
 
 .k3-setup__template-grid {

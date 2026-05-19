@@ -154,6 +154,7 @@ describe('IntegrationK3WiseSetupView', () => {
     expect(container.textContent).toContain('高级 SQL Server 通道')
     expect(container.textContent).toContain('allowlist 表/视图')
     expect(container.textContent).toContain('多维表清洗准备')
+    expect(container.textContent).toContain('如果当前只有 MetaSheet staging 多维表')
     expect(container.textContent).toContain('K3 单据模板')
     expect(container.textContent).toContain('K3 WISE 物料')
     expect(container.textContent).toContain('FNumber')
@@ -239,6 +240,77 @@ describe('IntegrationK3WiseSetupView', () => {
 
     expect(container.textContent).toContain('connected')
     expect(container.textContent).toContain('WebAPI 连接测试完成')
+  })
+
+  it('keeps SQL executor diagnostics collapsed behind a concise operator summary', async () => {
+    const longDiagnostic = 'x'.repeat(3200)
+    const sqlSystem = {
+      id: 'k3_sql_1',
+      tenantId: 'default',
+      workspaceId: null,
+      name: 'K3 WISE SQL Server',
+      kind: 'erp:k3-wise-sqlserver',
+      role: 'source',
+      status: 'error',
+      hasCredentials: true,
+      config: {
+        mode: 'readonly',
+        server: 'sql.local',
+        database: 'AIS_TEST',
+        allowedTables: ['dbo.t_ICItem'],
+      },
+    }
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url.startsWith('/api/integration/external-systems?kind=erp%3Ak3-wise-webapi')) {
+        return jsonResponse([])
+      }
+      if (url.startsWith('/api/integration/external-systems?kind=erp%3Ak3-wise-sqlserver')) {
+        return jsonResponse([sqlSystem])
+      }
+      if (url === '/api/integration/external-systems/k3_sql_1/test?tenantId=default') {
+        return jsonResponse({
+          ok: false,
+          code: 'SQLSERVER_EXECUTOR_MISSING',
+          message: `SQLSERVER_EXECUTOR_MISSING: ${longDiagnostic}`,
+          diagnostics: {
+            server: 'sql.local',
+            package: longDiagnostic,
+          },
+          system: {
+            ...sqlSystem,
+            lastError: 'SQLSERVER_EXECUTOR_MISSING: inject queryExecutor when creating K3WiseSqlServerChannel',
+          },
+        })
+      }
+      if (url === '/api/integration/staging/descriptors') {
+        return jsonResponse([])
+      }
+      return jsonResponse({})
+    })
+
+    const View = (await import('../src/views/IntegrationK3WiseSetupView.vue')).default
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    registerRouterLinkStub(app)
+    app.mount(container)
+    await flushUi()
+
+    const button = Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('测试 SQL Server')) as HTMLButtonElement
+    expect(button.disabled).toBe(false)
+    button.click()
+    await flushUi(8)
+
+    const summary = container.querySelector('[data-testid="connection-test-summary"]') as HTMLElement | null
+    const diagnostics = container.querySelector('[data-testid="connection-test-diagnostics"]') as HTMLDetailsElement | null
+    expect(summary).not.toBeNull()
+    expect(summary!.textContent).toContain('SQLSERVER_EXECUTOR_MISSING')
+    expect(summary!.textContent).toContain('当前部署未注入 SQL 执行器')
+    expect(summary!.textContent).not.toContain(longDiagnostic.slice(0, 80))
+    expect(diagnostics).not.toBeNull()
+    expect(diagnostics!.open).toBe(false)
+    expect(diagnostics!.textContent).toContain('展开原始诊断 JSON')
   })
 
   it('warns and normalizes a plain Project ID on the K3 setup page', async () => {

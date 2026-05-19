@@ -527,6 +527,23 @@ describe('IntegrationWorkbenchView', () => {
     ;(container.querySelector('[data-testid="load-target-objects"]') as HTMLButtonElement).click()
     await flushUi(8)
 
+    ;(container.querySelector('[data-testid="use-staging-source-bom_cleanse"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect((container.querySelector('[data-testid="source-object"]') as HTMLSelectElement).value).toBe('bom_cleanse')
+    const mismatchNotice = container.querySelector('[data-testid="source-target-mismatch-notice"]') as HTMLElement | null
+    expect(mismatchNotice).not.toBeNull()
+    expect(mismatchNotice!.textContent).toContain('目标模板')
+    expect(mismatchNotice!.textContent).toContain('物料清洗')
+    expect(mismatchNotice!.textContent).toContain('BOM 清洗')
+    expect((container.querySelector('[data-testid="save-pipeline"]') as HTMLButtonElement).disabled).toBe(true)
+    expect(container.querySelector('[data-testid="save-readiness-summary"]')?.textContent).toContain('确认来源与目标匹配')
+
+    ;(container.querySelector('[data-testid="use-recommended-staging-source"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect((container.querySelector('[data-testid="source-object"]') as HTMLSelectElement).value).toBe('standard_materials')
+    expect(container.querySelector('[data-testid="source-target-mismatch-notice"]')).toBeNull()
+    expect(container.textContent).toContain('已按目标模板切换到 物料清洗')
+
     expect((container.querySelector('[data-testid="source-field-0"]') as HTMLInputElement).value).toBe('code')
     expect((container.querySelector('[data-testid="target-field-0"]') as HTMLInputElement).value).toBe('FNumber')
     expect((container.querySelector('[data-testid="transform-fn-0"]') as HTMLSelectElement).value).toBe('trim')
@@ -678,8 +695,8 @@ describe('IntegrationWorkbenchView', () => {
 
     ;(container.querySelector('[data-testid="use-multitable-target-standard_materials"]') as HTMLButtonElement).click()
     await flushUi(10)
-    expect(externalSystemBodies).toHaveLength(2)
-    expect(externalSystemBodies[1]).toMatchObject({
+    const multitableTargetBody = externalSystemBodies.find((body) => body.kind === 'metasheet:multitable')
+    expect(multitableTargetBody).toMatchObject({
       id: 'metasheet_target_project_1',
       tenantId: 'default',
       workspaceId: null,
@@ -695,7 +712,7 @@ describe('IntegrationWorkbenchView', () => {
         upsert: true,
       },
     })
-    expect(externalSystemBodies[1].config).toMatchObject({
+    expect(multitableTargetBody?.config).toMatchObject({
       projectId: 'project_1',
       objects: {
         standard_materials: {

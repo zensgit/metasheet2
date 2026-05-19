@@ -881,7 +881,12 @@ export function validateK3WisePipelineTemplateForm(
   descriptors: IntegrationStagingDescriptor[] = [],
 ): K3WiseSetupValidationIssue[] {
   const issues: K3WiseSetupValidationIssue[] = []
-  if (!trim(form.sourceSystemId)) issues.push({ field: 'sourceSystemId', message: 'PLM source system ID is required' })
+  if (!trim(form.sourceSystemId)) {
+    issues.push({
+      field: 'sourceSystemId',
+      message: 'PLM source system ID is required for the K3 preset; use Data Factory with MetaSheet staging source when starting from existing staging tables',
+    })
+  }
   if (!trim(form.webApiSystemId)) issues.push({ field: 'webApiSystemId', message: 'Save or select a K3 WISE WebAPI system before creating pipelines' })
   if (!trim(form.materialPipelineName)) issues.push({ field: 'materialPipelineName', message: 'Material pipeline name is required' })
   if (!trim(form.bomPipelineName)) issues.push({ field: 'bomPipelineName', message: 'BOM pipeline name is required' })
@@ -1060,7 +1065,7 @@ export function buildK3WiseDeployGateChecklist(form: K3WiseSetupForm): K3WiseDep
       trim(form.sourceSystemId) ? 'ready' : 'external',
       trim(form.sourceSystemId)
         ? '已选择或粘贴 PLM source system ID，可创建清洗 pipeline'
-        : '当前页面只粘贴 sourceSystemId；第三方 PLM 连接本身仍需先通过 integration API/种子/后续 PLM UI 创建',
+        : 'K3 预设页是 PLM-first 创建器；若已在 MetaSheet staging 多维表清洗，请进入数据工厂选择 staging 来源创建 pipeline',
       'sourceSystemId',
     ),
     gateItem(
@@ -1080,7 +1085,7 @@ export function buildK3WiseDeployGateChecklist(form: K3WiseSetupForm): K3WiseDep
       pipelineTemplateReady ? 'ready' : 'missing',
       pipelineTemplateReady
         ? 'PLM source、K3 target 和 staging 对象已具备，可创建 draft pipeline'
-        : '需先保存 K3 WebAPI、准备 PLM source system，并选择物料/BOM staging 对象',
+        : '需先保存 K3 WebAPI、准备 PLM source system，并选择物料/BOM staging 对象；staging-first 场景请改用数据工厂',
       pipelineTemplateReady ? undefined : 'sourceSystemId',
     ),
     gateItem(
