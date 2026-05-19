@@ -230,9 +230,12 @@ const { isZh } = useLocale()
 | `apps/web/src/multitable/utils/workbench-labels.ts` | **新增** ~160 行：key 联合类型 + EN/ZH 表 + `workbenchLabel` + 插值 helper（presence.label 含 en 单复数、presence.title 含空态、conflict.message 含可选 version、commentInboxTitle 含 0 分支、card.sheets/fields/views 计数） |
 | `apps/web/src/multitable/views/MultitableWorkbench.vue` | import `useLocale` + `workbench-labels`；模板 ~25 处 + §3.0 的 4 个 computed 改读 isZh；脚本静态 toast ~17 处 → `wb(key, isZh.value)`；footer 统一 |
 | `apps/web/src/multitable/components/MetaTemplateCard.vue` | import `useLocale`；§3.6 的 5 处串改 helper（计数行 + 按钮） |
-| `apps/web/tests/multitable-workbench-i18n.spec.ts` | **新增**：`workbench-labels` 模块单测（key 完整性 + 插值 helper en/zh） |
-| `apps/web/tests/multitable-workbench-view.spec.ts`（既有，复用其 mock 范式增量） | 加 locale 断言（zh-CN/en 各渲染关键串）；**不新挂载**——复用既有重 mock 装配，避免被 composable/router/child 依赖拖垮 |
-| `apps/web/tests/multitable-home-view.spec.ts` + `multitable-template-center-view.spec.ts`（既有） | MetaTemplateCard 改动回归（这两 spec 已断言 card 渲染；确认 zh 默认下文案不变） |
+| `apps/web/tests/multitable-workbench-i18n.spec.ts` | **新增**：`workbench-labels` 模块单测（key 完整性 + en≠zh + 9 个插值 helper） |
+| `apps/web/tests/multitable-home-view.spec.ts` + `multitable-template-center-view.spec.ts`（既有） | 加 `beforeEach setLocale('zh-CN')` + afterEach 复位——MetaTemplateCard 转 locale 感知后，这两 spec 的中文断言需显式 locale（jsdom 默认 'en'） |
+
+> **`multitable-workbench-view.spec.ts` 不改（诚实口径）**：该 spec 在本仓 jsdom env 存在既有 `localStorage.removeItem is not a function` afterEach baseline（53/53 全 fail，已用 stash 法在 clean origin/main 复核逐字一致，见 verification §3）。往其中加断言无意义——afterEach 必抛、新断言照样标 failed。故 **Workbench 本体的 zh-CN/en 渲染不做自动化 render 断言**；其正确性由 (a) label 模块 spec 确定性覆盖全部映射/helper + (b) `vue-tsc` 保证每个 `wb(key,…)` 调用的 key 是合法 `WorkbenchLabelKey`（错 key=编译错）+ (c) build + (d) 代码 diff / 人工审阅 共同保证。新挂载 mock-heavy Workbench 是早先评审明确警告要避免的，故不做。
+
+不动：后端 / 契约 / migration / 其它 Meta\* 组件 / 其它视图 / `multitable-workbench-view.spec.ts`。
 
 不动：后端 / 契约 / migration / 其它 Meta\* 组件 / 其它视图。
 
@@ -242,8 +245,7 @@ const { isZh } = useLocale()
 
 ```bash
 pnpm --filter @metasheet/web exec vue-tsc --noEmit
-pnpm --filter @metasheet/web exec vitest run tests/multitable-workbench-i18n.spec.ts --watch=false
-pnpm --filter @metasheet/web exec vitest run tests/multitable-workbench-view.spec.ts --watch=false      # 复用既有 mock 范式 + locale 断言
+pnpm --filter @metasheet/web exec vitest run tests/multitable-workbench-i18n.spec.ts --watch=false       # label 模块（核心覆盖）
 pnpm --filter @metasheet/web exec vitest run tests/multitable-home-view.spec.ts --watch=false           # MetaTemplateCard 回归
 pnpm --filter @metasheet/web exec vitest run tests/multitable-template-center-view.spec.ts --watch=false # MetaTemplateCard 回归
 pnpm --filter @metasheet/web exec vitest run tests/platform-shell-nav.spec.ts --watch=false             # 回归：locale 开关未破
@@ -253,7 +255,7 @@ git diff --check origin/main..HEAD
 Acceptance：
 
 - `workbench-labels`：每 key en/zh 非空且不相等；`workbenchLabel(k,true)`→zh、`(k,false)`→en；插值 helper（presence.label en 单复数、presence.title 空态、conflict.message 可选 version、commentInboxTitle 0 分支、card.* 计数）代入正确。`<kbd>` 物理键名不翻译、不进表
-- Workbench：`zh-CN` 渲染含「字段/权限/视图/自动化/评论收件箱/模板库/键盘快捷键/导航单元格」+ presence/conflict 中文；`en` 对应英文
+- Workbench 本体（zh-CN/en 渲染）：**无自动化 render 断言**（workbench-view spec 既有 localStorage baseline，见 §5 诚实口径）。正确性由 label spec（映射/helper 全覆盖）+ `vue-tsc`（key 合法性）+ build + 代码审阅保证。期望行为：`zh-CN` 工具栏/横幅/modal 显示「字段/权限/视图/自动化/评论收件箱/模板库/键盘快捷键/导航单元格」+ presence/conflict 中文；`en` 对应英文 —— 经人工审阅 diff 确认
 - MetaTemplateCard（精确口径）：**zh-CN（默认）下 Home/TemplateCenter 必须保持**「`{n} 个 Sheet` / `{n} 个字段` / `{n} 个视图` / `使用模板` / `创建中...`」——既有 home-view / template-center-view spec 文案断言零回归；**en 下显示**「`{n} sheet(s)` / `{n} field(s)` / `{n} view(s)` / `Use template` / `Installing...`」（计数 en 走单复数）
 - **静态 toast 全覆盖证明**：verification MD 附 `grep -nE "showSuccess\(|showError\(" MultitableWorkbench.vue` 全量，逐条标 `[T2-done]`/`[T3-deferred]`
 - `git diff --check` clean；diff 仅 §5 所列文件
@@ -322,3 +324,8 @@ Lane: frontend
   - §6 acceptance MetaTemplateCard 精确化：zh-CN（默认）Home/TemplateCenter 必保「个 Sheet/个字段/个视图/使用模板/创建中...」零回归，en 显示 sheet(s)/field(s)/view(s)/Use template/Installing...
   - §3.0 加实现陷阱：`conflict.message` 的 `[ ]` 是 optional 段标记非字面方括号，输出禁现 `[`/`]`；`presence.title` ids 若为 user id 不译 id 本身
   - 译文/边界经评审确认：presence.*/conflict.message/card.sheets(保留 "Sheet" 不改"个表") 措辞接受；T3 边界（templateLibraryError/动态 toast/Meta\*）确认
+- **2026-05-19 (4)** 实现后评审 P1/P2 修正（验证声称诚实化）：
+  - §5：删除"`multitable-workbench-view.spec.ts` 加 locale 断言"行（该 spec 既有 localStorage baseline 53/53，往里加断言无意义）；改为诚实口径——Workbench 本体 render **无**自动化断言，正确性由 label spec + vue-tsc(key 合法性) + build + 人工 diff 审阅保证
+  - §6：移除 workbench-view spec 命令 + "Workbench zh-CN/en 渲染断言"验收项，改为诚实表述
+  - verification §7 加"测试覆盖诚实声明"段（P2）：Workbench 双语 render 未新增自动化，附原因 + 未来 baseline 修复后应补真实断言
+  - 实际改动 spec 仅 2 个（home-view/template-center 的 setLocale 回归处理）+ 1 新增（workbench-i18n label spec）
