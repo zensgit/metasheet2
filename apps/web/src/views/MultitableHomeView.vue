@@ -37,41 +37,33 @@
 
     <section class="multitable-home__panel" aria-label="Template quick start">
       <div class="multitable-home__panel-head">
-        <h2>模板快速开始</h2>
-        <span>{{ templates.length }} 个</span>
+        <div class="multitable-home__panel-title">
+          <h2>模板快速开始</h2>
+          <span class="multitable-home__panel-subtitle">{{ templates.length }} 个</span>
+        </div>
+        <router-link
+          class="multitable-home__panel-link"
+          :to="{ name: TemplateCenterRouteName }"
+          data-testid="multitable-home-template-center-link"
+        >
+          查看全部模板 →
+        </router-link>
       </div>
+
+      <p v-if="installError" class="multitable-home__error" role="alert">{{ installError }}</p>
 
       <div v-if="templateLoading" class="multitable-home__state">正在加载模板...</div>
       <div v-else-if="!templates.length" class="multitable-home__empty">
         暂无可用模板。你仍可直接新建空白 Base。
       </div>
       <div v-else class="multitable-home__template-grid">
-        <article
+        <MetaTemplateCard
           v-for="template in templates"
           :key="template.id"
-          class="multitable-home__template-card"
-          :style="{ borderColor: template.color || '#cbd5e1' }"
-        >
-          <div class="multitable-home__template-top">
-            <span class="multitable-home__template-icon" :style="{ background: template.color || '#2563eb' }">
-              {{ template.icon || template.name.slice(0, 1).toUpperCase() }}
-            </span>
-            <span class="multitable-home__template-category">{{ template.category }}</span>
-          </div>
-          <h3>{{ template.name }}</h3>
-          <p>{{ template.description }}</p>
-          <small>
-            {{ template.sheets.length }} 个 Sheet ·
-            {{ countTemplateViews(template) }} 个视图
-          </small>
-          <button
-            class="multitable-home__open multitable-home__open--wide"
-            :disabled="installingTemplateId === template.id"
-            @click="installTemplateAndOpen(template)"
-          >
-            {{ installingTemplateId === template.id ? '创建中...' : '使用模板' }}
-          </button>
-        </article>
+          :template="template"
+          :installing="installingTemplateId === template.id"
+          @install="installAndRemember"
+        />
       </div>
     </section>
 
@@ -145,7 +137,6 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { multitableClient } from '../multitable/api/client'
 import type {
-  InstallTemplateResult,
   MetaBase,
   MetaContext,
   MetaSheet,
@@ -161,6 +152,10 @@ import {
   toggleFavoriteBaseId,
 } from '../multitable/utils/base-local-state'
 import { AppRouteNames } from '../router/types'
+import MetaTemplateCard from '../multitable/components/MetaTemplateCard.vue'
+import { useTemplateInstall } from '../multitable/composables/useTemplateInstall'
+
+const TemplateCenterRouteName = AppRouteNames.MULTITABLE_TEMPLATES
 
 const router = useRouter()
 
@@ -170,11 +165,12 @@ const loading = ref(false)
 const templateLoading = ref(false)
 const creating = ref(false)
 const openingBaseId = ref<string | null>(null)
-const installingTemplateId = ref<string | null>(null)
 const errorMessage = ref('')
 const templateError = ref('')
 const newBaseName = ref('')
 const baseSearch = ref('')
+
+const { installingTemplateId, errorMessage: installError, installAndOpen } = useTemplateInstall()
 
 const favoriteBaseIds = ref<string[]>(readFavoriteBaseIds())
 const recentBaseOpens = ref(readRecentBaseOpens())
@@ -206,17 +202,6 @@ function resolveOpenTarget(context: MetaContext): { sheet: MetaSheet; view: Meta
   if (!sheet) return null
   const view = context.views.find((candidate) => candidate.sheetId === sheet.id) ?? context.views[0] ?? null
   return view ? { sheet, view } : null
-}
-
-function resolveTemplateTarget(result: InstallTemplateResult): { sheet: MetaSheet; view: MetaView } | null {
-  const sheet = result.sheets[0] ?? null
-  if (!sheet) return null
-  const view = result.views.find((candidate) => candidate.sheetId === sheet.id) ?? result.views[0] ?? null
-  return view ? { sheet, view } : null
-}
-
-function countTemplateViews(template: MetaTemplate): number {
-  return template.sheets.reduce((sum, sheet) => sum + sheet.views.length, 0)
 }
 
 async function loadBases(): Promise<void> {
@@ -272,31 +257,16 @@ async function openBase(base: MetaBase): Promise<void> {
   }
 }
 
-async function installTemplateAndOpen(template: MetaTemplate): Promise<void> {
-  if (installingTemplateId.value) return
-  installingTemplateId.value = template.id
-  errorMessage.value = ''
-  try {
-    const result = await multitableClient.installTemplate(template.id, { baseName: `${template.name} Base` })
-    if (!bases.value.some((base) => base.id === result.base.id)) {
-      bases.value = [result.base, ...bases.value]
-    }
-    const target = resolveTemplateTarget(result)
-    if (!target) {
-      errorMessage.value = '模板已创建，但默认视图尚未就绪。请刷新后重试。'
-      await loadBases()
-      return
-    }
-    rememberRecentBase(result.base.id)
-    await router.push({
-      name: AppRouteNames.MULTITABLE,
-      params: { sheetId: target.sheet.id, viewId: target.view.id },
-      query: { baseId: result.base.id },
-    })
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '模板创建失败'
-  } finally {
-    installingTemplateId.value = null
+async function installAndRemember(template: MetaTemplate): Promise<void> {
+  const outcome = await installAndOpen(template)
+  if (!outcome) return
+  if (outcome.status === 'installed-and-opened') {
+    rememberRecentBase(outcome.success.baseId)
+    return
+  }
+  if (outcome.status === 'installed-no-view') {
+    // Stay on Home; refresh base list so the user can see the newly created base.
+    await loadBases()
   }
 }
 

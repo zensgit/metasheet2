@@ -72,23 +72,24 @@
       <div v-if="templateLibraryLoading" class="mt-template-library__state">Loading templates...</div>
       <div v-else-if="templateLibraryError" class="mt-template-library__state mt-template-library__state--error">{{ templateLibraryError }}</div>
       <div v-else class="mt-template-library__grid">
-        <article v-for="template in templates" :key="template.id" class="mt-template-library__card" :style="{ borderColor: template.color }">
-          <div class="mt-template-library__card-top">
-            <span class="mt-template-library__icon" :style="{ backgroundColor: template.color }">{{ template.icon }}</span>
-            <span class="mt-template-library__category">{{ template.category }}</span>
-          </div>
-          <h3>{{ template.name }}</h3>
-          <p>{{ template.description }}</p>
-          <small>{{ template.sheets.length }} sheet{{ template.sheets.length === 1 ? '' : 's' }} · {{ template.sheets[0]?.fields.length ?? 0 }} fields</small>
-          <button
-            class="mt-template-library__install"
-            :disabled="installingTemplateId === template.id"
-            @click="onInstallTemplate(template)"
-          >
-            {{ installingTemplateId === template.id ? 'Installing...' : 'Use template' }}
-          </button>
-        </article>
+        <MetaTemplateCard
+          v-for="template in templates"
+          :key="template.id"
+          :template="template"
+          :installing="installingTemplateId === template.id"
+          @install="onInstallTemplate"
+        />
       </div>
+      <footer class="mt-template-library__footer">
+        <router-link
+          class="mt-template-library__more"
+          :to="{ name: TemplateCenterRouteName }"
+          data-testid="multitable-workbench-template-center-link"
+          @click="showTemplateLibrary = false"
+        >
+          更多模板 →
+        </router-link>
+      </footer>
     </div>
     <div
       v-if="capabilityOriginNotice"
@@ -396,6 +397,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { AppRouteNames } from '../../router/types'
 import { useAuth } from '../../composables/useAuth'
 import type {
   LinkedRecordSummary,
@@ -437,6 +439,7 @@ import MetaFormView from '../components/MetaFormView.vue'
 import MetaRecordDrawer from '../components/MetaRecordDrawer.vue'
 import MetaCommentsDrawer from '../components/MetaCommentsDrawer.vue'
 import MetaLinkPicker from '../components/MetaLinkPicker.vue'
+import MetaTemplateCard from '../components/MetaTemplateCard.vue'
 import MetaFieldManager from '../components/MetaFieldManager.vue'
 import MetaViewManager from '../components/MetaViewManager.vue'
 import MetaSheetPermissionManager from '../components/MetaSheetPermissionManager.vue'
@@ -512,6 +515,7 @@ const showPermissionManager = ref(false)
 const showAutomationManager = ref(false)
 const showDashboardView = ref(false)
 const showTemplateLibrary = ref(false)
+const TemplateCenterRouteName = AppRouteNames.MULTITABLE_TEMPLATES
 const showFormShareManager = ref(false)
 const showApiTokenManager = ref(false)
 const fieldPermissionEntries = ref<MetaFieldPermissionEntry[]>([])

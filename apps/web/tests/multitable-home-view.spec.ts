@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, nextTick, type App as VueApp, type Component } from 'vue'
+import { createApp, h, nextTick, type App as VueApp, type Component } from 'vue'
 import MultitableHomeView from '../src/views/MultitableHomeView.vue'
 import { AppRouteNames } from '../src/router/types'
 
@@ -88,6 +88,13 @@ describe('MultitableHomeView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(MultitableHomeView as Component)
+    app.component('router-link', {
+      props: ['to'],
+      render() {
+        const href = typeof this.$props.to === 'string' ? this.$props.to : JSON.stringify(this.$props.to)
+        return h('a', { href, 'data-router-link-to': href }, this.$slots.default ? this.$slots.default() : [])
+      },
+    })
     app.mount(container)
     return container
   }
@@ -281,7 +288,9 @@ describe('MultitableHomeView', () => {
     await flushUi()
 
     expect(root.textContent).toContain('Project Tracker')
-    expect(root.textContent).toContain('1 个 Sheet · 2 个视图')
+    // MetaTemplateCard now renders 3 metrics: sheets · fields · views.
+    // Project Tracker template has 1 sheet, 0 fields (mock), 2 views.
+    expect(root.textContent).toContain('1 个 Sheet · 0 个字段 · 2 个视图')
 
     findButton(root, '使用模板').click()
     await flushUi()
@@ -292,5 +301,18 @@ describe('MultitableHomeView', () => {
       params: { sheetId: 'sheet_template', viewId: 'view_template' },
       query: { baseId: 'base_template' },
     })
+  })
+
+  it('renders a link to the template center in the template section header', async () => {
+    mocks.listBases.mockResolvedValue({ bases: [] })
+    mocks.listTemplates.mockResolvedValue({ templates: [] })
+
+    const root = mountView()
+    await flushUi()
+
+    const link = root.querySelector<HTMLElement>('[data-testid="multitable-home-template-center-link"]')
+    expect(link).not.toBeNull()
+    expect(link?.textContent?.trim()).toContain('查看全部模板')
+    expect(link?.getAttribute('data-router-link-to')).toContain(AppRouteNames.MULTITABLE_TEMPLATES)
   })
 })
