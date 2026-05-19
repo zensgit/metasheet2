@@ -151,8 +151,8 @@ try {
   Require-Command -Name 'node'
   Require-Command -Name 'pnpm'
 
-  if ($InstallDeps -ne '0' -and -not (Test-Path -LiteralPath (Join-Path $resolvedRoot 'node_modules'))) {
-    Invoke-CheckedCommand 'Install dependencies (pnpm install --frozen-lockfile)' {
+  if ($InstallDeps -ne '0') {
+    Invoke-CheckedCommand 'Refresh dependencies (pnpm install --frozen-lockfile)' {
       pnpm install --frozen-lockfile
     }
   }

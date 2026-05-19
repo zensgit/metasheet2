@@ -115,6 +115,8 @@ REQUIRED_PATHS=(
   "docs/development/data-factory-issue1526-delivery-readiness-gate-contract-verification-20260518.md"
   "docs/development/data-factory-sqlserver-readonly-executor-design-20260519.md"
   "docs/development/data-factory-sqlserver-readonly-executor-verification-20260519.md"
+  "docs/development/onprem-package-dependency-refresh-design-20260519.md"
+  "docs/development/onprem-package-dependency-refresh-verification-20260519.md"
   "docs/development/data-factory-readiness-package-verify-delivery-development-20260515.md"
   "docs/development/data-factory-readiness-package-verify-delivery-verification-20260515.md"
   "docs/development/onprem-migration-gap-guard-development-20260514.md"
@@ -282,9 +284,11 @@ Upgrade / corrective reroll:
 
 Dependency policy:
   node_modules are intentionally not bundled. The apply helper defaults to
-  InstallDeps=1 and runs pnpm install --frozen-lockfile when node_modules is
-  missing. Manual deployments must run the same command before migrations,
-  PM2 restart, or admin bootstrap.
+  InstallDeps=1 and refreshes dependencies with pnpm install --frozen-lockfile
+  on every package apply. This is deliberate for corrective rerolls: an
+  existing deploy root may already have node_modules while the new package adds
+  a workspace runtime dependency. Manual deployments must run the same command
+  before migrations, PM2 restart, or admin bootstrap.
 
 Verification:
   A valid delivery asset passes:
@@ -300,6 +304,7 @@ EOF
   "deployMode": "fresh-extract-or-existing-root-apply",
   "directReplaceSafe": false,
   "nodeModulesBundled": false,
+  "dependencyInstallMode": "refresh-on-apply",
   "windowsEntryPoint": "deploy.bat <package.zip|package.tgz>",
   "linuxEntryPoint": "scripts/ops/multitable-onprem-package-install.sh",
   "includedRuntimeRoots": [
@@ -427,9 +432,11 @@ K3 WISE PoC operator tools (Node only; no Docker needed to run these):
 
 Runtime dependencies:
   node_modules are intentionally not bundled. deploy.bat defaults to
-  InstallDeps=1 and runs pnpm install --frozen-lockfile when node_modules is
-  missing. If applying files manually without deploy.bat, run pnpm install
-  --frozen-lockfile from the package root before migrations/bootstrap.
+  InstallDeps=1 and refreshes dependencies with pnpm install --frozen-lockfile
+  on every package apply. This prevents upgrade roots with existing
+  node_modules from missing newly added workspace runtime dependencies. If
+  applying files manually without deploy.bat, run pnpm install --frozen-lockfile
+  from the package root before migrations/bootstrap.
 EOF
 
 run rm -f "$ARCHIVE_TGZ_TMP_PATH" "$ARCHIVE_ZIP_TMP_PATH" "$ARCHIVE_TGZ_SHA_TMP_PATH" "$ARCHIVE_ZIP_SHA_TMP_PATH" "$METADATA_JSON_TMP_PATH"

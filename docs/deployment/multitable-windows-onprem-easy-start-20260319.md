@@ -270,7 +270,13 @@ These wrappers now call `scripts/ops/multitable-onprem-apply-package.ps1`, so a 
 
 The PowerShell helper extracts the incoming archive into a short-lived system temp directory instead of a deep deploy-root subdirectory, which avoids common Windows long-path failures during `Expand-Archive`.
 
-The package intentionally does **not** bundle `node_modules`. `deploy.bat` defaults to `InstallDeps=1` and runs `pnpm install --frozen-lockfile` when `node_modules` is missing. If you copy package files manually instead of using `deploy.bat`, run this from the package root before migrations, PM2 restart, or `bootstrap-admin.bat`:
+The package intentionally does **not** bundle `node_modules`. `deploy.bat`
+defaults to `InstallDeps=1` and refreshes dependencies with
+`pnpm install --frozen-lockfile` on every package apply. This is intentional for
+upgrade installs: the deploy root may already have `node_modules`, but the new
+package can add runtime dependencies such as plugin drivers. If you copy package
+files manually instead of using `deploy.bat`, run this from the package root
+before migrations, PM2 restart, or `bootstrap-admin.bat`:
 
 ```bat
 pnpm install --frozen-lockfile

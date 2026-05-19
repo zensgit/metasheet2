@@ -8,6 +8,7 @@ const DEFAULT_OUTPUT_ROOT = 'output/integration-k3wise-postdeploy-smoke'
 const ISSUE1542_SMOKE_PIPELINE_ID = 'issue1542_postdeploy_staging_material_smoke'
 const SQLSERVER_SYSTEM_KIND = 'erp:k3-wise-sqlserver'
 const SQLSERVER_EXECUTOR_MISSING_PATTERN = /SQLSERVER_EXECUTOR_MISSING|queryExecutor|executor|injected|注入|执行器/i
+const SQLSERVER_DRIVER_MISSING_PATTERN = /SQLSERVER_DRIVER_MISSING|mssql dependency|Cannot find module ['"]mssql['"]|找不到.*mssql/i
 const REQUIRED_ADAPTERS = [
   'http',
   'plm:yuantus-wrapper',
@@ -409,16 +410,28 @@ function sqlServerExecutorAvailabilityCheck(body) {
 
   const unavailableSystems = sqlSystems.filter((system) => {
     const lastError = typeof system.lastError === 'string' ? system.lastError : ''
-    return system.status === 'error' || SQLSERVER_EXECUTOR_MISSING_PATTERN.test(lastError)
+    return system.status === 'error' ||
+      SQLSERVER_EXECUTOR_MISSING_PATTERN.test(lastError) ||
+      SQLSERVER_DRIVER_MISSING_PATTERN.test(lastError)
   })
   if (unavailableSystems.length > 0) {
+    const missingDriverSystems = unavailableSystems.filter((system) => {
+      const lastError = typeof system.lastError === 'string' ? system.lastError : ''
+      return SQLSERVER_DRIVER_MISSING_PATTERN.test(lastError)
+    })
     const missingExecutorSystems = unavailableSystems.filter((system) => {
       const lastError = typeof system.lastError === 'string' ? system.lastError : ''
       return SQLSERVER_EXECUTOR_MISSING_PATTERN.test(lastError)
     })
     return result('sqlserver-executor-availability', 'skipped', {
-      code: missingExecutorSystems.length > 0 ? 'SQLSERVER_EXECUTOR_MISSING' : 'SQLSERVER_CHANNEL_UNAVAILABLE',
-      reason: missingExecutorSystems.length > 0
+      code: missingDriverSystems.length > 0
+        ? 'SQLSERVER_DRIVER_MISSING'
+        : missingExecutorSystems.length > 0
+          ? 'SQLSERVER_EXECUTOR_MISSING'
+          : 'SQLSERVER_CHANNEL_UNAVAILABLE',
+      reason: missingDriverSystems.length > 0
+        ? 'K3 WISE SQL Server source reached the built-in executor, but the mssql runtime dependency is missing; rerun the package apply helper with InstallDeps=1 or run pnpm install --frozen-lockfile from the deploy root.'
+        : missingExecutorSystems.length > 0
         ? 'K3 WISE SQL Server source is configured but this package has not completed SQL executor wiring or dependency install; staging-to-K3 smoke signoff can still pass.'
         : 'K3 WISE SQL Server source is configured but currently unavailable; staging-to-K3 smoke signoff can still pass.',
       systemsChecked: sqlSystems.length,
