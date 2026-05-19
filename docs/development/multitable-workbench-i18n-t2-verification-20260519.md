@@ -94,7 +94,7 @@ git stash (T2 改动) → 在 origin/main 原状跑 multitable-workbench-view.sp
 
 T2 实现与（评审三轮修订后的）dev MD 完全一致：工作台外壳 + §3.0 computed + 17 静态 toast + MetaTemplateCard + footer 全部中文化，预期响应顶部 en/zh-CN 开关。label 模块 8/8 单测绿，typecheck/build 绿，回归零净新增。T3 边界（Meta\* / templateLibraryError / 动态 toast）明确锚定。
 
-> **测试覆盖诚实声明**：Workbench 组件本体的双语 render **没有新增自动化断言**。原因：`multitable-workbench-view.spec.ts` 存在既有 `localStorage.removeItem` afterEach baseline failure（53/53，stash 法在 clean origin/main 复核逐字一致，§3），往其中加断言无意义（afterEach 必抛、新断言照样标 failed），而新挂载 mock-heavy Workbench 是早先评审明确警告要避免的。Workbench 本体的 zh-CN/en 正确性由 (a) `multitable-workbench-i18n.spec.ts` 8/8 确定性覆盖全部 en/zh 映射 + 9 helper + (b) `vue-tsc --noEmit` 保证每个 `wb(key,…)` 的 key 是合法 `WorkbenchLabelKey`（错 key = 编译失败）+ (c) build 通过 + (d) 代码 diff 人工审阅 共同保证，**非**通过 Workbench render assertion。若未来该 spec 的 localStorage baseline 被修复，应补真实 Workbench locale render 断言。
+> **测试覆盖（更新 2026-05-19）**：T2 合并时 Workbench 本体双语 render 无自动化断言（`multitable-workbench-view.spec.ts` 受 jsdom localStorage baseline 阻塞，53/53）。**该 baseline 已由后续 PR `web-test-jsdom-localstorage-baseline-fix-20260519` 根因修复**（全局 setupFile in-memory Storage polyfill；全套件失败 217→16、零回归、`comm -13` 空），并在 `multitable-workbench-view.spec.ts` 补了真实 Workbench locale render 断言（zh-CN 断言「字段/权限/视图/评论收件箱/仪表盘/API 与 Webhook」、en 断言对应英文，复用既有重 mock，55/55 绿）。因此 T2 §7 的"无自动化 render"残留风险**已消除**——保留此说明以记录历史与交叉引用。
 
 **待执行**：本地 commit → 停 push 前（沿用本会话节奏）→ 用户 review → push → CI → admin-merge。
 
