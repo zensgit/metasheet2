@@ -20,6 +20,19 @@ export function parseBoolean(value) {
   return value === '1' || value === 'true' || value === 'TRUE' || value === 'yes'
 }
 
+function parsePositiveInteger(value, fallback) {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback
+  return Math.floor(parsed)
+}
+
+function splitCsv(value) {
+  return String(value || '')
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean)
+}
+
 export function normalizeBaseUrl(value) {
   const normalized = String(value || '').trim().replace(/\/+$/, '')
   return normalized || DEFAULT_API_BASE
@@ -78,6 +91,11 @@ export function parseConfig(env = process.env, now = new Date()) {
     expectVisibleCode: String(env.EXPECT_VISIBLE_CODE || 'work_date').trim(),
     expectHiddenCode: String(env.EXPECT_HIDDEN_CODE || '').trim(),
     expectFormulaCode: String(env.EXPECT_FORMULA_CODE || '').trim(),
+    jobMode: parseBoolean(env.JOB_MODE),
+    jobUserIds: splitCsv(env.JOB_USER_IDS || env.USER_IDS),
+    jobAllUsers: parseBoolean(env.JOB_ALL_USERS || env.ALL_USERS),
+    jobPageSize: parsePositiveInteger(env.JOB_PAGE_SIZE || env.PAGE_SIZE, 5),
+    jobMaxPages: parsePositiveInteger(env.JOB_MAX_PAGES || env.MAX_JOB_PAGES, 10),
     devUserId: String(env.DEV_USER_ID || 'dev-admin').trim(),
     outputDir,
     reportPath: String(env.REPORT_JSON || path.join(outputDir, 'report.json')),
@@ -108,6 +126,10 @@ export function validateConfig(config) {
   if (!isValidHostHeader(config.hostHeader)) missing.push('API_HOST_HEADER host[:port]')
   if (!/^\d{4}-\d{2}-\d{2}$/.test(config.from)) missing.push('FROM_DATE yyyy-mm-dd')
   if (!/^\d{4}-\d{2}-\d{2}$/.test(config.to)) missing.push('TO_DATE yyyy-mm-dd')
+  if (!config.preflightOnly && config.jobMode) {
+    const selectedCount = (config.userId ? 1 : 0) + (config.jobUserIds.length > 0 ? 1 : 0) + (config.jobAllUsers ? 1 : 0)
+    if (selectedCount !== 1) missing.push('USER_ID/JOB_USER_IDS or JOB_ALL_USERS=1 for JOB_MODE=1')
+  }
   return missing
 }
 
@@ -332,11 +354,17 @@ async function fetchJson(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS, host
 
 async function requestJson(config, token, route, options = {}) {
   const url = `${config.apiBase}${route}`
+  const body = options.body === undefined || options.body === null
+    ? options.body
+    : typeof options.body === 'string' || Buffer.isBuffer(options.body)
+      ? options.body
+      : JSON.stringify(options.body)
   return fetchJson(url, {
     ...options,
+    body,
     headers: {
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
       ...(options.headers || {}),
     },
   }, config.timeoutMs, config.hostHeader)
@@ -368,6 +396,134 @@ function ensureOk(name, result) {
 
 function payloadData(json) {
   return json?.data && typeof json.data === 'object' ? json.data : {}
+}
+
+function reportSyncJobUserSelection(config) {
+  if (config.jobAllUsers) return { allUsers: true }
+  if (config.jobUserIds.length > 0) return { userIds: config.jobUserIds }
+  return { userId: config.userId }
+}
+
+function reportSyncJobBody(config, kind = 'daily_records', periodSource = { from: config.from, to: config.to }) {
+  return {
+    kind,
+    mode: 'manual_step',
+    pageSize: config.jobPageSize,
+    periodSource,
+    userSelection: reportSyncJobUserSelection(config),
+  }
+}
+
+function isTerminalJobStatus(status) {
+  return ['completed', 'canceled', 'failed'].includes(String(status || '').trim())
+}
+
+function jobTotalsPresent(job) {
+  const totals = job?.totals && typeof job.totals === 'object' ? job.totals : null
+  return Boolean(totals && Number.isFinite(Number(totals.usersScanned)) && Number.isFinite(Number(totals.synced)))
+}
+
+async function runReportSyncJobAcceptance(config, token, label, body, record) {
+  const created = payloadData(await checkedRequest(
+    config,
+    token,
+    `/api/attendance/report-sync-jobs?${buildQuery(config)}`,
+    `api.${label}.job.create`,
+    'POST /api/attendance/report-sync-jobs',
+    record,
+    { method: 'POST', body },
+  ))
+  const jobId = String(created?.id || '')
+  record(`${label}.job.created`, Boolean(jobId), {
+    jobId: jobId || 'missing',
+    kind: created?.kind || 'missing',
+    status: created?.status || 'missing',
+  })
+
+  let job = created
+  let pageCount = 0
+  const pageStatuses = []
+  while (jobId && !isTerminalJobStatus(job?.status) && pageCount < config.jobMaxPages) {
+    pageCount += 1
+    const pageData = payloadData(await checkedRequest(
+      config,
+      token,
+      `/api/attendance/report-sync-jobs/${encodeURIComponent(jobId)}/run-next-page?${buildQuery(config)}`,
+      `api.${label}.job.run-page`,
+      'POST /api/attendance/report-sync-jobs/:id/run-next-page',
+      record,
+      { method: 'POST' },
+    ))
+    job = pageData.job || job
+    pageStatuses.push(job?.status || 'missing')
+  }
+
+  record(`${label}.job.completed`, job?.status === 'completed', {
+    jobId: jobId || 'missing',
+    status: job?.status || 'missing',
+    pages: pageCount,
+  })
+  record(`${label}.job.pages-within-limit`, pageCount > 0 && pageCount <= config.jobMaxPages, {
+    pages: pageCount,
+    maxPages: config.jobMaxPages,
+    statuses: pageStatuses.join(','),
+  })
+  record(`${label}.job.totals-present`, jobTotalsPresent(job), {
+    usersScanned: job?.totals?.usersScanned ?? 'missing',
+    synced: job?.totals?.synced ?? 'missing',
+    failed: job?.totals?.failed ?? 'missing',
+  })
+
+  if (jobId && job?.status === 'completed') {
+    const rerun = await requestJson(
+      config,
+      token,
+      `/api/attendance/report-sync-jobs/${encodeURIComponent(jobId)}/run-next-page?${buildQuery(config)}`,
+      { method: 'POST' },
+    )
+    const errorCode = rerun?.json?.error?.code || ''
+    record(`${label}.job.terminal-rerun-rejected`, rerun.res.status === 409 && errorCode === 'JOB_TERMINAL', {
+      status: rerun.res.status,
+      code: errorCode || 'missing',
+    })
+    const replacement = payloadData(await checkedRequest(
+      config,
+      token,
+      `/api/attendance/report-sync-jobs?${buildQuery(config)}`,
+      `api.${label}.job.create-after-terminal`,
+      'POST /api/attendance/report-sync-jobs',
+      record,
+      { method: 'POST', body },
+    ))
+    const replacementJobId = String(replacement?.id || '')
+    record(`${label}.job.new-job-created`, Boolean(replacementJobId && replacementJobId !== jobId), {
+      jobId: replacementJobId || 'missing',
+      previousJobId: jobId,
+      status: replacement?.status || 'missing',
+    })
+    if (replacementJobId) {
+      const canceled = payloadData(await checkedRequest(
+        config,
+        token,
+        `/api/attendance/report-sync-jobs/${encodeURIComponent(replacementJobId)}/cancel?${buildQuery(config)}`,
+        `api.${label}.job.cancel-new-job`,
+        'POST /api/attendance/report-sync-jobs/:id/cancel',
+        record,
+        { method: 'POST' },
+      ))
+      record(`${label}.job.new-job-canceled`, canceled?.status === 'canceled', {
+        jobId: replacementJobId,
+        status: canceled?.status || 'missing',
+      })
+    }
+  } else {
+    record(`${label}.job.terminal-rerun-rejected`, false, {
+      reason: 'job did not reach completed status',
+      status: job?.status || 'missing',
+    })
+  }
+
+  return { jobId, job, pageCount }
 }
 
 function extractCategoryIds(categories) {
@@ -602,6 +758,10 @@ export function renderHelp() {
     '  EXPECT_VISIBLE_CODE=work_date',
     '  EXPECT_HIDDEN_CODE=<field_code>',
     '  EXPECT_FORMULA_CODE=<formula_field_code>',
+    '  JOB_MODE=1',
+    '  JOB_ALL_USERS=1 or JOB_USER_IDS=<id,id> (USER_ID also works)',
+    '  JOB_PAGE_SIZE=5',
+    '  JOB_MAX_PAGES=10',
     '  AUTH_SOURCE=AUTH_TOKEN|AUTH_TOKEN_FILE|ALLOW_DEV_TOKEN',
     '  OUTPUT_DIR=output/attendance-report-fields-live-acceptance/<run>',
     '',
@@ -626,6 +786,17 @@ const MARKDOWN_CHECK_DETAIL_KEYS = Object.freeze([
   'csvCodeBacking',
   'exportBacking',
   'fieldCount',
+  'jobId',
+  'kind',
+  'pages',
+  'maxPages',
+  'statuses',
+  'synced',
+  'created',
+  'patched',
+  'skipped',
+  'failed',
+  'usersScanned',
   'selected',
   'present',
   'ignored',
@@ -669,6 +840,9 @@ const EVIDENCE_SUMMARY_METADATA_KEYS = Object.freeze([
   ['CSV code field codes', 'csvCodeFieldCodes'],
   ['Formula field codes', 'formulaFieldCodes'],
   ['Formula invalid codes', 'formulaInvalidCodes'],
+  ['Daily job id', 'dailyJobId'],
+  ['Daily job status', 'dailyJobStatus'],
+  ['Daily job pages', 'dailyJobPages'],
   ['CSV backing', 'csvBacking'],
   ['CSV code backing', 'csvCodeBacking'],
 ])
@@ -1092,6 +1266,22 @@ export async function runAttendanceReportFieldsAcceptance(config) {
     report.metadata.csvCodeFieldFingerprint = csvCodeFieldFingerprint
     report.metadata.csvCodeFieldCodes = csvCodeFieldCodes.join(',')
     report.metadata.csvCodeBacking = csvCodeBackingFingerprint
+
+    if (config.jobMode) {
+      const dailyJob = await runReportSyncJobAcceptance(
+        config,
+        token,
+        'daily-records',
+        reportSyncJobBody(config, 'daily_records'),
+        record,
+      )
+      report.metadata.dailyJobId = dailyJob.jobId
+      report.metadata.dailyJobStatus = dailyJob.job?.status || ''
+      report.metadata.dailyJobPages = dailyJob.pageCount
+    } else {
+      record('daily-records.job.skipped', true, { reason: 'JOB_MODE not set' })
+    }
+
     record('runner.completed', true)
   } catch (error) {
     report.ok = false

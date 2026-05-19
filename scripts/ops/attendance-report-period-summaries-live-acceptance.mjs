@@ -94,6 +94,8 @@ export function parseConfig(env = process.env, now = new Date()) {
     cycleId: String(env.CYCLE_ID || '').trim(),
     page: parsePositiveInteger(env.PAGE, DEFAULT_PAGE),
     pageSize: parsePositiveInteger(env.PAGE_SIZE, DEFAULT_PAGE_SIZE),
+    jobMode: parseBoolean(env.JOB_MODE),
+    jobMaxPages: parsePositiveInteger(env.JOB_MAX_PAGES || env.MAX_JOB_PAGES, 10),
     expectObjectId: String(env.EXPECT_OBJECT_ID || EXPECTED_OBJECT_ID).trim(),
     expectFieldFingerprint: String(env.EXPECT_FIELD_FINGERPRINT || '').trim(),
     expectUsersScanned: env.EXPECT_USERS_SCANNED === undefined ? null : Number(env.EXPECT_USERS_SCANNED),
@@ -434,6 +436,130 @@ function createdOrPatched(data) {
   return Number(data?.created ?? 0) + Number(data?.patched ?? 0) > 0
 }
 
+function isTerminalJobStatus(status) {
+  return ['completed', 'canceled', 'failed'].includes(String(status || '').trim())
+}
+
+function jobTotalsPresent(job) {
+  const totals = job?.totals && typeof job.totals === 'object' ? job.totals : null
+  return Boolean(totals && Number.isFinite(Number(totals.usersScanned)) && Number.isFinite(Number(totals.synced)))
+}
+
+function reportSyncJobUserSelection(config) {
+  if (config.allUsers) return { allUsers: true }
+  if (config.userIds.length > 0) return { userIds: config.userIds }
+  return { userId: config.userId }
+}
+
+function reportSyncJobBody(config, periodSource) {
+  return {
+    kind: 'period_summaries',
+    mode: 'manual_step',
+    pageSize: config.pageSize,
+    periodSource,
+    userSelection: reportSyncJobUserSelection(config),
+  }
+}
+
+async function runReportSyncJobAcceptance(config, token, label, body, record) {
+  const created = payloadData(await checkedRequest(
+    config,
+    token,
+    `/api/attendance/report-sync-jobs?${buildQuery(config)}`,
+    `api.${label}.job.create`,
+    record,
+    { method: 'POST', body },
+  ))
+  const jobId = String(created?.id || '')
+  record(`${label}.job.created`, Boolean(jobId), {
+    jobId: jobId || 'missing',
+    kind: created?.kind || 'missing',
+    status: created?.status || 'missing',
+  })
+
+  let job = created
+  let pageCount = 0
+  const pageStatuses = []
+  while (jobId && !isTerminalJobStatus(job?.status) && pageCount < config.jobMaxPages) {
+    pageCount += 1
+    const pageData = payloadData(await checkedRequest(
+      config,
+      token,
+      `/api/attendance/report-sync-jobs/${encodeURIComponent(jobId)}/run-next-page?${buildQuery(config)}`,
+      `api.${label}.job.run-page`,
+      record,
+      { method: 'POST' },
+    ))
+    job = pageData.job || job
+    pageStatuses.push(job?.status || 'missing')
+  }
+
+  record(`${label}.job.completed`, job?.status === 'completed', {
+    jobId: jobId || 'missing',
+    status: job?.status || 'missing',
+    pages: pageCount,
+  })
+  record(`${label}.job.pages-within-limit`, pageCount > 0 && pageCount <= config.jobMaxPages, {
+    pages: pageCount,
+    maxPages: config.jobMaxPages,
+    statuses: pageStatuses.join(','),
+  })
+  record(`${label}.job.totals-present`, jobTotalsPresent(job), {
+    usersScanned: job?.totals?.usersScanned ?? 'missing',
+    synced: job?.totals?.synced ?? 'missing',
+    failed: job?.totals?.failed ?? 'missing',
+  })
+
+  if (jobId && job?.status === 'completed') {
+    const rerun = await requestJson(
+      config,
+      token,
+      `/api/attendance/report-sync-jobs/${encodeURIComponent(jobId)}/run-next-page?${buildQuery(config)}`,
+      { method: 'POST' },
+    )
+    const errorCode = rerun?.json?.error?.code || ''
+    record(`${label}.job.terminal-rerun-rejected`, rerun.res.status === 409 && errorCode === 'JOB_TERMINAL', {
+      status: rerun.res.status,
+      code: errorCode || 'missing',
+    })
+    const replacement = payloadData(await checkedRequest(
+      config,
+      token,
+      `/api/attendance/report-sync-jobs?${buildQuery(config)}`,
+      `api.${label}.job.create-after-terminal`,
+      record,
+      { method: 'POST', body },
+    ))
+    const replacementJobId = String(replacement?.id || '')
+    record(`${label}.job.new-job-created`, Boolean(replacementJobId && replacementJobId !== jobId), {
+      jobId: replacementJobId || 'missing',
+      previousJobId: jobId,
+      status: replacement?.status || 'missing',
+    })
+    if (replacementJobId) {
+      const canceled = payloadData(await checkedRequest(
+        config,
+        token,
+        `/api/attendance/report-sync-jobs/${encodeURIComponent(replacementJobId)}/cancel?${buildQuery(config)}`,
+        `api.${label}.job.cancel-new-job`,
+        record,
+        { method: 'POST' },
+      ))
+      record(`${label}.job.new-job-canceled`, canceled?.status === 'canceled', {
+        jobId: replacementJobId,
+        status: canceled?.status || 'missing',
+      })
+    }
+  } else {
+    record(`${label}.job.terminal-rerun-rejected`, false, {
+      reason: 'job did not reach completed status',
+      status: job?.status || 'missing',
+    })
+  }
+
+  return { jobId, job, pageCount }
+}
+
 function usersScannedMatches(data, config) {
   if (config.expectUsersScanned === null) return true
   return Number(data?.usersScanned ?? data?.synced ?? 0) === config.expectUsersScanned
@@ -549,6 +675,8 @@ export function renderHelp() {
     '  CYCLE_ID=<optional-payroll-cycle-id>',
     '  PAGE=1',
     '  PAGE_SIZE=5',
+    '  JOB_MODE=1',
+    '  JOB_MAX_PAGES=10',
     '  EXPECT_USERS_SCANNED=1',
     '  EXPECT_CREATED_OR_PATCHED=1',
     '  AUTH_SOURCE=AUTH_TOKEN|AUTH_TOKEN_FILE|ALLOW_DEV_TOKEN',
@@ -577,6 +705,12 @@ const MARKDOWN_CHECK_DETAIL_KEYS = Object.freeze([
   'failed',
   'duplicateRowKeys',
   'usersScanned',
+  'jobId',
+  'kind',
+  'pages',
+  'maxPages',
+  'statuses',
+  'synced',
   'expected',
   'objectId',
   'fingerprint',
@@ -719,12 +853,42 @@ export async function runAttendanceReportPeriodSummariesAcceptance(config) {
     report.metadata.dateRangeSheetId = dateRange.second.multitable?.sheetId || dateRange.first.multitable?.sheetId || ''
     report.metadata.dateRangeViewId = dateRange.second.multitable?.viewId || dateRange.first.multitable?.viewId || ''
 
+    if (config.jobMode) {
+      const dateRangeJob = await runReportSyncJobAcceptance(
+        config,
+        token,
+        'date-range',
+        reportSyncJobBody(config, { from: config.from, to: config.to }),
+        record,
+      )
+      report.metadata.dateRangeJobId = dateRangeJob.jobId
+      report.metadata.dateRangeJobStatus = dateRangeJob.job?.status || ''
+      report.metadata.dateRangeJobPages = dateRangeJob.pageCount
+    } else {
+      record('date-range.job.skipped', true, { reason: 'JOB_MODE not set' })
+    }
+
     if (config.cycleId) {
       const cycle = await syncPeriodTwice(config, token, 'payroll-cycle', buildCycleBody(config), record)
       report.metadata.cycleFieldFingerprint = cycle.second.fieldFingerprint || cycle.first.fieldFingerprint || ''
       report.metadata.cycleId = config.cycleId
+      if (config.jobMode) {
+        const cycleJob = await runReportSyncJobAcceptance(
+          config,
+          token,
+          'payroll-cycle',
+          reportSyncJobBody(config, { cycleId: config.cycleId }),
+          record,
+        )
+        report.metadata.cycleJobId = cycleJob.jobId
+        report.metadata.cycleJobStatus = cycleJob.job?.status || ''
+        report.metadata.cycleJobPages = cycleJob.pageCount
+      } else {
+        record('payroll-cycle.job.skipped', true, { reason: 'JOB_MODE not set' })
+      }
     } else {
       record('payroll-cycle.skipped', true, { reason: 'CYCLE_ID not set' })
+      record('payroll-cycle.job.skipped', true, { reason: 'CYCLE_ID not set' })
     }
 
     record('runner.completed', report.ok)

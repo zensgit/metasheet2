@@ -23,6 +23,22 @@ function sendText(res, status, text, contentType = 'text/plain; charset=utf-8', 
   res.end(text)
 }
 
+function readBody(req) {
+  return new Promise((resolve) => {
+    const chunks = []
+    req.setEncoding('utf8')
+    req.on('data', chunk => chunks.push(chunk))
+    req.on('end', () => {
+      const text = chunks.join('')
+      try {
+        resolve(text ? JSON.parse(text) : {})
+      } catch {
+        resolve({})
+      }
+    })
+  })
+}
+
 const categories = [
   { id: 'fixed', label: '固定字段' },
   { id: 'basic', label: '基础字段' },
@@ -114,8 +130,11 @@ function catalogPayload() {
 
 async function startMockServer() {
   const calls = []
+  const bodies = []
   const hostHeaders = []
-  const server = http.createServer((req, res) => {
+  const jobRunCounts = new Map()
+  let jobCreateCount = 0
+  const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://127.0.0.1')
     calls.push(`${req.method} ${url.pathname}`)
     hostHeaders.push(req.headers.host || '')
@@ -173,6 +192,66 @@ async function startMockServer() {
       })
       return
     }
+    if (url.pathname === '/api/attendance/report-sync-jobs' && req.method === 'POST') {
+      const body = await readBody(req)
+      bodies.push(body)
+      jobCreateCount += 1
+      const jobId = `daily-job-${jobCreateCount}`
+      send(res, 201, {
+        ok: true,
+        data: {
+          id: jobId,
+          kind: body.kind,
+          status: 'queued',
+          mode: body.mode,
+          periodSource: body.periodSource,
+          userSelection: body.userSelection,
+          cursor: { nextPage: 1, pageSize: body.pageSize, hasNextPage: true },
+          totals: { usersScanned: 0, usersSynced: 0, usersFailed: 0, synced: 0, rowsSynced: 0, created: 0, patched: 0, skipped: 0, failed: 0, duplicateRowKeys: 0 },
+        },
+      })
+      return
+    }
+    const jobCancelMatch = url.pathname.match(/^\/api\/attendance\/report-sync-jobs\/([^/]+)\/cancel$/)
+    if (jobCancelMatch && req.method === 'POST') {
+      const jobId = decodeURIComponent(jobCancelMatch[1])
+      send(res, 200, {
+        ok: true,
+        data: {
+          id: jobId,
+          kind: 'daily_records',
+          status: 'canceled',
+          totals: { usersScanned: 0, usersSynced: 0, usersFailed: 0, synced: 0, rowsSynced: 0, created: 0, patched: 0, skipped: 0, failed: 0, duplicateRowKeys: 0 },
+        },
+      })
+      return
+    }
+    const jobRunMatch = url.pathname.match(/^\/api\/attendance\/report-sync-jobs\/([^/]+)\/run-next-page$/)
+    if (jobRunMatch && req.method === 'POST') {
+      const jobId = decodeURIComponent(jobRunMatch[1])
+      const runCount = (jobRunCounts.get(jobId) || 0) + 1
+      jobRunCounts.set(jobId, runCount)
+      if (runCount > 2) {
+        send(res, 409, { ok: false, error: { code: 'JOB_TERMINAL', message: 'Completed or canceled attendance report sync jobs cannot run again' } })
+        return
+      }
+      const completed = runCount === 2
+      send(res, 200, {
+        ok: true,
+        data: {
+          job: {
+            id: jobId,
+            kind: 'daily_records',
+            status: completed ? 'completed' : 'queued',
+            cursor: { nextPage: completed ? 2 : 2, pageSize: 2, hasNextPage: !completed },
+            totals: { usersScanned: runCount, usersSynced: runCount, usersFailed: 0, synced: runCount, rowsSynced: runCount, created: runCount, patched: 0, skipped: 0, failed: 0, duplicateRowKeys: 0 },
+            lastResult: { usersScanned: 1, synced: 1, hasNextPage: !completed },
+          },
+          pageResult: { usersScanned: 1, synced: 1, hasNextPage: !completed },
+        },
+      })
+      return
+    }
 
     send(res, 404, { ok: false, error: { code: 'NOT_FOUND', message: url.pathname } })
   })
@@ -182,6 +261,7 @@ async function startMockServer() {
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
     calls,
+    bodies,
     hostHeaders,
     close: () => new Promise((resolve) => server.close(resolve)),
   }
@@ -259,6 +339,20 @@ test('validateConfig rejects invalid API host headers', () => {
     TO_DATE: '2026-05-13',
   })
   assert.deepEqual(validateConfig(config), ['API_HOST_HEADER host[:port]'])
+})
+
+test('validateConfig requires an explicit user selection for job mode', () => {
+  const config = parseConfig({
+    API_BASE: 'https://staging.example.test/',
+    AUTH_TOKEN: 'jwt-from-env',
+    CONFIRM_SYNC: '1',
+    JOB_MODE: '1',
+    FROM_DATE: '2026-05-01',
+    TO_DATE: '2026-05-13',
+  })
+  assert.deepEqual(validateConfig(config), [
+    'USER_ID/JOB_USER_IDS or JOB_ALL_USERS=1 for JOB_MODE=1',
+  ])
 })
 
 test('validateConfig allows preflight without auth or sync confirmation', () => {
@@ -644,6 +738,60 @@ test('runAttendanceReportFieldsAcceptance verifies catalog, records, export, and
     assert.ok(markdown.includes('- CSV backing: `default:attendance|attendance_report_field_catalog|sheet_attendance_report_fields|fields_by_category`'))
     assert.ok(markdown.includes('- CSV code backing: `default:attendance|attendance_report_field_catalog|sheet_attendance_report_fields|fields_by_category`'))
     assert.match(markdown, /Auth source: `AUTH_TOKEN_FILE`/)
+    assert.doesNotMatch(markdown, /unit-test-token/)
+  } finally {
+    await server.close()
+  }
+})
+
+test('JOB_MODE runs daily report sync job to completion and rejects terminal rerun', async () => {
+  const server = await startMockServer()
+  const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'attendance-report-fields-job-mode-'))
+  const tokenFile = path.join(outputDir, 'admin.jwt')
+  fs.writeFileSync(tokenFile, 'unit-test-token\n', { mode: 0o600 })
+  try {
+    const report = await runAttendanceReportFieldsAcceptance(parseConfig({
+      API_BASE: server.baseUrl,
+      AUTH_TOKEN_FILE: tokenFile,
+      CONFIRM_SYNC: '1',
+      ORG_ID: 'default',
+      USER_ID: 'user-1',
+      FROM_DATE: '2026-05-01',
+      TO_DATE: '2026-05-13',
+      JOB_MODE: '1',
+      JOB_PAGE_SIZE: '2',
+      OUTPUT_DIR: outputDir,
+    }))
+
+    assert.equal(report.ok, true)
+    assert.equal(report.metadata.dailyJobId, 'daily-job-1')
+    assert.equal(report.metadata.dailyJobStatus, 'completed')
+    assert.equal(report.metadata.dailyJobPages, 2)
+    assert.deepEqual(server.bodies, [
+      {
+        kind: 'daily_records',
+        mode: 'manual_step',
+        pageSize: 2,
+        periodSource: { from: '2026-05-01', to: '2026-05-13' },
+        userSelection: { userId: 'user-1' },
+      },
+      {
+        kind: 'daily_records',
+        mode: 'manual_step',
+        pageSize: 2,
+        periodSource: { from: '2026-05-01', to: '2026-05-13' },
+        userSelection: { userId: 'user-1' },
+      },
+    ])
+    assert.ok(report.checks.some((check) => check.name === 'daily-records.job.created' && check.ok))
+    assert.ok(report.checks.some((check) => check.name === 'daily-records.job.completed' && check.ok))
+    assert.ok(report.checks.some((check) => check.name === 'daily-records.job.pages-within-limit' && check.ok))
+    assert.ok(report.checks.some((check) => check.name === 'daily-records.job.totals-present' && check.ok))
+    assert.ok(report.checks.some((check) => check.name === 'daily-records.job.terminal-rerun-rejected' && check.ok))
+    assert.ok(report.checks.some((check) => check.name === 'daily-records.job.new-job-created' && check.ok))
+    assert.ok(report.checks.some((check) => check.name === 'daily-records.job.new-job-canceled' && check.ok))
+    const markdown = fs.readFileSync(path.join(outputDir, 'report.md'), 'utf8')
+    assert.match(markdown, /Daily job status: `completed`/)
     assert.doesNotMatch(markdown, /unit-test-token/)
   } finally {
     await server.close()

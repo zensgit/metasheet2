@@ -228,10 +228,12 @@ Rules:
 
 ### PR4: Live Acceptance Harness
 
-- Extend existing report records and period summaries live acceptance with optional `JOB_MODE=1`.
-- Verify create job -> run pages -> completed.
-- Verify rerun completed job is rejected and new job can be created.
-- Staging live only after explicit authorization and file-based JWT.
+- [x] Extend existing report records and period summaries live acceptance with optional `JOB_MODE=1`.
+- [x] Verify create job -> run pages -> completed.
+- [x] Verify rerun completed job is rejected and a replacement job can be created.
+- [x] Staging live only after explicit authorization and file-based JWT.
+
+**PR4 implementation pointer:** `docs/development/attendance-report-sync-jobs-pr4-development-20260519.md`; verification: `docs/development/attendance-report-sync-jobs-pr4-verification-20260519.md`.
 
 ## Hard Boundaries
 
