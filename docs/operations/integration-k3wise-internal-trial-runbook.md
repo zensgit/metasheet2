@@ -172,6 +172,19 @@ non-blocking `sqlserver-executor-availability` check:
   Re-apply the package with `InstallDeps=1` or run
   `pnpm install --frozen-lockfile` from the deploy root before restarting PM2.
 
+If a Windows package apply reaches dependency refresh but does not continue to
+migrations/restart/healthcheck, do not run the SQL source retest yet. Inspect
+`output\logs\deploy-remote.log` and the dependency logs written by the apply
+helper:
+
+- `output\logs\dependency-refresh-*.stdout.log`
+- `output\logs\dependency-refresh-*.stderr.log`
+
+The helper prints the resolved `pnpm` path/version, heartbeat progress, and a
+timeout failure if the install exceeds `DependencyRefreshTimeoutSec` (default
+1800 seconds). A stuck or timed-out dependency refresh is a deployment failure,
+not a valid SQL executor result.
+
 These SQL diagnostic states do not invalidate the #1542 staging-to-K3 metadata
 signoff. They mean direct SQL Server source execution is still blocked.
 Use `metasheet:staging` as the source for Data Factory retests until the package

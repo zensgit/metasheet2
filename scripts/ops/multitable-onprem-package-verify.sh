@@ -50,6 +50,13 @@ function verify_windows_entrypoints() {
 
   local apply_helper="${root}/scripts/ops/multitable-onprem-apply-package.ps1"
   search_fixed_string 'Refresh dependencies (pnpm install --frozen-lockfile)' "$apply_helper" || die "PowerShell apply helper must refresh dependencies on package apply"
+  search_fixed_string 'DependencyRefreshTimeoutSec' "$apply_helper" || die "PowerShell apply helper must expose dependency refresh timeout"
+  search_fixed_string 'DependencyRefreshHeartbeatSec' "$apply_helper" || die "PowerShell apply helper must expose dependency refresh heartbeat"
+  search_fixed_string 'dependency-refresh-' "$apply_helper" || die "PowerShell apply helper must write dependency refresh stdout/stderr logs"
+  search_fixed_string 'pnpm path:' "$apply_helper" || die "PowerShell apply helper must log pnpm path before dependency refresh"
+  search_fixed_string 'pnpm version:' "$apply_helper" || die "PowerShell apply helper must log pnpm version before dependency refresh"
+  search_fixed_string 'still running after' "$apply_helper" || die "PowerShell apply helper must emit dependency refresh heartbeat progress"
+  search_fixed_string 'timed out after' "$apply_helper" || die "PowerShell apply helper must fail dependency refresh with a timeout"
   if search_fixed_string "-not (Test-Path -LiteralPath (Join-Path \$resolvedRoot 'node_modules'))" "$apply_helper"; then
     die "PowerShell apply helper must not skip dependency refresh just because root node_modules already exists"
   fi

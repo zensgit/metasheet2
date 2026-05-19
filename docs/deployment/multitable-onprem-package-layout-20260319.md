@@ -170,4 +170,12 @@ rerolls safe when the deploy root already has `node_modules` but the new package
 adds a workspace runtime dependency. Manual file-copy deployments must run the
 same command before migrations, PM2 restart, or admin bootstrap.
 
+On Windows, dependency refresh is a logged child process. The apply helper logs
+the resolved `pnpm` path/version, writes stdout/stderr to
+`output\logs\dependency-refresh-*.stdout.log` and
+`output\logs\dependency-refresh-*.stderr.log`, emits heartbeat progress while
+the install is still running, and fails the deployment after the configured
+timeout instead of hanging forever. Defaults are
+`DependencyRefreshTimeoutSec=1800` and `DependencyRefreshHeartbeatSec=60`.
+
 For a fresh Windows-only install, use `bootstrap-admin.bat` after `deploy.bat` so the customer can create the first admin account without needing bash or WSL.

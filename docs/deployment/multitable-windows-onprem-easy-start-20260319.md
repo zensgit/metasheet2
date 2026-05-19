@@ -282,6 +282,21 @@ before migrations, PM2 restart, or `bootstrap-admin.bat`:
 pnpm install --frozen-lockfile
 ```
 
+The Windows apply helper runs that dependency refresh with diagnostics rather
+than as an unbounded silent command:
+
+- default timeout: 1800 seconds;
+- default heartbeat: 60 seconds;
+- stdout/stderr logs: `output\logs\dependency-refresh-*.stdout.log` and
+  `output\logs\dependency-refresh-*.stderr.log`;
+- tunables for exceptional hosts:
+  `-DependencyRefreshTimeoutSec <seconds>` and
+  `-DependencyRefreshHeartbeatSec <seconds>`.
+
+If a scheduled deployment appears stuck at dependency refresh, inspect
+`output\logs\deploy-remote.log` plus the two `dependency-refresh-*` logs before
+rerunning. A timeout is a deploy failure, not a valid SQL/K3 runtime test.
+
 The packaged Windows admin bootstrap helper also avoids `node -e` and writes a short-lived `.cjs` file into the package-local `.tmp/node-bootstrap` directory before invoking Node. This sidesteps the Node v24 + Windows PowerShell type-stripping issue and keeps bundled dependencies such as `bcryptjs` resolvable from the packaged app root.
 
 After `deploy.bat` completes on a fresh Windows-only install, create the first admin with:
