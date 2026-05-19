@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, type App as VueApp, type Component } from 'vue'
 import MultitableTemplateCenterView from '../src/views/MultitableTemplateCenterView.vue'
 import { AppRouteNames } from '../src/router/types'
+import { useLocale } from '../src/composables/useLocale'
 
 const mocks = vi.hoisted(() => ({
   push: vi.fn(),
@@ -92,11 +93,18 @@ describe('MultitableTemplateCenterView', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
 
+  // MetaTemplateCard is now locale-aware (T2 i18n); pin zh-CN so the Chinese
+  // product-copy assertions hold (jsdom default would be 'en').
+  beforeEach(() => {
+    useLocale().setLocale('zh-CN')
+  })
+
   afterEach(() => {
     if (app) app.unmount()
     if (container) container.remove()
     app = null
     container = null
+    useLocale().setLocale('en')
     vi.clearAllMocks()
   })
 

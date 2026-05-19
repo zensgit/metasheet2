@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, type App as VueApp, type Component } from 'vue'
 import MultitableHomeView from '../src/views/MultitableHomeView.vue'
 import { AppRouteNames } from '../src/router/types'
+import { useLocale } from '../src/composables/useLocale'
 
 const mocks = vi.hoisted(() => ({
   push: vi.fn(),
@@ -74,6 +75,13 @@ describe('MultitableHomeView', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
 
+  // MetaTemplateCard is now locale-aware (T2 i18n). These specs assert the
+  // Chinese product copy, so pin zh-CN before each mount; jsdom's default
+  // resolveInitialLocale() would otherwise yield 'en'.
+  beforeEach(() => {
+    useLocale().setLocale('zh-CN')
+  })
+
   afterEach(() => {
     if (app) app.unmount()
     if (container) container.remove()
@@ -81,6 +89,7 @@ describe('MultitableHomeView', () => {
     container = null
     localStorage.removeItem(FAVORITE_BASES_KEY)
     localStorage.removeItem(RECENT_BASES_KEY)
+    useLocale().setLocale('en')
     vi.clearAllMocks()
   })
 

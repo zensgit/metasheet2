@@ -3,13 +3,13 @@
     <MetaToast ref="toastRef" />
     <div v-if="grid.conflict.value" class="mt-workbench__conflict" role="alert">
       <div class="mt-workbench__conflict-copy">
-        <strong>Update conflict</strong>
+        <strong>{{ wb('conflict.title', isZh) }}</strong>
         <span>{{ conflictMessage }}</span>
       </div>
       <div class="mt-workbench__conflict-actions">
-        <button class="mt-workbench__conflict-btn" @click="onReloadConflict">Reload latest</button>
-        <button class="mt-workbench__conflict-btn mt-workbench__conflict-btn--primary" @click="onRetryConflict">Retry change</button>
-        <button class="mt-workbench__conflict-btn" @click="grid.dismissConflict()">Dismiss</button>
+        <button class="mt-workbench__conflict-btn" @click="onReloadConflict">{{ wb('conflict.reload', isZh) }}</button>
+        <button class="mt-workbench__conflict-btn mt-workbench__conflict-btn--primary" @click="onRetryConflict">{{ wb('conflict.retry', isZh) }}</button>
+        <button class="mt-workbench__conflict-btn" @click="grid.dismissConflict()">{{ wb('conflict.dismiss', isZh) }}</button>
       </div>
     </div>
     <div v-if="basePickerBases.length" class="mt-workbench__base-bar">
@@ -38,38 +38,38 @@
         :class="{ 'mt-workbench__mention-chip--unread': mentionInboxState.unreadMentionCount.value > 0 }"
         @click="onMentionChipClick"
       >
-        &#x1F4EC; Mentions <strong>{{ mentionInboxState.unreadMentionCount.value || mentionInboxState.summary.value.unresolvedMentionCount }}</strong>
-        <span v-if="mentionInboxState.unreadMentionCount.value > 0" class="mt-workbench__mention-chip-unread">{{ mentionInboxState.unreadMentionCount.value }} unread</span>
-        <span class="mt-workbench__mention-chip-records">{{ mentionInboxState.summary.value.mentionedRecordCount }} records</span>
+        &#x1F4EC; {{ wb('toolbar.mentions', isZh) }} <strong>{{ mentionInboxState.unreadMentionCount.value || mentionInboxState.summary.value.unresolvedMentionCount }}</strong>
+        <span v-if="mentionInboxState.unreadMentionCount.value > 0" class="mt-workbench__mention-chip-unread">{{ fmtMentionsUnread(mentionInboxState.unreadMentionCount.value, isZh) }}</span>
+        <span class="mt-workbench__mention-chip-records">{{ fmtMentionsRecords(mentionInboxState.summary.value.mentionedRecordCount, isZh) }}</span>
       </button>
       <button
         class="mt-workbench__mgr-btn"
         :class="{ 'mt-workbench__mgr-btn--attention': commentInboxBadgeCount > 0 }"
-        :title="commentInboxBadgeCount > 0 ? `${commentInboxBadgeCount} comment updates need attention` : 'Open comment inbox'"
+        :title="fmtCommentInboxTitle(commentInboxBadgeCount, isZh)"
         @click="openCommentInbox()"
       >
-        &#x1F4AC; Comment Inbox
+        &#x1F4AC; {{ wb('toolbar.commentInbox', isZh) }}
         <span v-if="commentInboxBadgeCount > 0" class="mt-workbench__mgr-badge">{{ commentInboxBadgeCount }}</span>
       </button>
-      <button v-if="caps.canManageFields.value" class="mt-workbench__mgr-btn" @click="showFieldManager = true">&#x2699; Fields</button>
-      <button v-if="caps.canManageSheetAccess.value" class="mt-workbench__mgr-btn" @click="showPermissionManager = true; void loadPermissionEntries()">&#x1F512; Access</button>
-      <button v-if="caps.canManageViews.value && canConfigureCurrentView" class="mt-workbench__mgr-btn" @click="showViewManager = true">&#x2630; Views</button>
-      <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="openWorkflowDesigner()">&#x2699; Workflow</button>
-      <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="showAutomationManager = true">&#x26A1; Automations</button>
-      <button v-if="canCreateBasesAndSheets" class="mt-workbench__mgr-btn" data-action="open-template-library" @click="openTemplateLibrary">&#x1F5C2; Templates</button>
-      <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard">&#x1F4CA; Dashboard</button>
-      <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true">&#x1F517; Share Form</button>
-      <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true">&#x1F511; API &amp; Webhooks</button>
+      <button v-if="caps.canManageFields.value" class="mt-workbench__mgr-btn" @click="showFieldManager = true">&#x2699; {{ wb('toolbar.fields', isZh) }}</button>
+      <button v-if="caps.canManageSheetAccess.value" class="mt-workbench__mgr-btn" @click="showPermissionManager = true; void loadPermissionEntries()">&#x1F512; {{ wb('toolbar.access', isZh) }}</button>
+      <button v-if="caps.canManageViews.value && canConfigureCurrentView" class="mt-workbench__mgr-btn" @click="showViewManager = true">&#x2630; {{ wb('toolbar.views', isZh) }}</button>
+      <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="openWorkflowDesigner()">&#x2699; {{ wb('toolbar.workflow', isZh) }}</button>
+      <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="showAutomationManager = true">&#x26A1; {{ wb('toolbar.automations', isZh) }}</button>
+      <button v-if="canCreateBasesAndSheets" class="mt-workbench__mgr-btn" data-action="open-template-library" @click="openTemplateLibrary">&#x1F5C2; {{ wb('toolbar.templates', isZh) }}</button>
+      <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard">&#x1F4CA; {{ wb('toolbar.dashboard', isZh) }}</button>
+      <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true">&#x1F517; {{ wb('toolbar.shareForm', isZh) }}</button>
+      <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true">&#x1F511; {{ wb('toolbar.apiWebhooks', isZh) }}</button>
     </div>
     <div v-if="showTemplateLibrary" class="mt-template-library" data-testid="multitable-template-library">
       <div class="mt-template-library__header">
         <div>
-          <strong>Template Library</strong>
-          <span>Start a new base from a built-in workspace pattern.</span>
+          <strong>{{ wb('tpl.title', isZh) }}</strong>
+          <span>{{ wb('tpl.subtitle', isZh) }}</span>
         </div>
         <button class="mt-template-library__close" @click="showTemplateLibrary = false">&times;</button>
       </div>
-      <div v-if="templateLibraryLoading" class="mt-template-library__state">Loading templates...</div>
+      <div v-if="templateLibraryLoading" class="mt-template-library__state">{{ wb('tpl.loading', isZh) }}</div>
       <div v-else-if="templateLibraryError" class="mt-template-library__state mt-template-library__state--error">{{ templateLibraryError }}</div>
       <div v-else class="mt-template-library__grid">
         <MetaTemplateCard
@@ -87,7 +87,7 @@
           data-testid="multitable-workbench-template-center-link"
           @click="showTemplateLibrary = false"
         >
-          更多模板 →
+          {{ wb('tpl.more', isZh) }}
         </router-link>
       </footer>
     </div>
@@ -299,19 +299,19 @@
     <div v-if="showShortcuts" class="mt-workbench__shortcuts-overlay" @click.self="showShortcuts = false">
       <div class="mt-workbench__shortcuts">
         <div class="mt-workbench__shortcuts-header">
-          <strong>Keyboard Shortcuts</strong>
+          <strong>{{ wb('kbd.title', isZh) }}</strong>
           <button class="mt-workbench__shortcuts-close" @click="showShortcuts = false">&times;</button>
         </div>
         <div class="mt-workbench__shortcuts-grid">
-          <div class="mt-workbench__shortcut"><kbd>&#x2191; &#x2193; &#x2190; &#x2192;</kbd><span>Navigate cells</span></div>
-          <div class="mt-workbench__shortcut"><kbd>Enter</kbd><span>Edit cell</span></div>
-          <div class="mt-workbench__shortcut"><kbd>Escape</kbd><span>Cancel edit / close</span></div>
-          <div class="mt-workbench__shortcut"><kbd>Tab</kbd><span>Next cell</span></div>
-          <div class="mt-workbench__shortcut"><kbd>Ctrl+C</kbd><span>Copy cell value</span></div>
-          <div class="mt-workbench__shortcut"><kbd>Ctrl+V</kbd><span>Paste into cell</span></div>
-          <div class="mt-workbench__shortcut"><kbd>Ctrl+Z</kbd><span>Undo</span></div>
-          <div class="mt-workbench__shortcut"><kbd>Ctrl+Y</kbd><span>Redo</span></div>
-          <div class="mt-workbench__shortcut"><kbd>?</kbd><span>Toggle this help</span></div>
+          <div class="mt-workbench__shortcut"><kbd>&#x2191; &#x2193; &#x2190; &#x2192;</kbd><span>{{ wb('kbd.navigateCells', isZh) }}</span></div>
+          <div class="mt-workbench__shortcut"><kbd>Enter</kbd><span>{{ wb('kbd.editCell', isZh) }}</span></div>
+          <div class="mt-workbench__shortcut"><kbd>Escape</kbd><span>{{ wb('kbd.cancelClose', isZh) }}</span></div>
+          <div class="mt-workbench__shortcut"><kbd>Tab</kbd><span>{{ wb('kbd.nextCell', isZh) }}</span></div>
+          <div class="mt-workbench__shortcut"><kbd>Ctrl+C</kbd><span>{{ wb('kbd.copy', isZh) }}</span></div>
+          <div class="mt-workbench__shortcut"><kbd>Ctrl+V</kbd><span>{{ wb('kbd.paste', isZh) }}</span></div>
+          <div class="mt-workbench__shortcut"><kbd>Ctrl+Z</kbd><span>{{ wb('kbd.undo', isZh) }}</span></div>
+          <div class="mt-workbench__shortcut"><kbd>Ctrl+Y</kbd><span>{{ wb('kbd.redo', isZh) }}</span></div>
+          <div class="mt-workbench__shortcut"><kbd>?</kbd><span>{{ wb('kbd.toggleHelp', isZh) }}</span></div>
         </div>
       </div>
     </div>
@@ -399,6 +399,16 @@ import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch } 
 import { useRouter } from 'vue-router'
 import { AppRouteNames } from '../../router/types'
 import { useAuth } from '../../composables/useAuth'
+import { useLocale } from '../../composables/useLocale'
+import {
+  workbenchLabel as wb,
+  conflictMessage as fmtConflictMessage,
+  presenceLabel as fmtPresenceLabel,
+  presenceTitle as fmtPresenceTitle,
+  commentInboxTitle as fmtCommentInboxTitle,
+  mentionsUnread as fmtMentionsUnread,
+  mentionsRecords as fmtMentionsRecords,
+} from '../utils/workbench-labels'
 import type {
   LinkedRecordSummary,
   MetaAttachment,
@@ -488,6 +498,9 @@ const emit = defineEmits<{
 const role = ref<MultitableRole>(props.role ?? 'editor')
 const router = useRouter()
 const auth = useAuth()
+// useLocale().isZh is a ComputedRef<boolean>; template auto-unwraps it,
+// script reads isZh.value (see T2 i18n dev MD).
+const { isZh } = useLocale()
 const workbench = useMultitableWorkbench({ initialBaseId: props.baseId, initialSheetId: props.sheetId, initialViewId: props.viewId })
 const capabilitySource = computed(() => workbench.capabilities.value ?? role.value)
 const caps = useMultitableCapabilities(capabilitySource)
@@ -606,21 +619,21 @@ function showSuccess(msg: string) {
 
 function ensureCanCreateRecord(): boolean {
   if (caps.canCreateRecord.value) return true
-  showError('Record creation is not allowed in this view.')
+  showError(wb('toast.recordCreateBlocked', isZh.value))
   return false
 }
 
 function ensureCanEditRecord(recordId?: string | null): boolean {
   const allowed = recordId ? (grid.resolveRowActions(recordId)?.canEdit ?? effectiveRowActions.value.canEdit) : effectiveRowActions.value.canEdit
   if (allowed) return true
-  showError('Record editing is not allowed for this row.')
+  showError(wb('toast.recordEditBlocked', isZh.value))
   return false
 }
 
 function ensureCanDeleteRecord(recordId?: string | null): boolean {
   const allowed = recordId ? (grid.resolveRowActions(recordId)?.canDelete ?? effectiveRowActions.value.canDelete) : effectiveRowActions.value.canDelete
   if (allowed) return true
-  showError('Record deletion is not allowed for this row.')
+  showError(wb('toast.recordDeleteBlocked', isZh.value))
   return false
 }
 
@@ -877,22 +890,21 @@ const commentComposerInitialMentions = computed(() => (
 ))
 const commentInboxBadgeCount = computed(() => commentInboxState.unreadCount.value)
 const sheetPresenceLabel = computed(() => (
-  `${sheetPresenceState.activeCollaboratorCount.value} ${sheetPresenceState.activeCollaboratorCount.value === 1 ? 'active collaborator' : 'active collaborators'}`
+  fmtPresenceLabel(sheetPresenceState.activeCollaboratorCount.value, isZh.value)
 ))
 const sheetPresenceTitle = computed(() => {
   const ids = sheetPresenceState.activeCollaborators.value.map((user) => user.id)
-  return ids.length > 0 ? `Active now: ${ids.join(', ')}` : 'No active collaborators'
+  return fmtPresenceTitle(ids, isZh.value)
 })
 const conflictFieldName = computed(() => {
   const fieldId = grid.conflict.value?.fieldId
-  if (!fieldId) return 'cell'
+  if (!fieldId) return wb('conflict.fieldFallback', isZh.value)
   return grid.fields.value.find((field) => field.id === fieldId)?.name ?? fieldId
 })
 const conflictMessage = computed(() => {
   const current = grid.conflict.value
   if (!current) return ''
-  const versionPart = typeof current.serverVersion === 'number' ? ` Latest version is ${current.serverVersion}.` : ''
-  return `${conflictFieldName.value} changed elsewhere.${versionPart} Reload the row or retry your edit.`
+  return fmtConflictMessage(conflictFieldName.value, current.serverVersion, isZh.value)
 })
 const hasUnsavedWorkbenchDrafts = computed(() => (
   formDirty.value ||
@@ -1326,7 +1338,7 @@ async function onTimelinePatchDates(payload: {
     if (selectedRecordId.value === payload.recordId) {
       await resolveDeepLink(payload.recordId)
     }
-    showSuccess('Dates updated')
+    showSuccess(wb('toast.datesUpdated', isZh.value))
   } catch (error: any) {
     showError(error?.message ?? 'Failed to update timeline dates')
   }
@@ -1355,7 +1367,7 @@ async function onHierarchyReparentRecord(payload: {
     if (selectedRecordId.value === payload.recordId) {
       await resolveDeepLink(payload.recordId)
     }
-    showSuccess('Hierarchy updated')
+    showSuccess(wb('toast.hierarchyUpdated', isZh.value))
   } catch (error: any) {
     showError(error?.message ?? 'Failed to update hierarchy parent')
   }
@@ -1377,7 +1389,7 @@ async function onDeleteRecord() {
     selectedRecordId.value = null
     showComments.value = false
     commentDraft.value = ''
-    showSuccess('Record deleted')
+    showSuccess(wb('toast.recordDeleted', isZh.value))
     return
   }
   if (grid.error.value) showError(grid.error.value)
@@ -1388,7 +1400,7 @@ async function onReloadConflict() {
   if (selectedRecordId.value) {
     await resolveDeepLink(selectedRecordId.value)
   }
-  showSuccess('Loaded the latest row state')
+  showSuccess(wb('toast.loadedLatest', isZh.value))
 }
 
 async function onRetryConflict() {
@@ -1397,7 +1409,7 @@ async function onRetryConflict() {
     if (selectedRecordId.value) {
       await resolveDeepLink(selectedRecordId.value)
     }
-    showSuccess('Change reapplied')
+    showSuccess(wb('toast.changeReapplied', isZh.value))
     return
   }
   if (grid.error.value) showError(grid.error.value)
@@ -1419,7 +1431,7 @@ async function onDrawerPatch(fieldId: string, value: unknown) {
       data: { ...deepLinkedRecord.value.data, [fieldId]: value },
     }
   }
-  showSuccess('Record updated')
+  showSuccess(wb('toast.recordUpdated', isZh.value))
 }
 
 async function onFormSubmit(data: Record<string, unknown>) {
@@ -1444,7 +1456,7 @@ async function onFormSubmit(data: Record<string, unknown>) {
       await grid.loadViewData(grid.page.value.offset)
       formSuccessMessage.value = result.mode === 'create' ? 'Record created' : 'Changes saved'
       formFieldErrors.value = {}
-      showSuccess('Form submitted')
+      showSuccess(wb('toast.formSubmitted', isZh.value))
     } catch (e: any) {
       const message = e.message ?? 'Form submit failed'
       formErrorMessage.value = message
@@ -1461,7 +1473,7 @@ async function onFormSubmit(data: Record<string, unknown>) {
     if (changes.length) {
       await workbench.client.patchRecords({ sheetId: workbench.activeSheetId.value || undefined, viewId: viewId || undefined, changes })
       await grid.loadViewData(grid.page.value.offset)
-      showSuccess('Record updated')
+      showSuccess(wb('toast.recordUpdated', isZh.value))
     }
   } else {
     if (!ensureCanCreateRecord()) return
@@ -1477,7 +1489,7 @@ async function onSubmitComment(payload: { content: string; mentions: string[] })
         content: payload.content,
         mentions: payload.mentions,
       })
-      showSuccess('Comment updated')
+      showSuccess(wb('toast.commentUpdated', isZh.value))
     } else {
       await commentsState.addComment({
         ...selectedRecordCommentsScope.value,
@@ -1486,7 +1498,7 @@ async function onSubmitComment(payload: { content: string; mentions: string[] })
         targetFieldId: activeCommentFieldId.value ?? undefined,
         parentId: selectedReplyCommentId.value ?? undefined,
       })
-      showSuccess('Comment added')
+      showSuccess(wb('toast.commentAdded', isZh.value))
     }
     commentDraft.value = ''
     selectedReplyCommentId.value = null
@@ -1499,7 +1511,7 @@ async function onSubmitComment(payload: { content: string; mentions: string[] })
 async function onResolveComment(commentId: string) {
   try {
     await commentsState.resolveComment(commentId)
-    showSuccess('Comment resolved')
+    showSuccess(wb('toast.commentResolved', isZh.value))
   } catch (e: any) {
     showError(commentsState.error.value ?? e.message ?? 'Failed to resolve comment')
   }
@@ -1528,7 +1540,7 @@ async function onDeleteComment(commentId: string) {
     if (highlightedCommentId.value === commentId) {
       highlightedCommentId.value = null
     }
-    showSuccess('Comment deleted')
+    showSuccess(wb('toast.commentDeleted', isZh.value))
   } catch (e: any) {
     showError(commentsState.error.value ?? e.message ?? 'Failed to delete comment')
   }
@@ -1577,7 +1589,7 @@ async function onLinkPickerConfirm(payload: { recordIds: string[]; summaries: Li
   } else {
     return
   }
-  showSuccess('Linked records updated')
+  showSuccess(wb('toast.linkedRecordsUpdated', isZh.value))
 }
 
 // --- Field management ---
@@ -1685,7 +1697,7 @@ async function updateViewInternal(
     await workbench.client.updateView(viewId, input)
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
     await grid.loadViewData(grid.page.value.offset)
-    if (notify) showSuccess('View settings saved')
+    if (notify) showSuccess(wb('toast.viewSettingsSaved', isZh.value))
   } catch (e: any) { showError(e.message ?? 'Failed to update view') }
 }
 
