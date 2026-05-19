@@ -13,9 +13,9 @@
     <h3 class="meta-template-card__name">{{ template.name }}</h3>
     <p class="meta-template-card__description">{{ template.description }}</p>
     <small class="meta-template-card__meta">
-      {{ template.sheets.length }} 个 Sheet ·
-      {{ fieldCount }} 个字段 ·
-      {{ viewCount }} 个视图
+      {{ cardSheets(template.sheets.length, isZh) }} ·
+      {{ cardFields(fieldCount, isZh) }} ·
+      {{ cardViews(viewCount, isZh) }}
     </small>
     <button
       type="button"
@@ -23,7 +23,7 @@
       :disabled="installing"
       @click="emit('install', template)"
     >
-      {{ installing ? '创建中...' : '使用模板' }}
+      {{ installing ? workbenchLabel('card.installing', isZh) : workbenchLabel('card.install', isZh) }}
     </button>
   </article>
 </template>
@@ -32,6 +32,13 @@
 import { computed } from 'vue'
 import type { MetaTemplate } from '../types'
 import { categoryLabel } from '../utils/category-labels'
+import { useLocale } from '../../composables/useLocale'
+import {
+  cardSheets,
+  cardFields,
+  cardViews,
+  workbenchLabel,
+} from '../utils/workbench-labels'
 
 const props = defineProps<{
   template: MetaTemplate
@@ -42,7 +49,13 @@ const emit = defineEmits<{
   (e: 'install', template: MetaTemplate): void
 }>()
 
-const categoryDisplay = computed(() => categoryLabel(props.template.category))
+// useLocale().isZh is already a ComputedRef<boolean>; template auto-unwraps it,
+// script reads isZh.value.
+const { isZh } = useLocale()
+
+const categoryDisplay = computed(() =>
+  categoryLabel(props.template.category, isZh.value ? 'zh-CN' : 'en'),
+)
 
 const fieldCount = computed(() => {
   return props.template.sheets.reduce((sum, sheet) => sum + sheet.fields.length, 0)
