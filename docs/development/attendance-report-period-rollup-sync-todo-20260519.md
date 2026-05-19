@@ -49,7 +49,7 @@ Date: 2026-05-19
 
 **落地状态：** PR1 由 Claude 按用户**显式 scoped 指派**实现（偏离本文件 Governance 的默认 Codex-driven —— 决策者明确指派单条 PR1 链，非自启、非 re-scope；记录在此保留 Codex review 连续性）。实现镜像既有 daily `attendance_report_records` 的 PR1 模式（descriptor / view descriptor / ensure / 测试 surface / degraded 语义一致）。`plugins/plugin-attendance/index.cjs` 新增 `ATTENDANCE_REPORT_PERIOD_SUMMARIES_{OBJECT_ID,FIELDS,VIEW_ID}` + `getAttendanceReportPeriodSummariesDescriptor()` + `getAttendanceReportPeriodSummariesViewDescriptor()` + `ensureAttendanceReportPeriodSummaries()`，并入 `__attendanceReportFieldCatalogForTests` 测试 surface；后端单测加在 `attendance-report-field-catalog.test.ts`（descriptor 稳定 / 类型只用 string·date·dateTime·number·boolean / row_key required / projectId=`${orgId}:attendance` / provisioning 缺失 degraded 不抛 / ensureView 失败不阻断 ensureObject 成功）。PR2（writer+route）/ PR3（前端+evidence）仍为后续，回归默认 Codex-driven 或另行显式指派。
 
-### PR2：writer + route
+### PR2：writer + route — ✅ 本分支实现中（2026-05-19）
 
 - 复用 `loadAttendanceSummary(db, orgId, userId, from, to)` 作为周期基础指标 producer。
 - payroll cycle 模式先读取 `attendance_payroll_cycles`，解析 `startDate/endDate/name/templateId`，再走同一 summary producer。
@@ -57,6 +57,8 @@ Date: 2026-05-19
 - value columns 由「summary 默认字段 + summary 公式字段 + active dynamic subtype 字段」确定性生成，排序按 `sortOrder/code`，同 code 映射稳定 `fld_xxx`。
 - upsert 规则沿用 daily sync：按物理 `fld_xxx` 的 `row_key` query，命中 patch，未命中 create；source + field fingerprint 双等才 skip；patch 时非 active managed 列显式写 `null`。
 - 多条相同 `row_key`：patch 第一条，计 `duplicateRowKeys`，不自动删重复。
+
+**落地指针：** 开发记录见 `docs/development/attendance-report-period-rollup-sync-pr2-development-20260519.md`；验证记录见 `docs/development/attendance-report-period-rollup-sync-pr2-verification-20260519.md`。
 
 ### PR3：前端入口 + live evidence
 

@@ -2639,6 +2639,496 @@ async function syncAttendanceReportRecordsForUsers(context, db, orgId, logger, p
   return aggregate
 }
 
+function resolveAttendanceReportPeriodSummaryManagedFormulaFields(items) {
+  return (Array.isArray(items) ? items : [])
+    .filter(field => (
+      field
+      && field.code
+      && field.formulaEnabled === true
+      && normalizeAttendanceReportFormulaScope(field.formulaScope) === 'summary'
+    ))
+    .map(field => ({
+      code: field.code,
+      name: field.name || field.code,
+      category: field.category || 'formula',
+      source: field.source || 'custom',
+      unit: field.unit || 'text',
+      sortOrder: Number(field.sortOrder) || 0,
+      configured: Boolean(field.configured),
+      systemDefined: field.systemDefined !== false,
+      enabled: field.enabled !== false,
+      reportVisible: field.reportVisible !== false,
+      formulaEnabled: true,
+      formulaExpression: field.formulaExpression || '',
+      formulaScope: 'summary',
+      formulaOutputType: normalizeAttendanceReportFormulaOutputType(field.formulaOutputType, field.unit),
+      formulaValid: field.formulaValid !== false,
+      formulaError: field.formulaError || null,
+      formulaReferences: Array.isArray(field.formulaReferences) ? field.formulaReferences : [],
+    }))
+    .sort((left, right) => {
+      if (left.sortOrder !== right.sortOrder) return left.sortOrder - right.sortOrder
+      return left.code.localeCompare(right.code)
+    })
+}
+
+function buildAttendanceReportPeriodSummaryValueFields(summaryFormulaFields = [], dynamicSubtypeDefinitions = []) {
+  const fields = []
+  const seen = new Set(Object.values(ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS))
+  for (const [index, field] of ATTENDANCE_SUMMARY_FORMULA_SOURCE_FIELDS.entries()) {
+    if (!field?.code || seen.has(field.code)) continue
+    seen.add(field.code)
+    fields.push({
+      ...field,
+      category: 'summary',
+      source: 'system',
+      sortOrder: 1000 + index,
+      systemDefined: true,
+      formulaEnabled: false,
+    })
+  }
+  for (const [index, field] of (Array.isArray(summaryFormulaFields) ? summaryFormulaFields : []).entries()) {
+    if (!field?.code || seen.has(field.code)) continue
+    seen.add(field.code)
+    fields.push({
+      ...field,
+      category: 'formula',
+      source: field.source || 'custom',
+      sortOrder: 2000 + (Number(field.sortOrder) || index),
+      configured: true,
+      systemDefined: field.systemDefined !== false,
+      formulaEnabled: true,
+    })
+  }
+  const sortedSubtypeDefinitions = [...(Array.isArray(dynamicSubtypeDefinitions) ? dynamicSubtypeDefinitions : [])]
+    .filter(field => field?.code)
+    .sort((left, right) => {
+      const leftSort = Number(left.sortOrder) || 0
+      const rightSort = Number(right.sortOrder) || 0
+      if (leftSort !== rightSort) return leftSort - rightSort
+      return String(left.code).localeCompare(String(right.code))
+    })
+  for (const [index, field] of sortedSubtypeDefinitions.entries()) {
+    if (!field?.code || seen.has(field.code)) continue
+    seen.add(field.code)
+    fields.push({
+      ...field,
+      sortOrder: 3000 + (Number(field.sortOrder) || index),
+      systemDefined: true,
+      formulaEnabled: false,
+    })
+  }
+  return fields
+}
+
+function buildAttendanceReportPeriodSummaryActiveValueCodes(summaryFormulaFields = [], dynamicSubtypeDefinitions = []) {
+  const codes = new Set(ATTENDANCE_SUMMARY_FORMULA_SOURCE_FIELDS.map(field => field.code))
+  for (const field of (Array.isArray(summaryFormulaFields) ? summaryFormulaFields : [])) {
+    if (field?.code) codes.add(field.code)
+  }
+  for (const field of (Array.isArray(dynamicSubtypeDefinitions) ? dynamicSubtypeDefinitions : [])) {
+    if (field?.code) codes.add(field.code)
+  }
+  return codes
+}
+
+function buildAttendanceReportPeriodSummaryValueColumns(valueFields) {
+  const skeletonIds = new Set(Object.values(ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS))
+  return (Array.isArray(valueFields) ? valueFields : [])
+    .filter(field => field?.code && !skeletonIds.has(field.code))
+    .map((field, index) => ({
+      id: field.code,
+      name: field.name || field.code,
+      type: mapReportFieldToMultitableType(field),
+      order: 1000 + index,
+    }))
+}
+
+function attendanceReportPeriodSummaryRowKey(orgId, userId, period) {
+  if (period?.cycleId) {
+    return `${orgId}:${userId}:cycle:${period.cycleId}`
+  }
+  return `${orgId}:${userId}:range:${period?.from}:${period?.to}`
+}
+
+function buildAttendanceReportPeriodSummarySourceFingerprint(logicalPayload) {
+  const excluded = new Set([
+    ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.syncedAt,
+    ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.fieldFingerprint,
+    ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.sourceFingerprint,
+  ])
+  const canonical = Object.keys(logicalPayload)
+    .filter(key => !excluded.has(key))
+    .sort()
+    .map(key => [key, logicalPayload[key]])
+  return crypto.createHash('sha1').update(JSON.stringify(canonical)).digest('hex')
+}
+
+function buildAttendancePeriodSummarySubtypeTotals(approvedMap) {
+  const totals = {}
+  if (!(approvedMap instanceof Map)) return totals
+  for (const entry of approvedMap.values()) {
+    const subtypes = entry?.reportSubtypeMinutes && typeof entry.reportSubtypeMinutes === 'object'
+      ? entry.reportSubtypeMinutes
+      : {}
+    for (const [code, value] of Object.entries(subtypes)) {
+      totals[code] = (totals[code] ?? 0) + Number(value ?? 0)
+    }
+  }
+  return totals
+}
+
+function getAttendancePeriodSummaryFieldValue(summary, code) {
+  if (!summary || !code) return ''
+  const formulaValues = summary.formula_values && typeof summary.formula_values === 'object'
+    ? summary.formula_values
+    : {}
+  if (Object.prototype.hasOwnProperty.call(formulaValues, code)) return formulaValues[code]
+  const subtypeValues = summary.reportSubtypeMinutes && typeof summary.reportSubtypeMinutes === 'object'
+    ? summary.reportSubtypeMinutes
+    : {}
+  if (Object.prototype.hasOwnProperty.call(subtypeValues, code)) return subtypeValues[code]
+  return getAttendancePayrollSummaryFieldValue(summary, code)
+}
+
+async function loadAttendancePeriodSummaryEmployeeInfo(db, orgId, userId, from, to) {
+  const rows = await db.query(
+    `SELECT u.name AS user_name,
+            u.username AS username,
+            ar.meta AS meta
+     FROM users u
+     LEFT JOIN LATERAL (
+       SELECT meta
+       FROM attendance_records
+       WHERE user_id = u.id
+         AND org_id = $2
+         AND work_date BETWEEN $3 AND $4
+       ORDER BY work_date DESC
+       LIMIT 1
+     ) ar ON true
+     WHERE u.id = $1
+     LIMIT 1`,
+    [userId, orgId, from, to],
+  )
+  const row = rows[0] ?? {}
+  const metaRow = { meta: normalizeMetadata(row.meta) }
+  return {
+    employeeName: firstNonEmptyValue(row.user_name, row.username, userId),
+    department: firstNonEmptyValue(readAttendanceRecordMeta(metaRow, ['department', '部门'])),
+    attendanceGroup: firstNonEmptyValue(readAttendanceRecordMeta(metaRow, ['attendanceGroup', 'attendance_group', '考勤组'])),
+  }
+}
+
+async function resolveAttendanceReportPeriodSyncPeriod(db, orgId, params = {}) {
+  const cycleIdRaw = String(params?.cycleId || '').trim()
+  const hasCycle = Boolean(cycleIdRaw)
+  const hasFrom = params?.from !== undefined
+  const hasTo = params?.to !== undefined
+  const hasDateRangeInput = hasFrom || hasTo
+  if (hasCycle && hasDateRangeInput) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'VALIDATION_ERROR',
+      message: 'Use either cycleId or from/to, not both',
+    }
+  }
+  if (hasCycle) {
+    const cycleId = normalizeUuidString(cycleIdRaw)
+    if (!cycleId) {
+      return { ok: false, status: 400, code: 'VALIDATION_ERROR', message: 'Invalid cycleId' }
+    }
+    const rows = await db.query(
+      'SELECT * FROM attendance_payroll_cycles WHERE id = $1 AND org_id = $2',
+      [cycleId, orgId],
+    )
+    if (!rows.length) {
+      return { ok: false, status: 404, code: 'NOT_FOUND', message: 'Payroll cycle not found' }
+    }
+    const cycle = mapPayrollCycleRow(rows[0])
+    return {
+      ok: true,
+      period: {
+        periodType: 'payroll_cycle',
+        periodKey: `cycle:${cycle.id}`,
+        cycleId: cycle.id,
+        periodName: cycle.name || cycle.id,
+        from: cycle.startDate,
+        to: cycle.endDate,
+        periodStart: cycle.startDate,
+        periodEnd: cycle.endDate,
+        cycle,
+      },
+    }
+  }
+  if (!hasDateRangeInput) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'VALIDATION_ERROR',
+      message: 'cycleId or from/to is required',
+    }
+  }
+  if (!hasFrom || !hasTo) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'VALIDATION_ERROR',
+      message: 'Both from and to are required for date range period sync',
+    }
+  }
+  const dateRange = resolveAttendanceDateRange(params?.from, params?.to)
+  if (!dateRange.ok) {
+    return { ok: false, status: 400, code: 'VALIDATION_ERROR', message: dateRange.message }
+  }
+  return {
+    ok: true,
+    period: {
+      periodType: 'date_range',
+      periodKey: `range:${dateRange.from}:${dateRange.to}`,
+      cycleId: null,
+      periodName: `${dateRange.from}..${dateRange.to}`,
+      from: dateRange.from,
+      to: dateRange.to,
+      periodStart: dateRange.from,
+      periodEnd: dateRange.to,
+    },
+  }
+}
+
+async function syncAttendanceReportPeriodSummary(context, db, orgId, logger, params) {
+  const userId = String(params?.userId || '').trim()
+  const period = params?.period
+  const empty = { synced: 0, patched: 0, created: 0, skipped: 0, failed: 0, duplicateRowKeys: 0 }
+  if (!userId || !period?.from || !period?.to) {
+    return { ...empty, failed: 1, reason: 'INVALID_SYNC_PARAMS' }
+  }
+
+  const ensured = await ensureAttendanceReportPeriodSummaries(context, orgId, logger)
+  if (!ensured.available) {
+    return { degraded: true, reason: ensured.reason, ...empty }
+  }
+  const records = context?.api?.multitable?.records
+  const provisioning = context?.api?.multitable?.provisioning
+  if (!records?.queryRecords || !records?.createRecord || !records?.patchRecord || !provisioning?.ensureObject) {
+    return { degraded: true, reason: 'MULTITABLE_RECORDS_API_UNAVAILABLE', ...empty }
+  }
+
+  const formulaOptions = await getAttendanceFormulaRuntimeOptions(db)
+  const catalog = await buildAttendanceReportFieldCatalogResponse(context, orgId, logger, {
+    provision: false,
+    ...formulaOptions,
+  })
+  const summaryFormulaFields = resolveAttendanceSummaryFormulaFields(catalog.items)
+  const managedSummaryFormulaFields = resolveAttendanceReportPeriodSummaryManagedFormulaFields(catalog.items)
+  const dynamicSubtype = await loadAttendanceReportDynamicSubtypeContext(db, orgId, logger)
+  const valueFields = buildAttendanceReportPeriodSummaryValueFields(managedSummaryFormulaFields, dynamicSubtype.definitions)
+  const valueColumns = buildAttendanceReportPeriodSummaryValueColumns(valueFields)
+  const activeValueCodes = buildAttendanceReportPeriodSummaryActiveValueCodes(summaryFormulaFields, dynamicSubtype.definitions)
+  const fieldFingerprint = buildAttendanceReportFieldConfigFingerprint(valueFields).value
+
+  const baseDescriptor = getAttendanceReportPeriodSummariesDescriptor()
+  await provisioning.ensureObject({
+    projectId: ensured.projectId,
+    descriptor: { ...baseDescriptor, fields: [...baseDescriptor.fields, ...valueColumns] },
+  })
+  const logicalIds = [
+    ...Object.values(ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS),
+    ...valueColumns.map(column => column.id),
+  ]
+  const fieldIds = typeof provisioning.resolveFieldIds === 'function'
+    ? await provisioning.resolveFieldIds({
+      projectId: ensured.projectId,
+      objectId: ATTENDANCE_REPORT_PERIOD_SUMMARIES_OBJECT_ID,
+      fieldIds: logicalIds,
+    })
+    : Object.fromEntries(logicalIds.map(id => [id, id]))
+  const physical = logicalId => fieldIds?.[logicalId] || logicalId
+
+  const result = { ...empty, synced: 1 }
+  const syncedAt = new Date().toISOString()
+  try {
+    const summary = await loadAttendanceSummary(db, orgId, userId, period.from, period.to)
+    const approvedMap = await loadApprovedMinutesRange(db, orgId, userId, period.from, period.to)
+    const reportSubtypeMinutes = buildAttendancePeriodSummarySubtypeTotals(approvedMap)
+    const summaryWithSubtype = {
+      ...summary,
+      ...reportSubtypeMinutes,
+      reportSubtypeMinutes,
+    }
+    const summaryWithFormulas = await enrichAttendanceSummaryWithFormulaValues(
+      context,
+      summaryWithSubtype,
+      summaryFormulaFields,
+    )
+    const employee = await loadAttendancePeriodSummaryEmployeeInfo(db, orgId, userId, period.from, period.to)
+    const rowKey = attendanceReportPeriodSummaryRowKey(orgId, userId, period)
+    const logical = {
+      [ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.rowKey]: rowKey,
+      [ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.orgId]: orgId,
+      [ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.userId]: userId,
+      [ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.employeeName]: employee.employeeName,
+      [ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.department]: employee.department,
+      [ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.attendanceGroup]: employee.attendanceGroup,
+      [ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.periodType]: period.periodType,
+      [ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.periodKey]: period.periodKey,
+      [ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.cycleId]: period.cycleId || null,
+      [ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.periodName]: period.periodName || '',
+      [ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.periodStart]: period.periodStart || period.from,
+      [ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.periodEnd]: period.periodEnd || period.to,
+    }
+    for (const column of valueColumns) {
+      if (!activeValueCodes.has(column.id)) {
+        logical[column.id] = null
+        continue
+      }
+      const value = getAttendancePeriodSummaryFieldValue(summaryWithFormulas, column.id)
+      logical[column.id] = value === '' && isAttendanceDynamicSubtypeCode(column.id) ? 0 : value
+    }
+    const sourceFingerprint = buildAttendanceReportPeriodSummarySourceFingerprint(logical)
+
+    const data = {}
+    for (const [logicalId, value] of Object.entries(logical)) {
+      data[physical(logicalId)] = value
+    }
+    data[physical(ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.fieldFingerprint)] = fieldFingerprint
+    data[physical(ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.sourceFingerprint)] = sourceFingerprint
+    data[physical(ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.syncedAt)] = syncedAt
+
+    const existing = await records.queryRecords({
+      sheetId: ensured.sheetId,
+      filters: { [physical(ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.rowKey)]: rowKey },
+      limit: 50,
+    })
+    if (!Array.isArray(existing) || existing.length === 0) {
+      await records.createRecord({ sheetId: ensured.sheetId, data })
+      result.created += 1
+    } else {
+      if (existing.length > 1) result.duplicateRowKeys += existing.length - 1
+      const target = existing[0]
+      const existingData = (target && target.data && typeof target.data === 'object') ? target.data : {}
+      const existingSource = existingData[physical(ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.sourceFingerprint)]
+      const existingField = existingData[physical(ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.fieldFingerprint)]
+      if (existingSource === sourceFingerprint && existingField === fieldFingerprint) {
+        result.skipped += 1
+      } else {
+        await records.patchRecord({ sheetId: ensured.sheetId, recordId: target.id, changes: data })
+        result.patched += 1
+      }
+    }
+  } catch (error) {
+    result.failed += 1
+    logger?.warn?.('attendance report period summary sync row failed', {
+      userId,
+      periodKey: period?.periodKey,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+
+  return {
+    ...result,
+    rowsSynced: result.synced,
+    usersScanned: 1,
+    usersSynced: result.failed > 0 ? 0 : 1,
+    usersFailed: result.failed > 0 ? 1 : 0,
+    failedUsers: result.failed > 0 ? [{ userId, failedRows: result.failed }] : [],
+    periodType: period.periodType,
+    periodKey: period.periodKey,
+    cycleId: period.cycleId || null,
+    from: period.from,
+    to: period.to,
+    fieldFingerprint,
+    syncedAt,
+    multitable: {
+      available: true,
+      degraded: false,
+      projectId: ensured.projectId,
+      objectId: ensured.objectId,
+      baseId: ensured.baseId || null,
+      sheetId: ensured.sheetId || null,
+      viewId: ensured.viewId || null,
+    },
+  }
+}
+
+async function syncAttendanceReportPeriodSummariesForUsers(context, db, orgId, logger, params) {
+  const period = params?.period
+  const explicitUserIds = normalizeAttendanceReportRecordsSyncUserIds(params?.userIds)
+  const selection = explicitUserIds.length > 0
+    ? {
+        userIds: explicitUserIds,
+        totalUsers: explicitUserIds.length,
+        page: 1,
+        pageSize: explicitUserIds.length,
+        hasNextPage: false,
+        userSelection: 'explicit',
+      }
+    : await loadAttendanceReportRecordsSyncUserPage(db, orgId, period.from, period.to, {
+      page: params?.page,
+      pageSize: params?.pageSize,
+    })
+
+  const aggregate = createAttendanceReportRecordsSyncEmptyResult({
+    totalUsers: selection.totalUsers,
+    page: selection.page,
+    pageSize: selection.pageSize,
+    hasNextPage: selection.hasNextPage,
+    userSelection: selection.userSelection,
+    periodType: period.periodType,
+    periodKey: period.periodKey,
+    cycleId: period.cycleId || null,
+    from: period.from,
+    to: period.to,
+  })
+
+  for (const userId of selection.userIds) {
+    aggregate.usersScanned += 1
+    try {
+      const result = await syncAttendanceReportPeriodSummary(context, db, orgId, logger, { period, userId })
+      if (result.degraded) {
+        return {
+          ...aggregate,
+          ...result,
+          rowsSynced: aggregate.synced,
+          totalUsers: selection.totalUsers,
+          page: selection.page,
+          pageSize: selection.pageSize,
+          hasNextPage: selection.hasNextPage,
+          userSelection: selection.userSelection,
+        }
+      }
+      aggregate.usersSynced += 1
+      aggregate.synced += Number(result.synced ?? 0)
+      aggregate.rowsSynced = aggregate.synced
+      aggregate.created += Number(result.created ?? 0)
+      aggregate.patched += Number(result.patched ?? 0)
+      aggregate.skipped += Number(result.skipped ?? 0)
+      aggregate.failed += Number(result.failed ?? 0)
+      aggregate.duplicateRowKeys += Number(result.duplicateRowKeys ?? 0)
+      if (Number(result.failed ?? 0) > 0) {
+        aggregate.failedUsers.push({ userId, failedRows: Number(result.failed ?? 0) })
+      }
+      if (result.fieldFingerprint) aggregate.fieldFingerprint = result.fieldFingerprint
+      if (result.syncedAt) aggregate.syncedAt = result.syncedAt
+      if (result.multitable) aggregate.multitable = result.multitable
+    } catch (error) {
+      aggregate.usersFailed += 1
+      aggregate.failed += 1
+      aggregate.failedUsers.push({
+        userId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      logger?.warn?.('attendance report period summaries user sync failed', {
+        userId,
+        periodKey: period?.periodKey,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+  aggregate.usersFailed = aggregate.failedUsers.length
+  return aggregate
+}
+
 async function loadAttendanceReportFieldCatalog(context, orgId) {
   const projectId = getAttendanceReportFieldProjectId(orgId)
   const multitable = context?.api?.multitable
@@ -10639,6 +11129,17 @@ module.exports = {
     getAttendanceReportPeriodSummariesDescriptor,
     getAttendanceReportPeriodSummariesViewDescriptor,
     ensureAttendanceReportPeriodSummaries,
+    resolveAttendanceReportPeriodSummaryManagedFormulaFields,
+    buildAttendanceReportPeriodSummaryValueFields,
+    buildAttendanceReportPeriodSummaryValueColumns,
+    buildAttendanceReportPeriodSummaryActiveValueCodes,
+    attendanceReportPeriodSummaryRowKey,
+    buildAttendanceReportPeriodSummarySourceFingerprint,
+    buildAttendancePeriodSummarySubtypeTotals,
+    getAttendancePeriodSummaryFieldValue,
+    resolveAttendanceReportPeriodSyncPeriod,
+    syncAttendanceReportPeriodSummary,
+    syncAttendanceReportPeriodSummariesForUsers,
     syncAttendanceReportRecords,
     syncAttendanceReportRecordsForUsers,
     normalizeAttendanceReportRecordsSyncUserIds,
@@ -22849,6 +23350,135 @@ module.exports = {
           syncedAt: result.syncedAt,
         })
         res.json({ ok: true, data: result })
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/report-period-summaries/sync',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const parsed = z.object({
+          from: z.string().min(1).optional(),
+          to: z.string().min(1).optional(),
+          cycleId: z.string().min(1).optional(),
+          userId: z.string().min(1).optional(),
+          userIds: z.array(z.string().min(1)).max(ATTENDANCE_REPORT_RECORDS_SYNC_MAX_PAGE_SIZE).optional(),
+          allUsers: z.boolean().optional(),
+          page: z.coerce.number().int().min(1).optional(),
+          pageSize: z.coerce.number().int().min(1).max(ATTENDANCE_REPORT_RECORDS_SYNC_MAX_PAGE_SIZE).optional(),
+        }).safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+        const explicitUserIds = normalizeAttendanceReportRecordsSyncUserIds([
+          parsed.data.userId,
+          ...(parsed.data.userIds ?? []),
+        ])
+        if (parsed.data.allUsers === true && explicitUserIds.length > 0) {
+          res.status(400).json({
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: 'Use either allUsers or userId/userIds, not both',
+            },
+          })
+          return
+        }
+        if (parsed.data.allUsers !== true && explicitUserIds.length === 0) {
+          res.status(400).json({
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: 'userId, userIds, or allUsers is required',
+            },
+          })
+          return
+        }
+        if (explicitUserIds.length > ATTENDANCE_REPORT_RECORDS_SYNC_MAX_PAGE_SIZE) {
+          res.status(400).json({
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: `At most ${ATTENDANCE_REPORT_RECORDS_SYNC_MAX_PAGE_SIZE} userIds can be synced in one request`,
+            },
+          })
+          return
+        }
+
+        try {
+          const resolvedPeriod = await resolveAttendanceReportPeriodSyncPeriod(db, orgId, parsed.data)
+          if (!resolvedPeriod.ok) {
+            res.status(resolvedPeriod.status || 400).json({
+              ok: false,
+              error: {
+                code: resolvedPeriod.code || 'VALIDATION_ERROR',
+                message: resolvedPeriod.message || 'Invalid period sync request',
+              },
+            })
+            return
+          }
+          const period = resolvedPeriod.period
+          const result = explicitUserIds.length === 1 && parsed.data.allUsers !== true && !Array.isArray(parsed.data.userIds)
+            ? await syncAttendanceReportPeriodSummary(context, db, orgId, logger, {
+              period,
+              userId: explicitUserIds[0],
+            })
+            : await syncAttendanceReportPeriodSummariesForUsers(context, db, orgId, logger, {
+              period,
+              userIds: explicitUserIds,
+              allUsers: parsed.data.allUsers,
+              page: parsed.data.page,
+              pageSize: parsed.data.pageSize,
+            })
+          if (result.degraded) {
+            res.json({
+              ok: true,
+              data: {
+                ...result,
+                degraded: true,
+                reason: result.reason,
+                periodType: period.periodType,
+                from: period.from,
+                to: period.to,
+                cycleId: period.cycleId || undefined,
+                synced: 0,
+              },
+            })
+            return
+          }
+          emitEvent('attendance.report_period_summaries.synced', {
+            orgId,
+            userId: explicitUserIds.length === 1 ? explicitUserIds[0] : undefined,
+            userIds: explicitUserIds.length > 1 ? explicitUserIds : undefined,
+            allUsers: parsed.data.allUsers === true,
+            periodType: period.periodType,
+            periodKey: period.periodKey,
+            cycleId: period.cycleId || undefined,
+            from: period.from,
+            to: period.to,
+            usersScanned: result.usersScanned,
+            usersSynced: result.usersSynced,
+            usersFailed: result.usersFailed,
+            synced: result.synced,
+            rowsSynced: result.rowsSynced,
+            patched: result.patched,
+            created: result.created,
+            skipped: result.skipped,
+            failed: result.failed,
+            duplicateRowKeys: result.duplicateRowKeys,
+            syncedAt: result.syncedAt,
+          })
+          res.json({ ok: true, data: result })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance report period summaries sync failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to sync attendance report period summaries' } })
+        }
       })
     )
 
