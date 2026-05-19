@@ -54,7 +54,7 @@
       <button v-if="caps.canManageFields.value" class="mt-workbench__mgr-btn" @click="showFieldManager = true">&#x2699; {{ wb('toolbar.fields', isZh) }}</button>
       <button v-if="caps.canManageSheetAccess.value" class="mt-workbench__mgr-btn" @click="showPermissionManager = true; void loadPermissionEntries()">&#x1F512; {{ wb('toolbar.access', isZh) }}</button>
       <button v-if="caps.canManageViews.value && canConfigureCurrentView" class="mt-workbench__mgr-btn" @click="showViewManager = true">&#x2630; {{ wb('toolbar.views', isZh) }}</button>
-      <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="openWorkflowDesigner()">&#x2699; {{ wb('toolbar.workflow', isZh) }}</button>
+      <button v-if="canOpenWorkflowDesigner" class="mt-workbench__mgr-btn" @click="openWorkflowDesigner()">&#x2699; {{ wb('toolbar.workflow', isZh) }}</button>
       <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="showAutomationManager = true">&#x26A1; {{ wb('toolbar.automations', isZh) }}</button>
       <button v-if="canCreateBasesAndSheets" class="mt-workbench__mgr-btn" data-action="open-template-library" @click="openTemplateLibrary">&#x1F5C2; {{ wb('toolbar.templates', isZh) }}</button>
       <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard">&#x1F4CA; {{ wb('toolbar.dashboard', isZh) }}</button>
@@ -264,7 +264,7 @@
       <MetaRecordDrawer
         :visible="!!selectedRecordId" :record="selectedRecordResolved" :fields="scopedAllFields"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
-        :can-manage-automation="caps.canManageAutomation.value"
+        :can-manage-automation="canOpenWorkflowDesigner"
         :field-permissions="effectiveFieldPermissions"
         :row-actions="effectiveRowActions"
         :comment-presence="selectedRecordCommentPresence"
@@ -400,6 +400,7 @@ import { useRouter } from 'vue-router'
 import { AppRouteNames } from '../../router/types'
 import { useAuth } from '../../composables/useAuth'
 import { useLocale } from '../../composables/useLocale'
+import { useFeatureFlags } from '../../stores/featureFlags'
 import {
   workbenchLabel as wb,
   conflictMessage as fmtConflictMessage,
@@ -504,6 +505,15 @@ const { isZh } = useLocale()
 const workbench = useMultitableWorkbench({ initialBaseId: props.baseId, initialSheetId: props.sheetId, initialViewId: props.viewId })
 const capabilitySource = computed(() => workbench.capabilities.value ?? role.value)
 const caps = useMultitableCapabilities(capabilitySource)
+const featureFlags = useFeatureFlags()
+// The workflow designer lives at a route gated by the global `workflow` product
+// feature (appRoutes.ts requiredFeature). On deployments without that feature the
+// router guard redirects to resolveHomePath() (often /attendance), which surfaces
+// as the multitable Workflow entry "jumping to attendance" (#1673). Hide the
+// designer entries unless the feature is actually reachable.
+const canOpenWorkflowDesigner = computed(
+  () => caps.canManageAutomation.value && featureFlags.hasFeature('workflow'),
+)
 const grid = useMultitableGrid({ sheetId: workbench.activeSheetId, viewId: workbench.activeViewId })
 const commentsState = useMultitableComments()
 const commentPresenceState = useMultitableCommentPresence()
@@ -1826,7 +1836,18 @@ function onOpenImportModal() {
   showImportModal.value = true
 }
 
+function flushActiveFieldEdit() {
+  // Drawer text/longText (and other text-like) fields commit on the input's
+  // native `change`, which only fires on blur. Closing the drawer or reloading
+  // without blurring drops the edit (#1672) — unlike select/checkbox, which
+  // commit on selection. Force-blur the focused control so its change event
+  // fires -> emit('patch') -> onDrawerPatch -> patchCell, same path as the grid.
+  const el = document.activeElement as HTMLElement | null
+  if (el && typeof el.blur === 'function') el.blur()
+}
+
 function onCloseDrawer() {
+  flushActiveFieldEdit()
   if (!confirmDiscardRecordChanges()) return
   selectedRecordId.value = null
   showComments.value = false
@@ -2371,6 +2392,10 @@ function onDrawerNavigate(recordId: string) {
 
 // --- Beforeunload: warn on unsaved changes ---
 function onBeforeUnload(e: BeforeUnloadEvent) {
+  // Best-effort: blur the focused field so an in-progress edit is dispatched
+  // before the page unloads (#1672). The async PATCH may not finish before a
+  // hard reload, but the optimistic update + request are at least issued.
+  flushActiveFieldEdit()
   if (!hasBlockingUnloadState.value) return
   e.preventDefault()
   e.returnValue = ''
@@ -2730,6 +2755,11 @@ async function loadStandaloneForm() {
 }
 
 function openWorkflowDesigner(recordId?: string) {
+  // Defensive: the workflow-designer route is gated by the `workflow` product
+  // feature; navigating without it makes the router guard redirect to
+  // resolveHomePath() (#1673). Entries are already hidden via
+  // canOpenWorkflowDesigner; this guards any remaining/programmatic caller.
+  if (!featureFlags.hasFeature('workflow')) return
   void router.push({
     name: 'workflow-designer',
     query: {
