@@ -2879,6 +2879,366 @@ async function loadAttendanceReportSyncJob(db, orgId, jobId) {
   return { ok: true, job: mapAttendanceReportSyncJobRow(rows[0]) }
 }
 
+const ATTENDANCE_REPORT_SYNC_JOB_LOCK_TTL_MS = 10 * 60 * 1000
+const ATTENDANCE_REPORT_SYNC_JOB_LIST_DEFAULT_LIMIT = 50
+const ATTENDANCE_REPORT_SYNC_JOB_LIST_MAX_LIMIT = 100
+const ATTENDANCE_REPORT_SYNC_JOB_TERMINAL_STATUSES = new Set(['completed', 'canceled'])
+const ATTENDANCE_REPORT_SYNC_JOB_TOTAL_KEYS = Object.freeze([
+  'usersScanned',
+  'usersSynced',
+  'usersFailed',
+  'synced',
+  'rowsSynced',
+  'created',
+  'patched',
+  'skipped',
+  'failed',
+  'duplicateRowKeys',
+])
+
+function isAttendanceReportSyncJobTerminalStatus(status) {
+  return ATTENDANCE_REPORT_SYNC_JOB_TERMINAL_STATUSES.has(normalizeAttendanceReportSyncJobStatus(status))
+}
+
+function isAttendanceReportSyncJobFreshlyLocked(job, now = new Date()) {
+  if (!job || normalizeAttendanceReportSyncJobStatus(job.status) !== 'running' || !job.lockedAt) return false
+  const lockedAtMs = new Date(job.lockedAt).getTime()
+  const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime()
+  if (!Number.isFinite(lockedAtMs) || !Number.isFinite(nowMs)) return false
+  return nowMs - lockedAtMs < ATTENDANCE_REPORT_SYNC_JOB_LOCK_TTL_MS
+}
+
+function normalizeAttendanceReportSyncJobLimit(value) {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return ATTENDANCE_REPORT_SYNC_JOB_LIST_DEFAULT_LIMIT
+  return Math.min(Math.max(Math.floor(parsed), 1), ATTENDANCE_REPORT_SYNC_JOB_LIST_MAX_LIMIT)
+}
+
+function normalizeAttendanceReportSyncJobTotalNumber(value) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0
+}
+
+function mergeAttendanceReportSyncJobTotals(existingTotals = {}, pageResult = {}) {
+  const merged = {
+    ...createAttendanceReportSyncJobEmptyTotals(),
+    ...normalizeAttendanceReportSyncJobJson(existingTotals),
+  }
+  for (const key of ATTENDANCE_REPORT_SYNC_JOB_TOTAL_KEYS) {
+    merged[key] = normalizeAttendanceReportSyncJobTotalNumber(merged[key])
+      + normalizeAttendanceReportSyncJobTotalNumber(pageResult[key])
+  }
+  merged.rowsSynced = merged.synced
+  const failedUsers = [
+    ...(Array.isArray(merged.failedUsers) ? merged.failedUsers : []),
+    ...(Array.isArray(pageResult.failedUsers) ? pageResult.failedUsers : []),
+  ].slice(0, 50)
+  if (failedUsers.length > 0) merged.failedUsers = failedUsers
+  return merged
+}
+
+function sanitizeAttendanceReportSyncJobLastResult(pageResult = {}) {
+  const allowedKeys = [
+    'periodType',
+    'periodKey',
+    'cycleId',
+    'from',
+    'to',
+    'totalUsers',
+    'page',
+    'pageSize',
+    'hasNextPage',
+    'usersScanned',
+    'usersSynced',
+    'usersFailed',
+    'synced',
+    'rowsSynced',
+    'created',
+    'patched',
+    'skipped',
+    'failed',
+    'duplicateRowKeys',
+    'fieldFingerprint',
+    'syncedAt',
+    'reason',
+    'degraded',
+  ]
+  const output = {}
+  for (const key of allowedKeys) {
+    if (pageResult[key] !== undefined) output[key] = pageResult[key]
+  }
+  if (Array.isArray(pageResult.failedUsers) && pageResult.failedUsers.length > 0) {
+    output.failedUsers = pageResult.failedUsers.slice(0, 20)
+  }
+  if (pageResult.multitable && typeof pageResult.multitable === 'object') {
+    output.multitable = {
+      available: pageResult.multitable.available,
+      projectId: pageResult.multitable.projectId,
+      sheetId: pageResult.multitable.sheetId,
+      viewId: pageResult.multitable.viewId,
+    }
+  }
+  return output
+}
+
+function isAttendanceReportSyncJobExplicitUserSelection(job) {
+  const selection = normalizeMetadata(job?.userSelection)
+  if (normalizeCatalogString(selection.userId)) return true
+  return Array.isArray(selection.userIds) && normalizeAttendanceReportRecordsSyncUserIds(selection.userIds).length > 0
+}
+
+function buildAttendanceReportSyncJobUserParams(job) {
+  const selection = normalizeMetadata(job?.userSelection)
+  if (normalizeCatalogString(selection.userId)) {
+    return { userIds: [normalizeCatalogString(selection.userId)] }
+  }
+  const userIds = normalizeAttendanceReportRecordsSyncUserIds(selection.userIds)
+  if (userIds.length > 0) return { userIds }
+  const cursor = normalizeAttendanceReportSyncJobJson(job?.cursor, createAttendanceReportSyncJobInitialCursor())
+  const page = normalizeAttendanceReportRecordsSyncPage(cursor.nextPage, cursor.pageSize)
+  return {
+    allUsers: true,
+    page: page.page,
+    pageSize: page.pageSize,
+  }
+}
+
+async function listAttendanceReportSyncJobs(db, orgId, filters = {}) {
+  const clauses = ['org_id = $1']
+  const params = [normalizeAttendanceReportFieldOrgId(orgId)]
+  const rawKind = normalizeCatalogString(filters.kind)
+  const kind = normalizeAttendanceReportSyncJobKind(rawKind)
+  if (rawKind && !kind) {
+    return createAttendanceReportSyncJobValidationError('Invalid job kind')
+  }
+  if (kind) {
+    params.push(kind)
+    clauses.push(`kind = $${params.length}`)
+  }
+  const rawStatus = normalizeCatalogString(filters.status)
+  if (rawStatus) {
+    const status = normalizeAttendanceReportSyncJobStatus(rawStatus)
+    if (!ATTENDANCE_REPORT_SYNC_JOB_STATUSES.includes(rawStatus)) {
+      return createAttendanceReportSyncJobValidationError('Invalid job status')
+    }
+    params.push(status)
+    clauses.push(`status = $${params.length}`)
+  }
+  params.push(normalizeAttendanceReportSyncJobLimit(filters.limit))
+  const rows = await db.query(
+    `SELECT * FROM ${ATTENDANCE_REPORT_SYNC_JOB_TABLE}
+     WHERE ${clauses.join(' AND ')}
+     ORDER BY created_at DESC, id DESC
+     LIMIT $${params.length}`,
+    params,
+  )
+  return { ok: true, jobs: rows.map(mapAttendanceReportSyncJobRow).filter(Boolean) }
+}
+
+async function lockAttendanceReportSyncJobForRun(db, orgId, jobId, now = new Date()) {
+  const id = normalizeUuidString(jobId)
+  if (!id) return { ok: false, status: 400, code: 'VALIDATION_ERROR', message: 'Invalid job id' }
+  const lockedAt = now instanceof Date ? now : new Date(now)
+  const staleBefore = new Date(lockedAt.getTime() - ATTENDANCE_REPORT_SYNC_JOB_LOCK_TTL_MS)
+  const rows = await db.query(
+    `UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE}
+     SET status = 'running',
+         locked_at = $3::timestamptz,
+         started_at = COALESCE(started_at, $3::timestamptz),
+         updated_at = $3::timestamptz
+     WHERE id = $1
+       AND org_id = $2
+       AND status NOT IN ('completed', 'canceled')
+       AND (status <> 'running' OR locked_at IS NULL OR locked_at < $4::timestamptz)
+     RETURNING *`,
+    [id, normalizeAttendanceReportFieldOrgId(orgId), lockedAt.toISOString(), staleBefore.toISOString()],
+  )
+  if (rows.length > 0) {
+    return { ok: true, job: mapAttendanceReportSyncJobRow(rows[0]) }
+  }
+  const existing = await loadAttendanceReportSyncJob(db, orgId, id)
+  if (!existing.ok) return existing
+  if (isAttendanceReportSyncJobTerminalStatus(existing.job.status)) {
+    return { ok: false, status: 409, code: 'JOB_TERMINAL', message: 'Completed or canceled attendance report sync jobs cannot run again' }
+  }
+  if (isAttendanceReportSyncJobFreshlyLocked(existing.job, lockedAt)) {
+    return { ok: false, status: 409, code: 'JOB_LOCKED', message: 'Attendance report sync job is already running' }
+  }
+  return { ok: false, status: 409, code: 'JOB_CONFLICT', message: 'Attendance report sync job cannot be locked for running' }
+}
+
+async function persistAttendanceReportSyncJobPageState(db, orgId, jobId, state = {}, now = new Date()) {
+  const id = normalizeUuidString(jobId)
+  if (!id) return { ok: false, status: 400, code: 'VALIDATION_ERROR', message: 'Invalid job id' }
+  const status = normalizeAttendanceReportSyncJobStatus(state.status)
+  const finishedAt = isAttendanceReportSyncJobTerminalStatus(status) ? now.toISOString() : null
+  const rows = await db.query(
+    `UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE}
+     SET status = $3,
+         cursor = $4::jsonb,
+         totals = $5::jsonb,
+         last_result = $6::jsonb,
+         error = $7,
+         locked_at = NULL,
+         finished_at = COALESCE($8::timestamptz, finished_at),
+         updated_at = $9::timestamptz
+     WHERE id = $1 AND org_id = $2
+     RETURNING *`,
+    [
+      id,
+      normalizeAttendanceReportFieldOrgId(orgId),
+      status,
+      JSON.stringify(state.cursor ?? createAttendanceReportSyncJobInitialCursor()),
+      JSON.stringify(state.totals ?? createAttendanceReportSyncJobEmptyTotals()),
+      JSON.stringify(state.lastResult ?? {}),
+      state.error ?? null,
+      finishedAt,
+      now.toISOString(),
+    ],
+  )
+  if (!rows.length) {
+    return { ok: false, status: 404, code: 'NOT_FOUND', message: 'Attendance report sync job not found' }
+  }
+  return { ok: true, job: mapAttendanceReportSyncJobRow(rows[0]) }
+}
+
+async function resolveAttendanceReportSyncJobDateRange(db, orgId, job, options = {}) {
+  const periodSource = normalizeMetadata(job?.periodSource)
+  if (periodSource.cycleId) {
+    const resolver = options.resolvePeriod || resolveAttendanceReportPeriodSyncPeriod
+    const resolved = await resolver(db, orgId, periodSource)
+    if (!resolved.ok) return resolved
+    return { ok: true, from: resolved.period.from, to: resolved.period.to, period: resolved.period }
+  }
+  const dateRange = resolveAttendanceDateRange(periodSource.from, periodSource.to)
+  if (!dateRange.ok) {
+    return { ok: false, status: 400, code: 'VALIDATION_ERROR', message: dateRange.message }
+  }
+  return { ok: true, from: dateRange.from, to: dateRange.to }
+}
+
+async function executeAttendanceReportSyncJobPage(context, db, orgId, logger, job, options = {}) {
+  const userParams = buildAttendanceReportSyncJobUserParams(job)
+  if (job.kind === 'daily_records') {
+    const dateRange = await resolveAttendanceReportSyncJobDateRange(db, orgId, job, options)
+    if (!dateRange.ok) return dateRange
+    const writer = options.dailyWriter || syncAttendanceReportRecordsForUsers
+    return {
+      ok: true,
+      result: await writer(context, db, orgId, logger, {
+        from: dateRange.from,
+        to: dateRange.to,
+        ...userParams,
+      }),
+    }
+  }
+  if (job.kind === 'period_summaries') {
+    const resolver = options.resolvePeriod || resolveAttendanceReportPeriodSyncPeriod
+    const resolvedPeriod = await resolver(db, orgId, job.periodSource)
+    if (!resolvedPeriod.ok) return resolvedPeriod
+    const writer = options.periodWriter || syncAttendanceReportPeriodSummariesForUsers
+    return {
+      ok: true,
+      result: await writer(context, db, orgId, logger, {
+        period: resolvedPeriod.period,
+        ...userParams,
+      }),
+    }
+  }
+  return { ok: false, status: 400, code: 'VALIDATION_ERROR', message: 'Unsupported report sync job kind' }
+}
+
+function buildAttendanceReportSyncJobCursorAfterPage(job, pageResult = {}, completed = false) {
+  const current = normalizeAttendanceReportSyncJobJson(job?.cursor, createAttendanceReportSyncJobInitialCursor())
+  const page = normalizeAttendanceReportRecordsSyncPage(current.nextPage, current.pageSize)
+  const hasNextPage = completed ? false : pageResult.hasNextPage === true
+  return {
+    ...current,
+    nextPage: hasNextPage ? page.page + 1 : page.page,
+    pageSize: page.pageSize,
+    hasNextPage,
+  }
+}
+
+async function runAttendanceReportSyncJobNextPage(context, db, orgId, logger, jobId, options = {}) {
+  const now = options.now instanceof Date ? options.now : new Date()
+  const locked = await lockAttendanceReportSyncJobForRun(db, orgId, jobId, now)
+  if (!locked.ok) return locked
+  const job = locked.job
+  try {
+    const page = await executeAttendanceReportSyncJobPage(context, db, orgId, logger, job, options)
+    if (!page.ok) {
+      const failed = await persistAttendanceReportSyncJobPageState(db, orgId, job.id, {
+        status: 'failed',
+        cursor: job.cursor,
+        totals: job.totals,
+        lastResult: { error: page.message, code: page.code },
+        error: page.message || 'Failed to run attendance report sync job page',
+      }, now)
+      return { ok: true, job: failed.job, pageResult: { error: page.message, code: page.code } }
+    }
+    const pageResult = page.result || {}
+    if (pageResult.degraded) {
+      const failed = await persistAttendanceReportSyncJobPageState(db, orgId, job.id, {
+        status: 'failed',
+        cursor: job.cursor,
+        totals: job.totals,
+        lastResult: sanitizeAttendanceReportSyncJobLastResult(pageResult),
+        error: pageResult.reason || 'DEGRADED',
+      }, now)
+      return { ok: true, job: failed.job, pageResult }
+    }
+    const totals = mergeAttendanceReportSyncJobTotals(job.totals, pageResult)
+    const explicitUsers = isAttendanceReportSyncJobExplicitUserSelection(job)
+    const allRowsFailed = normalizeAttendanceReportSyncJobTotalNumber(pageResult.usersScanned) > 0
+      && normalizeAttendanceReportSyncJobTotalNumber(pageResult.usersFailed) >= normalizeAttendanceReportSyncJobTotalNumber(pageResult.usersScanned)
+    const completed = explicitUsers || pageResult.hasNextPage !== true
+    const status = allRowsFailed ? 'failed' : (completed ? 'completed' : 'queued')
+    const cursor = buildAttendanceReportSyncJobCursorAfterPage(job, pageResult, completed || allRowsFailed)
+    const saved = await persistAttendanceReportSyncJobPageState(db, orgId, job.id, {
+      status,
+      cursor,
+      totals,
+      lastResult: sanitizeAttendanceReportSyncJobLastResult(pageResult),
+      error: allRowsFailed ? 'All users in the page failed' : null,
+    }, now)
+    return { ok: true, job: saved.job, pageResult }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    logger?.warn?.('attendance report sync job page failed', { jobId: job.id, error: message })
+    const failed = await persistAttendanceReportSyncJobPageState(db, orgId, job.id, {
+      status: 'failed',
+      cursor: job.cursor,
+      totals: job.totals,
+      lastResult: { error: message },
+      error: message,
+    }, now)
+    return { ok: true, job: failed.job, pageResult: { error: message } }
+  }
+}
+
+async function cancelAttendanceReportSyncJob(db, orgId, jobId, now = new Date()) {
+  const loaded = await loadAttendanceReportSyncJob(db, orgId, jobId)
+  if (!loaded.ok) return loaded
+  if (isAttendanceReportSyncJobTerminalStatus(loaded.job.status)) {
+    return { ok: false, status: 409, code: 'JOB_TERMINAL', message: 'Completed or canceled attendance report sync jobs cannot be canceled again' }
+  }
+  const rows = await db.query(
+    `UPDATE ${ATTENDANCE_REPORT_SYNC_JOB_TABLE}
+     SET status = 'canceled',
+         locked_at = NULL,
+         finished_at = $3::timestamptz,
+         updated_at = $3::timestamptz
+     WHERE id = $1 AND org_id = $2
+     RETURNING *`,
+    [loaded.job.id, normalizeAttendanceReportFieldOrgId(orgId), now.toISOString()],
+  )
+  if (!rows.length) {
+    return { ok: false, status: 404, code: 'NOT_FOUND', message: 'Attendance report sync job not found' }
+  }
+  return { ok: true, job: mapAttendanceReportSyncJobRow(rows[0]) }
+}
+
 function resolveAttendanceReportPeriodSummaryManagedFormulaFields(items) {
   return (Array.isArray(items) ? items : [])
     .filter(field => (
@@ -11394,6 +11754,14 @@ module.exports = {
     mapAttendanceReportSyncJobRow,
     createAttendanceReportSyncJob,
     loadAttendanceReportSyncJob,
+    listAttendanceReportSyncJobs,
+    isAttendanceReportSyncJobTerminalStatus,
+    isAttendanceReportSyncJobFreshlyLocked,
+    mergeAttendanceReportSyncJobTotals,
+    sanitizeAttendanceReportSyncJobLastResult,
+    buildAttendanceReportSyncJobUserParams,
+    runAttendanceReportSyncJobNextPage,
+    cancelAttendanceReportSyncJob,
     normalizeAttendanceReportRecordsSyncUserIds,
     normalizeAttendanceReportRecordsSyncPage,
     loadAttendanceReportRecordsSyncUserPage,
@@ -23504,6 +23872,157 @@ module.exports = {
           syncedAt: new Date().toISOString(),
         })
         res.json({ ok: true, data })
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/report-sync-jobs',
+      withPermission('attendance:admin', async (req, res) => {
+        try {
+          const orgId = getOrgId(req)
+          const created = await createAttendanceReportSyncJob(db, orgId, getUserId(req), req.body ?? {})
+          if (!created.ok) {
+            res.status(created.status || 400).json({
+              ok: false,
+              error: { code: created.code || 'VALIDATION_ERROR', message: created.message },
+            })
+            return
+          }
+          emitEvent('attendance.report_sync_job.created', {
+            orgId,
+            jobId: created.job.id,
+            kind: created.job.kind,
+            status: created.job.status,
+            createdAt: created.job.createdAt,
+          })
+          res.status(201).json({ ok: true, data: created.job })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance report sync job table missing' } })
+            return
+          }
+          logger.error('Attendance report sync job create failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create attendance report sync job' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/report-sync-jobs',
+      withPermission('attendance:admin', async (req, res) => {
+        try {
+          const orgId = getOrgId(req)
+          const listed = await listAttendanceReportSyncJobs(db, orgId, req.query ?? {})
+          if (!listed.ok) {
+            res.status(listed.status || 400).json({
+              ok: false,
+              error: { code: listed.code || 'VALIDATION_ERROR', message: listed.message },
+            })
+            return
+          }
+          res.json({ ok: true, data: { items: listed.jobs } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance report sync job table missing' } })
+            return
+          }
+          logger.error('Attendance report sync job list failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list attendance report sync jobs' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/report-sync-jobs/:id/run-next-page',
+      withPermission('attendance:admin', async (req, res) => {
+        try {
+          const orgId = getOrgId(req)
+          const result = await runAttendanceReportSyncJobNextPage(context, db, orgId, logger, req.params.id)
+          if (!result.ok) {
+            res.status(result.status || 400).json({
+              ok: false,
+              error: { code: result.code || 'VALIDATION_ERROR', message: result.message },
+            })
+            return
+          }
+          emitEvent('attendance.report_sync_job.page_ran', {
+            orgId,
+            jobId: result.job.id,
+            kind: result.job.kind,
+            status: result.job.status,
+            totals: result.job.totals,
+            updatedAt: result.job.updatedAt,
+          })
+          res.json({ ok: true, data: { job: result.job, pageResult: result.pageResult } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance report sync job table missing' } })
+            return
+          }
+          logger.error('Attendance report sync job run failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to run attendance report sync job page' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/report-sync-jobs/:id/cancel',
+      withPermission('attendance:admin', async (req, res) => {
+        try {
+          const orgId = getOrgId(req)
+          const canceled = await cancelAttendanceReportSyncJob(db, orgId, req.params.id)
+          if (!canceled.ok) {
+            res.status(canceled.status || 400).json({
+              ok: false,
+              error: { code: canceled.code || 'VALIDATION_ERROR', message: canceled.message },
+            })
+            return
+          }
+          emitEvent('attendance.report_sync_job.canceled', {
+            orgId,
+            jobId: canceled.job.id,
+            kind: canceled.job.kind,
+            canceledAt: canceled.job.finishedAt,
+          })
+          res.json({ ok: true, data: canceled.job })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance report sync job table missing' } })
+            return
+          }
+          logger.error('Attendance report sync job cancel failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to cancel attendance report sync job' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/report-sync-jobs/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        try {
+          const orgId = getOrgId(req)
+          const loaded = await loadAttendanceReportSyncJob(db, orgId, req.params.id)
+          if (!loaded.ok) {
+            res.status(loaded.status || 400).json({
+              ok: false,
+              error: { code: loaded.code || 'VALIDATION_ERROR', message: loaded.message },
+            })
+            return
+          }
+          res.json({ ok: true, data: loaded.job })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance report sync job table missing' } })
+            return
+          }
+          logger.error('Attendance report sync job load failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load attendance report sync job' } })
+        }
       })
     )
 

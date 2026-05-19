@@ -193,20 +193,24 @@ Rules:
 
 ### PR2: Runner + Routes
 
-- Implement create / list / get / run-next-page / cancel routes.
-- Implement one-page runner that delegates to existing daily or period sync helpers.
-- Implement cursor update:
+- [x] Implement create / list / get / run-next-page / cancel routes.
+- [x] Implement one-page runner that delegates to existing daily or period sync helpers.
+- [x] Implement cursor update:
   - `nextPage += 1` when `hasNextPage=true`
   - terminal `completed` when explicit users done or `hasNextPage=false`
-- Accumulate totals deterministically.
-- Use `context.services.queue` only as an optional launcher. Durable truth remains SQL job row.
-- Tests:
+- [x] Accumulate totals deterministically.
+- [ ] Use `context.services.queue` only as an optional launcher. Durable truth remains SQL job row.
+- [x] Tests:
   - daily allUsers page 1 -> page 2 -> completed
   - period cycle allUsers
   - explicit userIds complete in one page
   - degraded writer marks failed
   - fresh lock returns 409
   - canceled job cannot run
+
+**PR2 implementation pointer:** `docs/development/attendance-report-sync-jobs-pr2-development-20260519.md`; verification: `docs/development/attendance-report-sync-jobs-pr2-verification-20260519.md`.
+
+**Deferred from PR2 to PR3/PR4:** optional queue launcher for `mode=enqueue`, frontend job UI, and live `JOB_MODE=1` acceptance. PR2 intentionally keeps execution manual-step and SQL-row durable so route/writer semantics can settle before scheduler work.
 
 ### PR3: Frontend Job UI
 

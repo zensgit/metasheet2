@@ -1930,6 +1930,308 @@ describe('attendance report field catalog multitable foundation', () => {
       .toMatchObject({ ok: false, status: 400 })
   })
 
+  function createReportSyncJobRunnerDb(initialRows: Array<Record<string, unknown>>) {
+    const rows = initialRows.map(row => ({ ...row }))
+    const db = {
+      rows,
+      query: vi.fn(async (sql: string, params?: unknown[]) => {
+        if (/UPDATE plugin_attendance_report_sync_jobs\s+SET status = 'running'/.test(sql)) {
+          const [id, orgId, lockedAt, staleBefore] = params ?? []
+          const row = rows.find(item => item.id === id && item.org_id === orgId)
+          if (!row) return []
+          if (row.status === 'completed' || row.status === 'canceled') return []
+          if (
+            row.status === 'running'
+            && row.locked_at
+            && new Date(String(row.locked_at)).getTime() >= new Date(String(staleBefore)).getTime()
+          ) {
+            return []
+          }
+          row.status = 'running'
+          row.locked_at = lockedAt
+          row.started_at = row.started_at ?? lockedAt
+          row.updated_at = lockedAt
+          return [{ ...row }]
+        }
+        if (/UPDATE plugin_attendance_report_sync_jobs\s+SET status = \$3/.test(sql)) {
+          const [id, orgId, status, cursorJson, totalsJson, lastResultJson, error, finishedAt, updatedAt] = params ?? []
+          const row = rows.find(item => item.id === id && item.org_id === orgId)
+          if (!row) return []
+          row.status = status
+          row.cursor = JSON.parse(String(cursorJson))
+          row.totals = JSON.parse(String(totalsJson))
+          row.last_result = JSON.parse(String(lastResultJson))
+          row.error = error
+          row.locked_at = null
+          row.finished_at = finishedAt ?? row.finished_at ?? null
+          row.updated_at = updatedAt
+          return [{ ...row }]
+        }
+        if (/UPDATE plugin_attendance_report_sync_jobs\s+SET status = 'canceled'/.test(sql)) {
+          const [id, orgId, finishedAt] = params ?? []
+          const row = rows.find(item => item.id === id && item.org_id === orgId)
+          if (!row) return []
+          row.status = 'canceled'
+          row.locked_at = null
+          row.finished_at = finishedAt
+          row.updated_at = finishedAt
+          return [{ ...row }]
+        }
+        if (/SELECT \* FROM plugin_attendance_report_sync_jobs\s+WHERE id = \$1 AND org_id = \$2/.test(sql)) {
+          const [id, orgId] = params ?? []
+          const row = rows.find(item => item.id === id && item.org_id === orgId)
+          return row ? [{ ...row }] : []
+        }
+        if (/SELECT \* FROM plugin_attendance_report_sync_jobs\s+WHERE org_id = \$1/.test(sql)) {
+          const orgId = params?.[0]
+          const status = /status =/.test(sql) ? params?.find(value => value === 'queued' || value === 'running' || value === 'paused' || value === 'completed' || value === 'failed' || value === 'canceled') : null
+          return rows
+            .filter(row => row.org_id === orgId)
+            .filter(row => (status ? row.status === status : true))
+            .map(row => ({ ...row }))
+        }
+        return []
+      }),
+    }
+    return db
+  }
+
+  function createReportSyncJobRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: '44444444-4444-4444-8444-444444444444',
+      org_id: 'org-1',
+      kind: 'daily_records',
+      status: 'queued',
+      mode: 'manual_step',
+      created_by: 'admin-1',
+      period_source: { from: '2026-05-01', to: '2026-05-31' },
+      user_selection: { allUsers: true },
+      cursor: { nextPage: 1, pageSize: 1, hasNextPage: true },
+      totals: helpers.createAttendanceReportSyncJobEmptyTotals(),
+      last_result: {},
+      error: null,
+      idempotency_key: null,
+      locked_at: null,
+      started_at: null,
+      finished_at: null,
+      created_at: '2026-05-19T00:00:00.000Z',
+      updated_at: '2026-05-19T00:00:00.000Z',
+      ...overrides,
+    }
+  }
+
+  it('report sync jobs: runs daily allUsers pages and completes when writer has no next page', async () => {
+    const db = createReportSyncJobRunnerDb([createReportSyncJobRow()])
+    const dailyWriter = vi.fn()
+      .mockResolvedValueOnce({
+        usersScanned: 1,
+        usersSynced: 1,
+        usersFailed: 0,
+        synced: 2,
+        rowsSynced: 2,
+        created: 2,
+        patched: 0,
+        skipped: 0,
+        failed: 0,
+        duplicateRowKeys: 0,
+        page: 1,
+        pageSize: 1,
+        hasNextPage: true,
+        fieldFingerprint: 'fp-1',
+        syncedAt: '2026-05-19T01:00:00.000Z',
+      })
+      .mockResolvedValueOnce({
+        usersScanned: 1,
+        usersSynced: 1,
+        usersFailed: 0,
+        synced: 3,
+        rowsSynced: 3,
+        created: 0,
+        patched: 3,
+        skipped: 0,
+        failed: 0,
+        duplicateRowKeys: 1,
+        page: 2,
+        pageSize: 1,
+        hasNextPage: false,
+        fieldFingerprint: 'fp-1',
+        syncedAt: '2026-05-19T01:01:00.000Z',
+      })
+
+    const first = await helpers.runAttendanceReportSyncJobNextPage({}, db, 'org-1', { warn: vi.fn() }, '44444444-4444-4444-8444-444444444444', {
+      dailyWriter,
+      now: new Date('2026-05-19T01:00:00.000Z'),
+    })
+    expect(first).toMatchObject({
+      ok: true,
+      job: {
+        status: 'queued',
+        cursor: { nextPage: 2, pageSize: 1, hasNextPage: true },
+        totals: { usersScanned: 1, synced: 2, rowsSynced: 2, created: 2 },
+      },
+    })
+
+    const second = await helpers.runAttendanceReportSyncJobNextPage({}, db, 'org-1', { warn: vi.fn() }, '44444444-4444-4444-8444-444444444444', {
+      dailyWriter,
+      now: new Date('2026-05-19T01:01:00.000Z'),
+    })
+    expect(second).toMatchObject({
+      ok: true,
+      job: {
+        status: 'completed',
+        cursor: { nextPage: 2, pageSize: 1, hasNextPage: false },
+        totals: { usersScanned: 2, usersSynced: 2, synced: 5, rowsSynced: 5, created: 2, patched: 3, duplicateRowKeys: 1 },
+        finishedAt: '2026-05-19T01:01:00.000Z',
+      },
+    })
+    expect(dailyWriter).toHaveBeenNthCalledWith(1, {}, db, 'org-1', expect.any(Object), {
+      from: '2026-05-01',
+      to: '2026-05-31',
+      allUsers: true,
+      page: 1,
+      pageSize: 1,
+    })
+    expect(dailyWriter).toHaveBeenNthCalledWith(2, {}, db, 'org-1', expect.any(Object), {
+      from: '2026-05-01',
+      to: '2026-05-31',
+      allUsers: true,
+      page: 2,
+      pageSize: 1,
+    })
+  })
+
+  it('report sync jobs: delegates period cycle jobs and explicit user selections complete in one page', async () => {
+    const cycleId = '55555555-5555-4555-8555-555555555555'
+    const db = createReportSyncJobRunnerDb([
+      createReportSyncJobRow({
+        kind: 'period_summaries',
+        period_source: { cycleId },
+        user_selection: { userIds: ['u-1', 'u-2'] },
+        cursor: { nextPage: 1, pageSize: 50, hasNextPage: true },
+      }),
+    ])
+    const period = {
+      periodType: 'payroll_cycle',
+      periodKey: `cycle:${cycleId}`,
+      cycleId,
+      periodName: '五月考勤',
+      from: '2026-05-01',
+      to: '2026-05-31',
+    }
+    const resolvePeriod = vi.fn().mockResolvedValue({ ok: true, period })
+    const periodWriter = vi.fn().mockResolvedValue({
+      usersScanned: 2,
+      usersSynced: 2,
+      usersFailed: 0,
+      synced: 2,
+      rowsSynced: 2,
+      created: 2,
+      patched: 0,
+      skipped: 0,
+      failed: 0,
+      duplicateRowKeys: 0,
+      page: 1,
+      pageSize: 50,
+      hasNextPage: true,
+      periodType: 'payroll_cycle',
+    })
+
+    const result = await helpers.runAttendanceReportSyncJobNextPage({}, db, 'org-1', { warn: vi.fn() }, '44444444-4444-4444-8444-444444444444', {
+      resolvePeriod,
+      periodWriter,
+      now: new Date('2026-05-19T02:00:00.000Z'),
+    })
+
+    expect(result).toMatchObject({
+      ok: true,
+      job: {
+        status: 'completed',
+        totals: { usersScanned: 2, usersSynced: 2, synced: 2 },
+        cursor: { nextPage: 1, pageSize: 50, hasNextPage: false },
+      },
+    })
+    expect(resolvePeriod).toHaveBeenCalledWith(db, 'org-1', { cycleId })
+    expect(periodWriter).toHaveBeenCalledWith({}, db, 'org-1', expect.any(Object), {
+      period,
+      userIds: ['u-1', 'u-2'],
+    })
+  })
+
+  it('report sync jobs: degraded writer marks the job failed without advancing the cursor', async () => {
+    const db = createReportSyncJobRunnerDb([createReportSyncJobRow()])
+    const dailyWriter = vi.fn().mockResolvedValue({
+      degraded: true,
+      reason: 'MULTITABLE_API_UNAVAILABLE',
+      usersScanned: 0,
+      synced: 0,
+    })
+
+    const result = await helpers.runAttendanceReportSyncJobNextPage({}, db, 'org-1', { warn: vi.fn() }, '44444444-4444-4444-8444-444444444444', {
+      dailyWriter,
+      now: new Date('2026-05-19T03:00:00.000Z'),
+    })
+
+    expect(result).toMatchObject({
+      ok: true,
+      job: {
+        status: 'failed',
+        error: 'MULTITABLE_API_UNAVAILABLE',
+        cursor: { nextPage: 1, pageSize: 1, hasNextPage: true },
+        totals: { usersScanned: 0, synced: 0 },
+      },
+      pageResult: { degraded: true, reason: 'MULTITABLE_API_UNAVAILABLE' },
+    })
+  })
+
+  it('report sync jobs: fresh locks and terminal statuses block run-next-page', async () => {
+    const lockedDb = createReportSyncJobRunnerDb([
+      createReportSyncJobRow({
+        status: 'running',
+        locked_at: '2026-05-19T04:00:00.000Z',
+      }),
+    ])
+    expect(helpers.isAttendanceReportSyncJobFreshlyLocked(
+      helpers.mapAttendanceReportSyncJobRow(lockedDb.rows[0]),
+      new Date('2026-05-19T04:01:00.000Z'),
+    )).toBe(true)
+    const locked = await helpers.runAttendanceReportSyncJobNextPage({}, lockedDb, 'org-1', { warn: vi.fn() }, '44444444-4444-4444-8444-444444444444', {
+      dailyWriter: vi.fn(),
+      now: new Date('2026-05-19T04:01:00.000Z'),
+    })
+    expect(locked).toMatchObject({ ok: false, status: 409, code: 'JOB_LOCKED' })
+
+    const completedDb = createReportSyncJobRunnerDb([
+      createReportSyncJobRow({ status: 'completed', finished_at: '2026-05-19T04:00:00.000Z' }),
+    ])
+    const completed = await helpers.runAttendanceReportSyncJobNextPage({}, completedDb, 'org-1', { warn: vi.fn() }, '44444444-4444-4444-8444-444444444444', {
+      dailyWriter: vi.fn(),
+      now: new Date('2026-05-19T04:01:00.000Z'),
+    })
+    expect(completed).toMatchObject({ ok: false, status: 409, code: 'JOB_TERMINAL' })
+  })
+
+  it('report sync jobs: can list and cancel non-terminal jobs', async () => {
+    const db = createReportSyncJobRunnerDb([
+      createReportSyncJobRow({ status: 'queued' }),
+      createReportSyncJobRow({ id: '55555555-5555-4555-8555-555555555555', status: 'completed' }),
+    ])
+    const listed = await helpers.listAttendanceReportSyncJobs(db, 'org-1', { status: 'queued', limit: 10 })
+    expect(listed).toMatchObject({ ok: true, jobs: [{ id: '44444444-4444-4444-8444-444444444444', status: 'queued' }] })
+
+    const canceled = await helpers.cancelAttendanceReportSyncJob(db, 'org-1', '44444444-4444-4444-8444-444444444444', new Date('2026-05-19T05:00:00.000Z'))
+    expect(canceled).toMatchObject({
+      ok: true,
+      job: {
+        id: '44444444-4444-4444-8444-444444444444',
+        status: 'canceled',
+        finishedAt: '2026-05-19T05:00:00.000Z',
+      },
+    })
+
+    const canceledAgain = await helpers.cancelAttendanceReportSyncJob(db, 'org-1', '44444444-4444-4444-8444-444444444444', new Date('2026-05-19T05:01:00.000Z'))
+    expect(canceledAgain).toMatchObject({ ok: false, status: 409, code: 'JOB_TERMINAL' })
+  })
+
   it('does not add direct meta table writes to the attendance plugin', () => {
     const source = readFileSync(
       new URL('../../../../plugins/plugin-attendance/index.cjs', import.meta.url),
