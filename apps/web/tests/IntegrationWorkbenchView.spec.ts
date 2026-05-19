@@ -76,6 +76,7 @@ describe('IntegrationWorkbenchView', () => {
     const pipelineBodies: Array<Record<string, unknown>> = []
     const runBodies: Array<{ url: string; body: Record<string, unknown> }> = []
     const externalSystemBodies: Array<Record<string, unknown>> = []
+    let dryRunPreviewMode: 'record' | 'empty' = 'record'
     apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
       if (url === '/api/integration/adapters') {
         return jsonResponse([
@@ -303,10 +304,14 @@ describe('IntegrationWorkbenchView', () => {
           pipelineId: 'pipe_1',
           dryRun: url.endsWith('/dry-run'),
           metrics: url.endsWith('/dry-run')
-            ? { rowsRead: 1, rowsCleaned: 1, rowsWritten: 0 }
+            ? dryRunPreviewMode === 'empty'
+              ? { rowsRead: 0, rowsCleaned: 0, rowsWritten: 0 }
+              : { rowsRead: 1, rowsCleaned: 1, rowsWritten: 0 }
             : { rowsRead: 1, rowsCleaned: 1, rowsWritten: 1 },
           preview: url.endsWith('/dry-run')
-            ? {
+            ? dryRunPreviewMode === 'empty'
+              ? { records: [], errors: [] }
+              : {
                 records: [
                   {
                     source: {
@@ -334,7 +339,7 @@ describe('IntegrationWorkbenchView', () => {
                     },
                   },
                 ],
-              }
+                }
             : null,
         })
       }
@@ -388,9 +393,9 @@ describe('IntegrationWorkbenchView', () => {
     await flushUi()
 
     expect(container.textContent).toContain('数据工厂')
-    expect(container.textContent).toContain('连接新系统')
+    expect(container.textContent).toContain('新增或管理连接')
     expect(container.textContent).toContain('使用 K3 WISE 预设')
-    expect(container.textContent).toContain('已加载 4 个连接 · 4 个适配器 · 3 个 staging 表')
+    expect(container.textContent).toContain('已配置连接 4 个（可编辑 / 复制 / 停用 / 删除） · 4 个适配器 · 3 个 staging 表')
     expect(container.textContent).toContain('连接系统')
     expect(container.textContent).toContain('选择数据集')
     expect(container.textContent).toContain('多维表清洗')
@@ -398,8 +403,8 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.querySelector('[data-testid="data-factory-quick-flow"]')?.textContent)
       .toContain('选来源系统 -> 2. 选来源数据集')
     expect(container.textContent).toContain('选择系统与数据集')
-    expect(container.textContent).toContain('1. 选来源系统与数据集')
-    expect(container.textContent).toContain('2. 选目标系统与数据集')
+    expect(container.textContent).toContain('1. 来源对象选择')
+    expect(container.textContent).toContain('2. 目标模板选择')
     expect(container.textContent).toContain('数据集与多维表清洗')
     expect(container.textContent).toContain('运行与推送')
     expect(container.textContent).toContain('保存清洗流程')
@@ -643,6 +648,16 @@ describe('IntegrationWorkbenchView', () => {
     })
     expect(container.textContent).toContain('Save-only 推送已提交')
 
+    dryRunPreviewMode = 'empty'
+    ;(container.querySelector('[data-testid="run-dry-run"]') as HTMLButtonElement).click()
+    await flushUi(16)
+    expect(runBodies[2]).toMatchObject({
+      url: '/api/integration/pipelines/pipe_1/dry-run',
+    })
+    expect(container.textContent).toContain('Dry-run 成功，但本次没有可处理记录')
+    expect(container.querySelector('[data-testid="dry-run-empty-preview-notice"]')?.textContent).toContain('来源数据集为空或过滤条件过严')
+    expect(container.querySelector('[data-testid="cleansed-export-summary"]')?.textContent).toContain('没有可导出记录')
+
     ;(container.querySelector('[data-testid="use-multitable-target-standard_materials"]') as HTMLButtonElement).click()
     await flushUi(10)
     expect(externalSystemBodies).toHaveLength(2)
@@ -766,6 +781,17 @@ describe('IntegrationWorkbenchView', () => {
             },
             capabilities: { write: true },
           },
+          {
+            id: 'k3_archived_target',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'K3 Archived Target',
+            kind: 'erp:k3-wise-webapi',
+            role: 'target',
+            status: 'inactive',
+            config: { baseUrl: 'http://k3-archive.example.test/K3API/' },
+            capabilities: { write: true },
+          },
         ])
       }
       if (url === '/api/integration/external-systems' && init?.method === 'POST') {
@@ -830,12 +856,13 @@ describe('IntegrationWorkbenchView', () => {
     expect(sourceOptions).toContain('PLM Source · http')
     expect(sourceOptions).not.toContain('K3 Target · erp:k3-wise-webapi')
     expect(targetOptions).toContain('K3 Target · erp:k3-wise-webapi')
-    expect(container.querySelector('[data-testid="source-selector-explanation"]')?.textContent).toContain('K3 WISE WebAPI 现阶段只在目标侧出现')
-    expect(container.querySelector('[data-testid="k3-webapi-read-gate-notice"]')?.textContent).toContain('GATE-front contract')
+    expect(container.querySelector('[data-testid="source-selector-explanation"]')?.textContent).toContain('当前 K3 WISE WebAPI 仅作为目标写入连接')
+    expect(container.querySelector('[data-testid="k3-webapi-read-gate-notice"]')?.textContent).toContain('来源侧请使用 staging 多维表、SQL 只读通道或其他可读连接')
     expect(container.querySelector('[data-testid="target-selector-explanation"]')?.textContent).toContain('Save-only')
 
     ;(container.querySelector('[data-testid="toggle-inventory-overview"]') as HTMLButtonElement).click()
     await flushUi()
+    expect(container.textContent).toContain('在这里编辑、复制、停用 / 启用或删除连接')
     const deleteButton = container.querySelector('[data-testid="delete-connection-k3_target"]') as HTMLButtonElement
     expect(deleteButton.disabled).toBe(false)
     expect(deleteButton.textContent).toContain('删除')
@@ -889,6 +916,17 @@ describe('IntegrationWorkbenchView', () => {
       status: 'inactive',
     })
     expect(container.textContent).toContain('连接已停用：PLM Source')
+
+    ;(container.querySelector('[data-testid="activate-connection-k3_archived_target"]') as HTMLButtonElement).click()
+    await flushUi(8)
+    expect(upsertBodies[3]).toMatchObject({
+      id: 'k3_archived_target',
+      name: 'K3 Archived Target',
+      kind: 'erp:k3-wise-webapi',
+      role: 'target',
+      status: 'active',
+    })
+    expect(container.textContent).toContain('连接已启用：K3 Archived Target')
 
     ;(container.querySelector('[data-testid="delete-connection-k3_target"]') as HTMLButtonElement).click()
     await flushUi(8)
