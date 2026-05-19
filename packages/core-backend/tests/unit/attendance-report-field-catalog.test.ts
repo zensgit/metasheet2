@@ -1733,6 +1733,203 @@ describe('attendance report field catalog multitable foundation', () => {
     ])
   })
 
+  it('report sync jobs: migration defines an operational control-plane table', () => {
+    const source = readFileSync(
+      new URL('../../src/db/migrations/zzzz20260519070000_create_plugin_attendance_report_sync_jobs.ts', import.meta.url),
+      'utf8',
+    )
+
+    expect(source).toContain("checkTableExists(db, 'plugin_attendance_report_sync_jobs')")
+    expect(source).toContain(".addColumn('kind', 'varchar(32)'")
+    expect(source).toContain(".addColumn('status', 'varchar(20)'")
+    expect(source).toContain(".addColumn('mode', 'varchar(20)'")
+    expect(source).toContain(".addColumn('period_source', 'jsonb'")
+    expect(source).toContain(".addColumn('user_selection', 'jsonb'")
+    expect(source).toContain(".addColumn('cursor', 'jsonb'")
+    expect(source).toContain(".addColumn('totals', 'jsonb'")
+    expect(source).toContain('chk_plugin_attendance_report_sync_jobs_kind')
+    expect(source).toContain('chk_plugin_attendance_report_sync_jobs_status')
+    expect(source).toContain('uq_plugin_attendance_report_sync_jobs_idempotency')
+    expect(source).toContain('Operational cursor/progress state')
+    expect(source).not.toContain("createTable('attendance_report_sync_jobs')")
+  })
+
+  it('report sync jobs: normalizes create input and rejects ambiguous selections', () => {
+    const range = helpers.normalizeAttendanceReportSyncJobCreateInput({
+      kind: 'daily_records',
+      periodSource: { from: '2026-05-01', to: '2026-05-31' },
+      userSelection: { allUsers: true },
+      pageSize: 500,
+      mode: 'manual_step',
+      idempotencyKey: 'daily-may',
+    })
+    expect(range).toMatchObject({
+      ok: true,
+      value: {
+        kind: 'daily_records',
+        mode: 'manual_step',
+        periodType: 'date_range',
+        periodSource: { from: '2026-05-01', to: '2026-05-31' },
+        userSelection: { allUsers: true },
+        selectionType: 'allUsers',
+        idempotencyKey: 'daily-may',
+      },
+    })
+    expect(range.value.cursor).toEqual({ nextPage: 1, pageSize: 100, hasNextPage: true })
+    expect(range.value.totals).toMatchObject({ usersScanned: 0, synced: 0, duplicateRowKeys: 0 })
+
+    const cycleId = '11111111-1111-4111-8111-111111111111'
+    const cycle = helpers.normalizeAttendanceReportSyncJobCreateInput({
+      kind: 'period_summaries',
+      periodSource: { cycleId },
+      userSelection: { userIds: ['u-1', ' u-1 ', 'u-2', ''] },
+      mode: 'enqueue',
+    })
+    expect(cycle).toMatchObject({
+      ok: true,
+      value: {
+        kind: 'period_summaries',
+        mode: 'enqueue',
+        periodType: 'payroll_cycle',
+        periodSource: { cycleId },
+        userSelection: { userIds: ['u-1', 'u-2'] },
+        selectionType: 'userIds',
+      },
+    })
+
+    expect(helpers.normalizeAttendanceReportSyncJobCreateInput({
+      kind: 'bad',
+      periodSource: { from: '2026-05-01', to: '2026-05-31' },
+      userSelection: { allUsers: true },
+    })).toMatchObject({ ok: false, status: 400 })
+    expect(helpers.normalizeAttendanceReportSyncJobCreateInput({
+      kind: 'daily_records',
+      periodSource: { cycleId, from: '2026-05-01', to: '2026-05-31' },
+      userSelection: { allUsers: true },
+    })).toMatchObject({ ok: false, status: 400, message: 'Use either cycleId or from/to, not both' })
+    expect(helpers.normalizeAttendanceReportSyncJobCreateInput({
+      kind: 'daily_records',
+      periodSource: { from: '2026-05-01', to: '2026-05-31' },
+      userSelection: { allUsers: true, userId: 'u-1' },
+    })).toMatchObject({ ok: false, status: 400, message: 'Choose exactly one of userId, userIds, or allUsers' })
+  })
+
+  it('report sync jobs: builds rows, maps rows, creates jobs, and loads by org', async () => {
+    const built = helpers.buildAttendanceReportSyncJobInsertRow('org-1', 'admin-1', {
+      kind: 'daily_records',
+      periodSource: { from: '2026-05-01', to: '2026-05-31' },
+      userSelection: { userId: 'u-1' },
+      idempotencyKey: 'once',
+    })
+    expect(built).toMatchObject({
+      ok: true,
+      value: {
+        orgId: 'org-1',
+        kind: 'daily_records',
+        status: 'queued',
+        mode: 'manual_step',
+        createdBy: 'admin-1',
+        periodSource: { from: '2026-05-01', to: '2026-05-31' },
+        userSelection: { userId: 'u-1' },
+        lastResult: {},
+        error: null,
+        idempotencyKey: 'once',
+      },
+    })
+
+    const now = new Date('2026-05-19T01:02:03.000Z')
+    const mapped = helpers.mapAttendanceReportSyncJobRow({
+      id: '11111111-1111-4111-8111-111111111111',
+      org_id: 'org-1',
+      kind: 'period_summaries',
+      status: 'failed',
+      mode: 'enqueue',
+      created_by: 'admin-1',
+      period_source: { cycleId: '22222222-2222-4222-8222-222222222222' },
+      user_selection: { allUsers: true },
+      cursor: { nextPage: 3, pageSize: 50, hasNextPage: true },
+      totals: { usersScanned: 100, synced: 80 },
+      last_result: { synced: 50 },
+      error: 'boom',
+      idempotency_key: 'cycle-sync',
+      locked_at: now,
+      started_at: now,
+      finished_at: null,
+      created_at: now,
+      updated_at: now,
+    })
+    expect(mapped).toMatchObject({
+      id: '11111111-1111-4111-8111-111111111111',
+      orgId: 'org-1',
+      kind: 'period_summaries',
+      status: 'failed',
+      mode: 'enqueue',
+      createdBy: 'admin-1',
+      periodSource: { cycleId: '22222222-2222-4222-8222-222222222222' },
+      userSelection: { allUsers: true },
+      cursor: { nextPage: 3, pageSize: 50, hasNextPage: true },
+      totals: { usersScanned: 100, usersSynced: 0, synced: 80, duplicateRowKeys: 0 },
+      lastResult: { synced: 50 },
+      error: 'boom',
+      idempotencyKey: 'cycle-sync',
+      lockedAt: '2026-05-19T01:02:03.000Z',
+    })
+
+    const insertedRow = {
+      id: '33333333-3333-4333-8333-333333333333',
+      org_id: 'org-1',
+      kind: 'daily_records',
+      status: 'queued',
+      mode: 'manual_step',
+      created_by: 'admin-1',
+      period_source: { from: '2026-05-01', to: '2026-05-31' },
+      user_selection: { userId: 'u-1' },
+      cursor: { nextPage: 1, pageSize: 50, hasNextPage: true },
+      totals: {},
+      last_result: {},
+      error: null,
+      idempotency_key: null,
+      created_at: now,
+      updated_at: now,
+    }
+    const db = {
+      query: vi.fn(async (sql: string, params?: unknown[]) => {
+        if (/INSERT INTO plugin_attendance_report_sync_jobs/.test(sql)) {
+          expect(params?.[0]).toBe('org-1')
+          expect(params?.[1]).toBe('daily_records')
+          expect(params?.[3]).toBe('manual_step')
+          expect(JSON.parse(String(params?.[5]))).toEqual({ from: '2026-05-01', to: '2026-05-31' })
+          return [insertedRow]
+        }
+        if (/SELECT \* FROM plugin_attendance_report_sync_jobs/.test(sql)) {
+          expect(params).toEqual(['33333333-3333-4333-8333-333333333333', 'org-1'])
+          return [insertedRow]
+        }
+        return []
+      }),
+    }
+
+    const created = await helpers.createAttendanceReportSyncJob(db, 'org-1', 'admin-1', {
+      kind: 'daily_records',
+      periodSource: { from: '2026-05-01', to: '2026-05-31' },
+      userSelection: { userId: 'u-1' },
+    })
+    expect(created).toMatchObject({
+      ok: true,
+      status: 201,
+      job: {
+        id: '33333333-3333-4333-8333-333333333333',
+        orgId: 'org-1',
+        kind: 'daily_records',
+        status: 'queued',
+      },
+    })
+    const loaded = await helpers.loadAttendanceReportSyncJob(db, 'org-1', '33333333-3333-4333-8333-333333333333')
+    expect(loaded).toMatchObject({ ok: true, job: { id: '33333333-3333-4333-8333-333333333333' } })
+    expect(await helpers.loadAttendanceReportSyncJob(db, 'org-1', 'not-a-uuid'))
+      .toMatchObject({ ok: false, status: 400 })
+  })
+
   it('does not add direct meta table writes to the attendance plugin', () => {
     const source = readFileSync(
       new URL('../../../../plugins/plugin-attendance/index.cjs', import.meta.url),

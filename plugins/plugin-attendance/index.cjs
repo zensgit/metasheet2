@@ -2639,6 +2639,246 @@ async function syncAttendanceReportRecordsForUsers(context, db, orgId, logger, p
   return aggregate
 }
 
+// ── attendance report sync job control plane (PR1: schema + helper skeleton only) ──
+// The job row is operational cursor/progress state. It never becomes a report
+// fact source; PR2 runner must delegate page work to the existing daily/period
+// sync writers above instead of duplicating statistics or multitable upsert logic.
+const ATTENDANCE_REPORT_SYNC_JOB_TABLE = 'plugin_attendance_report_sync_jobs'
+const ATTENDANCE_REPORT_SYNC_JOB_KINDS = Object.freeze(['daily_records', 'period_summaries'])
+const ATTENDANCE_REPORT_SYNC_JOB_STATUSES = Object.freeze(['queued', 'running', 'paused', 'completed', 'failed', 'canceled'])
+const ATTENDANCE_REPORT_SYNC_JOB_MODES = Object.freeze(['manual_step', 'enqueue'])
+
+function createAttendanceReportSyncJobValidationError(message, code = 'VALIDATION_ERROR') {
+  return { ok: false, status: 400, code, message }
+}
+
+function normalizeAttendanceReportSyncJobKind(value) {
+  const kind = normalizeCatalogString(value)
+  return ATTENDANCE_REPORT_SYNC_JOB_KINDS.includes(kind) ? kind : null
+}
+
+function normalizeAttendanceReportSyncJobStatus(value) {
+  const status = normalizeCatalogString(value, 'queued')
+  return ATTENDANCE_REPORT_SYNC_JOB_STATUSES.includes(status) ? status : 'queued'
+}
+
+function normalizeAttendanceReportSyncJobMode(value) {
+  const mode = normalizeCatalogString(value, 'manual_step')
+  return ATTENDANCE_REPORT_SYNC_JOB_MODES.includes(mode) ? mode : null
+}
+
+function normalizeAttendanceReportSyncJobPeriodSource(value = {}) {
+  const source = normalizeMetadata(value)
+  const cycleIdInput = normalizeCatalogString(source.cycleId)
+  const hasCycleId = Boolean(cycleIdInput)
+  const hasFrom = source.from !== undefined && normalizeCatalogString(source.from) !== ''
+  const hasTo = source.to !== undefined && normalizeCatalogString(source.to) !== ''
+  if (hasCycleId && (hasFrom || hasTo)) {
+    return createAttendanceReportSyncJobValidationError('Use either cycleId or from/to, not both')
+  }
+  if (hasCycleId) {
+    const cycleId = normalizeUuidString(cycleIdInput)
+    if (!cycleId) {
+      return createAttendanceReportSyncJobValidationError('Invalid cycleId')
+    }
+    return { ok: true, value: { cycleId }, periodType: 'payroll_cycle' }
+  }
+  if (!hasFrom && !hasTo) {
+    return createAttendanceReportSyncJobValidationError('periodSource.cycleId or periodSource.from/to is required')
+  }
+  if (!hasFrom || !hasTo) {
+    return createAttendanceReportSyncJobValidationError('Both periodSource.from and periodSource.to are required')
+  }
+  const dateRange = resolveAttendanceDateRange(source.from, source.to)
+  if (!dateRange.ok) {
+    return createAttendanceReportSyncJobValidationError(dateRange.message)
+  }
+  return {
+    ok: true,
+    value: { from: dateRange.from, to: dateRange.to },
+    periodType: 'date_range',
+  }
+}
+
+function normalizeAttendanceReportSyncJobUserSelection(value = {}) {
+  const source = normalizeMetadata(value)
+  const allUsers = source.allUsers === true || String(source.allUsers ?? '').trim().toLowerCase() === 'true'
+  const userId = normalizeCatalogString(source.userId)
+  const userIds = normalizeAttendanceReportRecordsSyncUserIds(source.userIds)
+  const selectedCount = (allUsers ? 1 : 0) + (userId ? 1 : 0) + (userIds.length > 0 ? 1 : 0)
+  if (selectedCount !== 1) {
+    return createAttendanceReportSyncJobValidationError('Choose exactly one of userId, userIds, or allUsers')
+  }
+  if (allUsers) return { ok: true, value: { allUsers: true }, selectionType: 'allUsers' }
+  if (userId) return { ok: true, value: { userId }, selectionType: 'userId' }
+  return { ok: true, value: { userIds }, selectionType: 'userIds' }
+}
+
+function createAttendanceReportSyncJobEmptyTotals() {
+  return {
+    usersScanned: 0,
+    usersSynced: 0,
+    usersFailed: 0,
+    synced: 0,
+    rowsSynced: 0,
+    created: 0,
+    patched: 0,
+    skipped: 0,
+    failed: 0,
+    duplicateRowKeys: 0,
+  }
+}
+
+function createAttendanceReportSyncJobInitialCursor(pageSize) {
+  const normalized = normalizeAttendanceReportRecordsSyncPage(1, pageSize)
+  return {
+    nextPage: 1,
+    pageSize: normalized.pageSize,
+    hasNextPage: true,
+  }
+}
+
+function normalizeAttendanceReportSyncJobCreateInput(input = {}) {
+  const raw = normalizeMetadata(input)
+  const kind = normalizeAttendanceReportSyncJobKind(raw.kind)
+  if (!kind) {
+    return createAttendanceReportSyncJobValidationError('kind must be daily_records or period_summaries')
+  }
+  const periodSource = normalizeAttendanceReportSyncJobPeriodSource(raw.periodSource ?? raw)
+  if (!periodSource.ok) return periodSource
+  const userSelection = normalizeAttendanceReportSyncJobUserSelection(raw.userSelection ?? raw)
+  if (!userSelection.ok) return userSelection
+  const mode = normalizeAttendanceReportSyncJobMode(raw.mode)
+  if (!mode) {
+    return createAttendanceReportSyncJobValidationError('mode must be manual_step or enqueue')
+  }
+  const page = normalizeAttendanceReportRecordsSyncPage(1, raw.pageSize)
+  const idempotencyKey = normalizeCatalogString(raw.idempotencyKey)
+  return {
+    ok: true,
+    value: {
+      kind,
+      mode,
+      periodSource: periodSource.value,
+      periodType: periodSource.periodType,
+      userSelection: userSelection.value,
+      selectionType: userSelection.selectionType,
+      cursor: createAttendanceReportSyncJobInitialCursor(page.pageSize),
+      totals: createAttendanceReportSyncJobEmptyTotals(),
+      idempotencyKey: idempotencyKey || null,
+    },
+  }
+}
+
+function buildAttendanceReportSyncJobInsertRow(orgId, createdBy, input = {}) {
+  const parsed = normalizeAttendanceReportSyncJobCreateInput(input)
+  if (!parsed.ok) return parsed
+  const createdByText = normalizeCatalogString(createdBy)
+  return {
+    ok: true,
+    value: {
+      orgId: normalizeAttendanceReportFieldOrgId(orgId),
+      kind: parsed.value.kind,
+      status: 'queued',
+      createdBy: createdByText || null,
+      periodSource: parsed.value.periodSource,
+      userSelection: parsed.value.userSelection,
+      cursor: parsed.value.cursor,
+      totals: parsed.value.totals,
+      lastResult: {},
+      error: null,
+      idempotencyKey: parsed.value.idempotencyKey,
+      mode: parsed.value.mode,
+      periodType: parsed.value.periodType,
+      selectionType: parsed.value.selectionType,
+    },
+  }
+}
+
+function normalizeAttendanceReportSyncJobJson(value, fallback = {}) {
+  const normalized = normalizeMetadata(value)
+  return Object.keys(normalized).length > 0 ? normalized : fallback
+}
+
+function normalizeAttendanceReportSyncJobTimestamp(value) {
+  if (!value) return null
+  if (value instanceof Date) return value.toISOString()
+  const text = String(value)
+  const date = new Date(text)
+  return Number.isNaN(date.getTime()) ? text : date.toISOString()
+}
+
+function mapAttendanceReportSyncJobRow(row = {}) {
+  if (!row || typeof row !== 'object') return null
+  return {
+    id: row.id ? String(row.id) : null,
+    orgId: normalizeAttendanceReportFieldOrgId(row.org_id),
+    kind: normalizeAttendanceReportSyncJobKind(row.kind) || 'daily_records',
+    status: normalizeAttendanceReportSyncJobStatus(row.status),
+    mode: normalizeAttendanceReportSyncJobMode(row.mode) || 'manual_step',
+    createdBy: normalizeCatalogString(row.created_by) || null,
+    periodSource: normalizeAttendanceReportSyncJobJson(row.period_source),
+    userSelection: normalizeAttendanceReportSyncJobJson(row.user_selection),
+    cursor: normalizeAttendanceReportSyncJobJson(row.cursor, createAttendanceReportSyncJobInitialCursor()),
+    totals: {
+      ...createAttendanceReportSyncJobEmptyTotals(),
+      ...normalizeAttendanceReportSyncJobJson(row.totals),
+    },
+    lastResult: normalizeAttendanceReportSyncJobJson(row.last_result),
+    error: row.error == null ? null : String(row.error),
+    idempotencyKey: normalizeCatalogString(row.idempotency_key) || null,
+    lockedAt: normalizeAttendanceReportSyncJobTimestamp(row.locked_at),
+    startedAt: normalizeAttendanceReportSyncJobTimestamp(row.started_at),
+    finishedAt: normalizeAttendanceReportSyncJobTimestamp(row.finished_at),
+    createdAt: normalizeAttendanceReportSyncJobTimestamp(row.created_at),
+    updatedAt: normalizeAttendanceReportSyncJobTimestamp(row.updated_at),
+  }
+}
+
+async function createAttendanceReportSyncJob(db, orgId, createdBy, input = {}) {
+  const built = buildAttendanceReportSyncJobInsertRow(orgId, createdBy, input)
+  if (!built.ok) return built
+  const row = built.value
+  const rows = await db.query(
+    `INSERT INTO ${ATTENDANCE_REPORT_SYNC_JOB_TABLE}
+      (org_id, kind, status, mode, created_by, period_source, user_selection, cursor, totals, last_result, error, idempotency_key)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12)
+     RETURNING *`,
+    [
+      row.orgId,
+      row.kind,
+      row.status,
+      row.mode,
+      row.createdBy,
+      JSON.stringify(row.periodSource),
+      JSON.stringify(row.userSelection),
+      JSON.stringify(row.cursor),
+      JSON.stringify(row.totals),
+      JSON.stringify(row.lastResult),
+      row.error,
+      row.idempotencyKey,
+    ],
+  )
+  return { ok: true, status: 201, job: mapAttendanceReportSyncJobRow(rows[0]) }
+}
+
+async function loadAttendanceReportSyncJob(db, orgId, jobId) {
+  const id = normalizeUuidString(jobId)
+  if (!id) {
+    return { ok: false, status: 400, code: 'VALIDATION_ERROR', message: 'Invalid job id' }
+  }
+  const rows = await db.query(
+    `SELECT * FROM ${ATTENDANCE_REPORT_SYNC_JOB_TABLE}
+     WHERE id = $1 AND org_id = $2
+     LIMIT 1`,
+    [id, normalizeAttendanceReportFieldOrgId(orgId)],
+  )
+  if (!rows.length) {
+    return { ok: false, status: 404, code: 'NOT_FOUND', message: 'Attendance report sync job not found' }
+  }
+  return { ok: true, job: mapAttendanceReportSyncJobRow(rows[0]) }
+}
+
 function resolveAttendanceReportPeriodSummaryManagedFormulaFields(items) {
   return (Array.isArray(items) ? items : [])
     .filter(field => (
@@ -11142,6 +11382,18 @@ module.exports = {
     syncAttendanceReportPeriodSummariesForUsers,
     syncAttendanceReportRecords,
     syncAttendanceReportRecordsForUsers,
+    ATTENDANCE_REPORT_SYNC_JOB_TABLE,
+    ATTENDANCE_REPORT_SYNC_JOB_KINDS,
+    ATTENDANCE_REPORT_SYNC_JOB_STATUSES,
+    normalizeAttendanceReportSyncJobCreateInput,
+    normalizeAttendanceReportSyncJobPeriodSource,
+    normalizeAttendanceReportSyncJobUserSelection,
+    createAttendanceReportSyncJobEmptyTotals,
+    createAttendanceReportSyncJobInitialCursor,
+    buildAttendanceReportSyncJobInsertRow,
+    mapAttendanceReportSyncJobRow,
+    createAttendanceReportSyncJob,
+    loadAttendanceReportSyncJob,
     normalizeAttendanceReportRecordsSyncUserIds,
     normalizeAttendanceReportRecordsSyncPage,
     loadAttendanceReportRecordsSyncUserPage,
