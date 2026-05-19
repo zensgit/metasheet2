@@ -1,7 +1,7 @@
 # H3 行业模板种子扩充 — 开发计划
 
 - **日期**：2026-05-18
-- **范围**：`packages/core-backend/src/multitable/template-library.ts`、`packages/core-backend/tests/unit/multitable-template-library.test.ts`
+- **范围**（5 文件）：`packages/core-backend/src/multitable/template-library.ts`、`packages/core-backend/tests/unit/multitable-template-library.test.ts`、`packages/core-backend/tests/integration/multitable-context.api.test.ts`、本 development MD、配套 verification MD
 - **依赖**：Phase H2 (#1651) ✅ merged — 模板中心页面已能动态展示任意 category 的模板
 - **K3 PoC 阶段一锁定**：合规（纯静态 TS 数据 + 测试；无 API / migration / schema）
 - **关联**：[H2 development plan §2.2 / §6](./multitable-template-center-h2-development-20260518.md)

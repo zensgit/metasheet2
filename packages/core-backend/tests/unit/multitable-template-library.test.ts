@@ -360,6 +360,11 @@ describe('template library quality contract', () => {
           const dateField = fields.find((f) => f.name === srcSheet.fields.find((sf) => sf.id === srcView.dateFieldId)?.name)
           const tv = views.find((v) => v.type === srcView.type)
           expect(tv?.config).toEqual(expect.objectContaining({ dateFieldId: dateField?.id }))
+          if (srcView.titleFieldId) {
+            const titleField = fields.find((f) => f.name === srcSheet.fields.find((sf) => sf.id === srcView.titleFieldId)?.name)
+            expect(titleField).toBeDefined()
+            expect(tv?.config).toEqual(expect.objectContaining({ titleFieldId: titleField?.id }))
+          }
         }
       }
     },
