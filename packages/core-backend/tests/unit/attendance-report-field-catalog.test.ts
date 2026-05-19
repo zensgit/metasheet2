@@ -1328,6 +1328,411 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(store[0].data.fld_source_fingerprint).not.toBe('STALE-SOURCE')
   })
 
+  it('period-summary sync: pure helpers and period resolver stay deterministic', async () => {
+    const managedFormulas = helpers.resolveAttendanceReportPeriodSummaryManagedFormulaFields([
+      {
+        code: 'period_efficiency',
+        name: '周期效率',
+        unit: 'number',
+        sortOrder: 30,
+        enabled: true,
+        reportVisible: true,
+        formulaEnabled: true,
+        formulaExpression: '={total_minutes}/{total_days}',
+        formulaScope: 'summary',
+        formulaOutputType: 'number',
+      },
+      {
+        code: 'disabled_period_score',
+        name: '停用周期分',
+        unit: 'number',
+        sortOrder: 20,
+        enabled: false,
+        reportVisible: true,
+        formulaEnabled: true,
+        formulaExpression: '={total_minutes}',
+        formulaScope: 'summary',
+        formulaOutputType: 'number',
+      },
+      {
+        code: 'record_formula_ignored',
+        formulaEnabled: true,
+        formulaScope: 'record',
+      },
+    ])
+    expect(managedFormulas.map((field: { code: string }) => field.code)).toEqual([
+      'disabled_period_score',
+      'period_efficiency',
+    ])
+
+    const valueFields = helpers.buildAttendanceReportPeriodSummaryValueFields(managedFormulas, [
+      { code: 'leave_type_annual_duration', name: '年假时长', unit: 'minutes', sortOrder: 10 },
+    ])
+    const columns = helpers.buildAttendanceReportPeriodSummaryValueColumns(valueFields)
+    expect(columns.map((column: { id: string }) => column.id)).toContain('total_minutes')
+    expect(columns.map((column: { id: string }) => column.id)).toContain('disabled_period_score')
+    expect(columns.map((column: { id: string }) => column.id)).toContain('leave_type_annual_duration')
+    expect(columns.every((column: { type: string }) => ['number', 'string'].includes(column.type))).toBe(true)
+    const skeletonIds = new Set(Object.values(helpers.ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS) as string[])
+    expect(columns.some((column: { id: string }) => skeletonIds.has(column.id))).toBe(false)
+
+    const activeCodes = helpers.buildAttendanceReportPeriodSummaryActiveValueCodes(
+      managedFormulas.filter((field: { enabled?: boolean }) => field.enabled !== false),
+      [{ code: 'leave_type_annual_duration' }],
+    )
+    expect(activeCodes.has('total_minutes')).toBe(true)
+    expect(activeCodes.has('period_efficiency')).toBe(true)
+    expect(activeCodes.has('disabled_period_score')).toBe(false)
+
+    expect(helpers.attendanceReportPeriodSummaryRowKey('org-1', 'u-1', {
+      periodType: 'date_range',
+      from: '2026-05-01',
+      to: '2026-05-31',
+    })).toBe('org-1:u-1:range:2026-05-01:2026-05-31')
+    expect(helpers.attendanceReportPeriodSummaryRowKey('org-1', 'u-1', {
+      periodType: 'payroll_cycle',
+      cycleId: '11111111-1111-4111-8111-111111111111',
+      from: '2026-05-01',
+      to: '2026-05-31',
+    })).toBe('org-1:u-1:cycle:11111111-1111-4111-8111-111111111111')
+
+    const fpA = helpers.buildAttendanceReportPeriodSummarySourceFingerprint({
+      b: 2,
+      a: 1,
+      synced_at: 'A',
+      source_fingerprint: 'B',
+      field_fingerprint: 'C',
+    })
+    const fpB = helpers.buildAttendanceReportPeriodSummarySourceFingerprint({
+      field_fingerprint: 'X',
+      source_fingerprint: 'Y',
+      synced_at: 'Z',
+      a: 1,
+      b: 2,
+    })
+    expect(fpA).toBe(fpB)
+    expect(helpers.buildAttendanceReportPeriodSummarySourceFingerprint({ a: 1, b: 3 })).not.toBe(fpA)
+
+    const subtypeTotals = helpers.buildAttendancePeriodSummarySubtypeTotals(new Map([
+      ['2026-05-01', { reportSubtypeMinutes: { leave_type_annual_duration: 60 } }],
+      ['2026-05-02', { reportSubtypeMinutes: { leave_type_annual_duration: 30, overtime_rule_r1_duration: 45 } }],
+    ]))
+    expect(subtypeTotals).toEqual({
+      leave_type_annual_duration: 90,
+      overtime_rule_r1_duration: 45,
+    })
+
+    const cycleId = '11111111-1111-4111-8111-111111111111'
+    const db = {
+      query: vi.fn(async (_sql: string, params?: unknown[]) => (
+        params?.[0] === cycleId
+          ? [{
+              id: cycleId,
+              org_id: 'org-1',
+              name: '2026-05 薪资周期',
+              start_date: '2026-05-01',
+              end_date: '2026-05-31',
+              status: 'open',
+            }]
+          : []
+      )),
+    }
+    expect(await helpers.resolveAttendanceReportPeriodSyncPeriod(db, 'org-1', { cycleId, from: '2026-05-01', to: '2026-05-31' }))
+      .toMatchObject({ ok: false, status: 400 })
+    expect(await helpers.resolveAttendanceReportPeriodSyncPeriod(db, 'org-1', {}))
+      .toMatchObject({ ok: false, status: 400 })
+    expect(await helpers.resolveAttendanceReportPeriodSyncPeriod(db, 'org-1', { from: '2026-05-01' }))
+      .toMatchObject({ ok: false, status: 400 })
+    expect(await helpers.resolveAttendanceReportPeriodSyncPeriod(db, 'org-1', { cycleId: 'not-a-uuid' }))
+      .toMatchObject({ ok: false, status: 400 })
+    expect(await helpers.resolveAttendanceReportPeriodSyncPeriod(db, 'org-1', { cycleId: '22222222-2222-4222-8222-222222222222' }))
+      .toMatchObject({ ok: false, status: 404 })
+    const cycle = await helpers.resolveAttendanceReportPeriodSyncPeriod(db, 'org-1', { cycleId })
+    expect(cycle).toMatchObject({
+      ok: true,
+      period: {
+        periodType: 'payroll_cycle',
+        periodKey: `cycle:${cycleId}`,
+        cycleId,
+        from: '2026-05-01',
+        to: '2026-05-31',
+      },
+    })
+    const range = await helpers.resolveAttendanceReportPeriodSyncPeriod(db, 'org-1', {
+      from: '2026-05-01',
+      to: '2026-05-31',
+    })
+    expect(range).toMatchObject({
+      ok: true,
+      period: {
+        periodType: 'date_range',
+        periodKey: 'range:2026-05-01:2026-05-31',
+      },
+    })
+  })
+
+  it('period-summary sync: upsert / skip / duplicate / subtype values / stale formula null', async () => {
+    const catalogFieldIds = Object.fromEntries(
+      Object.values(helpers.ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS).map((fieldId) => [fieldId, `fld_${fieldId}`]),
+    )
+    const disabledSummaryFormulaRecord = {
+      id: 'cfg-disabled-period-score',
+      data: {
+        fld_field_code: 'period_score',
+        fld_field_name: '周期得分',
+        fld_category: '出勤统计字段',
+        fld_source: 'custom',
+        fld_unit: 'number',
+        fld_enabled: false,
+        fld_report_visible: true,
+        fld_sort_order: 9500,
+        fld_dingtalk_field_name: '周期得分',
+        fld_description: '停用周期公式字段应清空旧值',
+        fld_internal_key: 'formula.period_score',
+        fld_formula_enabled: true,
+        fld_formula_expression: '={total_minutes}',
+        fld_formula_scope: 'summary',
+        fld_formula_output_type: 'number',
+      },
+    }
+    const store: Array<{ id: string; data: Record<string, unknown> }> = []
+    let seq = 0
+    const records = {
+      queryRecords: vi.fn(async ({ sheetId, filters }: { sheetId: string; filters?: Record<string, unknown> }) => {
+        if (sheetId === 'sheet_catalog') return [disabledSummaryFormulaRecord]
+        const want = filters?.fld_row_key
+        return store.filter(record => record.data.fld_row_key === want)
+      }),
+      createRecord: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
+        const record = { id: `rec-${++seq}`, data: { ...data } }
+        store.push(record)
+        return record
+      }),
+      patchRecord: vi.fn(async ({ recordId, changes }: { recordId: string; changes: Record<string, unknown> }) => {
+        const record = store.find(item => item.id === recordId)
+        if (record) record.data = { ...record.data, ...changes }
+        return record
+      }),
+    }
+    const ensureObjectDescriptors: Array<{ fields: Array<{ id: string; type: string }> }> = []
+    const provisioning = {
+      ensureObject: vi.fn(async (input: { descriptor?: { fields?: Array<{ id: string; type: string }> } }) => {
+        if (input?.descriptor?.fields) ensureObjectDescriptors.push({ fields: input.descriptor.fields })
+        return { baseId: 'base_period', sheet: { id: 'sheet_period' } }
+      }),
+      ensureView: vi.fn(async () => ({ id: 'view_period', sheetId: 'sheet_period' })),
+      findObjectSheet: vi.fn(async ({ objectId }: { objectId: string }) => (
+        objectId === 'attendance_report_field_catalog'
+          ? { id: 'sheet_catalog', baseId: 'base_catalog' }
+          : null
+      )),
+      resolveFieldIds: vi.fn(async ({ objectId, fieldIds }: { objectId: string; fieldIds: string[] }) => (
+        objectId === 'attendance_report_field_catalog'
+          ? Object.fromEntries(fieldIds.map(fieldId => [fieldId, catalogFieldIds[fieldId] || `fld_${fieldId}`]))
+          : Object.fromEntries(fieldIds.map(fieldId => [fieldId, `fld_${fieldId}`]))
+      )),
+    }
+    const db = {
+      query: vi.fn(async (sql: string) => {
+        if (/FROM attendance_leave_types/.test(sql)) {
+          return [{ id: 'leave-annual', code: 'annual', name: '年假', is_active: true }]
+        }
+        if (/FROM attendance_overtime_rules/.test(sql)) return []
+        if (/SELECT\s+COALESCE\(SUM\(CASE WHEN is_workday THEN 1 ELSE 0 END\)/.test(sql)) {
+          return [{
+            total_days: 2,
+            total_minutes: 960,
+            total_late_minutes: 10,
+            total_early_leave_minutes: 5,
+            normal_days: 1,
+            late_days: 1,
+            early_leave_days: 0,
+            late_early_days: 0,
+            partial_days: 0,
+            absent_days: 0,
+            adjusted_days: 0,
+            off_days: 0,
+          }]
+        }
+        if (/SELECT request_type,\s+COALESCE\(SUM/.test(sql) && /GROUP BY request_type/.test(sql)) {
+          return [{ request_type: 'leave', total_minutes: 240 }]
+        }
+        if (/metadata->'leaveType'->>'code'/.test(sql)) {
+          return [{ work_date: '2026-05-02', request_type: 'leave', subtype_key: 'annual', total_minutes: 240 }]
+        }
+        if (/SELECT work_date,\s+request_type/.test(sql) && /GROUP BY work_date, request_type/.test(sql)) {
+          return [{ work_date: '2026-05-02', request_type: 'leave', total_minutes: 240 }]
+        }
+        if (/FROM users u/.test(sql)) {
+          return [{
+            user_name: '张三',
+            username: 'zhangsan',
+            meta: { department: '研发', attendanceGroup: '默认考勤组' },
+          }]
+        }
+        return []
+      }),
+    }
+    const context = { api: { multitable: { provisioning, records }, database: db } }
+    const period = {
+      periodType: 'date_range',
+      periodKey: 'range:2026-05-01:2026-05-31',
+      cycleId: null,
+      periodName: '2026-05-01..2026-05-31',
+      from: '2026-05-01',
+      to: '2026-05-31',
+      periodStart: '2026-05-01',
+      periodEnd: '2026-05-31',
+    }
+
+    const first = await helpers.syncAttendanceReportPeriodSummary(
+      context,
+      db,
+      'org-1',
+      { warn: vi.fn() },
+      { period, userId: 'u-1' },
+    )
+    expect(first).toMatchObject({ synced: 1, usersScanned: 1, usersSynced: 1, created: 1, patched: 0, skipped: 0, failed: 0 })
+    expect(first.multitable).toMatchObject({
+      objectId: 'attendance_report_period_summaries',
+      sheetId: 'sheet_period',
+      viewId: 'view_period',
+    })
+    expect(store).toHaveLength(1)
+    expect(store[0].data.fld_row_key).toBe('org-1:u-1:range:2026-05-01:2026-05-31')
+    expect(store[0].data.fld_period_type).toBe('date_range')
+    expect(store[0].data.fld_period_start).toBe('2026-05-01')
+    expect(store[0].data.fld_total_minutes).toBe(960)
+    expect(store[0].data.fld_leave_minutes).toBe(240)
+    expect(store[0].data.fld_leave_type_annual_duration).toBe(240)
+    expect(store[0].data.fld_period_score).toBeNull()
+    const periodEnsure = ensureObjectDescriptors[ensureObjectDescriptors.length - 1]
+    expect(periodEnsure.fields.filter(field => field.id === 'period_start')).toHaveLength(1)
+    expect(periodEnsure.fields.filter(field => field.id === 'row_key')).toHaveLength(1)
+
+    const second = await helpers.syncAttendanceReportPeriodSummary(
+      context,
+      db,
+      'org-1',
+      { warn: vi.fn() },
+      { period, userId: 'u-1' },
+    )
+    expect(second).toMatchObject({ synced: 1, created: 0, patched: 0, skipped: 1 })
+
+    store[0].data.fld_field_fingerprint = 'STALE-FIELD'
+    store[0].data.fld_period_score = 99
+    const third = await helpers.syncAttendanceReportPeriodSummary(
+      context,
+      db,
+      'org-1',
+      { warn: vi.fn() },
+      { period, userId: 'u-1' },
+    )
+    expect(third).toMatchObject({ patched: 1, skipped: 0, duplicateRowKeys: 0 })
+    const patch = records.patchRecord.mock.calls.at(-1)?.[0]
+    expect(patch.changes.fld_period_score).toBeNull()
+    expect(store[0].data.fld_period_score).toBeNull()
+    expect(store[0].data.fld_field_fingerprint).not.toBe('STALE-FIELD')
+
+    store.push({ id: 'rec-duplicate', data: { ...store[0].data } })
+    const fourth = await helpers.syncAttendanceReportPeriodSummary(
+      context,
+      db,
+      'org-1',
+      { warn: vi.fn() },
+      { period, userId: 'u-1' },
+    )
+    expect(fourth.duplicateRowKeys).toBeGreaterThanOrEqual(1)
+    expect(store.filter(row => row.data.fld_row_key === 'org-1:u-1:range:2026-05-01:2026-05-31')).toHaveLength(2)
+  })
+
+  it('period-summary sync: explicit users aggregate per user', async () => {
+    const store: Array<{ id: string; data: Record<string, unknown> }> = []
+    let seq = 0
+    const records = {
+      queryRecords: async ({ filters }: { filters?: Record<string, unknown> }) => {
+        const want = filters?.fld_row_key
+        return store.filter(record => record.data.fld_row_key === want)
+      },
+      createRecord: async ({ data }: { data: Record<string, unknown> }) => {
+        const record = { id: `rec-${++seq}`, data: { ...data } }
+        store.push(record)
+        return record
+      },
+      patchRecord: async ({ recordId, changes }: { recordId: string; changes: Record<string, unknown> }) => {
+        const record = store.find(item => item.id === recordId)
+        if (record) record.data = { ...record.data, ...changes }
+        return record
+      },
+    }
+    const provisioning = {
+      ensureObject: async () => ({ baseId: 'base_period', sheet: { id: 'sheet_period' } }),
+      ensureView: async () => ({ id: 'view_period', sheetId: 'sheet_period' }),
+      resolveFieldIds: async ({ fieldIds }: { fieldIds: string[] }) =>
+        Object.fromEntries(fieldIds.map(fieldId => [fieldId, `fld_${fieldId}`])),
+    }
+    const db = {
+      query: async (sql: string) => {
+        if (/FROM attendance_leave_types/.test(sql) || /FROM attendance_overtime_rules/.test(sql)) return []
+        if (/SELECT\s+COALESCE\(SUM\(CASE WHEN is_workday THEN 1 ELSE 0 END\)/.test(sql)) {
+          return [{
+            total_days: 1,
+            total_minutes: 480,
+            total_late_minutes: 0,
+            total_early_leave_minutes: 0,
+            normal_days: 1,
+            late_days: 0,
+            early_leave_days: 0,
+            late_early_days: 0,
+            partial_days: 0,
+            absent_days: 0,
+            adjusted_days: 0,
+            off_days: 0,
+          }]
+        }
+        if (/FROM users u/.test(sql)) return [{ user_name: '员工', username: 'employee', meta: {} }]
+        return []
+      },
+    }
+    const context = { api: { multitable: { provisioning, records }, database: db } }
+    const period = {
+      periodType: 'date_range',
+      periodKey: 'range:2026-05-01:2026-05-31',
+      cycleId: null,
+      periodName: '2026-05-01..2026-05-31',
+      from: '2026-05-01',
+      to: '2026-05-31',
+      periodStart: '2026-05-01',
+      periodEnd: '2026-05-31',
+    }
+
+    const result = await helpers.syncAttendanceReportPeriodSummariesForUsers(
+      context,
+      db,
+      'org-1',
+      { warn: vi.fn() },
+      { period, userIds: ['u-1', ' u-1 ', 'u-2'] },
+    )
+    expect(result).toMatchObject({
+      userSelection: 'explicit',
+      totalUsers: 2,
+      usersScanned: 2,
+      usersSynced: 2,
+      synced: 2,
+      rowsSynced: 2,
+      created: 2,
+      patched: 0,
+      skipped: 0,
+      failed: 0,
+      hasNextPage: false,
+      periodType: 'date_range',
+    })
+    expect(store.map(row => row.data.fld_row_key)).toEqual([
+      'org-1:u-1:range:2026-05-01:2026-05-31',
+      'org-1:u-2:range:2026-05-01:2026-05-31',
+    ])
+  })
+
   it('does not add direct meta table writes to the attendance plugin', () => {
     const source = readFileSync(
       new URL('../../../../plugins/plugin-attendance/index.cjs', import.meta.url),
