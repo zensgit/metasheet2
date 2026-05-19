@@ -185,9 +185,14 @@ current service as a retest. The helper now runs dependency refresh as a logged
 child process with:
 
 - resolved `pnpm` path and version in the apply log;
+- generated `dependency-refresh-*.cmd` wrapper launched through `cmd.exe`;
+- `pnpm.cmd` preference, deploy-root `.pnpm-store`, and
+  `--reporter=append-only`;
+- registry and pnpm store diagnostics before install;
 - heartbeat progress every `DependencyRefreshHeartbeatSec` seconds, default 60;
 - stdout/stderr logs under `output\logs\dependency-refresh-*`;
-- timeout failure after `DependencyRefreshTimeoutSec` seconds, default 1800.
+- timeout failure after `DependencyRefreshTimeoutSec` seconds, default 1800,
+  with child-process-tree cleanup via `taskkill.exe` when available.
 
 Only rerun the SQL source test after the deploy reaches migrations, restart,
 and healthcheck. If dependency refresh times out, collect

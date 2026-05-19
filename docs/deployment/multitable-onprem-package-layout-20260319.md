@@ -177,5 +177,8 @@ the resolved `pnpm` path/version, writes stdout/stderr to
 the install is still running, and fails the deployment after the configured
 timeout instead of hanging forever. Defaults are
 `DependencyRefreshTimeoutSec=1800` and `DependencyRefreshHeartbeatSec=60`.
+The child process is a generated `dependency-refresh-*.cmd` wrapper launched
+through `cmd.exe`; it prefers `pnpm.cmd`, uses `--reporter=append-only`, and
+pins pnpm's store to deploy-root `.pnpm-store` with `--store-dir`.
 
 For a fresh Windows-only install, use `bootstrap-admin.bat` after `deploy.bat` so the customer can create the first admin account without needing bash or WSL.

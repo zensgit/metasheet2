@@ -180,10 +180,13 @@ helper:
 - `output\logs\dependency-refresh-*.stdout.log`
 - `output\logs\dependency-refresh-*.stderr.log`
 
-The helper prints the resolved `pnpm` path/version, heartbeat progress, and a
-timeout failure if the install exceeds `DependencyRefreshTimeoutSec` (default
-1800 seconds). A stuck or timed-out dependency refresh is a deployment failure,
-not a valid SQL executor result.
+The helper prints the resolved `pnpm` path/version, the install path, registry,
+store diagnostics, heartbeat progress, and a timeout failure if the install
+exceeds `DependencyRefreshTimeoutSec` (default 1800 seconds). On Windows it
+prefers `pnpm.cmd`, runs a generated `dependency-refresh-*.cmd` wrapper through
+`cmd.exe`, uses deploy-root `.pnpm-store`, and kills the child process tree on
+timeout. A stuck or timed-out dependency refresh is a deployment failure, not a
+valid SQL executor result.
 
 These SQL diagnostic states do not invalidate the #1542 staging-to-K3 metadata
 signoff. They mean direct SQL Server source execution is still blocked.
