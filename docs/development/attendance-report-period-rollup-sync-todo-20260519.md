@@ -67,7 +67,7 @@ Date: 2026-05-19
 - 展示 synced/created/patched/skipped/failed、`fieldFingerprint`、`syncedAt`、打开多维表入口。
 - staging live evidence 只在明确授权后执行，不写 production。
 
-**落地指针：** PR3 设计记录见 `docs/development/attendance-report-period-rollup-sync-pr3-design-20260519.md`；验证记录见 `docs/development/attendance-report-period-rollup-sync-pr3-verification-20260519.md`。
+**落地指针：** PR3 设计记录见 `docs/development/attendance-report-period-rollup-sync-pr3-design-20260519.md`；验证记录见 `docs/development/attendance-report-period-rollup-sync-pr3-verification-20260519.md`；staging live closeout 见 `docs/development/attendance-report-period-rollup-sync-live-closeout-design-20260519.md` 与 `docs/development/attendance-report-period-rollup-sync-live-closeout-verification-20260519.md`。
 
 ## Test Plan
 
