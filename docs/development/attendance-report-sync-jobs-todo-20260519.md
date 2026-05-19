@@ -234,6 +234,7 @@ Rules:
 - [x] Staging live only after explicit authorization and file-based JWT.
 
 **PR4 implementation pointer:** `docs/development/attendance-report-sync-jobs-pr4-development-20260519.md`; verification: `docs/development/attendance-report-sync-jobs-pr4-verification-20260519.md`.
+Follow-up staging evidence: `docs/development/attendance-report-sync-jobs-live-evidence-development-20260519.md`; verification: `docs/development/attendance-report-sync-jobs-live-evidence-verification-20260519.md`.
 
 ## Hard Boundaries
 
