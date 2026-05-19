@@ -48,6 +48,20 @@ function normalizeField(field) {
   }
 }
 
+function normalizeFieldIdMap(value, field) {
+  if (value === undefined || value === null) return {}
+  if (!isPlainObject(value)) {
+    throw new AdapterValidationError(`${field} must be an object`, { field })
+  }
+  const normalized = {}
+  for (const [logicalField, physicalField] of Object.entries(value)) {
+    const logical = optionalString(logicalField)
+    const physical = optionalString(physicalField)
+    if (logical && physical) normalized[logical] = physical
+  }
+  return normalized
+}
+
 function descriptorFieldsForObject(objectId) {
   const descriptor = listStagingDescriptors().find((item) => item.id === objectId)
   if (!descriptor) return []
@@ -86,6 +100,7 @@ function targetArrayToObjects(targets) {
 function normalizeObjects(config = {}) {
   const rawObjects = isPlainObject(config.objects) ? config.objects : targetArrayToObjects(config.targets)
   const objects = {}
+  const configProjectId = optionalString(config.projectId)
   for (const [objectId, objectConfig] of Object.entries(rawObjects)) {
     if (!isPlainObject(objectConfig)) {
       throw new AdapterValidationError(`config.objects.${objectId} must be an object`, {
@@ -102,7 +117,9 @@ function normalizeObjects(config = {}) {
       viewId: optionalString(objectConfig.viewId),
       baseId: optionalString(objectConfig.baseId),
       openLink: optionalString(objectConfig.openLink),
+      projectId: optionalString(objectConfig.projectId) || configProjectId,
       fields: normalizeFields(objectConfig, objectId),
+      fieldIdMap: normalizeFieldIdMap(objectConfig.fieldIdMap, `config.objects.${objectId}.fieldIdMap`),
     }
   }
   return objects
@@ -118,6 +135,69 @@ function getRecordsApi(context) {
   return recordsApi
 }
 
+function getProvisioningApi(context) {
+  return context && context.api && context.api.multitable && context.api.multitable.provisioning
+    ? context.api.multitable.provisioning
+    : null
+}
+
+function logicalFieldNames(objectConfig) {
+  return Array.from(new Set((objectConfig.fields || [])
+    .map((field) => optionalString(field && field.name))
+    .filter(Boolean)))
+}
+
+async function resolveProvisionedFieldIdMap(context, objectConfig) {
+  const projectId = optionalString(objectConfig.projectId)
+  const fieldIds = logicalFieldNames(objectConfig)
+  if (!projectId || fieldIds.length === 0) return {}
+  const provisioning = getProvisioningApi(context)
+  if (!provisioning) return {}
+
+  if (typeof provisioning.resolveFieldIds === 'function') {
+    return provisioning.resolveFieldIds({
+      projectId,
+      objectId: objectConfig.objectId,
+      fieldIds,
+    })
+  }
+
+  if (typeof provisioning.getFieldId === 'function') {
+    const resolved = {}
+    for (const fieldId of fieldIds) {
+      const physical = provisioning.getFieldId(projectId, objectConfig.objectId, fieldId)
+      if (physical) resolved[fieldId] = physical
+    }
+    return resolved
+  }
+
+  return {}
+}
+
+function invertFieldIdMap(fieldIdMap = {}) {
+  const aliases = {}
+  for (const [logicalField, physicalField] of Object.entries(fieldIdMap)) {
+    const logical = optionalString(logicalField)
+    const physical = optionalString(physicalField)
+    if (logical && physical && logical !== physical) aliases[physical] = logical
+  }
+  return aliases
+}
+
+function applyLogicalFieldAliases(data, physicalToLogical = {}) {
+  if (!isPlainObject(data)) return data
+  const normalized = { ...data }
+  for (const [physicalField, logicalField] of Object.entries(physicalToLogical)) {
+    if (
+      Object.prototype.hasOwnProperty.call(normalized, physicalField) &&
+      !Object.prototype.hasOwnProperty.call(normalized, logicalField)
+    ) {
+      normalized[logicalField] = normalized[physicalField]
+    }
+  }
+  return normalized
+}
+
 function parseOffsetCursor(cursor) {
   if (cursor === null || cursor === undefined || cursor === '') return 0
   const numeric = Number(cursor)
@@ -127,10 +207,10 @@ function parseOffsetCursor(cursor) {
   return numeric
 }
 
-function recordData(row, sheetId) {
+function recordData(row, sheetId, physicalToLogical = {}) {
   if (isPlainObject(row && row.data)) {
     return {
-      ...row.data,
+      ...applyLogicalFieldAliases(row.data, physicalToLogical),
       _metaRecordId: row.id || null,
       _metaRecordVersion: Number.isInteger(row.version) ? row.version : null,
       _metaSheetId: row.sheetId || sheetId,
@@ -143,6 +223,7 @@ function recordData(row, sheetId) {
 function createMetaSheetStagingSourceAdapter({ system, context } = {}) {
   const normalizedSystem = normalizeExternalSystemForAdapter(system)
   const objects = normalizeObjects(normalizedSystem.config)
+  const fieldAliasCache = new Map()
 
   function getObjectConfig(object) {
     const objectConfig = objects[object]
@@ -150,6 +231,17 @@ function createMetaSheetStagingSourceAdapter({ system, context } = {}) {
       throw new AdapterValidationError(`MetaSheet staging object is not configured: ${object}`, { object })
     }
     return objectConfig
+  }
+
+  async function fieldAliasesForObject(objectConfig) {
+    if (fieldAliasCache.has(objectConfig.objectId)) return fieldAliasCache.get(objectConfig.objectId)
+    const resolved = {
+      ...objectConfig.fieldIdMap,
+      ...await resolveProvisionedFieldIdMap(context, objectConfig),
+    }
+    const aliases = invertFieldIdMap(resolved)
+    fieldAliasCache.set(objectConfig.objectId, aliases)
+    return aliases
   }
 
   return {
@@ -203,7 +295,8 @@ function createMetaSheetStagingSourceAdapter({ system, context } = {}) {
         limit: request.limit,
         offset,
       })
-      const records = Array.isArray(rows) ? rows.map((row) => recordData(row, objectConfig.sheetId)) : []
+      const physicalToLogical = await fieldAliasesForObject(objectConfig)
+      const records = Array.isArray(rows) ? rows.map((row) => recordData(row, objectConfig.sheetId, physicalToLogical)) : []
       const nextOffset = offset + records.length
       return createReadResult({
         records,
@@ -233,6 +326,9 @@ module.exports = {
     normalizeObjects,
     normalizeFields,
     descriptorFieldsForObject,
+    normalizeFieldIdMap,
+    invertFieldIdMap,
+    applyLogicalFieldAliases,
     parseOffsetCursor,
     recordData,
   },

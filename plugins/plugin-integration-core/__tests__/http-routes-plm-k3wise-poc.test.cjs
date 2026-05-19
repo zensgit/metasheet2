@@ -292,6 +292,12 @@ function createExternalSystemRegistry() {
       const system = systems.get(input.id)
       return system && inScope(system, input) ? clone(system) : null
     },
+    async deleteExternalSystem(input = {}) {
+      const system = systems.get(input.id)
+      if (!system || !inScope(system, input)) return null
+      systems.delete(input.id)
+      return publicExternalSystem(system)
+    },
     async listExternalSystems(input = {}) {
       return Array.from(systems.values())
         .filter((system) => inScope(system, input))

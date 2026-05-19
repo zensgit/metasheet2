@@ -10,7 +10,7 @@ const {
   createMetaSheetStagingSourceAdapter,
 } = require(path.join(__dirname, '..', 'lib', 'adapters', 'metasheet-staging-source-adapter.cjs'))
 
-function createContext({ rows = [] } = {}) {
+function createContext({ rows = [], provisioning = null } = {}) {
   const calls = []
   return {
     calls,
@@ -25,6 +25,7 @@ function createContext({ rows = [] } = {}) {
               return rows.slice(offset, offset + limit)
             },
           },
+          ...(provisioning ? { provisioning } : {}),
         },
       },
     },
@@ -120,6 +121,82 @@ async function main() {
   assert.equal(secondPage.records[0].code, 'MAT-002')
   assert.equal(secondPage.nextCursor, null)
   assert.equal(secondPage.done, true)
+
+  const fieldAliasCalls = []
+  const { context: physicalContext } = createContext({
+    rows: [
+      {
+        id: 'r3',
+        sheetId: 'sheet_materials',
+        version: 5,
+        data: {
+          fld_code: 'MAT-003',
+          fld_name: 'Screw',
+          fld_quantity: '8',
+        },
+      },
+      {
+        id: 'r4',
+        sheetId: 'sheet_materials',
+        version: 6,
+        data: {
+          code: 'MAT-004-LOGICAL',
+          fld_code: 'MAT-004-PHYSICAL',
+          fld_name: 'Washer',
+          fld_quantity: '13',
+        },
+      },
+    ],
+    provisioning: {
+      async resolveFieldIds(input) {
+        fieldAliasCalls.push(input)
+        return {
+          code: 'fld_code',
+          name: 'fld_name',
+          quantity: 'fld_quantity',
+        }
+      },
+    },
+  })
+  const physicalAdapter = createMetaSheetStagingSourceAdapter({
+    system: createSystem({ projectId: 'default:integration-core' }),
+    context: physicalContext,
+  })
+  const physicalRows = await physicalAdapter.read({ object: 'standard_materials', limit: 10 })
+  assert.equal(physicalRows.records[0].code, 'MAT-003')
+  assert.equal(physicalRows.records[0].name, 'Screw')
+  assert.equal(physicalRows.records[0].quantity, '8')
+  assert.equal(physicalRows.records[0].fld_code, 'MAT-003', 'physical field id is preserved for manually patched pipelines')
+  assert.equal(physicalRows.records[1].code, 'MAT-004-LOGICAL', 'existing logical fields are not overwritten')
+  assert.deepEqual(fieldAliasCalls, [{
+    projectId: 'default:integration-core',
+    objectId: 'standard_materials',
+    fieldIds: ['code', 'name', 'quantity'],
+  }])
+
+  const explicitMapAdapter = createMetaSheetStagingSourceAdapter({
+    system: createSystem({
+      objects: {
+        standard_materials: {
+          name: 'Standard Materials',
+          sheetId: 'sheet_materials',
+          fieldDetails: [
+            { id: 'code', name: 'Code', type: 'string' },
+          ],
+          fieldIdMap: {
+            code: 'fld_code',
+          },
+        },
+      },
+    }),
+    context: createContext({
+      rows: [
+        { id: 'r5', sheetId: 'sheet_materials', version: 1, data: { fld_code: 'MAT-005' } },
+      ],
+    }).context,
+  })
+  const explicitMapRows = await explicitMapAdapter.read({ object: 'standard_materials', limit: 1 })
+  assert.equal(explicitMapRows.records[0].code, 'MAT-005', 'explicit fieldIdMap works without provisioning API')
 
   await assert.rejects(
     () => adapter.read({ object: 'unknown', limit: 1 }),
