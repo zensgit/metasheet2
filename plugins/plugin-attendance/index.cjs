@@ -328,6 +328,7 @@ function attachAttendanceImportMultiPunchMeta(meta, options = {}) {
 const ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID = 'attendance_report_field_catalog'
 const ATTENDANCE_REPORT_FIELD_CATALOG_VIEW_ID = 'fields_by_category'
 const ATTENDANCE_REPORT_RECORDS_VIEW_ID = 'records_by_date'
+const ATTENDANCE_REPORT_PERIOD_SUMMARIES_VIEW_ID = 'period_summaries_by_period'
 const ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS = Object.freeze({
   fieldCode: 'field_code',
   fieldName: 'field_name',
@@ -2098,6 +2099,154 @@ async function ensureAttendanceReportRecords(context, orgId, logger) {
       error: error instanceof Error ? error.message : String(error),
       projectId,
       objectId: ATTENDANCE_REPORT_RECORDS_OBJECT_ID,
+      baseId: null,
+      sheetId: null,
+      viewId: null,
+      fieldIds: {},
+    }
+  }
+}
+
+// ── attendance_report_period_summaries (period rollup PR1: descriptor + ensure only) ──
+// 每员工每周期一行的可重建报表层. PR1 只 ship 固定身份/溯源骨架 + ensure；
+// writer/route/frontend 是 PR2/PR3, 不在本 slice. attendance_* 仍是唯一事实源,
+// 全程经 context.api.multitable.provisioning, 不裸写 meta_*, 不新增 attendance_* migration.
+const ATTENDANCE_REPORT_PERIOD_SUMMARIES_OBJECT_ID = 'attendance_report_period_summaries'
+const ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS = Object.freeze({
+  rowKey: 'row_key',
+  orgId: 'org_id',
+  userId: 'user_id',
+  employeeName: 'employee_name',
+  department: 'department',
+  attendanceGroup: 'attendance_group',
+  periodType: 'period_type',
+  periodKey: 'period_key',
+  cycleId: 'cycle_id',
+  periodName: 'period_name',
+  periodStart: 'period_start',
+  periodEnd: 'period_end',
+  fieldFingerprint: 'field_fingerprint',
+  sourceFingerprint: 'source_fingerprint',
+  syncedAt: 'synced_at',
+})
+
+function getAttendanceReportPeriodSummariesDescriptor() {
+  return {
+    id: ATTENDANCE_REPORT_PERIOD_SUMMARIES_OBJECT_ID,
+    name: '考勤周期汇总报表（多维表报表层）',
+    description: '考勤插件私有周期汇总报表快照对象：每员工每周期一行（手动 from/to 或薪资周期），供多维表二次公式/视图/筛选/权限。可重建，非事实源；attendance_* 仍是唯一事实源。',
+    fields: [
+      { id: ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.rowKey, name: '行键', type: 'string', order: 10, property: { validation: { required: true }, width: 280 } },
+      { id: ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.orgId, name: '组织', type: 'string', order: 20, property: { width: 120 } },
+      { id: ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.userId, name: '员工ID', type: 'string', order: 30, property: { width: 160 } },
+      { id: ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.employeeName, name: '姓名', type: 'string', order: 40, property: { width: 120 } },
+      { id: ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.department, name: '部门', type: 'string', order: 50, property: { width: 140 } },
+      { id: ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.attendanceGroup, name: '考勤组', type: 'string', order: 60, property: { width: 140 } },
+      { id: ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.periodType, name: '周期类型', type: 'string', order: 70, property: { width: 100 } },
+      { id: ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.periodKey, name: '周期键', type: 'string', order: 80, property: { width: 220 } },
+      { id: ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.cycleId, name: '薪资周期ID', type: 'string', order: 90, property: { width: 160 } },
+      { id: ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.periodName, name: '周期名称', type: 'string', order: 100, property: { width: 160 } },
+      { id: ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.periodStart, name: '周期开始', type: 'date', order: 110 },
+      { id: ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.periodEnd, name: '周期结束', type: 'date', order: 120 },
+      { id: ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.fieldFingerprint, name: '字段配置指纹', type: 'string', order: 130, property: { width: 200 } },
+      { id: ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.sourceFingerprint, name: '源数据指纹', type: 'string', order: 140, property: { width: 200 } },
+      { id: ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.syncedAt, name: '同步时间', type: 'dateTime', order: 150 },
+    ],
+  }
+}
+
+function getAttendanceReportPeriodSummariesViewDescriptor(fieldIds = {}) {
+  const periodStartFieldId = fieldIds[ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.periodStart] || ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.periodStart
+  const userIdFieldId = fieldIds[ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.userId] || ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.userId
+  const syncedAtFieldId = fieldIds[ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.syncedAt] || ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS.syncedAt
+  return {
+    id: ATTENDANCE_REPORT_PERIOD_SUMMARIES_VIEW_ID,
+    objectId: ATTENDANCE_REPORT_PERIOD_SUMMARIES_OBJECT_ID,
+    name: '按周期查看',
+    type: 'grid',
+    sortInfo: {
+      rules: [
+        { fieldId: periodStartFieldId, direction: 'desc' },
+        { fieldId: userIdFieldId, direction: 'asc' },
+        { fieldId: syncedAtFieldId, direction: 'desc' },
+      ],
+    },
+    config: {
+      purpose: 'attendance-report-period-summaries',
+    },
+  }
+}
+
+// PR1 ships the fixed identity/provenance skeleton + ensure only. Value columns
+// (summary base / summary formula / dynamic subtype period rollup) are ensured at
+// sync time in PR2 via the same ensureObject upsert, driven from the live catalog —
+// mirrors the daily attendance_report_records PR1/PR2 split. No writer, route, or
+// frontend in PR1.
+async function ensureAttendanceReportPeriodSummaries(context, orgId, logger) {
+  const projectId = getAttendanceReportFieldProjectId(orgId)
+  const multitable = context?.api?.multitable
+  if (!multitable?.provisioning?.ensureObject) {
+    return {
+      available: false,
+      reason: 'MULTITABLE_API_UNAVAILABLE',
+      projectId,
+      objectId: ATTENDANCE_REPORT_PERIOD_SUMMARIES_OBJECT_ID,
+      baseId: null,
+      sheetId: null,
+      viewId: null,
+      fieldIds: {},
+    }
+  }
+  try {
+    const descriptor = getAttendanceReportPeriodSummariesDescriptor()
+    const provisioned = await multitable.provisioning.ensureObject({ projectId, descriptor })
+    const logicalFieldIds = Object.values(ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS)
+    let fieldIds = {}
+    if (typeof multitable.provisioning.resolveFieldIds === 'function') {
+      fieldIds = await multitable.provisioning.resolveFieldIds({
+        projectId,
+        objectId: ATTENDANCE_REPORT_PERIOD_SUMMARIES_OBJECT_ID,
+        fieldIds: logicalFieldIds,
+      })
+    } else if (typeof multitable.provisioning.getFieldId === 'function') {
+      fieldIds = Object.fromEntries(logicalFieldIds.map(fieldId => [
+        fieldId,
+        multitable.provisioning.getFieldId(projectId, ATTENDANCE_REPORT_PERIOD_SUMMARIES_OBJECT_ID, fieldId),
+      ]))
+    }
+
+    let viewId = null
+    if (typeof multitable.provisioning.ensureView === 'function') {
+      try {
+        const view = await multitable.provisioning.ensureView({
+          projectId,
+          sheetId: provisioned.sheet.id,
+          descriptor: getAttendanceReportPeriodSummariesViewDescriptor(fieldIds),
+        })
+        viewId = view?.id || null
+      } catch (error) {
+        logger?.warn?.('Failed to ensure attendance report period summaries view', error)
+      }
+    }
+
+    return {
+      available: true,
+      reason: null,
+      projectId,
+      objectId: ATTENDANCE_REPORT_PERIOD_SUMMARIES_OBJECT_ID,
+      baseId: provisioned.baseId || null,
+      sheetId: provisioned.sheet?.id || null,
+      viewId,
+      fieldIds,
+    }
+  } catch (error) {
+    logger?.warn?.('Attendance report period summaries provisioning degraded', error)
+    return {
+      available: false,
+      reason: 'PROVISIONING_FAILED',
+      error: error instanceof Error ? error.message : String(error),
+      projectId,
+      objectId: ATTENDANCE_REPORT_PERIOD_SUMMARIES_OBJECT_ID,
       baseId: null,
       sheetId: null,
       viewId: null,
@@ -10484,6 +10633,12 @@ module.exports = {
     loadAttendanceReportFieldCatalog,
     getAttendanceReportRecordsDescriptor,
     ensureAttendanceReportRecords,
+    ATTENDANCE_REPORT_PERIOD_SUMMARIES_OBJECT_ID,
+    ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS,
+    ATTENDANCE_REPORT_PERIOD_SUMMARIES_VIEW_ID,
+    getAttendanceReportPeriodSummariesDescriptor,
+    getAttendanceReportPeriodSummariesViewDescriptor,
+    ensureAttendanceReportPeriodSummaries,
     syncAttendanceReportRecords,
     syncAttendanceReportRecordsForUsers,
     normalizeAttendanceReportRecordsSyncUserIds,

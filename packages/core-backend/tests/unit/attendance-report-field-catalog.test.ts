@@ -838,6 +838,124 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(failed).toMatchObject({ available: false, reason: 'PROVISIONING_FAILED', sheetId: null })
   })
 
+  it('attendance_report_period_summaries (PR1): stable descriptor + ensure + degraded fallback', async () => {
+    const d1 = helpers.getAttendanceReportPeriodSummariesDescriptor()
+    const d2 = helpers.getAttendanceReportPeriodSummariesDescriptor()
+    expect(d1.id).toBe('attendance_report_period_summaries')
+    expect(helpers.ATTENDANCE_REPORT_PERIOD_SUMMARIES_OBJECT_ID).toBe('attendance_report_period_summaries')
+    // descriptor stable across calls (same field ids/types/order)
+    expect(JSON.stringify(d1)).toBe(JSON.stringify(d2))
+    const ids = d1.fields.map((f: { id: string }) => f.id)
+    expect(ids).toEqual([
+      'row_key', 'org_id', 'user_id', 'employee_name', 'department', 'attendance_group',
+      'period_type', 'period_key', 'cycle_id', 'period_name', 'period_start', 'period_end',
+      'field_fingerprint', 'source_fingerprint', 'synced_at',
+    ])
+    expect(ids).toEqual(Object.values(helpers.ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS))
+    // provisioning field-type contract: only string/date/dateTime/number/boolean
+    const allowedTypes = new Set(['string', 'date', 'dateTime', 'number', 'boolean'])
+    expect(d1.fields.every((f: { type: string }) => allowedTypes.has(f.type))).toBe(true)
+    const typeByCode = Object.fromEntries(d1.fields.map((f: { id: string, type: string }) => [f.id, f.type]))
+    expect(typeByCode.row_key).toBe('string')
+    expect(typeByCode.period_start).toBe('date')
+    expect(typeByCode.period_end).toBe('date')
+    expect(typeByCode.synced_at).toBe('dateTime')
+    expect(d1.fields.some((f: { type: string }) => f.type === 'text')).toBe(false)
+    // row_key required
+    expect(d1.fields.find((f: { id: string }) => f.id === 'row_key')?.property?.validation?.required).toBe(true)
+
+    // ensure: ensureObject called with projectId `${orgId}:attendance`, same descriptor each call
+    const ensureCalls: unknown[] = []
+    const context = {
+      api: {
+        multitable: {
+          provisioning: {
+            ensureObject: async (input: unknown) => {
+              ensureCalls.push(input)
+              return { baseId: 'base_period', sheet: { id: 'sheet_period_summaries' } }
+            },
+            ensureView: vi.fn().mockResolvedValue({
+              id: 'view_period_summaries',
+              sheetId: 'sheet_period_summaries',
+              name: '按周期查看',
+              type: 'grid',
+            }),
+            resolveFieldIds: async ({ fieldIds }: { fieldIds: string[] }) =>
+              Object.fromEntries(fieldIds.map(fid => [fid, `fld_${fid}`])),
+          },
+        },
+      },
+    }
+    const r1 = await helpers.ensureAttendanceReportPeriodSummaries(context, 'org-a', { warn: vi.fn() })
+    const r2 = await helpers.ensureAttendanceReportPeriodSummaries(context, 'org-a', { warn: vi.fn() })
+    expect(r1).toMatchObject({
+      available: true,
+      reason: null,
+      projectId: 'org-a:attendance',
+      objectId: 'attendance_report_period_summaries',
+      sheetId: 'sheet_period_summaries',
+      viewId: 'view_period_summaries',
+    })
+    expect(r1.fieldIds.row_key).toBe('fld_row_key')
+    expect(r1.fieldIds.cycle_id).toBe('fld_cycle_id')
+    expect(r1.fieldIds.synced_at).toBe('fld_synced_at')
+    expect((ensureCalls[0] as { projectId: string }).projectId).toBe('org-a:attendance')
+    expect(JSON.stringify((ensureCalls[0] as { descriptor: unknown }).descriptor))
+      .toBe(JSON.stringify((ensureCalls[1] as { descriptor: unknown }).descriptor))
+    expect(helpers.getAttendanceReportPeriodSummariesViewDescriptor(r1.fieldIds)).toMatchObject({
+      id: helpers.ATTENDANCE_REPORT_PERIOD_SUMMARIES_VIEW_ID,
+      objectId: 'attendance_report_period_summaries',
+      sortInfo: {
+        rules: [
+          { fieldId: 'fld_period_start', direction: 'desc' },
+          { fieldId: 'fld_user_id', direction: 'asc' },
+          { fieldId: 'fld_synced_at', direction: 'desc' },
+        ],
+      },
+    })
+    expect(JSON.stringify(r2)).toBe(JSON.stringify(r1))
+
+    // degraded: provisioning API unavailable → no throw, available:false
+    const degraded = await helpers.ensureAttendanceReportPeriodSummaries({ api: { multitable: null } }, 'org-z', { warn: vi.fn() })
+    expect(degraded).toMatchObject({
+      available: false,
+      reason: 'MULTITABLE_API_UNAVAILABLE',
+      objectId: 'attendance_report_period_summaries',
+      sheetId: null,
+    })
+    expect(degraded.fieldIds).toEqual({})
+
+    // degraded: ensureObject throws → caught, available:false PROVISIONING_FAILED, no throw
+    const throwing = {
+      api: { multitable: { provisioning: { ensureObject: async () => { throw new Error('boom') } } } },
+    }
+    const failed = await helpers.ensureAttendanceReportPeriodSummaries(throwing, 'org-z', { warn: vi.fn() })
+    expect(failed).toMatchObject({ available: false, reason: 'PROVISIONING_FAILED', sheetId: null })
+
+    // ensureView failure does NOT block ensureObject success (inner try/catch → available:true, viewId:null)
+    const viewFailing = {
+      api: {
+        multitable: {
+          provisioning: {
+            ensureObject: async () => ({ baseId: 'base_period', sheet: { id: 'sheet_period_summaries' } }),
+            ensureView: async () => { throw new Error('view boom') },
+            resolveFieldIds: async ({ fieldIds }: { fieldIds: string[] }) =>
+              Object.fromEntries(fieldIds.map(fid => [fid, `fld_${fid}`])),
+          },
+        },
+      },
+    }
+    const viewFailed = await helpers.ensureAttendanceReportPeriodSummaries(viewFailing, 'org-a', { warn: vi.fn() })
+    expect(viewFailed).toMatchObject({
+      available: true,
+      reason: null,
+      objectId: 'attendance_report_period_summaries',
+      sheetId: 'sheet_period_summaries',
+      viewId: null,
+    })
+    expect(viewFailed.fieldIds.row_key).toBe('fld_row_key')
+  })
+
   it('report-records sync: pure helpers (type map / value columns / row key / source fingerprint)', () => {
     expect(helpers.mapReportFieldToMultitableType({ unit: 'minutes' })).toBe('number')
     expect(helpers.mapReportFieldToMultitableType({ unit: 'count' })).toBe('number')

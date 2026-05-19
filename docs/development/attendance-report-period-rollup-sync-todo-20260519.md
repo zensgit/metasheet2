@@ -41,11 +41,13 @@ Date: 2026-05-19
 
 ## Key Changes
 
-### PR1：descriptor + ensure
+### PR1：descriptor + ensure — ✅ 已实现（2026-05-19）
 
 - 新增 `ATTENDANCE_REPORT_PERIOD_SUMMARIES_OBJECT_ID`、固定字段 descriptor、默认 view descriptor。
 - `ensureAttendanceReportPeriodSummaries()` 只通过 `context.api.multitable.provisioning.ensureObject()` provision，不裸写 `meta_*`。
 - 不加 writer、不加路由、不改前端。
+
+**落地状态：** PR1 由 Claude 按用户**显式 scoped 指派**实现（偏离本文件 Governance 的默认 Codex-driven —— 决策者明确指派单条 PR1 链，非自启、非 re-scope；记录在此保留 Codex review 连续性）。实现镜像既有 daily `attendance_report_records` 的 PR1 模式（descriptor / view descriptor / ensure / 测试 surface / degraded 语义一致）。`plugins/plugin-attendance/index.cjs` 新增 `ATTENDANCE_REPORT_PERIOD_SUMMARIES_{OBJECT_ID,FIELDS,VIEW_ID}` + `getAttendanceReportPeriodSummariesDescriptor()` + `getAttendanceReportPeriodSummariesViewDescriptor()` + `ensureAttendanceReportPeriodSummaries()`，并入 `__attendanceReportFieldCatalogForTests` 测试 surface；后端单测加在 `attendance-report-field-catalog.test.ts`（descriptor 稳定 / 类型只用 string·date·dateTime·number·boolean / row_key required / projectId=`${orgId}:attendance` / provisioning 缺失 degraded 不抛 / ensureView 失败不阻断 ensureObject 成功）。PR2（writer+route）/ PR3（前端+evidence）仍为后续，回归默认 Codex-driven 或另行显式指派。
 
 ### PR2：writer + route
 
