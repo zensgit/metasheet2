@@ -82,4 +82,28 @@ metasheet-staging-backend ghcr.io/zensgit/metasheet2-backend:01d4134017febcdac5a
 - 值核对：三天分别为 `480/12/0/late`、`450/0/30/early_leave`、`0/0/0/absent`
 - 重跑：`skipped=3`、`created=0`、`patched=0`、`failed=0`
 
-`allUsers` 分页入口也执行了一次，返回 `ok=true`、`userSelection=allUsers`、`totalUsers=0`。这是 staging 环境事实：`user_orgs` 当前为空表，因此无法形成 active-membership bulk write 样本；该限制已在 verification MD 中明确标注。
+`allUsers` 分页入口也执行了一次，返回 `ok=true`、`userSelection=allUsers`、`totalUsers=0`。这是 staging 环境事实：`user_orgs` 当前为空表，因此第一次只能证明分页入口接受参数，不能证明 active membership 写入路径。
+
+## Active-Membership Bulk Evidence
+
+随后补充一个 staging-only 临时 membership fixture：
+
+- 插入 `user_orgs(default, 8b35cbe1-9fd6-4650-9d16-42b2c4d028d1, true)`
+- 执行 `POST /api/attendance/report-records/sync?orgId=default`
+- body `{ from: '2026-05-15', to: '2026-05-17', allUsers: true, page: 1, pageSize: 5 }`
+- 清理临时 `user_orgs` 行，确认 staging membership state 回到 0
+
+结果：
+
+- `userSelection=allUsers`
+- `totalUsers=1`
+- `usersScanned=1`
+- `usersSynced=1`
+- `synced=3`
+- `created=0`
+- `patched=0`
+- `skipped=3`
+- `failed=0`
+- `duplicateRowKeys=0`
+
+这证明 #1648 的 active-membership bulk branch 可以真实扫描用户、调用 report-records writer，并复用双 fingerprint 幂等 skip。临时 membership 已删除，只保留可重建的 report-records 派生行。

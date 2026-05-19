@@ -195,4 +195,4 @@ skip  iff  existing.source_fingerprint === next.source_fingerprint
 - [x] 前端单员工/全员分页模式切换
 - [x] development / verification MD：`attendance-report-records-bulk-sync-development-20260518.md`、`attendance-report-records-bulk-sync-verification-20260518.md`
 - [x] staging runtime 更新 + live explicit sync/readback/rerun skip evidence：见 `attendance-report-records-bulk-sync-live-closeout-development-20260519.md`、`attendance-report-records-bulk-sync-live-closeout-verification-20260519.md`
-- [ ] active-membership `allUsers` bulk write evidence：当前 staging `user_orgs` 为空，`allUsers` 分页返回空页；待 staging 准备 active membership 样本后补
+- [x] active-membership `allUsers` bulk write evidence：staging-only 临时 `user_orgs` fixture 扫描 1 个用户、同步 3 行、双 fingerprint skip 3 行，fixture 已清理；见 live closeout verification MD

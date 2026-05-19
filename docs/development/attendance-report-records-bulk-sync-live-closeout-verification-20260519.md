@@ -26,7 +26,8 @@
 | Explicit user sync | PASS: 3 rows patched, 0 failed, 0 duplicate row keys |
 | Multitable readback | PASS: 3 rows, 3 distinct row keys, fingerprints and `synced_at` present, values matched fixture |
 | Idempotent rerun | PASS: 3 rows skipped, 0 created, 0 patched, 0 failed |
-| Staging allUsers/pageSize sync | PASS-BY-ENV: endpoint accepted `{allUsers:true,page,pageSize}` and returned an empty page because staging `user_orgs` has 0 active memberships |
+| Staging allUsers/pageSize sync | PASS: temporary active membership fixture scanned 1 user and synced 3 rows via `{allUsers:true,page,pageSize}` |
+| Staging fixture cleanup | PASS: temporary `user_orgs` membership was removed after evidence; staging returned to 0 memberships |
 | `git diff --check` | PASS |
 
 ## Commands
@@ -157,13 +158,55 @@ usersScanned=0
 synced=0
 ```
 
-The empty all-users result is an environment fact: staging `user_orgs` currently has 0 rows. It verifies the bulk endpoint path accepts paging parameters, but not an active-membership bulk write. The explicit user sync above verifies the report-records writer against real staging attendance rows.
+The first all-users probe was an environment fact: staging `user_orgs` initially had 0 rows. It verified the bulk endpoint path accepted paging parameters, but not an active-membership bulk write.
+
+Active-membership all-users probe:
+
+```text
+temporary membership inserted:
+user_orgs_count=1
+org_id=default
+user_id=8b35cbe1-9fd6-4650-9d16-42b2c4d028d1
+is_active=true
+
+sync response:
+ok=true
+userSelection=allUsers
+totalUsers=1
+page=1
+pageSize=5
+hasNextPage=false
+usersScanned=1
+usersSynced=1
+usersFailed=0
+synced=3
+rowsSynced=3
+created=0
+patched=0
+skipped=3
+failed=0
+duplicateRowKeys=0
+fieldFingerprint=684233f9c36205f9ea59248b29f9d050f88af0cd
+syncedAt=2026-05-19T02:00:40.699Z
+projectId=default:attendance
+objectId=attendance_report_records
+sheetId=sheet_90fd4bdebbaabe12b76556bf
+viewId=view_f764653146213b44d955d2b1
+
+cleanup:
+deleted_memberships=1
+user_orgs_count=0
+report_record_rows_for_sample_user=3
+```
+
+This proves the active-membership all-users branch scans users, delegates to the same report-records writer, and preserves fingerprint idempotency. The temporary membership was removed after the probe so staging membership state returned to its original empty state.
 
 ## Boundaries
 
 - The short-lived JWT was read from a local file and not printed.
 - Production was not written by this verification.
 - Staging DB/Redis were not recreated during image update.
+- The active-membership fixture was temporary and was removed after the all-users probe.
 - The attendance plugin still writes report-records only through the multitable API; the DB readback above was verification-only.
 
-#1648 is merged, deployed to production, and verified on staging after updating staging to the latest available main runtime image. The report-records writer successfully patched real staging rows, readback matched the fixture, and rerun skipped all rows by fingerprint. The only remaining gap is an active-membership `allUsers` bulk-write sample; current staging has no `user_orgs` memberships, so the all-users path returned an honest empty page.
+#1648 is merged, deployed to production, and verified on staging after updating staging to the latest available main runtime image. The report-records writer successfully patched real staging rows, readback matched the fixture, rerun skipped all rows by fingerprint, and the active-membership `allUsers` path scanned 1 user and synced 3 rows with `skipped=3`.
