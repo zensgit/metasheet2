@@ -601,6 +601,187 @@
       </dl>
     </div>
 
+    <div
+      class="attendance-report-fields__basis attendance-report-fields__record-sync"
+      data-report-period-summary-sync-panel
+    >
+      <div class="attendance-report-fields__basis-header">
+        <div>
+          <div class="attendance-report-fields__basis-title">
+            {{ tr('Period summaries sync', '周期汇总同步') }}
+          </div>
+          <div class="attendance__section-meta">
+            {{ tr('One row per employee and period; facts remain in attendance tables.', '每员工每周期一行；考勤事实源仍保留在考勤表。') }}
+          </div>
+        </div>
+        <a
+          v-if="reportPeriodSummariesMultitableHref"
+          class="attendance__btn"
+          :href="reportPeriodSummariesMultitableHref"
+          target="_blank"
+          rel="noreferrer"
+          data-report-period-summary-open-multitable
+        >
+          {{ tr('Open period summaries', '打开周期汇总多维表') }}
+        </a>
+      </div>
+      <div class="attendance-report-fields__record-sync-form">
+        <label class="attendance-report-fields__filter" for="attendance-report-period-summary-sync-period-mode">
+          <span>{{ tr('Period source', '周期来源') }}</span>
+          <select
+            id="attendance-report-period-summary-sync-period-mode"
+            v-model="periodSummarySyncMode"
+            data-report-period-summary-sync-period-mode
+          >
+            <option value="date_range">{{ tr('Date range', '日期范围') }}</option>
+            <option value="payroll_cycle">{{ tr('Payroll cycle', '薪资周期') }}</option>
+          </select>
+        </label>
+        <label
+          v-if="periodSummarySyncMode === 'date_range'"
+          class="attendance-report-fields__filter"
+          for="attendance-report-period-summary-sync-from"
+        >
+          <span>{{ tr('From date', '开始日期') }}</span>
+          <input
+            id="attendance-report-period-summary-sync-from"
+            v-model="periodSummarySyncFrom"
+            type="date"
+            data-report-period-summary-sync-from
+          >
+        </label>
+        <label
+          v-if="periodSummarySyncMode === 'date_range'"
+          class="attendance-report-fields__filter"
+          for="attendance-report-period-summary-sync-to"
+        >
+          <span>{{ tr('To date', '结束日期') }}</span>
+          <input
+            id="attendance-report-period-summary-sync-to"
+            v-model="periodSummarySyncTo"
+            type="date"
+            data-report-period-summary-sync-to
+          >
+        </label>
+        <label
+          v-if="periodSummarySyncMode === 'payroll_cycle'"
+          class="attendance-report-fields__filter"
+          for="attendance-report-period-summary-sync-cycle"
+        >
+          <span>{{ tr('Cycle ID', '薪资周期 ID') }}</span>
+          <input
+            id="attendance-report-period-summary-sync-cycle"
+            v-model="periodSummarySyncCycleId"
+            type="text"
+            :placeholder="tr('Payroll cycle UUID', '薪资周期 UUID')"
+            data-report-period-summary-sync-cycle
+          >
+        </label>
+        <label class="attendance-report-fields__filter" for="attendance-report-period-summary-sync-user-mode">
+          <span>{{ tr('Users', '员工范围') }}</span>
+          <select
+            id="attendance-report-period-summary-sync-user-mode"
+            v-model="periodSummarySyncUserMode"
+            data-report-period-summary-sync-user-mode
+          >
+            <option value="single">{{ tr('Single user', '单员工') }}</option>
+            <option value="multiple">{{ tr('User ID list', '员工 ID 列表') }}</option>
+            <option value="all">{{ tr('All active users', '全部活跃员工') }}</option>
+          </select>
+        </label>
+        <label
+          v-if="periodSummarySyncUserMode === 'single'"
+          class="attendance-report-fields__filter"
+          for="attendance-report-period-summary-sync-user"
+        >
+          <span>{{ tr('User ID', '员工 ID') }}</span>
+          <input
+            id="attendance-report-period-summary-sync-user"
+            v-model="periodSummarySyncUserId"
+            type="text"
+            :placeholder="tr('Required for single user', '单员工必填')"
+            data-report-period-summary-sync-user
+          >
+        </label>
+        <label
+          v-if="periodSummarySyncUserMode === 'multiple'"
+          class="attendance-report-fields__filter"
+          for="attendance-report-period-summary-sync-user-ids"
+        >
+          <span>{{ tr('User IDs', '员工 ID 列表') }}</span>
+          <textarea
+            id="attendance-report-period-summary-sync-user-ids"
+            v-model="periodSummarySyncUserIdsText"
+            rows="2"
+            :placeholder="tr('Comma, space, or newline separated', '逗号、空格或换行分隔')"
+            data-report-period-summary-sync-user-ids
+          />
+        </label>
+        <label class="attendance-report-fields__filter" for="attendance-report-period-summary-sync-page">
+          <span>{{ tr('Page', '页码') }}</span>
+          <input
+            id="attendance-report-period-summary-sync-page"
+            v-model.number="periodSummarySyncPage"
+            type="number"
+            min="1"
+            :disabled="periodSummarySyncUserMode !== 'all'"
+            data-report-period-summary-sync-page
+          >
+        </label>
+        <label class="attendance-report-fields__filter" for="attendance-report-period-summary-sync-page-size">
+          <span>{{ tr('Page size', '每页数量') }}</span>
+          <input
+            id="attendance-report-period-summary-sync-page-size"
+            v-model.number="periodSummarySyncPageSize"
+            type="number"
+            min="1"
+            max="100"
+            :disabled="periodSummarySyncUserMode !== 'all'"
+            data-report-period-summary-sync-page-size
+          >
+        </label>
+        <button
+          class="attendance__btn"
+          type="button"
+          :disabled="periodSummarySyncing || !canSyncReportPeriodSummaries"
+          data-report-period-summary-sync-button
+          @click="syncReportPeriodSummaries"
+        >
+          {{ periodSummarySyncing ? tr('Syncing...', '同步中...') : tr('Sync period summaries', '同步周期汇总') }}
+        </button>
+      </div>
+      <div
+        v-if="periodSummarySyncStatusMessage"
+        class="attendance__status"
+        :class="{
+          'attendance__status--error': periodSummarySyncStatusKind === 'error',
+          'attendance__status--warn': periodSummarySyncStatusKind === 'warn',
+        }"
+        role="status"
+        data-report-period-summary-sync-status
+      >
+        {{ periodSummarySyncStatusMessage }}
+      </div>
+      <dl
+        v-if="reportPeriodSummarySyncDetailRows.length > 0"
+        class="attendance-report-fields__basis-details"
+        data-report-period-summary-sync-details
+      >
+        <div
+          v-for="row in reportPeriodSummarySyncDetailRows"
+          :key="row.key"
+          class="attendance-report-fields__basis-detail"
+          :data-report-period-summary-sync-detail="row.key"
+        >
+          <dt>{{ row.label }}</dt>
+          <dd>
+            <code v-if="row.monospace">{{ row.value }}</code>
+            <span v-else>{{ row.value }}</span>
+          </dd>
+        </div>
+      </dl>
+    </div>
+
     <div v-if="reportFields.length > 0 && filteredReportFields.length === 0" class="attendance__empty">
       {{ tr('No report fields match the current filters.', '当前筛选条件下没有匹配的统计字段。') }}
     </div>
@@ -817,6 +998,8 @@ import { readErrorMessage } from '../../utils/error'
 
 type TranslateFn = (en: string, zh: string) => string
 type ReportFieldStatusFilter = 'all' | 'configured' | 'formula' | 'formula_error' | 'disabled' | 'hidden'
+type PeriodSummarySyncMode = 'date_range' | 'payroll_cycle'
+type PeriodSummarySyncUserMode = 'single' | 'multiple' | 'all'
 
 interface AttendanceReportFieldCategory {
   id: string
@@ -942,6 +1125,15 @@ interface AttendanceReportRecordsSyncResult {
   }
 }
 
+interface AttendanceReportPeriodSummariesSyncResult extends AttendanceReportRecordsSyncResult {
+  periodType?: string
+  periodKey?: string
+  cycleId?: string | null
+  periodName?: string
+  from?: string
+  to?: string
+}
+
 interface FieldMappingRow {
   key: string
   label: string
@@ -1012,6 +1204,19 @@ const recordSyncAllUsers = ref(false)
 const recordSyncPage = ref(1)
 const recordSyncPageSize = ref(50)
 const reportRecordsSyncResult = ref<AttendanceReportRecordsSyncResult | null>(null)
+const periodSummarySyncing = ref(false)
+const periodSummarySyncStatusMessage = ref('')
+const periodSummarySyncStatusKind = ref<'info' | 'warn' | 'error'>('info')
+const periodSummarySyncMode = ref<PeriodSummarySyncMode>('date_range')
+const periodSummarySyncFrom = ref(dateInputValue(-30))
+const periodSummarySyncTo = ref(dateInputValue(0))
+const periodSummarySyncCycleId = ref('')
+const periodSummarySyncUserMode = ref<PeriodSummarySyncUserMode>('single')
+const periodSummarySyncUserId = ref('')
+const periodSummarySyncUserIdsText = ref('')
+const periodSummarySyncPage = ref(1)
+const periodSummarySyncPageSize = ref(50)
+const reportPeriodSummariesSyncResult = ref<AttendanceReportPeriodSummariesSyncResult | null>(null)
 const fieldSearchTerm = ref('')
 const fieldStatusFilter = ref<ReportFieldStatusFilter>('all')
 const fieldCategoryFilter = ref('all')
@@ -1279,6 +1484,68 @@ const reportRecordSyncDetailRows = computed<MultitableDetailRow[]>(() => {
     const normalized = String(value ?? '').trim()
     if (normalized) rows.push({ key, label, value: normalized, monospace })
   }
+  addNumber('totalUsers', tr('Total users', '总员工数'), result.totalUsers)
+  addNumber('page', tr('Page', '页码'), result.page)
+  addNumber('pageSize', tr('Page size', '每页数量'), result.pageSize)
+  if (typeof result.hasNextPage === 'boolean') {
+    rows.push({
+      key: 'hasNextPage',
+      label: tr('Has next page', '还有下一页'),
+      value: result.hasNextPage ? tr('Yes', '是') : tr('No', '否'),
+    })
+  }
+  addNumber('usersScanned', tr('Users scanned', '扫描员工'), result.usersScanned)
+  addNumber('usersSynced', tr('Users synced', '同步员工'), result.usersSynced)
+  addNumber('usersFailed', tr('Users failed', '失败员工'), result.usersFailed)
+  addNumber('synced', tr('Rows read', '读取行数'), result.synced)
+  addNumber('created', tr('Created', '新建'), result.created)
+  addNumber('patched', tr('Patched', '更新'), result.patched)
+  addNumber('skipped', tr('Skipped', '跳过'), result.skipped)
+  addNumber('failed', tr('Failed', '失败'), result.failed)
+  addNumber('duplicateRowKeys', tr('Duplicate row keys', '重复行键'), result.duplicateRowKeys)
+  addText('fieldFingerprint', tr('Field fingerprint', '字段指纹'), result.fieldFingerprint, true)
+  addText('syncedAt', tr('Synced at', '同步时间'), result.syncedAt)
+  addText('projectId', tr('Project ID', '项目 ID'), result.multitable?.projectId, true)
+  addText('objectId', tr('Object ID', '对象 ID'), result.multitable?.objectId, true)
+  addText('sheetId', tr('Sheet ID', '表格 ID'), result.multitable?.sheetId, true)
+  addText('viewId', tr('View ID', '视图 ID'), result.multitable?.viewId, true)
+  addText('reason', tr('Reason', '原因'), result.reason)
+  return rows
+})
+const canSyncReportPeriodSummaries = computed(() => {
+  const hasPeriod = periodSummarySyncMode.value === 'payroll_cycle'
+    ? periodSummarySyncCycleId.value.trim() !== ''
+    : periodSummarySyncFrom.value.trim() !== '' && periodSummarySyncTo.value.trim() !== ''
+  if (!hasPeriod) return false
+  if (periodSummarySyncUserMode.value === 'all') return true
+  if (periodSummarySyncUserMode.value === 'multiple') return parsePeriodSummarySyncUserIds().length > 0
+  return periodSummarySyncUserId.value.trim() !== ''
+})
+const reportPeriodSummariesMultitableHref = computed(() => {
+  const multitable = reportPeriodSummariesSyncResult.value?.multitable
+  if (!multitable?.sheetId || !multitable.viewId) return ''
+  const params = new URLSearchParams()
+  if (multitable.baseId) params.set('baseId', multitable.baseId)
+  const suffix = params.toString()
+  return `/multitable/${encodeURIComponent(multitable.sheetId)}/${encodeURIComponent(multitable.viewId)}${suffix ? `?${suffix}` : ''}`
+})
+const reportPeriodSummarySyncDetailRows = computed<MultitableDetailRow[]>(() => {
+  const result = reportPeriodSummariesSyncResult.value
+  if (!result) return []
+  const rows: MultitableDetailRow[] = []
+  const addNumber = (key: string, label: string, value?: number) => {
+    if (Number.isFinite(value)) rows.push({ key, label, value: String(value) })
+  }
+  const addText = (key: string, label: string, value?: string | null, monospace = false) => {
+    const normalized = String(value ?? '').trim()
+    if (normalized) rows.push({ key, label, value: normalized, monospace })
+  }
+  addText('periodType', tr('Period type', '周期类型'), result.periodType)
+  addText('periodKey', tr('Period key', '周期键'), result.periodKey, true)
+  addText('cycleId', tr('Cycle ID', '薪资周期 ID'), result.cycleId, true)
+  addText('periodName', tr('Period name', '周期名称'), result.periodName)
+  addText('from', tr('From date', '开始日期'), result.from)
+  addText('to', tr('To date', '结束日期'), result.to)
   addNumber('totalUsers', tr('Total users', '总员工数'), result.totalUsers)
   addNumber('page', tr('Page', '页码'), result.page)
   addNumber('pageSize', tr('Page size', '每页数量'), result.pageSize)
@@ -1699,6 +1966,15 @@ function dateInputValue(offsetDays: number): string {
   return `${year}-${month}-${day}`
 }
 
+function parsePeriodSummarySyncUserIds(): string[] {
+  const seen = new Set<string>()
+  for (const raw of periodSummarySyncUserIdsText.value.split(/[\s,，;；]+/)) {
+    const userId = raw.trim()
+    if (userId) seen.add(userId)
+  }
+  return Array.from(seen)
+}
+
 function buildReportRecordsSyncStatusMessage(data: AttendanceReportRecordsSyncResult): string {
   if (data.degraded) {
     const reason = String(data.reason ?? '').trim()
@@ -1719,6 +1995,32 @@ function buildReportRecordsSyncStatusMessage(data: AttendanceReportRecordsSyncRe
   ].filter(Boolean)
   const summary = details.length > 0 ? ` ${details.join(' · ')}` : ''
   return `${tr('Report records synchronized.', '报表记录已同步。')}${summary}`
+}
+
+function buildReportPeriodSummariesSyncStatusMessage(data: AttendanceReportPeriodSummariesSyncResult): string {
+  if (data.degraded) {
+    const reason = String(data.reason ?? '').trim()
+    return reason
+      ? `${tr('Period summaries sync degraded.', '周期汇总同步已降级。')} ${reason}`
+      : tr('Period summaries sync degraded.', '周期汇总同步已降级。')
+  }
+  const details = [
+    syncStatusMetric('Users', '员工', data.usersScanned),
+    syncStatusMetric('Synced users', '已同步员工', data.usersSynced),
+    syncStatusMetric('Failed users', '失败员工', data.usersFailed),
+    syncStatusMetric('Rows', '行数', data.synced),
+    syncStatusMetric('Created', '新建', data.created),
+    syncStatusMetric('Patched', '更新', data.patched),
+    syncStatusMetric('Skipped', '跳过', data.skipped),
+    syncStatusMetric('Failed', '失败', data.failed),
+    syncStatusMetric('Duplicate row keys', '重复行键', data.duplicateRowKeys),
+  ].filter(Boolean)
+  const period = data.periodType
+    ? `${tr('Period', '周期')}: ${data.periodType}${data.from && data.to ? ` ${data.from}..${data.to}` : ''}`
+    : ''
+  if (period) details.unshift(period)
+  const summary = details.length > 0 ? ` ${details.join(' · ')}` : ''
+  return `${tr('Period summaries synchronized.', '周期汇总已同步。')}${summary}`
 }
 
 async function loadReportFields(): Promise<void> {
@@ -1808,6 +2110,53 @@ async function syncReportRecords(): Promise<void> {
     recordSyncStatusMessage.value = readErrorMessage(error, tr('Failed to sync report records', '同步报表记录失败'))
   } finally {
     recordSyncing.value = false
+  }
+}
+
+function buildReportPeriodSummariesSyncBody(): Record<string, unknown> {
+  const body: Record<string, unknown> = {}
+  if (periodSummarySyncMode.value === 'payroll_cycle') {
+    body.cycleId = periodSummarySyncCycleId.value.trim()
+  } else {
+    body.from = periodSummarySyncFrom.value.trim()
+    body.to = periodSummarySyncTo.value.trim()
+  }
+  if (periodSummarySyncUserMode.value === 'all') {
+    body.allUsers = true
+    body.page = Number(periodSummarySyncPage.value) || 1
+    body.pageSize = Number(periodSummarySyncPageSize.value) || 50
+  } else if (periodSummarySyncUserMode.value === 'multiple') {
+    body.userIds = parsePeriodSummarySyncUserIds()
+  } else {
+    body.userId = periodSummarySyncUserId.value.trim()
+  }
+  return body
+}
+
+async function syncReportPeriodSummaries(): Promise<void> {
+  if (!canSyncReportPeriodSummaries.value) return
+  periodSummarySyncing.value = true
+  periodSummarySyncStatusMessage.value = ''
+  periodSummarySyncStatusKind.value = 'info'
+  try {
+    const response = await apiFetch(`/api/attendance/report-period-summaries/sync${attendanceOrgQuerySuffix()}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildReportPeriodSummariesSyncBody()),
+    })
+    const payload = await response.json()
+    if (!response.ok || payload?.ok === false) {
+      throw payload
+    }
+    const data = payload?.data ?? {}
+    reportPeriodSummariesSyncResult.value = data
+    periodSummarySyncStatusKind.value = data.degraded ? 'warn' : 'info'
+    periodSummarySyncStatusMessage.value = buildReportPeriodSummariesSyncStatusMessage(data)
+  } catch (error) {
+    periodSummarySyncStatusKind.value = 'error'
+    periodSummarySyncStatusMessage.value = readErrorMessage(error, tr('Failed to sync period summaries', '同步周期汇总失败'))
+  } finally {
+    periodSummarySyncing.value = false
   }
 }
 

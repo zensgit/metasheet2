@@ -964,4 +964,280 @@ describe('AttendanceReportFieldsSection', () => {
     expect(container!.querySelector('[data-report-record-open-multitable]')).toBeNull()
     expect(container!.textContent).toContain('Report fields')
   })
+
+  it('syncs date-range period summaries for a single user and shows the multitable result', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonResponse(200, populatedCatalogPayload()))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        data: {
+          periodType: 'date_range',
+          periodKey: 'range:2026-05-01:2026-05-31',
+          from: '2026-05-01',
+          to: '2026-05-31',
+          synced: 1,
+          created: 1,
+          patched: 0,
+          skipped: 0,
+          failed: 0,
+          duplicateRowKeys: 0,
+          usersScanned: 1,
+          usersSynced: 1,
+          usersFailed: 0,
+          fieldFingerprint: 'period-field-fingerprint',
+          syncedAt: '2026-05-19T12:00:00.000Z',
+          multitable: {
+            available: true,
+            degraded: false,
+            projectId: 'org-1:attendance',
+            objectId: 'attendance_report_period_summaries',
+            baseId: 'base-period',
+            sheetId: 'sheet-period',
+            viewId: 'view-period',
+          },
+        },
+      }))
+
+    mountSection()
+    await flushUi()
+
+    const fromInput = container!.querySelector<HTMLInputElement>('[data-report-period-summary-sync-from]')
+    const toInput = container!.querySelector<HTMLInputElement>('[data-report-period-summary-sync-to]')
+    const userInput = container!.querySelector<HTMLInputElement>('[data-report-period-summary-sync-user]')
+    const syncButton = container!.querySelector<HTMLButtonElement>('[data-report-period-summary-sync-button]')
+    expect(fromInput).toBeTruthy()
+    expect(toInput).toBeTruthy()
+    expect(userInput).toBeTruthy()
+    expect(syncButton).toBeTruthy()
+    expect(syncButton!.disabled).toBe(true)
+
+    fromInput!.value = '2026-05-01'
+    fromInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    toInput!.value = '2026-05-31'
+    toInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    userInput!.value = 'u-1'
+    userInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    expect(syncButton!.disabled).toBe(false)
+
+    syncButton!.click()
+    await flushUi()
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance/report-period-summaries/sync?orgId=org-1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: '2026-05-01', to: '2026-05-31', userId: 'u-1' }),
+    })
+    const status = container!.querySelector('[data-report-period-summary-sync-status]')
+    expect(status?.textContent).toContain('Period summaries synchronized.')
+    expect(status?.textContent).toContain('Period: date_range 2026-05-01..2026-05-31')
+    expect(status?.textContent).toContain('Rows: 1')
+    expect(status?.textContent).toContain('Created: 1')
+    expect(container!.querySelector('[data-report-period-summary-sync-detail="periodType"]')?.textContent).toContain('date_range')
+    expect(container!.querySelector('[data-report-period-summary-sync-detail="fieldFingerprint"]')?.textContent).toContain('period-field-fingerprint')
+    expect(container!.querySelector('[data-report-period-summary-sync-detail="syncedAt"]')?.textContent).toContain('2026-05-19T12:00:00.000Z')
+    expect(container!.querySelector('[data-report-period-summary-sync-detail="objectId"]')?.textContent).toContain('attendance_report_period_summaries')
+    expect(container!.querySelector<HTMLAnchorElement>('[data-report-period-summary-open-multitable]')?.getAttribute('href'))
+      .toBe('/multitable/sheet-period/view-period?baseId=base-period')
+  })
+
+  it('syncs payroll-cycle period summaries for an explicit user list', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonResponse(200, populatedCatalogPayload()))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        data: {
+          periodType: 'payroll_cycle',
+          periodKey: 'cycle:11111111-1111-4111-8111-111111111111',
+          cycleId: '11111111-1111-4111-8111-111111111111',
+          periodName: 'May payroll',
+          from: '2026-05-01',
+          to: '2026-05-31',
+          synced: 2,
+          created: 2,
+          patched: 0,
+          skipped: 0,
+          failed: 0,
+          duplicateRowKeys: 0,
+          usersScanned: 2,
+          usersSynced: 2,
+          usersFailed: 0,
+          fieldFingerprint: 'cycle-field-fingerprint',
+          syncedAt: '2026-05-19T12:10:00.000Z',
+          multitable: {
+            available: true,
+            degraded: false,
+            projectId: 'org-1:attendance',
+            objectId: 'attendance_report_period_summaries',
+            sheetId: 'sheet-period',
+            viewId: 'view-period',
+          },
+        },
+      }))
+
+    mountSection()
+    await flushUi()
+
+    const periodMode = container!.querySelector<HTMLSelectElement>('[data-report-period-summary-sync-period-mode]')!
+    const userMode = container!.querySelector<HTMLSelectElement>('[data-report-period-summary-sync-user-mode]')!
+    periodMode.value = 'payroll_cycle'
+    periodMode.dispatchEvent(new Event('change', { bubbles: true }))
+    userMode.value = 'multiple'
+    userMode.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+
+    const cycleInput = container!.querySelector<HTMLInputElement>('[data-report-period-summary-sync-cycle]')!
+    const userIdsInput = container!.querySelector<HTMLTextAreaElement>('[data-report-period-summary-sync-user-ids]')!
+    cycleInput.value = '11111111-1111-4111-8111-111111111111'
+    cycleInput.dispatchEvent(new Event('input', { bubbles: true }))
+    userIdsInput.value = 'u-1, u-2\nu-3'
+    userIdsInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-report-period-summary-sync-button]')!.click()
+    await flushUi()
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance/report-period-summaries/sync?orgId=org-1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cycleId: '11111111-1111-4111-8111-111111111111', userIds: ['u-1', 'u-2', 'u-3'] }),
+    })
+    expect(container!.querySelector('[data-report-period-summary-sync-detail="cycleId"]')?.textContent)
+      .toContain('11111111-1111-4111-8111-111111111111')
+    expect(container!.querySelector('[data-report-period-summary-sync-detail="periodName"]')?.textContent).toContain('May payroll')
+    expect(container!.querySelector('[data-report-period-summary-sync-detail="usersScanned"]')?.textContent).toContain('2')
+  })
+
+  it('syncs period summaries for all users with pagination controls', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonResponse(200, populatedCatalogPayload()))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        data: {
+          periodType: 'date_range',
+          from: '2026-05-01',
+          to: '2026-05-31',
+          synced: 4,
+          created: 3,
+          patched: 1,
+          skipped: 0,
+          failed: 0,
+          duplicateRowKeys: 0,
+          usersScanned: 2,
+          usersSynced: 2,
+          usersFailed: 0,
+          totalUsers: 7,
+          page: 2,
+          pageSize: 2,
+          hasNextPage: true,
+          fieldFingerprint: 'period-bulk-field-fingerprint',
+          syncedAt: '2026-05-19T12:20:00.000Z',
+          multitable: {
+            available: true,
+            degraded: false,
+            projectId: 'org-1:attendance',
+            objectId: 'attendance_report_period_summaries',
+            sheetId: 'sheet-period',
+            viewId: 'view-period',
+          },
+        },
+      }))
+
+    mountSection()
+    await flushUi()
+
+    const userMode = container!.querySelector<HTMLSelectElement>('[data-report-period-summary-sync-user-mode]')!
+    const pageInput = container!.querySelector<HTMLInputElement>('[data-report-period-summary-sync-page]')!
+    const pageSizeInput = container!.querySelector<HTMLInputElement>('[data-report-period-summary-sync-page-size]')!
+    const syncButton = container!.querySelector<HTMLButtonElement>('[data-report-period-summary-sync-button]')!
+    expect(pageInput.disabled).toBe(true)
+    expect(pageSizeInput.disabled).toBe(true)
+
+    userMode.value = 'all'
+    userMode.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(pageInput.disabled).toBe(false)
+    expect(pageSizeInput.disabled).toBe(false)
+
+    container!.querySelector<HTMLInputElement>('[data-report-period-summary-sync-from]')!.value = '2026-05-01'
+    container!.querySelector<HTMLInputElement>('[data-report-period-summary-sync-from]')!.dispatchEvent(new Event('input', { bubbles: true }))
+    container!.querySelector<HTMLInputElement>('[data-report-period-summary-sync-to]')!.value = '2026-05-31'
+    container!.querySelector<HTMLInputElement>('[data-report-period-summary-sync-to]')!.dispatchEvent(new Event('input', { bubbles: true }))
+    pageInput.value = '2'
+    pageInput.dispatchEvent(new Event('input', { bubbles: true }))
+    pageSizeInput.value = '2'
+    pageSizeInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    expect(syncButton.disabled).toBe(false)
+
+    syncButton.click()
+    await flushUi()
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance/report-period-summaries/sync?orgId=org-1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: '2026-05-01', to: '2026-05-31', allUsers: true, page: 2, pageSize: 2 }),
+    })
+    expect(container!.querySelector('[data-report-period-summary-sync-status]')?.textContent).toContain('Users: 2')
+    expect(container!.querySelector('[data-report-period-summary-sync-status]')?.textContent).toContain('Rows: 4')
+    expect(container!.querySelector('[data-report-period-summary-sync-detail="totalUsers"]')?.textContent).toContain('7')
+    expect(container!.querySelector('[data-report-period-summary-sync-detail="page"]')?.textContent).toContain('2')
+    expect(container!.querySelector('[data-report-period-summary-sync-detail="hasNextPage"]')?.textContent).toContain('Yes')
+    expect(container!.querySelector('[data-report-period-summary-sync-detail="fieldFingerprint"]')?.textContent).toContain('period-bulk-field-fingerprint')
+  })
+
+  it('shows degraded period summary sync as a non-blocking warning', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonResponse(200, populatedCatalogPayload()))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        data: {
+          degraded: true,
+          reason: 'MULTITABLE_RECORDS_API_UNAVAILABLE',
+          periodType: 'date_range',
+          from: '2026-05-01',
+          to: '2026-05-31',
+          synced: 0,
+        },
+      }))
+
+    mountSection()
+    await flushUi()
+
+    const userInput = container!.querySelector<HTMLInputElement>('[data-report-period-summary-sync-user]')!
+    userInput.value = 'u-1'
+    userInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-report-period-summary-sync-button]')!.click()
+    await flushUi()
+
+    const status = container!.querySelector('[data-report-period-summary-sync-status]')
+    expect(status?.textContent).toContain('Period summaries sync degraded.')
+    expect(status?.textContent).toContain('MULTITABLE_RECORDS_API_UNAVAILABLE')
+    expect(status?.className).toContain('attendance__status--warn')
+    expect(container!.querySelector('[data-report-period-summary-open-multitable]')).toBeNull()
+  })
+
+  it('shows period summary sync API errors without clearing the report fields panel', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonResponse(200, populatedCatalogPayload()))
+      .mockResolvedValueOnce(jsonResponse(400, { ok: false }))
+
+    mountSection()
+    await flushUi()
+
+    const userInput = container!.querySelector<HTMLInputElement>('[data-report-period-summary-sync-user]')!
+    userInput.value = 'u-1'
+    userInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-report-period-summary-sync-button]')!.click()
+    await flushUi()
+
+    const status = container!.querySelector('[data-report-period-summary-sync-status]')
+    expect(status?.textContent).toContain('Failed to sync period summaries')
+    expect(status?.className).toContain('attendance__status--error')
+    expect(container!.textContent).toContain('Report fields')
+  })
 })
