@@ -485,63 +485,64 @@
       <div class="integration-workbench__panel-head">
         <div>
           <h2>清洗映射规则</h2>
-          <p>这里只允许白名单转换函数；复杂逻辑应进入 adapter 或后端模板，而不是用户脚本。</p>
+          <p>一行就是一条清洗内容：从来源字段取值，经过白名单转换后写入目标字段。默认映射可直接用，也允许新增自定义清洗项。</p>
         </div>
         <button type="button" class="integration-workbench__button" data-testid="add-mapping" @click="addMapping">
-          新增映射
+          新增自定义清洗项
         </button>
       </div>
 
-      <table class="integration-workbench__mapping-table">
-        <thead>
-          <tr>
-            <th>源字段</th>
-            <th>目标字段</th>
-            <th>转换</th>
-            <th>校验</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="(mapping, index) in mappings" :key="mapping.id">
-            <td><input v-model="mapping.sourceField" :data-testid="`source-field-${index}`" /></td>
-            <td><input v-model="mapping.targetField" :data-testid="`target-field-${index}`" /></td>
-            <td>
+      <div class="integration-workbench__mapping-list" data-testid="mapping-rule-list">
+        <details v-for="(mapping, index) in mappings" :key="mapping.id" class="integration-workbench__mapping-card" open>
+          <summary :data-testid="`mapping-summary-${index}`">
+            <span>{{ mappingSummary(mapping, index) }}</span>
+            <small>{{ mappingDetail(mapping) }}</small>
+          </summary>
+          <div class="integration-workbench__mapping-editor">
+            <label>
+              <span>源字段</span>
+              <input v-model="mapping.sourceField" :data-testid="`source-field-${index}`" placeholder="例如 code" />
+            </label>
+            <label>
+              <span>目标字段</span>
+              <input v-model="mapping.targetField" :data-testid="`target-field-${index}`" placeholder="例如 FNumber" />
+            </label>
+            <label>
+              <span>转换</span>
               <select v-model="mapping.transformFn" :data-testid="`transform-fn-${index}`">
                 <option v-for="option in transformOptions" :key="option.value" :value="option.value">
                   {{ option.label }}
                 </option>
               </select>
+              <small class="integration-workbench__field-help">只允许 trim、upper、lower、toNumber、dictMap；不允许用户脚本或 raw SQL。</small>
               <textarea
                 v-if="mapping.transformFn === 'dictMap'"
                 v-model="mapping.dictMapText"
                 :data-testid="`dict-map-${index}`"
                 placeholder="EA=Pcs&#10;KG=Kg"
               ></textarea>
-            </td>
-            <td>
+            </label>
+            <div>
               <label class="integration-workbench__mapping-check">
                 <input v-model="mapping.required" type="checkbox" :data-testid="`required-${index}`" />
-                <span>必填</span>
+                <span>必填；缺值会进入 dead letter，不中断整批。</span>
               </label>
               <div class="integration-workbench__mapping-rules">
-                <input v-model="mapping.minValueText" :data-testid="`validation-min-${index}`" placeholder="min" />
-                <input v-model="mapping.maxValueText" :data-testid="`validation-max-${index}`" placeholder="max" />
+                <input v-model="mapping.minValueText" :data-testid="`validation-min-${index}`" placeholder="最小值 min" />
+                <input v-model="mapping.maxValueText" :data-testid="`validation-max-${index}`" placeholder="最大值 max" />
               </div>
-            </td>
-            <td>
-              <button type="button" class="integration-workbench__icon-button" @click="removeMapping(index)">删除</button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+            </div>
+            <button type="button" class="integration-workbench__icon-button" @click="removeMapping(index)">删除</button>
+          </div>
+        </details>
+      </div>
     </section>
 
     <section class="integration-workbench__panel">
       <div class="integration-workbench__panel-head">
         <div>
           <h2>运行与推送</h2>
-          <p>先保存清洗流程，再做 dry-run；确认无误后才 Save-only 推送到目标系统。</p>
+          <p>先保存清洗流程，再做 dry-run；确认无误后才 Save-only 推送到目标系统。默认不会 Submit / Audit。</p>
         </div>
         <button type="button" class="integration-workbench__button" data-testid="save-pipeline" :disabled="savingPipeline || !canSavePipeline" @click="savePipeline">
           {{ savingPipeline ? '保存中' : '保存清洗流程' }}
@@ -551,7 +552,11 @@
       <div class="integration-workbench__grid">
         <label>
           <span>清洗流程名称</span>
-          <input v-model="pipelineName" data-testid="pipeline-name" placeholder="例如 PLM material to K3 material" />
+          <input v-model="pipelineName" data-testid="pipeline-name" :placeholder="generatedPipelineName" />
+          <small class="integration-workbench__field-help" data-testid="pipeline-name-hint">留空自动生成：{{ generatedPipelineName }}；也可以手动改成业务名称。</small>
+          <button type="button" class="integration-workbench__inline-action" data-testid="use-generated-pipeline-name" @click="useGeneratedPipelineName">
+            使用自动名称
+          </button>
         </label>
         <label>
           <span>清洗流程模式</span>
@@ -560,10 +565,12 @@
             <option value="incremental">incremental</option>
             <option value="full">full</option>
           </select>
+          <small class="integration-workbench__field-help" data-testid="pipeline-mode-help">manual 手工触发；incremental 用水位增量；full 重新扫描来源数据集。</small>
         </label>
         <label>
           <span>幂等字段</span>
           <input v-model="idempotencyFieldsText" data-testid="idempotency-fields" placeholder="code 或 sourceId,revision" />
+          <small class="integration-workbench__field-help" data-testid="idempotency-fields-help">用于识别同一业务记录，避免重复写入；物料通常用 code，BOM 可用 parentCode,childCode,sequence。</small>
         </label>
         <label>
           <span>清洗 staging 表</span>
@@ -577,6 +584,7 @@
         <label>
           <span>已保存流程 ID</span>
           <input v-model="savedPipelineId" data-testid="pipeline-id" placeholder="保存后自动回填，也可粘贴已有 ID" />
+          <small class="integration-workbench__field-help" data-testid="pipeline-id-help">这是后端 pipeline ID。新建时留空，保存成功后自动回填；排障或复跑时可粘贴已有 ID。</small>
         </label>
         <label>
           <span>运行模式</span>
@@ -590,6 +598,16 @@
           <span>Dry-run 样本数</span>
           <input v-model="pipelineSampleLimit" data-testid="sample-limit" inputmode="numeric" />
         </label>
+      </div>
+
+      <div class="integration-workbench__run-explainer" data-testid="run-push-explainer">
+        <strong>运行时会发生什么</strong>
+        <ul>
+          <li>Dry-run 只读取来源数据并生成目标 payload preview，不写 K3 或其他外部系统。</li>
+          <li>Save-only 只调用目标系统保存接口；默认不 Submit、不 Audit，也不覆盖来源多维表。</li>
+          <li>成功后展示写入数、外部 ID 或单据号；失败会写入 dead letter，可从异常区打开排查。</li>
+          <li>导出清洗结果只使用已脱敏 preview，可用于人工复核或交接。</li>
+        </ul>
       </div>
 
       <label class="integration-workbench__inline-check">
@@ -1081,6 +1099,7 @@ const protocolSplitNotice = computed(() => {
 })
 const hasMappingRules = computed(() => mappings.value.some((mapping) => mapping.sourceField.trim() && mapping.targetField.trim()))
 const hasIdempotencyFields = computed(() => parseList(idempotencyFieldsText.value).length > 0)
+const generatedPipelineName = computed(() => defaultPipelineName())
 const savePipelineReadinessItems = computed(() => [
   {
     id: 'source-system',
@@ -2135,6 +2154,28 @@ function defaultPipelineName(): string {
   return `${sourceName}:${sourceObjectName.value || 'object'} -> ${targetName}:${targetObjectName.value || 'object'}`
 }
 
+function transformLabel(value: TransformFn): string {
+  return transformOptions.find((option) => option.value === value)?.label || '原样'
+}
+
+function mappingSummary(mapping: EditableMapping, index: number): string {
+  const source = mapping.sourceField.trim() || `来源字段 ${index + 1}`
+  const target = mapping.targetField.trim() || `目标字段 ${index + 1}`
+  return `${source} -> ${target}`
+}
+
+function mappingDetail(mapping: EditableMapping): string {
+  const parts = [transformLabel(mapping.transformFn)]
+  if (mapping.required) parts.push('必填')
+  if (mapping.minValueText.trim() || mapping.maxValueText.trim()) parts.push('数值范围')
+  if (mapping.transformFn === 'dictMap') parts.push('字典映射')
+  return parts.join(' · ')
+}
+
+function useGeneratedPipelineName(): void {
+  pipelineName.value = generatedPipelineName.value
+}
+
 function selectedTemplateMeta(): Record<string, unknown> {
   const template = selectedTargetObject.value?.template || targetSchema.value.template || {}
   return {
@@ -2824,6 +2865,41 @@ watch(showAdvancedConnectors, () => {
   border-collapse: collapse;
 }
 
+.integration-workbench__mapping-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.integration-workbench__mapping-card {
+  border: 1px solid #d8e0e8;
+  border-radius: 8px;
+  background: #fbfcfe;
+}
+
+.integration-workbench__mapping-card summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  padding: 10px 12px;
+  color: #1f3551;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.integration-workbench__mapping-card summary small {
+  color: #5c6878;
+  font-weight: 600;
+}
+
+.integration-workbench__mapping-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(180px, 0.8fr) minmax(180px, 0.8fr) auto;
+  gap: 10px;
+  padding: 0 12px 12px;
+  align-items: start;
+}
+
 .integration-workbench__mapping-table th,
 .integration-workbench__mapping-table td {
   padding: 8px;
@@ -2841,6 +2917,11 @@ watch(showAdvancedConnectors, () => {
 }
 
 .integration-workbench__mapping-table textarea {
+  min-height: 68px;
+  margin-top: 6px;
+}
+
+.integration-workbench__mapping-editor textarea {
   min-height: 68px;
   margin-top: 6px;
 }
@@ -2869,6 +2950,46 @@ watch(showAdvancedConnectors, () => {
 
 .integration-workbench__inline-check input {
   width: auto;
+}
+
+.integration-workbench__inline-action {
+  width: max-content;
+  border: 0;
+  background: transparent;
+  color: #1f5f99;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+  padding: 0;
+  text-align: left;
+}
+
+.integration-workbench__field-help {
+  color: #5c6878;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.integration-workbench__run-explainer {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid #d7deea;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.integration-workbench__run-explainer strong {
+  color: #1f3551;
+}
+
+.integration-workbench__run-explainer ul {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: #5c6878;
+  line-height: 1.5;
 }
 
 .integration-workbench__actions {
@@ -3043,6 +3164,7 @@ watch(showAdvancedConnectors, () => {
   .integration-workbench__readiness ul,
   .integration-workbench__staging-list,
   .integration-workbench__export,
+  .integration-workbench__mapping-editor,
   .integration-workbench__grid {
     grid-template-columns: 1fr;
   }
