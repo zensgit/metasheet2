@@ -20,7 +20,7 @@ Date: 2026-05-19
 - 不裸写 `meta_*`，全程经 `context.api.multitable.provisioning.ensureObject()` + `records.create/patchRecord`。
 - summary 动态 subtype 字段在周期层按 approved request 汇总，不默默返回全 0。
 - daily `attendance_report_records` 不改。
-- v1 支持 date range 与 payroll cycle 两种模式；后台任务队列、自动跨页全量跑批、period dedup cleanup 留后续。
+- v1 支持 date range 与 payroll cycle 两种模式；后台任务队列、自动跨页全量跑批进入 `attendance-report-sync-jobs-todo-20260519.md`；period dedup cleanup 留后续。
 
 ## Public Interfaces
 
@@ -100,7 +100,7 @@ Date: 2026-05-19
 - 不新增 `attendance_*` migration，不迁移事实源。
 - 不让多维表公式直读 `attendance_*`。
 - `attendance_report_period_summaries` 是可重建报表层，不作为查询 / 导出事实源。
-- v1 支持 date range 与 payroll cycle；后台任务队列、自动跨页全量跑批、period dedup cleanup 留后续。
+- v1 支持 date range 与 payroll cycle；后台任务队列、自动跨页全量跑批进入 `attendance-report-sync-jobs-todo-20260519.md`；period dedup cleanup 留后续。
 - summary 动态 subtype 字段在周期层按 approved request 汇总，不默默返回全 0。
 - daily `attendance_report_records` 不改；period rollup 是独立对象、独立 writer、独立 UI 入口。
 
