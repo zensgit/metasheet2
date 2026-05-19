@@ -115,6 +115,12 @@ export const appRoutes: RouteRecordRaw[] = [
     component: MultitableHomeView,
     meta: { title: 'Multitable', titleZh: '多维表', requiresAuth: true },
   },
+  {
+    path: ROUTE_PATHS.MULTITABLE_TEMPLATES,
+    name: AppRouteNames.MULTITABLE_TEMPLATES,
+    component: () => import('../views/MultitableTemplateCenterView.vue'),
+    meta: { title: 'Templates', titleZh: '模板中心', requiresAuth: true },
+  },
   buildPublicMultitableFormRoute(() => import('../views/PublicMultitableFormView.vue')),
   buildMultitableRoute(() => import('../multitable/views/MultitableEmbedHost.vue')),
   {
