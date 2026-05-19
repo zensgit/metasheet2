@@ -336,6 +336,18 @@
       <div v-if="protocolSplitNotice" class="integration-workbench__hint" data-testid="protocol-split-notice">
         {{ protocolSplitNotice }}
       </div>
+      <div v-if="stagingTargetMismatchNotice" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="source-target-mismatch-notice">
+        <span>{{ stagingTargetMismatchNotice }}</span>
+        <button
+          v-if="recommendedStagingSourceObject"
+          type="button"
+          class="integration-workbench__button"
+          data-testid="use-recommended-staging-source"
+          @click="useRecommendedStagingSource"
+        >
+          切换到 {{ stagingDatasetCopy[recommendedStagingSourceObject]?.name || recommendedStagingSourceObject }}
+        </button>
+      </div>
     </section>
 
     <section class="integration-workbench__panel">
@@ -856,6 +868,10 @@ const stagingDatasetCopy: Record<string, { area: string; name: string; descripti
     description: '记录 dry-run、Save-only 推送、外部 ID、单据号和错误摘要。',
   },
 }
+const recommendedStagingSourceByTarget: Record<string, string> = {
+  material: 'standard_materials',
+  bom: 'bom_cleanse',
+}
 
 const transformOptions: Array<{ value: TransformFn, label: string }> = [
   { value: '', label: '无转换' },
@@ -1097,6 +1113,21 @@ const protocolSplitNotice = computed(() => {
   }
   return ''
 })
+const recommendedStagingSourceObject = computed(() => {
+  const recommended = recommendedStagingSourceByTarget[targetObjectName.value]
+  if (!recommended) return ''
+  if (!stagingDescriptors.value.some((descriptor) => descriptor.id === recommended)) return ''
+  return recommended
+})
+const stagingTargetMismatchNotice = computed(() => {
+  if (selectedSourceSystem.value?.kind !== 'metasheet:staging') return ''
+  const recommended = recommendedStagingSourceObject.value
+  if (!recommended || !sourceObjectName.value || sourceObjectName.value === recommended) return ''
+  const sourceLabel = stagingDatasetCopy[sourceObjectName.value]?.name || sourceObjectName.value
+  const recommendedLabel = stagingDatasetCopy[recommended]?.name || recommended
+  const targetLabel = selectedTargetObject.value?.label || targetObjectName.value
+  return `当前目标模板「${targetLabel}」建议使用「${recommendedLabel}」作为来源；你选择的是「${sourceLabel}」，dry-run 可能成功但返回 0 条可处理记录。`
+})
 const hasMappingRules = computed(() => mappings.value.some((mapping) => mapping.sourceField.trim() && mapping.targetField.trim()))
 const hasIdempotencyFields = computed(() => parseList(idempotencyFieldsText.value).length > 0)
 const generatedPipelineName = computed(() => defaultPipelineName())
@@ -1124,6 +1155,12 @@ const savePipelineReadinessItems = computed(() => [
     label: '选择目标数据集 / 模板',
     ready: Boolean(targetObjectName.value),
     detail: targetObjectName.value || '加载目标模板后才能生成 payload 或保存 pipeline。',
+  },
+  {
+    id: 'source-target-pairing',
+    label: '确认来源与目标匹配',
+    ready: !stagingTargetMismatchNotice.value,
+    detail: stagingTargetMismatchNotice.value || '来源数据集与目标模板匹配。',
   },
   {
     id: 'mapping',
@@ -1173,6 +1210,12 @@ const dryRunReadinessItems = computed(() => [
     label: '选择目标数据集 / 模板',
     ready: Boolean(targetObjectName.value),
     detail: targetObjectName.value || '加载目标模板后才能生成 payload 或保存 pipeline。',
+  },
+  {
+    id: 'source-target-pairing',
+    label: '确认来源与目标匹配',
+    ready: !stagingTargetMismatchNotice.value,
+    detail: stagingTargetMismatchNotice.value || '来源数据集与目标模板匹配。',
   },
   {
     id: 'mapping',
@@ -1586,7 +1629,9 @@ function buildStagingSourceObjects(): IntegrationSystemObject[] {
 }
 
 function preferredStagingSourceObjectId(): string {
+  const targetPreferred = recommendedStagingSourceByTarget[targetObjectName.value] || ''
   const candidates = [
+    targetPreferred,
     stagingSheetId.value,
     'standard_materials',
     stagingOpenTargets.value[0]?.id || '',
@@ -1914,6 +1959,12 @@ async function useStagingAsSource(objectId: string): Promise<void> {
   await activateStagingAsSource(objectId)
 }
 
+async function useRecommendedStagingSource(): Promise<void> {
+  const objectId = recommendedStagingSourceObject.value
+  if (!objectId) return
+  await activateStagingAsSource(objectId, `已按目标模板切换到 ${stagingDatasetCopy[objectId]?.name || objectId} 作为 Dry-run 来源`)
+}
+
 async function activateStagingAsSource(objectId: string, successMessage?: string): Promise<void> {
   const descriptor = stagingDescriptors.value.find((item) => item.id === objectId) || null
   const target = stagingOpenTargetById.value.get(objectId)
@@ -2195,6 +2246,7 @@ function buildPipelinePayload() {
   if (!targetSystemId.value) throw new Error('请选择目标系统')
   if (!sourceObjectName.value) throw new Error('请选择来源数据集')
   if (!targetObjectName.value) throw new Error('请选择目标数据集')
+  if (stagingTargetMismatchNotice.value) throw new Error(stagingTargetMismatchNotice.value)
   if (fieldMappings.length === 0) throw new Error('请至少配置一条清洗映射规则')
   if (idempotencyKeyFields.length === 0) throw new Error('请至少配置一个幂等字段')
 

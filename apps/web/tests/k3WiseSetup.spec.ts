@@ -856,9 +856,9 @@ describe('K3 WISE setup helpers', () => {
     })
 
     const messages = validateK3WisePipelineTemplateForm(form).map((issue) => issue.message)
-    expect(messages).toContain('PLM source system ID is required')
+    expect(messages).toContain('PLM source system ID is required for the K3 preset; use Data Factory with MetaSheet staging source when starting from existing staging tables')
     expect(messages).toContain('Save or select a K3 WISE WebAPI system before creating pipelines')
-    expect(() => buildK3WisePipelinePayloads(form)).toThrow('PLM source system ID is required')
+    expect(() => buildK3WisePipelinePayloads(form)).toThrow('use Data Factory with MetaSheet staging source')
   })
 
   it('keeps pipeline staging object validation permissive until descriptors are loaded', () => {
@@ -1055,6 +1055,7 @@ describe('K3 WISE setup helpers', () => {
     expect(byId['webapi-credentials']?.status).toBe('ready')
     expect(byId['sql-channel']?.status).toBe('warning')
     expect(byId['plm-source']?.status).toBe('external')
+    expect(byId['plm-source']?.message).toContain('MetaSheet staging 多维表')
     // Post-#1572 an empty projectId is valid: the server auto-scopes to
     // tenant:integration-core, so the staging gate is READY (not missing).
     expect(byId.staging?.status).toBe('ready')
