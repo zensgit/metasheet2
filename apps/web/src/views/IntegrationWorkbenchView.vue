@@ -37,18 +37,18 @@
 
       <div class="integration-workbench__onboarding" data-testid="connection-onboarding">
         <div>
-          <strong>连接新系统</strong>
-          <p>从这里开始接入 PLM、ERP、CRM、SRM、HTTP API 或 SQL 数据源；已配置连接会回到下方数据源/目标选择器。</p>
+          <strong>新增或管理连接</strong>
+          <p>这是页面内连接设置区，不会跳到独立设置页。业务用户可从 K3 WISE 预设开始，实施人员再展开 SQL / 高级连接。</p>
         </div>
         <div class="integration-workbench__onboarding-actions">
           <router-link class="integration-workbench__button" to="/integrations/k3-wise" data-testid="k3-preset-entry">
             使用 K3 WISE 预设
           </router-link>
           <button type="button" class="integration-workbench__button" data-testid="connect-new-system" @click="showConnectionGuide">
-            连接新系统
+            新增连接草稿
           </button>
           <button type="button" class="integration-workbench__button" data-testid="show-sql-setup" @click="showSqlSetup">
-            查看 SQL / 高级连接
+            展开 SQL / 高级连接
           </button>
         </div>
       </div>
@@ -66,6 +66,7 @@
       <div v-if="inventoryExpanded" class="integration-workbench__inventory" data-testid="inventory-overview">
         <div>
           <h3>已配置连接</h3>
+          <p class="integration-workbench__muted">在这里编辑、复制、停用 / 启用或删除连接；删除仅限未被清洗流程引用的连接。</p>
           <div v-if="systems.length === 0" class="integration-workbench__empty">暂无连接。请使用 K3 WISE 预设或后续连接向导创建。</div>
           <ul v-else class="integration-workbench__inventory-list">
             <li v-for="system in systems" :key="system.id">
@@ -79,8 +80,11 @@
                 <button type="button" class="integration-workbench__icon-button" :data-testid="`copy-connection-${system.id}`" @click="copyConnection(system)">
                   复制
                 </button>
-                <button type="button" class="integration-workbench__icon-button" :data-testid="`deactivate-connection-${system.id}`" :disabled="system.status === 'inactive'" @click="deactivateConnection(system)">
+                <button v-if="system.status !== 'inactive'" type="button" class="integration-workbench__icon-button" :data-testid="`deactivate-connection-${system.id}`" @click="deactivateConnection(system)">
                   停用
+                </button>
+                <button v-else type="button" class="integration-workbench__icon-button" :data-testid="`activate-connection-${system.id}`" @click="activateConnection(system)">
+                  启用
                 </button>
                 <button type="button" class="integration-workbench__icon-button" :data-testid="`delete-connection-${system.id}`" :disabled="deletingConnectionId === system.id" title="只能删除未被 pipeline 引用的连接" @click="deleteConnection(system)">
                   {{ deletingConnectionId === system.id ? '删除中' : '删除' }}
@@ -137,7 +141,7 @@
       <div class="integration-workbench__connection-manager" data-testid="connection-manager">
         <div>
           <strong>{{ connectionDraftTitle }}</strong>
-          <p>这里管理的是已保存连接的元数据和非凭证配置。真实账号、密码、Token 仍通过各系统预设向导或后端凭证库处理。</p>
+          <p>这是内嵌连接设置面板：保存后会回到上方“已配置连接”和下方来源/目标选择器。真实账号、密码、Token 仍通过各系统预设向导或后端凭证库处理。</p>
         </div>
         <div class="integration-workbench__grid integration-workbench__grid--compact">
           <label>
@@ -194,7 +198,7 @@
         </div>
         <div class="integration-workbench__actions">
           <button type="button" class="integration-workbench__button" data-testid="save-connection-draft" :disabled="savingConnectionDraft || !canSaveConnectionDraft" @click="saveConnectionDraft">
-            {{ savingConnectionDraft ? '保存中' : '保存连接草稿' }}
+            {{ savingConnectionDraft ? '保存中' : '保存连接设置' }}
           </button>
           <button type="button" class="integration-workbench__button" data-testid="reset-connection-draft" @click="resetConnectionDraft">
             清空草稿
@@ -218,12 +222,12 @@
       <div class="integration-workbench__panel-head">
         <div>
           <h2>选择系统与数据集</h2>
-          <p>这里就是数据集选择入口：先选系统，再点加载数据集，最后在下拉框里选择来源数据集和目标数据集。</p>
+          <p>来源对象决定从哪里取数，目标模板决定写到哪里。先选系统，再加载可选数据集或模板。</p>
         </div>
       </div>
       <div class="integration-workbench__grid integration-workbench__grid--systems">
         <div class="integration-workbench__system-column">
-          <h2>1. 选来源系统与数据集</h2>
+          <h2>1. 来源对象选择</h2>
           <label>
             <span>数据源系统</span>
             <select v-model="sourceSystemId" data-testid="source-system">
@@ -267,11 +271,11 @@
               测试来源连接
             </button>
             <button type="button" class="integration-workbench__button" data-testid="load-source-objects" @click="loadObjects('source')">
-              加载来源数据集
+              加载来源对象
             </button>
           </div>
           <label>
-            <span>来源数据集</span>
+            <span>来源数据集（从哪里取数）</span>
             <select v-model="sourceObjectName" data-testid="source-object" @change="loadSchema('source')">
               <option value="">请选择来源数据集</option>
               <option v-for="object in sourceObjects" :key="object.name" :value="object.name">
@@ -287,7 +291,7 @@
         </div>
 
         <div class="integration-workbench__system-column">
-          <h2>2. 选目标系统与数据集</h2>
+          <h2>2. 目标模板选择</h2>
           <label>
             <span>目标系统</span>
             <select v-model="targetSystemId" data-testid="target-system">
@@ -306,11 +310,11 @@
               测试目标连接
             </button>
             <button type="button" class="integration-workbench__button" data-testid="load-target-objects" @click="loadObjects('target')">
-              加载目标数据集
+              加载目标模板
             </button>
           </div>
           <label>
-            <span>目标数据集 / 模板</span>
+            <span>目标数据集 / 模板（写到哪里）</span>
             <select v-model="targetObjectName" data-testid="target-object" @change="loadSchema('target')">
               <option value="">请选择目标数据集</option>
               <option v-for="object in targetObjects" :key="object.name" :value="object.name">
@@ -617,6 +621,9 @@
           {{ runningPipeline === 'run' ? '推送中' : 'Save-only 推送' }}
         </button>
       </div>
+      <div v-if="dryRunEmptyPreviewNotice" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="dry-run-empty-preview-notice">
+        {{ dryRunEmptyPreviewNotice }}
+      </div>
 
       <div class="integration-workbench__export">
         <div>
@@ -911,7 +918,7 @@ const savingConnectionDraft = ref(false)
 const deletingConnectionId = ref('')
 
 const adapterMetadataByKind = computed(() => new Map(adapters.value.map((adapter) => [adapter.kind, adapter])))
-const inventorySummary = computed(() => `已加载 ${systems.value.length} 个连接 · ${adapters.value.length} 个适配器 · ${stagingDescriptors.value.length} 个 staging 表`)
+const inventorySummary = computed(() => `已配置连接 ${systems.value.length} 个（可编辑 / 复制 / 停用 / 删除） · ${adapters.value.length} 个适配器 · ${stagingDescriptors.value.length} 个 staging 表`)
 const visibleAdapters = computed(() => adapters.value.filter((adapter) => showAdvancedConnectors.value || !adapter.advanced))
 const connectionDraftAdapterOptions = computed(() => {
   const options = [...visibleAdapters.value]
@@ -939,11 +946,11 @@ const sourceRuntimeBlocker = computed(() => runtimeBlockerForSystem(selectedSour
 const k3WebApiReadGateNotice = computed(() => {
   const targetOnlyK3WebApi = visibleSystems.value.some((system) => system.kind === 'erp:k3-wise-webapi' && canWriteToSystem(system) && !canReadFromSystem(system))
   if (!targetOnlyK3WebApi) return ''
-  return 'K3 WISE WebAPI 当前作为目标写入连接显示；WebAPI read/list runtime 仍受 GATE-front contract 约束，客户返回 O1-O6 与脱敏样例前不会作为数据源显示。'
+  return '当前 K3 WISE WebAPI 仅作为目标写入连接；来源侧请使用 staging 多维表、SQL 只读通道或其他可读连接。K3 WebAPI read/list runtime 仍等待客户 GATE 样例。'
 })
 const sourceSelectorExplanation = computed(() => {
   if (k3WebApiReadGateNotice.value) {
-    return '这里显示已保存且具备读取能力的连接，不是全部 adapter。K3 WISE WebAPI 现阶段只在目标侧出现；读取 K3 可用 SQL 只读通道或 staging 多维表。'
+    return '这里显示已保存且具备读取能力的连接，不是全部 adapter。当前 K3 WISE WebAPI 仅作为目标写入连接；读取 K3 可用 SQL 只读通道、staging 多维表或其他可读连接。'
   }
   return '这里显示已保存且具备读取能力的连接，不是全部 adapter。若只看到目标系统，请先创建 staging 来源或启用可读连接。'
 })
@@ -960,7 +967,7 @@ const sqlChannelDisabledHint = computed(() => {
 const connectionDraftTitle = computed(() => {
   if (connectionDraftMode.value === 'edit') return `编辑连接${connectionDraft.id ? `：${connectionDraft.id}` : ''}`
   if (connectionDraftMode.value === 'copy') return '复制为新连接'
-  return '连接管理草稿'
+  return '新增 / 编辑连接草稿'
 })
 const connectionDraftAdapter = computed(() => adapterMetadataByKind.value.get(connectionDraft.kind) || null)
 const connectionDraftDuplicateWarning = computed(() => {
@@ -1044,7 +1051,12 @@ const stagingDatasetCards = computed<StagingDatasetCard[]>(() => stagingDescript
 const observationSummary = computed(() => `${pipelineRuns.value.length} runs / ${deadLetters.value.length} open dead letters`)
 const cleansedExportRows = computed(() => buildCleansedExportRows(lastDryRunResult.value))
 const canExportCleansedResult = computed(() => cleansedExportRows.value.length > 0)
+const dryRunEmptyPreviewNotice = computed(() => {
+  if (!lastDryRunResult.value || !isDryRunEmptyPreview(lastDryRunResult.value)) return ''
+  return 'Dry-run 成功，但本次没有可处理记录。可能是来源数据集为空或过滤条件过严。'
+})
 const cleansedExportSummary = computed(() => {
+  if (cleansedExportRows.value.length === 0 && dryRunEmptyPreviewNotice.value) return 'Dry-run 成功但没有可导出记录；可能是来源数据集为空或过滤条件过严。'
   if (cleansedExportRows.value.length === 0) return '先运行 dry-run。导出只使用 dry-run preview，不会触发外部系统写入。'
   return `可导出 ${cleansedExportRows.value.length} 条 dry-run 清洗记录；内容来自已脱敏 preview。`
 })
@@ -1080,7 +1092,7 @@ const savePipelineReadinessItems = computed(() => [
     id: 'source-object',
     label: '选择来源数据集',
     ready: Boolean(sourceObjectName.value),
-    detail: sourceObjectName.value || '加载来源数据集后才能保存 pipeline。',
+    detail: sourceObjectName.value || '加载来源对象后才能保存 pipeline。',
   },
   {
     id: 'target-system',
@@ -1092,7 +1104,7 @@ const savePipelineReadinessItems = computed(() => [
     id: 'target-object',
     label: '选择目标数据集 / 模板',
     ready: Boolean(targetObjectName.value),
-    detail: targetObjectName.value || '加载目标数据集后才能生成 payload 或保存 pipeline。',
+    detail: targetObjectName.value || '加载目标模板后才能生成 payload 或保存 pipeline。',
   },
   {
     id: 'mapping',
@@ -1127,7 +1139,7 @@ const dryRunReadinessItems = computed(() => [
     id: 'source-object',
     label: '选择来源数据集',
     ready: Boolean(sourceObjectName.value),
-    detail: sourceObjectName.value || '加载来源数据集后才能保存 pipeline。',
+    detail: sourceObjectName.value || '加载来源对象后才能保存 pipeline。',
   },
   {
     id: 'target-system',
@@ -1141,7 +1153,7 @@ const dryRunReadinessItems = computed(() => [
     id: 'target-object',
     label: '选择目标数据集 / 模板',
     ready: Boolean(targetObjectName.value),
-    detail: targetObjectName.value || '加载目标数据集后才能生成 payload 或保存 pipeline。',
+    detail: targetObjectName.value || '加载目标模板后才能生成 payload 或保存 pipeline。',
   },
   {
     id: 'mapping',
@@ -1220,7 +1232,7 @@ function isK3WiseSystem(system: WorkbenchExternalSystem): boolean {
 
 function showConnectionGuide(): void {
   inventoryExpanded.value = true
-  setStatus('连接新系统第一步：优先使用 K3 WISE 预设；PLM/HTTP/SQL 连接向导会在后续版本补齐。', 'idle')
+  setStatus('已打开连接草稿区：优先使用 K3 WISE 预设；PLM/HTTP/SQL 连接向导会在后续版本补齐。', 'idle')
 }
 
 function showSqlSetup(): void {
@@ -1305,6 +1317,24 @@ async function deactivateConnection(system: WorkbenchExternalSystem): Promise<vo
     replaceSystem(updated)
     normalizeSystemSelections()
     setStatus(`连接已停用：${system.name}`, 'success')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), 'error')
+  }
+}
+
+async function activateConnection(system: WorkbenchExternalSystem): Promise<void> {
+  try {
+    const updated = await upsertWorkbenchExternalSystem({
+      ...currentScope(),
+      id: system.id,
+      name: system.name,
+      kind: system.kind,
+      role: system.role,
+      status: 'active',
+    })
+    replaceSystem(updated)
+    normalizeSystemSelections()
+    setStatus(`连接已启用：${system.name}`, 'success')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), 'error')
   }
@@ -1642,6 +1672,14 @@ function buildCleansedExportRows(result: IntegrationPipelineRunResult | null): E
     ...flattenForExport(record.targetPayload, 'payload'),
     ...flattenForExport(record.targetRequest, 'request'),
   }))
+}
+
+function isDryRunEmptyPreview(result: IntegrationPipelineRunResult): boolean {
+  const preview = isRecord(result.preview) ? result.preview : null
+  if (!preview) return false
+  const records = Array.isArray(preview.records) ? preview.records : []
+  const errors = Array.isArray(preview.errors) ? preview.errors : []
+  return records.length === 0 && errors.length === 0
 }
 
 function buildExportHeaders(rows: ExportRow[]): string[] {
@@ -2222,7 +2260,10 @@ async function executePipeline(dryRun: boolean): Promise<void> {
       result,
     }, null, 2)
     await refreshPipelineObservation(true)
-    setStatus(dryRun ? 'Dry-run 已提交' : 'Save-only 推送已提交', 'success')
+    const dryRunStatus = isDryRunEmptyPreview(result)
+      ? 'Dry-run 成功，但本次没有可处理记录'
+      : 'Dry-run 已提交'
+    setStatus(dryRun ? dryRunStatus : 'Save-only 推送已提交', 'success')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), 'error')
   } finally {
@@ -2920,6 +2961,13 @@ watch(showAdvancedConnectors, () => {
 .integration-workbench h3 {
   margin: 0 0 10px;
   font-size: 14px;
+}
+
+.integration-workbench__muted {
+  margin: -4px 0 10px;
+  color: #5c6878;
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .integration-workbench__empty {
