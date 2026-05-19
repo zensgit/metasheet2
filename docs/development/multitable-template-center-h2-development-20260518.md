@@ -85,7 +85,9 @@ router.push({
 - **纯数据 PR**，无新代码逻辑
 - 不加 DB 表 / migration
 
-#### 5 个新模板（与目标 6 类对齐）
+#### 5 个新模板（覆盖业务常见场景）
+
+> **Category 命名说明**：data-layer `Category` 字符串保持英文（与现有 `Project management` / `Sales` / `Engineering` 风格一致），UI 显示中文标签通过 `category-labels.ts` 翻译表实现。**不**新增 `CRM` 这个 data-layer category 值；`sales-crm` 的 `Sales` 保持不动，"CRM" 仅作为 UI 显示标签。
 
 | 模板 ID | Category (data layer) | 中文 UI 标签 | Sheets |
 |---|---|---|---|
@@ -142,7 +144,7 @@ H2 页面的分类聚合是**从返回数据动态读取**，新加的 category 
 | 文件 | 改动 |
 |---|---|
 | `apps/web/src/router/appRoutes.ts` | 加 `/multitable/templates` 路由项（component lazy import） |
-| `apps/web/src/router/types.ts` | **三处同步补齐**：(1) `AppRouteNames.MULTITABLE_TEMPLATES`；(2) `ROUTE_PATHS.MULTITABLE_TEMPLATES`；(3) `AppRouteParams['multitable-templates']: Record<string, never>` —— 与现有 typing 风格一致 |
+| `apps/web/src/router/types.ts` | **四处同步补齐**：(1) `AppRouteNames.MULTITABLE_TEMPLATES`；(2) `ROUTE_PATHS.MULTITABLE_TEMPLATES`；(3) `AppRouteParams['multitable-templates']: Record<string, never>`；(4) `AppRouteQuery['multitable-templates']: Record<string, never>` —— 与现有 typing 风格一致（虽然 query 有 index signature 默认兜底，显式补齐更一致） |
 | `apps/web/src/views/MultitableHomeView.vue` | 模板 section 标题旁加 "查看全部模板 →" 链接；卡片渲染改用 `<MetaTemplateCard>`；安装逻辑改走 `useTemplateInstall` composable |
 | `apps/web/src/multitable/views/MultitableWorkbench.vue` | **仅最小改动**：modal 卡片改用 `<MetaTemplateCard>` + 加 footer link；`onInstallTemplate` 完全不动 |
 
@@ -162,6 +164,9 @@ MULTITABLE_TEMPLATES: 'multitable-templates'
 ROUTE_PATHS.MULTITABLE_TEMPLATES: '/multitable/templates'
 
 // AppRouteParams 加
+'multitable-templates': Record<string, never>
+
+// AppRouteQuery 加（与现有 typing 风格一致；index signature 默认兜底，显式补齐）
 'multitable-templates': Record<string, never>
 
 // apps/web/src/router/appRoutes.ts 新增（放在 MULTITABLE_HOME 之后）
@@ -361,7 +366,7 @@ git diff --check origin/main..HEAD
 
 ### 10.2 Workbench template library（`MultitableWorkbench.vue:64-91`）
 
-- ✅ 顶部 "📁 Templates" 按钮 + modal + grid + install + redirect
+- ✅ 顶部 "📁 Templates" 按钮 + modal + grid + **install + context sync 闭环**（区别于 Home / Center 的 install + router.push；Workbench 走 `confirmDiscardContextChanges → workbench.client.installTemplate → workbench.syncExternalContext → showSuccess`）
 - ❌ 无分类导航 / 搜索（**不在 H2 修复范围**，仅 swap card + 加 footer link）
 
 ### 10.3 后端 API（全部就绪）
@@ -391,6 +396,10 @@ git diff --check origin/main..HEAD
 
 - **2026-05-18 (1)** 初稿 `multitable-template-center-design-20260518.md`
 - **2026-05-18 (2)** 评审修订 8 处（Workbench 不抽 composable、memory 路径替换、H3 category 不重命名、AppRouteParams 补 typing、MetaTemplateCard 纯展示、测试 spec 拆分、Workbench 最小改动、验证命令格式）
+- **2026-05-18 (4)** 第二轮评审 3 处小修：
+  - §10.2 Workbench 描述纠正：从 "install + redirect" → "install + context sync 闭环"（区别于 Home/Center 的 router.push 路径）
+  - §2.2 (5 个新模板) 标题"6 类对齐"改为"覆盖业务常见场景"，并加 Category 命名说明强调 data-layer 不新增 `CRM`，仅 UI 翻译显示
+  - §3.2 + §3.4 路由 typing 补齐 `AppRouteQuery['multitable-templates']: Record<string, never>`，与 AppRouteParams 对称
 - **2026-05-18 (3)** 融合 zensgit 的开发计划版本，重命名为 `multitable-template-center-h2-development-20260518.md`：
   - 顶层结构对齐 repo PR 模板风格（Summary / Key Changes / Deliverables / Test Plan / Assumptions）
   - 命名对齐 repo `*-development-*.md` / `*-verification-*.md` 惯例
