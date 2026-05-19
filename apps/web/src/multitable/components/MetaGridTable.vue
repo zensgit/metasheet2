@@ -1,11 +1,11 @@
 <template>
-  <div class="meta-grid" :class="[rowDensity ? `meta-grid--${rowDensity}` : '']" tabindex="0" role="grid" aria-label="Data grid" @keydown="onKeydown">
+  <div class="meta-grid" :class="[rowDensity ? `meta-grid--${rowDensity}` : '']" tabindex="0" role="grid" :aria-label="l('grid.aria')" @keydown="onKeydown">
     <div v-if="enableMultiSelect && selectedIds.size > 0" class="meta-grid__bulk-bar">
-      <span class="meta-grid__bulk-count">{{ selectedIds.size }} selected</span>
-      <button v-if="canBulkEdit" class="meta-grid__bulk-btn" aria-label="Set field on selected records" @click="onBulkEdit('set')">Set field</button>
-      <button v-if="canBulkEdit" class="meta-grid__bulk-btn" aria-label="Clear field on selected records" @click="onBulkEdit('clear')">Clear field</button>
-      <button v-if="canDelete" class="meta-grid__bulk-btn meta-grid__bulk-btn--danger" aria-label="Delete selected records" @click="onBulkDelete">Delete selected</button>
-      <button class="meta-grid__bulk-btn" aria-label="Clear selection" @click="selectedIds = new Set(); emit('selection-change', [])">Clear</button>
+      <span class="meta-grid__bulk-count">{{ selectedCount(selectedIds.size, isZh) }}</span>
+      <button v-if="canBulkEdit" class="meta-grid__bulk-btn" :aria-label="l('grid.setFieldAria')" @click="onBulkEdit('set')">{{ l('grid.setField') }}</button>
+      <button v-if="canBulkEdit" class="meta-grid__bulk-btn" :aria-label="l('grid.clearFieldAria')" @click="onBulkEdit('clear')">{{ l('grid.clearField') }}</button>
+      <button v-if="canDelete" class="meta-grid__bulk-btn meta-grid__bulk-btn--danger" :aria-label="l('grid.deleteSelectedAria')" @click="onBulkDelete">{{ l('grid.deleteSelected') }}</button>
+      <button class="meta-grid__bulk-btn" :aria-label="l('grid.clearSelection')" @click="selectedIds = new Set(); emit('selection-change', [])">{{ l('grid.clear') }}</button>
     </div>
     <div class="meta-grid__table-wrap">
       <table class="meta-grid__table">
@@ -58,7 +58,7 @@
                     type="button"
                     class="meta-grid__comment-action"
                     :class="rowCommentActionClass(row.id)"
-                    :aria-label="`Comments for row ${startIndex + flatIndex(group, ri) + 1}`"
+                    :aria-label="commentForRow(startIndex + flatIndex(group, ri) + 1, isZh)"
                     @click.stop="emit('open-comments', row.id)"
                     @keydown="onRowCommentKeydown($event, row.id)"
                   >
@@ -99,7 +99,7 @@
                     type="button"
                     class="meta-grid__field-comment-action"
                     :class="fieldCommentActionClass(row.id, field.id)"
-                    :aria-label="`Comments for ${field.name}`"
+                    :aria-label="commentForField(field.name, isZh)"
                     @click.stop="emit('open-field-comments', { recordId: row.id, fieldId: field.id })"
                     @keydown="onFieldCommentKeydown($event, row.id, field.id)"
                   >
@@ -112,8 +112,8 @@
           <tr v-if="!rows.length && !loading">
             <td :colspan="colSpan" class="meta-grid__empty">
               <div class="meta-grid__empty-icon">&#x1F4CB;</div>
-              <div class="meta-grid__empty-title">No records yet</div>
-              <div class="meta-grid__empty-hint">Click <strong>+ New Record</strong> to add your first row</div>
+              <div class="meta-grid__empty-title">{{ l('grid.noRecordsTitle') }}</div>
+              <div class="meta-grid__empty-hint">{{ l('grid.noRecordsHintPrefix') }} <strong>{{ l('grid.noRecordsHintAction') }}</strong> {{ l('grid.noRecordsHintSuffix') }}</div>
             </td>
           </tr>
         </tbody>
@@ -131,14 +131,14 @@
                 <input type="checkbox" :checked="selectedIds.has(row.id)" :disabled="!rowAllowsAnyBulkAction(row.id)" @change="toggleSelectRow(row.id)" />
               </td>
               <td class="meta-grid__row-num">
-                <button class="meta-grid__expand-btn" :class="{ 'meta-grid__expand-btn--open': expandedRowIds.has(row.id) }" :aria-label="expandedRowIds.has(row.id) ? 'Collapse row' : 'Expand row'" @click.stop="toggleRowExpand(row.id)">&#x25B6;</button>
+                <button class="meta-grid__expand-btn" :class="{ 'meta-grid__expand-btn--open': expandedRowIds.has(row.id) }" :aria-label="expandedRowIds.has(row.id) ? l('grid.collapseRow') : l('grid.expandRow')" @click.stop="toggleRowExpand(row.id)">&#x25B6;</button>
                 <span>{{ startIndex + ri + 1 }}</span>
                 <button
                   v-if="resolveRowActions(row.id).canComment"
                   type="button"
                   class="meta-grid__comment-action"
                   :class="rowCommentActionClass(row.id)"
-                  :aria-label="`Comments for row ${startIndex + ri + 1}`"
+                  :aria-label="commentForRow(startIndex + ri + 1, isZh)"
                   @click.stop="emit('open-comments', row.id)"
                   @keydown="onRowCommentKeydown($event, row.id)"
                 >
@@ -183,7 +183,7 @@
                   type="button"
                   class="meta-grid__field-comment-action"
                   :class="fieldCommentActionClass(row.id, field.id)"
-                  :aria-label="`Comments for ${field.name}`"
+                  :aria-label="commentForField(field.name, isZh)"
                   @click.stop="emit('open-field-comments', { recordId: row.id, fieldId: field.id })"
                   @keydown="onFieldCommentKeydown($event, row.id, field.id)"
                 >
@@ -213,13 +213,13 @@
             <td :colspan="colSpan" class="meta-grid__empty">
               <template v-if="searchText">
                 <div class="meta-grid__empty-icon">&#x1F50D;</div>
-                <div class="meta-grid__empty-title">No matching records</div>
-                <div class="meta-grid__empty-hint">Try a different search term</div>
+                <div class="meta-grid__empty-title">{{ l('grid.noMatchingTitle') }}</div>
+                <div class="meta-grid__empty-hint">{{ l('grid.noMatchingHint') }}</div>
               </template>
               <template v-else>
                 <div class="meta-grid__empty-icon">&#x1F4CB;</div>
-                <div class="meta-grid__empty-title">No records yet</div>
-                <div class="meta-grid__empty-hint">Click <strong>+ New Record</strong> to add your first row</div>
+                <div class="meta-grid__empty-title">{{ l('grid.noRecordsTitle') }}</div>
+                <div class="meta-grid__empty-hint">{{ l('grid.noRecordsHintPrefix') }} <strong>{{ l('grid.noRecordsHintAction') }}</strong> {{ l('grid.noRecordsHintSuffix') }}</div>
               </template>
             </td>
           </tr>
@@ -227,11 +227,11 @@
       </table>
     </div>
     <div v-if="totalPages > 1" class="meta-grid__pagination">
-      <button class="meta-grid__page-btn" :disabled="currentPage <= 1" @click="emit('go-to-page', currentPage - 1)">&lsaquo; Prev</button>
+      <button class="meta-grid__page-btn" :disabled="currentPage <= 1" @click="emit('go-to-page', currentPage - 1)">&lsaquo; {{ l('grid.prev') }}</button>
       <span class="meta-grid__page-info">{{ currentPage }} / {{ totalPages }}</span>
-      <button class="meta-grid__page-btn" :disabled="currentPage >= totalPages" @click="emit('go-to-page', currentPage + 1)">Next &rsaquo;</button>
+      <button class="meta-grid__page-btn" :disabled="currentPage >= totalPages" @click="emit('go-to-page', currentPage + 1)">{{ l('grid.next') }} &rsaquo;</button>
     </div>
-    <div v-if="loading" class="meta-grid__loading" aria-live="polite" aria-label="Loading data">
+    <div v-if="loading" class="meta-grid__loading" aria-live="polite" :aria-label="l('grid.loading')">
       <div class="meta-grid__skeleton">
         <div v-for="i in 5" :key="i" class="meta-grid__skeleton-row">
           <div v-for="j in Math.min(visibleFields.length || 4, 6)" :key="j" class="meta-grid__skeleton-cell"></div>
@@ -270,6 +270,15 @@ import {
   resolveRecordCommentAffordance,
 } from '../utils/comment-affordance'
 import { isSystemField } from '../utils/system-fields'
+import { useLocale } from '../../composables/useLocale'
+import {
+  metaCoreLabel,
+  selectedCount,
+  commentForRow,
+  commentForField,
+  groupNoValue,
+  type MetaCoreLabelKey,
+} from '../utils/meta-core-labels'
 
 const EDITABLE = new Set(['string', 'number', 'boolean', 'date', 'select', 'link', 'attachment'])
 
@@ -317,6 +326,9 @@ const emit = defineEmits<{
   (e: 'bulk-edit', payload: { mode: 'set' | 'clear'; recordIds: string[] }): void
   (e: 'reorder-field', fromFieldId: string, toFieldId: string): void
 }>()
+
+const { isZh } = useLocale()
+const l = (key: MetaCoreLabelKey) => metaCoreLabel(key, isZh.value)
 
 const editCell = ref<EditingCell | null>(null)
 const focusRow = ref(-1)
@@ -380,7 +392,7 @@ const groupedRows = computed<RowGroup[] | null>(() => {
   }
   const groups: RowGroup[] = []
   for (const [key, rows] of map) {
-    groups.push({ key, label: key === '__ungrouped__' ? '(No value)' : key, rows, count: rows.length })
+    groups.push({ key, label: key === '__ungrouped__' ? groupNoValue(isZh.value) : key, rows, count: rows.length })
   }
   return groups
 })
