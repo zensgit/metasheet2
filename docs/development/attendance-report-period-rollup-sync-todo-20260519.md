@@ -69,6 +69,8 @@ Date: 2026-05-19
 
 **落地指针：** PR3 设计记录见 `docs/development/attendance-report-period-rollup-sync-pr3-design-20260519.md`；验证记录见 `docs/development/attendance-report-period-rollup-sync-pr3-verification-20260519.md`；staging live closeout 见 `docs/development/attendance-report-period-rollup-sync-live-closeout-design-20260519.md` 与 `docs/development/attendance-report-period-rollup-sync-live-closeout-verification-20260519.md`。
 
+**ops harness：** period summaries live acceptance 脚本已补齐，见 `docs/development/attendance-report-period-summaries-live-acceptance-development-20260519.md` 与 `docs/development/attendance-report-period-summaries-live-acceptance-verification-20260519.md`。
+
 ## Test Plan
 
 - 后端单测：
