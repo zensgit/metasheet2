@@ -137,6 +137,19 @@ describe('MultitableHomeView', () => {
     })
   })
 
+  it('does not expose the legacy Grid/Spreadsheets transition copy in the subtitle (#1669)', async () => {
+    mocks.listBases.mockResolvedValue({ bases: [] })
+    mocks.listTemplates.mockResolvedValue({ templates: [] })
+
+    const root = mountView()
+    await flushUi()
+
+    const subtitle = root.querySelector('.multitable-home__subtitle')
+    expect(subtitle?.textContent?.trim()).toBe('打开 Base、继续清洗表或从模板开始。')
+    expect(subtitle?.textContent).not.toContain('Grid 和 Spreadsheets')
+    expect(subtitle?.textContent).not.toContain('默认工作入口收敛')
+  })
+
   it('filters visible bases by name or id without changing the loaded list', async () => {
     mocks.listBases.mockResolvedValue({
       bases: [
