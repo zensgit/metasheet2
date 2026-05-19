@@ -1,10 +1,10 @@
 <template>
-  <div class="meta-toolbar" role="toolbar" aria-label="Grid toolbar">
+  <div class="meta-toolbar" role="toolbar" :aria-label="l('toolbar.aria')">
     <div class="meta-toolbar__left">
       <!-- Hide Fields -->
       <div class="meta-toolbar__dropdown">
         <button class="meta-toolbar__btn" @click="showFieldPicker = !showFieldPicker">
-          <span class="meta-toolbar__btn-icon">&#x2630;</span> Fields
+          <span class="meta-toolbar__btn-icon">&#x2630;</span> {{ l('toolbar.fields') }}
           <span v-if="hiddenCount" class="meta-toolbar__badge">{{ hiddenCount }}</span>
         </button>
         <div v-if="showFieldPicker" class="meta-toolbar__panel" @keydown.escape="showFieldPicker = false">
@@ -18,7 +18,7 @@
       <!-- Sort -->
       <div class="meta-toolbar__dropdown">
         <button class="meta-toolbar__btn" @click="showSortPanel = !showSortPanel">
-          <span class="meta-toolbar__btn-icon">&#x2195;</span> Sort
+          <span class="meta-toolbar__btn-icon">&#x2195;</span> {{ l('toolbar.sort') }}
           <span v-if="sortRules.length" class="meta-toolbar__badge">{{ sortRules.length }}</span>
         </button>
         <div v-if="showSortPanel" class="meta-toolbar__panel" @keydown.escape="showSortPanel = false">
@@ -27,59 +27,59 @@
               <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
             </select>
             <select :value="rule.direction" @change="onSortDirChange(idx, ($event.target as HTMLSelectElement).value as 'asc'|'desc')">
-              <option value="asc">A &#x2192; Z</option>
-              <option value="desc">Z &#x2192; A</option>
+              <option value="asc">{{ l('toolbar.sortAsc') }}</option>
+              <option value="desc">{{ l('toolbar.sortDesc') }}</option>
             </select>
             <button class="meta-toolbar__remove" @click="emit('remove-sort', rule.fieldId)">&times;</button>
           </div>
-          <button v-if="fields.length" class="meta-toolbar__add" @click="emit('add-sort', { fieldId: fields[0].id, direction: 'asc' })">+ Add sort</button>
-          <button v-if="sortRules.length" class="meta-toolbar__apply" @click="emit('apply-sort-filter')">Apply</button>
+          <button v-if="fields.length" class="meta-toolbar__add" @click="emit('add-sort', { fieldId: fields[0].id, direction: 'asc' })">{{ l('toolbar.addSort') }}</button>
+          <button v-if="sortRules.length" class="meta-toolbar__apply" @click="emit('apply-sort-filter')">{{ l('toolbar.apply') }}</button>
         </div>
       </div>
 
       <!-- Filter -->
       <div class="meta-toolbar__dropdown">
         <button class="meta-toolbar__btn" @click="showFilterPanel = !showFilterPanel">
-          <span class="meta-toolbar__btn-icon">&#x2A01;</span> Filter
+          <span class="meta-toolbar__btn-icon">&#x2A01;</span> {{ l('toolbar.filter') }}
           <span v-if="filterRules.length" class="meta-toolbar__badge">{{ filterRules.length }}</span>
         </button>
         <div v-if="showFilterPanel" class="meta-toolbar__panel meta-toolbar__panel--filter" @keydown.escape="showFilterPanel = false">
           <div v-if="filterRules.length > 1" class="meta-toolbar__conjunction">
-            <span>Where</span>
+            <span>{{ l('toolbar.where') }}</span>
             <select :value="filterConjunction" @change="emit('set-conjunction', ($event.target as HTMLSelectElement).value as 'and'|'or')">
-              <option value="and">all</option>
-              <option value="or">any</option>
+              <option value="and">{{ l('toolbar.all') }}</option>
+              <option value="or">{{ l('toolbar.any') }}</option>
             </select>
-            <span>conditions match</span>
+            <span>{{ l('toolbar.conditionsMatch') }}</span>
           </div>
           <div v-for="(rule, idx) in filterRules" :key="idx" class="meta-toolbar__filter-rule">
-            <select :value="rule.fieldId" aria-label="Filter field" @change="onFilterFieldChange(idx, ($event.target as HTMLSelectElement).value)">
+            <select :value="rule.fieldId" :aria-label="l('toolbar.filterField')" @change="onFilterFieldChange(idx, ($event.target as HTMLSelectElement).value)">
               <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
             </select>
             <span class="meta-toolbar__field-type">{{ getFilterFieldTypeLabel(rule.fieldId) }}</span>
-            <select :value="rule.operator" aria-label="Filter operator" @change="onFilterOperatorChange(idx, ($event.target as HTMLSelectElement).value)">
+            <select :value="rule.operator" :aria-label="l('toolbar.filterOperator')" @change="onFilterOperatorChange(idx, ($event.target as HTMLSelectElement).value)">
               <option v-for="op in getOperatorsForField(rule.fieldId)" :key="op.value" :value="op.value">{{ op.label }}</option>
             </select>
-            <span v-if="isUnaryOp(rule.operator)" class="meta-toolbar__filter-empty-hint">no value needed</span>
+            <span v-if="isUnaryOp(rule.operator)" class="meta-toolbar__filter-empty-hint">{{ l('toolbar.noValueNeeded') }}</span>
             <select
               v-else-if="isSelectLikeField(rule.fieldId)"
               class="meta-toolbar__filter-value"
               :value="String(rule.value ?? '')"
-              aria-label="Filter value"
+              :aria-label="l('toolbar.filterValue')"
               @change="onFilterValueChange(idx, ($event.target as HTMLSelectElement).value)"
             >
-              <option value="" disabled>{{ getSelectOptions(rule.fieldId).length ? 'Choose option...' : 'No options' }}</option>
+              <option value="" disabled>{{ getSelectOptions(rule.fieldId).length ? l('toolbar.chooseOption') : l('toolbar.noOptions') }}</option>
               <option v-for="option in getSelectOptions(rule.fieldId)" :key="option.value" :value="option.value">{{ option.label }}</option>
             </select>
             <select
               v-else-if="getFieldType(rule.fieldId) === 'boolean'"
               class="meta-toolbar__filter-value"
               :value="String(rule.value ?? 'true')"
-              aria-label="Filter value"
+              :aria-label="l('toolbar.filterValue')"
               @change="onFilterValueChange(idx, ($event.target as HTMLSelectElement).value)"
             >
-              <option value="true">checked / true</option>
-              <option value="false">unchecked / false</option>
+              <option value="true">{{ l('toolbar.checkedTrue') }}</option>
+              <option value="false">{{ l('toolbar.uncheckedFalse') }}</option>
             </select>
             <input
               v-else
@@ -87,66 +87,66 @@
               :type="getInputType(rule.fieldId)"
               :placeholder="getValuePlaceholder(rule.fieldId)"
               :value="rule.value ?? ''"
-              aria-label="Filter value"
+              :aria-label="l('toolbar.filterValue')"
               @change="onFilterValueChange(idx, ($event.target as HTMLInputElement).value)"
             />
             <button class="meta-toolbar__remove" @click="emit('remove-filter', idx)">&times;</button>
           </div>
           <div class="meta-toolbar__filter-actions">
-            <button v-if="fields.length" class="meta-toolbar__add" @click="onAddFilter">+ Add filter</button>
-            <button v-if="filterRules.length" class="meta-toolbar__add meta-toolbar__add--danger" @click="emit('clear-filters')">Clear all</button>
+            <button v-if="fields.length" class="meta-toolbar__add" @click="onAddFilter">{{ l('toolbar.addFilter') }}</button>
+            <button v-if="filterRules.length" class="meta-toolbar__add meta-toolbar__add--danger" @click="emit('clear-filters')">{{ l('toolbar.clearAll') }}</button>
           </div>
           <button v-if="filterRules.length" class="meta-toolbar__apply" @click="emit('apply-sort-filter')">{{ applyButtonLabel }}</button>
-          <p v-if="filterRules.length && sortFilterDirty" class="meta-toolbar__apply-hint">Filter changes are staged until applied.</p>
+          <p v-if="filterRules.length && sortFilterDirty" class="meta-toolbar__apply-hint">{{ l('toolbar.stagedHint') }}</p>
         </div>
       </div>
 
       <!-- Group By -->
       <div class="meta-toolbar__dropdown">
         <button class="meta-toolbar__btn" @click="showGroupPanel = !showGroupPanel">
-          <span class="meta-toolbar__btn-icon">&#x229E;</span> Group
+          <span class="meta-toolbar__btn-icon">&#x229E;</span> {{ l('toolbar.group') }}
           <span v-if="groupFieldId" class="meta-toolbar__badge">1</span>
         </button>
         <div v-if="showGroupPanel" class="meta-toolbar__panel" @keydown.escape="showGroupPanel = false">
           <label class="meta-toolbar__field-toggle">
             <input type="radio" name="groupBy" :checked="!groupFieldId" @change="emit('set-group-field', null)" />
-            <span class="meta-toolbar__group-none">None</span>
+            <span class="meta-toolbar__group-none">{{ l('toolbar.none') }}</span>
           </label>
           <label v-for="f in groupableFields" :key="f.id" class="meta-toolbar__field-toggle">
             <input type="radio" name="groupBy" :checked="groupFieldId === f.id" @change="emit('set-group-field', f.id)" />
             <span>{{ f.name }}</span>
-            <span class="meta-toolbar__field-type">{{ f.type }}</span>
+            <span class="meta-toolbar__field-type">{{ fieldTypeLabel(f.type, isZh) }}</span>
           </label>
         </div>
       </div>
 
       <!-- Undo/Redo -->
-      <button class="meta-toolbar__btn" :disabled="!canUndo" title="Undo (Ctrl+Z)" aria-label="Undo" @click="emit('undo')">&#x21A9;</button>
-      <button class="meta-toolbar__btn" :disabled="!canRedo" title="Redo (Ctrl+Y)" aria-label="Redo" @click="emit('redo')">&#x21AA;</button>
+      <button class="meta-toolbar__btn" :disabled="!canUndo" :title="l('toolbar.undoTitle')" :aria-label="l('toolbar.undo')" @click="emit('undo')">&#x21A9;</button>
+      <button class="meta-toolbar__btn" :disabled="!canRedo" :title="l('toolbar.redoTitle')" :aria-label="l('toolbar.redo')" @click="emit('redo')">&#x21AA;</button>
     </div>
     <div class="meta-toolbar__right">
       <div class="meta-toolbar__search" :class="{ 'meta-toolbar__search--active': !!searchText }" role="search">
         <span class="meta-toolbar__search-icon" aria-hidden="true">&#x1F50D;</span>
-        <input class="meta-toolbar__search-input" type="search" placeholder="Search records..." aria-label="Search records" :value="searchText" @input="emit('update:search-text', ($event.target as HTMLInputElement).value)" />
-        <button v-if="searchText" class="meta-toolbar__search-clear" aria-label="Clear search" @click="emit('update:search-text', '')">&times;</button>
+        <input class="meta-toolbar__search-input" type="search" :placeholder="l('toolbar.searchPlaceholder')" :aria-label="l('toolbar.searchAria')" :value="searchText" @input="emit('update:search-text', ($event.target as HTMLInputElement).value)" />
+        <button v-if="searchText" class="meta-toolbar__search-clear" :aria-label="l('toolbar.clearSearch')" @click="emit('update:search-text', '')">&times;</button>
       </div>
-      <span v-if="totalRows !== undefined" class="meta-toolbar__row-count">{{ totalRows }} rows</span>
+      <span v-if="totalRows !== undefined" class="meta-toolbar__row-count">{{ rowCount(totalRows, isZh) }}</span>
       <!-- Row density -->
       <div class="meta-toolbar__dropdown">
-        <button class="meta-toolbar__btn" title="Row height" aria-label="Row height" @click="showDensityPanel = !showDensityPanel">&#x2195; Rows</button>
+        <button class="meta-toolbar__btn" :title="l('toolbar.rowHeight')" :aria-label="l('toolbar.rowHeight')" @click="showDensityPanel = !showDensityPanel">&#x2195; {{ l('toolbar.rows') }}</button>
         <div v-if="showDensityPanel" class="meta-toolbar__panel meta-toolbar__panel--density" @keydown.escape="showDensityPanel = false">
           <label v-for="d in DENSITIES" :key="d.value" class="meta-toolbar__field-toggle">
             <input type="radio" name="density" :checked="rowDensity === d.value" @change="emit('set-row-density', d.value); showDensityPanel = false" />
-            <span>{{ d.label }}</span>
+            <span>{{ l(d.labelKey) }}</span>
           </label>
         </div>
       </div>
-      <button class="meta-toolbar__btn" title="Auto-fit columns" aria-label="Auto-fit columns" @click="emit('auto-fit-columns')">&#x2194; Fit</button>
-      <button class="meta-toolbar__btn" title="Print" aria-label="Print grid" @click="emit('print')">&#x1F5A8; Print</button>
-      <button v-if="canCreateRecord" class="meta-toolbar__btn" title="Import records" aria-label="Import records" @click="emit('import')">&#x2B71; Import</button>
-      <button v-if="canExport" class="meta-toolbar__btn" title="Export CSV" aria-label="Export CSV" @click="emit('export-csv')">&#x2B73; Export CSV</button>
-      <button v-if="canExport" class="meta-toolbar__btn" title="Export Excel (.xlsx)" aria-label="Export Excel" @click="emit('export-xlsx')">&#x2B73; Export XLSX</button>
-      <button v-if="canCreateRecord" class="meta-toolbar__btn meta-toolbar__btn--primary" @click="emit('add-record')">+ New Record</button>
+      <button class="meta-toolbar__btn" :title="l('toolbar.autoFitColumns')" :aria-label="l('toolbar.autoFitColumns')" @click="emit('auto-fit-columns')">&#x2194; {{ l('toolbar.fit') }}</button>
+      <button class="meta-toolbar__btn" :title="l('toolbar.print')" :aria-label="l('toolbar.printGrid')" @click="emit('print')">&#x1F5A8; {{ l('toolbar.print') }}</button>
+      <button v-if="canCreateRecord" class="meta-toolbar__btn" :title="l('toolbar.importRecords')" :aria-label="l('toolbar.importRecords')" @click="emit('import')">&#x2B71; {{ l('toolbar.import') }}</button>
+      <button v-if="canExport" class="meta-toolbar__btn" :title="l('toolbar.exportCsv')" :aria-label="l('toolbar.exportCsv')" @click="emit('export-csv')">&#x2B73; {{ l('toolbar.exportCsv') }}</button>
+      <button v-if="canExport" class="meta-toolbar__btn" :title="l('toolbar.exportExcelXlsx')" :aria-label="l('toolbar.exportExcel')" @click="emit('export-xlsx')">&#x2B73; {{ l('toolbar.exportXlsx') }}</button>
+      <button v-if="canCreateRecord" class="meta-toolbar__btn meta-toolbar__btn--primary" @click="emit('add-record')">{{ l('toolbar.newRecord') }}</button>
     </div>
   </div>
 </template>
@@ -156,6 +156,14 @@ import { ref, computed } from 'vue'
 import type { MetaField, RowDensity } from '../types'
 import type { SortRule, FilterRule, FilterConjunction } from '../composables/useMultitableGrid'
 import { FILTER_OPERATORS_BY_TYPE } from '../composables/useMultitableGrid'
+import { useLocale } from '../../composables/useLocale'
+import {
+  metaCoreLabel,
+  rowCount,
+  fieldTypeLabel,
+  filterValuePlaceholder,
+  type MetaCoreLabelKey,
+} from '../utils/meta-core-labels'
 
 const props = defineProps<{
   fields: MetaField[]
@@ -198,15 +206,18 @@ const emit = defineEmits<{
   (e: 'auto-fit-columns'): void
 }>()
 
+const { isZh } = useLocale()
+const l = (key: MetaCoreLabelKey) => metaCoreLabel(key, isZh.value)
+
 const showFieldPicker = ref(false)
 const showSortPanel = ref(false)
 const showFilterPanel = ref(false)
 const showGroupPanel = ref(false)
 const showDensityPanel = ref(false)
-const DENSITIES: Array<{ value: RowDensity; label: string }> = [
-  { value: 'compact', label: 'Compact' },
-  { value: 'normal', label: 'Normal' },
-  { value: 'expanded', label: 'Expanded' },
+const DENSITIES: Array<{ value: RowDensity; labelKey: MetaCoreLabelKey }> = [
+  { value: 'compact', labelKey: 'density.compact' },
+  { value: 'normal', labelKey: 'density.normal' },
+  { value: 'expanded', labelKey: 'density.expanded' },
 ]
 const GROUPABLE_TYPES = new Set(['select', 'string', 'boolean', 'number', 'date'])
 const groupableFields = computed(() => props.fields.filter((f) => GROUPABLE_TYPES.has(f.type)))
@@ -226,31 +237,17 @@ const getOperatorsForField = (id: string) => {
   }
   return FILTER_OPERATORS_BY_TYPE[type] ?? FILTER_OPERATORS_BY_TYPE.string
 }
-const applyButtonLabel = computed(() => props.sortFilterDirty ? 'Apply filter changes' : 'Apply filters')
+const applyButtonLabel = computed(() => props.sortFilterDirty
+  ? metaCoreLabel('toolbar.applyFilterChanges', isZh.value)
+  : metaCoreLabel('toolbar.applyFilters', isZh.value))
 const getInputType = (id: string) => {
   const t = getFieldType(id)
   if (t === 'number') return 'number'
   if (t === 'date') return 'date'
   return 'text'
 }
-const getFilterFieldTypeLabel = (id: string) => {
-  const labels: Record<string, string> = {
-    string: 'text',
-    longText: 'long text',
-    number: 'number',
-    boolean: 'checkbox',
-    select: 'select',
-    multiSelect: 'multi-select',
-    date: 'date',
-  }
-  return labels[getFieldType(id)] ?? getFieldType(id)
-}
-const getValuePlaceholder = (id: string) => {
-  const t = getFieldType(id)
-  if (t === 'number') return 'Enter a number'
-  if (t === 'date') return 'Pick a date'
-  return 'Enter filter text'
-}
+const getFilterFieldTypeLabel = (id: string) => fieldTypeLabel(String(getFieldType(id)), isZh.value)
+const getValuePlaceholder = (id: string) => filterValuePlaceholder(String(getFieldType(id)), isZh.value)
 function getSelectOptions(id: string): Array<{ value: string; label: string }> {
   const field = getField(id)
   const rawOptions = field?.options ?? (Array.isArray(field?.property?.options) ? field.property.options : [])
