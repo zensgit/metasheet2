@@ -151,7 +151,7 @@ skip  iff  existing.source_fingerprint === next.source_fingerprint
 ## Out of scope（显式 follow-up）
 
 - period / 周期汇总行（复用 `loadAttendanceSummary`，下一条 slice）
-- **全员同步 / 分页 / batch cursor**（v1 `userId` 必填；全员需解决跨员工 approvedMap、分页、超时、部分失败汇总——单独 slice）
+- **batch cursor / 后台任务队列**（全员同步与分页已由 2026-05-18 bulk sync slice 补齐；自动连续分页、后台任务化、超时恢复仍为 follow-up）
 - **orphan / stale columns cleanup**（`ensureFields` 只 upsert 不删；字段隐藏/禁用/动态 subtype 消失后旧列保留——P2 cleanup follow-up）
 - **重复 row_key 行 dedup**（多维表无唯一约束；v1 只 patch 第一条 + warn，自动删重复 = cleanup follow-up）
 - 多维表侧公式/视图模板预置（归多维表配置，非本线）
@@ -163,7 +163,7 @@ skip  iff  existing.source_fingerprint === next.source_fingerprint
 - `provisioning.ensureObject` 支持给已存在对象补新字段（沿用 catalog 对象同语义；PR1 orientation 子项实测确认），但**只 upsert 不删**——orphan 列是 known behavior（P2 cleanup）
 - sync 永不成为事实源；考勤查询/导出永不读 report-records 对象
 - 不裸 SQL 写 `meta_*`；全程 multitable 插件 API；**所有 filter/data/changes key 用物理 `fld_xxx`（`resolveFieldIds`），逻辑名只用于 descriptor/mapping**
-- 幂等键 `orgId:userId:workDate` 稳定；`row_key` 字段落行；`userId` v1 必填
+- 幂等键 `orgId:userId:workDate` 稳定；`row_key` 字段落行；旧单员工 `{ userId }` 路径兼容，同时支持 `{ userIds }` 与 `{ allUsers, page, pageSize }`
 - skip 仅当 `source_fingerprint` 与 `field_fingerprint` 双等；`source_fingerprint` 基于排除 `synced_at`+fingerprint 自身、key-sorted 的稳定 payload
 - patch 既有行时，管理范围内但非 active output 的列显式写 `null`（patchRecord 是 merge 语义，不传 key 会残留旧值）
 - 动态列确定性：descriptor 顺序 `sortOrder→code`，同 code 稳定映射同 `fld_xxx`，列顺序/fld_id/fingerprint 跨 sync 不抖
