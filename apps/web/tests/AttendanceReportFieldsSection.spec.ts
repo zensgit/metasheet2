@@ -846,6 +846,88 @@ describe('AttendanceReportFieldsSection', () => {
       .toBe('/multitable/sheet-rr/view-rr?baseId=base-rr')
   })
 
+  it('syncs report records for all users with pagination controls', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(jsonResponse(200, populatedCatalogPayload()))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        data: {
+          synced: 4,
+          rowsSynced: 4,
+          created: 3,
+          patched: 1,
+          skipped: 0,
+          failed: 0,
+          duplicateRowKeys: 0,
+          usersScanned: 2,
+          usersSynced: 2,
+          usersFailed: 0,
+          totalUsers: 5,
+          page: 2,
+          pageSize: 2,
+          hasNextPage: true,
+          fieldFingerprint: 'bulk-field-fingerprint',
+          syncedAt: '2026-05-18T12:00:00.000Z',
+          multitable: {
+            available: true,
+            degraded: false,
+            projectId: 'org-1:attendance',
+            objectId: 'attendance_report_records',
+            sheetId: 'sheet-rr',
+            viewId: 'view-rr',
+          },
+        },
+      }))
+
+    mountSection()
+    await flushUi()
+
+    const fromInput = container!.querySelector<HTMLInputElement>('[data-report-record-sync-from]')!
+    const toInput = container!.querySelector<HTMLInputElement>('[data-report-record-sync-to]')!
+    const userInput = container!.querySelector<HTMLInputElement>('[data-report-record-sync-user]')!
+    const allUsersInput = container!.querySelector<HTMLInputElement>('[data-report-record-sync-all-users]')!
+    const pageInput = container!.querySelector<HTMLInputElement>('[data-report-record-sync-page]')!
+    const pageSizeInput = container!.querySelector<HTMLInputElement>('[data-report-record-sync-page-size]')!
+    const syncButton = container!.querySelector<HTMLButtonElement>('[data-report-record-sync-button]')!
+
+    fromInput.value = '2026-05-01'
+    fromInput.dispatchEvent(new Event('input', { bubbles: true }))
+    toInput.value = '2026-05-31'
+    toInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    expect(syncButton.disabled).toBe(true)
+
+    allUsersInput.click()
+    await flushUi()
+    expect(userInput.disabled).toBe(true)
+    expect(pageInput.disabled).toBe(false)
+    expect(pageSizeInput.disabled).toBe(false)
+
+    pageInput.value = '2'
+    pageInput.dispatchEvent(new Event('input', { bubbles: true }))
+    pageSizeInput.value = '2'
+    pageSizeInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    expect(syncButton.disabled).toBe(false)
+
+    syncButton.click()
+    await flushUi()
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance/report-records/sync?orgId=org-1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: '2026-05-01', to: '2026-05-31', allUsers: true, page: 2, pageSize: 2 }),
+    })
+    const status = container!.querySelector('[data-report-record-sync-status]')
+    expect(status?.textContent).toContain('Users: 2')
+    expect(status?.textContent).toContain('Synced users: 2')
+    expect(status?.textContent).toContain('Rows: 4')
+    expect(container!.querySelector('[data-report-record-sync-detail="totalUsers"]')?.textContent).toContain('5')
+    expect(container!.querySelector('[data-report-record-sync-detail="page"]')?.textContent).toContain('2')
+    expect(container!.querySelector('[data-report-record-sync-detail="hasNextPage"]')?.textContent).toContain('Yes')
+    expect(container!.querySelector('[data-report-record-sync-detail="fieldFingerprint"]')?.textContent).toContain('bulk-field-fingerprint')
+  })
+
   it('shows degraded report-records sync as a non-blocking warning', async () => {
     vi.mocked(apiFetch)
       .mockResolvedValueOnce(jsonResponse(200, populatedCatalogPayload()))

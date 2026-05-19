@@ -115,8 +115,8 @@ skip  iff  existing.source_fingerprint === next.source_fingerprint
 
 ### PR2 sync writer
 
-- `POST /api/attendance/report-records/sync`（`attendance:admin`，body `{ from, to, userId }`——**`userId` v1 必填**，review 修正点 1；沿用既有 `CONFIRM_SYNC` live 纪律）
-- 全员同步 / 分页 / batch cursor = follow-up（否则 PR2 从 medium 变 large：要解决跨员工 approvedMap、分页、超时、部分失败汇总）
+- `POST /api/attendance/report-records/sync`（`attendance:admin`，PR2 body `{ from, to, userId }`；2026-05-18 bulk sync slice 扩展 `{ userIds }` 与 `{ allUsers, page, pageSize }`；沿用既有 `CONFIRM_SYNC` live 纪律）
+- 全员同步 / 分页 = 已由 `attendance-report-records-bulk-sync-development-20260518.md` 作为显式分页管理员动作补齐；batch cursor / 后台任务队列仍为 follow-up。
 - 取数：复用既有 per-target-user export 构建流程（**单一权威路径，不另写聚合**）
 - 写入：per row 用物理 field id `queryRecords({ filters: { [fieldIds.rowKey]: rowKey } })` → `patchRecord`/`createRecord`；按上方 skip 判定（source+field fingerprint 双等才 skip）；patch 时清空 stale 列（写 null）
 - **重复行保险丝**：多维表无 `row_key` 唯一约束。若 `queryRecords(row_key)` 返回多条（并发/历史脏数据）→ v1 **patch 第一条**、其余计 `duplicateRowKeys` warn、**不自动删重复**（dedup = cleanup follow-up）
@@ -188,3 +188,9 @@ skip  iff  existing.source_fingerprint === next.source_fingerprint
 ### PR3（待 PR2 合并后）
 - [x] 前端同步入口 + syncedAt/数/fingerprint 展示 + 打开多维表
 - [x] mock acceptance fingerprint 链一致性
+
+### Bulk sync follow-up（2026-05-18）
+- [x] 显式 `userIds` 批量同步 + 去重
+- [x] `allUsers` 分页同步入口 + page/pageSize 汇总
+- [x] 前端单员工/全员分页模式切换
+- [x] development / verification MD：`attendance-report-records-bulk-sync-development-20260518.md`、`attendance-report-records-bulk-sync-verification-20260518.md`
