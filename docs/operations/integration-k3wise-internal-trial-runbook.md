@@ -166,14 +166,14 @@ non-blocking `sqlserver-executor-availability` check:
 - `pass` means a configured `erp:k3-wise-sqlserver` source is not currently
   marked unavailable by the backend.
 - `skipped` with `code=SQLSERVER_EXECUTOR_MISSING` means the SQL source exists,
-  but the deployment has not injected the allowlisted `queryExecutor`.
+  but the package has not completed SQL executor wiring or dependency install.
 
 `SQLSERVER_EXECUTOR_MISSING` does not invalidate the #1542 staging-to-K3
 metadata signoff. It means direct SQL Server source execution is still blocked.
-Use `metasheet:staging` as the source for Data Factory retests until the bridge
-deployment wires a query executor with the expected `testConnection`, `select`,
-and `insertMany` methods. After wiring the executor, retest the SQL source from
-the workbench and rerun this smoke; the diagnostic should move from `skipped`
+Use `metasheet:staging` as the source for Data Factory retests until the package
+runtime can load the built-in read-only executor and the SQL source has been
+tested successfully. After fixing the runtime/dependency issue, retest the SQL
+source from the workbench and rerun this smoke; the diagnostic should move from `skipped`
 to `pass`. See
 `docs/operations/integration-k3wise-sql-executor-bridge-handoff.md` for the
 bridge-machine implementation contract.

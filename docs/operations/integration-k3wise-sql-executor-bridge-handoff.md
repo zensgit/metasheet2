@@ -5,32 +5,40 @@
 This handoff is for the Windows/on-prem bridge machine that can reach the
 customer K3 WISE SQL Server network.
 
-MetaSheet already ships the `erp:k3-wise-sqlserver` adapter contract. The
-default package intentionally does not ship a production SQL Server driver or
-open database connection. Until the bridge deployment injects an allowlisted
-`queryExecutor`, Data Factory will show `SQLSERVER_EXECUTOR_MISSING` and direct
-SQL Server source execution must stay disabled.
+MetaSheet ships the `erp:k3-wise-sqlserver` adapter contract and, as of the
+2026-05-19 runtime slice, a built-in **read-only** SQL Server executor backed by
+the packaged `mssql` dependency. The executor can test the configured SQL Server
+connection and run structured `SELECT TOP <n>` reads against the adapter
+allowlist. It does not accept raw SQL and does not enable SQL writes.
+
+`SQLSERVER_EXECUTOR_MISSING` now means the packaged runtime wiring or dependency
+install is broken, not that the normal package intentionally lacks SQL support.
 
 Use `metasheet:staging` as the source for internal #1542 retests while this
 handoff is still incomplete.
 
 ## Current Runtime Contract
 
-The SQL channel is created by:
+The SQL channel is still created through the same injection seam:
 
 ```js
 createK3WiseSqlServerChannelFactory({ queryExecutor })
 ```
 
-The default plugin registration currently has no executor:
+The package runtime now registers the built-in read-only executor at activation:
 
 ```js
-registerAdapter('erp:k3-wise-sqlserver', createK3WiseSqlServerChannelFactory())
+registerAdapter(
+  'erp:k3-wise-sqlserver',
+  createK3WiseSqlServerChannelFactory({ queryExecutor })
+)
 ```
 
-That means the bridge layer must own the executor wiring. Do not store a
-function in `external_systems.config`; JSON config is for connection metadata,
-allowlists, object maps, and middle-table policy only.
+Deployment-owned custom executors may still replace this seam for customer
+middle-table writes or a different driver, but ordinary read-only sampling no
+longer requires a bridge-side source patch. Do not store a function in
+`external_systems.config`; JSON config is for connection metadata, allowlists,
+object maps, and middle-table policy only.
 
 ## Executor Interface
 
@@ -76,7 +84,12 @@ Hard constraints:
 
 ### `insertMany({ table, records, keyFields, mode, options, system })`
 
-Expected behavior:
+Built-in behavior:
+
+- throws `SQLSERVER_WRITE_EXECUTOR_DISABLED`;
+- keeps K3 SQL Server access read-only.
+
+Custom deployment executor behavior, if explicitly supplied:
 
 - write only to allowlisted middle tables from `system.config.allowedTables.write`;
 - use parameterized inserts or controlled stored procedures;
@@ -130,10 +143,12 @@ Data Factory previews, smoke artifacts, or `external_systems.config`.
 
 ## Operator Verification Flow
 
-1. Deploy the bridge-side executor on a machine that can reach SQL Server.
-2. Inject it into `createK3WiseSqlServerChannelFactory({ queryExecutor })`.
+1. Deploy the current package and let `pnpm install --frozen-lockfile` install
+   the packaged `mssql` dependency.
+2. Configure the SQL Server source with `server`, `database`, credentials, and
+   read allowlist.
 3. In Data Factory, test the `erp:k3-wise-sqlserver` source.
-4. Confirm the system no longer reports `SQLSERVER_EXECUTOR_MISSING`.
+4. Confirm the system reports connected instead of `SQLSERVER_EXECUTOR_MISSING`.
 5. Run the postdeploy smoke:
 
 ```bash
@@ -152,9 +167,9 @@ Expected smoke result after executor wiring:
 - `sqlserver-executor-availability.status=pass` when a SQL source is configured.
 
 If `sqlserver-executor-availability.status=skipped` with
-`code=SQLSERVER_EXECUTOR_MISSING`, the bridge wiring is still incomplete. The
-staging-to-K3 path can remain signed off, but direct SQL Server source execution
-is not ready.
+`code=SQLSERVER_EXECUTOR_MISSING`, the package wiring or dependency install is
+incomplete. The staging-to-K3 path can remain signed off, but direct SQL Server
+source execution is not ready.
 
 ## What Claude Code Should Do On The Bridge Machine
 
@@ -162,8 +177,8 @@ Claude Code can help on the Windows/K3 bridge machine once it has local access
 to the deployment and customer-approved credentials. The safe task is:
 
 1. inspect the deployed package version and Node runtime;
-2. locate the deployment-owned adapter registration/wiring point;
-3. implement an allowlisted `queryExecutor` module outside customer secrets;
+2. verify `plugins/plugin-integration-core` installed its `mssql` dependency;
+3. configure a read-only SQL account or readonly view/table allowlist;
 4. run connection tests against a test account or readonly view;
 5. rerun the postdeploy smoke and capture redacted evidence.
 
@@ -179,7 +194,8 @@ Claude Code should not:
 - `testConnection()` passes without leaking secrets.
 - `select()` can read the approved readonly view/table for the configured
   object.
-- `insertMany()` is either disabled or limited to approved middle tables.
+- built-in `insertMany()` stays disabled unless a custom middle-table executor
+  has been explicitly installed.
 - Data Factory no longer disables the SQL source for
   `SQLSERVER_EXECUTOR_MISSING`.
 - Postdeploy smoke records `sqlserver-executor-availability=pass`.

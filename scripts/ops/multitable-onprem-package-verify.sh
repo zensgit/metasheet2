@@ -72,6 +72,19 @@ function verify_root_runtime_dependencies() {
   search_fixed_string '"bcryptjs"' "$package_json" || die "root package.json must include bcryptjs for Windows bootstrap compatibility"
 }
 
+function verify_integration_plugin_runtime_dependencies() {
+  local root="$1"
+  local plugin_package_json="${root}/plugins/plugin-integration-core/package.json"
+  local sql_executor="${root}/plugins/plugin-integration-core/lib/adapters/k3-wise-sqlserver-executor.cjs"
+  local plugin_entry="${root}/plugins/plugin-integration-core/index.cjs"
+
+  search_fixed_string '"mssql"' "$plugin_package_json" || die "plugin-integration-core package.json must include mssql for the built-in SQL Server read executor"
+  search_fixed_string 'createK3WiseSqlServerReadOnlyExecutor' "$sql_executor" || die "SQL Server read-only executor must be packaged"
+  search_fixed_string 'SELECT TOP' "$sql_executor" || die "SQL Server executor must build bounded read-only SELECT statements"
+  search_fixed_string 'SQLSERVER_WRITE_EXECUTOR_DISABLED' "$sql_executor" || die "SQL Server executor must keep built-in writes disabled"
+  search_fixed_string 'createK3WiseSqlServerChannelFactory({ queryExecutor: sqlServerQueryExecutor })' "$plugin_entry" || die "plugin runtime must inject the built-in SQL Server query executor"
+}
+
 function verify_deployable_artifact_contract() {
   local root="$1"
   local deployment_txt="${root}/DEPLOYMENT.txt"
@@ -432,6 +445,7 @@ required=(
   "plugins/plugin-integration-core/lib/adapters/k3-wise-document-templates.cjs"
   "plugins/plugin-integration-core/lib/adapters/k3-wise-webapi-adapter.cjs"
   "plugins/plugin-integration-core/lib/adapters/k3-wise-sqlserver-channel.cjs"
+  "plugins/plugin-integration-core/lib/adapters/k3-wise-sqlserver-executor.cjs"
   "scripts/ops/integration-k3wise-onprem-preflight.mjs"
   "scripts/ops/integration-k3wise-live-poc-preflight.mjs"
   "scripts/ops/integration-k3wise-live-poc-evidence.mjs"
@@ -490,6 +504,8 @@ required=(
   "docs/development/data-factory-issue1526-gate-contract-package-verify-verification-20260518.md"
   "docs/development/data-factory-issue1526-delivery-readiness-gate-contract-design-20260518.md"
   "docs/development/data-factory-issue1526-delivery-readiness-gate-contract-verification-20260518.md"
+  "docs/development/data-factory-sqlserver-readonly-executor-design-20260519.md"
+  "docs/development/data-factory-sqlserver-readonly-executor-verification-20260519.md"
   "docs/development/data-factory-readiness-package-verify-delivery-development-20260515.md"
   "docs/development/data-factory-readiness-package-verify-delivery-verification-20260515.md"
   "docs/development/onprem-migration-gap-guard-development-20260514.md"
@@ -509,6 +525,7 @@ bootstrap_run_wrapper="$(find "$pkg_root" -maxdepth 1 -type f -name 'bootstrap-a
 [[ -n "$bootstrap_run_wrapper" ]] || die "Required package content missing: bootstrap-admin-<run>.bat"
 verify_windows_entrypoints "$pkg_root"
 verify_root_runtime_dependencies "$pkg_root"
+verify_integration_plugin_runtime_dependencies "$pkg_root"
 verify_deployable_artifact_contract "$pkg_root"
 verify_migration_bridge_contract "$pkg_root"
 verify_generic_integration_workbench_contract "$pkg_root"

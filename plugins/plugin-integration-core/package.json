@@ -29,5 +29,8 @@
     "test:e2e-plm-k3wise-writeback": "node __tests__/e2e-plm-k3wise-writeback.test.cjs",
     "test:staging": "node __tests__/staging-installer.test.cjs",
     "test:migration": "node __tests__/migration-sql.test.cjs"
+  },
+  "dependencies": {
+    "mssql": "^10.0.4"
   }
 }

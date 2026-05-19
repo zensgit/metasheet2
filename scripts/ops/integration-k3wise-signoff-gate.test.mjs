@@ -99,7 +99,7 @@ test('passes authenticated postdeploy evidence with skipped optional SQL executo
           id: 'sqlserver-executor-availability',
           status: 'skipped',
           code: 'SQLSERVER_EXECUTOR_MISSING',
-          reason: 'K3 WISE SQL Server source is configured but the deployment has not injected the allowlisted queryExecutor; staging-to-K3 smoke signoff can still pass.',
+          reason: 'K3 WISE SQL Server source is configured but this package has not completed SQL executor wiring or dependency install; staging-to-K3 smoke signoff can still pass.',
           systemsChecked: 1,
           blockedSystems: [
             {

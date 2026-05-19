@@ -419,7 +419,7 @@ function sqlServerExecutorAvailabilityCheck(body) {
     return result('sqlserver-executor-availability', 'skipped', {
       code: missingExecutorSystems.length > 0 ? 'SQLSERVER_EXECUTOR_MISSING' : 'SQLSERVER_CHANNEL_UNAVAILABLE',
       reason: missingExecutorSystems.length > 0
-        ? 'K3 WISE SQL Server source is configured but the deployment has not injected the allowlisted queryExecutor; staging-to-K3 smoke signoff can still pass.'
+        ? 'K3 WISE SQL Server source is configured but this package has not completed SQL executor wiring or dependency install; staging-to-K3 smoke signoff can still pass.'
         : 'K3 WISE SQL Server source is configured but currently unavailable; staging-to-K3 smoke signoff can still pass.',
       systemsChecked: sqlSystems.length,
       blockedSystems: unavailableSystems.map(systemSummary),
