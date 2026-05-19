@@ -13,7 +13,11 @@ const {
 } = require(path.join(__dirname, '..', 'lib', 'adapters', 'k3-wise-webapi-adapter.cjs'))
 const {
   createK3WiseSqlServerChannel,
+  createK3WiseSqlServerChannelFactory,
 } = require(path.join(__dirname, '..', 'lib', 'adapters', 'k3-wise-sqlserver-channel.cjs'))
+const {
+  createK3WiseSqlServerReadOnlyExecutor,
+} = require(path.join(__dirname, '..', 'lib', 'adapters', 'k3-wise-sqlserver-executor.cjs'))
 
 function jsonResponse(status, body, headers = {}) {
   return {
@@ -104,7 +108,7 @@ function createK3WebApiSystem(overrides = {}) {
   }
 }
 
-function createSqlSystem(config = {}) {
+function createSqlSystem(config = {}, overrides = {}) {
   return {
     id: 'k3_sql_1',
     name: 'K3 WISE SQL Server',
@@ -135,7 +139,47 @@ function createSqlSystem(config = {}) {
       },
       ...config,
     },
+    ...overrides,
   }
+}
+
+function createFakeMssqlDriver({ rows = [{ FItemID: 1, FNumber: 'MAT-001' }], failConnect = null } = {}) {
+  const calls = []
+  class FakeRequest {
+    input(name, value) {
+      calls.push({ method: 'input', name, value })
+      return this
+    }
+
+    async query(sql) {
+      calls.push({ method: 'query', sql })
+      return { recordset: rows, rowsAffected: [rows.length] }
+    }
+  }
+
+  class ConnectionPool {
+    constructor(config) {
+      calls.push({ method: 'pool', config })
+      this.config = config
+    }
+
+    async connect() {
+      calls.push({ method: 'connect' })
+      if (failConnect) throw failConnect
+      return this
+    }
+
+    request() {
+      calls.push({ method: 'request' })
+      return new FakeRequest()
+    }
+
+    async close() {
+      calls.push({ method: 'close' })
+    }
+  }
+
+  return { driver: { ConnectionPool }, calls }
 }
 
 async function testK3WebApiAdapter() {
@@ -583,6 +627,61 @@ async function testK3SqlServerChannel() {
     }
   })()
   assert.ok(rawIdentifier instanceof AdapterValidationError, 'raw SQL-like identifiers are rejected')
+
+  const factoryInjected = createK3WiseSqlServerChannelFactory({ queryExecutor })({
+    system: createSqlSystem(),
+  })
+  const factoryConnection = await factoryInjected.testConnection()
+  assert.equal(factoryConnection.ok, true, 'factory default queryExecutor is injected into channel instances')
+
+  const { driver, calls } = createFakeMssqlDriver()
+  const readOnlyExecutor = createK3WiseSqlServerReadOnlyExecutor({ driver })
+  const runtimeAdapter = createK3WiseSqlServerChannelFactory({ queryExecutor: readOnlyExecutor })({
+    system: createSqlSystem({ server: 'sql.local:1433', database: 'AIS_TEST' }, {
+      credentials: { username: 'readonly_user', password: 'readonly-password' },
+    }),
+  })
+  const runtimeConnection = await runtimeAdapter.testConnection()
+  assert.equal(runtimeConnection.ok, true)
+  assert.equal(runtimeConnection.code, 'SQLSERVER_CONNECTED')
+  const runtimeRead = await runtimeAdapter.read({
+    object: 'material',
+    limit: 3,
+    filters: { FUseStatus: '1' },
+    watermark: { FModifyDate: '2026-05-01T00:00:00.000Z' },
+  })
+  assert.equal(runtimeRead.records.length, 1)
+  const selectQuery = calls.findLast((call) => call.method === 'query')
+  assert.match(selectQuery.sql, /^SELECT TOP 3 \[FItemID\], \[FNumber\], \[FName\] FROM \[dbo\]\.\[t_ICItem\]/)
+  assert.match(selectQuery.sql, /WHERE \[FUseStatus\] = @filter_0 AND \[FModifyDate\] > @watermark_0/)
+  assert.match(selectQuery.sql, /ORDER BY \[FNumber\]$/)
+  assert.ok(calls.some((call) => call.method === 'input' && call.name === 'filter_0' && call.value === '1'))
+  assert.ok(calls.some((call) => call.method === 'input' && call.name === 'watermark_0' && call.value === '2026-05-01T00:00:00.000Z'))
+  assert.equal(
+    JSON.stringify(calls).includes('readonly-password'),
+    true,
+    'fake driver receives the credential internally for mssql connection config',
+  )
+  assert.equal(JSON.stringify(runtimeRead).includes('readonly-password'), false, 'read result does not expose SQL credentials')
+
+  const runtimeWrite = await runtimeAdapter.upsert({
+    object: 'material_stage',
+    records: [{ FNumber: 'MAT-SHOULD-NOT-WRITE' }],
+    keyFields: ['FNumber'],
+  }).catch((error) => error)
+  assert.equal(runtimeWrite.code, 'SQLSERVER_WRITE_EXECUTOR_DISABLED', 'built-in runtime executor remains read-only')
+
+  const { driver: failingDriver } = createFakeMssqlDriver({ failConnect: new Error('login failed password=secret-that-must-not-leak for readonly_user') })
+  const failingExecutor = createK3WiseSqlServerReadOnlyExecutor({ driver: failingDriver })
+  const failingAdapter = createK3WiseSqlServerChannelFactory({ queryExecutor: failingExecutor })({
+    system: createSqlSystem({ server: 'sql.local', database: 'AIS_TEST' }, {
+      credentials: { username: 'readonly_user', password: 'secret-that-must-not-leak' },
+    }),
+  })
+  const failingConnection = await failingAdapter.testConnection()
+  assert.equal(failingConnection.ok, false)
+  assert.equal(failingConnection.code, 'SQLSERVER_TEST_FAILED')
+  assert.equal(JSON.stringify(failingConnection).includes('secret-that-must-not-leak'), false)
 }
 
 async function testK3WebApiAutoFlagCoercion() {

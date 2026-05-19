@@ -88,7 +88,7 @@ test('renders skipped SQL executor diagnostic details without failing signoff su
           id: 'sqlserver-executor-availability',
           status: 'skipped',
           code: 'SQLSERVER_EXECUTOR_MISSING',
-          reason: 'K3 WISE SQL Server source is configured but the deployment has not injected the allowlisted queryExecutor; staging-to-K3 smoke signoff can still pass.',
+          reason: 'K3 WISE SQL Server source is configured but this package has not completed SQL executor wiring or dependency install; staging-to-K3 smoke signoff can still pass.',
           systemsChecked: 1,
           blockedSystems: [
             {
@@ -108,7 +108,7 @@ test('renders skipped SQL executor diagnostic details without failing signoff su
     assert.match(result.stdout, /Internal trial signoff: \*\*PASS\*\*/)
     assert.match(result.stdout, /`sqlserver-executor-availability`: `skipped`/)
     assert.match(result.stdout, /code: `SQLSERVER_EXECUTOR_MISSING`/)
-    assert.match(result.stdout, /reason: `K3 WISE SQL Server source is configured but the deployment has not injected the allowlisted queryExecutor; staging-to-K3 smoke signoff can still pass\.`/)
+    assert.match(result.stdout, /reason: `K3 WISE SQL Server source is configured but this package has not completed SQL executor wiring or dependency install; staging-to-K3 smoke signoff can still pass\.`/)
     assert.match(result.stdout, /systemsChecked: `1`/)
     assert.match(result.stdout, /blockedSystems: id: `sys_sql`; name: `K3 SQL Source`; role: `source`; status: `error`/)
   } finally {

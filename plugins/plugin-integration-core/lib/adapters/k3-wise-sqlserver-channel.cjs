@@ -203,6 +203,17 @@ function createK3WiseSqlServerChannel({ system, queryExecutor, logger } = {}) {
     try {
       if (typeof executor.testConnection === 'function') {
         const result = await executor.testConnection({ system: normalizedSystem, input })
+        if (isPlainObject(result)) {
+          const ok = result.ok !== false
+          return {
+            ok,
+            ...(typeof result.code === 'string' ? { code: result.code } : {}),
+            ...(typeof result.message === 'string' ? { message: result.message } : {}),
+            ...(result.authenticated === undefined ? {} : { authenticated: Boolean(result.authenticated) }),
+            ...(result.connected === undefined ? {} : { connected: Boolean(result.connected) }),
+            raw: result,
+          }
+        }
         return { ok: result === undefined ? true : Boolean(result.ok !== false), raw: result }
       }
       return { ok: true }

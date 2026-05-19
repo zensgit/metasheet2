@@ -24,6 +24,7 @@ const { createHttpAdapterFactory } = require('./lib/adapters/http-adapter.cjs')
 const { createYuantusPlmWrapperAdapterFactory } = require('./lib/adapters/plm-yuantus-wrapper.cjs')
 const { createK3WiseWebApiAdapterFactory } = require('./lib/adapters/k3-wise-webapi-adapter.cjs')
 const { createK3WiseSqlServerChannelFactory } = require('./lib/adapters/k3-wise-sqlserver-channel.cjs')
+const { createK3WiseSqlServerReadOnlyExecutor } = require('./lib/adapters/k3-wise-sqlserver-executor.cjs')
 const { createMetaSheetStagingSourceAdapterFactory } = require('./lib/adapters/metasheet-staging-source-adapter.cjs')
 const { createMetaSheetMultitableTargetAdapterFactory } = require('./lib/adapters/metasheet-multitable-target-adapter.cjs')
 const { createPipelineRegistry } = require('./lib/pipelines.cjs')
@@ -199,6 +200,7 @@ module.exports = {
       database: context.api && context.api.database,
       logger,
     })
+    const sqlServerQueryExecutor = createK3WiseSqlServerReadOnlyExecutor({ logger })
     externalSystemRegistry = createExternalSystemRegistry({
       db,
       credentialStore,
@@ -207,7 +209,7 @@ module.exports = {
       .registerAdapter('http', createHttpAdapterFactory())
       .registerAdapter('plm:yuantus-wrapper', createYuantusPlmWrapperAdapterFactory())
       .registerAdapter('erp:k3-wise-webapi', createK3WiseWebApiAdapterFactory())
-      .registerAdapter('erp:k3-wise-sqlserver', createK3WiseSqlServerChannelFactory())
+      .registerAdapter('erp:k3-wise-sqlserver', createK3WiseSqlServerChannelFactory({ queryExecutor: sqlServerQueryExecutor }))
       .registerAdapter('metasheet:staging', createMetaSheetStagingSourceAdapterFactory({ context }))
       .registerAdapter('metasheet:multitable', createMetaSheetMultitableTargetAdapterFactory({ context }))
     pipelineRegistry = createPipelineRegistry({ db })
