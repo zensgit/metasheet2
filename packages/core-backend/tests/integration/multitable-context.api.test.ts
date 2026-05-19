@@ -719,6 +719,14 @@ describe('Multitable context API', () => {
       },
     })
 
+    // createApp() already ran vi.resetModules() + imported univer-meta, so
+    // importing core/logger now returns the same post-reset module instance
+    // the route's templateInstallLogger was constructed from. A prototype spy
+    // installed after construction still intercepts (info() resolves via the
+    // prototype at call time).
+    const { Logger } = await import('../../src/core/logger')
+    const infoSpy = vi.spyOn(Logger.prototype, 'info')
+
     const response = await request(app)
       .post('/api/multitable/templates/contract-management/install')
       .send({ baseName: 'Q3 Contracts' })
@@ -731,6 +739,48 @@ describe('Multitable context API', () => {
     expect(response.body.data.fields).toHaveLength(8)
     expect(response.body.data.views.map((view: any) => view.type)).toEqual(['grid', 'kanban', 'calendar'])
     expect(mockPool.transaction).toHaveBeenCalledTimes(1)
+
+    // Observation event: success path emits the stable install event with
+    // structured fields only (no baseName / body / token / email).
+    const successCall = infoSpy.mock.calls.find(([msg]) => msg === '[multitable.template.install]')
+    expect(successCall).toBeDefined()
+    const successMeta = successCall![1] as Record<string, unknown>
+    expect(successMeta).toMatchObject({
+      templateId: 'contract-management',
+      ok: true,
+      userId: 'user_multitable_1',
+    })
+    expect(successMeta).toHaveProperty('baseId')
+    expect(successMeta).toHaveProperty('sheetId')
+    expect(successMeta).not.toHaveProperty('baseName')
+    expect(JSON.stringify(successMeta)).not.toContain('Q3 Contracts')
+  })
+
+  test('logs a failed [multitable.template.install] event for an unknown template', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:write'],
+      queryHandler: async () => ({ rows: [], rowCount: 0 }),
+    })
+
+    const { Logger } = await import('../../src/core/logger')
+    const infoSpy = vi.spyOn(Logger.prototype, 'info')
+
+    await request(app)
+      .post('/api/multitable/templates/no-such-template/install')
+      .send({ baseName: 'Whatever' })
+      .expect(404)
+
+    const failCall = infoSpy.mock.calls.find(([msg]) => msg === '[multitable.template.install]')
+    expect(failCall).toBeDefined()
+    const failMeta = failCall![1] as Record<string, unknown>
+    expect(failMeta).toMatchObject({
+      templateId: 'no-such-template',
+      ok: false,
+      statusCode: 404,
+      errorCode: 'NOT_FOUND',
+    })
+    expect(failMeta).not.toHaveProperty('baseName')
+    expect(JSON.stringify(failMeta)).not.toContain('Whatever')
   })
 
   test('allows create sheet under an owned base without global multitable write', async () => {
