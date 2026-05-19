@@ -522,8 +522,41 @@
             id="attendance-report-record-sync-user"
             v-model="recordSyncUserId"
             type="text"
-            :placeholder="tr('Required in v1', 'v1 必填')"
+            :disabled="recordSyncAllUsers"
+            :placeholder="recordSyncAllUsers ? tr('All users mode', '全员模式') : tr('Required for single user', '单员工必填')"
             data-report-record-sync-user
+          >
+        </label>
+        <label class="attendance-report-fields__filter attendance-report-fields__filter--inline" for="attendance-report-record-sync-all-users">
+          <span>{{ tr('All active users', '全部活跃员工') }}</span>
+          <input
+            id="attendance-report-record-sync-all-users"
+            v-model="recordSyncAllUsers"
+            type="checkbox"
+            data-report-record-sync-all-users
+          >
+        </label>
+        <label class="attendance-report-fields__filter" for="attendance-report-record-sync-page">
+          <span>{{ tr('Page', '页码') }}</span>
+          <input
+            id="attendance-report-record-sync-page"
+            v-model.number="recordSyncPage"
+            type="number"
+            min="1"
+            :disabled="!recordSyncAllUsers"
+            data-report-record-sync-page
+          >
+        </label>
+        <label class="attendance-report-fields__filter" for="attendance-report-record-sync-page-size">
+          <span>{{ tr('Page size', '每页数量') }}</span>
+          <input
+            id="attendance-report-record-sync-page-size"
+            v-model.number="recordSyncPageSize"
+            type="number"
+            min="1"
+            max="100"
+            :disabled="!recordSyncAllUsers"
+            data-report-record-sync-page-size
           >
         </label>
         <button
@@ -881,11 +914,21 @@ interface AttendanceReportRecordsSyncResult {
   degraded?: boolean
   reason?: string | null
   synced?: number
+  rowsSynced?: number
   patched?: number
   created?: number
   skipped?: number
   failed?: number
   duplicateRowKeys?: number
+  usersScanned?: number
+  usersSynced?: number
+  usersFailed?: number
+  totalUsers?: number
+  page?: number
+  pageSize?: number
+  hasNextPage?: boolean
+  userSelection?: string
+  failedUsers?: Array<{ userId?: string; error?: string; failedRows?: number }>
   fieldFingerprint?: string
   syncedAt?: string
   multitable?: {
@@ -965,6 +1008,9 @@ const recordSyncStatusKind = ref<'info' | 'warn' | 'error'>('info')
 const recordSyncFrom = ref(dateInputValue(-30))
 const recordSyncTo = ref(dateInputValue(0))
 const recordSyncUserId = ref('')
+const recordSyncAllUsers = ref(false)
+const recordSyncPage = ref(1)
+const recordSyncPageSize = ref(50)
 const reportRecordsSyncResult = ref<AttendanceReportRecordsSyncResult | null>(null)
 const fieldSearchTerm = ref('')
 const fieldStatusFilter = ref<ReportFieldStatusFilter>('all')
@@ -1212,7 +1258,7 @@ const multitableDetailRows = computed<MultitableDetailRow[]>(() => {
 const canSyncReportRecords = computed(() => (
   recordSyncFrom.value.trim() !== ''
   && recordSyncTo.value.trim() !== ''
-  && recordSyncUserId.value.trim() !== ''
+  && (recordSyncAllUsers.value || recordSyncUserId.value.trim() !== '')
 ))
 const reportRecordsMultitableHref = computed(() => {
   const multitable = reportRecordsSyncResult.value?.multitable
@@ -1233,6 +1279,19 @@ const reportRecordSyncDetailRows = computed<MultitableDetailRow[]>(() => {
     const normalized = String(value ?? '').trim()
     if (normalized) rows.push({ key, label, value: normalized, monospace })
   }
+  addNumber('totalUsers', tr('Total users', '总员工数'), result.totalUsers)
+  addNumber('page', tr('Page', '页码'), result.page)
+  addNumber('pageSize', tr('Page size', '每页数量'), result.pageSize)
+  if (typeof result.hasNextPage === 'boolean') {
+    rows.push({
+      key: 'hasNextPage',
+      label: tr('Has next page', '还有下一页'),
+      value: result.hasNextPage ? tr('Yes', '是') : tr('No', '否'),
+    })
+  }
+  addNumber('usersScanned', tr('Users scanned', '扫描员工'), result.usersScanned)
+  addNumber('usersSynced', tr('Users synced', '同步员工'), result.usersSynced)
+  addNumber('usersFailed', tr('Users failed', '失败员工'), result.usersFailed)
   addNumber('synced', tr('Rows read', '读取行数'), result.synced)
   addNumber('created', tr('Created', '新建'), result.created)
   addNumber('patched', tr('Patched', '更新'), result.patched)
@@ -1648,6 +1707,9 @@ function buildReportRecordsSyncStatusMessage(data: AttendanceReportRecordsSyncRe
       : tr('Report records sync degraded.', '报表记录同步已降级。')
   }
   const details = [
+    syncStatusMetric('Users', '员工', data.usersScanned),
+    syncStatusMetric('Synced users', '已同步员工', data.usersSynced),
+    syncStatusMetric('Failed users', '失败员工', data.usersFailed),
     syncStatusMetric('Rows', '行数', data.synced),
     syncStatusMetric('Created', '新建', data.created),
     syncStatusMetric('Patched', '更新', data.patched),
@@ -1717,14 +1779,21 @@ async function syncReportRecords(): Promise<void> {
     const orgId = props.orgId?.trim()
     if (orgId) params.set('orgId', orgId)
     const suffix = params.toString()
+    const body: Record<string, unknown> = {
+      from: recordSyncFrom.value.trim(),
+      to: recordSyncTo.value.trim(),
+    }
+    if (recordSyncAllUsers.value) {
+      body.allUsers = true
+      body.page = Number(recordSyncPage.value) || 1
+      body.pageSize = Number(recordSyncPageSize.value) || 50
+    } else {
+      body.userId = recordSyncUserId.value.trim()
+    }
     const response = await apiFetch(`/api/attendance/report-records/sync${suffix ? `?${suffix}` : ''}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        from: recordSyncFrom.value.trim(),
-        to: recordSyncTo.value.trim(),
-        userId: recordSyncUserId.value.trim(),
-      }),
+      body: JSON.stringify(body),
     })
     const payload = await response.json()
     if (!response.ok || payload?.ok === false) {
@@ -1968,6 +2037,17 @@ watch(
 
 .attendance-report-fields__record-sync-form .attendance-report-fields__filter {
   flex: 1 1 180px;
+}
+
+.attendance-report-fields__record-sync-form .attendance-report-fields__filter--inline {
+  flex: 0 0 auto;
+  min-width: 140px;
+}
+
+.attendance-report-fields__filter--inline input[type="checkbox"] {
+  width: 18px;
+  min-height: 18px;
+  padding: 0;
 }
 
 .attendance-report-fields__formula-reference-layout {

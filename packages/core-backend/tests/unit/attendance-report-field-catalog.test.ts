@@ -983,6 +983,143 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(store.filter(r => r.data[rowKeyFid] === 'org-1:u-1:2026-05-13').length).toBe(2) // not auto-deleted (v1)
   })
 
+  it('report-records sync: bulk explicit users dedupe and aggregate per-user results', async () => {
+    expect(helpers.normalizeAttendanceReportRecordsSyncUserIds(['u-1', ' u-1 ', '', null, 'u-2']))
+      .toEqual(['u-1', 'u-2'])
+    expect(helpers.normalizeAttendanceReportRecordsSyncPage('2', '500'))
+      .toMatchObject({ page: 2, pageSize: 100, offset: 100 })
+
+    const store: Array<{ id: string; data: Record<string, unknown> }> = []
+    let seq = 0
+    const rowKeyFid = 'fld_row_key'
+    const records = {
+      queryRecords: async ({ filters }: { filters?: Record<string, unknown> }) => {
+        const want = filters?.[rowKeyFid]
+        return store.filter(r => r.data[rowKeyFid] === want)
+      },
+      createRecord: async ({ data }: { data: Record<string, unknown> }) => {
+        const rec = { id: `rec-${++seq}`, data: { ...data } }
+        store.push(rec)
+        return rec
+      },
+      patchRecord: async ({ recordId, changes }: { recordId: string; changes: Record<string, unknown> }) => {
+        const rec = store.find(r => r.id === recordId)
+        if (rec) rec.data = { ...rec.data, ...changes }
+        return rec
+      },
+    }
+    const provisioning = {
+      ensureObject: async () => ({ baseId: 'base_rr', sheet: { id: 'sheet_rr' } }),
+      ensureView: async () => ({ id: 'view_rr', sheetId: 'sheet_rr' }),
+      resolveFieldIds: async ({ fieldIds }: { fieldIds: string[] }) =>
+        Object.fromEntries(fieldIds.map(fieldId => [fieldId, `fld_${fieldId}`])),
+    }
+    const rowsByUser: Record<string, Array<Record<string, unknown>>> = {
+      'u-1': [
+        { user_id: 'u-1', org_id: 'org-1', work_date: '2026-05-13', timezone: 'UTC', first_in_at: '2026-05-13T09:00:00Z', last_out_at: '2026-05-13T18:00:00Z', work_minutes: 480, late_minutes: 0, early_leave_minutes: 0, status: 'normal', is_workday: true, meta: {}, user_name: '张三', username: 'zhangsan' },
+        { user_id: 'u-1', org_id: 'org-1', work_date: '2026-05-14', timezone: 'UTC', first_in_at: '2026-05-14T09:10:00Z', last_out_at: '2026-05-14T18:00:00Z', work_minutes: 470, late_minutes: 10, early_leave_minutes: 0, status: 'late', is_workday: true, meta: {}, user_name: '张三', username: 'zhangsan' },
+      ],
+      'u-2': [
+        { user_id: 'u-2', org_id: 'org-1', work_date: '2026-05-13', timezone: 'UTC', first_in_at: '2026-05-13T09:00:00Z', last_out_at: '2026-05-13T18:00:00Z', work_minutes: 480, late_minutes: 0, early_leave_minutes: 0, status: 'normal', is_workday: true, meta: {}, user_name: '李四', username: 'lisi' },
+      ],
+    }
+    const db = {
+      query: async (sql: string, params?: unknown[]) => {
+        if (/FROM attendance_records ar/.test(sql)) return rowsByUser[String(params?.[0])] ?? []
+        return []
+      },
+    }
+    const context = { api: { multitable: { provisioning, records }, database: db } }
+
+    const result = await helpers.syncAttendanceReportRecordsForUsers(
+      context,
+      db,
+      'org-1',
+      { warn: vi.fn() },
+      { from: '2026-05-01', to: '2026-05-31', userIds: ['u-1', ' u-1 ', 'u-2', ''] },
+    )
+    expect(result).toMatchObject({
+      userSelection: 'explicit',
+      totalUsers: 2,
+      usersScanned: 2,
+      usersSynced: 2,
+      usersFailed: 0,
+      synced: 3,
+      rowsSynced: 3,
+      created: 3,
+      patched: 0,
+      skipped: 0,
+      failed: 0,
+      hasNextPage: false,
+    })
+    expect(store).toHaveLength(3)
+    expect(store.map(row => row.data[rowKeyFid])).toEqual([
+      'org-1:u-1:2026-05-13',
+      'org-1:u-1:2026-05-14',
+      'org-1:u-2:2026-05-13',
+    ])
+
+    const second = await helpers.syncAttendanceReportRecordsForUsers(
+      context,
+      db,
+      'org-1',
+      { warn: vi.fn() },
+      { from: '2026-05-01', to: '2026-05-31', userIds: ['u-1', 'u-2'] },
+    )
+    expect(second).toMatchObject({ synced: 3, created: 0, patched: 0, skipped: 3, usersScanned: 2 })
+  })
+
+  it('report-records sync: all-user pages prefer active org users and fall back to record owners', async () => {
+    const primaryDb = {
+      query: async (sql: string) => {
+        if (/COUNT\(\*\)::int AS total\s+FROM user_orgs/s.test(sql)) return [{ total: 5 }]
+        if (/SELECT uo\.user_id\s+FROM user_orgs/s.test(sql)) return [{ user_id: 'u-3' }, { user_id: 'u-4' }]
+        return []
+      },
+    }
+    const page = await helpers.loadAttendanceReportRecordsSyncUserPage(
+      primaryDb,
+      'org-1',
+      '2026-05-01',
+      '2026-05-31',
+      { page: 2, pageSize: 2 },
+    )
+    expect(page).toEqual({
+      userIds: ['u-3', 'u-4'],
+      totalUsers: 5,
+      page: 2,
+      pageSize: 2,
+      hasNextPage: true,
+      userSelection: 'allUsers',
+    })
+
+    const fallbackDb = {
+      query: async (sql: string) => {
+        if (/FROM user_orgs/.test(sql)) {
+          const error = new Error('relation "user_orgs" does not exist') as Error & { code: string }
+          error.code = '42P01'
+          throw error
+        }
+        if (/users_with_records/.test(sql)) return [{ total: 1 }]
+        if (/SELECT DISTINCT user_id/.test(sql)) return [{ user_id: 'u-record' }]
+        return []
+      },
+    }
+    const fallback = await helpers.loadAttendanceReportRecordsSyncUserPage(
+      fallbackDb,
+      'org-1',
+      '2026-05-01',
+      '2026-05-31',
+      { page: 1, pageSize: 50 },
+    )
+    expect(fallback).toMatchObject({
+      userIds: ['u-record'],
+      totalUsers: 1,
+      hasNextPage: false,
+      userSelection: 'attendanceRecordsFallback',
+    })
+  })
+
   it('report-records sync: disabled managed value columns are patched to null', async () => {
     const catalogFieldIds = Object.fromEntries(
       Object.values(helpers.ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS).map((fieldId) => [fieldId, `fld_${fieldId}`]),

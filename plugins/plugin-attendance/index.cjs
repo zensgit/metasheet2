@@ -2145,6 +2145,96 @@ function attendanceReportRecordRowKey(orgId, userId, workDate) {
   return `${orgId}:${userId}:${workDate}`
 }
 
+const ATTENDANCE_REPORT_RECORDS_SYNC_DEFAULT_PAGE_SIZE = 50
+const ATTENDANCE_REPORT_RECORDS_SYNC_MAX_PAGE_SIZE = 100
+
+function normalizeAttendanceReportRecordsSyncUserIds(values) {
+  const source = Array.isArray(values) ? values : [values]
+  const seen = new Set()
+  const userIds = []
+  for (const value of source) {
+    const userId = String(value ?? '').trim()
+    if (!userId || seen.has(userId)) continue
+    seen.add(userId)
+    userIds.push(userId)
+  }
+  return userIds
+}
+
+function normalizeAttendanceReportRecordsSyncPage(rawPage, rawPageSize) {
+  const page = Math.max(1, Math.floor(Number(rawPage) || 1))
+  const pageSize = Math.min(
+    ATTENDANCE_REPORT_RECORDS_SYNC_MAX_PAGE_SIZE,
+    Math.max(1, Math.floor(Number(rawPageSize) || ATTENDANCE_REPORT_RECORDS_SYNC_DEFAULT_PAGE_SIZE)),
+  )
+  return { page, pageSize, offset: (page - 1) * pageSize }
+}
+
+async function loadAttendanceReportRecordsSyncUserPage(db, orgId, from, to, options = {}) {
+  const { page, pageSize, offset } = normalizeAttendanceReportRecordsSyncPage(options.page, options.pageSize)
+  try {
+    const countRows = await db.query(
+      `SELECT COUNT(*)::int AS total
+       FROM user_orgs uo
+       JOIN users u ON u.id = uo.user_id
+       WHERE uo.org_id = $1
+         AND uo.is_active = true
+         AND u.is_active = true`,
+      [orgId]
+    )
+    const rows = await db.query(
+      `SELECT uo.user_id
+       FROM user_orgs uo
+       JOIN users u ON u.id = uo.user_id
+       WHERE uo.org_id = $1
+         AND uo.is_active = true
+         AND u.is_active = true
+       ORDER BY uo.user_id ASC
+       LIMIT $2 OFFSET $3`,
+      [orgId, pageSize, offset]
+    )
+    const totalUsers = Number(countRows[0]?.total ?? rows.length)
+    const userIds = normalizeAttendanceReportRecordsSyncUserIds(rows.map(row => row.user_id))
+    return {
+      userIds,
+      totalUsers,
+      page,
+      pageSize,
+      hasNextPage: offset + userIds.length < totalUsers,
+      userSelection: 'allUsers',
+    }
+  } catch (error) {
+    if (!isDatabaseSchemaError(error)) throw error
+    const countRows = await db.query(
+      `SELECT COUNT(*)::int AS total
+       FROM (
+         SELECT DISTINCT user_id
+         FROM attendance_records
+         WHERE org_id = $1 AND work_date BETWEEN $2 AND $3
+       ) users_with_records`,
+      [orgId, from, to]
+    )
+    const rows = await db.query(
+      `SELECT DISTINCT user_id
+       FROM attendance_records
+       WHERE org_id = $1 AND work_date BETWEEN $2 AND $3
+       ORDER BY user_id ASC
+       LIMIT $4 OFFSET $5`,
+      [orgId, from, to, pageSize, offset]
+    )
+    const totalUsers = Number(countRows[0]?.total ?? rows.length)
+    const userIds = normalizeAttendanceReportRecordsSyncUserIds(rows.map(row => row.user_id))
+    return {
+      userIds,
+      totalUsers,
+      page,
+      pageSize,
+      hasNextPage: offset + userIds.length < totalUsers,
+      userSelection: 'attendanceRecordsFallback',
+    }
+  }
+}
+
 function buildAttendanceReportRecordSourceFingerprint(logicalPayload) {
   const excluded = new Set([
     ATTENDANCE_REPORT_RECORDS_FIELDS.syncedAt,
@@ -2156,6 +2246,23 @@ function buildAttendanceReportRecordSourceFingerprint(logicalPayload) {
     .sort()
     .map(key => [key, logicalPayload[key]])
   return crypto.createHash('sha1').update(JSON.stringify(canonical)).digest('hex')
+}
+
+function createAttendanceReportRecordsSyncEmptyResult(extra = {}) {
+  return {
+    synced: 0,
+    rowsSynced: 0,
+    patched: 0,
+    created: 0,
+    skipped: 0,
+    failed: 0,
+    duplicateRowKeys: 0,
+    usersScanned: 0,
+    usersSynced: 0,
+    usersFailed: 0,
+    failedUsers: [],
+    ...extra,
+  }
 }
 
 async function syncAttendanceReportRecords(context, db, orgId, logger, params) {
@@ -2295,6 +2402,7 @@ async function syncAttendanceReportRecords(context, db, orgId, logger, params) {
   }
   return {
     ...result,
+    rowsSynced: result.synced,
     fieldFingerprint,
     syncedAt,
     multitable: {
@@ -2307,6 +2415,79 @@ async function syncAttendanceReportRecords(context, db, orgId, logger, params) {
       viewId: ensured.viewId || null,
     },
   }
+}
+
+async function syncAttendanceReportRecordsForUsers(context, db, orgId, logger, params) {
+  const from = String(params?.from || '').trim()
+  const to = String(params?.to || '').trim()
+  const explicitUserIds = normalizeAttendanceReportRecordsSyncUserIds(params?.userIds)
+  const selection = explicitUserIds.length > 0
+    ? {
+        userIds: explicitUserIds,
+        totalUsers: explicitUserIds.length,
+        page: 1,
+        pageSize: explicitUserIds.length,
+        hasNextPage: false,
+        userSelection: 'explicit',
+      }
+    : await loadAttendanceReportRecordsSyncUserPage(db, orgId, from, to, {
+      page: params?.page,
+      pageSize: params?.pageSize,
+    })
+
+  const aggregate = createAttendanceReportRecordsSyncEmptyResult({
+    totalUsers: selection.totalUsers,
+    page: selection.page,
+    pageSize: selection.pageSize,
+    hasNextPage: selection.hasNextPage,
+    userSelection: selection.userSelection,
+  })
+
+  for (const userId of selection.userIds) {
+    aggregate.usersScanned += 1
+    try {
+      const result = await syncAttendanceReportRecords(context, db, orgId, logger, { from, to, userId })
+      if (result.degraded) {
+        return {
+          ...aggregate,
+          ...result,
+          rowsSynced: aggregate.synced,
+          totalUsers: selection.totalUsers,
+          page: selection.page,
+          pageSize: selection.pageSize,
+          hasNextPage: selection.hasNextPage,
+          userSelection: selection.userSelection,
+        }
+      }
+      aggregate.usersSynced += 1
+      aggregate.synced += Number(result.synced ?? 0)
+      aggregate.rowsSynced = aggregate.synced
+      aggregate.created += Number(result.created ?? 0)
+      aggregate.patched += Number(result.patched ?? 0)
+      aggregate.skipped += Number(result.skipped ?? 0)
+      aggregate.failed += Number(result.failed ?? 0)
+      aggregate.duplicateRowKeys += Number(result.duplicateRowKeys ?? 0)
+      if (Number(result.failed ?? 0) > 0) {
+        aggregate.failedUsers.push({ userId, failedRows: Number(result.failed ?? 0) })
+      }
+      if (result.fieldFingerprint) aggregate.fieldFingerprint = result.fieldFingerprint
+      if (result.syncedAt) aggregate.syncedAt = result.syncedAt
+      if (result.multitable) aggregate.multitable = result.multitable
+    } catch (error) {
+      aggregate.usersFailed += 1
+      aggregate.failed += 1
+      aggregate.failedUsers.push({
+        userId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      logger?.warn?.('attendance report records user sync failed', {
+        userId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+  aggregate.usersFailed = aggregate.failedUsers.length
+  return aggregate
 }
 
 async function loadAttendanceReportFieldCatalog(context, orgId) {
@@ -10304,6 +10485,10 @@ module.exports = {
     getAttendanceReportRecordsDescriptor,
     ensureAttendanceReportRecords,
     syncAttendanceReportRecords,
+    syncAttendanceReportRecordsForUsers,
+    normalizeAttendanceReportRecordsSyncUserIds,
+    normalizeAttendanceReportRecordsSyncPage,
+    loadAttendanceReportRecordsSyncUserPage,
     buildAttendanceReportRecordsValueColumns,
     mapReportFieldToMultitableType,
     buildAttendanceReportRecordSourceFingerprint,
@@ -22422,10 +22607,48 @@ module.exports = {
         const parsed = z.object({
           from: z.string().min(1),
           to: z.string().min(1),
-          userId: z.string().min(1),
+          userId: z.string().min(1).optional(),
+          userIds: z.array(z.string().min(1)).max(ATTENDANCE_REPORT_RECORDS_SYNC_MAX_PAGE_SIZE).optional(),
+          allUsers: z.boolean().optional(),
+          page: z.coerce.number().int().min(1).optional(),
+          pageSize: z.coerce.number().int().min(1).max(ATTENDANCE_REPORT_RECORDS_SYNC_MAX_PAGE_SIZE).optional(),
         }).safeParse(req.body ?? {})
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+        const explicitUserIds = normalizeAttendanceReportRecordsSyncUserIds([
+          parsed.data.userId,
+          ...(parsed.data.userIds ?? []),
+        ])
+        if (parsed.data.allUsers === true && explicitUserIds.length > 0) {
+          res.status(400).json({
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: 'Use either allUsers or userId/userIds, not both',
+            },
+          })
+          return
+        }
+        if (parsed.data.allUsers !== true && explicitUserIds.length === 0) {
+          res.status(400).json({
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: 'userId, userIds, or allUsers is required',
+            },
+          })
+          return
+        }
+        if (explicitUserIds.length > ATTENDANCE_REPORT_RECORDS_SYNC_MAX_PAGE_SIZE) {
+          res.status(400).json({
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: `At most ${ATTENDANCE_REPORT_RECORDS_SYNC_MAX_PAGE_SIZE} userIds can be synced in one request`,
+            },
+          })
           return
         }
         const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
@@ -22433,21 +22656,36 @@ module.exports = {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
           return
         }
-        const result = await syncAttendanceReportRecords(context, db, orgId, logger, {
-          from: dateRange.from,
-          to: dateRange.to,
-          userId: parsed.data.userId,
-        })
+        const result = explicitUserIds.length === 1 && parsed.data.allUsers !== true && !Array.isArray(parsed.data.userIds)
+          ? await syncAttendanceReportRecords(context, db, orgId, logger, {
+            from: dateRange.from,
+            to: dateRange.to,
+            userId: explicitUserIds[0],
+          })
+          : await syncAttendanceReportRecordsForUsers(context, db, orgId, logger, {
+            from: dateRange.from,
+            to: dateRange.to,
+            userIds: explicitUserIds,
+            allUsers: parsed.data.allUsers,
+            page: parsed.data.page,
+            pageSize: parsed.data.pageSize,
+          })
         if (result.degraded) {
-          res.json({ ok: true, data: { degraded: true, reason: result.reason, synced: 0 } })
+          res.json({ ok: true, data: { ...result, degraded: true, reason: result.reason, synced: 0 } })
           return
         }
         emitEvent('attendance.report_records.synced', {
           orgId,
-          userId: parsed.data.userId,
+          userId: explicitUserIds.length === 1 ? explicitUserIds[0] : undefined,
+          userIds: explicitUserIds.length > 1 ? explicitUserIds : undefined,
+          allUsers: parsed.data.allUsers === true,
+          usersScanned: result.usersScanned,
+          usersSynced: result.usersSynced,
+          usersFailed: result.usersFailed,
           from: dateRange.from,
           to: dateRange.to,
           synced: result.synced,
+          rowsSynced: result.rowsSynced,
           patched: result.patched,
           created: result.created,
           skipped: result.skipped,
