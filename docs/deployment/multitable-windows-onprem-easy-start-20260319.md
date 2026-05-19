@@ -285,6 +285,11 @@ pnpm install --frozen-lockfile
 The Windows apply helper runs that dependency refresh with diagnostics rather
 than as an unbounded silent command:
 
+- install entrypoint: a generated `dependency-refresh-*.cmd` wrapper launched
+  through `cmd.exe /d /s /c`, with `pnpm.cmd` preferred over `pnpm.ps1`;
+- local store: deploy-root `.pnpm-store`, passed to pnpm with `--store-dir`;
+- pnpm reporter: `--reporter=append-only`, so scheduled-task logs can grow
+  incrementally instead of waiting for an interactive renderer;
 - default timeout: 1800 seconds;
 - default heartbeat: 60 seconds;
 - stdout/stderr logs: `output\logs\dependency-refresh-*.stdout.log` and

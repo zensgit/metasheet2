@@ -119,6 +119,8 @@ REQUIRED_PATHS=(
   "docs/development/onprem-package-dependency-refresh-verification-20260519.md"
   "docs/development/onprem-package-dependency-refresh-diagnostics-design-20260519.md"
   "docs/development/onprem-package-dependency-refresh-diagnostics-verification-20260519.md"
+  "docs/development/onprem-package-dependency-refresh-wrapper-design-20260519.md"
+  "docs/development/onprem-package-dependency-refresh-wrapper-verification-20260519.md"
   "docs/development/data-factory-readiness-package-verify-delivery-development-20260515.md"
   "docs/development/data-factory-readiness-package-verify-delivery-verification-20260515.md"
   "docs/development/onprem-migration-gap-guard-development-20260514.md"

@@ -79,6 +79,20 @@ function Resolve-CommandPath {
   return $command.Source
 }
 
+function Resolve-PnpmInstallCommand {
+  $cmdCommand = Get-Command 'pnpm.cmd' -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($cmdCommand -and -not [string]::IsNullOrWhiteSpace($cmdCommand.Source)) {
+    return $cmdCommand.Source
+  }
+
+  $command = Get-Command 'pnpm' -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $command -or [string]::IsNullOrWhiteSpace($command.Source)) {
+    throw 'Missing required command: pnpm'
+  }
+
+  return $command.Source
+}
+
 function Convert-PositiveInt {
   param(
     [string]$Value,
@@ -91,6 +105,103 @@ function Convert-PositiveInt {
   }
 
   return $parsed
+}
+
+function ConvertTo-CmdQuoted {
+  param([string]$Value)
+
+  return '"' + ($Value -replace '"', '""') + '"'
+}
+
+function Invoke-PnpmSingleLine {
+  param(
+    [string]$PnpmPath,
+    [string[]]$Arguments
+  )
+
+  if ($PnpmPath.ToLowerInvariant().EndsWith('.ps1')) {
+    $output = powershell.exe -NoProfile -ExecutionPolicy Bypass -File $PnpmPath @Arguments 2>$null
+    $firstLine = $output | Select-Object -First 1
+    return $firstLine
+  }
+
+  $output = & $PnpmPath @Arguments 2>$null
+  $firstLine = $output | Select-Object -First 1
+  return $firstLine
+}
+
+function New-DependencyRefreshCommandWrapper {
+  param(
+    [string]$WrapperPath,
+    [string]$PnpmPath,
+    [string]$RootDir,
+    [string]$StoreDir
+  )
+
+  $quotedPnpmPath = ConvertTo-CmdQuoted -Value $PnpmPath
+  $quotedStoreDir = ConvertTo-CmdQuoted -Value $StoreDir
+  $quotedRootDir = ConvertTo-CmdQuoted -Value $RootDir
+  $pnpmPrefix = if ($PnpmPath.ToLowerInvariant().EndsWith('.ps1')) {
+    "powershell.exe -NoProfile -ExecutionPolicy Bypass -File $quotedPnpmPath"
+  } else {
+    "call $quotedPnpmPath"
+  }
+
+  $lines = @(
+    '@echo off',
+    'setlocal EnableExtensions DisableDelayedExpansion',
+    'echo [dependency-refresh-wrapper] wrapper entered',
+    "echo [dependency-refresh-wrapper] root=$quotedRootDir",
+    'echo [dependency-refresh-wrapper] cwd before cd=%CD%',
+    "cd /d $quotedRootDir",
+    'echo [dependency-refresh-wrapper] cwd after cd=%CD%',
+    'echo [dependency-refresh-wrapper] user:',
+    'whoami',
+    'echo [dependency-refresh-wrapper] node path:',
+    'where node',
+    'echo [dependency-refresh-wrapper] pnpm path:',
+    'where pnpm',
+    'echo [dependency-refresh-wrapper] pnpm command:',
+    "echo $quotedPnpmPath",
+    'echo [dependency-refresh-wrapper] pnpm version:',
+    "$pnpmPrefix --version",
+    'echo [dependency-refresh-wrapper] pnpm config registry:',
+    "$pnpmPrefix config get registry",
+    'echo [dependency-refresh-wrapper] pnpm config store-dir:',
+    "$pnpmPrefix config get store-dir",
+    "echo [dependency-refresh-wrapper] local store-dir=$quotedStoreDir",
+    "if not exist $quotedStoreDir mkdir $quotedStoreDir",
+    'echo [dependency-refresh-wrapper] pnpm install starting',
+    "$pnpmPrefix install --frozen-lockfile --reporter=append-only --store-dir $quotedStoreDir",
+    'set "DEPENDENCY_REFRESH_EXIT=%ERRORLEVEL%"',
+    'echo [dependency-refresh-wrapper] pnpm install exit=%DEPENDENCY_REFRESH_EXIT%',
+    'exit /b %DEPENDENCY_REFRESH_EXIT%'
+  )
+
+  Set-Content -LiteralPath $WrapperPath -Value $lines -Encoding ASCII
+}
+
+function Stop-ProcessTree {
+  param([System.Diagnostics.Process]$Process)
+
+  $taskkill = Get-Command 'taskkill.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($taskkill -and -not [string]::IsNullOrWhiteSpace($taskkill.Source)) {
+    Write-Info "Killing process tree pid=$($Process.Id) via taskkill.exe"
+    & $taskkill.Source /PID $Process.Id /T /F | ForEach-Object {
+      Write-Info "taskkill: $_"
+    }
+    if ($LASTEXITCODE -eq 0) {
+      return
+    }
+    Write-Info "taskkill.exe returned exit code $LASTEXITCODE; falling back to Process.Kill()"
+  }
+
+  try {
+    $Process.Kill()
+  }
+  catch {
+    Write-Info "Failed to kill timed-out process pid=$($Process.Id): $($_.Exception.Message)"
+  }
 }
 
 function Invoke-CheckedCommand {
@@ -163,12 +274,7 @@ function Invoke-LoggedProcess {
     $elapsedSec = [int]($now - $startedAt).TotalSeconds
 
     if ($elapsedSec -ge $TimeoutSec) {
-      try {
-        $process.Kill()
-      }
-      catch {
-        Write-Info "Failed to kill timed-out process pid=$($process.Id): $($_.Exception.Message)"
-      }
+      Stop-ProcessTree -Process $process
 
       Write-LogTail -Path $stdoutLog -Label 'stdout'
       Write-LogTail -Path $stderrLog -Label 'stderr'
@@ -176,7 +282,9 @@ function Invoke-LoggedProcess {
     }
 
     if ($now -ge $nextHeartbeatAt) {
-      Write-Info "$Description still running after ${elapsedSec}s (pid=$($process.Id)); logs: $stdoutLog ; $stderrLog"
+      $stdoutSize = if (Test-Path -LiteralPath $stdoutLog) { (Get-Item -LiteralPath $stdoutLog).Length } else { 0 }
+      $stderrSize = if (Test-Path -LiteralPath $stderrLog) { (Get-Item -LiteralPath $stderrLog).Length } else { 0 }
+      Write-Info "$Description still running after ${elapsedSec}s (pid=$($process.Id)); stdout=${stdoutSize}B stderr=${stderrSize}B; logs: $stdoutLog ; $stderrLog"
       $nextHeartbeatAt = $now.AddSeconds($HeartbeatSec)
     }
   }
@@ -263,14 +371,21 @@ try {
 
   Require-Command -Name 'node'
   $pnpmPath = Resolve-CommandPath -Name 'pnpm'
+  $pnpmInstallPath = Resolve-PnpmInstallCommand
 
   if ($InstallDeps -ne '0') {
     $dependencyTimeoutSec = Convert-PositiveInt -Value $DependencyRefreshTimeoutSec -Label 'DependencyRefreshTimeoutSec'
     $dependencyHeartbeatSec = Convert-PositiveInt -Value $DependencyRefreshHeartbeatSec -Label 'DependencyRefreshHeartbeatSec'
     $dependencyLogPrefix = Join-Path $outputLogs ('dependency-refresh-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    $dependencyWrapperPath = $dependencyLogPrefix + '.cmd'
+    $dependencyStoreDir = Join-Path $resolvedRoot '.pnpm-store'
+    New-Item -ItemType Directory -Force -Path $dependencyStoreDir | Out-Null
     Write-Info "pnpm path: $pnpmPath"
+    Write-Info "pnpm install path: $pnpmInstallPath"
+    Write-Info "dependency refresh wrapper: $dependencyWrapperPath"
+    Write-Info "dependency refresh local store: $dependencyStoreDir"
     try {
-      $pnpmVersion = (& $pnpmPath --version 2>$null | Select-Object -First 1)
+      $pnpmVersion = Invoke-PnpmSingleLine -PnpmPath $pnpmInstallPath -Arguments @('--version')
       if (-not [string]::IsNullOrWhiteSpace($pnpmVersion)) {
         Write-Info "pnpm version: $pnpmVersion"
       }
@@ -278,10 +393,35 @@ try {
     catch {
       Write-Info "Unable to read pnpm version before dependency refresh: $($_.Exception.Message)"
     }
+    try {
+      $pnpmRegistry = Invoke-PnpmSingleLine -PnpmPath $pnpmInstallPath -Arguments @('config', 'get', 'registry')
+      if (-not [string]::IsNullOrWhiteSpace($pnpmRegistry)) {
+        Write-Info "pnpm config registry: $pnpmRegistry"
+      }
+    }
+    catch {
+      Write-Info "Unable to read pnpm registry before dependency refresh: $($_.Exception.Message)"
+    }
+    try {
+      $pnpmStoreDir = Invoke-PnpmSingleLine -PnpmPath $pnpmInstallPath -Arguments @('config', 'get', 'store-dir')
+      if (-not [string]::IsNullOrWhiteSpace($pnpmStoreDir)) {
+        Write-Info "pnpm config store-dir: $pnpmStoreDir"
+      }
+    }
+    catch {
+      Write-Info "Unable to read pnpm store-dir before dependency refresh: $($_.Exception.Message)"
+    }
+    New-DependencyRefreshCommandWrapper `
+      -WrapperPath $dependencyWrapperPath `
+      -PnpmPath $pnpmInstallPath `
+      -RootDir $resolvedRoot `
+      -StoreDir $dependencyStoreDir
+
+    $cmdPath = Resolve-CommandPath -Name 'cmd.exe'
     Invoke-LoggedProcess `
-      -Description 'Refresh dependencies (pnpm install --frozen-lockfile)' `
-      -FilePath $pnpmPath `
-      -Arguments @('install', '--frozen-lockfile') `
+      -Description 'Refresh dependencies (cmd.exe /c pnpm install --frozen-lockfile)' `
+      -FilePath $cmdPath `
+      -Arguments @('/d', '/s', '/c', ('"' + $dependencyWrapperPath + '"')) `
       -WorkingDirectory $resolvedRoot `
       -LogPrefix $dependencyLogPrefix `
       -TimeoutSec $dependencyTimeoutSec `
