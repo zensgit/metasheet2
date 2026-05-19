@@ -175,6 +175,11 @@ describe('multitable template library', () => {
       'project-tracker',
       'sales-crm',
       'issue-tracker',
+      'contract-management',
+      'field-inspection',
+      'recruitment',
+      'meeting-minutes',
+      'asset-inventory',
     ])
     first[0].sheets[0].fields[0].name = 'mutated'
     expect(second[0].sheets[0].fields[0].name).toBe('Task')
@@ -243,4 +248,120 @@ describe('multitable template library', () => {
     })).rejects.toBeInstanceOf(MultitableTemplateConflictError)
     expect(sheets).toHaveLength(0)
   })
+})
+
+describe('template library quality contract', () => {
+  const templates = listMultitableTemplates()
+  const NEW_TEMPLATE_IDS = [
+    'contract-management',
+    'field-inspection',
+    'recruitment',
+    'meeting-minutes',
+    'asset-inventory',
+  ] as const
+
+  it('has unique template ids', () => {
+    const ids = templates.map((t) => t.id)
+    expect(new Set(ids).size).toBe(ids.length)
+  })
+
+  it.each(templates.map((t) => [t.id, t] as const))(
+    'template %s satisfies the structural quality gate',
+    (_id, template) => {
+      // single sheet
+      expect(template.sheets).toHaveLength(1)
+      const sheet = template.sheets[0]
+
+      // 5-8 fields
+      expect(sheet.fields.length).toBeGreaterThanOrEqual(5)
+      expect(sheet.fields.length).toBeLessThanOrEqual(8)
+
+      // field ids unique within the sheet
+      const fieldIds = sheet.fields.map((f) => f.id)
+      expect(new Set(fieldIds).size).toBe(fieldIds.length)
+
+      // field order is contiguous from 0
+      expect(sheet.fields.map((f) => f.order)).toEqual(
+        sheet.fields.map((_, i) => i),
+      )
+
+      // select / multiSelect must carry non-empty options
+      for (const field of sheet.fields) {
+        if (field.type === 'select' || field.type === 'multiSelect') {
+          expect(Array.isArray(field.options)).toBe(true)
+          expect((field.options ?? []).length).toBeGreaterThan(0)
+        }
+      }
+
+      // >= 2 views, view ids unique, at least one grid
+      expect(sheet.views.length).toBeGreaterThanOrEqual(2)
+      const viewIds = sheet.views.map((v) => v.id)
+      expect(new Set(viewIds).size).toBe(viewIds.length)
+      expect(sheet.views.some((v) => v.type === 'grid')).toBe(true)
+
+      // view field references must point at real field ids
+      for (const view of sheet.views) {
+        if (view.type === 'kanban') {
+          expect(fieldIds).toContain(view.groupByFieldId)
+        }
+        if (view.type === 'calendar' || view.type === 'timeline') {
+          expect(view.dateFieldId).toBeTruthy()
+          expect(fieldIds).toContain(view.dateFieldId)
+          if (view.titleFieldId) {
+            expect(fieldIds).toContain(view.titleFieldId)
+          }
+        }
+      }
+    },
+  )
+
+  it.each(NEW_TEMPLATE_IDS.map((id) => [id] as const))(
+    'new template %s installs into one base with mapped fields and views',
+    async (templateId) => {
+      const { query, bases, sheets, fields, views } = createQuery()
+      const source = templates.find((t) => t.id === templateId)
+      expect(source).toBeDefined()
+      const srcSheet = source!.sheets[0]
+
+      const result = await installMultitableTemplate({
+        query,
+        templateId,
+        baseName: `${templateId} base`,
+        ownerId: 'user_q',
+        idGenerator: (prefix) => `${prefix}_fixed`,
+      })
+
+      expect(bases).toHaveLength(1)
+      expect(sheets).toHaveLength(1)
+      expect(result.sheets[0].baseId).toBe('base_fixed')
+
+      // fields: count + names + order preserved
+      expect(fields.map((f) => f.name)).toEqual(srcSheet.fields.map((f) => f.name))
+
+      // every select/multiSelect option propagated as { value }
+      for (const srcField of srcSheet.fields) {
+        if (srcField.type === 'select' || srcField.type === 'multiSelect') {
+          const installed = fields.find((f) => f.name === srcField.name)
+          expect(installed?.property.options).toEqual(
+            (srcField.options ?? []).map((value) => ({ value })),
+          )
+        }
+      }
+
+      // views: count matches, kanban -> group_info, calendar/timeline -> config.dateFieldId
+      expect(result.views).toHaveLength(srcSheet.views.length)
+      for (const srcView of srcSheet.views) {
+        if (srcView.type === 'kanban') {
+          const kanban = views.find((v) => v.type === 'kanban')
+          const groupField = fields.find((f) => f.name === srcSheet.fields.find((sf) => sf.id === srcView.groupByFieldId)?.name)
+          expect(kanban?.group_info).toEqual({ fieldId: groupField?.id })
+        }
+        if (srcView.type === 'calendar' || srcView.type === 'timeline') {
+          const dateField = fields.find((f) => f.name === srcSheet.fields.find((sf) => sf.id === srcView.dateFieldId)?.name)
+          const tv = views.find((v) => v.type === srcView.type)
+          expect(tv?.config).toEqual(expect.objectContaining({ dateFieldId: dateField?.id }))
+        }
+      }
+    },
+  )
 })
