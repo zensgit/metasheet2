@@ -528,6 +528,9 @@ describe('Multitable context API', () => {
           ])
           return { rows: [], rowCount: 1 }
         }
+        if (sql.includes('INSERT INTO meta_views')) {
+          return { rows: [], rowCount: 1 }
+        }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -540,6 +543,47 @@ describe('Multitable context API', () => {
     expect(response.body.ok).toBe(true)
     expect(response.body.data.sheet.baseId).toBe('base_legacy')
     expect(response.body.data.sheet.seeded).toBe(false)
+    expect(mockPool.transaction).toHaveBeenCalledTimes(1)
+  })
+
+  test('creates a default Grid view so a plain (un-seeded) sheet is immediately openable (#1670)', async () => {
+    let viewInsert: unknown[] | undefined
+    const { app, mockPool } = await createApp({
+      tokenPerms: ['multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('INSERT INTO meta_bases')) {
+          return { rows: [], rowCount: 1 }
+        }
+        if (sql.includes('INSERT INTO meta_sheets')) {
+          return { rows: [], rowCount: 1 }
+        }
+        if (sql.includes('INSERT INTO meta_views')) {
+          viewInsert = params
+          return { rows: [], rowCount: 1 }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .post('/api/multitable/sheets')
+      .send({ name: 'Plain Base Sheet' })
+      .expect(200)
+
+    expect(response.body.ok).toBe(true)
+    expect(response.body.data.sheet.seeded).toBe(false)
+    // The view must be created at sheet-create time. GET /context does not
+    // lazily create one (only GET /views does), so without this the base is
+    // unopenable: "这个 Base 还没有可打开的 Sheet 或 View。" (#1670)
+    expect(viewInsert).toBeDefined()
+    const [viewId, sheetId, viewName, viewType, filterInfo, sortInfo, groupInfo, hiddenFieldIds, config] =
+      viewInsert as string[]
+    expect(typeof viewId).toBe('string')
+    expect(viewId.length).toBeGreaterThan(0)
+    expect(sheetId).toBe(response.body.data.sheet.id)
+    expect(viewName).toBe('默认视图')
+    expect(viewType).toBe('grid')
+    expect([filterInfo, sortInfo, groupInfo, hiddenFieldIds, config]).toEqual(['{}', '{}', '{}', '[]', '{}'])
     expect(mockPool.transaction).toHaveBeenCalledTimes(1)
   })
 
@@ -802,6 +846,9 @@ describe('Multitable context API', () => {
             'Owned Sheet',
             'Created by base owner',
           ])
+          return { rows: [], rowCount: 1 }
+        }
+        if (sql.includes('INSERT INTO meta_views')) {
           return { rows: [], rowCount: 1 }
         }
         throw new Error(`Unhandled SQL in test: ${sql}`)

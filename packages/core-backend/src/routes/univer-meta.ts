@@ -5502,6 +5502,19 @@ export function univerMetaRouter(): Router {
           throw new ConflictError(`Sheet already exists: ${sheetId}`)
         }
 
+        // Every sheet needs at least one view to be openable. A plain
+        // (un-seeded) create otherwise strands users on "这个 Base 还没有可打开
+        // 的 Sheet 或 View。" because GET /api/multitable/context — unlike
+        // GET /views — does not lazily create a default view (#1670). Seed the
+        // same default Grid view the /views fallback would create.
+        const defaultViewId = buildId('view')
+        await query(
+          `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
+           VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)
+           ON CONFLICT (id) DO NOTHING`,
+          [defaultViewId, sheetId, '默认视图', 'grid', '{}', '{}', '{}', '[]', '{}'],
+        )
+
         if (seed) {
           await createSeededSheet({ sheetId, name, description, query: query as unknown as QueryFn })
         }
