@@ -214,15 +214,17 @@ Rules:
 
 ### PR3: Frontend Job UI
 
-- Add “创建同步任务” mode beside existing immediate sync panels.
-- Job list with status, progress, totals, latest error, `updatedAt`.
-- Actions:
+- [x] Add “创建同步任务” mode beside existing immediate sync panels.
+- [x] Job list with status, progress, totals, latest error, `updatedAt`.
+- [x] Actions:
   - create daily job
   - create period job
   - run next page
   - cancel
   - open report multitable object from latest result when present
-- Keep existing immediate daily / period sync controls as fallback.
+- [x] Keep existing immediate daily / period sync controls as fallback.
+
+**PR3 implementation pointer:** `docs/development/attendance-report-sync-jobs-pr3-development-20260519.md`; verification: `docs/development/attendance-report-sync-jobs-pr3-verification-20260519.md`.
 
 ### PR4: Live Acceptance Harness
 

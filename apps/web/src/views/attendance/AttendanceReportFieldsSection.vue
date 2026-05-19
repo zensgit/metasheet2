@@ -782,6 +782,245 @@
       </dl>
     </div>
 
+    <div
+      class="attendance-report-fields__basis attendance-report-fields__record-sync"
+      data-report-sync-job-panel
+    >
+      <div class="attendance-report-fields__basis-header">
+        <div>
+          <div class="attendance-report-fields__basis-title">
+            {{ tr('Report sync jobs', '报表同步任务') }}
+          </div>
+          <div class="attendance__section-meta">
+            {{ tr('Create a durable job and run one page at a time; existing immediate sync stays available above.', '创建可恢复任务并逐页执行；上方即时同步入口继续保留。') }}
+          </div>
+        </div>
+        <button
+          class="attendance__btn"
+          type="button"
+          :disabled="reportSyncJobsLoading"
+          data-report-sync-job-load
+          @click="loadReportSyncJobs"
+        >
+          {{ reportSyncJobsLoading ? tr('Loading...', '加载中...') : tr('Load jobs', '加载任务') }}
+        </button>
+      </div>
+      <div class="attendance-report-fields__record-sync-form">
+        <label class="attendance-report-fields__filter" for="attendance-report-sync-job-kind">
+          <span>{{ tr('Job kind', '任务类型') }}</span>
+          <select
+            id="attendance-report-sync-job-kind"
+            v-model="reportSyncJobKind"
+            data-report-sync-job-kind
+          >
+            <option value="daily_records">{{ tr('Daily records', '日报记录') }}</option>
+            <option value="period_summaries">{{ tr('Period summaries', '周期汇总') }}</option>
+          </select>
+        </label>
+        <label class="attendance-report-fields__filter" for="attendance-report-sync-job-period-mode">
+          <span>{{ tr('Period source', '周期来源') }}</span>
+          <select
+            id="attendance-report-sync-job-period-mode"
+            v-model="reportSyncJobPeriodMode"
+            data-report-sync-job-period-mode
+          >
+            <option value="date_range">{{ tr('Date range', '日期范围') }}</option>
+            <option value="payroll_cycle">{{ tr('Payroll cycle', '薪资周期') }}</option>
+          </select>
+        </label>
+        <label
+          v-if="reportSyncJobPeriodMode === 'date_range'"
+          class="attendance-report-fields__filter"
+          for="attendance-report-sync-job-from"
+        >
+          <span>{{ tr('From date', '开始日期') }}</span>
+          <input
+            id="attendance-report-sync-job-from"
+            v-model="reportSyncJobFrom"
+            type="date"
+            data-report-sync-job-from
+          >
+        </label>
+        <label
+          v-if="reportSyncJobPeriodMode === 'date_range'"
+          class="attendance-report-fields__filter"
+          for="attendance-report-sync-job-to"
+        >
+          <span>{{ tr('To date', '结束日期') }}</span>
+          <input
+            id="attendance-report-sync-job-to"
+            v-model="reportSyncJobTo"
+            type="date"
+            data-report-sync-job-to
+          >
+        </label>
+        <label
+          v-if="reportSyncJobPeriodMode === 'payroll_cycle'"
+          class="attendance-report-fields__filter"
+          for="attendance-report-sync-job-cycle"
+        >
+          <span>{{ tr('Cycle ID', '薪资周期 ID') }}</span>
+          <input
+            id="attendance-report-sync-job-cycle"
+            v-model="reportSyncJobCycleId"
+            type="text"
+            :placeholder="tr('Payroll cycle UUID', '薪资周期 UUID')"
+            data-report-sync-job-cycle
+          >
+        </label>
+        <label class="attendance-report-fields__filter" for="attendance-report-sync-job-user-mode">
+          <span>{{ tr('Users', '员工范围') }}</span>
+          <select
+            id="attendance-report-sync-job-user-mode"
+            v-model="reportSyncJobUserMode"
+            data-report-sync-job-user-mode
+          >
+            <option value="single">{{ tr('Single user', '单员工') }}</option>
+            <option value="multiple">{{ tr('User ID list', '员工 ID 列表') }}</option>
+            <option value="all">{{ tr('All active users', '全部活跃员工') }}</option>
+          </select>
+        </label>
+        <label
+          v-if="reportSyncJobUserMode === 'single'"
+          class="attendance-report-fields__filter"
+          for="attendance-report-sync-job-user"
+        >
+          <span>{{ tr('User ID', '员工 ID') }}</span>
+          <input
+            id="attendance-report-sync-job-user"
+            v-model="reportSyncJobUserId"
+            type="text"
+            :placeholder="tr('Required for single user', '单员工必填')"
+            data-report-sync-job-user
+          >
+        </label>
+        <label
+          v-if="reportSyncJobUserMode === 'multiple'"
+          class="attendance-report-fields__filter"
+          for="attendance-report-sync-job-user-ids"
+        >
+          <span>{{ tr('User IDs', '员工 ID 列表') }}</span>
+          <textarea
+            id="attendance-report-sync-job-user-ids"
+            v-model="reportSyncJobUserIdsText"
+            rows="2"
+            :placeholder="tr('Comma, space, or newline separated', '逗号、空格或换行分隔')"
+            data-report-sync-job-user-ids
+          />
+        </label>
+        <label class="attendance-report-fields__filter" for="attendance-report-sync-job-page-size">
+          <span>{{ tr('Page size', '每页数量') }}</span>
+          <input
+            id="attendance-report-sync-job-page-size"
+            v-model.number="reportSyncJobPageSize"
+            type="number"
+            min="1"
+            max="100"
+            data-report-sync-job-page-size
+          >
+        </label>
+        <button
+          class="attendance__btn"
+          type="button"
+          :disabled="reportSyncJobCreating || !canCreateReportSyncJob"
+          data-report-sync-job-create
+          @click="createReportSyncJob"
+        >
+          {{ reportSyncJobCreating ? tr('Creating...', '创建中...') : tr('Create job', '创建任务') }}
+        </button>
+      </div>
+      <div
+        v-if="reportSyncJobStatusMessage"
+        class="attendance__status"
+        :class="{
+          'attendance__status--error': reportSyncJobStatusKind === 'error',
+          'attendance__status--warn': reportSyncJobStatusKind === 'warn',
+        }"
+        role="status"
+        data-report-sync-job-status
+      >
+        {{ reportSyncJobStatusMessage }}
+      </div>
+      <div
+        v-if="reportSyncJobRows.length === 0"
+        class="attendance__empty"
+        data-report-sync-job-empty
+      >
+        {{ tr('No report sync jobs loaded yet.', '尚未加载报表同步任务。') }}
+      </div>
+      <div
+        v-else
+        class="attendance__table-wrapper attendance-report-fields__table-wrapper"
+        data-report-sync-job-list
+      >
+        <table class="attendance__table attendance-report-fields__table">
+          <thead>
+            <tr>
+              <th>{{ tr('Job', '任务') }}</th>
+              <th>{{ tr('Kind', '类型') }}</th>
+              <th>{{ tr('Status', '状态') }}</th>
+              <th>{{ tr('Scope', '范围') }}</th>
+              <th>{{ tr('Progress', '进度') }}</th>
+              <th>{{ tr('Updated', '更新时间') }}</th>
+              <th>{{ tr('Actions', '操作') }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="job in reportSyncJobRows"
+              :key="job.id"
+              :data-report-sync-job-row="job.id"
+            >
+              <td><code>{{ job.id }}</code></td>
+              <td>{{ formatReportSyncJobKind(job.kind) }}</td>
+              <td>{{ formatReportSyncJobStatus(job.status) }}</td>
+              <td>
+                <div>{{ reportSyncJobPeriodLabel(job) }}</div>
+                <div class="attendance__section-meta">{{ reportSyncJobSelectionLabel(job) }}</div>
+              </td>
+              <td>
+                {{ reportSyncJobProgressLabel(job) }}
+                <div v-if="job.error" class="attendance__field-hint">{{ job.error }}</div>
+              </td>
+              <td>{{ job.updatedAt || job.createdAt || '--' }}</td>
+              <td>
+                <div class="attendance__admin-actions">
+                  <button
+                    class="attendance__btn"
+                    type="button"
+                    :disabled="reportSyncJobActionId === job.id || !reportSyncJobCanRun(job)"
+                    :data-report-sync-job-run="job.id"
+                    @click="runReportSyncJobNextPage(job)"
+                  >
+                    {{ tr('Run next page', '运行下一页') }}
+                  </button>
+                  <button
+                    class="attendance__btn"
+                    type="button"
+                    :disabled="reportSyncJobActionId === job.id || !reportSyncJobCanCancel(job)"
+                    :data-report-sync-job-cancel="job.id"
+                    @click="cancelReportSyncJob(job)"
+                  >
+                    {{ tr('Cancel', '取消') }}
+                  </button>
+                  <a
+                    v-if="reportSyncJobMultitableHref(job)"
+                    class="attendance__btn"
+                    :href="reportSyncJobMultitableHref(job)"
+                    target="_blank"
+                    rel="noreferrer"
+                    :data-report-sync-job-open-multitable="job.id"
+                  >
+                    {{ tr('Open multitable', '打开多维表') }}
+                  </a>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <div v-if="reportFields.length > 0 && filteredReportFields.length === 0" class="attendance__empty">
       {{ tr('No report fields match the current filters.', '当前筛选条件下没有匹配的统计字段。') }}
     </div>
@@ -1134,6 +1373,46 @@ interface AttendanceReportPeriodSummariesSyncResult extends AttendanceReportReco
   to?: string
 }
 
+type ReportSyncJobKind = 'daily_records' | 'period_summaries'
+type ReportSyncJobUserMode = 'single' | 'multiple' | 'all'
+
+interface AttendanceReportSyncJobCursor {
+  nextPage?: number
+  pageSize?: number
+  hasNextPage?: boolean
+}
+
+interface AttendanceReportSyncJobTotals {
+  usersScanned?: number
+  usersSynced?: number
+  usersFailed?: number
+  synced?: number
+  rowsSynced?: number
+  created?: number
+  patched?: number
+  skipped?: number
+  failed?: number
+  duplicateRowKeys?: number
+}
+
+interface AttendanceReportSyncJob {
+  id: string
+  kind: ReportSyncJobKind | string
+  status: string
+  mode?: string
+  periodSource?: Record<string, unknown>
+  userSelection?: Record<string, unknown>
+  cursor?: AttendanceReportSyncJobCursor
+  totals?: AttendanceReportSyncJobTotals
+  lastResult?: AttendanceReportRecordsSyncResult & AttendanceReportPeriodSummariesSyncResult
+  error?: string | null
+  lockedAt?: string | null
+  startedAt?: string | null
+  finishedAt?: string | null
+  createdAt?: string | null
+  updatedAt?: string | null
+}
+
 interface FieldMappingRow {
   key: string
   label: string
@@ -1217,6 +1496,21 @@ const periodSummarySyncUserIdsText = ref('')
 const periodSummarySyncPage = ref(1)
 const periodSummarySyncPageSize = ref(50)
 const reportPeriodSummariesSyncResult = ref<AttendanceReportPeriodSummariesSyncResult | null>(null)
+const reportSyncJobKind = ref<ReportSyncJobKind>('daily_records')
+const reportSyncJobPeriodMode = ref<PeriodSummarySyncMode>('date_range')
+const reportSyncJobFrom = ref(dateInputValue(-30))
+const reportSyncJobTo = ref(dateInputValue(0))
+const reportSyncJobCycleId = ref('')
+const reportSyncJobUserMode = ref<ReportSyncJobUserMode>('single')
+const reportSyncJobUserId = ref('')
+const reportSyncJobUserIdsText = ref('')
+const reportSyncJobPageSize = ref(50)
+const reportSyncJobs = ref<AttendanceReportSyncJob[]>([])
+const reportSyncJobsLoading = ref(false)
+const reportSyncJobCreating = ref(false)
+const reportSyncJobActionId = ref('')
+const reportSyncJobStatusMessage = ref('')
+const reportSyncJobStatusKind = ref<'info' | 'warn' | 'error'>('info')
 const fieldSearchTerm = ref('')
 const fieldStatusFilter = ref<ReportFieldStatusFilter>('all')
 const fieldCategoryFilter = ref('all')
@@ -1574,6 +1868,16 @@ const reportPeriodSummarySyncDetailRows = computed<MultitableDetailRow[]>(() => 
   addText('reason', tr('Reason', '原因'), result.reason)
   return rows
 })
+const canCreateReportSyncJob = computed(() => {
+  const hasPeriod = reportSyncJobPeriodMode.value === 'payroll_cycle'
+    ? reportSyncJobCycleId.value.trim() !== ''
+    : reportSyncJobFrom.value.trim() !== '' && reportSyncJobTo.value.trim() !== ''
+  if (!hasPeriod) return false
+  if (reportSyncJobUserMode.value === 'all') return true
+  if (reportSyncJobUserMode.value === 'multiple') return parseReportSyncJobUserIds().length > 0
+  return reportSyncJobUserId.value.trim() !== ''
+})
+const reportSyncJobRows = computed(() => reportSyncJobs.value.slice(0, 20))
 const formulaPreviewMessage = computed(() => {
   const result = formulaPreviewResult.value
   if (!result) return ''
@@ -1975,6 +2279,126 @@ function parsePeriodSummarySyncUserIds(): string[] {
   return Array.from(seen)
 }
 
+function parseReportSyncJobUserIds(): string[] {
+  const seen = new Set<string>()
+  for (const raw of reportSyncJobUserIdsText.value.split(/[\s,，;；]+/)) {
+    const userId = raw.trim()
+    if (userId) seen.add(userId)
+  }
+  return Array.from(seen)
+}
+
+function buildReportSyncJobCreateBody(): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    kind: reportSyncJobKind.value,
+    mode: 'manual_step',
+    pageSize: Number(reportSyncJobPageSize.value) || 50,
+    periodSource: reportSyncJobPeriodMode.value === 'payroll_cycle'
+      ? { cycleId: reportSyncJobCycleId.value.trim() }
+      : { from: reportSyncJobFrom.value.trim(), to: reportSyncJobTo.value.trim() },
+  }
+  if (reportSyncJobUserMode.value === 'all') {
+    body.userSelection = { allUsers: true }
+  } else if (reportSyncJobUserMode.value === 'multiple') {
+    body.userSelection = { userIds: parseReportSyncJobUserIds() }
+  } else {
+    body.userSelection = { userId: reportSyncJobUserId.value.trim() }
+  }
+  return body
+}
+
+function upsertReportSyncJob(job?: AttendanceReportSyncJob | null): void {
+  if (!job?.id) return
+  const existingIndex = reportSyncJobs.value.findIndex(item => item.id === job.id)
+  if (existingIndex >= 0) {
+    const next = [...reportSyncJobs.value]
+    next[existingIndex] = job
+    reportSyncJobs.value = next
+  } else {
+    reportSyncJobs.value = [job, ...reportSyncJobs.value]
+  }
+}
+
+function formatReportSyncJobKind(kind?: string): string {
+  if (kind === 'daily_records') return tr('Daily records', '日报记录')
+  if (kind === 'period_summaries') return tr('Period summaries', '周期汇总')
+  return kind || '--'
+}
+
+function formatReportSyncJobStatus(status?: string): string {
+  const normalized = String(status || '').trim()
+  const labels: Record<string, string> = {
+    queued: tr('Queued', '等待中'),
+    running: tr('Running', '运行中'),
+    paused: tr('Paused', '已暂停'),
+    completed: tr('Completed', '已完成'),
+    failed: tr('Failed', '失败'),
+    canceled: tr('Canceled', '已取消'),
+  }
+  return labels[normalized] ?? (normalized || '--')
+}
+
+function reportSyncJobCanRun(job: AttendanceReportSyncJob): boolean {
+  return !['running', 'completed', 'canceled'].includes(String(job.status || ''))
+}
+
+function reportSyncJobCanCancel(job: AttendanceReportSyncJob): boolean {
+  return !['completed', 'canceled'].includes(String(job.status || ''))
+}
+
+function reportSyncJobSelectionLabel(job: AttendanceReportSyncJob): string {
+  const selection = job.userSelection ?? {}
+  if (selection.allUsers === true) return tr('All active users', '全部活跃员工')
+  if (typeof selection.userId === 'string' && selection.userId.trim()) return selection.userId
+  if (Array.isArray(selection.userIds)) return selection.userIds.join(', ')
+  return '--'
+}
+
+function reportSyncJobPeriodLabel(job: AttendanceReportSyncJob): string {
+  const source = job.periodSource ?? {}
+  if (typeof source.cycleId === 'string' && source.cycleId.trim()) return `cycle:${source.cycleId}`
+  const from = typeof source.from === 'string' ? source.from : ''
+  const to = typeof source.to === 'string' ? source.to : ''
+  if (from || to) return `${from || '?'}..${to || '?'}`
+  return '--'
+}
+
+function reportSyncJobProgressLabel(job: AttendanceReportSyncJob): string {
+  const cursor = job.cursor ?? {}
+  const totals = job.totals ?? {}
+  const pieces = [
+    `${tr('Next page', '下一页')}: ${cursor.nextPage ?? '--'}`,
+    `${tr('Page size', '每页数量')}: ${cursor.pageSize ?? '--'}`,
+    `${tr('Rows', '行数')}: ${totals.synced ?? totals.rowsSynced ?? 0}`,
+    `${tr('Created', '新建')}: ${totals.created ?? 0}`,
+    `${tr('Patched', '更新')}: ${totals.patched ?? 0}`,
+    `${tr('Skipped', '跳过')}: ${totals.skipped ?? 0}`,
+    `${tr('Failed', '失败')}: ${totals.failed ?? 0}`,
+  ]
+  if (typeof cursor.hasNextPage === 'boolean') {
+    pieces.unshift(`${tr('Has next page', '还有下一页')}: ${cursor.hasNextPage ? tr('Yes', '是') : tr('No', '否')}`)
+  }
+  return pieces.join(' · ')
+}
+
+function reportSyncJobMultitableHref(job: AttendanceReportSyncJob): string {
+  const multitable = job.lastResult?.multitable
+  if (!multitable?.sheetId || !multitable.viewId) return ''
+  const params = new URLSearchParams()
+  if (multitable.baseId) params.set('baseId', multitable.baseId)
+  const suffix = params.toString()
+  return `/multitable/${encodeURIComponent(multitable.sheetId)}/${encodeURIComponent(multitable.viewId)}${suffix ? `?${suffix}` : ''}`
+}
+
+function buildReportSyncJobStatusMessage(action: string, job?: AttendanceReportSyncJob | null): string {
+  const label = job?.id ? ` ${tr('Job', '任务')}: ${job.id}` : ''
+  if (action === 'created') return `${tr('Report sync job created.', '报表同步任务已创建。')}${label}`
+  if (action === 'loaded') return tr('Report sync jobs loaded.', '报表同步任务已加载。')
+  if (action === 'ran') return `${tr('Report sync job page completed.', '报表同步任务单页已执行。')}${label}`
+  if (action === 'canceled') return `${tr('Report sync job canceled.', '报表同步任务已取消。')}${label}`
+  return tr('Report sync job updated.', '报表同步任务已更新。')
+}
+
 function buildReportRecordsSyncStatusMessage(data: AttendanceReportRecordsSyncResult): string {
   if (data.degraded) {
     const reason = String(data.reason ?? '').trim()
@@ -2157,6 +2581,101 @@ async function syncReportPeriodSummaries(): Promise<void> {
     periodSummarySyncStatusMessage.value = readErrorMessage(error, tr('Failed to sync period summaries', '同步周期汇总失败'))
   } finally {
     periodSummarySyncing.value = false
+  }
+}
+
+async function loadReportSyncJobs(): Promise<void> {
+  reportSyncJobsLoading.value = true
+  reportSyncJobStatusMessage.value = ''
+  reportSyncJobStatusKind.value = 'info'
+  try {
+    const response = await apiFetch(`/api/attendance/report-sync-jobs${attendanceOrgQuerySuffix()}`)
+    const payload = await response.json()
+    if (!response.ok || payload?.ok === false) {
+      throw payload
+    }
+    reportSyncJobs.value = Array.isArray(payload?.data?.items) ? payload.data.items : []
+    reportSyncJobStatusMessage.value = buildReportSyncJobStatusMessage('loaded')
+  } catch (error) {
+    reportSyncJobStatusKind.value = 'error'
+    reportSyncJobStatusMessage.value = readErrorMessage(error, tr('Failed to load report sync jobs', '加载报表同步任务失败'))
+  } finally {
+    reportSyncJobsLoading.value = false
+  }
+}
+
+async function createReportSyncJob(): Promise<void> {
+  if (!canCreateReportSyncJob.value) return
+  reportSyncJobCreating.value = true
+  reportSyncJobStatusMessage.value = ''
+  reportSyncJobStatusKind.value = 'info'
+  try {
+    const response = await apiFetch(`/api/attendance/report-sync-jobs${attendanceOrgQuerySuffix()}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildReportSyncJobCreateBody()),
+    })
+    const payload = await response.json()
+    if (!response.ok || payload?.ok === false) {
+      throw payload
+    }
+    const job = payload?.data as AttendanceReportSyncJob
+    upsertReportSyncJob(job)
+    reportSyncJobStatusMessage.value = buildReportSyncJobStatusMessage('created', job)
+  } catch (error) {
+    reportSyncJobStatusKind.value = 'error'
+    reportSyncJobStatusMessage.value = readErrorMessage(error, tr('Failed to create report sync job', '创建报表同步任务失败'))
+  } finally {
+    reportSyncJobCreating.value = false
+  }
+}
+
+async function runReportSyncJobNextPage(job: AttendanceReportSyncJob): Promise<void> {
+  if (!job?.id || !reportSyncJobCanRun(job)) return
+  reportSyncJobActionId.value = job.id
+  reportSyncJobStatusMessage.value = ''
+  reportSyncJobStatusKind.value = 'info'
+  try {
+    const response = await apiFetch(`/api/attendance/report-sync-jobs/${encodeURIComponent(job.id)}/run-next-page${attendanceOrgQuerySuffix()}`, {
+      method: 'POST',
+    })
+    const payload = await response.json()
+    if (!response.ok || payload?.ok === false) {
+      throw payload
+    }
+    const updatedJob = payload?.data?.job as AttendanceReportSyncJob
+    upsertReportSyncJob(updatedJob)
+    reportSyncJobStatusKind.value = updatedJob?.status === 'failed' ? 'warn' : 'info'
+    reportSyncJobStatusMessage.value = buildReportSyncJobStatusMessage('ran', updatedJob)
+  } catch (error) {
+    reportSyncJobStatusKind.value = 'error'
+    reportSyncJobStatusMessage.value = readErrorMessage(error, tr('Failed to run report sync job page', '执行报表同步任务单页失败'))
+  } finally {
+    reportSyncJobActionId.value = ''
+  }
+}
+
+async function cancelReportSyncJob(job: AttendanceReportSyncJob): Promise<void> {
+  if (!job?.id || !reportSyncJobCanCancel(job)) return
+  reportSyncJobActionId.value = job.id
+  reportSyncJobStatusMessage.value = ''
+  reportSyncJobStatusKind.value = 'info'
+  try {
+    const response = await apiFetch(`/api/attendance/report-sync-jobs/${encodeURIComponent(job.id)}/cancel${attendanceOrgQuerySuffix()}`, {
+      method: 'POST',
+    })
+    const payload = await response.json()
+    if (!response.ok || payload?.ok === false) {
+      throw payload
+    }
+    const updatedJob = payload?.data as AttendanceReportSyncJob
+    upsertReportSyncJob(updatedJob)
+    reportSyncJobStatusMessage.value = buildReportSyncJobStatusMessage('canceled', updatedJob)
+  } catch (error) {
+    reportSyncJobStatusKind.value = 'error'
+    reportSyncJobStatusMessage.value = readErrorMessage(error, tr('Failed to cancel report sync job', '取消报表同步任务失败'))
+  } finally {
+    reportSyncJobActionId.value = ''
   }
 }
 
