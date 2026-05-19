@@ -93,12 +93,19 @@ pnpm run verify:attendance-report-period-summaries:live
 - No migration changed.
 - No secret, JWT, or generated staging output is committed.
 
-## Deferred Live Evidence
+## Follow-up Live Evidence
 
-Real staging `JOB_MODE=1` evidence remains pending fresh credentials. The expected live evidence should include:
+Real staging `JOB_MODE=1` evidence was completed after fresh file-based staging credentials were provided.
+
+Follow-up evidence:
+
+- Development record: `docs/development/attendance-report-sync-jobs-live-evidence-development-20260519.md`
+- Verification record: `docs/development/attendance-report-sync-jobs-live-evidence-verification-20260519.md`
+
+Coverage:
 
 - daily job create -> run pages -> completed
 - period date-range job create -> run pages -> completed
-- optional period cycle job create -> run pages -> completed
+- period payroll-cycle job create -> run pages -> completed
 - completed job rerun rejected with `409 JOB_TERMINAL`
 - replacement job create + cancel
