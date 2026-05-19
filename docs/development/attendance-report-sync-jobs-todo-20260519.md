@@ -40,6 +40,7 @@ plugin_attendance_report_sync_jobs
 | `org_id` | text | tenant |
 | `kind` | text | `daily_records` / `period_summaries` |
 | `status` | text | `queued` / `running` / `paused` / `completed` / `failed` / `canceled` |
+| `mode` | text | `manual_step` / `enqueue` |
 | `created_by` | text | requester |
 | `period_source` | jsonb | `{from,to}` or `{cycleId}` |
 | `user_selection` | jsonb | `{userId}` / `{userIds}` / `{allUsers:true}` |
@@ -57,7 +58,7 @@ Indexes:
 
 - `(org_id, status, updated_at desc)`
 - `(org_id, created_at desc)`
-- optional unique `(org_id, idempotency_key)` if PR1 includes idempotency.
+- unique `(org_id, idempotency_key)` where `idempotency_key IS NOT NULL`.
 
 ### New APIs
 
@@ -176,16 +177,19 @@ Rules:
 
 ### PR1: Schema + Service Helpers
 
-- Add migration for `plugin_attendance_report_sync_jobs`.
-- Add helper functions inside attendance plugin:
+- [x] Add migration for `plugin_attendance_report_sync_jobs`.
+- [x] Add helper functions inside attendance plugin:
   - normalize job body
   - map job row
   - create job
   - load job
-  - update job progress
-  - validate transition
-- Add tests for schema-independent helpers and route body validation where possible.
-- No runner loop, no UI.
+  - initial cursor / totals skeleton
+- [x] Add tests for schema-independent helpers and migration source checks.
+- [x] No runner loop, no route, no UI.
+
+**PR1 implementation pointer:** `docs/development/attendance-report-sync-jobs-pr1-development-20260519.md`; verification: `docs/development/attendance-report-sync-jobs-pr1-verification-20260519.md`.
+
+**Deferred from PR1 to PR2:** update job progress, lock/transition validation, route validation and one-page runner. PR1 intentionally ships only storage + normalization + create/load helper skeleton so the runner PR can stay focused.
 
 ### PR2: Runner + Routes
 
