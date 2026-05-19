@@ -72,23 +72,24 @@
       <div v-if="templateLibraryLoading" class="mt-template-library__state">Loading templates...</div>
       <div v-else-if="templateLibraryError" class="mt-template-library__state mt-template-library__state--error">{{ templateLibraryError }}</div>
       <div v-else class="mt-template-library__grid">
-        <article v-for="template in templates" :key="template.id" class="mt-template-library__card" :style="{ borderColor: template.color }">
-          <div class="mt-template-library__card-top">
-            <span class="mt-template-library__icon" :style="{ backgroundColor: template.color }">{{ template.icon }}</span>
-            <span class="mt-template-library__category">{{ template.category }}</span>
-          </div>
-          <h3>{{ template.name }}</h3>
-          <p>{{ template.description }}</p>
-          <small>{{ template.sheets.length }} sheet{{ template.sheets.length === 1 ? '' : 's' }} · {{ template.sheets[0]?.fields.length ?? 0 }} fields</small>
-          <button
-            class="mt-template-library__install"
-            :disabled="installingTemplateId === template.id"
-            @click="onInstallTemplate(template)"
-          >
-            {{ installingTemplateId === template.id ? 'Installing...' : 'Use template' }}
-          </button>
-        </article>
+        <MetaTemplateCard
+          v-for="template in templates"
+          :key="template.id"
+          :template="template"
+          :installing="installingTemplateId === template.id"
+          @install="onInstallTemplate"
+        />
       </div>
+      <footer class="mt-template-library__footer">
+        <router-link
+          class="mt-template-library__more"
+          :to="{ name: TemplateCenterRouteName }"
+          data-testid="multitable-workbench-template-center-link"
+          @click="showTemplateLibrary = false"
+        >
+          更多模板 →
+        </router-link>
+      </footer>
     </div>
     <div
       v-if="capabilityOriginNotice"
@@ -396,6 +397,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { AppRouteNames } from '../../router/types'
 import { useAuth } from '../../composables/useAuth'
 import type {
   LinkedRecordSummary,
@@ -437,6 +439,7 @@ import MetaFormView from '../components/MetaFormView.vue'
 import MetaRecordDrawer from '../components/MetaRecordDrawer.vue'
 import MetaCommentsDrawer from '../components/MetaCommentsDrawer.vue'
 import MetaLinkPicker from '../components/MetaLinkPicker.vue'
+import MetaTemplateCard from '../components/MetaTemplateCard.vue'
 import MetaFieldManager from '../components/MetaFieldManager.vue'
 import MetaViewManager from '../components/MetaViewManager.vue'
 import MetaSheetPermissionManager from '../components/MetaSheetPermissionManager.vue'
@@ -512,6 +515,7 @@ const showPermissionManager = ref(false)
 const showAutomationManager = ref(false)
 const showDashboardView = ref(false)
 const showTemplateLibrary = ref(false)
+const TemplateCenterRouteName = AppRouteNames.MULTITABLE_TEMPLATES
 const showFormShareManager = ref(false)
 const showApiTokenManager = ref(false)
 const fieldPermissionEntries = ref<MetaFieldPermissionEntry[]>([])
@@ -3012,23 +3016,9 @@ defineExpose({
 .mt-template-library__state { padding: 12px; border-radius: 10px; background: #fff; color: #475569; font-size: 12px; }
 .mt-template-library__state--error { color: #b91c1c; background: #fef2f2; }
 .mt-template-library__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
-.mt-template-library__card {
-  padding: 12px;
-  border: 1px solid;
-  border-radius: 12px;
-  background: rgba(255,255,255,.92);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.mt-template-library__card-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.mt-template-library__icon { min-width: 36px; height: 24px; padding: 0 8px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; color: #fff; font-size: 11px; font-weight: 600; text-transform: uppercase; }
-.mt-template-library__category { color: #64748b; font-size: 11px; }
-.mt-template-library__card h3 { margin: 0; color: #111827; font-size: 14px; }
-.mt-template-library__card p { margin: 0; min-height: 36px; color: #475569; font-size: 12px; line-height: 1.5; }
-.mt-template-library__card small { color: #64748b; font-size: 11px; }
-.mt-template-library__install { margin-top: auto; padding: 7px 10px; border: 1px solid #2563eb; border-radius: 8px; background: #2563eb; color: #fff; cursor: pointer; font-size: 12px; }
-.mt-template-library__install:disabled { opacity: .7; cursor: wait; }
+.mt-template-library__footer { margin-top: 12px; display: flex; justify-content: flex-end; }
+.mt-template-library__more { font-size: 12px; color: #2563eb; text-decoration: none; }
+.mt-template-library__more:hover { text-decoration: underline; }
 .mt-workbench__shortcuts-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.3); display: flex; align-items: center; justify-content: center; }
 .mt-workbench__shortcuts { background: #fff; border-radius: 8px; padding: 20px 24px; min-width: 320px; box-shadow: 0 8px 24px rgba(0,0,0,.15); }
 .mt-workbench__shortcuts-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; font-size: 15px; }

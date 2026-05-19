@@ -73,6 +73,7 @@ export const AppRouteNames = {
   // Attendance routes
   ATTENDANCE: 'attendance',
   MULTITABLE_HOME: 'multitable-home',
+  MULTITABLE_TEMPLATES: 'multitable-templates',
   MULTITABLE: 'multitable',
   MULTITABLE_PUBLIC_FORM: 'multitable-public-form',
   MULTITABLE_COMMENT_INBOX: 'multitable-comment-inbox',
@@ -150,6 +151,7 @@ export interface AppRouteParams {
   'approval-history': Record<string, never>
   'attendance': Record<string, never>
   'multitable-home': Record<string, never>
+  'multitable-templates': Record<string, never>
   'multitable': { sheetId: string; viewId: string }
   'multitable-public-form': { sheetId: string; viewId: string }
   'multitable-comment-inbox': Record<string, never>
@@ -246,6 +248,9 @@ export interface AppRouteQuery {
   'multitable-public-form': {
     publicToken?: string
   }
+
+  // No query params; explicit entry for typing parity with AppRouteParams.
+  'multitable-templates': Record<string, never>
 
   // Default (no query params) - index signature for untyped routes
   [key: string]: Record<string, string | string[] | undefined>
@@ -438,6 +443,7 @@ export const ROUTE_PATHS = {
   // Attendance
   ATTENDANCE: '/attendance',
   MULTITABLE_HOME: '/multitable',
+  MULTITABLE_TEMPLATES: '/multitable/templates',
   MULTITABLE: '/multitable/:sheetId/:viewId',
   MULTITABLE_PUBLIC_FORM: '/multitable/public-form/:sheetId/:viewId',
   MULTITABLE_COMMENT_INBOX: '/multitable/comments/inbox',
