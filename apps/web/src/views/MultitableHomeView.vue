@@ -475,55 +475,21 @@ onMounted(loadHomeData)
   padding: 18px;
 }
 
-.multitable-home__template-card {
-  display: grid;
-  gap: 12px;
-  align-content: start;
-  border: 1px solid #cbd5e1;
-  border-radius: 20px;
-  padding: 16px;
-  background: linear-gradient(180deg, #fff 0%, #f8fafc 100%);
-}
-
-.multitable-home__template-top {
+.multitable-home__panel-title {
   display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  align-items: center;
+  align-items: baseline;
+  gap: 0.5rem;
 }
 
-.multitable-home__template-icon {
-  width: 38px;
-  height: 38px;
-  border-radius: 14px;
-  display: grid;
-  place-items: center;
-  color: #fff;
-  font-weight: 800;
+.multitable-home__panel-link {
+  font-size: 0.875rem;
+  color: #2563eb;
+  text-decoration: none;
+  white-space: nowrap;
 }
 
-.multitable-home__template-category {
-  border-radius: 999px;
-  padding: 5px 9px;
-  background: #e0f2fe;
-  color: #0369a1;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.multitable-home__template-card h3,
-.multitable-home__template-card p {
-  margin: 0;
-}
-
-.multitable-home__template-card p {
-  color: #475569;
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-.multitable-home__template-card small {
-  color: #64748b;
+.multitable-home__panel-link:hover {
+  text-decoration: underline;
 }
 
 .multitable-home__card {
