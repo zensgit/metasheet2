@@ -11,7 +11,9 @@ param(
   [string]$BuildWeb = '0',
   [string]$BuildBackend = '0',
   [string]$RunMigrations = '1',
-  [string]$RestartService = '1'
+  [string]$RestartService = '1',
+  [string]$DependencyRefreshTimeoutSec = '1800',
+  [string]$DependencyRefreshHeartbeatSec = '60'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -66,6 +68,31 @@ function Require-Command {
   }
 }
 
+function Resolve-CommandPath {
+  param([string]$Name)
+
+  $command = Get-Command $Name -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $command) {
+    throw "Missing required command: $Name"
+  }
+
+  return $command.Source
+}
+
+function Convert-PositiveInt {
+  param(
+    [string]$Value,
+    [string]$Label
+  )
+
+  $parsed = 0
+  if (-not [int]::TryParse($Value, [ref]$parsed) -or $parsed -lt 1) {
+    throw "$Label must be a positive integer: $Value"
+  }
+
+  return $parsed
+}
+
 function Invoke-CheckedCommand {
   param(
     [string]$Description,
@@ -76,6 +103,92 @@ function Invoke-CheckedCommand {
   & $Command
   if ($LASTEXITCODE -ne 0) {
     throw "$Description failed"
+  }
+}
+
+function Write-LogTail {
+  param(
+    [string]$Path,
+    [string]$Label,
+    [int]$LineCount = 20
+  )
+
+  if (-not (Test-Path -LiteralPath $Path)) {
+    Write-Info "$Label log is unavailable: $Path"
+    return
+  }
+
+  Write-Info "$Label log tail ($Path):"
+  Get-Content -LiteralPath $Path -Tail $LineCount | ForEach-Object {
+    Write-Host "  $_"
+  }
+}
+
+function Invoke-LoggedProcess {
+  param(
+    [string]$Description,
+    [string]$FilePath,
+    [string[]]$Arguments,
+    [string]$WorkingDirectory,
+    [string]$LogPrefix,
+    [int]$TimeoutSec,
+    [int]$HeartbeatSec
+  )
+
+  $stdoutLog = "$LogPrefix.stdout.log"
+  $stderrLog = "$LogPrefix.stderr.log"
+  Remove-Item -LiteralPath $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
+
+  Write-Info $Description
+  Write-Info "Command: $FilePath $($Arguments -join ' ')"
+  Write-Info "Working directory: $WorkingDirectory"
+  Write-Info "Timeout: ${TimeoutSec}s; heartbeat: ${HeartbeatSec}s"
+  Write-Info "stdout log: $stdoutLog"
+  Write-Info "stderr log: $stderrLog"
+
+  $process = Start-Process `
+    -FilePath $FilePath `
+    -ArgumentList $Arguments `
+    -WorkingDirectory $WorkingDirectory `
+    -RedirectStandardOutput $stdoutLog `
+    -RedirectStandardError $stderrLog `
+    -PassThru
+
+  $startedAt = Get-Date
+  $nextHeartbeatAt = $startedAt.AddSeconds($HeartbeatSec)
+
+  while (-not $process.HasExited) {
+    Start-Sleep -Seconds 5
+    $now = Get-Date
+    $elapsedSec = [int]($now - $startedAt).TotalSeconds
+
+    if ($elapsedSec -ge $TimeoutSec) {
+      try {
+        $process.Kill()
+      }
+      catch {
+        Write-Info "Failed to kill timed-out process pid=$($process.Id): $($_.Exception.Message)"
+      }
+
+      Write-LogTail -Path $stdoutLog -Label 'stdout'
+      Write-LogTail -Path $stderrLog -Label 'stderr'
+      throw "$Description timed out after ${TimeoutSec}s; inspect logs: $stdoutLog ; $stderrLog"
+    }
+
+    if ($now -ge $nextHeartbeatAt) {
+      Write-Info "$Description still running after ${elapsedSec}s (pid=$($process.Id)); logs: $stdoutLog ; $stderrLog"
+      $nextHeartbeatAt = $now.AddSeconds($HeartbeatSec)
+    }
+  }
+
+  $exitCode = $process.ExitCode
+  $elapsedTotalSec = [int]((Get-Date) - $startedAt).TotalSeconds
+  Write-Info "$Description finished with exit code $exitCode after ${elapsedTotalSec}s"
+
+  if ($exitCode -ne 0) {
+    Write-LogTail -Path $stdoutLog -Label 'stdout'
+    Write-LogTail -Path $stderrLog -Label 'stderr'
+    throw "$Description failed with exit code $exitCode; inspect logs: $stdoutLog ; $stderrLog"
   }
 }
 
@@ -149,12 +262,30 @@ try {
   Set-Location $resolvedRoot
 
   Require-Command -Name 'node'
-  Require-Command -Name 'pnpm'
+  $pnpmPath = Resolve-CommandPath -Name 'pnpm'
 
   if ($InstallDeps -ne '0') {
-    Invoke-CheckedCommand 'Refresh dependencies (pnpm install --frozen-lockfile)' {
-      pnpm install --frozen-lockfile
+    $dependencyTimeoutSec = Convert-PositiveInt -Value $DependencyRefreshTimeoutSec -Label 'DependencyRefreshTimeoutSec'
+    $dependencyHeartbeatSec = Convert-PositiveInt -Value $DependencyRefreshHeartbeatSec -Label 'DependencyRefreshHeartbeatSec'
+    $dependencyLogPrefix = Join-Path $outputLogs ('dependency-refresh-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    Write-Info "pnpm path: $pnpmPath"
+    try {
+      $pnpmVersion = (& $pnpmPath --version 2>$null | Select-Object -First 1)
+      if (-not [string]::IsNullOrWhiteSpace($pnpmVersion)) {
+        Write-Info "pnpm version: $pnpmVersion"
+      }
     }
+    catch {
+      Write-Info "Unable to read pnpm version before dependency refresh: $($_.Exception.Message)"
+    }
+    Invoke-LoggedProcess `
+      -Description 'Refresh dependencies (pnpm install --frozen-lockfile)' `
+      -FilePath $pnpmPath `
+      -Arguments @('install', '--frozen-lockfile') `
+      -WorkingDirectory $resolvedRoot `
+      -LogPrefix $dependencyLogPrefix `
+      -TimeoutSec $dependencyTimeoutSec `
+      -HeartbeatSec $dependencyHeartbeatSec
   }
 
   if ($RunMigrations -ne '0') {

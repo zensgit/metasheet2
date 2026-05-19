@@ -179,6 +179,20 @@ If the code is `SQLSERVER_DRIVER_MISSING`, runtime injection is working but the
 deploy root is missing `mssql`. Re-apply the package with `InstallDeps=1` or run
 `pnpm install --frozen-lockfile` from the deploy root, restart PM2, then retest.
 
+If the Windows scheduled deploy task reaches dependency refresh and stays
+running, wait for the apply helper's bounded result instead of treating the
+current service as a retest. The helper now runs dependency refresh as a logged
+child process with:
+
+- resolved `pnpm` path and version in the apply log;
+- heartbeat progress every `DependencyRefreshHeartbeatSec` seconds, default 60;
+- stdout/stderr logs under `output\logs\dependency-refresh-*`;
+- timeout failure after `DependencyRefreshTimeoutSec` seconds, default 1800.
+
+Only rerun the SQL source test after the deploy reaches migrations, restart,
+and healthcheck. If dependency refresh times out, collect
+`deploy-remote.log` plus the matching dependency stdout/stderr logs.
+
 ## What Claude Code Should Do On The Bridge Machine
 
 Claude Code can help on the Windows/K3 bridge machine once it has local access
