@@ -78,7 +78,12 @@ export default defineConfig(({ mode }) => {
       },
     },
     test: {
-      environment: 'jsdom'
+      environment: 'jsdom',
+      // jsdom's default about:blank origin yields a non-functional
+      // localStorage ({} without methods). This setup file installs an
+      // in-memory Storage polyfill (at load + per test). See
+      // docs/development/web-test-jsdom-localstorage-baseline-fix-20260519.md
+      setupFiles: ['./tests/setup/localstorage.ts']
     }
   }
 })

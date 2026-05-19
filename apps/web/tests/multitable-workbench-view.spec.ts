@@ -875,6 +875,7 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 }))
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
+import { useLocale } from '../src/composables/useLocale'
 
 async function flushUi(cycles = 5): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
@@ -1070,6 +1071,7 @@ describe('MultitableWorkbench view wiring', () => {
     pushSpy.mockReset()
     localStorage.removeItem(FAVORITE_BASES_KEY)
     localStorage.removeItem(RECENT_BASES_KEY)
+    useLocale().setLocale('en')
     vi.clearAllMocks()
   })
 
@@ -2470,5 +2472,32 @@ describe('MultitableWorkbench view wiring', () => {
       targetId: 'rec_2',
     }))
     expect(mentionInboxSummaryMock.markRead).toHaveBeenCalledWith({ spreadsheetId: 'sheet_orders' })
+  })
+
+  // T2 i18n: real Workbench locale render assertions (unblocked by the
+  // jsdom-localStorage baseline fix). Targets are only buttons that the
+  // DEFAULT workbenchMock renders: Fields/Access/Views (caps default true)
+  // + Comment Inbox/Dashboard/API & Webhooks (no capability gate).
+  // Workflow/Automations are excluded — canManageAutomation defaults false.
+  it('renders the workbench toolbar in zh-CN when locale is zh-CN', async () => {
+    useLocale().setLocale('zh-CN')
+    mountWorkbench()
+    await nextTick()
+    const text = container!.textContent ?? ''
+    for (const s of ['字段', '权限', '视图', '评论收件箱', '仪表盘', 'API 与 Webhook']) {
+      expect(text, `missing zh string: ${s}`).toContain(s)
+    }
+    expect(text).not.toContain('Comment Inbox')
+  })
+
+  it('renders the workbench toolbar in English when locale is en', async () => {
+    useLocale().setLocale('en')
+    mountWorkbench()
+    await nextTick()
+    const text = container!.textContent ?? ''
+    for (const s of ['Fields', 'Access', 'Views', 'Comment Inbox', 'Dashboard', 'API & Webhooks']) {
+      expect(text, `missing en string: ${s}`).toContain(s)
+    }
+    expect(text).not.toContain('评论收件箱')
   })
 })
