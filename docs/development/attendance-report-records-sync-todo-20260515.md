@@ -151,7 +151,7 @@ skip  iff  existing.source_fingerprint === next.source_fingerprint
 ## Out of scope（显式 follow-up）
 
 - period / 周期汇总行（复用 `loadAttendanceSummary`，下一条 slice）
-- **batch cursor / 后台任务队列**（全员同步与分页已由 2026-05-18 bulk sync slice 补齐；自动连续分页、后台任务化、超时恢复仍为 follow-up）
+- **batch cursor / 后台任务队列**（全员同步与分页已由 2026-05-18 bulk sync slice 补齐；自动连续分页、后台任务化、超时恢复进入 `attendance-report-sync-jobs-todo-20260519.md`）
 - **orphan / stale columns cleanup**（`ensureFields` 只 upsert 不删；字段隐藏/禁用/动态 subtype 消失后旧列保留——P2 cleanup follow-up）
 - **重复 row_key 行 dedup**（多维表无唯一约束；v1 只 patch 第一条 + warn，自动删重复 = cleanup follow-up）
 - 多维表侧公式/视图模板预置（归多维表配置，非本线）
