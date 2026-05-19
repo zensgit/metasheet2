@@ -71,4 +71,4 @@ ghcr.io/zensgit/metasheet2-web:dc31d86688956bd474a3e3d65ca343c1672cbb16
 
 ## Follow-up
 
-后续若要把 period summaries 作为运营日常验收，可再补一个专用 `scripts/ops/attendance-report-period-summaries-live-acceptance.mjs`。本轮按既有 closeout 纪律手动执行，不把 live harness 纳入此 docs-only slice。
+后续运营日常验收脚本已补齐：`scripts/ops/attendance-report-period-summaries-live-acceptance.mjs`。设计与验证记录见 `docs/development/attendance-report-period-summaries-live-acceptance-development-20260519.md` 与 `docs/development/attendance-report-period-summaries-live-acceptance-verification-20260519.md`。
