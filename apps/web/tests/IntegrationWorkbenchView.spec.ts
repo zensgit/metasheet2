@@ -406,7 +406,12 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).toContain('1. 来源对象选择')
     expect(container.textContent).toContain('2. 目标模板选择')
     expect(container.textContent).toContain('数据集与多维表清洗')
+    expect(container.textContent).toContain('一行就是一条清洗内容')
+    expect(container.textContent).toContain('新增自定义清洗项')
     expect(container.textContent).toContain('运行与推送')
+    expect(container.querySelector('[data-testid="run-push-explainer"]')?.textContent).toContain('Dry-run 只读取来源数据')
+    expect(container.querySelector('[data-testid="run-push-explainer"]')?.textContent).toContain('默认不 Submit、不 Audit')
+    expect(container.querySelector('[data-testid="run-push-explainer"]')?.textContent).toContain('dead letter')
     expect(container.textContent).toContain('保存清洗流程')
     expect(container.textContent).not.toContain('Pipeline 执行')
     expect(container.textContent).toContain('发布 API 数据服务暂不开放')
@@ -526,9 +531,21 @@ describe('IntegrationWorkbenchView', () => {
     expect((container.querySelector('[data-testid="target-field-0"]') as HTMLInputElement).value).toBe('FNumber')
     expect((container.querySelector('[data-testid="transform-fn-0"]') as HTMLSelectElement).value).toBe('trim')
     expect((container.querySelector('[data-testid="transform-fn-3"]') as HTMLSelectElement).value).toBe('toNumber')
+    expect(container.querySelector('[data-testid="mapping-rule-list"]')?.textContent).toContain('code -> FNumber')
+    expect(container.querySelector('[data-testid="mapping-summary-0"]')?.textContent).toContain('trim')
     expect(container.textContent).toContain('Material code')
     expect((container.querySelector('[data-testid="save-pipeline"]') as HTMLButtonElement).disabled).toBe(false)
     expect(container.querySelector('[data-testid="save-readiness-summary"]')?.textContent).toContain('已满足保存条件')
+    expect(container.querySelector('[data-testid="pipeline-name-hint"]')?.textContent).toContain('留空自动生成')
+    expect(container.querySelector('[data-testid="pipeline-mode-help"]')?.textContent).toContain('manual 手工触发')
+    expect(container.querySelector('[data-testid="idempotency-fields-help"]')?.textContent).toContain('避免重复写入')
+    expect(container.querySelector('[data-testid="pipeline-id-help"]')?.textContent).toContain('保存成功后自动回填')
+
+    ;(container.querySelector('[data-testid="use-generated-pipeline-name"]') as HTMLButtonElement).click()
+    await flushUi()
+    const generatedName = (container.querySelector('[data-testid="pipeline-name"]') as HTMLInputElement).value
+    expect(generatedName).toContain('MetaSheet staging 多维表:standard_materials')
+    expect(generatedName).toContain('K3 Target:material')
 
     const firstTransform = container.querySelector('[data-testid="transform-fn-0"]') as HTMLSelectElement
     firstTransform.value = 'upper'
@@ -577,6 +594,7 @@ describe('IntegrationWorkbenchView', () => {
     expect(pipelineBodies).toHaveLength(1)
     expect(pipelineBodies[0]).toMatchObject({
       tenantId: 'default',
+      name: generatedName,
       sourceSystemId: 'metasheet_staging_project_1',
       sourceObject: 'standard_materials',
       targetSystemId: 'k3_1',
