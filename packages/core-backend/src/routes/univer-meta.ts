@@ -3240,8 +3240,11 @@ export function univerMetaRouter(): Router {
           message = 'Failed to install template'
           // Raw exception/stack kept separate from the structured event
           // (Logger.error only carries an Error, not arbitrary meta).
+          // Message intentionally omits the stable `[multitable.template.install]`
+          // token so the SOP's event-name grep is not double-counted on the
+          // 500 path (this line + the structured ok:false event below).
           templateInstallLogger.error(
-            '[multitable.template.install] internal error',
+            'Install multitable template failed',
             err instanceof Error ? err : new Error(String(err)),
           )
         }
