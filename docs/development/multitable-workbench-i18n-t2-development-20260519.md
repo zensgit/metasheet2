@@ -233,7 +233,7 @@ const { isZh } = useLocale()
 | `apps/web/tests/multitable-workbench-i18n.spec.ts` | **新增**：`workbench-labels` 模块单测（key 完整性 + en≠zh + 9 个插值 helper） |
 | `apps/web/tests/multitable-home-view.spec.ts` + `multitable-template-center-view.spec.ts`（既有） | 加 `beforeEach setLocale('zh-CN')` + afterEach 复位——MetaTemplateCard 转 locale 感知后，这两 spec 的中文断言需显式 locale（jsdom 默认 'en'） |
 
-> **`multitable-workbench-view.spec.ts` 不改（诚实口径）**：该 spec 在本仓 jsdom env 存在既有 `localStorage.removeItem is not a function` afterEach baseline（53/53 全 fail，已用 stash 法在 clean origin/main 复核逐字一致，见 verification §3）。往其中加断言无意义——afterEach 必抛、新断言照样标 failed。故 **Workbench 本体的 zh-CN/en 渲染不做自动化 render 断言**；其正确性由 (a) label 模块 spec 确定性覆盖全部映射/helper + (b) `vue-tsc` 保证每个 `wb(key,…)` 调用的 key 是合法 `WorkbenchLabelKey`（错 key=编译错）+ (c) build + (d) 代码 diff / 人工审阅 共同保证。新挂载 mock-heavy Workbench 是早先评审明确警告要避免的，故不做。
+> **`multitable-workbench-view.spec.ts`（T2 合并时不改，后续 PR 已补真断言）**：T2 合并时该 spec 受 jsdom `localStorage` baseline 阻塞（53/53），故当时不加 render 断言。**该 baseline 已由后续 PR `web-test-jsdom-localstorage-baseline-fix-20260519` 根因修复**（全局 setupFile polyfill），并在该 spec 内**已补真实 Workbench locale render 断言**（复用既有重 mock，zh-CN/en 各一例，55/55 绿）。本节保留以记录 T2 合并时点的口径与交叉引用；Workbench 本体双语 render 现**有**自动化覆盖。
 
 不动：后端 / 契约 / migration / 其它 Meta\* 组件 / 其它视图 / `multitable-workbench-view.spec.ts`。
 
@@ -255,7 +255,7 @@ git diff --check origin/main..HEAD
 Acceptance：
 
 - `workbench-labels`：每 key en/zh 非空且不相等；`workbenchLabel(k,true)`→zh、`(k,false)`→en；插值 helper（presence.label en 单复数、presence.title 空态、conflict.message 可选 version、commentInboxTitle 0 分支、card.* 计数）代入正确。`<kbd>` 物理键名不翻译、不进表
-- Workbench 本体（zh-CN/en 渲染）：**无自动化 render 断言**（workbench-view spec 既有 localStorage baseline，见 §5 诚实口径）。正确性由 label spec（映射/helper 全覆盖）+ `vue-tsc`（key 合法性）+ build + 代码审阅保证。期望行为：`zh-CN` 工具栏/横幅/modal 显示「字段/权限/视图/自动化/评论收件箱/模板库/键盘快捷键/导航单元格」+ presence/conflict 中文；`en` 对应英文 —— 经人工审阅 diff 确认
+- Workbench 本体（zh-CN/en 渲染）：T2 合并时无自动化断言（workbench-view baseline 阻塞）；**后续 baseline-fix PR 已补真实 render 断言**（`multitable-workbench-view.spec.ts` zh-CN 断言「字段/权限/视图/评论收件箱/仪表盘/API 与 Webhook」、en 对应英文，55/55 绿）。Workflow/Automations 因默认 `canManageAutomation=false` 不在默认断言（可选增强）。当时口径下另由 label spec + `vue-tsc`（key 合法性）+ build + 人工 diff 兜底
 - MetaTemplateCard（精确口径）：**zh-CN（默认）下 Home/TemplateCenter 必须保持**「`{n} 个 Sheet` / `{n} 个字段` / `{n} 个视图` / `使用模板` / `创建中...`」——既有 home-view / template-center-view spec 文案断言零回归；**en 下显示**「`{n} sheet(s)` / `{n} field(s)` / `{n} view(s)` / `Use template` / `Installing...`」（计数 en 走单复数）
 - **静态 toast 全覆盖证明**：verification MD 附 `grep -nE "showSuccess\(|showError\(" MultitableWorkbench.vue` 全量，逐条标 `[T2-done]`/`[T3-deferred]`
 - `git diff --check` clean；diff 仅 §5 所列文件
