@@ -149,19 +149,22 @@ function analyzeMigrationFile(filePath) {
       hasAlterTable: false,
       hasIfNotExists: false,
       hasCheckTableExistsGuard: false,
+      schemaTargets: emptySchemaTargets(),
     }
   }
   const source = readFileSync(filePath, 'utf8')
   const upSource = extractUpSource(source)
+  const scanSource = stripComments(upSource)
   return {
     filePath: path.relative(REPO_ROOT, filePath),
     fileKind: path.extname(filePath).replace(/^\./, '') || 'unknown',
-    hasCreateTableWithoutIfNotExists: /CREATE\s+TABLE\s+(?!IF\s+NOT\s+EXISTS)/i.test(upSource),
-    hasKyselyCreateTableWithoutIfNotExists: hasUnguardedKyselyCreateTable(upSource),
-    hasDropStatement: /\bDROP\s+(TABLE|COLUMN|INDEX|CONSTRAINT|DATABASE)\b/i.test(upSource),
-    hasAlterTable: /\bALTER\s+TABLE\b/i.test(upSource),
-    hasIfNotExists: /IF\s+NOT\s+EXISTS|\.ifNotExists\s*\(/i.test(upSource),
-    hasCheckTableExistsGuard: /checkTableExists|to_regclass\s*\(/i.test(upSource),
+    hasCreateTableWithoutIfNotExists: /CREATE\s+TABLE\s+(?!IF\s+NOT\s+EXISTS)/i.test(scanSource),
+    hasKyselyCreateTableWithoutIfNotExists: hasUnguardedKyselyCreateTable(scanSource),
+    hasDropStatement: /\bDROP\s+(TABLE|COLUMN|INDEX|CONSTRAINT|DATABASE)\b/i.test(scanSource),
+    hasAlterTable: /\bALTER\s+TABLE\b/i.test(scanSource),
+    hasIfNotExists: /IF\s+NOT\s+EXISTS|\.ifNotExists\s*\(/i.test(scanSource),
+    hasCheckTableExistsGuard: /checkTableExists|to_regclass\s*\(/i.test(scanSource),
+    schemaTargets: extractSchemaTargets(scanSource),
   }
 }
 
@@ -173,9 +176,222 @@ function extractUpSource(source) {
   return source.slice(upMatch.index, upMatch.index + upMatch[0].length + downMatch.index)
 }
 
+function stripComments(source) {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/--[^\r\n]*/g, ' ')
+    .replace(/\/\/[^\r\n]*/g, ' ')
+}
+
 function hasUnguardedKyselyCreateTable(source) {
   const calls = [...source.matchAll(/\.createTable\s*\([^)]*\)([\s\S]*?)(?=\.execute\s*\(\s*\)|;)/g)]
   return calls.some((call) => !/\.ifNotExists\s*\(/.test(call[1]))
+}
+
+function emptySchemaTargets() {
+  return {
+    createTables: [],
+    alterTables: [],
+    addColumns: [],
+    indexes: [],
+  }
+}
+
+function cleanSqlIdentifier(identifier) {
+  return String(identifier || '')
+    .trim()
+    .replace(/[;,)]*$/g, '')
+    .split(/\s*\.\s*/)
+    .map((part) => part.trim().replace(/^["'`\[]/, '').replace(/["'`\]]$/, ''))
+    .filter(Boolean)
+    .join('.')
+}
+
+function uniqueSorted(values) {
+  return [...new Set(values.filter(Boolean))].sort((a, b) => a.localeCompare(b))
+}
+
+function uniqueColumnTargets(values) {
+  const seen = new Set()
+  const result = []
+  for (const value of values) {
+    if (!value.table || !value.column) continue
+    const key = `${value.table}.${value.column}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push(value)
+  }
+  return result.sort((a, b) => `${a.table}.${a.column}`.localeCompare(`${b.table}.${b.column}`))
+}
+
+function uniqueIndexTargets(values) {
+  const seen = new Set()
+  const result = []
+  for (const value of values) {
+    if (!value.table || !value.index) continue
+    const key = `${value.table}.${value.index}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push(value)
+  }
+  return result.sort((a, b) => `${a.table}.${a.index}`.localeCompare(`${b.table}.${b.index}`))
+}
+
+function splitStatementSegments(source) {
+  return source
+    .split(/;\s*|\.execute\s*\([^)]*\)/g)
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+}
+
+function findMatchingParen(source, openIndex) {
+  let depth = 0
+  let quote = ''
+  for (let i = openIndex; i < source.length; i += 1) {
+    const char = source[i]
+    const prev = source[i - 1]
+    if (quote) {
+      if (char === quote && prev !== '\\') quote = ''
+      continue
+    }
+    if (char === '\'' || char === '"' || char === '`') {
+      quote = char
+      continue
+    }
+    if (char === '(') depth += 1
+    if (char === ')') {
+      depth -= 1
+      if (depth === 0) return i
+    }
+  }
+  return -1
+}
+
+function splitTopLevelComma(source) {
+  const parts = []
+  let start = 0
+  let depth = 0
+  let quote = ''
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i]
+    const prev = source[i - 1]
+    if (quote) {
+      if (char === quote && prev !== '\\') quote = ''
+      continue
+    }
+    if (char === '\'' || char === '"' || char === '`') {
+      quote = char
+      continue
+    }
+    if (char === '(') depth += 1
+    if (char === ')') depth -= 1
+    if (char === ',' && depth === 0) {
+      parts.push(source.slice(start, i).trim())
+      start = i + 1
+    }
+  }
+  const tail = source.slice(start).trim()
+  if (tail) parts.push(tail)
+  return parts
+}
+
+function extractSqlCreateTableColumns(source, identifierPattern) {
+  const targets = []
+  const createTableRegex = new RegExp(String.raw`\bCREATE\s+(?:UNLOGGED\s+|TEMP(?:ORARY)?\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(${identifierPattern})`, 'gi')
+  for (const match of source.matchAll(createTableRegex)) {
+    if (match.index === undefined) continue
+    const table = cleanSqlIdentifier(match[1])
+    const afterName = match.index + match[0].length
+    const nextText = source.slice(afterName, afterName + 80)
+    if (/^\s+PARTITION\s+OF\b/i.test(nextText)) continue
+    const openIndex = source.indexOf('(', afterName)
+    if (openIndex < 0 || openIndex > afterName + 200) continue
+    const closeIndex = findMatchingParen(source, openIndex)
+    if (closeIndex < 0) continue
+    for (const entry of splitTopLevelComma(source.slice(openIndex + 1, closeIndex))) {
+      const firstToken = entry.match(/^\s*("[^"]+"|`[^`]+`|'[^']+'|[A-Za-z_][A-Za-z0-9_$]*)/)
+      if (!firstToken) continue
+      const column = cleanSqlIdentifier(firstToken[1])
+      if (/^(PRIMARY|CONSTRAINT|FOREIGN|UNIQUE|CHECK|EXCLUDE|LIKE)$/i.test(column)) continue
+      targets.push({ table, column })
+    }
+  }
+  return targets
+}
+
+function extractSchemaTargets(source) {
+  const identifier = String.raw`(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*))?`
+  const createTables = []
+  const alterTables = []
+  const addColumns = []
+  const indexes = []
+
+  for (const match of source.matchAll(new RegExp(String.raw`\bCREATE\s+(?:UNLOGGED\s+|TEMP(?:ORARY)?\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(${identifier})`, 'gi'))) {
+    createTables.push(cleanSqlIdentifier(match[1]))
+  }
+
+  for (const match of source.matchAll(/\.createTable\s*\(\s*(['"`])([^'"`]+)\1\s*\)/g)) {
+    createTables.push(cleanSqlIdentifier(match[2]))
+  }
+
+  for (const match of source.matchAll(new RegExp(String.raw`\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(${identifier})\s+ON\s+(${identifier})`, 'gi'))) {
+    indexes.push({
+      index: cleanSqlIdentifier(match[1]),
+      table: cleanSqlIdentifier(match[2]),
+    })
+  }
+
+  for (const match of source.matchAll(/\.createIndex\s*\(\s*(['"`])([^'"`]+)\1\s*\)([\s\S]*?)(?=\.execute\s*\(\s*\)|;)/g)) {
+    const onMatch = match[3].match(/\.on\s*\(\s*(['"`])([^'"`]+)\1\s*\)/)
+    if (!onMatch) continue
+    indexes.push({
+      index: cleanSqlIdentifier(match[2]),
+      table: cleanSqlIdentifier(onMatch[2]),
+    })
+  }
+
+  addColumns.push(...extractSqlCreateTableColumns(source, identifier))
+
+  for (const segment of splitStatementSegments(source)) {
+    const alterMatch = segment.match(new RegExp(String.raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(${identifier})`, 'i'))
+    if (!alterMatch) continue
+    const table = cleanSqlIdentifier(alterMatch[1])
+    alterTables.push(table)
+    const addColumnMatch = segment.match(new RegExp(String.raw`\bADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?(${identifier})`, 'i'))
+    if (addColumnMatch) {
+      addColumns.push({
+        table,
+        column: cleanSqlIdentifier(addColumnMatch[1]),
+      })
+    }
+  }
+
+  for (const match of source.matchAll(/\.alterTable\s*\(\s*(['"`])([^'"`]+)\1\s*\)([\s\S]*?)(?=\.execute\s*\(\s*\)|;)/g)) {
+    const table = cleanSqlIdentifier(match[2])
+    for (const columnMatch of match[3].matchAll(/\.addColumn\s*\(\s*(['"`])([^'"`]+)\1/g)) {
+      addColumns.push({
+        table,
+        column: cleanSqlIdentifier(columnMatch[2]),
+      })
+    }
+  }
+
+  for (const match of source.matchAll(/\.createTable\s*\(\s*(['"`])([^'"`]+)\1\s*\)([\s\S]*?)(?=\.execute\s*\(\s*\)|;)/g)) {
+    const table = cleanSqlIdentifier(match[2])
+    for (const columnMatch of match[3].matchAll(/\.addColumn\s*\(\s*(['"`])([^'"`]+)\1/g)) {
+      addColumns.push({
+        table,
+        column: cleanSqlIdentifier(columnMatch[2]),
+      })
+    }
+  }
+
+  return {
+    createTables: uniqueSorted(createTables),
+    alterTables: uniqueSorted(alterTables),
+    addColumns: uniqueColumnTargets(addColumns),
+    indexes: uniqueIndexTargets(indexes),
+  }
 }
 
 function riskFor(category, fileInfo) {
@@ -224,6 +440,38 @@ function countBy(items, key) {
   return counts
 }
 
+function buildSchemaProbePlan(items) {
+  return items
+    .filter((item) => (
+      item.schemaTargets.createTables.length > 0
+      || item.schemaTargets.alterTables.length > 0
+      || item.schemaTargets.addColumns.length > 0
+      || item.schemaTargets.indexes.length > 0
+      || item.risk === 'high'
+      || item.risk === 'unknown'
+    ))
+    .map((item) => ({
+      migration: item.name,
+      category: item.category,
+      risk: item.risk,
+      filePath: item.filePath,
+      tablesToCheck: uniqueSorted([
+        ...item.schemaTargets.createTables,
+        ...item.schemaTargets.alterTables,
+        ...item.schemaTargets.addColumns.map((column) => column.table),
+        ...item.schemaTargets.indexes.map((index) => index.table),
+      ]),
+      columnsToCheck: item.schemaTargets.addColumns.map((column) => `${column.table}.${column.column}`),
+      indexesToCheck: item.schemaTargets.indexes.map((index) => `${index.table}.${index.index}`),
+      notes: item.schemaTargets.createTables.length === 0
+        && item.schemaTargets.alterTables.length === 0
+        && item.schemaTargets.addColumns.length === 0
+        && item.schemaTargets.indexes.length === 0
+        ? 'No obvious table/column targets were extracted; inspect the migration manually.'
+        : 'Verify these targets on a cloned or backed-up DB before applying or marking migrations.',
+    }))
+}
+
 function buildReport(migrateList, opts) {
   const supersededLegacyNames = loadSupersededLegacyNames()
   const items = migrateList.pendingNames.map((name) => {
@@ -268,6 +516,7 @@ function buildReport(migrateList, opts) {
     categoryCounts: countBy(items, 'category'),
     riskCounts: countBy(items, 'risk'),
     recommendation,
+    schemaProbePlan: buildSchemaProbePlan(items),
     items,
   }
 }
@@ -285,6 +534,7 @@ function renderMarkdown(report) {
   const highOrUnknown = report.items
     .filter((item) => item.risk === 'high' || item.risk === 'unknown')
     .slice(0, 25)
+  const schemaProbePlan = report.schemaProbePlan.slice(0, 40)
 
   const lines = [
     `# ${report.title}`,
@@ -327,6 +577,27 @@ function renderMarkdown(report) {
       { label: 'Risk', value: (row) => row.risk },
       { label: 'File', value: (row) => row.filePath || '(missing)' },
       { label: 'Reason', value: (row) => row.riskReason },
+    ]))
+  }
+
+  lines.push(
+    '',
+    '## Schema Probe Plan',
+    '',
+    'Use this as a read-only rehearsal checklist on a cloned or backed-up DB. It is not a safety proof.',
+    '',
+  )
+
+  if (schemaProbePlan.length === 0) {
+    lines.push('No obvious schema probe targets were extracted.')
+  } else {
+    lines.push(markdownTable(schemaProbePlan, [
+      { label: 'Migration', value: (row) => row.migration },
+      { label: 'Risk', value: (row) => row.risk },
+      { label: 'Tables to check', value: (row) => row.tablesToCheck.join(', ') || '(manual)' },
+      { label: 'Columns to check', value: (row) => row.columnsToCheck.join(', ') || '(none)' },
+      { label: 'Indexes to check', value: (row) => row.indexesToCheck.join(', ') || '(none)' },
+      { label: 'Note', value: (row) => row.notes },
     ]))
   }
 

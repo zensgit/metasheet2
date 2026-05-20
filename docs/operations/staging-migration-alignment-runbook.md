@@ -20,6 +20,12 @@ pending names into superseded legacy no-op markers, executable legacy SQL,
 timestamp SQL, and modern migrations, and flags obvious replay risks such as
 `CREATE TABLE` without `IF NOT EXISTS`.
 
+The report also includes a **Schema Probe Plan** section. Treat that section as
+a read-only rehearsal checklist: it lists obvious table, column, and index
+targets extracted from migration `up()` paths so operators know what to inspect
+on a cloned or backed-up DB. The probe plan is not a safety proof and does not
+replace a real rehearsal.
+
 Do **not** apply Option A or run full `migrate --latest` when the report says
 `do_not_run_full_migrate`. Use a cloned or backed-up rehearsal DB first.
 
