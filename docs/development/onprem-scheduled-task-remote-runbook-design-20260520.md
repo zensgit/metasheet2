@@ -14,6 +14,9 @@ were not yet captured in the canonical Windows on-prem runbook.
   with a new `## 10.2) Scheduled-task remote apply (release 584dbc88a and
   later)` subsection, sitting after the existing `## 10.1)` block (which
   already describes the wrappers).
+- Refresh the existing `deploy-remote.bat` bullet in `## 10.1)` so it no
+  longer calls the current wrapper a detached background run. The old
+  detached behavior is still mentioned as the pre-584dbc88a legacy behavior.
 - Add this design MD + companion verification MD under
   `docs/development/`.
 - No code change. No package build. No verify-script gate change.
@@ -60,6 +63,10 @@ Creating a separate doc would force operators to read two places for
 the same upgrade flow, which the bridge feedback explicitly does not
 want.
 
+The existing `deploy-remote.bat` bullet in `10.1` also had to be refreshed:
+leaving it as "detached background run" would contradict the new 584dbc88a
+semantics described immediately below it.
+
 ## Why a "real-environment" acceptance section is worth the addition
 
 The bridge feedback distinguishes between two kinds of "looks OK":
@@ -87,8 +94,8 @@ without proving anything".
 ## Files touched
 
 - `docs/deployment/multitable-windows-onprem-easy-start-20260319.md`
-  (new `## 10.2)` subsection inserted before `## 11) Delivery
-  checklist`)
+  (one refreshed `deploy-remote.bat` bullet in `## 10.1`, plus new
+  `## 10.2)` subsection inserted before `## 11) Delivery checklist`)
 - `docs/development/onprem-scheduled-task-remote-runbook-design-20260520.md`
   (this file)
 - `docs/development/onprem-scheduled-task-remote-runbook-verification-20260520.md`

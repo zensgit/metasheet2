@@ -23,6 +23,11 @@ the canonical release SHA `584dbc88a` (PR #1703 merge) is cited as the
 boundary - so future operators reading "this runbook documents the
 584dbc88a path" can grep the SHA directly.
 
+The existing `10.1` wrapper summary also now describes `deploy-remote.bat`
+as a scheduled-task-friendly wrapper, with the detached behavior scoped to
+older packages. This prevents the summary bullet from contradicting the new
+`10.2` behavior.
+
 ### 2. Acceptance-text grep against the updated runbook
 
 ```text
@@ -79,6 +84,7 @@ No trailing-whitespace or merge-conflict markers introduced.
 | Criterion | Evidence |
 | --- | --- |
 | Update an existing runbook, no duplicate doc | section `10.2` inserted into existing `multitable-windows-onprem-easy-start-20260319.md` |
+| Existing `deploy-remote.bat` summary no longer contradicts 584dbc88a behavior | `10.1` bullet says release `584dbc88a` and later run synchronously and propagate `apply exit=N`; older packages are identified as detached |
 | New `docs/development/...-design-20260520.md` | this PR adds it |
 | New `docs/development/...-verification-20260520.md` | this PR adds it |
 | Runbook records release `584dbc88a` scheduled-task validation passed | section heading cites `584dbc88a`; "Verified on the on-prem bridge against release `584dbc88a`" sentence |
@@ -93,7 +99,8 @@ No trailing-whitespace or merge-conflict markers introduced.
 ## Files touched
 
 - `docs/deployment/multitable-windows-onprem-easy-start-20260319.md`
-  (+ new section 10.2 only; sections 1-10.1 + 11 untouched)
+  (+ one `deploy-remote.bat` summary clarification in 10.1, plus new
+  section 10.2; sections 1-10 and 11 untouched)
 - `docs/development/onprem-scheduled-task-remote-runbook-design-20260520.md`
   (new)
 - `docs/development/onprem-scheduled-task-remote-runbook-verification-20260520.md`

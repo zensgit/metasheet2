@@ -262,7 +262,7 @@ The packaged root now also includes Windows-native wrappers:
 
 - `deploy.bat <package.zip|package.tgz>`: synchronous apply + upgrade
 - `deploy-runXX.bat <package.zip|package.tgz>`: same helper with the packaged run label baked in
-- `deploy-remote.bat <package.zip|package.tgz>`: detached background run that writes `output/logs/deploy-remote.log`
+- `deploy-remote.bat <package.zip|package.tgz>`: scheduled-task-friendly remote wrapper that writes `output/logs/deploy-remote.log`; release `584dbc88a` and later run synchronously and propagate `apply exit=N` (older packages used a detached background wrapper)
 - `bootstrap-admin.bat <admin-email> <admin-password> [admin-name]`: create or repair the initial admin user on a pure Windows host
 - `bootstrap-admin-runXX.bat <admin-email> <admin-password> [admin-name]`: same helper with the packaged run label baked in
 
