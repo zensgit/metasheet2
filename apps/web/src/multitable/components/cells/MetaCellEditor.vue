@@ -47,7 +47,7 @@
       <MetaYjsPresenceChip
         v-if="yjsActive && yjsCollaborators.length > 0"
         class="meta-cell-editor__presence"
-        label="Editing"
+        :label="l('cell.editing')"
         :users="yjsCollaborators"
       />
     </div>
@@ -72,7 +72,7 @@
       class="meta-cell-editor__input"
       type="text"
       inputmode="text"
-      placeholder="Scan or enter barcode"
+      :placeholder="l('cell.barcodePlaceholder')"
       :value="textControlValue(modelValue)"
       @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
       @keydown.enter="emit('confirm')"
@@ -85,7 +85,7 @@
       ref="inputRef"
       class="meta-cell-editor__input"
       type="text"
-      placeholder="Enter address"
+      :placeholder="l('cell.locationPlaceholder')"
       :value="locationAddressValue(modelValue)"
       @input="emit('update:modelValue', locationValueFromAddress(($event.target as HTMLInputElement).value))"
       @keydown.enter="emit('confirm')"
@@ -112,7 +112,7 @@
         :checked="!!modelValue"
         @change="emit('update:modelValue', ($event.target as HTMLInputElement).checked); emit('confirm')"
       />
-      <span>{{ modelValue ? 'Yes' : 'No' }}</span>
+      <span>{{ modelValue ? l('cell.yes') : l('cell.no') }}</span>
     </label>
 
     <!-- select -->
@@ -182,7 +182,7 @@
         type="button"
         class="meta-cell-editor__rating-clear"
         @click="onRatingPick(0)"
-      >Clear</button>
+      >{{ l('cell.clear') }}</button>
     </div>
 
     <!-- url / email / phone: validated text input -->
@@ -225,7 +225,7 @@
       <MetaAttachmentList
         :attachments="attachmentItems"
         removable
-        empty-label="No attachments"
+        :empty-label="l('cell.noAttachments')"
         @remove="onRemoveAttachment"
       />
       <div class="meta-cell-editor__attachment-actions">
@@ -252,11 +252,11 @@
           :disabled="!attachmentIds.length || !!attachmentActivity || uploading"
           @click="clearAttachments"
         >
-          Clear all
+          {{ l('cell.clearAll') }}
         </button>
       </div>
       <div v-if="attachmentActivity" class="meta-cell-editor__uploading">
-        {{ attachmentActivity === 'removing' ? 'Removing...' : attachmentActivity === 'clearing' ? 'Clearing...' : 'Uploading...' }}
+        {{ attachmentActivity ? attachmentActivityLabel(attachmentActivity, isZh) : '' }}
       </div>
       <div v-if="attachmentError" class="meta-cell-editor__error">{{ attachmentError }}</div>
     </div>
@@ -290,6 +290,13 @@ import {
   locationValueFromAddress,
 } from '../../utils/field-display'
 import { useYjsCellBinding, type YjsCellBinding } from '../../composables/useYjsCellBinding'
+import { useLocale } from '../../../composables/useLocale'
+import {
+  metaCoreLabel,
+  attachmentActionHint as attachmentActionHintFn,
+  attachmentActivityLabel,
+  type MetaCoreLabelKey,
+} from '../../utils/meta-core-labels'
 
 const props = defineProps<{
   field: MetaField
@@ -328,6 +335,9 @@ const emit = defineEmits<{
    */
   (e: 'yjs-commit'): void
 }>()
+
+const { isZh } = useLocale()
+const l = (key: MetaCoreLabelKey) => metaCoreLabel(key, isZh.value)
 
 const readonlyDisplayValue = computed(() =>
   formatFieldDisplay({
@@ -407,6 +417,12 @@ function onMultiSelectChange(event: Event) {
 }
 
 const linkButtonLabel = computed(() => {
+  // T3A2 unreachable-fallback note: the surrounding `<button v-else-if="field.type === 'link'">`
+  // only renders when field.type === 'link', which makes this `!== 'link'` branch
+  // unreachable in the current render flow. We intentionally do NOT localize this
+  // static English string in T3A2 (would be a dead key per the merged dev MD §7.6).
+  // If a future refactor exposes this branch to the DOM, localize it together with
+  // `formatLinkActionLabel` (queued for T3B with the link picker/drawer slice).
   if (props.field.type !== 'link') return 'Choose linked records...'
   const count = Array.isArray(props.modelValue) ? props.modelValue.length : props.modelValue ? 1 : 0
   return formatLinkActionLabel(props.field, count)
@@ -427,10 +443,13 @@ const attachmentAllowsMultiple = computed(() => {
   if (props.field.type !== 'attachment') return true
   return resolveAttachmentFieldProperty(props.field.property).maxFiles !== 1
 })
-const attachmentActionHint = computed(() => {
-  if (attachmentAllowsMultiple.value) return 'Drop files or click to browse'
-  return attachmentIds.value.length ? 'Upload a new file to replace the current one' : 'Upload a file'
-})
+const attachmentActionHint = computed(() =>
+  attachmentActionHintFn(
+    attachmentAllowsMultiple.value,
+    attachmentIds.value.length > 0,
+    isZh.value,
+  ),
+)
 
 const attachmentItems = computed<MetaAttachment[]>(() => {
   const summaryById = new Map((props.attachmentSummaries ?? []).map((attachment) => [attachment.id, attachment]))
@@ -486,7 +505,7 @@ async function uploadFiles(files: FileList) {
     }
     setAttachmentValue(replaceExisting ? newIds : [...existingIds, ...newIds])
   } catch (error: any) {
-    attachmentError.value = error?.message ?? 'Failed to upload attachment'
+    attachmentError.value = error?.message ?? l('cell.uploadFailed')
   } finally {
     uploading.value = false
     attachmentActivity.value = null
@@ -552,7 +571,7 @@ async function onRemoveAttachment(attachmentId: string) {
     }
     setAttachmentValue(attachmentIds.value.filter((id) => id !== attachmentId))
   } catch (error: any) {
-    attachmentError.value = error?.message ?? 'Failed to remove attachment'
+    attachmentError.value = error?.message ?? l('cell.removeFailed')
   } finally {
     attachmentActivity.value = null
   }
@@ -572,7 +591,7 @@ async function clearAttachments() {
     }
     setAttachmentValue([])
   } catch (error: any) {
-    attachmentError.value = error?.message ?? 'Failed to clear attachments'
+    attachmentError.value = error?.message ?? l('cell.clearFailed')
   } finally {
     attachmentActivity.value = null
   }
