@@ -59,6 +59,8 @@ function verify_windows_entrypoints() {
   search_fixed_string 'pnpm.cmd' "$apply_helper" || die "PowerShell apply helper must prefer pnpm.cmd for Windows scheduled-task install"
   search_fixed_string 'cmd.exe' "$apply_helper" || die "PowerShell apply helper must run dependency refresh through cmd.exe"
   search_fixed_string 'dependency-refresh-wrapper' "$apply_helper" || die "PowerShell apply helper must generate a dependency refresh command wrapper"
+  search_fixed_string 'CI=true' "$apply_helper" || die "PowerShell apply helper must force dependency refresh into non-interactive CI mode"
+  search_fixed_string 'PNPM_CONFIG_CONFIRM_MODULES_PURGE=false' "$apply_helper" || die "PowerShell apply helper must disable pnpm module purge confirmation"
   search_fixed_string '--reporter=append-only' "$apply_helper" || die "PowerShell apply helper must use append-only pnpm reporter for deploy logs"
   search_fixed_string '--store-dir' "$apply_helper" || die "PowerShell apply helper must pin a deploy-local pnpm store"
   search_fixed_string '.pnpm-store' "$apply_helper" || die "PowerShell apply helper must create a deploy-local pnpm store"
@@ -67,6 +69,8 @@ function verify_windows_entrypoints() {
   search_fixed_string 'taskkill.exe' "$apply_helper" || die "PowerShell apply helper must kill the dependency refresh process tree on timeout"
   search_fixed_string 'still running after' "$apply_helper" || die "PowerShell apply helper must emit dependency refresh heartbeat progress"
   search_fixed_string 'timed out after' "$apply_helper" || die "PowerShell apply helper must fail dependency refresh with a timeout"
+  search_fixed_string 'Get-DependencyRefreshExitCodeFromLog' "$apply_helper" || die "PowerShell apply helper must recover the wrapper exit marker when Start-Process exit code is blank"
+  search_fixed_string 'WaitForExit()' "$apply_helper" || die "PowerShell apply helper must wait for process exit before reading ExitCode"
   if search_fixed_string "-not (Test-Path -LiteralPath (Join-Path \$resolvedRoot 'node_modules'))" "$apply_helper"; then
     die "PowerShell apply helper must not skip dependency refresh just because root node_modules already exists"
   fi
@@ -536,6 +540,8 @@ required=(
   "docs/development/onprem-package-dependency-refresh-diagnostics-verification-20260519.md"
   "docs/development/onprem-package-dependency-refresh-wrapper-design-20260519.md"
   "docs/development/onprem-package-dependency-refresh-wrapper-verification-20260519.md"
+  "docs/development/data-factory-issue1526-wrapper-sql-followup-design-20260519.md"
+  "docs/development/data-factory-issue1526-wrapper-sql-followup-verification-20260519.md"
   "docs/development/data-factory-readiness-package-verify-delivery-development-20260515.md"
   "docs/development/data-factory-readiness-package-verify-delivery-verification-20260515.md"
   "docs/development/onprem-migration-gap-guard-development-20260514.md"

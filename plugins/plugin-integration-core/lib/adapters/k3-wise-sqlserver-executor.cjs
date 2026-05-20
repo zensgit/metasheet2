@@ -92,15 +92,22 @@ function parseServerAndPort(serverValue, portValue) {
     })
   }
 
-  const hostPortMatch = server.match(/^([^,:\\]+):(\d+)$/)
-  if (hostPortMatch && configuredPort === null) {
-    const parsedPort = Number(hostPortMatch[2])
+  const hostPortMatch = server.match(/^([^,:\\]+)([:,])(\d+)$/)
+  if (hostPortMatch) {
+    const parsedPort = Number(hostPortMatch[3])
     if (!Number.isInteger(parsedPort) || parsedPort <= 0 || parsedPort > 65535) {
       throw new SqlServerExecutorError('SQLSERVER_PORT_INVALID', 'system.config.server contains an invalid port', {
         field: 'system.config.server',
       })
     }
-    return { server: hostPortMatch[1], port: parsedPort }
+    if (configuredPort !== null && configuredPort !== parsedPort) {
+      throw new SqlServerExecutorError(
+        'SQLSERVER_PORT_INVALID',
+        'system.config.server port must match system.config.port when both are provided',
+        { field: 'system.config.server' },
+      )
+    }
+    return { server: hostPortMatch[1], port: configuredPort === null ? parsedPort : configuredPort }
   }
   return { server, port: configuredPort }
 }

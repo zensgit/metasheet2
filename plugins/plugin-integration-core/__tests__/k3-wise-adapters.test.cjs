@@ -16,6 +16,7 @@ const {
   createK3WiseSqlServerChannelFactory,
 } = require(path.join(__dirname, '..', 'lib', 'adapters', 'k3-wise-sqlserver-channel.cjs'))
 const {
+  __internals: sqlExecutorInternals,
   createK3WiseSqlServerReadOnlyExecutor,
 } = require(path.join(__dirname, '..', 'lib', 'adapters', 'k3-wise-sqlserver-executor.cjs'))
 
@@ -180,6 +181,45 @@ function createFakeMssqlDriver({ rows = [{ FItemID: 1, FNumber: 'MAT-001' }], fa
   }
 
   return { driver: { ConnectionPool }, calls }
+}
+
+function testSqlServerConnectionConfigNormalization() {
+  const credentials = { credentials: { username: 'readonly_user', password: 'readonly-password' } }
+
+  const commaPort = sqlExecutorInternals.resolveConnectionConfig(createSqlSystem({
+    server: '10.0.0.8,1433',
+    database: 'AIS_TEST',
+  }, credentials))
+  assert.equal(commaPort.server, '10.0.0.8')
+  assert.equal(commaPort.port, 1433)
+
+  const colonPort = sqlExecutorInternals.resolveConnectionConfig(createSqlSystem({
+    server: 'sql.local:14330',
+    database: 'AIS_TEST',
+  }, credentials))
+  assert.equal(colonPort.server, 'sql.local')
+  assert.equal(colonPort.port, 14330)
+
+  const matchingExplicitPort = sqlExecutorInternals.resolveConnectionConfig(createSqlSystem({
+    server: 'sql.local,1433',
+    port: '1433',
+    database: 'AIS_TEST',
+  }, credentials))
+  assert.equal(matchingExplicitPort.server, 'sql.local')
+  assert.equal(matchingExplicitPort.port, 1433)
+
+  let conflictingPort = null
+  try {
+    sqlExecutorInternals.resolveConnectionConfig(createSqlSystem({
+      server: 'sql.local,1433',
+      port: '1434',
+      database: 'AIS_TEST',
+    }, credentials))
+  } catch (error) {
+    conflictingPort = error
+  }
+  assert.equal(conflictingPort && conflictingPort.code, 'SQLSERVER_PORT_INVALID')
+  assert.match(conflictingPort.message, /must match/)
 }
 
 async function testK3WebApiAdapter() {
@@ -810,6 +850,7 @@ async function testK3WebApiAutoFlagCoercion() {
 async function main() {
   await testK3WebApiAdapter()
   await testK3WebApiAuthorityCodeToken()
+  testSqlServerConnectionConfigNormalization()
   await testK3SqlServerChannel()
   await testK3WebApiAutoFlagCoercion()
   console.log('✓ k3-wise-adapters: WebAPI, SQL Server channel, and auto-flag coercion tests passed')
