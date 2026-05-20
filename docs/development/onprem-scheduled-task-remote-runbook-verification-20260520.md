@@ -29,20 +29,24 @@ boundary - so future operators reading "this runbook documents the
 grep -cF '<needle>' multitable-windows-onprem-easy-start-20260319.md
 
 LastTaskResult                                            -> 6
-[multitable-onprem-deploy-launcher] apply exit=0          -> 1
-[multitable-onprem-deploy] apply exit=0                   -> 1
-[multitable-onprem-deploy-remote] apply exit=0            -> 1
+[multitable-onprem-deploy-launcher] apply exit=           -> 2
+[multitable-onprem-deploy] apply exit=                    -> 2
+[multitable-onprem-deploy-remote] apply exit=             -> 2
 HOMEPATH                                                  -> 1
 USERPROFILE                                               -> 1
 APPDATA                                                   -> 2
-pnpm                                                      -> 15
-PM2                                                       -> 4
+#1696                                                     -> 1
+#1684                                                     -> 1
 ```
 
-All three `apply exit=0` markers appear exactly once each, in the
-"Success acceptance" block. `LastTaskResult` is referenced six times
-(section narration + concrete check). The SYSTEM env requirement is
-visible via the named variables and the `pnpm`/`PM2` rationale.
+Each of the three `apply exit=` marker prefixes appears twice: once in
+the "Success acceptance" example block (with the literal `=0` suffix
+for the success-case template) and once in the "missing marker → stale
+file" diagnostic table (without an `=N` suffix, as the marker name
+itself). `LastTaskResult` is referenced six times (section narration +
+concrete check). The SYSTEM env requirement is visible via HOMEPATH /
+USERPROFILE / APPDATA. The `#1696` / `#1684` references cite the
+prior-PR boundary the upgrade-gap caveat in gotcha #1 depends on.
 
 ### 3. Secret-shape grep across all three changed files
 
