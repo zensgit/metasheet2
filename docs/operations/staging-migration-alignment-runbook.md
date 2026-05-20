@@ -26,6 +26,13 @@ targets extracted from migration `up()` paths so operators know what to inspect
 on a cloned or backed-up DB. The probe plan is not a safety proof and does not
 replace a real rehearsal.
 
+The same run writes `schema-probes.sql` next to `report.json` and `report.md`.
+This SQL file contains only read-only PostgreSQL `pg_catalog` checks wrapped in
+a read-only transaction. Run it against a cloned or backed-up rehearsal DB when
+you need a machine-readable table/column/index existence matrix. Unqualified
+targets are not assumed to be in `public`; the output includes `match_count` and
+`matched_schemas` so operators can see ambiguity explicitly.
+
 Do **not** apply Option A or run full `migrate --latest` when the report says
 `do_not_run_full_migrate`. Use a cloned or backed-up rehearsal DB first.
 

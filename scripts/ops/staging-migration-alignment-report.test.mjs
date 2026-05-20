@@ -104,10 +104,13 @@ Pending migrations (in load order):
     assert.equal(result.status, 0, result.stderr)
 
     const report = JSON.parse(readFileSync(path.join(outDir, 'report.json'), 'utf8'))
+    const probeSql = readFileSync(path.join(outDir, 'schema-probes.sql'), 'utf8')
     const item = report.items.find((it) => it.name === '20250926_create_audit_tables')
     assert.equal(item.category, 'timestamp_sql')
     assert.equal(item.risk, 'high')
     assert.equal(item.hasCreateTableWithoutIfNotExists, true)
+    assert.ok(report.schemaProbeSqlCounts.tables > 0)
+    assert.ok(report.schemaProbeSqlCounts.columns > 0)
     assert.ok(item.schemaTargets.createTables.includes('audit_logs'))
     assert.ok(item.schemaTargets.addColumns.some((target) => (
       target.table === 'audit_logs' && target.column === 'event_id'
@@ -120,6 +123,14 @@ Pending migrations (in load order):
       && entry.tablesToCheck.includes('audit_logs')
       && entry.columnsToCheck.includes('audit_logs.event_id')
     )))
+    assert.match(probeSql, /BEGIN READ ONLY/)
+    assert.match(probeSql, /WITH probe_plan/)
+    assert.match(probeSql, /pg_catalog\.pg_attribute/)
+    assert.match(probeSql, /matched_schemas/)
+    assert.match(probeSql, /\('column', '20250926_create_audit_tables', NULL, 'audit_logs', 'event_id', NULL\)/)
+    assert.doesNotMatch(probeSql, /to_regclass/)
+    assert.doesNotMatch(probeSql, /information_schema\.columns/)
+    assert.doesNotMatch(probeSql, /\b(CREATE|ALTER|DROP)\s+(TABLE|INDEX|COLUMN)\b/i)
   } finally {
     rmSync(tmp, { recursive: true, force: true })
   }
@@ -162,6 +173,7 @@ Pending migrations (in load order):
     assert.equal(result.status, 0, result.stderr)
 
     const report = JSON.parse(readFileSync(path.join(outDir, 'report.json'), 'utf8'))
+    const probeSql = readFileSync(path.join(outDir, 'schema-probes.sql'), 'utf8')
     const item = report.items.find((it) => it.name === 'zzzz20260519070000_create_plugin_attendance_report_sync_jobs')
     assert.equal(item.category, 'modern_timestamp_migration')
     assert.notEqual(item.risk, 'high')
@@ -174,6 +186,11 @@ Pending migrations (in load order):
       target.table === 'plugin_attendance_report_sync_jobs'
       && target.index === 'uq_plugin_attendance_report_sync_jobs_idempotency'
     )))
+    assert.equal(report.schemaProbeSqlCounts.tables, 1)
+    assert.equal(report.schemaProbeSqlCounts.indexes, 1)
+    assert.match(probeSql, /pg_catalog\.pg_index/)
+    assert.match(probeSql, /plugin_attendance_report_sync_jobs/)
+    assert.match(probeSql, /status/)
   } finally {
     rmSync(tmp, { recursive: true, force: true })
   }
@@ -201,6 +218,33 @@ Pending migrations (in load order):
     assert.equal(item.schemaTargets.addColumns.some((target) => (
       target.table === 'approval_records' && target.column === 'node_key'
     )), false)
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+test('emits full schema probe SQL from the whole probe plan', () => {
+  const tmp = makeTmp()
+  try {
+    const outDir = path.join(tmp, 'out')
+    const result = run(['--out-dir', outDir], STAGING_LIST)
+    assert.equal(result.status, 0, result.stderr)
+
+    const report = JSON.parse(readFileSync(path.join(outDir, 'report.json'), 'utf8'))
+    const markdown = readFileSync(path.join(outDir, 'report.md'), 'utf8')
+    const probeSql = readFileSync(path.join(outDir, 'schema-probes.sql'), 'utf8')
+
+    const planRowsInSql = [...probeSql.matchAll(/\('(?:table|column|index)', /g)].length
+    const expectedRows = report.schemaProbeSqlCounts.tables
+      + report.schemaProbeSqlCounts.columns
+      + report.schemaProbeSqlCounts.indexes
+
+    assert.equal(planRowsInSql, expectedRows)
+    assert.equal(report.schemaProbePlan.length, 40)
+    assert.match(markdown, /The companion `schema-probes\.sql`/)
+    assert.match(probeSql, /Unqualified table names are not assumed to be public/)
+    assert.match(probeSql, /coalesce\(probe\.matched_schemas, ''\) AS matched_schemas/)
+    assert.match(probeSql, /\('table', '008_plugin_infrastructure', NULL, 'plugin_registry', NULL, NULL\)/)
   } finally {
     rmSync(tmp, { recursive: true, force: true })
   }
