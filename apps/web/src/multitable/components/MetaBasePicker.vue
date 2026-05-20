@@ -4,7 +4,7 @@
       <span class="meta-base-picker__icon" :style="activeBase ? { background: activeBase.color ?? '#409eff' } : {}">
         {{ activeBase?.icon ?? '📋' }}
       </span>
-      <span class="meta-base-picker__name">{{ activeBase?.name ?? 'Select Base' }}</span>
+      <span class="meta-base-picker__name">{{ activeBase?.name ?? l('basePicker.selectBase') }}</span>
       <span class="meta-base-picker__arrow">{{ open ? '▲' : '▼' }}</span>
     </div>
 
@@ -13,7 +13,7 @@
         <input
           v-model="search"
           class="meta-base-picker__search-input"
-          placeholder="Search bases..."
+          :placeholder="l('basePicker.searchPlaceholder')"
           @keydown.escape="open = false"
         />
       </div>
@@ -29,27 +29,27 @@
           <span class="meta-base-picker__item-copy">
             <span class="meta-base-picker__item-name">{{ base.name }}</span>
             <span v-if="base.isFavorite || base.lastOpenedAt" class="meta-base-picker__badges">
-              <span v-if="base.isFavorite">收藏</span>
-              <span v-if="base.lastOpenedAt">最近打开</span>
+              <span v-if="base.isFavorite">{{ l('basePicker.favoriteBadge') }}</span>
+              <span v-if="base.lastOpenedAt">{{ l('basePicker.recentBadge') }}</span>
             </span>
           </span>
           <button
             type="button"
             class="meta-base-picker__favorite"
             :aria-pressed="base.isFavorite"
-            :aria-label="base.isFavorite ? `取消收藏 ${base.name}` : `收藏 ${base.name}`"
+            :aria-label="favoriteAriaLabel(base.name, base.isFavorite === true, isZh)"
             @click.stop="onToggleFavorite(base.id)"
           >
             {{ base.isFavorite ? '★' : '☆' }}
           </button>
         </div>
-        <div v-if="!filteredBases.length" class="meta-base-picker__empty">No bases found</div>
+        <div v-if="!filteredBases.length" class="meta-base-picker__empty">{{ l('basePicker.empty') }}</div>
       </div>
       <div v-if="canCreate" class="meta-base-picker__create">
         <input
           v-model="newBaseName"
           class="meta-base-picker__create-input"
-          placeholder="New base name..."
+          :placeholder="l('basePicker.newBasePlaceholder')"
           @keydown.enter="onCreate"
         />
         <button class="meta-base-picker__create-btn" :disabled="!newBaseName.trim()" @click="onCreate">+</button>
@@ -60,7 +60,9 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import type { DecoratedBase } from '../utils/base-local-state'
+import { basePickerLabel, favoriteAriaLabel } from '../utils/meta-base-picker-labels'
 
 const props = defineProps<{
   bases: DecoratedBase[]
@@ -77,6 +79,8 @@ const emit = defineEmits<{
 const open = ref(false)
 const search = ref('')
 const newBaseName = ref('')
+const { isZh } = useLocale()
+const l = (key: Parameters<typeof basePickerLabel>[0]) => basePickerLabel(key, isZh.value)
 
 const activeBase = computed(() => props.bases.find((b) => b.id === props.activeBaseId) ?? null)
 
