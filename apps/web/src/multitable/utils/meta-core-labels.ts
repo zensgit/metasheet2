@@ -53,6 +53,12 @@ export type MetaCoreLabelKey =
   | 'grid.noMatchingTitle' | 'grid.noMatchingHint'
   | 'grid.collapseRow' | 'grid.expandRow'
   | 'grid.prev' | 'grid.next' | 'grid.loading'
+  // --- MetaCellEditor static (T3A2) ---
+  | 'cell.editing'
+  | 'cell.barcodePlaceholder' | 'cell.locationPlaceholder'
+  | 'cell.yes' | 'cell.no' | 'cell.clear'
+  | 'cell.noAttachments' | 'cell.clearAll'
+  | 'cell.uploadFailed' | 'cell.removeFailed' | 'cell.clearFailed'
 
 const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'toolbar.aria': { en: 'Grid toolbar', zh: '表格工具栏' },
@@ -136,6 +142,26 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'grid.prev': { en: 'Prev', zh: '上一页' },
   'grid.next': { en: 'Next', zh: '下一页' },
   'grid.loading': { en: 'Loading data', zh: '正在加载数据' },
+
+  // MetaCellEditor (T3A2): shallow chrome inside the grid cell editor.
+  // Excludes user data (option values, format examples like https://example.com),
+  // backend free-form errors, and link-button labels driven by formatLinkActionLabel
+  // (those are queued for T3B).
+  'cell.editing': { en: 'Editing', zh: '正在编辑' },
+  'cell.barcodePlaceholder': { en: 'Scan or enter barcode', zh: '扫描或输入条码' },
+  'cell.locationPlaceholder': { en: 'Enter address', zh: '输入地址' },
+  'cell.yes': { en: 'Yes', zh: '是' },
+  'cell.no': { en: 'No', zh: '否' },
+  'cell.clear': { en: 'Clear', zh: '清除' },
+  'cell.noAttachments': { en: 'No attachments', zh: '无附件' },
+  // Same en/zh as toolbar.clearAll but kept namespaced — different surface,
+  // different reviewer audit path.
+  'cell.clearAll': { en: 'Clear all', zh: '全部清除' },
+  // Fallback-only: backend error.message is preferred when present (kept raw,
+  // since it is user data); these are the frontend fallback for the `??` branch.
+  'cell.uploadFailed': { en: 'Failed to upload attachment', zh: '附件上传失败' },
+  'cell.removeFailed': { en: 'Failed to remove attachment', zh: '附件移除失败' },
+  'cell.clearFailed': { en: 'Failed to clear attachments', zh: '附件清空失败' },
 }
 
 export function metaCoreLabel(key: MetaCoreLabelKey, isZh: boolean): string {
@@ -200,4 +226,35 @@ export function filterValuePlaceholder(type: string, isZh: boolean): string {
   if (type === 'number') return isZh ? '输入数字' : 'Enter a number'
   if (type === 'date') return isZh ? '选择日期' : 'Pick a date'
   return isZh ? '输入筛选文本' : 'Enter filter text'
+}
+
+// --- T3A2: MetaCellEditor attachment helpers ---
+
+// attachmentActionHint: drop-target hint for the MetaCellEditor attachment
+// trigger. Three variants chosen by capability + existing-attachment state:
+//   - multi-file allowed → "Drop files or click to browse"
+//   - single-file + already has an attachment → "Upload a new file to replace the current one"
+//   - single-file + empty → "Upload a file"
+// `hasExisting` is a boolean — only >0-ness matters to copy, not the count.
+// User-confirmed zh choices (T3A2 AskUserQuestion, 2026-05-19): 拖拽文件或点击选择 /
+// 上传新文件以替换当前文件 / 上传文件.
+export function attachmentActionHint(
+  allowsMultiple: boolean,
+  hasExisting: boolean,
+  isZh: boolean,
+): string {
+  if (allowsMultiple) return isZh ? '拖拽文件或点击选择' : 'Drop files or click to browse'
+  if (hasExisting) return isZh ? '上传新文件以替换当前文件' : 'Upload a new file to replace the current one'
+  return isZh ? '上传文件' : 'Upload a file'
+}
+
+// attachmentActivityLabel: in-progress label below the attachment trigger.
+// Source enum matches MetaCellEditor's `attachmentActivity` ref union.
+export function attachmentActivityLabel(
+  activity: 'uploading' | 'removing' | 'clearing',
+  isZh: boolean,
+): string {
+  if (activity === 'removing') return isZh ? '正在移除...' : 'Removing...'
+  if (activity === 'clearing') return isZh ? '正在清空...' : 'Clearing...'
+  return isZh ? '正在上传...' : 'Uploading...'
 }

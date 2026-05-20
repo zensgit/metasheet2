@@ -8,6 +8,8 @@ import {
   groupNoValue,
   fieldTypeLabel,
   filterValuePlaceholder,
+  attachmentActionHint,
+  attachmentActivityLabel,
 } from '../src/multitable/utils/meta-core-labels'
 
 describe('meta-core-labels static keys', () => {
@@ -103,5 +105,60 @@ describe('meta-core-labels helpers', () => {
     expect(filterValuePlaceholder('date', true)).toBe('选择日期')
     expect(filterValuePlaceholder('string', true)).toBe('输入筛选文本')
     expect(filterValuePlaceholder('whatever', false)).toBe('Enter filter text')
+  })
+})
+
+describe('meta-core-labels MetaCellEditor static keys (T3A2)', () => {
+  it('localizes cell.editing / barcode / location / yes / no / clear / noAttachments / clearAll', () => {
+    expect(metaCoreLabel('cell.editing', true)).toBe('正在编辑')
+    expect(metaCoreLabel('cell.editing', false)).toBe('Editing')
+    expect(metaCoreLabel('cell.barcodePlaceholder', true)).toBe('扫描或输入条码')
+    expect(metaCoreLabel('cell.locationPlaceholder', true)).toBe('输入地址')
+    expect(metaCoreLabel('cell.yes', true)).toBe('是')
+    expect(metaCoreLabel('cell.no', true)).toBe('否')
+    expect(metaCoreLabel('cell.clear', true)).toBe('清除')
+    expect(metaCoreLabel('cell.noAttachments', true)).toBe('无附件')
+    expect(metaCoreLabel('cell.clearAll', true)).toBe('全部清除')
+  })
+
+  it('localizes attachment fallback error strings (frontend ?? branch only)', () => {
+    expect(metaCoreLabel('cell.uploadFailed', true)).toBe('附件上传失败')
+    expect(metaCoreLabel('cell.removeFailed', true)).toBe('附件移除失败')
+    expect(metaCoreLabel('cell.clearFailed', true)).toBe('附件清空失败')
+    // en preserved exactly to keep the existing `?? 'Failed to ...'` semantics
+    expect(metaCoreLabel('cell.uploadFailed', false)).toBe('Failed to upload attachment')
+    expect(metaCoreLabel('cell.removeFailed', false)).toBe('Failed to remove attachment')
+    expect(metaCoreLabel('cell.clearFailed', false)).toBe('Failed to clear attachments')
+  })
+
+  it('cell.clearAll is namespaced separately from toolbar.clearAll (same en/zh, different surface)', () => {
+    expect(metaCoreLabel('cell.clearAll', true)).toBe('全部清除')
+    expect(metaCoreLabel('toolbar.clearAll', true)).toBe('全部清除')
+    expect(metaCoreLabel('cell.clearAll', false)).toBe('Clear all')
+    expect(metaCoreLabel('toolbar.clearAll', false)).toBe('Clear all')
+  })
+})
+
+describe('meta-core-labels MetaCellEditor helpers (T3A2)', () => {
+  it('attachmentActionHint picks the multi-file copy when allowsMultiple', () => {
+    expect(attachmentActionHint(true, false, false)).toBe('Drop files or click to browse')
+    expect(attachmentActionHint(true, true, false)).toBe('Drop files or click to browse')
+    expect(attachmentActionHint(true, false, true)).toBe('拖拽文件或点击选择')
+  })
+
+  it('attachmentActionHint distinguishes single-file empty vs has-existing', () => {
+    expect(attachmentActionHint(false, false, false)).toBe('Upload a file')
+    expect(attachmentActionHint(false, false, true)).toBe('上传文件')
+    expect(attachmentActionHint(false, true, false)).toBe('Upload a new file to replace the current one')
+    expect(attachmentActionHint(false, true, true)).toBe('上传新文件以替换当前文件')
+  })
+
+  it('attachmentActivityLabel covers all three states matching MetaCellEditor activity ref', () => {
+    expect(attachmentActivityLabel('uploading', false)).toBe('Uploading...')
+    expect(attachmentActivityLabel('uploading', true)).toBe('正在上传...')
+    expect(attachmentActivityLabel('removing', false)).toBe('Removing...')
+    expect(attachmentActivityLabel('removing', true)).toBe('正在移除...')
+    expect(attachmentActivityLabel('clearing', false)).toBe('Clearing...')
+    expect(attachmentActivityLabel('clearing', true)).toBe('正在清空...')
   })
 })
