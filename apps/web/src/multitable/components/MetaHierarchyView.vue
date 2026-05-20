@@ -64,6 +64,7 @@
           :can-create="canCreate"
           :can-edit="canEdit"
           :can-comment="canComment"
+          :comment-label="commentsChipLabel"
           :dragging-record-id="draggingRecordId"
           :comment-presence="commentPresence"
           @toggle="toggleNode"
@@ -87,12 +88,14 @@ import { computed, defineComponent, h, reactive, ref, watch, type PropType, type
 import type { MetaField, MetaHierarchyViewConfig, MetaRecord, MultitableCommentPresenceSummary } from '../types'
 import { formatFieldDisplay } from '../utils/field-display'
 import { resolveHierarchyViewConfig } from '../utils/view-config'
+import { useLocale } from '../../composables/useLocale'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import {
   handleCommentAffordanceKeydown,
   resolveCommentAffordanceStateClass,
   resolveRecordCommentAffordance,
 } from '../utils/comment-affordance'
+import { commentLabel } from '../utils/meta-comment-labels'
 
 type HierarchyNodeModel = {
   record: MetaRecord
@@ -134,6 +137,8 @@ const pendingConfigKey = ref<string | null>(null)
 const expandedIds = ref<Set<string>>(new Set())
 const draggingRecordId = ref<string | null>(null)
 const dragWarning = ref<string | null>(null)
+const { isZh } = useLocale()
+const commentsChipLabel = computed(() => commentLabel('comment.title', isZh.value))
 
 const hierarchyConfig = computed<Required<MetaHierarchyViewConfig>>(() =>
   resolveHierarchyViewConfig(props.fields, props.viewConfig),
@@ -400,6 +405,7 @@ const HierarchyNode: ReturnType<typeof defineComponent> = defineComponent({
     canCreate: { type: Boolean, default: false },
     canEdit: { type: Boolean, default: false },
     canComment: { type: Boolean, default: false },
+    commentLabel: { type: String, default: 'Comments' },
     draggingRecordId: { type: String as PropType<string | null>, default: null },
     commentPresence: { type: Object as PropType<Record<string, MultitableCommentPresenceSummary | undefined> | undefined>, default: undefined },
   },
@@ -466,7 +472,7 @@ const HierarchyNode: ReturnType<typeof defineComponent> = defineComponent({
               'aria-label': `Open comments for ${title}`,
               onClick: () => nodeEmit('open-comments', node.record.id),
               onKeydown: (event: KeyboardEvent) => handleCommentAffordanceKeydown(event, () => nodeEmit('open-comments', node.record.id)),
-            }, [h(MetaCommentActionChip, { label: 'Comments', state: rowCommentAffordance(node.record.id) })])
+            }, [h(MetaCommentActionChip, { label: nodeProps.commentLabel, state: rowCommentAffordance(node.record.id) })])
             : null,
           nodeProps.canCreate
             ? h('button', {
@@ -486,6 +492,7 @@ const HierarchyNode: ReturnType<typeof defineComponent> = defineComponent({
               canCreate: nodeProps.canCreate,
               canEdit: nodeProps.canEdit,
               canComment: nodeProps.canComment,
+              commentLabel: nodeProps.commentLabel,
               draggingRecordId: nodeProps.draggingRecordId,
               commentPresence: nodeProps.commentPresence,
               onToggle: (recordId: string) => nodeEmit('toggle', recordId),

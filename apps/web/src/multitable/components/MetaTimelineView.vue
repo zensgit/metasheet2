@@ -92,7 +92,7 @@
                 @click.stop="emit('open-comments', item.record.id)"
                 @keydown="onRowCommentKeydown($event, item.record.id)"
               >
-                <MetaCommentActionChip label="Comments" :state="rowCommentAffordance(item.record.id)" />
+                <MetaCommentActionChip :label="commentsChipLabel" :state="rowCommentAffordance(item.record.id)" />
               </button>
               <button
                 v-if="displayField"
@@ -151,7 +151,7 @@
                 @click.stop="emit('open-comments', row.id)"
                 @keydown="onRowCommentKeydown($event, row.id)"
               >
-                <MetaCommentActionChip label="Comments" :state="rowCommentAffordance(row.id)" />
+                <MetaCommentActionChip :label="commentsChipLabel" :state="rowCommentAffordance(row.id)" />
               </button>
               <button
                 v-if="displayField"
@@ -182,6 +182,7 @@ import { ref, computed, watch } from 'vue'
 import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaRecord, MetaTimelineViewConfig, MultitableCommentPresenceSummary } from '../types'
 import { resolveTimelineViewConfig } from '../utils/view-config'
 import { formatFieldDisplay } from '../utils/field-display'
+import { useLocale } from '../../composables/useLocale'
 import MetaAttachmentList from './MetaAttachmentList.vue'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaCommentAffordance from './MetaCommentAffordance.vue'
@@ -191,6 +192,7 @@ import {
   resolveFieldCommentAffordance,
   resolveRecordCommentAffordance,
 } from '../utils/comment-affordance'
+import { commentLabel } from '../utils/meta-comment-labels'
 
 const props = defineProps<{
   rows: MetaRecord[]
@@ -234,6 +236,8 @@ const dragState = ref<{
   startMs: number
   endMs: number
 } | null>(null)
+const { isZh } = useLocale()
+const commentsChipLabel = computed(() => commentLabel('comment.title', isZh.value))
 
 const timelineConfig = computed<Required<MetaTimelineViewConfig>>(() =>
   resolveTimelineViewConfig(props.fields, props.viewConfig),
