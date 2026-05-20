@@ -44,7 +44,7 @@ function printHelp() {
 
 This script is read-only. It parses \`migrate --list\` output, classifies pending
 migrations, scans local migration files for obvious replay risk, and writes
-report.json + report.md.`)
+report.json + report.md + schema-probes.sql.`)
 }
 
 function readStdinIfAvailable() {
@@ -334,7 +334,7 @@ function extractSchemaTargets(source) {
     createTables.push(cleanSqlIdentifier(match[2]))
   }
 
-  for (const match of source.matchAll(new RegExp(String.raw`\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(${identifier})\s+ON\s+(${identifier})`, 'gi'))) {
+  for (const match of source.matchAll(new RegExp(String.raw`\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(${identifier})\s+ON\s+(${identifier})`, 'gi'))) {
     indexes.push({
       index: cleanSqlIdentifier(match[1]),
       table: cleanSqlIdentifier(match[2]),
@@ -357,8 +357,8 @@ function extractSchemaTargets(source) {
     if (!alterMatch) continue
     const table = cleanSqlIdentifier(alterMatch[1])
     alterTables.push(table)
-    const addColumnMatch = segment.match(new RegExp(String.raw`\bADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?(${identifier})`, 'i'))
-    if (addColumnMatch) {
+    const addColumnMatches = [...segment.matchAll(new RegExp(String.raw`\bADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?(${identifier})`, 'gi'))]
+    for (const addColumnMatch of addColumnMatches) {
       addColumns.push({
         table,
         column: cleanSqlIdentifier(addColumnMatch[1]),
@@ -505,6 +505,7 @@ function buildReport(migrateList, opts) {
       ? 'No migration alignment action is required.'
       : 'Use a cloned or backed-up staging DB for rehearsal before applying migrations to staging.',
   }
+  const schemaProbePlan = buildSchemaProbePlan(items)
 
   return {
     ok: true,
@@ -516,9 +517,225 @@ function buildReport(migrateList, opts) {
     categoryCounts: countBy(items, 'category'),
     riskCounts: countBy(items, 'risk'),
     recommendation,
-    schemaProbePlan: buildSchemaProbePlan(items),
+    schemaProbePlan,
+    schemaProbeSqlCounts: countSchemaProbeSqlRows(schemaProbePlan),
     items,
   }
+}
+
+function splitSchemaName(identifier) {
+  const parts = String(identifier || '').split('.').filter(Boolean)
+  if (parts.length <= 1) {
+    return {
+      schema: null,
+      name: parts[0] || '',
+    }
+  }
+  return {
+    schema: parts[0],
+    name: parts.slice(1).join('.'),
+  }
+}
+
+function sqlLiteral(value) {
+  if (value === null || value === undefined || value === '') return 'NULL'
+  return `'${String(value).replace(/'/g, "''")}'`
+}
+
+function uniqueProbeRows(rows, keyFn) {
+  const seen = new Set()
+  const result = []
+  for (const row of rows) {
+    const key = keyFn(row)
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push(row)
+  }
+  return result.sort((a, b) => keyFn(a).localeCompare(keyFn(b)))
+}
+
+function buildSchemaProbeSqlRows(schemaProbePlan) {
+  const tableRows = []
+  const columnRows = []
+  const indexRows = []
+
+  for (const entry of schemaProbePlan) {
+    for (const table of entry.tablesToCheck) {
+      const parsed = splitSchemaName(table)
+      if (!parsed.name) continue
+      tableRows.push({
+        migration: entry.migration,
+        schema: parsed.schema,
+        table: parsed.name,
+      })
+    }
+
+    for (const columnTarget of entry.columnsToCheck) {
+      const parts = String(columnTarget).split('.').filter(Boolean)
+      if (parts.length < 2) continue
+      const column = parts.pop()
+      const parsed = splitSchemaName(parts.join('.'))
+      if (!parsed.name || !column) continue
+      columnRows.push({
+        migration: entry.migration,
+        schema: parsed.schema,
+        table: parsed.name,
+        column,
+      })
+    }
+
+    for (const indexTarget of entry.indexesToCheck) {
+      const parts = String(indexTarget).split('.').filter(Boolean)
+      if (parts.length < 2) continue
+      const index = parts.pop()
+      const parsed = splitSchemaName(parts.join('.'))
+      if (!parsed.name || !index) continue
+      indexRows.push({
+        migration: entry.migration,
+        schema: parsed.schema,
+        table: parsed.name,
+        index,
+      })
+    }
+  }
+
+  return {
+    tables: uniqueProbeRows(tableRows, (row) => `${row.migration}.${row.schema || ''}.${row.table}`),
+    columns: uniqueProbeRows(columnRows, (row) => `${row.migration}.${row.schema || ''}.${row.table}.${row.column}`),
+    indexes: uniqueProbeRows(indexRows, (row) => `${row.migration}.${row.schema || ''}.${row.table}.${row.index}`),
+  }
+}
+
+function countSchemaProbeSqlRows(schemaProbePlan) {
+  const rows = buildSchemaProbeSqlRows(schemaProbePlan)
+  return {
+    tables: rows.tables.length,
+    columns: rows.columns.length,
+    indexes: rows.indexes.length,
+  }
+}
+
+function renderValues(rows, columns) {
+  if (rows.length === 0) return ''
+  return rows
+    .map((row) => `    (${columns.map((column) => sqlLiteral(row[column])).join(', ')})`)
+    .join(',\n')
+}
+
+function buildUnifiedProbeRows(schemaProbePlan) {
+  const rows = buildSchemaProbeSqlRows(schemaProbePlan)
+  return [
+    ...rows.tables.map((row) => ({
+      kind: 'table',
+      migration: row.migration,
+      schema: row.schema,
+      table: row.table,
+      column: null,
+      index: null,
+    })),
+    ...rows.columns.map((row) => ({
+      kind: 'column',
+      migration: row.migration,
+      schema: row.schema,
+      table: row.table,
+      column: row.column,
+      index: null,
+    })),
+    ...rows.indexes.map((row) => ({
+      kind: 'index',
+      migration: row.migration,
+      schema: row.schema,
+      table: row.table,
+      column: null,
+      index: row.index,
+    })),
+  ].sort((a, b) => (
+    `${a.migration}.${a.kind}.${a.schema || ''}.${a.table}.${a.column || ''}.${a.index || ''}`
+      .localeCompare(`${b.migration}.${b.kind}.${b.schema || ''}.${b.table}.${b.column || ''}.${b.index || ''}`)
+  ))
+}
+
+function renderSchemaProbeSql(report) {
+  const rows = buildUnifiedProbeRows(report.schemaProbePlan)
+  const lines = [
+    '-- Staging migration alignment schema probe SQL',
+    `-- Generated at: ${report.generatedAt}`,
+    '-- Read-only catalog checks generated from migration up-path static analysis.',
+    '-- Run only against a cloned or backed-up rehearsal DB unless explicitly approved.',
+    '-- This is not a migration safety proof: index checks verify name/table presence, not definition equivalence.',
+    '-- Unqualified table names are not assumed to be public; matched_schemas reports every non-system schema match.',
+    '',
+    'BEGIN READ ONLY;',
+    '',
+  ]
+
+  if (rows.length > 0) {
+    lines.push(
+      'WITH probe_plan(kind, migration, schema_name, table_name, column_name, index_name) AS (',
+      '  VALUES',
+      renderValues(rows, ['kind', 'migration', 'schema', 'table', 'column', 'index']),
+      ')',
+      'SELECT',
+      '  p.kind AS probe_type,',
+      '  migration,',
+      '  concat_ws(',
+      "    '.',",
+      "    nullif(coalesce(p.schema_name, ''), ''),",
+      '    p.table_name,',
+      '    p.column_name,',
+      '    p.index_name',
+      '  ) AS target,',
+      '  probe.match_count > 0 AS exists,',
+      '  probe.match_count,',
+      "  coalesce(probe.matched_schemas, '') AS matched_schemas",
+      'FROM probe_plan p',
+      'CROSS JOIN LATERAL (',
+      '  SELECT count(*)::integer AS match_count, string_agg(DISTINCT schema_match, \', \' ORDER BY schema_match) AS matched_schemas',
+      '  FROM (',
+      '    SELECT n.nspname AS schema_match',
+      '    FROM pg_catalog.pg_class c',
+      '    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace',
+      "    WHERE p.kind = 'table'",
+      '      AND c.relname = p.table_name',
+      "      AND c.relkind IN ('r', 'p')",
+      "      AND n.nspname NOT IN ('pg_catalog', 'information_schema')",
+      '      AND (p.schema_name IS NULL OR n.nspname = p.schema_name)',
+      '    UNION ALL',
+      '    SELECT n.nspname AS schema_match',
+      '    FROM pg_catalog.pg_attribute a',
+      '    JOIN pg_catalog.pg_class c ON c.oid = a.attrelid',
+      '    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace',
+      "    WHERE p.kind = 'column'",
+      '      AND c.relname = p.table_name',
+      '      AND a.attname = p.column_name',
+      '      AND a.attnum > 0',
+      '      AND NOT a.attisdropped',
+      "      AND c.relkind IN ('r', 'p')",
+      "      AND n.nspname NOT IN ('pg_catalog', 'information_schema')",
+      '      AND (p.schema_name IS NULL OR n.nspname = p.schema_name)',
+      '    UNION ALL',
+      '    SELECT n.nspname AS schema_match',
+      '    FROM pg_catalog.pg_class i',
+      '    JOIN pg_catalog.pg_namespace n ON n.oid = i.relnamespace',
+      '    JOIN pg_catalog.pg_index ix ON ix.indexrelid = i.oid',
+      '    JOIN pg_catalog.pg_class t ON t.oid = ix.indrelid',
+      "    WHERE p.kind = 'index'",
+      '      AND i.relname = p.index_name',
+      '      AND t.relname = p.table_name',
+      "      AND i.relkind IN ('i', 'I')",
+      "      AND n.nspname NOT IN ('pg_catalog', 'information_schema')",
+      '      AND (p.schema_name IS NULL OR n.nspname = p.schema_name)',
+      '  ) matches',
+      ') probe',
+      'ORDER BY migration, probe_type, target;',
+      '',
+    )
+  } else {
+    lines.push('-- No schema probes extracted.', '')
+  }
+
+  lines.push('ROLLBACK;', '')
+  return `${lines.join('\n')}`
 }
 
 function markdownTable(rows, columns) {
@@ -549,6 +766,7 @@ function renderMarkdown(report) {
     `- Decision: \`${report.recommendation.decision}\``,
     `- Full migrate recommended: \`${report.recommendation.fullMigrateRecommended}\``,
     `- Next action: ${report.recommendation.nextAction}`,
+    `- Probe SQL targets: ${report.schemaProbeSqlCounts.tables} tables, ${report.schemaProbeSqlCounts.columns} columns, ${report.schemaProbeSqlCounts.indexes} indexes`,
     '',
     '## Category Counts',
     '',
@@ -585,6 +803,8 @@ function renderMarkdown(report) {
     '## Schema Probe Plan',
     '',
     'Use this as a read-only rehearsal checklist on a cloned or backed-up DB. It is not a safety proof.',
+    '',
+    'The companion `schema-probes.sql` file contains read-only PostgreSQL catalog queries for these extracted targets.',
     '',
   )
 
@@ -625,9 +845,11 @@ function writeOutputs(report, outDir) {
   mkdirSync(absoluteOut, { recursive: true })
   const jsonPath = path.join(absoluteOut, 'report.json')
   const mdPath = path.join(absoluteOut, 'report.md')
+  const probeSqlPath = path.join(absoluteOut, 'schema-probes.sql')
   writeFileSync(jsonPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8')
   writeFileSync(mdPath, renderMarkdown(report), 'utf8')
-  return { jsonPath, mdPath }
+  writeFileSync(probeSqlPath, renderSchemaProbeSql(report), 'utf8')
+  return { jsonPath, mdPath, probeSqlPath }
 }
 
 function main() {
@@ -644,6 +866,7 @@ function main() {
     console.log(`[staging-migration-alignment-report] decision=${report.recommendation.decision}`)
     console.log(`[staging-migration-alignment-report] JSON: ${outputs.jsonPath}`)
     console.log(`[staging-migration-alignment-report] MD: ${outputs.mdPath}`)
+    console.log(`[staging-migration-alignment-report] schema probes SQL: ${outputs.probeSqlPath}`)
   } catch (error) {
     console.error(`[staging-migration-alignment-report] ERROR: ${error.message}`)
     process.exitCode = 1
