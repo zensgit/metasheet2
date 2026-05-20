@@ -317,6 +317,114 @@ set PSQL_PATH=C:\Program Files\PostgreSQL\17\bin\psql.exe
 bootstrap-admin.bat admin@your-company.local <StrongPasswordAtLeast12Chars> Administrator
 ```
 
+## 10.2) Scheduled-task remote apply (release 584dbc88a and later)
+
+Verified on the on-prem bridge against release `584dbc88a` (the merge that
+fixed the scheduled-task exit-code / log marker quirk for issue #1526). This
+subsection documents the **scheduled-task** path specifically — the synchronous
+`deploy.bat` and `deploy-runXX.bat` flows already worked and are unchanged here.
+
+### Two upgrade-time gotchas to plan for
+
+1. **Pre-584dbc88a installs cannot self-fix on the first scheduled run.**
+   `deploy-remote.bat` and the launcher in older installs are the
+   fire-and-forget version: they return `exit /b 0` immediately without
+   waiting for `apply`, so the scheduled task's `LastTaskResult` never
+   reflects what `apply` actually did. The new `deploy-remote.bat` (the one
+   that captures `APPLY_EXIT` and writes `apply exit=N`) only takes effect
+   **after** it is on disk in the installed root. On the upgrade run from a
+   pre-584dbc88a state, the **old** `deploy-remote.bat` is what executes; the
+   new wrappers only land as part of that run's copy step. Plan one of:
+
+   - run a single synchronous `deploy.bat <new-package.zip>` from the
+     installed root first (the new wrappers land, the next scheduled-task
+     invocation then uses them), or
+   - manually copy `deploy.bat`, `deploy-remote.bat`,
+     `deploy-runXX.bat`, and
+     `scripts\ops\multitable-onprem-deploy-launcher.ps1` from the new
+     package zip into the installed root before letting the scheduled task
+     fire.
+
+   Either path leaves a `>=584dbc88a` `deploy-remote.bat` on disk before the
+   first scheduled-task run that is expected to report a real
+   `LastTaskResult`. Path 1 assumes the pre-state's `apply.ps1` actually
+   reaches its "Copy extracted package into root" step; if the install
+   predates #1696 (env loading) or #1684 (dependency-refresh wrapper),
+   `apply` may die before that step and path 2 (manual copy) is the safer
+   option from the start.
+
+2. **Scheduled Task running as `SYSTEM` needs the Administrator profile env.**
+   `apply` calls `pnpm.cmd` (dependency refresh wrapper) and `pm2` (process
+   manager). Both look up Node, pnpm, the pnpm store, and a writable home
+   directory through environment variables that the LocalSystem account does
+   not inherit. Without these, `pnpm` or PM2 fails — usually visibly in
+   `deploy-remote.log` as `'pnpm' is not recognized` or as PM2 unable to
+   write to its store. Configure the task with **explicit** environment
+   variables before saving it:
+
+   - `PATH` extended with the Administrator's Node install root (e.g.
+     `C:\Program Files\nodejs`) and pnpm install root (e.g.
+     `%LOCALAPPDATA%\pnpm` from the Administrator profile);
+   - `HOME`, `HOMEPATH`, `USERPROFILE` pointing at the Administrator
+     profile directory (e.g. `C:\Users\Administrator`);
+   - `APPDATA` pointing at that profile's `AppData\Roaming`.
+
+   If the operator policy forbids running the task as SYSTEM, schedule it as
+   the Administrator account instead with `Run whether user is logged on or
+   not` enabled — the same env then comes through naturally.
+
+### Success acceptance (what to look for after a scheduled run)
+
+A "real" successful scheduled-task apply has **all** of the following:
+
+- the task's `LastTaskResult` is `0` (visible in Task Scheduler → History,
+  or `Get-ScheduledTaskInfo -TaskName <task> | Select LastTaskResult`);
+- `output/logs/deploy-remote.log` ends with these three parseable markers,
+  in this order (inner-most to outer-most), each carrying the same exit
+  code:
+
+  ```text
+  [multitable-onprem-deploy-launcher] apply exit=0
+  [multitable-onprem-deploy] apply exit=0
+  [multitable-onprem-deploy-remote] apply exit=0
+  ```
+
+- the apply log above the markers passes through the full progression:
+  - dependency refresh (`[dependency-refresh-wrapper] pnpm install exit=0`),
+  - migrations (`Run database migrations ...` completes),
+  - PM2 restart and `pm2 save`,
+  - `Package deploy complete`,
+  - `Healthcheck OK`.
+
+A failed apply leaves a non-zero in **all three** `apply exit=N` markers and
+in `LastTaskResult`; the matching layer in the log shows where the failure
+actually originated.
+
+If `LastTaskResult` is `0` but any of the three markers is missing or shows a
+different code, the wrapper chain is mixed (an older `deploy-remote.bat`
+short-circuited before the new layers ran). Re-check gotcha #1 above. The
+missing marker tells you which installed file is stale:
+
+| Missing marker | Stale installed file to refresh from the new package |
+| --- | --- |
+| `[multitable-onprem-deploy-launcher] apply exit=...` | `scripts\ops\multitable-onprem-deploy-launcher.ps1` |
+| `[multitable-onprem-deploy] apply exit=...` | `deploy.bat` |
+| `[multitable-onprem-deploy-remote] apply exit=...` | `deploy-remote.bat` |
+
+### Out of scope (deliberate)
+
+This runbook section is about the Windows scheduled-task / `deploy-remote.bat`
+plumbing only. It does **not** change:
+
+- `plugins/plugin-integration-core` runtime,
+- DB migration behavior,
+- API runtime or frontend runtime,
+- K3 Save / Submit / Audit semantics,
+- SQL Server / TLS failure summarization (a separate #1526 actionable).
+
+Customer GATE state is unchanged — this section is operational hygiene around
+an already-shipped fix.
+
 ## 11) Delivery checklist
 
 Before handing this package to a customer or field team, also review:
