@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 
 async function flushPromises() {
@@ -10,6 +10,7 @@ async function flushPromises() {
 
 import MetaFormShareManager from '../src/multitable/components/MetaFormShareManager.vue'
 import { MultitableApiClient } from '../src/multitable/api/client'
+import { useLocale } from '../src/composables/useLocale'
 
 function fakeConfig(overrides: Record<string, unknown> = {}) {
   return {
@@ -68,9 +69,14 @@ function mount(props: Record<string, unknown>) {
 }
 
 describe('MetaFormShareManager', () => {
+  beforeEach(() => {
+    useLocale().setLocale('en')
+  })
+
   afterEach(() => {
     document.body.innerHTML = ''
     vi.restoreAllMocks()
+    useLocale().setLocale('en')
   })
 
   it('renders share config when visible', async () => {
@@ -371,6 +377,51 @@ describe('MetaFormShareManager', () => {
     expect(statuses).toContain('DingTalk authorization not enabled')
     expect(statuses).toContain('DingTalk not bound')
     expect(statuses).toContain('Members are checked individually')
+  })
+
+  it('localizes form-share chrome to zh-CN without translating raw subjects', async () => {
+    useLocale().setLocale('zh-CN')
+    const { client } = mockClient(fakeConfig({
+      accessMode: 'dingtalk_granted',
+      allowedUserIds: ['user_authorized', 'user_needs_grant'],
+      allowedUsers: [
+        { subjectType: 'user', subjectId: 'user_authorized', label: 'Authorized User', subtitle: 'authorized@test.local', isActive: true, dingtalkBound: true, dingtalkGrantEnabled: true, dingtalkPersonDeliveryAvailable: true },
+        { subjectType: 'user', subjectId: 'user_needs_grant', label: 'Needs Grant', subtitle: 'needs-grant@test.local', isActive: true, dingtalkBound: true, dingtalkGrantEnabled: false, dingtalkPersonDeliveryAvailable: true },
+      ],
+      allowedMemberGroupIds: ['group_ops'],
+      allowedMemberGroups: [{ subjectType: 'member-group', subjectId: 'group_ops', label: 'Ops', subtitle: 'Operations', isActive: true }],
+    }))
+    mount({ visible: true, sheetId: 'sh_1', viewId: 'v_1', client })
+    await flushPromises()
+
+    const search = document.querySelector('[data-form-share-allowlist-search]') as HTMLInputElement
+    const audience = document.querySelector('[data-form-share-audience-rule]') as HTMLElement
+    const removeButtons = Array.from(document.querySelectorAll('[data-form-share-remove-user], [data-form-share-remove-group]'))
+
+    expect(document.body.textContent).toContain('公开表单分享')
+    expect(document.body.textContent).toContain('分享已启用')
+    expect(document.body.textContent).toContain('有效')
+    expect(document.body.textContent).toContain('访问模式')
+    expect(document.body.textContent).toContain('仅已授权钉钉用户')
+    expect(document.body.textContent).toContain('仅允许已绑定钉钉且管理员已启用钉钉授权的用户打开此表单。')
+    expect(audience.textContent).toContain('已选授权钉钉用户')
+    expect(audience.textContent).toContain('只有已选本地用户或组成员可以填写，且每个用户必须已绑定钉钉并启用表单授权。')
+    expect(document.body.textContent).toContain('钉钉仅用于登录和投递通道；允许名单仍以本地用户和成员组为准。')
+    expect(document.body.textContent).toContain('本地允许名单限制：2 个本地用户和 1 个本地成员组通过当前钉钉模式后可以填写此表单。')
+    expect(search.placeholder).toBe('搜索本地用户或成员组')
+    expect(document.body.textContent).toContain('允许的用户')
+    expect(document.body.textContent).toContain('允许的成员组')
+    expect(document.body.textContent).toContain('已绑定钉钉并已授权')
+    expect(document.body.textContent).toContain('未启用钉钉授权')
+    expect(document.body.textContent).toContain('成员会逐个校验')
+    expect(document.body.textContent).toContain('公开链接')
+    expect(document.body.textContent).toContain('复制')
+    expect(document.body.textContent).toContain('重新生成令牌')
+    expect(document.body.textContent).toContain('预览')
+    expect(document.body.textContent).toContain('过期时间')
+    expect(removeButtons.every((button) => button.textContent?.trim() === '移除')).toBe(true)
+    expect(document.body.textContent).toContain('Authorized User')
+    expect(document.body.textContent).toContain('Ops')
   })
 
   it('adds an allowed user through the allowlist controls', async () => {

@@ -2,13 +2,13 @@
   <div v-if="visible" class="meta-form-share__overlay" @click.self="$emit('close')">
     <div class="meta-form-share">
       <div class="meta-form-share__header">
-        <h4 class="meta-form-share__title">Public Form Sharing</h4>
+        <h4 class="meta-form-share__title">{{ f('title') }}</h4>
         <button class="meta-form-share__close" type="button" @click="$emit('close')">&times;</button>
       </div>
 
       <div class="meta-form-share__body">
         <div v-if="error" class="meta-form-share__error" role="alert">{{ error }}</div>
-        <div v-if="loading" class="meta-form-share__empty">Loading share settings&#x2026;</div>
+        <div v-if="loading" class="meta-form-share__empty">{{ f('state.loading') }}</div>
 
         <template v-else>
           <div class="meta-form-share__toggle-row">
@@ -19,7 +19,7 @@
                 data-form-share-toggle="true"
                 @change="onToggleEnabled"
               />
-              <span>{{ config?.enabled ? 'Sharing enabled' : 'Sharing disabled' }}</span>
+              <span>{{ config?.enabled ? f('toggle.enabled') : f('toggle.disabled') }}</span>
             </label>
             <span
               class="meta-form-share__status"
@@ -31,7 +31,7 @@
 
           <template v-if="config?.enabled && config.publicToken">
             <div class="meta-form-share__auth-section">
-              <label class="meta-form-share__label" for="meta-form-share-access-mode">Access mode</label>
+              <label class="meta-form-share__label" for="meta-form-share-access-mode">{{ f('access.label') }}</label>
               <select
                 id="meta-form-share-access-mode"
                 class="meta-form-share__input"
@@ -40,9 +40,9 @@
                 :disabled="busy"
                 @change="onAccessModeChange"
               >
-                <option value="public">Anyone with the link</option>
-                <option value="dingtalk">Bound DingTalk users only</option>
-                <option value="dingtalk_granted">DingTalk-authorized users only</option>
+                <option value="public">{{ f('access.option.public') }}</option>
+                <option value="dingtalk">{{ f('access.option.dingtalk') }}</option>
+                <option value="dingtalk_granted">{{ f('access.option.dingtalkGranted') }}</option>
               </select>
               <p class="meta-form-share__hint">{{ accessModeHint }}</p>
               <div
@@ -59,9 +59,9 @@
             <div v-if="showAllowlistSection" class="meta-form-share__allowlist-section">
               <div class="meta-form-share__allowlist-header">
                 <div>
-                  <label class="meta-form-share__label" for="meta-form-share-allowlist-search">Allowed system users and member groups</label>
+                  <label class="meta-form-share__label" for="meta-form-share-allowlist-search">{{ f('allowlist.label') }}</label>
                   <p class="meta-form-share__hint">
-                    DingTalk is only the sign-in and delivery channel. The allowlist still targets your local users and member groups.
+                    {{ f('allowlist.hint') }}
                   </p>
                   <p
                     class="meta-form-share__allowlist-summary"
@@ -79,13 +79,13 @@
                 v-model.trim="candidateQuery"
                 class="meta-form-share__input"
                 type="search"
-                placeholder="Search local users or member groups"
+                :placeholder="f('allowlist.searchPlaceholder')"
                 data-form-share-allowlist-search="true"
                 :disabled="busy"
               />
 
               <div class="meta-form-share__allowlist-subsection">
-                <label class="meta-form-share__label">Allowed users</label>
+                <label class="meta-form-share__label">{{ f('allowlist.users') }}</label>
                 <div v-if="allowedUsers.length > 0" class="meta-form-share__chip-list">
                   <span
                     v-for="user in allowedUsers"
@@ -96,7 +96,7 @@
                     <span class="meta-form-share__chip-text">
                       {{ user.label }}
                       <span v-if="user.subtitle" class="meta-form-share__chip-subtitle">{{ user.subtitle }}</span>
-                      <span v-if="!user.isActive" class="meta-form-share__chip-subtitle">Inactive user</span>
+                      <span v-if="!user.isActive" class="meta-form-share__chip-subtitle">{{ f('allowlist.inactiveUser') }}</span>
                       <span
                         v-if="subjectDingTalkStatus(user)"
                         class="meta-form-share__chip-subtitle"
@@ -112,17 +112,17 @@
                       :data-form-share-remove-user="user.subjectId"
                       @click="void removeAllowedSubject('user', user.subjectId)"
                     >
-                      Remove
+                      {{ m('action.remove') }}
                     </button>
                   </span>
                 </div>
                 <div v-else class="meta-form-share__empty">
-                  No local user allowlist configured. Access is still gated by the selected DingTalk mode; add local users or member groups to narrow who can fill this form.
+                  {{ f('allowlist.userEmpty') }}
                 </div>
               </div>
 
               <div class="meta-form-share__allowlist-subsection">
-                <label class="meta-form-share__label">Allowed member groups</label>
+                <label class="meta-form-share__label">{{ f('allowlist.groups') }}</label>
                 <div v-if="allowedMemberGroups.length > 0" class="meta-form-share__chip-list">
                   <span
                     v-for="group in allowedMemberGroups"
@@ -148,19 +148,19 @@
                       :data-form-share-remove-group="group.subjectId"
                       @click="void removeAllowedSubject('member-group', group.subjectId)"
                     >
-                      Remove
+                      {{ m('action.remove') }}
                     </button>
                   </span>
                 </div>
                 <div v-else class="meta-form-share__empty">
-                  No local member-group allowlist configured. Add a local member group to let its members fill this form.
+                  {{ f('allowlist.groupEmpty') }}
                 </div>
               </div>
 
               <div class="meta-form-share__allowlist-subsection">
-                <label class="meta-form-share__label">Add from eligible people and groups</label>
-                <div v-if="candidatesLoading" class="meta-form-share__empty">Searching users and member groups&#x2026;</div>
-                <div v-else-if="filteredCandidates.length === 0" class="meta-form-share__empty">No matching candidates.</div>
+                <label class="meta-form-share__label">{{ f('candidate.addSection') }}</label>
+                <div v-if="candidatesLoading" class="meta-form-share__empty">{{ f('candidate.loading') }}</div>
+                <div v-else-if="filteredCandidates.length === 0" class="meta-form-share__empty">{{ f('candidate.empty') }}</div>
                 <div v-else class="meta-form-share__candidate-list">
                   <button
                     v-for="candidate in filteredCandidates"
@@ -174,7 +174,7 @@
                     <span class="meta-form-share__candidate-title">
                       {{ candidate.label }}
                       <span class="meta-form-share__candidate-badge">
-                        {{ candidate.subjectType === 'user' ? 'User' : 'Member group' }}
+                        {{ candidate.subjectType === 'user' ? f('candidate.user') : f('candidate.memberGroup') }}
                       </span>
                     </span>
                     <span v-if="candidate.subtitle" class="meta-form-share__candidate-subtitle">{{ candidate.subtitle }}</span>
@@ -186,7 +186,7 @@
                       {{ subjectDingTalkStatus(candidate) }}
                     </span>
                     <span v-if="candidate.subjectType === 'user' && !candidate.isActive" class="meta-form-share__candidate-subtitle">
-                      Inactive users cannot be added
+                      {{ f('candidate.inactiveUser') }}
                     </span>
                   </button>
                 </div>
@@ -194,7 +194,7 @@
             </div>
 
             <div class="meta-form-share__link-section">
-              <label class="meta-form-share__label">Public link</label>
+              <label class="meta-form-share__label">{{ f('link.label') }}</label>
               <div class="meta-form-share__link-row">
                 <input
                   class="meta-form-share__input"
@@ -209,7 +209,7 @@
                   data-form-share-copy="true"
                   @click="onCopyLink"
                 >
-                  {{ copied ? 'Copied!' : 'Copy' }}
+                  {{ copied ? f('link.copied') : f('link.copy') }}
                 </button>
               </div>
             </div>
@@ -222,7 +222,7 @@
                 :disabled="busy"
                 @click="onRegenerate"
               >
-                Regenerate token
+                {{ f('link.regenerate') }}
               </button>
               <button
                 class="meta-form-share__btn"
@@ -230,12 +230,12 @@
                 data-form-share-preview="true"
                 @click="onPreview"
               >
-                Preview
+                {{ f('link.preview') }}
               </button>
             </div>
 
             <div class="meta-form-share__expiry-section">
-              <label class="meta-form-share__label">Expiry</label>
+              <label class="meta-form-share__label">{{ f('expiry.label') }}</label>
               <div class="meta-form-share__expiry-row">
                 <input
                   class="meta-form-share__input"
@@ -252,7 +252,7 @@
                   :disabled="busy"
                   @click="onClearExpiry"
                 >
-                  No expiry
+                  {{ f('expiry.none') }}
                 </button>
               </div>
             </div>
@@ -265,8 +265,19 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import type { FormShareConfig, MetaSheetPermissionCandidate } from '../types'
 import type { MultitableApiClient } from '../api/client'
+import { managerLabel, type MetaManagerLabelKey } from '../utils/meta-manager-labels'
+import {
+  formShareAccessModeHint,
+  formShareAllowlistSummary,
+  formShareAudienceRule,
+  formShareDingTalkStatusLabel,
+  formShareLabel,
+  formShareStatusLabel,
+  type MetaFormShareLabelKey,
+} from '../utils/meta-form-share-labels'
 
 const props = defineProps<{
   sheetId: string
@@ -289,15 +300,18 @@ const candidateQuery = ref('')
 const candidates = ref<MetaSheetPermissionCandidate[]>([])
 const candidatesLoading = ref(false)
 let candidateTimer: number | null = null
+const { isZh } = useLocale()
+
+function f(key: MetaFormShareLabelKey): string {
+  return formShareLabel(key, isZh.value)
+}
+
+function m(key: MetaManagerLabelKey): string {
+  return managerLabel(key, isZh.value)
+}
 
 const statusLabel = computed(() => {
-  if (!config.value) return 'Disabled'
-  switch (config.value.status) {
-    case 'active': return 'Active'
-    case 'expired': return 'Expired'
-    case 'disabled': return 'Disabled'
-    default: return 'Disabled'
-  }
+  return formShareStatusLabel(config.value?.status, isZh.value)
 })
 
 const publicLink = computed(() => {
@@ -316,13 +330,7 @@ const showAllowlistSection = computed(() =>
 )
 
 const accessModeHint = computed(() => {
-  if (config.value?.accessMode === 'dingtalk_granted') {
-    return 'The form opens only for DingTalk-bound users whose DingTalk grant is enabled by an administrator.'
-  }
-  if (config.value?.accessMode === 'dingtalk') {
-    return 'The form opens only after DingTalk sign-in, and the user must already be bound to a local account.'
-  }
-  return 'Anyone who has the link can open and submit this form.'
+  return formShareAccessModeHint(config.value?.accessMode, isZh.value)
 })
 
 const allowedUsers = computed(() => config.value?.allowedUsers ?? [])
@@ -332,48 +340,10 @@ const allowedMemberGroupCount = computed(() => config.value?.allowedMemberGroupI
 const hasLocalAllowlist = computed(() => allowedUserCount.value > 0 || allowedMemberGroupCount.value > 0)
 const audienceRule = computed(() => {
   const mode = config.value?.accessMode ?? 'public'
-  if (mode === 'public') {
-    return {
-      title: 'Fully public anonymous form',
-      description: 'Anyone with the link can open and submit without local login or DingTalk binding.',
-    }
-  }
-  if (mode === 'dingtalk_granted') {
-    return hasLocalAllowlist.value
-      ? {
-          title: 'Selected authorized DingTalk users',
-          description: 'Only selected local users or group members can fill, and each user must be DingTalk-bound with form authorization enabled.',
-        }
-      : {
-          title: 'All authorized DingTalk users',
-          description: 'Any DingTalk-bound local user can fill after an administrator enables their DingTalk form authorization.',
-        }
-  }
-  return hasLocalAllowlist.value
-    ? {
-        title: 'Selected DingTalk-bound users',
-        description: 'Only selected local users or group members can fill, and each user must be bound to DingTalk.',
-      }
-    : {
-        title: 'All DingTalk-bound users',
-        description: 'Any local user can fill after DingTalk sign-in when their account is bound to DingTalk.',
-      }
+  return formShareAudienceRule(mode, hasLocalAllowlist.value, isZh.value)
 })
 const allowlistAudienceSummary = computed(() => {
-  const userCount = allowedUserCount.value
-  const memberGroupCount = allowedMemberGroupCount.value
-  if (userCount === 0 && memberGroupCount === 0) {
-    return 'No local allowlist limits are set; all users allowed by the selected DingTalk mode can fill this form.'
-  }
-
-  const parts: string[] = []
-  if (userCount > 0) {
-    parts.push(`${userCount} ${userCount === 1 ? 'local user' : 'local users'}`)
-  }
-  if (memberGroupCount > 0) {
-    parts.push(`${memberGroupCount} ${memberGroupCount === 1 ? 'local member group' : 'local member groups'}`)
-  }
-  return `Local allowlist limits: ${parts.join(' and ')} can fill after passing the selected DingTalk mode.`
+  return formShareAllowlistSummary(allowedUserCount.value, allowedMemberGroupCount.value, isZh.value)
 })
 const selectedSubjectKeys = computed(() => new Set([
   ...allowedUsers.value.map((user) => `user:${user.subjectId}`),
@@ -387,17 +357,7 @@ function subjectDingTalkStatus(
   subject: Pick<MetaSheetPermissionCandidate, 'subjectType' | 'dingtalkBound' | 'dingtalkGrantEnabled' | 'dingtalkPersonDeliveryAvailable'>,
 ): string {
   const mode = config.value?.accessMode ?? 'public'
-  if (mode === 'public') return ''
-  if (subject.subjectType === 'member-group') return 'Members are checked individually'
-  if (subject.subjectType !== 'user') return ''
-  if (subject.dingtalkBound === false) return 'DingTalk not bound'
-  if (mode === 'dingtalk_granted') {
-    if (subject.dingtalkGrantEnabled === true) return 'DingTalk bound and authorized'
-    if (subject.dingtalkBound === true && subject.dingtalkGrantEnabled === false) return 'DingTalk authorization not enabled'
-  }
-  if (subject.dingtalkBound === true) return 'DingTalk bound'
-  if (subject.dingtalkPersonDeliveryAvailable === true) return 'DingTalk delivery linked'
-  return ''
+  return formShareDingTalkStatusLabel(subject, mode, isZh.value)
 }
 
 async function loadConfig() {
@@ -407,7 +367,7 @@ async function loadConfig() {
   try {
     config.value = await props.client.getFormShareConfig(props.sheetId, props.viewId)
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to load share config'
+    error.value = err instanceof Error ? err.message : f('error.loadConfig')
   } finally {
     loading.value = false
   }
@@ -426,7 +386,7 @@ async function loadCandidates() {
     })
     candidates.value = response.items
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to load allowlist candidates'
+    error.value = err instanceof Error ? err.message : f('error.loadCandidates')
   } finally {
     candidatesLoading.value = false
   }
@@ -448,7 +408,7 @@ async function persistAllowlist(update: Pick<FormShareConfig, 'allowedUserIds' |
     emit('updated')
     await loadCandidates()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to update allowlist'
+    error.value = err instanceof Error ? err.message : f('error.updateAllowlist')
   } finally {
     busy.value = false
   }
@@ -494,7 +454,7 @@ async function onToggleEnabled() {
     })
     emit('updated')
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to update'
+    error.value = err instanceof Error ? err.message : f('error.update')
   } finally {
     busy.value = false
   }
@@ -508,7 +468,7 @@ async function onAccessModeChange(event: Event) {
     select.value === 'public'
     && (config.value.allowedUserIds.length > 0 || config.value.allowedMemberGroupIds.length > 0)
   ) {
-    error.value = 'Clear the allowed users and member groups before switching back to a fully public form.'
+    error.value = f('error.clearBeforePublic')
     select.value = config.value.accessMode
     return
   }
@@ -521,7 +481,7 @@ async function onAccessModeChange(event: Event) {
     emit('updated')
     await loadCandidates()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to update access mode'
+    error.value = err instanceof Error ? err.message : f('error.updateAccessMode')
   } finally {
     busy.value = false
   }
@@ -538,7 +498,7 @@ async function onRegenerate() {
     }
     emit('updated')
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to regenerate token'
+    error.value = err instanceof Error ? err.message : f('error.regenerate')
   } finally {
     busy.value = false
   }
@@ -569,7 +529,7 @@ async function onExpiryChange(event: Event) {
     })
     emit('updated')
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to update expiry'
+    error.value = err instanceof Error ? err.message : f('error.updateExpiry')
   } finally {
     busy.value = false
   }
@@ -585,7 +545,7 @@ async function onClearExpiry() {
     })
     emit('updated')
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to clear expiry'
+    error.value = err instanceof Error ? err.message : f('error.clearExpiry')
   } finally {
     busy.value = false
   }
