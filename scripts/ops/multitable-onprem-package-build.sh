@@ -211,9 +211,19 @@ REM helper sitting in the installed root. The launcher extracts to a staging
 REM temp dir, locates the staged apply helper, and invokes it with this
 REM installed root as -RootDir. See multitable-onprem-deploy-launcher.ps1.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\ops\multitable-onprem-deploy-launcher.ps1" -RootDir "%~dp0." -PackageArchive "%~1"
-exit /b %ERRORLEVEL%
+set "APPLY_EXIT=%ERRORLEVEL%"
+echo [multitable-onprem-deploy] apply exit=%APPLY_EXIT%
+exit /b %APPLY_EXIT%
 EOF
 
+  # deploy-remote.bat is what Windows scheduled tasks typically call.
+  # Previous versions fired deploy.bat in the background via `start ""`
+  # and exited 0 immediately, so the scheduled-task Last Result never
+  # reflected the actual apply outcome. #1526 follow-up makes it
+  # synchronous: invoke deploy.bat in-process, redirect stdout/stderr to
+  # deploy-remote.log, capture ERRORLEVEL, append "apply exit=N" to the
+  # log AND to stdout, and propagate the captured code as the wrapper's
+  # exit.
   cat > "${PACKAGE_ROOT}/deploy-remote.bat" <<'EOF'
 @echo off
 setlocal
@@ -222,16 +232,20 @@ if "%~1"=="" (
   exit /b 64
 )
 if not exist "%~dp0output\logs" mkdir "%~dp0output\logs"
-start "" /min cmd /c "call \"%~dp0deploy.bat\" \"%~1\" >> \"%~dp0output\logs\deploy-remote.log\" 2>&1"
-echo [multitable-onprem-deploy-remote] started. See output\logs\deploy-remote.log
-exit /b 0
+call "%~dp0deploy.bat" "%~1" >> "%~dp0output\logs\deploy-remote.log" 2>&1
+set "APPLY_EXIT=%ERRORLEVEL%"
+>> "%~dp0output\logs\deploy-remote.log" echo [multitable-onprem-deploy-remote] apply exit=%APPLY_EXIT%
+echo [multitable-onprem-deploy-remote] apply exit=%APPLY_EXIT%. See output\logs\deploy-remote.log
+exit /b %APPLY_EXIT%
 EOF
 
   cat > "${PACKAGE_ROOT}/deploy-${PACKAGE_RUN_LABEL}.bat" <<'EOF'
 @echo off
 setlocal
 call "%~dp0deploy.bat" "%~1"
-exit /b %ERRORLEVEL%
+set "APPLY_EXIT=%ERRORLEVEL%"
+echo [multitable-onprem-deploy-label] apply exit=%APPLY_EXIT%
+exit /b %APPLY_EXIT%
 EOF
 
   cat > "${PACKAGE_ROOT}/bootstrap-admin.bat" <<'EOF'

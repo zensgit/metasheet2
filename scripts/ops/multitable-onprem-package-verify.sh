@@ -52,6 +52,15 @@ function verify_windows_entrypoints() {
     die "deploy.bat must not call the apply helper directly; it must go through the launcher so a stale installed apply helper cannot win on first apply"
   fi
 
+  # #1526 follow-up (2026-05-20): deploy.bat must capture the launcher's
+  # ERRORLEVEL into APPLY_EXIT, emit a parseable `apply exit=N` marker,
+  # and propagate the captured code as its own exit. Otherwise a stale
+  # %ERRORLEVEL% leak elsewhere in the call chain could leave the outer
+  # scheduled-task Last Result as 1 when apply itself returned 0.
+  search_fixed_string 'set "APPLY_EXIT=%ERRORLEVEL%"' "$start_script" || die "deploy.bat must capture the launcher exit code into APPLY_EXIT"
+  search_fixed_string '[multitable-onprem-deploy] apply exit=%APPLY_EXIT%' "$start_script" || die "deploy.bat must echo a parseable apply exit marker"
+  search_fixed_string 'exit /b %APPLY_EXIT%' "$start_script" || die "deploy.bat must propagate the captured APPLY_EXIT as its own exit code"
+
   local launcher_helper="${root}/scripts/ops/multitable-onprem-deploy-launcher.ps1"
   if [[ ! -f "$launcher_helper" ]]; then
     die "PowerShell launcher script must be packaged for deploy.bat self-bootstrap"
@@ -61,6 +70,15 @@ function verify_windows_entrypoints() {
   search_fixed_string 'Resolve-StagedPackageRoot' "$launcher_helper" || die "launcher must resolve the staged package root before invoking the apply helper"
   search_fixed_string 'multitable-onprem-apply-package.ps1' "$launcher_helper" || die "launcher must invoke the staged apply helper from inside the extracted package"
   search_fixed_string 'Remove-Item -LiteralPath $stage' "$launcher_helper" || die "launcher must clean up staging extraction on exit"
+  # #1526 follow-up (2026-05-20): launcher must use the apply.ps1
+  # throw/no-throw contract (not $LASTEXITCODE, which leaks from external
+  # subprograms apply invoked) and must emit a parseable `apply exit=N`
+  # marker so deploy-remote.log / scheduled-task stdout carry an
+  # unambiguous inner-most exit signal.
+  search_fixed_string 'apply exit=' "$launcher_helper" || die "launcher must emit a parseable apply exit marker before exiting"
+  if search_fixed_string 'if ($null -ne $LASTEXITCODE) {' "$launcher_helper"; then
+    die "launcher must not derive its exit from \$LASTEXITCODE (it leaks from apply's external sub-programs); use the try/catch throw/no-throw contract instead"
+  fi
 
   local apply_helper="${root}/scripts/ops/multitable-onprem-apply-package.ps1"
   search_fixed_string 'Refresh dependencies (cmd.exe /c pnpm install --frozen-lockfile)' "$apply_helper" || die "PowerShell apply helper must refresh dependencies on package apply through cmd.exe"
@@ -99,8 +117,28 @@ function verify_windows_entrypoints() {
     die "deploy-remote.bat must continue writing output\\logs\\deploy-remote.log"
   fi
 
+  # #1526 follow-up (2026-05-20): deploy-remote.bat is what Windows
+  # scheduled tasks call. Previously it fired deploy.bat in the
+  # background via `start ""` and exited 0 - so the scheduled-task
+  # Last Result was always 0, regardless of whether apply succeeded
+  # or failed (and the apply log never carried a final exit marker).
+  # The wrapper must now be SYNCHRONOUS, capture ERRORLEVEL, append
+  # `apply exit=N` to deploy-remote.log AND to stdout, and propagate.
+  if search_fixed_string 'start "" /min cmd /c' "$remote_script"; then
+    die "deploy-remote.bat must not fire deploy.bat as a background `start \"\"` process; it must invoke deploy.bat synchronously so the captured apply exit can become the wrapper's exit code"
+  fi
+  search_fixed_string 'call "%~dp0deploy.bat" "%~1" >> "%~dp0output\logs\deploy-remote.log" 2>&1' "$remote_script" || die "deploy-remote.bat must invoke deploy.bat synchronously and redirect stdout/stderr into deploy-remote.log"
+  search_fixed_string 'set "APPLY_EXIT=%ERRORLEVEL%"' "$remote_script" || die "deploy-remote.bat must capture deploy.bat's ERRORLEVEL into APPLY_EXIT"
+  search_fixed_string '[multitable-onprem-deploy-remote] apply exit=%APPLY_EXIT%' "$remote_script" || die "deploy-remote.bat must emit a parseable apply exit marker to deploy-remote.log and stdout"
+  search_fixed_string 'exit /b %APPLY_EXIT%' "$remote_script" || die "deploy-remote.bat must propagate the captured APPLY_EXIT as its own exit code so the outer scheduled-task Last Result matches the apply outcome"
+
   if [[ -n "$deploy_run_wrapper" ]] && ! search_fixed_string 'call "%~dp0deploy.bat" "%~1"' "$deploy_run_wrapper"; then
     die "$(basename "$deploy_run_wrapper") must delegate to deploy.bat"
+  fi
+  if [[ -n "$deploy_run_wrapper" ]]; then
+    search_fixed_string 'set "APPLY_EXIT=%ERRORLEVEL%"' "$deploy_run_wrapper" || die "$(basename "$deploy_run_wrapper") must capture deploy.bat's ERRORLEVEL into APPLY_EXIT"
+    search_fixed_string '[multitable-onprem-deploy-label] apply exit=%APPLY_EXIT%' "$deploy_run_wrapper" || die "$(basename "$deploy_run_wrapper") must echo a parseable apply exit marker"
+    search_fixed_string 'exit /b %APPLY_EXIT%' "$deploy_run_wrapper" || die "$(basename "$deploy_run_wrapper") must propagate APPLY_EXIT"
   fi
 
   if ! search_fixed_string 'multitable-onprem-bootstrap-admin.ps1' "$bootstrap_script"; then
