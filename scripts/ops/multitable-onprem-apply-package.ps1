@@ -36,6 +36,43 @@ function Resolve-NormalizedPath {
   return [System.IO.Path]::GetFullPath($trimmed)
 }
 
+function Import-AppEnvFile {
+  param([string]$EnvFile)
+
+  # Mirror of scripts/ops/attendance-onprem-start-pm2.ps1 Import-AppEnvFile so
+  # migration / restart inherit DATABASE_URL / JWT_SECRET / etc. from the same
+  # env file PM2 will source. Without this, `node migrate.js` sees an empty
+  # process environment and dies with "DATABASE_URL not set" (#1526 follow-up).
+  $applied = 0
+  foreach ($rawLine in Get-Content -Path $EnvFile) {
+    $line = $rawLine.Trim()
+    if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith('#')) {
+      continue
+    }
+
+    $parts = $line -split '=', 2
+    if ($parts.Length -ne 2) {
+      continue
+    }
+
+    $name = $parts[0].Trim()
+    if ([string]::IsNullOrWhiteSpace($name)) {
+      continue
+    }
+    $value = $parts[1].Trim()
+
+    if ($value.Length -ge 2) {
+      if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+        $value = $value.Substring(1, $value.Length - 2)
+      }
+    }
+
+    Set-Item -Path ("Env:{0}" -f $name) -Value $value
+    $applied += 1
+  }
+  return $applied
+}
+
 function Write-Info {
   param([string]$Message)
   Write-Host "[multitable-onprem-apply-package] $Message"
@@ -399,8 +436,16 @@ $resolvedEnvFile = if ([string]::IsNullOrWhiteSpace($EnvFile)) {
 }
 
 if (-not (Test-Path -LiteralPath $resolvedEnvFile)) {
-  throw "EnvFile not found: $resolvedEnvFile"
+  throw "EnvFile not found: $resolvedEnvFile. Use -EnvFile <path> or place app.env at docker\app.env under the root."
 }
+
+# Load env into this process before migration/restart/healthcheck so child
+# processes (node migrate.js, PM2 startup, healthcheck request) inherit
+# DATABASE_URL / JWT_SECRET / etc. from the same file PM2 sources. Without
+# this load, migrations fail with "DATABASE_URL not set" before PM2 ever
+# starts (#1526 official-apply migration env loading follow-up).
+$importedEnvCount = Import-AppEnvFile -EnvFile $resolvedEnvFile
+Write-Info ("Loaded env from {0} ({1} variables); migration / restart / healthcheck will inherit DATABASE_URL and JWT_SECRET when present in that file" -f $resolvedEnvFile, $importedEnvCount)
 
 $outputLogs = Join-Path $resolvedRoot 'output\logs'
 New-Item -ItemType Directory -Force -Path $outputLogs | Out-Null
