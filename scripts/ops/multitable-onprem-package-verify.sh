@@ -74,6 +74,12 @@ function verify_windows_entrypoints() {
   if search_fixed_string "-not (Test-Path -LiteralPath (Join-Path \$resolvedRoot 'node_modules'))" "$apply_helper"; then
     die "PowerShell apply helper must not skip dependency refresh just because root node_modules already exists"
   fi
+  # #1526 follow-up (2026-05-20): apply.ps1 must load the env file before
+  # migration/restart so node migrate.js inherits DATABASE_URL / JWT_SECRET.
+  # Without these markers an older apply.ps1 would silently regress to the
+  # pre-fix state where official Windows apply died with "DATABASE_URL not set".
+  search_fixed_string 'Import-AppEnvFile' "$apply_helper" || die "PowerShell apply helper must define Import-AppEnvFile to load the deploy env file before migration (#1526 migration env loading)"
+  search_fixed_string 'Loaded env from' "$apply_helper" || die "PowerShell apply helper must invoke env loading and log the source path before migration (#1526 migration env loading)"
 
   if ! search_fixed_string 'deploy-remote.log' "$remote_script"; then
     die "deploy-remote.bat must continue writing output\\logs\\deploy-remote.log"
