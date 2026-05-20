@@ -92,7 +92,7 @@
                     @click.stop="emit('open-comments', ev.id)"
                     @keydown="onRowCommentKeydown($event, ev.id)"
                   >
-                    <MetaCommentActionChip label="Comments" :state="rowCommentAffordance(ev.id)" />
+                    <MetaCommentActionChip :label="commentsChipLabel" :state="rowCommentAffordance(ev.id)" />
                   </button>
                   <button
                     v-if="dateField"
@@ -173,7 +173,7 @@
                     @click.stop="emit('open-comments', ev.id)"
                     @keydown="onRowCommentKeydown($event, ev.id)"
                   >
-                    <MetaCommentActionChip label="Comments" :state="rowCommentAffordance(ev.id)" />
+                    <MetaCommentActionChip :label="commentsChipLabel" :state="rowCommentAffordance(ev.id)" />
                   </button>
                   <button
                     v-if="dateField"
@@ -248,7 +248,7 @@
                   @click.stop="emit('open-comments', ev.id)"
                   @keydown="onRowCommentKeydown($event, ev.id)"
                 >
-                  <MetaCommentActionChip label="Comments" :state="rowCommentAffordance(ev.id)" />
+                  <MetaCommentActionChip :label="commentsChipLabel" :state="rowCommentAffordance(ev.id)" />
                 </button>
                 <button
                   v-if="dateField"
@@ -289,12 +289,14 @@ import {
 import MetaAttachmentList from './MetaAttachmentList.vue'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaCommentAffordance from './MetaCommentAffordance.vue'
+import { useLocale } from '../../composables/useLocale'
 import {
   handleCommentAffordanceKeydown,
   resolveCommentAffordanceStateClass,
   resolveFieldCommentAffordance,
   resolveRecordCommentAffordance,
 } from '../utils/comment-affordance'
+import { commentLabel } from '../utils/meta-comment-labels'
 
 const MAX_EVENTS_PER_CELL = 3
 
@@ -324,6 +326,8 @@ const dateFieldId = ref<string | null>(null)
 const viewMode = ref<'month' | 'week' | 'day'>('month')
 const viewDate = ref(new Date())
 const pendingConfigKey = ref<string | null>(null)
+const { isZh } = useLocale()
+const commentsChipLabel = computed(() => commentLabel('comment.title', isZh.value))
 
 const baseWeekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const calendarConfig = computed<Required<MetaCalendarViewConfig>>(() =>

@@ -79,7 +79,7 @@
             @click.stop="emit('open-comments', row.id)"
             @keydown="onRowCommentKeydown($event, row.id)"
           >
-            <MetaCommentActionChip label="Comments" :state="rowCommentAffordance(row.id)" />
+            <MetaCommentActionChip :label="commentsChipLabel" :state="rowCommentAffordance(row.id)" />
           </button>
         </div>
         <div class="meta-gallery__card-body">
@@ -130,6 +130,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaGalleryViewConfig, MetaRecord, MultitableCommentPresenceSummary } from '../types'
 import { resolveGalleryViewConfig } from '../utils/view-config'
 import { formatFieldDisplay } from '../utils/field-display'
+import { useLocale } from '../../composables/useLocale'
 import MetaAttachmentList from './MetaAttachmentList.vue'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaCommentAffordance from './MetaCommentAffordance.vue'
@@ -139,6 +140,7 @@ import {
   resolveFieldCommentAffordance,
   resolveRecordCommentAffordance,
 } from '../utils/comment-affordance'
+import { commentLabel } from '../utils/meta-comment-labels'
 
 const props = defineProps<{
   rows: MetaRecord[]
@@ -167,6 +169,8 @@ const galleryConfig = computed<Required<MetaGalleryViewConfig>>(() =>
   resolveGalleryViewConfig(props.fields, props.viewConfig),
 )
 const pendingConfigKey = ref<string | null>(null)
+const { isZh } = useLocale()
+const commentsChipLabel = computed(() => commentLabel('comment.title', isZh.value))
 
 const galleryDraft = reactive<Required<MetaGalleryViewConfig>>({
   titleFieldId: null,

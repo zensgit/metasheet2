@@ -68,7 +68,7 @@
                   @click.stop="emit('open-comments', row.id)"
                   @keydown="onRowCommentKeydown($event, row.id)"
                 >
-                  <MetaCommentActionChip label="Comments" :state="rowCommentAffordance(row.id)" />
+                  <MetaCommentActionChip :label="commentsChipLabel" :state="rowCommentAffordance(row.id)" />
                 </button>
               </div>
               <div class="meta-kanban__card-fields">
@@ -127,7 +127,7 @@
                   @click.stop="emit('open-comments', row.id)"
                   @keydown="onRowCommentKeydown($event, row.id)"
                 >
-                  <MetaCommentActionChip label="Comments" :state="rowCommentAffordance(row.id)" />
+                  <MetaCommentActionChip :label="commentsChipLabel" :state="rowCommentAffordance(row.id)" />
                 </button>
               </div>
               <div class="meta-kanban__card-fields">
@@ -168,6 +168,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaKanbanViewConfig, MetaRecord, MultitableCommentPresenceSummary } from '../types'
 import { resolveKanbanViewConfig } from '../utils/view-config'
 import { formatFieldDisplay } from '../utils/field-display'
+import { useLocale } from '../../composables/useLocale'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaCommentAffordance from './MetaCommentAffordance.vue'
 import {
@@ -176,6 +177,7 @@ import {
   resolveFieldCommentAffordance,
   resolveRecordCommentAffordance,
 } from '../utils/comment-affordance'
+import { commentLabel } from '../utils/meta-comment-labels'
 
 const props = defineProps<{
   rows: MetaRecord[]
@@ -208,6 +210,8 @@ const kanbanDraft = reactive<Required<MetaKanbanViewConfig>>({
 let dragRecordId: string | null = null
 let dragVersion = 0
 const dragOverColumn = ref<string | null>(null)
+const { isZh } = useLocale()
+const commentsChipLabel = computed(() => commentLabel('comment.title', isZh.value))
 
 const kanbanConfig = computed<Required<MetaKanbanViewConfig>>(() =>
   resolveKanbanViewConfig(props.fields, props.viewConfig, props.groupInfo),

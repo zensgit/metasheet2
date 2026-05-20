@@ -1,8 +1,8 @@
 // Comments drawer + composer chrome string table (T3B2).
 //
-// Scope: MetaCommentsDrawer.vue and MetaCommentComposer.vue only. User
-// content, author names, mention labels, and backend/composable error bodies
-// stay raw and are never translated here.
+// Scope: comment drawer/composer chrome plus row-comment action chip labels in
+// alternative views. User content, author names, mention labels, and
+// backend/composable error bodies stay raw and are never translated here.
 
 export type MetaCommentLabelKey =
   | 'comment.title'
