@@ -3825,6 +3825,142 @@ describe('Attendance Plugin Integration', () => {
     expect(invalidHolidayTypeRes.status).toBe(400)
   })
 
+  it('protects manual holiday origins during national holiday sync', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const syncYear = 3030 + (Number.parseInt(runSuffix.slice(-3), 36) % 500)
+    const dates = {
+      empty: `${syncYear}-01-01`,
+      national: `${syncYear}-01-02`,
+      manual: `${syncYear}-01-03`,
+      manualDeleted: `${syncYear}-01-04`,
+      defaultManual: `${syncYear}-01-05`,
+      overwriteFalse: `${syncYear}-01-06`,
+    }
+    const targetDates = Object.values(dates)
+    const pool = new Pool({ connectionString: dbUrl })
+    let fetchDays: Array<{ date: string; name: string; isOffDay: boolean }> = []
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => ({
+      ok: true,
+      json: async () => ({ days: fetchDays }),
+    }) as any)
+
+    async function readHolidayRows() {
+      const rows = await pool.query(
+        `SELECT to_char(holiday_date, 'YYYY-MM-DD') AS date, name, is_working_day, origin
+         FROM attendance_holidays
+         WHERE org_id = $1 AND holiday_date = ANY($2::date[])`,
+        ['default', targetDates]
+      )
+      return new Map(rows.rows.map(row => [String(row.date), row]))
+    }
+
+    try {
+      await pool.query('DELETE FROM attendance_holidays WHERE org_id = $1 AND holiday_date = ANY($2::date[])', ['default', targetDates])
+      await pool.query(
+        `INSERT INTO attendance_holidays (id, org_id, holiday_date, name, is_working_day, origin)
+         VALUES
+           ($1, 'default', $2, 'Old National', false, 'national'),
+           ($3, 'default', $4, 'Manual Protected', false, 'manual'),
+           ($5, 'default', $6, 'Manual Deleted', false, 'manual'),
+           ($7, 'default', $8, 'Overwrite Disabled', false, 'national')`,
+        [
+          randomUuidV4(),
+          dates.national,
+          randomUuidV4(),
+          dates.manual,
+          randomUuidV4(),
+          dates.manualDeleted,
+          randomUuidV4(),
+          dates.overwriteFalse,
+        ]
+      )
+      await pool.query(
+        `INSERT INTO attendance_holidays (id, org_id, holiday_date, name, is_working_day)
+         VALUES ($1, 'default', $2, 'Default Manual', false)`,
+        [randomUuidV4(), dates.defaultManual]
+      )
+      await pool.query('DELETE FROM attendance_holidays WHERE org_id = $1 AND holiday_date = $2', ['default', dates.manualDeleted])
+
+      const tokenRes = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=attendance-holiday-sync-${runSuffix}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      )
+      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      expect(token).toBeTruthy()
+      if (!token) return
+
+      fetchDays = [
+        { date: dates.empty, name: 'Synced Empty', isOffDay: true },
+        { date: dates.national, name: 'Synced National Update', isOffDay: false },
+        { date: dates.manual, name: 'Synced Manual Conflict', isOffDay: true },
+        { date: dates.manualDeleted, name: 'Synced Deleted Manual', isOffDay: true },
+        { date: dates.defaultManual, name: 'Synced Default Manual Conflict', isOffDay: true },
+      ]
+      const overwriteTrueRes = await requestJson(`${baseUrl}/api/attendance/holidays/sync`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          years: [syncYear],
+          baseUrl: 'https://attendance-sync.test',
+          addDayIndex: false,
+          overwrite: true,
+        }),
+      })
+      expect(overwriteTrueRes.status).toBe(200)
+      const overwriteTrueData = (overwriteTrueRes.body as { data?: Record<string, any> } | undefined)?.data ?? {}
+      expect(overwriteTrueData.totalFetched).toBe(5)
+      expect(overwriteTrueData.totalApplied).toBe(3)
+      expect(overwriteTrueData.totalIgnored).toBe(2)
+      expect(overwriteTrueData.totalSkipped).toBe(0)
+      expect(overwriteTrueData.results?.[0]).toMatchObject({ fetched: 5, applied: 3, ignored: 2, skipped: 0 })
+      expect(overwriteTrueData.lastRun).toMatchObject({ totalFetched: 5, totalApplied: 3, totalIgnored: 2, totalSkipped: 0 })
+
+      let rowsByDate = await readHolidayRows()
+      expect(rowsByDate.get(dates.empty)).toMatchObject({ name: 'Synced Empty', origin: 'national' })
+      expect(rowsByDate.get(dates.national)).toMatchObject({ name: 'Synced National Update', origin: 'national', is_working_day: true })
+      expect(rowsByDate.get(dates.manual)).toMatchObject({ name: 'Manual Protected', origin: 'manual' })
+      expect(rowsByDate.get(dates.manualDeleted)).toMatchObject({ name: 'Synced Deleted Manual', origin: 'national' })
+      expect(rowsByDate.get(dates.defaultManual)).toMatchObject({ name: 'Default Manual', origin: 'manual' })
+
+      fetchDays = [
+        { date: dates.overwriteFalse, name: 'Should Not Overwrite', isOffDay: false },
+      ]
+      const overwriteFalseRes = await requestJson(`${baseUrl}/api/attendance/holidays/sync`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          years: [syncYear],
+          baseUrl: 'https://attendance-sync.test',
+          addDayIndex: false,
+          overwrite: false,
+        }),
+      })
+      expect(overwriteFalseRes.status).toBe(200)
+      const overwriteFalseData = (overwriteFalseRes.body as { data?: Record<string, any> } | undefined)?.data ?? {}
+      expect(overwriteFalseData.totalFetched).toBe(1)
+      expect(overwriteFalseData.totalApplied).toBe(0)
+      expect(overwriteFalseData.totalIgnored).toBe(0)
+      expect(overwriteFalseData.totalSkipped).toBe(1)
+      expect(overwriteFalseData.results?.[0]).toMatchObject({ fetched: 1, applied: 0, ignored: 0, skipped: 1 })
+
+      rowsByDate = await readHolidayRows()
+      expect(rowsByDate.get(dates.overwriteFalse)).toMatchObject({ name: 'Overwrite Disabled', origin: 'national', is_working_day: false })
+    } finally {
+      fetchSpy.mockRestore()
+      await pool.query('DELETE FROM attendance_holidays WHERE org_id = $1 AND holiday_date = ANY($2::date[])', ['default', targetDates]).catch(() => undefined)
+      await pool.end()
+    }
+  })
+
   it('rejects negative leave type daily_minutes aliases, empty holiday names, and exposes holiday type fields', async () => {
     if (!baseUrl) return
 

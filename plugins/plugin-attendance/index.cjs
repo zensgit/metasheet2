@@ -7413,12 +7413,14 @@ function mapShiftFromAssignmentRow(row) {
 
 function mapHolidayRow(row) {
   const holidayType = row.is_working_day === true ? 'working_day_override' : 'holiday'
+  const origin = row.origin === 'national' ? 'national' : 'manual'
   return {
     id: row.id,
     orgId: row.org_id ?? DEFAULT_ORG_ID,
     date: normalizeDateOnly(row.holiday_date) ?? row.holiday_date,
     name: row.name ?? null,
     isWorkingDay: row.is_working_day ?? false,
+    origin,
     type: holidayType,
     holidayType,
   }
@@ -8592,33 +8594,76 @@ async function fetchHolidayCnYear({ year, baseUrl }) {
 }
 
 async function upsertHolidayRows(db, { orgId, rows, overwrite }) {
-  if (!rows.length) return 0
+  if (!rows.length) return { applied: 0, skipped: 0, ignored: 0 }
   const chunkSize = 200
   let applied = 0
+  let skipped = 0
+  let ignored = 0
 
   for (let i = 0; i < rows.length; i += chunkSize) {
     const chunk = rows.slice(i, i + chunkSize)
+    const dates = chunk.map(row => row.date).filter(Boolean)
+    const existingRows = dates.length
+      ? await db.query(
+        `SELECT holiday_date, COALESCE(origin, 'manual') AS origin
+         FROM attendance_holidays
+         WHERE org_id = $1 AND holiday_date = ANY($2::date[])`,
+        [orgId, dates]
+      )
+      : []
+    const existingByDate = new Map()
+    for (const existing of existingRows) {
+      const date = normalizeDateOnly(existing.holiday_date) ?? String(existing.holiday_date ?? '').slice(0, 10)
+      if (!date) continue
+      existingByDate.set(date, existing.origin === 'national' ? 'national' : 'manual')
+    }
+
+    const writeRows = []
+    for (const row of chunk) {
+      const existingOrigin = existingByDate.get(row.date)
+      if (existingOrigin === 'manual') {
+        ignored += 1
+        continue
+      }
+      if (!overwrite && existingOrigin) {
+        skipped += 1
+        continue
+      }
+      writeRows.push(row)
+    }
+    if (!writeRows.length) continue
+
     const values = []
     const params = []
-    chunk.forEach((row, index) => {
-      const baseIndex = index * 5
-      values.push(`($${baseIndex + 1}, $${baseIndex + 2}, $${baseIndex + 3}, $${baseIndex + 4}, $${baseIndex + 5})`)
-      params.push(randomUUID(), orgId, row.date, row.name ?? null, row.isWorkingDay)
+    writeRows.forEach((row, index) => {
+      const baseIndex = index * 6
+      values.push(`($${baseIndex + 1}, $${baseIndex + 2}, $${baseIndex + 3}, $${baseIndex + 4}, $${baseIndex + 5}, $${baseIndex + 6})`)
+      params.push(randomUUID(), orgId, row.date, row.name ?? null, row.isWorkingDay, 'national')
     })
     const conflictAction = overwrite
-      ? 'DO UPDATE SET name = EXCLUDED.name, is_working_day = EXCLUDED.is_working_day'
+      ? `DO UPDATE SET
+           name = EXCLUDED.name,
+           is_working_day = EXCLUDED.is_working_day,
+           origin = 'national',
+           updated_at = now()
+         WHERE attendance_holidays.origin = 'national'`
       : 'DO NOTHING'
     const rowsInserted = await db.query(
-      `INSERT INTO attendance_holidays (id, org_id, holiday_date, name, is_working_day)
+      `INSERT INTO attendance_holidays (id, org_id, holiday_date, name, is_working_day, origin)
        VALUES ${values.join(', ')}
        ON CONFLICT (org_id, holiday_date) ${conflictAction}
        RETURNING holiday_date`,
       params
     )
     applied += rowsInserted.length
+    const notApplied = writeRows.length - rowsInserted.length
+    if (notApplied > 0) {
+      if (overwrite) ignored += notApplied
+      else skipped += notApplied
+    }
   }
 
-  return applied
+  return { applied, skipped, ignored }
 }
 
 function getZonedParts(date, timeZone) {
@@ -8723,6 +8768,8 @@ async function performHolidaySync({ db, logger, orgId, settings, payload }) {
   const years = resolveHolidaySyncYears(settings, payload)
   let totalFetched = 0
   let totalApplied = 0
+  let totalSkipped = 0
+  let totalIgnored = 0
   const results = []
 
   for (const year of years) {
@@ -8734,13 +8781,22 @@ async function performHolidaySync({ db, logger, orgId, settings, payload }) {
       dayIndexMaxDays: syncConfig.dayIndexMaxDays,
       dayIndexFormat: syncConfig.dayIndexFormat,
     })
-    const applied = await upsertHolidayRows(db, {
+    const syncResult = await upsertHolidayRows(db, {
       orgId,
       rows,
       overwrite: syncConfig.overwrite,
     })
-    totalApplied += applied
-    results.push({ year, url, fetched: days.length, applied })
+    totalApplied += syncResult.applied
+    totalSkipped += syncResult.skipped
+    totalIgnored += syncResult.ignored
+    results.push({
+      year,
+      url,
+      fetched: days.length,
+      applied: syncResult.applied,
+      skipped: syncResult.skipped,
+      ignored: syncResult.ignored,
+    })
   }
 
   const lastRun = {
@@ -8749,6 +8805,8 @@ async function performHolidaySync({ db, logger, orgId, settings, payload }) {
     years,
     totalFetched,
     totalApplied,
+    totalSkipped,
+    totalIgnored,
     error: null,
   }
   await saveSettings(db, {
@@ -8759,7 +8817,7 @@ async function performHolidaySync({ db, logger, orgId, settings, payload }) {
     },
   })
 
-  return { syncConfig, years, totalFetched, totalApplied, results, lastRun }
+  return { syncConfig, years, totalFetched, totalApplied, totalSkipped, totalIgnored, results, lastRun }
 }
 
 function matchesNumberGte(actual, expected) {
@@ -9218,6 +9276,12 @@ function normalizeSettings(raw) {
         totalApplied: Number.isFinite(holidaySyncLastRun.totalApplied)
           ? Number(holidaySyncLastRun.totalApplied)
           : null,
+        totalSkipped: Number.isFinite(holidaySyncLastRun.totalSkipped)
+          ? Number(holidaySyncLastRun.totalSkipped)
+          : null,
+        totalIgnored: Number.isFinite(holidaySyncLastRun.totalIgnored)
+          ? Number(holidaySyncLastRun.totalIgnored)
+          : null,
         error: typeof holidaySyncLastRun.error === 'string' ? holidaySyncLastRun.error : null,
       }
     : null
@@ -9592,7 +9656,7 @@ async function loadHoliday(db, orgId, workDate) {
   const targetOrg = orgId || DEFAULT_ORG_ID
   try {
     const rows = await db.query(
-      `SELECT id, org_id, holiday_date, name, is_working_day
+      `SELECT id, org_id, holiday_date, name, is_working_day, origin
        FROM attendance_holidays
        WHERE org_id = $1 AND holiday_date = $2
        LIMIT 1`,
@@ -9928,7 +9992,7 @@ async function loadHolidayMapByDates(db, orgId, workDates) {
   if (!Array.isArray(workDates) || workDates.length === 0) return new Map()
   try {
     const rows = await db.query(
-      `SELECT id, org_id, holiday_date, name, is_working_day
+      `SELECT id, org_id, holiday_date, name, is_working_day, origin
        FROM attendance_holidays
        WHERE org_id = $1 AND holiday_date = ANY($2::date[])`,
       [targetOrg, workDates]
@@ -11526,12 +11590,16 @@ function scheduleHolidaySync({ db, logger, emit }) {
           years: result.years,
           totalFetched: result.totalFetched,
           totalApplied: result.totalApplied,
+          totalSkipped: result.totalSkipped,
+          totalIgnored: result.totalIgnored,
         })
         logger.info('Auto holiday sync completed', {
           orgId,
           years: result.years,
           totalFetched: result.totalFetched,
           totalApplied: result.totalApplied,
+          totalSkipped: result.totalSkipped,
+          totalIgnored: result.totalIgnored,
         })
       }
     } catch (error) {
@@ -11868,6 +11936,8 @@ module.exports = {
           years: z.array(z.number().int()).optional(),
           totalFetched: z.number().optional(),
           totalApplied: z.number().optional(),
+          totalSkipped: z.number().optional(),
+          totalIgnored: z.number().optional(),
           error: z.string().optional(),
         }).nullable().optional(),
       }).optional(),
@@ -23561,7 +23631,7 @@ module.exports = {
           const total = Number(countRows[0]?.total ?? 0)
 
           const rows = await db.query(
-            `SELECT id, org_id, holiday_date, name, is_working_day
+            `SELECT id, org_id, holiday_date, name, is_working_day, origin
              FROM attendance_holidays
              WHERE org_id = $1 AND holiday_date BETWEEN $2 AND $3
              ORDER BY holiday_date ASC`,
@@ -23618,7 +23688,7 @@ module.exports = {
 
         try {
           const rows = await db.query(
-            'SELECT id, org_id, holiday_date, name, is_working_day FROM attendance_holidays WHERE id = $1 AND org_id = $2',
+            'SELECT id, org_id, holiday_date, name, is_working_day, origin FROM attendance_holidays WHERE id = $1 AND org_id = $2',
             [holidayId, orgId]
           )
           if (!rows.length) {
@@ -23651,7 +23721,7 @@ module.exports = {
         const years = resolveHolidaySyncYears(settings, parsed.data)
 
         try {
-          const { syncConfig, totalFetched, totalApplied, results, lastRun } = await performHolidaySync({
+          const { syncConfig, totalFetched, totalApplied, totalSkipped, totalIgnored, results, lastRun } = await performHolidaySync({
             db,
             logger,
             orgId,
@@ -23672,6 +23742,8 @@ module.exports = {
               overwrite: syncConfig.overwrite,
               totalFetched,
               totalApplied,
+              totalSkipped,
+              totalIgnored,
               results,
               lastRun,
             },
@@ -23683,6 +23755,8 @@ module.exports = {
             years,
             totalFetched: 0,
             totalApplied: 0,
+            totalSkipped: 0,
+            totalIgnored: 0,
             error: error instanceof Error ? error.message : 'Holiday sync failed',
           }
           try {
@@ -23718,9 +23792,9 @@ module.exports = {
           const payload = resolveHolidayWritePayload(parsed.data)
           const rows = await db.query(
             `INSERT INTO attendance_holidays
-             (id, org_id, holiday_date, name, is_working_day)
-             VALUES ($1, $2, $3, $4, $5)
-             RETURNING id, org_id, holiday_date, name, is_working_day`,
+             (id, org_id, holiday_date, name, is_working_day, origin)
+             VALUES ($1, $2, $3, $4, $5, 'manual')
+             RETURNING id, org_id, holiday_date, name, is_working_day, origin`,
             [
               randomUUID(),
               orgId,
@@ -23766,7 +23840,7 @@ module.exports = {
 
         try {
           const existingRows = await db.query(
-            'SELECT id, org_id, holiday_date, name, is_working_day FROM attendance_holidays WHERE id = $1 AND org_id = $2',
+            'SELECT id, org_id, holiday_date, name, is_working_day, origin FROM attendance_holidays WHERE id = $1 AND org_id = $2',
             [holidayId, orgId]
           )
           if (!existingRows.length) {
@@ -23784,7 +23858,7 @@ module.exports = {
                  is_working_day = $5,
                  updated_at = now()
              WHERE id = $1 AND org_id = $2
-             RETURNING id, org_id, holiday_date, name, is_working_day`,
+             RETURNING id, org_id, holiday_date, name, is_working_day, origin`,
             [holidayId, orgId, payload.date, payload.name, payload.isWorkingDay]
           )
 

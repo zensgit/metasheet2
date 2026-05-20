@@ -1116,6 +1116,7 @@ export interface AttendanceHolidaysTable {
   holiday_date: ColumnType<string, string | undefined, string>
   name: string | null
   is_working_day: boolean
+  origin: 'national' | 'manual'
   created_at: CreatedAt
   updated_at: UpdatedAt
 }
