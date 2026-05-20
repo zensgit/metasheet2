@@ -10,8 +10,9 @@ const personField: MetaField = { id: 'owner', name: 'Owner', type: 'person' as M
 const recordField: MetaField = { id: 'parent', name: 'Parent', type: 'link' as MetaField['type'] }
 
 describe('linkActionLabel — backwards compatibility (isZh default = false)', () => {
-  it('defaults to English when no isZh arg is passed — MetaCellEditor / MetaImportModal stay unchanged', () => {
-    // record branch (the T3A2 unreachable-fallback case + MetaImportModal)
+  it('defaults to English when no isZh arg is passed — legacy callers stay unchanged', () => {
+    // record branch (the T3A2 unreachable-fallback case and any caller that
+    // intentionally omits locale)
     expect(linkActionLabel(recordField, 0)).toBe('Choose linked records...')
     expect(linkActionLabel(recordField, 1)).toBe('Edit linked record (1)')
     expect(linkActionLabel(recordField, 5)).toBe('Edit linked records (5)')
