@@ -2227,6 +2227,26 @@ describe('MultitableWorkbench view wiring', () => {
     expect(container!.querySelector('[data-close-comments="true"]')).toBeTruthy()
   })
 
+  it('localizes the unsaved comment draft confirm copy in zh-CN', async () => {
+    useLocale().setLocale('zh-CN')
+    mountWorkbench()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-toggle-comments="true"]')!.click()
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-set-comment-draft="true"]')!.click()
+    await flushUi()
+
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    container!.querySelector<HTMLButtonElement>('[data-close-comments="true"]')!.click()
+    await flushUi()
+
+    expect(confirmSpy).toHaveBeenCalledWith('放弃未保存的评论草稿吗？')
+    expect(container!.querySelector('[data-close-comments="true"]')).toBeTruthy()
+  })
+
   it('prompts before closing the record drawer when record-scoped drafts are present', async () => {
     mountWorkbench()
     await flushUi()

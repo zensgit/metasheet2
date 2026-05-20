@@ -33,7 +33,7 @@
         v-if="showSuggestions"
         class="meta-comment-composer__suggestions"
         role="listbox"
-        aria-label="Comment mention suggestions"
+        :aria-label="l('comment.mentionSuggestionsAria')"
       >
         <button
           v-for="suggestion in filteredSuggestions"
@@ -60,7 +60,9 @@
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import type { MetaCommentMentionSuggestion } from '../types'
+import { commentLabel, type MetaCommentLabelKey } from '../utils/meta-comment-labels'
 
 const props = withDefaults(defineProps<{
   modelValue: string
@@ -70,6 +72,7 @@ const props = withDefaults(defineProps<{
   disabled?: boolean
   placeholder?: string
   submitLabel?: string
+  submitKind?: 'send' | 'save'
 }>(), {
   suggestions: () => [],
   initialMentions: () => [],
@@ -77,6 +80,7 @@ const props = withDefaults(defineProps<{
   disabled: false,
   placeholder: 'Add a comment...',
   submitLabel: 'Send',
+  submitKind: 'send',
 })
 
 const emit = defineEmits<{
@@ -88,6 +92,8 @@ const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const selectedMentions = ref<MetaCommentMentionSuggestion[]>([])
 const activeSuggestionIndex = ref(0)
 const suggestionsDismissed = ref(false)
+const { isZh } = useLocale()
+const l = (key: MetaCommentLabelKey) => commentLabel(key, isZh.value)
 const mentionMatch = computed(() => props.modelValue.match(/(?:^|\s)@([^\s@]*)$/))
 const mentionQuery = computed(() => mentionMatch.value?.[1] ?? '')
 
@@ -109,7 +115,7 @@ const showSuggestions = computed(() => {
 
 const submitButtonLabel = computed(() => {
   if (!props.submitting) return props.submitLabel
-  return props.submitLabel === 'Save' ? 'Saving...' : 'Sending...'
+  return props.submitKind === 'save' ? l('comment.submitSaving') : l('comment.submitSending')
 })
 
 const activeSuggestion = computed(() => {
@@ -121,7 +127,7 @@ const activeSuggestion = computed(() => {
 const activeSuggestionId = computed(() => activeSuggestion.value?.id ?? null)
 
 const composerHint = computed(() => (
-  showSuggestions.value ? 'Tab to mention, Ctrl/Cmd + Enter to send' : 'Ctrl/Cmd + Enter to send'
+  showSuggestions.value ? l('comment.hintWithMention') : l('comment.hintBase')
 ))
 
 watch(

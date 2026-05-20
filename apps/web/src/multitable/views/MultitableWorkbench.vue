@@ -414,6 +414,7 @@ import {
   mentionsUnread as fmtMentionsUnread,
   mentionsRecords as fmtMentionsRecords,
 } from '../utils/workbench-labels'
+import { commentLabel } from '../utils/meta-comment-labels'
 import type {
   LinkedRecordSummary,
   MetaAttachment,
@@ -1936,7 +1937,7 @@ function confirmDiscardRecordChanges() {
 
 function confirmDiscardCommentDraft() {
   if (!hasCommentDraft.value) return true
-  return window.confirm('Discard unsaved comment draft?')
+  return window.confirm(commentLabel('comment.discardDraftConfirm', isZh.value))
 }
 
 function discardWorkbenchDraftsForExternalContextChange() {
