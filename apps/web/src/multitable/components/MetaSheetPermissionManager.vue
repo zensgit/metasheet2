@@ -3,8 +3,8 @@
     <div class="meta-sheet-perm">
       <div class="meta-sheet-perm__header">
         <div>
-          <h4 class="meta-sheet-perm__title">Manage Access</h4>
-          <p class="meta-sheet-perm__subtitle">Override sheet-level access for eligible people, member groups, or roles. Admin includes sharing and sheet deletion. Write-own remains user-only.</p>
+          <h4 class="meta-sheet-perm__title">{{ p('sheet.title') }}</h4>
+          <p class="meta-sheet-perm__subtitle">{{ p('sheet.subtitle') }}</p>
         </div>
         <button class="meta-sheet-perm__close" type="button" @click="requestClose">&times;</button>
       </div>
@@ -31,10 +31,10 @@
         <template v-if="activeTab === 'sheet'">
           <section class="meta-sheet-perm__section">
             <div class="meta-sheet-perm__section-header">
-              <strong>Current access</strong>
+              <strong>{{ p('sheet.currentAccess') }}</strong>
             </div>
-            <div v-if="loading" class="meta-sheet-perm__empty">Loading access list&#x2026;</div>
-            <div v-else-if="!entries.length" class="meta-sheet-perm__empty">No sheet-specific access grants yet.</div>
+            <div v-if="loading" class="meta-sheet-perm__empty">{{ p('sheet.loadingAccess') }}</div>
+            <div v-else-if="!entries.length" class="meta-sheet-perm__empty">{{ p('sheet.emptyAccess') }}</div>
             <div
               v-for="entry in entries"
               :key="subjectKey(entry.subjectType, entry.subjectId)"
@@ -49,13 +49,13 @@
                   class="meta-sheet-perm__lifecycle"
                   data-lifecycle="inactive"
                 >
-                  Inactive user
+                  {{ p('subject.inactiveUser') }}
                 </span>
                 <span
                   v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
                   class="meta-sheet-perm__hint"
                 >
-                  Cleanup only
+                  {{ p('subject.cleanupOnly') }}
                 </span>
                 <span
                   v-if="hasSubjectOverrides(entry.subjectType, entry.subjectId)"
@@ -64,8 +64,8 @@
                   {{ subjectOverrideSummaryLabel(entry.subjectType, entry.subjectId) }}
                 </span>
               </div>
-              <span class="meta-sheet-perm__subject" :data-subject-type="entry.subjectType">{{ subjectTypeBadgeLabel(entry.subjectType) }}</span>
-              <span class="meta-sheet-perm__badge" :data-access-level="entry.accessLevel">{{ accessLevelLabel(entry.accessLevel) }}</span>
+              <span class="meta-sheet-perm__subject" :data-subject-type="entry.subjectType">{{ sheetSubjectText(entry.subjectType) }}</span>
+              <span class="meta-sheet-perm__badge" :data-access-level="entry.accessLevel">{{ sheetAccessLabel(entry.accessLevel) }}</span>
               <select
                 :value="entryDrafts[subjectKey(entry.subjectType, entry.subjectId)] ?? entry.accessLevel"
                 class="meta-sheet-perm__select"
@@ -86,7 +86,7 @@
                 :disabled="busySubjectKey === subjectKey(entry.subjectType, entry.subjectId) || subjectMutationBlocked(entry.subjectType, entry.isActive) || (entryDrafts[subjectKey(entry.subjectType, entry.subjectId)] ?? entry.accessLevel) === entry.accessLevel"
                 @click="applyEntry(entry.subjectType, entry.subjectId)"
               >
-                Save
+                {{ m('action.save') }}
               </button>
               <button
                 v-if="hasSubjectOverrides(entry.subjectType, entry.subjectId)"
@@ -96,7 +96,7 @@
                 :disabled="busySubjectKey === subjectKey(entry.subjectType, entry.subjectId)"
                 @click="clearSubjectOverrides(entry.subjectType, entry.subjectId)"
               >
-                Clear overrides
+                {{ p('action.clearOverrides') }}
               </button>
               <template v-if="entry.subjectType === 'member-group'">
                 <select
@@ -106,7 +106,7 @@
                   :disabled="busySubjectAclCopyKey === entry.subjectId || memberGroupTemplateSourceOptions(entry.subjectId).length === 0"
                   @change="setSubjectAclTemplateSource(entry.subjectId, $event)"
                 >
-                  <option value="">Copy downstream ACL…</option>
+                  <option value="">{{ p('permission.copyDownstreamPlaceholder') }}</option>
                   <option
                     v-for="option in memberGroupTemplateSourceOptions(entry.subjectId)"
                     :key="`sp-copy-${entry.subjectId}-${option.subjectId}`"
@@ -122,7 +122,7 @@
                   :disabled="busySubjectAclCopyKey === entry.subjectId || subjectAclTemplateSourceValue(entry.subjectId).length === 0"
                   @click="copySubjectAclFromMemberGroup(entry.subjectId)"
                 >
-                  Copy field+view ACL
+                  {{ p('action.copyFieldViewAcl') }}
                 </button>
               </template>
               <button
@@ -131,29 +131,29 @@
                 :disabled="busySubjectKey === subjectKey(entry.subjectType, entry.subjectId)"
                 @click="removeEntry(entry.subjectType, entry.subjectId)"
               >
-                Remove
+                {{ m('action.remove') }}
               </button>
             </div>
           </section>
 
           <section class="meta-sheet-perm__section">
             <div class="meta-sheet-perm__section-header">
-              <strong>Eligible people, member groups, or roles</strong>
+              <strong>{{ p('sheet.eligibleSection') }}</strong>
             </div>
             <input
               v-model="search"
               class="meta-sheet-perm__search"
               type="search"
-              placeholder="Search people or roles"
+              :placeholder="p('sheet.searchPlaceholder')"
               data-sheet-permission-search="true"
             />
-            <div v-if="candidatesLoading" class="meta-sheet-perm__empty">Searching eligible people, member groups, and roles&#x2026;</div>
-            <div v-else-if="!availableCandidates.length" class="meta-sheet-perm__empty">No matching eligible people, member groups, or roles.</div>
+            <div v-if="candidatesLoading" class="meta-sheet-perm__empty">{{ p('sheet.searchingCandidates') }}</div>
+            <div v-else-if="!availableCandidates.length" class="meta-sheet-perm__empty">{{ p('sheet.noCandidates') }}</div>
             <template v-else>
               <div class="meta-sheet-perm__section-header">
-                <strong>People</strong>
+                <strong>{{ p('subject.people') }}</strong>
               </div>
-              <div v-if="!peopleCandidates.length" class="meta-sheet-perm__empty">No matching people.</div>
+              <div v-if="!peopleCandidates.length" class="meta-sheet-perm__empty">{{ p('subject.noPeople') }}</div>
               <div
                 v-for="candidate in peopleCandidates"
                 :key="subjectKey(candidate.subjectType, candidate.subjectId)"
@@ -168,16 +168,16 @@
                     class="meta-sheet-perm__lifecycle"
                     data-lifecycle="inactive"
                   >
-                    Inactive user
+                    {{ p('subject.inactiveUser') }}
                   </span>
                   <span
                     v-if="candidateGrantBlocked(candidate)"
                     class="meta-sheet-perm__hint"
                   >
-                    Grant blocked
+                    {{ p('subject.grantBlocked') }}
                   </span>
                 </div>
-                <span class="meta-sheet-perm__subject" data-subject-type="user">Person</span>
+                <span class="meta-sheet-perm__subject" data-subject-type="user">{{ p('subject.person') }}</span>
                 <select
                   :value="candidateDrafts[subjectKey(candidate.subjectType, candidate.subjectId)] ?? candidate.accessLevel ?? 'read'"
                   class="meta-sheet-perm__select"
@@ -198,14 +198,14 @@
                   :disabled="busySubjectKey === subjectKey(candidate.subjectType, candidate.subjectId) || candidateGrantBlocked(candidate)"
                   @click="grantCandidate(candidate.subjectType, candidate.subjectId)"
                 >
-                  Apply
+                  {{ m('action.apply') }}
                 </button>
               </div>
 
               <div class="meta-sheet-perm__section-header">
-                <strong>Member groups</strong>
+                <strong>{{ p('subject.memberGroups') }}</strong>
               </div>
-              <div v-if="!memberGroupCandidates.length" class="meta-sheet-perm__empty">No matching member groups.</div>
+              <div v-if="!memberGroupCandidates.length" class="meta-sheet-perm__empty">{{ p('subject.noMemberGroups') }}</div>
               <div
                 v-for="candidate in memberGroupCandidates"
                 :key="subjectKey(candidate.subjectType, candidate.subjectId)"
@@ -216,7 +216,7 @@
                   <strong>{{ candidate.label }}</strong>
                   <span>{{ candidate.subtitle || candidate.subjectId }}</span>
                 </div>
-                <span class="meta-sheet-perm__subject" data-subject-type="member-group">Member group</span>
+                <span class="meta-sheet-perm__subject" data-subject-type="member-group">{{ p('subject.memberGroup') }}</span>
                 <select
                   :value="candidateDrafts[subjectKey(candidate.subjectType, candidate.subjectId)] ?? candidate.accessLevel ?? 'read'"
                   class="meta-sheet-perm__select"
@@ -237,14 +237,14 @@
                   :disabled="busySubjectKey === subjectKey(candidate.subjectType, candidate.subjectId)"
                   @click="grantCandidate(candidate.subjectType, candidate.subjectId)"
                 >
-                  Apply
+                  {{ m('action.apply') }}
                 </button>
               </div>
 
               <div class="meta-sheet-perm__section-header">
-                <strong>Roles</strong>
+                <strong>{{ p('subject.roles') }}</strong>
               </div>
-              <div v-if="!roleCandidates.length" class="meta-sheet-perm__empty">No matching roles.</div>
+              <div v-if="!roleCandidates.length" class="meta-sheet-perm__empty">{{ p('subject.noRoles') }}</div>
               <div
                 v-for="candidate in roleCandidates"
                 :key="subjectKey(candidate.subjectType, candidate.subjectId)"
@@ -255,7 +255,7 @@
                   <strong>{{ candidate.label }}</strong>
                   <span>{{ candidate.subtitle || candidate.subjectId }}</span>
                 </div>
-                <span class="meta-sheet-perm__subject" data-subject-type="role">Role</span>
+                <span class="meta-sheet-perm__subject" data-subject-type="role">{{ p('subject.role') }}</span>
                 <select
                   :value="candidateDrafts[subjectKey(candidate.subjectType, candidate.subjectId)] ?? candidate.accessLevel ?? 'read'"
                   class="meta-sheet-perm__select"
@@ -276,7 +276,7 @@
                   :disabled="busySubjectKey === subjectKey(candidate.subjectType, candidate.subjectId)"
                   @click="grantCandidate(candidate.subjectType, candidate.subjectId)"
                 >
-                  Apply
+                  {{ m('action.apply') }}
                 </button>
               </div>
             </template>
@@ -287,14 +287,14 @@
         <template v-if="activeTab === 'fields'">
           <section class="meta-sheet-perm__section">
             <div class="meta-sheet-perm__section-header">
-              <strong>Field-level permissions</strong>
-            </div>
-            <div v-if="!fields.length" class="meta-sheet-perm__empty">No fields available.</div>
-            <div v-else-if="!entries.length && !hasFieldOrphans" class="meta-sheet-perm__empty">No subjects with sheet access. Grant sheet access first to configure field permissions.</div>
+                  <strong>{{ p('field.title') }}</strong>
+                </div>
+            <div v-if="!fields.length" class="meta-sheet-perm__empty">{{ p('field.noFields') }}</div>
+            <div v-else-if="!entries.length && !hasFieldOrphans" class="meta-sheet-perm__empty">{{ p('field.noSubjects') }}</div>
             <template v-else>
               <div v-if="entries.length" class="meta-sheet-perm__section">
                 <div class="meta-sheet-perm__section-header">
-                  <strong>Bulk apply to all fields</strong>
+                  <strong>{{ p('field.bulkApply') }}</strong>
                 </div>
                 <div
                   v-for="entry in entries"
@@ -310,25 +310,25 @@
                       class="meta-sheet-perm__lifecycle"
                       data-lifecycle="inactive"
                     >
-                      Inactive user
+                      {{ p('subject.inactiveUser') }}
                     </span>
                     <span
                       v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
                       class="meta-sheet-perm__hint"
                     >
-                      Cleanup only
+                      {{ p('subject.cleanupOnly') }}
                     </span>
                   </div>
-                  <span class="meta-sheet-perm__subject" :data-subject-type="entry.subjectType">{{ subjectTypeBadgeLabel(entry.subjectType) }}</span>
+                  <span class="meta-sheet-perm__subject" :data-subject-type="entry.subjectType">{{ sheetSubjectText(entry.subjectType) }}</span>
                   <select
                     :value="fieldTemplateDraftValue(entry.subjectType, entry.subjectId)"
                     class="meta-sheet-perm__select"
                     :disabled="busyFieldTemplateKey === subjectKey(entry.subjectType, entry.subjectId) || subjectMutationBlocked(entry.subjectType, entry.isActive)"
                     @change="setFieldTemplateDraft(entry.subjectType, entry.subjectId, $event)"
                   >
-                    <option value="default">Default</option>
-                    <option value="hidden">Hidden</option>
-                    <option value="readonly">Read-only</option>
+                    <option value="default">{{ p('field.state.default') }}</option>
+                    <option value="hidden">{{ p('field.state.hidden') }}</option>
+                    <option value="readonly">{{ p('field.state.readonly') }}</option>
                   </select>
                   <button
                     class="meta-sheet-perm__action meta-sheet-perm__action--primary"
@@ -336,7 +336,7 @@
                     :disabled="busyFieldTemplateKey === subjectKey(entry.subjectType, entry.subjectId) || subjectMutationBlocked(entry.subjectType, entry.isActive)"
                     @click="applyFieldTemplate(entry.subjectType, entry.subjectId)"
                   >
-                    Apply to all fields
+                    {{ p('field.applyAll') }}
                   </button>
                   <template v-if="entry.subjectType === 'member-group'">
                     <select
@@ -346,7 +346,7 @@
                       :disabled="busyFieldTemplateCopyKey === entry.subjectId || memberGroupTemplateSourceOptions(entry.subjectId).length === 0"
                       @change="setFieldTemplateSource(entry.subjectId, $event)"
                     >
-                      <option value="">Copy from member group…</option>
+                      <option value="">{{ p('permission.copyFromMemberGroup') }}</option>
                       <option
                         v-for="option in memberGroupTemplateSourceOptions(entry.subjectId)"
                         :key="`fp-copy-${entry.subjectId}-${option.subjectId}`"
@@ -362,7 +362,7 @@
                       :disabled="busyFieldTemplateCopyKey === entry.subjectId || fieldTemplateSourceValue(entry.subjectId).length === 0"
                       @click="copyFieldTemplateFromMemberGroup(entry.subjectId)"
                     >
-                      Copy ACL
+                      {{ p('action.copyAcl') }}
                     </button>
                   </template>
                 </div>
@@ -384,7 +384,7 @@
                       :disabled="busyFieldOrphanBulkKey === field.id"
                       @click="clearFieldOrphans(field.id)"
                     >
-                      Clear orphan overrides
+                      {{ p('permission.clearOrphanOverrides') }}
                     </button>
                   </div>
                 </div>
@@ -396,24 +396,24 @@
                 >
                   <div class="meta-sheet-perm__identity">
                     <strong>{{ entry.label }}</strong>
-                    <span>{{ subjectTypeBadgeLabel(entry.subjectType) }}</span>
+                    <span>{{ sheetSubjectText(entry.subjectType) }}</span>
                     <span
                       v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
                       class="meta-sheet-perm__lifecycle"
                       data-lifecycle="inactive"
                     >
-                      Inactive user
+                      {{ p('subject.inactiveUser') }}
                     </span>
                     <span
                       v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
                       class="meta-sheet-perm__hint"
                     >
-                      Cleanup only
+                      {{ p('subject.cleanupOnly') }}
                     </span>
                   </div>
                   <span
                     class="meta-sheet-perm__badge"
-                    :data-access-level="fieldPermDraftLabel(field.id, entry.subjectType, entry.subjectId)"
+                    :data-access-level="fieldPermDraftValue(field.id, entry.subjectType, entry.subjectId)"
                   >
                     {{ fieldPermDraftLabel(field.id, entry.subjectType, entry.subjectId) }}
                   </span>
@@ -423,9 +423,9 @@
                     :disabled="busyFieldPermKey === fieldPermKey(field.id, entry.subjectType, entry.subjectId) || subjectMutationBlocked(entry.subjectType, entry.isActive)"
                     @change="setFieldPermDraft(field.id, entry.subjectType, entry.subjectId, $event)"
                   >
-                    <option value="default">Default</option>
-                    <option value="hidden">Hidden</option>
-                    <option value="readonly">Read-only</option>
+                    <option value="default">{{ p('field.state.default') }}</option>
+                    <option value="hidden">{{ p('field.state.hidden') }}</option>
+                    <option value="readonly">{{ p('field.state.readonly') }}</option>
                   </select>
                   <button
                     class="meta-sheet-perm__action meta-sheet-perm__action--primary"
@@ -433,7 +433,7 @@
                     :disabled="busyFieldPermKey === fieldPermKey(field.id, entry.subjectType, entry.subjectId) || subjectMutationBlocked(entry.subjectType, entry.isActive)"
                     @click="applyFieldPerm(field.id, entry.subjectType, entry.subjectId)"
                   >
-                    Save
+                    {{ m('action.save') }}
                   </button>
                 </div>
                 <div
@@ -444,29 +444,29 @@
                 >
                 <div class="meta-sheet-perm__identity">
                   <strong>{{ orphan.subjectLabel || orphan.subjectId }}</strong>
-                  <span>{{ orphan.subjectSubtitle || `Orphan ${subjectTypeBadgeLabel(orphan.subjectType)}` }}</span>
+                  <span>{{ orphan.subjectSubtitle || orphanSubjectLabel(orphan.subjectType) }}</span>
                   <span
                     v-if="subjectMutationBlocked(orphan.subjectType, orphan.isActive)"
                     class="meta-sheet-perm__lifecycle"
                     data-lifecycle="inactive"
                   >
-                    Inactive user
+                    {{ p('subject.inactiveUser') }}
                   </span>
                 </div>
                   <span
                     class="meta-sheet-perm__badge"
-                    :data-access-level="fieldPermDraftLabel(field.id, orphan.subjectType, orphan.subjectId)"
+                    :data-access-level="fieldPermDraftValue(field.id, orphan.subjectType, orphan.subjectId)"
                   >
                     {{ fieldPermDraftLabel(field.id, orphan.subjectType, orphan.subjectId) }}
                   </span>
-                  <span class="meta-sheet-perm__hint">No current sheet access</span>
+                  <span class="meta-sheet-perm__hint">{{ p('permission.noCurrentSheetAccess') }}</span>
                   <button
                     class="meta-sheet-perm__action meta-sheet-perm__action--danger"
                     type="button"
                     :disabled="busyFieldPermKey === fieldPermKey(field.id, orphan.subjectType, orphan.subjectId)"
                     @click="clearFieldPerm(field.id, orphan.subjectType, orphan.subjectId)"
                   >
-                    Clear
+                    {{ m('action.clear') }}
                   </button>
                 </div>
               </div>
@@ -478,14 +478,14 @@
         <template v-if="activeTab === 'views'">
           <section class="meta-sheet-perm__section">
             <div class="meta-sheet-perm__section-header">
-              <strong>View-level permissions</strong>
-            </div>
-            <div v-if="!views.length" class="meta-sheet-perm__empty">No views available.</div>
-            <div v-else-if="!entries.length && !hasViewOrphans" class="meta-sheet-perm__empty">No subjects with sheet access. Grant sheet access first to configure view permissions.</div>
+                  <strong>{{ p('view.title') }}</strong>
+                </div>
+            <div v-if="!views.length" class="meta-sheet-perm__empty">{{ p('view.noViews') }}</div>
+            <div v-else-if="!entries.length && !hasViewOrphans" class="meta-sheet-perm__empty">{{ p('view.noSubjects') }}</div>
             <template v-else>
               <div v-if="entries.length" class="meta-sheet-perm__section">
                 <div class="meta-sheet-perm__section-header">
-                  <strong>Bulk apply to all views</strong>
+                  <strong>{{ p('view.bulkApply') }}</strong>
                 </div>
                 <div
                   v-for="entry in entries"
@@ -501,26 +501,26 @@
                       class="meta-sheet-perm__lifecycle"
                       data-lifecycle="inactive"
                     >
-                      Inactive user
+                      {{ p('subject.inactiveUser') }}
                     </span>
                     <span
                       v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
                       class="meta-sheet-perm__hint"
                     >
-                      Cleanup only
+                      {{ p('subject.cleanupOnly') }}
                     </span>
                   </div>
-                  <span class="meta-sheet-perm__subject" :data-subject-type="entry.subjectType">{{ subjectTypeBadgeLabel(entry.subjectType) }}</span>
+                  <span class="meta-sheet-perm__subject" :data-subject-type="entry.subjectType">{{ sheetSubjectText(entry.subjectType) }}</span>
                   <select
                     :value="viewTemplateDraftValue(entry.subjectType, entry.subjectId)"
                     class="meta-sheet-perm__select"
                     :disabled="busyViewTemplateKey === subjectKey(entry.subjectType, entry.subjectId) || subjectMutationBlocked(entry.subjectType, entry.isActive)"
                     @change="setViewTemplateDraft(entry.subjectType, entry.subjectId, $event)"
                   >
-                    <option value="none">None</option>
-                    <option value="read">Read</option>
-                    <option value="write">Write</option>
-                    <option value="admin">Admin</option>
+                    <option value="none">{{ p('view.state.none') }}</option>
+                    <option value="read">{{ p('access.read') }}</option>
+                    <option value="write">{{ p('access.write') }}</option>
+                    <option value="admin">{{ p('access.admin') }}</option>
                   </select>
                   <button
                     class="meta-sheet-perm__action meta-sheet-perm__action--primary"
@@ -528,7 +528,7 @@
                     :disabled="busyViewTemplateKey === subjectKey(entry.subjectType, entry.subjectId) || subjectMutationBlocked(entry.subjectType, entry.isActive)"
                     @click="applyViewTemplate(entry.subjectType, entry.subjectId)"
                   >
-                    Apply to all views
+                    {{ p('view.applyAll') }}
                   </button>
                   <template v-if="entry.subjectType === 'member-group'">
                     <select
@@ -538,7 +538,7 @@
                       :disabled="busyViewTemplateCopyKey === entry.subjectId || memberGroupTemplateSourceOptions(entry.subjectId).length === 0"
                       @change="setViewTemplateSource(entry.subjectId, $event)"
                     >
-                      <option value="">Copy from member group…</option>
+                      <option value="">{{ p('permission.copyFromMemberGroup') }}</option>
                       <option
                         v-for="option in memberGroupTemplateSourceOptions(entry.subjectId)"
                         :key="`vp-copy-${entry.subjectId}-${option.subjectId}`"
@@ -554,7 +554,7 @@
                       :disabled="busyViewTemplateCopyKey === entry.subjectId || viewTemplateSourceValue(entry.subjectId).length === 0"
                       @click="copyViewTemplateFromMemberGroup(entry.subjectId)"
                     >
-                      Copy ACL
+                      {{ p('action.copyAcl') }}
                     </button>
                   </template>
                 </div>
@@ -576,7 +576,7 @@
                       :disabled="busyViewOrphanBulkKey === view.id"
                       @click="clearViewOrphans(view.id)"
                     >
-                      Clear orphan overrides
+                      {{ p('permission.clearOrphanOverrides') }}
                     </button>
                   </div>
                 </div>
@@ -588,19 +588,19 @@
                 >
                   <div class="meta-sheet-perm__identity">
                     <strong>{{ entry.label }}</strong>
-                    <span>{{ subjectTypeBadgeLabel(entry.subjectType) }}</span>
+                    <span>{{ sheetSubjectText(entry.subjectType) }}</span>
                     <span
                       v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
                       class="meta-sheet-perm__lifecycle"
                       data-lifecycle="inactive"
                     >
-                      Inactive user
+                      {{ p('subject.inactiveUser') }}
                     </span>
                     <span
                       v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
                       class="meta-sheet-perm__hint"
                     >
-                      Cleanup only
+                      {{ p('subject.cleanupOnly') }}
                     </span>
                   </div>
                   <span
@@ -615,10 +615,10 @@
                     :disabled="busyViewPermKey === viewPermKey(view.id, entry.subjectType, entry.subjectId) || subjectMutationBlocked(entry.subjectType, entry.isActive)"
                     @change="setViewPermDraft(view.id, entry.subjectType, entry.subjectId, $event)"
                   >
-                    <option value="none">None</option>
-                    <option value="read">Read</option>
-                    <option value="write">Write</option>
-                    <option value="admin">Admin</option>
+                    <option value="none">{{ p('view.state.none') }}</option>
+                    <option value="read">{{ p('access.read') }}</option>
+                    <option value="write">{{ p('access.write') }}</option>
+                    <option value="admin">{{ p('access.admin') }}</option>
                   </select>
                   <button
                     class="meta-sheet-perm__action meta-sheet-perm__action--primary"
@@ -626,7 +626,7 @@
                     :disabled="busyViewPermKey === viewPermKey(view.id, entry.subjectType, entry.subjectId) || subjectMutationBlocked(entry.subjectType, entry.isActive)"
                     @click="applyViewPerm(view.id, entry.subjectType, entry.subjectId)"
                   >
-                    Save
+                    {{ m('action.save') }}
                   </button>
                 </div>
                 <div
@@ -637,13 +637,13 @@
                 >
                 <div class="meta-sheet-perm__identity">
                   <strong>{{ orphan.subjectLabel || orphan.subjectId }}</strong>
-                  <span>{{ orphan.subjectSubtitle || `Orphan ${subjectTypeBadgeLabel(orphan.subjectType)}` }}</span>
+                  <span>{{ orphan.subjectSubtitle || orphanSubjectLabel(orphan.subjectType) }}</span>
                   <span
                     v-if="subjectMutationBlocked(orphan.subjectType, orphan.isActive)"
                     class="meta-sheet-perm__lifecycle"
                     data-lifecycle="inactive"
                   >
-                    Inactive user
+                    {{ p('subject.inactiveUser') }}
                   </span>
                 </div>
                   <span
@@ -652,14 +652,14 @@
                   >
                     {{ viewPermDisplayLabel(viewPermDraftValue(view.id, orphan.subjectType, orphan.subjectId)) }}
                   </span>
-                  <span class="meta-sheet-perm__hint">No current sheet access</span>
+                  <span class="meta-sheet-perm__hint">{{ p('permission.noCurrentSheetAccess') }}</span>
                   <button
                     class="meta-sheet-perm__action meta-sheet-perm__action--danger"
                     type="button"
                     :disabled="busyViewPermKey === viewPermKey(view.id, orphan.subjectType, orphan.subjectId)"
                     @click="clearViewPerm(view.id, orphan.subjectType, orphan.subjectId)"
                   >
-                    Clear
+                    {{ m('action.clear') }}
                   </button>
                 </div>
               </div>
@@ -673,6 +673,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import type { MultitableApiClient } from '../api/client'
 import type {
   MetaField,
@@ -684,21 +685,28 @@ import type {
   MetaSheetPermissionEntry,
   MetaSheetPermissionSubjectType,
 } from '../types'
+import { managerLabel, type MetaManagerLabelKey } from '../utils/meta-manager-labels'
+import {
+  clearedSubjectOverrides,
+  fieldStateText,
+  fieldStatusApplied,
+  fieldStatusClearedAll,
+  fieldStatusClearedOrphans,
+  orphanSubjectText,
+  permissionLabel,
+  sheetAccessText,
+  subjectOverrideSummary,
+  subjectText,
+  viewPermissionText,
+  viewStatusApplied,
+  viewStatusClearedOrphans,
+  type MetaPermissionLabelKey,
+} from '../utils/meta-permission-labels'
 
-const ACCESS_LEVEL_OPTIONS: Array<{ value: MetaSheetPermissionAccessLevel; label: string }> = [
-  { value: 'read', label: 'Read' },
-  { value: 'write', label: 'Write' },
-  { value: 'write-own', label: 'Write own' },
-  { value: 'admin', label: 'Admin' },
-]
-const ROLE_ACCESS_LEVEL_OPTIONS = ACCESS_LEVEL_OPTIONS.filter((option) => option.value !== 'write-own')
+const ACCESS_LEVEL_VALUES: MetaSheetPermissionAccessLevel[] = ['read', 'write', 'write-own', 'admin']
+const ROLE_ACCESS_LEVEL_VALUES = ACCESS_LEVEL_VALUES.filter((value) => value !== 'write-own')
 
 type TabId = 'sheet' | 'fields' | 'views'
-const tabs: Array<{ id: TabId; label: string }> = [
-  { id: 'sheet', label: 'Sheet Access' },
-  { id: 'fields', label: 'Field Permissions' },
-  { id: 'views', label: 'View Permissions' },
-]
 
 const props = withDefaults(defineProps<{
   visible: boolean
@@ -723,6 +731,32 @@ const emit = defineEmits<{
 }>()
 
 const activeTab = ref<TabId>('sheet')
+const { isZh } = useLocale()
+const accessLevelOptions = computed(() =>
+  ACCESS_LEVEL_VALUES.map((value) => ({
+    value,
+    label: sheetAccessText(value, isZh.value),
+  })),
+)
+const roleAccessLevelOptions = computed(() =>
+  ROLE_ACCESS_LEVEL_VALUES.map((value) => ({
+    value,
+    label: sheetAccessText(value, isZh.value),
+  })),
+)
+const tabs = computed<Array<{ id: TabId; label: string }>>(() => [
+  { id: 'sheet', label: p('sheet.tab.sheet') },
+  { id: 'fields', label: p('sheet.tab.fields') },
+  { id: 'views', label: p('sheet.tab.views') },
+])
+
+function p(key: MetaPermissionLabelKey): string {
+  return permissionLabel(key, isZh.value)
+}
+
+function m(key: MetaManagerLabelKey): string {
+  return managerLabel(key, isZh.value)
+}
 
 const entries = ref<MetaSheetPermissionEntry[]>([])
 const candidates = ref<MetaSheetPermissionCandidate[]>([])
@@ -792,10 +826,7 @@ function fieldPermDraftValue(fieldId: string, subjectType: string, subjectId: st
 }
 
 function fieldPermDraftLabel(fieldId: string, subjectType: string, subjectId: string): string {
-  const val = fieldPermDraftValue(fieldId, subjectType, subjectId)
-  if (val === 'hidden') return 'Hidden'
-  if (val === 'readonly') return 'Read-only'
-  return 'Default'
+  return fieldStateText(fieldPermDraftValue(fieldId, subjectType, subjectId), isZh.value)
 }
 
 function fieldTemplateDraftValue(subjectType: string, subjectId: string): string {
@@ -845,11 +876,11 @@ async function applyFieldPerm(fieldId: string, subjectType: string, subjectId: s
       ? { remove: true }
       : fieldPermFromDraftValue(val)
     await props.client.updateFieldPermission(props.sheetId, fieldId, subjectType as MetaSheetPermissionSubjectType, subjectId, perm)
-    status.value = isDefault ? 'Field permission cleared' : 'Field permission updated'
+    status.value = isDefault ? p('field.status.cleared') : p('field.status.updated')
     emit('update-field-permission', fieldId, subjectType, subjectId, isDefault ? { visible: true, readOnly: false } : perm)
     emit('updated')
   } catch (cause: any) {
-    error.value = cause?.message ?? 'Failed to update field permission'
+    error.value = cause?.message ?? p('field.error.update')
   } finally {
     busyFieldPermKey.value = null
   }
@@ -861,11 +892,11 @@ async function clearFieldPerm(fieldId: string, subjectType: string, subjectId: s
   clearMessages()
   try {
     await props.client.updateFieldPermission(props.sheetId, fieldId, subjectType as MetaSheetPermissionSubjectType, subjectId, { remove: true })
-    status.value = 'Field permission cleared'
+    status.value = p('field.status.cleared')
     emit('update-field-permission', fieldId, subjectType, subjectId, { visible: true, readOnly: false })
     emit('updated')
   } catch (cause: any) {
-    error.value = cause?.message ?? 'Failed to clear field permission'
+    error.value = cause?.message ?? p('field.error.clear')
   } finally {
     busyFieldPermKey.value = null
   }
@@ -882,10 +913,10 @@ async function clearFieldOrphans(fieldId: string) {
         props.client.updateFieldPermission(props.sheetId, fieldId, entry.subjectType, entry.subjectId, { remove: true }),
       ),
     )
-    status.value = `Cleared ${orphans.length} orphan field override${orphans.length === 1 ? '' : 's'}`
+    status.value = fieldStatusClearedOrphans(orphans.length, isZh.value)
     emit('updated')
   } catch (cause: any) {
-    error.value = cause?.message ?? 'Failed to clear orphan field overrides'
+    error.value = cause?.message ?? p('field.error.clearOrphans')
   } finally {
     busyFieldOrphanBulkKey.value = null
   }
@@ -913,11 +944,11 @@ async function applyFieldTemplate(subjectType: string, subjectId: string) {
       ),
     )
     status.value = draft === 'default'
-      ? `Cleared field permission overrides on ${props.fields.length} fields`
-      : `Applied field permission to ${props.fields.length} fields`
+      ? fieldStatusClearedAll(props.fields.length, isZh.value)
+      : fieldStatusApplied(props.fields.length, isZh.value)
     emit('updated')
   } catch (cause: any) {
-    error.value = cause?.message ?? 'Failed to apply field permission template'
+    error.value = cause?.message ?? p('field.error.applyTemplate')
   } finally {
     busyFieldTemplateKey.value = null
   }
@@ -932,11 +963,11 @@ async function copyFieldTemplateFromMemberGroup(targetSubjectId: string) {
   try {
     const operationCount = await syncFieldTemplateBetweenMemberGroups(sourceSubjectId, targetSubjectId)
     status.value = operationCount > 0
-      ? 'Copied field ACL template from source member group'
-      : 'Field ACL template already matches source member group'
+      ? p('field.status.copiedTemplate')
+      : p('field.status.copyTemplateNoop')
     emit('updated')
   } catch (cause: any) {
-    error.value = cause?.message ?? 'Failed to copy field ACL template'
+    error.value = cause?.message ?? p('field.error.copyTemplate')
   } finally {
     busyFieldTemplateCopyKey.value = null
   }
@@ -968,10 +999,7 @@ function viewTemplateDraftValue(subjectType: string, subjectId: string): string 
 }
 
 function viewPermDisplayLabel(val: string): string {
-  if (val === 'read') return 'Read'
-  if (val === 'write') return 'Write'
-  if (val === 'admin') return 'Admin'
-  return 'None'
+  return viewPermissionText(val, isZh.value)
 }
 
 function setViewPermDraft(viewId: string, subjectType: string, subjectId: string, event: Event) {
@@ -1008,11 +1036,11 @@ async function applyViewPerm(viewId: string, subjectType: string, subjectId: str
       subjectId,
       permission,
     )
-    status.value = 'View permission updated'
+    status.value = p('view.status.updated')
     emit('update-view-permission', viewId, subjectType, subjectId, permission)
     emit('updated')
   } catch (cause: any) {
-    error.value = cause?.message ?? 'Failed to update view permission'
+    error.value = cause?.message ?? p('view.error.update')
   } finally {
     busyViewPermKey.value = null
   }
@@ -1024,11 +1052,11 @@ async function clearViewPerm(viewId: string, subjectType: string, subjectId: str
   clearMessages()
   try {
     await props.client.updateViewPermission(viewId, subjectType as MetaSheetPermissionSubjectType, subjectId, 'none')
-    status.value = 'View permission cleared'
+    status.value = p('view.status.cleared')
     emit('update-view-permission', viewId, subjectType, subjectId, 'none')
     emit('updated')
   } catch (cause: any) {
-    error.value = cause?.message ?? 'Failed to clear view permission'
+    error.value = cause?.message ?? p('view.error.clear')
   } finally {
     busyViewPermKey.value = null
   }
@@ -1045,10 +1073,10 @@ async function clearViewOrphans(viewId: string) {
         props.client.updateViewPermission(viewId, entry.subjectType, entry.subjectId, 'none'),
       ),
     )
-    status.value = `Cleared ${orphans.length} orphan view override${orphans.length === 1 ? '' : 's'}`
+    status.value = viewStatusClearedOrphans(orphans.length, isZh.value)
     emit('updated')
   } catch (cause: any) {
-    error.value = cause?.message ?? 'Failed to clear orphan view overrides'
+    error.value = cause?.message ?? p('view.error.clearOrphans')
   } finally {
     busyViewOrphanBulkKey.value = null
   }
@@ -1071,10 +1099,10 @@ async function applyViewTemplate(subjectType: string, subjectId: string) {
         ),
       ),
     )
-    status.value = `Applied view permission to ${props.views.length} views`
+    status.value = viewStatusApplied(props.views.length, isZh.value)
     emit('updated')
   } catch (cause: any) {
-    error.value = cause?.message ?? 'Failed to apply view permission template'
+    error.value = cause?.message ?? p('view.error.applyTemplate')
   } finally {
     busyViewTemplateKey.value = null
   }
@@ -1089,11 +1117,11 @@ async function copyViewTemplateFromMemberGroup(targetSubjectId: string) {
   try {
     const operationCount = await syncViewTemplateBetweenMemberGroups(sourceSubjectId, targetSubjectId)
     status.value = operationCount > 0
-      ? 'Copied view ACL template from source member group'
-      : 'View ACL template already matches source member group'
+      ? p('view.status.copiedTemplate')
+      : p('view.status.copyTemplateNoop')
     emit('updated')
   } catch (cause: any) {
-    error.value = cause?.message ?? 'Failed to copy view ACL template'
+    error.value = cause?.message ?? p('view.error.copyTemplate')
   } finally {
     busyViewTemplateCopyKey.value = null
   }
@@ -1141,11 +1169,11 @@ async function copySubjectAclFromMemberGroup(targetSubjectId: string) {
     ])
     const totalOperationCount = fieldOperationCount + viewOperationCount
     status.value = totalOperationCount > 0
-      ? 'Copied downstream field and view ACL from source member group'
-      : 'Downstream field and view ACL already matches source member group'
+      ? p('sheet.status.copiedDownstreamAcl')
+      : p('sheet.status.copyDownstreamNoop')
     emit('updated')
   } catch (cause: any) {
-    error.value = cause?.message ?? 'Failed to copy downstream member-group ACL'
+    error.value = cause?.message ?? p('sheet.error.copyDownstreamAcl')
   } finally {
     busySubjectAclCopyKey.value = null
   }
@@ -1212,28 +1240,27 @@ function hasSubjectOverrides(subjectType: MetaSheetPermissionSubjectType, subjec
 
 function subjectOverrideSummaryLabel(subjectType: MetaSheetPermissionSubjectType, subjectId: string) {
   const counts = subjectOverrideCountsFor(subjectType, subjectId)
-  const parts: string[] = []
-  if (counts.fieldCount > 0) parts.push(`${counts.fieldCount} field override${counts.fieldCount === 1 ? '' : 's'}`)
-  if (counts.viewCount > 0) parts.push(`${counts.viewCount} view override${counts.viewCount === 1 ? '' : 's'}`)
-  return parts.join(' · ')
+  return subjectOverrideSummary(counts.fieldCount, counts.viewCount, isZh.value)
 }
 
 function memberGroupTemplateSourceOptions(targetSubjectId: string) {
   return memberGroupEntries.value.filter((entry) => entry.subjectId !== targetSubjectId)
 }
 
-function accessLevelLabel(accessLevel: MetaSheetPermissionAccessLevel) {
-  return ACCESS_LEVEL_OPTIONS.find((option) => option.value === accessLevel)?.label ?? accessLevel
+function sheetAccessLabel(accessLevel: MetaSheetPermissionAccessLevel) {
+  return sheetAccessText(accessLevel, isZh.value)
 }
 
 function accessLevelOptionsFor(subjectType: MetaSheetPermissionSubjectType) {
-  return subjectType === 'user' ? ACCESS_LEVEL_OPTIONS : ROLE_ACCESS_LEVEL_OPTIONS
+  return subjectType === 'user' ? accessLevelOptions.value : roleAccessLevelOptions.value
 }
 
-function subjectTypeBadgeLabel(subjectType: MetaSheetPermissionSubjectType) {
-  if (subjectType === 'role') return 'Role'
-  if (subjectType === 'member-group') return 'Member group'
-  return 'Person'
+function sheetSubjectText(subjectType: MetaSheetPermissionSubjectType) {
+  return subjectText(subjectType, isZh.value, 'person')
+}
+
+function orphanSubjectLabel(subjectType: MetaSheetPermissionSubjectType) {
+  return orphanSubjectText(sheetSubjectText(subjectType), isZh.value)
 }
 
 function subjectIsInactive(subjectType: MetaSheetPermissionSubjectType, isActive: boolean | undefined) {
@@ -1283,7 +1310,7 @@ async function loadEntries() {
     entries.value = response.items
     syncEntryDrafts(response.items)
   } catch (cause: any) {
-    error.value = cause?.message ?? 'Failed to load sheet access'
+    error.value = cause?.message ?? p('sheet.error.loadAccess')
   } finally {
     loading.value = false
   }
@@ -1304,7 +1331,7 @@ async function loadCandidates(query?: string) {
     candidates.value = response.items
     syncCandidateDrafts(response.items)
   } catch (cause: any) {
-    error.value = cause?.message ?? 'Failed to load permission candidates'
+    error.value = cause?.message ?? p('sheet.error.loadCandidates')
   } finally {
     candidatesLoading.value = false
   }
@@ -1354,7 +1381,7 @@ async function updateSubjectAccess(
     status.value = successMessage
     emit('updated')
   } catch (cause: any) {
-    error.value = cause?.message ?? 'Failed to update sheet access'
+    error.value = cause?.message ?? p('sheet.error.updateAccess')
   } finally {
     busySubjectKey.value = null
   }
@@ -1363,16 +1390,16 @@ async function updateSubjectAccess(
 async function applyEntry(subjectType: MetaSheetPermissionSubjectType, subjectId: string) {
   const nextAccessLevel = entryDrafts.value[subjectKey(subjectType, subjectId)]
   if (!nextAccessLevel) return
-  await updateSubjectAccess(subjectType, subjectId, nextAccessLevel, 'Sheet access override updated')
+  await updateSubjectAccess(subjectType, subjectId, nextAccessLevel, p('sheet.status.updated'))
 }
 
 async function removeEntry(subjectType: MetaSheetPermissionSubjectType, subjectId: string) {
-  await updateSubjectAccess(subjectType, subjectId, 'none', 'Sheet access override removed')
+  await updateSubjectAccess(subjectType, subjectId, 'none', p('sheet.status.removed'))
 }
 
 async function grantCandidate(subjectType: MetaSheetPermissionSubjectType, subjectId: string) {
   const key = subjectKey(subjectType, subjectId)
-  await updateSubjectAccess(subjectType, subjectId, candidateDrafts.value[key] ?? 'read', 'Sheet access override saved')
+  await updateSubjectAccess(subjectType, subjectId, candidateDrafts.value[key] ?? 'read', p('sheet.status.saved'))
 }
 
 async function clearSubjectOverrides(subjectType: MetaSheetPermissionSubjectType, subjectId: string) {
@@ -1396,10 +1423,10 @@ async function clearSubjectOverrides(subjectType: MetaSheetPermissionSubjectType
         props.client.updateViewPermission(entry.viewId, subjectType, subjectId, 'none'),
       ),
     ])
-    status.value = `Cleared ${subjectOverrideSummaryLabel(subjectType, subjectId)}`
+    status.value = clearedSubjectOverrides(subjectOverrideSummaryLabel(subjectType, subjectId), isZh.value)
     emit('updated')
   } catch (cause: any) {
-    error.value = cause?.message ?? 'Failed to clear subject overrides'
+    error.value = cause?.message ?? p('sheet.error.clearSubjectOverrides')
   } finally {
     busySubjectKey.value = null
   }
@@ -1633,12 +1660,12 @@ onBeforeUnmount(() => {
   color: #334155;
 }
 
-.meta-sheet-perm__badge[data-access-level='Hidden'] {
+.meta-sheet-perm__badge[data-access-level='hidden'] {
   background: #fef2f2;
   color: #b91c1c;
 }
 
-.meta-sheet-perm__badge[data-access-level='Read-only'] {
+.meta-sheet-perm__badge[data-access-level='readonly'] {
   background: #fef3c7;
   color: #92400e;
 }

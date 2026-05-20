@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App as VueApp } from 'vue'
+import { useLocale } from '../src/composables/useLocale'
 import MetaSheetPermissionManager from '../src/multitable/components/MetaSheetPermissionManager.vue'
 
 let app: VueApp | null = null
@@ -47,9 +48,136 @@ afterEach(() => {
   container?.remove()
   app = null
   container = null
+  useLocale().setLocale('en')
 })
 
 describe('MetaSheetPermissionManager', () => {
+  it('preserves English sheet permission chrome as the default locale', async () => {
+    const client = {
+      listSheetPermissions: vi.fn().mockResolvedValue({ items: [] }),
+      listSheetPermissionCandidates: vi.fn().mockResolvedValue({ items: [] }),
+      updateSheetPermission: vi.fn().mockResolvedValue({}),
+      updateFieldPermission: vi.fn().mockResolvedValue({}),
+      updateViewPermission: vi.fn().mockResolvedValue({}),
+    }
+
+    mountManager({ client })
+    await flushUi()
+
+    const text = container!.textContent ?? ''
+    expect(text).toContain('Manage Access')
+    expect(text).toContain('Override sheet-level access for eligible people, member groups, or roles. Admin includes sharing and sheet deletion. Write-own remains user-only.')
+    expect(text).toContain('Sheet Access')
+    expect(text).toContain('Field Permissions')
+    expect(text).toContain('View Permissions')
+    expect(text).toContain('No sheet-specific access grants yet.')
+    expect(container!.querySelector<HTMLInputElement>('[data-sheet-permission-search]')?.getAttribute('placeholder')).toBe('Search people or roles')
+  })
+
+  it('localizes sheet, field, and view permission chrome in zh-CN while preserving raw ACL data', async () => {
+    useLocale().setLocale('zh-CN')
+    const client = {
+      listSheetPermissions: vi.fn().mockResolvedValue({
+        items: [
+          {
+            subjectType: 'user',
+            subjectId: 'user_1',
+            accessLevel: 'write',
+            permissions: ['spreadsheet.read', 'spreadsheet.write'],
+            label: 'Alex',
+            subtitle: 'alex@example.com',
+            isActive: true,
+          },
+        ],
+      }),
+      listSheetPermissionCandidates: vi.fn().mockResolvedValue({
+        items: [
+          { subjectType: 'member-group', subjectId: 'group_north', label: 'North Region', subtitle: '12 members', isActive: true, accessLevel: null },
+        ],
+      }),
+      updateSheetPermission: vi.fn().mockResolvedValue({}),
+      updateFieldPermission: vi.fn().mockResolvedValue({}),
+      updateViewPermission: vi.fn().mockResolvedValue({}),
+    }
+
+    mountManager({
+      client,
+      fields: [
+        { id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 0, options: [] },
+      ],
+      views: [
+        { id: 'view_grid', name: 'Grid View', type: 'grid', sheetId: 'sheet_orders' },
+      ],
+      fieldPermissionEntries: [
+        {
+          fieldId: 'fld_title',
+          subjectType: 'user',
+          subjectId: 'user_1',
+          subjectLabel: 'Alex',
+          subjectSubtitle: 'alex@example.com',
+          visible: true,
+          readOnly: true,
+          isActive: true,
+        },
+      ],
+      viewPermissionEntries: [
+        {
+          viewId: 'view_grid',
+          subjectType: 'user',
+          subjectId: 'user_1',
+          subjectLabel: 'Alex',
+          subjectSubtitle: 'alex@example.com',
+          permission: 'admin',
+          isActive: true,
+        },
+      ],
+    })
+    await flushUi()
+
+    let text = container!.textContent ?? ''
+    expect(text).toContain('管理访问权限')
+    expect(text).toContain('为可授权人员、成员组或角色覆盖表级访问权限')
+    expect(text).toContain('表访问权限')
+    expect(text).toContain('字段权限')
+    expect(text).toContain('视图权限')
+    expect(text).toContain('当前访问权限')
+    expect(text).toContain('写入')
+    expect(text).toContain('应用')
+    expect(text).toContain('Alex')
+    expect(text).toContain('alex@example.com')
+    expect(text).toContain('North Region')
+    expect(container!.querySelector<HTMLInputElement>('[data-sheet-permission-search]')?.getAttribute('placeholder')).toBe('搜索人员或角色')
+    expect(container!.querySelector('[data-sheet-permission-entry="user:user_1"] .meta-sheet-perm__badge')?.getAttribute('data-access-level')).toBe('write')
+    const sheetSelect = container!.querySelector('[data-sheet-permission-entry="user:user_1"] .meta-sheet-perm__select') as HTMLSelectElement
+    expect(Array.from(sheetSelect.options).map((option) => option.value)).toEqual(['read', 'write', 'write-own', 'admin'])
+
+    const tabs = Array.from(container!.querySelectorAll('[role="tab"]'))
+    ;(tabs.find((tab) => tab.textContent?.includes('字段权限')) as HTMLElement).click()
+    await flushUi()
+
+    text = container!.textContent ?? ''
+    expect(text).toContain('字段级权限')
+    expect(text).toContain('批量应用到所有字段')
+    expect(text).toContain('Title')
+    expect(text).toContain('string')
+    expect(text).toContain('只读')
+    expect(container!.querySelector('[data-field-permission-row="fld_title:user:user_1"] .meta-sheet-perm__badge')?.getAttribute('data-access-level')).toBe('readonly')
+    const fieldSelect = container!.querySelector('[data-field-permission-row="fld_title:user:user_1"] .meta-sheet-perm__select') as HTMLSelectElement
+    expect(Array.from(fieldSelect.options).map((option) => option.value)).toEqual(['default', 'hidden', 'readonly'])
+
+    ;(tabs.find((tab) => tab.textContent?.includes('视图权限')) as HTMLElement).click()
+    await flushUi()
+
+    text = container!.textContent ?? ''
+    expect(text).toContain('视图级权限')
+    expect(text).toContain('Grid View')
+    expect(text).toContain('grid')
+    expect(text).toContain('管理员')
+    expect(container!.querySelector('[data-view-permission-row="view_grid:user:user_1"] .meta-sheet-perm__badge')?.getAttribute('data-access-level')).toBe('admin')
+    const viewSelect = container!.querySelector('[data-view-permission-row="view_grid:user:user_1"] .meta-sheet-perm__select') as HTMLSelectElement
+    expect(Array.from(viewSelect.options).map((option) => option.value)).toEqual(['none', 'read', 'write', 'admin'])
+  })
+
   it('loads entries and filters active users out of candidate results', async () => {
     const client = {
       listSheetPermissions: vi.fn().mockResolvedValue({
