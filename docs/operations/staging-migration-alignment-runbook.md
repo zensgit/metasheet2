@@ -33,6 +33,26 @@ you need a machine-readable table/column/index existence matrix. Unqualified
 targets are not assumed to be in `public`; the output includes `match_count` and
 `matched_schemas` so operators can see ambiguity explicitly.
 
+After running `schema-probes.sql`, summarize the probe output offline:
+
+```bash
+psql "$REHEARSAL_DATABASE_URL" \
+  -X --set ON_ERROR_STOP=1 --csv \
+  -f output/staging-migration-alignment-report/<run>/schema-probes.sql \
+  > output/staging-migration-alignment-report/<run>/schema-probe-results.csv
+
+node scripts/ops/staging-migration-schema-probe-summary.mjs \
+  --input output/staging-migration-alignment-report/<run>/schema-probe-results.csv \
+  --format csv \
+  --out-dir output/staging-migration-alignment-report/<run>
+```
+
+Read `schema-probe-summary.md` before deciding which migration names can be
+synthetic marked as applied. A `schema_probe_targets_present` result means the
+emitted targets matched exactly once; it is still not a replay safety proof. A
+`manual_review_required` result means at least one target was missing or matched
+multiple schemas and must be investigated before any alignment write.
+
 Do **not** apply Option A or run full `migrate --latest` when the report says
 `do_not_run_full_migrate`. Use a cloned or backed-up rehearsal DB first.
 
