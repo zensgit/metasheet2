@@ -104,7 +104,7 @@ Extract the scope matching part of `matchHolidayOverrideFilters` into a shared h
 function matchScopeFilters(filters: ScopeFilters | null | undefined, context: ScopeContext): boolean
 ```
 
-Both `holidayPolicy` and `calendarPolicy` must call the shared helper. Day-index matching should also be centralized or have one shared predicate, so future filters do not drift between policy families.
+`matchScopeFilters(filters, context)` and day-index matching MUST share one predicate each. Both `holidayPolicy.*` and `calendarPolicy.*` resolvers MUST call those predicates directly. No duplicate scope or day-index implementations are allowed.
 
 ## 3. Holiday Sync Contract
 
@@ -136,6 +136,36 @@ Important counter semantics:
 - `totalIgnored`: fetched rows ignored because a conflicting `manual` base row already exists and must be protected.
 - `manual` conflicts must not be counted as applied.
 - Admin response, year-level `results[]`, and `holidaySync.lastRun` should expose `totalApplied`, `totalSkipped`, and `totalIgnored` once the runtime slice adds them.
+
+Implementation note: distinguishing `totalIgnored` from `totalSkipped` requires a pre-pass query over conflicting dates. `RETURNING` from the upsert is sufficient for `totalApplied`, but it cannot identify manual rows filtered by `WHERE attendance_holidays.origin = 'national'`.
+
+```sql
+SELECT holiday_date, origin
+FROM attendance_holidays
+WHERE org_id = $1
+  AND holiday_date = ANY($2::date[]);
+```
+
+Use that pre-pass to classify existing manual conflicts before the insert/upsert. Then derive:
+
+- `totalIgnored`: incoming rows whose date already has `origin = 'manual'`.
+- `totalSkipped`: incoming rows not applied because `overwrite = false` and the existing row is not ignored.
+- `totalApplied`: rows returned by the insert/upsert.
+
+Forward-compatible `holidaySync.lastRun` shape:
+
+```ts
+interface HolidaySyncLastRun {
+  ranAt?: string
+  success?: boolean
+  years?: number[]
+  totalFetched?: number
+  totalApplied?: number
+  totalSkipped?: number
+  totalIgnored?: number
+  error?: string | null
+}
+```
 
 ### 3.2 Required Sync Tests
 
@@ -236,6 +266,8 @@ interface EffectiveCalendarOverlay {
 }
 ```
 
+`base.source` is the holiday row `origin` when an `attendance_holidays` row exists; otherwise it is the profile source selected from rotation, shift assignment, or rule. `effective.policyId` is the matched `CalendarPolicyOverride.id`; it is absent when the effective result comes from the base layer.
+
 Overlay source mapping:
 
 | Overlay kind | Source | Current status |
@@ -250,7 +282,7 @@ Overlays are additive:
 
 - Do not merge, offset, or resolve conflicts between overlays in the backend.
 - Return all overlays for the day.
-- Sort deterministically by `workDate/date`, then `createdAt`, then `id`; where no `createdAt` exists, use stable source priority plus `id`.
+- Sort deterministically by `date`, then `createdAt`, then `id`; where no `createdAt` exists, use stable source priority plus `id`.
 - UI owns combined display such as "4h leave + 3h overtime".
 
 ## 5. HTTP API Contract
@@ -296,6 +328,9 @@ Validation:
 - `userId` mode requires access to the target user.
 - `groupId` mode requires attendance admin permission.
 - `orgOnly` mode requires attendance read/admin permission according to existing route conventions.
+- Writes to `settings.calendarPolicy.overrides[]` require `attendance:admin`, matching other attendance settings writes.
+
+Performance note: Step 3 resolves per-user-per-day calendar data for monthly UI ranges in real time. Batch use cases such as more than 500 users over monthly ranges should be treated as Phase 2 materialization/cache work, not as part of the read-only endpoint slice.
 
 ## 6. Regression Contract Tests
 
@@ -342,7 +377,7 @@ Required matrix:
 | 1 | RFC | docs | This docs-only PR | None |
 | 2 | `attendance_holidays.origin` column, sync `ON CONFLICT` protection, counters, and sync test matrix | runtime | Migration + plugin sync writer + integration tests | After RFC review |
 | 3 | `settings.calendarPolicy.overrides[]`, `matchScopeFilters`, `EffectiveCalendarResolver`, and read-only `/effective-calendar` API | runtime | Backend service/route/tests | After Step 2 because resolver reads `origin` |
-| 4 | Frontend consumers use effective calendar | frontend | Type expansion, calendar colors, layer-chain tooltip | Can start with Step 3 mock contract; merge after Step 3 lands |
+| 4 | Frontend consumers use effective calendar | frontend | Type expansion, calendar colors, layer-chain tooltip in multitable Calendar view (`apps/web/src/multitable/components/MetaCalendarView.vue`), attendance calendar (`apps/web/src/views/AttendanceView.vue`), and holiday admin calendar (`apps/web/src/views/attendance/AttendanceHolidayDataSection.vue`) | Can start with Step 3 mock contract; merge after Step 3 lands |
 | 5 | Calculation-chain cutover | runtime | `resolveWorkContext`/prefetch path uses resolver; `attendance_records.is_workday` remains materialized from resolver | Last, after read-only path proves stable |
 
 Step 5 is intentionally last. Payroll/import/auto-absence should keep current `resolveWorkContext` behavior until the read-only resolver has contract coverage and frontend exposure.
