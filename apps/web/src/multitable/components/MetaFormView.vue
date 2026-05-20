@@ -1,8 +1,8 @@
 <template>
   <div class="meta-form-view">
-    <div v-if="loading" class="meta-form-view__loading">Loading...</div>
+    <div v-if="loading" class="meta-form-view__loading">{{ l('form.loading') }}</div>
     <template v-else>
-      <div v-if="readOnly" class="meta-form-view__readonly-banner">This form is read-only</div>
+      <div v-if="readOnly" class="meta-form-view__readonly-banner">{{ l('form.readOnly') }}</div>
       <div v-if="successMessage" class="meta-form-view__success">{{ successMessage }}</div>
       <div v-if="errorMessage" class="meta-form-view__error">{{ errorMessage }}</div>
       <form class="meta-form-view__form" @submit.prevent="onSubmit">
@@ -18,7 +18,7 @@
               type="button"
               class="meta-form-view__comment-anchor"
               :class="formFieldAnchorClass(field.id)"
-              :aria-label="`Comments for ${field.name}`"
+              :aria-label="commentForField(field.name, isZh)"
               @click="emit('comment-field', field)"
             >
               <MetaCommentAffordance :state="formFieldAffordance(field.id)" />
@@ -57,7 +57,7 @@
             :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
             type="text"
             inputmode="text"
-            placeholder="Scan or enter barcode"
+            :placeholder="lc('cell.barcodePlaceholder')"
             :disabled="isFieldReadOnly(field.id)"
             :aria-required="field.required ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
@@ -71,7 +71,7 @@
             class="meta-form-view__input"
             :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
             type="text"
-            placeholder="Enter address"
+            :placeholder="lc('cell.locationPlaceholder')"
             :disabled="isFieldReadOnly(field.id)"
             :aria-required="field.required ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
@@ -94,7 +94,7 @@
           />
           <label v-else-if="field.type === 'boolean'" class="meta-form-view__check">
             <input type="checkbox" :disabled="isFieldReadOnly(field.id)" :checked="!!formData[field.id]" @change="formData[field.id] = ($event.target as HTMLInputElement).checked" />
-            {{ formData[field.id] ? 'Yes' : 'No' }}
+            {{ formData[field.id] ? lc('cell.yes') : lc('cell.no') }}
           </label>
           <input
             v-else-if="field.type === 'date'"
@@ -176,10 +176,10 @@
                 class="meta-form-view__attachment-clear"
                 :disabled="!!attachmentActivity[field.id]"
                 @click="onClearAttachments(field.id)"
-              >Clear all</button>
+              >{{ lc('cell.clearAll') }}</button>
             </div>
             <span v-if="attachmentActivity[field.id]" class="meta-form-view__uploading">
-              {{ attachmentActivity[field.id] === 'removing' ? 'Removing...' : attachmentActivity[field.id] === 'clearing' ? 'Clearing...' : 'Uploading...' }}
+              {{ attachmentActivityLabel(attachmentActivity[field.id] || 'uploading', isZh) }}
             </span>
             <MetaAttachmentList
               :attachments="attachmentItems(field.id)"
@@ -252,9 +252,9 @@
         </div>
         <div v-if="!readOnly" class="meta-form-view__actions">
           <button type="submit" class="meta-form-view__submit" :disabled="submitting || hasPendingAttachmentActions">
-            {{ submitting ? 'Saving...' : (record ? 'Save' : 'Create') }}
+            {{ submitting ? l('form.saving') : (record ? l('form.save') : l('form.create')) }}
           </button>
-          <button v-if="record" type="button" class="meta-form-view__reset" @click="resetForm">Reset</button>
+          <button v-if="record" type="button" class="meta-form-view__reset" @click="resetForm">{{ l('form.reset') }}</button>
         </div>
       </form>
     </template>
@@ -288,6 +288,19 @@ import {
   validateAttachmentSelection,
 } from '../utils/field-config'
 import { linkActionLabel } from '../utils/link-fields'
+import { useLocale } from '../../composables/useLocale'
+import {
+  recordLabel,
+  requiredField,
+  type MetaRecordLabelKey,
+} from '../utils/meta-record-labels'
+import {
+  metaCoreLabel,
+  attachmentActionHint as attachmentActionHintFn,
+  attachmentActivityLabel,
+  commentForField,
+  type MetaCoreLabelKey,
+} from '../utils/meta-core-labels'
 import {
   dateTimeInputValue,
   dateTimeValueFromLocalInput,
@@ -323,6 +336,10 @@ const emit = defineEmits<{
   (e: 'update:dirty', dirty: boolean): void
   (e: 'comment-field', field: MetaField): void
 }>()
+
+const { isZh } = useLocale()
+const l = (key: MetaRecordLabelKey) => recordLabel(key, isZh.value)
+const lc = (key: MetaCoreLabelKey) => metaCoreLabel(key, isZh.value)
 
 const formData = reactive<Record<string, unknown>>({})
 const validationErrors = ref<Record<string, string>>({})
@@ -402,7 +419,7 @@ function validate(): boolean {
   for (const f of editableFields.value) {
     const v = formData[f.id]
     if (f.required && isEmptyFormValue(v)) {
-      errs[f.id] = `${f.name} is required`
+      errs[f.id] = requiredField(f.name, isZh.value)
     }
   }
   validationErrors.value = errs
@@ -415,7 +432,7 @@ function onSubmit() {
 }
 
 function resetForm() {
-  if (hasUnsavedChanges.value && !confirm('Discard unsaved changes?')) return
+  if (hasUnsavedChanges.value && !confirm(l('form.discardConfirm'))) return
   syncFromRecord(props.record)
   validationErrors.value = {}
 }
@@ -423,7 +440,7 @@ function resetForm() {
 function linkButtonLabel(fieldId: string): string {
   const count = linkSummaryCount(fieldId)
   const field = props.fields.find((item) => item.id === fieldId) ?? null
-  return linkActionLabel(field, count)
+  return linkActionLabel(field, count, isZh.value)
 }
 
 function ratingMaxFor(field: MetaField): number {
@@ -496,11 +513,20 @@ function attachmentItems(fieldId: string): MetaAttachment[] {
 }
 
 function attachmentActionHint(fieldId: string): string {
+  // T3B1 (F-T3B-B): reuse the T3A2 meta-core-labels helper with mode='add'
+  // so this surface does not re-implement the ternary chain. Non-attachment
+  // fields fall back to the multi-file add copy (matches the old behavior of
+  // the inline string before the refactor).
   const field = props.fields.find((item) => item.id === fieldId)
-  if (!field || field.type !== 'attachment') return 'Add files'
-  const allowsMultiple = attachmentAllowsMultiple(field)
-  if (allowsMultiple) return 'Add files'
-  return attachmentList(fieldId).length ? 'Upload a new file to replace the current one' : 'Upload a file'
+  if (!field || field.type !== 'attachment') {
+    return attachmentActionHintFn(true, false, isZh.value, 'add')
+  }
+  return attachmentActionHintFn(
+    attachmentAllowsMultiple(field),
+    attachmentList(fieldId).length > 0,
+    isZh.value,
+    'add',
+  )
 }
 
 async function onFormFileSelect(fieldId: string, e: Event) {
@@ -540,7 +566,7 @@ async function onFormFileSelect(fieldId: string, e: Event) {
     }
     formData[fieldId] = replaceExisting ? newIds : [...existing, ...newIds]
   } catch (error: any) {
-    setAttachmentOperationError(fieldId, error?.message ?? 'Failed to upload attachment')
+    setAttachmentOperationError(fieldId, error?.message ?? lc('cell.uploadFailed'))
   } finally {
     setAttachmentActivity(fieldId)
     input.value = ''
@@ -557,7 +583,7 @@ async function onRemoveAttachment(fieldId: string, attachmentId: string) {
         fieldId,
       })
     } catch (error: any) {
-      setAttachmentOperationError(fieldId, error?.message ?? 'Failed to remove attachment')
+      setAttachmentOperationError(fieldId, error?.message ?? lc('cell.removeFailed'))
       setAttachmentActivity(fieldId)
       return
     }
@@ -582,7 +608,7 @@ async function onClearAttachments(fieldId: string) {
         forgetLocalAttachment(fieldId, attachmentId)
       }
     } catch (error: any) {
-      setAttachmentOperationError(fieldId, error?.message ?? 'Failed to clear attachments')
+      setAttachmentOperationError(fieldId, error?.message ?? lc('cell.clearFailed'))
       setAttachmentActivity(fieldId)
       return
     }

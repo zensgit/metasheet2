@@ -162,3 +162,42 @@ describe('meta-core-labels MetaCellEditor helpers (T3A2)', () => {
     expect(attachmentActivityLabel('clearing', true)).toBe('正在清空...')
   })
 })
+
+describe('meta-core-labels attachmentActionHint mode extension (T3B1)', () => {
+  it('default mode (no 4th arg) keeps T3A2 behavior exactly — backwards compatible', () => {
+    // multi-file
+    expect(attachmentActionHint(true, false, false)).toBe('Drop files or click to browse')
+    expect(attachmentActionHint(true, false, true)).toBe('拖拽文件或点击选择')
+    // single + existing
+    expect(attachmentActionHint(false, true, false)).toBe('Upload a new file to replace the current one')
+    expect(attachmentActionHint(false, true, true)).toBe('上传新文件以替换当前文件')
+    // single + empty
+    expect(attachmentActionHint(false, false, false)).toBe('Upload a file')
+    expect(attachmentActionHint(false, false, true)).toBe('上传文件')
+  })
+
+  it("explicit mode='drop' equals the legacy default (regression guard)", () => {
+    expect(attachmentActionHint(true, false, false, 'drop')).toBe('Drop files or click to browse')
+    expect(attachmentActionHint(true, false, true, 'drop')).toBe('拖拽文件或点击选择')
+    expect(attachmentActionHint(false, true, false, 'drop')).toBe('Upload a new file to replace the current one')
+    expect(attachmentActionHint(false, false, true, 'drop')).toBe('上传文件')
+  })
+
+  it("mode='add' changes only the multi-file copy to Add files / 添加文件", () => {
+    // multi-file → distinct add copy
+    expect(attachmentActionHint(true, false, false, 'add')).toBe('Add files')
+    expect(attachmentActionHint(true, false, true, 'add')).toBe('添加文件')
+    // multi-file + has existing still picks the multi-file branch (allowsMultiple guards)
+    expect(attachmentActionHint(true, true, false, 'add')).toBe('Add files')
+    expect(attachmentActionHint(true, true, true, 'add')).toBe('添加文件')
+  })
+
+  it("mode='add' does NOT affect single-file branches (mode only matters when allowsMultiple)", () => {
+    // single + existing
+    expect(attachmentActionHint(false, true, false, 'add')).toBe('Upload a new file to replace the current one')
+    expect(attachmentActionHint(false, true, true, 'add')).toBe('上传新文件以替换当前文件')
+    // single + empty
+    expect(attachmentActionHint(false, false, false, 'add')).toBe('Upload a file')
+    expect(attachmentActionHint(false, false, true, 'add')).toBe('上传文件')
+  })
+})

@@ -230,20 +230,35 @@ export function filterValuePlaceholder(type: string, isZh: boolean): string {
 
 // --- T3A2: MetaCellEditor attachment helpers ---
 
+// AttachmentActionMode (T3B1): selects the multi-file copy variant.
+//   - `drop`  → "Drop files or click to browse" (MetaCellEditor — drop target chrome)
+//   - `add`   → "Add files" (MetaRecordDrawer / MetaFormView — add-action chrome)
+// Single-file branches are identical across modes (the mode only matters
+// when allowsMultiple is true). Backwards compatible: legacy callers
+// without an explicit mode keep T3A2 behavior via the default.
+export type AttachmentActionMode = 'drop' | 'add'
+
 // attachmentActionHint: drop-target hint for the MetaCellEditor attachment
-// trigger. Three variants chosen by capability + existing-attachment state:
-//   - multi-file allowed → "Drop files or click to browse"
-//   - single-file + already has an attachment → "Upload a new file to replace the current one"
-//   - single-file + empty → "Upload a file"
+// trigger (mode='drop', T3A2 default) or the add-files trigger used by
+// MetaRecordDrawer / MetaFormView (mode='add', T3B1). Three variants chosen
+// by capability + existing-attachment state:
+//   multi-file allowed → mode='drop' "Drop files or click to browse" /
+//                        mode='add'  "Add files"
+//   single-file + already has an attachment → "Upload a new file to replace the current one"
+//   single-file + empty → "Upload a file"
 // `hasExisting` is a boolean — only >0-ness matters to copy, not the count.
 // User-confirmed zh choices (T3A2 AskUserQuestion, 2026-05-19): 拖拽文件或点击选择 /
-// 上传新文件以替换当前文件 / 上传文件.
+// 上传新文件以替换当前文件 / 上传文件. T3B1 add-mode zh: 添加文件.
 export function attachmentActionHint(
   allowsMultiple: boolean,
   hasExisting: boolean,
   isZh: boolean,
+  mode: AttachmentActionMode = 'drop',
 ): string {
-  if (allowsMultiple) return isZh ? '拖拽文件或点击选择' : 'Drop files or click to browse'
+  if (allowsMultiple) {
+    if (mode === 'add') return isZh ? '添加文件' : 'Add files'
+    return isZh ? '拖拽文件或点击选择' : 'Drop files or click to browse'
+  }
   if (hasExisting) return isZh ? '上传新文件以替换当前文件' : 'Upload a new file to replace the current one'
   return isZh ? '上传文件' : 'Upload a file'
 }
