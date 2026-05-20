@@ -185,6 +185,7 @@
           :rows="grid.rows.value" :fields="scopedAllFields" :loading="grid.loading.value"
           :view-config="workbench.activeView.value?.config"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
+          :calendar-holidays="calendarHolidays"
           :can-create="caps.canCreateRecord.value"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
@@ -192,6 +193,7 @@
           @open-comments="onOpenRecordComments"
           @open-field-comments="onOpenGridFieldComments"
           @update-view-config="onPersistActiveViewConfig"
+          @visible-range-change="onCalendarVisibleRangeChange"
         />
         <MetaTimelineView
           v-else-if="activeViewType === 'timeline'"
@@ -400,6 +402,8 @@ import { useRouter } from 'vue-router'
 import { AppRouteNames } from '../../router/types'
 import { useAuth } from '../../composables/useAuth'
 import { useLocale } from '../../composables/useLocale'
+import { apiFetch } from '../../utils/api'
+import type { CalendarHoliday, CalendarVisibleRange } from '../../composables/useCalendarDays'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import {
   workbenchLabel as wb,
@@ -558,6 +562,9 @@ const searchText = ref('')
 const templates = ref<MetaTemplate[]>([])
 const templateLibraryLoading = ref(false)
 const templateLibraryError = ref<string | null>(null)
+const calendarHolidays = ref<CalendarHoliday[]>([])
+const calendarHolidayRangeKey = ref<string | null>(null)
+let calendarHolidayLoadVersion = 0
 const installingTemplateId = ref<string | null>(null)
 const showShortcuts = ref(false)
 const showImportModal = ref(false)
@@ -2775,6 +2782,53 @@ function openCommentInbox() {
   void router.push({
     name: 'multitable-comment-inbox',
   })
+}
+
+function normalizeCalendarHoliday(item: unknown): CalendarHoliday | null {
+  const row = item && typeof item === 'object' ? item as Record<string, unknown> : null
+  if (!row) return null
+  const date = typeof row.date === 'string' ? row.date.trim() : ''
+  if (!date) return null
+  const id = typeof row.id === 'string' && row.id.trim() ? row.id.trim() : `holiday:${date}:${String(row.name ?? '')}`
+  const name = typeof row.name === 'string' ? row.name : null
+  const isWorkingDay = typeof row.isWorkingDay === 'boolean'
+    ? row.isWorkingDay
+    : typeof row.is_workday === 'boolean'
+      ? row.is_workday
+      : undefined
+  return {
+    id,
+    date,
+    name,
+    isWorkingDay,
+  }
+}
+
+async function loadCalendarHolidays(range: CalendarVisibleRange) {
+  const from = String(range.from || '').trim()
+  const to = String(range.to || '').trim()
+  if (!from || !to) return
+  const rangeKey = `${from}|${to}`
+  if (calendarHolidayRangeKey.value === rangeKey) return
+  calendarHolidayRangeKey.value = rangeKey
+  const loadVersion = ++calendarHolidayLoadVersion
+  try {
+    const query = new URLSearchParams({ from, to })
+    const response = await apiFetch(`/api/attendance/holidays?${query.toString()}`, {
+      suppressUnauthorizedRedirect: true,
+    })
+    const data = await response.json().catch(() => null)
+    if (!response.ok || data?.ok === false) throw new Error('Failed to load calendar holidays')
+    if (loadVersion !== calendarHolidayLoadVersion) return
+    const items = Array.isArray(data?.data?.items) ? data.data.items : []
+    calendarHolidays.value = items.map(normalizeCalendarHoliday).filter(Boolean) as CalendarHoliday[]
+  } catch {
+    if (loadVersion === calendarHolidayLoadVersion) calendarHolidays.value = []
+  }
+}
+
+function onCalendarVisibleRangeChange(range: CalendarVisibleRange) {
+  void loadCalendarHolidays(range)
 }
 
 watch(

@@ -51,7 +51,20 @@
             @click="canCreate && cell.inMonth && emit('create-record', buildCreateRecordData(cell.dateStr))"
             @keydown="onCellKeydown($event, cellIdx, monthCells)"
           >
-            <div class="meta-calendar__day-num">{{ cell.day }}</div>
+            <div class="meta-calendar__day-head">
+              <span class="meta-calendar__day-num">{{ cell.day }}</span>
+              <span v-if="cell.lunarLabel" class="meta-calendar__lunar">{{ cell.lunarLabel }}</span>
+            </div>
+            <div v-if="cell.holidays.length" class="meta-calendar__holidays">
+              <span
+                v-for="holiday in cell.holidays.slice(0, 2)"
+                :key="`${cell.dateStr}-${holiday.id}`"
+                class="meta-calendar__holiday"
+                :class="holiday.isWorkingDay ? 'meta-calendar__holiday--working' : 'meta-calendar__holiday--rest'"
+              >
+                {{ holiday.name || fallbackHolidayName(holiday) }}
+              </span>
+            </div>
             <div class="meta-calendar__events">
               <div
                 v-for="ev in cell.events"
@@ -119,7 +132,20 @@
             @click="canCreate && emit('create-record', buildCreateRecordData(cell.dateStr))"
             @keydown="onCellKeydown($event, cellIdx, weekCells)"
           >
-            <div class="meta-calendar__day-num">{{ cell.day }}</div>
+            <div class="meta-calendar__day-head">
+              <span class="meta-calendar__day-num">{{ cell.day }}</span>
+              <span v-if="cell.lunarLabel" class="meta-calendar__lunar">{{ cell.lunarLabel }}</span>
+            </div>
+            <div v-if="cell.holidays.length" class="meta-calendar__holidays">
+              <span
+                v-for="holiday in cell.holidays.slice(0, 2)"
+                :key="`${cell.dateStr}-${holiday.id}`"
+                class="meta-calendar__holiday"
+                :class="holiday.isWorkingDay ? 'meta-calendar__holiday--working' : 'meta-calendar__holiday--rest'"
+              >
+                {{ holiday.name || fallbackHolidayName(holiday) }}
+              </span>
+            </div>
             <div class="meta-calendar__events">
               <div
                 v-for="ev in cell.events"
@@ -172,6 +198,17 @@
         <div class="meta-calendar__day-view">
           <div class="meta-calendar__day-panel">
             <div class="meta-calendar__day-heading">{{ activeDayLabel }}</div>
+            <div v-if="activeDayCell.lunarLabel || activeDayCell.holidays.length" class="meta-calendar__day-calendar-meta">
+              <span v-if="activeDayCell.lunarLabel" class="meta-calendar__lunar">{{ activeDayCell.lunarLabel }}</span>
+              <span
+                v-for="holiday in activeDayCell.holidays"
+                :key="`${activeDayCell.dateStr}-${holiday.id}`"
+                class="meta-calendar__holiday"
+                :class="holiday.isWorkingDay ? 'meta-calendar__holiday--working' : 'meta-calendar__holiday--rest'"
+              >
+                {{ holiday.name || fallbackHolidayName(holiday) }}
+              </span>
+            </div>
             <div class="meta-calendar__day-meta">{{ currentDayEvents.length }} event{{ currentDayEvents.length === 1 ? '' : 's' }}</div>
             <button
               v-if="canCreate"
@@ -241,6 +278,14 @@ import { ref, computed, watch } from 'vue'
 import type { LinkedRecordSummary, MetaAttachment, MetaCalendarViewConfig, MetaField, MetaRecord, MultitableCommentPresenceSummary } from '../types'
 import { resolveCalendarViewConfig } from '../utils/view-config'
 import { formatFieldDisplay } from '../utils/field-display'
+import {
+  buildCalendarDay,
+  buildCalendarDays,
+  normalizeDateKey,
+  type CalendarDayCell as SharedCalendarDayCell,
+  type CalendarHoliday,
+  type CalendarVisibleRange,
+} from '../../composables/useCalendarDays'
 import MetaAttachmentList from './MetaAttachmentList.vue'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaCommentAffordance from './MetaCommentAffordance.vue'
@@ -262,6 +307,7 @@ const props = defineProps<{
   viewConfig?: Record<string, unknown> | null
   linkSummaries?: Record<string, Record<string, LinkedRecordSummary[]>>
   attachmentSummaries?: Record<string, Record<string, MetaAttachment[]>>
+  calendarHolidays?: CalendarHoliday[]
   commentPresence?: Record<string, MultitableCommentPresenceSummary | undefined>
 }>()
 
@@ -271,6 +317,7 @@ const emit = defineEmits<{
   (e: 'open-field-comments', payload: { recordId: string; fieldId: string }): void
   (e: 'create-record', data: Record<string, unknown>): void
   (e: 'update-view-config', input: { config: Record<string, unknown> }): void
+  (e: 'visible-range-change', range: CalendarVisibleRange): void
 }>()
 
 const dateFieldId = ref<string | null>(null)
@@ -387,12 +434,11 @@ const eventsByDate = computed(() => {
   return map
 })
 
-interface CalendarCell {
+interface CalendarCell extends SharedCalendarDayCell<CalendarHoliday> {
   key: string
   day: number
   dateStr: string
   inMonth: boolean
-  isToday: boolean
   events: CalendarEvent[]
   overflow: number
 }
@@ -412,14 +458,19 @@ function addDays(date: Date, days: number): Date {
 }
 
 function buildCell(date: Date, inMonth: boolean): CalendarCell {
-  const dateStr = fmt(date.getFullYear(), date.getMonth() + 1, date.getDate())
+  const calendarDay = buildCalendarDay(date, {
+    holidays: props.calendarHolidays ?? [],
+    isCurrentMonth: inMonth,
+    showLunarCalendar: true,
+  })
+  const dateStr = calendarDay.date
   const all = eventsByDate.value[dateStr] ?? []
   return {
+    ...calendarDay,
     key: dateStr,
-    day: date.getDate(),
+    day: calendarDay.dayNumber,
     dateStr,
     inMonth,
-    isToday: dateStr === todayStr.value,
     events: all.slice(0, MAX_EVENTS_PER_CELL),
     overflow: Math.max(0, all.length - MAX_EVENTS_PER_CELL),
   }
@@ -431,27 +482,18 @@ const todayStr = computed(() => {
 })
 
 const monthCells = computed<CalendarCell[]>(() => {
-  const cells: CalendarCell[] = []
   const first = new Date(viewDate.value.getFullYear(), viewDate.value.getMonth(), 1)
-  const startDay = (first.getDay() - calendarConfig.value.weekStartsOn + 7) % 7
-
-  const prevLast = new Date(viewDate.value.getFullYear(), viewDate.value.getMonth(), 0)
-  for (let i = startDay - 1; i >= 0; i--) {
-    const d = prevLast.getDate() - i
-    cells.push(buildCell(new Date(prevLast.getFullYear(), prevLast.getMonth(), d), false))
-  }
-
-  const daysInMonth = new Date(viewDate.value.getFullYear(), viewDate.value.getMonth() + 1, 0).getDate()
-  for (let d = 1; d <= daysInMonth; d++) {
-    cells.push(buildCell(new Date(viewDate.value.getFullYear(), viewDate.value.getMonth(), d), true))
-  }
-
-  const remaining = 42 - cells.length
-  for (let d = 1; d <= remaining; d++) {
-    cells.push(buildCell(new Date(viewDate.value.getFullYear(), viewDate.value.getMonth() + 1, d), false))
-  }
-
-  return cells
+  const start = startOfWeek(first)
+  return buildCalendarDays({
+    startDate: start,
+    days: 42,
+    currentMonth: first,
+    holidays: props.calendarHolidays ?? [],
+    showLunarCalendar: true,
+  }).map((day) => {
+    const date = parseDateForCell(day.date)
+    return buildCell(date, day.isCurrentMonth)
+  })
 })
 
 const weekCells = computed<CalendarCell[]>(() => {
@@ -460,6 +502,19 @@ const weekCells = computed<CalendarCell[]>(() => {
 })
 
 const currentDayEvents = computed(() => eventsByDate.value[activeDayStr.value] ?? [])
+const activeDayCell = computed(() => buildCell(parseDateForCell(activeDayStr.value), true))
+
+const visibleRange = computed<CalendarVisibleRange | null>(() => {
+  if (!dateField.value) return null
+  if (viewMode.value === 'month') return rangeFromCells(monthCells.value)
+  if (viewMode.value === 'week') return rangeFromCells(weekCells.value)
+  return { from: activeDayStr.value, to: activeDayStr.value }
+})
+const visibleRangeKey = computed(() => visibleRange.value ? `${visibleRange.value.from}|${visibleRange.value.to}` : '')
+
+watch(visibleRangeKey, () => {
+  if (visibleRange.value) emit('visible-range-change', visibleRange.value)
+}, { immediate: true })
 
 function rowCommentAffordance(recordId: string) {
   return resolveRecordCommentAffordance(props.commentPresence?.[recordId])
@@ -510,11 +565,24 @@ function fmt(y: number, m: number, d: number): string {
 }
 
 function normalizeDate(raw: string): string | null {
-  const m = raw.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/)
-  if (m) return fmt(Number(m[1]), Number(m[2]), Number(m[3]))
-  const d = new Date(raw)
-  if (!isNaN(d.getTime())) return fmt(d.getFullYear(), d.getMonth() + 1, d.getDate())
-  return null
+  return normalizeDateKey(raw)
+}
+
+function parseDateForCell(dateStr: string): Date {
+  const [year, month, day] = dateStr.split('-').map(Number)
+  return new Date(year, month - 1, day)
+}
+
+function rangeFromCells(cells: CalendarCell[]): CalendarVisibleRange | null {
+  if (!cells.length) return null
+  return {
+    from: cells[0]!.dateStr,
+    to: cells[cells.length - 1]!.dateStr,
+  }
+}
+
+function fallbackHolidayName(holiday: CalendarHoliday): string {
+  return holiday.isWorkingDay ? 'Working day' : 'Holiday'
 }
 
 function onPickDateField(e: Event) {
@@ -593,7 +661,12 @@ function cellAriaLabel(cell: CalendarCell): string {
   const d = new Date(cell.dateStr + 'T00:00:00')
   const dateLabel = d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
   const total = cell.events.length + cell.overflow
-  if (total > 0) return `${dateLabel}, ${total} event${total > 1 ? 's' : ''}`
+  const annotations = [
+    cell.lunarLabel,
+    ...cell.holidays.map((holiday) => holiday.name || fallbackHolidayName(holiday)),
+    total > 0 ? `${total} event${total > 1 ? 's' : ''}` : null,
+  ].filter(Boolean)
+  if (annotations.length) return `${dateLabel}, ${annotations.join(', ')}`
   return dateLabel
 }
 
@@ -651,7 +724,14 @@ function onCellKeydown(e: KeyboardEvent, cellIdx: number, cells: CalendarCell[])
 .meta-calendar__cell--today { background: #ecf5ff; }
 .meta-calendar__cell--today .meta-calendar__day-num { color: #409eff; font-weight: 700; }
 .meta-calendar__cell--week { min-height: 120px; }
+.meta-calendar__day-head { display: flex; align-items: baseline; justify-content: space-between; gap: 4px; margin-bottom: 2px; }
 .meta-calendar__day-num { font-size: 12px; color: #666; margin-bottom: 2px; }
+.meta-calendar__lunar { color: #8a5c2e; font-size: 10px; line-height: 1.25; white-space: nowrap; }
+.meta-calendar__holidays,
+.meta-calendar__day-calendar-meta { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-bottom: 3px; }
+.meta-calendar__holiday { display: inline-flex; align-items: center; max-width: 100%; padding: 1px 5px; border-radius: 999px; font-size: 10px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta-calendar__holiday--rest { background: #ffe8e8; color: #9a1a1a; }
+.meta-calendar__holiday--working { background: #e5f7ec; color: #15693a; }
 .meta-calendar__events { display: flex; flex-direction: column; gap: 2px; }
 .meta-calendar__event { padding: 2px 4px; background: #409eff; color: #fff; border-radius: 3px; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; display: flex; align-items: center; gap: 6px; }
 .meta-calendar__event:hover { background: #337ecc; }

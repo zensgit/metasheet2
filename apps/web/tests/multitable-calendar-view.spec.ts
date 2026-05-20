@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 import MetaCalendarView from '../src/multitable/components/MetaCalendarView.vue'
 
@@ -10,6 +10,10 @@ function isoDate(offsetDays = 0): string {
 }
 
 describe('MetaCalendarView', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
   it('renders persisted default view and emits config changes when switching modes', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
@@ -114,6 +118,59 @@ describe('MetaCalendarView', () => {
       fld_start: expectedDate,
       fld_end: expectedDate,
     })
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('renders shared lunar and holiday metadata in the multitable calendar grid', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-02-03T12:00:00Z'))
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const visibleRangeSpy = vi.fn()
+
+    const app = createApp({
+      render() {
+        return h(MetaCalendarView, {
+          rows: [
+            {
+              id: 'rec_1',
+              version: 1,
+              data: {
+                fld_title: 'Contract renewal',
+                fld_start: '2026-02-17',
+              },
+            },
+          ],
+          fields: [
+            { id: 'fld_title', name: 'Title', type: 'string' },
+            { id: 'fld_start', name: 'Start', type: 'date' },
+          ],
+          loading: false,
+          calendarHolidays: [
+            { id: 'holiday_spring', date: '2026-02-17', name: '春节', isWorkingDay: false },
+            { id: 'working_sat', date: '2026-02-21', name: '调休', isWorkingDay: true },
+          ],
+          viewConfig: {
+            dateFieldId: 'fld_start',
+            titleFieldId: 'fld_title',
+            defaultView: 'month',
+            weekStartsOn: 0,
+          },
+          onVisibleRangeChange: visibleRangeSpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    expect(container.textContent).toContain('春节')
+    expect(container.textContent).toContain('调休')
+    expect(container.querySelector('.meta-calendar__lunar')?.textContent?.trim()).toBeTruthy()
+    expect(visibleRangeSpy).toHaveBeenCalledWith({ from: '2026-02-01', to: '2026-03-14' })
 
     app.unmount()
     container.remove()

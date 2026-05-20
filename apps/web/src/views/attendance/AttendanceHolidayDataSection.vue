@@ -129,7 +129,16 @@
 <script setup lang="ts">
 import { computed, ref, watch, type Ref } from 'vue'
 import type { AttendanceHoliday } from './useAttendanceAdminScheduling'
-import { formatLunarDayLabel } from '../attendanceCalendarUtils'
+import {
+  buildCalendarDays,
+  firstDayOfMonth,
+  groupCalendarHolidaysByDate,
+  isSameMonth,
+  lastDayOfMonth,
+  parseDateOnly,
+  toDateInput,
+  type CalendarDayCell as SharedCalendarDayCell,
+} from '../../composables/useCalendarDays'
 
 type Translate = (en: string, zh: string) => string
 type MaybePromise<T> = T | Promise<T>
@@ -158,14 +167,7 @@ interface HolidayDataBindings {
   deleteHoliday: (id: string) => MaybePromise<void>
 }
 
-interface CalendarDayCell {
-  date: string
-  dayNumber: number
-  isCurrentMonth: boolean
-  isToday: boolean
-  holidays: AttendanceHoliday[]
-  lunarLabel?: string
-}
+type CalendarDayCell = SharedCalendarDayCell<AttendanceHoliday>
 
 const props = defineProps<{
   holiday: HolidayDataBindings
@@ -198,35 +200,6 @@ const weekdayLabels = computed(() => [
   tr('Sat', '周六'),
 ])
 
-function parseDateOnly(value: string | null | undefined): Date | null {
-  if (typeof value !== 'string') return null
-  const normalized = value.trim()
-  const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})$/)
-  if (!match) return null
-  const [, year, month, day] = match
-  const date = new Date(Number(year), Number(month) - 1, Number(day))
-  return Number.isNaN(date.getTime()) ? null : date
-}
-
-function toDateInput(date: Date): string {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-function firstDayOfMonth(date: Date): Date {
-  return new Date(date.getFullYear(), date.getMonth(), 1)
-}
-
-function lastDayOfMonth(date: Date): Date {
-  return new Date(date.getFullYear(), date.getMonth() + 1, 0)
-}
-
-function sameMonth(a: Date, b: Date): boolean {
-  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth()
-}
-
 function fallbackHolidayName(isWorkingDay: boolean): string {
   return isWorkingDay
     ? tr('Working day override', '调班工作日')
@@ -237,14 +210,7 @@ const today = new Date()
 const selectedDate = ref(holidayForm.date || toDateInput(today))
 const calendarMonth = ref(firstDayOfMonth(parseDateOnly(holidayForm.date) ?? today))
 
-const holidayMap = computed(() => {
-  const map = new Map<string, AttendanceHoliday[]>()
-  for (const holiday of holidays.value) {
-    if (!map.has(holiday.date)) map.set(holiday.date, [])
-    map.get(holiday.date)?.push(holiday)
-  }
-  return map
-})
+const holidayMap = computed(() => groupCalendarHolidaysByDate(holidays.value))
 
 const selectedDateHolidays = computed(() => holidayMap.value.get(selectedDate.value) ?? [])
 
@@ -256,23 +222,15 @@ const calendarLabel = computed(() => {
 
 const calendarDays = computed<CalendarDayCell[]>(() => {
   const start = firstDayOfMonth(calendarMonth.value)
-  const startOffset = start.getDay()
   const firstCell = new Date(start)
-  firstCell.setDate(start.getDate() - startOffset)
-  return Array.from({ length: 42 }, (_, index) => {
-    const date = new Date(firstCell)
-    date.setDate(firstCell.getDate() + index)
-    const key = toDateInput(date)
-    return {
-      date: key,
-      dayNumber: date.getDate(),
-      isCurrentMonth: sameMonth(date, calendarMonth.value),
-      isToday: key === toDateInput(today),
-      holidays: holidayMap.value.get(key) ?? [],
-      lunarLabel: formatLunarDayLabel(date, {
-        enabled: Boolean(props.showLunarCalendar),
-      }),
-    }
+  firstCell.setDate(start.getDate() - start.getDay())
+  return buildCalendarDays({
+    startDate: firstCell,
+    days: 42,
+    currentMonth: calendarMonth.value,
+    holidaysByDate: holidayMap.value,
+    showLunarCalendar: Boolean(props.showLunarCalendar),
+    today,
   })
 })
 
@@ -326,7 +284,7 @@ watch(
     const date = parseDateOnly(value)
     if (!date) return
     selectedDate.value = toDateInput(date)
-    if (!sameMonth(date, calendarMonth.value)) {
+    if (!isSameMonth(date, calendarMonth.value)) {
       await setCalendarMonth(date)
     }
   }
