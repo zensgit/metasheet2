@@ -108,6 +108,18 @@ Pending migrations (in load order):
     assert.equal(item.category, 'timestamp_sql')
     assert.equal(item.risk, 'high')
     assert.equal(item.hasCreateTableWithoutIfNotExists, true)
+    assert.ok(item.schemaTargets.createTables.includes('audit_logs'))
+    assert.ok(item.schemaTargets.addColumns.some((target) => (
+      target.table === 'audit_logs' && target.column === 'event_id'
+    )))
+    assert.equal(item.schemaTargets.addColumns.some((target) => (
+      target.table === 'audit_logs_2025_01' && target.column === 'id'
+    )), false)
+    assert.ok(report.schemaProbePlan.some((entry) => (
+      entry.migration === '20250926_create_audit_tables'
+      && entry.tablesToCheck.includes('audit_logs')
+      && entry.columnsToCheck.includes('audit_logs.event_id')
+    )))
   } finally {
     rmSync(tmp, { recursive: true, force: true })
   }
@@ -154,6 +166,41 @@ Pending migrations (in load order):
     assert.equal(item.category, 'modern_timestamp_migration')
     assert.notEqual(item.risk, 'high')
     assert.equal(item.hasDropStatement, false)
+    assert.deepEqual(item.schemaTargets.createTables, ['plugin_attendance_report_sync_jobs'])
+    assert.ok(item.schemaTargets.addColumns.some((target) => (
+      target.table === 'plugin_attendance_report_sync_jobs' && target.column === 'status'
+    )))
+    assert.ok(item.schemaTargets.indexes.some((target) => (
+      target.table === 'plugin_attendance_report_sync_jobs'
+      && target.index === 'uq_plugin_attendance_report_sync_jobs_idempotency'
+    )))
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+test('keeps SQL alter-column probes within the same statement', () => {
+  const tmp = makeTmp()
+  try {
+    const outDir = path.join(tmp, 'out')
+    const input = `Applied: 1
+Pending: 1
+
+Pending migrations (in load order):
+  - zzzz20260411120100_approval_templates_and_instance_extensions
+`
+
+    const result = run(['--out-dir', outDir], input)
+    assert.equal(result.status, 0, result.stderr)
+
+    const report = JSON.parse(readFileSync(path.join(outDir, 'report.json'), 'utf8'))
+    const item = report.items.find((it) => it.name === 'zzzz20260411120100_approval_templates_and_instance_extensions')
+    assert.ok(item.schemaTargets.addColumns.some((target) => (
+      target.table === 'approval_assignments' && target.column === 'node_key'
+    )))
+    assert.equal(item.schemaTargets.addColumns.some((target) => (
+      target.table === 'approval_records' && target.column === 'node_key'
+    )), false)
   } finally {
     rmSync(tmp, { recursive: true, force: true })
   }
