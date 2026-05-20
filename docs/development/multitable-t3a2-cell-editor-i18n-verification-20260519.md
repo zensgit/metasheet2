@@ -1,7 +1,7 @@
 # T3A2 — MetaCellEditor shallow chrome zh-CN i18n — Verification
 
 - **Date**: 2026-05-19
-- **Branch**: `frontend/multitable-t3a2-cell-editor-i18n-20260519` (rebased onto `origin/main` post #1685/#1686, ahead 3 / behind 0)
+- **Branch**: `frontend/multitable-t3a2-cell-editor-i18n-20260519` (rebased onto `origin/main` post #1685/#1686; no upstream drift at the time of verification)
 - **Dev plan**: anchored in `docs/development/multitable-t3a-core-table-i18n-development-20260519.md` §3.3 / §5.6 / §7.4 / §13 (T3A2 deferral path from the merged T3A1 packet — no new dev MD).
 - **Type**: implementation + verification.
 - **K3 PoC stage-1 lock**: complies — no `/api/*` contract, no migration, no integration-core, no plugin-integration; touches only `meta-core-labels.ts` (frontend label module) + `MetaCellEditor.vue` (frontend chrome) + tests.
@@ -85,14 +85,9 @@ $ git diff --check origin/main..HEAD
 
 ## 6. Git State
 
-```
-$ git log --oneline origin/main..HEAD
-0341dd272 docs(multitable): T3A2 verification report
-9615f6afa feat(multitable): localize MetaCellEditor cell chrome to zh-CN (T3A2)
-2f3de9e93 feat(multitable): extend core labels with cell editor helpers (T3A2)
-```
+The authoritative PR shape is the committed diff against `origin/main`; this packet intentionally avoids pinning an exact commit count because docs-only verification corrections can be appended before PR open and the PR will be squash-merged.
 
-Rebase note: branch was created from `origin/main @ cbcc6bf32`; during T3A2 implementation `origin/main` advanced by 3 commits (#1685 multitable drawer/workflow fix, #1686 attendance staging migration audit docs, `66d74119a` onprem wrapper fix). Rebased clean (no conflicts — those commits don't touch `MetaCellEditor.vue` / `meta-core-labels.ts` / the 2 specs); post-rebase ahead 3/behind 0; vue-tsc + 44 focused specs re-verified green on rebased state.
+Rebase note: branch was created from `origin/main @ cbcc6bf32`; during T3A2 implementation `origin/main` advanced by 3 commits (#1685 multitable drawer/workflow fix, #1686 attendance staging migration audit docs, `66d74119a` onprem wrapper fix). Rebased clean (no conflicts — those commits don't touch `MetaCellEditor.vue` / `meta-core-labels.ts` / the 2 specs); vue-tsc + 44 focused specs re-verified green on rebased state.
 
 ## 7. Worktree-Contention Mitigation
 
