@@ -2,7 +2,7 @@
   <div v-if="visible" class="meta-view-mgr__overlay" @click.self="requestClose">
     <div class="meta-view-mgr">
       <div class="meta-view-mgr__header">
-        <h4 class="meta-view-mgr__title">Manage Views</h4>
+        <h4 class="meta-view-mgr__title">{{ ml('view.title') }}</h4>
         <button class="meta-view-mgr__close" @click="requestClose">&times;</button>
       </div>
 
@@ -28,53 +28,53 @@
           </template>
           <template v-else>
             <span class="meta-view-mgr__name" :title="view.name">{{ view.name }}</span>
-            <span class="meta-view-mgr__type">{{ view.type }}</span>
-            <button class="meta-view-mgr__action" title="Configure" @click="openConfig(view)">&#x2699;</button>
-            <button class="meta-view-mgr__action" title="Conditional formatting" @click="openConditionalFormatting(view)">&#x1F3A8;</button>
-            <button class="meta-view-mgr__action" title="Rename" @click="startRename(view)">&#x270E;</button>
+            <span class="meta-view-mgr__type">{{ viewTypeLabel(view.type, isZh) }}</span>
+            <button class="meta-view-mgr__action" :title="ml('action.configure')" @click="openConfig(view)">&#x2699;</button>
+            <button class="meta-view-mgr__action" :title="ml('action.conditionalFormatting')" @click="openConditionalFormatting(view)">&#x1F3A8;</button>
+            <button class="meta-view-mgr__action" :title="ml('action.rename')" @click="startRename(view)">&#x270E;</button>
             <button
               class="meta-view-mgr__action meta-view-mgr__action--danger"
-              title="Delete"
+              :title="ml('action.delete')"
               :disabled="views.length <= 1"
               @click="onDeleteView(view)"
             >&#x1F5D1;</button>
           </template>
         </div>
 
-        <div v-if="!views.length" class="meta-view-mgr__empty">No views defined</div>
+        <div v-if="!views.length" class="meta-view-mgr__empty">{{ ml('view.empty') }}</div>
       </div>
 
       <div v-if="configTarget" class="meta-view-mgr__config">
         <div class="meta-view-mgr__config-header">
-          <strong>Configure {{ configTarget.name }}</strong>
-          <span>{{ configTarget.type }}</span>
+          <strong>{{ configureView(configTarget.name, isZh) }}</strong>
+          <span>{{ viewTypeLabel(configTarget.type, isZh) }}</span>
         </div>
         <div v-if="viewConfigOutdated" class="meta-view-mgr__warning">
           <span>{{ viewConfigWarningText }}</span>
-          <button class="meta-view-mgr__btn-inline" @click="reloadLatestConfig">Reload latest</button>
+          <button class="meta-view-mgr__btn-inline" @click="reloadLatestConfig">{{ ml('action.reloadLatest') }}</button>
         </div>
         <div v-else-if="viewConfigLiveRefreshText" class="meta-view-mgr__refresh">
           <span>{{ viewConfigLiveRefreshText }}</span>
-          <button class="meta-view-mgr__btn-inline" @click="dismissLiveRefreshNotice">Dismiss</button>
+          <button class="meta-view-mgr__btn-inline" @click="dismissLiveRefreshNotice">{{ ml('action.dismiss') }}</button>
         </div>
 
         <template v-if="configTarget.type === 'gallery'">
           <label class="meta-view-mgr__field">
-            <span>Title field</span>
+            <span>{{ ml('view.titleField') }}</span>
             <select v-model="galleryDraft.titleFieldId" class="meta-view-mgr__select">
-              <option value="">(auto)</option>
+              <option value="">{{ autoLabel(isZh) }}</option>
               <option v-for="field in stringFields" :key="field.id" :value="field.id">{{ field.name }}</option>
             </select>
           </label>
           <label class="meta-view-mgr__field">
-            <span>Cover field</span>
+            <span>{{ ml('view.coverField') }}</span>
             <select v-model="galleryDraft.coverFieldId" class="meta-view-mgr__select">
-              <option value="">None</option>
+              <option value="">{{ groupNoneLabel(isZh) }}</option>
               <option v-for="field in attachmentFields" :key="field.id" :value="field.id">{{ field.name }}</option>
             </select>
           </label>
           <div class="meta-view-mgr__field">
-            <span>Card fields</span>
+            <span>{{ ml('view.cardFields') }}</span>
             <div class="meta-view-mgr__checks">
               <label v-for="field in configTargetFields" :key="field.id" class="meta-view-mgr__check">
                 <input
@@ -88,15 +88,15 @@
           </div>
           <div class="meta-view-mgr__grid">
             <label class="meta-view-mgr__field">
-              <span>Columns</span>
+              <span>{{ ml('view.columns') }}</span>
               <input v-model.number="galleryDraft.columns" class="meta-view-mgr__input" type="number" min="1" max="4" />
             </label>
             <label class="meta-view-mgr__field">
-              <span>Card size</span>
+              <span>{{ ml('view.cardSize') }}</span>
               <select v-model="galleryDraft.cardSize" class="meta-view-mgr__select">
-                <option value="small">small</option>
-                <option value="medium">medium</option>
-                <option value="large">large</option>
+                <option value="small">{{ sizeLabel('small', isZh) }}</option>
+                <option value="medium">{{ sizeLabel('medium', isZh) }}</option>
+                <option value="large">{{ sizeLabel('large', isZh) }}</option>
               </select>
             </label>
           </div>
@@ -105,33 +105,33 @@
         <template v-else-if="configTarget.type === 'calendar'">
           <div class="meta-view-mgr__grid">
             <label class="meta-view-mgr__field">
-              <span>Date field</span>
+              <span>{{ ml('view.dateField') }}</span>
               <select v-model="calendarDraft.dateFieldId" class="meta-view-mgr__select">
-                <option value="">(auto)</option>
+                <option value="">{{ autoLabel(isZh) }}</option>
                 <option v-for="field in dateLikeFields" :key="field.id" :value="field.id">{{ field.name }}</option>
               </select>
             </label>
             <label class="meta-view-mgr__field">
-              <span>End date field</span>
+              <span>{{ ml('view.endDateField') }}</span>
               <select v-model="calendarDraft.endDateFieldId" class="meta-view-mgr__select">
-                <option value="">None</option>
+                <option value="">{{ groupNoneLabel(isZh) }}</option>
                 <option v-for="field in dateLikeFields" :key="field.id" :value="field.id">{{ field.name }}</option>
               </select>
             </label>
           </div>
           <div class="meta-view-mgr__grid">
             <label class="meta-view-mgr__field">
-              <span>Title field</span>
+              <span>{{ ml('view.titleField') }}</span>
               <select v-model="calendarDraft.titleFieldId" class="meta-view-mgr__select">
-                <option value="">(auto)</option>
+                <option value="">{{ autoLabel(isZh) }}</option>
                 <option v-for="field in configTargetFields" :key="field.id" :value="field.id">{{ field.name }}</option>
               </select>
             </label>
             <label class="meta-view-mgr__field">
-              <span>Week starts on</span>
+              <span>{{ ml('view.weekStartsOn') }}</span>
               <select v-model.number="calendarDraft.weekStartsOn" class="meta-view-mgr__select">
-                <option :value="0">Sunday</option>
-                <option :value="1">Monday</option>
+                <option :value="0">{{ weekdayLabel(0, isZh) }}</option>
+                <option :value="1">{{ weekdayLabel(1, isZh) }}</option>
               </select>
             </label>
           </div>
@@ -140,34 +140,34 @@
         <template v-else-if="configTarget.type === 'timeline'">
           <div class="meta-view-mgr__grid">
             <label class="meta-view-mgr__field">
-              <span>Start field</span>
+              <span>{{ ml('view.startField') }}</span>
               <select v-model="timelineDraft.startFieldId" class="meta-view-mgr__select">
-                <option value="">(auto)</option>
+                <option value="">{{ autoLabel(isZh) }}</option>
                 <option v-for="field in dateFields" :key="field.id" :value="field.id">{{ field.name }}</option>
               </select>
             </label>
             <label class="meta-view-mgr__field">
-              <span>End field</span>
+              <span>{{ ml('view.endField') }}</span>
               <select v-model="timelineDraft.endFieldId" class="meta-view-mgr__select">
-                <option value="">(auto)</option>
+                <option value="">{{ autoLabel(isZh) }}</option>
                 <option v-for="field in dateFields" :key="field.id" :value="field.id">{{ field.name }}</option>
               </select>
             </label>
           </div>
           <div class="meta-view-mgr__grid">
             <label class="meta-view-mgr__field">
-              <span>Label field</span>
+              <span>{{ ml('view.labelField') }}</span>
               <select v-model="timelineDraft.labelFieldId" class="meta-view-mgr__select">
-                <option value="">(auto)</option>
+                <option value="">{{ autoLabel(isZh) }}</option>
                 <option v-for="field in configTargetFields" :key="field.id" :value="field.id">{{ field.name }}</option>
               </select>
             </label>
             <label class="meta-view-mgr__field">
-              <span>Zoom</span>
+              <span>{{ ml('view.zoom') }}</span>
               <select v-model="timelineDraft.zoom" class="meta-view-mgr__select">
-                <option value="day">day</option>
-                <option value="week">week</option>
-                <option value="month">month</option>
+                <option value="day">{{ zoomLabel('day', isZh) }}</option>
+                <option value="week">{{ zoomLabel('week', isZh) }}</option>
+                <option value="month">{{ zoomLabel('month', isZh) }}</option>
               </select>
             </label>
           </div>
@@ -176,59 +176,59 @@
         <template v-else-if="configTarget.type === 'gantt'">
           <div class="meta-view-mgr__grid">
             <label class="meta-view-mgr__field">
-              <span>Start field</span>
+              <span>{{ ml('view.startField') }}</span>
               <select v-model="ganttDraft.startFieldId" class="meta-view-mgr__select">
-                <option value="">(auto)</option>
+                <option value="">{{ autoLabel(isZh) }}</option>
                 <option v-for="field in dateFields" :key="field.id" :value="field.id">{{ field.name }}</option>
               </select>
             </label>
             <label class="meta-view-mgr__field">
-              <span>End field</span>
+              <span>{{ ml('view.endField') }}</span>
               <select v-model="ganttDraft.endFieldId" class="meta-view-mgr__select">
-                <option value="">(auto)</option>
+                <option value="">{{ autoLabel(isZh) }}</option>
                 <option v-for="field in dateFields" :key="field.id" :value="field.id">{{ field.name }}</option>
               </select>
             </label>
           </div>
           <div class="meta-view-mgr__grid">
             <label class="meta-view-mgr__field">
-              <span>Title field</span>
+              <span>{{ ml('view.titleField') }}</span>
               <select v-model="ganttDraft.titleFieldId" class="meta-view-mgr__select">
-                <option value="">(auto)</option>
+                <option value="">{{ autoLabel(isZh) }}</option>
                 <option v-for="field in configTargetFields" :key="field.id" :value="field.id">{{ field.name }}</option>
               </select>
             </label>
             <label class="meta-view-mgr__field">
-              <span>Progress field</span>
+              <span>{{ ml('view.progressField') }}</span>
               <select v-model="ganttDraft.progressFieldId" class="meta-view-mgr__select">
-                <option value="">None</option>
+                <option value="">{{ groupNoneLabel(isZh) }}</option>
                 <option v-for="field in numericFields" :key="field.id" :value="field.id">{{ field.name }}</option>
               </select>
             </label>
           </div>
           <div class="meta-view-mgr__grid">
             <label class="meta-view-mgr__field">
-              <span>Gantt group field</span>
+              <span>{{ ml('view.ganttGroupField') }}</span>
               <select v-model="ganttDraft.groupFieldId" class="meta-view-mgr__select">
-                <option value="">None</option>
+                <option value="">{{ groupNoneLabel(isZh) }}</option>
                 <option v-for="field in groupableFields" :key="field.id" :value="field.id">{{ field.name }}</option>
               </select>
             </label>
             <label class="meta-view-mgr__field">
-              <span>Dependency field</span>
+              <span>{{ ml('view.dependencyField') }}</span>
               <select v-model="ganttDraft.dependencyFieldId" class="meta-view-mgr__select">
-                <option value="">None</option>
+                <option value="">{{ groupNoneLabel(isZh) }}</option>
                 <option v-for="field in dependencyFields" :key="field.id" :value="field.id">{{ field.name }}</option>
               </select>
             </label>
           </div>
           <div class="meta-view-mgr__grid">
             <label class="meta-view-mgr__field">
-              <span>Zoom</span>
+              <span>{{ ml('view.zoom') }}</span>
               <select v-model="ganttDraft.zoom" class="meta-view-mgr__select">
-                <option value="day">day</option>
-                <option value="week">week</option>
-                <option value="month">month</option>
+                <option value="day">{{ zoomLabel('day', isZh) }}</option>
+                <option value="week">{{ zoomLabel('week', isZh) }}</option>
+                <option value="month">{{ zoomLabel('month', isZh) }}</option>
               </select>
             </label>
           </div>
@@ -236,14 +236,14 @@
 
         <template v-else-if="configTarget.type === 'kanban'">
           <label class="meta-view-mgr__field">
-            <span>Group field</span>
+            <span>{{ ml('view.groupField') }}</span>
             <select v-model="kanbanDraft.groupFieldId" class="meta-view-mgr__select">
-              <option value="">(none)</option>
+              <option value="">{{ groupNoneLabel(isZh) }}</option>
               <option v-for="field in selectFields" :key="field.id" :value="field.id">{{ field.name }}</option>
             </select>
           </label>
           <div class="meta-view-mgr__field">
-            <span>Card fields</span>
+            <span>{{ ml('view.cardFields') }}</span>
             <div class="meta-view-mgr__checks">
               <label v-for="field in configTargetFields" :key="field.id" class="meta-view-mgr__check">
                 <input
@@ -260,55 +260,55 @@
         <template v-else-if="configTarget.type === 'hierarchy'">
           <div class="meta-view-mgr__grid">
             <label class="meta-view-mgr__field">
-              <span>Parent field</span>
+              <span>{{ ml('view.parentField') }}</span>
               <select v-model="hierarchyDraft.parentFieldId" class="meta-view-mgr__select">
-                <option value="">(auto link field)</option>
+                <option value="">{{ autoLinkFieldLabel(isZh) }}</option>
                 <option v-for="field in linkFields" :key="field.id" :value="field.id">{{ field.name }}</option>
               </select>
             </label>
             <label class="meta-view-mgr__field">
-              <span>Title field</span>
+              <span>{{ ml('view.titleField') }}</span>
               <select v-model="hierarchyDraft.titleFieldId" class="meta-view-mgr__select">
-                <option value="">(auto)</option>
+                <option value="">{{ autoLabel(isZh) }}</option>
                 <option v-for="field in configTargetFields" :key="field.id" :value="field.id">{{ field.name }}</option>
               </select>
             </label>
           </div>
           <div class="meta-view-mgr__grid">
             <label class="meta-view-mgr__field">
-              <span>Default expand depth</span>
+              <span>{{ ml('view.defaultExpandDepth') }}</span>
               <input v-model.number="hierarchyDraft.defaultExpandDepth" class="meta-view-mgr__input" type="number" min="0" max="8" />
             </label>
             <label class="meta-view-mgr__field">
-              <span>Orphan records</span>
+              <span>{{ ml('view.orphanRecords') }}</span>
               <select v-model="hierarchyDraft.orphanMode" class="meta-view-mgr__select">
-                <option value="root">show at root</option>
-                <option value="hidden">hide</option>
+                <option value="root">{{ orphanModeLabel('root', isZh) }}</option>
+                <option value="hidden">{{ orphanModeLabel('hidden', isZh) }}</option>
               </select>
             </label>
           </div>
         </template>
 
         <div v-else class="meta-view-mgr__config-note">
-          No additional configuration is required for this view type.
+          {{ ml('view.noAdditionalConfig') }}
         </div>
 
         <div class="meta-view-mgr__common">
           <div class="meta-view-mgr__common-header">
-            <strong>Filter, sort, group</strong>
-            <span>Shared by grid and visual views</span>
+            <strong>{{ ml('view.filterSortGroup') }}</strong>
+            <span>{{ ml('view.sharedByViews') }}</span>
           </div>
 
           <div class="meta-view-mgr__field">
             <div class="meta-view-mgr__subheader">
-              <span>Filters</span>
+              <span>{{ ml('view.filters') }}</span>
               <select
                 v-if="filterDraft.conditions.length > 1"
                 v-model="filterDraft.conjunction"
                 class="meta-view-mgr__select meta-view-mgr__select--compact"
               >
-                <option value="and">all conditions</option>
-                <option value="or">any condition</option>
+                <option value="and">{{ ml('view.allConditions') }}</option>
+                <option value="or">{{ ml('view.anyCondition') }}</option>
               </select>
             </div>
             <div v-if="filterDraft.conditions.length" class="meta-view-mgr__rules">
@@ -329,7 +329,7 @@
                   class="meta-view-mgr__select"
                   @change="updateFilterOperator(idx, ($event.target as HTMLSelectElement).value)"
                 >
-                  <option v-for="operator in operatorsForField(rule.fieldId)" :key="operator.value" :value="operator.value">{{ operator.label }}</option>
+                  <option v-for="operator in operatorsForField(rule.fieldId)" :key="operator.value" :value="operator.value">{{ filterOperatorLabel(operator.value, operator.label, isZh) }}</option>
                 </select>
                 <input
                   v-if="!isUnaryFilterOperator(rule.operator)"
@@ -338,16 +338,16 @@
                   :value="rule.value ?? ''"
                   @change="updateFilterValue(idx, ($event.target as HTMLInputElement).value)"
                 />
-                <span v-else class="meta-view-mgr__rule-empty">no value</span>
+                <span v-else class="meta-view-mgr__rule-empty">{{ ml('view.noValue') }}</span>
                 <button class="meta-view-mgr__action meta-view-mgr__action--danger" @click="removeFilterRule(idx)">&times;</button>
               </div>
             </div>
-            <button v-if="configTargetFields.length" class="meta-view-mgr__btn-inline" @click="addFilterRule">+ Add filter</button>
+            <button v-if="configTargetFields.length" class="meta-view-mgr__btn-inline" @click="addFilterRule">{{ ml('view.addFilter') }}</button>
           </div>
 
           <div class="meta-view-mgr__field">
             <div class="meta-view-mgr__subheader">
-              <span>Sorts</span>
+              <span>{{ ml('view.sorts') }}</span>
             </div>
             <div v-if="sortDraft.rules.length" class="meta-view-mgr__rules">
               <div
@@ -367,27 +367,27 @@
                   class="meta-view-mgr__select"
                   @change="updateSortDirection(idx, ($event.target as HTMLSelectElement).value as 'asc' | 'desc')"
                 >
-                  <option value="asc">A to Z</option>
-                  <option value="desc">Z to A</option>
+                  <option value="asc">{{ ml('view.sortAsc') }}</option>
+                  <option value="desc">{{ ml('view.sortDesc') }}</option>
                 </select>
                 <button class="meta-view-mgr__action meta-view-mgr__action--danger" @click="removeSortRule(idx)">&times;</button>
               </div>
             </div>
-            <button v-if="configTargetFields.length" class="meta-view-mgr__btn-inline" @click="addSortRule">+ Add sort</button>
+            <button v-if="configTargetFields.length" class="meta-view-mgr__btn-inline" @click="addSortRule">{{ ml('view.addSort') }}</button>
           </div>
 
           <label v-if="configTarget.type !== 'kanban' && configTarget.type !== 'gantt' && configTarget.type !== 'hierarchy'" class="meta-view-mgr__field">
-            <span>Group field</span>
+            <span>{{ ml('view.groupField') }}</span>
             <select v-model="groupDraft.fieldId" class="meta-view-mgr__select">
-              <option value="">None</option>
+              <option value="">{{ groupNoneLabel(isZh) }}</option>
               <option v-for="field in groupableFields" :key="field.id" :value="field.id">{{ field.name }}</option>
             </select>
           </label>
         </div>
 
         <div class="meta-view-mgr__config-actions">
-          <button class="meta-view-mgr__btn-cancel" @click="closeConfig">Cancel</button>
-          <button class="meta-view-mgr__btn-add" :disabled="Boolean(viewConfigBlockingReason)" @click="saveConfig">Save view settings</button>
+          <button class="meta-view-mgr__btn-cancel" @click="closeConfig">{{ ml('action.cancel') }}</button>
+          <button class="meta-view-mgr__btn-add" :disabled="Boolean(viewConfigBlockingReason)" @click="saveConfig">{{ ml('view.saveSettings') }}</button>
         </div>
       </div>
 
@@ -396,21 +396,21 @@
           <input
             v-model="newViewName"
             class="meta-view-mgr__input"
-            placeholder="View name"
+            :placeholder="ml('view.namePlaceholder')"
             @keydown.enter="onAddView"
           />
           <select v-model="newViewType" class="meta-view-mgr__select">
-            <option v-for="t in VIEW_TYPES" :key="t" :value="t">{{ t }}</option>
+            <option v-for="t in VIEW_TYPES" :key="t" :value="t">{{ viewTypeLabel(t, isZh) }}</option>
           </select>
-          <button class="meta-view-mgr__btn-add" :disabled="!newViewName.trim()" @click="onAddView">+ Add</button>
+          <button class="meta-view-mgr__btn-add" :disabled="!newViewName.trim()" @click="onAddView">{{ ml('view.addButton') }}</button>
         </div>
       </div>
 
       <div v-if="deleteTarget" class="meta-view-mgr__confirm">
-        <p>Delete view <strong>{{ deleteTarget.name }}</strong>? This cannot be undone.</p>
+        <p>{{ deleteViewConfirm(deleteTarget.name, isZh) }}</p>
         <div class="meta-view-mgr__confirm-actions">
-          <button class="meta-view-mgr__btn-cancel" @click="deleteTargetId = null">Cancel</button>
-          <button class="meta-view-mgr__btn-delete" @click="confirmDelete">Delete</button>
+          <button class="meta-view-mgr__btn-cancel" @click="deleteTargetId = null">{{ ml('action.cancel') }}</button>
+          <button class="meta-view-mgr__btn-delete" @click="confirmDelete">{{ ml('action.delete') }}</button>
         </div>
       </div>
     </div>
@@ -427,6 +427,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import type {
   ConditionalFormattingRule,
   MetaCalendarViewConfig,
@@ -453,6 +454,20 @@ import {
   resolveKanbanViewConfig,
   resolveTimelineViewConfig,
 } from '../utils/view-config'
+import {
+  autoLabel,
+  autoLinkFieldLabel,
+  configureView,
+  deleteViewConfirm,
+  filterOperatorLabel,
+  groupNoneLabel,
+  managerLabel,
+  orphanModeLabel,
+  sizeLabel,
+  viewTypeLabel,
+  weekdayLabel,
+  zoomLabel,
+} from '../utils/meta-manager-labels'
 import ConditionalFormattingDialog from './ConditionalFormattingDialog.vue'
 
 const VIEW_TYPES = ['grid', 'form', 'kanban', 'gallery', 'calendar', 'timeline', 'gantt', 'hierarchy'] as const
@@ -488,6 +503,9 @@ const emit = defineEmits<{
   (e: 'delete-view', viewId: string): void
   (e: 'update:dirty', dirty: boolean): void
 }>()
+
+const { isZh } = useLocale()
+const ml = (key: Parameters<typeof managerLabel>[0]) => managerLabel(key, isZh.value)
 
 const newViewName = ref('')
 const newViewType = ref<string>('grid')
@@ -583,94 +601,94 @@ const viewConfigBlockingReason = computed(() => {
 
   if (target.type === 'gallery') {
     if (galleryDraft.titleFieldId && !validStringFieldIds.value.has(galleryDraft.titleFieldId)) {
-      return 'A selected title field is no longer a text-like field. Reload latest before saving.'
+      return ml('view.error.galleryTitleInvalid')
     }
     if (galleryDraft.coverFieldId && !validAttachmentFieldIds.value.has(galleryDraft.coverFieldId)) {
-      return 'A selected cover field is no longer an attachment field. Reload latest before saving.'
+      return ml('view.error.galleryCoverInvalid')
     }
     if (galleryDraft.fieldIds.some((fieldId) => !validFieldIds.value.has(fieldId))) {
-      return 'One or more selected card fields disappeared in the background. Reload latest before saving.'
+      return ml('view.error.cardFieldsMissing')
     }
   }
 
   if (target.type === 'calendar') {
     if (calendarDraft.dateFieldId && !validDateLikeFieldIds.value.has(calendarDraft.dateFieldId)) {
-      return 'The selected date field is no longer date-like. Reload latest before saving.'
+      return ml('view.error.dateInvalid')
     }
     if (calendarDraft.endDateFieldId && !validDateLikeFieldIds.value.has(calendarDraft.endDateFieldId)) {
-      return 'The selected end date field is no longer date-like. Reload latest before saving.'
+      return ml('view.error.endDateInvalid')
     }
     if (calendarDraft.titleFieldId && !validFieldIds.value.has(calendarDraft.titleFieldId)) {
-      return 'The selected title field disappeared in the background. Reload latest before saving.'
+      return ml('view.error.titleMissing')
     }
   }
 
   if (target.type === 'timeline') {
     if (timelineDraft.startFieldId && !validDateFieldIds.value.has(timelineDraft.startFieldId)) {
-      return 'The selected start field is no longer a date field. Reload latest before saving.'
+      return ml('view.error.startInvalid')
     }
     if (timelineDraft.endFieldId && !validDateFieldIds.value.has(timelineDraft.endFieldId)) {
-      return 'The selected end field is no longer a date field. Reload latest before saving.'
+      return ml('view.error.endInvalid')
     }
     if (timelineDraft.labelFieldId && !validFieldIds.value.has(timelineDraft.labelFieldId)) {
-      return 'The selected label field disappeared in the background. Reload latest before saving.'
+      return ml('view.error.labelMissing')
     }
   }
 
   if (target.type === 'gantt') {
     if (ganttDraft.startFieldId && !validDateFieldIds.value.has(ganttDraft.startFieldId)) {
-      return 'The selected start field is no longer a date field. Reload latest before saving.'
+      return ml('view.error.startInvalid')
     }
     if (ganttDraft.endFieldId && !validDateFieldIds.value.has(ganttDraft.endFieldId)) {
-      return 'The selected end field is no longer a date field. Reload latest before saving.'
+      return ml('view.error.endInvalid')
     }
     if (ganttDraft.titleFieldId && !validFieldIds.value.has(ganttDraft.titleFieldId)) {
-      return 'The selected title field disappeared in the background. Reload latest before saving.'
+      return ml('view.error.titleMissing')
     }
     if (ganttDraft.progressFieldId && !numericFields.value.some((field) => field.id === ganttDraft.progressFieldId)) {
-      return 'The selected progress field is no longer numeric. Reload latest before saving.'
+      return ml('view.error.progressInvalid')
     }
     if (ganttDraft.groupFieldId && !validGroupableFieldIds.value.has(ganttDraft.groupFieldId)) {
-      return 'The selected Gantt group field is no longer groupable. Reload latest before saving.'
+      return ml('view.error.ganttGroupInvalid')
     }
     if (ganttDraft.dependencyFieldId && !validDependencyFieldIds.value.has(ganttDraft.dependencyFieldId)) {
-      return 'The selected dependency field is no longer supported. Reload latest before saving.'
+      return ml('view.error.dependencyInvalid')
     }
   }
 
   if (target.type === 'kanban') {
     if (kanbanDraft.groupFieldId && !validSelectFieldIds.value.has(kanbanDraft.groupFieldId)) {
-      return 'The selected group field is no longer a select field. Reload latest before saving.'
+      return ml('view.error.kanbanGroupInvalid')
     }
     if (kanbanDraft.cardFieldIds.some((fieldId) => !validFieldIds.value.has(fieldId))) {
-      return 'One or more selected card fields disappeared in the background. Reload latest before saving.'
+      return ml('view.error.cardFieldsMissing')
     }
   }
 
   if (target.type === 'hierarchy') {
     if (hierarchyDraft.parentFieldId && !validLinkFieldIds.value.has(hierarchyDraft.parentFieldId)) {
-      return 'The selected parent field is no longer a link field. Reload latest before saving.'
+      return ml('view.error.parentInvalid')
     }
     if (hierarchyDraft.titleFieldId && !validFieldIds.value.has(hierarchyDraft.titleFieldId)) {
-      return 'The selected title field disappeared in the background. Reload latest before saving.'
+      return ml('view.error.titleMissing')
     }
   }
 
   if (filterDraft.conditions.some((condition) => condition.fieldId && !validFieldIds.value.has(condition.fieldId))) {
-    return 'One or more selected filter fields disappeared in the background. Reload latest before saving.'
+    return ml('view.error.filterMissing')
   }
   if (sortDraft.rules.some((rule) => rule.fieldId && !validFieldIds.value.has(rule.fieldId))) {
-    return 'One or more selected sort fields disappeared in the background. Reload latest before saving.'
+    return ml('view.error.sortMissing')
   }
   if (target.type !== 'kanban' && target.type !== 'gantt' && target.type !== 'hierarchy' && groupDraft.fieldId && !validGroupableFieldIds.value.has(groupDraft.fieldId)) {
-    return 'The selected group field is no longer groupable. Reload latest before saving.'
+    return ml('view.error.groupInvalid')
   }
 
   return ''
 })
 
 const viewConfigWarningText = computed(() => {
-  return viewConfigBlockingReason.value || 'This view changed in the background. Save keeps your draft, or reload the latest settings.'
+  return viewConfigBlockingReason.value || ml('view.changedWarning')
 })
 
 function resetConfigDrafts() {
@@ -1196,7 +1214,7 @@ const managerDirty = computed(() => props.visible && hasPendingDrafts.value)
 
 function confirmDiscardViewManagerChanges() {
   if (!hasPendingDrafts.value) return true
-  return window.confirm('Discard unsaved view manager changes?')
+  return window.confirm(ml('view.discardManagerConfirm'))
 }
 
 function reloadLatestConfig() {
@@ -1205,7 +1223,7 @@ function reloadLatestConfig() {
 
 function openConditionalFormatting(view: MetaView) {
   if (conditionalFormattingTargetId.value && conditionalFormattingTargetId.value !== view.id) {
-    if (conditionalFormattingDirty.value && !window.confirm('Discard unsaved formatting rules?')) return
+    if (conditionalFormattingDirty.value && !window.confirm(ml('view.discardFormattingConfirm'))) return
   }
   conditionalFormattingTargetId.value = view.id
 }
@@ -1244,7 +1262,7 @@ watch(
           viewConfigLiveRefreshText.value = ''
         } else {
           hydrateExistingViewConfig(configTarget.value, {
-            liveRefreshText: 'Latest view metadata loaded from the sheet context.',
+            liveRefreshText: ml('view.latestMetadataLoaded'),
           })
         }
       }
@@ -1265,7 +1283,7 @@ watch(
       viewConfigLiveRefreshText.value = ''
     } else {
       hydrateExistingViewConfig(configTarget.value, {
-        liveRefreshText: 'Latest field metadata loaded from the sheet context.',
+        liveRefreshText: ml('view.latestFieldMetadataLoaded'),
       })
     }
   },
