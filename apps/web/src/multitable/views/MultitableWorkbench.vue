@@ -403,7 +403,14 @@ import { AppRouteNames } from '../../router/types'
 import { useAuth } from '../../composables/useAuth'
 import { useLocale } from '../../composables/useLocale'
 import { apiFetch } from '../../utils/api'
-import type { CalendarHoliday, CalendarVisibleRange } from '../../composables/useCalendarDays'
+import type { CalendarVisibleRange } from '../../composables/useCalendarDays'
+import {
+  EffectiveCalendarFetchError,
+  effectiveCalendarItemToChip,
+  fetchEffectiveCalendar,
+  isCalendarEffectiveItemNoteworthy,
+  type CalendarEffectiveChip,
+} from '../../services/attendance/effectiveCalendar'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import {
   workbenchLabel as wb,
@@ -563,9 +570,15 @@ const searchText = ref('')
 const templates = ref<MetaTemplate[]>([])
 const templateLibraryLoading = ref(false)
 const templateLibraryError = ref<string | null>(null)
-const calendarHolidays = ref<CalendarHoliday[]>([])
-const calendarHolidayRangeKey = ref<string | null>(null)
+const calendarHolidays = ref<CalendarEffectiveChip[]>([])
+// Composite cache key `${from}|${to}|${userId}` — when userId arrives later
+// (auth resolving after MetaCalendarView's first visible-range emit) the new
+// key forces a refetch instead of skipping on stale (range-only) match.
+let calendarEffectiveCacheKey: string | null = null
 let calendarHolidayLoadVersion = 0
+// Last range emitted by MetaCalendarView — replayed once currentUserId
+// resolves so the user does not see an empty calendar for the gap window.
+const lastCalendarVisibleRange = ref<CalendarVisibleRange | null>(null)
 const installingTemplateId = ref<string | null>(null)
 const showShortcuts = ref(false)
 const showImportModal = ref(false)
@@ -2785,52 +2798,59 @@ function openCommentInbox() {
   })
 }
 
-function normalizeCalendarHoliday(item: unknown): CalendarHoliday | null {
-  const row = item && typeof item === 'object' ? item as Record<string, unknown> : null
-  if (!row) return null
-  const date = typeof row.date === 'string' ? row.date.trim() : ''
-  if (!date) return null
-  const id = typeof row.id === 'string' && row.id.trim() ? row.id.trim() : `holiday:${date}:${String(row.name ?? '')}`
-  const name = typeof row.name === 'string' ? row.name : null
-  const isWorkingDay = typeof row.isWorkingDay === 'boolean'
-    ? row.isWorkingDay
-    : typeof row.is_workday === 'boolean'
-      ? row.is_workday
-      : undefined
-  return {
-    id,
-    date,
-    name,
-    isWorkingDay,
-  }
-}
-
 async function loadCalendarHolidays(range: CalendarVisibleRange) {
   const from = String(range.from || '').trim()
   const to = String(range.to || '').trim()
   if (!from || !to) return
-  const rangeKey = `${from}|${to}`
-  if (calendarHolidayRangeKey.value === rangeKey) return
-  calendarHolidayRangeKey.value = rangeKey
+  // Record the latest emitted range BEFORE the auth-readiness gate so the
+  // currentUserId watcher can replay it (Step 4 Codex constraint #3: visible
+  // range can fire before currentUserId resolves; we must not silently skip).
+  lastCalendarVisibleRange.value = range
+  const userId = currentUserId.value
+  if (!userId) return
+  const cacheKey = `${from}|${to}|${userId}`
+  if (calendarEffectiveCacheKey === cacheKey) return
+  calendarEffectiveCacheKey = cacheKey
   const loadVersion = ++calendarHolidayLoadVersion
   try {
-    const query = new URLSearchParams({ from, to })
-    const response = await apiFetch(`/api/attendance/holidays?${query.toString()}`, {
+    const result = await fetchEffectiveCalendar({
+      from,
+      to,
+      userId,
       suppressUnauthorizedRedirect: true,
     })
-    const data = await response.json().catch(() => null)
-    if (!response.ok || data?.ok === false) throw new Error('Failed to load calendar holidays')
     if (loadVersion !== calendarHolidayLoadVersion) return
-    const items = Array.isArray(data?.data?.items) ? data.data.items : []
-    calendarHolidays.value = items.map(normalizeCalendarHoliday).filter(Boolean) as CalendarHoliday[]
-  } catch {
-    if (loadVersion === calendarHolidayLoadVersion) calendarHolidays.value = []
+    const items = Array.isArray(result?.items) ? result.items : []
+    calendarHolidays.value = items
+      .filter(isCalendarEffectiveItemNoteworthy)
+      .map(effectiveCalendarItemToChip)
+  } catch (error) {
+    // Failure (network, 401/403 suppressed, server) must not block calendar
+    // rendering — clear chips but leave the cell grid intact. Bust the cache
+    // key so a later auth/retry can succeed.
+    if (loadVersion === calendarHolidayLoadVersion) {
+      calendarHolidays.value = []
+      calendarEffectiveCacheKey = null
+    }
+    if (error instanceof EffectiveCalendarFetchError) {
+      // Non-fatal; surface to console for debugging, no user-facing toast.
+      console.debug('[MultitableWorkbench] effective-calendar load failed', error.status, error.message)
+    }
   }
 }
 
 function onCalendarVisibleRangeChange(range: CalendarVisibleRange) {
   void loadCalendarHolidays(range)
 }
+
+// When currentUserId resolves AFTER MetaCalendarView has already emitted its
+// first visible-range (the typical race on mount), replay the cached range so
+// the calendar chips populate without waiting for the next user-driven nav.
+watch(currentUserId, (next) => {
+  if (next && lastCalendarVisibleRange.value) {
+    void loadCalendarHolidays(lastCalendarVisibleRange.value)
+  }
+})
 
 watch(
   [activeViewType, () => workbench.activeViewId.value, selectedRecordId],

@@ -60,7 +60,12 @@
                 v-for="holiday in cell.holidays.slice(0, 2)"
                 :key="`${cell.dateStr}-${holiday.id}`"
                 class="meta-calendar__holiday"
-                :class="holiday.isWorkingDay ? 'meta-calendar__holiday--working' : 'meta-calendar__holiday--rest'"
+                :class="[
+                  holiday.isWorkingDay ? 'meta-calendar__holiday--working' : 'meta-calendar__holiday--rest',
+                  hasOverrideMarker(holiday) ? 'meta-calendar__holiday--overridden' : null,
+                  holiday.overlays && holiday.overlays.length ? 'meta-calendar__holiday--with-overlay' : null,
+                ]"
+                :title="buildHolidayTooltip(holiday)"
               >
                 {{ holiday.name || fallbackHolidayName(holiday) }}
               </span>
@@ -141,7 +146,12 @@
                 v-for="holiday in cell.holidays.slice(0, 2)"
                 :key="`${cell.dateStr}-${holiday.id}`"
                 class="meta-calendar__holiday"
-                :class="holiday.isWorkingDay ? 'meta-calendar__holiday--working' : 'meta-calendar__holiday--rest'"
+                :class="[
+                  holiday.isWorkingDay ? 'meta-calendar__holiday--working' : 'meta-calendar__holiday--rest',
+                  hasOverrideMarker(holiday) ? 'meta-calendar__holiday--overridden' : null,
+                  holiday.overlays && holiday.overlays.length ? 'meta-calendar__holiday--with-overlay' : null,
+                ]"
+                :title="buildHolidayTooltip(holiday)"
               >
                 {{ holiday.name || fallbackHolidayName(holiday) }}
               </span>
@@ -204,7 +214,12 @@
                 v-for="holiday in activeDayCell.holidays"
                 :key="`${activeDayCell.dateStr}-${holiday.id}`"
                 class="meta-calendar__holiday"
-                :class="holiday.isWorkingDay ? 'meta-calendar__holiday--working' : 'meta-calendar__holiday--rest'"
+                :class="[
+                  holiday.isWorkingDay ? 'meta-calendar__holiday--working' : 'meta-calendar__holiday--rest',
+                  hasOverrideMarker(holiday) ? 'meta-calendar__holiday--overridden' : null,
+                  holiday.overlays && holiday.overlays.length ? 'meta-calendar__holiday--with-overlay' : null,
+                ]"
+                :title="buildHolidayTooltip(holiday)"
               >
                 {{ holiday.name || fallbackHolidayName(holiday) }}
               </span>
@@ -286,6 +301,11 @@ import {
   type CalendarHoliday,
   type CalendarVisibleRange,
 } from '../../composables/useCalendarDays'
+import type {
+  CalendarEffectiveChip,
+  CalendarEffectiveLayer,
+  CalendarEffectiveOverlay,
+} from '../../services/attendance/effectiveCalendar'
 import MetaAttachmentList from './MetaAttachmentList.vue'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaCommentAffordance from './MetaCommentAffordance.vue'
@@ -309,7 +329,12 @@ const props = defineProps<{
   viewConfig?: Record<string, unknown> | null
   linkSummaries?: Record<string, Record<string, LinkedRecordSummary[]>>
   attachmentSummaries?: Record<string, Record<string, MetaAttachment[]>>
-  calendarHolidays?: CalendarHoliday[]
+  // CalendarEffectiveChip is a widened CalendarHoliday: legacy id/date/name/
+  // isWorkingDay still drives the chip text and working/rest class, while
+  // base/effective/layers/overlays (when present) feed tooltip + override
+  // marker. PR1 wires this in MultitableWorkbench; existing CalendarHoliday
+  // payloads remain compatible since the new fields are optional.
+  calendarHolidays?: CalendarEffectiveChip[]
   commentPresence?: Record<string, MultitableCommentPresenceSummary | undefined>
 }>()
 
@@ -438,7 +463,7 @@ const eventsByDate = computed(() => {
   return map
 })
 
-interface CalendarCell extends SharedCalendarDayCell<CalendarHoliday> {
+interface CalendarCell extends SharedCalendarDayCell<CalendarEffectiveChip> {
   key: string
   day: number
   dateStr: string
@@ -585,8 +610,55 @@ function rangeFromCells(cells: CalendarCell[]): CalendarVisibleRange | null {
   }
 }
 
-function fallbackHolidayName(holiday: CalendarHoliday): string {
+function fallbackHolidayName(holiday: CalendarEffectiveChip): string {
   return holiday.isWorkingDay ? 'Working day' : 'Holiday'
+}
+
+// PR1 scope C: minimal visual — keep legacy --working/--rest classes and add
+// (1) an `--overridden` marker class when a calendar_policy layer fired, and
+// (2) a native `title` tooltip with the full layer chain + overlay summary so
+// users can see "national rest day → org override changed to working" without
+// a new tooltip component. Source coloring palette is deferred to PR2.
+function hasOverrideMarker(chip: CalendarEffectiveChip): boolean {
+  if (!Array.isArray(chip.layers)) return false
+  return chip.layers.some((layer) => layer.kind === 'calendar_policy')
+}
+
+function describeLayerForTooltip(layer: CalendarEffectiveLayer): string {
+  const verdict = layer.isWorkingDay ? 'work' : 'rest'
+  const label = layer.label ? ` ${layer.label}` : ''
+  return `${layer.source}:${label} (${verdict})`
+}
+
+function describeOverlayForTooltip(overlay: CalendarEffectiveOverlay): string {
+  const parts: string[] = [overlay.kind]
+  if (typeof overlay.minutes === 'number' && Number.isFinite(overlay.minutes)) {
+    parts.push(`${overlay.minutes}m`)
+  }
+  if (overlay.status) parts.push(overlay.status)
+  return parts.join(' · ')
+}
+
+function buildHolidayTooltip(chip: CalendarEffectiveChip): string | undefined {
+  // Only build a tooltip when the chip carries effective-calendar context;
+  // legacy CalendarHoliday payloads (no base/effective/layers) get no title.
+  if (!chip.effective && !chip.base && !chip.layers?.length && !chip.overlays?.length) {
+    return undefined
+  }
+  const lines: string[] = []
+  const verdict = chip.effective?.isWorkingDay ?? chip.isWorkingDay
+  const verdictWord = verdict === true ? 'Working day' : verdict === false ? 'Rest day' : 'Unknown'
+  const sourceTag = chip.effective?.source ? ` · ${chip.effective.source}` : ''
+  lines.push(`${chip.date} — ${verdictWord}${sourceTag}`)
+  if (chip.layers?.length) {
+    const chain = chip.layers.map(describeLayerForTooltip).join(' → ')
+    lines.push(`Layers: ${chain}`)
+  }
+  if (chip.overlays?.length) {
+    const summary = chip.overlays.map(describeOverlayForTooltip).join('; ')
+    lines.push(`Overlays: ${summary}`)
+  }
+  return lines.join('\n')
 }
 
 function onPickDateField(e: Event) {
@@ -736,6 +808,11 @@ function onCellKeydown(e: KeyboardEvent, cellIdx: number, cells: CalendarCell[])
 .meta-calendar__holiday { display: inline-flex; align-items: center; max-width: 100%; padding: 1px 5px; border-radius: 999px; font-size: 10px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meta-calendar__holiday--rest { background: #ffe8e8; color: #9a1a1a; }
 .meta-calendar__holiday--working { background: #e5f7ec; color: #15693a; }
+/* Minimal override marker (PR1 scope C): dotted bottom-border + cursor:help so
+ * the user notices a layered policy and the native title tooltip discloses the
+ * full chain. Source coloring palette is intentionally deferred to PR2. */
+.meta-calendar__holiday--overridden { border-bottom: 1px dotted currentColor; cursor: help; }
+.meta-calendar__holiday--with-overlay::after { content: '·'; margin-left: 3px; opacity: 0.55; }
 .meta-calendar__events { display: flex; flex-direction: column; gap: 2px; }
 .meta-calendar__event { padding: 2px 4px; background: #409eff; color: #fff; border-radius: 3px; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; display: flex; align-items: center; gap: 6px; }
 .meta-calendar__event:hover { background: #337ecc; }
