@@ -116,13 +116,18 @@ try {
   }
   Write-LauncherInfo "Invoking staged apply helper: $stagedApply"
 
+  # apply.ps1's contract is "throw on failure, return on success"
+  # ($ErrorActionPreference = 'Stop' in apply.ps1; failures bubble as
+  # terminating errors). $LASTEXITCODE for `& <script.ps1>` in-process is
+  # NOT a reliable apply signal - it reflects the *last external program*
+  # apply.ps1 invoked internally (tar, node migrate.js, pm2, etc.), which
+  # could be 0, or could leak a non-fatal sub-program's exit. Trust the
+  # try/catch contract instead so a successful apply ("Package deploy
+  # complete" + health 200) reliably yields launcher exit 0 and a Last
+  # Result of 0 in the outer scheduled task (#1526 follow-up).
   try {
     & $stagedApply -RootDir $resolvedRoot -PackageArchive $resolvedArchive
-    if ($null -ne $LASTEXITCODE) {
-      $launcherExit = $LASTEXITCODE
-    } else {
-      $launcherExit = 0
-    }
+    $launcherExit = 0
   }
   catch {
     Write-LauncherInfo ("Apply helper raised an error: {0}" -f $_.Exception.Message)
@@ -134,5 +139,10 @@ finally {
     Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
   }
 }
+
+# Stable, parseable last-line marker so deploy-remote.log / scheduled-task
+# stdout always carry the captured apply exit code. Outer wrappers also
+# echo this; the launcher line is the inner-most source of truth.
+Write-LauncherInfo ("apply exit={0}" -f $launcherExit)
 
 exit $launcherExit
