@@ -94,9 +94,13 @@ describe('meta-core-labels helpers', () => {
     expect(fieldTypeLabel('longText', true)).toBe('长文本')
     expect(fieldTypeLabel('multiSelect', true)).toBe('多选')
     expect(fieldTypeLabel('boolean', true)).toBe('复选框')
-    // unknown / custom type: returned unchanged in BOTH locales
     expect(fieldTypeLabel('formula', false)).toBe('formula')
-    expect(fieldTypeLabel('formula', true)).toBe('formula')
+    expect(fieldTypeLabel('formula', true)).toBe('公式')
+    expect(fieldTypeLabel('autoNumber', false)).toBe('auto number')
+    expect(fieldTypeLabel('createdTime', true)).toBe('创建时间')
+    // unknown / custom type: returned unchanged in BOTH locales
+    expect(fieldTypeLabel('customType', false)).toBe('customType')
+    expect(fieldTypeLabel('customType', true)).toBe('customType')
   })
 
   it('filterValuePlaceholder is keyed by field type with a text fallback', () => {

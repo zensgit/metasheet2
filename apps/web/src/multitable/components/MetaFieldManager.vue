@@ -2,7 +2,7 @@
   <div v-if="visible" class="meta-field-mgr__overlay" @click.self="requestClose">
     <div class="meta-field-mgr">
       <div class="meta-field-mgr__header">
-        <h4 class="meta-field-mgr__title">Manage Fields</h4>
+        <h4 class="meta-field-mgr__title">{{ ml('field.title') }}</h4>
         <button class="meta-field-mgr__close" @click="requestClose">&times;</button>
       </div>
 
@@ -32,97 +32,97 @@
                 class="meta-field-mgr__inline-error"
                 data-test="rename-conflict-error"
                 role="alert"
-              >A field named "{{ editingName.trim() }}" already exists</span>
+              >{{ duplicateFieldName(editingName.trim(), isZh) }}</span>
             </div>
             <button
               class="meta-field-mgr__action meta-field-mgr__action--ok"
               :disabled="renameNameConflict"
-              :title="renameNameConflict ? 'Resolve the duplicate name to confirm' : 'Confirm rename'"
+              :title="renameNameConflict ? duplicateRenameTitle : ml('action.confirmRename')"
               @click="confirmRename(field.id)"
             >&#x2713;</button>
-            <button class="meta-field-mgr__action" title="Cancel rename" @click="cancelRename">&#x2717;</button>
+            <button class="meta-field-mgr__action" :title="ml('action.cancelRename')" @click="cancelRename">&#x2717;</button>
           </template>
           <template v-else>
             <span class="meta-field-mgr__name" :title="field.name">{{ field.name }}</span>
-            <span class="meta-field-mgr__type">{{ displayFieldType(field) }}</span>
-            <button class="meta-field-mgr__action" title="Configure" @click="openConfig(field)">&#x2699;</button>
-            <button class="meta-field-mgr__action" title="Rename" @click="startRename(field)">&#x270E;</button>
-            <button class="meta-field-mgr__action" :disabled="idx === 0" title="Move up" @click="moveField(field.id, idx - 1)">&#x25B2;</button>
-            <button class="meta-field-mgr__action" :disabled="idx === fields.length - 1" title="Move down" @click="moveField(field.id, idx + 1)">&#x25BC;</button>
-            <button class="meta-field-mgr__action meta-field-mgr__action--danger" title="Delete" @click="onDeleteField(field)">&#x1F5D1;</button>
+            <span class="meta-field-mgr__type">{{ fieldTypeName(field) }}</span>
+            <button class="meta-field-mgr__action" :title="ml('action.configure')" @click="openConfig(field)">&#x2699;</button>
+            <button class="meta-field-mgr__action" :title="ml('action.rename')" @click="startRename(field)">&#x270E;</button>
+            <button class="meta-field-mgr__action" :disabled="idx === 0" :title="ml('action.moveUp')" @click="moveField(field.id, idx - 1)">&#x25B2;</button>
+            <button class="meta-field-mgr__action" :disabled="idx === fields.length - 1" :title="ml('action.moveDown')" @click="moveField(field.id, idx + 1)">&#x25BC;</button>
+            <button class="meta-field-mgr__action meta-field-mgr__action--danger" :title="ml('action.delete')" @click="onDeleteField(field)">&#x1F5D1;</button>
           </template>
         </div>
 
-        <div v-if="!fields.length" class="meta-field-mgr__empty">No fields defined</div>
+        <div v-if="!fields.length" class="meta-field-mgr__empty">{{ ml('field.empty') }}</div>
       </div>
 
       <div v-if="configTargetType" class="meta-field-mgr__config">
         <div class="meta-field-mgr__config-header">
-          <strong>{{ configTarget ? `Configure ${configTarget.name}` : `Configure new ${newFieldType} field` }}</strong>
-          <span>{{ configTargetType }}</span>
+          <strong>{{ configTarget ? configureField(configTarget.name, isZh) : configureNewField(newFieldType, isZh) }}</strong>
+          <span>{{ fieldTypeLabel(configTargetType, isZh) }}</span>
         </div>
         <div v-if="fieldConfigOutdated" class="meta-field-mgr__warning">
           <span>{{ fieldConfigWarningText }}</span>
-          <button class="meta-field-mgr__btn-inline" @click="reloadLatestConfig">Reload latest</button>
+          <button class="meta-field-mgr__btn-inline" @click="reloadLatestConfig">{{ ml('action.reloadLatest') }}</button>
         </div>
         <div v-else-if="fieldConfigLiveRefreshText" class="meta-field-mgr__refresh">
           <span>{{ fieldConfigLiveRefreshText }}</span>
-          <button class="meta-field-mgr__btn-inline" @click="dismissLiveRefreshNotice">Dismiss</button>
+          <button class="meta-field-mgr__btn-inline" @click="dismissLiveRefreshNotice">{{ ml('action.dismiss') }}</button>
         </div>
 
         <template v-if="configTargetType === 'select' || configTargetType === 'multiSelect'">
           <div class="meta-field-mgr__field">
-            <span>Options</span>
+            <span>{{ ml('field.options') }}</span>
             <div class="meta-field-mgr__stack">
               <div v-for="(option, idx) in selectDraft.options" :key="idx" class="meta-field-mgr__option-row">
-                <input v-model="option.value" class="meta-field-mgr__input" placeholder="Value" />
+                <input v-model="option.value" class="meta-field-mgr__input" :placeholder="ml('field.optionValue')" />
                 <input v-model="option.color" class="meta-field-mgr__input" placeholder="#409eff" />
                 <button class="meta-field-mgr__action meta-field-mgr__action--danger" @click="removeSelectOption(idx)">&times;</button>
               </div>
-              <button class="meta-field-mgr__btn-inline" @click="addSelectOption">+ Add option</button>
+              <button class="meta-field-mgr__btn-inline" @click="addSelectOption">{{ ml('action.addOption') }}</button>
             </div>
           </div>
         </template>
 
         <template v-else-if="configTargetType === 'link'">
           <label class="meta-field-mgr__field">
-            <span>Target sheet</span>
+            <span>{{ ml('field.targetSheet') }}</span>
             <select v-model="linkDraft.foreignSheetId" class="meta-field-mgr__select">
-              <option value="">Select sheet</option>
+              <option value="">{{ ml('field.selectSheet') }}</option>
               <option v-for="sheet in targetSheets" :key="sheet.id" :value="sheet.id">{{ sheet.name }}</option>
             </select>
           </label>
           <label class="meta-field-mgr__toggle">
             <input v-model="linkDraft.limitSingleRecord" type="checkbox" />
-            <span>Limit to a single linked record</span>
+            <span>{{ ml('field.limitSingleLinkedRecord') }}</span>
           </label>
         </template>
 
         <template v-else-if="configTargetType === 'person'">
           <div class="meta-field-mgr__hint">
-            People fields use the system people sheet preset and stay hidden from normal sheet navigation.
+            {{ ml('field.personHint') }}
           </div>
           <label class="meta-field-mgr__toggle">
             <input v-model="personDraft.limitSingleRecord" type="checkbox" />
-            <span>Limit to a single person</span>
+            <span>{{ ml('field.limitSinglePerson') }}</span>
           </label>
         </template>
 
         <template v-else-if="configTargetType === 'lookup'">
           <label class="meta-field-mgr__field">
-            <span>Link field</span>
+            <span>{{ ml('field.linkField') }}</span>
             <select v-model="lookupDraft.linkFieldId" class="meta-field-mgr__select">
-              <option value="">Select link field</option>
+              <option value="">{{ ml('field.selectLinkField') }}</option>
               <option v-for="field in linkSourceFields" :key="field.id" :value="field.id">{{ field.name }}</option>
             </select>
           </label>
           <div class="meta-field-mgr__grid">
             <label class="meta-field-mgr__field">
-              <span>Foreign sheet id</span>
-              <input v-model="lookupDraft.foreignSheetId" class="meta-field-mgr__input" placeholder="Optional override" />
+              <span>{{ ml('field.foreignSheetId') }}</span>
+              <input v-model="lookupDraft.foreignSheetId" class="meta-field-mgr__input" :placeholder="ml('field.optionalOverride')" />
             </label>
             <label class="meta-field-mgr__field">
-              <span>Target field id</span>
+              <span>{{ ml('field.targetFieldId') }}</span>
               <input v-model="lookupDraft.targetFieldId" class="meta-field-mgr__input" placeholder="fld_target" />
             </label>
           </div>
@@ -130,37 +130,37 @@
 
         <template v-else-if="configTargetType === 'rollup'">
           <label class="meta-field-mgr__field">
-            <span>Link field</span>
+            <span>{{ ml('field.linkField') }}</span>
             <select v-model="rollupDraft.linkFieldId" class="meta-field-mgr__select">
-              <option value="">Select link field</option>
+              <option value="">{{ ml('field.selectLinkField') }}</option>
               <option v-for="field in linkSourceFields" :key="field.id" :value="field.id">{{ field.name }}</option>
             </select>
           </label>
           <div class="meta-field-mgr__grid">
             <label class="meta-field-mgr__field">
-              <span>Foreign sheet id</span>
-              <input v-model="rollupDraft.foreignSheetId" class="meta-field-mgr__input" placeholder="Optional override" />
+              <span>{{ ml('field.foreignSheetId') }}</span>
+              <input v-model="rollupDraft.foreignSheetId" class="meta-field-mgr__input" :placeholder="ml('field.optionalOverride')" />
             </label>
             <label class="meta-field-mgr__field">
-              <span>Target field id</span>
+              <span>{{ ml('field.targetFieldId') }}</span>
               <input v-model="rollupDraft.targetFieldId" class="meta-field-mgr__input" placeholder="fld_target" />
             </label>
           </div>
           <label class="meta-field-mgr__field">
-            <span>Aggregation</span>
+            <span>{{ ml('field.aggregation') }}</span>
             <select v-model="rollupDraft.aggregation" class="meta-field-mgr__select">
-              <option value="count">count</option>
-              <option value="sum">sum</option>
-              <option value="avg">avg</option>
-              <option value="min">min</option>
-              <option value="max">max</option>
+              <option value="count">{{ aggregationLabel('count', isZh) }}</option>
+              <option value="sum">{{ aggregationLabel('sum', isZh) }}</option>
+              <option value="avg">{{ aggregationLabel('avg', isZh) }}</option>
+              <option value="min">{{ aggregationLabel('min', isZh) }}</option>
+              <option value="max">{{ aggregationLabel('max', isZh) }}</option>
             </select>
           </label>
         </template>
 
         <template v-else-if="configTargetType === 'formula'">
           <label class="meta-field-mgr__field">
-            <span>Expression</span>
+            <span>{{ ml('field.expression') }}</span>
             <textarea v-model="formulaDraft.expression" class="meta-field-mgr__textarea" placeholder="=SUM({fld_price}, {fld_tax})"></textarea>
           </label>
           <div v-if="formulaDiagnostics.length" class="meta-field-mgr__formula-diagnostics">
@@ -174,28 +174,28 @@
             </div>
           </div>
           <div class="meta-field-mgr__field">
-            <span>Insert field token</span>
+            <span>{{ ml('field.insertFieldToken') }}</span>
             <div class="meta-field-mgr__chips">
               <button
                 v-for="field in formulaSourceFields"
                 :key="field.id"
                 type="button"
                 class="meta-field-mgr__chip"
-                :title="`Insert {${field.id}}`"
+                :title="insertFieldTokenTitle(field.id, isZh)"
                 @click="insertFormulaField(field.id)"
               >{{ field.name }}</button>
             </div>
           </div>
           <div class="meta-field-mgr__field">
-            <span>Formula reference</span>
+            <span>{{ ml('field.formulaReference') }}</span>
             <div class="meta-field-mgr__formula-toolbar">
               <input
                 v-model="formulaFunctionSearch"
                 class="meta-field-mgr__input"
-                placeholder="Search SUM, IF, %, ^, &..."
+                :placeholder="ml('field.formulaSearchPlaceholder')"
               />
               <select v-model="formulaFunctionCategory" class="meta-field-mgr__select">
-                <option value="all">All categories</option>
+                <option value="all">{{ ml('field.allCategories') }}</option>
                 <option
                   v-for="category in formulaFunctionCategories"
                   :key="category.id"
@@ -226,18 +226,18 @@
                 </button>
               </section>
             </div>
-            <div v-else class="meta-field-mgr__formula-empty">No matching functions.</div>
+            <div v-else class="meta-field-mgr__formula-empty">{{ ml('field.noMatchingFunctions') }}</div>
           </div>
         </template>
 
         <template v-else-if="configTargetType === 'attachment'">
           <div class="meta-field-mgr__grid">
             <label class="meta-field-mgr__field">
-              <span>Max files</span>
+              <span>{{ ml('field.maxFiles') }}</span>
               <input v-model.number="attachmentDraft.maxFiles" class="meta-field-mgr__input" type="number" min="1" />
             </label>
             <label class="meta-field-mgr__field">
-              <span>Accepted mime types</span>
+              <span>{{ ml('field.acceptedMimeTypes') }}</span>
               <input v-model="attachmentDraft.acceptedMimeTypesText" class="meta-field-mgr__input" placeholder="image/png,application/pdf" />
             </label>
           </div>
@@ -246,32 +246,32 @@
         <template v-else-if="configTargetType === 'number'">
           <div class="meta-field-mgr__grid">
             <label class="meta-field-mgr__field">
-              <span>Decimals</span>
+              <span>{{ ml('field.decimals') }}</span>
               <input
                 class="meta-field-mgr__input"
                 type="number"
                 min="0"
                 max="6"
-                placeholder="Preserve"
+                :placeholder="ml('field.preserve')"
                 :value="numberDraft.decimals ?? ''"
                 @input="onNumberDecimalsInput"
               />
             </label>
             <label class="meta-field-mgr__field">
-              <span>Unit</span>
+              <span>{{ ml('field.unit') }}</span>
               <input v-model="numberDraft.unit" class="meta-field-mgr__input" maxlength="24" placeholder="kg, hours, pcs..." />
             </label>
           </div>
           <label class="meta-field-mgr__toggle">
             <input v-model="numberDraft.thousands" type="checkbox" />
-            <span>Use thousands separators</span>
+            <span>{{ ml('field.useThousandsSeparators') }}</span>
           </label>
         </template>
 
         <template v-else-if="configTargetType === 'currency'">
           <div class="meta-field-mgr__grid">
             <label class="meta-field-mgr__field">
-              <span>Currency code (ISO 4217)</span>
+              <span>{{ ml('field.currencyCode') }}</span>
               <select v-model="currencyDraft.code" class="meta-field-mgr__select">
                 <option value="CNY">CNY (¥)</option>
                 <option value="USD">USD ($)</option>
@@ -287,7 +287,7 @@
               </select>
             </label>
             <label class="meta-field-mgr__field">
-              <span>Decimals</span>
+              <span>{{ ml('field.decimals') }}</span>
               <input v-model.number="currencyDraft.decimals" class="meta-field-mgr__input" type="number" min="0" max="6" />
             </label>
           </div>
@@ -295,14 +295,14 @@
 
         <template v-else-if="configTargetType === 'percent'">
           <label class="meta-field-mgr__field">
-            <span>Decimals</span>
+            <span>{{ ml('field.decimals') }}</span>
             <input v-model.number="percentDraft.decimals" class="meta-field-mgr__input" type="number" min="0" max="6" />
           </label>
         </template>
 
         <template v-else-if="configTargetType === 'rating'">
           <label class="meta-field-mgr__field">
-            <span>Maximum rating (1-10)</span>
+            <span>{{ ml('field.maxRating') }}</span>
             <input v-model.number="ratingDraft.max" class="meta-field-mgr__input" type="number" min="1" max="10" />
           </label>
         </template>
@@ -310,20 +310,20 @@
         <template v-else-if="configTargetType === 'autoNumber'">
           <div class="meta-field-mgr__grid">
             <label class="meta-field-mgr__field">
-              <span>Prefix</span>
+              <span>{{ ml('field.prefix') }}</span>
               <input v-model="autoNumberDraft.prefix" class="meta-field-mgr__input" maxlength="32" placeholder="INV-" />
             </label>
             <label class="meta-field-mgr__field">
-              <span>Digits</span>
+              <span>{{ ml('field.digits') }}</span>
               <input v-model.number="autoNumberDraft.digits" class="meta-field-mgr__input" type="number" min="0" max="12" />
             </label>
             <label class="meta-field-mgr__field">
-              <span>Start at</span>
+              <span>{{ ml('field.startAt') }}</span>
               <input v-model.number="autoNumberDraft.start" class="meta-field-mgr__input" type="number" min="1" />
             </label>
           </div>
           <div class="meta-field-mgr__hint">
-            Existing records are backfilled once when the field is created or converted.
+            {{ ml('field.autoNumberHint') }}
           </div>
         </template>
 
@@ -338,8 +338,8 @@
         />
         <div v-if="fieldConfigError" class="meta-field-mgr__error">{{ fieldConfigError }}</div>
         <div class="meta-field-mgr__config-actions">
-          <button class="meta-field-mgr__btn-cancel" @click="closeConfig">Cancel</button>
-          <button class="meta-field-mgr__btn-add" :disabled="Boolean(fieldConfigBlockingReason)" @click="saveConfig">{{ configTarget ? 'Save field settings' : 'Apply defaults' }}</button>
+          <button class="meta-field-mgr__btn-cancel" @click="closeConfig">{{ ml('action.cancel') }}</button>
+          <button class="meta-field-mgr__btn-add" :disabled="Boolean(fieldConfigBlockingReason)" @click="saveConfig">{{ configTarget ? ml('field.saveSettings') : ml('field.applyDefaults') }}</button>
         </div>
       </div>
 
@@ -349,19 +349,19 @@
             v-model="newFieldName"
             class="meta-field-mgr__input"
             :class="{ 'meta-field-mgr__input--invalid': addNameConflict }"
-            placeholder="Field name"
+            :placeholder="ml('field.namePlaceholder')"
             :aria-invalid="addNameConflict"
             :aria-describedby="addNameConflict ? 'meta-field-mgr-add-error' : undefined"
             @keydown.enter="onAddField"
           />
           <select v-model="newFieldType" class="meta-field-mgr__select" @change="openNewFieldConfigIfNeeded">
-            <option v-for="t in FIELD_TYPES" :key="t" :value="t">{{ t }}</option>
+            <option v-for="t in FIELD_TYPES" :key="t" :value="t">{{ fieldTypeLabel(t, isZh) }}</option>
           </select>
           <button
             class="meta-field-mgr__btn-add"
             :disabled="!newFieldName.trim() || addNameConflict"
             @click="onAddField"
-          >+ Add</button>
+          >{{ ml('field.addButton') }}</button>
         </div>
         <div
           v-if="addNameConflict"
@@ -369,17 +369,17 @@
           class="meta-field-mgr__inline-error"
           data-test="add-conflict-error"
           role="alert"
-        >A field named "{{ newFieldName.trim() }}" already exists</div>
+        >{{ duplicateFieldName(newFieldName.trim(), isZh) }}</div>
         <div v-if="newFieldTypeIsSystem" class="meta-field-mgr__hint meta-field-mgr__hint--system">
           {{ systemFieldHint(newFieldType) }}
         </div>
       </div>
 
       <div v-if="deleteTarget" class="meta-field-mgr__confirm">
-        <p>Delete field <strong>{{ deleteTarget.name }}</strong>? This cannot be undone.</p>
+        <p>{{ deleteFieldConfirm(deleteTarget.name, isZh) }}</p>
         <div class="meta-field-mgr__confirm-actions">
-          <button class="meta-field-mgr__btn-cancel" @click="deleteTargetId = null">Cancel</button>
-          <button class="meta-field-mgr__btn-delete" @click="confirmDelete">Delete</button>
+          <button class="meta-field-mgr__btn-cancel" @click="deleteTargetId = null">{{ ml('action.cancel') }}</button>
+          <button class="meta-field-mgr__btn-delete" @click="confirmDelete">{{ ml('action.delete') }}</button>
         </div>
       </div>
     </div>
@@ -388,6 +388,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import type { FieldValidationRule, MetaField, MetaFieldCreateType, MetaSheet } from '../types'
 import {
   FORMULA_FUNCTION_CATEGORIES,
@@ -418,6 +419,17 @@ import {
   isSystemFieldCreateType,
   systemFieldHint,
 } from '../utils/system-fields'
+import {
+  configureField,
+  configureNewField,
+  deleteFieldConfirm,
+  duplicateFieldName,
+  aggregationLabel,
+  fieldOptionRequired,
+  insertFieldTokenTitle,
+  managerLabel,
+} from '../utils/meta-manager-labels'
+import { fieldTypeLabel } from '../utils/meta-core-labels'
 import MetaFieldValidationPanel from './MetaFieldValidationPanel.vue'
 
 /** Field types where the validation panel is configurable. */
@@ -536,6 +548,10 @@ const emit = defineEmits<{
   (e: 'update:dirty', dirty: boolean): void
 }>()
 
+const { isZh } = useLocale()
+const ml = (key: Parameters<typeof managerLabel>[0]) => managerLabel(key, isZh.value)
+const duplicateRenameTitle = computed(() => isZh.value ? '请先解决重复名称再确认' : 'Resolve the duplicate name to confirm')
+
 const newFieldName = ref('')
 const newFieldType = ref<MetaFieldCreateType>('string')
 const newFieldConfigVisible = ref(false)
@@ -633,10 +649,10 @@ const fieldConfigSchemaChanged = computed(() =>
 )
 const fieldConfigBlockingReason = computed(() => {
   if (!configTarget.value || !fieldConfigOutdated.value || !fieldConfigSchemaChanged.value) return ''
-  return 'This field changed type in the background. Reload latest before saving.'
+  return ml('field.changedTypeBlocking')
 })
 const fieldConfigWarningText = computed(() => {
-  return fieldConfigBlockingReason.value || 'This field changed in the background. Save keeps your draft, or reload the latest settings.'
+  return fieldConfigBlockingReason.value || ml('field.changedWarning')
 })
 const newFieldTypeIsSystem = computed(() => isSystemFieldCreateType(newFieldType.value))
 
@@ -702,6 +718,10 @@ function requiresConfig(type: MetaFieldCreateType): boolean {
 function displayFieldType(field: MetaField): string {
   if (field.type === 'link' && field.property?.refKind === 'user') return 'person'
   return field.type
+}
+
+function fieldTypeName(field: MetaField): string {
+  return fieldTypeLabel(displayFieldType(field), isZh.value)
 }
 
 function resetDrafts() {
@@ -974,14 +994,14 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
       .map((option) => ({ value: option.value.trim(), color: option.color.trim() }))
       .filter((option) => option.value.length > 0)
     if (!options.length) {
-      fieldConfigError.value = `${normalizedType === 'multiSelect' ? 'Multi-select' : 'Select'} fields need at least one option`
+      fieldConfigError.value = fieldOptionRequired(normalizedType, isZh.value)
       return undefined
     }
     return { options, ...validationProperty }
   }
   if (normalizedType === 'link') {
     if (!linkDraft.foreignSheetId || !targetSheets.value.some((sheet) => sheet.id === linkDraft.foreignSheetId)) {
-      fieldConfigError.value = 'Choose a target sheet for link fields'
+      fieldConfigError.value = ml('field.error.linkNeedsTargetSheet')
       return undefined
     }
     return {
@@ -995,11 +1015,11 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
   }
   if (normalizedType === 'lookup') {
     if (!lookupDraft.linkFieldId || !linkSourceFields.value.some((field) => field.id === lookupDraft.linkFieldId) || !lookupDraft.targetFieldId) {
-      fieldConfigError.value = 'Lookup fields need a link field and a target field id'
+      fieldConfigError.value = ml('field.error.lookupNeedsLinkAndTarget')
       return undefined
     }
     if (lookupDraft.foreignSheetId && !targetSheets.value.some((sheet) => sheet.id === lookupDraft.foreignSheetId)) {
-      fieldConfigError.value = 'Lookup fields need a valid target sheet'
+      fieldConfigError.value = ml('field.error.lookupNeedsValidTargetSheet')
       return undefined
     }
     return {
@@ -1010,11 +1030,11 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
   }
   if (normalizedType === 'rollup') {
     if (!rollupDraft.linkFieldId || !linkSourceFields.value.some((field) => field.id === rollupDraft.linkFieldId) || !rollupDraft.targetFieldId) {
-      fieldConfigError.value = 'Rollup fields need a link field and a target field id'
+      fieldConfigError.value = ml('field.error.rollupNeedsLinkAndTarget')
       return undefined
     }
     if (rollupDraft.foreignSheetId && !targetSheets.value.some((sheet) => sheet.id === rollupDraft.foreignSheetId)) {
-      fieldConfigError.value = 'Rollup fields need a valid target sheet'
+      fieldConfigError.value = ml('field.error.rollupNeedsValidTargetSheet')
       return undefined
     }
     return {
@@ -1041,12 +1061,12 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
   if (normalizedType === 'currency') {
     const code = currencyDraft.code.trim().toUpperCase()
     if (!/^[A-Z]{3}$/.test(code)) {
-      fieldConfigError.value = 'Currency code must be a 3-letter ISO code (e.g. CNY, USD, EUR)'
+      fieldConfigError.value = ml('field.error.currencyCode')
       return undefined
     }
     const decimals = Number(currencyDraft.decimals)
     if (!Number.isFinite(decimals) || decimals < 0 || decimals > 6) {
-      fieldConfigError.value = 'Currency decimals must be between 0 and 6'
+      fieldConfigError.value = ml('field.error.currencyDecimals')
       return undefined
     }
     return { code, decimals: Math.round(decimals) }
@@ -1056,7 +1076,7 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
     if (numberDraft.decimals !== null) {
       const decimals = Number(numberDraft.decimals)
       if (!Number.isFinite(decimals) || decimals < 0 || decimals > 6) {
-        fieldConfigError.value = 'Number decimals must be blank or between 0 and 6'
+        fieldConfigError.value = ml('field.error.numberDecimals')
         return undefined
       }
       property.decimals = Math.round(decimals)
@@ -1064,7 +1084,7 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
     property.thousands = numberDraft.thousands
     const unit = numberDraft.unit.trim()
     if (unit.length > 24) {
-      fieldConfigError.value = 'Number unit must be 24 characters or fewer'
+      fieldConfigError.value = ml('field.error.numberUnit')
       return undefined
     }
     if (unit) property.unit = unit
@@ -1073,7 +1093,7 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
   if (normalizedType === 'percent') {
     const decimals = Number(percentDraft.decimals)
     if (!Number.isFinite(decimals) || decimals < 0 || decimals > 6) {
-      fieldConfigError.value = 'Percent decimals must be between 0 and 6'
+      fieldConfigError.value = ml('field.error.percentDecimals')
       return undefined
     }
     return { decimals: Math.round(decimals) }
@@ -1081,7 +1101,7 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
   if (normalizedType === 'rating') {
     const max = Number(ratingDraft.max)
     if (!Number.isFinite(max) || max < 1 || max > 10) {
-      fieldConfigError.value = 'Rating max must be between 1 and 10'
+      fieldConfigError.value = ml('field.error.ratingMax')
       return undefined
     }
     return { max: Math.round(max) }
@@ -1089,17 +1109,17 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
   if (normalizedType === 'autoNumber') {
     const prefix = autoNumberDraft.prefix.trim()
     if (prefix.length > 32) {
-      fieldConfigError.value = 'Auto number prefix must be 32 characters or fewer'
+      fieldConfigError.value = ml('field.error.autoNumberPrefix')
       return undefined
     }
     const digits = Number(autoNumberDraft.digits)
     if (!Number.isFinite(digits) || digits < 0 || digits > 12) {
-      fieldConfigError.value = 'Auto number digits must be between 0 and 12'
+      fieldConfigError.value = ml('field.error.autoNumberDigits')
       return undefined
     }
     const start = Number(autoNumberDraft.start)
     if (!Number.isFinite(start) || start < 1) {
-      fieldConfigError.value = 'Auto number start must be at least 1'
+      fieldConfigError.value = ml('field.error.autoNumberStart')
       return undefined
     }
     const normalizedStart = Math.floor(start)
@@ -1227,7 +1247,7 @@ const managerDirty = computed(() => props.visible && hasPendingDrafts.value)
 
 function confirmDiscardFieldManagerChanges() {
   if (!hasPendingDrafts.value) return true
-  return window.confirm('Discard unsaved field manager changes?')
+  return window.confirm(ml('field.discardManagerConfirm'))
 }
 
 function reloadLatestConfig() {
@@ -1275,7 +1295,7 @@ watch(
           fieldConfigLiveRefreshText.value = ''
         } else {
           hydrateExistingFieldConfig(configTarget.value, {
-            liveRefreshText: 'Latest field metadata loaded from the sheet context.',
+            liveRefreshText: ml('field.latestMetadataLoaded'),
           })
         }
       }

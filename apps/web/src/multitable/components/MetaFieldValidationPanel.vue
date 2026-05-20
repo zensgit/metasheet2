@@ -1,7 +1,7 @@
 <template>
   <div class="meta-field-validation">
     <div class="meta-field-validation__header">
-      <strong class="meta-field-validation__title">Validation Rules</strong>
+      <strong class="meta-field-validation__title">{{ ml('validation.title') }}</strong>
     </div>
 
     <div class="meta-field-validation__body">
@@ -14,13 +14,13 @@
             data-rule-toggle="required"
             @change="onToggleRequired"
           />
-          <span>Required</span>
+          <span>{{ ml('validation.required') }}</span>
         </label>
         <input
           v-if="hasRule('required')"
           class="meta-field-validation__input meta-field-validation__input--message"
           type="text"
-          placeholder="Custom error message"
+          :placeholder="ml('validation.customErrorMessage')"
           :value="getRule('required')?.message ?? ''"
           data-rule-message="required"
           @input="onUpdateMessage('required', $event)"
@@ -30,7 +30,7 @@
       <!-- Text rules -->
       <template v-if="fieldType === 'text'">
         <div class="meta-field-validation__rule-row" data-rule-type="minLength">
-          <label class="meta-field-validation__label">Min length</label>
+          <label class="meta-field-validation__label">{{ ml('validation.minLength') }}</label>
           <div class="meta-field-validation__inline">
             <input
               class="meta-field-validation__input meta-field-validation__input--small"
@@ -52,7 +52,7 @@
             v-if="hasRule('minLength')"
             class="meta-field-validation__input meta-field-validation__input--message"
             type="text"
-            placeholder="Custom error message"
+            :placeholder="ml('validation.customErrorMessage')"
             :value="getRule('minLength')?.message ?? ''"
             data-rule-message="minLength"
             @input="onUpdateMessage('minLength', $event)"
@@ -60,7 +60,7 @@
         </div>
 
         <div class="meta-field-validation__rule-row" data-rule-type="maxLength">
-          <label class="meta-field-validation__label">Max length</label>
+          <label class="meta-field-validation__label">{{ ml('validation.maxLength') }}</label>
           <div class="meta-field-validation__inline">
             <input
               class="meta-field-validation__input meta-field-validation__input--small"
@@ -82,7 +82,7 @@
             v-if="hasRule('maxLength')"
             class="meta-field-validation__input meta-field-validation__input--message"
             type="text"
-            placeholder="Custom error message"
+            :placeholder="ml('validation.customErrorMessage')"
             :value="getRule('maxLength')?.message ?? ''"
             data-rule-message="maxLength"
             @input="onUpdateMessage('maxLength', $event)"
@@ -90,7 +90,7 @@
         </div>
 
         <div class="meta-field-validation__rule-row" data-rule-type="pattern">
-          <label class="meta-field-validation__label">Pattern</label>
+          <label class="meta-field-validation__label">{{ ml('validation.pattern') }}</label>
           <div class="meta-field-validation__inline">
             <select
               class="meta-field-validation__select"
@@ -98,15 +98,15 @@
               data-rule-pattern-preset="true"
               @change="onPatternPreset"
             >
-              <option value="">Custom</option>
-              <option value="email">Email</option>
-              <option value="url">URL</option>
-              <option value="phone">Phone</option>
+              <option value="">{{ ml('validation.patternCustom') }}</option>
+              <option value="email">{{ ml('validation.patternEmail') }}</option>
+              <option value="url">{{ ml('validation.patternUrl') }}</option>
+              <option value="phone">{{ ml('validation.patternPhone') }}</option>
             </select>
             <input
               class="meta-field-validation__input"
               type="text"
-              placeholder="Regex pattern"
+              :placeholder="ml('validation.regexPattern')"
               :value="getRuleValue('pattern') ?? ''"
               data-rule-value="pattern"
               @input="onSetPatternRule($event)"
@@ -123,7 +123,7 @@
             v-if="hasRule('pattern')"
             class="meta-field-validation__input meta-field-validation__input--message"
             type="text"
-            placeholder="Custom error message"
+            :placeholder="ml('validation.customErrorMessage')"
             :value="getRule('pattern')?.message ?? ''"
             data-rule-message="pattern"
             @input="onUpdateMessage('pattern', $event)"
@@ -134,7 +134,7 @@
       <!-- Number rules -->
       <template v-if="fieldType === 'number'">
         <div class="meta-field-validation__rule-row" data-rule-type="min">
-          <label class="meta-field-validation__label">Minimum</label>
+          <label class="meta-field-validation__label">{{ ml('validation.minimum') }}</label>
           <div class="meta-field-validation__inline">
             <input
               class="meta-field-validation__input meta-field-validation__input--small"
@@ -155,7 +155,7 @@
             v-if="hasRule('min')"
             class="meta-field-validation__input meta-field-validation__input--message"
             type="text"
-            placeholder="Custom error message"
+            :placeholder="ml('validation.customErrorMessage')"
             :value="getRule('min')?.message ?? ''"
             data-rule-message="min"
             @input="onUpdateMessage('min', $event)"
@@ -163,7 +163,7 @@
         </div>
 
         <div class="meta-field-validation__rule-row" data-rule-type="max">
-          <label class="meta-field-validation__label">Maximum</label>
+          <label class="meta-field-validation__label">{{ ml('validation.maximum') }}</label>
           <div class="meta-field-validation__inline">
             <input
               class="meta-field-validation__input meta-field-validation__input--small"
@@ -184,7 +184,7 @@
             v-if="hasRule('max')"
             class="meta-field-validation__input meta-field-validation__input--message"
             type="text"
-            placeholder="Custom error message"
+            :placeholder="ml('validation.customErrorMessage')"
             :value="getRule('max')?.message ?? ''"
             data-rule-message="max"
             @input="onUpdateMessage('max', $event)"
@@ -202,17 +202,17 @@
               data-rule-toggle="enum"
               @change="onToggleEnum"
             />
-            <span>Restrict to defined options</span>
+            <span>{{ ml('validation.restrictOptions') }}</span>
           </label>
           <div v-if="hasRule('enum')" class="meta-field-validation__enum-values" data-rule-enum-values="true">
             <span v-for="opt in enumValues" :key="opt" class="meta-field-validation__enum-chip">{{ opt }}</span>
-            <span v-if="!enumValues.length" class="meta-field-validation__empty">No options defined</span>
+            <span v-if="!enumValues.length" class="meta-field-validation__empty">{{ ml('validation.noOptions') }}</span>
           </div>
           <input
             v-if="hasRule('enum')"
             class="meta-field-validation__input meta-field-validation__input--message"
             type="text"
-            placeholder="Custom error message"
+            :placeholder="ml('validation.customErrorMessage')"
             :value="getRule('enum')?.message ?? ''"
             data-rule-message="enum"
             @input="onUpdateMessage('enum', $event)"
@@ -222,7 +222,7 @@
 
       <!-- Preview -->
       <div v-if="localRules.length" class="meta-field-validation__preview" data-validation-preview="true">
-        <strong class="meta-field-validation__label">Preview</strong>
+        <strong class="meta-field-validation__label">{{ ml('validation.preview') }}</strong>
         <div v-for="rule in localRules" :key="rule.type" class="meta-field-validation__preview-item">
           <span class="meta-field-validation__preview-type">{{ ruleLabel(rule.type) }}</span>
           <span v-if="rule.value !== undefined" class="meta-field-validation__preview-value">{{ rule.value }}</span>
@@ -235,7 +235,9 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import type { FieldValidationRule, FieldValidationRuleType } from '../types'
+import { managerLabel } from '../utils/meta-manager-labels'
 
 const PATTERN_PRESETS: Record<string, string> = {
   email: '^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$',
@@ -254,6 +256,8 @@ const emit = defineEmits<{
   (e: 'update:rules', rules: FieldValidationRule[]): void
 }>()
 
+const { isZh } = useLocale()
+const ml = (key: Parameters<typeof managerLabel>[0]) => managerLabel(key, isZh.value)
 const localRules = ref<FieldValidationRule[]>([...props.rules])
 
 const enumValues = computed(() => {
@@ -362,13 +366,13 @@ function onUpdateMessage(type: FieldValidationRuleType, event: Event) {
 
 function ruleLabel(type: FieldValidationRuleType): string {
   switch (type) {
-    case 'required': return 'Required'
-    case 'minLength': return 'Min length'
-    case 'maxLength': return 'Max length'
-    case 'pattern': return 'Pattern'
-    case 'min': return 'Minimum'
-    case 'max': return 'Maximum'
-    case 'enum': return 'Enum'
+    case 'required': return ml('validation.required')
+    case 'minLength': return ml('validation.minLength')
+    case 'maxLength': return ml('validation.maxLength')
+    case 'pattern': return ml('validation.pattern')
+    case 'min': return ml('validation.minimum')
+    case 'max': return ml('validation.maximum')
+    case 'enum': return ml('validation.restrictOptions')
     default: return type
   }
 }
