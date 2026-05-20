@@ -141,6 +141,40 @@ test('buildPacket normalizes safe customer formatting variants', () => {
   assert.equal(packet.externalSystems.find((system) => system.kind === 'erp:k3-wise-sqlserver').config.mode, 'readonly')
 })
 
+test('buildPacket preserves SQL Server port in external-system packet', () => {
+  const packet = buildPacket(gate({
+    sqlServer: {
+      enabled: true,
+      mode: 'readonly',
+      server: '10.0.0.10',
+      port: '14330',
+      allowedTables: ['T_ICITEM'],
+    },
+  }))
+  const sql = packet.externalSystems.find((system) => system.kind === 'erp:k3-wise-sqlserver')
+
+  assert.equal(sql.config.server, '10.0.0.10')
+  assert.equal(sql.config.port, 14330)
+})
+
+test('buildPacket rejects invalid SQL Server port values', () => {
+  for (const port of ['0', '65536', 'abc', 1433.5]) {
+    assert.throws(
+      () => buildPacket(gate({
+        sqlServer: {
+          enabled: true,
+          mode: 'readonly',
+          server: '10.0.0.10',
+          port,
+          allowedTables: ['T_ICITEM'],
+        },
+      })),
+      (error) => error instanceof LivePocPreflightError && error.details.field === 'sqlServer.port',
+      `port=${String(port)} must be rejected`,
+    )
+  }
+})
+
 test('buildPacket rejects truthy Submit/Audit strings and invalid flag values', () => {
   for (const k3Wise of [
     { autoSubmit: 'true' },

@@ -173,6 +173,7 @@ export interface K3WiseSetupForm {
   sqlName: string
   sqlMode: K3SqlServerMode
   sqlServer: string
+  sqlPort: string
   sqlDatabase: string
   sqlUsername: string
   sqlPassword: string
@@ -450,6 +451,33 @@ function optionalString(value: string): string | undefined {
   return normalized.length > 0 ? normalized : undefined
 }
 
+interface SqlServerEndpointParts {
+  server: string
+  port: string
+  embeddedPort: string
+}
+
+export function normalizeK3WiseSqlServerEndpoint(serverValue: string, portValue = ''): SqlServerEndpointParts {
+  const server = trim(serverValue)
+  const port = trim(portValue)
+  const hostPortMatch = server.match(/^([^,:]+)([:,])(\d+)$/)
+  if (!hostPortMatch) {
+    return { server, port, embeddedPort: '' }
+  }
+  const embeddedPort = hostPortMatch[3]
+  return {
+    server: hostPortMatch[1],
+    port: port || embeddedPort,
+    embeddedPort,
+  }
+}
+
+export function normalizeK3WiseSqlConnectionForm(form: K3WiseSetupForm): void {
+  const endpoint = normalizeK3WiseSqlServerEndpoint(form.sqlServer, form.sqlPort)
+  form.sqlServer = endpoint.server
+  form.sqlPort = endpoint.embeddedPort || endpoint.port
+}
+
 function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
 }
@@ -537,6 +565,16 @@ function parseOptionalPositiveInteger(value: string): number | undefined {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
 }
 
+function parseOptionalTcpPort(value: string, field: keyof K3WiseSetupForm): number | undefined {
+  const normalized = trim(value)
+  if (!normalized) return undefined
+  const parsed = Number(normalized)
+  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 65535) {
+    throw new Error(`${field} must be a TCP port between 1 and 65535`)
+  }
+  return parsed
+}
+
 const BOOLEAN_TRUE_TEXT = new Set(['true', '1', 'yes', 'y', 'on', 'enable', 'enabled', '是', '启用', '开启'])
 const BOOLEAN_FALSE_TEXT = new Set(['false', '0', 'no', 'n', 'off', 'disable', 'disabled', '否', '禁用', '关闭'])
 
@@ -590,6 +628,7 @@ export function buildK3WiseWebApiConnectionFingerprint(form: K3WiseSetupForm): s
 }
 
 export function buildK3WiseSqlConnectionFingerprint(form: K3WiseSetupForm): string {
+  const sqlEndpoint = normalizeK3WiseSqlServerEndpoint(form.sqlServer, form.sqlPort)
   return fingerprintJson({
     tenantId: trim(form.tenantId),
     workspaceId: trim(form.workspaceId),
@@ -598,7 +637,8 @@ export function buildK3WiseSqlConnectionFingerprint(form: K3WiseSetupForm): stri
     hasCredentials: form.sqlHasCredentials === true,
     credentialDraftTouched: hasSqlCredentialDraft(form),
     mode: form.sqlMode,
-    server: trim(form.sqlServer),
+    server: sqlEndpoint.server,
+    port: sqlEndpoint.port,
     database: trim(form.sqlDatabase),
     allowedTables: normalizeListFingerprint(form.sqlAllowedTables),
     middleTables: normalizeListFingerprint(form.sqlMiddleTables),
@@ -760,6 +800,7 @@ export function createDefaultK3WiseSetupForm(): K3WiseSetupForm {
     sqlName: 'K3 WISE SQL Server',
     sqlMode: 'readonly',
     sqlServer: '',
+    sqlPort: '1433',
     sqlDatabase: '',
     sqlUsername: '',
     sqlPassword: '',
@@ -831,7 +872,7 @@ export function validateK3WiseSetupForm(form: K3WiseSetupForm): K3WiseSetupValid
   }
   if (form.sqlEnabled) {
     if (!trim(form.sqlName)) issues.push({ field: 'sqlName', message: 'SQL Server system name is required' })
-    if (!trim(form.sqlServer)) issues.push({ field: 'sqlServer', message: 'SQL Server host is required' })
+    validateSqlServerEndpoint(form, issues)
     if (!trim(form.sqlDatabase)) issues.push({ field: 'sqlDatabase', message: 'SQL Server database is required' })
     if (splitList(form.sqlAllowedTables).length === 0) {
       issues.push({ field: 'sqlAllowedTables', message: 'At least one SQL Server table must be allowed' })
@@ -873,7 +914,27 @@ export function validateK3WiseGateDraftForm(form: K3WiseSetupForm): K3WiseSetupV
   if (form.sqlEnabled && form.sqlMode !== 'readonly' && splitList(form.sqlMiddleTables).some(isK3CoreBusinessTable)) {
     issues.push({ field: 'sqlMiddleTables', message: 'Live PoC may not write K3 WISE core business tables' })
   }
+  if (form.sqlEnabled) {
+    validateSqlServerEndpoint(form, issues)
+  }
   return issues
+}
+
+function validateSqlServerEndpoint(form: K3WiseSetupForm, issues: K3WiseSetupValidationIssue[]): void {
+  const sqlEndpoint = normalizeK3WiseSqlServerEndpoint(form.sqlServer, form.sqlPort)
+  if (!trim(sqlEndpoint.server)) issues.push({ field: 'sqlServer', message: 'SQL Server host is required' })
+  if (!trim(sqlEndpoint.port)) {
+    issues.push({ field: 'sqlPort', message: 'SQL Server port is required' })
+  } else {
+    try {
+      parseOptionalTcpPort(sqlEndpoint.port, 'sqlPort')
+    } catch (error) {
+      issues.push({ field: 'sqlPort', message: error instanceof Error ? error.message : String(error) })
+    }
+  }
+  if (sqlEndpoint.embeddedPort && trim(form.sqlPort) && trim(form.sqlPort) !== sqlEndpoint.embeddedPort) {
+    issues.push({ field: 'sqlPort', message: 'SQL Server port must match the port embedded in Server' })
+  }
 }
 
 export function validateK3WisePipelineTemplateForm(
@@ -1210,6 +1271,8 @@ export function buildK3WiseGateDraft(form: K3WiseSetupForm): Record<string, unkn
       username: trim(form.username) || credentialPlaceholder(),
       password: credentialPlaceholder(),
     }
+  const sqlEndpoint = normalizeK3WiseSqlServerEndpoint(form.sqlServer, form.sqlPort)
+  const sqlPort = form.sqlEnabled ? parseOptionalTcpPort(sqlEndpoint.port, 'sqlPort') : undefined
 
   return {
     tenantId: resolveTenantId(form),
@@ -1239,7 +1302,8 @@ export function buildK3WiseGateDraft(form: K3WiseSetupForm): Record<string, unkn
     sqlServer: {
       enabled: form.sqlEnabled,
       mode: form.sqlEnabled ? form.sqlMode : 'readonly',
-      ...(optionalString(form.sqlServer) ? { server: trim(form.sqlServer) } : {}),
+      ...(optionalString(sqlEndpoint.server) ? { server: sqlEndpoint.server } : {}),
+      ...(form.sqlEnabled && sqlPort ? { port: sqlPort } : {}),
       ...(optionalString(form.sqlDatabase) ? { database: trim(form.sqlDatabase) } : {}),
       allowedTables: splitList(form.sqlAllowedTables),
       middleTables: splitList(form.sqlMiddleTables),
@@ -1427,7 +1491,7 @@ function collectIgnoredSecretWarnings(value: unknown, path: string, warnings: Se
 }
 
 function hasImportedSqlConfig(sqlServer: Record<string, unknown>): boolean {
-  return ['mode', 'server', 'database', 'allowedTables', 'middleTables', 'storedProcedures'].some((key) => {
+  return ['mode', 'server', 'host', 'port', 'database', 'allowedTables', 'middleTables', 'storedProcedures'].some((key) => {
     if (!hasOwn(sqlServer, key)) return false
     const value = sqlServer[key]
     if (Array.isArray(value)) return value.length > 0
@@ -1529,6 +1593,12 @@ export function applyK3WiseGateJsonToForm(form: K3WiseSetupForm, jsonText: strin
     if (hasOwn(sqlServer, 'allowedTables')) next.sqlAllowedTables = importedListText(sqlServer.allowedTables)
     if (hasOwn(sqlServer, 'middleTables')) next.sqlMiddleTables = importedListText(sqlServer.middleTables)
     if (hasOwn(sqlServer, 'storedProcedures')) next.sqlStoredProcedures = importedListText(sqlServer.storedProcedures)
+    const sqlPort = firstImportedString(sqlServer, ['port'])
+    if (sqlHost || sqlPort) {
+      const endpoint = normalizeK3WiseSqlServerEndpoint(sqlHost || next.sqlServer, sqlPort)
+      next.sqlServer = endpoint.server
+      next.sqlPort = endpoint.port || next.sqlPort
+    }
   }
 
   const rollbackOwner = firstImportedString(rollback, ['owner'])
@@ -1712,6 +1782,8 @@ export function buildK3WiseSetupPayloads(form: K3WiseSetupForm): K3WiseSetupPayl
   const sqlCredentials: Record<string, unknown> = {}
   if (trim(form.sqlUsername)) sqlCredentials.username = trim(form.sqlUsername)
   if (trim(form.sqlPassword)) sqlCredentials.password = form.sqlPassword
+  const sqlEndpoint = normalizeK3WiseSqlServerEndpoint(form.sqlServer, form.sqlPort)
+  const sqlPort = parseOptionalTcpPort(sqlEndpoint.port, 'sqlPort')
   const sqlServer = {
     ...baseSystem,
     ...(optionalString(form.sqlSystemId) ? { id: trim(form.sqlSystemId) } : {}),
@@ -1720,7 +1792,8 @@ export function buildK3WiseSetupPayloads(form: K3WiseSetupForm): K3WiseSetupPayl
     role: 'bidirectional',
     config: {
       mode: form.sqlMode,
-      server: trim(form.sqlServer),
+      server: sqlEndpoint.server,
+      ...(sqlPort ? { port: sqlPort } : {}),
       database: trim(form.sqlDatabase),
       allowedTables,
       middleTables,
@@ -1884,7 +1957,12 @@ export function applyExternalSystemToForm(form: K3WiseSetupForm, system: Integra
     next.workspaceId = system.workspaceId || ''
     next.sqlName = system.name
     next.sqlMode = typeof config.mode === 'string' ? config.mode as K3SqlServerMode : next.sqlMode
-    next.sqlServer = typeof config.server === 'string' ? config.server : next.sqlServer
+    const sqlEndpoint = normalizeK3WiseSqlServerEndpoint(
+      typeof config.server === 'string' ? config.server : next.sqlServer,
+      typeof config.port === 'string' || typeof config.port === 'number' ? String(config.port) : '',
+    )
+    next.sqlServer = sqlEndpoint.server
+    next.sqlPort = sqlEndpoint.port || next.sqlPort
     next.sqlDatabase = typeof config.database === 'string' ? config.database : next.sqlDatabase
     next.sqlAllowedTables = Array.isArray(config.allowedTables) ? config.allowedTables.join('\n') : next.sqlAllowedTables
     next.sqlMiddleTables = Array.isArray(config.middleTables) ? config.middleTables.join('\n') : next.sqlMiddleTables

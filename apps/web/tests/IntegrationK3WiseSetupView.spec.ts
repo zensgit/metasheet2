@@ -349,6 +349,38 @@ describe('IntegrationK3WiseSetupView', () => {
     expect(container.textContent).toContain('Project ID 已规范化为 project_default:integration-core')
   })
 
+  it('shows a dedicated SQL Server port field and splits pasted host-port input', async () => {
+    const View = (await import('../src/views/IntegrationK3WiseSetupView.vue')).default
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    registerRouterLinkStub(app)
+    app.mount(container)
+    await flushUi()
+
+    const sqlSection = Array.from(container.querySelectorAll('details'))
+      .find((item) => item.textContent?.includes('高级 SQL Server 通道')) as HTMLDetailsElement | undefined
+    expect(sqlSection).toBeTruthy()
+    const sqlToggle = sqlSection!.querySelector('input[type="checkbox"]') as HTMLInputElement
+    sqlToggle.checked = true
+    sqlToggle.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+
+    const serverInput = inputByLabel(container, 'Server / Host')
+    const portInput = inputByLabel(container, 'Port')
+    expect(portInput.value).toBe('1433')
+    expect(container.textContent).toContain('粘贴 10.0.0.8,1433')
+
+    serverInput.value = '10.0.0.9,14330'
+    serverInput.dispatchEvent(new Event('input', { bubbles: true }))
+    serverInput.dispatchEvent(new Event('blur', { bubbles: true }))
+    await flushUi()
+
+    expect(serverInput.value).toBe('10.0.0.9')
+    expect(portInput.value).toBe('14330')
+  })
+
   it('opens installed staging multitable sheets from the setup page', async () => {
     const View = (await import('../src/views/IntegrationK3WiseSetupView.vue')).default
 
