@@ -5,7 +5,7 @@
         <p class="multitable-home__eyebrow">Multitable</p>
         <h1>多维表</h1>
         <p class="multitable-home__subtitle">
-          打开 Base、继续清洗表或从模板开始。Grid 和 Spreadsheets 仍保留旧链接，但默认工作入口收敛到多维表。
+          打开 Base、继续清洗表或从模板开始。
         </p>
       </div>
       <button class="multitable-home__refresh" :disabled="loading" @click="loadHomeData">
