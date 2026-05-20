@@ -1,5 +1,28 @@
 # Staging Migration Alignment Runbook
 
+## 2026-05-20 Safety Update
+
+Before choosing any alignment option, generate a read-only migration alignment
+report:
+
+```bash
+docker compose -f docker-compose.app.staging.yml exec -T backend \
+  node packages/core-backend/dist/src/db/migrate.js --list \
+  > /tmp/staging-migrate-list.txt
+
+node scripts/ops/staging-migration-alignment-report.mjs \
+  --migrate-list-file /tmp/staging-migrate-list.txt \
+  --out-dir output/staging-migration-alignment-report/<run>
+```
+
+Read `report.md` before running or marking migrations. The report classifies
+pending names into superseded legacy no-op markers, executable legacy SQL,
+timestamp SQL, and modern migrations, and flags obvious replay risks such as
+`CREATE TABLE` without `IF NOT EXISTS`.
+
+Do **not** apply Option A or run full `migrate --latest` when the report says
+`do_not_run_full_migrate`. Use a cloned or backed-up rehearsal DB first.
+
 This runbook handles the case where a target env's `kysely_migration`
 table is **out of sync with the actual schema state** — typically
 manifests as `pnpm migrate` failing on an old migration that
