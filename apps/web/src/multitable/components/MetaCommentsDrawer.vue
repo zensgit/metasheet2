@@ -2,19 +2,19 @@
   <div v-if="visible" class="meta-comments-drawer">
     <div class="meta-comments-drawer__header">
       <div class="meta-comments-drawer__title-group">
-        <h4 class="meta-comments-drawer__title">Comments</h4>
+        <h4 class="meta-comments-drawer__title">{{ l('comment.title') }}</h4>
         <div v-if="scopeLabel" class="meta-comments-drawer__scope">{{ scopeLabel }}</div>
       </div>
       <div class="meta-comments-drawer__header-actions">
         <RouterLink class="meta-comments-drawer__inbox-link" :to="{ name: 'multitable-comment-inbox' }">
-          Inbox
+          {{ l('comment.inbox') }}
           <span v-if="unreadCount > 0" class="meta-comments-drawer__inbox-badge">{{ unreadCount }}</span>
         </RouterLink>
         <button class="meta-comments-drawer__close" @click="emit('close')">&times;</button>
       </div>
     </div>
     <div class="meta-comments-drawer__body">
-      <div v-if="loading" class="meta-comments-drawer__loading">Loading...</div>
+      <div v-if="loading" class="meta-comments-drawer__loading">{{ l('comment.loading') }}</div>
       <div v-else-if="!threadRoots.length" class="meta-comments-drawer__empty">{{ emptyMessage }}</div>
       <div v-for="thread in threadRoots" :key="thread.id" class="meta-comments-drawer__thread">
         <div
@@ -35,26 +35,26 @@
               v-if="canComment && !thread.resolved"
               class="meta-comments-drawer__reply"
               @click="emit('reply', thread.id)"
-            >Reply</button>
+            >{{ l('comment.reply') }}</button>
             <button
               v-if="canEditComment(thread)"
               class="meta-comments-drawer__reply"
               :disabled="updatingIds.includes(thread.id) || deletingIds.includes(thread.id)"
               @click="emit('edit', thread.id)"
-            >{{ editingCommentId === thread.id ? 'Editing...' : 'Edit' }}</button>
+            >{{ editingCommentId === thread.id ? l('comment.editing') : l('comment.edit') }}</button>
             <button
               v-if="canDeleteComment(thread)"
               class="meta-comments-drawer__reply"
               :disabled="deletingIds.includes(thread.id) || updatingIds.includes(thread.id)"
               @click="emit('delete', thread.id)"
-            >{{ deletingIds.includes(thread.id) ? 'Deleting...' : 'Delete' }}</button>
+            >{{ deletingIds.includes(thread.id) ? l('comment.deleting') : l('comment.delete') }}</button>
             <button
               v-if="canResolve && !thread.resolved"
               class="meta-comments-drawer__resolve"
               :disabled="resolvingIds.includes(thread.id)"
               @click="emit('resolve', thread.id)"
-            >{{ resolvingIds.includes(thread.id) ? 'Resolving...' : 'Resolve' }}</button>
-            <span v-if="thread.resolved" class="meta-comments-drawer__badge">Resolved</span>
+            >{{ resolvingIds.includes(thread.id) ? l('comment.resolving') : l('comment.resolve') }}</button>
+            <span v-if="thread.resolved" class="meta-comments-drawer__badge">{{ l('comment.resolved') }}</span>
           </div>
           <p class="meta-comments-drawer__content">{{ formatContent(thread.content) }}</p>
         </div>
@@ -75,13 +75,13 @@
               class="meta-comments-drawer__reply"
               :disabled="updatingIds.includes(reply.id) || deletingIds.includes(reply.id)"
               @click="emit('edit', reply.id)"
-            >{{ editingCommentId === reply.id ? 'Editing...' : 'Edit' }}</button>
+            >{{ editingCommentId === reply.id ? l('comment.editing') : l('comment.edit') }}</button>
             <button
               v-if="canDeleteComment(reply)"
               class="meta-comments-drawer__reply"
               :disabled="deletingIds.includes(reply.id) || updatingIds.includes(reply.id)"
               @click="emit('delete', reply.id)"
-            >{{ deletingIds.includes(reply.id) ? 'Deleting...' : 'Delete' }}</button>
+            >{{ deletingIds.includes(reply.id) ? l('comment.deleting') : l('comment.delete') }}</button>
           </div>
           <p class="meta-comments-drawer__content">{{ formatContent(reply.content) }}</p>
         </div>
@@ -90,21 +90,21 @@
     <div v-if="canComment" class="meta-comments-drawer__input-area">
       <div v-if="error" class="meta-comments-drawer__error">
         {{ error }}
-        <button class="meta-comments-drawer__retry" @click="emit('retry')">Retry</button>
+        <button class="meta-comments-drawer__retry" @click="emit('retry')">{{ l('comment.retry') }}</button>
       </div>
       <div v-if="activeEditingComment" class="meta-comments-drawer__reply-banner">
         <div class="meta-comments-drawer__reply-banner-copy">
-          <span>Editing {{ activeEditingComment.authorName ?? activeEditingComment.authorId }}</span>
+          <span>{{ activeEditingBanner }}</span>
           <span class="meta-comments-drawer__reply-preview">{{ formatCommentPreview(activeEditingComment.content) }}</span>
         </div>
-        <button class="meta-comments-drawer__reply-cancel" @click="emit('cancel-edit')">Cancel</button>
+        <button class="meta-comments-drawer__reply-cancel" @click="emit('cancel-edit')">{{ l('comment.cancel') }}</button>
       </div>
       <div v-else-if="activeReplyComment" class="meta-comments-drawer__reply-banner">
         <div class="meta-comments-drawer__reply-banner-copy">
-          <span>Replying to {{ activeReplyComment.authorName ?? activeReplyComment.authorId }}</span>
+          <span>{{ activeReplyBanner }}</span>
           <span class="meta-comments-drawer__reply-preview">{{ formatCommentPreview(activeReplyComment.content) }}</span>
         </div>
-        <button class="meta-comments-drawer__reply-cancel" @click="emit('cancel-reply')">Cancel</button>
+        <button class="meta-comments-drawer__reply-cancel" @click="emit('cancel-reply')">{{ l('comment.cancel') }}</button>
       </div>
       <MetaCommentComposer
         v-model="draftModel"
@@ -112,8 +112,9 @@
         :initial-mentions="composerInitialMentions"
         :disabled="!canComment"
         :submitting="submitting"
-        :placeholder="activeEditingComment ? 'Edit comment…' : activeReplyComment ? 'Reply to thread…' : 'Add a comment...'"
-        :submit-label="activeEditingComment ? 'Save' : 'Send'"
+        :placeholder="composerPlaceholder"
+        :submit-label="composerSubmitLabel"
+        :submit-kind="composerSubmitKind"
         @submit="submitComment"
       />
     </div>
@@ -123,8 +124,17 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
+import { useLocale } from '../../composables/useLocale'
 import type { MetaCommentMentionSuggestion, MultitableComment } from '../types'
 import { normalizeMultitableComment } from '../api/client'
+import {
+  commentLabel,
+  editingBanner,
+  emptyMessage as commentEmptyMessage,
+  replyingBanner,
+  replyCount,
+  type MetaCommentLabelKey,
+} from '../utils/meta-comment-labels'
 import MetaCommentComposer from './MetaCommentComposer.vue'
 
 export type MentionCandidateInput = {
@@ -192,6 +202,8 @@ const draftModel = computed({
   set: (value: string) => emit('update:draft', value),
 })
 
+const { isZh } = useLocale()
+const l = (key: MetaCommentLabelKey) => commentLabel(key, isZh.value)
 const normalizedComments = computed(() => props.comments.map((comment) => normalizeMultitableComment(comment)))
 
 const visibleComments = computed(() => {
@@ -268,9 +280,27 @@ const activeEditingComment = computed(() => {
 })
 
 const emptyMessage = computed(() => {
-  if (props.targetFieldId && props.scopeLabel) return `No comments yet for ${props.scopeLabel}`
-  if (props.targetFieldId) return 'No comments yet for this field'
-  return 'No comments yet'
+  return commentEmptyMessage(props.scopeLabel, props.targetFieldId, isZh.value)
+})
+
+const activeEditingBanner = computed(() => {
+  if (!activeEditingComment.value) return ''
+  return editingBanner(activeEditingComment.value.authorName ?? activeEditingComment.value.authorId, isZh.value)
+})
+
+const activeReplyBanner = computed(() => {
+  if (!activeReplyComment.value) return ''
+  return replyingBanner(activeReplyComment.value.authorName ?? activeReplyComment.value.authorId, isZh.value)
+})
+
+const composerSubmitKind = computed<'send' | 'save'>(() => (activeEditingComment.value ? 'save' : 'send'))
+const composerSubmitLabel = computed(() => (
+  composerSubmitKind.value === 'save' ? l('comment.submitSave') : l('comment.submitSend')
+))
+const composerPlaceholder = computed(() => {
+  if (activeEditingComment.value) return l('comment.placeholderEdit')
+  if (activeReplyComment.value) return l('comment.placeholderReply')
+  return l('comment.placeholderAdd')
 })
 
 const defaultMentionSuggestions = computed<MetaCommentMentionSuggestion[]>(() => {
@@ -333,7 +363,7 @@ function getReplyCount(commentId: string): number {
 }
 
 function formatReplyCount(count: number): string {
-  return count === 1 ? '1 reply' : `${count} replies`
+  return replyCount(count, isZh.value)
 }
 
 function formatTime(iso: string): string {
