@@ -150,7 +150,12 @@ function New-DependencyRefreshCommandWrapper {
   $lines = @(
     '@echo off',
     'setlocal EnableExtensions DisableDelayedExpansion',
+    'set "CI=true"',
+    'set "npm_config_yes=true"',
+    'set "npm_config_confirm_modules_purge=false"',
+    'set "PNPM_CONFIG_CONFIRM_MODULES_PURGE=false"',
     'echo [dependency-refresh-wrapper] wrapper entered',
+    'echo [dependency-refresh-wrapper] non-interactive env: CI=true npm_config_confirm_modules_purge=false PNPM_CONFIG_CONFIRM_MODULES_PURGE=false',
     "echo [dependency-refresh-wrapper] root=$quotedRootDir",
     'echo [dependency-refresh-wrapper] cwd before cd=%CD%',
     "cd /d $quotedRootDir",
@@ -179,6 +184,23 @@ function New-DependencyRefreshCommandWrapper {
   )
 
   Set-Content -LiteralPath $WrapperPath -Value $lines -Encoding ASCII
+}
+
+function Get-DependencyRefreshExitCodeFromLog {
+  param([string]$Path)
+
+  if (-not (Test-Path -LiteralPath $Path)) {
+    return $null
+  }
+
+  $exitLine = Get-Content -LiteralPath $Path -Tail 80 |
+    Where-Object { $_ -match '\[dependency-refresh-wrapper\] pnpm install exit=(\d+)' } |
+    Select-Object -Last 1
+  if ($exitLine -and $exitLine -match 'exit=(\d+)') {
+    return [int]$matches[1]
+  }
+
+  return $null
 }
 
 function Stop-ProcessTree {
@@ -289,8 +311,41 @@ function Invoke-LoggedProcess {
     }
   }
 
-  $exitCode = $process.ExitCode
+  try {
+    $process.WaitForExit()
+  }
+  catch {
+    Write-Info "Failed while waiting for process exit confirmation pid=$($process.Id): $($_.Exception.Message)"
+  }
+  try {
+    $process.Refresh()
+  }
+  catch {
+    Write-Info "Failed to refresh process state pid=$($process.Id): $($_.Exception.Message)"
+  }
+
+  $exitCode = $null
+  try {
+    $exitCode = $process.ExitCode
+  }
+  catch {
+    Write-Info "Unable to read process exit code pid=$($process.Id): $($_.Exception.Message)"
+  }
+  if ($null -eq $exitCode -or [string]::IsNullOrWhiteSpace([string]$exitCode)) {
+    $wrapperExitCode = Get-DependencyRefreshExitCodeFromLog -Path $stdoutLog
+    if ($null -ne $wrapperExitCode) {
+      $exitCode = $wrapperExitCode
+      Write-Info "$Description using wrapper exit marker $exitCode from stdout log"
+    }
+  }
+
   $elapsedTotalSec = [int]((Get-Date) - $startedAt).TotalSeconds
+  if ($null -eq $exitCode -or [string]::IsNullOrWhiteSpace([string]$exitCode)) {
+    Write-LogTail -Path $stdoutLog -Label 'stdout'
+    Write-LogTail -Path $stderrLog -Label 'stderr'
+    throw "$Description finished without a readable process exit code after ${elapsedTotalSec}s; inspect logs: $stdoutLog ; $stderrLog"
+  }
+
   Write-Info "$Description finished with exit code $exitCode after ${elapsedTotalSec}s"
 
   if ($exitCode -ne 0) {
