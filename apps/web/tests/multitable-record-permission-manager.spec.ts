@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App as VueApp } from 'vue'
+import { useLocale } from '../src/composables/useLocale'
 import MetaRecordPermissionManager from '../src/multitable/components/MetaRecordPermissionManager.vue'
 
 let app: VueApp | null = null
@@ -52,9 +53,81 @@ afterEach(() => {
   container?.remove()
   app = null
   container = null
+  useLocale().setLocale('en')
 })
 
 describe('MetaRecordPermissionManager', () => {
+  it('preserves English record permission chrome as the default locale', async () => {
+    const client = makeClient()
+
+    mountManager({ client })
+    await flushUi()
+
+    const text = container!.textContent ?? ''
+    expect(text).toContain('Record Permissions')
+    expect(text).toContain('Current access')
+    expect(text).toContain('No record-specific permissions yet.')
+    expect(text).toContain('Grant to people, member groups, or roles')
+    expect(container!.querySelector<HTMLInputElement>('[data-record-permission-search]')?.getAttribute('placeholder'))
+      .toBe('Search people, member groups, or roles')
+  })
+
+  it('localizes record permission chrome in zh-CN while preserving raw subjects and data attributes', async () => {
+    useLocale().setLocale('zh-CN')
+    const client = makeClient({
+      listRecordPermissions: vi.fn().mockResolvedValue([
+        {
+          id: 'perm_zh',
+          sheetId: 'sheet_1',
+          recordId: 'record_1',
+          subjectType: 'user',
+          subjectId: 'user_alice',
+          accessLevel: 'write',
+          label: 'Alice',
+          subtitle: 'alice@example.com',
+          isActive: false,
+        },
+      ]),
+      listSheetPermissions: vi.fn().mockResolvedValue({
+        items: [
+          {
+            subjectType: 'member-group',
+            subjectId: 'group_north',
+            accessLevel: 'read',
+            permissions: ['spreadsheet:read'],
+            label: 'North Region',
+            subtitle: 'Regional operations',
+            isActive: true,
+          },
+        ],
+      }),
+    })
+
+    mountManager({ client })
+    await flushUi()
+
+    const text = container!.textContent ?? ''
+    expect(text).toContain('记录权限')
+    expect(text).toContain('当前访问权限')
+    expect(text).toContain('写入')
+    expect(text).toContain('已停用用户')
+    expect(text).toContain('仅可清理')
+    expect(text).toContain('授权给人员、成员组或角色')
+    expect(text).toContain('成员组')
+    expect(text).toContain('授权')
+    expect(text).toContain('Alice')
+    expect(text).toContain('alice@example.com')
+    expect(text).toContain('North Region')
+    expect(text).toContain('Regional operations')
+    expect(container!.querySelector<HTMLInputElement>('[data-record-permission-search]')?.getAttribute('placeholder'))
+      .toBe('搜索人员、成员组或角色')
+
+    const entry = container!.querySelector('[data-record-permission-entry="perm_zh"]')!
+    expect(entry.querySelector('.meta-record-perm__badge')?.getAttribute('data-access-level')).toBe('write')
+    const candidateSelect = container!.querySelector('[data-record-permission-candidate="member-group:group_north"] select') as HTMLSelectElement
+    expect(Array.from(candidateSelect.options).map((option) => option.value)).toEqual(['read', 'write', 'admin'])
+  })
+
   it('renders permission list when visible', async () => {
     const client = makeClient({
       listRecordPermissions: vi.fn().mockResolvedValue([

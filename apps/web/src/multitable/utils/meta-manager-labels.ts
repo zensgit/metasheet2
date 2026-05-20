@@ -12,7 +12,8 @@ export type MetaManagerLabelKey =
   | 'action.moveUp' | 'action.moveDown' | 'action.delete'
   | 'action.confirmRename' | 'action.cancelRename'
   | 'action.cancel' | 'action.reloadLatest' | 'action.dismiss'
-  | 'action.add' | 'action.addOption'
+  | 'action.add' | 'action.addOption' | 'action.save' | 'action.remove'
+  | 'action.clear' | 'action.apply'
   | 'field.title' | 'field.empty' | 'field.options' | 'field.optionValue'
   | 'field.targetSheet' | 'field.selectSheet' | 'field.limitSingleLinkedRecord'
   | 'field.personHint' | 'field.limitSinglePerson'
@@ -103,6 +104,10 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'action.dismiss': { en: 'Dismiss', zh: '忽略' },
   'action.add': { en: '+ Add', zh: '+ 添加' },
   'action.addOption': { en: '+ Add option', zh: '+ 添加选项' },
+  'action.save': { en: 'Save', zh: '保存' },
+  'action.remove': { en: 'Remove', zh: '移除' },
+  'action.clear': { en: 'Clear', zh: '清除' },
+  'action.apply': { en: 'Apply', zh: '应用' },
 
   'field.title': { en: 'Manage Fields', zh: '管理字段' },
   'field.empty': { en: 'No fields defined', zh: '暂无字段' },

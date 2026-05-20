@@ -3,8 +3,8 @@
     <div class="meta-record-perm">
       <div class="meta-record-perm__header">
         <div>
-          <h4 class="meta-record-perm__title">Record Permissions</h4>
-          <p class="meta-record-perm__subtitle">Manage who can access this record and at what level.</p>
+          <h4 class="meta-record-perm__title">{{ p('record.title') }}</h4>
+          <p class="meta-record-perm__subtitle">{{ p('record.subtitle') }}</p>
         </div>
         <button class="meta-record-perm__close" type="button" @click="requestClose">&times;</button>
       </div>
@@ -16,10 +16,10 @@
         <!-- Current permissions -->
         <section class="meta-record-perm__section">
           <div class="meta-record-perm__section-header">
-            <strong>Current access</strong>
+            <strong>{{ p('record.currentAccess') }}</strong>
           </div>
-          <div v-if="loading" class="meta-record-perm__empty">Loading permissions&#x2026;</div>
-        <div v-else-if="!entries.length" class="meta-record-perm__empty">No record-specific permissions yet.</div>
+          <div v-if="loading" class="meta-record-perm__empty">{{ p('record.loadingPermissions') }}</div>
+        <div v-else-if="!entries.length" class="meta-record-perm__empty">{{ p('record.empty') }}</div>
           <template v-else>
           <div
             v-for="entry in entries"
@@ -35,18 +35,18 @@
                   class="meta-record-perm__lifecycle"
                   data-lifecycle="inactive"
                 >
-                  Inactive user
+                  {{ p('subject.inactiveUser') }}
                 </span>
                 <span
                   v-if="subjectMutationBlocked(entry.subjectType, entry.isActive)"
                   class="meta-record-perm__hint"
                 >
-                  Cleanup only
+                  {{ p('subject.cleanupOnly') }}
                 </span>
               </div>
-            <span class="meta-record-perm__subject" :data-subject-type="entry.subjectType">{{ subjectTypeLabel(entry.subjectType) }}</span>
+            <span class="meta-record-perm__subject" :data-subject-type="entry.subjectType">{{ recordSubjectLabel(entry.subjectType) }}</span>
             <span class="meta-record-perm__badge" :data-access-level="entryDrafts[entry.id] ?? entry.accessLevel">
-              {{ accessLevelLabel(entryDrafts[entry.id] ?? entry.accessLevel) }}
+              {{ recordAccessLabel(entryDrafts[entry.id] ?? entry.accessLevel) }}
             </span>
             <select
               :value="entryDrafts[entry.id] ?? entry.accessLevel"
@@ -54,9 +54,13 @@
               :disabled="busyKey === entry.id || subjectMutationBlocked(entry.subjectType, entry.isActive)"
               @change="setEntryDraft(entry.id, $event)"
             >
-              <option value="read">Read</option>
-              <option value="write">Write</option>
-              <option value="admin">Admin</option>
+              <option
+                v-for="option in recordAccessOptions"
+                :key="option.value"
+                :value="option.value"
+              >
+                {{ option.label }}
+              </option>
             </select>
             <button
               class="meta-record-perm__action"
@@ -64,7 +68,7 @@
               :disabled="busyKey === entry.id || subjectMutationBlocked(entry.subjectType, entry.isActive) || (entryDrafts[entry.id] ?? entry.accessLevel) === entry.accessLevel"
               @click="saveEntry(entry)"
             >
-              Save
+              {{ m('action.save') }}
             </button>
             <button
               class="meta-record-perm__action meta-record-perm__action--danger"
@@ -72,7 +76,7 @@
               :disabled="busyKey === entry.id"
               @click="removeEntry(entry)"
             >
-              Remove
+              {{ m('action.remove') }}
             </button>
           </div>
           </template>
@@ -81,22 +85,22 @@
         <!-- Add permission -->
         <section class="meta-record-perm__section">
           <div class="meta-record-perm__section-header">
-            <strong>Grant to people, member groups, or roles</strong>
+            <strong>{{ p('record.grantSection') }}</strong>
           </div>
           <input
             v-model="candidateSearch"
             class="meta-record-perm__search"
             type="search"
-            placeholder="Search people, member groups, or roles"
+            :placeholder="p('record.searchPlaceholder')"
             data-record-permission-search="true"
           />
-          <div v-if="candidatesLoading" class="meta-record-perm__empty">Loading eligible people, member groups, and roles&#x2026;</div>
-          <div v-else-if="!availableCandidates.length" class="meta-record-perm__empty">No matching eligible people, member groups, or roles.</div>
+          <div v-if="candidatesLoading" class="meta-record-perm__empty">{{ p('record.loadingCandidates') }}</div>
+          <div v-else-if="!availableCandidates.length" class="meta-record-perm__empty">{{ p('record.noCandidates') }}</div>
           <template v-else>
             <div class="meta-record-perm__section-header">
-              <strong>People</strong>
+              <strong>{{ p('subject.people') }}</strong>
             </div>
-            <div v-if="!peopleCandidates.length" class="meta-record-perm__empty">No matching people.</div>
+            <div v-if="!peopleCandidates.length" class="meta-record-perm__empty">{{ p('subject.noPeople') }}</div>
             <div
               v-for="candidate in peopleCandidates"
               :key="`people-${subjectKey(candidate.subjectType, candidate.subjectId)}`"
@@ -111,25 +115,29 @@
                   class="meta-record-perm__lifecycle"
                   data-lifecycle="inactive"
                 >
-                  Inactive user
+                  {{ p('subject.inactiveUser') }}
                 </span>
                 <span
                   v-if="candidateGrantBlocked(candidate)"
                   class="meta-record-perm__hint"
                 >
-                  Grant blocked
+                  {{ p('subject.grantBlocked') }}
                 </span>
               </div>
-              <span class="meta-record-perm__subject" data-subject-type="user">User</span>
+              <span class="meta-record-perm__subject" data-subject-type="user">{{ p('subject.user') }}</span>
               <select
                 :value="candidateDrafts[subjectKey(candidate.subjectType, candidate.subjectId)] ?? candidate.accessLevel ?? 'read'"
                 class="meta-record-perm__select"
                 :disabled="busyKey === subjectKey(candidate.subjectType, candidate.subjectId) || candidateGrantBlocked(candidate)"
                 @change="setCandidateDraft(candidate.subjectType, candidate.subjectId, $event)"
               >
-                <option value="read">Read</option>
-                <option value="write">Write</option>
-                <option value="admin">Admin</option>
+                <option
+                  v-for="option in recordAccessOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
               </select>
               <button
                 class="meta-record-perm__action meta-record-perm__action--primary"
@@ -137,14 +145,14 @@
                 :disabled="busyKey === subjectKey(candidate.subjectType, candidate.subjectId) || candidateGrantBlocked(candidate)"
                 @click="grantCandidate(candidate.subjectType, candidate.subjectId)"
               >
-                Grant
+                {{ p('action.grant') }}
               </button>
             </div>
 
             <div class="meta-record-perm__section-header">
-              <strong>Member groups</strong>
+              <strong>{{ p('subject.memberGroups') }}</strong>
             </div>
-            <div v-if="!memberGroupCandidates.length" class="meta-record-perm__empty">No matching member groups.</div>
+            <div v-if="!memberGroupCandidates.length" class="meta-record-perm__empty">{{ p('subject.noMemberGroups') }}</div>
             <div
               v-for="candidate in memberGroupCandidates"
               :key="`member-group-${subjectKey(candidate.subjectType, candidate.subjectId)}`"
@@ -155,16 +163,20 @@
                 <strong>{{ candidate.label }}</strong>
                 <span>{{ candidate.subtitle || candidate.subjectId }}</span>
               </div>
-              <span class="meta-record-perm__subject" data-subject-type="member-group">Member group</span>
+              <span class="meta-record-perm__subject" data-subject-type="member-group">{{ p('subject.memberGroup') }}</span>
               <select
                 :value="candidateDrafts[subjectKey(candidate.subjectType, candidate.subjectId)] ?? candidate.accessLevel ?? 'read'"
                 class="meta-record-perm__select"
                 :disabled="busyKey === subjectKey(candidate.subjectType, candidate.subjectId)"
                 @change="setCandidateDraft(candidate.subjectType, candidate.subjectId, $event)"
               >
-                <option value="read">Read</option>
-                <option value="write">Write</option>
-                <option value="admin">Admin</option>
+                <option
+                  v-for="option in recordAccessOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
               </select>
               <button
                 class="meta-record-perm__action meta-record-perm__action--primary"
@@ -172,14 +184,14 @@
                 :disabled="busyKey === subjectKey(candidate.subjectType, candidate.subjectId)"
                 @click="grantCandidate(candidate.subjectType, candidate.subjectId)"
               >
-                Grant
+                {{ p('action.grant') }}
               </button>
             </div>
 
             <div class="meta-record-perm__section-header">
-              <strong>Roles</strong>
+              <strong>{{ p('subject.roles') }}</strong>
             </div>
-            <div v-if="!roleCandidates.length" class="meta-record-perm__empty">No matching roles.</div>
+            <div v-if="!roleCandidates.length" class="meta-record-perm__empty">{{ p('subject.noRoles') }}</div>
             <div
               v-for="candidate in roleCandidates"
               :key="`role-${subjectKey(candidate.subjectType, candidate.subjectId)}`"
@@ -190,16 +202,20 @@
                 <strong>{{ candidate.label }}</strong>
                 <span>{{ candidate.subtitle || candidate.subjectId }}</span>
               </div>
-              <span class="meta-record-perm__subject" data-subject-type="role">Role</span>
+              <span class="meta-record-perm__subject" data-subject-type="role">{{ p('subject.role') }}</span>
               <select
                 :value="candidateDrafts[subjectKey(candidate.subjectType, candidate.subjectId)] ?? candidate.accessLevel ?? 'read'"
                 class="meta-record-perm__select"
                 :disabled="busyKey === subjectKey(candidate.subjectType, candidate.subjectId)"
                 @change="setCandidateDraft(candidate.subjectType, candidate.subjectId, $event)"
               >
-                <option value="read">Read</option>
-                <option value="write">Write</option>
-                <option value="admin">Admin</option>
+                <option
+                  v-for="option in recordAccessOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
               </select>
               <button
                 class="meta-record-perm__action meta-record-perm__action--primary"
@@ -207,7 +223,7 @@
                 :disabled="busyKey === subjectKey(candidate.subjectType, candidate.subjectId)"
                 @click="grantCandidate(candidate.subjectType, candidate.subjectId)"
               >
-                Grant
+                {{ p('action.grant') }}
               </button>
             </div>
           </template>
@@ -219,8 +235,11 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import type { MultitableApiClient } from '../api/client'
 import type { MetaSheetPermissionCandidate, MetaSheetPermissionEntry, RecordPermissionAccessLevel, RecordPermissionEntry } from '../types'
+import { managerLabel, type MetaManagerLabelKey } from '../utils/meta-manager-labels'
+import { permissionLabel, recordAccessText, subjectText, type MetaPermissionLabelKey } from '../utils/meta-permission-labels'
 
 const props = defineProps<{
   visible: boolean
@@ -246,17 +265,29 @@ const subjectCandidates = ref<MetaSheetPermissionCandidate[]>([])
 const candidateDrafts = ref<Record<string, RecordPermissionAccessLevel>>({})
 let candidateLoadVersion = 0
 
-function accessLevelLabel(level: string): string {
-  if (level === 'read') return 'Read'
-  if (level === 'write') return 'Write'
-  if (level === 'admin') return 'Admin'
-  return level
+const { isZh } = useLocale()
+const recordAccessLevels: RecordPermissionAccessLevel[] = ['read', 'write', 'admin']
+const recordAccessOptions = computed(() =>
+  recordAccessLevels.map((value) => ({
+    value,
+    label: recordAccessText(value, isZh.value),
+  })),
+)
+
+function p(key: MetaPermissionLabelKey): string {
+  return permissionLabel(key, isZh.value)
 }
 
-function subjectTypeLabel(subjectType: string): string {
-  if (subjectType === 'role') return 'Role'
-  if (subjectType === 'member-group') return 'Member group'
-  return 'User'
+function m(key: MetaManagerLabelKey): string {
+  return managerLabel(key, isZh.value)
+}
+
+function recordAccessLabel(level: string): string {
+  return recordAccessText(level, isZh.value)
+}
+
+function recordSubjectLabel(subjectType: string): string {
+  return subjectText(subjectType, isZh.value)
 }
 
 function subjectIsInactive(subjectType: string, isActive: boolean) {
@@ -343,7 +374,7 @@ async function loadPermissions() {
     entries.value = await props.client.listRecordPermissions(props.sheetId, props.recordId)
     syncEntryDrafts()
   } catch (cause: any) {
-    error.value = cause?.message ?? 'Failed to load record permissions'
+    error.value = cause?.message ?? p('record.error.loadPermissions')
   } finally {
     loading.value = false
   }
@@ -378,7 +409,7 @@ async function loadCandidates() {
     syncCandidateDrafts()
   } catch (cause: any) {
     if (currentVersion !== candidateLoadVersion) return
-    error.value = cause?.message ?? 'Failed to load permission candidates'
+    error.value = cause?.message ?? p('record.error.loadCandidates')
   } finally {
     if (currentVersion === candidateLoadVersion) {
       candidatesLoading.value = false
@@ -393,10 +424,10 @@ async function saveEntry(entry: RecordPermissionEntry) {
   try {
     await props.client.updateRecordPermission(props.sheetId, props.recordId, entry.subjectType, entry.subjectId, nextLevel)
     await loadPermissions()
-    status.value = 'Permission updated'
+    status.value = p('record.status.updated')
     emit('updated')
   } catch (cause: any) {
-    error.value = cause?.message ?? 'Failed to update permission'
+    error.value = cause?.message ?? p('record.error.update')
   } finally {
     busyKey.value = null
   }
@@ -408,10 +439,10 @@ async function removeEntry(entry: RecordPermissionEntry) {
   try {
     await props.client.deleteRecordPermission(props.sheetId, props.recordId, entry.id)
     entries.value = entries.value.filter((e) => e.id !== entry.id)
-    status.value = 'Permission removed'
+    status.value = p('record.status.removed')
     emit('updated')
   } catch (cause: any) {
-    error.value = cause?.message ?? 'Failed to remove permission'
+    error.value = cause?.message ?? p('record.error.remove')
   } finally {
     busyKey.value = null
   }
@@ -438,10 +469,10 @@ async function grantCandidate(subjectType: RecordPermissionEntry['subjectType'],
       candidateDrafts.value[key] ?? 'read',
     )
     await Promise.all([loadPermissions(), loadCandidates()])
-    status.value = 'Permission granted'
+    status.value = p('record.status.granted')
     emit('updated')
   } catch (cause: any) {
-    error.value = cause?.message ?? 'Failed to grant permission'
+    error.value = cause?.message ?? p('record.error.grant')
   } finally {
     busyKey.value = null
   }
