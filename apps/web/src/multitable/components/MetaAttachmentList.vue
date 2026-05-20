@@ -7,7 +7,7 @@
           v-if="isPreviewableImage(attachment)"
           type="button"
           class="meta-attachment-list__card meta-attachment-list__card--preview"
-          :title="`Preview ${attachment.filename}`"
+          :title="previewAttachmentTitle(attachment.filename, isZh)"
           @click="previewAttachment = attachment"
         >
           <img
@@ -36,7 +36,7 @@
           v-if="removable"
           type="button"
           class="meta-attachment-list__remove"
-          :title="`Remove ${attachment.filename}`"
+          :title="removeAttachmentTitle(attachment.filename, isZh)"
           @click="emit('remove', attachment.id)"
         >&times;</button>
       </div>
@@ -57,11 +57,11 @@
                 :href="previewAttachment.url"
                 target="_blank"
                 rel="noopener noreferrer"
-              >Open original</a>
+              >{{ attachmentLabel('attachment.openOriginal', isZh) }}</a>
               <button
                 type="button"
                 class="meta-attachment-list__lightbox-close"
-                aria-label="Close attachment preview"
+                :aria-label="attachmentLabel('attachment.closePreview', isZh)"
                 @click="previewAttachment = null"
               >&times;</button>
             </div>
@@ -79,7 +79,9 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import type { MetaAttachment } from '../types'
+import { attachmentLabel, previewAttachmentTitle, removeAttachmentTitle } from '../utils/meta-attachment-labels'
 
 withDefaults(defineProps<{
   attachments: MetaAttachment[]
@@ -97,6 +99,7 @@ const emit = defineEmits<{
 }>()
 
 const previewAttachment = ref<MetaAttachment | null>(null)
+const { isZh } = useLocale()
 
 function isPreviewableImage(attachment: MetaAttachment): boolean {
   return attachment.mimeType.startsWith('image/') && !!(attachment.thumbnailUrl || attachment.url)
