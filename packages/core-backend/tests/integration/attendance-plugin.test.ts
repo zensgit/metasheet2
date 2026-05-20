@@ -7346,4 +7346,464 @@ describe('Attendance Plugin Integration', () => {
     expect(code).toBe('EXPIRED')
   })
 
+  it('effective-calendar §6.1 baseline equals resolveWorkContext for rule + holiday rows', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const year = 3030 + (Number.parseInt(runSuffix.slice(-3), 36) % 500)
+    const testUserId = `attendance-effcal-baseline-${runSuffix}`
+    const orgId = 'default'
+    const rangeFrom = `${year}-06-01`
+    const rangeTo = `${year}-06-08`
+    const holidayDate = `${year}-06-03`
+    const workdayOverrideDate = `${year}-06-07`
+
+    const weekdays = new Map<string, number>()
+    for (let i = 1; i <= 8; i += 1) {
+      const d = `${year}-06-${String(i).padStart(2, '0')}`
+      weekdays.set(d, new Date(`${d}T00:00:00Z`).getUTCDay())
+    }
+
+    const pool = new Pool({ connectionString: dbUrl })
+    try {
+      await pool.query(
+        'DELETE FROM attendance_holidays WHERE org_id = $1 AND holiday_date BETWEEN $2 AND $3',
+        [orgId, rangeFrom, rangeTo]
+      )
+      await pool.query(
+        `INSERT INTO attendance_holidays (id, org_id, holiday_date, name, is_working_day, origin)
+         VALUES ($1, 'default', $2, 'Test Holiday', false, 'manual'),
+                ($3, 'default', $4, 'Saturday Work', true, 'manual')`,
+        [randomUuidV4(), holidayDate, randomUuidV4(), workdayOverrideDate]
+      )
+
+      const tokenRes = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:admin`
+      )
+      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      expect(token).toBeTruthy()
+      if (!token) return
+
+      const res = await requestJson(
+        `${baseUrl}/api/attendance/effective-calendar?from=${rangeFrom}&to=${rangeTo}&userId=${encodeURIComponent(testUserId)}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      )
+      expect(res.status).toBe(200)
+      const data = (res.body as any)?.data
+      expect(data?.mode).toBe('userId')
+      expect(data.from).toBe(rangeFrom)
+      expect(data.to).toBe(rangeTo)
+      expect(Array.isArray(data.items)).toBe(true)
+      expect(data.items.length).toBe(8)
+
+      const byDate = new Map<string, any>(data.items.map((it: any) => [it.date, it]))
+
+      const holidayItem = byDate.get(holidayDate)
+      expect(holidayItem.base.source).toBe('manual')
+      expect(holidayItem.base.isWorkingDay).toBe(false)
+      expect(holidayItem.effective.source).toBe('manual')
+      expect(holidayItem.effective.isWorkingDay).toBe(false)
+      expect(holidayItem.layers.some((l: any) => l.kind === 'holiday' && l.source === 'manual')).toBe(true)
+
+      const overrideItem = byDate.get(workdayOverrideDate)
+      expect(overrideItem.base.source).toBe('manual')
+      expect(overrideItem.base.isWorkingDay).toBe(true)
+      expect(overrideItem.effective.source).toBe('manual')
+      expect(overrideItem.effective.isWorkingDay).toBe(true)
+
+      const defaultWorkingDays = [1, 2, 3, 4, 5]
+      for (const item of data.items) {
+        if (item.date === holidayDate || item.date === workdayOverrideDate) continue
+        const expectedWorkday = defaultWorkingDays.includes(weekdays.get(item.date)!)
+        expect(item.base.source).toBe('rule')
+        expect(item.base.isWorkingDay).toBe(expectedWorkday)
+        expect(item.effective.source).toBe('rule')
+        expect(item.effective.isWorkingDay).toBe(expectedWorkday)
+      }
+
+      for (const item of data.items) {
+        const policyLayers = item.layers.filter((l: any) => l.kind === 'calendar_policy')
+        expect(policyLayers.length).toBe(0)
+        expect(item.overlays).toEqual([])
+      }
+    } finally {
+      await pool.query(
+        'DELETE FROM attendance_holidays WHERE org_id = $1 AND holiday_date BETWEEN $2 AND $3',
+        [orgId, rangeFrom, rangeTo]
+      ).catch(() => undefined)
+      await pool.end()
+    }
+  })
+
+  it('effective-calendar §6.2 applies calendarPolicy with mode gates, priority, and normalize drops invalid', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const year = 3030 + (Number.parseInt(runSuffix.slice(-3), 36) % 500)
+    const testUserId = `attendance-effcal-policy-${runSuffix}`
+    const orgId = 'default'
+    const targetDate = `${year}-07-04`
+    const groupName = `effcal-prod-${runSuffix}`
+    const adminUserId = `attendance-effcal-policy-admin-${runSuffix}`
+    let groupId: string | null = null
+    let originalSettings: any = null
+
+    const pool = new Pool({ connectionString: dbUrl })
+    try {
+      // Setup: holiday on targetDate (national)
+      await pool.query(
+        'DELETE FROM attendance_holidays WHERE org_id = $1 AND holiday_date = $2',
+        [orgId, targetDate]
+      )
+      await pool.query(
+        `INSERT INTO attendance_holidays (id, org_id, holiday_date, name, is_working_day, origin)
+         VALUES ($1, 'default', $2, 'National Day Test', false, 'national')`,
+        [randomUuidV4(), targetDate]
+      )
+      // Group + member
+      const groupRows = await pool.query(
+        `INSERT INTO attendance_groups (org_id, name, code, timezone)
+         VALUES ('default', $1, $2, 'UTC')
+         RETURNING id`,
+        [groupName, groupName]
+      )
+      groupId = String(groupRows.rows[0].id)
+      await pool.query(
+        `INSERT INTO attendance_group_members (org_id, group_id, user_id)
+         VALUES ('default', $1, $2)`,
+        [groupId, testUserId]
+      )
+
+      const adminTokenRes = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
+      )
+      const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+
+      // Preserve current settings to restore later
+      const settingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      })
+      originalSettings = (settingsRes.body as any)?.data ?? null
+
+      const overridesPayload = [
+        // valid: org override that flips the national rest day to working day
+        { date: targetDate, effective: { isWorkingDay: true, label: 'Org swap', source: 'org' } },
+        // valid: group override (production) -> rest day
+        { date: targetDate, filters: { attendanceGroups: [groupName] }, effective: { isWorkingDay: false, label: 'Group rest', source: 'group' } },
+        // valid: user override -> working day (highest priority)
+        { date: targetDate, filters: { userIds: [testUserId] }, effective: { isWorkingDay: true, label: 'User confirm', source: 'user' } },
+        // INVALID 1: source='group' missing attendanceGroups filter -> normalize drops
+        { date: targetDate, effective: { isWorkingDay: false, label: 'Bad group', source: 'group' } },
+        // INVALID 2: no constraint at all -> normalize drops
+        { effective: { isWorkingDay: false, label: 'Bad blanket', source: 'org' } },
+        // INVALID 3: source='user' missing user filter -> normalize drops
+        { date: targetDate, effective: { isWorkingDay: true, label: 'Bad user', source: 'user' } },
+      ]
+
+      const putRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ calendarPolicy: { overrides: overridesPayload } }),
+      })
+      expect(putRes.status).toBe(200)
+      const savedOverrides = ((putRes.body as any)?.data?.calendarPolicy?.overrides ?? []) as any[]
+      // 3 invalid entries dropped at normalize
+      expect(savedOverrides.length).toBe(3)
+      const labels = savedOverrides.map((o: any) => o.effective?.label).sort()
+      expect(labels).toEqual(['Group rest', 'Org swap', 'User confirm'])
+      // Each saved override has a stable id assigned at normalize
+      for (const o of savedOverrides) expect(typeof o.id).toBe('string')
+
+      // Mode: userId — user override wins (priority 4 > group 2 > org 1)
+      const userRes = await requestJson(
+        `${baseUrl}/api/attendance/effective-calendar?from=${targetDate}&to=${targetDate}&userId=${encodeURIComponent(testUserId)}`,
+        { headers: { Authorization: `Bearer ${adminToken}` } }
+      )
+      expect(userRes.status).toBe(200)
+      const userItem = ((userRes.body as any)?.data?.items ?? [])[0]
+      expect(userItem.date).toBe(targetDate)
+      expect(userItem.base.source).toBe('national')
+      expect(userItem.base.isWorkingDay).toBe(false)
+      expect(userItem.effective.source).toBe('user')
+      expect(userItem.effective.isWorkingDay).toBe(true)
+      const userPolicyLayers = userItem.layers.filter((l: any) => l.kind === 'calendar_policy').map((l: any) => l.source)
+      expect(userPolicyLayers).toEqual(['org', 'group', 'user'])
+
+      // Mode: groupId — only 'group' source is in allowed set; org/user don't apply
+      const groupRes = await requestJson(
+        `${baseUrl}/api/attendance/effective-calendar?from=${targetDate}&to=${targetDate}&groupId=${encodeURIComponent(groupId!)}`,
+        { headers: { Authorization: `Bearer ${adminToken}` } }
+      )
+      expect(groupRes.status).toBe(200)
+      const groupItem = ((groupRes.body as any)?.data?.items ?? [])[0]
+      expect(groupItem.effective.source).toBe('group')
+      expect(groupItem.effective.isWorkingDay).toBe(false)
+      const groupPolicyLayers = groupItem.layers.filter((l: any) => l.kind === 'calendar_policy').map((l: any) => l.source)
+      expect(groupPolicyLayers).toEqual(['group'])
+
+      // Mode: orgOnly — only 'org' source applies
+      const orgRes = await requestJson(
+        `${baseUrl}/api/attendance/effective-calendar?from=${targetDate}&to=${targetDate}&orgOnly=true`,
+        { headers: { Authorization: `Bearer ${adminToken}` } }
+      )
+      expect(orgRes.status).toBe(200)
+      const orgItem = ((orgRes.body as any)?.data?.items ?? [])[0]
+      expect(orgItem.effective.source).toBe('org')
+      expect(orgItem.effective.isWorkingDay).toBe(true)
+      const orgPolicyLayers = orgItem.layers.filter((l: any) => l.kind === 'calendar_policy').map((l: any) => l.source)
+      expect(orgPolicyLayers).toEqual(['org'])
+    } finally {
+      if (originalSettings) {
+        const cleanupTokenRes = await requestJson(
+          `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(`${adminUserId}-cleanup`)}&roles=admin&perms=attendance:admin`
+        )
+        const cleanupToken = (cleanupTokenRes.body as { token?: string } | undefined)?.token
+        if (cleanupToken) {
+          await requestJson(`${baseUrl}/api/attendance/settings`, {
+            method: 'PUT',
+            headers: { Authorization: `Bearer ${cleanupToken}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ calendarPolicy: { overrides: [] } }),
+          }).catch(() => undefined)
+        }
+      }
+      if (groupId) {
+        await pool.query('DELETE FROM attendance_group_members WHERE group_id = $1', [groupId]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_groups WHERE id = $1', [groupId]).catch(() => undefined)
+      }
+      await pool.query(
+        'DELETE FROM attendance_holidays WHERE org_id = $1 AND holiday_date = $2',
+        [orgId, targetDate]
+      ).catch(() => undefined)
+      await pool.end()
+    }
+  })
+
+  it('effective-calendar §6.3 returns approved request overlays additively without merging', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const year = 3030 + (Number.parseInt(runSuffix.slice(-3), 36) % 500)
+    const testUserId = `attendance-effcal-overlays-${runSuffix}`
+    const orgId = 'default'
+    const targetDate = `${year}-08-15`
+    const pool = new Pool({ connectionString: dbUrl })
+
+    try {
+      await pool.query(
+        `DELETE FROM attendance_requests WHERE user_id = $1`,
+        [testUserId]
+      )
+      // Insert approved leave, overtime, and correction (time_correction) requests on the same date
+      const leaveId = randomUuidV4()
+      const overtimeId = randomUuidV4()
+      const correctionId = randomUuidV4()
+      await pool.query(
+        `INSERT INTO attendance_requests (id, org_id, user_id, work_date, request_type, status, metadata, created_at)
+         VALUES
+           ($1, 'default', $2, $3, 'leave', 'approved', '{"minutes":240}'::jsonb, now()),
+           ($4, 'default', $2, $3, 'overtime', 'approved', '{"minutes":180}'::jsonb, now() + interval '1 second'),
+           ($5, 'default', $2, $3, 'time_correction', 'approved', '{}'::jsonb, now() + interval '2 second')`,
+        [leaveId, testUserId, targetDate, overtimeId, correctionId]
+      )
+
+      const tokenRes = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:admin`
+      )
+      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      expect(token).toBeTruthy()
+      if (!token) return
+
+      const res = await requestJson(
+        `${baseUrl}/api/attendance/effective-calendar?from=${targetDate}&to=${targetDate}&userId=${encodeURIComponent(testUserId)}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      )
+      expect(res.status).toBe(200)
+      const item = ((res.body as any)?.data?.items ?? [])[0]
+      expect(item.date).toBe(targetDate)
+      expect(Array.isArray(item.overlays)).toBe(true)
+      expect(item.overlays.length).toBe(3)
+      // additive: kinds preserved, no merge
+      const kinds = item.overlays.map((o: any) => o.kind)
+      expect(kinds).toEqual(['personal_leave', 'overtime', 'attendance_correction'])
+      // sources all attendance_requests
+      for (const ov of item.overlays) expect(ov.source).toBe('attendance_requests')
+      // requestType preserved per overlay
+      expect(item.overlays[0].requestType).toBe('leave')
+      expect(item.overlays[0].minutes).toBe(240)
+      expect(item.overlays[1].requestType).toBe('overtime')
+      expect(item.overlays[1].minutes).toBe(180)
+      expect(item.overlays[2].requestType).toBe('time_correction')
+      // refId carries attendance_requests.id for client audit
+      expect(item.overlays[0].refId).toBe(leaveId)
+      expect(item.overlays[1].refId).toBe(overtimeId)
+      expect(item.overlays[2].refId).toBe(correctionId)
+      // effective workday is NOT changed by overlays (no calendarPolicy here)
+      expect(item.effective.source).toBe('rule')
+    } finally {
+      await pool.query(`DELETE FROM attendance_requests WHERE user_id = $1`, [testUserId]).catch(() => undefined)
+      await pool.end()
+    }
+  })
+
+  it('effective-calendar validates strictly, enforces RBAC, and 404s missing group', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const requesterId = `attendance-effcal-rbac-req-${runSuffix}`
+    const targetId = `attendance-effcal-rbac-tgt-${runSuffix}`
+    const adminId = `attendance-effcal-rbac-adm-${runSuffix}`
+
+    // Read-only token for cross-user RBAC negative case
+    const readOnlyRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&roles=user&perms=attendance:read`
+    )
+    const readOnlyToken = (readOnlyRes.body as { token?: string } | undefined)?.token
+    // Read + approve token for cross-user RBAC positive case
+    const approveRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&roles=user&perms=attendance:read,attendance:approve`
+    )
+    const approveToken = (approveRes.body as { token?: string } | undefined)?.token
+    // Admin token for groupId / 404 case
+    const adminRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminId)}&roles=admin&perms=attendance:read,attendance:admin`
+    )
+    const adminToken = (adminRes.body as { token?: string } | undefined)?.token
+    expect(readOnlyToken).toBeTruthy()
+    expect(approveToken).toBeTruthy()
+    expect(adminToken).toBeTruthy()
+    if (!readOnlyToken || !approveToken || !adminToken) return
+
+    const base = `${baseUrl}/api/attendance/effective-calendar`
+    const dateRange = `from=2030-01-01&to=2030-01-03`
+
+    // 400: missing from/to
+    const missingRes = await requestJson(`${base}?to=2030-01-01&orgOnly=true`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    })
+    expect(missingRes.status).toBe(400)
+    // 400: invalid date
+    const badDateRes = await requestJson(`${base}?from=bogus&to=2030-01-01&orgOnly=true`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    })
+    expect(badDateRes.status).toBe(400)
+    // 400: no mode
+    const noModeRes = await requestJson(`${base}?${dateRange}`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    })
+    expect(noModeRes.status).toBe(400)
+    // 400: two modes
+    const twoModesRes = await requestJson(`${base}?${dateRange}&userId=x&orgOnly=true`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    })
+    expect(twoModesRes.status).toBe(400)
+    // 400: range too big
+    const bigRangeRes = await requestJson(`${base}?from=2030-01-01&to=2031-06-01&orgOnly=true`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    })
+    expect(bigRangeRes.status).toBe(400)
+    // 404: groupId not found
+    const noGroupRes = await requestJson(`${base}?${dateRange}&groupId=group-does-not-exist-${runSuffix}`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    })
+    expect(noGroupRes.status).toBe(404)
+
+    // RBAC: read-only token querying another user → 403
+    const denyRes = await requestJson(`${base}?${dateRange}&userId=${encodeURIComponent(targetId)}`, {
+      headers: { Authorization: `Bearer ${readOnlyToken}` },
+    })
+    expect(denyRes.status).toBe(403)
+    // RBAC: same user (self) querying own calendar → 200
+    const selfRes = await requestJson(`${base}?${dateRange}&userId=${encodeURIComponent(requesterId)}`, {
+      headers: { Authorization: `Bearer ${readOnlyToken}` },
+    })
+    expect(selfRes.status).toBe(200)
+    // RBAC: read+approve token querying another user → 200
+    const approveOtherRes = await requestJson(`${base}?${dateRange}&userId=${encodeURIComponent(targetId)}`, {
+      headers: { Authorization: `Bearer ${approveToken}` },
+    })
+    expect(approveOtherRes.status).toBe(200)
+    // RBAC: read-only token using groupId → 403 (groupId requires attendance:admin)
+    const groupDenyRes = await requestJson(`${base}?${dateRange}&groupId=anything`, {
+      headers: { Authorization: `Bearer ${readOnlyToken}` },
+    })
+    expect(groupDenyRes.status).toBe(403)
+  })
+
+  it('effective-calendar role/roleTags override is valid config but silently inert in resolver mode', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const year = 3030 + (Number.parseInt(runSuffix.slice(-3), 36) % 500)
+    const targetDate = `${year}-09-12`
+    const testUserId = `attendance-effcal-roleinert-user-${runSuffix}`
+    const adminUserId = `attendance-effcal-roleinert-admin-${runSuffix}`
+
+    const adminTokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:admin`
+    )
+    const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
+    expect(adminToken).toBeTruthy()
+    if (!adminToken) return
+
+    try {
+      // POST a role-source override targeting a role the resolver cannot load
+      // for a user; per Known Limitation (v1), role/roleTags filters require
+      // a DB context loader that does not exist yet, so the override stays as
+      // valid persisted config but does not fire in resolver mode.
+      const putRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          calendarPolicy: {
+            overrides: [
+              {
+                date: targetDate,
+                filters: { roles: ['production_lead'] },
+                effective: { isWorkingDay: true, label: 'Role-inert in resolver', source: 'role' },
+              },
+            ],
+          },
+        }),
+      })
+      expect(putRes.status).toBe(200)
+      const saved = ((putRes.body as any)?.data?.calendarPolicy?.overrides ?? []) as any[]
+      // Config remains valid + persisted (normalize keeps it)
+      expect(saved.length).toBe(1)
+      expect(saved[0].effective?.source).toBe('role')
+
+      const res = await requestJson(
+        `${baseUrl}/api/attendance/effective-calendar?from=${targetDate}&to=${targetDate}&userId=${encodeURIComponent(testUserId)}`,
+        { headers: { Authorization: `Bearer ${adminToken}` } }
+      )
+      expect(res.status).toBe(200)
+      const item = ((res.body as any)?.data?.items ?? [])[0]
+      expect(item.date).toBe(targetDate)
+      // No calendar_policy layer present — the role override silently did not fire
+      const policyLayers = item.layers.filter((l: any) => l.kind === 'calendar_policy')
+      expect(policyLayers.length).toBe(0)
+      // effective falls back to base (rule)
+      expect(item.effective.source).toBe('rule')
+      expect(item.effective.policyId).toBeUndefined()
+    } finally {
+      const cleanupRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ calendarPolicy: { overrides: [] } }),
+      })
+      expect(cleanupRes.status).toBe(200)
+    }
+  })
+
 })
