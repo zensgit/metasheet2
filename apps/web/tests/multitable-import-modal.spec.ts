@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref } from 'vue'
+import { useLocale } from '../src/composables/useLocale'
 import MetaImportModal from '../src/multitable/components/MetaImportModal.vue'
 
 const { mockListLinkOptions } = vi.hoisted(() => ({
@@ -21,6 +22,7 @@ async function flushUi() {
 describe('MetaImportModal', () => {
   beforeEach(() => {
     mockListLinkOptions.mockReset()
+    useLocale().setLocale('en')
     window.localStorage.clear()
   })
 
@@ -213,6 +215,100 @@ describe('MetaImportModal', () => {
     expect(mappingOptions).toContain('Title')
     expect(mappingOptions).not.toContain('Locked')
     expect(mappingOptions).not.toContain('Score')
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('renders zh-CN import chrome while preserving imported headers, field names, and cells raw', async () => {
+    useLocale().setLocale('zh-CN')
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaImportModal, {
+          visible: true,
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string' },
+            { id: 'fld_status', name: 'Status', type: 'select', options: [{ value: 'Open' }] },
+          ],
+          importing: false,
+          result: null,
+          onClose: vi.fn(),
+          onImport: vi.fn(),
+        })
+      },
+    })
+
+    app.mount(container)
+    await flushUi()
+
+    const initialText = document.body.textContent ?? ''
+    expect(initialText).toContain('导入记录')
+    expect(initialText).toContain('粘贴来自 Excel 或 Google Sheets 的制表符分隔数据')
+    expect(initialText).toContain('选择 CSV/TSV/Excel 文件，或拖到这里')
+    expect(initialText).not.toContain('Import Records')
+    expect(document.body.querySelector<HTMLTextAreaElement>('.meta-import__textarea')?.getAttribute('placeholder')).toBe('姓名\t年龄\t邮箱\n张三\t30\tzhangsan@example.com')
+
+    const textarea = document.body.querySelector('.meta-import__textarea') as HTMLTextAreaElement
+    textarea.value = 'Name\tStatus\nAlpha\tOpen'
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    ;(document.body.querySelector('.meta-import__btn--primary') as HTMLButtonElement)?.click()
+    await flushUi()
+
+    const previewText = document.body.textContent ?? ''
+    expect(previewText).toContain('已识别 1 条记录。请将列映射到字段：')
+    expect(previewText).toContain('导入 1 条记录')
+    expect(previewText).toContain('(跳过)')
+    expect(previewText).toContain('Name')
+    expect(previewText).toContain('Status')
+    expect(previewText).toContain('Alpha')
+    expect(previewText).toContain('Open')
+    expect(previewText).not.toContain('Map columns to fields')
+    expect(previewText).not.toContain('Import 1 record(s)')
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('localizes zh-CN result repair chrome while preserving backend failure text raw', async () => {
+    useLocale().setLocale('zh-CN')
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaImportModal, {
+          visible: true,
+          fields: [{ id: 'fld_owner', name: 'Owner', type: 'link', property: { refKind: 'user', foreignSheetId: 'sheet_people' } }],
+          importing: false,
+          result: {
+            attempted: 1,
+            succeeded: 0,
+            failed: 1,
+            firstError: 'Backend raw failure',
+            failures: [{ rowIndex: 0, fieldId: 'fld_owner', retryable: false, message: 'Backend raw failure' }],
+          },
+          onClose: vi.fn(),
+          onImport: vi.fn(),
+        })
+      },
+    })
+
+    app.mount(container)
+    await flushUi()
+
+    const text = document.body.textContent ?? ''
+    expect(text).toContain('0 条已导入，1 条失败')
+    expect(text).toContain('请检查下方失败行，并返回映射以修正源数据。')
+    expect(text).toContain('修正第 2 行')
+    expect(text).toContain('选择人员...')
+    expect(text).toContain('Backend raw failure')
+    expect(text).not.toContain('Review the failed rows below')
+    expect(text).not.toContain('Choose people')
 
     app.unmount()
     container.remove()

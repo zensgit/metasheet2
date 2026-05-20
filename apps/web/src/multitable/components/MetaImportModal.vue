@@ -3,15 +3,15 @@
     <div v-if="visible" class="meta-import-overlay" @click.self="requestClose">
       <div class="meta-import-modal">
         <div class="meta-import__header">
-          <strong>Import Records</strong>
+          <strong>{{ l('import.title') }}</strong>
           <button class="meta-import__close" @click="requestClose">&times;</button>
         </div>
 
         <div v-if="step === 'paste'" class="meta-import__body">
           <div v-if="restoredDraft" class="meta-import__warning">
-            <span>Recovered your previous import draft for this sheet.</span>
+            <span>{{ l('import.recoveredDraft') }}</span>
           </div>
-          <p class="meta-import__hint">Paste tab-separated data from Excel or Google Sheets (first row = headers):</p>
+          <p class="meta-import__hint">{{ l('import.pasteHint') }}</p>
           <label class="meta-import__file-drop" @dragover.prevent @drop.prevent="onFileDrop">
             <input
               class="meta-import__file-input"
@@ -19,40 +19,40 @@
               accept=".csv,text/csv,.tsv,text/tab-separated-values,.txt,text/plain,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xls,application/vnd.ms-excel"
               @change="onFileSelect"
             />
-            <span>Choose a CSV/TSV/Excel file or drop it here</span>
+            <span>{{ l('import.fileDrop') }}</span>
           </label>
           <textarea
             ref="textareaRef"
             class="meta-import__textarea"
-            placeholder="Name&#x9;Age&#x9;Email&#x0A;Alice&#x9;30&#x9;alice@example.com"
+            :placeholder="l('import.textareaPlaceholder')"
             :value="rawText"
             @input="rawText = ($event.target as HTMLTextAreaElement).value"
           ></textarea>
           <div v-if="parseError" class="meta-import__error">{{ parseError }}</div>
           <div class="meta-import__actions">
-            <button class="meta-import__btn" :disabled="isImporting" @click="requestClose">Cancel</button>
-            <button class="meta-import__btn meta-import__btn--primary" :disabled="!rawText.trim()" @click="parseAndPreview">Preview</button>
+            <button class="meta-import__btn" :disabled="isImporting" @click="requestClose">{{ l('import.cancel') }}</button>
+            <button class="meta-import__btn meta-import__btn--primary" :disabled="!rawText.trim()" @click="parseAndPreview">{{ l('import.preview') }}</button>
           </div>
         </div>
 
         <div v-else-if="step === 'preview'" class="meta-import__body">
           <div v-if="restoredDraft" class="meta-import__warning">
-            <span>Recovered your previous import draft for this sheet.</span>
+            <span>{{ l('import.recoveredDraft') }}</span>
           </div>
           <div v-if="parseWarning" class="meta-import__warning">
             <span>{{ parseWarning }}</span>
           </div>
-          <p class="meta-import__hint">{{ parsedRows.length }} record(s) detected. Map columns to fields:</p>
+          <p class="meta-import__hint">{{ detectedRows(parsedRows.length, isZh) }}</p>
           <div v-if="hasImportDraftIssues" class="meta-import__warning">
             <span>{{ importDraftIssueText }}</span>
-            <button class="meta-import__btn-inline" @click="reconcileImportDraft">Reconcile draft</button>
+            <button class="meta-import__btn-inline" @click="reconcileImportDraft">{{ l('import.reconcileDraft') }}</button>
           </div>
           <div class="meta-import__mapping">
             <div v-for="(header, i) in parsedHeaders" :key="i" class="meta-import__map-row">
               <span class="meta-import__col-name">{{ header }}</span>
               <span class="meta-import__arrow">&rarr;</span>
               <select class="meta-import__field-select" :value="fieldMapping[i] ?? ''" @change="fieldMapping[i] = ($event.target as HTMLSelectElement).value">
-                <option value="">(skip)</option>
+                <option value="">{{ l('import.skip') }}</option>
                 <option v-for="f in importableFields" :key="f.id" :value="f.id">{{ f.name }}</option>
               </select>
             </div>
@@ -64,23 +64,23 @@
                 <tr v-for="(row, ri) in parsedRows.slice(0, 5)" :key="ri">
                   <td v-for="(cell, ci) in row" :key="ci">{{ cell }}</td>
                 </tr>
-                <tr v-if="parsedRows.length > 5"><td :colspan="parsedHeaders.length" class="meta-import__more">... and {{ parsedRows.length - 5 }} more</td></tr>
+                <tr v-if="parsedRows.length > 5"><td :colspan="parsedHeaders.length" class="meta-import__more">{{ moreRows(parsedRows.length - 5, isZh) }}</td></tr>
               </tbody>
             </table>
           </div>
           <div class="meta-import__actions">
-            <button class="meta-import__btn" :disabled="isImporting" @click="goBackToPaste">Back</button>
+            <button class="meta-import__btn" :disabled="isImporting" @click="goBackToPaste">{{ l('import.back') }}</button>
             <button class="meta-import__btn meta-import__btn--primary" :disabled="!canImportPreview" @click="doImport">
-              Import {{ parsedRows.length }} record(s)
+              {{ importRecords(parsedRows.length, isZh) }}
             </button>
           </div>
         </div>
 
         <div v-else-if="step === 'importing'" class="meta-import__body meta-import__importing">
           <div class="meta-import__spinner"></div>
-          <p>Importing {{ pendingRecordCount }} record(s)...</p>
+          <p>{{ importingRecords(pendingRecordCount, isZh) }}</p>
           <div class="meta-import__actions meta-import__actions--center">
-            <button class="meta-import__btn" @click="requestClose">Cancel import</button>
+            <button class="meta-import__btn" @click="requestClose">{{ l('import.cancelImport') }}</button>
           </div>
         </div>
 
@@ -89,37 +89,37 @@
             <strong>{{ resultSummaryText }}</strong>
             <p v-if="hasFailedImports">
               <template v-if="retryableFailureCount > 0">
-                Review the failed rows below, then retry just those rows or return to mapping.
+                {{ l('import.failedReviewRetry') }}
               </template>
               <template v-else>
-                Review the failed rows below and return to mapping to fix the source data.
+                {{ l('import.failedReviewMapping') }}
               </template>
             </p>
             <p v-else-if="hasSkippedImports">
-              Some rows were skipped as duplicates.
+              {{ l('import.skippedDuplicates') }}
             </p>
-            <p v-else>The selected records were imported successfully.</p>
+            <p v-else>{{ l('import.success') }}</p>
           </div>
           <div v-if="hasImportDraftIssues" class="meta-import__warning">
             <span>{{ importDraftIssueText }}</span>
-            <button class="meta-import__btn-inline" @click="reconcileImportDraft">Reconcile draft</button>
+            <button class="meta-import__btn-inline" @click="reconcileImportDraft">{{ l('import.reconcileDraft') }}</button>
           </div>
           <div v-if="failedPreviewRows.length" class="meta-import__failures">
             <div v-for="failure in failedPreviewRows" :key="`${failure.originalIndex}:${failure.fieldId ?? 'row'}`" class="meta-import__failure">
               <div class="meta-import__failure-head">
-                <strong>Row {{ failure.rowNumber }}</strong>
+                <strong>{{ rowLabel(failure.rowNumber, isZh) }}</strong>
                 <span>{{ failure.message }}</span>
               </div>
-              <div class="meta-import__failure-row">{{ failure.values.join(' | ') || '(empty row)' }}</div>
+              <div class="meta-import__failure-row">{{ failure.values.join(' | ') || l('import.emptyRow') }}</div>
             </div>
             <div v-if="remainingFailedCount > 0" class="meta-import__more">
-              ... and {{ remainingFailedCount }} more failed row(s)
+              {{ moreFailedRows(remainingFailedCount, isZh) }}
             </div>
           </div>
           <div v-if="manualFixRows.length" class="meta-import__fixes">
             <div v-for="failure in manualFixRows" :key="`${failure.rowIndex}:${failure.fieldId ?? 'row'}`" class="meta-import__fix">
               <div class="meta-import__failure-head">
-                <strong>Fix Row {{ failure.rowNumber }}</strong>
+                <strong>{{ fixRowLabel(failure.rowNumber, isZh) }}</strong>
                 <span>{{ failure.message }}</span>
               </div>
               <div class="meta-import__fix-grid">
@@ -129,12 +129,12 @@
                   class="meta-import__fix-cell"
                   :class="{ 'meta-import__fix-cell--problem': failure.problemColumnIndexes.includes(ci) }"
                 >
-                  <span>{{ parsedHeaders[ci] || `Column ${ci + 1}` }}</span>
+                  <span>{{ parsedHeaders[ci] || columnLabel(ci, isZh) }}</span>
                   <input class="meta-import__fix-input" :value="cell" @input="updateFailedCell(failure.rowIndex, ci, ($event.target as HTMLInputElement).value)" />
                 </label>
               </div>
               <div v-if="failure.showPeopleHint" class="meta-import__fix-hint">
-                Use an exact email address or person record ID for this field.
+                {{ l('import.peopleExactHint') }}
               </div>
               <div v-if="failure.canUsePicker" class="meta-import__fix-picker-row">
                 <button class="meta-import__btn meta-import__btn--primary" @click="openPickerForFailure(failure)">
@@ -147,14 +147,14 @@
             </div>
           </div>
           <div class="meta-import__actions">
-            <button class="meta-import__btn" :disabled="isImporting" @click="goBackToPreview">Back to mapping</button>
+            <button class="meta-import__btn" :disabled="isImporting" @click="goBackToPreview">{{ l('import.backToMapping') }}</button>
             <button v-if="hasFailedImports && retryableFailureCount > 0" class="meta-import__btn meta-import__btn--primary" :disabled="!canRetryFailedRows" @click="retryFailedRows">
-              Retry failed rows
+              {{ l('import.retryFailedRows') }}
             </button>
             <button v-if="manualFixRows.length" class="meta-import__btn meta-import__btn--primary" :disabled="!canApplyFixes" @click="applyFixesAndRetry">
-              Apply fixes and retry
+              {{ l('import.applyFixes') }}
             </button>
-            <button class="meta-import__btn" :disabled="isImporting" @click="requestClose">Close</button>
+            <button class="meta-import__btn" :disabled="isImporting" @click="requestClose">{{ l('import.close') }}</button>
           </div>
         </div>
       </div>
@@ -173,11 +173,32 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import MetaLinkPicker from './MetaLinkPicker.vue'
+import { useLocale } from '../../composables/useLocale'
 import type { LinkedRecordSummary, MetaField } from '../types'
 import { buildImportedRecords, parseDelimitedText } from '../import/delimited'
 import type { ImportBuildFailure, ImportBuildResult, ImportFieldOverrides, ImportValueResolver } from '../import/delimited'
 import { XLSX_MAX_BYTES, XLSX_MAX_ROWS, mapXlsxColumnsToFields, parseXlsxBuffer } from '../import/xlsx-mapping'
 import { isLinkField, isPersonField, linkActionLabel } from '../utils/link-fields'
+import {
+  columnLabel,
+  detectedRows,
+  fieldNoLongerImportable,
+  fileTooLarge,
+  fixRowLabel,
+  importComplete,
+  importLabel,
+  importRecords,
+  importResultSummary,
+  importingRecords,
+  manualRepairFieldRemoved,
+  mappedFieldRemoved,
+  moreDraftIssues,
+  moreFailedRows,
+  moreRows,
+  rowLabel,
+  selectedRepairInvalid,
+  xlsxTruncated,
+} from '../utils/meta-import-labels'
 
 type ImportResultFailure = ImportBuildFailure & {
   index?: number
@@ -227,6 +248,9 @@ const emit = defineEmits<{
   (e: 'import', payload: ImportBuildResult): void
   (e: 'update:dirty', dirty: boolean): void
 }>()
+
+const { isZh } = useLocale()
+const l = (key: Parameters<typeof importLabel>[0]) => importLabel(key, isZh.value)
 
 const step = ref<'paste' | 'preview' | 'importing' | 'result'>('paste')
 const rawText = ref('')
@@ -281,17 +305,14 @@ const manualFixRows = computed(() => (props.result?.failures ?? [])
       problemField: field,
       showPeopleHint: !!field && isPersonField(field) && /exact match|people value/i.test(failure.message),
       canUsePicker: !!field && isLinkField(field),
-      pickerButtonLabel: linkActionLabel(field, selectedSummaries.length),
+      pickerButtonLabel: linkActionLabel(field, selectedSummaries.length, isZh.value),
       selectedSummaries,
     }
   }))
 const resultSummaryText = computed(() => {
-  if (!props.result) return 'Import complete'
+  if (!props.result) return importComplete(isZh.value)
   const skipped = props.result.skipped ?? 0
-  if (props.result.failed > 0 && skipped > 0) return `${props.result.succeeded} imported, ${skipped} skipped, ${props.result.failed} failed`
-  if (props.result.failed > 0) return `${props.result.succeeded} imported, ${props.result.failed} failed`
-  if (skipped > 0) return `${props.result.succeeded} imported, ${skipped} skipped`
-  return `Imported ${props.result.succeeded} record(s)`
+  return importResultSummary(props.result.succeeded, skipped, props.result.failed, isZh.value)
 })
 const failedPreviewRows = computed(() => (props.result?.failures ?? []).slice(0, 5).map((failure) => ({
   ...failure,
@@ -325,12 +346,12 @@ const importDraftIssues = computed<ImportDraftIssue[]>(() => {
   for (const [columnIndex, fieldId] of Object.entries(fieldMapping.value)) {
     if (!fieldId) continue
     const field = fieldsById.value.get(fieldId)
-    const header = parsedHeaders.value[Number(columnIndex)] || `Column ${Number(columnIndex) + 1}`
+    const header = parsedHeaders.value[Number(columnIndex)] || columnLabel(Number(columnIndex), isZh.value)
     if (!field) {
       issues.set(`mapping:${fieldId}`, {
         kind: 'mapping-missing',
         fieldId,
-        message: `Mapped field for ${header} was removed in the background. Reconcile the draft before importing.`,
+        message: mappedFieldRemoved(header, isZh.value),
       })
       continue
     }
@@ -338,7 +359,7 @@ const importDraftIssues = computed<ImportDraftIssue[]>(() => {
       issues.set(`mapping:${fieldId}`, {
         kind: 'mapping-not-importable',
         fieldId,
-        message: `${field.name} is no longer an importable field. Reconcile the draft before importing.`,
+        message: fieldNoLongerImportable(field.name, isZh.value),
       })
     }
   }
@@ -349,7 +370,7 @@ const importDraftIssues = computed<ImportDraftIssue[]>(() => {
         issues.set(`override:${rowIndexText}:${fieldId}`, {
           kind: 'manual-override-invalid',
           fieldId,
-          message: 'A manual repair targets a field that was removed in the background. Reconcile the draft before importing.',
+          message: manualRepairFieldRemoved(isZh.value),
         })
         continue
       }
@@ -357,7 +378,7 @@ const importDraftIssues = computed<ImportDraftIssue[]>(() => {
         issues.set(`override:${rowIndexText}:${fieldId}`, {
           kind: 'manual-override-invalid',
           fieldId,
-          message: `A selected linked-record repair for ${field.name} is no longer valid because the field changed type. Reconcile the draft before importing.`,
+          message: selectedRepairInvalid(field.name, isZh.value),
         })
       }
     }
@@ -368,7 +389,7 @@ const hasImportDraftIssues = computed(() => importDraftIssues.value.length > 0)
 const importDraftIssueText = computed(() => {
   if (!importDraftIssues.value.length) return ''
   const [first, ...rest] = importDraftIssues.value
-  return rest.length > 0 ? `${first.message} ${rest.length} more issue(s) need review.` : first.message
+  return moreDraftIssues(first.message, rest.length, isZh.value)
 })
 const canImportPreview = computed(() => hasMappedFields.value && props.importing !== true && !hasImportDraftIssues.value)
 const canRetryFailedRows = computed(() => !props.importing && !hasImportDraftIssues.value && failedPreviewRows.value.length > 0)
@@ -517,13 +538,13 @@ function parseAndPreview() {
   const parsed = parseDelimitedText(rawText.value)
   const lines = parsed.rows
   if (lines.length < 2) {
-    parseError.value = 'Need at least one header row and one data row'
+    parseError.value = l('import.errorNeedRows')
     return
   }
   parsedHeaders.value = lines[0]
   parsedRows.value = lines.slice(1).filter((row) => row.some((cell) => cell.trim()))
   if (!parsedRows.value.length) {
-    parseError.value = 'No importable rows found'
+    parseError.value = l('import.errorNoRows')
     return
   }
 
@@ -541,7 +562,7 @@ async function readAndSetText(file: File) {
   try {
     rawText.value = await file.text()
   } catch (error: any) {
-    parseError.value = error.message ?? 'Failed to read file'
+    parseError.value = error.message ?? l('import.errorReadFile')
   }
 }
 
@@ -559,7 +580,7 @@ async function readAndSetXlsx(file: File) {
   parseError.value = ''
   parseWarning.value = ''
   if (file.size > XLSX_MAX_BYTES) {
-    parseError.value = `File too large (max ${(XLSX_MAX_BYTES / (1024 * 1024)).toFixed(0)} MB)`
+    parseError.value = fileTooLarge((XLSX_MAX_BYTES / (1024 * 1024)).toFixed(0), isZh.value)
     return
   }
   try {
@@ -567,7 +588,7 @@ async function readAndSetXlsx(file: File) {
     const buffer = await file.arrayBuffer()
     const result = parseXlsxBuffer(xlsx, buffer)
     if (!result.headers.length || !result.rows.length) {
-      parseError.value = 'No importable rows found in spreadsheet'
+      parseError.value = l('import.errorSpreadsheetEmpty')
       return
     }
     rawText.value = ''
@@ -575,11 +596,11 @@ async function readAndSetXlsx(file: File) {
     parsedRows.value = result.rows
     fieldMapping.value = mapXlsxColumnsToFields(result.headers, importableFields.value).mapping
     if (result.truncated) {
-      parseWarning.value = `Imported the first ${parsedRows.value.length} rows; remaining rows were skipped (limit ${XLSX_MAX_ROWS}).`
+      parseWarning.value = xlsxTruncated(parsedRows.value.length, XLSX_MAX_ROWS, isZh.value)
     }
     step.value = 'preview'
   } catch (error: any) {
-    parseError.value = error?.message ?? 'Failed to read Excel file'
+    parseError.value = error?.message ?? l('import.errorReadExcel')
   }
 }
 
@@ -628,7 +649,7 @@ function requestClose() {
     emit('cancel-import')
     return
   }
-  if (importDraftDirty.value && !window.confirm('Discard unsaved import changes?')) return
+  if (importDraftDirty.value && !window.confirm(l('import.discardConfirm'))) return
   clearImportDraft()
   emit('close')
 }
