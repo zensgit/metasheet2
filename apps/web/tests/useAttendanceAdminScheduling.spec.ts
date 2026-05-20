@@ -484,6 +484,73 @@ describe('useAttendanceAdminScheduling', () => {
     expect(scheduling.holidays.value[0]?.id).toBe('holiday-2')
   })
 
+  it('preserves the holiday row origin (national/manual) loaded from /api/attendance/holidays for PR2 admin chip badge', async () => {
+    const adminForbidden = ref(false)
+    const apiFetch = vi.fn().mockResolvedValue(jsonResponse(200, {
+      ok: true,
+      data: {
+        items: [
+          { id: 'h-nat', date: '2026-10-01', name: 'National Day', isWorkingDay: false, origin: 'national' },
+          { id: 'h-man', date: '2026-10-08', name: 'Office party', isWorkingDay: false, origin: 'manual' },
+          { id: 'h-legacy', date: '2026-10-15', name: 'Legacy row', isWorkingDay: false },
+        ],
+      },
+    }))
+
+    const scheduling = useAttendanceAdminScheduling({
+      adminForbidden,
+      apiFetch,
+      defaultTimezone: 'UTC',
+      getOrgId: () => 'org-pr2',
+      getDateRange: () => ({ from: '2026-10-01', to: '2026-10-31' }),
+    })
+
+    await scheduling.loadHolidays()
+
+    expect(scheduling.holidays.value).toHaveLength(3)
+    expect(scheduling.holidays.value[0]?.origin).toBe('national')
+    expect(scheduling.holidays.value[1]?.origin).toBe('manual')
+    // Legacy rows without `origin` keep the field undefined — the UI badge
+    // treats undefined as 'manual' (the backend default since Step 2).
+    expect(scheduling.holidays.value[2]?.origin).toBeUndefined()
+  })
+
+  it('does NOT send origin in the holiday save body — backend keeps manual as authoritative default', async () => {
+    const adminForbidden = ref(false)
+    const setStatus = vi.fn()
+    const apiFetch = vi.fn().mockResolvedValue(jsonResponse(200, {
+      ok: true,
+      data: { holiday: { id: 'h-new', date: '2026-11-11', name: 'Single Day', isWorkingDay: false, origin: 'manual' } },
+    }))
+
+    const scheduling = useAttendanceAdminScheduling({
+      adminForbidden,
+      apiFetch,
+      setStatus,
+      defaultTimezone: 'UTC',
+      getOrgId: () => 'org-pr2',
+      getDateRange: () => ({ from: '2026-11-01', to: '2026-11-30' }),
+    })
+
+    scheduling.holidayForm.date = '2026-11-11'
+    scheduling.holidayForm.name = 'Single Day'
+    scheduling.holidayForm.isWorkingDay = false
+
+    await scheduling.saveHoliday()
+
+    // Find the create call (POST /api/attendance/holidays). Inspect its body
+    // and assert `origin` is absent — Should-Fix #4: backend default reigns.
+    const saveCall = apiFetch.mock.calls.find((call) => {
+      const [, init] = call as [string, RequestInit | undefined]
+      return typeof init?.method === 'string' && /post|put|patch/i.test(init.method)
+    })
+    expect(saveCall).toBeDefined()
+    const init = saveCall?.[1] as RequestInit | undefined
+    const body = typeof init?.body === 'string' ? JSON.parse(init.body) : null
+    expect(body).toBeTruthy()
+    expect(Object.prototype.hasOwnProperty.call(body!, 'origin')).toBe(false)
+  })
+
   it('requires a holiday name before saving', async () => {
     const adminForbidden = ref(false)
     const setStatus = vi.fn()

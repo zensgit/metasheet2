@@ -415,4 +415,39 @@ describe('Attendance self-service dashboard', () => {
     expect(pageText).toContain('Minimum punch interval is enforced by policy. Retry after the interval.')
     expect(pageText).toContain('Retry refresh')
   })
+
+  // PR2 review fix (Codex Blocking #1): the personal calendar must read a
+  // userId committed at Refresh-time, NOT the live v-model value of the
+  // targetUserId input. This test types into the input without refreshing
+  // and asserts that no new effective-calendar fetch fired for the typed
+  // value; then clicks Refresh and asserts the fetch URL carries the typed
+  // userId — same commit point as summary/records/requests.
+  it('PR2 review #1: typing targetUserId does not request effective-calendar until Refresh commits it', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const effectiveCalls = () => vi.mocked(apiFetch).mock.calls.filter((call) =>
+      typeof call[0] === 'string' && call[0].includes('/api/attendance/effective-calendar'),
+    )
+    const baselineCalls = effectiveCalls().length
+    expect(effectiveCalls().some((call) => String(call[0]).includes('userId=typed-user-pr2'))).toBe(false)
+
+    const targetInput = container?.querySelector('input[name="targetUserId"]') as HTMLInputElement | null
+    expect(targetInput).toBeTruthy()
+    targetInput!.value = 'typed-user-pr2'
+    targetInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    // Typing must NOT have produced a new effective-calendar fetch
+    expect(effectiveCalls().length).toBe(baselineCalls)
+    expect(effectiveCalls().some((call) => String(call[0]).includes('userId=typed-user-pr2'))).toBe(false)
+
+    findButton(container!, 'Refresh').click()
+    await flushUi(12)
+
+    const afterRefresh = effectiveCalls()
+    expect(afterRefresh.length).toBeGreaterThan(baselineCalls)
+    expect(afterRefresh.some((call) => String(call[0]).includes('userId=typed-user-pr2'))).toBe(true)
+  })
 })

@@ -1,0 +1,33 @@
+/*
+ * Shared source palette for effective-calendar chips across multitable
+ * Calendar view, attendance personal calendar, and holiday admin section.
+ *
+ * Imported once globally from apps/web/src/main.ts so per-SFC scoped @imports
+ * do not silently drift. Components apply the source class via
+ * calendarChipSourceClassName(chip.effective?.source) and resolve the CSS
+ * variable in their own scoped style block, typically as:
+ *   border-left: 4px solid var(--calendar-source-accent, transparent);
+ * Working/rest base colors stay intact on each surface; this palette adds an
+ * orthogonal source channel.
+ */
+
+.calendar-source--national { --calendar-source-accent: #d73a4a; }
+.calendar-source--manual   { --calendar-source-accent: #6e7681; }
+.calendar-source--org      { --calendar-source-accent: #fb8500; }
+.calendar-source--group    { --calendar-source-accent: #3a86ff; }
+.calendar-source--role     { --calendar-source-accent: #9b5de5; }
+.calendar-source--user     { --calendar-source-accent: #063070; }
+
+/* Generic consume: any element carrying a calendar-source--<kind> class gets
+ * a 4px left border accent in the resolved color. Surfaces opt in by adding
+ * the source class (no per-component CSS duplication needed). The accent is
+ * orthogonal to working/rest base colors and stacks with PR1's
+ * --overridden dotted bottom and --with-overlay dot. */
+.calendar-source--national,
+.calendar-source--manual,
+.calendar-source--org,
+.calendar-source--group,
+.calendar-source--role,
+.calendar-source--user {
+  border-left: 4px solid var(--calendar-source-accent, transparent);
+}
