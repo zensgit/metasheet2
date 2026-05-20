@@ -52,6 +52,7 @@ REQUIRED_PATHS=(
   "scripts/ops/multitable-onprem-deploy-easy.sh"
   "scripts/ops/multitable-onprem-apply-package.sh"
   "scripts/ops/multitable-onprem-apply-package.ps1"
+  "scripts/ops/multitable-onprem-deploy-launcher.ps1"
   "scripts/ops/multitable-onprem-package-install.sh"
   "scripts/ops/multitable-onprem-package-upgrade.sh"
   "scripts/ops/multitable-onprem-healthcheck.sh"
@@ -204,7 +205,12 @@ if "%~1"=="" (
   echo Usage: deploy.bat ^<package.zip^|package.tgz^>
   exit /b 64
 )
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\ops\multitable-onprem-apply-package.ps1" -RootDir "%~dp0." -PackageArchive "%~1"
+REM Call the self-bootstrapping launcher so the FIRST apply on an upgrade uses
+REM the freshest apply helper from inside the supplied package, not the stale
+REM helper sitting in the installed root. The launcher extracts to a staging
+REM temp dir, locates the staged apply helper, and invokes it with this
+REM installed root as -RootDir. See multitable-onprem-deploy-launcher.ps1.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\ops\multitable-onprem-deploy-launcher.ps1" -RootDir "%~dp0." -PackageArchive "%~1"
 exit /b %ERRORLEVEL%
 EOF
 
@@ -411,6 +417,11 @@ Server-side apply helpers:
   deploy-${PACKAGE_RUN_LABEL}.bat <package.zip|package.tgz>
   bootstrap-admin.bat <admin-email> <admin-password> [admin-name]
   bootstrap-admin-${PACKAGE_RUN_LABEL}.bat <admin-email> <admin-password> [admin-name]
+
+deploy.bat now calls scripts/ops/multitable-onprem-deploy-launcher.ps1 first,
+which extracts the supplied package to a staging temp dir and invokes the
+apply helper *from inside the new package*. This avoids the prior
+"first apply uses the stale installed helper" issue on upgrades.
 
 K3 WISE PoC operator tools (Node only; no Docker needed to run these):
   Runtime plugin:

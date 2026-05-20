@@ -1,0 +1,138 @@
+param(
+  [Parameter(Mandatory = $true)]
+  [string]$PackageArchive,
+  [string]$RootDir = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+)
+
+$ErrorActionPreference = 'Stop'
+
+# multitable-onprem-deploy-launcher.ps1
+#
+# Self-bootstrapping launcher for the Windows on-prem apply path.
+#
+# Why this exists: before this launcher, deploy.bat invoked the
+# multitable-onprem-apply-package.ps1 sitting in the already-installed root.
+# When upgrading from an older install whose apply helper had a bug, the
+# first apply would still execute the stale helper because the new package
+# contents only land on disk *after* extraction inside the running apply.
+# Operators had to rerun apply ("first fails, second succeeds").
+#
+# This launcher closes that gap. deploy.bat now calls THIS file, which:
+#   1. extracts the supplied package archive into a temp staging directory,
+#   2. locates the apply helper *inside the staged extraction*,
+#   3. invokes that newest apply helper with -RootDir = installed root,
+#   4. cleans up staging on exit and propagates the apply exit code.
+#
+# The launcher is intentionally small and self-contained. It does not load
+# env, does not touch DB, does not call PM2. It is the bootstrap step only.
+# All migration / dependency-refresh / PM2 / healthcheck behavior continues
+# to live in the staged apply helper (including #1684 wrapper / exit-marker
+# and #1696 env loading).
+
+function Write-LauncherInfo {
+  param([string]$Message)
+  Write-Output ("[multitable-onprem-deploy-launcher] {0}" -f $Message)
+}
+
+function Resolve-LauncherPath {
+  param([string]$Candidate, [string]$Label)
+
+  $trimmed = $Candidate.Trim().Trim('"')
+  if ([string]::IsNullOrWhiteSpace($trimmed)) {
+    throw "$Label is empty after normalization"
+  }
+  if (-not (Test-Path -LiteralPath $trimmed)) {
+    throw "$Label not found: $trimmed"
+  }
+  return (Resolve-Path -LiteralPath $trimmed).Path
+}
+
+function New-StagingDirectory {
+  $base = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
+  $name = 'msdl-' + ([System.Guid]::NewGuid().ToString('N').Substring(0, 8))
+  $path = Join-Path $base $name
+  New-Item -ItemType Directory -Path $path -Force | Out-Null
+  return (Resolve-Path -LiteralPath $path).Path
+}
+
+function Expand-StagingArchive {
+  param([string]$Archive, [string]$Stage)
+
+  $lower = $Archive.ToLowerInvariant()
+  if ($lower.EndsWith('.zip')) {
+    Write-LauncherInfo "Extracting zip via Expand-Archive"
+    Expand-Archive -LiteralPath $Archive -DestinationPath $Stage -Force
+    return
+  }
+
+  if ($lower.EndsWith('.tgz') -or $lower.EndsWith('.tar.gz')) {
+    if (-not (Get-Command tar -ErrorAction SilentlyContinue)) {
+      throw "tar command is required to extract tgz/tar.gz archives"
+    }
+    Write-LauncherInfo "Extracting tar archive via tar -xzf"
+    & tar -xzf $Archive -C $Stage
+    if ($LASTEXITCODE -ne 0) {
+      throw "tar extraction failed with exit code $LASTEXITCODE"
+    }
+    return
+  }
+
+  throw "Unsupported package extension (expected .zip, .tgz, or .tar.gz): $Archive"
+}
+
+function Resolve-StagedPackageRoot {
+  param([string]$Stage)
+
+  $children = Get-ChildItem -LiteralPath $Stage -Directory -ErrorAction Stop
+  if ($null -eq $children -or @($children).Count -lt 1) {
+    throw "No package root directory found inside staging extraction at $Stage"
+  }
+
+  $preferred = @($children) | Where-Object { $_.Name -like 'metasheet-multitable-onprem-*' } | Select-Object -First 1
+  if ($null -ne $preferred) {
+    return $preferred.FullName
+  }
+  return @($children)[0].FullName
+}
+
+$resolvedArchive = Resolve-LauncherPath -Candidate $PackageArchive -Label 'PackageArchive'
+$resolvedRoot = Resolve-LauncherPath -Candidate $RootDir -Label 'RootDir'
+
+Write-LauncherInfo "Package archive: $resolvedArchive"
+Write-LauncherInfo "Install root:    $resolvedRoot"
+
+$stage = New-StagingDirectory
+$launcherExit = 1
+try {
+  Write-LauncherInfo "Staging extraction root: $stage"
+  Expand-StagingArchive -Archive $resolvedArchive -Stage $stage
+
+  $packageRoot = Resolve-StagedPackageRoot -Stage $stage
+  Write-LauncherInfo "Staged package root: $packageRoot"
+
+  $stagedApply = Join-Path $packageRoot 'scripts\ops\multitable-onprem-apply-package.ps1'
+  if (-not (Test-Path -LiteralPath $stagedApply)) {
+    throw "Staged package does not contain apply helper at $stagedApply"
+  }
+  Write-LauncherInfo "Invoking staged apply helper: $stagedApply"
+
+  try {
+    & $stagedApply -RootDir $resolvedRoot -PackageArchive $resolvedArchive
+    if ($null -ne $LASTEXITCODE) {
+      $launcherExit = $LASTEXITCODE
+    } else {
+      $launcherExit = 0
+    }
+  }
+  catch {
+    Write-LauncherInfo ("Apply helper raised an error: {0}" -f $_.Exception.Message)
+    $launcherExit = 1
+  }
+}
+finally {
+  if (Test-Path -LiteralPath $stage) {
+    Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+
+exit $launcherExit

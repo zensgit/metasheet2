@@ -40,13 +40,27 @@ function verify_windows_entrypoints() {
   local remote_script="${root}/deploy-remote.bat"
   local bootstrap_script="${root}/bootstrap-admin.bat"
 
-  if ! search_fixed_string 'multitable-onprem-apply-package.ps1' "$start_script"; then
-    die "deploy.bat must call the PowerShell-native multitable apply helper"
+  if ! search_fixed_string 'multitable-onprem-deploy-launcher.ps1' "$start_script"; then
+    die "deploy.bat must call the self-bootstrapping PowerShell launcher (multitable-onprem-deploy-launcher.ps1) so first apply on an upgrade uses the freshest apply helper from the supplied package"
   fi
 
   if search_fixed_string 'multitable-onprem-apply-package.sh' "$start_script"; then
     die "deploy.bat must not require bash or the .sh apply helper"
   fi
+
+  if search_fixed_string 'multitable-onprem-apply-package.ps1' "$start_script"; then
+    die "deploy.bat must not call the apply helper directly; it must go through the launcher so a stale installed apply helper cannot win on first apply"
+  fi
+
+  local launcher_helper="${root}/scripts/ops/multitable-onprem-deploy-launcher.ps1"
+  if [[ ! -f "$launcher_helper" ]]; then
+    die "PowerShell launcher script must be packaged for deploy.bat self-bootstrap"
+  fi
+  search_fixed_string '[multitable-onprem-deploy-launcher]' "$launcher_helper" || die "launcher must self-identify in its logs"
+  search_fixed_string 'Expand-StagingArchive' "$launcher_helper" || die "launcher must extract the supplied package into a staging directory before invoking the apply helper"
+  search_fixed_string 'Resolve-StagedPackageRoot' "$launcher_helper" || die "launcher must resolve the staged package root before invoking the apply helper"
+  search_fixed_string 'multitable-onprem-apply-package.ps1' "$launcher_helper" || die "launcher must invoke the staged apply helper from inside the extracted package"
+  search_fixed_string 'Remove-Item -LiteralPath $stage' "$launcher_helper" || die "launcher must clean up staging extraction on exit"
 
   local apply_helper="${root}/scripts/ops/multitable-onprem-apply-package.ps1"
   search_fixed_string 'Refresh dependencies (cmd.exe /c pnpm install --frozen-lockfile)' "$apply_helper" || die "PowerShell apply helper must refresh dependencies on package apply through cmd.exe"
