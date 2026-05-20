@@ -1,11 +1,11 @@
 <template>
   <div v-if="visible" class="meta-record-drawer">
     <div class="meta-record-drawer__header">
-      <h3 class="meta-record-drawer__title">Record Detail</h3>
+      <h3 class="meta-record-drawer__title">{{ l('record.title') }}</h3>
       <div class="meta-record-drawer__nav" v-if="recordIds.length > 1">
-        <button class="meta-record-drawer__nav-btn" :disabled="currentRecordIndex <= 0" aria-label="Previous record" @click="navigatePrev">&lsaquo;</button>
+        <button class="meta-record-drawer__nav-btn" :disabled="currentRecordIndex <= 0" :aria-label="l('record.previous')" @click="navigatePrev">&lsaquo;</button>
         <span class="meta-record-drawer__nav-pos">{{ currentRecordIndex + 1 }} / {{ recordIds.length }}</span>
-        <button class="meta-record-drawer__nav-btn" :disabled="currentRecordIndex >= recordIds.length - 1" aria-label="Next record" @click="navigateNext">&rsaquo;</button>
+        <button class="meta-record-drawer__nav-btn" :disabled="currentRecordIndex >= recordIds.length - 1" :aria-label="l('record.next')" @click="navigateNext">&rsaquo;</button>
       </div>
       <div class="meta-record-drawer__actions">
         <button
@@ -14,29 +14,29 @@
           :class="{ 'meta-record-drawer__btn--watching': recordSubscribed }"
           type="button"
           :disabled="subscriptionLoading"
-          :title="recordSubscribed ? 'Unwatch this record' : 'Watch this record'"
+          :title="l(recordSubscribed ? 'record.unwatchTitle' : 'record.watchTitle')"
           @click="toggleRecordSubscription"
         >
-          {{ recordSubscribed ? 'Watching' : 'Watch' }}
+          {{ l(recordSubscribed ? 'record.watching' : 'record.watch') }}
         </button>
         <button
           v-if="resolvedCanComment"
           class="meta-record-drawer__btn meta-record-drawer__btn--comment"
           :class="drawerCommentButtonClass"
-          title="Comments"
+          :title="l('record.comments')"
           type="button"
           @click="emit('toggle-comments')"
         >
-          <MetaCommentActionChip label="Comments" :state="drawerCommentAffordance" />
+          <MetaCommentActionChip :label="l('record.comments')" :state="drawerCommentAffordance" />
         </button>
-        <button v-if="canManageAutomation" class="meta-record-drawer__btn" title="Open workflow designer" @click="emit('open-automation')">&#x2699; Workflow</button>
-        <button v-if="canManageRecordPermissions" class="meta-record-drawer__btn" title="Record Permissions" @click="showRecordPermissions = true">&#x1F512; Permissions</button>
-        <button v-if="resolvedCanDelete" class="meta-record-drawer__btn meta-record-drawer__btn--danger" @click="emit('delete')">Delete</button>
-        <button class="meta-record-drawer__close" aria-label="Close record drawer" @click="emit('close')">&times;</button>
+        <button v-if="canManageAutomation" class="meta-record-drawer__btn" :title="l('record.workflowTitle')" @click="emit('open-automation')">&#x2699; {{ l('record.workflow') }}</button>
+        <button v-if="canManageRecordPermissions" class="meta-record-drawer__btn" :title="l('record.permissionsTitle')" @click="showRecordPermissions = true">&#x1F512; {{ l('record.permissions') }}</button>
+        <button v-if="resolvedCanDelete" class="meta-record-drawer__btn meta-record-drawer__btn--danger" @click="emit('delete')">{{ l('record.delete') }}</button>
+        <button class="meta-record-drawer__close" :aria-label="l('record.close')" @click="emit('close')">&times;</button>
       </div>
     </div>
     <div v-if="record" class="meta-record-drawer__body">
-      <div class="meta-record-drawer__tabs" role="tablist" aria-label="Record drawer sections">
+      <div class="meta-record-drawer__tabs" role="tablist" :aria-label="l('record.tabsAria')">
         <button
           class="meta-record-drawer__tab"
           :class="{ 'meta-record-drawer__tab--active': activeTab === 'details' }"
@@ -44,7 +44,7 @@
           role="tab"
           :aria-selected="activeTab === 'details'"
           @click="activeTab = 'details'"
-        >Details</button>
+        >{{ l('record.details') }}</button>
         <button
           class="meta-record-drawer__tab"
           :class="{ 'meta-record-drawer__tab--active': activeTab === 'history' }"
@@ -52,7 +52,7 @@
           role="tab"
           :aria-selected="activeTab === 'history'"
           @click="activeTab = 'history'"
-        >History</button>
+        >{{ l('record.history') }}</button>
       </div>
       <div v-if="subscriptionError" class="meta-record-drawer__watch-error">{{ subscriptionError }}</div>
       <div v-if="activeTab === 'details'" class="meta-record-drawer__fields">
@@ -65,8 +65,8 @@
             class="meta-record-drawer__comment-anchor"
             :class="recordFieldAnchorClass(field.id)"
             :data-comment-field="field.id"
-            :aria-label="`Comment on ${field.name}`"
-            :title="`Comment on ${field.name}`"
+            :aria-label="commentOnField(field.name, isZh)"
+            :title="commentOnField(field.name, isZh)"
             @click="emit('comment-field', field)"
           >
             <MetaCommentAffordance :state="recordFieldAffordance(field.id)" />
@@ -95,7 +95,7 @@
             class="meta-record-drawer__input"
             type="text"
             inputmode="text"
-            placeholder="Scan or enter barcode"
+            :placeholder="lc('cell.barcodePlaceholder')"
             :value="textControlValue(record.data[field.id])"
             @change="emit('patch', field.id, ($event.target as HTMLInputElement).value)"
           />
@@ -104,7 +104,7 @@
             :id="`drawer_field_${field.id}`"
             class="meta-record-drawer__input"
             type="text"
-            placeholder="Enter address"
+            :placeholder="lc('cell.locationPlaceholder')"
             :value="locationAddressValue(record.data[field.id])"
             @change="emit('patch', field.id, locationValueFromAddress(($event.target as HTMLInputElement).value))"
           />
@@ -183,9 +183,9 @@
                 class="meta-record-drawer__attachment-clear"
                 :disabled="!!attachmentActivity[field.id]"
                 @click="onClearAttachments(field.id)"
-              >Clear all</button>
+              >{{ lc('cell.clearAll') }}</button>
               <span v-if="attachmentActivity[field.id]" class="meta-record-drawer__uploading">
-                {{ attachmentActivity[field.id] === 'removing' ? 'Removing...' : attachmentActivity[field.id] === 'clearing' ? 'Clearing...' : 'Uploading...' }}
+                {{ attachmentActivityLabel(attachmentActivity[field.id] || 'uploading', isZh) }}
               </span>
             </div>
             <div v-if="attachmentErrors[field.id]" class="meta-record-drawer__error">{{ attachmentErrors[field.id] }}</div>
@@ -196,10 +196,10 @@
       </div>
       </div>
       <div v-else class="meta-record-drawer__history">
-        <div v-if="historyLoading" class="meta-record-drawer__history-state">Loading history...</div>
+        <div v-if="historyLoading" class="meta-record-drawer__history-state">{{ l('record.historyLoading') }}</div>
         <div v-else-if="historyError" class="meta-record-drawer__history-state meta-record-drawer__history-state--error">{{ historyError }}</div>
-        <div v-else-if="!canLoadHistory" class="meta-record-drawer__history-state">History unavailable for this record.</div>
-        <div v-else-if="historyItems.length === 0" class="meta-record-drawer__history-state">No history yet.</div>
+        <div v-else-if="!canLoadHistory" class="meta-record-drawer__history-state">{{ l('record.historyUnavailable') }}</div>
+        <div v-else-if="historyItems.length === 0" class="meta-record-drawer__history-state">{{ l('record.historyEmpty') }}</div>
         <ol v-else class="meta-record-drawer__history-list">
           <li v-for="item in historyItems" :key="item.id" class="meta-record-drawer__history-item">
             <div class="meta-record-drawer__history-main">
@@ -208,7 +208,7 @@
             </div>
             <div class="meta-record-drawer__history-meta">
               <span>{{ formatHistoryTime(item.createdAt) }}</span>
-              <span v-if="item.actorId">by {{ item.actorId }}</span>
+              <span v-if="item.actorId">{{ historyActor(item.actorId, isZh) }}</span>
               <span>{{ item.source }}</span>
             </div>
             <div v-if="item.changedFieldIds.length" class="meta-record-drawer__history-fields">
@@ -218,7 +218,7 @@
         </ol>
       </div>
     </div>
-    <div v-else class="meta-record-drawer__empty">No record selected</div>
+    <div v-else class="meta-record-drawer__empty">{{ l('record.noRecord') }}</div>
     <MetaRecordPermissionManager
       v-if="canManageRecordPermissions && record && sheetId && apiClient"
       :visible="showRecordPermissions"
@@ -258,6 +258,19 @@ import {
 } from '../utils/comment-affordance'
 import { attachmentAcceptAttr, resolveAttachmentFieldProperty, shouldReplaceAttachmentSelection, validateAttachmentSelection } from '../utils/field-config'
 import { linkActionLabel } from '../utils/link-fields'
+import { useLocale } from '../../composables/useLocale'
+import {
+  recordLabel,
+  commentOnField,
+  historyActor,
+  type MetaRecordLabelKey,
+} from '../utils/meta-record-labels'
+import {
+  metaCoreLabel,
+  attachmentActionHint as attachmentActionHintFn,
+  attachmentActivityLabel,
+  type MetaCoreLabelKey,
+} from '../utils/meta-core-labels'
 import {
   dateTimeInputValue,
   dateTimeValueFromLocalInput,
@@ -300,6 +313,10 @@ const emit = defineEmits<{
   (e: 'open-link-picker', field: MetaField): void
   (e: 'navigate', recordId: string): void
 }>()
+
+const { isZh } = useLocale()
+const l = (key: MetaRecordLabelKey) => recordLabel(key, isZh.value)
+const lc = (key: MetaCoreLabelKey) => metaCoreLabel(key, isZh.value)
 
 const showRecordPermissions = ref(false)
 const activeTab = ref<'details' | 'history'>('details')
@@ -404,7 +421,7 @@ async function loadRecordHistory() {
   } catch (error: any) {
     if (requestId !== historyRequestId) return
     historyItems.value = []
-    historyError.value = error?.message ?? 'Failed to load history'
+    historyError.value = error?.message ?? l('record.errorHistoryLoad')
   } finally {
     if (requestId === historyRequestId) historyLoading.value = false
   }
@@ -434,7 +451,7 @@ async function loadRecordSubscription() {
   } catch (error: any) {
     if (requestId !== subscriptionRequestId) return
     recordSubscribed.value = false
-    subscriptionError.value = error?.message ?? 'Failed to load watch status'
+    subscriptionError.value = error?.message ?? l('record.errorWatchLoad')
   } finally {
     if (requestId === subscriptionRequestId) subscriptionLoading.value = false
   }
@@ -456,16 +473,16 @@ async function toggleRecordSubscription() {
     applySubscriptionStatus(status)
   } catch (error: any) {
     if (requestId !== subscriptionRequestId) return
-    subscriptionError.value = error?.message ?? 'Failed to update watch status'
+    subscriptionError.value = error?.message ?? l('record.errorWatchUpdate')
   } finally {
     if (requestId === subscriptionRequestId) subscriptionLoading.value = false
   }
 }
 
 function historyActionLabel(action: MetaRecordRevision['action']): string {
-  if (action === 'create') return 'Created'
-  if (action === 'delete') return 'Deleted'
-  return 'Updated'
+  if (action === 'create') return l('record.historyActionCreated')
+  if (action === 'delete') return l('record.historyActionDeleted')
+  return l('record.historyActionUpdated')
 }
 
 function historyFieldLabels(fieldIds: string[]): string {
@@ -507,7 +524,7 @@ function multiSelectEventValue(event: Event): string[] {
 function linkButtonLabel(fieldId: string): string {
   const count = linkSummaryCount(fieldId)
   const field = props.fields.find((item) => item.id === fieldId) ?? null
-  return linkActionLabel(field, count)
+  return linkActionLabel(field, count, isZh.value)
 }
 
 function linkPreview(fieldId: string): string {
@@ -549,13 +566,20 @@ function linkSummaryCount(fieldId: string): number {
 }
 
 function attachmentActionHint(fieldId: string): string {
+  // T3B1 (F-T3B-B): reuse the T3A2 meta-core-labels helper with mode='add'
+  // so this surface does not re-implement the ternary chain. Non-attachment
+  // fields fall back to the multi-file add copy (matches the old behavior of
+  // the inline string before the refactor).
   const field = props.fields.find((item) => item.id === fieldId)
-  if (!field || field.type !== 'attachment') return 'Add files'
-  return attachmentAllowsMultiple(field)
-    ? 'Add files'
-    : attachmentList(fieldId).length
-      ? 'Upload a new file to replace the current one'
-      : 'Upload a file'
+  if (!field || field.type !== 'attachment') {
+    return attachmentActionHintFn(true, false, isZh.value, 'add')
+  }
+  return attachmentActionHintFn(
+    attachmentAllowsMultiple(field),
+    attachmentList(fieldId).length > 0,
+    isZh.value,
+    'add',
+  )
 }
 
 async function onDrawerFileSelect(fieldId: string, e: Event) {
@@ -595,7 +619,7 @@ async function onDrawerFileSelect(fieldId: string, e: Event) {
     }
     emit('patch', fieldId, replaceExisting ? newIds : [...existing, ...newIds])
   } catch (error: any) {
-    setAttachmentError(fieldId, error?.message ?? 'Failed to upload attachment')
+    setAttachmentError(fieldId, error?.message ?? lc('cell.uploadFailed'))
   } finally {
     setAttachmentActivity(fieldId)
     input.value = ''
@@ -612,7 +636,7 @@ async function onRemoveAttachment(fieldId: string, attachmentId: string) {
         fieldId,
       })
     } catch (error: any) {
-      setAttachmentError(fieldId, error?.message ?? 'Failed to remove attachment')
+      setAttachmentError(fieldId, error?.message ?? lc('cell.removeFailed'))
       setAttachmentActivity(fieldId)
       return
     }
@@ -638,7 +662,7 @@ async function onClearAttachments(fieldId: string) {
         forgetLocalAttachment(fieldId, attachmentId)
       }
     } catch (error: any) {
-      setAttachmentError(fieldId, error?.message ?? 'Failed to clear attachments')
+      setAttachmentError(fieldId, error?.message ?? lc('cell.clearFailed'))
       setAttachmentActivity(fieldId)
       return
     }
