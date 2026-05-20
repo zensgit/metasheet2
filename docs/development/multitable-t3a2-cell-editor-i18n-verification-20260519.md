@@ -1,7 +1,7 @@
 # T3A2 — MetaCellEditor shallow chrome zh-CN i18n — Verification
 
 - **Date**: 2026-05-19
-- **Branch**: `frontend/multitable-t3a2-cell-editor-i18n-20260519` (rebased onto `origin/main` post #1685/#1686, ahead 2 / behind 0)
+- **Branch**: `frontend/multitable-t3a2-cell-editor-i18n-20260519` (rebased onto `origin/main` post #1685/#1686, ahead 3 / behind 0)
 - **Dev plan**: anchored in `docs/development/multitable-t3a-core-table-i18n-development-20260519.md` §3.3 / §5.6 / §7.4 / §13 (T3A2 deferral path from the merged T3A1 packet — no new dev MD).
 - **Type**: implementation + verification.
 - **K3 PoC stage-1 lock**: complies — no `/api/*` contract, no migration, no integration-core, no plugin-integration; touches only `meta-core-labels.ts` (frontend label module) + `MetaCellEditor.vue` (frontend chrome) + tests.
@@ -15,9 +15,11 @@ M  apps/web/src/multitable/utils/meta-core-labels.ts            (+76 lines: 11 c
 M  apps/web/src/multitable/components/cells/MetaCellEditor.vue  (locale-wired; 13 chrome strings + 3 fallback errors)
 M  apps/web/tests/multitable-core-i18n.spec.ts                  (+6 cases for cell.*/attachment helpers)
 A  apps/web/tests/meta-cell-editor-i18n.spec.ts                 (11 render cases)
+A  docs/development/multitable-t3a2-cell-editor-i18n-verification-20260519.md
+                                                                 (this verification packet)
 ```
 
-Pure T3A2; no attendance/Workbench/HomeView/backend/contract leakage (`git diff --name-status origin/main..HEAD` confirms 4 files only).
+Pure T3A2; no attendance/Workbench/HomeView/backend/contract leakage (`git diff --name-status origin/main..HEAD` confirms 5 files only: 4 frontend/test files + this verification MD).
 
 ## 2. Test Results (focused)
 
@@ -76,7 +78,7 @@ $ git diff --check origin/main..HEAD
 | 2 | en preserves existing English labels | ✓ (en cases + jsdom default locale) |
 | 3 | No translation of user data (option values, URLs, emails, phone, backend free-form errors) | ✓ (explicit spec assertions + `error?.message ??` pattern preserved) |
 | 4 | Cell editing behavior unchanged | ✓ (no event/emit changes; existing `confirm`/`cancel`/`yjs-commit`/`open-link-picker`/`update:modelValue` paths intact) |
-| 5 | No API contract / backend route / migration / K3 / plugin-integration / OpenAPI change | ✓ (`git diff --name-only origin/main..HEAD` = 4 files, all under `apps/web/`) |
+| 5 | No API contract / backend route / migration / K3 / plugin-integration / OpenAPI change | ✓ (`git diff --name-only origin/main..HEAD` = 5 files, all under `apps/web/` or `docs/development/`) |
 | 6 | New helpers have unit coverage for variants + fallbacks | ✓ (`attachmentActionHint` 3 variants × locales, `attachmentActivityLabel` 3 states × locales, fallback errors en+zh) |
 | 7 | Focused component tests cover both zh-CN and en render | ✓ (11 cases mixed) |
 | 8 | Verification MD records any intentionally deferred strings found by grep | ✓ (this §4) |
@@ -85,15 +87,16 @@ $ git diff --check origin/main..HEAD
 
 ```
 $ git log --oneline origin/main..HEAD
+0341dd272 docs(multitable): T3A2 verification report
 9615f6afa feat(multitable): localize MetaCellEditor cell chrome to zh-CN (T3A2)
 2f3de9e93 feat(multitable): extend core labels with cell editor helpers (T3A2)
 ```
 
-Rebase note: branch was created from `origin/main @ cbcc6bf32`; during T3A2 implementation `origin/main` advanced by 3 commits (#1685 multitable drawer/workflow fix, #1686 attendance staging migration audit docs, `66d74119a` onprem wrapper fix). Rebased clean (no conflicts — those commits don't touch `MetaCellEditor.vue` / `meta-core-labels.ts` / the 2 specs); post-rebase ahead 2/behind 0; vue-tsc + 44 focused specs re-verified green on rebased state.
+Rebase note: branch was created from `origin/main @ cbcc6bf32`; during T3A2 implementation `origin/main` advanced by 3 commits (#1685 multitable drawer/workflow fix, #1686 attendance staging migration audit docs, `66d74119a` onprem wrapper fix). Rebased clean (no conflicts — those commits don't touch `MetaCellEditor.vue` / `meta-core-labels.ts` / the 2 specs); post-rebase ahead 3/behind 0; vue-tsc + 44 focused specs re-verified green on rebased state.
 
 ## 7. Worktree-Contention Mitigation
 
-Per the `multitable-i18n` project memory durability-first rule: both feat commits landed early (immediately after focused-specs green), making the work durable in the branch-ref before any further worktree clobbering could affect it. No `git add -A` used — targeted adds only (worktree contains parallel-actor's uncommitted WIP on `MultitableWorkbench.vue` / `MultitableHomeView.vue` / `multitable-home-view.spec.ts` / `multitable-workbench-1672-1673.spec.ts` plus pre-existing `.tmp-*` and `docs/research/dingtalk-*` untracked — none ever entered any T3A2 commit, verified via `git diff --name-status origin/main..HEAD`).
+Per the `multitable-i18n` project memory durability-first rule: both feat commits landed early (immediately after focused-specs green), making the work durable in the branch-ref before any further worktree clobbering could affect it. No `git add -A` used — targeted adds only. Current untracked `.tmp-*`, `docs/research/dingtalk-*`, and `output/attendance-*` artifacts are pre-existing local noise and are not part of the T3A2 commits, verified via `git diff --name-status origin/main..HEAD`.
 
 ## 8. Regression Comm-Diff (pending)
 
