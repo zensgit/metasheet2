@@ -61,6 +61,12 @@ const DEFAULT_SETTINGS = {
     overtimeSource: 'approval',
     overrides: [],
   },
+  // calendarPolicy answers "is this day a working day for whom?" (date-level
+  // effective workday + display source); kept separate from holidayPolicy which
+  // answers "how do work hours / overtime compute on a holiday day".
+  calendarPolicy: {
+    overrides: [],
+  },
   holidaySync: {
     source: 'holiday-cn',
     baseUrl: 'https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master',
@@ -8325,39 +8331,70 @@ function matchAnyTag(values, list) {
   return values.some((value) => normalizedList.includes(normalizeMatchKey(value)))
 }
 
-function matchHolidayOverrideFilters(override, holidayMeta, policyContext) {
-  if (!override) return true
-  const dayIndex = holidayMeta?.dayIndex
-  if (override.dayIndexStart != null || override.dayIndexEnd != null || (override.dayIndexList && override.dayIndexList.length)) {
-    if (!dayIndex) return false
-    if (Array.isArray(override.dayIndexList) && override.dayIndexList.length && !override.dayIndexList.includes(dayIndex)) {
+// Shared day-index predicate (RFC §2.3): both holidayPolicy and calendarPolicy
+// MUST use this; no duplicate implementations allowed.
+function matchDayIndexFilter(filter, dayIndex) {
+  if (!filter) return true
+  const hasFilter = filter.dayIndexStart != null
+    || filter.dayIndexEnd != null
+    || (Array.isArray(filter.dayIndexList) && filter.dayIndexList.length > 0)
+  if (!hasFilter) return true
+  if (dayIndex == null) return false
+  if (Array.isArray(filter.dayIndexList) && filter.dayIndexList.length && !filter.dayIndexList.includes(dayIndex)) {
+    return false
+  }
+  if (Number.isFinite(filter.dayIndexStart) && dayIndex < filter.dayIndexStart) return false
+  if (Number.isFinite(filter.dayIndexEnd) && dayIndex > filter.dayIndexEnd) return false
+  return true
+}
+
+// Shared scope predicate (RFC §2.3): both holidayPolicy.overrides[] (filters
+// at top level of override) and calendarPolicy.overrides[] (filters under
+// override.filters) MUST call this; no duplicate scope implementations allowed.
+// Context supports both shapes:
+//   - import path: context.attendanceGroup (single value)
+//   - resolver path: context.attendanceGroups (string[])
+function matchScopeFilters(filters, context) {
+  if (!filters) return true
+  const ctx = context ?? {}
+  if (Array.isArray(filters.userIds) && filters.userIds.length && !matchListValue(ctx.userId, filters.userIds)) {
+    return false
+  }
+  if (Array.isArray(filters.userNames) && filters.userNames.length && !matchListValue(ctx.userName, filters.userNames)) {
+    return false
+  }
+  if (Array.isArray(filters.excludeUserIds) && filters.excludeUserIds.length && matchListValue(ctx.userId, filters.excludeUserIds)) {
+    return false
+  }
+  if (Array.isArray(filters.excludeUserNames) && filters.excludeUserNames.length && matchListValue(ctx.userName, filters.excludeUserNames)) {
+    return false
+  }
+  if (Array.isArray(filters.attendanceGroups) && filters.attendanceGroups.length) {
+    if (Array.isArray(ctx.attendanceGroups)) {
+      // resolver path: any of user's groups must match the filter list. Use
+      // matchListValue per group so case/whitespace normalization mirrors the
+      // import path; a naive `includes` here would be case-sensitive and
+      // silently miss "Production" vs "production" / trailing-space drift.
+      if (!ctx.attendanceGroups.some((g) => matchListValue(g, filters.attendanceGroups))) return false
+    } else if (!matchListValue(ctx.attendanceGroup, filters.attendanceGroups)) {
       return false
     }
-    if (Number.isFinite(override.dayIndexStart) && dayIndex < override.dayIndexStart) return false
-    if (Number.isFinite(override.dayIndexEnd) && dayIndex > override.dayIndexEnd) return false
   }
-  const context = policyContext ?? {}
-  if (Array.isArray(override.userIds) && override.userIds.length && !matchListValue(context.userId, override.userIds)) {
+  if (Array.isArray(filters.roles) && filters.roles.length && !matchListValue(ctx.role, filters.roles)) {
     return false
   }
-  if (Array.isArray(override.userNames) && override.userNames.length && !matchListValue(context.userName, override.userNames)) {
+  if (Array.isArray(filters.roleTags) && filters.roleTags.length && !matchAnyTag(ctx.roleTags, filters.roleTags)) {
     return false
   }
-  if (Array.isArray(override.excludeUserIds) && override.excludeUserIds.length && matchListValue(context.userId, override.excludeUserIds)) {
-    return false
-  }
-  if (Array.isArray(override.excludeUserNames) && override.excludeUserNames.length && matchListValue(context.userName, override.excludeUserNames)) {
-    return false
-  }
-  if (Array.isArray(override.attendanceGroups) && override.attendanceGroups.length && !matchListValue(context.attendanceGroup, override.attendanceGroups)) {
-    return false
-  }
-  if (Array.isArray(override.roles) && override.roles.length && !matchListValue(context.role, override.roles)) {
-    return false
-  }
-  if (Array.isArray(override.roleTags) && override.roleTags.length && !matchAnyTag(context.roleTags, override.roleTags)) {
-    return false
-  }
+  return true
+}
+
+function matchHolidayOverrideFilters(override, holidayMeta, policyContext) {
+  if (!override) return true
+  if (!matchDayIndexFilter(override, holidayMeta?.dayIndex)) return false
+  // holidayPolicy.overrides[] keeps scope fields flat on the override itself
+  // (legacy schema); pass the override directly as ScopeFilters.
+  if (!matchScopeFilters(override, policyContext)) return false
   return true
 }
 
@@ -9221,10 +9258,99 @@ function normalizeHolidayPolicyOverrides(rawOverrides) {
     .filter(Boolean)
 }
 
+// calendarPolicy.overrides[] (RFC §2.2): "is this day a working day for whom?"
+// Distinct from holidayPolicy.overrides[]; do NOT merge into the same array.
+// Drops invalid entries (silently, by design — caller passes raw config):
+//   - no constraint (must provide at least one of date/from/to/name/dayIndex*)
+//   - no `effective.isWorkingDay`
+//   - source/filters mismatch:
+//       source='group' must declare filters.attendanceGroups (non-empty)
+//       source='role'  must declare filters.roles OR filters.roleTags
+//       source='user'  must declare filters.userIds OR filters.userNames
+//       source='org'   has no filter requirement
+// Generates randomUUID() for entries missing `id` so client-side audit (and
+// effective.policyId in responses) can reference a stable handle once saved.
+function normalizeCalendarPolicyOverrides(rawOverrides) {
+  if (!Array.isArray(rawOverrides)) return []
+  return rawOverrides
+    .map((override) => {
+      if (!override || typeof override !== 'object') return null
+      const effectiveRaw = override.effective && typeof override.effective === 'object' ? override.effective : null
+      if (!effectiveRaw || typeof effectiveRaw.isWorkingDay !== 'boolean') return null
+      const source = ['org', 'group', 'role', 'user'].includes(effectiveRaw.source) ? effectiveRaw.source : 'org'
+
+      const filtersRaw = override.filters && typeof override.filters === 'object' ? override.filters : {}
+      const userIds = ensureStringArray(filtersRaw.userIds)
+      const userNames = ensureStringArray(filtersRaw.userNames)
+      const excludeUserIds = ensureStringArray(filtersRaw.excludeUserIds)
+      const excludeUserNames = ensureStringArray(filtersRaw.excludeUserNames)
+      const attendanceGroups = ensureStringArray(filtersRaw.attendanceGroups)
+      const roles = ensureStringArray(filtersRaw.roles)
+      const roleTags = ensureStringArray(filtersRaw.roleTags)
+
+      // source/filters consistency — invalid means drop (silent, by design)
+      if (source === 'group' && attendanceGroups.length === 0) return null
+      if (source === 'role' && roles.length === 0 && roleTags.length === 0) return null
+      if (source === 'user' && userIds.length === 0 && userNames.length === 0) return null
+
+      const date = typeof override.date === 'string' ? override.date.trim() : ''
+      const from = typeof override.from === 'string' ? override.from.trim() : ''
+      const to = typeof override.to === 'string' ? override.to.trim() : ''
+      const name = typeof override.name === 'string' ? override.name.trim() : ''
+      const matchRaw = typeof override.match === 'string' ? override.match.trim() : 'contains'
+      const match = ['contains', 'regex', 'equals'].includes(matchRaw) ? matchRaw : 'contains'
+      const dayIndexStart = parseNumber(override.dayIndexStart, null)
+      const dayIndexEnd = parseNumber(override.dayIndexEnd, null)
+      const dayIndexList = ensureNumberArray(override.dayIndexList)
+      const hasDayIndexFilter = Number.isFinite(dayIndexStart)
+        || Number.isFinite(dayIndexEnd)
+        || dayIndexList.length > 0
+
+      // Must constrain by at least one of date / from-to / name / dayIndex*
+      const hasConstraint = !!date || !!from || !!to || !!name || hasDayIndexFilter
+      if (!hasConstraint) return null
+
+      const filters = {}
+      if (userIds.length) filters.userIds = userIds
+      if (userNames.length) filters.userNames = userNames
+      if (excludeUserIds.length) filters.excludeUserIds = excludeUserIds
+      if (excludeUserNames.length) filters.excludeUserNames = excludeUserNames
+      if (attendanceGroups.length) filters.attendanceGroups = attendanceGroups
+      if (roles.length) filters.roles = roles
+      if (roleTags.length) filters.roleTags = roleTags
+
+      const id = typeof override.id === 'string' && override.id.trim()
+        ? override.id.trim()
+        : randomUUID()
+
+      return {
+        id,
+        date: date || undefined,
+        from: from || undefined,
+        to: to || undefined,
+        name: name || undefined,
+        match: name ? match : undefined,
+        dayIndexStart: Number.isFinite(dayIndexStart) ? Math.max(1, dayIndexStart) : undefined,
+        dayIndexEnd: Number.isFinite(dayIndexEnd) ? Math.max(1, dayIndexEnd) : undefined,
+        dayIndexList: dayIndexList.length ? dayIndexList.map((item) => Math.max(1, item)) : undefined,
+        filters: Object.keys(filters).length ? filters : undefined,
+        effective: {
+          isWorkingDay: effectiveRaw.isWorkingDay,
+          label: typeof effectiveRaw.label === 'string' && effectiveRaw.label.trim()
+            ? effectiveRaw.label.trim()
+            : undefined,
+          source,
+        },
+      }
+    })
+    .filter(Boolean)
+}
+
 function normalizeSettings(raw) {
   if (!raw || typeof raw !== 'object') return { ...DEFAULT_SETTINGS }
   const autoAbsence = raw.autoAbsence ?? {}
   const holidayPolicy = raw.holidayPolicy ?? {}
+  const calendarPolicy = raw.calendarPolicy ?? {}
   const holidaySync = raw.holidaySync ?? {}
   const holidaySyncAuto = holidaySync.auto ?? {}
   const holidaySyncLastRun = holidaySync.lastRun ?? null
@@ -9286,6 +9412,7 @@ function normalizeSettings(raw) {
       }
     : null
   const holidayPolicyOverrides = normalizeHolidayPolicyOverrides(holidayPolicy.overrides)
+  const calendarPolicyOverrides = normalizeCalendarPolicyOverrides(calendarPolicy.overrides)
   return {
     autoAbsence: {
       enabled: parseBoolean(autoAbsence.enabled, DEFAULT_SETTINGS.autoAbsence.enabled),
@@ -9300,6 +9427,9 @@ function normalizeSettings(raw) {
       overtimeAdds: parseBoolean(holidayPolicy.overtimeAdds, DEFAULT_SETTINGS.holidayPolicy.overtimeAdds),
       overtimeSource,
       overrides: holidayPolicyOverrides,
+    },
+    calendarPolicy: {
+      overrides: calendarPolicyOverrides,
     },
     holidaySync: {
       source: 'holiday-cn',
@@ -9337,6 +9467,10 @@ function mergeSettings(base, update) {
     holidayPolicy: {
       ...(base?.holidayPolicy || {}),
       ...(update?.holidayPolicy || {}),
+    },
+    calendarPolicy: {
+      ...(base?.calendarPolicy || {}),
+      ...(update?.calendarPolicy || {}),
     },
     holidaySync: {
       ...(base?.holidaySync || {}),
@@ -10110,6 +10244,395 @@ async function loadRotationAssignmentMapForUsersRange(db, orgId, userIds, fromDa
       return { assignmentsByUser: new Map(), shiftsById: new Map() }
     }
     throw error
+  }
+}
+
+// ===== EffectiveCalendarResolver (RFC §4) =====
+// Read-only resolver for `GET /api/attendance/effective-calendar`. Composes
+// base layer (rotation/shift/rule + national/manual holidays) with
+// calendarPolicy.overrides[] and (userId mode only) per-user request overlays.
+// Does NOT mutate `resolveWorkContext`; calc-chain cutover is Step 5.
+
+const CALENDAR_BASE_SOURCE_PRIORITY = 0
+const CALENDAR_POLICY_SOURCE_PRIORITY = {
+  // strictly ascending; same-source ties broken by array order — see RFC §4.2.
+  org: 1,
+  group: 2,
+  role: 3,
+  user: 4,
+}
+
+const CALENDAR_MODE_ALLOWED_SOURCES = {
+  userId: new Set(['org', 'group', 'role', 'user']),
+  groupId: new Set(['group']),
+  orgOnly: new Set(['org']),
+}
+
+const CALENDAR_OVERLAY_REQUEST_TYPES = ['leave', 'overtime', 'missed_check_in', 'missed_check_out', 'time_correction']
+
+function calendarOverlayKindFromRequestType(requestType) {
+  if (requestType === 'leave') return 'personal_leave'
+  if (requestType === 'overtime') return 'overtime'
+  if (
+    requestType === 'missed_check_in'
+    || requestType === 'missed_check_out'
+    || requestType === 'time_correction'
+  ) return 'attendance_correction'
+  return null
+}
+
+function matchCalendarOverride(override, dayContext, mode) {
+  if (!override || !override.effective) return false
+  const allowed = CALENDAR_MODE_ALLOWED_SOURCES[mode]
+  if (!allowed || !allowed.has(override.effective.source)) return false
+
+  const dateKey = dayContext.date
+  if (override.date && override.date !== dateKey) return false
+  if (override.from && dateKey < override.from) return false
+  if (override.to && dateKey > override.to) return false
+
+  const holiday = dayContext.holiday ?? null
+  if (override.name) {
+    if (!holiday || !holiday.name) return false
+    if (!matchHolidayOverride(holiday.name, override)) return false
+  }
+
+  if (!matchDayIndexFilter(override, holiday?.dayIndex ?? null)) return false
+  if (!matchScopeFilters(override.filters, dayContext.scopeContext)) return false
+  return true
+}
+
+async function loadApprovedRequestsForOverlay(db, orgId, userId, fromDate, toDate) {
+  if (!userId || !fromDate || !toDate) return []
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  try {
+    const rows = await db.query(
+      `SELECT id, request_type, work_date, status, metadata, created_at
+       FROM attendance_requests
+       WHERE user_id = $1
+         AND org_id = $2
+         AND work_date BETWEEN $3 AND $4
+         AND status = 'approved'
+         AND request_type = ANY($5::text[])
+       ORDER BY work_date ASC, created_at ASC NULLS LAST, id ASC`,
+      [userId, targetOrg, fromDate, toDate, CALENDAR_OVERLAY_REQUEST_TYPES]
+    )
+    return rows.map((row) => ({
+      id: row.id,
+      requestType: row.request_type,
+      workDate: normalizeDateOnly(row.work_date) ?? row.work_date,
+      status: row.status,
+      metadata: normalizeMetadata(row.metadata),
+      createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at ?? null,
+    }))
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return []
+    throw error
+  }
+}
+
+async function loadAttendanceScopeContextForUser(db, orgId, userId) {
+  if (!userId) return { userId: null, userName: undefined, attendanceGroups: [] }
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  let userName
+  try {
+    const rows = await db.query('SELECT name FROM users WHERE id = $1', [userId])
+    if (rows.length && typeof rows[0].name === 'string') userName = rows[0].name
+  } catch (error) {
+    if (!isDatabaseSchemaError(error)) throw error
+  }
+  const attendanceGroups = []
+  try {
+    const rows = await db.query(
+      `SELECT g.name, g.code
+       FROM attendance_group_members m
+       JOIN attendance_groups g ON g.id = m.group_id
+       WHERE m.user_id = $1 AND m.org_id = $2`,
+      [userId, targetOrg]
+    )
+    const seen = new Set()
+    for (const row of rows) {
+      for (const candidate of [row.name, row.code]) {
+        if (typeof candidate === 'string' && candidate && !seen.has(candidate)) {
+          seen.add(candidate)
+          attendanceGroups.push(candidate)
+        }
+      }
+    }
+  } catch (error) {
+    if (!isDatabaseSchemaError(error)) throw error
+  }
+  // role/roleTags: NOT loaded in v1 — Step 3 Known Limitation (see dev MD).
+  // calendarPolicy.overrides[] with effective.source='role' remain valid
+  // config but the resolver cannot match them without DB-backed role context.
+  return { userId, userName, attendanceGroups }
+}
+
+async function loadAttendanceGroupByIdOrCode(db, orgId, identifier) {
+  if (!identifier) return null
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  try {
+    const rows = await db.query(
+      `SELECT id, name, code, timezone
+       FROM attendance_groups
+       WHERE org_id = $1 AND (id::text = $2 OR code = $2)
+       LIMIT 1`,
+      [targetOrg, String(identifier)]
+    )
+    return rows.length ? { id: rows[0].id, name: rows[0].name, code: rows[0].code, timezone: rows[0].timezone } : null
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return null
+    throw error
+  }
+}
+
+function enumerateAttendanceCalendarDateRange(fromDate, toDate) {
+  const out = []
+  const start = normalizeDateOnly(fromDate)
+  const end = normalizeDateOnly(toDate)
+  if (!start || !end || start > end) return out
+  let cursor = start
+  // hard cap at 366 to match route validation; never iterate forever
+  for (let i = 0; i <= 366 && cursor <= end; i += 1) {
+    out.push(cursor)
+    cursor = addDaysToDateKey(cursor, 1)
+  }
+  return out
+}
+
+function buildCalendarBaseFromProfile(profile, weekday, source) {
+  const isWorkingDay = Array.isArray(profile?.workingDays) && profile.workingDays.includes(weekday)
+  return {
+    isWorkingDay,
+    source: source ?? 'rule',
+  }
+}
+
+function buildCalendarBaseFromHoliday(holiday) {
+  const meta = resolveHolidayMeta(holiday)
+  const origin = holiday?.origin === 'national' ? 'national' : 'manual'
+  return {
+    isWorkingDay: holiday?.isWorkingDay === true,
+    source: origin,
+    holidayId: holiday?.id ?? undefined,
+    name: meta.name ?? holiday?.name ?? undefined,
+    dayIndex: meta.dayIndex ?? undefined,
+  }
+}
+
+function pushCalendarLayer(layers, layer) {
+  layers.push(layer)
+}
+
+function resolveCalendarTimezone({ rotation, shift, defaultRule, group, defaultTimezone }) {
+  const candidates = [
+    rotation?.timezone,
+    shift?.timezone,
+    defaultRule?.timezone,
+    group?.timezone,
+    defaultTimezone,
+  ]
+  for (const tz of candidates) {
+    if (typeof tz === 'string' && tz.trim()) return tz.trim()
+  }
+  return 'UTC'
+}
+
+// resolveEffectiveCalendar implements RFC §4. Returns { mode, from, to, timezone, items[] }.
+// Throws on invalid inputs (route handler converts to 400/404).
+async function resolveEffectiveCalendar(db, args) {
+  const orgId = args.orgId || DEFAULT_ORG_ID
+  const from = normalizeDateOnlyStrict(args.from)
+  const to = normalizeDateOnlyStrict(args.to)
+  if (!from) throw new Error('VALIDATION:from')
+  if (!to) throw new Error('VALIDATION:to')
+  if (from > to) throw new Error('VALIDATION:range')
+  const modeCount = [args.userId, args.groupId, args.orgOnly === true].filter((v) => v != null && v !== false).length
+  if (modeCount !== 1) throw new Error('VALIDATION:mode')
+
+  let mode
+  if (args.userId) mode = 'userId'
+  else if (args.groupId) mode = 'groupId'
+  else mode = 'orgOnly'
+
+  const settings = await getSettings(db)
+  const calendarOverrides = Array.isArray(settings?.calendarPolicy?.overrides)
+    ? settings.calendarPolicy.overrides
+    : []
+  const defaultRule = await loadDefaultRule(db, orgId)
+  const dates = enumerateAttendanceCalendarDateRange(from, to)
+  const holidaysByDate = await loadHolidayMapByDates(db, orgId, dates)
+
+  // Mode-specific loads
+  let scopeContext = {}
+  let shiftAssignmentsByUser = new Map()
+  let rotationByUser = new Map()
+  let rotationShiftsById = new Map()
+  let overlays = []
+  let groupContext = null
+
+  if (mode === 'userId') {
+    scopeContext = await loadAttendanceScopeContextForUser(db, orgId, args.userId)
+    shiftAssignmentsByUser = await loadShiftAssignmentMapForUsersRange(db, orgId, [args.userId], from, to)
+    const rotationPrefetch = await loadRotationAssignmentMapForUsersRange(db, orgId, [args.userId], from, to)
+    rotationByUser = rotationPrefetch.assignmentsByUser
+    rotationShiftsById = rotationPrefetch.shiftsById
+    overlays = await loadApprovedRequestsForOverlay(db, orgId, args.userId, from, to)
+  } else if (mode === 'groupId') {
+    groupContext = await loadAttendanceGroupByIdOrCode(db, orgId, args.groupId)
+    if (!groupContext) throw new Error('NOT_FOUND:group')
+    const groupRefs = []
+    if (groupContext.name) groupRefs.push(groupContext.name)
+    if (groupContext.code) groupRefs.push(groupContext.code)
+    scopeContext = { attendanceGroups: groupRefs }
+  } else {
+    scopeContext = {}
+  }
+
+  // RFC §4.3 timezone chain. For userId mode we sample the rotation/shift
+  // active at `from` so the response carries a representative tz (rather than
+  // always falling through to defaultRule.timezone). Per-day rotation/shift
+  // can drift inside the range; documented choice is the `from` snapshot.
+  let firstDateRotation = null
+  let firstDateShift = null
+  if (mode === 'userId') {
+    const firstDate = dates[0] ?? from
+    const rotationInfo = resolveRotationInfoFromPrefetch(rotationByUser.get(args.userId), firstDate, rotationShiftsById)
+    const shiftInfo = resolveShiftAssignmentFromPrefetch(shiftAssignmentsByUser.get(args.userId), firstDate)
+    firstDateRotation = rotationInfo?.rotation ?? null
+    firstDateShift = rotationInfo?.shift ?? shiftInfo?.shift ?? null
+  }
+  const timezone = resolveCalendarTimezone({
+    rotation: firstDateRotation,
+    shift: firstDateShift,
+    defaultRule,
+    group: groupContext,
+    defaultTimezone: undefined,
+  })
+
+  const overlaysByDate = new Map()
+  for (const row of overlays) {
+    const kind = calendarOverlayKindFromRequestType(row.requestType)
+    if (!kind) continue
+    const key = row.workDate
+    if (!overlaysByDate.has(key)) overlaysByDate.set(key, [])
+    const minutesRaw = row.metadata?.minutes
+    const minutes = typeof minutesRaw === 'string' && /^[0-9]+(\.[0-9]+)?$/.test(minutesRaw)
+      ? Number(minutesRaw)
+      : Number.isFinite(minutesRaw) ? Number(minutesRaw) : undefined
+    overlaysByDate.get(key).push({
+      kind,
+      source: 'attendance_requests',
+      requestType: row.requestType,
+      minutes,
+      status: row.status,
+      refId: row.id,
+    })
+  }
+
+  const items = dates.map((date) => {
+    const weekday = getWeekdayFromDateKey(date)
+    let profileSource = 'rule'
+    let profile = defaultRule
+
+    if (mode === 'userId') {
+      const rotationInfo = resolveRotationInfoFromPrefetch(rotationByUser.get(args.userId), date, rotationShiftsById)
+      const shiftInfo = resolveShiftAssignmentFromPrefetch(shiftAssignmentsByUser.get(args.userId), date)
+      if (rotationInfo?.shift) {
+        profile = rotationInfo.shift
+        profileSource = 'rotation'
+      } else if (shiftInfo?.shift) {
+        profile = shiftInfo.shift
+        profileSource = 'shift'
+      }
+    }
+
+    const holiday = holidaysByDate.get(date) ?? null
+    const layers = []
+    let base
+    if (holiday) {
+      base = buildCalendarBaseFromHoliday(holiday)
+      layers.push({
+        kind: 'holiday',
+        source: base.source,
+        isWorkingDay: base.isWorkingDay,
+        label: base.name,
+        refId: base.holidayId,
+      })
+    } else {
+      base = buildCalendarBaseFromProfile(profile, weekday, profileSource)
+      layers.push({
+        kind: 'base_rule',
+        source: profileSource,
+        isWorkingDay: base.isWorkingDay,
+      })
+    }
+
+    let effective = {
+      isWorkingDay: base.isWorkingDay,
+      source: base.source,
+      label: base.name,
+    }
+    let effectivePriority = CALENDAR_BASE_SOURCE_PRIORITY
+
+    const holidayMeta = holiday ? { name: holiday.name ?? null, dayIndex: resolveHolidayMeta(holiday).dayIndex } : null
+    const dayContext = {
+      date,
+      holiday: holidayMeta,
+      scopeContext,
+    }
+    for (const override of calendarOverrides) {
+      if (!matchCalendarOverride(override, dayContext, mode)) continue
+      const overridePriority = CALENDAR_POLICY_SOURCE_PRIORITY[override.effective.source] ?? 0
+      const label = override.effective.label ?? override.name ?? undefined
+      pushCalendarLayer(layers, {
+        kind: 'calendar_policy',
+        source: override.effective.source,
+        isWorkingDay: override.effective.isWorkingDay,
+        label,
+        refId: override.id,
+      })
+      // Higher priority wins; same priority -> later in array order wins
+      if (overridePriority >= effectivePriority) {
+        effective = {
+          isWorkingDay: override.effective.isWorkingDay,
+          source: override.effective.source,
+          label,
+          policyId: override.id,
+        }
+        effectivePriority = overridePriority
+      }
+    }
+
+    const baseOut = {
+      isWorkingDay: base.isWorkingDay,
+      source: base.source,
+    }
+    if (base.holidayId) baseOut.holidayId = base.holidayId
+    if (base.name) baseOut.name = base.name
+
+    const effectiveOut = {
+      isWorkingDay: effective.isWorkingDay,
+      source: effective.source,
+    }
+    if (effective.label) effectiveOut.label = effective.label
+    if (effective.policyId) effectiveOut.policyId = effective.policyId
+
+    return {
+      date,
+      base: baseOut,
+      effective: effectiveOut,
+      layers,
+      overlays: overlaysByDate.get(date) ?? [],
+    }
+  })
+
+  return {
+    mode,
+    from,
+    to,
+    timezone,
+    items,
   }
 }
 
@@ -11913,6 +12436,35 @@ module.exports = {
             firstDayBaseHours: z.number().min(0).optional(),
             overtimeAdds: z.boolean().optional(),
             overtimeSource: z.enum(['approval', 'clock', 'both']).optional(),
+          })
+        ).optional(),
+      }).optional(),
+      calendarPolicy: z.object({
+        overrides: z.array(
+          z.object({
+            id: z.string().optional(),
+            name: z.string().optional(),
+            match: z.enum(['contains', 'regex', 'equals']).optional(),
+            date: z.string().optional(),
+            from: z.string().optional(),
+            to: z.string().optional(),
+            dayIndexStart: z.number().int().min(1).optional(),
+            dayIndexEnd: z.number().int().min(1).optional(),
+            dayIndexList: z.array(z.number().int().min(1)).optional(),
+            filters: z.object({
+              userIds: z.array(z.string()).optional(),
+              userNames: z.array(z.string()).optional(),
+              excludeUserIds: z.array(z.string()).optional(),
+              excludeUserNames: z.array(z.string()).optional(),
+              attendanceGroups: z.array(z.string()).optional(),
+              roles: z.array(z.string()).optional(),
+              roleTags: z.array(z.string()).optional(),
+            }).optional(),
+            effective: z.object({
+              isWorkingDay: z.boolean(),
+              label: z.string().optional(),
+              source: z.enum(['org', 'group', 'role', 'user']),
+            }),
           })
         ).optional(),
       }).optional(),
@@ -23588,6 +24140,103 @@ module.exports = {
           }
           logger.error('Attendance assignment delete failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete assignment' } })
+        }
+      })
+    )
+
+    // RFC §5: read-only effective calendar.
+    // Validation is inline (does NOT reuse resolveAttendanceDateRange, which
+    // silently defaults missing from/to to a 30-day window). from/to MUST be
+    // provided and the inclusive range MUST be <= 366 days.
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/effective-calendar',
+      withPermission('attendance:read', async (req, res) => {
+        const fromRaw = typeof req.query.from === 'string' ? req.query.from.trim() : ''
+        const toRaw = typeof req.query.to === 'string' ? req.query.to.trim() : ''
+        const userIdRaw = typeof req.query.userId === 'string' ? req.query.userId.trim() : ''
+        const groupIdRaw = typeof req.query.groupId === 'string' ? req.query.groupId.trim() : ''
+        const orgOnlyRaw = typeof req.query.orgOnly === 'string' ? req.query.orgOnly.trim().toLowerCase() : ''
+        const orgOnly = orgOnlyRaw === 'true' || orgOnlyRaw === '1'
+
+        if (!fromRaw || !toRaw) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: '"from" and "to" are required (YYYY-MM-DD).' } })
+          return
+        }
+        const from = normalizeDateOnlyStrict(fromRaw)
+        const to = normalizeDateOnlyStrict(toRaw)
+        if (!from) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid "from" date. Use YYYY-MM-DD.' } })
+          return
+        }
+        if (!to) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid "to" date. Use YYYY-MM-DD.' } })
+          return
+        }
+        if (from > to) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: '"from" must be on or before "to".' } })
+          return
+        }
+        const rangeDays = diffDays(from, to) + 1
+        if (rangeDays > 366) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Range must be <= 366 days.' } })
+          return
+        }
+
+        const modeCount = (userIdRaw ? 1 : 0) + (groupIdRaw ? 1 : 0) + (orgOnly ? 1 : 0)
+        if (modeCount !== 1) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Provide exactly one of userId, groupId, or orgOnly=true.' } })
+          return
+        }
+
+        const requesterId = getUserId(req)
+        if (!requesterId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found.' } })
+          return
+        }
+        const orgId = getOrgId(req)
+
+        // Per-mode RBAC. Outer withPermission('attendance:read') already
+        // gates entry; cross-user / admin checks layer on top.
+        if (userIdRaw && userIdRaw !== requesterId) {
+          const allowed = await canAccessOtherUsers(requesterId)
+          if (!allowed) {
+            res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'No access to other users.' } })
+            return
+          }
+        }
+        if (groupIdRaw) {
+          const allowed = await hasAttendanceAdminAccess(requesterId)
+          if (!allowed) {
+            res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Attendance admin required for groupId mode.' } })
+            return
+          }
+        }
+
+        try {
+          const result = await resolveEffectiveCalendar(db, {
+            orgId,
+            from,
+            to,
+            userId: userIdRaw || undefined,
+            groupId: groupIdRaw || undefined,
+            orgOnly: orgOnly === true ? true : undefined,
+            logger,
+          })
+          res.json({ ok: true, data: result })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          if (message === 'NOT_FOUND:group') {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found.' } })
+            return
+          }
+          if (message.startsWith('VALIDATION:')) {
+            // resolver-level validation; route validation should normally catch first
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message } })
+            return
+          }
+          logger.error('Attendance effective-calendar resolve failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to resolve effective calendar.' } })
         }
       })
     )
