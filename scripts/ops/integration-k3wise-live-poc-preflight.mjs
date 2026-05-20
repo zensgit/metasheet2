@@ -135,6 +135,27 @@ function normalizeMaterialSampleLimit(value, field = 'k3Wise.sampleLimit') {
   return parsed
 }
 
+function normalizeOptionalTcpPort(value, field) {
+  if (value === undefined || value === null || value === '') return undefined
+  let parsed
+  if (typeof value === 'number') {
+    parsed = value
+  } else if (typeof value === 'string') {
+    const normalized = value.trim()
+    if (normalized.length === 0) return undefined
+    parsed = Number(normalized)
+  } else {
+    throw new LivePocPreflightError(`${field} must be a TCP port between 1 and 65535`, { field })
+  }
+  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 65535) {
+    throw new LivePocPreflightError(`${field} must be a TCP port between 1 and 65535`, {
+      field,
+      received: value,
+    })
+  }
+  return parsed
+}
+
 function normalizeSqlMode(value, sqlEnabled) {
   const fallback = sqlEnabled ? 'readonly' : 'disabled'
   const text = optionalString(value)
@@ -356,6 +377,7 @@ function normalizeGate(input) {
   const sqlEnabled = normalizeSafeBoolean(sqlServer.enabled, 'sqlServer.enabled')
   const sqlWriteCoreFlag = normalizeSafeBoolean(sqlServer.writeCoreTables, 'sqlServer.writeCoreTables')
   const sqlMode = normalizeSqlMode(sqlServer.mode, sqlEnabled)
+  const sqlPort = normalizeOptionalTcpPort(sqlServer.port, 'sqlServer.port')
   const allowedTables = optionalArray(sqlServer.allowedTables, 'sqlServer.allowedTables').map((table) => String(table))
   const writesCoreTable = allowedTables.some((table) => K3_CORE_TABLES.has(normalizeSqlObjectName(table)))
   if (sqlEnabled && sqlMode !== 'readonly' && (sqlWriteCoreFlag || writesCoreTable)) {
@@ -399,6 +421,18 @@ function normalizeGate(input) {
   requiredString(rollback.owner, 'rollback.owner')
   requiredString(rollback.strategy, 'rollback.strategy')
 
+  const normalizedSqlServer = {
+    ...sqlServer,
+    enabled: sqlEnabled,
+    writeCoreTables: sqlWriteCoreFlag,
+    mode: sqlMode,
+  }
+  if (sqlPort === undefined) {
+    delete normalizedSqlServer.port
+  } else {
+    normalizedSqlServer.port = sqlPort
+  }
+
   return {
     tenantId,
     workspaceId,
@@ -412,12 +446,7 @@ function normalizeGate(input) {
       sampleLimit: normalizeMaterialSampleLimit(k3Wise.sampleLimit),
     },
     plm,
-    sqlServer: {
-      ...sqlServer,
-      enabled: sqlEnabled,
-      writeCoreTables: sqlWriteCoreFlag,
-      mode: sqlMode,
-    },
+    sqlServer: normalizedSqlServer,
     rollback,
     fieldMappings,
     bom: {
@@ -521,6 +550,7 @@ function buildExternalSystems(gate) {
       config: {
         mode: gate.sqlMode,
         server: optionalString(gate.sqlServer.server) || '<provided-by-customer>',
+        ...(Number.isInteger(gate.sqlServer.port) ? { port: gate.sqlServer.port } : {}),
         database: optionalString(gate.sqlServer.database) || '<provided-by-customer>',
         allowedTables: optionalArray(gate.sqlServer.allowedTables, 'sqlServer.allowedTables'),
         middleTables: optionalArray(gate.sqlServer.middleTables, 'sqlServer.middleTables'),
@@ -767,6 +797,7 @@ function sampleGate() {
       enabled: true,
       mode: 'readonly',
       server: '10.0.0.10',
+      port: 1433,
       database: 'AIS_TEST',
       allowedTables: ['t_ICItem', 't_MeasureUnit'],
     },

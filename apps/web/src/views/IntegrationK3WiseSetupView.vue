@@ -564,8 +564,13 @@
               </select>
             </label>
             <label class="k3-setup__field">
-              <span>Server</span>
-              <input v-model.trim="form.sqlServer" autocomplete="off" />
+              <span>Server / Host</span>
+              <input v-model.trim="form.sqlServer" placeholder="10.0.0.8" autocomplete="off" @blur="normalizeSqlServerDraft" />
+              <small>只填主机名或 IP；粘贴 10.0.0.8,1433 / 10.0.0.8:1433 会自动拆出端口。</small>
+            </label>
+            <label class="k3-setup__field">
+              <span>Port</span>
+              <input v-model.trim="form.sqlPort" inputmode="numeric" placeholder="1433" autocomplete="off" @blur="normalizeSqlServerDraft" />
             </label>
             <label class="k3-setup__field">
               <span>Database</span>
@@ -864,6 +869,7 @@ import {
   listIntegrationPipelineRuns,
   listIntegrationStagingDescriptors,
   listIntegrationSystems,
+  normalizeK3WiseSqlConnectionForm,
   runIntegrationPipeline,
   stringifyK3WiseGateDraft,
   summarizeK3WiseDeployGateChecklist,
@@ -1122,6 +1128,10 @@ function normalizeK3SetupProjectIdToScope(): void {
 function onK3SetupProjectIdInput(event: Event): void {
   const target = event.target as HTMLInputElement | null
   form.projectId = target?.value ?? ''
+}
+
+function normalizeSqlServerDraft(): void {
+  normalizeK3WiseSqlConnectionForm(form)
 }
 
 function setStatus(message: string, kind: 'info' | 'success' | 'error' = 'info'): void {

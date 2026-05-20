@@ -54,6 +54,7 @@
     "enabled": false,
     "mode": "disabled",
     "server": "<customer-sqlserver-host>",
+    "port": 1433,
     "database": "AIS_TEST",
     "allowedTables": [],
     "middleTables": [],

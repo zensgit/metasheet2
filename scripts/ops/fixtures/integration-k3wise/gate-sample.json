@@ -29,6 +29,7 @@
     "enabled": true,
     "mode": "readonly",
     "server": "10.0.0.10",
+    "port": 1433,
     "database": "AIS_TEST",
     "allowedTables": ["t_ICItem", "t_MeasureUnit"]
   },

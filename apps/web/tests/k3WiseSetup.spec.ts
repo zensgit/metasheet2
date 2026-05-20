@@ -23,6 +23,8 @@ import {
   getIntegrationStagingFieldCount,
   getK3WisePipelineId,
   listK3WiseDocumentTemplates,
+  normalizeK3WiseSqlConnectionForm,
+  normalizeK3WiseSqlServerEndpoint,
   splitList,
   stringifyK3WiseGateDraft,
   summarizeK3WiseDeployGateChecklist,
@@ -57,6 +59,7 @@ describe('K3 WISE setup helpers', () => {
       password: 'secret',
       sqlEnabled: true,
       sqlServer: '10.0.0.10',
+      sqlPort: '14330',
       sqlDatabase: 'AIS_TEST',
       sqlAllowedTables: 'dbo.t_ICItem\ndbo.t_ICBOM, dbo.t_ICBomChild',
       sqlMiddleTables: 'dbo.integration_material_stage',
@@ -86,10 +89,38 @@ describe('K3 WISE setup helpers', () => {
       kind: 'erp:k3-wise-sqlserver',
       role: 'bidirectional',
       config: {
+        server: '10.0.0.10',
+        port: 14330,
         allowedTables: ['dbo.t_ICItem', 'dbo.t_ICBOM', 'dbo.t_ICBomChild'],
         middleTables: ['dbo.integration_material_stage'],
       },
     })
+  })
+
+  it('normalizes SQL Server host and port from dedicated and legacy endpoint inputs', () => {
+    expect(normalizeK3WiseSqlServerEndpoint('10.0.0.8,1433')).toEqual({
+      server: '10.0.0.8',
+      port: '1433',
+      embeddedPort: '1433',
+    })
+    expect(normalizeK3WiseSqlServerEndpoint('sql.local:14330', '14330')).toEqual({
+      server: 'sql.local',
+      port: '14330',
+      embeddedPort: '14330',
+    })
+    expect(normalizeK3WiseSqlServerEndpoint('K3-SQL\\WISE,1433')).toEqual({
+      server: 'K3-SQL\\WISE',
+      port: '1433',
+      embeddedPort: '1433',
+    })
+
+    const form = createDefaultK3WiseSetupForm()
+    form.sqlServer = '10.0.0.8,1433'
+    form.sqlPort = ''
+    normalizeK3WiseSqlConnectionForm(form)
+
+    expect(form.sqlServer).toBe('10.0.0.8')
+    expect(form.sqlPort).toBe('1433')
   })
 
   it('builds K3 API authority-code token payloads from the setup form', () => {
@@ -655,6 +686,7 @@ describe('K3 WISE setup helpers', () => {
         enabled: true,
         mode: 'middle-table',
         server: '10.0.0.10',
+        port: 1433,
         database: 'AIS_TEST',
         middleTables: ['dbo.integration_material_stage'],
         writeCoreTables: false,
@@ -770,7 +802,7 @@ describe('K3 WISE setup helpers', () => {
       sqlServer: {
         enabled: true,
         mode: 'middle-table',
-        server: '10.0.0.10',
+        server: '10.0.0.10,14330',
         database: 'AIS_TEST',
         username: 'sql-user',
         password: 'sql-secret',
@@ -808,6 +840,7 @@ describe('K3 WISE setup helpers', () => {
       sqlEnabled: true,
       sqlMode: 'middle-table',
       sqlServer: '10.0.0.10',
+      sqlPort: '14330',
       sqlDatabase: 'AIS_TEST',
       sqlUsername: 'sql-user',
       sqlPassword: '',
@@ -823,6 +856,29 @@ describe('K3 WISE setup helpers', () => {
     expect(result.warnings).toContain('plm.credentials.token ignored; enter it in the credential form if needed')
     expect(result.warnings).toContain('sqlServer.password ignored; enter it in the credential form if needed')
     expect(result.warnings).not.toContain('k3Wise.tokenPath ignored; enter it in the credential form if needed')
+  })
+
+  it('loads saved SQL Server systems with a canonical host and port', () => {
+    const form = createDefaultK3WiseSetupForm()
+    const next = applyExternalSystemToForm(form, {
+      id: 'sql_1',
+      tenantId: 'default',
+      workspaceId: null,
+      name: 'K3 SQL loaded',
+      kind: 'erp:k3-wise-sqlserver',
+      role: 'bidirectional',
+      status: 'active',
+      config: {
+        mode: 'readonly',
+        server: '10.0.0.8,14330',
+        database: 'AIS_TEST',
+        allowedTables: ['dbo.t_ICItem'],
+      },
+      capabilities: {},
+    })
+
+    expect(next.sqlServer).toBe('10.0.0.8')
+    expect(next.sqlPort).toBe('14330')
   })
 
   it('rejects invalid customer GATE JSON before applying it to the form', () => {
