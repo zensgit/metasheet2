@@ -3,15 +3,15 @@
     <div class="meta-link-picker" @keydown.esc.stop.prevent="emit('close')" @keydown.enter.stop.prevent="onConfirm">
       <div class="meta-link-picker__header">
         <h4 class="meta-link-picker__title">{{ titleText }}</h4>
-        <button class="meta-link-picker__close" @click="emit('close')">&times;</button>
+        <button class="meta-link-picker__close" :aria-label="lp('linkPicker.close')" @click="emit('close')">&times;</button>
       </div>
       <div class="meta-link-picker__search">
         <input v-model="search" class="meta-link-picker__input" :placeholder="searchPlaceholder" @input="onSearch" />
       </div>
       <div v-if="selectedSummaries.length" class="meta-link-picker__selected">
         <div class="meta-link-picker__selected-header">
-          <span class="meta-link-picker__selected-label">Selected</span>
-          <button class="meta-link-picker__clear" @click="clearSelection">Clear</button>
+          <span class="meta-link-picker__selected-label">{{ lp('linkPicker.selected') }}</span>
+          <button class="meta-link-picker__clear" @click="clearSelection">{{ lp('linkPicker.clear') }}</button>
         </div>
         <div class="meta-link-picker__chips">
           <span v-for="item in selectedSummaries" :key="item.id" class="meta-link-picker__chip">
@@ -21,22 +21,22 @@
         </div>
       </div>
       <div class="meta-link-picker__body">
-        <div v-if="loading" class="meta-link-picker__loading">Loading...</div>
+        <div v-if="loading" class="meta-link-picker__loading">{{ lp('linkPicker.loading') }}</div>
         <div v-else-if="errorMessage" class="meta-link-picker__error">{{ errorMessage }}</div>
         <label v-for="rec in records" :key="rec.id" class="meta-link-picker__item">
           <input type="checkbox" :checked="selected.has(rec.id)" @change="toggleSelect(rec.id)" />
           <span>{{ rec.display || rec.id }}</span>
         </label>
-        <div v-if="!loading && !errorMessage && !records.length" class="meta-link-picker__empty">No records found</div>
+        <div v-if="!loading && !errorMessage && !records.length" class="meta-link-picker__empty">{{ lp('linkPicker.empty') }}</div>
         <button v-if="!loading && !errorMessage && hasMore" type="button" class="meta-link-picker__load-more" @click="loadMore">
-          Load more
+          {{ lp('linkPicker.loadMore') }}
         </button>
       </div>
       <div class="meta-link-picker__footer">
-        <span class="meta-link-picker__count">{{ selected.size }} selected</span>
+        <span class="meta-link-picker__count">{{ selectedCountText }}</span>
         <div class="meta-link-picker__actions">
-          <button class="meta-link-picker__cancel" @click="emit('close')">Cancel</button>
-          <button class="meta-link-picker__confirm" @click="onConfirm">Confirm</button>
+          <button class="meta-link-picker__cancel" @click="emit('close')">{{ lp('linkPicker.cancel') }}</button>
+          <button class="meta-link-picker__confirm" @click="onConfirm">{{ lp('linkPicker.confirm') }}</button>
         </div>
       </div>
     </div>
@@ -45,9 +45,15 @@
 
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import type { LinkedRecordSummary, MetaField } from '../types'
 import { multitableClient } from '../api/client'
 import { linkPickerSearchPlaceholder, linkPickerTitle } from '../utils/link-fields'
+import {
+  linkPickerLabel,
+  selectedCount,
+  type MetaLinkPickerLabelKey,
+} from '../utils/meta-link-picker-labels'
 
 const props = defineProps<{
   visible: boolean
@@ -68,10 +74,13 @@ const errorMessage = ref('')
 const page = ref({ offset: 0, limit: 50, total: 0, hasMore: false })
 const selected = reactive(new Set<string>())
 const summaryById = reactive<Record<string, LinkedRecordSummary>>({})
+const { isZh } = useLocale()
+const lp = (key: MetaLinkPickerLabelKey) => linkPickerLabel(key, isZh.value)
 const singleSelect = computed(() => props.field?.property?.limitSingleRecord === true || props.field?.property?.refKind === 'user')
-const titleText = computed(() => linkPickerTitle(props.field))
-const searchPlaceholder = computed(() => linkPickerSearchPlaceholder(props.field))
+const titleText = computed(() => linkPickerTitle(props.field, isZh.value))
+const searchPlaceholder = computed(() => linkPickerSearchPlaceholder(props.field, isZh.value))
 const hasMore = computed(() => page.value.hasMore)
+const selectedCountText = computed(() => selectedCount(selected.size, isZh.value))
 
 watch(() => props.visible, async (visible) => {
   if (!visible) {
@@ -111,7 +120,7 @@ async function loadRecords(reset = false) {
     for (const record of data.records ?? []) summaryById[record.id] = record
   } catch (error: any) {
     if (reset) records.value = []
-    errorMessage.value = error?.message ?? 'Failed to load records'
+    errorMessage.value = error?.message ?? lp('linkPicker.errorLoad')
   } finally {
     loading.value = false
   }

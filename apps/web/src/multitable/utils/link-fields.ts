@@ -46,11 +46,14 @@ export function linkActionLabel(
   return `Choose ${linkEntityLabel(field)}...`
 }
 
-export function linkPickerTitle(field?: MetaField | null): string {
-  const prefix = isPersonField(field) ? 'Select People' : 'Link Records'
+export function linkPickerTitle(field?: MetaField | null, isZh: boolean = false): string {
+  const prefix = isPersonField(field)
+    ? (isZh ? '选择人员' : 'Select People')
+    : (isZh ? '选择关联记录' : 'Link Records')
   return field?.name ? `${prefix} — ${field.name}` : prefix
 }
 
-export function linkPickerSearchPlaceholder(field?: MetaField | null): string {
-  return isPersonField(field) ? 'Search people...' : 'Search records...'
+export function linkPickerSearchPlaceholder(field?: MetaField | null, isZh: boolean = false): string {
+  if (isPersonField(field)) return isZh ? '搜索人员...' : 'Search people...'
+  return isZh ? '搜索记录...' : 'Search records...'
 }

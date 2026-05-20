@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { linkActionLabel } from '../src/multitable/utils/link-fields'
+import {
+  linkActionLabel,
+  linkPickerSearchPlaceholder,
+  linkPickerTitle,
+} from '../src/multitable/utils/link-fields'
 import type { MetaField } from '../src/multitable/types'
 
 const personField: MetaField = { id: 'owner', name: 'Owner', type: 'person' as MetaField['type'] }
@@ -55,5 +59,33 @@ describe('linkActionLabel — zh forms (T3B1 opt-in)', () => {
   it('null/undefined field with zh still maps to the record branch', () => {
     expect(linkActionLabel(null, 0, true)).toBe('选择关联记录...')
     expect(linkActionLabel(undefined, 3, true)).toBe('编辑关联记录 (3)')
+  })
+})
+
+describe('link picker helper labels — T3B3', () => {
+  it('keeps picker title/search helpers English by default', () => {
+    expect(linkPickerTitle(recordField)).toBe('Link Records — Parent')
+    expect(linkPickerSearchPlaceholder(recordField)).toBe('Search records...')
+    expect(linkPickerTitle(personField)).toBe('Select People — Owner')
+    expect(linkPickerSearchPlaceholder(personField)).toBe('Search people...')
+  })
+
+  it('localizes picker title/search helpers when isZh=true', () => {
+    expect(linkPickerTitle(recordField, true)).toBe('选择关联记录 — Parent')
+    expect(linkPickerSearchPlaceholder(recordField, true)).toBe('搜索记录...')
+    expect(linkPickerTitle(personField, true)).toBe('选择人员 — Owner')
+    expect(linkPickerSearchPlaceholder(personField, true)).toBe('搜索人员...')
+  })
+
+  it('preserves field names raw in picker titles', () => {
+    const zhNamedRecordField: MetaField = { id: 'parent', name: '父级记录', type: 'link' as MetaField['type'] }
+    expect(linkPickerTitle(zhNamedRecordField, true)).toBe('选择关联记录 — 父级记录')
+    expect(linkPickerTitle(zhNamedRecordField, false)).toBe('Link Records — 父级记录')
+  })
+
+  it('falls back to the record branch when field is absent', () => {
+    expect(linkPickerTitle(null)).toBe('Link Records')
+    expect(linkPickerTitle(undefined, true)).toBe('选择关联记录')
+    expect(linkPickerSearchPlaceholder(null, true)).toBe('搜索记录...')
   })
 })
