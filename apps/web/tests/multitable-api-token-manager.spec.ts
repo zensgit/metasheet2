@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 
 async function flushPromises() {
@@ -10,6 +10,7 @@ async function flushPromises() {
 
 import MetaApiTokenManager from '../src/multitable/components/MetaApiTokenManager.vue'
 import { MultitableApiClient } from '../src/multitable/api/client'
+import { useLocale } from '../src/composables/useLocale'
 import type {
   ApiToken,
   DingTalkGroupDelivery,
@@ -203,8 +204,13 @@ function mount(props: Record<string, unknown>) {
 }
 
 describe('MetaApiTokenManager', () => {
+  beforeEach(() => {
+    useLocale().setLocale('en')
+  })
+
   afterEach(() => {
     document.body.innerHTML = ''
+    useLocale().setLocale('en')
     vi.restoreAllMocks()
   })
 
@@ -440,6 +446,67 @@ describe('MetaApiTokenManager', () => {
     expect(tabLabels).toEqual(['API Tokens', 'Webhooks'])
     expect(document.querySelector('[data-dingtalk-groups-permission-note]')?.textContent).toContain('DingTalk group bindings require automation management permission')
     expect(fetchFn.mock.calls.some(([url]) => String(url).includes('/dingtalk-groups'))).toBe(false)
+  })
+
+  it('localizes API token, webhook, and DingTalk group chrome while preserving raw enum data', async () => {
+    useLocale().setLocale('zh-CN')
+    const { client } = mockClient(
+      [fakeToken({ scopes: ['read', 'admin'] })],
+      [fakeWebhook({ events: ['record.created', 'field.changed'] })],
+      [fakeDelivery({ event: 'field.changed', retryCount: 2 })],
+      [fakeDingTalkGroup({ hasSecret: true })],
+      [fakeDingTalkDelivery({ sourceType: 'manual_test' })],
+    )
+    mount({ visible: true, client })
+    await flushPromises()
+
+    expect(document.querySelector('.meta-api-mgr__title')?.textContent).toBe('API 令牌、Webhook 与钉钉群')
+    const tabLabels = Array.from(document.querySelectorAll('[role="tab"]')).map((tab) => tab.textContent?.trim())
+    expect(tabLabels).toEqual(['API 令牌', 'Webhook', '钉钉群'])
+    expect(document.body.textContent).toContain('Test token')
+    expect(document.body.textContent).toContain('mst_abc...')
+    expect(document.body.textContent).toContain('权限范围: 读取, 管理')
+
+    const newTokenBtn = document.querySelector('[data-token-new]') as HTMLButtonElement
+    newTokenBtn.click()
+    await flushPromises()
+    expect(document.querySelector('[data-token-scope="read"]')).toBeTruthy()
+    expect(document.querySelector('[data-token-form]')?.textContent).toContain('权限范围')
+
+    const webhookTab = document.querySelectorAll('[role="tab"]')[1] as HTMLButtonElement
+    webhookTab.click()
+    await flushPromises()
+    const webhookCard = document.querySelector('[data-webhook-id="wh_1"]') as HTMLElement
+    expect(webhookCard.textContent).toContain('Test webhook')
+    expect(webhookCard.textContent).toContain('事件: 记录已创建, 字段已变更')
+    expect(webhookCard.querySelector('[data-webhook-status="active"]')?.textContent).toContain('有效')
+    const newWebhookBtn = document.querySelector('[data-webhook-new]') as HTMLButtonElement
+    newWebhookBtn.click()
+    await flushPromises()
+    expect(document.querySelector('[data-webhook-event="record.created"]')).toBeTruthy()
+    expect(document.querySelector('[data-webhook-form]')?.textContent).toContain('记录已创建')
+    document.querySelector('[data-webhook-deliveries]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushPromises()
+    expect(document.querySelector('[data-deliveries]')?.textContent).toContain('最近投递')
+    expect(document.querySelector('[data-deliveries]')?.textContent).toContain('字段已变更')
+    expect(document.querySelector('[data-deliveries]')?.textContent).toContain('重试次数: 2')
+
+    const dingTalkTab = document.querySelectorAll('[role="tab"]')[2] as HTMLButtonElement
+    dingTalkTab.click()
+    await flushPromises()
+    const dingTalkCard = document.querySelector('[data-dingtalk-group-id="dt_1"]') as HTMLElement
+    expect(document.querySelector('[data-dingtalk-groups-scope-note]')?.textContent).toContain('表级钉钉群')
+    expect(dingTalkCard.textContent).toContain('Ops DingTalk Group')
+    expect(dingTalkCard.textContent).toContain('Webhook: https://oapi.dingtalk.com/robot/send?access_token=***')
+    expect(dingTalkCard.textContent).toContain('密钥: 已配置')
+    expect(dingTalkCard.textContent).toContain('共享到表: sheet_1')
+    expect(dingTalkCard.querySelector('[data-dingtalk-group-status="enabled"]')?.textContent).toContain('已启用')
+    const dingTalkDeliveriesBtn = dingTalkCard.querySelector('[data-dingtalk-group-deliveries]') as HTMLButtonElement
+    dingTalkDeliveriesBtn.click()
+    await flushPromises()
+    expect(document.querySelector('[data-dingtalk-deliveries]')?.textContent).toContain('最近投递')
+    expect(document.querySelector('[data-dingtalk-deliveries]')?.textContent).toContain('手动测试')
+    expect(document.querySelector('[data-dingtalk-deliveries]')?.textContent).toContain('Please fill incident details')
   })
 
   it('shows readable permission errors when DingTalk group loading is forbidden', async () => {

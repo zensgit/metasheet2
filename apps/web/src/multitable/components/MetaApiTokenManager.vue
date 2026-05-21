@@ -14,7 +14,7 @@
           :class="{ 'meta-api-mgr__tab--active': activeTab === 'tokens' }"
           @click="activeTab = 'tokens'"
         >
-          API Tokens
+          {{ a('tab.tokens') }}
         </button>
         <button
           role="tab"
@@ -23,7 +23,7 @@
           :class="{ 'meta-api-mgr__tab--active': activeTab === 'webhooks' }"
           @click="activeTab = 'webhooks'"
         >
-          Webhooks
+          {{ a('tab.webhooks') }}
         </button>
         <button
           v-if="canManageDingTalkGroups"
@@ -33,7 +33,7 @@
           :class="{ 'meta-api-mgr__tab--active': activeTab === 'dingtalk-groups' }"
           @click="activeTab = 'dingtalk-groups'"
         >
-          DingTalk Groups
+          {{ a('tab.dingtalkGroups') }}
         </button>
       </div>
 
@@ -45,63 +45,63 @@
           role="note"
           data-dingtalk-groups-permission-note="true"
         >
-          DingTalk group bindings require automation management permission for this table.
+          {{ a('notice.dingtalkPermission') }}
         </div>
 
         <!-- ===== TOKENS TAB ===== -->
         <template v-if="activeTab === 'tokens'">
           <!-- Newly created token (show once) -->
           <div v-if="newTokenPlaintext" class="meta-api-mgr__new-token" data-new-token="true">
-            <strong>Your new API token (shown once):</strong>
+            <strong>{{ a('token.newShownOnce') }}</strong>
             <div class="meta-api-mgr__token-display">
               <code data-new-token-value="true">{{ newTokenPlaintext }}</code>
               <button class="meta-api-mgr__btn meta-api-mgr__btn--primary" type="button" data-copy-new-token="true" @click="onCopyNewToken">
-                {{ copiedNewToken ? 'Copied!' : 'Copy' }}
+                {{ copiedNewToken ? a('token.action.copied') : a('token.action.copy') }}
               </button>
             </div>
-            <p class="meta-api-mgr__warning">Save this token now. You will not be able to see it again.</p>
-            <button class="meta-api-mgr__btn" type="button" @click="newTokenPlaintext = null">Dismiss</button>
+            <p class="meta-api-mgr__warning">{{ a('token.saveWarning') }}</p>
+            <button class="meta-api-mgr__btn" type="button" @click="newTokenPlaintext = null">{{ m('action.dismiss') }}</button>
           </div>
 
           <!-- Create form -->
           <section v-if="showTokenForm" class="meta-api-mgr__form" data-token-form="true">
-            <div class="meta-api-mgr__form-title">New API Token</div>
-            <label class="meta-api-mgr__label">Name</label>
-            <input v-model="tokenDraft.name" class="meta-api-mgr__input" type="text" placeholder="Token name" data-token-name="true" />
-            <label class="meta-api-mgr__label">Scopes</label>
+            <div class="meta-api-mgr__form-title">{{ a('token.newTitle') }}</div>
+            <label class="meta-api-mgr__label">{{ a('token.name') }}</label>
+            <input v-model="tokenDraft.name" class="meta-api-mgr__input" type="text" :placeholder="a('token.namePlaceholder')" data-token-name="true" />
+            <label class="meta-api-mgr__label">{{ a('token.scopes') }}</label>
             <div class="meta-api-mgr__checkboxes">
               <label v-for="scope in availableScopes" :key="scope" class="meta-api-mgr__checkbox-label">
                 <input type="checkbox" :value="scope" :checked="tokenDraft.scopes.includes(scope)" @change="onToggleScope(scope)" :data-token-scope="scope" />
-                {{ scope }}
+                {{ apiScopeLabel(scope, isZh) }}
               </label>
             </div>
-            <label class="meta-api-mgr__label">Expiry (optional)</label>
+            <label class="meta-api-mgr__label">{{ a('token.expiryOptional') }}</label>
             <input v-model="tokenDraft.expiresAt" class="meta-api-mgr__input" type="date" data-token-expiry="true" />
             <div class="meta-api-mgr__form-actions">
-              <button class="meta-api-mgr__btn meta-api-mgr__btn--primary" type="button" :disabled="!tokenDraft.name.trim() || busy" data-token-create="true" @click="onCreateToken">Create</button>
-              <button class="meta-api-mgr__btn" type="button" @click="showTokenForm = false">Cancel</button>
+              <button class="meta-api-mgr__btn meta-api-mgr__btn--primary" type="button" :disabled="!tokenDraft.name.trim() || busy" data-token-create="true" @click="onCreateToken">{{ a('token.action.create') }}</button>
+              <button class="meta-api-mgr__btn" type="button" @click="showTokenForm = false">{{ m('action.cancel') }}</button>
             </div>
           </section>
 
-          <button v-if="!showTokenForm" class="meta-api-mgr__btn meta-api-mgr__btn--primary meta-api-mgr__btn-add" type="button" data-token-new="true" @click="openTokenForm">+ New Token</button>
+          <button v-if="!showTokenForm" class="meta-api-mgr__btn meta-api-mgr__btn--primary meta-api-mgr__btn-add" type="button" data-token-new="true" @click="openTokenForm">{{ a('token.newButton') }}</button>
 
           <!-- Token list -->
-          <div v-if="tokensLoading" class="meta-api-mgr__empty">Loading tokens&#x2026;</div>
-          <div v-else-if="!tokens.length && !showTokenForm" class="meta-api-mgr__empty" data-tokens-empty="true">No API tokens yet.</div>
+          <div v-if="tokensLoading" class="meta-api-mgr__empty">{{ a('token.loading') }}</div>
+          <div v-else-if="!tokens.length && !showTokenForm" class="meta-api-mgr__empty" data-tokens-empty="true">{{ a('token.empty') }}</div>
           <div v-for="token in tokens" :key="token.id" class="meta-api-mgr__card" :data-token-id="token.id">
             <div class="meta-api-mgr__card-header">
               <strong class="meta-api-mgr__card-name">{{ token.name }}</strong>
               <code class="meta-api-mgr__card-prefix">{{ token.prefix }}...</code>
             </div>
             <div class="meta-api-mgr__card-meta">
-              <span>Scopes: {{ token.scopes.join(', ') || 'none' }}</span>
-              <span>Created: {{ formatDate(token.createdAt) }}</span>
-              <span v-if="token.lastUsedAt">Last used: {{ formatDate(token.lastUsedAt) }}</span>
-              <span v-if="token.expiresAt">Expires: {{ formatDate(token.expiresAt) }}</span>
+              <span>{{ a('token.meta.scopes') }}: {{ apiScopesText(token.scopes, isZh) }}</span>
+              <span>{{ a('token.meta.created') }}: {{ formatDate(token.createdAt) }}</span>
+              <span v-if="token.lastUsedAt">{{ a('token.meta.lastUsed') }}: {{ formatDate(token.lastUsedAt) }}</span>
+              <span v-if="token.expiresAt">{{ a('token.meta.expires') }}: {{ formatDate(token.expiresAt) }}</span>
             </div>
             <div class="meta-api-mgr__card-actions">
-              <button class="meta-api-mgr__btn" type="button" :disabled="busy" data-token-rotate="true" @click="onRotateToken(token.id)">Rotate</button>
-              <button class="meta-api-mgr__btn meta-api-mgr__btn--danger" type="button" :disabled="busy" data-token-revoke="true" @click="onRevokeToken(token.id)">Revoke</button>
+              <button class="meta-api-mgr__btn" type="button" :disabled="busy" data-token-rotate="true" @click="onRotateToken(token.id)">{{ a('token.action.rotate') }}</button>
+              <button class="meta-api-mgr__btn meta-api-mgr__btn--danger" type="button" :disabled="busy" data-token-revoke="true" @click="onRevokeToken(token.id)">{{ a('token.action.revoke') }}</button>
             </div>
           </div>
         </template>
@@ -110,64 +110,64 @@
         <template v-if="activeTab === 'webhooks'">
           <!-- Create/Edit form -->
           <section v-if="showWebhookForm" class="meta-api-mgr__form" data-webhook-form="true">
-            <div class="meta-api-mgr__form-title">{{ editingWebhookId ? 'Edit Webhook' : 'New Webhook' }}</div>
-            <label class="meta-api-mgr__label">Name</label>
-            <input v-model="webhookDraft.name" class="meta-api-mgr__input" type="text" placeholder="Webhook name" data-webhook-name="true" />
-            <label class="meta-api-mgr__label">URL (HTTPS required)</label>
-            <input v-model="webhookDraft.url" class="meta-api-mgr__input" type="url" placeholder="https://example.com/webhook" data-webhook-url="true" />
-            <label class="meta-api-mgr__label">Events</label>
+            <div class="meta-api-mgr__form-title">{{ editingWebhookId ? a('webhook.editTitle') : a('webhook.newTitle') }}</div>
+            <label class="meta-api-mgr__label">{{ a('webhook.name') }}</label>
+            <input v-model="webhookDraft.name" class="meta-api-mgr__input" type="text" :placeholder="a('webhook.namePlaceholder')" data-webhook-name="true" />
+            <label class="meta-api-mgr__label">{{ a('webhook.url') }}</label>
+            <input v-model="webhookDraft.url" class="meta-api-mgr__input" type="url" :placeholder="a('webhook.urlPlaceholder')" data-webhook-url="true" />
+            <label class="meta-api-mgr__label">{{ a('webhook.events') }}</label>
             <div class="meta-api-mgr__checkboxes">
               <label v-for="evt in availableEvents" :key="evt" class="meta-api-mgr__checkbox-label">
                 <input type="checkbox" :value="evt" :checked="webhookDraft.events.includes(evt)" @change="onToggleEvent(evt)" :data-webhook-event="evt" />
-                {{ evt }}
+                {{ apiWebhookEventLabel(evt, isZh) }}
               </label>
             </div>
-            <label class="meta-api-mgr__label">Secret (optional)</label>
-            <input v-model="webhookDraft.secret" class="meta-api-mgr__input" type="text" placeholder="HMAC secret" data-webhook-secret="true" />
+            <label class="meta-api-mgr__label">{{ a('webhook.secretOptional') }}</label>
+            <input v-model="webhookDraft.secret" class="meta-api-mgr__input" type="text" :placeholder="a('webhook.secretPlaceholder')" data-webhook-secret="true" />
             <div class="meta-api-mgr__form-actions">
               <button class="meta-api-mgr__btn meta-api-mgr__btn--primary" type="button" :disabled="!canSaveWebhook || busy" data-webhook-save="true" @click="onSaveWebhook">
-                {{ editingWebhookId ? 'Update' : 'Create' }}
+                {{ editingWebhookId ? a('webhook.action.update') : a('webhook.action.create') }}
               </button>
-              <button class="meta-api-mgr__btn" type="button" @click="cancelWebhookForm">Cancel</button>
+              <button class="meta-api-mgr__btn" type="button" @click="cancelWebhookForm">{{ m('action.cancel') }}</button>
             </div>
           </section>
 
-          <button v-if="!showWebhookForm" class="meta-api-mgr__btn meta-api-mgr__btn--primary meta-api-mgr__btn-add" type="button" data-webhook-new="true" @click="openWebhookForm">+ New Webhook</button>
+          <button v-if="!showWebhookForm" class="meta-api-mgr__btn meta-api-mgr__btn--primary meta-api-mgr__btn-add" type="button" data-webhook-new="true" @click="openWebhookForm">{{ a('webhook.newButton') }}</button>
 
           <!-- Webhook list -->
-          <div v-if="webhooksLoading" class="meta-api-mgr__empty">Loading webhooks&#x2026;</div>
-          <div v-else-if="!webhooks.length && !showWebhookForm" class="meta-api-mgr__empty" data-webhooks-empty="true">No webhooks yet.</div>
+          <div v-if="webhooksLoading" class="meta-api-mgr__empty">{{ a('webhook.loading') }}</div>
+          <div v-else-if="!webhooks.length && !showWebhookForm" class="meta-api-mgr__empty" data-webhooks-empty="true">{{ a('webhook.empty') }}</div>
           <div v-for="wh in webhooks" :key="wh.id" class="meta-api-mgr__card" :data-webhook-id="wh.id">
             <div class="meta-api-mgr__card-header">
               <strong class="meta-api-mgr__card-name">{{ wh.name }}</strong>
               <span class="meta-api-mgr__card-status" :data-webhook-status="wh.active ? 'active' : 'disabled'">
-                {{ wh.active ? 'Active' : 'Disabled' }}
+                {{ apiWebhookStatusLabel(wh.active, isZh) }}
               </span>
             </div>
             <div class="meta-api-mgr__card-meta">
-              <span>URL: {{ wh.url }}</span>
-              <span>Events: {{ wh.events.join(', ') }}</span>
-              <span v-if="wh.failureCount > 0" class="meta-api-mgr__card-failures">Failures: {{ wh.failureCount }}</span>
+              <span>{{ a('webhook.meta.url') }}: {{ wh.url }}</span>
+              <span>{{ a('webhook.meta.events') }}: {{ apiWebhookEventsText(wh.events, isZh) }}</span>
+              <span v-if="wh.failureCount > 0" class="meta-api-mgr__card-failures">{{ a('webhook.meta.failures') }}: {{ wh.failureCount }}</span>
             </div>
             <div class="meta-api-mgr__card-actions">
-              <button class="meta-api-mgr__btn" type="button" data-webhook-edit="true" @click="openEditWebhook(wh)">Edit</button>
+              <button class="meta-api-mgr__btn" type="button" data-webhook-edit="true" @click="openEditWebhook(wh)">{{ a('webhook.action.edit') }}</button>
               <button class="meta-api-mgr__btn" type="button" data-webhook-toggle="true" :disabled="busy" @click="onToggleWebhook(wh)">
-                {{ wh.active ? 'Disable' : 'Enable' }}
+                {{ apiToggleLabel(wh.active, isZh) }}
               </button>
-              <button class="meta-api-mgr__btn" type="button" data-webhook-deliveries="true" @click="onViewDeliveries(wh.id)">Deliveries</button>
-              <button class="meta-api-mgr__btn meta-api-mgr__btn--danger" type="button" :disabled="busy" data-webhook-delete="true" @click="onDeleteWebhook(wh.id)">Delete</button>
+              <button class="meta-api-mgr__btn" type="button" data-webhook-deliveries="true" @click="onViewDeliveries(wh.id)">{{ a('webhook.action.deliveries') }}</button>
+              <button class="meta-api-mgr__btn meta-api-mgr__btn--danger" type="button" :disabled="busy" data-webhook-delete="true" @click="onDeleteWebhook(wh.id)">{{ m('action.delete') }}</button>
             </div>
 
             <!-- Delivery history (inline) -->
             <div v-if="deliveriesWebhookId === wh.id && deliveries.length" class="meta-api-mgr__deliveries" data-deliveries="true">
-              <strong class="meta-api-mgr__label">Recent Deliveries</strong>
+              <strong class="meta-api-mgr__label">{{ a('webhook.delivery.recent') }}</strong>
               <div v-for="d in deliveries" :key="d.id" class="meta-api-mgr__delivery-row" :data-delivery-id="d.id">
                 <span :class="d.success ? 'meta-api-mgr__delivery--ok' : 'meta-api-mgr__delivery--fail'">
-                  {{ d.success ? 'OK' : 'FAIL' }}
+                  {{ apiDeliveryResultLabel(d.success, isZh) }}
                 </span>
-                <span>{{ d.event }}</span>
+                <span>{{ apiWebhookEventLabel(d.event, isZh) }}</span>
                 <span>HTTP {{ d.httpStatus ?? '-' }}</span>
-                <span v-if="d.retryCount > 0">Retries: {{ d.retryCount }}</span>
+                <span v-if="d.retryCount > 0">{{ a('webhook.delivery.retries') }}: {{ d.retryCount }}</span>
                 <span>{{ formatDate(d.timestamp) }}</span>
               </div>
             </div>
@@ -177,34 +177,34 @@
         <!-- ===== DINGTALK GROUPS TAB ===== -->
         <template v-if="canManageDingTalkGroups && activeTab === 'dingtalk-groups'">
           <section class="meta-api-mgr__notice" data-dingtalk-groups-scope-note="true">
-            <strong>Table-scoped DingTalk groups</strong>
-            <span>Groups created here are bound to this table. You can add multiple groups and choose one or more in automations; organization catalog groups are listed read-only when shared with your organization.</span>
-            <span>Register DingTalk robot webhooks as send destinations for this table. This does not import DingTalk group members or control form access.</span>
+            <strong>{{ a('dingtalk.scopeNote.title') }}</strong>
+            <span>{{ a('dingtalk.scopeNote.bound') }}</span>
+            <span>{{ a('dingtalk.scopeNote.delivery') }}</span>
           </section>
 
           <section v-if="showDingTalkGroupForm" class="meta-api-mgr__form" data-dingtalk-group-form="true">
             <div class="meta-api-mgr__form-title">
-              {{ editingDingTalkGroupId ? 'Edit DingTalk Group' : 'New DingTalk Group' }}
+              {{ editingDingTalkGroupId ? a('dingtalk.editTitle') : a('dingtalk.newTitle') }}
             </div>
-            <label class="meta-api-mgr__label">Name</label>
+            <label class="meta-api-mgr__label">{{ a('dingtalk.name') }}</label>
             <input
               v-model="dingTalkGroupDraft.name"
               class="meta-api-mgr__input"
               type="text"
-              placeholder="Support group"
+              :placeholder="a('dingtalk.namePlaceholder')"
               data-dingtalk-group-name="true"
             />
-            <label class="meta-api-mgr__label">Webhook URL</label>
+            <label class="meta-api-mgr__label">{{ a('dingtalk.webhookUrl') }}</label>
             <input
               v-model="dingTalkGroupDraft.webhookUrl"
               class="meta-api-mgr__input"
               type="url"
-              placeholder="https://oapi.dingtalk.com/robot/send?access_token=..."
+              :placeholder="a('dingtalk.webhookPlaceholder')"
               aria-describedby="dingtalk-group-webhook-help"
               data-dingtalk-group-webhook-url="true"
             />
             <p id="dingtalk-group-webhook-help" class="meta-api-mgr__help" data-dingtalk-group-webhook-help="true">
-              Paste the robot webhook from the target DingTalk group robot settings. After saving, this destination appears in this table's automation rule editor. The access token is stored for delivery but masked in this UI.
+              {{ a('dingtalk.webhookHelp') }}
             </p>
             <p
               v-if="dingTalkGroupWebhookValidationMessage && dingTalkGroupDraft.webhookUrl.trim()"
@@ -213,12 +213,12 @@
             >
               {{ dingTalkGroupWebhookValidationMessage }}
             </p>
-            <label class="meta-api-mgr__label">Secret (optional)</label>
+            <label class="meta-api-mgr__label">{{ a('dingtalk.secretOptional') }}</label>
             <input
               v-model="dingTalkGroupDraft.secret"
               class="meta-api-mgr__input"
               type="text"
-              placeholder="SEC..."
+              :placeholder="a('dingtalk.secretPlaceholder')"
               :disabled="dingTalkGroupDraft.clearSecret"
               aria-describedby="dingtalk-group-secret-help"
               data-dingtalk-group-secret="true"
@@ -243,7 +243,7 @@
                 type="checkbox"
                 data-dingtalk-group-clear-secret="true"
               />
-              Clear saved SEC secret
+              {{ a('dingtalk.clearSecret') }}
             </label>
             <label class="meta-api-mgr__checkbox-label">
               <input
@@ -251,7 +251,7 @@
                 type="checkbox"
                 data-dingtalk-group-enabled="true"
               />
-              Enabled
+              {{ a('dingtalk.enabled') }}
             </label>
             <div class="meta-api-mgr__form-actions">
               <button
@@ -261,9 +261,9 @@
                 data-dingtalk-group-save="true"
                 @click="onSaveDingTalkGroup"
               >
-                {{ editingDingTalkGroupId ? 'Update' : 'Create' }}
+                {{ editingDingTalkGroupId ? a('dingtalk.action.update') : a('dingtalk.action.create') }}
               </button>
-              <button class="meta-api-mgr__btn" type="button" @click="cancelDingTalkGroupForm">Cancel</button>
+              <button class="meta-api-mgr__btn" type="button" @click="cancelDingTalkGroupForm">{{ m('action.cancel') }}</button>
             </div>
           </section>
 
@@ -274,16 +274,16 @@
             data-dingtalk-group-new="true"
             @click="openDingTalkGroupForm"
           >
-            + New DingTalk Group
+            {{ a('dingtalk.newButton') }}
           </button>
 
-          <div v-if="dingTalkGroupsLoading" class="meta-api-mgr__empty">Loading DingTalk groups&#x2026;</div>
+          <div v-if="dingTalkGroupsLoading" class="meta-api-mgr__empty">{{ a('dingtalk.loading') }}</div>
           <div
             v-else-if="!dingTalkGroups.length && !showDingTalkGroupForm"
             class="meta-api-mgr__empty"
             data-dingtalk-groups-empty="true"
           >
-            No DingTalk group destinations yet. Add a group robot webhook before configuring group-message automations.
+            {{ a('dingtalk.empty') }}
           </div>
           <div
             v-for="group in dingTalkGroups"
@@ -294,40 +294,40 @@
             <div class="meta-api-mgr__card-header">
               <strong class="meta-api-mgr__card-name">{{ group.name }}</strong>
               <span class="meta-api-mgr__card-status" :data-dingtalk-group-status="group.enabled ? 'enabled' : 'disabled'">
-                {{ group.enabled ? 'Enabled' : 'Disabled' }}
+                {{ apiDingTalkEnabledLabel(group.enabled, isZh) }}
               </span>
             </div>
             <div class="meta-api-mgr__card-meta">
-              <span>Webhook: {{ maskDingTalkWebhookUrl(group.webhookUrl) }}</span>
-              <span>Secret: {{ group.hasSecret ? 'configured' : 'not configured' }}</span>
+              <span>{{ a('dingtalk.meta.webhook') }}: {{ maskDingTalkWebhookUrl(group.webhookUrl) }}</span>
+              <span>{{ a('dingtalk.meta.secret') }}: {{ apiDingTalkSecretStateLabel(group.hasSecret === true, isZh) }}</span>
               <span>{{ dingTalkGroupScopeLabel(group) }}</span>
-              <span>Created: {{ formatDate(group.createdAt) }}</span>
-              <span v-if="group.lastTestedAt">Last test: {{ formatDate(group.lastTestedAt) }}</span>
+              <span>{{ a('dingtalk.meta.created') }}: {{ formatDate(group.createdAt) }}</span>
+              <span v-if="group.lastTestedAt">{{ a('dingtalk.meta.lastTest') }}: {{ formatDate(group.lastTestedAt) }}</span>
               <span v-if="group.lastTestStatus" :data-dingtalk-group-test-status="group.lastTestStatus">
-                Test status: {{ group.lastTestStatus }}
+                {{ a('dingtalk.meta.testStatus') }}: {{ group.lastTestStatus }}
               </span>
             </div>
             <div v-if="group.lastTestError" class="meta-api-mgr__card-meta meta-api-mgr__card-failures">
-              <span>Last error: {{ group.lastTestError }}</span>
+              <span>{{ a('dingtalk.meta.lastError') }}: {{ group.lastTestError }}</span>
             </div>
             <div class="meta-api-mgr__card-actions">
               <button v-if="canMutateDingTalkGroup(group)" class="meta-api-mgr__btn" type="button" data-dingtalk-group-edit="true" @click="openEditDingTalkGroup(group)">
-                Edit
+                {{ a('dingtalk.action.edit') }}
               </button>
               <button v-if="canMutateDingTalkGroup(group)" class="meta-api-mgr__btn" type="button" :disabled="busy" data-dingtalk-group-toggle="true" @click="onToggleDingTalkGroup(group)">
-                {{ group.enabled ? 'Disable' : 'Enable' }}
+                {{ apiDingTalkToggleLabel(group.enabled, isZh) }}
               </button>
               <button class="meta-api-mgr__btn" type="button" data-dingtalk-group-deliveries="true" @click="onViewDingTalkDeliveries(group)">
-                Deliveries
+                {{ a('dingtalk.action.deliveries') }}
               </button>
               <button v-if="canMutateDingTalkGroup(group)" class="meta-api-mgr__btn" type="button" :disabled="busy" data-dingtalk-group-test-send="true" @click="onTestDingTalkGroup(group)">
-                Test send
+                {{ a('dingtalk.action.testSend') }}
               </button>
               <button v-if="canMutateDingTalkGroup(group)" class="meta-api-mgr__btn meta-api-mgr__btn--danger" type="button" :disabled="busy" data-dingtalk-group-delete="true" @click="onDeleteDingTalkGroup(group)">
-                Delete
+                {{ m('action.delete') }}
               </button>
               <span v-else class="meta-api-mgr__card-readonly" data-dingtalk-group-readonly="true">
-                Managed by organization admins
+                {{ a('dingtalk.readonly') }}
               </span>
             </div>
 
@@ -336,16 +336,16 @@
               class="meta-api-mgr__deliveries"
               data-dingtalk-deliveries="true"
             >
-              <strong class="meta-api-mgr__label">Recent Deliveries</strong>
+              <strong class="meta-api-mgr__label">{{ a('dingtalk.delivery.recent') }}</strong>
               <div v-if="dingTalkDeliveriesLoading" class="meta-api-mgr__empty" data-dingtalk-deliveries-loading="true">
-                Loading DingTalk deliveries…
+                {{ a('dingtalk.delivery.loading') }}
               </div>
               <div
                 v-else-if="!dingTalkDeliveries.length"
                 class="meta-api-mgr__empty"
                 data-dingtalk-deliveries-empty="true"
               >
-                No DingTalk deliveries yet.
+                {{ a('dingtalk.delivery.empty') }}
               </div>
               <template v-else>
                 <div
@@ -355,9 +355,9 @@
                   :data-dingtalk-delivery-id="delivery.id"
                 >
                   <span :class="delivery.success ? 'meta-api-mgr__delivery--ok' : 'meta-api-mgr__delivery--fail'">
-                    {{ delivery.success ? 'OK' : 'FAIL' }}
+                    {{ apiDeliveryResultLabel(delivery.success, isZh) }}
                   </span>
-                  <span>{{ delivery.sourceType === 'manual_test' ? 'Manual test' : 'Automation' }}</span>
+                  <span>{{ apiDingTalkDeliverySourceLabel(delivery.sourceType, isZh) }}</span>
                   <span>{{ delivery.subject }}</span>
                   <span>HTTP {{ delivery.httpStatus ?? '-' }}</span>
                   <span>{{ formatDate(delivery.createdAt) }}</span>
@@ -373,6 +373,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import type {
   ApiToken,
   DingTalkGroupDelivery,
@@ -381,6 +382,24 @@ import type {
   WebhookDelivery,
 } from '../types'
 import type { MultitableApiClient } from '../api/client'
+import { managerLabel, type MetaManagerLabelKey } from '../utils/meta-manager-labels'
+import {
+  apiDeliveryResultLabel,
+  apiDingTalkDeliverySourceLabel,
+  apiDingTalkEnabledLabel,
+  apiDingTalkScopeLabel,
+  apiDingTalkSecretStateLabel,
+  apiDingTalkToggleLabel,
+  apiManagerTitle,
+  apiScopeLabel,
+  apiScopesText,
+  apiTokenLabel,
+  apiToggleLabel,
+  apiWebhookEventLabel,
+  apiWebhookEventsText,
+  apiWebhookStatusLabel,
+  type MetaApiTokenLabelKey,
+} from '../utils/meta-api-token-labels'
 
 const props = withDefaults(defineProps<{
   visible: boolean
@@ -398,6 +417,15 @@ const emit = defineEmits<{
 const activeTab = ref<'tokens' | 'webhooks' | 'dingtalk-groups'>('tokens')
 const error = ref<string | null>(null)
 const busy = ref(false)
+const { isZh } = useLocale()
+
+function a(key: MetaApiTokenLabelKey): string {
+  return apiTokenLabel(key, isZh.value)
+}
+
+function m(key: MetaManagerLabelKey): string {
+  return managerLabel(key, isZh.value)
+}
 
 // ---- Tokens ----
 const tokens = ref<ApiToken[]>([])
@@ -437,9 +465,7 @@ const dingTalkGroupDraft = ref({
 })
 
 const canManageDingTalkGroups = computed(() => props.canManageAutomation !== false)
-const managerTitle = computed(() => canManageDingTalkGroups.value
-  ? 'API Tokens, Webhooks & DingTalk Groups'
-  : 'API Tokens & Webhooks')
+const managerTitle = computed(() => apiManagerTitle(canManageDingTalkGroups.value, isZh.value))
 
 const canSaveWebhook = computed(() => {
   return webhookDraft.value.name.trim() && webhookDraft.value.url.startsWith('https://') && webhookDraft.value.events.length > 0
@@ -462,9 +488,9 @@ const dingTalkGroupSecretValidationMessage = computed(() =>
 )
 const dingTalkGroupSecretHelpText = computed(() => {
   if (editingDingTalkGroupOriginal.value?.hasSecret) {
-    return 'A SEC secret is already saved. Leave blank to keep it, enter a new SEC secret to replace it, or clear it below.'
+    return a('dingtalk.secretHelp.saved')
   }
-  return 'Fill this only when the DingTalk robot uses signature security. Leave empty for robots without a SEC secret.'
+  return a('dingtalk.secretHelp.new')
 })
 const canSaveDingTalkGroup = computed(() => {
   return canManageDingTalkGroups.value
@@ -500,19 +526,19 @@ function maskDingTalkWebhookUrl(url: string): string {
 
 function validateDingTalkGroupWebhookUrl(value: string): string {
   const webhookUrl = value.trim()
-  if (!webhookUrl) return 'Webhook URL is required'
+  if (!webhookUrl) return a('validation.webhookRequired')
   let parsed: URL
   try {
     parsed = new URL(webhookUrl)
   } catch {
-    return 'Webhook URL is not a valid URL'
+    return a('validation.webhookInvalid')
   }
-  if (parsed.protocol !== 'https:') return 'DingTalk robot webhook URL must use HTTPS'
+  if (parsed.protocol !== 'https:') return a('validation.webhookHttps')
   if (parsed.hostname !== 'oapi.dingtalk.com' || parsed.pathname !== '/robot/send') {
-    return 'Use the DingTalk group robot webhook from https://oapi.dingtalk.com/robot/send'
+    return a('validation.webhookDingTalkUrl')
   }
   if (!parsed.searchParams.get('access_token')?.trim()) {
-    return 'DingTalk group robot webhook must include access_token'
+    return a('validation.webhookAccessToken')
   }
   return ''
 }
@@ -520,7 +546,7 @@ function validateDingTalkGroupWebhookUrl(value: string): string {
 function validateDingTalkGroupSecret(value: string): string {
   const secret = value.trim()
   if (!secret) return ''
-  if (!secret.startsWith('SEC')) return 'DingTalk robot secret must start with SEC'
+  if (!secret.startsWith('SEC')) return a('validation.secretPrefix')
   return ''
 }
 
@@ -532,9 +558,7 @@ function dingTalkGroupScope(group: DingTalkGroupDestination): 'private' | 'sheet
 
 function dingTalkGroupScopeLabel(group: DingTalkGroupDestination): string {
   const scope = dingTalkGroupScope(group)
-  if (scope === 'org') return group.orgId ? `Organization catalog group: ${group.orgId}` : 'Organization catalog group'
-  if (scope === 'sheet') return group.sheetId ? `Shared with sheet: ${group.sheetId}` : 'Shared with this sheet'
-  return 'Private legacy group'
+  return apiDingTalkScopeLabel(scope, { sheetId: group.sheetId, orgId: group.orgId }, isZh.value)
 }
 
 function canMutateDingTalkGroup(group: DingTalkGroupDestination): boolean {
@@ -549,7 +573,7 @@ async function loadTokens() {
   try {
     tokens.value = await props.client.listApiTokens()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to load tokens'
+    error.value = err instanceof Error ? err.message : a('error.loadTokens')
   } finally {
     tokensLoading.value = false
   }
@@ -583,7 +607,7 @@ async function onCreateToken() {
     showTokenForm.value = false
     await loadTokens()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to create token'
+    error.value = err instanceof Error ? err.message : a('error.createToken')
   } finally {
     busy.value = false
   }
@@ -604,7 +628,7 @@ async function onRevokeToken(tokenId: string) {
     await props.client.revokeApiToken(tokenId)
     await loadTokens()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to revoke token'
+    error.value = err instanceof Error ? err.message : a('error.revokeToken')
   } finally {
     busy.value = false
   }
@@ -619,7 +643,7 @@ async function onRotateToken(tokenId: string) {
     newTokenPlaintext.value = result.plaintext
     await loadTokens()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to rotate token'
+    error.value = err instanceof Error ? err.message : a('error.rotateToken')
   } finally {
     busy.value = false
   }
@@ -633,7 +657,7 @@ async function loadWebhooks() {
   try {
     webhooks.value = await props.client.listWebhooks()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to load webhooks'
+    error.value = err instanceof Error ? err.message : a('error.loadWebhooks')
   } finally {
     webhooksLoading.value = false
   }
@@ -689,7 +713,7 @@ async function onSaveWebhook() {
     cancelWebhookForm()
     await loadWebhooks()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to save webhook'
+    error.value = err instanceof Error ? err.message : a('error.saveWebhook')
   } finally {
     busy.value = false
   }
@@ -703,7 +727,7 @@ async function onToggleWebhook(wh: Webhook) {
     await props.client.updateWebhook(wh.id, { active: !wh.active })
     await loadWebhooks()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to toggle webhook'
+    error.value = err instanceof Error ? err.message : a('error.toggleWebhook')
   } finally {
     busy.value = false
   }
@@ -721,7 +745,7 @@ async function onDeleteWebhook(id: string) {
     }
     await loadWebhooks()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to delete webhook'
+    error.value = err instanceof Error ? err.message : a('error.deleteWebhook')
   } finally {
     busy.value = false
   }
@@ -739,7 +763,7 @@ async function onViewDeliveries(webhookId: string) {
     deliveries.value = await props.client.getWebhookDeliveries(webhookId)
     deliveriesWebhookId.value = webhookId
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to load deliveries'
+    error.value = err instanceof Error ? err.message : a('error.loadDeliveries')
   }
 }
 
@@ -756,7 +780,7 @@ async function loadDingTalkGroups() {
   try {
     dingTalkGroups.value = await props.client.listDingTalkGroups(props.sheetId)
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to load DingTalk groups'
+    error.value = err instanceof Error ? err.message : a('error.loadDingTalkGroups')
   } finally {
     dingTalkGroupsLoading.value = false
   }
@@ -845,7 +869,7 @@ async function onSaveDingTalkGroup() {
     cancelDingTalkGroupForm()
     await loadDingTalkGroups()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to save DingTalk group'
+    error.value = err instanceof Error ? err.message : a('error.saveDingTalkGroup')
   } finally {
     busy.value = false
   }
@@ -859,7 +883,7 @@ async function onToggleDingTalkGroup(group: DingTalkGroupDestination) {
     await props.client.updateDingTalkGroup(group.id, { enabled: !group.enabled }, props.sheetId)
     await loadDingTalkGroups()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to toggle DingTalk group'
+    error.value = err instanceof Error ? err.message : a('error.toggleDingTalkGroup')
   } finally {
     busy.value = false
   }
@@ -877,7 +901,7 @@ async function onTestDingTalkGroup(group: DingTalkGroupDestination) {
       await loadDingTalkDeliveries(group)
     }
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to test DingTalk group'
+    error.value = err instanceof Error ? err.message : a('error.testDingTalkGroup')
   } finally {
     busy.value = false
   }
@@ -902,7 +926,7 @@ async function loadDingTalkDeliveries(group: DingTalkGroupDestination) {
     if (requestToken !== dingTalkDeliveriesRequestToken || dingTalkDeliveriesGroupId.value !== groupId) {
       return
     }
-    error.value = err instanceof Error ? err.message : 'Failed to load DingTalk deliveries'
+    error.value = err instanceof Error ? err.message : a('error.loadDingTalkDeliveries')
   } finally {
     if (requestToken === dingTalkDeliveriesRequestToken && dingTalkDeliveriesGroupId.value === groupId) {
       dingTalkDeliveriesLoading.value = false
@@ -938,7 +962,7 @@ async function onDeleteDingTalkGroup(group: DingTalkGroupDestination) {
     }
     await loadDingTalkGroups()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to delete DingTalk group'
+    error.value = err instanceof Error ? err.message : a('error.deleteDingTalkGroup')
   } finally {
     busy.value = false
   }
