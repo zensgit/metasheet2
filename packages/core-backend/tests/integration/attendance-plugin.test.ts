@@ -7806,4 +7806,317 @@ describe('Attendance Plugin Integration', () => {
     }
   })
 
+  // ===== Step 5: calc-chain cutover =====
+  // RFC §8 cutover: resolveWorkContext (and its prefetch sibling) now apply
+  // calendarPolicy.overrides on top of profile + holiday, so payroll /
+  // import / auto-absence / summary observe the same effective isWorkingDay
+  // as the read-only /api/attendance/effective-calendar API. This test
+  // exercises the most direct calc-chain entry — POST /api/attendance/punch
+  // calls resolveWorkContext, then upsertAttendanceRecord writes the row
+  // with is_workday = context.isWorkingDay. We verify three scenarios on the
+  // same date:
+  //   (a) baseline — no policy → is_workday tracks the holiday row
+  //   (b) org override flips holiday → is_workday flips with it
+  //   (c) role-source override stays inert (D6 known limitation)
+  // §5.1 / §5.7 / §5.11 negative protection (no-policy equivalence) is
+  // already covered by all 71 existing tests continuing to pass after the
+  // Block A/B/C integration.
+  it('Step 5: resolveWorkContext applies calendarPolicy.overrides at punch time (with org-flip and role-inert cases)', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    // Codex Step 5 review v2 follow-up: the /punch endpoint has a
+    // pre-existing FUTURE_PUNCH_NOT_ALLOWED guard rejecting occurredAt
+    // more than 5 minutes in the future. The original year-3030 fixture
+    // could never reach the assertions on a properly-migrated scratch
+    // DB; the test was silently early-returning via `!baseUrl` whenever
+    // migrations hadn't been applied. Anchor to a fixed past Monday
+    // (2024-10-07; default rule treats Mon as a working day, so the
+    // holiday seed below is the only source of is_working_day=false).
+    const targetDate = '2024-10-07'
+    const todayUtc = new Date().toISOString().slice(0, 10)
+    expect(targetDate < todayUtc).toBe(true)
+    const userId = `attendance-step5-user-${runSuffix}`
+    const adminId = `attendance-step5-admin-${runSuffix}`
+    const orgId = 'default'
+    const occurredAt = `${targetDate}T01:00:00.000Z` // 09:00 in Asia/Shanghai
+
+    const pool = new Pool({ connectionString: dbUrl })
+
+    async function tokenFor(uid: string, role: string, perms: string): Promise<string | null> {
+      const res = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=${role}&perms=${perms}`
+      )
+      return (res.body as { token?: string } | undefined)?.token ?? null
+    }
+
+    async function putCalendarPolicy(adminToken: string, overrides: unknown[]): Promise<void> {
+      const res = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ calendarPolicy: { overrides } }),
+      })
+      // Settings endpoint accepts PUT in this codebase; some flows route POST.
+      // If POST is rejected, fall back to PUT.
+      if (res.status !== 200) {
+        const putRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT',
+          headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ calendarPolicy: { overrides } }),
+        })
+        expect(putRes.status).toBe(200)
+      }
+    }
+
+    async function punchAndReadIsWorkday(userToken: string): Promise<boolean | null> {
+      // Clear prior state so each scenario gets a clean row to read.
+      await pool.query(`DELETE FROM attendance_records WHERE user_id = $1 AND work_date = $2`, [userId, targetDate])
+      await pool.query(`DELETE FROM attendance_events WHERE user_id = $1 AND work_date = $2`, [userId, targetDate])
+      const punchRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${userToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventType: 'check_in', occurredAt, timezone: 'Asia/Shanghai' }),
+      })
+      expect(punchRes.status).toBe(200)
+      const rows = await pool.query(
+        `SELECT is_workday FROM attendance_records WHERE user_id = $1 AND work_date = $2`,
+        [userId, targetDate],
+      )
+      if (rows.rows.length === 0) return null
+      return rows.rows[0].is_workday === true
+    }
+
+    try {
+      // Setup: a national holiday on targetDate (is_working_day=false). The
+      // pre-Step-5 calc would always treat this day as rest; Step 5 lets
+      // calendarPolicy flip it.
+      await pool.query(
+        `DELETE FROM attendance_holidays WHERE org_id = $1 AND holiday_date = $2`,
+        [orgId, targetDate],
+      )
+      await pool.query(
+        `INSERT INTO attendance_holidays (id, org_id, holiday_date, name, is_working_day, origin)
+         VALUES ($1, 'default', $2, 'Step 5 National Rest', false, 'national')`,
+        [randomUuidV4(), targetDate],
+      )
+
+      const adminToken = await tokenFor(adminId, 'admin', 'attendance:read,attendance:write,attendance:admin,attendance:approve')
+      const userToken = await tokenFor(userId, 'user', 'attendance:read,attendance:write')
+      expect(adminToken).toBeTruthy()
+      expect(userToken).toBeTruthy()
+      if (!adminToken || !userToken) return
+
+      // Ensure no leftover policy from earlier tests
+      await putCalendarPolicy(adminToken, [])
+
+      // --- (a) baseline: no policy → holiday wins, is_workday=false ---
+      const baselineWorkday = await punchAndReadIsWorkday(userToken)
+      expect(baselineWorkday).toBe(false)
+
+      // --- (b) org override flips the holiday to a working day ---
+      await putCalendarPolicy(adminToken, [
+        {
+          date: targetDate,
+          effective: { isWorkingDay: true, label: 'Step 5 org flip', source: 'org' },
+        },
+      ])
+      const flippedWorkday = await punchAndReadIsWorkday(userToken)
+      expect(flippedWorkday).toBe(true)
+
+      // --- (c) role-source override stays inert (D6: no DB role context in v1) ---
+      await putCalendarPolicy(adminToken, [
+        {
+          date: targetDate,
+          filters: { roles: ['production'] },
+          effective: { isWorkingDay: true, label: 'Step 5 role flip', source: 'role' },
+        },
+      ])
+      const roleWorkday = await punchAndReadIsWorkday(userToken)
+      expect(roleWorkday).toBe(false)
+    } finally {
+      const cleanToken = await tokenFor(`${adminId}-cleanup`, 'admin', 'attendance:admin')
+      if (cleanToken) {
+        await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT',
+          headers: { Authorization: `Bearer ${cleanToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ calendarPolicy: { overrides: [] } }),
+        }).catch(() => undefined)
+      }
+      await pool.query(`DELETE FROM attendance_events WHERE user_id = $1`, [userId]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_records WHERE user_id = $1`, [userId]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_holidays WHERE org_id = $1 AND holiday_date = $2`, [orgId, targetDate]).catch(() => undefined)
+      await pool.end()
+    }
+  })
+
+  // Step 5 review fix (Codex Blocking #1): auto-absence bidirectional.
+  // The pre-fix scheduler short-circuited on any org-level holiday with
+  // is_working_day=false, so a calendarPolicy override flipping that day
+  // to working never reached the per-user resolveWorkContext loop. This
+  // test exercises the calc-chain end-to-end via the new admin trigger
+  // `POST /api/attendance/auto-absence/run`:
+  //   (rest -> work) holiday + org override -> absence generated
+  //   (work -> rest) normal weekday + org override -> NO absence
+  // It guards against future regressions of the same short-circuit shape.
+  it('Step 5: auto-absence respects calendarPolicy in both directions (rest->work generates absence; work->rest does not)', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    // Codex Step 5 review (Blocking #1 v2): admin endpoint now rejects
+    // workDate >= UTC today. Use definitively-past dates anchored to a
+    // fixed past year. Codex Step 5 review (Blocking #2 v2): use a
+    // unique orgId so the auto-absence fanout cannot touch any other
+    // active user. The unique-org route also exercises the
+    // org-fallback path in loadDefaultRule (no attendance_rules row
+    // exists for this org → DEFAULT_RULE shape with Mon-Fri workdays).
+    const orgId = `step5-absence-org-${runSuffix}`
+    // 2024-01-15 is a Monday (Jan 1 2024 was Monday); inserting a
+    // holiday row there makes it a rest day under the default rule.
+    // 2024-01-16 is a Tuesday with no holiday → a default work day.
+    const restDate = '2024-01-15'
+    const workdayDate = '2024-01-16'
+    // Sanity check that both dates remain past relative to UTC today.
+    // If anyone ever back-dates the system clock for a CI image they
+    // need to see this assertion blow up rather than the suite quietly
+    // pass.
+    const todayUtc = new Date().toISOString().slice(0, 10)
+    expect(restDate < todayUtc).toBe(true)
+    expect(workdayDate < todayUtc).toBe(true)
+
+    const userId = `attendance-step5-absence-${runSuffix}`
+    const adminId = `attendance-step5-absence-admin-${runSuffix}`
+    const pool = new Pool({ connectionString: dbUrl })
+
+    async function tokenFor(uid: string, role: string, perms: string): Promise<string | null> {
+      const res = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=${role}&perms=${perms}`
+      )
+      return (res.body as { token?: string } | undefined)?.token ?? null
+    }
+    async function putCalendarPolicy(adminToken: string, overrides: unknown[]): Promise<void> {
+      const res = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ calendarPolicy: { overrides } }),
+      })
+      expect(res.status).toBe(200)
+    }
+    async function runAutoAbsence(adminToken: string, workDate: string): Promise<{ status: number; data: { total: number; skipped?: boolean; reason?: string } | null; rawBody?: unknown }> {
+      const res = await requestJson(`${baseUrl}/api/attendance/auto-absence/run`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orgId, workDate }),
+      })
+      const body = res.body as { data?: { total: number; skipped?: boolean; reason?: string } } | undefined
+      return { status: res.status, data: body?.data ?? null, rawBody: res.body }
+    }
+
+    try {
+      // Seed user + user_orgs against the ISOLATED org so the
+      // auto-absence fanout finds exactly one user.
+      await pool.query(`DELETE FROM user_orgs WHERE user_id = $1`, [userId])
+      await pool.query(`DELETE FROM users WHERE id = $1`, [userId])
+      await pool.query(
+        `INSERT INTO users (id, email, password_hash, name, role, is_active)
+         VALUES ($1, $2, 'no-login', 'Step5 Absence User', 'user', true)`,
+        [userId, `${userId}@example.com`],
+      )
+      await pool.query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`,
+        [userId, orgId],
+      )
+
+      // National holiday on restDate keyed to our isolated org so the
+      // pre-fix short-circuit (now gated on calendarPolicy.overrides
+      // being empty) would have skipped the day for the entire org.
+      await pool.query(
+        `DELETE FROM attendance_holidays WHERE org_id = $1 AND holiday_date = ANY($2::date[])`,
+        [orgId, [restDate, workdayDate]],
+      )
+      await pool.query(
+        `INSERT INTO attendance_holidays (id, org_id, holiday_date, name, is_working_day, origin)
+         VALUES ($1, $2, $3, 'Step 5 Rest', false, 'national')`,
+        [randomUuidV4(), orgId, restDate],
+      )
+
+      const adminToken = await tokenFor(adminId, 'admin', 'attendance:read,attendance:write,attendance:admin')
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+
+      // Clean any leftover attendance_records for the user (scoped to
+      // our isolated org so we never touch default org rows).
+      await pool.query(`DELETE FROM attendance_records WHERE user_id = $1 AND org_id = $2`, [userId, orgId])
+
+      // --- (0) future-date guard: endpoint must refuse today / future ---
+      // This locks the Codex Blocking #1 v2 fix (admin trigger cannot
+      // fabricate absent rows for non-past dates).
+      const futureRes = await runAutoAbsence(adminToken, todayUtc)
+      expect(futureRes.status).toBe(400)
+      expect((futureRes.rawBody as { error?: { code?: string } } | undefined)?.error?.code).toBe('WORK_DATE_NOT_PAST')
+
+      // --- (1) rest -> work: org override flips the holiday to working ---
+      await putCalendarPolicy(adminToken, [
+        {
+          date: restDate,
+          effective: { isWorkingDay: true, label: 'Step 5 org rest->work', source: 'org' },
+        },
+      ])
+      const restToWorkRes = await runAutoAbsence(adminToken, restDate)
+      expect(restToWorkRes.status).toBe(200)
+      // Target list must include our user (resolveWorkContext.isWorkingDay=true
+      // because the org override fired), and an absence row is generated.
+      expect(restToWorkRes.data?.skipped ?? false).toBe(false)
+      const restAbsenceRows = await pool.query(
+        `SELECT status FROM attendance_records WHERE user_id = $1 AND work_date = $2 AND org_id = $3`,
+        [userId, restDate, orgId],
+      )
+      expect(restAbsenceRows.rows.length).toBe(1)
+      expect(restAbsenceRows.rows[0].status).toBe('absent')
+
+      // --- (2) work -> rest: org override flips a default workday to rest ---
+      await pool.query(
+        `DELETE FROM attendance_records WHERE user_id = $1 AND work_date = $2 AND org_id = $3`,
+        [userId, workdayDate, orgId],
+      )
+      await putCalendarPolicy(adminToken, [
+        {
+          date: workdayDate,
+          effective: { isWorkingDay: false, label: 'Step 5 org work->rest', source: 'org' },
+        },
+      ])
+      const workToRestRes = await runAutoAbsence(adminToken, workdayDate)
+      expect(workToRestRes.status).toBe(200)
+      // No absence row generated for our user — the policy turned the day
+      // to rest, so the target list excludes them.
+      expect(workToRestRes.data?.skipped ?? false).toBe(false)
+      expect(workToRestRes.data?.total ?? 0).toBe(0)
+      const workAbsenceRows = await pool.query(
+        `SELECT status FROM attendance_records WHERE user_id = $1 AND work_date = $2 AND org_id = $3`,
+        [userId, workdayDate, orgId],
+      )
+      expect(workAbsenceRows.rows.length).toBe(0)
+    } finally {
+      const cleanToken = await tokenFor(`${adminId}-cleanup`, 'admin', 'attendance:admin')
+      if (cleanToken) {
+        await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT',
+          headers: { Authorization: `Bearer ${cleanToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ calendarPolicy: { overrides: [] } }),
+        }).catch(() => undefined)
+      }
+      // Cleanup is scoped to the isolated orgId, so even if the test
+      // partially failed we never touch other orgs' rows.
+      await pool.query(`DELETE FROM attendance_records WHERE org_id = $1`, [orgId]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_events WHERE user_id = $1`, [userId]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_holidays WHERE org_id = $1`, [orgId]).catch(() => undefined)
+      await pool.query(`DELETE FROM user_orgs WHERE org_id = $1`, [orgId]).catch(() => undefined)
+      await pool.query(`DELETE FROM users WHERE id = $1`, [userId]).catch(() => undefined)
+      await pool.end()
+    }
+  })
+
 })
