@@ -7739,7 +7739,7 @@ describe('Attendance Plugin Integration', () => {
     expect(groupDenyRes.status).toBe(403)
   })
 
-  it('effective-calendar role/roleTags override is valid config but silently inert in resolver mode', async () => {
+  it('effective-calendar role/roleTags override matches DB-backed role context in resolver mode', async () => {
     if (!baseUrl) return
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
     if (!dbUrl) return
@@ -7747,8 +7747,11 @@ describe('Attendance Plugin Integration', () => {
     const runSuffix = Date.now().toString(36)
     const year = 3030 + (Number.parseInt(runSuffix.slice(-3), 36) % 500)
     const targetDate = `${year}-09-12`
-    const testUserId = `attendance-effcal-roleinert-user-${runSuffix}`
-    const adminUserId = `attendance-effcal-roleinert-admin-${runSuffix}`
+    const targetTagDate = `${year}-09-13`
+    const testUserId = `attendance-effcal-role-user-${runSuffix}`
+    const adminUserId = `attendance-effcal-role-admin-${runSuffix}`
+    const roleId = `attendance-effcal-role-${runSuffix}`
+    const roleName = `Effective Calendar Role ${runSuffix}`
 
     const adminTokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:admin`
@@ -7756,12 +7759,29 @@ describe('Attendance Plugin Integration', () => {
     const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
     expect(adminToken).toBeTruthy()
     if (!adminToken) return
+    const pool = new Pool({ connectionString: dbUrl })
 
     try {
-      // POST a role-source override targeting a role the resolver cannot load
-      // for a user; per Known Limitation (v1), role/roleTags filters require
-      // a DB context loader that does not exist yet, so the override stays as
-      // valid persisted config but does not fire in resolver mode.
+      await pool.query(
+        `INSERT INTO users (id, email, password_hash, name, role, is_active)
+         VALUES ($1, $2, 'no-login', 'Effective Calendar Role User', $3, true)
+         ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, role = EXCLUDED.role, is_active = true`,
+        [testUserId, `${testUserId}@example.com`, roleId],
+      )
+      await pool.query(
+        `INSERT INTO roles (id, name) VALUES ($1, $2)
+         ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name`,
+        [roleId, roleName],
+      )
+      await pool.query(
+        `INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)
+         ON CONFLICT DO NOTHING`,
+        [testUserId, roleId],
+      )
+
+      // Role and roleTags both resolve from the DB-backed role alias set:
+      // users.role + assigned RBAC role ids/names. There is no dedicated
+      // role-tag table yet, so roleTags intentionally use the same alias set.
       const putRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
         method: 'PUT',
         headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
@@ -7770,8 +7790,13 @@ describe('Attendance Plugin Integration', () => {
             overrides: [
               {
                 date: targetDate,
-                filters: { roles: ['production_lead'] },
-                effective: { isWorkingDay: true, label: 'Role-inert in resolver', source: 'role' },
+                filters: { roles: [roleId] },
+                effective: { isWorkingDay: true, label: 'Role resolver match', source: 'role' },
+              },
+              {
+                date: targetTagDate,
+                filters: { roleTags: [roleName] },
+                effective: { isWorkingDay: false, label: 'Role tag resolver match', source: 'role' },
               },
             ],
           },
@@ -7779,23 +7804,24 @@ describe('Attendance Plugin Integration', () => {
       })
       expect(putRes.status).toBe(200)
       const saved = ((putRes.body as any)?.data?.calendarPolicy?.overrides ?? []) as any[]
-      // Config remains valid + persisted (normalize keeps it)
-      expect(saved.length).toBe(1)
+      expect(saved.length).toBe(2)
       expect(saved[0].effective?.source).toBe('role')
+      expect(saved[1].filters?.roleTags).toEqual([roleName])
 
       const res = await requestJson(
-        `${baseUrl}/api/attendance/effective-calendar?from=${targetDate}&to=${targetDate}&userId=${encodeURIComponent(testUserId)}`,
+        `${baseUrl}/api/attendance/effective-calendar?from=${targetDate}&to=${targetTagDate}&userId=${encodeURIComponent(testUserId)}`,
         { headers: { Authorization: `Bearer ${adminToken}` } }
       )
       expect(res.status).toBe(200)
-      const item = ((res.body as any)?.data?.items ?? [])[0]
-      expect(item.date).toBe(targetDate)
-      // No calendar_policy layer present — the role override silently did not fire
-      const policyLayers = item.layers.filter((l: any) => l.kind === 'calendar_policy')
-      expect(policyLayers.length).toBe(0)
-      // effective falls back to base (rule)
-      expect(item.effective.source).toBe('rule')
-      expect(item.effective.policyId).toBeUndefined()
+      const items = ((res.body as any)?.data?.items ?? []) as any[]
+      const roleItem = items.find((item) => item.date === targetDate)
+      const tagItem = items.find((item) => item.date === targetTagDate)
+      expect(roleItem?.effective.source).toBe('role')
+      expect(roleItem?.effective.policyId).toBeTruthy()
+      expect(roleItem?.layers.some((l: any) => l.kind === 'calendar_policy' && l.source === 'role')).toBe(true)
+      expect(tagItem?.effective.source).toBe('role')
+      expect(tagItem?.effective.label).toBe('Role tag resolver match')
+      expect(tagItem?.layers.some((l: any) => l.kind === 'calendar_policy' && l.source === 'role')).toBe(true)
     } finally {
       const cleanupRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
         method: 'PUT',
@@ -7803,6 +7829,10 @@ describe('Attendance Plugin Integration', () => {
         body: JSON.stringify({ calendarPolicy: { overrides: [] } }),
       })
       expect(cleanupRes.status).toBe(200)
+      await pool.query(`DELETE FROM user_roles WHERE user_id = $1`, [testUserId]).catch(() => undefined)
+      await pool.query(`DELETE FROM roles WHERE id = $1`, [roleId]).catch(() => undefined)
+      await pool.query(`DELETE FROM users WHERE id = $1`, [testUserId]).catch(() => undefined)
+      await pool.end()
     }
   })
 
@@ -7817,7 +7847,7 @@ describe('Attendance Plugin Integration', () => {
   // same date:
   //   (a) baseline — no policy → is_workday tracks the holiday row
   //   (b) org override flips holiday → is_workday flips with it
-  //   (c) role-source override stays inert (D6 known limitation)
+  //   (c) role-source override flips holiday after loading DB role context
   // §5.1 / §5.7 / §5.11 negative protection (no-policy equivalence) is
   // already covered by all 71 existing tests continuing to pass after the
   // Block A/B/C integration.
@@ -7840,6 +7870,8 @@ describe('Attendance Plugin Integration', () => {
     expect(targetDate < todayUtc).toBe(true)
     const userId = `attendance-step5-user-${runSuffix}`
     const adminId = `attendance-step5-admin-${runSuffix}`
+    const roleId = `attendance-step5-role-${runSuffix}`
+    const roleName = `Step 5 Role ${runSuffix}`
     const orgId = 'default'
     const occurredAt = `${targetDate}T01:00:00.000Z` // 09:00 in Asia/Shanghai
 
@@ -7889,6 +7921,23 @@ describe('Attendance Plugin Integration', () => {
     }
 
     try {
+      await pool.query(
+        `INSERT INTO users (id, email, password_hash, name, role, is_active)
+         VALUES ($1, $2, 'no-login', 'Step5 Role User', $3, true)
+         ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, role = EXCLUDED.role, is_active = true`,
+        [userId, `${userId}@example.com`, roleId],
+      )
+      await pool.query(
+        `INSERT INTO roles (id, name) VALUES ($1, $2)
+         ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name`,
+        [roleId, roleName],
+      )
+      await pool.query(
+        `INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)
+         ON CONFLICT DO NOTHING`,
+        [userId, roleId],
+      )
+
       // Setup: a national holiday on targetDate (is_working_day=false). The
       // pre-Step-5 calc would always treat this day as rest; Step 5 lets
       // calendarPolicy flip it.
@@ -7925,16 +7974,16 @@ describe('Attendance Plugin Integration', () => {
       const flippedWorkday = await punchAndReadIsWorkday(userToken)
       expect(flippedWorkday).toBe(true)
 
-      // --- (c) role-source override stays inert (D6: no DB role context in v1) ---
+      // --- (c) role-source override flips after resolver loads DB role context ---
       await putCalendarPolicy(adminToken, [
         {
           date: targetDate,
-          filters: { roles: ['production'] },
+          filters: { roles: [roleId] },
           effective: { isWorkingDay: true, label: 'Step 5 role flip', source: 'role' },
         },
       ])
       const roleWorkday = await punchAndReadIsWorkday(userToken)
-      expect(roleWorkday).toBe(false)
+      expect(roleWorkday).toBe(true)
     } finally {
       const cleanToken = await tokenFor(`${adminId}-cleanup`, 'admin', 'attendance:admin')
       if (cleanToken) {
@@ -7947,6 +7996,9 @@ describe('Attendance Plugin Integration', () => {
       await pool.query(`DELETE FROM attendance_events WHERE user_id = $1`, [userId]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_records WHERE user_id = $1`, [userId]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_holidays WHERE org_id = $1 AND holiday_date = $2`, [orgId, targetDate]).catch(() => undefined)
+      await pool.query(`DELETE FROM user_roles WHERE user_id = $1`, [userId]).catch(() => undefined)
+      await pool.query(`DELETE FROM roles WHERE id = $1`, [roleId]).catch(() => undefined)
+      await pool.query(`DELETE FROM users WHERE id = $1`, [userId]).catch(() => undefined)
       await pool.end()
     }
   })
