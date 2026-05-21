@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildAttendanceRotationAssignmentCalendarMap,
   buildAttendanceRotationAssignmentPreview,
   buildAttendanceRotationSequencePreview,
   parseAttendanceRotationSequenceInput,
@@ -184,5 +185,59 @@ describe('attendance rotation sequence preview', () => {
     expect(preview.projectedDays).toBe(10)
     expect(preview.items).toHaveLength(4)
     expect(preview.isTruncated).toBe(true)
+  })
+
+  it('attaches effective-calendar context by preview date without changing row order', () => {
+    const calendarByDate = buildAttendanceRotationAssignmentCalendarMap([
+      {
+        date: '2026-03-02',
+        isWorkingDay: false,
+        label: 'Org rest override',
+        source: 'org',
+        sourceClass: 'calendar-source--org',
+        tooltip: '2026-03-02 — Rest day · org',
+        hasOverride: true,
+      },
+      {
+        date: 'invalid-date',
+        label: 'ignored',
+      },
+    ])
+    const preview = buildAttendanceRotationAssignmentPreview({
+      rotationRuleId: 'rot-1',
+      rotationRules: [
+        {
+          id: 'rot-1',
+          name: 'Two shift',
+          shiftSequence: ['shift-a', 'shift-b'],
+        },
+      ],
+      shifts: [
+        {
+          id: 'shift-a',
+          name: 'Day shift',
+          workStartTime: '09:00',
+          workEndTime: '18:00',
+        },
+        {
+          id: 'shift-b',
+          name: 'Night shift',
+          workStartTime: '22:00',
+          workEndTime: '06:00',
+        },
+      ],
+      startDate: '2026-03-01',
+      endDate: '2026-03-03',
+      calendarByDate,
+    })
+
+    expect(preview.items.map(item => item.date)).toEqual(['2026-03-01', '2026-03-02', '2026-03-03'])
+    expect(preview.items[0]?.calendar).toBeUndefined()
+    expect(preview.items[1]?.calendar).toMatchObject({
+      label: 'Org rest override',
+      source: 'org',
+      sourceClass: 'calendar-source--org',
+      hasOverride: true,
+    })
   })
 })

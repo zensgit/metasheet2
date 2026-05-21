@@ -29,6 +29,7 @@ export interface AttendanceRotationAssignmentRuleLike {
 export interface AttendanceRotationAssignmentPreviewItem extends AttendanceRotationSequencePreviewItem {
   date: string
   sequenceIndex: number
+  calendar?: AttendanceRotationAssignmentCalendarLike
 }
 
 export interface AttendanceRotationAssignmentPreview {
@@ -40,6 +41,16 @@ export interface AttendanceRotationAssignmentPreview {
   projectedDays: number
 }
 
+export interface AttendanceRotationAssignmentCalendarLike {
+  date: string
+  isWorkingDay?: boolean
+  label?: string | null
+  source?: string
+  sourceClass?: string
+  tooltip?: string
+  hasOverride?: boolean
+}
+
 export interface BuildAttendanceRotationAssignmentPreviewInput {
   rotationRuleId: string | null | undefined
   rotationRules: AttendanceRotationAssignmentRuleLike[] | null | undefined
@@ -47,6 +58,7 @@ export interface BuildAttendanceRotationAssignmentPreviewInput {
   startDate: string | null | undefined
   endDate?: string | null
   maxDays?: number
+  calendarByDate?: Map<string, AttendanceRotationAssignmentCalendarLike>
 }
 
 const DATE_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/
@@ -75,6 +87,19 @@ function inclusiveDayCount(startDate: Date, endDate: Date): number {
 function normalizeMaxDays(value: number | null | undefined): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return 14
   return Math.min(Math.max(Math.floor(value), 1), 60)
+}
+
+export function buildAttendanceRotationAssignmentCalendarMap(
+  items: AttendanceRotationAssignmentCalendarLike[] | null | undefined,
+): Map<string, AttendanceRotationAssignmentCalendarLike> {
+  const map = new Map<string, AttendanceRotationAssignmentCalendarLike>()
+  if (!Array.isArray(items)) return map
+  for (const item of items) {
+    const date = typeof item.date === 'string' ? item.date.trim() : ''
+    if (!DATE_KEY_PATTERN.test(date)) continue
+    map.set(date, { ...item, date })
+  }
+  return map
 }
 
 export function parseAttendanceRotationSequenceInput(value: string | string[] | null | undefined): string[] {
@@ -122,6 +147,7 @@ export function buildAttendanceRotationAssignmentPreview({
   startDate,
   endDate,
   maxDays,
+  calendarByDate,
 }: BuildAttendanceRotationAssignmentPreviewInput): AttendanceRotationAssignmentPreview {
   const selectedRuleId = typeof rotationRuleId === 'string' ? rotationRuleId.trim() : ''
   const ruleList = Array.isArray(rotationRules) ? rotationRules : []
@@ -154,11 +180,12 @@ export function buildAttendanceRotationAssignmentPreview({
   const items = Array.from({ length: visibleDays }, (_, index): AttendanceRotationAssignmentPreviewItem => {
     const shiftRef = sequence[index % sequence.length] ?? ''
     const shift = shiftById.get(shiftRef)
+    const date = formatDateKey(addDays(start, index))
     if (!shift && hasShiftCatalog && shiftRef && !missingRefs.includes(shiftRef)) {
       missingRefs.push(shiftRef)
     }
     return {
-      date: formatDateKey(addDays(start, index)),
+      date,
       dayIndex: index + 1,
       sequenceIndex: index % sequence.length,
       shiftRef,
@@ -166,6 +193,7 @@ export function buildAttendanceRotationAssignmentPreview({
       schedule: shift ? `${shift.workStartTime} -> ${shift.workEndTime}` : '',
       isKnown: Boolean(shift),
       isOvernight: Boolean(shift?.isOvernight),
+      calendar: calendarByDate?.get(date),
     }
   })
 
