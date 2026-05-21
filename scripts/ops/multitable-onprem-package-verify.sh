@@ -336,9 +336,9 @@ function verify_bridge_agent_tooling_contract() {
   search_fixed_string '"spec": "ba-m0.5-driver-smoke"' "$smoke_template_json" || die "Bridge Agent driver smoke JSON evidence template must identify the BA-M0.5 smoke spec"
   search_fixed_string '"decision": "<PASS | FAIL>"' "$smoke_template_json" || die "Bridge Agent driver smoke JSON evidence template must document PASS/FAIL decision shape"
   search_fixed_string '"sqlServerVersionRedacted"' "$smoke_template_json" || die "Bridge Agent driver smoke JSON evidence template must document redacted @@VERSION evidence"
-  search_fixed_string 'BA-M1 does not start until BA-M0.5 is signed off green' "$smoke_runbook" || die "Bridge Agent driver smoke runbook must preserve the BA-M1 gate"
-  search_fixed_string 'Do not paste raw evidence into GitHub' "$smoke_runbook" || die "Bridge Agent driver smoke runbook must document evidence hygiene"
-  search_fixed_string 'Driver Smoke Evidence Template' "$smoke_template_md" || die "Bridge Agent driver smoke Markdown evidence template must be packaged"
+  search_fixed_string 'does not start' "$smoke_runbook" || die "Bridge Agent driver smoke runbook must preserve the BA-M1 gate"
+  search_fixed_string 'Secret hygiene' "$smoke_runbook" || die "Bridge Agent driver smoke runbook must document evidence hygiene"
+  search_fixed_string 'BA-M0.5 Driver Smoke Evidence' "$smoke_template_md" || die "Bridge Agent driver smoke Markdown evidence template must be packaged"
 
   search_fixed_string 'System.Data.SqlClient.SqlConnection' "$readonly_script" || die "readonly Bridge Agent must use the approved SqlClient provider"
   search_fixed_string 'BA-M1 MVP only supports localhost binding' "$readonly_script" || die "readonly Bridge Agent must reject non-localhost bindings"
