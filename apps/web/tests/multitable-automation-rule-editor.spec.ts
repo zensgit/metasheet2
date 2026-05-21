@@ -6,6 +6,7 @@ function flushPromises() {
 }
 
 import MetaAutomationRuleEditor from '../src/multitable/components/MetaAutomationRuleEditor.vue'
+import { useLocale } from '../src/composables/useLocale'
 import type { AutomationRule, ConditionGroup } from '../src/multitable/types'
 
 const fields = [
@@ -207,6 +208,7 @@ describe('MetaAutomationRuleEditor', () => {
       configurable: true,
       value: originalClipboard,
     })
+    useLocale().setLocale('en')
   })
 
   it('renders trigger type selector when visible', async () => {
@@ -216,6 +218,142 @@ describe('MetaAutomationRuleEditor', () => {
     const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
     expect(triggerSelect).toBeTruthy()
     expect(triggerSelect.options.length).toBe(7)
+  })
+
+  it('localizes core rule editor chrome in zh-CN while keeping raw select values', async () => {
+    useLocale().setLocale('zh-CN')
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
+    await flushPromises()
+
+    const text = container.textContent ?? ''
+    expect(text).toContain('新建自动化规则')
+    expect(text).toContain('名称')
+    expect(text).toContain('触发器')
+    expect(text).toContain('条件')
+    expect(text).toContain('动作')
+    expect(text).toContain('更新记录')
+    expect(text).toContain('发送钉钉群消息')
+    expect(text).not.toContain('New Automation Rule')
+    expect(text).not.toContain('When record created')
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    expect(nameInput.placeholder).toBe('自动化名称')
+
+    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
+    expect(triggerSelect.options[0]?.value).toBe('record.created')
+    expect(triggerSelect.options[0]?.textContent?.trim()).toBe('当记录创建时')
+    expect(triggerSelect.options[3]?.value).toBe('field.value_changed')
+    expect(triggerSelect.options[3]?.textContent?.trim()).toBe('当字段值变化时')
+
+    triggerSelect.value = 'schedule.cron'
+    triggerSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const cronSelect = container.querySelector('[data-field="cronPreset"]') as HTMLSelectElement
+    expect(cronSelect.options[0]?.value).toBe('*/5 * * * *')
+    expect(cronSelect.options[0]?.textContent?.trim()).toBe('每 5 分钟')
+  })
+
+  it('localizes condition builder labels and placeholders without translating field options', async () => {
+    useLocale().setLocale('zh-CN')
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="add-condition"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
+    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
+    expect(fieldSelect.options[0]?.textContent?.trim()).toBe('-- 字段 --')
+    expect(fieldSelect.options[1]?.textContent?.trim()).toBe('Status')
+
+    fieldSelect.value = 'fld_score'
+    fieldSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const operatorSelect = Array.from(conditionRow.querySelectorAll('select'))[1] as HTMLSelectElement
+    expect(operatorSelect.options[0]?.value).toBe('equals')
+    expect(operatorSelect.options[0]?.textContent?.trim()).toBe('等于')
+    operatorSelect.value = 'in'
+    operatorSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const valueInput = conditionRow.querySelector('input') as HTMLInputElement
+    expect(valueInput.placeholder).toBe('逗号分隔的值')
+  })
+
+  it('localizes non-DingTalk action config and keeps protocol/example placeholders raw', async () => {
+    useLocale().setLocale('zh-CN')
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    expect(actionSelect.options[0]?.value).toBe('update_record')
+    expect(actionSelect.options[0]?.textContent?.trim()).toBe('更新记录')
+
+    actionSelect.value = 'send_email'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const text = container.textContent ?? ''
+    expect(text).toContain('收件人')
+    expect(text).toContain('主题模板')
+    expect(text).toContain('正文模板')
+    expect(text).toContain('使用逗号或换行分隔邮箱地址。投递使用 NotificationService 邮件通道。')
+    expect((container.querySelector('[data-field="emailRecipients"]') as HTMLTextAreaElement).placeholder)
+      .toBe('ops@example.com, owner@example.com')
+    expect((container.querySelector('[data-field="emailSubjectTemplate"]') as HTMLInputElement).placeholder)
+      .toBe('{{record.title}} 需要处理')
+    expect((container.querySelector('[data-field="emailBodyTemplate"]') as HTMLTextAreaElement).placeholder)
+      .toBe('记录 {{recordId}} 已变更。状态：{{record.status}}')
+  })
+
+  it('localizes test-run warning and confirm text while leaving runtime status messages raw', async () => {
+    useLocale().setLocale('zh-CN')
+    const tested = vi.fn()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      rule: fakeRule({
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: {
+          destinationId: 'dt_1',
+          titleTemplate: 'Ticket {{recordId}}',
+          bodyTemplate: 'Please fill',
+        },
+        actions: [{
+          type: 'send_dingtalk_group_message',
+          config: { destinationId: 'dt_1', titleTemplate: 'Ticket {{recordId}}', bodyTemplate: 'Please fill' },
+        }],
+      }),
+      testRunState: { status: 'success', message: 'Running test. DingTalk actions may send real messages.' },
+      onTest: tested,
+    })
+    await flushPromises()
+
+    expect(container.querySelector('[data-field="dingtalkTestRunWarning"]')?.textContent)
+      .toContain('测试运行会执行已保存规则')
+    expect(container.querySelector('[data-field="testRunStatus"]')?.textContent)
+      .toContain('Running test. DingTalk actions may send real messages.')
+
+    ;(container.querySelector('[data-action="test"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(tested).toHaveBeenCalledWith('rule_1')
+    expect(confirmSpy).toHaveBeenCalledWith('测试运行会执行已保存规则，并可能向已配置的钉钉群或用户发送真实消息。未保存的更改不会包含在内。是否继续？')
+  })
+
+  it('keeps representative a11y attribute counts unchanged after localization wiring', async () => {
+    useLocale().setLocale('zh-CN')
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
+    await flushPromises()
+
+    expect(container.querySelectorAll('[aria-label]')).toHaveLength(0)
+    expect(container.querySelectorAll('[title]')).toHaveLength(1)
+    expect(container.querySelectorAll('[placeholder]')).toHaveLength(1)
   })
 
   it('shows field picker for field.value_changed trigger', async () => {

@@ -2,7 +2,7 @@
   <div v-if="visible" class="meta-rule-editor__overlay" @click.self="$emit('close')">
     <div class="meta-rule-editor">
       <div class="meta-rule-editor__header">
-        <h4 class="meta-rule-editor__title">{{ rule ? 'Edit Automation Rule' : 'New Automation Rule' }}</h4>
+        <h4 class="meta-rule-editor__title">{{ rule ? automationLabel('editor.titleEdit', isZh) : automationLabel('editor.titleNew', isZh) }}</h4>
         <button class="meta-rule-editor__close" type="button" @click="$emit('close')">&times;</button>
       </div>
 
@@ -10,60 +10,60 @@
         <div v-if="error" class="meta-rule-editor__error" role="alert">{{ error }}</div>
 
         <!-- Name -->
-        <label class="meta-rule-editor__label">Name</label>
-        <input v-model="draft.name" class="meta-rule-editor__input" type="text" placeholder="Automation name" data-field="name" />
+        <label class="meta-rule-editor__label">{{ automationLabel('editor.name', isZh) }}</label>
+        <input v-model="draft.name" class="meta-rule-editor__input" type="text" :placeholder="automationLabel('editor.namePlaceholder', isZh)" data-field="name" />
 
         <!-- 1. Trigger selector -->
         <section class="meta-rule-editor__section">
-          <div class="meta-rule-editor__section-title">Trigger</div>
+          <div class="meta-rule-editor__section-title">{{ automationLabel('trigger.title', isZh) }}</div>
           <select v-model="draft.triggerType" class="meta-rule-editor__select" data-field="triggerType">
-            <option value="record.created">When record created</option>
-            <option value="record.updated">When record updated</option>
-            <option value="record.deleted">When record deleted</option>
-            <option value="field.value_changed">When field value changed</option>
-            <option value="schedule.cron">Schedule (cron)</option>
-            <option value="schedule.interval">Schedule (interval)</option>
-            <option value="webhook.received">Webhook received</option>
+            <option value="record.created">{{ automationTriggerTypeLabel('record.created', isZh) }}</option>
+            <option value="record.updated">{{ automationTriggerTypeLabel('record.updated', isZh) }}</option>
+            <option value="record.deleted">{{ automationTriggerTypeLabel('record.deleted', isZh) }}</option>
+            <option value="field.value_changed">{{ automationTriggerTypeLabel('field.value_changed', isZh) }}</option>
+            <option value="schedule.cron">{{ automationTriggerTypeLabel('schedule.cron', isZh) }}</option>
+            <option value="schedule.interval">{{ automationTriggerTypeLabel('schedule.interval', isZh) }}</option>
+            <option value="webhook.received">{{ automationTriggerTypeLabel('webhook.received', isZh) }}</option>
           </select>
 
           <!-- field.value_changed config -->
           <template v-if="draft.triggerType === 'field.value_changed'">
-            <label class="meta-rule-editor__label">Watch field</label>
+            <label class="meta-rule-editor__label">{{ automationLabel('trigger.watchField', isZh) }}</label>
             <select v-model="draft.triggerConfig.fieldId" class="meta-rule-editor__select" data-field="triggerFieldId">
-              <option value="">-- select field --</option>
+              <option value="">{{ automationLabel('trigger.selectField', isZh) }}</option>
               <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
             </select>
-            <label class="meta-rule-editor__label">Condition</label>
+            <label class="meta-rule-editor__label">{{ automationLabel('trigger.condition', isZh) }}</label>
             <select v-model="draft.triggerConfig.condition" class="meta-rule-editor__select" data-field="triggerCondition">
-              <option value="any">Any change</option>
-              <option value="equals">Equals</option>
-              <option value="changed_to">Changed to</option>
+              <option value="any">{{ automationTriggerConditionLabel('any', isZh) }}</option>
+              <option value="equals">{{ automationTriggerConditionLabel('equals', isZh) }}</option>
+              <option value="changed_to">{{ automationTriggerConditionLabel('changed_to', isZh) }}</option>
             </select>
             <template v-if="draft.triggerConfig.condition !== 'any'">
-              <label class="meta-rule-editor__label">Value</label>
-              <input v-model="draft.triggerConfig.value" class="meta-rule-editor__input" type="text" placeholder="Value" data-field="triggerValue" />
+              <label class="meta-rule-editor__label">{{ automationLabel('editor.value', isZh) }}</label>
+              <input v-model="draft.triggerConfig.value" class="meta-rule-editor__input" type="text" :placeholder="automationLabel('editor.value', isZh)" data-field="triggerValue" />
             </template>
           </template>
 
           <!-- schedule.cron config -->
           <template v-if="draft.triggerType === 'schedule.cron'">
-            <label class="meta-rule-editor__label">Preset</label>
+            <label class="meta-rule-editor__label">{{ automationLabel('trigger.preset', isZh) }}</label>
             <select v-model="cronPreset" class="meta-rule-editor__select" data-field="cronPreset">
-              <option value="*/5 * * * *">Every 5 minutes</option>
-              <option value="0 * * * *">Every hour</option>
-              <option value="0 0 * * *">Daily at midnight</option>
-              <option value="0 0 * * 1">Weekly (Monday)</option>
-              <option value="custom">Custom</option>
+              <option value="*/5 * * * *">{{ automationCronPresetLabel('*/5 * * * *', isZh) }}</option>
+              <option value="0 * * * *">{{ automationCronPresetLabel('0 * * * *', isZh) }}</option>
+              <option value="0 0 * * *">{{ automationCronPresetLabel('0 0 * * *', isZh) }}</option>
+              <option value="0 0 * * 1">{{ automationCronPresetLabel('0 0 * * 1', isZh) }}</option>
+              <option value="custom">{{ automationCronPresetLabel('custom', isZh) }}</option>
             </select>
             <template v-if="cronPreset === 'custom'">
-              <label class="meta-rule-editor__label">Cron expression</label>
+              <label class="meta-rule-editor__label">{{ automationLabel('trigger.cronExpression', isZh) }}</label>
               <input v-model="draft.triggerConfig.cron" class="meta-rule-editor__input" type="text" placeholder="* * * * *" data-field="cronExpression" />
             </template>
           </template>
 
           <!-- schedule.interval config -->
           <template v-if="draft.triggerType === 'schedule.interval'">
-            <label class="meta-rule-editor__label">Interval (minutes)</label>
+            <label class="meta-rule-editor__label">{{ automationLabel('trigger.intervalMinutes', isZh) }}</label>
             <input v-model.number="draft.triggerConfig.intervalMinutes" class="meta-rule-editor__input" type="number" min="1" placeholder="5" data-field="intervalMinutes" />
           </template>
         </section>
@@ -71,8 +71,8 @@
         <!-- 2. Conditions -->
         <section class="meta-rule-editor__section">
           <div class="meta-rule-editor__section-title">
-            Conditions
-            <span class="meta-rule-editor__hint">(optional)</span>
+            {{ automationLabel('condition.title', isZh) }}
+            <span class="meta-rule-editor__hint">{{ automationLabel('condition.optional', isZh) }}</span>
           </div>
           <div v-if="draft.conditions.conditions.length > 1" class="meta-rule-editor__conjunction">
             <button
@@ -80,13 +80,13 @@
               class="meta-rule-editor__toggle-btn"
               :class="{ 'meta-rule-editor__toggle-btn--active': draft.conditions.conjunction === 'AND' }"
               @click="draft.conditions.conjunction = 'AND'"
-            >AND</button>
+            >{{ automationLabel('condition.and', isZh) }}</button>
             <button
               type="button"
               class="meta-rule-editor__toggle-btn"
               :class="{ 'meta-rule-editor__toggle-btn--active': draft.conditions.conjunction === 'OR' }"
               @click="draft.conditions.conjunction = 'OR'"
-            >OR</button>
+            >{{ automationLabel('condition.or', isZh) }}</button>
           </div>
           <div class="meta-rule-editor__condition-list">
             <template v-for="entry in conditionEditorEntries" :key="entry.pathKey">
@@ -96,31 +96,31 @@
                 :style="conditionIndentStyle(entry.depth)"
                 :data-condition-group-path="entry.pathKey"
               >
-                <span class="meta-rule-editor__group-label">Group</span>
+                <span class="meta-rule-editor__group-label">{{ automationLabel('condition.group', isZh) }}</span>
                 <div class="meta-rule-editor__conjunction">
                   <button
                     type="button"
                     class="meta-rule-editor__toggle-btn"
                     :class="{ 'meta-rule-editor__toggle-btn--active': normalizeConditionConjunction(entry.group) === 'AND' }"
                     @click="setGroupConjunction(entry.group, 'AND')"
-                  >AND</button>
+                  >{{ automationLabel('condition.and', isZh) }}</button>
                   <button
                     type="button"
                     class="meta-rule-editor__toggle-btn"
                     :class="{ 'meta-rule-editor__toggle-btn--active': normalizeConditionConjunction(entry.group) === 'OR' }"
                     @click="setGroupConjunction(entry.group, 'OR')"
-                  >OR</button>
+                  >{{ automationLabel('condition.or', isZh) }}</button>
                 </div>
                 <div class="meta-rule-editor__condition-actions">
-                  <button class="meta-rule-editor__btn" type="button" data-action="add-nested-condition" @click="addConditionToGroup(entry.path)">+ Condition</button>
+                  <button class="meta-rule-editor__btn" type="button" data-action="add-nested-condition" @click="addConditionToGroup(entry.path)">{{ automationLabel('condition.addNestedCondition', isZh) }}</button>
                   <button
                     class="meta-rule-editor__btn"
                     type="button"
                     data-action="add-condition-group"
                     :disabled="!entry.canAddGroup"
                     @click="addGroupToGroup(entry.path)"
-                  >+ Group</button>
-                  <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeConditionNode(entry.path)" title="Remove group">&times;</button>
+                  >{{ automationLabel('condition.addNestedGroup', isZh) }}</button>
+                  <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeConditionNode(entry.path)" :title="automationLabel('condition.removeGroupTitle', isZh)">&times;</button>
                 </div>
               </div>
               <div
@@ -135,7 +135,7 @@
                   class="meta-rule-editor__select meta-rule-editor__select--sm"
                   @change="onConditionFieldChange(entry.condition, ($event.target as HTMLSelectElement).value)"
                 >
-                  <option value="">-- field --</option>
+                  <option value="">{{ automationLabel('condition.selectField', isZh) }}</option>
                   <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
                 </select>
                 <select
@@ -143,7 +143,7 @@
                   class="meta-rule-editor__select meta-rule-editor__select--sm"
                   @change="onConditionOperatorChange(entry.condition, ($event.target as HTMLSelectElement).value as ConditionOperator)"
                 >
-                  <option v-for="op in conditionOperatorsForField(entry.condition.fieldId)" :key="op.value" :value="op.value">{{ op.label }}</option>
+                  <option v-for="op in conditionOperatorsForField(entry.condition.fieldId)" :key="op.value" :value="op.value">{{ automationConditionOperatorLabel(op.value, isZh) }}</option>
                 </select>
                 <template v-if="!isUnaryOperator(entry.condition.operator)">
                   <select
@@ -164,7 +164,7 @@
                     data-condition-value="boolean"
                     @change="onBooleanConditionValueChange(entry.condition, ($event.target as HTMLSelectElement).value)"
                   >
-                    <option value="">-- value --</option>
+                    <option value="">{{ automationLabel('condition.selectValue', isZh) }}</option>
                     <option value="true">true</option>
                     <option value="false">false</option>
                   </select>
@@ -175,7 +175,7 @@
                     data-condition-value="select"
                     @change="entry.condition.value = ($event.target as HTMLSelectElement).value"
                   >
-                    <option value="">-- value --</option>
+                    <option value="">{{ automationLabel('condition.selectValue', isZh) }}</option>
                     <option v-for="option in conditionFieldOptions(entry.condition)" :key="option.value" :value="option.value">
                       {{ optionLabel(option) }}
                     </option>
@@ -201,19 +201,19 @@
                     :placeholder="conditionValuePlaceholder(entry.condition)"
                   />
                 </template>
-                <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeConditionNode(entry.path)" title="Remove condition">&times;</button>
+                <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeConditionNode(entry.path)" :title="automationLabel('condition.removeConditionTitle', isZh)">&times;</button>
               </div>
             </template>
           </div>
           <div class="meta-rule-editor__condition-actions">
-            <button class="meta-rule-editor__btn" type="button" data-action="add-condition" @click="addCondition">+ Add condition</button>
-            <button class="meta-rule-editor__btn" type="button" data-action="add-condition-group" @click="addGroupToGroup([])">+ Add group</button>
+            <button class="meta-rule-editor__btn" type="button" data-action="add-condition" @click="addCondition">{{ automationLabel('condition.addCondition', isZh) }}</button>
+            <button class="meta-rule-editor__btn" type="button" data-action="add-condition-group" @click="addGroupToGroup([])">{{ automationLabel('condition.addGroup', isZh) }}</button>
           </div>
         </section>
 
         <!-- 3. Actions -->
         <section class="meta-rule-editor__section">
-          <div class="meta-rule-editor__section-title">Actions <span class="meta-rule-editor__hint">(1-3 steps)</span></div>
+          <div class="meta-rule-editor__section-title">{{ automationLabel('editor.actions', isZh) }} <span class="meta-rule-editor__hint">{{ automationLabel('editor.actionStepHint', isZh) }}</span></div>
           <div
             v-for="(action, idx) in draft.actions"
             :key="idx"
@@ -223,19 +223,19 @@
             <div class="meta-rule-editor__action-header">
               <span class="meta-rule-editor__action-num">{{ idx + 1 }}.</span>
               <select v-model="action.type" class="meta-rule-editor__select" @change="onDraftActionTypeChange(action)">
-                <option value="update_record">Update record</option>
-                <option value="create_record">Create record</option>
-                <option value="send_webhook">Send webhook</option>
-                <option value="send_notification">Send notification</option>
-                <option value="send_email">Send email</option>
-                <option value="send_dingtalk_group_message">Send DingTalk group message</option>
-                <option value="send_dingtalk_person_message">Send DingTalk person message</option>
-                <option value="lock_record">Lock record</option>
+                <option value="update_record">{{ automationActionTypeLabel('update_record', isZh) }}</option>
+                <option value="create_record">{{ automationActionTypeLabel('create_record', isZh) }}</option>
+                <option value="send_webhook">{{ automationActionTypeLabel('send_webhook', isZh) }}</option>
+                <option value="send_notification">{{ automationActionTypeLabel('send_notification', isZh) }}</option>
+                <option value="send_email">{{ automationActionTypeLabel('send_email', isZh) }}</option>
+                <option value="send_dingtalk_group_message">{{ automationActionTypeLabel('send_dingtalk_group_message', isZh) }}</option>
+                <option value="send_dingtalk_person_message">{{ automationActionTypeLabel('send_dingtalk_person_message', isZh) }}</option>
+                <option value="lock_record">{{ automationActionTypeLabel('lock_record', isZh) }}</option>
               </select>
               <div class="meta-rule-editor__action-btns">
-                <button v-if="idx > 0" class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="moveAction(idx, -1)" title="Move up">&#x2191;</button>
-                <button v-if="idx < draft.actions.length - 1" class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="moveAction(idx, 1)" title="Move down">&#x2193;</button>
-                <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeAction(idx)" title="Remove action">&times;</button>
+                <button v-if="idx > 0" class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="moveAction(idx, -1)" :title="automationLabel('editor.moveUpTitle', isZh)">&#x2191;</button>
+                <button v-if="idx < draft.actions.length - 1" class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="moveAction(idx, 1)" :title="automationLabel('editor.moveDownTitle', isZh)">&#x2193;</button>
+                <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeAction(idx)" :title="automationLabel('editor.removeActionTitle', isZh)">&times;</button>
               </div>
             </div>
 
@@ -243,32 +243,32 @@
             <div v-if="action.type === 'update_record'" class="meta-rule-editor__action-config">
               <div v-for="(pair, pidx) in (action.config.fieldUpdates as FieldPair[] || [])" :key="pidx" class="meta-rule-editor__field-pair">
                 <select v-model="pair.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm">
-                  <option value="">-- field --</option>
+                  <option value="">{{ automationLabel('condition.selectField', isZh) }}</option>
                   <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
                 </select>
-                <input v-model="pair.value" class="meta-rule-editor__input meta-rule-editor__input--sm" type="text" placeholder="Value" />
+                <input v-model="pair.value" class="meta-rule-editor__input meta-rule-editor__input--sm" type="text" :placeholder="automationLabel('editor.value', isZh)" />
                 <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeFieldUpdate(action, pidx)">&times;</button>
               </div>
-              <button class="meta-rule-editor__btn" type="button" @click="addFieldUpdate(action)">+ Field</button>
+              <button class="meta-rule-editor__btn" type="button" @click="addFieldUpdate(action)">{{ automationLabel('editor.addField', isZh) }}</button>
             </div>
 
             <!-- create_record config -->
             <div v-if="action.type === 'create_record'" class="meta-rule-editor__action-config">
-              <label class="meta-rule-editor__label">Target sheet ID</label>
-              <input v-model="action.config.targetSheetId" class="meta-rule-editor__input" type="text" placeholder="Sheet ID" />
+              <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.targetSheetId', isZh) }}</label>
+              <input v-model="action.config.targetSheetId" class="meta-rule-editor__input" type="text" :placeholder="automationLabel('actionConfig.sheetIdPlaceholder', isZh)" />
               <div v-for="(pair, pidx) in (action.config.fieldValues as FieldPair[] || [])" :key="pidx" class="meta-rule-editor__field-pair">
-                <input v-model="pair.fieldId" class="meta-rule-editor__input meta-rule-editor__input--sm" type="text" placeholder="Field ID" />
-                <input v-model="pair.value" class="meta-rule-editor__input meta-rule-editor__input--sm" type="text" placeholder="Value" />
+                <input v-model="pair.fieldId" class="meta-rule-editor__input meta-rule-editor__input--sm" type="text" :placeholder="automationLabel('actionConfig.fieldIdPlaceholder', isZh)" />
+                <input v-model="pair.value" class="meta-rule-editor__input meta-rule-editor__input--sm" type="text" :placeholder="automationLabel('editor.value', isZh)" />
                 <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeCreateFieldValue(action, pidx)">&times;</button>
               </div>
-              <button class="meta-rule-editor__btn" type="button" @click="addCreateFieldValue(action)">+ Field</button>
+              <button class="meta-rule-editor__btn" type="button" @click="addCreateFieldValue(action)">{{ automationLabel('editor.addField', isZh) }}</button>
             </div>
 
             <!-- send_webhook config -->
             <div v-if="action.type === 'send_webhook'" class="meta-rule-editor__action-config">
-              <label class="meta-rule-editor__label">URL</label>
+              <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.url', isZh) }}</label>
               <input v-model="action.config.url" class="meta-rule-editor__input" type="url" placeholder="https://..." />
-              <label class="meta-rule-editor__label">Method</label>
+              <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.method', isZh) }}</label>
               <select v-model="action.config.method" class="meta-rule-editor__select">
                 <option value="POST">POST</option>
                 <option value="PUT">PUT</option>
@@ -278,15 +278,15 @@
 
             <!-- send_notification config -->
             <div v-if="action.type === 'send_notification'" class="meta-rule-editor__action-config">
-              <label class="meta-rule-editor__label">User ID</label>
-              <input v-model="action.config.userId" class="meta-rule-editor__input" type="text" placeholder="User ID" />
-              <label class="meta-rule-editor__label">Message</label>
-              <textarea v-model="action.config.message" class="meta-rule-editor__textarea" placeholder="Notification message" rows="3"></textarea>
+              <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.userId', isZh) }}</label>
+              <input v-model="action.config.userId" class="meta-rule-editor__input" type="text" :placeholder="automationLabel('actionConfig.userId', isZh)" />
+              <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.message', isZh) }}</label>
+              <textarea v-model="action.config.message" class="meta-rule-editor__textarea" :placeholder="automationLabel('actionConfig.notificationMessagePlaceholder', isZh)" rows="3"></textarea>
             </div>
 
             <!-- send_email config -->
             <div v-if="action.type === 'send_email'" class="meta-rule-editor__action-config">
-              <label class="meta-rule-editor__label">Recipients</label>
+              <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.recipients', isZh) }}</label>
               <textarea
                 v-model="action.config.recipientsText"
                 class="meta-rule-editor__textarea"
@@ -294,21 +294,21 @@
                 placeholder="ops@example.com, owner@example.com"
                 data-field="emailRecipients"
               ></textarea>
-              <div class="meta-rule-editor__hint">Use comma or newline separated email addresses. Delivery uses the NotificationService email channel.</div>
-              <label class="meta-rule-editor__label">Subject template</label>
+              <div class="meta-rule-editor__hint">{{ automationLabel('actionConfig.emailRecipientsHint', isZh) }}</div>
+              <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.subjectTemplate', isZh) }}</label>
               <input
                 v-model="action.config.subjectTemplate"
                 class="meta-rule-editor__input"
                 type="text"
-                placeholder="{{record.title}} needs attention"
+                :placeholder="automationLabel('actionConfig.emailSubjectPlaceholder', isZh)"
                 data-field="emailSubjectTemplate"
               />
-              <label class="meta-rule-editor__label">Body template</label>
+              <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.bodyTemplate', isZh) }}</label>
               <textarea
                 v-model="action.config.bodyTemplate"
                 class="meta-rule-editor__textarea"
                 rows="4"
-                placeholder="Record {{recordId}} changed. Status: {{record.status}}"
+                :placeholder="automationLabel('actionConfig.emailBodyPlaceholder', isZh)"
                 data-field="emailBodyTemplate"
               ></textarea>
             </div>
@@ -874,7 +874,7 @@
             <div v-if="action.type === 'lock_record'" class="meta-rule-editor__action-config">
               <label class="meta-rule-editor__toggle-label">
                 <input type="checkbox" v-model="action.config.locked" />
-                Lock record
+                {{ automationLabel('actionConfig.lockRecord', isZh) }}
               </label>
             </div>
           </div>
@@ -884,7 +884,7 @@
             type="button"
             data-action="add-action"
             @click="addAction"
-          >+ Add action</button>
+          >{{ automationLabel('editor.addAction', isZh) }}</button>
         </section>
       </div>
 
@@ -892,10 +892,10 @@
       <div class="meta-rule-editor__footer">
         <div class="meta-rule-editor__test-run-feedback">
           <div v-if="savedRuleHasDingTalkActions" class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="dingtalkTestRunWarning">
-            Test Run executes the saved rule and can send real DingTalk messages to configured groups or users.
+            {{ automationLabel('testRun.warning', isZh) }}
           </div>
           <div v-if="!props.rule?.id" class="meta-rule-editor__hint" data-field="testRunUnsavedHint">
-            Save this automation before running a test.
+            {{ automationLabel('testRun.unsavedHint', isZh) }}
           </div>
           <div
             v-if="props.testRunState"
@@ -908,7 +908,7 @@
           </div>
         </div>
         <button class="meta-rule-editor__btn meta-rule-editor__btn--primary" type="button" :disabled="!canSave || saving" data-action="save" @click="onSave">
-          {{ saving ? 'Saving...' : 'Save' }}
+          {{ saving ? automationLabel('editor.saving', isZh) : automationLabel('editor.save', isZh) }}
         </button>
         <button
           class="meta-rule-editor__btn"
@@ -917,9 +917,9 @@
           @click="onTestRun"
           data-action="test"
         >
-          {{ props.testRunState?.status === 'running' ? 'Running...' : 'Test Run' }}
+          {{ props.testRunState?.status === 'running' ? automationLabel('testRun.running', isZh) : automationLabel('testRun.button', isZh) }}
         </button>
-        <button class="meta-rule-editor__btn" type="button" @click="$emit('close')">Cancel</button>
+        <button class="meta-rule-editor__btn" type="button" @click="$emit('close')">{{ automationLabel('editor.cancel', isZh) }}</button>
       </div>
     </div>
   </div>
@@ -927,6 +927,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import type { MultitableApiClient } from '../api/client'
 import type {
   AutomationRule,
@@ -964,6 +965,15 @@ import {
   listDingTalkInternalViewLinkBlockingErrors,
   listDingTalkInternalViewLinkWarnings,
 } from '../utils/dingtalkInternalViewLinkWarnings'
+import {
+  automationActionTypeLabel,
+  automationConditionOperatorLabel,
+  automationConditionValuePlaceholder,
+  automationCronPresetLabel,
+  automationLabel,
+  automationTriggerConditionLabel,
+  automationTriggerTypeLabel,
+} from '../utils/meta-automation-labels'
 
 interface FieldPair {
   fieldId: string
@@ -1059,6 +1069,7 @@ const personRecipientDirectory = ref<Record<string, PersonRecipientDirectoryEntr
 const copiedPreviewKey = ref('')
 let personRecipientSuggestionLoadId = 0
 let copiedPreviewResetTimer: ReturnType<typeof setTimeout> | null = null
+const { isZh } = useLocale()
 
 const formViews = computed(() => (props.views ?? []).filter((view) =>
   view.type === 'form' && (!view.sheetId || view.sheetId === props.sheetId),
@@ -1068,8 +1079,10 @@ const groupDestinationCandidateFields = computed(() => props.fields)
 const recipientCandidateFields = computed(() => props.fields.filter((field) => field.type === 'user'))
 const memberGroupRecipientCandidateFields = computed(() => props.fields.filter(isDingTalkMemberGroupRecipientField))
 const savedRuleHasDingTalkActions = computed(() => ruleHasDingTalkActions(props.rule))
-const DINGTALK_TEST_RUN_CONFIRM_MESSAGE =
-  'Test Run executes the saved rule and can send real DingTalk messages to configured groups or users. Unsaved changes are not included. Continue?'
+function dingTalkTestRunConfirmMessage(): string {
+  const separator = isZh.value ? '' : ' '
+  return `${automationLabel('testRun.warning', isZh.value)}${separator}${automationLabel('testRun.confirmSuffix', isZh.value)}`
+}
 
 type ConditionOperatorOption = { value: ConditionOperator; label: string }
 type ConditionValueWidget = 'text' | 'number' | 'date' | 'dateTime' | 'boolean' | 'booleanMultiSelect' | 'select' | 'multiSelect'
@@ -1308,11 +1321,7 @@ function isArrayOperator(op: ConditionOperator): boolean {
 }
 
 function conditionValuePlaceholder(condition: AutomationCondition): string {
-  if (isArrayOperator(condition.operator)) return 'Comma-separated values'
-  if (conditionValueWidget(condition) === 'number') return 'Number'
-  if (conditionValueWidget(condition) === 'date') return 'YYYY-MM-DD'
-  if (conditionValueWidget(condition) === 'dateTime') return 'Date and time'
-  return 'Value'
+  return automationConditionValuePlaceholder(conditionValueWidget(condition), isArrayOperator(condition.operator), isZh.value)
 }
 
 function isConditionGroupNode(node: AutomationConditionNode): node is ConditionGroup {
@@ -2392,7 +2401,7 @@ async function onSave() {
   try {
     emit('save', buildPayload())
   } catch (e: unknown) {
-    error.value = e instanceof Error ? e.message : 'Save failed'
+    error.value = e instanceof Error ? e.message : automationLabel('error.saveFailed', isZh.value)
   } finally {
     saving.value = false
   }
@@ -2400,7 +2409,7 @@ async function onSave() {
 
 function onTestRun() {
   if (saving.value || props.testRunState?.status === 'running' || !props.rule?.id) return
-  if (savedRuleHasDingTalkActions.value && !window.confirm(DINGTALK_TEST_RUN_CONFIRM_MESSAGE)) return
+  if (savedRuleHasDingTalkActions.value && !window.confirm(dingTalkTestRunConfirmMessage())) return
   emit('test', props.rule.id)
 }
 </script>
