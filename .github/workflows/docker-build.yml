@@ -74,6 +74,7 @@ jobs:
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_SYNC_MIN_FREE_KB: ${{ vars.DEPLOY_SYNC_MIN_FREE_KB || '1048576' }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
@@ -81,9 +82,10 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
           DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
+          DEPLOY_SYNC_MIN_FREE_KB="${DEPLOY_SYNC_MIN_FREE_KB:-1048576}"
 
           remote_repo_path="$(
-            ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" "DEPLOY_PATH='${DEPLOY_PATH}' bash -s" <<'EOF'
+            ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" "DEPLOY_PATH='${DEPLOY_PATH}' DEPLOY_SYNC_MIN_FREE_KB='${DEPLOY_SYNC_MIN_FREE_KB}' bash -s" <<'EOF'
           set -euo pipefail
           if [[ "${DEPLOY_PATH}" == /* ]]; then
             DEPLOY_REPO_PATH="${DEPLOY_PATH}"
@@ -93,6 +95,29 @@ jobs:
             DEPLOY_REPO_PATH="${HOME}/${DEPLOY_PATH}"
           fi
           mkdir -p "${DEPLOY_REPO_PATH}"
+          required_free_kb="${DEPLOY_SYNC_MIN_FREE_KB:-1048576}"
+          if ! [[ "${required_free_kb}" =~ ^[0-9]+$ ]]; then
+            echo "[host-sync][error] DEPLOY_SYNC_MIN_FREE_KB must be an integer, got: ${required_free_kb}" >&2
+            exit 78
+          fi
+          available_kb="$(df -Pk "${DEPLOY_REPO_PATH}" | awk 'NR == 2 { print $4 }')"
+          use_percent="$(df -Pk "${DEPLOY_REPO_PATH}" | awk 'NR == 2 { print $5 }')"
+          if [[ -z "${available_kb}" ]]; then
+            echo "[host-sync][error] failed to read free space for ${DEPLOY_REPO_PATH}" >&2
+            df -Pk "${DEPLOY_REPO_PATH}" >&2 || true
+            exit 78
+          fi
+          if ! [[ "${available_kb}" =~ ^[0-9]+$ ]]; then
+            echo "[host-sync][error] deploy host df returned a non-integer available_kb value: ${available_kb}" >&2
+            df -Pk "${DEPLOY_REPO_PATH}" >&2 || true
+            exit 78
+          fi
+          echo "[host-sync] disk_available_kb=${available_kb} required_kb=${required_free_kb} use=${use_percent:-unknown}" >&2
+          if (( available_kb < required_free_kb )); then
+            echo "[host-sync][error] deploy host free space is below the sync gate: available_kb=${available_kb}, required_kb=${required_free_kb}, path=${DEPLOY_REPO_PATH}" >&2
+            echo "[host-sync][error] free disk space on the deploy host before rerunning; see docs/deployment/onprem-docker-gc-20260403.md" >&2
+            exit 78
+          fi
           printf '%s' "${DEPLOY_REPO_PATH}"
           EOF
           )"

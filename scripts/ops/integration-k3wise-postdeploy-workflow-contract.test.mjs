@@ -178,3 +178,21 @@ test('deploy workflow keeps K3 WISE smoke evidence wired into deploy summary and
   assertContains(raw, 'K3 WISE postdeploy smoke input check failed', 'deploy final gate')
   assertContains(raw, 'K3 WISE postdeploy smoke failed', 'deploy final gate')
 })
+
+test('deploy workflow checks deploy host disk before sync archive extraction', () => {
+  const raw = readFileSync(deployWorkflowPath, 'utf8')
+
+  assertContains(raw, '- name: Sync deploy host files', 'deploy host sync step')
+  assertContains(raw, "DEPLOY_SYNC_MIN_FREE_KB: ${{ vars.DEPLOY_SYNC_MIN_FREE_KB || '1048576' }}", 'deploy host sync disk gate env')
+  assertContains(raw, 'DEPLOY_SYNC_MIN_FREE_KB="${DEPLOY_SYNC_MIN_FREE_KB:-1048576}"', 'deploy host sync disk gate default')
+  assertContains(raw, 'DEPLOY_SYNC_MIN_FREE_KB=\'${DEPLOY_SYNC_MIN_FREE_KB}\' bash -s', 'deploy host sync remote env')
+  assertContains(raw, 'required_free_kb="${DEPLOY_SYNC_MIN_FREE_KB:-1048576}"', 'deploy host sync remote default')
+  assertContains(raw, 'df -Pk "${DEPLOY_REPO_PATH}"', 'deploy host sync disk probe')
+  assertContains(raw, '[host-sync] disk_available_kb=', 'deploy host sync disk log')
+  assertContains(raw, 'deploy host free space is below the sync gate', 'deploy host sync fail-fast message')
+  assertContains(raw, 'docs/deployment/onprem-docker-gc-20260403.md', 'deploy host sync recovery pointer')
+  assert.ok(
+    raw.indexOf('deploy host free space is below the sync gate') < raw.indexOf('tar -czf - \\'),
+    'deploy host sync disk gate must run before tar extraction',
+  )
+})
