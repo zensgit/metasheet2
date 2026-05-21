@@ -64,6 +64,7 @@
                   holiday.isWorkingDay ? 'meta-calendar__holiday--working' : 'meta-calendar__holiday--rest',
                   hasOverrideMarker(holiday) ? 'meta-calendar__holiday--overridden' : null,
                   holiday.overlays && holiday.overlays.length ? 'meta-calendar__holiday--with-overlay' : null,
+                  calendarChipSourceClassName(holiday.effective?.source),
                 ]"
                 :title="buildHolidayTooltip(holiday)"
               >
@@ -150,6 +151,7 @@
                   holiday.isWorkingDay ? 'meta-calendar__holiday--working' : 'meta-calendar__holiday--rest',
                   hasOverrideMarker(holiday) ? 'meta-calendar__holiday--overridden' : null,
                   holiday.overlays && holiday.overlays.length ? 'meta-calendar__holiday--with-overlay' : null,
+                  calendarChipSourceClassName(holiday.effective?.source),
                 ]"
                 :title="buildHolidayTooltip(holiday)"
               >
@@ -218,6 +220,7 @@
                   holiday.isWorkingDay ? 'meta-calendar__holiday--working' : 'meta-calendar__holiday--rest',
                   hasOverrideMarker(holiday) ? 'meta-calendar__holiday--overridden' : null,
                   holiday.overlays && holiday.overlays.length ? 'meta-calendar__holiday--with-overlay' : null,
+                  calendarChipSourceClassName(holiday.effective?.source),
                 ]"
                 :title="buildHolidayTooltip(holiday)"
               >
@@ -303,9 +306,13 @@ import {
 } from '../../composables/useCalendarDays'
 import type {
   CalendarEffectiveChip,
-  CalendarEffectiveLayer,
-  CalendarEffectiveOverlay,
 } from '../../services/attendance/effectiveCalendar'
+import {
+  buildCalendarChipTooltip,
+  calendarChipSourceClassName,
+  fallbackChipName,
+  hasCalendarChipOverrideMarker,
+} from '../../services/attendance/calendarChipDisplay'
 import MetaAttachmentList from './MetaAttachmentList.vue'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaCommentAffordance from './MetaCommentAffordance.vue'
@@ -610,56 +617,16 @@ function rangeFromCells(cells: CalendarCell[]): CalendarVisibleRange | null {
   }
 }
 
-function fallbackHolidayName(holiday: CalendarEffectiveChip): string {
-  return holiday.isWorkingDay ? 'Working day' : 'Holiday'
-}
+// PR2: chip-display helpers (fallback name, override marker, tooltip,
+// source class) are extracted to apps/web/src/services/attendance/calendarChipDisplay.ts
+// so the multitable Calendar view and attendance personal calendar share one
+// implementation. The PR1 visual contract (red/green base + dotted override
+// + overlay dot) is preserved; PR2 adds the source border-left accent via
+// the shared `calendar-source--{source}` class.
 
-// PR1 scope C: minimal visual — keep legacy --working/--rest classes and add
-// (1) an `--overridden` marker class when a calendar_policy layer fired, and
-// (2) a native `title` tooltip with the full layer chain + overlay summary so
-// users can see "national rest day → org override changed to working" without
-// a new tooltip component. Source coloring palette is deferred to PR2.
-function hasOverrideMarker(chip: CalendarEffectiveChip): boolean {
-  if (!Array.isArray(chip.layers)) return false
-  return chip.layers.some((layer) => layer.kind === 'calendar_policy')
-}
-
-function describeLayerForTooltip(layer: CalendarEffectiveLayer): string {
-  const verdict = layer.isWorkingDay ? 'work' : 'rest'
-  const label = layer.label ? ` ${layer.label}` : ''
-  return `${layer.source}:${label} (${verdict})`
-}
-
-function describeOverlayForTooltip(overlay: CalendarEffectiveOverlay): string {
-  const parts: string[] = [overlay.kind]
-  if (typeof overlay.minutes === 'number' && Number.isFinite(overlay.minutes)) {
-    parts.push(`${overlay.minutes}m`)
-  }
-  if (overlay.status) parts.push(overlay.status)
-  return parts.join(' · ')
-}
-
-function buildHolidayTooltip(chip: CalendarEffectiveChip): string | undefined {
-  // Only build a tooltip when the chip carries effective-calendar context;
-  // legacy CalendarHoliday payloads (no base/effective/layers) get no title.
-  if (!chip.effective && !chip.base && !chip.layers?.length && !chip.overlays?.length) {
-    return undefined
-  }
-  const lines: string[] = []
-  const verdict = chip.effective?.isWorkingDay ?? chip.isWorkingDay
-  const verdictWord = verdict === true ? 'Working day' : verdict === false ? 'Rest day' : 'Unknown'
-  const sourceTag = chip.effective?.source ? ` · ${chip.effective.source}` : ''
-  lines.push(`${chip.date} — ${verdictWord}${sourceTag}`)
-  if (chip.layers?.length) {
-    const chain = chip.layers.map(describeLayerForTooltip).join(' → ')
-    lines.push(`Layers: ${chain}`)
-  }
-  if (chip.overlays?.length) {
-    const summary = chip.overlays.map(describeOverlayForTooltip).join('; ')
-    lines.push(`Overlays: ${summary}`)
-  }
-  return lines.join('\n')
-}
+const fallbackHolidayName = fallbackChipName
+const hasOverrideMarker = hasCalendarChipOverrideMarker
+const buildHolidayTooltip = buildCalendarChipTooltip
 
 function onPickDateField(e: Event) {
   const val = (e.target as HTMLSelectElement).value

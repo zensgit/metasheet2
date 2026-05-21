@@ -43,6 +43,13 @@ export interface AttendanceHoliday {
   date: string
   name: string | null
   isWorkingDay: boolean
+  // PR2: surface the row's `origin` (`national` for /holidays/sync rows,
+  // `manual` for admin CRUD). The backend has populated this since Step 2
+  // (#1698); existing legacy clients see it as optional. Admin CRUD POST/PUT
+  // bodies intentionally do NOT include `origin` — the backend keeps
+  // `manual` as the authoritative default for manual writes (PR2 Should-Fix
+  // #4).
+  origin?: 'national' | 'manual'
 }
 
 export interface AttendanceRotationRule {

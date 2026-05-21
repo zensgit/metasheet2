@@ -644,7 +644,7 @@
               <span v-if="day.statusLabel" class="attendance__calendar-status">{{ day.statusLabel }}</span>
               <span v-else class="attendance__calendar-status attendance__calendar-status--empty">--</span>
               <span v-if="showLunarLabel && day.lunarLabel" class="attendance__calendar-lunar">{{ day.lunarLabel }}</span>
-              <span v-if="showHolidayBadge && day.holidayName" class="attendance__calendar-holiday">{{ day.holidayName }}</span>
+              <span v-if="showHolidayBadge && day.holidayName" class="attendance__calendar-holiday" :class="day.sourceClass">{{ day.holidayName }}</span>
             </div>
           </div>
         </div>
@@ -4711,6 +4711,19 @@ import {
   type AttendancePayrollSummaryFieldOption,
 } from './attendance/useAttendanceAdminPayroll'
 import { useLocale } from '../composables/useLocale'
+import { useAuth } from '../composables/useAuth'
+import { getCalendarVisibleRange } from '../composables/useCalendarDays'
+import {
+  EffectiveCalendarFetchError,
+  effectiveCalendarItemToChip,
+  fetchEffectiveCalendar,
+  isCalendarEffectiveItemNoteworthy,
+  type CalendarEffectiveChip,
+} from '../services/attendance/effectiveCalendar'
+import {
+  buildCalendarChipTooltip,
+  calendarChipSourceClassName,
+} from '../services/attendance/calendarChipDisplay'
 import { usePlugins } from '../composables/usePlugins'
 import { apiFetch } from '../utils/api'
 import { readErrorMessage } from '../utils/error'
@@ -5448,6 +5461,10 @@ interface AttendanceRotationAssignmentItem {
   rotation: AttendanceRotationRule
 }
 
+// PR2 adds `sourceClass` carrying `calendar-source--{national|manual|org|group|role|user}`
+// (or undefined for plain rule/shift days). The shared palette in
+// apps/web/src/styles/calendar-source-palette.css resolves it to a 4px
+// border-left accent; UI surfaces apply the class without per-component CSS.
 interface CalendarDay {
   key: string
   day: number
@@ -5458,6 +5475,7 @@ interface CalendarDay {
   tooltip: string
   holidayName?: string
   lunarLabel?: string
+  sourceClass?: string
 }
 
 interface AttendanceApiError extends Error {
@@ -5700,6 +5718,29 @@ const provisionRolePermissions: Record<ProvisionRole, string[]> = {
 const shifts = ref<AttendanceShift[]>([])
 const assignments = ref<AttendanceAssignmentItem[]>([])
 const holidays = ref<AttendanceHoliday[]>([])
+// PR2 raw/effective split (Codex Must-Fix #1): `holidays` keeps feeding the
+// admin Holiday CRUD section (holidaySectionBindings); the personal overview
+// calendar grid now reads from `calendarEffectiveChips` so each cell can
+// expose source + layer chain + overlays without polluting the admin CRUD
+// payload. Mixing them would break edit/delete (admin edits raw rows by id).
+const calendarEffectiveChips = ref<CalendarEffectiveChip[]>([])
+const currentUserId = ref<string | null>(null)
+// PR2 review fix (Codex Blocking #1): `committedCalendarUserId` is the userId
+// the overview is currently rendered against. It is set ONLY by refreshAll()
+// (when the user clicks Refresh, after typing into targetUserId) and by the
+// initial auth resolution — NOT by live v-model edits to the targetUserId
+// input. This keeps calendar chips in sync with summary/records/requests
+// which all use a refreshAll-committed view of the userId rather than the
+// live input value.
+const committedCalendarUserId = ref<string | null>(null)
+const lastCalendarEffectiveRange = ref<{ from: string; to: string } | null>(null)
+let calendarEffectiveCacheKey: string | null = null
+// PR2 review fix (Codex Blocking #2): stale-response guard. A bumped version
+// is captured before the await; after the response we discard it if the
+// counter advanced (rapid month/user switches) so older responses can never
+// overwrite newer chip data.
+let calendarEffectiveLoadVersion = 0
+const auth = useAuth()
 const requestReport = ref<AttendanceRequestReportItem[]>([])
 const requestReportTotal = computed(() =>
   requestReport.value.reduce((sum, row) => sum + (Number(row.total) || 0), 0)
@@ -7289,6 +7330,81 @@ const holidayMap = computed(() => {
   return map
 })
 
+// PR2 effective-calendar consumer state (Codex Must-Fix #2: AttendanceView
+// has no currentUserId — populate `committedCalendarUserId` via useAuth on
+// mount + on every refreshAll). The fetcher gates on the committed value
+// and a watcher replays the cached range when auth resolves later.
+
+const calendarEffectiveChipMap = computed(() => {
+  const map = new Map<string, CalendarEffectiveChip>()
+  for (const chip of calendarEffectiveChips.value) {
+    const key = normalizeDateKey(chip.date)
+    if (key) map.set(key, chip)
+  }
+  return map
+})
+
+async function loadEffectiveCalendarForOverview(
+  range: { from: string; to: string },
+  options?: { force?: boolean },
+): Promise<void> {
+  const from = String(range.from || '').trim()
+  const to = String(range.to || '').trim()
+  if (!from || !to) return
+  // Record the latest emitted range BEFORE the auth gate so the watcher can
+  // replay once committedCalendarUserId populates (the page often mounts
+  // before useAuth resolves; we must not silently skip).
+  lastCalendarEffectiveRange.value = { from, to }
+  const userId = committedCalendarUserId.value
+  if (!userId) return
+  const cacheKey = `${from}|${to}|${userId}`
+  if (!options?.force && calendarEffectiveCacheKey === cacheKey) return
+  calendarEffectiveCacheKey = cacheKey
+  const loadVersion = ++calendarEffectiveLoadVersion
+  try {
+    const result = await fetchEffectiveCalendar({
+      from,
+      to,
+      userId,
+      suppressUnauthorizedRedirect: true,
+    })
+    // Stale-response guard (Codex Blocking #2): if another call started after
+    // this one (e.g. user switched months or clicked Refresh during await),
+    // drop this result so the newer one wins.
+    if (loadVersion !== calendarEffectiveLoadVersion) return
+    const items = Array.isArray(result?.items) ? result.items : []
+    calendarEffectiveChips.value = items
+      .filter(isCalendarEffectiveItemNoteworthy)
+      .map(effectiveCalendarItemToChip)
+  } catch (error) {
+    // Failure must not block calendar grid rendering — clear chips, bust the
+    // cache key so a later auth/retry succeeds. Only the most recent failed
+    // version mutates state so older failures cannot blank a newer success.
+    if (loadVersion === calendarEffectiveLoadVersion) {
+      calendarEffectiveChips.value = []
+      calendarEffectiveCacheKey = null
+    }
+    if (error instanceof EffectiveCalendarFetchError) {
+      console.debug('[AttendanceView] effective-calendar load failed', error.status, error.message)
+    }
+  }
+}
+
+watch(committedCalendarUserId, (next) => {
+  if (next && lastCalendarEffectiveRange.value) {
+    void loadEffectiveCalendarForOverview(lastCalendarEffectiveRange.value)
+  }
+})
+
+watch(
+  calendarMonth,
+  (month) => {
+    const range = getCalendarVisibleRange(month)
+    void loadEffectiveCalendarForOverview(range)
+  },
+  { immediate: true },
+)
+
 const calendarDays = computed<CalendarDay[]>(() => {
   const year = calendarMonth.value.getFullYear()
   const month = calendarMonth.value.getMonth()
@@ -7303,22 +7419,35 @@ const calendarDays = computed<CalendarDay[]>(() => {
     const date = new Date(year, month, index - startOffset + 1)
     const key = toDateKey(date)
     const record = recordMap.value.get(key)
-    const holiday = holidayMap.value.get(key)
+    // PR2: read from effective-calendar chips (not raw `holidayMap`) so
+    // each cell reflects the viewing user's effective layer chain (national/
+    // manual/org/group/user policies + approved overlays). Admin CRUD still
+    // reads `holidays`/`holidayMap` for its own raw-row workflow.
+    const chip = calendarEffectiveChipMap.value.get(key)
     let status = record?.status
     let statusLabel = status ? formatStatus(status) : undefined
-    const holidayName = typeof holiday?.name === 'string' && holiday.name.trim().length > 0
-      ? holiday.name.trim()
+    const holidayName = typeof chip?.name === 'string' && chip.name.trim().length > 0
+      ? chip.name.trim()
       : undefined
     const lunarLabel = formatLunarDayLabel(date)
+    const chipTooltip = chip ? buildCalendarChipTooltip(chip) : undefined
+    const sourceClass = calendarChipSourceClassName(chip?.effective?.source)
     let tooltip = record
       ? `${key} · ${statusLabel} · ${record.work_minutes} min`
       : key
-    if (!record && holiday && holiday.isWorkingDay === false) {
+    if (!record && chip && chip.isWorkingDay === false) {
       status = 'off'
       statusLabel = tr('Holiday', '休息日')
-      tooltip = holidayName ? `${key} · ${holidayName}` : `${key} · ${tr('Holiday', '休息日')}`
+      // Prefer the layer-chain tooltip when the chip exposes effective fields
+      // so users can see "national rest → org override" without leaving the
+      // cell; fall back to the legacy text otherwise.
+      tooltip = chipTooltip
+        ?? (holidayName ? `${key} · ${holidayName}` : `${key} · ${tr('Holiday', '休息日')}`)
     } else if (record && status === 'off' && holidayName) {
-      tooltip = `${key} · ${holidayName} · ${record.work_minutes} min`
+      tooltip = chipTooltip
+        ?? `${key} · ${holidayName} · ${record.work_minutes} min`
+    } else if (chipTooltip) {
+      tooltip = chipTooltip
     }
     return {
       key,
@@ -7330,6 +7459,7 @@ const calendarDays = computed<CalendarDay[]>(() => {
       tooltip,
       holidayName,
       lunarLabel,
+      sourceClass,
     }
   })
 })
@@ -11768,9 +11898,19 @@ async function refreshAll(): Promise<boolean> {
   loading.value = true
   recordsPage.value = 1
   calendarMonth.value = new Date(`${toDate.value}T00:00:00`)
+  // PR2 review fix (Codex Blocking #1): commit the userId for the overview
+  // calendar HERE — same moment summary/records/requests are refreshed —
+  // instead of reacting to live targetUserId v-model edits. The watcher on
+  // committedCalendarUserId will fire when it actually changes; we also
+  // force a fresh effective-calendar load below so Refresh on the same
+  // (from, to, userId) tuple still discards the cache (Blocking #2 part 2).
+  committedCalendarUserId.value = normalizedUserId() ?? currentUserId.value ?? null
   let success = true
   try {
     await Promise.all([loadSummary(), loadRecords(), loadRequests(), loadAnomalies(), loadRequestReport(), loadHolidays()])
+    if (lastCalendarEffectiveRange.value) {
+      void loadEffectiveCalendarForOverview(lastCalendarEffectiveRange.value, { force: true })
+    }
   } catch (error: any) {
     success = false
     setStatusFromError(error, tr('Refresh failed', '刷新失败'), 'refresh')
@@ -14332,6 +14472,23 @@ async function loadAdminData() {
 }
 
 onMounted(() => {
+  // Populate currentUserId for the effective-calendar fetcher. If refreshAll
+  // ran first and could not commit a userId (auth still resolving),
+  // backfill committedCalendarUserId now so the watcher replays the cached
+  // visible range and the personal calendar grid does not stay empty. We
+  // intentionally do NOT touch committedCalendarUserId when the user has
+  // already typed a targetUserId — refreshAll will commit that the next
+  // time it runs.
+  auth.getCurrentUserId().then((id) => {
+    if (!id) return
+    currentUserId.value = id
+    if (!committedCalendarUserId.value && !normalizedUserId()) {
+      committedCalendarUserId.value = id
+    }
+  }).catch(() => {
+    // Auth failures are surfaced elsewhere; calendar simply waits for a
+    // userId and will not call the API without one.
+  })
   fetchPlugins()
     .then(() => {
       pluginsLoaded.value = true
@@ -14874,6 +15031,14 @@ const holidaySectionBindings = {
   color: #b45309;
   background: #fff7ed;
   border: 1px solid #fed7aa;
+  /* PR2 review fix (Codex Medium #3): the `border` shorthand above resets
+   * any left-edge accent painted by the shared palette
+   * apps/web/src/styles/calendar-source-palette.css. The scoped selector
+   * has higher specificity than the global `.calendar-source--*` rule, so
+   * we re-declare `border-left` here to consume the same CSS variable.
+   * When no source class is present, the variable resolves to the original
+   * 1px #fed7aa value via fallback. */
+  border-left: 4px solid var(--calendar-source-accent, #fed7aa);
   border-radius: 6px;
   padding: 2px 4px;
   line-height: 1.2;

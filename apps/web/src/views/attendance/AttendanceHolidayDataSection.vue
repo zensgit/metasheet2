@@ -54,9 +54,16 @@
               v-for="holiday in day.holidays.slice(0, 2)"
               :key="`${day.date}-${holiday.id}`"
               class="attendance__holiday-chip"
-              :class="holiday.isWorkingDay ? 'attendance__holiday-chip--working' : 'attendance__holiday-chip--holiday'"
+              :class="[
+                holiday.isWorkingDay ? 'attendance__holiday-chip--working' : 'attendance__holiday-chip--holiday',
+                calendarChipOriginClassName(holiday.origin),
+              ]"
+              :title="holiday.origin === 'national'
+                ? tr('Synced from national holiday source', '来自国家节假日同步')
+                : tr('Manually added by administrator', '管理员手工添加')"
             >
               {{ holiday.name || fallbackHolidayName(holiday.isWorkingDay) }}
+              <small class="attendance__holiday-chip-origin">{{ calendarChipOriginBadge(holiday.origin) }}</small>
             </span>
             <span v-if="day.holidays.length > 2" class="attendance__holiday-more">
               +{{ day.holidays.length - 2 }}
@@ -139,6 +146,10 @@ import {
   toDateInput,
   type CalendarDayCell as SharedCalendarDayCell,
 } from '../../composables/useCalendarDays'
+import {
+  calendarChipOriginBadge,
+  calendarChipOriginClassName,
+} from '../../services/attendance/calendarChipDisplay'
 
 type Translate = (en: string, zh: string) => string
 type MaybePromise<T> = T | Promise<T>
@@ -322,6 +333,10 @@ void syncMonthRange(calendarMonth.value)
 .attendance__holiday-chip { display: inline-flex; align-items: center; max-width: 100%; padding: 2px 6px; border-radius: 999px; font-size: 11px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .attendance__holiday-chip--holiday { background: #ffe8e8; color: #9a1a1a; }
 .attendance__holiday-chip--working { background: #e5f7ec; color: #15693a; }
+/* PR2: tiny origin badge inside the chip (N = national/sync, M = manual/admin).
+ * The chip also receives a `calendar-source--{national|manual}` class from
+ * the shared palette, painting a 4px border-left accent in the source color. */
+.attendance__holiday-chip-origin { margin-left: 4px; font-size: 9px; opacity: 0.65; letter-spacing: 0.5px; }
 .attendance__holiday-more { color: #666; font-size: 11px; }
 .attendance__holiday-side { display: flex; flex-direction: column; gap: 12px; }
 .attendance__holiday-panel { border: 1px solid #e0e0e0; border-radius: 10px; padding: 12px; background: #fff; display: flex; flex-direction: column; gap: 10px; }
