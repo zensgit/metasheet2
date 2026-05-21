@@ -10110,7 +10110,7 @@ async function resolveWorkContext(options) {
   if (holiday) {
     isWorkingDay = holiday.isWorkingDay === true
   }
-  return {
+  const context = {
     rule: profile,
     assignment: assignmentInfo?.assignment ?? null,
     rotation: rotationInfo?.rotation ?? null,
@@ -10119,6 +10119,32 @@ async function resolveWorkContext(options) {
     isWorkingDay,
     source: rotationInfo ? 'rotation' : assignmentInfo ? 'shift' : 'rule',
   }
+  // Step 5: layer calendarPolicy.overrides on top of profile/holiday. D4
+  // pinned: only hit the DB when we actually have overrides to match, and
+  // accept caller-provided overrides/scopeContext to avoid redundant
+  // queries from batch / test paths.
+  let calendarOverrides = Array.isArray(options.calendarOverrides) ? options.calendarOverrides : null
+  if (calendarOverrides === null) {
+    try {
+      const settings = await getSettings(db)
+      calendarOverrides = Array.isArray(settings?.calendarPolicy?.overrides)
+        ? settings.calendarPolicy.overrides
+        : []
+    } catch (_error) {
+      calendarOverrides = []
+    }
+  }
+  if (calendarOverrides.length > 0 && userId) {
+    const scopeContext = options.scopeContext
+      ?? await loadAttendanceScopeContextForUser(db, orgId, userId)
+    applyCalendarPolicyToWorkContext(context, {
+      calendarOverrides,
+      scopeContext,
+      dateKey: workDate,
+      mode: 'userId',
+    })
+  }
+  return context
 }
 
 async function loadHolidayMapByDates(db, orgId, workDates) {
@@ -10281,6 +10307,64 @@ function calendarOverlayKindFromRequestType(requestType) {
   return null
 }
 
+// Step 5 (RFC §8): shared override-selection core. One implementation of
+// matching + priority + tie-order, consumed by both the read-only
+// /api/attendance/effective-calendar resolver and the runtime calc chain
+// (resolveWorkContext / resolveWorkContextFromPrefetch). Same-priority ties
+// are broken by later-array-index wins (`>=` comparison), so this contract
+// is identical between API view and payroll/import/auto-absence calc.
+//
+// Returns the winning override (with derived priority + label + policyId)
+// or null when no override matches. Pure function; no DB, no Vue.
+function selectHighestPriorityCalendarOverride(overrides, dayContext, mode) {
+  if (!Array.isArray(overrides) || overrides.length === 0) return null
+  let winner = null
+  let winnerPriority = CALENDAR_BASE_SOURCE_PRIORITY
+  for (const override of overrides) {
+    if (!matchCalendarOverride(override, dayContext, mode)) continue
+    const priority = CALENDAR_POLICY_SOURCE_PRIORITY[override.effective.source] ?? 0
+    // Higher priority wins; same priority -> later in array order wins (`>=`).
+    if (priority >= winnerPriority) {
+      winner = {
+        isWorkingDay: override.effective.isWorkingDay,
+        source: override.effective.source,
+        label: override.effective.label ?? override.name ?? undefined,
+        policyId: override.id,
+        priority,
+      }
+      winnerPriority = priority
+    }
+  }
+  return winner
+}
+
+// Step 5: calc-chain integration helper. Given a workContext already merged
+// for profile + holiday, runs the shared selector and (when a policy fires)
+// updates `isWorkingDay` + sets `policySource` / `policyId` for diagnostics.
+// `context.source` keeps its old semantics (profile origin: rotation|shift|rule)
+// — D1 pinned: callers that read `source` see no shift; callers that want
+// the final effective source check `policySource ?? source`.
+function applyCalendarPolicyToWorkContext(workContext, options) {
+  if (!workContext) return workContext
+  const overrides = Array.isArray(options?.calendarOverrides) ? options.calendarOverrides : []
+  if (overrides.length === 0) return workContext
+  const scopeContext = options?.scopeContext ?? null
+  const holiday = workContext.holiday ?? null
+  const meta = holiday ? resolveHolidayMeta(holiday) : { name: null, dayIndex: null, isFirstDay: false }
+  const dayContext = {
+    date: options?.dateKey,
+    holiday: holiday ? { name: meta.name ?? null, dayIndex: meta.dayIndex } : null,
+    scopeContext: scopeContext ?? {},
+  }
+  const mode = options?.mode || 'userId'
+  const winner = selectHighestPriorityCalendarOverride(overrides, dayContext, mode)
+  if (!winner) return workContext
+  workContext.isWorkingDay = winner.isWorkingDay === true
+  workContext.policySource = winner.source
+  workContext.policyId = winner.policyId
+  return workContext
+}
+
 function matchCalendarOverride(override, dayContext, mode) {
   if (!override || !override.effective) return false
   const allowed = CALENDAR_MODE_ALLOWED_SOURCES[mode]
@@ -10366,6 +10450,63 @@ async function loadAttendanceScopeContextForUser(db, orgId, userId) {
   // calendarPolicy.overrides[] with effective.source='role' remain valid
   // config but the resolver cannot match them without DB-backed role context.
   return { userId, userName, attendanceGroups }
+}
+
+// Step 5: batch range version mirroring loadShiftAssignmentMapForUsersRange.
+// Used by buildWorkContextPrefetch to populate scopeContextByUser so the
+// calc-chain prefetch path can resolve calendarPolicy.overrides without a
+// per-user round-trip. Same role/roleTags limitation as the single-user
+// variant — D6 pinned.
+async function loadAttendanceScopeContextMapForUsers(db, orgId, userIds) {
+  const list = Array.isArray(userIds) ? Array.from(new Set(userIds.filter(Boolean))) : []
+  const result = new Map()
+  if (list.length === 0) return result
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  for (const id of list) {
+    result.set(id, { userId: id, userName: undefined, attendanceGroups: [] })
+  }
+  try {
+    const userRows = await db.query(
+      'SELECT id, name FROM users WHERE id = ANY($1::text[])',
+      [list],
+    )
+    for (const row of userRows) {
+      const id = row?.id
+      if (!id || !result.has(id)) continue
+      if (typeof row.name === 'string') result.get(id).userName = row.name
+    }
+  } catch (error) {
+    if (!isDatabaseSchemaError(error)) throw error
+  }
+  try {
+    const memberRows = await db.query(
+      `SELECT m.user_id, g.name, g.code
+       FROM attendance_group_members m
+       JOIN attendance_groups g ON g.id = m.group_id
+       WHERE m.org_id = $1 AND m.user_id = ANY($2::text[])`,
+      [targetOrg, list],
+    )
+    const seenByUser = new Map()
+    for (const row of memberRows) {
+      const id = row?.user_id
+      if (!id || !result.has(id)) continue
+      let seen = seenByUser.get(id)
+      if (!seen) {
+        seen = new Set()
+        seenByUser.set(id, seen)
+      }
+      const target = result.get(id)
+      for (const candidate of [row.name, row.code]) {
+        if (typeof candidate === 'string' && candidate && !seen.has(candidate)) {
+          seen.add(candidate)
+          target.attendanceGroups.push(candidate)
+        }
+      }
+    }
+  } catch (error) {
+    if (!isDatabaseSchemaError(error)) throw error
+  }
+  return result
 }
 
 async function loadAttendanceGroupByIdOrCode(db, orgId, identifier) {
@@ -10581,27 +10722,30 @@ async function resolveEffectiveCalendar(db, args) {
       holiday: holidayMeta,
       scopeContext,
     }
+    // Step 5: layers[] is built unconditionally for the API response (every
+    // matching policy appears in the chain, oldest-to-newest); the
+    // effective.* fields are chosen by the shared selector so the calc
+    // chain (resolveWorkContext) reaches the same verdict by the same
+    // priority + tie-order rule.
     for (const override of calendarOverrides) {
       if (!matchCalendarOverride(override, dayContext, mode)) continue
-      const overridePriority = CALENDAR_POLICY_SOURCE_PRIORITY[override.effective.source] ?? 0
-      const label = override.effective.label ?? override.name ?? undefined
       pushCalendarLayer(layers, {
         kind: 'calendar_policy',
         source: override.effective.source,
         isWorkingDay: override.effective.isWorkingDay,
-        label,
+        label: override.effective.label ?? override.name ?? undefined,
         refId: override.id,
       })
-      // Higher priority wins; same priority -> later in array order wins
-      if (overridePriority >= effectivePriority) {
-        effective = {
-          isWorkingDay: override.effective.isWorkingDay,
-          source: override.effective.source,
-          label,
-          policyId: override.id,
-        }
-        effectivePriority = overridePriority
+    }
+    const policyWinner = selectHighestPriorityCalendarOverride(calendarOverrides, dayContext, mode)
+    if (policyWinner) {
+      effective = {
+        isWorkingDay: policyWinner.isWorkingDay,
+        source: policyWinner.source,
+        label: policyWinner.label,
+        policyId: policyWinner.policyId,
       }
+      effectivePriority = policyWinner.priority
     }
 
     const baseOut = {
@@ -10686,7 +10830,7 @@ function resolveWorkContextFromPrefetch(options) {
   if (holiday) {
     isWorkingDay = holiday.isWorkingDay === true
   }
-  return {
+  const context = {
     rule: profile,
     assignment: assignmentInfo?.assignment ?? null,
     rotation: rotationInfo?.rotation ?? null,
@@ -10695,6 +10839,23 @@ function resolveWorkContextFromPrefetch(options) {
     isWorkingDay,
     source: rotationInfo ? 'rotation' : assignmentInfo ? 'shift' : 'rule',
   }
+  // Step 5: apply calendarPolicy.overrides when the prefetch carries both
+  // the policy list and the user's scope context. D5 pinned: when either
+  // is missing (old fixtures that build prefetched manually), behave
+  // exactly as pre-Step-5 — no-op the policy layer.
+  const overrides = Array.isArray(prefetched.calendarPolicy?.overrides)
+    ? prefetched.calendarPolicy.overrides
+    : null
+  const scopeContext = userId ? prefetched.scopeContextByUser?.get(userId) : null
+  if (overrides && overrides.length > 0 && scopeContext) {
+    applyCalendarPolicyToWorkContext(context, {
+      calendarOverrides: overrides,
+      scopeContext,
+      dateKey: workDate,
+      mode: 'userId',
+    })
+  }
+  return context
 }
 
 async function buildWorkContextPrefetch(db, options) {
@@ -10717,17 +10878,33 @@ async function buildWorkContextPrefetch(db, options) {
         shiftAssignmentsByUser: new Map(),
         rotationAssignmentsByUser: new Map(),
         rotationShiftsById: new Map(),
+        // Step 5: empty userIds / dates path still attaches an empty
+        // calendarPolicy shape so resolveWorkContextFromPrefetch's
+        // backward-compat check sees a present-but-empty array (no
+        // policy applies) rather than triggering the "old fixture"
+        // no-op branch unexpectedly.
+        calendarPolicy: { overrides: [] },
+        scopeContextByUser: new Map(),
       },
     }
   }
 
   const fromDate = normalizedWorkDates[0]
   const toDate = normalizedWorkDates[normalizedWorkDates.length - 1]
-  const [holidaysByDate, shiftAssignmentsByUser, rotationPrefetch] = await Promise.all([
+  // Step 5: settings + scopeContextByUser join the existing parallel loads.
+  // Settings hit the in-memory cache (60s TTL) most of the time so the
+  // network cost is just the scope JOIN.
+  const [holidaysByDate, shiftAssignmentsByUser, rotationPrefetch, settings, scopeContextByUser] = await Promise.all([
     loadHolidayMapByDates(db, orgId, normalizedWorkDates),
     loadShiftAssignmentMapForUsersRange(db, orgId, normalizedUserIds, fromDate, toDate),
     loadRotationAssignmentMapForUsersRange(db, orgId, normalizedUserIds, fromDate, toDate),
+    getSettings(db).catch(() => null),
+    loadAttendanceScopeContextMapForUsers(db, orgId, normalizedUserIds),
   ])
+
+  const calendarOverrides = Array.isArray(settings?.calendarPolicy?.overrides)
+    ? settings.calendarPolicy.overrides
+    : []
 
   return {
     defaultRule: resolvedDefaultRule,
@@ -10736,6 +10913,8 @@ async function buildWorkContextPrefetch(db, options) {
       shiftAssignmentsByUser,
       rotationAssignmentsByUser: rotationPrefetch.assignmentsByUser,
       rotationShiftsById: rotationPrefetch.shiftsById,
+      calendarPolicy: { overrides: calendarOverrides },
+      scopeContextByUser,
     },
   }
 }
@@ -11996,6 +12175,77 @@ function clearHolidaySyncSchedule() {
   }
 }
 
+// Step 5 (Codex review Blocking #1): extracted from the scheduler's run
+// loop so the per-(org, date) auto-absence pass is unit-testable AND can
+// be re-triggered manually via the admin endpoint below. The key fix vs
+// pre-Step-5 is the holiday short-circuit: when `calendarPolicy.overrides`
+// is configured, an org-level holiday with `is_working_day=false` MUST
+// fall through to the per-user `resolveWorkContext` loop because a
+// policy override may flip that day to a working day for some/all users.
+// The original blanket `continue` on org holidays is preserved ONLY when
+// no calendarPolicy.overrides exist (the common case; saves one user
+// query on holiday-rest days for orgs that haven't configured any policy).
+async function runAutoAbsenceForOrgDate(db, options) {
+  const { orgId, workDate, logger, emit, skipDedup = false } = options
+  const rule = options.rule ?? await loadDefaultRule(db, orgId)
+  let calendarOverrides = Array.isArray(options.calendarOverrides) ? options.calendarOverrides : null
+  if (calendarOverrides === null) {
+    try {
+      const currentSettings = await getSettings(db)
+      calendarOverrides = Array.isArray(currentSettings?.calendarPolicy?.overrides)
+        ? currentSettings.calendarPolicy.overrides
+        : []
+    } catch (_error) {
+      calendarOverrides = []
+    }
+  }
+  const holiday = await loadHoliday(db, orgId, workDate)
+  // Optimization preserved ONLY when no policy can flip the holiday verdict.
+  if (calendarOverrides.length === 0 && holiday && holiday.isWorkingDay === false) {
+    return { skipped: true, reason: 'holiday-rest-no-policy', total: 0 }
+  }
+  const key = `${orgId}:${workDate}`
+  if (!skipDedup && key === lastAutoAbsenceKey) {
+    return { skipped: true, reason: 'dedup', total: 0 }
+  }
+  const userRows = await db.query(
+    `SELECT uo.user_id
+     FROM user_orgs uo
+     JOIN users u ON u.id = uo.user_id
+     WHERE uo.org_id = $1
+       AND uo.is_active = true
+       AND u.is_active = true`,
+    [orgId]
+  )
+  const targetUsers = []
+  for (const row of userRows) {
+    const context = await resolveWorkContext({
+      db,
+      orgId,
+      userId: row.user_id,
+      workDate,
+      defaultRule: rule,
+      holidayOverride: holiday,
+      calendarOverrides,
+    })
+    if (!context.isWorkingDay) continue
+    targetUsers.push(row.user_id)
+  }
+  const rows = await generateAbsenceRecords(db, orgId, workDate, rule.timezone, targetUsers)
+  if (!skipDedup) lastAutoAbsenceKey = key
+  if (emit) {
+    emit('attendance.absence.generated', {
+      orgId,
+      workDate,
+      total: rows.length,
+    })
+  }
+  if (logger && rows.length > 0) {
+    logger.info(`Auto absence generated for ${workDate}`, { orgId, total: rows.length })
+  }
+  return { skipped: false, total: rows.length, targetUsers: targetUsers.length, generated: rows.length }
+}
+
 function scheduleAutoAbsence({ db, logger, emit }) {
   clearAutoAbsenceSchedule()
   const settings = settingsCache.value
@@ -12024,44 +12274,13 @@ function scheduleAutoAbsence({ db, logger, emit }) {
         for (let offset = 1; offset <= lookbackDays; offset += 1) {
           const targetDate = new Date(Date.now() - offset * 24 * 60 * 60 * 1000)
           const workDate = toWorkDate(targetDate, rule.timezone)
-          const holiday = await loadHoliday(db, orgId, workDate)
-          if (holiday && holiday.isWorkingDay === false) {
-            continue
-          }
-          const key = `${orgId}:${workDate}`
-          if (key === lastAutoAbsenceKey) continue
-          const userRows = await db.query(
-            `SELECT uo.user_id
-             FROM user_orgs uo
-             JOIN users u ON u.id = uo.user_id
-             WHERE uo.org_id = $1
-               AND uo.is_active = true
-               AND u.is_active = true`,
-            [orgId]
-          )
-          const targetUsers = []
-          for (const row of userRows) {
-            const context = await resolveWorkContext({
-              db,
-              orgId,
-              userId: row.user_id,
-              workDate,
-              defaultRule: rule,
-              holidayOverride: holiday,
-            })
-            if (!context.isWorkingDay) continue
-            targetUsers.push(row.user_id)
-          }
-          const rows = await generateAbsenceRecords(db, orgId, workDate, rule.timezone, targetUsers)
-          lastAutoAbsenceKey = key
-          emit('attendance.absence.generated', {
+          await runAutoAbsenceForOrgDate(db, {
             orgId,
             workDate,
-            total: rows.length,
+            rule,
+            logger,
+            emit,
           })
-          if (rows.length > 0) {
-            logger.info(`Auto absence generated for ${workDate}`, { orgId, total: rows.length })
-          }
         }
       }
     } catch (error) {
@@ -24352,6 +24571,67 @@ module.exports = {
           }
           logger.error('Attendance holiday lookup failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load holiday' } })
+        }
+      })
+    )
+
+    // Step 5: admin-triggerable auto-absence run for a specific (orgId,
+    // workDate). Bypasses the scheduler dedup so ops can re-run after a
+    // policy edit. Same per-user resolveWorkContext path the scheduler
+    // uses, so calendarPolicy.overrides are respected in both surfaces.
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/auto-absence/run',
+      withPermission('attendance:admin', async (req, res) => {
+        const schema = z.object({
+          orgId: z.string().optional(),
+          workDate: z.string().min(10),
+        })
+        const parsed = schema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+        const workDate = normalizeDateOnlyStrict(parsed.data.workDate)
+        if (!workDate) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'workDate must be YYYY-MM-DD' } })
+          return
+        }
+        // Auto-absence is a retrospective fill-in pass. The admin trigger
+        // must not be usable to fabricate absent rows for today or future
+        // dates. Compare YYYY-MM-DD strings against UTC "today" — this is
+        // strictly more conservative than local-time-today for any user
+        // east of UTC, which matches the codebase's primary deployment
+        // timezone (Asia/Shanghai). Codex Step 5 review (Blocking #1, v2).
+        const todayUtc = new Date().toISOString().slice(0, 10)
+        if (workDate >= todayUtc) {
+          res.status(400).json({
+            ok: false,
+            error: {
+              code: 'WORK_DATE_NOT_PAST',
+              message: 'workDate must be strictly in the past (UTC); auto-absence is a retrospective pass',
+              today: todayUtc,
+            },
+          })
+          return
+        }
+        const targetOrgId = parsed.data.orgId || getOrgId(req) || DEFAULT_ORG_ID
+        try {
+          const result = await runAutoAbsenceForOrgDate(db, {
+            orgId: targetOrgId,
+            workDate,
+            logger,
+            emit: emitEvent,
+            skipDedup: true,
+          })
+          res.json({ ok: true, data: result })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Manual auto-absence run failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to run auto absence' } })
         }
       })
     )
