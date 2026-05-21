@@ -4,32 +4,32 @@
       <div class="meta-bulk-edit-modal" role="dialog" :aria-label="title">
         <div class="meta-bulk-edit__header">
           <strong>{{ title }}</strong>
-          <button class="meta-bulk-edit__close" aria-label="Close" @click="onCancel">&times;</button>
+          <button class="meta-bulk-edit__close" :aria-label="b('bulk.close')" @click="onCancel">&times;</button>
         </div>
 
         <div class="meta-bulk-edit__body">
           <p class="meta-bulk-edit__hint">{{ summary }}</p>
 
           <label class="meta-bulk-edit__row">
-            <span class="meta-bulk-edit__label">Field</span>
+            <span class="meta-bulk-edit__label">{{ b('bulk.field') }}</span>
             <select
               v-model="selectedFieldId"
               class="meta-bulk-edit__select"
-              aria-label="Field to update"
+              :aria-label="b('bulk.fieldAria')"
               @change="onFieldChange"
             >
-              <option value="">(choose a field)</option>
+              <option value="">{{ b('bulk.chooseField') }}</option>
               <option v-for="field in eligibleFields" :key="field.id" :value="field.id">
                 {{ field.name }}
               </option>
             </select>
           </label>
           <p v-if="!eligibleFields.length" class="meta-bulk-edit__hint meta-bulk-edit__hint--muted">
-            No bulk-editable fields are available for the current selection.
+            {{ b('bulk.noEditableFields') }}
           </p>
 
           <div v-if="mode === 'set' && selectedField" class="meta-bulk-edit__row">
-            <span class="meta-bulk-edit__label">Value</span>
+            <span class="meta-bulk-edit__label">{{ b('bulk.value') }}</span>
             <div class="meta-bulk-edit__value-wrap">
               <!--
                 Intentionally NOT wiring @confirm to onApply: MetaCellEditor
@@ -47,9 +47,9 @@
             </div>
           </div>
           <div v-else-if="mode === 'clear' && selectedField" class="meta-bulk-edit__row">
-            <span class="meta-bulk-edit__label">Action</span>
+            <span class="meta-bulk-edit__label">{{ b('bulk.action') }}</span>
             <span class="meta-bulk-edit__hint">
-              Will clear <strong>{{ selectedField.name }}</strong> on {{ recordIds.length }} record(s).
+              <span>{{ clearHintPrefix }}</span><strong>{{ selectedField.name }}</strong><span>{{ clearHintSuffix }}</span>
             </span>
           </div>
 
@@ -58,7 +58,7 @@
         </div>
 
         <div class="meta-bulk-edit__actions">
-          <button class="meta-bulk-edit__btn" :disabled="busy" @click="onCancel">Cancel</button>
+          <button class="meta-bulk-edit__btn" :disabled="busy" @click="onCancel">{{ b('bulk.cancel') }}</button>
           <button
             class="meta-bulk-edit__btn meta-bulk-edit__btn--primary"
             :disabled="!canSubmit || busy"
@@ -74,7 +74,14 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import type { MetaField } from '../types'
+import {
+  bulkClearHintPrefix,
+  bulkClearHintSuffix,
+  bulkEditLabel,
+  bulkSummary,
+} from '../utils/meta-bulk-edit-labels'
 import { isFieldBulkEditable } from '../utils/field-permissions'
 import MetaCellEditor from './cells/MetaCellEditor.vue'
 
@@ -97,6 +104,8 @@ const emit = defineEmits<{
 
 const selectedFieldId = ref<string>('')
 const value = ref<unknown>('')
+const { isZh } = useLocale()
+const b = (key: Parameters<typeof bulkEditLabel>[0]) => bulkEditLabel(key, isZh.value)
 
 const eligibleFields = computed(() =>
   props.fields.filter((field) =>
@@ -112,13 +121,11 @@ const selectedField = computed<MetaField | null>(
   () => eligibleFields.value.find((f) => f.id === selectedFieldId.value) ?? null,
 )
 
-const title = computed(() => (props.mode === 'clear' ? 'Clear field for selected records' : 'Set field for selected records'))
-const summary = computed(() =>
-  props.mode === 'clear'
-    ? `Pick a field to clear on ${props.recordIds.length} selected record(s).`
-    : `Pick a field and a value to set on ${props.recordIds.length} selected record(s).`,
-)
-const submitLabel = computed(() => (props.mode === 'clear' ? 'Clear' : 'Set value'))
+const title = computed(() => b(props.mode === 'clear' ? 'bulk.titleClear' : 'bulk.titleSet'))
+const summary = computed(() => bulkSummary(props.mode, props.recordIds.length, isZh.value))
+const clearHintPrefix = computed(() => bulkClearHintPrefix(props.recordIds.length, isZh.value))
+const clearHintSuffix = computed(() => bulkClearHintSuffix(props.recordIds.length, isZh.value))
+const submitLabel = computed(() => b(props.mode === 'clear' ? 'bulk.submitClear' : 'bulk.submitSet'))
 const canSubmit = computed(() => Boolean(selectedField.value) && (props.mode === 'clear' || hasMeaningfulValue(value.value)))
 
 watch(

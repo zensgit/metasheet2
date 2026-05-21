@@ -14,6 +14,12 @@ export type MetaManagerLabelKey =
   | 'action.cancel' | 'action.reloadLatest' | 'action.dismiss'
   | 'action.add' | 'action.addOption' | 'action.save' | 'action.remove'
   | 'action.clear' | 'action.apply'
+  | 'formatting.title' | 'formatting.ariaTitle' | 'formatting.close'
+  | 'formatting.empty' | 'formatting.minPlaceholder'
+  | 'formatting.maxPlaceholder' | 'formatting.pickOption'
+  | 'formatting.color' | 'formatting.applyToRow' | 'formatting.enabled'
+  | 'formatting.up' | 'formatting.down' | 'formatting.addRule'
+  | 'formatting.noFieldsHint' | 'formatting.saveRules'
   | 'field.title' | 'field.empty' | 'field.options' | 'field.optionValue'
   | 'field.targetSheet' | 'field.selectSheet' | 'field.limitSingleLinkedRecord'
   | 'field.personHint' | 'field.limitSinglePerson'
@@ -108,6 +114,25 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'action.remove': { en: 'Remove', zh: '移除' },
   'action.clear': { en: 'Clear', zh: '清除' },
   'action.apply': { en: 'Apply', zh: '应用' },
+
+  'formatting.title': { en: 'Conditional formatting', zh: '条件格式' },
+  'formatting.ariaTitle': { en: 'Conditional formatting rules', zh: '条件格式规则' },
+  'formatting.close': { en: 'Close', zh: '关闭' },
+  'formatting.empty': {
+    en: 'No rules yet. Add a rule to color cells or rows based on field values.',
+    zh: '暂无规则。添加规则后，可根据字段值为单元格或整行着色。',
+  },
+  'formatting.minPlaceholder': { en: 'min', zh: '最小值' },
+  'formatting.maxPlaceholder': { en: 'max', zh: '最大值' },
+  'formatting.pickOption': { en: '(pick)', zh: '（选择）' },
+  'formatting.color': { en: 'Color', zh: '颜色' },
+  'formatting.applyToRow': { en: 'Apply to whole row', zh: '应用到整行' },
+  'formatting.enabled': { en: 'Enabled', zh: '启用' },
+  'formatting.up': { en: '\u25B2 Up', zh: '\u25B2 上移' },
+  'formatting.down': { en: '\u25BC Down', zh: '\u25BC 下移' },
+  'formatting.addRule': { en: '+ Add rule', zh: '+ 添加规则' },
+  'formatting.noFieldsHint': { en: 'Add fields to the sheet to create formatting rules.', zh: '请先向 Sheet 添加字段，再创建格式规则。' },
+  'formatting.saveRules': { en: 'Save rules', zh: '保存规则' },
 
   'field.title': { en: 'Manage Fields', zh: '管理字段' },
   'field.empty': { en: 'No fields defined', zh: '暂无字段' },
@@ -369,4 +394,30 @@ export function filterOperatorLabel(value: string, fallback: string, isZh: boole
     case 'lessEqual': return '\u2264'
     default: return fallback
   }
+}
+
+export function formattingOperatorLabel(operator: string, fieldType: string | undefined, isZh: boolean): string {
+  const isSelectLike = fieldType === 'select' || fieldType === 'multiSelect'
+  if (operator === 'gt') return '>'
+  if (operator === 'gte') return '>='
+  if (operator === 'lt') return '<'
+  if (operator === 'lte') return '<='
+  if (operator === 'eq') return isSelectLike ? (isZh ? '是' : 'is') : '='
+  if (operator === 'neq') return isSelectLike ? (isZh ? '不是' : 'is not') : '!='
+  if (operator === 'between') return isZh ? '介于' : 'between'
+  if (operator === 'contains') return isZh ? '包含' : 'contains'
+  if (operator === 'not_contains') return isZh ? '不包含' : 'does not contain'
+  if (operator === 'is_empty') return isZh ? '为空' : 'is empty'
+  if (operator === 'is_not_empty') return isZh ? '不为空' : 'is not empty'
+  if (operator === 'is_today') return isZh ? '是今天' : 'is today'
+  if (operator === 'is_overdue') return isZh ? '已逾期' : 'is overdue'
+  if (operator === 'is_in_last_n_days') return isZh ? '最近 N 天内' : 'is in last N days'
+  if (operator === 'is_in_next_n_days') return isZh ? '未来 N 天内' : 'is in next N days'
+  if (operator === 'is_true') return isZh ? '已勾选' : 'is checked'
+  if (operator === 'is_false') return isZh ? '未勾选' : 'is unchecked'
+  return operator
+}
+
+export function formattingPickColor(color: string, isZh: boolean): string {
+  return isZh ? `选择颜色 ${color}` : `Pick color ${color}`
 }
