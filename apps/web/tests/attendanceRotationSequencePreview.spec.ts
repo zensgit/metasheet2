@@ -3,6 +3,8 @@ import {
   buildAttendanceRotationAssignmentCalendarMap,
   buildAttendanceRotationAssignmentPreview,
   buildAttendanceRotationSequencePreview,
+  buildAttendanceShiftAssignmentCalendarMap,
+  buildAttendanceShiftAssignmentPreview,
   parseAttendanceRotationSequenceInput,
 } from '../src/views/attendance/attendanceRotationSequencePreview'
 
@@ -237,6 +239,95 @@ describe('attendance rotation sequence preview', () => {
       label: 'Org rest override',
       source: 'org',
       sourceClass: 'calendar-source--org',
+      hasOverride: true,
+    })
+  })
+
+  it('projects a fixed shift assignment across the assignment date window', () => {
+    const preview = buildAttendanceShiftAssignmentPreview({
+      shiftId: 'shift-a',
+      shifts: [
+        {
+          id: 'shift-a',
+          name: 'Day shift',
+          workStartTime: '09:00',
+          workEndTime: '18:00',
+        },
+      ],
+      startDate: '2026-03-01',
+      endDate: '2026-03-03',
+    })
+
+    expect(preview.shiftName).toBe('Day shift')
+    expect(preview.projectedDays).toBe(3)
+    expect(preview.isTruncated).toBe(false)
+    expect(preview.missingShiftId).toBeNull()
+    expect(preview.items.map(item => [item.date, item.dayIndex, item.shiftId, item.label, item.schedule])).toEqual([
+      ['2026-03-01', 1, 'shift-a', 'Day shift (shift-a)', '09:00 -> 18:00'],
+      ['2026-03-02', 2, 'shift-a', 'Day shift (shift-a)', '09:00 -> 18:00'],
+      ['2026-03-03', 3, 'shift-a', 'Day shift (shift-a)', '09:00 -> 18:00'],
+    ])
+  })
+
+  it('caps fixed shift assignment previews and reports missing loaded shift refs', () => {
+    const preview = buildAttendanceShiftAssignmentPreview({
+      shiftId: 'legacy-shift',
+      shifts: [
+        {
+          id: 'shift-a',
+          name: 'Day shift',
+          workStartTime: '09:00',
+          workEndTime: '18:00',
+        },
+      ],
+      startDate: '2026-03-01',
+      endDate: '2026-03-10',
+      maxDays: 2,
+    })
+
+    expect(preview.projectedDays).toBe(10)
+    expect(preview.items).toHaveLength(2)
+    expect(preview.isTruncated).toBe(true)
+    expect(preview.missingShiftId).toBe('legacy-shift')
+    expect(preview.items.map(item => [item.date, item.isKnown, item.label])).toEqual([
+      ['2026-03-01', false, 'legacy-shift'],
+      ['2026-03-02', false, 'legacy-shift'],
+    ])
+  })
+
+  it('attaches effective-calendar context to fixed shift assignment rows', () => {
+    const calendarByDate = buildAttendanceShiftAssignmentCalendarMap([
+      {
+        date: '2026-03-02',
+        isWorkingDay: false,
+        label: 'Manual rest day',
+        source: 'manual',
+        sourceClass: 'calendar-source--manual',
+        tooltip: '2026-03-02 — Rest day · manual',
+        hasOverride: true,
+      },
+    ])
+    const preview = buildAttendanceShiftAssignmentPreview({
+      shiftId: 'shift-a',
+      shifts: [
+        {
+          id: 'shift-a',
+          name: 'Day shift',
+          workStartTime: '09:00',
+          workEndTime: '18:00',
+        },
+      ],
+      startDate: '2026-03-01',
+      endDate: '2026-03-03',
+      calendarByDate,
+    })
+
+    expect(preview.items.map(item => item.date)).toEqual(['2026-03-01', '2026-03-02', '2026-03-03'])
+    expect(preview.items[0]?.calendar).toBeUndefined()
+    expect(preview.items[1]?.calendar).toMatchObject({
+      label: 'Manual rest day',
+      source: 'manual',
+      sourceClass: 'calendar-source--manual',
       hasOverride: true,
     })
   })

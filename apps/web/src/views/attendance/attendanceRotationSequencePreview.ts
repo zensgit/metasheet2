@@ -51,6 +51,8 @@ export interface AttendanceRotationAssignmentCalendarLike {
   hasOverride?: boolean
 }
 
+export type AttendanceShiftAssignmentCalendarLike = AttendanceRotationAssignmentCalendarLike
+
 export interface BuildAttendanceRotationAssignmentPreviewInput {
   rotationRuleId: string | null | undefined
   rotationRules: AttendanceRotationAssignmentRuleLike[] | null | undefined
@@ -59,6 +61,35 @@ export interface BuildAttendanceRotationAssignmentPreviewInput {
   endDate?: string | null
   maxDays?: number
   calendarByDate?: Map<string, AttendanceRotationAssignmentCalendarLike>
+}
+
+export interface BuildAttendanceShiftAssignmentPreviewInput {
+  shiftId: string | null | undefined
+  shifts: AttendanceRotationSequenceShiftLike[] | null | undefined
+  startDate: string | null | undefined
+  endDate?: string | null
+  maxDays?: number
+  calendarByDate?: Map<string, AttendanceShiftAssignmentCalendarLike>
+}
+
+export interface AttendanceShiftAssignmentPreviewItem {
+  date: string
+  dayIndex: number
+  shiftId: string
+  label: string
+  schedule: string
+  isKnown: boolean
+  isOvernight: boolean
+  calendar?: AttendanceShiftAssignmentCalendarLike
+}
+
+export interface AttendanceShiftAssignmentPreview {
+  shiftId: string
+  shiftName: string
+  items: AttendanceShiftAssignmentPreviewItem[]
+  missingShiftId: string | null
+  isTruncated: boolean
+  projectedDays: number
 }
 
 const DATE_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/
@@ -100,6 +131,12 @@ export function buildAttendanceRotationAssignmentCalendarMap(
     map.set(date, { ...item, date })
   }
   return map
+}
+
+export function buildAttendanceShiftAssignmentCalendarMap(
+  items: AttendanceShiftAssignmentCalendarLike[] | null | undefined,
+): Map<string, AttendanceShiftAssignmentCalendarLike> {
+  return buildAttendanceRotationAssignmentCalendarMap(items)
 }
 
 export function parseAttendanceRotationSequenceInput(value: string | string[] | null | undefined): string[] {
@@ -202,6 +239,64 @@ export function buildAttendanceRotationAssignmentPreview({
     ruleName: rule.name,
     items,
     missingRefs,
+    isTruncated: projectedDays > visibleDays,
+    projectedDays,
+  }
+}
+
+export function buildAttendanceShiftAssignmentPreview({
+  shiftId,
+  shifts,
+  startDate,
+  endDate,
+  maxDays,
+  calendarByDate,
+}: BuildAttendanceShiftAssignmentPreviewInput): AttendanceShiftAssignmentPreview {
+  const selectedShiftId = typeof shiftId === 'string' ? shiftId.trim() : ''
+  const shiftList = Array.isArray(shifts) ? shifts : []
+  const shift = shiftList.find(item => item.id === selectedShiftId)
+  const start = parseDateKey(startDate)
+  const end = parseDateKey(endDate)
+  const previewLimit = normalizeMaxDays(maxDays)
+  const empty = {
+    shiftId: selectedShiftId,
+    shiftName: shift?.name ?? '',
+    items: [],
+    missingShiftId: null,
+    isTruncated: false,
+    projectedDays: 0,
+  }
+
+  if (!selectedShiftId || !start) return empty
+  if (end && end < start) return empty
+
+  const projectedDays = end ? inclusiveDayCount(start, end) : previewLimit
+  const visibleDays = Math.min(projectedDays, previewLimit)
+  const label = shift ? `${shift.name} (${shift.id})` : selectedShiftId
+  const schedule = shift ? `${shift.workStartTime} -> ${shift.workEndTime}` : ''
+  const isKnown = Boolean(shift)
+  const isOvernight = Boolean(shift?.isOvernight)
+  const missingShiftId = !shift && shiftList.length > 0 ? selectedShiftId : null
+
+  const items = Array.from({ length: visibleDays }, (_, index): AttendanceShiftAssignmentPreviewItem => {
+    const date = formatDateKey(addDays(start, index))
+    return {
+      date,
+      dayIndex: index + 1,
+      shiftId: selectedShiftId,
+      label,
+      schedule,
+      isKnown,
+      isOvernight,
+      calendar: calendarByDate?.get(date),
+    }
+  })
+
+  return {
+    shiftId: selectedShiftId,
+    shiftName: shift?.name ?? selectedShiftId,
+    items,
+    missingShiftId,
     isTruncated: projectedDays > visibleDays,
     projectedDays,
   }

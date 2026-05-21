@@ -532,6 +532,58 @@
       {{ tr('Shift assignments', '排班分配') }}: {{ assignments.length }}
       <span v-if="assignmentEditingId"> · {{ assignmentEditingLabel }}</span>
     </div>
+    <div
+      v-if="shiftAssignmentPreview.items.length"
+      class="attendance__shift-assignment-preview"
+      data-attendance-shift-assignment-preview
+    >
+      <div class="attendance__preview-header">
+        <strong>{{ tr('Assignment impact preview', '班次分配影响预览') }}</strong>
+        <span>
+          {{ shiftAssignmentPreview.shiftName }}
+          <template v-if="shiftAssignmentPreview.isTruncated">
+            · {{ tr(`First ${shiftAssignmentPreview.items.length} of ${shiftAssignmentPreview.projectedDays} days`, `前 ${shiftAssignmentPreview.items.length} / 共 ${shiftAssignmentPreview.projectedDays} 天`) }}
+          </template>
+        </span>
+      </div>
+      <ol>
+        <li
+          v-for="item in shiftAssignmentPreview.items"
+          :key="`${item.date}:${item.dayIndex}:${item.shiftId}`"
+          :data-shift-assignment-known="item.isKnown ? 'true' : 'false'"
+        >
+          <span>{{ item.date }}</span>
+          <span>{{ tr(`Day ${item.dayIndex}`, `第 ${item.dayIndex} 天`) }}</span>
+          <span>{{ item.label }}</span>
+          <span v-if="item.isKnown">
+            {{ item.schedule }}<template v-if="item.isOvernight"> · {{ tr('Overnight', '跨夜') }}</template>
+          </span>
+          <span v-else>{{ tr('Unresolved shift', '未解析班次') }}</span>
+          <span
+            v-if="item.calendar"
+            class="attendance__assignment-calendar-chip"
+            :class="item.calendar.sourceClass"
+            :title="item.calendar.tooltip"
+            :data-calendar-working-day="item.calendar.isWorkingDay === true ? 'true' : item.calendar.isWorkingDay === false ? 'false' : 'unknown'"
+            :data-calendar-source="item.calendar.source || ''"
+            :data-calendar-override="item.calendar.hasOverride ? 'true' : 'false'"
+          >
+            {{ item.calendar.label || (item.calendar.isWorkingDay === false ? tr('Rest day', '休息日') : tr('Working day', '工作日')) }}
+          </span>
+        </li>
+      </ol>
+      <small
+        v-if="shiftAssignmentPreview.missingShiftId"
+        class="attendance__field-hint attendance__field-hint--warning"
+        data-attendance-shift-assignment-missing
+      >
+        {{ tr('This assignment references a shift ID that is not in the loaded shift catalog', '该分配引用了当前已加载班次中不存在的 ID') }}:
+        {{ shiftAssignmentPreview.missingShiftId }}
+      </small>
+      <small class="attendance__field-hint">
+        {{ tr('Preview is advisory and uses the selected shift, dates, and optional effective-calendar context.', '预览仅作提示，基于所选班次、日期和可选生效日历上下文计算。') }}
+      </small>
+    </div>
     <div class="attendance__admin-grid">
       <AttendanceUserPickerField
         v-model="assignmentForm.userId"
@@ -649,8 +701,10 @@ import {
   buildAttendanceRotationAssignmentCalendarMap,
   buildAttendanceRotationAssignmentPreview,
   buildAttendanceRotationSequencePreview,
+  buildAttendanceShiftAssignmentCalendarMap,
+  buildAttendanceShiftAssignmentPreview,
   parseAttendanceRotationSequenceInput,
-  type AttendanceRotationAssignmentCalendarLike,
+  type AttendanceShiftAssignmentCalendarLike,
 } from './attendanceRotationSequencePreview'
 import {
   buildCalendarChipTooltip,
@@ -759,6 +813,7 @@ interface SchedulingBindings {
 const props = defineProps<{
   tr: Translate
   scheduling: SchedulingBindings
+  shiftAssignmentCalendarChips?: CalendarEffectiveChip[]
   rotationAssignmentCalendarChips?: CalendarEffectiveChip[]
 }>()
 
@@ -869,6 +924,18 @@ const rotationAssignmentCalendarByDate = computed(() => buildAttendanceRotationA
   })),
 ))
 
+const shiftAssignmentCalendarByDate = computed(() => buildAttendanceShiftAssignmentCalendarMap(
+  (props.shiftAssignmentCalendarChips ?? []).map((chip): AttendanceShiftAssignmentCalendarLike => ({
+    date: chip.date,
+    isWorkingDay: chip.effective?.isWorkingDay ?? chip.isWorkingDay,
+    label: chip.name || fallbackChipName(chip),
+    source: chip.effective?.source,
+    sourceClass: calendarChipSourceClassName(chip.effective?.source),
+    tooltip: buildCalendarChipTooltip(chip),
+    hasOverride: hasCalendarChipOverrideMarker(chip),
+  })),
+))
+
 const rotationAssignmentPreview = computed(() => buildAttendanceRotationAssignmentPreview({
   rotationRuleId: rotationAssignmentForm.rotationRuleId,
   rotationRules: rotationRules.value,
@@ -877,6 +944,15 @@ const rotationAssignmentPreview = computed(() => buildAttendanceRotationAssignme
   endDate: rotationAssignmentForm.endDate || null,
   maxDays: 14,
   calendarByDate: rotationAssignmentCalendarByDate.value,
+}))
+
+const shiftAssignmentPreview = computed(() => buildAttendanceShiftAssignmentPreview({
+  shiftId: assignmentForm.shiftId,
+  shifts: shifts.value,
+  startDate: assignmentForm.startDate,
+  endDate: assignmentForm.endDate || null,
+  maxDays: 14,
+  calendarByDate: shiftAssignmentCalendarByDate.value,
 }))
 
 const rotationRuleEditingLabel = computed(() => {
@@ -1036,7 +1112,8 @@ const assignmentEditingLabel = computed(() => {
   font-size: 12px;
 }
 
-.attendance__rotation-assignment-preview {
+.attendance__rotation-assignment-preview,
+.attendance__shift-assignment-preview {
   border: 1px solid #bfdbfe;
   background: #eff6ff;
   border-radius: 6px;
@@ -1052,7 +1129,8 @@ const assignmentEditingLabel = computed(() => {
 }
 
 .attendance__rotation-sequence-preview ol,
-.attendance__rotation-assignment-preview ol {
+.attendance__rotation-assignment-preview ol,
+.attendance__shift-assignment-preview ol {
   display: grid;
   gap: 6px;
   margin: 8px 0 0;
@@ -1066,7 +1144,8 @@ const assignmentEditingLabel = computed(() => {
   align-items: center;
 }
 
-.attendance__rotation-assignment-preview li {
+.attendance__rotation-assignment-preview li,
+.attendance__shift-assignment-preview li {
   display: grid;
   grid-template-columns: minmax(96px, max-content) minmax(56px, max-content) minmax(120px, 1fr) minmax(120px, max-content) minmax(92px, max-content);
   gap: 8px;
@@ -1081,7 +1160,12 @@ const assignmentEditingLabel = computed(() => {
   color: #92400e;
 }
 
-.attendance__rotation-assignment-calendar-chip {
+.attendance__shift-assignment-preview li[data-shift-assignment-known="false"] {
+  color: #92400e;
+}
+
+.attendance__rotation-assignment-calendar-chip,
+.attendance__assignment-calendar-chip {
   border: 1px solid var(--calendar-source-accent, #bfdbfe);
   border-left-width: 3px;
   border-radius: 999px;
@@ -1091,11 +1175,13 @@ const assignmentEditingLabel = computed(() => {
   white-space: nowrap;
 }
 
-.attendance__rotation-assignment-calendar-chip[data-calendar-working-day="false"] {
+.attendance__rotation-assignment-calendar-chip[data-calendar-working-day="false"],
+.attendance__assignment-calendar-chip[data-calendar-working-day="false"] {
   background: #fef3c7;
 }
 
-.attendance__rotation-assignment-calendar-chip[data-calendar-override="true"] {
+.attendance__rotation-assignment-calendar-chip[data-calendar-override="true"],
+.attendance__assignment-calendar-chip[data-calendar-override="true"] {
   border-style: dashed;
 }
 
