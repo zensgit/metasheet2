@@ -421,6 +421,12 @@ import {
   mentionsUnread as fmtMentionsUnread,
   mentionsRecords as fmtMentionsRecords,
   templateInstalled as fmtTemplateInstalled,
+  formSubmitSuccess as fmtFormSubmitSuccess,
+  recordsImported as fmtRecordsImported,
+  recordsFailedToImport as fmtRecordsFailedToImport,
+  duplicateRowsSkipped as fmtDuplicateRowsSkipped,
+  recordsDeleted as fmtRecordsDeleted,
+  recordNotFound as fmtRecordNotFound,
 } from '../utils/workbench-labels'
 import { commentLabel } from '../utils/meta-comment-labels'
 import type {
@@ -1372,7 +1378,7 @@ async function onTimelinePatchDates(payload: {
     }
     showSuccess(wb('toast.datesUpdated', isZh.value))
   } catch (error: any) {
-    showError(error?.message ?? 'Failed to update timeline dates')
+    showError(error?.message ?? wb('toast.timelineDatesUpdateFailed', isZh.value))
   }
 }
 async function onHierarchyReparentRecord(payload: {
@@ -1401,7 +1407,7 @@ async function onHierarchyReparentRecord(payload: {
     }
     showSuccess(wb('toast.hierarchyUpdated', isZh.value))
   } catch (error: any) {
-    showError(error?.message ?? 'Failed to update hierarchy parent')
+    showError(error?.message ?? wb('toast.hierarchyParentUpdateFailed', isZh.value))
   }
 }
 async function onAddRecord() {
@@ -1486,11 +1492,11 @@ async function onFormSubmit(data: Record<string, unknown>) {
       selectedRecordId.value = result.record.id
       formDirty.value = false
       await grid.loadViewData(grid.page.value.offset)
-      formSuccessMessage.value = result.mode === 'create' ? 'Record created' : 'Changes saved'
+      formSuccessMessage.value = fmtFormSubmitSuccess(result.mode, isZh.value)
       formFieldErrors.value = {}
-      showSuccess(wb('toast.formSubmitted', isZh.value))
+      showSuccess(formSuccessMessage.value)
     } catch (e: any) {
-      const message = e.message ?? 'Form submit failed'
+      const message = e.message ?? wb('toast.formSubmitFailed', isZh.value)
       formErrorMessage.value = message
       formFieldErrors.value = e.fieldErrors ?? {}
       showError(message)
@@ -1536,7 +1542,7 @@ async function onSubmitComment(payload: { content: string; mentions: string[] })
     selectedReplyCommentId.value = null
     selectedEditingCommentId.value = null
   } catch (e: any) {
-    showError(commentsState.error.value ?? e.message ?? (selectedEditingCommentId.value ? 'Failed to update comment' : 'Failed to add comment'))
+    showError(commentsState.error.value ?? e.message ?? (selectedEditingCommentId.value ? wb('toast.commentUpdateFailed', isZh.value) : wb('toast.commentAddFailed', isZh.value)))
   }
 }
 
@@ -1545,7 +1551,7 @@ async function onResolveComment(commentId: string) {
     await commentsState.resolveComment(commentId)
     showSuccess(wb('toast.commentResolved', isZh.value))
   } catch (e: any) {
-    showError(commentsState.error.value ?? e.message ?? 'Failed to resolve comment')
+    showError(commentsState.error.value ?? e.message ?? wb('toast.commentResolveFailed', isZh.value))
   }
 }
 
@@ -1574,7 +1580,7 @@ async function onDeleteComment(commentId: string) {
     }
     showSuccess(wb('toast.commentDeleted', isZh.value))
   } catch (e: any) {
-    showError(commentsState.error.value ?? e.message ?? 'Failed to delete comment')
+    showError(commentsState.error.value ?? e.message ?? wb('toast.commentDeleteFailed', isZh.value))
   }
 }
 
@@ -1615,7 +1621,7 @@ async function onLinkPickerConfirm(payload: { recordIds: string[]; summaries: Li
       }
       applyLocalLinkSummaries(recordId, fieldId, result.linkSummaries?.[recordId]?.[fieldId] ?? payload.summaries)
     } catch (e: any) {
-      showError(e.message ?? 'Failed to update linked records')
+      showError(e.message ?? wb('toast.linkedRecordsUpdateFailed', isZh.value))
       return
     }
   } else {
@@ -1648,7 +1654,7 @@ async function onCreateField(input: { sheetId: string; name: string; type: MetaF
     }
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
     await grid.loadViewData(grid.page.value.offset)
-  } catch (e: any) { showError(e.message ?? 'Failed to create field') }
+  } catch (e: any) { showError(e.message ?? wb('toast.fieldCreateFailed', isZh.value)) }
 }
 
 async function onUpdateField(fieldId: string, input: { name?: string; order?: number; type?: string; property?: Record<string, unknown> }) {
@@ -1656,7 +1662,7 @@ async function onUpdateField(fieldId: string, input: { name?: string; order?: nu
     await workbench.client.updateField(fieldId, input)
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
     await grid.loadViewData(grid.page.value.offset)
-  } catch (e: any) { showError(e.message ?? 'Failed to update field') }
+  } catch (e: any) { showError(e.message ?? wb('toast.fieldUpdateFailed', isZh.value)) }
 }
 
 async function onDeleteField(fieldId: string) {
@@ -1664,7 +1670,7 @@ async function onDeleteField(fieldId: string) {
     await workbench.client.deleteField(fieldId)
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
     await grid.loadViewData(grid.page.value.offset)
-  } catch (e: any) { showError(e.message ?? 'Failed to delete field') }
+  } catch (e: any) { showError(e.message ?? wb('toast.fieldDeleteFailed', isZh.value)) }
 }
 
 // --- View management ---
@@ -1690,7 +1696,7 @@ async function onCreateView(input: {
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
     workbench.selectView(res.view.id)
     await grid.loadViewData(grid.page.value.offset)
-  } catch (e: any) { showError(e.message ?? 'Failed to create view') }
+  } catch (e: any) { showError(e.message ?? wb('toast.viewCreateFailed', isZh.value)) }
 }
 
 async function onUpdateView(viewId: string, input: {
@@ -1730,7 +1736,7 @@ async function updateViewInternal(
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
     await grid.loadViewData(grid.page.value.offset)
     if (notify) showSuccess(wb('toast.viewSettingsSaved', isZh.value))
-  } catch (e: any) { showError(e.message ?? 'Failed to update view') }
+  } catch (e: any) { showError(e.message ?? wb('toast.viewUpdateFailed', isZh.value)) }
 }
 
 async function onDeleteView(viewId: string) {
@@ -1738,7 +1744,7 @@ async function onDeleteView(viewId: string) {
     await workbench.client.deleteView(viewId)
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
     if (workbench.activeViewId.value === viewId) workbench.selectView(workbench.views.value[0]?.id ?? '')
-  } catch (e: any) { showError(e.message ?? 'Failed to delete view') }
+  } catch (e: any) { showError(e.message ?? wb('toast.viewDeleteFailed', isZh.value)) }
 }
 
 async function onSheetPermissionsUpdated() {
@@ -1749,7 +1755,7 @@ async function onSheetPermissionsUpdated() {
       await refreshSelectedRecordContext(selectedRecordId.value)
     }
   } catch (e: any) {
-    showError(e.message ?? 'Failed to refresh sheet access')
+    showError(e.message ?? wb('toast.sheetAccessRefreshFailed', isZh.value))
   }
 }
 
@@ -1786,7 +1792,7 @@ async function onViewPermissionUpdated() {
 // --- Sheet management ---
 async function onCreateSheet(name: string) {
   if (!canCreateBasesAndSheets.value) {
-    showError('Sheet creation requires multitable write access.')
+    showError(wb('toast.sheetCreateBlocked', isZh.value))
     return
   }
   if (!confirmDiscardContextChanges()) return
@@ -1797,10 +1803,10 @@ async function onCreateSheet(name: string) {
       sheetId: res.sheet.id,
     })
     if (!ok) {
-      showError(workbench.error.value ?? 'Created sheet but failed to refresh workbench context')
+      showError(workbench.error.value ?? wb('toast.sheetRefreshFailed', isZh.value))
       return
     }
-  } catch (e: any) { showError(e.message ?? 'Failed to create sheet') }
+  } catch (e: any) { showError(e.message ?? wb('toast.sheetCreateFailed', isZh.value)) }
 }
 
 // --- Base management ---
@@ -1828,7 +1834,7 @@ async function onSelectBase(baseId: string) {
   if (!confirmDiscardContextChanges()) return
   const ok = await workbench.switchBase(baseId)
   if (!ok) {
-    showError(workbench.error.value ?? 'Failed to load base')
+    showError(workbench.error.value ?? wb('toast.baseLoadFailed', isZh.value))
     return
   }
   rememberWorkbenchBaseOpen(baseId)
@@ -1941,12 +1947,12 @@ function onCloseComments() {
 
 function confirmDiscardContextChanges() {
   if (!hasUnsavedWorkbenchDrafts.value) return true
-  return window.confirm('Discard unsaved changes before leaving the current sheet or view?')
+  return window.confirm(wb('confirm.discardContextChanges', isZh.value))
 }
 
 function confirmDiscardRecordChanges() {
   if (!hasRecordScopedDrafts.value) return true
-  return window.confirm('Discard unsaved record changes?')
+  return window.confirm(wb('confirm.discardRecordChanges', isZh.value))
 }
 
 function confirmDiscardCommentDraft() {
@@ -1977,10 +1983,10 @@ function discardWorkbenchDraftsForExternalContextChange() {
 
 function confirmPageLeave() {
   if (formSubmitting.value || importSubmitting.value) {
-    return window.confirm('Leave the multitable while the current save or import is still running?')
+    return window.confirm(wb('confirm.pageLeaveBusy', isZh.value))
   }
   if (!hasUnsavedWorkbenchDrafts.value) return true
-  return window.confirm('Discard unsaved multitable changes before leaving this page?')
+  return window.confirm(wb('confirm.pageLeaveDirty', isZh.value))
 }
 
 function normalizeExternalContext(input: { baseId?: string; sheetId?: string; viewId?: string }) {
@@ -2014,7 +2020,7 @@ async function applyExternalContext(input: { baseId: string; sheetId: string; vi
   pendingExternalContextReason.value = null
   pendingExternalContextNoticeKey.value = ''
   const ok = await workbench.syncExternalContext(input)
-  if (!ok) showError(workbench.error.value ?? 'Failed to sync workbench context')
+  if (!ok) showError(workbench.error.value ?? wb('toast.contextSyncFailed', isZh.value))
   return ok
 }
 
@@ -2080,9 +2086,9 @@ function deferExternalContextSync(
   if (pendingExternalContextNoticeKey.value !== noticeKey) {
     pendingExternalContextNoticeKey.value = noticeKey
     if (reason === 'busy') {
-      showError('Host multitable context change is waiting for the current save or import to finish.')
+      showError(wb('toast.externalContextBusy', isZh.value))
     } else {
-      showError('Host multitable context changed while unsaved drafts are open. Resolve or discard changes to continue.')
+      showError(wb('toast.externalContextUnsaved', isZh.value))
     }
   }
   return { status: 'deferred', context: input, reason, requestId }
@@ -2137,14 +2143,14 @@ async function requestExternalContextSync(
 
 async function onCreateBase(name: string) {
   if (!canCreateBasesAndSheets.value) {
-    showError('Base creation requires multitable write access.')
+    showError(wb('toast.baseCreateBlocked', isZh.value))
     return
   }
   try {
     const res = await workbench.client.createBase({ name })
     bases.value.push(res.base)
     await onSelectBase(res.base.id)
-  } catch (e: any) { showError(e.message ?? 'Failed to create base') }
+  } catch (e: any) { showError(e.message ?? wb('toast.baseCreateFailed', isZh.value)) }
 }
 
 async function loadTemplateLibrary() {
@@ -2279,32 +2285,33 @@ async function onBulkImport(payload: ImportBuildResult) {
     }
     if (result.failed === 0 && result.skipped === 0) {
       closeImportModal()
-      showSuccess(`${result.succeeded} record(s) imported`)
+      showSuccess(fmtRecordsImported(result.succeeded, isZh.value))
       return
     }
     if (result.succeeded > 0) {
-      const failedRows = actualFailures.slice(0, 3).map((failure) => `row ${failure.rowIndex + 2}`).join(', ')
+      // rowIndex is 0-based in import failures; +2 converts to 1-based UI row plus the header row.
+      const failedRowNumbers = actualFailures.slice(0, 3).map((failure) => failure.rowIndex + 2)
       if (result.failed > 0) {
-        showError(`${result.failed} record(s) failed to import${failedRows ? ` (${failedRows})` : ''}. ${result.firstError ?? ''}`.trim())
+        showError(fmtRecordsFailedToImport(result.failed, failedRowNumbers, result.firstError ?? '', isZh.value))
       } else if (result.skipped > 0) {
-        showError(`${result.skipped} duplicate row(s) were skipped`)
+        showError(fmtDuplicateRowsSkipped(result.skipped, isZh.value))
       }
-      showSuccess(`${result.succeeded} record(s) imported`)
+      showSuccess(fmtRecordsImported(result.succeeded, isZh.value))
       return
     }
     if (result.skipped > 0) {
-      showError(`${result.skipped} duplicate row(s) were skipped`)
+      showError(fmtDuplicateRowsSkipped(result.skipped, isZh.value))
       return
     }
-    showError(result.firstError ?? 'Import failed')
+    showError(result.firstError ?? wb('toast.importFailed', isZh.value))
   } catch (e: any) {
     if (e?.name === 'AbortError') {
       closeImportModal()
       await grid.loadViewData(grid.page.value.offset)
-      showError('Import cancelled')
+      showError(wb('toast.importCancelled', isZh.value))
       return
     }
-    const fallbackMessage = e?.message ?? 'Import failed'
+    const fallbackMessage = e?.message ?? wb('toast.importFailed', isZh.value)
     const failures = [
       ...payload.failures.map((failure) => ({ ...failure, retryable: false })),
       ...payload.rowIndexes.map((rowIndex, index) => ({
@@ -2402,7 +2409,7 @@ async function onExportXlsx() {
     a.click()
     URL.revokeObjectURL(url)
   } catch (err: any) {
-    showError(err?.message ?? 'Excel export failed')
+    showError(err?.message ?? wb('toast.excelExportFailed', isZh.value))
   }
 }
 
@@ -2514,8 +2521,8 @@ async function onBulkDelete(recordIds: string[]) {
   try {
     await Promise.all(recordIds.map((rid) => grid.deleteRecord(rid)))
     if (selectedRecordId.value && recordIds.includes(selectedRecordId.value)) selectedRecordId.value = null
-    showSuccess(`${recordIds.length} record(s) deleted`)
-  } catch (e: any) { showError(e.message ?? 'Bulk delete failed') }
+    showSuccess(fmtRecordsDeleted(recordIds.length, isZh.value))
+  } catch (e: any) { showError(e.message ?? wb('toast.bulkDeleteFailed', isZh.value)) }
 }
 
 const bulkEditDialog = reactive<{
@@ -2612,7 +2619,7 @@ async function resolveDeepLink(recordId: string, options?: { openComments?: bool
     deepLinkedRecordRowActions.value = ctx.rowActions ?? null
     await selectRecord(recordId, options)
   } catch (e: any) {
-    showError(`Record not found: ${recordId}`)
+    showError(fmtRecordNotFound(recordId, isZh.value))
   }
 }
 
@@ -2990,7 +2997,7 @@ onMounted(async () => {
       await loadStandaloneForm()
     }
   } catch (e: any) {
-    showError(e.message ?? 'Failed to initialize workbench')
+    showError(e.message ?? wb('toast.workbenchInitFailed', isZh.value))
   } finally {
     workbenchReady.value = true
     emit('ready', {
