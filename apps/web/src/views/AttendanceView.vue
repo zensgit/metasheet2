@@ -4457,6 +4457,23 @@
                   {{ rotationAssignmentLoading ? tr('Loading...', '加载中...') : tr('Reload rotations', '重载轮班分配') }}
                 </button>
               </div>
+              <div
+                v-if="scheduleConflictDiagnostics.length"
+                class="attendance__schedule-conflict-diagnostics"
+                data-attendance-schedule-conflict-diagnostics
+                role="alert"
+              >
+                <strong>{{ tr('Schedule conflict checks', '排班冲突检查') }}</strong>
+                <ul>
+                  <li
+                    v-for="diagnostic in scheduleConflictDiagnostics"
+                    :key="`rotation-${diagnostic.key}`"
+                    :data-schedule-conflict-diagnostic="diagnostic.code"
+                  >
+                    {{ formatScheduleConflictDiagnostic(diagnostic) }}
+                  </li>
+                </ul>
+              </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-rotation-user">
                   <span>{{ tr('User ID', '用户 ID') }}</span>
@@ -4700,6 +4717,23 @@
                   {{ assignmentLoading ? tr('Loading...', '加载中...') : tr('Reload assignments', '重载分配') }}
                 </button>
               </div>
+              <div
+                v-if="scheduleConflictDiagnostics.length"
+                class="attendance__schedule-conflict-diagnostics"
+                data-attendance-schedule-conflict-diagnostics
+                role="alert"
+              >
+                <strong>{{ tr('Schedule conflict checks', '排班冲突检查') }}</strong>
+                <ul>
+                  <li
+                    v-for="diagnostic in scheduleConflictDiagnostics"
+                    :key="`assignment-${diagnostic.key}`"
+                    :data-schedule-conflict-diagnostic="diagnostic.code"
+                  >
+                    {{ formatScheduleConflictDiagnostic(diagnostic) }}
+                  </li>
+                </ul>
+              </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-assignment-user-id">
                   <span>{{ tr('User ID', '用户 ID') }}</span>
@@ -4875,6 +4909,11 @@ import {
   buildCalendarChipTooltip,
   calendarChipSourceClassName,
 } from '../services/attendance/calendarChipDisplay'
+import {
+  buildAttendanceScheduleConflictDiagnostics,
+  formatAttendanceScheduleConflictDiagnostic,
+  type AttendanceScheduleConflictDiagnostic,
+} from './attendance/attendanceScheduleConflictDiagnostics'
 import { usePlugins } from '../composables/usePlugins'
 import { apiFetch } from '../utils/api'
 import { readErrorMessage } from '../utils/error'
@@ -7772,6 +7811,33 @@ const rotationAssignmentForm = reactive({
   endDate: '',
   isActive: true,
 })
+
+const scheduleConflictDiagnostics = computed(() => buildAttendanceScheduleConflictDiagnostics({
+  assignments: assignments.value,
+  rotationAssignments: rotationAssignments.value,
+  assignmentDraft: {
+    id: assignmentEditingId.value,
+    userId: assignmentForm.userId,
+    refId: assignmentForm.shiftId,
+    refLabel: shifts.value.find(shift => shift.id === assignmentForm.shiftId)?.name || assignmentForm.shiftId,
+    startDate: assignmentForm.startDate,
+    endDate: assignmentForm.endDate || null,
+    isActive: assignmentForm.isActive,
+  },
+  rotationAssignmentDraft: {
+    id: rotationAssignmentEditingId.value,
+    userId: rotationAssignmentForm.userId,
+    refId: rotationAssignmentForm.rotationRuleId,
+    refLabel: rotationRules.value.find(rule => rule.id === rotationAssignmentForm.rotationRuleId)?.name || rotationAssignmentForm.rotationRuleId,
+    startDate: rotationAssignmentForm.startDate,
+    endDate: rotationAssignmentForm.endDate || null,
+    isActive: rotationAssignmentForm.isActive,
+  },
+}))
+
+function formatScheduleConflictDiagnostic(diagnostic: AttendanceScheduleConflictDiagnostic): string {
+  return formatAttendanceScheduleConflictDiagnostic(diagnostic, tr)
+}
 
 const ruleSetForm = reactive({
   name: '',
@@ -14885,6 +14951,20 @@ const holidaySectionBindings = {
 }
 
 .attendance__calendar-policy-diagnostics ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+.attendance__schedule-conflict-diagnostics {
+  border: 1px solid #f2c94c;
+  background: #fff8e1;
+  color: #7a4f00;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 12px;
+}
+
+.attendance__schedule-conflict-diagnostics ul {
   margin: 6px 0 0;
   padding-left: 18px;
 }
