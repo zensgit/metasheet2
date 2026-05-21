@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildAttendanceRotationAssignmentPreview,
   buildAttendanceRotationSequencePreview,
   parseAttendanceRotationSequenceInput,
 } from '../src/views/attendance/attendanceRotationSequencePreview'
@@ -88,5 +89,100 @@ describe('attendance rotation sequence preview', () => {
         isKnown: false,
       }),
     ])
+  })
+
+  it('projects a selected rotation rule across the assignment date window', () => {
+    const preview = buildAttendanceRotationAssignmentPreview({
+      rotationRuleId: 'rot-1',
+      rotationRules: [
+        {
+          id: 'rot-1',
+          name: 'Two shift',
+          shiftSequence: ['shift-a', 'shift-b'],
+        },
+      ],
+      shifts: [
+        {
+          id: 'shift-a',
+          name: 'Day shift',
+          workStartTime: '09:00',
+          workEndTime: '18:00',
+        },
+        {
+          id: 'shift-b',
+          name: 'Night shift',
+          workStartTime: '22:00',
+          workEndTime: '06:00',
+          isOvernight: true,
+        },
+      ],
+      startDate: '2026-03-01',
+      endDate: '2026-03-04',
+    })
+
+    expect(preview.ruleName).toBe('Two shift')
+    expect(preview.projectedDays).toBe(4)
+    expect(preview.isTruncated).toBe(false)
+    expect(preview.items.map(item => [item.date, item.dayIndex, item.shiftRef, item.label])).toEqual([
+      ['2026-03-01', 1, 'shift-a', 'Day shift (shift-a)'],
+      ['2026-03-02', 2, 'shift-b', 'Night shift (shift-b)'],
+      ['2026-03-03', 3, 'shift-a', 'Day shift (shift-a)'],
+      ['2026-03-04', 4, 'shift-b', 'Night shift (shift-b)'],
+    ])
+    expect(preview.items[1]?.isOvernight).toBe(true)
+  })
+
+  it('caps open-ended rotation assignment previews and reports missing shift refs once', () => {
+    const preview = buildAttendanceRotationAssignmentPreview({
+      rotationRuleId: 'rot-1',
+      rotationRules: [
+        {
+          id: 'rot-1',
+          name: 'Legacy rotation',
+          shiftSequence: ['shift-a', 'missing-shift'],
+        },
+      ],
+      shifts: [
+        {
+          id: 'shift-a',
+          name: 'Day shift',
+          workStartTime: '09:00',
+          workEndTime: '18:00',
+        },
+      ],
+      startDate: '2026-03-01',
+      endDate: null,
+      maxDays: 3,
+    })
+
+    expect(preview.projectedDays).toBe(3)
+    expect(preview.isTruncated).toBe(false)
+    expect(preview.missingRefs).toEqual(['missing-shift'])
+    expect(preview.items.map(item => [item.date, item.shiftRef, item.isKnown])).toEqual([
+      ['2026-03-01', 'shift-a', true],
+      ['2026-03-02', 'missing-shift', false],
+      ['2026-03-03', 'shift-a', true],
+    ])
+  })
+
+  it('marks long closed assignment previews as truncated', () => {
+    const preview = buildAttendanceRotationAssignmentPreview({
+      rotationRuleId: 'rot-1',
+      rotationRules: [
+        {
+          id: 'rot-1',
+          name: 'Long rotation',
+          shiftSequence: ['shift-a'],
+        },
+      ],
+      shifts: [],
+      startDate: '2026-03-01',
+      endDate: '2026-03-10',
+      maxDays: 4,
+    })
+
+    expect(preview.projectedDays).toBe(10)
+    expect(preview.items).toHaveLength(4)
+    expect(preview.isTruncated).toBe(true)
   })
 })

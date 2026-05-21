@@ -452,6 +452,64 @@ describe('AttendanceSchedulingAdminSection', () => {
     expect(container!.querySelector('[data-attendance-rotation-sequence-missing]')?.textContent).toContain('missing-shift')
   })
 
+  it('renders rotation assignment date impact preview from the selected rule', async () => {
+    const scheduling = createSchedulingBindings({
+      shifts: ref<AttendanceShift[]>([
+        {
+          id: 'shift-a',
+          name: 'Day shift',
+          timezone: 'UTC',
+          workStartTime: '09:00',
+          workEndTime: '18:00',
+          isOvernight: false,
+          lateGraceMinutes: 10,
+          earlyGraceMinutes: 10,
+          roundingMinutes: 5,
+          workingDays: [1, 2, 3, 4, 5],
+        },
+        {
+          id: 'shift-b',
+          name: 'Night shift',
+          timezone: 'UTC',
+          workStartTime: '22:00',
+          workEndTime: '06:00',
+          isOvernight: true,
+          lateGraceMinutes: 10,
+          earlyGraceMinutes: 10,
+          roundingMinutes: 5,
+          workingDays: [1, 2, 3, 4, 5],
+        },
+      ]),
+      rotationAssignmentForm: reactive<RotationAssignmentFormState>({
+        userId: 'user-7',
+        rotationRuleId: 'rot-1',
+        startDate: '2026-03-01',
+        endDate: '2026-03-03',
+        isActive: true,
+      }),
+    })
+
+    app = createApp(AttendanceSchedulingAdminSection, {
+      tr,
+      scheduling,
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const preview = container!.querySelector('[data-attendance-rotation-assignment-preview]')
+    expect(preview).toBeTruthy()
+    expect(preview?.textContent).toContain('Assignment impact preview')
+    expect(preview?.textContent).toContain('Two shift')
+    expect(preview?.textContent).toContain('2026-03-01')
+    expect(preview?.textContent).toContain('Day 1')
+    expect(preview?.textContent).toContain('Day shift (shift-a)')
+    expect(preview?.textContent).toContain('2026-03-02')
+    expect(preview?.textContent).toContain('Night shift (shift-b)')
+    expect(preview?.textContent).toContain('22:00 -> 06:00')
+    expect(preview?.textContent).toContain('Overnight')
+    expect(container!.querySelector('[data-attendance-rotation-assignment-missing]')).toBeFalsy()
+  })
+
   it('falls back to plain counts when nothing is being edited', async () => {
     const scheduling = createSchedulingBindings({
       rotationRuleEditingId: ref(null),

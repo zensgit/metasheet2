@@ -4523,6 +4523,47 @@
                   </li>
                 </ul>
               </div>
+              <div
+                v-if="rotationAssignmentPreview.items.length"
+                class="attendance__rotation-assignment-preview"
+                data-attendance-rotation-assignment-preview
+              >
+                <div class="attendance__preview-header">
+                  <strong>{{ tr('Assignment impact preview', '轮班分配影响预览') }}</strong>
+                  <span>
+                    {{ rotationAssignmentPreview.ruleName }}
+                    <template v-if="rotationAssignmentPreview.isTruncated">
+                      · {{ tr(`First ${rotationAssignmentPreview.items.length} of ${rotationAssignmentPreview.projectedDays} days`, `前 ${rotationAssignmentPreview.items.length} / 共 ${rotationAssignmentPreview.projectedDays} 天`) }}
+                    </template>
+                  </span>
+                </div>
+                <ol>
+                  <li
+                    v-for="item in rotationAssignmentPreview.items"
+                    :key="`${item.date}:${item.dayIndex}:${item.shiftRef}`"
+                    :data-rotation-assignment-known="item.isKnown ? 'true' : 'false'"
+                  >
+                    <span>{{ item.date }}</span>
+                    <span>{{ tr(`Day ${item.dayIndex}`, `第 ${item.dayIndex} 天`) }}</span>
+                    <span>{{ item.label }}</span>
+                    <span v-if="item.isKnown">
+                      {{ item.schedule }}<template v-if="item.isOvernight"> · {{ tr('Overnight', '跨夜') }}</template>
+                    </span>
+                    <span v-else>{{ tr('Unresolved shift', '未解析班次') }}</span>
+                  </li>
+                </ol>
+                <small
+                  v-if="rotationAssignmentPreview.missingRefs.length"
+                  class="attendance__field-hint attendance__field-hint--warning"
+                  data-attendance-rotation-assignment-missing
+                >
+                  {{ tr('This assignment references shift IDs that are not in the loaded shift catalog', '该分配引用了当前已加载班次中不存在的 ID') }}:
+                  {{ rotationAssignmentPreview.missingRefs.join(', ') }}
+                </small>
+                <small class="attendance__field-hint">
+                  {{ tr('Preview is advisory and uses the current loaded rule, dates, and shift catalog.', '预览仅作提示，基于当前已加载的规则、日期和班次目录计算。') }}
+                </small>
+              </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-rotation-user">
                   <span>{{ tr('User ID', '用户 ID') }}</span>
@@ -4964,6 +5005,7 @@ import {
   type AttendanceScheduleConflictDiagnostic,
 } from './attendance/attendanceScheduleConflictDiagnostics'
 import {
+  buildAttendanceRotationAssignmentPreview,
   buildAttendanceRotationSequencePreview,
   parseAttendanceRotationSequenceInput,
 } from './attendance/attendanceRotationSequencePreview'
@@ -7878,6 +7920,15 @@ const rotationAssignmentForm = reactive({
   endDate: '',
   isActive: true,
 })
+
+const rotationAssignmentPreview = computed(() => buildAttendanceRotationAssignmentPreview({
+  rotationRuleId: rotationAssignmentForm.rotationRuleId,
+  rotationRules: rotationRules.value,
+  shifts: shifts.value,
+  startDate: rotationAssignmentForm.startDate,
+  endDate: rotationAssignmentForm.endDate || null,
+  maxDays: 14,
+}))
 
 const scheduleConflictDiagnostics = computed(() => buildAttendanceScheduleConflictDiagnostics({
   assignments: assignments.value,
@@ -15053,7 +15104,23 @@ const holidaySectionBindings = {
   font-size: 12px;
 }
 
-.attendance__rotation-sequence-preview ol {
+.attendance__rotation-assignment-preview {
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 12px;
+}
+
+.attendance__preview-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.attendance__rotation-sequence-preview ol,
+.attendance__rotation-assignment-preview ol {
   display: grid;
   gap: 6px;
   margin: 8px 0 0;
@@ -15067,7 +15134,18 @@ const holidaySectionBindings = {
   align-items: center;
 }
 
+.attendance__rotation-assignment-preview li {
+  display: grid;
+  grid-template-columns: minmax(96px, max-content) minmax(56px, max-content) minmax(120px, 1fr) minmax(120px, max-content);
+  gap: 8px;
+  align-items: center;
+}
+
 .attendance__rotation-sequence-preview li[data-rotation-sequence-known="false"] {
+  color: #92400e;
+}
+
+.attendance__rotation-assignment-preview li[data-rotation-assignment-known="false"] {
   color: #92400e;
 }
 
