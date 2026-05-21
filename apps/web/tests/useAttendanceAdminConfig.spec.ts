@@ -61,6 +61,16 @@ describe('useAttendanceAdminConfig', () => {
               },
             ],
           },
+          calendarPolicy: {
+            overrides: [
+              {
+                id: 'policy-1',
+                date: '2026-10-04',
+                filters: { attendanceGroups: ['day-shift'] },
+                effective: { isWorkingDay: true, label: 'Make-up workday', source: 'group' },
+              },
+            ],
+          },
           holidaySync: {
             baseUrl: 'https://example.com',
             years: [2026],
@@ -82,6 +92,10 @@ describe('useAttendanceAdminConfig', () => {
     expect(config.settingsForm.autoAbsenceRunAt).toBe('01:30')
     expect(config.settingsForm.holidayOverrides).toHaveLength(1)
     expect(config.settingsForm.holidayOverrides[0]?.attendanceGroups).toBe('ops')
+    expect(config.settingsForm.calendarPolicyOverrides).toHaveLength(1)
+    expect(config.settingsForm.calendarPolicyOverrides[0]?.source).toBe('group')
+    expect(config.settingsForm.calendarPolicyOverrides[0]?.attendanceGroups).toBe('day-shift')
+    expect(config.settingsForm.calendarPolicyOverrides[0]?.label).toBe('Make-up workday')
     expect(config.settingsForm.holidaySyncBaseUrl).toBe('https://example.com')
     expect(config.settingsForm.ipAllowlist).toBe('10.0.0.1')
     expect(config.holidaySyncLastRun.value?.totalApplied).toBe(3)
@@ -121,6 +135,27 @@ describe('useAttendanceAdminConfig', () => {
       overtimeAdds: true,
       overtimeSource: 'approval',
     })
+    config.settingsForm.calendarPolicyOverrides.push({
+      id: 'policy-1',
+      name: '国庆',
+      match: 'contains',
+      date: '',
+      from: '2026-10-01',
+      to: '2026-10-07',
+      dayIndexStart: 2,
+      dayIndexEnd: null,
+      dayIndexList: '2 3',
+      source: 'group',
+      isWorkingDay: false,
+      label: 'Group rest',
+      attendanceGroups: 'day-shift',
+      roles: '',
+      roleTags: '',
+      userIds: '',
+      userNames: '',
+      excludeUserIds: 'user-9',
+      excludeUserNames: '',
+    })
 
     await config.saveSettings()
 
@@ -134,6 +169,23 @@ describe('useAttendanceAdminConfig', () => {
       attendanceGroups: ['ops'],
       roles: ['manager'],
       dayIndexList: [1, 2],
+    })
+    expect(payload.calendarPolicy.overrides[0]).toMatchObject({
+      id: 'policy-1',
+      name: '国庆',
+      from: '2026-10-01',
+      to: '2026-10-07',
+      dayIndexStart: 2,
+      dayIndexList: [2, 3],
+      filters: {
+        attendanceGroups: ['day-shift'],
+        excludeUserIds: ['user-9'],
+      },
+      effective: {
+        isWorkingDay: false,
+        label: 'Group rest',
+        source: 'group',
+      },
     })
     expect(payload.holidaySync.years).toEqual([2026, 2027])
     expect(payload.ipAllowlist).toEqual(['10.0.0.1', '10.0.0.2'])
