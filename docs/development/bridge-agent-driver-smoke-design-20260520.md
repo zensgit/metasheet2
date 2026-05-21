@@ -97,6 +97,11 @@ driver can negotiate pre-login, authenticate, and execute a read.
   `Password=`, `User ID=`, `Server=`, `Data Source=`, `Initial Catalog=`,
   `Bearer ...`, and JWT-shape substring before being written to the
   evidence files.
+- SQL login-failure messages are handled as a separate error shape:
+  English `Login failed for user '...'`, Chinese `用户 '...' 登录失败`,
+  and quoted occurrences of the supplied `-Username` are masked to
+  `<redacted-login>`. This keeps failed BA-M0.5 evidence shareable even
+  when a provider localizes its authentication error text.
 - The evidence files capture only structural facts: provider name,
   driver assembly version, OS / PS / CLR version, elapsed milliseconds,
   PASS / FAIL per check, and a defensively-redacted `@@VERSION` echo.
@@ -125,7 +130,9 @@ Inherited verbatim from the Bridge Agent plan's `## Security Model`:
   harness writes,
 - evidence redaction is layered: in-process credential acquisition,
   in-memory-only connection string, regex redaction of error
-  messages, harness output that captures only structural facts.
+  messages, login-identifier redaction for localized SQL Server
+  authentication failures, and harness output that captures only
+  structural facts.
 
 ## What this PR proves
 

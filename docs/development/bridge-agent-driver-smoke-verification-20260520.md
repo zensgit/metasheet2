@@ -193,3 +193,26 @@ grep -n 'SQL Server Native Client 11.0|SQLNCLI11|SQLOLEDB' \
 
 The PR (#1721) auto-updates with the new commit on push; no second PR
 opened.
+
+## Follow-up after #1723 entity-machine smoke
+
+#1723 surfaced one more evidence-hygiene gap during real operator-side
+failure handling: localized SQL Server login-failure messages can echo
+the rejected login identifier without using a `User ID=...` connection
+string shape. Operator evidence was manually scrubbed before handoff, but
+the harness should not require that extra manual step.
+
+Follow-up fix:
+
+- `ConvertTo-RedactedText` now masks English
+  `Login failed for user '...'` messages to
+  `Login failed for user '<redacted-login>'`.
+- It also masks Chinese localized forms such as
+  `用户 '...' 登录失败` / `登入名 '...' 登入失敗`.
+- When `-Username` is provided, quoted exact occurrences of that login
+  are masked case-insensitively as `<redacted-login>`.
+
+This is intentionally limited to error/evidence redaction. The smoke
+query remains exactly `SELECT @@VERSION`; no provider selection,
+connection, SQL, business-table sampling, or Bridge Agent runtime logic
+changes.
