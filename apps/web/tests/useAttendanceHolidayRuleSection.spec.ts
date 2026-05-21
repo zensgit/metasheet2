@@ -312,12 +312,14 @@ describe('AttendanceHolidayRuleSection', () => {
     expect(config.addCalendarPolicyOverride).toHaveBeenCalledTimes(1)
     expect(container!.textContent).toContain('有效日历覆盖规则')
     expect(container!.textContent).toContain('自动缺勤任务运行时可能生成缺勤记录')
-    const sourceSelect = Array.from(container!.querySelectorAll('select')).find((select) => (
-      Array.from(select.options).some((option) => option.value === 'role' && option.disabled)
-    ))
-    expect(sourceSelect).toBeTruthy()
+    expect(container!.textContent).toContain('角色匹配使用用户平台角色')
+    const roleOption = Array.from(container!.querySelectorAll('option')).find((option) => option.value === 'role')
+    expect(roleOption).toBeTruthy()
+    expect(roleOption?.disabled).toBe(false)
     expect(container!.querySelector('input[placeholder="规则标签"]')).toBeTruthy()
     expect(container!.querySelector('.attendance__override-field input[placeholder="单休办公,白班"]')).toBeTruthy()
+    const roleInputs = container!.querySelectorAll('.attendance__override-field input[placeholder="attendance_admin,班组长"]')
+    expect(roleInputs.length).toBeGreaterThanOrEqual(2)
   })
 
   it('shows the auto-sync timezone as a select with UTC offset labels', async () => {

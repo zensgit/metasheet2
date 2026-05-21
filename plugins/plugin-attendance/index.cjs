@@ -8331,6 +8331,46 @@ function matchAnyTag(values, list) {
   return values.some((value) => normalizedList.includes(normalizeMatchKey(value)))
 }
 
+function pushUniqueMatchValue(target, seen, value) {
+  const text = normalizeMatchValue(value)
+  if (!text) return
+  const key = normalizeMatchKey(text)
+  if (!key || seen.has(key)) return
+  seen.add(key)
+  target.push(text)
+}
+
+function appendRoleContextValue(context, value) {
+  if (!context || value === null || value === undefined) return
+  const values = Array.isArray(value) ? value : ensureStringArray(value)
+  for (const item of values) {
+    pushUniqueMatchValue(context.roles, context.roleSeen, item)
+    // There is no dedicated role-tag table in the current RBAC schema. For
+    // resolver-mode matching, expose assigned role ids/names as tag-like
+    // aliases too; this mirrors the import/profile path where "职位" can feed
+    // both role and roleTags.
+    pushUniqueMatchValue(context.roleTags, context.roleTagSeen, item)
+  }
+}
+
+function createAttendanceRoleContextAccumulator() {
+  return {
+    roles: [],
+    roleTags: [],
+    roleSeen: new Set(),
+    roleTagSeen: new Set(),
+  }
+}
+
+function finalizeAttendanceRoleContext(accumulator) {
+  if (!accumulator) return { role: undefined, roles: [], roleTags: [] }
+  return {
+    role: accumulator.roles[0],
+    roles: accumulator.roles.slice(),
+    roleTags: accumulator.roleTags.slice(),
+  }
+}
+
 // Shared day-index predicate (RFC §2.3): both holidayPolicy and calendarPolicy
 // MUST use this; no duplicate implementations allowed.
 function matchDayIndexFilter(filter, dayIndex) {
@@ -8380,8 +8420,12 @@ function matchScopeFilters(filters, context) {
       return false
     }
   }
-  if (Array.isArray(filters.roles) && filters.roles.length && !matchListValue(ctx.role, filters.roles)) {
-    return false
+  if (Array.isArray(filters.roles) && filters.roles.length) {
+    const roleValues = [
+      ctx.role,
+      ...(Array.isArray(ctx.roles) ? ctx.roles : []),
+    ].filter((value) => value !== undefined && value !== null && value !== '')
+    if (!roleValues.some((value) => matchListValue(value, filters.roles))) return false
   }
   if (Array.isArray(filters.roleTags) && filters.roleTags.length && !matchAnyTag(ctx.roleTags, filters.roleTags)) {
     return false
@@ -10416,14 +10460,22 @@ async function loadApprovedRequestsForOverlay(db, orgId, userId, fromDate, toDat
 }
 
 async function loadAttendanceScopeContextForUser(db, orgId, userId) {
-  if (!userId) return { userId: null, userName: undefined, attendanceGroups: [] }
+  if (!userId) return { userId: null, userName: undefined, attendanceGroups: [], roles: [], roleTags: [] }
   const targetOrg = orgId || DEFAULT_ORG_ID
   let userName
+  const roleAccumulator = createAttendanceRoleContextAccumulator()
   try {
-    const rows = await db.query('SELECT name FROM users WHERE id = $1', [userId])
+    const rows = await db.query('SELECT name, role FROM users WHERE id = $1', [userId])
     if (rows.length && typeof rows[0].name === 'string') userName = rows[0].name
+    if (rows.length) appendRoleContextValue(roleAccumulator, rows[0].role)
   } catch (error) {
     if (!isDatabaseSchemaError(error)) throw error
+    try {
+      const rows = await db.query('SELECT name FROM users WHERE id = $1', [userId])
+      if (rows.length && typeof rows[0].name === 'string') userName = rows[0].name
+    } catch (fallbackError) {
+      if (!isDatabaseSchemaError(fallbackError)) throw fallbackError
+    }
   }
   const attendanceGroups = []
   try {
@@ -10446,37 +10498,72 @@ async function loadAttendanceScopeContextForUser(db, orgId, userId) {
   } catch (error) {
     if (!isDatabaseSchemaError(error)) throw error
   }
-  // role/roleTags: NOT loaded in v1 — Step 3 Known Limitation (see dev MD).
-  // calendarPolicy.overrides[] with effective.source='role' remain valid
-  // config but the resolver cannot match them without DB-backed role context.
-  return { userId, userName, attendanceGroups }
+  try {
+    const rows = await db.query(
+      `SELECT ur.role_id, r.name AS role_name
+       FROM user_roles ur
+       LEFT JOIN roles r ON r.id = ur.role_id
+       WHERE ur.user_id = $1`,
+      [userId]
+    )
+    for (const row of rows) {
+      appendRoleContextValue(roleAccumulator, row.role_id)
+      appendRoleContextValue(roleAccumulator, row.role_name)
+    }
+  } catch (error) {
+    if (!isDatabaseSchemaError(error)) throw error
+  }
+  const roleContext = finalizeAttendanceRoleContext(roleAccumulator)
+  return {
+    userId,
+    userName,
+    attendanceGroups,
+    role: roleContext.role,
+    roles: roleContext.roles,
+    roleTags: roleContext.roleTags,
+  }
 }
 
 // Step 5: batch range version mirroring loadShiftAssignmentMapForUsersRange.
 // Used by buildWorkContextPrefetch to populate scopeContextByUser so the
 // calc-chain prefetch path can resolve calendarPolicy.overrides without a
-// per-user round-trip. Same role/roleTags limitation as the single-user
-// variant — D6 pinned.
+// per-user round-trip.
 async function loadAttendanceScopeContextMapForUsers(db, orgId, userIds) {
   const list = Array.isArray(userIds) ? Array.from(new Set(userIds.filter(Boolean))) : []
   const result = new Map()
   if (list.length === 0) return result
   const targetOrg = orgId || DEFAULT_ORG_ID
+  const rolesByUser = new Map()
   for (const id of list) {
-    result.set(id, { userId: id, userName: undefined, attendanceGroups: [] })
+    result.set(id, { userId: id, userName: undefined, attendanceGroups: [], roles: [], roleTags: [] })
+    rolesByUser.set(id, createAttendanceRoleContextAccumulator())
   }
   try {
     const userRows = await db.query(
-      'SELECT id, name FROM users WHERE id = ANY($1::text[])',
+      'SELECT id, name, role FROM users WHERE id = ANY($1::text[])',
       [list],
     )
     for (const row of userRows) {
       const id = row?.id
       if (!id || !result.has(id)) continue
       if (typeof row.name === 'string') result.get(id).userName = row.name
+      appendRoleContextValue(rolesByUser.get(id), row.role)
     }
   } catch (error) {
     if (!isDatabaseSchemaError(error)) throw error
+    try {
+      const userRows = await db.query(
+        'SELECT id, name FROM users WHERE id = ANY($1::text[])',
+        [list],
+      )
+      for (const row of userRows) {
+        const id = row?.id
+        if (!id || !result.has(id)) continue
+        if (typeof row.name === 'string') result.get(id).userName = row.name
+      }
+    } catch (fallbackError) {
+      if (!isDatabaseSchemaError(fallbackError)) throw fallbackError
+    }
   }
   try {
     const memberRows = await db.query(
@@ -10505,6 +10592,32 @@ async function loadAttendanceScopeContextMapForUsers(db, orgId, userIds) {
     }
   } catch (error) {
     if (!isDatabaseSchemaError(error)) throw error
+  }
+  try {
+    const roleRows = await db.query(
+      `SELECT ur.user_id, ur.role_id, r.name AS role_name
+       FROM user_roles ur
+       LEFT JOIN roles r ON r.id = ur.role_id
+       WHERE ur.user_id = ANY($1::text[])`,
+      [list],
+    )
+    for (const row of roleRows) {
+      const id = row?.user_id
+      if (!id || !rolesByUser.has(id)) continue
+      const accumulator = rolesByUser.get(id)
+      appendRoleContextValue(accumulator, row.role_id)
+      appendRoleContextValue(accumulator, row.role_name)
+    }
+  } catch (error) {
+    if (!isDatabaseSchemaError(error)) throw error
+  }
+  for (const [id, accumulator] of rolesByUser.entries()) {
+    const target = result.get(id)
+    if (!target) continue
+    const roleContext = finalizeAttendanceRoleContext(accumulator)
+    target.role = roleContext.role
+    target.roles = roleContext.roles
+    target.roleTags = roleContext.roleTags
   }
   return result
 }
@@ -12613,6 +12726,9 @@ module.exports = {
     buildAttendanceReportFieldConfig,
     buildAttendanceReportFieldConfigHeaders,
     buildAttendanceReportFieldConfigFingerprint,
+    matchScopeFilters,
+    loadAttendanceScopeContextForUser,
+    loadAttendanceScopeContextMapForUsers,
   },
 
   async activate(context) {

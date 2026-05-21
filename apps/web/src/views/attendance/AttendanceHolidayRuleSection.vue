@@ -117,7 +117,7 @@
             {{ tr('These overrides drive the effective-calendar API and attendance calculation chain. Rest-to-work changes can create auto-absence rows after the auto-absence job runs.', '这些规则会影响有效日历 API 与考勤计算链。休息日改为工作日后，自动缺勤任务运行时可能生成缺勤记录。') }}
           </p>
           <p class="attendance__field-hint attendance__field-hint--warn">
-            {{ tr('Role and role-tag matching is reserved until role context is loaded by the resolver; keep new rules scoped to org, group, or user.', '角色与角色标签匹配需等待解析器加载角色上下文；新增规则请先使用组织、考勤组或用户范围。') }}
+            {{ tr('Role matching uses the platform user role plus assigned RBAC role IDs/names; role tags use the same resolver aliases until a dedicated role-tag catalog exists.', '角色匹配使用用户平台角色及已分配 RBAC 角色 ID/名称；在独立角色标签目录落地前，角色标签使用同一解析别名。') }}
           </p>
           <AttendanceCalendarPolicyPreviewPanel :tr="tr" />
           <div v-if="calendarPolicyOverridesExpanded">
@@ -157,7 +157,7 @@
                           <option value="org">{{ tr('Organization', '组织') }}</option>
                           <option value="group">{{ tr('Attendance group', '考勤组') }}</option>
                           <option value="user">{{ tr('User', '用户') }}</option>
-                          <option value="role" disabled>{{ tr('Role (reserved)', '角色（预留）') }}</option>
+                          <option value="role">{{ tr('Role', '角色') }}</option>
                         </select>
                       </td>
                       <td>
@@ -177,6 +177,8 @@
                             <input v-model="override.attendanceGroups" type="text" placeholder="单休办公,白班" />
                             <small v-if="attendanceGroupOptions.length" class="attendance__field-hint">{{ tr('Known groups', '已知分组') }}: {{ attendanceGroupOptions.join(', ') }}</small>
                           </label>
+                          <label class="attendance__override-field"><span>{{ tr('Roles', '角色') }}</span><input v-model="override.roles" type="text" placeholder="attendance_admin,班组长" /></label>
+                          <label class="attendance__override-field"><span>{{ tr('Role tags', '角色标签') }}</span><input v-model="override.roleTags" type="text" placeholder="attendance_admin,班组长" /></label>
                           <label class="attendance__override-field"><span>{{ tr('User IDs', '用户ID') }}</span><input v-model="override.userIds" type="text" placeholder="uuid1,uuid2" /></label>
                           <label class="attendance__override-field"><span>{{ tr('User names', '用户名') }}</span><input v-model="override.userNames" type="text" placeholder="张三,李四" /></label>
                           <label class="attendance__override-field"><span>{{ tr('Exclude user IDs', '排除用户ID') }}</span><input v-model="override.excludeUserIds" type="text" placeholder="uuid3" /></label>

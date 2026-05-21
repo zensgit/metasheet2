@@ -145,12 +145,12 @@ describe('useAttendanceAdminConfig', () => {
       dayIndexStart: 2,
       dayIndexEnd: null,
       dayIndexList: '2 3',
-      source: 'group',
+      source: 'role',
       isWorkingDay: false,
       label: 'Group rest',
       attendanceGroups: 'day-shift',
-      roles: '',
-      roleTags: '',
+      roles: 'attendance_admin',
+      roleTags: 'Night Shift Lead',
       userIds: '',
       userNames: '',
       excludeUserIds: 'user-9',
@@ -179,12 +179,14 @@ describe('useAttendanceAdminConfig', () => {
       dayIndexList: [2, 3],
       filters: {
         attendanceGroups: ['day-shift'],
+        roles: ['attendance_admin'],
+        roleTags: ['Night Shift Lead'],
         excludeUserIds: ['user-9'],
       },
       effective: {
         isWorkingDay: false,
         label: 'Group rest',
-        source: 'group',
+        source: 'role',
       },
     })
     expect(payload.holidaySync.years).toEqual([2026, 2027])
