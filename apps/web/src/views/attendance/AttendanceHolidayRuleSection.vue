@@ -120,6 +120,23 @@
             {{ tr('Role matching uses the platform user role plus assigned RBAC role IDs/names; role tags use the same resolver aliases until a dedicated role-tag catalog exists.', '角色匹配使用用户平台角色及已分配 RBAC 角色 ID/名称；在独立角色标签目录落地前，角色标签使用同一解析别名。') }}
           </p>
           <AttendanceCalendarPolicyPreviewPanel :tr="tr" />
+          <div
+            v-if="calendarPolicyOverrideDiagnostics.length"
+            class="attendance__calendar-policy-diagnostics"
+            data-attendance-calendar-policy-diagnostics
+            role="alert"
+          >
+            <strong>{{ tr('Calendar rule checks', '日历规则检查') }}</strong>
+            <ul>
+              <li
+                v-for="diagnostic in calendarPolicyOverrideDiagnostics"
+                :key="diagnostic.key"
+                :data-calendar-policy-diagnostic="diagnostic.code"
+              >
+                {{ calendarPolicyDiagnosticMessage(diagnostic) }}
+              </li>
+            </ul>
+          </div>
           <div v-if="calendarPolicyOverridesExpanded">
             <div v-if="settingsForm.calendarPolicyOverrides.length === 0" class="attendance__empty">{{ tr('No effective calendar overrides configured.', '暂无有效日历覆盖规则。') }}</div>
             <div v-else class="attendance__table-wrapper">
@@ -284,7 +301,11 @@
 <script setup lang="ts">
 import { computed, ref, watch, type Ref } from 'vue'
 import AttendanceCalendarPolicyPreviewPanel from './AttendanceCalendarPolicyPreviewPanel.vue'
-import type { CalendarPolicyOverrideFormState } from './attendanceCalendarPolicyOverrides'
+import {
+  buildCalendarPolicyOverrideDiagnostics,
+  type CalendarPolicyOverrideDiagnostic,
+  type CalendarPolicyOverrideFormState,
+} from './attendanceCalendarPolicyOverrides'
 import { buildTimezoneOptionGroups } from './attendanceTimezones'
 
 type Translate = (en: string, zh: string) => string
@@ -390,6 +411,37 @@ const calendarPolicyOverrideSummary = computed(() => {
   return count === 0 ? tr('No effective calendar overrides configured', '暂无有效日历覆盖规则') : tr(`${count} effective override(s) configured`, `已配置 ${count} 条有效日历规则`)
 })
 
+const calendarPolicyOverrideDiagnostics = computed(() => buildCalendarPolicyOverrideDiagnostics(settingsForm.calendarPolicyOverrides))
+
+function calendarPolicySourceRequirement(source: CalendarPolicyOverrideFormState['source']): string {
+  if (source === 'group') return tr('attendance groups', '考勤组')
+  if (source === 'role') return tr('roles or role tags', '角色或角色标签')
+  if (source === 'user') return tr('user IDs or user names', '用户ID或用户名')
+  return tr('a date, range, holiday name, or day index', '日期、范围、节假日名称或序号')
+}
+
+function calendarPolicyDiagnosticMessage(diagnostic: CalendarPolicyOverrideDiagnostic): string {
+  const row = diagnostic.primaryIndex + 1
+  if (diagnostic.code === 'missing_scope') {
+    const requirement = calendarPolicySourceRequirement(diagnostic.source)
+    return tr(
+      `Rule #${row} will not be saved because its source requires ${requirement}.`,
+      `第 ${row} 条规则不会被保存：该范围需要填写${requirement}。`,
+    )
+  }
+  if (diagnostic.code === 'invalid_date_range') {
+    return tr(
+      `Rule #${row} has a start date after the end date.`,
+      `第 ${row} 条规则的开始日期晚于结束日期。`,
+    )
+  }
+  const winner = (diagnostic.secondaryIndex ?? diagnostic.primaryIndex) + 1
+  return tr(
+    `Rule #${row} overlaps rule #${winner} with the same source and scope; the later rule wins on overlapping days.`,
+    `第 ${row} 条规则与第 ${winner} 条规则的范围和来源重叠；重叠日期以后面的规则为准。`,
+  )
+}
+
 const toggleHolidayOverrides = () => {
   holidayOverridesExpanded.value = !holidayOverridesExpanded.value
 }
@@ -427,6 +479,8 @@ const syncNextYear = () => syncHolidaysForYears([currentYear + 1])
 .attendance__field--checkbox { justify-content: flex-end; }
 .attendance__field-hint { color: #777; font-size: 11px; }
 .attendance__field-hint--warn { color: #9a6700; }
+.attendance__calendar-policy-diagnostics { border: 1px solid #f2c94c; background: #fff8e1; color: #7a4f00; border-radius: 6px; padding: 10px 12px; font-size: 12px; }
+.attendance__calendar-policy-diagnostics ul { margin: 6px 0 0; padding-left: 18px; }
 .attendance__accordion { flex: 1; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 10px; border: 1px solid #d0d0d0; background: #fff; cursor: pointer; text-align: left; }
 .attendance__accordion-copy small, .attendance__accordion-indicator { color: #666; font-size: 12px; }
 .attendance__btn { padding: 8px 14px; border-radius: 6px; border: 1px solid #d0d0d0; background: #fff; cursor: pointer; }
