@@ -183,6 +183,23 @@
       {{ tr('Rotation assignments', '轮班分配') }}: {{ rotationAssignments.length }}
       <span v-if="rotationAssignmentEditingId"> · {{ rotationAssignmentEditingLabel }}</span>
     </div>
+    <div
+      v-if="scheduleConflictDiagnostics.length"
+      class="attendance__schedule-conflict-diagnostics"
+      data-attendance-schedule-conflict-diagnostics
+      role="alert"
+    >
+      <strong>{{ tr('Schedule conflict checks', '排班冲突检查') }}</strong>
+      <ul>
+        <li
+          v-for="diagnostic in scheduleConflictDiagnostics"
+          :key="diagnostic.key"
+          :data-schedule-conflict-diagnostic="diagnostic.code"
+        >
+          {{ formatScheduleConflictDiagnostic(diagnostic) }}
+        </li>
+      </ul>
+    </div>
     <div class="attendance__admin-grid">
       <AttendanceUserPickerField
         v-model="rotationAssignmentForm.userId"
@@ -542,6 +559,11 @@ import {
   buildTimezoneOptionGroups,
   formatTimezoneOptionLabel,
 } from './attendanceTimezones'
+import {
+  buildAttendanceScheduleConflictDiagnostics,
+  formatAttendanceScheduleConflictDiagnostic,
+  type AttendanceScheduleConflictDiagnostic,
+} from './attendanceScheduleConflictDiagnostics'
 
 type Translate = (en: string, zh: string) => string
 type MaybePromise<T> = T | Promise<T>
@@ -692,6 +714,32 @@ const editAssignment = (item: AttendanceAssignmentItem) => props.scheduling.edit
 const loadAssignments = () => props.scheduling.loadAssignments()
 const saveAssignment = () => props.scheduling.saveAssignment()
 const deleteAssignment = (id: string) => props.scheduling.deleteAssignment(id)
+const scheduleConflictDiagnostics = computed(() => buildAttendanceScheduleConflictDiagnostics({
+  assignments: assignments.value,
+  rotationAssignments: rotationAssignments.value,
+  assignmentDraft: {
+    id: assignmentEditingId.value,
+    userId: assignmentForm.userId,
+    refId: assignmentForm.shiftId,
+    refLabel: shifts.value.find(shift => shift.id === assignmentForm.shiftId)?.name || assignmentForm.shiftId,
+    startDate: assignmentForm.startDate,
+    endDate: assignmentForm.endDate || null,
+    isActive: assignmentForm.isActive,
+  },
+  rotationAssignmentDraft: {
+    id: rotationAssignmentEditingId.value,
+    userId: rotationAssignmentForm.userId,
+    refId: rotationAssignmentForm.rotationRuleId,
+    refLabel: rotationRules.value.find(rule => rule.id === rotationAssignmentForm.rotationRuleId)?.name || rotationAssignmentForm.rotationRuleId,
+    startDate: rotationAssignmentForm.startDate,
+    endDate: rotationAssignmentForm.endDate || null,
+    isActive: rotationAssignmentForm.isActive,
+  },
+}))
+
+function formatScheduleConflictDiagnostic(diagnostic: AttendanceScheduleConflictDiagnostic): string {
+  return formatAttendanceScheduleConflictDiagnostic(diagnostic, tr)
+}
 
 function parseShiftSequence(value: string): string[] {
   return value
@@ -790,6 +838,20 @@ const assignmentEditingLabel = computed(() => {
 .attendance__field-hint {
   color: #666;
   font-size: 12px;
+}
+
+.attendance__schedule-conflict-diagnostics {
+  border: 1px solid #f2c94c;
+  background: #fff8e1;
+  color: #7a4f00;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 12px;
+}
+
+.attendance__schedule-conflict-diagnostics ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
 }
 
 .attendance__field--checkbox .attendance__field-hint {

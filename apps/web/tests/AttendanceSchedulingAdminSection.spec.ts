@@ -296,6 +296,107 @@ describe('AttendanceSchedulingAdminSection', () => {
     expect(container!.textContent).toContain('Editing shift assignment: user-9 → shift-a')
   })
 
+  it('shows schedule conflict diagnostics for overlapping assignments', async () => {
+    const scheduling = createSchedulingBindings({
+      rotationAssignments: ref<AttendanceRotationAssignmentItem[]>([
+        {
+          assignment: {
+            id: 'rotation-assignment-1',
+            userId: 'user-9',
+            rotationRuleId: 'rot-1',
+            startDate: '2026-03-05',
+            endDate: null,
+            isActive: true,
+          },
+          rotation: {
+            id: 'rot-1',
+            name: 'Two shift',
+            timezone: 'UTC',
+            shiftSequence: ['shift-a', 'shift-b'],
+            isActive: true,
+          },
+        },
+      ]),
+      assignments: ref<AttendanceAssignmentItem[]>([
+        {
+          assignment: {
+            id: 'assignment-1',
+            userId: 'user-9',
+            shiftId: 'shift-a',
+            startDate: '2026-03-01',
+            endDate: null,
+            isActive: true,
+          },
+          shift: {
+            id: 'shift-a',
+            name: 'Day shift',
+            timezone: 'UTC',
+            workStartTime: '09:00',
+            workEndTime: '18:00',
+            isOvernight: false,
+            lateGraceMinutes: 10,
+            earlyGraceMinutes: 10,
+            roundingMinutes: 5,
+            workingDays: [1, 2, 3, 4, 5],
+          },
+        },
+        {
+          assignment: {
+            id: 'assignment-2',
+            userId: 'user-9',
+            shiftId: 'shift-b',
+            startDate: '2026-03-10',
+            endDate: null,
+            isActive: true,
+          },
+          shift: {
+            id: 'shift-b',
+            name: 'Night shift',
+            timezone: 'UTC',
+            workStartTime: '22:00',
+            workEndTime: '06:00',
+            isOvernight: true,
+            lateGraceMinutes: 10,
+            earlyGraceMinutes: 10,
+            roundingMinutes: 5,
+            workingDays: [1, 2, 3, 4, 5],
+          },
+        },
+      ]),
+      assignmentEditingId: ref(null),
+      assignmentForm: reactive<AssignmentFormState>({
+        userId: '',
+        shiftId: '',
+        startDate: '2026-03-01',
+        endDate: '',
+        isActive: true,
+      }),
+      rotationAssignmentEditingId: ref(null),
+      rotationAssignmentForm: reactive<RotationAssignmentFormState>({
+        userId: '',
+        rotationRuleId: '',
+        startDate: '2026-03-01',
+        endDate: '',
+        isActive: true,
+      }),
+    })
+
+    app = createApp(AttendanceSchedulingAdminSection, {
+      tr,
+      scheduling,
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const diagnostics = container!.querySelector('[data-attendance-schedule-conflict-diagnostics]')
+    expect(diagnostics).toBeTruthy()
+    expect(diagnostics?.textContent).toContain('Schedule conflict checks')
+    expect(diagnostics?.textContent).toContain('User user-9')
+    expect(diagnostics?.textContent).toContain('rotation wins')
+    expect(container!.querySelector('[data-schedule-conflict-diagnostic="shift_assignment_overlap"]')).toBeTruthy()
+    expect(container!.querySelector('[data-schedule-conflict-diagnostic="rotation_overrides_shift"]')).toBeTruthy()
+  })
+
   it('falls back to plain counts when nothing is being edited', async () => {
     const scheduling = createSchedulingBindings({
       rotationRuleEditingId: ref(null),
