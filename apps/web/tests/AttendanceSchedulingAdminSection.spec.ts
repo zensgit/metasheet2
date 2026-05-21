@@ -532,6 +532,55 @@ describe('AttendanceSchedulingAdminSection', () => {
     expect(container!.querySelector('[data-attendance-rotation-assignment-missing]')).toBeFalsy()
   })
 
+  it('renders shift assignment date impact preview from the selected shift', async () => {
+    const scheduling = createSchedulingBindings({
+      assignmentForm: reactive<AssignmentFormState>({
+        userId: 'user-9',
+        shiftId: 'shift-a',
+        startDate: '2026-03-01',
+        endDate: '2026-03-03',
+        isActive: true,
+      }),
+    })
+
+    app = createApp(AttendanceSchedulingAdminSection, {
+      tr,
+      scheduling,
+      shiftAssignmentCalendarChips: [
+        {
+          id: 'calendar-2',
+          date: '2026-03-02',
+          name: 'Org rest override',
+          isWorkingDay: false,
+          effective: { isWorkingDay: false, source: 'org', label: 'Org rest override', policyId: 'policy-2' },
+          base: { isWorkingDay: true, source: 'shift' },
+          layers: [
+            { kind: 'base_rule', source: 'shift', isWorkingDay: true, label: 'Shift workday' },
+            { kind: 'calendar_policy', source: 'org', isWorkingDay: false, label: 'Org rest override', refId: 'policy-2' },
+          ],
+          overlays: [],
+        } satisfies CalendarEffectiveChip,
+      ],
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const preview = container!.querySelector('[data-attendance-shift-assignment-preview]')
+    expect(preview).toBeTruthy()
+    expect(preview?.textContent).toContain('Assignment impact preview')
+    expect(preview?.textContent).toContain('Day shift')
+    expect(preview?.textContent).toContain('2026-03-01')
+    expect(preview?.textContent).toContain('Day 1')
+    expect(preview?.textContent).toContain('09:00 -> 18:00')
+    expect(preview?.textContent).toContain('2026-03-02')
+    expect(preview?.textContent).toContain('Org rest override')
+    const calendarChip = preview!.querySelector('[data-calendar-source="org"]')
+    expect(calendarChip).toBeTruthy()
+    expect(calendarChip?.getAttribute('data-calendar-working-day')).toBe('false')
+    expect(calendarChip?.getAttribute('data-calendar-override')).toBe('true')
+    expect(container!.querySelector('[data-attendance-shift-assignment-missing]')).toBeFalsy()
+  })
+
   it('falls back to plain counts when nothing is being edited', async () => {
     const scheduling = createSchedulingBindings({
       rotationRuleEditingId: ref(null),
