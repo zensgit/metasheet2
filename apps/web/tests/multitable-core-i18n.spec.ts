@@ -14,6 +14,8 @@ import {
 
 describe('meta-core-labels static keys', () => {
   it('returns zh for isZh=true and en for isZh=false', () => {
+    expect(metaCoreLabel('presence.collaboratingNow', true)).toBe('正在协作')
+    expect(metaCoreLabel('presence.collaboratingNow', false)).toBe('Collaborating now')
     expect(metaCoreLabel('toolbar.fields', true)).toBe('字段')
     expect(metaCoreLabel('toolbar.fields', false)).toBe('Fields')
     expect(metaCoreLabel('grid.aria', true)).toBe('数据表格')

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref, type App } from 'vue'
+import { useLocale } from '../src/composables/useLocale'
 import { useYjsDocument } from '../src/multitable/composables/useYjsDocument'
 import { useYjsTextField } from '../src/multitable/composables/useYjsTextField'
 import MetaYjsPresenceChip from '../src/multitable/components/MetaYjsPresenceChip.vue'
@@ -41,6 +42,7 @@ describe('Yjs awareness presence', () => {
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
+    useLocale().setLocale('en')
     handlers.clear()
     emitMock.mockReset()
     disconnectMock.mockReset()
@@ -54,6 +56,7 @@ describe('Yjs awareness presence', () => {
     if (container) container.remove()
     app = null
     container = null
+    useLocale().setLocale('en')
   })
 
   it('tracks collaborators per field and emits active field presence', async () => {
@@ -153,5 +156,29 @@ describe('Yjs awareness presence', () => {
     expect(container?.textContent).toContain('user_alpha, user_beta')
     expect(container?.textContent).not.toContain('user_self')
     expect(container?.textContent).not.toContain('user_gamma')
+  })
+
+  it('localizes the default chip label while preserving raw collaborator ids', async () => {
+    useLocale().setLocale('zh-CN')
+
+    app = createApp(defineComponent({
+      setup() {
+        return () => h(MetaYjsPresenceChip, {
+          currentUserId: 'user_self',
+          fieldId: 'fld_body',
+          users: [
+            { id: 'user_self', fieldIds: ['fld_body'] },
+            { id: 'user_alpha', fieldIds: ['fld_body'] },
+          ],
+        })
+      },
+    }))
+    app.mount(container!)
+    await flushUi(2)
+
+    const chip = container?.querySelector('.mt-yjs-presence-chip')
+    expect(container?.textContent).toContain('正在协作')
+    expect(container?.textContent).toContain('user_alpha')
+    expect(chip?.getAttribute('title')).toBe('正在协作: user_alpha')
   })
 })

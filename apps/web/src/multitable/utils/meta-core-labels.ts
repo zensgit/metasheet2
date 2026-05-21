@@ -17,6 +17,8 @@
 // "(No value)" fallback (see groupNoValue / MetaGridTable __ungrouped__).
 
 export type MetaCoreLabelKey =
+  // --- Shared presence chrome (T3E-1) ---
+  | 'presence.collaboratingNow'
   // --- MetaToolbar static ---
   | 'toolbar.aria'
   | 'toolbar.fields'
@@ -61,6 +63,8 @@ export type MetaCoreLabelKey =
   | 'cell.uploadFailed' | 'cell.removeFailed' | 'cell.clearFailed'
 
 const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
+  'presence.collaboratingNow': { en: 'Collaborating now', zh: '正在协作' },
+
   'toolbar.aria': { en: 'Grid toolbar', zh: '表格工具栏' },
   'toolbar.fields': { en: 'Fields', zh: '字段' },
   'toolbar.sort': { en: 'Sort', zh: '排序' },

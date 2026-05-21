@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import type { YjsPresenceUser } from '../types'
+import { metaCoreLabel } from '../utils/meta-core-labels'
 
 const props = withDefaults(defineProps<{
   users: YjsPresenceUser[]
@@ -10,8 +12,10 @@ const props = withDefaults(defineProps<{
 }>(), {
   currentUserId: null,
   fieldId: null,
-  label: 'Collaborating now',
 })
+
+const { isZh } = useLocale()
+const resolvedLabel = computed(() => props.label ?? metaCoreLabel('presence.collaboratingNow', isZh.value))
 
 const filteredUsers = computed(() => {
   const normalizedFieldId = props.fieldId?.trim() || null
@@ -35,10 +39,10 @@ const summary = computed(() => {
   <div
     v-if="filteredUsers.length > 0"
     class="mt-yjs-presence-chip"
-    :title="`${label}: ${filteredUsers.map((user) => user.id).join(', ')}`"
+    :title="`${resolvedLabel}: ${filteredUsers.map((user) => user.id).join(', ')}`"
   >
     <span class="mt-yjs-presence-chip__dot" aria-hidden="true" />
-    <span class="mt-yjs-presence-chip__label">{{ label }}</span>
+    <span class="mt-yjs-presence-chip__label">{{ resolvedLabel }}</span>
     <span class="mt-yjs-presence-chip__users">{{ summary }}</span>
   </div>
 </template>
