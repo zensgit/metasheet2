@@ -1,0 +1,59 @@
+{
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 19091
+  },
+  "auth": {
+    "mode": "shared-secret-header",
+    "headerName": "X-MetaSheet-Bridge-Secret",
+    "sharedSecretEnvVar": "METASHEET_BRIDGE_SHARED_SECRET"
+  },
+  "database": {
+    "server": "<configured-on-bridge-host>",
+    "database": "<configured-on-bridge-host>",
+    "integratedSecurity": false,
+    "usernameEnvVar": "METASHEET_BRIDGE_SQL_USERNAME",
+    "passwordEnvVar": "METASHEET_BRIDGE_SQL_PASSWORD",
+    "connectTimeoutSec": 8,
+    "queryTimeoutSec": 15,
+    "encrypt": false,
+    "trustServerCertificate": true
+  },
+  "limits": {
+    "sampleLimit": 3,
+    "maxLimit": 20
+  },
+  "objects": {
+    "material": {
+      "label": "Material",
+      "source": "v_MetaSheet_MaterialRead",
+      "keyField": "FNumber",
+      "fields": [
+        { "name": "FItemID", "type": "number", "required": false },
+        { "name": "FNumber", "type": "string", "required": true },
+        { "name": "FName", "type": "string", "required": true },
+        { "name": "FModel", "type": "string", "required": false }
+      ]
+    },
+    "bom": {
+      "label": "BOM Header",
+      "source": "v_MetaSheet_BomRead",
+      "keyField": "FBOMInterID",
+      "fields": [
+        { "name": "FBOMInterID", "type": "number", "required": true },
+        { "name": "FBOMNumber", "type": "string", "required": false },
+        { "name": "FItemID", "type": "number", "required": true }
+      ]
+    },
+    "bom_child": {
+      "label": "BOM Child",
+      "source": "v_MetaSheet_BomChildRead",
+      "keyField": "FBOMInterID",
+      "fields": [
+        { "name": "FBOMInterID", "type": "number", "required": true },
+        { "name": "FItemID", "type": "number", "required": true },
+        { "name": "FQty", "type": "number", "required": true }
+      ]
+    }
+  }
+}
