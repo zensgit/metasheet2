@@ -317,6 +317,54 @@ function verify_generic_integration_workbench_contract() {
   search_fixed_string '"autoAudit": false' "$onsite_evidence_template" || die "on-site evidence template must default autoAudit=false"
 }
 
+function verify_bridge_agent_tooling_contract() {
+  local root="$1"
+  local smoke_script="${root}/scripts/ops/bridge-agent-driver-smoke.ps1"
+  local smoke_template_json="${root}/scripts/ops/fixtures/bridge-agent-driver-smoke/evidence.template.json"
+  local smoke_template_md="${root}/scripts/ops/fixtures/bridge-agent-driver-smoke/evidence.template.md"
+  local smoke_runbook="${root}/docs/operations/bridge-agent-driver-smoke-runbook-20260520.md"
+  local readonly_script="${root}/scripts/ops/bridge-agent-readonly.ps1"
+  local readonly_config="${root}/scripts/ops/fixtures/bridge-agent-readonly/config.example.json"
+  local readonly_runbook="${root}/docs/operations/bridge-agent-readonly-runbook-20260521.md"
+  local install_txt="${root}/INSTALL.txt"
+
+  search_fixed_string 'SELECT @@VERSION' "$smoke_script" || die "Bridge Agent driver smoke must run SELECT @@VERSION only"
+  search_fixed_string "[ValidateSet('SqlClient', 'Odbc', 'OleDb')]" "$smoke_script" || die "Bridge Agent driver smoke must support SqlClient/Odbc/OleDb provider modes"
+  search_fixed_string 'OdbcDriverName' "$smoke_script" || die "Bridge Agent driver smoke must allow BA-M0 approved ODBC driver names"
+  search_fixed_string 'OleDbProviderName' "$smoke_script" || die "Bridge Agent driver smoke must allow BA-M0 approved OLE DB provider names"
+  search_fixed_string 'data[$kStr]=<redacted>' "$smoke_script" || die "Bridge Agent driver smoke must redact sensitive Exception.Data values"
+  search_fixed_string '"decision": "PASS|FAIL"' "$smoke_template_json" || die "Bridge Agent driver smoke JSON evidence template must be packaged"
+  search_fixed_string 'BA-M1 does not start until BA-M0.5 is signed off green' "$smoke_runbook" || die "Bridge Agent driver smoke runbook must preserve the BA-M1 gate"
+  search_fixed_string 'Do not paste raw evidence into GitHub' "$smoke_runbook" || die "Bridge Agent driver smoke runbook must document evidence hygiene"
+  search_fixed_string 'Driver Smoke Evidence Template' "$smoke_template_md" || die "Bridge Agent driver smoke Markdown evidence template must be packaged"
+
+  search_fixed_string 'System.Data.SqlClient.SqlConnection' "$readonly_script" || die "readonly Bridge Agent must use the approved SqlClient provider"
+  search_fixed_string 'BA-M1 MVP only supports localhost binding' "$readonly_script" || die "readonly Bridge Agent must reject non-localhost bindings"
+  search_fixed_string 'RAW_SQL_REJECTED' "$readonly_script" || die "readonly Bridge Agent must reject raw SQL requests"
+  search_fixed_string 'UNSUPPORTED_FILTERS' "$readonly_script" || die "readonly Bridge Agent must reject filters until BA-M2 designs the query contract"
+  search_fixed_string 'SELECT TOP $Limit' "$readonly_script" || die "readonly Bridge Agent must build bounded SELECT TOP queries"
+  search_fixed_string 'ConvertTo-QuotedIdentifier' "$readonly_script" || die "readonly Bridge Agent must quote allowlisted SQL identifiers"
+  search_fixed_string 'sharedSecretEnvVar' "$readonly_script" || die "readonly Bridge Agent must read its shared secret from a local environment variable"
+  search_fixed_string 'ConvertTo-BridgeError' "$readonly_script" || die "readonly Bridge Agent must redact returned errors"
+
+  search_fixed_string '"host": "127.0.0.1"' "$readonly_config" || die "readonly Bridge Agent example config must bind to localhost"
+  search_fixed_string 'METASHEET_BRIDGE_SQL_USERNAME' "$readonly_config" || die "readonly Bridge Agent config must keep SQL username in an env var"
+  search_fixed_string 'METASHEET_BRIDGE_SQL_PASSWORD' "$readonly_config" || die "readonly Bridge Agent config must keep SQL password in an env var"
+  search_fixed_string 'METASHEET_BRIDGE_SHARED_SECRET' "$readonly_config" || die "readonly Bridge Agent config must keep the shared secret in an env var"
+  search_fixed_string 'v_MetaSheet_MaterialRead' "$readonly_config" || die "readonly Bridge Agent config must prefer material readonly views"
+  search_fixed_string 'v_MetaSheet_BomRead' "$readonly_config" || die "readonly Bridge Agent config must prefer BOM readonly views"
+  search_fixed_string 'v_MetaSheet_BomChildRead' "$readonly_config" || die "readonly Bridge Agent config must prefer BOM child readonly views"
+
+  search_fixed_string 'ValidateConfigOnly' "$readonly_runbook" || die "readonly Bridge Agent runbook must document config validation"
+  search_fixed_string 'http://127.0.0.1:19091/' "$readonly_runbook" || die "readonly Bridge Agent runbook must document localhost endpoint"
+  search_fixed_string 'Raw SQL must fail' "$readonly_runbook" || die "readonly Bridge Agent runbook must document negative raw-SQL check"
+  search_fixed_string 'netsh http add urlacl' "$readonly_runbook" || die "readonly Bridge Agent runbook must document HttpListener URL ACL setup"
+
+  search_fixed_string 'bridge-agent-driver-smoke.ps1' "$install_txt" || die "INSTALL.txt must mention the BA-M0.5 Bridge Agent driver smoke"
+  search_fixed_string 'bridge-agent-readonly.ps1' "$install_txt" || die "INSTALL.txt must mention the BA-M1 readonly Bridge Agent"
+  search_fixed_string 'bridge-agent-readonly-runbook-20260521.md' "$install_txt" || die "INSTALL.txt must point operators at the readonly Bridge Agent runbook"
+}
+
 function write_optional_report() {
   local checksum_status="SKIPPED"
   local link_status="SKIPPED"
@@ -540,6 +588,11 @@ required=(
   "scripts/ops/integration-issue1542-seed-workbench-systems.mjs"
   "scripts/ops/integration-k3wise-postdeploy-summary.mjs"
   "scripts/ops/integration-k3wise-gate-contract-check.mjs"
+  "scripts/ops/bridge-agent-driver-smoke.ps1"
+  "scripts/ops/fixtures/bridge-agent-driver-smoke/evidence.template.json"
+  "scripts/ops/fixtures/bridge-agent-driver-smoke/evidence.template.md"
+  "scripts/ops/bridge-agent-readonly.ps1"
+  "scripts/ops/fixtures/bridge-agent-readonly/config.example.json"
   "scripts/ops/fixtures/integration-k3wise/gate-intake-template.json"
   "scripts/ops/fixtures/integration-k3wise/evidence-onsite-c4-c9-template.json"
   "scripts/ops/fixtures/integration-k3wise/run-mock-poc-demo.mjs"
@@ -561,6 +614,8 @@ required=(
   "docs/operations/integration-k3wise-live-gate-execution-package.md"
   "docs/operations/integration-k3wise-webapi-read-list-customer-sample-manifest.md"
   "docs/operations/integration-k3wise-relationship-mapping-customer-sample-manifest.md"
+  "docs/operations/bridge-agent-driver-smoke-runbook-20260520.md"
+  "docs/operations/bridge-agent-readonly-runbook-20260521.md"
   "docs/development/data-factory-workbench-todo-20260514.md"
   "docs/development/data-factory-workbench-development-20260514.md"
   "docs/development/data-factory-workbench-verification-20260514.md"
@@ -623,6 +678,7 @@ verify_integration_plugin_runtime_dependencies "$pkg_root"
 verify_deployable_artifact_contract "$pkg_root"
 verify_migration_bridge_contract "$pkg_root"
 verify_generic_integration_workbench_contract "$pkg_root"
+verify_bridge_agent_tooling_contract "$pkg_root"
 
 if [[ "$VERIFY_NO_GITHUB_LINKS" == "1" ]]; then
   verify_no_github_links "$pkg_root"

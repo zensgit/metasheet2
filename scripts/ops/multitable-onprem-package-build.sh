@@ -73,11 +73,21 @@ REQUIRED_PATHS=(
   "scripts/ops/integration-k3wise-postdeploy-summary.mjs"
   "scripts/ops/integration-k3wise-gate-contract-check.mjs"
   "scripts/ops/fixtures/integration-k3wise"
+  # Legacy SQL readonly Bridge Agent tooling. BA-M0.5 proves the approved
+  # Windows SQL driver can connect with SELECT @@VERSION only. BA-M1 then
+  # exposes a localhost-only, readonly, allowlisted HTTP bridge for operator
+  # validation before MetaSheet runtime integration begins.
+  "scripts/ops/bridge-agent-driver-smoke.ps1"
+  "scripts/ops/fixtures/bridge-agent-driver-smoke"
+  "scripts/ops/bridge-agent-readonly.ps1"
+  "scripts/ops/fixtures/bridge-agent-readonly"
   "docs/operations/k3-poc-onprem-preflight-runbook.md"
   "docs/operations/integration-k3wise-onprem-operator-handoff-checklist.md"
   "docs/operations/integration-k3wise-internal-trial-runbook.md"
   "docs/operations/integration-k3wise-live-gate-execution-package.md"
   "docs/operations/integration-k3wise-sql-executor-bridge-handoff.md"
+  "docs/operations/bridge-agent-driver-smoke-runbook-20260520.md"
+  "docs/operations/bridge-agent-readonly-runbook-20260521.md"
   "docs/operations/integration-k3wise-webapi-read-list-customer-sample-manifest.md"
   "docs/operations/integration-k3wise-relationship-mapping-customer-sample-manifest.md"
   "docs/development/k3wise-bridge-machine-codex-handoff-20260513.md"
@@ -460,6 +470,15 @@ K3 WISE PoC operator tools (Node only; no Docker needed to run these):
     docs/operations/integration-k3wise-onprem-operator-handoff-checklist.md (deploy-to-live handoff checklist)
     docs/operations/integration-k3wise-internal-trial-runbook.md  (post-deploy auth smoke)
     docs/operations/integration-k3wise-live-gate-execution-package.md (C0-C10 sequence + customer GATE fields)
+
+Legacy SQL readonly Bridge Agent tools (Windows bridge host only):
+  powershell -ExecutionPolicy Bypass -File scripts\ops\bridge-agent-driver-smoke.ps1 ...
+    -> BA-M0.5 driver smoke, runs connection.Open() and SELECT @@VERSION only.
+  powershell -ExecutionPolicy Bypass -File scripts\ops\bridge-agent-readonly.ps1 -ConfigPath <local-config>
+    -> BA-M1 localhost-only readonly bridge for allowlisted SQL views.
+  Runbooks:
+    docs/operations/bridge-agent-driver-smoke-runbook-20260520.md
+    docs/operations/bridge-agent-readonly-runbook-20260521.md
 
 Runtime dependencies:
   node_modules are intentionally not bundled. deploy.bat defaults to
