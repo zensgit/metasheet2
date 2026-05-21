@@ -1407,7 +1407,10 @@
                     <p class="attendance__field-hint attendance__field-hint--warn">
                       {{ tr('Role matching uses the platform user role plus assigned RBAC role IDs/names; role tags use the same resolver aliases until a dedicated role-tag catalog exists.', '角色匹配使用用户平台角色及已分配 RBAC 角色 ID/名称；在独立角色标签目录落地前，角色标签使用同一解析别名。') }}
                     </p>
-                    <AttendanceCalendarPolicyPreviewPanel :tr="tr" />
+                    <AttendanceCalendarPolicyPreviewPanel
+                      :tr="tr"
+                      :draft-overrides="calendarPolicyPreviewDraftOverrides"
+                    />
                     <div
                       v-if="calendarPolicyOverrideDiagnostics.length"
                       class="attendance__calendar-policy-diagnostics"
@@ -7932,6 +7935,7 @@ const settingsForm = reactive({
 })
 
 const calendarPolicyOverrideDiagnostics = computed(() => buildCalendarPolicyOverrideDiagnostics(settingsForm.calendarPolicyOverrides))
+const calendarPolicyPreviewDraftOverrides = computed(() => calendarPolicyOverridesFromForm(settingsForm.calendarPolicyOverrides))
 
 function calendarPolicySourceRequirement(source: CalendarPolicyOverrideFormState['source']): string {
   if (source === 'group') return tr('attendance groups', '考勤组')
