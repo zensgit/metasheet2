@@ -49,6 +49,20 @@ export interface CalendarPolicyOverrideFormState {
   excludeUserNames?: string
 }
 
+export type CalendarPolicyOverrideDiagnosticCode =
+  | 'missing_scope'
+  | 'invalid_date_range'
+  | 'shadowed_same_source'
+
+export interface CalendarPolicyOverrideDiagnostic {
+  key: string
+  code: CalendarPolicyOverrideDiagnosticCode
+  severity: 'warning'
+  primaryIndex: number
+  secondaryIndex?: number
+  source: CalendarPolicySource
+}
+
 function listToText(list?: Array<string | number>): string {
   return Array.isArray(list) ? list.join(',') : ''
 }
@@ -72,6 +86,73 @@ function splitNumberList(value?: string): number[] {
 function normalizeOptionalNumber(value: unknown): number | undefined {
   const num = typeof value === 'number' ? value : Number(value)
   return Number.isFinite(num) && num >= 1 ? num : undefined
+}
+
+function normalizeListKey(value?: string): string {
+  return splitListText(value)
+    .map((item) => item.toLocaleLowerCase())
+    .sort((left, right) => left.localeCompare(right))
+    .join(',')
+}
+
+function normalizeTextKey(value?: string): string {
+  return (value ?? '').trim().toLocaleLowerCase()
+}
+
+function dateKey(value?: string): string {
+  const trimmed = (value ?? '').trim()
+  return /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? trimmed : ''
+}
+
+function getDateSpan(form: CalendarPolicyOverrideFormState): { start: string; end: string } | null {
+  const singleDate = dateKey(form.date)
+  if (singleDate) return { start: singleDate, end: singleDate }
+  const from = dateKey(form.from)
+  const to = dateKey(form.to)
+  if (!from || !to || from > to) return null
+  return { start: from, end: to }
+}
+
+function hasInvalidDateRange(form: CalendarPolicyOverrideFormState): boolean {
+  const from = dateKey(form.from)
+  const to = dateKey(form.to)
+  return Boolean(from && to && from > to)
+}
+
+function dateSpansOverlap(
+  left: { start: string; end: string },
+  right: { start: string; end: string },
+): boolean {
+  return left.start <= right.end && right.start <= left.end
+}
+
+function dayIndexKey(form: CalendarPolicyOverrideFormState): string {
+  return [
+    normalizeOptionalNumber(form.dayIndexStart) ?? '',
+    normalizeOptionalNumber(form.dayIndexEnd) ?? '',
+    splitNumberList(form.dayIndexList).sort((left, right) => left - right).join(','),
+  ].join(':')
+}
+
+function calendarPolicyTargetKey(form: CalendarPolicyOverrideFormState): string {
+  const source = normalizeCalendarPolicySource(form.source)
+  return [
+    source,
+    normalizeTextKey(form.name),
+    normalizeCalendarPolicyMatch(form.match),
+    dayIndexKey(form),
+    normalizeListKey(form.attendanceGroups),
+    normalizeListKey(form.roles),
+    normalizeListKey(form.roleTags),
+    normalizeListKey(form.userIds),
+    normalizeListKey(form.userNames),
+    normalizeListKey(form.excludeUserIds),
+    normalizeListKey(form.excludeUserNames),
+  ].join('|')
+}
+
+function effectiveValueKey(form: CalendarPolicyOverrideFormState): string {
+  return `${form.isWorkingDay === true ? 'work' : 'rest'}:${normalizeTextKey(form.label)}`
 }
 
 function normalizeCalendarPolicySource(value: unknown): CalendarPolicySource {
@@ -153,6 +234,78 @@ function hasRequiredSourceFilter(form: CalendarPolicyOverrideFormState): boolean
     return splitListText(form.userIds).length > 0 || splitListText(form.userNames).length > 0
   }
   return true
+}
+
+export function buildCalendarPolicyOverrideDiagnostics(
+  forms: CalendarPolicyOverrideFormState[] | undefined,
+): CalendarPolicyOverrideDiagnostic[] {
+  if (!Array.isArray(forms)) return []
+
+  const diagnostics: CalendarPolicyOverrideDiagnostic[] = []
+  const comparableRows: Array<{
+    index: number
+    source: CalendarPolicySource
+    span: { start: string; end: string }
+    targetKey: string
+    effectiveKey: string
+  }> = []
+
+  forms.forEach((form, index) => {
+    if (!hasCalendarPolicyConstraint(form)) return
+    const source = normalizeCalendarPolicySource(form.source)
+    if (!hasRequiredSourceFilter(form)) {
+      diagnostics.push({
+        key: `missing-scope:${index}`,
+        code: 'missing_scope',
+        severity: 'warning',
+        primaryIndex: index,
+        source,
+      })
+      return
+    }
+    if (hasInvalidDateRange(form)) {
+      diagnostics.push({
+        key: `invalid-date-range:${index}`,
+        code: 'invalid_date_range',
+        severity: 'warning',
+        primaryIndex: index,
+        source,
+      })
+      return
+    }
+    const span = getDateSpan(form)
+    if (!span) return
+    comparableRows.push({
+      index,
+      source,
+      span,
+      targetKey: calendarPolicyTargetKey(form),
+      effectiveKey: effectiveValueKey(form),
+    })
+  })
+
+  for (let leftIndex = 0; leftIndex < comparableRows.length; leftIndex += 1) {
+    const left = comparableRows[leftIndex]
+    if (!left) continue
+    for (let rightIndex = leftIndex + 1; rightIndex < comparableRows.length; rightIndex += 1) {
+      const right = comparableRows[rightIndex]
+      if (!right) continue
+      if (left.source !== right.source) continue
+      if (left.targetKey !== right.targetKey) continue
+      if (left.effectiveKey === right.effectiveKey) continue
+      if (!dateSpansOverlap(left.span, right.span)) continue
+      diagnostics.push({
+        key: `shadowed-same-source:${left.index}:${right.index}`,
+        code: 'shadowed_same_source',
+        severity: 'warning',
+        primaryIndex: left.index,
+        secondaryIndex: right.index,
+        source: left.source,
+      })
+    }
+  }
+
+  return diagnostics
 }
 
 export function calendarPolicyOverridesFromForm(

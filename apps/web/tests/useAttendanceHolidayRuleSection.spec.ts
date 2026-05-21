@@ -322,6 +322,103 @@ describe('AttendanceHolidayRuleSection', () => {
     expect(roleInputs.length).toBeGreaterThanOrEqual(2)
   })
 
+  it('shows effective calendar override diagnostics for unsaved and shadowed rules', async () => {
+    const settingsForm = reactive<HolidaySettingsState>(createDefaultSettings())
+    settingsForm.calendarPolicyOverrides.push(
+      {
+        name: '',
+        match: 'contains',
+        date: '',
+        from: '2026-10-01',
+        to: '2026-10-07',
+        dayIndexStart: null,
+        dayIndexEnd: null,
+        dayIndexList: '',
+        source: 'role',
+        isWorkingDay: false,
+        label: '角色休息日',
+        attendanceGroups: '',
+        roles: '',
+        roleTags: '',
+        userIds: '',
+        userNames: '',
+        excludeUserIds: '',
+        excludeUserNames: '',
+      },
+      {
+        name: '',
+        match: 'contains',
+        date: '',
+        from: '2026-10-01',
+        to: '2026-10-07',
+        dayIndexStart: null,
+        dayIndexEnd: null,
+        dayIndexList: '',
+        source: 'group',
+        isWorkingDay: false,
+        label: '休息日',
+        attendanceGroups: 'day-shift',
+        roles: '',
+        roleTags: '',
+        userIds: '',
+        userNames: '',
+        excludeUserIds: '',
+        excludeUserNames: '',
+      },
+      {
+        name: '',
+        match: 'contains',
+        date: '',
+        from: '2026-10-03',
+        to: '2026-10-04',
+        dayIndexStart: null,
+        dayIndexEnd: null,
+        dayIndexList: '',
+        source: 'group',
+        isWorkingDay: true,
+        label: '调休工作日',
+        attendanceGroups: 'day-shift',
+        roles: '',
+        roleTags: '',
+        userIds: '',
+        userNames: '',
+        excludeUserIds: '',
+        excludeUserNames: '',
+      },
+    )
+
+    const config = {
+      addCalendarPolicyOverride: vi.fn(),
+      addHolidayOverride: vi.fn(),
+      holidaySyncLastRun: { value: null },
+      holidaySyncLoading: { value: false },
+      removeCalendarPolicyOverride: vi.fn(),
+      removeHolidayOverride: vi.fn(),
+      saveSettings: vi.fn(),
+      settingsForm,
+      settingsLoading: { value: false },
+      syncHolidays: vi.fn(),
+      syncHolidaysForYears: vi.fn(),
+    } as HolidayConfig
+
+    app = createApp(AttendanceHolidayRuleSection, {
+      attendanceGroupOptions: ['day-shift'],
+      config,
+      formatDateTime,
+      tr,
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const diagnostics = container!.querySelector('[data-attendance-calendar-policy-diagnostics]')
+    expect(diagnostics).toBeTruthy()
+    expect(diagnostics?.textContent).toContain('日历规则检查')
+    expect(diagnostics?.textContent).toContain('第 1 条规则不会被保存')
+    expect(diagnostics?.textContent).toContain('第 2 条规则与第 3 条规则')
+    expect(container!.querySelector('[data-calendar-policy-diagnostic="missing_scope"]')).toBeTruthy()
+    expect(container!.querySelector('[data-calendar-policy-diagnostic="shadowed_same_source"]')).toBeTruthy()
+  })
+
   it('shows the auto-sync timezone as a select with UTC offset labels', async () => {
     const settingsForm = reactive<HolidaySettingsState>(createDefaultSettings())
 
