@@ -57,6 +57,11 @@ implementation) does not start**.
 - The harness's evidence files contain **no** server / database / user /
   password values. Inspect both files before handing them off; they
   should not require further redaction.
+- SQL Server login-failure messages may quote the rejected login name in
+  localized provider text. The harness redacts the common English and
+  Chinese shapes before writing evidence, but if an operator still sees a
+  login identifier in either evidence file, stop the handoff and treat it
+  as a harness defect.
 
 ## Primary path: PowerShell harness on Windows (preferred)
 

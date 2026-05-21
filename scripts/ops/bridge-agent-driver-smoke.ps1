@@ -120,6 +120,7 @@ $ErrorActionPreference = 'Stop'
 function ConvertTo-RedactedText {
   param([string]$Value)
   if ([string]::IsNullOrEmpty($Value)) { return $Value }
+  $redactedLogin = '<redacted-login>'
   $patterns = @(
     '(?i)(Password|Pwd)\s*=\s*[^;""'']+',
     '(?i)(User\s*ID|UID|User)\s*=\s*[^;""'']+',
@@ -131,6 +132,26 @@ function ConvertTo-RedactedText {
   $redacted = $Value
   foreach ($p in $patterns) {
     $redacted = [System.Text.RegularExpressions.Regex]::Replace($redacted, $p, '<redacted>')
+  }
+  $quotePattern = "[`"']"
+  $redacted = [System.Text.RegularExpressions.Regex]::Replace(
+    $redacted,
+    "(?i)(Login failed for user\s+$quotePattern)([^`"']+)($quotePattern)",
+    '${1}' + $redactedLogin + '${3}'
+  )
+  $redacted = [System.Text.RegularExpressions.Regex]::Replace(
+    $redacted,
+    "((?:用户|使用者|登入名|登录名)\s*$quotePattern)([^`"']+)($quotePattern\s*(?:登录失败|登入失敗|login failed))",
+    '${1}' + $redactedLogin + '${3}'
+  )
+  if (-not [string]::IsNullOrEmpty($Username)) {
+    $escapedUsername = [System.Text.RegularExpressions.Regex]::Escape($Username)
+    $redacted = [System.Text.RegularExpressions.Regex]::Replace(
+      $redacted,
+      "($quotePattern)$escapedUsername($quotePattern)",
+      '${1}' + $redactedLogin + '${2}',
+      [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
   }
   return $redacted
 }
