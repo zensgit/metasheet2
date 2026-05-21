@@ -7980,6 +7980,125 @@ function mapRotationAssignmentRow(row) {
   }
 }
 
+const ATTENDANCE_SCHEDULE_OPEN_END_DATE = '9999-12-31'
+
+function normalizeAttendanceScheduleAssignmentEndDate(value) {
+  const normalized = normalizeDateOnly(value)
+  return normalized || value || null
+}
+
+function resolveAttendanceScheduleAssignmentUpdateEndDate(payload, existingEndDate) {
+  if (!Object.prototype.hasOwnProperty.call(payload, 'endDate')) return existingEndDate
+  return normalizeAttendanceScheduleAssignmentEndDate(payload.endDate)
+}
+
+async function acquireAttendanceScheduleAssignmentLock(client, orgId, userId) {
+  try {
+    await client.query(
+      'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+      [`attendance-schedule:${String(orgId ?? '')}`, String(userId ?? '')]
+    )
+  } catch (_error) {
+    // Best-effort: preserve save behavior if advisory locks are unavailable.
+  }
+}
+
+function getAttendanceScheduleAssignmentConflictType(draftKind, existingKind) {
+  if (draftKind === 'shift' && existingKind === 'shift') return 'shift_assignment_overlap'
+  if (draftKind === 'rotation' && existingKind === 'rotation') return 'rotation_assignment_overlap'
+  return 'rotation_overrides_shift'
+}
+
+function getAttendanceScheduleAssignmentConflictMessage(conflict) {
+  if (conflict.conflictType === 'shift_assignment_overlap') {
+    return 'Shift assignment overlaps an active shift assignment for the same user'
+  }
+  if (conflict.conflictType === 'rotation_assignment_overlap') {
+    return 'Rotation assignment overlaps an active rotation assignment for the same user'
+  }
+  if (conflict.draftKind === 'rotation') {
+    return 'Rotation assignment overlaps an active shift assignment for the same user'
+  }
+  return 'Shift assignment overlaps an active rotation assignment for the same user'
+}
+
+function mapAttendanceScheduleAssignmentConflict(row, draft) {
+  if (!row) return null
+  const existingKind = row.kind === 'rotation' ? 'rotation' : 'shift'
+  const conflictType = getAttendanceScheduleAssignmentConflictType(draft.kind, existingKind)
+  const startDate = normalizeDateOnly(row.start_date) ?? row.start_date
+  const endDate = normalizeAttendanceScheduleAssignmentEndDate(row.end_date)
+  const draftStartDate = normalizeDateOnly(draft.startDate) ?? draft.startDate
+  const draftEndDate = normalizeAttendanceScheduleAssignmentEndDate(draft.endDate)
+  return {
+    conflictType,
+    draftKind: draft.kind,
+    existingKind,
+    assignmentId: row.id,
+    userId: draft.userId,
+    startDate: draftStartDate,
+    endDate: draftEndDate,
+    existingStartDate: startDate,
+    existingEndDate: endDate,
+  }
+}
+
+async function findAttendanceScheduleAssignmentConflict(db, draft) {
+  if (draft.isActive === false) return null
+  const draftStartDate = normalizeDateOnly(draft.startDate) ?? draft.startDate
+  const draftEndDate = normalizeAttendanceScheduleAssignmentEndDate(draft.endDate)
+  const overlapEndDate = draftEndDate || ATTENDANCE_SCHEDULE_OPEN_END_DATE
+  const sameKindTable = draft.kind === 'rotation'
+    ? 'attendance_rotation_assignments'
+    : 'attendance_shift_assignments'
+  const otherKindTable = draft.kind === 'rotation'
+    ? 'attendance_shift_assignments'
+    : 'attendance_rotation_assignments'
+  const sameKindLabel = draft.kind
+  const otherKindLabel = draft.kind === 'rotation' ? 'shift' : 'rotation'
+  const baseParams = [draft.orgId, draft.userId, draftStartDate, overlapEndDate]
+  const excludeClause = draft.excludeId ? 'AND id <> $5' : ''
+  const sameKindRows = await db.query(
+    `SELECT id, start_date, end_date, $${draft.excludeId ? 6 : 5}::text AS kind
+       FROM ${sameKindTable}
+      WHERE org_id = $1
+        AND user_id = $2
+        AND COALESCE(is_active, true) = true
+        AND start_date <= $4::date
+        AND COALESCE(end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
+        ${excludeClause}
+      ORDER BY start_date DESC, created_at DESC
+      LIMIT 1`,
+    draft.excludeId ? [...baseParams, draft.excludeId, sameKindLabel] : [...baseParams, sameKindLabel]
+  )
+  if (sameKindRows.length) return mapAttendanceScheduleAssignmentConflict(sameKindRows[0], draft)
+
+  const otherKindRows = await db.query(
+    `SELECT id, start_date, end_date, $5::text AS kind
+       FROM ${otherKindTable}
+      WHERE org_id = $1
+        AND user_id = $2
+        AND COALESCE(is_active, true) = true
+        AND start_date <= $4::date
+        AND COALESCE(end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
+      ORDER BY start_date DESC, created_at DESC
+      LIMIT 1`,
+    [...baseParams, otherKindLabel]
+  )
+  return mapAttendanceScheduleAssignmentConflict(otherKindRows[0], draft)
+}
+
+function respondAttendanceScheduleAssignmentConflict(res, conflict) {
+  res.status(409).json({
+    ok: false,
+    error: {
+      code: 'ATTENDANCE_SCHEDULE_ASSIGNMENT_CONFLICT',
+      message: getAttendanceScheduleAssignmentConflictMessage(conflict),
+      details: conflict,
+    },
+  })
+}
+
 function mapRotationRuleFromAssignmentRow(row) {
   return mapRotationRuleRow({
     id: row.rotation_rule_id,
@@ -12726,6 +12845,11 @@ module.exports = {
     getAttendancePayrollSummaryFieldValue,
     normalizeCalendarPolicyOverrides,
     resolveEffectiveCalendar,
+    findAttendanceScheduleAssignmentConflict,
+    acquireAttendanceScheduleAssignmentLock,
+    getAttendanceScheduleAssignmentConflictMessage,
+    getAttendanceScheduleAssignmentConflictType,
+    resolveAttendanceScheduleAssignmentUpdateEndDate,
     buildAttendanceRecordReportExportItem,
     buildAttendanceRecordReportExportItemAsync,
     buildAttendanceRecordReportCsv,
@@ -18099,8 +18223,13 @@ module.exports = {
           userId: parsed.data.userId,
           rotationRuleId,
           startDate: parsed.data.startDate,
-          endDate: parsed.data.endDate ?? null,
+          endDate: normalizeAttendanceScheduleAssignmentEndDate(parsed.data.endDate),
           isActive: parsed.data.isActive ?? true,
+        }
+
+        if (payload.endDate && payload.endDate < payload.startDate) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'End date must be after start date' } })
+          return
         }
 
         try {
@@ -18113,23 +18242,42 @@ module.exports = {
             return
           }
 
-          const rows = await db.query(
-            `INSERT INTO attendance_rotation_assignments
-             (id, org_id, user_id, rotation_rule_id, start_date, end_date, is_active)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
-             RETURNING *`,
-            [
-              randomUUID(),
+          const result = await db.transaction(async (trx) => {
+            await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
+              kind: 'rotation',
               orgId,
-              payload.userId,
-              payload.rotationRuleId,
-              payload.startDate,
-              payload.endDate,
-              payload.isActive,
-            ]
-          )
+              userId: payload.userId,
+              startDate: payload.startDate,
+              endDate: payload.endDate,
+              isActive: payload.isActive,
+            })
+            if (conflict) return { conflict }
 
-          const assignment = mapRotationAssignmentRow(rows[0])
+            const rows = await trx.query(
+              `INSERT INTO attendance_rotation_assignments
+               (id, org_id, user_id, rotation_rule_id, start_date, end_date, is_active)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)
+               RETURNING *`,
+              [
+                randomUUID(),
+                orgId,
+                payload.userId,
+                payload.rotationRuleId,
+                payload.startDate,
+                payload.endDate,
+                payload.isActive,
+              ]
+            )
+            return { row: rows[0] }
+          })
+
+          if (result.conflict) {
+            respondAttendanceScheduleAssignmentConflict(res, result.conflict)
+            return
+          }
+
+          const assignment = mapRotationAssignmentRow(result.row)
           const rotation = mapRotationRuleRow(ruleRows[0])
           emitEvent('attendance.rotationAssignment.created', { orgId, rotationAssignmentId: assignment.id })
           res.status(201).json({ ok: true, data: { assignment, rotation } })
@@ -18183,8 +18331,13 @@ module.exports = {
             userId: parsed.data.userId ?? existing.user_id,
             rotationRuleId: nextRotationRuleId,
             startDate: parsed.data.startDate ?? existing.start_date,
-            endDate: parsed.data.endDate ?? existing.end_date,
+            endDate: resolveAttendanceScheduleAssignmentUpdateEndDate(parsed.data, existing.end_date),
             isActive: parsed.data.isActive ?? existing.is_active,
+          }
+
+          if (payload.endDate && payload.endDate < payload.startDate) {
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'End date must be after start date' } })
+            return
           }
 
           const ruleRows = await db.query(
@@ -18196,28 +18349,48 @@ module.exports = {
             return
           }
 
-          const rows = await db.query(
-            `UPDATE attendance_rotation_assignments
-             SET user_id = $3,
-                 rotation_rule_id = $4,
-                 start_date = $5,
-                 end_date = $6,
-                 is_active = $7,
-                 updated_at = now()
-             WHERE id = $1 AND org_id = $2
-             RETURNING *`,
-            [
-              assignmentId,
+          const result = await db.transaction(async (trx) => {
+            await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
+              kind: 'rotation',
               orgId,
-              payload.userId,
-              payload.rotationRuleId,
-              payload.startDate,
-              payload.endDate,
-              payload.isActive,
-            ]
-          )
+              userId: payload.userId,
+              startDate: payload.startDate,
+              endDate: payload.endDate,
+              isActive: payload.isActive,
+              excludeId: assignmentId,
+            })
+            if (conflict) return { conflict }
 
-          const assignment = mapRotationAssignmentRow(rows[0])
+            const rows = await trx.query(
+              `UPDATE attendance_rotation_assignments
+               SET user_id = $3,
+                   rotation_rule_id = $4,
+                   start_date = $5,
+                   end_date = $6,
+                   is_active = $7,
+                   updated_at = now()
+               WHERE id = $1 AND org_id = $2
+               RETURNING *`,
+              [
+                assignmentId,
+                orgId,
+                payload.userId,
+                payload.rotationRuleId,
+                payload.startDate,
+                payload.endDate,
+                payload.isActive,
+              ]
+            )
+            return { row: rows[0] }
+          })
+
+          if (result.conflict) {
+            respondAttendanceScheduleAssignmentConflict(res, result.conflict)
+            return
+          }
+
+          const assignment = mapRotationAssignmentRow(result.row)
           const rotation = mapRotationRuleRow(ruleRows[0])
           emitEvent('attendance.rotationAssignment.updated', { orgId, rotationAssignmentId: assignment.id })
           res.json({ ok: true, data: { assignment, rotation } })
@@ -24309,15 +24482,11 @@ module.exports = {
           respondInvalidUuid(res, 'shiftId')
           return
         }
-        const normalizedEndDate = typeof parsed.data.endDate === 'string' && parsed.data.endDate.trim().length > 0
-          ? parsed.data.endDate
-          : null
-
         const payload = {
           userId: parsed.data.userId,
           shiftId,
           startDate: parsed.data.startDate,
-          endDate: normalizedEndDate,
+          endDate: normalizeAttendanceScheduleAssignmentEndDate(parsed.data.endDate),
           isActive: parsed.data.isActive ?? true,
         }
 
@@ -24336,23 +24505,42 @@ module.exports = {
             return
           }
 
-          const rows = await db.query(
-            `INSERT INTO attendance_shift_assignments
-             (id, org_id, user_id, shift_id, start_date, end_date, is_active)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
-             RETURNING *`,
-            [
-              randomUUID(),
+          const result = await db.transaction(async (trx) => {
+            await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
+              kind: 'shift',
               orgId,
-              payload.userId,
-              payload.shiftId,
-              payload.startDate,
-              payload.endDate,
-              payload.isActive,
-            ]
-          )
+              userId: payload.userId,
+              startDate: payload.startDate,
+              endDate: payload.endDate,
+              isActive: payload.isActive,
+            })
+            if (conflict) return { conflict }
 
-          const assignment = mapAssignmentRow(rows[0])
+            const rows = await trx.query(
+              `INSERT INTO attendance_shift_assignments
+               (id, org_id, user_id, shift_id, start_date, end_date, is_active)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)
+               RETURNING *`,
+              [
+                randomUUID(),
+                orgId,
+                payload.userId,
+                payload.shiftId,
+                payload.startDate,
+                payload.endDate,
+                payload.isActive,
+              ]
+            )
+            return { row: rows[0] }
+          })
+
+          if (result.conflict) {
+            respondAttendanceScheduleAssignmentConflict(res, result.conflict)
+            return
+          }
+
+          const assignment = mapAssignmentRow(result.row)
           const shift = mapShiftRow(shiftRows[0])
           emitEvent('attendance.assignment.created', { orgId, assignmentId: assignment.id })
           res.status(201).json({ ok: true, data: { assignment, shift } })
@@ -24402,15 +24590,11 @@ module.exports = {
             respondInvalidUuid(res, 'shiftId')
             return
           }
-          const normalizedEndDate = typeof parsed.data.endDate === 'string'
-            ? (parsed.data.endDate.trim().length > 0 ? parsed.data.endDate : null)
-            : parsed.data.endDate
-
           const payload = {
             userId: parsed.data.userId ?? existing.user_id,
             shiftId: nextShiftId,
             startDate: parsed.data.startDate ?? existing.start_date,
-            endDate: normalizedEndDate ?? existing.end_date,
+            endDate: resolveAttendanceScheduleAssignmentUpdateEndDate(parsed.data, existing.end_date),
             isActive: parsed.data.isActive ?? existing.is_active,
           }
 
@@ -24428,28 +24612,48 @@ module.exports = {
             return
           }
 
-          const rows = await db.query(
-            `UPDATE attendance_shift_assignments
-             SET user_id = $3,
-                 shift_id = $4,
-                 start_date = $5,
-                 end_date = $6,
-                 is_active = $7,
-                 updated_at = now()
-             WHERE id = $1 AND org_id = $2
-             RETURNING *`,
-            [
-              assignmentId,
+          const result = await db.transaction(async (trx) => {
+            await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
+            const conflict = await findAttendanceScheduleAssignmentConflict(trx, {
+              kind: 'shift',
               orgId,
-              payload.userId,
-              payload.shiftId,
-              payload.startDate,
-              payload.endDate,
-              payload.isActive,
-            ]
-          )
+              userId: payload.userId,
+              startDate: payload.startDate,
+              endDate: payload.endDate,
+              isActive: payload.isActive,
+              excludeId: assignmentId,
+            })
+            if (conflict) return { conflict }
 
-          const assignment = mapAssignmentRow(rows[0])
+            const rows = await trx.query(
+              `UPDATE attendance_shift_assignments
+               SET user_id = $3,
+                   shift_id = $4,
+                   start_date = $5,
+                   end_date = $6,
+                   is_active = $7,
+                   updated_at = now()
+               WHERE id = $1 AND org_id = $2
+               RETURNING *`,
+              [
+                assignmentId,
+                orgId,
+                payload.userId,
+                payload.shiftId,
+                payload.startDate,
+                payload.endDate,
+                payload.isActive,
+              ]
+            )
+            return { row: rows[0] }
+          })
+
+          if (result.conflict) {
+            respondAttendanceScheduleAssignmentConflict(res, result.conflict)
+            return
+          }
+
+          const assignment = mapAssignmentRow(result.row)
           const shift = mapShiftRow(shiftRows[0])
           emitEvent('attendance.assignment.updated', { orgId, assignmentId: assignment.id })
           res.json({ ok: true, data: { assignment, shift } })
