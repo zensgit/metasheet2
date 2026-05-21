@@ -84,6 +84,21 @@ param(
   [ValidateSet('SqlClient', 'Odbc', 'OleDb')]
   [string]$Provider = 'SqlClient',
 
+  # ODBC driver name as it appears in the customer's installed ODBC stack.
+  # Default targets ODBC Driver 17. Override to the customer-approved
+  # legacy driver if BA-M0 picked one, e.g.
+  #   -OdbcDriverName 'SQL Server Native Client 11.0'
+  #   -OdbcDriverName 'ODBC Driver 18 for SQL Server'
+  #   -OdbcDriverName 'SQL Server'
+  [string]$OdbcDriverName = 'ODBC Driver 17 for SQL Server',
+
+  # OLE DB provider name as installed on the customer host. Default
+  # targets MSOLEDBSQL. Override to the customer-approved legacy provider
+  # if BA-M0 picked one, e.g.
+  #   -OleDbProviderName 'SQLNCLI11'
+  #   -OleDbProviderName 'SQLOLEDB'
+  [string]$OleDbProviderName = 'MSOLEDBSQL',
+
   [Parameter(Mandatory = $true)]
   [string]$OutDir,
 
@@ -130,6 +145,15 @@ function Get-RedactedErrorRecord {
   # some SQL Server providers surface the original connection string inside
   # InnerException.Message or Exception.Data on pre-login TLS failures.
   # Concatenate everything into one buffer, then run a single redaction pass.
+  #
+  # Exception.Data is key/value, so the regex redactor (which keys off
+  # `Password=...` / `Server=...` shapes) would miss e.g. Data["Password"]
+  # entries because they serialize as `data[Password]=xxx` and the equals
+  # sign is preceded by `]`, not whitespace. Apply key-aware masking BEFORE
+  # concatenation: if the Data key name itself names a sensitive concept,
+  # mask the whole value; otherwise still run the value through the regex
+  # redactor for defense in depth.
+  $sensitiveKeyPattern = '(?i)^(password|pwd|secret|token|user|user[\s_-]*id|uid|server|data[\s_-]*source|database|initial[\s_-]*catalog|connection[\s_-]*string|connstring|address|host|hostname|network[\s_-]*address)$'
   $buf = New-Object System.Text.StringBuilder
   $current = $top
   $depth = 0
@@ -140,7 +164,14 @@ function Get-RedactedErrorRecord {
     if ($null -ne $current.Data -and $current.Data.Count -gt 0) {
       foreach ($k in $current.Data.Keys) {
         $v = $current.Data[$k]
-        if ($null -ne $v) { [void]$buf.AppendLine(("data[$k]=" + $v)) }
+        if ($null -eq $v) { continue }
+        $kStr = [string]$k
+        if ($kStr -match $sensitiveKeyPattern) {
+          [void]$buf.AppendLine("data[$kStr]=<redacted>")
+        } else {
+          $vStr = [string]$v
+          [void]$buf.AppendLine("data[$kStr]=" + (ConvertTo-RedactedText -Value $vStr))
+        }
       }
     }
     $current = $current.InnerException
@@ -198,7 +229,9 @@ function New-SqlClientConnectionString {
 function New-OdbcConnectionString {
   param([string]$Pwd)
   $parts = New-Object System.Collections.Generic.List[string]
-  $parts.Add('Driver={ODBC Driver 17 for SQL Server}')
+  # Driver name comes from the -OdbcDriverName parameter so the smoke
+  # exercises the *customer-approved* driver, not a baked-in modern one.
+  $parts.Add('Driver={' + $OdbcDriverName + '}')
   $parts.Add("Server=$Server")
   $parts.Add("Database=$Database")
   if ($IntegratedSecurity) {
@@ -214,7 +247,10 @@ function New-OdbcConnectionString {
 function New-OleDbConnectionString {
   param([string]$Pwd)
   $parts = New-Object System.Collections.Generic.List[string]
-  $parts.Add('Provider=MSOLEDBSQL')
+  # Provider name comes from the -OleDbProviderName parameter so the
+  # smoke exercises the *customer-approved* OLE DB provider, not a
+  # baked-in modern one.
+  $parts.Add("Provider=$OleDbProviderName")
   $parts.Add("Data Source=$Server")
   $parts.Add("Initial Catalog=$Database")
   if ($IntegratedSecurity) {
@@ -379,6 +415,12 @@ $evidence = [ordered]@{
   }
   target      = [ordered]@{
     provider          = $Provider
+    # Record the customer-approved driver/provider name actually used
+    # for the smoke. Non-secret product identifier (e.g.
+    # "SQL Server Native Client 11.0", "MSOLEDBSQL"); reviewers need
+    # it to know which driver actually negotiated.
+    odbcDriverName    = if ($Provider -eq 'Odbc')  { $OdbcDriverName    } else { $null }
+    oleDbProviderName = if ($Provider -eq 'OleDb') { $OleDbProviderName } else { $null }
     serverPresent     = -not [string]::IsNullOrEmpty($Server)
     databasePresent   = -not [string]::IsNullOrEmpty($Database)
     integratedSecurity= [bool]$IntegratedSecurity
@@ -414,6 +456,12 @@ $mdLines += ''
 $mdLines += '## Target (no host / DB / user values recorded)'
 $mdLines += ''
 $mdLines += "- provider: $($evidence.target.provider)"
+if ($null -ne $evidence.target.odbcDriverName) {
+  $mdLines += "- ODBC driver name: ``$($evidence.target.odbcDriverName)``"
+}
+if ($null -ne $evidence.target.oleDbProviderName) {
+  $mdLines += "- OLE DB provider name: ``$($evidence.target.oleDbProviderName)``"
+}
 $mdLines += "- server present: $($evidence.target.serverPresent)"
 $mdLines += "- database present: $($evidence.target.databasePresent)"
 $mdLines += "- integrated security: $($evidence.target.integratedSecurity)"

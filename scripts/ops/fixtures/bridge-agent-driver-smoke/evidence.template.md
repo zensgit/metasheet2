@@ -23,6 +23,8 @@ populated with redacted values.
 ## Target (no host / DB / user values recorded)
 
 - provider: `<SqlClient | Odbc | OleDb>`
+- ODBC driver name (when provider=Odbc): `<e.g. 'ODBC Driver 17 for SQL Server' or 'SQL Server Native Client 11.0' or 'SQL Server'>`
+- OLE DB provider name (when provider=OleDb): `<e.g. 'MSOLEDBSQL' or 'SQLNCLI11' or 'SQLOLEDB'>`
 - server present: `<true | false>`
 - database present: `<true | false>`
 - integrated security: `<true | false>`

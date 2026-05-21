@@ -120,3 +120,76 @@ per the parallel-session worktree hazard memory. Branch
 `origin/main` (one shot, no rename / no re-point). Branch self-check
 ran inside the worktree immediately before commit. No file in the main
 checkout was modified.
+
+## Follow-up edits after initial review (commit 2)
+
+Two review-driven follow-ups applied on the same branch (PR auto-updates;
+no second PR opened):
+
+### P1 - key-aware Exception.Data redaction
+
+`Get-RedactedErrorRecord` previously serialized every `Exception.Data`
+entry as `data[<key>]=<value>` and relied on the value-side regex to
+catch credential-shaped strings. That regex looks for `Password=` /
+`Server=` shaped substrings; a Data dictionary entry like
+`Exception.Data["Password"] = "xxx"` serializes as `data[Password]=xxx`
+where the `]` between the key and `=` defeats the regex. Real leak path.
+
+Fix: introduced a key-aware mask layer **before** concatenation.
+Sensitive key names matched by a single anchored case-insensitive
+pattern (covering `password|pwd|secret|token|user|user[\s_-]*id|uid|server|data[\s_-]*source|database|initial[\s_-]*catalog|connection[\s_-]*string|connstring|address|host|hostname|network[\s_-]*address`)
+cause the whole entry to be written as `data[<k>]=<redacted>`.
+Non-sensitive keys still pass the value through the existing
+`ConvertTo-RedactedText` regex for defense in depth.
+
+```text
+grep -n 'sensitiveKeyPattern|data\[\$kStr\]=<redacted>' \
+  scripts/ops/bridge-agent-driver-smoke.ps1
+  -> hits at pattern definition + the masked-write line + the
+     fallback-value line
+```
+
+### P2 - configurable ODBC / OLE DB driver names
+
+Previously the harness hard-coded `'ODBC Driver 17 for SQL Server'` and
+`'MSOLEDBSQL'`. The gate's whole purpose is to prove the
+**customer-approved** driver works, not our preset modern driver, so
+hard-coding turned BA-M0.5 into "test our preset" instead of "test the
+driver BA-M0 picked" — defeated the gate for legacy customers (SQL
+Server Native Client 11.0, SQLNCLI11, SQLOLEDB, ancient Windows ODBC).
+
+Fix: two new parameters with the existing modern defaults preserved:
+
+```text
+-OdbcDriverName    default 'ODBC Driver 17 for SQL Server'
+-OleDbProviderName default 'MSOLEDBSQL'
+```
+
+Both are wired into the connection-string builders. The chosen value is
+also captured (non-secret product identifier) into the evidence target
+block as `odbcDriverName` / `oleDbProviderName` (populated only for the
+matching provider; null otherwise), so reviewers can see exactly which
+driver was tested. Runbook Mode B / Mode C now show both modern and
+legacy invocation examples.
+
+```text
+grep -n 'OdbcDriverName|OleDbProviderName' \
+  scripts/ops/bridge-agent-driver-smoke.ps1
+  -> hits across param block, builder comments, builders, and evidence target
+grep -n 'SQL Server Native Client 11.0|SQLNCLI11|SQLOLEDB' \
+  docs/operations/bridge-agent-driver-smoke-runbook-20260520.md
+  -> Mode B / Mode C legacy examples
+```
+
+### Re-verification after P1 + P2
+
+- Secret-shape sweep across all 6 changed files: still **30/30 = 0**
+  (the legacy driver names like `SQLNCLI11`, `SQLOLEDB`,
+  `SQL Server Native Client 11.0` are product identifiers, not
+  credential shapes; they correctly do not match the patterns).
+- `git diff --check`: exit 0.
+- Branch self-check before commit: still
+  `codex/bridge-agent-driver-smoke-20260520`.
+
+The PR (#1721) auto-updates with the new commit on push; no second PR
+opened.

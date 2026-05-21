@@ -78,9 +78,16 @@ talking to this SQL Server.
   -Provider SqlClient
 ```
 
-### Mode B: ODBC (Microsoft ODBC Driver 17 for SQL Server)
+### Mode B: ODBC
 
-Best when customer IT has standardized on the ODBC stack.
+Best when customer IT has standardized on the ODBC stack. The driver
+name the harness uses comes from `-OdbcDriverName`. The default targets
+the modern ODBC Driver 17, but BA-M0 may have selected a different
+**customer-approved driver** — the whole point of BA-M0.5 is to exercise
+*that* driver, not our preset. Override with the exact name as it
+appears under `HKLM\SOFTWARE\ODBC\ODBCINST.INI` on the bridge machine.
+
+Modern (default):
 
 ```powershell
 .\scripts\ops\bridge-agent-driver-smoke.ps1 `
@@ -89,12 +96,32 @@ Best when customer IT has standardized on the ODBC stack.
   -Username '<readonly_user>' `
   -PasswordEnvVar BRIDGE_SMOKE_DB_PASSWORD `
   -OutDir 'C:\metasheet\bridge-evidence' `
-  -Provider Odbc
+  -Provider Odbc `
+  -OdbcDriverName 'ODBC Driver 17 for SQL Server'
 ```
 
-### Mode C: OLE DB (MSOLEDBSQL)
+Legacy (only if BA-M0 approved the older Native Client or the ancient
+Windows ODBC driver):
 
-Best when the customer IT inventory still proves OLE DB drivers.
+```powershell
+# SQL Server Native Client 11.0 (common on 2014-era Windows servers):
+.\scripts\ops\bridge-agent-driver-smoke.ps1 ... `
+  -Provider Odbc `
+  -OdbcDriverName 'SQL Server Native Client 11.0'
+
+# Other approved alternates:
+#   -OdbcDriverName 'ODBC Driver 18 for SQL Server'
+#   -OdbcDriverName 'SQL Server'   (the original ancient one)
+```
+
+### Mode C: OLE DB
+
+Best when the customer IT inventory still proves OLE DB providers.
+`-OleDbProviderName` selects which provider the harness asks for. The
+default targets the modern `MSOLEDBSQL`; legacy customers may require
+`SQLNCLI11` or `SQLOLEDB`.
+
+Modern (default):
 
 ```powershell
 .\scripts\ops\bridge-agent-driver-smoke.ps1 `
@@ -102,7 +129,23 @@ Best when the customer IT inventory still proves OLE DB drivers.
   -Database '<db>' `
   -IntegratedSecurity `
   -OutDir 'C:\metasheet\bridge-evidence' `
-  -Provider OleDb
+  -Provider OleDb `
+  -OleDbProviderName 'MSOLEDBSQL'
+```
+
+Legacy (only if approved by BA-M0):
+
+```powershell
+# SQL Server Native Client 11.0 OLE DB provider:
+.\scripts\ops\bridge-agent-driver-smoke.ps1 ... `
+  -Provider OleDb `
+  -OleDbProviderName 'SQLNCLI11'
+
+# Legacy SQL OLE DB provider (deprecated by Microsoft, still installed on
+# many older Windows servers; only use if BA-M0 explicitly approved it):
+.\scripts\ops\bridge-agent-driver-smoke.ps1 ... `
+  -Provider OleDb `
+  -OleDbProviderName 'SQLOLEDB'
 ```
 
 ### Fallback: jTDS (Java) if no .NET path is acceptable

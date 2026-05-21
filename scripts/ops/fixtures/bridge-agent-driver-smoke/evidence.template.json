@@ -9,6 +9,8 @@
   },
   "target": {
     "provider": "<SqlClient | Odbc | OleDb>",
+    "odbcDriverName": "<populated only when provider=Odbc, e.g. 'ODBC Driver 17 for SQL Server' or 'SQL Server Native Client 11.0' or 'SQL Server'; null otherwise>",
+    "oleDbProviderName": "<populated only when provider=OleDb, e.g. 'MSOLEDBSQL' or 'SQLNCLI11' or 'SQLOLEDB'; null otherwise>",
     "serverPresent": true,
     "databasePresent": true,
     "integratedSecurity": false
