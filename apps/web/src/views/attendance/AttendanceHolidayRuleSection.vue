@@ -101,6 +101,98 @@
           </div>
         </div>
       </div>
+      <div class="attendance__field attendance__field--full">
+        <div class="attendance__admin-subsection">
+          <div class="attendance__admin-subsection-header attendance__admin-subsection-header--accordion">
+            <button class="attendance__accordion" type="button" :aria-expanded="calendarPolicyOverridesExpanded ? 'true' : 'false'" @click="toggleCalendarPolicyOverrides">
+              <span class="attendance__accordion-copy">
+                <strong>{{ tr('Effective calendar overrides', '有效日历覆盖规则') }}</strong>
+                <small>{{ calendarPolicyOverrideSummary }}</small>
+              </span>
+              <span class="attendance__accordion-indicator">{{ calendarPolicyOverridesExpanded ? tr('Collapse', '收起') : tr('Expand', '展开') }}</span>
+            </button>
+            <button class="attendance__btn" type="button" @click="addCalendarPolicyOverrideAndExpand">{{ tr('Add calendar override', '新增日历覆盖') }}</button>
+          </div>
+          <p class="attendance__field-hint">
+            {{ tr('These overrides drive the effective-calendar API and attendance calculation chain. Rest-to-work changes can create auto-absence rows after the auto-absence job runs.', '这些规则会影响有效日历 API 与考勤计算链。休息日改为工作日后，自动缺勤任务运行时可能生成缺勤记录。') }}
+          </p>
+          <p class="attendance__field-hint attendance__field-hint--warn">
+            {{ tr('Role and role-tag matching is reserved until role context is loaded by the resolver; keep new rules scoped to org, group, or user.', '角色与角色标签匹配需等待解析器加载角色上下文；新增规则请先使用组织、考勤组或用户范围。') }}
+          </p>
+          <div v-if="calendarPolicyOverridesExpanded">
+            <div v-if="settingsForm.calendarPolicyOverrides.length === 0" class="attendance__empty">{{ tr('No effective calendar overrides configured.', '暂无有效日历覆盖规则。') }}</div>
+            <div v-else class="attendance__table-wrapper">
+              <table class="attendance__table">
+                <thead>
+                  <tr>
+                    <th>{{ tr('Date / range', '日期 / 范围') }}</th>
+                    <th>{{ tr('Holiday name match', '节假日名称匹配') }}</th>
+                    <th>{{ tr('Scope', '范围') }}</th>
+                    <th>{{ tr('Effective day', '生效日类型') }}</th>
+                    <th>{{ tr('Label', '标签') }}</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template v-for="(override, index) in settingsForm.calendarPolicyOverrides" :key="`calendar-policy-override-${override.id || index}`">
+                    <tr>
+                      <td>
+                        <div class="attendance__inline-fields">
+                          <input v-model="override.date" class="attendance__table-input" type="date" :aria-label="tr('Single date', '单日')" />
+                          <input v-model="override.from" class="attendance__table-input" type="date" :aria-label="tr('From date', '开始日期')" />
+                          <input v-model="override.to" class="attendance__table-input" type="date" :aria-label="tr('To date', '结束日期')" />
+                        </div>
+                      </td>
+                      <td>
+                        <input v-model="override.name" class="attendance__table-input" type="text" placeholder="春节" />
+                        <select v-model="override.match" class="attendance__table-input">
+                          <option value="contains">{{ tr('Contains', '包含') }}</option>
+                          <option value="equals">{{ tr('Equals', '等于') }}</option>
+                          <option value="regex">{{ tr('Regex', '正则') }}</option>
+                        </select>
+                      </td>
+                      <td>
+                        <select v-model="override.source" class="attendance__table-input">
+                          <option value="org">{{ tr('Organization', '组织') }}</option>
+                          <option value="group">{{ tr('Attendance group', '考勤组') }}</option>
+                          <option value="user">{{ tr('User', '用户') }}</option>
+                          <option value="role" disabled>{{ tr('Role (reserved)', '角色（预留）') }}</option>
+                        </select>
+                      </td>
+                      <td>
+                        <select v-model="override.isWorkingDay" class="attendance__table-input">
+                          <option :value="true">{{ tr('Working day', '工作日') }}</option>
+                          <option :value="false">{{ tr('Rest day', '休息日') }}</option>
+                        </select>
+                      </td>
+                      <td><input v-model="override.label" class="attendance__table-input" type="text" :placeholder="tr('Policy label', '规则标签')" /></td>
+                      <td><button class="attendance__btn attendance__btn--danger" type="button" @click="removeCalendarPolicyOverride(index)">{{ tr('Remove', '移除') }}</button></td>
+                    </tr>
+                    <tr class="attendance__table-row--meta">
+                      <td colspan="6">
+                        <div class="attendance__override-filters">
+                          <label class="attendance__override-field">
+                            <span>{{ tr('Attendance groups', '考勤组') }}</span>
+                            <input v-model="override.attendanceGroups" type="text" placeholder="单休办公,白班" />
+                            <small v-if="attendanceGroupOptions.length" class="attendance__field-hint">{{ tr('Known groups', '已知分组') }}: {{ attendanceGroupOptions.join(', ') }}</small>
+                          </label>
+                          <label class="attendance__override-field"><span>{{ tr('User IDs', '用户ID') }}</span><input v-model="override.userIds" type="text" placeholder="uuid1,uuid2" /></label>
+                          <label class="attendance__override-field"><span>{{ tr('User names', '用户名') }}</span><input v-model="override.userNames" type="text" placeholder="张三,李四" /></label>
+                          <label class="attendance__override-field"><span>{{ tr('Exclude user IDs', '排除用户ID') }}</span><input v-model="override.excludeUserIds" type="text" placeholder="uuid3" /></label>
+                          <label class="attendance__override-field"><span>{{ tr('Exclude user names', '排除用户名') }}</span><input v-model="override.excludeUserNames" type="text" placeholder="王五" /></label>
+                          <label class="attendance__override-field"><span>{{ tr('Day index start', '节假日序号起始') }}</span><input v-model.number="override.dayIndexStart" type="number" min="1" /></label>
+                          <label class="attendance__override-field"><span>{{ tr('Day index end', '节假日序号结束') }}</span><input v-model.number="override.dayIndexEnd" type="number" min="1" /></label>
+                          <label class="attendance__override-field"><span>{{ tr('Day index list', '节假日序号列表') }}</span><input v-model="override.dayIndexList" type="text" placeholder="1,2,3" /></label>
+                        </div>
+                      </td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
     <button class="attendance__btn attendance__btn--primary" :disabled="settingsLoading" @click="saveSettings">
       {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save holiday settings', '保存节假日设置') }}
@@ -188,6 +280,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch, type Ref } from 'vue'
+import type { CalendarPolicyOverrideFormState } from './attendanceCalendarPolicyOverrides'
 import { buildTimezoneOptionGroups } from './attendanceTimezones'
 
 type Translate = (en: string, zh: string) => string
@@ -227,6 +320,7 @@ interface SettingsFormState {
   holidayOvertimeAdds: boolean
   holidayOvertimeSource: 'approval' | 'clock' | 'both'
   holidayOverrides: HolidayOverrideFormState[]
+  calendarPolicyOverrides: CalendarPolicyOverrideFormState[]
   holidaySyncBaseUrl: string
   holidaySyncYears: string
   holidaySyncAddDayIndex: boolean
@@ -240,10 +334,12 @@ interface SettingsFormState {
 }
 
 interface HolidayRuleBindings {
+  addCalendarPolicyOverride: () => MaybePromise<void>
   addHolidayOverride: () => MaybePromise<void>
   holidaySyncLastRun: Ref<HolidaySyncLastRun | null>
   holidaySyncLoading: Ref<boolean>
   removeHolidayOverride: (index: number) => MaybePromise<void>
+  removeCalendarPolicyOverride: (index: number) => MaybePromise<void>
   saveSettings: () => MaybePromise<void>
   settingsForm: SettingsFormState
   settingsLoading: Ref<boolean>
@@ -270,9 +366,14 @@ const settingsLoading = props.config.settingsLoading
 const syncHolidays = () => props.config.syncHolidays()
 const syncHolidaysForYears = (years: number[]) => props.config.syncHolidaysForYears(years)
 const holidayOverridesExpanded = ref((settingsForm.holidayOverrides?.length ?? 0) > 0)
+const calendarPolicyOverridesExpanded = ref((settingsForm.calendarPolicyOverrides?.length ?? 0) > 0)
 
 watch(() => settingsForm.holidayOverrides.length, (next, prev) => {
   if (next > prev) holidayOverridesExpanded.value = true
+})
+
+watch(() => settingsForm.calendarPolicyOverrides.length, (next, prev) => {
+  if (next > prev) calendarPolicyOverridesExpanded.value = true
 })
 
 const holidayOverrideSummary = computed(() => {
@@ -280,8 +381,17 @@ const holidayOverrideSummary = computed(() => {
   return count === 0 ? tr('No overrides configured', '暂无覆盖规则') : tr(`${count} override(s) configured`, `已配置 ${count} 条规则`)
 })
 
+const calendarPolicyOverrideSummary = computed(() => {
+  const count = settingsForm.calendarPolicyOverrides.length
+  return count === 0 ? tr('No effective calendar overrides configured', '暂无有效日历覆盖规则') : tr(`${count} effective override(s) configured`, `已配置 ${count} 条有效日历规则`)
+})
+
 const toggleHolidayOverrides = () => {
   holidayOverridesExpanded.value = !holidayOverridesExpanded.value
+}
+
+const toggleCalendarPolicyOverrides = () => {
+  calendarPolicyOverridesExpanded.value = !calendarPolicyOverridesExpanded.value
 }
 
 const addHolidayOverrideAndExpand = () => {
@@ -289,7 +399,13 @@ const addHolidayOverrideAndExpand = () => {
   props.config.addHolidayOverride()
 }
 
+const addCalendarPolicyOverrideAndExpand = () => {
+  calendarPolicyOverridesExpanded.value = true
+  props.config.addCalendarPolicyOverride()
+}
+
 const removeHolidayOverride = (index: number) => props.config.removeHolidayOverride(index)
+const removeCalendarPolicyOverride = (index: number) => props.config.removeCalendarPolicyOverride(index)
 const currentYear = new Date().getFullYear()
 const syncCurrentYear = () => syncHolidaysForYears([currentYear])
 const syncNextYear = () => syncHolidaysForYears([currentYear + 1])
@@ -306,6 +422,7 @@ const syncNextYear = () => syncHolidaysForYears([currentYear + 1])
 .attendance__field--full { grid-column: 1 / -1; }
 .attendance__field--checkbox { justify-content: flex-end; }
 .attendance__field-hint { color: #777; font-size: 11px; }
+.attendance__field-hint--warn { color: #9a6700; }
 .attendance__accordion { flex: 1; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 10px; border: 1px solid #d0d0d0; background: #fff; cursor: pointer; text-align: left; }
 .attendance__accordion-copy small, .attendance__accordion-indicator { color: #666; font-size: 12px; }
 .attendance__btn { padding: 8px 14px; border-radius: 6px; border: 1px solid #d0d0d0; background: #fff; cursor: pointer; }
@@ -318,6 +435,7 @@ const syncNextYear = () => syncHolidaysForYears([currentYear + 1])
 .attendance__table th, .attendance__table td { border-bottom: 1px solid #e0e0e0; padding: 8px; text-align: left; font-size: 13px; }
 .attendance__table-row--meta td { background: #fafafa; }
 .attendance__table-input { width: 100%; min-width: 0; box-sizing: border-box; }
+.attendance__inline-fields { display: grid; grid-template-columns: repeat(3, minmax(120px, 1fr)); gap: 6px; }
 .attendance__empty { color: #888; font-size: 13px; margin-top: 8px; }
 .attendance__admin-meta { color: #555; font-size: 13px; }
 </style>

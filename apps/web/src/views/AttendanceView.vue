@@ -1393,6 +1393,121 @@
                     </div>
                   </div>
                 </div>
+                <div class="attendance__field attendance__field--full">
+                  <div class="attendance__admin-subsection">
+                    <div class="attendance__admin-subsection-header">
+                      <h5>{{ tr('Effective calendar overrides', '有效日历覆盖规则') }}</h5>
+                      <button class="attendance__btn" type="button" @click="addCalendarPolicyOverride">
+                        {{ tr('Add calendar override', '新增日历覆盖') }}
+                      </button>
+                    </div>
+                    <p class="attendance__field-hint">
+                      {{ tr('These overrides feed the effective-calendar API and attendance calculation chain. Rest-to-work changes can create auto-absence rows after the auto-absence job runs.', '这些规则会进入有效日历 API 与考勤计算链。休息日改为工作日后，自动缺勤任务运行时可能生成缺勤记录。') }}
+                    </p>
+                    <p class="attendance__field-hint attendance__field-hint--warn">
+                      {{ tr('Role and role-tag matching is reserved until role context is loaded by the resolver; keep new rules scoped to org, group, or user.', '角色与角色标签匹配需等待解析器加载角色上下文；新增规则请先使用组织、考勤组或用户范围。') }}
+                    </p>
+                    <div v-if="settingsForm.calendarPolicyOverrides.length === 0" class="attendance__empty">
+                      {{ tr('No effective calendar overrides configured.', '暂无有效日历覆盖规则。') }}
+                    </div>
+                    <div v-else class="attendance__table-wrapper">
+                      <table class="attendance__table">
+                        <thead>
+                          <tr>
+                            <th>{{ tr('Date / range', '日期 / 范围') }}</th>
+                            <th>{{ tr('Holiday name match', '节假日名称匹配') }}</th>
+                            <th>{{ tr('Scope', '范围') }}</th>
+                            <th>{{ tr('Effective day', '生效日类型') }}</th>
+                            <th>{{ tr('Label', '标签') }}</th>
+                            <th></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <template v-for="(override, index) in settingsForm.calendarPolicyOverrides" :key="`calendar-policy-override-${override.id || index}`">
+                            <tr>
+                              <td>
+                                <div class="attendance__inline-fields">
+                                  <input v-model="override.date" type="date" :aria-label="tr('Single date', '单日')" />
+                                  <input v-model="override.from" type="date" :aria-label="tr('From date', '开始日期')" />
+                                  <input v-model="override.to" type="date" :aria-label="tr('To date', '结束日期')" />
+                                </div>
+                              </td>
+                              <td>
+                                <input v-model="override.name" type="text" placeholder="春节" />
+                                <select v-model="override.match">
+                                  <option value="contains">{{ tr('Contains', '包含') }}</option>
+                                  <option value="equals">{{ tr('Equals', '等于') }}</option>
+                                  <option value="regex">{{ tr('Regex', '正则') }}</option>
+                                </select>
+                              </td>
+                              <td>
+                                <select v-model="override.source">
+                                  <option value="org">{{ tr('Organization', '组织') }}</option>
+                                  <option value="group">{{ tr('Attendance group', '考勤组') }}</option>
+                                  <option value="user">{{ tr('User', '用户') }}</option>
+                                  <option value="role" disabled>{{ tr('Role (reserved)', '角色（预留）') }}</option>
+                                </select>
+                              </td>
+                              <td>
+                                <select v-model="override.isWorkingDay">
+                                  <option :value="true">{{ tr('Working day', '工作日') }}</option>
+                                  <option :value="false">{{ tr('Rest day', '休息日') }}</option>
+                                </select>
+                              </td>
+                              <td><input v-model="override.label" type="text" :placeholder="tr('Policy label', '规则标签')" /></td>
+                              <td>
+                                <button class="attendance__btn attendance__btn--danger" type="button" @click="removeCalendarPolicyOverride(index)">
+                                  {{ tr('Remove', '移除') }}
+                                </button>
+                              </td>
+                            </tr>
+                            <tr class="attendance__table-row--meta">
+                              <td colspan="6">
+                                <div class="attendance__override-filters">
+                                  <label class="attendance__override-field">
+                                    <span>{{ tr('Attendance groups', '考勤组') }}</span>
+                                    <input v-model="override.attendanceGroups" type="text" placeholder="单休办公,白班" />
+                                    <small v-if="attendanceGroupOptions.length" class="attendance__field-hint">
+                                      {{ tr('Known groups', '已知分组') }}: {{ attendanceGroupOptions.join(', ') }}
+                                    </small>
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>{{ tr('User IDs', '用户ID') }}</span>
+                                    <input v-model="override.userIds" type="text" placeholder="uuid1,uuid2" />
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>{{ tr('User names', '用户名') }}</span>
+                                    <input v-model="override.userNames" type="text" placeholder="张三,李四" />
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>{{ tr('Exclude user IDs', '排除用户ID') }}</span>
+                                    <input v-model="override.excludeUserIds" type="text" placeholder="uuid3" />
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>{{ tr('Exclude user names', '排除用户名') }}</span>
+                                    <input v-model="override.excludeUserNames" type="text" placeholder="王五" />
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>{{ tr('Day index start', '节假日序号起始') }}</span>
+                                    <input v-model.number="override.dayIndexStart" type="number" min="1" />
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>{{ tr('Day index end', '节假日序号结束') }}</span>
+                                    <input v-model.number="override.dayIndexEnd" type="number" min="1" />
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>{{ tr('Day index list', '节假日序号列表') }}</span>
+                                    <input v-model="override.dayIndexList" type="text" placeholder="1,2,3" />
+                                  </label>
+                                </div>
+                              </td>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
                 <label class="attendance__field" for="attendance-min-punch-interval">
                   <span>{{ tr('Min punch interval (min)', '最小打卡间隔（分钟）') }}</span>
                   <input
@@ -4687,6 +4802,13 @@ import AttendanceImportBatchesSection from './attendance/AttendanceImportBatches
 import AttendanceHolidayDataSection from './attendance/AttendanceHolidayDataSection.vue'
 import AttendanceUserPickerField from './attendance/AttendanceUserPickerField.vue'
 import AttendanceReportFieldsSection from './attendance/AttendanceReportFieldsSection.vue'
+import {
+  calendarPolicyOverridesFromForm,
+  calendarPolicyOverridesToForm,
+  createDefaultCalendarPolicyOverrideForm,
+  type CalendarPolicyOverrideFormState,
+  type CalendarPolicyOverrideWire,
+} from './attendance/attendanceCalendarPolicyOverrides'
 import { useAttendanceAdminImportBatches } from './attendance/useAttendanceAdminImportBatches'
 import {
   buildRuleSetPreviewRecommendations,
@@ -5076,6 +5198,9 @@ interface AttendanceSettings {
     overtimeAdds?: boolean
     overtimeSource?: 'approval' | 'clock' | 'both'
     overrides?: HolidayPolicyOverride[]
+  }
+  calendarPolicy?: {
+    overrides?: CalendarPolicyOverrideWire[]
   }
   holidaySync?: {
     source?: 'holiday-cn'
@@ -7489,6 +7614,7 @@ const settingsForm = reactive({
   holidayOvertimeAdds: true,
   holidayOvertimeSource: 'approval' as 'approval' | 'clock' | 'both',
   holidayOverrides: [] as HolidayPolicyOverrideForm[],
+  calendarPolicyOverrides: [] as CalendarPolicyOverrideFormState[],
   holidaySyncBaseUrl: 'https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master',
   holidaySyncYears: '',
   holidaySyncAddDayIndex: true,
@@ -12352,6 +12478,7 @@ function applySettingsToForm(settings: AttendanceSettings) {
         }
       })
     : []
+  settingsForm.calendarPolicyOverrides = calendarPolicyOverridesToForm(settings.calendarPolicy?.overrides)
   settingsForm.holidaySyncBaseUrl = settings.holidaySync?.baseUrl
     || 'https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master'
   settingsForm.holidaySyncYears = Array.isArray(settings.holidaySync?.years)
@@ -12398,6 +12525,14 @@ function addHolidayOverride() {
 
 function removeHolidayOverride(index: number) {
   settingsForm.holidayOverrides.splice(index, 1)
+}
+
+function addCalendarPolicyOverride() {
+  settingsForm.calendarPolicyOverrides.push(createDefaultCalendarPolicyOverrideForm())
+}
+
+function removeCalendarPolicyOverride(index: number) {
+  settingsForm.calendarPolicyOverrides.splice(index, 1)
 }
 
 async function loadSettings() {
@@ -12487,6 +12622,9 @@ async function saveSettings() {
               : undefined,
           }))
           .filter((override) => override.name.length > 0),
+      },
+      calendarPolicy: {
+        overrides: calendarPolicyOverridesFromForm(settingsForm.calendarPolicyOverrides),
       },
       holidaySync: {
         source: 'holiday-cn',
@@ -14673,6 +14811,10 @@ const holidaySectionBindings = {
   color: #c0392b;
 }
 
+.attendance__field-hint--warn {
+  color: #9a6700;
+}
+
 .attendance__btn {
   padding: 8px 14px;
   border-radius: 6px;
@@ -15337,6 +15479,12 @@ const holidaySectionBindings = {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 8px;
+}
+
+.attendance__inline-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(120px, 1fr));
+  gap: 6px;
 }
 
 .attendance__override-field {

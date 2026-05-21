@@ -1,4 +1,11 @@
 import { reactive, ref, type Ref } from 'vue'
+import {
+  calendarPolicyOverridesFromForm,
+  calendarPolicyOverridesToForm,
+  createDefaultCalendarPolicyOverrideForm,
+  type CalendarPolicyOverrideFormState,
+  type CalendarPolicyOverrideWire,
+} from './attendanceCalendarPolicyOverrides'
 
 type Translate = (en: string, zh: string) => string
 type SetStatusFn = (message: string, kind?: 'info' | 'error') => void
@@ -41,6 +48,9 @@ interface AttendanceSettings {
     overtimeAdds?: boolean
     overtimeSource?: 'approval' | 'clock' | 'both'
     overrides?: HolidayPolicyOverride[]
+  }
+  calendarPolicy?: {
+    overrides?: CalendarPolicyOverrideWire[]
   }
   holidaySync?: {
     source?: 'holiday-cn'
@@ -180,6 +190,7 @@ export function useAttendanceAdminConfig({
     holidayOvertimeAdds: true,
     holidayOvertimeSource: 'approval' as 'approval' | 'clock' | 'both',
     holidayOverrides: [] as HolidayPolicyOverrideForm[],
+    calendarPolicyOverrides: [] as CalendarPolicyOverrideFormState[],
     holidaySyncBaseUrl: 'https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master',
     holidaySyncYears: '',
     holidaySyncAddDayIndex: true,
@@ -243,6 +254,7 @@ export function useAttendanceAdminConfig({
           }
         })
       : []
+    settingsForm.calendarPolicyOverrides = calendarPolicyOverridesToForm(settings.calendarPolicy?.overrides)
     settingsForm.holidaySyncBaseUrl = settings.holidaySync?.baseUrl
       || 'https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master'
     settingsForm.holidaySyncYears = Array.isArray(settings.holidaySync?.years)
@@ -289,6 +301,14 @@ export function useAttendanceAdminConfig({
 
   function removeHolidayOverride(index: number) {
     settingsForm.holidayOverrides.splice(index, 1)
+  }
+
+  function addCalendarPolicyOverride() {
+    settingsForm.calendarPolicyOverrides.push(createDefaultCalendarPolicyOverrideForm())
+  }
+
+  function removeCalendarPolicyOverride(index: number) {
+    settingsForm.calendarPolicyOverrides.splice(index, 1)
   }
 
   async function loadSettings() {
@@ -378,6 +398,9 @@ export function useAttendanceAdminConfig({
                 : undefined,
             }))
             .filter((override) => override.name.length > 0),
+        },
+        calendarPolicy: {
+          overrides: calendarPolicyOverridesFromForm(settingsForm.calendarPolicyOverrides),
         },
         holidaySync: {
           source: 'holiday-cn',
@@ -566,11 +589,13 @@ export function useAttendanceAdminConfig({
   }
 
   return {
+    addCalendarPolicyOverride,
     addHolidayOverride,
     holidaySyncLastRun,
     holidaySyncLoading,
     loadRule,
     loadSettings,
+    removeCalendarPolicyOverride,
     removeHolidayOverride,
     ruleForm,
     ruleLoading,

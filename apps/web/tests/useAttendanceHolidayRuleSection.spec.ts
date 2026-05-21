@@ -21,12 +21,35 @@ interface HolidayOverrideState {
   overtimeSource: 'approval' | 'clock' | 'both'
 }
 
+interface CalendarPolicyOverrideState {
+  id?: string
+  name: string
+  match: 'contains' | 'regex' | 'equals'
+  date: string
+  from: string
+  to: string
+  dayIndexStart: number | null
+  dayIndexEnd: number | null
+  dayIndexList: string
+  source: 'org' | 'group' | 'role' | 'user'
+  isWorkingDay: boolean
+  label: string
+  attendanceGroups: string
+  roles: string
+  roleTags: string
+  userIds: string
+  userNames: string
+  excludeUserIds: string
+  excludeUserNames: string
+}
+
 interface HolidaySettingsState {
   holidayFirstDayEnabled: boolean
   holidayFirstDayBaseHours: number
   holidayOvertimeAdds: boolean
   holidayOvertimeSource: 'approval' | 'clock' | 'both'
   holidayOverrides: HolidayOverrideState[]
+  calendarPolicyOverrides: CalendarPolicyOverrideState[]
   holidaySyncBaseUrl: string
   holidaySyncYears: string
   holidaySyncAddDayIndex: boolean
@@ -40,10 +63,12 @@ interface HolidaySettingsState {
 }
 
 type HolidayConfig = {
+  addCalendarPolicyOverride: () => void
   addHolidayOverride: () => void
   holidaySyncLastRun: { value: null }
   holidaySyncLoading: { value: boolean }
   removeHolidayOverride: (index: number) => void
+  removeCalendarPolicyOverride: (index: number) => void
   saveSettings: () => void
   settingsForm: HolidaySettingsState
   settingsLoading: { value: boolean }
@@ -72,6 +97,7 @@ function createDefaultSettings(): HolidaySettingsState {
     holidayOvertimeAdds: false,
     holidayOvertimeSource: 'approval',
     holidayOverrides: [],
+    calendarPolicyOverrides: [],
     holidaySyncBaseUrl: '',
     holidaySyncYears: '',
     holidaySyncAddDayIndex: false,
@@ -108,9 +134,11 @@ describe('AttendanceHolidayRuleSection', () => {
     const settingsForm = reactive<HolidaySettingsState>(createDefaultSettings())
 
     const config = {
+      addCalendarPolicyOverride: vi.fn(),
       addHolidayOverride: vi.fn(),
       holidaySyncLastRun: { value: null },
       holidaySyncLoading: { value: false },
+      removeCalendarPolicyOverride: vi.fn(),
       removeHolidayOverride: vi.fn(),
       saveSettings: vi.fn(),
       settingsForm,
@@ -139,9 +167,11 @@ describe('AttendanceHolidayRuleSection', () => {
     const settingsForm = reactive<HolidaySettingsState>(createDefaultSettings())
 
     const config = {
+      addCalendarPolicyOverride: vi.fn(),
       addHolidayOverride: vi.fn(),
       holidaySyncLastRun: { value: null },
       holidaySyncLoading: { value: false },
+      removeCalendarPolicyOverride: vi.fn(),
       removeHolidayOverride: vi.fn(),
       saveSettings: vi.fn(),
       settingsForm,
@@ -176,6 +206,7 @@ describe('AttendanceHolidayRuleSection', () => {
     const settingsForm = reactive<HolidaySettingsState>(createDefaultSettings())
 
     const config = {
+      addCalendarPolicyOverride: vi.fn(),
       addHolidayOverride: vi.fn(() => {
         settingsForm.holidayOverrides.push({
           name: '',
@@ -198,6 +229,7 @@ describe('AttendanceHolidayRuleSection', () => {
       }),
       holidaySyncLastRun: { value: null },
       holidaySyncLoading: { value: false },
+      removeCalendarPolicyOverride: vi.fn(),
       removeHolidayOverride: vi.fn(),
       saveSettings: vi.fn(),
       settingsForm,
@@ -227,13 +259,76 @@ describe('AttendanceHolidayRuleSection', () => {
     expect(container!.querySelector('.attendance__override-field input[placeholder="单休办公,白班"]')).toBeTruthy()
   })
 
+  it('expands and shows effective calendar override controls after adding one rule', async () => {
+    const settingsForm = reactive<HolidaySettingsState>(createDefaultSettings())
+
+    const config = {
+      addCalendarPolicyOverride: vi.fn(() => {
+        settingsForm.calendarPolicyOverrides.push({
+          name: '',
+          match: 'contains',
+          date: '',
+          from: '2026-10-01',
+          to: '2026-10-07',
+          dayIndexStart: null,
+          dayIndexEnd: null,
+          dayIndexList: '',
+          source: 'group',
+          isWorkingDay: false,
+          label: '国庆调休',
+          attendanceGroups: 'day-shift',
+          roles: '',
+          roleTags: '',
+          userIds: '',
+          userNames: '',
+          excludeUserIds: '',
+          excludeUserNames: '',
+        })
+      }),
+      addHolidayOverride: vi.fn(),
+      holidaySyncLastRun: { value: null },
+      holidaySyncLoading: { value: false },
+      removeCalendarPolicyOverride: vi.fn(),
+      removeHolidayOverride: vi.fn(),
+      saveSettings: vi.fn(),
+      settingsForm,
+      settingsLoading: { value: false },
+      syncHolidays: vi.fn(),
+      syncHolidaysForYears: vi.fn(),
+    } as HolidayConfig
+
+    app = createApp(AttendanceHolidayRuleSection, {
+      attendanceGroupOptions: ['day-shift'],
+      config,
+      formatDateTime,
+      tr,
+    })
+    app.mount(container!)
+    await flushUi()
+
+    findButton(container!, '新增日历覆盖').click()
+    await flushUi(6)
+
+    expect(config.addCalendarPolicyOverride).toHaveBeenCalledTimes(1)
+    expect(container!.textContent).toContain('有效日历覆盖规则')
+    expect(container!.textContent).toContain('自动缺勤任务运行时可能生成缺勤记录')
+    const sourceSelect = Array.from(container!.querySelectorAll('select')).find((select) => (
+      Array.from(select.options).some((option) => option.value === 'role' && option.disabled)
+    ))
+    expect(sourceSelect).toBeTruthy()
+    expect(container!.querySelector('input[placeholder="规则标签"]')).toBeTruthy()
+    expect(container!.querySelector('.attendance__override-field input[placeholder="单休办公,白班"]')).toBeTruthy()
+  })
+
   it('shows the auto-sync timezone as a select with UTC offset labels', async () => {
     const settingsForm = reactive<HolidaySettingsState>(createDefaultSettings())
 
     const config = {
+      addCalendarPolicyOverride: vi.fn(),
       addHolidayOverride: vi.fn(),
       holidaySyncLastRun: { value: null },
       holidaySyncLoading: { value: false },
+      removeCalendarPolicyOverride: vi.fn(),
       removeHolidayOverride: vi.fn(),
       saveSettings: vi.fn(),
       settingsForm,
