@@ -2,7 +2,7 @@
   <div v-if="visible" class="meta-log-viewer__overlay" @click.self="$emit('close')">
     <div class="meta-log-viewer">
       <div class="meta-log-viewer__header">
-        <h4 class="meta-log-viewer__title">Execution Logs</h4>
+        <h4 class="meta-log-viewer__title">{{ automationLabel('log.title', isZh) }}</h4>
         <button class="meta-log-viewer__close" type="button" @click="$emit('close')">&times;</button>
       </div>
 
@@ -10,19 +10,19 @@
         <!-- Stats bar -->
         <div v-if="stats" class="meta-log-viewer__stats" data-stats="true">
           <div class="meta-log-viewer__stat">
-            <span class="meta-log-viewer__stat-label">Total</span>
+            <span class="meta-log-viewer__stat-label">{{ automationLabel('log.total', isZh) }}</span>
             <span class="meta-log-viewer__stat-value">{{ stats.total }}</span>
           </div>
           <div class="meta-log-viewer__stat">
-            <span class="meta-log-viewer__stat-label">Success</span>
+            <span class="meta-log-viewer__stat-label">{{ automationLabel('log.success', isZh) }}</span>
             <span class="meta-log-viewer__stat-value meta-log-viewer__stat-value--success">{{ stats.success }}</span>
           </div>
           <div class="meta-log-viewer__stat">
-            <span class="meta-log-viewer__stat-label">Failed</span>
+            <span class="meta-log-viewer__stat-label">{{ automationLabel('log.failed', isZh) }}</span>
             <span class="meta-log-viewer__stat-value meta-log-viewer__stat-value--failed">{{ stats.failed }}</span>
           </div>
           <div class="meta-log-viewer__stat">
-            <span class="meta-log-viewer__stat-label">Avg duration</span>
+            <span class="meta-log-viewer__stat-label">{{ automationLabel('log.avgDuration', isZh) }}</span>
             <span class="meta-log-viewer__stat-value">{{ stats.avgDuration }}ms</span>
           </div>
         </div>
@@ -30,12 +30,12 @@
         <!-- Toolbar -->
         <div class="meta-log-viewer__toolbar">
           <select v-model="statusFilter" class="meta-log-viewer__select" data-field="statusFilter">
-            <option value="">All statuses</option>
-            <option value="success">Success</option>
-            <option value="failed">Failed</option>
-            <option value="skipped">Skipped</option>
+            <option value="">{{ automationLabel('status.all', isZh) }}</option>
+            <option value="success">{{ automationStatusLabel('success', isZh) }}</option>
+            <option value="failed">{{ automationStatusLabel('failed', isZh) }}</option>
+            <option value="skipped">{{ automationStatusLabel('skipped', isZh) }}</option>
           </select>
-          <button class="meta-log-viewer__btn" type="button" data-action="refresh" @click="loadData">Refresh</button>
+          <button class="meta-log-viewer__btn" type="button" data-action="refresh" @click="loadData">{{ automationLabel('log.refresh', isZh) }}</button>
         </div>
 
         <!-- Load error (replaces previous silent catch) -->
@@ -45,19 +45,19 @@
           data-error="true"
           role="alert"
         >
-          <span class="meta-log-viewer__error-label">Failed to load logs:</span>
+          <span class="meta-log-viewer__error-label">{{ automationLabel('log.errorPrefix', isZh) }}</span>
           <span class="meta-log-viewer__error-message" data-field="error-message">{{ loadError }}</span>
           <button
             type="button"
             class="meta-log-viewer__btn meta-log-viewer__btn--retry"
             data-action="retry"
             @click="loadData"
-          >Retry</button>
+          >{{ automationLabel('log.retry', isZh) }}</button>
         </div>
 
         <!-- Log list -->
-        <div v-if="loading" class="meta-log-viewer__empty">Loading logs...</div>
-        <div v-else-if="!loadError && filteredLogs.length === 0" class="meta-log-viewer__empty" data-empty="true">No execution logs found.</div>
+        <div v-if="loading" class="meta-log-viewer__empty">{{ automationLabel('log.loading', isZh) }}</div>
+        <div v-else-if="!loadError && filteredLogs.length === 0" class="meta-log-viewer__empty" data-empty="true">{{ automationLabel('log.empty', isZh) }}</div>
         <div
           v-for="log in filteredLogs"
           :key="log.id"
@@ -71,7 +71,7 @@
               class="meta-log-viewer__badge"
               :class="`meta-log-viewer__badge--${log.status}`"
               :data-status="log.status"
-            >{{ log.status }}</span>
+            >{{ automationStatusLabel(log.status, isZh) }}</span>
             <span class="meta-log-viewer__log-trigger" data-field="triggeredBy">{{ log.triggeredBy }}</span>
             <span class="meta-log-viewer__log-duration">{{ log.duration ?? '-' }}ms</span>
           </div>
@@ -82,13 +82,13 @@
                 type="button"
                 data-action="copy-support-packet"
                 @click.stop="copySupportPacket(log)"
-              >Copy redacted packet</button>
+              >{{ automationLabel('support.copyPacket', isZh) }}</button>
               <button
                 class="meta-log-viewer__btn meta-log-viewer__btn--support"
                 type="button"
                 data-action="download-support-packet"
                 @click.stop="downloadSupportPacket(log)"
-              >Download JSON</button>
+              >{{ automationLabel('support.downloadJson', isZh) }}</button>
               <span
                 v-if="supportPacketStatus[log.id]"
                 class="meta-log-viewer__support-status"
@@ -101,11 +101,11 @@
               class="meta-log-viewer__step"
             >
               <span class="meta-log-viewer__step-num">{{ idx + 1 }}.</span>
-              <span class="meta-log-viewer__step-type">{{ step.actionType }}</span>
+              <span class="meta-log-viewer__step-type">{{ automationActionTypeLabel(step.actionType, isZh) }}</span>
               <span
                 class="meta-log-viewer__badge meta-log-viewer__badge--sm"
                 :class="`meta-log-viewer__badge--${step.status}`"
-              >{{ step.status }}</span>
+              >{{ automationStatusLabel(step.status, isZh) }}</span>
               <span v-if="step.durationMs" class="meta-log-viewer__step-dur">{{ step.durationMs }}ms</span>
               <div
                 v-if="step.error"
@@ -127,8 +127,16 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import type { AutomationExecution, AutomationStats } from '../types'
 import type { MultitableApiClient } from '../api/client'
+import {
+  automationActionTypeLabel,
+  automationLabel,
+  automationStatusLabel,
+  supportCopyFailed,
+  supportDownloadFailed,
+} from '../utils/meta-automation-labels'
 import {
   redactString,
   summarizeStepError,
@@ -158,6 +166,7 @@ const statusFilter = ref('')
 const expandedId = ref<string | null>(null)
 const loadError = ref<string | null>(null)
 const supportPacketStatus = ref<Record<string, string>>({})
+const { isZh } = useLocale()
 
 const filteredLogs = computed(() => {
   if (!statusFilter.value) return logs.value
@@ -187,13 +196,13 @@ async function copySupportPacket(log: AutomationExecution) {
   try {
     const clipboard = navigator?.clipboard
     if (!clipboard?.writeText) {
-      throw new Error('Clipboard unavailable')
+      throw new Error(automationLabel('support.clipboardUnavailable', isZh.value))
     }
     await clipboard.writeText(renderAutomationLogSupportPacketMarkdown(log))
-    setSupportPacketStatus(log.id, 'Redacted packet copied.')
+    setSupportPacketStatus(log.id, automationLabel('support.copied', isZh.value))
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
-    setSupportPacketStatus(log.id, redactString(`Copy failed: ${message}`))
+    setSupportPacketStatus(log.id, redactString(supportCopyFailed(message, isZh.value)))
   }
 }
 
@@ -208,10 +217,10 @@ function downloadSupportPacket(log: AutomationExecution) {
     link.download = createAutomationLogSupportPacketFilename(log)
     link.click()
     URL.revokeObjectURL(url)
-    setSupportPacketStatus(log.id, 'Redacted JSON downloaded.')
+    setSupportPacketStatus(log.id, automationLabel('support.downloaded', isZh.value))
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
-    setSupportPacketStatus(log.id, redactString(`Download failed: ${message}`))
+    setSupportPacketStatus(log.id, redactString(supportDownloadFailed(message, isZh.value)))
   }
 }
 
@@ -232,7 +241,7 @@ async function loadData() {
     // when fetches actually failed (the user could not tell the difference
     // between an empty rule and a backend / network error).
     const message = err instanceof Error ? err.message : String(err)
-    loadError.value = redactString(message) || 'Unknown error'
+    loadError.value = redactString(message) || automationLabel('error.unknown', isZh.value)
     logs.value = []
     stats.value = null
   } finally {

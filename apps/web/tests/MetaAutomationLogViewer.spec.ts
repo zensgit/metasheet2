@@ -3,6 +3,7 @@ import { createApp, h, nextTick } from 'vue'
 
 import MetaAutomationLogViewer from '../src/multitable/components/MetaAutomationLogViewer.vue'
 import type { AutomationExecution, AutomationStats } from '../src/multitable/types'
+import { useLocale } from '../src/composables/useLocale'
 
 interface MockClientOptions {
   logs?: AutomationExecution[]
@@ -100,9 +101,69 @@ afterEach(() => {
     mounted.container.remove()
     mounted = null
   }
+  useLocale().setLocale('en')
 })
 
 describe('MetaAutomationLogViewer — backend contract normalization', () => {
+  it('localizes log chrome in zh-CN while preserving raw status selectors', async () => {
+    useLocale().setLocale('zh-CN')
+    const client = makeMockClient({
+      logs: [PASS_EXECUTION],
+      stats: { total: 1, success: 1, failed: 0, skipped: 0, avgDuration: 42 },
+    })
+    mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client })
+    await flushPromises()
+
+    const text = mounted.container.textContent ?? ''
+    expect(text).toContain('执行日志')
+    expect(text).toContain('总计')
+    expect(text).toContain('成功')
+    expect(text).toContain('失败')
+    expect(text).toContain('平均耗时')
+    expect(text).toContain('全部状态')
+    expect(text).toContain('刷新')
+    expect(text).not.toContain('Execution Logs')
+    expect(text).not.toContain('All statuses')
+
+    const statusBadge = mounted.container.querySelector('[data-log-id="exec-pass"] [data-status="success"]')
+    expect(statusBadge).not.toBeNull()
+    expect(statusBadge?.textContent?.trim()).toBe('成功')
+  })
+
+  it('localizes expanded step and support actions in zh-CN without changing data-action attributes', async () => {
+    useLocale().setLocale('zh-CN')
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    })
+    const client = makeMockClient({ logs: [PASS_EXECUTION] })
+    mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client })
+    await flushPromises()
+
+    const item = mounted.container.querySelector('[data-log-id="exec-pass"]') as HTMLElement
+    item.click()
+    await nextTick()
+
+    expect(item.textContent ?? '').toContain('发送邮件')
+    expect(item.querySelector('[data-action="copy-support-packet"]')?.textContent).toContain('复制脱敏包')
+    expect(item.querySelector('[data-action="download-support-packet"]')?.textContent).toContain('下载 JSON')
+
+    ;(item.querySelector('[data-action="copy-support-packet"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(item.querySelector('[data-field="support-packet-status"]')?.textContent).toContain('已复制脱敏包')
+  })
+
+  it('does not add aria-label, title, or placeholder attributes for the log viewer fixture', async () => {
+    const client = makeMockClient({ logs: [PASS_EXECUTION] })
+    mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client })
+    await flushPromises()
+
+    expect(mounted.container.querySelectorAll('[aria-label]')).toHaveLength(0)
+    expect(mounted.container.querySelectorAll('[title]')).toHaveLength(0)
+    expect(mounted.container.querySelectorAll('[placeholder]')).toHaveLength(0)
+  })
+
   it('renders `triggeredAt` as the log time, not the removed `startedAt`', async () => {
     const client = makeMockClient({ logs: [PASS_EXECUTION] })
     mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client })
