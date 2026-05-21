@@ -96,8 +96,8 @@ describe('AttendanceCalendarPolicyPreviewPanel', () => {
     vi.clearAllMocks()
   })
 
-  function mountPanel(): HTMLElement {
-    app = createApp(AttendanceCalendarPolicyPreviewPanel, { tr })
+  function mountPanel(extraProps: Record<string, unknown> = {}): HTMLElement {
+    app = createApp(AttendanceCalendarPolicyPreviewPanel, { tr, ...extraProps })
     app.mount(container!)
     return container!
   }
@@ -167,5 +167,46 @@ describe('AttendanceCalendarPolicyPreviewPanel', () => {
     const error = root.querySelector('[data-attendance-calendar-policy-preview-error]')
     expect(error?.textContent).toContain('No access to this user. (FORBIDDEN)')
     expect(root.querySelector('[data-attendance-calendar-policy-preview-result]')).toBeNull()
+  })
+
+  it('can include or exclude unsaved editor overrides from preview calls', async () => {
+    const draftOverrides = [
+      {
+        date: '2026-10-06',
+        effective: { isWorkingDay: true, source: 'org' as const, label: 'Draft workday' },
+      },
+    ]
+    fetchEffectiveCalendarMock.mockResolvedValue(buildResult())
+    const root = mountPanel({ draftOverrides })
+    await flushUi()
+
+    expect(root.textContent).toContain('包含未保存的编辑规则（1 条）')
+    setInput(root, '[data-attendance-calendar-policy-preview-from]', '2026-10-01')
+    setInput(root, '[data-attendance-calendar-policy-preview-to]', '2026-10-07')
+    clickPreview(root)
+    await flushUi(8)
+
+    expect(fetchEffectiveCalendarMock).toHaveBeenLastCalledWith({
+      from: '2026-10-01',
+      to: '2026-10-07',
+      orgOnly: true,
+      suppressUnauthorizedRedirect: true,
+      draftOverrides,
+    })
+
+    const checkbox = root.querySelector<HTMLInputElement>('[data-attendance-calendar-policy-preview-draft]')
+    expect(checkbox).toBeTruthy()
+    checkbox!.checked = false
+    checkbox!.dispatchEvent(new Event('change'))
+    await flushUi()
+    clickPreview(root)
+    await flushUi(8)
+
+    expect(fetchEffectiveCalendarMock).toHaveBeenLastCalledWith({
+      from: '2026-10-01',
+      to: '2026-10-07',
+      orgOnly: true,
+      suppressUnauthorizedRedirect: true,
+    })
   })
 })

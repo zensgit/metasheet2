@@ -82,6 +82,40 @@ describe('fetchEffectiveCalendar', () => {
     expect((apiFetchMock.mock.calls[0]?.[1] as any)?.suppressUnauthorizedRedirect).toBe(false)
   })
 
+  it('posts draft calendar policy overrides to the admin preview endpoint', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, buildOkPayload()))
+    await fetchEffectiveCalendar({
+      from: '2026-10-01',
+      to: '2026-10-07',
+      orgOnly: true,
+      draftOverrides: [
+        {
+          date: '2026-10-04',
+          effective: { isWorkingDay: true, source: 'org', label: 'Draft workday' },
+        },
+      ],
+    })
+
+    expect(apiFetchMock).toHaveBeenCalledTimes(1)
+    const [path, options] = apiFetchMock.mock.calls[0]
+    expect(path).toBe('/api/attendance/effective-calendar/preview')
+    expect((options as any)?.method).toBe('POST')
+    expect((options as any)?.suppressUnauthorizedRedirect).toBe(true)
+    expect(JSON.parse(String((options as any)?.body || '{}'))).toEqual({
+      from: '2026-10-01',
+      to: '2026-10-07',
+      orgOnly: true,
+      calendarPolicy: {
+        overrides: [
+          {
+            date: '2026-10-04',
+            effective: { isWorkingDay: true, source: 'org', label: 'Draft workday' },
+          },
+        ],
+      },
+    })
+  })
+
   it('rejects when no mode is provided (mirrors route validation)', async () => {
     await expect(fetchEffectiveCalendar({ from: '2026-01-01', to: '2026-01-02' } as any)).rejects.toThrow(/exactly one of/)
     expect(apiFetchMock).not.toHaveBeenCalled()

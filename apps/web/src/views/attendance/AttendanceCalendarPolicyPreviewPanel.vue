@@ -4,7 +4,9 @@
       <div>
         <h5>{{ tr('Preview effective calendar', '预览有效日历') }}</h5>
         <p class="attendance__field-hint">
-          {{ tr('Uses the saved effective-calendar resolver. Unsaved edits must be saved first.', '使用已保存的有效日历解析器；未保存的修改需先保存。') }}
+          {{ hasDraftOverrides
+            ? tr('Can preview the current editor draft without saving. Runtime still uses saved settings until Save settings succeeds.', '可在不保存的情况下预览当前编辑草稿；运行时仍以保存成功后的设置为准。')
+            : tr('Uses the saved effective-calendar resolver. Unsaved edits must be saved first.', '使用已保存的有效日历解析器；未保存的修改需先保存。') }}
         </p>
       </div>
       <button
@@ -42,6 +44,14 @@
       <label v-if="previewMode === 'userId'" class="attendance__field">
         <span>{{ tr('User ID', '用户 ID') }}</span>
         <input v-model="previewUserId" type="text" placeholder="user_1" data-attendance-calendar-policy-preview-user />
+      </label>
+      <label v-if="hasDraftOverrides" class="attendance__field attendance__field--checkbox">
+        <span>{{ tr(`Include unsaved editor rules (${draftOverrideCount})`, `包含未保存的编辑规则（${draftOverrideCount} 条）`) }}</span>
+        <input
+          v-model="includeDraftOverrides"
+          type="checkbox"
+          data-attendance-calendar-policy-preview-draft
+        />
       </label>
     </div>
 
@@ -98,10 +108,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import {
   EffectiveCalendarFetchError,
   fetchEffectiveCalendar,
+  type CalendarEffectiveDraftOverride,
   type CalendarEffectiveItem,
   type CalendarEffectiveMode,
   type CalendarEffectiveSource,
@@ -114,6 +125,7 @@ type PreviewMode = CalendarEffectiveMode
 
 const props = defineProps<{
   tr: Translate
+  draftOverrides?: CalendarEffectiveDraftOverride[]
 }>()
 
 const tr = props.tr
@@ -124,9 +136,12 @@ const previewTo = ref(today())
 const previewMode = ref<PreviewMode>('orgOnly')
 const previewGroupId = ref('')
 const previewUserId = ref('')
+const includeDraftOverrides = ref(true)
 const previewLoading = ref(false)
 const previewError = ref('')
 const previewResult = ref<CalendarEffectiveResponse | null>(null)
+const hasDraftOverrides = computed(() => Array.isArray(props.draftOverrides))
+const draftOverrideCount = computed(() => props.draftOverrides?.length ?? 0)
 
 const SOURCE_LABELS: Record<CalendarEffectiveSource, [string, string]> = {
   rule: ['Rule', '规则'],
@@ -197,7 +212,7 @@ function buildPreviewOptions(): FetchEffectiveCalendarOptions | null {
   }
   if (previewMode.value === 'orgOnly') {
     options.orgOnly = true
-    return options
+    return withDraftOverrides(options)
   }
   if (previewMode.value === 'groupId') {
     const groupId = previewGroupId.value.trim()
@@ -206,7 +221,7 @@ function buildPreviewOptions(): FetchEffectiveCalendarOptions | null {
       return null
     }
     options.groupId = groupId
-    return options
+    return withDraftOverrides(options)
   }
   const userId = previewUserId.value.trim()
   if (!userId) {
@@ -214,6 +229,16 @@ function buildPreviewOptions(): FetchEffectiveCalendarOptions | null {
     return null
   }
   options.userId = userId
+  return withDraftOverrides(options)
+}
+
+function withDraftOverrides(options: FetchEffectiveCalendarOptions): FetchEffectiveCalendarOptions {
+  if (hasDraftOverrides.value && includeDraftOverrides.value) {
+    return {
+      ...options,
+      draftOverrides: props.draftOverrides ?? [],
+    }
+  }
   return options
 }
 

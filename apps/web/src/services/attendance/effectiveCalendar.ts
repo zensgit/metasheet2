@@ -98,6 +98,32 @@ export interface CalendarEffectiveResponse {
   items: CalendarEffectiveItem[]
 }
 
+export interface CalendarEffectiveDraftOverride {
+  id?: string
+  name?: string
+  match?: 'contains' | 'regex' | 'equals'
+  date?: string
+  from?: string
+  to?: string
+  dayIndexStart?: number
+  dayIndexEnd?: number
+  dayIndexList?: number[]
+  filters?: {
+    userIds?: string[]
+    userNames?: string[]
+    excludeUserIds?: string[]
+    excludeUserNames?: string[]
+    attendanceGroups?: string[]
+    roles?: string[]
+    roleTags?: string[]
+  }
+  effective: {
+    isWorkingDay: boolean
+    label?: string
+    source: 'org' | 'group' | 'role' | 'user'
+  }
+}
+
 // UI-facing chip shape: lets calendar components keep treating items as the
 // legacy CalendarHoliday tuple (id/date/name/isWorkingDay drives the badge
 // text + working/rest class) while also carrying the richer effective fields
@@ -170,6 +196,7 @@ export interface FetchEffectiveCalendarOptions {
   userId?: string
   groupId?: string
   orgOnly?: boolean
+  draftOverrides?: CalendarEffectiveDraftOverride[]
   suppressUnauthorizedRedirect?: boolean
   signal?: AbortSignal
 }
@@ -195,6 +222,37 @@ export async function fetchEffectiveCalendar(
   const modeCount = (userId ? 1 : 0) + (groupId ? 1 : 0) + (orgOnly ? 1 : 0)
   if (modeCount !== 1) {
     throw new Error('fetchEffectiveCalendar: provide exactly one of userId, groupId, or orgOnly=true.')
+  }
+
+  const useDraftPreview = Array.isArray(options.draftOverrides)
+  if (useDraftPreview) {
+    const body: Record<string, unknown> = {
+      from,
+      to,
+      calendarPolicy: { overrides: options.draftOverrides ?? [] },
+    }
+    if (userId) body.userId = userId
+    if (groupId) body.groupId = groupId
+    if (orgOnly) body.orgOnly = true
+
+    const response = await apiFetch('/api/attendance/effective-calendar/preview', {
+      method: 'POST',
+      body: JSON.stringify(body),
+      suppressUnauthorizedRedirect: suppressUnauthorizedRedirect ?? true,
+      signal,
+    })
+    let data: any = null
+    try {
+      data = await response.json()
+    } catch {
+      data = null
+    }
+    if (!response.ok || data?.ok === false) {
+      const message = data?.error?.message
+        ?? `Failed to load effective calendar (HTTP ${response.status}).`
+      throw new EffectiveCalendarFetchError(message, response.status, data?.error?.code)
+    }
+    return data?.data as CalendarEffectiveResponse
   }
 
   const query = new URLSearchParams({ from, to })

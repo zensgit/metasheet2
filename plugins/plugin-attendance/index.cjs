@@ -10709,10 +10709,15 @@ async function resolveEffectiveCalendar(db, args) {
   else if (args.groupId) mode = 'groupId'
   else mode = 'orgOnly'
 
-  const settings = await getSettings(db)
-  const calendarOverrides = Array.isArray(settings?.calendarPolicy?.overrides)
-    ? settings.calendarPolicy.overrides
-    : []
+  let calendarPolicyOverrides
+  if (Array.isArray(args.calendarPolicyOverrides)) {
+    calendarPolicyOverrides = normalizeCalendarPolicyOverrides(args.calendarPolicyOverrides)
+  } else {
+    const settings = await getSettings(db)
+    calendarPolicyOverrides = Array.isArray(settings?.calendarPolicy?.overrides)
+      ? settings.calendarPolicy.overrides
+      : []
+  }
   const defaultRule = await loadDefaultRule(db, orgId)
   const dates = enumerateAttendanceCalendarDateRange(from, to)
   const holidaysByDate = await loadHolidayMapByDates(db, orgId, dates)
@@ -10840,7 +10845,7 @@ async function resolveEffectiveCalendar(db, args) {
     // effective.* fields are chosen by the shared selector so the calc
     // chain (resolveWorkContext) reaches the same verdict by the same
     // priority + tie-order rule.
-    for (const override of calendarOverrides) {
+    for (const override of calendarPolicyOverrides) {
       if (!matchCalendarOverride(override, dayContext, mode)) continue
       pushCalendarLayer(layers, {
         kind: 'calendar_policy',
@@ -10850,7 +10855,7 @@ async function resolveEffectiveCalendar(db, args) {
         refId: override.id,
       })
     }
-    const policyWinner = selectHighestPriorityCalendarOverride(calendarOverrides, dayContext, mode)
+    const policyWinner = selectHighestPriorityCalendarOverride(calendarPolicyOverrides, dayContext, mode)
     if (policyWinner) {
       effective = {
         isWorkingDay: policyWinner.isWorkingDay,
@@ -12719,6 +12724,8 @@ module.exports = {
     normalizeAttendancePayrollSummaryFieldTemplateConfig,
     buildAttendancePayrollSummaryFieldTemplate,
     getAttendancePayrollSummaryFieldValue,
+    normalizeCalendarPolicyOverrides,
+    resolveEffectiveCalendar,
     buildAttendanceRecordReportExportItem,
     buildAttendanceRecordReportExportItemAsync,
     buildAttendanceRecordReportCsv,
@@ -12741,6 +12748,43 @@ module.exports = {
         context.api.events.emit(type, data)
       }
     }
+
+    const calendarPolicyOverrideSchema = z.object({
+      id: z.string().optional(),
+      name: z.string().optional(),
+      match: z.enum(['contains', 'regex', 'equals']).optional(),
+      date: z.string().optional(),
+      from: z.string().optional(),
+      to: z.string().optional(),
+      dayIndexStart: z.number().int().min(1).optional(),
+      dayIndexEnd: z.number().int().min(1).optional(),
+      dayIndexList: z.array(z.number().int().min(1)).optional(),
+      filters: z.object({
+        userIds: z.array(z.string()).optional(),
+        userNames: z.array(z.string()).optional(),
+        excludeUserIds: z.array(z.string()).optional(),
+        excludeUserNames: z.array(z.string()).optional(),
+        attendanceGroups: z.array(z.string()).optional(),
+        roles: z.array(z.string()).optional(),
+        roleTags: z.array(z.string()).optional(),
+      }).optional(),
+      effective: z.object({
+        isWorkingDay: z.boolean(),
+        label: z.string().optional(),
+        source: z.enum(['org', 'group', 'role', 'user']),
+      }),
+    })
+
+    const effectiveCalendarPreviewSchema = z.object({
+      from: z.string().optional(),
+      to: z.string().optional(),
+      userId: z.string().optional(),
+      groupId: z.string().optional(),
+      orgOnly: z.boolean().optional(),
+      calendarPolicy: z.object({
+        overrides: z.array(calendarPolicyOverrideSchema).optional(),
+      }).optional(),
+    })
 
     const settingsSchema = z.object({
       autoAbsence: z.object({
@@ -12775,33 +12819,7 @@ module.exports = {
         ).optional(),
       }).optional(),
       calendarPolicy: z.object({
-        overrides: z.array(
-          z.object({
-            id: z.string().optional(),
-            name: z.string().optional(),
-            match: z.enum(['contains', 'regex', 'equals']).optional(),
-            date: z.string().optional(),
-            from: z.string().optional(),
-            to: z.string().optional(),
-            dayIndexStart: z.number().int().min(1).optional(),
-            dayIndexEnd: z.number().int().min(1).optional(),
-            dayIndexList: z.array(z.number().int().min(1)).optional(),
-            filters: z.object({
-              userIds: z.array(z.string()).optional(),
-              userNames: z.array(z.string()).optional(),
-              excludeUserIds: z.array(z.string()).optional(),
-              excludeUserNames: z.array(z.string()).optional(),
-              attendanceGroups: z.array(z.string()).optional(),
-              roles: z.array(z.string()).optional(),
-              roleTags: z.array(z.string()).optional(),
-            }).optional(),
-            effective: z.object({
-              isWorkingDay: z.boolean(),
-              label: z.string().optional(),
-              source: z.enum(['org', 'group', 'role', 'user']),
-            }),
-          })
-        ).optional(),
+        overrides: z.array(calendarPolicyOverrideSchema).optional(),
       }).optional(),
       holidaySync: z.object({
         source: z.enum(['holiday-cn']).optional(),
@@ -24572,6 +24590,80 @@ module.exports = {
           }
           logger.error('Attendance effective-calendar resolve failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to resolve effective calendar.' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/effective-calendar/preview',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = effectiveCalendarPreviewSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const fromRaw = typeof parsed.data.from === 'string' ? parsed.data.from.trim() : ''
+        const toRaw = typeof parsed.data.to === 'string' ? parsed.data.to.trim() : ''
+        if (!fromRaw || !toRaw) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: '"from" and "to" are required (YYYY-MM-DD).' } })
+          return
+        }
+        const from = normalizeDateOnlyStrict(fromRaw)
+        const to = normalizeDateOnlyStrict(toRaw)
+        if (!from) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid "from" date. Use YYYY-MM-DD.' } })
+          return
+        }
+        if (!to) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid "to" date. Use YYYY-MM-DD.' } })
+          return
+        }
+        if (from > to) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: '"from" must be on or before "to".' } })
+          return
+        }
+        const rangeDays = diffDays(from, to) + 1
+        if (rangeDays > 366) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Range must be <= 366 days.' } })
+          return
+        }
+
+        const userIdRaw = typeof parsed.data.userId === 'string' ? parsed.data.userId.trim() : ''
+        const groupIdRaw = typeof parsed.data.groupId === 'string' ? parsed.data.groupId.trim() : ''
+        const orgOnly = parsed.data.orgOnly === true
+        const modeCount = (userIdRaw ? 1 : 0) + (groupIdRaw ? 1 : 0) + (orgOnly ? 1 : 0)
+        if (modeCount !== 1) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Provide exactly one of userId, groupId, or orgOnly=true.' } })
+          return
+        }
+
+        try {
+          const orgId = getOrgId(req)
+          const result = await resolveEffectiveCalendar(db, {
+            orgId,
+            from,
+            to,
+            userId: userIdRaw || undefined,
+            groupId: groupIdRaw || undefined,
+            orgOnly: orgOnly === true ? true : undefined,
+            calendarPolicyOverrides: parsed.data.calendarPolicy?.overrides ?? [],
+            logger,
+          })
+          res.json({ ok: true, data: result })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          if (message === 'NOT_FOUND:group') {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found.' } })
+            return
+          }
+          if (message.startsWith('VALIDATION:')) {
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message } })
+            return
+          }
+          logger.error('Attendance effective-calendar draft preview failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to preview effective calendar.' } })
         }
       })
     )

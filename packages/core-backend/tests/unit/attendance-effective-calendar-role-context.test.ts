@@ -6,6 +6,47 @@ const attendancePlugin = require('../../../../plugins/plugin-attendance/index.cj
 const helpers = attendancePlugin.__attendanceReportFieldCatalogForTests
 
 describe('attendance effective calendar role context', () => {
+  it('resolves effective-calendar preview rows from draft overrides without loading saved settings', async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('system_configs')) {
+        throw new Error('saved settings should not be loaded for draft preview')
+      }
+      if (sql.includes('FROM attendance_rules')) return []
+      if (sql.includes('FROM attendance_holidays')) return []
+      return []
+    })
+
+    const result = await helpers.resolveEffectiveCalendar({ query }, {
+      orgId: 'default',
+      from: '2026-10-06',
+      to: '2026-10-06',
+      orgOnly: true,
+      calendarPolicyOverrides: [
+        {
+          date: '2026-10-06',
+          effective: { isWorkingDay: false, source: 'org', label: 'Draft rest day' },
+        },
+      ],
+    })
+
+    expect(result).toMatchObject({
+      mode: 'orgOnly',
+      from: '2026-10-06',
+      to: '2026-10-06',
+      items: [
+        {
+          date: '2026-10-06',
+          effective: {
+            isWorkingDay: false,
+            source: 'org',
+            label: 'Draft rest day',
+          },
+        },
+      ],
+    })
+    expect(result.items[0]?.layers.some((layer: any) => layer.kind === 'calendar_policy')).toBe(true)
+  })
+
   it('loads role aliases from users.role and assigned RBAC roles for single-user matching', async () => {
     const query = vi.fn(async (sql: string) => {
       if (sql.includes('SELECT name, role FROM users')) {
