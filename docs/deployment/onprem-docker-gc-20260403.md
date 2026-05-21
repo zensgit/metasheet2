@@ -55,6 +55,67 @@ JSON_OUTPUT=true bash scripts/ops/dingtalk-onprem-docker-gc.sh
 
 - `/home/mainuser/docker-gc-runs/docker-gc-*.json`
 
+## GitHub deploy host sync 空间门禁
+
+`Build and Push Docker Images` 在 deploy job 的 `Sync deploy host files`
+阶段会先检查 deploy host 上 `DEPLOY_PATH` 所在文件系统的可用空间，再解包
+`docker-compose.app.yml`、`docker/nginx.conf` 和 `scripts/ops/attendance-preflight.sh`。
+
+默认门槛：
+
+- `DEPLOY_SYNC_MIN_FREE_KB=1048576`（1 GiB）
+- 低于这个值时，deploy host
+  通常已经接近无法可靠完成镜像拉取、解包和日志写入。
+
+可通过 GitHub repository variable `DEPLOY_SYNC_MIN_FREE_KB` 调整。这个门槛只用于
+deploy host 文件同步前置检查；它不会清理磁盘，也不会停止容器。
+
+如果 workflow 在 `Sync deploy host files` 阶段失败并出现类似输出：
+
+```text
+[host-sync] disk_available_kb=...
+[host-sync][error] deploy host free space is below the sync gate
+```
+
+处理顺序：
+
+1. SSH 到 deploy host。
+2. 先查看根分区和 Docker 占用：
+
+   ```bash
+   df -h /
+   docker system df
+   ```
+
+3. 执行一次手工 GC：
+
+   ```bash
+   bash scripts/ops/dingtalk-onprem-docker-gc.sh
+   ```
+
+   如果希望直接从 GitHub Actions 触发既有远端 GC，也可以手工运行
+   `Attendance Remote Docker GC (Prod)` workflow；它会输出 `df -h` 和
+   `docker system df` 证据。
+
+4. 再确认空间：
+
+   ```bash
+   df -h /
+   docker system df
+   ```
+
+5. 重新运行失败的 `Build and Push Docker Images` workflow。
+
+如果 workflow 仍然显示：
+
+```text
+tar: ... Cannot write: No space left on device
+```
+
+说明磁盘在 preflight 之后、解包期间仍被占满，或门槛设得过低。先继续释放
+deploy host 空间；必要时把 repository variable `DEPLOY_SYNC_MIN_FREE_KB`
+调高后再重跑。
+
 ## 验证
 
 执行：
