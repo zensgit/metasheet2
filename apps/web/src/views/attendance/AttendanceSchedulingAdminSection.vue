@@ -118,6 +118,35 @@
         <small v-if="rotationSequencePreviewText" class="attendance__field-hint">
           {{ tr('Current sequence', '当前序列') }}: {{ rotationSequencePreviewText }}
         </small>
+        <div
+          v-if="rotationSequencePreview.items.length"
+          class="attendance__rotation-sequence-preview"
+          data-attendance-rotation-sequence-preview
+        >
+          <strong>{{ tr('Cycle preview', '轮班周期预览') }}</strong>
+          <ol>
+            <li
+              v-for="item in rotationSequencePreview.items"
+              :key="`${item.dayIndex}:${item.shiftRef}`"
+              :data-rotation-sequence-known="item.isKnown ? 'true' : 'false'"
+            >
+              <span>{{ tr(`Day ${item.dayIndex}`, `第 ${item.dayIndex} 天`) }}</span>
+              <span>{{ item.label }}</span>
+              <span v-if="item.isKnown">
+                {{ item.schedule }}<template v-if="item.isOvernight"> · {{ tr('Overnight', '跨夜') }}</template>
+              </span>
+              <span v-else>{{ tr('Unresolved shift', '未解析班次') }}</span>
+            </li>
+          </ol>
+          <small
+            v-if="rotationSequencePreview.missingRefs.length"
+            class="attendance__field-hint attendance__field-hint--warning"
+            data-attendance-rotation-sequence-missing
+          >
+            {{ tr('Missing loaded shift IDs', '当前已加载班次中不存在这些 ID') }}:
+            {{ rotationSequencePreview.missingRefs.join(', ') }}
+          </small>
+        </div>
       </label>
       <label class="attendance__field attendance__field--checkbox" for="attendance-rotation-rule-active">
         <span>{{ tr('Active', '启用') }}</span>
@@ -564,6 +593,10 @@ import {
   formatAttendanceScheduleConflictDiagnostic,
   type AttendanceScheduleConflictDiagnostic,
 } from './attendanceScheduleConflictDiagnostics'
+import {
+  buildAttendanceRotationSequencePreview,
+  parseAttendanceRotationSequenceInput,
+} from './attendanceRotationSequencePreview'
 
 type Translate = (en: string, zh: string) => string
 type MaybePromise<T> = T | Promise<T>
@@ -742,10 +775,7 @@ function formatScheduleConflictDiagnostic(diagnostic: AttendanceScheduleConflict
 }
 
 function parseShiftSequence(value: string): string[] {
-  return value
-    .split(',')
-    .map(item => item.trim())
-    .filter(Boolean)
+  return parseAttendanceRotationSequenceInput(value)
 }
 
 function appendShiftToRotationSequence(shiftId: string) {
@@ -753,13 +783,15 @@ function appendShiftToRotationSequence(shiftId: string) {
   rotationRuleForm.shiftSequence = [...current, shiftId].join(', ')
 }
 
+const rotationSequencePreview = computed(() => buildAttendanceRotationSequencePreview(
+  rotationRuleForm.shiftSequence,
+  shifts.value,
+))
+
 const rotationSequencePreviewText = computed(() => {
-  const sequence = parseShiftSequence(rotationRuleForm.shiftSequence)
-  if (sequence.length === 0) return ''
-  return sequence.map((shiftId) => {
-    const shift = shifts.value.find(item => item.id === shiftId)
-    return shift ? `${shift.name} (${shiftId})` : shiftId
-  }).join(' → ')
+  return rotationSequencePreview.value.items
+    .map(item => item.label)
+    .join(' -> ')
 })
 
 const rotationRuleEditingLabel = computed(() => {
@@ -909,6 +941,36 @@ const assignmentEditingLabel = computed(() => {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.attendance__rotation-sequence-preview {
+  border: 1px solid #d1d5db;
+  background: #f9fafb;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 12px;
+}
+
+.attendance__rotation-sequence-preview ol {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.attendance__rotation-sequence-preview li {
+  display: grid;
+  grid-template-columns: minmax(56px, max-content) minmax(120px, 1fr) minmax(120px, max-content);
+  gap: 8px;
+  align-items: center;
+}
+
+.attendance__rotation-sequence-preview li[data-rotation-sequence-known="false"] {
+  color: #92400e;
+}
+
+.attendance__field-hint--warning {
+  color: #92400e;
 }
 
 .attendance__table-wrapper {

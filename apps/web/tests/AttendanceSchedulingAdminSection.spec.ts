@@ -397,6 +397,61 @@ describe('AttendanceSchedulingAdminSection', () => {
     expect(container!.querySelector('[data-schedule-conflict-diagnostic="rotation_overrides_shift"]')).toBeTruthy()
   })
 
+  it('renders rotation sequence preview and missing-shift diagnostics', async () => {
+    const scheduling = createSchedulingBindings({
+      shifts: ref<AttendanceShift[]>([
+        {
+          id: 'shift-a',
+          name: 'Day shift',
+          timezone: 'UTC',
+          workStartTime: '09:00',
+          workEndTime: '18:00',
+          isOvernight: false,
+          lateGraceMinutes: 10,
+          earlyGraceMinutes: 10,
+          roundingMinutes: 5,
+          workingDays: [1, 2, 3, 4, 5],
+        },
+        {
+          id: 'shift-b',
+          name: 'Night shift',
+          timezone: 'UTC',
+          workStartTime: '22:00',
+          workEndTime: '06:00',
+          isOvernight: true,
+          lateGraceMinutes: 10,
+          earlyGraceMinutes: 10,
+          roundingMinutes: 5,
+          workingDays: [1, 2, 3, 4, 5],
+        },
+      ]),
+      rotationRuleForm: reactive<RotationRuleFormState>({
+        name: 'Three day cycle',
+        timezone: 'UTC',
+        shiftSequence: 'shift-a, shift-b, missing-shift',
+        isActive: true,
+      }),
+    })
+
+    app = createApp(AttendanceSchedulingAdminSection, {
+      tr,
+      scheduling,
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const preview = container!.querySelector('[data-attendance-rotation-sequence-preview]')
+    expect(preview).toBeTruthy()
+    expect(preview?.textContent).toContain('Cycle preview')
+    expect(preview?.textContent).toContain('Day 1')
+    expect(preview?.textContent).toContain('Day shift (shift-a)')
+    expect(preview?.textContent).toContain('Night shift (shift-b)')
+    expect(preview?.textContent).toContain('22:00 -> 06:00')
+    expect(preview?.textContent).toContain('Overnight')
+    expect(preview?.textContent).toContain('Unresolved shift')
+    expect(container!.querySelector('[data-attendance-rotation-sequence-missing]')?.textContent).toContain('missing-shift')
+  })
+
   it('falls back to plain counts when nothing is being edited', async () => {
     const scheduling = createSchedulingBindings({
       rotationRuleEditingId: ref(null),

@@ -4388,6 +4388,55 @@
                     type="text"
                     :placeholder="tr('shiftId1, shiftId2', '班次ID1, 班次ID2')"
                   />
+                  <small class="attendance__field-hint">
+                    {{ tr('Separate shift IDs with commas. Use the quick append buttons below to build the sequence in order, and repeat a shift if the cycle needs duplicates.', '请用英文逗号分隔班次 ID。可用下方快捷按钮按顺序拼接，如需重复班次可重复点击。') }}
+                  </small>
+                  <div v-if="shifts.length > 0" class="attendance__sequence-builder">
+                    <span class="attendance__field-hint">{{ tr('Quick append from existing shifts', '从已有班次快捷拼接') }}</span>
+                    <div class="attendance__sequence-builder-actions">
+                      <button
+                        v-for="shift in shifts"
+                        :key="shift.id"
+                        class="attendance__btn attendance__btn--inline"
+                        type="button"
+                        @click="appendShiftToRotationSequence(shift.id)"
+                      >
+                        {{ shift.name }} · {{ shift.id }}
+                      </button>
+                    </div>
+                  </div>
+                  <small v-if="rotationSequencePreviewText" class="attendance__field-hint">
+                    {{ tr('Current sequence', '当前序列') }}: {{ rotationSequencePreviewText }}
+                  </small>
+                  <div
+                    v-if="rotationSequencePreview.items.length"
+                    class="attendance__rotation-sequence-preview"
+                    data-attendance-rotation-sequence-preview
+                  >
+                    <strong>{{ tr('Cycle preview', '轮班周期预览') }}</strong>
+                    <ol>
+                      <li
+                        v-for="item in rotationSequencePreview.items"
+                        :key="`${item.dayIndex}:${item.shiftRef}`"
+                        :data-rotation-sequence-known="item.isKnown ? 'true' : 'false'"
+                      >
+                        <span>{{ tr(`Day ${item.dayIndex}`, `第 ${item.dayIndex} 天`) }}</span>
+                        <span>{{ item.label }}</span>
+                        <span v-if="item.isKnown">
+                          {{ item.schedule }}<template v-if="item.isOvernight"> · {{ tr('Overnight', '跨夜') }}</template>
+                        </span>
+                        <span v-else>{{ tr('Unresolved shift', '未解析班次') }}</span>
+                      </li>
+                    </ol>
+                    <small
+                      v-if="rotationSequencePreview.missingRefs.length"
+                      class="attendance__field-hint attendance__field-hint--warning"
+                      data-attendance-rotation-sequence-missing
+                    >
+                      {{ tr('Missing loaded shift IDs', '当前已加载班次中不存在这些 ID') }}:
+                      {{ rotationSequencePreview.missingRefs.join(', ') }}
+                    </small>
+                  </div>
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-rotation-active">
                   <span>{{ tr('Active', '启用') }}</span>
@@ -4914,6 +4963,10 @@ import {
   formatAttendanceScheduleConflictDiagnostic,
   type AttendanceScheduleConflictDiagnostic,
 } from './attendance/attendanceScheduleConflictDiagnostics'
+import {
+  buildAttendanceRotationSequencePreview,
+  parseAttendanceRotationSequenceInput,
+} from './attendance/attendanceRotationSequencePreview'
 import { usePlugins } from '../composables/usePlugins'
 import { apiFetch } from '../utils/api'
 import { readErrorMessage } from '../utils/error'
@@ -7804,6 +7857,20 @@ const rotationRuleForm = reactive({
   isActive: true,
 })
 
+function appendShiftToRotationSequence(shiftId: string) {
+  const current = parseShiftSequenceInput(rotationRuleForm.shiftSequence)
+  rotationRuleForm.shiftSequence = [...current, shiftId].join(', ')
+}
+
+const rotationSequencePreview = computed(() => buildAttendanceRotationSequencePreview(
+  rotationRuleForm.shiftSequence,
+  shifts.value,
+))
+
+const rotationSequencePreviewText = computed(() => rotationSequencePreview.value.items
+  .map(item => item.label)
+  .join(' -> '))
+
 const rotationAssignmentForm = reactive({
   userId: '',
   rotationRuleId: '',
@@ -8347,10 +8414,7 @@ function parseWorkingDaysInput(value: string): number[] {
 }
 
 function parseShiftSequenceInput(value: string): string[] {
-  return value
-    .split(/[\n,]/)
-    .map(item => item.trim())
-    .filter(Boolean)
+  return parseAttendanceRotationSequenceInput(value)
 }
 
 function parseApprovalStepsInput(value: string): AttendanceApprovalStep[] | null {
@@ -14967,6 +15031,48 @@ const holidaySectionBindings = {
 .attendance__schedule-conflict-diagnostics ul {
   margin: 6px 0 0;
   padding-left: 18px;
+}
+
+.attendance__sequence-builder {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.attendance__sequence-builder-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.attendance__rotation-sequence-preview {
+  border: 1px solid #d1d5db;
+  background: #f9fafb;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 12px;
+}
+
+.attendance__rotation-sequence-preview ol {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.attendance__rotation-sequence-preview li {
+  display: grid;
+  grid-template-columns: minmax(56px, max-content) minmax(120px, 1fr) minmax(120px, max-content);
+  gap: 8px;
+  align-items: center;
+}
+
+.attendance__rotation-sequence-preview li[data-rotation-sequence-known="false"] {
+  color: #92400e;
+}
+
+.attendance__field-hint--warning {
+  color: #92400e;
 }
 
 .attendance__btn {
