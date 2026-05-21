@@ -484,6 +484,7 @@ describe('Attendance Plugin Integration', () => {
         userId: testUserId,
         shiftId,
         startDate: workDate,
+        endDate: workDate,
         isActive: true,
       }),
     })
@@ -539,6 +540,9 @@ describe('Attendance Plugin Integration', () => {
     expect(rotationRuleRes.status).toBe(201)
     const rotationRuleId = (rotationRuleRes.body as { data?: { id?: string } } | undefined)?.data?.id
     expect(rotationRuleId).toBeTruthy()
+    const rotationStart = new Date(`${workDate}T00:00:00.000Z`)
+    rotationStart.setUTCDate(rotationStart.getUTCDate() + 1)
+    const rotationStartDate = rotationStart.toISOString().slice(0, 10)
 
     const rotationAssignmentRes = await requestJson(`${baseUrl}/api/attendance/rotation-assignments`, {
       method: 'POST',
@@ -549,7 +553,7 @@ describe('Attendance Plugin Integration', () => {
       body: JSON.stringify({
         userId: testUserId,
         rotationRuleId,
-        startDate: workDate,
+        startDate: rotationStartDate,
         isActive: true,
       }),
     })
@@ -1912,6 +1916,221 @@ describe('Attendance Plugin Integration', () => {
     expect(lookupRes.status).toBe(200)
   })
 
+  it('rejects overlapping active shift and rotation assignments at save time', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const testUserId = `attendance-schedule-conflict-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    async function createShift(name: string): Promise<string> {
+      const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name,
+          timezone: 'Asia/Shanghai',
+          workStartTime: '09:00',
+          workEndTime: '18:00',
+          workingDays: [1, 2, 3, 4, 5],
+        }),
+      })
+      expect(shiftRes.status).toBe(201)
+      const shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(shiftId).toBeTruthy()
+      if (!shiftId) throw new Error('missing shift id')
+      return shiftId
+    }
+
+    const baseShiftId = await createShift(`Conflict Base Shift ${runSuffix}`)
+    const alternateShiftId = await createShift(`Conflict Alternate Shift ${runSuffix}`)
+
+    const assignmentRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId: testUserId,
+        shiftId: baseShiftId,
+        startDate: '2026-06-01',
+        endDate: '2026-06-10',
+        isActive: true,
+      }),
+    })
+    expect(assignmentRes.status).toBe(201)
+    const assignmentId = (assignmentRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
+    expect(assignmentId).toBeTruthy()
+    if (!assignmentId) return
+
+    const overlappingShiftRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId: testUserId,
+        shiftId: alternateShiftId,
+        startDate: '2026-06-10',
+        endDate: '2026-06-12',
+        isActive: true,
+      }),
+    })
+    expect(overlappingShiftRes.status).toBe(409)
+    const overlappingShiftError = (overlappingShiftRes.body as { error?: { code?: string; details?: { conflictType?: string } } } | undefined)?.error
+    expect(overlappingShiftError?.code).toBe('ATTENDANCE_SCHEDULE_ASSIGNMENT_CONFLICT')
+    expect(overlappingShiftError?.details?.conflictType).toBe('shift_assignment_overlap')
+
+    const otherUserShiftRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId: `${testUserId}-other`,
+        shiftId: alternateShiftId,
+        startDate: '2026-06-10',
+        endDate: '2026-06-12',
+        isActive: true,
+      }),
+    })
+    expect(otherUserShiftRes.status).toBe(201)
+
+    const rotationRuleRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Conflict Rotation ${runSuffix}`,
+        timezone: 'Asia/Shanghai',
+        shiftSequence: [alternateShiftId],
+        isActive: true,
+      }),
+    })
+    expect(rotationRuleRes.status).toBe(201)
+    const rotationRuleId = (rotationRuleRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(rotationRuleId).toBeTruthy()
+    if (!rotationRuleId) return
+
+    const overlappingRotationRes = await requestJson(`${baseUrl}/api/attendance/rotation-assignments`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId: testUserId,
+        rotationRuleId,
+        startDate: '2026-06-05',
+        endDate: '2026-06-08',
+        isActive: true,
+      }),
+    })
+    expect(overlappingRotationRes.status).toBe(409)
+    const overlappingRotationError = (overlappingRotationRes.body as { error?: { details?: { conflictType?: string; draftKind?: string; existingKind?: string } } } | undefined)?.error
+    expect(overlappingRotationError?.details?.conflictType).toBe('rotation_overrides_shift')
+    expect(overlappingRotationError?.details?.draftKind).toBe('rotation')
+    expect(overlappingRotationError?.details?.existingKind).toBe('shift')
+
+    const inactiveRotationRes = await requestJson(`${baseUrl}/api/attendance/rotation-assignments`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId: testUserId,
+        rotationRuleId,
+        startDate: '2026-06-05',
+        endDate: '2026-06-08',
+        isActive: false,
+      }),
+    })
+    expect(inactiveRotationRes.status).toBe(201)
+
+    const rotationRes = await requestJson(`${baseUrl}/api/attendance/rotation-assignments`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId: testUserId,
+        rotationRuleId,
+        startDate: '2026-06-11',
+        isActive: true,
+      }),
+    })
+    expect(rotationRes.status).toBe(201)
+    const rotationAssignmentId = (rotationRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
+    expect(rotationAssignmentId).toBeTruthy()
+    if (!rotationAssignmentId) return
+
+    const overlappingSecondRotationRes = await requestJson(`${baseUrl}/api/attendance/rotation-assignments`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId: testUserId,
+        rotationRuleId,
+        startDate: '2026-06-12',
+        isActive: true,
+      }),
+    })
+    expect(overlappingSecondRotationRes.status).toBe(409)
+    const overlappingSecondRotationError = (overlappingSecondRotationRes.body as { error?: { details?: { conflictType?: string } } } | undefined)?.error
+    expect(overlappingSecondRotationError?.details?.conflictType).toBe('rotation_assignment_overlap')
+
+    const updateShiftToOverlapRotationRes = await requestJson(`${baseUrl}/api/attendance/assignments/${assignmentId}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        endDate: '2026-06-11',
+      }),
+    })
+    expect(updateShiftToOverlapRotationRes.status).toBe(409)
+    const updateShiftError = (updateShiftToOverlapRotationRes.body as { error?: { details?: { conflictType?: string; draftKind?: string; existingKind?: string } } } | undefined)?.error
+    expect(updateShiftError?.details?.conflictType).toBe('rotation_overrides_shift')
+    expect(updateShiftError?.details?.draftKind).toBe('shift')
+    expect(updateShiftError?.details?.existingKind).toBe('rotation')
+
+    const invalidRotationRangeRes = await requestJson(`${baseUrl}/api/attendance/rotation-assignments`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId: `${testUserId}-invalid-range`,
+        rotationRuleId,
+        startDate: '2026-06-12',
+        endDate: '2026-06-01',
+        isActive: true,
+      }),
+    })
+    expect(invalidRotationRangeRes.status).toBe(400)
+    const invalidRangeError = (invalidRotationRangeRes.body as { error?: { code?: string } } | undefined)?.error
+    expect(invalidRangeError?.code).toBe('VALIDATION_ERROR')
+  })
+
   it('rejects non-UUID shift references for rotation rules, including UUID-like shift names', async () => {
     if (!baseUrl) return
 
@@ -2537,7 +2756,7 @@ describe('Attendance Plugin Integration', () => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        user_id: testUserId,
+        user_id: `${testUserId}-rotation`,
         rotation_rule_id: rotationRuleId,
         start_date: '2026-03-20',
         end_date: null,
