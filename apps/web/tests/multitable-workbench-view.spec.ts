@@ -1361,7 +1361,34 @@ describe('MultitableWorkbench view wiring', () => {
         { fld_title: 'alpha', fld_status: 'Closed' },
       ],
     }))
-    expect(showSuccessSpy).toHaveBeenCalledWith('2 record(s) imported')
+    expect(showSuccessSpy).toHaveBeenCalledWith('2 records imported')
+  })
+
+  it('localizes workbench import success toast in zh-CN', async () => {
+    useLocale().setLocale('zh-CN')
+    bulkImportRecordsMock.mockResolvedValue({
+      attempted: 2,
+      succeeded: 2,
+      failed: 0,
+      firstError: null,
+      failures: [],
+    })
+    workbenchMock.fields.value = [
+      { id: 'fld_title', name: 'Title', type: 'string', order: 1 },
+      { id: 'fld_status', name: 'Status', type: 'string', order: 2 },
+    ]
+    gridMock.fields.value = [...workbenchMock.fields.value]
+
+    mountWorkbench()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-open-import="true"]')!.click()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-import-submit="true"]')!.click()
+    await flushUi()
+
+    expect(showSuccessSpy).toHaveBeenCalledWith('2 条记录已导入')
   })
 
   it('exports only scoped visible grid fields', async () => {

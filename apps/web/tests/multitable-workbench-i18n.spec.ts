@@ -8,6 +8,12 @@ import {
   mentionsUnread,
   mentionsRecords,
   templateInstalled,
+  formSubmitSuccess,
+  recordsImported,
+  recordsFailedToImport,
+  duplicateRowsSkipped,
+  recordsDeleted,
+  recordNotFound,
   cardSheets,
   cardFields,
   cardViews,
@@ -30,10 +36,27 @@ const ALL_KEYS: WorkbenchLabelKey[] = [
   'toast.recordCreateBlocked', 'toast.recordEditBlocked', 'toast.recordDeleteBlocked',
   'toast.datesUpdated', 'toast.hierarchyUpdated', 'toast.recordDeleted',
   'toast.loadedLatest', 'toast.changeReapplied', 'toast.recordUpdated',
-  'toast.formSubmitted', 'toast.commentUpdated', 'toast.commentAdded',
+  'toast.commentUpdated', 'toast.commentAdded',
   'toast.commentResolved', 'toast.commentDeleted', 'toast.linkedRecordsUpdated',
   'toast.viewSettingsSaved', 'toast.templateInstallBlocked', 'toast.templateRefreshFailed',
   'toast.templateInstallFailed',
+  'toast.timelineDatesUpdateFailed', 'toast.hierarchyParentUpdateFailed',
+  'toast.formSubmitFailed',
+  'toast.commentUpdateFailed', 'toast.commentAddFailed',
+  'toast.commentResolveFailed', 'toast.commentDeleteFailed',
+  'toast.linkedRecordsUpdateFailed',
+  'toast.fieldCreateFailed', 'toast.fieldUpdateFailed', 'toast.fieldDeleteFailed',
+  'toast.viewCreateFailed', 'toast.viewUpdateFailed', 'toast.viewDeleteFailed',
+  'toast.sheetAccessRefreshFailed',
+  'toast.sheetCreateBlocked', 'toast.sheetRefreshFailed', 'toast.sheetCreateFailed',
+  'toast.baseLoadFailed', 'toast.contextSyncFailed',
+  'toast.externalContextBusy', 'toast.externalContextUnsaved',
+  'toast.baseCreateBlocked', 'toast.baseCreateFailed',
+  'toast.importCancelled', 'toast.importFailed',
+  'toast.excelExportFailed', 'toast.bulkDeleteFailed',
+  'toast.workbenchInitFailed',
+  'confirm.discardContextChanges', 'confirm.discardRecordChanges',
+  'confirm.pageLeaveBusy', 'confirm.pageLeaveDirty',
   'card.install', 'card.installing',
 ]
 
@@ -126,5 +149,38 @@ describe('workbench-labels interpolation helpers', () => {
     expect(templateInstalled('CRM Pipeline', false)).toBe('Installed CRM Pipeline')
     expect(templateInstalled('CRM Pipeline', true)).toBe('已安装 CRM Pipeline')
     expect(templateInstalled('合同管理', true)).toBe('已安装 合同管理')
+  })
+
+  it('formSubmitSuccess switches on the explicit create/update discriminator', () => {
+    expect(formSubmitSuccess('create', false)).toBe('Record created')
+    expect(formSubmitSuccess('update', false)).toBe('Changes saved')
+    expect(formSubmitSuccess('create', true)).toBe('记录已创建')
+    expect(formSubmitSuccess('update', true)).toBe('更改已保存')
+  })
+
+  it('dynamic count helpers pluralize en and keep zh count forms stable', () => {
+    expect(recordsImported(1, false)).toBe('1 record imported')
+    expect(recordsImported(3, false)).toBe('3 records imported')
+    expect(recordsImported(3, true)).toBe('3 条记录已导入')
+
+    expect(duplicateRowsSkipped(1, false)).toBe('1 duplicate row skipped')
+    expect(duplicateRowsSkipped(2, false)).toBe('2 duplicate rows skipped')
+    expect(duplicateRowsSkipped(2, true)).toBe('2 条重复行已跳过')
+
+    expect(recordsDeleted(1, false)).toBe('1 record deleted')
+    expect(recordsDeleted(4, false)).toBe('4 records deleted')
+    expect(recordsDeleted(4, true)).toBe('4 条记录已删除')
+  })
+
+  it('recordsFailedToImport formats row chrome and preserves raw firstError', () => {
+    expect(recordsFailedToImport(1, [2], 'Bad value', false)).toBe('1 record failed to import (row 2). Bad value')
+    expect(recordsFailedToImport(2, [2, 3], 'Invalid SKU', false)).toBe('2 records failed to import (row 2, row 3). Invalid SKU')
+    expect(recordsFailedToImport(2, [2, 3], 'Invalid SKU', true)).toBe('2 条记录导入失败（第 2 行，第 3 行）。Invalid SKU')
+    expect(recordsFailedToImport(2, [], '', true)).toBe('2 条记录导入失败')
+  })
+
+  it('recordNotFound localizes surrounding chrome and keeps record id raw', () => {
+    expect(recordNotFound('rec_abc123', false)).toBe('Record not found: rec_abc123')
+    expect(recordNotFound('rec_abc123', true)).toBe('未找到记录：rec_abc123')
   })
 })

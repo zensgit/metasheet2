@@ -8,8 +8,7 @@
 //
 // Scope: see docs/development/multitable-workbench-i18n-t2-development-20260519.md.
 // `<kbd>` physical key names are NOT translated and are NOT in this table.
-// Dynamic / interpolated / permission / host-context / "Failed to ..." toasts
-// are T3 and intentionally absent here.
+// Dynamic helpers and fallback toasts are added incrementally in T3E.
 
 export type WorkbenchLabelKey =
   // §3.0 script-computed shell (interpolated variants live in the helpers)
@@ -31,12 +30,30 @@ export type WorkbenchLabelKey =
   | 'toast.recordCreateBlocked' | 'toast.recordEditBlocked' | 'toast.recordDeleteBlocked'
   | 'toast.datesUpdated' | 'toast.hierarchyUpdated' | 'toast.recordDeleted'
   | 'toast.loadedLatest' | 'toast.changeReapplied' | 'toast.recordUpdated'
-  | 'toast.formSubmitted' | 'toast.commentUpdated' | 'toast.commentAdded'
+  | 'toast.commentUpdated' | 'toast.commentAdded'
   | 'toast.commentResolved' | 'toast.commentDeleted' | 'toast.linkedRecordsUpdated'
   | 'toast.viewSettingsSaved'
   // T3E-1 template-library fallback/toast residuals
   | 'toast.templateInstallBlocked' | 'toast.templateRefreshFailed'
   | 'toast.templateInstallFailed'
+  // T3E-2 Workbench dynamic fallback/confirm residuals
+  | 'toast.timelineDatesUpdateFailed' | 'toast.hierarchyParentUpdateFailed'
+  | 'toast.formSubmitFailed'
+  | 'toast.commentUpdateFailed' | 'toast.commentAddFailed'
+  | 'toast.commentResolveFailed' | 'toast.commentDeleteFailed'
+  | 'toast.linkedRecordsUpdateFailed'
+  | 'toast.fieldCreateFailed' | 'toast.fieldUpdateFailed' | 'toast.fieldDeleteFailed'
+  | 'toast.viewCreateFailed' | 'toast.viewUpdateFailed' | 'toast.viewDeleteFailed'
+  | 'toast.sheetAccessRefreshFailed'
+  | 'toast.sheetCreateBlocked' | 'toast.sheetRefreshFailed' | 'toast.sheetCreateFailed'
+  | 'toast.baseLoadFailed' | 'toast.contextSyncFailed'
+  | 'toast.externalContextBusy' | 'toast.externalContextUnsaved'
+  | 'toast.baseCreateBlocked' | 'toast.baseCreateFailed'
+  | 'toast.importCancelled' | 'toast.importFailed'
+  | 'toast.excelExportFailed' | 'toast.bulkDeleteFailed'
+  | 'toast.workbenchInitFailed'
+  | 'confirm.discardContextChanges' | 'confirm.discardRecordChanges'
+  | 'confirm.pageLeaveBusy' | 'confirm.pageLeaveDirty'
   // §3.6 MetaTemplateCard button (counts use the card* helpers below)
   | 'card.install' | 'card.installing'
 
@@ -98,7 +115,6 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'toast.loadedLatest': { en: 'Loaded the latest row state', zh: '已加载最新行状态' },
   'toast.changeReapplied': { en: 'Change reapplied', zh: '修改已重新应用' },
   'toast.recordUpdated': { en: 'Record updated', zh: '记录已更新' },
-  'toast.formSubmitted': { en: 'Form submitted', zh: '表单已提交' },
   'toast.commentUpdated': { en: 'Comment updated', zh: '评论已更新' },
   'toast.commentAdded': { en: 'Comment added', zh: '评论已添加' },
   'toast.commentResolved': { en: 'Comment resolved', zh: '评论已解决' },
@@ -116,6 +132,67 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'toast.templateInstallFailed': {
     en: 'Failed to install template',
     zh: '安装模板失败',
+  },
+  'toast.timelineDatesUpdateFailed': { en: 'Failed to update timeline dates', zh: '更新时间线日期失败' },
+  'toast.hierarchyParentUpdateFailed': { en: 'Failed to update hierarchy parent', zh: '更新层级父记录失败' },
+  'toast.formSubmitFailed': { en: 'Form submit failed', zh: '表单提交失败' },
+  'toast.commentUpdateFailed': { en: 'Failed to update comment', zh: '更新评论失败' },
+  'toast.commentAddFailed': { en: 'Failed to add comment', zh: '添加评论失败' },
+  'toast.commentResolveFailed': { en: 'Failed to resolve comment', zh: '解决评论失败' },
+  'toast.commentDeleteFailed': { en: 'Failed to delete comment', zh: '删除评论失败' },
+  'toast.linkedRecordsUpdateFailed': { en: 'Failed to update linked records', zh: '更新关联记录失败' },
+  'toast.fieldCreateFailed': { en: 'Failed to create field', zh: '创建字段失败' },
+  'toast.fieldUpdateFailed': { en: 'Failed to update field', zh: '更新字段失败' },
+  'toast.fieldDeleteFailed': { en: 'Failed to delete field', zh: '删除字段失败' },
+  'toast.viewCreateFailed': { en: 'Failed to create view', zh: '创建视图失败' },
+  'toast.viewUpdateFailed': { en: 'Failed to update view', zh: '更新视图失败' },
+  'toast.viewDeleteFailed': { en: 'Failed to delete view', zh: '删除视图失败' },
+  'toast.sheetAccessRefreshFailed': { en: 'Failed to refresh sheet access', zh: '刷新 Sheet 权限失败' },
+  'toast.sheetCreateBlocked': {
+    en: 'Sheet creation requires multitable write access.',
+    zh: '创建 Sheet 需要多维表写入权限。',
+  },
+  'toast.sheetRefreshFailed': {
+    en: 'Created sheet but failed to refresh workbench context',
+    zh: 'Sheet 已创建，但刷新工作台上下文失败',
+  },
+  'toast.sheetCreateFailed': { en: 'Failed to create sheet', zh: '创建 Sheet 失败' },
+  'toast.baseLoadFailed': { en: 'Failed to load base', zh: '加载 Base 失败' },
+  'toast.contextSyncFailed': { en: 'Failed to sync workbench context', zh: '同步工作台上下文失败' },
+  'toast.externalContextBusy': {
+    en: 'Host multitable context change is waiting for the current save or import to finish.',
+    zh: '宿主多维表上下文变更正在等待当前保存或导入完成。',
+  },
+  'toast.externalContextUnsaved': {
+    en: 'Host multitable context changed while unsaved drafts are open. Resolve or discard changes to continue.',
+    zh: '宿主多维表上下文已变更。请处理或放弃未保存草稿后继续。',
+  },
+  'toast.baseCreateBlocked': {
+    en: 'Base creation requires multitable write access.',
+    zh: '创建 Base 需要多维表写入权限。',
+  },
+  'toast.baseCreateFailed': { en: 'Failed to create base', zh: '创建 Base 失败' },
+  'toast.importCancelled': { en: 'Import cancelled', zh: '导入已取消' },
+  'toast.importFailed': { en: 'Import failed', zh: '导入失败' },
+  'toast.excelExportFailed': { en: 'Excel export failed', zh: 'Excel 导出失败' },
+  'toast.bulkDeleteFailed': { en: 'Bulk delete failed', zh: '批量删除失败' },
+  'toast.workbenchInitFailed': { en: 'Failed to initialize workbench', zh: '初始化工作台失败' },
+
+  'confirm.discardContextChanges': {
+    en: 'Discard unsaved changes before leaving the current sheet or view?',
+    zh: '离开当前 Sheet 或视图前放弃未保存的更改吗？',
+  },
+  'confirm.discardRecordChanges': {
+    en: 'Discard unsaved record changes?',
+    zh: '放弃未保存的记录更改吗？',
+  },
+  'confirm.pageLeaveBusy': {
+    en: 'Leave the multitable while the current save or import is still running?',
+    zh: '当前保存或导入仍在进行，确定离开多维表吗？',
+  },
+  'confirm.pageLeaveDirty': {
+    en: 'Discard unsaved multitable changes before leaving this page?',
+    zh: '离开此页面前放弃未保存的多维表更改吗？',
   },
 
   'card.install': { en: 'Use template', zh: '使用模板' },
@@ -174,6 +251,44 @@ export function mentionsRecords(n: number, isZh: boolean): string {
 // Template names are user/data values and pass through raw.
 export function templateInstalled(templateName: string, isZh: boolean): string {
   return isZh ? `已安装 ${templateName}` : `Installed ${templateName}`
+}
+
+export function formSubmitSuccess(mode: 'create' | 'update', isZh: boolean): string {
+  if (mode === 'create') return isZh ? '记录已创建' : 'Record created'
+  return isZh ? '更改已保存' : 'Changes saved'
+}
+
+export function recordsImported(n: number, isZh: boolean): string {
+  return isZh ? `${n} 条记录已导入` : `${n} record${n === 1 ? '' : 's'} imported`
+}
+
+export function recordsFailedToImport(
+  n: number,
+  rowNumbers: number[],
+  firstError: string,
+  isZh: boolean,
+): string {
+  const errorPart = firstError.trim()
+  if (isZh) {
+    const rows = rowNumbers.length > 0 ? `（${rowNumbers.map((row) => `第 ${row} 行`).join('，')}）` : ''
+    const error = errorPart ? `。${errorPart}` : ''
+    return `${n} 条记录导入失败${rows}${error}`.trim()
+  }
+  const rows = rowNumbers.length > 0 ? ` (${rowNumbers.map((row) => `row ${row}`).join(', ')})` : ''
+  const error = errorPart ? `. ${errorPart}` : ''
+  return `${n} record${n === 1 ? '' : 's'} failed to import${rows}${error}`.trim()
+}
+
+export function duplicateRowsSkipped(n: number, isZh: boolean): string {
+  return isZh ? `${n} 条重复行已跳过` : `${n} duplicate row${n === 1 ? '' : 's'} skipped`
+}
+
+export function recordsDeleted(n: number, isZh: boolean): string {
+  return isZh ? `${n} 条记录已删除` : `${n} record${n === 1 ? '' : 's'} deleted`
+}
+
+export function recordNotFound(recordId: string, isZh: boolean): string {
+  return isZh ? `未找到记录：${recordId}` : `Record not found: ${recordId}`
 }
 
 // MetaTemplateCard counts: zh "{n} 个 Sheet/字段/视图"; en pluralized.
