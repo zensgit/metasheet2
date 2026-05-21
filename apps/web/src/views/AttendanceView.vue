@@ -1407,6 +1407,7 @@
                     <p class="attendance__field-hint attendance__field-hint--warn">
                       {{ tr('Role and role-tag matching is reserved until role context is loaded by the resolver; keep new rules scoped to org, group, or user.', '角色与角色标签匹配需等待解析器加载角色上下文；新增规则请先使用组织、考勤组或用户范围。') }}
                     </p>
+                    <AttendanceCalendarPolicyPreviewPanel :tr="tr" />
                     <div v-if="settingsForm.calendarPolicyOverrides.length === 0" class="attendance__empty">
                       {{ tr('No effective calendar overrides configured.', '暂无有效日历覆盖规则。') }}
                     </div>
@@ -4798,6 +4799,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
+import AttendanceCalendarPolicyPreviewPanel from './attendance/AttendanceCalendarPolicyPreviewPanel.vue'
 import AttendanceImportBatchesSection from './attendance/AttendanceImportBatchesSection.vue'
 import AttendanceHolidayDataSection from './attendance/AttendanceHolidayDataSection.vue'
 import AttendanceUserPickerField from './attendance/AttendanceUserPickerField.vue'
