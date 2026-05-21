@@ -10746,16 +10746,44 @@ async function loadAttendanceGroupByIdOrCode(db, orgId, identifier) {
   const targetOrg = orgId || DEFAULT_ORG_ID
   try {
     const rows = await db.query(
-      `SELECT id, name, code, timezone
+      `SELECT id, name, code, timezone, rule_set_id
        FROM attendance_groups
        WHERE org_id = $1 AND (id::text = $2 OR code = $2)
        LIMIT 1`,
       [targetOrg, String(identifier)]
     )
-    return rows.length ? { id: rows[0].id, name: rows[0].name, code: rows[0].code, timezone: rows[0].timezone } : null
+    return rows.length
+      ? {
+        id: rows[0].id,
+        name: rows[0].name,
+        code: rows[0].code,
+        timezone: rows[0].timezone,
+        ruleSetId: rows[0].rule_set_id ?? null,
+      }
+      : null
   } catch (error) {
-    if (isDatabaseSchemaError(error)) return null
-    throw error
+    if (!isDatabaseSchemaError(error)) throw error
+    try {
+      const rows = await db.query(
+        `SELECT id, name, code, timezone
+         FROM attendance_groups
+         WHERE org_id = $1 AND (id::text = $2 OR code = $2)
+         LIMIT 1`,
+        [targetOrg, String(identifier)]
+      )
+      return rows.length
+        ? {
+          id: rows[0].id,
+          name: rows[0].name,
+          code: rows[0].code,
+          timezone: rows[0].timezone,
+          ruleSetId: null,
+        }
+        : null
+    } catch (fallbackError) {
+      if (isDatabaseSchemaError(fallbackError)) return null
+      throw fallbackError
+    }
   }
 }
 
@@ -10779,6 +10807,17 @@ function buildCalendarBaseFromProfile(profile, weekday, source) {
     isWorkingDay,
     source: source ?? 'rule',
   }
+}
+
+function buildAttendanceRuleWithRuleSetOverride(baseRule, ruleSetConfig) {
+  const override = normalizeRuleOverride(ruleSetConfig?.rule)
+  return override
+    ? {
+      ...baseRule,
+      ...override,
+      workingDays: override.workingDays ?? baseRule.workingDays,
+    }
+    : baseRule
 }
 
 function buildCalendarBaseFromHoliday(holiday) {
@@ -10848,6 +10887,7 @@ async function resolveEffectiveCalendar(db, args) {
   let rotationShiftsById = new Map()
   let overlays = []
   let groupContext = null
+  let groupRule = null
 
   if (mode === 'userId') {
     scopeContext = await loadAttendanceScopeContextForUser(db, orgId, args.userId)
@@ -10859,6 +10899,15 @@ async function resolveEffectiveCalendar(db, args) {
   } else if (mode === 'groupId') {
     groupContext = await loadAttendanceGroupByIdOrCode(db, orgId, args.groupId)
     if (!groupContext) throw new Error('NOT_FOUND:group')
+    if (groupContext.ruleSetId) {
+      let ruleSetConfig = null
+      try {
+        ruleSetConfig = await loadRuleSetConfigById(db, orgId, groupContext.ruleSetId)
+      } catch (error) {
+        if (!isDatabaseSchemaError(error)) throw error
+      }
+      groupRule = buildAttendanceRuleWithRuleSetOverride(defaultRule, ruleSetConfig)
+    }
     const groupRefs = []
     if (groupContext.name) groupRefs.push(groupContext.name)
     if (groupContext.code) groupRefs.push(groupContext.code)
@@ -10883,7 +10932,7 @@ async function resolveEffectiveCalendar(db, args) {
   const timezone = resolveCalendarTimezone({
     rotation: firstDateRotation,
     shift: firstDateShift,
-    defaultRule,
+    defaultRule: groupRule ?? defaultRule,
     group: groupContext,
     defaultTimezone: undefined,
   })
@@ -10911,7 +10960,7 @@ async function resolveEffectiveCalendar(db, args) {
   const items = dates.map((date) => {
     const weekday = getWeekdayFromDateKey(date)
     let profileSource = 'rule'
-    let profile = defaultRule
+    let profile = groupRule ?? defaultRule
 
     if (mode === 'userId') {
       const rotationInfo = resolveRotationInfoFromPrefetch(rotationByUser.get(args.userId), date, rotationShiftsById)
