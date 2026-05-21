@@ -1,0 +1,41 @@
+{
+  "spec": "ba-m0.5-driver-smoke",
+  "specVersion": "1.0",
+  "timestamp": "<UTC ISO-8601, e.g. 2026-05-20T01:23:45Z>",
+  "runner": {
+    "os": "<windows version string>",
+    "powerShellVersion": "<x.y.z>",
+    "clrVersion": "<x.y.z>"
+  },
+  "target": {
+    "provider": "<SqlClient | Odbc | OleDb>",
+    "odbcDriverName": "<populated only when provider=Odbc, e.g. 'ODBC Driver 17 for SQL Server' or 'SQL Server Native Client 11.0' or 'SQL Server'; null otherwise>",
+    "oleDbProviderName": "<populated only when provider=OleDb, e.g. 'MSOLEDBSQL' or 'SQLNCLI11' or 'SQLOLEDB'; null otherwise>",
+    "serverPresent": true,
+    "databasePresent": true,
+    "integratedSecurity": false
+  },
+  "driver": {
+    "provider": "<SqlClient | Odbc | OleDb>",
+    "typeName": "<System.Data.SqlClient.SqlConnection | System.Data.Odbc.OdbcConnection | System.Data.OleDb.OleDbConnection>",
+    "assemblyVersion": "<x.y.z.b>"
+  },
+  "checks": [
+    {
+      "name": "open-connection",
+      "status": "<PASS | FAIL>",
+      "elapsed_ms": 0,
+      "error": null
+    },
+    {
+      "name": "select-version",
+      "status": "<PASS | FAIL>",
+      "elapsed_ms": 0,
+      "error": null,
+      "comment_only": "On PASS the harness fills sqlServerVersionRedacted at the top level; on FAIL the error class+message land here."
+    }
+  ],
+  "sqlServerVersionRedacted": "<@@VERSION output, defensively redacted; absent when select-version FAILed>",
+  "decision": "<PASS | FAIL>",
+  "nextStep": "<one-line maintainer-facing summary; BA-M1 stays blocked until decision = PASS>"
+}
