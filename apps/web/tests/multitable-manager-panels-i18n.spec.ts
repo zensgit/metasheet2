@@ -4,6 +4,11 @@ import { useLocale } from '../src/composables/useLocale'
 import MetaFieldManager from '../src/multitable/components/MetaFieldManager.vue'
 import MetaFieldValidationPanel from '../src/multitable/components/MetaFieldValidationPanel.vue'
 import MetaViewManager from '../src/multitable/components/MetaViewManager.vue'
+import {
+  formattingOperatorLabel,
+  formattingPickColor,
+  managerLabel,
+} from '../src/multitable/utils/meta-manager-labels'
 
 function mount(render: () => ReturnType<typeof h>) {
   const container = document.createElement('div')
@@ -136,5 +141,19 @@ describe('multitable manager panel i18n', () => {
     expect(container.querySelector('.meta-view-mgr__action[title="Configure"]')).toBeTruthy()
 
     app.unmount()
+  })
+
+  it('formats conditional-formatting manager labels and preserves raw values', () => {
+    expect(managerLabel('formatting.title', false)).toBe('Conditional formatting')
+    expect(managerLabel('formatting.title', true)).toBe('条件格式')
+    expect(formattingOperatorLabel('eq', 'select', false)).toBe('is')
+    expect(formattingOperatorLabel('eq', 'multiSelect', true)).toBe('是')
+    expect(formattingOperatorLabel('eq', 'number', true)).toBe('=')
+    expect(formattingOperatorLabel('between', 'number', true)).toBe('介于')
+    expect(formattingOperatorLabel('contains', 'string', true)).toBe('包含')
+    expect(formattingOperatorLabel('is_true', 'boolean', true)).toBe('已勾选')
+    expect(formattingOperatorLabel('is_today', 'date', true)).toBe('是今天')
+    expect(formattingOperatorLabel('unknown_operator', 'string', true)).toBe('unknown_operator')
+    expect(formattingPickColor('#fce4e4', true)).toBe('选择颜色 #fce4e4')
   })
 })

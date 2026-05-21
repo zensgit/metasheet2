@@ -1,14 +1,14 @@
 <template>
   <div v-if="visible" class="cf-dlg__overlay" @click.self="close">
-    <div class="cf-dlg" role="dialog" aria-label="Conditional formatting rules">
+    <div class="cf-dlg" role="dialog" :aria-label="ml('formatting.ariaTitle')">
       <div class="cf-dlg__header">
-        <h4 class="cf-dlg__title">Conditional formatting</h4>
+        <h4 class="cf-dlg__title">{{ ml('formatting.title') }}</h4>
         <span class="cf-dlg__count">{{ draftRules.length }} / {{ ruleLimit }}</span>
-        <button class="cf-dlg__close" aria-label="Close" @click="close">&times;</button>
+        <button class="cf-dlg__close" :aria-label="ml('formatting.close')" @click="close">&times;</button>
       </div>
       <div class="cf-dlg__body">
         <p v-if="!draftRules.length" class="cf-dlg__empty">
-          No rules yet. Add a rule to color cells or rows based on field values.
+          {{ ml('formatting.empty') }}
         </p>
         <div v-else class="cf-dlg__rule-list">
           <div
@@ -36,7 +36,7 @@
                     class="cf-dlg__input cf-dlg__input--mini"
                     :value="getBetweenValue(rule, 0)"
                     @input="setBetweenValue(rule, 0, ($event.target as HTMLInputElement).value)"
-                    placeholder="min"
+                    :placeholder="ml('formatting.minPlaceholder')"
                   />
                   <span class="cf-dlg__sep">–</span>
                   <input
@@ -44,12 +44,12 @@
                     class="cf-dlg__input cf-dlg__input--mini"
                     :value="getBetweenValue(rule, 1)"
                     @input="setBetweenValue(rule, 1, ($event.target as HTMLInputElement).value)"
-                    placeholder="max"
+                    :placeholder="ml('formatting.maxPlaceholder')"
                   />
                 </template>
                 <template v-else-if="isSelectField(rule.fieldId)">
                   <select v-model="rule.value" class="cf-dlg__select cf-dlg__select--value">
-                    <option value="">(pick)</option>
+                    <option value="">{{ ml('formatting.pickOption') }}</option>
                     <option
                       v-for="opt in selectOptionsFor(rule.fieldId)"
                       :key="opt.value"
@@ -77,7 +77,7 @@
               <span v-else class="cf-dlg__no-value">—</span>
             </div>
             <div class="cf-dlg__rule-row cf-dlg__rule-row--secondary">
-              <span class="cf-dlg__label">Color</span>
+              <span class="cf-dlg__label">{{ ml('formatting.color') }}</span>
               <div class="cf-dlg__palette">
                 <button
                   v-for="preset in PALETTE"
@@ -86,7 +86,7 @@
                   class="cf-dlg__swatch"
                   :class="{ 'cf-dlg__swatch--active': rule.style.backgroundColor === preset }"
                   :style="{ backgroundColor: preset }"
-                  :aria-label="`Pick color ${preset}`"
+                  :aria-label="pickColorLabel(preset)"
                   @click="rule.style.backgroundColor = preset"
                 />
                 <input
@@ -100,11 +100,11 @@
               </div>
               <label class="cf-dlg__check-inline">
                 <input type="checkbox" :checked="rule.style.applyToRow === true" @change="rule.style.applyToRow = ($event.target as HTMLInputElement).checked" />
-                <span>Apply to whole row</span>
+                <span>{{ ml('formatting.applyToRow') }}</span>
               </label>
               <label class="cf-dlg__check-inline">
                 <input type="checkbox" :checked="rule.enabled" @change="rule.enabled = ($event.target as HTMLInputElement).checked" />
-                <span>Enabled</span>
+                <span>{{ ml('formatting.enabled') }}</span>
               </label>
             </div>
             <div class="cf-dlg__rule-row cf-dlg__rule-row--actions">
@@ -113,14 +113,14 @@
                 class="cf-dlg__btn cf-dlg__btn--ghost"
                 :disabled="index === 0"
                 @click="moveRule(index, -1)"
-              >&#x25B2; Up</button>
+              >{{ ml('formatting.up') }}</button>
               <button
                 type="button"
                 class="cf-dlg__btn cf-dlg__btn--ghost"
                 :disabled="index === draftRules.length - 1"
                 @click="moveRule(index, 1)"
-              >&#x25BC; Down</button>
-              <button type="button" class="cf-dlg__btn cf-dlg__btn--danger" @click="removeRule(index)">Remove</button>
+              >{{ ml('formatting.down') }}</button>
+              <button type="button" class="cf-dlg__btn cf-dlg__btn--danger" @click="removeRule(index)">{{ ml('action.remove') }}</button>
             </div>
           </div>
         </div>
@@ -129,12 +129,12 @@
           class="cf-dlg__btn cf-dlg__btn--primary"
           :disabled="draftRules.length >= ruleLimit || !selectableFields.length"
           @click="addRule"
-        >+ Add rule</button>
-        <p v-if="!selectableFields.length" class="cf-dlg__hint">Add fields to the sheet to create formatting rules.</p>
+        >{{ ml('formatting.addRule') }}</button>
+        <p v-if="!selectableFields.length" class="cf-dlg__hint">{{ ml('formatting.noFieldsHint') }}</p>
       </div>
       <div class="cf-dlg__footer">
-        <button type="button" class="cf-dlg__btn" @click="close">Cancel</button>
-        <button type="button" class="cf-dlg__btn cf-dlg__btn--primary" :disabled="!dirty" @click="save">Save rules</button>
+        <button type="button" class="cf-dlg__btn" @click="close">{{ ml('action.cancel') }}</button>
+        <button type="button" class="cf-dlg__btn cf-dlg__btn--primary" :disabled="!dirty" @click="save">{{ ml('formatting.saveRules') }}</button>
       </div>
     </div>
   </div>
@@ -142,6 +142,7 @@
 
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import type {
   ConditionalFormattingOperator,
   ConditionalFormattingRule,
@@ -149,6 +150,11 @@ import type {
 } from '../types'
 import { CONDITIONAL_FORMATTING_RULE_LIMIT } from '../types'
 import { extractRulesFromConfig, operatorRequiresValue } from '../utils/conditional-formatting'
+import {
+  formattingOperatorLabel,
+  formattingPickColor,
+  managerLabel,
+} from '../utils/meta-manager-labels'
 
 const props = defineProps<{
   visible: boolean
@@ -164,6 +170,9 @@ const emit = defineEmits<{
 }>()
 
 const ruleLimit = CONDITIONAL_FORMATTING_RULE_LIMIT
+const { isZh } = useLocale()
+const ml = (key: Parameters<typeof managerLabel>[0]) => managerLabel(key, isZh.value)
+const pickColorLabel = (color: string) => formattingPickColor(color, isZh.value)
 
 const PALETTE = [
   '#fce4e4',
@@ -235,51 +244,53 @@ function isNumberOperator(op: ConditionalFormattingOperator): boolean {
 }
 
 function operatorsForField(fieldId: string): Array<{ value: ConditionalFormattingOperator; label: string }> {
+  const fieldType = fieldsById.value.get(fieldId)?.type
+  const label = (value: ConditionalFormattingOperator) => formattingOperatorLabel(value, fieldType, isZh.value)
   const baseEmpty = [
-    { value: 'is_empty' as const, label: 'is empty' },
-    { value: 'is_not_empty' as const, label: 'is not empty' },
+    { value: 'is_empty' as const, label: label('is_empty') },
+    { value: 'is_not_empty' as const, label: label('is_not_empty') },
   ]
   if (isNumberField(fieldId)) {
     return [
-      { value: 'gt', label: '>' },
-      { value: 'gte', label: '>=' },
-      { value: 'lt', label: '<' },
-      { value: 'lte', label: '<=' },
-      { value: 'eq', label: '=' },
-      { value: 'neq', label: '!=' },
-      { value: 'between', label: 'between' },
+      { value: 'gt', label: label('gt') },
+      { value: 'gte', label: label('gte') },
+      { value: 'lt', label: label('lt') },
+      { value: 'lte', label: label('lte') },
+      { value: 'eq', label: label('eq') },
+      { value: 'neq', label: label('neq') },
+      { value: 'between', label: label('between') },
       ...baseEmpty,
     ]
   }
   if (isDateField(fieldId)) {
     return [
-      { value: 'is_today', label: 'is today' },
-      { value: 'is_overdue', label: 'is overdue' },
-      { value: 'is_in_last_n_days', label: 'is in last N days' },
-      { value: 'is_in_next_n_days', label: 'is in next N days' },
+      { value: 'is_today', label: label('is_today') },
+      { value: 'is_overdue', label: label('is_overdue') },
+      { value: 'is_in_last_n_days', label: label('is_in_last_n_days') },
+      { value: 'is_in_next_n_days', label: label('is_in_next_n_days') },
       ...baseEmpty,
     ]
   }
   if (isBooleanField(fieldId)) {
     return [
-      { value: 'is_true', label: 'is checked' },
-      { value: 'is_false', label: 'is unchecked' },
+      { value: 'is_true', label: label('is_true') },
+      { value: 'is_false', label: label('is_false') },
       ...baseEmpty,
     ]
   }
   if (isSelectField(fieldId)) {
     return [
-      { value: 'eq', label: 'is' },
-      { value: 'neq', label: 'is not' },
-      { value: 'contains', label: 'contains' },
+      { value: 'eq', label: label('eq') },
+      { value: 'neq', label: label('neq') },
+      { value: 'contains', label: label('contains') },
       ...baseEmpty,
     ]
   }
   return [
-    { value: 'eq', label: '=' },
-    { value: 'neq', label: '!=' },
-    { value: 'contains', label: 'contains' },
-    { value: 'not_contains', label: 'does not contain' },
+    { value: 'eq', label: label('eq') },
+    { value: 'neq', label: label('neq') },
+    { value: 'contains', label: label('contains') },
+    { value: 'not_contains', label: label('not_contains') },
     ...baseEmpty,
   ]
 }
@@ -367,7 +378,7 @@ function updateHex(rule: ConditionalFormattingRule, key: 'backgroundColor' | 'te
 }
 
 function close() {
-  if (dirty.value && !window.confirm('Discard unsaved formatting rules?')) return
+  if (dirty.value && !window.confirm(ml('view.discardFormattingConfirm'))) return
   emit('close')
 }
 

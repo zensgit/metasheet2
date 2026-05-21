@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
+import { useLocale } from '../src/composables/useLocale'
 import MetaBulkEditDialog from '../src/multitable/components/MetaBulkEditDialog.vue'
 import type { MetaField } from '../src/multitable/types'
 
@@ -60,6 +61,7 @@ function mountDialog(propsOverride: Partial<{
 describe('MetaBulkEditDialog', () => {
   afterEach(() => {
     document.body.innerHTML = ''
+    useLocale().setLocale('en')
     vi.restoreAllMocks()
   })
 
@@ -75,6 +77,46 @@ describe('MetaBulkEditDialog', () => {
     const { app, root } = mountDialog({ mode: 'clear' })
     await nextTick()
     expect(root.querySelector('.meta-bulk-edit__header strong')?.textContent).toBe('Clear field for selected records')
+    app.unmount()
+  })
+
+  it('renders bulk edit chrome in zh-CN while preserving raw field names', async () => {
+    useLocale().setLocale('zh-CN')
+    const { app, root } = mountDialog({ mode: 'clear' })
+    await nextTick()
+
+    expect(root.querySelector('.meta-bulk-edit__header strong')?.textContent).toBe('清空所选记录的字段')
+    expect(root.querySelector('.meta-bulk-edit__close')?.getAttribute('aria-label')).toBe('关闭')
+    expect(root.textContent).toContain('字段')
+    expect(root.textContent).toContain('（选择字段）')
+    expect(root.textContent).toContain('选择要在 3 条所选记录中清空的字段。')
+
+    const select = root.querySelector('.meta-bulk-edit__select') as HTMLSelectElement
+    expect(select.getAttribute('aria-label')).toBe('要更新的字段')
+    select.value = 'fld_notes'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    expect(root.textContent).toContain('操作')
+    expect(root.textContent).toContain('将在 3 条记录中清空 Notes。')
+    expect(root.textContent).toContain('取消')
+    expect(root.textContent).toContain('清空')
+    app.unmount()
+  })
+
+  it('preserves English bulk edit chrome by default', async () => {
+    const { app, root } = mountDialog({ mode: 'clear' })
+    await nextTick()
+
+    expect(root.querySelector('.meta-bulk-edit__header strong')?.textContent).toBe('Clear field for selected records')
+    expect(root.querySelector('.meta-bulk-edit__close')?.getAttribute('aria-label')).toBe('Close')
+
+    const select = root.querySelector('.meta-bulk-edit__select') as HTMLSelectElement
+    select.value = 'fld_notes'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    expect(root.textContent).toContain('Will clear Notes on 3 records.')
     app.unmount()
   })
 

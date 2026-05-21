@@ -429,6 +429,13 @@ import {
   recordNotFound as fmtRecordNotFound,
 } from '../utils/workbench-labels'
 import { commentLabel } from '../utils/meta-comment-labels'
+import {
+  bulkFailure as fmtBulkFailure,
+  bulkPartialSuccess as fmtBulkPartialSuccess,
+  bulkSuccess as fmtBulkSuccess,
+  bulkVersionConflict as fmtBulkVersionConflict,
+  bulkEditLabel,
+} from '../utils/meta-bulk-edit-labels'
 import type {
   LinkedRecordSummary,
   MetaAttachment,
@@ -2568,14 +2575,14 @@ async function onBulkEditApply(payload: { mode: 'set' | 'clear'; fieldId: string
         .slice(0, 3)
         .map((failure) => `${failure.recordId}: ${failure.reason}`)
         .join('; ')
-      bulkEditDialog.error = `${result.failed.length} of ${requestedCount} record(s) failed${sampleFailures ? ` (${sampleFailures})` : ''}`
+      bulkEditDialog.error = fmtBulkFailure(result.failed.length, requestedCount, sampleFailures, isZh.value)
       if (updatedCount > 0) {
-        bulkEditDialog.resultMessage = `${updatedCount} of ${requestedCount} record(s) ${payload.mode === 'clear' ? 'cleared' : 'updated'}`
+        bulkEditDialog.resultMessage = fmtBulkPartialSuccess(updatedCount, requestedCount, payload.mode, isZh.value)
       }
     } else if (updatedCount < requestedCount) {
-      bulkEditDialog.resultMessage = `${updatedCount} of ${requestedCount} record(s) updated`
+      bulkEditDialog.resultMessage = fmtBulkPartialSuccess(updatedCount, requestedCount, payload.mode, isZh.value)
     } else {
-      bulkEditDialog.resultMessage = `${updatedCount} record(s) ${payload.mode === 'clear' ? 'cleared' : 'updated'}`
+      bulkEditDialog.resultMessage = fmtBulkSuccess(updatedCount, payload.mode, isZh.value)
     }
     if (updatedCount > 0 && bulkEditDialog.resultMessage) showSuccess(bulkEditDialog.resultMessage)
     if (result.failed.length > 0 && bulkEditDialog.error) showError(bulkEditDialog.error)
@@ -2583,9 +2590,9 @@ async function onBulkEditApply(payload: { mode: 'set' | 'clear'; fieldId: string
       bulkEditDialog.visible = false
     }
   } catch (e: any) {
-    const message = e?.message ?? 'Bulk edit failed'
+    const message = e?.message ?? bulkEditLabel('bulk.errorFailed', isZh.value)
     const errorMessage = e?.code === 'VERSION_CONFLICT'
-      ? `Some records were modified elsewhere. Reload and retry. (${message})`
+      ? fmtBulkVersionConflict(message, isZh.value)
       : message
     bulkEditDialog.error = errorMessage
     showError(errorMessage)
