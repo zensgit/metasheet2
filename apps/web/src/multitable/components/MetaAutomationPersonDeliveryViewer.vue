@@ -2,27 +2,27 @@
   <div v-if="visible" class="meta-person-delivery__overlay" @click.self="$emit('close')">
     <div class="meta-person-delivery">
       <div class="meta-person-delivery__header">
-        <h4 class="meta-person-delivery__title">DingTalk Person Deliveries</h4>
+        <h4 class="meta-person-delivery__title">{{ automationLabel('delivery.personTitle', isZh) }}</h4>
         <button class="meta-person-delivery__close" type="button" @click="$emit('close')">&times;</button>
       </div>
 
       <div class="meta-person-delivery__body">
         <div class="meta-person-delivery__toolbar">
           <select v-model="statusFilter" class="meta-person-delivery__select" data-field="statusFilter">
-            <option value="">All statuses</option>
-            <option value="success">Success</option>
-            <option value="failed">Failed</option>
-            <option value="skipped">Skipped / unbound</option>
+            <option value="">{{ automationLabel('status.all', isZh) }}</option>
+            <option value="success">{{ automationStatusLabel('success', isZh) }}</option>
+            <option value="failed">{{ automationStatusLabel('failed', isZh) }}</option>
+            <option value="skipped">{{ automationLabel('delivery.statusSkippedUnbound', isZh) }}</option>
           </select>
-          <button class="meta-person-delivery__btn" type="button" :disabled="loading" data-action="refresh" @click="loadData">Refresh</button>
+          <button class="meta-person-delivery__btn" type="button" :disabled="loading" data-action="refresh" @click="loadData">{{ automationLabel('log.refresh', isZh) }}</button>
         </div>
 
-        <div v-if="loading" class="meta-person-delivery__empty">Loading deliveries...</div>
+        <div v-if="loading" class="meta-person-delivery__empty">{{ automationLabel('delivery.loading', isZh) }}</div>
         <div v-else-if="errorMessage" class="meta-person-delivery__error-state" data-person-delivery-error="true">
           {{ errorMessage }}
         </div>
         <div v-else-if="filteredDeliveries.length === 0" class="meta-person-delivery__empty" data-empty="true">
-          No DingTalk person deliveries found.
+          {{ automationLabel('delivery.emptyPerson', isZh) }}
         </div>
 
         <div
@@ -34,7 +34,7 @@
           <div class="meta-person-delivery__summary">
             <span class="meta-person-delivery__recipient">
               {{ delivery.localUserLabel || delivery.localUserId }}
-              <em v-if="!delivery.localUserIsActive">Inactive user</em>
+              <em v-if="!delivery.localUserIsActive">{{ automationLabel('delivery.inactiveUser', isZh) }}</em>
             </span>
             <span
               class="meta-person-delivery__badge"
@@ -47,7 +47,7 @@
           </div>
           <div v-if="delivery.localUserSubtitle || delivery.dingtalkUserId" class="meta-person-delivery__detail">
             <span v-if="delivery.localUserSubtitle">{{ delivery.localUserSubtitle }}</span>
-            <span v-if="delivery.dingtalkUserId">DingTalk: {{ delivery.dingtalkUserId }}</span>
+            <span v-if="delivery.dingtalkUserId">{{ automationLabel('delivery.dingtalkPrefix', isZh) }}{{ isZh ? '：' : ': ' }}{{ delivery.dingtalkUserId }}</span>
           </div>
           <div class="meta-person-delivery__subject">{{ delivery.subject }}</div>
           <div v-if="deliveryStatus(delivery) !== 'success' && deliveryReason(delivery)" class="meta-person-delivery__error">
@@ -61,8 +61,10 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import type { DingTalkPersonDelivery } from '../types'
 import type { MultitableApiClient } from '../api/client'
+import { automationLabel, automationStatusLabel } from '../utils/meta-automation-labels'
 
 const props = defineProps<{
   visible: boolean
@@ -79,6 +81,7 @@ const loading = ref(false)
 const deliveries = ref<DingTalkPersonDelivery[]>([])
 const statusFilter = ref('')
 const errorMessage = ref('')
+const { isZh } = useLocale()
 
 const filteredDeliveries = computed(() => {
   if (!statusFilter.value) return deliveries.value
@@ -98,13 +101,14 @@ function deliveryStatus(delivery: DingTalkPersonDelivery): DeliveryStatus {
 
 function deliveryStatusLabel(delivery: DingTalkPersonDelivery): string {
   const status = deliveryStatus(delivery)
-  if (status === 'skipped') return 'skipped'
-  return status
+  return automationStatusLabel(status, isZh.value)
 }
 
 function deliveryReason(delivery: DingTalkPersonDelivery): string {
   if (deliveryStatus(delivery) === 'skipped') {
-    return delivery.errorMessage || UNBOUND_DINGTALK_REASON
+    return delivery.errorMessage === UNBOUND_DINGTALK_REASON || !delivery.errorMessage
+      ? automationLabel('delivery.unboundReason', isZh.value)
+      : delivery.errorMessage
   }
   return delivery.errorMessage || ''
 }
@@ -120,7 +124,7 @@ function formatTime(ts: string): string {
 function readErrorMessage(error: unknown): string {
   return error instanceof Error && error.message.trim()
     ? error.message
-    : 'Failed to load DingTalk person deliveries.'
+    : automationLabel('error.loadPersonDeliveries', isZh.value)
 }
 
 async function loadData() {
