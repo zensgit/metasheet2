@@ -4550,6 +4550,17 @@
                       {{ item.schedule }}<template v-if="item.isOvernight"> · {{ tr('Overnight', '跨夜') }}</template>
                     </span>
                     <span v-else>{{ tr('Unresolved shift', '未解析班次') }}</span>
+                    <span
+                      v-if="item.calendar"
+                      class="attendance__rotation-assignment-calendar-chip"
+                      :class="item.calendar.sourceClass"
+                      :title="item.calendar.tooltip"
+                      :data-calendar-working-day="item.calendar.isWorkingDay === true ? 'true' : item.calendar.isWorkingDay === false ? 'false' : 'unknown'"
+                      :data-calendar-source="item.calendar.source || ''"
+                      :data-calendar-override="item.calendar.hasOverride ? 'true' : 'false'"
+                    >
+                      {{ item.calendar.label || (item.calendar.isWorkingDay === false ? tr('Rest day', '休息日') : tr('Working day', '工作日')) }}
+                    </span>
                   </li>
                 </ol>
                 <small
@@ -4561,7 +4572,7 @@
                   {{ rotationAssignmentPreview.missingRefs.join(', ') }}
                 </small>
                 <small class="attendance__field-hint">
-                  {{ tr('Preview is advisory and uses the current loaded rule, dates, and shift catalog.', '预览仅作提示，基于当前已加载的规则、日期和班次目录计算。') }}
+                  {{ tr('Preview is advisory and uses the current loaded rule, dates, shift catalog, and effective-calendar context for the selected user/date.', '预览仅作提示，基于当前已加载的规则、日期、班次目录以及所选用户/日期的生效日历上下文计算。') }}
                 </small>
               </div>
               <div class="attendance__admin-grid">
@@ -4998,6 +5009,8 @@ import {
 import {
   buildCalendarChipTooltip,
   calendarChipSourceClassName,
+  fallbackChipName,
+  hasCalendarChipOverrideMarker,
 } from '../services/attendance/calendarChipDisplay'
 import {
   buildAttendanceScheduleConflictDiagnostics,
@@ -5005,6 +5018,7 @@ import {
   type AttendanceScheduleConflictDiagnostic,
 } from './attendance/attendanceScheduleConflictDiagnostics'
 import {
+  buildAttendanceRotationAssignmentCalendarMap,
   buildAttendanceRotationAssignmentPreview,
   buildAttendanceRotationSequencePreview,
   parseAttendanceRotationSequenceInput,
@@ -7684,6 +7698,40 @@ watch(committedCalendarUserId, (next) => {
   }
 })
 
+async function loadEffectiveCalendarForRotationAssignment(
+  range: { userId: string; from: string; to: string },
+): Promise<void> {
+  const userId = range.userId.trim()
+  const from = range.from.trim()
+  const to = range.to.trim()
+  if (!userId || !from || !to) return
+  const cacheKey = `${userId}|${from}|${to}`
+  if (rotationAssignmentEffectiveCalendarCacheKey === cacheKey) return
+  rotationAssignmentEffectiveCalendarCacheKey = cacheKey
+  const loadVersion = ++rotationAssignmentEffectiveCalendarLoadVersion
+  try {
+    const result = await fetchEffectiveCalendar({
+      from,
+      to,
+      userId,
+      suppressUnauthorizedRedirect: true,
+    })
+    if (loadVersion !== rotationAssignmentEffectiveCalendarLoadVersion) return
+    const items = Array.isArray(result?.items) ? result.items : []
+    rotationAssignmentEffectiveCalendarChips.value = items
+      .filter(isCalendarEffectiveItemNoteworthy)
+      .map(effectiveCalendarItemToChip)
+  } catch (error) {
+    if (loadVersion === rotationAssignmentEffectiveCalendarLoadVersion) {
+      rotationAssignmentEffectiveCalendarChips.value = []
+      rotationAssignmentEffectiveCalendarCacheKey = null
+    }
+    if (error instanceof EffectiveCalendarFetchError) {
+      console.debug('[AttendanceView] rotation assignment effective-calendar load failed', error.status, error.message)
+    }
+  }
+}
+
 watch(
   calendarMonth,
   (month) => {
@@ -7921,7 +7969,11 @@ const rotationAssignmentForm = reactive({
   isActive: true,
 })
 
-const rotationAssignmentPreview = computed(() => buildAttendanceRotationAssignmentPreview({
+const rotationAssignmentEffectiveCalendarChips = ref<CalendarEffectiveChip[]>([])
+let rotationAssignmentEffectiveCalendarCacheKey: string | null = null
+let rotationAssignmentEffectiveCalendarLoadVersion = 0
+
+const rotationAssignmentPreviewBase = computed(() => buildAttendanceRotationAssignmentPreview({
   rotationRuleId: rotationAssignmentForm.rotationRuleId,
   rotationRules: rotationRules.value,
   shifts: shifts.value,
@@ -7929,6 +7981,46 @@ const rotationAssignmentPreview = computed(() => buildAttendanceRotationAssignme
   endDate: rotationAssignmentForm.endDate || null,
   maxDays: 14,
 }))
+
+const rotationAssignmentCalendarByDate = computed(() => buildAttendanceRotationAssignmentCalendarMap(
+  rotationAssignmentEffectiveCalendarChips.value.map((chip) => ({
+    date: chip.date,
+    isWorkingDay: chip.effective?.isWorkingDay ?? chip.isWorkingDay,
+    label: chip.name || fallbackChipName(chip),
+    source: chip.effective?.source,
+    sourceClass: calendarChipSourceClassName(chip.effective?.source),
+    tooltip: buildCalendarChipTooltip(chip),
+    hasOverride: hasCalendarChipOverrideMarker(chip),
+  })),
+))
+
+const rotationAssignmentPreview = computed(() => buildAttendanceRotationAssignmentPreview({
+  rotationRuleId: rotationAssignmentForm.rotationRuleId,
+  rotationRules: rotationRules.value,
+  shifts: shifts.value,
+  startDate: rotationAssignmentForm.startDate,
+  endDate: rotationAssignmentForm.endDate || null,
+  maxDays: 14,
+  calendarByDate: rotationAssignmentCalendarByDate.value,
+}))
+
+const rotationAssignmentEffectiveCalendarRange = computed(() => {
+  const userId = rotationAssignmentForm.userId.trim()
+  const items = rotationAssignmentPreviewBase.value.items
+  const first = items[0]
+  const last = items[items.length - 1]
+  if (!userId || !first || !last) return null
+  return { userId, from: first.date, to: last.date }
+})
+
+watch(rotationAssignmentEffectiveCalendarRange, (range) => {
+  if (!range) {
+    rotationAssignmentEffectiveCalendarChips.value = []
+    rotationAssignmentEffectiveCalendarCacheKey = null
+    return
+  }
+  void loadEffectiveCalendarForRotationAssignment(range)
+}, { immediate: true })
 
 const scheduleConflictDiagnostics = computed(() => buildAttendanceScheduleConflictDiagnostics({
   assignments: assignments.value,
@@ -15136,7 +15228,7 @@ const holidaySectionBindings = {
 
 .attendance__rotation-assignment-preview li {
   display: grid;
-  grid-template-columns: minmax(96px, max-content) minmax(56px, max-content) minmax(120px, 1fr) minmax(120px, max-content);
+  grid-template-columns: minmax(96px, max-content) minmax(56px, max-content) minmax(120px, 1fr) minmax(120px, max-content) minmax(92px, max-content);
   gap: 8px;
   align-items: center;
 }
@@ -15147,6 +15239,24 @@ const holidaySectionBindings = {
 
 .attendance__rotation-assignment-preview li[data-rotation-assignment-known="false"] {
   color: #92400e;
+}
+
+.attendance__rotation-assignment-calendar-chip {
+  border: 1px solid var(--calendar-source-accent, #bfdbfe);
+  border-left-width: 3px;
+  border-radius: 999px;
+  padding: 2px 8px;
+  color: #1f2937;
+  background: #fff;
+  white-space: nowrap;
+}
+
+.attendance__rotation-assignment-calendar-chip[data-calendar-working-day="false"] {
+  background: #fef3c7;
+}
+
+.attendance__rotation-assignment-calendar-chip[data-calendar-override="true"] {
+  border-style: dashed;
 }
 
 .attendance__field-hint--warning {

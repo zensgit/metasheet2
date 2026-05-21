@@ -7,6 +7,7 @@ import type {
   AttendanceRotationRule,
   AttendanceShift,
 } from '../src/views/attendance/useAttendanceAdminScheduling'
+import type { CalendarEffectiveChip } from '../src/services/attendance/effectiveCalendar'
 
 type Translate = (en: string, zh: string) => string
 
@@ -492,6 +493,21 @@ describe('AttendanceSchedulingAdminSection', () => {
     app = createApp(AttendanceSchedulingAdminSection, {
       tr,
       scheduling,
+      rotationAssignmentCalendarChips: [
+        {
+          id: 'calendar-1',
+          date: '2026-03-02',
+          name: 'Org rest override',
+          isWorkingDay: false,
+          effective: { isWorkingDay: false, source: 'org', label: 'Org rest override', policyId: 'policy-1' },
+          base: { isWorkingDay: true, source: 'rotation' },
+          layers: [
+            { kind: 'base_rule', source: 'rotation', isWorkingDay: true, label: 'Rotation workday' },
+            { kind: 'calendar_policy', source: 'org', isWorkingDay: false, label: 'Org rest override', refId: 'policy-1' },
+          ],
+          overlays: [],
+        } satisfies CalendarEffectiveChip,
+      ],
     })
     app.mount(container!)
     await flushUi()
@@ -507,6 +523,12 @@ describe('AttendanceSchedulingAdminSection', () => {
     expect(preview?.textContent).toContain('Night shift (shift-b)')
     expect(preview?.textContent).toContain('22:00 -> 06:00')
     expect(preview?.textContent).toContain('Overnight')
+    expect(preview?.textContent).toContain('Org rest override')
+    const calendarChip = container!.querySelector('[data-calendar-source="org"]')
+    expect(calendarChip).toBeTruthy()
+    expect(calendarChip?.getAttribute('data-calendar-working-day')).toBe('false')
+    expect(calendarChip?.getAttribute('data-calendar-override')).toBe('true')
+    expect(calendarChip?.getAttribute('title')).toContain('Layers:')
     expect(container!.querySelector('[data-attendance-rotation-assignment-missing]')).toBeFalsy()
   })
 
