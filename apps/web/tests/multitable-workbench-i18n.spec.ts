@@ -7,6 +7,7 @@ import {
   commentInboxTitle,
   mentionsUnread,
   mentionsRecords,
+  templateInstalled,
   cardSheets,
   cardFields,
   cardViews,
@@ -22,7 +23,7 @@ const ALL_KEYS: WorkbenchLabelKey[] = [
   'toolbar.workflow', 'toolbar.automations', 'toolbar.templates',
   'toolbar.dashboard', 'toolbar.shareForm', 'toolbar.apiWebhooks',
   'toolbar.mentions',
-  'tpl.title', 'tpl.subtitle', 'tpl.loading', 'tpl.more',
+  'tpl.title', 'tpl.subtitle', 'tpl.loading', 'tpl.more', 'tpl.errorLoad',
   'kbd.title', 'kbd.navigateCells', 'kbd.editCell', 'kbd.cancelClose',
   'kbd.nextCell', 'kbd.copy', 'kbd.paste', 'kbd.undo', 'kbd.redo',
   'kbd.toggleHelp',
@@ -31,7 +32,8 @@ const ALL_KEYS: WorkbenchLabelKey[] = [
   'toast.loadedLatest', 'toast.changeReapplied', 'toast.recordUpdated',
   'toast.formSubmitted', 'toast.commentUpdated', 'toast.commentAdded',
   'toast.commentResolved', 'toast.commentDeleted', 'toast.linkedRecordsUpdated',
-  'toast.viewSettingsSaved',
+  'toast.viewSettingsSaved', 'toast.templateInstallBlocked', 'toast.templateRefreshFailed',
+  'toast.templateInstallFailed',
   'card.install', 'card.installing',
 ]
 
@@ -118,5 +120,11 @@ describe('workbench-labels interpolation helpers', () => {
     expect(cardFields(0, false)).toBe('0 fields')
     expect(cardViews(3, true)).toBe('3 个视图')
     expect(cardViews(1, false)).toBe('1 view')
+  })
+
+  it('templateInstalled localizes surrounding chrome and keeps template name raw', () => {
+    expect(templateInstalled('CRM Pipeline', false)).toBe('Installed CRM Pipeline')
+    expect(templateInstalled('CRM Pipeline', true)).toBe('已安装 CRM Pipeline')
+    expect(templateInstalled('合同管理', true)).toBe('已安装 合同管理')
   })
 })

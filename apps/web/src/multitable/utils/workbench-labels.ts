@@ -22,7 +22,7 @@ export type WorkbenchLabelKey =
   | 'toolbar.dashboard' | 'toolbar.shareForm' | 'toolbar.apiWebhooks'
   | 'toolbar.mentions'
   // §3.3 template library modal
-  | 'tpl.title' | 'tpl.subtitle' | 'tpl.loading' | 'tpl.more'
+  | 'tpl.title' | 'tpl.subtitle' | 'tpl.loading' | 'tpl.more' | 'tpl.errorLoad'
   // §3.4 keyboard shortcuts modal (explanatory text only)
   | 'kbd.title' | 'kbd.navigateCells' | 'kbd.editCell' | 'kbd.cancelClose'
   | 'kbd.nextCell' | 'kbd.copy' | 'kbd.paste' | 'kbd.undo' | 'kbd.redo'
@@ -34,6 +34,9 @@ export type WorkbenchLabelKey =
   | 'toast.formSubmitted' | 'toast.commentUpdated' | 'toast.commentAdded'
   | 'toast.commentResolved' | 'toast.commentDeleted' | 'toast.linkedRecordsUpdated'
   | 'toast.viewSettingsSaved'
+  // T3E-1 template-library fallback/toast residuals
+  | 'toast.templateInstallBlocked' | 'toast.templateRefreshFailed'
+  | 'toast.templateInstallFailed'
   // §3.6 MetaTemplateCard button (counts use the card* helpers below)
   | 'card.install' | 'card.installing'
 
@@ -64,6 +67,7 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   },
   'tpl.loading': { en: 'Loading templates...', zh: '正在加载模板...' },
   'tpl.more': { en: 'More templates →', zh: '更多模板 →' },
+  'tpl.errorLoad': { en: 'Failed to load templates', zh: '加载模板失败' },
 
   'kbd.title': { en: 'Keyboard Shortcuts', zh: '键盘快捷键' },
   'kbd.navigateCells': { en: 'Navigate cells', zh: '导航单元格' },
@@ -101,6 +105,18 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'toast.commentDeleted': { en: 'Comment deleted', zh: '评论已删除' },
   'toast.linkedRecordsUpdated': { en: 'Linked records updated', zh: '关联记录已更新' },
   'toast.viewSettingsSaved': { en: 'View settings saved', zh: '视图设置已保存' },
+  'toast.templateInstallBlocked': {
+    en: 'Template installation requires multitable write access.',
+    zh: '安装模板需要多维表写入权限。',
+  },
+  'toast.templateRefreshFailed': {
+    en: 'Installed template but failed to refresh workbench context',
+    zh: '模板已安装，但刷新工作台上下文失败',
+  },
+  'toast.templateInstallFailed': {
+    en: 'Failed to install template',
+    zh: '安装模板失败',
+  },
 
   'card.install': { en: 'Use template', zh: '使用模板' },
   'card.installing': { en: 'Installing...', zh: '创建中...' },
@@ -153,6 +169,11 @@ export function mentionsUnread(n: number, isZh: boolean): string {
 
 export function mentionsRecords(n: number, isZh: boolean): string {
   return isZh ? `${n} 条记录` : `${n} record${n === 1 ? '' : 's'}`
+}
+
+// Template names are user/data values and pass through raw.
+export function templateInstalled(templateName: string, isZh: boolean): string {
+  return isZh ? `已安装 ${templateName}` : `Installed ${templateName}`
 }
 
 // MetaTemplateCard counts: zh "{n} 个 Sheet/字段/视图"; en pluralized.

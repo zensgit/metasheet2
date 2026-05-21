@@ -420,6 +420,7 @@ import {
   commentInboxTitle as fmtCommentInboxTitle,
   mentionsUnread as fmtMentionsUnread,
   mentionsRecords as fmtMentionsRecords,
+  templateInstalled as fmtTemplateInstalled,
 } from '../utils/workbench-labels'
 import { commentLabel } from '../utils/meta-comment-labels'
 import type {
@@ -2153,7 +2154,7 @@ async function loadTemplateLibrary() {
     const data = await workbench.client.listTemplates()
     templates.value = data.templates ?? []
   } catch (e: any) {
-    templateLibraryError.value = e.message ?? 'Failed to load templates'
+    templateLibraryError.value = e.message ?? wb('tpl.errorLoad', isZh.value)
   } finally {
     templateLibraryLoading.value = false
   }
@@ -2161,7 +2162,7 @@ async function loadTemplateLibrary() {
 
 async function openTemplateLibrary() {
   if (!canCreateBasesAndSheets.value) {
-    showError('Template installation requires multitable write access.')
+    showError(wb('toast.templateInstallBlocked', isZh.value))
     return
   }
   showTemplateLibrary.value = true
@@ -2172,7 +2173,7 @@ async function openTemplateLibrary() {
 
 async function onInstallTemplate(template: MetaTemplate) {
   if (!canCreateBasesAndSheets.value) {
-    showError('Template installation requires multitable write access.')
+    showError(wb('toast.templateInstallBlocked', isZh.value))
     return
   }
   if (!confirmDiscardContextChanges()) return
@@ -2188,14 +2189,14 @@ async function onInstallTemplate(template: MetaTemplate) {
       viewId: result.views[0]?.id,
     })
     if (!ok) {
-      showError(workbench.error.value ?? 'Installed template but failed to refresh workbench context')
+      showError(workbench.error.value ?? wb('toast.templateRefreshFailed', isZh.value))
       return
     }
     rememberWorkbenchBaseOpen(result.base.id)
     showTemplateLibrary.value = false
-    showSuccess(`Installed ${result.template.name}`)
+    showSuccess(fmtTemplateInstalled(result.template.name, isZh.value))
   } catch (e: any) {
-    showError(e.message ?? 'Failed to install template')
+    showError(e.message ?? wb('toast.templateInstallFailed', isZh.value))
   } finally {
     installingTemplateId.value = null
   }
