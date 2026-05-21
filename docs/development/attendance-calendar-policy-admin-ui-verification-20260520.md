@@ -33,6 +33,14 @@ Base: `origin/main@37013f269`
 
 ## Boundaries Verified
 
+- Backend settings support is inherited from the effective-calendar work already
+  on `origin/main`: `DEFAULT_SETTINGS.calendarPolicy`, `settingsSchema.calendarPolicy`,
+  and `normalizeCalendarPolicyOverrides()` are present in
+  `plugins/plugin-attendance/index.cjs`; the existing integration test
+  `effective-calendar §6.2 applies calendarPolicy with mode gates, priority, and
+  normalize drops invalid` round-trips `PUT /api/attendance/settings` with
+  `calendarPolicy.overrides[]` and asserts the normalized response keeps three
+  valid nested `{ filters, effective }` entries while dropping invalid ones.
 - No backend code changes beyond syntax checking the existing plugin file.
 - No `attendance_*` migration or fact-source move.
 - No direct `meta_*` writes.

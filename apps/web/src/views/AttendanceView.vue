@@ -1402,7 +1402,7 @@
                       </button>
                     </div>
                     <p class="attendance__field-hint">
-                      {{ tr('These overrides feed the effective-calendar API and attendance calculation chain. Rest-to-work changes can create auto-absence rows after the auto-absence job runs.', '这些规则会进入有效日历 API 与考勤计算链。休息日改为工作日后，自动缺勤任务运行时可能生成缺勤记录。') }}
+                      {{ tr('These overrides drive the effective-calendar API and attendance calculation chain. Rest-to-work changes can create auto-absence rows after the auto-absence job runs.', '这些规则会影响有效日历 API 与考勤计算链。休息日改为工作日后，自动缺勤任务运行时可能生成缺勤记录。') }}
                     </p>
                     <p class="attendance__field-hint attendance__field-hint--warn">
                       {{ tr('Role and role-tag matching is reserved until role context is loaded by the resolver; keep new rules scoped to org, group, or user.', '角色与角色标签匹配需等待解析器加载角色上下文；新增规则请先使用组织、考勤组或用户范围。') }}
@@ -1427,21 +1427,21 @@
                             <tr>
                               <td>
                                 <div class="attendance__inline-fields">
-                                  <input v-model="override.date" type="date" :aria-label="tr('Single date', '单日')" />
-                                  <input v-model="override.from" type="date" :aria-label="tr('From date', '开始日期')" />
-                                  <input v-model="override.to" type="date" :aria-label="tr('To date', '结束日期')" />
+                                  <input v-model="override.date" class="attendance__table-input" type="date" :aria-label="tr('Single date', '单日')" />
+                                  <input v-model="override.from" class="attendance__table-input" type="date" :aria-label="tr('From date', '开始日期')" />
+                                  <input v-model="override.to" class="attendance__table-input" type="date" :aria-label="tr('To date', '结束日期')" />
                                 </div>
                               </td>
                               <td>
-                                <input v-model="override.name" type="text" placeholder="春节" />
-                                <select v-model="override.match">
+                                <input v-model="override.name" class="attendance__table-input" type="text" placeholder="春节" />
+                                <select v-model="override.match" class="attendance__table-input">
                                   <option value="contains">{{ tr('Contains', '包含') }}</option>
                                   <option value="equals">{{ tr('Equals', '等于') }}</option>
                                   <option value="regex">{{ tr('Regex', '正则') }}</option>
                                 </select>
                               </td>
                               <td>
-                                <select v-model="override.source">
+                                <select v-model="override.source" class="attendance__table-input">
                                   <option value="org">{{ tr('Organization', '组织') }}</option>
                                   <option value="group">{{ tr('Attendance group', '考勤组') }}</option>
                                   <option value="user">{{ tr('User', '用户') }}</option>
@@ -1449,12 +1449,12 @@
                                 </select>
                               </td>
                               <td>
-                                <select v-model="override.isWorkingDay">
+                                <select v-model="override.isWorkingDay" class="attendance__table-input">
                                   <option :value="true">{{ tr('Working day', '工作日') }}</option>
                                   <option :value="false">{{ tr('Rest day', '休息日') }}</option>
                                 </select>
                               </td>
-                              <td><input v-model="override.label" type="text" :placeholder="tr('Policy label', '规则标签')" /></td>
+                              <td><input v-model="override.label" class="attendance__table-input" type="text" :placeholder="tr('Policy label', '规则标签')" /></td>
                               <td>
                                 <button class="attendance__btn attendance__btn--danger" type="button" @click="removeCalendarPolicyOverride(index)">
                                   {{ tr('Remove', '移除') }}
