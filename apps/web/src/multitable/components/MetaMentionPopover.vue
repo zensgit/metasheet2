@@ -1,9 +1,9 @@
 <template>
   <div v-if="visible" class="meta-mention-popover" @click.self="emit('close')">
-    <div class="meta-mention-popover__panel" role="dialog" aria-label="Mentions">
+    <div class="meta-mention-popover__panel" role="dialog" :aria-label="l('comment.mentions')">
       <div class="meta-mention-popover__header">
-        <strong>Mentions</strong>
-        <button class="meta-mention-popover__close" aria-label="Close mentions" @click="emit('close')">&times;</button>
+        <strong>{{ l('comment.mentions') }}</strong>
+        <button class="meta-mention-popover__close" :aria-label="l('comment.closeMentions')" @click="emit('close')">&times;</button>
       </div>
       <div class="meta-mention-popover__list">
         <button
@@ -13,7 +13,7 @@
           :class="{ 'meta-mention-popover__item--unread': item.unreadCount > 0 }"
           @click="emit('select-record', { rowId: item.rowId, fieldId: item.mentionedFieldIds[0] ?? null, mentionedFieldIds: item.mentionedFieldIds })"
         >
-          <span v-if="item.unreadCount > 0" class="meta-mention-popover__unread-dot" aria-label="Unread"></span>
+          <span v-if="item.unreadCount > 0" class="meta-mention-popover__unread-dot" :aria-label="l('comment.unread')"></span>
           <span class="meta-mention-popover__label">{{ resolveLabel(item.rowId) }}</span>
           <span class="meta-mention-popover__count">{{ item.mentionedCount }}</span>
           <span
@@ -31,6 +31,8 @@
 
 <script setup lang="ts">
 import type { CommentMentionSummaryItem, MetaField, MetaRecord } from '../types'
+import { useLocale } from '../../composables/useLocale'
+import { commentLabel, mentionFieldScope, type MetaCommentLabelKey } from '../utils/meta-comment-labels'
 
 const props = defineProps<{
   visible: boolean
@@ -51,6 +53,9 @@ const emit = defineEmits<{
   (e: 'select-record', payload: MentionPopoverSelectPayload): void
 }>()
 
+const { isZh } = useLocale()
+const l = (key: MetaCommentLabelKey) => commentLabel(key, isZh.value)
+
 function resolveLabel(rowId: string): string {
   if (!props.displayFieldId) return rowId
   const row = props.rows.find((record) => record.id === rowId)
@@ -68,8 +73,7 @@ function resolveFieldName(fieldId: string): string {
 function fieldScopeLabel(mentionedFieldIds: string[]): string {
   if (mentionedFieldIds.length === 0) return ''
   const primary = resolveFieldName(mentionedFieldIds[0])
-  if (mentionedFieldIds.length === 1) return primary
-  return `${primary} +${mentionedFieldIds.length - 1} more`
+  return mentionFieldScope(primary, mentionedFieldIds.length - 1, isZh.value)
 }
 </script>
 

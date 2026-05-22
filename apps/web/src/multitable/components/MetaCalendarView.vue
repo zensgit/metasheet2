@@ -450,6 +450,7 @@ const eventsByDate = computed(() => {
         value: row.data[titleField.value.id],
         linkSummaries: props.linkSummaries?.[row.id]?.[titleField.value.id],
         attachmentSummaries: props.attachmentSummaries?.[row.id]?.[titleField.value.id],
+        isZh: isZh.value,
       })
       : row.id
     const title = titleDisplay === '—' ? row.id : titleDisplay

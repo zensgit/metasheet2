@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { createApp, nextTick, type App as VueApp } from 'vue'
+import { useLocale } from '../src/composables/useLocale'
 import MetaMentionPopover from '../src/multitable/components/MetaMentionPopover.vue'
 import type { CommentMentionSummaryItem, MetaField, MetaRecord } from '../src/multitable/types'
 
@@ -28,6 +29,7 @@ afterEach(() => {
   container?.remove()
   app = null
   container = null
+  useLocale().setLocale('en')
 })
 
 const ROWS: MetaRecord[] = [
@@ -47,15 +49,34 @@ const ITEMS: CommentMentionSummaryItem[] = [
 
 describe('MetaMentionPopover', () => {
   it('renders unread affordances and record labels', async () => {
+    useLocale().setLocale('en')
     mountPopover({ visible: true, items: ITEMS, rows: ROWS, fields: FIELDS, displayFieldId: 'title' })
     await nextTick()
 
+    expect(container!.querySelector('.meta-mention-popover__panel')?.getAttribute('aria-label')).toBe('Mentions')
+    expect(container!.querySelector('.meta-mention-popover__header strong')?.textContent).toBe('Mentions')
+    expect(container!.querySelector('.meta-mention-popover__close')?.getAttribute('aria-label')).toBe('Close mentions')
     const itemEls = container!.querySelectorAll('.meta-mention-popover__item')
     expect(itemEls).toHaveLength(2)
     expect(itemEls[0].classList.contains('meta-mention-popover__item--unread')).toBe(true)
-    expect(itemEls[0].querySelector('.meta-mention-popover__unread-dot')).not.toBeNull()
+    expect(itemEls[0].querySelector('.meta-mention-popover__unread-dot')?.getAttribute('aria-label')).toBe('Unread')
     expect(itemEls[0].querySelector('.meta-mention-popover__label')!.textContent).toBe('Alpha')
     expect(itemEls[1].querySelector('.meta-mention-popover__fields')!.textContent!.trim()).toBe('Title +1 more')
+  })
+
+  it('localizes mention popover chrome while preserving record and field names raw', async () => {
+    useLocale().setLocale('zh-CN')
+    mountPopover({ visible: true, items: ITEMS, rows: ROWS, fields: FIELDS, displayFieldId: 'title' })
+    await nextTick()
+
+    expect(container!.querySelector('.meta-mention-popover__panel')?.getAttribute('aria-label')).toBe('提及')
+    expect(container!.querySelector('.meta-mention-popover__header strong')?.textContent).toBe('提及')
+    expect(container!.querySelector('.meta-mention-popover__close')?.getAttribute('aria-label')).toBe('关闭提及')
+    const itemEls = container!.querySelectorAll('.meta-mention-popover__item')
+    expect(itemEls[0].querySelector('.meta-mention-popover__unread-dot')?.getAttribute('aria-label')).toBe('未读')
+    expect(itemEls[0].querySelector('.meta-mention-popover__label')!.textContent).toBe('Alpha')
+    expect(itemEls[1].querySelector('.meta-mention-popover__label')!.textContent).toBe('Beta')
+    expect(itemEls[1].querySelector('.meta-mention-popover__fields')!.textContent!.trim()).toBe('Title +1 个字段')
   })
 
   it('emits the selected row and field scope', async () => {

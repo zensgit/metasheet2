@@ -504,6 +504,7 @@ function formatValue(field: MetaField, v: unknown): string {
     value: v,
     linkSummaries: props.linkSummariesByField?.[field.id],
     attachmentSummaries: props.attachmentSummariesByField?.[field.id],
+    isZh: isZh.value,
   })
 }
 
@@ -589,7 +590,7 @@ async function onDrawerFileSelect(fieldId: string, e: Event) {
   clearAttachmentError(fieldId)
   const field = props.fields.find((item) => item.id === fieldId)
   if (field) {
-    const validationError = validateAttachmentSelection(field, files, attachmentList(fieldId).length)
+    const validationError = validateAttachmentSelection(field, files, attachmentList(fieldId).length, isZh.value)
     if (validationError) {
       setAttachmentError(fieldId, validationError)
       input.value = ''

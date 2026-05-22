@@ -41,6 +41,10 @@ function ambiguousMatchMessage(token: string, kind: LookupKind) {
   return `Multiple people match "${token}". Use email for an exact match.`
 }
 
+function singlePersonLimitMessage(rawValue: string, isZh: boolean) {
+  return isZh ? `人员字段只允许一个人员：${rawValue}` : `People field only allows one person: ${rawValue}`
+}
+
 function collectMatchesForLookup(token: string, kind: LookupKind, lookup?: Map<string, string | null>) {
   if (!lookup) return []
   const normalized = normalizePeopleImportKey(token)
@@ -60,8 +64,9 @@ export function resolvePeopleImportValue(params: {
   rawValue: string
   currentField?: MetaField
   lookups: PeopleImportLookupMaps
+  isZh?: boolean
 }): string[] | null {
-  const { rawValue, currentField, lookups } = params
+  const { rawValue, currentField, lookups, isZh = false } = params
   const tokens = extractImportTokens(rawValue)
   if (!tokens.length) return null
 
@@ -71,7 +76,7 @@ export function resolvePeopleImportValue(params: {
   }
   if (matchesFromIds.length) {
     if (currentField?.property?.limitSingleRecord === true && matchesFromIds.length > 1) {
-      throw new Error(`People field only allows one person: ${rawValue}`)
+      throw new Error(singlePersonLimitMessage(rawValue, isZh))
     }
     return matchesFromIds
   }
@@ -84,7 +89,7 @@ export function resolvePeopleImportValue(params: {
     }
     if (!bucketMatches.length) continue
     if (currentField?.property?.limitSingleRecord === true && bucketMatches.length > 1) {
-      throw new Error(`People field only allows one person: ${rawValue}`)
+      throw new Error(singlePersonLimitMessage(rawValue, isZh))
     }
     return bucketMatches
   }

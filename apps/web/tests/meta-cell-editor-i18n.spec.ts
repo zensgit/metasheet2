@@ -165,6 +165,28 @@ describe('MetaCellEditor i18n — attachment chrome', () => {
   })
 })
 
+describe('MetaCellEditor i18n — link action chrome', () => {
+  it('localizes the reachable link action button while preserving field metadata raw', () => {
+    const field: MetaField = {
+      id: 'owner',
+      name: 'Owner',
+      type: 'link',
+      property: { refKind: 'user' } as unknown as MetaField['property'],
+    }
+
+    useLocale().setLocale('zh-CN')
+    let root = mountEditor(field, [])
+    expect(root.querySelector('.meta-cell-editor__link-btn')?.textContent?.trim()).toBe('选择人员...')
+    expect(root.textContent).not.toContain('Choose people')
+
+    app?.unmount(); app = null; container?.remove(); container = null
+
+    useLocale().setLocale('zh-CN')
+    root = mountEditor(field, ['rec_1'])
+    expect(root.querySelector('.meta-cell-editor__link-btn')?.textContent?.trim()).toBe('编辑人员 (1)')
+  })
+})
+
 describe('MetaCellEditor i18n — user-data preservation', () => {
   it('select option values stay exactly as authored (user data)', () => {
     useLocale().setLocale('zh-CN')

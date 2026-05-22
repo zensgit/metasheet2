@@ -44,6 +44,24 @@ describe('people import lookup priorities', () => {
     })).toThrow('People field only allows one person')
   })
 
+  it('localizes single-select people field lookup fallbacks when requested', () => {
+    const emailLookup = new Map<string, string | null>()
+    addPeopleLookupToken(emailLookup, 'amy@example.com', 'rec_amy')
+    addPeopleLookupToken(emailLookup, 'jamie@example.com', 'rec_jamie')
+
+    expect(() => resolvePeopleImportValue({
+      rawValue: 'amy@example.com, jamie@example.com',
+      currentField: {
+        id: 'fld_owner',
+        name: 'Owner',
+        type: 'link',
+        property: { refKind: 'user', limitSingleRecord: true },
+      },
+      lookups: { email: emailLookup },
+      isZh: true,
+    })).toThrow('人员字段只允许一个人员：amy@example.com, jamie@example.com')
+  })
+
   it('classifies email, name and alias fields consistently', () => {
     expect(inferPeopleLookupKind('Email')).toBe('email')
     expect(inferPeopleLookupKind('Display Name')).toBe('name')
