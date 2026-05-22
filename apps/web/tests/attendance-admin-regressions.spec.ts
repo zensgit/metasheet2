@@ -209,8 +209,8 @@ describe('Attendance admin regressions', () => {
               shifts: 2,
               rotationRules: 1,
               shiftAssignments: 1,
-              rotationAssignments: 1,
-              assignedUsers: 2,
+              rotationAssignments: 9,
+              assignedUsers: 10,
               diagnostics: 1,
               groupsWithoutMembers: 0,
               assignmentUsersWithoutScheduleGroup: 1,
@@ -251,6 +251,20 @@ describe('Attendance admin regressions', () => {
                 shiftAssignments: true,
                 rotationAssignments: false,
                 truncated: true,
+              },
+              sampling: {
+                assignmentLimit: 500,
+                sampled: true,
+                shiftAssignments: {
+                  visible: 1,
+                  total: 1,
+                  truncated: true,
+                },
+                rotationAssignments: {
+                  visible: 1,
+                  total: 9,
+                  truncated: false,
+                },
               },
             },
           },
@@ -788,9 +802,10 @@ describe('Attendance admin regressions', () => {
     expect(section).toBeTruthy()
     expect(window.getComputedStyle(section!).display).not.toBe('none')
     expect(section!.textContent).toContain('Read-only snapshot')
-    expect(section!.querySelector('[data-attendance-advanced-scheduling-truncation]')?.textContent).toContain('Shift assignment snapshot is capped at 500 rows')
+    expect(section!.querySelector('[data-attendance-advanced-scheduling-truncation]')?.textContent).toContain('Shift assignment detail rows are capped at 500')
+    expect(section!.querySelector('[data-attendance-advanced-scheduling-truncation]')?.textContent).toContain('top metrics use full aggregate counts')
     expect(section!.querySelector('[data-attendance-advanced-scheduling-metric="schedule-groups"]')?.textContent).toContain('1')
-    expect(section!.querySelector('[data-attendance-advanced-scheduling-metric="assignments"]')?.textContent).toContain('2')
+    expect(section!.querySelector('[data-attendance-advanced-scheduling-metric="assignments"]')?.textContent).toContain('10')
     expect(section!.querySelector('[data-attendance-advanced-scheduling-diagnostic="assignment_without_schedule_group"]')?.textContent).toContain('1')
     expect(section!.querySelector('[data-attendance-advanced-scheduling-groups]')?.textContent).toContain('Line A')
     const buttons = Array.from(section!.querySelectorAll<HTMLButtonElement>('button')).map(button => button.textContent || '')

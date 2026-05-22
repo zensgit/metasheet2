@@ -5977,6 +5977,20 @@ interface AttendanceAdvancedSchedulingWorkbench {
       rotationAssignments?: boolean
       truncated?: boolean
     }
+    sampling?: {
+      assignmentLimit?: number
+      sampled?: boolean
+      shiftAssignments?: {
+        visible?: number
+        total?: number
+        truncated?: boolean
+      }
+      rotationAssignments?: {
+        visible?: number
+        total?: number
+        truncated?: boolean
+      }
+    }
   }
 }
 
@@ -6380,30 +6394,34 @@ const advancedSchedulingWorkbenchReadOnlyLabel = computed(() =>
 )
 
 const advancedSchedulingWorkbenchTruncationWarning = computed(() => {
+  const sampling = advancedSchedulingWorkbench.value?.metadata?.sampling
   const truncation = advancedSchedulingWorkbench.value?.metadata?.truncation
-  if (!truncation?.truncated) return ''
-  const limit = Number(truncation.assignmentLimit) || 500
-  if (truncation.shiftAssignments && truncation.rotationAssignments) {
+  const sampled = sampling?.sampled ?? truncation?.truncated
+  if (!sampled) return ''
+  const limit = Number(sampling?.assignmentLimit ?? truncation?.assignmentLimit) || 500
+  const shiftSampled = sampling?.shiftAssignments?.truncated ?? truncation?.shiftAssignments
+  const rotationSampled = sampling?.rotationAssignments?.truncated ?? truncation?.rotationAssignments
+  if (shiftSampled && rotationSampled) {
     return tr(
-      `Shift and rotation assignment snapshots are capped at ${limit} rows each; coverage counts may be lower than actual.`,
-      `固定班与轮班分配快照分别最多显示 ${limit} 行，覆盖统计可能低于实际。`,
+      `Shift and rotation assignment detail rows are capped at ${limit} each; top metrics use full aggregate counts.`,
+      `固定班与轮班分配明细分别最多显示 ${limit} 行，顶部指标使用完整聚合统计。`,
     )
   }
-  if (truncation.shiftAssignments) {
+  if (shiftSampled) {
     return tr(
-      `Shift assignment snapshot is capped at ${limit} rows; coverage counts may be lower than actual.`,
-      `固定班分配快照最多显示 ${limit} 行，覆盖统计可能低于实际。`,
+      `Shift assignment detail rows are capped at ${limit}; top metrics use full aggregate counts.`,
+      `固定班分配明细最多显示 ${limit} 行，顶部指标使用完整聚合统计。`,
     )
   }
-  if (truncation.rotationAssignments) {
+  if (rotationSampled) {
     return tr(
-      `Rotation assignment snapshot is capped at ${limit} rows; coverage counts may be lower than actual.`,
-      `轮班分配快照最多显示 ${limit} 行，覆盖统计可能低于实际。`,
+      `Rotation assignment detail rows are capped at ${limit}; top metrics use full aggregate counts.`,
+      `轮班分配明细最多显示 ${limit} 行，顶部指标使用完整聚合统计。`,
     )
   }
   return tr(
-    `Assignment snapshot is capped at ${limit} rows; coverage counts may be lower than actual.`,
-    `分配快照最多显示 ${limit} 行，覆盖统计可能低于实际。`,
+    `Assignment detail rows are capped at ${limit}; top metrics use full aggregate counts.`,
+    `分配明细最多显示 ${limit} 行，顶部指标使用完整聚合统计。`,
   )
 })
 
