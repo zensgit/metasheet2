@@ -1128,6 +1128,7 @@ async function getPeopleResolver(field: MetaField): Promise<ImportValueResolver 
           name: nameLookup,
           alias: aliasLookup,
         },
+        isZh: isZh.value,
       })
   })().catch((error) => {
     peopleResolverCache.delete(targetSheetId)

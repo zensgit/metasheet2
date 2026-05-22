@@ -225,7 +225,7 @@ function onPickOrphanMode(event: Event) {
 
 function titleForRow(row: MetaRecord): string {
   if (!titleField.value) return row.id
-  const display = formatFieldDisplay({ field: titleField.value, value: row.data[titleField.value.id] })
+  const display = formatFieldDisplay({ field: titleField.value, value: row.data[titleField.value.id], isZh: isZh.value })
   return display === '-' || display === '—' ? row.id : display
 }
 

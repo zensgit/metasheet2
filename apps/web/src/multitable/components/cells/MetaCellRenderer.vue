@@ -120,11 +120,13 @@
 import { computed } from 'vue'
 import type { MetaAttachment, MetaField, LinkedRecordSummary } from '../../types'
 import MetaAttachmentList from '../MetaAttachmentList.vue'
+import { useLocale } from '../../../composables/useLocale'
 import { isPersonField } from '../../utils/link-fields'
 import { formatFieldDisplay } from '../../utils/field-display'
 import { isSystemFieldType } from '../../utils/system-fields'
 
 const props = defineProps<{ field: MetaField; value: unknown; linkSummaries?: LinkedRecordSummary[]; attachmentSummaries?: MetaAttachment[] }>()
+const { isZh } = useLocale()
 
 const displayValue = computed(() => {
   return formatFieldDisplay({
@@ -132,6 +134,7 @@ const displayValue = computed(() => {
     value: props.value,
     linkSummaries: props.linkSummaries,
     attachmentSummaries: props.attachmentSummaries,
+    isZh: isZh.value,
   })
 })
 const isSystemField = computed(() => isSystemFieldType(props.field.type))
@@ -175,6 +178,7 @@ const linkItems = computed(() => {
     value: props.value,
     linkSummaries: props.linkSummaries,
     attachmentSummaries: props.attachmentSummaries,
+    isZh: isZh.value,
   })
   if (!linkIds.value.length) return []
   return [{ id: '__link_summary__', display: fallbackLabel }]
@@ -198,6 +202,7 @@ const attachmentItems = computed<MetaAttachment[]>(() => {
       value: props.value,
       linkSummaries: props.linkSummaries,
       attachmentSummaries: props.attachmentSummaries,
+      isZh: isZh.value,
     }),
     mimeType: 'application/octet-stream',
     size: 0,

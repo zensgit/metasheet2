@@ -258,6 +258,7 @@ function formatValue(row: MetaRecord, field: MetaField): string {
     value: row.data[field.id],
     linkSummaries: props.linkSummaries?.[row.id]?.[field.id],
     attachmentSummaries: props.attachmentSummaries?.[row.id]?.[field.id],
+    isZh: isZh.value,
   })
 }
 

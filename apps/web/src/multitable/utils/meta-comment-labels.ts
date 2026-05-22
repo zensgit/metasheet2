@@ -1,7 +1,7 @@
 // Comments drawer + composer chrome string table (T3B2).
 //
 // Scope: comment drawer/composer chrome plus row-comment action chip labels in
-// alternative views. User content, author names, mention labels, and
+// alternative views. User content, author names, record labels, field names, and
 // backend/composable error bodies stay raw and are never translated here.
 
 export type MetaCommentLabelKey =
@@ -18,6 +18,9 @@ export type MetaCommentLabelKey =
   | 'comment.resolve'
   | 'comment.resolving'
   | 'comment.resolved'
+  | 'comment.mentions'
+  | 'comment.closeMentions'
+  | 'comment.unread'
   | 'comment.placeholderAdd'
   | 'comment.placeholderEdit'
   | 'comment.placeholderReply'
@@ -44,6 +47,9 @@ const META_COMMENT_LABELS: Record<MetaCommentLabelKey, { en: string; zh: string 
   'comment.resolve': { en: 'Resolve', zh: '解决' },
   'comment.resolving': { en: 'Resolving...', zh: '正在解决...' },
   'comment.resolved': { en: 'Resolved', zh: '已解决' },
+  'comment.mentions': { en: 'Mentions', zh: '提及' },
+  'comment.closeMentions': { en: 'Close mentions', zh: '关闭提及' },
+  'comment.unread': { en: 'Unread', zh: '未读' },
   'comment.placeholderAdd': { en: 'Add a comment...', zh: '添加评论...' },
   'comment.placeholderEdit': { en: 'Edit comment…', zh: '编辑评论…' },
   'comment.placeholderReply': { en: 'Reply to thread…', zh: '回复线程…' },
@@ -93,4 +99,9 @@ export function editingBanner(actorLabel: string, isZh: boolean): string {
 
 export function replyingBanner(actorLabel: string, isZh: boolean): string {
   return isZh ? `正在回复 ${actorLabel}` : `Replying to ${actorLabel}`
+}
+
+export function mentionFieldScope(primaryFieldName: string, extraCount: number, isZh: boolean): string {
+  if (extraCount <= 0) return primaryFieldName
+  return isZh ? `${primaryFieldName} +${extraCount} 个字段` : `${primaryFieldName} +${extraCount} more`
 }

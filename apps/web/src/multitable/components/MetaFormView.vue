@@ -479,6 +479,7 @@ function readonlyFieldDisplay(field: MetaField): string {
     value: formData[field.id] ?? props.record?.data[field.id],
     linkSummaries: props.linkSummariesByField?.[field.id],
     attachmentSummaries: props.attachmentSummariesByField?.[field.id],
+    isZh: isZh.value,
   })
 }
 
@@ -536,7 +537,7 @@ async function onFormFileSelect(fieldId: string, e: Event) {
   clearAttachmentOperationError(fieldId)
   const field = props.fields.find((item) => item.id === fieldId)
   if (field) {
-    const validationError = validateAttachmentSelection(field, files, attachmentList(fieldId).length)
+    const validationError = validateAttachmentSelection(field, files, attachmentList(fieldId).length, isZh.value)
     if (validationError) {
       setAttachmentOperationError(fieldId, validationError)
       input.value = ''

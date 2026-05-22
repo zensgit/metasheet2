@@ -3,6 +3,7 @@ import {
   commentLabel,
   editingBanner,
   emptyMessage,
+  mentionFieldScope,
   replyingBanner,
   replyCount,
   type MetaCommentLabelKey,
@@ -24,6 +25,9 @@ describe('meta-comment-labels static keys', () => {
       ['comment.resolve', 'Resolve', '解决'],
       ['comment.resolving', 'Resolving...', '正在解决...'],
       ['comment.resolved', 'Resolved', '已解决'],
+      ['comment.mentions', 'Mentions', '提及'],
+      ['comment.closeMentions', 'Close mentions', '关闭提及'],
+      ['comment.unread', 'Unread', '未读'],
       ['comment.placeholderAdd', 'Add a comment...', '添加评论...'],
       ['comment.placeholderEdit', 'Edit comment…', '编辑评论…'],
       ['comment.placeholderReply', 'Reply to thread…', '回复线程…'],
@@ -67,5 +71,11 @@ describe('meta-comment-labels helpers', () => {
     expect(editingBanner('张三', true)).toBe('正在编辑 张三')
     expect(replyingBanner('Amy Wong', false)).toBe('Replying to Amy Wong')
     expect(replyingBanner('张三', true)).toBe('正在回复 张三')
+  })
+
+  it('formats mention field scopes while preserving field names raw', () => {
+    expect(mentionFieldScope('Title', 0, false)).toBe('Title')
+    expect(mentionFieldScope('Title', 1, false)).toBe('Title +1 more')
+    expect(mentionFieldScope('标题', 1, true)).toBe('标题 +1 个字段')
   })
 })

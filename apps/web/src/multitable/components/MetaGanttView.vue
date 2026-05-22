@@ -146,6 +146,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaGanttViewConfig, MetaRecord } from '../types'
+import { useLocale } from '../../composables/useLocale'
 import { formatFieldDisplay } from '../utils/field-display'
 import { isSelfTableLinkField, resolveGanttViewConfig } from '../utils/view-config'
 
@@ -186,6 +187,7 @@ const zoom = ref<'day' | 'week' | 'month'>('week')
 const selectedRecordId = ref<string | null>(null)
 const pendingConfigKey = ref<string | null>(null)
 const resizingRecordId = ref<string | null>(null)
+const { isZh } = useLocale()
 
 type ResizeEdge = 'start' | 'end'
 
@@ -246,6 +248,7 @@ function displayTitle(record: MetaRecord): string {
     value: record.data[field.id],
     linkSummaries: props.linkSummaries?.[record.id]?.[field.id],
     attachmentSummaries: props.attachmentSummaries?.[record.id]?.[field.id],
+    isZh: isZh.value,
   })
   return value === '-' || value === '\u2014' ? record.id : value
 }

@@ -344,6 +344,7 @@ const readonlyDisplayValue = computed(() =>
     field: props.field,
     value: props.modelValue,
     attachmentSummaries: props.attachmentSummaries,
+    isZh: isZh.value,
   }),
 )
 
@@ -422,10 +423,10 @@ const linkButtonLabel = computed(() => {
   // unreachable in the current render flow. We intentionally do NOT localize this
   // static English string in T3A2 (would be a dead key per the merged dev MD §7.6).
   // If a future refactor exposes this branch to the DOM, localize it together with
-  // `formatLinkActionLabel` (queued for T3B with the link picker/drawer slice).
+  // a real render assertion; the reachable link branch below now receives locale.
   if (props.field.type !== 'link') return 'Choose linked records...'
   const count = Array.isArray(props.modelValue) ? props.modelValue.length : props.modelValue ? 1 : 0
-  return formatLinkActionLabel(props.field, count)
+  return formatLinkActionLabel(props.field, count, isZh.value)
 })
 
 const uploading = ref(false)
@@ -483,7 +484,7 @@ function setAttachmentValue(nextIds: string[], confirm = true) {
 
 async function uploadFiles(files: FileList) {
   attachmentError.value = ''
-  const validationError = validateAttachmentSelection(props.field, files, attachmentIds.value.length)
+  const validationError = validateAttachmentSelection(props.field, files, attachmentIds.value.length, isZh.value)
   if (validationError) {
     attachmentError.value = validationError
     return

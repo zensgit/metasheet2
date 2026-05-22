@@ -330,6 +330,7 @@ function displayLabel(record: MetaRecord): string {
     value: record.data[displayField.value.id],
     linkSummaries: props.linkSummaries?.[record.id]?.[displayField.value.id],
     attachmentSummaries: props.attachmentSummaries?.[record.id]?.[displayField.value.id],
+    isZh: isZh.value,
   })
   return label === '—' ? record.id : label
 }

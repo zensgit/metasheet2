@@ -65,14 +65,16 @@ function formatAutoNumber(value: unknown, property: Record<string, unknown> | un
   return `${prefix}${String(Math.trunc(num)).padStart(digits, '0')}`
 }
 
-function summarizeLinkCount(field: MetaField, count: number): string {
+function summarizeLinkCount(field: MetaField, count: number, isZh = false): string {
   if (count <= 0) return '—'
+  if (isZh) return field.property?.refKind === 'user' ? `${count} 个人员` : `${count} 条关联记录`
   if (field.property?.refKind === 'user') return count === 1 ? '1 person' : `${count} people`
   return count === 1 ? '1 linked record' : `${count} linked records`
 }
 
-function summarizeAttachmentCount(count: number): string {
+function summarizeAttachmentCount(count: number, isZh = false): string {
   if (count <= 0) return '—'
+  if (isZh) return `${count} 个附件`
   return count === 1 ? '1 attachment' : `${count} attachments`
 }
 
@@ -104,8 +106,9 @@ export function formatFieldDisplay(params: {
   value: unknown
   linkSummaries?: LinkedRecordSummary[] | null
   attachmentSummaries?: MetaAttachment[] | null
+  isZh?: boolean
 }): string {
-  const { field, value, linkSummaries, attachmentSummaries } = params
+  const { field, value, linkSummaries, attachmentSummaries, isZh = false } = params
   if (value === null || value === undefined || value === '') return '—'
 
   if (field.type === 'date') return formatDate(value)
@@ -113,7 +116,7 @@ export function formatFieldDisplay(params: {
   if (field.type === 'createdTime' || field.type === 'modifiedTime') return formatDateTime(value)
   if (field.type === 'autoNumber') return formatAutoNumber(value, field.property)
   if (isSystemFieldType(field.type)) return String(value)
-  if (field.type === 'boolean') return value ? 'Yes' : 'No'
+  if (field.type === 'boolean') return isZh ? (value ? '是' : '否') : (value ? 'Yes' : 'No')
 
   if (field.type === 'number') {
     const num = typeof value === 'number' ? value : Number(value)
@@ -164,7 +167,7 @@ export function formatFieldDisplay(params: {
         .join(', ')
     }
     const count = Array.isArray(value) ? value.length : value ? 1 : 0
-    return summarizeLinkCount(field, count)
+    return summarizeLinkCount(field, count, isZh)
   }
 
   if (field.type === 'attachment') {
@@ -175,7 +178,7 @@ export function formatFieldDisplay(params: {
         .join(', ')
     }
     const count = Array.isArray(value) ? value.length : value ? 1 : 0
-    return summarizeAttachmentCount(count)
+    return summarizeAttachmentCount(count, isZh)
   }
 
   if (Array.isArray(value)) {

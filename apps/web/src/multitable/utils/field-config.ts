@@ -287,19 +287,25 @@ export function isValidPhoneValue(value: unknown): boolean {
   return typeof value === 'string' && PHONE_REGEX.test(value.trim())
 }
 
-export function validateAttachmentSelection(field: MetaField, files: FileList | File[], existingCount: number): string | null {
+export function validateAttachmentSelection(field: MetaField, files: FileList | File[], existingCount: number, isZh = false): string | null {
   if (field.type !== 'attachment') return null
   const { maxFiles, acceptedMimeTypes } = resolveAttachmentFieldProperty(field.property)
   const fileList = Array.from(files)
   if (maxFiles && existingCount + fileList.length > maxFiles && !shouldReplaceAttachmentSelection(field, fileList, existingCount)) {
-    return maxFiles === 1
-      ? 'This field only allows one attachment. Clear the current file before adding another.'
+    if (maxFiles === 1) {
+      return isZh
+        ? '该字段只允许一个附件。添加新文件前请先清除当前文件。'
+        : 'This field only allows one attachment. Clear the current file before adding another.'
+    }
+    return isZh
+      ? `该字段最多允许 ${maxFiles} 个附件。`
       : `This field allows up to ${maxFiles} attachments.`
   }
   if (acceptedMimeTypes.length > 0) {
     const disallowed = fileList.find((file) => file.type && !acceptedMimeTypes.includes(file.type))
     if (disallowed) {
-      return `File type not allowed: ${disallowed.type || disallowed.name}`
+      const rejectedType = disallowed.type || disallowed.name
+      return isZh ? `不允许的文件类型：${rejectedType}` : `File type not allowed: ${rejectedType}`
     }
   }
   return null
