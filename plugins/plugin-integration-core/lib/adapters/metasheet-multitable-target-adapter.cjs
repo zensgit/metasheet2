@@ -42,6 +42,20 @@ function normalizeStringArray(value, field) {
   return value.map((item, index) => requiredString(item, `${field}[${index}]`))
 }
 
+function normalizeFieldIdMap(value, field) {
+  if (value === undefined || value === null) return {}
+  if (!isPlainObject(value)) {
+    throw new AdapterValidationError(`${field} must be an object`, { field })
+  }
+  const normalized = {}
+  for (const [logicalField, physicalField] of Object.entries(value)) {
+    const logical = optionalString(logicalField)
+    const physical = optionalString(physicalField)
+    if (logical && physical) normalized[logical] = physical
+  }
+  return normalized
+}
+
 function normalizeField(field) {
   if (typeof field === 'string') {
     return { name: field, label: field, type: 'string' }
@@ -77,6 +91,7 @@ function normalizeWriteMode(value, field) {
 function normalizeObjects(config = {}) {
   const rawObjects = isPlainObject(config.objects) ? config.objects : {}
   const objects = {}
+  const configProjectId = optionalString(config.projectId)
   for (const [objectId, objectConfig] of Object.entries(rawObjects)) {
     if (!isPlainObject(objectConfig)) {
       throw new AdapterValidationError(`config.objects.${objectId} must be an object`, {
@@ -97,14 +112,22 @@ function normalizeObjects(config = {}) {
       viewId: optionalString(objectConfig.viewId),
       baseId: optionalString(objectConfig.baseId),
       openLink: optionalString(objectConfig.openLink),
+      projectId: optionalString(objectConfig.projectId) || configProjectId,
       fields,
       fieldNames: new Set(fields.map((field) => field.name)),
+      fieldIdMap: normalizeFieldIdMap(objectConfig.fieldIdMap, `config.objects.${objectId}.fieldIdMap`),
       keyFields: Array.from(new Set(keyFields)),
       includeInternalFields: objectConfig.includeInternalFields === true,
       mode: normalizeWriteMode(objectConfig.mode, `config.objects.${objectId}.mode`),
     }
   }
   return objects
+}
+
+function getProvisioningApi(context) {
+  return context && context.api && context.api.multitable && context.api.multitable.provisioning
+    ? context.api.multitable.provisioning
+    : null
 }
 
 function getRecordsApi(context) {
@@ -137,6 +160,58 @@ function projectRecordForWrite(record, objectConfig) {
     if (shouldWriteField(field, objectConfig)) data[field] = value
   }
   return data
+}
+
+function logicalFieldNames(objectConfig) {
+  const fields = new Set()
+  for (const field of objectConfig.fields || []) {
+    const name = optionalString(field && field.name)
+    if (name) fields.add(name)
+  }
+  for (const keyField of objectConfig.keyFields || []) {
+    const name = optionalString(keyField)
+    if (name) fields.add(name)
+  }
+  return Array.from(fields)
+}
+
+async function resolveProvisionedFieldIdMap(context, objectConfig) {
+  const projectId = optionalString(objectConfig.projectId)
+  const fieldIds = logicalFieldNames(objectConfig)
+  if (!projectId || fieldIds.length === 0) return {}
+  const provisioning = getProvisioningApi(context)
+  if (!provisioning) return {}
+
+  if (typeof provisioning.resolveFieldIds === 'function') {
+    return provisioning.resolveFieldIds({
+      projectId,
+      objectId: objectConfig.objectId,
+      fieldIds,
+    })
+  }
+
+  if (typeof provisioning.getFieldId === 'function') {
+    const resolved = {}
+    for (const fieldId of fieldIds) {
+      const physical = provisioning.getFieldId(projectId, objectConfig.objectId, fieldId)
+      if (physical) resolved[fieldId] = physical
+    }
+    return resolved
+  }
+
+  return {}
+}
+
+function mapLogicalFieldName(field, logicalToPhysical = {}) {
+  return logicalToPhysical[field] || field
+}
+
+function mapRecordFieldsForWrite(record, logicalToPhysical = {}) {
+  const mapped = {}
+  for (const [field, value] of Object.entries(record)) {
+    mapped[mapLogicalFieldName(field, logicalToPhysical)] = value
+  }
+  return mapped
 }
 
 function resolvedKeyFields(request, objectConfig) {
@@ -174,13 +249,15 @@ async function findExistingRecord(recordsApi, objectConfig, data, keyFields) {
   return Array.isArray(records) && records.length > 0 ? records[0] : null
 }
 
-async function writeOne({ recordsApi, objectConfig, request, record, index }) {
-  const data = projectRecordForWrite(record, objectConfig)
+async function writeOne({ recordsApi, objectConfig, request, record, index, logicalToPhysical }) {
+  const logicalData = projectRecordForWrite(record, objectConfig)
   const keyFields = resolvedKeyFields(request, objectConfig)
   const mode = objectConfig.mode === 'append' || keyFields.length === 0 ? 'append' : 'upsert'
-  const key = keyForRecord(data, keyFields) || keyForRecord(record, request.keyFields) || String(index)
+  const key = keyForRecord(logicalData, keyFields) || keyForRecord(record, request.keyFields) || String(index)
 
-  if (mode === 'upsert') assertKeyValues(data, keyFields, index)
+  if (mode === 'upsert') assertKeyValues(logicalData, keyFields, index)
+  const data = mapRecordFieldsForWrite(logicalData, logicalToPhysical)
+  const physicalKeyFields = keyFields.map((field) => mapLogicalFieldName(field, logicalToPhysical))
 
   if (mode === 'upsert') {
     if (typeof recordsApi.queryRecords !== 'function' || typeof recordsApi.patchRecord !== 'function') {
@@ -188,7 +265,7 @@ async function writeOne({ recordsApi, objectConfig, request, record, index }) {
         field: 'context.api.multitable.records',
       })
     }
-    const existing = await findExistingRecord(recordsApi, objectConfig, data, keyFields)
+    const existing = await findExistingRecord(recordsApi, objectConfig, data, physicalKeyFields)
     if (existing && existing.id) {
       const updated = await recordsApi.patchRecord({
         sheetId: objectConfig.sheetId,
@@ -223,6 +300,17 @@ async function writeOne({ recordsApi, objectConfig, request, record, index }) {
 function createMetaSheetMultitableTargetAdapter({ system, context } = {}) {
   const normalizedSystem = normalizeExternalSystemForAdapter(system)
   const objects = normalizeObjects(normalizedSystem.config)
+  const fieldMapCache = new Map()
+
+  async function fieldMapForObject(objectConfig) {
+    if (fieldMapCache.has(objectConfig.objectId)) return fieldMapCache.get(objectConfig.objectId)
+    const resolved = {
+      ...objectConfig.fieldIdMap,
+      ...await resolveProvisionedFieldIdMap(context, objectConfig),
+    }
+    fieldMapCache.set(objectConfig.objectId, resolved)
+    return resolved
+  }
 
   return {
     async testConnection() {
@@ -295,6 +383,7 @@ function createMetaSheetMultitableTargetAdapter({ system, context } = {}) {
       const request = normalizeUpsertRequest(input)
       const objectConfig = getObjectConfig(objects, request.object)
       const recordsApi = getRecordsApi(context)
+      const logicalToPhysical = await fieldMapForObject(objectConfig)
       const results = []
       const errors = []
 
@@ -306,6 +395,7 @@ function createMetaSheetMultitableTargetAdapter({ system, context } = {}) {
             request,
             record: request.records[index],
             index,
+            logicalToPhysical,
           }))
         } catch (error) {
           errors.push({
@@ -344,7 +434,10 @@ module.exports = {
   __internals: {
     normalizeObjects,
     normalizeFields,
+    normalizeFieldIdMap,
     projectRecordForWrite,
+    mapRecordFieldsForWrite,
+    resolveProvisionedFieldIdMap,
     resolvedKeyFields,
   },
 }

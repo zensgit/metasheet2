@@ -11,42 +11,51 @@ const {
   __internals,
 } = require(path.join(__dirname, '..', 'lib', 'adapters', 'metasheet-multitable-target-adapter.cjs'))
 
-function createContext({ existing = [] } = {}) {
+function createContext({ existing = [], resolveFieldIds } = {}) {
   const rows = [...existing]
   const calls = []
+  const multitable = {
+    records: {
+      async queryRecords(input) {
+        calls.push(['queryRecords', input])
+        return rows.filter((row) => Object.entries(input.filters || {}).every(([field, value]) => row.data[field] === value))
+          .slice(0, input.limit || 1000)
+      },
+      async createRecord(input) {
+        calls.push(['createRecord', input])
+        const row = {
+          id: `rec_${rows.length + 1}`,
+          sheetId: input.sheetId,
+          version: 1,
+          data: { ...input.data },
+        }
+        rows.push(row)
+        return row
+      },
+      async patchRecord(input) {
+        calls.push(['patchRecord', input])
+        const row = rows.find((item) => item.id === input.recordId && item.sheetId === input.sheetId)
+        if (!row) throw new Error(`record not found: ${input.recordId}`)
+        row.version += 1
+        row.data = { ...row.data, ...input.changes }
+        return row
+      },
+    },
+  }
+  if (resolveFieldIds) {
+    multitable.provisioning = {
+      async resolveFieldIds(input) {
+        calls.push(['resolveFieldIds', input])
+        return resolveFieldIds(input)
+      },
+    }
+  }
   return {
     calls,
     rows,
     context: {
       api: {
-        multitable: {
-          records: {
-            async queryRecords(input) {
-              calls.push(['queryRecords', input])
-              return rows.filter((row) => Object.entries(input.filters || {}).every(([field, value]) => row.data[field] === value))
-                .slice(0, input.limit || 1000)
-            },
-            async createRecord(input) {
-              calls.push(['createRecord', input])
-              const row = {
-                id: `rec_${rows.length + 1}`,
-                sheetId: input.sheetId,
-                version: 1,
-                data: { ...input.data },
-              }
-              rows.push(row)
-              return row
-            },
-            async patchRecord(input) {
-              calls.push(['patchRecord', input])
-              const row = rows.find((item) => item.id === input.recordId && item.sheetId === input.sheetId)
-              if (!row) throw new Error(`record not found: ${input.recordId}`)
-              row.version += 1
-              row.data = { ...row.data, ...input.changes }
-              return row
-            },
-          },
-        },
+        multitable,
       },
     },
   }
@@ -167,6 +176,84 @@ async function main() {
   assert.equal(appendResult.written, 1)
   assert.equal(appendResult.results[0].status, 'created')
 
+  const physical = createContext({
+    existing: [
+      {
+        id: 'rec_plm_existing',
+        sheetId: 'sheet_plm_raw_items',
+        version: 1,
+        data: {
+          fld_sourceSystemId: 'bridge_source_1',
+          fld_objectType: 'material',
+          fld_sourceId: '1',
+          fld_code: 'OLD',
+        },
+      },
+    ],
+    resolveFieldIds: ({ fieldIds }) => Object.fromEntries(fieldIds.map((fieldId) => [fieldId, `fld_${fieldId}`])),
+  })
+  const physicalTarget = createMetaSheetMultitableTargetAdapter({
+    system: createSystem({
+      projectId: 'default:integration-core',
+      objects: {
+        plm_raw_items: {
+          name: 'PLM Raw Items',
+          sheetId: 'sheet_plm_raw_items',
+          keyFields: ['sourceSystemId', 'objectType', 'sourceId'],
+          fieldDetails: [
+            { id: 'sourceSystemId', name: 'Source System', type: 'string' },
+            { id: 'objectType', name: 'Object Type', type: 'string' },
+            { id: 'sourceId', name: 'Source ID', type: 'string' },
+            { id: 'code', name: 'Code', type: 'string' },
+            { id: 'name', name: 'Name', type: 'string' },
+          ],
+        },
+      },
+    }),
+    context: physical.context,
+  })
+  const physicalResult = await physicalTarget.upsert({
+    object: 'plm_raw_items',
+    records: [
+      { sourceSystemId: 'bridge_source_1', objectType: 'material', sourceId: '1', code: 'MAT-001', name: 'Bolt' },
+      { sourceSystemId: 'bridge_source_1', objectType: 'bom', sourceId: '2', code: 'BOM-002', name: 'Parent' },
+    ],
+  })
+  assert.equal(physicalResult.written, 2)
+  assert.equal(physicalResult.failed, 0)
+  assert.deepEqual(physical.calls[0], ['resolveFieldIds', {
+    projectId: 'default:integration-core',
+    objectId: 'plm_raw_items',
+    fieldIds: ['sourceSystemId', 'objectType', 'sourceId', 'code', 'name'],
+  }])
+  assert.deepEqual(physical.calls[1], ['queryRecords', {
+    sheetId: 'sheet_plm_raw_items',
+    filters: {
+      fld_sourceSystemId: 'bridge_source_1',
+      fld_objectType: 'material',
+      fld_sourceId: '1',
+    },
+    limit: 1,
+    offset: 0,
+  }])
+  const patchCall = physical.calls.find((call) => call[0] === 'patchRecord')
+  assert.deepEqual(patchCall[1].changes, {
+    fld_sourceSystemId: 'bridge_source_1',
+    fld_objectType: 'material',
+    fld_sourceId: '1',
+    fld_code: 'MAT-001',
+    fld_name: 'Bolt',
+  })
+  const createCall = physical.calls.find((call) => call[0] === 'createRecord')
+  assert.deepEqual(createCall[1].data, {
+    fld_sourceSystemId: 'bridge_source_1',
+    fld_objectType: 'bom',
+    fld_sourceId: '2',
+    fld_code: 'BOM-002',
+    fld_name: 'Parent',
+  })
+  assert.equal(physical.rows.find((row) => row.id === 'rec_plm_existing').data.fld_code, 'MAT-001')
+
   const missingKey = await adapter.upsert({
     object: 'approved_materials',
     records: [{ name: 'Missing code' }],
@@ -203,6 +290,16 @@ async function main() {
     ignored: 'x',
   }, __internals.normalizeObjects(createSystem().config).approved_materials), {
     code: 'MAT-004',
+  })
+  assert.deepEqual(__internals.mapRecordFieldsForWrite({
+    sourceSystemId: 'bridge_source_1',
+    objectType: 'material',
+  }, {
+    sourceSystemId: 'fld_sourceSystemId',
+    objectType: 'fld_objectType',
+  }), {
+    fld_sourceSystemId: 'bridge_source_1',
+    fld_objectType: 'material',
   })
 
   console.log('✓ metasheet-multitable-target-adapter: write-only multitable target tests passed')
