@@ -462,9 +462,10 @@ K3 WISE PoC operator tools (Node only; no Docker needed to run these):
   node scripts/ops/integration-k3wise-live-poc-preflight.mjs --input <gate.json> --out-dir <packet-dir>
     -> builds the Save-only live PoC packet from the GATE answer JSON.
   node scripts/ops/integration-k3wise-gate-contract-check.mjs --init-template <safe-dir>
-    -> creates a fillable O1-O6/R1-R7 GATE contract packet and 8 redacted
-       sample skeletons outside Git. Fill the generated directory with customer
-       evidence before running the checker below.
+    -> creates a fillable O1-O6/R1-R7 GATE contract packet,
+       README-CUSTOMER-HANDOFF.zh.md, and 8 redacted sample skeletons outside
+       Git. Fill the generated directory with customer evidence before running
+       the checker below.
   node scripts/ops/integration-k3wise-gate-contract-check.mjs --input <contract.json> --out-dir <art>
     -> verifies O1-O6 and R1-R7 customer evidence before WebAPI read/list or
        relationship runtime work starts.
