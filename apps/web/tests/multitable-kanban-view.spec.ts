@@ -1,8 +1,15 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 import MetaKanbanView from '../src/multitable/components/MetaKanbanView.vue'
+import { useLocale } from '../src/composables/useLocale'
 
 describe('MetaKanbanView', () => {
+  afterEach(() => {
+    useLocale().setLocale('en')
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
   it('renders people and attachment summaries with persisted card field config', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
@@ -116,5 +123,61 @@ describe('MetaKanbanView', () => {
 
     app.unmount()
     container.remove()
+  })
+
+  it('localizes kanban chrome while keeping option values and card titles raw', async () => {
+    useLocale().setLocale('zh-CN')
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaKanbanView, {
+          rows: [
+            {
+              id: 'rec_1',
+              version: 1,
+              data: {
+                fld_title: 'Pilot card',
+                fld_status: 'Doing',
+                fld_note: 'Raw note',
+              },
+            },
+          ],
+          fields: [
+            { id: 'fld_title', name: 'Title', type: 'string' },
+            { id: 'fld_status', name: 'Status', type: 'select', options: [{ value: 'Doing', color: '#409eff' }] },
+            { id: 'fld_note', name: 'Note', type: 'string' },
+          ],
+          loading: false,
+          canCreate: true,
+          canEdit: true,
+          canComment: true,
+          viewConfig: {
+            groupFieldId: 'fld_status',
+            cardFieldIds: ['fld_note'],
+          },
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    expect(container.textContent).toContain('分组')
+    expect(container.textContent).toContain('分组依据：')
+    expect(container.textContent).toContain('卡片字段（1）')
+    expect(container.textContent).toContain('未分类')
+    expect(container.textContent).toContain('+ 添加记录')
+    expect(container.textContent).toContain('+ 添加')
+    expect(container.textContent).toContain('Doing')
+    expect(container.textContent).toContain('Pilot card')
+    expect(container.textContent).toContain('Raw note')
+    expect(container.querySelector('.meta-kanban__comment-btn')?.getAttribute('aria-label')).toBe('打开 Pilot card 的评论')
+    expect(container.querySelectorAll('[aria-label]')).toHaveLength(3)
+    expect(container.querySelectorAll('[title]')).toHaveLength(0)
+    expect(container.querySelectorAll('[placeholder]')).toHaveLength(0)
+
+    app.unmount()
   })
 })

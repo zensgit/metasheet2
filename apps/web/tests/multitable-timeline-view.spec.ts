@@ -1,8 +1,15 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 import MetaTimelineView from '../src/multitable/components/MetaTimelineView.vue'
+import { useLocale } from '../src/composables/useLocale'
 
 describe('MetaTimelineView', () => {
+  afterEach(() => {
+    useLocale().setLocale('en')
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
   it('renders persisted label field and zoom state in the timeline header', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
@@ -128,5 +135,57 @@ describe('MetaTimelineView', () => {
 
     app.unmount()
     container.remove()
+  })
+
+  it('localizes timeline chrome and preserves raw field and record labels', async () => {
+    useLocale().setLocale('zh-CN')
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaTimelineView, {
+          rows: [
+            {
+              id: 'rec_1',
+              version: 1,
+              data: {
+                fld_name: 'Roadmap',
+                fld_start: '2026-03-01',
+                fld_end: '2026-03-05',
+              },
+            },
+          ],
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string' },
+            { id: 'fld_start', name: 'Start', type: 'date' },
+            { id: 'fld_end', name: 'End', type: 'date' },
+          ],
+          loading: false,
+          canCreate: true,
+          viewConfig: {
+            startFieldId: 'fld_start',
+            endFieldId: 'fld_end',
+            labelFieldId: 'fld_name',
+            zoom: 'month',
+          },
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    expect(container.querySelector('.meta-timeline')?.getAttribute('aria-label')).toBe('时间轴视图')
+    expect(container.textContent).toContain('开始日期')
+    expect(container.textContent).toContain('结束日期')
+    expect(container.textContent).toContain('标签：Name')
+    expect(container.textContent).toContain('缩放: 月')
+    expect(container.textContent).toContain('Roadmap')
+    expect(container.querySelectorAll('[aria-label]')).toHaveLength(2)
+    expect(container.querySelectorAll('[title]')).toHaveLength(1)
+    expect(container.querySelectorAll('[placeholder]')).toHaveLength(0)
+
+    app.unmount()
   })
 })

@@ -2,21 +2,21 @@
   <div class="meta-gallery">
     <div v-if="fields.length" class="meta-gallery__toolbar">
       <label class="meta-gallery__toolbar-field">
-        <span>Title</span>
+        <span>{{ viewRenderLabel('gallery.title', isZh) }}</span>
         <select class="meta-gallery__toolbar-select" :value="galleryDraft.titleFieldId ?? ''" @change="onTitleFieldChange">
-          <option value="">Auto</option>
+          <option value="">{{ viewRenderLabel('common.auto', isZh) }}</option>
           <option v-for="field in titleFieldCandidates" :key="field.id" :value="field.id">{{ field.name }}</option>
         </select>
       </label>
       <label class="meta-gallery__toolbar-field">
-        <span>Cover</span>
+        <span>{{ viewRenderLabel('gallery.cover', isZh) }}</span>
         <select class="meta-gallery__toolbar-select" :value="galleryDraft.coverFieldId ?? ''" @change="onCoverFieldChange">
-          <option value="">None</option>
+          <option value="">{{ viewRenderLabel('common.none', isZh) }}</option>
           <option v-for="field in attachmentFields" :key="field.id" :value="field.id">{{ field.name }}</option>
         </select>
       </label>
       <label class="meta-gallery__toolbar-field">
-        <span>Columns</span>
+        <span>{{ viewRenderLabel('gallery.columns', isZh) }}</span>
         <select class="meta-gallery__toolbar-select" :value="galleryDraft.columns" @change="onColumnsChange">
           <option :value="1">1</option>
           <option :value="2">2</option>
@@ -25,15 +25,15 @@
         </select>
       </label>
       <label class="meta-gallery__toolbar-field">
-        <span>Card size</span>
+        <span>{{ viewRenderLabel('gallery.cardSize', isZh) }}</span>
         <select class="meta-gallery__toolbar-select" :value="galleryDraft.cardSize" @change="onCardSizeChange">
-          <option value="small">Small</option>
-          <option value="medium">Medium</option>
-          <option value="large">Large</option>
+          <option value="small">{{ viewSizeLabel('small', isZh) }}</option>
+          <option value="medium">{{ viewSizeLabel('medium', isZh) }}</option>
+          <option value="large">{{ viewSizeLabel('large', isZh) }}</option>
         </select>
       </label>
       <details class="meta-gallery__field-picker">
-        <summary>Card fields ({{ displayFields.length }})</summary>
+        <summary>{{ cardFieldsSummary(displayFields.length, isZh) }}</summary>
         <div class="meta-gallery__field-picker-list">
           <label v-for="field in configurableFields" :key="field.id" class="meta-gallery__field-picker-item">
             <input
@@ -45,7 +45,7 @@
           </label>
         </div>
       </details>
-      <button v-if="canCreate" class="meta-gallery__create-btn" @click="emit('create-record', {})">+ Add record</button>
+      <button v-if="canCreate" class="meta-gallery__create-btn" @click="emit('create-record', {})">{{ viewRenderLabel('common.addRecord', isZh) }}</button>
     </div>
     <div class="meta-gallery__grid" :style="gridStyle">
       <div
@@ -75,7 +75,7 @@
             class="meta-gallery__comment-btn"
             :class="rowCommentButtonClass(row.id)"
             type="button"
-            :aria-label="`Open comments for ${cardTitle(row)}`"
+            :aria-label="openRecordCommentsAria(cardTitle(row), isZh)"
             @click.stop="emit('open-comments', row.id)"
             @keydown="onRowCommentKeydown($event, row.id)"
           >
@@ -90,7 +90,7 @@
                 <MetaAttachmentList
                   :attachments="attachmentItems(row, field)"
                   variant="compact"
-                  empty-label="No attachments"
+                  :empty-label="metaCoreLabel('cell.noAttachments', isZh)"
                 />
               </div>
               <span v-else class="meta-gallery__field-value">{{ formatValue(row, field) }}</span>
@@ -100,7 +100,7 @@
               type="button"
               class="meta-gallery__field-comment-btn"
               :class="fieldCommentButtonClass(row.id, field.id)"
-              :aria-label="`Open comments for ${field.name} on ${cardTitle(row)}`"
+              :aria-label="openFieldCommentsForRecordAria(field.name, cardTitle(row), isZh)"
               @click.stop="emit('open-field-comments', { recordId: row.id, fieldId: field.id })"
               @keydown="onFieldCommentKeydown($event, row.id, field.id)"
             >
@@ -111,17 +111,17 @@
       </div>
       <div v-if="!rows.length && !loading" class="meta-gallery__empty">
         <div class="meta-gallery__empty-icon">&#x1F5BC;</div>
-        <div class="meta-gallery__empty-title">No records to display</div>
-        <div class="meta-gallery__empty-hint">Add records to see them as cards here</div>
-        <button v-if="canCreate" class="meta-gallery__empty-action" @click="emit('create-record', {})">Create first record</button>
+        <div class="meta-gallery__empty-title">{{ viewRenderLabel('gallery.noRecordsTitle', isZh) }}</div>
+        <div class="meta-gallery__empty-hint">{{ viewRenderLabel('gallery.noRecordsHint', isZh) }}</div>
+        <button v-if="canCreate" class="meta-gallery__empty-action" @click="emit('create-record', {})">{{ viewRenderLabel('common.createFirstRecord', isZh) }}</button>
       </div>
     </div>
     <div v-if="totalPages > 1" class="meta-gallery__pagination">
-      <button class="meta-gallery__page-btn" :disabled="currentPage <= 1" @click="emit('go-to-page', currentPage - 1)">&lsaquo; Prev</button>
+      <button class="meta-gallery__page-btn" :disabled="currentPage <= 1" @click="emit('go-to-page', currentPage - 1)">&lsaquo; {{ viewRenderLabel('gallery.prev', isZh) }}</button>
       <span class="meta-gallery__page-info">{{ currentPage }} / {{ totalPages }}</span>
-      <button class="meta-gallery__page-btn" :disabled="currentPage >= totalPages" @click="emit('go-to-page', currentPage + 1)">Next &rsaquo;</button>
+      <button class="meta-gallery__page-btn" :disabled="currentPage >= totalPages" @click="emit('go-to-page', currentPage + 1)">{{ viewRenderLabel('gallery.next', isZh) }} &rsaquo;</button>
     </div>
-    <div v-if="loading" class="meta-gallery__loading">Loading...</div>
+    <div v-if="loading" class="meta-gallery__loading">{{ viewRenderLabel('common.loading', isZh) }}</div>
   </div>
 </template>
 
@@ -141,6 +141,14 @@ import {
   resolveRecordCommentAffordance,
 } from '../utils/comment-affordance'
 import { commentLabel } from '../utils/meta-comment-labels'
+import { metaCoreLabel } from '../utils/meta-core-labels'
+import {
+  cardFieldsSummary,
+  openFieldCommentsForRecordAria,
+  openRecordCommentsAria,
+  viewRenderLabel,
+  viewSizeLabel,
+} from '../utils/meta-view-render-labels'
 
 const props = defineProps<{
   rows: MetaRecord[]

@@ -7,6 +7,7 @@ function flushPromises() {
 
 import MetaChartRenderer from '../src/multitable/components/MetaChartRenderer.vue'
 import type { ChartData, ChartDisplayConfig } from '../src/multitable/types'
+import { useLocale } from '../src/composables/useLocale'
 
 function mount(props: Record<string, unknown>) {
   const container = document.createElement('div')
@@ -59,6 +60,7 @@ const tableData: ChartData = {
 
 describe('MetaChartRenderer', () => {
   afterEach(() => {
+    useLocale().setLocale('en')
     document.body.innerHTML = ''
   })
 
@@ -140,5 +142,19 @@ describe('MetaChartRenderer', () => {
 
     const title = container.querySelector('.meta-chart__title')
     expect(title?.textContent).toBe('Sales Overview')
+  })
+
+  it('localizes table headers while keeping chart data labels raw', async () => {
+    useLocale().setLocale('zh-CN')
+    const { container } = mount({ chartData: tableData })
+    await flushPromises()
+
+    expect(container.querySelectorAll('th')[0]?.textContent).toBe('标签')
+    expect(container.querySelectorAll('th')[1]?.textContent).toBe('值')
+    expect(container.textContent).toContain('Row 1')
+    expect(container.textContent).toContain('100')
+    expect(container.querySelectorAll('[aria-label]')).toHaveLength(0)
+    expect(container.querySelectorAll('[title]')).toHaveLength(0)
+    expect(container.querySelectorAll('[placeholder]')).toHaveLength(0)
   })
 })

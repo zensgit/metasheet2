@@ -32,20 +32,20 @@
           v-if="activeDashboard && !editingName"
           class="meta-dashboard__btn meta-dashboard__btn--sm"
           type="button"
-          title="Rename"
+          :title="viewRenderLabel('dashboard.rename', isZh)"
           data-action="rename"
           @click="startRename"
-        >Rename</button>
+        >{{ viewRenderLabel('dashboard.rename', isZh) }}</button>
       </div>
       <div class="meta-dashboard__actions">
-        <button class="meta-dashboard__btn" type="button" data-action="add-panel" @click="showAddPanel = true">+ Add Panel</button>
-        <button class="meta-dashboard__btn meta-dashboard__btn--primary" type="button" data-action="create-dashboard" @click="onCreateDashboard">+ New Dashboard</button>
+        <button class="meta-dashboard__btn" type="button" data-action="add-panel" @click="showAddPanel = true">{{ viewRenderLabel('dashboard.addPanel', isZh) }}</button>
+        <button class="meta-dashboard__btn meta-dashboard__btn--primary" type="button" data-action="create-dashboard" @click="onCreateDashboard">{{ viewRenderLabel('dashboard.newDashboard', isZh) }}</button>
       </div>
     </div>
 
-    <div v-if="loading" class="meta-dashboard__empty">Loading dashboard...</div>
+    <div v-if="loading" class="meta-dashboard__empty">{{ viewRenderLabel('dashboard.loadingDashboard', isZh) }}</div>
     <div v-else-if="!activeDashboard" class="meta-dashboard__empty" data-empty="true">
-      No dashboards yet. Create your first dashboard.
+      {{ viewRenderLabel('dashboard.empty', isZh) }}
     </div>
 
     <!-- Grid of panels -->
@@ -66,9 +66,9 @@
               data-field="panel-size"
               @change="onResizePanel(panel.id, ($event.target as HTMLSelectElement).value as 'small' | 'medium' | 'large')"
             >
-              <option value="small">Small</option>
-              <option value="medium">Medium</option>
-              <option value="large">Large</option>
+              <option value="small">{{ viewSizeLabel('small', isZh) }}</option>
+              <option value="medium">{{ viewSizeLabel('medium', isZh) }}</option>
+              <option value="large">{{ viewSizeLabel('large', isZh) }}</option>
             </select>
             <button
               class="meta-dashboard__btn meta-dashboard__btn--icon meta-dashboard__btn--danger"
@@ -84,7 +84,7 @@
             :chart-data="chartDataMap[panel.chartId]"
             :display-config="chartConfigMap[panel.chartId]?.displayConfig"
           />
-          <div v-else class="meta-dashboard__panel-loading">Loading chart...</div>
+          <div v-else class="meta-dashboard__panel-loading">{{ viewRenderLabel('dashboard.loadingChart', isZh) }}</div>
         </div>
       </div>
     </div>
@@ -93,11 +93,11 @@
     <div v-if="showAddPanel" class="meta-dashboard__modal-overlay" @click.self="showAddPanel = false">
       <div class="meta-dashboard__modal">
         <div class="meta-dashboard__modal-header">
-          <h4>Add Chart Panel</h4>
+          <h4>{{ viewRenderLabel('dashboard.addChartPanel', isZh) }}</h4>
           <button class="meta-dashboard__btn meta-dashboard__btn--icon" type="button" @click="showAddPanel = false">&times;</button>
         </div>
         <div class="meta-dashboard__modal-body">
-          <div v-if="!charts.length" class="meta-dashboard__empty">No charts available. Create a chart first.</div>
+          <div v-if="!charts.length" class="meta-dashboard__empty">{{ viewRenderLabel('dashboard.noCharts', isZh) }}</div>
           <div
             v-for="chart in charts"
             :key="chart.id"
@@ -119,6 +119,8 @@ import { ref, computed, watch, nextTick } from 'vue'
 import type { Dashboard, DashboardPanel, ChartConfig, ChartData } from '../types'
 import type { MultitableApiClient } from '../api/client'
 import MetaChartRenderer from './MetaChartRenderer.vue'
+import { useLocale } from '../../composables/useLocale'
+import { dashboardDefaultName, viewRenderLabel, viewSizeLabel } from '../utils/meta-view-render-labels'
 
 const props = defineProps<{
   sheetId: string
@@ -136,6 +138,7 @@ const showAddPanel = ref(false)
 const editingName = ref(false)
 const nameInput = ref('')
 const nameInputRef = ref<HTMLInputElement | null>(null)
+const { isZh } = useLocale()
 
 const activeDashboard = computed(() => dashboards.value.find((d) => d.id === activeDashboardId.value) ?? dashboards.value[0] ?? null)
 
@@ -191,7 +194,7 @@ async function loadPanelData() {
 async function onCreateDashboard() {
   if (!props.client) return
   try {
-    const db = await props.client.createDashboard(props.sheetId, { name: `Dashboard ${dashboards.value.length + 1}` })
+    const db = await props.client.createDashboard(props.sheetId, { name: dashboardDefaultName(dashboards.value.length + 1, isZh.value) })
     dashboards.value.push(db)
     activeDashboardId.value = db.id
   } catch {

@@ -1,26 +1,26 @@
 <template>
-  <div class="meta-timeline" role="region" aria-label="Timeline view">
-    <div v-if="loading" class="meta-timeline__loading">Loading...</div>
+  <div class="meta-timeline" role="region" :aria-label="viewRenderLabel('timeline.viewAria', isZh)">
+    <div v-if="loading" class="meta-timeline__loading">{{ viewRenderLabel('common.loading', isZh) }}</div>
     <template v-else>
       <div class="meta-timeline__config">
         <label class="meta-timeline__config-label">
-          Start date
+          {{ viewRenderLabel('timeline.startDate', isZh) }}
           <select class="meta-timeline__config-select" :value="startFieldId" @change="onStartFieldChange">
-            <option value="">— select —</option>
+            <option value="">{{ viewRenderLabel('common.chooseField', isZh) }}</option>
             <option v-for="f in dateFields" :key="f.id" :value="f.id">{{ f.name }}</option>
           </select>
         </label>
         <label class="meta-timeline__config-label">
-          End date
+          {{ viewRenderLabel('timeline.endDate', isZh) }}
           <select class="meta-timeline__config-select" :value="endFieldId" @change="onEndFieldChange">
-            <option value="">— select —</option>
+            <option value="">{{ viewRenderLabel('common.chooseField', isZh) }}</option>
             <option v-for="f in dateFields" :key="f.id" :value="f.id">{{ f.name }}</option>
           </select>
         </label>
         <label class="meta-timeline__config-label">
-          Label field
+          {{ managerLabel('view.labelField', isZh) }}
           <select class="meta-timeline__config-select" :value="labelFieldId" @change="onLabelFieldChange">
-            <option value="">(auto)</option>
+            <option value="">{{ viewRenderLabel('common.auto', isZh) }}</option>
             <option v-for="f in labelFields" :key="f.id" :value="f.id">{{ f.name }}</option>
           </select>
           <span class="meta-timeline__config-hint">
@@ -28,34 +28,34 @@
           </span>
         </label>
         <label class="meta-timeline__config-label">
-          Zoom
+          {{ managerLabel('view.zoom', isZh) }}
           <select class="meta-timeline__config-select" :value="zoom" @change="onZoomChange">
-            <option value="day">Day</option>
-            <option value="week">Week</option>
-            <option value="month">Month</option>
+            <option value="day">{{ viewZoomLabel('day', isZh) }}</option>
+            <option value="week">{{ viewZoomLabel('week', isZh) }}</option>
+            <option value="month">{{ viewZoomLabel('month', isZh) }}</option>
           </select>
           <span class="meta-timeline__config-hint">
-            Axis spacing follows the selected zoom level.
+            {{ viewRenderLabel('timeline.axisZoomHint', isZh) }}
           </span>
         </label>
-        <button v-if="canCreate" class="meta-timeline__create-btn" @click="onQuickCreate">+ Add record</button>
+        <button v-if="canCreate" class="meta-timeline__create-btn" @click="onQuickCreate">{{ viewRenderLabel('common.addRecord', isZh) }}</button>
       </div>
 
       <div v-if="!startFieldId || !endFieldId" class="meta-timeline__placeholder">
-        Select start and end date fields to display the timeline.
-        <button v-if="canCreate" class="meta-timeline__placeholder-action" @click="onQuickCreate">Create record</button>
+        {{ viewRenderLabel('timeline.selectStartEnd', isZh) }}
+        <button v-if="canCreate" class="meta-timeline__placeholder-action" @click="onQuickCreate">{{ viewRenderLabel('common.createRecord', isZh) }}</button>
       </div>
 
       <template v-else>
         <div class="meta-timeline__header">
           <div class="meta-timeline__label-col">
-            <span>Record</span>
+            <span>{{ viewRenderLabel('timeline.record', isZh) }}</span>
             <span class="meta-timeline__header-meta">
               {{ labelFieldSummary }}
             </span>
           </div>
           <div class="meta-timeline__axis">
-            <span class="meta-timeline__zoom-badge">Zoom: {{ zoomLabel }}</span>
+            <span class="meta-timeline__zoom-badge">{{ managerLabel('view.zoom', isZh) }}: {{ zoomLabel }}</span>
             <span v-for="tick in axisTicks" :key="tick.key" class="meta-timeline__tick" :style="{ left: tick.left + '%' }">
               {{ tick.label }}
             </span>
@@ -79,7 +79,7 @@
                 v-if="isAttachmentLabel && displayField"
                 :attachments="attachmentItems(item.record, displayField)"
                 variant="compact"
-                empty-label="No attachments"
+                :empty-label="metaCoreLabel('cell.noAttachments', isZh)"
               />
               <template v-else>{{ displayLabel(item.record) }}</template>
             </div>
@@ -88,7 +88,7 @@
                 type="button"
                 class="meta-timeline__comment-btn"
                 :class="rowCommentButtonClass(item.record.id)"
-                :aria-label="`Open comments for ${displayLabel(item.record)}`"
+                :aria-label="openRecordCommentsAria(displayLabel(item.record), isZh)"
                 @click.stop="emit('open-comments', item.record.id)"
                 @keydown="onRowCommentKeydown($event, item.record.id)"
               >
@@ -99,7 +99,7 @@
                 type="button"
                 class="meta-timeline__field-comment-btn"
                 :class="fieldCommentButtonClass(item.record.id)"
-                :aria-label="`Open comments for ${displayField.name}`"
+                :aria-label="openFieldCommentsAria(displayField.name, isZh)"
                 @click.stop="emit('open-field-comments', { recordId: item.record.id, fieldId: displayField.id })"
                 @keydown="onFieldCommentKeydown($event, item.record.id, displayField.id)"
               >
@@ -121,7 +121,7 @@
         </div>
 
         <div v-if="unscheduledRows.length" class="meta-timeline__unscheduled">
-          <div class="meta-timeline__unscheduled-header">Unscheduled ({{ unscheduledRows.length }})</div>
+          <div class="meta-timeline__unscheduled-header">{{ unscheduledCount(unscheduledRows.length, isZh) }}</div>
           <div
             v-for="row in unscheduledRows"
             :key="row.id"
@@ -138,7 +138,7 @@
                 v-if="isAttachmentLabel && displayField"
                 :attachments="attachmentItems(row, displayField)"
                 variant="compact"
-                empty-label="No attachments"
+                :empty-label="metaCoreLabel('cell.noAttachments', isZh)"
               />
               <template v-else>{{ displayLabel(row) }}</template>
             </div>
@@ -147,7 +147,7 @@
                 type="button"
                 class="meta-timeline__comment-btn"
                 :class="rowCommentButtonClass(row.id)"
-                :aria-label="`Open comments for ${displayLabel(row)}`"
+                :aria-label="openRecordCommentsAria(displayLabel(row), isZh)"
                 @click.stop="emit('open-comments', row.id)"
                 @keydown="onRowCommentKeydown($event, row.id)"
               >
@@ -158,7 +158,7 @@
                 type="button"
                 class="meta-timeline__field-comment-btn"
                 :class="fieldCommentButtonClass(row.id)"
-                :aria-label="`Open comments for ${displayField.name}`"
+                :aria-label="openFieldCommentsAria(displayField.name, isZh)"
                 @click.stop="emit('open-field-comments', { recordId: row.id, fieldId: displayField.id })"
                 @keydown="onFieldCommentKeydown($event, row.id, displayField.id)"
               >
@@ -169,8 +169,8 @@
         </div>
 
         <div v-if="!scheduledRows.length && !unscheduledRows.length" class="meta-timeline__empty">
-          No records found
-          <button v-if="canCreate" class="meta-timeline__placeholder-action" @click="onQuickCreate">Create first record</button>
+          {{ viewRenderLabel('common.noRecordsFound', isZh) }}
+          <button v-if="canCreate" class="meta-timeline__placeholder-action" @click="onQuickCreate">{{ viewRenderLabel('common.createFirstRecord', isZh) }}</button>
         </div>
       </template>
     </template>
@@ -193,6 +193,17 @@ import {
   resolveRecordCommentAffordance,
 } from '../utils/comment-affordance'
 import { commentLabel } from '../utils/meta-comment-labels'
+import { metaCoreLabel } from '../utils/meta-core-labels'
+import { managerLabel } from '../utils/meta-manager-labels'
+import {
+  openFieldCommentsAria,
+  openRecordCommentsAria,
+  timelineAutoUsesFieldHint,
+  timelineLabelSummary,
+  unscheduledCount,
+  viewRenderLabel,
+  viewZoomLabel,
+} from '../utils/meta-view-render-labels'
 
 const props = defineProps<{
   rows: MetaRecord[]
@@ -279,23 +290,21 @@ const displayField = computed(() =>
 const isAttachmentLabel = computed(() => displayField.value?.type === 'attachment')
 
 const zoomLabel = computed(() => {
-  if (zoom.value === 'day') return 'Day'
-  if (zoom.value === 'month') return 'Month'
-  return 'Week'
+  return viewZoomLabel(zoom.value, isZh.value)
 })
 
 const labelFieldSummary = computed(() => {
-  if (!labelFieldId.value) return 'Label: auto'
+  if (!labelFieldId.value) return timelineLabelSummary('auto', null, isZh.value)
   const field = props.fields.find((item) => item.id === labelFieldId.value)
-  return field ? `Label: ${field.name}` : 'Label: custom'
+  return field ? timelineLabelSummary('field', field.name, isZh.value) : timelineLabelSummary('custom', null, isZh.value)
 })
 
 const labelFieldHint = computed(() => {
   if (!labelFieldId.value) {
     const field = displayField.value
-    return field ? `Auto uses ${field.name} when available.` : 'Auto falls back to record id.'
+    return field ? timelineAutoUsesFieldHint(field.name, isZh.value) : viewRenderLabel('timeline.autoRecordIdHint', isZh.value)
   }
-  return 'Timeline labels use this field across rows and unscheduled items.'
+  return viewRenderLabel('timeline.labelFieldHint', isZh.value)
 })
 
 function rowCommentAffordance(recordId: string) {

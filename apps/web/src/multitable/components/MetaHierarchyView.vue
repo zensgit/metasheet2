@@ -1,22 +1,22 @@
 <template>
-  <div class="meta-hierarchy" role="tree" aria-label="Hierarchy view">
+  <div class="meta-hierarchy" role="tree" :aria-label="viewRenderLabel('hierarchy.viewAria', isZh)">
     <div class="meta-hierarchy__toolbar">
       <label class="meta-hierarchy__control">
-        <span>Parent field</span>
+        <span>{{ managerLabel('view.parentField', isZh) }}</span>
         <select :value="hierarchyDraft.parentFieldId ?? ''" @change="onPickParentField">
-          <option value="">(auto link field)</option>
+          <option value="">{{ viewRenderLabel('hierarchy.autoLinkField', isZh) }}</option>
           <option v-for="field in linkFields" :key="field.id" :value="field.id">{{ field.name }}</option>
         </select>
       </label>
       <label class="meta-hierarchy__control">
-        <span>Title field</span>
+        <span>{{ managerLabel('view.titleField', isZh) }}</span>
         <select :value="hierarchyDraft.titleFieldId ?? ''" @change="onPickTitleField">
-          <option value="">(auto)</option>
+          <option value="">{{ viewRenderLabel('common.auto', isZh) }}</option>
           <option v-for="field in fields" :key="field.id" :value="field.id">{{ field.name }}</option>
         </select>
       </label>
       <label class="meta-hierarchy__control">
-        <span>Expand depth</span>
+        <span>{{ managerLabel('view.defaultExpandDepth', isZh) }}</span>
         <input
           :value="hierarchyDraft.defaultExpandDepth"
           type="number"
@@ -26,18 +26,18 @@
         />
       </label>
       <label class="meta-hierarchy__control">
-        <span>Orphans</span>
+        <span>{{ managerLabel('view.orphanRecords', isZh) }}</span>
         <select :value="hierarchyDraft.orphanMode" @change="onPickOrphanMode">
-          <option value="root">show at root</option>
-          <option value="hidden">hide</option>
+          <option value="root">{{ viewRenderLabel('hierarchy.showAtRoot', isZh) }}</option>
+          <option value="hidden">{{ viewRenderLabel('hierarchy.hide', isZh) }}</option>
         </select>
       </label>
-      <button v-if="canCreate" class="meta-hierarchy__create" @click="emit('create-record', {})">+ Add root</button>
+      <button v-if="canCreate" class="meta-hierarchy__create" @click="emit('create-record', {})">{{ viewRenderLabel('hierarchy.addRoot', isZh) }}</button>
     </div>
 
     <div v-if="!parentField" class="meta-hierarchy__placeholder">
-      <strong>No parent link field configured.</strong>
-      <span>Add or choose a link field to render parent-child relationships.</span>
+      <strong>{{ viewRenderLabel('hierarchy.noParentConfigured', isZh) }}</strong>
+      <span>{{ viewRenderLabel('hierarchy.parentHelp', isZh) }}</span>
     </div>
 
     <div v-else class="meta-hierarchy__body">
@@ -52,7 +52,7 @@
         @dragover.prevent
         @drop.prevent="onDropToRoot"
       >
-        Drop here to move to root
+        {{ viewRenderLabel('hierarchy.dropToRoot', isZh) }}
       </div>
       <ul v-if="visibleRoots.length" class="meta-hierarchy__list meta-hierarchy__list--root">
         <HierarchyNode
@@ -65,6 +65,7 @@
           :can-edit="canEdit"
           :can-comment="canComment"
           :comment-label="commentsChipLabel"
+          :is-zh="isZh"
           :dragging-record-id="draggingRecordId"
           :comment-presence="commentPresence"
           @toggle="toggleNode"
@@ -76,10 +77,10 @@
           @drop-record="onDropRecord"
         />
       </ul>
-      <div v-else class="meta-hierarchy__empty">No records match this hierarchy view.</div>
+      <div v-else class="meta-hierarchy__empty">{{ viewRenderLabel('hierarchy.empty', isZh) }}</div>
     </div>
 
-    <div v-if="loading" class="meta-hierarchy__loading">Loading...</div>
+    <div v-if="loading" class="meta-hierarchy__loading">{{ viewRenderLabel('common.loading', isZh) }}</div>
   </div>
 </template>
 
@@ -96,6 +97,11 @@ import {
   resolveRecordCommentAffordance,
 } from '../utils/comment-affordance'
 import { commentLabel } from '../utils/meta-comment-labels'
+import { managerLabel } from '../utils/meta-manager-labels'
+import {
+  openRecordCommentsAria,
+  viewRenderLabel,
+} from '../utils/meta-view-render-labels'
 
 type HierarchyNodeModel = {
   record: MetaRecord
@@ -406,6 +412,7 @@ const HierarchyNode: ReturnType<typeof defineComponent> = defineComponent({
     canEdit: { type: Boolean, default: false },
     canComment: { type: Boolean, default: false },
     commentLabel: { type: String, default: 'Comments' },
+    isZh: { type: Boolean, default: false },
     draggingRecordId: { type: String as PropType<string | null>, default: null },
     commentPresence: { type: Object as PropType<Record<string, MultitableCommentPresenceSummary | undefined> | undefined>, default: undefined },
   },
@@ -469,7 +476,7 @@ const HierarchyNode: ReturnType<typeof defineComponent> = defineComponent({
             ? h('button', {
               class: rowCommentButtonClass(node.record.id),
               type: 'button',
-              'aria-label': `Open comments for ${title}`,
+              'aria-label': openRecordCommentsAria(title, nodeProps.isZh),
               onClick: () => nodeEmit('open-comments', node.record.id),
               onKeydown: (event: KeyboardEvent) => handleCommentAffordanceKeydown(event, () => nodeEmit('open-comments', node.record.id)),
             }, [h(MetaCommentActionChip, { label: nodeProps.commentLabel, state: rowCommentAffordance(node.record.id) })])
@@ -479,7 +486,7 @@ const HierarchyNode: ReturnType<typeof defineComponent> = defineComponent({
               class: 'meta-hierarchy__child-btn',
               type: 'button',
               onClick: () => nodeEmit('create-child', node.record.id),
-            }, '+ Child')
+            }, viewRenderLabel('hierarchy.child', nodeProps.isZh))
             : null,
         ]),
         hasChildren && expanded
@@ -493,6 +500,7 @@ const HierarchyNode: ReturnType<typeof defineComponent> = defineComponent({
               canEdit: nodeProps.canEdit,
               canComment: nodeProps.canComment,
               commentLabel: nodeProps.commentLabel,
+              isZh: nodeProps.isZh,
               draggingRecordId: nodeProps.draggingRecordId,
               commentPresence: nodeProps.commentPresence,
               onToggle: (recordId: string) => nodeEmit('toggle', recordId),
