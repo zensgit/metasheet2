@@ -56,8 +56,9 @@ PowerShell 7 / `pwsh` on macOS.
 - the evidence JSON has a fixed key set; none of the keys is a host or
   credential field.
 - the runbook adds a pre-delivery `Select-String` self-check for
-  `Password|Pwd=|User Id|Uid=|Data Source|Server=` against the evidence
-  files.
+  `Password`, `Pwd=`, `User Id`, `Uid=`, `Data Source`, and `Server=`
+  against the evidence files. The runbook intentionally passes these as a
+  `-SimpleMatch` pattern array so each token is checked independently.
 
 ## Acceptance criteria mapped to evidence
 

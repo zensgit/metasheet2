@@ -178,8 +178,9 @@ redaction rule (no host, no credentials, no connection string).
 Pre-delivery self-check (run against the evidence files):
 
 ```powershell
+$leakPatterns = @('Password', 'Pwd=', 'User Id', 'Uid=', 'Data Source', 'Server=')
 Select-String -Path .\ba-m05-evidence\*.json,.\ba-m05-evidence\*.md `
-  -Pattern 'Password|Pwd=|User Id|Uid=|Data Source|Server=' -SimpleMatch
+  -Pattern $leakPatterns -SimpleMatch
 ```
 
 Expect no matches. If anything matches, do not deliver; report the leak.
