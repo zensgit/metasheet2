@@ -115,10 +115,12 @@ node scripts/ops/integration-k3wise-gate-contract-check.mjs \
   --init-template /path/outside-git/k3wise-gate-contract
 ```
 
-Then replace the WebAPI read/list placeholders and the four sample files with
-the customer-approved, redacted evidence. Keep the directory outside Git and do
-not paste tokens, passwords, session IDs, authority codes, or SQL connection
-strings into any sample.
+The generated directory includes `README-CUSTOMER-HANDOFF.zh.md`, the fillable
+packet JSON, and the redacted sample skeletons. Read the README first, then
+replace the WebAPI read/list placeholders and the four sample files with the
+customer-approved, redacted evidence. Keep the directory outside Git and do not
+paste tokens, passwords, session IDs, authority codes, or SQL connection strings
+into any sample.
 
 When the packet is filled, run:
 

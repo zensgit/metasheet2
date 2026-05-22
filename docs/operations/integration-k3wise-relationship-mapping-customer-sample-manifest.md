@@ -164,8 +164,10 @@ node scripts/ops/integration-k3wise-gate-contract-check.mjs \
   --init-template /path/outside-git/k3wise-gate-contract
 ```
 
-Then replace the relationship placeholders and the four relationship sample
-files with redacted customer-approved evidence. When the packet is filled, run:
+The generated directory includes `README-CUSTOMER-HANDOFF.zh.md`, the fillable
+packet JSON, and the redacted sample skeletons. Read the README first, then
+replace the relationship placeholders and the four relationship sample files
+with redacted customer-approved evidence. When the packet is filled, run:
 
 ```bash
 node scripts/ops/integration-k3wise-gate-contract-check.mjs \
