@@ -108,4 +108,203 @@ describe('attendance effective calendar role context', () => {
     expect(helpers.matchScopeFilters({ roles: ['attendance employee'] }, user2)).toBe(true)
     expect(helpers.matchScopeFilters({ roleTags: ['operator'] }, user2)).toBe(true)
   })
+
+  it('uses a group rule-set rule as groupId effective-calendar base profile', async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('FROM attendance_rules')) {
+        return [
+          {
+            id: 'default-rule',
+            name: 'Default rule',
+            timezone: 'UTC',
+            work_start_time: '09:00',
+            work_end_time: '18:00',
+            late_grace_minutes: 10,
+            early_grace_minutes: 10,
+            rounding_minutes: 5,
+            working_days: [1, 2, 3, 4, 5],
+            is_default: true,
+            org_id: 'default',
+          },
+        ]
+      }
+      if (sql.includes('FROM attendance_holidays')) return []
+      if (sql.includes('FROM attendance_groups')) {
+        return [
+          {
+            id: 'group-1',
+            name: 'Weekend Ops',
+            code: 'weekend_ops',
+            timezone: 'Asia/Tokyo',
+            rule_set_id: 'rule-set-1',
+          },
+        ]
+      }
+      if (sql.includes('FROM attendance_rule_sets')) {
+        return [
+          {
+            config: {
+              rule: {
+                timezone: 'Asia/Shanghai',
+                workingDays: [6],
+              },
+            },
+          },
+        ]
+      }
+      return []
+    })
+
+    const result = await helpers.resolveEffectiveCalendar({ query }, {
+      orgId: 'default',
+      from: '2026-10-10',
+      to: '2026-10-10',
+      groupId: 'group-1',
+      calendarPolicyOverrides: [],
+    })
+
+    expect(result.timezone).toBe('Asia/Shanghai')
+    expect(result.items[0]).toMatchObject({
+      date: '2026-10-10',
+      base: {
+        isWorkingDay: true,
+        source: 'rule',
+      },
+      effective: {
+        isWorkingDay: true,
+        source: 'rule',
+      },
+    })
+    expect(result.items[0]?.layers).toEqual([
+      {
+        kind: 'base_rule',
+        source: 'rule',
+        isWorkingDay: true,
+      },
+    ])
+    expect(query).toHaveBeenCalledWith(
+      'SELECT config FROM attendance_rule_sets WHERE id = $1 AND org_id = $2',
+      ['rule-set-1', 'default'],
+    )
+  })
+
+  it('keeps groupId mode on the default rule when the group has no rule set', async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('FROM attendance_rules')) {
+        return [
+          {
+            id: 'default-rule',
+            name: 'Default rule',
+            timezone: 'UTC',
+            work_start_time: '09:00',
+            work_end_time: '18:00',
+            late_grace_minutes: 10,
+            early_grace_minutes: 10,
+            rounding_minutes: 5,
+            working_days: [1, 2, 3, 4, 5],
+            is_default: true,
+            org_id: 'default',
+          },
+        ]
+      }
+      if (sql.includes('FROM attendance_holidays')) return []
+      if (sql.includes('FROM attendance_groups')) {
+        return [
+          {
+            id: 'group-2',
+            name: 'Weekday Ops',
+            code: 'weekday_ops',
+            timezone: 'Asia/Tokyo',
+            rule_set_id: null,
+          },
+        ]
+      }
+      if (sql.includes('FROM attendance_rule_sets')) {
+        throw new Error('rule-set lookup should not run without group rule_set_id')
+      }
+      return []
+    })
+
+    const result = await helpers.resolveEffectiveCalendar({ query }, {
+      orgId: 'default',
+      from: '2026-10-10',
+      to: '2026-10-10',
+      groupId: 'group-2',
+      calendarPolicyOverrides: [],
+    })
+
+    expect(result.timezone).toBe('UTC')
+    expect(result.items[0]?.base).toMatchObject({
+      isWorkingDay: false,
+      source: 'rule',
+    })
+    expect(result.items[0]?.effective).toMatchObject({
+      isWorkingDay: false,
+      source: 'rule',
+    })
+  })
+
+  it('falls back to the pre-rule-set group lookup when rule_set_id schema is missing', async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('FROM attendance_rules')) {
+        return [
+          {
+            id: 'default-rule',
+            name: 'Default rule',
+            timezone: 'UTC',
+            work_start_time: '09:00',
+            work_end_time: '18:00',
+            late_grace_minutes: 10,
+            early_grace_minutes: 10,
+            rounding_minutes: 5,
+            working_days: [1, 2, 3, 4, 5],
+            is_default: true,
+            org_id: 'default',
+          },
+        ]
+      }
+      if (sql.includes('FROM attendance_holidays')) return []
+      if (sql.includes('FROM attendance_groups') && sql.includes('rule_set_id')) {
+        const error = new Error('column "rule_set_id" does not exist') as Error & { code?: string }
+        error.code = '42703'
+        throw error
+      }
+      if (sql.includes('FROM attendance_groups')) {
+        return [
+          {
+            id: 'group-legacy',
+            name: 'Legacy Ops',
+            code: 'legacy_ops',
+            timezone: 'Asia/Tokyo',
+          },
+        ]
+      }
+      if (sql.includes('FROM attendance_rule_sets')) {
+        throw new Error('rule-set lookup should not run after schema fallback')
+      }
+      return []
+    })
+
+    const result = await helpers.resolveEffectiveCalendar({ query }, {
+      orgId: 'default',
+      from: '2026-10-10',
+      to: '2026-10-10',
+      groupId: 'legacy_ops',
+      calendarPolicyOverrides: [],
+    })
+
+    expect(result.timezone).toBe('UTC')
+    expect(result.items[0]?.base).toMatchObject({
+      isWorkingDay: false,
+      source: 'rule',
+    })
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('SELECT id, name, code, timezone, rule_set_id'),
+      ['default', 'legacy_ops'],
+    )
+    expect(query).toHaveBeenCalledWith(
+      expect.not.stringContaining('rule_set_id'),
+      ['default', 'legacy_ops'],
+    )
+  })
 })
