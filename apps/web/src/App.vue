@@ -74,6 +74,7 @@ import { useRoute } from 'vue-router'
 import { useAuth } from './composables/useAuth'
 import { useLocale } from './composables/useLocale'
 import { usePlugins } from './composables/usePlugins'
+import { setMultitableApiErrorLocaleResolver } from './multitable/api/client'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
 import { useFeatureFlags } from './stores/featureFlags'
 import { getApiBase } from './utils/api'
@@ -83,6 +84,7 @@ const { navItems: pluginNavItems, fetchPlugins } = usePlugins()
 const { isAttendanceFocused, isPlmWorkbenchFocused, hasFeature, loadProductFeatures } = useFeatureFlags()
 const { clearToken, getAccessSnapshot, getToken, hasPermission } = useAuth()
 const { locale, isZh, setLocale } = useLocale()
+setMultitableApiErrorLocaleResolver(() => isZh.value)
 
 const showNav = computed(() => {
   return route.meta?.hideNavbar !== true
