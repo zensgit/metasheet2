@@ -43,6 +43,10 @@ const REQUEST_TYPES = [
   'leave',
   'overtime',
 ]
+const ATTENDANCE_SCHEDULE_GROUP_SOURCES = new Set(['manual', 'import', 'integration'])
+const ATTENDANCE_SCHEDULE_GROUP_MEMBER_ROLES = new Set(['member', 'lead', 'backup'])
+const ATTENDANCE_SCHEDULER_SCOPE_SUBJECT_TYPES = new Set(['user', 'role', 'role_tag'])
+const ATTENDANCE_SCHEDULER_SCOPE_ACTIONS = new Set(['view', 'edit', 'import', 'export', 'clear', 'approve', 'dispatch'])
 
 const SETTINGS_KEY = 'attendance.settings'
 const SETTINGS_CACHE_TTL_MS = 60000
@@ -7227,6 +7231,228 @@ function mapAttendanceGroupMemberRow(row) {
   }
 }
 
+function normalizeNullableText(value) {
+  if (value === undefined || value === null) return null
+  const text = String(value).trim()
+  return text.length ? text : null
+}
+
+function normalizeOptionalUuidField(fieldName, value) {
+  if (value === undefined || value === null || value === '') return null
+  const uuid = normalizeUuidString(String(value))
+  if (!uuid) {
+    throw new HttpError(400, 'VALIDATION_ERROR', `${fieldName} must be a UUID`)
+  }
+  return uuid
+}
+
+function normalizeEnumValue(fieldName, value, allowed, fallback) {
+  const raw = value === undefined || value === null || value === '' ? fallback : String(value).trim()
+  if (!allowed.has(raw)) {
+    throw new HttpError(400, 'VALIDATION_ERROR', `${fieldName} is invalid`)
+  }
+  return raw
+}
+
+function mapAttendanceScheduleGroupRow(row) {
+  return {
+    id: row.id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    name: row.name,
+    code: row.code ?? '',
+    description: row.description ?? null,
+    attendanceGroupId: row.attendance_group_id ?? null,
+    parentId: row.parent_id ?? null,
+    departmentRef: row.department_ref ?? null,
+    source: row.source ?? 'manual',
+    isActive: row.is_active !== false,
+    createdBy: row.created_by ?? null,
+    updatedBy: row.updated_by ?? null,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : undefined,
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : undefined,
+  }
+}
+
+function mapAttendanceScheduleGroupMemberRow(row) {
+  return {
+    id: row.id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    scheduleGroupId: row.schedule_group_id,
+    userId: row.user_id,
+    effectiveFrom: normalizeDateOnly(row.effective_from),
+    effectiveTo: normalizeDateOnly(row.effective_to),
+    role: row.role ?? null,
+    source: row.source ?? 'manual',
+    createdBy: row.created_by ?? null,
+    updatedBy: row.updated_by ?? null,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : undefined,
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : undefined,
+  }
+}
+
+function normalizeAttendanceScheduleGroupInput(value, existing = null) {
+  const name = value.name !== undefined
+    ? normalizeSafeDisplayName('name', value.name)
+    : normalizeSafeDisplayName('name', existing?.name)
+  const code = resolveAttendanceCode({
+    explicitCode: value.code,
+    existingCode: existing?.code,
+    prefix: 'schedule-group',
+    name,
+  })
+  const attendanceGroupId = value.attendanceGroupId !== undefined
+    ? normalizeOptionalUuidField('attendanceGroupId', value.attendanceGroupId)
+    : existing?.attendance_group_id ?? existing?.attendanceGroupId ?? null
+  const parentId = value.parentId !== undefined
+    ? normalizeOptionalUuidField('parentId', value.parentId)
+    : existing?.parent_id ?? existing?.parentId ?? null
+  if (parentId && existing?.id && parentId === existing.id) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'parentId cannot reference the same schedule group')
+  }
+  return {
+    name,
+    code,
+    description: value.description !== undefined ? normalizeNullableText(value.description) : existing?.description ?? null,
+    attendanceGroupId,
+    parentId,
+    departmentRef: value.departmentRef !== undefined ? normalizeNullableText(value.departmentRef) : existing?.department_ref ?? existing?.departmentRef ?? null,
+    source: normalizeEnumValue('source', value.source, ATTENDANCE_SCHEDULE_GROUP_SOURCES, existing?.source ?? 'manual'),
+    isActive: value.isActive !== undefined ? value.isActive !== false : existing?.is_active !== false,
+  }
+}
+
+function normalizeAttendanceScheduleGroupMemberInput(value) {
+  const userIds = normalizeStringArray([
+    ...(Array.isArray(value.userIds) ? value.userIds : []),
+    value.userId,
+  ].filter((item) => item !== undefined && item !== null))
+  const effectiveFrom = value.effectiveFrom === undefined || value.effectiveFrom === null || value.effectiveFrom === ''
+    ? null
+    : normalizeDateOnlyStrict(String(value.effectiveFrom))
+  const effectiveTo = value.effectiveTo === undefined || value.effectiveTo === null || value.effectiveTo === ''
+    ? null
+    : normalizeDateOnlyStrict(String(value.effectiveTo))
+  if (!userIds.length) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'userId is required')
+  }
+  if ((value.effectiveFrom && !effectiveFrom) || (value.effectiveTo && !effectiveTo)) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'effective date must use YYYY-MM-DD')
+  }
+  if (effectiveFrom && effectiveTo && effectiveTo < effectiveFrom) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'effectiveTo must be on or after effectiveFrom')
+  }
+  return {
+    userIds,
+    effectiveFrom,
+    effectiveTo,
+    role: value.role === undefined || value.role === null || value.role === ''
+      ? null
+      : normalizeEnumValue('role', value.role, ATTENDANCE_SCHEDULE_GROUP_MEMBER_ROLES, 'member'),
+    source: normalizeEnumValue('source', value.source, ATTENDANCE_SCHEDULE_GROUP_SOURCES, 'manual'),
+  }
+}
+
+function doAttendanceScheduleMembershipWindowsOverlap(a, b) {
+  const aStart = a?.effectiveFrom ?? '0001-01-01'
+  const aEnd = a?.effectiveTo ?? '9999-12-31'
+  const bStart = b?.effectiveFrom ?? '0001-01-01'
+  const bEnd = b?.effectiveTo ?? '9999-12-31'
+  return aStart <= bEnd && bStart <= aEnd
+}
+
+function buildAttendanceScheduleGroupMemberLockKey(orgId, scheduleGroupId, userId) {
+  return [
+    String(orgId ?? ''),
+    String(scheduleGroupId ?? ''),
+    String(userId ?? ''),
+  ].join(':')
+}
+
+async function acquireAttendanceScheduleGroupMemberLock(client, orgId, scheduleGroupId, userId) {
+  await client.query(
+    'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+    ['attendance-schedule-group-member', buildAttendanceScheduleGroupMemberLockKey(orgId, scheduleGroupId, userId)]
+  )
+}
+
+function normalizeAttendanceSchedulerScopeBody(value) {
+  const source = value && typeof value === 'object' ? value : {}
+  const result = {}
+  for (const key of ['scheduleGroupIds', 'attendanceGroupIds', 'userIds', 'departments', 'roles', 'roleTags']) {
+    result[key] = normalizeStringArray(source[key])
+  }
+  return result
+}
+
+function attendanceSchedulerScopeHasTargets(scope) {
+  if (!scope || typeof scope !== 'object') return false
+  return ['scheduleGroupIds', 'attendanceGroupIds', 'userIds', 'departments', 'roles', 'roleTags']
+    .some((key) => Array.isArray(scope[key]) && scope[key].length > 0)
+}
+
+function normalizeAttendanceSchedulerScopeInput(value, existing = null) {
+  const subjectType = normalizeEnumValue(
+    'subjectType',
+    value.subjectType,
+    ATTENDANCE_SCHEDULER_SCOPE_SUBJECT_TYPES,
+    existing?.subject_type ?? existing?.subjectType
+  )
+  const subjectRef = value.subjectRef !== undefined
+    ? normalizeSafeDisplayName('subjectRef', value.subjectRef)
+    : normalizeSafeDisplayName('subjectRef', existing?.subject_ref ?? existing?.subjectRef)
+  const actions = normalizeStringArray(value.actions !== undefined ? value.actions : existing?.actions)
+  const invalidActions = actions.filter((action) => !ATTENDANCE_SCHEDULER_SCOPE_ACTIONS.has(action))
+  if (!actions.length || invalidActions.length > 0) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'actions must contain valid scheduler actions')
+  }
+  const scope = normalizeAttendanceSchedulerScopeBody(value.scope !== undefined ? value.scope : existing?.scope)
+  if (!attendanceSchedulerScopeHasTargets(scope)) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'scope must include at least one target')
+  }
+  return {
+    subjectType,
+    subjectRef,
+    actions,
+    scope,
+    isActive: value.isActive !== undefined ? value.isActive !== false : existing?.is_active !== false,
+  }
+}
+
+function mapAttendanceSchedulerScopeRow(row) {
+  return {
+    id: row.id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    subjectType: row.subject_type,
+    subjectRef: row.subject_ref,
+    actions: normalizeStringArray(row.actions),
+    scope: normalizeAttendanceSchedulerScopeBody(normalizeMetadata(row.scope)),
+    isActive: row.is_active !== false,
+    createdBy: row.created_by ?? null,
+    updatedBy: row.updated_by ?? null,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : undefined,
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : undefined,
+  }
+}
+
+function scopeListCoversTarget(scopeList, targetList) {
+  const allowed = new Set(normalizeStringArray(scopeList))
+  const targets = normalizeStringArray(targetList)
+  if (targets.length === 0) return true
+  if (allowed.size === 0) return false
+  return targets.every((target) => allowed.has(target))
+}
+
+function attendanceSchedulerScopeMatchesTarget(scopeRow, target) {
+  const scope = normalizeAttendanceSchedulerScopeBody(scopeRow?.scope ?? scopeRow)
+  if (!scopeListCoversTarget(scope.scheduleGroupIds, target?.scheduleGroupIds)) return false
+  if (!scopeListCoversTarget(scope.attendanceGroupIds, target?.attendanceGroupIds)) return false
+  if (!scopeListCoversTarget(scope.userIds, target?.userIds)) return false
+  if (!scopeListCoversTarget(scope.departments, target?.departments)) return false
+  if (!scopeListCoversTarget(scope.roles, target?.roles)) return false
+  if (!scopeListCoversTarget(scope.roleTags, target?.roleTags)) return false
+  return true
+}
+
 function normalizeAttendanceGroupValue(value) {
   if (value === undefined || value === null) return null
   const text = String(value).trim()
@@ -12906,6 +13132,21 @@ module.exports = {
     buildAttendanceReportFieldConfig,
     buildAttendanceReportFieldConfigHeaders,
     buildAttendanceReportFieldConfigFingerprint,
+    ATTENDANCE_SCHEDULE_GROUP_SOURCES,
+    ATTENDANCE_SCHEDULE_GROUP_MEMBER_ROLES,
+    ATTENDANCE_SCHEDULER_SCOPE_SUBJECT_TYPES,
+    ATTENDANCE_SCHEDULER_SCOPE_ACTIONS,
+    mapAttendanceScheduleGroupRow,
+    mapAttendanceScheduleGroupMemberRow,
+    normalizeAttendanceScheduleGroupInput,
+    normalizeAttendanceScheduleGroupMemberInput,
+    doAttendanceScheduleMembershipWindowsOverlap,
+    buildAttendanceScheduleGroupMemberLockKey,
+    acquireAttendanceScheduleGroupMemberLock,
+    normalizeAttendanceSchedulerScopeBody,
+    normalizeAttendanceSchedulerScopeInput,
+    mapAttendanceSchedulerScopeRow,
+    attendanceSchedulerScopeMatchesTarget,
     matchScopeFilters,
     loadAttendanceScopeContextForUser,
     loadAttendanceScopeContextMapForUsers,
@@ -24098,6 +24339,620 @@ module.exports = {
           }
           logger.error('Attendance group member delete failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to remove group member' } })
+        }
+      })
+    )
+
+    const scheduleGroupSchema = z.object({
+      name: z.string().min(1).optional(),
+      code: z.string().trim().optional().nullable(),
+      description: z.string().optional().nullable(),
+      attendanceGroupId: z.string().optional().nullable(),
+      parentId: z.string().optional().nullable(),
+      departmentRef: z.string().optional().nullable(),
+      source: z.enum(['manual', 'import', 'integration']).optional(),
+      isActive: z.boolean().optional(),
+    }).strict()
+
+    const scheduleGroupCreateSchema = scheduleGroupSchema.extend({
+      name: z.string().min(1),
+    })
+
+    const scheduleGroupMemberSchema = z.object({
+      userId: z.string().optional(),
+      userIds: z.array(z.string()).optional(),
+      effectiveFrom: z.string().optional().nullable(),
+      effectiveTo: z.string().optional().nullable(),
+      role: z.enum(['member', 'lead', 'backup']).optional().nullable(),
+      source: z.enum(['manual', 'import', 'integration']).optional(),
+    }).strict()
+
+    const schedulerScopeSchema = z.object({
+      subjectType: z.enum(['user', 'role', 'role_tag']).optional(),
+      subjectRef: z.string().min(1).optional(),
+      actions: z.array(z.enum(['view', 'edit', 'import', 'export', 'clear', 'approve', 'dispatch'])).optional(),
+      scope: z.record(z.unknown()).optional(),
+      isActive: z.boolean().optional(),
+    }).strict()
+
+    const schedulerScopeCreateSchema = schedulerScopeSchema.extend({
+      subjectType: z.enum(['user', 'role', 'role_tag']),
+      subjectRef: z.string().min(1),
+      actions: z.array(z.enum(['view', 'edit', 'import', 'export', 'clear', 'approve', 'dispatch'])).min(1),
+      scope: z.record(z.unknown()),
+    })
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/schedule-groups',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const { page, pageSize, offset } = parsePagination(req.query)
+        const includeInactive = parseBoolean(req.query.includeInactive, false)
+        try {
+          const activeClause = includeInactive ? '' : 'AND is_active = true'
+          const countRows = await db.query(
+            `SELECT COUNT(*)::int AS total
+             FROM attendance_schedule_groups
+             WHERE org_id = $1 ${activeClause}`,
+            [orgId]
+          )
+          const total = Number(countRows[0]?.total ?? 0)
+          const rows = await db.query(
+            `SELECT *
+             FROM attendance_schedule_groups
+             WHERE org_id = $1 ${activeClause}
+             ORDER BY is_active DESC, name ASC, created_at DESC
+             LIMIT $2 OFFSET $3`,
+            [orgId, pageSize, offset]
+          )
+          res.json({ ok: true, data: { items: rows.map(mapAttendanceScheduleGroupRow), total, page, pageSize } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
+            return
+          }
+          logger.error('Attendance schedule groups fetch failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load schedule groups' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/schedule-groups/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
+        try {
+          const rows = await db.query(
+            'SELECT * FROM attendance_schedule_groups WHERE id = $1 AND org_id = $2',
+            [groupId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Schedule group not found' } })
+            return
+          }
+          res.json({ ok: true, data: mapAttendanceScheduleGroupRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
+            return
+          }
+          logger.error('Attendance schedule group lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load schedule group' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/schedule-groups',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = scheduleGroupCreateSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+        const orgId = getOrgId(req)
+        const actorId = getUserId(req)
+        let input
+        try {
+          input = normalizeAttendanceScheduleGroupInput(parsed.data)
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          throw error
+        }
+        try {
+          const rows = await db.query(
+            `INSERT INTO attendance_schedule_groups (
+               org_id, name, code, description, attendance_group_id, parent_id, department_ref,
+               source, is_active, created_by, updated_by, created_at, updated_at
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, now(), now())
+             RETURNING *`,
+            [
+              orgId,
+              input.name,
+              input.code,
+              input.description,
+              input.attendanceGroupId,
+              input.parentId,
+              input.departmentRef,
+              input.source,
+              input.isActive,
+              actorId,
+            ]
+          )
+          res.json({ ok: true, data: mapAttendanceScheduleGroupRow(rows[0]) })
+        } catch (error) {
+          if (error?.code === '23505') {
+            res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Schedule group name or code already exists' } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
+            return
+          }
+          logger.error('Attendance schedule group create failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create schedule group' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/attendance/schedule-groups/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = scheduleGroupSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+        const orgId = getOrgId(req)
+        const actorId = getUserId(req)
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
+        try {
+          const existingRows = await db.query(
+            'SELECT * FROM attendance_schedule_groups WHERE id = $1 AND org_id = $2',
+            [groupId, orgId]
+          )
+          if (!existingRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Schedule group not found' } })
+            return
+          }
+          const input = normalizeAttendanceScheduleGroupInput(parsed.data, existingRows[0])
+          const rows = await db.query(
+            `UPDATE attendance_schedule_groups
+             SET name = $3,
+                 code = $4,
+                 description = $5,
+                 attendance_group_id = $6,
+                 parent_id = $7,
+                 department_ref = $8,
+                 source = $9,
+                 is_active = $10,
+                 updated_by = $11,
+                 updated_at = now()
+             WHERE id = $1 AND org_id = $2
+             RETURNING *`,
+            [
+              groupId,
+              orgId,
+              input.name,
+              input.code,
+              input.description,
+              input.attendanceGroupId,
+              input.parentId,
+              input.departmentRef,
+              input.source,
+              input.isActive,
+              actorId,
+            ]
+          )
+          res.json({ ok: true, data: mapAttendanceScheduleGroupRow(rows[0]) })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          if (error?.code === '23505') {
+            res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Schedule group name or code already exists' } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
+            return
+          }
+          logger.error('Attendance schedule group update failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update schedule group' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/attendance/schedule-groups/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const actorId = getUserId(req)
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
+        try {
+          const rows = await db.query(
+            `UPDATE attendance_schedule_groups
+             SET is_active = false, updated_by = $3, updated_at = now()
+             WHERE id = $1 AND org_id = $2
+             RETURNING *`,
+            [groupId, orgId, actorId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Schedule group not found' } })
+            return
+          }
+          res.json({ ok: true, data: mapAttendanceScheduleGroupRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
+            return
+          }
+          logger.error('Attendance schedule group delete failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete schedule group' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/schedule-groups/:id/members',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
+        const { page, pageSize, offset } = parsePagination(req.query)
+        try {
+          const countRows = await db.query(
+            `SELECT COUNT(*)::int AS total
+             FROM attendance_schedule_group_members
+             WHERE org_id = $1 AND schedule_group_id = $2`,
+            [orgId, groupId]
+          )
+          const rows = await db.query(
+            `SELECT *
+             FROM attendance_schedule_group_members
+             WHERE org_id = $1 AND schedule_group_id = $2
+             ORDER BY effective_from ASC NULLS FIRST, user_id ASC, created_at DESC
+             LIMIT $3 OFFSET $4`,
+            [orgId, groupId, pageSize, offset]
+          )
+          res.json({
+            ok: true,
+            data: { items: rows.map(mapAttendanceScheduleGroupMemberRow), total: Number(countRows[0]?.total ?? 0), page, pageSize },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
+            return
+          }
+          logger.error('Attendance schedule group members fetch failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load schedule group members' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/schedule-groups/:id/members',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = scheduleGroupMemberSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+        const orgId = getOrgId(req)
+        const actorId = getUserId(req)
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
+        let input
+        try {
+          input = normalizeAttendanceScheduleGroupMemberInput(parsed.data)
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          throw error
+        }
+        try {
+          const created = []
+          await db.transaction(async (trx) => {
+            for (const userId of input.userIds) {
+              await acquireAttendanceScheduleGroupMemberLock(trx, orgId, groupId, userId)
+              const overlapRows = await trx.query(
+                `SELECT 1
+                 FROM attendance_schedule_group_members
+                 WHERE org_id = $1
+                   AND schedule_group_id = $2
+                   AND user_id = $3
+                   AND COALESCE(effective_from, DATE '0001-01-01') <= COALESCE($5::date, DATE '9999-12-31')
+                   AND COALESCE(effective_to, DATE '9999-12-31') >= COALESCE($4::date, DATE '0001-01-01')
+                 LIMIT 1`,
+                [orgId, groupId, userId, input.effectiveFrom, input.effectiveTo]
+              )
+              if (overlapRows.length) {
+                throw new HttpError(409, 'MEMBERSHIP_OVERLAP', `Schedule group membership overlaps for ${userId}`)
+              }
+              const rows = await trx.query(
+                `INSERT INTO attendance_schedule_group_members (
+                   org_id, schedule_group_id, user_id, effective_from, effective_to, role,
+                   source, created_by, updated_by, created_at, updated_at
+                 )
+                 VALUES ($1, $2, $3, $4::date, $5::date, $6, $7, $8, $8, now(), now())
+                 RETURNING *`,
+                [orgId, groupId, userId, input.effectiveFrom, input.effectiveTo, input.role, input.source, actorId]
+              )
+              if (rows.length) created.push(mapAttendanceScheduleGroupMemberRow(rows[0]))
+            }
+          })
+          res.json({ ok: true, data: { items: created } })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          if (error?.code === '23505') {
+            res.status(409).json({ ok: false, error: { code: 'MEMBERSHIP_OVERLAP', message: 'Schedule group membership overlaps or already exists' } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
+            return
+          }
+          logger.error('Attendance schedule group member create failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to add schedule group members' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/attendance/schedule-groups/:id/members/:memberId',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const groupId = normalizeUuidString(req.params.id)
+        const memberId = normalizeUuidString(req.params.memberId)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
+        if (!memberId) {
+          respondInvalidUuid(res, 'memberId')
+          return
+        }
+        try {
+          const rows = await db.query(
+            `DELETE FROM attendance_schedule_group_members
+             WHERE id = $1 AND org_id = $2 AND schedule_group_id = $3
+             RETURNING id`,
+            [memberId, orgId, groupId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Schedule group member not found' } })
+            return
+          }
+          res.json({ ok: true, data: { id: memberId } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
+            return
+          }
+          logger.error('Attendance schedule group member delete failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to remove schedule group member' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/scheduler-scopes',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const { page, pageSize, offset } = parsePagination(req.query)
+        const includeInactive = parseBoolean(req.query.includeInactive, false)
+        try {
+          const activeClause = includeInactive ? '' : 'AND is_active = true'
+          const countRows = await db.query(
+            `SELECT COUNT(*)::int AS total
+             FROM attendance_scheduler_scopes
+             WHERE org_id = $1 ${activeClause}`,
+            [orgId]
+          )
+          const rows = await db.query(
+            `SELECT *
+             FROM attendance_scheduler_scopes
+             WHERE org_id = $1 ${activeClause}
+             ORDER BY is_active DESC, subject_type ASC, subject_ref ASC, created_at DESC
+             LIMIT $2 OFFSET $3`,
+            [orgId, pageSize, offset]
+          )
+          res.json({ ok: true, data: { items: rows.map(mapAttendanceSchedulerScopeRow), total: Number(countRows[0]?.total ?? 0), page, pageSize } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
+            return
+          }
+          logger.error('Attendance scheduler scopes fetch failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load scheduler scopes' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/scheduler-scopes',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = schedulerScopeCreateSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+        const orgId = getOrgId(req)
+        const actorId = getUserId(req)
+        let input
+        try {
+          input = normalizeAttendanceSchedulerScopeInput(parsed.data)
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          throw error
+        }
+        try {
+          const rows = await db.query(
+            `INSERT INTO attendance_scheduler_scopes (
+               org_id, subject_type, subject_ref, actions, scope, is_active,
+               created_by, updated_by, created_at, updated_at
+             )
+             VALUES ($1, $2, $3, $4::text[], $5::jsonb, $6, $7, $7, now(), now())
+             RETURNING *`,
+            [
+              orgId,
+              input.subjectType,
+              input.subjectRef,
+              input.actions,
+              JSON.stringify(input.scope),
+              input.isActive,
+              actorId,
+            ]
+          )
+          res.json({ ok: true, data: mapAttendanceSchedulerScopeRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
+            return
+          }
+          logger.error('Attendance scheduler scope create failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create scheduler scope' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/attendance/scheduler-scopes/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = schedulerScopeSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+        const orgId = getOrgId(req)
+        const actorId = getUserId(req)
+        const scopeId = normalizeUuidString(req.params.id)
+        if (!scopeId) {
+          respondInvalidUuid(res)
+          return
+        }
+        try {
+          const existingRows = await db.query(
+            'SELECT * FROM attendance_scheduler_scopes WHERE id = $1 AND org_id = $2',
+            [scopeId, orgId]
+          )
+          if (!existingRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Scheduler scope not found' } })
+            return
+          }
+          const input = normalizeAttendanceSchedulerScopeInput(parsed.data, existingRows[0])
+          const rows = await db.query(
+            `UPDATE attendance_scheduler_scopes
+             SET subject_type = $3,
+                 subject_ref = $4,
+                 actions = $5::text[],
+                 scope = $6::jsonb,
+                 is_active = $7,
+                 updated_by = $8,
+                 updated_at = now()
+             WHERE id = $1 AND org_id = $2
+             RETURNING *`,
+            [
+              scopeId,
+              orgId,
+              input.subjectType,
+              input.subjectRef,
+              input.actions,
+              JSON.stringify(input.scope),
+              input.isActive,
+              actorId,
+            ]
+          )
+          res.json({ ok: true, data: mapAttendanceSchedulerScopeRow(rows[0]) })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
+            return
+          }
+          logger.error('Attendance scheduler scope update failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update scheduler scope' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/attendance/scheduler-scopes/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const actorId = getUserId(req)
+        const scopeId = normalizeUuidString(req.params.id)
+        if (!scopeId) {
+          respondInvalidUuid(res)
+          return
+        }
+        try {
+          const rows = await db.query(
+            `UPDATE attendance_scheduler_scopes
+             SET is_active = false, updated_by = $3, updated_at = now()
+             WHERE id = $1 AND org_id = $2
+             RETURNING *`,
+            [scopeId, orgId, actorId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Scheduler scope not found' } })
+            return
+          }
+          res.json({ ok: true, data: mapAttendanceSchedulerScopeRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
+            return
+          }
+          logger.error('Attendance scheduler scope delete failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete scheduler scope' } })
         }
       })
     )
