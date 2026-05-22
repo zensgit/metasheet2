@@ -58,6 +58,7 @@ const ALL_KEYS: WorkbenchLabelKey[] = [
   'confirm.discardContextChanges', 'confirm.discardRecordChanges',
   'confirm.pageLeaveBusy', 'confirm.pageLeaveDirty',
   'card.install', 'card.installing',
+  'error.loadSheets', 'error.loadSheetMetadata', 'error.loadBaseMetadata',
 ]
 
 describe('workbench-labels static table', () => {
@@ -85,6 +86,8 @@ describe('workbench-labels static table', () => {
     expect(workbenchLabel('conflict.fieldFallback', false)).toBe('cell')
     expect(workbenchLabel('card.install', true)).toBe('使用模板')
     expect(workbenchLabel('card.installing', false)).toBe('Installing...')
+    expect(workbenchLabel('error.loadSheets', true)).toBe('加载 Sheet 失败')
+    expect(workbenchLabel('error.loadSheetMetadata', false)).toBe('Failed to load sheet metadata')
   })
 })
 

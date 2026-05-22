@@ -1,9 +1,13 @@
 import { computed, ref } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import type { MultitableCommentInboxItem, MultitableCommentInboxPage } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
+import { commentLabel } from '../utils/meta-comment-labels'
 
 export function useMultitableCommentInbox(client?: MultitableApiClient) {
   const api = client ?? multitableClient
+  const { isZh } = useLocale()
+  const fallback = (key: Parameters<typeof commentLabel>[0]) => commentLabel(key, isZh.value)
   const inbox = ref<MultitableCommentInboxItem[]>([])
   const total = ref(0)
   const unreadCount = ref(0)
@@ -22,7 +26,7 @@ export function useMultitableCommentInbox(client?: MultitableApiClient) {
       total.value = page.total
       return page
     } catch (e: any) {
-      error.value = e.message ?? 'Failed to load comment inbox'
+      error.value = e.message ?? fallback('comment.errorLoadInbox')
       throw e
     } finally {
       loading.value = false
@@ -34,7 +38,7 @@ export function useMultitableCommentInbox(client?: MultitableApiClient) {
       unreadCount.value = await api.getCommentUnreadCount()
       return unreadCount.value
     } catch (e: any) {
-      error.value = e.message ?? 'Failed to load unread comment count'
+      error.value = e.message ?? fallback('comment.errorLoadUnreadCount')
       throw e
     }
   }
@@ -60,7 +64,7 @@ export function useMultitableCommentInbox(client?: MultitableApiClient) {
       inbox.value = nextItems
       if (wasUnread) unreadCount.value = Math.max(0, unreadCount.value - 1)
     } catch (e: any) {
-      error.value = e.message ?? 'Failed to mark comment as read'
+      error.value = e.message ?? fallback('comment.errorMarkRead')
       throw e
     } finally {
       busyIds.value = busyIds.value.filter((id) => id !== commentId)

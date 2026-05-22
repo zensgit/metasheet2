@@ -193,3 +193,41 @@ export function xlsxTruncated(importedRows: number, maxRows: number, isZh: boole
     ? `已导入前 ${importedRows} 行；其余行已跳过（上限 ${maxRows}）。`
     : `Imported the first ${importedRows} rows; remaining rows were skipped (limit ${maxRows}).`
 }
+
+export function importResolverMissing(fieldName: string, kind: 'person' | 'link', isZh: boolean): string {
+  if (kind === 'person') {
+    return isZh
+      ? `人员字段 ${fieldName} 未配置导入解析器`
+      : `No import resolver is configured for people field ${fieldName}`
+  }
+  return isZh
+    ? `关联字段 ${fieldName} 未配置导入解析器`
+    : `No import resolver is configured for linked field ${fieldName}`
+}
+
+export function importValueResolveFailed(
+  fieldName: string,
+  rawValue: string,
+  kind: 'person' | 'link',
+  isZh: boolean,
+): string {
+  if (kind === 'person') {
+    return isZh
+      ? `无法解析 ${fieldName} 的人员值：${rawValue}`
+      : `Unable to resolve people value for ${fieldName}: ${rawValue}`
+  }
+  return isZh
+    ? `无法解析 ${fieldName} 的关联值：${rawValue}`
+    : `Unable to resolve linked value for ${fieldName}: ${rawValue}`
+}
+
+export function importCancelled(isZh: boolean): string {
+  return isZh ? '导入已取消' : 'Import cancelled'
+}
+
+export function duplicateRowSkipped(primaryFieldName: string, rawValue: unknown, isZh: boolean): string {
+  const normalizedRaw = String(rawValue).trim()
+  return isZh
+    ? `已跳过重复行，因为 ${primaryFieldName} 已存在：${normalizedRaw}`
+    : `Skipped duplicate row because ${primaryFieldName} already exists: ${normalizedRaw}`
+}

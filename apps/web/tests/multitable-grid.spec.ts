@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { ref, nextTick } from 'vue'
+import { useLocale } from '../src/composables/useLocale'
 import {
   useMultitableGrid,
   buildSortInfo,
@@ -30,7 +31,10 @@ function createMockClient() {
 describe('useMultitableGrid', () => {
   let client: MultitableApiClient
 
-  beforeEach(() => { client = createMockClient() })
+  beforeEach(() => {
+    useLocale().setLocale('en')
+    client = createMockClient()
+  })
 
   it('initializes with empty state', () => {
     const grid = useMultitableGrid({ sheetId: ref(''), viewId: ref(''), client })
@@ -293,6 +297,21 @@ describe('useMultitableGrid', () => {
 
     expect(fetchFn).not.toHaveBeenCalled()
     expect(grid.error.value).toBe('sheetId or viewId is required')
+  })
+
+  it('localizes local record-create context fallback in zh-CN', async () => {
+    useLocale().setLocale('zh-CN')
+    const fetchFn = vi.fn()
+    const grid = useMultitableGrid({
+      sheetId: ref(''),
+      viewId: ref(''),
+      client: new MultitableApiClient({ fetchFn }),
+    })
+
+    await grid.createRecord({})
+
+    expect(fetchFn).not.toHaveBeenCalled()
+    expect(grid.error.value).toBe('需要 sheetId 或 viewId')
   })
 
   it('falls back to the last non-empty page when a load lands beyond the new total', async () => {
@@ -559,6 +578,29 @@ describe('useMultitableGrid', () => {
     expect(fetchFn).not.toHaveBeenCalled()
     expect(grid.rows.value[0].data.f1).toBe('before')
     expect(grid.error.value).toBe('Record editing is not allowed for this row.')
+  })
+
+  it('localizes local row-action edit blocks in zh-CN', async () => {
+    useLocale().setLocale('zh-CN')
+    const fetchFn = vi.fn()
+    const grid = useMultitableGrid({
+      sheetId: ref(''),
+      viewId: ref(''),
+      client: new MultitableApiClient({ fetchFn }),
+    })
+
+    grid.fields.value = [{ id: 'f1', name: 'Title', type: 'string' }]
+    grid.rows.value = [{ id: 'r1', version: 1, data: { f1: 'before' } }]
+    grid.rowActions.value = {
+      canEdit: false,
+      canDelete: true,
+      canComment: true,
+    }
+
+    await grid.patchCell('r1', 'f1', 'patched', 1)
+
+    expect(fetchFn).not.toHaveBeenCalled()
+    expect(grid.error.value).toBe('该行不允许编辑记录。')
   })
 
   it('allows patchCell when a record-scoped rowActionOverride grants edit access', async () => {

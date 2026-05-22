@@ -1,4 +1,5 @@
 import { ref, computed, watch } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import type {
   MetaCapabilityOrigin,
   MetaCapabilities,
@@ -9,6 +10,7 @@ import type {
   MetaViewPermission,
 } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
+import { workbenchLabel } from '../utils/workbench-labels'
 
 const SYSTEM_PEOPLE_SHEET_DESCRIPTION = '__metasheet_system:people__'
 const EMPTY_CAPABILITIES: MetaCapabilities = {
@@ -35,6 +37,8 @@ export function useMultitableWorkbench(opts?: {
   client?: MultitableApiClient
 }) {
   const client = opts?.client ?? multitableClient
+  const { isZh } = useLocale()
+  const fallback = (key: Parameters<typeof workbenchLabel>[0]) => workbenchLabel(key, isZh.value)
 
   const sheets = ref<MetaSheet[]>([])
   const fields = ref<MetaField[]>([])
@@ -159,7 +163,7 @@ export function useMultitableWorkbench(opts?: {
         await loadSheetMeta(activeSheetId.value)
       }
     } catch (e: any) {
-      error.value = e.message ?? 'Failed to load sheets'
+      error.value = e.message ?? fallback('error.loadSheets')
     } finally {
       loading.value = false
     }
@@ -183,7 +187,7 @@ export function useMultitableWorkbench(opts?: {
       syncContextState(ctx, requestedViewId)
       return true
     } catch (e: any) {
-      error.value = e.message ?? 'Failed to load sheet metadata'
+      error.value = e.message ?? fallback('error.loadSheetMetadata')
       return false
     }
   }
@@ -207,7 +211,7 @@ export function useMultitableWorkbench(opts?: {
       }
       return true
     } catch (e: any) {
-      error.value = e.message ?? 'Failed to load base metadata'
+      error.value = e.message ?? fallback('error.loadBaseMetadata')
       return false
     } finally {
       loading.value = false
@@ -234,7 +238,7 @@ export function useMultitableWorkbench(opts?: {
     if (ok) return true
     const failureMessage = error.value
     restoreSnapshot(snapshot)
-    error.value = failureMessage ?? 'Failed to load base metadata'
+    error.value = failureMessage ?? fallback('error.loadBaseMetadata')
     return false
   }
 
@@ -266,7 +270,7 @@ export function useMultitableWorkbench(opts?: {
       if (ok) return true
       const failureMessage = error.value
       restoreSnapshot(snapshot)
-      error.value = failureMessage ?? 'Failed to load sheet metadata'
+      error.value = failureMessage ?? fallback('error.loadSheetMetadata')
       return false
     }
 
@@ -276,7 +280,7 @@ export function useMultitableWorkbench(opts?: {
       if (ok) return true
       const failureMessage = error.value
       restoreSnapshot(snapshot)
-      error.value = failureMessage ?? 'Failed to load sheet metadata'
+      error.value = failureMessage ?? fallback('error.loadSheetMetadata')
       return false
     }
 

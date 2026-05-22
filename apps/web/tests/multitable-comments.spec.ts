@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import { useMultitableComments } from '../src/multitable/composables/useMultitableComments'
 import { MultitableApiClient } from '../src/multitable/api/client'
 
@@ -11,7 +12,10 @@ function createMockClient() {
 describe('useMultitableComments', () => {
   let client: MultitableApiClient
 
-  beforeEach(() => { client = createMockClient() })
+  beforeEach(() => {
+    useLocale().setLocale('en')
+    client = createMockClient()
+  })
 
   it('loads comments', async () => {
     const comments = [{ id: 'c1', spreadsheetId: 's1', rowId: 'r1', fieldId: null, mentions: [], authorId: 'u1', content: 'hello', resolved: false, createdAt: '2026-01-01' }]
@@ -192,5 +196,27 @@ describe('useMultitableComments', () => {
     const state = useMultitableComments(client)
     await state.loadComments({ containerId: 's1', targetId: 'r1' })
     expect(state.error.value).toBeTruthy()
+  })
+
+  it('localizes frontend load fallback when backend message is absent', async () => {
+    useLocale().setLocale('zh-CN')
+    const state = useMultitableComments({
+      listComments: vi.fn().mockRejectedValue({}),
+    } as any)
+
+    await state.loadComments({ containerId: 's1', targetId: 'r1' })
+
+    expect(state.error.value).toBe('加载评论失败')
+  })
+
+  it('keeps backend error messages raw ahead of localized fallbacks', async () => {
+    useLocale().setLocale('zh-CN')
+    const state = useMultitableComments({
+      listComments: vi.fn().mockRejectedValue(new Error('backend raw')),
+    } as any)
+
+    await state.loadComments({ containerId: 's1', targetId: 'r1' })
+
+    expect(state.error.value).toBe('backend raw')
   })
 })

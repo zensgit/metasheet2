@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import { useMultitableWorkbench } from '../src/multitable/composables/useMultitableWorkbench'
 import { MultitableApiClient } from '../src/multitable/api/client'
 
@@ -9,6 +10,10 @@ function mockClient(data: any = {}) {
 }
 
 describe('useMultitableWorkbench', () => {
+  beforeEach(() => {
+    useLocale().setLocale('en')
+  })
+
   it('loads sheets and auto-selects first', async () => {
     const client = mockClient({ sheets: [{ id: 's1', name: 'Sheet1' }, { id: 's2', name: 'Sheet2' }] })
     const wb = useMultitableWorkbench({ client })
@@ -348,5 +353,25 @@ describe('useMultitableWorkbench', () => {
     const wb = useMultitableWorkbench({ client })
     await wb.loadSheets()
     expect(wb.error.value).toBeTruthy()
+  })
+
+  it('localizes sheet-load fallback when backend message is absent', async () => {
+    useLocale().setLocale('zh-CN')
+    const client = { listSheets: vi.fn().mockRejectedValue({}) } as any
+    const wb = useMultitableWorkbench({ client })
+
+    await wb.loadSheets()
+
+    expect(wb.error.value).toBe('加载 Sheet 失败')
+  })
+
+  it('keeps backend load errors raw ahead of localized fallbacks', async () => {
+    useLocale().setLocale('zh-CN')
+    const client = { listSheets: vi.fn().mockRejectedValue(new Error('backend raw')) } as any
+    const wb = useMultitableWorkbench({ client })
+
+    await wb.loadSheets()
+
+    expect(wb.error.value).toBe('backend raw')
   })
 })

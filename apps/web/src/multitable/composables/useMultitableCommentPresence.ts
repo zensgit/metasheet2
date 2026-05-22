@@ -1,6 +1,8 @@
 import { onScopeDispose, ref } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import type { MultitableCommentPresenceSummary } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
+import { commentLabel } from '../utils/meta-comment-labels'
 import {
   normalizeMultitableCommentMutationEvent,
   normalizeMultitableCommentRealtimeEvent,
@@ -60,6 +62,8 @@ function buildEmptyPresenceSummary(containerId: string, targetId: string): Multi
 
 export function useMultitableCommentPresence(client?: MultitableApiClient, options?: UseMultitableCommentPresenceOptions) {
   const api = client ?? multitableClient
+  const { isZh } = useLocale()
+  const fallback = (key: Parameters<typeof commentLabel>[0]) => commentLabel(key, isZh.value)
   const subscribeRealtime = options?.subscribeRealtime ?? subscribeToMultitableCommentsRealtime
   const presenceByRecordId = ref<Record<string, MultitableCommentPresenceSummary>>({})
   const loading = ref(false)
@@ -216,7 +220,7 @@ export function useMultitableCommentPresence(client?: MultitableApiClient, optio
       replacePresence(data.items ?? [])
     } catch (e: any) {
       if (loadVersion !== activeLoadVersion || !sameScope(activeScope, scope)) return
-      error.value = e.message ?? 'Failed to load comment presence'
+      error.value = e.message ?? fallback('comment.errorLoadPresence')
     } finally {
       if (loadVersion === activeLoadVersion) {
         loading.value = false

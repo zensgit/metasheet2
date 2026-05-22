@@ -2265,6 +2265,7 @@ async function onBulkImport(payload: ImportBuildResult) {
         viewId: workbench.activeViewId.value || undefined,
         records: recordsToImport,
         signal: controller.signal,
+        isZh: isZh.value,
       })
       : { attempted: 0, succeeded: 0, failed: 0, firstError: null, failures: [] }
 

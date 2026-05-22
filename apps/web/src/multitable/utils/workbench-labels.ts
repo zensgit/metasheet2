@@ -56,6 +56,8 @@ export type WorkbenchLabelKey =
   | 'confirm.pageLeaveBusy' | 'confirm.pageLeaveDirty'
   // §3.6 MetaTemplateCard button (counts use the card* helpers below)
   | 'card.install' | 'card.installing'
+  // final audit closure follow-up: composable fallback messages (backend e.message remains raw)
+  | 'error.loadSheets' | 'error.loadSheetMetadata' | 'error.loadBaseMetadata'
 
 const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = {
   'conflict.fieldFallback': { en: 'cell', zh: '单元格' },
@@ -197,6 +199,10 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
 
   'card.install': { en: 'Use template', zh: '使用模板' },
   'card.installing': { en: 'Installing...', zh: '创建中...' },
+
+  'error.loadSheets': { en: 'Failed to load sheets', zh: '加载 Sheet 失败' },
+  'error.loadSheetMetadata': { en: 'Failed to load sheet metadata', zh: '加载 Sheet 元数据失败' },
+  'error.loadBaseMetadata': { en: 'Failed to load base metadata', zh: '加载 Base 元数据失败' },
 }
 
 export function workbenchLabel(key: WorkbenchLabelKey, isZh: boolean): string {
