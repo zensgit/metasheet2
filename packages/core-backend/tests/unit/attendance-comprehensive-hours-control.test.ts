@@ -108,15 +108,27 @@ describe('attendance comprehensive working-hours control helpers', () => {
         effective: { isWorkingDay: true, source: 'manual' },
         plannedMinutes: 300,
       },
+      {
+        date: '2026-05-05',
+        effective: { isWorkingDay: true, source: 'null-fallback' },
+        shift: { workStartTime: '10:00', workEndTime: '17:30' },
+        plannedMinutes: null,
+      },
+      {
+        date: '2026-05-06',
+        effective: { isWorkingDay: true, source: 'empty-fallback' },
+        shift: { workStartTime: '08:00', workEndTime: '12:00' },
+        planned_minutes: '',
+      },
     ])
 
     expect(planned).toMatchObject({
-      plannedMinutes: 540 + 0 + 480 + 300,
-      days: 4,
-      workingDays: 3,
+      plannedMinutes: 540 + 0 + 480 + 300 + 450 + 240,
+      days: 6,
+      workingDays: 5,
     })
-    expect(planned.items.map((item: any) => item.plannedMinutes)).toEqual([540, 0, 480, 300])
-    expect(planned.items.map((item: any) => item.source)).toEqual(['shift', 'national', 'rotation', 'manual'])
+    expect(planned.items.map((item: any) => item.plannedMinutes)).toEqual([540, 0, 480, 300, 450, 240])
+    expect(planned.items.map((item: any) => item.source)).toEqual(['shift', 'national', 'rotation', 'manual', 'null-fallback', 'empty-fallback'])
   })
 
   it('keeps actual minutes sourced from summary payloads separate from planned minutes', () => {
