@@ -137,6 +137,8 @@ REQUIRED_PATHS=(
   "docs/development/data-factory-issue1526-wrapper-sql-followup-verification-20260519.md"
   "docs/development/bridge-agent-source-refresh-staging-design-20260522.md"
   "docs/development/bridge-agent-source-refresh-staging-verification-20260522.md"
+  "docs/development/metasheet-multitable-target-fieldid-map-design-20260522.md"
+  "docs/development/metasheet-multitable-target-fieldid-map-verification-20260522.md"
   "docs/development/data-factory-readiness-package-verify-delivery-development-20260515.md"
   "docs/development/data-factory-readiness-package-verify-delivery-verification-20260515.md"
   "docs/development/onprem-migration-gap-guard-development-20260514.md"
