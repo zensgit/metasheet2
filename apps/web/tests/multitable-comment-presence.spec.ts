@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import { MultitableApiClient } from '../src/multitable/api/client'
 import { useMultitableCommentPresence } from '../src/multitable/composables/useMultitableCommentPresence'
 
@@ -50,6 +51,7 @@ describe('useMultitableCommentPresence', () => {
   let client: MultitableApiClient
 
   beforeEach(() => {
+    useLocale().setLocale('en')
     client = createMockClient()
   })
 
@@ -201,5 +203,16 @@ describe('useMultitableCommentPresence', () => {
 
     expect(state.presenceByRecordId.value).toEqual({})
     expect(realtime.unsubscribe).toHaveBeenCalled()
+  })
+
+  it('localizes load fallback when backend message is absent', async () => {
+    useLocale().setLocale('zh-CN')
+    const state = useMultitableCommentPresence({
+      listCommentPresence: vi.fn().mockRejectedValue({}),
+    } as any)
+
+    await state.loadPresence({ containerId: 'sheet_orders', targetIds: ['rec_1'] })
+
+    expect(state.error.value).toBe('加载评论状态失败')
   })
 })

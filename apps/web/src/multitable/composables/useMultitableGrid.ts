@@ -1,4 +1,5 @@
 import { ref, computed, watch, type Ref, type ComputedRef, type WatchStopHandle } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import type {
   MetaCapabilityOrigin,
   LinkedRecordSummary,
@@ -13,6 +14,7 @@ import type {
 } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
 import { isPropertyHiddenField } from '../utils/field-permissions'
+import { metaCoreLabel } from '../utils/meta-core-labels'
 
 // --- Sort / Filter types ---
 
@@ -340,6 +342,8 @@ export function useMultitableGrid(opts: {
 }) {
   const client = opts.client ?? multitableClient
   const pageSize = opts.pageSize ?? DEFAULT_PAGE_SIZE
+  const { isZh } = useLocale()
+  const fallback = (key: Parameters<typeof metaCoreLabel>[0]) => metaCoreLabel(key, isZh.value)
 
   // Core state
   const fields = ref<MetaField[]>([])
@@ -468,7 +472,7 @@ export function useMultitableGrid(opts: {
       if (data.view) syncFromView(data.view)
     } catch (e: any) {
       if (requestId !== latestLoadRequestId) return
-      error.value = e.message ?? 'Failed to load view data'
+      error.value = e.message ?? fallback('grid.errorLoadViewData')
     } finally {
       if (requestId === latestLoadRequestId) loading.value = false
     }
@@ -592,12 +596,12 @@ export function useMultitableGrid(opts: {
   // --- Record CRUD ---
 
   function rejectRowEdit(): false {
-    error.value = 'Record editing is not allowed for this row.'
+    error.value = fallback('grid.errorEditRowBlocked')
     return false
   }
 
   function rejectRowDelete(): false {
-    error.value = 'Record deletion is not allowed for this row.'
+    error.value = fallback('grid.errorDeleteRowBlocked')
     return false
   }
 
@@ -615,7 +619,7 @@ export function useMultitableGrid(opts: {
       viewId: opts.viewId.value,
     })
     if (!context.sheetId && !context.viewId) {
-      error.value = 'sheetId or viewId is required'
+      error.value = fallback('grid.errorContextRequired')
       return
     }
     if (!opts.sheetId.value && context.sheetId) opts.sheetId.value = context.sheetId
@@ -628,7 +632,7 @@ export function useMultitableGrid(opts: {
       })
       await loadViewData(page.value.offset)
     } catch (e: any) {
-      error.value = e.message ?? 'Failed to create record'
+      error.value = e.message ?? fallback('grid.errorCreateRecord')
     }
   }
 
@@ -641,7 +645,7 @@ export function useMultitableGrid(opts: {
       await loadViewData(page.value.offset)
       return true
     } catch (e: any) {
-      error.value = e.message ?? 'Failed to delete record'
+      error.value = e.message ?? fallback('grid.errorDeleteRecord')
       return false
     }
   }
@@ -695,13 +699,13 @@ export function useMultitableGrid(opts: {
           recordId,
           fieldId,
           attemptedValue: value,
-          message: e.message ?? 'This cell was updated elsewhere. Reload and retry.',
+          message: e.message ?? fallback('grid.errorCellUpdatedElsewhere'),
           serverVersion: typeof e.serverVersion === 'number' ? e.serverVersion : undefined,
           previousLinkSummaries: oldLinkSummaries,
           nextLinkSummaries,
         }
       }
-      error.value = e.message ?? 'Failed to patch cell'
+      error.value = e.message ?? fallback('grid.errorPatchCell')
     }
   }
 
@@ -776,7 +780,7 @@ export function useMultitableGrid(opts: {
     const updated = (result.updated ?? []).map((u) => u.recordId)
     const failed = (result.failed ?? []).map((failure) => ({
       recordId: failure.recordId,
-      reason: failure.message || failure.code || 'Patch failed',
+      reason: failure.message || failure.code || fallback('grid.errorPatchFailed'),
     }))
     return { updated, failed }
   }
@@ -827,7 +831,7 @@ export function useMultitableGrid(opts: {
       row = rows.value.find((record) => record.id === pending.recordId)
     }
     if (!row) {
-      error.value = 'The latest record version is not available on this page anymore.'
+      error.value = fallback('grid.errorRecordVersionUnavailable')
       return false
     }
 

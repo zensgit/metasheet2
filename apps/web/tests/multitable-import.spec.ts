@@ -100,6 +100,33 @@ describe('multitable import parsing', () => {
     ])
   })
 
+  it('localizes unresolved people values when isZh is requested and preserves raw value', async () => {
+    const records = await buildImportedRecords({
+      parsedRows: [['Unknown Person']],
+      fieldMapping: { 0: 'fld_people' },
+      fields: [
+        {
+          id: 'fld_people',
+          name: '负责人',
+          type: 'link',
+          property: { refKind: 'user', foreignSheetId: 'sheet_people' },
+        },
+      ],
+      fieldResolvers: {
+        fld_people: async () => null,
+      },
+      isZh: true,
+    })
+
+    expect(records.failures).toEqual([
+      expect.objectContaining({
+        rowIndex: 0,
+        retryable: false,
+        message: '无法解析 负责人 的人员值：Unknown Person',
+      }),
+    ])
+  })
+
   it('prefers field overrides over people resolution failures', async () => {
     const resolver = vi.fn(async () => {
       throw new Error('Multiple people match "Owner". Use email for an exact match.')
@@ -185,6 +212,31 @@ describe('multitable import parsing', () => {
     ])
   })
 
+  it('localizes missing link resolver fallback and keeps the field name raw', async () => {
+    const records = await buildImportedRecords({
+      parsedRows: [['Vendor']],
+      fieldMapping: { 0: 'fld_vendor' },
+      fields: [
+        {
+          id: 'fld_vendor',
+          name: '供应商',
+          type: 'link',
+          property: { foreignSheetId: 'sheet_vendors', limitSingleRecord: true },
+        },
+      ],
+      fieldResolvers: {},
+      isZh: true,
+    })
+
+    expect(records.failures).toEqual([
+      expect.objectContaining({
+        fieldId: 'fld_vendor',
+        fieldName: '供应商',
+        message: '关联字段 供应商 未配置导入解析器',
+      }),
+    ])
+  })
+
   it('skips duplicate rows using the primary import field against existing and in-batch values', () => {
     const result = skipDuplicateImportRows({
       records: [
@@ -212,6 +264,26 @@ describe('multitable import parsing', () => {
         fieldId: 'fld_name',
         skipped: true,
         message: 'Skipped duplicate row because Name already exists: Beta',
+      }),
+    ])
+  })
+
+  it('localizes duplicate-row skipped messages and keeps raw field/value text', () => {
+    const result = skipDuplicateImportRows({
+      records: [
+        { fld_name: 'Alpha' },
+        { fld_name: 'alpha' },
+      ],
+      rowIndexes: [0, 1],
+      primaryFieldId: 'fld_name',
+      primaryFieldName: '名称',
+      isZh: true,
+    })
+
+    expect(result.skippedRows).toEqual([
+      expect.objectContaining({
+        rowIndex: 1,
+        message: '已跳过重复行，因为 名称 已存在：alpha',
       }),
     ])
   })
@@ -437,5 +509,18 @@ describe('multitable bulk import', () => {
 
     await expect(importPromise).rejects.toMatchObject({ name: 'AbortError', message: 'Import cancelled' })
     expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('localizes generated abort errors when isZh is requested', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const client = new MultitableApiClient({ fetchFn: vi.fn() })
+
+    await expect(bulkImportRecords({
+      client,
+      records: [{ fld_name: 'A' }],
+      signal: controller.signal,
+      isZh: true,
+    })).rejects.toMatchObject({ name: 'AbortError', message: '导入已取消' })
   })
 })

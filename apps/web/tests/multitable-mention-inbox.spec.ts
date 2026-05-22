@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import { MultitableApiClient } from '../src/multitable/api/client'
 import { useMultitableCommentInboxSummary } from '../src/multitable/composables/useMultitableCommentInboxSummary'
 import type { CommentMentionSummary } from '../src/multitable/types'
@@ -67,6 +68,7 @@ describe('useMultitableCommentInboxSummary', () => {
   let client: MultitableApiClient
 
   beforeEach(() => {
+    useLocale().setLocale('en')
     client = makeMockClient()
   })
 
@@ -101,6 +103,19 @@ describe('useMultitableCommentInboxSummary', () => {
 
     expect(inbox.summary.value).toBeNull()
     expect(inbox.error.value).toContain('DB error')
+  })
+
+  it('localizes summary fallback when backend message is absent', async () => {
+    useLocale().setLocale('zh-CN')
+    const failClient = {
+      loadMentionSummary: vi.fn().mockRejectedValue({}),
+    } as any
+    const inbox = useMultitableCommentInboxSummary({ client: failClient })
+
+    await inbox.loadSummary({ spreadsheetId: 'sheet_1' })
+
+    expect(inbox.summary.value).toBeNull()
+    expect(inbox.error.value).toBe('加载提及摘要失败')
   })
 
   it('skips load for empty spreadsheetId', async () => {

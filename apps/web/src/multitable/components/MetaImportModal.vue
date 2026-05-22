@@ -634,6 +634,7 @@ async function buildRecords(): Promise<ImportBuildResult> {
     fields: props.fields,
     fieldResolvers: props.fieldResolvers,
     fieldOverrides: manualFieldOverrides.value,
+    isZh: isZh.value,
   })
 }
 
@@ -762,6 +763,7 @@ async function applyFixesAndRetry() {
     fields: props.fields,
     fieldResolvers: props.fieldResolvers,
     fieldOverrides: subsetOverrides,
+    isZh: isZh.value,
   })
 
   const retryableFailures = result.failures.filter((failure) => !failure.skipped && failure.retryable !== false)

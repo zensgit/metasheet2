@@ -1,11 +1,15 @@
 import { ref } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import type { MetaCommentsScope, MultitableComment } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
+import { commentLabel } from '../utils/meta-comment-labels'
 
 type CommentsTarget = { containerId: string; targetId: string; targetFieldId?: string | null } | MetaCommentsScope
 
 export function useMultitableComments(client?: MultitableApiClient) {
   const api = client ?? multitableClient
+  const { isZh } = useLocale()
+  const fallback = (key: Parameters<typeof commentLabel>[0]) => commentLabel(key, isZh.value)
   const comments = ref<MultitableComment[]>([])
   const loading = ref(false)
   const error = ref<string | null>(null)
@@ -21,7 +25,7 @@ export function useMultitableComments(client?: MultitableApiClient) {
       const data = await api.listComments(params)
       comments.value = data.comments ?? []
     } catch (e: any) {
-      error.value = e.message ?? 'Failed to load comments'
+      error.value = e.message ?? fallback('comment.errorLoad')
     } finally {
       loading.value = false
     }
@@ -35,7 +39,7 @@ export function useMultitableComments(client?: MultitableApiClient) {
       if (data.comment) comments.value.unshift(data.comment)
       return data.comment ?? null
     } catch (e: any) {
-      error.value = e.message ?? 'Failed to add comment'
+      error.value = e.message ?? fallback('comment.errorAdd')
       throw e
     } finally {
       submitting.value = false
@@ -52,7 +56,7 @@ export function useMultitableComments(client?: MultitableApiClient) {
       const idx = comments.value.findIndex((c) => c.id === commentId)
       if (idx >= 0) comments.value[idx] = { ...comments.value[idx], resolved: true }
     } catch (e: any) {
-      error.value = e.message ?? 'Failed to resolve comment'
+      error.value = e.message ?? fallback('comment.errorResolve')
       throw e
     } finally {
       resolvingIds.value = resolvingIds.value.filter((id) => id !== commentId)
@@ -69,7 +73,7 @@ export function useMultitableComments(client?: MultitableApiClient) {
       if (data.comment) upsertComment(data.comment)
       return data.comment ?? null
     } catch (e: any) {
-      error.value = e.message ?? 'Failed to update comment'
+      error.value = e.message ?? fallback('comment.errorUpdate')
       throw e
     } finally {
       updatingIds.value = updatingIds.value.filter((id) => id !== commentId)
@@ -85,7 +89,7 @@ export function useMultitableComments(client?: MultitableApiClient) {
       await api.deleteComment(commentId)
       applyDeletedComment(commentId)
     } catch (e: any) {
-      error.value = e.message ?? 'Failed to delete comment'
+      error.value = e.message ?? fallback('comment.errorDelete')
       throw e
     } finally {
       deletingIds.value = deletingIds.value.filter((id) => id !== commentId)

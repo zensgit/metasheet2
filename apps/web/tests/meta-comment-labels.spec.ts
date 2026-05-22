@@ -39,6 +39,16 @@ describe('meta-comment-labels static keys', () => {
       ['comment.hintBase', 'Ctrl/Cmd + Enter to send', 'Ctrl/Cmd + Enter 发送'],
       ['comment.hintWithMention', 'Tab to mention, Ctrl/Cmd + Enter to send', 'Tab 提及，Ctrl/Cmd + Enter 发送'],
       ['comment.discardDraftConfirm', 'Discard unsaved comment draft?', '放弃未保存的评论草稿吗？'],
+      ['comment.errorLoad', 'Failed to load comments', '加载评论失败'],
+      ['comment.errorAdd', 'Failed to add comment', '添加评论失败'],
+      ['comment.errorResolve', 'Failed to resolve comment', '解决评论失败'],
+      ['comment.errorUpdate', 'Failed to update comment', '更新评论失败'],
+      ['comment.errorDelete', 'Failed to delete comment', '删除评论失败'],
+      ['comment.errorLoadInbox', 'Failed to load comment inbox', '加载评论收件箱失败'],
+      ['comment.errorLoadUnreadCount', 'Failed to load unread comment count', '加载未读评论数失败'],
+      ['comment.errorMarkRead', 'Failed to mark comment as read', '标记评论已读失败'],
+      ['comment.errorLoadMentionSummary', 'Failed to load mention summary', '加载提及摘要失败'],
+      ['comment.errorLoadPresence', 'Failed to load comment presence', '加载评论状态失败'],
     ]
 
     for (const [key, en, zh] of expectations) {

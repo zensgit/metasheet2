@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import { useMultitableCommentInbox } from '../src/multitable/composables/useMultitableCommentInbox'
 import { MultitableApiClient } from '../src/multitable/api/client'
 
@@ -12,6 +13,7 @@ describe('useMultitableCommentInbox', () => {
   let client: MultitableApiClient
 
   beforeEach(() => {
+    useLocale().setLocale('en')
     client = createMockClient()
   })
 
@@ -112,5 +114,30 @@ describe('useMultitableCommentInbox', () => {
 
     expect(state.items.value[0].unread).toBe(false)
     expect(state.unreadCount.value).toBe(2)
+  })
+
+  it('localizes mark-read fallback when backend message is absent', async () => {
+    useLocale().setLocale('zh-CN')
+    const state = useMultitableCommentInbox({
+      markCommentRead: vi.fn().mockRejectedValue({}),
+    } as any)
+    state.items.value = [{
+      id: 'c1',
+      containerId: 'sheet_ops',
+      targetId: 'rec_1',
+      fieldId: null,
+      parentId: undefined,
+      mentions: [],
+      authorId: 'user_2',
+      content: 'hello',
+      resolved: false,
+      createdAt: '2026-04-04T00:00:00.000Z',
+      unread: true,
+      mentioned: false,
+    }]
+
+    await expect(state.markRead('c1')).rejects.toThrow()
+
+    expect(state.error.value).toBe('标记评论已读失败')
   })
 })

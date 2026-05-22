@@ -1,7 +1,9 @@
 import { computed, ref } from 'vue'
 import { useAuth } from '../../composables/useAuth'
+import { useLocale } from '../../composables/useLocale'
 import type { CommentMentionSummary } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
+import { commentLabel } from '../utils/meta-comment-labels'
 import {
   normalizeMultitableCommentMutationEvent,
   normalizeMultitableCommentRealtimeEvent,
@@ -16,6 +18,8 @@ export function useMultitableCommentInboxSummary(opts?: {
 }) {
   const auth = useAuth()
   const client = opts?.client ?? multitableClient
+  const { isZh } = useLocale()
+  const fallback = (key: Parameters<typeof commentLabel>[0]) => commentLabel(key, isZh.value)
 
   const summary = ref<CommentMentionSummary | null>(null)
   const loading = ref(false)
@@ -56,7 +60,7 @@ export function useMultitableCommentInboxSummary(opts?: {
       summary.value = await client.loadMentionSummary({ spreadsheetId: params.spreadsheetId })
       lastMarkedReadAt = null
     } catch (e: any) {
-      error.value = e.message ?? 'Failed to load mention summary'
+      error.value = e.message ?? fallback('comment.errorLoadMentionSummary')
       summary.value = null
     } finally {
       loading.value = false

@@ -1,4 +1,5 @@
 import type { MultitableApiClient } from '../api/client'
+import { duplicateRowSkipped, importCancelled } from '../utils/meta-import-labels'
 
 export type BulkImportFailure = {
   index: number
@@ -37,22 +38,22 @@ const DEFAULT_MAX_RETRY_ATTEMPTS = 1
 const DEFAULT_RETRY_BASE_DELAY_MS = 500
 const DEFAULT_MAX_RETRY_DELAY_MS = 30_000
 
-function createAbortError() {
-  const error = new Error('Import cancelled') as Error & { name: string }
+function createAbortError(isZh = false) {
+  const error = new Error(importCancelled(isZh)) as Error & { name: string }
   error.name = 'AbortError'
   return error
 }
 
-function ensureNotAborted(signal?: AbortSignal) {
-  if (signal?.aborted) throw createAbortError()
+function ensureNotAborted(signal?: AbortSignal, isZh = false) {
+  if (signal?.aborted) throw createAbortError(isZh)
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+function sleep(ms: number, signal?: AbortSignal, isZh = false): Promise<void> {
   if (!signal) {
     return new Promise((resolve) => globalThis.setTimeout(resolve, ms))
   }
   if (signal.aborted) {
-    return Promise.reject(createAbortError())
+    return Promise.reject(createAbortError(isZh))
   }
   return new Promise((resolve, reject) => {
     const timer = globalThis.setTimeout(() => {
@@ -62,7 +63,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     const onAbort = () => {
       globalThis.clearTimeout(timer)
       signal.removeEventListener('abort', onAbort)
-      reject(createAbortError())
+      reject(createAbortError(isZh))
     }
     signal.addEventListener('abort', onAbort, { once: true })
   })
@@ -124,20 +125,21 @@ async function createRecordWithRetry(params: {
   sleepFn: (ms: number) => Promise<void>
   jitterFn: (delayMs: number) => number
   signal?: AbortSignal
+  isZh?: boolean
 }) {
-  const { client, sheetId, viewId, data, maxRetryAttempts, retryBaseDelayMs, maxRetryDelayMs, sleepFn, jitterFn, signal } = params
+  const { client, sheetId, viewId, data, maxRetryAttempts, retryBaseDelayMs, maxRetryDelayMs, sleepFn, jitterFn, signal, isZh = false } = params
   let attempt = 0
   while (true) {
     try {
-      ensureNotAborted(signal)
+      ensureNotAborted(signal, isZh)
       return await client.createRecord({ sheetId, viewId, data }, { signal })
     } catch (error) {
       if (!isRetryableError(error) || attempt >= maxRetryAttempts) {
         throw error
       }
-      ensureNotAborted(signal)
+      ensureNotAborted(signal, isZh)
       await sleepFn(retryDelayMs({ error, attempt, retryBaseDelayMs, maxRetryDelayMs, jitterFn }))
-      ensureNotAborted(signal)
+      ensureNotAborted(signal, isZh)
       attempt += 1
     }
   }
@@ -149,6 +151,7 @@ export function skipDuplicateImportRows(params: {
   primaryFieldId: string
   primaryFieldName?: string
   existingKeys?: Iterable<string>
+  isZh?: boolean
 }) {
   const {
     records,
@@ -156,6 +159,7 @@ export function skipDuplicateImportRows(params: {
     primaryFieldId,
     primaryFieldName = primaryFieldId,
     existingKeys = [],
+    isZh = false,
   } = params
 
   const keptRecords: Array<Record<string, unknown>> = []
@@ -184,7 +188,7 @@ export function skipDuplicateImportRows(params: {
         fieldId: primaryFieldId,
         key: normalizedKey,
         skipped: true,
-        message: `Skipped duplicate row because ${primaryFieldName} already exists: ${String(rawKey).trim()}`,
+        message: duplicateRowSkipped(primaryFieldName, rawKey, isZh),
       })
       return
     }
@@ -212,6 +216,7 @@ export async function bulkImportRecords(params: {
   sleepFn?: (ms: number) => Promise<void>
   jitterFn?: (delayMs: number) => number
   signal?: AbortSignal
+  isZh?: boolean
 }): Promise<BulkImportResult> {
   const {
     client,
@@ -222,14 +227,15 @@ export async function bulkImportRecords(params: {
     maxRetryAttempts = DEFAULT_MAX_RETRY_ATTEMPTS,
     retryBaseDelayMs = DEFAULT_RETRY_BASE_DELAY_MS,
     maxRetryDelayMs = DEFAULT_MAX_RETRY_DELAY_MS,
-    sleepFn = (ms) => sleep(ms, params.signal),
+    sleepFn = (ms) => sleep(ms, params.signal, params.isZh ?? false),
     jitterFn = applyRetryJitter,
     signal,
+    isZh = false,
   } = params
   const settled: PromiseSettledResult<unknown>[] = []
   const chunkSize = Math.max(1, Math.floor(concurrency))
   for (let offset = 0; offset < records.length; offset += chunkSize) {
-    ensureNotAborted(signal)
+    ensureNotAborted(signal, isZh)
     const chunk = records.slice(offset, offset + chunkSize)
     const chunkSettled = await Promise.allSettled(
       chunk.map((data) => createRecordWithRetry({
@@ -243,10 +249,11 @@ export async function bulkImportRecords(params: {
         sleepFn,
         jitterFn,
         signal,
+        isZh,
       })),
     )
     if (signal?.aborted || chunkSettled.some((item) => item.status === 'rejected' && isAbortError(item.reason))) {
-      throw createAbortError()
+      throw createAbortError(isZh)
     }
     settled.push(...chunkSettled)
   }

@@ -1,4 +1,5 @@
 import type { MetaField } from '../types'
+import { importResolverMissing, importValueResolveFailed } from '../utils/meta-import-labels'
 import { isLinkField, isPersonField } from '../utils/link-fields'
 
 export type DelimitedParseResult = {
@@ -125,8 +126,9 @@ export async function buildImportedRecords(params: {
   fields: MetaField[]
   fieldResolvers?: Record<string, ImportValueResolver>
   fieldOverrides?: ImportFieldOverrides
+  isZh?: boolean
 }): Promise<ImportBuildResult> {
-  const { parsedRows, fieldMapping, fields, fieldResolvers = {}, fieldOverrides = {} } = params
+  const { parsedRows, fieldMapping, fields, fieldResolvers = {}, fieldOverrides = {}, isZh = false } = params
   const records: Array<Record<string, unknown>> = []
   const rowIndexes: number[] = []
   const failures: ImportBuildFailure[] = []
@@ -157,9 +159,7 @@ export async function buildImportedRecords(params: {
         }
         const resolver = fieldResolvers[fieldId]
         if (!resolver) {
-          rowFailure = isPersonField(field)
-            ? `No import resolver is configured for people field ${field.name}`
-            : `No import resolver is configured for linked field ${field.name}`
+          rowFailure = importResolverMissing(field.name, isPersonField(field) ? 'person' : 'link', isZh)
           failingField = field
           break
         }
@@ -167,16 +167,12 @@ export async function buildImportedRecords(params: {
         try {
           resolved = await resolver(rawValue, field)
         } catch (error: any) {
-          rowFailure = error?.message ?? (isPersonField(field)
-            ? `Unable to resolve people value for ${field.name}: ${rawValue}`
-            : `Unable to resolve linked value for ${field.name}: ${rawValue}`)
+          rowFailure = error?.message ?? importValueResolveFailed(field.name, rawValue, isPersonField(field) ? 'person' : 'link', isZh)
           failingField = field
           break
         }
         if (resolved === null || resolved === undefined) {
-          rowFailure = isPersonField(field)
-            ? `Unable to resolve people value for ${field.name}: ${rawValue}`
-            : `Unable to resolve linked value for ${field.name}: ${rawValue}`
+          rowFailure = importValueResolveFailed(field.name, rawValue, isPersonField(field) ? 'person' : 'link', isZh)
           failingField = field
           break
         }

@@ -55,6 +55,12 @@ export type MetaCoreLabelKey =
   | 'grid.noMatchingTitle' | 'grid.noMatchingHint'
   | 'grid.collapseRow' | 'grid.expandRow'
   | 'grid.prev' | 'grid.next' | 'grid.loading'
+  | 'grid.errorLoadViewData'
+  | 'grid.errorEditRowBlocked' | 'grid.errorDeleteRowBlocked'
+  | 'grid.errorContextRequired'
+  | 'grid.errorCreateRecord' | 'grid.errorDeleteRecord'
+  | 'grid.errorCellUpdatedElsewhere' | 'grid.errorPatchCell'
+  | 'grid.errorRecordVersionUnavailable' | 'grid.errorPatchFailed'
   // --- MetaCellEditor static (T3A2) ---
   | 'cell.editing'
   | 'cell.barcodePlaceholder' | 'cell.locationPlaceholder'
@@ -146,6 +152,29 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'grid.prev': { en: 'Prev', zh: '上一页' },
   'grid.next': { en: 'Next', zh: '下一页' },
   'grid.loading': { en: 'Loading data', zh: '正在加载数据' },
+  // Frontend-owned composable fallbacks. Backend/user messages still win via `e.message ?? fallback`.
+  'grid.errorLoadViewData': { en: 'Failed to load view data', zh: '加载视图数据失败' },
+  'grid.errorEditRowBlocked': {
+    en: 'Record editing is not allowed for this row.',
+    zh: '该行不允许编辑记录。',
+  },
+  'grid.errorDeleteRowBlocked': {
+    en: 'Record deletion is not allowed for this row.',
+    zh: '该行不允许删除记录。',
+  },
+  'grid.errorContextRequired': { en: 'sheetId or viewId is required', zh: '需要 sheetId 或 viewId' },
+  'grid.errorCreateRecord': { en: 'Failed to create record', zh: '创建记录失败' },
+  'grid.errorDeleteRecord': { en: 'Failed to delete record', zh: '删除记录失败' },
+  'grid.errorCellUpdatedElsewhere': {
+    en: 'This cell was updated elsewhere. Reload and retry.',
+    zh: '该单元格已在别处更新。请重新加载后重试。',
+  },
+  'grid.errorPatchCell': { en: 'Failed to patch cell', zh: '更新单元格失败' },
+  'grid.errorRecordVersionUnavailable': {
+    en: 'The latest record version is not available on this page anymore.',
+    zh: '此页面已无法获取该记录的最新版本。',
+  },
+  'grid.errorPatchFailed': { en: 'Patch failed', zh: '更新失败' },
 
   // MetaCellEditor (T3A2): shallow chrome inside the grid cell editor.
   // Excludes user data (option values, format examples like https://example.com),
