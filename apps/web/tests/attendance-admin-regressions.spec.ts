@@ -197,6 +197,59 @@ describe('Attendance admin regressions', () => {
           },
         })
       }
+      if (url.includes('/api/attendance/advanced-scheduling/workbench')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            range: { from: '2026-05-01', to: '2026-05-31' },
+            summary: {
+              scheduleGroups: 1,
+              scheduleGroupMembers: 2,
+              schedulerScopes: 1,
+              shifts: 2,
+              rotationRules: 1,
+              shiftAssignments: 1,
+              rotationAssignments: 1,
+              assignedUsers: 2,
+              diagnostics: 1,
+              groupsWithoutMembers: 0,
+              assignmentUsersWithoutScheduleGroup: 1,
+              usersWithMultipleScheduleGroups: 0,
+              usersWithBothAssignmentKinds: 0,
+            },
+            scheduleGroups: {
+              total: 1,
+              items: [
+                {
+                  id: 'sg-1',
+                  name: 'Line A',
+                  code: 'line-a',
+                  source: 'manual',
+                  memberCount: 2,
+                  assignedUserCount: 1,
+                  shiftAssignmentCount: 1,
+                  rotationAssignmentCount: 1,
+                  isActive: true,
+                },
+              ],
+            },
+            diagnostics: [
+              {
+                code: 'assignment_without_schedule_group',
+                severity: 'warning',
+                message: 'Active shift or rotation assignments reference users without an effective schedule-group membership in this range.',
+                count: 1,
+                userIds: ['user-3'],
+                scheduleGroupIds: [],
+              },
+            ],
+            metadata: {
+              readOnly: true,
+              source: 'attendance_advanced_scheduling_workbench',
+            },
+          },
+        })
+      }
       if (url.includes('/api/attendance/leave-types')) {
         return jsonResponse(200, {
           ok: true,
@@ -713,6 +766,31 @@ describe('Attendance admin regressions', () => {
     expect(actionCell).toBeTruthy()
     expect(actionCell?.classList.contains('attendance__table-actions')).toBe(true)
     expect(window.getComputedStyle(actionCell!).display).toBe('table-cell')
+  })
+
+  it('renders the read-only advanced scheduling workbench without write controls', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const workbenchNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-advanced-scheduling-workbench"]')
+    expect(workbenchNav).toBeTruthy()
+    workbenchNav!.click()
+    await flushUi(2)
+
+    const section = container!.querySelector<HTMLElement>('[data-attendance-advanced-scheduling-workbench]')
+    expect(section).toBeTruthy()
+    expect(window.getComputedStyle(section!).display).not.toBe('none')
+    expect(section!.textContent).toContain('Read-only snapshot')
+    expect(section!.querySelector('[data-attendance-advanced-scheduling-metric="schedule-groups"]')?.textContent).toContain('1')
+    expect(section!.querySelector('[data-attendance-advanced-scheduling-metric="assignments"]')?.textContent).toContain('2')
+    expect(section!.querySelector('[data-attendance-advanced-scheduling-diagnostic="assignment_without_schedule_group"]')?.textContent).toContain('1')
+    expect(section!.querySelector('[data-attendance-advanced-scheduling-groups]')?.textContent).toContain('Line A')
+    const buttons = Array.from(section!.querySelectorAll<HTMLButtonElement>('button')).map(button => button.textContent || '')
+    expect(buttons.join(' ')).toContain('Reload workbench')
+    expect(buttons.join(' ')).not.toContain('Create')
+    expect(buttons.join(' ')).not.toContain('Edit')
+    expect(buttons.join(' ')).not.toContain('Delete')
   })
 
   it('restores the run21 holiday calendar, rule builder, and import template guidance', async () => {

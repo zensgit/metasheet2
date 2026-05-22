@@ -124,11 +124,12 @@ describe('Attendance admin anchor navigation', () => {
     )
 
     expect(groupLabels).toEqual(['Workspace', 'Scheduling', 'Organization', 'Policies', 'Data & Payroll'])
-    expect(labels).toHaveLength(23)
+    expect(labels).toHaveLength(24)
     expect(labels).toEqual(
       expect.arrayContaining([
         'Settings',
         'User Access',
+        'Advanced scheduling',
         'Import',
         'Import batches',
         'Report fields',
@@ -280,14 +281,15 @@ describe('Attendance admin anchor navigation', () => {
 
     const jumpSelect = container!.querySelector<HTMLSelectElement>('[data-admin-quick-jump="true"]')
     expect(jumpSelect).toBeTruthy()
-    expect(Array.from(jumpSelect!.querySelectorAll('option')).length).toBe(23)
+    expect(Array.from(jumpSelect!.querySelectorAll('option')).length).toBe(24)
 
-    jumpSelect!.value = 'attendance-admin-shifts'
+    jumpSelect!.value = 'attendance-admin-advanced-scheduling-workbench'
     jumpSelect!.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi(2)
 
-    expect(window.location.hash).toBe('#attendance-admin-shifts')
-    expect(container!.querySelector('[data-admin-current-section="true"]')?.textContent).toContain('Scheduling · Shifts')
+    expect(window.location.hash).toBe('#attendance-admin-advanced-scheduling-workbench')
+    expect(container!.querySelector('[data-admin-current-section="true"]')?.textContent).toContain('Scheduling · Advanced scheduling')
+    expect(container!.querySelector('[data-attendance-advanced-scheduling-workbench]')).toBeTruthy()
   })
 
   it('normalizes legacy show-all storage back to focused mode across remounts', async () => {
@@ -655,6 +657,7 @@ describe('Attendance admin anchor navigation', () => {
       item => item.textContent?.trim() || '',
     )
     expect(groupLabels[0]).toBe('Scheduling')
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-advanced-scheduling-workbench"]')).toBeTruthy()
     expect(container!.querySelector('[data-admin-anchor="attendance-admin-shifts"]')).toBeTruthy()
     expect(container!.querySelector('[data-admin-anchor="attendance-admin-user-access"]')).toBeNull()
     expect(container!.querySelector('[data-admin-shortcut="attendance-admin-shifts"]')?.textContent).toContain('Scheduling · Shifts')
