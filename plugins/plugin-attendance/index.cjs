@@ -11807,6 +11807,16 @@ function calculateAttendanceComprehensiveShiftPlannedMinutes(profile) {
   return Math.max(0, Math.floor(duration))
 }
 
+function normalizeAttendanceComprehensiveOptionalMinutes(...values) {
+  for (const value of values) {
+    if (value === undefined || value === null) continue
+    if (typeof value === 'string' && value.trim() === '') continue
+    const minutes = Number(value)
+    if (Number.isFinite(minutes)) return Math.max(0, Math.floor(minutes))
+  }
+  return null
+}
+
 function resolveAttendanceComprehensiveDayProfile(day, fallbackProfile) {
   if (day?.profile && typeof day.profile === 'object') return day.profile
   if (day?.shift && typeof day.shift === 'object') return day.shift
@@ -11832,10 +11842,10 @@ function buildAttendanceComprehensivePlannedMinutesFromDays(days, options = {}) 
     const date = normalizeDateOnly(day?.date ?? day?.workDate ?? day?.work_date)
     const profile = resolveAttendanceComprehensiveDayProfile(day, fallbackProfile)
     const isWorkingDay = isAttendanceComprehensiveDayWorking(day, profile)
-    const explicitMinutes = Number(day?.plannedMinutes ?? day?.planned_minutes)
+    const explicitMinutes = normalizeAttendanceComprehensiveOptionalMinutes(day?.plannedMinutes, day?.planned_minutes)
     const minutes = isWorkingDay
-      ? Number.isFinite(explicitMinutes)
-        ? Math.max(0, Math.floor(explicitMinutes))
+      ? explicitMinutes !== null
+        ? explicitMinutes
         : calculateAttendanceComprehensiveShiftPlannedMinutes(profile)
       : 0
     plannedMinutes += minutes
