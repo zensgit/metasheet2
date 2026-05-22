@@ -1,4 +1,15 @@
 import type { MetaField } from '../types'
+import {
+  formulaCategoryLabel,
+  formulaDiagnosticLabel,
+  formulaEmptyArgument,
+  formulaFieldNameReference,
+  formulaFunctionDescription,
+  formulaMaxArgs,
+  formulaMinArgs,
+  formulaUndocumentedFunction,
+  formulaUnknownFieldReference,
+} from './meta-formula-labels'
 
 export type FormulaFunctionCategory =
   | 'aggregate'
@@ -540,22 +551,34 @@ const FORMULA_FUNCTION_ARITY: Record<string, Pick<FormulaFunctionDoc, 'minArgs' 
   YEAR: { minArgs: 1, maxArgs: 1 },
 }
 
-export function searchFormulaFunctionDocs(query: string): FormulaFunctionDoc[] {
-  const normalized = query.trim().toUpperCase()
-  if (!normalized) return FORMULA_FUNCTION_DOCS
+function localizeFormulaFunctionDoc(doc: FormulaFunctionDoc, isZh: boolean): FormulaFunctionDoc {
+  const description = formulaFunctionDescription(doc.name, isZh) || doc.description
+  return description === doc.description ? doc : { ...doc, description }
+}
+
+export function getFormulaFunctionCategories(isZh = false): FormulaFunctionCategoryDoc[] {
+  return FORMULA_FUNCTION_CATEGORIES.map((category) => formulaCategoryLabel(category.id, isZh))
+}
+
+export function searchFormulaFunctionDocs(query: string, isZh = false): FormulaFunctionDoc[] {
+  const trimmed = query.trim()
+  const normalized = trimmed.toUpperCase()
+  if (!normalized) return FORMULA_FUNCTION_DOCS.map((doc) => localizeFormulaFunctionDoc(doc, isZh))
   return FORMULA_FUNCTION_DOCS.filter((doc) =>
     doc.name.includes(normalized)
     || doc.signature.toUpperCase().includes(normalized)
-    || doc.description.toUpperCase().includes(normalized),
-  )
+    || doc.description.toUpperCase().includes(normalized)
+    || (isZh && formulaFunctionDescription(doc.name, true).includes(trimmed)),
+  ).map((doc) => localizeFormulaFunctionDoc(doc, isZh))
 }
 
 export function getFormulaFunctionCatalog(
   query = '',
   category: FormulaFunctionCategory | 'all' = 'all',
+  isZh = false,
 ): FormulaFunctionCatalogSection[] {
-  const docs = searchFormulaFunctionDocs(query).filter((doc) => category === 'all' || doc.category === category)
-  return FORMULA_FUNCTION_CATEGORIES
+  const docs = searchFormulaFunctionDocs(query, isZh).filter((doc) => category === 'all' || doc.category === category)
+  return getFormulaFunctionCategories(isZh)
     .map((categoryDoc) => ({
       category: categoryDoc.id,
       label: categoryDoc.label,
@@ -601,7 +624,7 @@ export function extractFormulaFieldRefs(expression: string): string[] {
   return refs
 }
 
-function getFormulaSyntaxDiagnostics(expression: string): FormulaDiagnostic[] {
+function getFormulaSyntaxDiagnostics(expression: string, isZh: boolean): FormulaDiagnostic[] {
   const diagnostics: FormulaDiagnostic[] = []
   let parenthesesDepth = 0
   let bracketDepth = 0
@@ -638,7 +661,7 @@ function getFormulaSyntaxDiagnostics(expression: string): FormulaDiagnostic[] {
     }
     if (char === ')') {
       if (parenthesesDepth === 0) {
-        diagnostics.push({ severity: 'error', message: 'Unexpected closing parenthesis.' })
+        diagnostics.push({ severity: 'error', message: formulaDiagnosticLabel('diagnostic.unexpectedClosingParenthesis', isZh) })
       } else {
         parenthesesDepth--
       }
@@ -651,7 +674,7 @@ function getFormulaSyntaxDiagnostics(expression: string): FormulaDiagnostic[] {
     }
     if (char === ']') {
       if (bracketDepth === 0) {
-        diagnostics.push({ severity: 'error', message: 'Unexpected closing array bracket.' })
+        diagnostics.push({ severity: 'error', message: formulaDiagnosticLabel('diagnostic.unexpectedClosingArrayBracket', isZh) })
       } else {
         bracketDepth--
       }
@@ -664,7 +687,7 @@ function getFormulaSyntaxDiagnostics(expression: string): FormulaDiagnostic[] {
     }
     if (char === '}') {
       if (braceDepth === 0) {
-        diagnostics.push({ severity: 'error', message: 'Unexpected closing field-reference brace.' })
+        diagnostics.push({ severity: 'error', message: formulaDiagnosticLabel('diagnostic.unexpectedClosingFieldReferenceBrace', isZh) })
       } else {
         braceDepth--
       }
@@ -672,21 +695,21 @@ function getFormulaSyntaxDiagnostics(expression: string): FormulaDiagnostic[] {
   }
 
   if (inQuotes) {
-    diagnostics.push({ severity: 'error', message: 'Quoted string is not closed.' })
+    diagnostics.push({ severity: 'error', message: formulaDiagnosticLabel('diagnostic.quotedStringNotClosed', isZh) })
   }
   if (parenthesesDepth > 0) {
-    diagnostics.push({ severity: 'error', message: 'Parentheses are not balanced.' })
+    diagnostics.push({ severity: 'error', message: formulaDiagnosticLabel('diagnostic.parenthesesNotBalanced', isZh) })
   }
   if (bracketDepth > 0) {
-    diagnostics.push({ severity: 'error', message: 'Array brackets are not balanced.' })
+    diagnostics.push({ severity: 'error', message: formulaDiagnosticLabel('diagnostic.arrayBracketsNotBalanced', isZh) })
   }
   if (braceDepth > 0) {
-    diagnostics.push({ severity: 'error', message: 'Field reference braces are not balanced.' })
+    diagnostics.push({ severity: 'error', message: formulaDiagnosticLabel('diagnostic.fieldReferenceBracesNotBalanced', isZh) })
   }
 
   const withoutWhitespace = expression.trimEnd()
   if (TRAILING_BINARY_OPERATOR_PATTERN.test(withoutWhitespace)) {
-    diagnostics.push({ severity: 'error', message: 'Formula cannot end with a binary operator.' })
+    diagnostics.push({ severity: 'error', message: formulaDiagnosticLabel('diagnostic.trailingBinaryOperator', isZh) })
   }
 
   return diagnostics
@@ -878,7 +901,7 @@ function collectFormulaFunctionCalls(expression: string): ParsedFormulaFunctionC
   return calls
 }
 
-function getFormulaFunctionArgumentDiagnostics(expression: string): FormulaDiagnostic[] {
+function getFormulaFunctionArgumentDiagnostics(expression: string, isZh: boolean): FormulaDiagnostic[] {
   const diagnostics: FormulaDiagnostic[] = []
   const knownFunctions = new Set(FORMULA_FUNCTION_DOCS.map((doc) => doc.name))
   for (const call of collectFormulaFunctionCalls(expression)) {
@@ -886,7 +909,7 @@ function getFormulaFunctionArgumentDiagnostics(expression: string): FormulaDiagn
 
     const emptyArgument = call.args.some((arg) => !arg)
     if (emptyArgument) {
-      diagnostics.push({ severity: 'error', message: `${call.name} has an empty argument.` })
+      diagnostics.push({ severity: 'error', message: formulaEmptyArgument(call.name, isZh) })
       continue
     }
 
@@ -896,7 +919,7 @@ function getFormulaFunctionArgumentDiagnostics(expression: string): FormulaDiagn
     if (typeof arity.minArgs === 'number' && call.args.length < arity.minArgs) {
       diagnostics.push({
         severity: 'error',
-        message: `${call.name} expects at least ${arity.minArgs} argument${arity.minArgs === 1 ? '' : 's'}.`,
+        message: formulaMinArgs(call.name, arity.minArgs, isZh),
       })
       continue
     }
@@ -904,7 +927,7 @@ function getFormulaFunctionArgumentDiagnostics(expression: string): FormulaDiagn
     if (typeof arity.maxArgs === 'number' && call.args.length > arity.maxArgs) {
       diagnostics.push({
         severity: 'error',
-        message: `${call.name} expects at most ${arity.maxArgs} argument${arity.maxArgs === 1 ? '' : 's'}.`,
+        message: formulaMaxArgs(call.name, arity.maxArgs, isZh),
       })
     }
   }
@@ -912,16 +935,16 @@ function getFormulaFunctionArgumentDiagnostics(expression: string): FormulaDiagn
   return diagnostics
 }
 
-export function validateFormulaExpression(expression: string, fields: MetaField[]): FormulaDiagnostic[] {
+export function validateFormulaExpression(expression: string, fields: MetaField[], isZh = false): FormulaDiagnostic[] {
   const diagnostics: FormulaDiagnostic[] = []
   const trimmed = expression.trim()
   if (!trimmed) {
-    diagnostics.push({ severity: 'warning', message: 'Formula expression is empty.' })
+    diagnostics.push({ severity: 'warning', message: formulaDiagnosticLabel('diagnostic.emptyExpression', isZh) })
     return diagnostics
   }
 
-  diagnostics.push(...getFormulaSyntaxDiagnostics(trimmed))
-  diagnostics.push(...getFormulaFunctionArgumentDiagnostics(trimmed))
+  diagnostics.push(...getFormulaSyntaxDiagnostics(trimmed, isZh))
+  diagnostics.push(...getFormulaFunctionArgumentDiagnostics(trimmed, isZh))
 
   const fieldIds = new Set(fields.map((field) => field.id))
   const fieldNames = new Set(fields.map((field) => field.name))
@@ -930,11 +953,11 @@ export function validateFormulaExpression(expression: string, fields: MetaField[
     if (fieldNames.has(ref)) {
       diagnostics.push({
         severity: 'warning',
-        message: `Field reference {${ref}} uses a name. Use the field chip to insert a stable {fld_xxx} token.`,
+        message: formulaFieldNameReference(ref, isZh),
       })
       continue
     }
-    diagnostics.push({ severity: 'error', message: `Unknown field reference {${ref}}.` })
+    diagnostics.push({ severity: 'error', message: formulaUnknownFieldReference(ref, isZh) })
   }
 
   const knownFunctions = new Set(FORMULA_FUNCTION_DOCS.map((doc) => doc.name))
@@ -943,7 +966,7 @@ export function validateFormulaExpression(expression: string, fields: MetaField[
   while ((match = FUNCTION_CALL_PATTERN.exec(trimmed.toUpperCase())) !== null) {
     const fn = match[1]
     if (fn && !knownFunctions.has(fn)) {
-      diagnostics.push({ severity: 'warning', message: `${fn} is not documented in this editor yet.` })
+      diagnostics.push({ severity: 'warning', message: formulaUndocumentedFunction(fn, isZh) })
     }
   }
 
