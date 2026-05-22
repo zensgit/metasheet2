@@ -14,6 +14,7 @@ const DEFAULT_ADAPTERS = [
   'plm:yuantus-wrapper',
   'erp:k3-wise-webapi',
   'erp:k3-wise-sqlserver',
+  'bridge:legacy-sql-readonly',
   'metasheet:staging',
   'metasheet:multitable',
 ]
@@ -63,6 +64,25 @@ const DEFAULT_ADAPTER_METADATA = [
     roles: ['source', 'target'],
     supports: ['testConnection', 'listObjects', 'getSchema', 'read', 'upsert'],
     advanced: true,
+  },
+  {
+    kind: 'bridge:legacy-sql-readonly',
+    label: 'Readonly Bridge Agent',
+    roles: ['source'],
+    supports: ['testConnection', 'listObjects', 'getSchema', 'read'],
+    advanced: true,
+    guardrails: {
+      read: {
+        localhostOnly: true,
+        requiresObjectAllowlist: true,
+        maxPreviewLimit: 20,
+        noRawSql: true,
+        dryRunFriendly: true,
+      },
+      write: {
+        supported: false,
+      },
+    },
   },
   {
     kind: 'metasheet:staging',
@@ -181,6 +201,15 @@ const DEFAULT_STAGING_DESCRIPTORS = [
   { id: 'integration_run_log', name: 'Integration Run Log', fields: DEFAULT_STAGING_FIELDS.integration_run_log, fieldDetails: makeFieldDetails('integration_run_log') },
 ]
 const DEFAULT_SYSTEMS = [
+  {
+    id: 'bridge_source_1',
+    tenantId: 'tenant-smoke',
+    workspaceId: null,
+    name: 'Readonly Bridge Agent',
+    kind: 'bridge:legacy-sql-readonly',
+    role: 'source',
+    status: 'active',
+  },
   {
     id: 'staging_source_1',
     tenantId: 'tenant-smoke',
@@ -521,6 +550,33 @@ function createFakeServer(options = {}) {
         })
         return
       }
+      if (system.kind === 'bridge:legacy-sql-readonly' && action === 'objects') {
+        sendJson(res, 200, {
+          ok: true,
+          data: options.bridgeObjects || [
+            { name: 'material', label: 'Material', operations: ['read'], source: 'bridge:legacy-sql-readonly', readonly: true },
+            { name: 'bom', label: 'BOM', operations: ['read'], source: 'bridge:legacy-sql-readonly', readonly: true },
+            { name: 'bom_child', label: 'BOM Child', operations: ['read'], source: 'bridge:legacy-sql-readonly', readonly: true },
+          ],
+        })
+        return
+      }
+      if (system.kind === 'bridge:legacy-sql-readonly' && action === 'schema') {
+        const object = url.searchParams.get('object') || 'material'
+        const fieldsByObject = {
+          material: ['ID', 'OBJ_ID', 'IdentityNo', 'IdentityName', 'Material', 'Specification'],
+          bom: ['ID', 'bom_id', 'part_id', 'State', 'path_id'],
+          bom_child: ['ID', 'bom_pid', 'part_id', 'sort_id', 'brand'],
+        }
+        sendJson(res, 200, {
+          ok: true,
+          data: {
+            object,
+            fields: (fieldsByObject[object] || fieldsByObject.material).map((name) => ({ name, label: name, type: 'string' })),
+          },
+        })
+        return
+      }
       sendJson(res, 400, { ok: false, error: { message: `unsupported system action: ${system.kind}/${action}` } })
       return
     }
@@ -558,6 +614,41 @@ function createFakeServer(options = {}) {
           ...body,
           id: body?.id || 'pipe_smoke',
           fieldMappings: Array.isArray(body?.fieldMappings) ? body.fieldMappings : [],
+        },
+      })
+      return
+    }
+
+    const pipelineRunRoute = url.pathname.match(/^\/api\/integration\/pipelines\/([^/]+)\/run$/)
+    if (req.method === 'POST' && pipelineRunRoute) {
+      if (req.headers.authorization !== 'Bearer test.jwt.token') {
+        sendJson(res, 401, { ok: false, error: { message: 'bad token' } })
+        return
+      }
+      const body = await readRequestBody(req)
+      requests[requests.length - 1].body = body
+      const pipelineId = decodeURIComponent(pipelineRunRoute[1])
+      const sourceObject = pipelineId.includes('bom_child')
+        ? 'bom_child'
+        : pipelineId.includes('bom')
+          ? 'bom'
+          : 'material'
+      const metrics = options.bridgeRefreshRunMetrics?.[sourceObject] || {
+        rowsRead: 3,
+        rowsCleaned: 3,
+        rowsWritten: 3,
+        rowsFailed: 0,
+      }
+      sendJson(res, 202, {
+        ok: true,
+        data: {
+          run: {
+            id: `run_${sourceObject}`,
+            pipelineId,
+            status: metrics.rowsFailed > 0 ? 'partial' : 'succeeded',
+          },
+          metrics,
+          preview: null,
         },
       })
       return
@@ -784,7 +875,8 @@ test('authenticated postdeploy smoke validates route and staging contracts witho
     assert.equal(routeCheck.adaptersChecked, DEFAULT_ADAPTERS.length)
     const adapterDiscoveryCheck = evidence.checks.find((check) => check.id === 'data-factory-adapter-discovery')
     assert.equal(adapterDiscoveryCheck.status, 'pass')
-    assert.equal(adapterDiscoveryCheck.adaptersChecked, 2)
+    assert.equal(adapterDiscoveryCheck.adaptersChecked, 3)
+    assert.ok(adapterDiscoveryCheck.adapters.includes('bridge:legacy-sql-readonly'))
     assert.ok(adapterDiscoveryCheck.adapters.includes('metasheet:staging'))
     assert.ok(adapterDiscoveryCheck.adapters.includes('metasheet:multitable'))
     for (const id of [
@@ -1012,6 +1104,137 @@ test('issue1542 install-staging smoke creates and uses the installed staging sou
     assert.equal(pipelineRequest.body.sourceSystemId, 'metasheet_staging_tenant-smoke_integration-core')
     assert.ok(fake.requests.some((request) => request.pathname === '/api/integration/external-systems/metasheet_staging_tenant-smoke_integration-core/schema'))
     assert.equal(fake.requests.some((request) => request.pathname === '/api/integration/external-systems/staging_source_1/schema'), false)
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('bridge source refresh smoke installs a raw staging target and runs capped refresh pipelines', async () => {
+  const fake = createFakeServer({ externalSystems: DEFAULT_SYSTEMS })
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--auth-token', 'test.jwt.token',
+      '--tenant-id', 'tenant-smoke',
+      '--require-auth',
+      '--bridge-source-refresh-smoke',
+      '--bridge-refresh-install-staging',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout.includes('test.jwt.token'), false)
+    const evidenceText = readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8')
+    assert.equal(evidenceText.includes('test.jwt.token'), false)
+    const evidence = JSON.parse(evidenceText)
+    assert.equal(evidence.summary.fail, 0)
+
+    const installCheck = evidence.checks.find((check) => check.id === 'bridge-refresh-target-install')
+    assert.equal(installCheck.status, 'pass')
+    assert.equal(installCheck.projectId, 'tenant-smoke:integration-core')
+    assert.equal(installCheck.targetSystemId, 'metasheet_multitable_tenant-smoke_integration-core')
+    assert.equal(installCheck.rawSheetId, 'sheet_plm_raw_items')
+
+    const readiness = evidence.checks.find((check) => check.id === 'bridge-refresh-system-readiness')
+    assert.equal(readiness.status, 'pass')
+    assert.equal(readiness.sourceSystemId, 'bridge_source_1')
+    assert.equal(readiness.targetSystemId, 'metasheet_multitable_tenant-smoke_integration-core')
+    assert.deepEqual(readiness.objects, ['material', 'bom', 'bom_child'])
+
+    for (const object of ['material', 'bom', 'bom_child']) {
+      const saveCheck = evidence.checks.find((check) => check.id === `bridge-refresh-${object}-pipeline-save`)
+      assert.equal(saveCheck.status, 'pass')
+      assert.equal(saveCheck.targetObject, 'plm_raw_items')
+      assert.ok(saveCheck.fieldMappings >= 4)
+
+      const runCheck = evidence.checks.find((check) => check.id === `bridge-refresh-${object}-run`)
+      assert.equal(runCheck.status, 'pass')
+      assert.equal(runCheck.rowsRead, 3)
+      assert.equal(runCheck.rowsCleaned, 3)
+      assert.equal(runCheck.rowsWritten, 3)
+      assert.equal(runCheck.rowsFailed, 0)
+      assert.equal(runCheck.maxRows, 3)
+    }
+
+    const targetSystemRequest = fake.requests.find((request) => (
+      request.method === 'POST' &&
+      request.pathname === '/api/integration/external-systems' &&
+      request.body?.kind === 'metasheet:multitable'
+    ))
+    assert.ok(targetSystemRequest, 'bridge refresh installs a MetaSheet multitable target system')
+    assert.equal(targetSystemRequest.body.config.objects.plm_raw_items.sheetId, 'sheet_plm_raw_items')
+    assert.deepEqual(targetSystemRequest.body.config.objects.plm_raw_items.keyFields, ['sourceSystemId', 'objectType', 'sourceId'])
+    assert.equal(targetSystemRequest.body.config.objects.plm_raw_items.mode, 'upsert')
+
+    const pipelineRequests = fake.requests.filter((request) => (
+      request.method === 'POST' &&
+      request.pathname === '/api/integration/pipelines'
+    ))
+    assert.equal(pipelineRequests.length, 3)
+    assert.deepEqual(pipelineRequests.map((request) => request.body.sourceObject), ['material', 'bom', 'bom_child'])
+    for (const request of pipelineRequests) {
+      assert.equal(request.body.targetObject, 'plm_raw_items')
+      assert.equal(request.body.targetSystemId, 'metasheet_multitable_tenant-smoke_integration-core')
+      assert.equal(request.body.options.batchSize, 3)
+      assert.equal(request.body.options.maxPages, 1)
+      assert.equal(request.body.options.bridgeRefresh.maxRows, 3)
+      assert.equal(request.body.options.target.writeScope, 'metasheet-staging-raw')
+      assert.ok(request.body.fieldMappings.some((mapping) => mapping.targetField === 'sourceId' && mapping.validation?.[0]?.type === 'required'))
+    }
+
+    const runRequests = fake.requests.filter((request) => (
+      request.method === 'POST' &&
+      /^\/api\/integration\/pipelines\/bridge_refresh_.*_to_plm_raw_items\/run$/.test(request.pathname)
+    ))
+    assert.equal(runRequests.length, 3)
+    for (const request of runRequests) {
+      assert.deepEqual(request.body, { tenantId: 'tenant-smoke', workspaceId: null, mode: 'full' })
+    }
+  } finally {
+    await fake.close()
+    rmSync(outDir, { recursive: true, force: true })
+  }
+})
+
+test('bridge source refresh smoke fails when the live refresh writes fewer rows than it reads', async () => {
+  const fake = createFakeServer({
+    externalSystems: DEFAULT_SYSTEMS,
+    bridgeRefreshRunMetrics: {
+      material: {
+        rowsRead: 3,
+        rowsCleaned: 3,
+        rowsWritten: 2,
+        rowsFailed: 0,
+      },
+    },
+  })
+  const baseUrl = await fake.listen()
+  const outDir = makeTmpDir()
+  try {
+    const result = await runScript([
+      '--base-url', baseUrl,
+      '--auth-token', 'test.jwt.token',
+      '--tenant-id', 'tenant-smoke',
+      '--require-auth',
+      '--bridge-source-refresh-smoke',
+      '--bridge-refresh-install-staging',
+      '--out-dir', outDir,
+    ])
+
+    assert.equal(result.status, 1)
+    const evidence = JSON.parse(readFileSync(path.join(outDir, 'integration-k3wise-postdeploy-smoke.json'), 'utf8'))
+    const runCheck = evidence.checks.find((check) => check.id === 'bridge-refresh-material-run')
+    assert.equal(runCheck.status, 'fail')
+    assert.match(runCheck.error, /did not clean\/write all read rows/)
+    assert.deepEqual(runCheck.details, {
+      sourceObject: 'material',
+      rowsRead: 3,
+      rowsCleaned: 3,
+      rowsWritten: 2,
+    })
   } finally {
     await fake.close()
     rmSync(outDir, { recursive: true, force: true })

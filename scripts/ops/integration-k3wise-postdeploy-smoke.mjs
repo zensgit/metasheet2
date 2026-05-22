@@ -6,14 +6,35 @@ import { pathToFileURL } from 'node:url'
 const DEFAULT_BASE_URL = 'http://142.171.239.56:8081'
 const DEFAULT_OUTPUT_ROOT = 'output/integration-k3wise-postdeploy-smoke'
 const ISSUE1542_SMOKE_PIPELINE_ID = 'issue1542_postdeploy_staging_material_smoke'
+const BRIDGE_SOURCE_KIND = 'bridge:legacy-sql-readonly'
 const SQLSERVER_SYSTEM_KIND = 'erp:k3-wise-sqlserver'
 const SQLSERVER_EXECUTOR_MISSING_PATTERN = /SQLSERVER_EXECUTOR_MISSING|queryExecutor|executor|injected|注入|执行器/i
 const SQLSERVER_DRIVER_MISSING_PATTERN = /SQLSERVER_DRIVER_MISSING|mssql dependency|Cannot find module ['"]mssql['"]|找不到.*mssql/i
+const BRIDGE_REFRESH_RAW_OBJECT = 'plm_raw_items'
+const BRIDGE_REFRESH_MAX_ROWS = 3
+const BRIDGE_REFRESH_OBJECTS = {
+  material: {
+    sourceIdField: 'ID',
+    codeField: 'IdentityNo',
+    nameField: 'IdentityName',
+  },
+  bom: {
+    sourceIdField: 'ID',
+    codeField: 'bom_id',
+    nameField: 'part_id',
+  },
+  bom_child: {
+    sourceIdField: 'ID',
+    codeField: 'part_id',
+    nameField: 'brand',
+  },
+}
 const REQUIRED_ADAPTERS = [
   'http',
   'plm:yuantus-wrapper',
   'erp:k3-wise-webapi',
   'erp:k3-wise-sqlserver',
+  BRIDGE_SOURCE_KIND,
   'metasheet:staging',
   'metasheet:multitable',
 ]
@@ -36,6 +57,23 @@ const REQUIRED_ROUTES = [
   ['POST', '/api/integration/staging/install'],
 ]
 const REQUIRED_DATA_FACTORY_ADAPTER_METADATA = {
+  [BRIDGE_SOURCE_KIND]: {
+    roles: ['source'],
+    supports: ['testConnection', 'listObjects', 'getSchema', 'read'],
+    advanced: true,
+    guardrails: {
+      read: {
+        localhostOnly: true,
+        requiresObjectAllowlist: true,
+        maxPreviewLimit: 20,
+        noRawSql: true,
+        dryRunFriendly: true,
+      },
+      write: {
+        supported: false,
+      },
+    },
+  },
   'metasheet:staging': {
     roles: ['source'],
     advanced: false,
@@ -183,6 +221,17 @@ Options:
                           With --issue1542-workbench-smoke, first install staging
                           multitables and upsert a MetaSheet staging source
                           connection. Writes staging/source metadata only.
+  --bridge-source-refresh-smoke
+                          Opt-in BA-M3 smoke: refresh capped readonly Bridge
+                          source rows into MetaSheet plm_raw_items staging.
+                          Writes MetaSheet staging rows only; never calls K3.
+  --bridge-refresh-install-staging
+                          With --bridge-source-refresh-smoke, install staging
+                          multitables and upsert a MetaSheet multitable target
+                          connection before running refresh pipelines.
+  --bridge-source-system-id <id>
+                          Optional explicit bridge:legacy-sql-readonly source
+                          system id for the BA-M3 refresh smoke.
   --help                 Show this help
 
 Environment fallbacks:
@@ -191,6 +240,7 @@ Environment fallbacks:
   METASHEET_AUTH_TOKEN, ADMIN_TOKEN, AUTH_TOKEN
   METASHEET_AUTH_TOKEN_FILE, AUTH_TOKEN_FILE
   METASHEET_TENANT_ID, TENANT_ID
+  METASHEET_BRIDGE_SOURCE_SYSTEM_ID
 `)
 }
 
@@ -221,6 +271,9 @@ function parseArgs(argv = process.argv.slice(2)) {
     requireAuth: false,
     issue1542WorkbenchSmoke: false,
     issue1542InstallStaging: false,
+    bridgeSourceRefreshSmoke: false,
+    bridgeRefreshInstallStaging: false,
+    bridgeSourceSystemId: envValue('METASHEET_BRIDGE_SOURCE_SYSTEM_ID', 'BRIDGE_SOURCE_SYSTEM_ID'),
     outDir: '',
     timeoutMs: 10_000,
     help: false,
@@ -262,6 +315,16 @@ function parseArgs(argv = process.argv.slice(2)) {
       case '--issue1542-install-staging':
         opts.issue1542InstallStaging = true
         break
+      case '--bridge-source-refresh-smoke':
+        opts.bridgeSourceRefreshSmoke = true
+        break
+      case '--bridge-refresh-install-staging':
+        opts.bridgeRefreshInstallStaging = true
+        break
+      case '--bridge-source-system-id':
+        opts.bridgeSourceSystemId = readRequiredValue(argv, i, arg)
+        i += 1
+        break
       case '--out-dir':
         opts.outDir = readRequiredValue(argv, i, arg)
         i += 1
@@ -284,6 +347,9 @@ function parseArgs(argv = process.argv.slice(2)) {
   }
   if (opts.issue1542InstallStaging && !opts.issue1542WorkbenchSmoke) {
     throw new K3WisePostdeploySmokeError('--issue1542-install-staging requires --issue1542-workbench-smoke')
+  }
+  if (opts.bridgeRefreshInstallStaging && !opts.bridgeSourceRefreshSmoke) {
+    throw new K3WisePostdeploySmokeError('--bridge-refresh-install-staging requires --bridge-source-refresh-smoke')
   }
   opts.baseUrl = normalizeBaseUrl(opts.baseUrl, '--base-url')
   opts.frontendBaseUrl = normalizeBaseUrl(opts.frontendBaseUrl || opts.baseUrl, '--frontend-base-url')
@@ -909,6 +975,14 @@ function issue1542StagingSourceSystemId(projectId) {
   return `metasheet_staging_${safeSystemIdSuffix(projectId)}`
 }
 
+function bridgeRefreshTargetSystemId(projectId) {
+  return `metasheet_multitable_${safeSystemIdSuffix(projectId)}`
+}
+
+function bridgeRefreshPipelineId(sourceObject) {
+  return `bridge_refresh_${safeSystemIdSuffix(sourceObject)}_to_${BRIDGE_REFRESH_RAW_OBJECT}`
+}
+
 function objectConfigFromInstallTarget(target, descriptor) {
   const fields = Array.isArray(descriptor?.fields) ? descriptor.fields : []
   const fieldDetails = Array.isArray(descriptor?.fieldDetails) ? descriptor.fieldDetails : []
@@ -953,6 +1027,36 @@ function buildStagingSourceObjectsFromInstall(installResult, descriptorList) {
     }, descriptor)
   }
   return objects
+}
+
+function buildRawStagingTargetObjectsFromInstall(installResult, descriptorList) {
+  const descriptorsById = new Map(
+    (Array.isArray(descriptorList) ? descriptorList : [])
+      .filter((descriptor) => descriptor && typeof descriptor.id === 'string')
+      .map((descriptor) => [descriptor.id, descriptor]),
+  )
+  const descriptor = descriptorsById.get(BRIDGE_REFRESH_RAW_OBJECT)
+  const targets = Array.isArray(installResult?.targets) ? installResult.targets : []
+  const directTarget = targets.find((target) => target && target.id === BRIDGE_REFRESH_RAW_OBJECT)
+  const sheetIds = installResult?.sheetIds && typeof installResult.sheetIds === 'object' ? installResult.sheetIds : {}
+  const viewIds = installResult?.viewIds && typeof installResult.viewIds === 'object' ? installResult.viewIds : {}
+  const openLinks = installResult?.openLinks && typeof installResult.openLinks === 'object' ? installResult.openLinks : {}
+  const sheetId = directTarget?.sheetId || sheetIds[BRIDGE_REFRESH_RAW_OBJECT]
+  if (typeof sheetId !== 'string' || !sheetId) return {}
+  return {
+    [BRIDGE_REFRESH_RAW_OBJECT]: {
+      ...objectConfigFromInstallTarget({
+        id: BRIDGE_REFRESH_RAW_OBJECT,
+        name: descriptor?.name || 'PLM Raw Items',
+        sheetId,
+        viewId: directTarget?.viewId || viewIds[BRIDGE_REFRESH_RAW_OBJECT] || null,
+        baseId: directTarget?.baseId || installResult?.baseId || null,
+        openLink: directTarget?.openLink || openLinks[BRIDGE_REFRESH_RAW_OBJECT] || null,
+      }, descriptor),
+      mode: 'upsert',
+      keyFields: ['sourceSystemId', 'objectType', 'sourceId'],
+    },
+  }
 }
 
 async function installIssue1542StagingSource({ baseUrl, token, tenantId, workspaceId, timeoutMs }) {
@@ -1033,6 +1137,371 @@ async function installIssue1542StagingSource({ baseUrl, token, tenantId, workspa
     objects: Object.keys(objects),
     warnings: Array.isArray(installResult?.warnings) ? installResult.warnings.length : 0,
   }
+}
+
+async function installBridgeRefreshTarget({ baseUrl, token, tenantId, workspaceId, timeoutMs }) {
+  const descriptorResponse = await requestJson(baseUrl, '/api/integration/staging/descriptors', {
+    token,
+    timeoutMs,
+  })
+  const descriptorList = responseData(descriptorResponse.body)
+  if (!Array.isArray(descriptorList)) {
+    throw new K3WisePostdeploySmokeError('staging descriptors response data must be an array', {
+      received: Array.isArray(descriptorList) ? 'array' : typeof descriptorList,
+    })
+  }
+
+  const installResponse = await requestJson(baseUrl, '/api/integration/staging/install', {
+    token,
+    timeoutMs,
+    method: 'POST',
+    acceptStatuses: [200, 201],
+    requestBody: {
+      tenantId,
+      workspaceId: workspaceId || null,
+    },
+  })
+  const installResult = responseData(installResponse.body)
+  const objects = buildRawStagingTargetObjectsFromInstall(installResult, descriptorList)
+  if (!objects[BRIDGE_REFRESH_RAW_OBJECT]?.sheetId) {
+    throw new K3WisePostdeploySmokeError('bridge refresh target config could not be built from staging install result', {
+      objectIds: Object.keys(objects),
+      sheetIds: installResult?.sheetIds && typeof installResult.sheetIds === 'object'
+        ? Object.keys(installResult.sheetIds)
+        : [],
+    })
+  }
+  const projectId = typeof installResult?.projectId === 'string' && installResult.projectId.trim()
+    ? installResult.projectId.trim()
+    : `${tenantId}:integration-core`
+  const targetSystemId = bridgeRefreshTargetSystemId(projectId)
+  const targetSystemPayload = {
+    id: targetSystemId,
+    tenantId,
+    workspaceId: workspaceId || null,
+    projectId,
+    name: 'MetaSheet staging raw target',
+    kind: 'metasheet:multitable',
+    role: 'target',
+    status: 'active',
+    config: {
+      projectId,
+      objects,
+    },
+    capabilities: {
+      write: true,
+      stagingTarget: true,
+      bridgeSourceRefresh: true,
+    },
+  }
+  const upsertResponse = await requestJson(baseUrl, '/api/integration/external-systems', {
+    token,
+    timeoutMs,
+    method: 'POST',
+    acceptStatuses: [200, 201],
+    requestBody: targetSystemPayload,
+  })
+  const savedSystem = responseData(upsertResponse.body)
+  return {
+    projectId,
+    targetSystemId: savedSystem?.id || targetSystemId,
+    rawSheetId: objects[BRIDGE_REFRESH_RAW_OBJECT].sheetId,
+    rawViewId: objects[BRIDGE_REFRESH_RAW_OBJECT].viewId || null,
+    rawOpenLink: objects[BRIDGE_REFRESH_RAW_OBJECT].openLink || null,
+    warnings: Array.isArray(installResult?.warnings) ? installResult.warnings.length : 0,
+  }
+}
+
+function bridgeRefreshFieldMappings({ sourceSystemId, sourceObject }) {
+  const config = BRIDGE_REFRESH_OBJECTS[sourceObject]
+  if (!config) {
+    throw new K3WisePostdeploySmokeError('bridge refresh source object is not configured', {
+      sourceObject,
+      configuredObjects: Object.keys(BRIDGE_REFRESH_OBJECTS),
+    })
+  }
+  const mappings = [
+    {
+      sourceField: '__metasheet_missing_source_system_id',
+      targetField: 'sourceSystemId',
+      defaultValue: sourceSystemId,
+      validation: [{ type: 'required' }],
+      sortOrder: 0,
+    },
+    {
+      sourceField: '__metasheet_missing_object_type',
+      targetField: 'objectType',
+      defaultValue: sourceObject,
+      validation: [{ type: 'required' }],
+      sortOrder: 1,
+    },
+    {
+      sourceField: config.sourceIdField,
+      targetField: 'sourceId',
+      transform: [{ fn: 'trim' }],
+      validation: [{ type: 'required' }],
+      sortOrder: 2,
+    },
+  ]
+  let sortOrder = 3
+  if (config.codeField) {
+    mappings.push({
+      sourceField: config.codeField,
+      targetField: 'code',
+      transform: [{ fn: 'trim' }],
+      sortOrder,
+    })
+    sortOrder += 1
+  }
+  if (config.nameField) {
+    mappings.push({
+      sourceField: config.nameField,
+      targetField: 'name',
+      transform: [{ fn: 'trim' }],
+      sortOrder,
+    })
+    sortOrder += 1
+  }
+  mappings.push({
+    sourceField: '__metasheet_missing_refresh_note',
+    targetField: 'rawPayload',
+    defaultValue: `bridge-source-refresh:${sourceObject}`,
+    sortOrder,
+  })
+  return mappings
+}
+
+function bridgeRefreshPipelinePayload({ tenantId, workspaceId, sourceSystemId, targetSystemId, sourceObject }) {
+  return {
+    id: bridgeRefreshPipelineId(sourceObject),
+    tenantId,
+    workspaceId: workspaceId || null,
+    name: `Bridge source refresh: ${sourceObject} to raw staging`,
+    description: `Refresh capped readonly Bridge ${sourceObject} rows into MetaSheet ${BRIDGE_REFRESH_RAW_OBJECT}. No K3 write path is used.`,
+    sourceSystemId,
+    sourceObject,
+    targetSystemId,
+    targetObject: BRIDGE_REFRESH_RAW_OBJECT,
+    mode: 'manual',
+    status: 'active',
+    idempotencyKeyFields: ['ID'],
+    options: {
+      batchSize: BRIDGE_REFRESH_MAX_ROWS,
+      maxPages: 1,
+      target: {
+        writeScope: 'metasheet-staging-raw',
+      },
+      bridgeRefresh: {
+        source: BRIDGE_SOURCE_KIND,
+        sourceObject,
+        targetObject: BRIDGE_REFRESH_RAW_OBJECT,
+        maxRows: BRIDGE_REFRESH_MAX_ROWS,
+      },
+      workbench: {
+        source: 'integration-k3wise-postdeploy-smoke',
+        issue: '#1710',
+        bridgeSourceRefresh: true,
+      },
+    },
+    fieldMappings: bridgeRefreshFieldMappings({ sourceSystemId, sourceObject }),
+  }
+}
+
+function assertBridgeRefreshPipelineSaveResponse(body, sourceObject) {
+  const data = responseData(body)
+  const expectedId = bridgeRefreshPipelineId(sourceObject)
+  if (!data || typeof data !== 'object' || data.id !== expectedId) {
+    throw new K3WisePostdeploySmokeError('bridge refresh pipeline save returned an unexpected id', {
+      expected: expectedId,
+      actual: data?.id || null,
+    })
+  }
+  if (data.status !== 'active') {
+    throw new K3WisePostdeploySmokeError('bridge refresh pipeline is not active', {
+      pipelineId: data.id,
+      status: data.status || null,
+    })
+  }
+  if (!Array.isArray(data.fieldMappings) || data.fieldMappings.length < 4) {
+    throw new K3WisePostdeploySmokeError('bridge refresh pipeline save did not return field mappings', {
+      pipelineId: data.id,
+      fieldMappingsLength: Array.isArray(data.fieldMappings) ? data.fieldMappings.length : null,
+    })
+  }
+  if (data.targetObject !== BRIDGE_REFRESH_RAW_OBJECT) {
+    throw new K3WisePostdeploySmokeError('bridge refresh pipeline target is not raw staging', {
+      pipelineId: data.id,
+      targetObject: data.targetObject || null,
+    })
+  }
+  return {
+    pipelineId: data.id,
+    sourceObject,
+    targetObject: data.targetObject,
+    fieldMappings: data.fieldMappings.length,
+  }
+}
+
+function assertBridgeRefreshRunResponse(body, sourceObject) {
+  const data = responseData(body)
+  const metrics = data?.metrics || {}
+  const run = data?.run || {}
+  const rowsRead = Number(metrics.rowsRead)
+  const rowsCleaned = Number(metrics.rowsCleaned)
+  const rowsWritten = Number(metrics.rowsWritten)
+  const rowsFailed = Number(metrics.rowsFailed)
+  if (!Number.isInteger(rowsRead) || rowsRead < 1 || rowsRead > BRIDGE_REFRESH_MAX_ROWS) {
+    throw new K3WisePostdeploySmokeError('bridge refresh run read count is outside the capped range', {
+      sourceObject,
+      rowsRead: metrics.rowsRead,
+      maxRows: BRIDGE_REFRESH_MAX_ROWS,
+    })
+  }
+  if (rowsFailed !== 0) {
+    throw new K3WisePostdeploySmokeError('bridge refresh run failed rows', {
+      sourceObject,
+      rowsFailed: metrics.rowsFailed,
+    })
+  }
+  if (rowsCleaned !== rowsRead || rowsWritten !== rowsCleaned) {
+    throw new K3WisePostdeploySmokeError('bridge refresh run did not clean/write all read rows', {
+      sourceObject,
+      rowsRead,
+      rowsCleaned,
+      rowsWritten,
+    })
+  }
+  if (run.status !== 'succeeded') {
+    throw new K3WisePostdeploySmokeError('bridge refresh run did not succeed', {
+      sourceObject,
+      status: run.status || null,
+    })
+  }
+  return {
+    sourceObject,
+    pipelineId: run.pipelineId || bridgeRefreshPipelineId(sourceObject),
+    runId: run.id || null,
+    runStatus: run.status,
+    rowsRead,
+    rowsCleaned,
+    rowsWritten,
+    rowsFailed,
+    maxRows: BRIDGE_REFRESH_MAX_ROWS,
+  }
+}
+
+async function runBridgeSourceRefreshSmoke({
+  baseUrl,
+  token,
+  tenantId,
+  workspaceId,
+  timeoutMs,
+  installStaging = false,
+  bridgeSourceSystemId = '',
+}) {
+  const checks = []
+  let installedTargetId = ''
+
+  if (installStaging) {
+    try {
+      const installDetails = await installBridgeRefreshTarget({
+        baseUrl,
+        token,
+        tenantId,
+        workspaceId,
+        timeoutMs,
+      })
+      installedTargetId = installDetails.targetSystemId
+      checks.push(result('bridge-refresh-target-install', 'pass', installDetails))
+    } catch (error) {
+      return [failResult('bridge-refresh-target-install', error)]
+    }
+  }
+
+  let bridgeSource = null
+  let stagingTarget = null
+  try {
+    const systemsResponse = await requestJson(baseUrl, withQuery('/api/integration/external-systems', {
+      tenantId,
+      workspaceId,
+      limit: 100,
+    }), { token, timeoutMs })
+    const systems = responseData(systemsResponse.body)
+    if (!Array.isArray(systems)) {
+      throw new K3WisePostdeploySmokeError('external systems response data must be an array', {
+        received: Array.isArray(systems) ? 'array' : typeof systems,
+      })
+    }
+    bridgeSource = requireSystem(systems, {
+      id: bridgeSourceSystemId || undefined,
+      kind: BRIDGE_SOURCE_KIND,
+      role: 'source',
+      label: 'Readonly Bridge Agent source',
+    })
+    stagingTarget = requireSystem(systems, {
+      id: installedTargetId || undefined,
+      kind: 'metasheet:multitable',
+      role: 'target',
+      label: 'MetaSheet raw staging target',
+    })
+    checks.push(result('bridge-refresh-system-readiness', 'pass', {
+      sourceSystemId: bridgeSource.id,
+      targetSystemId: stagingTarget.id,
+      objects: Object.keys(BRIDGE_REFRESH_OBJECTS),
+    }))
+  } catch (error) {
+    return [...checks, failResult('bridge-refresh-system-readiness', error)]
+  }
+
+  for (const sourceObject of Object.keys(BRIDGE_REFRESH_OBJECTS)) {
+    try {
+      const payload = bridgeRefreshPipelinePayload({
+        tenantId,
+        workspaceId,
+        sourceSystemId: bridgeSource.id,
+        targetSystemId: stagingTarget.id,
+        sourceObject,
+      })
+      const saved = await requestJson(baseUrl, '/api/integration/pipelines', {
+        token,
+        timeoutMs,
+        method: 'POST',
+        acceptStatuses: [200, 201],
+        requestBody: payload,
+      })
+      checks.push(result(
+        `bridge-refresh-${sourceObject}-pipeline-save`,
+        'pass',
+        assertBridgeRefreshPipelineSaveResponse(saved.body, sourceObject),
+      ))
+    } catch (error) {
+      checks.push(failResult(`bridge-refresh-${sourceObject}-pipeline-save`, error))
+      continue
+    }
+
+    try {
+      const run = await requestJson(baseUrl, `/api/integration/pipelines/${encodeURIComponent(bridgeRefreshPipelineId(sourceObject))}/run`, {
+        token,
+        timeoutMs,
+        method: 'POST',
+        acceptStatuses: [200, 202],
+        requestBody: {
+          tenantId,
+          workspaceId: workspaceId || null,
+          mode: 'full',
+        },
+      })
+      checks.push(result(
+        `bridge-refresh-${sourceObject}-run`,
+        'pass',
+        assertBridgeRefreshRunResponse(run.body, sourceObject),
+      ))
+    } catch (error) {
+      checks.push(failResult(`bridge-refresh-${sourceObject}-run`, error))
+    }
+  }
+
+  return checks
 }
 
 async function runIssue1542WorkbenchSmoke({ baseUrl, token, tenantId, workspaceId, timeoutMs, installStaging = false }) {
@@ -1336,6 +1805,24 @@ async function runSmoke(opts) {
         }))
       }
     }
+
+    if (opts.bridgeSourceRefreshSmoke) {
+      if (!tenantId) {
+        checks.push(result('bridge-source-refresh-smoke', 'fail', {
+          reason: 'tenantId could not be resolved from --tenant-id, environment, or /api/auth/me',
+        }))
+      } else {
+        checks.push(...await runBridgeSourceRefreshSmoke({
+          baseUrl: opts.baseUrl,
+          token,
+          tenantId,
+          workspaceId: opts.workspaceId || '',
+          timeoutMs: opts.timeoutMs,
+          installStaging: opts.bridgeRefreshInstallStaging,
+          bridgeSourceSystemId: opts.bridgeSourceSystemId || '',
+        }))
+      }
+    }
   }
 
   const failed = checks.filter((check) => check.status === 'fail')
@@ -1453,6 +1940,8 @@ if (entryPath && import.meta.url === entryPath) {
 export {
   K3WisePostdeploySmokeError,
   assertDataFactoryAdapterDiscovery,
+  assertBridgeRefreshRunResponse,
+  bridgeRefreshPipelinePayload,
   assertStagingDescriptors,
   assertStatusRoutes,
   markdownInlineCode,
