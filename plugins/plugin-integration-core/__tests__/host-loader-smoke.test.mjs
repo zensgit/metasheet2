@@ -128,6 +128,7 @@ async function main() {
   assert.ok(status.adapters.includes('http'), 'status reports http adapter')
   assert.ok(status.adapters.includes('erp:k3-wise-webapi'), 'status reports K3 WISE WebAPI adapter')
   assert.ok(status.adapters.includes('erp:k3-wise-sqlserver'), 'status reports K3 WISE SQL Server adapter')
+  assert.ok(status.adapters.includes('bridge:legacy-sql-readonly'), 'status reports readonly Bridge Agent adapter')
   assert.equal(status.capabilities?.runner, true)
   assert.equal(status.capabilities?.deadLetterReplay, true)
   assert.equal(typeof host.namespaces.get('integration-core').upsertExternalSystem, 'function')

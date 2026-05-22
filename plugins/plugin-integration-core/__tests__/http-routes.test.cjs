@@ -681,7 +681,7 @@ async function testDiscoveryRoutes() {
     adapterRegistry: {
       listAdapterKinds() {
         calls.push(['listAdapterKinds'])
-        return ['http', 'erp:k3-wise-sqlserver', 'metasheet:staging', 'metasheet:multitable', 'custom:unknown']
+        return ['http', 'erp:k3-wise-sqlserver', 'bridge:legacy-sql-readonly', 'metasheet:staging', 'metasheet:multitable', 'custom:unknown']
       },
       createAdapter(input) {
         calls.push(['createAdapter', input])
@@ -744,6 +744,23 @@ async function testDiscoveryRoutes() {
       hiddenByDefault: true,
       normalUiDirectCoreTableWrites: false,
     },
+  })
+  const bridgeMetadata = res.body.data.find((adapter) => adapter.kind === 'bridge:legacy-sql-readonly')
+  assert.equal(bridgeMetadata.label, 'Readonly Bridge Agent')
+  assert.equal(bridgeMetadata.advanced, true, 'Bridge Agent source is marked as advanced')
+  assert.deepEqual(bridgeMetadata.roles, ['source'])
+  assert.deepEqual(bridgeMetadata.supports, ['testConnection', 'listObjects', 'getSchema', 'read'])
+  assert.deepEqual(bridgeMetadata.guardrails.read, {
+    localhostOnly: true,
+    requiresObjectAllowlist: true,
+    maxPreviewLimit: 20,
+    noRawSql: true,
+    dryRunFriendly: true,
+  })
+  assert.deepEqual(bridgeMetadata.guardrails.write, { supported: false })
+  assert.deepEqual(bridgeMetadata.guardrails.ui, {
+    hiddenByDefault: true,
+    recommendedForLegacySqlBridge: true,
   })
   const stagingMetadata = res.body.data.find((adapter) => adapter.kind === 'metasheet:staging')
   assert.equal(stagingMetadata.label, 'MetaSheet staging multitable')
