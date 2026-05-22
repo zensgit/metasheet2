@@ -105,10 +105,24 @@ the panel reloads the snapshot.
 
 ## Follow-Up
 
-Next slice should build draft/grid preview on top of this read-only overview:
+This slice should be treated as a scheduling data-quality read-only dashboard,
+not as an automatic launchpad for advanced scheduling writes.
+
+Allowed follow-up without a new product gate:
+
+- additional read-only diagnostic codes
+- truncation flags or aggregate-count hardening
+- reviewer-visible evidence and copy clarity
+- bug fixes that preserve the read-only route/UI boundary
+
+Locked follow-up until explicit customer opt-in or K3 PoC stage-1 GATE PASS:
 
 - dense date x user/group grid
 - draft cell edits against existing shifts
 - clear selected cells
 - preview conflicts and effective-calendar changes
 - save through existing guarded assignment APIs or a narrow batch endpoint
+
+Any future write-path PR must restate its authorization source and must route
+writes through backend conflict guards, scheduler-scope enforcement, and
+operation-log requirements.

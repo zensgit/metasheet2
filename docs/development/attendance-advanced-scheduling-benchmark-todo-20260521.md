@@ -6,6 +6,22 @@ Source focus: DingTalk handbook advanced scheduling pages under
 `https://alidocs.dingtalk.com/i/p/Y7kmbokZp3pgGLq2/docs/...`, read from the
 left-hand "考勤高级版" menu and the visible right-hand detail pages.
 
+## Status Update - 2026-05-22
+
+This roadmap is now partially landed, but the write-path portions remain locked:
+
+| Item | Status | Boundary |
+| --- | --- | --- |
+| PR0 benchmark closeout | Landed in `#1749` | Docs/reference only. |
+| PR1 scheduling group and scheduler-scope foundation | Landed in `#1752` | Backend foundation for schedule groups, memberships, and scheduler scopes. |
+| PR2 read-only advanced scheduling workbench | Landed in `#1755` | Repositioned as a scheduling data-quality read-only dashboard, not as a grid-edit launchpad. |
+| PR3-PR9 write-path roadmap | Not started | Locked until explicit customer need or K3 PoC stage-1 GATE PASS. |
+
+`#1755` should not be used as implicit authorization to continue into grid edit,
+copy/paste, Excel import, temporary shifts, scheduler write scopes, or dispatch
+optimization. Read-only hardening and additional diagnostic codes remain allowed;
+any schedule write-path PR must be explicitly opted in by the user.
+
 ## Reading Coverage
 
 The DingTalk handbook body is rendered through an embedded preview frame, so the
@@ -124,6 +140,15 @@ Scope:
 
 This is the safest bridge from current CRUD forms to DingTalk-style scheduling.
 
+Landed status:
+
+- `#1755` shipped a conservative version of this PR as a read-only scheduling
+  data-quality dashboard over existing scheduling primitives.
+- It does not ship the dense date x user/group grid, draft edits, or any write
+  affordance.
+- Treat it as an operational overview and diagnostics surface. Do not infer
+  approval to start PR3+ from its merge.
+
 ### PR3 - Grid edit draft and preview
 
 Goal: edit grid cells in draft mode and preview impact before save.
@@ -219,21 +244,21 @@ Scope:
 
 ## Near-Term Recommendation
 
-Start with PR1, not PR2. The DingTalk pages show that `排班班组` and `排班人`
-are load-bearing concepts, not cosmetic UI labels. If we build a grid before
-deciding scheduler scope and scheduling-group ownership, later permission and
-audit fixes will be expensive.
+PR1 and the conservative read-only PR2 are complete. The next recommended move
+is not PR3 by default. Keep advanced scheduling in one of two lanes:
 
-Recommended PR1 title:
+1. Read-only hardening:
+   add diagnostic codes, truncation flags, or reviewer-visible evidence around
+   the existing workbench.
+2. Explicit opt-in write path:
+   start grid draft/edit, copy/paste, Excel import, temporary shifts, scheduler
+   write enforcement, or dispatch only after a concrete customer need or K3 PoC
+   stage-1 GATE PASS.
 
-```text
-docs(attendance): lock advanced scheduling group and scheduler scope
-```
+Claude review focus for any future write-path PR:
 
-Recommended Claude review focus for PR1:
-
-- Whether scheduling group is safely separated from org department and
-  attendance group.
-- Whether scheduler scope can enforce both read and write operations.
-- Whether operation-log requirements cover batch/import/copy/clear.
-- Whether the roadmap avoids hidden fact-source or multitable-boundary drift.
+- Whether the PR has explicit user opt-in or GATE PASS evidence.
+- Whether schedule writes reuse backend conflict guards and operation logs.
+- Whether scheduler scope is enforced on both read and write targets.
+- Whether the PR avoids hidden fact-source, client-validator, or multitable
+  boundary drift.
