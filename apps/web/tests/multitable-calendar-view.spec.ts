@@ -179,6 +179,45 @@ describe('MetaCalendarView', () => {
     container.remove()
   })
 
+  it('renders a calendar holiday sync notice when the workbench passes one', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-01T12:00:00Z'))
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaCalendarView, {
+          rows: [],
+          fields: [
+            { id: 'fld_title', name: 'Title', type: 'string' },
+            { id: 'fld_start', name: 'Start', type: 'date' },
+          ],
+          loading: false,
+          calendarHolidayNotice: 'No public holiday data is synced for this range.',
+          viewConfig: {
+            dateFieldId: 'fld_start',
+            titleFieldId: 'fld_title',
+            defaultView: 'month',
+            weekStartsOn: 0,
+          },
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    const notice = container.querySelector('.meta-calendar__notice')
+    expect(notice).not.toBeNull()
+    expect(notice?.getAttribute('role')).toBe('status')
+    expect(notice?.textContent).toContain('No public holiday data')
+
+    app.unmount()
+    container.remove()
+  })
+
   // ===== Step 4 PR1: effective-calendar chip rendering =====
   // The 6 cases below pin the contract between Workbench (which maps API
   // items to CalendarEffectiveChip) and MetaCalendarView (which renders the
