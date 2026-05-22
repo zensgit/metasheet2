@@ -29,6 +29,9 @@
           <button v-if="dateField" class="meta-calendar__change-btn" @click="onResetDateField">{{ viewRenderLabel('calendar.change', isZh) }}</button>
         </span>
       </div>
+      <div v-if="calendarHolidayNotice" class="meta-calendar__notice" role="status">
+        {{ calendarHolidayNotice }}
+      </div>
 
       <template v-if="viewMode === 'month'">
         <div class="meta-calendar__weekdays">
@@ -353,6 +356,7 @@ const props = defineProps<{
   // marker. PR1 wires this in MultitableWorkbench; existing CalendarHoliday
   // payloads remain compatible since the new fields are optional.
   calendarHolidays?: CalendarEffectiveChip[]
+  calendarHolidayNotice?: string | null
   commentPresence?: Record<string, MultitableCommentPresenceSummary | undefined>
 }>()
 
@@ -765,6 +769,7 @@ function onCellKeydown(e: KeyboardEvent, cellIdx: number, cells: CalendarCell[])
 .meta-calendar__mode-select { padding: 4px 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; }
 .meta-calendar__field-label { margin-left: auto; font-size: 12px; color: #999; }
 .meta-calendar__change-btn { padding: 1px 6px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 11px; color: #409eff; margin-left: 4px; }
+.meta-calendar__notice { margin: 8px 16px 0; padding: 6px 10px; border: 1px solid #fde68a; border-radius: 6px; background: #fffbeb; color: #92400e; font-size: 12px; line-height: 1.45; }
 .meta-calendar__weekdays { display: grid; grid-template-columns: repeat(7, 1fr); border-bottom: 1px solid #eee; }
 .meta-calendar__weekday { padding: 6px 0; text-align: center; font-size: 12px; font-weight: 600; color: #999; }
 .meta-calendar__grid { display: grid; grid-template-columns: repeat(7, 1fr); flex: 1; overflow-y: auto; }

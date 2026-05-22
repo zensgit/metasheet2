@@ -186,6 +186,7 @@
           :view-config="workbench.activeView.value?.config"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
           :calendar-holidays="calendarHolidays"
+          :calendar-holiday-notice="calendarHolidayNotice"
           :can-create="caps.canCreateRecord.value"
           :can-comment="effectiveRowActions.canComment"
           :comment-presence="commentPresenceState.presenceByRecordId.value"
@@ -501,6 +502,10 @@ import { extractImportTokens, type ImportBuildFailure, type ImportBuildResult, t
 import { buildXlsxBuffer } from '../import/xlsx-mapping'
 import { filterPropertyVisibleFields } from '../utils/field-permissions'
 import { isLinkField, isPersonField } from '../utils/link-fields'
+import {
+  calendarHolidaySyncNotice,
+  type CalendarHolidayFetchState,
+} from '../utils/calendar-holiday-notice'
 import { addPeopleLookupToken, inferPeopleLookupKind, resolvePeopleImportValue } from '../utils/people-import'
 import { buildRecordFormattingMap, extractRulesFromConfig } from '../utils/conditional-formatting'
 import {
@@ -585,6 +590,7 @@ const templates = ref<MetaTemplate[]>([])
 const templateLibraryLoading = ref(false)
 const templateLibraryError = ref<string | null>(null)
 const calendarHolidays = ref<CalendarEffectiveChip[]>([])
+const calendarHolidayFetchState = ref<CalendarHolidayFetchState>('idle')
 // Composite cache key `${from}|${to}|${userId}` — when userId arrives later
 // (auth resolving after MetaCalendarView's first visible-range emit) the new
 // key forces a refetch instead of skipping on stale (range-only) match.
@@ -593,6 +599,11 @@ let calendarHolidayLoadVersion = 0
 // Last range emitted by MetaCalendarView — replayed once currentUserId
 // resolves so the user does not see an empty calendar for the gap window.
 const lastCalendarVisibleRange = ref<CalendarVisibleRange | null>(null)
+const calendarHolidayNotice = computed(() => calendarHolidaySyncNotice({
+  state: calendarHolidayFetchState.value,
+  range: lastCalendarVisibleRange.value,
+  isZh: isZh.value,
+}))
 const installingTemplateId = ref<string | null>(null)
 const showShortcuts = ref(false)
 const showImportModal = ref(false)
@@ -2824,11 +2835,15 @@ async function loadCalendarHolidays(range: CalendarVisibleRange) {
   // range can fire before currentUserId resolves; we must not silently skip).
   lastCalendarVisibleRange.value = range
   const userId = currentUserId.value
-  if (!userId) return
+  if (!userId) {
+    calendarHolidayFetchState.value = 'waiting-for-user'
+    return
+  }
   const cacheKey = `${from}|${to}|${userId}`
   if (calendarEffectiveCacheKey === cacheKey) return
   calendarEffectiveCacheKey = cacheKey
   const loadVersion = ++calendarHolidayLoadVersion
+  calendarHolidayFetchState.value = 'loading'
   try {
     const result = await fetchEffectiveCalendar({
       from,
@@ -2841,12 +2856,14 @@ async function loadCalendarHolidays(range: CalendarVisibleRange) {
     calendarHolidays.value = items
       .filter(isCalendarEffectiveItemNoteworthy)
       .map(effectiveCalendarItemToChip)
+    calendarHolidayFetchState.value = calendarHolidays.value.length ? 'ready' : 'empty'
   } catch (error) {
     // Failure (network, 401/403 suppressed, server) must not block calendar
     // rendering — clear chips but leave the cell grid intact. Bust the cache
     // key so a later auth/retry can succeed.
     if (loadVersion === calendarHolidayLoadVersion) {
       calendarHolidays.value = []
+      calendarHolidayFetchState.value = 'error'
       calendarEffectiveCacheKey = null
     }
     if (error instanceof EffectiveCalendarFetchError) {

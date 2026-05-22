@@ -28,6 +28,7 @@ export type MetaViewRenderLabelKey =
   | 'calendar.newRecord'
   | 'calendar.selectDateField'
   | 'calendar.noRecordsOnDay'
+  | 'calendar.holidayDataMissingHint'
   | 'gallery.title'
   | 'gallery.cover'
   | 'gallery.columns'
@@ -108,6 +109,7 @@ export const VIEW_RENDER_LABEL_KEYS: readonly MetaViewRenderLabelKey[] = [
   'calendar.newRecord',
   'calendar.selectDateField',
   'calendar.noRecordsOnDay',
+  'calendar.holidayDataMissingHint',
   'gallery.title',
   'gallery.cover',
   'gallery.columns',
@@ -189,6 +191,10 @@ const LABELS: Record<MetaViewRenderLabelKey, { en: string; zh: string }> = {
   'calendar.newRecord': { en: '+ New record', zh: '+ 新建记录' },
   'calendar.selectDateField': { en: 'Select a date field to use for the calendar:', zh: '选择一个日期字段用于日历：' },
   'calendar.noRecordsOnDay': { en: 'No records on this day', zh: '这一天没有记录' },
+  'calendar.holidayDataMissingHint': {
+    en: 'No public holiday data is synced for this range. Sync holidays in Attendance settings if holiday or makeup-workday chips are expected.',
+    zh: '当前范围没有已同步的节假日数据；如应显示节假日或调休班标记，请先在考勤设置中同步节假日。',
+  },
   'gallery.title': { en: 'Title', zh: '标题' },
   'gallery.cover': { en: 'Cover', zh: '封面' },
   'gallery.columns': { en: 'Columns', zh: '列数' },
