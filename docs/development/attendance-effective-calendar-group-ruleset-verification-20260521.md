@@ -24,6 +24,21 @@ Branch: `codex/attendance-effective-calendar-group-ruleset-20260521`
 - A group without `rule_set_id` does not query `attendance_rule_sets` and
   retains the default-rule Saturday rest-day result.
 
+Semantic note: User belonging to a group with `rule_set_id` will see different
+calendars between `groupId`-mode preview and `userId`-mode preview; this is the
+intended boundary in this slice, deferred to a separate product decision.
+
+## Schema-Degrade Gate
+
+The fallback is intentionally narrow: it only catches errors classified by
+`isDatabaseSchemaError()` while loading group `rule_set_id` / rule-set config
+for the read-only `groupId` resolver path. The classifier recognizes:
+
+- PostgreSQL code `42P01` (`undefined_table`).
+- PostgreSQL code `42703` (`undefined_column`).
+- Message text containing `relation` or `table` plus `does not exist`.
+- Message text containing `column` plus `does not exist`.
+
 ## Boundary Checks
 
 - No migration file added or edited.
