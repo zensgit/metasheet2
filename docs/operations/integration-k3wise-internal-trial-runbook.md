@@ -158,6 +158,43 @@ template schema, and a fixed draft pipeline ID can be saved without PostgreSQL
 JSONB `22P02`. It writes staging/source/pipeline metadata only and never runs
 dry-run, Save-only, Submit, or Audit.
 
+For the readonly Bridge Agent source refresh retest, add the BA-M3 refresh
+flags. `--bridge-refresh-install-staging` first calls
+`/api/integration/staging/install`, then upserts a `metasheet:multitable`
+target pointing only at `plm_raw_items`. The smoke creates three capped live
+refresh pipelines from the `bridge:legacy-sql-readonly` source into
+`plm_raw_items`, one each for `material`, `bom`, and `bom_child`. Each pipeline
+uses `batchSize=3` and `maxPages=1`, so the smoke proves fresh Bridge rows can
+materialize into MetaSheet staging without reading or writing K3.
+
+```bash
+node scripts/ops/integration-k3wise-postdeploy-smoke.mjs \
+  --base-url "$METASHEET_BASE_URL" \
+  --frontend-base-url "${METASHEET_FRONTEND_BASE_URL:-$METASHEET_BASE_URL}" \
+  --token-file "$METASHEET_AUTH_TOKEN_FILE" \
+  --tenant-id "$METASHEET_TENANT_ID" \
+  --require-auth \
+  --bridge-source-refresh-smoke \
+  --bridge-refresh-install-staging \
+  --out-dir artifacts/integration-k3wise/internal-trial/postdeploy-smoke-bridge-refresh
+```
+
+Expected new checks:
+
+- `bridge-refresh-target-install`
+- `bridge-refresh-system-readiness`
+- `bridge-refresh-material-pipeline-save`
+- `bridge-refresh-material-run`
+- `bridge-refresh-bom-pipeline-save`
+- `bridge-refresh-bom-run`
+- `bridge-refresh-bom_child-pipeline-save`
+- `bridge-refresh-bom_child-run`
+
+The evidence intentionally records only counts and system/pipeline identifiers.
+Do not paste row values, Bridge secrets, SQL credentials, K3 credentials, or
+connection strings into GitHub. This BA-M3 smoke writes MetaSheet staging rows
+only; K3 Save, Submit, and Audit remain out of scope.
+
 ### SQL Server executor diagnostic
 
 The postdeploy smoke reports configured K3 WISE SQL Server sources through the
