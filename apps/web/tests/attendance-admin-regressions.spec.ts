@@ -246,6 +246,12 @@ describe('Attendance admin regressions', () => {
             metadata: {
               readOnly: true,
               source: 'attendance_advanced_scheduling_workbench',
+              truncation: {
+                assignmentLimit: 500,
+                shiftAssignments: true,
+                rotationAssignments: false,
+                truncated: true,
+              },
             },
           },
         })
@@ -782,6 +788,7 @@ describe('Attendance admin regressions', () => {
     expect(section).toBeTruthy()
     expect(window.getComputedStyle(section!).display).not.toBe('none')
     expect(section!.textContent).toContain('Read-only snapshot')
+    expect(section!.querySelector('[data-attendance-advanced-scheduling-truncation]')?.textContent).toContain('Shift assignment snapshot is capped at 500 rows')
     expect(section!.querySelector('[data-attendance-advanced-scheduling-metric="schedule-groups"]')?.textContent).toContain('1')
     expect(section!.querySelector('[data-attendance-advanced-scheduling-metric="assignments"]')?.textContent).toContain('2')
     expect(section!.querySelector('[data-attendance-advanced-scheduling-diagnostic="assignment_without_schedule_group"]')?.textContent).toContain('1')

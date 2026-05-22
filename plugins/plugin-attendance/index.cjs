@@ -7478,6 +7478,8 @@ function buildAttendanceAdvancedSchedulingDiagnostic({ code, severity = 'info', 
   }
 }
 
+const ATTENDANCE_ADVANCED_SCHEDULING_WORKBENCH_ASSIGNMENT_LIMIT = 500
+
 function buildAttendanceAdvancedSchedulingWorkbench(input = {}) {
   const from = normalizeDateOnly(input.from) ?? null
   const to = normalizeDateOnly(input.to) ?? null
@@ -7488,6 +7490,15 @@ function buildAttendanceAdvancedSchedulingWorkbench(input = {}) {
   const rotationRules = Array.isArray(input.rotationRules) ? input.rotationRules : []
   const shiftAssignments = Array.isArray(input.shiftAssignments) ? input.shiftAssignments : []
   const rotationAssignments = Array.isArray(input.rotationAssignments) ? input.rotationAssignments : []
+  const assignmentLimit = Number.isFinite(Number(input.assignmentLimit))
+    ? Math.max(0, Math.floor(Number(input.assignmentLimit)))
+    : ATTENDANCE_ADVANCED_SCHEDULING_WORKBENCH_ASSIGNMENT_LIMIT
+  const truncation = {
+    assignmentLimit,
+    shiftAssignments: Boolean(input.shiftAssignmentsTruncated),
+    rotationAssignments: Boolean(input.rotationAssignmentsTruncated),
+    truncated: Boolean(input.shiftAssignmentsTruncated || input.rotationAssignmentsTruncated),
+  }
 
   const membersByGroupId = new Map()
   const groupIdsByUserId = new Map()
@@ -7627,6 +7638,7 @@ function buildAttendanceAdvancedSchedulingWorkbench(input = {}) {
     metadata: {
       readOnly: true,
       source: 'attendance_advanced_scheduling_workbench',
+      truncation,
     },
   }
 }
@@ -25222,7 +25234,7 @@ module.exports = {
                  AND a.start_date <= $3::date
                  AND COALESCE(a.end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $2::date
                ORDER BY a.start_date DESC, a.created_at DESC
-               LIMIT 500`,
+               LIMIT ${ATTENDANCE_ADVANCED_SCHEDULING_WORKBENCH_ASSIGNMENT_LIMIT + 1}`,
               [orgId, rangeStart, rangeEnd]
             ),
             db.query(
@@ -25237,10 +25249,15 @@ module.exports = {
                  AND a.start_date <= $3::date
                  AND COALESCE(a.end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $2::date
                ORDER BY a.start_date DESC, a.created_at DESC
-               LIMIT 500`,
+               LIMIT ${ATTENDANCE_ADVANCED_SCHEDULING_WORKBENCH_ASSIGNMENT_LIMIT + 1}`,
               [orgId, rangeStart, rangeEnd]
             ),
           ])
+
+          const shiftAssignmentsTruncated = shiftAssignmentRows.length > ATTENDANCE_ADVANCED_SCHEDULING_WORKBENCH_ASSIGNMENT_LIMIT
+          const rotationAssignmentsTruncated = rotationAssignmentRows.length > ATTENDANCE_ADVANCED_SCHEDULING_WORKBENCH_ASSIGNMENT_LIMIT
+          const visibleShiftAssignmentRows = shiftAssignmentRows.slice(0, ATTENDANCE_ADVANCED_SCHEDULING_WORKBENCH_ASSIGNMENT_LIMIT)
+          const visibleRotationAssignmentRows = rotationAssignmentRows.slice(0, ATTENDANCE_ADVANCED_SCHEDULING_WORKBENCH_ASSIGNMENT_LIMIT)
 
           const data = buildAttendanceAdvancedSchedulingWorkbench({
             from,
@@ -25250,14 +25267,17 @@ module.exports = {
             schedulerScopes: schedulerScopeRows.map(mapAttendanceSchedulerScopeRow),
             shifts: shiftRows.map(mapShiftRow),
             rotationRules: rotationRuleRows.map(mapRotationRuleRow),
-            shiftAssignments: shiftAssignmentRows.map(row => ({
+            shiftAssignments: visibleShiftAssignmentRows.map(row => ({
               assignment: mapAssignmentRow(row),
               shift: mapShiftFromAssignmentRow(row),
             })),
-            rotationAssignments: rotationAssignmentRows.map(row => ({
+            rotationAssignments: visibleRotationAssignmentRows.map(row => ({
               assignment: mapRotationAssignmentRow(row),
               rotation: mapRotationRuleFromAssignmentRow(row),
             })),
+            assignmentLimit: ATTENDANCE_ADVANCED_SCHEDULING_WORKBENCH_ASSIGNMENT_LIMIT,
+            shiftAssignmentsTruncated,
+            rotationAssignmentsTruncated,
           })
           res.json({ ok: true, data })
         } catch (error) {
