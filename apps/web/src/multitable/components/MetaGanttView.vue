@@ -1,68 +1,68 @@
 <template>
-  <div class="meta-gantt" role="region" aria-label="Gantt view">
-    <div v-if="loading" class="meta-gantt__loading">Loading...</div>
+  <div class="meta-gantt" role="region" :aria-label="viewRenderLabel('gantt.viewAria', isZh)">
+    <div v-if="loading" class="meta-gantt__loading">{{ viewRenderLabel('common.loading', isZh) }}</div>
     <template v-else>
       <div class="meta-gantt__toolbar">
         <label class="meta-gantt__control">
-          Start
+          {{ viewRenderLabel('gantt.start', isZh) }}
           <select :value="startFieldId" @change="onConfigChange('startFieldId', ($event.target as HTMLSelectElement).value || null)">
-            <option value="">select</option>
+            <option value="">{{ viewRenderLabel('common.select', isZh) }}</option>
             <option v-for="field in dateFields" :key="field.id" :value="field.id">{{ field.name }}</option>
           </select>
         </label>
         <label class="meta-gantt__control">
-          End
+          {{ viewRenderLabel('gantt.end', isZh) }}
           <select :value="endFieldId" @change="onConfigChange('endFieldId', ($event.target as HTMLSelectElement).value || null)">
-            <option value="">select</option>
+            <option value="">{{ viewRenderLabel('common.select', isZh) }}</option>
             <option v-for="field in dateFields" :key="field.id" :value="field.id">{{ field.name }}</option>
           </select>
         </label>
         <label class="meta-gantt__control">
-          Title
+          {{ viewRenderLabel('gantt.title', isZh) }}
           <select :value="titleFieldId" @change="onConfigChange('titleFieldId', ($event.target as HTMLSelectElement).value || null)">
-            <option value="">auto</option>
+            <option value="">{{ viewRenderLabel('common.auto', isZh) }}</option>
             <option v-for="field in titleFields" :key="field.id" :value="field.id">{{ field.name }}</option>
           </select>
         </label>
         <label class="meta-gantt__control">
-          Progress
+          {{ viewRenderLabel('gantt.progress', isZh) }}
           <select :value="progressFieldId" @change="onConfigChange('progressFieldId', ($event.target as HTMLSelectElement).value || null)">
-            <option value="">none</option>
+            <option value="">{{ viewRenderLabel('common.none', isZh) }}</option>
             <option v-for="field in numericFields" :key="field.id" :value="field.id">{{ field.name }}</option>
           </select>
         </label>
         <label class="meta-gantt__control">
-          Group
+          {{ viewRenderLabel('gantt.group', isZh) }}
           <select :value="groupFieldId" @change="onConfigChange('groupFieldId', ($event.target as HTMLSelectElement).value || null)">
-            <option value="">none</option>
+            <option value="">{{ viewRenderLabel('common.none', isZh) }}</option>
             <option v-for="field in groupableFields" :key="field.id" :value="field.id">{{ field.name }}</option>
           </select>
         </label>
         <label class="meta-gantt__control">
-          Dependencies
+          {{ viewRenderLabel('gantt.dependencies', isZh) }}
           <select :value="dependencyFieldId" @change="onConfigChange('dependencyFieldId', ($event.target as HTMLSelectElement).value || null)">
-            <option value="">none</option>
+            <option value="">{{ viewRenderLabel('common.none', isZh) }}</option>
             <option v-for="field in dependencyFields" :key="field.id" :value="field.id">{{ field.name }}</option>
           </select>
         </label>
         <label class="meta-gantt__control">
-          Zoom
+          {{ managerLabel('view.zoom', isZh) }}
           <select :value="zoom" @change="onConfigChange('zoom', ($event.target as HTMLSelectElement).value)">
-            <option value="day">Day</option>
-            <option value="week">Week</option>
-            <option value="month">Month</option>
+            <option value="day">{{ viewZoomLabel('day', isZh) }}</option>
+            <option value="week">{{ viewZoomLabel('week', isZh) }}</option>
+            <option value="month">{{ viewZoomLabel('month', isZh) }}</option>
           </select>
         </label>
-        <button v-if="canCreate" class="meta-gantt__create" @click="onQuickCreate">+ Add task</button>
+        <button v-if="canCreate" class="meta-gantt__create" @click="onQuickCreate">{{ viewRenderLabel('gantt.addTask', isZh) }}</button>
       </div>
 
       <div v-if="!startFieldId || !endFieldId" class="meta-gantt__placeholder">
-        Select start and end date fields to display Gantt tasks.
+        {{ viewRenderLabel('gantt.selectStartEnd', isZh) }}
       </div>
 
       <template v-else>
         <div class="meta-gantt__head">
-          <div class="meta-gantt__task-col">Task</div>
+          <div class="meta-gantt__task-col">{{ viewRenderLabel('gantt.task', isZh) }}</div>
           <div class="meta-gantt__axis">
             <span v-for="tick in axisTicks" :key="tick.key" class="meta-gantt__tick" :style="{ left: tick.left + '%' }">
               {{ tick.label }}
@@ -81,7 +81,7 @@
           >
             <span class="meta-gantt__task-col">
               <strong>{{ displayTitle(task.record) }}</strong>
-              <small>{{ displayStartDate(task) }} to {{ displayEndDate(task) }}</small>
+              <small>{{ displayStartDate(task) }} {{ viewRenderLabel('gantt.to', isZh) }} {{ displayEndDate(task) }}</small>
             </span>
             <span class="meta-gantt__bar-area">
               <span
@@ -104,7 +104,7 @@
                   class="meta-gantt__resize-handle meta-gantt__resize-handle--start"
                   role="separator"
                   aria-orientation="vertical"
-                  :aria-label="`Resize start for ${displayTitle(task.record)}`"
+                  :aria-label="ganttResizeAria('start', displayTitle(task.record), isZh)"
                   @click.stop
                   @mousedown.stop.prevent="onResizeStart(task, 'start', $event)"
                 ></span>
@@ -114,7 +114,7 @@
                   class="meta-gantt__resize-handle meta-gantt__resize-handle--end"
                   role="separator"
                   aria-orientation="vertical"
-                  :aria-label="`Resize end for ${displayTitle(task.record)}`"
+                  :aria-label="ganttResizeAria('end', displayTitle(task.record), isZh)"
                   @click.stop
                   @mousedown.stop.prevent="onResizeStart(task, 'end', $event)"
                 ></span>
@@ -124,7 +124,7 @@
         </div>
 
         <div v-if="unscheduledRows.length" class="meta-gantt__unscheduled">
-          <strong>Unscheduled ({{ unscheduledRows.length }})</strong>
+          <strong>{{ unscheduledCount(unscheduledRows.length, isZh) }}</strong>
           <button
             v-for="row in unscheduledRows"
             :key="row.id"
@@ -136,7 +136,7 @@
         </div>
 
         <div v-if="!scheduledTasks.length && !unscheduledRows.length" class="meta-gantt__placeholder">
-          No records found.
+          {{ viewRenderLabel('common.noRecordsFound', isZh) }}
         </div>
       </template>
     </template>
@@ -149,6 +149,13 @@ import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaGanttViewConfi
 import { useLocale } from '../../composables/useLocale'
 import { formatFieldDisplay } from '../utils/field-display'
 import { isSelfTableLinkField, resolveGanttViewConfig } from '../utils/view-config'
+import { managerLabel } from '../utils/meta-manager-labels'
+import {
+  ganttResizeAria,
+  unscheduledCount,
+  viewRenderLabel,
+  viewZoomLabel,
+} from '../utils/meta-view-render-labels'
 
 const props = defineProps<{
   sheetId?: string
@@ -322,9 +329,9 @@ const unscheduledRows = computed(() => {
 const groupedSections = computed(() => {
   const buckets = new Map<string, { key: string; label: string; items: typeof scheduledTasks.value }>()
   for (const item of scheduledTasks.value) {
-    const raw = groupFieldId.value ? item.record.data[groupFieldId.value] : 'All tasks'
+    const raw = groupFieldId.value ? item.record.data[groupFieldId.value] : viewRenderLabel('gantt.allTasks', isZh.value)
     const key = raw === null || raw === undefined || raw === '' ? 'ungrouped' : String(raw)
-    const label = key === 'ungrouped' ? 'Ungrouped' : key
+    const label = key === 'ungrouped' ? viewRenderLabel('gantt.ungrouped', isZh.value) : key
     if (!buckets.has(key)) buckets.set(key, { key, label, items: [] })
     buckets.get(key)?.items.push(item)
   }

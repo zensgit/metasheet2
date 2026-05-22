@@ -124,8 +124,8 @@
       <table class="meta-chart__table" data-chart="table">
         <thead>
           <tr>
-            <th>Label</th>
-            <th>Value</th>
+            <th>{{ viewRenderLabel('chart.label', isZh) }}</th>
+            <th>{{ viewRenderLabel('chart.value', isZh) }}</th>
           </tr>
         </thead>
         <tbody>
@@ -142,11 +142,14 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { ChartData, ChartDisplayConfig } from '../types'
+import { useLocale } from '../../composables/useLocale'
+import { viewRenderLabel } from '../utils/meta-view-render-labels'
 
 const props = defineProps<{
   chartData: ChartData
   displayConfig?: ChartDisplayConfig
 }>()
+const { isZh } = useLocale()
 
 const COLORS = ['#2563eb', '#16a34a', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899', '#84cc16']
 

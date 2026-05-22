@@ -2,9 +2,9 @@
   <div class="meta-calendar">
     <div v-if="!dateField" class="meta-calendar__picker">
       <div class="meta-calendar__picker-icon">&#x1F4C5;</div>
-      <p>Select a date field to use for the calendar:</p>
+      <p>{{ viewRenderLabel('calendar.selectDateField', isZh) }}</p>
       <select class="meta-calendar__field-select" @change="onPickDateField($event)">
-        <option value="">— Choose field —</option>
+        <option value="">{{ viewRenderLabel('common.chooseField', isZh) }}</option>
         <option v-for="f in dateFields" :key="f.id" :value="f.id">{{ f.name }}</option>
       </select>
     </div>
@@ -14,19 +14,19 @@
         <button class="meta-calendar__nav-btn" @click="goPrevious">&lsaquo;</button>
         <span class="meta-calendar__title">{{ periodLabel }}</span>
         <button class="meta-calendar__nav-btn" @click="goNext">&rsaquo;</button>
-        <button class="meta-calendar__today-btn" @click="goToday">Today</button>
-        <button v-if="canCreate" class="meta-calendar__create-btn" @click="onQuickCreate">+ Add record</button>
+        <button class="meta-calendar__today-btn" @click="goToday">{{ viewRenderLabel('calendar.today', isZh) }}</button>
+        <button v-if="canCreate" class="meta-calendar__create-btn" @click="onQuickCreate">{{ viewRenderLabel('common.addRecord', isZh) }}</button>
         <label class="meta-calendar__mode-label">
-          View
+          {{ viewRenderLabel('calendar.view', isZh) }}
           <select class="meta-calendar__mode-select" :value="viewMode" @change="onViewModeChange">
-            <option value="month">Month</option>
-            <option value="week">Week</option>
-            <option value="day">Day</option>
+            <option value="month">{{ calendarViewModeLabel('month', isZh) }}</option>
+            <option value="week">{{ calendarViewModeLabel('week', isZh) }}</option>
+            <option value="day">{{ calendarViewModeLabel('day', isZh) }}</option>
           </select>
         </label>
         <span class="meta-calendar__field-label">
-          Field: <strong>{{ dateField.name }}</strong>
-          <button v-if="dateField" class="meta-calendar__change-btn" @click="onResetDateField">Change</button>
+          {{ isZh ? '字段：' : 'Field:' }} <strong>{{ dateField.name }}</strong>
+          <button v-if="dateField" class="meta-calendar__change-btn" @click="onResetDateField">{{ viewRenderLabel('calendar.change', isZh) }}</button>
         </span>
       </div>
 
@@ -85,7 +85,7 @@
                     class="meta-calendar__event-attachments"
                     :attachments="ev.attachments"
                     variant="compact"
-                    empty-label="No attachments"
+                    :empty-label="metaCoreLabel('cell.noAttachments', isZh)"
                   />
                   <template v-else>{{ ev.title }}</template>
                 </div>
@@ -94,7 +94,7 @@
                     type="button"
                     class="meta-calendar__comment-btn"
                     :class="rowCommentButtonClass(ev.id)"
-                    :aria-label="`Open comments for ${ev.title}`"
+                    :aria-label="openRecordCommentsAria(ev.title, isZh)"
                     @click.stop="emit('open-comments', ev.id)"
                     @keydown="onRowCommentKeydown($event, ev.id)"
                   >
@@ -105,7 +105,7 @@
                     type="button"
                     class="meta-calendar__field-comment-btn"
                     :class="fieldCommentButtonClass(ev.id)"
-                    :aria-label="`Open comments for ${dateField.name}`"
+                    :aria-label="openFieldCommentsAria(dateField.name, isZh)"
                     @click.stop="emit('open-field-comments', { recordId: ev.id, fieldId: dateField.id })"
                     @keydown="onFieldCommentKeydown($event, ev.id, dateField.id)"
                   >
@@ -113,7 +113,7 @@
                   </button>
                 </div>
               </div>
-              <div v-if="cell.overflow > 0" class="meta-calendar__overflow">+{{ cell.overflow }} more</div>
+              <div v-if="cell.overflow > 0" class="meta-calendar__overflow">{{ calendarMoreEvents(cell.overflow, isZh) }}</div>
             </div>
           </div>
         </div>
@@ -172,7 +172,7 @@
                     class="meta-calendar__event-attachments"
                     :attachments="ev.attachments"
                     variant="compact"
-                    empty-label="No attachments"
+                    :empty-label="metaCoreLabel('cell.noAttachments', isZh)"
                   />
                   <template v-else>{{ ev.title }}</template>
                 </div>
@@ -181,7 +181,7 @@
                     type="button"
                     class="meta-calendar__comment-btn"
                     :class="rowCommentButtonClass(ev.id)"
-                    :aria-label="`Open comments for ${ev.title}`"
+                    :aria-label="openRecordCommentsAria(ev.title, isZh)"
                     @click.stop="emit('open-comments', ev.id)"
                     @keydown="onRowCommentKeydown($event, ev.id)"
                   >
@@ -192,7 +192,7 @@
                     type="button"
                     class="meta-calendar__field-comment-btn"
                     :class="fieldCommentButtonClass(ev.id)"
-                    :aria-label="`Open comments for ${dateField.name}`"
+                    :aria-label="openFieldCommentsAria(dateField.name, isZh)"
                     @click.stop="emit('open-field-comments', { recordId: ev.id, fieldId: dateField.id })"
                     @keydown="onFieldCommentKeydown($event, ev.id, dateField.id)"
                   >
@@ -200,7 +200,7 @@
                   </button>
                 </div>
               </div>
-              <div v-if="cell.overflow > 0" class="meta-calendar__overflow">+{{ cell.overflow }} more</div>
+              <div v-if="cell.overflow > 0" class="meta-calendar__overflow">{{ calendarMoreEvents(cell.overflow, isZh) }}</div>
             </div>
           </div>
         </div>
@@ -227,13 +227,13 @@
                 {{ holiday.name || fallbackHolidayName(holiday) }}
               </span>
             </div>
-            <div class="meta-calendar__day-meta">{{ currentDayEvents.length }} event{{ currentDayEvents.length === 1 ? '' : 's' }}</div>
+            <div class="meta-calendar__day-meta">{{ calendarEventCount(currentDayEvents.length, isZh) }}</div>
             <button
               v-if="canCreate"
               class="meta-calendar__day-create"
               @click="emit('create-record', buildCreateRecordData(activeDayStr))"
             >
-              + New record
+              {{ viewRenderLabel('calendar.newRecord', isZh) }}
             </button>
           </div>
           <div class="meta-calendar__day-list">
@@ -253,7 +253,7 @@
                   class="meta-calendar__day-event-attachments"
                   :attachments="ev.attachments"
                   variant="compact"
-                  empty-label="No attachments"
+                  :empty-label="metaCoreLabel('cell.noAttachments', isZh)"
                 />
                 <template v-else>{{ ev.title }}</template>
               </div>
@@ -262,7 +262,7 @@
                   type="button"
                   class="meta-calendar__comment-btn"
                   :class="rowCommentButtonClass(ev.id)"
-                  :aria-label="`Open comments for ${ev.title}`"
+                  :aria-label="openRecordCommentsAria(ev.title, isZh)"
                   @click.stop="emit('open-comments', ev.id)"
                   @keydown="onRowCommentKeydown($event, ev.id)"
                 >
@@ -273,7 +273,7 @@
                   type="button"
                   class="meta-calendar__field-comment-btn"
                   :class="fieldCommentButtonClass(ev.id)"
-                  :aria-label="`Open comments for ${dateField.name}`"
+                  :aria-label="openFieldCommentsAria(dateField.name, isZh)"
                   @click.stop="emit('open-field-comments', { recordId: ev.id, fieldId: dateField.id })"
                   @keydown="onFieldCommentKeydown($event, ev.id, dateField.id)"
                 >
@@ -281,13 +281,13 @@
                 </button>
               </div>
             </div>
-            <div v-if="!currentDayEvents.length" class="meta-calendar__empty-hint">No records on this day</div>
+            <div v-if="!currentDayEvents.length" class="meta-calendar__empty-hint">{{ viewRenderLabel('calendar.noRecordsOnDay', isZh) }}</div>
           </div>
         </div>
       </template>
     </template>
 
-    <div v-if="loading" class="meta-calendar__loading">Loading...</div>
+    <div v-if="loading" class="meta-calendar__loading">{{ viewRenderLabel('common.loading', isZh) }}</div>
   </div>
 </template>
 
@@ -324,6 +324,17 @@ import {
   resolveRecordCommentAffordance,
 } from '../utils/comment-affordance'
 import { commentLabel } from '../utils/meta-comment-labels'
+import { metaCoreLabel } from '../utils/meta-core-labels'
+import {
+  calendarCellAriaLabel,
+  calendarEventCount,
+  calendarMoreEvents,
+  calendarViewModeLabel,
+  calendarWeekdayShort,
+  openFieldCommentsAria,
+  openRecordCommentsAria,
+  viewRenderLabel,
+} from '../utils/meta-view-render-labels'
 
 const MAX_EVENTS_PER_CELL = 3
 
@@ -361,7 +372,6 @@ const pendingConfigKey = ref<string | null>(null)
 const { isZh } = useLocale()
 const commentsChipLabel = computed(() => commentLabel('comment.title', isZh.value))
 
-const baseWeekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const calendarConfig = computed<Required<MetaCalendarViewConfig>>(() =>
   resolveCalendarViewConfig(props.fields, props.viewConfig),
 )
@@ -391,6 +401,7 @@ watch(
 
 const weekdays = computed(() => {
   const weekStartsOn = calendarConfig.value.weekStartsOn
+  const baseWeekdays = [0, 1, 2, 3, 4, 5, 6].map((day) => calendarWeekdayShort(day as 0 | 1 | 2 | 3 | 4 | 5 | 6, isZh.value))
   return [...baseWeekdays.slice(weekStartsOn), ...baseWeekdays.slice(0, weekStartsOn)]
 })
 
@@ -703,15 +714,13 @@ function goToday() {
 
 function cellAriaLabel(cell: CalendarCell): string {
   const d = new Date(cell.dateStr + 'T00:00:00')
-  const dateLabel = d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+  const dateLabel = d.toLocaleDateString(isZh.value ? 'zh-CN' : 'en-US', { month: 'long', day: 'numeric', year: 'numeric' })
   const total = cell.events.length + cell.overflow
   const annotations = [
     cell.lunarLabel,
     ...cell.holidays.map((holiday) => holiday.name || fallbackHolidayName(holiday)),
-    total > 0 ? `${total} event${total > 1 ? 's' : ''}` : null,
-  ].filter(Boolean)
-  if (annotations.length) return `${dateLabel}, ${annotations.join(', ')}`
-  return dateLabel
+  ].filter((item): item is string => Boolean(item))
+  return calendarCellAriaLabel(dateLabel, annotations, total, isZh.value)
 }
 
 function onCellKeydown(e: KeyboardEvent, cellIdx: number, cells: CalendarCell[]) {

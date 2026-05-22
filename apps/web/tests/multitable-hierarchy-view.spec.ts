@@ -1,7 +1,8 @@
 import { createApp, h, nextTick } from 'vue'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import MetaHierarchyView from '../src/multitable/components/MetaHierarchyView.vue'
 import type { MetaField, MetaRecord } from '../src/multitable/types'
+import { useLocale } from '../src/composables/useLocale'
 
 const fields: MetaField[] = [
   { id: 'fld_title', name: 'Title', type: 'string' },
@@ -42,6 +43,12 @@ function mountHierarchy(props: {
 }
 
 describe('MetaHierarchyView', () => {
+  afterEach(() => {
+    useLocale().setLocale('en')
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
   it('builds a tree from rows and the first parent link id', async () => {
     const selectSpy = vi.fn()
     const createSpy = vi.fn()
@@ -215,6 +222,36 @@ describe('MetaHierarchyView', () => {
 
     expect(reparentSpy).not.toHaveBeenCalled()
     expect(container.textContent).toContain('Cannot move a record under its own descendant.')
+
+    unmount()
+  })
+
+  it('localizes hierarchy chrome and comment chip label while preserving record titles', async () => {
+    useLocale().setLocale('zh-CN')
+    const { container, unmount } = mountHierarchy({
+      rows: [
+        { id: 'rec_root', version: 1, data: { fld_title: 'Root' } },
+      ],
+      viewConfig: { parentFieldId: 'fld_parent', titleFieldId: 'fld_title', defaultExpandDepth: 2 },
+      canCreate: true,
+      canComment: true,
+    })
+    await nextTick()
+
+    expect(container.querySelector('.meta-hierarchy')?.getAttribute('aria-label')).toBe('层级视图')
+    expect(container.textContent).toContain('父级字段')
+    expect(container.textContent).toContain('标题字段')
+    expect(container.textContent).toContain('默认展开层级')
+    expect(container.textContent).toContain('孤立记录')
+    expect(container.textContent).toContain('+ 添加根记录')
+    expect(container.textContent).toContain('+ 子记录')
+    expect(container.textContent).toContain('Root')
+    expect(container.textContent).toContain('评论')
+    expect(container.textContent).not.toContain('Comments')
+    expect(container.querySelector('button[aria-label="打开 Root 的评论"]')).not.toBeNull()
+    expect(container.querySelectorAll('[aria-label]')).toHaveLength(2)
+    expect(container.querySelectorAll('[title]')).toHaveLength(0)
+    expect(container.querySelectorAll('[placeholder]')).toHaveLength(0)
 
     unmount()
   })

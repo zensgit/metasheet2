@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 import MetaCalendarView from '../src/multitable/components/MetaCalendarView.vue'
+import { useLocale } from '../src/composables/useLocale'
 
 function isoDate(offsetDays = 0): string {
   const date = new Date()
@@ -11,7 +12,9 @@ function isoDate(offsetDays = 0): string {
 
 describe('MetaCalendarView', () => {
   afterEach(() => {
+    useLocale().setLocale('en')
     vi.useRealTimers()
+    document.body.innerHTML = ''
   })
 
   it('renders persisted default view and emits config changes when switching modes', async () => {
@@ -439,5 +442,62 @@ describe('MetaCalendarView', () => {
 
     app.unmount()
     container.remove()
+  })
+
+  it('localizes calendar view chrome while keeping event and holiday names raw', async () => {
+    useLocale().setLocale('zh-CN')
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-02-03T12:00:00Z'))
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaCalendarView, {
+          rows: [
+            {
+              id: 'rec_1',
+              version: 1,
+              data: {
+                fld_title: 'Contract renewal',
+                fld_start: '2026-02-17',
+              },
+            },
+          ],
+          fields: [
+            { id: 'fld_title', name: 'Title', type: 'string' },
+            { id: 'fld_start', name: 'Start', type: 'date' },
+          ],
+          loading: false,
+          canCreate: true,
+          calendarHolidays: [
+            { id: 'holiday_spring', date: '2026-02-17', name: '春节', isWorkingDay: false },
+          ],
+          viewConfig: {
+            dateFieldId: 'fld_start',
+            titleFieldId: 'fld_title',
+            defaultView: 'month',
+            weekStartsOn: 0,
+          },
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    expect(container.textContent).toContain('今天')
+    expect(container.textContent).toContain('+ 添加记录')
+    expect(container.textContent).toContain('视图')
+    expect(container.textContent).toContain('更改')
+    expect(container.textContent).toContain('春节')
+    expect(container.textContent).toContain('Contract renewal')
+    expect(container.querySelectorAll('[aria-label]')).toHaveLength(42)
+    expect(container.querySelectorAll('[title]')).toHaveLength(0)
+    expect(container.querySelectorAll('[placeholder]')).toHaveLength(0)
+    expect(container.querySelector('.meta-calendar__cell')?.getAttribute('aria-label')).toContain('2026年')
+
+    app.unmount()
   })
 })

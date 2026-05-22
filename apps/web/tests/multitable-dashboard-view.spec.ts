@@ -8,6 +8,7 @@ function flushPromises() {
 import MetaDashboardView from '../src/multitable/components/MetaDashboardView.vue'
 import { MultitableApiClient } from '../src/multitable/api/client'
 import type { Dashboard, ChartConfig, ChartData } from '../src/multitable/types'
+import { useLocale } from '../src/composables/useLocale'
 
 function fakeDashboard(overrides: Partial<Dashboard> = {}): Dashboard {
   return {
@@ -82,6 +83,7 @@ function mount(props: Record<string, unknown>) {
 
 describe('MetaDashboardView', () => {
   afterEach(() => {
+    useLocale().setLocale('en')
     document.body.innerHTML = ''
     vi.restoreAllMocks()
   })
@@ -179,5 +181,37 @@ describe('MetaDashboardView', () => {
     expect(patchCalls.length).toBe(1)
     const body = JSON.parse(patchCalls[0][1].body as string)
     expect(body.panels[0].size).toBe('large')
+  })
+
+  it('localizes dashboard chrome and generated dashboard name while keeping chart names raw', async () => {
+    useLocale().setLocale('zh-CN')
+    const chart = fakeChart({ name: 'Sales Chart' })
+    const { client, fetchFn } = mockClient([fakeDashboard()], [chart])
+    const { container } = mount({ sheetId: 'sheet_1', client })
+    await flushPromises()
+
+    expect(container.textContent).toContain('重命名')
+    expect(container.textContent).toContain('+ 添加面板')
+    expect(container.textContent).toContain('+ 新建仪表板')
+    expect(container.textContent).toContain('Sales Chart')
+    expect(container.textContent).toContain('中')
+
+    const addPanelBtn = container.querySelector('[data-action="add-panel"]') as HTMLButtonElement
+    addPanelBtn.click()
+    await flushPromises()
+    expect(container.textContent).toContain('添加图表面板')
+
+    const createBtn = container.querySelector('[data-action="create-dashboard"]') as HTMLButtonElement
+    createBtn.click()
+    await flushPromises()
+    const postCalls = fetchFn.mock.calls.filter(
+      ([url, init]: [string, RequestInit?]) => url.includes('/dashboards') && init?.method === 'POST',
+    )
+    const body = JSON.parse(postCalls[0][1].body as string)
+    expect(body.name).toBe('仪表板 2')
+    expect(container.querySelector('[data-action="rename"]')?.getAttribute('title')).toBe('重命名')
+    expect(container.querySelectorAll('[aria-label]')).toHaveLength(0)
+    expect(container.querySelectorAll('[title]')).toHaveLength(1)
+    expect(container.querySelectorAll('[placeholder]')).toHaveLength(0)
   })
 })

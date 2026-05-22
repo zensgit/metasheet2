@@ -2,9 +2,11 @@ import { createApp, h, nextTick } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import MetaGanttView from '../src/multitable/components/MetaGanttView.vue'
 import { resolveGanttViewConfig } from '../src/multitable/utils/view-config'
+import { useLocale } from '../src/composables/useLocale'
 
 describe('MetaGanttView', () => {
   afterEach(() => {
+    useLocale().setLocale('en')
     document.body.innerHTML = ''
     vi.restoreAllMocks()
   })
@@ -843,6 +845,75 @@ describe('MetaGanttView', () => {
     const backwardArrows = arrows.filter((arrow) => arrow.classList.contains('meta-gantt__dependency-arrow--backward'))
     expect(arrows).toHaveLength(2)
     expect(backwardArrows).toHaveLength(1)
+
+    app.unmount()
+  })
+
+  it('localizes Gantt chrome while keeping task and group values raw', async () => {
+    useLocale().setLocale('zh-CN')
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaGanttView, {
+          loading: false,
+          canCreate: true,
+          canEdit: true,
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string' },
+            { id: 'fld_start', name: 'Start', type: 'date' },
+            { id: 'fld_end', name: 'End', type: 'date' },
+            { id: 'fld_status', name: 'Status', type: 'select' },
+          ],
+          rows: [
+            {
+              id: 'rec_1',
+              version: 1,
+              data: {
+                fld_name: 'Design',
+                fld_start: '2026-04-01',
+                fld_end: '2026-04-10',
+                fld_status: 'Open',
+              },
+            },
+            {
+              id: 'rec_2',
+              version: 1,
+              data: {
+                fld_name: 'Unplanned',
+                fld_status: 'Open',
+              },
+            },
+          ],
+          viewConfig: {
+            startFieldId: 'fld_start',
+            endFieldId: 'fld_end',
+            titleFieldId: 'fld_name',
+            groupFieldId: 'fld_status',
+          },
+          groupInfo: { fieldId: 'fld_status' },
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    expect(container.querySelector('.meta-gantt')?.getAttribute('aria-label')).toBe('甘特视图')
+    expect(container.textContent).toContain('开始')
+    expect(container.textContent).toContain('结束')
+    expect(container.textContent).toContain('进度')
+    expect(container.textContent).toContain('+ 添加任务')
+    expect(container.textContent).toContain('任务')
+    expect(container.textContent).toContain('至')
+    expect(container.textContent).toContain('未排期（1）')
+    expect(container.textContent).toContain('Design')
+    expect(container.textContent).toContain('Open')
+    expect(container.querySelector('.meta-gantt__resize-handle--start')?.getAttribute('aria-label')).toBe('调整 Design 的开始时间')
+    expect(container.querySelectorAll('[aria-label]')).toHaveLength(3)
+    expect(container.querySelectorAll('[title]')).toHaveLength(1)
+    expect(container.querySelectorAll('[placeholder]')).toHaveLength(0)
 
     app.unmount()
   })

@@ -1,8 +1,15 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 import MetaGalleryView from '../src/multitable/components/MetaGalleryView.vue'
+import { useLocale } from '../src/composables/useLocale'
 
 describe('MetaGalleryView', () => {
+  afterEach(() => {
+    useLocale().setLocale('en')
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
   it('renders persisted gallery config including cover image and configured fields', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
@@ -134,5 +141,55 @@ describe('MetaGalleryView', () => {
 
     app.unmount()
     container.remove()
+  })
+
+  it('localizes gallery chrome while keeping field and card values raw', async () => {
+    useLocale().setLocale('zh-CN')
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaGalleryView, {
+          rows: [],
+          fields: [
+            { id: 'fld_title', name: 'Title', type: 'string' },
+            { id: 'fld_cover', name: 'Cover', type: 'attachment' },
+            { id: 'fld_status', name: 'Status', type: 'string' },
+          ],
+          loading: false,
+          canCreate: true,
+          currentPage: 1,
+          totalPages: 2,
+          viewConfig: {
+            titleFieldId: 'fld_title',
+            coverFieldId: 'fld_cover',
+            fieldIds: ['fld_status'],
+            columns: 2,
+            cardSize: 'large',
+          },
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    expect(container.textContent).toContain('标题')
+    expect(container.textContent).toContain('封面')
+    expect(container.textContent).toContain('列数')
+    expect(container.textContent).toContain('卡片尺寸')
+    expect(container.textContent).toContain('大')
+    expect(container.textContent).toContain('卡片字段（1）')
+    expect(container.textContent).toContain('没有可显示的记录')
+    expect(container.textContent).toContain('创建第一条记录')
+    expect(container.textContent).toContain('上一页')
+    expect(container.textContent).toContain('下一页')
+    expect(container.textContent).toContain('Status')
+    expect(container.querySelectorAll('[aria-label]')).toHaveLength(0)
+    expect(container.querySelectorAll('[title]')).toHaveLength(0)
+    expect(container.querySelectorAll('[placeholder]')).toHaveLength(0)
+
+    app.unmount()
   })
 })

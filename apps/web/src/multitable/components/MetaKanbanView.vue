@@ -2,27 +2,27 @@
   <div class="meta-kanban">
     <div v-if="!groupField" class="meta-kanban__empty">
       <div class="meta-kanban__empty-icon">&#x1F4CA;</div>
-      <p>Select a <strong>select</strong>-type field to group by:</p>
+      <p>{{ viewRenderLabel('kanban.selectFieldPromptPrefix', isZh) }}<strong>{{ fieldTypeLabel('select', isZh) }}</strong>{{ viewRenderLabel('kanban.selectFieldPromptSuffix', isZh) }}</p>
       <select class="meta-kanban__field-select" :value="kanbanDraft.groupFieldId ?? ''" @change="onPickGroupField($event)">
-        <option value="">— Choose field —</option>
+        <option value="">{{ viewRenderLabel('common.chooseField', isZh) }}</option>
         <option v-for="f in selectFields" :key="f.id" :value="f.id">{{ f.name }}</option>
       </select>
-      <p v-if="!selectFields.length" class="meta-kanban__empty-hint">No select-type fields found. Add a select field first.</p>
-      <button v-if="canCreate" class="meta-kanban__header-add" @click="emit('create-record', {})">+ Add record</button>
+      <p v-if="!selectFields.length" class="meta-kanban__empty-hint">{{ viewRenderLabel('kanban.noSelectFields', isZh) }}</p>
+      <button v-if="canCreate" class="meta-kanban__header-add" @click="emit('create-record', {})">{{ viewRenderLabel('common.addRecord', isZh) }}</button>
     </div>
 
     <template v-else>
       <div class="meta-kanban__header">
         <label class="meta-kanban__header-field">
-          <span>Group</span>
+          <span>{{ viewRenderLabel('gantt.group', isZh) }}</span>
           <select class="meta-kanban__field-select" :value="kanbanDraft.groupFieldId ?? ''" @change="onPickGroupField($event)">
-            <option value="">(none)</option>
+            <option value="">{{ viewRenderLabel('common.none', isZh) }}</option>
             <option v-for="field in selectFields" :key="field.id" :value="field.id">{{ field.name }}</option>
           </select>
         </label>
-        <span class="meta-kanban__group-label">Grouped by: <strong>{{ groupField.name }}</strong></span>
+        <span class="meta-kanban__group-label">{{ viewRenderLabel('kanban.groupedBy', isZh) }} <strong>{{ groupField.name }}</strong></span>
         <details class="meta-kanban__field-picker">
-          <summary>Card fields ({{ previewFields.length }})</summary>
+          <summary>{{ cardFieldsSummary(previewFields.length, isZh) }}</summary>
           <div class="meta-kanban__field-picker-list">
             <label v-for="field in previewFieldCandidates" :key="field.id" class="meta-kanban__field-picker-item">
               <input
@@ -34,14 +34,14 @@
             </label>
           </div>
         </details>
-        <button v-if="canCreate" class="meta-kanban__header-add" @click="emit('create-record', {})">+ Add record</button>
-        <button class="meta-kanban__change-btn" @click="onClearGroupField">Clear</button>
+        <button v-if="canCreate" class="meta-kanban__header-add" @click="emit('create-record', {})">{{ viewRenderLabel('common.addRecord', isZh) }}</button>
+        <button class="meta-kanban__change-btn" @click="onClearGroupField">{{ viewRenderLabel('kanban.clear', isZh) }}</button>
       </div>
 
       <div class="meta-kanban__board">
         <div class="meta-kanban__column">
           <div class="meta-kanban__column-header meta-kanban__column-header--uncategorized">
-            <span>Uncategorized</span>
+            <span>{{ viewRenderLabel('kanban.uncategorized', isZh) }}</span>
             <span class="meta-kanban__count">{{ uncategorized.length }}</span>
           </div>
           <div class="meta-kanban__cards" :class="{ 'meta-kanban__cards--drag-over': dragOverColumn === '__uncategorized__' }" @dragover.prevent="dragOverColumn = '__uncategorized__'" @dragleave="dragOverColumn = null" @drop="dragOverColumn = null; onDrop(null, $event)">
@@ -64,7 +64,7 @@
                   class="meta-kanban__comment-btn"
                   :class="rowCommentButtonClass(row.id)"
                   type="button"
-                  :aria-label="`Open comments for ${cardTitle(row)}`"
+                  :aria-label="openRecordCommentsAria(cardTitle(row), isZh)"
                   @click.stop="emit('open-comments', row.id)"
                   @keydown="onRowCommentKeydown($event, row.id)"
                 >
@@ -82,7 +82,7 @@
                     type="button"
                     class="meta-kanban__field-comment-btn"
                     :class="fieldCommentButtonClass(row.id, f.id)"
-                    :aria-label="`Open comments for ${f.name} on ${cardTitle(row)}`"
+                    :aria-label="openFieldCommentsForRecordAria(f.name, cardTitle(row), isZh)"
                     @click.stop="emit('open-field-comments', { recordId: row.id, fieldId: f.id })"
                     @keydown="onFieldCommentKeydown($event, row.id, f.id)"
                   >
@@ -92,10 +92,10 @@
               </div>
             </div>
             <div v-if="!uncategorized.length" class="meta-kanban__drop-hint">
-              {{ canEdit ? 'Drop a card here or add a new record' : 'No cards in this column' }}
+              {{ canEdit ? viewRenderLabel('kanban.dropOrAdd', isZh) : viewRenderLabel('kanban.noCards', isZh) }}
             </div>
           </div>
-          <button v-if="canCreate" class="meta-kanban__add-btn" @click="emit('create-record', {})">+ Add</button>
+          <button v-if="canCreate" class="meta-kanban__add-btn" @click="emit('create-record', {})">{{ viewRenderLabel('common.add', isZh) }}</button>
         </div>
 
         <div v-for="opt in groupOptions" :key="opt.value" class="meta-kanban__column">
@@ -123,7 +123,7 @@
                   class="meta-kanban__comment-btn"
                   :class="rowCommentButtonClass(row.id)"
                   type="button"
-                  :aria-label="`Open comments for ${cardTitle(row)}`"
+                  :aria-label="openRecordCommentsAria(cardTitle(row), isZh)"
                   @click.stop="emit('open-comments', row.id)"
                   @keydown="onRowCommentKeydown($event, row.id)"
                 >
@@ -141,7 +141,7 @@
                     type="button"
                     class="meta-kanban__field-comment-btn"
                     :class="fieldCommentButtonClass(row.id, f.id)"
-                    :aria-label="`Open comments for ${f.name} on ${cardTitle(row)}`"
+                    :aria-label="openFieldCommentsForRecordAria(f.name, cardTitle(row), isZh)"
                     @click.stop="emit('open-field-comments', { recordId: row.id, fieldId: f.id })"
                     @keydown="onFieldCommentKeydown($event, row.id, f.id)"
                   >
@@ -151,15 +151,15 @@
               </div>
             </div>
             <div v-if="!columnRows(opt.value).length" class="meta-kanban__drop-hint">
-              {{ canEdit ? 'Drop a card here to update its group' : 'No cards in this column' }}
+              {{ canEdit ? viewRenderLabel('kanban.dropToUpdate', isZh) : viewRenderLabel('kanban.noCards', isZh) }}
             </div>
           </div>
-          <button v-if="canCreate" class="meta-kanban__add-btn" @click="emit('create-record', { [groupField!.id]: opt.value })">+ Add</button>
+          <button v-if="canCreate" class="meta-kanban__add-btn" @click="emit('create-record', { [groupField!.id]: opt.value })">{{ viewRenderLabel('common.add', isZh) }}</button>
         </div>
       </div>
     </template>
 
-    <div v-if="loading" class="meta-kanban__loading">Loading...</div>
+    <div v-if="loading" class="meta-kanban__loading">{{ viewRenderLabel('common.loading', isZh) }}</div>
   </div>
 </template>
 
@@ -178,6 +178,13 @@ import {
   resolveRecordCommentAffordance,
 } from '../utils/comment-affordance'
 import { commentLabel } from '../utils/meta-comment-labels'
+import { fieldTypeLabel } from '../utils/meta-core-labels'
+import {
+  cardFieldsSummary,
+  openFieldCommentsForRecordAria,
+  openRecordCommentsAria,
+  viewRenderLabel,
+} from '../utils/meta-view-render-labels'
 
 const props = defineProps<{
   rows: MetaRecord[]
