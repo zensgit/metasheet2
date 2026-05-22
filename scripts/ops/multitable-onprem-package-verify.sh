@@ -328,6 +328,9 @@ function verify_bridge_agent_tooling_contract() {
   local readonly_runbook="${root}/docs/operations/bridge-agent-readonly-runbook-20260521.md"
   local install_txt="${root}/INSTALL.txt"
 
+  if LC_ALL=C grep -n '[^ -~]' "$smoke_script" >/dev/null 2>&1; then
+    die "Bridge Agent driver smoke must remain ASCII-safe for Windows PowerShell 5.1"
+  fi
   search_fixed_string 'SELECT @@VERSION' "$smoke_script" || die "Bridge Agent driver smoke must run SELECT @@VERSION only"
   search_fixed_string "[ValidateSet('SqlClient', 'Odbc', 'OleDb')]" "$smoke_script" || die "Bridge Agent driver smoke must support SqlClient/Odbc/OleDb provider modes"
   search_fixed_string 'OdbcDriverName' "$smoke_script" || die "Bridge Agent driver smoke must allow BA-M0 approved ODBC driver names"
