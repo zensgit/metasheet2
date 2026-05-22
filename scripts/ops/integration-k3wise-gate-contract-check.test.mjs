@@ -200,11 +200,24 @@ test('init-template writes a safe fillable packet that is blocked until customer
   assert.equal(initResult.status, 0, initResult.stderr)
   assert.match(initResult.stdout, /"decision": "TEMPLATE_CREATED"/)
   assert.match(initResult.stdout, /"sampleCount": 8/)
+  assert.match(initResult.stdout, /README-CUSTOMER-HANDOFF\.zh\.md/)
 
   const packetPath = path.join(dir, 'k3wise-gate-contract-packet.template.json')
   const packet = JSON.parse(await readFile(packetPath, 'utf8'))
   assert.equal(packet.webapiReadList.answers['O1-MAT'], '<fill-outside-git>')
   assert.equal(packet.relationshipMapping.answers.R1, '<fill-outside-git>')
+
+  const readmeText = await readFile(path.join(dir, 'README-CUSTOMER-HANDOFF.zh.md'), 'utf8')
+  assert.match(readmeText, /K3 WISE GATE 信息填写说明/)
+  assert.match(readmeText, /O1-MAT/)
+  assert.match(readmeText, /O1-BOM/)
+  assert.match(readmeText, /R1/)
+  assert.match(readmeText, /R7/)
+  assert.match(readmeText, /不执行 K3 Save、Submit、Audit/)
+  assert.doesNotMatch(readmeText, /Bearer\s+[A-Za-z0-9._-]{16,}/i)
+  assert.doesNotMatch(readmeText, /[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/)
+  assert.doesNotMatch(readmeText, /\b(postgres|postgresql|mysql|mssql|sqlserver|jdbc):\/\/[^/\s:]+:[^@\s]+@/i)
+  assert.doesNotMatch(readmeText, /[?&](access[_-]?token|api[_-]?key|auth|authorization|credential|jwt|password|secret|session[_-]?id|sign|signature|token)=([^&#\s]+)/i)
 
   for (const samplePath of [
     ...Object.values(packet.webapiReadList.samples),
