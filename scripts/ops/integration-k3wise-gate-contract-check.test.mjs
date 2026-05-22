@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -264,4 +264,18 @@ test('direct-run guard accepts Windows script paths', () => {
     ),
     true,
   )
+})
+
+test('direct-run guard accepts equivalent real paths through symlinks', async () => {
+  const dir = await makeDir()
+  const realDir = path.join(dir, 'real')
+  const linkDir = path.join(dir, 'link')
+  await mkdir(realDir)
+  await symlink(realDir, linkDir, 'dir')
+
+  const realScript = path.join(realDir, 'integration-k3wise-gate-contract-check.mjs')
+  const linkScript = path.join(linkDir, 'integration-k3wise-gate-contract-check.mjs')
+  await writeFile(realScript, '')
+
+  assert.equal(isDirectCliRun(realScript, linkScript), true)
 })
