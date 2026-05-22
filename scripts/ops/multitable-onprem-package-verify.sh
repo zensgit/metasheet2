@@ -303,6 +303,7 @@ function verify_generic_integration_workbench_contract() {
   search_fixed_string 'SECRET_QUERY_PATTERN' "$gate_contract_checker" || die "GATE contract checker must reject secret-looking query parameters"
   search_fixed_string '--init-template' "$gate_contract_checker" || die "GATE contract checker must initialize a fillable packet template"
   search_fixed_string 'k3wise-gate-contract-packet.template.json' "$gate_contract_checker" || die "GATE contract checker must write the canonical packet template file"
+  search_fixed_string 'README-CUSTOMER-HANDOFF.zh.md' "$gate_contract_checker" || die "GATE contract checker must write the customer handoff README"
   search_fixed_string '--init-template' "$install_txt" || die "INSTALL.txt must document the GATE contract template initializer"
   search_fixed_string '8 redacted' "$install_txt" || die "INSTALL.txt must explain the generated sample skeleton count"
   search_fixed_string 'integration-k3wise-gate-contract-check.mjs' "$webapi_read_manifest" || die "WebAPI read/list manifest must point operators at the packaged GATE checker"

@@ -57,6 +57,7 @@ const RELATIONSHIP_SAMPLES = {
   },
 }
 const TEMPLATE_PACKET_FILE = 'k3wise-gate-contract-packet.template.json'
+const TEMPLATE_HANDOFF_README_FILE = 'README-CUSTOMER-HANDOFF.zh.md'
 const TEMPLATE_SAMPLE_FILES = {
   materialList: 'sample-material-list.redacted.json',
   materialDetail: 'sample-material-detail.redacted.json',
@@ -630,6 +631,79 @@ function buildTemplateSamples() {
   }
 }
 
+function buildCustomerHandoffReadme() {
+  return `# K3 WISE GATE 信息填写说明
+
+这份包用于确认 MetaSheet 下一阶段是否可以开发 K3 WISE WebAPI 读取和关系映射功能。请只填写脱敏后的接口路径、字段说明、样例结构和业务规则，不要填写任何真实密码、Token、Cookie、authorityCode、SQL 连接串或生产数据原文。
+
+## 文件清单
+
+- \`${TEMPLATE_PACKET_FILE}\`：主填写文件。
+- \`${TEMPLATE_SAMPLE_FILES.materialList}\`：物料列表接口脱敏样例。
+- \`${TEMPLATE_SAMPLE_FILES.materialDetail}\`：物料详情接口脱敏样例。
+- \`${TEMPLATE_SAMPLE_FILES.bomList}\`：BOM 列表接口脱敏样例。
+- \`${TEMPLATE_SAMPLE_FILES.bomDetail}\`：BOM 详情接口脱敏样例。
+- \`${TEMPLATE_SAMPLE_FILES.flatBomLines}\`：平铺 BOM 行样例。
+- \`${TEMPLATE_SAMPLE_FILES.treeBom}\`：树形 BOM 样例。
+- \`${TEMPLATE_SAMPLE_FILES.unresolvedChild}\`：子件无法匹配时的样例。
+- \`${TEMPLATE_SAMPLE_FILES.k3BomSaveShape}\`：K3 BOM Save 请求体结构样例。
+
+## WebAPI read/list 必填项
+
+请在 \`webapiReadList.answers\` 中填写：
+
+- \`O1-MAT\`：物料读取接口相对路径，例如 \`/K3API/...\`。不要填完整域名、Token 或查询密钥。
+- \`O1-MAT-M\`：物料读取接口方法，只能是 \`GET\` 或 \`POST\`。
+- \`O1-BOM\`：BOM 读取接口相对路径。
+- \`O1-BOM-M\`：BOM 读取接口方法，只能是 \`GET\` 或 \`POST\`。
+- \`O2-P\`：分页规则，例如页码参数、每页数量参数、最大页数限制。
+- \`O2-T\`：总数或下一页判断规则。
+- \`O2-C\`：游标或下一页 token 规则；如果没有请写“无，按页码”。
+- \`O3-F\`：过滤条件规则，例如物料编码、修改时间、组织范围。
+- \`O3-M\`：最小可接受过滤条件；用于避免全量扫生产数据。
+- \`O4-MAT\`：物料响应中关键字段含义和路径。
+- \`O4-BOM\`：BOM 响应中关键字段含义和路径。
+- \`O6\`：错误响应格式，例如认证失败、无数据、参数错误。
+
+## relationship 必填项
+
+请在 \`relationshipMapping.answers\` 中填写：
+
+- \`R1\`：BOM 来源形态，是平铺行、树形结构，还是二者都有。
+- \`R2\`：父件、子件、数量、单位分别由哪些字段表示。
+- \`R3\`：单位映射规则，例如 PCS/EA/KG 对应 K3 中哪个字段或编码。
+- \`R4\`：物料分类映射规则。
+- \`R5\`：子件找不到时的期望行为。
+- \`R6\`：重复、冲突或多版本 BOM 的处理规则。
+- \`R7\`：首轮 PoC 必须支持哪些关系，哪些可以暂缓。
+
+## 脱敏要求
+
+可以保留字段名和结构，但请替换所有敏感值：
+
+- Token / Cookie / session / authorityCode：写成 \`<redacted>\`。
+- 密码、密钥、连接串：写成 \`<redacted>\`。
+- 真实客户物料编码、名称、供应商、人员等业务数据：用示例值替换，例如 \`MAT-001\`、\`Demo Parent\`。
+- URL 里不要包含 \`access_token\`、\`api_key\`、\`password\`、\`secret\`、\`sign\`、\`session_id\` 等查询参数。
+
+## 校验方式
+
+填写完成后，在 MetaSheet 仓库根目录运行：
+
+\`\`\`bash
+node scripts/ops/integration-k3wise-gate-contract-check.mjs \\
+  --input /path/outside-git/k3wise-gate-contract/k3wise-gate-contract-packet.template.json \\
+  --out-dir /path/outside-git/k3wise-gate-contract/check-filled
+\`\`\`
+
+只有校验结果为 \`PASS\` 后，MetaSheet 才会开始 #1709 / #1711 的 runtime 开发。若结果是 \`GATE_BLOCKED\`，说明仍有必填项未完成。若结果是 \`FAIL\`，说明存在格式或脱敏问题。
+
+## 明确边界
+
+这份包不会触发 K3 写入。当前阶段不执行 K3 Save、Submit、Audit，也不会修改生产 K3 数据。
+`
+}
+
 async function writeTemplateJson(filePath, value) {
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, { flag: 'wx' })
 }
@@ -639,6 +713,8 @@ async function initTemplateDirectory(targetDir) {
   await mkdir(resolvedDir, { recursive: true })
   const packetPath = path.join(resolvedDir, TEMPLATE_PACKET_FILE)
   await writeTemplateJson(packetPath, buildTemplatePacket())
+  const readmePath = path.join(resolvedDir, TEMPLATE_HANDOFF_README_FILE)
+  await writeFile(readmePath, buildCustomerHandoffReadme(), { flag: 'wx' })
   const samples = buildTemplateSamples()
   for (const [fileName, value] of Object.entries(samples)) {
     await writeTemplateJson(path.join(resolvedDir, fileName), value)
@@ -646,6 +722,7 @@ async function initTemplateDirectory(targetDir) {
   return {
     templateDir: resolvedDir,
     packetPath,
+    readmePath,
     sampleCount: Object.keys(samples).length,
   }
 }
