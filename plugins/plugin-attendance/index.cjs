@@ -11672,6 +11672,262 @@ async function buildWorkContextPrefetch(db, options) {
   }
 }
 
+const ATTENDANCE_COMPREHENSIVE_HOURS_PERIOD_TYPES = new Set([
+  'month',
+  'quarter',
+  'year',
+  'payroll_cycle',
+  'custom_range',
+])
+const ATTENDANCE_COMPREHENSIVE_HOURS_METRICS = new Set(['planned', 'actual'])
+const ATTENDANCE_COMPREHENSIVE_HOURS_ENFORCEMENT = new Set(['warn', 'block'])
+
+function buildAttendanceComprehensiveHoursError(code, message) {
+  return { ok: false, error: { code, message } }
+}
+
+function normalizeAttendanceComprehensiveInteger(value, fallback = null) {
+  if (typeof value === 'number' && Number.isInteger(value)) return value
+  if (typeof value === 'string' && /^-?\d+$/.test(value.trim())) return Number(value.trim())
+  return fallback
+}
+
+function attendanceComprehensiveMonthEndDate(year, month) {
+  const date = new Date(Date.UTC(year, month, 0))
+  return date.toISOString().slice(0, 10)
+}
+
+function resolveAttendanceComprehensiveHoursPeriod(input = {}, options = {}) {
+  const type = typeof input.type === 'string' ? input.type.trim() : ''
+  if (!ATTENDANCE_COMPREHENSIVE_HOURS_PERIOD_TYPES.has(type)) {
+    return buildAttendanceComprehensiveHoursError(
+      'INVALID_PERIOD_TYPE',
+      'Comprehensive hours period type must be month, quarter, year, payroll_cycle, or custom_range',
+    )
+  }
+
+  if (type === 'custom_range') {
+    const from = normalizeDateOnlyStrict(input.from)
+    const to = normalizeDateOnlyStrict(input.to)
+    if (!from || !to || from > to) {
+      return buildAttendanceComprehensiveHoursError('INVALID_PERIOD_RANGE', 'Custom range requires valid from/to dates')
+    }
+    return { ok: true, period: { type, key: `range:${from}:${to}`, from, to, label: `${from}..${to}` } }
+  }
+
+  if (type === 'month') {
+    const year = normalizeAttendanceComprehensiveInteger(input.year)
+    const month = normalizeAttendanceComprehensiveInteger(input.month)
+    if (!Number.isInteger(year) || year < 1970 || year > 9999 || !Number.isInteger(month) || month < 1 || month > 12) {
+      return buildAttendanceComprehensiveHoursError('INVALID_PERIOD_MONTH', 'Month period requires valid year and month')
+    }
+    const mm = String(month).padStart(2, '0')
+    const from = `${String(year).padStart(4, '0')}-${mm}-01`
+    const to = attendanceComprehensiveMonthEndDate(year, month)
+    return { ok: true, period: { type, key: `${year}-${mm}`, from, to, label: `${year}-${mm}` } }
+  }
+
+  if (type === 'quarter') {
+    const year = normalizeAttendanceComprehensiveInteger(input.year)
+    const quarter = normalizeAttendanceComprehensiveInteger(input.quarter)
+    if (!Number.isInteger(year) || year < 1970 || year > 9999 || !Number.isInteger(quarter) || quarter < 1 || quarter > 4) {
+      return buildAttendanceComprehensiveHoursError('INVALID_PERIOD_QUARTER', 'Quarter period requires valid year and quarter')
+    }
+    const startMonth = (quarter - 1) * 3 + 1
+    const endMonth = startMonth + 2
+    const from = `${String(year).padStart(4, '0')}-${String(startMonth).padStart(2, '0')}-01`
+    const to = attendanceComprehensiveMonthEndDate(year, endMonth)
+    return { ok: true, period: { type, key: `${year}-Q${quarter}`, from, to, label: `${year} Q${quarter}` } }
+  }
+
+  if (type === 'year') {
+    const year = normalizeAttendanceComprehensiveInteger(input.year)
+    if (!Number.isInteger(year) || year < 1970 || year > 9999) {
+      return buildAttendanceComprehensiveHoursError('INVALID_PERIOD_YEAR', 'Year period requires a valid year')
+    }
+    return {
+      ok: true,
+      period: {
+        type,
+        key: String(year),
+        from: `${String(year).padStart(4, '0')}-01-01`,
+        to: `${String(year).padStart(4, '0')}-12-31`,
+        label: String(year),
+      },
+    }
+  }
+
+  const cycle = input.cycle && typeof input.cycle === 'object'
+    ? input.cycle
+    : options.payrollCycle && typeof options.payrollCycle === 'object'
+      ? options.payrollCycle
+      : input
+  const cycleId = typeof (input.cycleId ?? cycle.id) === 'string' ? String(input.cycleId ?? cycle.id).trim() : ''
+  const from = normalizeDateOnlyStrict(cycle.startDate ?? cycle.start_date)
+  const to = normalizeDateOnlyStrict(cycle.endDate ?? cycle.end_date)
+  if (!cycleId || !from || !to || from > to) {
+    return buildAttendanceComprehensiveHoursError('INVALID_PAYROLL_CYCLE', 'Payroll-cycle period requires cycleId, startDate, and endDate')
+  }
+  return {
+    ok: true,
+    period: {
+      type,
+      key: `cycle:${cycleId}`,
+      cycleId,
+      from,
+      to,
+      label: typeof cycle.name === 'string' && cycle.name.trim() ? cycle.name.trim() : `Payroll cycle ${cycleId}`,
+    },
+  }
+}
+
+function resolveAttendanceComprehensiveHoursMetric(value) {
+  return typeof value === 'string' && ATTENDANCE_COMPREHENSIVE_HOURS_METRICS.has(value)
+    ? value
+    : 'planned'
+}
+
+function resolveAttendanceComprehensiveHoursEnforcement(value) {
+  return typeof value === 'string' && ATTENDANCE_COMPREHENSIVE_HOURS_ENFORCEMENT.has(value)
+    ? value
+    : 'warn'
+}
+
+function calculateAttendanceComprehensiveShiftPlannedMinutes(profile) {
+  const startTime = normalizeTimeString(profile?.workStartTime ?? profile?.work_start_time ?? DEFAULT_RULE.workStartTime)
+  const endTime = normalizeTimeString(profile?.workEndTime ?? profile?.work_end_time ?? DEFAULT_RULE.workEndTime)
+  if (!startTime || !endTime) return 0
+  const startMinutes = parseTimeToMinutes(startTime, null)
+  const endMinutes = parseTimeToMinutes(endTime, null)
+  if (!Number.isFinite(startMinutes) || !Number.isFinite(endMinutes)) return 0
+  const isOvernight = resolveOvernightFlag(profile?.isOvernight ?? profile?.is_overnight, startTime, endTime)
+  let duration = endMinutes - startMinutes
+  if (isOvernight && duration <= 0) duration += 24 * 60
+  if (!isOvernight && duration < 0) return 0
+  return Math.max(0, Math.floor(duration))
+}
+
+function resolveAttendanceComprehensiveDayProfile(day, fallbackProfile) {
+  if (day?.profile && typeof day.profile === 'object') return day.profile
+  if (day?.shift && typeof day.shift === 'object') return day.shift
+  if (day?.rule && typeof day.rule === 'object') return day.rule
+  if (day?.resolvedContext?.rule && typeof day.resolvedContext.rule === 'object') return day.resolvedContext.rule
+  return fallbackProfile ?? DEFAULT_RULE
+}
+
+function isAttendanceComprehensiveDayWorking(day, profile) {
+  if (day?.effective && typeof day.effective.isWorkingDay === 'boolean') return day.effective.isWorkingDay
+  if (typeof day?.isWorkingDay === 'boolean') return day.isWorkingDay
+  if (typeof day?.resolvedContext?.isWorkingDay === 'boolean') return day.resolvedContext.isWorkingDay
+  const date = normalizeDateOnly(day?.date ?? day?.workDate ?? day?.work_date)
+  const weekday = date ? getWeekdayFromDateKey(date) : null
+  return weekday != null && Array.isArray(profile?.workingDays) && profile.workingDays.includes(weekday)
+}
+
+function buildAttendanceComprehensivePlannedMinutesFromDays(days, options = {}) {
+  const fallbackProfile = options.defaultRule ?? options.fallbackProfile ?? DEFAULT_RULE
+  const items = []
+  let plannedMinutes = 0
+  for (const day of Array.isArray(days) ? days : []) {
+    const date = normalizeDateOnly(day?.date ?? day?.workDate ?? day?.work_date)
+    const profile = resolveAttendanceComprehensiveDayProfile(day, fallbackProfile)
+    const isWorkingDay = isAttendanceComprehensiveDayWorking(day, profile)
+    const explicitMinutes = Number(day?.plannedMinutes ?? day?.planned_minutes)
+    const minutes = isWorkingDay
+      ? Number.isFinite(explicitMinutes)
+        ? Math.max(0, Math.floor(explicitMinutes))
+        : calculateAttendanceComprehensiveShiftPlannedMinutes(profile)
+      : 0
+    plannedMinutes += minutes
+    items.push({
+      date,
+      isWorkingDay,
+      plannedMinutes: minutes,
+      source: day?.effective?.source ?? day?.source ?? day?.resolvedContext?.policySource ?? day?.resolvedContext?.source ?? null,
+    })
+  }
+  return {
+    plannedMinutes,
+    days: items.length,
+    workingDays: items.filter(item => item.isWorkingDay).length,
+    items,
+  }
+}
+
+function buildAttendanceComprehensiveActualMinutesFromSummary(summary) {
+  if (!summary || typeof summary !== 'object') return { actualMinutes: 0, source: 'summary' }
+  const candidates = [
+    summary.total_minutes,
+    summary.work_duration,
+    summary.workMinutes,
+    summary.work_minutes,
+  ]
+  for (const value of candidates) {
+    const minutes = Number(value)
+    if (Number.isFinite(minutes)) {
+      return { actualMinutes: Math.max(0, Math.floor(minutes)), source: 'summary' }
+    }
+  }
+  return { actualMinutes: 0, source: 'summary' }
+}
+
+function buildAttendanceComprehensiveHoursComparison(input = {}) {
+  const metric = resolveAttendanceComprehensiveHoursMetric(input.metric)
+  const enforcement = resolveAttendanceComprehensiveHoursEnforcement(input.enforcement)
+  const capMinutesRaw = Number(input.capMinutes ?? input.cap_minutes)
+  const capMinutes = Number.isFinite(capMinutesRaw) ? Math.max(0, Math.floor(capMinutesRaw)) : 0
+  const minutesRaw = Number(
+    input.minutes
+      ?? (metric === 'actual'
+        ? input.actualMinutes ?? input.actual_minutes
+        : input.plannedMinutes ?? input.planned_minutes)
+  )
+  const minutes = Number.isFinite(minutesRaw) ? Math.max(0, Math.floor(minutesRaw)) : 0
+  const excessMinutes = Math.max(0, minutes - capMinutes)
+  const remainingMinutes = Math.max(0, capMinutes - minutes)
+  const status = excessMinutes > 0
+    ? enforcement === 'block' ? 'violation' : 'warning'
+    : 'ok'
+  return {
+    userId: input.userId ?? input.user_id ?? null,
+    period: input.period ?? null,
+    metric,
+    enforcement,
+    capMinutes,
+    minutes,
+    plannedMinutes: metric === 'planned' ? minutes : undefined,
+    actualMinutes: metric === 'actual' ? minutes : undefined,
+    remainingMinutes,
+    excessMinutes,
+    status,
+  }
+}
+
+function buildAttendanceComprehensiveHoursPreviewRows(input = {}) {
+  const users = Array.isArray(input.users) ? input.users : []
+  const metric = resolveAttendanceComprehensiveHoursMetric(input.metric)
+  const enforcement = resolveAttendanceComprehensiveHoursEnforcement(input.enforcement)
+  const capMinutes = Number(input.capMinutes ?? input.cap_minutes ?? 0)
+  const plannedByUser = input.plannedMinutesByUser instanceof Map ? input.plannedMinutesByUser : new Map()
+  const actualByUser = input.actualMinutesByUser instanceof Map ? input.actualMinutesByUser : new Map()
+  return users
+    .map((user) => {
+      const userId = String(user?.id ?? user?.userId ?? user?.user_id ?? '').trim()
+      const minutes = metric === 'actual'
+        ? Number(actualByUser.get(userId) ?? user?.actualMinutes ?? user?.actual_minutes ?? 0)
+        : Number(plannedByUser.get(userId) ?? user?.plannedMinutes ?? user?.planned_minutes ?? 0)
+      return buildAttendanceComprehensiveHoursComparison({
+        userId,
+        period: input.period ?? null,
+        metric,
+        enforcement,
+        capMinutes,
+        minutes,
+      })
+    })
+    .sort((a, b) => String(a.userId ?? '').localeCompare(String(b.userId ?? '')))
+}
+
 function buildWorkdayContextSummary(options) {
   const { workDate, storedIsWorkday, resolvedContext } = options
   if (!resolvedContext || !workDate) return null
@@ -13361,6 +13617,12 @@ module.exports = {
     getAttendancePayrollSummaryFieldValue,
     normalizeCalendarPolicyOverrides,
     resolveEffectiveCalendar,
+    resolveAttendanceComprehensiveHoursPeriod,
+    calculateAttendanceComprehensiveShiftPlannedMinutes,
+    buildAttendanceComprehensivePlannedMinutesFromDays,
+    buildAttendanceComprehensiveActualMinutesFromSummary,
+    buildAttendanceComprehensiveHoursComparison,
+    buildAttendanceComprehensiveHoursPreviewRows,
     findAttendanceScheduleAssignmentConflict,
     acquireAttendanceScheduleAssignmentLock,
     getAttendanceScheduleAssignmentConflictMessage,
