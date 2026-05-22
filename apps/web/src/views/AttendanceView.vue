@@ -4375,6 +4375,16 @@
                 </span>
               </div>
 
+              <div
+                v-if="advancedSchedulingWorkbenchTruncationWarning"
+                class="attendance__schedule-conflict-diagnostics"
+                data-attendance-advanced-scheduling-truncation
+                role="alert"
+              >
+                <strong>{{ tr('Snapshot truncated', '快照已截断') }}</strong>
+                <p>{{ advancedSchedulingWorkbenchTruncationWarning }}</p>
+              </div>
+
               <div class="attendance__summary attendance__summary--workbench" data-attendance-advanced-scheduling-metrics>
                 <div
                   v-for="item in advancedSchedulingWorkbenchMetricItems"
@@ -5961,6 +5971,12 @@ interface AttendanceAdvancedSchedulingWorkbench {
   metadata?: {
     readOnly?: boolean
     source?: string
+    truncation?: {
+      assignmentLimit?: number
+      shiftAssignments?: boolean
+      rotationAssignments?: boolean
+      truncated?: boolean
+    }
   }
 }
 
@@ -6362,6 +6378,34 @@ const advancedSchedulingWorkbenchReadOnlyLabel = computed(() =>
     ? tr('Read-only snapshot', '只读快照')
     : tr('Not loaded', '未加载')
 )
+
+const advancedSchedulingWorkbenchTruncationWarning = computed(() => {
+  const truncation = advancedSchedulingWorkbench.value?.metadata?.truncation
+  if (!truncation?.truncated) return ''
+  const limit = Number(truncation.assignmentLimit) || 500
+  if (truncation.shiftAssignments && truncation.rotationAssignments) {
+    return tr(
+      `Shift and rotation assignment snapshots are capped at ${limit} rows each; coverage counts may be lower than actual.`,
+      `固定班与轮班分配快照分别最多显示 ${limit} 行，覆盖统计可能低于实际。`,
+    )
+  }
+  if (truncation.shiftAssignments) {
+    return tr(
+      `Shift assignment snapshot is capped at ${limit} rows; coverage counts may be lower than actual.`,
+      `固定班分配快照最多显示 ${limit} 行，覆盖统计可能低于实际。`,
+    )
+  }
+  if (truncation.rotationAssignments) {
+    return tr(
+      `Rotation assignment snapshot is capped at ${limit} rows; coverage counts may be lower than actual.`,
+      `轮班分配快照最多显示 ${limit} 行，覆盖统计可能低于实际。`,
+    )
+  }
+  return tr(
+    `Assignment snapshot is capped at ${limit} rows; coverage counts may be lower than actual.`,
+    `分配快照最多显示 ${limit} 行，覆盖统计可能低于实际。`,
+  )
+})
 
 const reportRangeLabel = computed(() => {
   if (!fromDate.value || !toDate.value) return tr('Range not set', '区间未设置')

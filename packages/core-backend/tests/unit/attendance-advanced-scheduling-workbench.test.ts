@@ -49,6 +49,12 @@ describe('attendance advanced scheduling read-only workbench', () => {
     expect(workbench.metadata).toEqual({
       readOnly: true,
       source: 'attendance_advanced_scheduling_workbench',
+      truncation: {
+        assignmentLimit: 500,
+        shiftAssignments: false,
+        rotationAssignments: false,
+        truncated: false,
+      },
     })
     expect(workbench.summary).toMatchObject({
       scheduleGroups: 2,
@@ -79,6 +85,39 @@ describe('attendance advanced scheduling read-only workbench', () => {
     ])
   })
 
+  it('reports assignment snapshot truncation metadata without changing the read-only summary shape', () => {
+    const shiftAssignments = Array.from({ length: 500 }, (_, index) => ({
+      assignment: {
+        id: `sa-${index}`,
+        userId: `user-${index}`,
+        shiftId: 'shift-a',
+        startDate: '2026-06-01',
+        endDate: null,
+        isActive: true,
+      },
+      shift: { id: 'shift-a', name: 'Day' },
+    }))
+
+    const workbench = helpers.buildAttendanceAdvancedSchedulingWorkbench({
+      from: '2026-06-01',
+      to: '2026-06-30',
+      scheduleGroups: [],
+      shiftAssignments,
+      assignmentLimit: 500,
+      shiftAssignmentsTruncated: true,
+      rotationAssignmentsTruncated: false,
+    })
+
+    expect(workbench.summary.shiftAssignments).toBe(500)
+    expect(workbench.assignments.shiftItems).toHaveLength(500)
+    expect(workbench.metadata.truncation).toEqual({
+      assignmentLimit: 500,
+      shiftAssignments: true,
+      rotationAssignments: false,
+      truncated: true,
+    })
+  })
+
   it('registers a read-only attendance-admin GET route and no sibling write route', () => {
     expect(pluginSource).toMatch(
       /'GET',\s*\n\s*'\/api\/attendance\/advanced-scheduling\/workbench',\s*\n\s*withPermission\('attendance:admin'/,
@@ -86,5 +125,8 @@ describe('attendance advanced scheduling read-only workbench', () => {
     expect(pluginSource).not.toContain("'POST',\n      '/api/attendance/advanced-scheduling/workbench'")
     expect(pluginSource).not.toContain("'PUT',\n      '/api/attendance/advanced-scheduling/workbench'")
     expect(pluginSource).not.toContain("'DELETE',\n      '/api/attendance/advanced-scheduling/workbench'")
+    expect(pluginSource).toContain('LIMIT ${ATTENDANCE_ADVANCED_SCHEDULING_WORKBENCH_ASSIGNMENT_LIMIT + 1}')
+    expect(pluginSource).toContain('visibleShiftAssignmentRows = shiftAssignmentRows.slice(0, ATTENDANCE_ADVANCED_SCHEDULING_WORKBENCH_ASSIGNMENT_LIMIT)')
+    expect(pluginSource).toContain('visibleRotationAssignmentRows = rotationAssignmentRows.slice(0, ATTENDANCE_ADVANCED_SCHEDULING_WORKBENCH_ASSIGNMENT_LIMIT)')
   })
 })
