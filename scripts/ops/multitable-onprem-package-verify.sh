@@ -324,6 +324,7 @@ function verify_bridge_agent_tooling_contract() {
   local smoke_template_md="${root}/scripts/ops/fixtures/bridge-agent-driver-smoke/evidence.template.md"
   local smoke_runbook="${root}/docs/operations/bridge-agent-driver-smoke-runbook-20260520.md"
   local readonly_script="${root}/scripts/ops/bridge-agent-readonly.ps1"
+  local readonly_task_script="${root}/scripts/ops/bridge-agent-readonly-scheduled-task.ps1"
   local readonly_config="${root}/scripts/ops/fixtures/bridge-agent-readonly/config.example.json"
   local readonly_runbook="${root}/docs/operations/bridge-agent-readonly-runbook-20260521.md"
   local install_txt="${root}/INSTALL.txt"
@@ -352,6 +353,17 @@ function verify_bridge_agent_tooling_contract() {
   search_fixed_string 'sharedSecretEnvVar' "$readonly_script" || die "readonly Bridge Agent must read its shared secret from a local environment variable"
   search_fixed_string 'ConvertTo-BridgeError' "$readonly_script" || die "readonly Bridge Agent must redact returned errors"
 
+  if LC_ALL=C grep -n '[^ -~]' "$readonly_task_script" >/dev/null 2>&1; then
+    die "readonly Bridge Agent scheduled task helper must remain ASCII-safe for Windows PowerShell 5.1"
+  fi
+  search_fixed_string "ValidateSet('Install', 'Start', 'Stop', 'Status', 'Uninstall')" "$readonly_task_script" || die "readonly Bridge Agent scheduled task helper must expose install/start/stop/status/uninstall actions"
+  search_fixed_string 'MetaSheetReadonlyBridgeAgent' "$readonly_task_script" || die "readonly Bridge Agent scheduled task helper must use a stable task name"
+  search_fixed_string 'Register-ScheduledTask' "$readonly_task_script" || die "readonly Bridge Agent scheduled task helper must register a Windows Scheduled Task"
+  search_fixed_string "New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest" "$readonly_task_script" || die "readonly Bridge Agent scheduled task helper must run as SYSTEM"
+  search_fixed_string 'bridge-agent-readonly.ps1' "$readonly_task_script" || die "readonly Bridge Agent scheduled task helper must launch the readonly agent script"
+  search_fixed_string 'Get-ScheduledTaskInfo' "$readonly_task_script" || die "readonly Bridge Agent scheduled task helper must report LastTaskResult"
+  search_fixed_string 'System.Net.Sockets.TcpClient' "$readonly_task_script" || die "readonly Bridge Agent scheduled task helper must include a secret-free local listener check"
+
   search_fixed_string '"host": "127.0.0.1"' "$readonly_config" || die "readonly Bridge Agent example config must bind to localhost"
   search_fixed_string 'METASHEET_BRIDGE_SQL_USERNAME' "$readonly_config" || die "readonly Bridge Agent config must keep SQL username in an env var"
   search_fixed_string 'METASHEET_BRIDGE_SQL_PASSWORD' "$readonly_config" || die "readonly Bridge Agent config must keep SQL password in an env var"
@@ -364,9 +376,13 @@ function verify_bridge_agent_tooling_contract() {
   search_fixed_string 'http://127.0.0.1:19091/' "$readonly_runbook" || die "readonly Bridge Agent runbook must document localhost endpoint"
   search_fixed_string 'Raw SQL must fail' "$readonly_runbook" || die "readonly Bridge Agent runbook must document negative raw-SQL check"
   search_fixed_string 'netsh http add urlacl' "$readonly_runbook" || die "readonly Bridge Agent runbook must document HttpListener URL ACL setup"
+  search_fixed_string 'Persistent Scheduled Task Start' "$readonly_runbook" || die "readonly Bridge Agent runbook must document persistent scheduled task startup"
+  search_fixed_string 'bridge-agent-readonly-scheduled-task.ps1' "$readonly_runbook" || die "readonly Bridge Agent runbook must point operators at the scheduled task helper"
+  search_fixed_string 'Machine-level environment variables' "$readonly_runbook" || die "readonly Bridge Agent runbook must document SYSTEM environment variable handling"
 
   search_fixed_string 'bridge-agent-driver-smoke.ps1' "$install_txt" || die "INSTALL.txt must mention the BA-M0.5 Bridge Agent driver smoke"
   search_fixed_string 'bridge-agent-readonly.ps1' "$install_txt" || die "INSTALL.txt must mention the BA-M1 readonly Bridge Agent"
+  search_fixed_string 'bridge-agent-readonly-scheduled-task.ps1' "$install_txt" || die "INSTALL.txt must mention the readonly Bridge Agent scheduled task helper"
   search_fixed_string 'bridge-agent-readonly-runbook-20260521.md' "$install_txt" || die "INSTALL.txt must point operators at the readonly Bridge Agent runbook"
 }
 
@@ -597,6 +613,7 @@ required=(
   "scripts/ops/fixtures/bridge-agent-driver-smoke/evidence.template.json"
   "scripts/ops/fixtures/bridge-agent-driver-smoke/evidence.template.md"
   "scripts/ops/bridge-agent-readonly.ps1"
+  "scripts/ops/bridge-agent-readonly-scheduled-task.ps1"
   "scripts/ops/fixtures/bridge-agent-readonly/config.example.json"
   "scripts/ops/fixtures/integration-k3wise/gate-intake-template.json"
   "scripts/ops/fixtures/integration-k3wise/evidence-onsite-c4-c9-template.json"
