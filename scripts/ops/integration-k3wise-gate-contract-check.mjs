@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const DEFAULT_OUTPUT_ROOT = 'output/integration-k3wise-gate-contract-check'
 const READ_ANSWER_IDS = [
@@ -757,7 +758,19 @@ async function main() {
   return report.exitCode
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+export function isDirectCliRun(moduleFilePath, entryFilePath, platform = process.platform) {
+  if (!entryFilePath) return false
+  const pathModule = platform === 'win32' ? path.win32 : path
+  const modulePath = pathModule.normalize(moduleFilePath)
+  const entryPath = pathModule.resolve(entryFilePath)
+  if (platform === 'win32') {
+    return modulePath.toLowerCase() === entryPath.toLowerCase()
+  }
+  return modulePath === entryPath
+}
+
+const moduleFilePath = fileURLToPath(import.meta.url)
+if (isDirectCliRun(moduleFilePath, process.argv[1])) {
   main()
     .then((code) => {
       process.exitCode = code
