@@ -318,6 +318,28 @@ const ADAPTER_METADATA = {
       },
     },
   },
+  'bridge:legacy-sql-readonly': {
+    label: 'Readonly Bridge Agent',
+    roles: ['source'],
+    supports: ['testConnection', 'listObjects', 'getSchema', 'read'],
+    advanced: true,
+    guardrails: {
+      read: {
+        localhostOnly: true,
+        requiresObjectAllowlist: true,
+        maxPreviewLimit: 20,
+        noRawSql: true,
+        dryRunFriendly: true,
+      },
+      write: {
+        supported: false,
+      },
+      ui: {
+        hiddenByDefault: true,
+        recommendedForLegacySqlBridge: true,
+      },
+    },
+  },
   'metasheet:staging': {
     label: 'MetaSheet staging multitable',
     roles: ['source'],
