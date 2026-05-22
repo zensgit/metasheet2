@@ -66,6 +66,25 @@ For a persistent operator setup, store them using the chosen Windows secret
 mechanism and inject them into the process environment before start. BA-M1 MVP
 does not prescribe the final service secret store.
 
+### Machine-level environment variables for Scheduled Task mode
+
+When the agent runs as `SYSTEM` through Windows Task Scheduler, user-scoped
+PowerShell variables from an SSH/RDP session are not visible. Store the three
+runtime values in the machine environment or another approved host secret
+mechanism before installing the task.
+
+Example shape, with values filled only on the customer host:
+
+```powershell
+[Environment]::SetEnvironmentVariable('METASHEET_BRIDGE_SQL_USERNAME', '<readonly-sql-login>', 'Machine')
+[Environment]::SetEnvironmentVariable('METASHEET_BRIDGE_SQL_PASSWORD', '<readonly-sql-password>', 'Machine')
+[Environment]::SetEnvironmentVariable('METASHEET_BRIDGE_SHARED_SECRET', '<local-shared-secret>', 'Machine')
+```
+
+Do not paste the real values into chat, issue comments, screenshots, or
+artifacts. Restart the Scheduled Task after changing machine-level environment
+variables.
+
 ## Config Setup
 
 Copy the example config to the private host path:
@@ -125,6 +144,47 @@ run the equivalent command as Administrator:
 ```powershell
 netsh http add urlacl url=http://127.0.0.1:19091/ user=<service-account>
 ```
+
+## Persistent Scheduled Task Start
+
+Do not rely on a background process launched from an SSH session. Windows may
+tear down child processes when the remote session exits, which makes Data
+Factory see `fetch failed` even though the foreground command worked during the
+session.
+
+After config validation passes, install the persistent task from an elevated
+PowerShell window:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\metasheet\scripts\ops\bridge-agent-readonly-scheduled-task.ps1 `
+  -Action Install `
+  -RootDir C:\metasheet `
+  -ConfigPath C:\ProgramData\MetaSheet\BridgeAgent\config.json `
+  -StartAfterInstall
+```
+
+Expected markers:
+
+```text
+[bridge-agent-readonly-task] Task installed.
+[bridge-agent-readonly-task] Task start requested.
+[bridge-agent-readonly-task] State: Running
+[bridge-agent-readonly-task] Local TCP listener: 127.0.0.1:19091 reachable
+```
+
+Useful management commands:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\metasheet\scripts\ops\bridge-agent-readonly-scheduled-task.ps1 -Action Status
+powershell -ExecutionPolicy Bypass -File C:\metasheet\scripts\ops\bridge-agent-readonly-scheduled-task.ps1 -Action Stop
+powershell -ExecutionPolicy Bypass -File C:\metasheet\scripts\ops\bridge-agent-readonly-scheduled-task.ps1 -Action Start
+powershell -ExecutionPolicy Bypass -File C:\metasheet\scripts\ops\bridge-agent-readonly-scheduled-task.ps1 -Action Uninstall
+```
+
+`Status` deliberately checks only the Scheduled Task state, `LastTaskResult`,
+and the local TCP listener. It does not call `/health`, because `/health`
+requires `X-MetaSheet-Bridge-Secret` and the helper must not read or print the
+shared secret. Use the smoke commands below for authenticated protocol checks.
 
 ## Smoke Commands
 

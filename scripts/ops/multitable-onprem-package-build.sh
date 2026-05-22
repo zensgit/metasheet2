@@ -80,6 +80,7 @@ REQUIRED_PATHS=(
   "scripts/ops/bridge-agent-driver-smoke.ps1"
   "scripts/ops/fixtures/bridge-agent-driver-smoke"
   "scripts/ops/bridge-agent-readonly.ps1"
+  "scripts/ops/bridge-agent-readonly-scheduled-task.ps1"
   "scripts/ops/fixtures/bridge-agent-readonly"
   "docs/operations/k3-poc-onprem-preflight-runbook.md"
   "docs/operations/integration-k3wise-onprem-operator-handoff-checklist.md"
@@ -476,6 +477,8 @@ Legacy SQL readonly Bridge Agent tools (Windows bridge host only):
     -> BA-M0.5 driver smoke, runs connection.Open() and SELECT @@VERSION only.
   powershell -ExecutionPolicy Bypass -File scripts\ops\bridge-agent-readonly.ps1 -ConfigPath <local-config>
     -> BA-M1 localhost-only readonly bridge for allowlisted SQL views.
+  powershell -ExecutionPolicy Bypass -File scripts\ops\bridge-agent-readonly-scheduled-task.ps1 -Action Install -StartAfterInstall
+    -> persistent Windows Scheduled Task launcher for the readonly bridge.
   Runbooks:
     docs/operations/bridge-agent-driver-smoke-runbook-20260520.md
     docs/operations/bridge-agent-readonly-runbook-20260521.md
