@@ -141,7 +141,7 @@ function ConvertTo-RedactedText {
   )
   $redacted = [System.Text.RegularExpressions.Regex]::Replace(
     $redacted,
-    "((?:用户|使用者|登入名|登录名)\s*$quotePattern)([^`"']+)($quotePattern\s*(?:登录失败|登入失敗|login failed))",
+    "((?:\u7528\u6237|\u4f7f\u7528\u8005|\u767b\u5165\u540d|\u767b\u5f55\u540d)\s*$quotePattern)([^`"']+)($quotePattern\s*(?:\u767b\u5f55\u5931\u8d25|\u767b\u5165\u5931\u6557|login failed))",
     '${1}' + $redactedLogin + '${3}'
   )
   if (-not [string]::IsNullOrEmpty($Username)) {
@@ -459,7 +459,7 @@ $mdPath   = Join-Path $OutDir 'ba-m0_5-driver-smoke.md'
 # JSON evidence
 $evidence | ConvertTo-Json -Depth 8 | Out-File -LiteralPath $jsonPath -Encoding utf8 -Force
 
-# Human-readable Markdown evidence (no secrets — mirrors JSON content)
+# Human-readable Markdown evidence (no secrets - mirrors JSON content)
 $mdLines = @()
 $mdLines += '# BA-M0.5 Driver Smoke Evidence'
 $mdLines += ''
