@@ -3,11 +3,20 @@ import { describe, expect, it } from 'vitest'
 import {
   AUTOMATION_LABEL_KEYS,
   automationActionTypeLabel,
+  automationCardActionSummary,
+  automationCardLinkLabel,
+  automationCardLinkSummary,
+  automationCardStats,
+  automationCardTriggerSummary,
   automationConditionOperatorLabel,
   automationConditionValuePlaceholder,
   automationCronPresetLabel,
   automationLabel,
   automationStatusLabel,
+  automationTestRunFailed,
+  automationTestRunRequestFailed,
+  automationTestRunSkipped,
+  automationTestRunSucceeded,
   automationTriggerConditionLabel,
   automationTriggerTypeLabel,
   supportCopyFailed,
@@ -93,5 +102,43 @@ describe('meta-automation-labels', () => {
     expect(supportCopyFailed('Network down', true)).toBe('复制失败：Network down')
     expect(supportDownloadFailed('Disk full', false)).toBe('Download failed: Disk full')
     expect(supportDownloadFailed('Disk full', true)).toBe('下载失败：Disk full')
+  })
+
+  it('localizes manager card summaries while preserving raw field and view names', () => {
+    expect(automationCardTriggerSummary('record.created', '', false)).toBe('When a record is created')
+    expect(automationCardTriggerSummary('record.updated', '', true)).toBe('当记录更新时')
+    expect(automationCardTriggerSummary('field.changed', '状态', false)).toBe('When "状态" changes')
+    expect(automationCardTriggerSummary('field.changed', 'Status', true)).toBe('当“Status”变化时')
+    expect(automationCardTriggerSummary('future.trigger', '', true)).toBe('future.trigger')
+
+    expect(automationCardActionSummary('notify', '', true)).toBe('发送通知')
+    expect(automationCardActionSummary('update_field', '状态', false)).toBe('Update "状态"')
+    expect(automationCardActionSummary('update_field', 'Status', true)).toBe('更新“Status”')
+    expect(automationCardActionSummary('future_action', '', true)).toBe('future_action')
+
+    expect(automationCardLinkLabel('publicForm', '我的视图', false)).toBe('Open public form: 我的视图')
+    expect(automationCardLinkLabel('internalView', 'Grid', true)).toBe('打开内部处理视图：Grid')
+    expect(automationCardLinkSummary('publicForm', '我的视图', false)).toBe('Public form: 我的视图')
+    expect(automationCardLinkSummary('internalView', 'Grid', true)).toBe('内部处理：Grid')
+
+    expect(automationCardStats(1, 'ok', false)).toBe('1 ok')
+    expect(automationCardStats(3, 'fail', true)).toBe('3 失败')
+  })
+
+  it('localizes manager test-run messages with raw details and empty fallbacks', () => {
+    expect(automationTestRunRequestFailed('Automation service unavailable', false)).toBe('Test run request failed: Automation service unavailable')
+    expect(automationTestRunRequestFailed('', false)).toBe('Test run request failed: Unknown error')
+    expect(automationTestRunRequestFailed('服务异常', true)).toBe('测试运行请求失败：服务异常')
+    expect(automationTestRunRequestFailed('', true)).toBe('测试运行请求失败：未知错误')
+
+    expect(automationTestRunFailed('DingTalk robot keyword blocked', false)).toBe('Test run failed: DingTalk robot keyword blocked')
+    expect(automationTestRunFailed('', false)).toBe('Test run failed: At least one action failed.')
+    expect(automationTestRunFailed('钉钉机器人关键字拦截', true)).toBe('测试运行失败：钉钉机器人关键字拦截')
+    expect(automationTestRunFailed('', true)).toBe('测试运行失败：至少一个动作失败。')
+
+    expect(automationTestRunSucceeded(' (32 ms)', false)).toBe('Test run succeeded (32 ms).')
+    expect(automationTestRunSucceeded('', true)).toBe('测试运行成功。')
+    expect(automationTestRunSkipped(' (4 ms)', false)).toBe('Test run skipped (4 ms).')
+    expect(automationTestRunSkipped('', true)).toBe('测试运行已跳过。')
   })
 })

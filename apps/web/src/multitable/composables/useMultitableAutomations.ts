@@ -1,12 +1,19 @@
 import { ref } from 'vue'
 import type { AutomationRule } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
+import { useLocale } from '../../composables/useLocale'
+import { automationLabel } from '../utils/meta-automation-labels'
 
 export function useMultitableAutomations(client?: MultitableApiClient) {
   const api = client ?? multitableClient
+  const { isZh } = useLocale()
   const rules = ref<AutomationRule[]>([])
   const loading = ref(false)
   const error = ref<string | null>(null)
+
+  function errorMessage(e: any, fallbackKey: Parameters<typeof automationLabel>[0]): string {
+    return e?.message ?? automationLabel(fallbackKey, isZh.value)
+  }
 
   async function loadRules(sheetId: string): Promise<void> {
     loading.value = true
@@ -14,7 +21,7 @@ export function useMultitableAutomations(client?: MultitableApiClient) {
     try {
       rules.value = await api.listAutomationRules(sheetId)
     } catch (e: any) {
-      error.value = e.message ?? 'Failed to load automation rules'
+      error.value = errorMessage(e, 'error.loadRules')
     } finally {
       loading.value = false
     }
@@ -29,7 +36,7 @@ export function useMultitableAutomations(client?: MultitableApiClient) {
       const created = await api.createAutomationRule(sheetId, rule)
       rules.value = [created, ...rules.value]
     } catch (e: any) {
-      error.value = e.message ?? 'Failed to create automation rule'
+      error.value = errorMessage(e, 'error.createRule')
       throw e
     }
   }
@@ -43,7 +50,7 @@ export function useMultitableAutomations(client?: MultitableApiClient) {
         rules.value[idx] = { ...rules.value[idx], ...updates }
       }
     } catch (e: any) {
-      error.value = e.message ?? 'Failed to update automation rule'
+      error.value = errorMessage(e, 'error.updateRule')
       throw e
     }
   }
@@ -54,7 +61,7 @@ export function useMultitableAutomations(client?: MultitableApiClient) {
       await api.deleteAutomationRule(sheetId, ruleId)
       rules.value = rules.value.filter((r) => r.id !== ruleId)
     } catch (e: any) {
-      error.value = e.message ?? 'Failed to delete automation rule'
+      error.value = errorMessage(e, 'error.deleteRule')
       throw e
     }
   }

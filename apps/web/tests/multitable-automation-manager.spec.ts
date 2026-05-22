@@ -14,6 +14,7 @@ function flushPromises() {
 }
 import MetaAutomationManager from '../src/multitable/components/MetaAutomationManager.vue'
 import { MultitableApiClient } from '../src/multitable/api/client'
+import { useLocale } from '../src/composables/useLocale'
 import { AppRouteNames } from '../src/router/types'
 import type { AutomationRule, DingTalkGroupDelivery, DingTalkPersonDelivery } from '../src/multitable/types'
 
@@ -38,6 +39,7 @@ function mockClient(
     testErrorMessage?: string
     groupDeliveryErrorMessage?: string
     personDeliveryErrorMessage?: string
+    rulesErrorMessage?: string | null
     stats?: Record<string, unknown>
     dingTalkGroups?: Array<Record<string, unknown>>
   } = {},
@@ -144,6 +146,12 @@ function mockClient(
       }
       if (url.endsWith('/stats')) {
         return ok(options.stats ?? { total: 1, success: 1, failed: 0, skipped: 0, avgDuration: 32 })
+      }
+      if (options.rulesErrorMessage !== undefined) {
+        if (options.rulesErrorMessage === null) {
+          return new Response(JSON.stringify({}), { status: 500, headers: { 'Content-Type': 'application/json' } })
+        }
+        return apiError(options.rulesErrorMessage)
       }
       return ok({ rules })
     }
@@ -287,6 +295,7 @@ describe('MetaAutomationManager', () => {
   const originalClipboard = navigator.clipboard
 
   beforeEach(() => {
+    useLocale().setLocale('en')
     routerPushMock.mockClear()
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
@@ -297,6 +306,7 @@ describe('MetaAutomationManager', () => {
   })
 
   afterEach(() => {
+    useLocale().setLocale('en')
     document.body.innerHTML = ''
     vi.restoreAllMocks()
     Object.defineProperty(navigator, 'clipboard', {
@@ -314,6 +324,127 @@ describe('MetaAutomationManager', () => {
     expect(cards.length).toBe(1)
     expect(container.querySelector('.meta-automation__card-name')?.textContent).toBe('Notify on create')
     expect(container.querySelector('.meta-automation__card-desc')?.textContent).toContain('Send notification')
+  })
+
+  it('localizes zh-CN manager card chrome while preserving raw rule data and selectors', async () => {
+    useLocale().setLocale('zh-CN')
+    const { client } = mockClient([
+      fakeRule({
+        name: 'Raw 规则名',
+        triggerType: 'field.changed',
+        triggerConfig: { fieldId: 'fld_1' },
+        actionType: 'update_field',
+        actionConfig: { fieldId: 'fld_2', value: 'Done' },
+        enabled: false,
+      }),
+    ], { stats: { total: 4, success: 1, failed: 3, skipped: 0, avgDuration: 32 } })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    await flushPromises()
+
+    const card = container.querySelector('[data-automation-rule="rule_1"]') as HTMLElement
+    expect(container.querySelector('.meta-automation__title')?.textContent).toBe('自动化')
+    expect(card).not.toBeNull()
+    expect(card.getAttribute('data-automation-rule')).toBe('rule_1')
+    expect(card.querySelector('.meta-automation__card-name')?.textContent).toBe('Raw 规则名')
+    expect(card.querySelector('.meta-automation__card-desc')?.textContent).toContain('当“Status”变化时 → 更新“Name”')
+    expect(card.querySelector('.meta-automation__toggle')?.textContent).toContain('已停用')
+    expect(card.querySelector('.meta-automation__stat--success')?.textContent).toBe('1 成功')
+    expect(card.querySelector('.meta-automation__stat--failed')?.textContent).toBe('3 失败')
+    expect(card.querySelector('[data-automation-edit="true"]')?.textContent).toContain('编辑')
+    expect(card.querySelector('[data-automation-delete="true"]')?.textContent).toContain('删除')
+  })
+
+  it('localizes zh-CN quick legacy form chrome without translating raw data attributes', async () => {
+    useLocale().setLocale('zh-CN')
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('[data-automation-new-rule="quick"]') as HTMLButtonElement
+    expect(addBtn.textContent).toContain('快速旧版表单')
+    addBtn.click()
+    await nextTick()
+
+    const nameInput = container.querySelector('[data-automation-field="name"]') as HTMLInputElement
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    expect(container.querySelector('.meta-automation__form-title')?.textContent).toContain('新建自动化')
+    expect(nameInput.placeholder).toBe('自动化名称')
+    expect(actionSelect.value).toBe('notify')
+    expect(Array.from(actionSelect.options).map((option) => option.value)).toEqual([
+      'notify',
+      'update_field',
+      'send_dingtalk_group_message',
+      'send_dingtalk_person_message',
+    ])
+    expect(actionSelect.textContent).toContain('发送通知')
+    expect((container.querySelector('[data-automation-field="notifyMessage"]') as HTMLInputElement).placeholder).toBe('通知内容')
+    expect(container.querySelectorAll('[aria-label]')).toHaveLength(0)
+    expect(container.querySelectorAll('[title]')).toHaveLength(0)
+    expect(container.querySelectorAll('[placeholder]')).toHaveLength(2)
+
+    actionSelect.value = 'update_field'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    const targetField = container.querySelector('[data-automation-field="targetFieldId"]') as HTMLSelectElement
+    const targetValue = container.querySelector('[data-automation-field="targetValue"]') as HTMLInputElement
+    expect(targetField.value).toBe('')
+    expect(targetValue.placeholder).toBe('新值')
+    expect(container.querySelector('.meta-automation__btn--primary')?.textContent).toContain('创建')
+    expect(container.querySelectorAll('[placeholder]')).toHaveLength(2)
+  })
+
+  it('localizes zh-CN card-level DingTalk links and preserves raw access summaries', async () => {
+    useLocale().setLocale('zh-CN')
+    const zhViews = [
+      { id: 'view_grid', sheetId: 'sheet_1', name: '内部视图', type: 'grid' },
+      {
+        id: 'view_form',
+        sheetId: 'sheet_1',
+        name: '我的视图',
+        type: 'form',
+        config: { publicForm: { enabled: true, publicToken: 'pub_view_form' } },
+      },
+    ]
+    const { client } = mockClient([
+      fakeRule({
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: {
+          destinationId: 'dt_1',
+          publicFormViewId: 'view_form',
+          internalViewId: 'view_grid',
+        },
+      }),
+    ])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views: zhViews, client })
+    await flushPromises()
+
+    const desc = container.querySelector('[data-automation-rule="rule_1"] .meta-automation__card-desc')
+    expect(desc?.textContent).toContain('公开表单：我的视图')
+    expect(desc?.textContent).toContain('内部处理：内部视图')
+    expect(container.querySelector('[data-automation-card-link="public-form:view_form"]')?.textContent)
+      .toContain('打开公开表单：我的视图')
+    expect(container.querySelector('[data-automation-card-link="internal-view:view_grid"]')?.textContent)
+      .toContain('打开内部处理视图：内部视图')
+    expect(container.querySelector('[data-automation-card-link-audience="public-form:view_form"]')?.textContent)
+      .toContain('允许范围：Anyone with the link can submit')
+    expect(container.querySelector('[data-automation-card-link-access="public-form:view_form"]')?.getAttribute('data-access-level'))
+      .toBe('public')
+  })
+
+  it('localizes zh-CN frontend fallback errors from the automation composable at event time', async () => {
+    useLocale().setLocale('zh-CN')
+    const client = {
+      listDingTalkGroups: vi.fn(async () => []),
+      listAutomationRules: vi.fn(async () => {
+        throw {}
+      }),
+    } as unknown as MultitableApiClient
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    expect(container.querySelector('.meta-automation__error')?.textContent).toBe('加载自动化规则失败')
   })
 
   it('describes V1 multi-action DingTalk group rules in the list', async () => {
@@ -2350,6 +2481,83 @@ describe('MetaAutomationManager', () => {
     expect(container.querySelector('[data-field="testRunStatus"]')?.textContent).toContain('Test run succeeded (32 ms)')
     expect(container.querySelector('[data-automation-test-status="rule_1"]')?.textContent).toContain('Test run succeeded (32 ms)')
     expect(fetchFn.mock.calls.filter(([url]) => String(url).endsWith('/stats')).length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('localizes zh-CN automation test run messages while preserving raw durations and backend errors', async () => {
+    useLocale().setLocale('zh-CN')
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    let resolveExecution!: (value: Record<string, unknown>) => void
+    const testExecution = new Promise<Record<string, unknown>>((resolve) => {
+      resolveExecution = resolve
+    })
+    const { client } = mockClient([
+      fakeRule({
+        name: 'DingTalk group notify',
+        actionType: 'send_dingtalk_group_message',
+        actionConfig: {
+          destinationId: 'dt_1',
+          titleTemplate: 'Ticket {{recordId}}',
+          bodyTemplate: 'Please fill {{record.status}}',
+        },
+        actions: [{
+          type: 'send_dingtalk_group_message',
+          config: { destinationId: 'dt_1', titleTemplate: 'Ticket {{recordId}}', bodyTemplate: 'Please fill' },
+        }],
+      }),
+    ], { testExecution })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    ;(container.querySelector('[data-automation-edit="true"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    const testBtn = container.querySelector('[data-action="test"]') as HTMLButtonElement
+    expect(testBtn.disabled).toBe(false)
+    expect(container.textContent).toContain('可能向已配置的钉钉群或用户发送真实消息')
+
+    testBtn.click()
+    await nextTick()
+
+    expect(container.querySelector('[data-field="testRunStatus"]')?.textContent)
+      .toContain('正在运行测试。钉钉动作可能发送真实消息。')
+
+    resolveExecution({
+      id: 'exec_1',
+      ruleId: 'rule_1',
+      status: 'success',
+      triggeredBy: 'test',
+      triggeredAt: '2026-04-21T00:00:00.000Z',
+      duration: 32,
+      steps: [],
+    })
+    await flushPromises()
+
+    expect(container.querySelector('[data-field="testRunStatus"]')?.textContent).toContain('测试运行成功 (32 ms)。')
+    expect(container.querySelector('[data-automation-test-status="rule_1"]')?.textContent).toContain('测试运行成功 (32 ms)。')
+  })
+
+  it('localizes zh-CN automation test run request failures with raw backend messages', async () => {
+    useLocale().setLocale('zh-CN')
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { client } = mockClient([
+      fakeRule({
+        name: 'DingTalk person notify',
+        actionType: 'send_dingtalk_person_message',
+        actionConfig: { userIds: ['user_1'], titleTemplate: 'Ticket {{recordId}}', bodyTemplate: 'Please fill' },
+        actions: [{ type: 'send_dingtalk_person_message', config: { userIds: ['user_1'] } }],
+      }),
+    ], { testErrorMessage: 'Automation service unavailable' })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    ;(container.querySelector('[data-automation-edit="true"]') as HTMLButtonElement).click()
+    await flushPromises()
+    ;(container.querySelector('[data-action="test"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(container.querySelector('[data-field="testRunStatus"]')?.textContent)
+      .toContain('测试运行请求失败：Automation service unavailable')
+    expect(container.querySelector('[data-field="testRunStatus"]')?.getAttribute('data-status')).toBe('failed')
   })
 
   it('uses a generic running message for non-DingTalk automation tests', async () => {
