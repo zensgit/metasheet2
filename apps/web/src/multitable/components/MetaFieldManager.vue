@@ -391,9 +391,9 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type { FieldValidationRule, MetaField, MetaFieldCreateType, MetaSheet } from '../types'
 import {
-  FORMULA_FUNCTION_CATEGORIES,
   buildFormulaFieldTokenInsertion,
   buildFormulaFunctionInsertion,
+  getFormulaFunctionCategories,
   getFormulaFunctionCatalog,
   validateFormulaExpression,
   type FormulaFunctionCategory,
@@ -588,7 +588,7 @@ const formulaDraft = reactive<{ expression: string }>({
 })
 const formulaFunctionSearch = ref('')
 const formulaFunctionCategory = ref<FormulaFunctionCategory | 'all'>('all')
-const formulaFunctionCategories = FORMULA_FUNCTION_CATEGORIES
+const formulaFunctionCategories = computed(() => getFormulaFunctionCategories(isZh.value))
 const attachmentDraft = reactive<{ maxFiles: number; acceptedMimeTypesText: string }>({
   maxFiles: 1,
   acceptedMimeTypesText: '',
@@ -632,12 +632,12 @@ const formulaSourceFields = computed(() =>
   props.fields.filter((field) => field.id !== configTarget.value?.id && field.type !== 'formula'),
 )
 const formulaCatalogSections = computed(() =>
-  getFormulaFunctionCatalog(formulaFunctionSearch.value, formulaFunctionCategory.value)
+  getFormulaFunctionCatalog(formulaFunctionSearch.value, formulaFunctionCategory.value, isZh.value)
     .map((section) => ({ ...section, functions: section.functions.slice(0, 6) })),
 )
 const formulaDiagnostics = computed<FormulaDiagnostic[]>(() =>
   configTargetType.value === 'formula'
-    ? validateFormulaExpression(formulaDraft.expression, formulaSourceFields.value)
+    ? validateFormulaExpression(formulaDraft.expression, formulaSourceFields.value, isZh.value)
     : [],
 )
 const configTargetType = computed(() => {

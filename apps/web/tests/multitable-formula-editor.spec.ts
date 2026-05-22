@@ -1,11 +1,13 @@
 import { createApp, h, nextTick } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import MetaFieldManager from '../src/multitable/components/MetaFieldManager.vue'
 import {
   FORMULA_FUNCTION_DOCS,
   buildFormulaFieldTokenInsertion,
   buildFormulaFunctionInsertion,
   extractFormulaFieldRefs,
+  getFormulaFunctionCategories,
   getFormulaFunctionCatalog,
   searchFormulaFunctionDocs,
   validateFormulaExpression,
@@ -13,6 +15,7 @@ import {
 
 describe('multitable formula editor', () => {
   afterEach(() => {
+    useLocale().setLocale('en')
     document.body.innerHTML = ''
     vi.restoreAllMocks()
   })
@@ -106,6 +109,41 @@ describe('multitable formula editor', () => {
     expect(buildFormulaFunctionInsertion('', ifDoc!)).toBe('=IF(, , )')
     expect(buildFormulaFunctionInsertion('=SUM({fld_price})', 'today')).toBe('=SUM({fld_price}) TODAY()')
     expect(buildFormulaFieldTokenInsertion('=SUM()', 'fld_tax')).toBe('=SUM() {fld_tax}')
+  })
+
+  it('localizes formula catalogs and diagnostics when requested', () => {
+    expect(getFormulaFunctionCategories(true).find((category) => category.id === 'math')).toMatchObject({
+      label: '数学',
+      description: '对数字进行舍入、转换和比较。',
+    })
+
+    expect(searchFormulaFunctionDocs('SUM', true)[0]).toMatchObject({
+      name: 'SUM',
+      signature: 'SUM(number, ...)',
+      description: '将数字值相加。',
+      example: '=SUM({fld_price}, {fld_tax})',
+      insertText: 'SUM()',
+    })
+    expect(searchFormulaFunctionDocs('Adds', true).map((doc) => doc.name)).toContain('SUM')
+    expect(searchFormulaFunctionDocs('相加', true).map((doc) => doc.name)).toEqual(expect.arrayContaining(['SUM', 'ADD']))
+
+    const fields = [{ id: 'fld_price', name: 'Price', type: 'number' }]
+    expect(validateFormulaExpression('', fields, true)).toContainEqual({
+      severity: 'warning',
+      message: '公式表达式为空。',
+    })
+    expect(validateFormulaExpression('=ROUND(, 2)', fields, true)).toContainEqual({
+      severity: 'error',
+      message: 'ROUND 存在空参数。',
+    })
+    expect(validateFormulaExpression('=SUM({Price})', fields, true)).toContainEqual({
+      severity: 'warning',
+      message: '字段引用 {Price} 使用了名称。请使用字段标签插入稳定的 {fld_xxx} 令牌。',
+    })
+    expect(validateFormulaExpression('=FOO({fld_price})', fields, true)).toContainEqual({
+      severity: 'warning',
+      message: 'FOO 尚未在此编辑器中记录。',
+    })
   })
 
   it('documents every backend registered formula function', () => {
@@ -305,6 +343,53 @@ describe('multitable formula editor', () => {
     expect(container.textContent).toContain('Operators')
     expect(container.textContent).toContain('value%')
     expect(container.textContent).toContain('left ^ right')
+
+    app.unmount()
+  })
+
+  it('renders localized formula reference chrome while preserving raw formula syntax', async () => {
+    useLocale().setLocale('zh-CN')
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaFieldManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          sheets: [],
+          fields: [
+            { id: 'fld_price', name: 'Price', type: 'number' },
+            { id: 'fld_total', name: 'Total', type: 'formula', property: { expression: '=SUM({fld_missing})' } },
+          ],
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    const configureButtons = Array.from(container.querySelectorAll('.meta-field-mgr__action[title="配置"]')) as HTMLButtonElement[]
+    configureButtons[1]?.click()
+    await nextTick()
+
+    const categorySelect = container.querySelector('.meta-field-mgr__formula-toolbar .meta-field-mgr__select') as HTMLSelectElement
+    expect(categorySelect.querySelector('option[value="math"]')?.textContent).toBe('数学')
+    categorySelect.value = 'math'
+    categorySelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    expect(container.textContent).toContain('数学')
+    expect(container.textContent).toContain('将数字舍入到指定小数位。')
+    expect(container.textContent).toContain('ROUND(number, digits)')
+    expect(container.textContent).toContain('=ROUND({fld_amount}, 2)')
+    expect(container.textContent).toContain('未知字段引用 {fld_missing}。')
+    expect(container.textContent).not.toContain('Unknown field reference {fld_missing}.')
+    expect(container.querySelector('.meta-field-mgr__formula-diagnostic--error')).toBeTruthy()
+    expect(container.querySelectorAll('[aria-label]')).toHaveLength(0)
+    expect(container.querySelectorAll('[title]')).toHaveLength(13)
+    expect(container.querySelectorAll('[placeholder]')).toHaveLength(3)
 
     app.unmount()
   })
