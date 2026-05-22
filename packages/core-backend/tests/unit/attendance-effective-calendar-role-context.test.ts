@@ -243,4 +243,68 @@ describe('attendance effective calendar role context', () => {
       source: 'rule',
     })
   })
+
+  it('falls back to the pre-rule-set group lookup when rule_set_id schema is missing', async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('FROM attendance_rules')) {
+        return [
+          {
+            id: 'default-rule',
+            name: 'Default rule',
+            timezone: 'UTC',
+            work_start_time: '09:00',
+            work_end_time: '18:00',
+            late_grace_minutes: 10,
+            early_grace_minutes: 10,
+            rounding_minutes: 5,
+            working_days: [1, 2, 3, 4, 5],
+            is_default: true,
+            org_id: 'default',
+          },
+        ]
+      }
+      if (sql.includes('FROM attendance_holidays')) return []
+      if (sql.includes('FROM attendance_groups') && sql.includes('rule_set_id')) {
+        const error = new Error('column "rule_set_id" does not exist') as Error & { code?: string }
+        error.code = '42703'
+        throw error
+      }
+      if (sql.includes('FROM attendance_groups')) {
+        return [
+          {
+            id: 'group-legacy',
+            name: 'Legacy Ops',
+            code: 'legacy_ops',
+            timezone: 'Asia/Tokyo',
+          },
+        ]
+      }
+      if (sql.includes('FROM attendance_rule_sets')) {
+        throw new Error('rule-set lookup should not run after schema fallback')
+      }
+      return []
+    })
+
+    const result = await helpers.resolveEffectiveCalendar({ query }, {
+      orgId: 'default',
+      from: '2026-10-10',
+      to: '2026-10-10',
+      groupId: 'legacy_ops',
+      calendarPolicyOverrides: [],
+    })
+
+    expect(result.timezone).toBe('UTC')
+    expect(result.items[0]?.base).toMatchObject({
+      isWorkingDay: false,
+      source: 'rule',
+    })
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('SELECT id, name, code, timezone, rule_set_id'),
+      ['default', 'legacy_ops'],
+    )
+    expect(query).toHaveBeenCalledWith(
+      expect.not.stringContaining('rule_set_id'),
+      ['default', 'legacy_ops'],
+    )
+  })
 })

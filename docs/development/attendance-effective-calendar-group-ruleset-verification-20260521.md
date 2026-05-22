@@ -8,8 +8,8 @@ Branch: `codex/attendance-effective-calendar-group-ruleset-20260521`
 | Layer | Command | Result |
 | --- | --- | --- |
 | Plugin syntax | `node --check plugins/plugin-attendance/index.cjs` | PASS |
-| Focused backend unit | `pnpm --filter @metasheet/core-backend exec vitest run tests/unit/attendance-effective-calendar-role-context.test.ts --reporter=dot` | PASS, 5 tests |
-| Backend catalog/formula/effective-calendar regression | `pnpm --filter @metasheet/core-backend exec vitest run tests/unit/attendance-report-field-catalog.test.ts tests/unit/attendance-report-field-formula-engine.test.ts tests/unit/attendance-effective-calendar-role-context.test.ts --reporter=dot` | PASS, 61 tests |
+| Focused backend unit | `pnpm --filter @metasheet/core-backend exec vitest run tests/unit/attendance-effective-calendar-role-context.test.ts --reporter=dot` | PASS, 6 tests |
+| Backend catalog/formula/effective-calendar regression | `pnpm --filter @metasheet/core-backend exec vitest run tests/unit/attendance-report-field-catalog.test.ts tests/unit/attendance-report-field-formula-engine.test.ts tests/unit/attendance-effective-calendar-role-context.test.ts --reporter=dot` | PASS, 62 tests |
 | Backend build | `pnpm --filter @metasheet/core-backend build` | PASS |
 | Frontend type-check | `pnpm --filter @metasheet/web type-check` | PASS |
 | Whitespace | `git diff --check` | PASS |
@@ -23,6 +23,10 @@ Branch: `codex/attendance-effective-calendar-group-ruleset-20260521`
   falling back to the group timezone.
 - A group without `rule_set_id` does not query `attendance_rule_sets` and
   retains the default-rule Saturday rest-day result.
+- Legacy schema fallback is covered: if the new group lookup sees PostgreSQL
+  `42703` for missing `rule_set_id`, the resolver retries the exact pre-slice
+  group lookup shape, keeps default-rule behavior, and does not query
+  `attendance_rule_sets`.
 
 Semantic note: User belonging to a group with `rule_set_id` will see different
 calendars between `groupId`-mode preview and `userId`-mode preview; this is the
