@@ -29,6 +29,7 @@ export function applyDingTalkNotificationPreset(
   config: DingTalkNotificationPresetConfig,
   preset: DingTalkNotificationPreset,
   views: MetaView[],
+  isZh = false,
 ): DingTalkNotificationPresetConfig {
   const formViewId = pickDefaultFormViewId(views, config.publicFormViewId)
   const internalViewId = pickDefaultInternalViewId(views, config.internalViewId)
@@ -36,8 +37,10 @@ export function applyDingTalkNotificationPreset(
   if (preset === 'form_request') {
     return {
       ...config,
-      titleTemplate: '{{recordId}} 待填写',
-      bodyTemplate: '请完成本次表单填写。\n记录编号：{{recordId}}\n触发人：{{actorId}}',
+      titleTemplate: isZh ? '{{recordId}} 待填写' : '{{recordId}} needs input',
+      bodyTemplate: isZh
+        ? '请完成本次表单填写。\n记录编号：{{recordId}}\n触发人：{{actorId}}'
+        : 'Please complete this form request.\nRecord ID: {{recordId}}\nActor: {{actorId}}',
       publicFormViewId: formViewId,
       internalViewId: '',
     }
@@ -46,8 +49,10 @@ export function applyDingTalkNotificationPreset(
   if (preset === 'internal_process') {
     return {
       ...config,
-      titleTemplate: '{{recordId}} 待处理',
-      bodyTemplate: '请查看并处理该记录。\n记录编号：{{recordId}}\n触发人：{{actorId}}',
+      titleTemplate: isZh ? '{{recordId}} 待处理' : '{{recordId}} needs processing',
+      bodyTemplate: isZh
+        ? '请查看并处理该记录。\n记录编号：{{recordId}}\n触发人：{{actorId}}'
+        : 'Please review and process this record.\nRecord ID: {{recordId}}\nActor: {{actorId}}',
       publicFormViewId: '',
       internalViewId,
     }
@@ -55,8 +60,10 @@ export function applyDingTalkNotificationPreset(
 
   return {
     ...config,
-    titleTemplate: '{{recordId}} 待填写并处理',
-    bodyTemplate: '请先填写所需信息，并由有权限成员继续处理该记录。\n记录编号：{{recordId}}\n触发人：{{actorId}}',
+    titleTemplate: isZh ? '{{recordId}} 待填写并处理' : '{{recordId}} needs input and processing',
+    bodyTemplate: isZh
+      ? '请先填写所需信息，并由有权限成员继续处理该记录。\n记录编号：{{recordId}}\n触发人：{{actorId}}'
+      : 'Please complete the required form input, then continue processing this record.\nRecord ID: {{recordId}}\nActor: {{actorId}}',
     publicFormViewId: formViewId,
     internalViewId,
   }

@@ -35,6 +35,18 @@ export type AutomationCronPresetValue =
 
 export type AutomationCardLinkVariant = 'publicForm' | 'internalView'
 export type AutomationCardStatType = 'ok' | 'fail'
+export type AutomationDingTalkPreset = 'form_request' | 'internal_process' | 'form_and_process'
+export type AutomationDingTalkTemplateTokenKey = 'recordId' | 'sheetId' | 'actorId' | 'recordField'
+export type AutomationDingTalkDestinationScope = 'private' | 'sheet' | 'org'
+export type AutomationDingTalkPersonSubject = 'user' | 'member-group'
+export type AutomationDingTalkPersonStatus =
+  | 'memberGroupCheckedIndividually'
+  | 'noDeliveryLink'
+  | 'deliveryReadyGrantEnabled'
+  | 'deliveryReadyGrantDisabled'
+  | 'notBound'
+  | 'boundGrantEnabled'
+  | 'boundGrantDisabled'
 
 export type AutomationLabelKey =
   | 'log.title'
@@ -144,6 +156,76 @@ export type AutomationLabelKey =
   | 'manager.testRunning'
   | 'manager.testRunningDingTalkWarning'
   | 'manager.testRunAtLeastOneActionFailed'
+  | 'dingtalk.preset'
+  | 'dingtalk.addGroups'
+  | 'dingtalk.addGroupOption'
+  | 'dingtalk.groupsRegisteredHint'
+  | 'dingtalk.noGroupsAvailable'
+  | 'dingtalk.remove'
+  | 'dingtalk.recordGroupFieldPaths'
+  | 'dingtalk.recordGroupFieldPathHint'
+  | 'dingtalk.pickGroupField'
+  | 'dingtalk.pickFieldOption'
+  | 'dingtalk.searchUsersOrGroups'
+  | 'dingtalk.searchUsersOrGroupsPlaceholder'
+  | 'dingtalk.searchingUsersOrGroups'
+  | 'dingtalk.noMatchingUsersOrGroups'
+  | 'dingtalk.inactiveUsersCannotBeAdded'
+  | 'dingtalk.localUserIds'
+  | 'dingtalk.localUserIdsPlaceholder'
+  | 'dingtalk.memberGroupIds'
+  | 'dingtalk.memberGroupIdsPlaceholder'
+  | 'dingtalk.recordRecipientFieldPaths'
+  | 'dingtalk.recordRecipientFieldPathPlaceholder'
+  | 'dingtalk.pickRecipientField'
+  | 'dingtalk.chooseUserFieldOption'
+  | 'dingtalk.recordRecipientFieldPathHint'
+  | 'dingtalk.recordMemberGroupFieldPaths'
+  | 'dingtalk.recordMemberGroupFieldPathPlaceholder'
+  | 'dingtalk.pickMemberGroupField'
+  | 'dingtalk.chooseMemberGroupFieldOption'
+  | 'dingtalk.recordMemberGroupFieldPathHint'
+  | 'dingtalk.titleTemplate'
+  | 'dingtalk.titleTemplatePlaceholder'
+  | 'dingtalk.bodyTemplate'
+  | 'dingtalk.bodyTemplatePlaceholder'
+  | 'dingtalk.templateTokens'
+  | 'dingtalk.publicFormView'
+  | 'dingtalk.noPublicFormLinkOption'
+  | 'dingtalk.internalProcessingView'
+  | 'dingtalk.noInternalLinkOption'
+  | 'dingtalk.noInternalLink'
+  | 'dingtalk.messageSummary'
+  | 'dingtalk.groups'
+  | 'dingtalk.recordGroups'
+  | 'dingtalk.recipients'
+  | 'dingtalk.recordRecipients'
+  | 'dingtalk.recordMemberGroups'
+  | 'dingtalk.noGroupsSelected'
+  | 'dingtalk.noRecipientsSelected'
+  | 'dingtalk.noDynamicGroupField'
+  | 'dingtalk.noDynamicRecipientField'
+  | 'dingtalk.noDynamicMemberGroupField'
+  | 'dingtalk.renderedTitle'
+  | 'dingtalk.renderedBody'
+  | 'dingtalk.noTitleTemplate'
+  | 'dingtalk.noBodyTemplate'
+  | 'dingtalk.noRenderedTitle'
+  | 'dingtalk.noRenderedBody'
+  | 'dingtalk.copy'
+  | 'dingtalk.copied'
+  | 'dingtalk.publicForm'
+  | 'dingtalk.publicFormAccess'
+  | 'dingtalk.allowedAudience'
+  | 'dingtalk.internalProcessing'
+  | 'dingtalk.noPublicFormLink'
+  | 'dingtalk.allowedAudienceUnavailable'
+  | 'dingtalk.viewUnavailable'
+  | 'dingtalk.selectedViewNotForm'
+  | 'dingtalk.publicFormNotConfigured'
+  | 'dingtalk.publicFormDisabled'
+  | 'dingtalk.publicFormMissingToken'
+  | 'dingtalk.publicFormExpired'
   | 'error.loadGroupDeliveries'
   | 'error.loadPersonDeliveries'
   | 'error.loadRules'
@@ -266,6 +348,76 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'manager.testRunning',
   'manager.testRunningDingTalkWarning',
   'manager.testRunAtLeastOneActionFailed',
+  'dingtalk.preset',
+  'dingtalk.addGroups',
+  'dingtalk.addGroupOption',
+  'dingtalk.groupsRegisteredHint',
+  'dingtalk.noGroupsAvailable',
+  'dingtalk.remove',
+  'dingtalk.recordGroupFieldPaths',
+  'dingtalk.recordGroupFieldPathHint',
+  'dingtalk.pickGroupField',
+  'dingtalk.pickFieldOption',
+  'dingtalk.searchUsersOrGroups',
+  'dingtalk.searchUsersOrGroupsPlaceholder',
+  'dingtalk.searchingUsersOrGroups',
+  'dingtalk.noMatchingUsersOrGroups',
+  'dingtalk.inactiveUsersCannotBeAdded',
+  'dingtalk.localUserIds',
+  'dingtalk.localUserIdsPlaceholder',
+  'dingtalk.memberGroupIds',
+  'dingtalk.memberGroupIdsPlaceholder',
+  'dingtalk.recordRecipientFieldPaths',
+  'dingtalk.recordRecipientFieldPathPlaceholder',
+  'dingtalk.pickRecipientField',
+  'dingtalk.chooseUserFieldOption',
+  'dingtalk.recordRecipientFieldPathHint',
+  'dingtalk.recordMemberGroupFieldPaths',
+  'dingtalk.recordMemberGroupFieldPathPlaceholder',
+  'dingtalk.pickMemberGroupField',
+  'dingtalk.chooseMemberGroupFieldOption',
+  'dingtalk.recordMemberGroupFieldPathHint',
+  'dingtalk.titleTemplate',
+  'dingtalk.titleTemplatePlaceholder',
+  'dingtalk.bodyTemplate',
+  'dingtalk.bodyTemplatePlaceholder',
+  'dingtalk.templateTokens',
+  'dingtalk.publicFormView',
+  'dingtalk.noPublicFormLinkOption',
+  'dingtalk.internalProcessingView',
+  'dingtalk.noInternalLinkOption',
+  'dingtalk.noInternalLink',
+  'dingtalk.messageSummary',
+  'dingtalk.groups',
+  'dingtalk.recordGroups',
+  'dingtalk.recipients',
+  'dingtalk.recordRecipients',
+  'dingtalk.recordMemberGroups',
+  'dingtalk.noGroupsSelected',
+  'dingtalk.noRecipientsSelected',
+  'dingtalk.noDynamicGroupField',
+  'dingtalk.noDynamicRecipientField',
+  'dingtalk.noDynamicMemberGroupField',
+  'dingtalk.renderedTitle',
+  'dingtalk.renderedBody',
+  'dingtalk.noTitleTemplate',
+  'dingtalk.noBodyTemplate',
+  'dingtalk.noRenderedTitle',
+  'dingtalk.noRenderedBody',
+  'dingtalk.copy',
+  'dingtalk.copied',
+  'dingtalk.publicForm',
+  'dingtalk.publicFormAccess',
+  'dingtalk.allowedAudience',
+  'dingtalk.internalProcessing',
+  'dingtalk.noPublicFormLink',
+  'dingtalk.allowedAudienceUnavailable',
+  'dingtalk.viewUnavailable',
+  'dingtalk.selectedViewNotForm',
+  'dingtalk.publicFormNotConfigured',
+  'dingtalk.publicFormDisabled',
+  'dingtalk.publicFormMissingToken',
+  'dingtalk.publicFormExpired',
   'error.loadGroupDeliveries',
   'error.loadPersonDeliveries',
   'error.loadRules',
@@ -389,6 +541,76 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'manager.testRunning': { en: 'Running test.', zh: '正在运行测试。' },
   'manager.testRunningDingTalkWarning': { en: 'Running test. DingTalk actions may send real messages.', zh: '正在运行测试。钉钉动作可能发送真实消息。' },
   'manager.testRunAtLeastOneActionFailed': { en: 'At least one action failed.', zh: '至少一个动作失败。' },
+  'dingtalk.preset': { en: 'Message preset', zh: '消息预设' },
+  'dingtalk.addGroups': { en: 'Add DingTalk groups', zh: '添加钉钉群' },
+  'dingtalk.addGroupOption': { en: '-- add DingTalk group --', zh: '-- 添加钉钉群 --' },
+  'dingtalk.groupsRegisteredHint': { en: 'DingTalk groups registered for this table or shared from the organization catalog are listed here.', zh: '此处列出为本表注册或从组织目录共享的钉钉群。' },
+  'dingtalk.noGroupsAvailable': { en: 'No DingTalk groups are available for this table yet. Add one in API Tokens & Webhooks > DingTalk Groups, ask an admin to share an organization catalog group, or use a record group field path below.', zh: '此表暂无可用钉钉群。请在 API Token 与 Webhook > 钉钉群中添加，或让管理员共享组织目录群，也可使用下方记录群字段路径。' },
+  'dingtalk.remove': { en: 'Remove', zh: '移除' },
+  'dingtalk.recordGroupFieldPaths': { en: 'Record group field paths (optional)', zh: '记录群字段路径（可选）' },
+  'dingtalk.recordGroupFieldPathHint': { en: 'Use record fields whose value is a DingTalk group destination ID, not a local user, member group, or DingTalk group name.', zh: '使用值为钉钉群目标 ID 的记录字段，不要使用本地用户、成员组或钉钉群名称。' },
+  'dingtalk.pickGroupField': { en: 'Pick group field', zh: '选择群字段' },
+  'dingtalk.pickFieldOption': { en: '-- pick field --', zh: '-- 选择字段 --' },
+  'dingtalk.searchUsersOrGroups': { en: 'Search and add users or member groups', zh: '搜索并添加用户或成员组' },
+  'dingtalk.searchUsersOrGroupsPlaceholder': { en: 'Search by user, member group, email, or subject ID', zh: '按用户、成员组、邮箱或主体 ID 搜索' },
+  'dingtalk.searchingUsersOrGroups': { en: 'Searching users and member groups...', zh: '正在搜索用户和成员组...' },
+  'dingtalk.noMatchingUsersOrGroups': { en: 'No matching users or member groups', zh: '没有匹配的用户或成员组' },
+  'dingtalk.inactiveUsersCannotBeAdded': { en: 'Inactive users cannot be added', zh: '不能添加已停用用户' },
+  'dingtalk.localUserIds': { en: 'Local user IDs', zh: '本地用户 ID' },
+  'dingtalk.localUserIdsPlaceholder': { en: 'Use comma or newline separated local user IDs', zh: '使用逗号或换行分隔本地 userId' },
+  'dingtalk.memberGroupIds': { en: 'Member group IDs (optional)', zh: '成员组 ID（可选）' },
+  'dingtalk.memberGroupIdsPlaceholder': { en: 'Use comma or newline separated member group IDs', zh: '使用逗号或换行分隔成员组 ID' },
+  'dingtalk.recordRecipientFieldPaths': { en: 'Record recipient field paths (optional)', zh: '记录收件人字段路径（可选）' },
+  'dingtalk.recordRecipientFieldPathPlaceholder': { en: 'Example: record.assigneeUserIds, record.reviewerUserId', zh: '例如：record.assigneeUserIds, record.reviewerUserId' },
+  'dingtalk.pickRecipientField': { en: 'Pick recipient field', zh: '选择收件人字段' },
+  'dingtalk.chooseUserFieldOption': { en: '-- choose a user field --', zh: '-- 选择用户字段 --' },
+  'dingtalk.recordRecipientFieldPathHint': { en: 'Record data is keyed by field ID. Use comma or newline separated record.<fieldId> paths. The picker only lists user fields.', zh: '记录数据以字段 ID 为键。请使用逗号或换行分隔的 record.<fieldId> 路径。选择器仅列出用户字段。' },
+  'dingtalk.recordMemberGroupFieldPaths': { en: 'Record member group field paths (optional)', zh: '记录成员组字段路径（可选）' },
+  'dingtalk.recordMemberGroupFieldPathPlaceholder': { en: 'Example: record.watcherGroupIds, record.escalationGroupId', zh: '例如：record.watcherGroupIds, record.escalationGroupId' },
+  'dingtalk.pickMemberGroupField': { en: 'Pick member group field', zh: '选择成员组字段' },
+  'dingtalk.chooseMemberGroupFieldOption': { en: '-- choose a member group field --', zh: '-- 选择成员组字段 --' },
+  'dingtalk.recordMemberGroupFieldPathHint': { en: 'Use comma or newline separated record.<fieldId> paths whose values resolve to member group IDs. The picker only lists explicit member group fields.', zh: '使用逗号或换行分隔的 record.<fieldId> 路径，字段值应解析为成员组 ID。选择器仅列出显式成员组字段。' },
+  'dingtalk.titleTemplate': { en: 'Title template', zh: '标题模板' },
+  'dingtalk.titleTemplatePlaceholder': { en: 'Example: {{record.title}} needs attention', zh: '例如：{{record.title}} 待处理' },
+  'dingtalk.bodyTemplate': { en: 'Body template', zh: '正文模板' },
+  'dingtalk.bodyTemplatePlaceholder': { en: 'Supports {{record.xxx}}, {{recordId}}, {{sheetId}}, and {{actorId}}', zh: '支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}' },
+  'dingtalk.templateTokens': { en: 'Template tokens', zh: '模板令牌' },
+  'dingtalk.publicFormView': { en: 'Public form view (optional)', zh: '公开表单视图（可选）' },
+  'dingtalk.noPublicFormLinkOption': { en: '-- no public form link --', zh: '-- 无公开表单链接 --' },
+  'dingtalk.internalProcessingView': { en: 'Internal processing view (optional)', zh: '内部处理视图（可选）' },
+  'dingtalk.noInternalLinkOption': { en: '-- no internal link --', zh: '-- 无内部链接 --' },
+  'dingtalk.noInternalLink': { en: 'No internal link', zh: '无内部链接' },
+  'dingtalk.messageSummary': { en: 'Message summary', zh: '消息摘要' },
+  'dingtalk.groups': { en: 'Groups', zh: '群' },
+  'dingtalk.recordGroups': { en: 'Record groups', zh: '记录群' },
+  'dingtalk.recipients': { en: 'Recipients', zh: '收件人' },
+  'dingtalk.recordRecipients': { en: 'Record recipients', zh: '记录收件人' },
+  'dingtalk.recordMemberGroups': { en: 'Record member groups', zh: '记录成员组' },
+  'dingtalk.noGroupsSelected': { en: 'No groups selected', zh: '未选择群' },
+  'dingtalk.noRecipientsSelected': { en: 'No recipients selected', zh: '未选择收件人' },
+  'dingtalk.noDynamicGroupField': { en: 'No dynamic group field', zh: '无动态群字段' },
+  'dingtalk.noDynamicRecipientField': { en: 'No dynamic recipient field', zh: '无动态收件人字段' },
+  'dingtalk.noDynamicMemberGroupField': { en: 'No dynamic member group field', zh: '无动态成员组字段' },
+  'dingtalk.renderedTitle': { en: 'Rendered title', zh: '渲染标题' },
+  'dingtalk.renderedBody': { en: 'Rendered body', zh: '渲染正文' },
+  'dingtalk.noTitleTemplate': { en: 'No title template', zh: '无标题模板' },
+  'dingtalk.noBodyTemplate': { en: 'No body template', zh: '无正文模板' },
+  'dingtalk.noRenderedTitle': { en: 'No rendered title', zh: '无渲染标题' },
+  'dingtalk.noRenderedBody': { en: 'No rendered body', zh: '无渲染正文' },
+  'dingtalk.copy': { en: 'Copy', zh: '复制' },
+  'dingtalk.copied': { en: 'Copied', zh: '已复制' },
+  'dingtalk.publicForm': { en: 'Public form', zh: '公开表单' },
+  'dingtalk.publicFormAccess': { en: 'Public form access', zh: '公开表单访问' },
+  'dingtalk.allowedAudience': { en: 'Allowed audience', zh: '允许范围' },
+  'dingtalk.internalProcessing': { en: 'Internal processing', zh: '内部处理' },
+  'dingtalk.noPublicFormLink': { en: 'No public form link', zh: '无公开表单链接' },
+  'dingtalk.allowedAudienceUnavailable': { en: 'Allowed audience unavailable', zh: '允许范围不可用' },
+  'dingtalk.viewUnavailable': { en: 'View unavailable in this sheet', zh: '此表中不可用的视图' },
+  'dingtalk.selectedViewNotForm': { en: 'Selected view is not a form', zh: '所选视图不是表单视图' },
+  'dingtalk.publicFormNotConfigured': { en: 'Public form sharing is not configured', zh: '未配置公开表单分享' },
+  'dingtalk.publicFormDisabled': { en: 'Public form sharing is disabled', zh: '公开表单分享已停用' },
+  'dingtalk.publicFormMissingToken': { en: 'Public form sharing is missing a public token', zh: '公开表单分享缺少公开令牌' },
+  'dingtalk.publicFormExpired': { en: 'Public form sharing has expired', zh: '公开表单分享已过期' },
   'error.loadGroupDeliveries': { en: 'Failed to load DingTalk group deliveries.', zh: '加载钉钉群投递记录失败。' },
   'error.loadPersonDeliveries': { en: 'Failed to load DingTalk person deliveries.', zh: '加载钉钉个人投递记录失败。' },
   'error.loadRules': { en: 'Failed to load automation rules', zh: '加载自动化规则失败' },
@@ -576,6 +798,111 @@ export function automationCardLinkSummary(variant: AutomationCardLinkVariant, vi
 export function automationCardStats(count: number, status: AutomationCardStatType, isZh: boolean): string {
   const key = status === 'ok' ? 'manager.statOk' : 'manager.statFail'
   return `${count} ${automationLabel(key, isZh)}`
+}
+
+export function automationDingTalkPresetLabel(preset: AutomationDingTalkPreset | (string & {}), isZh: boolean): string {
+  switch (preset) {
+    case 'form_request':
+      return isZh ? '表单填写' : 'Form request'
+    case 'internal_process':
+      return automationLabel('dingtalk.internalProcessing', isZh)
+    case 'form_and_process':
+      return isZh ? '表单 + 处理' : 'Form + processing'
+    default:
+      return String(preset)
+  }
+}
+
+export function automationDingTalkTemplateTokenLabel(token: AutomationDingTalkTemplateTokenKey | (string & {}), isZh: boolean): string {
+  switch (token) {
+    case 'recordId':
+      return isZh ? '记录 ID' : 'Record ID'
+    case 'sheetId':
+      return isZh ? '表 ID' : 'Sheet ID'
+    case 'actorId':
+      return isZh ? '触发人 ID' : 'Actor ID'
+    case 'recordField':
+      return isZh ? '记录字段' : 'Record field'
+    default:
+      return String(token)
+  }
+}
+
+export function automationDingTalkDestinationScopeLabel(scope: AutomationDingTalkDestinationScope | (string & {}), isZh: boolean): string {
+  switch (scope) {
+    case 'org':
+      return isZh ? '组织目录' : 'Organization catalog'
+    case 'sheet':
+      return isZh ? '本表' : 'This table'
+    case 'private':
+      return isZh ? '私有' : 'Private'
+    default:
+      return String(scope)
+  }
+}
+
+export function automationDingTalkDestinationSubtitle(scope: AutomationDingTalkDestinationScope, id: string, isZh: boolean): string {
+  if (scope === 'org') {
+    if (!id) return isZh ? '组织目录' : 'organization catalog'
+    return isZh ? `组织目录：${id}` : `organization catalog: ${id}`
+  }
+  if (scope === 'sheet') {
+    if (!id) return isZh ? '本表' : 'this table'
+    return isZh ? `表：${id}` : `sheet: ${id}`
+  }
+  return isZh ? '私有' : 'private'
+}
+
+export function automationDingTalkPersonSubjectLabel(subject: AutomationDingTalkPersonSubject | (string & {}), isZh: boolean): string {
+  switch (subject) {
+    case 'member-group':
+      return isZh ? '成员组' : 'Member group'
+    case 'user':
+      return isZh ? '用户' : 'User'
+    default:
+      return String(subject)
+  }
+}
+
+export function automationDingTalkPersonAccessLabel(accessLevel: string, isZh: boolean): string {
+  return accessLevel ? `${isZh ? '权限：' : 'Access: '}${accessLevel}` : ''
+}
+
+export function automationDingTalkPersonStatusLabel(status: AutomationDingTalkPersonStatus | (string & {}), isZh: boolean): string {
+  switch (status) {
+    case 'memberGroupCheckedIndividually':
+      return isZh ? '成员组成员会逐个检查钉钉投递条件' : 'Member group members are checked individually for DingTalk delivery'
+    case 'noDeliveryLink':
+      return isZh ? '无钉钉投递关联；关联前个人消息会跳过' : 'No DingTalk delivery link; person message will skip until linked'
+    case 'deliveryReadyGrantEnabled':
+      return isZh ? '钉钉直接消息已就绪；表单授权已启用' : 'DingTalk direct message ready; form authorization enabled'
+    case 'deliveryReadyGrantDisabled':
+      return isZh ? '钉钉直接消息已就绪；表单授权未启用' : 'DingTalk direct message ready; form authorization not enabled'
+    case 'notBound':
+      return isZh ? '未绑定钉钉；关联前个人消息可能跳过' : 'Not bound to DingTalk; person message may skip until linked'
+    case 'boundGrantEnabled':
+      return isZh ? '已绑定钉钉；表单授权已启用' : 'DingTalk bound; form authorization enabled'
+    case 'boundGrantDisabled':
+      return isZh ? '已绑定钉钉；表单授权未启用' : 'DingTalk bound; form authorization not enabled'
+    default:
+      return String(status)
+  }
+}
+
+export function automationDingTalkAllowlistSummary(userCount: number, memberGroupCount: number, isZh: boolean): string {
+  const users = Math.max(0, userCount)
+  const groups = Math.max(0, memberGroupCount)
+  if (users === 0 && groups === 0) return ''
+  if (isZh) {
+    const parts: string[] = []
+    if (users > 0) parts.push(`${users} 个本地用户`)
+    if (groups > 0) parts.push(`${groups} 个本地成员组`)
+    return parts.join('和 ')
+  }
+  const parts: string[] = []
+  if (users > 0) parts.push(`${users} ${users === 1 ? 'local user' : 'local users'}`)
+  if (groups > 0) parts.push(`${groups} ${groups === 1 ? 'local member group' : 'local member groups'}`)
+  return parts.join(' and ')
 }
 
 export function automationTestRunRequestFailed(message: string, isZh: boolean): string {

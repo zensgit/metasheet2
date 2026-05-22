@@ -25,4 +25,10 @@ describe('dingtalk internal view link warnings', () => {
       'Internal processing view "missing_view" is not available in this sheet; DingTalk messages may not include a working processing link.',
     ])
   })
+
+  it('localizes missing internal processing view warnings while preserving raw ids', () => {
+    expect(listDingTalkInternalViewLinkBlockingErrors('missing_view', views, true)).toEqual([
+      '内部处理视图 "missing_view" 在此表中不可用；钉钉消息可能不包含可用的处理链接。',
+    ])
+  })
 })

@@ -19,7 +19,22 @@ function renderTemplateValue(value: unknown): string {
   }
 }
 
-const EXAMPLE_TEMPLATE_DATA: Record<string, unknown> = {
+const EXAMPLE_TEMPLATE_DATA_EN: Record<string, unknown> = {
+  sheetId: 'sheet_demo_001',
+  recordId: 'record_demo_001',
+  actorId: 'user_demo_001',
+  record: {
+    title: 'Sample request',
+    status: 'Pending',
+    owner: 'Sample owner',
+    name: 'Sample contact',
+    email: 'demo@example.com',
+    mobile: '13900001234',
+    xxx: 'Sample field value',
+  },
+}
+
+const EXAMPLE_TEMPLATE_DATA_ZH: Record<string, unknown> = {
   sheetId: 'sheet_demo_001',
   recordId: 'record_demo_001',
   actorId: 'user_demo_001',
@@ -34,8 +49,9 @@ const EXAMPLE_TEMPLATE_DATA: Record<string, unknown> = {
   },
 }
 
-export function renderDingTalkTemplateExample(template: string): string {
+export function renderDingTalkTemplateExample(template: string, isZh = false): string {
+  const data = isZh ? EXAMPLE_TEMPLATE_DATA_ZH : EXAMPLE_TEMPLATE_DATA_EN
   return template.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_match, key: string) =>
-    renderTemplateValue(lookupTemplateValue(key, EXAMPLE_TEMPLATE_DATA)),
+    renderTemplateValue(lookupTemplateValue(key, data)),
   )
 }

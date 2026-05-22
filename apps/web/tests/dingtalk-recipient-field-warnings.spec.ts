@@ -40,6 +40,17 @@ describe('dingtalk recipient field warnings', () => {
     ])
   })
 
+  it('localizes dynamic group destination warnings while preserving raw field paths', () => {
+    expect(listDingTalkGroupDestinationFieldPathWarnings(
+      ['record.missingDestinationId', 'record.assigneeUserIds'].join(','),
+      fields,
+      true,
+    )).toEqual([
+      'record.missingDestinationId 不是此表中的已知字段；钉钉群消息需要能解析为目标 ID 的字段 ID。',
+      'record.assigneeUserIds 是用户字段；请改用钉钉个人收件人字段。',
+    ])
+  })
+
   it('returns no dynamic group destination warnings for empty or non-string input', () => {
     expect(listDingTalkGroupDestinationFieldPathWarnings('', fields)).toEqual([])
     expect(listDingTalkGroupDestinationFieldPathWarnings(['record.assigneeUserIds'], fields)).toEqual([])
@@ -84,6 +95,15 @@ describe('dingtalk recipient field warnings', () => {
       'record.missingGroupId is not a known field in this sheet; DingTalk person member-group recipients expect field IDs that resolve to member group IDs.',
       'record.assigneeUserIds is a user field; use Record recipient field paths instead.',
       'record.name is not a member group field; DingTalk person member-group recipients expect member group fields.',
+    ])
+  })
+
+  it('localizes dynamic person recipient warnings while preserving raw field paths', () => {
+    expect(listDingTalkPersonRecipientFieldPathWarnings('record.name', fields, true)).toEqual([
+      'record.name 不是用户字段；钉钉个人消息需要本地用户 ID。',
+    ])
+    expect(listDingTalkPersonMemberGroupRecipientFieldPathWarnings('record.name', fields, true)).toEqual([
+      'record.name 不是成员组字段；钉钉个人成员组收件人需要成员组字段。',
     ])
   })
 

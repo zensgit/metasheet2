@@ -11,6 +11,14 @@ import {
   automationConditionOperatorLabel,
   automationConditionValuePlaceholder,
   automationCronPresetLabel,
+  automationDingTalkAllowlistSummary,
+  automationDingTalkDestinationScopeLabel,
+  automationDingTalkDestinationSubtitle,
+  automationDingTalkPersonAccessLabel,
+  automationDingTalkPersonStatusLabel,
+  automationDingTalkPersonSubjectLabel,
+  automationDingTalkPresetLabel,
+  automationDingTalkTemplateTokenLabel,
   automationLabel,
   automationStatusLabel,
   automationTestRunFailed,
@@ -140,5 +148,45 @@ describe('meta-automation-labels', () => {
     expect(automationTestRunSucceeded('', true)).toBe('测试运行成功。')
     expect(automationTestRunSkipped(' (4 ms)', false)).toBe('Test run skipped (4 ms).')
     expect(automationTestRunSkipped('', true)).toBe('测试运行已跳过。')
+  })
+
+  it('localizes DingTalk shared chrome helpers with raw fallbacks', () => {
+    expect(automationDingTalkPresetLabel('form_request', false)).toBe('Form request')
+    expect(automationDingTalkPresetLabel('form_request', true)).toBe('表单填写')
+    expect(automationDingTalkPresetLabel('internal_process', true)).toBe('内部处理')
+    expect(automationDingTalkPresetLabel('form_and_process', false)).toBe('Form + processing')
+    expect(automationDingTalkPresetLabel('future_preset', true)).toBe('future_preset')
+
+    expect(automationDingTalkTemplateTokenLabel('recordId', true)).toBe('记录 ID')
+    expect(automationDingTalkTemplateTokenLabel('recordField', false)).toBe('Record field')
+    expect(automationDingTalkTemplateTokenLabel('futureToken', true)).toBe('futureToken')
+
+    expect(automationDingTalkDestinationScopeLabel('org', true)).toBe('组织目录')
+    expect(automationDingTalkDestinationScopeLabel('sheet', false)).toBe('This table')
+    expect(automationDingTalkDestinationSubtitle('org', 'org_catalog', true)).toBe('组织目录：org_catalog')
+    expect(automationDingTalkDestinationSubtitle('sheet', 'sheet_1', false)).toBe('sheet: sheet_1')
+
+    expect(automationDingTalkPersonSubjectLabel('member-group', true)).toBe('成员组')
+    expect(automationDingTalkPersonAccessLabel('read', false)).toBe('Access: read')
+    expect(automationDingTalkPersonAccessLabel('write', true)).toBe('权限：write')
+    expect(automationDingTalkPersonStatusLabel('memberGroupCheckedIndividually', false))
+      .toBe('Member group members are checked individually for DingTalk delivery')
+    expect(automationDingTalkPersonStatusLabel('noDeliveryLink', true))
+      .toBe('无钉钉投递关联；关联前个人消息会跳过')
+    expect(automationDingTalkPersonStatusLabel('deliveryReadyGrantEnabled', false))
+      .toBe('DingTalk direct message ready; form authorization enabled')
+    expect(automationDingTalkPersonStatusLabel('deliveryReadyGrantDisabled', true))
+      .toBe('钉钉直接消息已就绪；表单授权未启用')
+    expect(automationDingTalkPersonStatusLabel('notBound', false))
+      .toBe('Not bound to DingTalk; person message may skip until linked')
+    expect(automationDingTalkPersonStatusLabel('boundGrantEnabled', true))
+      .toBe('已绑定钉钉；表单授权已启用')
+    expect(automationDingTalkPersonStatusLabel('boundGrantDisabled', false))
+      .toBe('DingTalk bound; form authorization not enabled')
+
+    expect(automationDingTalkAllowlistSummary(0, 0, false)).toBe('')
+    expect(automationDingTalkAllowlistSummary(1, 0, false)).toBe('1 local user')
+    expect(automationDingTalkAllowlistSummary(2, 1, false)).toBe('2 local users and 1 local member group')
+    expect(automationDingTalkAllowlistSummary(1, 2, true)).toBe('1 个本地用户和 2 个本地成员组')
   })
 })

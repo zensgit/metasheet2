@@ -316,32 +316,32 @@
             <!-- send_dingtalk_group_message config -->
             <div v-if="action.type === 'send_dingtalk_group_message'" class="meta-rule-editor__action-config">
               <div class="meta-rule-editor__preset-row">
-                <span class="meta-rule-editor__preset-label">Message preset</span>
-                <button class="meta-rule-editor__btn" type="button" data-field="groupPresetForm" @click="applyGroupPreset(action, 'form_request')">Form request</button>
-                <button class="meta-rule-editor__btn" type="button" data-field="groupPresetInternal" @click="applyGroupPreset(action, 'internal_process')">Internal processing</button>
-                <button class="meta-rule-editor__btn" type="button" data-field="groupPresetBoth" @click="applyGroupPreset(action, 'form_and_process')">Form + processing</button>
+                <span class="meta-rule-editor__preset-label">{{ automationLabel('dingtalk.preset', isZh) }}</span>
+                <button class="meta-rule-editor__btn" type="button" data-field="groupPresetForm" @click="applyGroupPreset(action, 'form_request')">{{ automationDingTalkPresetLabel('form_request', isZh) }}</button>
+                <button class="meta-rule-editor__btn" type="button" data-field="groupPresetInternal" @click="applyGroupPreset(action, 'internal_process')">{{ automationDingTalkPresetLabel('internal_process', isZh) }}</button>
+                <button class="meta-rule-editor__btn" type="button" data-field="groupPresetBoth" @click="applyGroupPreset(action, 'form_and_process')">{{ automationDingTalkPresetLabel('form_and_process', isZh) }}</button>
               </div>
-              <label class="meta-rule-editor__label">Add DingTalk groups</label>
+              <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.addGroups', isZh) }}</label>
               <select
                 v-model="action.config.destinationPickerId"
                 class="meta-rule-editor__select"
                 data-field="dingtalkDestinationPickerId"
                 @change="appendGroupDestination(action, $event.target as HTMLSelectElement)"
               >
-                <option value="">-- add DingTalk group --</option>
+                <option value="">{{ automationLabel('dingtalk.addGroupOption', isZh) }}</option>
                 <option v-for="destination in availableGroupDestinations(action)" :key="destination.id" :value="destination.id">
                   {{ destination.name }} · {{ groupDestinationScopeLabel(destination) }}
                 </option>
               </select>
               <div class="meta-rule-editor__hint" data-field="dingtalkDestinationPickerHint">
-                DingTalk group destinations registered for this table or shared from the organization catalog are listed here.
+                {{ automationLabel('dingtalk.groupsRegisteredHint', isZh) }}
               </div>
               <div
                 v-if="!dingTalkDestinationsError && dingTalkDestinations.length === 0"
                 class="meta-rule-editor__hint"
                 data-field="dingtalkDestinationEmpty"
               >
-                No DingTalk groups are available for this table yet. Add one in API Tokens &amp; Webhooks &gt; DingTalk Groups, ask an admin to share an organization catalog group, or use a record group field path below.
+                {{ automationLabel('dingtalk.noGroupsAvailable', isZh) }}
               </div>
               <div
                 v-if="selectedGroupDestinations(action).length"
@@ -357,11 +357,11 @@
                 >
                   <strong>{{ destination.label }}</strong>
                   <span>{{ destination.subtitle || destination.id }}</span>
-                  <em>Remove</em>
+                  <em>{{ automationLabel('dingtalk.remove', isZh) }}</em>
                 </button>
               </div>
               <div v-if="dingTalkDestinationsError" class="meta-rule-editor__hint">{{ dingTalkDestinationsError }}</div>
-              <label class="meta-rule-editor__label">Record group field paths (optional)</label>
+              <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.recordGroupFieldPaths', isZh) }}</label>
               <input
                 v-model="action.config.destinationFieldPath"
                 class="meta-rule-editor__input"
@@ -370,15 +370,15 @@
                 data-field="dingtalkDestinationFieldPath"
               />
               <div class="meta-rule-editor__hint" data-field="dingtalkDestinationFieldPathHint">
-                Use record fields whose value is a DingTalk group destination ID, not a local user, member group, or DingTalk group name.
+                {{ automationLabel('dingtalk.recordGroupFieldPathHint', isZh) }}
               </div>
-              <label class="meta-rule-editor__label">Pick group field</label>
+              <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.pickGroupField', isZh) }}</label>
               <select
                 class="meta-rule-editor__select"
                 data-field="dingtalkDestinationFieldSelect"
                 @change="appendGroupDestinationFieldPath(action, $event.target as HTMLSelectElement)"
               >
-                <option value="">-- pick field --</option>
+                <option value="">{{ automationLabel('dingtalk.pickFieldOption', isZh) }}</option>
                 <option v-for="field in groupDestinationCandidateFields" :key="field.id" :value="field.id">
                   {{ field.name }}
                 </option>
@@ -397,7 +397,7 @@
                 >
                   <strong>{{ field.label }}</strong>
                   <span>{{ field.id }}</span>
-                  <em>Remove</em>
+                  <em>{{ automationLabel('dingtalk.remove', isZh) }}</em>
                 </button>
               </div>
               <div
@@ -407,12 +407,12 @@
               >
                 {{ warning }}
               </div>
-              <label class="meta-rule-editor__label">Title template</label>
+              <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.titleTemplate', isZh) }}</label>
               <input
                 v-model="action.config.titleTemplate"
                 class="meta-rule-editor__input"
                 type="text"
-                placeholder="例如：{{record.title}} 待处理"
+                :placeholder="automationLabel('dingtalk.titleTemplatePlaceholder', isZh)"
                 data-field="dingtalkTitleTemplate"
               />
               <div
@@ -423,7 +423,7 @@
                 {{ warning }}
               </div>
               <div class="meta-rule-editor__token-row">
-                <span class="meta-rule-editor__preset-label">Template tokens</span>
+                <span class="meta-rule-editor__preset-label">{{ automationLabel('dingtalk.templateTokens', isZh) }}</span>
                 <button
                   v-for="token in DINGTALK_TITLE_TEMPLATE_TOKENS"
                   :key="token.key"
@@ -432,15 +432,15 @@
                   :data-field="`groupTitleToken-${token.key}`"
                   @click="appendGroupTemplateToken(action, 'titleTemplate', token.value)"
                 >
-                  {{ token.label }}
+                  {{ dingTalkTemplateTokenLabel(token, isZh) }}
                 </button>
               </div>
-              <label class="meta-rule-editor__label">Body template</label>
+              <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.bodyTemplate', isZh) }}</label>
               <textarea
                 v-model="action.config.bodyTemplate"
                 class="meta-rule-editor__textarea"
                 rows="4"
-                placeholder="支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}"
+                :placeholder="automationLabel('dingtalk.bodyTemplatePlaceholder', isZh)"
                 data-field="dingtalkBodyTemplate"
               ></textarea>
               <div
@@ -451,7 +451,7 @@
                 {{ warning }}
               </div>
               <div class="meta-rule-editor__token-row">
-                <span class="meta-rule-editor__preset-label">Template tokens</span>
+                <span class="meta-rule-editor__preset-label">{{ automationLabel('dingtalk.templateTokens', isZh) }}</span>
                 <button
                   v-for="token in DINGTALK_BODY_TEMPLATE_TOKENS"
                   :key="token.key"
@@ -460,16 +460,16 @@
                   :data-field="`groupBodyToken-${token.key}`"
                   @click="appendGroupTemplateToken(action, 'bodyTemplate', token.value, true)"
                 >
-                  {{ token.label }}
+                  {{ dingTalkTemplateTokenLabel(token, isZh) }}
                 </button>
               </div>
-              <label class="meta-rule-editor__label">Public form view (optional)</label>
+              <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.publicFormView', isZh) }}</label>
               <select
                 v-model="action.config.publicFormViewId"
                 class="meta-rule-editor__select"
                 data-field="publicFormViewId"
               >
-                <option value="">-- no public form link --</option>
+                  <option value="">{{ automationLabel('dingtalk.noPublicFormLinkOption', isZh) }}</option>
                 <option v-for="view in formViews" :key="view.id" :value="view.id">{{ view.name }}</option>
               </select>
               <div
@@ -490,23 +490,23 @@
                   :data-field="`groupPublicFormAccessSummary-${idx}`"
                   :data-access-level="accessState.level"
                 >
-                  <strong>Access:</strong> {{ accessState.summary }}
+                  <strong>{{ automationLabel('dingtalk.publicFormAccess', isZh) }}:</strong> {{ accessState.summary }}
                 </div>
                 <div
                   v-if="accessState.hasSelection"
                   class="meta-rule-editor__hint meta-rule-editor__access-audience"
                   :data-field="`groupPublicFormAudienceSummary-${idx}`"
                 >
-                  <strong>Allowed audience:</strong> {{ accessState.audienceSummary }}
+                  <strong>{{ automationLabel('dingtalk.allowedAudience', isZh) }}:</strong> {{ accessState.audienceSummary }}
                 </div>
               </template>
-              <label class="meta-rule-editor__label">Internal processing view (optional)</label>
+              <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.internalProcessingView', isZh) }}</label>
               <select
                 v-model="action.config.internalViewId"
                 class="meta-rule-editor__select"
                 data-field="internalViewId"
               >
-                <option value="">-- no internal link --</option>
+                <option value="">{{ automationLabel('dingtalk.noInternalLinkOption', isZh) }}</option>
                 <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
               </select>
               <div
@@ -517,58 +517,58 @@
                 {{ warning }}
               </div>
               <div class="meta-rule-editor__preview" data-field="groupMessageSummary">
-                <div class="meta-rule-editor__preview-title">Message summary</div>
-                <div><strong>Groups:</strong> {{ dingTalkGroupSummary(action) }}</div>
-                <div><strong>Record groups:</strong> {{ groupDestinationFieldPathSummary(action.config.destinationFieldPath) }}</div>
-                <div><strong>Title template:</strong> {{ templatePreviewText(action.config.titleTemplate, 'No title template') }}</div>
-                <div class="meta-rule-editor__preview-body"><strong>Body template:</strong> {{ templatePreviewText(action.config.bodyTemplate, 'No body template') }}</div>
+                <div class="meta-rule-editor__preview-title">{{ automationLabel('dingtalk.messageSummary', isZh) }}</div>
+                <div><strong>{{ automationLabel('dingtalk.groups', isZh) }}:</strong> {{ dingTalkGroupSummary(action) }}</div>
+                <div><strong>{{ automationLabel('dingtalk.recordGroups', isZh) }}:</strong> {{ groupDestinationFieldPathSummary(action.config.destinationFieldPath) }}</div>
+                <div><strong>{{ automationLabel('dingtalk.titleTemplate', isZh) }}:</strong> {{ templatePreviewText(action.config.titleTemplate, automationLabel('dingtalk.noTitleTemplate', isZh)) }}</div>
+                <div class="meta-rule-editor__preview-body"><strong>{{ automationLabel('dingtalk.bodyTemplate', isZh) }}:</strong> {{ templatePreviewText(action.config.bodyTemplate, automationLabel('dingtalk.noBodyTemplate', isZh)) }}</div>
                 <div class="meta-rule-editor__preview-line">
-                  <span><strong>Rendered title:</strong> {{ renderedTemplateExample(action.config.titleTemplate, 'No rendered title') }}</span>
+                  <span><strong>{{ automationLabel('dingtalk.renderedTitle', isZh) }}:</strong> {{ renderedTemplateExample(action.config.titleTemplate, automationLabel('dingtalk.noRenderedTitle', isZh)) }}</span>
                   <button
                     class="meta-rule-editor__copy-btn"
                     type="button"
                     :data-field="`groupRenderedTitleCopy-${idx}`"
                     @click="copyPreviewText(`group-title-${idx}`, renderedTemplateExample(action.config.titleTemplate, ''))"
                   >
-                    {{ copiedPreviewKey === `group-title-${idx}` ? 'Copied' : 'Copy' }}
+                    {{ copiedPreviewKey === `group-title-${idx}` ? automationLabel('dingtalk.copied', isZh) : automationLabel('dingtalk.copy', isZh) }}
                   </button>
                 </div>
                 <div class="meta-rule-editor__preview-line meta-rule-editor__preview-body">
-                  <span><strong>Rendered body:</strong> {{ renderedTemplateExample(action.config.bodyTemplate, 'No rendered body') }}</span>
+                  <span><strong>{{ automationLabel('dingtalk.renderedBody', isZh) }}:</strong> {{ renderedTemplateExample(action.config.bodyTemplate, automationLabel('dingtalk.noRenderedBody', isZh)) }}</span>
                   <button
                     class="meta-rule-editor__copy-btn"
                     type="button"
                     :data-field="`groupRenderedBodyCopy-${idx}`"
                     @click="copyPreviewText(`group-body-${idx}`, renderedTemplateExample(action.config.bodyTemplate, ''))"
                   >
-                    {{ copiedPreviewKey === `group-body-${idx}` ? 'Copied' : 'Copy' }}
+                    {{ copiedPreviewKey === `group-body-${idx}` ? automationLabel('dingtalk.copied', isZh) : automationLabel('dingtalk.copy', isZh) }}
                   </button>
                 </div>
-                <div><strong>Public form:</strong> {{ viewSummaryName(action.config.publicFormViewId, 'No public form link') }}</div>
-                <div><strong>Public form access:</strong> {{ publicFormAccessState(action.config.publicFormViewId).summary }}</div>
-                <div><strong>Allowed audience:</strong> {{ publicFormAccessState(action.config.publicFormViewId).audienceSummary }}</div>
-                <div><strong>Internal processing:</strong> {{ viewSummaryName(action.config.internalViewId, 'No internal link') }}</div>
+                <div><strong>{{ automationLabel('dingtalk.publicForm', isZh) }}:</strong> {{ viewSummaryName(action.config.publicFormViewId, automationLabel('dingtalk.noPublicFormLink', isZh)) }}</div>
+                <div><strong>{{ automationLabel('dingtalk.publicFormAccess', isZh) }}:</strong> {{ publicFormAccessState(action.config.publicFormViewId).summary }}</div>
+                <div><strong>{{ automationLabel('dingtalk.allowedAudience', isZh) }}:</strong> {{ publicFormAccessState(action.config.publicFormViewId).audienceSummary }}</div>
+                <div><strong>{{ automationLabel('dingtalk.internalProcessing', isZh) }}:</strong> {{ viewSummaryName(action.config.internalViewId, automationLabel('dingtalk.noInternalLink', isZh)) }}</div>
               </div>
             </div>
 
             <!-- send_dingtalk_person_message config -->
             <div v-if="action.type === 'send_dingtalk_person_message'" class="meta-rule-editor__action-config">
               <div class="meta-rule-editor__preset-row">
-                <span class="meta-rule-editor__preset-label">Message preset</span>
-                <button class="meta-rule-editor__btn" type="button" data-field="personPresetForm" @click="applyPersonPreset(action, 'form_request')">Form request</button>
-                <button class="meta-rule-editor__btn" type="button" data-field="personPresetInternal" @click="applyPersonPreset(action, 'internal_process')">Internal processing</button>
-                <button class="meta-rule-editor__btn" type="button" data-field="personPresetBoth" @click="applyPersonPreset(action, 'form_and_process')">Form + processing</button>
+                <span class="meta-rule-editor__preset-label">{{ automationLabel('dingtalk.preset', isZh) }}</span>
+                <button class="meta-rule-editor__btn" type="button" data-field="personPresetForm" @click="applyPersonPreset(action, 'form_request')">{{ automationDingTalkPresetLabel('form_request', isZh) }}</button>
+                <button class="meta-rule-editor__btn" type="button" data-field="personPresetInternal" @click="applyPersonPreset(action, 'internal_process')">{{ automationDingTalkPresetLabel('internal_process', isZh) }}</button>
+                <button class="meta-rule-editor__btn" type="button" data-field="personPresetBoth" @click="applyPersonPreset(action, 'form_and_process')">{{ automationDingTalkPresetLabel('form_and_process', isZh) }}</button>
               </div>
-              <label class="meta-rule-editor__label">Search and add users or member groups</label>
+              <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.searchUsersOrGroups', isZh) }}</label>
               <input
                 v-model="action.config.userIdsSearch"
                 class="meta-rule-editor__input"
                 type="text"
-                placeholder="Search by user, member group, email, or subject ID"
+                :placeholder="automationLabel('dingtalk.searchUsersOrGroupsPlaceholder', isZh)"
                 data-field="dingtalkPersonUserSearch"
                 @input="void loadPersonRecipientSuggestions(idx, action)"
               />
-              <div v-if="personRecipientLoading[idx]" class="meta-rule-editor__hint">Searching users and member groups…</div>
+              <div v-if="personRecipientLoading[idx]" class="meta-rule-editor__hint">{{ automationLabel('dingtalk.searchingUsersOrGroups', isZh) }}</div>
               <div v-else-if="personRecipientErrors[idx]" class="meta-rule-editor__hint meta-rule-editor__hint--error">{{ personRecipientErrors[idx] }}</div>
               <div v-else-if="availablePersonRecipientSuggestions(idx, action).length" class="meta-rule-editor__recipient-list">
                 <button
@@ -585,10 +585,10 @@
                   <span>{{ personRecipientSubjectLabel(candidate) }}</span>
                   <span v-if="candidate.accessLevel">{{ personRecipientAccessLabel(candidate.accessLevel) }}</span>
                   <span v-if="personRecipientDingTalkStatusLabel(candidate.subjectType, candidate)">{{ personRecipientDingTalkStatusLabel(candidate.subjectType, candidate) }}</span>
-                  <span v-if="isInactivePersonRecipientCandidate(candidate)">Inactive users cannot be added</span>
+                  <span v-if="isInactivePersonRecipientCandidate(candidate)">{{ automationLabel('dingtalk.inactiveUsersCannotBeAdded', isZh) }}</span>
                 </button>
               </div>
-              <div v-else-if="typeof action.config.userIdsSearch === 'string' && action.config.userIdsSearch.trim()" class="meta-rule-editor__hint">No matching users or member groups</div>
+              <div v-else-if="typeof action.config.userIdsSearch === 'string' && action.config.userIdsSearch.trim()" class="meta-rule-editor__hint">{{ automationLabel('dingtalk.noMatchingUsersOrGroups', isZh) }}</div>
               <div v-if="selectedPersonRecipients(action).length" class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected">
                 <button
                   v-for="recipient in selectedPersonRecipients(action)"
@@ -601,7 +601,7 @@
                   <strong>{{ recipient.label }}</strong>
                   <span>{{ recipient.subtitle || recipient.id }}</span>
                   <span v-if="personRecipientDingTalkStatusLabel('user', recipient)">{{ personRecipientDingTalkStatusLabel('user', recipient) }}</span>
-                  <em>Remove</em>
+                  <em>{{ automationLabel('dingtalk.remove', isZh) }}</em>
                 </button>
               </div>
               <div v-if="selectedPersonRecipientGroups(action).length" class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected">
@@ -616,40 +616,40 @@
                   <strong>{{ group.label }}</strong>
                   <span>{{ group.subtitle || group.id }}</span>
                   <span v-if="personRecipientDingTalkStatusLabel('member-group', group)">{{ personRecipientDingTalkStatusLabel('member-group', group) }}</span>
-                  <em>Remove</em>
+                  <em>{{ automationLabel('dingtalk.remove', isZh) }}</em>
                 </button>
               </div>
-              <label class="meta-rule-editor__label">Local user IDs</label>
+              <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.localUserIds', isZh) }}</label>
               <textarea
                 v-model="action.config.userIdsText"
                 class="meta-rule-editor__textarea"
                 rows="3"
-                placeholder="使用逗号或换行分隔本地 userId"
+                :placeholder="automationLabel('dingtalk.localUserIdsPlaceholder', isZh)"
                 data-field="dingtalkPersonUserIds"
               ></textarea>
-              <label class="meta-rule-editor__label">Member group IDs (optional)</label>
+              <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.memberGroupIds', isZh) }}</label>
               <textarea
                 v-model="action.config.memberGroupIdsText"
                 class="meta-rule-editor__textarea"
                 rows="2"
-                placeholder="使用逗号或换行分隔成员组 ID"
+                :placeholder="automationLabel('dingtalk.memberGroupIdsPlaceholder', isZh)"
                 data-field="dingtalkPersonMemberGroupIds"
               ></textarea>
-              <label class="meta-rule-editor__label">Record recipient field paths (optional)</label>
+              <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.recordRecipientFieldPaths', isZh) }}</label>
               <input
                 v-model="action.config.recipientFieldPath"
                 class="meta-rule-editor__input"
                 type="text"
-                placeholder="例如：record.assigneeUserIds, record.reviewerUserId"
+                :placeholder="automationLabel('dingtalk.recordRecipientFieldPathPlaceholder', isZh)"
                 data-field="dingtalkPersonRecipientFieldPath"
               />
-              <label class="meta-rule-editor__label">Pick recipient field</label>
+              <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.pickRecipientField', isZh) }}</label>
               <select
                 class="meta-rule-editor__select"
                 data-field="dingtalkPersonRecipientFieldSelect"
                 @change="appendRecipientFieldPath(action, ($event.target as HTMLSelectElement))"
               >
-                <option value="">-- choose a user field --</option>
+                <option value="">{{ automationLabel('dingtalk.chooseUserFieldOption', isZh) }}</option>
                 <option v-for="field in recipientCandidateFields" :key="field.id" :value="field.id">
                   {{ field.name }} (record.{{ field.id }})
                 </option>
@@ -667,7 +667,7 @@
                   @click="removeRecipientFieldPath(action, field.id)"
                 >
                   <strong>{{ field.label }}</strong>
-                  <em>Remove</em>
+                  <em>{{ automationLabel('dingtalk.remove', isZh) }}</em>
                 </button>
               </div>
               <div
@@ -678,23 +678,23 @@
                 {{ warning }}
               </div>
               <div class="meta-rule-editor__hint">
-                Record data is keyed by field ID. Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths. The picker only lists user fields.
+                {{ automationLabel('dingtalk.recordRecipientFieldPathHint', isZh) }}
               </div>
-              <label class="meta-rule-editor__label">Record member group field paths (optional)</label>
+              <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.recordMemberGroupFieldPaths', isZh) }}</label>
               <input
                 v-model="action.config.memberGroupRecipientFieldPath"
                 class="meta-rule-editor__input"
                 type="text"
-                placeholder="例如：record.watcherGroupIds, record.escalationGroupId"
+                :placeholder="automationLabel('dingtalk.recordMemberGroupFieldPathPlaceholder', isZh)"
                 data-field="dingtalkPersonMemberGroupRecipientFieldPath"
               />
-              <label class="meta-rule-editor__label">Pick member group field</label>
+              <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.pickMemberGroupField', isZh) }}</label>
               <select
                 class="meta-rule-editor__select"
                 data-field="dingtalkPersonMemberGroupRecipientFieldSelect"
                 @change="appendMemberGroupRecipientFieldPath(action, $event.target as HTMLSelectElement)"
               >
-                <option value="">-- choose a member group field --</option>
+                <option value="">{{ automationLabel('dingtalk.chooseMemberGroupFieldOption', isZh) }}</option>
                 <option v-for="field in memberGroupRecipientCandidateFields" :key="field.id" :value="field.id">
                   {{ field.name }} (record.{{ field.id }})
                 </option>
@@ -712,7 +712,7 @@
                   @click="removeMemberGroupRecipientFieldPath(action, field.id)"
                 >
                   <strong>{{ field.label }}</strong>
-                  <em>Remove</em>
+                  <em>{{ automationLabel('dingtalk.remove', isZh) }}</em>
                 </button>
               </div>
               <div
@@ -723,14 +723,14 @@
                 {{ warning }}
               </div>
               <div class="meta-rule-editor__hint">
-                Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths whose values resolve to member group IDs. The picker only lists explicit member group fields.
+                {{ automationLabel('dingtalk.recordMemberGroupFieldPathHint', isZh) }}
               </div>
-              <label class="meta-rule-editor__label">Title template</label>
+              <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.titleTemplate', isZh) }}</label>
               <input
                 v-model="action.config.titleTemplate"
                 class="meta-rule-editor__input"
                 type="text"
-                placeholder="例如：{{record.title}} 待处理"
+                :placeholder="automationLabel('dingtalk.titleTemplatePlaceholder', isZh)"
                 data-field="dingtalkPersonTitleTemplate"
               />
               <div
@@ -741,7 +741,7 @@
                 {{ warning }}
               </div>
               <div class="meta-rule-editor__token-row">
-                <span class="meta-rule-editor__preset-label">Template tokens</span>
+                <span class="meta-rule-editor__preset-label">{{ automationLabel('dingtalk.templateTokens', isZh) }}</span>
                 <button
                   v-for="token in DINGTALK_TITLE_TEMPLATE_TOKENS"
                   :key="token.key"
@@ -750,15 +750,15 @@
                   :data-field="`personTitleToken-${token.key}`"
                   @click="appendPersonTemplateToken(action, 'titleTemplate', token.value)"
                 >
-                  {{ token.label }}
+                  {{ dingTalkTemplateTokenLabel(token, isZh) }}
                 </button>
               </div>
-              <label class="meta-rule-editor__label">Body template</label>
+              <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.bodyTemplate', isZh) }}</label>
               <textarea
                 v-model="action.config.bodyTemplate"
                 class="meta-rule-editor__textarea"
                 rows="4"
-                placeholder="支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}"
+                :placeholder="automationLabel('dingtalk.bodyTemplatePlaceholder', isZh)"
                 data-field="dingtalkPersonBodyTemplate"
               ></textarea>
               <div
@@ -769,7 +769,7 @@
                 {{ warning }}
               </div>
               <div class="meta-rule-editor__token-row">
-                <span class="meta-rule-editor__preset-label">Template tokens</span>
+                <span class="meta-rule-editor__preset-label">{{ automationLabel('dingtalk.templateTokens', isZh) }}</span>
                 <button
                   v-for="token in DINGTALK_BODY_TEMPLATE_TOKENS"
                   :key="token.key"
@@ -778,16 +778,16 @@
                   :data-field="`personBodyToken-${token.key}`"
                   @click="appendPersonTemplateToken(action, 'bodyTemplate', token.value, true)"
                 >
-                  {{ token.label }}
+                  {{ dingTalkTemplateTokenLabel(token, isZh) }}
                 </button>
               </div>
-              <label class="meta-rule-editor__label">Public form view (optional)</label>
+              <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.publicFormView', isZh) }}</label>
               <select
                 v-model="action.config.publicFormViewId"
                 class="meta-rule-editor__select"
                 data-field="dingtalkPersonPublicFormViewId"
               >
-                <option value="">-- no public form link --</option>
+                <option value="">{{ automationLabel('dingtalk.noPublicFormLinkOption', isZh) }}</option>
                 <option v-for="view in formViews" :key="view.id" :value="view.id">{{ view.name }}</option>
               </select>
               <div
@@ -808,23 +808,23 @@
                   :data-field="`personPublicFormAccessSummary-${idx}`"
                   :data-access-level="accessState.level"
                 >
-                  <strong>Access:</strong> {{ accessState.summary }}
+                  <strong>{{ automationLabel('dingtalk.publicFormAccess', isZh) }}:</strong> {{ accessState.summary }}
                 </div>
                 <div
                   v-if="accessState.hasSelection"
                   class="meta-rule-editor__hint meta-rule-editor__access-audience"
                   :data-field="`personPublicFormAudienceSummary-${idx}`"
                 >
-                  <strong>Allowed audience:</strong> {{ accessState.audienceSummary }}
+                  <strong>{{ automationLabel('dingtalk.allowedAudience', isZh) }}:</strong> {{ accessState.audienceSummary }}
                 </div>
               </template>
-              <label class="meta-rule-editor__label">Internal processing view (optional)</label>
+              <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.internalProcessingView', isZh) }}</label>
               <select
                 v-model="action.config.internalViewId"
                 class="meta-rule-editor__select"
                 data-field="dingtalkPersonInternalViewId"
               >
-                <option value="">-- no internal link --</option>
+                <option value="">{{ automationLabel('dingtalk.noInternalLinkOption', isZh) }}</option>
                 <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
               </select>
               <div
@@ -835,38 +835,38 @@
                 {{ warning }}
               </div>
               <div class="meta-rule-editor__preview" data-field="personMessageSummary">
-                <div class="meta-rule-editor__preview-title">Message summary</div>
-                <div><strong>Recipients:</strong> {{ personRecipientSummary(action) }}</div>
-                <div><strong>Record recipients:</strong> {{ recipientFieldPathSummary(action.config.recipientFieldPath) }}</div>
-                <div><strong>Record member groups:</strong> {{ recipientFieldPathSummary(action.config.memberGroupRecipientFieldPath) }}</div>
-                <div><strong>Title template:</strong> {{ templatePreviewText(action.config.titleTemplate, 'No title template') }}</div>
-                <div class="meta-rule-editor__preview-body"><strong>Body template:</strong> {{ templatePreviewText(action.config.bodyTemplate, 'No body template') }}</div>
+                <div class="meta-rule-editor__preview-title">{{ automationLabel('dingtalk.messageSummary', isZh) }}</div>
+                <div><strong>{{ automationLabel('dingtalk.recipients', isZh) }}:</strong> {{ personRecipientSummary(action) }}</div>
+                <div><strong>{{ automationLabel('dingtalk.recordRecipients', isZh) }}:</strong> {{ recipientFieldPathSummary(action.config.recipientFieldPath) }}</div>
+                <div><strong>{{ automationLabel('dingtalk.recordMemberGroups', isZh) }}:</strong> {{ memberGroupRecipientFieldPathSummary(action.config.memberGroupRecipientFieldPath) }}</div>
+                <div><strong>{{ automationLabel('dingtalk.titleTemplate', isZh) }}:</strong> {{ templatePreviewText(action.config.titleTemplate, automationLabel('dingtalk.noTitleTemplate', isZh)) }}</div>
+                <div class="meta-rule-editor__preview-body"><strong>{{ automationLabel('dingtalk.bodyTemplate', isZh) }}:</strong> {{ templatePreviewText(action.config.bodyTemplate, automationLabel('dingtalk.noBodyTemplate', isZh)) }}</div>
                 <div class="meta-rule-editor__preview-line">
-                  <span><strong>Rendered title:</strong> {{ renderedTemplateExample(action.config.titleTemplate, 'No rendered title') }}</span>
+                  <span><strong>{{ automationLabel('dingtalk.renderedTitle', isZh) }}:</strong> {{ renderedTemplateExample(action.config.titleTemplate, automationLabel('dingtalk.noRenderedTitle', isZh)) }}</span>
                   <button
                     class="meta-rule-editor__copy-btn"
                     type="button"
                     :data-field="`personRenderedTitleCopy-${idx}`"
                     @click="copyPreviewText(`person-title-${idx}`, renderedTemplateExample(action.config.titleTemplate, ''))"
                   >
-                    {{ copiedPreviewKey === `person-title-${idx}` ? 'Copied' : 'Copy' }}
+                    {{ copiedPreviewKey === `person-title-${idx}` ? automationLabel('dingtalk.copied', isZh) : automationLabel('dingtalk.copy', isZh) }}
                   </button>
                 </div>
                 <div class="meta-rule-editor__preview-line meta-rule-editor__preview-body">
-                  <span><strong>Rendered body:</strong> {{ renderedTemplateExample(action.config.bodyTemplate, 'No rendered body') }}</span>
+                  <span><strong>{{ automationLabel('dingtalk.renderedBody', isZh) }}:</strong> {{ renderedTemplateExample(action.config.bodyTemplate, automationLabel('dingtalk.noRenderedBody', isZh)) }}</span>
                   <button
                     class="meta-rule-editor__copy-btn"
                     type="button"
                     :data-field="`personRenderedBodyCopy-${idx}`"
                     @click="copyPreviewText(`person-body-${idx}`, renderedTemplateExample(action.config.bodyTemplate, ''))"
                   >
-                    {{ copiedPreviewKey === `person-body-${idx}` ? 'Copied' : 'Copy' }}
+                    {{ copiedPreviewKey === `person-body-${idx}` ? automationLabel('dingtalk.copied', isZh) : automationLabel('dingtalk.copy', isZh) }}
                   </button>
                 </div>
-                <div><strong>Public form:</strong> {{ viewSummaryName(action.config.publicFormViewId, 'No public form link') }}</div>
-                <div><strong>Public form access:</strong> {{ publicFormAccessState(action.config.publicFormViewId).summary }}</div>
-                <div><strong>Allowed audience:</strong> {{ publicFormAccessState(action.config.publicFormViewId).audienceSummary }}</div>
-                <div><strong>Internal processing:</strong> {{ viewSummaryName(action.config.internalViewId, 'No internal link') }}</div>
+                <div><strong>{{ automationLabel('dingtalk.publicForm', isZh) }}:</strong> {{ viewSummaryName(action.config.publicFormViewId, automationLabel('dingtalk.noPublicFormLink', isZh)) }}</div>
+                <div><strong>{{ automationLabel('dingtalk.publicFormAccess', isZh) }}:</strong> {{ publicFormAccessState(action.config.publicFormViewId).summary }}</div>
+                <div><strong>{{ automationLabel('dingtalk.allowedAudience', isZh) }}:</strong> {{ publicFormAccessState(action.config.publicFormViewId).audienceSummary }}</div>
+                <div><strong>{{ automationLabel('dingtalk.internalProcessing', isZh) }}:</strong> {{ viewSummaryName(action.config.internalViewId, automationLabel('dingtalk.noInternalLink', isZh)) }}</div>
               </div>
             </div>
 
@@ -947,6 +947,7 @@ import {
   appendTemplateToken,
   DINGTALK_BODY_TEMPLATE_TOKENS,
   DINGTALK_TITLE_TEMPLATE_TOKENS,
+  dingTalkTemplateTokenLabel,
 } from '../utils/dingtalkNotificationTemplateTokens'
 import { listDingTalkTemplateSyntaxWarnings } from '../utils/dingtalkNotificationTemplateLint'
 import { renderDingTalkTemplateExample } from '../utils/dingtalkNotificationTemplateExample'
@@ -970,6 +971,12 @@ import {
   automationConditionOperatorLabel,
   automationConditionValuePlaceholder,
   automationCronPresetLabel,
+  automationDingTalkDestinationScopeLabel,
+  automationDingTalkDestinationSubtitle,
+  automationDingTalkPersonAccessLabel,
+  automationDingTalkPersonStatusLabel,
+  automationDingTalkPersonSubjectLabel,
+  automationDingTalkPresetLabel,
   automationLabel,
   automationTriggerConditionLabel,
   automationTriggerTypeLabel,
@@ -1767,25 +1774,25 @@ function isInactivePersonRecipientCandidate(candidate: MetaSheetPermissionCandid
 }
 
 function personRecipientSubjectLabel(candidate: MetaSheetPermissionCandidate): string {
-  return candidate.subjectType === 'member-group' ? 'Member group' : 'User'
+  return automationDingTalkPersonSubjectLabel(candidate.subjectType === 'member-group' ? 'member-group' : 'user', isZh.value)
 }
 
 function personRecipientAccessLabel(accessLevel: MetaSheetPermissionCandidate['accessLevel']): string {
-  return accessLevel ? `Access: ${accessLevel}` : ''
+  return accessLevel ? automationDingTalkPersonAccessLabel(accessLevel, isZh.value) : ''
 }
 
 function personRecipientDingTalkStatusLabel(
   subjectType: MetaSheetPermissionCandidate['subjectType'],
   status: Pick<MetaSheetPermissionCandidate, 'dingtalkBound' | 'dingtalkGrantEnabled' | 'dingtalkPersonDeliveryAvailable'>,
 ): string {
-  if (subjectType === 'member-group') return 'Member group members are checked individually for DingTalk delivery'
+  if (subjectType === 'member-group') return automationDingTalkPersonStatusLabel('memberGroupCheckedIndividually', isZh.value)
   if (subjectType !== 'user') return ''
-  if (status.dingtalkPersonDeliveryAvailable === false) return 'No DingTalk delivery link; person message will skip until linked'
-  if (status.dingtalkPersonDeliveryAvailable === true && status.dingtalkGrantEnabled === true) return 'DingTalk direct message ready; form authorization enabled'
-  if (status.dingtalkPersonDeliveryAvailable === true && status.dingtalkGrantEnabled === false) return 'DingTalk direct message ready; form authorization not enabled'
-  if (status.dingtalkBound === false) return 'Not bound to DingTalk; person message may skip until linked'
-  if (status.dingtalkBound === true && status.dingtalkGrantEnabled === true) return 'DingTalk bound; form authorization enabled'
-  if (status.dingtalkBound === true && status.dingtalkGrantEnabled === false) return 'DingTalk bound; form authorization not enabled'
+  if (status.dingtalkPersonDeliveryAvailable === false) return automationDingTalkPersonStatusLabel('noDeliveryLink', isZh.value)
+  if (status.dingtalkPersonDeliveryAvailable === true && status.dingtalkGrantEnabled === true) return automationDingTalkPersonStatusLabel('deliveryReadyGrantEnabled', isZh.value)
+  if (status.dingtalkPersonDeliveryAvailable === true && status.dingtalkGrantEnabled === false) return automationDingTalkPersonStatusLabel('deliveryReadyGrantDisabled', isZh.value)
+  if (status.dingtalkBound === false) return automationDingTalkPersonStatusLabel('notBound', isZh.value)
+  if (status.dingtalkBound === true && status.dingtalkGrantEnabled === true) return automationDingTalkPersonStatusLabel('boundGrantEnabled', isZh.value)
+  if (status.dingtalkBound === true && status.dingtalkGrantEnabled === false) return automationDingTalkPersonStatusLabel('boundGrantDisabled', isZh.value)
   return ''
 }
 
@@ -1909,16 +1916,12 @@ function groupDestinationScope(destination?: DingTalkGroupDestination): 'private
 
 function groupDestinationScopeLabel(destination?: DingTalkGroupDestination): string {
   const scope = groupDestinationScope(destination)
-  if (scope === 'org') return 'Organization catalog'
-  if (scope === 'sheet') return 'This table'
-  return 'Private'
+  return automationDingTalkDestinationScopeLabel(scope, isZh.value)
 }
 
 function groupDestinationSubtitle(destination?: DingTalkGroupDestination): string | undefined {
   const scope = groupDestinationScope(destination)
-  if (scope === 'org') return destination?.orgId ? `organization catalog: ${destination.orgId}` : 'organization catalog'
-  if (scope === 'sheet') return destination?.sheetId ? `sheet: ${destination.sheetId}` : 'this table'
-  return 'private'
+  return automationDingTalkDestinationSubtitle(scope, scope === 'org' ? destination?.orgId ?? '' : destination?.sheetId ?? '', isZh.value)
 }
 
 function selectedGroupDestinations(action: DraftAction) {
@@ -1965,19 +1968,19 @@ function removeGroupDestination(action: DraftAction, destinationId: string) {
 
 function dingTalkGroupSummary(action: DraftAction) {
   const selected = selectedGroupDestinations(action)
-  if (!selected.length) return 'No groups selected'
+  if (!selected.length) return automationLabel('dingtalk.noGroupsSelected', isZh.value)
   return selected.map((item) => item.label).join(', ')
 }
 
 function groupDestinationFieldPathWarnings(value: unknown) {
-  return listDingTalkGroupDestinationFieldPathWarnings(value, props.fields)
+  return listDingTalkGroupDestinationFieldPathWarnings(value, props.fields, isZh.value)
 }
 
 function groupDestinationFieldPathSummary(value: unknown) {
   const labels = parseRecipientFieldPathsText(value)
     .map((path) => recipientFieldSummaryLabel(path))
     .filter(Boolean)
-  if (!labels.length) return 'No dynamic group field'
+  if (!labels.length) return automationLabel('dingtalk.noDynamicGroupField', isZh.value)
   return labels.join(', ')
 }
 
@@ -2017,31 +2020,32 @@ function templatePreviewText(value: unknown, fallback: string) {
 
 function renderedTemplateExample(value: unknown, fallback: string) {
   if (typeof value !== 'string' || !value.trim()) return fallback
-  const rendered = renderDingTalkTemplateExample(value).trim()
+  const rendered = renderDingTalkTemplateExample(value, isZh.value).trim()
   return rendered || fallback
 }
 
 function publicFormLinkWarnings(value: unknown, warnWhenDingTalkAccessRisk = false) {
   return listDingTalkPublicFormLinkWarnings(value, formViews.value, {
+    isZh: isZh.value,
     warnWhenFullyPublic: warnWhenDingTalkAccessRisk,
     warnWhenProtectedWithoutAllowlist: warnWhenDingTalkAccessRisk,
   })
 }
 
 function publicFormLinkBlockingErrors(value: unknown) {
-  return listDingTalkPublicFormLinkBlockingErrors(value, formViews.value)
+  return listDingTalkPublicFormLinkBlockingErrors(value, formViews.value, { isZh: isZh.value })
 }
 
 function internalViewLinkWarnings(value: unknown) {
-  return listDingTalkInternalViewLinkWarnings(value, internalViews.value)
+  return listDingTalkInternalViewLinkWarnings(value, internalViews.value, isZh.value)
 }
 
 function internalViewLinkBlockingErrors(value: unknown) {
-  return listDingTalkInternalViewLinkBlockingErrors(value, internalViews.value)
+  return listDingTalkInternalViewLinkBlockingErrors(value, internalViews.value, isZh.value)
 }
 
 function publicFormAccessState(value: unknown) {
-  return getDingTalkPublicFormLinkAccessState(value, formViews.value)
+  return getDingTalkPublicFormLinkAccessState(value, formViews.value, { isZh: isZh.value })
 }
 
 function isDingTalkActionType(value: unknown): boolean {
@@ -2070,10 +2074,10 @@ function personRecipientSummary(action: DraftAction) {
   const selectedUsers = selectedPersonRecipients(action).map((item) => item.label)
   const selectedGroups = selectedPersonRecipientGroups(action).map((item) => item.label)
   const parts = [
-    selectedUsers.length ? `Users: ${selectedUsers.join(', ')}` : '',
-    selectedGroups.length ? `Groups: ${selectedGroups.join(', ')}` : '',
+    selectedUsers.length ? `${isZh.value ? '用户' : 'Users'}: ${selectedUsers.join(', ')}` : '',
+    selectedGroups.length ? `${isZh.value ? '成员组' : 'Groups'}: ${selectedGroups.join(', ')}` : '',
   ].filter(Boolean)
-  if (!parts.length) return 'No recipients selected'
+  if (!parts.length) return automationLabel('dingtalk.noRecipientsSelected', isZh.value)
   return parts.join(' | ')
 }
 
@@ -2113,18 +2117,26 @@ function selectedMemberGroupRecipientFields(action: DraftAction) {
 }
 
 function recipientFieldPathWarnings(value: unknown) {
-  return listDingTalkPersonRecipientFieldPathWarnings(value, props.fields)
+  return listDingTalkPersonRecipientFieldPathWarnings(value, props.fields, isZh.value)
 }
 
 function memberGroupRecipientFieldPathWarnings(value: unknown) {
-  return listDingTalkPersonMemberGroupRecipientFieldPathWarnings(value, props.fields)
+  return listDingTalkPersonMemberGroupRecipientFieldPathWarnings(value, props.fields, isZh.value)
 }
 
 function recipientFieldPathSummary(value: unknown) {
   const labels = parseRecipientFieldPathsText(value)
     .map((path) => recipientFieldSummaryLabel(path))
     .filter(Boolean)
-  if (!labels.length) return 'No dynamic recipient field'
+  if (!labels.length) return automationLabel('dingtalk.noDynamicRecipientField', isZh.value)
+  return labels.join(', ')
+}
+
+function memberGroupRecipientFieldPathSummary(value: unknown) {
+  const labels = parseRecipientFieldPathsText(value)
+    .map((path) => recipientFieldSummaryLabel(path))
+    .filter(Boolean)
+  if (!labels.length) return automationLabel('dingtalk.noDynamicMemberGroupField', isZh.value)
   return labels.join(', ')
 }
 
@@ -2165,7 +2177,7 @@ function removeMemberGroupRecipientFieldPath(action: DraftAction, path: string) 
 }
 
 function templateSyntaxWarnings(value: unknown) {
-  return typeof value === 'string' ? listDingTalkTemplateSyntaxWarnings(value) : []
+  return typeof value === 'string' ? listDingTalkTemplateSyntaxWarnings(value, isZh.value) : []
 }
 
 onBeforeUnmount(() => {
@@ -2184,6 +2196,7 @@ function applyGroupPreset(action: DraftAction, preset: DingTalkNotificationPrese
       },
       preset,
       props.views ?? [],
+      isZh.value,
     ),
   }
 }
@@ -2200,6 +2213,7 @@ function applyPersonPreset(action: DraftAction, preset: DingTalkNotificationPres
       },
       preset,
       props.views ?? [],
+      isZh.value,
     ),
   }
 }
