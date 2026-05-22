@@ -1,5 +1,10 @@
+import {
+  automationDingTalkTemplateTokenLabel,
+  type AutomationDingTalkTemplateTokenKey,
+} from './meta-automation-labels'
+
 export interface DingTalkNotificationTemplateToken {
-  key: string
+  key: AutomationDingTalkTemplateTokenKey
   label: string
   value: string
 }
@@ -20,4 +25,8 @@ export function appendTemplateToken(currentValue: string, token: string, multili
   if (currentValue.endsWith(token)) return currentValue
   if (/\s$/.test(currentValue)) return `${currentValue}${token}`
   return multiline ? `${currentValue}\n${token}` : `${currentValue} ${token}`
+}
+
+export function dingTalkTemplateTokenLabel(token: DingTalkNotificationTemplateToken, isZh: boolean): string {
+  return automationDingTalkTemplateTokenLabel(token.key, isZh)
 }

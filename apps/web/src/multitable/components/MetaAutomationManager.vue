@@ -74,32 +74,32 @@
 
           <template v-if="draft.actionType === 'send_dingtalk_group_message'">
             <div class="meta-automation__preset-row">
-              <span class="meta-automation__preset-label">Message preset</span>
-              <button class="meta-automation__btn" type="button" data-automation-preset="group-form" @click="applyGroupPreset('form_request')">Form request</button>
-              <button class="meta-automation__btn" type="button" data-automation-preset="group-internal" @click="applyGroupPreset('internal_process')">Internal processing</button>
-              <button class="meta-automation__btn" type="button" data-automation-preset="group-both" @click="applyGroupPreset('form_and_process')">Form + processing</button>
+              <span class="meta-automation__preset-label">{{ l('dingtalk.preset') }}</span>
+              <button class="meta-automation__btn" type="button" data-automation-preset="group-form" @click="applyGroupPreset('form_request')">{{ automationDingTalkPresetLabel('form_request', isZh) }}</button>
+              <button class="meta-automation__btn" type="button" data-automation-preset="group-internal" @click="applyGroupPreset('internal_process')">{{ automationDingTalkPresetLabel('internal_process', isZh) }}</button>
+              <button class="meta-automation__btn" type="button" data-automation-preset="group-both" @click="applyGroupPreset('form_and_process')">{{ automationDingTalkPresetLabel('form_and_process', isZh) }}</button>
             </div>
-            <label class="meta-automation__label">Add DingTalk groups</label>
+            <label class="meta-automation__label">{{ l('dingtalk.addGroups') }}</label>
             <select
               v-model="draft.dingtalkDestinationPickerId"
               class="meta-automation__select"
               data-automation-field="dingtalkDestinationPickerId"
               @change="appendDingTalkGroupDestination($event.target as HTMLSelectElement)"
             >
-              <option value="">-- add DingTalk group --</option>
+              <option value="">{{ l('dingtalk.addGroupOption') }}</option>
               <option v-for="destination in availableDingTalkGroupDestinations" :key="destination.id" :value="destination.id">
                 {{ destination.name }} · {{ dingTalkDestinationScopeLabel(destination) }}
               </option>
             </select>
             <div class="meta-automation__hint" data-automation-field="dingtalkDestinationPickerHint">
-              DingTalk groups registered for this table or shared from the organization catalog are listed here.
+              {{ l('dingtalk.groupsRegisteredHint') }}
             </div>
             <div
               v-if="!dingTalkDestinations.length"
               class="meta-automation__hint"
               data-automation-field="dingtalkDestinationEmpty"
             >
-              No DingTalk groups are available for this table yet. Add one in API Tokens &amp; Webhooks &gt; DingTalk Groups, ask an admin to share an organization catalog group, or use a record group field path below.
+              {{ l('dingtalk.noGroupsAvailable') }}
             </div>
             <div
               v-if="selectedDingTalkGroupDestinations.length"
@@ -115,10 +115,10 @@
               >
                 <strong>{{ destination.label }}</strong>
                 <span>{{ destination.subtitle || destination.id }}</span>
-                <em>Remove</em>
+                <em>{{ l('dingtalk.remove') }}</em>
               </button>
             </div>
-            <label class="meta-automation__label">Record group field paths (optional)</label>
+            <label class="meta-automation__label">{{ l('dingtalk.recordGroupFieldPaths') }}</label>
             <input
               v-model="draft.dingtalkDestinationFieldPath"
               class="meta-automation__input"
@@ -126,13 +126,13 @@
               placeholder="record.opsDestinationId, record.escalationDestinationIds"
               data-automation-field="dingtalkDestinationFieldPath"
             />
-            <label class="meta-automation__label">Pick group field</label>
+            <label class="meta-automation__label">{{ l('dingtalk.pickGroupField') }}</label>
             <select
               class="meta-automation__select"
               data-automation-field="dingtalkDestinationFieldSelect"
               @change="appendDingTalkGroupDestinationField($event.target as HTMLSelectElement)"
             >
-              <option value="">-- pick field --</option>
+              <option value="">{{ l('dingtalk.pickFieldOption') }}</option>
               <option v-for="field in dingTalkGroupDestinationCandidateFields" :key="field.id" :value="field.id">
                 {{ field.name }}
               </option>
@@ -151,7 +151,7 @@
               >
                 <strong>{{ field.label }}</strong>
                 <span>{{ field.id }}</span>
-                <em>Remove</em>
+                <em>{{ l('dingtalk.remove') }}</em>
               </button>
             </div>
             <div
@@ -161,12 +161,12 @@
             >
               {{ warning }}
             </div>
-            <label class="meta-automation__label">Title template</label>
+            <label class="meta-automation__label">{{ l('dingtalk.titleTemplate') }}</label>
             <input
               v-model="draft.dingtalkTitleTemplate"
               class="meta-automation__input"
               type="text"
-              placeholder="例如：{{record.title}} 待处理"
+              :placeholder="l('dingtalk.titleTemplatePlaceholder')"
               data-automation-field="dingtalkTitleTemplate"
             />
             <div
@@ -177,7 +177,7 @@
               {{ warning }}
             </div>
             <div class="meta-automation__preset-row">
-              <span class="meta-automation__preset-label">Template tokens</span>
+              <span class="meta-automation__preset-label">{{ l('dingtalk.templateTokens') }}</span>
               <button
                 v-for="token in DINGTALK_TITLE_TEMPLATE_TOKENS"
                 :key="token.key"
@@ -186,15 +186,15 @@
                 :data-automation-token="`group-title-${token.key}`"
                 @click="appendGroupTemplateToken('title', token.value)"
               >
-                {{ token.label }}
+                {{ dingTalkTemplateTokenLabel(token, isZh) }}
               </button>
             </div>
-            <label class="meta-automation__label">Body template</label>
+            <label class="meta-automation__label">{{ l('dingtalk.bodyTemplate') }}</label>
             <textarea
               v-model="draft.dingtalkBodyTemplate"
               class="meta-automation__input"
               rows="4"
-              placeholder="支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}"
+              :placeholder="l('dingtalk.bodyTemplatePlaceholder')"
               data-automation-field="dingtalkBodyTemplate"
             ></textarea>
             <div
@@ -205,7 +205,7 @@
               {{ warning }}
             </div>
             <div class="meta-automation__preset-row">
-              <span class="meta-automation__preset-label">Template tokens</span>
+              <span class="meta-automation__preset-label">{{ l('dingtalk.templateTokens') }}</span>
               <button
                 v-for="token in DINGTALK_BODY_TEMPLATE_TOKENS"
                 :key="token.key"
@@ -214,12 +214,12 @@
                 :data-automation-token="`group-body-${token.key}`"
                 @click="appendGroupTemplateToken('body', token.value)"
               >
-                {{ token.label }}
+                {{ dingTalkTemplateTokenLabel(token, isZh) }}
               </button>
             </div>
-            <label class="meta-automation__label">Public form view (optional)</label>
+            <label class="meta-automation__label">{{ l('dingtalk.publicFormView') }}</label>
             <select v-model="draft.publicFormViewId" class="meta-automation__select" data-automation-field="publicFormViewId">
-              <option value="">-- no public form link --</option>
+              <option value="">{{ l('dingtalk.noPublicFormLinkOption') }}</option>
               <option v-for="view in formViews" :key="view.id" :value="view.id">{{ view.name }}</option>
             </select>
             <div
@@ -229,9 +229,9 @@
             >
               {{ warning }}
             </div>
-            <label class="meta-automation__label">Internal processing view (optional)</label>
+            <label class="meta-automation__label">{{ l('dingtalk.internalProcessingView') }}</label>
             <select v-model="draft.internalViewId" class="meta-automation__select" data-automation-field="internalViewId">
-              <option value="">-- no internal link --</option>
+              <option value="">{{ l('dingtalk.noInternalLinkOption') }}</option>
               <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
             </select>
             <div
@@ -242,66 +242,66 @@
               {{ warning }}
             </div>
             <div class="meta-automation__preview" data-automation-summary="group">
-              <div class="meta-automation__preview-title">Message summary</div>
-              <div><strong>Groups:</strong> {{ dingTalkGroupSummary }}</div>
-              <div><strong>Record groups:</strong> {{ dingTalkGroupFieldSummary }}</div>
-              <div><strong>Title template:</strong> {{ templatePreviewText(draft.dingtalkTitleTemplate, 'No title template') }}</div>
-              <div class="meta-automation__preview-body"><strong>Body template:</strong> {{ templatePreviewText(draft.dingtalkBodyTemplate, 'No body template') }}</div>
+              <div class="meta-automation__preview-title">{{ l('dingtalk.messageSummary') }}</div>
+              <div><strong>{{ l('dingtalk.groups') }}:</strong> {{ dingTalkGroupSummary }}</div>
+              <div><strong>{{ l('dingtalk.recordGroups') }}:</strong> {{ dingTalkGroupFieldSummary }}</div>
+              <div><strong>{{ l('dingtalk.titleTemplate') }}:</strong> {{ templatePreviewText(draft.dingtalkTitleTemplate, l('dingtalk.noTitleTemplate')) }}</div>
+              <div class="meta-automation__preview-body"><strong>{{ l('dingtalk.bodyTemplate') }}:</strong> {{ templatePreviewText(draft.dingtalkBodyTemplate, l('dingtalk.noBodyTemplate')) }}</div>
               <div class="meta-automation__preview-line">
-                <span><strong>Rendered title:</strong> {{ renderedTemplateExample(draft.dingtalkTitleTemplate, 'No rendered title') }}</span>
+                <span><strong>{{ l('dingtalk.renderedTitle') }}:</strong> {{ renderedTemplateExample(draft.dingtalkTitleTemplate, l('dingtalk.noRenderedTitle')) }}</span>
                 <button
                   class="meta-automation__copy-btn"
                   type="button"
                   data-automation-copy="group-rendered-title"
                   @click="copyPreviewText('group-title', renderedTemplateExample(draft.dingtalkTitleTemplate, ''))"
                 >
-                  {{ copiedPreviewKey === 'group-title' ? 'Copied' : 'Copy' }}
+                  {{ copiedPreviewKey === 'group-title' ? l('dingtalk.copied') : l('dingtalk.copy') }}
                 </button>
               </div>
               <div class="meta-automation__preview-line meta-automation__preview-body">
-                <span><strong>Rendered body:</strong> {{ renderedTemplateExample(draft.dingtalkBodyTemplate, 'No rendered body') }}</span>
+                <span><strong>{{ l('dingtalk.renderedBody') }}:</strong> {{ renderedTemplateExample(draft.dingtalkBodyTemplate, l('dingtalk.noRenderedBody')) }}</span>
                 <button
                   class="meta-automation__copy-btn"
                   type="button"
                   data-automation-copy="group-rendered-body"
                   @click="copyPreviewText('group-body', renderedTemplateExample(draft.dingtalkBodyTemplate, ''))"
                 >
-                  {{ copiedPreviewKey === 'group-body' ? 'Copied' : 'Copy' }}
+                  {{ copiedPreviewKey === 'group-body' ? l('dingtalk.copied') : l('dingtalk.copy') }}
                 </button>
               </div>
-              <div><strong>Public form:</strong> {{ viewSummaryName(draft.publicFormViewId, 'No public form link') }}</div>
+              <div><strong>{{ l('dingtalk.publicForm') }}:</strong> {{ viewSummaryName(draft.publicFormViewId, l('dingtalk.noPublicFormLink')) }}</div>
               <div
                 class="meta-automation__public-form-access"
                 :class="`meta-automation__public-form-access--${draftGroupPublicFormAccessState.level}`"
                 data-automation-public-form-access="group"
                 :data-access-level="draftGroupPublicFormAccessState.level"
               >
-                <strong>Public form access:</strong> {{ draftGroupPublicFormAccessState.summary }}
+                <strong>{{ l('dingtalk.publicFormAccess') }}:</strong> {{ draftGroupPublicFormAccessState.summary }}
               </div>
               <div data-automation-public-form-audience="group">
-                <strong>Allowed audience:</strong> {{ draftGroupPublicFormAccessState.audienceSummary }}
+                <strong>{{ l('dingtalk.allowedAudience') }}:</strong> {{ draftGroupPublicFormAccessState.audienceSummary }}
               </div>
-              <div><strong>Internal processing:</strong> {{ viewSummaryName(draft.internalViewId, 'No internal link') }}</div>
+              <div><strong>{{ l('dingtalk.internalProcessing') }}:</strong> {{ viewSummaryName(draft.internalViewId, l('dingtalk.noInternalLink')) }}</div>
             </div>
           </template>
 
           <template v-if="draft.actionType === 'send_dingtalk_person_message'">
             <div class="meta-automation__preset-row">
-              <span class="meta-automation__preset-label">Message preset</span>
-              <button class="meta-automation__btn" type="button" data-automation-preset="person-form" @click="applyPersonPreset('form_request')">Form request</button>
-              <button class="meta-automation__btn" type="button" data-automation-preset="person-internal" @click="applyPersonPreset('internal_process')">Internal processing</button>
-              <button class="meta-automation__btn" type="button" data-automation-preset="person-both" @click="applyPersonPreset('form_and_process')">Form + processing</button>
+              <span class="meta-automation__preset-label">{{ l('dingtalk.preset') }}</span>
+              <button class="meta-automation__btn" type="button" data-automation-preset="person-form" @click="applyPersonPreset('form_request')">{{ automationDingTalkPresetLabel('form_request', isZh) }}</button>
+              <button class="meta-automation__btn" type="button" data-automation-preset="person-internal" @click="applyPersonPreset('internal_process')">{{ automationDingTalkPresetLabel('internal_process', isZh) }}</button>
+              <button class="meta-automation__btn" type="button" data-automation-preset="person-both" @click="applyPersonPreset('form_and_process')">{{ automationDingTalkPresetLabel('form_and_process', isZh) }}</button>
             </div>
-            <label class="meta-automation__label">Search and add users or member groups</label>
+            <label class="meta-automation__label">{{ l('dingtalk.searchUsersOrGroups') }}</label>
             <input
               v-model="dingtalkPersonUserSearch"
               class="meta-automation__input"
               type="text"
-              placeholder="Search by user, member group, email, or subject ID"
+              :placeholder="l('dingtalk.searchUsersOrGroupsPlaceholder')"
               data-automation-field="dingtalkPersonUserSearch"
               @input="void loadDingTalkPersonSuggestions()"
             />
-            <div v-if="dingtalkPersonUserSearchLoading" class="meta-automation__hint">Searching users and member groups…</div>
+            <div v-if="dingtalkPersonUserSearchLoading" class="meta-automation__hint">{{ l('dingtalk.searchingUsersOrGroups') }}</div>
             <div v-else-if="dingtalkPersonUserSearchError" class="meta-automation__hint meta-automation__hint--error">{{ dingtalkPersonUserSearchError }}</div>
             <div v-else-if="availableDingTalkPersonSuggestions.length" class="meta-automation__recipient-list">
               <button
@@ -318,10 +318,10 @@
                 <span>{{ personRecipientSubjectLabel(candidate) }}</span>
                 <span v-if="candidate.accessLevel">{{ personRecipientAccessLabel(candidate.accessLevel) }}</span>
                 <span v-if="personRecipientDingTalkStatusLabel(candidate.subjectType, candidate)">{{ personRecipientDingTalkStatusLabel(candidate.subjectType, candidate) }}</span>
-                <span v-if="isInactivePersonRecipientCandidate(candidate)">Inactive users cannot be added</span>
+                <span v-if="isInactivePersonRecipientCandidate(candidate)">{{ l('dingtalk.inactiveUsersCannotBeAdded') }}</span>
               </button>
             </div>
-            <div v-else-if="dingtalkPersonUserSearch.trim()" class="meta-automation__hint">No matching users or member groups</div>
+            <div v-else-if="dingtalkPersonUserSearch.trim()" class="meta-automation__hint">{{ l('dingtalk.noMatchingUsersOrGroups') }}</div>
             <div v-if="selectedDingTalkPersonRecipients.length" class="meta-automation__recipient-list meta-automation__recipient-list--selected">
               <button
                 v-for="recipient in selectedDingTalkPersonRecipients"
@@ -334,7 +334,7 @@
                 <strong>{{ recipient.label }}</strong>
                 <span>{{ recipient.subtitle || recipient.id }}</span>
                 <span v-if="personRecipientDingTalkStatusLabel('user', recipient)">{{ personRecipientDingTalkStatusLabel('user', recipient) }}</span>
-                <em>Remove</em>
+                <em>{{ l('dingtalk.remove') }}</em>
               </button>
             </div>
             <div v-if="selectedDingTalkPersonMemberGroups.length" class="meta-automation__recipient-list meta-automation__recipient-list--selected">
@@ -349,40 +349,40 @@
                 <strong>{{ group.label }}</strong>
                 <span>{{ group.subtitle || group.id }}</span>
                 <span v-if="personRecipientDingTalkStatusLabel('member-group', group)">{{ personRecipientDingTalkStatusLabel('member-group', group) }}</span>
-                <em>Remove</em>
+                <em>{{ l('dingtalk.remove') }}</em>
               </button>
             </div>
-            <label class="meta-automation__label">Local user IDs</label>
+            <label class="meta-automation__label">{{ l('dingtalk.localUserIds') }}</label>
             <textarea
               v-model="draft.dingtalkPersonUserIds"
               class="meta-automation__input"
               rows="3"
-              placeholder="使用逗号或换行分隔本地 userId"
+              :placeholder="l('dingtalk.localUserIdsPlaceholder')"
               data-automation-field="dingtalkPersonUserIds"
             ></textarea>
-            <label class="meta-automation__label">Member group IDs (optional)</label>
+            <label class="meta-automation__label">{{ l('dingtalk.memberGroupIds') }}</label>
             <textarea
               v-model="draft.dingtalkPersonMemberGroupIds"
               class="meta-automation__input"
               rows="2"
-              placeholder="使用逗号或换行分隔成员组 ID"
+              :placeholder="l('dingtalk.memberGroupIdsPlaceholder')"
               data-automation-field="dingtalkPersonMemberGroupIds"
             ></textarea>
-            <label class="meta-automation__label">Record recipient field paths (optional)</label>
+            <label class="meta-automation__label">{{ l('dingtalk.recordRecipientFieldPaths') }}</label>
             <input
               v-model="draft.dingtalkPersonRecipientFieldPath"
               class="meta-automation__input"
               type="text"
-              placeholder="例如：record.assigneeUserIds, record.reviewerUserId"
+              :placeholder="l('dingtalk.recordRecipientFieldPathPlaceholder')"
               data-automation-field="dingtalkPersonRecipientFieldPath"
             />
-            <label class="meta-automation__label">Pick recipient field</label>
+            <label class="meta-automation__label">{{ l('dingtalk.pickRecipientField') }}</label>
             <select
               class="meta-automation__select"
               data-automation-field="dingtalkPersonRecipientFieldSelect"
               @change="appendDingTalkPersonRecipientField($event.target as HTMLSelectElement)"
             >
-              <option value="">-- choose a user field --</option>
+              <option value="">{{ l('dingtalk.chooseUserFieldOption') }}</option>
               <option v-for="field in dingTalkPersonRecipientCandidateFields" :key="field.id" :value="field.id">
                 {{ field.name }} (record.{{ field.id }})
               </option>
@@ -400,7 +400,7 @@
                 @click="removeDingTalkPersonRecipientField(field.id)"
               >
                 <strong>{{ field.label }}</strong>
-                <em>Remove</em>
+                <em>{{ l('dingtalk.remove') }}</em>
               </button>
             </div>
             <div
@@ -411,23 +411,23 @@
               {{ warning }}
             </div>
             <div class="meta-automation__hint">
-              Record data is keyed by field ID. Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths. The picker only lists user fields.
+              {{ l('dingtalk.recordRecipientFieldPathHint') }}
             </div>
-            <label class="meta-automation__label">Record member group field paths (optional)</label>
+            <label class="meta-automation__label">{{ l('dingtalk.recordMemberGroupFieldPaths') }}</label>
             <input
               v-model="draft.dingtalkPersonMemberGroupRecipientFieldPath"
               class="meta-automation__input"
               type="text"
-              placeholder="例如：record.watcherGroupIds, record.escalationGroupId"
+              :placeholder="l('dingtalk.recordMemberGroupFieldPathPlaceholder')"
               data-automation-field="dingtalkPersonMemberGroupRecipientFieldPath"
             />
-            <label class="meta-automation__label">Pick member group field</label>
+            <label class="meta-automation__label">{{ l('dingtalk.pickMemberGroupField') }}</label>
             <select
               class="meta-automation__select"
               data-automation-field="dingtalkPersonMemberGroupRecipientFieldSelect"
               @change="appendDingTalkPersonMemberGroupRecipientField($event.target as HTMLSelectElement)"
             >
-              <option value="">-- choose a member group field --</option>
+              <option value="">{{ l('dingtalk.chooseMemberGroupFieldOption') }}</option>
               <option v-for="field in dingTalkPersonMemberGroupRecipientCandidateFields" :key="field.id" :value="field.id">
                 {{ field.name }} (record.{{ field.id }})
               </option>
@@ -445,7 +445,7 @@
                 @click="removeDingTalkPersonMemberGroupRecipientField(field.id)"
               >
                 <strong>{{ field.label }}</strong>
-                <em>Remove</em>
+                <em>{{ l('dingtalk.remove') }}</em>
               </button>
             </div>
             <div
@@ -456,14 +456,14 @@
               {{ warning }}
             </div>
             <div class="meta-automation__hint">
-              Use comma or newline separated <code>record.&lt;fieldId&gt;</code> paths whose values resolve to member group IDs. The picker only lists explicit member group fields.
+              {{ l('dingtalk.recordMemberGroupFieldPathHint') }}
             </div>
-            <label class="meta-automation__label">Title template</label>
+            <label class="meta-automation__label">{{ l('dingtalk.titleTemplate') }}</label>
             <input
               v-model="draft.dingtalkPersonTitleTemplate"
               class="meta-automation__input"
               type="text"
-              placeholder="例如：{{record.title}} 待处理"
+              :placeholder="l('dingtalk.titleTemplatePlaceholder')"
               data-automation-field="dingtalkPersonTitleTemplate"
             />
             <div
@@ -474,7 +474,7 @@
               {{ warning }}
             </div>
             <div class="meta-automation__preset-row">
-              <span class="meta-automation__preset-label">Template tokens</span>
+              <span class="meta-automation__preset-label">{{ l('dingtalk.templateTokens') }}</span>
               <button
                 v-for="token in DINGTALK_TITLE_TEMPLATE_TOKENS"
                 :key="token.key"
@@ -483,15 +483,15 @@
                 :data-automation-token="`person-title-${token.key}`"
                 @click="appendPersonTemplateToken('title', token.value)"
               >
-                {{ token.label }}
+                {{ dingTalkTemplateTokenLabel(token, isZh) }}
               </button>
             </div>
-            <label class="meta-automation__label">Body template</label>
+            <label class="meta-automation__label">{{ l('dingtalk.bodyTemplate') }}</label>
             <textarea
               v-model="draft.dingtalkPersonBodyTemplate"
               class="meta-automation__input"
               rows="4"
-              placeholder="支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}"
+              :placeholder="l('dingtalk.bodyTemplatePlaceholder')"
               data-automation-field="dingtalkPersonBodyTemplate"
             ></textarea>
             <div
@@ -502,7 +502,7 @@
               {{ warning }}
             </div>
             <div class="meta-automation__preset-row">
-              <span class="meta-automation__preset-label">Template tokens</span>
+              <span class="meta-automation__preset-label">{{ l('dingtalk.templateTokens') }}</span>
               <button
                 v-for="token in DINGTALK_BODY_TEMPLATE_TOKENS"
                 :key="token.key"
@@ -511,12 +511,12 @@
                 :data-automation-token="`person-body-${token.key}`"
                 @click="appendPersonTemplateToken('body', token.value)"
               >
-                {{ token.label }}
+                {{ dingTalkTemplateTokenLabel(token, isZh) }}
               </button>
             </div>
-            <label class="meta-automation__label">Public form view (optional)</label>
+            <label class="meta-automation__label">{{ l('dingtalk.publicFormView') }}</label>
             <select v-model="draft.dingtalkPersonPublicFormViewId" class="meta-automation__select" data-automation-field="dingtalkPersonPublicFormViewId">
-              <option value="">-- no public form link --</option>
+              <option value="">{{ l('dingtalk.noPublicFormLinkOption') }}</option>
               <option v-for="view in formViews" :key="view.id" :value="view.id">{{ view.name }}</option>
             </select>
             <div
@@ -526,9 +526,9 @@
             >
               {{ warning }}
             </div>
-            <label class="meta-automation__label">Internal processing view (optional)</label>
+            <label class="meta-automation__label">{{ l('dingtalk.internalProcessingView') }}</label>
             <select v-model="draft.dingtalkPersonInternalViewId" class="meta-automation__select" data-automation-field="dingtalkPersonInternalViewId">
-              <option value="">-- no internal link --</option>
+              <option value="">{{ l('dingtalk.noInternalLinkOption') }}</option>
               <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
             </select>
             <div
@@ -539,47 +539,47 @@
               {{ warning }}
             </div>
             <div class="meta-automation__preview" data-automation-summary="person">
-              <div class="meta-automation__preview-title">Message summary</div>
-              <div><strong>Recipients:</strong> {{ dingTalkPersonRecipientSummary }}</div>
-              <div><strong>Record recipients:</strong> {{ dingTalkPersonRecipientFieldSummary }}</div>
-              <div><strong>Record member groups:</strong> {{ dingTalkPersonMemberGroupFieldSummary }}</div>
-              <div><strong>Title template:</strong> {{ templatePreviewText(draft.dingtalkPersonTitleTemplate, 'No title template') }}</div>
-              <div class="meta-automation__preview-body"><strong>Body template:</strong> {{ templatePreviewText(draft.dingtalkPersonBodyTemplate, 'No body template') }}</div>
+              <div class="meta-automation__preview-title">{{ l('dingtalk.messageSummary') }}</div>
+              <div><strong>{{ l('dingtalk.recipients') }}:</strong> {{ dingTalkPersonRecipientSummary }}</div>
+              <div><strong>{{ l('dingtalk.recordRecipients') }}:</strong> {{ dingTalkPersonRecipientFieldSummary }}</div>
+              <div><strong>{{ l('dingtalk.recordMemberGroups') }}:</strong> {{ dingTalkPersonMemberGroupFieldSummary }}</div>
+              <div><strong>{{ l('dingtalk.titleTemplate') }}:</strong> {{ templatePreviewText(draft.dingtalkPersonTitleTemplate, l('dingtalk.noTitleTemplate')) }}</div>
+              <div class="meta-automation__preview-body"><strong>{{ l('dingtalk.bodyTemplate') }}:</strong> {{ templatePreviewText(draft.dingtalkPersonBodyTemplate, l('dingtalk.noBodyTemplate')) }}</div>
               <div class="meta-automation__preview-line">
-                <span><strong>Rendered title:</strong> {{ renderedTemplateExample(draft.dingtalkPersonTitleTemplate, 'No rendered title') }}</span>
+                <span><strong>{{ l('dingtalk.renderedTitle') }}:</strong> {{ renderedTemplateExample(draft.dingtalkPersonTitleTemplate, l('dingtalk.noRenderedTitle')) }}</span>
                 <button
                   class="meta-automation__copy-btn"
                   type="button"
                   data-automation-copy="person-rendered-title"
                   @click="copyPreviewText('person-title', renderedTemplateExample(draft.dingtalkPersonTitleTemplate, ''))"
                 >
-                  {{ copiedPreviewKey === 'person-title' ? 'Copied' : 'Copy' }}
+                  {{ copiedPreviewKey === 'person-title' ? l('dingtalk.copied') : l('dingtalk.copy') }}
                 </button>
               </div>
               <div class="meta-automation__preview-line meta-automation__preview-body">
-                <span><strong>Rendered body:</strong> {{ renderedTemplateExample(draft.dingtalkPersonBodyTemplate, 'No rendered body') }}</span>
+                <span><strong>{{ l('dingtalk.renderedBody') }}:</strong> {{ renderedTemplateExample(draft.dingtalkPersonBodyTemplate, l('dingtalk.noRenderedBody')) }}</span>
                 <button
                   class="meta-automation__copy-btn"
                   type="button"
                   data-automation-copy="person-rendered-body"
                   @click="copyPreviewText('person-body', renderedTemplateExample(draft.dingtalkPersonBodyTemplate, ''))"
                 >
-                  {{ copiedPreviewKey === 'person-body' ? 'Copied' : 'Copy' }}
+                  {{ copiedPreviewKey === 'person-body' ? l('dingtalk.copied') : l('dingtalk.copy') }}
                 </button>
               </div>
-              <div><strong>Public form:</strong> {{ viewSummaryName(draft.dingtalkPersonPublicFormViewId, 'No public form link') }}</div>
+              <div><strong>{{ l('dingtalk.publicForm') }}:</strong> {{ viewSummaryName(draft.dingtalkPersonPublicFormViewId, l('dingtalk.noPublicFormLink')) }}</div>
               <div
                 class="meta-automation__public-form-access"
                 :class="`meta-automation__public-form-access--${draftPersonPublicFormAccessState.level}`"
                 data-automation-public-form-access="person"
                 :data-access-level="draftPersonPublicFormAccessState.level"
               >
-                <strong>Public form access:</strong> {{ draftPersonPublicFormAccessState.summary }}
+                <strong>{{ l('dingtalk.publicFormAccess') }}:</strong> {{ draftPersonPublicFormAccessState.summary }}
               </div>
               <div data-automation-public-form-audience="person">
-                <strong>Allowed audience:</strong> {{ draftPersonPublicFormAccessState.audienceSummary }}
+                <strong>{{ l('dingtalk.allowedAudience') }}:</strong> {{ draftPersonPublicFormAccessState.audienceSummary }}
               </div>
-              <div><strong>Internal processing:</strong> {{ viewSummaryName(draft.dingtalkPersonInternalViewId, 'No internal link') }}</div>
+              <div><strong>{{ l('dingtalk.internalProcessing') }}:</strong> {{ viewSummaryName(draft.dingtalkPersonInternalViewId, l('dingtalk.noInternalLink')) }}</div>
             </div>
           </template>
 
@@ -781,6 +781,7 @@ import {
   appendTemplateToken,
   DINGTALK_BODY_TEMPLATE_TOKENS,
   DINGTALK_TITLE_TEMPLATE_TOKENS,
+  dingTalkTemplateTokenLabel,
 } from '../utils/dingtalkNotificationTemplateTokens'
 import { listDingTalkTemplateSyntaxWarnings } from '../utils/dingtalkNotificationTemplateLint'
 import { renderDingTalkTemplateExample } from '../utils/dingtalkNotificationTemplateExample'
@@ -807,6 +808,12 @@ import {
   automationCardLinkSummary,
   automationCardStats,
   automationCardTriggerSummary,
+  automationDingTalkDestinationScopeLabel,
+  automationDingTalkDestinationSubtitle,
+  automationDingTalkPersonAccessLabel,
+  automationDingTalkPersonStatusLabel,
+  automationDingTalkPersonSubjectLabel,
+  automationDingTalkPresetLabel,
   automationLabel,
   automationTestRunFailed,
   automationTestRunRequestFailed,
@@ -920,10 +927,10 @@ const formViews = computed(() => (props.views ?? []).filter((view) =>
 ))
 const internalViews = computed(() => (props.views ?? []).filter((view) => !view.sheetId || view.sheetId === props.sheetId))
 const draftGroupPublicFormAccessState = computed(() =>
-  getDingTalkPublicFormLinkAccessState(draft.value.publicFormViewId, formViews.value),
+  getDingTalkPublicFormLinkAccessState(draft.value.publicFormViewId, formViews.value, { isZh: isZh.value }),
 )
 const draftPersonPublicFormAccessState = computed(() =>
-  getDingTalkPublicFormLinkAccessState(draft.value.dingtalkPersonPublicFormViewId, formViews.value),
+  getDingTalkPublicFormLinkAccessState(draft.value.dingtalkPersonPublicFormViewId, formViews.value, { isZh: isZh.value }),
 )
 
 interface DingTalkCardLink {
@@ -967,25 +974,25 @@ function isInactivePersonRecipientCandidate(candidate: MetaSheetPermissionCandid
 }
 
 function personRecipientSubjectLabel(candidate: MetaSheetPermissionCandidate): string {
-  return candidate.subjectType === 'member-group' ? 'Member group' : 'User'
+  return automationDingTalkPersonSubjectLabel(candidate.subjectType === 'member-group' ? 'member-group' : 'user', isZh.value)
 }
 
 function personRecipientAccessLabel(accessLevel: MetaSheetPermissionCandidate['accessLevel']): string {
-  return accessLevel ? `Access: ${accessLevel}` : ''
+  return accessLevel ? automationDingTalkPersonAccessLabel(accessLevel, isZh.value) : ''
 }
 
 function personRecipientDingTalkStatusLabel(
   subjectType: MetaSheetPermissionCandidate['subjectType'],
   status: Pick<MetaSheetPermissionCandidate, 'dingtalkBound' | 'dingtalkGrantEnabled' | 'dingtalkPersonDeliveryAvailable'>,
 ): string {
-  if (subjectType === 'member-group') return 'Member group members are checked individually for DingTalk delivery'
+  if (subjectType === 'member-group') return automationDingTalkPersonStatusLabel('memberGroupCheckedIndividually', isZh.value)
   if (subjectType !== 'user') return ''
-  if (status.dingtalkPersonDeliveryAvailable === false) return 'No DingTalk delivery link; person message will skip until linked'
-  if (status.dingtalkPersonDeliveryAvailable === true && status.dingtalkGrantEnabled === true) return 'DingTalk direct message ready; form authorization enabled'
-  if (status.dingtalkPersonDeliveryAvailable === true && status.dingtalkGrantEnabled === false) return 'DingTalk direct message ready; form authorization not enabled'
-  if (status.dingtalkBound === false) return 'Not bound to DingTalk; person message may skip until linked'
-  if (status.dingtalkBound === true && status.dingtalkGrantEnabled === true) return 'DingTalk bound; form authorization enabled'
-  if (status.dingtalkBound === true && status.dingtalkGrantEnabled === false) return 'DingTalk bound; form authorization not enabled'
+  if (status.dingtalkPersonDeliveryAvailable === false) return automationDingTalkPersonStatusLabel('noDeliveryLink', isZh.value)
+  if (status.dingtalkPersonDeliveryAvailable === true && status.dingtalkGrantEnabled === true) return automationDingTalkPersonStatusLabel('deliveryReadyGrantEnabled', isZh.value)
+  if (status.dingtalkPersonDeliveryAvailable === true && status.dingtalkGrantEnabled === false) return automationDingTalkPersonStatusLabel('deliveryReadyGrantDisabled', isZh.value)
+  if (status.dingtalkBound === false) return automationDingTalkPersonStatusLabel('notBound', isZh.value)
+  if (status.dingtalkBound === true && status.dingtalkGrantEnabled === true) return automationDingTalkPersonStatusLabel('boundGrantEnabled', isZh.value)
+  if (status.dingtalkBound === true && status.dingtalkGrantEnabled === false) return automationDingTalkPersonStatusLabel('boundGrantDisabled', isZh.value)
   return ''
 }
 
@@ -1132,16 +1139,12 @@ function dingTalkDestinationScope(destination?: DingTalkGroupDestination): 'priv
 
 function dingTalkDestinationScopeLabel(destination?: DingTalkGroupDestination): string {
   const scope = dingTalkDestinationScope(destination)
-  if (scope === 'org') return 'Organization catalog'
-  if (scope === 'sheet') return 'This table'
-  return 'Private'
+  return automationDingTalkDestinationScopeLabel(scope, isZh.value)
 }
 
 function dingTalkDestinationSubtitle(destination?: DingTalkGroupDestination): string | undefined {
   const scope = dingTalkDestinationScope(destination)
-  if (scope === 'org') return destination?.orgId ? `organization catalog: ${destination.orgId}` : 'organization catalog'
-  if (scope === 'sheet') return destination?.sheetId ? `sheet: ${destination.sheetId}` : 'this table'
-  return 'private'
+  return automationDingTalkDestinationSubtitle(scope, scope === 'org' ? destination?.orgId ?? '' : destination?.sheetId ?? '', isZh.value)
 }
 
 const selectedDingTalkGroupDestinations = computed(() =>
@@ -1175,7 +1178,7 @@ function removeDingTalkGroupDestination(destinationId: string) {
 }
 
 const dingTalkGroupSummary = computed(() => {
-  if (!selectedDingTalkGroupDestinations.value.length) return 'No groups selected'
+  if (!selectedDingTalkGroupDestinations.value.length) return l('dingtalk.noGroupsSelected')
   return selectedDingTalkGroupDestinations.value.map((item) => item.label).join(', ')
 })
 
@@ -1192,27 +1195,28 @@ function templatePreviewText(value: string, fallback: string) {
 function renderedTemplateExample(value: string, fallback: string) {
   const trimmed = value.trim()
   if (!trimmed) return fallback
-  const rendered = renderDingTalkTemplateExample(trimmed).trim()
+  const rendered = renderDingTalkTemplateExample(trimmed, isZh.value).trim()
   return rendered || fallback
 }
 
 function publicFormLinkWarnings(value: unknown, warnWhenDingTalkAccessRisk = false) {
   return listDingTalkPublicFormLinkWarnings(value, formViews.value, {
+    isZh: isZh.value,
     warnWhenFullyPublic: warnWhenDingTalkAccessRisk,
     warnWhenProtectedWithoutAllowlist: warnWhenDingTalkAccessRisk,
   })
 }
 
 function publicFormLinkBlockingErrors(value: unknown) {
-  return listDingTalkPublicFormLinkBlockingErrors(value, formViews.value)
+  return listDingTalkPublicFormLinkBlockingErrors(value, formViews.value, { isZh: isZh.value })
 }
 
 function internalViewLinkWarnings(value: unknown) {
-  return listDingTalkInternalViewLinkWarnings(value, internalViews.value)
+  return listDingTalkInternalViewLinkWarnings(value, internalViews.value, isZh.value)
 }
 
 function internalViewLinkBlockingErrors(value: unknown) {
-  return listDingTalkInternalViewLinkBlockingErrors(value, internalViews.value)
+  return listDingTalkInternalViewLinkBlockingErrors(value, internalViews.value, isZh.value)
 }
 
 function readPublicFormToken(view: MetaView): string {
@@ -1309,10 +1313,10 @@ const dingTalkPersonRecipientSummary = computed(() => {
   const userLabels = selectedDingTalkPersonRecipients.value.map((item) => item.label)
   const groupLabels = selectedDingTalkPersonMemberGroups.value.map((item) => item.label)
   const parts = [
-    userLabels.length ? `Users: ${userLabels.join(', ')}` : '',
-    groupLabels.length ? `Groups: ${groupLabels.join(', ')}` : '',
+    userLabels.length ? `${isZh.value ? '用户' : 'Users'}: ${userLabels.join(', ')}` : '',
+    groupLabels.length ? `${isZh.value ? '成员组' : 'Groups'}: ${groupLabels.join(', ')}` : '',
   ].filter(Boolean)
-  if (!parts.length) return 'No recipients selected'
+  if (!parts.length) return l('dingtalk.noRecipientsSelected')
   return parts.join(' | ')
 })
 
@@ -1340,7 +1344,7 @@ function recipientFieldSummaryLabel(path: string) {
 }
 
 function groupDestinationFieldPathWarnings(value: string) {
-  return listDingTalkGroupDestinationFieldPathWarnings(value, props.fields)
+  return listDingTalkGroupDestinationFieldPathWarnings(value, props.fields, isZh.value)
 }
 
 const dingTalkPersonRecipientCandidateFields = computed(() => props.fields.filter((field) => field.type === 'user'))
@@ -1361,16 +1365,16 @@ const selectedDingTalkPersonMemberGroupRecipientFields = computed(() => parseRec
   .filter((item) => item.label))
 
 function recipientFieldPathWarnings(value: string) {
-  return listDingTalkPersonRecipientFieldPathWarnings(value, props.fields)
+  return listDingTalkPersonRecipientFieldPathWarnings(value, props.fields, isZh.value)
 }
 
 function memberGroupRecipientFieldPathWarnings(value: string) {
-  return listDingTalkPersonMemberGroupRecipientFieldPathWarnings(value, props.fields)
+  return listDingTalkPersonMemberGroupRecipientFieldPathWarnings(value, props.fields, isZh.value)
 }
 
 const dingTalkPersonRecipientFieldSummary = computed(() => {
   const labels = selectedDingTalkPersonRecipientFields.value.map((item) => item.label)
-  if (!labels.length) return 'No dynamic recipient field'
+  if (!labels.length) return l('dingtalk.noDynamicRecipientField')
   return labels.join(', ')
 })
 
@@ -1378,13 +1382,13 @@ const dingTalkPersonMemberGroupFieldSummary = computed(() => {
   const labels = parseRecipientFieldPathsText(draft.value.dingtalkPersonMemberGroupRecipientFieldPath)
     .map((path) => recipientFieldSummaryLabel(path))
     .filter(Boolean)
-  if (!labels.length) return 'No dynamic member group field'
+  if (!labels.length) return l('dingtalk.noDynamicMemberGroupField')
   return labels.join(', ')
 })
 
 const dingTalkGroupFieldSummary = computed(() => {
   const labels = selectedDingTalkGroupDestinationFields.value.map((item) => item.label)
-  if (!labels.length) return 'No dynamic group field'
+  if (!labels.length) return l('dingtalk.noDynamicGroupField')
   return labels.join(', ')
 })
 
@@ -1443,7 +1447,7 @@ function removeDingTalkPersonMemberGroupRecipientField(path: string) {
 }
 
 function templateSyntaxWarnings(value: string) {
-  return listDingTalkTemplateSyntaxWarnings(value)
+  return listDingTalkTemplateSyntaxWarnings(value, isZh.value)
 }
 
 onBeforeUnmount(() => {
@@ -1460,6 +1464,7 @@ function applyGroupPreset(preset: DingTalkNotificationPreset) {
     },
     preset,
     props.views ?? [],
+    isZh.value,
   )
   draft.value.dingtalkTitleTemplate = next.titleTemplate ?? ''
   draft.value.dingtalkBodyTemplate = next.bodyTemplate ?? ''
@@ -1477,6 +1482,7 @@ function applyPersonPreset(preset: DingTalkNotificationPreset) {
     },
     preset,
     props.views ?? [],
+    isZh.value,
   )
   draft.value.dingtalkPersonTitleTemplate = next.titleTemplate ?? ''
   draft.value.dingtalkPersonBodyTemplate = next.bodyTemplate ?? ''

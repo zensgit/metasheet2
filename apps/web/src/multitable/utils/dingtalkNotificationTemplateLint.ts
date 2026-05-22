@@ -10,7 +10,7 @@ function isKnownPlaceholderPath(path: string): boolean {
   return false
 }
 
-export function listDingTalkTemplateSyntaxWarnings(template: string): string[] {
+export function listDingTalkTemplateSyntaxWarnings(template: string, isZh = false): string[] {
   const warnings: string[] = []
   const seen = new Set<string>()
 
@@ -24,21 +24,27 @@ export function listDingTalkTemplateSyntaxWarnings(template: string): string[] {
     const raw = match[0]
     const inner = match[1].trim()
     if (!inner) {
-      push('Empty placeholder {{ }} is not supported.')
+      push(isZh ? '不支持空占位符 {{ }}。' : 'Empty placeholder {{ }} is not supported.')
       continue
     }
     if (!VALID_TEMPLATE_PATH.test(inner)) {
-      push(`Unsupported placeholder syntax ${raw}. Use letters, numbers, "_" and dot paths such as {{recordId}} or {{record.xxx}}.`)
+      push(isZh
+        ? `不支持的占位符语法 ${raw}。请使用字母、数字、"_" 和点路径，例如 {{recordId}} 或 {{record.xxx}}。`
+        : `Unsupported placeholder syntax ${raw}. Use letters, numbers, "_" and dot paths such as {{recordId}} or {{record.xxx}}.`)
       continue
     }
     if (!isKnownPlaceholderPath(inner)) {
-      push(`Unknown placeholder ${raw}. Use {{recordId}}, {{sheetId}}, {{actorId}}, or {{record.fieldName}}.`)
+      push(isZh
+        ? `未知占位符 ${raw}。请使用 {{recordId}}、{{sheetId}}、{{actorId}} 或 {{record.fieldName}}。`
+        : `Unknown placeholder ${raw}. Use {{recordId}}, {{sheetId}}, {{actorId}}, or {{record.fieldName}}.`)
     }
   }
 
   const stripped = template.replace(/\{\{[^{}]*\}\}/g, '')
   if (stripped.includes('{{') || stripped.includes('}}')) {
-    push('Unclosed placeholder braces detected. Use complete forms like {{recordId}}.')
+    push(isZh
+      ? '检测到未闭合的占位符花括号。请使用类似 {{recordId}} 的完整形式。'
+      : 'Unclosed placeholder braces detected. Use complete forms like {{recordId}}.')
   }
 
   return warnings

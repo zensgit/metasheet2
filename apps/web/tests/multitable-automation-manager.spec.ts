@@ -433,6 +433,61 @@ describe('MetaAutomationManager', () => {
       .toBe('public')
   })
 
+  it('localizes zh-CN DingTalk inline form chrome while preserving raw token insertion values', async () => {
+    useLocale().setLocale('zh-CN')
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('[data-automation-new-rule="quick"]') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_person_message'
+    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+
+    expect(container.textContent).toContain('消息预设')
+    expect(container.textContent).toContain('表单填写')
+    expect(container.textContent).toContain('搜索并添加用户或成员组')
+    expect(container.textContent).toContain('模板令牌')
+    expect((container.querySelector('[data-automation-field="dingtalkPersonUserSearch"]') as HTMLInputElement).placeholder)
+      .toBe('按用户、成员组、邮箱或主体 ID 搜索')
+    expect((container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement).placeholder)
+      .toBe('例如：record.assigneeUserIds, record.reviewerUserId')
+    expect((container.querySelector('[data-automation-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement).placeholder)
+      .toBe('支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}')
+    expect(container.querySelector('[data-automation-token="person-title-recordId"]')?.textContent).toContain('记录 ID')
+    expect(container.querySelector('[data-automation-token="person-body-recordField"]')?.textContent).toContain('记录字段')
+
+    const titleInput = container.querySelector('[data-automation-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement
+    titleInput.value = '{{record}}'
+    titleInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+    expect(container.textContent).toContain('未知占位符 {{record}}')
+
+    const presetBtn = container.querySelector('[data-automation-preset="person-both"]') as HTMLButtonElement
+    presetBtn.click()
+    await flushPromises()
+
+    const bodyInput = container.querySelector('[data-automation-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
+    expect(titleInput.value).toBe('{{recordId}} 待填写并处理')
+    expect(bodyInput.value).toContain('请先填写所需信息')
+
+    bodyInput.value = '处理 {{record.xxx}}'
+    bodyInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    const summary = container.querySelector('[data-automation-summary="person"]')
+    expect(summary?.textContent).toContain('消息摘要')
+    expect(summary?.textContent).toContain('渲染正文')
+    expect(summary?.textContent).toContain('处理 示例字段值')
+    expect(container.querySelectorAll('[aria-label]')).toHaveLength(0)
+    expect(container.querySelectorAll('[title]')).toHaveLength(0)
+    expect(container.querySelectorAll('[placeholder]')).toHaveLength(8)
+  })
+
   it('localizes zh-CN frontend fallback errors from the automation composable at event time', async () => {
     useLocale().setLocale('zh-CN')
     const client = {
@@ -2677,8 +2732,8 @@ describe('MetaAutomationManager', () => {
     const publicFormSelect = container.querySelector('[data-automation-field="publicFormViewId"]') as HTMLSelectElement
     const internalViewSelect = container.querySelector('[data-automation-field="internalViewId"]') as HTMLSelectElement
 
-    expect(titleInput.value).toBe('{{recordId}} 待填写')
-    expect(bodyInput.value).toContain('请完成本次表单填写')
+    expect(titleInput.value).toBe('{{recordId}} needs input')
+    expect(bodyInput.value).toContain('Please complete this form request')
     expect(publicFormSelect.value).toBe('view_form')
     expect(internalViewSelect.value).toBe('')
   })
@@ -2711,8 +2766,8 @@ describe('MetaAutomationManager', () => {
     const internalViewSelect = container.querySelector('[data-automation-field="dingtalkPersonInternalViewId"]') as HTMLSelectElement
 
     expect(userIdsInput.value).toBe('user_1')
-    expect(titleInput.value).toBe('{{recordId}} 待填写并处理')
-    expect(bodyInput.value).toContain('请先填写所需信息')
+    expect(titleInput.value).toBe('{{recordId}} needs input and processing')
+    expect(bodyInput.value).toContain('Please complete the required form input')
     expect(publicFormSelect.value).toBe('view_form')
     expect(internalViewSelect.value).toBe('view_grid')
   })
@@ -2781,7 +2836,7 @@ describe('MetaAutomationManager', () => {
     expect(summary?.textContent).toContain('Need action {{recordId}}')
     expect(summary?.textContent).toContain('Handle {{record.xxx}}')
     expect(summary?.textContent).toContain('Need action record_demo_001')
-    expect(summary?.textContent).toContain('Handle 示例字段值')
+    expect(summary?.textContent).toContain('Handle Sample field value')
     expect(summary?.textContent).toContain('Assignees (record.assigneeUserIds)')
     expect(summary?.textContent).toContain('Public Form')
     expect(summary?.textContent).toContain('Fully public; anyone with the link can submit')
@@ -3043,7 +3098,7 @@ describe('MetaAutomationManager', () => {
     await flushPromises()
 
     expect(navigator.clipboard?.writeText).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(navigator.clipboard!.writeText).mock.calls[0]?.[0]).toBe('Handle 示例字段值')
+    expect(vi.mocked(navigator.clipboard!.writeText).mock.calls[0]?.[0]).toBe('Handle Sample field value')
     expect(container.textContent).toContain('Copied')
   })
 })

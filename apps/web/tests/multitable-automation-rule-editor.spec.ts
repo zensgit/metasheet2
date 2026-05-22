@@ -346,6 +346,55 @@ describe('MetaAutomationRuleEditor', () => {
     expect(confirmSpy).toHaveBeenCalledWith('测试运行会执行已保存规则，并可能向已配置的钉钉群或用户发送真实消息。未保存的更改不会包含在内。是否继续？')
   })
 
+  it('localizes zh-CN DingTalk group editor chrome while preserving raw template values', async () => {
+    useLocale().setLocale('zh-CN')
+    const client = mockClient()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      views,
+      client,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_dingtalk_group_message'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    expect(container.textContent).toContain('消息预设')
+    expect(container.textContent).toContain('添加钉钉群')
+    expect(container.textContent).toContain('模板令牌')
+    expect(container.querySelector('[data-field="groupTitleToken-recordId"]')?.textContent).toContain('记录 ID')
+    expect(container.querySelector('[data-field="groupBodyToken-recordField"]')?.textContent).toContain('记录字段')
+    expect((container.querySelector('[data-field="dingtalkTitleTemplate"]') as HTMLInputElement).placeholder)
+      .toBe('例如：{{record.title}} 待处理')
+    expect((container.querySelector('[data-field="dingtalkBodyTemplate"]') as HTMLTextAreaElement).placeholder)
+      .toBe('支持 {{record.xxx}}、{{recordId}}、{{sheetId}}、{{actorId}}')
+
+    const presetBtn = container.querySelector('[data-field="groupPresetBoth"]') as HTMLButtonElement
+    presetBtn.click()
+    await flushPromises()
+
+    const titleInput = container.querySelector('[data-field="dingtalkTitleTemplate"]') as HTMLInputElement
+    const bodyInput = container.querySelector('[data-field="dingtalkBodyTemplate"]') as HTMLTextAreaElement
+    expect(titleInput.value).toBe('{{recordId}} 待填写并处理')
+    expect(bodyInput.value).toContain('请先填写所需信息')
+
+    bodyInput.value = '处理 {{record.xxx}}'
+    bodyInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const summary = container.querySelector('[data-field="groupMessageSummary"]')
+    expect(summary?.textContent).toContain('消息摘要')
+    expect(summary?.textContent).toContain('渲染正文')
+    expect(summary?.textContent).toContain('处理 示例字段值')
+    expect(container.querySelectorAll('[aria-label]')).toHaveLength(0)
+    expect(container.querySelectorAll('[title]')).toHaveLength(1)
+    expect(container.querySelectorAll('[placeholder]')).toHaveLength(4)
+  })
+
   it('keeps representative a11y attribute counts unchanged after localization wiring', async () => {
     useLocale().setLocale('zh-CN')
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
@@ -3058,8 +3107,8 @@ describe('MetaAutomationRuleEditor', () => {
     const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLSelectElement
     const internalViewSelect = container.querySelector('[data-field="internalViewId"]') as HTMLSelectElement
 
-    expect(titleInput.value).toBe('{{recordId}} 待填写并处理')
-    expect(bodyInput.value).toContain('请先填写所需信息')
+    expect(titleInput.value).toBe('{{recordId}} needs input and processing')
+    expect(bodyInput.value).toContain('Please complete the required form input')
     expect(publicFormSelect.value).toBe('view_form')
     expect(internalViewSelect.value).toBe('view_grid')
   })
@@ -3094,8 +3143,8 @@ describe('MetaAutomationRuleEditor', () => {
     const internalViewSelect = container.querySelector('[data-field="dingtalkPersonInternalViewId"]') as HTMLSelectElement
 
     expect(userIdsInput.value).toBe('user_1')
-    expect(titleInput.value).toBe('{{recordId}} 待处理')
-    expect(bodyInput.value).toContain('请查看并处理该记录')
+    expect(titleInput.value).toBe('{{recordId}} needs processing')
+    expect(bodyInput.value).toContain('Please review and process this record')
     expect(publicFormSelect.value).toBe('')
     expect(internalViewSelect.value).toBe('view_grid')
   })
@@ -3160,7 +3209,7 @@ describe('MetaAutomationRuleEditor', () => {
     expect(summary?.textContent).toContain('Ticket {{recordId}}')
     expect(summary?.textContent).toContain('Please fill {{record.xxx}}')
     expect(summary?.textContent).toContain('Ticket record_demo_001')
-    expect(summary?.textContent).toContain('Please fill 示例字段值')
+    expect(summary?.textContent).toContain('Please fill Sample field value')
     expect(summary?.textContent).toContain('No public form link')
     expect(summary?.textContent).toContain('No internal link')
   })
@@ -3286,7 +3335,7 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     expect(navigator.clipboard?.writeText).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(navigator.clipboard!.writeText).mock.calls[0]?.[0]).toBe('Please fill 示例字段值')
+    expect(vi.mocked(navigator.clipboard!.writeText).mock.calls[0]?.[0]).toBe('Please fill Sample field value')
     expect(container.textContent).toContain('Copied')
   })
 })

@@ -175,6 +175,17 @@ describe('dingtalk public form link warnings', () => {
     expect(describeDingTalkPublicFormLinkAudience('missing_view', views, nowMs)).toBe('Allowed audience unavailable')
   })
 
+  it('localizes selected public form access and audience when requested', () => {
+    expect(describeDingTalkPublicFormLinkAccess('', views, { nowMs, isZh: true })).toBe('无公开表单链接')
+    expect(describeDingTalkPublicFormLinkAccess('view_form_enabled', views, { nowMs, isZh: true }))
+      .toBe('完全公开；任何获得链接的人都可提交')
+    expect(describeDingTalkPublicFormLinkAccess('view_grid', views, { nowMs, isZh: true })).toBe('所选视图不是表单视图')
+    expect(describeDingTalkPublicFormLinkAudience('view_form_protected_allowed_user', views, { nowMs, isZh: true }))
+      .toBe('1 个本地用户通过钉钉检查后可提交')
+    expect(describeDingTalkPublicFormLinkAudience('view_form_granted_allowed_group', views, { nowMs, isZh: true }))
+      .toBe('1 个本地成员组通过钉钉检查后可提交')
+  })
+
   it('returns stable access levels for automation badges', () => {
     expect(getDingTalkPublicFormLinkAccessLevel('', views, nowMs)).toBe('none')
     expect(getDingTalkPublicFormLinkAccessLevel('view_form_enabled', views, nowMs)).toBe('public')
@@ -233,5 +244,14 @@ describe('dingtalk public form link warnings', () => {
     ])
     expect(listDingTalkPublicFormLinkBlockingErrors('view_form_enabled', views, { nowMs, warnWhenFullyPublic: true })).toEqual([])
     expect(listDingTalkPublicFormLinkBlockingErrors('view_form_protected', views, { nowMs, warnWhenProtectedWithoutAllowlist: true })).toEqual([])
+  })
+
+  it('localizes link warnings while preserving raw view labels', () => {
+    expect(listDingTalkPublicFormLinkBlockingErrors('missing_view', views, { nowMs, isZh: true })).toEqual([
+      '公开表单视图 "missing_view" 在此表中不可用；钉钉消息可能不包含可用的填写链接。',
+    ])
+    expect(listDingTalkPublicFormLinkWarnings('view_form_enabled', views, { nowMs, isZh: true, warnWhenFullyPublic: true })).toEqual([
+      '"Enabled Form" 的公开表单分享完全公开；所有能打开钉钉消息链接的人都可提交。若仅允许指定用户填写，请使用钉钉保护访问和 allowlist。',
+    ])
   })
 })
