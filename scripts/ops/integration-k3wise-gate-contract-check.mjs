@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { realpathSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -761,8 +762,17 @@ async function main() {
 export function isDirectCliRun(moduleFilePath, entryFilePath, platform = process.platform) {
   if (!entryFilePath) return false
   const pathModule = platform === 'win32' ? path.win32 : path
-  const modulePath = pathModule.normalize(moduleFilePath)
-  const entryPath = pathModule.resolve(entryFilePath)
+  const normalizePath = (value) => {
+    const resolved = pathModule.resolve(value)
+    if (platform !== process.platform) return pathModule.normalize(resolved)
+    try {
+      return pathModule.normalize(realpathSync.native(resolved))
+    } catch {
+      return pathModule.normalize(resolved)
+    }
+  }
+  const modulePath = normalizePath(moduleFilePath)
+  const entryPath = normalizePath(entryFilePath)
   if (platform === 'win32') {
     return modulePath.toLowerCase() === entryPath.toLowerCase()
   }

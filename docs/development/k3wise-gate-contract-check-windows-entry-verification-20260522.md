@@ -23,6 +23,8 @@ Expected:
   - case-insensitive Windows paths;
   - negative non-matching script path;
   - POSIX direct-run path.
+- New symlink/realpath direct-run guard test passes for equivalent physical
+  paths, covering the macOS `/tmp` to `/private/tmp` package-verification case.
 
 ### 2. CLI Template Smoke
 
@@ -86,6 +88,22 @@ PASS criteria:
 - Directory contains 8 redacted sample skeletons.
 - Running the checker against the empty template returns expected
   `GATE_BLOCKED`, not silent success.
+
+## Package Extraction Smoke
+
+The Release verification should also extract the Windows zip to a temporary
+directory and run the packaged checker directly from that extracted path:
+
+```bash
+node <extracted-package>/scripts/ops/integration-k3wise-gate-contract-check.mjs --init-template <tmp-output-dir>
+```
+
+PASS criteria:
+
+- stdout contains `TEMPLATE_CREATED`;
+- the target directory is created;
+- README, packet JSON, and 8 redacted sample skeletons exist;
+- checking the empty template returns exit `2` with `GATE_BLOCKED`.
 
 ## Security Check
 
