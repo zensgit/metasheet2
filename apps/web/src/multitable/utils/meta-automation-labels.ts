@@ -33,6 +33,9 @@ export type AutomationCronPresetValue =
   | '0 0 * * 1'
   | 'custom'
 
+export type AutomationCardLinkVariant = 'publicForm' | 'internalView'
+export type AutomationCardStatType = 'ok' | 'fail'
+
 export type AutomationLabelKey =
   | 'log.title'
   | 'log.total'
@@ -113,8 +116,40 @@ export type AutomationLabelKey =
   | 'testRun.unsavedHint'
   | 'testRun.button'
   | 'testRun.running'
+  | 'manager.title'
+  | 'manager.quickEditTitle'
+  | 'manager.quickNewTitle'
+  | 'manager.action'
+  | 'manager.targetField'
+  | 'manager.newValuePlaceholder'
+  | 'manager.update'
+  | 'manager.create'
+  | 'manager.newAutomation'
+  | 'manager.quickLegacyForm'
+  | 'manager.loading'
+  | 'manager.empty'
+  | 'manager.enabled'
+  | 'manager.disabled'
+  | 'manager.allowedAudiencePrefix'
+  | 'manager.statOk'
+  | 'manager.statFail'
+  | 'manager.edit'
+  | 'manager.viewLogs'
+  | 'manager.viewDeliveries'
+  | 'manager.delete'
+  | 'manager.cardPublicForm'
+  | 'manager.cardInternalProcessing'
+  | 'manager.cardOpenPublicForm'
+  | 'manager.cardOpenInternalView'
+  | 'manager.testRunning'
+  | 'manager.testRunningDingTalkWarning'
+  | 'manager.testRunAtLeastOneActionFailed'
   | 'error.loadGroupDeliveries'
   | 'error.loadPersonDeliveries'
+  | 'error.loadRules'
+  | 'error.createRule'
+  | 'error.updateRule'
+  | 'error.deleteRule'
   | 'error.saveFailed'
   | 'error.unknown'
   | 'status.all'
@@ -203,8 +238,40 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'testRun.unsavedHint',
   'testRun.button',
   'testRun.running',
+  'manager.title',
+  'manager.quickEditTitle',
+  'manager.quickNewTitle',
+  'manager.action',
+  'manager.targetField',
+  'manager.newValuePlaceholder',
+  'manager.update',
+  'manager.create',
+  'manager.newAutomation',
+  'manager.quickLegacyForm',
+  'manager.loading',
+  'manager.empty',
+  'manager.enabled',
+  'manager.disabled',
+  'manager.allowedAudiencePrefix',
+  'manager.statOk',
+  'manager.statFail',
+  'manager.edit',
+  'manager.viewLogs',
+  'manager.viewDeliveries',
+  'manager.delete',
+  'manager.cardPublicForm',
+  'manager.cardInternalProcessing',
+  'manager.cardOpenPublicForm',
+  'manager.cardOpenInternalView',
+  'manager.testRunning',
+  'manager.testRunningDingTalkWarning',
+  'manager.testRunAtLeastOneActionFailed',
   'error.loadGroupDeliveries',
   'error.loadPersonDeliveries',
+  'error.loadRules',
+  'error.createRule',
+  'error.updateRule',
+  'error.deleteRule',
   'error.saveFailed',
   'error.unknown',
   'status.all',
@@ -294,8 +361,40 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'testRun.unsavedHint': { en: 'Save this automation before running a test.', zh: '请先保存此自动化，再运行测试。' },
   'testRun.button': { en: 'Test Run', zh: '测试运行' },
   'testRun.running': { en: 'Running...', zh: '正在运行...' },
+  'manager.title': { en: 'Automations', zh: '自动化' },
+  'manager.quickEditTitle': { en: 'Edit Automation', zh: '编辑自动化' },
+  'manager.quickNewTitle': { en: 'New Automation', zh: '新建自动化' },
+  'manager.action': { en: 'Action', zh: '动作' },
+  'manager.targetField': { en: 'Target field', zh: '目标字段' },
+  'manager.newValuePlaceholder': { en: 'New value', zh: '新值' },
+  'manager.update': { en: 'Update', zh: '更新' },
+  'manager.create': { en: 'Create', zh: '创建' },
+  'manager.newAutomation': { en: '+ New Automation', zh: '+ 新建自动化' },
+  'manager.quickLegacyForm': { en: 'Quick legacy form', zh: '快速旧版表单' },
+  'manager.loading': { en: 'Loading automations...', zh: '正在加载自动化...' },
+  'manager.empty': { en: 'No automations yet. Create your first automation rule.', zh: '暂无自动化。创建第一条自动化规则。' },
+  'manager.enabled': { en: 'Enabled', zh: '已启用' },
+  'manager.disabled': { en: 'Disabled', zh: '已停用' },
+  'manager.allowedAudiencePrefix': { en: 'Allowed audience:', zh: '允许范围：' },
+  'manager.statOk': { en: 'ok', zh: '成功' },
+  'manager.statFail': { en: 'fail', zh: '失败' },
+  'manager.edit': { en: 'Edit', zh: '编辑' },
+  'manager.viewLogs': { en: 'View Logs', zh: '查看日志' },
+  'manager.viewDeliveries': { en: 'View Deliveries', zh: '查看投递记录' },
+  'manager.delete': { en: 'Delete', zh: '删除' },
+  'manager.cardPublicForm': { en: 'Public form', zh: '公开表单' },
+  'manager.cardInternalProcessing': { en: 'Internal processing', zh: '内部处理' },
+  'manager.cardOpenPublicForm': { en: 'Open public form', zh: '打开公开表单' },
+  'manager.cardOpenInternalView': { en: 'Open internal view', zh: '打开内部处理视图' },
+  'manager.testRunning': { en: 'Running test.', zh: '正在运行测试。' },
+  'manager.testRunningDingTalkWarning': { en: 'Running test. DingTalk actions may send real messages.', zh: '正在运行测试。钉钉动作可能发送真实消息。' },
+  'manager.testRunAtLeastOneActionFailed': { en: 'At least one action failed.', zh: '至少一个动作失败。' },
   'error.loadGroupDeliveries': { en: 'Failed to load DingTalk group deliveries.', zh: '加载钉钉群投递记录失败。' },
   'error.loadPersonDeliveries': { en: 'Failed to load DingTalk person deliveries.', zh: '加载钉钉个人投递记录失败。' },
+  'error.loadRules': { en: 'Failed to load automation rules', zh: '加载自动化规则失败' },
+  'error.createRule': { en: 'Failed to create automation rule', zh: '创建自动化规则失败' },
+  'error.updateRule': { en: 'Failed to update automation rule', zh: '更新自动化规则失败' },
+  'error.deleteRule': { en: 'Failed to delete automation rule', zh: '删除自动化规则失败' },
   'error.saveFailed': { en: 'Save failed', zh: '保存失败' },
   'error.unknown': { en: 'Unknown error', zh: '未知错误' },
   'status.all': { en: 'All statuses', zh: '全部状态' },
@@ -434,6 +533,67 @@ export function automationConditionValuePlaceholder(widget: AutomationConditionV
   if (widget === 'date') return 'YYYY-MM-DD'
   if (widget === 'dateTime') return isZh ? '日期和时间' : 'Date and time'
   return isZh ? '值' : 'Value'
+}
+
+export function automationCardTriggerSummary(
+  triggerType: AutomationTriggerType | (string & {}),
+  fieldName: string,
+  isZh: boolean,
+): string {
+  if (triggerType === 'field.changed' || triggerType === 'field.value_changed') {
+    const rawField = fieldName.trim()
+    if (!rawField) return isZh ? '当字段变化时' : 'When a field changes'
+    return isZh ? `当“${rawField}”变化时` : `When "${rawField}" changes`
+  }
+  if (triggerType === 'record.created') return isZh ? '当记录创建时' : 'When a record is created'
+  if (triggerType === 'record.updated') return isZh ? '当记录更新时' : 'When a record is updated'
+  return automationTriggerTypeLabel(triggerType, isZh)
+}
+
+export function automationCardActionSummary(
+  actionType: AutomationActionType | (string & {}),
+  fieldName: string,
+  isZh: boolean,
+): string {
+  if (actionType === 'update_field') {
+    const rawField = fieldName.trim()
+    if (!rawField) return automationActionTypeLabel(actionType, isZh)
+    return isZh ? `更新“${rawField}”` : `Update "${rawField}"`
+  }
+  return automationActionTypeLabel(actionType, isZh)
+}
+
+export function automationCardLinkLabel(variant: AutomationCardLinkVariant, viewName: string, isZh: boolean): string {
+  const key = variant === 'publicForm' ? 'manager.cardOpenPublicForm' : 'manager.cardOpenInternalView'
+  return `${automationLabel(key, isZh)}${isZh ? '：' : ': '}${viewName}`
+}
+
+export function automationCardLinkSummary(variant: AutomationCardLinkVariant, viewName: string, isZh: boolean): string {
+  const key = variant === 'publicForm' ? 'manager.cardPublicForm' : 'manager.cardInternalProcessing'
+  return `${automationLabel(key, isZh)}${isZh ? '：' : ': '}${viewName}`
+}
+
+export function automationCardStats(count: number, status: AutomationCardStatType, isZh: boolean): string {
+  const key = status === 'ok' ? 'manager.statOk' : 'manager.statFail'
+  return `${count} ${automationLabel(key, isZh)}`
+}
+
+export function automationTestRunRequestFailed(message: string, isZh: boolean): string {
+  const detail = message.trim() || automationLabel('error.unknown', isZh)
+  return isZh ? `测试运行请求失败：${detail}` : `Test run request failed: ${detail}`
+}
+
+export function automationTestRunFailed(raw: string, isZh: boolean): string {
+  const detail = raw.trim() || automationLabel('manager.testRunAtLeastOneActionFailed', isZh)
+  return isZh ? `测试运行失败：${detail}` : `Test run failed: ${detail}`
+}
+
+export function automationTestRunSkipped(duration: string, isZh: boolean): string {
+  return isZh ? `测试运行已跳过${duration}。` : `Test run skipped${duration}.`
+}
+
+export function automationTestRunSucceeded(duration: string, isZh: boolean): string {
+  return isZh ? `测试运行成功${duration}。` : `Test run succeeded${duration}.`
 }
 
 export function supportCopyFailed(message: string, isZh: boolean): string {

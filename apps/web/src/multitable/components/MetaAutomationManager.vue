@@ -2,7 +2,7 @@
   <div v-if="visible" class="meta-automation__overlay" @click.self="$emit('close')">
     <div class="meta-automation">
       <div class="meta-automation__header">
-        <h4 class="meta-automation__title">Automations</h4>
+        <h4 class="meta-automation__title">{{ l('manager.title') }}</h4>
         <button class="meta-automation__close" type="button" @click="$emit('close')">&times;</button>
       </div>
 
@@ -11,63 +11,63 @@
 
         <!-- Create / Edit form -->
         <section v-if="showForm" class="meta-automation__form">
-          <div class="meta-automation__form-title">{{ editingRuleId ? 'Edit Automation' : 'New Automation' }}</div>
+          <div class="meta-automation__form-title">{{ editingRuleId ? l('manager.quickEditTitle') : l('manager.quickNewTitle') }}</div>
 
-          <label class="meta-automation__label">Name</label>
+          <label class="meta-automation__label">{{ l('editor.name') }}</label>
           <input
             v-model="draft.name"
             class="meta-automation__input"
             type="text"
-            placeholder="Automation name"
+            :placeholder="l('editor.namePlaceholder')"
             data-automation-field="name"
           />
 
-          <label class="meta-automation__label">Trigger</label>
+          <label class="meta-automation__label">{{ l('trigger.title') }}</label>
           <select v-model="draft.triggerType" class="meta-automation__select" data-automation-field="triggerType">
-            <option value="record.created">When record created</option>
-            <option value="record.updated">When record updated</option>
-            <option value="field.changed">When field changes</option>
+            <option value="record.created">{{ automationTriggerTypeLabel('record.created', isZh) }}</option>
+            <option value="record.updated">{{ automationTriggerTypeLabel('record.updated', isZh) }}</option>
+            <option value="field.changed">{{ automationTriggerTypeLabel('field.changed', isZh) }}</option>
           </select>
 
           <template v-if="draft.triggerType === 'field.changed'">
-            <label class="meta-automation__label">Watch field</label>
+            <label class="meta-automation__label">{{ l('trigger.watchField') }}</label>
             <select v-model="draft.triggerFieldId" class="meta-automation__select" data-automation-field="triggerFieldId">
-              <option value="">-- select field --</option>
+              <option value="">{{ l('trigger.selectField') }}</option>
               <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
             </select>
           </template>
 
-          <label class="meta-automation__label">Action</label>
+          <label class="meta-automation__label">{{ l('manager.action') }}</label>
           <select v-model="draft.actionType" class="meta-automation__select" data-automation-field="actionType">
-            <option value="notify">Send notification</option>
-            <option value="update_field">Update field value</option>
-            <option value="send_dingtalk_group_message">Send DingTalk group message</option>
-            <option value="send_dingtalk_person_message">Send DingTalk person message</option>
+            <option value="notify">{{ automationActionTypeLabel('notify', isZh) }}</option>
+            <option value="update_field">{{ automationActionTypeLabel('update_field', isZh) }}</option>
+            <option value="send_dingtalk_group_message">{{ automationActionTypeLabel('send_dingtalk_group_message', isZh) }}</option>
+            <option value="send_dingtalk_person_message">{{ automationActionTypeLabel('send_dingtalk_person_message', isZh) }}</option>
           </select>
 
           <template v-if="draft.actionType === 'notify'">
-            <label class="meta-automation__label">Message</label>
+            <label class="meta-automation__label">{{ l('actionConfig.message') }}</label>
             <input
               v-model="draft.notifyMessage"
               class="meta-automation__input"
               type="text"
-              placeholder="Notification message"
+              :placeholder="l('actionConfig.notificationMessagePlaceholder')"
               data-automation-field="notifyMessage"
             />
           </template>
 
           <template v-if="draft.actionType === 'update_field'">
-            <label class="meta-automation__label">Target field</label>
+            <label class="meta-automation__label">{{ l('manager.targetField') }}</label>
             <select v-model="draft.targetFieldId" class="meta-automation__select" data-automation-field="targetFieldId">
-              <option value="">-- select field --</option>
+              <option value="">{{ l('trigger.selectField') }}</option>
               <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
             </select>
-            <label class="meta-automation__label">Value</label>
+            <label class="meta-automation__label">{{ l('editor.value') }}</label>
             <input
               v-model="draft.targetValue"
               class="meta-automation__input"
               type="text"
-              placeholder="New value"
+              :placeholder="l('manager.newValuePlaceholder')"
               data-automation-field="targetValue"
             />
           </template>
@@ -585,9 +585,9 @@
 
           <div class="meta-automation__form-actions">
             <button class="meta-automation__btn meta-automation__btn--primary" type="button" :disabled="!canSave" @click="onSave">
-              {{ editingRuleId ? 'Update' : 'Create' }}
+              {{ editingRuleId ? l('manager.update') : l('manager.create') }}
             </button>
-            <button class="meta-automation__btn" type="button" @click="cancelForm">Cancel</button>
+            <button class="meta-automation__btn" type="button" @click="cancelForm">{{ l('editor.cancel') }}</button>
           </div>
         </section>
 
@@ -599,7 +599,7 @@
             data-automation-new-rule="advanced"
             @click="openRuleEditor()"
           >
-            + New Automation
+            {{ l('manager.newAutomation') }}
           </button>
           <button
             class="meta-automation__btn meta-automation__btn-add"
@@ -607,14 +607,14 @@
             data-automation-new-rule="quick"
             @click="openCreateForm"
           >
-            Quick legacy form
+            {{ l('manager.quickLegacyForm') }}
           </button>
         </div>
 
         <!-- Rule list -->
-        <div v-if="loading" class="meta-automation__empty">Loading automations&#x2026;</div>
+        <div v-if="loading" class="meta-automation__empty">{{ l('manager.loading') }}</div>
         <div v-else-if="!rules.length && !showForm" class="meta-automation__empty" data-automation-empty="true">
-          No automations yet. Create your first automation rule.
+          {{ l('manager.empty') }}
         </div>
         <div
           v-for="rule in rules"
@@ -631,7 +631,7 @@
                 data-automation-toggle="true"
                 @change="onToggle(rule)"
               />
-              <span>{{ rule.enabled ? 'Enabled' : 'Disabled' }}</span>
+              <span>{{ rule.enabled ? l('manager.enabled') : l('manager.disabled') }}</span>
             </label>
           </div>
           <div class="meta-automation__card-desc">
@@ -676,13 +676,13 @@
                 class="meta-automation__card-link-audience"
                 :data-automation-card-link-audience="link.key"
               >
-                Allowed audience: {{ link.audienceSummary }}
+                {{ allowedAudienceText(link.audienceSummary) }}
               </span>
             </div>
           </div>
           <div v-if="ruleStats[rule.id]" class="meta-automation__card-stats">
-            <span class="meta-automation__stat meta-automation__stat--success">{{ ruleStats[rule.id].success }} ok</span>
-            <span class="meta-automation__stat meta-automation__stat--failed">{{ ruleStats[rule.id].failed }} fail</span>
+            <span class="meta-automation__stat meta-automation__stat--success">{{ automationCardStats(ruleStats[rule.id].success, 'ok', isZh) }}</span>
+            <span class="meta-automation__stat meta-automation__stat--failed">{{ automationCardStats(ruleStats[rule.id].failed, 'fail', isZh) }}</span>
           </div>
           <div
             v-if="ruleTestRunStates[rule.id]"
@@ -694,8 +694,8 @@
             {{ ruleTestRunStates[rule.id].message }}
           </div>
           <div class="meta-automation__card-actions">
-            <button class="meta-automation__btn" type="button" data-automation-edit="true" @click="openRuleEditor(rule)">Edit</button>
-            <button class="meta-automation__btn" type="button" data-automation-logs="true" @click="openLogViewer(rule)">View Logs</button>
+            <button class="meta-automation__btn" type="button" data-automation-edit="true" @click="openRuleEditor(rule)">{{ l('manager.edit') }}</button>
+            <button class="meta-automation__btn" type="button" data-automation-logs="true" @click="openLogViewer(rule)">{{ l('manager.viewLogs') }}</button>
             <button
               v-if="ruleHasActionType(rule, 'send_dingtalk_group_message')"
               class="meta-automation__btn"
@@ -703,7 +703,7 @@
               :data-automation-group-deliveries="rule.id"
               @click="openGroupDeliveryViewer(rule)"
             >
-              View Deliveries
+              {{ l('manager.viewDeliveries') }}
             </button>
             <button
               v-if="ruleHasActionType(rule, 'send_dingtalk_person_message')"
@@ -712,9 +712,9 @@
               :data-automation-person-deliveries="rule.id"
               @click="openPersonDeliveryViewer(rule)"
             >
-              View Deliveries
+              {{ l('manager.viewDeliveries') }}
             </button>
-            <button class="meta-automation__btn meta-automation__btn--danger" type="button" data-automation-delete="true" @click="onDelete(rule)">Delete</button>
+            <button class="meta-automation__btn meta-automation__btn--danger" type="button" data-automation-delete="true" @click="onDelete(rule)">{{ l('manager.delete') }}</button>
           </div>
         </div>
       </div>
@@ -769,6 +769,7 @@ import type {
   MetaView,
 } from '../types'
 import { AppRouteNames } from '../../router/types'
+import { useLocale } from '../../composables/useLocale'
 import { useMultitableAutomations } from '../composables/useMultitableAutomations'
 import type { MultitableApiClient } from '../api/client'
 import MetaAutomationRuleEditor from './MetaAutomationRuleEditor.vue'
@@ -799,6 +800,21 @@ import {
   listDingTalkInternalViewLinkBlockingErrors,
   listDingTalkInternalViewLinkWarnings,
 } from '../utils/dingtalkInternalViewLinkWarnings'
+import {
+  automationActionTypeLabel,
+  automationCardActionSummary,
+  automationCardLinkLabel,
+  automationCardLinkSummary,
+  automationCardStats,
+  automationCardTriggerSummary,
+  automationLabel,
+  automationTestRunFailed,
+  automationTestRunRequestFailed,
+  automationTestRunSkipped,
+  automationTestRunSucceeded,
+  automationTriggerTypeLabel,
+  type AutomationLabelKey,
+} from '../utils/meta-automation-labels'
 
 const props = defineProps<{
   visible: boolean
@@ -814,6 +830,8 @@ const emit = defineEmits<{
 }>()
 
 const router = useRouter()
+const { isZh } = useLocale()
+const l = (key: AutomationLabelKey) => automationLabel(key, isZh.value)
 
 type AutomationTestRunState = {
   status: 'running' | 'success' | 'failed' | 'skipped'
@@ -1236,7 +1254,7 @@ function dingTalkCardLinks(rule: AutomationRule): DingTalkCardLink[] {
         seen.add(key)
         links.push({
           key,
-          label: `Open public form: ${viewSummaryName(publicFormViewId, publicFormViewId)}`,
+          label: automationCardLinkLabel('publicForm', viewSummaryName(publicFormViewId, publicFormViewId), isZh.value),
           href: buildPublicFormHref(publicFormViewId, publicToken),
           accessSummary: accessState.summary,
           audienceSummary: accessState.audienceSummary,
@@ -1254,7 +1272,7 @@ function dingTalkCardLinks(rule: AutomationRule): DingTalkCardLink[] {
         seen.add(key)
         links.push({
           key,
-          label: `Open internal view: ${viewSummaryName(internalViewId, internalViewId)}`,
+          label: automationCardLinkLabel('internalView', viewSummaryName(internalViewId, internalViewId), isZh.value),
           viewId: internalViewId,
         })
       }
@@ -1548,7 +1566,7 @@ async function onTestRule(ruleId: string) {
   } catch (err: unknown) {
     setRuleTestRunState(ruleId, {
       status: 'failed',
-      message: `Test run request failed: ${readErrorMessage(err)}`,
+      message: automationTestRunRequestFailed(readErrorMessage(err), isZh.value),
     })
   }
 }
@@ -1558,13 +1576,13 @@ function setRuleTestRunState(ruleId: string, state: AutomationTestRunState) {
 }
 
 function readErrorMessage(err: unknown): string {
-  return err instanceof Error && err.message.trim() ? err.message : 'Unknown error'
+  return err instanceof Error && err.message.trim() ? err.message : ''
 }
 
 function testRunPendingMessage(ruleId: string): string {
   return hasDingTalkRuleActions(rules.value.find((rule) => rule.id === ruleId))
-    ? 'Running test. DingTalk actions may send real messages.'
-    : 'Running test.'
+    ? l('manager.testRunningDingTalkWarning')
+    : l('manager.testRunning')
 }
 
 function hasDingTalkRuleActions(rule: AutomationRule | undefined): boolean {
@@ -1583,18 +1601,18 @@ function describeTestRunExecution(execution: AutomationExecution): AutomationTes
   if (execution.status === 'failed' || failedStep) {
     return {
       status: 'failed',
-      message: `Test run failed: ${execution.error || failedStep?.error || 'At least one action failed.'}`,
+      message: automationTestRunFailed(execution.error || failedStep?.error || '', isZh.value),
     }
   }
   if (execution.status === 'skipped') {
     return {
       status: 'skipped',
-      message: `Test run skipped${duration}.`,
+      message: automationTestRunSkipped(duration, isZh.value),
     }
   }
   return {
     status: 'success',
-    message: `Test run succeeded${duration}.`,
+    message: automationTestRunSucceeded(duration, isZh.value),
   }
 }
 
@@ -1808,12 +1826,12 @@ function fieldNameById(fieldId: string): string {
 function describeTrigger(rule: AutomationRule): string {
   switch (rule.triggerType) {
     case 'record.created':
-      return 'When a record is created'
+      return automationCardTriggerSummary(rule.triggerType, '', isZh.value)
     case 'record.updated':
-      return 'When a record is updated'
+      return automationCardTriggerSummary(rule.triggerType, '', isZh.value)
     case 'field.changed': {
       const fid = rule.triggerConfig?.fieldId as string | undefined
-      return fid ? `When "${fieldNameById(fid)}" changes` : 'When a field changes'
+      return automationCardTriggerSummary(rule.triggerType, fid ? fieldNameById(fid) : '', isZh.value)
     }
     default:
       return String(rule.triggerType)
@@ -1831,23 +1849,19 @@ function describeActionType(actionType: AutomationActionType, actionConfig: Reco
   switch (actionType) {
     case 'notify':
     case 'send_notification':
-      return 'Send notification'
+      return automationCardActionSummary(actionType, '', isZh.value)
     case 'update_field': {
       const fid = actionConfig?.fieldId as string | undefined
-      return fid ? `Update "${fieldNameById(fid)}"` : 'Update field value'
+      return automationCardActionSummary(actionType, fid ? fieldNameById(fid) : '', isZh.value)
     }
     case 'update_record':
-      return 'Update record'
     case 'create_record':
-      return 'Create record'
     case 'send_webhook':
-      return 'Send webhook'
-    case 'send_dingtalk_group_message':
-      return `Send DingTalk group message${describeDingTalkActionLinks(actionConfig)}`
-    case 'send_dingtalk_person_message':
-      return `Send DingTalk person message${describeDingTalkActionLinks(actionConfig)}`
     case 'lock_record':
-      return 'Lock record'
+      return automationCardActionSummary(actionType, '', isZh.value)
+    case 'send_dingtalk_group_message':
+    case 'send_dingtalk_person_message':
+      return `${automationCardActionSummary(actionType, '', isZh.value)}${describeDingTalkActionLinks(actionConfig)}`
     default:
       return String(actionType)
   }
@@ -1861,10 +1875,14 @@ function describeDingTalkActionLinks(actionConfig: Record<string, unknown>): str
     ? actionConfig.internalViewId.trim()
     : ''
   const parts = [
-    publicFormViewId ? `Public form: ${viewSummaryName(publicFormViewId, publicFormViewId)}` : '',
-    internalViewId ? `Internal processing: ${viewSummaryName(internalViewId, internalViewId)}` : '',
+    publicFormViewId ? automationCardLinkSummary('publicForm', viewSummaryName(publicFormViewId, publicFormViewId), isZh.value) : '',
+    internalViewId ? automationCardLinkSummary('internalView', viewSummaryName(internalViewId, internalViewId), isZh.value) : '',
   ].filter(Boolean)
   return parts.length ? ` · ${parts.join(' · ')}` : ''
+}
+
+function allowedAudienceText(summary: string): string {
+  return `${l('manager.allowedAudiencePrefix')}${isZh.value ? '' : ' '}${summary}`
 }
 
 function ruleHasActionType(rule: AutomationRule, actionType: AutomationActionType): boolean {
