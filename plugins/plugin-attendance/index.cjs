@@ -7480,6 +7480,12 @@ function buildAttendanceAdvancedSchedulingDiagnostic({ code, severity = 'info', 
 
 const ATTENDANCE_ADVANCED_SCHEDULING_WORKBENCH_ASSIGNMENT_LIMIT = 500
 
+function normalizeAttendanceWorkbenchCount(value, fallback = 0) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || numeric < 0) return fallback
+  return Math.floor(numeric)
+}
+
 function buildAttendanceAdvancedSchedulingWorkbench(input = {}) {
   const from = normalizeDateOnly(input.from) ?? null
   const to = normalizeDateOnly(input.to) ?? null
@@ -7499,6 +7505,18 @@ function buildAttendanceAdvancedSchedulingWorkbench(input = {}) {
     rotationAssignments: Boolean(input.rotationAssignmentsTruncated),
     truncated: Boolean(input.shiftAssignmentsTruncated || input.rotationAssignmentsTruncated),
   }
+  const assignmentAggregates = input.assignmentAggregates && typeof input.assignmentAggregates === 'object'
+    ? input.assignmentAggregates
+    : {}
+  const scheduleGroupAssignmentAggregates = new Map(
+    (Array.isArray(input.scheduleGroupAssignmentAggregates) ? input.scheduleGroupAssignmentAggregates : [])
+      .map((item) => {
+        const scheduleGroupId = String(item?.scheduleGroupId || '').trim()
+        if (!scheduleGroupId) return null
+        return [scheduleGroupId, item]
+      })
+      .filter(Boolean)
+  )
 
   const membersByGroupId = new Map()
   const groupIdsByUserId = new Map()
@@ -7518,18 +7536,29 @@ function buildAttendanceAdvancedSchedulingWorkbench(input = {}) {
   const shiftAssignmentCountByUser = countBy(shiftAssignments, item => item?.assignment?.userId)
   const rotationAssignmentCountByUser = countBy(rotationAssignments, item => item?.assignment?.userId)
   const assignedUserIds = new Set([...shiftAssignmentCountByUser.keys(), ...rotationAssignmentCountByUser.keys()])
+  const summaryShiftAssignments = normalizeAttendanceWorkbenchCount(assignmentAggregates.shiftAssignments, shiftAssignments.length)
+  const summaryRotationAssignments = normalizeAttendanceWorkbenchCount(assignmentAggregates.rotationAssignments, rotationAssignments.length)
+  const summaryAssignedUsers = normalizeAttendanceWorkbenchCount(assignmentAggregates.assignedUsers, assignedUserIds.size)
 
   const scheduleGroupIds = new Set(scheduleGroups.map(group => group.id).filter(Boolean))
   const groupItems = scheduleGroups.map((group) => {
     const members = membersByGroupId.get(group.id) ?? []
     const memberUserIds = new Set(members.map(member => member.userId).filter(Boolean))
     const assignedMemberUserIds = [...memberUserIds].filter(userId => assignedUserIds.has(userId))
-    const shiftAssignmentCount = [...memberUserIds].reduce((sum, userId) => sum + (shiftAssignmentCountByUser.get(userId) ?? 0), 0)
-    const rotationAssignmentCount = [...memberUserIds].reduce((sum, userId) => sum + (rotationAssignmentCountByUser.get(userId) ?? 0), 0)
+    const aggregate = scheduleGroupAssignmentAggregates.get(group.id)
+    const shiftAssignmentCount = normalizeAttendanceWorkbenchCount(
+      aggregate?.shiftAssignmentCount,
+      [...memberUserIds].reduce((sum, userId) => sum + (shiftAssignmentCountByUser.get(userId) ?? 0), 0)
+    )
+    const rotationAssignmentCount = normalizeAttendanceWorkbenchCount(
+      aggregate?.rotationAssignmentCount,
+      [...memberUserIds].reduce((sum, userId) => sum + (rotationAssignmentCountByUser.get(userId) ?? 0), 0)
+    )
+    const assignedUserCount = normalizeAttendanceWorkbenchCount(aggregate?.assignedUserCount, assignedMemberUserIds.length)
     return {
       ...group,
       memberCount: members.length,
-      assignedUserCount: assignedMemberUserIds.length,
+      assignedUserCount,
       shiftAssignmentCount,
       rotationAssignmentCount,
     }
@@ -7543,6 +7572,14 @@ function buildAttendanceAdvancedSchedulingWorkbench(input = {}) {
     .filter(userId => !groupIdsByUserId.has(userId))
   const usersWithBothAssignmentKinds = [...shiftAssignmentCountByUser.keys()]
     .filter(userId => rotationAssignmentCountByUser.has(userId))
+  const assignmentUsersWithoutScheduleGroupCount = normalizeAttendanceWorkbenchCount(
+    assignmentAggregates.assignmentUsersWithoutScheduleGroup,
+    assignmentUsersWithoutScheduleGroup.length
+  )
+  const usersWithBothAssignmentKindsCount = normalizeAttendanceWorkbenchCount(
+    assignmentAggregates.usersWithBothAssignmentKinds,
+    usersWithBothAssignmentKinds.length
+  )
   const schedulerScopesWithUnknownGroups = schedulerScopes
     .filter(scope => Array.isArray(scope?.scope?.scheduleGroupIds) && scope.scope.scheduleGroupIds.some(groupId => !scheduleGroupIds.has(groupId)))
   const schedulerScopeUnknownGroupIds = schedulerScopesWithUnknownGroups
@@ -7558,12 +7595,12 @@ function buildAttendanceAdvancedSchedulingWorkbench(input = {}) {
         scheduleGroupIds: groupsWithoutMembers.map(group => group.id),
       })
       : null,
-    assignmentUsersWithoutScheduleGroup.length
+    assignmentUsersWithoutScheduleGroupCount
       ? buildAttendanceAdvancedSchedulingDiagnostic({
         code: 'assignment_without_schedule_group',
         severity: 'warning',
         message: 'Active shift or rotation assignments reference users without an effective schedule-group membership in this range.',
-        count: assignmentUsersWithoutScheduleGroup.length,
+        count: assignmentUsersWithoutScheduleGroupCount,
         userIds: assignmentUsersWithoutScheduleGroup,
       })
       : null,
@@ -7576,12 +7613,12 @@ function buildAttendanceAdvancedSchedulingWorkbench(input = {}) {
         userIds: usersWithMultipleScheduleGroups,
       })
       : null,
-    usersWithBothAssignmentKinds.length
+    usersWithBothAssignmentKindsCount
       ? buildAttendanceAdvancedSchedulingDiagnostic({
         code: 'user_mixed_assignment_kinds',
         severity: 'info',
         message: 'Users have both shift and rotation assignment rows in this range; effective-calendar resolution still owns day-level precedence.',
-        count: usersWithBothAssignmentKinds.length,
+        count: usersWithBothAssignmentKindsCount,
         userIds: usersWithBothAssignmentKinds,
       })
       : null,
@@ -7604,14 +7641,14 @@ function buildAttendanceAdvancedSchedulingWorkbench(input = {}) {
       schedulerScopes: schedulerScopes.length,
       shifts: shifts.length,
       rotationRules: rotationRules.length,
-      shiftAssignments: shiftAssignments.length,
-      rotationAssignments: rotationAssignments.length,
-      assignedUsers: assignedUserIds.size,
+      shiftAssignments: summaryShiftAssignments,
+      rotationAssignments: summaryRotationAssignments,
+      assignedUsers: summaryAssignedUsers,
       diagnostics: diagnostics.length,
       groupsWithoutMembers: groupsWithoutMembers.length,
-      assignmentUsersWithoutScheduleGroup: assignmentUsersWithoutScheduleGroup.length,
+      assignmentUsersWithoutScheduleGroup: assignmentUsersWithoutScheduleGroupCount,
       usersWithMultipleScheduleGroups: usersWithMultipleScheduleGroups.length,
-      usersWithBothAssignmentKinds: usersWithBothAssignmentKinds.length,
+      usersWithBothAssignmentKinds: usersWithBothAssignmentKindsCount,
     },
     scheduleGroups: {
       items: groupItems,
@@ -7639,6 +7676,20 @@ function buildAttendanceAdvancedSchedulingWorkbench(input = {}) {
       readOnly: true,
       source: 'attendance_advanced_scheduling_workbench',
       truncation,
+      sampling: {
+        assignmentLimit,
+        sampled: truncation.truncated,
+        shiftAssignments: {
+          visible: shiftAssignments.length,
+          total: summaryShiftAssignments,
+          truncated: truncation.shiftAssignments,
+        },
+        rotationAssignments: {
+          visible: rotationAssignments.length,
+          total: summaryRotationAssignments,
+          truncated: truncation.rotationAssignments,
+        },
+      },
     },
   }
 }
@@ -25181,6 +25232,8 @@ module.exports = {
             rotationRuleRows,
             shiftAssignmentRows,
             rotationAssignmentRows,
+            assignmentAggregateRows,
+            scheduleGroupAssignmentAggregateRows,
           ] = await Promise.all([
             db.query(
               `SELECT *
@@ -25252,6 +25305,99 @@ module.exports = {
                LIMIT ${ATTENDANCE_ADVANCED_SCHEDULING_WORKBENCH_ASSIGNMENT_LIMIT + 1}`,
               [orgId, rangeStart, rangeEnd]
             ),
+            db.query(
+              `WITH active_shift AS (
+                 SELECT a.id, a.user_id
+                 FROM attendance_shift_assignments a
+                 JOIN attendance_shifts s ON s.id = a.shift_id
+                 WHERE a.org_id = $1
+                   AND COALESCE(a.is_active, true) = true
+                   AND a.start_date <= $3::date
+                   AND COALESCE(a.end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $2::date
+               ),
+               active_rotation AS (
+                 SELECT a.id, a.user_id
+                 FROM attendance_rotation_assignments a
+                 JOIN attendance_rotation_rules r ON r.id = a.rotation_rule_id
+                 WHERE a.org_id = $1
+                   AND COALESCE(a.is_active, true) = true
+                   AND a.start_date <= $3::date
+                   AND COALESCE(a.end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $2::date
+               ),
+               assigned_users AS (
+                 SELECT user_id FROM active_shift WHERE user_id IS NOT NULL
+                 UNION
+                 SELECT user_id FROM active_rotation WHERE user_id IS NOT NULL
+               ),
+               active_members AS (
+                 SELECT DISTINCT user_id
+                 FROM attendance_schedule_group_members
+                 WHERE org_id = $1
+                   AND user_id IS NOT NULL
+                   AND COALESCE(effective_from, DATE '0001-01-01') <= $3::date
+                   AND COALESCE(effective_to, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $2::date
+               ),
+               mixed_users AS (
+                 SELECT s.user_id
+                 FROM active_shift s
+                 JOIN active_rotation r ON r.user_id = s.user_id
+                 WHERE s.user_id IS NOT NULL
+                 GROUP BY s.user_id
+               )
+               SELECT
+                 (SELECT COUNT(*) FROM active_shift)::int AS shift_assignments,
+                 (SELECT COUNT(*) FROM active_rotation)::int AS rotation_assignments,
+                 (SELECT COUNT(*) FROM assigned_users)::int AS assigned_users,
+                 (SELECT COUNT(*) FROM assigned_users au WHERE NOT EXISTS (
+                   SELECT 1 FROM active_members m WHERE m.user_id = au.user_id
+                 ))::int AS assignment_users_without_schedule_group,
+                 (SELECT COUNT(*) FROM mixed_users)::int AS users_with_both_assignment_kinds`,
+              [orgId, rangeStart, rangeEnd]
+            ),
+            db.query(
+              `WITH active_members AS (
+                 SELECT schedule_group_id, user_id
+                 FROM attendance_schedule_group_members
+                 WHERE org_id = $1
+                   AND user_id IS NOT NULL
+                   AND schedule_group_id IS NOT NULL
+                   AND COALESCE(effective_from, DATE '0001-01-01') <= $3::date
+                   AND COALESCE(effective_to, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $2::date
+               ),
+               shift_counts AS (
+                 SELECT a.user_id, COUNT(*)::int AS assignment_count
+                 FROM attendance_shift_assignments a
+                 JOIN attendance_shifts s ON s.id = a.shift_id
+                 WHERE a.org_id = $1
+                   AND COALESCE(a.is_active, true) = true
+                   AND a.start_date <= $3::date
+                   AND COALESCE(a.end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $2::date
+                 GROUP BY a.user_id
+               ),
+               rotation_counts AS (
+                 SELECT a.user_id, COUNT(*)::int AS assignment_count
+                 FROM attendance_rotation_assignments a
+                 JOIN attendance_rotation_rules r ON r.id = a.rotation_rule_id
+                 WHERE a.org_id = $1
+                   AND COALESCE(a.is_active, true) = true
+                   AND a.start_date <= $3::date
+                   AND COALESCE(a.end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $2::date
+                 GROUP BY a.user_id
+               )
+               SELECT
+                 m.schedule_group_id,
+                 COUNT(DISTINCT CASE
+                   WHEN COALESCE(s.assignment_count, 0) + COALESCE(r.assignment_count, 0) > 0 THEN m.user_id
+                   ELSE NULL
+                 END)::int AS assigned_user_count,
+                 COALESCE(SUM(COALESCE(s.assignment_count, 0)), 0)::int AS shift_assignment_count,
+                 COALESCE(SUM(COALESCE(r.assignment_count, 0)), 0)::int AS rotation_assignment_count
+               FROM active_members m
+               LEFT JOIN shift_counts s ON s.user_id = m.user_id
+               LEFT JOIN rotation_counts r ON r.user_id = m.user_id
+               GROUP BY m.schedule_group_id`,
+              [orgId, rangeStart, rangeEnd]
+            ),
           ])
 
           const shiftAssignmentsTruncated = shiftAssignmentRows.length > ATTENDANCE_ADVANCED_SCHEDULING_WORKBENCH_ASSIGNMENT_LIMIT
@@ -25274,6 +25420,19 @@ module.exports = {
             rotationAssignments: visibleRotationAssignmentRows.map(row => ({
               assignment: mapRotationAssignmentRow(row),
               rotation: mapRotationRuleFromAssignmentRow(row),
+            })),
+            assignmentAggregates: {
+              shiftAssignments: assignmentAggregateRows[0]?.shift_assignments,
+              rotationAssignments: assignmentAggregateRows[0]?.rotation_assignments,
+              assignedUsers: assignmentAggregateRows[0]?.assigned_users,
+              assignmentUsersWithoutScheduleGroup: assignmentAggregateRows[0]?.assignment_users_without_schedule_group,
+              usersWithBothAssignmentKinds: assignmentAggregateRows[0]?.users_with_both_assignment_kinds,
+            },
+            scheduleGroupAssignmentAggregates: scheduleGroupAssignmentAggregateRows.map(row => ({
+              scheduleGroupId: row.schedule_group_id,
+              assignedUserCount: row.assigned_user_count,
+              shiftAssignmentCount: row.shift_assignment_count,
+              rotationAssignmentCount: row.rotation_assignment_count,
             })),
             assignmentLimit: ATTENDANCE_ADVANCED_SCHEDULING_WORKBENCH_ASSIGNMENT_LIMIT,
             shiftAssignmentsTruncated,

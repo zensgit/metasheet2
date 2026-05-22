@@ -55,6 +55,20 @@ describe('attendance advanced scheduling read-only workbench', () => {
         rotationAssignments: false,
         truncated: false,
       },
+      sampling: {
+        assignmentLimit: 500,
+        sampled: false,
+        shiftAssignments: {
+          visible: 2,
+          total: 2,
+          truncated: false,
+        },
+        rotationAssignments: {
+          visible: 1,
+          total: 1,
+          truncated: false,
+        },
+      },
     })
     expect(workbench.summary).toMatchObject({
       scheduleGroups: 2,
@@ -85,7 +99,7 @@ describe('attendance advanced scheduling read-only workbench', () => {
     ])
   })
 
-  it('reports assignment snapshot truncation metadata without changing the read-only summary shape', () => {
+  it('uses aggregate assignment counts while keeping capped detail rows as a sample', () => {
     const shiftAssignments = Array.from({ length: 500 }, (_, index) => ({
       assignment: {
         id: `sa-${index}`,
@@ -103,18 +117,73 @@ describe('attendance advanced scheduling read-only workbench', () => {
       to: '2026-06-30',
       scheduleGroups: [],
       shiftAssignments,
+      assignmentAggregates: {
+        shiftAssignments: 650,
+        rotationAssignments: 3,
+        assignedUsers: 640,
+        assignmentUsersWithoutScheduleGroup: 639,
+        usersWithBothAssignmentKinds: 2,
+      },
       assignmentLimit: 500,
       shiftAssignmentsTruncated: true,
       rotationAssignmentsTruncated: false,
     })
 
-    expect(workbench.summary.shiftAssignments).toBe(500)
+    expect(workbench.summary).toMatchObject({
+      shiftAssignments: 650,
+      rotationAssignments: 3,
+      assignedUsers: 640,
+      assignmentUsersWithoutScheduleGroup: 639,
+      usersWithBothAssignmentKinds: 2,
+    })
     expect(workbench.assignments.shiftItems).toHaveLength(500)
+    expect(workbench.diagnostics.find((item: any) => item.code === 'assignment_without_schedule_group')).toMatchObject({
+      count: 639,
+    })
     expect(workbench.metadata.truncation).toEqual({
       assignmentLimit: 500,
       shiftAssignments: true,
       rotationAssignments: false,
       truncated: true,
+    })
+    expect(workbench.metadata.sampling).toEqual({
+      assignmentLimit: 500,
+      sampled: true,
+      shiftAssignments: {
+        visible: 500,
+        total: 650,
+        truncated: true,
+      },
+      rotationAssignments: {
+        visible: 0,
+        total: 3,
+        truncated: false,
+      },
+    })
+  })
+
+  it('uses aggregate group coverage counts when detail samples are capped', () => {
+    const workbench = helpers.buildAttendanceAdvancedSchedulingWorkbench({
+      scheduleGroups: [{ id: 'group-a', name: 'Line A', code: 'line-a', source: 'manual', isActive: true }],
+      scheduleGroupMembers: [
+        { id: 'm-1', scheduleGroupId: 'group-a', userId: 'user-1', effectiveFrom: '2026-06-01', effectiveTo: null },
+      ],
+      shiftAssignments: [],
+      scheduleGroupAssignmentAggregates: [
+        {
+          scheduleGroupId: 'group-a',
+          assignedUserCount: 25,
+          shiftAssignmentCount: 31,
+          rotationAssignmentCount: 7,
+        },
+      ],
+    })
+
+    expect(workbench.scheduleGroups.items[0]).toMatchObject({
+      memberCount: 1,
+      assignedUserCount: 25,
+      shiftAssignmentCount: 31,
+      rotationAssignmentCount: 7,
     })
   })
 
@@ -128,5 +197,7 @@ describe('attendance advanced scheduling read-only workbench', () => {
     expect(pluginSource).toContain('LIMIT ${ATTENDANCE_ADVANCED_SCHEDULING_WORKBENCH_ASSIGNMENT_LIMIT + 1}')
     expect(pluginSource).toContain('visibleShiftAssignmentRows = shiftAssignmentRows.slice(0, ATTENDANCE_ADVANCED_SCHEDULING_WORKBENCH_ASSIGNMENT_LIMIT)')
     expect(pluginSource).toContain('visibleRotationAssignmentRows = rotationAssignmentRows.slice(0, ATTENDANCE_ADVANCED_SCHEDULING_WORKBENCH_ASSIGNMENT_LIMIT)')
+    expect(pluginSource).toContain('assignmentAggregateRows')
+    expect(pluginSource).toContain('scheduleGroupAssignmentAggregateRows')
   })
 })
