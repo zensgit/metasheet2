@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
-import { buildGateContractReport } from './integration-k3wise-gate-contract-check.mjs'
+import { buildGateContractReport, isDirectCliRun } from './integration-k3wise-gate-contract-check.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(__dirname, '..', '..')
@@ -241,4 +241,27 @@ test('init-template writes a safe fillable packet that is blocked until customer
   assert.equal(evidence.sections.relationshipMapping.answered, 0)
   assert.equal(evidence.sections.webapiReadList.samples.filter((sample) => sample.status === 'present').length, 4)
   assert.equal(evidence.sections.relationshipMapping.samples.filter((sample) => sample.status === 'present').length, 4)
+})
+
+test('direct-run guard accepts Windows script paths', () => {
+  const modulePath = 'C:\\metasheet\\scripts\\ops\\integration-k3wise-gate-contract-check.mjs'
+
+  assert.equal(isDirectCliRun(modulePath, modulePath, 'win32'), true)
+  assert.equal(
+    isDirectCliRun(modulePath, 'C:/metasheet/scripts/ops/integration-k3wise-gate-contract-check.mjs', 'win32'),
+    true,
+  )
+  assert.equal(
+    isDirectCliRun(modulePath, 'c:\\METASHEET\\scripts\\ops\\integration-k3wise-gate-contract-check.mjs', 'win32'),
+    true,
+  )
+  assert.equal(isDirectCliRun(modulePath, 'C:\\metasheet\\scripts\\ops\\other-checker.mjs', 'win32'), false)
+  assert.equal(
+    isDirectCliRun(
+      '/repo/scripts/ops/integration-k3wise-gate-contract-check.mjs',
+      '/repo/scripts/ops/integration-k3wise-gate-contract-check.mjs',
+      'linux',
+    ),
+    true,
+  )
 })
