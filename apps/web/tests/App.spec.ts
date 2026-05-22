@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, ref, type App as VueApp, type Component } from 'vue'
 import App from '../src/App.vue'
+import { setMultitableApiErrorLocaleResolver } from '../src/multitable/api/client'
 
 const loadProductFeatures = vi.fn().mockResolvedValue(undefined)
 const fetchPlugins = vi.fn().mockResolvedValue(undefined)
@@ -39,6 +40,7 @@ vi.mock('../src/composables/useLocale', () => ({
 }))
 
 vi.mock('../src/utils/api', () => ({
+  apiFetch: vi.fn(),
   clearStoredAuthState: vi.fn(),
   getStoredAuthToken: vi.fn(() => ''),
 }))
@@ -59,6 +61,7 @@ describe('App guest bootstrap', () => {
     if (container) container.remove()
     app = null
     container = null
+    setMultitableApiErrorLocaleResolver(undefined)
     vi.clearAllMocks()
   })
 

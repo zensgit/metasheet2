@@ -69,14 +69,29 @@ import type {
   DingTalkGroupDestinationInput,
 } from '../types'
 import { apiFetch } from '../../utils/api'
+import { apiDefaultErrorMessage, apiFieldValidationFallback } from '../utils/meta-api-error-labels'
 
 type FetchFn = (input: string, init?: RequestInit) => Promise<Response>
+type ApiErrorLocaleResolver = () => boolean
+type ApiErrorLocaleOption = boolean | ApiErrorLocaleResolver
 
 type ApiErrorPayload = {
   code?: string
   message?: string
   fieldErrors?: Record<string, string>
   serverVersion?: number
+}
+
+let globalApiErrorLocaleResolver: ApiErrorLocaleResolver | undefined
+
+export function setMultitableApiErrorLocaleResolver(
+  resolver: ApiErrorLocaleResolver | null | undefined,
+): void {
+  globalApiErrorLocaleResolver = resolver ?? undefined
+}
+
+function resolveGlobalApiErrorIsZh(): boolean {
+  return globalApiErrorLocaleResolver?.() === true
 }
 
 export function parseRetryAfterMs(headerValue: string | null): number | undefined {
@@ -101,12 +116,12 @@ function qs(params: Record<string, string | number | boolean | undefined>): stri
   return entries.length ? `?${entries.join('&')}` : ''
 }
 
-async function parseJson<T>(res: Response): Promise<T> {
+async function parseJson<T>(res: Response, isZh = false): Promise<T> {
   const raw = await res.text()
   const body = raw ? safeParseJson(raw) : null
   if (!res.ok) {
-    const payload = normalizeApiErrorPayload(body)
-    const error = new Error(firstFieldError(payload.fieldErrors) ?? payload.message ?? defaultApiErrorMessage(payload.code, res.status)) as Error & {
+    const payload = normalizeApiErrorPayload(body, isZh)
+    const error = new Error(firstFieldError(payload.fieldErrors) ?? payload.message ?? apiDefaultErrorMessage(payload.code, res.status, isZh)) as Error & {
       status?: number
       code?: string
       fieldErrors?: Record<string, string>
@@ -133,7 +148,7 @@ function safeParseJson(raw: string): unknown {
   }
 }
 
-function normalizeApiErrorPayload(body: unknown): ApiErrorPayload {
+function normalizeApiErrorPayload(body: unknown, isZh = false): ApiErrorPayload {
   if (!body || typeof body !== 'object') return {}
   const record = body as Record<string, unknown>
   const error = record.error
@@ -141,26 +156,26 @@ function normalizeApiErrorPayload(body: unknown): ApiErrorPayload {
     return {
       code: error,
       message: typeof record.message === 'string' ? record.message : error,
-      fieldErrors: normalizeFieldErrors(record.fieldErrors),
+      fieldErrors: normalizeFieldErrors(record.fieldErrors, isZh),
     }
   }
   if (error && typeof error === 'object') {
     const payload = error as ApiErrorPayload & { fieldErrors?: unknown }
     return {
       ...payload,
-      fieldErrors: normalizeFieldErrors(payload.fieldErrors),
+      fieldErrors: normalizeFieldErrors(payload.fieldErrors, isZh),
     }
   }
   if (typeof record.message === 'string') {
     return {
       message: record.message,
-      fieldErrors: normalizeFieldErrors(record.fieldErrors),
+      fieldErrors: normalizeFieldErrors(record.fieldErrors, isZh),
     }
   }
   return {}
 }
 
-function normalizeFieldErrors(fieldErrors: unknown): Record<string, string> | undefined {
+function normalizeFieldErrors(fieldErrors: unknown, isZh = false): Record<string, string> | undefined {
   if (Array.isArray(fieldErrors)) {
     const normalized: Record<string, string> = {}
     fieldErrors.forEach((entry, index) => {
@@ -171,7 +186,7 @@ function normalizeFieldErrors(fieldErrors: unknown): Record<string, string> | un
         : `field_${index + 1}`
       const message = typeof candidate.message === 'string' && candidate.message.trim()
         ? candidate.message.trim()
-        : 'Validation failed'
+        : apiFieldValidationFallback(isZh)
       normalized[fieldId] = message
     })
     return Object.keys(normalized).length > 0 ? normalized : undefined
@@ -183,26 +198,13 @@ function normalizeFieldErrors(fieldErrors: unknown): Record<string, string> | un
         .filter(([fieldId]) => fieldId.trim().length > 0)
         .map(([fieldId, message]) => [
           fieldId,
-          typeof message === 'string' && message.trim() ? message.trim() : 'Validation failed',
+          typeof message === 'string' && message.trim() ? message.trim() : apiFieldValidationFallback(isZh),
         ]),
     )
     return Object.keys(normalized).length > 0 ? normalized : undefined
   }
 
   return undefined
-}
-
-function defaultApiErrorMessage(code: string | undefined, status: number): string {
-  switch (code) {
-    case 'FORBIDDEN':
-      return 'Insufficient permissions'
-    case 'UNAUTHENTICATED':
-      return 'Please sign in to continue.'
-    case 'VALIDATION_ERROR':
-      return 'Please check the submitted data and try again.'
-    default:
-      return `API ${status}`
-  }
 }
 
 function unwrapDataBody(body: unknown): unknown {
@@ -737,15 +739,27 @@ function normalizeCommentsParams(params: { containerId: string; targetId: string
 
 export class MultitableApiClient {
   private fetch: FetchFn
+  private readonly isZhOption?: ApiErrorLocaleOption
 
-  constructor(opts?: { fetchFn?: FetchFn }) {
+  constructor(opts?: { fetchFn?: FetchFn; isZh?: ApiErrorLocaleOption }) {
     this.fetch = opts?.fetchFn ?? defaultFetchFn()
+    this.isZhOption = opts?.isZh
+  }
+
+  private resolveIsZh(): boolean {
+    if (typeof this.isZhOption === 'function') return this.isZhOption()
+    if (typeof this.isZhOption === 'boolean') return this.isZhOption
+    return resolveGlobalApiErrorIsZh()
+  }
+
+  private parseJson<T>(res: Response): Promise<T> {
+    return parseJson<T>(res, this.resolveIsZh())
   }
 
   // --- Bases ---
   async listBases(): Promise<{ bases: MetaBase[] }> {
     const res = await this.fetch('/api/multitable/bases')
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async createBase(input: CreateBaseInput): Promise<{ base: MetaBase }> {
@@ -754,12 +768,12 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async listTemplates(): Promise<{ templates: MetaTemplate[] }> {
     const res = await this.fetch('/api/multitable/templates')
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async installTemplate(templateId: string, input: InstallTemplateInput = {}): Promise<InstallTemplateResult> {
@@ -768,19 +782,19 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   // --- Context ---
   async loadContext(params: { baseId?: string; sheetId?: string; viewId?: string }): Promise<MetaContext> {
     const res = await this.fetch(`/api/multitable/context${qs(params)}`)
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   // --- Sheets ---
   async listSheets(): Promise<{ sheets: MetaSheet[] }> {
     const res = await this.fetch('/api/multitable/sheets')
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async createSheet(input: CreateSheetInput): Promise<{ sheet: MetaSheet & { seeded?: boolean } }> {
@@ -789,12 +803,12 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async listSheetPermissions(sheetId: string): Promise<{ items: MetaSheetPermissionEntry[] }> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/permissions`)
-    const data = await parseJson<{ items?: Array<Partial<MetaSheetPermissionEntry>> }>(res)
+    const data = await this.parseJson<{ items?: Array<Partial<MetaSheetPermissionEntry>> }>(res)
     return normalizeSheetPermissionEntries(data)
   }
 
@@ -803,7 +817,7 @@ export class MultitableApiClient {
     params?: { q?: string; limit?: number },
   ): Promise<{ items: MetaSheetPermissionCandidate[]; total: number; limit: number; query: string }> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/permission-candidates${qs(params ?? {})}`)
-    const data = await parseJson<{ items?: Array<Partial<MetaSheetPermissionCandidate>>; total?: number; limit?: number; query?: string }>(res)
+    const data = await this.parseJson<{ items?: Array<Partial<MetaSheetPermissionCandidate>>; total?: number; limit?: number; query?: string }>(res)
     return normalizeSheetPermissionCandidates(data)
   }
 
@@ -818,7 +832,7 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ accessLevel }),
     })
-    const data = await parseJson<{
+    const data = await this.parseJson<{
       subjectType?: 'user' | 'role' | 'member-group'
       subjectId?: string
       accessLevel?: MetaSheetPermissionAccessLevel | 'none'
@@ -840,7 +854,7 @@ export class MultitableApiClient {
   // --- Field permissions ---
   async listFieldPermissions(sheetId: string): Promise<{ items: MetaFieldPermissionEntry[] }> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/field-permissions`)
-    const data = await parseJson<{ items?: Array<Partial<MetaFieldPermissionEntry>> }>(res)
+    const data = await this.parseJson<{ items?: Array<Partial<MetaFieldPermissionEntry>> }>(res)
     return {
       items: Array.isArray(data?.items)
         ? data.items
@@ -877,13 +891,13 @@ export class MultitableApiClient {
         body: JSON.stringify(perm),
       },
     )
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   // --- View permissions ---
   async listViewPermissions(viewId: string): Promise<{ items: MetaViewPermissionEntry[] }> {
     const res = await this.fetch(`/api/multitable/views/${encodeURIComponent(viewId)}/permissions`)
-    const data = await parseJson<{ items?: Array<Partial<MetaViewPermissionEntry>> }>(res)
+    const data = await this.parseJson<{ items?: Array<Partial<MetaViewPermissionEntry>> }>(res)
     return {
       items: Array.isArray(data?.items)
         ? data.items
@@ -919,13 +933,13 @@ export class MultitableApiClient {
         body: JSON.stringify({ permission }),
       },
     )
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   // --- Fields ---
   async listFields(sheetId: string): Promise<{ fields: MetaField[] }> {
     const res = await this.fetch(`/api/multitable/fields${qs({ sheetId })}`)
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async createField(input: CreateFieldInput): Promise<{ field: MetaField }> {
@@ -934,7 +948,7 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async preparePersonField(sheetId: string): Promise<MetaPreparedPersonField> {
@@ -943,7 +957,7 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sheetId }),
     })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async updateField(fieldId: string, input: UpdateFieldInput): Promise<{ field: MetaField }> {
@@ -952,18 +966,18 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async deleteField(fieldId: string): Promise<{ deleted: string }> {
     const res = await this.fetch(`/api/multitable/fields/${fieldId}`, { method: 'DELETE' })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   // --- Views ---
   async listViews(sheetId: string): Promise<{ views: MetaView[] }> {
     const res = await this.fetch(`/api/multitable/views${qs({ sheetId })}`)
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async createView(input: CreateViewInput): Promise<{ view: MetaView }> {
@@ -972,7 +986,7 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async updateView(viewId: string, input: UpdateViewInput): Promise<{ view: MetaView }> {
@@ -981,12 +995,12 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async deleteView(viewId: string): Promise<{ deleted: string }> {
     const res = await this.fetch(`/api/multitable/views/${viewId}`, { method: 'DELETE' })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   // --- View data (grid) ---
@@ -1000,7 +1014,7 @@ export class MultitableApiClient {
     search?: string
   }): Promise<MetaViewData> {
     const res = await this.fetch(`/api/multitable/view${qs(params as Record<string, string | number | boolean | undefined>)}`)
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   // --- Form context ---
@@ -1009,20 +1023,20 @@ export class MultitableApiClient {
     const res = params.publicToken && this.fetch === apiFetch
       ? await apiFetch(path, { suppressUnauthorizedRedirect: true })
       : await this.fetch(path)
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   // --- Records ---
   async getRecord(recordId: string, params?: { sheetId?: string; viewId?: string }): Promise<MetaRecordContext> {
     const res = await this.fetch(`/api/multitable/records/${recordId}${qs(params ?? {})}`)
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async listRecordHistory(sheetId: string, recordId: string, params?: { limit?: number; offset?: number }): Promise<MetaRecordRevision[]> {
     const res = await this.fetch(
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/history${qs(params ?? {})}`,
     )
-    const data = await parseJson<{ items?: Array<Partial<MetaRecordRevision>> }>(res)
+    const data = await this.parseJson<{ items?: Array<Partial<MetaRecordRevision>> }>(res)
     return normalizeRecordHistoryEntries(data)
   }
 
@@ -1030,7 +1044,7 @@ export class MultitableApiClient {
     const res = await this.fetch(
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/subscriptions`,
     )
-    const data = await parseJson<{ subscribed?: boolean; subscription?: Partial<MetaRecordSubscription> | null; items?: Array<Partial<MetaRecordSubscription>> }>(res)
+    const data = await this.parseJson<{ subscribed?: boolean; subscription?: Partial<MetaRecordSubscription> | null; items?: Array<Partial<MetaRecordSubscription>> }>(res)
     return normalizeRecordSubscriptionStatus(data)
   }
 
@@ -1039,7 +1053,7 @@ export class MultitableApiClient {
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/subscriptions/me`,
       { method: 'PUT' },
     )
-    const data = await parseJson<{ subscribed?: boolean; subscription?: Partial<MetaRecordSubscription> | null }>(res)
+    const data = await this.parseJson<{ subscribed?: boolean; subscription?: Partial<MetaRecordSubscription> | null }>(res)
     return normalizeRecordSubscriptionStatus(data)
   }
 
@@ -1048,13 +1062,13 @@ export class MultitableApiClient {
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/subscriptions/me`,
       { method: 'DELETE' },
     )
-    const data = await parseJson<{ subscribed?: boolean; subscription?: Partial<MetaRecordSubscription> | null }>(res)
+    const data = await this.parseJson<{ subscribed?: boolean; subscription?: Partial<MetaRecordSubscription> | null }>(res)
     return normalizeRecordSubscriptionStatus(data)
   }
 
   async listRecordSubscriptionNotifications(params?: { sheetId?: string; recordId?: string; limit?: number; offset?: number }): Promise<MetaRecordSubscriptionNotification[]> {
     const res = await this.fetch(`/api/multitable/record-subscription-notifications${qs(params ?? {})}`)
-    const data = await parseJson<{ items?: Array<Partial<MetaRecordSubscriptionNotification>> }>(res)
+    const data = await this.parseJson<{ items?: Array<Partial<MetaRecordSubscriptionNotification>> }>(res)
     return normalizeRecordSubscriptionNotifications(data)
   }
 
@@ -1065,12 +1079,12 @@ export class MultitableApiClient {
       body: JSON.stringify(input),
       signal: opts?.signal,
     })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async deleteRecord(recordId: string, expectedVersion?: number): Promise<{ deleted: string }> {
     const res = await this.fetch(`/api/multitable/records/${recordId}${qs({ expectedVersion })}`, { method: 'DELETE' })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async patchRecords(input: PatchRecordsInput): Promise<PatchResult> {
@@ -1079,7 +1093,7 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   // --- Form submit ---
@@ -1093,7 +1107,7 @@ export class MultitableApiClient {
     const res = input.publicToken && this.fetch === apiFetch
       ? await apiFetch(path, { ...requestInit, suppressUnauthorizedRedirect: true })
       : await this.fetch(path, requestInit)
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   // --- Link options ---
@@ -1101,7 +1115,7 @@ export class MultitableApiClient {
     recordId?: string; search?: string; limit?: number; offset?: number
   }): Promise<LinkOptionsData> {
     const res = await this.fetch(`/api/multitable/fields/${fieldId}/link-options${qs(params ?? {})}`)
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   // --- Record summaries ---
@@ -1109,7 +1123,7 @@ export class MultitableApiClient {
     sheetId: string; displayFieldId?: string; search?: string; limit?: number; offset?: number
   }): Promise<RecordSummaryPage> {
     const res = await this.fetch(`/api/multitable/records-summary${qs(params as Record<string, string | number | boolean | undefined>)}`)
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   // --- Attachments ---
@@ -1123,19 +1137,19 @@ export class MultitableApiClient {
       method: 'POST',
       body: formData,
     })
-    const data = await parseJson<MetaAttachment | { attachment: MetaAttachment }>(res)
+    const data = await this.parseJson<MetaAttachment | { attachment: MetaAttachment }>(res)
     return 'attachment' in data ? data.attachment : data
   }
 
   async deleteAttachment(attachmentId: string): Promise<{ deleted: string }> {
     const res = await this.fetch(`/api/multitable/attachments/${attachmentId}`, { method: 'DELETE' })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   // --- Record permissions ---
   async listRecordPermissions(sheetId: string, recordId: string): Promise<RecordPermissionEntry[]> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/permissions`)
-    const data = await parseJson<{ items?: Array<Partial<RecordPermissionEntry>> }>(res)
+    const data = await this.parseJson<{ items?: Array<Partial<RecordPermissionEntry>> }>(res)
     return normalizeRecordPermissionEntries(data)
   }
 
@@ -1154,7 +1168,7 @@ export class MultitableApiClient {
         body: JSON.stringify({ subjectType, subjectId, accessLevel }),
       },
     )
-    await parseJson(res)
+    await this.parseJson(res)
   }
 
   async deleteRecordPermission(sheetId: string, recordId: string, permissionId: string): Promise<void> {
@@ -1162,13 +1176,13 @@ export class MultitableApiClient {
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/permissions/${encodeURIComponent(permissionId)}`,
       { method: 'DELETE' },
     )
-    await parseJson(res)
+    await this.parseJson(res)
   }
 
   // --- Automation rules ---
   async listAutomationRules(sheetId: string): Promise<AutomationRule[]> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations`)
-    const data = await parseJson<{ rules?: unknown[] } | unknown[]>(res)
+    const data = await this.parseJson<{ rules?: unknown[] } | unknown[]>(res)
     const rules = Array.isArray(data)
       ? data
       : isPlainObject(data) && Array.isArray(data.rules)
@@ -1186,7 +1200,7 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(rule),
     })
-    const data = await parseJson<unknown>(res)
+    const data = await this.parseJson<unknown>(res)
     return normalizeAutomationRulePayload(data)
   }
 
@@ -1199,7 +1213,7 @@ export class MultitableApiClient {
         body: JSON.stringify(updates),
       },
     )
-    await parseJson(res)
+    await this.parseJson(res)
   }
 
   async deleteAutomationRule(sheetId: string, ruleId: string): Promise<void> {
@@ -1207,7 +1221,7 @@ export class MultitableApiClient {
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}`,
       { method: 'DELETE' },
     )
-    await parseJson(res)
+    await this.parseJson(res)
   }
 
   // --- Comments (uses /api/comments) ---
@@ -1218,7 +1232,7 @@ export class MultitableApiClient {
       rowId: normalized.targetId,
       fieldId: normalized.targetFieldId ?? undefined,
     })}`)
-    const data = await parseJson<{ comments?: RawComment[]; items?: RawComment[] }>(res)
+    const data = await this.parseJson<{ comments?: RawComment[]; items?: RawComment[] }>(res)
     return normalizeCommentsList(data)
   }
 
@@ -1247,7 +1261,7 @@ export class MultitableApiClient {
         mentions: input.mentions,
       }),
     })
-    const data = await parseJson<{ comment?: RawComment }>(res)
+    const data = await this.parseJson<{ comment?: RawComment }>(res)
     return {
       comment: normalizeMultitableComment(data.comment),
     }
@@ -1259,13 +1273,13 @@ export class MultitableApiClient {
     limit?: number
   }): Promise<{ items: MetaCommentMentionSuggestion[]; total: number; limit: number }> {
     const res = await this.fetch(`/api/comments/mention-candidates${qs(params)}`)
-    const data = await parseJson<{ items?: Array<Partial<MetaCommentMentionSuggestion>>; total?: number; limit?: number }>(res)
+    const data = await this.parseJson<{ items?: Array<Partial<MetaCommentMentionSuggestion>>; total?: number; limit?: number }>(res)
     return normalizeCommentMentionSuggestions(data)
   }
 
   async resolveComment(commentId: string): Promise<void> {
     const res = await this.fetch(`/api/comments/${commentId}/resolve`, { method: 'POST' })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async updateComment(commentId: string, input: {
@@ -1280,7 +1294,7 @@ export class MultitableApiClient {
         mentions: input.mentions,
       }),
     })
-    const data = await parseJson<{ comment?: RawComment }>(res)
+    const data = await this.parseJson<{ comment?: RawComment }>(res)
     return {
       comment: normalizeMultitableComment(data.comment),
     }
@@ -1288,7 +1302,7 @@ export class MultitableApiClient {
 
   async deleteComment(commentId: string): Promise<void> {
     const res = await this.fetch(`/api/comments/${commentId}`, { method: 'DELETE' })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async listCommentPresence(params: { containerId: string; targetIds?: string[] }): Promise<{ items: MultitableCommentPresenceSummary[] }> {
@@ -1297,13 +1311,13 @@ export class MultitableApiClient {
       spreadsheetId: params.containerId,
       rowIds: targetIds.length ? targetIds.join(',') : undefined,
     })}`)
-    const data = await parseJson<{ items?: MultitableCommentPresenceSummary[] }>(res)
+    const data = await this.parseJson<{ items?: MultitableCommentPresenceSummary[] }>(res)
     return normalizeCommentPresenceList(data)
   }
 
   async loadMentionSummary(params: { spreadsheetId: string }): Promise<CommentMentionSummary> {
     const res = await this.fetch(`/api/comments/mention-summary${qs(params)}`)
-    const data = await parseJson<Partial<CommentMentionSummary> | null>(res)
+    const data = await this.parseJson<Partial<CommentMentionSummary> | null>(res)
     return normalizeCommentMentionSummary(data)
   }
 
@@ -1313,30 +1327,30 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
     })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async listCommentInbox(params?: { limit?: number; offset?: number }): Promise<MultitableCommentInboxPage> {
     const res = await this.fetch(`/api/comments/inbox${qs(params ?? {})}`)
-    const data = await parseJson<{ items?: RawInboxItem[]; total?: number; limit?: number; offset?: number }>(res)
+    const data = await this.parseJson<{ items?: RawInboxItem[]; total?: number; limit?: number; offset?: number }>(res)
     return normalizeCommentInbox(data)
   }
 
   async getCommentUnreadCount(): Promise<number> {
     const res = await this.fetch('/api/comments/unread-count')
-    const data = await parseJson<{ count?: number }>(res)
+    const data = await this.parseJson<{ count?: number }>(res)
     return typeof data?.count === 'number' ? data.count : 0
   }
 
   async markCommentRead(commentId: string): Promise<void> {
     const res = await this.fetch(`/api/comments/${commentId}/read`, { method: 'POST' })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   // --- Form Share ---
   async getFormShareConfig(sheetId: string, viewId: string): Promise<FormShareConfig> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/views/${encodeURIComponent(viewId)}/form-share`)
-    const data = await parseJson<Partial<FormShareConfig>>(res)
+    const data = await this.parseJson<Partial<FormShareConfig>>(res)
     return normalizeFormShareConfig(data)
   }
 
@@ -1346,7 +1360,7 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
     })
-    const data = await parseJson<Partial<FormShareConfig>>(res)
+    const data = await this.parseJson<Partial<FormShareConfig>>(res)
     return normalizeFormShareConfig(data)
   }
 
@@ -1354,7 +1368,7 @@ export class MultitableApiClient {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/views/${encodeURIComponent(viewId)}/form-share/regenerate`, {
       method: 'POST',
     })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async listFormShareCandidates(
@@ -1362,14 +1376,14 @@ export class MultitableApiClient {
     params?: { q?: string; limit?: number },
   ): Promise<{ items: MetaSheetPermissionCandidate[]; total: number; limit: number; query: string }> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/form-share-candidates${qs(params ?? {})}`)
-    const data = await parseJson<{ items?: Array<Partial<MetaSheetPermissionCandidate>>; total?: number; limit?: number; query?: string }>(res)
+    const data = await this.parseJson<{ items?: Array<Partial<MetaSheetPermissionCandidate>>; total?: number; limit?: number; query?: string }>(res)
     return normalizeSheetPermissionCandidates(data)
   }
 
   // --- API Tokens ---
   async listApiTokens(): Promise<ApiToken[]> {
     const res = await this.fetch('/api/multitable/tokens')
-    const data = await parseJson<{ tokens: ApiToken[] }>(res)
+    const data = await this.parseJson<{ tokens: ApiToken[] }>(res)
     return data.tokens ?? []
   }
 
@@ -1379,27 +1393,27 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async revokeApiToken(tokenId: string): Promise<void> {
     const res = await this.fetch(`/api/multitable/tokens/${encodeURIComponent(tokenId)}`, {
       method: 'DELETE',
     })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async rotateApiToken(tokenId: string): Promise<ApiTokenCreateResult> {
     const res = await this.fetch(`/api/multitable/tokens/${encodeURIComponent(tokenId)}/rotate`, {
       method: 'POST',
     })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   // --- Webhooks ---
   async listWebhooks(): Promise<Webhook[]> {
     const res = await this.fetch('/api/multitable/webhooks')
-    const data = await parseJson<{ webhooks: Webhook[] }>(res)
+    const data = await this.parseJson<{ webhooks: Webhook[] }>(res)
     return data.webhooks ?? []
   }
 
@@ -1409,7 +1423,7 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async updateWebhook(id: string, input: Partial<WebhookCreateInput>): Promise<Webhook> {
@@ -1418,26 +1432,26 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async deleteWebhook(id: string): Promise<void> {
     const res = await this.fetch(`/api/multitable/webhooks/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async getWebhookDeliveries(id: string): Promise<WebhookDelivery[]> {
     const res = await this.fetch(`/api/multitable/webhooks/${encodeURIComponent(id)}/deliveries`)
-    const data = await parseJson<{ deliveries: WebhookDelivery[] }>(res)
+    const data = await this.parseJson<{ deliveries: WebhookDelivery[] }>(res)
     return data.deliveries ?? []
   }
 
   // --- DingTalk Group Destinations ---
   async listDingTalkGroups(sheetId?: string): Promise<DingTalkGroupDestination[]> {
     const res = await this.fetch(`/api/multitable/dingtalk-groups${qs(sheetId ? { sheetId } : {})}`)
-    const data = await parseJson<{ destinations: DingTalkGroupDestination[] }>(res)
+    const data = await this.parseJson<{ destinations: DingTalkGroupDestination[] }>(res)
     return data.destinations ?? []
   }
 
@@ -1447,7 +1461,7 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async updateDingTalkGroup(id: string, input: Partial<Omit<DingTalkGroupDestinationInput, 'sheetId'>>, sheetId?: string): Promise<DingTalkGroupDestination> {
@@ -1456,14 +1470,14 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async deleteDingTalkGroup(id: string, sheetId?: string): Promise<void> {
     const res = await this.fetch(`/api/multitable/dingtalk-groups/${encodeURIComponent(id)}${qs(sheetId ? { sheetId } : {})}`, {
       method: 'DELETE',
     })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async testDingTalkGroup(id: string, input?: { subject?: string; content?: string }, sheetId?: string): Promise<void> {
@@ -1472,12 +1486,12 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input ?? {}),
     })
-    return parseJson(res)
+    return this.parseJson(res)
   }
 
   async getDingTalkGroupDeliveries(id: string, sheetId?: string): Promise<DingTalkGroupDelivery[]> {
     const res = await this.fetch(`/api/multitable/dingtalk-groups/${encodeURIComponent(id)}/deliveries${qs(sheetId ? { sheetId } : {})}`)
-    const data = await parseJson<{ deliveries: DingTalkGroupDelivery[] }>(res)
+    const data = await this.parseJson<{ deliveries: DingTalkGroupDelivery[] }>(res)
     return data.deliveries ?? []
   }
 
@@ -1487,14 +1501,14 @@ export class MultitableApiClient {
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/test`,
       { method: 'POST' },
     )
-    return parseJson<AutomationExecution>(res)
+    return this.parseJson<AutomationExecution>(res)
   }
 
   async getAutomationLogs(sheetId: string, ruleId: string, limit?: number): Promise<AutomationExecution[]> {
     const res = await this.fetch(
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/logs${qs({ limit })}`,
     )
-    const data = await parseJson<{ executions: AutomationExecution[] }>(res)
+    const data = await this.parseJson<{ executions: AutomationExecution[] }>(res)
     return Array.isArray(data?.executions) ? data.executions : []
   }
 
@@ -1502,14 +1516,14 @@ export class MultitableApiClient {
     const res = await this.fetch(
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/stats`,
     )
-    return parseJson<AutomationStats>(res)
+    return this.parseJson<AutomationStats>(res)
   }
 
   async getAutomationDingTalkPersonDeliveries(sheetId: string, ruleId: string, limit?: number): Promise<DingTalkPersonDelivery[]> {
     const res = await this.fetch(
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/dingtalk-person-deliveries${qs({ limit })}`,
     )
-    const data = await parseJson<{ deliveries: DingTalkPersonDelivery[] }>(res)
+    const data = await this.parseJson<{ deliveries: DingTalkPersonDelivery[] }>(res)
     return Array.isArray(data?.deliveries) ? data.deliveries : []
   }
 
@@ -1517,14 +1531,14 @@ export class MultitableApiClient {
     const res = await this.fetch(
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/dingtalk-group-deliveries${qs({ limit })}`,
     )
-    const data = await parseJson<{ deliveries: DingTalkGroupDelivery[] }>(res)
+    const data = await this.parseJson<{ deliveries: DingTalkGroupDelivery[] }>(res)
     return Array.isArray(data?.deliveries) ? data.deliveries : []
   }
 
   // --- Charts ---
   async listCharts(sheetId: string): Promise<ChartConfig[]> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/charts`)
-    const data = await parseJson<{ charts: ChartConfig[] }>(res)
+    const data = await this.parseJson<{ charts: ChartConfig[] }>(res)
     return Array.isArray(data?.charts) ? data.charts : []
   }
 
@@ -1534,7 +1548,7 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return parseJson<ChartConfig>(res)
+    return this.parseJson<ChartConfig>(res)
   }
 
   async updateChart(sheetId: string, chartId: string, input: Partial<ChartCreateInput>): Promise<ChartConfig> {
@@ -1546,7 +1560,7 @@ export class MultitableApiClient {
         body: JSON.stringify(input),
       },
     )
-    return parseJson<ChartConfig>(res)
+    return this.parseJson<ChartConfig>(res)
   }
 
   async deleteChart(sheetId: string, chartId: string): Promise<void> {
@@ -1554,20 +1568,20 @@ export class MultitableApiClient {
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/charts/${encodeURIComponent(chartId)}`,
       { method: 'DELETE' },
     )
-    await parseJson(res)
+    await this.parseJson(res)
   }
 
   async getChartData(sheetId: string, chartId: string): Promise<ChartData> {
     const res = await this.fetch(
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/charts/${encodeURIComponent(chartId)}/data`,
     )
-    return parseJson<ChartData>(res)
+    return this.parseJson<ChartData>(res)
   }
 
   // --- Dashboards ---
   async listDashboards(sheetId: string): Promise<Dashboard[]> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/dashboards`)
-    const data = await parseJson<{ dashboards: Dashboard[] }>(res)
+    const data = await this.parseJson<{ dashboards: Dashboard[] }>(res)
     return Array.isArray(data?.dashboards) ? data.dashboards : []
   }
 
@@ -1577,7 +1591,7 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return parseJson<Dashboard>(res)
+    return this.parseJson<Dashboard>(res)
   }
 
   async updateDashboard(sheetId: string, dashboardId: string, input: DashboardUpdateInput): Promise<Dashboard> {
@@ -1589,7 +1603,7 @@ export class MultitableApiClient {
         body: JSON.stringify(input),
       },
     )
-    return parseJson<Dashboard>(res)
+    return this.parseJson<Dashboard>(res)
   }
 
   async deleteDashboard(sheetId: string, dashboardId: string): Promise<void> {
@@ -1597,7 +1611,7 @@ export class MultitableApiClient {
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/dashboards/${encodeURIComponent(dashboardId)}`,
       { method: 'DELETE' },
     )
-    await parseJson(res)
+    await this.parseJson(res)
   }
 }
 

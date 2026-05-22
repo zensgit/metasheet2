@@ -6,16 +6,19 @@ import {
   normalizeMultitableCommentIdentity,
   normalizeMultitableCommentMentions,
   parseRetryAfterMs,
+  setMultitableApiErrorLocaleResolver,
 } from '../src/multitable/api/client'
 import type { AutomationRule } from '../src/multitable/types'
 
 describe('MultitableApiClient', () => {
   beforeEach(() => {
+    setMultitableApiErrorLocaleResolver(undefined)
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-03-25T12:00:00.000Z'))
   })
 
   afterEach(() => {
+    setMultitableApiErrorLocaleResolver(undefined)
     vi.useRealTimers()
   })
 
@@ -429,6 +432,130 @@ describe('MultitableApiClient', () => {
     expect(error.message).toBe('Insufficient permissions')
     expect(error.status).toBe(403)
     expect(error.code).toBe('FORBIDDEN')
+  })
+
+  it('localizes code-only forbidden responses when constructor locale is zh', async () => {
+    const client = new MultitableApiClient({
+      isZh: true,
+      fetchFn: vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        ok: false,
+        error: { code: 'FORBIDDEN' },
+      }), { status: 403 })),
+    })
+
+    const error = await client.listDingTalkGroups('sheet_1').catch((err) => err)
+
+    expect(error.message).toBe('权限不足')
+    expect(error.status).toBe(403)
+    expect(error.code).toBe('FORBIDDEN')
+  })
+
+  it('uses a constructor locale resolver for unauthenticated fallbacks', async () => {
+    let isZh = false
+    const client = new MultitableApiClient({
+      isZh: () => isZh,
+      fetchFn: vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        ok: false,
+        error: { code: 'UNAUTHENTICATED' },
+      }), { status: 401 })),
+    })
+
+    isZh = true
+    const error = await client.listDingTalkGroups('sheet_1').catch((err) => err)
+
+    expect(error.message).toBe('请先登录后继续。')
+    expect(error.status).toBe(401)
+    expect(error.code).toBe('UNAUTHENTICATED')
+  })
+
+  it('uses the global API error locale resolver when no constructor locale is provided', async () => {
+    setMultitableApiErrorLocaleResolver(() => true)
+    const client = new MultitableApiClient({
+      fetchFn: vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        ok: false,
+        error: { code: 'VALIDATION_ERROR' },
+      }), { status: 422 })),
+    })
+
+    const error = await client.listDingTalkGroups('sheet_1').catch((err) => err)
+
+    expect(error.message).toBe('请检查提交的数据后重试。')
+    expect(error.status).toBe(422)
+    expect(error.code).toBe('VALIDATION_ERROR')
+  })
+
+  it('lets constructor locale override the global API error locale resolver', async () => {
+    setMultitableApiErrorLocaleResolver(() => true)
+    const client = new MultitableApiClient({
+      isZh: false,
+      fetchFn: vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        ok: false,
+        error: { code: 'VALIDATION_ERROR' },
+      }), { status: 422 })),
+    })
+
+    const error = await client.listDingTalkGroups('sheet_1').catch((err) => err)
+
+    expect(error.message).toBe('Please check the submitted data and try again.')
+    expect(error.status).toBe(422)
+    expect(error.code).toBe('VALIDATION_ERROR')
+  })
+
+  it('preserves backend payload messages for localized clients', async () => {
+    const client = new MultitableApiClient({
+      isZh: true,
+      fetchFn: vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        ok: false,
+        error: {
+          code: 'FORBIDDEN',
+          message: 'Backend policy denied access',
+        },
+      }), { status: 403 })),
+    })
+
+    const error = await client.listDingTalkGroups('sheet_1').catch((err) => err)
+
+    expect(error.message).toBe('Backend policy denied access')
+    expect(error.code).toBe('FORBIDDEN')
+  })
+
+  it('localizes missing field-error messages but preserves field ids', async () => {
+    const client = new MultitableApiClient({
+      isZh: true,
+      fetchFn: vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        ok: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          fieldErrors: [
+            { fieldId: 'fld_code' },
+          ],
+        },
+      }), { status: 422 })),
+    })
+
+    const error = await client.createRecord({
+      sheetId: 'sheet_standard_materials',
+      viewId: 'view_grid',
+      data: {},
+    }).catch((err) => err)
+
+    expect(error.message).toBe('验证失败')
+    expect(error.fieldErrors).toEqual({ fld_code: '验证失败' })
+  })
+
+  it('keeps unknown code status fallbacks technical in localized clients', async () => {
+    const client = new MultitableApiClient({
+      isZh: true,
+      fetchFn: vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        ok: false,
+        error: { code: 'FUTURE_CODE' },
+      }), { status: 418 })),
+    })
+
+    const error = await client.listDingTalkGroups('sheet_1').catch((err) => err)
+
+    expect(error.message).toBe('API 418')
+    expect(error.code).toBe('FUTURE_CODE')
   })
 
   it('preserves legacy string error payloads for permission failures', async () => {
