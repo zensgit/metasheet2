@@ -4349,6 +4349,98 @@
             </div>
 
             <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.advancedSchedulingWorkbench)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.advancedSchedulingWorkbench)"
+              data-attendance-advanced-scheduling-workbench
+            >
+              <div class="attendance__admin-section-header">
+                <div>
+                  <h4>{{ tr('Advanced scheduling workbench', '高级排班工作台') }}</h4>
+                  <small class="attendance__field-hint">
+                    {{ tr('Read-only scope, coverage, and conflict signals across groups, shifts, rotations, and effective calendars.', '只读汇总排班组、班次、轮班、生效日历的覆盖与冲突信号。') }}
+                  </small>
+                </div>
+                <button class="attendance__btn" :disabled="advancedSchedulingWorkbenchLoading" @click="loadAdvancedSchedulingWorkbench">
+                  {{ advancedSchedulingWorkbenchLoading ? tr('Loading...', '加载中...') : tr('Reload workbench', '重载工作台') }}
+                </button>
+              </div>
+
+              <div class="attendance__admin-meta">
+                <span class="attendance__status-chip" data-attendance-advanced-scheduling-readonly>
+                  {{ advancedSchedulingWorkbenchReadOnlyLabel }}
+                </span>
+                <span class="attendance__status-chip">
+                  {{ reportRangeLabel }}
+                </span>
+              </div>
+
+              <div class="attendance__summary attendance__summary--workbench" data-attendance-advanced-scheduling-metrics>
+                <div
+                  v-for="item in advancedSchedulingWorkbenchMetricItems"
+                  :key="item.key"
+                  class="attendance__summary-item"
+                  :data-attendance-advanced-scheduling-metric="item.key"
+                >
+                  <span>{{ item.label }}</span>
+                  <strong>{{ item.value }}</strong>
+                </div>
+              </div>
+
+              <div
+                v-if="advancedSchedulingWorkbenchDiagnostics.length"
+                class="attendance__schedule-conflict-diagnostics"
+                data-attendance-advanced-scheduling-diagnostics
+                role="alert"
+              >
+                <strong>{{ tr('Planning signals', '排班信号') }}</strong>
+                <ul>
+                  <li
+                    v-for="diagnostic in advancedSchedulingWorkbenchDiagnostics"
+                    :key="diagnostic.code"
+                    :data-attendance-advanced-scheduling-diagnostic="diagnostic.code"
+                  >
+                    {{ diagnostic.message }} · {{ diagnostic.count }}
+                  </li>
+                </ul>
+              </div>
+              <div v-else class="attendance__empty" data-attendance-advanced-scheduling-no-diagnostics>
+                {{ tr('No planning signals in the current range.', '当前区间暂无排班信号。') }}
+              </div>
+
+              <div v-if="advancedSchedulingWorkbenchGroups.length === 0" class="attendance__empty">
+                {{ tr('No active schedule groups yet.', '暂无启用的排班组。') }}
+              </div>
+              <div v-else class="attendance__table-wrapper">
+                <table class="attendance__table" data-attendance-advanced-scheduling-groups>
+                  <thead>
+                    <tr>
+                      <th>{{ tr('Schedule group', '排班组') }}</th>
+                      <th>{{ tr('Members', '成员') }}</th>
+                      <th>{{ tr('Assigned users', '已分配成员') }}</th>
+                      <th>{{ tr('Shift assignments', '班次分配') }}</th>
+                      <th>{{ tr('Rotation assignments', '轮班分配') }}</th>
+                      <th>{{ tr('Source', '来源') }}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="group in advancedSchedulingWorkbenchGroups" :key="group.id">
+                      <td>
+                        <strong>{{ group.name }}</strong>
+                        <div class="attendance__field-hint">{{ group.code || group.id }}</div>
+                      </td>
+                      <td>{{ group.memberCount }}</td>
+                      <td>{{ group.assignedUserCount }}</td>
+                      <td>{{ group.shiftAssignmentCount }}</td>
+                      <td>{{ group.rotationAssignmentCount }}</td>
+                      <td>{{ group.source || 'manual' }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.rotationRules)"
               class="attendance__admin-section"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.rotationRules)"
@@ -5820,6 +5912,58 @@ interface AttendanceRotationAssignmentItem {
   rotation: AttendanceRotationRule
 }
 
+interface AttendanceAdvancedSchedulingDiagnostic {
+  code: string
+  severity: 'info' | 'warning' | 'error'
+  message: string
+  count: number
+  userIds?: string[]
+  scheduleGroupIds?: string[]
+}
+
+interface AttendanceAdvancedSchedulingGroupItem {
+  id: string
+  name: string
+  code?: string
+  source?: string
+  memberCount: number
+  assignedUserCount: number
+  shiftAssignmentCount: number
+  rotationAssignmentCount: number
+  isActive?: boolean
+}
+
+interface AttendanceAdvancedSchedulingWorkbench {
+  range?: {
+    from: string | null
+    to: string | null
+  }
+  summary: {
+    scheduleGroups: number
+    scheduleGroupMembers: number
+    schedulerScopes: number
+    shifts: number
+    rotationRules: number
+    shiftAssignments: number
+    rotationAssignments: number
+    assignedUsers: number
+    diagnostics: number
+    groupsWithoutMembers: number
+    assignmentUsersWithoutScheduleGroup: number
+    usersWithMultipleScheduleGroups: number
+    usersWithBothAssignmentKinds: number
+  }
+  scheduleGroups: {
+    items: AttendanceAdvancedSchedulingGroupItem[]
+    total: number
+  }
+  diagnostics: AttendanceAdvancedSchedulingDiagnostic[]
+  metadata?: {
+    readOnly?: boolean
+    source?: string
+  }
+}
+
 // PR2 adds `sourceClass` carrying `calendar-source--{national|manual|org|group|role|user}`
 // (or undefined for plain rule/shift days). The shared palette in
 // apps/web/src/styles/calendar-source-palette.css resolves it to a 4px
@@ -6192,6 +6336,32 @@ const activeReportRangePreset = computed<AttendanceReportRangePreset | ''>(() =>
   }
   return ''
 })
+
+const advancedSchedulingWorkbenchMetricItems = computed(() => {
+  const summary = advancedSchedulingWorkbench.value?.summary
+  return [
+    { key: 'schedule-groups', label: tr('Schedule groups', '排班组'), value: summary?.scheduleGroups ?? 0 },
+    { key: 'members', label: tr('Effective members', '生效成员'), value: summary?.scheduleGroupMembers ?? 0 },
+    { key: 'shifts', label: tr('Shifts', '班次'), value: summary?.shifts ?? 0 },
+    { key: 'rotation-rules', label: tr('Rotation rules', '轮班规则'), value: summary?.rotationRules ?? 0 },
+    { key: 'assignments', label: tr('Assignments', '分配'), value: (summary?.shiftAssignments ?? 0) + (summary?.rotationAssignments ?? 0) },
+    { key: 'scheduler-scopes', label: tr('Scheduler scopes', '调度权限'), value: summary?.schedulerScopes ?? 0 },
+  ]
+})
+
+const advancedSchedulingWorkbenchGroups = computed(() =>
+  advancedSchedulingWorkbench.value?.scheduleGroups?.items ?? []
+)
+
+const advancedSchedulingWorkbenchDiagnostics = computed(() =>
+  advancedSchedulingWorkbench.value?.diagnostics ?? []
+)
+
+const advancedSchedulingWorkbenchReadOnlyLabel = computed(() =>
+  advancedSchedulingWorkbench.value?.metadata?.readOnly
+    ? tr('Read-only snapshot', '只读快照')
+    : tr('Not loaded', '未加载')
+)
 
 const reportRangeLabel = computed(() => {
   if (!fromDate.value || !toDate.value) return tr('Range not set', '区间未设置')
@@ -6954,6 +7124,7 @@ const overtimeRules = ref<AttendanceOvertimeRule[]>([])
 const approvalFlows = ref<AttendanceApprovalFlow[]>([])
 const rotationRules = ref<AttendanceRotationRule[]>([])
 const rotationAssignments = ref<AttendanceRotationAssignmentItem[]>([])
+const advancedSchedulingWorkbench = ref<AttendanceAdvancedSchedulingWorkbench | null>(null)
 const ruleSets = ref<AttendanceRuleSet[]>([])
 const ruleTemplateSystemText = ref('[]')
 const ruleTemplateLibraryText = ref('[]')
@@ -7018,6 +7189,7 @@ const importAsyncJobTelemetryText = computed(() => {
 
 const shiftEditingId = ref<string | null>(null)
 const assignmentEditingId = ref<string | null>(null)
+const advancedSchedulingWorkbenchLoading = ref(false)
 const holidayEditingId = ref<string | null>(null)
 const leaveTypeEditingId = ref<string | null>(null)
 const overtimeRuleEditingId = ref<string | null>(null)
@@ -13626,6 +13798,32 @@ async function deleteApprovalFlow(id: string) {
   }
 }
 
+async function loadAdvancedSchedulingWorkbench() {
+  advancedSchedulingWorkbenchLoading.value = true
+  try {
+    const query = buildQuery({
+      orgId: normalizedOrgId(),
+      from: fromDate.value,
+      to: toDate.value,
+    })
+    const response = await apiFetch(`/api/attendance/advanced-scheduling/workbench?${query.toString()}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to load advanced scheduling workbench', '加载高级排班工作台失败')))
+    }
+    adminForbidden.value = false
+    advancedSchedulingWorkbench.value = data.data ?? null
+  } catch (error: any) {
+    setStatus(readErrorMessage(error, tr('Failed to load advanced scheduling workbench', '加载高级排班工作台失败')), 'error')
+  } finally {
+    advancedSchedulingWorkbenchLoading.value = false
+  }
+}
+
 function resetRotationRuleForm() {
   rotationRuleEditingId.value = null
   rotationRuleForm.name = ''
@@ -15074,6 +15272,7 @@ async function loadAdminData() {
       loadLeaveTypes(),
       loadOvertimeRules(),
       loadApprovalFlows(),
+      loadAdvancedSchedulingWorkbench(),
       loadRotationRules(),
       loadShifts(),
       loadAssignments(),

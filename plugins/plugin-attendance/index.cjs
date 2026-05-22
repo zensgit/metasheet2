@@ -7453,6 +7453,184 @@ function attendanceSchedulerScopeMatchesTarget(scopeRow, target) {
   return true
 }
 
+function countBy(items, resolveKey) {
+  const counts = new Map()
+  for (const item of Array.isArray(items) ? items : []) {
+    const key = resolveKey(item)
+    if (!key) continue
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  return counts
+}
+
+function sortedUnique(values) {
+  return Array.from(new Set((Array.isArray(values) ? values : []).map(value => String(value || '').trim()).filter(Boolean))).sort()
+}
+
+function buildAttendanceAdvancedSchedulingDiagnostic({ code, severity = 'info', message, count, userIds, scheduleGroupIds }) {
+  return {
+    code,
+    severity,
+    message,
+    count: Number(count) || 0,
+    userIds: sortedUnique(userIds),
+    scheduleGroupIds: sortedUnique(scheduleGroupIds),
+  }
+}
+
+function buildAttendanceAdvancedSchedulingWorkbench(input = {}) {
+  const from = normalizeDateOnly(input.from) ?? null
+  const to = normalizeDateOnly(input.to) ?? null
+  const scheduleGroups = Array.isArray(input.scheduleGroups) ? input.scheduleGroups : []
+  const scheduleGroupMembers = Array.isArray(input.scheduleGroupMembers) ? input.scheduleGroupMembers : []
+  const schedulerScopes = Array.isArray(input.schedulerScopes) ? input.schedulerScopes : []
+  const shifts = Array.isArray(input.shifts) ? input.shifts : []
+  const rotationRules = Array.isArray(input.rotationRules) ? input.rotationRules : []
+  const shiftAssignments = Array.isArray(input.shiftAssignments) ? input.shiftAssignments : []
+  const rotationAssignments = Array.isArray(input.rotationAssignments) ? input.rotationAssignments : []
+
+  const membersByGroupId = new Map()
+  const groupIdsByUserId = new Map()
+  for (const member of scheduleGroupMembers) {
+    const groupId = member.scheduleGroupId
+    const userId = member.userId
+    if (groupId) {
+      if (!membersByGroupId.has(groupId)) membersByGroupId.set(groupId, [])
+      membersByGroupId.get(groupId).push(member)
+    }
+    if (userId && groupId) {
+      if (!groupIdsByUserId.has(userId)) groupIdsByUserId.set(userId, new Set())
+      groupIdsByUserId.get(userId).add(groupId)
+    }
+  }
+
+  const shiftAssignmentCountByUser = countBy(shiftAssignments, item => item?.assignment?.userId)
+  const rotationAssignmentCountByUser = countBy(rotationAssignments, item => item?.assignment?.userId)
+  const assignedUserIds = new Set([...shiftAssignmentCountByUser.keys(), ...rotationAssignmentCountByUser.keys()])
+
+  const scheduleGroupIds = new Set(scheduleGroups.map(group => group.id).filter(Boolean))
+  const groupItems = scheduleGroups.map((group) => {
+    const members = membersByGroupId.get(group.id) ?? []
+    const memberUserIds = new Set(members.map(member => member.userId).filter(Boolean))
+    const assignedMemberUserIds = [...memberUserIds].filter(userId => assignedUserIds.has(userId))
+    const shiftAssignmentCount = [...memberUserIds].reduce((sum, userId) => sum + (shiftAssignmentCountByUser.get(userId) ?? 0), 0)
+    const rotationAssignmentCount = [...memberUserIds].reduce((sum, userId) => sum + (rotationAssignmentCountByUser.get(userId) ?? 0), 0)
+    return {
+      ...group,
+      memberCount: members.length,
+      assignedUserCount: assignedMemberUserIds.length,
+      shiftAssignmentCount,
+      rotationAssignmentCount,
+    }
+  })
+
+  const groupsWithoutMembers = groupItems.filter(group => group.isActive !== false && group.memberCount === 0)
+  const usersWithMultipleScheduleGroups = [...groupIdsByUserId.entries()]
+    .filter(([, groupIds]) => groupIds.size > 1)
+    .map(([userId]) => userId)
+  const assignmentUsersWithoutScheduleGroup = [...assignedUserIds]
+    .filter(userId => !groupIdsByUserId.has(userId))
+  const usersWithBothAssignmentKinds = [...shiftAssignmentCountByUser.keys()]
+    .filter(userId => rotationAssignmentCountByUser.has(userId))
+  const schedulerScopesWithUnknownGroups = schedulerScopes
+    .filter(scope => Array.isArray(scope?.scope?.scheduleGroupIds) && scope.scope.scheduleGroupIds.some(groupId => !scheduleGroupIds.has(groupId)))
+  const schedulerScopeUnknownGroupIds = schedulerScopesWithUnknownGroups
+    .flatMap(scope => normalizeStringArray(scope?.scope?.scheduleGroupIds).filter(groupId => !scheduleGroupIds.has(groupId)))
+
+  const diagnostics = [
+    groupsWithoutMembers.length
+      ? buildAttendanceAdvancedSchedulingDiagnostic({
+        code: 'schedule_group_without_members',
+        severity: 'warning',
+        message: 'Active schedule groups have no effective members in this range.',
+        count: groupsWithoutMembers.length,
+        scheduleGroupIds: groupsWithoutMembers.map(group => group.id),
+      })
+      : null,
+    assignmentUsersWithoutScheduleGroup.length
+      ? buildAttendanceAdvancedSchedulingDiagnostic({
+        code: 'assignment_without_schedule_group',
+        severity: 'warning',
+        message: 'Active shift or rotation assignments reference users without an effective schedule-group membership in this range.',
+        count: assignmentUsersWithoutScheduleGroup.length,
+        userIds: assignmentUsersWithoutScheduleGroup,
+      })
+      : null,
+    usersWithMultipleScheduleGroups.length
+      ? buildAttendanceAdvancedSchedulingDiagnostic({
+        code: 'user_multiple_schedule_groups',
+        severity: 'warning',
+        message: 'Users belong to multiple schedule groups in this range.',
+        count: usersWithMultipleScheduleGroups.length,
+        userIds: usersWithMultipleScheduleGroups,
+      })
+      : null,
+    usersWithBothAssignmentKinds.length
+      ? buildAttendanceAdvancedSchedulingDiagnostic({
+        code: 'user_mixed_assignment_kinds',
+        severity: 'info',
+        message: 'Users have both shift and rotation assignment rows in this range; effective-calendar resolution still owns day-level precedence.',
+        count: usersWithBothAssignmentKinds.length,
+        userIds: usersWithBothAssignmentKinds,
+      })
+      : null,
+    schedulerScopesWithUnknownGroups.length
+      ? buildAttendanceAdvancedSchedulingDiagnostic({
+        code: 'scheduler_scope_unknown_schedule_group',
+        severity: 'warning',
+        message: 'Scheduler scopes reference schedule groups that are not active in this workbench snapshot.',
+        count: schedulerScopesWithUnknownGroups.length,
+        scheduleGroupIds: schedulerScopeUnknownGroupIds,
+      })
+      : null,
+  ].filter(Boolean)
+
+  return {
+    range: { from, to },
+    summary: {
+      scheduleGroups: scheduleGroups.length,
+      scheduleGroupMembers: scheduleGroupMembers.length,
+      schedulerScopes: schedulerScopes.length,
+      shifts: shifts.length,
+      rotationRules: rotationRules.length,
+      shiftAssignments: shiftAssignments.length,
+      rotationAssignments: rotationAssignments.length,
+      assignedUsers: assignedUserIds.size,
+      diagnostics: diagnostics.length,
+      groupsWithoutMembers: groupsWithoutMembers.length,
+      assignmentUsersWithoutScheduleGroup: assignmentUsersWithoutScheduleGroup.length,
+      usersWithMultipleScheduleGroups: usersWithMultipleScheduleGroups.length,
+      usersWithBothAssignmentKinds: usersWithBothAssignmentKinds.length,
+    },
+    scheduleGroups: {
+      items: groupItems,
+      total: groupItems.length,
+    },
+    shifts: {
+      items: shifts,
+      total: shifts.length,
+    },
+    rotationRules: {
+      items: rotationRules,
+      total: rotationRules.length,
+    },
+    assignments: {
+      shiftItems: shiftAssignments,
+      rotationItems: rotationAssignments,
+      total: shiftAssignments.length + rotationAssignments.length,
+    },
+    schedulerScopes: {
+      items: schedulerScopes,
+      total: schedulerScopes.length,
+    },
+    diagnostics,
+    metadata: {
+      readOnly: true,
+      source: 'attendance_advanced_scheduling_workbench',
+    },
+  }
+}
+
 function normalizeAttendanceGroupValue(value) {
   if (value === undefined || value === null) return null
   const text = String(value).trim()
@@ -13143,6 +13321,7 @@ module.exports = {
     doAttendanceScheduleMembershipWindowsOverlap,
     buildAttendanceScheduleGroupMemberLockKey,
     acquireAttendanceScheduleGroupMemberLock,
+    buildAttendanceAdvancedSchedulingWorkbench,
     normalizeAttendanceSchedulerScopeBody,
     normalizeAttendanceSchedulerScopeInput,
     mapAttendanceSchedulerScopeRow,
@@ -24953,6 +25132,141 @@ module.exports = {
           }
           logger.error('Attendance scheduler scope delete failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete scheduler scope' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/advanced-scheduling/workbench',
+      withPermission('attendance:admin', async (req, res) => {
+        const fromRaw = typeof req.query.from === 'string' ? req.query.from.trim() : ''
+        const toRaw = typeof req.query.to === 'string' ? req.query.to.trim() : ''
+        const from = fromRaw ? normalizeDateOnlyStrict(fromRaw) : null
+        const to = toRaw ? normalizeDateOnlyStrict(toRaw) : null
+        if (fromRaw && !from) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid "from" date. Use YYYY-MM-DD.' } })
+          return
+        }
+        if (toRaw && !to) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid "to" date. Use YYYY-MM-DD.' } })
+          return
+        }
+        if (from && to && from > to) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: '"from" must be on or before "to".' } })
+          return
+        }
+        const orgId = getOrgId(req)
+        const rangeStart = from ?? '0001-01-01'
+        const rangeEnd = to ?? ATTENDANCE_SCHEDULE_OPEN_END_DATE
+
+        try {
+          const [
+            scheduleGroupRows,
+            scheduleGroupMemberRows,
+            schedulerScopeRows,
+            shiftRows,
+            rotationRuleRows,
+            shiftAssignmentRows,
+            rotationAssignmentRows,
+          ] = await Promise.all([
+            db.query(
+              `SELECT *
+               FROM attendance_schedule_groups
+               WHERE org_id = $1 AND is_active = true
+               ORDER BY name ASC, created_at DESC`,
+              [orgId]
+            ),
+            db.query(
+              `SELECT *
+               FROM attendance_schedule_group_members
+               WHERE org_id = $1
+                 AND COALESCE(effective_from, DATE '0001-01-01') <= $3::date
+                 AND COALESCE(effective_to, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $2::date
+               ORDER BY schedule_group_id ASC, effective_from ASC NULLS FIRST, user_id ASC`,
+              [orgId, rangeStart, rangeEnd]
+            ),
+            db.query(
+              `SELECT *
+               FROM attendance_scheduler_scopes
+               WHERE org_id = $1 AND is_active = true
+               ORDER BY subject_type ASC, subject_ref ASC, created_at DESC`,
+              [orgId]
+            ),
+            db.query(
+              `SELECT *
+               FROM attendance_shifts
+               WHERE org_id = $1
+               ORDER BY name ASC, created_at DESC`,
+              [orgId]
+            ),
+            db.query(
+              `SELECT *
+               FROM attendance_rotation_rules
+               WHERE org_id = $1
+               ORDER BY is_active DESC, name ASC, created_at DESC`,
+              [orgId]
+            ),
+            db.query(
+              `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.start_date, a.end_date, a.is_active,
+                      s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
+                      s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight,
+                      s.late_grace_minutes AS shift_late_grace_minutes,
+                      s.early_grace_minutes AS shift_early_grace_minutes,
+                      s.rounding_minutes AS shift_rounding_minutes,
+                      s.working_days AS shift_working_days
+               FROM attendance_shift_assignments a
+               JOIN attendance_shifts s ON s.id = a.shift_id
+               WHERE a.org_id = $1
+                 AND COALESCE(a.is_active, true) = true
+                 AND a.start_date <= $3::date
+                 AND COALESCE(a.end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $2::date
+               ORDER BY a.start_date DESC, a.created_at DESC
+               LIMIT 500`,
+              [orgId, rangeStart, rangeEnd]
+            ),
+            db.query(
+              `SELECT a.id, a.org_id, a.user_id, a.rotation_rule_id, a.start_date, a.end_date, a.is_active,
+                      r.name AS rotation_name, r.timezone AS rotation_timezone,
+                      r.shift_sequence AS rotation_shift_sequence,
+                      r.is_active AS rotation_is_active
+               FROM attendance_rotation_assignments a
+               JOIN attendance_rotation_rules r ON r.id = a.rotation_rule_id
+               WHERE a.org_id = $1
+                 AND COALESCE(a.is_active, true) = true
+                 AND a.start_date <= $3::date
+                 AND COALESCE(a.end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $2::date
+               ORDER BY a.start_date DESC, a.created_at DESC
+               LIMIT 500`,
+              [orgId, rangeStart, rangeEnd]
+            ),
+          ])
+
+          const data = buildAttendanceAdvancedSchedulingWorkbench({
+            from,
+            to,
+            scheduleGroups: scheduleGroupRows.map(mapAttendanceScheduleGroupRow),
+            scheduleGroupMembers: scheduleGroupMemberRows.map(mapAttendanceScheduleGroupMemberRow),
+            schedulerScopes: schedulerScopeRows.map(mapAttendanceSchedulerScopeRow),
+            shifts: shiftRows.map(mapShiftRow),
+            rotationRules: rotationRuleRows.map(mapRotationRuleRow),
+            shiftAssignments: shiftAssignmentRows.map(row => ({
+              assignment: mapAssignmentRow(row),
+              shift: mapShiftFromAssignmentRow(row),
+            })),
+            rotationAssignments: rotationAssignmentRows.map(row => ({
+              assignment: mapRotationAssignmentRow(row),
+              rotation: mapRotationRuleFromAssignmentRow(row),
+            })),
+          })
+          res.json({ ok: true, data })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
+            return
+          }
+          logger.error('Attendance advanced scheduling workbench query failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load advanced scheduling workbench' } })
         }
       })
     )
