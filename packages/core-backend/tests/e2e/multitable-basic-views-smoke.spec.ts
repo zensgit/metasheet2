@@ -109,7 +109,7 @@ function requireFixture(): SharedFixture {
   return fixture
 }
 
-test.describe('Multitable basic views smoke', () => {
+test.describe.serial('Multitable basic views smoke', () => {
   test('grid view renders workbench, rows, and cell data', async ({ request, page }) => {
     const f = requireFixture()
     const client = makeAuthClient(request, token)
