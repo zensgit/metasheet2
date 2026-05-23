@@ -1253,3 +1253,143 @@ pnpm validate:all
 6. 增加后端单元和集成测试覆盖版本冻结、自动审批、跳转、加签。
 
 这张 TODO 与旧文档 Wave A 对齐，属于“已上线模块内核打磨”，不新增独立产品面。完成后再进入第二张 TODO：公开表单/多维表触发审批、审批结果回写、`start_approval` 自动化动作。
+
+## 14. 2026-05-23 进度附录
+
+本节是对 `origin/main@39258df83` 的代码实证进度复核，不改写 2026-05-15 的原始计划。状态口径如下：
+
+- **已落地**：运行时代码、迁移、路由或测试已经进入 `origin/main`。
+- **战略推迟**：已经有明确延期决策和再进入条件，不按普通未启动处理。
+- **已有底座**：相关基础能力存在，但不是本文计划项的完整实现。
+- **未启动**：目标命名空间、表、路由、动作或运行时代码不存在。
+
+### 14.1 Phase 总览
+
+| Phase | Plan 内项数 | 已落地 | 未启动 | 战略推迟 | 当前进度口径 |
+|---|---:|---:|---:|---:|---|
+| Phase 0 文档固化 | 3 个具名 deliverable | 2 个替代性产物 | 1 组具名三件套 | 0 | 部分完成；approval Phase 1 docs 替代了原计划三件套的一部分 |
+| Phase 1 审批内核正确性 | 4 | 3 | 0 | 1 | 版本冻结、自动审批三合并、管理员跳转已落地；加签冻结 |
+| Phase 2 业务闭环 MVP | 5 | 0 | 5 | 0 | 未启动 |
+| Phase 3 审批产品化增强 | 5 | 0 个新增计划项 | 5 | 0 | 有历史基线，但本文计划项未启动 |
+| Phase 4 运行治理 | 5 | 0 个完整计划项 | 4+ | 0 | 有自动化日志/支持包底座；重跑、失败治理、SLA 超时动作未启动 |
+| Phase 5 可靠调度 | 5 | 0 | 5 | 0 | 未启动 |
+| Phase 6 设计器整合 | 4 | 0 个映射计划项 | 4 | 0 | Workflow Designer/BPMN baseline 存在；运行时映射未启动 |
+
+按本文 §7 推荐执行顺序的前 15 项计算，代码层面已落地 3 项：版本冻结、自动审批三合并、管理员跳转。`add-sign` 只有 worksplit/ADR-first 入口和战略推迟决策，不能计为运行时落地。
+
+### 14.2 Phase 0：文档固化与现状清理
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 本 research plan | 已落地 | `docs/research/yida-workflow-automation-benchmark-improvement-plan-20260515.md` |
+| Phase 1 worksplit/TODO | 已落地 | `docs/development/approval-phase1-codex-claude-worksplit-todo-20260515.md` |
+| 原计划具名三件套 | 未单独立卷 | 未发现 `workflow-automation-yida-benchmark-todo-20260515.md`、`workflow-automation-yida-benchmark-development-20260515.md`、`workflow-automation-yida-benchmark-verification-20260515.md` |
+| 隔离纪律 | 已执行于后续 PR | Approval PR1/PR2/PR3 均以独立分支和开发/验证文档推进，没有混入考勤公式修复 |
+
+Phase 0 的准确口径是“部分完成且被 approval Phase 1 文档替代”，不是原计划三件套完整完成。
+
+### 14.3 Phase 1：审批内核正确性
+
+| 项 | 状态 | 代码和验证证据 |
+|---|---|---|
+| 版本冻结与发布生命周期 | 已落地 | `ApprovalProductService` 使用 `published_definition_id` 和 `approval_published_definitions.runtime_graph` 推进既有实例；`buildRuntimeGraph()` 固化 runtime policy；`assertTemplateVersionDeletable()` 阻止有未完结实例的版本删除；`approval-pr1-version-freeze-{development,verification}-20260515.md` 记录 PR1。 |
+| 自动审批三合并 | 已落地 | `RuntimePolicy.autoApproval`、`AutoApprovalPolicy`、`applyAutoApprovalCascade()`、`APPROVAL_AUTO_STEP_LIMIT_EXCEEDED` 已在 `ApprovalProductService.ts` / `packages/core-backend/src/types/approval-product.ts`；`approval-pr2-auto-approval-three-merge-{development,verification}-20260515.md` 记录 PR2。 |
+| 管理员跳转节点 | 已落地 | `POST /api/approvals/:id/jump` 受 `rbacGuard('approvals:admin')` 保护；`ApprovalProductService.adminJump()` 仅读实例绑定的 frozen runtime graph；`zzzz20260515130000_add_jump_action_to_approval_records.ts` 增加 `jump` action 和 `approvals:admin` seed；`approval-pr3-admin-jump-node-verification-20260515.md` 记录 scratch PG T11 数据环和 44 个 approval integration PASS。 |
+| 加签：前加签、后加签、并行加签 | 战略推迟 | 运行时代码中未发现 `approval_countersign_tasks`、`addSign`、`add_sign`、`countersign` 实现。`approval-phase1-codex-claude-worksplit-todo-20260515.md` 保留 PR4 ADR-first 方案；`k3-poc-shortest-closure-gap-survey-20260516.md` 明确 `add-sign-mvp stays DEFERRED`，再进入条件为 K3 gate 点名需要或客户 GATE PASS。 |
+
+结论：Phase 1 不应再按“未完成的 4 项开发线”看待，而是 **PR1-PR3 已完成并经真实 PG 收口，PR4 加签按战略锁冻结**。
+
+### 14.4 Phase 2：业务闭环 MVP
+
+Phase 2 当前没有运行时代码落地。以下命名空间在 `origin/main` 中未发现：
+
+- `ApprovalAssigneeResolver`
+- `approval_trigger_bindings`
+- `start_approval`
+- `approval.approved`
+- `approval.rejected`
+- `approval.returned`
+
+对应状态：
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| `ApprovalAssigneeResolver` 第一版 | 未启动 | 仍缺字段取人、requester、动态角色、组织成员组等统一解析层。 |
+| 多维表/公开表单触发审批 | 未启动 | 无 trigger binding 表和 source snapshot 服务。 |
+| 审批结果回写记录 | 未启动 | 无 result mapping/backwrite 服务。 |
+| 自动化 `start_approval` 动作 | 未启动 | 自动化 action 白名单和 executor 中未见该动作。 |
+| 审批完成事件桥 | 未启动 | 无 `approval.approved/rejected/returned` 自动化事件桥。 |
+
+如果后续解锁 Phase 2，建议第一片仍从 `ApprovalAssigneeResolver` scope gate 开始，因为它是公开表单/多维表触发审批的动态审批人基础。
+
+### 14.5 Phase 3：审批产品化增强
+
+Phase 3 有历史审批基线，但本文计划项未真正启动：
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| 节点字段权限三态 | 未启动 | 现有能力是 form schema/field visibility rule，不是本文要求的节点级 editable/readonly/hidden 三态。 |
+| 任务中心聚合 API | 未启动 | 未发现统一 `/api/approvals/tasks` 聚合待办、已办、抄送、我发起、超时的路由。 |
+| transfer/return/revoke/comment 完整状态机 | 有基线，未按本文完整审计 | 基础动作入口已存在；本文要求的加签/代理/指定退回组合语义未完成。 |
+| 代理/委托中心 | 未启动 | 未发现 `approval_delegations` 迁移或 runtime。 |
+| dry-run / trace | 未启动 | 未发现 `approval-templates/:id/simulate` 或 workflow-designer simulate endpoint。 |
+
+### 14.6 Phase 4：运行治理
+
+当前已有自动化执行日志和部分支持包/日志查看能力，但本文 Phase 4 的核心治理项尚未实现：
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| 自动化运行日志基础 | 已有底座 | `multitable_automation_executions`、`AutomationExecution.steps`、logs/stats/manual test 已存在。 |
+| 整条 execution 重跑 | 未启动 | 未发现 `POST /api/multitable/automation-executions/:executionId/retry`。 |
+| 持久 attempt | 未启动 | 未发现 `automation_execution_attempts` 表。 |
+| 异常提醒/自动暂停 | 未启动 | 未发现 `AutomationFailurePolicy` 或 `autoDisableAfterConsecutiveFailures`。 |
+| SLA timeout actions | 未启动 | 现有 `ApprovalSlaScheduler` 是 breach/remind 基线；未发现 `approval_deadlines`、`TimeoutRule`、`system:timeout` 推进动作。 |
+| 工作日历用于 SLA | 未启动于 approval | attendance effective-calendar 已完成，但尚未接入 approval SLA deadline 计算。 |
+
+### 14.7 Phase 5：可靠调度
+
+Phase 5 当前未启动：
+
+- 未发现 `automation_jobs` 持久队列表。
+- 自动化调度仍是现有 scheduler + leader lock 路线。
+- 未发现 cron timezone/misfire 策略的持久 job worker。
+- 未发现独立 `business_calendars` 或不计时时段模型。
+
+注意：考勤 effective-calendar 已在另一条线上完成从 RFC 到 Step 5 的闭环，并统一到了考勤 UI、payroll/import/summary/auto-absence 的 `resolveWorkContext`。它是后续 approval SLA/business calendar 的可复用基础，但不能等同于本文 Phase 5 已完成。
+
+### 14.8 Phase 6：Workflow Designer 整合
+
+Workflow Designer/BPMN baseline 仍然存在：
+
+- `packages/core-backend/src/routes/workflow-designer.ts`
+- `packages/core-backend/src/workflow/BPMNWorkflowEngine.ts`
+- `apps/web/src/views/WorkflowDesigner.vue`
+- `apps/web/src/views/WorkflowHubView.vue`
+
+但本文要求的运行时整合未启动：
+
+- 未发现 Workflow Designer 节点到 approval runtime 的 adapter。
+- 未发现 workflow graph 到 approval template/runtime graph 的映射层。
+- 未发现设计器 trace/simulate 与 approval assignee resolver 的联动。
+- BPMN 仍应作为高级建模入口后置，不应替代 Phase 2 的业务闭环。
+
+### 14.9 当前真实结论
+
+这份计划没有废弃，但它的实际状态已经从“准备启动”变成：
+
+1. **审批内核高风险项已完成 3/4**：版本冻结、自动审批三合并、管理员跳转已经进入 `origin/main`，并且补过 scratch PG 验证债。
+2. **加签不作为当前未完成阻塞项追赶**：PR4 保留低再进入成本，但受 K3 PoC gate 策略冻结。
+3. **业务闭环 Phase 2 尚未开始**：公开表单/多维表触发审批、审批结果回写、`start_approval` 和 approval event bridge 都还没有 runtime。
+4. **运行治理和可靠调度仍是后续阶段**：automation retry、persistent queue、SLA timeout actions、business calendar 尚未落地。
+5. **attendance effective-calendar 是旁路完成资产**：它降低了未来工作日历/SLA 的实现风险，但不是本文 approval SLA 的完成证明。
+
+### 14.10 建议的下一步
+
+除非客户或 K3 gate 明确要求加签，否则不建议重启 PR4。更稳的后续路线是：
+
+1. 先做 Phase 2 scope gate：`ApprovalAssigneeResolver` 第一版。
+2. 再做 `approval_trigger_bindings`：多维表/公开表单触发审批。
+3. 然后做审批结果回写和 `start_approval` 自动化动作。
+
+每一片仍应按独立 opt-in 推进，并保持 development/verification MD 作为审计链。本文附录只提供状态对账，不自动解锁后续 runtime 开发。
