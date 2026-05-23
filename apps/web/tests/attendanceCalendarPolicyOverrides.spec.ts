@@ -178,13 +178,59 @@ describe('attendance calendar policy holiday length quick add', () => {
     })).toEqual({ kind: 'noop', reason: 'same_length' })
   })
 
-  it('does not generate longer-than-base holiday spans automatically', () => {
+  it('requires a base rest start date before generating longer group holiday length', () => {
     expect(buildHolidayLengthCalendarPolicyOverride({
       holidayName: '国庆',
       attendanceGroup: '长假班组',
       baseRestDays: 3,
       targetRestDays: 5,
-    })).toEqual({ kind: 'unsupported', reason: 'target_longer_than_base' })
+    })).toEqual({ kind: 'unsupported', reason: 'missing_base_rest_start_date' })
+  })
+
+  it('creates a date-range rest exception for longer group holiday length', () => {
+    const result = buildHolidayLengthCalendarPolicyOverride({
+      holidayName: '国庆',
+      attendanceGroup: '长假班组',
+      baseRestDays: 3,
+      targetRestDays: 5,
+      baseRestStartDate: '2026-10-01',
+      localizedExtraRestLabel: '国庆延休',
+    })
+
+    expect(result).toEqual({
+      kind: 'append',
+      form: expect.objectContaining({
+        name: '',
+        match: 'contains',
+        date: '',
+        from: '2026-10-04',
+        to: '2026-10-05',
+        dayIndexStart: null,
+        dayIndexEnd: null,
+        dayIndexList: '',
+        source: 'group',
+        isWorkingDay: false,
+        attendanceGroups: '长假班组',
+        label: '国庆延休',
+      }),
+    })
+    if (result.kind !== 'append') throw new Error('expected append result')
+    const [wire] = calendarPolicyOverridesFromForm([result.form])
+    expect(wire).toMatchObject({
+      from: '2026-10-04',
+      to: '2026-10-05',
+      filters: { attendanceGroups: ['长假班组'] },
+      effective: {
+        isWorkingDay: false,
+        label: '国庆延休',
+        source: 'group',
+      },
+    })
+    expect(wire?.name).toBeUndefined()
+    expect(wire?.match).toBeUndefined()
+    expect(wire?.dayIndexStart).toBeUndefined()
+    expect(wire?.dayIndexEnd).toBeUndefined()
+    expect(wire?.dayIndexList).toEqual([])
   })
 
   it('rejects invalid quick-add inputs', () => {
@@ -208,19 +254,36 @@ describe('attendance calendar policy holiday length quick add', () => {
       baseRestDays: 5.5,
       targetRestDays: 3,
     })).toEqual({ kind: 'unsupported', reason: 'invalid_input' })
+
+    expect(buildHolidayLengthCalendarPolicyOverride({
+      holidayName: '国庆',
+      attendanceGroup: '长假班组',
+      baseRestDays: 3,
+      targetRestDays: 5,
+      baseRestStartDate: '2026-02-30',
+    })).toEqual({ kind: 'unsupported', reason: 'invalid_input' })
   })
 
   it('keeps diagnostics behavior for generated and manually incomplete group rows', () => {
-    const result = buildHolidayLengthCalendarPolicyOverride({
+    const shorterResult = buildHolidayLengthCalendarPolicyOverride({
       holidayName: '国庆',
       attendanceGroup: '短假班组',
       baseRestDays: 5,
       targetRestDays: 3,
     })
-    if (result.kind !== 'append') throw new Error('expected append result')
+    if (shorterResult.kind !== 'append') throw new Error('expected append result')
+    const longerResult = buildHolidayLengthCalendarPolicyOverride({
+      holidayName: '国庆',
+      attendanceGroup: '长假班组',
+      baseRestDays: 3,
+      targetRestDays: 5,
+      baseRestStartDate: '2026-10-01',
+    })
+    if (longerResult.kind !== 'append') throw new Error('expected append result')
 
     const diagnostics = buildCalendarPolicyOverrideDiagnostics([
-      result.form,
+      shorterResult.form,
+      longerResult.form,
       overrideForm({
         source: 'group',
         attendanceGroups: '',
@@ -234,7 +297,7 @@ describe('attendance calendar policy holiday length quick add', () => {
     expect(diagnostics).toEqual([
       expect.objectContaining({
         code: 'missing_scope',
-        primaryIndex: 1,
+        primaryIndex: 2,
         source: 'group',
       }),
     ])

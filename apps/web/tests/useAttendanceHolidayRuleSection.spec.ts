@@ -383,6 +383,66 @@ describe('AttendanceHolidayRuleSection', () => {
     expect(container!.querySelector('.attendance__override-field input[placeholder="单休办公,白班"]')).toBeTruthy()
   })
 
+  it('quick-adds a longer group holiday length as a concrete rest date range', async () => {
+    const settingsForm = reactive<HolidaySettingsState>(createDefaultSettings())
+
+    const config = {
+      addCalendarPolicyOverride: vi.fn(),
+      addHolidayOverride: vi.fn(),
+      holidaySyncLastRun: { value: null },
+      holidaySyncLoading: { value: false },
+      removeCalendarPolicyOverride: vi.fn(),
+      removeHolidayOverride: vi.fn(),
+      saveSettings: vi.fn(),
+      settingsForm,
+      settingsLoading: { value: false },
+      syncHolidays: vi.fn(),
+      syncHolidaysForYears: vi.fn(),
+    } as HolidayConfig
+
+    app = createApp(AttendanceHolidayRuleSection, {
+      attendanceGroupOptions: ['长假班组'],
+      config,
+      formatDateTime,
+      tr,
+    })
+    app.mount(container!)
+    await flushUi()
+
+    setInput(container!, '[data-calendar-policy-quick-group]', '长假班组')
+    setInput(container!, '[data-calendar-policy-quick-base-days]', '3')
+    setInput(container!, '[data-calendar-policy-quick-target-days]', '5')
+    setInput(container!, '[data-calendar-policy-quick-base-start-date]', '2026-10-01')
+    await flushUi(2)
+
+    const quickAddButton = container!.querySelector<HTMLButtonElement>('button[data-calendar-policy-quick-add]')
+    expect(quickAddButton).toBeTruthy()
+    expect(quickAddButton!.disabled).toBe(false)
+    quickAddButton!.click()
+    await flushUi(6)
+
+    expect(config.addCalendarPolicyOverride).not.toHaveBeenCalled()
+    expect(settingsForm.calendarPolicyOverrides).toHaveLength(1)
+    expect(settingsForm.calendarPolicyOverrides[0]).toMatchObject({
+      name: '',
+      match: 'contains',
+      date: '',
+      from: '2026-10-04',
+      to: '2026-10-05',
+      dayIndexStart: null,
+      dayIndexEnd: null,
+      dayIndexList: '',
+      source: 'group',
+      isWorkingDay: false,
+      attendanceGroups: '长假班组',
+      label: '国庆延休',
+    })
+    const accordions = container!.querySelectorAll<HTMLButtonElement>('.attendance__accordion')
+    expect(accordions[1]?.getAttribute('aria-expanded')).toBe('true')
+    expect(container!.textContent).toContain('2026-10-04 至 2026-10-05 改为休息日')
+    expect(container!.querySelector('.attendance__override-field input[placeholder="单休办公,白班"]')).toBeTruthy()
+  })
+
   it('shows effective calendar override diagnostics for unsaved and shadowed rules', async () => {
     const settingsForm = reactive<HolidaySettingsState>(createDefaultSettings())
     settingsForm.calendarPolicyOverrides.push(
