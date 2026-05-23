@@ -32,9 +32,10 @@ deferred item (see §6).
 
 `packages/core-backend/tests/e2e/multitable-basic-views-smoke.spec.ts` — five
 Playwright tests, one per view type (grid / calendar / kanban / gallery / form),
-sharing a single base/sheet fixture created in `beforeAll`. Tests run under
-plain `test.describe` so per-view failures report independently; the wrapper
-pins `--workers=1` for serial execution. Each test:
+sharing a single base/sheet fixture created in `beforeAll` and run via
+`test.describe.serial` (since the tests share the fixture, a fixture-stage
+failure short-circuits the remaining tests instead of cascading misleading
+per-view failures; the wrapper additionally pins `--workers=1`). Each test:
 
 - asserts `.mt-workbench` (the workbench root, defined at
   `apps/web/src/multitable/views/MultitableWorkbench.vue:2`) is visible
