@@ -267,3 +267,25 @@ DB-required tests must not be silently skipped. If local DB is unavailable, mark
 - G8: dispatch/admin-jump/return resolution reads only the instance-bound frozen runtime graph.
 
 If any of G1-G8 changes, pause and update this gate before writing runtime code.
+
+## 9. Forward Gate — Phase 2 Follow-Up Freeze Conditions
+
+User opt-in recorded on 2026-05-23:
+
+This scope gate **only unlocks** the first Phase 2 slice, `ApprovalAssigneeResolver`, as approval-kernel hardening.
+
+The following Phase 2 follow-up items remain frozen under the K3 PoC stage-1 lock. Passing this gate does not unlock them:
+
+- `approval_trigger_bindings` for multitable/public-form approval trigger binding;
+- multitable/public-form approval trigger source-snapshot and trigger-event paths;
+- approval result backwrite to multitable records;
+- automation `start_approval`;
+- approval completion event bridge (`approval.approved`, `approval.rejected`, `approval.returned`) for automation triggers.
+
+Any of those follow-up items may start only if one of these conditions is true:
+
+- the customer K3 GATE passes and the stage-1 lock is lifted;
+- a named K3 PoC requirement identifies the item as a gate blocker;
+- the user independently opts in to a specific item under the staged opt-in lineage discipline.
+
+Each follow-up item still needs its own scope gate. The Resolver implementation PR must not carry any of them along opportunistically.
