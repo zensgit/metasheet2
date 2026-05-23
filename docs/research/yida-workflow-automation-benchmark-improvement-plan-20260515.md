@@ -1293,7 +1293,7 @@ Phase 0 的准确口径是“部分完成且被 approval Phase 1 文档替代”
 | 项 | 状态 | 代码和验证证据 |
 |---|---|---|
 | 版本冻结与发布生命周期 | 已落地 | `ApprovalProductService` 使用 `published_definition_id` 和 `approval_published_definitions.runtime_graph` 推进既有实例；`buildRuntimeGraph()` 固化 runtime policy；`assertTemplateVersionDeletable()` 阻止有未完结实例的版本删除；`approval-pr1-version-freeze-{development,verification}-20260515.md` 记录 PR1。 |
-| 自动审批三合并 | 已落地 | `RuntimePolicy.autoApproval`、`AutoApprovalPolicy`、`applyAutoApprovalCascade()`、`APPROVAL_AUTO_STEP_LIMIT_EXCEEDED` 已在 `ApprovalProductService` / `approval-product.ts`；`approval-pr2-auto-approval-three-merge-{development,verification}-20260515.md` 记录 PR2。 |
+| 自动审批三合并 | 已落地 | `RuntimePolicy.autoApproval`、`AutoApprovalPolicy`、`applyAutoApprovalCascade()`、`APPROVAL_AUTO_STEP_LIMIT_EXCEEDED` 已在 `ApprovalProductService.ts` / `packages/core-backend/src/types/approval-product.ts`；`approval-pr2-auto-approval-three-merge-{development,verification}-20260515.md` 记录 PR2。 |
 | 管理员跳转节点 | 已落地 | `POST /api/approvals/:id/jump` 受 `rbacGuard('approvals:admin')` 保护；`ApprovalProductService.adminJump()` 仅读实例绑定的 frozen runtime graph；`zzzz20260515130000_add_jump_action_to_approval_records.ts` 增加 `jump` action 和 `approvals:admin` seed；`approval-pr3-admin-jump-node-verification-20260515.md` 记录 scratch PG T11 数据环和 44 个 approval integration PASS。 |
 | 加签：前加签、后加签、并行加签 | 战略推迟 | 运行时代码中未发现 `approval_countersign_tasks`、`addSign`、`add_sign`、`countersign` 实现。`approval-phase1-codex-claude-worksplit-todo-20260515.md` 保留 PR4 ADR-first 方案；`k3-poc-shortest-closure-gap-survey-20260516.md` 明确 `add-sign-mvp stays DEFERRED`，再进入条件为 K3 gate 点名需要或客户 GATE PASS。 |
 
