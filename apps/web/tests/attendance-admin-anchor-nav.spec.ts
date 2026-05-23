@@ -124,12 +124,13 @@ describe('Attendance admin anchor navigation', () => {
     )
 
     expect(groupLabels).toEqual(['Workspace', 'Scheduling', 'Organization', 'Policies', 'Data & Payroll'])
-    expect(labels).toHaveLength(24)
+    expect(labels).toHaveLength(25)
     expect(labels).toEqual(
       expect.arrayContaining([
         'Settings',
         'User Access',
         'Advanced scheduling',
+        'Comprehensive hours',
         'Import',
         'Import batches',
         'Report fields',
@@ -281,7 +282,7 @@ describe('Attendance admin anchor navigation', () => {
 
     const jumpSelect = container!.querySelector<HTMLSelectElement>('[data-admin-quick-jump="true"]')
     expect(jumpSelect).toBeTruthy()
-    expect(Array.from(jumpSelect!.querySelectorAll('option')).length).toBe(24)
+    expect(Array.from(jumpSelect!.querySelectorAll('option')).length).toBe(25)
 
     jumpSelect!.value = 'attendance-admin-advanced-scheduling-workbench'
     jumpSelect!.dispatchEvent(new Event('change', { bubbles: true }))
@@ -290,6 +291,23 @@ describe('Attendance admin anchor navigation', () => {
     expect(window.location.hash).toBe('#attendance-admin-advanced-scheduling-workbench')
     expect(container!.querySelector('[data-admin-current-section="true"]')?.textContent).toContain('Scheduling · Advanced scheduling')
     expect(container!.querySelector('[data-attendance-advanced-scheduling-workbench]')).toBeTruthy()
+  })
+
+  it('jumps to the comprehensive hours preview from the quick selector', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const jumpSelect = container!.querySelector<HTMLSelectElement>('[data-admin-quick-jump="true"]')
+    expect(jumpSelect).toBeTruthy()
+
+    jumpSelect!.value = 'attendance-admin-comprehensive-hours-preview'
+    jumpSelect!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    expect(window.location.hash).toBe('#attendance-admin-comprehensive-hours-preview')
+    expect(container!.querySelector('[data-admin-current-section="true"]')?.textContent).toContain('Scheduling · Comprehensive hours')
+    expect(container!.querySelector('[data-attendance-comprehensive-hours-preview]')).toBeTruthy()
   })
 
   it('normalizes legacy show-all storage back to focused mode across remounts', async () => {

@@ -270,6 +270,52 @@ describe('Attendance admin regressions', () => {
           },
         })
       }
+      if (url.includes('/api/attendance/comprehensive-hours/preview')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            readOnly: true,
+            period: {
+              type: 'month',
+              key: '2026-05',
+              from: '2026-05-01',
+              to: '2026-05-31',
+              label: 'May 2026',
+            },
+            metric: 'planned',
+            enforcement: 'warn',
+            capMinutes: 9600,
+            scope: {
+              userIds: ['user-1'],
+            },
+            aggregate: {
+              users: 1,
+              ok: 0,
+              warning: 0,
+              violation: 1,
+              totalMinutes: 10200,
+              totalExcessMinutes: 600,
+              totalRemainingMinutes: 0,
+              status: 'violation',
+            },
+            rows: [
+              {
+                userId: 'user-1',
+                minutes: 10200,
+                plannedMinutes: 10200,
+                capMinutes: 9600,
+                remainingMinutes: 0,
+                excessMinutes: 600,
+                status: 'violation',
+                source: 'effective_calendar',
+                days: 31,
+                workingDays: 22,
+              },
+            ],
+            degraded: false,
+          },
+        })
+      }
       if (url.includes('/api/attendance/leave-types')) {
         return jsonResponse(200, {
           ok: true,
@@ -810,6 +856,60 @@ describe('Attendance admin regressions', () => {
     expect(section!.querySelector('[data-attendance-advanced-scheduling-groups]')?.textContent).toContain('Line A')
     const buttons = Array.from(section!.querySelectorAll<HTMLButtonElement>('button')).map(button => button.textContent || '')
     expect(buttons.join(' ')).toContain('Reload workbench')
+    expect(buttons.join(' ')).not.toContain('Create')
+    expect(buttons.join(' ')).not.toContain('Edit')
+    expect(buttons.join(' ')).not.toContain('Delete')
+  })
+
+  it('runs the read-only comprehensive hours preview without write controls', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const previewNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-comprehensive-hours-preview"]')
+    expect(previewNav).toBeTruthy()
+    previewNav!.click()
+    await flushUi(2)
+
+    const section = container!.querySelector<HTMLElement>('[data-attendance-comprehensive-hours-preview]')
+    expect(section).toBeTruthy()
+    expect(window.getComputedStyle(section!).display).not.toBe('none')
+
+    const userInput = section!.querySelector<HTMLInputElement>('[data-attendance-comprehensive-hours-user-id]')
+    expect(userInput).toBeTruthy()
+    userInput!.value = 'user-1'
+    userInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+
+    const runButton = section!.querySelector<HTMLButtonElement>('[data-attendance-comprehensive-hours-preview-run]')
+    expect(runButton).toBeTruthy()
+    expect(runButton!.disabled).toBe(false)
+    runButton!.click()
+    await flushUi(4)
+
+    const previewCall = vi.mocked(apiFetch).mock.calls.find(([input]) =>
+      String(input).includes('/api/attendance/comprehensive-hours/preview')
+    )
+    expect(previewCall).toBeTruthy()
+    const requestBody = JSON.parse(String((previewCall![1] as RequestInit).body))
+    expect(requestBody).toMatchObject({
+      policyDraft: { capHours: 160, enforcement: 'warn' },
+      scope: { userId: 'user-1' },
+      period: { type: 'month' },
+      metric: 'planned',
+    })
+
+    expect(section!.textContent).toContain('Read-only preview')
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-status]')?.textContent).toContain('No policy was saved')
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-aggregate-item="violation"]')?.textContent).toContain('1')
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-rows]')?.textContent).toContain('user-1')
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-rows]')?.textContent).toContain('Violation')
+
+    const buttons = Array.from(section!.querySelectorAll<HTMLButtonElement>('button')).map(button => button.textContent || '')
+    expect(buttons.join(' ')).toContain('Preview comprehensive hours')
+    expect(buttons.join(' ')).not.toContain('Save')
+    expect(buttons.join(' ')).not.toContain('Apply')
+    expect(buttons.join(' ')).not.toContain('Enforce')
     expect(buttons.join(' ')).not.toContain('Create')
     expect(buttons.join(' ')).not.toContain('Edit')
     expect(buttons.join(' ')).not.toContain('Delete')
