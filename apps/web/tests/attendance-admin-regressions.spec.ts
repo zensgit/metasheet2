@@ -989,6 +989,288 @@ describe('Attendance admin regressions', () => {
     expect(buttons.join(' ')).not.toContain('Delete')
   })
 
+  it('runs a weak comprehensive-hours advisory before saving shift assignments without blocking save', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/shifts')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'shift-a',
+                name: 'Day shift',
+                timezone: 'UTC',
+                workStartTime: '09:00',
+                workEndTime: '18:00',
+                isOvernight: false,
+                lateGraceMinutes: 10,
+                earlyGraceMinutes: 10,
+                roundingMinutes: 5,
+                workingDays: [1, 2, 3, 4, 5],
+              },
+            ],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/comprehensive-hours/preview')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            readOnly: true,
+            period: { type: 'custom_range', from: '2026-05-01', to: '2026-05-10' },
+            metric: 'planned',
+            enforcement: 'warn',
+            capMinutes: 9600,
+            scope: { userIds: ['user-9'] },
+            aggregate: {
+              users: 1,
+              ok: 0,
+              warning: 0,
+              violation: 1,
+              totalMinutes: 10200,
+              totalExcessMinutes: 600,
+              totalRemainingMinutes: 0,
+              status: 'violation',
+            },
+            rows: [
+              {
+                userId: 'user-9',
+                minutes: 10200,
+                plannedMinutes: 10200,
+                capMinutes: 9600,
+                remainingMinutes: 0,
+                excessMinutes: 600,
+                status: 'violation',
+                source: 'effective_calendar',
+              },
+            ],
+            degraded: false,
+          },
+        })
+      }
+      if (url === '/api/attendance/assignments' && init?.method === 'POST') {
+        return jsonResponse(200, { ok: true })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const assignmentsNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-assignments"]')
+    expect(assignmentsNav).toBeTruthy()
+    assignmentsNav!.click()
+    await flushUi(2)
+
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-assignments')
+    expect(section).toBeTruthy()
+    setInput(section!, '#attendance-assignment-user-id', 'user-9')
+    const shiftSelect = section!.querySelector<HTMLSelectElement>('#attendance-assignment-shift-id')
+    expect(shiftSelect).toBeTruthy()
+    shiftSelect!.value = 'shift-a'
+    shiftSelect!.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(section!, '#attendance-assignment-start-date', '2026-05-01')
+    setInput(section!, '#attendance-assignment-end-date', '2026-05-10')
+    await flushUi(2)
+
+    const createButton = Array.from(section!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Create assignment'))
+    expect(createButton).toBeTruthy()
+    expect(createButton!.disabled).toBe(false)
+    createButton!.click()
+    await flushUi(8)
+
+    const previewCallIndex = vi.mocked(apiFetch).mock.calls.findIndex(([input]) =>
+      String(input).includes('/api/attendance/comprehensive-hours/preview')
+    )
+    const saveCallIndex = vi.mocked(apiFetch).mock.calls.findIndex(([input, init]) =>
+      String(input) === '/api/attendance/assignments' && init?.method === 'POST'
+    )
+    expect(previewCallIndex).toBeGreaterThanOrEqual(0)
+    expect(saveCallIndex).toBeGreaterThan(previewCallIndex)
+    const previewBody = JSON.parse(String(vi.mocked(apiFetch).mock.calls[previewCallIndex]![1]!.body))
+    expect(previewBody).toMatchObject({
+      policyDraft: { capHours: 160, enforcement: 'warn' },
+      scope: { userId: 'user-9' },
+      period: { type: 'custom_range', from: '2026-05-01', to: '2026-05-10' },
+      metric: 'planned',
+    })
+    expect(previewBody).not.toHaveProperty('allUsers')
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-assignment-advisory="shift"]')?.textContent)
+      .toContain('Saving is still allowed')
+    expect(container!.textContent).toContain('Assignment created.')
+  })
+
+  it('runs a weak comprehensive-hours advisory before saving rotation assignments without blocking save', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/rotation-rules')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'rot-1',
+                name: 'Two shift',
+                timezone: 'UTC',
+                shiftSequence: ['shift-a', 'shift-b'],
+                isActive: true,
+              },
+            ],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/comprehensive-hours/preview')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            readOnly: true,
+            period: { type: 'custom_range', from: '2026-05-01', to: '2026-05-10' },
+            metric: 'planned',
+            enforcement: 'warn',
+            capMinutes: 9600,
+            scope: { userIds: ['user-7'] },
+            aggregate: {
+              users: 1,
+              ok: 0,
+              warning: 1,
+              violation: 0,
+              totalMinutes: 9500,
+              totalExcessMinutes: 0,
+              totalRemainingMinutes: 100,
+              status: 'warning',
+            },
+            rows: [
+              {
+                userId: 'user-7',
+                minutes: 9500,
+                plannedMinutes: 9500,
+                capMinutes: 9600,
+                remainingMinutes: 100,
+                excessMinutes: 0,
+                status: 'warning',
+                source: 'effective_calendar',
+              },
+            ],
+            degraded: false,
+          },
+        })
+      }
+      if (url === '/api/attendance/rotation-assignments' && init?.method === 'POST') {
+        return jsonResponse(200, { ok: true })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-rotation-assignments')
+    expect(section).toBeTruthy()
+    setInput(section!, '#attendance-rotation-user', 'user-7')
+    const rotationSelect = section!.querySelector<HTMLSelectElement>('#attendance-rotation-rule')
+    expect(rotationSelect).toBeTruthy()
+    rotationSelect!.value = 'rot-1'
+    rotationSelect!.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(section!, '#attendance-rotation-start', '2026-05-01')
+    setInput(section!, '#attendance-rotation-end', '2026-05-10')
+    await flushUi(2)
+
+    const createButton = Array.from(section!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Create assignment'))
+    expect(createButton).toBeTruthy()
+    createButton!.click()
+    await flushUi(8)
+
+    const previewCallIndex = vi.mocked(apiFetch).mock.calls.findIndex(([input]) =>
+      String(input).includes('/api/attendance/comprehensive-hours/preview')
+    )
+    const saveCallIndex = vi.mocked(apiFetch).mock.calls.findIndex(([input, init]) =>
+      String(input) === '/api/attendance/rotation-assignments' && init?.method === 'POST'
+    )
+    expect(previewCallIndex).toBeGreaterThanOrEqual(0)
+    expect(saveCallIndex).toBeGreaterThan(previewCallIndex)
+    const previewBody = JSON.parse(String(vi.mocked(apiFetch).mock.calls[previewCallIndex]![1]!.body))
+    expect(previewBody).toMatchObject({
+      policyDraft: { capHours: 160, enforcement: 'warn' },
+      scope: { userId: 'user-7' },
+      period: { type: 'custom_range', from: '2026-05-01', to: '2026-05-10' },
+      metric: 'planned',
+    })
+    expect(previewBody).not.toHaveProperty('allUsers')
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-assignment-advisory="rotation"]')?.textContent)
+      .toContain('Saving is still allowed')
+    expect(container!.textContent).toContain('Rotation assignment created.')
+  })
+
+  it('keeps shift assignment save available when the weak comprehensive-hours advisory preview fails', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/shifts')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'shift-a',
+                name: 'Day shift',
+                timezone: 'UTC',
+                workStartTime: '09:00',
+                workEndTime: '18:00',
+                isOvernight: false,
+                lateGraceMinutes: 10,
+                earlyGraceMinutes: 10,
+                roundingMinutes: 5,
+                workingDays: [1, 2, 3, 4, 5],
+              },
+            ],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/comprehensive-hours/preview')) {
+        return jsonResponse(503, {
+          ok: false,
+          error: { code: 'DB_NOT_READY', message: 'schema not ready' },
+        })
+      }
+      if (url === '/api/attendance/assignments' && init?.method === 'POST') {
+        return jsonResponse(200, { ok: true })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-assignments')
+    expect(section).toBeTruthy()
+    setInput(section!, '#attendance-assignment-user-id', 'user-9')
+    const shiftSelect = section!.querySelector<HTMLSelectElement>('#attendance-assignment-shift-id')
+    expect(shiftSelect).toBeTruthy()
+    shiftSelect!.value = 'shift-a'
+    shiftSelect!.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(section!, '#attendance-assignment-start-date', '2026-05-01')
+    setInput(section!, '#attendance-assignment-end-date', '2026-05-10')
+    await flushUi(2)
+
+    const createButton = Array.from(section!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Create assignment'))
+    expect(createButton).toBeTruthy()
+    createButton!.click()
+    await flushUi(8)
+
+    expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
+      String(input) === '/api/attendance/assignments' && init?.method === 'POST'
+    )).toBe(true)
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-assignment-advisory="shift"]')?.textContent)
+      .toContain('saving is still allowed')
+    expect(container!.textContent).toContain('Assignment created.')
+  })
+
   it('restores the run21 holiday calendar, rule builder, and import template guidance', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)

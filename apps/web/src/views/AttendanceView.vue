@@ -5033,6 +5033,17 @@
                   />
                 </label>
               </div>
+              <p
+                v-if="comprehensiveHoursAssignmentAdvisory.rotation.message"
+                class="attendance__status"
+                :class="{
+                  'attendance__status--warn': comprehensiveHoursAssignmentAdvisory.rotation.kind === 'warn',
+                  'attendance__status--error': comprehensiveHoursAssignmentAdvisory.rotation.kind === 'error'
+                }"
+                data-attendance-comprehensive-hours-assignment-advisory="rotation"
+              >
+                {{ comprehensiveHoursAssignmentAdvisory.rotation.message }}
+              </p>
               <div class="attendance__admin-actions">
                 <button
                   class="attendance__btn attendance__btn--primary"
@@ -5345,6 +5356,17 @@
                   />
                 </label>
               </div>
+              <p
+                v-if="comprehensiveHoursAssignmentAdvisory.shift.message"
+                class="attendance__status"
+                :class="{
+                  'attendance__status--warn': comprehensiveHoursAssignmentAdvisory.shift.kind === 'warn',
+                  'attendance__status--error': comprehensiveHoursAssignmentAdvisory.shift.kind === 'error'
+                }"
+                data-attendance-comprehensive-hours-assignment-advisory="shift"
+              >
+                {{ comprehensiveHoursAssignmentAdvisory.shift.message }}
+              </p>
               <div class="attendance__admin-actions">
                 <button class="attendance__btn attendance__btn--primary" :disabled="assignmentSaving" @click="saveAssignment">
                   {{ assignmentSaving ? tr('Saving...', '保存中...') : assignmentEditingId ? tr('Update assignment', '更新分配') : tr('Create assignment', '创建分配') }}
@@ -6346,6 +6368,13 @@ interface AttendanceComprehensiveHoursPreviewResult {
   rows: AttendanceComprehensiveHoursPreviewRow[]
   aggregate: AttendanceComprehensiveHoursPreviewAggregate
   degraded?: boolean
+}
+
+type AttendanceComprehensiveHoursAssignmentKind = 'shift' | 'rotation'
+
+interface AttendanceComprehensiveHoursAssignmentAdvisory {
+  kind: 'info' | 'warn' | 'error'
+  message: string
 }
 
 interface CalendarDay {
@@ -7606,6 +7635,10 @@ const comprehensiveHoursPreviewLoading = ref(false)
 const comprehensiveHoursPreviewStatus = ref<{ kind: 'info' | 'warn' | 'error'; message: string }>({
   kind: 'info',
   message: '',
+})
+const comprehensiveHoursAssignmentAdvisory = reactive<Record<AttendanceComprehensiveHoursAssignmentKind, AttendanceComprehensiveHoursAssignmentAdvisory>>({
+  shift: { kind: 'info', message: '' },
+  rotation: { kind: 'info', message: '' },
 })
 const holidayEditingId = ref<string | null>(null)
 const leaveTypeEditingId = ref<string | null>(null)
@@ -14411,6 +14444,104 @@ async function previewComprehensiveHours() {
   }
 }
 
+function setComprehensiveHoursAssignmentAdvisory(
+  kind: AttendanceComprehensiveHoursAssignmentKind,
+  advisory: AttendanceComprehensiveHoursAssignmentAdvisory,
+): void {
+  comprehensiveHoursAssignmentAdvisory[kind] = advisory
+}
+
+function clearComprehensiveHoursAssignmentAdvisory(kind: AttendanceComprehensiveHoursAssignmentKind): void {
+  setComprehensiveHoursAssignmentAdvisory(kind, { kind: 'info', message: '' })
+}
+
+function resolveComprehensiveHoursAssignmentStatus(
+  result: AttendanceComprehensiveHoursPreviewResult | null | undefined,
+): AttendanceComprehensiveHoursStatus {
+  const aggregateStatus = result?.aggregate?.status
+  if (aggregateStatus === 'violation' || aggregateStatus === 'warning' || aggregateStatus === 'ok') {
+    return aggregateStatus
+  }
+  if (result?.rows?.some(row => row.status === 'violation')) return 'violation'
+  if (result?.rows?.some(row => row.status === 'warning')) return 'warning'
+  return 'ok'
+}
+
+function comprehensiveHoursAssignmentAdvisoryMessage(
+  result: AttendanceComprehensiveHoursPreviewResult | null | undefined,
+): string {
+  if (result?.degraded) {
+    return tr(
+      'Comprehensive-hours advisory preview returned degraded data; saving is still allowed in this stage.',
+      '综合工时提示预览返回降级数据；当前阶段仍允许保存。',
+    )
+  }
+  const status = resolveComprehensiveHoursAssignmentStatus(result)
+  if (status === 'violation') {
+    return tr(
+      'Comprehensive-hours advisory before save: planned minutes exceed the draft cap. Saving is still allowed in this stage.',
+      '保存前综合工时提示：计划工时已超过草稿上限；当前阶段仍允许保存。',
+    )
+  }
+  if (status === 'warning') {
+    return tr(
+      'Comprehensive-hours advisory before save: planned minutes are close to the draft cap. Saving is still allowed in this stage.',
+      '保存前综合工时提示：计划工时接近草稿上限；当前阶段仍允许保存。',
+    )
+  }
+  return ''
+}
+
+async function previewComprehensiveHoursAssignmentAdvisory(
+  kind: AttendanceComprehensiveHoursAssignmentKind,
+  draft: { userId: string; startDate: string; endDate: string | null; isActive: boolean },
+): Promise<void> {
+  clearComprehensiveHoursAssignmentAdvisory(kind)
+  if (!draft.isActive) return
+  const userId = draft.userId.trim()
+  const from = draft.startDate.trim()
+  if (!userId || !from) return
+  const capHours = Number(comprehensiveHoursPreviewForm.capHours)
+  const body = {
+    policyDraft: {
+      capHours: Number.isFinite(capHours) && capHours > 0 ? capHours : 160,
+      enforcement: 'warn',
+    },
+    scope: { userId },
+    period: {
+      type: 'custom_range',
+      from,
+      to: draft.endDate || from,
+    },
+    metric: 'planned',
+  }
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId() })
+    const response = await apiFetch(`/api/attendance/comprehensive-hours/preview?${query.toString()}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to preview comprehensive hours', '综合工时预览失败')))
+    }
+    const result = data.data as AttendanceComprehensiveHoursPreviewResult | null | undefined
+    const message = comprehensiveHoursAssignmentAdvisoryMessage(result)
+    if (message) {
+      setComprehensiveHoursAssignmentAdvisory(kind, { kind: 'warn', message })
+    }
+  } catch (error: any) {
+    setComprehensiveHoursAssignmentAdvisory(kind, {
+      kind: 'error',
+      message: tr(
+        'Comprehensive-hours advisory preview is unavailable; saving is still allowed in this stage.',
+        '综合工时提示预览暂不可用；当前阶段仍允许保存。',
+      ) + ` ${readErrorMessage(error, '')}`.trimEnd(),
+    })
+  }
+}
+
 function resetRotationRuleForm() {
   rotationRuleEditingId.value = null
   rotationRuleForm.name = ''
@@ -14576,6 +14707,12 @@ async function saveRotationAssignment() {
       isActive: rotationAssignmentForm.isActive,
       orgId: normalizedOrgId(),
     }
+    await previewComprehensiveHoursAssignmentAdvisory('rotation', {
+      userId: payload.userId,
+      startDate: payload.startDate,
+      endDate: payload.endDate,
+      isActive: payload.isActive,
+    })
     const endpoint = isEditing
       ? `/api/attendance/rotation-assignments/${rotationAssignmentEditingId.value}`
       : '/api/attendance/rotation-assignments'
@@ -14796,6 +14933,12 @@ async function saveAssignment() {
       isActive: assignmentForm.isActive,
       orgId: normalizedOrgId(),
     }
+    await previewComprehensiveHoursAssignmentAdvisory('shift', {
+      userId: payload.userId,
+      startDate: payload.startDate,
+      endDate: payload.endDate,
+      isActive: payload.isActive,
+    })
     const endpoint = isEditing
       ? `/api/attendance/assignments/${assignmentEditingId.value}`
       : '/api/attendance/assignments'
@@ -16254,6 +16397,10 @@ const holidaySectionBindings = {
 
 .attendance__status--error {
   color: #c62828;
+}
+
+.attendance__status--warn {
+  color: #9a6700;
 }
 
 .attendance__grid {
