@@ -6,8 +6,8 @@
         <p class="attendance__field-hint">
           {{
             tr(
-              'Use this for "Group A rests 3 days while the base holiday is 5 days." The helper creates a group-scoped workday exception for the remaining holiday day indexes.',
-              '用于“某个考勤组在 5 天假期里只休 3 天”这类场景。系统会为剩余节假日序号生成班组级调班规则。',
+              'Use this for "Group A rests 3 days while the base holiday is 5 days" or "Group B rests 5 days while the base holiday is 3 days." The helper creates a group-scoped calendar policy row.',
+              '用于“某个考勤组在 5 天假期里只休 3 天”或“某个考勤组在 3 天基础假期上多休到 5 天”这类场景。系统会生成班组级日历规则。',
             )
           }}
         </p>
@@ -60,6 +60,18 @@
           min="1"
           data-calendar-policy-quick-target-days
         />
+      </label>
+      <label class="attendance__field" :for="baseStartDateInputId">
+        <span>{{ tr('Base rest start date', '基础休息起始日期') }}</span>
+        <input
+          :id="baseStartDateInputId"
+          v-model="form.baseRestStartDate"
+          type="date"
+          data-calendar-policy-quick-base-start-date
+        />
+        <small class="attendance__field-hint">
+          {{ tr('Required only when target rest days is greater than base rest days. Use the first date in the base rest range, not necessarily the festival date.', '仅当目标休息天数大于基础休息天数时必填。请填写基础休息范围的第一天，不一定是节日本身日期。') }}
+        </small>
       </label>
       <label class="attendance__field" :for="labelInputId">
         <span>{{ tr('Label', '标签') }}</span>
@@ -118,6 +130,7 @@ const groupInputId = `${quickAddId}-group`
 const groupListId = `${quickAddId}-groups`
 const baseDaysInputId = `${quickAddId}-base-days`
 const targetDaysInputId = `${quickAddId}-target-days`
+const baseStartDateInputId = `${quickAddId}-base-start-date`
 const labelInputId = `${quickAddId}-label`
 
 const form = reactive({
@@ -125,17 +138,28 @@ const form = reactive({
   attendanceGroup: '',
   baseRestDays: 5,
   targetRestDays: 3,
+  baseRestStartDate: '',
   label: '',
 })
 
-const defaultLabel = computed(() => {
+const isLongerRestTarget = computed(() => Number(form.targetRestDays) > Number(form.baseRestDays))
+
+const defaultWorkdayLabel = computed(() => {
   const holidayName = form.holidayName.trim() || tr('Holiday', '节假日')
   return tr(`${holidayName} make-up workday`, `${holidayName}调班`)
 })
 
+const defaultExtraRestLabel = computed(() => {
+  const holidayName = form.holidayName.trim() || tr('Holiday', '节假日')
+  return tr(`${holidayName} extra rest`, `${holidayName}延休`)
+})
+
+const defaultLabel = computed(() => (isLongerRestTarget.value ? defaultExtraRestLabel.value : defaultWorkdayLabel.value))
+
 const quickAddResult = computed(() => buildHolidayLengthCalendarPolicyOverride({
   ...form,
-  localizedDefaultLabel: defaultLabel.value,
+  localizedDefaultLabel: defaultWorkdayLabel.value,
+  localizedExtraRestLabel: defaultExtraRestLabel.value,
 }))
 
 function appendQuickOverride() {
@@ -152,6 +176,12 @@ const statusKind = computed<'info' | 'warn'>(() => {
 const statusMessage = computed(() => {
   const result = quickAddResult.value
   if (result.kind === 'append') {
+    if (result.form.isWorkingDay === false && result.form.from && result.form.to) {
+      return tr(
+        `Will add a group rest exception from ${result.form.from} to ${result.form.to}.`,
+        `将新增班组延休规则：${result.form.from} 至 ${result.form.to} 改为休息日。`,
+      )
+    }
     return tr(
       `Will add a group workday exception for holiday day ${result.form.dayIndexStart}-${result.form.dayIndexEnd}.`,
       `将新增班组调班规则：节假日第 ${result.form.dayIndexStart}-${result.form.dayIndexEnd} 天改为工作日。`,
@@ -160,9 +190,11 @@ const statusMessage = computed(() => {
   if (result.reason === 'same_length') {
     return tr('No rule is needed because the target rest length equals the base holiday length.', '目标休息天数与基础假期一致，无需新增规则。')
   }
-  if (result.reason === 'target_longer_than_base') {
-    return tr('Longer-than-base rest spans are not generated automatically in v1; extend the base holiday range or use the advanced table.', 'v1 不自动生成长于基础假期的休息规则；请先延长基础假期范围，或使用高级表格手动配置。')
+  if (result.reason === 'missing_base_rest_start_date') {
+    return tr('Enter the base rest start date to generate extra rest days.', '请填写基础休息起始日期，才能生成额外休息日规则。')
   }
-  return tr('Fill a holiday name, attendance group, and valid day counts before adding a rule.', '请先填写节假日名称、考勤组和有效天数。')
+  return isLongerRestTarget.value
+    ? tr('Fill a holiday name, attendance group, valid day counts, and a valid base rest start date before adding a rule.', '请先填写节假日名称、考勤组、有效天数和有效的基础休息起始日期。')
+    : tr('Fill a holiday name, attendance group, and valid day counts before adding a rule.', '请先填写节假日名称、考勤组和有效天数。')
 })
 </script>

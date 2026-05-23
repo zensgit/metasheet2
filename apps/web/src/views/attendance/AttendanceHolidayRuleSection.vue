@@ -161,9 +161,9 @@
                     <tr>
                       <td>
                         <div class="attendance__inline-fields">
-                          <input v-model="override.date" class="attendance__table-input" type="date" :aria-label="tr('Single date', '单日')" />
-                          <input v-model="override.from" class="attendance__table-input" type="date" :aria-label="tr('From date', '开始日期')" />
-                          <input v-model="override.to" class="attendance__table-input" type="date" :aria-label="tr('To date', '结束日期')" />
+                          <input v-model="override.date" class="attendance__table-input" type="date" :aria-label="tr('Single date', '单日')" data-calendar-policy-override-date />
+                          <input v-model="override.from" class="attendance__table-input" type="date" :aria-label="tr('From date', '开始日期')" data-calendar-policy-override-from />
+                          <input v-model="override.to" class="attendance__table-input" type="date" :aria-label="tr('To date', '结束日期')" data-calendar-policy-override-to />
                         </div>
                       </td>
                       <td>

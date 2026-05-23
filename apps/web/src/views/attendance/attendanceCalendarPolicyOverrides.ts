@@ -68,14 +68,16 @@ export interface CalendarPolicyHolidayLengthQuickAddInput {
   attendanceGroup: string
   baseRestDays: number
   targetRestDays: number
+  baseRestStartDate?: string
   label?: string
   localizedDefaultLabel?: string
+  localizedExtraRestLabel?: string
 }
 
 export type CalendarPolicyHolidayLengthQuickAddResult =
   | { kind: 'append'; form: CalendarPolicyOverrideFormState }
   | { kind: 'noop'; reason: 'same_length' }
-  | { kind: 'unsupported'; reason: 'target_longer_than_base' | 'invalid_input' }
+  | { kind: 'unsupported'; reason: 'invalid_input' | 'missing_base_rest_start_date' }
 
 function listToText(list?: Array<string | number>): string {
   return Array.isArray(list) ? list.join(',') : ''
@@ -206,6 +208,32 @@ function normalizeQuickAddDayCount(value: unknown): number | null {
   return count
 }
 
+function parseDateOnly(value: unknown): Date | null {
+  if (typeof value !== 'string') return null
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim())
+  if (!match) return null
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const date = new Date(Date.UTC(year, month - 1, day))
+  if (
+    date.getUTCFullYear() !== year
+    || date.getUTCMonth() !== month - 1
+    || date.getUTCDate() !== day
+  ) {
+    return null
+  }
+  return date
+}
+
+function addCalendarDays(date: Date, days: number): string {
+  const next = new Date(date.getTime() + days * 86_400_000)
+  const year = String(next.getUTCFullYear()).padStart(4, '0')
+  const month = String(next.getUTCMonth() + 1).padStart(2, '0')
+  const day = String(next.getUTCDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
 export function buildHolidayLengthCalendarPolicyOverride(
   input: CalendarPolicyHolidayLengthQuickAddInput,
 ): CalendarPolicyHolidayLengthQuickAddResult {
@@ -220,7 +248,26 @@ export function buildHolidayLengthCalendarPolicyOverride(
     return { kind: 'noop', reason: 'same_length' }
   }
   if (targetRestDays > baseRestDays) {
-    return { kind: 'unsupported', reason: 'target_longer_than_base' }
+    const baseRestStartDate = input.baseRestStartDate?.trim() ?? ''
+    if (!baseRestStartDate) {
+      return { kind: 'unsupported', reason: 'missing_base_rest_start_date' }
+    }
+    const baseRestStart = parseDateOnly(baseRestStartDate)
+    if (!baseRestStart) {
+      return { kind: 'unsupported', reason: 'invalid_input' }
+    }
+    return {
+      kind: 'append',
+      form: {
+        ...createDefaultCalendarPolicyOverrideForm(),
+        from: addCalendarDays(baseRestStart, baseRestDays),
+        to: addCalendarDays(baseRestStart, targetRestDays - 1),
+        source: 'group',
+        isWorkingDay: false,
+        label: input.label?.trim() || input.localizedExtraRestLabel?.trim() || `${holidayName}延休`,
+        attendanceGroups: attendanceGroup,
+      },
+    }
   }
 
   return {

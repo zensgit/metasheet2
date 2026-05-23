@@ -572,6 +572,42 @@ describe('Attendance admin regressions', () => {
     expect(dayIndexEndInputs.some(input => input.value === '5')).toBe(true)
   })
 
+  it('renders the production quick-add panel and appends a longer-rest date range row', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const settings = container!.querySelector<HTMLElement>('#attendance-admin-settings')
+    expect(settings).toBeTruthy()
+    expect(window.getComputedStyle(settings!).display).not.toBe('none')
+    expect(settings!.querySelector('[data-attendance-calendar-policy-quick-add]')).toBeTruthy()
+
+    setInput(settings!, '[data-calendar-policy-quick-holiday]', 'National Day')
+    setInput(settings!, '[data-calendar-policy-quick-group]', 'long-rest-shift')
+    setInput(settings!, '[data-calendar-policy-quick-base-days]', '3')
+    setInput(settings!, '[data-calendar-policy-quick-target-days]', '5')
+    setInput(settings!, '[data-calendar-policy-quick-base-start-date]', '2026-10-01')
+    await flushUi(2)
+
+    const quickAddButton = settings!.querySelector<HTMLButtonElement>('button[data-calendar-policy-quick-add]')
+    expect(quickAddButton).toBeTruthy()
+    expect(quickAddButton!.disabled).toBe(false)
+    quickAddButton!.click()
+    await flushUi(4)
+
+    expect(settings!.textContent).toContain('Will add a group rest exception from 2026-10-04 to 2026-10-05.')
+    const groupInputs = Array.from(settings!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-attendance-groups]'))
+    expect(groupInputs.some(input => input.value === 'long-rest-shift')).toBe(true)
+    const fromInputs = Array.from(settings!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-from]'))
+    const toInputs = Array.from(settings!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-to]'))
+    expect(fromInputs.some(input => input.value === '2026-10-04')).toBe(true)
+    expect(toInputs.some(input => input.value === '2026-10-05')).toBe(true)
+    const dayIndexStartInputs = Array.from(settings!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-day-index-start]'))
+    const dayIndexEndInputs = Array.from(settings!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-day-index-end]'))
+    expect(dayIndexStartInputs.some(input => input.value === '4')).toBe(false)
+    expect(dayIndexEndInputs.some(input => input.value === '5')).toBe(false)
+  })
+
   it('passes the selected CSV header mode when exporting report records', async () => {
     const originalCreateObjectURL = URL.createObjectURL
     const originalRevokeObjectURL = URL.revokeObjectURL
