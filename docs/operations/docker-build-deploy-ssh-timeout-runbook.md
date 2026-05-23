@@ -11,7 +11,7 @@ step:
 - failing step: `Sync deploy host files`
   (`.github/workflows/docker-build.yml:71`)
 - failing command: the first `ssh` inside that step
-  (`.github/workflows/docker-build.yml:86`)
+  (`.github/workflows/docker-build.yml:88`)
 - failing error shape:
 
   ```text
@@ -246,7 +246,8 @@ system API. It is operator documentation only.
 
 - Workflow: `Build and Push Docker Images` -
   `.github/workflows/docker-build.yml` (`name:` on line 1, `deploy:`
-  job starts at line 64, `Sync deploy host files` step at line 71).
+  job starts at line 64, `Sync deploy host files` step at line 71,
+  first `ssh` command inside that step on line 88).
 - Tracking issue: #1772.
 - First failing run: workflow run `26293551077` after the
   `d23472167` main commit (`fix(multitable): hint when calendar

@@ -26,7 +26,7 @@ Each marker the task required, counted via `grep -cF` against
 | `26293551077` | 3 (cited as the workflow run, in symptom + step 9 + "Related" footer) |
 | `#1772` | 3 (top tracking line + step 9 reference + "Related" footer) |
 | `docker-build.yml:71` | 1 (the failing step's exact line) |
-| `docker-build.yml:86` | 1 (the failing `ssh` command's exact line inside the step) |
+| `docker-build.yml:88` | 1 (the failing `ssh` command's exact line inside the step) |
 
 All eight checklist items from the task acceptance are present
 (DNS/IP, port 22, security group / firewall, deploy user, deploy key,
@@ -42,7 +42,7 @@ PR's branch creation):
 - `jobs:` on line 19
 - `deploy:` job on line 64
 - `Sync deploy host files` step on line 71
-- the first `ssh` command inside that step on line 86
+- the first `ssh` command inside that step on line 88
 
 The runbook does **not** modify the workflow YAML. The line numbers are
 load-bearing for operator triage, so they are cited; the runbook also
@@ -91,7 +91,7 @@ git diff --check  -> exit 0
 | Operator checklist: GitHub runner outbound IPs | section 5 cites `https://api.github.com/meta` |
 | Operator checklist: manual `ssh -v` | section 8 with the `ssh -vv -o ConnectTimeout=10 ...` placeholder-only reproduction shape |
 | Operator checklist: when to rerun failed jobs | section 9 with the "fix first, rerun once" discipline |
-| Cite #1772 and workflow failure point | tracking line + step 9 + Related-workflows footer; line numbers 71 and 86 for the step and the ssh call |
+| Cite #1772 and workflow failure point | tracking line + step 9 + Related-workflows footer; line numbers 71 and 88 for the step and the ssh call |
 | Design MD + verification MD | this PR adds both |
 | No secret / host / user / key emitted | secret-shape sweep above; `0.0.0.0/0` is the only IPv4 literal and it is the CIDR-any placeholder, not a leak |
 
