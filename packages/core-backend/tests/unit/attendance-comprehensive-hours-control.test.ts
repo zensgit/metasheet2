@@ -397,6 +397,55 @@ describe('attendance comprehensive working-hours control helpers', () => {
       ok: false,
       error: { code: 'INVALID_CAP' },
     })
+    expect(helpers.normalizeAttendanceComprehensiveHoursPreviewInput({
+      userId: 'user-a',
+      period: { type: 'month', year: 2026, month: 5 },
+      capMinutes: 600,
+      metric: 'actuals',
+    })).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_METRIC' },
+    })
+    expect(helpers.normalizeAttendanceComprehensiveHoursPreviewInput({
+      userId: 'user-a',
+      period: { type: 'month', year: 2026, month: 5 },
+      capMinutes: 600,
+      policyDraft: { metric: 'actuals' },
+    })).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_METRIC' },
+    })
+    expect(helpers.normalizeAttendanceComprehensiveHoursPreviewInput({
+      userId: 'user-a',
+      period: { type: 'month', year: 2026, month: 5 },
+      capMinutes: 600,
+      enforcement: 'deny',
+    })).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_ENFORCEMENT' },
+    })
+    expect(helpers.normalizeAttendanceComprehensiveHoursPreviewInput({
+      userId: 'user-a',
+      period: { type: 'month', year: 2026, month: 5 },
+      capMinutes: 600,
+      policyDraft: { enforcement: 'deny' },
+    })).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_ENFORCEMENT' },
+    })
+    expect(helpers.normalizeAttendanceComprehensiveHoursPreviewInput({
+      userId: 'user-a',
+      period: { type: 'month', year: 2026, month: 5 },
+      capMinutes: 600,
+      metric: ' actual ',
+      enforcement: ' block ',
+    })).toMatchObject({
+      ok: true,
+      input: {
+        metric: 'actual',
+        enforcement: 'block',
+      },
+    })
     await expect(helpers.previewAttendanceComprehensiveHours(db, 'org-1', {
       userId: 'user-a',
       period: { type: 'week' },
