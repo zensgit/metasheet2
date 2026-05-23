@@ -33,6 +33,7 @@ No new files outside the above four. No `plugins/`, `packages/`, `migrations/`,
 | Strong mode + `ok` allows save | `PR5 strong-control allows shift assignment save when preview returns ok` | PASS |
 | Strong mode + preview 503 allows save | `PR5 strong-control allows shift assignment save when preview fails with 503` | PASS |
 | Inactive assignment skips preview entirely | `PR5 inactive shift assignment skips the preview call in both modes` | PASS |
+| Strong mode + `degraded: true` still allows save even on `violation` status (locks `!result?.degraded` guard) | `PR5 strong-control does NOT block shift assignment save when preview is degraded even if status is violation` | PASS |
 | Payload contract: `metric: planned`, single `userId`, `custom_range`, no `allUsers`, `enforcement` mirrors mode (`warn`/`block`) | Asserted in all 6 PR5 tests (positive enforcement assertion in shift+rotation block tests; preserved in PR4 weak tests for `warn` mode) | PASS |
 | Block-state advisory copy banned-language scan | In the shift-violation block test: `advisoryText` must NOT contain `cannot save`, `policy enforced`, `violation prevented`, `禁止保存`, `已强制策略`, `已阻止违规` | PASS |
 | Preview reuses existing `/api/attendance/comprehensive-hours/preview` route | URL match in every test mock | PASS |
@@ -76,7 +77,7 @@ design MD.
 
 | Command | Result |
 | --- | --- |
-| `pnpm --filter @metasheet/web exec vitest run tests/attendance-admin-regressions.spec.ts tests/attendance-admin-anchor-nav.spec.ts --watch=false` | **47/47 PASS** (24 admin-regressions + 23 anchor-nav), 6.26 s |
+| `pnpm --filter @metasheet/web exec vitest run tests/attendance-admin-regressions.spec.ts tests/attendance-admin-anchor-nav.spec.ts --watch=false` | **48/48 PASS** (25 admin-regressions + 23 anchor-nav), 5.91 s |
 | `pnpm --filter @metasheet/web type-check` | PASS |
 | `pnpm --filter @metasheet/web build` | PASS, 6.63 s |
 | `node --check plugins/plugin-attendance/index.cjs` | PASS |

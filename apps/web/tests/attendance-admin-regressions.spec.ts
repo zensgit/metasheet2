@@ -1777,6 +1777,108 @@ describe('Attendance admin regressions', () => {
     expect(advisory?.textContent).toContain('save blocked')
   })
 
+  it('PR5 strong-control does NOT block shift assignment save when preview is degraded even if status is violation', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/shifts')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'shift-a',
+                name: 'Day shift',
+                timezone: 'UTC',
+                workStartTime: '09:00',
+                workEndTime: '18:00',
+                isOvernight: false,
+                lateGraceMinutes: 10,
+                earlyGraceMinutes: 10,
+                roundingMinutes: 5,
+                workingDays: [1, 2, 3, 4, 5],
+              },
+            ],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/comprehensive-hours/preview')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            readOnly: true,
+            period: { type: 'custom_range', from: '2026-05-01', to: '2026-05-10' },
+            metric: 'planned',
+            enforcement: 'block',
+            capMinutes: 9600,
+            scope: { userIds: ['user-9'] },
+            aggregate: {
+              users: 1,
+              ok: 0,
+              warning: 0,
+              violation: 1,
+              totalMinutes: 10200,
+              totalExcessMinutes: 600,
+              totalRemainingMinutes: 0,
+              status: 'violation',
+            },
+            rows: [
+              {
+                userId: 'user-9',
+                minutes: 10200,
+                plannedMinutes: 10200,
+                capMinutes: 9600,
+                remainingMinutes: 0,
+                excessMinutes: 600,
+                status: 'violation',
+                source: 'effective_calendar',
+              },
+            ],
+            degraded: true,
+          },
+        })
+      }
+      if (url === '/api/attendance/assignments' && init?.method === 'POST') {
+        return jsonResponse(200, { ok: true })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const strongModeCheckbox = container!.querySelector<HTMLInputElement>('#attendance-comprehensive-hours-save-block-mode')
+    strongModeCheckbox!.checked = true
+    strongModeCheckbox!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-assignments')
+    setInput(section!, '#attendance-assignment-user-id', 'user-9')
+    const shiftSelect = section!.querySelector<HTMLSelectElement>('#attendance-assignment-shift-id')
+    shiftSelect!.value = 'shift-a'
+    shiftSelect!.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(section!, '#attendance-assignment-start-date', '2026-05-01')
+    setInput(section!, '#attendance-assignment-end-date', '2026-05-10')
+    await flushUi(2)
+
+    const createButton = Array.from(section!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Create assignment'))
+    createButton!.click()
+    await flushUi(8)
+
+    expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
+      String(input) === '/api/attendance/assignments' && init?.method === 'POST'
+    )).toBe(true)
+    expect(container!.textContent).toContain('Assignment created.')
+
+    const advisory = section!.querySelector<HTMLElement>('[data-attendance-comprehensive-hours-assignment-advisory="shift"]')
+    expect(advisory?.dataset.attendanceComprehensiveHoursAssignmentAdvisoryKind).toBe('warn')
+    const advisoryText = advisory?.textContent || ''
+    expect(advisoryText).toContain('degraded')
+    expect(advisoryText).toContain('saving is still allowed')
+    expect(advisoryText).not.toContain('save blocked')
+  })
+
   it('PR5 inactive shift assignment skips the preview call in both modes', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.url
