@@ -204,14 +204,14 @@ materially larger than any of PR1-PR5 individually and must not be auto-started.
 | Action | Status |
 | --- | --- |
 | Closeout MD written | this file |
-| `.worktrees/multitable-issue-1780-closure-20260523/` worktree | scheduled for removal — branch merged via #1798 |
-| Local branch `runtime/multitable-issue-1780-closure-20260523` | scheduled for removal — merged into `main` at `2d50cc51d` |
-| Local branch `frontend/attendance-comprehensive-hours-pr5-strong-control-20260523` | scheduled for removal — merged into `main` at `014fa5078` |
+| `.worktrees/multitable-issue-1780-closure-20260523/` worktree | **removed / verified gone** — auto-cleaned at `gh pr merge 1798 --delete-branch`; `ls .worktrees/multitable-issue-1780-closure-20260523` returned no-such-file-or-directory; `git worktree prune -v` reported no dangling refs |
+| Local branch `runtime/multitable-issue-1780-closure-20260523` | **removed / verified gone** — auto-cleaned at the same `--delete-branch` step; `git branch -l 'runtime/multitable-issue-1780-closure*'` returned no match; merge of squash-merged content is recorded on `main` at `2d50cc51d` |
+| Local branch `frontend/attendance-comprehensive-hours-pr5-strong-control-20260523` | **removed** — `git branch -D` invoked after the squash-merge of PR #1796 (`388a12062` orphaned by squash to `014fa5078` on `main`); `git branch -l 'frontend/attendance-comprehensive-hours-pr5-*'` returned no match |
 | Pre-existing main-worktree dingtalk dirty docs (8 files under `docs/development/dingtalk-*`) | **untouched** — not in this lane |
 | Pre-existing main-worktree `.tmp-*.mjs` scratch files (12 files) | **untouched** — not in this lane |
 
-The cleanup is recorded here for traceability but executed in a separate
-operation; this MD is the docs-only artifact.
+All three local-residue items were removed in the same session as this
+closeout doc; the table is the final-state record, not a forward-looking plan.
 
 ## References
 
