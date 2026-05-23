@@ -1613,6 +1613,17 @@ function appendAutoApprovalHistory(history: ApprovalHistoryEntry[], event: Appro
   })
 }
 
+// Build a pure assignment-resolver closure for the executor.
+//
+// `formSchema` is intentionally OPTIONAL: createApproval passes the schema
+// (publish/create-time validation path) but dispatch/adminJump deliberately
+// omit it. Those runtime paths must read only the frozen runtime_graph and
+// instance snapshots — never `approval_template_versions` or any active
+// template — so source-of-truth field-type validation already happened at
+// publish-time (`validateApprovalAssigneeSourcesAgainstFormSchema`). The
+// resolver's own `assertFormUserSource` is a belt-and-suspenders check that
+// activates only when a schema is supplied; do not change this signature to
+// fetch a schema from active template tables at runtime.
 function buildApprovalAssignmentResolver(options: {
   formSchema?: FormSchema
   formSnapshot: Record<string, unknown>
@@ -3602,14 +3613,34 @@ export class ApprovalProductService {
     }
   }
 
+  // Dynamic-source discriminator. `metadata.resolvedFrom` is written ONLY by
+  // `ApprovalAssigneeResolver` (the sole producer for dynamic `assigneeSources`);
+  // legacy static `assigneeType`/`assigneeIds` assignments never carry it.
+  //
+  // `assertNoActiveAssignmentConflicts` uses this predicate to gate the extra
+  // active-assignment SELECT: legacy/static batches skip the DB round-trip
+  // because static parallel-branch duplicates are already refused at template
+  // validation time. Dynamic batches MUST hit the SELECT to catch runtime
+  // collisions that the unique index would otherwise raise after partial
+  // mutation.
+  //
+  // Do NOT strip `metadata.resolvedFrom` from a dynamic assignment before it
+  // reaches `insertAssignments` — doing so silently disables this guard. If a
+  // future caller needs a different discriminator, prefer adding an explicit
+  // flag rather than reusing this one.
+  private isDynamicallyResolvedAssignment(
+    assignment: { metadata?: unknown },
+  ): boolean {
+    return isRecord(assignment.metadata) && isRecord(assignment.metadata.resolvedFrom)
+  }
+
   private async assertNoActiveAssignmentConflicts(
     client: { query: typeof pool.query },
     instanceId: string,
     assignments: Array<{ assignmentType: 'user' | 'role'; assigneeId: string; nodeKey: string; metadata?: unknown }>,
   ): Promise<void> {
     if (assignments.length === 0) return
-    if (assignments.every((assignment) =>
-      !isRecord(assignment.metadata) || !isRecord(assignment.metadata.resolvedFrom))) return
+    if (!assignments.some((assignment) => this.isDynamicallyResolvedAssignment(assignment))) return
 
     const pendingKeys = new Map<string, { assignmentType: 'user' | 'role'; assigneeId: string; nodeKey: string }>()
     for (const assignment of assignments) {

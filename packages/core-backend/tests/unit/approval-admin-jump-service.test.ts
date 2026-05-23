@@ -124,6 +124,57 @@ function buildRequesterMergeGraph() {
   }
 }
 
+function buildDynamicTargetGraph() {
+  // Same shape as buildLinearGraph, but `finance_review` (the admin-jump
+  // target) uses a dynamic `assigneeSources: [{ kind: 'requester' }]` and
+  // omits legacy `assigneeType`/`assigneeIds`. No autoApproval policy.
+  return {
+    nodes: [
+      { key: 'start', type: 'start', config: {} },
+      { key: 'manager_review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['manager-1'] } },
+      { key: 'finance_review', type: 'approval', config: { assigneeSources: [{ kind: 'requester' }] } },
+      { key: 'cc_notify', type: 'cc', config: { targetType: 'user', targetIds: ['audit-1'] } },
+      { key: 'director_review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['director-1'] } },
+      { key: 'end', type: 'end', config: {} },
+    ],
+    edges: [
+      { key: 'e-start-manager', source: 'start', target: 'manager_review' },
+      { key: 'e-manager-finance', source: 'manager_review', target: 'finance_review' },
+      { key: 'e-finance-cc', source: 'finance_review', target: 'cc_notify' },
+      { key: 'e-cc-director', source: 'cc_notify', target: 'director_review' },
+      { key: 'e-director-end', source: 'director_review', target: 'end' },
+    ],
+    policy: { allowRevoke: true },
+  }
+}
+
+function buildDynamicRequesterMergeGraph() {
+  // Dynamic counterpart of `buildRequesterMergeGraph`: `finance_review` uses
+  // `assigneeSources: [{ kind: 'requester' }]`, and policy enables
+  // `mergeWithRequester` so PR2 auto-approval cascades past the dynamic node.
+  return {
+    nodes: [
+      { key: 'start', type: 'start', config: {} },
+      { key: 'manager_review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['manager-1'] } },
+      { key: 'finance_review', type: 'approval', config: { assigneeSources: [{ kind: 'requester' }] } },
+      { key: 'cc_notify', type: 'cc', config: { targetType: 'user', targetIds: ['audit-1'] } },
+      { key: 'director_review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['director-1'] } },
+      { key: 'end', type: 'end', config: {} },
+    ],
+    edges: [
+      { key: 'e-start-manager', source: 'start', target: 'manager_review' },
+      { key: 'e-manager-finance', source: 'manager_review', target: 'finance_review' },
+      { key: 'e-finance-cc', source: 'finance_review', target: 'cc_notify' },
+      { key: 'e-cc-director', source: 'cc_notify', target: 'director_review' },
+      { key: 'e-director-end', source: 'director_review', target: 'end' },
+    ],
+    policy: {
+      allowRevoke: true,
+      autoApproval: { mergeWithRequester: true },
+    },
+  }
+}
+
 function buildParallelGraph() {
   return {
     nodes: [
@@ -209,6 +260,12 @@ function mockAdminJumpQueries(options: {
     }
     if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1 AND is_active = TRUE')) {
       return { rows: assignments, rowCount: assignments.length }
+    }
+    if (statement.startsWith('SELECT assignment_type, assignee_id, node_key FROM approval_assignments')) {
+      // Dynamic-assignment conflict guard (insertAssignments → assertNoActiveAssignmentConflicts).
+      // Adminjump deactivates old assignments before insertAssignments, so by the time the
+      // guard SELECT fires there are no active rows to compare against.
+      return { rows: [], rowCount: 0 }
     }
     if (statement.startsWith('SELECT id, actor_id, metadata FROM approval_records')) {
       return { rows: historyRows, rowCount: historyRows.length }
@@ -443,6 +500,125 @@ describe('ApprovalProductService adminJump', () => {
 
     const jumpRecordCall = findRecordInsert('jump')
     const jumpMetadata = JSON.parse(String((jumpRecordCall?.[1] as unknown[])[9])) as Record<string, unknown>
+    expect(jumpMetadata).toMatchObject({
+      toNodeKey: 'finance_review',
+      nextNodeKey: 'director_review',
+      newAssignees: [{
+        assignmentType: 'user',
+        assigneeId: 'director-1',
+        nodeKey: 'director_review',
+        sourceStep: 3,
+      }],
+    })
+  })
+
+  it('O1a admin jump into a dynamic assigneeSources target resolves via the resolver and persists metadata', async () => {
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    installGetApprovalStub(service)
+    mockAdminJumpQueries({ runtimeGraph: buildDynamicTargetGraph() })
+
+    const result = await service.adminJump(
+      'apr-1',
+      { version: 2, targetNodeKey: 'finance_review', reason: 'redirect to requester' },
+      adminActor(),
+    )
+
+    expect(result).toMatchObject({ id: 'apr-1', currentNodeKey: 'finance_review' })
+
+    const statements = allSqlStatements()
+    expect(statements.some((statement) => statement.includes('approval_templates'))).toBe(false)
+    expect(statements.some((statement) => statement.includes('approval_template_versions'))).toBe(false)
+    expect(statements.some((statement) => statement.includes('active_version_id'))).toBe(false)
+
+    const deactivateCall = pgState.client.query.mock.calls.find(([sql]) =>
+      normalize(String(sql)).startsWith('UPDATE approval_assignments SET is_active = FALSE'))
+    expect(deactivateCall).toBeTruthy()
+
+    const assignmentInsert = pgState.client.query.mock.calls.find(([sql]) =>
+      normalize(String(sql)).startsWith('INSERT INTO approval_assignments'))
+    expect(assignmentInsert?.[1]).toEqual([
+      'apr-1',
+      'user',
+      'requester-1',
+      2,
+      'finance_review',
+      JSON.stringify({ resolvedFrom: { kind: 'requester', sourceIndex: 0 } }),
+    ])
+
+    const jumpRecord = findRecordInsert('jump')
+    const jumpMetadata = JSON.parse(String((jumpRecord?.[1] as unknown[])[9])) as Record<string, unknown>
+    expect(jumpMetadata).toMatchObject({
+      adminJump: true,
+      fromNodeKey: 'manager_review',
+      toNodeKey: 'finance_review',
+      nextNodeKey: 'finance_review',
+    })
+    expect(jumpMetadata.newAssignees).toEqual([{
+      assignmentType: 'user',
+      assigneeId: 'requester-1',
+      nodeKey: 'finance_review',
+      sourceStep: 2,
+    }])
+
+    // No PR2 cascade audit because this graph has no autoApproval policy.
+    expect(findRecordInsert('approve')).toBeUndefined()
+  })
+
+  it('O1b admin jump into a dynamic assigneeSources target composes with PR2 mergeWithRequester cascade past the dynamic node', async () => {
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    installGetApprovalStub(service)
+    mockAdminJumpQueries({ runtimeGraph: buildDynamicRequesterMergeGraph() })
+
+    await service.adminJump(
+      'apr-1',
+      { version: 2, targetNodeKey: 'finance_review', reason: 'dynamic jump into requester merge' },
+      adminActor(),
+    )
+
+    const statements = allSqlStatements()
+    expect(statements.some((statement) => statement.includes('approval_template_versions'))).toBe(false)
+    expect(statements.some((statement) => statement.includes('active_version_id'))).toBe(false)
+
+    // The cascade auto-approves the dynamic finance_review and advances to
+    // director_review, so the only assignment write is for director-1 and
+    // carries no resolvedFrom metadata (static).
+    const assignmentInserts = pgState.client.query.mock.calls.filter(([sql]) =>
+      normalize(String(sql)).startsWith('INSERT INTO approval_assignments'))
+    expect(assignmentInserts).toHaveLength(1)
+    expect(assignmentInserts[0]?.[1]).toEqual([
+      'apr-1',
+      'user',
+      'director-1',
+      3,
+      'director_review',
+      '{}',
+    ])
+
+    const updateCall = findInstanceUpdate()
+    expect(updateCall?.[1]).toEqual([
+      'apr-1',
+      'pending',
+      3,
+      'director_review',
+      3,
+      3,
+    ])
+
+    const autoRecord = findRecordInsert('approve')
+    expect(autoRecord?.[1]?.[2]).toBe('system:auto-approval')
+    const autoMetadata = JSON.parse(String((autoRecord?.[1] as unknown[])[9])) as Record<string, unknown>
+    expect(autoMetadata).toMatchObject({
+      autoApproved: true,
+      nodeKey: 'finance_review',
+      reason: 'auto-merge-requester',
+      originalApprover: { type: 'user', id: 'requester-1' },
+      actorMode: 'system',
+    })
+
+    const jumpRecord = findRecordInsert('jump')
+    const jumpMetadata = JSON.parse(String((jumpRecord?.[1] as unknown[])[9])) as Record<string, unknown>
     expect(jumpMetadata).toMatchObject({
       toNodeKey: 'finance_review',
       nextNodeKey: 'director_review',
