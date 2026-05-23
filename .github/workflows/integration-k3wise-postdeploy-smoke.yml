@@ -6,7 +6,7 @@ on:
       base_url:
         description: 'MetaSheet API/control-plane base URL to smoke'
         required: false
-        default: 'http://142.171.239.56:8081'
+        default: 'http://23.254.236.11:8081'
       frontend_base_url:
         description: 'Optional frontend/nginx SPA base URL for /integrations/* route checks'
         required: false
@@ -78,7 +78,7 @@ jobs:
         id: env_check
         continue-on-error: true
         env:
-          METASHEET_BASE_URL: ${{ github.event.inputs.base_url || 'http://142.171.239.56:8081' }}
+          METASHEET_BASE_URL: ${{ github.event.inputs.base_url || vars.METASHEET_BASE_URL || vars.PUBLIC_APP_URL || 'http://23.254.236.11:8081' }}
           METASHEET_FRONTEND_BASE_URL: ${{ github.event.inputs.frontend_base_url || '' }}
           METASHEET_TENANT_ID: ${{ github.event.inputs.tenant_id || vars.METASHEET_TENANT_ID || '' }}
           REQUIRE_AUTH: ${{ github.event.inputs.require_auth || 'true' }}
@@ -130,7 +130,7 @@ jobs:
         if: ${{ steps.env_check.outputs.env_check_rc == '0' }}
         continue-on-error: true
         env:
-          METASHEET_BASE_URL: ${{ github.event.inputs.base_url || 'http://142.171.239.56:8081' }}
+          METASHEET_BASE_URL: ${{ github.event.inputs.base_url || vars.METASHEET_BASE_URL || vars.PUBLIC_APP_URL || 'http://23.254.236.11:8081' }}
           METASHEET_FRONTEND_BASE_URL: ${{ github.event.inputs.frontend_base_url || '' }}
           METASHEET_TENANT_ID: ${{ github.event.inputs.tenant_id || vars.METASHEET_TENANT_ID || '' }}
           REQUIRE_AUTH: ${{ github.event.inputs.require_auth || 'true' }}

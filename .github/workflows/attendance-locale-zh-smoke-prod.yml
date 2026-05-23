@@ -10,11 +10,11 @@ on:
       web_url:
         description: 'Web URL (attendance page base)'
         required: false
-        default: 'http://142.171.239.56:8081'
+        default: 'http://23.254.236.11:8081'
       api_base:
         description: 'API base'
         required: false
-        default: 'http://142.171.239.56:8081/api'
+        default: 'http://23.254.236.11:8081/api'
       org_id:
         description: 'Org ID used for temporary holiday setup'
         required: false
@@ -54,8 +54,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      WEB_URL: ${{ inputs.web_url || vars.ATTENDANCE_WEB_BASE_URL || 'http://142.171.239.56:8081' }}
-      API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://142.171.239.56:8081/api' }}
+      WEB_URL: ${{ inputs.web_url || vars.ATTENDANCE_WEB_BASE_URL || 'http://23.254.236.11:8081' }}
+      API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://23.254.236.11:8081/api' }}
       ORG_ID: ${{ inputs.org_id || vars.ATTENDANCE_ORG_ID || 'default' }}
       VERIFY_HOLIDAY: ${{ inputs.verify_holiday || 'true' }}
       REQUIRE_TOGGLE_CHECKS: ${{ inputs.require_toggle_checks || vars.ATTENDANCE_LOCALE_ZH_REQUIRE_TOGGLE_CHECKS || 'false' }}

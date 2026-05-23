@@ -11,7 +11,7 @@ on:
       base_url:
         description: 'Yjs base URL (backend, not reverse-proxy)'
         required: true
-        default: 'http://142.171.239.56:8081'
+        default: 'http://23.254.236.11:8081'
       record_id:
         description: 'Record ID with a fld_pilot_title text field to edit'
         required: true

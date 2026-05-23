@@ -37,7 +37,7 @@ This folder contains GitHub Actions that validate Phase 5 SLOs against a Prometh
 
 - `dingtalk-oauth-stability-recording-lite.yml`
   - Triggers every 2 hours (`15 */2 * * *`) and via manual dispatch.
-  - Restores the deploy SSH key, reapplies the on-prem Alertmanager webhook config from `ALERTMANAGER_WEBHOOK_URL`, `ALERT_WEBHOOK_URL`, `SLACK_WEBHOOK_URL`, or `ATTENDANCE_ALERT_SLACK_WEBHOOK_URL` when available, runs `scripts/ops/dingtalk-oauth-stability-check.sh` against `142.171.239.56`, and uploads JSON/log/summary artifacts.
+  - Restores the deploy SSH key, reapplies the on-prem Alertmanager webhook config from `ALERTMANAGER_WEBHOOK_URL`, `ALERT_WEBHOOK_URL`, `SLACK_WEBHOOK_URL`, or `ATTENDANCE_ALERT_SLACK_WEBHOOK_URL` when available, runs `scripts/ops/dingtalk-oauth-stability-check.sh` against the configured `DEPLOY_HOST`, and uploads JSON/log/summary artifacts.
   - Does not run the Slack drill; it is recording-only and fails the workflow when `healthy != true`.
   - Preflight GitHub configuration with `node scripts/ops/github-actions-runtime-readiness.mjs --repo zensgit/metasheet2 --strict`.
   - Like other scheduled/manual workflows, it only becomes live after the workflow file exists on the default branch.
