@@ -11681,6 +11681,7 @@ const ATTENDANCE_COMPREHENSIVE_HOURS_PERIOD_TYPES = new Set([
 ])
 const ATTENDANCE_COMPREHENSIVE_HOURS_METRICS = new Set(['planned', 'actual'])
 const ATTENDANCE_COMPREHENSIVE_HOURS_ENFORCEMENT = new Set(['warn', 'block'])
+const ATTENDANCE_COMPREHENSIVE_HOURS_PREVIEW_MAX_USERS = 100
 
 function buildAttendanceComprehensiveHoursError(code, message) {
   return { ok: false, error: { code, message } }
@@ -11936,6 +11937,287 @@ function buildAttendanceComprehensiveHoursPreviewRows(input = {}) {
       })
     })
     .sort((a, b) => String(a.userId ?? '').localeCompare(String(b.userId ?? '')))
+}
+
+function normalizeAttendanceComprehensiveHoursUserIds(input = {}) {
+  const scope = input.scope && typeof input.scope === 'object' ? input.scope : {}
+  if (input.allUsers === true || scope.allUsers === true) {
+    return buildAttendanceComprehensiveHoursError(
+      'ALL_USERS_NOT_SUPPORTED',
+      'Comprehensive hours preview v1 requires explicit userId/userIds; allUsers belongs to a later batch slice.',
+    )
+  }
+  const values = []
+  for (const value of [input.userId, scope.userId]) {
+    if (typeof value === 'string' && value.trim()) values.push(value.trim())
+  }
+  for (const list of [input.userIds, scope.userIds]) {
+    if (!Array.isArray(list)) continue
+    for (const value of list) {
+      if (typeof value === 'string' && value.trim()) values.push(value.trim())
+    }
+  }
+  const userIds = Array.from(new Set(values)).sort()
+  if (userIds.length === 0) {
+    return buildAttendanceComprehensiveHoursError(
+      'EMPTY_SCOPE',
+      'Comprehensive hours preview requires userId or userIds.',
+    )
+  }
+  if (userIds.length > ATTENDANCE_COMPREHENSIVE_HOURS_PREVIEW_MAX_USERS) {
+    return buildAttendanceComprehensiveHoursError(
+      'SCOPE_TOO_LARGE',
+      `Comprehensive hours preview supports at most ${ATTENDANCE_COMPREHENSIVE_HOURS_PREVIEW_MAX_USERS} userIds per request.`,
+    )
+  }
+  return { ok: true, userIds }
+}
+
+function normalizeAttendanceComprehensiveHoursCapMinutes(input = {}) {
+  const policyDraft = input.policyDraft && typeof input.policyDraft === 'object' ? input.policyDraft : {}
+  const minuteCandidates = [
+    policyDraft.capMinutes,
+    policyDraft.cap_minutes,
+    input.capMinutes,
+    input.cap_minutes,
+  ]
+  for (const value of minuteCandidates) {
+    const minutes = Number(value)
+    if (Number.isFinite(minutes) && minutes > 0) {
+      return { ok: true, capMinutes: Math.floor(minutes) }
+    }
+  }
+  const hourCandidates = [
+    policyDraft.capHours,
+    policyDraft.cap_hours,
+    input.capHours,
+    input.cap_hours,
+  ]
+  for (const value of hourCandidates) {
+    const hours = Number(value)
+    if (Number.isFinite(hours) && hours > 0) {
+      return { ok: true, capMinutes: Math.floor(hours * 60) }
+    }
+  }
+  return buildAttendanceComprehensiveHoursError(
+    'INVALID_CAP',
+    'Comprehensive hours preview requires a positive capMinutes or capHours value.',
+  )
+}
+
+function normalizeAttendanceComprehensiveHoursPreviewInput(input = {}) {
+  const policyDraft = input.policyDraft && typeof input.policyDraft === 'object' ? input.policyDraft : {}
+  const metric = resolveAttendanceComprehensiveHoursMetric(input.metric ?? policyDraft.metric)
+  const enforcement = resolveAttendanceComprehensiveHoursEnforcement(input.enforcement ?? policyDraft.enforcement)
+  const scope = normalizeAttendanceComprehensiveHoursUserIds(input)
+  if (!scope.ok) return scope
+  const cap = normalizeAttendanceComprehensiveHoursCapMinutes(input)
+  if (!cap.ok) return cap
+  const periodInput = input.period && typeof input.period === 'object'
+    ? input.period
+    : {
+      type: input.type,
+      from: input.from,
+      to: input.to,
+      year: input.year,
+      month: input.month,
+      quarter: input.quarter,
+      cycleId: input.cycleId,
+      cycle: input.cycle,
+    }
+  return {
+    ok: true,
+    input: {
+      metric,
+      enforcement,
+      capMinutes: cap.capMinutes,
+      userIds: scope.userIds,
+      periodInput,
+    },
+  }
+}
+
+async function resolveAttendanceComprehensiveHoursPreviewPeriod(db, orgId, periodInput = {}) {
+  const raw = periodInput && typeof periodInput === 'object' ? { ...periodInput } : {}
+  if (!raw.type) {
+    if (raw.cycleId) raw.type = 'payroll_cycle'
+    else if (raw.from !== undefined || raw.to !== undefined) raw.type = 'custom_range'
+  }
+  if (raw.type === 'payroll_cycle' && raw.cycleId && !(raw.cycle || raw.startDate || raw.start_date)) {
+    const cycleId = normalizeUuidString(raw.cycleId)
+    if (!cycleId) {
+      return buildAttendanceComprehensiveHoursError('INVALID_PAYROLL_CYCLE', 'Payroll-cycle period requires a valid cycleId.')
+    }
+    const rows = await db.query(
+      'SELECT * FROM attendance_payroll_cycles WHERE id = $1 AND org_id = $2',
+      [cycleId, orgId],
+    )
+    if (!rows.length) {
+      return {
+        ok: false,
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Payroll cycle not found.',
+        },
+        status: 404,
+      }
+    }
+    raw.cycle = mapPayrollCycleRow(rows[0])
+  }
+  const resolved = resolveAttendanceComprehensiveHoursPeriod(raw)
+  if (!resolved.ok) return resolved
+  const rangeDays = diffDays(resolved.period.from, resolved.period.to) + 1
+  if (rangeDays > 366) {
+    return buildAttendanceComprehensiveHoursError('INVALID_PERIOD_RANGE', 'Comprehensive hours preview range must be <= 366 days.')
+  }
+  return resolved
+}
+
+async function assertAttendanceComprehensiveHoursPreviewSchemaReady(db, orgId, metric) {
+  const tables = metric === 'actual'
+    ? ['attendance_records', 'attendance_requests']
+    : [
+      'attendance_rules',
+      'attendance_holidays',
+      'attendance_shifts',
+      'attendance_shift_assignments',
+      'attendance_rotation_assignments',
+    ]
+  for (const table of tables) {
+    await db.query(`SELECT 1 FROM ${table} WHERE org_id = $1 LIMIT 1`, [orgId])
+  }
+}
+
+async function loadAttendanceComprehensivePlannedMinutesByUser(db, orgId, userIds, period) {
+  const workDates = enumerateAttendanceCalendarDateRange(period.from, period.to)
+  const defaultRule = await loadDefaultRule(db, orgId)
+  const { prefetched } = await buildWorkContextPrefetch(db, {
+    orgId,
+    userIds,
+    workDates,
+    defaultRule,
+  })
+  const plannedMinutesByUser = new Map()
+  const plannedDetailsByUser = new Map()
+  for (const userId of userIds) {
+    const days = workDates.map((date) => ({
+      date,
+      resolvedContext: resolveWorkContextFromPrefetch({
+        orgId,
+        userId,
+        workDate: date,
+        defaultRule,
+        prefetched,
+      }),
+    }))
+    const planned = buildAttendanceComprehensivePlannedMinutesFromDays(days, { defaultRule })
+    plannedMinutesByUser.set(userId, planned.plannedMinutes)
+    plannedDetailsByUser.set(userId, planned)
+  }
+  return { plannedMinutesByUser, plannedDetailsByUser }
+}
+
+async function loadAttendanceComprehensiveActualMinutesByUser(db, orgId, userIds, period) {
+  const actualMinutesByUser = new Map()
+  const actualDetailsByUser = new Map()
+  for (const userId of userIds) {
+    const summary = await loadAttendanceSummary(db, orgId, userId, period.from, period.to)
+    const actual = buildAttendanceComprehensiveActualMinutesFromSummary(summary)
+    actualMinutesByUser.set(userId, actual.actualMinutes)
+    actualDetailsByUser.set(userId, { ...actual, summary })
+  }
+  return { actualMinutesByUser, actualDetailsByUser }
+}
+
+function buildAttendanceComprehensiveHoursPreviewAggregate(rows) {
+  const aggregate = {
+    users: rows.length,
+    ok: 0,
+    warning: 0,
+    violation: 0,
+    totalMinutes: 0,
+    totalExcessMinutes: 0,
+    totalRemainingMinutes: 0,
+    status: 'ok',
+  }
+  for (const row of rows) {
+    if (row.status === 'violation') aggregate.violation += 1
+    else if (row.status === 'warning') aggregate.warning += 1
+    else aggregate.ok += 1
+    aggregate.totalMinutes += Number(row.minutes ?? 0)
+    aggregate.totalExcessMinutes += Number(row.excessMinutes ?? 0)
+    aggregate.totalRemainingMinutes += Number(row.remainingMinutes ?? 0)
+  }
+  aggregate.status = aggregate.violation > 0 ? 'violation' : aggregate.warning > 0 ? 'warning' : 'ok'
+  return aggregate
+}
+
+async function previewAttendanceComprehensiveHours(db, orgId, body = {}) {
+  const normalized = normalizeAttendanceComprehensiveHoursPreviewInput(body)
+  if (!normalized.ok) return { ...normalized, status: 400 }
+  try {
+    const resolved = await resolveAttendanceComprehensiveHoursPreviewPeriod(db, orgId, normalized.input.periodInput)
+    if (!resolved.ok) {
+      return { ...resolved, status: resolved.status ?? 400 }
+    }
+    await assertAttendanceComprehensiveHoursPreviewSchemaReady(db, orgId, normalized.input.metric)
+    const users = normalized.input.userIds.map(id => ({ id }))
+    let plannedResult = { plannedMinutesByUser: new Map(), plannedDetailsByUser: new Map() }
+    let actualResult = { actualMinutesByUser: new Map(), actualDetailsByUser: new Map() }
+    if (normalized.input.metric === 'actual') {
+      actualResult = await loadAttendanceComprehensiveActualMinutesByUser(db, orgId, normalized.input.userIds, resolved.period)
+    } else {
+      plannedResult = await loadAttendanceComprehensivePlannedMinutesByUser(db, orgId, normalized.input.userIds, resolved.period)
+    }
+    const rows = buildAttendanceComprehensiveHoursPreviewRows({
+      users,
+      metric: normalized.input.metric,
+      enforcement: normalized.input.enforcement,
+      capMinutes: normalized.input.capMinutes,
+      period: resolved.period,
+      plannedMinutesByUser: plannedResult.plannedMinutesByUser,
+      actualMinutesByUser: actualResult.actualMinutesByUser,
+    }).map((row) => {
+      const detail = normalized.input.metric === 'actual'
+        ? actualResult.actualDetailsByUser.get(row.userId)
+        : plannedResult.plannedDetailsByUser.get(row.userId)
+      return {
+        ...row,
+        source: normalized.input.metric === 'actual' ? 'summary' : 'effective_calendar',
+        ...(normalized.input.metric === 'planned' && detail
+          ? { days: detail.days, workingDays: detail.workingDays }
+          : {}),
+      }
+    })
+    return {
+      ok: true,
+      data: {
+        readOnly: true,
+        period: resolved.period,
+        metric: normalized.input.metric,
+        enforcement: normalized.input.enforcement,
+        capMinutes: normalized.input.capMinutes,
+        scope: {
+          userIds: normalized.input.userIds,
+        },
+        rows,
+        aggregate: buildAttendanceComprehensiveHoursPreviewAggregate(rows),
+        degraded: false,
+      },
+    }
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) {
+      return {
+        ok: false,
+        status: 503,
+        error: {
+          code: 'DB_NOT_READY',
+          message: 'Attendance tables missing',
+        },
+      }
+    }
+    throw error
+  }
 }
 
 function buildWorkdayContextSummary(options) {
@@ -13633,6 +13915,9 @@ module.exports = {
     buildAttendanceComprehensiveActualMinutesFromSummary,
     buildAttendanceComprehensiveHoursComparison,
     buildAttendanceComprehensiveHoursPreviewRows,
+    normalizeAttendanceComprehensiveHoursPreviewInput,
+    resolveAttendanceComprehensiveHoursPreviewPeriod,
+    previewAttendanceComprehensiveHours,
     findAttendanceScheduleAssignmentConflict,
     acquireAttendanceScheduleAssignmentLock,
     getAttendanceScheduleAssignmentConflictMessage,
@@ -26366,6 +26651,31 @@ module.exports = {
           }
           logger.error('Attendance assignment delete failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete assignment' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/comprehensive-hours/preview',
+      withPermission('attendance:admin', async (req, res) => {
+        try {
+          const result = await previewAttendanceComprehensiveHours(db, getOrgId(req), req.body ?? {})
+          if (!result.ok) {
+            res.status(result.status || 400).json({
+              ok: false,
+              error: result.error || { code: 'VALIDATION_ERROR', message: 'Invalid comprehensive hours preview request' },
+            })
+            return
+          }
+          res.json({ ok: true, data: result.data })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance comprehensive-hours preview failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to preview comprehensive hours.' } })
         }
       })
     )
