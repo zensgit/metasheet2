@@ -11507,6 +11507,7 @@ async function resolveEffectiveCalendar(db, args) {
     }
     if (base.holidayId) baseOut.holidayId = base.holidayId
     if (base.name) baseOut.name = base.name
+    if (base.dayIndex) baseOut.dayIndex = base.dayIndex
 
     const effectiveOut = {
       isWorkingDay: effective.isWorkingDay,

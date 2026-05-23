@@ -140,6 +140,36 @@ describe('employee calendar chip display', () => {
     expect(display.title).toBe('Holiday')
     expect(display.visibleText).toBe('Holiday')
   })
+
+  it('renders group-specific holiday length results as the same employee company-policy accent', () => {
+    const shortGroupDisplays = [1, 2, 3, 4, 5].map((dayIndex) => buildCalendarChipDisplay({
+      id: `short-${dayIndex}`,
+      date: `2026-10-${String(dayIndex).padStart(2, '0')}`,
+      isWorkingDay: dayIndex >= 4,
+      base: {
+        isWorkingDay: false,
+        source: 'national',
+        name: `国庆节-${dayIndex}`,
+        dayIndex,
+      },
+      effective: dayIndex >= 4
+        ? { isWorkingDay: true, source: 'group', label: 'Short group makeup work' }
+        : { isWorkingDay: false, source: 'national', label: `国庆节-${dayIndex}` },
+      layers: dayIndex >= 4
+        ? [
+            { kind: 'holiday', source: 'national', isWorkingDay: false, label: `国庆节-${dayIndex}` },
+            { kind: 'calendar_policy', source: 'group', isWorkingDay: true, label: 'Short group makeup work' },
+          ]
+        : [{ kind: 'holiday', source: 'national', isWorkingDay: false, label: `国庆节-${dayIndex}` }],
+      overlays: [],
+    } as CalendarEffectiveChip, { isZh: true }))
+
+    expect(shortGroupDisplays.map(display => display.dayBadge?.text)).toEqual(['休', '休', '休', '班', '班'])
+    expect(shortGroupDisplays[0]?.visibleText).toBe('国庆节 休')
+    expect(shortGroupDisplays[3]?.visibleText).toBe('Short group makeup work 班')
+    expect(shortGroupDisplays[3]?.sourceClass).toBe('calendar-source--company-policy')
+    expect(shortGroupDisplays[3]?.tooltip).toContain('公司节假日 · 班组日历政策')
+  })
 })
 
 describe('hasCalendarChipOverrideMarker', () => {

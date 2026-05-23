@@ -7803,6 +7803,152 @@ describe('Attendance Plugin Integration', () => {
     }
   })
 
+  it('effective-calendar accepts group-specific holiday lengths for different users in userId mode', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const year = 3030 + (Number.parseInt(runSuffix.slice(-3), 36) % 500)
+    const orgId = 'default'
+    const rangeFrom = `${year}-10-01`
+    const rangeTo = `${year}-10-05`
+    const shortUserId = `attendance-effcal-short-${runSuffix}`
+    const longUserId = `attendance-effcal-long-${runSuffix}`
+    const adminUserId = `attendance-effcal-group-length-admin-${runSuffix}`
+    const shortGroupName = `effcal-short-holiday-${runSuffix}`
+    const longGroupName = `effcal-long-holiday-${runSuffix}`
+    let shortGroupId: string | null = null
+    let longGroupId: string | null = null
+    let originalCalendarPolicy: any = null
+
+    const pool = new Pool({ connectionString: dbUrl })
+    try {
+      await pool.query(
+        'DELETE FROM attendance_holidays WHERE org_id = $1 AND holiday_date BETWEEN $2 AND $3',
+        [orgId, rangeFrom, rangeTo]
+      )
+      for (let day = 1; day <= 5; day += 1) {
+        await pool.query(
+          `INSERT INTO attendance_holidays (id, org_id, holiday_date, name, is_working_day, origin)
+           VALUES ($1, 'default', $2, $3, false, 'national')`,
+          [randomUuidV4(), `${year}-10-${String(day).padStart(2, '0')}`, `National Day-${day}`]
+        )
+      }
+
+      const shortGroupRows = await pool.query(
+        `INSERT INTO attendance_groups (org_id, name, code, timezone)
+         VALUES ('default', $1, $2, 'UTC')
+         RETURNING id`,
+        [shortGroupName, shortGroupName]
+      )
+      shortGroupId = String(shortGroupRows.rows[0].id)
+      const longGroupRows = await pool.query(
+        `INSERT INTO attendance_groups (org_id, name, code, timezone)
+         VALUES ('default', $1, $2, 'UTC')
+         RETURNING id`,
+        [longGroupName, longGroupName]
+      )
+      longGroupId = String(longGroupRows.rows[0].id)
+      await pool.query(
+        `INSERT INTO attendance_group_members (org_id, group_id, user_id)
+         VALUES ('default', $1, $2), ('default', $3, $4)`,
+        [shortGroupId, shortUserId, longGroupId, longUserId]
+      )
+
+      const adminTokenRes = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
+      )
+      const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+
+      const settingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      })
+      originalCalendarPolicy = (settingsRes.body as any)?.data?.calendarPolicy ?? { overrides: [] }
+
+      const putRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          calendarPolicy: {
+            overrides: [
+              {
+                dayIndexStart: 4,
+                dayIndexEnd: 5,
+                filters: { attendanceGroups: [shortGroupName] },
+                effective: {
+                  isWorkingDay: true,
+                  label: 'Short group makeup work',
+                  source: 'group',
+                },
+              },
+            ],
+          },
+        }),
+      })
+      expect(putRes.status).toBe(200)
+
+      const fetchForUser = async (userId: string) => {
+        const res = await requestJson(
+          `${baseUrl}/api/attendance/effective-calendar?from=${rangeFrom}&to=${rangeTo}&userId=${encodeURIComponent(userId)}`,
+          { headers: { Authorization: `Bearer ${adminToken}` } }
+        )
+        expect(res.status).toBe(200)
+        return ((res.body as any)?.data?.items ?? []) as any[]
+      }
+
+      const shortItems = await fetchForUser(shortUserId)
+      const longItems = await fetchForUser(longUserId)
+      expect(shortItems).toHaveLength(5)
+      expect(longItems).toHaveLength(5)
+
+      const shortRestDates = shortItems.filter(item => item.effective.isWorkingDay === false).map(item => item.date)
+      const shortWorkDates = shortItems.filter(item => item.effective.isWorkingDay === true).map(item => item.date)
+      const longRestDates = longItems.filter(item => item.effective.isWorkingDay === false).map(item => item.date)
+      expect(shortRestDates).toEqual([`${year}-10-01`, `${year}-10-02`, `${year}-10-03`])
+      expect(shortWorkDates).toEqual([`${year}-10-04`, `${year}-10-05`])
+      expect(longRestDates).toEqual([`${year}-10-01`, `${year}-10-02`, `${year}-10-03`, `${year}-10-04`, `${year}-10-05`])
+
+      const shortByDate = new Map<string, any>(shortItems.map(item => [item.date, item]))
+      expect(shortByDate.get(`${year}-10-01`)?.base.dayIndex).toBe(1)
+      expect(shortByDate.get(`${year}-10-01`)?.effective.source).toBe('national')
+      expect(shortByDate.get(`${year}-10-04`)?.base.dayIndex).toBe(4)
+      expect(shortByDate.get(`${year}-10-04`)?.effective.source).toBe('group')
+      expect(shortByDate.get(`${year}-10-04`)?.layers.map((layer: any) => layer.source)).toContain('group')
+      expect(longItems.every(item => item.effective.source === 'national')).toBe(true)
+      expect(longItems.flatMap(item => item.layers).some((layer: any) => layer.kind === 'calendar_policy')).toBe(false)
+    } finally {
+      const cleanupTokenRes = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(`${adminUserId}-cleanup`)}&roles=admin&perms=attendance:admin`
+      ).catch(() => null)
+      const cleanupToken = (cleanupTokenRes?.body as { token?: string } | undefined)?.token
+      if (cleanupToken) {
+        await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT',
+          headers: { Authorization: `Bearer ${cleanupToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ calendarPolicy: originalCalendarPolicy ?? { overrides: [] } }),
+        }).catch(() => undefined)
+      }
+      if (shortGroupId || longGroupId) {
+        await pool.query(
+          'DELETE FROM attendance_group_members WHERE group_id = ANY($1::uuid[])',
+          [[shortGroupId, longGroupId].filter(Boolean)]
+        ).catch(() => undefined)
+        await pool.query(
+          'DELETE FROM attendance_groups WHERE id = ANY($1::uuid[])',
+          [[shortGroupId, longGroupId].filter(Boolean)]
+        ).catch(() => undefined)
+      }
+      await pool.query(
+        'DELETE FROM attendance_holidays WHERE org_id = $1 AND holiday_date BETWEEN $2 AND $3',
+        [orgId, rangeFrom, rangeTo]
+      ).catch(() => undefined)
+      await pool.end()
+    }
+  })
+
   it('effective-calendar §6.3 returns approved request overlays additively without merging', async () => {
     if (!baseUrl) return
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
