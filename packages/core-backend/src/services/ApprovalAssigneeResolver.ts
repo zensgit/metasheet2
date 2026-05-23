@@ -50,6 +50,14 @@ function resolveFormUserValue(value: unknown): string | null {
   return null
 }
 
+// Source-of-truth for `form_field_user` field-type validation is publish-time
+// (`validateApprovalAssigneeSourcesAgainstFormSchema` in ApprovalProductService).
+// Runtime callers that operate against a frozen runtime graph + instance snapshots
+// (dispatch / adminJump / return) intentionally do NOT pass `formSchema` here,
+// because they must rely only on the published, frozen graph and never re-read
+// active template tables. This belt-and-suspenders check only activates when a
+// `formSchema` is available (i.e. createApproval path) and must not be turned
+// into an active-template lookup.
 function assertFormUserSource(
   source: Extract<ApprovalAssigneeSource, { kind: 'form_field_user' }>,
   formSchema: FormSchema | undefined,
