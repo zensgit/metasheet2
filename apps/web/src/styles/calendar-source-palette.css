@@ -17,6 +17,7 @@
 .calendar-source--group    { --calendar-source-accent: #3a86ff; }
 .calendar-source--role     { --calendar-source-accent: #9b5de5; }
 .calendar-source--user     { --calendar-source-accent: #063070; }
+.calendar-source--company-policy { --calendar-source-accent: #3a86ff; }
 
 /* Generic consume: any element carrying a calendar-source--<kind> class gets
  * a 4px left border accent in the resolved color. Surfaces opt in by adding
@@ -28,6 +29,7 @@
 .calendar-source--org,
 .calendar-source--group,
 .calendar-source--role,
-.calendar-source--user {
+.calendar-source--user,
+.calendar-source--company-policy {
   border-left: 4px solid var(--calendar-source-accent, transparent);
 }

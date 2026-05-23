@@ -178,6 +178,18 @@ describe('effectiveCalendarItemToChip + isCalendarEffectiveItemNoteworthy', () =
     expect(chip.layers?.length).toBe(1)
   })
 
+  it('preserves base.dayIndex exposed by the backend wire contract', () => {
+    const item: CalendarEffectiveItem = {
+      date: '2026-10-01',
+      base: { isWorkingDay: false, source: 'national', name: '国庆节-1', holidayId: 'h_1', dayIndex: 1 },
+      effective: { isWorkingDay: false, source: 'national', label: '国庆节-1' },
+      layers: [{ kind: 'holiday', source: 'national', isWorkingDay: false, label: '国庆节-1' }],
+      overlays: [],
+    }
+    const chip = effectiveCalendarItemToChip(item)
+    expect(chip.base?.dayIndex).toBe(1)
+  })
+
   it('prefers effective.label when both base.name and effective.label exist', () => {
     const item: CalendarEffectiveItem = {
       date: '2026-10-05',
