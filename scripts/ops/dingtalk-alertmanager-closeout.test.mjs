@@ -79,7 +79,7 @@ test('loads downloaded DingTalk stability summary without requiring raw logs', (
       selfHeal: { webhookSecretAvailable: false },
       snapshot: {
         checkedAt: '2026-05-05T01:06:33Z',
-        host: 'mainuser@142.171.239.56',
+        host: 'mainuser@23.254.236.11',
         health: { ok: true },
         webhookConfig: { configured: false, host: '' },
         alertmanager: { notifyErrorsLastWindow: 0 },

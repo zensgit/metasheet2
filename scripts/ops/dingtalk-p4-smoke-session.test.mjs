@@ -75,8 +75,8 @@ function writeCompletedSession(sessionDir, options = {}) {
     runId: 'remote-20260422',
     executedAt: '2026-04-22T15:00:00.000Z',
     environment: {
-      apiBase: 'http://142.171.239.56:8900',
-      webBase: 'http://142.171.239.56:8081',
+      apiBase: 'http://23.254.236.11:8081',
+      webBase: 'http://23.254.236.11:8081',
       operator: 'qa',
     },
     checks: requiredIds.map((id) => ({

@@ -36,8 +36,8 @@ test('dingtalk-p4-final-input-status reports blocked final inputs without leakin
 
   try {
     writeEnv(envFile, [
-      'DINGTALK_P4_API_BASE="http://142.171.239.56:8900"',
-      'DINGTALK_P4_WEB_BASE="http://142.171.239.56:8081"',
+      'DINGTALK_P4_API_BASE="http://23.254.236.11:8081"',
+      'DINGTALK_P4_WEB_BASE="http://23.254.236.11:8081"',
       'DINGTALK_P4_AUTH_TOKEN="secret-admin-token"',
       'DINGTALK_P4_GROUP_A_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=robot-secret-a&timestamp=1690000000000&sign=robot-sign-a"',
       'DINGTALK_P4_GROUP_B_WEBHOOK=""',
@@ -89,8 +89,8 @@ test('dingtalk-p4-final-input-status passes complete final inputs', () => {
 
   try {
     writeEnv(envFile, [
-      'DINGTALK_P4_API_BASE="http://142.171.239.56:8900"',
-      'DINGTALK_P4_WEB_BASE="http://142.171.239.56:8081"',
+      'DINGTALK_P4_API_BASE="http://23.254.236.11:8081"',
+      'DINGTALK_P4_WEB_BASE="http://23.254.236.11:8081"',
       'DINGTALK_P4_AUTH_TOKEN="secret-admin-token"',
       'DINGTALK_P4_GROUP_A_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=robot-secret-a"',
       'DINGTALK_P4_GROUP_B_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=robot-secret-b"',
@@ -129,8 +129,8 @@ test('dingtalk-p4-final-input-status rejects reused unauthorized target', () => 
 
   try {
     writeEnv(envFile, [
-      'DINGTALK_P4_API_BASE="http://142.171.239.56:8900"',
-      'DINGTALK_P4_WEB_BASE="http://142.171.239.56:8081"',
+      'DINGTALK_P4_API_BASE="http://23.254.236.11:8081"',
+      'DINGTALK_P4_WEB_BASE="http://23.254.236.11:8081"',
       'DINGTALK_P4_AUTH_TOKEN="secret-admin-token"',
       'DINGTALK_P4_GROUP_A_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=robot-secret-a"',
       'DINGTALK_P4_GROUP_B_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=robot-secret-b"',
@@ -167,8 +167,8 @@ test('dingtalk-p4-final-input-status rejects duplicate group webhook access toke
 
   try {
     writeEnv(envFile, [
-      'DINGTALK_P4_API_BASE="http://142.171.239.56:8900"',
-      'DINGTALK_P4_WEB_BASE="http://142.171.239.56:8081"',
+      'DINGTALK_P4_API_BASE="http://23.254.236.11:8081"',
+      'DINGTALK_P4_WEB_BASE="http://23.254.236.11:8081"',
       'DINGTALK_P4_AUTH_TOKEN="secret-admin-token"',
       'DINGTALK_P4_GROUP_A_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=robot-secret-same&timestamp=1"',
       'DINGTALK_P4_GROUP_B_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=robot-secret-same&timestamp=2"',
@@ -196,7 +196,7 @@ test('dingtalk-p4-final-input-status exits non-zero when blocked unless allowed'
 
   try {
     writeEnv(envFile, [
-      'DINGTALK_P4_API_BASE="http://142.171.239.56:8900"',
+      'DINGTALK_P4_API_BASE="http://23.254.236.11:8081"',
     ])
 
     const result = runScript(['--env-file', envFile])

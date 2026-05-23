@@ -65,8 +65,8 @@ test('dingtalk-p4-env-bootstrap reports missing readiness fields without leaking
 
   try {
     writeEnv(envFile, [
-      'DINGTALK_P4_API_BASE="http://142.171.239.56:8900"',
-      'DINGTALK_P4_WEB_BASE="http://142.171.239.56:8081"',
+      'DINGTALK_P4_API_BASE="http://23.254.236.11:8081"',
+      'DINGTALK_P4_WEB_BASE="http://23.254.236.11:8081"',
       'DINGTALK_P4_AUTH_TOKEN="secret-admin-token"',
       'DINGTALK_P4_GROUP_A_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=robot-secret-a&timestamp=1690000000000&sign=robot-sign-a"',
       'DINGTALK_P4_GROUP_B_WEBHOOK=""',
@@ -107,8 +107,8 @@ test('dingtalk-p4-env-bootstrap passes with complete env and derives authorized 
 
   try {
     writeEnv(envFile, [
-      'DINGTALK_P4_API_BASE="http://142.171.239.56:8900"',
-      'DINGTALK_P4_WEB_BASE="http://142.171.239.56:8081"',
+      'DINGTALK_P4_API_BASE="http://23.254.236.11:8081"',
+      'DINGTALK_P4_WEB_BASE="http://23.254.236.11:8081"',
       'DINGTALK_P4_AUTH_TOKEN="secret-admin-token"',
       'DINGTALK_P4_GROUP_A_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=robot-secret-a"',
       'DINGTALK_P4_GROUP_B_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=robot-secret-b"',
@@ -148,8 +148,8 @@ test('dingtalk-p4-env-bootstrap requires person smoke input for final P4 readine
 
   try {
     writeEnv(envFile, [
-      'DINGTALK_P4_API_BASE="http://142.171.239.56:8900"',
-      'DINGTALK_P4_WEB_BASE="http://142.171.239.56:8081"',
+      'DINGTALK_P4_API_BASE="http://23.254.236.11:8081"',
+      'DINGTALK_P4_WEB_BASE="http://23.254.236.11:8081"',
       'DINGTALK_P4_AUTH_TOKEN="secret-admin-token"',
       'DINGTALK_P4_GROUP_A_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=robot-secret-a"',
       'DINGTALK_P4_GROUP_B_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=robot-secret-b"',
@@ -180,8 +180,8 @@ test('dingtalk-p4-env-bootstrap rejects duplicate webhooks and reused unauthoriz
 
   try {
     writeEnv(envFile, [
-      'DINGTALK_P4_API_BASE="http://142.171.239.56:8900"',
-      'DINGTALK_P4_WEB_BASE="http://142.171.239.56:8081"',
+      'DINGTALK_P4_API_BASE="http://23.254.236.11:8081"',
+      'DINGTALK_P4_WEB_BASE="http://23.254.236.11:8081"',
       'DINGTALK_P4_AUTH_TOKEN="secret-admin-token"',
       'DINGTALK_P4_GROUP_A_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=robot-secret-same&timestamp=1"',
       'DINGTALK_P4_GROUP_B_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=robot-secret-same&timestamp=2"',
@@ -209,8 +209,8 @@ test('dingtalk-p4-env-bootstrap rejects non-canonical DingTalk robot webhook sha
 
   try {
     writeEnv(envFile, [
-      'DINGTALK_P4_API_BASE="http://142.171.239.56:8900"',
-      'DINGTALK_P4_WEB_BASE="http://142.171.239.56:8081"',
+      'DINGTALK_P4_API_BASE="http://23.254.236.11:8081"',
+      'DINGTALK_P4_WEB_BASE="http://23.254.236.11:8081"',
       'DINGTALK_P4_AUTH_TOKEN="secret-admin-token"',
       'DINGTALK_P4_GROUP_A_WEBHOOK="http://oapi.dingtalk.com/robot/send?access_token=robot-secret-a"',
       'DINGTALK_P4_GROUP_B_WEBHOOK="https://oapi.dingtalk.com/wrong/path?access_token=robot-secret-b"',
@@ -339,8 +339,8 @@ test('dingtalk-p4-env-bootstrap rejects loose private env file permissions', () 
 
   try {
     writeEnv(envFile, [
-      'DINGTALK_P4_API_BASE="http://142.171.239.56:8900"',
-      'DINGTALK_P4_WEB_BASE="http://142.171.239.56:8081"',
+      'DINGTALK_P4_API_BASE="http://23.254.236.11:8081"',
+      'DINGTALK_P4_WEB_BASE="http://23.254.236.11:8081"',
       'DINGTALK_P4_AUTH_TOKEN="secret-admin-token"',
       'DINGTALK_P4_GROUP_A_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=robot-secret-a"',
       'DINGTALK_P4_GROUP_B_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=robot-secret-b"',

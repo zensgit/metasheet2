@@ -700,7 +700,7 @@ async function recoverAsyncCommitJobWithRetry({
 }
 
 async function run() {
-  if (!apiBase) die('API_BASE is required (example: http://142.171.239.56:8081/api)')
+  if (!apiBase) die('API_BASE is required (example: http://23.254.236.11:8081/api)')
   if (!token) die('AUTH_TOKEN is required')
 
   log(`API_BASE=${apiBase}`)

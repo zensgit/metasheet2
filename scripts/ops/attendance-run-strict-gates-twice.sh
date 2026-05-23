@@ -34,7 +34,7 @@ function info() {
   echo "[attendance-run-strict-gates-twice] $*" >&2
 }
 
-[[ -n "$API_BASE" ]] || die "API_BASE is required (example: http://142.171.239.56:8081/api)"
+[[ -n "$API_BASE" ]] || die "API_BASE is required (example: http://23.254.236.11:8081/api)"
 [[ -n "$AUTH_TOKEN" ]] || die "AUTH_TOKEN is required"
 
 timestamp="$(date -u +%Y%m%d-%H%M%S)"

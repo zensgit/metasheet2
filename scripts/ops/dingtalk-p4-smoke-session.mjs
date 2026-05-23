@@ -285,8 +285,8 @@ function renderEnvTemplate() {
 # Run:
 #   node scripts/ops/dingtalk-p4-smoke-session.mjs --env-file <this-file> --output-dir output/dingtalk-p4-remote-smoke-session/<run>
 
-DINGTALK_P4_API_BASE=http://142.171.239.56:8900
-DINGTALK_P4_WEB_BASE=http://142.171.239.56:8081
+DINGTALK_P4_API_BASE=http://23.254.236.11:8081
+DINGTALK_P4_WEB_BASE=http://23.254.236.11:8081
 
 # Admin/table-owner bearer token. Keep private.
 DINGTALK_P4_AUTH_TOKEN=

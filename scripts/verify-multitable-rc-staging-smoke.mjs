@@ -40,7 +40,7 @@
  *   2 — env / fatal error before any check ran
  *
  * Usage:
- *   AUTH_TOKEN=<jwt> API_BASE=http://142.171.239.56:8081 \
+ *   AUTH_TOKEN=<jwt> API_BASE=http://23.254.236.11:8081 \
  *     node scripts/verify-multitable-rc-staging-smoke.mjs
  */
 
@@ -83,7 +83,7 @@ const skipSet = new Set(
 )
 
 if (!apiBase) {
-  console.error('[rc-smoke] API_BASE env is required (e.g. http://142.171.239.56:8081)')
+  console.error('[rc-smoke] API_BASE env is required (e.g. http://23.254.236.11:8081)')
   process.exit(2)
 }
 if (!authToken) {

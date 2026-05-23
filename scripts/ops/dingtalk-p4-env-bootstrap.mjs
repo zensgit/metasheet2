@@ -6,8 +6,8 @@ import path from 'node:path'
 
 const DEFAULT_ENV_FILE = path.join(homedir(), '.config', 'yuantus', 'dingtalk-p4-staging.env')
 const DEFAULT_OUTPUT_ROOT = 'output/dingtalk-p4-env-readiness'
-const DEFAULT_API_BASE = 'http://142.171.239.56:8900'
-const DEFAULT_WEB_BASE = 'http://142.171.239.56:8081'
+const DEFAULT_API_BASE = 'http://23.254.236.11:8081'
+const DEFAULT_WEB_BASE = 'http://23.254.236.11:8081'
 
 const P4_ENV_KEYS = [
   'DINGTALK_P4_API_BASE',
@@ -61,7 +61,7 @@ Typical flow:
   node scripts/ops/dingtalk-p4-env-bootstrap.mjs --check
   # Or safely update fields without printing raw secret values:
   DINGTALK_P4_AUTH_TOKEN=... node scripts/ops/dingtalk-p4-env-bootstrap.mjs --set-from-env DINGTALK_P4_AUTH_TOKEN
-  node scripts/ops/dingtalk-p4-smoke-session.mjs --env-file ${DEFAULT_ENV_FILE} --require-manual-targets --output-dir output/dingtalk-p4-remote-smoke-session/142-session
+  node scripts/ops/dingtalk-p4-smoke-session.mjs --env-file ${DEFAULT_ENV_FILE} --require-manual-targets --output-dir output/dingtalk-p4-remote-smoke-session/current-session
 `)
 }
 

@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-SSH_USER_HOST="${SSH_USER_HOST:-mainuser@142.171.239.56}"
+SSH_USER_HOST="${SSH_USER_HOST:-mainuser@23.254.236.11}"
 SSH_KEY="${SSH_KEY:-${HOME}/.ssh/metasheet2_deploy}"
 JSON_OUTPUT="${JSON_OUTPUT:-false}"
 REMOTE_SELF="${REMOTE_SELF:-false}"

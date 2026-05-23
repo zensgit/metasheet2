@@ -61,7 +61,7 @@ function normalize_web_url_to_attendance() {
   echo "${value}/attendance"
 }
 
-[[ -n "$API_BASE" ]] || die "API_BASE is required (example: http://142.171.239.56:8081/api)"
+[[ -n "$API_BASE" ]] || die "API_BASE is required (example: http://23.254.236.11:8081/api)"
 [[ -n "$AUTH_TOKEN" ]] || die "AUTH_TOKEN is required"
 
 API_BASE="$(normalize_url "$API_BASE")"
