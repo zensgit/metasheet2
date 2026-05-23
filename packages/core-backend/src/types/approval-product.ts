@@ -9,6 +9,7 @@ export type ApprovalProductPermission = typeof APPROVAL_PRODUCT_PERMISSIONS[numb
 
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end'
 export type ApprovalAssigneeType = 'user' | 'role'
+export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user'
 export type ApprovalMode = 'single' | 'all' | 'any'
 export type ParallelJoinMode = 'all' | 'any'
 export type EmptyAssigneePolicy = 'error' | 'auto-approve'
@@ -43,11 +44,26 @@ export interface ApprovalNode {
 }
 
 export interface ApprovalNodeConfig {
-  assigneeType: ApprovalAssigneeType
-  assigneeIds: string[]
+  assigneeType?: ApprovalAssigneeType
+  assigneeIds?: string[]
+  assigneeSources?: ApprovalAssigneeSource[]
   approvalMode?: ApprovalMode
   emptyAssigneePolicy?: EmptyAssigneePolicy
   autoApprovalPolicy?: AutoApprovalPolicy
+}
+
+export type ApprovalAssigneeSource =
+  | { kind: 'static_user'; userIds: string[] }
+  | { kind: 'static_role'; roleIds: string[] }
+  | { kind: 'requester' }
+  | { kind: 'form_field_user'; fieldId: string }
+
+export interface ApprovalAssigneeResolutionMetadata {
+  resolvedFrom: {
+    kind: ApprovalAssigneeSourceKind
+    sourceIndex: number
+    fieldId?: string
+  }
 }
 
 export interface ConditionNodeConfig {
