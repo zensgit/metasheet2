@@ -11794,6 +11794,30 @@ function resolveAttendanceComprehensiveHoursEnforcement(value) {
     : 'warn'
 }
 
+function normalizeAttendanceComprehensiveHoursMetricInput(value) {
+  if (value === undefined || value === null || value === '') return { ok: true, metric: 'planned' }
+  if (typeof value === 'string') {
+    const metric = value.trim()
+    if (ATTENDANCE_COMPREHENSIVE_HOURS_METRICS.has(metric)) return { ok: true, metric }
+  }
+  return buildAttendanceComprehensiveHoursError(
+    'INVALID_METRIC',
+    'Comprehensive hours preview metric must be planned or actual.',
+  )
+}
+
+function normalizeAttendanceComprehensiveHoursEnforcementInput(value) {
+  if (value === undefined || value === null || value === '') return { ok: true, enforcement: 'warn' }
+  if (typeof value === 'string') {
+    const enforcement = value.trim()
+    if (ATTENDANCE_COMPREHENSIVE_HOURS_ENFORCEMENT.has(enforcement)) return { ok: true, enforcement }
+  }
+  return buildAttendanceComprehensiveHoursError(
+    'INVALID_ENFORCEMENT',
+    'Comprehensive hours preview enforcement must be warn or block.',
+  )
+}
+
 function calculateAttendanceComprehensiveShiftPlannedMinutes(profile) {
   const startTime = normalizeTimeString(profile?.workStartTime ?? profile?.work_start_time ?? DEFAULT_RULE.workStartTime)
   const endTime = normalizeTimeString(profile?.workEndTime ?? profile?.work_end_time ?? DEFAULT_RULE.workEndTime)
@@ -12007,8 +12031,10 @@ function normalizeAttendanceComprehensiveHoursCapMinutes(input = {}) {
 
 function normalizeAttendanceComprehensiveHoursPreviewInput(input = {}) {
   const policyDraft = input.policyDraft && typeof input.policyDraft === 'object' ? input.policyDraft : {}
-  const metric = resolveAttendanceComprehensiveHoursMetric(input.metric ?? policyDraft.metric)
-  const enforcement = resolveAttendanceComprehensiveHoursEnforcement(input.enforcement ?? policyDraft.enforcement)
+  const metric = normalizeAttendanceComprehensiveHoursMetricInput(input.metric ?? policyDraft.metric)
+  if (!metric.ok) return metric
+  const enforcement = normalizeAttendanceComprehensiveHoursEnforcementInput(input.enforcement ?? policyDraft.enforcement)
+  if (!enforcement.ok) return enforcement
   const scope = normalizeAttendanceComprehensiveHoursUserIds(input)
   if (!scope.ok) return scope
   const cap = normalizeAttendanceComprehensiveHoursCapMinutes(input)
@@ -12028,8 +12054,8 @@ function normalizeAttendanceComprehensiveHoursPreviewInput(input = {}) {
   return {
     ok: true,
     input: {
-      metric,
-      enforcement,
+      metric: metric.metric,
+      enforcement: enforcement.enforcement,
       capMinutes: cap.capMinutes,
       userIds: scope.userIds,
       periodInput,
@@ -13915,6 +13941,8 @@ module.exports = {
     buildAttendanceComprehensiveActualMinutesFromSummary,
     buildAttendanceComprehensiveHoursComparison,
     buildAttendanceComprehensiveHoursPreviewRows,
+    normalizeAttendanceComprehensiveHoursMetricInput,
+    normalizeAttendanceComprehensiveHoursEnforcementInput,
     normalizeAttendanceComprehensiveHoursPreviewInput,
     resolveAttendanceComprehensiveHoursPreviewPeriod,
     previewAttendanceComprehensiveHours,
