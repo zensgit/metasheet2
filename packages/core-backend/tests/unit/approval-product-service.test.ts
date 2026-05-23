@@ -978,6 +978,63 @@ describe('ApprovalProductService', () => {
     expect(pgState.pool.connect).not.toHaveBeenCalled()
   })
 
+  it('rejects empty assigneeSources and invalid form field sources before hitting the database', async () => {
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService()
+
+    await expect(service.createTemplate({
+      key: 'empty-sources',
+      name: 'Empty Sources',
+      formSchema: { fields: [] },
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'approval_1', type: 'approval', config: { assigneeSources: [] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-approval', source: 'start', target: 'approval_1' },
+          { key: 'edge-approval-end', source: 'approval_1', target: 'end' },
+        ],
+      },
+    } as never)).rejects.toMatchObject({
+      message: 'approvalGraph.nodes[1].config.assigneeSources must not be empty',
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+    })
+
+    await expect(service.createTemplate({
+      key: 'bad-field-source',
+      name: 'Bad Field Source',
+      formSchema: {
+        fields: [
+          { id: 'notes', type: 'text', label: 'Notes' },
+        ],
+      },
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          {
+            key: 'approval_1',
+            type: 'approval',
+            config: { assigneeSources: [{ kind: 'form_field_user', fieldId: 'notes' }] },
+          },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-approval', source: 'start', target: 'approval_1' },
+          { key: 'edge-approval-end', source: 'approval_1', target: 'end' },
+        ],
+      },
+    } as never)).rejects.toMatchObject({
+      message: 'approvalGraph node approval_1 assigneeSources form_field_user must reference a user field',
+      statusCode: 400,
+      code: 'VALIDATION_ERROR',
+    })
+
+    expect(pgState.pool.connect).not.toHaveBeenCalled()
+  })
+
   it('records terminal metrics for approvals auto-approved at creation', async () => {
     const metrics = {
       recordInstanceStart: vi.fn().mockResolvedValue(undefined),
@@ -1676,6 +1733,134 @@ describe('ApprovalProductService', () => {
       JSON.parse(String(params?.[9])).autoApproved === true)).toBe(false)
   })
 
+  it('creates requester-source assignments from the frozen published runtime graph with metadata', async () => {
+    const runtimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'approval_1', type: 'approval', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-approval', source: 'start', target: 'approval_1' },
+        { key: 'edge-approval-end', source: 'approval_1', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+    mockPublishedTemplatePool(runtimeGraph, 'AP-101008')
+
+    pgState.client.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('INSERT INTO approval_instances')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('SELECT assignment_type, assignee_id, node_key FROM approval_assignments')) {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('INSERT INTO approval_assignments')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_records')) {
+        return { rows: [], rowCount: 1 }
+      }
+      throw new Error(`Unhandled client query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({
+      currentNodeKey: 'approval_1',
+      assignments: [{
+        id: 'asg-requester',
+        type: 'user',
+        assigneeId: 'requester-1',
+        sourceStep: 1,
+        nodeKey: 'approval_1',
+        isActive: true,
+        metadata: { resolvedFrom: { kind: 'requester', sourceIndex: 0 } },
+      }],
+    }))
+
+    await service.createApproval(
+      { templateId: 'tpl-1', formData: {} },
+      { userId: 'requester-1', userName: 'Requester One' },
+    )
+
+    const assignmentInsert = pgState.client.query.mock.calls.find(([sql]) =>
+      normalize(sql as string).startsWith('INSERT INTO approval_assignments'))
+    expect(assignmentInsert?.[1]).toEqual([
+      expect.any(String),
+      'user',
+      'requester-1',
+      1,
+      'approval_1',
+      JSON.stringify({ resolvedFrom: { kind: 'requester', sourceIndex: 0 } }),
+    ])
+  })
+
+  it('rejects duplicate dynamic assignees across parallel branches at creation time', async () => {
+    const runtimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'parallel_fork',
+          type: 'parallel',
+          config: {
+            branches: ['edge-fork-legal', 'edge-fork-compliance'],
+            joinMode: 'all',
+            joinNodeKey: 'end',
+          },
+        },
+        { key: 'legal-review', type: 'approval', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'compliance-review', type: 'approval', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-fork', source: 'start', target: 'parallel_fork' },
+        { key: 'edge-fork-legal', source: 'parallel_fork', target: 'legal-review' },
+        { key: 'edge-fork-compliance', source: 'parallel_fork', target: 'compliance-review' },
+        { key: 'edge-legal-end', source: 'legal-review', target: 'end' },
+        { key: 'edge-compliance-end', source: 'compliance-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+    mockPublishedTemplatePool(runtimeGraph, 'AP-101009')
+
+    pgState.client.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('INSERT INTO approval_instances')) {
+        return { rows: [], rowCount: 1 }
+      }
+      throw new Error(`Unhandled client query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+
+    await expect(service.createApproval(
+      { templateId: 'tpl-1', formData: {} },
+      { userId: 'requester-1' },
+    )).rejects.toMatchObject({
+      code: 'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT',
+      statusCode: 409,
+      details: {
+        assignmentType: 'user',
+        assigneeId: 'requester-1',
+        nodeKeys: ['legal-review', 'compliance-review'],
+      },
+    })
+
+    const statements = pgState.client.query.mock.calls.map(([sql]) => normalize(sql as string))
+    expect(statements).toContain('ROLLBACK')
+    expect(statements).not.toContain('COMMIT')
+    expect(statements.some((statement) => statement.startsWith('INSERT INTO approval_assignments'))).toBe(false)
+  })
+
   it('keeps all-mode approvals pending when requester auto-merge leaves human assignees', async () => {
     const runtimeGraph = {
       nodes: [
@@ -1728,7 +1913,7 @@ describe('ApprovalProductService', () => {
     const assignmentInserts = pgState.client.query.mock.calls.filter(([sql]) =>
       normalize(sql as string).startsWith('INSERT INTO approval_assignments'))
     expect(assignmentInserts).toHaveLength(1)
-    expect(assignmentInserts[0]?.[1]).toEqual([expect.any(String), 'user', 'manager-2', 1, 'approval_1'])
+    expect(assignmentInserts[0]?.[1]).toEqual([expect.any(String), 'user', 'manager-2', 1, 'approval_1', '{}'])
 
     const autoRecordCall = pgState.client.query.mock.calls.find(([sql, params]) =>
       normalize(sql as string).startsWith('INSERT INTO approval_records') &&
@@ -2248,6 +2433,236 @@ describe('ApprovalProductService', () => {
     expect(autoRecords.map((entry) => entry.matchedAgainst.nodeKey)).toEqual(['prior-legal', 'prior-compliance'])
   })
 
+  it('dispatches dynamic assignees from the instance-bound runtime graph without active template reads', async () => {
+    const runtimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'approval_gate', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['lead-1'] } },
+        { key: 'requester-review', type: 'approval', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-gate', source: 'start', target: 'approval_gate' },
+        { key: 'edge-gate-requester', source: 'approval_gate', target: 'requester-review' },
+        { key: 'edge-requester-end', source: 'requester-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    pgState.client.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
+        return {
+          rows: [buildInstanceRow({
+            current_node_key: 'approval_gate',
+            current_step: 1,
+            total_steps: 2,
+            requester_snapshot: { id: 'requester-1', name: 'Requester One' },
+          })],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_published_definitions WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'pub-1',
+            template_id: 'tpl-1',
+            template_version_id: 'ver-1',
+            runtime_graph: runtimeGraph,
+            is_active: true,
+            published_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
+        return {
+          rows: [{
+            id: 'asg-gate',
+            instance_id: 'apr-1',
+            assignment_type: 'user',
+            assignee_id: 'lead-1',
+            source_step: 1,
+            node_key: 'approval_gate',
+            is_active: true,
+            metadata: {},
+            created_at: new Date(),
+            updated_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('UPDATE approval_assignments SET is_active = FALSE')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('UPDATE approval_instances SET status = $2')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('SELECT assignment_type, assignee_id, node_key FROM approval_assignments')) {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('INSERT INTO approval_assignments')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('INSERT INTO approval_records')) {
+        return { rows: [], rowCount: 1 }
+      }
+      throw new Error(`Unhandled query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({
+      currentStep: 2,
+      totalSteps: 2,
+      currentNodeKey: 'requester-review',
+      assignments: [{
+        id: 'asg-requester',
+        type: 'user',
+        assigneeId: 'requester-1',
+        sourceStep: 2,
+        nodeKey: 'requester-review',
+        isActive: true,
+        metadata: { resolvedFrom: { kind: 'requester', sourceIndex: 0 } },
+      }],
+    }))
+
+    await service.dispatchAction(
+      'apr-1',
+      { action: 'approve' },
+      { userId: 'lead-1' },
+    )
+
+    const statements = pgState.client.query.mock.calls.map(([sql]) => normalize(sql as string))
+    expect(statements.some((statement) => statement.includes('approval_template_versions'))).toBe(false)
+    expect(statements.some((statement) => statement.includes('approval_templates'))).toBe(false)
+
+    const assignmentInsert = pgState.client.query.mock.calls.find(([sql]) =>
+      normalize(sql as string).startsWith('INSERT INTO approval_assignments'))
+    expect(assignmentInsert?.[1]).toEqual([
+      'apr-1',
+      'user',
+      'requester-1',
+      2,
+      'requester-review',
+      JSON.stringify({ resolvedFrom: { kind: 'requester', sourceIndex: 0 } }),
+    ])
+  })
+
+  it('rejects duplicate dynamic assignees across parallel branches at advance time', async () => {
+    const runtimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'approval_gate', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['lead-1'] } },
+        {
+          key: 'parallel_fork',
+          type: 'parallel',
+          config: {
+            branches: ['edge-fork-legal', 'edge-fork-compliance'],
+            joinMode: 'all',
+            joinNodeKey: 'end',
+          },
+        },
+        { key: 'legal-review', type: 'approval', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'compliance-review', type: 'approval', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-gate', source: 'start', target: 'approval_gate' },
+        { key: 'edge-gate-fork', source: 'approval_gate', target: 'parallel_fork' },
+        { key: 'edge-fork-legal', source: 'parallel_fork', target: 'legal-review' },
+        { key: 'edge-fork-compliance', source: 'parallel_fork', target: 'compliance-review' },
+        { key: 'edge-legal-end', source: 'legal-review', target: 'end' },
+        { key: 'edge-compliance-end', source: 'compliance-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    pgState.client.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
+        return {
+          rows: [buildInstanceRow({
+            current_node_key: 'approval_gate',
+            current_step: 1,
+            total_steps: 3,
+            requester_snapshot: { id: 'requester-1', name: 'Requester One' },
+          })],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_published_definitions WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'pub-1',
+            template_id: 'tpl-1',
+            template_version_id: 'ver-1',
+            runtime_graph: runtimeGraph,
+            is_active: true,
+            published_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
+        return {
+          rows: [{
+            id: 'asg-gate',
+            instance_id: 'apr-1',
+            assignment_type: 'user',
+            assignee_id: 'lead-1',
+            source_step: 1,
+            node_key: 'approval_gate',
+            is_active: true,
+            metadata: {},
+            created_at: new Date(),
+            updated_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('UPDATE approval_assignments SET is_active = FALSE')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('UPDATE approval_instances SET metadata = COALESCE')) {
+        return { rows: [], rowCount: 1 }
+      }
+      if (statement.startsWith('UPDATE approval_instances SET status = $2')) {
+        return { rows: [], rowCount: 1 }
+      }
+      throw new Error(`Unhandled query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+
+    await expect(service.dispatchAction(
+      'apr-1',
+      { action: 'approve' },
+      { userId: 'lead-1' },
+    )).rejects.toMatchObject({
+      code: 'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT',
+      statusCode: 409,
+      details: {
+        assignmentType: 'user',
+        assigneeId: 'requester-1',
+        nodeKeys: ['legal-review', 'compliance-review'],
+      },
+    })
+
+    const statements = pgState.client.query.mock.calls.map(([sql]) => normalize(sql as string))
+    expect(statements).toContain('ROLLBACK')
+    expect(statements).not.toContain('COMMIT')
+    expect(statements.some((statement) => statement.startsWith('INSERT INTO approval_assignments'))).toBe(false)
+    expect(statements.some((statement) => statement.startsWith('INSERT INTO approval_records'))).toBe(false)
+  })
+
   it('refuses and warns when adjacent merge would auto-approve duplicate parallel assignees', async () => {
     const runtimeGraph = {
       nodes: [
@@ -2375,7 +2790,7 @@ describe('ApprovalProductService', () => {
     const assignmentInserts = pgState.client.query.mock.calls.filter(([sql]) =>
       normalize(sql as string).startsWith('INSERT INTO approval_assignments'))
     expect(assignmentInserts).toHaveLength(1)
-    expect(assignmentInserts[0]?.[1]).toEqual(['apr-1', 'user', 'manager-1', 3, 'compliance-review'])
+    expect(assignmentInserts[0]?.[1]).toEqual(['apr-1', 'user', 'manager-1', 3, 'compliance-review', '{}'])
 
     const skippedRecord = pgState.client.query.mock.calls.find(([sql, params]) =>
       normalize(sql as string).startsWith('INSERT INTO approval_records') &&
@@ -2491,7 +2906,7 @@ describe('ApprovalProductService', () => {
         return { rows: [], rowCount: 1 }
       }
       if (statement.startsWith('INSERT INTO approval_assignments')) {
-        expect(params).toEqual(['apr-1', 'user', 'legacy-manager', 2, 'approval_old_high'])
+        expect(params).toEqual(['apr-1', 'user', 'legacy-manager', 2, 'approval_old_high', '{}'])
         return { rows: [], rowCount: 1 }
       }
       if (statement.startsWith('INSERT INTO approval_records')) {

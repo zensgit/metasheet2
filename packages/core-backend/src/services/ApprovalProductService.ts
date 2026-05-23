@@ -2,6 +2,7 @@ import crypto from 'crypto'
 import { pool } from '../db/pg'
 import type {
   ApprovalActionRequest,
+  ApprovalAssigneeSource,
   ApprovalAutoApprovalReason,
   AutoApprovalActorMode,
   AutoApprovalMergeReason,
@@ -28,12 +29,14 @@ import { APPROVAL_TERMINAL_STATUSES } from '../types/approval-product'
 import {
   ApprovalGraphExecutor,
   type ApprovalGraphAssignment,
+  type ApprovalGraphAssignmentResolver,
   type ApprovalGraphAutoApprovalEvent,
   type ApprovalGraphResolution,
   type ParallelInstanceState,
   pruneHiddenFormData,
   validateApprovalFormData,
 } from './ApprovalGraphExecutor'
+import { resolveApprovalAssignees } from './ApprovalAssigneeResolver'
 import type {
   ApprovalAssignmentDTO,
   ApprovalAssignmentRow,
@@ -353,6 +356,84 @@ function normalizeAutoApprovalPolicy(
   }
 }
 
+function normalizeStringArray(
+  value: unknown,
+  context: ValidationContext,
+  path: string,
+): string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.some((entry) => !isNonEmptyString(entry))) {
+    failValidation(context, `${path} must be a non-empty string array`)
+  }
+  return value.map((entry) => entry.trim())
+}
+
+function normalizeApprovalAssigneeSources(
+  value: unknown,
+  context: ValidationContext,
+  path: string,
+): ApprovalAssigneeSource[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) {
+    failValidation(context, `${path} must be an array`)
+  }
+  if (value.length === 0) {
+    failValidation(context, `${path} must not be empty`)
+  }
+
+  return value.map((source, index): ApprovalAssigneeSource => {
+    const sourcePath = `${path}[${index}]`
+    if (!isRecord(source) || !isNonEmptyString(source.kind)) {
+      failValidation(context, `${sourcePath}.kind is required`)
+    }
+    switch (source.kind) {
+      case 'static_user':
+        return {
+          kind: 'static_user',
+          userIds: normalizeStringArray(source.userIds, context, `${sourcePath}.userIds`),
+        }
+      case 'static_role':
+        return {
+          kind: 'static_role',
+          roleIds: normalizeStringArray(source.roleIds, context, `${sourcePath}.roleIds`),
+        }
+      case 'requester':
+        return { kind: 'requester' }
+      case 'form_field_user':
+        if (!isNonEmptyString(source.fieldId)) {
+          failValidation(context, `${sourcePath}.fieldId is required`)
+        }
+        return {
+          kind: 'form_field_user',
+          fieldId: source.fieldId.trim(),
+        }
+      default:
+        failValidation(context, `${sourcePath}.kind is invalid`)
+    }
+  })
+}
+
+function validateApprovalAssigneeSourcesAgainstFormSchema(
+  approvalGraph: ApprovalGraph,
+  formSchema: FormSchema,
+  context: ValidationContext,
+): void {
+  const fieldById = new Map(formSchema.fields.map((field) => [field.id, field]))
+  approvalGraph.nodes.forEach((node) => {
+    if (node.type !== 'approval') return
+    const config = node.config as { assigneeSources?: ApprovalAssigneeSource[] }
+    for (const source of config.assigneeSources ?? []) {
+      if (source.kind !== 'form_field_user') continue
+      const field = fieldById.get(source.fieldId)
+      if (!field || field.type !== 'user') {
+        failValidation(
+          context,
+          `approvalGraph node ${node.key} assigneeSources form_field_user must reference a user field`,
+        )
+      }
+    }
+  })
+}
+
 function failValidation(context: ValidationContext, message: string): never {
   throw new ServiceError(message, context.status, context.code)
 }
@@ -583,12 +664,21 @@ function normalizeApprovalGraph(
 
     switch (node.type) {
       case 'approval':
-        if ((node.config.assigneeType !== 'user' && node.config.assigneeType !== 'role')
-          || !Array.isArray(node.config.assigneeIds)
-          || node.config.assigneeIds.some((entry) => !isNonEmptyString(entry))) {
-          failValidation(context, `approvalGraph.nodes[${index}].config must define assigneeType and assigneeIds`)
-        }
         {
+          const assigneeSources = normalizeApprovalAssigneeSources(
+            node.config.assigneeSources,
+            context,
+            `approvalGraph.nodes[${index}].config.assigneeSources`,
+          )
+          const hasLegacyAssignees = (node.config.assigneeType === 'user' || node.config.assigneeType === 'role')
+            && Array.isArray(node.config.assigneeIds)
+            && node.config.assigneeIds.every((entry) => isNonEmptyString(entry))
+          if (!assigneeSources && !hasLegacyAssignees) {
+            failValidation(context, `approvalGraph.nodes[${index}].config must define assigneeType and assigneeIds or assigneeSources`)
+          }
+          if (assigneeSources && (node.config.assigneeType !== undefined || node.config.assigneeIds !== undefined) && !hasLegacyAssignees) {
+            failValidation(context, `approvalGraph.nodes[${index}].config legacy assigneeType/assigneeIds must be valid when provided`)
+          }
           const approvalMode = normalizeApprovalMode(
             node.config.approvalMode,
             context,
@@ -605,8 +695,13 @@ function normalizeApprovalGraph(
             `approvalGraph.nodes[${index}].config.autoApprovalPolicy`,
           )
           normalizedNode.config = {
-            assigneeType: node.config.assigneeType,
-            assigneeIds: node.config.assigneeIds.map((entry) => entry.trim()),
+            ...(hasLegacyAssignees
+              ? {
+                  assigneeType: node.config.assigneeType as 'user' | 'role',
+                  assigneeIds: (node.config.assigneeIds as string[]).map((entry) => entry.trim()),
+                }
+              : {}),
+            ...(assigneeSources ? { assigneeSources } : {}),
             ...(approvalMode ? { approvalMode } : {}),
             ...(emptyAssigneePolicy ? { emptyAssigneePolicy } : {}),
             ...(autoApprovalPolicy ? { autoApprovalPolicy } : {}),
@@ -816,9 +911,17 @@ function collectBranchAssignees(
       )
     }
     if (node.type === 'approval') {
-      const approvalConfig = node.config as { assigneeIds?: string[] }
+      const approvalConfig = node.config as { assigneeIds?: string[]; assigneeSources?: ApprovalAssigneeSource[] }
       for (const assignee of approvalConfig.assigneeIds ?? []) {
         assignees.add(assignee)
+      }
+      for (const source of approvalConfig.assigneeSources ?? []) {
+        if (source.kind === 'static_user') {
+          source.userIds.forEach((assignee) => assignees.add(assignee))
+        }
+        if (source.kind === 'static_role') {
+          source.roleIds.forEach((assignee) => assignees.add(assignee))
+        }
       }
     }
     // Walk the first outgoing edge — condition nodes aren't explored for every
@@ -1510,6 +1613,21 @@ function appendAutoApprovalHistory(history: ApprovalHistoryEntry[], event: Appro
   })
 }
 
+function buildApprovalAssignmentResolver(options: {
+  formSchema?: FormSchema
+  formSnapshot: Record<string, unknown>
+  requesterSnapshot: Record<string, unknown> | null
+}): ApprovalGraphAssignmentResolver {
+  return ({ nodeKey, sourceStep, config }) => resolveApprovalAssignees({
+    nodeKey,
+    sourceStep,
+    config,
+    formSchema: options.formSchema,
+    formSnapshot: options.formSnapshot,
+    requesterSnapshot: options.requesterSnapshot,
+  })
+}
+
 export class ApprovalProductService {
   /**
    * Wave 2 WP5 slice 1 — optional metrics service injection so tests can
@@ -1866,6 +1984,7 @@ export class ApprovalProductService {
     const slaHours = slaHoursNormalized === undefined ? null : slaHoursNormalized
     const formSchema = assertFormSchema(request.formSchema)
     const approvalGraph = assertApprovalGraph(request.approvalGraph)
+    validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
 
     let client: ApprovalDbClient | null = null
     try {
@@ -2016,6 +2135,10 @@ export class ApprovalProductService {
         )
         const nextVersion = Number.parseInt(maxVersionResult.rows[0]?.max_version || '0', 10) + 1
 
+        const nextFormSchema = formSchema ?? asFormSchema(latestVersion.form_schema)
+        const nextApprovalGraph = approvalGraph ?? asApprovalGraph(latestVersion.approval_graph)
+        validateApprovalAssigneeSourcesAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
+
         const versionResult = await client.query<TemplateVersionRow>(
           `INSERT INTO approval_template_versions (template_id, version, status, form_schema, approval_graph)
            VALUES ($1, $2, 'draft', $3, $4)
@@ -2023,8 +2146,8 @@ export class ApprovalProductService {
           [
             id,
             nextVersion,
-            JSON.stringify(formSchema ?? latestVersion.form_schema),
-            JSON.stringify(approvalGraph ?? latestVersion.approval_graph),
+            JSON.stringify(nextFormSchema),
+            JSON.stringify(nextApprovalGraph),
           ],
         )
         version = versionResult.rows[0]
@@ -2098,7 +2221,10 @@ export class ApprovalProductService {
         [id],
       )
 
-      const runtimeGraph = buildRuntimeGraph(asApprovalGraph(version.approval_graph), policy)
+      const formSchema = asFormSchema(version.form_schema)
+      const approvalGraph = asApprovalGraph(version.approval_graph)
+      validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
+      const runtimeGraph = buildRuntimeGraph(approvalGraph, policy)
 
       const publishedDefinitionResult = await client.query<PublishedDefinitionRow>(
         `INSERT INTO approval_published_definitions (template_id, template_version_id, runtime_graph, is_active, published_at)
@@ -2348,15 +2474,6 @@ export class ApprovalProductService {
       )
     }
 
-    const runtimeGraph = asRuntimeGraph(bundle.publishedDefinition.runtime_graph)
-    const executor = new ApprovalGraphExecutor(runtimeGraph, normalizedFormData)
-    const instanceId = crypto.randomUUID()
-    const initialResolution = executor.resolveInitialState()
-    const initial = runtimeGraphHasAutoApprovalPolicy(runtimeGraph)
-      ? this.applyAutoApprovalCascade(instanceId, runtimeGraph, executor, initialResolution, actor.userId, [])
-      : initialResolution
-    const requestNo = await this.allocateRequestNo()
-
     const requesterSnapshot = {
       id: actor.userId,
       name: actor.userName || actor.userId,
@@ -2365,6 +2482,20 @@ export class ApprovalProductService {
       roles: actor.roles || [],
       permissions: actor.permissions || [],
     }
+    const runtimeGraph = asRuntimeGraph(bundle.publishedDefinition.runtime_graph)
+    const executor = new ApprovalGraphExecutor(runtimeGraph, normalizedFormData, {
+      assignmentResolver: buildApprovalAssignmentResolver({
+        formSchema,
+        formSnapshot: normalizedFormData,
+        requesterSnapshot,
+      }),
+    })
+    const instanceId = crypto.randomUUID()
+    const initialResolution = executor.resolveInitialState()
+    const initial = runtimeGraphHasAutoApprovalPolicy(runtimeGraph)
+      ? this.applyAutoApprovalCascade(instanceId, runtimeGraph, executor, initialResolution, actor.userId, [])
+      : initialResolution
+    const requestNo = await this.allocateRequestNo()
 
     const instanceMetadata: Record<string, unknown> = { templateKey: bundle.template.key }
     if (initial.parallelState) {
@@ -2559,9 +2690,16 @@ export class ApprovalProductService {
         [id],
       )
       const oldAssignees = assignmentRowsForAudit(activeAssignments.rows)
-      const executor = new ApprovalGraphExecutor(runtimeGraph, toNullableRecord(instance.form_snapshot) || {})
+      const formSnapshot = toNullableRecord(instance.form_snapshot) || {}
+      const requesterSnapshot = toNullableRecord(instance.requester_snapshot)
+      const executor = new ApprovalGraphExecutor(runtimeGraph, formSnapshot, {
+        assignmentResolver: buildApprovalAssignmentResolver({
+          formSnapshot,
+          requesterSnapshot,
+        }),
+      })
       const jumpResolution = executor.resolveReturnToNode(targetNodeKey)
-      const requesterId = toNullableRecord(instance.requester_snapshot)?.id
+      const requesterId = requesterSnapshot?.id
       // Admin jump enters the target through the same node-entry path as create/advance,
       // so PR2 auto-approval policies intentionally compose after the jump.
       const resolution = runtimeGraphHasAutoApprovalPolicy(runtimeGraph)
@@ -2699,7 +2837,14 @@ export class ApprovalProductService {
       )
 
       const runtimeGraph = asRuntimeGraph(runtime.runtime_graph)
-      const executor = new ApprovalGraphExecutor(runtimeGraph, toNullableRecord(instance.form_snapshot) || {})
+      const formSnapshot = toNullableRecord(instance.form_snapshot) || {}
+      const requesterSnapshot = toNullableRecord(instance.requester_snapshot)
+      const executor = new ApprovalGraphExecutor(runtimeGraph, formSnapshot, {
+        assignmentResolver: buildApprovalAssignmentResolver({
+          formSnapshot,
+          requesterSnapshot,
+        }),
+      })
       const storedCurrentNodeKey = instance.current_node_key
       const actorRoles = actor.roles || []
       const actorName = actor.userName || actor.userId
@@ -2786,7 +2931,7 @@ export class ApprovalProductService {
         if (!runtimeGraph.policy.allowRevoke) {
           throw new ServiceError('Approval cannot be revoked for this template', 409, 'APPROVAL_REVOKE_DISABLED')
         }
-        const requesterId = toNullableRecord(instance.requester_snapshot)?.id
+        const requesterId = requesterSnapshot?.id
         if (requesterId !== actor.userId) {
           throw new ServiceError('Only the requester can revoke this approval', 403, 'APPROVAL_REVOKE_FORBIDDEN')
         }
@@ -2884,7 +3029,7 @@ export class ApprovalProductService {
 
         await this.deactivateAllActiveAssignments(client, id)
         const returnResolution = executor.resolveReturnToNode(targetNodeKey)
-        const requesterId = toNullableRecord(instance.requester_snapshot)?.id
+        const requesterId = requesterSnapshot?.id
         const resolution = runtimeGraphHasAutoApprovalPolicy(runtimeGraph)
           ? this.applyAutoApprovalCascade(
               id,
@@ -3055,7 +3200,7 @@ export class ApprovalProductService {
           nodeKey: currentNodeKey,
           actorId: actor.userId,
         })
-        const requesterId = toNullableRecord(instance.requester_snapshot)?.id
+        const requesterId = requesterSnapshot?.id
         resolution = this.applyAutoApprovalCascade(
           id,
           runtimeGraph,
@@ -3437,20 +3582,78 @@ export class ApprovalProductService {
   private async insertAssignments(
     client: { query: typeof pool.query },
     instanceId: string,
-    assignments: Array<{ assignmentType: 'user' | 'role'; assigneeId: string; nodeKey: string; sourceStep: number }>,
+    assignments: Array<{ assignmentType: 'user' | 'role'; assigneeId: string; nodeKey: string; sourceStep: number; metadata?: unknown }>,
   ): Promise<void> {
+    await this.assertNoActiveAssignmentConflicts(client, instanceId, assignments)
     for (const assignment of assignments) {
       await client.query(
         `INSERT INTO approval_assignments
          (instance_id, assignment_type, assignee_id, source_step, node_key, is_active, metadata, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, TRUE, '{}'::jsonb, now(), now())`,
+         VALUES ($1, $2, $3, $4, $5, TRUE, $6::jsonb, now(), now())`,
         [
           instanceId,
           assignment.assignmentType,
           assignment.assigneeId,
           assignment.sourceStep,
           assignment.nodeKey,
+          JSON.stringify(assignment.metadata ?? {}),
         ],
+      )
+    }
+  }
+
+  private async assertNoActiveAssignmentConflicts(
+    client: { query: typeof pool.query },
+    instanceId: string,
+    assignments: Array<{ assignmentType: 'user' | 'role'; assigneeId: string; nodeKey: string; metadata?: unknown }>,
+  ): Promise<void> {
+    if (assignments.length === 0) return
+    if (assignments.every((assignment) =>
+      !isRecord(assignment.metadata) || !isRecord(assignment.metadata.resolvedFrom))) return
+
+    const pendingKeys = new Map<string, { assignmentType: 'user' | 'role'; assigneeId: string; nodeKey: string }>()
+    for (const assignment of assignments) {
+      const key = `${assignment.assignmentType}:${assignment.assigneeId}`
+      const existing = pendingKeys.get(key)
+      if (existing) {
+        throw new ServiceError(
+          'Approval assignee resolves to multiple active parallel assignments',
+          409,
+          'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT',
+          {
+            instanceId,
+            assignmentType: assignment.assignmentType,
+            assigneeId: assignment.assigneeId,
+            nodeKeys: [existing.nodeKey, assignment.nodeKey],
+          },
+        )
+      }
+      pendingKeys.set(key, assignment)
+    }
+
+    const activeResult = await client.query<{
+      assignment_type: 'user' | 'role'
+      assignee_id: string
+      node_key: string | null
+    }>(
+      `SELECT assignment_type, assignee_id, node_key
+       FROM approval_assignments
+       WHERE instance_id = $1 AND is_active = TRUE`,
+      [instanceId],
+    )
+    for (const active of activeResult.rows) {
+      const pending = pendingKeys.get(`${active.assignment_type}:${active.assignee_id}`)
+      if (!pending) continue
+      throw new ServiceError(
+        'Approval assignee resolves to multiple active parallel assignments',
+        409,
+        'APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT',
+        {
+          instanceId,
+          assignmentType: pending.assignmentType,
+          assigneeId: pending.assigneeId,
+          nodeKeys: [active.node_key, pending.nodeKey].filter((entry): entry is string => Boolean(entry)),
+        },
       )
     }
   }

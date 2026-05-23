@@ -184,6 +184,96 @@ describe('ApprovalGraphExecutor', () => {
     ])
   })
 
+  it('uses an injected resolver for assigneeSources nodes', () => {
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'dynamic-review', type: 'approval', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-dynamic', source: 'start', target: 'dynamic-review' },
+        { key: 'edge-dynamic-end', source: 'dynamic-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    const executor = new ApprovalGraphExecutor(runtimeGraph, {}, {
+      assignmentResolver: ({ nodeKey, sourceStep, config }) => [{
+        assignmentType: 'user',
+        assigneeId: `resolved-${config.assigneeSources?.[0]?.kind}`,
+        nodeKey,
+        sourceStep,
+        metadata: { resolvedFrom: { kind: 'requester', sourceIndex: 0 } },
+      }],
+    })
+
+    expect(executor.resolveInitialState().assignments).toEqual([
+      {
+        assignmentType: 'user',
+        assigneeId: 'resolved-requester',
+        nodeKey: 'dynamic-review',
+        sourceStep: 1,
+        metadata: { resolvedFrom: { kind: 'requester', sourceIndex: 0 } },
+      },
+    ])
+  })
+
+  it('lets empty dynamic resolution follow the existing empty-assignee policies', () => {
+    const autoRuntimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'dynamic-gap',
+          type: 'approval',
+          config: {
+            assigneeSources: [{ kind: 'requester' }],
+            emptyAssigneePolicy: 'auto-approve',
+          },
+        },
+        { key: 'final-review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-9'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-gap', source: 'start', target: 'dynamic-gap' },
+        { key: 'edge-gap-final', source: 'dynamic-gap', target: 'final-review' },
+        { key: 'edge-final-end', source: 'final-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    const resolver = ({ nodeKey, sourceStep }: { nodeKey: string; sourceStep: number }) =>
+      nodeKey === 'dynamic-gap'
+        ? []
+        : [{ assignmentType: 'user' as const, assigneeId: 'user-9', nodeKey, sourceStep }]
+    const autoExecutor = new ApprovalGraphExecutor(autoRuntimeGraph, {}, { assignmentResolver: resolver })
+    const initial = autoExecutor.resolveInitialState()
+
+    expect(initial.currentNodeKey).toBe('final-review')
+    expect(initial.autoApprovalEvents).toEqual([
+      {
+        nodeKey: 'dynamic-gap',
+        sourceStep: 1,
+        approvalMode: 'single',
+        reason: 'empty-assignee',
+      },
+    ])
+
+    const errorRuntimeGraph: RuntimeGraph = {
+      ...autoRuntimeGraph,
+      nodes: autoRuntimeGraph.nodes.map((node) =>
+        node.key === 'dynamic-gap'
+          ? { ...node, config: { assigneeSources: [{ kind: 'requester' }] } }
+          : node),
+    }
+    const errorExecutor = new ApprovalGraphExecutor(errorRuntimeGraph, {}, { assignmentResolver: resolver })
+
+    expect(() => errorExecutor.resolveInitialState()).toThrowError(expect.objectContaining({
+      code: 'APPROVAL_ASSIGNEE_EMPTY',
+      statusCode: 400,
+    }))
+  })
+
   it('tags resolveAfterApprove resolutions with the resolved-away node aggregate mode', () => {
     const runtimeGraph: RuntimeGraph = {
       nodes: [

@@ -1,4 +1,5 @@
 import type {
+  ApprovalAssigneeResolutionMetadata,
   ApprovalAutoApprovalReason,
   ApprovalEdge,
   ApprovalMode,
@@ -12,13 +13,23 @@ import type {
   ParallelNodeConfig,
   RuntimeGraph,
 } from '../types/approval-product'
+import { ServiceError } from './ApprovalBridgeService'
 
 export interface ApprovalGraphAssignment {
   assignmentType: 'user' | 'role'
   assigneeId: string
   nodeKey: string
   sourceStep: number
+  metadata?: ApprovalAssigneeResolutionMetadata
 }
+
+export interface ApprovalGraphAssignmentResolverInput {
+  nodeKey: string
+  sourceStep: number
+  config: ApprovalNodeConfig
+}
+
+export type ApprovalGraphAssignmentResolver = (input: ApprovalGraphAssignmentResolverInput) => ApprovalGraphAssignment[]
 
 export interface ApprovalCcEvent {
   nodeKey: string
@@ -112,9 +123,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isApprovalNodeConfig(config: unknown): config is ApprovalNodeConfig {
-  return isRecord(config)
-    && (config.assigneeType === 'user' || config.assigneeType === 'role')
+  if (!isRecord(config)) return false
+  const hasLegacyAssignees = (config.assigneeType === 'user' || config.assigneeType === 'role')
     && Array.isArray(config.assigneeIds)
+  return hasLegacyAssignees || Array.isArray(config.assigneeSources)
 }
 
 function isConditionBranch(value: unknown): value is ConditionBranch {
@@ -452,6 +464,7 @@ export class ApprovalGraphExecutor {
   constructor(
     private readonly runtimeGraph: RuntimeGraph,
     private readonly formData: Record<string, unknown>,
+    private readonly options: { assignmentResolver?: ApprovalGraphAssignmentResolver } = {},
   ) {
     for (const node of runtimeGraph.nodes) {
       this.nodeMap.set(node.key, node)
@@ -615,7 +628,7 @@ export class ApprovalGraphExecutor {
   }
 
   getApprovalNodeAssigneeIds(nodeKey: string): string[] {
-    return [...this.getApprovalNodeConfig(nodeKey).assigneeIds]
+    return [...(this.getApprovalNodeConfig(nodeKey).assigneeIds ?? [])]
   }
 
   resolveReturnToNode(targetNodeKey: string): ApprovalGraphResolution {
@@ -750,7 +763,8 @@ export class ApprovalGraphExecutor {
         }
         const sourceStep = this.stepIndexForNode(node.key)
         const approvalMode = normalizeApprovalMode(approvalConfig.approvalMode)
-        if (approvalConfig.assigneeIds.length === 0) {
+        const assignments = this.resolveAssignmentsForApprovalNode(node.key, approvalConfig, sourceStep)
+        if (assignments.length === 0) {
           if (approvalConfig.emptyAssigneePolicy === 'auto-approve') {
             autoApprovalEvents.push({
               nodeKey: node.key,
@@ -761,19 +775,19 @@ export class ApprovalGraphExecutor {
             currentKey = this.firstTargetForNode(node.key)
             continue
           }
-          throw new Error(`Approval node ${node.key} has no assignees`)
+          throw new ServiceError(
+            `Approval node ${node.key} has no assignees`,
+            400,
+            'APPROVAL_ASSIGNEE_EMPTY',
+            { nodeKey: node.key },
+          )
         }
         return {
           status: 'pending',
           currentNodeKey: node.key,
           currentStep: sourceStep,
           totalSteps: this.totalSteps,
-          assignments: approvalConfig.assigneeIds.map((assigneeId) => ({
-            assignmentType: approvalConfig.assigneeType,
-            assigneeId,
-            nodeKey: node.key,
-            sourceStep,
-          })),
+          assignments,
           ccEvents,
           autoApprovalEvents,
           aggregateMode: context.aggregateMode,
@@ -1014,7 +1028,8 @@ export class ApprovalGraphExecutor {
         }
         const sourceStep = this.stepIndexForNode(node.key)
         const approvalMode = normalizeApprovalMode(approvalConfig.approvalMode)
-        if (approvalConfig.assigneeIds.length === 0) {
+        const assignments = this.resolveAssignmentsForApprovalNode(node.key, approvalConfig, sourceStep)
+        if (assignments.length === 0) {
           if (approvalConfig.emptyAssigneePolicy === 'auto-approve') {
             autoApprovalEvents.push({
               nodeKey: node.key,
@@ -1025,17 +1040,17 @@ export class ApprovalGraphExecutor {
             currentKey = this.firstTargetForNode(node.key)
             continue
           }
-          throw new Error(`Approval node ${node.key} has no assignees`)
+          throw new ServiceError(
+            `Approval node ${node.key} has no assignees`,
+            400,
+            'APPROVAL_ASSIGNEE_EMPTY',
+            { nodeKey: node.key },
+          )
         }
         return {
           kind: 'pending-approval',
           approvalNodeKey: node.key,
-          assignments: approvalConfig.assigneeIds.map((assigneeId) => ({
-            assignmentType: approvalConfig.assigneeType,
-            assigneeId,
-            nodeKey: node.key,
-            sourceStep,
-          })),
+          assignments,
           ccEvents,
           autoApprovalEvents,
         }
@@ -1079,5 +1094,21 @@ export class ApprovalGraphExecutor {
       throw new Error(`Approval node ${node.key} has invalid config`)
     }
     return approvalConfig
+  }
+
+  private resolveAssignmentsForApprovalNode(
+    nodeKey: string,
+    approvalConfig: ApprovalNodeConfig,
+    sourceStep: number,
+  ): ApprovalGraphAssignment[] {
+    if (this.options.assignmentResolver) {
+      return this.options.assignmentResolver({ nodeKey, sourceStep, config: approvalConfig })
+    }
+    return (approvalConfig.assigneeIds ?? []).map((assigneeId) => ({
+      assignmentType: approvalConfig.assigneeType === 'role' ? 'role' : 'user',
+      assigneeId,
+      nodeKey,
+      sourceStep,
+    }))
   }
 }

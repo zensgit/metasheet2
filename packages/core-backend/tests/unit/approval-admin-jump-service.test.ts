@@ -360,6 +360,7 @@ describe('ApprovalProductService adminJump', () => {
       'finance-1',
       2,
       'finance_review',
+      '{}',
     ])
 
     const recordCall = findRecordInsert('jump')
@@ -425,6 +426,7 @@ describe('ApprovalProductService adminJump', () => {
       'director-1',
       3,
       'director_review',
+      '{}',
     ])
 
     const autoRecordCall = findRecordInsert('approve')
