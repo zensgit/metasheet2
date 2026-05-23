@@ -32,7 +32,9 @@ deferred item (see §6).
 
 `packages/core-backend/tests/e2e/multitable-basic-views-smoke.spec.ts` — five
 Playwright tests, one per view type (grid / calendar / kanban / gallery / form),
-sharing a single base/sheet fixture via `test.describe.serial`. Each test:
+sharing a single base/sheet fixture created in `beforeAll`. Tests run under
+plain `test.describe` so per-view failures report independently; the wrapper
+pins `--workers=1` for serial execution. Each test:
 
 - asserts `.mt-workbench` (the workbench root, defined at
   `apps/web/src/multitable/views/MultitableWorkbench.vue:2`) is visible
@@ -129,7 +131,7 @@ remains under the existing
 
 **PASS.** Comment "effective-calendar … 返回 200，节假日数据可见" + the
 attendance-side closure recorded in
-`docs/development/attendance-effective-calendar-policy-closure-audit-20260523.md`
+`docs/development/attendance-calendar-effective-policy-closure-audit-20260523.md`
 ([[project_attendance_effective_calendar_complete]]).
 
 ### 6. 导入导出与附件评论基础链路
@@ -239,5 +241,5 @@ Expected output on success: `[views-ui-smoke] PASS — basic views UI 5/5`.
   `packages/core-backend/tests/e2e/multitable-lifecycle-smoke.spec.ts`
 - Hierarchy UI smoke (existing): `multitable-hierarchy-smoke.spec.ts`
 - Shared helper: `packages/core-backend/tests/e2e/multitable-helpers.ts`
-- Attendance closure: `docs/development/attendance-effective-calendar-policy-closure-audit-20260523.md`
+- Attendance closure: `docs/development/attendance-calendar-effective-policy-closure-audit-20260523.md`
 - Visual-view localization: `docs/development/multitable-final-audit-visual-views-verification-20260522.md`

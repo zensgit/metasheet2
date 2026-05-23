@@ -70,21 +70,27 @@ async function setupSharedFixture(client: AuthClient): Promise<SharedFixture> {
     options: ['Todo', 'Doing', 'Done'],
   })
 
+  // Dates are computed relative to today so calendar opens on a month
+  // containing fixture records regardless of when the spec runs. Anchored
+  // mid-month (day 15) so a date drift of ±10 days stays in the same view.
   const stamp = Date.now()
+  const today = new Date()
+  const yyyy = today.getUTCFullYear()
+  const mm = String(today.getUTCMonth() + 1).padStart(2, '0')
   const records: CreatedRecord[] = []
   records.push(await createRecord(client, sheet.id, {
     [title.id]: `bv-design-${stamp}`,
-    [due.id]: '2026-05-25',
+    [due.id]: `${yyyy}-${mm}-10`,
     [status.id]: 'Todo',
   }))
   records.push(await createRecord(client, sheet.id, {
     [title.id]: `bv-build-${stamp}`,
-    [due.id]: '2026-05-27',
+    [due.id]: `${yyyy}-${mm}-15`,
     [status.id]: 'Doing',
   }))
   records.push(await createRecord(client, sheet.id, {
     [title.id]: `bv-ship-${stamp}`,
-    [due.id]: '2026-05-29',
+    [due.id]: `${yyyy}-${mm}-20`,
     [status.id]: 'Done',
   }))
 
@@ -138,6 +144,12 @@ test.describe('Multitable basic views smoke', () => {
     await expect(calendarGrid).toBeVisible({ timeout: 15000 })
     await expect(page.locator('.meta-calendar__title')).toBeVisible()
     expect(await page.locator('.meta-calendar__cell').count()).toBeGreaterThan(0)
+
+    // Catches "calendar shell renders but date-bound records never appear".
+    // Fixture dates are computed relative to today (see setupSharedFixture),
+    // so they land in the calendar's default current-month view regardless
+    // of when the spec runs.
+    await expect(page.locator('body')).toContainText(String(f.records[0].data[f.title.id]), { timeout: 15000 })
   })
 
   test('kanban view renders board with grouped columns', async ({ request, page }) => {
