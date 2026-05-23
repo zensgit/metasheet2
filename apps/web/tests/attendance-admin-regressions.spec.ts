@@ -1271,6 +1271,584 @@ describe('Attendance admin regressions', () => {
     expect(container!.textContent).toContain('Assignment created.')
   })
 
+  it('PR5 strong-control blocks shift assignment save when preview returns violation', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/shifts')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'shift-a',
+                name: 'Day shift',
+                timezone: 'UTC',
+                workStartTime: '09:00',
+                workEndTime: '18:00',
+                isOvernight: false,
+                lateGraceMinutes: 10,
+                earlyGraceMinutes: 10,
+                roundingMinutes: 5,
+                workingDays: [1, 2, 3, 4, 5],
+              },
+            ],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/comprehensive-hours/preview')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            readOnly: true,
+            period: { type: 'custom_range', from: '2026-05-01', to: '2026-05-10' },
+            metric: 'planned',
+            enforcement: 'block',
+            capMinutes: 9600,
+            scope: { userIds: ['user-9'] },
+            aggregate: {
+              users: 1,
+              ok: 0,
+              warning: 0,
+              violation: 1,
+              totalMinutes: 10200,
+              totalExcessMinutes: 600,
+              totalRemainingMinutes: 0,
+              status: 'violation',
+            },
+            rows: [
+              {
+                userId: 'user-9',
+                minutes: 10200,
+                plannedMinutes: 10200,
+                capMinutes: 9600,
+                remainingMinutes: 0,
+                excessMinutes: 600,
+                status: 'violation',
+                source: 'effective_calendar',
+              },
+            ],
+            degraded: false,
+          },
+        })
+      }
+      if (url === '/api/attendance/assignments' && init?.method === 'POST') {
+        return jsonResponse(200, { ok: true })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const strongModeCheckbox = container!.querySelector<HTMLInputElement>('#attendance-comprehensive-hours-save-block-mode')
+    expect(strongModeCheckbox).toBeTruthy()
+    strongModeCheckbox!.checked = true
+    strongModeCheckbox!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-assignments')
+    expect(section).toBeTruthy()
+    setInput(section!, '#attendance-assignment-user-id', 'user-9')
+    const shiftSelect = section!.querySelector<HTMLSelectElement>('#attendance-assignment-shift-id')
+    expect(shiftSelect).toBeTruthy()
+    shiftSelect!.value = 'shift-a'
+    shiftSelect!.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(section!, '#attendance-assignment-start-date', '2026-05-01')
+    setInput(section!, '#attendance-assignment-end-date', '2026-05-10')
+    await flushUi(2)
+
+    const createButton = Array.from(section!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Create assignment'))
+    expect(createButton).toBeTruthy()
+    createButton!.click()
+    await flushUi(8)
+
+    const previewBody = JSON.parse(String(vi.mocked(apiFetch).mock.calls.find(([input]) =>
+      String(input).includes('/api/attendance/comprehensive-hours/preview')
+    )![1]!.body))
+    expect(previewBody).toMatchObject({
+      policyDraft: { capHours: 160, enforcement: 'block' },
+      scope: { userId: 'user-9' },
+      period: { type: 'custom_range', from: '2026-05-01', to: '2026-05-10' },
+      metric: 'planned',
+    })
+    expect(previewBody).not.toHaveProperty('allUsers')
+
+    const savePosted = vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
+      String(input) === '/api/attendance/assignments' && init?.method === 'POST'
+    )
+    expect(savePosted).toBe(false)
+    expect(container!.textContent).not.toContain('Assignment created.')
+
+    const advisory = section!.querySelector<HTMLElement>('[data-attendance-comprehensive-hours-assignment-advisory="shift"]')
+    expect(advisory).toBeTruthy()
+    expect(advisory!.dataset.attendanceComprehensiveHoursAssignmentAdvisoryKind).toBe('block')
+    const advisoryText = advisory!.textContent || ''
+    expect(advisoryText).toContain('strong-control')
+    expect(advisoryText).toContain('save blocked')
+    expect(advisoryText).not.toContain('cannot save')
+    expect(advisoryText).not.toContain('policy enforced')
+    expect(advisoryText).not.toContain('violation prevented')
+    expect(advisoryText).not.toContain('禁止保存')
+    expect(advisoryText).not.toContain('已强制策略')
+    expect(advisoryText).not.toContain('已阻止违规')
+  })
+
+  it('PR5 strong-control allows shift assignment save when preview returns warning', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/shifts')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'shift-a',
+                name: 'Day shift',
+                timezone: 'UTC',
+                workStartTime: '09:00',
+                workEndTime: '18:00',
+                isOvernight: false,
+                lateGraceMinutes: 10,
+                earlyGraceMinutes: 10,
+                roundingMinutes: 5,
+                workingDays: [1, 2, 3, 4, 5],
+              },
+            ],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/comprehensive-hours/preview')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            readOnly: true,
+            period: { type: 'custom_range', from: '2026-05-01', to: '2026-05-10' },
+            metric: 'planned',
+            enforcement: 'block',
+            capMinutes: 9600,
+            scope: { userIds: ['user-9'] },
+            aggregate: {
+              users: 1,
+              ok: 0,
+              warning: 1,
+              violation: 0,
+              totalMinutes: 9500,
+              totalExcessMinutes: 0,
+              totalRemainingMinutes: 100,
+              status: 'warning',
+            },
+            rows: [
+              {
+                userId: 'user-9',
+                minutes: 9500,
+                plannedMinutes: 9500,
+                capMinutes: 9600,
+                remainingMinutes: 100,
+                excessMinutes: 0,
+                status: 'warning',
+                source: 'effective_calendar',
+              },
+            ],
+            degraded: false,
+          },
+        })
+      }
+      if (url === '/api/attendance/assignments' && init?.method === 'POST') {
+        return jsonResponse(200, { ok: true })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const strongModeCheckbox = container!.querySelector<HTMLInputElement>('#attendance-comprehensive-hours-save-block-mode')
+    expect(strongModeCheckbox).toBeTruthy()
+    strongModeCheckbox!.checked = true
+    strongModeCheckbox!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-assignments')
+    expect(section).toBeTruthy()
+    setInput(section!, '#attendance-assignment-user-id', 'user-9')
+    const shiftSelect = section!.querySelector<HTMLSelectElement>('#attendance-assignment-shift-id')
+    shiftSelect!.value = 'shift-a'
+    shiftSelect!.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(section!, '#attendance-assignment-start-date', '2026-05-01')
+    setInput(section!, '#attendance-assignment-end-date', '2026-05-10')
+    await flushUi(2)
+
+    const createButton = Array.from(section!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Create assignment'))
+    expect(createButton).toBeTruthy()
+    createButton!.click()
+    await flushUi(8)
+
+    const previewBody = JSON.parse(String(vi.mocked(apiFetch).mock.calls.find(([input]) =>
+      String(input).includes('/api/attendance/comprehensive-hours/preview')
+    )![1]!.body))
+    expect(previewBody.policyDraft.enforcement).toBe('block')
+
+    const savePosted = vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
+      String(input) === '/api/attendance/assignments' && init?.method === 'POST'
+    )
+    expect(savePosted).toBe(true)
+    expect(container!.textContent).toContain('Assignment created.')
+
+    const advisory = section!.querySelector<HTMLElement>('[data-attendance-comprehensive-hours-assignment-advisory="shift"]')
+    expect(advisory?.dataset.attendanceComprehensiveHoursAssignmentAdvisoryKind).toBe('warn')
+    expect(advisory?.textContent).toContain('Saving is still allowed')
+  })
+
+  it('PR5 strong-control allows shift assignment save when preview returns ok', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/shifts')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'shift-a',
+                name: 'Day shift',
+                timezone: 'UTC',
+                workStartTime: '09:00',
+                workEndTime: '18:00',
+                isOvernight: false,
+                lateGraceMinutes: 10,
+                earlyGraceMinutes: 10,
+                roundingMinutes: 5,
+                workingDays: [1, 2, 3, 4, 5],
+              },
+            ],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/comprehensive-hours/preview')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            readOnly: true,
+            period: { type: 'custom_range', from: '2026-05-01', to: '2026-05-10' },
+            metric: 'planned',
+            enforcement: 'block',
+            capMinutes: 9600,
+            scope: { userIds: ['user-9'] },
+            aggregate: {
+              users: 1,
+              ok: 1,
+              warning: 0,
+              violation: 0,
+              totalMinutes: 5000,
+              totalExcessMinutes: 0,
+              totalRemainingMinutes: 4600,
+              status: 'ok',
+            },
+            rows: [
+              {
+                userId: 'user-9',
+                minutes: 5000,
+                plannedMinutes: 5000,
+                capMinutes: 9600,
+                remainingMinutes: 4600,
+                excessMinutes: 0,
+                status: 'ok',
+                source: 'effective_calendar',
+              },
+            ],
+            degraded: false,
+          },
+        })
+      }
+      if (url === '/api/attendance/assignments' && init?.method === 'POST') {
+        return jsonResponse(200, { ok: true })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const strongModeCheckbox = container!.querySelector<HTMLInputElement>('#attendance-comprehensive-hours-save-block-mode')
+    strongModeCheckbox!.checked = true
+    strongModeCheckbox!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-assignments')
+    setInput(section!, '#attendance-assignment-user-id', 'user-9')
+    const shiftSelect = section!.querySelector<HTMLSelectElement>('#attendance-assignment-shift-id')
+    shiftSelect!.value = 'shift-a'
+    shiftSelect!.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(section!, '#attendance-assignment-start-date', '2026-05-01')
+    setInput(section!, '#attendance-assignment-end-date', '2026-05-10')
+    await flushUi(2)
+
+    const createButton = Array.from(section!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Create assignment'))
+    createButton!.click()
+    await flushUi(8)
+
+    expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
+      String(input) === '/api/attendance/assignments' && init?.method === 'POST'
+    )).toBe(true)
+    expect(container!.textContent).toContain('Assignment created.')
+
+    const advisory = section!.querySelector<HTMLElement>('[data-attendance-comprehensive-hours-assignment-advisory="shift"]')
+    expect(advisory?.textContent || '').toBe('')
+  })
+
+  it('PR5 strong-control allows shift assignment save when preview fails with 503', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/shifts')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'shift-a',
+                name: 'Day shift',
+                timezone: 'UTC',
+                workStartTime: '09:00',
+                workEndTime: '18:00',
+                isOvernight: false,
+                lateGraceMinutes: 10,
+                earlyGraceMinutes: 10,
+                roundingMinutes: 5,
+                workingDays: [1, 2, 3, 4, 5],
+              },
+            ],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/comprehensive-hours/preview')) {
+        return jsonResponse(503, {
+          ok: false,
+          error: { code: 'DB_NOT_READY', message: 'schema not ready' },
+        })
+      }
+      if (url === '/api/attendance/assignments' && init?.method === 'POST') {
+        return jsonResponse(200, { ok: true })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const strongModeCheckbox = container!.querySelector<HTMLInputElement>('#attendance-comprehensive-hours-save-block-mode')
+    strongModeCheckbox!.checked = true
+    strongModeCheckbox!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-assignments')
+    setInput(section!, '#attendance-assignment-user-id', 'user-9')
+    const shiftSelect = section!.querySelector<HTMLSelectElement>('#attendance-assignment-shift-id')
+    shiftSelect!.value = 'shift-a'
+    shiftSelect!.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(section!, '#attendance-assignment-start-date', '2026-05-01')
+    setInput(section!, '#attendance-assignment-end-date', '2026-05-10')
+    await flushUi(2)
+
+    const createButton = Array.from(section!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Create assignment'))
+    createButton!.click()
+    await flushUi(8)
+
+    expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
+      String(input) === '/api/attendance/assignments' && init?.method === 'POST'
+    )).toBe(true)
+    expect(container!.textContent).toContain('Assignment created.')
+
+    const advisory = section!.querySelector<HTMLElement>('[data-attendance-comprehensive-hours-assignment-advisory="shift"]')
+    expect(advisory?.dataset.attendanceComprehensiveHoursAssignmentAdvisoryKind).toBe('error')
+    expect(advisory?.textContent).toContain('saving is still allowed')
+  })
+
+  it('PR5 strong-control blocks rotation assignment save when preview returns violation', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/rotation-rules')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'rot-1',
+                name: 'Two shift',
+                timezone: 'UTC',
+                shiftSequence: ['shift-a', 'shift-b'],
+                isActive: true,
+              },
+            ],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/comprehensive-hours/preview')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            readOnly: true,
+            period: { type: 'custom_range', from: '2026-05-01', to: '2026-05-10' },
+            metric: 'planned',
+            enforcement: 'block',
+            capMinutes: 9600,
+            scope: { userIds: ['user-7'] },
+            aggregate: {
+              users: 1,
+              ok: 0,
+              warning: 0,
+              violation: 1,
+              totalMinutes: 10500,
+              totalExcessMinutes: 900,
+              totalRemainingMinutes: 0,
+              status: 'violation',
+            },
+            rows: [
+              {
+                userId: 'user-7',
+                minutes: 10500,
+                plannedMinutes: 10500,
+                capMinutes: 9600,
+                remainingMinutes: 0,
+                excessMinutes: 900,
+                status: 'violation',
+                source: 'effective_calendar',
+              },
+            ],
+            degraded: false,
+          },
+        })
+      }
+      if (url === '/api/attendance/rotation-assignments' && init?.method === 'POST') {
+        return jsonResponse(200, { ok: true })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const strongModeCheckbox = container!.querySelector<HTMLInputElement>('#attendance-comprehensive-hours-save-block-mode')
+    strongModeCheckbox!.checked = true
+    strongModeCheckbox!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-rotation-assignments')
+    expect(section).toBeTruthy()
+    setInput(section!, '#attendance-rotation-user', 'user-7')
+    const rotationSelect = section!.querySelector<HTMLSelectElement>('#attendance-rotation-rule')
+    rotationSelect!.value = 'rot-1'
+    rotationSelect!.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(section!, '#attendance-rotation-start', '2026-05-01')
+    setInput(section!, '#attendance-rotation-end', '2026-05-10')
+    await flushUi(2)
+
+    const createButton = Array.from(section!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Create assignment'))
+    createButton!.click()
+    await flushUi(8)
+
+    const previewBody = JSON.parse(String(vi.mocked(apiFetch).mock.calls.find(([input]) =>
+      String(input).includes('/api/attendance/comprehensive-hours/preview')
+    )![1]!.body))
+    expect(previewBody).toMatchObject({
+      policyDraft: { capHours: 160, enforcement: 'block' },
+      scope: { userId: 'user-7' },
+      period: { type: 'custom_range', from: '2026-05-01', to: '2026-05-10' },
+      metric: 'planned',
+    })
+    expect(previewBody).not.toHaveProperty('allUsers')
+
+    expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
+      String(input) === '/api/attendance/rotation-assignments' && init?.method === 'POST'
+    )).toBe(false)
+    expect(container!.textContent).not.toContain('Rotation assignment created.')
+
+    const advisory = section!.querySelector<HTMLElement>('[data-attendance-comprehensive-hours-assignment-advisory="rotation"]')
+    expect(advisory?.dataset.attendanceComprehensiveHoursAssignmentAdvisoryKind).toBe('block')
+    expect(advisory?.textContent).toContain('strong-control')
+    expect(advisory?.textContent).toContain('save blocked')
+  })
+
+  it('PR5 inactive shift assignment skips the preview call in both modes', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/shifts')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'shift-a',
+                name: 'Day shift',
+                timezone: 'UTC',
+                workStartTime: '09:00',
+                workEndTime: '18:00',
+                isOvernight: false,
+                lateGraceMinutes: 10,
+                earlyGraceMinutes: 10,
+                roundingMinutes: 5,
+                workingDays: [1, 2, 3, 4, 5],
+              },
+            ],
+          },
+        })
+      }
+      if (url === '/api/attendance/assignments' && init?.method === 'POST') {
+        return jsonResponse(200, { ok: true })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const strongModeCheckbox = container!.querySelector<HTMLInputElement>('#attendance-comprehensive-hours-save-block-mode')
+    strongModeCheckbox!.checked = true
+    strongModeCheckbox!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-assignments')
+    setInput(section!, '#attendance-assignment-user-id', 'user-9')
+    const shiftSelect = section!.querySelector<HTMLSelectElement>('#attendance-assignment-shift-id')
+    shiftSelect!.value = 'shift-a'
+    shiftSelect!.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(section!, '#attendance-assignment-start-date', '2026-05-01')
+    setInput(section!, '#attendance-assignment-end-date', '2026-05-10')
+
+    const activeCheckbox = section!.querySelector<HTMLInputElement>('#attendance-assignment-active')
+    expect(activeCheckbox).toBeTruthy()
+    activeCheckbox!.checked = false
+    activeCheckbox!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    const createButton = Array.from(section!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Create assignment'))
+    createButton!.click()
+    await flushUi(8)
+
+    const previewCalled = vi.mocked(apiFetch).mock.calls.some(([input]) =>
+      String(input).includes('/api/attendance/comprehensive-hours/preview')
+    )
+    expect(previewCalled).toBe(false)
+
+    expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
+      String(input) === '/api/attendance/assignments' && init?.method === 'POST'
+    )).toBe(true)
+    expect(container!.textContent).toContain('Assignment created.')
+
+    const advisory = section!.querySelector<HTMLElement>('[data-attendance-comprehensive-hours-assignment-advisory="shift"]')
+    expect(advisory?.textContent || '').toBe('')
+  })
+
   it('restores the run21 holiday calendar, rule builder, and import template guidance', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
