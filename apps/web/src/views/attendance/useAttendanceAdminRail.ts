@@ -29,6 +29,7 @@ export const ATTENDANCE_ADMIN_SECTION_IDS = {
   overtimeRules: 'attendance-admin-overtime-rules',
   approvalFlows: 'attendance-admin-approval-flows',
   advancedSchedulingWorkbench: 'attendance-admin-advanced-scheduling-workbench',
+  comprehensiveHoursPreview: 'attendance-admin-comprehensive-hours-preview',
   rotationRules: 'attendance-admin-rotation-rules',
   rotationAssignments: 'attendance-admin-rotation-assignments',
   shifts: 'attendance-admin-shifts',
@@ -176,6 +177,7 @@ export function useAttendanceAdminRail({
     { id: ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules, label: tr('Overtime Rules', '加班规则') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.approvalFlows, label: tr('Approval Flows', '审批流') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.advancedSchedulingWorkbench, label: tr('Advanced scheduling', '高级排班') },
+    { id: ATTENDANCE_ADMIN_SECTION_IDS.comprehensiveHoursPreview, label: tr('Comprehensive hours', '综合工时') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.rotationRules, label: tr('Rotation Rules', '轮班规则') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments, label: tr('Rotation Assignments', '轮班分配') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.shifts, label: tr('Shifts', '班次') },
@@ -199,6 +201,7 @@ export function useAttendanceAdminRail({
       label: tr('Scheduling', '排班执行'),
       itemIds: [
         ATTENDANCE_ADMIN_SECTION_IDS.advancedSchedulingWorkbench,
+        ATTENDANCE_ADMIN_SECTION_IDS.comprehensiveHoursPreview,
         ATTENDANCE_ADMIN_SECTION_IDS.rotationRules,
         ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments,
         ATTENDANCE_ADMIN_SECTION_IDS.shifts,
