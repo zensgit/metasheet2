@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-const DEFAULT_BASE_URL = 'http://142.171.239.56:8081'
+const DEFAULT_BASE_URL = 'http://23.254.236.11:8081'
 const DEFAULT_OUTPUT_ROOT = 'output/integration-k3wise-postdeploy-smoke'
 const ISSUE1542_SMOKE_PIPELINE_ID = 'issue1542_postdeploy_staging_material_smoke'
 const BRIDGE_SOURCE_KIND = 'bridge:legacy-sql-readonly'

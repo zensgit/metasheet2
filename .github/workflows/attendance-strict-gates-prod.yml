@@ -37,7 +37,7 @@ on:
       api_base:
         description: 'API base (must end with /api)'
         required: false
-        default: 'http://142.171.239.56:8081/api'
+        default: 'http://23.254.236.11:8081/api'
       expect_product_mode:
         description: 'Expected product mode (from /api/auth/me -> features.mode)'
         required: false
@@ -258,7 +258,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://142.171.239.56:8081/api' }}
+      API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://23.254.236.11:8081/api' }}
       AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT || vars.ATTENDANCE_ADMIN_JWT || '' }}
       LOGIN_EMAIL: ${{ secrets.ATTENDANCE_ADMIN_EMAIL || vars.ATTENDANCE_ADMIN_EMAIL || '' }}
       LOGIN_PASSWORD: ${{ secrets.ATTENDANCE_ADMIN_PASSWORD || vars.ATTENDANCE_ADMIN_PASSWORD || '' }}

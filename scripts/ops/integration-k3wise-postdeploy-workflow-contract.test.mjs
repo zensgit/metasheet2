@@ -21,7 +21,7 @@ test('manual K3 WISE postdeploy smoke workflow keeps dispatch and auth contract 
   assertContains(raw, 'name: K3 WISE Postdeploy Smoke', 'manual workflow')
   assertContains(raw, 'workflow_dispatch:', 'manual trigger')
   assertContains(raw, 'base_url:', 'manual inputs')
-  assertContains(raw, "default: 'http://142.171.239.56:8081'", 'manual default base URL')
+  assertContains(raw, "default: 'http://23.254.236.11:8081'", 'manual default base URL')
   assertContains(raw, 'frontend_base_url:', 'manual inputs')
   assertContains(raw, 'Optional frontend/nginx SPA base URL for /integrations/* route checks', 'manual frontend input')
   assertContains(raw, 'require_auth:', 'manual inputs')
