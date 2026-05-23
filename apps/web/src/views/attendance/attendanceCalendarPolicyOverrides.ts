@@ -63,6 +63,20 @@ export interface CalendarPolicyOverrideDiagnostic {
   source: CalendarPolicySource
 }
 
+export interface CalendarPolicyHolidayLengthQuickAddInput {
+  holidayName: string
+  attendanceGroup: string
+  baseRestDays: number
+  targetRestDays: number
+  label?: string
+  localizedDefaultLabel?: string
+}
+
+export type CalendarPolicyHolidayLengthQuickAddResult =
+  | { kind: 'append'; form: CalendarPolicyOverrideFormState }
+  | { kind: 'noop'; reason: 'same_length' }
+  | { kind: 'unsupported'; reason: 'target_longer_than_base' | 'invalid_input' }
+
 function listToText(list?: Array<string | number>): string {
   return Array.isArray(list) ? list.join(',') : ''
 }
@@ -183,6 +197,45 @@ export function createDefaultCalendarPolicyOverrideForm(): CalendarPolicyOverrid
     userNames: '',
     excludeUserIds: '',
     excludeUserNames: '',
+  }
+}
+
+function normalizeQuickAddDayCount(value: unknown): number | null {
+  const count = typeof value === 'number' ? value : Number(value)
+  if (!Number.isInteger(count) || count < 1) return null
+  return count
+}
+
+export function buildHolidayLengthCalendarPolicyOverride(
+  input: CalendarPolicyHolidayLengthQuickAddInput,
+): CalendarPolicyHolidayLengthQuickAddResult {
+  const holidayName = input.holidayName.trim()
+  const attendanceGroup = input.attendanceGroup.trim()
+  const baseRestDays = normalizeQuickAddDayCount(input.baseRestDays)
+  const targetRestDays = normalizeQuickAddDayCount(input.targetRestDays)
+  if (!holidayName || !attendanceGroup || !baseRestDays || !targetRestDays) {
+    return { kind: 'unsupported', reason: 'invalid_input' }
+  }
+  if (targetRestDays === baseRestDays) {
+    return { kind: 'noop', reason: 'same_length' }
+  }
+  if (targetRestDays > baseRestDays) {
+    return { kind: 'unsupported', reason: 'target_longer_than_base' }
+  }
+
+  return {
+    kind: 'append',
+    form: {
+      ...createDefaultCalendarPolicyOverrideForm(),
+      name: holidayName,
+      match: 'contains',
+      dayIndexStart: targetRestDays + 1,
+      dayIndexEnd: baseRestDays,
+      source: 'group',
+      isWorkingDay: true,
+      label: input.label?.trim() || input.localizedDefaultLabel?.trim() || `${holidayName}调班`,
+      attendanceGroups: attendanceGroup,
+    },
   }
 }
 

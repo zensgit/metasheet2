@@ -1425,6 +1425,11 @@
                     <p class="attendance__field-hint attendance__field-hint--warn">
                       {{ tr('Role matching uses the platform user role plus assigned RBAC role IDs/names; role tags use the same resolver aliases until a dedicated role-tag catalog exists.', '角色匹配使用用户平台角色及已分配 RBAC 角色 ID/名称；在独立角色标签目录落地前，角色标签使用同一解析别名。') }}
                     </p>
+                    <AttendanceCalendarPolicyQuickAdd
+                      :attendance-group-options="attendanceGroupOptions"
+                      :tr="tr"
+                      @append="appendCalendarPolicyQuickAdd"
+                    />
                     <AttendanceCalendarPolicyPreviewPanel
                       :tr="tr"
                       :draft-overrides="calendarPolicyPreviewDraftOverrides"
@@ -1505,7 +1510,7 @@
                                 <div class="attendance__override-filters">
                                   <label class="attendance__override-field">
                                     <span>{{ tr('Attendance groups', '考勤组') }}</span>
-                                    <input v-model="override.attendanceGroups" type="text" placeholder="单休办公,白班" />
+                                    <input v-model="override.attendanceGroups" type="text" placeholder="单休办公,白班" data-calendar-policy-override-attendance-groups />
                                     <small v-if="attendanceGroupOptions.length" class="attendance__field-hint">
                                       {{ tr('Known groups', '已知分组') }}: {{ attendanceGroupOptions.join(', ') }}
                                     </small>
@@ -1536,11 +1541,11 @@
                                   </label>
                                   <label class="attendance__override-field">
                                     <span>{{ tr('Day index start', '节假日序号起始') }}</span>
-                                    <input v-model.number="override.dayIndexStart" type="number" min="1" />
+                                    <input v-model.number="override.dayIndexStart" type="number" min="1" data-calendar-policy-override-day-index-start />
                                   </label>
                                   <label class="attendance__override-field">
                                     <span>{{ tr('Day index end', '节假日序号结束') }}</span>
-                                    <input v-model.number="override.dayIndexEnd" type="number" min="1" />
+                                    <input v-model.number="override.dayIndexEnd" type="number" min="1" data-calendar-policy-override-day-index-end />
                                   </label>
                                   <label class="attendance__override-field">
                                     <span>{{ tr('Day index list', '节假日序号列表') }}</span>
@@ -5412,6 +5417,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
+import AttendanceCalendarPolicyQuickAdd from './attendance/AttendanceCalendarPolicyQuickAdd.vue'
 import AttendanceCalendarPolicyPreviewPanel from './attendance/AttendanceCalendarPolicyPreviewPanel.vue'
 import AttendanceImportBatchesSection from './attendance/AttendanceImportBatchesSection.vue'
 import AttendanceHolidayDataSection from './attendance/AttendanceHolidayDataSection.vue'
@@ -13699,6 +13705,10 @@ function removeHolidayOverride(index: number) {
 
 function addCalendarPolicyOverride() {
   settingsForm.calendarPolicyOverrides.push(createDefaultCalendarPolicyOverrideForm())
+}
+
+function appendCalendarPolicyQuickAdd(form: CalendarPolicyOverrideFormState) {
+  settingsForm.calendarPolicyOverrides.push(form)
 }
 
 function removeCalendarPolicyOverride(index: number) {

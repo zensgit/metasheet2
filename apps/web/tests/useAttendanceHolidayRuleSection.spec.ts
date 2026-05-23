@@ -90,6 +90,13 @@ function findButton(container: HTMLElement, label: string): HTMLButtonElement {
   return button as HTMLButtonElement
 }
 
+function setInput(container: HTMLElement, selector: string, value: string): void {
+  const input = container.querySelector<HTMLInputElement>(selector)
+  expect(input, `expected input ${selector}`).toBeTruthy()
+  input!.value = value
+  input!.dispatchEvent(new Event('input'))
+}
+
 function createDefaultSettings(): HolidaySettingsState {
   return {
     holidayFirstDayEnabled: true,
@@ -320,6 +327,60 @@ describe('AttendanceHolidayRuleSection', () => {
     expect(container!.querySelector('.attendance__override-field input[placeholder="单休办公,白班"]')).toBeTruthy()
     const roleInputs = container!.querySelectorAll('.attendance__override-field input[placeholder="attendance_admin,班组长"]')
     expect(roleInputs.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('quick-adds a group holiday-length calendar policy row', async () => {
+    const settingsForm = reactive<HolidaySettingsState>(createDefaultSettings())
+
+    const config = {
+      addCalendarPolicyOverride: vi.fn(),
+      addHolidayOverride: vi.fn(),
+      holidaySyncLastRun: { value: null },
+      holidaySyncLoading: { value: false },
+      removeCalendarPolicyOverride: vi.fn(),
+      removeHolidayOverride: vi.fn(),
+      saveSettings: vi.fn(),
+      settingsForm,
+      settingsLoading: { value: false },
+      syncHolidays: vi.fn(),
+      syncHolidaysForYears: vi.fn(),
+    } as HolidayConfig
+
+    app = createApp(AttendanceHolidayRuleSection, {
+      attendanceGroupOptions: ['短假班组'],
+      config,
+      formatDateTime,
+      tr,
+    })
+    app.mount(container!)
+    await flushUi()
+
+    expect(container!.querySelector('[data-attendance-calendar-policy-quick-add]')).toBeTruthy()
+    setInput(container!, '[data-calendar-policy-quick-group]', '短假班组')
+    await flushUi(2)
+
+    const quickAddButton = container!.querySelector<HTMLButtonElement>('button[data-calendar-policy-quick-add]')
+    expect(quickAddButton).toBeTruthy()
+    expect(quickAddButton!.disabled).toBe(false)
+    quickAddButton!.click()
+    await flushUi(6)
+
+    expect(config.addCalendarPolicyOverride).not.toHaveBeenCalled()
+    expect(settingsForm.calendarPolicyOverrides).toHaveLength(1)
+    expect(settingsForm.calendarPolicyOverrides[0]).toMatchObject({
+      name: '国庆',
+      match: 'contains',
+      dayIndexStart: 4,
+      dayIndexEnd: 5,
+      source: 'group',
+      isWorkingDay: true,
+      attendanceGroups: '短假班组',
+      label: '国庆调班',
+    })
+    const accordions = container!.querySelectorAll<HTMLButtonElement>('.attendance__accordion')
+    expect(accordions[1]?.getAttribute('aria-expanded')).toBe('true')
+    expect(container!.textContent).toContain('节假日第 4-5 天改为工作日')
+    expect(container!.querySelector('.attendance__override-field input[placeholder="单休办公,白班"]')).toBeTruthy()
   })
 
   it('shows effective calendar override diagnostics for unsaved and shadowed rules', async () => {
