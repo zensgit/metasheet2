@@ -119,6 +119,11 @@
           <p class="attendance__field-hint attendance__field-hint--warn">
             {{ tr('Role matching uses the platform user role plus assigned RBAC role IDs/names; role tags use the same resolver aliases until a dedicated role-tag catalog exists.', '角色匹配使用用户平台角色及已分配 RBAC 角色 ID/名称；在独立角色标签目录落地前，角色标签使用同一解析别名。') }}
           </p>
+          <AttendanceCalendarPolicyQuickAdd
+            :attendance-group-options="attendanceGroupOptions"
+            :tr="tr"
+            @append="appendCalendarPolicyQuickAdd"
+          />
           <AttendanceCalendarPolicyPreviewPanel :tr="tr" />
           <div
             v-if="calendarPolicyOverrideDiagnostics.length"
@@ -191,7 +196,7 @@
                         <div class="attendance__override-filters">
                           <label class="attendance__override-field">
                             <span>{{ tr('Attendance groups', '考勤组') }}</span>
-                            <input v-model="override.attendanceGroups" type="text" placeholder="单休办公,白班" />
+                            <input v-model="override.attendanceGroups" type="text" placeholder="单休办公,白班" data-calendar-policy-override-attendance-groups />
                             <small v-if="attendanceGroupOptions.length" class="attendance__field-hint">{{ tr('Known groups', '已知分组') }}: {{ attendanceGroupOptions.join(', ') }}</small>
                           </label>
                           <label class="attendance__override-field"><span>{{ tr('Roles', '角色') }}</span><input v-model="override.roles" type="text" placeholder="attendance_admin,班组长" /></label>
@@ -200,8 +205,8 @@
                           <label class="attendance__override-field"><span>{{ tr('User names', '用户名') }}</span><input v-model="override.userNames" type="text" placeholder="张三,李四" /></label>
                           <label class="attendance__override-field"><span>{{ tr('Exclude user IDs', '排除用户ID') }}</span><input v-model="override.excludeUserIds" type="text" placeholder="uuid3" /></label>
                           <label class="attendance__override-field"><span>{{ tr('Exclude user names', '排除用户名') }}</span><input v-model="override.excludeUserNames" type="text" placeholder="王五" /></label>
-                          <label class="attendance__override-field"><span>{{ tr('Day index start', '节假日序号起始') }}</span><input v-model.number="override.dayIndexStart" type="number" min="1" /></label>
-                          <label class="attendance__override-field"><span>{{ tr('Day index end', '节假日序号结束') }}</span><input v-model.number="override.dayIndexEnd" type="number" min="1" /></label>
+                          <label class="attendance__override-field"><span>{{ tr('Day index start', '节假日序号起始') }}</span><input v-model.number="override.dayIndexStart" type="number" min="1" data-calendar-policy-override-day-index-start /></label>
+                          <label class="attendance__override-field"><span>{{ tr('Day index end', '节假日序号结束') }}</span><input v-model.number="override.dayIndexEnd" type="number" min="1" data-calendar-policy-override-day-index-end /></label>
                           <label class="attendance__override-field"><span>{{ tr('Day index list', '节假日序号列表') }}</span><input v-model="override.dayIndexList" type="text" placeholder="1,2,3" /></label>
                         </div>
                       </td>
@@ -300,6 +305,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch, type Ref } from 'vue'
+import AttendanceCalendarPolicyQuickAdd from './AttendanceCalendarPolicyQuickAdd.vue'
 import AttendanceCalendarPolicyPreviewPanel from './AttendanceCalendarPolicyPreviewPanel.vue'
 import {
   buildCalendarPolicyOverrideDiagnostics,
@@ -458,6 +464,11 @@ const addHolidayOverrideAndExpand = () => {
 const addCalendarPolicyOverrideAndExpand = () => {
   calendarPolicyOverridesExpanded.value = true
   props.config.addCalendarPolicyOverride()
+}
+
+const appendCalendarPolicyQuickAdd = (form: CalendarPolicyOverrideFormState) => {
+  calendarPolicyOverridesExpanded.value = true
+  settingsForm.calendarPolicyOverrides.push(form)
 }
 
 const removeHolidayOverride = (index: number) => props.config.removeHolidayOverride(index)

@@ -51,6 +51,13 @@ async function flushUi(cycles = 6): Promise<void> {
   }
 }
 
+function setInput(container: HTMLElement, selector: string, value: string): void {
+  const input = container.querySelector<HTMLInputElement>(selector)
+  expect(input, `expected input ${selector}`).toBeTruthy()
+  input!.value = value
+  input!.dispatchEvent(new Event('input', { bubbles: true }))
+}
+
 function setViewportWidth(width: number): void {
   Object.defineProperty(window, 'innerWidth', {
     configurable: true,
@@ -532,6 +539,37 @@ describe('Attendance admin regressions', () => {
     expect(container!.querySelector('[data-admin-shortcut="attendance-admin-group-members"]')?.textContent).toContain('Organization · Group members')
     expect(container!.textContent).toContain('User picker')
     expect(container!.textContent).toContain('Append selected user')
+  })
+
+  it('renders the production calendar-policy quick-add panel and appends a group day-index row', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const settings = container!.querySelector<HTMLElement>('#attendance-admin-settings')
+    expect(settings).toBeTruthy()
+    expect(window.getComputedStyle(settings!).display).not.toBe('none')
+    expect(settings!.querySelector('[data-attendance-calendar-policy-quick-add]')).toBeTruthy()
+
+    setInput(settings!, '[data-calendar-policy-quick-holiday]', 'National Day')
+    setInput(settings!, '[data-calendar-policy-quick-group]', 'day-shift')
+    await flushUi(2)
+
+    const quickAddButton = settings!.querySelector<HTMLButtonElement>('button[data-calendar-policy-quick-add]')
+    expect(quickAddButton).toBeTruthy()
+    expect(quickAddButton!.disabled).toBe(false)
+    quickAddButton!.click()
+    await flushUi(4)
+
+    expect(settings!.textContent).toContain('Will add a group workday exception for holiday day 4-5.')
+    const policyRows = settings!.querySelectorAll('template, tbody tr')
+    expect(policyRows.length).toBeGreaterThan(0)
+    const groupInputs = Array.from(settings!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-attendance-groups]'))
+    expect(groupInputs.some(input => input.value === 'day-shift')).toBe(true)
+    const dayIndexStartInputs = Array.from(settings!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-day-index-start]'))
+    const dayIndexEndInputs = Array.from(settings!.querySelectorAll<HTMLInputElement>('[data-calendar-policy-override-day-index-end]'))
+    expect(dayIndexStartInputs.some(input => input.value === '4')).toBe(true)
+    expect(dayIndexEndInputs.some(input => input.value === '5')).toBe(true)
   })
 
   it('passes the selected CSV header mode when exporting report records', async () => {
