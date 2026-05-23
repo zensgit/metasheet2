@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, ref, type App } from 'vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
+import { useLocale } from '../src/composables/useLocale'
 import { apiFetch } from '../src/utils/api'
 
 vi.mock('../src/composables/usePlugins', () => ({
@@ -168,6 +169,35 @@ function installOverviewMock(): void {
     if (url.includes('/api/attendance/reports/requests?')) {
       return jsonResponse(200, { ok: true, data: { items: [] } })
     }
+    if (url.includes('/api/attendance/effective-calendar?')) {
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          mode: 'userId',
+          from: '2026-03-30',
+          to: '2026-05-03',
+          timezone: 'Asia/Shanghai',
+          items: [
+            {
+              date: '2026-04-05',
+              base: { isWorkingDay: false, source: 'national', name: '清明节-1', holidayId: 'h_qm', dayIndex: 1 },
+              effective: { isWorkingDay: false, source: 'national', label: '清明节-1' },
+              layers: [{ kind: 'holiday', source: 'national', isWorkingDay: false, label: '清明节-1' }],
+              overlays: [],
+            },
+            {
+              date: '2026-04-10',
+              base: { isWorkingDay: true, source: 'rule' },
+              effective: { isWorkingDay: true, source: 'rule' },
+              layers: [{ kind: 'base_rule', source: 'rule', isWorkingDay: true }],
+              overlays: [
+                { kind: 'overtime', source: 'attendance_requests', requestType: 'overtime', minutes: 180, status: 'approved', refId: 'request-approved' },
+              ],
+            },
+          ],
+        },
+      })
+    }
     if (url.includes('/api/attendance/holidays?')) {
       return jsonResponse(200, { ok: true, data: { items: [] } })
     }
@@ -244,6 +274,18 @@ function installZeroStateMock(): void {
     if (url.includes('/api/attendance/reports/requests?')) {
       return jsonResponse(200, { ok: true, data: { items: [] } })
     }
+    if (url.includes('/api/attendance/effective-calendar?')) {
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          mode: 'userId',
+          from: '2026-03-30',
+          to: '2026-05-03',
+          timezone: 'Asia/Shanghai',
+          items: [],
+        },
+      })
+    }
     if (url.includes('/api/attendance/holidays?')) {
       return jsonResponse(200, { ok: true, data: { items: [] } })
     }
@@ -289,6 +331,7 @@ describe('Attendance self-service dashboard', () => {
     if (app) app.unmount()
     if (container) container.remove()
     HTMLElement.prototype.scrollIntoView = originalScrollIntoView
+    useLocale().setLocale('en')
     vi.useRealTimers()
     app = null
     container = null
@@ -310,6 +353,32 @@ describe('Attendance self-service dashboard', () => {
     expect(container?.querySelector('[data-selfservice-primary-action]')?.textContent).toContain('Resolve anomaly reminders')
     expect(container?.querySelector('[data-selfservice-card="guide"]')?.textContent).toContain('Adjusted')
     expect(container?.querySelector('[data-selfservice-card="guide"]')?.textContent).toContain('manual correction')
+  })
+
+  it('renders effective-calendar holiday anchors and approved overlays in the personal calendar', async () => {
+    useLocale().setLocale('zh-CN')
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi(12)
+
+    const targetInput = container?.querySelector('input[name="targetUserId"]') as HTMLInputElement | null
+    expect(targetInput).toBeTruthy()
+    targetInput!.value = 'user-self'
+    targetInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    findButton(container!, '刷新').click()
+    await flushUi(12)
+
+    const chips = Array.from(container!.querySelectorAll('.attendance__calendar-holiday')) as HTMLElement[]
+    const statutoryChip = chips.find((chip) => chip.textContent?.includes('清明节'))
+    expect(statutoryChip).toBeTruthy()
+    expect(statutoryChip!.textContent).toContain('休')
+    expect(statutoryChip!.textContent?.includes('清明节-1')).toBe(false)
+    expect(statutoryChip!.classList.contains('calendar-source--national')).toBe(true)
+
+    const overtimeChip = chips.find((chip) => chip.textContent?.includes('加 3h'))
+    expect(overtimeChip).toBeTruthy()
+    expect(overtimeChip!.textContent).toContain('班')
+    expect(overtimeChip!.getAttribute('title') ?? '').toContain('加班 · 180m')
   })
 
   it('surfaces anomaly-driven follow-up guidance and request backlog detail', async () => {

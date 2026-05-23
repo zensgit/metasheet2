@@ -60,18 +60,29 @@
             </div>
             <div v-if="cell.holidays.length" class="meta-calendar__holidays">
               <span
-                v-for="holiday in cell.holidays.slice(0, 2)"
-                :key="`${cell.dateStr}-${holiday.id}`"
+                v-for="entry in calendarHolidayDisplays(cell.holidays, 2)"
+                :key="`${cell.dateStr}-${entry.holiday.id}`"
                 class="meta-calendar__holiday"
                 :class="[
-                  holiday.isWorkingDay ? 'meta-calendar__holiday--working' : 'meta-calendar__holiday--rest',
-                  hasOverrideMarker(holiday) ? 'meta-calendar__holiday--overridden' : null,
-                  holiday.overlays && holiday.overlays.length ? 'meta-calendar__holiday--with-overlay' : null,
-                  calendarChipSourceClassName(holiday.effective?.source),
+                  entry.display.dayBadge?.kind === 'work' ? 'meta-calendar__holiday--working' : 'meta-calendar__holiday--rest',
+                  entry.display.hasOverride ? 'meta-calendar__holiday--overridden' : null,
+                  entry.display.hasOverlay ? 'meta-calendar__holiday--with-overlay' : null,
+                  entry.display.sourceClass,
                 ]"
-                :title="buildHolidayTooltip(holiday)"
+                :title="entry.display.tooltip"
               >
-                {{ holiday.name || fallbackHolidayName(holiday) }}
+                <span v-if="entry.display.title" class="meta-calendar__holiday-title">{{ entry.display.title }}</span>
+                <span
+                  v-if="entry.display.dayBadge"
+                  class="meta-calendar__holiday-day-badge"
+                  :class="`meta-calendar__holiday-day-badge--${entry.display.dayBadge.kind}`"
+                >{{ entry.display.dayBadge.text }}</span>
+                <span
+                  v-for="overlay in entry.display.overlayBadges.slice(0, 2)"
+                  :key="`${entry.holiday.id}-${overlay.kind}`"
+                  class="meta-calendar__holiday-overlay-badge"
+                  :class="overlay.className"
+                >{{ overlay.text }}</span>
               </span>
             </div>
             <div class="meta-calendar__events">
@@ -147,18 +158,29 @@
             </div>
             <div v-if="cell.holidays.length" class="meta-calendar__holidays">
               <span
-                v-for="holiday in cell.holidays.slice(0, 2)"
-                :key="`${cell.dateStr}-${holiday.id}`"
+                v-for="entry in calendarHolidayDisplays(cell.holidays, 2)"
+                :key="`${cell.dateStr}-${entry.holiday.id}`"
                 class="meta-calendar__holiday"
                 :class="[
-                  holiday.isWorkingDay ? 'meta-calendar__holiday--working' : 'meta-calendar__holiday--rest',
-                  hasOverrideMarker(holiday) ? 'meta-calendar__holiday--overridden' : null,
-                  holiday.overlays && holiday.overlays.length ? 'meta-calendar__holiday--with-overlay' : null,
-                  calendarChipSourceClassName(holiday.effective?.source),
+                  entry.display.dayBadge?.kind === 'work' ? 'meta-calendar__holiday--working' : 'meta-calendar__holiday--rest',
+                  entry.display.hasOverride ? 'meta-calendar__holiday--overridden' : null,
+                  entry.display.hasOverlay ? 'meta-calendar__holiday--with-overlay' : null,
+                  entry.display.sourceClass,
                 ]"
-                :title="buildHolidayTooltip(holiday)"
+                :title="entry.display.tooltip"
               >
-                {{ holiday.name || fallbackHolidayName(holiday) }}
+                <span v-if="entry.display.title" class="meta-calendar__holiday-title">{{ entry.display.title }}</span>
+                <span
+                  v-if="entry.display.dayBadge"
+                  class="meta-calendar__holiday-day-badge"
+                  :class="`meta-calendar__holiday-day-badge--${entry.display.dayBadge.kind}`"
+                >{{ entry.display.dayBadge.text }}</span>
+                <span
+                  v-for="overlay in entry.display.overlayBadges.slice(0, 2)"
+                  :key="`${entry.holiday.id}-${overlay.kind}`"
+                  class="meta-calendar__holiday-overlay-badge"
+                  :class="overlay.className"
+                >{{ overlay.text }}</span>
               </span>
             </div>
             <div class="meta-calendar__events">
@@ -216,18 +238,29 @@
             <div v-if="activeDayCell.lunarLabel || activeDayCell.holidays.length" class="meta-calendar__day-calendar-meta">
               <span v-if="activeDayCell.lunarLabel" class="meta-calendar__lunar">{{ activeDayCell.lunarLabel }}</span>
               <span
-                v-for="holiday in activeDayCell.holidays"
-                :key="`${activeDayCell.dateStr}-${holiday.id}`"
+                v-for="entry in calendarHolidayDisplays(activeDayCell.holidays)"
+                :key="`${activeDayCell.dateStr}-${entry.holiday.id}`"
                 class="meta-calendar__holiday"
                 :class="[
-                  holiday.isWorkingDay ? 'meta-calendar__holiday--working' : 'meta-calendar__holiday--rest',
-                  hasOverrideMarker(holiday) ? 'meta-calendar__holiday--overridden' : null,
-                  holiday.overlays && holiday.overlays.length ? 'meta-calendar__holiday--with-overlay' : null,
-                  calendarChipSourceClassName(holiday.effective?.source),
+                  entry.display.dayBadge?.kind === 'work' ? 'meta-calendar__holiday--working' : 'meta-calendar__holiday--rest',
+                  entry.display.hasOverride ? 'meta-calendar__holiday--overridden' : null,
+                  entry.display.hasOverlay ? 'meta-calendar__holiday--with-overlay' : null,
+                  entry.display.sourceClass,
                 ]"
-                :title="buildHolidayTooltip(holiday)"
+                :title="entry.display.tooltip"
               >
-                {{ holiday.name || fallbackHolidayName(holiday) }}
+                <span v-if="entry.display.title" class="meta-calendar__holiday-title">{{ entry.display.title }}</span>
+                <span
+                  v-if="entry.display.dayBadge"
+                  class="meta-calendar__holiday-day-badge"
+                  :class="`meta-calendar__holiday-day-badge--${entry.display.dayBadge.kind}`"
+                >{{ entry.display.dayBadge.text }}</span>
+                <span
+                  v-for="overlay in entry.display.overlayBadges.slice(0, 2)"
+                  :key="`${entry.holiday.id}-${overlay.kind}`"
+                  class="meta-calendar__holiday-overlay-badge"
+                  :class="overlay.className"
+                >{{ overlay.text }}</span>
               </span>
             </div>
             <div class="meta-calendar__day-meta">{{ calendarEventCount(currentDayEvents.length, isZh) }}</div>
@@ -311,10 +344,8 @@ import type {
   CalendarEffectiveChip,
 } from '../../services/attendance/effectiveCalendar'
 import {
-  buildCalendarChipTooltip,
-  calendarChipSourceClassName,
-  fallbackChipName,
-  hasCalendarChipOverrideMarker,
+  buildCalendarChipDisplay,
+  type CalendarChipDisplayModel,
 } from '../../services/attendance/calendarChipDisplay'
 import MetaAttachmentList from './MetaAttachmentList.vue'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
@@ -633,16 +664,21 @@ function rangeFromCells(cells: CalendarCell[]): CalendarVisibleRange | null {
   }
 }
 
-// PR2: chip-display helpers (fallback name, override marker, tooltip,
-// source class) are extracted to apps/web/src/services/attendance/calendarChipDisplay.ts
-// so the multitable Calendar view and attendance personal calendar share one
-// implementation. The PR1 visual contract (red/green base + dotted override
-// + overlay dot) is preserved; PR2 adds the source border-left accent via
-// the shared `calendar-source--{source}` class.
+interface CalendarHolidayDisplayEntry {
+  holiday: CalendarEffectiveChip
+  display: CalendarChipDisplayModel
+}
 
-const fallbackHolidayName = fallbackChipName
-const hasOverrideMarker = hasCalendarChipOverrideMarker
-const buildHolidayTooltip = buildCalendarChipTooltip
+function calendarHolidayDisplays(
+  holidays: CalendarEffectiveChip[],
+  limit?: number,
+): CalendarHolidayDisplayEntry[] {
+  const items = typeof limit === 'number' ? holidays.slice(0, limit) : holidays
+  return items.map((holiday) => ({
+    holiday,
+    display: buildCalendarChipDisplay(holiday, { isZh: isZh.value }),
+  }))
+}
 
 function onPickDateField(e: Event) {
   const val = (e.target as HTMLSelectElement).value
@@ -722,7 +758,7 @@ function cellAriaLabel(cell: CalendarCell): string {
   const total = cell.events.length + cell.overflow
   const annotations = [
     cell.lunarLabel,
-    ...cell.holidays.map((holiday) => holiday.name || fallbackHolidayName(holiday)),
+    ...cell.holidays.map((holiday) => buildCalendarChipDisplay(holiday, { isZh: isZh.value }).ariaLabel),
   ].filter((item): item is string => Boolean(item))
   return calendarCellAriaLabel(dateLabel, annotations, total, isZh.value)
 }
@@ -787,14 +823,24 @@ function onCellKeydown(e: KeyboardEvent, cellIdx: number, cells: CalendarCell[])
 .meta-calendar__lunar { color: #8a5c2e; font-size: 10px; line-height: 1.25; white-space: nowrap; }
 .meta-calendar__holidays,
 .meta-calendar__day-calendar-meta { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-bottom: 3px; }
-.meta-calendar__holiday { display: inline-flex; align-items: center; max-width: 100%; padding: 1px 5px; border-radius: 999px; font-size: 10px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta-calendar__holiday { display: inline-flex; align-items: center; gap: 3px; max-width: 100%; padding: 1px 5px; border-radius: 999px; font-size: 10px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meta-calendar__holiday--rest { background: #ffe8e8; color: #9a1a1a; }
 .meta-calendar__holiday--working { background: #e5f7ec; color: #15693a; }
-/* Minimal override marker (PR1 scope C): dotted bottom-border + cursor:help so
- * the user notices a layered policy and the native title tooltip discloses the
- * full chain. Source coloring palette is intentionally deferred to PR2. */
+.meta-calendar__holiday-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.meta-calendar__holiday-day-badge,
+.meta-calendar__holiday-overlay-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 1.2em; padding: 0 3px; border-radius: 999px; font-weight: 700; line-height: 1.2; flex-shrink: 0; }
+.meta-calendar__holiday-day-badge--rest { background: rgba(215, 58, 74, 0.16); color: #9a1a1a; }
+.meta-calendar__holiday-day-badge--work { background: rgba(34, 197, 94, 0.16); color: #15693a; }
+.meta-calendar__holiday-overlay-badge { color: #fff; }
+.meta-calendar__holiday-overlay-badge.calendar-overlay--leave { background: #2563eb; }
+.meta-calendar__holiday-overlay-badge.calendar-overlay--overtime { background: #f97316; }
+.meta-calendar__holiday-overlay-badge.calendar-overlay--correction { background: #6b7280; }
+.meta-calendar__holiday-overlay-badge.calendar-overlay--business-trip { background: #7c3aed; }
+.meta-calendar__holiday-overlay-badge.calendar-overlay--training { background: #0891b2; }
+/* Minimal override marker: dotted bottom-border + cursor:help so the user
+ * notices a layered policy and the native title tooltip discloses the chain. */
 .meta-calendar__holiday--overridden { border-bottom: 1px dotted currentColor; cursor: help; }
-.meta-calendar__holiday--with-overlay::after { content: '·'; margin-left: 3px; opacity: 0.55; }
+.meta-calendar__holiday--with-overlay::after { content: none; }
 .meta-calendar__events { display: flex; flex-direction: column; gap: 2px; }
 .meta-calendar__event { padding: 2px 4px; background: #409eff; color: #fff; border-radius: 3px; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; display: flex; align-items: center; gap: 6px; }
 .meta-calendar__event:hover { background: #337ecc; }

@@ -257,6 +257,11 @@ describe('MetaCalendarView', () => {
       (el) => el.textContent?.trim() === text,
     ) as HTMLElement | null
   }
+  function findChipContainingText(container: HTMLElement, text: string): HTMLElement | null {
+    return Array.from(container.querySelectorAll('.meta-calendar__holiday')).find(
+      (el) => el.textContent?.includes(text),
+    ) as HTMLElement | null
+  }
 
   it('§4-PR1 case 1: national base chip renders with tooltip naming effective.source=national, no override marker', async () => {
     vi.useFakeTimers()
@@ -281,10 +286,67 @@ describe('MetaCalendarView', () => {
     expect(chip!.classList.contains('meta-calendar__holiday--rest')).toBe(true)
     expect(chip!.classList.contains('meta-calendar__holiday--overridden')).toBe(false)
     expect(chip!.classList.contains('meta-calendar__holiday--with-overlay')).toBe(false)
+    expect(chip!.classList.contains('calendar-source--national')).toBe(true)
     const title = chip!.getAttribute('title') ?? ''
     expect(title).toContain('2026-10-01')
-    expect(title).toContain('national')
+    expect(title).toContain('Statutory holiday')
     expect(title).toContain('Rest day')
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('PR-B: generated holiday dayIndex=1 keeps the festival anchor visible plus the rest badge', async () => {
+    useLocale().setLocale('zh-CN')
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-02T00:00:00Z'))
+
+    const { app, container } = mountChipCalendar([
+      {
+        id: 'h_nat_cn',
+        date: '2026-10-01',
+        name: '国庆节-1',
+        isWorkingDay: false,
+        base: { isWorkingDay: false, source: 'national', name: '国庆节-1', holidayId: 'h_nat_cn', dayIndex: 1 },
+        effective: { isWorkingDay: false, source: 'national', label: '国庆节-1' },
+        layers: [{ kind: 'holiday', source: 'national', isWorkingDay: false, label: '国庆节-1' }],
+        overlays: [],
+      },
+    ])
+    await nextTick()
+
+    const chip = findChipContainingText(container, '国庆节')
+    expect(chip).not.toBeNull()
+    expect(chip!.textContent).toContain('休')
+    expect(chip!.textContent?.includes('国庆节-1')).toBe(false)
+    expect(chip!.classList.contains('calendar-source--national')).toBe(true)
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('PR-B: generated holiday continuation days show only the rest badge and keep raw holiday name in tooltip', async () => {
+    useLocale().setLocale('zh-CN')
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-03T00:00:00Z'))
+
+    const { app, container } = mountChipCalendar([
+      {
+        id: 'h_nat_cn_2',
+        date: '2026-10-02',
+        name: '国庆节 DAY2',
+        isWorkingDay: false,
+        base: { isWorkingDay: false, source: 'national', name: '国庆节 DAY2', holidayId: 'h_nat_cn_2', dayIndex: 2 },
+        effective: { isWorkingDay: false, source: 'national', label: '国庆节 DAY2' },
+        layers: [{ kind: 'holiday', source: 'national', isWorkingDay: false, label: '国庆节 DAY2' }],
+        overlays: [],
+      },
+    ])
+    await nextTick()
+
+    const chip = findChipByText(container, '休')
+    expect(chip).not.toBeNull()
+    expect(chip!.getAttribute('title') ?? '').toContain('国庆节 DAY2')
 
     app.unmount()
     container.remove()
@@ -315,6 +377,7 @@ describe('MetaCalendarView', () => {
     expect(chip).not.toBeNull()
     expect(chip!.classList.contains('meta-calendar__holiday--working')).toBe(true)
     expect(chip!.classList.contains('meta-calendar__holiday--overridden')).toBe(true)
+    expect(chip!.classList.contains('calendar-source--company-policy')).toBe(true)
     const title = chip!.getAttribute('title') ?? ''
     expect(title).toContain('national:')
     expect(title).toContain('National Day')
@@ -350,6 +413,7 @@ describe('MetaCalendarView', () => {
     expect(chip).not.toBeNull()
     expect(chip!.classList.contains('meta-calendar__holiday--rest')).toBe(true)
     expect(chip!.classList.contains('meta-calendar__holiday--overridden')).toBe(true)
+    expect(chip!.classList.contains('calendar-source--company-policy')).toBe(true)
     const title = chip!.getAttribute('title') ?? ''
     expect(title).toContain('group:')
 
@@ -380,6 +444,7 @@ describe('MetaCalendarView', () => {
 
     const chip = findChipByText(container, 'User confirm')
     expect(chip!.classList.contains('meta-calendar__holiday--overridden')).toBe(true)
+    expect(chip!.classList.contains('calendar-source--company-policy')).toBe(true)
     const title = chip!.getAttribute('title') ?? ''
     expect(title).toContain('user:')
     expect(title).toContain('User confirm')
@@ -409,13 +474,14 @@ describe('MetaCalendarView', () => {
     ])
     await nextTick()
 
-    const chip = findChipByText(container, 'Leave + OT')
+    const chip = findChipByText(container, 'Manual rest')
     expect(chip!.classList.contains('meta-calendar__holiday--with-overlay')).toBe(true)
+    expect(chip!.classList.contains('calendar-source--company-policy')).toBe(true)
     const title = chip!.getAttribute('title') ?? ''
     expect(title).toContain('Overlays:')
-    expect(title).toContain('personal_leave')
+    expect(title).toContain('Leave')
     expect(title).toContain('240m')
-    expect(title).toContain('overtime')
+    expect(title).toContain('Overtime')
     expect(title).toContain('180m')
 
     app.unmount()
@@ -423,6 +489,7 @@ describe('MetaCalendarView', () => {
   })
 
   it('§4-PR1 case 5b: overlay-only rule day renders the overlay label (not generic "Working day") and keeps --with-overlay', async () => {
+    useLocale().setLocale('zh-CN')
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-08-16T00:00:00Z'))
 
@@ -446,15 +513,17 @@ describe('MetaCalendarView', () => {
     ])
     await nextTick()
 
-    const chip = findChipByText(container, 'Leave')
+    const chip = findChipContainingText(container, '假 4h')
     expect(chip).not.toBeNull()
     expect(chip!.classList.contains('meta-calendar__holiday--working')).toBe(true)
     expect(chip!.classList.contains('meta-calendar__holiday--overridden')).toBe(false)
     expect(chip!.classList.contains('meta-calendar__holiday--with-overlay')).toBe(true)
-    // No generic "Working day" fallback should be shown
+    expect(chip!.textContent).toContain('班')
+    // No legacy overlay-derived chip.name or generic fallback should be shown.
+    expect(chip!.textContent?.includes('Leave')).toBe(false)
     expect(chip!.textContent?.includes('Working day')).toBe(false)
     const title = chip!.getAttribute('title') ?? ''
-    expect(title).toContain('personal_leave')
+    expect(title).toContain('请假')
     expect(title).toContain('240m')
 
     app.unmount()

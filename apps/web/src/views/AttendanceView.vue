@@ -644,7 +644,25 @@
               <span v-if="day.statusLabel" class="attendance__calendar-status">{{ day.statusLabel }}</span>
               <span v-else class="attendance__calendar-status attendance__calendar-status--empty">--</span>
               <span v-if="showLunarLabel && day.lunarLabel" class="attendance__calendar-lunar">{{ day.lunarLabel }}</span>
-              <span v-if="showHolidayBadge && day.holidayName" class="attendance__calendar-holiday" :class="day.sourceClass">{{ day.holidayName }}</span>
+              <span
+                v-if="showHolidayBadge && day.calendarDisplay"
+                class="attendance__calendar-holiday"
+                :class="day.calendarDisplay.sourceClass"
+                :title="day.calendarDisplay.tooltip"
+              >
+                <span v-if="day.calendarDisplay.title" class="attendance__calendar-holiday-title">{{ day.calendarDisplay.title }}</span>
+                <span
+                  v-if="day.calendarDisplay.dayBadge"
+                  class="attendance__calendar-holiday-day-badge"
+                  :class="`attendance__calendar-holiday-day-badge--${day.calendarDisplay.dayBadge.kind}`"
+                >{{ day.calendarDisplay.dayBadge.text }}</span>
+                <span
+                  v-for="overlay in day.calendarDisplay.overlayBadges.slice(0, 2)"
+                  :key="overlay.kind"
+                  class="attendance__calendar-holiday-overlay-badge"
+                  :class="overlay.className"
+                >{{ overlay.text }}</span>
+              </span>
             </div>
           </div>
         </div>
@@ -5442,10 +5460,12 @@ import {
   type CalendarEffectiveChip,
 } from '../services/attendance/effectiveCalendar'
 import {
+  buildCalendarChipDisplay,
   buildCalendarChipTooltip,
   calendarChipSourceClassName,
   fallbackChipName,
   hasCalendarChipOverrideMarker,
+  type CalendarChipDisplayModel,
 } from '../services/attendance/calendarChipDisplay'
 import {
   buildAttendanceScheduleConflictDiagnostics,
@@ -6322,10 +6342,6 @@ interface AttendanceComprehensiveHoursPreviewResult {
   degraded?: boolean
 }
 
-// PR2 adds `sourceClass` carrying `calendar-source--{national|manual|org|group|role|user}`
-// (or undefined for plain rule/shift days). The shared palette in
-// apps/web/src/styles/calendar-source-palette.css resolves it to a 4px
-// border-left accent; UI surfaces apply the class without per-component CSS.
 interface CalendarDay {
   key: string
   day: number
@@ -6334,9 +6350,8 @@ interface CalendarDay {
   status?: string
   statusLabel?: string
   tooltip: string
-  holidayName?: string
+  calendarDisplay?: CalendarChipDisplayModel
   lunarLabel?: string
-  sourceClass?: string
 }
 
 interface AttendanceApiError extends Error {
@@ -8421,12 +8436,8 @@ const calendarDays = computed<CalendarDay[]>(() => {
     const chip = calendarEffectiveChipMap.value.get(key)
     let status = record?.status
     let statusLabel = status ? formatStatus(status) : undefined
-    const holidayName = typeof chip?.name === 'string' && chip.name.trim().length > 0
-      ? chip.name.trim()
-      : undefined
+    const calendarDisplay = chip ? buildCalendarChipDisplay(chip, { isZh: isZh.value }) : undefined
     const lunarLabel = formatLunarDayLabel(date)
-    const chipTooltip = chip ? buildCalendarChipTooltip(chip) : undefined
-    const sourceClass = calendarChipSourceClassName(chip?.effective?.source)
     let tooltip = record
       ? `${key} · ${statusLabel} · ${record.work_minutes} min`
       : key
@@ -8436,13 +8447,13 @@ const calendarDays = computed<CalendarDay[]>(() => {
       // Prefer the layer-chain tooltip when the chip exposes effective fields
       // so users can see "national rest → org override" without leaving the
       // cell; fall back to the legacy text otherwise.
-      tooltip = chipTooltip
-        ?? (holidayName ? `${key} · ${holidayName}` : `${key} · ${tr('Holiday', '休息日')}`)
-    } else if (record && status === 'off' && holidayName) {
-      tooltip = chipTooltip
-        ?? `${key} · ${holidayName} · ${record.work_minutes} min`
-    } else if (chipTooltip) {
-      tooltip = chipTooltip
+      tooltip = calendarDisplay?.tooltip
+        ?? (calendarDisplay?.visibleText ? `${key} · ${calendarDisplay.visibleText}` : `${key} · ${tr('Holiday', '休息日')}`)
+    } else if (record && status === 'off' && calendarDisplay?.visibleText) {
+      tooltip = calendarDisplay.tooltip
+        ?? `${key} · ${calendarDisplay.visibleText} · ${record.work_minutes} min`
+    } else if (calendarDisplay?.tooltip) {
+      tooltip = calendarDisplay.tooltip
     }
     return {
       key,
@@ -8452,9 +8463,8 @@ const calendarDays = computed<CalendarDay[]>(() => {
       status,
       statusLabel,
       tooltip,
-      holidayName,
+      calendarDisplay,
       lunarLabel,
-      sourceClass,
     }
   })
 })
@@ -16535,6 +16545,9 @@ const holidaySectionBindings = {
 }
 
 .attendance__calendar-holiday {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   margin-top: auto;
   font-size: 10px;
   color: #b45309;
@@ -16554,6 +16567,59 @@ const holidaySectionBindings = {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.attendance__calendar-holiday-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.attendance__calendar-holiday-day-badge,
+.attendance__calendar-holiday-overlay-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.2em;
+  padding: 0 3px;
+  border-radius: 999px;
+  font-weight: 700;
+  line-height: 1.2;
+  flex-shrink: 0;
+}
+
+.attendance__calendar-holiday-day-badge--rest {
+  background: rgba(215, 58, 74, 0.16);
+  color: #9a1a1a;
+}
+
+.attendance__calendar-holiday-day-badge--work {
+  background: rgba(34, 197, 94, 0.16);
+  color: #15693a;
+}
+
+.attendance__calendar-holiday-overlay-badge {
+  color: #fff;
+}
+
+.attendance__calendar-holiday-overlay-badge.calendar-overlay--leave {
+  background: #2563eb;
+}
+
+.attendance__calendar-holiday-overlay-badge.calendar-overlay--overtime {
+  background: #f97316;
+}
+
+.attendance__calendar-holiday-overlay-badge.calendar-overlay--correction {
+  background: #6b7280;
+}
+
+.attendance__calendar-holiday-overlay-badge.calendar-overlay--business-trip {
+  background: #7c3aed;
+}
+
+.attendance__calendar-holiday-overlay-badge.calendar-overlay--training {
+  background: #0891b2;
 }
 
 .attendance__calendar-cell--muted {

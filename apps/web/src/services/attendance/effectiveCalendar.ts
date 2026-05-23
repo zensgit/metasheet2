@@ -33,6 +33,7 @@ export interface CalendarEffectiveBase {
   isWorkingDay: boolean
   source: CalendarEffectiveSource
   holidayId?: string
+  dayIndex?: number
   name?: string | null
 }
 

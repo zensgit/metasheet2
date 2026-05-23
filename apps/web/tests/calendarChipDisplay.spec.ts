@@ -9,7 +9,9 @@
 
 import { describe, expect, it } from 'vitest'
 import {
+  buildCalendarChipDisplay,
   buildCalendarChipTooltip,
+  calendarChipEmployeeSourceClassName,
   calendarChipOriginBadge,
   calendarChipOriginClassName,
   calendarChipSourceClassName,
@@ -34,6 +36,109 @@ describe('calendarChipSourceClassName', () => {
     expect(calendarChipSourceClassName('shift')).toBeUndefined()
     expect(calendarChipSourceClassName('rotation')).toBeUndefined()
     expect(calendarChipSourceClassName(undefined)).toBeUndefined()
+  })
+})
+
+describe('employee calendar chip display', () => {
+  it('collapses non-national sources into the employee company-policy accent', () => {
+    expect(calendarChipEmployeeSourceClassName('national')).toBe('calendar-source--national')
+    for (const source of ['manual', 'org', 'group', 'role', 'user'] as const) {
+      expect(calendarChipEmployeeSourceClassName(source)).toBe('calendar-source--company-policy')
+    }
+    expect(calendarChipEmployeeSourceClassName('rule')).toBeUndefined()
+  })
+
+  it('shows the stripped festival anchor on dayIndex=1 across backend suffix formats', () => {
+    for (const name of ['国庆节-1', '国庆节第1天', '国庆节 DAY1']) {
+      const display = buildCalendarChipDisplay({
+        id: name,
+        date: '2026-10-01',
+        name,
+        isWorkingDay: false,
+        base: { isWorkingDay: false, source: 'national', name, dayIndex: 1 },
+        effective: { isWorkingDay: false, source: 'national', label: name },
+      } as CalendarEffectiveChip, { isZh: true })
+      expect(display.title).toBe('国庆节')
+      expect(display.dayBadge?.text).toBe('休')
+      expect(display.visibleText).toBe('国庆节 休')
+      expect(display.sourceClass).toBe('calendar-source--national')
+    }
+  })
+
+  it('uses only the rest badge for generated holiday continuation days', () => {
+    const display = buildCalendarChipDisplay({
+      id: 'national-2',
+      date: '2026-10-02',
+      name: '国庆节-2',
+      isWorkingDay: false,
+      base: { isWorkingDay: false, source: 'national', name: '国庆节-2', dayIndex: 2 },
+      effective: { isWorkingDay: false, source: 'national', label: '国庆节-2' },
+    } as CalendarEffectiveChip, { isZh: true })
+    expect(display.title).toBeUndefined()
+    expect(display.dayBadge?.text).toBe('休')
+    expect(display.visibleText).toBe('休')
+    expect(display.tooltip).toContain('国庆节-2')
+  })
+
+  it('renders overlay as a secondary badge without reading overlay-derived chip.name', () => {
+    const display = buildCalendarChipDisplay({
+      id: 'leave-1',
+      date: '2026-10-06',
+      name: 'Leave',
+      isWorkingDay: true,
+      base: { isWorkingDay: true, source: 'rule' },
+      effective: { isWorkingDay: true, source: 'rule' },
+      overlays: [{ kind: 'personal_leave', source: 'attendance_requests', minutes: 240, status: 'approved' }],
+    } as CalendarEffectiveChip, { isZh: true })
+    expect(display.title).toBeUndefined()
+    expect(display.dayBadge?.text).toBe('班')
+    expect(display.overlayBadges[0]).toMatchObject({
+      kind: 'leave',
+      text: '假 4h',
+      label: '请假',
+      fullDay: false,
+    })
+    expect(display.visibleText).toBe('班 假 4h')
+    expect(display.tooltip).toContain('个人状态: 请假 · 240m')
+  })
+
+  it('hides overlay duration when minutes equals the configured full-day threshold', () => {
+    const display = buildCalendarChipDisplay({
+      id: 'leave-2',
+      date: '2026-10-07',
+      isWorkingDay: true,
+      base: { isWorkingDay: true, source: 'rule' },
+      effective: { isWorkingDay: true, source: 'rule' },
+      overlays: [{ kind: 'personal_leave', source: 'attendance_requests', minutes: 480 }],
+    } as CalendarEffectiveChip, { isZh: true, fullDayMinutes: 480 })
+    expect(display.overlayBadges[0]?.text).toBe('假')
+    expect(display.overlayBadges[0]?.fullDay).toBe(true)
+  })
+
+  it('keeps English short badges empty while preserving tooltip detail', () => {
+    const display = buildCalendarChipDisplay({
+      id: 'ot-1',
+      date: '2026-10-08',
+      name: 'Overtime',
+      isWorkingDay: true,
+      base: { isWorkingDay: true, source: 'rule' },
+      effective: { isWorkingDay: true, source: 'rule' },
+      overlays: [{ kind: 'overtime', source: 'attendance_requests', minutes: 120 }],
+    } as CalendarEffectiveChip, { isZh: false })
+    expect(display.dayBadge?.text).toBe('')
+    expect(display.overlayBadges[0]?.text).toBe('')
+    expect(display.visibleText).toBe('')
+    expect(display.tooltip).toContain('Overlays: Overtime · 120m')
+  })
+
+  it('falls back to legacy chip name when no effective-calendar fields are present', () => {
+    const display = buildCalendarChipDisplay({
+      id: 'legacy',
+      date: '2026-01-01',
+      isWorkingDay: false,
+    } as CalendarEffectiveChip, { isZh: false })
+    expect(display.title).toBe('Holiday')
+    expect(display.visibleText).toBe('Holiday')
   })
 })
 
