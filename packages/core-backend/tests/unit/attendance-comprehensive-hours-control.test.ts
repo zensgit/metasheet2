@@ -410,6 +410,24 @@ describe('attendance comprehensive working-hours control helpers', () => {
       userId: 'user-a',
       period: { type: 'month', year: 2026, month: 5 },
       capMinutes: 600,
+      policyDraft: { metric: 'actuals' },
+    })).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_METRIC' },
+    })
+    expect(helpers.normalizeAttendanceComprehensiveHoursPreviewInput({
+      userId: 'user-a',
+      period: { type: 'month', year: 2026, month: 5 },
+      capMinutes: 600,
+      enforcement: 'deny',
+    })).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_ENFORCEMENT' },
+    })
+    expect(helpers.normalizeAttendanceComprehensiveHoursPreviewInput({
+      userId: 'user-a',
+      period: { type: 'month', year: 2026, month: 5 },
+      capMinutes: 600,
       policyDraft: { enforcement: 'deny' },
     })).toMatchObject({
       ok: false,

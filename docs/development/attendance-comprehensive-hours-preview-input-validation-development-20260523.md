@@ -38,6 +38,10 @@ Implementation details:
 - Existing internal helpers such as `buildAttendanceComprehensiveHoursComparison()`
   keep their defensive fallback behavior, so this is scoped to the route-facing
   preview contract.
+- The older `resolveAttendanceComprehensiveHoursMetric()` and
+  `resolveAttendanceComprehensiveHoursEnforcement()` helpers intentionally remain
+  for internal derived paths that need a defensive fallback. The new
+  `normalize*Input()` helpers are the strict route-boundary validators.
 
 ## Boundary
 

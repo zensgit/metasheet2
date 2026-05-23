@@ -28,6 +28,8 @@ The existing invalid-preview test now also covers:
 | Case | Expected result |
 | --- | --- |
 | `metric: 'actuals'` | `INVALID_METRIC` |
+| `policyDraft.metric: 'actuals'` | `INVALID_METRIC` |
+| `enforcement: 'deny'` | `INVALID_ENFORCEMENT` |
 | `policyDraft.enforcement: 'deny'` | `INVALID_ENFORCEMENT` |
 | `metric: ' actual '`, `enforcement: ' block '` | Valid, normalized to `actual` / `block` |
 
