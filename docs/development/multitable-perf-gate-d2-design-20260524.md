@@ -1,7 +1,7 @@
 # Multitable D2 大表性能基线门 — Scout & Design
 
 Date: 2026-05-24
-Revision: v2（post-review precision pass — triage 模式 + 绝对值/slope 主导 + black-box 立场，详见 §17 Changelog）
+Revision: v3（stale-wording cleanup — v2 改了 §7/§16/§6 schema 但 §1/§13/§14/§15 残留 v1 binary 措辞，v3 全文对齐，详见 §17 Changelog）
 Status: docs-only design（无产品代码改动）— 后续 perf-test impl PR 独立链节
 Branch: `docs/multitable-perf-gate-d2-scout-20260524`
 Anchors:
@@ -15,11 +15,15 @@ Anchors:
 
 建立 multitable grid 在 **10k / 50k / 100k 行**规模下的可重复测量方法论 + 验收 JSON schema。
 
-**本 gate 输出是一个二分判断**，不是预设的虚拟化方案：
-- "CSS-native virt sufficient" — 已有的 `content-visibility: auto` 已足够，无需 JS 虚拟化
-- "Needs JS virtualization" — CSS-native virt 在 N 行规模下崩盘，明确解锁 §9 #2 grid virtualization PR
+**本 gate 输出是一个 5-class triage verdict**（详见 §7），不是预设的虚拟化方案：
 
-这是把 benchmark v2 §10 measurement-before-optimization 原则递归地应用到 D2 自身：D2 不是"做虚拟化"的 PR，是"决定要不要做虚拟化"的 PR。
+- **A_CSS_sufficient** — 已有的 `content-visibility: auto` 已足够，无需任何后续优化
+- **B_frontend_dom_memory_bound** — frontend DOM/heap 绝对值或 slope 越线 → **唯一**解锁 §9 #2 grid virtualization PR
+- **C_backend_query_bound** — backend insert/query/group 越线 → 启独立 server-side optimization PR（virtualization 不解此问题）
+- **D_client_algorithm_bound** — client 端 sort/filter/group 算法越线 → 启独立算法优化 PR（virtualization 不解此问题）
+- **E_yjs_sync_overhead_bound** — multi-client sync overhead 越线 → 启独立 realtime perf PR（v1 仅声明分类位，**本 PR 不输出**）
+
+A/B/C/D **互斥或可叠加**。这是把 benchmark v2 §10 measurement-before-optimization 原则递归地应用到 D2 自身：D2 不是"做虚拟化"的 PR，是"测量后按瓶颈分类决定下一步"的 PR——**仅 verdict B 触发虚拟化**，其它 verdict 走对应专属路径。
 
 ---
 
@@ -226,7 +230,7 @@ grep -R -E "performance\.mark|performance\.measure|requestAnimationFrame.*fps|pl
 }
 ```
 
-`thresholds` 与 `passFail` 在 §8 接受标准首跑后由人 review 后回填——之后变成 CI gate 的硬性比较。
+`thresholds` 在首跑后由人 review 回填——之后变成 CI gate 的硬性比较；`verdict` 由 trend-report 按 §7.1 决策树自动分类（A/B/C/D；E 在 multi-client metric profile 启动后才可输出）。
 
 `scenario` 取值：`primary`（collapsed row）或 `expanded`（部分行展开 — `EXPANDED_ROW_RATIO > 0`）。
 
@@ -359,8 +363,9 @@ A/B/C/D **互斥**或**可叠加**（B+C / B+D / C+D 等）；首跑 verdict 由
 - ✅ benchmark v2 §9 #1 D2 = 本 MD（优先级 #1，effort 1 PR / 1 周）
 - ✅ benchmark v2 §10 measurement-before-optimization 原则递归应用于 D2 自身
 - ✅ 本 MD 不预设 #2 grid virtualization 必做 — gate 输出决定 #2 是否必要
-- ✅ 若 D2 输出 "CSS-virt sufficient"，benchmark v2 §9 排序 #2 取消，全部 effort 转 #3 D3 permission matrix（节约 2-3 周）
-- ✅ 若 D2 输出 "Needs JS virtualization"，#2 PR 开工时 §6 acceptance 阈值反向作为虚拟化设计目标
+- ✅ 若 D2 输出 verdict **A_CSS_sufficient**，benchmark v2 §9 排序 #2 取消，全部 effort 转 #3 D3 permission matrix（节约 2-3 周）
+- ✅ 若 D2 输出 verdict **B_frontend_dom_memory_bound**，#2 grid virtualization PR 开工时 §7.2 frontend DOM/memory 阈值反向作为虚拟化设计目标
+- ✅ 若 D2 输出 verdict **C_backend_query_bound** 或 **D_client_algorithm_bound**，benchmark v2 §9 #2 仍取消（virtualization 不解此类瓶颈），代之以独立专属优化 PR 插入到 §9 顺序中重新排序
 
 ---
 
@@ -369,12 +374,13 @@ A/B/C/D **互斥**或**可叠加**（B+C / B+D / C+D 等）；首跑 verdict 由
 待本 MD merge + 用户 explicit 启动 instruction 后，下一 slice：
 
 1. 新增 `scripts/ops/multitable-perf-baseline.mjs` — backend 半（复用 attendance pattern）
-2. 新增 `tests/e2e/multitable-perf-baseline.spec.ts` — frontend 半（Playwright tracing + PerformanceObserver + CDP）
+2. 新增 `tests/e2e/multitable-perf-baseline.spec.ts` — frontend 半（black-box only：Playwright `browserContext.tracing` + CDP + 注入 PerformanceObserver/MutationObserver/raf；不触碰产品代码）
 3. 新增 `.github/workflows/multitable-perf-{baseline,highscale}.yml` — CI dispatch
-4. 第一波 18 run（3 rows × 6 metricProfile）— 填 §6 JSON
-5. 产 verification MD — propose §7 thresholds X/Y/Z/W/V → 锁定基线
-6. 决定 §10 seed Path A vs B
-7. 决定 §12 五个 open questions
+4. 第一波 **36 baseline run**（3 rows × 6 metricProfile × 2 scenario `primary`/`expanded`）— 填 §6 JSON
+5. 产 verification MD — propose §7.2 全部 thresholds（DOM/heap 绝对值与 slope 族 + scroll/interact 族 + backend 族共 16 字段）→ 锁定基线
+6. 数据 review 后给出首跑 verdict（A/B/C/D；E 因不含 multi-client 不输出）
+7. 决定 §10 seed Path A vs B
+8. 决定 §12 五个 open questions
 
 ---
 
@@ -382,7 +388,7 @@ A/B/C/D **互斥**或**可叠加**（B+C / B+D / C+D 等）；首跑 verdict 由
 
 - **零代码风险**：本 MD docs-only
 - **K3 stage-1 lock 边界**：默认 Path A 不触线；Path B 触线但需独立 opt-in
-- **CI cost**：18 run × ~5min/run = ~1.5h；后续 long-run 单独审批
+- **CI cost**：36 run × ~5min/run = ~3h（3 rows × 6 metricProfile × 2 scenario）；后续 long-run 单独审批
 - **数据污染**：`ROLLBACK=true` default + Path A 复用现有 endpoint 即不污染
 - **K3 PoC GATE 影响**：零 — D2 是 multitable 内核 polish，不属于 ERP 集成战线
 
@@ -405,6 +411,16 @@ A/B/C/D **互斥**或**可叠加**（B+C / B+D / C+D 等）；首跑 verdict 由
 ---
 
 ## 17. Changelog
+
+### v3 (2026-05-24) — Stale-wording cleanup（push 前第二轮）
+
+v2 改了 §7（4-way triage）、§16（决策摘要 Triage/测量立场）、§6（JSON schema `passFail` → `verdict`），但同文 §1 / §13 / §14 / §15 仍残留 v1 binary 措辞，逻辑上互相矛盾。v3 对齐：
+
+- **§1 目标**："本 gate 输出是一个二分判断" → 5-class triage verdict 全文展开；明确**仅 verdict B_frontend_dom_memory_bound 触发虚拟化**，A/C/D/E 各走专属路径
+- **§6 schema 后说明**："`passFail` 在 §8 ... 回填" → `verdict` 由 trend-report 按 §7.1 决策树自动分类
+- **§13 与 benchmark v2 一致性**："CSS-virt sufficient" / "Needs JS virtualization" → verdict A / B / C+D（C/D 同样取消 v2 §9 #2，代之以专属优化 PR）
+- **§14 Next slice**："18 run（3 rows × 6 metricProfile）" + "thresholds X/Y/Z/W/V" → 36 run（3 rows × 6 metricProfile × 2 scenario） + thresholds 16 字段全族（DOM/heap 绝对值与 slope + scroll/interact + backend）
+- **§15 CI cost**："18 run × ~5min/run = ~1.5h" → 36 run × ~5min/run = ~3h
 
 ### v2 (2026-05-24) — Post-review precision pass（push 前）
 
