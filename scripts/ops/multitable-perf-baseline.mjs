@@ -25,7 +25,13 @@ import { performance } from 'perf_hooks'
 import { createRequire } from 'module'
 
 // --- env config ---
-const API_BASE = String(process.env.API_BASE || '').replace(/\/+$/, '')
+// API_BASE normalized: strip trailing slashes AND trailing /api suffix.
+// Both 'http://host:8081' and 'http://host:8081/api' work — we always
+// build URLs as '${API_BASE}/api/multitable/...' (helpers convention),
+// matching multitable-helpers.ts API_BASE_URL semantics.
+const API_BASE = String(process.env.API_BASE || '')
+  .replace(/\/+$/, '')
+  .replace(/\/api$/, '')
 const AUTH_TOKEN = String(process.env.AUTH_TOKEN || '')
 const ROWS = Math.max(1, Number(process.env.ROWS || 10_000))
 const PERF_PROFILE = String(process.env.PERF_PROFILE || 'multitable-d2-baseline')
@@ -44,6 +50,13 @@ const CI_RUNNER_TAG = String(process.env.CI_RUNNER_TAG || 'local-dev')
 const STATE_FILE = String(process.env.STATE_FILE || path.join(OUTPUT_DIR, `state-${BASELINE_ID}.json`))
 const BASE_ID_OVERRIDE = String(process.env.BASE_ID || '')
 const SHEET_ID_OVERRIDE = String(process.env.SHEET_ID || '')
+// Minimum success ratio per measurement sample — fail-fast prevents silent
+// green dispatches where backendInsertMs.p95=null or backendQueryMs.p95=null
+// because every sample errored. Default 0.8 (≥80% of requested calls).
+const MIN_SAMPLE_SUCCESS_RATIO = Math.max(
+  0,
+  Math.min(1, Number(process.env.MIN_SAMPLE_SUCCESS_RATIO || 0.8)),
+)
 
 if (!API_BASE) {
   console.error('[d2-perf] API_BASE required')
@@ -51,6 +64,18 @@ if (!API_BASE) {
 }
 if (!AUTH_TOKEN) {
   console.error('[d2-perf] AUTH_TOKEN required')
+  process.exit(1)
+}
+if (PHASE === 'seed_and_backend' && !BASE_ID_OVERRIDE) {
+  console.error(
+    '[d2-perf] BASE_ID required for seed_and_backend phase.\n' +
+      'No DELETE /bases endpoint exists; per-run base creation would leave\n' +
+      '36 orphans after a full baseline. Create ONE reusable base before the\n' +
+      'first dispatch (e.g., POST /api/multitable/bases) and reuse its id\n' +
+      'across all dispatches via the BASE_ID env (or workflow base_id input /\n' +
+      'MULTITABLE_PERF_BASE_ID repo var). Sheets are still per-dispatch and\n' +
+      'cleanly cascade-deleted via rollback.',
+  )
   process.exit(1)
 }
 
@@ -108,12 +133,11 @@ const FIELDS = (() => {
 })()
 
 // --- workflow steps ---
+// Note: BASE_ID is required at startup for seed_and_backend phase (see env
+// validation above). No auto-create — no DELETE /bases endpoint exists, so
+// per-run base creation would leave orphans.
 async function ensureBase() {
-  if (BASE_ID_OVERRIDE) return BASE_ID_OVERRIDE
-  const env = await apiFetch('POST', '/api/multitable/bases', { name: `d2-perf-base-${BASELINE_ID}` })
-  const id = env.data?.base?.id ?? env.base?.id
-  if (!id) throw new Error('Failed to create base — no id in response')
-  return id
+  return BASE_ID_OVERRIDE
 }
 
 async function ensureSheet(baseId) {
@@ -245,6 +269,18 @@ async function seedRows(sheetId) {
   return chunks
 }
 
+function assertSampleSuccessRate(label, successCount, requested) {
+  const ratio = requested > 0 ? successCount / requested : 0
+  if (ratio < MIN_SAMPLE_SUCCESS_RATIO) {
+    throw new Error(
+      `[${label}] success ratio ${(ratio * 100).toFixed(1)}% (${successCount}/${requested}) ` +
+        `below MIN_SAMPLE_SUCCESS_RATIO=${(MIN_SAMPLE_SUCCESS_RATIO * 100).toFixed(0)}%. ` +
+        `Failing fast to avoid silent green dispatch with null p95. ` +
+        `Check earlier WARN logs for endpoint error messages.`,
+    )
+  }
+}
+
 async function measureBackendInsertDistribution(sheetId, fields) {
   const samples = []
   console.log(`[measure] backend insert: ${BACKEND_INSERT_SAMPLE_SIZE} × POST /records`)
@@ -263,15 +299,31 @@ async function measureBackendInsertDistribution(sheetId, fields) {
       console.warn(`[measure-insert] sample ${i} failed: ${err.message}`)
     }
   }
+  assertSampleSuccessRate('backend-insert', samples.length, BACKEND_INSERT_SAMPLE_SIZE)
   return summarizeLatencies(samples)
 }
 
-async function measureBackendQueryDistribution(sheetId) {
+async function measureBackendQueryDistribution(sheetId, fields) {
+  // Cache-bust strategy: pick a real string field and filter on a random value
+  // that won't match any record. The query SQL goes through the full
+  // normalizeQueryFilters path (which would throw on unknown field IDs — see
+  // packages/core-backend/src/multitable/query-service.ts:128) and produces a
+  // unique cache key per request (buildRecordsCacheKey hashes the filter).
+  // Returns 0 rows but exercises the same query path as a hit-zero filter
+  // would in production.
+  const bustField = fields.find((f) => f.type === 'string')
+  if (!bustField) {
+    throw new Error('measureBackendQueryDistribution: need at least one string field for cache-bust strategy')
+  }
   const samples = []
-  console.log(`[measure] backend query: ${BACKEND_QUERY_SAMPLE_SIZE} × GET /records (cache-bust via random filter)`)
+  console.log(
+    `[measure] backend query: ${BACKEND_QUERY_SAMPLE_SIZE} × GET /records (cache-bust via filter.${bustField.id}=<random>)`,
+  )
   for (let i = 0; i < BACKEND_QUERY_SAMPLE_SIZE; i++) {
-    const bust = Math.random().toString(36).slice(2, 10)
-    const url = `/api/multitable/records?sheetId=${encodeURIComponent(sheetId)}&limit=100&filter._bust=${bust}`
+    const bust = `z-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    const url =
+      `/api/multitable/records?sheetId=${encodeURIComponent(sheetId)}&limit=100` +
+      `&filter.${encodeURIComponent(bustField.id)}=${encodeURIComponent(bust)}`
     const start = performance.now()
     try {
       await apiFetch('GET', url)
@@ -280,6 +332,7 @@ async function measureBackendQueryDistribution(sheetId) {
       console.warn(`[measure-query] sample ${i} failed: ${err.message}`)
     }
   }
+  assertSampleSuccessRate('backend-query', samples.length, BACKEND_QUERY_SAMPLE_SIZE)
   return summarizeLatencies(samples)
 }
 
@@ -374,7 +427,7 @@ async function runSeedAndBackend() {
 
   const chunks = await seedRows(sheetId)
   const insertStats = await measureBackendInsertDistribution(sheetId, fields)
-  const queryStats = await measureBackendQueryDistribution(sheetId)
+  const queryStats = await measureBackendQueryDistribution(sheetId, fields)
 
   const output = buildOutputJson({ sheetId, viewId, chunks, insertStats, queryStats })
   await ensureDir(OUTPUT_DIR)

@@ -357,16 +357,23 @@ test.describe('multitable D2 perf baseline (frontend half)', () => {
       // Mount metrics already captured above.
     } else if (METRIC_PROFILE === 'scroll') {
       await measureScroll(page, output)
-    } else if (METRIC_PROFILE === 'edit') {
-      await measureEdit(page, output)
-    } else if (METRIC_PROFILE === 'sort') {
-      await measureSort(page, output)
-    } else if (METRIC_PROFILE === 'filter') {
-      await measureFilter(page, output)
-    } else if (METRIC_PROFILE === 'group') {
-      await measureGroup(page, output)
+    } else if (
+      METRIC_PROFILE === 'edit' ||
+      METRIC_PROFILE === 'sort' ||
+      METRIC_PROFILE === 'filter' ||
+      METRIC_PROFILE === 'group'
+    ) {
+      // Fail-fast: scaffolds exist (see helpers below) but produce no measurement.
+      // Letting these "pass" would ship green artifacts with null metric values,
+      // polluting the threshold proposal and verdict diagnosis. The workflow
+      // dispatch UI also excludes these from `metric_profile` choices in v1.
+      throw new Error(
+        `METRIC_PROFILE=${METRIC_PROFILE} is scaffolded but not implemented in v1 ` +
+          `(see TODO(d2-followup) in this spec). Use mount|scroll for v1 baseline. ` +
+          `edit/sort/filter/group land in a follow-up impl PR.`,
+      )
     } else {
-      throw new Error(`Unknown METRIC_PROFILE=${METRIC_PROFILE} (mount|scroll|edit|sort|filter|group)`)
+      throw new Error(`Unknown METRIC_PROFILE=${METRIC_PROFILE} (v1: mount|scroll)`)
     }
 
     // ---------------- final DOM/heap snapshot ----------------

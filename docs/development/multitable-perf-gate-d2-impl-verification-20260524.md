@@ -23,6 +23,17 @@ Branch: `frontend/multitable-d2-perf-test-impl-20260524`
 - ❌ Backend seed endpoint — Path A 默认零 backend touch；Path B 独立 kernel-polish opt-in
 - ❌ Product code performance.mark 注入 — v2 separate opt-in
 - ❌ multi-client metric profile / verdict E — 独立后续 slice
+- ❌ **edit / sort / filter / group metric profiles**（**post-review precision pass 2**）— scaffolded in spec helpers 但 v1 hard-fail on invocation；从 workflow choice 移除；留作 follow-up impl PR。**v1 baseline 实际 = 12 dispatches**（3 rows × 2 metric profile × 2 scenario），非 36
+
+### Post-review precision pass 2（2026-05-24，pre-1k-smoke）
+
+5 个 finding 全修：
+
+1. **Backend query cache-bust 用真 fieldId** — 原 `filter._bust=<random>` 触发 `query-service.ts:128 Unknown fieldId` 异常 → 样本静默丢光 → `backendQueryMs.p95=null` 但 dispatch green pass。改用第一个 `string` field 的真 ID + 随机值（命中 0 行但走完整 query 路径 + 唯一 cache key）。**+ 加 `MIN_SAMPLE_SUCCESS_RATIO=0.8` 硬门** — insert/query 任一样本 < 80% 成功即 fail-fast，杜绝静默 null。
+2. **edit/sort/filter/group hard-fail** — 原 spec 路由到只写 TODO note 的 helper → 静默成功而 metrics null。从 workflow `metric_profile` choice 移除；spec invocation 即 hard-throw。v1 baseline 缩为 mount + scroll 2 profile（12 dispatches）。
+3. **API_BASE 归一化** — workflow 文案"must end with /api"（attendance 习惯）与 mjs 路径已含 `/api/multitable/...` 前缀冲突，会产 `/api/api/multitable/...`。mjs 加 `.replace(/\/api$/, '')` 接受 host root 或 `/api` 后缀两种形式；workflow input 描述明确"host root，with or without /api（normalized）"。
+4. **Yjs precondition 语言** — workflow `ENABLE_YJS_COLLAB=false` 只影响 GH runner，不传播到远程 server。改为显式 precondition：workflow validate step `::notice::PRECONDITION: remote API at ${API_BASE} must have ENABLE_YJS_COLLAB!=true server-side. This workflow does NOT enforce.` + verification MD 强调 operator 必须服务器端验证。
+5. **BASE_ID 必填** — 无 `DELETE /api/multitable/bases/:id` endpoint，原 mjs 每 dispatch 新建 base → 36 dispatch 留 36 orphan bases。新逻辑：`BASE_ID` env 必须由 operator 预创建并复用（POST 一次 `/api/multitable/bases` 得到 id，存为 `MULTITABLE_PERF_BASE_ID` repo var），mjs 启动即校验。Sheets 仍 per-dispatch 创建 + DELETE /sheets cascade 干净删；只有 1 个 reused base 残留，operator UI/API 手动清理。
 
 ---
 
@@ -212,21 +223,30 @@ verdict = TBD ∈ { A_CSS_sufficient | B_frontend_dom_memory_bound | C_backend_q
 
 ## 9. 下一链节（待 explicit opt-in）
 
-1. **首次 CI baseline run**（用户触发）：
-   - 配置 GH secrets：`MULTITABLE_PERF_AUTH_TOKEN`
-   - 配置 GH vars：`MULTITABLE_PERF_API_BASE` + `MULTITABLE_PERF_FE_BASE`
-   - 触发 36 workflow_dispatch（用上述 wrapper bash）
-   - 等 ~3h（baseline ~30min × 24 + highscale ~60min × 12 — 实际并发上限决定）
-   - 下载 artifacts → 整合 36 个 JSON
-2. **Review-and-lock PR**（独立 chain link）：
-   - Propose §7 thresholds 数值
+1. **Operator preconditions**（首次 baseline 前一次性设置）：
+   - 配置 GH secrets：`MULTITABLE_PERF_AUTH_TOKEN`（never logged）
+   - 配置 GH vars：`MULTITABLE_PERF_API_BASE` + `MULTITABLE_PERF_FE_BASE` + **`MULTITABLE_PERF_BASE_ID`**
+   - **预创建 1 个可复用 base**：`curl -X POST -H "Authorization: Bearer $TOKEN" "$API_BASE/api/multitable/bases" -d '{"name":"d2-perf-baseline-shared"}'` → 取 `data.base.id` 写入 `MULTITABLE_PERF_BASE_ID` var
+   - **服务器端验证 `ENABLE_YJS_COLLAB!=true`** — workflow runner env 不传播到远程；operator 必须 ssh / 配置面板确认 staging server config
+2. **首次 CI baseline run**（用户触发）：
+   - **v1 实际 12 dispatches**（3 rows × 2 profile mount/scroll × 2 scenario primary/expanded）— edit/sort/filter/group v1 不输出，待 follow-up impl PR
+   - 用 wrapper bash 触发（baseline.yml for 10k / highscale.yml for 50k/100k）
+   - 等 ~1.5h（实际并发决定）
+   - 下载 artifacts → 整合 12 个 JSON
+3. **Review-and-lock PR**（独立 chain link）：
+   - Propose §7 thresholds 数值（仅 mount + scroll + DOM/heap + backend 族；edit/sort/filter/group 族 thresholds 留到 follow-up baseline 全集合后）
    - 输出 §8 verdict
    - 跑第 2 次复跑确认稳定性
    - Lock thresholds 为 CI gate baseline
-3. **若 verdict B** → 启 grid virtualization PR（benchmark v2 §9 #2）
-4. **若 verdict C** → 启 server-side optimization PR（独立 server lane）
-5. **若 verdict D** → 启 client algorithm optimization PR（独立 frontend lane）
-6. **若 verdict A** → benchmark v2 §9 #2 取消，effort 转 #3 D3 permission matrix
+4. **Follow-up impl PR for edit/sort/filter/group profiles**（独立 chain link）：
+   - 实现 4 个 metric profile 完整测量（UI selector + reset-between）
+   - 重新启 dispatch 跑剩 24 runs（3 rows × 4 profile × 2 scenario）
+   - 填齐 16 字段 threshold 全集
+5. **若 verdict A_CSS_sufficient** → benchmark v2 §9 #2 取消，effort 转 #3 D3 permission matrix
+6. **若 verdict B_frontend_dom_memory_bound** → 启 grid virtualization PR（benchmark v2 §9 #2）
+7. **若 verdict C_backend_query_bound** → 启 server-side optimization PR（独立 server lane；virtualization 不解此问题）
+8. **若 verdict D_client_algorithm_bound** → 启 client algorithm optimization PR（独立 frontend lane；virtualization 不解此问题）
+9. **Cleanup**: baseline 全跑完后 operator 手动 UI/API 删除 reused base（无 DELETE /bases endpoint，留 1 个 orphan，可接受）
 
 ---
 

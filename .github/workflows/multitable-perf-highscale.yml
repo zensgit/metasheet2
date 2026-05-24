@@ -28,17 +28,13 @@ on:
           - '50000'
           - '100000'
       metric_profile:
-        description: 'Which metric profile to measure'
+        description: 'Which metric profile to measure (v1: mount + scroll only; edit/sort/filter/group are scaffolded but not yet implemented and will fail-fast)'
         required: true
         default: 'mount'
         type: choice
         options:
           - mount
           - scroll
-          - edit
-          - sort
-          - filter
-          - group
       scenario:
         description: 'primary | expanded'
         required: true
@@ -48,11 +44,15 @@ on:
           - primary
           - expanded
       api_base:
-        description: 'API base URL'
+        description: 'API base URL — host root, e.g., http://staging:8081 (with or without trailing /api; normalized by harness)'
         required: false
         default: ''
       fe_base:
-        description: 'Frontend base URL'
+        description: 'Frontend base URL (no trailing slash)'
+        required: false
+        default: ''
+      base_id:
+        description: 'Existing multitable base id (REQUIRED — operator pre-creates ONE reusable base since no DELETE /bases endpoint exists; reuse across dispatches; defaults to MULTITABLE_PERF_BASE_ID var)'
         required: false
         default: ''
 
@@ -68,9 +68,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
+      # PRECONDITION (NOT enforced): remote API server must have
+      # ENABLE_YJS_COLLAB!=true. This runner env does NOT propagate to remote.
+      # Operator MUST verify server-side; otherwise Yjs hook pollutes baseline.
       ENABLE_YJS_COLLAB: 'false'
       API_BASE: ${{ inputs.api_base || vars.MULTITABLE_PERF_API_BASE || '' }}
       AUTH_TOKEN: ${{ secrets.MULTITABLE_PERF_AUTH_TOKEN || vars.MULTITABLE_PERF_AUTH_TOKEN || '' }}
+      BASE_ID: ${{ inputs.base_id || vars.MULTITABLE_PERF_BASE_ID || '' }}
       ROWS: ${{ inputs.rows }}
       PERF_PROFILE: 'multitable-d2-highscale'
       SCENARIO: ${{ inputs.scenario }}
@@ -132,8 +136,14 @@ jobs:
             echo "::error::FE_BASE_URL is empty"
             exit 1
           fi
+          if [[ -z "${BASE_ID}" ]]; then
+            echo "::error::BASE_ID is empty — pre-create ONE reusable multitable base and set MULTITABLE_PERF_BASE_ID repo var or base_id input"
+            exit 1
+          fi
           mkdir -p "${OUTPUT_DIR}"
           echo "[validate] OUTPUT_DIR=${OUTPUT_DIR}"
+          echo "[validate] BASE_ID=${BASE_ID}"
+          echo "::notice::PRECONDITION: remote API at ${API_BASE} must have ENABLE_YJS_COLLAB!=true server-side. This workflow does NOT enforce."
 
       - name: Backend seed + measure (chunked XLSX; may take 15-30 min)
         env:
