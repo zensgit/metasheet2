@@ -1,0 +1,170 @@
+name: Multitable D2 Perf Highscale
+
+# Highscale (50k / 100k) variant of multitable-perf-baseline.yml.
+# Separated from the 10k baseline workflow because:
+#   - 100k seed via chunked XLSX upload can take 15-30 min (server-side
+#     synchronous for-loop createRecord; multitable has no async-commit
+#     pattern, unlike attendance).
+#   - Higher timeout boundary; explicit approval surface.
+#   - Resource-heavy dispatches should be gated separately.
+#
+# Spec: docs/development/multitable-perf-gate-d2-design-20260524.md §5.3
+# Per design + locked decisions (2026-05-24):
+#   - XLSX_CHUNK_SIZE=50000 (server cap XLSX_MAX_ROWS=50_000)
+#   - 100k seed = 2 chunked uploads
+#   - Yjs invalidation OFF (ENABLE_YJS_COLLAB=false)
+
+run-name: D2 Perf Highscale rows=${{ inputs.rows }} profile=${{ inputs.metric_profile }} scenario=${{ inputs.scenario }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      rows:
+        description: 'Row count for highscale baseline'
+        required: true
+        default: '50000'
+        type: choice
+        options:
+          - '50000'
+          - '100000'
+      metric_profile:
+        description: 'Which metric profile to measure'
+        required: true
+        default: 'mount'
+        type: choice
+        options:
+          - mount
+          - scroll
+          - edit
+          - sort
+          - filter
+          - group
+      scenario:
+        description: 'primary | expanded'
+        required: true
+        default: 'primary'
+        type: choice
+        options:
+          - primary
+          - expanded
+      api_base:
+        description: 'API base URL'
+        required: false
+        default: ''
+      fe_base:
+        description: 'Frontend base URL'
+        required: false
+        default: ''
+
+concurrency:
+  group: multitable-perf-highscale-${{ inputs.rows }}-${{ inputs.metric_profile }}-${{ inputs.scenario }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      ENABLE_YJS_COLLAB: 'false'
+      API_BASE: ${{ inputs.api_base || vars.MULTITABLE_PERF_API_BASE || '' }}
+      AUTH_TOKEN: ${{ secrets.MULTITABLE_PERF_AUTH_TOKEN || vars.MULTITABLE_PERF_AUTH_TOKEN || '' }}
+      ROWS: ${{ inputs.rows }}
+      PERF_PROFILE: 'multitable-d2-highscale'
+      SCENARIO: ${{ inputs.scenario }}
+      ROLLBACK: 'true'
+      XLSX_CHUNK_SIZE: '50000'
+      BACKEND_INSERT_SAMPLE_SIZE: '200'
+      BACKEND_QUERY_SAMPLE_SIZE: '50'
+      OUTPUT_DIR: 'output/multitable-perf'
+      CI_RUNNER_TAG: 'ubuntu-latest'
+
+      FE_BASE_URL: ${{ inputs.fe_base || vars.MULTITABLE_PERF_FE_BASE || '' }}
+      API_BASE_URL: ${{ inputs.api_base || vars.MULTITABLE_PERF_API_BASE || '' }}
+      METRIC_PROFILE: ${{ inputs.metric_profile }}
+      VIEWPORT_WIDTH: '1440'
+      VIEWPORT_HEIGHT: '900'
+      DEVICE_SCALE_FACTOR: '1'
+      SCROLL_TARGET: 'bottom'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install chromium --with-deps
+
+      - name: Generate stable baselineId
+        id: meta
+        run: |
+          BASELINE_ID="$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-highscale"
+          echo "baseline_id=${BASELINE_ID}" >> "$GITHUB_OUTPUT"
+          echo "[meta] baselineId=${BASELINE_ID}"
+
+      - name: Validate required env
+        run: |
+          if [[ -z "${API_BASE}" ]]; then
+            echo "::error::API_BASE is empty"
+            exit 1
+          fi
+          if [[ -z "${AUTH_TOKEN}" ]]; then
+            echo "::error::AUTH_TOKEN is empty"
+            exit 1
+          fi
+          if [[ -z "${FE_BASE_URL}" ]]; then
+            echo "::error::FE_BASE_URL is empty"
+            exit 1
+          fi
+          mkdir -p "${OUTPUT_DIR}"
+
+      - name: Backend seed + measure (chunked XLSX; may take 15-30 min)
+        env:
+          PHASE: 'seed_and_backend'
+          BASELINE_ID: ${{ steps.meta.outputs.baseline_id }}
+          STATE_FILE: 'output/multitable-perf/state-${{ steps.meta.outputs.baseline_id }}.json'
+        run: |
+          node scripts/ops/multitable-perf-baseline.mjs
+
+      - name: Frontend measure (Playwright)
+        env:
+          BASELINE_ID: ${{ steps.meta.outputs.baseline_id }}
+          STATE_FILE: 'output/multitable-perf/state-${{ steps.meta.outputs.baseline_id }}.json'
+        working-directory: packages/core-backend
+        run: |
+          pnpm exec playwright test \
+            --config tests/e2e/playwright.config.ts \
+            --reporter=line \
+            tests/e2e/multitable-perf-baseline.spec.ts
+
+      - name: Rollback (cascade delete sheet)
+        if: always()
+        env:
+          PHASE: 'rollback'
+          BASELINE_ID: ${{ steps.meta.outputs.baseline_id }}
+          STATE_FILE: 'output/multitable-perf/state-${{ steps.meta.outputs.baseline_id }}.json'
+        run: |
+          node scripts/ops/multitable-perf-baseline.mjs || true
+
+      - name: Upload highscale baseline artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: multitable-perf-highscale-${{ inputs.rows }}-${{ inputs.metric_profile }}-${{ inputs.scenario }}-${{ github.run_id }}
+          retention-days: 30
+          path: |
+            output/multitable-perf/**

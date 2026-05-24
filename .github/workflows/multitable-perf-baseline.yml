@@ -1,0 +1,173 @@
+name: Multitable D2 Perf Baseline
+
+# Single-dispatch parameterized baseline run for the multitable D2 large-table
+# perf gate. Each dispatch produces ONE backend JSON + ONE frontend JSON +
+# Playwright trace zip for a single (rows, metricProfile, scenario) tuple.
+#
+# Spec: docs/development/multitable-perf-gate-d2-design-20260524.md
+# Full baseline = 3 rows × 6 metricProfile × 2 scenario = 36 dispatches (use a
+# wrapper script invoking `gh workflow run` with different inputs).
+#
+# Discipline: workflow_dispatch ONLY (NO push/PR trigger) to keep perf cost
+# off the standard PR pipeline. Highscale (50k/100k) runs in a separate
+# workflow with longer timeout + separate approval surface.
+
+run-name: D2 Perf Baseline rows=${{ inputs.rows }} profile=${{ inputs.metric_profile }} scenario=${{ inputs.scenario }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      rows:
+        description: 'Row count (use 10000 here; 50000/100000 use multitable-perf-highscale.yml)'
+        required: false
+        default: '10000'
+        type: choice
+        options:
+          - '1000'
+          - '10000'
+      metric_profile:
+        description: 'Which metric profile to measure (one per dispatch)'
+        required: true
+        default: 'mount'
+        type: choice
+        options:
+          - mount
+          - scroll
+          - edit
+          - sort
+          - filter
+          - group
+      scenario:
+        description: 'primary (collapsed rows) | expanded (subset expanded)'
+        required: true
+        default: 'primary'
+        type: choice
+        options:
+          - primary
+          - expanded
+      api_base:
+        description: 'API base URL (must end with /api)'
+        required: false
+        default: ''
+      fe_base:
+        description: 'Frontend base URL (no trailing slash)'
+        required: false
+        default: ''
+
+concurrency:
+  group: multitable-perf-baseline-${{ inputs.rows }}-${{ inputs.metric_profile }}-${{ inputs.scenario }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Server config: explicitly disable Yjs invalidation path for baseline isolation
+      # (per design §13 verdict E deferred; locked decision 2026-05-24).
+      ENABLE_YJS_COLLAB: 'false'
+
+      # Backend mjs env vars
+      API_BASE: ${{ inputs.api_base || vars.MULTITABLE_PERF_API_BASE || '' }}
+      AUTH_TOKEN: ${{ secrets.MULTITABLE_PERF_AUTH_TOKEN || vars.MULTITABLE_PERF_AUTH_TOKEN || '' }}
+      ROWS: ${{ inputs.rows }}
+      PERF_PROFILE: 'multitable-d2-baseline'
+      SCENARIO: ${{ inputs.scenario }}
+      ROLLBACK: 'true'
+      XLSX_CHUNK_SIZE: '50000'
+      BACKEND_INSERT_SAMPLE_SIZE: '200'
+      BACKEND_QUERY_SAMPLE_SIZE: '50'
+      OUTPUT_DIR: 'output/multitable-perf'
+      CI_RUNNER_TAG: 'ubuntu-latest'
+
+      # Frontend spec env vars
+      FE_BASE_URL: ${{ inputs.fe_base || vars.MULTITABLE_PERF_FE_BASE || '' }}
+      API_BASE_URL: ${{ inputs.api_base || vars.MULTITABLE_PERF_API_BASE || '' }}
+      METRIC_PROFILE: ${{ inputs.metric_profile }}
+      VIEWPORT_WIDTH: '1440'
+      VIEWPORT_HEIGHT: '900'
+      DEVICE_SCALE_FACTOR: '1'
+      SCROLL_TARGET: 'bottom'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install chromium --with-deps
+
+      - name: Generate stable baselineId
+        id: meta
+        run: |
+          BASELINE_ID="$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "baseline_id=${BASELINE_ID}" >> "$GITHUB_OUTPUT"
+          echo "[meta] baselineId=${BASELINE_ID}"
+
+      - name: Validate required env
+        run: |
+          if [[ -z "${API_BASE}" ]]; then
+            echo "::error::API_BASE is empty — set MULTITABLE_PERF_API_BASE repo var or api_base input"
+            exit 1
+          fi
+          if [[ -z "${AUTH_TOKEN}" ]]; then
+            echo "::error::AUTH_TOKEN is empty — set MULTITABLE_PERF_AUTH_TOKEN secret"
+            exit 1
+          fi
+          if [[ -z "${FE_BASE_URL}" ]]; then
+            echo "::error::FE_BASE_URL is empty — set MULTITABLE_PERF_FE_BASE repo var or fe_base input"
+            exit 1
+          fi
+          mkdir -p "${OUTPUT_DIR}"
+
+      - name: Backend seed + measure
+        env:
+          PHASE: 'seed_and_backend'
+          BASELINE_ID: ${{ steps.meta.outputs.baseline_id }}
+          STATE_FILE: 'output/multitable-perf/state-${{ steps.meta.outputs.baseline_id }}.json'
+        run: |
+          node scripts/ops/multitable-perf-baseline.mjs
+
+      - name: Frontend measure (Playwright)
+        env:
+          BASELINE_ID: ${{ steps.meta.outputs.baseline_id }}
+          STATE_FILE: 'output/multitable-perf/state-${{ steps.meta.outputs.baseline_id }}.json'
+        working-directory: packages/core-backend
+        run: |
+          pnpm exec playwright test \
+            --config tests/e2e/playwright.config.ts \
+            --reporter=line \
+            tests/e2e/multitable-perf-baseline.spec.ts
+
+      - name: Rollback (cascade delete sheet)
+        if: always()
+        env:
+          PHASE: 'rollback'
+          BASELINE_ID: ${{ steps.meta.outputs.baseline_id }}
+          STATE_FILE: 'output/multitable-perf/state-${{ steps.meta.outputs.baseline_id }}.json'
+        run: |
+          node scripts/ops/multitable-perf-baseline.mjs || true
+
+      - name: Upload baseline artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: multitable-perf-${{ inputs.rows }}-${{ inputs.metric_profile }}-${{ inputs.scenario }}-${{ github.run_id }}
+          retention-days: 30
+          path: |
+            output/multitable-perf/**
