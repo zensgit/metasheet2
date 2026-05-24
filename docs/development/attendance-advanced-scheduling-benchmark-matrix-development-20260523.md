@@ -30,10 +30,11 @@ The immediate recommendation is:
 | Source | Use |
 | --- | --- |
 | `docs/research/dingtalk-advanced-scheduling-vs-metasheet2-20260522.md` | Primary DingTalk text extraction and 12-chapter capability inventory. |
-| `docs/research/dingtalk-attendance-vs-metasheet2-comparison-20260514.md` | Earlier broader attendance comparison, used for cross-checking schedule/report positioning. |
 | `docs/development/attendance-advanced-scheduling-readonly-workbench-*.md` | Current shipped read-only scheduling workbench boundary. |
 | `docs/development/attendance-advanced-scheduling-workbench-truncation-verification-20260522.md` | Follow-up that made detail-row truncation visible. |
 | `docs/development/attendance-advanced-scheduling-workbench-aggregate-accuracy-verification-20260522.md` | Follow-up that moved top metrics and per-group coverage to full aggregate counts. |
+| `docs/operations/attendance-advanced-scheduling-workbench-runbook.md` | Operator-facing guidance for the shipped read-only workbench. |
+| `docs/development/attendance-advanced-scheduling-workbench-runbook-verification-20260524.md` | Docs-only verification for the operator runbook. |
 | `docs/development/attendance-comprehensive-hours-pr0-pr5-closeout-20260523.md` | Comprehensive-hours PR0-PR5 closeout and PR6 deferral discipline. |
 | `plugins/plugin-attendance/index.cjs` | Current route/schema evidence for scheduling groups, scheduler scopes, shift/rotation assignments, read-only workbench, and comprehensive-hours preview. |
 | `apps/web/src/views/AttendanceView.vue` | Current admin UI evidence for advanced scheduling read-only workbench and comprehensive-hours controls. |
@@ -52,7 +53,8 @@ field/value replication.
 | Effective calendar | Resolver and preview/audit work has landed for group/rule-set context and holiday policy overlays. | `attendance-effective-calendar-*` docs. |
 | Advanced scheduling overview | Read-only workbench shipped under the Scheduling rail. | `GET /api/attendance/advanced-scheduling/workbench`, `data-attendance-advanced-scheduling-workbench`. |
 | Workbench truncation | Detail rows are capped samples but no longer silently mislead. | `metadata.truncation` / `metadata.sampling`, frontend truncation warning. |
-| Workbench aggregate accuracy | Top metrics and per-group coverage use aggregate counts, not sample rows. | `assignmentAggregateRows` and aggregate verification MD. |
+| Workbench aggregate accuracy | Top metrics and per-group coverage use aggregate counts, not sample rows. | `summary.shiftAssignments` / `summary.rotationAssignments`, per-group `shiftAssignmentCount` / `rotationAssignmentCount`, and aggregate verification MD. |
+| Workbench operator guidance | Operator runbook is now available for the read-only dashboard. | `docs/operations/attendance-advanced-scheduling-workbench-runbook.md` (#1804). |
 | Comprehensive-hours control | PR0-PR5 shipped read-only preview, weak warning, and opt-in strong save control. | `attendance-comprehensive-hours-pr0-pr5-closeout-20260523.md`. |
 | Scheduling write UX | Existing lower-level forms remain. Dense grid edit, copy/paste, Excel import, temporary shifts, and dispatch are not opened by the read-only workbench. | Read-only workbench development boundary. |
 
@@ -97,7 +99,7 @@ boundary.
 
 | Candidate | Type | Why safe | Suggested acceptance |
 | --- | --- | --- | --- |
-| Advanced scheduling operator runbook | docs-only | Explains how to read the workbench, diagnostics, truncation warning, and scheduler-scope gaps. | One MD, no runtime changes, links existing route/UI and diagnostics. |
+| Advanced scheduling operator runbook | docs-only | Landed as #1804; keep it current as the read-only workbench evolves. | Docs-only updates only, no runtime changes, no write-path implication. |
 | Live read-only workbench evidence | ops/docs | Calls only `GET /api/attendance/advanced-scheduling/workbench` on staging/prod with an admin token; no writes. | Evidence MD with redacted payload shape and diagnostics counts. |
 | Additional read-only diagnostics | backend read-only | Adds diagnostic codes only; no editor, no assignment mutation. | Tests assert GET-only route remains the only workbench route. |
 | Scheduling operation-log filter | frontend/backend read-only | Reuses existing audit log data to show schedule/dispatch-related operations. | No new write route, no migration, no assignment change. |
@@ -124,8 +126,8 @@ During the PR5 24-hour heartbeat window, the best next action is still
 low-risk:
 
 1. Let the heartbeat finish.
-2. If development is desired before the heartbeat ends, do **docs-only** work:
-   write the advanced scheduling operator runbook.
+2. Treat the advanced scheduling operator runbook as complete (#1804) and keep
+   any further work docs-only or read-only unless explicitly opted in.
 3. If a code slice is desired after heartbeat PASS, pick one read-only
    diagnostic improvement and require a short design lock before coding.
 
