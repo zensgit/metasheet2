@@ -236,7 +236,7 @@ grep -R -E "performance\.mark|performance\.measure|requestAnimationFrame.*fps|pl
 
 ---
 
-## 7. 接受标准 — 4-way triage（threshold 数值首跑后回填）
+## 7. 接受标准 — 5-class triage（threshold 数值首跑后回填）
 
 D2 gate 输出是一个**多路 triage**，不是 sufficient/insufficient 二分。失败可能来自 frontend DOM/memory、backend query、client 算法、Yjs sync overhead 中任意之一或叠加；不同失败模式对应不同后续 PR，把"任一不达标 → 必做 JS 虚拟化"是错误推论。
 
@@ -405,7 +405,7 @@ A/B/C/D **互斥**或**可叠加**（B+C / B+D / C+D 等）；首跑 verdict 由
 | 场景 | primary 主 + expanded ref | 主决策路径单一不被次要变量噪音掩盖 |
 | Seed 路径 | Path A 优先，Path B 仅在阻塞时启 + 独立 opt-in | K3 stage-1 lock |
 | 主导信号 | DOM node count `afterMountMax` + `per10kSlope` + JS heap `afterMountMax` + `per10kSlope`；delta 辅助 | CSS `content-visibility` 跳 paint/layout 但不减 DOM/heap 绝对值；只看 delta 会漏掉 mount 阶段已爆的关键问题 |
-| Triage 模式 | 4-way A/B/C/D + E（multi-client 暂悬）| 失败模式 ≠ "必做 JS 虚拟化"——可能是 backend query / client 算法 / Yjs 等；二分决策会让下一 PR 跑偏 |
+| Triage 模式 | 5-class A–E（E 暂悬置至 multi-client metric profile，本 PR 不输出）| 失败模式 ≠ "必做 JS 虚拟化"——可能是 backend query / client 算法 / Yjs 等；二分决策会让下一 PR 跑偏 |
 | 测量立场 | v1 black-box only（Playwright + CDP + injected PerformanceObserver/MutationObserver/raf）| 不触碰产品代码；`performance.mark` 注入命名 mark 留 v2 separate opt-in |
 
 ---
