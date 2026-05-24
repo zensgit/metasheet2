@@ -80,7 +80,9 @@ jobs:
       XLSX_CHUNK_SIZE: '50000'
       BACKEND_INSERT_SAMPLE_SIZE: '200'
       BACKEND_QUERY_SAMPLE_SIZE: '50'
-      OUTPUT_DIR: 'output/multitable-perf'
+      # Absolute paths to avoid resolution mismatch between backend step
+      # (cwd=workspace) and frontend step (working-directory=packages/core-backend).
+      OUTPUT_DIR: '${{ github.workspace }}/output/multitable-perf'
       CI_RUNNER_TAG: 'ubuntu-latest'
 
       # Frontend spec env vars
@@ -134,19 +136,20 @@ jobs:
             exit 1
           fi
           mkdir -p "${OUTPUT_DIR}"
+          echo "[validate] OUTPUT_DIR=${OUTPUT_DIR}"
 
       - name: Backend seed + measure
         env:
           PHASE: 'seed_and_backend'
           BASELINE_ID: ${{ steps.meta.outputs.baseline_id }}
-          STATE_FILE: 'output/multitable-perf/state-${{ steps.meta.outputs.baseline_id }}.json'
+          STATE_FILE: '${{ github.workspace }}/output/multitable-perf/state-${{ steps.meta.outputs.baseline_id }}.json'
         run: |
           node scripts/ops/multitable-perf-baseline.mjs
 
       - name: Frontend measure (Playwright)
         env:
           BASELINE_ID: ${{ steps.meta.outputs.baseline_id }}
-          STATE_FILE: 'output/multitable-perf/state-${{ steps.meta.outputs.baseline_id }}.json'
+          STATE_FILE: '${{ github.workspace }}/output/multitable-perf/state-${{ steps.meta.outputs.baseline_id }}.json'
         working-directory: packages/core-backend
         run: |
           pnpm exec playwright test \
@@ -159,7 +162,7 @@ jobs:
         env:
           PHASE: 'rollback'
           BASELINE_ID: ${{ steps.meta.outputs.baseline_id }}
-          STATE_FILE: 'output/multitable-perf/state-${{ steps.meta.outputs.baseline_id }}.json'
+          STATE_FILE: '${{ github.workspace }}/output/multitable-perf/state-${{ steps.meta.outputs.baseline_id }}.json'
         run: |
           node scripts/ops/multitable-perf-baseline.mjs || true
 
@@ -170,4 +173,4 @@ jobs:
           name: multitable-perf-${{ inputs.rows }}-${{ inputs.metric_profile }}-${{ inputs.scenario }}-${{ github.run_id }}
           retention-days: 30
           path: |
-            output/multitable-perf/**
+            ${{ github.workspace }}/output/multitable-perf/**

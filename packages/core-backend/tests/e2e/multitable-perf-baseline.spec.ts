@@ -27,14 +27,14 @@
  * Targets come from STATE_FILE written by perf-baseline.mjs, OR from
  * TARGET_SHEET_ID + TARGET_VIEW_ID env vars (manual override).
  */
-import { test, type CDPSession } from '@playwright/test'
+import { test, type APIRequestContext, type CDPSession } from '@playwright/test'
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import {
-  ensureServersReachable,
   resolveE2EAuthToken,
   injectTokenAndGo,
   FE_BASE_URL,
+  API_BASE_URL,
 } from './multitable-helpers'
 
 const ROWS = Math.max(1, Number(process.env.ROWS || 10_000))
@@ -136,10 +136,39 @@ function pct(arr: number[], q: number): number | null {
 
 function summarizeFps(samples: number[]): { p50: number | null; p95: number | null; min: number | null } {
   if (samples.length === 0) return { p50: null, p95: null, min: null }
+  // FPS is "higher is better"; for verdict comparison we want the 95th-percentile
+  // of FPS *quality*, which equals the 5th-percentile of the sorted FPS samples
+  // (worst frames). DO NOT "fix" pct(samples, 0.05) to 0.95 — that would invert
+  // the metric semantic. See verification MD §6 advisor note.
   return {
     p50: Math.round(pct(samples, 0.5) ?? 0),
     p95: Math.round(pct(samples, 0.05) ?? 0),
     min: Math.round(Math.min(...samples)),
+  }
+}
+
+// Perf workflow MUST hard-fail if servers unreachable. The shared
+// ensureServersReachable() in multitable-helpers calls test.skip() which would
+// read as PASS in CI, silently shipping "green" baselines that measured nothing.
+async function requireServersReachable(request: APIRequestContext): Promise<void> {
+  try {
+    const apiHealth = await request.get(`${API_BASE_URL}/health`, { timeout: 3000 })
+    if (!apiHealth.ok()) {
+      const apiHealth2 = await request.get(`${API_BASE_URL}/api/health`, { timeout: 3000 })
+      if (!apiHealth2.ok()) {
+        throw new Error(`API health probe failed: ${API_BASE_URL}/health → ${apiHealth.status()}, /api/health → ${apiHealth2.status()}`)
+      }
+    }
+  } catch (err) {
+    throw new Error(`Perf gate requires reachable API. ${API_BASE_URL} probe failed: ${(err as Error).message}`)
+  }
+  try {
+    const feHealth = await request.get(FE_BASE_URL, { timeout: 3000 })
+    if (!feHealth.ok()) {
+      throw new Error(`FE probe at ${FE_BASE_URL} returned ${feHealth.status()}`)
+    }
+  } catch (err) {
+    throw new Error(`Perf gate requires reachable FE. ${FE_BASE_URL} probe failed: ${(err as Error).message}`)
   }
 }
 
@@ -261,7 +290,7 @@ test.describe('multitable D2 perf baseline (frontend half)', () => {
   let chromiumVersion = ''
 
   test.beforeAll(async ({ request, browser }) => {
-    await ensureServersReachable(request)
+    await requireServersReachable(request)
     target = await resolveTarget()
     chromiumVersion = browser.version()
     console.log(`[d2-perf-spec] target=${JSON.stringify(target)} chromium=${chromiumVersion}`)
@@ -372,6 +401,12 @@ test.describe('multitable D2 perf baseline (frontend half)', () => {
 // ---------------- per-metric-profile helpers ----------------
 
 async function measureScroll(page: import('@playwright/test').Page, output: OutputJson): Promise<void> {
+  // Methodology: start FPS sampling, dispatch ONE scroll-to-bottom jump, then
+  // wait 1500ms for paint/layout settling while raf samples accumulate. This
+  // measures FPS during the post-scroll settle window, NOT during a sustained
+  // user scroll gesture. Good enough for verdict B detection (DOM-memory-bound
+  // failure manifests in the settle window via long paint tasks); for richer
+  // sustained-scroll signal, follow-up impl can drive a multi-frame scroll loop.
   await page.evaluate(() => {
     // @ts-expect-error injected
     window.__d2Perf.startFpsSampling()
