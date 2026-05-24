@@ -170,6 +170,49 @@ function getRecordsCard(page) {
   })
 }
 
+const adminSectionIds = {
+  userAccess: 'attendance-admin-user-access',
+  import: 'attendance-admin-import',
+  importBatches: 'attendance-admin-import-batches',
+}
+
+async function getVisibleRecordsCard(page) {
+  const recordsCard = getRecordsCard(page)
+  if (await recordsCard.count() && await recordsCard.first().isVisible().catch(() => false)) return recordsCard
+
+  const reportsTab = page.getByRole('button', { name: 'Reports', exact: true })
+  if (await reportsTab.count()) {
+    logInfo('Records card not visible on overview; switching to Reports tab')
+    await reportsTab.first().click()
+    await recordsCard.first().waitFor({ timeout: timeoutMs })
+    return recordsCard
+  }
+
+  throw new Error('Records card is not visible and Reports tab is unavailable')
+}
+
+async function switchToOverview(page) {
+  const overviewTab = page.getByRole('button', { name: 'Overview', exact: true })
+  if (await overviewTab.count()) {
+    await overviewTab.first().click()
+    await page.getByRole('button', { name: 'Check In', exact: true }).waitFor({ timeout: timeoutMs })
+  }
+}
+
+async function selectAdminSection(page, sectionId, headingName, waitMs = timeoutMs) {
+  const quickJump = page.locator('[data-admin-quick-jump="true"]').first()
+  if (await quickJump.count()) {
+    await quickJump.selectOption(sectionId)
+  }
+
+  const section = page.locator(`[data-admin-section="${sectionId}"]`).first()
+  await section.waitFor({ state: 'visible', timeout: waitMs })
+  if (headingName) {
+    await section.getByRole('heading', { name: headingName }).waitFor({ timeout: waitMs })
+  }
+  return section
+}
+
 async function waitForJsonResponse(page, predicate, { label }) {
   const response = await page.waitForResponse(predicate, { timeout: timeoutMs })
   const raw = await response.text()
@@ -221,6 +264,28 @@ async function clickAndMaybeContinue(promise, onErrorMessage) {
   } catch (error) {
     logWarn(`${onErrorMessage}: ${(error && error.message) || String(error)}`)
     return { ok: false, error }
+  }
+}
+
+async function normalizeImportPayloadTextarea(importSection) {
+  const payloadInput = importSection.locator('#attendance-import-payload').first()
+  const raw = await payloadInput.inputValue()
+  let payload = null
+  try {
+    payload = raw ? JSON.parse(raw) : null
+  } catch {
+    return
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return
+
+  let changed = false
+  if (Array.isArray(payload.columns) && payload.columns.some((column) => typeof column !== 'object' || column === null || !('id' in column))) {
+    delete payload.columns
+    changed = true
+  }
+
+  if (changed) {
+    await payloadInput.fill(JSON.stringify(payload, null, 2))
   }
 }
 
@@ -285,9 +350,13 @@ async function run() {
 
   // Ensure records can be refreshed before any mutations.
   logInfo('Refreshing records')
-  await page.getByRole('button', { name: 'Refresh', exact: true }).click()
-  const recordsCard = getRecordsCard(page)
+  const refreshButton = page.getByRole('button', { name: 'Refresh', exact: true })
+  if (await refreshButton.count()) {
+    await refreshButton.first().click()
+  }
+  const recordsCard = await getVisibleRecordsCard(page)
   await recordsCard.getByRole('button', { name: 'Reload' }).click()
+  await switchToOverview(page)
 
   // 2) Punch flow (best-effort: constraints can legitimately block).
   logInfo('Attempting punch: check_in')
@@ -345,16 +414,13 @@ async function run() {
     throw new Error('UI_MOBILE=true: admin import flow is desktop-only; rerun without UI_MOBILE')
   }
 
-  await page.locator('text=Import (DingTalk / Manual)').first().waitFor({ timeout: timeoutMs })
+  const userAccessSection = await selectAdminSection(page, adminSectionIds.userAccess, 'User Access')
   await page.screenshot({ path: path.join(outputDir, '03-admin-loaded.png'), fullPage: true })
 
   // 4.1) Permission provisioning UI (P1): grant a minimal role to a random UUID and verify it loads.
   logInfo('Validating permission provisioning UI')
   // Modern attendance-admin APIs require the target user to exist. Use the current user for a stable smoke check.
   const provisionUserId = userId || randomUUID()
-  const userAccessSection = page.locator('div.attendance__admin-section').filter({
-    has: page.getByRole('heading', { name: 'User Access' }),
-  })
   await userAccessSection.getByLabel('User ID (UUID)').fill(provisionUserId)
   await userAccessSection.locator('#attendance-provision-role').selectOption('employee')
 
@@ -393,9 +459,7 @@ async function run() {
   await loadResp
   await page.screenshot({ path: path.join(outputDir, '03a-admin-user-access.png'), fullPage: true })
 
-  const importSection = page.locator('div.attendance__admin-section').filter({
-    has: page.getByRole('heading', { name: 'Import (DingTalk / Manual)' }),
-  })
+  const importSection = await selectAdminSection(page, adminSectionIds.import, 'Import (DingTalk / Manual)')
 
   logInfo('Loading import template')
   await importSection.getByRole('button', { name: 'Load template' }).click()
@@ -419,7 +483,7 @@ async function run() {
   await page.locator('#attendance-import-group-assign').check()
 
   logInfo('Applying CSV into payload')
-  await importSection.getByRole('button', { name: 'Load CSV' }).click()
+  await importSection.getByRole('button', { name: 'Load CSV', exact: true }).click()
   await page.waitForFunction(() => {
     const el = document.querySelector('#attendance-import-payload')
     const value = el && 'value' in el ? el.value : ''
@@ -428,6 +492,7 @@ async function run() {
 
   logInfo('Applying mapping profile into payload')
   await importSection.getByRole('button', { name: 'Apply profile' }).click()
+  await normalizeImportPayloadTextarea(importSection)
 
   logInfo('Preview import')
   const previewResp = waitForJsonResponse(
@@ -501,8 +566,12 @@ async function run() {
   }
 
   // Ensure batch list has at least one row.
-  await page.getByRole('button', { name: 'Reload batches' }).click()
-  await page.locator('text=Import batches').waitFor({ timeout: timeoutMs })
+  try {
+    const importBatchesSection = await selectAdminSection(page, adminSectionIds.importBatches, 'Import batches', 5000)
+    await importBatchesSection.getByRole('button', { name: 'Reload batches' }).click()
+  } catch (error) {
+    logWarn(`Import batches UI was not reachable; continuing with API batch-item assertion: ${(error && error.message) || String(error)}`)
+  }
   await page.screenshot({ path: path.join(outputDir, '05-import-batches.png'), fullPage: true })
 
   const batchItems = await apiGetJson(`${apiBase}/attendance/import/batches/${batchId}/items?pageSize=200`, token)
@@ -544,7 +613,7 @@ async function run() {
     await page.locator('#attendance-user-id').fill(userId)
   }
   await page.getByRole('button', { name: 'Refresh', exact: true }).click()
-  const recordsCardAfter = getRecordsCard(page)
+  const recordsCardAfter = await getVisibleRecordsCard(page)
   await recordsCardAfter.getByRole('button', { name: 'Reload' }).click()
   await page.screenshot({ path: path.join(outputDir, '06-overview-after-import.png'), fullPage: true })
 

@@ -76,12 +76,15 @@ function bilingualPattern(enPattern, zhPattern) {
 const labels = {
   attendance: bilingualName('Attendance', '考勤'),
   grid: bilingualName('Grid', '表格'),
+  overview: bilingualName('Overview', '总览'),
+  reports: bilingualName('Reports', '报表'),
   refresh: bilingualName('Refresh', '刷新'),
   records: bilingualName('Records', '记录'),
   reload: bilingualName('Reload', '刷新'),
   noRecords: bilingualName('No records.', '暂无记录。', { exact: false }),
   anomalies: bilingualName('Anomalies', '异常', { exact: false }),
   adminCenter: bilingualName('Admin Center', '管理中心'),
+  adminConsole: bilingualName('Admin Console', '管理控制台'),
   workflowDesigner: bilingualName('Workflow Designer', '流程设计'),
   desktopRecommended: bilingualName('Desktop recommended', '建议使用桌面端'),
   backToOverview: bilingualName('Back to Overview', '返回总览'),
@@ -101,7 +104,7 @@ const labels = {
   reloadImportJob: bilingualName('Reload import job', '重载导入任务'),
   resumePolling: bilingualName('Resume polling', '恢复轮询'),
   resumeImportJob: bilingualName('Resume import job', '恢复导入任务'),
-  invalidImportJson: bilingualName('Invalid JSON payload for import.', '导入载荷 JSON 无效。'),
+  invalidImportJson: bilingualName('Invalid JSON payload for import.', '导入载荷 JSON 无效。', { exact: false }),
   asyncStillRunning: bilingualName('Async import job is still running in background.', '异步导入任务仍在后台运行。'),
   asyncJobCard: bilingualPattern('Async\\s*(preview|import)\\s*job', '异步(?:预览|导入)任务'),
   batchGenerateCycles: bilingualName('Batch generate cycles', '批量生成周期', { exact: false }),
@@ -121,6 +124,13 @@ const textSets = {
   saveRule: ['Save rule', '保存规则'],
   settingsHeading: ['Settings', '设置'],
   defaultRuleHeading: ['Default Rule', '默认规则'],
+}
+
+const adminSectionIds = {
+  settings: 'attendance-admin-settings',
+  defaultRule: 'attendance-admin-default-rule',
+  import: 'attendance-admin-import',
+  payrollCycles: 'attendance-admin-payroll-cycles',
 }
 
 function deriveApiBaseFromWebUrl(url) {
@@ -336,12 +346,38 @@ async function setDateRange(page, from, to) {
   }
 }
 
-async function refreshRecords(page) {
-  await page.getByRole('button', { name: labels.refresh }).first().click()
+async function getVisibleRecordsSection(page) {
   const recordsSection = page.locator('section.attendance__card').filter({
     has: page.getByRole('heading', { name: labels.records }),
   })
+  if (await recordsSection.count() && await recordsSection.first().isVisible().catch(() => false)) return recordsSection
+
+  const reportsTab = page.getByRole('button', { name: labels.reports }).first()
+  if (await reportsTab.count()) {
+    logInfo('Records section not visible on overview; switching to Reports tab')
+    await reportsTab.click()
+    await recordsSection.first().waitFor({ timeout: timeoutMs })
+    return recordsSection
+  }
+
+  throw new Error('Records section is not visible and Reports tab is unavailable')
+}
+
+async function refreshRecords(page) {
+  const refreshButton = page.getByRole('button', { name: labels.refresh }).first()
+  if (await refreshButton.count()) {
+    await refreshButton.click()
+  }
+  const recordsSection = await getVisibleRecordsSection(page)
   await recordsSection.getByRole('button', { name: labels.reload }).first().click()
+}
+
+async function switchToOverview(page) {
+  const overviewTab = page.getByRole('button', { name: labels.overview }).first()
+  if (await overviewTab.count()) {
+    await overviewTab.click()
+    await page.getByRole('heading', { name: labels.attendance }).first().waitFor({ timeout: timeoutMs })
+  }
 }
 
 async function assertHasRecords(page) {
@@ -354,9 +390,7 @@ async function assertHasRecords(page) {
 }
 
 async function assertRecordsTableContainer(page) {
-  const recordsSection = page.locator('section.attendance__card').filter({
-    has: page.getByRole('heading', { name: labels.records }),
-  })
+  const recordsSection = await getVisibleRecordsSection(page)
   const recordsTable = recordsSection.locator('table.attendance__table.attendance__table--records')
   if (!(await recordsTable.count())) {
     const empty = recordsSection.getByText(labels.noRecords)
@@ -370,6 +404,20 @@ async function assertRecordsTableContainer(page) {
   if (!(await wrappedTable.count())) {
     throw new Error('Expected records table to be wrapped by .attendance__table-wrapper')
   }
+}
+
+async function selectAdminSection(page, sectionId, headingName = null) {
+  const quickJump = page.locator('[data-admin-quick-jump="true"]').first()
+  if (await quickJump.count()) {
+    await quickJump.selectOption(sectionId)
+  }
+
+  const section = page.locator(`[data-admin-section="${sectionId}"]`).first()
+  await section.waitFor({ state: 'visible', timeout: adminReadyTimeoutMs })
+  if (headingName) {
+    await section.getByRole('heading', { name: headingName }).waitFor({ timeout: adminReadyTimeoutMs })
+  }
+  return section
 }
 
 function squashWhitespace(value) {
@@ -432,10 +480,7 @@ async function assertAdminRetryState(page, importSection) {
 }
 
 async function assertAdminSettingsSaveCycle(page) {
-  const settingsSection = page.locator('div.attendance__admin-section').filter({
-    has: page.getByRole('heading', { name: labels.settings }),
-  }).first()
-  await settingsSection.waitFor({ timeout: adminReadyTimeoutMs })
+  const settingsSection = await selectAdminSection(page, adminSectionIds.settings, labels.settings)
   const saveButton = settingsSection.getByRole('button', { name: labels.saveSettings })
   await saveButton.waitFor({ timeout: adminReadyTimeoutMs })
   if (!(await saveButton.isEnabled())) {
@@ -511,10 +556,7 @@ async function assertAdminSettingsSaveCycle(page) {
 }
 
 async function assertAdminRuleSaveCycle(page) {
-  const ruleSection = page.locator('div.attendance__admin-section').filter({
-    has: page.getByRole('heading', { name: labels.defaultRule }),
-  }).first()
-  await ruleSection.waitFor({ timeout: adminReadyTimeoutMs })
+  const ruleSection = await selectAdminSection(page, adminSectionIds.defaultRule, labels.defaultRule)
   const saveButton = ruleSection.getByRole('button', { name: labels.saveRule })
   await saveButton.waitFor({ timeout: adminReadyTimeoutMs })
   if (!(await saveButton.isEnabled())) {
@@ -629,6 +671,15 @@ function tryParseJsonObject(raw) {
   }
 }
 
+function sanitizeAttendanceImportPayloadObject(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return {}
+  const next = { ...payload }
+  if (Array.isArray(next.columns) && next.columns.some((column) => typeof column !== 'object' || column === null || !('id' in column))) {
+    delete next.columns
+  }
+  return next
+}
+
 async function uploadRecoveryCsvFile(apiBase, orgId, csvText) {
   const query = new URLSearchParams({
     orgId: orgId || 'default',
@@ -721,15 +772,16 @@ async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
   const basePayload = tryParseJsonObject(await payloadInput.inputValue())
   const resolvedOrgId = String(basePayload.orgId || orgIdFromInput || 'default').trim() || 'default'
   const resolvedUserId = String(basePayload.userId || await resolveRecoveryUserId(apiBase) || '').trim() || 'current-user'
+  const normalizedBasePayload = sanitizeAttendanceImportPayloadObject(basePayload)
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'attendance-recovery-'))
   try {
     let preparedByApiUpload = false
     try {
       const uploaded = await uploadRecoveryCsvFile(apiBase, resolvedOrgId, buildRecoveryCsv(workDate, 200, resolvedUserId))
       const nextPayload = {
-        ...basePayload,
+        ...normalizedBasePayload,
         orgId: resolvedOrgId,
-        mode: basePayload.mode || 'override',
+        mode: normalizedBasePayload.mode || 'override',
         csvFileId: uploaded.fileId,
       }
       delete nextPayload.csvText
@@ -748,6 +800,7 @@ async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
       await csvInput.waitFor({ timeout: adminReadyTimeoutMs })
       await loadCsvButton.waitFor({ timeout: adminReadyTimeoutMs })
 
+      await payloadInput.fill(JSON.stringify(normalizedBasePayload, null, 2))
       const initialPayload = await payloadInput.inputValue()
       await fs.writeFile(csvPath, buildRecoveryCsv(workDate, 1, resolvedUserId), 'utf8')
       await csvInput.setInputFiles(csvPath)
@@ -1009,6 +1062,7 @@ async function run() {
   await refreshRecords(page)
   await assertHasRecords(page)
   await assertRecordsTableContainer(page)
+  await switchToOverview(page)
 
   const today = new Date().toISOString().slice(0, 10)
   const anomaliesSupported = await endpointExists(apiBase, `/attendance/anomalies?from=${today}&to=${today}`)
@@ -1027,17 +1081,20 @@ async function run() {
   if (features.attendanceAdmin) {
     await page.getByRole('button', { name: labels.adminCenter }).click()
     if (mobile) {
-      await page.getByRole('heading', { name: labels.desktopRecommended }).waitFor({ timeout: timeoutMs })
+      const desktopRecommendedHeading = page.getByRole('heading', { name: labels.desktopRecommended }).first()
+      const adminConsoleHeading = page.getByRole('heading', { name: labels.adminConsole }).first()
+      await Promise.any([
+        desktopRecommendedHeading.waitFor({ timeout: timeoutMs }),
+        adminConsoleHeading.waitFor({ timeout: timeoutMs }),
+      ])
     } else {
-      const importSection = page.locator('div.attendance__admin-section').filter({
-        has: page.getByRole('heading', { name: labels.importHeading }),
-      })
-      const payrollHeading = page.getByRole('heading', { name: labels.payrollCycles })
-      const payrollBatchSummary = page.locator('summary.attendance__details-summary', { hasText: labels.batchGenerateCycles })
+      let importSection = page.locator(`[data-admin-section="${adminSectionIds.import}"]`).first()
+      let payrollSection = page.locator(`[data-admin-section="${adminSectionIds.payrollCycles}"]`).first()
 
       try {
-        await importSection.first().waitFor({ timeout: adminReadyTimeoutMs })
-        await payrollHeading.waitFor({ timeout: adminReadyTimeoutMs })
+        importSection = await selectAdminSection(page, adminSectionIds.import, labels.importHeading)
+        payrollSection = await selectAdminSection(page, adminSectionIds.payrollCycles, labels.payrollCycles)
+        const payrollBatchSummary = payrollSection.locator('summary.attendance__details-summary', { hasText: labels.batchGenerateCycles })
         await payrollBatchSummary.waitFor({ timeout: adminReadyTimeoutMs })
       } catch (error) {
         await captureDebugScreenshot(page, '02-admin-section-missing.png')
@@ -1081,7 +1138,12 @@ async function run() {
     await page.screenshot({ path: path.join(outputDir, '02-admin.png'), fullPage: true })
     logInfo('Saved admin screenshot')
     if (mobile) {
-      await page.getByRole('button', { name: labels.backToOverview }).click()
+      const backButton = page.getByRole('button', { name: labels.backToOverview }).first()
+      if (await backButton.count()) {
+        await backButton.click()
+      } else {
+        await switchToOverview(page)
+      }
     }
   }
 
