@@ -61,13 +61,18 @@ gh variable list --repo zensgit/metasheet2 | grep MULTITABLE_PERF_
 
 无 `DELETE /api/multitable/bases/:id` endpoint — 必须 pre-create **1 个** base 复用所有 dispatch。
 
-```bash
-# 临时本地变量（仅 shell session）
-export API_BASE="http://STAGING_HOST:8081"
-export TOKEN="$(gh secret list --repo zensgit/metasheet2 >/dev/null && echo 'set-token-locally-for-this-curl-only')"
-# 实际：用你手上的 admin JWT；NEVER 用 echo 暴露
-# 推荐做法：把 token 写到一个本地非 git 跟踪的临时文件，curl 引用，然后 shred 删除
+**Token lifecycle**：runbook 全程通过 shell session 持有 `TOKEN` / `API_BASE` / `BASE_ID` env vars（不导出为脚本变量、不写文件、不进 history）。所有 step 用同一 session，§8 cleanup 时 `unset`。
 
+```bash
+# 1) 用 read -rsp 输入 JWT — 无回显、不入 shell history、不留剪贴板
+read -rsp 'Staging admin JWT: ' TOKEN
+echo
+export TOKEN
+
+# 2) 设 staging endpoints
+export API_BASE='http://STAGING_HOST:8081'
+
+# 3) curl POST /bases — 复用同一 TOKEN
 curl -sS -X POST -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name":"d2-perf-baseline-shared","color":"#42b883"}' \
@@ -88,10 +93,14 @@ curl -sS -X POST -H "Authorization: Bearer $TOKEN" \
 }
 ```
 
-写入 GH var：
+写入 GH var + 同时保留 shell-session env var 给后续 step 用：
+
 ```bash
+# 把响应里的 base id 同时记到本地 env + GH var
+export BASE_ID='base_xxxxxxxx'    # ← 从上方 response.data.base.id 复制
+
 gh variable set MULTITABLE_PERF_BASE_ID --repo zensgit/metasheet2 \
-  --body 'base_xxxxxxxx'    # ← 从上方 response.data.base.id 复制
+  --body "$BASE_ID"
 ```
 
 验证：
@@ -99,10 +108,7 @@ gh variable set MULTITABLE_PERF_BASE_ID --repo zensgit/metasheet2 \
 gh variable list --repo zensgit/metasheet2 | grep MULTITABLE_PERF_BASE_ID
 ```
 
-清理本地临时 token：
-```bash
-unset TOKEN
-```
+**注意**：`TOKEN` / `API_BASE` / `BASE_ID` env vars 保留到 §8 cleanup 才 unset — §4.5 rollback 验证 / §6 metadata 收集 都会复用。
 
 ---
 
@@ -255,7 +261,7 @@ jq '{
 ### 4.5 验证 rollback
 
 ```bash
-# 检查 sheet 已删除
+# 检查 sheet 已删除（$TOKEN / $API_BASE / $BASE_ID 从 §2 shell session 继承）
 curl -sS -H "Authorization: Bearer $TOKEN" \
   "$API_BASE/api/multitable/sheets?baseId=$BASE_ID" \
   | jq '.data.sheets | length'
@@ -276,15 +282,25 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 
 3 rows × 2 metricProfile (mount + scroll) × 2 scenario (primary + expanded) = 12
 
-### 5.1 触发 wrapper
+### 5.1 触发 wrapper — **必须捕获 dispatched run IDs**
+
+防 §6 收集污染（§4 smoke 已跑、`gh run list --limit` 无法保证只拿 baseline runs）：wrapper 在每次 dispatch 后立即查最新 run + 通过 `run-name` 字段（含 inputs.rows/profile/scenario）匹配，写入 `$ROOT/dispatched-run-ids.txt`。§6 只下载这个 file 里的 IDs。
 
 ```bash
-# Save to /tmp/d2-baseline-trigger.sh; chmod +x; run
-cat > /tmp/d2-baseline-trigger.sh <<'EOF'
+# 预设 ROOT（同时给 §6 用）
+export ROOT="/tmp/d2-baseline-$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$ROOT"
+echo "[init] ROOT=$ROOT"
+
+# Save to $ROOT/d2-baseline-trigger.sh; chmod +x; run
+cat > "$ROOT/d2-baseline-trigger.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
 REPO="zensgit/metasheet2"
+RUNS_FILE="${ROOT}/dispatched-run-ids.txt"
+: > "$RUNS_FILE"   # truncate fresh
+echo "# wf,rows,profile,scenario,run_id" >> "$RUNS_FILE"
 
 for rows in 10000 50000 100000; do
   WF=$([[ "$rows" == "10000" ]] && echo "multitable-perf-baseline.yml" || echo "multitable-perf-highscale.yml")
@@ -293,18 +309,47 @@ for rows in 10000 50000 100000; do
       echo "[dispatch] rows=$rows wf=$WF profile=$mp scenario=$sc"
       gh workflow run "$WF" --repo "$REPO" \
         -f rows="$rows" -f metric_profile="$mp" -f scenario="$sc"
-      sleep 2   # 避免 GH API rate limit 突发
+
+      # 等 GH 把 run 注册（通常 3-5s）；最多 polling 6 × 5s = 30s
+      run_id=""
+      for attempt in 1 2 3 4 5 6; do
+        sleep 5
+        # workflow yml 的 run-name 含 "rows=X profile=Y scenario=Z" — 用 displayTitle 精确匹配
+        run_id=$(gh run list --repo "$REPO" --workflow "$WF" --limit 5 \
+          --json databaseId,displayTitle,createdAt \
+          --jq "[.[] | select(.displayTitle | test(\"rows=$rows.*profile=$mp.*scenario=$sc\"))] | sort_by(.createdAt) | last | .databaseId // empty" 2>/dev/null || echo "")
+        if [[ -n "$run_id" && "$run_id" != "null" ]]; then break; fi
+      done
+      if [[ -z "$run_id" ]]; then
+        echo "::warning::Could not capture run_id for ($rows, $mp, $sc) — manual lookup required" >&2
+        echo "${WF},${rows},${mp},${sc}," >> "$RUNS_FILE"
+      else
+        echo "[captured] run_id=$run_id"
+        echo "${WF},${rows},${mp},${sc},${run_id}" >> "$RUNS_FILE"
+      fi
+
+      sleep 2   # GH API rate limit 缓冲
     done
   done
 done
 
-echo "[done] 12 dispatches triggered. Monitor via:"
+echo "[done] 12 dispatches triggered. Run IDs at: $RUNS_FILE"
+echo
+echo "Monitor via:"
 echo "  gh run list --repo $REPO --workflow multitable-perf-baseline.yml --limit 10"
 echo "  gh run list --repo $REPO --workflow multitable-perf-highscale.yml --limit 10"
+echo
+echo "Or watch a specific captured run:"
+echo "  gh run watch <run_id> --repo $REPO"
 EOF
-chmod +x /tmp/d2-baseline-trigger.sh
-/tmp/d2-baseline-trigger.sh
+chmod +x "$ROOT/d2-baseline-trigger.sh"
+"$ROOT/d2-baseline-trigger.sh"
+
+# Verify captured IDs after trigger:
+cat "$ROOT/dispatched-run-ids.txt"
 ```
+
+预期 `dispatched-run-ids.txt` 含 13 行（1 header + 12 dispatches），所有 12 行的 `run_id` 列非空。若有空行 → manual `gh run list` 补查后回填。
 
 ### 5.2 监控
 
@@ -345,34 +390,45 @@ gh workflow run multitable-perf-baseline.yml --repo zensgit/metasheet2 \
 
 ## 6. Artifact 收集 + 整理
 
-### 6.1 下载全部 artifacts
+### 6.1 下载 artifacts —— **仅** §5.1 捕获的 12 个 run IDs
+
+**核心防回归**：不能再用 `gh run list --limit 8` 拉"最近成功的 run"——§4 smoke 也会被收进来。直接从 `$ROOT/dispatched-run-ids.txt`（§5.1 捕获）按 IDs 下载。
 
 ```bash
-ROOT=/tmp/d2-baseline-$(date -u +%Y%m%dT%H%M%SZ)
-mkdir -p "$ROOT"
+# $ROOT 从 §5.1 继承（同一 shell session）
+test -f "$ROOT/dispatched-run-ids.txt" || { echo "::error::missing $ROOT/dispatched-run-ids.txt — re-trigger §5.1 first"; }
 
-# 列出最近 12+ run（按时间倒序）
-gh run list --repo zensgit/metasheet2 \
-  --workflow multitable-perf-baseline.yml --limit 8 --json databaseId,name,status,conclusion \
-  | jq -r '.[] | select(.conclusion == "success") | .databaseId' \
-  > "$ROOT/baseline-run-ids.txt"
+REPO="zensgit/metasheet2"
 
-gh run list --repo zensgit/metasheet2 \
-  --workflow multitable-perf-highscale.yml --limit 8 --json databaseId,name,status,conclusion \
-  | jq -r '.[] | select(.conclusion == "success") | .databaseId' \
-  > "$ROOT/highscale-run-ids.txt"
+# Pre-flight: 验证 captured runs 数量 + 所有 run_id 非空
+captured_count=$(grep -v '^#' "$ROOT/dispatched-run-ids.txt" | grep -c -v ',$' || true)
+echo "[verify] captured run IDs: ${captured_count}/12"
+if [[ "$captured_count" -lt 12 ]]; then
+  echo "::error::dispatched-run-ids.txt 缺 run_id 行 — 用 'gh run list ... --created \"YYYY-MM-DDT...\"' 手动补回填后再继续"
+  exit 1
+fi
 
-# 下载每个 successful run 的 artifact
-while read -r run_id; do
-  echo "[download] run $run_id"
-  gh run download "$run_id" --repo zensgit/metasheet2 --dir "$ROOT/run-$run_id"
-done < "$ROOT/baseline-run-ids.txt"
+# Pre-flight: 验证 captured runs 都已 completed + success
+while IFS=, read -r wf rows mp sc run_id; do
+  [[ "$wf" == \#* || -z "$wf" ]] && continue
+  status=$(gh run view "$run_id" --repo "$REPO" --json status,conclusion --jq '.status + "/" + .conclusion')
+  echo "[check] $wf rows=$rows mp=$mp sc=$sc run=$run_id status=$status"
+  if [[ "$status" != "completed/success" ]]; then
+    echo "::error::run $run_id not completed/success (got: $status). Wait or retry."
+    exit 1
+  fi
+done < "$ROOT/dispatched-run-ids.txt"
 
-while read -r run_id; do
-  echo "[download] run $run_id"
-  gh run download "$run_id" --repo zensgit/metasheet2 --dir "$ROOT/run-$run_id"
-done < "$ROOT/highscale-run-ids.txt"
+# 下载每个 captured run 的 artifact，按 (rows, profile, scenario) 命名子目录
+while IFS=, read -r wf rows mp sc run_id; do
+  [[ "$wf" == \#* || -z "$wf" ]] && continue
+  dir="$ROOT/run-${rows}-${mp}-${sc}-${run_id}"
+  echo "[download] run_id=$run_id → $dir"
+  gh run download "$run_id" --repo "$REPO" --dir "$dir"
+done < "$ROOT/dispatched-run-ids.txt"
 ```
+
+**核心保证**：本 step 只 touch §5.1 captured runs，§4 smoke runs 完全隔离不进 baseline 收集。
 
 ### 6.2 整理目录
 
@@ -464,19 +520,36 @@ verdict 可叠加（B+C / B+D 等），分别启对应 PR。
 
 ---
 
-## 8. Cleanup（baseline 全完成后）
+## 8. Cleanup（baseline 全完成 + review-and-lock PR merge 后）
+
+### 8.1 Reused base 残留处理
+
+无 `DELETE /api/multitable/bases/:id` endpoint（已在 §2 注释 + memory `project_multitable_d2_perf_gate_design_locked.md` §8 锁定）。不要伪造任何 DELETE 命令。三个合规选项，按可用性优先：
+
+1. **UI 删除**（推荐）：admin 登录前端 base 管理界面 → 找到 `d2-perf-baseline-shared` → 删除。前提：UI 已有 "delete base" 功能（未必所有版本都暴露）。
+2. **保留作下次复用**：把 `MULTITABLE_PERF_BASE_ID` 这 1 个 reused base 留着，下次 D2 baseline 复跑（review-and-lock 第 2 round / follow-up impl PR 之后 +24 runs / verdict-driven optimization 后 re-baseline）继续复用，**完全省下重 setup**。仅 1 个 orphan，磁盘+列表噪音极低，强烈推荐采用此路径。
+3. **DBA 程序删除**：如果一定要清，走 DBA 流程独立 review（直接 SQL `DELETE FROM meta_bases WHERE id = '<BASE_ID>'`；级联删 sheets/fields/views/records via FK）。这是受控操作不应在 runbook 里写运行式命令。
+
+### 8.2 本地 artifacts 保留 / 清理
 
 ```bash
-# 1. 手动删 reused base via UI 或 API
-curl -sS -X DELETE -H "Authorization: Bearer $TOKEN" \
-  "$API_BASE/api/multitable/<unknown-endpoint>"
-# (再确认：no DELETE /bases endpoint exists; manual UI deletion 或 直接 DB DELETE 才行)
+# review-and-lock PR merge 后保留 ~30 天给 audit，到期再删
+# Until then, keep $ROOT for traceability
+ls "$ROOT"
 
-# 2. 清理本地 artifacts（review-and-lock PR merge 后保留 ~30 天给 audit，再删）
-rm -rf "$ROOT"
+# 到期清理（手动确认目录无误后执行）
+# rm -rf "$ROOT"
+```
 
-# 3. 清理本地临时 token / shell variables
-unset TOKEN API_BASE BASE_ID
+### 8.3 本地 shell session 清理
+
+```bash
+# 把贯穿全 runbook 的临时 env 卸掉
+unset TOKEN API_BASE BASE_ID ROOT
+
+# 清掉 shell history 里的 base creation 命令（如果你的 shell 是 bash 且 HISTFILE 默认）
+# 注意：read -rsp 输入的 TOKEN 不会进 history；其它命令会
+history -d $(history | grep -n 'gh secret set\|gh variable set' | tail -3 | cut -d: -f1) 2>/dev/null || true
 ```
 
 ---
@@ -513,6 +586,12 @@ unset TOKEN API_BASE BASE_ID
 ---
 
 ## 11. Changelog
+
+### v2 (2026-05-24) — Pre-push precision pass — 3 review finding fixes
+
+- **(High) Artifact collection 反 smoke 污染**：§5.1 wrapper 新增 captured run IDs 写到 `$ROOT/dispatched-run-ids.txt`（每 dispatch 后通过 `gh run list --json displayTitle` 精确匹配 `rows=X profile=Y scenario=Z` 找最新 run）；§6.1 不再用 `gh run list --limit 8`，改读 `dispatched-run-ids.txt` 仅下载 12 个捕获 IDs。§4 smoke runs 完全隔离不进 baseline 收集。
+- **(Medium) Token / env vars lifecycle 一致性**：§2 用 `read -rsp` 输入 JWT（无回显、不入 history）后 `export TOKEN`；同步 `export BASE_ID` 给后续 step。§4.5 / §6 metadata 收集都复用同一 shell session 的 `TOKEN` / `API_BASE` / `BASE_ID`。**§8 cleanup 才 unset**（不再在 §2 末尾 unset TOKEN，那会让 §4.5 rollback verify 拿不到 token）。
+- **(Medium) §8 cleanup 去 fake DELETE endpoint**：原 `curl DELETE "$API_BASE/api/multitable/<unknown-endpoint>"` 与同文 §2 "no DELETE /bases endpoint exists" 矛盾；移除该命令，replace with 3 个合规处置路径（UI 删 / 保留复用（推荐）/ DBA SQL 程序）— 不再 paste 看似可运行的 unknown 删除指令。
 
 ### v1 (2026-05-24) — Initial operator runbook
 
