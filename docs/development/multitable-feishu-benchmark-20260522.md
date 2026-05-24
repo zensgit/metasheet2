@@ -107,7 +107,7 @@ T3D 4-PR 链交付：
 ```
 - 渲染层：`<MetaGridFooter :rows="filteredRows" :aggs="aggregations">` 一行（sticky bottom）
 - group header 加 inline agg：`{groupValue} ({rowCount}) — 销售总计：${groupSum}`
-- 前端 reduce 即可；配合虚拟滚动只算 visible window 也无碍
+- 聚合口径：基于当前 **filtered result**（不是 visible window）reduce — virtual scroll 仅决定渲染窗口，**不能影响聚合 source set**，否则滚动会改 footer 总计（BI 致命错位）；行数超阈值（如 server page > 10k）走 **server-side aggregation** 兜底
 
 **Effort: 中等 (1.5-2 周)** | **Impact: 高** — BI 用户的核心期望（销售看板、预算追踪）。
 
@@ -327,7 +327,7 @@ T3D 4-PR 链交付：
 | 1 | **Webhook HMAC-SHA256 签名** — `WebhookCreateInput` 加 secret 字段已存在 schema，加签名 generate (backend) + verify docs (frontend) | 3-5 天 | 高（安全 baseline）|
 | 2 | **Comment mention → in-app push 通知** — mention inbox 数据通路已就绪，加 mention 时 fan-out 到 commentInbox.unread + ws push（如已有 ws 连接） | 3-5 天 | 中-高 |
 | 3 | **`lock_record` action UI** — action type 已在 types.ts 但 RuleEditor 无对应 widget；加 dropdown + spec | 2 天 | 中 |
-| 4 | **`send_email` 真实实现** — 类型存在但无 endpoint；连 SMTP / SendGrid / SES，模板复用 DingTalk preset pattern | 1 周 | 高 |
+| 4 | **Email send action UI + 生产 SMTP 验收** — 源码已 ready（SMTP transport + readiness gate + e2e smoke，见 §2.1 / Gap 5），补 UI 配置流程 + 生产凭证落地 + 真实邮箱回执归档 | 3-5 天 | 高 |
 | 5 | **Webhook retry + exponential backoff UI** — backend 已 `retryCount` 字段，前端补 `retryPolicy` 配置 UI | 3-5 天 | 中 |
 | 6 | **Inline create row** — Grid 末行 "+" 直接新建（最常见缺失 UX） | 3-5 天 | 中-高 |
 | 7 | **冻结列（用户可配）** — 加 `view.config.frozenLeftColumnIds[]` + CSS sticky stack | 1 周 | 中 |
