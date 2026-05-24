@@ -67,6 +67,8 @@ export type MetaCoreLabelKey =
   | 'cell.yes' | 'cell.no' | 'cell.clear'
   | 'cell.noAttachments' | 'cell.clearAll'
   | 'cell.uploadFailed' | 'cell.removeFailed' | 'cell.clearFailed'
+  // --- Auth chrome (file-location closure tightening per #1803) ---
+  | 'auth.notAuthenticated'
 
 const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'presence.collaboratingNow': { en: 'Collaborating now', zh: '正在协作' },
@@ -175,6 +177,11 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
     zh: '此页面已无法获取该记录的最新版本。',
   },
   'grid.errorPatchFailed': { en: 'Patch failed', zh: '更新失败' },
+
+  // Auth chrome (#1803 file-location closure tightening).
+  // Used by useYjsDocument.ts:126 when local auth.getToken() returns falsy.
+  // Catch-time isZh capture (event-time semantics matching Slice E composables).
+  'auth.notAuthenticated': { en: 'Not authenticated', zh: '未登录' },
 
   // MetaCellEditor (T3A2): shallow chrome inside the grid cell editor.
   // Excludes user data (option values, format examples like https://example.com),

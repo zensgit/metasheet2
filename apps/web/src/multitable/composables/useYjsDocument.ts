@@ -6,6 +6,8 @@ import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
 import { io as socketIO, type Socket } from 'socket.io-client'
 import { useAuth } from '../../composables/useAuth'
+import { useLocale } from '../../composables/useLocale'
+import { metaCoreLabel } from '../utils/meta-core-labels'
 import type { YjsRecordPresence, YjsPresenceUser } from '../types'
 
 const MSG_SYNC = 0
@@ -69,6 +71,7 @@ export function useYjsDocument(recordId: Ref<string | null>, options: UseYjsDocu
   const currentUserId = ref<string | null>(null)
 
   const auth = useAuth()
+  const { isZh } = useLocale()
   let socket: Socket | null = null
   let currentRecordId: string | null = null
   /**
@@ -123,7 +126,7 @@ export function useYjsDocument(recordId: Ref<string | null>, options: UseYjsDocu
     // Pass JWT token for server-side verification — not raw userId
     const token = auth.getToken()
     if (!token) {
-      error.value = 'Not authenticated'
+      error.value = metaCoreLabel('auth.notAuthenticated', isZh.value)
       return
     }
     const resolvedUserId = await auth.getCurrentUserId().catch(() => null)
