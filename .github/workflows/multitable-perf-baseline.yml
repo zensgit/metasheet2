@@ -1,0 +1,211 @@
+name: Multitable D2 Perf Baseline
+
+# Single-dispatch parameterized baseline run for the multitable D2 large-table
+# perf gate. Each dispatch produces ONE backend JSON + ONE frontend JSON +
+# Playwright trace zip for a single (rows, metricProfile, scenario) tuple.
+#
+# Spec: docs/development/multitable-perf-gate-d2-design-20260524.md
+# v1 baseline = 3 rows × 2 metricProfile (mount + scroll) × 2 scenario =
+# 12 dispatches. edit / sort / filter / group profiles are scaffolded but
+# not implemented in v1 (hard-throw on invocation; removed from choice
+# options below); they land in a follow-up impl PR which will add the
+# remaining 24 dispatches to the full baseline. Use a wrapper script
+# invoking `gh workflow run` with different inputs across the 12 tuples.
+#
+# Discipline: workflow_dispatch ONLY (NO push/PR trigger) to keep perf cost
+# off the standard PR pipeline. Highscale (50k/100k) runs in a separate
+# workflow with longer timeout + separate approval surface.
+
+run-name: D2 Perf Baseline rows=${{ inputs.rows }} profile=${{ inputs.metric_profile }} scenario=${{ inputs.scenario }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      rows:
+        description: 'Row count (use 10000 here; 50000/100000 use multitable-perf-highscale.yml)'
+        required: false
+        default: '10000'
+        type: choice
+        options:
+          - '1000'
+          - '10000'
+      metric_profile:
+        description: 'Which metric profile to measure (v1: mount + scroll only; edit/sort/filter/group are scaffolded but not yet implemented and will fail-fast)'
+        required: true
+        default: 'mount'
+        type: choice
+        options:
+          - mount
+          - scroll
+      scenario:
+        description: 'primary (collapsed rows) | expanded (subset expanded)'
+        required: true
+        default: 'primary'
+        type: choice
+        options:
+          - primary
+          - expanded
+      api_base:
+        description: 'API base URL — host root, e.g., http://staging:8081 (with or without trailing /api; normalized by harness)'
+        required: false
+        default: ''
+      fe_base:
+        description: 'Frontend base URL (no trailing slash)'
+        required: false
+        default: ''
+      base_id:
+        description: 'Existing multitable base id (REQUIRED — operator pre-creates ONE reusable base since no DELETE /bases endpoint exists; reuse across all dispatches; defaults to MULTITABLE_PERF_BASE_ID var)'
+        required: false
+        default: ''
+
+concurrency:
+  group: multitable-perf-baseline-${{ inputs.rows }}-${{ inputs.metric_profile }}-${{ inputs.scenario }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # PRECONDITION (NOT enforced by this workflow): the REMOTE API server at
+      # ${API_BASE} must have ENABLE_YJS_COLLAB!=true. This env var here only
+      # affects the GH runner process and does NOT propagate to the remote
+      # server being measured. Operator MUST verify server-side config before
+      # treating baseline metrics as Yjs-isolated. See verification MD §3.
+      ENABLE_YJS_COLLAB: 'false'
+
+      # Backend mjs env vars
+      API_BASE: ${{ inputs.api_base || vars.MULTITABLE_PERF_API_BASE || '' }}
+      AUTH_TOKEN: ${{ secrets.MULTITABLE_PERF_AUTH_TOKEN || vars.MULTITABLE_PERF_AUTH_TOKEN || '' }}
+      BASE_ID: ${{ inputs.base_id || vars.MULTITABLE_PERF_BASE_ID || '' }}
+      ROWS: ${{ inputs.rows }}
+      PERF_PROFILE: 'multitable-d2-baseline'
+      SCENARIO: ${{ inputs.scenario }}
+      ROLLBACK: 'true'
+      XLSX_CHUNK_SIZE: '50000'
+      BACKEND_INSERT_SAMPLE_SIZE: '200'
+      BACKEND_QUERY_SAMPLE_SIZE: '50'
+      # Absolute paths to avoid resolution mismatch between backend step
+      # (cwd=workspace) and frontend step (working-directory=packages/core-backend).
+      OUTPUT_DIR: '${{ github.workspace }}/output/multitable-perf'
+      CI_RUNNER_TAG: 'ubuntu-latest'
+
+      # Frontend spec env vars
+      FE_BASE_URL: ${{ inputs.fe_base || vars.MULTITABLE_PERF_FE_BASE || '' }}
+      API_BASE_URL: ${{ inputs.api_base || vars.MULTITABLE_PERF_API_BASE || '' }}
+      METRIC_PROFILE: ${{ inputs.metric_profile }}
+      VIEWPORT_WIDTH: '1440'
+      VIEWPORT_HEIGHT: '900'
+      DEVICE_SCALE_FACTOR: '1'
+      SCROLL_TARGET: 'bottom'
+    steps:
+      - name: Normalize API_BASE / FE_BASE_URL once for both backend + frontend steps
+        # API_BASE accepts host root with or without trailing /api (operator-friendly).
+        # Strip both /api and trailing slash, then export normalized values via
+        # $GITHUB_ENV so subsequent steps inherit consistent forms. Without this,
+        # if operator enters 'http://host/api', the Playwright helpers build URLs
+        # as `${API_BASE_URL}/api/health` → 'http://host/api/api/health' (broken).
+        run: |
+          set -euo pipefail
+          raw_api="${API_BASE:-}"
+          norm_api="${raw_api%/}"
+          norm_api="${norm_api%/api}"
+          echo "API_BASE=$norm_api" >> "$GITHUB_ENV"
+          echo "API_BASE_URL=$norm_api" >> "$GITHUB_ENV"
+
+          raw_fe="${FE_BASE_URL:-}"
+          norm_fe="${raw_fe%/}"
+          echo "FE_BASE_URL=$norm_fe" >> "$GITHUB_ENV"
+
+          echo "[normalize] API_BASE: '${raw_api}' → '${norm_api}'"
+          echo "[normalize] FE_BASE_URL: '${raw_fe}' → '${norm_fe}'"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install chromium --with-deps
+
+      - name: Generate stable baselineId
+        id: meta
+        run: |
+          BASELINE_ID="$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "baseline_id=${BASELINE_ID}" >> "$GITHUB_OUTPUT"
+          echo "[meta] baselineId=${BASELINE_ID}"
+
+      - name: Validate required env
+        run: |
+          if [[ -z "${API_BASE}" ]]; then
+            echo "::error::API_BASE is empty — set MULTITABLE_PERF_API_BASE repo var or api_base input"
+            exit 1
+          fi
+          if [[ -z "${AUTH_TOKEN}" ]]; then
+            echo "::error::AUTH_TOKEN is empty — set MULTITABLE_PERF_AUTH_TOKEN secret"
+            exit 1
+          fi
+          if [[ -z "${FE_BASE_URL}" ]]; then
+            echo "::error::FE_BASE_URL is empty — set MULTITABLE_PERF_FE_BASE repo var or fe_base input"
+            exit 1
+          fi
+          if [[ -z "${BASE_ID}" ]]; then
+            echo "::error::BASE_ID is empty — pre-create ONE reusable multitable base (POST /api/multitable/bases) and set MULTITABLE_PERF_BASE_ID repo var or base_id input"
+            exit 1
+          fi
+          mkdir -p "${OUTPUT_DIR}"
+          echo "[validate] OUTPUT_DIR=${OUTPUT_DIR}"
+          echo "[validate] BASE_ID=${BASE_ID}"
+          echo "::notice::PRECONDITION: remote API at ${API_BASE} must have ENABLE_YJS_COLLAB!=true on its server-side config. This workflow does NOT enforce that — runner env does not propagate to remote process. Operator-verified."
+
+      - name: Backend seed + measure
+        env:
+          PHASE: 'seed_and_backend'
+          BASELINE_ID: ${{ steps.meta.outputs.baseline_id }}
+          STATE_FILE: '${{ github.workspace }}/output/multitable-perf/state-${{ steps.meta.outputs.baseline_id }}.json'
+        run: |
+          node scripts/ops/multitable-perf-baseline.mjs
+
+      - name: Frontend measure (Playwright)
+        env:
+          BASELINE_ID: ${{ steps.meta.outputs.baseline_id }}
+          STATE_FILE: '${{ github.workspace }}/output/multitable-perf/state-${{ steps.meta.outputs.baseline_id }}.json'
+        working-directory: packages/core-backend
+        run: |
+          pnpm exec playwright test \
+            --config tests/e2e/playwright.config.ts \
+            --reporter=line \
+            tests/e2e/multitable-perf-baseline.spec.ts
+
+      - name: Rollback (cascade delete sheet)
+        if: always()
+        env:
+          PHASE: 'rollback'
+          BASELINE_ID: ${{ steps.meta.outputs.baseline_id }}
+          STATE_FILE: '${{ github.workspace }}/output/multitable-perf/state-${{ steps.meta.outputs.baseline_id }}.json'
+        run: |
+          node scripts/ops/multitable-perf-baseline.mjs || true
+
+      - name: Upload baseline artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: multitable-perf-${{ inputs.rows }}-${{ inputs.metric_profile }}-${{ inputs.scenario }}-${{ github.run_id }}
+          retention-days: 30
+          path: |
+            ${{ github.workspace }}/output/multitable-perf/**
