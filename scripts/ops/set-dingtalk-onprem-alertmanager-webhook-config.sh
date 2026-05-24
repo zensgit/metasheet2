@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SSH_USER_HOST="${SSH_USER_HOST:-mainuser@142.171.239.56}"
+SSH_USER_HOST="${SSH_USER_HOST:-mainuser@23.254.236.11}"
 SSH_KEY="${SSH_KEY:-${HOME}/.ssh/metasheet2_deploy}"
 REMOTE_APP_DIR="${REMOTE_APP_DIR:-/home/mainuser/metasheet2}"
 REMOTE_CONFIG_FILE="${REMOTE_APP_DIR}/docker/observability/alertmanager/alertmanager.onprem.env"

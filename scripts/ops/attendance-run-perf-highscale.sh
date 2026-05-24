@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 WORKFLOW="${WORKFLOW:-attendance-import-perf-highscale.yml}"
 BRANCH="${BRANCH:-main}"
-API_BASE="${API_BASE:-http://142.171.239.56:8081/api}"
+API_BASE="${API_BASE:-http://23.254.236.11:8081/api}"
 ROWS="${ROWS:-100000}"
 MODE="${MODE:-commit}"
 PREVIEW_MODE="${PREVIEW_MODE:-auto}"

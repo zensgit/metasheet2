@@ -112,8 +112,8 @@ function writeEvidence(file, overrides = {}, options = {}) {
     runId: 'remote-20260422',
     executedAt: '2026-04-22T15:00:00.000Z',
     environment: {
-      apiBase: 'http://142.171.239.56:8900',
-      webBase: 'http://142.171.239.56:8081',
+      apiBase: 'http://23.254.236.11:8081',
+      webBase: 'http://23.254.236.11:8081',
       branch: 'codex/dingtalk-docs-smoke-runbook-20260422',
       commit: '83eed2a50',
       operator: 'qa',

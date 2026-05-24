@@ -37,8 +37,8 @@ function runScriptWithSelftest(args, options = {}) {
 
 function writeEnv(file, overrides = {}) {
   const values = {
-    DINGTALK_P4_API_BASE: 'http://142.171.239.56:8900',
-    DINGTALK_P4_WEB_BASE: 'http://142.171.239.56:8081',
+    DINGTALK_P4_API_BASE: 'http://23.254.236.11:8081',
+    DINGTALK_P4_WEB_BASE: 'http://23.254.236.11:8081',
     DINGTALK_P4_AUTH_TOKEN: 'secret-admin-token',
     DINGTALK_P4_GROUP_A_WEBHOOK: 'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-a&timestamp=1690000000000&sign=robot-sign-a',
     DINGTALK_P4_GROUP_B_WEBHOOK: 'https://oapi.dingtalk.com/robot/send?access_token=robot-secret-b',

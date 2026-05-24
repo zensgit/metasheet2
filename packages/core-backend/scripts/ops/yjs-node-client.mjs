@@ -7,7 +7,7 @@
  * flow (doc count up, bridge flush triggers a patch to meta_records).
  *
  * Usage:
- *   YJS_BASE_URL=http://142.171.239.56:8081 \
+ *   YJS_BASE_URL=http://23.254.236.11:8081 \
  *   YJS_TOKEN=<jwt> \
  *   RECORD_ID=<recordId> \
  *   node scripts/ops/yjs-client-validation/yjs-node-client.mjs
@@ -19,7 +19,7 @@ import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
 import { io as socketIO } from 'socket.io-client'
 
-const BASE_URL = process.env.YJS_BASE_URL || 'http://142.171.239.56:8081'
+const BASE_URL = process.env.YJS_BASE_URL || 'http://23.254.236.11:8081'
 const TOKEN = process.env.YJS_TOKEN
 const RECORD_ID = process.env.RECORD_ID
 const FIELD_ID = process.env.FIELD_ID || 'fld_pilot_title'

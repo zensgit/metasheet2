@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
 
-API_BASE="${API_BASE:-http://142.171.239.56:8081/api}"
+API_BASE="${API_BASE:-http://23.254.236.11:8081/api}"
 ORG_ID="${ORG_ID:-default}"
 AUTH_TOKEN="${AUTH_TOKEN:-}"
 ROWS="${ROWS:-100000}"

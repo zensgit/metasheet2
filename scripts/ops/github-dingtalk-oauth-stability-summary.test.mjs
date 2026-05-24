@@ -56,7 +56,7 @@ test('summary calls out missing GitHub webhook secret when self-heal was skipped
   try {
     writeFileSync(jsonPath, `${JSON.stringify({
       checkedAt: '2026-04-29T12:50:55Z',
-      host: 'mainuser@142.171.239.56',
+      host: 'mainuser@23.254.236.11',
       health: { status: 'ok', plugins: 13, ok: true },
       webhookConfig: { configured: false, host: '', pathLength: 0 },
       alertmanager: { activeAlertsCount: 0, notifyErrorsLastWindow: 0 },
@@ -89,4 +89,3 @@ test('summary calls out missing GitHub webhook secret when self-heal was skipped
     rmSync(outDir, { recursive: true, force: true })
   }
 })
-
