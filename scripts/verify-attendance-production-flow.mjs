@@ -414,14 +414,13 @@ async function run() {
     throw new Error('UI_MOBILE=true: admin import flow is desktop-only; rerun without UI_MOBILE')
   }
 
-  await selectAdminSection(page, adminSectionIds.userAccess, 'User Access')
+  const userAccessSection = await selectAdminSection(page, adminSectionIds.userAccess, 'User Access')
   await page.screenshot({ path: path.join(outputDir, '03-admin-loaded.png'), fullPage: true })
 
   // 4.1) Permission provisioning UI (P1): grant a minimal role to a random UUID and verify it loads.
   logInfo('Validating permission provisioning UI')
   // Modern attendance-admin APIs require the target user to exist. Use the current user for a stable smoke check.
   const provisionUserId = userId || randomUUID()
-  const userAccessSection = await selectAdminSection(page, adminSectionIds.userAccess, 'User Access')
   await userAccessSection.getByLabel('User ID (UUID)').fill(provisionUserId)
   await userAccessSection.locator('#attendance-provision-role').selectOption('employee')
 

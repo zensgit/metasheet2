@@ -36,6 +36,15 @@ git diff --check
 
 Result: PASS.
 
+Follow-up review fixes:
+
+- Removed a redundant second `selectAdminSection()` call in
+  `verify-attendance-full-flow.mjs` so the import-section fallback can continue
+  to skip optional assertions when the first admin-section lookup is caught.
+- Reused the first `User Access` section handle in
+  `verify-attendance-production-flow.mjs` so the screenshot and role
+  provisioning checks share one quick-jump selection.
+
 ## Live Verification Target
 
 Target:

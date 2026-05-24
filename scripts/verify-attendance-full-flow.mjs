@@ -1105,7 +1105,6 @@ async function run() {
         logInfo(`WARN: Admin section not ready, skipping retry assertions (${message})`)
       }
 
-      importSection = await selectAdminSection(page, adminSectionIds.import, labels.importHeading)
       const importSectionCount = await importSection.count()
       if (assertImportScalabilityHint && importSectionCount > 0) {
         await importSection.getByText(/Auto mode:\s*preview\s*>=\s*\d+\s*rows/i).first().waitFor({ timeout: timeoutMs })
