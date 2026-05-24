@@ -70,10 +70,10 @@ if (PHASE === 'seed_and_backend' && !BASE_ID_OVERRIDE) {
   console.error(
     '[d2-perf] BASE_ID required for seed_and_backend phase.\n' +
       'No DELETE /bases endpoint exists; per-run base creation would leave\n' +
-      '36 orphans after a full baseline. Create ONE reusable base before the\n' +
-      'first dispatch (e.g., POST /api/multitable/bases) and reuse its id\n' +
-      'across all dispatches via the BASE_ID env (or workflow base_id input /\n' +
-      'MULTITABLE_PERF_BASE_ID repo var). Sheets are still per-dispatch and\n' +
+      'many orphan bases across repeated dispatches. Create ONE reusable base\n' +
+      'before the first dispatch (e.g., POST /api/multitable/bases) and reuse\n' +
+      'its id across all dispatches via the BASE_ID env (or workflow base_id\n' +
+      'input / MULTITABLE_PERF_BASE_ID repo var). Sheets are still per-dispatch and\n' +
       'cleanly cascade-deleted via rollback.',
   )
   process.exit(1)
