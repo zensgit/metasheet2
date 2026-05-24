@@ -52,7 +52,7 @@ on:
         required: false
         default: ''
       base_id:
-        description: 'Existing multitable base id (REQUIRED — operator pre-creates ONE reusable base since no DELETE /bases endpoint exists; reuse across dispatches; defaults to MULTITABLE_PERF_BASE_ID var)'
+        description: 'Existing multitable base id (REQUIRED — operator pre-creates ONE reusable base since no DELETE /bases endpoint exists; reuse across all dispatches; defaults to MULTITABLE_PERF_BASE_ID var)'
         required: false
         default: ''
 
@@ -95,6 +95,25 @@ jobs:
       DEVICE_SCALE_FACTOR: '1'
       SCROLL_TARGET: 'bottom'
     steps:
+      - name: Normalize API_BASE / FE_BASE_URL once for both backend + frontend steps
+        # Same as multitable-perf-baseline.yml — strip /api and trailing slash so
+        # Playwright helpers do not produce /api/api/... URLs when operator
+        # enters API base with /api suffix.
+        run: |
+          set -euo pipefail
+          raw_api="${API_BASE:-}"
+          norm_api="${raw_api%/}"
+          norm_api="${norm_api%/api}"
+          echo "API_BASE=$norm_api" >> "$GITHUB_ENV"
+          echo "API_BASE_URL=$norm_api" >> "$GITHUB_ENV"
+
+          raw_fe="${FE_BASE_URL:-}"
+          norm_fe="${raw_fe%/}"
+          echo "FE_BASE_URL=$norm_fe" >> "$GITHUB_ENV"
+
+          echo "[normalize] API_BASE: '${raw_api}' → '${norm_api}'"
+          echo "[normalize] FE_BASE_URL: '${raw_fe}' → '${norm_fe}'"
+
       - name: Checkout
         uses: actions/checkout@v4
 

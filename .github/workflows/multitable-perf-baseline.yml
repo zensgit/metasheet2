@@ -5,8 +5,12 @@ name: Multitable D2 Perf Baseline
 # Playwright trace zip for a single (rows, metricProfile, scenario) tuple.
 #
 # Spec: docs/development/multitable-perf-gate-d2-design-20260524.md
-# Full baseline = 3 rows × 6 metricProfile × 2 scenario = 36 dispatches (use a
-# wrapper script invoking `gh workflow run` with different inputs).
+# v1 baseline = 3 rows × 2 metricProfile (mount + scroll) × 2 scenario =
+# 12 dispatches. edit / sort / filter / group profiles are scaffolded but
+# not implemented in v1 (hard-throw on invocation; removed from choice
+# options below); they land in a follow-up impl PR which will add the
+# remaining 24 dispatches to the full baseline. Use a wrapper script
+# invoking `gh workflow run` with different inputs across the 12 tuples.
 #
 # Discipline: workflow_dispatch ONLY (NO push/PR trigger) to keep perf cost
 # off the standard PR pipeline. Highscale (50k/100k) runs in a separate
@@ -50,7 +54,7 @@ on:
         required: false
         default: ''
       base_id:
-        description: 'Existing multitable base id (REQUIRED — operator pre-creates ONE reusable base since no DELETE /bases endpoint exists; reuse across all 36 dispatches; defaults to MULTITABLE_PERF_BASE_ID var)'
+        description: 'Existing multitable base id (REQUIRED — operator pre-creates ONE reusable base since no DELETE /bases endpoint exists; reuse across all dispatches; defaults to MULTITABLE_PERF_BASE_ID var)'
         required: false
         default: ''
 
@@ -98,6 +102,27 @@ jobs:
       DEVICE_SCALE_FACTOR: '1'
       SCROLL_TARGET: 'bottom'
     steps:
+      - name: Normalize API_BASE / FE_BASE_URL once for both backend + frontend steps
+        # API_BASE accepts host root with or without trailing /api (operator-friendly).
+        # Strip both /api and trailing slash, then export normalized values via
+        # $GITHUB_ENV so subsequent steps inherit consistent forms. Without this,
+        # if operator enters 'http://host/api', the Playwright helpers build URLs
+        # as `${API_BASE_URL}/api/health` → 'http://host/api/api/health' (broken).
+        run: |
+          set -euo pipefail
+          raw_api="${API_BASE:-}"
+          norm_api="${raw_api%/}"
+          norm_api="${norm_api%/api}"
+          echo "API_BASE=$norm_api" >> "$GITHUB_ENV"
+          echo "API_BASE_URL=$norm_api" >> "$GITHUB_ENV"
+
+          raw_fe="${FE_BASE_URL:-}"
+          norm_fe="${raw_fe%/}"
+          echo "FE_BASE_URL=$norm_fe" >> "$GITHUB_ENV"
+
+          echo "[normalize] API_BASE: '${raw_api}' → '${norm_api}'"
+          echo "[normalize] FE_BASE_URL: '${raw_fe}' → '${norm_fe}'"
+
       - name: Checkout
         uses: actions/checkout@v4
 
