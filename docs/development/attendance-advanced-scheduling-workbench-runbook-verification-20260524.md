@@ -101,6 +101,21 @@ This slice sits in the kernel-polish lane per memory
 It pairs with — but does not depend on — any future "advanced scheduling
 benchmark matrix" docs-only slice. The runbook is self-contained.
 
+## Codex review round 1 — corrections applied
+
+Round-1 Codex review (issuecomment-4527289086) returned `BLOCK` on three
+documentation-accuracy points, all addressed in the follow-up commit on
+this branch:
+
+| # | Codex finding | Fix applied | Grounding |
+| --- | --- | --- | --- |
+| 1 | "UI loads only on Refresh click" was reversed — the workbench actually auto-loads as part of the Admin Center batch data load | Runbook §1 / UI section rewritten: auto-fires via `loadAdvancedSchedulingWorkbench()` inside the `Promise.all` admin-data batch; button is **Reload workbench / 重载工作台** (not "Refresh") | `apps/web/src/views/AttendanceView.vue:16051` (Promise.all call) and `:4388` (button label) |
+| 2 | Table name `attendance_assignments` is wrong (3 occurrences in runbook); the real table is `attendance_shift_assignments` | All 3 occurrences corrected: §3.2 trigger, §3.4 trigger, §5 read-only list | `plugins/plugin-attendance/index.cjs` lines 10446, 10813, 25869, 25897, 25955, 26326, 26408, 26421, 26560, 26667 — all reference `attendance_shift_assignments` |
+| 3 | "token never on the command line" over-promised; `$(cat "$AUTH_TOKEN_FILE")` substitutes into curl argv | Runbook §6 setup rewritten with an explicit secret-hygiene contract: "not printed, not committed, only read from 0600 file"; argv caveat is called out; `curl -H @<header-file>` tighter variant offered as drop-in. The bullet list at the end of §6 also corrected to remove the "never on the command line" phrase | n/a (docs-only wording fix) |
+
+The fixes are docs-only and do not change the slice's scope, boundaries, or
+PR6-deferred posture. CI re-runs against the same path-filter subset.
+
 ## Not done in this slice (intentionally)
 
 - No code change.

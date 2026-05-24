@@ -14,9 +14,13 @@ advanced-scheduling write-path freeze, no write actions are exposed.
 
 `Admin Center → Attendance → Scheduling → Advanced scheduling`
 
-The section anchor is `attendance-admin-advanced-scheduling-workbench`. It
-loads automatically when the surrounding admin rail mounts; no fetch is fired
-unless the admin clicks **Refresh**.
+The section anchor is `attendance-admin-advanced-scheduling-workbench`. The
+workbench fetch fires automatically as part of the Admin Center's batch
+data load (`loadAdvancedSchedulingWorkbench()` is one of the `Promise.all`
+admin-data calls invoked when the admin view mounts or the admin rail
+reloads). The section itself exposes a **Reload workbench / 重载工作台**
+button (not "Refresh") for on-demand re-fetches; the same loader function
+backs both paths.
 
 ### Backend route
 
@@ -185,7 +189,7 @@ effective member rows in `attendance_schedule_group_members` for the range.
 
 **API message:** `Active shift or rotation assignments reference users without an effective schedule-group membership in this range.`
 
-**Triggers when:** users with active `attendance_assignments` or
+**Triggers when:** users with active `attendance_shift_assignments` or
 `attendance_rotation_assignments` rows in the range have no
 `attendance_schedule_group_members` row in the same range.
 
@@ -225,7 +229,7 @@ an ambiguous ownership signal.
 **API message:** `Users have both shift and rotation assignment rows in this range; effective-calendar resolution still owns day-level precedence.`
 
 **Triggers when:** the same user has at least one active row in BOTH
-`attendance_assignments` (shift) AND `attendance_rotation_assignments`
+`attendance_shift_assignments` (shift) AND `attendance_rotation_assignments`
 (rotation) overlapping the range.
 
 **Targets:** `userIds`.
@@ -276,8 +280,8 @@ this route, this UI, or this runbook:
 - **Read-only.** No row in `attendance_schedule_groups`,
   `attendance_schedule_group_members`, `attendance_scheduler_scopes`,
   `attendance_shifts`, `attendance_rotation_rules`,
-  `attendance_assignments`, or `attendance_rotation_assignments` is ever
-  inserted, updated, or deleted through this route.
+  `attendance_shift_assignments`, or `attendance_rotation_assignments` is
+  ever inserted, updated, or deleted through this route.
 - **Not a substitute for the effective-calendar resolver.** Day-level
   precedence (shift vs. rotation vs. override vs. holiday) is still owned by
   the existing `resolveEffectiveCalendar` path. The workbench reports
@@ -318,8 +322,23 @@ API_BASE="http://<host>:<port>"   # examples: http://23.254.236.11:8081 (prod)
                                   #           http://23.254.236.11:8082 (staging — uses a DIFFERENT JWT)
 ```
 
-The token value is never echoed to the terminal or written to files other
-than the local 0600 file.
+Secret-hygiene contract for the examples below:
+
+- The token is **not printed** to stdout, **not committed** to the repo,
+  and is **only read** from the local 0600 file at the moment the command
+  runs.
+- The token is **not used in shell history** because the shell substitutes
+  `$(cat "$AUTH_TOKEN_FILE")` at invocation time without echoing the
+  expansion. Operators should still scrub history (`history -c` /
+  `unset HISTFILE`) after a sensitive session.
+- Caveat: at invocation time the substituted token becomes part of the
+  `curl` process's argv and is briefly visible in `/proc/<pid>/cmdline`
+  to other processes running as the same OS user. For stricter isolation,
+  operators may substitute `curl -H @<header-file>` where `<header-file>`
+  is a 0600 file containing exactly `Authorization: Bearer <token>` on
+  one line — `curl` reads the header from the file and the token does
+  not enter argv. The runbook keeps `$(cat ...)` for readability; the
+  `@<header-file>` swap is a drop-in for tighter ops environments.
 
 ### Auth round-trip
 
@@ -409,8 +428,8 @@ curl -sS -o /dev/null -w "HTTP %{http_code}\n" \
 All examples above:
 
 - Use `GET` only.
-- Use `AUTH_TOKEN_FILE` indirection so the token value is never on the command line.
-- Print only status, summary, and diagnostic counts — never the raw body, never the token.
+- Use `AUTH_TOKEN_FILE` indirection so the token value is not printed, not committed, and only read from the local 0600 file at invocation time (per the secret-hygiene contract above; see that section for the argv caveat and the `-H @<header-file>` tighter variant).
+- Print only status, summary, and diagnostic counts — never the raw response body, and never the token value.
 - Are safe to run against production because no row is modified.
 
 ## 7. References
