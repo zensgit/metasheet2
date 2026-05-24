@@ -1,6 +1,7 @@
 # Multitable D2 大表性能基线门 — Scout & Design
 
 Date: 2026-05-24
+Revision: v2（post-review precision pass — triage 模式 + 绝对值/slope 主导 + black-box 立场，详见 §17 Changelog）
 Status: docs-only design（无产品代码改动）— 后续 perf-test impl PR 独立链节
 Branch: `docs/multitable-perf-gate-d2-scout-20260524`
 Anchors:
@@ -84,11 +85,15 @@ grep -R -E "performance\.mark|performance\.measure|requestAnimationFrame.*fps|pl
 # → 0 hits
 ```
 
-D2 perf-test PR 必须新增 frontend 测量层：
-- **Playwright tracing API** — `page.tracing.start({ screenshots: false, snapshots: false, sources: false })` 收 perf timeline
-- **PerformanceObserver** — `longtask` / `largest-contentful-paint` / `layout-shift`
-- **`performance.mark/measure`** — 在 grid mount/update/scroll/edit/sort/filter/group hook 处打桩
-- **Chrome DevTools Protocol via Playwright** — `Memory.getDOMCounters()` / `Performance.getMetrics()` 抓 DOM node count + JS heap
+**v1 立场：black-box measurement only** — D2 perf-test PR **不触碰** `apps/web/src/**` 任何产品代码。所有测量在浏览器外部 + 通过 Playwright `addInitScript` 注入测试侧脚本：
+
+- **Playwright context tracing** — `browserContext.tracing.start({ screenshots: false, snapshots: false, sources: false })` + `browserContext.tracing.stop({ path })` 收 timeline（注意：tracing 是 context-level API，不是 page-level）
+- **Chrome DevTools Protocol via Playwright** — `context.newCDPSession(page)` 后 `Memory.getDOMCounters()` / `Performance.getMetrics()` / `Performance.enable` 抓 DOM node count + JS heap
+- **PerformanceObserver（注入式）** — 通过 `addInitScript` 在浏览器上下文订阅 `longtask` / `largest-contentful-paint` / `layout-shift` / `paint` / `event`（PerformanceEventTiming）；脚本由测试 PR 提供，不进产品 bundle
+- **MutationObserver（注入式）** — 观察 grid DOM 节点增减、cell 内容变化（标识"cell-edit 完成"等事件），同 init script 注入
+- **`requestAnimationFrame` 时间差采样 FPS** — 注入测试侧 raf 循环采样、滚动驱动循环，非产品代码
+
+**v2 候选（**本 PR 显式不启**）**：若 v1 black-box 测得的事件粒度不足以定位 hook 层瓶颈（例如无法区分 `mount` vs `update` 内部阶段），可考虑在产品代码 `apps/web/src/multitable/**` 加 `performance.mark('multitable.grid.<hook>.start')` 命名 mark。该改动**触碰产品代码**，须 **separate kernel-polish opt-in**（与 §10 Path B、§11 K3 boundary 同级处理）。v1 不依赖此前置。
 
 ### 3.4 multitable bulk insert 入口（perf-test PR 待最终确认）
 
@@ -100,24 +105,24 @@ D2 perf-test PR 必须新增 frontend 测量层：
 
 | 层 | Metric | 何时是 discriminator | 工具 |
 |---|---|---|---|
-| Frontend mount | TTI after data arrives (ms) | CSS-virt 跳过 *之前* 的代价 | Playwright `page.evaluate` + `performance.mark` 在 `onMounted` |
-| Frontend scroll | scroll FPS p50/p95/min | CSS-virt 实力体现处 | rAF delta + scroll loop |
-| Frontend scroll | Long Task count + 总时长 | scripting bottleneck | PerformanceObserver `longtask` |
-| **Frontend memory** | **DOM node count @ mount vs scroll-bottom + delta** | **CSS-virt 盲点 — 主导信号** | CDP `DOM.getDocument` 计数 |
-| **Frontend memory** | **JS heap MB @ mount vs scroll-bottom + delta** | **CSS-virt 盲点 — 主导信号** | CDP `Performance.getMetrics` `JSHeapUsedSize` |
-| Frontend interact | cell-edit roundtrip (focus→keystroke→commit) p50/p95 ms | scripting hot path（非 paint）| `performance.measure` 跨 hook |
-| Frontend interact | sort apply latency (ms) | full-data re-sort scripting | `performance.measure` |
-| Frontend interact | filter apply latency (ms) | full-data re-filter scripting | `performance.measure` |
-| Frontend interact | group apply latency (ms) | groupedRows 计算 + 渲染 | `performance.measure` |
+| Frontend mount | TTI after data arrives (ms) | CSS-virt 跳过 *之前* 的代价 | 注入 MutationObserver 观察 grid root 首次完整 render；与 Playwright `waitForFunction` 联用 |
+| Frontend scroll | scroll FPS p50/p95/min | CSS-virt 实力体现处 | 注入 rAF 时间差采样 + 测试驱动 scroll loop |
+| Frontend scroll | Long Task count + 总时长 | scripting bottleneck | 注入 PerformanceObserver `longtask` |
+| **Frontend memory** | **DOM node count: afterMountMax / per10kSlope（绝对值与斜率，主导）+ delta（辅助）** | **CSS-virt 盲点 — 主导信号** | CDP `Memory.getDOMCounters` / `DOM.getDocument` 计数 |
+| **Frontend memory** | **JS heap MB: afterMountMax / per10kSlope（绝对值与斜率，主导）+ delta（辅助）** | **CSS-virt 盲点 — 主导信号** | CDP `Performance.getMetrics` `JSHeapUsedSize` |
+| Frontend interact | cell-edit roundtrip (focus→keystroke→commit) p50/p95 ms | scripting hot path（非 paint）| PerformanceEventTiming（input event）+ MutationObserver（cell DOM 提交完成时点）— 注入式 |
+| Frontend interact | sort apply latency (ms) | full-data re-sort scripting | 测试侧触发 sort 操作 → MutationObserver row order 变更完成 → 时间差 |
+| Frontend interact | filter apply latency (ms) | full-data re-filter scripting | 测试侧触发 filter → MutationObserver row count 稳定时点 → 时间差 |
+| Frontend interact | group apply latency (ms) | groupedRows 计算 + 渲染 | 测试侧触发 group → MutationObserver group header 出现 → 时间差 |
 | Backend insert | bulk-insert p50/p95/p99 ms（一次入 N 行）| attendance pattern 直接迁移 | hybrid 复用 attendance-perf.mjs |
 | Backend query | view-load latency at N rows (ms) | 数据进 frontend 之前的成本 | hybrid 复用 attendance-perf.mjs |
 | Backend query | group/filter applied at backend latency (ms) | server-side 优化 ROI 参考 | hybrid 复用 attendance-perf.mjs |
 
 **主导信号顺位**：
-1. **DOM node count delta + JS heap delta** — CSS-virt 盲点；这两个数决定 CSS-virt 是否足够
+1. **DOM node count `afterMountMax` + `per10kSlope`** + **JS heap `afterMountMax` + `per10kSlope`** — CSS-virt 盲点核心指标；CSS `content-visibility: auto` 跳过 paint/layout 但**不减少 DOM/heap 绝对值**，故必须看**绝对值与增长斜率**而非 scroll delta。delta 仅作辅助（可能接近零却说不明问题）
 2. scroll FPS p95 + Long Task count — 用户感知核心
-3. cell-edit / sort / filter / group apply latency — 交互连续性
-4. Backend insert/query — 后端瓶颈是否前置
+3. cell-edit / sort / filter / group apply latency — 交互连续性（client algorithm bound 信号）
+4. Backend insert/query — 后端瓶颈是否前置（backend-query bound 信号）
 
 ---
 
@@ -189,8 +194,8 @@ D2 perf-test PR 必须新增 frontend 测量层：
     "ttiMs": null,
     "scrollFps": { "p50": null, "p95": null, "min": null },
     "longTask": { "count": null, "totalMs": null },
-    "domNodes": { "afterMount": null, "afterScrollBottom": null, "delta": null },
-    "jsHeapMb": { "afterMount": null, "afterScrollBottom": null, "delta": null },
+    "domNodes": { "afterMount": null, "afterScrollBottom": null, "delta": null, "per10kSlope": null },
+    "jsHeapMb": { "afterMount": null, "afterScrollBottom": null, "delta": null, "per10kSlope": null },
     "editCellRoundtripMs": { "p50": null, "p95": null },
     "sortApplyMs": null,
     "filterApplyMs": null,
@@ -198,8 +203,25 @@ D2 perf-test PR 必须新增 frontend 测量层：
     "backendInsertMs": { "p50": null, "p95": null, "p99": null },
     "backendQueryMs": { "p50": null, "p95": null }
   },
-  "thresholds": { "ttiMs": null, "scrollFpsP95Min": null, "domNodesDeltaMax": null, "jsHeapMbDeltaMax": null },
-  "passFail": "TBD",
+  "thresholds": {
+    "ttiMs": null,
+    "scrollFpsP95Min": null,
+    "longTaskCountMax": null,
+    "longTaskTotalMsMax": null,
+    "domNodesAfterMountMax": null,
+    "domNodesPer10kSlopeMax": null,
+    "domNodesDeltaMax": null,
+    "jsHeapMbAfterMountMax": null,
+    "jsHeapMbPer10kSlopeMax": null,
+    "jsHeapMbDeltaMax": null,
+    "editCellRoundtripP95Max": null,
+    "sortApplyMax": null,
+    "filterApplyMax": null,
+    "groupApplyMax": null,
+    "backendInsertP95Max": null,
+    "backendQueryP95Max": null
+  },
+  "verdict": "TBD — A_CSS_sufficient | B_frontend_dom_memory_bound | C_backend_query_bound | D_client_algorithm_bound | E_yjs_sync_overhead_bound",
   "notes": []
 }
 ```
@@ -210,24 +232,60 @@ D2 perf-test PR 必须新增 frontend 测量层：
 
 ---
 
-## 7. 接受标准 — Decision branch（threshold 数值首跑后回填）
+## 7. 接受标准 — 4-way triage（threshold 数值首跑后回填）
 
-**「CSS-virt sufficient」当且仅当下列**全部**满足**（threshold X/Y/Z 待 perf-test PR 首跑后人工 review 锁定）：
+D2 gate 输出是一个**多路 triage**，不是 sufficient/insufficient 二分。失败可能来自 frontend DOM/memory、backend query、client 算法、Yjs sync overhead 中任意之一或叠加；不同失败模式对应不同后续 PR，把"任一不达标 → 必做 JS 虚拟化"是错误推论。
 
-1. `scrollFps.p95` ≥ X（候选 50 fps，需基线验证）
-2. `domNodes.delta` < Y（候选 10% of `afterMount`，即接近零 — `content-visibility` 不应增 DOM）
-3. `jsHeapMb.delta` < Z（候选 50 MB，需基线验证）
-4. `editCellRoundtripMs.p95` < W（候选 200ms，行业基线）
-5. `sortApplyMs` / `filterApplyMs` < V at N=50k（候选 1s，需基线验证）
+### 7.1 Triage 决策树（verdict 取值）
 
-**任一不满足 → "Needs JS virtualization"**，解锁 §9 #2 PR + 提供具体 ROI 论证（"虚拟化要打到这几个数才合理"）。
+| Verdict | 触发条件 | 对应后续 PR |
+|---|---|---|
+| **A_CSS_sufficient** | 所有 frontend + backend 指标均达标 | 取消 v2 §9 #2 — effort 转 #3 D3 permission matrix（节约 2-3 周）|
+| **B_frontend_dom_memory_bound** | DOM `afterMountMax` 或 `per10kSlope` 越线 ∨ JS heap `afterMountMax` 或 `per10kSlope` 越线 ∨ scroll FPS p95 越线 | 启 v2 §9 #2 grid virtualization PR — JS 虚拟化才能减少 DOM node 总数（CSS-virt 做不到）|
+| **C_backend_query_bound** | backend insert/query/group p95 超阈值 + frontend 指标合格 | 启独立 server-side optimization PR（分页 / server-side group / index 优化）；JS 虚拟化**不解此问题** |
+| **D_client_algorithm_bound** | sortApplyMs / filterApplyMs / groupApplyMs 越线 + DOM/heap 合格 + backend 合格 | 启独立 client-side 算法优化 PR（O(N²) → O(N log N)、web worker offload、stable sort 等）；JS 虚拟化**不解此问题** |
+| **E_yjs_sync_overhead_bound** | scroll/edit 在 multi-client 场景越线但 single client 合格 | 启独立 realtime perf PR（v1 不含 multi-client metric profile，verdict E **本 PR 不输出**，仅声明分类位）|
 
-数值锁定流程：
-1. perf-test PR 实施 metric collection
-2. 三档 rows × 6 metricProfile = 18 baseline run
+A/B/C/D **互斥**或**可叠加**（B+C / B+D / C+D 等）；首跑 verdict 由人工 review JSON metrics 按上述决策树打标，后续 trend-report 可自动分类。
+
+### 7.2 阈值清单（首跑后回填）
+
+**frontend DOM/memory（绝对值 + slope 主导；delta 辅助）**：
+
+| Field | 含义 | 候选起点（首跑前 hallucination；锁定值由 baseline review 定）|
+|---|---|---|
+| `domNodes.afterMountMax` @ N=10k | mount 完成后 DOM 总数上限 | TBD |
+| `domNodes.afterMountMax` @ N=50k | | TBD |
+| `domNodes.afterMountMax` @ N=100k | | TBD |
+| `domNodes.per10kSlope` | 每增 10k 行 DOM 增长上限 | TBD（候选：< 1.2× 体现 CSS-virt 在 mount 阶段未线性炸开）|
+| `jsHeapMb.afterMountMax` @ N=10k / 50k / 100k | | TBD |
+| `jsHeapMb.per10kSlope` | 每增 10k 行 heap 增长上限 | TBD |
+| `domNodes.delta` / `jsHeapMb.delta` | scroll 前后差（**辅助**）| 接近零 ≠ 通过；与 afterMount 绝对值联合判断（CSS-virt 下 delta 天然小但 mount 已经爆）|
+
+**frontend scroll / interact**：
+
+| Field | 含义 | 候选 |
+|---|---|---|
+| `scrollFps.p95` | scroll 时 95th 帧率下限 | ≥ 50 fps（行业 baseline）|
+| `longTask.count` | longtask 数上限 | < 5（候选）|
+| `longTask.totalMs` | longtask 总时长上限 | < 500ms（候选）|
+| `editCellRoundtripMs.p95` | cell 编辑端到端 95th | < 200ms（候选）|
+| `sortApplyMs` / `filterApplyMs` / `groupApplyMs` @ N=50k | full-data 操作完成上限 | < 1000ms（候选）|
+
+**backend**：
+
+| Field | 含义 | 候选 |
+|---|---|---|
+| `backendInsertMs.p95` | bulk insert 95th | attendance pattern 同档（50k async 内 60s）|
+| `backendQueryMs.p95` | view-load 95th | < 500ms（体感门槛）|
+
+### 7.3 阈值锁定流程
+
+1. perf-test PR 实施 metric collection（black-box，§3.3 v1 立场）
+2. 三档 rows × 6 metricProfile × 2 scenario（primary/expanded）= **36 baseline run**
 3. 数据进 trend-report，人工 review
-4. 在新的 verification MD 里 propose threshold X/Y/Z/W/V
-5. Threshold 锁定 = 后续 CI gate 比较基准
+4. 在新的 verification MD 里 propose 全部 thresholds → 锁定
+5. Threshold 锁定后 → CI gate 比较基准 + verdict 自动分类（A/B/C/D 决定下一 PR 路径，E 暂悬置）
 
 ---
 
@@ -340,11 +398,23 @@ D2 perf-test PR 必须新增 frontend 测量层：
 | 输出格式 | JSON schema 锁定（§6）| 后续 #2 PR 须能机械化消费 ROI 证据 |
 | 场景 | primary 主 + expanded ref | 主决策路径单一不被次要变量噪音掩盖 |
 | Seed 路径 | Path A 优先，Path B 仅在阻塞时启 + 独立 opt-in | K3 stage-1 lock |
-| 主导信号 | DOM node count delta + JS heap delta | CSS-virt 盲点 — advisor 关键洞察 |
+| 主导信号 | DOM node count `afterMountMax` + `per10kSlope` + JS heap `afterMountMax` + `per10kSlope`；delta 辅助 | CSS `content-visibility` 跳 paint/layout 但不减 DOM/heap 绝对值；只看 delta 会漏掉 mount 阶段已爆的关键问题 |
+| Triage 模式 | 4-way A/B/C/D + E（multi-client 暂悬）| 失败模式 ≠ "必做 JS 虚拟化"——可能是 backend query / client 算法 / Yjs 等；二分决策会让下一 PR 跑偏 |
+| 测量立场 | v1 black-box only（Playwright + CDP + injected PerformanceObserver/MutationObserver/raf）| 不触碰产品代码；`performance.mark` 注入命名 mark 留 v2 separate opt-in |
 
 ---
 
 ## 17. Changelog
+
+### v2 (2026-05-24) — Post-review precision pass（push 前）
+
+3 个 Should-Fix finding 修正：
+
+- **§7 二分 → 4-way triage**：原 "任一不达标 → Needs JS virtualization" 是错误推论；失败可能源自 backend query / client 算法 / Yjs sync 等，JS 虚拟化只解 frontend DOM-memory bound 一类。改为 A_CSS_sufficient / B_frontend_dom_memory_bound / C_backend_query_bound / D_client_algorithm_bound / E_yjs_sync_overhead_bound 5 类 verdict（E 本 PR 仅声明分类位）。
+- **§4 / §6 / §7 阈值结构修正**：原以 `domNodes.delta` / `jsHeapMb.delta` 为主导是错觉——CSS `content-visibility: auto` 跳 paint/layout 但不减 DOM/heap 绝对值，scroll 前后 delta 可能接近零却 mount 已经爆。改为 `afterMountMax` + `per10kSlope` 为主导，delta 仅辅助。JSON schema metrics + thresholds 同步扩展。
+- **§3.3 black-box 立场 + tracing API 修正**：原写 `page.tracing.start` 是错误 API（Playwright tracing 是 `browserContext.tracing.start`）；原文又提到在 grid hook 加 `performance.mark/measure` 会触碰 `apps/web/src/**` 与"零产品代码"口径冲突。改为明确 v1 black-box only（Playwright + CDP + 注入 PerformanceObserver/MutationObserver/raf），产品代码命名 mark 留 v2 separate opt-in。同步修正 §4 metric matrix 工具列 4 处 `performance.mark/measure` 表述。
+
+旁路更新：§16 决策摘要补 Triage 模式 + 测量立场两行；§6 JSON schema `passFail` 字段替换为 `verdict` 字段（5 类 enum）；JSON metrics 加 `per10kSlope` 字段。
 
 ### v1 (2026-05-24) — Initial scout + design
 - 关键 pivot：发现 `content-visibility: auto` 已在 line 606 — benchmark v1/v2 "无虚拟化"假设需修正
