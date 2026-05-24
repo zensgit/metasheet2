@@ -64,9 +64,14 @@ gh variable list --repo zensgit/metasheet2 | grep MULTITABLE_PERF_
 **Token lifecycle**：runbook 全程通过 shell session 持有 `TOKEN` / `API_BASE` / `BASE_ID` env vars（不导出为脚本变量、不写文件、不进 history）。所有 step 用同一 session，§8 cleanup 时 `unset`。
 
 ```bash
-# 1) 用 read -rsp 输入 JWT — 无回显、不入 shell history、不留剪贴板
-read -rsp 'Staging admin JWT: ' TOKEN
-echo
+# 1) 用 stty + IFS read 输入 JWT — 无回显、不入 shell history、不留剪贴板
+#    portable across bash + zsh（read -rsp 是 bash 特性，zsh 行为不一致；
+#    这种 stty-based 方案在两 shell 下都按预期工作）。
+printf 'Staging admin JWT: '
+stty -echo
+IFS= read -r TOKEN
+stty echo
+printf '\n'
 export TOKEN
 
 # 2) 设 staging endpoints + 本地归一化（与 workflow yml 同款，strip 尾部 / 和 /api）
@@ -442,25 +447,36 @@ grep -E "^${WF},${RETRY_ROWS},${RETRY_MP},${RETRY_SC}," "$ROOT/dispatched-run-id
 
 ```bash
 # $ROOT 从 §5.1 继承（同一 shell session）
-test -f "$ROOT/dispatched-run-ids.txt" || { echo "::error::missing $ROOT/dispatched-run-ids.txt — re-trigger §5.1 first"; }
+test -f "$ROOT/dispatched-run-ids.txt" || {
+  echo "::error::missing $ROOT/dispatched-run-ids.txt — re-trigger §5.1 first" >&2
+  exit 1
+}
 
 REPO="zensgit/metasheet2"
 
-# Pre-flight: 验证 captured runs 数量 + 所有 run_id 非空
-captured_count=$(grep -v '^#' "$ROOT/dispatched-run-ids.txt" | grep -c -v ',$' || true)
+# Pre-flight #1: 验证 captured run_id 数量 — **必须用 awk 检查 CSV 第 5 列非空**
+# v3 CSV 是 6 列（wf,rows,mp,sc,run_id,dispatch_started），空 run_id 行形如
+# 'wf,10000,mount,primary,,2026-05-24T...' — 行尾是 dispatch_started 不是空，
+# 所以 `grep -c -v ',$'` 会把空 run_id 行误算为已捕获 → 必须用 awk 检 $5。
+captured_count=$(awk -F, 'NR > 1 && $5 != "" { count++ } END { print count + 0 }' "$ROOT/dispatched-run-ids.txt")
 echo "[verify] captured run IDs: ${captured_count}/12"
 if [[ "$captured_count" -lt 12 ]]; then
-  echo "::error::dispatched-run-ids.txt 缺 run_id 行 — 用 'gh run list ... --created \"YYYY-MM-DDT...\"' 手动补回填后再继续"
+  echo "::error::dispatched-run-ids.txt 缺 run_id 行（第 5 列空）— 用 'gh run list ... --created \">$<行内 dispatch_started_utc>\"' 手动补查后回填那一行" >&2
+  awk -F, 'NR > 1 && $5 == "" { print "  missing: " $0 }' "$ROOT/dispatched-run-ids.txt" >&2
   exit 1
 fi
 
-# Pre-flight: 验证 captured runs 都已 completed + success
+# Pre-flight #2: 验证 captured runs 都已 completed + success；run_id 空行硬 guard
 while IFS=, read -r wf rows mp sc run_id dispatch_started; do
   [[ "$wf" == \#* || -z "$wf" ]] && continue
+  [[ -n "$run_id" ]] || {
+    echo "::error::missing run_id for $wf $rows $mp $sc dispatch_started=$dispatch_started" >&2
+    exit 1
+  }
   status=$(gh run view "$run_id" --repo "$REPO" --json status,conclusion --jq '.status + "/" + .conclusion')
   echo "[check] $wf rows=$rows mp=$mp sc=$sc run=$run_id status=$status"
   if [[ "$status" != "completed/success" ]]; then
-    echo "::error::run $run_id not completed/success (got: $status). Wait or retry."
+    echo "::error::run $run_id not completed/success (got: $status). Wait or retry." >&2
     exit 1
   fi
 done < "$ROOT/dispatched-run-ids.txt"
@@ -468,6 +484,10 @@ done < "$ROOT/dispatched-run-ids.txt"
 # 下载每个 captured run 的 artifact，按 (rows, profile, scenario) 命名子目录
 while IFS=, read -r wf rows mp sc run_id dispatch_started; do
   [[ "$wf" == \#* || -z "$wf" ]] && continue
+  [[ -n "$run_id" ]] || {
+    echo "::error::missing run_id for $wf $rows $mp $sc — should have been caught by Pre-flight #1; re-run §6.1 from start" >&2
+    exit 1
+  }
   dir="$ROOT/run-${rows}-${mp}-${sc}-${run_id}"
   echo "[download] run_id=$run_id → $dir"
   gh run download "$run_id" --repo "$REPO" --dir "$dir"
@@ -637,6 +657,12 @@ unset TOKEN API_BASE BASE_ID ROOT
 ---
 
 ## 11. Changelog
+
+### v4 (2026-05-24) — Pre-push precision pass 3 — 2 Medium + 1 Low fixes
+
+- **(Medium) §6.1 captured_count 改 awk 检查 CSV 第 5 列非空**：v3 用 `grep -c -v ',$'` 检查"行尾非逗号"，但 v3 CSV 是 6 列（`wf,rows,mp,sc,run_id,dispatch_started_utc`）— 空 run_id 行形如 `wf,10000,mount,primary,,2026-05-24T...`，行尾是 dispatch_started 不是空，所以 grep 误算为已捕获 → 空 run_id 漏过第一道门。v4 改 `awk -F, 'NR>1 && $5 != "" { count++ }'` 精确检查第 5 列；下载 while-loop 加 `[[ -n "$run_id" ]] || exit 1` 第二道 guard。失败时 awk 同时打印缺失行帮 operator 定位。
+- **(Medium) §2 token 输入 portable 化 zsh + bash 通用**：v3 用 `read -rsp` 是 bash 特性，zsh 下行为不一致（zsh 的 `read` 不接 `-s -p` 组合）。v4 改 `stty -echo + IFS= read -r TOKEN + stty echo` 在两个 shell 下都按预期无回显地读 token。
+- **(Low) §6.1 missing-file guard 加 exit 1**：v3 缺失 `$ROOT/dispatched-run-ids.txt` 时只 echo 不退出，会让后续 awk/while 二级错误一串。v4 改为 `{ echo "::error::..." >&2; exit 1 }`。所有错误输出也统一重定向到 stderr (`>&2`)。
 
 ### v3 (2026-05-24) — Pre-push precision pass 2 — 3 finding fixes + 1 nit
 
