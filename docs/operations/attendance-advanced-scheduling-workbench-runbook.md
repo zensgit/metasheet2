@@ -265,7 +265,7 @@ When the workbench surfaces non-zero diagnostics, follow this sequence:
 3. **Read the aggregate metrics.** Compare `summary.shiftAssignments` to `sampling.shiftAssignments.total` to confirm the aggregate matches what you expect for the org. A large mismatch with previous days indicates either truncation or a real data shift.
 4. **Walk the diagnostics list top-to-bottom.** Each entry includes `count` and either `userIds` or `scheduleGroupIds`. Group entries by code first (the five codes from §3), then by severity (`warning` > `info`).
 5. **Remediate via the matching admin section.** Each diagnostic in §3 points to a specific `Admin Center` section. Do not edit DB rows directly; use the existing admin UI. The workbench itself does not provide edit affordances.
-6. **Re-run the workbench.** Click **Refresh** in the UI or re-issue the GET to confirm the diagnostic has cleared.
+6. **Re-run the workbench.** Click **Reload workbench / 重载工作台** in the UI or re-issue the GET to confirm the diagnostic has cleared.
 
 If multiple diagnostics target the same user or group, address the
 ownership-shaping diagnostic first (§3.1 → §3.2 → §3.5) before the
