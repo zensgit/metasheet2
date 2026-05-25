@@ -288,6 +288,29 @@ async function testK3WebApiAdapter() {
   assert.equal(preview.metadata.autoSubmit, true)
   assert.equal(preview.metadata.autoAudit, true)
 
+  const referencePreview = await adapter.previewUpsert({
+    object: 'material',
+    records: [
+      {
+        FNumber: 'MAT-REF-001',
+        FName: 'Reference material',
+        FUnitGroupID: { FNumber: 'UG-PCS', FName: 'Pieces' },
+        FBaseUnitID: 'PCS',
+        FAcctID: '1405',
+      },
+    ],
+    keyFields: ['FNumber'],
+  })
+  assert.deepEqual(referencePreview.records[0].body, {
+    Data: {
+      FNumber: 'MAT-REF-001',
+      FName: 'Reference material',
+      FUnitGroupID: { FNumber: 'UG-PCS', FName: 'Pieces' },
+      FBaseUnitID: { FNumber: 'PCS' },
+      FAcctID: { FNumber: '1405' },
+    },
+  }, 'material reference fields preserve object values and wrap scalar values')
+
   const upsert = await adapter.upsert({
     object: 'material',
     records: [

@@ -1122,7 +1122,7 @@ async function testTemplatePreviewRoute() {
         schema: [
           { name: 'FNumber', label: 'Material code', type: 'string', required: true },
           { name: 'FName', label: 'Material name', type: 'string', required: true },
-          { name: 'FBaseUnitID', label: 'Base unit', type: 'string' },
+          { name: 'FBaseUnitID', label: 'Base unit', type: 'reference', reference: { identifier: 'FNumber' } },
           { name: 'FQty', label: 'Quantity', type: 'number' },
         ],
       },
@@ -1134,7 +1134,7 @@ async function testTemplatePreviewRoute() {
     Data: {
       FNumber: 'MAT-001',
       FName: 'Bolt',
-      FBaseUnitID: 'Pcs',
+      FBaseUnitID: { FNumber: 'Pcs' },
       FQty: 2,
     },
   })

@@ -2,6 +2,8 @@
 
 const K3_WISE_DOCUMENT_TEMPLATE_VERSION = '2026.05.v1'
 
+const K3_REFERENCE_BY_NUMBER = { identifier: 'FNumber' }
+
 const MATERIAL_FIELD_MAPPINGS = [
   {
     sourceField: 'code',
@@ -103,7 +105,20 @@ const K3_WISE_DOCUMENT_TEMPLATES = {
       { name: 'FNumber', label: 'Material code', type: 'string', required: true },
       { name: 'FName', label: 'Material name', type: 'string', required: true },
       { name: 'FModel', label: 'Specification', type: 'string' },
-      { name: 'FBaseUnitID', label: 'Base unit', type: 'string' },
+      { name: 'FUnitGroupID', label: 'Unit group', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FBaseUnitID', label: 'Base unit', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FOrderUnitID', label: 'Order unit', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FSaleUnitID', label: 'Sales unit', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FProductUnitID', label: 'Production unit', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FStoreUnitID', label: 'Inventory unit', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FAcctID', label: 'Inventory account', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FSaleAcctID', label: 'Sales account', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FCostAcctID', label: 'Cost account', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FCheckCycle', label: 'Check cycle', type: 'number' },
+      { name: 'FTrack', label: 'Track policy', type: 'string' },
+      { name: 'FBatChangeEconomy', label: 'Batch change economy', type: 'number' },
+      { name: 'FStdBatchQty', label: 'Standard batch quantity', type: 'number' },
+      { name: 'FKanBanCapability', label: 'Kanban capability', type: 'number' },
     ],
     sampleSource: {
       code: 'MAT-001',
