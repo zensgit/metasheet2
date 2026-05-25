@@ -182,6 +182,7 @@ function buildUnmatchedTargetErrorPayload(error = {}) {
     key: errorKey(error) || null,
     code: error.code || null,
     message: error.message || null,
+    responseSummary: error.responseSummary || null,
   }
 }
 
@@ -515,6 +516,7 @@ function createPipelineRunner(deps = {}) {
       let lastSuccessfulWatermark = null
       let exitedNormally = false
       const erpFeedback = []
+      const targetWriteSummaries = []
       let remainingDryRunSamples = dryRun && Number.isInteger(input.sampleLimit) && input.sampleLimit > 0
         ? input.sampleLimit
         : null
@@ -556,6 +558,14 @@ function createPipelineRunner(deps = {}) {
             keyFields: ['_integration_idempotency_key'],
             options: resolveTargetOptions(context.pipeline),
           }), cleanRecords)
+          if (writeResult.metadata && Array.isArray(writeResult.metadata.businessResponses)) {
+            targetWriteSummaries.push(...writeResult.metadata.businessResponses.map((summary) => sanitizeIntegrationPayload(summary, {
+              maxDepth: 4,
+              maxArrayItems: 20,
+              maxStringLength: 500,
+              maxBytes: 12000,
+            })))
+          }
           metrics.rowsWritten += writeResult.written || 0
           metrics.rowsFailed += writeResult.failed || 0
           const targetErrors = writeResult.errors || []
@@ -634,6 +644,9 @@ function createPipelineRunner(deps = {}) {
             watermarkAdvanced: !dryRun && metrics.rowsFailed === 0 && Boolean(lastSuccessfulWatermark),
             nextCursor: cursor,
             erpFeedback,
+            ...(targetWriteSummaries.length > 0 && {
+              targetWriteSummaries: targetWriteSummaries.slice(0, 50),
+            }),
             maxPagesReached,
             pagesProcessed: page,
           },

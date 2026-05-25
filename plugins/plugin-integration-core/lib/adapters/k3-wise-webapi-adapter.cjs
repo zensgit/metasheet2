@@ -121,6 +121,145 @@ function firstDefined(...values) {
   return undefined
 }
 
+function normalizeBusinessBoolean(value) {
+  if (value === undefined || value === null || value === '') return null
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') {
+    if (value === 1) return true
+    if (value === 0) return false
+    return null
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (normalized.length === 0) return null
+    if (['true', '1', 'yes', 'y', 'success', 'successful', 'ok', '是', '成功'].includes(normalized)) return true
+    if (['false', '0', 'no', 'n', 'fail', 'failed', 'faild', 'failure', 'error', '否', '失败', '错误'].includes(normalized)) return false
+  }
+  return null
+}
+
+function businessTextIndicatesFailure(value) {
+  if (typeof value !== 'string' || value.trim().length === 0) return false
+  return /\b(faild|failed|failure|error|invalid|denied|not\s+exist|not\s+found|no\s+access)\b/i.test(value) ||
+    /失败|错误|不存在|无权限|无权|非法|无效/.test(value)
+}
+
+function getStatusCode(data) {
+  return toPositiveNumber(firstDefined(getPath(data, 'StatusCode'), getPath(data, 'statusCode')))
+}
+
+function getDataCode(data) {
+  return firstDefined(getPath(data, 'Data.Code'), getPath(data, 'data.code'))
+}
+
+function getSuccessEntityCount(data) {
+  const successEntities = firstDefined(
+    getPath(data, 'Result.ResponseStatus.SuccessEntitys'),
+    getPath(data, 'Result.ResponseStatus.SuccessEntities'),
+    getPath(data, 'Data.SuccessEntitys'),
+    getPath(data, 'Data.SuccessEntities'),
+  )
+  return Array.isArray(successEntities) ? successEntities.length : 0
+}
+
+function businessRowMessage(row) {
+  return firstDefined(
+    getPath(row, 'FMessage'),
+    getPath(row, 'Message'),
+    getPath(row, 'message'),
+    getPath(row, 'ErrorMessage'),
+    getPath(row, 'errorMessage'),
+    getPath(row, 'FErrMessage'),
+    getPath(row, 'ErrMessage'),
+  )
+}
+
+function businessRowStatus(row) {
+  return normalizeBusinessBoolean(firstDefined(
+    getPath(row, 'FStatus'),
+    getPath(row, 'fStatus'),
+    getPath(row, 'status'),
+    getPath(row, 'Status'),
+    getPath(row, 'success'),
+    getPath(row, 'Success'),
+    getPath(row, 'IsSuccess'),
+    getPath(row, 'isSuccess'),
+  ))
+}
+
+function isMeaningfulIdentifier(value) {
+  if (value === undefined || value === null || value === '') return false
+  if (typeof value === 'number') return Number.isFinite(value) && value > 0
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    return normalized.length > 0 && !['0', 'null', 'undefined', 'none'].includes(normalized)
+  }
+  return true
+}
+
+function businessRowHasIdentifier(row) {
+  return isMeaningfulIdentifier(firstDefined(
+    getPath(row, 'FItemID'),
+    getPath(row, 'FItemId'),
+    getPath(row, 'FId'),
+    getPath(row, 'FID'),
+    getPath(row, 'Id'),
+    getPath(row, 'id'),
+    getPath(row, 'Number'),
+    getPath(row, 'FNumber'),
+  ))
+}
+
+function extractBusinessRows(data) {
+  const rows = []
+  const candidates = [
+    getPath(data, 'Data'),
+    getPath(data, 'data'),
+    getPath(data, 'Result.Data'),
+    getPath(data, 'Result.ResponseStatus.SuccessEntitys'),
+    getPath(data, 'Result.ResponseStatus.SuccessEntities'),
+  ]
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) {
+      rows.push(...candidate.filter(isPlainObject))
+    } else if (isPlainObject(candidate) && (
+      businessRowStatus(candidate) !== null ||
+      businessRowMessage(candidate) !== undefined ||
+      businessRowHasIdentifier(candidate)
+    )) {
+      rows.push(candidate)
+    }
+  }
+  return rows
+}
+
+function hasExplicitBusinessFailure(data) {
+  const dataCode = getDataCode(data)
+  if (typeof dataCode === 'string' && ['N', 'NO', 'FALSE', 'FAILED', 'FAILD', 'ERROR'].includes(dataCode.trim().toUpperCase())) return true
+  const responseSuccess = normalizeBusinessBoolean(getPath(data, 'Result.ResponseStatus.IsSuccess'))
+  if (responseSuccess === false) return true
+  for (const row of extractBusinessRows(data)) {
+    if (businessRowStatus(row) === false) return true
+    if (businessTextIndicatesFailure(businessRowMessage(row))) return true
+  }
+  return businessTextIndicatesFailure(firstDefined(getPath(data, 'Message'), getPath(data, 'message')))
+}
+
+function hasExplicitBusinessSuccess(data) {
+  const dataCode = getDataCode(data)
+  if (typeof dataCode === 'string' && ['Y', 'YES', 'TRUE', 'SUCCESS', 'OK'].includes(dataCode.trim().toUpperCase())) return true
+  const candidates = [
+    getPath(data, 'success'),
+    getPath(data, 'ok'),
+    getPath(data, 'Success'),
+    getPath(data, 'IsSuccess'),
+    getPath(data, 'Result.ResponseStatus.IsSuccess'),
+  ]
+  if (candidates.some((candidate) => normalizeBusinessBoolean(candidate) === true)) return true
+  if (getSuccessEntityCount(data) > 0) return true
+  return extractBusinessRows(data).some((row) => businessRowStatus(row) === true && businessRowHasIdentifier(row))
+}
+
 // Tri-state coercion for autoSubmit / autoAudit decision logic.
 // Returns true / false for any boolean-like input, or null when the field is
 // truly unset (undefined / null / ""). The decision logic at upsert-time uses
@@ -281,29 +420,30 @@ function buildLifecycleBody(record, request, objectConfig, operation) {
 }
 
 function businessSuccess(data, config) {
+  if (hasExplicitBusinessFailure(data)) return false
   if (config.successPath) return Boolean(getPath(data, config.successPath))
-  const statusCode = toPositiveNumber(firstDefined(getPath(data, 'StatusCode'), getPath(data, 'statusCode')))
-  const dataCode = firstDefined(getPath(data, 'Data.Code'), getPath(data, 'data.code'))
-  if (typeof dataCode === 'string' && ['N', 'NO', 'FALSE', 'FAILED', 'ERROR'].includes(dataCode.trim().toUpperCase())) return false
+  const statusCode = getStatusCode(data)
+  const dataCode = getDataCode(data)
   if (typeof dataCode === 'string' && ['Y', 'YES', 'TRUE', 'SUCCESS', 'OK'].includes(dataCode.trim().toUpperCase())) return true
   if (statusCode !== null) return statusCode >= 200 && statusCode < 300
-  const candidates = [
-    getPath(data, 'success'),
-    getPath(data, 'ok'),
-    getPath(data, 'Success'),
-    getPath(data, 'IsSuccess'),
-    getPath(data, 'Result.ResponseStatus.IsSuccess'),
-  ]
-  for (const candidate of candidates) {
-    if (candidate === true || candidate === 'true' || candidate === 1 || candidate === '1') return true
-    if (candidate === false || candidate === 'false' || candidate === 0 || candidate === '0') return false
-  }
+  if (hasExplicitBusinessSuccess(data)) return true
   return false
+}
+
+function saveBusinessSuccess(data, config) {
+  if (hasExplicitBusinessFailure(data)) return false
+  if (config.saveSuccessPath) return Boolean(getPath(data, config.saveSuccessPath))
+  if (config.successPath) return Boolean(getPath(data, config.successPath))
+  return hasExplicitBusinessSuccess(data)
 }
 
 function responseMessage(data, config, fallback = 'K3 WISE WebAPI business response failed') {
   return firstDefined(
     config.messagePath ? getPath(data, config.messagePath) : undefined,
+    getPath(data, 'Data.0.FMessage'),
+    getPath(data, 'Data.0.Message'),
+    getPath(data, 'Data.0.ErrorMessage'),
+    getPath(data, 'Data.0.FErrMessage'),
     getPath(data, 'message'),
     getPath(data, 'Message'),
     getPath(data, 'error'),
@@ -320,11 +460,31 @@ function responseCode(data, config, fallback = 'OK') {
     getPath(data, 'Code'),
     getPath(data, 'errorCode'),
     getPath(data, 'ErrorCode'),
+    getPath(data, 'Data.0.Code'),
+    getPath(data, 'Data.0.ErrorCode'),
     getPath(data, 'StatusCode'),
     getPath(data, 'Data.Code'),
     getPath(data, 'Result.ResponseStatus.ErrorCode'),
     fallback,
   )
+}
+
+function responseFailureCode(data, config, fallback) {
+  const explicit = firstDefined(
+    config.responseCodePath ? getPath(data, config.responseCodePath) : undefined,
+    getPath(data, 'code'),
+    getPath(data, 'Code'),
+    getPath(data, 'errorCode'),
+    getPath(data, 'ErrorCode'),
+    getPath(data, 'Data.0.Code'),
+    getPath(data, 'Data.0.ErrorCode'),
+    getPath(data, 'Data.Code'),
+    getPath(data, 'Result.ResponseStatus.ErrorCode'),
+  )
+  if (explicit !== undefined && explicit !== null && explicit !== '') return explicit
+  const statusCode = getStatusCode(data)
+  if (statusCode !== null && (statusCode < 200 || statusCode >= 300)) return statusCode
+  return fallback
 }
 
 function responseBillNo(data, config) {
@@ -335,24 +495,54 @@ function responseBillNo(data, config) {
     getPath(data, 'number'),
     getPath(data, 'Number'),
     getPath(data, 'Data.FBillNo'),
+    getPath(data, 'Data.0.FBillNo'),
     getPath(data, 'Data.FNumber'),
+    getPath(data, 'Data.0.FNumber'),
     getPath(data, 'Result.Number'),
     getPath(data, 'Result.ResponseStatus.SuccessEntitys.0.Number'),
   )
 }
 
 function responseExternalId(data, config) {
-  return firstDefined(
+  const candidates = [
     config.externalIdPath ? getPath(data, config.externalIdPath) : undefined,
     getPath(data, 'externalId'),
     getPath(data, 'id'),
     getPath(data, 'Id'),
     getPath(data, 'FItemID'),
     getPath(data, 'Data.FItemID'),
+    getPath(data, 'Data.0.FItemID'),
     getPath(data, 'Data.Id'),
+    getPath(data, 'Data.0.Id'),
     getPath(data, 'Result.Id'),
     getPath(data, 'Result.ResponseStatus.SuccessEntitys.0.Id'),
-  )
+  ]
+  return candidates.find(isMeaningfulIdentifier)
+}
+
+function createBusinessResponseSummary(data, config, { operation, success }) {
+  const rows = extractBusinessRows(data)
+  const rowStatuses = rows.map((row) => businessRowStatus(row)).filter((value) => value !== null)
+  const failedRows = rowStatuses.filter((value) => value === false).length
+  const successfulRows = rowStatuses.filter((value) => value === true).length
+  const externalId = responseExternalId(data, config)
+  const billNo = responseBillNo(data, config)
+  const message = responseMessage(data, config, null)
+  return {
+    operation,
+    success: Boolean(success),
+    envelopeStatusCode: firstDefined(getPath(data, 'StatusCode'), getPath(data, 'statusCode'), null),
+    envelopeMessagePresent: firstDefined(getPath(data, 'Message'), getPath(data, 'message')) !== undefined,
+    dataCode: firstDefined(getPath(data, 'Data.Code'), getPath(data, 'data.code'), null),
+    responseCode: responseCode(data, config, null),
+    responseMessagePresent: message !== undefined && message !== null && message !== '',
+    rowCount: rows.length,
+    successfulRowCount: successfulRows,
+    failedRowCount: failedRows,
+    successEntityCount: getSuccessEntityCount(data),
+    externalIdPresent: isMeaningfulIdentifier(externalId),
+    billNoPresent: isMeaningfulIdentifier(billNo),
+  }
 }
 
 function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logger } = {}) {
@@ -635,6 +825,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     const results = []
     const errors = []
     const raw = []
+    const businessResponses = []
 
     for (let index = 0; index < request.records.length; index += 1) {
       const record = request.records[index]
@@ -646,11 +837,18 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
           headers: authContext.headers,
           body: buildSaveBody(record, request, objectConfig),
         })
-        raw.push({ index, operation: 'save', body: save.data })
-        if (!businessSuccess(save.data, config)) {
+        const saveSucceeded = saveBusinessSuccess(save.data, config)
+        const saveSummary = createBusinessResponseSummary(save.data, config, {
+          operation: 'save',
+          success: saveSucceeded,
+        })
+        raw.push({ index, operation: 'save', body: save.data, summary: saveSummary })
+        businessResponses.push({ index, object: request.object, ...saveSummary })
+        if (!saveSucceeded) {
           throw new K3WiseWebApiAdapterError(String(responseMessage(save.data, config)), {
-            code: responseCode(save.data, config, 'K3_WISE_SAVE_FAILED'),
+            code: responseFailureCode(save.data, config, 'K3_WISE_SAVE_FAILED'),
             body: save.data,
+            responseSummary: saveSummary,
             object: request.object,
             key,
           })
@@ -670,11 +868,18 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
             headers: authContext.headers,
             body: buildLifecycleBody(record, request, objectConfig, 'submit'),
           })
-          raw.push({ index, operation: 'submit', body: submit.data })
-          if (!businessSuccess(submit.data, config)) {
+          const submitSucceeded = businessSuccess(submit.data, config)
+          const submitSummary = createBusinessResponseSummary(submit.data, config, {
+            operation: 'submit',
+            success: submitSucceeded,
+          })
+          raw.push({ index, operation: 'submit', body: submit.data, summary: submitSummary })
+          businessResponses.push({ index, object: request.object, ...submitSummary })
+          if (!submitSucceeded) {
             throw new K3WiseWebApiAdapterError(String(responseMessage(submit.data, config)), {
               code: responseCode(submit.data, config, 'K3_WISE_SUBMIT_FAILED'),
               body: submit.data,
+              responseSummary: submitSummary,
               object: request.object,
               key,
             })
@@ -695,11 +900,18 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
             headers: authContext.headers,
             body: buildLifecycleBody(record, request, objectConfig, 'audit'),
           })
-          raw.push({ index, operation: 'audit', body: audit.data })
-          if (!businessSuccess(audit.data, config)) {
+          const auditSucceeded = businessSuccess(audit.data, config)
+          const auditSummary = createBusinessResponseSummary(audit.data, config, {
+            operation: 'audit',
+            success: auditSucceeded,
+          })
+          raw.push({ index, operation: 'audit', body: audit.data, summary: auditSummary })
+          businessResponses.push({ index, object: request.object, ...auditSummary })
+          if (!auditSucceeded) {
             throw new K3WiseWebApiAdapterError(String(responseMessage(audit.data, config)), {
               code: responseCode(audit.data, config, 'K3_WISE_AUDIT_FAILED'),
               body: audit.data,
+              responseSummary: auditSummary,
               object: request.object,
               key,
             })
@@ -715,6 +927,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
           billNo: responseBillNo(save.data, config),
           responseCode: responseCode(save.data, config, 'OK'),
           responseMessage: responseMessage(save.data, config, 'K3 WISE save succeeded'),
+          responseSummary: saveSummary,
           raw: save.data,
         })
       } catch (error) {
@@ -724,6 +937,9 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
           object: request.object,
           code: error && error.details && error.details.code ? error.details.code : 'K3_WISE_UPSERT_FAILED',
           message: error && error.message ? error.message : String(error),
+          responseSummary: error && error.details && error.details.responseSummary
+            ? error.details.responseSummary
+            : undefined,
         })
       }
     }
@@ -739,6 +955,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
         autoSubmit,
         autoAudit,
         k3Template: objectConfig.k3Template ? { ...objectConfig.k3Template } : undefined,
+        businessResponses,
       },
     })
   }
@@ -773,5 +990,6 @@ module.exports = {
     responseBillNo,
     responseCode,
     responseExternalId,
+    saveBusinessSuccess,
   },
 }

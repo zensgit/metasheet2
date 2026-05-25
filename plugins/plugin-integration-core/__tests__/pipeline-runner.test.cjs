@@ -510,6 +510,50 @@ async function main() {
   assert.equal(errorOnly.db.tables.get('integration_dead_letters')[0].error_code, 'ERP_REJECTED')
   assert.equal(await errorOnly.db.selectOne('integration_watermarks', { pipeline_id: 'pipe_1' }), null, 'error-only target result does not advance watermark')
 
+  // --- 4c.1b. Adapter business summaries are persisted on run details ---
+  const targetSummary = createRunnerHarness({
+    sourceRecords: [
+      { code: 'sum-01', revision: 'r1', qty: '3', name: 'Bolt', updatedAt: '2026-04-24T01:00:00.000Z' },
+    ],
+    targetUpsert: async (input) => createUpsertResult({
+      written: 0,
+      failed: 1,
+      errors: [
+        {
+          key: input.records[0]._integration_idempotency_key,
+          code: 'K3_WISE_SAVE_BUSINESS_FAILED',
+          message: 'unit group parameter invalid',
+          responseSummary: {
+            operation: 'save',
+            success: false,
+            envelopeStatusCode: 200,
+            responseMessagePresent: true,
+            failedRowCount: 1,
+            externalIdPresent: false,
+            token: 'must-redact',
+          },
+        },
+      ],
+      metadata: {
+        businessResponses: [
+          {
+            operation: 'save',
+            success: false,
+            envelopeStatusCode: 200,
+            responseMessagePresent: true,
+            failedRowCount: 1,
+            token: 'must-redact',
+          },
+        ],
+      },
+    }),
+  })
+  const targetSummaryRun = await targetSummary.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'incremental', triggeredBy: 'manual' })
+  assert.equal(targetSummaryRun.run.status, 'partial')
+  assert.equal(targetSummaryRun.run.details.targetWriteSummaries.length, 1)
+  assert.equal(targetSummaryRun.run.details.targetWriteSummaries[0].success, false)
+  assert.equal(targetSummaryRun.run.details.targetWriteSummaries[0].token, '[redacted]')
+
   // --- 4c.2. Itemized plus aggregate failures preserve replay evidence ---
   const mixedFailure = createRunnerHarness({
     sourceRecords: [
