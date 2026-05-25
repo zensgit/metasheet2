@@ -40,6 +40,10 @@ Status column = **expected** outcome; PASS/FAIL is recorded only from CI (§4.2)
 | export | denied | *N/A — `canExport` fused to `canRead`* | user without `multitable:read` | `403` (sheet-capability gate; no independent export-deny lever) | pending CI |
 | — | sentinel | — | — | `DATABASE_URL` set (suite ran, not skipped) | pending CI |
 
+**Field inherited path:** D3d-1 tests **role** inheritance as the representative path.
+**Member-group** inheritance (`field_permissions(subject_type='member-group')` + `platform_member_group_members`)
+is **deferred** to D3d-2 / the final matrix — same scope-map code branch, one extra seed table; role
+covers the inherited semantic here.
 **View-access tri-state** (`meta_view_permissions` granted/denied/inherited-from-sheet-scope): **not
 here** — export ignores `meta_view_permissions`; deferred to D3d-2.
 **Record class:** not in D3d-1 (→ D3d-2). Per-record read-deny does not exist in the model

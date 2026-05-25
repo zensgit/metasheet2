@@ -154,6 +154,8 @@ describeIfDatabase('multitable permission golden matrix — D3d-1 (field tri-sta
     expect(flat).not.toContain('topsecret')
   })
 
+  // role is the representative inherited path; member-group inheritance (same scope-map
+  // branch + platform_member_group_members) is deferred to D3d-2 / final matrix.
   test('field/inherited: visible=false via role membership → masked in export', async () => {
     await q(
       'INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1, $2, $3, $4, $5, $6)',
