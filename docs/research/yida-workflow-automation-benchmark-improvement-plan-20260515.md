@@ -1315,7 +1315,7 @@ Phase 2 已落地 1/5（2026-05-25 更新）：`ApprovalAssigneeResolver` 第一
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| `ApprovalAssigneeResolver` 第一版 | **已落地并硬化（2026-05-25 更新）** | `packages/core-backend/src/services/ApprovalAssigneeResolver.ts` 已落地，支持 `static_user`、`static_role`、`requester`、`form_field_user` 四种 source kind（类型层亦只开放这四种，见 `packages/core-backend/src/types/approval-product.ts`）；同步纯函数、无 DB、解析结果写入冻结 runtime graph 快照。PR #1797 实现 + #1800 收口 O1/O2/O3 硬化观察点。落地原因：在 #1794 scope-gate 被显式降级为 kernel-polish（纯解析层、无新表、无新路由），故允许在 K3 stage-1 lock 下做。 |
+| `ApprovalAssigneeResolver` 第一版 | **已落地并硬化（2026-05-25 更新）** | `packages/core-backend/src/services/ApprovalAssigneeResolver.ts` 已落地，支持 `static_user`、`static_role`、`requester`、`form_field_user` 四种 source kind（类型层亦只开放这四种，见 `packages/core-backend/src/types/approval-product.ts`）；同步纯函数、无 DB；`assigneeSources` 配置随 `runtime_graph` 冻结进 `approval_published_definitions.runtime_graph`，运行时从冻结 graph + instance snapshot 读取，解析结果以 `metadata.resolvedFrom` 写入 `approval_assignments`（非写回冻结 graph）。PR #1797 实现 + #1800 收口 O1/O2/O3 硬化观察点。落地原因：在 #1794 scope-gate 被显式降级为 kernel-polish（纯解析层、无新表、无新路由），故允许在 K3 stage-1 lock 下做。 |
 | 多维表/公开表单触发审批 | 未启动（冻结） | 无 trigger binding 表和 source snapshot 服务；属新业务面，受 K3 stage-1 lock 冻结。 |
 | 审批结果回写记录 | 未启动（冻结） | 无 result mapping/backwrite 服务；受 K3 stage-1 lock 冻结。 |
 | 自动化 `start_approval` 动作 | 未启动（冻结） | 自动化 action 白名单和 executor 中未见该动作；受 K3 stage-1 lock 冻结。 |
