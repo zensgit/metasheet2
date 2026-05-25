@@ -134,10 +134,14 @@ Step 6 directly proved the gating activates: both admin-only sections rendered.
 **Recorded for any future reuse of the /tmp login script** (NOT being changed now — script is in /tmp only, not in repo): the admin assertion should be a disjunction such as
 
 ```js
+const body = await meResponse.json()
+const user = body.data?.user ?? {}
+const features = body.data?.features ?? {}
+
 const isAttendanceAdmin =
-  meResp.role === 'admin' ||
-  (Array.isArray(meResp.permissions) && meResp.permissions.includes('attendance:admin')) ||
-  meResp.attendanceAdmin === true
+  user.role === 'admin' ||
+  (Array.isArray(user.permissions) && user.permissions.includes('attendance:admin')) ||
+  features.attendanceAdmin === true
 ```
 
 so that any of the three signal channels is sufficient. Not blocking; not patched in this window.
