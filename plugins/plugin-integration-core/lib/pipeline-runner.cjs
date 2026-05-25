@@ -558,8 +558,9 @@ function createPipelineRunner(deps = {}) {
             keyFields: ['_integration_idempotency_key'],
             options: resolveTargetOptions(context.pipeline),
           }), cleanRecords)
-          if (writeResult.metadata && Array.isArray(writeResult.metadata.businessResponses)) {
-            targetWriteSummaries.push(...writeResult.metadata.businessResponses.map((summary) => sanitizeIntegrationPayload(summary, {
+          if (writeResult.metadata && Array.isArray(writeResult.metadata.businessResponses) && targetWriteSummaries.length < 50) {
+            const remainingTargetWriteSummarySlots = 50 - targetWriteSummaries.length
+            targetWriteSummaries.push(...writeResult.metadata.businessResponses.slice(0, remainingTargetWriteSummarySlots).map((summary) => sanitizeIntegrationPayload(summary, {
               maxDepth: 4,
               maxArrayItems: 20,
               maxStringLength: 500,
@@ -645,7 +646,7 @@ function createPipelineRunner(deps = {}) {
             nextCursor: cursor,
             erpFeedback,
             ...(targetWriteSummaries.length > 0 && {
-              targetWriteSummaries: targetWriteSummaries.slice(0, 50),
+              targetWriteSummaries,
             }),
             maxPagesReached,
             pagesProcessed: page,

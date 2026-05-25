@@ -72,6 +72,10 @@ Pipeline runner persists those summaries to run details under
 limits. This gives operators a run-level explanation for "outer 200, business
 row failed" without storing tokens or full K3 payloads.
 
+The runner caps collected summaries at 50 during the write loop, not only at
+final serialization time, so large runs do not keep sanitizing summaries that
+will be discarded.
+
 ### Compatibility
 
 Existing adapter error code compatibility is preserved for Save failures:

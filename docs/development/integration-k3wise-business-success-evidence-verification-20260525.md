@@ -107,6 +107,13 @@ asserts the stored run detail contains:
 token = [redacted]
 ```
 
+Review follow-up:
+
+- `extractBusinessRows()` now de-duplicates candidate row objects by reference
+  before computing summary counts.
+- `targetWriteSummaries` is capped during the write loop at 50 summaries before
+  sanitization work is performed for discarded entries.
+
 ## Deployment Impact
 
 - No migration.

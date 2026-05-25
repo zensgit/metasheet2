@@ -211,7 +211,7 @@ function businessRowHasIdentifier(row) {
 }
 
 function extractBusinessRows(data) {
-  const rows = []
+  const rows = new Set()
   const candidates = [
     getPath(data, 'Data'),
     getPath(data, 'data'),
@@ -221,16 +221,16 @@ function extractBusinessRows(data) {
   ]
   for (const candidate of candidates) {
     if (Array.isArray(candidate)) {
-      rows.push(...candidate.filter(isPlainObject))
+      candidate.filter(isPlainObject).forEach((row) => rows.add(row))
     } else if (isPlainObject(candidate) && (
       businessRowStatus(candidate) !== null ||
       businessRowMessage(candidate) !== undefined ||
       businessRowHasIdentifier(candidate)
     )) {
-      rows.push(candidate)
+      rows.add(candidate)
     }
   }
-  return rows
+  return Array.from(rows)
 }
 
 function hasExplicitBusinessFailure(data) {
