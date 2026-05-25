@@ -77,7 +77,7 @@ import { usePlugins } from './composables/usePlugins'
 import { setMultitableApiErrorLocaleResolver } from './multitable/api/client'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
 import { useFeatureFlags } from './stores/featureFlags'
-import { getApiBase } from './utils/api'
+import { clearStoredAuthState, getApiBase } from './utils/api'
 
 const route = useRoute()
 const { navItems: pluginNavItems, fetchPlugins } = usePlugins()
@@ -186,12 +186,9 @@ async function logout(): Promise<void> {
   }
   clearToken()
   try {
-    if (typeof localStorage !== 'undefined') {
-      localStorage.removeItem('metasheet_features')
-      localStorage.removeItem('metasheet_product_mode')
-    }
+    clearStoredAuthState()
   } catch {
-    // Ignore feature cache cleanup failures.
+    // Ignore local session cleanup failures; logout should still leave the view.
   }
   window.location.assign('/login')
 }
