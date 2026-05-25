@@ -27,6 +27,13 @@ D3d-2 gap and NOT an enforcement bug. D3d-2 asserts the **annotation contract**,
 If a reviewer believes view data *should* be blocked when `canAccess=false`, that is a **product
 model change** (separate proposal), explicitly out of D3d-2 scope.
 
+**Second non-gate (corrected during scope-lock):** `spreadsheet_permissions` is **per-user
+grant-additive, not a whitelist read-gate** (verified in `loadSheetPermissionScopeMap`). A user with
+**no** sheet row still reads via base capability (200) — "others have a sheet row, so I'm denied read"
+is **not** a semantic. So a reviewer must NOT flag "ungranted user still reads the sheet" as a gap. The
+real sheet gate is the **write intersection** (§1/§2 below). The original lock's "sheet read 200/403"
+assumption was wrong (not a code bug); this commit corrects it.
+
 ---
 
 ## 1. Locked scope — what D3d-2 tests, and how
@@ -39,9 +46,10 @@ through real endpoints.
 | **view-access / granted** | annotation only | `viewPermissions[viewId].canAccess === true` | GET /view |
 | **view-access / denied** | annotation only (data NOT blocked) | `canAccess === false` **AND data still returned** (documents non-gate) | GET /view |
 | **view-access / inherited** | annotation only | no `meta_view_permissions` row → `canAccess === true` (from sheet/base capability) | GET /view |
-| **sheet / granted** | **real gate** | 200 + data | read/export endpoint |
-| **sheet / denied** | **real gate** | sheet has permission assignments + user not granted read → **403** | read/export endpoint |
-| **sheet / inherited** | **real gate** | no sheet assignments → base capability passes → 200 | read/export endpoint |
+| **sheet / inherited** | **real gate (write axis)** | no sheet row + base `multitable:write` → PATCH **200** (base capability passes) | PATCH /records |
+| **sheet / granted** | **real gate (write axis)** | matching sheet row `spreadsheet:write` + base write context → PATCH **200** | PATCH /records |
+| **sheet / write-downgraded** | **real gate (write axis)** | base `multitable:write` + matching sheet row `spreadsheet:read` only → write intersected away → PATCH **403** | PATCH /records |
+| **sheet / read-denied** | **N/A** | no "others have a sheet row so I'm denied read" semantic — `loadSheetPermissionScopeMap` is per-user grant-additive; unmatched user → no scope → base capability → 200. Read-deny = no base capability (sheet-independent). | — |
 | **record / write-guard** | **real guard** | granted → 200; no grant + not creator → **403** | PATCH/DELETE /records |
 | **record / read** | grant-only, **no deny exists** | N/A — documented, not tested as bug | — |
 | **field / inherited-via-member-group** | real (completes D3d-1 deferred path) | field masked in export via `platform_member_group_members` | GET export-xlsx |
@@ -50,9 +58,15 @@ through real endpoints.
 
 - **view-access** → `permission-derivation.ts deriveViewPermissions` (canAccess) consumed only as
   response metadata in `univer-meta.ts` (e.g. ~3409/6098/7076); no gate. **Annotation contract.**
-- **sheet** → `permission-service.ts applySheetPermissionScope`: with assignments,
-  `scopedCanRead = canRead && scope.canRead` → ungranted user gets `canRead=false` → endpoint 403.
-  No assignments → base capability passes (inherited). **Real gate.**
+- **sheet** → `loadSheetPermissionScopeMap` (permission-service.ts:636-699) fetches **only the
+  requesting user's** rows (user / role-membership / member-group). **Unmatched user → no scope →
+  `applySheetPermissionScope` returns base capabilities unchanged** (NOT a deny). So spreadsheet_permissions
+  is **per-user grant-additive, not a whitelist read-gate**. The real gate is the **write
+  intersection**: when the user *has* a sheet row, `scopedCanWrite = base.canWrite && scope.canWrite`,
+  so a base-write user holding a read-only sheet row loses write → PATCH/DELETE **403**. Every perm_code
+  implies read, so `scopedCanRead` is never false for a row-holder → **read is never sheet-denied**.
+  **Corrected from the original lock's read-gate assumption** (that assumption was wrong, not an
+  enforcement bug — verified against the loader, no code change).
 - **record write/delete** → `ensureRecordWriteAllowed` enforced at PATCH/DELETE (univer-meta.ts
   ~6531/7342/7459) → 403. **Real guard.** Record *read* has no deny (grant-only `access_level`).
 
