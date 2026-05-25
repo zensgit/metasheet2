@@ -35,6 +35,9 @@ import {
   validateK3WiseSetupForm,
   validateK3WiseStagingInstallForm,
   buildK3WiseReferenceCompletenessPreview,
+  buildK3WiseMaterialReferenceSchema,
+  parseMaterialReferenceShapesFromSchema,
+  K3_WISE_WEBAPI_KIND,
   K3_WISE_REFERENCE_COMPLETENESS_SAMPLE_ROWS,
   type IntegrationExternalSystem,
 } from '../src/services/integration/k3WiseSetup'
@@ -1286,5 +1289,79 @@ describe('buildK3WiseReferenceCompletenessPreview', () => {
     expect(preview.scannedRowCount).toBe(1)
     expect(preview.unresolvedCount).toBe(0)
     expect(preview.canSave).toBe(true)
+  })
+})
+
+describe('buildK3WiseMaterialReferenceSchema (A4 shape persistence)', () => {
+  it('returns the COMPLETE material schema array (non-reference fields preserved)', () => {
+    const full = buildK3WiseMaterialReferenceSchema({})
+    const template = listK3WiseDocumentTemplates().find((t) => t.targetObject === 'material')
+    expect(full.length).toBe(template?.schema.length)
+    // a non-reference field (FNumber identity column) is preserved unchanged
+    const fnumber = full.find((f) => f.name === 'FNumber')
+    expect(fnumber?.reference).toBeUndefined()
+  })
+
+  it('defaults unset reference fields to {FNumber}', () => {
+    const full = buildK3WiseMaterialReferenceSchema({})
+    expect(full.find((f) => f.name === 'FBaseUnitID')?.reference).toEqual({ identifier: 'FNumber' })
+  })
+
+  it('applies per-field identifier choices (FID)', () => {
+    const full = buildK3WiseMaterialReferenceSchema({ FAcctID: 'FID' })
+    expect(full.find((f) => f.name === 'FAcctID')?.reference).toEqual({ identifier: 'FID' })
+    // other reference fields keep the default
+    expect(full.find((f) => f.name === 'FBaseUnitID')?.reference).toEqual({ identifier: 'FNumber' })
+  })
+
+  it('records object-passthrough as a scalar-fallback identifier plus passthrough flag', () => {
+    const full = buildK3WiseMaterialReferenceSchema({ FBaseUnitID: 'object' })
+    expect(full.find((f) => f.name === 'FBaseUnitID')?.reference).toEqual({ identifier: 'FNumber', passthrough: true })
+  })
+
+  it('is JSON-serializable identity (plain objects, no null-proto / class instances)', () => {
+    const full = buildK3WiseMaterialReferenceSchema({ FAcctID: 'FID', FBaseUnitID: 'object' })
+    expect(JSON.parse(JSON.stringify(full))).toEqual(full)
+  })
+
+  it('buildK3WiseSetupPayloads persists the complete schema into config.objects.material.schema', () => {
+    const form = createDefaultK3WiseSetupForm()
+    form.materialReferenceShapes = { ...form.materialReferenceShapes, FAcctID: 'FID' }
+    const payloads = buildK3WiseSetupPayloads(form)
+    const schema = (payloads.webApi.config as any).objects.material.schema as Array<Record<string, any>>
+    expect(Array.isArray(schema)).toBe(true)
+    // complete array (all material template fields), with the chosen identifier present
+    expect(schema.length).toBe(listK3WiseDocumentTemplates().find((t) => t.targetObject === 'material')?.schema.length)
+    expect(schema.find((f) => f.name === 'FAcctID')?.reference?.identifier).toBe('FID')
+    expect(schema.find((f) => f.name === 'FBaseUnitID')?.reference?.identifier).toBe('FNumber')
+  })
+
+  it('parseMaterialReferenceShapesFromSchema merges over defaults (garbage-safe)', () => {
+    expect(parseMaterialReferenceShapesFromSchema(undefined).FBaseUnitID).toBe('FNumber')
+    const parsed = parseMaterialReferenceShapesFromSchema([{ name: 'FAcctID', reference: { identifier: 'FID' } }])
+    expect(parsed.FAcctID).toBe('FID')
+    expect(parsed.FUnitGroupID).toBe('FNumber') // present-by-default, absent from the schema
+  })
+
+  it('restores materialReferenceShapes from a saved config on reload (persistence closure)', () => {
+    const saved = {
+      id: 'sys_saved',
+      name: 'K3 saved',
+      kind: K3_WISE_WEBAPI_KIND,
+      tenantId: 'default',
+      workspaceId: '',
+      config: { objects: { material: { schema: [
+        { name: 'FAcctID', type: 'reference', reference: { identifier: 'FID' } },
+        { name: 'FBaseUnitID', type: 'reference', reference: { identifier: 'FNumber', passthrough: true } },
+      ] } } },
+    } as unknown as IntegrationExternalSystem
+    const form = applyExternalSystemToForm(createDefaultK3WiseSetupForm(), saved)
+    expect(form.materialReferenceShapes.FAcctID).toBe('FID')
+    expect(form.materialReferenceShapes.FBaseUnitID).toBe('object')
+    expect(form.materialReferenceShapes.FUnitGroupID).toBe('FNumber') // not in saved schema → stays default
+    // re-save still emits the COMPLETE schema with the restored shapes (no silent downgrade)
+    const schema = (buildK3WiseSetupPayloads(form).webApi.config as any).objects.material.schema as Array<Record<string, any>>
+    expect(schema.find((f) => f.name === 'FAcctID')?.reference).toEqual({ identifier: 'FID' })
+    expect(schema.find((f) => f.name === 'FBaseUnitID')?.reference).toEqual({ identifier: 'FNumber', passthrough: true })
   })
 })

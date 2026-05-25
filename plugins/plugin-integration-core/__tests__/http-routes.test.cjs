@@ -476,6 +476,39 @@ async function testExternalSystemRoutes() {
   assert.equal(conflict.body.error.details.referencedPipelineCount, 2)
 }
 
+async function testExternalSystemUpsertPreservesObjectSchema() {
+  // A4 route-fidelity probe (isolated harness): the HTTP upsert route MUST forward
+  // config.objects.material.schema (incl. each field's reference.identifier) verbatim —
+  // not strip it via route / requestBody / scopedInput / response path. The store + get +
+  // sanitize round-trip is covered separately by external-systems.test.cjs §7e (O4).
+  const { calls, services } = createMockServices()
+  const { routes } = mountRoutes(services)
+  const refSchema = [
+    { name: 'FBaseUnitID', type: 'reference', reference: { identifier: 'FNumber' } },
+    { name: 'FAcctID', type: 'reference', reference: { identifier: 'FID' } },
+  ]
+  const res = await invoke(routes, 'POST', '/api/integration/external-systems', {
+    user: WRITE_USER,
+    body: {
+      id: 'sys_ref_schema',
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      name: 'K3 WISE ref-schema',
+      kind: 'erp:k3-wise-webapi',
+      role: 'target',
+      status: 'active',
+      config: { objects: { material: { schema: refSchema } } },
+    },
+  })
+  assertOkResponse(res, 201)
+  const forwarded = findCall(calls, 'upsertExternalSystem')
+  assert.ok(forwarded, 'route forwarded the upsert to the store')
+  assert.deepEqual(forwarded[1].config.objects.material.schema, refSchema,
+    'A4 route fidelity: config.objects.material.schema (incl. per-field reference.identifier) forwarded verbatim, not stripped')
+  assert.equal(res.body.data.config.objects.material.schema[1].reference.identifier, 'FID',
+    'A4 route fidelity: response path preserves nested reference.identifier')
+}
+
 async function testExternalSystemTestPersistsFailureAndPreservesInactive() {
   const { calls, services } = createMockServices({
     externalSystemRegistry: {
@@ -1807,6 +1840,7 @@ async function testListOffsetCap() {
 async function main() {
   await testUnauthenticatedWriteRequestIsRejected()
   await testExternalSystemRoutes()
+  await testExternalSystemUpsertPreservesObjectSchema()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
   await testExternalSystemTestRequiresSavedSystem()
   await testExternalSystemTestRedactsAdapterResultSecrets()
