@@ -3544,17 +3544,21 @@ async function syncAttendanceReportPeriodSummary(context, db, orgId, logger, par
   const dynamicSubtype = await loadAttendanceReportDynamicSubtypeContext(db, orgId, logger)
   const valueFields = buildAttendanceReportPeriodSummaryValueFields(managedSummaryFormulaFields, dynamicSubtype.definitions)
   const valueColumns = buildAttendanceReportPeriodSummaryValueColumns(valueFields)
+  // Comprehensive-hours system columns are provisioned alongside the catalog value columns
+  // but filled separately (not from the catalog value loop). fieldFingerprint stays keyed
+  // on valueFields only — these are system columns, not catalog config.
+  const allValueColumns = [...valueColumns, ...ATTENDANCE_COMPREHENSIVE_HOURS_PERIOD_VALUE_COLUMNS]
   const activeValueCodes = buildAttendanceReportPeriodSummaryActiveValueCodes(summaryFormulaFields, dynamicSubtype.definitions)
   const fieldFingerprint = buildAttendanceReportFieldConfigFingerprint(valueFields).value
 
   const baseDescriptor = getAttendanceReportPeriodSummariesDescriptor()
   await provisioning.ensureObject({
     projectId: ensured.projectId,
-    descriptor: { ...baseDescriptor, fields: [...baseDescriptor.fields, ...valueColumns] },
+    descriptor: { ...baseDescriptor, fields: [...baseDescriptor.fields, ...allValueColumns] },
   })
   const logicalIds = [
     ...Object.values(ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS),
-    ...valueColumns.map(column => column.id),
+    ...allValueColumns.map(column => column.id),
   ]
   const fieldIds = typeof provisioning.resolveFieldIds === 'function'
     ? await provisioning.resolveFieldIds({
@@ -3605,6 +3609,20 @@ async function syncAttendanceReportPeriodSummary(context, db, orgId, logger, par
       const value = getAttendancePeriodSummaryFieldValue(summaryWithFormulas, column.id)
       logical[column.id] = value === '' && isAttendanceDynamicSubtypeCode(column.id) ? 0 : value
     }
+    // Comprehensive-hours metric + cap companion fields. Set AFTER the catalog value loop
+    // and BEFORE the source fingerprint so the cap value/source/effective_key are hashed
+    // into source_fingerprint (a cap edit → fingerprint change → re-sync). Stale-nulls when
+    // no org default applies.
+    const settings = await getSettings(db)
+    const { actualMinutes } = buildAttendanceComprehensiveActualMinutesFromSummary(summary)
+    const comprehensiveHoursValues = buildAttendanceComprehensiveHoursPeriodSummaryValues(
+      settings,
+      orgId,
+      userId,
+      period,
+      actualMinutes,
+    )
+    Object.assign(logical, comprehensiveHoursValues)
     const sourceFingerprint = buildAttendanceReportPeriodSummarySourceFingerprint(logical)
 
     const data = {}
@@ -10165,6 +10183,12 @@ async function loadSettings(db) {
   }
 }
 
+// Test-only: clear the module-level settings cache so a test can control the persisted
+// settings per case (the 60s TTL would otherwise leak settings across tests).
+function resetAttendanceSettingsCacheForTests() {
+  settingsCache = { value: DEFAULT_SETTINGS, loadedAt: 0 }
+}
+
 async function getSettings(db) {
   if (Date.now() - settingsCache.loadedAt < SETTINGS_CACHE_TTL_MS) {
     return settingsCache.value
@@ -12045,6 +12069,50 @@ function resolveAttendanceComprehensiveHoursCap(settings, orgId, userId, period)
       comprehensive_hours_cap_source: source,
       comprehensive_hours_cap_effective_key: buildAttendanceComprehensiveHoursCapEffectiveKey(capDefaults),
     },
+  }
+}
+
+// ── PR6 value-plumbing: one period-level comprehensive-hours metric + cap companion fields ──
+// System-managed value columns (not catalog-authored) injected into the period-summary
+// snapshot. They ride the existing provisioning + record-write path; no new producer, no
+// route, no UI, no migration. The cap companion fields carry the resolver's fingerprintPayload
+// so a cap edit changes the row source_fingerprint and the row re-syncs.
+const ATTENDANCE_COMPREHENSIVE_HOURS_PERIOD_VALUE_COLUMNS = Object.freeze([
+  { id: 'comprehensive_hours_excess_minutes', name: '综合工时超额（分钟）', type: 'number', order: 4000 },
+  { id: 'comprehensive_hours_cap_minutes', name: '综合工时上限（分钟）', type: 'number', order: 4001 },
+  { id: 'comprehensive_hours_cap_source', name: '综合工时上限来源', type: 'string', order: 4002 },
+  { id: 'comprehensive_hours_cap_effective_key', name: '综合工时上限版本', type: 'string', order: 4003 },
+])
+
+// Compute the four comprehensive-hours period values for one row. Fail-closed: only an
+// explicit date_range that bridges to an aligned month/quarter/year with a configured org
+// default yields a cap; payroll_cycle / custom_range / missing type / unset cap all
+// stale-null. Reuses the cap resolver (#1829) and the shared excess math — no parallel
+// computation.
+function buildAttendanceComprehensiveHoursPeriodSummaryValues(settings, orgId, userId, period, actualMinutes) {
+  const nullValues = {
+    comprehensive_hours_excess_minutes: null,
+    comprehensive_hours_cap_minutes: null,
+    comprehensive_hours_cap_source: null,
+    comprehensive_hours_cap_effective_key: null,
+  }
+  if (!period || !period.periodType || period.periodType === 'payroll_cycle') return nullValues
+  const bridged = bridgeAttendanceDateRangeToComprehensiveHoursPeriod(period.from, period.to)
+  const cap = resolveAttendanceComprehensiveHoursCap(settings, orgId, userId, bridged)
+  if (!cap) return nullValues
+  const comparison = buildAttendanceComprehensiveHoursComparison({
+    userId,
+    period: bridged.key,
+    metric: 'actual',
+    enforcement: 'warn',
+    capMinutes: cap.capMinutes,
+    minutes: actualMinutes,
+  })
+  return {
+    comprehensive_hours_excess_minutes: comparison.excessMinutes,
+    comprehensive_hours_cap_minutes: cap.fingerprintPayload.comprehensive_hours_cap_minutes,
+    comprehensive_hours_cap_source: cap.fingerprintPayload.comprehensive_hours_cap_source,
+    comprehensive_hours_cap_effective_key: cap.fingerprintPayload.comprehensive_hours_cap_effective_key,
   }
 }
 
@@ -14050,6 +14118,9 @@ module.exports = {
     bridgeAttendanceDateRangeToComprehensiveHoursPeriod,
     resolveAttendanceComprehensiveHoursCap,
     buildAttendanceComprehensiveHoursCapEffectiveKey,
+    buildAttendanceComprehensiveHoursPeriodSummaryValues,
+    ATTENDANCE_COMPREHENSIVE_HOURS_PERIOD_VALUE_COLUMNS,
+    resetAttendanceSettingsCacheForTests,
     mergeSettings,
     calculateAttendanceComprehensiveShiftPlannedMinutes,
     buildAttendanceComprehensivePlannedMinutesFromDays,
