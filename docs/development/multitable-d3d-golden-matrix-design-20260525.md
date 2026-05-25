@@ -32,10 +32,12 @@ tests (#1820, `cc29c6631`). Source: benchmark v2 §9 #3 / Gap 7.
   (used by `approval-wp*`, `after-sales-*`).
 - Config: `packages/core-backend/vitest.integration.config.ts` + `tests/setup.integration.ts`.
 - All 4 permission tables are migration-created → present after `db:migrate`:
-  - `field_permissions` — `src/db/migrations/zzzz20260411140100_create_field_permissions.ts`
-  - `meta_view_permissions` — `src/db/migrations/zzzz20260411140000_create_meta_view_permissions.ts`
-  - `record_permissions` / member-group subjects — `src/db/migrations/zzzz20260418143000_allow_member_group_multitable_permission_subjects.ts`
-  - `spreadsheet_permissions` — `migrations/036_create_spreadsheet_permissions.sql`
+  - `field_permissions` — `packages/core-backend/src/db/migrations/zzzz20260411140100_create_field_permissions.ts`
+  - `meta_view_permissions` — `packages/core-backend/src/db/migrations/zzzz20260411140000_create_meta_view_permissions.ts`
+  - `record_permissions` — `packages/core-backend/src/db/migrations/zzzz20260413100000_create_record_permissions.ts`
+  - `spreadsheet_permissions` — `packages/core-backend/migrations/036_create_spreadsheet_permissions.sql`
+  - Member-group subjects for all four tables are extended by
+    `packages/core-backend/src/db/migrations/zzzz20260418143000_allow_member_group_multitable_permission_subjects.ts`
 
 **The trap (must design around it):** the `Run core-backend tests` step in
 `.github/workflows/plugin-tests.yml` (≈L135-137) runs `pnpm --filter @metasheet/core-backend test`
@@ -64,7 +66,7 @@ value is unambiguous:
 | **view** | `meta_view_permissions` grant | view perm denies | from **sheet scope** (no view-level row) |
 | **field** | `field_permissions.visible=true` (direct user) | `field_permissions.visible=false` | via **role / member-group** membership (scope-map SQL: `user_roles` / `platform_member_group_members` EXISTS), not direct user row |
 | **record** | `record_permissions` read/write/admin | *(N/A — no deny semantic; see §4)* | default-allow when no record row (grant-only model) |
-| **export** | `canRead && canExport` | missing `canExport` → 403 | masked set = field/view inherited results applied to export |
+| **export** | `canRead && canExport` | missing read/export capability → 403 (`canExport` derives from `canRead` today) | masked set = field/view inherited results applied to export |
 
 Each populated cell = a black-box assertion through the real endpoint. Export cells assert
 **both header and cell values** (the leak surface D3c closed).
@@ -75,7 +77,7 @@ D3c already ships green regression tests for: field hidden via `field_permission
 and field in `view.hidden_field_ids` — both masked in export header + cells. D3d-1 **extends**
 this, it does not redo it:
 - Add **inherited** combos: field hidden via **role / member-group** scope (not direct user).
-- Add **denied** combos: `canExport` missing → 403; record-scope export behavior per §4.
+- Add **denied** combos: missing read/export capability → 403; record-scope export behavior per §4.
 - Promote the 2 D3c canaries from mock-pool into the real-DB matrix (or keep mock-pool ones as
   fast unit-ish guards and add real-DB equivalents — decide in D3d-1; the Medium review finding
   requires the *golden matrix* itself be real-DB).
