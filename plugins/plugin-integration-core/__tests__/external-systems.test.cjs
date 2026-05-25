@@ -422,6 +422,42 @@ async function main() {
   assert.deepEqual(afterFullUpdate.capabilities, { read: true, write: false },
     'explicit capabilities replacement works')
 
+  // 7e: O4 probe for #1821 — nested config.objects.material.schema (incl. each
+  //     field's reference.identifier) must survive upsert -> store -> get.
+  //     A config-level sensitive key is included to prove the get/public
+  //     projection's sanitize is ACTIVE on this path (so schema survival is not
+  //     a no-op sanitize), while the non-sensitive reference schema is spared.
+  const refSchema = [
+    { name: 'FBaseUnitID', type: 'reference', reference: { identifier: 'FNumber' } },
+    { name: 'FAcctID', type: 'reference', reference: { identifier: 'FID' } },
+  ]
+  await preserveRegistry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    id: 'sys_preserve',
+    name: 'K3 WISE full',
+    kind: 'erp:k3-wise-webapi',
+    role: 'target',
+    status: 'active',
+    config: {
+      baseUrl: 'https://k3-ref.internal',
+      apiKey: 'should-be-redacted-not-a-real-secret',
+      objects: { material: { schema: refSchema } },
+    },
+  })
+  const storedRefRow = preserveDb.rows.find((row) => row.id === 'sys_preserve')
+  assert.deepEqual(storedRefRow.config.objects.material.schema, refSchema,
+    'O4: nested objects.material.schema (incl. per-field reference.identifier) stored verbatim')
+  const fetchedRef = await preserveRegistry.getExternalSystem({
+    tenantId: 'tenant_1', workspaceId: null, id: 'sys_preserve',
+  })
+  // sanitize rebuilds nested objects with a null prototype (its prototype-pollution
+  // guard), so compare JSON-normalized content — which is exactly what gets persisted
+  // (JSONB) and sent on the wire.
+  assert.deepEqual(JSON.parse(JSON.stringify(fetchedRef.config.objects.material.schema)), refSchema,
+    'O4: schema + reference.identifier content survives the get/public projection (sanitize does not strip it)')
+  assert.equal(fetchedRef.config.apiKey, '[redacted]',
+    'O4: config sanitize is active here (sensitive key redacted) — schema survival is not a no-op')
+
   // --- 9. kind/role immutability after creation -------------------------
   const immutableDb = createMockDb()
   const immutableRegistry = createExternalSystemRegistry({
