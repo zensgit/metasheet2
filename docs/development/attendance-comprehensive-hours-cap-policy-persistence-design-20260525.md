@@ -28,7 +28,7 @@ resolveComprehensiveHoursCap(orgId, userId, period)
 
 **Input**
 - `orgId`, `userId` — strings.
-- `period` — the already-resolved period object produced by `resolveAttendanceComprehensiveHoursPeriod` (`:11702`): `{ type, key, from, to, label }`, where `type ∈ { month, quarter, year, payroll_cycle, custom_range }` (the literal enum in `ATTENDANCE_COMPREHENSIVE_HOURS_PERIOD_TYPES` `:11676`; the spec's "monthly/quarterly/yearly" = `month/quarter/year`). `key` is the stable period identifier (`2026-03`, `2026-Q1`, `range:from:to`).
+- `period` — the already-resolved period object produced by `resolveAttendanceComprehensiveHoursPeriod` (`:11702`): `{ type, key, from, to, label }`, where `type ∈ { month, quarter, year, payroll_cycle, custom_range }` (the literal enum in `ATTENDANCE_COMPREHENSIVE_HOURS_PERIOD_TYPES` `:11676`; the spec's "monthly/quarterly/yearly" = `month/quarter/year`). `key` is the stable period identifier (`2026-03`, `2026-Q1`, `range:from:to`). Note: the PR6 producer emits `date_range`/`payroll_cycle`, not these types directly — §2.1 defines the required bridge that derives `period.type` before the resolver is called.
 
 **Output**
 - `capMinutes` — resolved cap in minutes (same unit as `buildAttendanceComprehensiveHoursComparison` expects, `:11910`).
@@ -41,7 +41,7 @@ resolveComprehensiveHoursCap(orgId, userId, period)
     comprehensive_hours_cap_effective_key: <effectiveKey>,
   }
   ```
-- **`null`** when no cap is configured for this (org, period-type). The caller (period sync) then **stale-nulls** the `comprehensive_hours_*` columns — inheriting the existing disabled-field stale-null pattern (`:2519`). Null is **not** an error and **not** zero.
+- **`null`** when no cap is configured for this (org, period-type). The caller (period sync) then **stale-nulls** the `comprehensive_hours_*` columns — inheriting the existing period-summary stale-null pattern (`:3590-3592`, the `!activeValueCodes.has(column.id) → null` branch). Null is **not** an error and **not** zero.
 
 **Why `userId` is in the V1 signature even though V1 ignores it:** forward-compat. The
 per-user override extension (§5) slots in without changing any caller. V1 resolves the same
@@ -52,9 +52,37 @@ cap for every user in the org.
 ## 2. V1 RECOMMENDED source — org default by cycle-type
 
 - **Covered in V1:** `month`, `quarter`, `year` — one org default cap per cycle-type. The resolver keys off `period.type`.
-- **NOT covered by org-default in V1:** `payroll_cycle` (a `cycleId` is a specific *instance*, not a type — `attendance_payroll_cycles` row, `:3452`) and `custom_range` (caller-defined window). For these, the resolver returns `null` in V1 → the snapshot stale-nulls. Preview-time behavior is unchanged (the preview still takes a caller cap). Deriving a cap for these is deferred (§6).
+- **NOT covered by org-default in V1:** `custom_range` (arbitrary window — no natural org default) and `payroll_cycle` (a `cycleId` is a specific *instance*, not a type — `attendance_payroll_cycles` row, `:3452`). For these the resolver returns `null` → the snapshot stale-nulls. Preview-time behavior is unchanged (the preview still takes a caller cap). Deriving a cap for these is deferred (§6).
 
-**Storage (recommended): reuse `system_configs` settings-JSON via `ConfigService`** (`packages/core-backend/src/services/ConfigService.ts:216`/`:253`) — **no migration.** One org-scoped key (e.g. `attendance.comprehensive_hours.cap_defaults`) holding a small map:
+### 2.1 Period-type bridge — REQUIRED for PR6 to reach the org defaults
+
+**The gap this closes:** the PR6 producer reuses the existing period-summary sync, whose
+period resolver `resolveAttendanceReportPeriodSyncPeriod` (`:3432`) emits **only**
+`periodType: 'payroll_cycle'` (`:3462`) or `periodType: 'date_range'` (`:3497`) — it never
+emits `month/quarter/year`. Without a bridge, the resolver above would always receive
+`date_range`, never match an org default, and PR6 would always stale-null. So the bridge is
+mandatory, not optional.
+
+**Bridge rule (applied before calling the resolver, on the period sync's `date_range` window
+`from`/`to`):**
+- exact natural calendar month (`from` = 1st, `to` = month-end) → `month`
+- exact natural calendar quarter → `quarter`
+- exact natural calendar year (`YYYY-01-01`..`YYYY-12-31`) → `year`
+- any other `date_range` → `custom_range` (→ resolver returns `null` → stale-null)
+- `payroll_cycle` → stays `null` in V1; mapping a payroll cycle to a cycle-type (cycle-template mapping) is a **separate opt-in** (§6)
+
+This keeps the resolver's clean `month/quarter/year/payroll_cycle/custom_range` vocabulary
+while making the org defaults actually reachable through the real producer. The derived
+`type` (and its `key`, e.g. `2026-03`) is what the resolver and the fingerprint payload use.
+
+**Storage (recommended): a settings-JSON path — no new migration.** Carry the cap defaults
+on existing config infrastructure rather than a new table. The impl should prefer the
+**existing `attendance.settings` normalizer** (`SETTINGS_KEY = 'attendance.settings'` `:51`,
+with the `attendance.settings.updated` event `:27801`) so cap defaults live inside the
+attendance settings shape that admins already manage — *or* an equivalent `system_configs`
+settings-JSON entry via `ConfigService` (`packages/core-backend/src/services/ConfigService.ts:216`/`:253`).
+The impl must **not** bypass the existing `attendance.settings` normalizer with a parallel
+config write. Either way it is migration-free. The cap defaults are a small map:
 ```
 { "month": <minutes>, "quarter": <minutes>, "year": <minutes> }
 ```
@@ -92,7 +120,7 @@ honest choice. Out of scope for V1.
 - Employee-category / position-class caps.
 - Historical audit table (cap change history).
 - Effective-dated caps + retroactive recompute policy (changing a cap retroactively alters already-computed violations — deliberately not decided here).
-- `payroll_cycle` / `custom_range` org-default derivation.
+- `payroll_cycle` → cycle-type mapping (cycle-template mapping) so payroll cycles can resolve an org default; `custom_range` org-default derivation. Both stay `null` in V1 (§2.1).
 
 ## 6. Stage lock
 
@@ -108,11 +136,12 @@ deliberately. PR6 reporting remains a *further* separate opt-in after cap-policy
 | # | Property | Enforcement | Test |
 | --- | --- | --- | --- |
 | R1 | Resolver contract: `(orgId,userId,period)→{capMinutes,source,fingerprintPayload}` for `month/quarter/year` | unit test | Configure org defaults; assert resolved cap per cycle-type. |
-| R2 | No cap configured → `null` (not 0, not error) → columns stale-null | unit + integration | Unset config; resolver returns null; period sync writes null for the `comprehensive_hours_*` columns (`:2519` pattern). |
-| R3 | `payroll_cycle` / `custom_range` → `null` in V1 | unit test | Assert resolver returns null for these types (deferred coverage). |
+| R2 | No cap configured → `null` (not 0, not error) → columns stale-null | unit + integration | Unset config; resolver returns null; period sync writes null for the `comprehensive_hours_*` columns (period-path stale-null `:3590-3592`). |
+| R3 | `payroll_cycle` / non-aligned `custom_range` → `null` in V1 | unit test | Assert resolver returns null for these (deferred coverage). |
+| R7 | Period-type bridge: aligned `date_range` → `month/quarter/year`; non-aligned → `custom_range`; `payroll_cycle` → null | unit test | Feed exact-month/quarter/year and off-by-one windows; assert the derived type, so the org default is reachable through `resolveAttendanceReportPeriodSyncPeriod`'s `date_range` output. |
 | R4 | Cap edit changes `effective_key` → `source_fingerprint` changes → row re-syncs | integration test | Edit the config; re-run sync; assert the period row patched (fingerprint differs). Real wire, not fixture. |
 | R5 | `fingerprintPayload` keys are exactly the companion catalog codes | unit test | Assert the payload shape so PR6 plumbing can rely on it. |
-| R6 | Storage is `system_configs` via `ConfigService`; no new migration | review checklist | Reviewer confirms empty `migrations/` diff (honest: review-enforced unless a CI guard is added separately). |
+| R6 | Storage rides the existing `attendance.settings` normalizer (or a `ConfigService` settings-JSON equivalent); no new migration; no parallel config write | review checklist | Reviewer confirms empty `migrations/` diff and that cap defaults flow through the existing settings normalizer (honest: review-enforced unless a CI guard is added separately). |
 
 ## 8. Cross-references
 
