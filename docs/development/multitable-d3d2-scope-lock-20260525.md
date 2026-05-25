@@ -1,93 +1,97 @@
-# Multitable D3d-2 — Scope Lock (2026-05-25)
+# Multitable D3d-2 — Scope Lock (final, 2026-05-25)
 
-Locks the scope of D3d-2 **before** implementation, and records one semantic correction to
-the original D3d design that must not be re-litigated as a bug. Predecessor: D3d-1 real-DB
-golden matrix (#1827, `4ca98cda1`). Source: benchmark v2 §9 #3 / Gap 7.
+Locks D3d-2 scope **before** implementation. This is a standalone artifact (not folded into
+the golden matrix) because D3d-2's main value is not "more tests" — it is **pinning the real
+permission model** so future reviewers/implementers don't re-litigate it. Predecessor: D3d-1
+real-DB golden matrix (#1827, `4ca98cda1`). Source: benchmark v2 §9 #3 / Gap 7.
 
-This is a deliberate **standalone** artifact (not folded into the final golden matrix) because
-D3d-2 is not a routine test split — it corrects a permission **semantic**: `meta_view_permissions`
-"denied" does **not** block data; it only flips a response annotation.
-
----
-
-## 0. The correction a reviewer must not flag as a bug
-
-Original D3d design (§2) listed `view` as a permission **class** with granted/denied/inherited,
-implying access enforcement. **In the current product, view-access is annotation-only:**
-
-- `deriveViewPermissions(...).canAccess` is surfaced in the GET /view response `viewPermissions`
-  field. There is **no** `if (!canAccess) return 403` and **no** record/data filtering on it.
-- So a user with `meta_view_permissions` granting no read still **receives the view data**, with
-  `viewPermissions[viewId].canAccess === false` as advisory metadata for the frontend.
-
-**Therefore:** "`canAccess=false` but data still returned" is **correct current behavior**, NOT a
-D3d-2 gap and NOT an enforcement bug. D3d-2 asserts the **annotation contract**, not a data gate.
-(This parallels the record-read finding: grant-only model, no server-side read-deny.)
-
-If a reviewer believes view data *should* be blocked when `canAccess=false`, that is a **product
-model change** (separate proposal), explicitly out of D3d-2 scope.
-
-**Second non-gate (corrected during scope-lock):** `spreadsheet_permissions` is **per-user
-grant-additive, not a whitelist read-gate** (verified in `loadSheetPermissionScopeMap`). A user with
-**no** sheet row still reads via base capability (200) — "others have a sheet row, so I'm denied read"
-is **not** a semantic. So a reviewer must NOT flag "ungranted user still reads the sheet" as a gap. The
-real sheet gate is the **write intersection** (§1/§2 below). The original lock's "sheet read 200/403"
-assumption was wrong (not a code bug); this commit corrects it.
+> Revision note: the scope was narrowed twice during the lock (view-access and sheet both turned
+> out to be non-gates). This final version reflects the model **as the code actually behaves**,
+> verified against the loaders/routes (§2). No product code is changed.
 
 ---
 
-## 1. Locked scope — what D3d-2 tests, and how
+## 0. Systemic finding — the multitable permission model is annotation-rich, enforcement-thin
 
-Non-admin user (`roles:['member']`) so scoping applies. Real DB, dedicated CI step, asserted
-through real endpoints.
+Verified across four classes: the model is **grant-additive at read**, with **denial only via
+field-projection or write-intersection**. The COMPLETE set of real deny-gates:
 
-| case | enforcement reality | assertion (the contract) | endpoint |
+1. **Field masking** — `field_permissions.visible=false` (export + view-data projection). D3d-1 proven.
+2. **Field via member-group** inheritance — mechanically identical (D3d-1 deferred this path).
+3. **Sheet write-intersection** — a base-write user holding a read-only sheet row loses write.
+4. **Record write-own** — write-own scope + non-creator is blocked.
+
+Everything else — **view-access `canAccess`, sheet-read, record-read** — is a frontend **annotation**
+the backend does **not** enforce. A reviewer must NOT flag any of these as a gap or leak:
+
+- **`canAccess=false` does not exist for a reachable user** — GET /view 403s if `!capabilities.canRead`,
+  and every `meta_view_permissions.permission` ∈ {read,write,admin} implies `scope.canRead`, so
+  `canAccess` is provably **always true**. View-access is annotation-only.
+- **"Others have a sheet/record row, so I'm denied read"** is not a semantic — the scope loaders are
+  **per-user**; an unmatched user gets no scope → base capability → 200.
+
+If a future change *wants* read-deny or view-access gating, that is a **product model change**
+(separate proposal), explicitly out of D3d-2.
+
+---
+
+## 1. Locked scope
+
+Non-admin user (`roles:['member']`); real DB; dedicated CI step; real endpoints. **Read-deny is not
+tested** (no such semantic). "result" below = the asserted contract.
+
+### Real deny-gates (asserted)
+
+| case | seed | endpoint | asserted result |
 |---|---|---|---|
-| **view-access / granted** | annotation only | `viewPermissions[viewId].canAccess === true` | GET /view |
-| **view-access / denied** | annotation only (data NOT blocked) | `canAccess === false` **AND data still returned** (documents non-gate) | GET /view |
-| **view-access / inherited** | annotation only | no `meta_view_permissions` row → `canAccess === true` (from sheet/base capability) | GET /view |
-| **sheet / inherited** | **real gate (write axis)** | no sheet row + base `multitable:write` → PATCH **200** (base capability passes) | PATCH /records |
-| **sheet / granted** | **real gate (write axis)** | matching sheet row `spreadsheet:write` + base write context → PATCH **200** | PATCH /records |
-| **sheet / write-downgraded** | **real gate (write axis)** | base `multitable:write` + matching sheet row `spreadsheet:read` only → write intersected away → PATCH **403** | PATCH /records |
-| **sheet / read-denied** | **N/A** | no "others have a sheet row so I'm denied read" semantic — `loadSheetPermissionScopeMap` is per-user grant-additive; unmatched user → no scope → base capability → 200. Read-deny = no base capability (sheet-independent). | — |
-| **record / write-guard** | **real guard** | granted → 200; no grant + not creator → **403** | PATCH/DELETE /records |
-| **record / read** | grant-only, **no deny exists** | N/A — documented, not tested as bug | — |
-| **field / inherited-via-member-group** | real (completes D3d-1 deferred path) | field masked in export via `platform_member_group_members` | GET export-xlsx |
+| **field / inherited-via-member-group** | `field_permissions(member-group, visible=false)` + `platform_member_group_members` | GET export-xlsx | field masked (header + cells) |
+| **sheet / inherited** (control) | no sheet row, base `multitable:write` | PATCH /records | **200** |
+| **sheet / granted** (control) | matching sheet row `spreadsheet:write` | PATCH /records | **200** |
+| **sheet / write-downgraded** (gate) | base `multitable:write` + matching sheet row `spreadsheet:read` only | PATCH /records | **403** (write intersected away) |
+| **record / write-own — own** | write-own sheet scope, record `created_by = user` | PATCH /records | **200** |
+| **record / write-own — not-own** (gate) | write-own sheet scope, record `created_by = other` | PATCH /records | **403** |
 
-## 2. Enforcement reality (verified, so the matrix is honest)
+### Non-gates (live assertion for view-access per option (b); documented for reads)
 
-- **view-access** → `permission-derivation.ts deriveViewPermissions` (canAccess) consumed only as
-  response metadata in `univer-meta.ts` (e.g. ~3409/6098/7076); no gate. **Annotation contract.**
-- **sheet** → `loadSheetPermissionScopeMap` (permission-service.ts:636-699) fetches **only the
-  requesting user's** rows (user / role-membership / member-group). **Unmatched user → no scope →
-  `applySheetPermissionScope` returns base capabilities unchanged** (NOT a deny). So spreadsheet_permissions
-  is **per-user grant-additive, not a whitelist read-gate**. The real gate is the **write
-  intersection**: when the user *has* a sheet row, `scopedCanWrite = base.canWrite && scope.canWrite`,
-  so a base-write user holding a read-only sheet row loses write → PATCH/DELETE **403**. Every perm_code
-  implies read, so `scopedCanRead` is never false for a row-holder → **read is never sheet-denied**.
-  **Corrected from the original lock's read-gate assumption** (that assumption was wrong, not an
-  enforcement bug — verified against the loader, no code change).
-- **record write/delete** → `ensureRecordWriteAllowed` enforced at PATCH/DELETE (univer-meta.ts
-  ~6531/7342/7459) → 403. **Real guard.** Record *read* has no deny (grant-only `access_level`).
+| case | assertion / disposition |
+|---|---|
+| **view-access** | **one live assertion**: GET /view returns **data** AND `viewPermissions[viewId].canAccess === true` (locks "annotation currently non-blocking" as a test, not just prose — guards against a future implicit 403 or false-leak report) |
+| **sheet-read** | documented non-gate: per-user grant-additive, no whitelist deny. No assertion. |
+| **record-read** | documented non-gate: grant-only `access_level`, no deny. No assertion. |
+
+## 2. Enforcement reality (verified — so the matrix is honest)
+
+- **field / member-group** → `loadFieldPermissionScopeMap` matches `subject_type='member-group'` via
+  `platform_member_group_members`; `deriveFieldPermissions` masks `visible=false`. Export applies it
+  (D3c fix). Real.
+- **sheet** → `loadSheetPermissionScopeMap` (permission-service.ts:636-699) is **per-user**; unmatched
+  user → no scope → `applySheetPermissionScope` returns base capabilities (NOT a deny). With a row,
+  `scopedCanWrite = base.canWrite && scope.canWrite`; a read-only row strips write → PATCH base gate
+  `if (!capabilities.canEditRecord) sendForbidden` (univer-meta.ts ~6791) → **403**. Read never denied.
+- **record write-own** → `deriveRecordRowActions`: under `requiresOwnWriteRowPolicy` (write-own scope),
+  `canEdit = canEditRecord && isCreator`. `ensureRecordWriteAllowed` at PATCH/DELETE → non-creator **403**.
+- **view-access** → `deriveViewPermissions.canAccess` surfaced only in the response `viewPermissions`
+  field (univer-meta.ts ~6098); no `403`/data-block. Annotation.
 
 ## 3. Rules (locked)
 
-- **Test/acceptance only.** No `rbac/service.ts` / `auth` / enforcement / model changes. Sole
-  non-test edit = extending the dedicated CI step.
-- **New-leak rule:** if any assertion reveals a *new* enforcement leak (a real gate failing), the
-  suite **stops as RED evidence**; the fix goes in a **separate** PR, NOT folded into D3d-2.
-- **Read-deny** (record or view): out of scope; documented as open model question.
+- **Test/acceptance only.** No `rbac/service.ts` / `auth` / enforcement / model code. Sole non-test
+  edit = extending the dedicated CI step.
+- **New-leak rule:** only a **real gate failure** stops as RED evidence (separate fix PR, not folded) —
+  i.e. `sheet/write-downgraded` or `record/write-own — not-own` returning **200**, or a masked field
+  appearing. A **non-gate returning data is the expected contract**, never RED.
+- **Read-deny** (sheet / record / view): out of scope; documented as the model's current contract.
 
 ## 4. CI + verification
 
-- Extend the existing dedicated `plugin-tests.yml` step (DATABASE_URL hard guard, after
-  `db:migrate`, `vitest.integration.config.ts`) to also run the D3d-2 file — or add a sibling
-  dedicated step. Same non-skip discipline.
+- Extend the existing dedicated `plugin-tests.yml` step (DATABASE_URL hard guard, after `db:migrate`,
+  `vitest.integration.config.ts`) to also run the D3d-2 file. Same non-skip discipline + sentinel.
 - Verification = real CI "ran N / skipped 0" cited from the dedicated step (no pre-CI pass claims).
-- **Output:** consolidated `permission-matrix-golden-20260525.md` merging D3d-1 + D3d-2 evidence.
+- **Output:** consolidated `permission-matrix-golden-20260525.md` merging D3d-1 + D3d-2, **including a
+  "model observation: annotation-rich, enforcement-thin" section** (§0 above) so the contract's shape
+  is explained, not just listed.
 
 ## 5. Out of scope / deferred
 
-- view-data access **gating** (would require a product model change).
-- per-record **read-deny** model.
+- view-data access **gating**, per-record / per-sheet **read-deny** model (product model changes).
 - Anything touching central RBAC/auth.
