@@ -1,8 +1,15 @@
 /**
  * D3d-1 permission golden matrix — REAL DB (benchmark v2 #3 / Gap 7).
  *
- * Covers export + field + view classes × {granted, denied, inherited} against a real
- * Postgres (seeded permission rows), asserting through the real export-xlsx route.
+ * Covers, against a real Postgres (seeded rows), asserted through the real export-xlsx route:
+ *   - FIELD class × {granted, denied, inherited}
+ *   - VIEW hidden-field projection × {granted (not hidden), denied (hidden)}
+ *
+ * NOTE on view scope: the export path applies `view.hidden_field_ids` (field projection) but
+ * does NOT consult `meta_view_permissions` (view-access grants), so view-ACCESS tri-state
+ * (granted/denied/INHERITED-from-sheet-scope) is NOT testable here and is deferred to D3d-2
+ * (the view-data path). D3d-1's "view" coverage is hidden-field projection only.
+ *
  * This is the golden-contract upgrade of the D3c mock-pool canaries (which stay as
  * fast guards in multitable-export-permission-canary.test.ts).
  *
@@ -71,7 +78,7 @@ async function exportHeaderAndCells(viewId?: string): Promise<{ status: number; 
   return { status: res.status, header: rows[0] ?? [], flat: rows.flat() }
 }
 
-describeIfDatabase('multitable permission golden matrix — D3d-1 (export + field + view, real DB)', () => {
+describeIfDatabase('multitable permission golden matrix — D3d-1 (field tri-state + view hidden-field projection, real DB)', () => {
   beforeAll(async () => {
     xlsx = (await import('xlsx')) as unknown as XlsxModule
     app = express()
@@ -158,14 +165,14 @@ describeIfDatabase('multitable permission golden matrix — D3d-1 (export + fiel
     expect(flat).not.toContain('topsecret')
   })
 
-  // ── VIEW class ───────────────────────────────────────────────────────────
-  test('view/granted: field not in hidden_field_ids → exported', async () => {
+  // ── VIEW hidden-field projection (NOT view-access perms; meta_view_permissions = D3d-2) ──
+  test('view-projection/granted: field not in hidden_field_ids → exported', async () => {
     const { status, header } = await exportHeaderAndCells(VIEW_ALL)
     expect(status).toBe(200)
     expect(header).toContain('Secret')
   })
 
-  test('view/denied: field in view.hidden_field_ids → masked in export', async () => {
+  test('view-projection/denied: field in view.hidden_field_ids → masked in export', async () => {
     const { status, header, flat } = await exportHeaderAndCells(VIEW_HIDDEN)
     expect(status).toBe(200)
     expect(header).not.toContain('Secret')

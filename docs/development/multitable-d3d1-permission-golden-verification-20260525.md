@@ -1,8 +1,13 @@
-# Multitable D3d-1 — Permission Golden Matrix (export + field + view, real DB): Verification (2026-05-25)
+# Multitable D3d-1 — Permission Golden Matrix (field tri-state + view hidden-field projection, real DB): Verification (2026-05-25)
 
-Implements D3d-1 per the design (`docs/development/multitable-d3d-golden-matrix-design-20260525.md`):
-a real-DB golden matrix for the **export + field + view** classes × {granted/denied/inherited},
-plus the dedicated CI step that makes it actually run.
+Implements D3d-1 per the design (`docs/development/multitable-d3d-golden-matrix-design-20260525.md`),
+scoped to what the **export path** can enforce: **FIELD** class × {granted/denied/inherited} and
+**VIEW hidden-field projection** × {granted/denied}, plus the dedicated CI step that makes it run.
+
+**Scope narrowing (vs design §5):** the export path applies `view.hidden_field_ids` but does NOT
+consult `meta_view_permissions`, so view-**access** tri-state (granted/denied/**inherited-from-sheet-scope**)
+is not testable via export and is **deferred to D3d-2** (view-data path). D3d-1's "view" = hidden-field
+projection only.
 
 Predecessors: D3c export field-perm leak fix (#1820, `cc29c6631`) · D3d design (#1822, `854b39712`).
 
@@ -23,16 +28,20 @@ Predecessors: D3c export field-perm leak fix (#1820, `cc29c6631`) · D3d design 
 
 Non-admin user (`roles:['member']`, `perms:['multitable:read']`) — admin bypass avoided so scoping applies.
 
-| class | state | seed | endpoint | expected | test |
-|---|---|---|---|---|---|
-| field | granted | `field_permissions(user, visible=true)` | `GET export-xlsx` | `Secret` + `topsecret` present | ✅ |
-| field | denied | `field_permissions(user, visible=false)` | `GET export-xlsx` | `Secret`/`topsecret` **absent** (header + cells) | ✅ |
-| field | inherited | `field_permissions(role, visible=false)` + `user_roles` | `GET export-xlsx` | absent (hidden via role membership) | ✅ |
-| view | granted | field not in `hidden_field_ids` | `GET export-xlsx?viewId=all` | `Secret` present | ✅ |
-| view | denied | field in `view.hidden_field_ids` | `GET export-xlsx?viewId=hidden` | absent | ✅ |
-| export | denied | *N/A — `canExport` fused to `canRead`* | user without `multitable:read` | `403` (sheet-capability gate; no independent export-deny lever) | ✅ |
-| — | sentinel | — | — | `DATABASE_URL` set (suite ran, not skipped) | ✅ |
+Status column = **expected** outcome; PASS/FAIL is recorded only from CI (§4.2) — locally these all skip.
 
+| class | state | seed | endpoint | expected | result |
+|---|---|---|---|---|---|
+| field | granted | `field_permissions(user, visible=true)` | `GET export-xlsx` | `Secret` + `topsecret` present | pending CI |
+| field | denied | `field_permissions(user, visible=false)` | `GET export-xlsx` | `Secret`/`topsecret` **absent** (header + cells) | pending CI |
+| field | inherited | `field_permissions(role, visible=false)` + `user_roles` | `GET export-xlsx` | absent (hidden via role membership) | pending CI |
+| view-projection | granted | field not in `hidden_field_ids` | `GET export-xlsx?viewId=all` | `Secret` present | pending CI |
+| view-projection | denied | field in `view.hidden_field_ids` | `GET export-xlsx?viewId=hidden` | absent | pending CI |
+| export | denied | *N/A — `canExport` fused to `canRead`* | user without `multitable:read` | `403` (sheet-capability gate; no independent export-deny lever) | pending CI |
+| — | sentinel | — | — | `DATABASE_URL` set (suite ran, not skipped) | pending CI |
+
+**View-access tri-state** (`meta_view_permissions` granted/denied/inherited-from-sheet-scope): **not
+here** — export ignores `meta_view_permissions`; deferred to D3d-2.
 **Record class:** not in D3d-1 (→ D3d-2). Per-record read-deny does not exist in the model
 (grant-only `access_level`), so it is documented, not tested-as-bug.
 
@@ -40,9 +49,11 @@ Non-admin user (`roles:['member']`, `perms:['multitable:read']`) — admin bypas
 
 - **Test/acceptance only.** Sole non-test edit = the `plugin-tests.yml` CI step (pure test plumbing).
 - **No** `rbac/service.ts` / `auth` / enforcement / record-deny changes.
-- **No new enforcement bug found.** All masking assertions pass against the D3c-fixed route — D3d-1
-  confirms the contract rather than uncovering new leaks. (Had any class revealed a new leak, per the
-  locked rule it would stop here as RED evidence + a separate fix PR, NOT be fixed in this PR.)
+- **Enforcement-bug disposition (pending CI):** the assertions are written to *confirm* the D3c-fixed
+  contract; they have not yet run against a real DB (local = skip only). **If CI shows any masking
+  assertion FAIL**, that is a new enforcement leak → per the locked rule the suite **stops as RED
+  evidence** and the fix goes in a **separate** PR, NOT folded here. If CI is green, the contract holds.
+  This line is resolved in §4.2 from the CI result.
 
 ## 4. Verification
 
