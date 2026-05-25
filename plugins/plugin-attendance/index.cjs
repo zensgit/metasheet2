@@ -93,6 +93,16 @@ const DEFAULT_SETTINGS = {
   formula: {
     allowRawAliases: true,
   },
+  // Comprehensive-hours org default caps by cycle-type (minutes). null = unset.
+  // Persisted here so a background period sync can resolve a cap; per-org / per-user
+  // override and effective-dating are deferred (see cap-policy design-lock).
+  comprehensiveHours: {
+    capDefaults: {
+      month: null,
+      quarter: null,
+      year: null,
+    },
+  },
 }
 
 const allowRbacDegradation = process.env.RBAC_OPTIONAL === '1'
@@ -10083,6 +10093,26 @@ function normalizeSettings(raw) {
     formula: {
       allowRawAliases: parseBoolean(formula.allowRawAliases, DEFAULT_SETTINGS.formula.allowRawAliases),
     },
+    comprehensiveHours: normalizeAttendanceComprehensiveHoursSettings(raw.comprehensiveHours),
+  }
+}
+
+// Normalize the comprehensive-hours settings sub-shape: org default caps by cycle-type.
+// Each cap is a positive integer of minutes, or null when unset.
+function normalizeAttendanceComprehensiveHoursSettings(raw) {
+  const capDefaultsRaw = raw && typeof raw === 'object' && raw.capDefaults && typeof raw.capDefaults === 'object'
+    ? raw.capDefaults
+    : {}
+  const normalizeCap = (value) => {
+    const minutes = Number(value)
+    return Number.isFinite(minutes) && minutes > 0 ? Math.floor(minutes) : null
+  }
+  return {
+    capDefaults: {
+      month: normalizeCap(capDefaultsRaw.month),
+      quarter: normalizeCap(capDefaultsRaw.quarter),
+      year: normalizeCap(capDefaultsRaw.year),
+    },
   }
 }
 
@@ -10109,6 +10139,10 @@ function mergeSettings(base, update) {
     formula: {
       ...(base?.formula || {}),
       ...(update?.formula || {}),
+    },
+    comprehensiveHours: {
+      ...(base?.comprehensiveHours || {}),
+      ...(update?.comprehensiveHours || {}),
     },
   })
 }
@@ -11936,6 +11970,75 @@ function buildAttendanceComprehensiveHoursComparison(input = {}) {
     remainingMinutes,
     excessMinutes,
     status,
+  }
+}
+
+// ── Cap-policy persistence V1 (resolver + period-type bridge) ──
+// Persisted comprehensive-hours cap defaults are resolved here so a background period
+// sync (PR6, separate opt-in) can compute excess against an org default. This slice ships
+// the resolver/bridge as the locked contract; it does NOT wire them into any producer and
+// does NOT change preview behavior (preview still takes a caller cap).
+
+// Config-revision marker for the cap defaults. Any cap edit changes this key, so a row's
+// source_fingerprint (which will carry it) changes and the row re-syncs on the next pass.
+// It is a revision id, NOT an effective-date (effective-dating is deferred).
+function buildAttendanceComprehensiveHoursCapEffectiveKey(capDefaults) {
+  const canonical = JSON.stringify({
+    month: capDefaults?.month ?? null,
+    quarter: capDefaults?.quarter ?? null,
+    year: capDefaults?.year ?? null,
+  })
+  return `cfg:${crypto.createHash('sha1').update(canonical).digest('hex').slice(0, 12)}`
+}
+
+// Period-type bridge: the period-summary sync emits date_range / payroll_cycle, never
+// month/quarter/year. Derive the comprehensive-hours cycle-type from a date_range window so
+// the org defaults are reachable. Exact natural month/quarter/year map to those types; any
+// other window is custom_range (no org default in V1).
+function bridgeAttendanceDateRangeToComprehensiveHoursPeriod(from, to) {
+  const f = normalizeDateOnlyStrict(from)
+  const t = normalizeDateOnlyStrict(to)
+  if (!f || !t || f > t) {
+    return { type: 'custom_range', key: `range:${from}:${to}`, from, to }
+  }
+  const [year, month, day] = f.split('-').map((part) => Number(part))
+  if (day === 1) {
+    if (t === attendanceComprehensiveMonthEndDate(year, month)) {
+      return { type: 'month', key: f.slice(0, 7), from: f, to: t }
+    }
+    if ((month - 1) % 3 === 0 && t === attendanceComprehensiveMonthEndDate(year, month + 2)) {
+      const quarter = Math.floor((month - 1) / 3) + 1
+      return { type: 'quarter', key: `${year}-Q${quarter}`, from: f, to: t }
+    }
+    if (month === 1 && t === `${String(year).padStart(4, '0')}-12-31`) {
+      return { type: 'year', key: `${year}`, from: f, to: t }
+    }
+  }
+  return { type: 'custom_range', key: `range:${f}:${t}`, from: f, to: t }
+}
+
+// V1 resolver: org default cap by cycle-type. orgId / userId are forward-compat (per-org and
+// per-user override land later without changing callers) and intentionally unused in V1 —
+// attendance.settings is a single global config. Returns null when no org default applies
+// (payroll_cycle / custom_range, or the cap is unset); callers then stale-null the columns.
+function resolveAttendanceComprehensiveHoursCap(settings, orgId, userId, period) {
+  const capDefaults = settings?.comprehensiveHours?.capDefaults || {}
+  const type = period?.type
+  let capMinutes = null
+  if (type === 'month' || type === 'quarter' || type === 'year') {
+    const raw = Number(capDefaults[type])
+    capMinutes = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : null
+  }
+  if (capMinutes === null) return null
+  const source = 'org_default_by_cycle_type'
+  return {
+    capMinutes,
+    source,
+    fingerprintPayload: {
+      comprehensive_hours_cap_minutes: capMinutes,
+      comprehensive_hours_cap_source: source,
+      comprehensive_hours_cap_effective_key: buildAttendanceComprehensiveHoursCapEffectiveKey(capDefaults),
+    },
   }
 }
 
@@ -13937,6 +14040,10 @@ module.exports = {
     normalizeCalendarPolicyOverrides,
     resolveEffectiveCalendar,
     resolveAttendanceComprehensiveHoursPeriod,
+    normalizeAttendanceComprehensiveHoursSettings,
+    bridgeAttendanceDateRangeToComprehensiveHoursPeriod,
+    resolveAttendanceComprehensiveHoursCap,
+    buildAttendanceComprehensiveHoursCapEffectiveKey,
     calculateAttendanceComprehensiveShiftPlannedMinutes,
     buildAttendanceComprehensivePlannedMinutesFromDays,
     buildAttendanceComprehensiveActualMinutesFromSummary,

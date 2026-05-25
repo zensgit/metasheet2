@@ -484,3 +484,96 @@ describe('attendance comprehensive working-hours control helpers', () => {
     expect(pluginSource).not.toContain("'DELETE',\n      '/api/attendance/comprehensive-hours/preview'")
   })
 })
+
+describe('comprehensive-hours cap-policy persistence (V1)', () => {
+  const settingsWith = (capDefaults: Record<string, number | null>) => ({
+    comprehensiveHours: { capDefaults },
+  })
+
+  // R1 — resolver contract: org default by cycle-type for month/quarter/year.
+  it('R1: resolves the org default cap per cycle-type', () => {
+    const settings = settingsWith({ month: 10560, quarter: 31680, year: 126720 })
+    for (const [type, expected] of [['month', 10560], ['quarter', 31680], ['year', 126720]] as const) {
+      const resolved = helpers.resolveAttendanceComprehensiveHoursCap(settings, 'org-1', 'u-1', { type, key: 'k' })
+      expect(resolved).not.toBeNull()
+      expect(resolved.capMinutes).toBe(expected)
+      expect(resolved.source).toBe('org_default_by_cycle_type')
+    }
+  })
+
+  // R2 (resolver half) — no cap configured → null (not 0, not error). The sync-side
+  // stale-null behaviour is exercised by PR6 against the real wire.
+  it('R2: returns null when the cap is unset for the cycle-type', () => {
+    const settings = settingsWith({ month: null, quarter: null, year: null })
+    expect(helpers.resolveAttendanceComprehensiveHoursCap(settings, 'org-1', 'u-1', { type: 'month', key: 'k' })).toBeNull()
+    expect(helpers.resolveAttendanceComprehensiveHoursCap({}, 'org-1', 'u-1', { type: 'year', key: 'k' })).toBeNull()
+  })
+
+  // R3 — payroll_cycle / custom_range have no org default in V1 → null.
+  it('R3: payroll_cycle and custom_range resolve to null in V1', () => {
+    const settings = settingsWith({ month: 10560, quarter: 31680, year: 126720 })
+    expect(helpers.resolveAttendanceComprehensiveHoursCap(settings, 'org-1', 'u-1', { type: 'payroll_cycle', key: 'c' })).toBeNull()
+    expect(helpers.resolveAttendanceComprehensiveHoursCap(settings, 'org-1', 'u-1', { type: 'custom_range', key: 'r' })).toBeNull()
+  })
+
+  // R5 — fingerprintPayload keys are exactly the companion catalog codes PR6 relies on.
+  it('R5: fingerprintPayload carries exactly the companion cap codes', () => {
+    const resolved = helpers.resolveAttendanceComprehensiveHoursCap(
+      settingsWith({ month: 10560, quarter: null, year: null }), 'org-1', 'u-1', { type: 'month', key: '2026-03' },
+    )
+    expect(Object.keys(resolved.fingerprintPayload).sort()).toEqual([
+      'comprehensive_hours_cap_effective_key',
+      'comprehensive_hours_cap_minutes',
+      'comprehensive_hours_cap_source',
+    ])
+    expect(resolved.fingerprintPayload.comprehensive_hours_cap_minutes).toBe(10560)
+    expect(resolved.fingerprintPayload.comprehensive_hours_cap_source).toBe('org_default_by_cycle_type')
+    expect(resolved.fingerprintPayload.comprehensive_hours_cap_effective_key).toMatch(/^cfg:[0-9a-f]{12}$/)
+  })
+
+  // R4 (payload half) — a cap edit changes effective_key, so the row's fingerprint changes
+  // and it re-syncs on the next pass. (The actual re-sync is exercised by PR6.)
+  it('R4: effective_key changes when any cap default changes', () => {
+    const a = helpers.buildAttendanceComprehensiveHoursCapEffectiveKey({ month: 10560, quarter: null, year: null })
+    const b = helpers.buildAttendanceComprehensiveHoursCapEffectiveKey({ month: 10561, quarter: null, year: null })
+    const aAgain = helpers.buildAttendanceComprehensiveHoursCapEffectiveKey({ month: 10560, quarter: null, year: null })
+    expect(a).not.toBe(b)
+    expect(a).toBe(aAgain)
+  })
+
+  // R7 — period-type bridge: exact natural windows map to month/quarter/year; others to
+  // custom_range; so org defaults are reachable through the date_range producer.
+  it('R7: bridges date_range windows to the correct cycle-type', () => {
+    expect(helpers.bridgeAttendanceDateRangeToComprehensiveHoursPeriod('2026-03-01', '2026-03-31'))
+      .toMatchObject({ type: 'month', key: '2026-03' })
+    expect(helpers.bridgeAttendanceDateRangeToComprehensiveHoursPeriod('2026-01-01', '2026-03-31'))
+      .toMatchObject({ type: 'quarter', key: '2026-Q1' })
+    expect(helpers.bridgeAttendanceDateRangeToComprehensiveHoursPeriod('2026-02-01', '2026-02-28'))
+      .toMatchObject({ type: 'month', key: '2026-02' })
+    expect(helpers.bridgeAttendanceDateRangeToComprehensiveHoursPeriod('2026-01-01', '2026-12-31'))
+      .toMatchObject({ type: 'year', key: '2026' })
+    expect(helpers.bridgeAttendanceDateRangeToComprehensiveHoursPeriod('2026-03-02', '2026-03-30'))
+      .toMatchObject({ type: 'custom_range' })
+    expect(helpers.bridgeAttendanceDateRangeToComprehensiveHoursPeriod('2026-01-01', '2026-04-15'))
+      .toMatchObject({ type: 'custom_range' })
+  })
+
+  // R7 end-to-end — a bridged natural-month window reaches the org default.
+  it('R7: a bridged natural-month window resolves the month org default', () => {
+    const period = helpers.bridgeAttendanceDateRangeToComprehensiveHoursPeriod('2026-03-01', '2026-03-31')
+    const resolved = helpers.resolveAttendanceComprehensiveHoursCap(
+      settingsWith({ month: 10560, quarter: null, year: null }), 'org-1', 'u-1', period,
+    )
+    expect(resolved?.capMinutes).toBe(10560)
+  })
+
+  // Settings normalizer — caps are positive integers or null; junk coerces to null.
+  it('normalizer: cap defaults are positive integers or null', () => {
+    const normalized = helpers.normalizeAttendanceComprehensiveHoursSettings({
+      capDefaults: { month: 600, quarter: -5, year: 'nope', day: 99 },
+    })
+    expect(normalized.capDefaults).toEqual({ month: 600, quarter: null, year: null })
+    expect(helpers.normalizeAttendanceComprehensiveHoursSettings(undefined).capDefaults)
+      .toEqual({ month: null, quarter: null, year: null })
+  })
+})
