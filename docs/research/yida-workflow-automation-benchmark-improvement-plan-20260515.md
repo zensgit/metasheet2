@@ -1256,6 +1256,8 @@ pnpm validate:all
 
 ## 14. 2026-05-23 进度附录
 
+> **2026-05-25 刷新说明**：本附录原快照定格在 `origin/main@39258df83`（2026-05-23），其中 Phase 2 当时记为完全未启动。此后 `ApprovalAssigneeResolver` 第一版已作为 kernel-polish 落地并硬化（PR #1797 + #1800），故下列与 Phase 2 Resolver 相关的"未启动"口径已过时。本次刷新已就地更正 §14.1 总览、§14.4 Phase 2、§14.9 结论、§14.10 下一步四处；其余 Phase 2 下游项（trigger bindings / backwrite / start_approval / event bridge）与 Phase 3-6 仍冻结/未启动，口径不变。本刷新仅改文档，不触碰 runtime / migrations / routes。
+
 本节是对 `origin/main@39258df83` 的代码实证进度复核，不改写 2026-05-15 的原始计划。状态口径如下：
 
 - **已落地**：运行时代码、迁移、路由或测试已经进入 `origin/main`。
@@ -1269,13 +1271,13 @@ pnpm validate:all
 |---|---:|---:|---:|---:|---|
 | Phase 0 文档固化 | 3 个具名 deliverable | 2 个替代性产物 | 1 组具名三件套 | 0 | 部分完成；approval Phase 1 docs 替代了原计划三件套的一部分 |
 | Phase 1 审批内核正确性 | 4 | 3 | 0 | 1 | 版本冻结、自动审批三合并、管理员跳转已落地；加签冻结 |
-| Phase 2 业务闭环 MVP | 5 | 0 | 5 | 0 | 未启动 |
+| Phase 2 业务闭环 MVP | 5 | 1 | 4 | 0 | **1/5（2026-05-25 更新）**：`ApprovalAssigneeResolver` 第一版已落地并硬化（#1797 + #1800）；trigger bindings / backwrite / start_approval / event bridge 仍冻结 |
 | Phase 3 审批产品化增强 | 5 | 0 个新增计划项 | 5 | 0 | 有历史基线，但本文计划项未启动 |
 | Phase 4 运行治理 | 5 | 0 个完整计划项 | 4+ | 0 | 有自动化日志/支持包底座；重跑、失败治理、SLA 超时动作未启动 |
 | Phase 5 可靠调度 | 5 | 0 | 5 | 0 | 未启动 |
 | Phase 6 设计器整合 | 4 | 0 个映射计划项 | 4 | 0 | Workflow Designer/BPMN baseline 存在；运行时映射未启动 |
 
-按本文 §7 推荐执行顺序的前 15 项计算，代码层面已落地 3 项：版本冻结、自动审批三合并、管理员跳转。`add-sign` 只有 worksplit/ADR-first 入口和战略推迟决策，不能计为运行时落地。
+按本文 §7 推荐执行顺序的前 15 项计算，代码层面已落地 4 项（2026-05-25 更新）：版本冻结、自动审批三合并、管理员跳转（§7 第 1-3 项）、`ApprovalAssigneeResolver` 第一版（§7 第 5 项，#1797 + #1800）。`add-sign`（§7 第 4 项）只有 worksplit/ADR-first 入口和战略推迟决策，不能计为运行时落地。`approval_trigger_bindings`（§7 第 6 项）及之后均仍冻结/未启动。
 
 ### 14.2 Phase 0：文档固化与现状清理
 
@@ -1301,9 +1303,8 @@ Phase 0 的准确口径是“部分完成且被 approval Phase 1 文档替代”
 
 ### 14.4 Phase 2：业务闭环 MVP
 
-Phase 2 当前没有运行时代码落地。以下命名空间在 `origin/main` 中未发现：
+Phase 2 已落地 1/5（2026-05-25 更新）：`ApprovalAssigneeResolver` 第一版已进入 `origin/main`。以下下游命名空间在 `origin/main` 中仍未发现（grep 实证）：
 
-- `ApprovalAssigneeResolver`
 - `approval_trigger_bindings`
 - `start_approval`
 - `approval.approved`
@@ -1314,13 +1315,13 @@ Phase 2 当前没有运行时代码落地。以下命名空间在 `origin/main` 
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| `ApprovalAssigneeResolver` 第一版 | 未启动 | 仍缺字段取人、requester、动态角色、组织成员组等统一解析层。 |
-| 多维表/公开表单触发审批 | 未启动 | 无 trigger binding 表和 source snapshot 服务。 |
-| 审批结果回写记录 | 未启动 | 无 result mapping/backwrite 服务。 |
-| 自动化 `start_approval` 动作 | 未启动 | 自动化 action 白名单和 executor 中未见该动作。 |
-| 审批完成事件桥 | 未启动 | 无 `approval.approved/rejected/returned` 自动化事件桥。 |
+| `ApprovalAssigneeResolver` 第一版 | **已落地并硬化（2026-05-25 更新）** | `packages/core-backend/src/services/ApprovalAssigneeResolver.ts` 已落地，支持 `static_user`、`static_role`、`requester`、`form_field_user` 四种 source kind（类型层亦只开放这四种，见 `packages/core-backend/src/types/approval-product.ts`）；同步纯函数、无 DB；`assigneeSources` 配置随 `runtime_graph` 冻结进 `approval_published_definitions.runtime_graph`，运行时从冻结 graph + instance snapshot 读取，解析结果以 `metadata.resolvedFrom` 写入 `approval_assignments`（非写回冻结 graph）。PR #1797 实现 + #1800 收口 O1/O2/O3 硬化观察点。落地原因：在 #1794 scope-gate 被显式降级为 kernel-polish（纯解析层、无新表、无新路由），故允许在 K3 stage-1 lock 下做。 |
+| 多维表/公开表单触发审批 | 未启动（冻结） | 无 trigger binding 表和 source snapshot 服务；属新业务面，受 K3 stage-1 lock 冻结。 |
+| 审批结果回写记录 | 未启动（冻结） | 无 result mapping/backwrite 服务；受 K3 stage-1 lock 冻结。 |
+| 自动化 `start_approval` 动作 | 未启动（冻结） | 自动化 action 白名单和 executor 中未见该动作；受 K3 stage-1 lock 冻结。 |
+| 审批完成事件桥 | 未启动（冻结） | 无 `approval.approved/rejected/returned` 自动化事件桥；受 K3 stage-1 lock 冻结。 |
 
-如果后续解锁 Phase 2，建议第一片仍从 `ApprovalAssigneeResolver` scope gate 开始，因为它是公开表单/多维表触发审批的动态审批人基础。
+`ApprovalAssigneeResolver` 第一版已完成（见上）。Phase 2 下一片本应是 `approval_trigger_bindings` scope-gate，但它会带来新表 + 新路由 + 跨域事件，无法像 Resolver 那样降级为 kernel-polish，属新业务面 —— **再进入条件为 K3 GATE PASS 或用户具名解锁，不会因"Resolver 已做完"自动顺延进入**。
 
 ### 14.5 Phase 3：审批产品化增强
 
@@ -1380,16 +1381,18 @@ Workflow Designer/BPMN baseline 仍然存在：
 
 1. **审批内核高风险项已完成 3/4**：版本冻结、自动审批三合并、管理员跳转已经进入 `origin/main`，并且补过 scratch PG 验证债。
 2. **加签不作为当前未完成阻塞项追赶**：PR4 保留低再进入成本，但受 K3 PoC gate 策略冻结。
-3. **业务闭环 Phase 2 尚未开始**：公开表单/多维表触发审批、审批结果回写、`start_approval` 和 approval event bridge 都还没有 runtime。
+3. **业务闭环 Phase 2 已落地 1/5（2026-05-25 更新）**：`ApprovalAssigneeResolver` 第一版已落地并硬化（#1797 + #1800，kernel-polish 降级后进入）；下游的公开表单/多维表触发审批、审批结果回写、`start_approval` 和 approval event bridge 都还没有 runtime，且受 K3 stage-1 lock 冻结。
 4. **运行治理和可靠调度仍是后续阶段**：automation retry、persistent queue、SLA timeout actions、business calendar 尚未落地。
 5. **attendance effective-calendar 是旁路完成资产**：它降低了未来工作日历/SLA 的实现风险，但不是本文 approval SLA 的完成证明。
 
 ### 14.10 建议的下一步
 
-除非客户或 K3 gate 明确要求加签，否则不建议重启 PR4。更稳的后续路线是：
+除非客户或 K3 gate 明确要求加签，否则不建议重启 PR4。`ApprovalAssigneeResolver` 第一版已完成（2026-05-25 更新），故原列表第 1 项已落地。更稳的后续路线是：
 
-1. 先做 Phase 2 scope gate：`ApprovalAssigneeResolver` 第一版。
-2. 再做 `approval_trigger_bindings`：多维表/公开表单触发审批。
-3. 然后做审批结果回写和 `start_approval` 自动化动作。
+1. ~~先做 Phase 2 scope gate：`ApprovalAssigneeResolver` 第一版。~~ **已完成（#1797 + #1800）**。
+2. 再做 `approval_trigger_bindings`：多维表/公开表单触发审批 —— **冻结中**，属新业务面（新表 + 新路由 + 跨域事件，无法降级为 kernel-polish），再进入条件为 K3 GATE PASS 或用户具名解锁，不会因第 1 项完成而自动进入。
+3. 然后做审批结果回写和 `start_approval` 自动化动作 —— 同样冻结，排在第 2 项之后。
+
+**关键纪律（2026-05-25）**：Resolver 第一版能在 K3 stage-1 lock 下落地，是因为它被显式降级为 kernel-polish（纯解析层、无新表、无新路由、同步纯函数）；这一豁免不传递给下游 trigger bindings 及之后的任何项。下一片不是自动进入 `approval_trigger_bindings`，而是等 **K3 GATE PASS 或用户具名解锁**。
 
 每一片仍应按独立 opt-in 推进，并保持 development/verification MD 作为审计链。本文附录只提供状态对账，不自动解锁后续 runtime 开发。
