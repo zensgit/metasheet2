@@ -610,7 +610,7 @@ describe('K3 WISE setup helpers', () => {
         FNumber: 'MAT-001',
         FName: 'Bolt',
         FModel: 'M6 x 20',
-        FBaseUnitID: 'Pcs',
+        FBaseUnitID: { FNumber: 'Pcs' },
       },
     })
     expect(bomPreview).toEqual({

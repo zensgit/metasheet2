@@ -587,9 +587,25 @@ function projectRecordForTemplate(record, schema) {
   const projected = {}
   for (const field of schema) {
     const value = getPath(record, field.name)
-    if (value !== undefined) setPath(projected, field.name, value)
+    if (value !== undefined) setPath(projected, field.name, applyPreviewReferenceShape(value, field))
   }
   return projected
+}
+
+function normalizePreviewReferenceIdentifier(field) {
+  const reference = field && isPlainObject(field.reference) ? field.reference : null
+  const identifier = firstString(
+    reference && reference.identifier,
+    reference && reference.identifierField,
+    reference && reference.key,
+  )
+  return identifier || null
+}
+
+function applyPreviewReferenceShape(value, field) {
+  const identifier = normalizePreviewReferenceIdentifier(field)
+  if (!identifier || value === undefined || value === null || value === '' || isPlainObject(value)) return value
+  return { [identifier]: value }
 }
 
 function buildTemplatePreview(input) {

@@ -235,6 +235,11 @@ export interface K3WiseDocumentTemplate {
     label: string
     type: string
     required?: boolean
+    reference?: {
+      identifier?: string
+      identifierField?: string
+      key?: string
+    }
   }>
   sampleSource: Record<string, unknown>
 }
@@ -307,6 +312,7 @@ const SQLSERVER_KIND = 'erp:k3-wise-sqlserver'
 const K3_WISE_POC_MIN_SAMPLE_LIMIT = 1
 const K3_WISE_POC_MAX_SAMPLE_LIMIT = 3
 const K3_WISE_DOCUMENT_TEMPLATE_VERSION = '2026.05.v1'
+const K3_REFERENCE_BY_NUMBER = { identifier: 'FNumber' }
 const IMPORT_SECRET_KEY_PATTERN =
   /(password|passwd|pwd|secret|sessionid|session_id|cookie|accesskey|access_key|privatekey|private_key|clientsecret|client_secret|authoritycode|authority_code|^token$|access[_-]?token|bearer[_-]?token)/i
 
@@ -323,7 +329,20 @@ const K3_WISE_DOCUMENT_TEMPLATES: Record<K3WisePipelineTarget, K3WiseDocumentTem
       { name: 'FNumber', label: '物料编码', type: 'string', required: true },
       { name: 'FName', label: '物料名称', type: 'string', required: true },
       { name: 'FModel', label: '规格型号', type: 'string' },
-      { name: 'FBaseUnitID', label: '基本单位', type: 'string' },
+      { name: 'FUnitGroupID', label: '单位组', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FBaseUnitID', label: '基本单位', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FOrderUnitID', label: '订货单位', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FSaleUnitID', label: '销售单位', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FProductUnitID', label: '生产单位', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FStoreUnitID', label: '库存单位', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FAcctID', label: '存货科目', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FSaleAcctID', label: '销售科目', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FCostAcctID', label: '成本科目', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FCheckCycle', label: '检验周期', type: 'number' },
+      { name: 'FTrack', label: '跟踪策略', type: 'string' },
+      { name: 'FBatChangeEconomy', label: '批量变动经济量', type: 'number' },
+      { name: 'FStdBatchQty', label: '标准批量', type: 'number' },
+      { name: 'FKanBanCapability', label: '看板能力', type: 'number' },
     ],
     sampleSource: {
       code: 'MAT-001',
@@ -735,11 +754,25 @@ function buildTargetRecordFromTemplate(template: K3WiseDocumentTemplate): Record
   return target
 }
 
+function normalizeReferenceIdentifier(field: K3WiseDocumentTemplate['schema'][number]): string | null {
+  const reference = field.reference
+  if (!reference || typeof reference !== 'object') return null
+  const identifier = reference.identifier || reference.identifierField || reference.key
+  return typeof identifier === 'string' && identifier.trim() ? identifier.trim() : null
+}
+
+function applyReferenceShape(value: unknown, field: K3WiseDocumentTemplate['schema'][number]): unknown {
+  const identifier = normalizeReferenceIdentifier(field)
+  if (!identifier || isBlank(value) || (value && typeof value === 'object' && !Array.isArray(value))) return value
+  return { [identifier]: value }
+}
+
 function projectTargetRecordForTemplate(template: K3WiseDocumentTemplate, record: Record<string, unknown>): Record<string, unknown> {
   const projected: Record<string, unknown> = {}
   template.schema.forEach((field) => {
     if (Object.prototype.hasOwnProperty.call(record, field.name)) {
-      projected[field.name] = record[field.name]
+      const value = applyReferenceShape(record[field.name], field)
+      if (!isBlank(value)) projected[field.name] = value
     }
   })
   return projected

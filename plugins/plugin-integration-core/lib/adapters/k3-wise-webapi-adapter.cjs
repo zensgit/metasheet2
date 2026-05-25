@@ -121,6 +121,30 @@ function firstDefined(...values) {
   return undefined
 }
 
+function cloneJson(value) {
+  return value === undefined ? undefined : JSON.parse(JSON.stringify(value))
+}
+
+function isBlankValue(value) {
+  return value === undefined || value === null || (typeof value === 'string' && value.trim() === '')
+}
+
+function normalizeReferenceIdentifier(field) {
+  const reference = field && isPlainObject(field.reference) ? field.reference : null
+  const identifier = firstDefined(
+    reference && reference.identifier,
+    reference && reference.identifierField,
+    reference && reference.key,
+  )
+  return typeof identifier === 'string' && identifier.trim() ? identifier.trim() : null
+}
+
+function applyReferenceShape(value, field) {
+  const identifier = normalizeReferenceIdentifier(field)
+  if (!identifier || isBlankValue(value) || isPlainObject(value)) return value
+  return { [identifier]: value }
+}
+
 function normalizeBusinessBoolean(value) {
   if (value === undefined || value === null || value === '') return null
   if (typeof value === 'boolean') return value
@@ -387,8 +411,11 @@ function buildSaveBody(record, request, objectConfig) {
     return objectConfig.buildBody(record, request)
   }
   const bodyKey = objectConfig.bodyKey || 'Data'
-  const base = isPlainObject(objectConfig.bodyTemplate) ? { ...objectConfig.bodyTemplate } : {}
-  base[bodyKey] = projectRecordForBody(record, objectConfig)
+  const base = isPlainObject(objectConfig.bodyTemplate) ? cloneJson(objectConfig.bodyTemplate) : {}
+  const projected = projectRecordForBody(record, objectConfig)
+  base[bodyKey] = isPlainObject(base[bodyKey]) && isPlainObject(projected)
+    ? { ...base[bodyKey], ...projected }
+    : projected
   return base
 }
 
@@ -402,9 +429,12 @@ function projectRecordForBody(record, objectConfig) {
     : []
   if (schemaFields.length === 0) return record
   const projected = {}
-  for (const field of schemaFields) {
-    if (Object.prototype.hasOwnProperty.call(record, field)) {
-      projected[field] = record[field]
+  for (const field of objectConfig.schema) {
+    const fieldName = field && field.name
+    if (typeof fieldName !== 'string' || fieldName.trim().length === 0) continue
+    if (Object.prototype.hasOwnProperty.call(record, fieldName)) {
+      const value = applyReferenceShape(record[fieldName], field)
+      if (!isBlankValue(value)) projected[fieldName] = value
     }
   }
   return projected
