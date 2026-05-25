@@ -778,6 +778,149 @@ function projectTargetRecordForTemplate(template: K3WiseDocumentTemplate, record
   return projected
 }
 
+// ---- Reference completeness preview (S2) --------------------------------------
+// Implements the K3 reference-mapping UI contract
+// (integration-k3wise-reference-mapping-ui-contract-design-20260525.md):
+//   C2 — a reference cell is treated as an array with null-skip semantics.
+//   C3 — compose {FNumber} / {FName,FNumber} / {FID,FName} client-side (preview ONLY).
+//   C5 — bounded sample scan + unresolved detection.
+// This is a client-side preview/validation helper, NOT a server gate. It deliberately
+// does NOT reuse applyReferenceShape (single-key wrap, a different concern) — it
+// preserves EVERY present component so two-field shapes are not flattened.
+
+export type K3WiseReferenceCompletenessReason = 'empty' | 'missing-identifier' | 'invalid-row'
+
+export interface K3WiseReferenceCompletenessEntry {
+  field: string
+  label: string
+  rowIndex: number
+  status: 'resolved' | 'unresolved'
+  reason?: K3WiseReferenceCompletenessReason
+  composed?: Record<string, unknown>
+}
+
+export interface K3WiseReferenceCompletenessPreview {
+  scannedRowCount: number
+  truncated: boolean
+  entries: K3WiseReferenceCompletenessEntry[]
+  resolvedCount: number
+  unresolvedCount: number
+  canSave: boolean
+}
+
+const K3_REFERENCE_COMPONENT_KEYS = ['FNumber', 'FName', 'FID'] as const
+const K3_REFERENCE_IDENTIFIER_KEYS = ['FNumber', 'FID'] as const
+const DEFAULT_REFERENCE_COMPLETENESS_SAMPLE_LIMIT = 3
+
+// Normalize a reference cell to candidate values, dropping null/undefined/'' (C2 null-skip).
+function normalizeReferenceCellValues(raw: unknown): unknown[] {
+  const list = Array.isArray(raw)
+    ? raw
+    : raw === null || raw === undefined || raw === ''
+      ? []
+      : [raw]
+  return list.filter((value) => value !== null && value !== undefined && value !== '')
+}
+
+// Compose a K3 reference object from one candidate, PRESERVING every present component
+// ({FName,FNumber} / {FID,FName} stay multi-field). Returns null when no identifier
+// component (FNumber|FID) is present. A scalar composes to the degenerate {FNumber}.
+function composeK3ReferenceObject(candidate: unknown): Record<string, unknown> | null {
+  if (typeof candidate === 'object' && candidate !== null && !Array.isArray(candidate)) {
+    const source = candidate as Record<string, unknown>
+    const composed: Record<string, unknown> = {}
+    for (const key of K3_REFERENCE_COMPONENT_KEYS) {
+      const value = source[key]
+      if (value !== null && value !== undefined && value !== '') composed[key] = value
+    }
+    const hasIdentifier = K3_REFERENCE_IDENTIFIER_KEYS.some((key) => composed[key] !== undefined)
+    return hasIdentifier ? composed : null
+  }
+  return { FNumber: candidate }
+}
+
+export function buildK3WiseReferenceCompletenessPreview(
+  target: K3WisePipelineTarget,
+  rows: unknown,
+  options?: { sampleLimit?: number },
+): K3WiseReferenceCompletenessPreview {
+  const template = K3_WISE_DOCUMENT_TEMPLATES[target]
+  const referenceFields = (template ? template.schema : []).filter((field) => Boolean(field.reference))
+  const sampleLimit = Math.max(1, Math.floor(options?.sampleLimit ?? DEFAULT_REFERENCE_COMPLETENESS_SAMPLE_LIMIT))
+
+  // Defensive: garbage in (textarea-parsed JSON) must not throw. Non-array ⇒ nothing
+  // validated ⇒ canSave stays false.
+  if (!Array.isArray(rows)) {
+    return { scannedRowCount: 0, truncated: false, entries: [], resolvedCount: 0, unresolvedCount: 0, canSave: false }
+  }
+
+  const scannedRowCount = Math.min(rows.length, sampleLimit)
+  const truncated = rows.length > sampleLimit
+  const entries: K3WiseReferenceCompletenessEntry[] = []
+
+  for (let rowIndex = 0; rowIndex < scannedRowCount; rowIndex += 1) {
+    const row = rows[rowIndex]
+    const isObjectRow = typeof row === 'object' && row !== null && !Array.isArray(row)
+    for (const field of referenceFields) {
+      const base = { field: field.name, label: field.label, rowIndex }
+      if (!isObjectRow) {
+        entries.push({ ...base, status: 'unresolved', reason: 'invalid-row' })
+        continue
+      }
+      const candidates = normalizeReferenceCellValues((row as Record<string, unknown>)[field.name])
+      if (candidates.length === 0) {
+        entries.push({ ...base, status: 'unresolved', reason: 'empty' })
+        continue
+      }
+      let composed: Record<string, unknown> | null = null
+      for (const candidate of candidates) {
+        composed = composeK3ReferenceObject(candidate)
+        if (composed) break
+      }
+      entries.push(
+        composed
+          ? { ...base, status: 'resolved', composed }
+          : { ...base, status: 'unresolved', reason: 'missing-identifier' },
+      )
+    }
+  }
+
+  const resolvedCount = entries.filter((entry) => entry.status === 'resolved').length
+  const unresolvedCount = entries.length - resolvedCount
+  // UX-only signal (contract C5): true only when at least one row was actually scanned
+  // AND no unresolved reference was found. An empty/zero-row sample must NOT report
+  // "resolvable" (nothing was checked). This NEVER enforces on the server.
+  return {
+    scannedRowCount,
+    truncated,
+    entries,
+    resolvedCount,
+    unresolvedCount,
+    canSave: scannedRowCount > 0 && unresolvedCount === 0,
+  }
+}
+
+// Illustrative rows for the preview panel: row 0 fully resolves (mixed {FName,FNumber}
+// and {FID,FName} shapes); row 1 shows both unresolved reasons (empty array, and an
+// object missing an identifier component).
+export const K3_WISE_REFERENCE_COMPLETENESS_SAMPLE_ROWS: ReadonlyArray<Record<string, unknown>> = [
+  {
+    FUnitGroupID: [{ FName: '基本单位组', FNumber: 'UG01' }],
+    FBaseUnitID: [{ FName: '个', FNumber: 'Pcs' }],
+    FOrderUnitID: [{ FName: '个', FNumber: 'Pcs' }],
+    FSaleUnitID: [{ FName: '个', FNumber: 'Pcs' }],
+    FProductUnitID: [{ FName: '个', FNumber: 'Pcs' }],
+    FStoreUnitID: [{ FName: '个', FNumber: 'Pcs' }],
+    FAcctID: [{ FID: '1001', FName: '库存商品' }],
+    FSaleAcctID: [{ FID: '6001', FName: '主营业务收入' }],
+    FCostAcctID: [{ FID: '6401', FName: '主营业务成本' }],
+  },
+  {
+    FBaseUnitID: [],
+    FAcctID: [{ FName: '缺编码科目' }],
+  },
+]
+
 function validateHttpUrl(value: string, field: keyof K3WiseSetupForm, issues: K3WiseSetupValidationIssue[]): void {
   const normalized = trim(value)
   if (!normalized) {
