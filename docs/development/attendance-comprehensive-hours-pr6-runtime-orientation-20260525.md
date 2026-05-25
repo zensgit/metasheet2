@@ -47,13 +47,23 @@ there is no cap-free comprehensive-hours value to snapshot.
 
 ## 3. Slice-size verdict: NOT small — blocked
 
-The first micro-slice is not merely "large"; it is gated behind a feature that does not
-exist and that PR6's contract forbids building inside PR6:
+The first micro-slice is not merely "large"; it is gated behind a capability that does not
+exist today: **a persisted comprehensive-hours cap policy.** That prerequisite introduces
+**new persistent policy / admin-configuration semantics** — caps that survive beyond a
+single request, set and owned by an admin — which is precisely why it must be its own
+opt-in, separate from PR6 reporting.
 
-| Prerequisite the slice needs | #1819 boundary it collides with |
-| --- | --- |
-| Persist a cap (per user / group / cycle) → new policy or settings table | **#2 No new migration** |
-| Let admins set the cap → policy CRUD UI | **#8 No UI / no presentation decision** |
+**What the prerequisite does NOT presuppose:** it is *not* necessarily a DB migration and
+*not* necessarily a new UI. A cap-policy shape could be carried by the existing
+`system_configs` settings-JSON path (`packages/core-backend/src/services/ConfigService.ts:216`/`:253`)
+without a new migration, and an admin surface might reuse an existing settings screen. Whether
+a migration, a new table, or a new admin surface is needed is a **downstream design choice**
+for that separate opt-in — not something this orientation should pre-decide, and not
+something to assume crosses #1819 #2 (no migration) or #8 (no UI) by default.
+
+The point that matters for PR6: PR6's contract forbids *deciding* persistence/admin-config
+shape inside PR6, so the cap-policy prerequisite is out of PR6 scope regardless of how it is
+later implemented.
 
 Orientation succeeded exactly as intended: the prerequisite is caught **before** any code,
 not half-way through.
@@ -85,27 +95,27 @@ exercises fingerprint + value plumbing, less presentation ambiguity than `status
 - **T1** period wire round-trip (real wire, not fixture): sync a user+period with a known cap → query the multitable record back → assert the `comprehensive_hours_excess_minutes` column equals expected.
 - **T3** `source_fingerprint` inclusion: changing the computed value changes the period source fingerprint; `synced_at` alone does not.
 - **T5** no-parallel-producer guard: no new `sync.*[Cc]omprehensive` writer.
-- **Gap to note:** there is no dedicated period-summary sync test file today; the closest report test is `packages/core-backend/tests/unit/attendance-report-field-catalog.test.ts`. The impl slice would add a period-summary sync test target.
+- **Test target already exists:** `packages/core-backend/tests/unit/attendance-report-field-catalog.test.ts:1331` already covers period-summary sync (managed formula fields, value columns, active codes, row key, source fingerprint). The impl slice can **extend this existing target** with the comprehensive-hours value + T1 wire round-trip; no new file required.
 
 ---
 
 ## 5. Recommended sequencing (not decided here)
 
 The honest order is: **comprehensive-hours cap-policy persistence is the real prerequisite,
-and it is a separate decision that deliberately crosses #1819's no-migration boundary** — so
-it must be its own opt-in, not smuggled into PR6 reporting. Once a cap is persisted, the
-reporting value-plumbing slice becomes genuinely small (the value-column path in §1 is
-already there).
+and it is a separate opt-in because it introduces new persistent policy / admin-config
+semantics** (not because it necessarily needs a migration) — so it must not be smuggled into
+PR6 reporting. Once a cap is persisted, the reporting value-plumbing slice becomes genuinely
+small (the value-column path in §1 is already there).
 
 This document does not start that work. Open options (each a separate opt-in):
-1. A cap-policy-persistence design-lock (scopes a migration + how caps are set).
+1. A cap-policy-persistence design-lock — it decides the storage choice (e.g. the existing `system_configs` settings-JSON path vs a new table) and how caps are set; migration vs no-migration is part of *that* design, not presupposed here.
 2. Park PR6 reporting until there is a concrete need for persisted caps.
 
 ---
 
 ## 6. Cross-references
 
-- `docs/development/attendance-comprehensive-hours-pr6-snapshot-boundary-20260525.md` — the boundary contract (#1819) whose #2/#8 the prerequisite collides with.
+- `docs/development/attendance-comprehensive-hours-pr6-snapshot-boundary-20260525.md` — the boundary contract (#1819); PR6 may not decide persistence/admin-config shape, which is why the cap-policy prerequisite is out of PR6 scope.
 - `docs/development/attendance-comprehensive-hours-pr0-pr5-closeout-20260523.md` — establishes comprehensive-hours as stateless preview/control.
 - `[[attendance-multitable-report-boundary]]` — period summaries are the correct grain for period aggregates.
 - `[[staged-opt-in-lineage]]` — cap-persistence and PR6 impl are each separate opt-ins.
