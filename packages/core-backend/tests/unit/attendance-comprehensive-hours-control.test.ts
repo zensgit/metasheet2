@@ -576,4 +576,23 @@ describe('comprehensive-hours cap-policy persistence (V1)', () => {
     expect(helpers.normalizeAttendanceComprehensiveHoursSettings(undefined).capDefaults)
       .toEqual({ month: null, quarter: null, year: null })
   })
+
+  // Merge — a partial capDefaults update must NOT clear the other cycle-types' caps
+  // (deep-merge), and the merged result is normalized.
+  it('mergeSettings deep-merges capDefaults so a partial update preserves the rest', () => {
+    const base = { comprehensiveHours: { capDefaults: { month: 10560, quarter: 31680, year: 126720 } } }
+    const merged = helpers.mergeSettings(base, { comprehensiveHours: { capDefaults: { month: 10561 } } })
+    expect(merged.comprehensiveHours.capDefaults).toEqual({ month: 10561, quarter: 31680, year: 126720 })
+    // An unrelated update leaves caps intact.
+    const merged2 = helpers.mergeSettings(base, { minPunchIntervalMinutes: 5 })
+    expect(merged2.comprehensiveHours.capDefaults).toEqual({ month: 10560, quarter: 31680, year: 126720 })
+  })
+
+  // Save-path guard (static): the PUT /api/attendance/settings zod schema MUST accept
+  // comprehensiveHours.capDefaults, otherwise the save path silently strips it and the
+  // cap is never persisted. The real-wire round-trip is asserted in the integration test.
+  it('settingsSchema accepts comprehensiveHours.capDefaults (not stripped on save)', () => {
+    expect(pluginSource).toMatch(/comprehensiveHours:\s*z\.object\(\{\s*\n\s*capDefaults:\s*z\.object\(\{/)
+    expect(pluginSource).toMatch(/capDefaults:\s*z\.object\(\{\s*\n\s*month:\s*z\.number\(\)/)
+  })
 })

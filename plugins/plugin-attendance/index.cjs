@@ -10143,6 +10143,12 @@ function mergeSettings(base, update) {
     comprehensiveHours: {
       ...(base?.comprehensiveHours || {}),
       ...(update?.comprehensiveHours || {}),
+      // Deep-merge capDefaults so a partial update (e.g. only { month }) does not
+      // clear the other cycle-types' existing caps.
+      capDefaults: {
+        ...(base?.comprehensiveHours?.capDefaults || {}),
+        ...(update?.comprehensiveHours?.capDefaults || {}),
+      },
     },
   })
 }
@@ -14044,6 +14050,7 @@ module.exports = {
     bridgeAttendanceDateRangeToComprehensiveHoursPeriod,
     resolveAttendanceComprehensiveHoursCap,
     buildAttendanceComprehensiveHoursCapEffectiveKey,
+    mergeSettings,
     calculateAttendanceComprehensiveShiftPlannedMinutes,
     buildAttendanceComprehensivePlannedMinutesFromDays,
     buildAttendanceComprehensiveActualMinutesFromSummary,
@@ -14204,6 +14211,13 @@ module.exports = {
       minPunchIntervalMinutes: z.number().int().min(0).optional(),
       formula: z.object({
         allowRawAliases: z.boolean().optional(),
+      }).optional(),
+      comprehensiveHours: z.object({
+        capDefaults: z.object({
+          month: z.number().int().min(0).nullable().optional(),
+          quarter: z.number().int().min(0).nullable().optional(),
+          year: z.number().int().min(0).nullable().optional(),
+        }).optional(),
       }).optional(),
     })
 

@@ -3687,9 +3687,23 @@ describe('Attendance Plugin Integration', () => {
         body: JSON.stringify({
           ...originalSettings,
           minPunchIntervalMinutes: 60,
+          comprehensiveHours: { capDefaults: { month: 10560, quarter: 31680, year: 126720 } },
         }),
       })
       expect(saveSettingsRes.status).toBe(200)
+
+      // Real-wire round-trip: comprehensiveHours.capDefaults must survive the PUT zod
+      // schema + persistence and come back on GET — not be silently stripped. Guards the
+      // save-path drift class (a field present in the normalizer but missing from the
+      // route schema would persist as nothing).
+      const reloadRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      expect(reloadRes.status).toBe(200)
+      const reloaded = (reloadRes.body as {
+        data?: { comprehensiveHours?: { capDefaults?: Record<string, number | null> } }
+      } | undefined)?.data
+      expect(reloaded?.comprehensiveHours?.capDefaults).toEqual({ month: 10560, quarter: 31680, year: 126720 })
 
       const futurePunchRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
         method: 'POST',
