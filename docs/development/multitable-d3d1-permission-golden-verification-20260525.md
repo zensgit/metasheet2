@@ -28,17 +28,17 @@ Predecessors: D3c export field-perm leak fix (#1820, `cc29c6631`) · D3d design 
 
 Non-admin user (`roles:['member']`, `perms:['multitable:read']`) — admin bypass avoided so scoping applies.
 
-Status column = **expected** outcome; PASS/FAIL is recorded only from CI (§4.2) — locally these all skip.
+Result column recorded from CI run [26403388718](https://github.com/zensgit/metasheet2/actions/runs/26403388718) (7 passed / 0 skipped, real DB).
 
 | class | state | seed | endpoint | expected | result |
 |---|---|---|---|---|---|
-| field | granted | `field_permissions(user, visible=true)` | `GET export-xlsx` | `Secret` + `topsecret` present | pending CI |
-| field | denied | `field_permissions(user, visible=false)` | `GET export-xlsx` | `Secret`/`topsecret` **absent** (header + cells) | pending CI |
-| field | inherited | `field_permissions(role, visible=false)` + `user_roles` | `GET export-xlsx` | absent (hidden via role membership) | pending CI |
-| view-projection | granted | field not in `hidden_field_ids` | `GET export-xlsx?viewId=all` | `Secret` present | pending CI |
-| view-projection | denied | field in `view.hidden_field_ids` | `GET export-xlsx?viewId=hidden` | absent | pending CI |
-| export | denied | *N/A — `canExport` fused to `canRead`* | user without `multitable:read` | `403` (sheet-capability gate; no independent export-deny lever) | pending CI |
-| — | sentinel | — | — | `DATABASE_URL` set (suite ran, not skipped) | pending CI |
+| field | granted | `field_permissions(user, visible=true)` | `GET export-xlsx` | `Secret` + `topsecret` present | ✅ |
+| field | denied | `field_permissions(user, visible=false)` | `GET export-xlsx` | `Secret`/`topsecret` **absent** (header + cells) | ✅ |
+| field | inherited | `field_permissions(role, visible=false)` + `user_roles` | `GET export-xlsx` | absent (hidden via role membership) | ✅ |
+| view-projection | granted | field not in `hidden_field_ids` | `GET export-xlsx?viewId=all` | `Secret` present | ✅ |
+| view-projection | denied | field in `view.hidden_field_ids` | `GET export-xlsx?viewId=hidden` | absent | ✅ |
+| export | denied | *N/A — `canExport` fused to `canRead`* | user without `multitable:read` | `403` (sheet-capability gate; no independent export-deny lever) | ✅ |
+| — | sentinel | — | — | `DATABASE_URL` set (suite ran, not skipped) | ✅ |
 
 **Field inherited path:** D3d-1 tests **role** inheritance as the representative path.
 **Member-group** inheritance (`field_permissions(subject_type='member-group')` + `platform_member_group_members`)
@@ -53,11 +53,10 @@ here** — export ignores `meta_view_permissions`; deferred to D3d-2.
 
 - **Test/acceptance only.** Sole non-test edit = the `plugin-tests.yml` CI step (pure test plumbing).
 - **No** `rbac/service.ts` / `auth` / enforcement / record-deny changes.
-- **Enforcement-bug disposition (pending CI):** the assertions are written to *confirm* the D3c-fixed
-  contract; they have not yet run against a real DB (local = skip only). **If CI shows any masking
-  assertion FAIL**, that is a new enforcement leak → per the locked rule the suite **stops as RED
-  evidence** and the fix goes in a **separate** PR, NOT folded here. If CI is green, the contract holds.
-  This line is resolved in §4.2 from the CI result.
+- **Enforcement-bug disposition — RESOLVED (CI green):** all 7 assertions passed against real Postgres
+  (§4.2), including every field/view masking case. **No new enforcement leak** — D3d-1 confirms the
+  D3c-fixed contract. (Had any masking assertion failed, per the locked rule the suite would have
+  stopped as RED evidence with the fix in a separate PR, not folded here.)
 
 ## 4. Verification
 
@@ -78,11 +77,20 @@ Local skip is expected and is NOT acceptance — the real run is CI (§4.2).
 Per the skip-when-unreachable rule, "green" is insufficient; the suite must be proven to **run**,
 not skip. From the `Run multitable permission golden matrix (D3d-1, real DB)` job:
 
-> _<fill after first CI run: paste the reporter line showing `Tests 7 passed (7)` with **0 skipped**,
-> plus the job permalink>_
+From the `Run multitable permission golden matrix (D3d-1, real DB)` step (test (20.x), run
+[26403388718](https://github.com/zensgit/metasheet2/actions/runs/26403388718), 2026-05-25):
 
-The step's `: "${DATABASE_URL:?...}"` guard fails the job loudly if `DATABASE_URL` is ever unset, so
-a phantom-skip cannot pass silently.
+```
+✓ tests/integration/multitable-permission-golden-d3d1.test.ts  (7 tests) 516ms
+ Test Files  1 passed (1)
+      Tests  7 passed (7)
+```
+
+**7 passed, 0 skipped, against real Postgres** — non-skip proven. The step's `: "${DATABASE_URL:?...}"`
+guard fails the job loudly if `DATABASE_URL` is ever unset, so a phantom-skip cannot pass silently.
+
+(Note: the separate non-gating `Run integration tests` step runs the broad suite without `DATABASE_URL`,
+where this file correctly shows `↓ 7 skipped`. The gating signal is the dedicated step above.)
 
 ## 5. Next links
 
