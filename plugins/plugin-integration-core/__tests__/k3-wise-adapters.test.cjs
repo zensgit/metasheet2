@@ -68,6 +68,27 @@ function createK3FetchMock() {
       if (record.FNumber === 'BAD') {
         return jsonResponse(200, { success: false, message: 'invalid material' })
       }
+      if (record.FNumber === 'ROWFAIL') {
+        return jsonResponse(200, {
+          StatusCode: 200,
+          Message: 'Successful',
+          Data: [{ FStatus: false, FItemID: 0, FMessage: 'unit group parameter invalid' }],
+        })
+      }
+      if (record.FNumber === 'STATUS201') {
+        return jsonResponse(200, {
+          StatusCode: 201,
+          Message: 'Faild',
+          Data: [{ FStatus: false, FItemID: 0, FMessage: 'required unit missing' }],
+        })
+      }
+      if (record.FNumber === 'ROWOK') {
+        return jsonResponse(200, {
+          StatusCode: 200,
+          Message: 'Successful',
+          Data: [{ FStatus: true, FItemID: 1001, FNumber: record.FNumber }],
+        })
+      }
       if (parsed.searchParams.get('Token')) {
         return jsonResponse(200, {
           StatusCode: 200,
@@ -390,9 +411,21 @@ async function testK3WebApiAdapter() {
   assert.equal(webApiInternals.businessSuccess({ success: true }, {}), true)
   assert.equal(webApiInternals.businessSuccess({ StatusCode: 200, Data: { Code: 'Y' } }, {}), true)
   assert.equal(webApiInternals.businessSuccess({ StatusCode: 500, Data: { Code: 'N' } }, {}), false)
+  assert.equal(webApiInternals.businessSuccess({
+    StatusCode: 200,
+    Message: 'Successful',
+    Data: [{ FStatus: false, FItemID: 0, FMessage: 'unit group parameter invalid' }],
+  }, {}), false)
+  assert.equal(webApiInternals.businessSuccess({ StatusCode: 201, Message: 'Faild' }, {}), false)
   assert.equal(webApiInternals.businessSuccess({ Result: { ResponseStatus: { IsSuccess: true } } }, {}), true)
   assert.equal(webApiInternals.businessSuccess({ Result: { ResponseStatus: { IsSuccess: false } } }, {}), false)
   assert.equal(webApiInternals.businessSuccess({ id: 'silent-success' }, {}), false)
+  assert.equal(webApiInternals.saveBusinessSuccess({ StatusCode: 200, Message: 'Successful' }, {}), false)
+  assert.equal(webApiInternals.saveBusinessSuccess({
+    StatusCode: 200,
+    Message: 'Successful',
+    Data: [{ FStatus: true, FItemID: 1001 }],
+  }, {}), true)
 
   const invalidBaseUrl = (() => {
     try {
@@ -506,6 +539,48 @@ async function testK3WebApiAuthorityCodeToken() {
   assert.equal(upsert.written, 1)
   assert.equal(upsert.results[0].externalId, 'item-MAT-TOKEN-001')
   assert.equal(upsert.results[0].billNo, 'MAT-TOKEN-001')
+}
+
+async function testK3WebApiSaveBusinessEvidence() {
+  const { fetchImpl } = createK3FetchMock()
+  const adapter = createK3WiseWebApiAdapter({
+    system: createK3WebApiSystem({
+      config: {
+        baseUrl: 'https://k3.example.test',
+        autoSubmit: false,
+        autoAudit: false,
+      },
+    }),
+    fetchImpl,
+  })
+
+  const upsert = await adapter.upsert({
+    object: 'material',
+    records: [
+      { FNumber: 'ROWOK', FName: 'Positive row' },
+      { FNumber: 'ROWFAIL', FName: 'Business row fail' },
+      { FNumber: 'STATUS201', FName: 'Envelope fail' },
+    ],
+    keyFields: ['FNumber'],
+  })
+
+  assert.equal(upsert.written, 1, 'only K3 business-positive row counts as written')
+  assert.equal(upsert.failed, 2, 'K3 row-level failures are counted as failed')
+  assert.equal(upsert.results[0].externalId, 1001, 'positive FItemID is surfaced as external id')
+  assert.equal(upsert.results[0].responseSummary.success, true)
+  assert.equal(upsert.results[0].responseSummary.externalIdPresent, true)
+  assert.equal(upsert.errors[0].code, 'K3_WISE_SAVE_FAILED')
+  assert.match(upsert.errors[0].message, /unit group/i)
+  assert.equal(upsert.errors[0].responseSummary.success, false)
+  assert.equal(upsert.errors[0].responseSummary.failedRowCount, 1)
+  assert.equal(upsert.errors[1].code, 'K3_WISE_SAVE_FAILED')
+  assert.match(upsert.errors[1].message, /required unit/i)
+  assert.equal(upsert.metadata.businessResponses.length, 3)
+  assert.deepEqual(
+    upsert.metadata.businessResponses.map((summary) => summary.success),
+    [true, false, false],
+    'business response summaries preserve one entry per attempted save',
+  )
 }
 
 async function testK3SqlServerChannel() {
@@ -850,6 +925,7 @@ async function testK3WebApiAutoFlagCoercion() {
 async function main() {
   await testK3WebApiAdapter()
   await testK3WebApiAuthorityCodeToken()
+  await testK3WebApiSaveBusinessEvidence()
   testSqlServerConnectionConfigNormalization()
   await testK3SqlServerChannel()
   await testK3WebApiAutoFlagCoercion()
