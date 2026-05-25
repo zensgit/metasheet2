@@ -33,10 +33,13 @@ const GROUP_ID = `d3d20000-0000-4000-8000-${String(TS).slice(-12).padStart(12, '
 const BASE_ID = `base_d3d2_${TS}`
 const SHEET_ID = `sheet_d3d2_${TS}`
 const VIEW_ID = `view_d3d2_${TS}`
-const FLD_NAME = `fld_name_${TS}`
-const FLD_SECRET = `fld_secret_${TS}`
-const REC_OWN = `rec_own_${TS}`
-const REC_OTHER = `rec_other_${TS}`
+// NB: field ids MUST be file-distinct — meta_fields.id is a GLOBAL PK, and the D3d-1 suite
+// uses `fld_name_${TS}` / `fld_secret_${TS}`. Running both files in one vitest invocation with
+// a same-millisecond Date.now() would collide (meta_fields_pkey). The `d3d2` infix prevents it.
+const FLD_NAME = `fld_name_d3d2_${TS}`
+const FLD_SECRET = `fld_secret_d3d2_${TS}`
+const REC_OWN = `rec_own_d3d2_${TS}`
+const REC_OTHER = `rec_other_d3d2_${TS}`
 
 let currentUser: { id: string; roles: string[]; perms: string[] } = { id: USER, roles: ['member'], perms: ['multitable:read'] }
 let app: Express
