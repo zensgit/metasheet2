@@ -44,11 +44,27 @@ Test Files  1 skipped (1)
 ```
 Skip is expected locally; the real run is CI (§4.2).
 
-### 4.2 CI non-skip evidence (REQUIRED — filled from the dedicated step)
+### 4.2 CI non-skip evidence
 
-> _<fill from the `Run multitable permission golden matrix (D3d, real DB)` step: reporter line showing
-> both files' `Tests N passed (N)` with **0 skipped**, plus job permalink. If any real-gate assertion
-> FAILS → stop, RED evidence, separate fix PR (do not fold).>_
+From the `Run multitable permission golden matrix (D3d, real DB)` step (test (20.x), run
+[26408342198](https://github.com/zensgit/metasheet2/actions/runs/26408342198), 2026-05-25):
+
+```
+✓ tests/integration/multitable-permission-golden-d3d1.test.ts  (7 tests) 572ms
+✓ tests/integration/multitable-permission-golden-d3d2.test.ts  (8 tests) 587ms
+ Test Files  2 passed (2)
+      Tests  15 passed (15)
+```
+
+**15 passed, 0 skipped, real Postgres** — non-skip proven. All real gates green (member-group mask,
+sheet write-downgrade 403, record write-own 403) and the view-access non-gate (`canAccess===false` +
+data returned). No enforcement leak found. The `: "${DATABASE_URL:?...}"` guard fails the job loudly if
+unset, so phantom-skip can't pass.
+
+> CI iteration note: two prior CI runs surfaced **test-harness** issues, not leaks — (1) view-access
+> assertion corrected (whitelist annotation, not "always true"), (2) `meta_fields_pkey` collision from
+> D3d-1/D3d-2 sharing `fld_*_${TS}` ids at same-ms import → `d3d2` infix. Real-gate assertions passed
+> throughout.
 
 ## 5. Next
 

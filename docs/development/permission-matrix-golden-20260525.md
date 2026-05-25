@@ -70,5 +70,5 @@ is a deliberate product-model proposal, not a "fix."
 - **D3d-1** (#1827, `4ca98cda1`): export+field tri-state + view projection — **7 passed / 0 skipped**,
   real DB (run 26403388718).
 - **D3d-2** (this PR): member-group field + sheet write-intersection + record write-own + view-access
-  non-gate — _<CI evidence filled in the D3d-2 verification MD §4.2>_.
+  non-gate — **15 passed / 0 skipped** (combined with D3d-1), real DB (run 26408342198).
 - Both run via the dedicated `plugin-tests.yml` step (DATABASE_URL hard guard); non-skip proven in CI.
