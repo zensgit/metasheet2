@@ -5673,11 +5673,13 @@ export function univerMetaRouter(): Router {
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
+      let viewHiddenFieldIds: string[] = []
       if (viewId) {
         const view = await tryResolveViewShared(pool.query.bind(pool), viewId)
         if (!view || view.sheetId !== sheetId) {
           return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
         }
+        viewHiddenFieldIds = view.hiddenFieldIds ?? []
       }
 
       const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
@@ -5686,7 +5688,15 @@ export function univerMetaRouter(): Router {
       }
       if (!capabilities.canRead || !capabilities.canExport) return sendForbidden(res)
 
-      const fields = filterVisiblePropertyFields(await loadFieldsForSheetShared(pool.query.bind(pool), sheetId))
+      // D3c: export must mirror the view path's field masking — apply subject-scoped
+      // field_permissions + view.hidden_field_ids, not only static property.hidden.
+      const visibleFields = filterVisiblePropertyFields(await loadFieldsForSheetShared(pool.query.bind(pool), sheetId))
+      const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
+      const fieldPermissions = deriveFieldPermissions(visibleFields, capabilities, {
+        hiddenFieldIds: viewHiddenFieldIds,
+        fieldScopeMap,
+      })
+      const fields = visibleFields.filter((field) => fieldPermissions[field.id]?.visible !== false)
       const fieldIds = new Set(fields.map((field) => field.id))
       const rows: Array<Array<string | number | boolean | null | undefined>> = []
       let cursor: string | undefined
