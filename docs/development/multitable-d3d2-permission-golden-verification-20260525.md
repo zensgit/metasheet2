@@ -22,7 +22,7 @@ Predecessors: D3d-1 (#1827, `4ca98cda1`) · D3c export leak fix (#1820).
 | sheet | **write-downgraded (gate)** | base write + sheet row `spreadsheet:read` only | PATCH /records | **403** |
 | record | write-own — own | write-own scope, creator | PATCH /records | 200 |
 | record | **write-own — not-own (gate)** | write-own scope, non-creator | PATCH /records | **403** |
-| view-access | **NON-GATE (live)** | row for another user; per-user scope = none | GET /view | `canAccess===true` **AND** rows returned |
+| view-access | **NON-GATE (live)** | view-wide whitelist row for another user; our user ungranted | GET /view | `canAccess===false` (whitelist) **AND** rows still returned (not enforced) |
 | — | sentinel | — | — | `DATABASE_URL` set |
 
 **Documented non-gates (no assertion):** sheet-read, record-read — grant-additive / grant-only, no deny

@@ -24,11 +24,15 @@ field-projection or write-intersection**. The COMPLETE set of real deny-gates:
 Everything else — **view-access `canAccess`, sheet-read, record-read** — is a frontend **annotation**
 the backend does **not** enforce. A reviewer must NOT flag any of these as a gap or leak:
 
-- **`canAccess=false` does not exist for a reachable user** — GET /view 403s if `!capabilities.canRead`,
-  and every `meta_view_permissions.permission` ∈ {read,write,admin} implies `scope.canRead`, so
-  `canAccess` is provably **always true**. View-access is annotation-only.
-- **"Others have a sheet/record row, so I'm denied read"** is not a semantic — the scope loaders are
-  **per-user**; an unmatched user gets no scope → base capability → 200.
+- **`view-access` is a whitelist annotation the backend does NOT enforce.** `meta_view_permissions` is
+  **view-wide whitelist** (`loadViewPermissionScopeMap`): a view with ANY assignment + an ungranted user →
+  `hasAssignments=true, canRead=false` → `canAccess=false`. **But GET /view 403s only on base
+  `capabilities.canRead`, never on `canAccess`** — data is returned regardless. `canAccess` is advisory.
+  (Corrected: an earlier draft wrongly said `canAccess` is "always true"; it varies with the whitelist,
+  but is never *enforced* — the non-gate point is "data returned regardless", not a constant value.)
+- **Sheet/record read** are different: those loaders are **per-user grant-additive** (not view's whitelist),
+  so an unmatched user falls through to base capability → 200. "Others have a sheet/record row, so I'm
+  denied read" is not a semantic there.
 
 If a future change *wants* read-deny or view-access gating, that is a **product model change**
 (separate proposal), explicitly out of D3d-2.
@@ -55,7 +59,7 @@ tested** (no such semantic). "result" below = the asserted contract.
 
 | case | assertion / disposition |
 |---|---|
-| **view-access** | **one live assertion**: GET /view returns **data** AND `viewPermissions[viewId].canAccess === true` (locks "annotation currently non-blocking" as a test, not just prose — guards against a future implicit 403 or false-leak report) |
+| **view-access** | **one live assertion**: with a view perm row for another user (whitelist), our ungranted user gets `viewPermissions[viewId].canAccess === false` **AND GET /view still returns data** (locks "annotation, not enforced" — `canAccess` reflects the whitelist but the backend does not gate data; guards against a future implicit 403 or false-leak report) |
 | **sheet-read** | documented non-gate: per-user grant-additive, no whitelist deny. No assertion. |
 | **record-read** | documented non-gate: grant-only `access_level`, no deny. No assertion. |
 
@@ -70,8 +74,11 @@ tested** (no such semantic). "result" below = the asserted contract.
   `if (!capabilities.canEditRecord) sendForbidden` (univer-meta.ts ~6791) → **403**. Read never denied.
 - **record write-own** → `deriveRecordRowActions`: under `requiresOwnWriteRowPolicy` (write-own scope),
   `canEdit = canEditRecord && isCreator`. `ensureRecordWriteAllowed` at PATCH/DELETE → non-creator **403**.
-- **view-access** → `deriveViewPermissions.canAccess` surfaced only in the response `viewPermissions`
-  field (univer-meta.ts ~6098); no `403`/data-block. Annotation.
+- **view-access** → `loadViewPermissionScopeMap` is **view-wide whitelist** (any assignment →
+  `hasAssignments=true`; ungranted user → `canRead=false` → `canAccess=false`). But
+  `deriveViewPermissions.canAccess` is surfaced only in the response `viewPermissions` field
+  (univer-meta.ts ~6098); GET /view has **no `403`/data-block on `canAccess`** → data returned
+  regardless. Whitelist annotation, not enforced.
 
 ## 3. Rules (locked)
 

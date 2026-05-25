@@ -18,8 +18,9 @@ Knowing this prevents re-litigating the same phantoms:
   so I'm denied" is **not** a semantic anywhere.
 - **`access_level`/`permission` enums are grant-only** (`read`/`write`/`admin`) — no `deny`/`none`.
 - **Frontend annotations are not gates.** `viewPermissions.canAccess`, record `rowActions`, etc. are
-  advisory metadata; the backend does not block data on them. `canAccess` is provably always `true`
-  for any user who can reach GET /view.
+  advisory metadata; the backend does not block data on them. `canAccess` *does* reflect the view-wide
+  whitelist (it can be `false` for an ungranted user when the view has assignments), but GET /view never
+  403s on it — data is returned regardless. The contract is "not enforced", not "constant value".
 
 ### The complete set of REAL deny-gates
 
@@ -52,7 +53,7 @@ Everything else is annotation/grant-additive (non-gates, §2).
 
 | class | disposition | how locked |
 |---|---|---|
-| **view-access** (`canAccess`) | annotation; always `true` for reachable user; data never blocked | **live assertion** (D3d-2): `canAccess===true` AND rows returned |
+| **view-access** (`canAccess`) | whitelist annotation, NOT enforced — `canAccess` can be `false` (view has assignments, user ungranted) yet data is never blocked | **live assertion** (D3d-2): `canAccess===false` AND rows returned |
 | **sheet-read** | per-user grant-additive; unmatched user reads via base capability | documented (no deny path exists) |
 | **record-read** | grant-only `access_level`; no deny | documented (D3d-1 + D3d-2) |
 

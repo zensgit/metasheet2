@@ -158,16 +158,19 @@ describeIfDatabase('multitable permission golden matrix — D3d-2 (real gates + 
     expect(await patchRecord(REC_OTHER)).toBe(403)
   })
 
-  // ── NON-GATE (live contract): view-access is annotation, never blocks data ──
-  // Locks "annotation, not gate": even with a view perm row for ANOTHER user, our user
-  // (per-user scope → none) still gets canAccess===true AND the data rows. Guards against a
-  // future implicit 403 or a reviewer misreading this as a leak.
-  test('view-access NON-GATE: canAccess===true AND data still returned', async () => {
+  // ── NON-GATE (live contract): view-access is a WHITELIST annotation, NOT enforced ──
+  // meta_view_permissions is view-wide whitelist (loadViewPermissionScopeMap): a view with ANY
+  // assignment + an ungranted user → hasAssignments=true, canRead=false → canAccess===false.
+  // The non-gate point: even so, GET /view still returns the DATA (only 403s on base canRead,
+  // never on canAccess). So canAccess reflects the whitelist but the backend does not enforce it.
+  // Locking canAccess===false AND data-returned guards against a future reviewer "fixing" this
+  // into an implicit 403, and documents that the annotation is advisory.
+  test('view-access NON-GATE: whitelist annotation canAccess===false but data STILL returned', async () => {
     currentUser = { id: USER, roles: ['member'], perms: ['multitable:read'] }
     await q('INSERT INTO meta_view_permissions (view_id, subject_type, subject_id, permission) VALUES ($1,$2,$3,$4)', [VIEW_ID, 'user', OTHER, 'admin'])
     const { status, canAccess, rowCount } = await getView()
     expect(status).toBe(200)
-    expect(canAccess).toBe(true)
-    expect(rowCount).toBeGreaterThanOrEqual(1)
+    expect(canAccess).toBe(false) // whitelist: view has an assignment, our user ungranted
+    expect(rowCount).toBeGreaterThanOrEqual(1) // NON-GATE: data returned regardless of canAccess
   })
 })
