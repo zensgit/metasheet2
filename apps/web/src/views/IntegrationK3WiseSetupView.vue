@@ -797,6 +797,61 @@
           <pre class="k3-setup__json-preview">{{ templatePreviewJson }}</pre>
         </section>
 
+        <section class="k3-setup__section" data-testid="reference-completeness-panel">
+          <div class="k3-setup__preview-head">
+            <strong>引用字段完整性预览</strong>
+            <span>仅前端校验 · 不写 K3 · 非服务端门</span>
+          </div>
+          <p class="k3-setup__hint">
+            粘贴一行或多行 staging/preview 样本(JSON 数组),客户端组合 K3 引用对象并标出未解析项。
+            引用列按数组处理(lookup 输出),保留 {FName,FNumber}/{FID,FName} 全部组件;空数组或缺少标识符(FNumber/FID)显示“未解析”。仅扫描前 3 行样本。
+          </p>
+          <textarea
+            v-model="referenceCompletenessInput"
+            rows="10"
+            spellcheck="false"
+            data-testid="reference-completeness-input"
+          ></textarea>
+          <p
+            v-if="referenceCompletenessPreview.error"
+            class="k3-setup__hint"
+            data-testid="reference-completeness-error"
+          >
+            {{ referenceCompletenessPreview.error }}
+          </p>
+          <template v-else>
+            <div class="k3-setup__preview-head" data-testid="reference-completeness-summary">
+              <span>扫描 {{ referenceCompletenessPreview.preview.scannedRowCount }} 行{{ referenceCompletenessPreview.preview.truncated ? '(已截断,仅前 3 行)' : '' }}</span>
+              <span>已解析 {{ referenceCompletenessPreview.preview.resolvedCount }} · 未解析 {{ referenceCompletenessPreview.preview.unresolvedCount }}</span>
+            </div>
+            <p
+              class="k3-setup__hint"
+              :data-can-save="referenceCompletenessPreview.preview.canSave ? 'true' : 'false'"
+              data-testid="reference-completeness-cansave"
+            >
+              <template v-if="referenceCompletenessPreview.preview.scannedRowCount === 0">
+                ℹ️ 尚无样本行可校验(canSave=false,仅前端提示)。请粘贴至少一行 staging/preview 样本。
+              </template>
+              <template v-else-if="referenceCompletenessPreview.preview.canSave">
+                ✅ 样本内引用均可解析(仅前端提示,非服务端门 —— 服务端不据此放行)。
+              </template>
+              <template v-else>
+                ⛔ 存在未解析引用:Save 在前端禁用/提示(仅 UX,非服务端门)。请补全 staging 引用数据后再 Save。
+              </template>
+            </p>
+            <ul class="k3-setup__issues k3-setup__issues--compact" data-testid="reference-completeness-entries">
+              <li
+                v-for="entry in referenceCompletenessPreview.preview.entries"
+                :key="`${entry.rowIndex}:${entry.field}`"
+              >
+                行 {{ entry.rowIndex }} · {{ entry.label }}（{{ entry.field }}）：
+                <template v-if="entry.status === 'resolved'">已解析 → {{ formatComposed(entry.composed) }}</template>
+                <template v-else>未解析（{{ entry.reason }}）</template>
+              </li>
+            </ul>
+          </template>
+        </section>
+
         <details class="k3-setup__section k3-setup__details">
           <summary class="k3-setup__section-summary">
             <span>Pipeline 执行参数</span>
@@ -882,6 +937,8 @@ import {
   validateK3WisePipelineRunForm,
   validateK3WiseSetupForm,
   validateK3WiseStagingInstallForm,
+  buildK3WiseReferenceCompletenessPreview,
+  K3_WISE_REFERENCE_COMPLETENESS_SAMPLE_ROWS,
   type IntegrationDeadLetter,
   type IntegrationExternalSystem,
   type IntegrationPipelineRun,
@@ -889,6 +946,7 @@ import {
   type IntegrationStagingInstallResult,
   type K3WiseDocumentTemplateMapping,
   type K3WisePipelineTarget,
+  type K3WiseReferenceCompletenessPreview,
 } from '../services/integration/k3WiseSetup'
 import {
   isIntegrationScopedProjectId,
@@ -960,6 +1018,25 @@ const gateDraftText = computed(() => {
 const observationSummary = computed(() => `${pipelineRuns.value.length} runs / ${deadLetters.value.length} open`)
 const stagingDescriptorLabel = computed(() => stagingDescriptors.value.length > 0 ? `${stagingDescriptors.value.length} descriptors` : 'not loaded')
 const templatePreviewJson = computed(() => JSON.stringify(buildK3WiseDocumentPayloadPreview(templatePreviewTarget.value), null, 2))
+
+// Reference completeness preview (S2). Client-side validation pad only — never a server gate.
+const referenceCompletenessInput = ref(JSON.stringify(K3_WISE_REFERENCE_COMPLETENESS_SAMPLE_ROWS, null, 2))
+const referenceCompletenessPreview = computed<{ error: string; preview: K3WiseReferenceCompletenessPreview }>(() => {
+  const empty: K3WiseReferenceCompletenessPreview = {
+    scannedRowCount: 0, truncated: false, entries: [], resolvedCount: 0, unresolvedCount: 0, canSave: false,
+  }
+  const raw = referenceCompletenessInput.value.trim()
+  if (!raw) return { error: '请粘贴 staging/preview 样本行(JSON 数组)。', preview: empty }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return { error: 'JSON 解析失败:请粘贴合法的 JSON 数组。', preview: empty }
+  }
+  if (!Array.isArray(parsed)) return { error: '样本必须是 JSON 数组(每个元素是一行 staging 记录)。', preview: empty }
+  return { error: '', preview: buildK3WiseReferenceCompletenessPreview(templatePreviewTarget.value, parsed, { sampleLimit: 3 }) }
+})
+const formatComposed = (value: unknown): string => JSON.stringify(value)
 const stagingOpenTargets = computed(() => buildStagingOpenTargets(stagingInstallResult.value, form.baseId))
 const selectedWebApiSystem = computed(() => webApiSystems.value.find((system) => system.id === form.webApiSystemId) || null)
 const selectedSqlSystem = computed(() => sqlSystems.value.find((system) => system.id === form.sqlSystemId) || null)

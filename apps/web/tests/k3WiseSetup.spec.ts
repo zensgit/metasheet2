@@ -34,6 +34,8 @@ import {
   validateK3WisePipelineRunForm,
   validateK3WiseSetupForm,
   validateK3WiseStagingInstallForm,
+  buildK3WiseReferenceCompletenessPreview,
+  K3_WISE_REFERENCE_COMPLETENESS_SAMPLE_ROWS,
   type IntegrationExternalSystem,
 } from '../src/services/integration/k3WiseSetup'
 
@@ -1193,5 +1195,96 @@ describe('K3 WISE setup helpers', () => {
       field: 'allowLivePipelineRun',
     })
     expect(summary.canRunLive).toBe(true)
+  })
+})
+
+describe('buildK3WiseReferenceCompletenessPreview', () => {
+  const entryFor = (preview: ReturnType<typeof buildK3WiseReferenceCompletenessPreview>, field: string, rowIndex = 0) =>
+    preview.entries.find((entry) => entry.field === field && entry.rowIndex === rowIndex)
+
+  it('preserves ALL present components — {FName,FNumber} stays two-field, not flattened to {FNumber}', () => {
+    const preview = buildK3WiseReferenceCompletenessPreview('material', [{ FBaseUnitID: [{ FName: '个', FNumber: 'Pcs' }] }])
+    const entry = entryFor(preview, 'FBaseUnitID')
+    expect(entry?.status).toBe('resolved')
+    expect(entry?.composed).toEqual({ FName: '个', FNumber: 'Pcs' })
+  })
+
+  it('composes {FID,FName} preserving both components', () => {
+    const preview = buildK3WiseReferenceCompletenessPreview('material', [{ FAcctID: [{ FID: '1001', FName: '库存商品' }] }])
+    expect(entryFor(preview, 'FAcctID')?.composed).toEqual({ FID: '1001', FName: '库存商品' })
+  })
+
+  it('wraps a scalar reference value as the degenerate single-key {FNumber}', () => {
+    const preview = buildK3WiseReferenceCompletenessPreview('material', [{ FBaseUnitID: 'Pcs' }])
+    expect(entryFor(preview, 'FBaseUnitID')?.composed).toEqual({ FNumber: 'Pcs' })
+  })
+
+  it('flags an empty array as unresolved (empty)', () => {
+    const preview = buildK3WiseReferenceCompletenessPreview('material', [{ FBaseUnitID: [] }])
+    const entry = entryFor(preview, 'FBaseUnitID')
+    expect(entry?.status).toBe('unresolved')
+    expect(entry?.reason).toBe('empty')
+  })
+
+  it('skips null entries and flags a missing identifier as unresolved', () => {
+    const preview = buildK3WiseReferenceCompletenessPreview('material', [{ FBaseUnitID: [null, { FName: 'only-name' }] }])
+    const entry = entryFor(preview, 'FBaseUnitID')
+    expect(entry?.status).toBe('unresolved')
+    expect(entry?.reason).toBe('missing-identifier')
+  })
+
+  it('resolves when a valid object follows skipped null entries (array null-skip)', () => {
+    const preview = buildK3WiseReferenceCompletenessPreview('material', [{ FBaseUnitID: [null, { FNumber: 'Pcs' }] }])
+    expect(entryFor(preview, 'FBaseUnitID')?.status).toBe('resolved')
+  })
+
+  it('bounds the scan to sampleLimit and reports truncation', () => {
+    const rows = Array.from({ length: 10 }, () => ({ FBaseUnitID: [{ FNumber: 'Pcs' }] }))
+    const preview = buildK3WiseReferenceCompletenessPreview('material', rows, { sampleLimit: 2 })
+    expect(preview.scannedRowCount).toBe(2)
+    expect(preview.truncated).toBe(true)
+    expect(preview.entries.every((entry) => entry.rowIndex < 2)).toBe(true)
+  })
+
+  it('returns no entries and canSave=false for invalid (non-array) rows', () => {
+    const preview = buildK3WiseReferenceCompletenessPreview('material', null)
+    expect(preview.entries).toEqual([])
+    expect(preview.canSave).toBe(false)
+  })
+
+  it('flags a non-object row entry as invalid-row', () => {
+    const preview = buildK3WiseReferenceCompletenessPreview('material', ['not-an-object'])
+    expect(preview.entries.length).toBeGreaterThan(0)
+    expect(preview.entries.every((entry) => entry.reason === 'invalid-row')).toBe(true)
+    expect(preview.canSave).toBe(false)
+  })
+
+  it('sample rows: row 0 fully resolves, row 1 surfaces both unresolved reasons → canSave=false', () => {
+    const preview = buildK3WiseReferenceCompletenessPreview(
+      'material',
+      K3_WISE_REFERENCE_COMPLETENESS_SAMPLE_ROWS as Array<Record<string, unknown>>,
+    )
+    expect(preview.canSave).toBe(false)
+    const row0 = preview.entries.filter((entry) => entry.rowIndex === 0)
+    expect(row0.length).toBeGreaterThan(0)
+    expect(row0.every((entry) => entry.status === 'resolved')).toBe(true)
+    const row1 = preview.entries.filter((entry) => entry.rowIndex === 1)
+    expect(row1.some((entry) => entry.reason === 'empty')).toBe(true)
+    expect(row1.some((entry) => entry.reason === 'missing-identifier')).toBe(true)
+  })
+
+  it('does NOT report canSave for an empty sample (nothing was checked)', () => {
+    const preview = buildK3WiseReferenceCompletenessPreview('material', [])
+    expect(preview.scannedRowCount).toBe(0)
+    expect(preview.entries).toEqual([])
+    expect(preview.canSave).toBe(false)
+  })
+
+  it('reports canSave only when at least one row scanned and all references resolve', () => {
+    const fullRow = K3_WISE_REFERENCE_COMPLETENESS_SAMPLE_ROWS[0]
+    const preview = buildK3WiseReferenceCompletenessPreview('material', [fullRow] as Array<Record<string, unknown>>)
+    expect(preview.scannedRowCount).toBe(1)
+    expect(preview.unresolvedCount).toBe(0)
+    expect(preview.canSave).toBe(true)
   })
 })
