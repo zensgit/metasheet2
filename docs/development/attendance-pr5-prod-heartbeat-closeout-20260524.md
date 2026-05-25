@@ -33,18 +33,21 @@ workbench operator runbook).
 | iter=4 | 2026-05-24T11:25:30Z | `/assets/index-DX_EUprZ.js` | `1/1/2` | `1/2` | **OK — same forward-deploy bundle as iter=3, fingerprints intact** |
 | HEARTBEAT_DONE | 2026-05-24T17:24:01Z | n/a (terminator line) | n/a | n/a | **PASS — 24 h elapsed, iterations=4, initial_bundle=`/assets/index-CWe-UNpc.js`; no new ALERT after iter=2's transient probe-side flake** |
 
-### Bundle hash change explanation — `CWe-UNpc` → `DX_EUprZ` is FORWARD, not rollback
+### Bundle hash change explanation — `CWe-UNpc` → `DX_EUprZ` is a FORWARD frontend rebuild, not a rollback
 
-The asset hash flipped between iter=1 (Wed 17:24Z) and iter=3 (Thu 05:24Z) because two non-frontend-runtime PRs were merged in between:
+The asset hash flipped between iter=1 (Wed 17:24Z) and iter=3 (Thu 05:24Z) because a real `apps/web` frontend-runtime PR (#1805) plus several docs/ops PRs merged in between. The frontend change is what re-hashed the bundle; the docs/ops PRs are listed for window completeness:
 
-| Time (UTC, approx) | Event |
-| --- | --- |
-| 2026-05-23 ~17:24 | iter=1 — bundle `CWe-UNpc` (built from main at SHA `6c4bf1f82` lineage at that moment) |
-| 2026-05-24 ~04:09 | `#1804` merged: `docs(attendance): add advanced-scheduling workbench operator runbook` (docs-only, no frontend code touched) |
-| 2026-05-24 ~ (window) | `#1802` and `#1791` merged: `docs(attendance): add advanced scheduling benchmark matrix` and `fix(attendance): adapt strict smoke to current overview` (docs + ops smoke scripts; no frontend runtime code) |
-| 2026-05-24 ~05:24 | iter=3 — bundle `DX_EUprZ` (built from current main after those merges) |
+| Time (UTC) | Event | Frontend runtime? |
+| --- | --- | --- |
+| 2026-05-23 17:24 | iter=1 — bundle `CWe-UNpc` (main lineage at that moment) | — |
+| 2026-05-24 03:35 | `#1803` merged: `docs(multitable): scope yjs not-authenticated i18n closure` | No — docs-only |
+| 2026-05-24 04:06 | **`#1805` merged: `feat(multitable): localize useYjsDocument not-authenticated error`** | **Yes — touches `apps/web/src/multitable/composables/useYjsDocument.ts` + `meta-core-labels.ts`** |
+| 2026-05-24 04:09 | `#1804` merged: `docs(attendance): add advanced-scheduling workbench operator runbook` | No — docs-only |
+| 2026-05-24 04:26 | `#1802` merged: `docs(attendance): add advanced scheduling benchmark matrix` | No — docs-only |
+| 2026-05-24 04:42 | `#1791` merged: `fix(attendance): adapt strict smoke to current overview` | No — docs + `scripts/verify-attendance-*.mjs` ops scripts only |
+| 2026-05-24 05:24 | iter=3 — bundle `DX_EUprZ` (rebuilt from main after #1805 landed) | — |
 
-Because Vite content-hashes the asset filename precisely, a build re-runs of even an unchanged frontend source tree can yield a new hash if the build environment timestamps or compaction order differ slightly. More importantly: independent maintainer re-check at the moment of bundle swap also confirmed all PR5 + PR4 fingerprints non-zero on `DX_EUprZ`. The fingerprint persistence is the load-bearing check; the asset hash is informational.
+The hash flip is therefore a **forward frontend rebuild** triggered by #1805's multitable i18n source change — expected and benign, and unrelated to the attendance comprehensive-hours surface. The load-bearing evidence is that across that rebuild **all PR4 + PR5 fingerprints stayed non-zero** on `DX_EUprZ` (re-confirmed by independent maintainer re-check at the moment of bundle swap, and by the subsequent two OK iterations). The asset hash is informational; the fingerprint persistence is the check that proves PR5 did not regress.
 
 ### Per-fingerprint persistence
 
@@ -187,7 +190,7 @@ These are candidate kernel-polish slices to consider **after** HEARTBEAT_DONE. E
 
 If maintainer wants to land one more small win before fully closing the attendance lane, **C is the cleanest**: evidence already exists in `/tmp/`, identical hygiene pattern to PR #1795, no code or runtime change, no risk to the heartbeat window. **A is the next-smallest read-only enhancement** if a code touch is acceptable. **B is materially larger** and would benefit from a design-lock MD first. **D stays deferred.**
 
-The closeout PR itself (this draft promoted to repo) is the obvious "one more small win" alongside C — both are docs-only and could be combined or kept separate as you prefer.
+This closeout document is itself the docs-only record of the completed window; candidate C would be the natural next docs-only companion to it — both are docs-only and could be combined or kept separate as you prefer.
 
 ---
 
@@ -207,6 +210,8 @@ HEARTBEAT_DONE (~17:24Z)
             this draft does NOT get promoted; closeout work pauses until the regression is resolved
             and a fresh observation window opens
 ```
+
+**Branch taken:** the top "all iterations OK" branch. iter=2's ALERT was classified as a probe-side flake (not a production regression), the window ran to 24 h with all completed iterations OK, and this document is the resulting docs-only closeout.
 
 ---
 
@@ -229,4 +234,4 @@ HEARTBEAT_DONE (~17:24Z)
 - `docs/development/attendance-comprehensive-hours-pr0-pr5-closeout-20260523.md` — establishes PR6 deferred posture (merged via #1801)
 - `docs/operations/attendance-advanced-scheduling-workbench-runbook.md` — companion runbook (merged via #1804)
 - `/tmp/attendance-advanced-scheduling-workbench-live-probe-20260524.md` — live probe evidence
-- Monitor task ID: `b4oaxwetb` — currently running, two events remaining
+- Monitor task ID: `b4oaxwetb` — completed / self-terminated at 2026-05-24T17:24:01Z (HEARTBEAT_DONE, 4 iterations)
