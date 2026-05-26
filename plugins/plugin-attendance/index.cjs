@@ -7842,6 +7842,23 @@ async function loadRuleSetConfigById(db, orgId, ruleSetId) {
   return normalizeMetadata(rows[0].config)
 }
 
+// Read-only: attendance-group ids carrying a rule_set override, for the workbench
+// preview-divergence diagnostic. This is an OPTIONAL visibility signal — on an older schema
+// without attendance_groups.rule_set_id (or the table), degrade to [] so the diagnostic is
+// simply absent rather than failing the whole workbench with 503. Non-schema errors propagate.
+async function loadAttendanceRuleSetAttendanceGroupIds(db, orgId) {
+  try {
+    const rows = await db.query(
+      'SELECT id FROM attendance_groups WHERE org_id = $1 AND rule_set_id IS NOT NULL',
+      [orgId]
+    )
+    return rows.map(row => row.id).filter(Boolean)
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return []
+    throw error
+  }
+}
+
 async function loadAttendanceGroupRuleSetMap(db, orgId) {
   const rows = await db.query(
     'SELECT name, code, rule_set_id FROM attendance_groups WHERE org_id = $1 AND rule_set_id IS NOT NULL',
@@ -14180,6 +14197,7 @@ module.exports = {
     buildAttendanceScheduleGroupMemberLockKey,
     acquireAttendanceScheduleGroupMemberLock,
     buildAttendanceAdvancedSchedulingWorkbench,
+    loadAttendanceRuleSetAttendanceGroupIds,
     normalizeAttendanceSchedulerScopeBody,
     normalizeAttendanceSchedulerScopeInput,
     mapAttendanceSchedulerScopeRow,
@@ -26036,7 +26054,7 @@ module.exports = {
             rotationAssignmentRows,
             assignmentAggregateRows,
             scheduleGroupAssignmentAggregateRows,
-            ruleSetAttendanceGroupRows,
+            ruleSetAttendanceGroupIds,
           ] = await Promise.all([
             db.query(
               `SELECT *
@@ -26201,12 +26219,9 @@ module.exports = {
                GROUP BY m.schedule_group_id`,
               [orgId, rangeStart, rangeEnd]
             ),
-            db.query(
-              // Read-only: attendance groups carrying a rule_set override (surfaced as a
-              // preview-semantics diagnostic only; no calc-chain effect).
-              `SELECT id FROM attendance_groups WHERE org_id = $1 AND rule_set_id IS NOT NULL`,
-              [orgId]
-            ),
+            // Optional visibility signal — schema-safe: degrades to [] (diagnostic absent)
+            // if attendance_groups.rule_set_id is missing, instead of failing the workbench.
+            loadAttendanceRuleSetAttendanceGroupIds(db, orgId),
           ])
 
           const shiftAssignmentsTruncated = shiftAssignmentRows.length > ATTENDANCE_ADVANCED_SCHEDULING_WORKBENCH_ASSIGNMENT_LIMIT
@@ -26246,7 +26261,7 @@ module.exports = {
             assignmentLimit: ATTENDANCE_ADVANCED_SCHEDULING_WORKBENCH_ASSIGNMENT_LIMIT,
             shiftAssignmentsTruncated,
             rotationAssignmentsTruncated,
-            ruleSetAttendanceGroupIds: ruleSetAttendanceGroupRows.map(row => row.id),
+            ruleSetAttendanceGroupIds,
           })
           res.json({ ok: true, data })
         } catch (error) {

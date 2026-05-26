@@ -249,7 +249,7 @@ describe('attendance advanced scheduling read-only workbench', () => {
 
     it('source guard: the new query is a SELECT and the workbench route region is read-only', () => {
       expect(pluginSource).toMatch(/SELECT id FROM attendance_groups WHERE org_id = \$1 AND rule_set_id IS NOT NULL/)
-      expect(pluginSource).toContain('ruleSetAttendanceGroupRows')
+      expect(pluginSource).toContain('loadAttendanceRuleSetAttendanceGroupIds(db, orgId)')
       // Scope the write-guard to the workbench GET handler region only (the file legitimately
       // writes attendance_groups elsewhere via group sync). The handler must be SELECT-only.
       const start = pluginSource.indexOf("'/api/attendance/advanced-scheduling/workbench'")
@@ -257,6 +257,18 @@ describe('attendance advanced scheduling read-only workbench', () => {
       const nextRoute = pluginSource.indexOf('context.api.http.addRoute(', start + 1)
       const handler = pluginSource.slice(start, nextRoute > start ? nextRoute : start + 12000)
       expect(handler).not.toMatch(/\b(INSERT\s+INTO|UPDATE\s+\w|DELETE\s+FROM)\b/i)
+    })
+
+    it('schema-safe: rule_set lookup degrades to [] on a missing column/table (no 503), rethrows otherwise', async () => {
+      // Older schema lacking attendance_groups.rule_set_id → undefined_column (42703) → [].
+      const schemaErrDb = { query: async () => { const e: any = new Error('column "rule_set_id" does not exist'); e.code = '42703'; throw e } }
+      await expect(helpers.loadAttendanceRuleSetAttendanceGroupIds(schemaErrDb, 'org-1')).resolves.toEqual([])
+      // Non-schema error must propagate (not be swallowed).
+      const connErrDb = { query: async () => { const e: any = new Error('connection terminated'); e.code = '08006'; throw e } }
+      await expect(helpers.loadAttendanceRuleSetAttendanceGroupIds(connErrDb, 'org-1')).rejects.toThrow('connection terminated')
+      // Happy path returns the ids.
+      const okDb = { query: async () => [{ id: 'ag-1' }, { id: 'ag-2' }] }
+      await expect(helpers.loadAttendanceRuleSetAttendanceGroupIds(okDb, 'org-1')).resolves.toEqual(['ag-1', 'ag-2'])
     })
   })
 })

@@ -25,7 +25,7 @@ by group than the actual per-user effective-calendar resolves. The diagnostic su
 ## Data signal (read-only)
 
 - `attendance_schedule_groups.attendance_group_id` → `attendance_groups.rule_set_id` (both columns already exist; no migration).
-- Route adds: `SELECT id FROM attendance_groups WHERE org_id = $1 AND rule_set_id IS NOT NULL` (query form A — simplest; `attendance_groups` is small and the builder intersects against the active schedule groups anyway). Org-scoped, read-only.
+- Route adds a **schema-safe** read-only lookup, `loadAttendanceRuleSetAttendanceGroupIds(db, orgId)` → `SELECT id FROM attendance_groups WHERE org_id = $1 AND rule_set_id IS NOT NULL` (query form A — simplest; `attendance_groups` is small and the builder intersects against the active schedule groups anyway). Org-scoped, read-only. **Because this is an optional visibility signal, the helper catches `isDatabaseSchemaError` and returns `[]`** (diagnostic absent) on an older schema lacking `attendance_groups.rule_set_id` or the table — so it never fails the whole workbench with `503 DB_NOT_READY`. Non-schema errors still propagate.
 - Builder (`buildAttendanceAdvancedSchedulingWorkbench`): new optional input `ruleSetAttendanceGroupIds` (defaults to `[]` → backward compatible). `scheduleGroupsWithRuleSetOverride` (`:7626`) = active schedule groups whose `attendanceGroupId` is in that set. If any, emit the diagnostic (`:7677`), appended **last** in the diagnostics array (preserves the existing order assertion).
 
 ## The diagnostic
@@ -41,12 +41,13 @@ No change. `AttendanceView.vue` (`:4432`) renders diagnostics in a generic `v-fo
 the new diagnostic appears automatically with its server message. Verified by reading the
 template; no FE diff and (by requirement) no fix affordance.
 
-## Tests (workbench test file, 8/8; 4 new)
+## Tests (workbench test file, 9/9; 5 new)
 
 - **Positive:** schedule group whose `attendanceGroupId ∈ ruleSetAttendanceGroupIds` → diagnostic present, `severity:info`, `count:1`, correct `scheduleGroupIds`, message contains "by design".
 - **Negative:** linked attendance group not in the rule_set set → diagnostic absent (no false positive).
 - **Backward compat:** no `ruleSetAttendanceGroupIds` input, and group without `attendanceGroupId` → diagnostic absent; the existing diagnostics-order assertion still passes.
 - **Source guard:** the new query matches the read-only `SELECT … rule_set_id IS NOT NULL`; the workbench GET handler **region** contains no `INSERT INTO`/`UPDATE`/`DELETE FROM` (scoped to the handler — the file legitimately writes `attendance_groups` elsewhere via group sync).
+- **Schema-safe degradation:** `loadAttendanceRuleSetAttendanceGroupIds` returns `[]` on an `undefined_column`/`undefined_table` error (so the workbench keeps working without the diagnostic on older schemas) and **rethrows** non-schema errors (e.g. connection failures). 9/9 in the workbench test file.
 
 ## Verification run
 
