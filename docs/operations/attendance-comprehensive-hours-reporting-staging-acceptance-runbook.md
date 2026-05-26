@@ -58,13 +58,13 @@ Pick a **test user** (`TARGET=<userId>`; the admin's own id is fine) and a date 
 an **exact natural calendar month** (e.g. `2026-04-01`..`2026-04-30`) so the period-type bridge
 resolves to `month`. Note: `UID` is a reserved shell variable — use `TARGET`.
 
-1. **Save original settings** (for restore):
+1. **Save original settings** (for restore). This is the source of truth for step 7 — do **not** assume the original caps are null; staging may already have caps configured:
    `curl -s -H @/tmp/stg-hdr "$BASE/api/attendance/settings" -o /tmp/stg-orig.json`
-   Record `data.comprehensiveHours.capDefaults`.
+   Record `data.comprehensiveHours.capDefaults` (call it `ORIG_CAPS`).
 2. **PUT a test cap** (partial body → deep-merge preserves the other cycle-types):
    `curl -s -X PUT -H @/tmp/stg-hdr -H 'Content-Type: application/json' -d '{"comprehensiveHours":{"capDefaults":{"month":600}}}' "$BASE/api/attendance/settings"`
-   → 200, saved `{month:600, quarter:null, year:null}`.
-3. **GET confirm** `capDefaults.month == 600`.
+   → 200; `month` becomes `600` while **`quarter`/`year` keep their original values** (deep-merge, only `month` is overwritten).
+3. **GET confirm**: `capDefaults.month == 600` **and** `quarter`/`year` are unchanged from `ORIG_CAPS`.
 4. **Run the period sync** (single user, natural month):
    `curl -s -X POST -H @/tmp/stg-hdr -H 'Content-Type: application/json' -d "{\"userId\":\"$TARGET\",\"from\":\"2026-04-01\",\"to\":\"2026-04-30\"}" "$BASE/api/attendance/report-period-summaries/sync"`
    → `data.created>=1` (or `patched`), **not** `degraded`, `periodType=date_range`. Capture `data.multitable.sheetId`. Route at `index.cjs:27746`.
@@ -82,15 +82,19 @@ resolves to `month`. Note: `UID` is a reserved shell variable — use `TARGET`.
 6. **Idempotency + cap-change re-sync** (behavioral proof the cap is fingerprinted):
    - Re-run step 4 with the cap unchanged → `skipped=1` (source_fingerprint match).
    - `PUT` cap `month:900`, re-run step 4 → `patched=1`; re-read the row → `cap_minutes=900` and a **new** `cap_effective_key`. (Pre-#1833 code would `skip` here, since the cap would not be in the fingerprint.)
-7. **Restore original settings:**
-   `curl -s -X PUT -H @/tmp/stg-hdr -H 'Content-Type: application/json' -d '{"comprehensiveHours":{"capDefaults":{"month":null,"quarter":null,"year":null}}}' "$BASE/api/attendance/settings"`
-   then `GET` and confirm it matches `/tmp/stg-orig.json`. Finally `rm -f /tmp/stg-hdr /tmp/stg-orig.json`.
+7. **Restore the original caps** — build the restore body from the saved original (do **not** hardcode nulls; that would wipe any pre-existing staging caps). `capDefaults` always carries all three keys, so PUT-ing the original fully reverts steps 2/6:
+   ```bash
+   ORIG_CAPS=$(python3 -c "import json;print(json.dumps(json.load(open('/tmp/stg-orig.json'))['data']['comprehensiveHours']['capDefaults']))")
+   curl -s -X PUT -H @/tmp/stg-hdr -H 'Content-Type: application/json' \
+     -d "{\"comprehensiveHours\":{\"capDefaults\":$ORIG_CAPS}}" "$BASE/api/attendance/settings"
+   ```
+   (Equivalently, PUT the full original settings payload from `/tmp/stg-orig.json` `data`.) Then `GET` and assert the restored `capDefaults` **equals `ORIG_CAPS`** (not necessarily null). Finally `rm -f /tmp/stg-hdr /tmp/stg-orig.json`.
 
 ## Pass criteria
 
 All gates green; step 4 non-degraded with a row created/patched; step 5 shows all four columns;
 step 6 shows skip-when-unchanged and patch-on-cap-change with a changed `effective_key`; step 7
-restores the original settings.
+restores `capDefaults` to exactly the saved `ORIG_CAPS` (verified by GET-compare).
 
 ## Interpretation / troubleshooting
 
