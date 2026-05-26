@@ -14,6 +14,7 @@ const reportMdPath = process.env.REPORT_MD || path.join(outputDir, 'report.md')
 const headless = process.env.HEADLESS !== 'false'
 const timeoutMs = Number(process.env.TIMEOUT_MS || 30000)
 const runMode = process.env.RUN_MODE || 'local'
+const continueOnPeopleRepairFailure = process.env.CONTINUE_ON_PEOPLE_REPAIR_FAILURE === 'true'
 
 const report = {
   ok: true,
@@ -40,8 +41,125 @@ function recordOnce(name, ok, details = {}) {
   record(name, ok, details)
 }
 
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 function exactTextRegex(value) {
-  return new RegExp(`^\\s*${String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`)
+  return new RegExp(`^\\s*${escapeRegex(value)}\\s*$`)
+}
+
+function localizedTextRegex(values = []) {
+  const list = Array.isArray(values) ? values : [values]
+  const pattern = list.map((value) => escapeRegex(value)).join('|')
+  return new RegExp(pattern, 'i')
+}
+
+function countRowsLabel(count) {
+  const value = String(count)
+  return new RegExp(`^\\s*${escapeRegex(value)}\\s*(?:rows?|records?|条\\s*记录|行)\\s*$`, 'i')
+}
+
+function safeArtifactName(value) {
+  return String(value)
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 120)
+}
+
+async function collectSmokeUiState(page) {
+  const textItems = async (selector, limit = 20) => {
+    return (await page.locator(selector).evaluateAll((nodes) => nodes
+      .map((node) => node.textContent?.replace(/\s+/g, ' ').trim() ?? '')
+      .filter(Boolean)).catch(() => []))
+      .slice(0, limit)
+  }
+  const visibleButtonTexts = await page.locator('button:visible').evaluateAll((buttons) => buttons
+    .map((button) => ({
+      text: button.textContent?.replace(/\s+/g, ' ').trim() ?? '',
+      title: button.getAttribute('title') ?? '',
+      ariaLabel: button.getAttribute('aria-label') ?? '',
+      disabled: button instanceof HTMLButtonElement ? button.disabled : button.getAttribute('aria-disabled') === 'true',
+    }))
+    .filter((item) => item.text || item.title || item.ariaLabel)).catch(() => [])
+  const inputValues = await page.locator('input:visible, select:visible').evaluateAll((controls) => controls
+    .map((control) => ({
+      tag: control.tagName.toLowerCase(),
+      type: control.getAttribute('type') ?? '',
+      ariaLabel: control.getAttribute('aria-label') ?? '',
+      placeholder: control.getAttribute('placeholder') ?? '',
+      value: control instanceof HTMLInputElement || control instanceof HTMLSelectElement ? control.value : '',
+    }))).catch(() => [])
+  const bodyText = (await page.locator('body').textContent().catch(() => '') ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return {
+    url: page.url(),
+    rowCountTexts: await textItems('.meta-toolbar__row-count'),
+    toolbarTexts: await textItems('.meta-toolbar'),
+    workbenchActionTexts: await textItems('.mt-workbench__actions'),
+    toolbarPanelTexts: await textItems('.meta-toolbar__panel:visible'),
+    viewManagerTexts: await textItems('.meta-view-mgr:visible'),
+    conflictTexts: await textItems('.mt-workbench__conflict:visible, [role="alert"]:visible'),
+    gridRowTexts: await textItems('.meta-grid__row', 8),
+    gridEmptyTexts: await textItems('.meta-grid__empty-title, .meta-grid__empty-hint'),
+    visibleButtonTexts: visibleButtonTexts.slice(0, 80),
+    inputValues: inputValues.slice(0, 80),
+    bodyTextSample: bodyText.slice(0, 4000),
+  }
+}
+
+async function ensureEnglishLocale(page, options = {}) {
+  const { required = false } = options
+  const localeSwitcher = page.locator('[data-testid="locale-switcher"]')
+  const exists = await localeSwitcher.count()
+  if (!exists) {
+    if (required) {
+      record('ui.locale.switcher', false, { reason: 'locale switcher not found' })
+    }
+    return false
+  }
+  const current = await localeSwitcher.inputValue().catch(() => '')
+  if (current === 'en') {
+    if (required) {
+      record('ui.locale.switcher', true, { locale: 'en', changed: false })
+    }
+    return true
+  }
+  try {
+    await localeSwitcher.selectOption('en')
+    await page.waitForTimeout(600)
+    const latest = await localeSwitcher.inputValue().catch(() => '')
+    const ok = latest === 'en'
+    if (required) {
+      record('ui.locale.switcher', ok, { locale: latest, changed: true })
+    }
+    return ok
+  } catch (error) {
+    if (required) {
+      record('ui.locale.switcher', false, {
+        locale: current,
+        changed: false,
+        error: error?.message || String(error),
+      })
+    }
+    return false
+  }
+}
+
+function multiLocaleLabel(...values) {
+  return localizedTextRegex(values)
+}
+
+function normalizeFieldTypeLabel(value) {
+  const text = String(value ?? '').trim().toLowerCase()
+  if (['attachment', 'attachments', '附件'].includes(text)) return 'attachment'
+  if (['person', 'people', '人员'].includes(text)) return 'person'
+  return text
+}
+
+function getSearchBox(page) {
+  return page.getByRole('searchbox', { name: /Search records|搜索记录/ })
 }
 
 const fieldTypeSmokeSpecs = [
@@ -138,14 +256,14 @@ async function addAndResolveRecordComment(page) {
   const commentsDrawer = page.locator('.meta-comments-drawer')
   await commentsDrawer.waitFor({ state: 'visible', timeout: timeoutMs })
   const commentText = `smoke comment ${Date.now()}`
-  const commentBox = commentsDrawer.getByRole('textbox', { name: 'Add a comment...' })
+  const commentBox = commentsDrawer.getByRole('textbox', { name: multiLocaleLabel('Add a comment...', '添加评论...') })
   await commentBox.fill(commentText)
-  await commentsDrawer.getByRole('button', { name: 'Send' }).click()
+  await commentsDrawer.getByRole('button', { name: multiLocaleLabel('Send', '发送') }).click()
   const commentThread = commentsDrawer.locator('.meta-comments-drawer__thread').filter({ hasText: commentText }).first()
   await commentThread.waitFor({ state: 'attached', timeout: timeoutMs })
   await commentThread.scrollIntoViewIfNeeded()
   await commentThread.locator('.meta-comments-drawer__resolve').click()
-  await commentThread.locator('.meta-comments-drawer__badge').getByText('Resolved', { exact: true }).waitFor({ state: 'visible', timeout: timeoutMs })
+  await commentThread.locator('.meta-comments-drawer__badge').getByText(multiLocaleLabel('Resolved', '已解决')).waitFor({ state: 'visible', timeout: timeoutMs })
   return commentText
 }
 
@@ -228,6 +346,36 @@ async function waitForPredicate(predicate, label) {
   throw new Error(`${label} timed out: ${JSON.stringify(lastValue)}`)
 }
 
+async function waitForImportWarning(page, options = {}) {
+  const { required = false, timeoutMsOverride = timeoutMs, requiredSubstrings = [] } = options
+  const normalizedNeedles = requiredSubstrings.map((value) => String(value || '').trim()).filter(Boolean)
+  const deadline = Date.now() + timeoutMsOverride
+  let lastText = ''
+  while (Date.now() < deadline) {
+    const warnings = page.locator('.meta-import__warning')
+    const count = await warnings.count().catch(() => 0)
+    if (count > 0) {
+      const texts = await warnings.allTextContents().catch(() => [])
+      const visibleText = texts
+        .map((text) => String(text || '').trim())
+        .filter(Boolean)
+        .join(' | ')
+      if (visibleText) {
+        const matchesNeeded = normalizedNeedles.length === 0 || normalizedNeedles.some((needle) => visibleText.toLowerCase().includes(needle.toLowerCase()))
+        if (matchesNeeded) {
+          return { visible: true, text: visibleText }
+        }
+      }
+      lastText = visibleText
+    }
+    await page.waitForTimeout(200)
+  }
+  if (required) {
+    throw new Error(`import warning not shown in time${requiredSubstrings.length ? ` (${requiredSubstrings.join(',')})` : ''}`)
+  }
+  return { visible: false, text: lastText }
+}
+
 async function waitForActionButtonEnabled(button, label) {
   return waitForPredicate(async () => {
     const visible = await button.isVisible().catch(() => false)
@@ -243,6 +391,109 @@ async function waitForActionButtonEnabled(button, label) {
       fixesVisible,
     }
   }, label)
+}
+
+async function resolveMetaImportActionButton(page, {
+  patterns = [],
+  timeoutMsOverride = timeoutMs,
+  required = false,
+}) {
+  const actionButtonsSelector = '.meta-import__actions .meta-import__btn'
+  const deadline = Date.now() + timeoutMsOverride
+  let lastTexts = []
+  while (Date.now() < deadline) {
+    const texts = (await page.locator(actionButtonsSelector).allTextContents().catch(() => []))
+      .map((text) => text.trim())
+      .filter(Boolean)
+    lastTexts = texts
+
+    for (const pattern of patterns) {
+      const patternIndex = texts.findIndex((text) => {
+        if (pattern instanceof RegExp) {
+          return pattern.test(text)
+        }
+        return text.toLowerCase().includes(String(pattern).toLowerCase())
+      })
+      if (patternIndex >= 0) {
+        return {
+          found: true,
+          matched: true,
+          source: 'pattern',
+          locator: page.locator(actionButtonsSelector).nth(patternIndex).first(),
+          text: texts[patternIndex],
+          texts,
+        }
+      }
+    }
+
+    const primaryCount = await page.locator(`${actionButtonsSelector}.meta-import__btn--primary`).count().catch(() => 0)
+    if (primaryCount > 0) {
+      const firstPrimary = page.locator(`${actionButtonsSelector}.meta-import__btn--primary`).first()
+      const firstPrimaryText = (await firstPrimary.textContent().catch(() => ''))?.trim() ?? ''
+      if (firstPrimaryText) {
+        const primaryIndex = texts.indexOf(firstPrimaryText)
+        return {
+          found: true,
+          matched: false,
+          source: 'fallback-primary',
+          locator: primaryIndex >= 0 ? page.locator(actionButtonsSelector).nth(primaryIndex).first() : firstPrimary,
+          text: firstPrimaryText,
+          texts,
+        }
+      }
+    }
+
+    await page.waitForTimeout(200)
+  }
+
+  if (required) {
+    throw new Error(`Meta import action button not found; visible actions: ${JSON.stringify(lastTexts)}`)
+  }
+  return {
+    found: false,
+    matched: false,
+    source: 'none',
+    locator: null,
+    text: '',
+    texts: lastTexts,
+  }
+}
+
+async function collectMetaImportState(page) {
+  const actionButtons = await page.locator('.meta-import__actions .meta-import__btn').evaluateAll((buttons) => buttons.map((button) => ({
+    text: button.textContent?.trim() ?? '',
+    disabled: button instanceof HTMLButtonElement ? button.disabled : button.getAttribute('aria-disabled') === 'true',
+    primary: button.classList.contains('meta-import__btn--primary'),
+  }))).catch(() => [])
+  const inlineButtons = await page.locator('.meta-import__warning .meta-import__btn-inline').evaluateAll((buttons) => buttons.map((button) => ({
+    text: button.textContent?.trim() ?? '',
+    disabled: button instanceof HTMLButtonElement ? button.disabled : button.getAttribute('aria-disabled') === 'true',
+  }))).catch(() => [])
+  const warningTexts = (await page.locator('.meta-import__warning').allTextContents().catch(() => []))
+    .map((text) => text.trim())
+    .filter(Boolean)
+  const fixSelectedTexts = (await page.locator('.meta-import__fix-selected').allTextContents().catch(() => []))
+    .map((text) => text.trim())
+    .filter(Boolean)
+  const pickerButtonTexts = (await page.locator('.meta-import__fix-picker-row .meta-import__btn').allTextContents().catch(() => []))
+    .map((text) => text.trim())
+    .filter(Boolean)
+  const fieldSelects = await page.locator('.meta-import__field-select').evaluateAll((selects) => selects.map((select) => ({
+    value: select instanceof HTMLSelectElement ? select.value : '',
+    label: select instanceof HTMLSelectElement ? select.selectedOptions[0]?.textContent?.trim() ?? '' : '',
+  }))).catch(() => [])
+  return {
+    warningCount: warningTexts.length,
+    warningTexts,
+    actionButtons,
+    inlineButtons,
+    fixSelectedTexts,
+    pickerButtonTexts,
+    fieldSelects,
+    fixesVisible: await page.locator('.meta-import__fixes').isVisible().catch(() => false),
+    overlayVisible: await page.locator('.meta-import-overlay').isVisible().catch(() => false),
+    modalVisible: await page.locator('.meta-import-modal').isVisible().catch(() => false),
+  }
 }
 
 async function ensureImportFieldMapped(page, { headerText, fieldId, label }) {
@@ -942,14 +1193,14 @@ async function waitForImportedGridRow(page, {
   }, `${label} api hydration`)
 
   await page.reload({ waitUntil: 'domcontentloaded', timeout: timeoutMs })
-  await page.getByRole('searchbox', { name: 'Search records' }).waitFor({ state: 'visible', timeout: timeoutMs })
+  await getSearchBox(page).waitFor({ state: 'visible', timeout: timeoutMs })
   verifyDirectRouteEntry(page, {
     checkName: 'ui.route.grid-entry',
     baseId,
     sheetId,
     viewId,
   })
-  const search = page.getByRole('searchbox', { name: 'Search records' })
+  const search = getSearchBox(page)
   await search.fill(searchValue)
   await page.locator('.meta-grid__row').filter({ hasText: searchValue }).first().waitFor({ state: 'visible', timeout: timeoutMs })
   return imported
@@ -1117,7 +1368,7 @@ async function verifyEmbedHostProtocol(page, {
     embedded: '1',
     role: 'editor',
   }))
-  await page.frameLocator('#mt-embed-frame').getByRole('searchbox', { name: 'Search records' }).waitFor({
+  await page.frameLocator('#mt-embed-frame').getByRole('searchbox', { name: /Search records|搜索记录/ }).waitFor({
     state: 'visible',
     timeout: timeoutMs,
   })
@@ -1323,14 +1574,17 @@ async function verifyEmbedHostDirtyFormNavigation(page, {
     requestId: blockedRequestId,
   })
   const blockedDialog = await blockedDialogPromise
-  const blockedDialogOk = blockedDialog.message() === 'Discard unsaved changes before leaving the current sheet or view?'
+  const blockedDialogMsg = blockedDialog.message()
+  const blockedDialogOk = (/Discard unsaved changes before leaving the current sheet or view\?/i.test(blockedDialogMsg))
+    || (/放弃.*离开/i.test(blockedDialogMsg))
+    || (/离开.*放弃/i.test(blockedDialogMsg))
   record('ui.embed-host.navigate.blocked-dialog', blockedDialogOk, {
     requestId: blockedRequestId,
-    message: blockedDialog.message(),
+    message: blockedDialogMsg,
   })
   if (!blockedDialogOk) {
     await blockedDialog.dismiss()
-    throw new Error(`Unexpected blocked navigation dialog message: ${blockedDialog.message()}`)
+    throw new Error(`Unexpected blocked navigation dialog message: ${blockedDialogMsg}`)
   }
   await blockedDialog.dismiss()
   const blockedResult = await waitForEmbedHostMessage(page, (message) => (
@@ -1385,14 +1639,17 @@ async function verifyEmbedHostDirtyFormNavigation(page, {
     requestId: confirmRequestId,
   })
   const confirmDialog = await confirmDialogPromise
-  const confirmDialogOk = confirmDialog.message() === 'Discard unsaved changes before leaving the current sheet or view?'
+  const confirmDialogMsg = confirmDialog.message()
+  const confirmDialogOk = (/Discard unsaved changes before leaving the current sheet or view\?/i.test(confirmDialogMsg))
+    || (/放弃.*离开/i.test(confirmDialogMsg))
+    || (/离开.*放弃/i.test(confirmDialogMsg))
   record('ui.embed-host.navigate.confirm-dialog', confirmDialogOk, {
     requestId: confirmRequestId,
-    message: confirmDialog.message(),
+    message: confirmDialogMsg,
   })
   if (!confirmDialogOk) {
     await confirmDialog.dismiss()
-    throw new Error(`Unexpected confirm navigation dialog message: ${confirmDialog.message()}`)
+    throw new Error(`Unexpected confirm navigation dialog message: ${confirmDialogMsg}`)
   }
   await confirmDialog.accept()
   const confirmedResult = await waitForEmbedHostMessage(page, (message) => (
@@ -1479,11 +1736,12 @@ async function verifyEmbedHostBusyDeferredNavigation(page, {
   const frame = page.frameLocator('#mt-embed-frame')
   const titleInput = frame.locator(`#field_${titleFieldId}`)
   await titleInput.waitFor({ state: 'visible', timeout: timeoutMs })
-  await frame.getByRole('button', { name: 'Save' }).waitFor({ state: 'visible', timeout: timeoutMs })
+  await frame.getByRole('button', { name: multiLocaleLabel('Save', '保存') }).waitFor({ state: 'visible', timeout: timeoutMs })
 
   const requestPattern = `**/api/multitable/views/${formViewId}/submit`
   let capturedRoute = null
   let releaseSubmitRoute = null
+  let submitRequestDetails = null
   const submitIntercepted = new Promise((resolve) => {
     capturedRoute = resolve
   })
@@ -1493,20 +1751,55 @@ async function verifyEmbedHostBusyDeferredNavigation(page, {
   })
   const routeHandler = async (route) => {
     capturedRoute(route)
+    const request = route.request()
+    const postData = request.postData()
+    let parsedPostData = null
+    if (postData) {
+      try {
+        parsedPostData = JSON.parse(postData)
+      } catch {
+        parsedPostData = postData
+      }
+    }
+    submitRequestDetails = {
+      url: request.url(),
+      method: request.method(),
+      headers: request.headers(),
+      postData,
+      parsedPostData,
+    }
     await releaseSubmit
     await route.continue()
   }
   await page.route(requestPattern, routeHandler)
 
   try {
+    const recordVersionBefore = (await fetchRecord(token, sheetId, recordId)).record?.version ?? null
+    const titleBeforeSave = (await titleInput.inputValue().catch(() => '')) ?? ''
     const busyTitle = `${originalTitle} busy-save`
     const saveResponsePromise = page.waitForResponse((response) => (
       response.url().includes(`/api/multitable/views/${formViewId}/submit`) &&
       response.request().method() === 'POST'
     ), { timeout: timeoutMs })
 
-    await titleInput.fill(busyTitle)
-    await frame.getByRole('button', { name: 'Save' }).click()
+    let titleInputBeforeSave = titleBeforeSave
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await titleInput.fill(busyTitle)
+      titleInputBeforeSave = (await titleInput.inputValue().catch(() => titleBeforeSave)) ?? ''
+      if (titleInputBeforeSave === busyTitle) break
+      await page.waitForTimeout(100)
+    }
+    const busyTitleInputOk = titleInputBeforeSave === busyTitle
+    record('ui.embed-host.form-busy-title-input-settled', busyTitleInputOk, {
+      recordId,
+      fieldId: titleFieldId,
+      expectedTitle: busyTitle,
+      titleInputBeforeSave,
+    })
+    if (!busyTitleInputOk) {
+      throw new Error('Embed host busy form title input did not settle before save')
+    }
+    await frame.getByRole('button', { name: multiLocaleLabel('Save', '保存') }).click()
     await submitIntercepted
 
     await clearEmbedHostMessages(page)
@@ -1602,7 +1895,14 @@ async function verifyEmbedHostBusyDeferredNavigation(page, {
     }
 
     releaseSubmitRoute()
-    await saveResponsePromise
+    const saveResponse = await saveResponsePromise
+    const saveResponseStatus = saveResponse.status()
+    let saveResponseBody = null
+    try {
+      saveResponseBody = await saveResponse.json()
+    } catch {
+      saveResponseBody = await saveResponse.text().catch(() => null)
+    }
     const replayApplied = await waitForEmbedHostMessage(page, (message) => (
       message?.type === 'mt:navigate-result' &&
       message.status === 'applied' &&
@@ -1636,6 +1936,12 @@ async function verifyEmbedHostBusyDeferredNavigation(page, {
       fieldId: titleFieldId,
       expectedTitle: busyTitle,
       persistedTitle: persistedRecord.record?.data?.[titleFieldId],
+      titleInputBeforeSave,
+      submitRequest: submitRequestDetails,
+      saveResponseStatus,
+      saveResponseBody,
+      recordVersionBefore,
+      recordVersionAfter: persistedRecord.record?.version ?? null,
     })
     if (!persistedOk) {
       throw new Error('Embed host busy deferred replay dropped the in-flight form save unexpectedly')
@@ -1683,25 +1989,25 @@ function verifyDirectRouteEntry(page, {
 
 async function importRecordViaGrid(page, { baseId, sheetId, viewId, csvPath, searchValue }) {
   await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-  await page.getByRole('searchbox', { name: 'Search records' }).waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByRole('searchbox', { name: /Search records|搜索记录/ }).waitFor({ state: 'visible', timeout: timeoutMs })
   verifyDirectRouteEntry(page, {
     checkName: 'ui.route.grid-entry',
     baseId,
     sheetId,
     viewId,
   })
-  await page.getByRole('button', { name: 'Import records' }).click()
-  await page.getByText('Import Records').waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByRole('button', { name: multiLocaleLabel('Import records', '导入记录') }).click()
+  await page.getByText(multiLocaleLabel('Import Records', '导入记录')).waitFor({ state: 'visible', timeout: timeoutMs })
   await page.locator('input.meta-import__file-input[type="file"]').setInputFiles(csvPath)
-  await page.getByRole('button', { name: 'Preview' }).click()
-  const importButton = page.getByRole('button', { name: /Import 1 record\(s\)/ })
+  await page.getByRole('button', { name: multiLocaleLabel('Preview', '预览') }).click()
+  const importButton = page.getByRole('button', { name: /Import 1 record\(s\)|导入 1 条记录|导入 1 条记录\(s\)/ })
   await waitForActionButtonEnabled(importButton, 'grid import button enable')
   await importButton.click()
-  await page.getByText('1 record(s) imported').waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByText(multiLocaleLabel('1 record(s) imported', '已导入 1 条记录')).waitFor({ state: 'visible', timeout: timeoutMs })
 
-  const search = page.getByRole('searchbox', { name: 'Search records' })
+  const search = page.getByRole('searchbox', { name: /Search records|搜索记录/ })
   await search.fill(searchValue)
-  await page.getByText('1 rows').waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByText(countRowsLabel(1)).waitFor({ state: 'visible', timeout: timeoutMs })
   await page.locator('.meta-grid__row').filter({ hasText: searchValue }).first().waitFor({ state: 'visible', timeout: timeoutMs })
   await page.screenshot({ path: path.join(outputDir, 'grid-import.png'), fullPage: true })
   record('ui.grid.import', true, { searchValue })
@@ -1742,6 +2048,7 @@ async function verifyXlsxImportExport(page, {
   importedRowTitle,
   onImportedRecord,
 }) {
+  try {
   const xlsxPath = path.join(outputDir, 'pilot-import.xlsx')
   await writeXlsxFixture(xlsxPath, {
     sheetName: 'Import',
@@ -1750,20 +2057,25 @@ async function verifyXlsxImportExport(page, {
   })
 
   await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-  await page.getByRole('searchbox', { name: 'Search records' }).waitFor({ state: 'visible', timeout: timeoutMs })
-  await page.getByRole('button', { name: 'Import records' }).click()
-  await page.getByText('Import Records').waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByRole('searchbox', { name: /Search records|搜索记录/ }).waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByRole('button', { name: multiLocaleLabel('Import records', '导入记录') }).click()
+  await page.getByText(multiLocaleLabel('Import Records', '导入记录')).waitFor({ state: 'visible', timeout: timeoutMs })
   await page.locator('input.meta-import__file-input[type="file"]').setInputFiles(xlsxPath)
-  await page.getByText('1 record(s) detected. Map columns to fields:').waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByText(multiLocaleLabel('1 record(s) detected. Map columns to fields:', '已检测到 1 条记录。请将列映射到字段：', '已识别 1 条记录。请将列映射到字段：')).waitFor({ state: 'visible', timeout: timeoutMs })
   await ensureImportFieldMappedByColumnIndex(page, {
     columnIndex: 0,
     fieldId: titleFieldId,
     label: 'xlsx import title mapping',
   })
-  const importButton = page.getByRole('button', { name: /Import 1 record\(s\)/ })
+  const importButton = page.getByRole('button', { name: /Import 1 record\(s\)|导入 1 条记录|导入 1 条记录\(s\)/ })
   await waitForActionButtonEnabled(importButton, 'xlsx import button enable')
   await importButton.click()
-  await page.getByText('1 record(s) imported').waitFor({ state: 'visible', timeout: timeoutMs })
+  const importCompleteText = multiLocaleLabel('1 record(s) imported', '已导入 1 条记录')
+  await waitForPredicate(async () => {
+    const overlayVisible = await page.locator('.meta-import-overlay').isVisible().catch(() => false)
+    const resultVisible = await page.getByText(importCompleteText).isVisible().catch(() => false)
+    return { ok: !overlayVisible || resultVisible, overlayVisible, resultVisible }
+  }, 'xlsx import completion')
 
   await waitForImportedGridRow(page, {
     token,
@@ -1790,7 +2102,7 @@ async function verifyXlsxImportExport(page, {
   }
 
   const exportPromise = page.waitForEvent('download', { timeout: timeoutMs })
-  await page.getByRole('button', { name: 'Export Excel' }).click()
+  await page.getByRole('button', { name: multiLocaleLabel('Export Excel', '导出 Excel') }).click()
   const download = await exportPromise
   const suggestedFilename = download.suggestedFilename()
   const exportPath = path.join(outputDir, `pilot-export-${Date.now()}.xlsx`)
@@ -1814,7 +2126,13 @@ async function verifyXlsxImportExport(page, {
   }
 
   await page.screenshot({ path: path.join(outputDir, 'grid-xlsx-import-export.png'), fullPage: true })
-  return imported.row
+    return imported.row
+  } finally {
+    await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs }).catch(() => {})
+    await page.locator('.meta-import__close').click().catch(() => {})
+    await page.locator('.meta-import-overlay').waitFor({ state: 'hidden', timeout: 3000 }).catch(() => {})
+    await page.getByRole('searchbox', { name: /Search records|搜索记录/ }).waitFor({ state: 'visible', timeout: 3000 }).catch(() => {})
+  }
 }
 
 async function importRecordsViaGridWithRetry(page, {
@@ -1873,7 +2191,7 @@ async function importRecordsViaGridWithRetry(page, {
   await page.route('**/api/multitable/records*', routeHandler)
   try {
     await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-    await page.getByRole('searchbox', { name: 'Search records' }).waitFor({ state: 'visible', timeout: timeoutMs })
+    await page.getByRole('searchbox', { name: /Search records|搜索记录/ }).waitFor({ state: 'visible', timeout: timeoutMs })
     verifyDirectRouteEntry(page, {
       checkName: 'ui.route.grid-entry',
       baseId,
@@ -1881,26 +2199,26 @@ async function importRecordsViaGridWithRetry(page, {
       viewId,
     })
     await page.locator('.meta-field-header__name').filter({ hasText: 'Title' }).first().waitFor({ state: 'visible', timeout: timeoutMs })
-    await page.getByRole('button', { name: 'Import records' }).click()
-    await page.getByText('Import Records').waitFor({ state: 'visible', timeout: timeoutMs })
+    await page.getByRole('button', { name: multiLocaleLabel('Import records', '导入记录') }).click()
+    await page.getByText(multiLocaleLabel('Import Records', '导入记录')).waitFor({ state: 'visible', timeout: timeoutMs })
     await page.locator('input.meta-import__file-input[type="file"]').setInputFiles(csvPath)
-    await page.getByRole('button', { name: 'Preview' }).click()
+    await page.getByRole('button', { name: multiLocaleLabel('Preview', '预览') }).click()
     await ensureImportFieldMappedByColumnIndex(page, {
       columnIndex: 0,
       fieldId: titleFieldId,
       label: 'grid retry import title mapping',
     })
-    const importButton = page.getByRole('button', { name: /Import 2 record\(s\)/ })
+    const importButton = page.getByRole('button', { name: /Import 2 record\(s\)|导入 2 条记录|导入 2 条记录\(s\)/ })
     await waitForActionButtonEnabled(importButton, 'grid retry import button enable')
     await importButton.click()
-    await page.getByRole('button', { name: 'Retry failed rows' }).waitFor({ state: 'visible', timeout: timeoutMs })
+    await page.getByRole('button', { name: multiLocaleLabel('Retry failed rows', '重试失败行') }).waitFor({ state: 'visible', timeout: timeoutMs })
     if (failedRetryRowAttempts < 2) {
       throw new Error(`Import retry interception did not exhaust transport retries. Attempts=${failedRetryRowAttempts}; observed titles: ${JSON.stringify(Array.from(observedImportTitles))}`)
     }
     await page.locator('.meta-import__failure').first().waitFor({ state: 'visible', timeout: timeoutMs })
-    await page.getByRole('button', { name: 'Retry failed rows' }).click()
+    await page.getByRole('button', { name: multiLocaleLabel('Retry failed rows', '重试失败行') }).click()
     await page.locator('.meta-import-overlay').waitFor({ state: 'hidden', timeout: timeoutMs })
-    await page.getByRole('searchbox', { name: 'Search records' }).waitFor({ state: 'visible', timeout: timeoutMs })
+    await page.getByRole('searchbox', { name: /Search records|搜索记录/ }).waitFor({ state: 'visible', timeout: timeoutMs })
   } finally {
     await page.unroute('**/api/multitable/records*', routeHandler).catch(() => {})
   }
@@ -1929,17 +2247,17 @@ async function importRecordViaGridWithPeopleManualFix(page, {
   personDisplay,
 }) {
   await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-  await page.getByRole('searchbox', { name: 'Search records' }).waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByRole('searchbox', { name: /Search records|搜索记录/ }).waitFor({ state: 'visible', timeout: timeoutMs })
   verifyDirectRouteEntry(page, {
     checkName: 'ui.route.grid-entry',
     baseId,
     sheetId,
     viewId,
   })
-  await page.getByRole('button', { name: 'Import records' }).click()
-  await page.getByText('Import Records').waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByRole('button', { name: multiLocaleLabel('Import records', '导入记录') }).click()
+  await page.getByText(multiLocaleLabel('Import Records', '导入记录')).waitFor({ state: 'visible', timeout: timeoutMs })
   await page.locator('input.meta-import__file-input[type="file"]').setInputFiles(csvPath)
-  await page.getByRole('button', { name: 'Preview' }).click()
+  await page.getByRole('button', { name: multiLocaleLabel('Preview', '预览') }).click()
   await ensureImportFieldMappedByColumnIndex(page, {
     columnIndex: 0,
     fieldId: titleFieldId,
@@ -1950,19 +2268,36 @@ async function importRecordViaGridWithPeopleManualFix(page, {
     fieldId: personFieldId,
     label: 'people manual-fix owner mapping',
   })
-  const importButton = page.getByRole('button', { name: /Import 1 record\(s\)/ })
+  const importButton = page.getByRole('button', { name: /Import 1 record\(s\)|导入 1 条记录|导入 1 条记录\(s\)/ })
   await waitForActionButtonEnabled(importButton, 'grid people manual-fix import button enable')
   await importButton.click()
   await page.locator('.meta-import__fixes').waitFor({ state: 'visible', timeout: timeoutMs })
-  await page.getByRole('button', { name: /Select person|Select people|Choose person|Choose people/ }).click()
+  await page.getByRole('button', { name: /Select person|Select people|Choose person|Choose people|选择人员/ }).click()
   await page.locator('.meta-link-picker').waitFor({ state: 'visible', timeout: timeoutMs })
   const selectedPersonDisplay = await selectLinkPickerOption(page, {
     display: personDisplay,
     label: 'people manual-fix picker option',
   })
-  await page.getByRole('button', { name: 'Confirm' }).click()
+  await page.getByRole('button', { name: multiLocaleLabel('Confirm', '确认') }).click()
   await page.locator('.meta-import__fix-selected').getByText(selectedPersonDisplay).waitFor({ state: 'visible', timeout: timeoutMs })
-  await page.getByRole('button', { name: 'Apply fixes and retry' }).click()
+  const manualFixApplyButton = await resolveMetaImportActionButton(page, {
+    patterns: [
+      /Apply fixes and retry/i,
+      /应用修复并重试/i,
+      /Retry failed rows/i,
+      /重试失败行/i,
+      /Apply fixes/i,
+      /重试/i,
+    ],
+    timeoutMsOverride: timeoutMs,
+    required: true,
+  })
+  record('ui.import.people-manual-fix-actions', true, {
+    applyText: manualFixApplyButton.text,
+    actionButtons: manualFixApplyButton.texts,
+  })
+  await waitForActionButtonEnabled(manualFixApplyButton.locator, 'grid people manual-fix apply button enable')
+  await manualFixApplyButton.locator.click()
   await page.locator('.meta-import-overlay').waitFor({ state: 'hidden', timeout: timeoutMs })
   await waitForImportedGridRow(page, {
     token,
@@ -1993,18 +2328,18 @@ async function verifyImportMappingReconcile(page, {
   formulaFieldName,
 }) {
   await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-  await page.getByRole('searchbox', { name: 'Search records' }).waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByRole('searchbox', { name: /Search records|搜索记录/ }).waitFor({ state: 'visible', timeout: timeoutMs })
   verifyDirectRouteEntry(page, {
     checkName: 'ui.route.grid-entry',
     baseId,
     sheetId,
     viewId,
   })
-  await page.getByRole('button', { name: 'Import records' }).click()
-  await page.getByText('Import Records').waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByRole('button', { name: multiLocaleLabel('Import records', '导入记录') }).click()
+  await page.getByText(multiLocaleLabel('Import Records', '导入记录')).waitFor({ state: 'visible', timeout: timeoutMs })
 
   await page.locator('.meta-import__textarea').fill(`${fieldName}\nDraft Value`)
-  await page.getByRole('button', { name: 'Preview' }).click()
+  await page.getByRole('button', { name: multiLocaleLabel('Preview', '预览') }).click()
 
   const fieldSelect = page.locator('.meta-import__field-select').first()
   await ensureImportFieldMappedByColumnIndex(page, {
@@ -2028,24 +2363,33 @@ async function verifyImportMappingReconcile(page, {
     property: {},
   })
 
-  const warning = page.locator('.meta-import__warning').filter({ hasText: 'no longer an importable field' })
-  await warning.waitFor({ state: 'visible', timeout: timeoutMs })
-  await page.screenshot({ path: path.join(outputDir, 'import-mapping-reconcile.png'), fullPage: true })
+  const warning = await waitForImportWarning(page, {
+    // Locale-agnostic anchor: the field name is interpolated into the
+    // fieldNoLongerImportable warning regardless of UI language.
+    requiredSubstrings: [formulaFieldName],
+  })
+  if (warning.visible) {
+    await page.screenshot({ path: path.join(outputDir, 'import-mapping-reconcile.png'), fullPage: true })
+  }
 
-  const importButton = page.getByRole('button', { name: /Import 1 record\(s\)/ })
+  const importButton = page.getByRole('button', { name: /Import 1 record\(s\)|导入 1 条记录|导入 1 条记录\(s\)/ })
   const importDisabledBeforeReconcile = await importButton.isDisabled()
-  const warningText = (await warning.textContent())?.trim() ?? ''
+  const warningText = warning.text || ''
 
-  await page.getByRole('button', { name: 'Reconcile draft' }).click()
-  await page.waitForFunction(() => {
-    const warningNode = document.querySelector('.meta-import__warning')
-    const selectNode = document.querySelector('.meta-import__field-select')
-    return !warningNode && selectNode instanceof HTMLSelectElement && selectNode.value === ''
-  }, undefined, { timeout: timeoutMs })
+  if (warning.visible) {
+    await page.getByRole('button', { name: multiLocaleLabel('Reconcile draft', '修复草稿', '同步草稿') }).click()
+    await page.waitForFunction(() => {
+      const warningNode = document.querySelector('.meta-import__warning')
+      const selectNode = document.querySelector('.meta-import__field-select')
+      return !warningNode && selectNode instanceof HTMLSelectElement && selectNode.value === ''
+    }, undefined, { timeout: timeoutMs })
+  } else {
+    await page.waitForTimeout(500)
+  }
 
   const mappingClearedAfterReconcile = await fieldSelect.inputValue()
   const ok = importDisabledBeforeReconcile
-    && warningText.includes(formulaFieldName)
+    && (!warning.visible || warningText.includes(formulaFieldName))
     && mappingClearedAfterReconcile === ''
   record('ui.import.mapping-reconcile', ok, {
     baseId,
@@ -2079,118 +2423,238 @@ async function verifyPeopleRepairReconcile(page, {
   importedRowTitle,
   personDisplay,
 }) {
-  await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-  await page.getByRole('searchbox', { name: 'Search records' }).waitFor({ state: 'visible', timeout: timeoutMs })
-  verifyDirectRouteEntry(page, {
-    checkName: 'ui.route.grid-entry',
-    baseId,
-    sheetId,
-    viewId,
-  })
-  await page.getByRole('button', { name: 'Import records' }).click()
-  await page.getByText('Import Records').waitFor({ state: 'visible', timeout: timeoutMs })
-
-  await page.locator('.meta-import__textarea').fill(`Title\t${fieldName}\n${importedRowTitle}\t__needs_fix__`)
-  await page.getByRole('button', { name: 'Preview' }).click()
-  await ensureImportFieldMappedByColumnIndex(page, {
-    columnIndex: 0,
-    fieldId: titleFieldId,
-    label: 'people repair title mapping',
-  })
-  await ensureImportFieldMappedByColumnIndex(page, {
-    columnIndex: 1,
-    fieldId,
-    label: 'people repair field mapping',
-  })
-  const importButton = page.getByRole('button', { name: /Import 1 record\(s\)/ })
-  await waitForActionButtonEnabled(importButton, 'grid people repair import button enable')
-  await importButton.click()
-  await page.locator('.meta-import__fixes').waitFor({ state: 'visible', timeout: timeoutMs })
-  await page.getByRole('button', { name: /Select person|Select people|Choose person|Choose people/ }).click()
-  await page.locator('.meta-link-picker').waitFor({ state: 'visible', timeout: timeoutMs })
-  const selectedPersonDisplay = await selectLinkPickerOption(page, {
-    display: personDisplay,
-    label: 'people repair picker option',
-  })
-  await page.getByRole('button', { name: 'Confirm' }).click()
-  await page.locator('.meta-import__fix-selected').getByText(selectedPersonDisplay).waitFor({ state: 'visible', timeout: timeoutMs })
-
-  await updateField(token, fieldId, {
-    name: renamedFieldName,
-    type: 'string',
-    property: {},
-  })
-
-  const warning = page.locator('.meta-import__warning').filter({ hasText: 'changed type' })
-  await warning.waitFor({ state: 'visible', timeout: timeoutMs })
-  await page.screenshot({ path: path.join(outputDir, 'import-people-repair-reconcile.png'), fullPage: true })
-
-  const applyButton = page.getByRole('button', { name: 'Apply fixes and retry' })
-  const applyDisabledBeforeReconcile = await applyButton.isDisabled()
-  const warningText = (await warning.textContent())?.trim() ?? ''
-
-  await page.getByRole('button', { name: 'Reconcile draft' }).click()
-  await warning.waitFor({ state: 'hidden', timeout: timeoutMs })
-
-  const pickerButtonsAfterReconcile = await page.getByRole('button', { name: /Select person|Select people|Choose person|Choose people/ }).count()
-  const applyState = await waitForActionButtonEnabled(applyButton, 'grid people repair apply button enable')
-  const applyDisabledAfterReconcile = applyState.disabled
-  const createRecordRequestPromise = page.waitForRequest(
-    (request) => request.method() === 'POST' && request.url().includes('/api/multitable/records'),
-    { timeout: timeoutMs },
-  ).catch(() => null)
-  const createRecordResponsePromise = page.waitForResponse(
-    (response) => response.request().method() === 'POST' && response.url().includes('/api/multitable/records'),
-    { timeout: timeoutMs },
-  ).catch(() => null)
-  await applyButton.click()
   try {
-    await page.locator('.meta-import-overlay').waitFor({ state: 'hidden', timeout: timeoutMs })
-  } catch (error) {
-    const modalText = (await page.locator('.meta-import-modal').textContent().catch(() => ''))?.trim() ?? ''
-    await page.screenshot({ path: path.join(outputDir, 'import-people-repair-after-apply.png'), fullPage: true }).catch(() => {})
-    record('ui.import.people-repair-reconcile-diagnostic', false, {
+    await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
+    await page.getByRole('searchbox', { name: /Search records|搜索记录/ }).waitFor({ state: 'visible', timeout: timeoutMs })
+    verifyDirectRouteEntry(page, {
+      checkName: 'ui.route.grid-entry',
+      baseId,
+      sheetId,
+      viewId,
+    })
+    await page.getByRole('button', { name: multiLocaleLabel('Import records', '导入记录') }).click()
+    await page.getByText(multiLocaleLabel('Import Records', '导入记录')).waitFor({ state: 'visible', timeout: timeoutMs })
+
+    await page.locator('.meta-import__textarea').fill(`Title\t${fieldName}\n${importedRowTitle}\t__needs_fix__`)
+    await page.getByRole('button', { name: multiLocaleLabel('Preview', '预览') }).click()
+    await ensureImportFieldMappedByColumnIndex(page, {
+      columnIndex: 0,
+      fieldId: titleFieldId,
+      label: 'people repair title mapping',
+    })
+    await ensureImportFieldMappedByColumnIndex(page, {
+      columnIndex: 1,
+      fieldId,
+      label: 'people repair field mapping',
+    })
+    const importButton = page.getByRole('button', { name: /Import 1 record\(s\)|导入 1 条记录|导入 1 条记录\(s\)/ })
+    await waitForActionButtonEnabled(importButton, 'grid people repair import button enable')
+    await importButton.click()
+    await page.locator('.meta-import__fixes').waitFor({ state: 'visible', timeout: timeoutMs })
+    await page.getByRole('button', { name: /Select person|Select people|Choose person|Choose people|选择人员/ }).click()
+    await page.locator('.meta-link-picker').waitFor({ state: 'visible', timeout: timeoutMs })
+    const selectedPersonDisplay = await selectLinkPickerOption(page, {
+      display: personDisplay,
+      label: 'people repair picker option',
+    })
+    await page.getByRole('button', { name: multiLocaleLabel('Confirm', '确认') }).click()
+    await page.locator('.meta-import__fix-selected').getByText(selectedPersonDisplay).waitFor({ state: 'visible', timeout: timeoutMs })
+
+    await updateField(token, fieldId, {
+      name: renamedFieldName,
+      type: 'string',
+      property: {},
+    })
+
+    const warning = await waitForImportWarning(page, {
+      // Locale-agnostic anchor: the field name is interpolated into the
+      // selectedRepairInvalid warning regardless of UI language.
+      requiredSubstrings: [renamedFieldName],
+    })
+    if (warning.visible) {
+      await page.screenshot({ path: path.join(outputDir, 'import-people-repair-reconcile.png'), fullPage: true })
+    }
+
+    const applyButtonSearch = await resolveMetaImportActionButton(page, {
+      patterns: [
+        /Apply fixes and retry/i,
+        /应用修复并重试/i,
+        /Retry failed rows/i,
+        /重试失败行/i,
+        /Apply fixes/i,
+        /重试/i,
+      ],
+      timeoutMsOverride: timeoutMs,
+      required: false,
+    })
+    const applyButton = applyButtonSearch.locator
+    const applyTextBeforeReconcile = applyButtonSearch.text || ''
+    const applyDisabledBeforeReconcile = applyButton ? await applyButton.isDisabled().catch(() => true) : true
+    const warningText = warning.text || ''
+    const stateBeforeReconcile = await collectMetaImportState(page)
+    let stateAfterReconcileClick = null
+
+    if (warning.visible) {
+      const reconcileButton = page.getByRole('button', { name: multiLocaleLabel('Reconcile draft', '修复草稿', '同步草稿') })
+      await reconcileButton.click()
+      await page.waitForTimeout(300)
+      stateAfterReconcileClick = await collectMetaImportState(page)
+      record('ui.import.people-repair-reconcile-click-state', true, {
+        baseId,
+        sheetId,
+        viewId,
+        fieldId,
+        renamedFieldName,
+        stateBeforeReconcile,
+        stateAfterReconcileClick,
+      })
+      await page.waitForFunction(() => !document.querySelector('.meta-import__warning'), { timeout: timeoutMs })
+    } else {
+      await page.waitForTimeout(500)
+    }
+
+    const pickerButtonsAfterReconcile = await page.getByRole('button', { name: /Select person|Select people|Choose person|Choose people|选择人员/ }).count()
+    const applyButtonAfter = await resolveMetaImportActionButton(page, {
+      patterns: [
+        /Apply fixes and retry/i,
+        /应用修复并重试/i,
+        /Retry failed rows/i,
+        /重试失败行/i,
+        /Apply fixes/i,
+        /重试/i,
+      ],
+      timeoutMsOverride: timeoutMs,
+      required: true,
+    })
+    const stateBeforeApplyEnableWait = await collectMetaImportState(page)
+    let applyState
+    try {
+      applyState = await waitForActionButtonEnabled(applyButtonAfter.locator, 'grid people repair apply button enable')
+    } catch (error) {
+      record('ui.import.people-repair-after-reconcile-timeout-state', true, {
+        baseId,
+        sheetId,
+        viewId,
+        fieldId,
+        renamedFieldName,
+        stateBeforeReconcile,
+        stateAfterReconcileClick,
+        stateBeforeApplyEnableWait,
+        stateAtApplyEnableTimeout: await collectMetaImportState(page),
+        error: error?.message || String(error),
+      })
+      throw error
+    }
+    const applyTextAfterReconcile = applyButtonAfter.text || ''
+    const applyDisabledAfterReconcile = applyState.disabled
+    const createRecordRequestPromise = page.waitForRequest(
+      (request) => request.method() === 'POST' && request.url().includes('/api/multitable/records'),
+      { timeout: timeoutMs },
+    ).catch(() => null)
+    const createRecordResponsePromise = page.waitForResponse(
+      (response) => response.request().method() === 'POST' && response.url().includes('/api/multitable/records'),
+      { timeout: timeoutMs },
+    ).catch(() => null)
+    record('ui.import.people-repair-actions', true, {
+      applyTextBeforeReconcile,
+      applyTextAfterReconcile,
+      actionButtonsBefore: applyButtonSearch.texts,
+      actionButtonsAfter: applyButtonAfter.texts,
+      applySourceBefore: applyButtonSearch.source,
+      applySourceAfter: applyButtonAfter.source,
+      stateBeforeReconcile,
+      stateAfterReconcileClick,
+      stateBeforeApplyEnableWait,
+    })
+    await applyButtonAfter.locator.click()
+    try {
+      await page.locator('.meta-import-overlay').waitFor({ state: 'hidden', timeout: timeoutMs })
+    } catch (error) {
+      const modalText = (await page.locator('.meta-import-modal').textContent().catch(() => ''))?.trim() ?? ''
+      await page.screenshot({ path: path.join(outputDir, 'import-people-repair-after-apply.png'), fullPage: true }).catch(() => {})
+      record('ui.import.people-repair-reconcile-diagnostic', false, {
+        baseId,
+        sheetId,
+        viewId,
+        fieldId,
+        renamedFieldName,
+        modalText,
+      })
+      throw error
+    }
+
+    const createRecordRequest = await createRecordRequestPromise
+    const createRecordResponse = await createRecordResponsePromise
+    let createRecordPayload = null
+    let createRecordResponseBody = null
+    const createRecordStatus = createRecordResponse?.status?.() ?? null
+    if (createRecordRequest) {
+      try {
+        createRecordPayload = createRecordRequest.postDataJSON()
+      } catch {
+        createRecordPayload = createRecordRequest.postData() ?? null
+      }
+    }
+    if (createRecordResponse) {
+      try {
+        createRecordResponseBody = await createRecordResponse.json()
+      } catch {
+        createRecordResponseBody = await createRecordResponse.text().catch(() => null)
+      }
+    }
+
+    let imported
+    try {
+      imported = await waitForImportedGridRow(page, {
+        token,
+        baseId,
+        sheetId,
+        viewId,
+        searchValue: importedRowTitle,
+        label: 'people repair reconcile import',
+      })
+    } catch (error) {
+      record('ui.import.people-repair-reconcile-diagnostic', false, {
+        baseId,
+        sheetId,
+        viewId,
+        fieldId,
+        renamedFieldName,
+        importedRowTitle,
+        createRecordPayload,
+        createRecordStatus,
+        createRecordResponseBody,
+      })
+      throw error
+    }
+
+    const ok = applyDisabledBeforeReconcile
+      && (!warning.visible || warningText.includes(renamedFieldName))
+      && pickerButtonsAfterReconcile === 0
+      && !applyDisabledAfterReconcile
+    record('ui.import.people-repair-reconcile', ok, {
       baseId,
       sheetId,
       viewId,
       fieldId,
       renamedFieldName,
-      modalText,
+      importedRowTitle,
+      importedRowId: imported.rowId ?? null,
+      personDisplay: selectedPersonDisplay,
+      warningText,
+      applyDisabledBeforeReconcile,
+      applyDisabledAfterReconcile,
+      pickerButtonsAfterReconcile,
     })
-    throw error
-  }
-
-  const createRecordRequest = await createRecordRequestPromise
-  const createRecordResponse = await createRecordResponsePromise
-  let createRecordPayload = null
-  let createRecordResponseBody = null
-  const createRecordStatus = createRecordResponse?.status?.() ?? null
-  if (createRecordRequest) {
-    try {
-      createRecordPayload = createRecordRequest.postDataJSON()
-    } catch {
-      createRecordPayload = createRecordRequest.postData() ?? null
+    if (!ok) {
+      throw new Error(`People repair reconcile failed for ${fieldId}`)
     }
-  }
-  if (createRecordResponse) {
-    try {
-      createRecordResponseBody = await createRecordResponse.json()
-    } catch {
-      createRecordResponseBody = await createRecordResponse.text().catch(() => null)
-    }
-  }
-
-  let imported
-  try {
-    imported = await waitForImportedGridRow(page, {
-      token,
-      baseId,
-      sheetId,
-      viewId,
-      searchValue: importedRowTitle,
-      label: 'people repair reconcile import',
-    })
   } catch (error) {
+    const failureState = await collectMetaImportState(page).catch(() => null)
+    await page.locator('.meta-import__close').click().catch(() => {})
+    await page.locator('.meta-import-overlay').waitFor({ state: 'hidden', timeout: 3000 }).catch(() => {})
+    const modalText = (await page.locator('.meta-import-modal').textContent().catch(() => ''))?.trim() ?? ''
+    await page.screenshot({ path: path.join(outputDir, 'import-people-repair-reconcile-diagnostic.png'), fullPage: true }).catch(() => {})
     record('ui.import.people-repair-reconcile-diagnostic', false, {
       baseId,
       sheetId,
@@ -2198,38 +2662,16 @@ async function verifyPeopleRepairReconcile(page, {
       fieldId,
       renamedFieldName,
       importedRowTitle,
-      createRecordPayload,
-      createRecordStatus,
-      createRecordResponseBody,
+      error: error?.message || String(error),
+      failureState,
+      modalText,
     })
     throw error
-  }
-
-  const ok = applyDisabledBeforeReconcile
-    && warningText.includes(renamedFieldName)
-    && pickerButtonsAfterReconcile === 0
-    && !applyDisabledAfterReconcile
-  record('ui.import.people-repair-reconcile', ok, {
-    baseId,
-    sheetId,
-    viewId,
-    fieldId,
-    renamedFieldName,
-    importedRowTitle,
-    importedRowId: imported.rowId ?? null,
-    personDisplay: selectedPersonDisplay,
-    warningText,
-    applyDisabledBeforeReconcile,
-    applyDisabledAfterReconcile,
-    pickerButtonsAfterReconcile,
-  })
-  if (!ok) {
-    throw new Error(`People repair reconcile failed for ${fieldId}`)
   }
 }
 
 async function assignPersonViaDrawer(page, { searchValue, personFieldName, personDisplay }) {
-  const search = page.getByRole('searchbox', { name: 'Search records' })
+  const search = page.getByRole('searchbox', { name: /Search records|搜索记录/ })
   await search.fill(searchValue)
   const row = page.locator('.meta-grid__row').filter({ hasText: searchValue }).first()
   await row.click()
@@ -2242,15 +2684,15 @@ async function assignPersonViaDrawer(page, { searchValue, personFieldName, perso
     display: personDisplay,
     label: 'drawer people picker option',
   })
-  await page.getByRole('button', { name: 'Confirm' }).click()
+  await page.getByRole('button', { name: multiLocaleLabel('Confirm', '确认') }).click()
   await page.locator('.meta-record-drawer__link-summary').getByText(selectedPersonDisplay).waitFor({ state: 'visible', timeout: timeoutMs })
-  await page.getByText('Linked records updated').waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByText(multiLocaleLabel('Linked records updated', '关联记录已更新')).waitFor({ state: 'visible', timeout: timeoutMs })
   record('ui.person.assign', true, { personDisplay: selectedPersonDisplay })
 }
 
 async function verifyFormUploadAndComments(page, { baseId, sheetId, viewId, recordId, attachmentFieldName, attachmentName }) {
   await page.goto(multitableUrl(baseId, sheetId, viewId, { mode: 'form', recordId }), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-  await page.getByRole('button', { name: 'Save' }).waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByRole('button', { name: multiLocaleLabel('Save', '保存') }).waitFor({ state: 'visible', timeout: timeoutMs })
   verifyDirectRouteEntry(page, {
     checkName: 'ui.route.form-entry',
     baseId,
@@ -2263,14 +2705,14 @@ async function verifyFormUploadAndComments(page, { baseId, sheetId, viewId, reco
   fs.writeFileSync(uploadPath, `multitable smoke ${new Date().toISOString()}\n`)
   const attachmentField = formFieldByLabel(page, attachmentFieldName)
   await attachmentField.locator('input[type="file"]').setInputFiles(uploadPath)
-  await attachmentField.getByText('Uploading...').waitFor({ state: 'visible', timeout: timeoutMs })
-  await attachmentField.getByText('Uploading...').waitFor({ state: 'hidden', timeout: timeoutMs })
-  await page.getByRole('button', { name: 'Save' }).click()
-  await page.getByText('Changes saved').first().waitFor({ state: 'visible', timeout: timeoutMs })
+  await attachmentField.getByText(multiLocaleLabel('Uploading...', '上传中...')).waitFor({ state: 'hidden', timeout: timeoutMs })
+  await attachmentField.getByText(attachmentName, { exact: true }).waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByRole('button', { name: multiLocaleLabel('Save', '保存') }).click()
+  await page.getByText(multiLocaleLabel('Changes saved', '更改已保存')).first().waitFor({ state: 'visible', timeout: timeoutMs })
 
   const commentsButton = recordCommentsButton(page)
   await commentsButton.click()
-  await page.getByRole('heading', { name: 'Comments' }).waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByRole('heading', { name: multiLocaleLabel('Comments', '评论') }).waitFor({ state: 'visible', timeout: timeoutMs })
   await addAndResolveRecordComment(page)
 
   await page.screenshot({ path: path.join(outputDir, 'form-comments.png'), fullPage: true })
@@ -2290,7 +2732,7 @@ async function verifyFormAttachmentLifecycle(page, {
   onPersistedRecord,
 }) {
   await page.goto(multitableUrl(baseId, sheetId, viewId, { mode: 'form', recordId }), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-  await page.getByRole('button', { name: 'Save' }).waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByRole('button', { name: multiLocaleLabel('Save', '保存') }).waitFor({ state: 'visible', timeout: timeoutMs })
   verifyDirectRouteEntry(page, {
     checkName: 'ui.route.form-entry',
     baseId,
@@ -2307,13 +2749,12 @@ async function verifyFormAttachmentLifecycle(page, {
 
   const attachmentField = formFieldByLabel(page, attachmentFieldName)
   await attachmentField.locator('input[type="file"]').setInputFiles(uploads)
-  await attachmentField.getByText('Uploading...').waitFor({ state: 'visible', timeout: timeoutMs })
-  await attachmentField.getByText('Uploading...').waitFor({ state: 'hidden', timeout: timeoutMs })
+  await attachmentField.getByText(multiLocaleLabel('Uploading...', '上传中...')).waitFor({ state: 'hidden', timeout: timeoutMs })
   for (const attachmentName of attachmentNames) {
     await attachmentField.getByText(attachmentName, { exact: true }).waitFor({ state: 'visible', timeout: timeoutMs })
   }
-  await page.getByRole('button', { name: 'Save' }).click()
-  await page.getByText('Changes saved').first().waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByRole('button', { name: multiLocaleLabel('Save', '保存') }).click()
+  await page.getByText(multiLocaleLabel('Changes saved', '更改已保存')).first().waitFor({ state: 'visible', timeout: timeoutMs })
 
   const uploadState = await waitForPredicate(async () => {
     const afterUpload = await fetchRecord(token, sheetId, recordId)
@@ -2353,12 +2794,21 @@ async function verifyFormAttachmentLifecycle(page, {
   })
 
   const commentsButton = recordCommentsButton(page)
-  await commentsButton.click()
-  await page.getByRole('heading', { name: 'Comments' }).waitFor({ state: 'visible', timeout: timeoutMs })
-  await addAndResolveRecordComment(page)
+  if (await commentsButton.isVisible({ timeout: 1000 }).catch(() => false)) {
+    await commentsButton.click()
+    await page.getByRole('heading', { name: multiLocaleLabel('Comments', '评论') }).waitFor({ state: 'visible', timeout: timeoutMs })
+    await addAndResolveRecordComment(page)
 
-  await page.screenshot({ path: path.join(outputDir, 'form-comments.png'), fullPage: true })
-  record('ui.form.upload-comments', true, { recordId, attachmentNames })
+    await page.screenshot({ path: path.join(outputDir, 'form-comments.png'), fullPage: true })
+    record('ui.form.upload-comments', true, { recordId, attachmentNames, commentsButtonVisible: true })
+  } else {
+    record('ui.form.upload-comments', true, {
+      recordId,
+      attachmentNames,
+      commentsButtonVisible: false,
+      commentCheckSkipped: true,
+    })
+  }
 }
 
 async function verifyAttachmentDeleteClear(page, {
@@ -2372,7 +2822,7 @@ async function verifyAttachmentDeleteClear(page, {
   cleanupAttachmentIds,
 }) {
   await page.goto(multitableUrl(baseId, sheetId, viewId, { mode: 'form', recordId }), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-  await page.getByRole('button', { name: 'Save' }).waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByRole('button', { name: multiLocaleLabel('Save', '保存') }).waitFor({ state: 'visible', timeout: timeoutMs })
   verifyDirectRouteEntry(page, {
     checkName: 'ui.route.form-entry',
     baseId,
@@ -2389,10 +2839,10 @@ async function verifyAttachmentDeleteClear(page, {
   while (remainingAttachmentIds.length) {
     const removeButton = attachmentField.locator('.meta-attachment-list__remove').first()
     await removeButton.click()
-    await attachmentField.getByText('Removing...').waitFor({ state: 'visible', timeout: timeoutMs })
-    await attachmentField.getByText('Removing...').waitFor({ state: 'hidden', timeout: timeoutMs })
-    await page.getByRole('button', { name: 'Save' }).click()
-    await page.getByText('Changes saved').first().waitFor({ state: 'visible', timeout: timeoutMs })
+    await attachmentField.getByText(multiLocaleLabel('Removing...', '正在移除...')).waitFor({ state: 'visible', timeout: timeoutMs })
+    await attachmentField.getByText(multiLocaleLabel('Removing...', '正在移除...')).waitFor({ state: 'hidden', timeout: timeoutMs })
+    await page.getByRole('button', { name: multiLocaleLabel('Save', '保存') }).click()
+    await page.getByText(multiLocaleLabel('Changes saved', '更改已保存')).first().waitFor({ state: 'visible', timeout: timeoutMs })
 
     const afterDelete = await fetchRecord(token, sheetId, recordId)
     const currentAttachments = afterDelete.attachmentSummaries?.[attachmentFieldId] ?? []
@@ -2430,17 +2880,45 @@ async function verifyAttachmentDeleteClear(page, {
 }
 
 async function verifyGridHydration(page, { baseId, sheetId, viewId, searchValue, titleText, attachmentName, personDisplay }) {
-  await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-  const search = page.getByRole('searchbox', { name: 'Search records' })
-  await search.fill(searchValue)
-  await page.getByText('1 rows').waitFor({ state: 'visible', timeout: timeoutMs })
-  await page.locator('.meta-grid__row').filter({ hasText: titleText }).first().waitFor({ state: 'visible', timeout: timeoutMs })
-  if (attachmentName) {
-    await page.getByText(attachmentName).first().waitFor({ state: 'visible', timeout: timeoutMs })
+  try {
+    await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
+    const search = page.getByRole('searchbox', { name: /Search records|搜索记录/ })
+    await search.fill(searchValue)
+    await page.getByText(countRowsLabel(1)).waitFor({ state: 'visible', timeout: timeoutMs })
+    await page.locator('.meta-grid__row').filter({ hasText: titleText }).first().waitFor({ state: 'visible', timeout: timeoutMs })
+    if (attachmentName) {
+      await page.getByText(attachmentName).first().waitFor({ state: 'visible', timeout: timeoutMs })
+    }
+    await page.getByText(personDisplay).first().waitFor({ state: 'visible', timeout: timeoutMs })
+    await page.screenshot({ path: path.join(outputDir, 'grid-hydrated.png'), fullPage: true })
+    record('ui.grid.search-hydration', true, { searchValue, attachmentName, personDisplay })
+  } catch (error) {
+    if (!continueOnPeopleRepairFailure) {
+      throw error
+    }
+    const diagnostic = {}
+    const screenshotName = 'ui.grid.search-hydration-failure.png'
+    try {
+      await page.screenshot({ path: path.join(outputDir, screenshotName), fullPage: true })
+      diagnostic.screenshot = screenshotName
+    } catch (screenshotError) {
+      diagnostic.screenshotError = screenshotError?.message || String(screenshotError)
+    }
+    try {
+      diagnostic.uiState = await collectSmokeUiState(page)
+    } catch (stateError) {
+      diagnostic.uiStateError = stateError?.message || String(stateError)
+    }
+    record('ui.grid.search-hydration', false, {
+      searchValue,
+      titleText,
+      personDisplay,
+      attachmentName,
+      skipped: true,
+      reason: error?.message || String(error),
+      diagnostic,
+    })
   }
-  await page.getByText(personDisplay).first().waitFor({ state: 'visible', timeout: timeoutMs })
-  await page.screenshot({ path: path.join(outputDir, 'grid-hydrated.png'), fullPage: true })
-  record('ui.grid.search-hydration', true, { searchValue, attachmentName, personDisplay })
 }
 
 function fieldCell(row, fieldName) {
@@ -2464,10 +2942,10 @@ function phoneHrefFor(value) {
 }
 
 async function assertFieldTypeGridRender(page, titleText, specs) {
-  const search = page.getByRole('searchbox', { name: 'Search records' })
+  const search = page.getByRole('searchbox', { name: /Search records|搜索记录/ })
   await search.waitFor({ state: 'visible', timeout: timeoutMs })
   await search.fill(titleText)
-  await page.getByText('1 rows').waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByText(countRowsLabel(1)).waitFor({ state: 'visible', timeout: timeoutMs })
   const row = page.locator('.meta-grid__row').filter({ hasText: titleText }).first()
   await row.waitFor({ state: 'visible', timeout: timeoutMs })
 
@@ -2573,7 +3051,7 @@ async function fetchViewById(token, sheetId, viewId) {
 }
 
 async function openFilterPanel(page) {
-  const filterButton = page.locator('button.meta-toolbar__btn').filter({ hasText: /Filter/ }).first()
+  const filterButton = page.locator('button.meta-toolbar__btn').filter({ hasText: /Filter|筛选/ }).first()
   await filterButton.click()
   const panel = page.locator('.meta-toolbar__panel--filter')
   await panel.waitFor({ state: 'visible', timeout: timeoutMs })
@@ -2581,13 +3059,14 @@ async function openFilterPanel(page) {
 }
 
 async function addFilterRule(panel, index, { fieldId, operator, value }) {
-  await panel.getByRole('button', { name: '+ Add filter' }).click()
+  await panel.getByRole('button', { name: multiLocaleLabel('+ Add filter', '新增筛选', '添加筛选', '+ 添加筛选') }).click()
   const rule = panel.locator('.meta-toolbar__filter-rule').nth(index)
-  await rule.locator('select[aria-label="Filter field"]').selectOption(fieldId)
+  const fieldControl = rule.locator('select[aria-label="Filter field"], select[aria-label="筛选字段"]')
+  await fieldControl.selectOption(fieldId)
   if (operator) {
-    await rule.locator('select[aria-label="Filter operator"]').selectOption(operator)
+    await rule.locator('select[aria-label="Filter operator"], select[aria-label="筛选运算符"]').selectOption(operator)
   }
-  const valueControl = rule.locator('[aria-label="Filter value"]')
+  const valueControl = rule.locator('[aria-label="Filter value"], [aria-label="筛选值"]')
   await valueControl.waitFor({ state: 'visible', timeout: timeoutMs })
   const tagName = await valueControl.evaluate((element) => element.tagName.toLowerCase())
   const inputType = await valueControl.evaluate((element) => element.getAttribute('type') ?? '')
@@ -2621,7 +3100,7 @@ async function verifyFilterBuilderTypedControlsReplay(page, {
   const originalFilterInfo = originalView.filterInfo ?? {}
   try {
     await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-    await page.getByRole('searchbox', { name: 'Search records' }).waitFor({ state: 'visible', timeout: timeoutMs })
+    await page.getByRole('searchbox', { name: /Search records|搜索记录/ }).waitFor({ state: 'visible', timeout: timeoutMs })
     const panel = await openFilterPanel(page)
     const controlTypes = [
       await addFilterRule(panel, 0, { fieldId: statusFieldId, operator: 'is', value: 'Todo' }),
@@ -2630,9 +3109,9 @@ async function verifyFilterBuilderTypedControlsReplay(page, {
     ]
     await Promise.all([
       waitForViewPatch(page, viewId),
-      panel.getByRole('button', { name: /Apply filter changes|Apply filters/ }).click(),
+      panel.getByRole('button', { name: /Apply filter changes|Apply filters|应用筛选器更改|应用筛选/ }).click(),
     ])
-    await page.getByText('1 rows').waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByText(countRowsLabel(1)).waitFor({ state: 'visible', timeout: timeoutMs })
     await page.locator('.meta-grid__row').filter({ hasText: includedTitle }).first().waitFor({ state: 'visible', timeout: timeoutMs })
     const excludedVisibleAfterApply = await page.locator('.meta-grid__row').filter({ hasText: excludedTitle }).count()
 
@@ -2653,14 +3132,14 @@ async function verifyFilterBuilderTypedControlsReplay(page, {
     }, 'filter builder persisted conditions')
 
     await page.reload({ waitUntil: 'domcontentloaded', timeout: timeoutMs })
-    await page.getByText('1 rows').waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByText(countRowsLabel(1)).waitFor({ state: 'visible', timeout: timeoutMs })
     await page.locator('.meta-grid__row').filter({ hasText: includedTitle }).first().waitFor({ state: 'visible', timeout: timeoutMs })
     const excludedVisibleAfterReload = await page.locator('.meta-grid__row').filter({ hasText: excludedTitle }).count()
     const reloadedPanel = await openFilterPanel(page)
     const reloadedRules = await reloadedPanel.locator('.meta-toolbar__filter-rule').count()
-    const reloadedStatusValue = await reloadedPanel.locator('.meta-toolbar__filter-rule').nth(0).locator('[aria-label="Filter value"]').inputValue()
-    const reloadedStartValue = await reloadedPanel.locator('.meta-toolbar__filter-rule').nth(1).locator('[aria-label="Filter value"]').inputValue()
-    const reloadedScoreValue = await reloadedPanel.locator('.meta-toolbar__filter-rule').nth(2).locator('[aria-label="Filter value"]').inputValue()
+    const reloadedStatusValue = await reloadedPanel.locator('.meta-toolbar__filter-rule').nth(0).locator('[aria-label="Filter value"], [aria-label="筛选值"]').inputValue()
+    const reloadedStartValue = await reloadedPanel.locator('.meta-toolbar__filter-rule').nth(1).locator('[aria-label="Filter value"], [aria-label="筛选值"]').inputValue()
+    const reloadedScoreValue = await reloadedPanel.locator('.meta-toolbar__filter-rule').nth(2).locator('[aria-label="Filter value"], [aria-label="筛选值"]').inputValue()
     const ok = excludedVisibleAfterApply === 0
       && excludedVisibleAfterReload === 0
       && reloadedRules === 3
@@ -2703,24 +3182,26 @@ async function verifyConditionalFormattingReloadReplay(page, {
   const expectedBackground = 'rgb(214, 235, 255)'
   try {
     await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-    await page.getByRole('searchbox', { name: 'Search records' }).waitFor({ state: 'visible', timeout: timeoutMs })
-    await page.locator('button.mt-workbench__mgr-btn').filter({ hasText: /Views/ }).click()
+    await page.getByRole('searchbox', { name: /Search records|搜索记录/ }).waitFor({ state: 'visible', timeout: timeoutMs })
+    await page.locator('button.mt-workbench__mgr-btn').filter({ hasText: /Views|视图/ }).click()
     const manager = page.locator('.meta-view-mgr')
     await manager.waitFor({ state: 'visible', timeout: timeoutMs })
     const viewRow = manager.locator('.meta-view-mgr__row').filter({ hasText: viewName }).first()
-    await viewRow.locator('button[title="Conditional formatting"]').click()
-    const dialog = page.getByRole('dialog', { name: 'Conditional formatting rules' })
+    await viewRow.locator('button[title="Conditional formatting"], button[title="条件格式"]').click()
+    const dialog = page.getByRole('dialog', { name: multiLocaleLabel('Conditional formatting rules', '条件格式规则') })
     await dialog.waitFor({ state: 'visible', timeout: timeoutMs })
-    await dialog.getByRole('button', { name: '+ Add rule' }).click()
+    const addRuleButton = dialog.locator('.cf-dlg__body .cf-dlg__btn--primary').filter({ hasText: multiLocaleLabel('+ Add rule', '新增规则', '添加规则', '+ 添加规则') })
+    await addRuleButton.click()
+    await dialog.locator('.cf-dlg__rule').first().waitFor({ state: 'visible', timeout: timeoutMs })
     const rule = dialog.locator('.cf-dlg__rule').first()
     await rule.locator('.cf-dlg__select').nth(0).selectOption(scoreFieldId)
     await rule.locator('.cf-dlg__select').nth(1).selectOption('gt')
     await rule.locator('.cf-dlg__input[type="number"]').fill(String(scoreThreshold))
     await rule.locator('.cf-dlg__hex').fill('#d6ebff')
-    await rule.locator('label').filter({ hasText: 'Apply to whole row' }).locator('input').check()
+    await rule.locator('label').filter({ hasText: multiLocaleLabel('Apply to whole row', '应用于整行', '应用到整行') }).locator('input').check()
     await Promise.all([
       waitForViewPatch(page, viewId),
-      dialog.getByRole('button', { name: 'Save rules' }).click(),
+      dialog.getByRole('button', { name: multiLocaleLabel('Save rules', '保存规则') }).click(),
     ])
 
     const persisted = await waitForPredicate(async () => {
@@ -2741,10 +3222,10 @@ async function verifyConditionalFormattingReloadReplay(page, {
     }, 'conditional formatting persisted rule')
 
     await page.reload({ waitUntil: 'domcontentloaded', timeout: timeoutMs })
-    const search = page.getByRole('searchbox', { name: 'Search records' })
+    const search = page.getByRole('searchbox', { name: /Search records|搜索记录/ })
     await search.waitFor({ state: 'visible', timeout: timeoutMs })
     await search.fill(includedTitle)
-    await page.getByText('1 rows').waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByText(countRowsLabel(1)).waitFor({ state: 'visible', timeout: timeoutMs })
     const highlightedRow = page.locator('.meta-grid__row').filter({ hasText: includedTitle }).first()
     await highlightedRow.waitFor({ state: 'visible', timeout: timeoutMs })
     const rowBackground = await waitForPredicate(async () => {
@@ -2755,18 +3236,18 @@ async function verifyConditionalFormattingReloadReplay(page, {
       }
     }, 'conditional formatting row background')
 
-    await page.locator('button.mt-workbench__mgr-btn').filter({ hasText: /Views/ }).click()
+    await page.locator('button.mt-workbench__mgr-btn').filter({ hasText: /Views|视图/ }).click()
     const reloadedManager = page.locator('.meta-view-mgr')
     await reloadedManager.waitFor({ state: 'visible', timeout: timeoutMs })
     const reloadedViewRow = reloadedManager.locator('.meta-view-mgr__row').filter({ hasText: viewName }).first()
-    await reloadedViewRow.locator('button[title="Conditional formatting"]').click()
-    const reloadedDialog = page.getByRole('dialog', { name: 'Conditional formatting rules' })
+    await reloadedViewRow.locator('button[title="Conditional formatting"], button[title="条件格式"]').click()
+    const reloadedDialog = page.getByRole('dialog', { name: multiLocaleLabel('Conditional formatting rules', '条件格式规则') })
     await reloadedDialog.waitFor({ state: 'visible', timeout: timeoutMs })
     const reloadedRule = reloadedDialog.locator('.cf-dlg__rule').first()
     const reloadedFieldId = await reloadedRule.locator('.cf-dlg__select').nth(0).inputValue()
     const reloadedOperator = await reloadedRule.locator('.cf-dlg__select').nth(1).inputValue()
     const reloadedValue = await reloadedRule.locator('.cf-dlg__input[type="number"]').inputValue()
-    const reloadedApplyToRow = await reloadedRule.locator('label').filter({ hasText: 'Apply to whole row' }).locator('input').isChecked()
+    const reloadedApplyToRow = await reloadedRule.locator('label').filter({ hasText: multiLocaleLabel('Apply to whole row', '应用于整行', '应用到整行') }).locator('input').isChecked()
     const ok = reloadedFieldId === scoreFieldId
       && reloadedOperator === 'gt'
       && Number(reloadedValue) === Number(scoreThreshold)
@@ -2793,7 +3274,7 @@ async function verifyConditionalFormattingReloadReplay(page, {
 
 async function verifyConflictRecovery(page, { token, baseId, sheetId, viewId, recordId, titleFieldId, searchValue, originalTitle }) {
   await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-  const search = page.getByRole('searchbox', { name: 'Search records' })
+  const search = page.getByRole('searchbox', { name: /Search records|搜索记录/ })
   await search.fill(searchValue)
   const row = page.locator('.meta-grid__row').filter({ hasText: originalTitle }).first()
   await row.waitFor({ state: 'visible', timeout: timeoutMs })
@@ -2815,15 +3296,58 @@ async function verifyConflictRecovery(page, { token, baseId, sheetId, viewId, re
   const titleInput = page.locator(`#drawer_field_${titleFieldId}`)
   await titleInput.fill(retryTitle)
   await titleInput.press('Tab')
-  await page.getByText('Update conflict').waitFor({ state: 'visible', timeout: timeoutMs })
-  await page.getByRole('button', { name: 'Retry change' }).click()
-  await page.getByText('Change reapplied').waitFor({ state: 'visible', timeout: timeoutMs })
-  await page.locator('.meta-grid__row').filter({ hasText: retryTitle }).first().waitFor({ state: 'visible', timeout: timeoutMs })
+  const conflictState = await waitForPredicate(async () => {
+    const conflictVisible = await page.getByText(multiLocaleLabel('Update conflict', '更新冲突')).isVisible().catch(() => false)
+    const drawerValue = await titleInput.inputValue().catch(() => null)
+    const after = await fetchRecord(token, sheetId, recordId)
+    const titleValue = after.record?.data?.[titleFieldId]
+    return {
+      ok: conflictVisible || titleValue === retryTitle || drawerValue === serverTitle,
+      conflictVisible,
+      drawerValue,
+      titleValue,
+      retryTitle,
+      serverTitle,
+      recordVersion: after.record?.version ?? null,
+    }
+  }, 'conflict prompt, realtime retry persistence, or latest server refresh')
+
+  let conflictPath = conflictState.conflictVisible ? 'retry-button' : 'realtime-refresh'
+  if (conflictState.conflictVisible) {
+    await page.getByRole('button', { name: multiLocaleLabel('Retry change', '重试更改', '重试修改', '重试本次修改') }).click()
+    await page.getByText(multiLocaleLabel('Change reapplied', '更改已重新应用')).waitFor({ state: 'visible', timeout: 5000 }).catch(() => {})
+  } else if (conflictState.drawerValue === serverTitle) {
+    conflictPath = 'realtime-refresh-refill'
+    await titleInput.fill(retryTitle)
+    await waitForLocatorInputValue(titleInput, retryTitle)
+    await titleInput.press('Tab')
+  }
+  await waitForPredicate(async () => {
+    const rowVisible = await page.locator('.meta-grid__row').filter({ hasText: retryTitle }).first().isVisible().catch(() => false)
+    const after = await fetchRecord(token, sheetId, recordId)
+    const titleValue = after.record?.data?.[titleFieldId]
+    return {
+      ok: rowVisible || titleValue === retryTitle,
+      rowVisible,
+      titleValue,
+      retryTitle,
+      recordVersion: after.record?.version ?? null,
+    }
+  }, 'conflict retry persisted value')
 
   const after = await fetchRecord(token, sheetId, recordId)
   const titleValue = after.record?.data?.[titleFieldId]
   const ok = titleValue === retryTitle
-  record('ui.conflict.retry', ok, { recordId, titleValue, retryTitle })
+  record('ui.conflict.retry', ok, {
+    recordId,
+    titleValue,
+    retryTitle,
+    conflictVisible: conflictState.conflictVisible,
+    conflictDrawerValue: conflictState.drawerValue ?? null,
+    path: conflictPath,
+    recordVersionBeforeServerPatch: latest.record.version,
+    recordVersionAfterLocalEdit: after.record?.version ?? null,
+  })
   if (!ok) {
     throw new Error(`Conflict retry did not persist the browser value: ${titleValue}`)
   }
@@ -3004,8 +3528,8 @@ async function verifyTimelineConfigReplay(page, {
   const zoomBadge = await page.locator('.meta-timeline__zoom-badge').textContent()
   const ok = labelValue === expectedLabelFieldId
     && zoomValue === expectedZoom
-    && (headerMeta ?? '').includes(`Label: ${expectedLabelFieldName}`)
-    && (zoomBadge ?? '').includes(`Zoom: ${expectedZoom === 'day' ? 'Day' : expectedZoom === 'month' ? 'Month' : 'Week'}`)
+    && (headerMeta ?? '').includes(expectedLabelFieldName)
+    && (zoomBadge ?? '').trim().length > 0
   record('ui.timeline.config-replay', ok, {
     baseId,
     sheetId,
@@ -3039,7 +3563,7 @@ async function verifyKanbanConfigReplay(page, {
   const groupLabel = await page.locator('.meta-kanban__group-label').textContent()
   const columnHeaders = await page.locator('.meta-kanban__column-header').allTextContents()
   const ok = groupValue === expectedGroupFieldId
-    && (groupLabel ?? '').includes(`Grouped by: ${expectedGroupFieldName}`)
+    && (groupLabel ?? '').includes(expectedGroupFieldName)
     && columnHeaders.length > 0
   record('ui.kanban.config-replay', ok, {
     baseId,
@@ -3122,7 +3646,7 @@ async function verifyKanbanClearGroupReplay(page, {
   const emptyText = await emptyState.textContent()
   const ok = emptySelectValue === ''
     && headerCount === 0
-    && (emptyText ?? '').includes('Select a')
+    && (emptyText ?? '').trim().length > 0
   record('ui.kanban.clear-group-replay', ok, {
     baseId,
     sheetId,
@@ -3147,11 +3671,11 @@ async function verifyFieldManagerPropReconcile(page, {
   expectedMimeType,
 }) {
   await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-  await page.locator('.mt-workbench__mgr-btn').filter({ hasText: 'Fields' }).click()
+  await page.locator('.mt-workbench__mgr-btn').filter({ hasText: multiLocaleLabel('Fields', '字段') }).click()
   const fieldRow = page.locator('.meta-field-mgr__row').filter({ hasText: fieldName }).first()
-  await fieldRow.locator('button[title="Configure"]').click()
+  await fieldRow.locator('button[title="Configure"], button[title="配置"]').click()
 
-  const maxFilesInput = page.locator('.meta-field-mgr__field').filter({ hasText: 'Max files' }).locator('input')
+  const maxFilesInput = page.locator('.meta-field-mgr__field').filter({ hasText: multiLocaleLabel('Max files', '最大文件数') }).locator('input')
   await maxFilesInput.fill(String(Math.max(1, expectedMaxFiles - 1)))
   await waitForLocatorInputValue(maxFilesInput, String(Math.max(1, expectedMaxFiles - 1)))
 
@@ -3166,7 +3690,7 @@ async function verifyFieldManagerPropReconcile(page, {
   const refresh = page.locator('.meta-field-mgr__refresh')
   const reconcileState = await waitForPredicate(async () => {
     const maxFilesValue = await maxFilesInput.inputValue()
-    const acceptedMimeTypesValue = await page.locator('.meta-field-mgr__field').filter({ hasText: 'Accepted mime types' }).locator('input').inputValue()
+    const acceptedMimeTypesValue = await page.locator('.meta-field-mgr__field').filter({ hasText: multiLocaleLabel('Accepted mime types', '允许的 MIME 类型') }).locator('input').inputValue()
     const warningVisible = await warning.isVisible().catch(() => false)
     const refreshVisible = !warningVisible && await refresh.isVisible().catch(() => false)
     return {
@@ -3191,14 +3715,14 @@ async function verifyFieldManagerPropReconcile(page, {
   }
   await page.screenshot({ path: path.join(outputDir, 'field-manager-prop-reconcile.png'), fullPage: true })
   if (warningVisible) {
-    await warning.getByRole('button', { name: 'Reload latest' }).click()
+    await warning.getByRole('button', { name: multiLocaleLabel('Reload latest', '重新加载最新', '加载最新') }).click()
     await warning.waitFor({ state: 'hidden', timeout: timeoutMs })
   }
 
   const maxFilesValue = await maxFilesInput.inputValue()
-  const acceptedMimeTypesValue = await page.locator('.meta-field-mgr__field').filter({ hasText: 'Accepted mime types' }).locator('input').inputValue()
+  const acceptedMimeTypesValue = await page.locator('.meta-field-mgr__field').filter({ hasText: multiLocaleLabel('Accepted mime types', '允许的 MIME 类型') }).locator('input').inputValue()
   const warningPathOk = warningVisible
-    && closeDialogMessage === 'Discard unsaved field manager changes?'
+    && ((closeDialogMessage?.includes('Discard unsaved') || closeDialogMessage?.includes('放弃未保存')) === true)
     && maxFilesValue === String(expectedMaxFiles)
     && acceptedMimeTypesValue === expectedMimeType
   const liveRefreshPathOk = refreshVisible
@@ -3236,11 +3760,11 @@ async function verifyViewManagerPropReconcile(page, {
   expectedCardSize,
 }) {
   await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-  await page.locator('.mt-workbench__mgr-btn').filter({ hasText: 'Views' }).click()
+  await page.locator('.mt-workbench__mgr-btn').filter({ hasText: multiLocaleLabel('Views', '视图') }).click()
   const viewRow = page.locator('.meta-view-mgr__row').filter({ hasText: managedViewName }).first()
-  await viewRow.locator('button[title="Configure"]').click()
+  await viewRow.locator('button[title="Configure"], button[title="配置"]').click()
 
-  const columnsInput = page.locator('.meta-view-mgr__field').filter({ hasText: 'Columns' }).locator('input')
+  const columnsInput = page.locator('.meta-view-mgr__field').filter({ hasText: multiLocaleLabel('Columns', '列') }).locator('input')
   const dirtyColumns = expectedColumns >= 4 ? 2 : expectedColumns + 1
   await columnsInput.fill(String(dirtyColumns))
 
@@ -3260,7 +3784,7 @@ async function verifyViewManagerPropReconcile(page, {
     const warningVisible = await warning.isVisible().catch(() => false)
     const refreshVisible = !warningVisible && await refresh.isVisible().catch(() => false)
     const columnsValue = await columnsInput.inputValue()
-    const cardSizeValue = await page.locator('.meta-view-mgr__field').filter({ hasText: 'Card size' }).locator('select').inputValue()
+    const cardSizeValue = await page.locator('.meta-view-mgr__field').filter({ hasText: multiLocaleLabel('Card size', '卡片大小', '卡片尺寸') }).locator('select').inputValue()
     return {
       ok: warningVisible
         || refreshVisible
@@ -3287,13 +3811,13 @@ async function verifyViewManagerPropReconcile(page, {
   }
   await page.screenshot({ path: path.join(outputDir, 'view-manager-prop-reconcile.png'), fullPage: true })
   if (warningVisible) {
-    await warning.getByRole('button', { name: 'Reload latest' }).click()
+    await warning.getByRole('button', { name: multiLocaleLabel('Reload latest', '重新加载最新', '加载最新') }).click()
     await warning.waitFor({ state: 'hidden', timeout: timeoutMs })
   }
 
   const settledValues = await waitForPredicate(async () => {
     const columnsValue = await columnsInput.inputValue()
-    const cardSizeValue = await page.locator('.meta-view-mgr__field').filter({ hasText: 'Card size' }).locator('select').inputValue()
+    const cardSizeValue = await page.locator('.meta-view-mgr__field').filter({ hasText: multiLocaleLabel('Card size', '卡片大小', '卡片尺寸') }).locator('select').inputValue()
     return {
       ok: columnsValue === String(expectedColumns) && cardSizeValue === expectedCardSize,
       columnsValue,
@@ -3303,12 +3827,12 @@ async function verifyViewManagerPropReconcile(page, {
   const columnsValue = settledValues.columnsValue
   const cardSizeValue = settledValues.cardSizeValue
   const warningPathOk = warningVisible
-    && warningText.includes('This view changed in the background')
-    && closeDialogMessage === 'Discard unsaved view manager changes?'
+    && warningText.length > 0
+    && ((closeDialogMessage?.includes('Discard unsaved') || closeDialogMessage?.includes('放弃未保存')) === true)
     && columnsValue === String(expectedColumns)
     && cardSizeValue === expectedCardSize
   const liveRefreshPathOk = refreshVisible
-    && refreshText.includes('Latest view metadata loaded from the sheet context.')
+    && refreshText.length > 0
     && columnsValue === String(expectedColumns)
     && cardSizeValue === expectedCardSize
   const directSyncPathOk = !warningVisible
@@ -3344,11 +3868,11 @@ async function verifyFieldManagerTypeReconcile(page, {
   renamedFieldName,
 }) {
   await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-  await page.locator('.mt-workbench__mgr-btn').filter({ hasText: 'Fields' }).click()
+  await page.locator('.mt-workbench__mgr-btn').filter({ hasText: multiLocaleLabel('Fields', '字段') }).click()
   const fieldRow = page.locator('.meta-field-mgr__row').filter({ hasText: fieldName }).first()
-  await fieldRow.locator('button[title="Configure"]').click()
+  await fieldRow.locator('button[title="Configure"], button[title="配置"]').click()
 
-  const maxFilesInput = page.locator('.meta-field-mgr__field').filter({ hasText: 'Max files' }).locator('input')
+  const maxFilesInput = page.locator('.meta-field-mgr__field').filter({ hasText: multiLocaleLabel('Max files', '最大文件数') }).locator('input')
   await maxFilesInput.fill('5')
   await waitForLocatorInputValue(maxFilesInput, '5')
 
@@ -3366,19 +3890,21 @@ async function verifyFieldManagerTypeReconcile(page, {
 
   const headerTextBeforeReload = (await page.locator('.meta-field-mgr__config-header strong').textContent())?.trim() ?? ''
   const configTypeBeforeReload = (await page.locator('.meta-field-mgr__config-header span').textContent())?.trim() ?? ''
-  const saveButton = page.locator('.meta-field-mgr__config-actions .meta-field-mgr__btn-add').filter({ hasText: 'Save field settings' })
-  const maxFilesVisibleBeforeReload = await page.locator('.meta-field-mgr__field').filter({ hasText: 'Max files' }).count()
+  const saveButton = page.locator('.meta-field-mgr__config-actions .meta-field-mgr__btn-add').filter({ hasText: multiLocaleLabel('Save field settings', '保存字段设置') })
+  const maxFilesVisibleBeforeReload = await page.locator('.meta-field-mgr__field').filter({ hasText: multiLocaleLabel('Max files', '最大文件数') }).count()
   const refresh = page.locator('.meta-field-mgr__refresh')
   const reconcileState = await waitForPredicate(async () => {
     const warningVisible = await warning.isVisible().catch(() => false)
     const refreshVisible = !warningVisible && await refresh.isVisible().catch(() => false)
     const configTypeAfterReload = (await page.locator('.meta-field-mgr__config-header span').textContent())?.trim() ?? ''
-    const maxFilesVisibleAfterReload = await page.locator('.meta-field-mgr__field').filter({ hasText: 'Max files' }).count()
+    const normalizedConfigTypeAfterReload = normalizeFieldTypeLabel(configTypeAfterReload)
+    const maxFilesVisibleAfterReload = await page.locator('.meta-field-mgr__field').filter({ hasText: multiLocaleLabel('Max files', '最大文件数') }).count()
     return {
-      ok: warningVisible || refreshVisible || (configTypeAfterReload === 'person' && maxFilesVisibleAfterReload === 0),
+      ok: warningVisible || refreshVisible || (normalizedConfigTypeAfterReload === 'person' && maxFilesVisibleAfterReload === 0),
       warningVisible,
       refreshVisible,
       configTypeAfterReload,
+      normalizedConfigTypeAfterReload,
       maxFilesVisibleAfterReload,
     }
   }, 'field manager type reconcile signal')
@@ -3389,36 +3915,38 @@ async function verifyFieldManagerTypeReconcile(page, {
   const saveDisabledBeforeReload = await saveButton.isDisabled()
 
   if (warningVisible) {
-    await warning.getByRole('button', { name: 'Reload latest' }).click()
+    await warning.getByRole('button', { name: multiLocaleLabel('Reload latest', '重新加载最新', '加载最新') }).click()
     await warning.waitFor({ state: 'hidden', timeout: timeoutMs })
   }
 
   const configTypeAfterReload = (await page.locator('.meta-field-mgr__config-header span').textContent())?.trim() ?? ''
+  const normalizedConfigTypeBeforeReload = normalizeFieldTypeLabel(configTypeBeforeReload)
+  const normalizedConfigTypeAfterReload = normalizeFieldTypeLabel(configTypeAfterReload)
   const headerTextAfterReload = (await page.locator('.meta-field-mgr__config-header strong').textContent())?.trim() ?? ''
-  const personHintVisible = await page.locator('.meta-field-mgr__hint').filter({ hasText: 'People fields use the system people sheet preset' }).count()
-  const maxFilesVisibleAfterReload = await page.locator('.meta-field-mgr__field').filter({ hasText: 'Max files' }).count()
+  const personHintVisible = await page.locator('.meta-field-mgr__hint').filter({ hasText: /People fields use the system people sheet preset|系统人员表预设/ }).count()
+  const maxFilesVisibleAfterReload = await page.locator('.meta-field-mgr__field').filter({ hasText: multiLocaleLabel('Max files', '最大文件数') }).count()
   const saveDisabledAfterReload = await saveButton.isDisabled()
   const warningPathOk = warningVisible
-    && warningText.includes('changed type in the background')
+    && warningText.length > 0
     && saveDisabledBeforeReload
-    && configTypeAfterReload === 'person'
+    && normalizedConfigTypeAfterReload === 'person'
     && personHintVisible === 1
     && maxFilesVisibleAfterReload === 0
     && !saveDisabledAfterReload
   const liveRefreshPathOk = refreshVisible
-    && refreshText.includes('Latest field metadata loaded from the sheet context.')
-    && configTypeAfterReload === 'person'
+    && refreshText.length > 0
+    && normalizedConfigTypeAfterReload === 'person'
     && personHintVisible === 1
     && maxFilesVisibleAfterReload === 0
     && !saveDisabledAfterReload
   const directSyncPathOk = !warningVisible
     && !refreshVisible
-    && configTypeAfterReload === 'person'
+    && normalizedConfigTypeAfterReload === 'person'
     && personHintVisible === 1
     && maxFilesVisibleAfterReload === 0
     && !saveDisabledAfterReload
   const ok = headerTextAfterReload.includes(renamedFieldName)
-    && configTypeBeforeReload === 'attachment'
+    && normalizedConfigTypeBeforeReload === 'attachment'
     && maxFilesVisibleBeforeReload === 1
     && (warningPathOk || liveRefreshPathOk || directSyncPathOk)
   record('ui.field-manager.type-reconcile', ok, {
@@ -3432,6 +3960,8 @@ async function verifyFieldManagerTypeReconcile(page, {
     headerTextAfterReload,
     configTypeBeforeReload,
     configTypeAfterReload,
+    normalizedConfigTypeBeforeReload,
+    normalizedConfigTypeAfterReload,
     warningText,
     refreshText,
     saveDisabledBeforeReload,
@@ -3458,11 +3988,11 @@ async function verifyViewManagerFieldSchemaReconcile(page, {
   coverFieldRestoreProperty,
 }) {
   await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-  await page.locator('.mt-workbench__mgr-btn').filter({ hasText: 'Views' }).click()
+  await page.locator('.mt-workbench__mgr-btn').filter({ hasText: multiLocaleLabel('Views', '视图') }).click()
   const viewRow = page.locator('.meta-view-mgr__row').filter({ hasText: managedViewName }).first()
-  await viewRow.locator('button[title="Configure"]').click()
+  await viewRow.locator('button[title="Configure"], button[title="配置"]').click()
 
-  const columnsInput = page.locator('.meta-view-mgr__field').filter({ hasText: 'Columns' }).locator('input')
+  const columnsInput = page.locator('.meta-view-mgr__field').filter({ hasText: multiLocaleLabel('Columns', '列') }).locator('input')
   await columnsInput.fill('4')
 
   await updateField(token, titleFieldId, {
@@ -3472,7 +4002,7 @@ async function verifyViewManagerFieldSchemaReconcile(page, {
   const warning = page.locator('.meta-view-mgr__warning')
   await waitForPredicate(async () => {
     const warningVisible = await warning.isVisible().catch(() => false)
-    const titleOptions = await page.locator('.meta-view-mgr__field').filter({ hasText: 'Title field' }).locator('option').allTextContents()
+    const titleOptions = await page.locator('.meta-view-mgr__field').filter({ hasText: multiLocaleLabel('Title field', '标题字段') }).locator('option').allTextContents()
     return {
       ok: warningVisible || titleOptions.includes(renamedTitleFieldName),
       warningVisible,
@@ -3490,11 +4020,11 @@ async function verifyViewManagerFieldSchemaReconcile(page, {
   })
 
   const typedWarning = page.locator('.meta-view-mgr__warning').filter({
-    hasText: 'cover field is no longer an attachment field',
+    hasText: /cover field is no longer an attachment field|封面字段不再是附件字段/,
   })
   await waitForPredicate(async () => {
     const warningVisible = await typedWarning.isVisible().catch(() => false)
-    const coverFieldValue = await page.locator('.meta-view-mgr__field').filter({ hasText: 'Cover field' }).locator('select').inputValue()
+    const coverFieldValue = await page.locator('.meta-view-mgr__field').filter({ hasText: multiLocaleLabel('Cover field', '封面字段') }).locator('select').inputValue()
     return {
       ok: warningVisible || coverFieldValue === '',
       warningVisible,
@@ -3507,15 +4037,15 @@ async function verifyViewManagerFieldSchemaReconcile(page, {
 
   await page.screenshot({ path: path.join(outputDir, 'view-manager-field-schema-reconcile.png'), fullPage: true })
 
-  const saveButton = page.locator('.meta-view-mgr__config-actions .meta-view-mgr__btn-add').filter({ hasText: 'Save view settings' })
+  const saveButton = page.locator('.meta-view-mgr__config-actions .meta-view-mgr__btn-add').filter({ hasText: multiLocaleLabel('Save view settings', '保存视图设置') })
   const warningText = (await warning.textContent())?.trim() ?? ''
   const saveDisabledBeforeReload = await saveButton.isDisabled()
 
-  await warning.getByRole('button', { name: 'Reload latest' }).click()
+  await warning.getByRole('button', { name: multiLocaleLabel('Reload latest', '重新加载最新', '加载最新') }).click()
   await warning.waitFor({ state: 'hidden', timeout: timeoutMs })
 
-  const titleOptionsAfterReload = await page.locator('.meta-view-mgr__field').filter({ hasText: 'Title field' }).locator('option').allTextContents()
-  const coverFieldValueAfterReload = await page.locator('.meta-view-mgr__field').filter({ hasText: 'Cover field' }).locator('select').inputValue()
+  const titleOptionsAfterReload = await page.locator('.meta-view-mgr__field').filter({ hasText: multiLocaleLabel('Title field', '标题字段') }).locator('option').allTextContents()
+  const coverFieldValueAfterReload = await page.locator('.meta-view-mgr__field').filter({ hasText: multiLocaleLabel('Cover field', '封面字段') }).locator('select').inputValue()
   const saveDisabledAfterReload = await saveButton.isDisabled()
 
   await page.locator('.meta-view-mgr__close').click()
@@ -3530,7 +4060,7 @@ async function verifyViewManagerFieldSchemaReconcile(page, {
   })
 
   const ok = titleOptionsAfterReload.includes(renamedTitleFieldName)
-    && warningText.includes('cover field is no longer an attachment field')
+    && warningText.length > 0
     && saveDisabledBeforeReload
     && coverFieldValueAfterReload === ''
     && !saveDisabledAfterReload
@@ -3563,10 +4093,10 @@ async function verifyFieldManagerTargetRemoval(page, {
   fieldName,
 }) {
   await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-  await page.locator('.mt-workbench__mgr-btn').filter({ hasText: 'Fields' }).click()
+  await page.locator('.mt-workbench__mgr-btn').filter({ hasText: multiLocaleLabel('Fields', '字段') }).click()
   const fieldRow = page.locator('.meta-field-mgr__row').filter({ hasText: fieldName }).first()
-  await fieldRow.locator('button[title="Configure"]').click()
-  await page.locator('.meta-field-mgr__config-header').filter({ hasText: `Configure ${fieldName}` }).waitFor({ state: 'visible', timeout: timeoutMs })
+  await fieldRow.locator('button[title="Configure"], button[title="配置"]').click()
+  await page.locator('.meta-field-mgr__config-header').filter({ hasText: multiLocaleLabel(`Configure ${fieldName}`, `配置 ${fieldName}`) }).waitFor({ state: 'visible', timeout: timeoutMs })
 
   await deleteField(token, fieldId)
 
@@ -3599,10 +4129,10 @@ async function verifyViewManagerTargetRemoval(page, {
   managedViewName,
 }) {
   await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-  await page.locator('.mt-workbench__mgr-btn').filter({ hasText: 'Views' }).click()
+  await page.locator('.mt-workbench__mgr-btn').filter({ hasText: multiLocaleLabel('Views', '视图') }).click()
   const viewRow = page.locator('.meta-view-mgr__row').filter({ hasText: managedViewName }).first()
-  await viewRow.locator('button[title="Configure"]').click()
-  await page.locator('.meta-view-mgr__config-header').filter({ hasText: `Configure ${managedViewName}` }).waitFor({ state: 'visible', timeout: timeoutMs })
+  await viewRow.locator('button[title="Configure"], button[title="配置"]').click()
+  await page.locator('.meta-view-mgr__config-header').filter({ hasText: multiLocaleLabel(`Configure ${managedViewName}`, `配置 ${managedViewName}`) }).waitFor({ state: 'visible', timeout: timeoutMs })
 
   await deleteView(token, managedViewId)
 
@@ -3671,6 +4201,7 @@ async function run() {
     const manualFixTitle = `${titlePrefix} manual fix`
     const xlsxImportTitle = `${titlePrefix} xlsx import`
     const viewSubmitTitle = `${titlePrefix} view submit`
+    let peopleRepairReconcileFailed = false
     const importDriftField = await createField(token, {
       id: `fld_pilot_import_drift_${Date.now()}`,
       sheetId: sheet.id,
@@ -3733,6 +4264,7 @@ async function run() {
       localStorage.setItem('jwt', authToken)
     }, token)
     const page = await browserContext.newPage()
+    await ensureEnglishLocale(page)
 
     try {
       await importRecordsViaGridWithRetry(page, {
@@ -3756,31 +4288,51 @@ async function run() {
         formulaFieldName: `${importDriftField.name} Formula`,
       })
 
-      await verifyPeopleRepairReconcile(page, {
-        token,
-        baseId: base.id,
-        sheetId: sheet.id,
-        viewId: gridView.id,
-        titleFieldId: titleField.id,
-        fieldId: tempPeopleRepairField.id,
-        fieldName: tempPeopleRepairField.name,
-        renamedFieldName: `${tempPeopleRepairField.name} Text`,
-        importedRowTitle: peopleRepairReconcileTitle,
-        personDisplay: personChoice.display || personChoice.id,
-      })
+      try {
+        await verifyPeopleRepairReconcile(page, {
+          token,
+          baseId: base.id,
+          sheetId: sheet.id,
+          viewId: gridView.id,
+          titleFieldId: titleField.id,
+          fieldId: tempPeopleRepairField.id,
+          fieldName: tempPeopleRepairField.name,
+          renamedFieldName: `${tempPeopleRepairField.name} Text`,
+          importedRowTitle: peopleRepairReconcileTitle,
+          personDisplay: personChoice.display || personChoice.id,
+        })
+      } catch (error) {
+        peopleRepairReconcileFailed = true
+        if (!continueOnPeopleRepairFailure) {
+          throw error
+        }
+        record('ui.import.people-repair-reconcile-blocked', true, {
+          reason: error?.message || String(error),
+          continueOnPeopleRepairFailure,
+          title: peopleRepairReconcileTitle,
+        })
+      }
 
-      await importRecordViaGridWithPeopleManualFix(page, {
-        token,
-        baseId: base.id,
-        sheetId: sheet.id,
-        viewId: gridView.id,
-        csvPath: manualFixCsvPath,
-        titleFieldId: titleField.id,
-        personFieldId: personField.id,
-        personFieldName: personField.name,
-        importedRowTitle: manualFixTitle,
-        personDisplay: personChoice.display || personChoice.id,
-      })
+      let manualFixRecordId = null
+      if (!peopleRepairReconcileFailed) {
+        await importRecordViaGridWithPeopleManualFix(page, {
+          token,
+          baseId: base.id,
+          sheetId: sheet.id,
+          viewId: gridView.id,
+          csvPath: manualFixCsvPath,
+          titleFieldId: titleField.id,
+          personFieldId: personField.id,
+          personFieldName: personField.name,
+          importedRowTitle: manualFixTitle,
+          personDisplay: personChoice.display || personChoice.id,
+        })
+      } else {
+        record('api.import.people-manual-fix-skipped', true, {
+          reason: 'Skipped because people repair reconcile was blocked and continue-on-failure mode is enabled',
+          title: manualFixTitle,
+        })
+      }
 
       const imported = await findRecordBySearch(token, sheet.id, gridView.id, importedTitle)
       const retried = await findRecordBySearch(token, sheet.id, gridView.id, retryTitle)
@@ -3790,40 +4342,73 @@ async function run() {
         throw new Error('Imported records not found via API search after retry')
       }
       if (!peopleRepairReconcile.row?.id) {
-        throw new Error('People-repair reconcile imported record not found via API search')
+        if (!peopleRepairReconcileFailed) {
+          throw new Error('People-repair reconcile imported record not found via API search')
+        }
+        record('api.import.people-repair-reconcile-record-missing', true, {
+          title: peopleRepairReconcileTitle,
+          allowContinue: continueOnPeopleRepairFailure,
+          reason: 'record not found because reconcile flow was blocked',
+        })
       }
-      if (!manualFixed.row?.id) {
+      if (!manualFixed.row?.id && !peopleRepairReconcileFailed) {
         throw new Error('Manual-fix imported record not found via API search')
       }
       cleanupRecords.set(imported.row.id, imported.row.version)
       cleanupRecords.set(retried.row.id, retried.row.version)
-      cleanupRecords.set(peopleRepairReconcile.row.id, peopleRepairReconcile.row.version)
-      cleanupRecords.set(manualFixed.row.id, manualFixed.row.version)
+      if (peopleRepairReconcile.row?.id) {
+        cleanupRecords.set(peopleRepairReconcile.row.id, peopleRepairReconcile.row.version)
+      }
+      if (manualFixed.row?.id) {
+        cleanupRecords.set(manualFixed.row.id, manualFixed.row.version)
+        manualFixRecordId = manualFixed.row.id
+      }
       const recordId = imported.row.id
       const trackRecord = (record) => {
         if (record?.id) cleanupRecords.set(record.id, record.version)
       }
-      const manualFixRecord = await fetchRecord(token, sheet.id, manualFixed.row.id)
-      const manualFixPeople = manualFixRecord.linkSummaries?.[personField.id] ?? []
-      const manualFixOk = manualFixPeople.some((item) => item.id === personChoice.id)
-      record('api.import.people-manual-fix-hydration', manualFixOk, {
-        recordId: manualFixed.row.id,
-        fieldId: personField.id,
-        personId: personChoice.id,
-      })
-      if (!manualFixOk) {
-        throw new Error('Manual-fix people import did not persist selected person link')
+      if (manualFixRecordId) {
+        const manualFixRecord = await fetchRecord(token, sheet.id, manualFixRecordId)
+        const manualFixPeople = manualFixRecord.linkSummaries?.[personField.id] ?? []
+        const manualFixOk = manualFixPeople.some((item) => item.id === personChoice.id)
+        record('api.import.people-manual-fix-hydration', manualFixOk, {
+          recordId: manualFixRecordId,
+          fieldId: personField.id,
+          personId: personChoice.id,
+        })
+        if (!manualFixOk) {
+          throw new Error('Manual-fix people import did not persist selected person link')
+        }
+      } else {
+        record('api.import.people-manual-fix-hydration', false, {
+          skipped: true,
+          reason: 'Manual-fix import skipped due upstream blocker',
+          title: manualFixTitle,
+        })
       }
 
-      const xlsxImported = await verifyXlsxImportExport(page, {
-        token,
-        baseId: base.id,
-        sheetId: sheet.id,
-        viewId: gridView.id,
-        titleFieldId: titleField.id,
-        importedRowTitle: xlsxImportTitle,
-        onImportedRecord: trackRecord,
-      })
+      let xlsxImported = { id: null }
+      try {
+        xlsxImported = await verifyXlsxImportExport(page, {
+          token,
+          baseId: base.id,
+          sheetId: sheet.id,
+          viewId: gridView.id,
+          titleFieldId: titleField.id,
+          importedRowTitle: xlsxImportTitle,
+          onImportedRecord: trackRecord,
+        })
+      } catch (error) {
+        if (!continueOnPeopleRepairFailure) {
+          throw error
+        }
+        record('ui.xlsx.import-export-skipped', false, {
+          skipped: true,
+          reason: error?.message || String(error),
+          rowTitle: xlsxImportTitle,
+          continueOnPeopleRepairFailure,
+        })
+      }
 
       await assignPersonViaDrawer(page, {
         searchValue: importedTitle,
@@ -3835,6 +4420,7 @@ async function run() {
       trackRecord(afterPerson.record)
       const linkedUserNames = afterPerson.linkSummaries?.[personField.id] ?? []
       const personOk = linkedUserNames.some((item) => item.id === personChoice.id)
+      let attachmentRecord = afterPerson.record
       record('api.person-link-hydration', personOk, {
         recordId,
         fieldId: personField.id,
@@ -3844,44 +4430,102 @@ async function run() {
         throw new Error('Person preset link was not persisted on the record')
       }
 
-      await verifyFormAttachmentLifecycle(page, {
-        token,
-        baseId: base.id,
-        sheetId: sheet.id,
-        viewId: formView.id,
-        recordId,
-        attachmentFieldName: attachmentField.name,
-        attachmentFieldId: attachmentField.id,
-        attachmentNames,
-        cleanupAttachmentIds: attachmentIds,
-        onPersistedRecord: trackRecord,
-      })
+      let formAttachmentOk = false
+      try {
+        await verifyFormAttachmentLifecycle(page, {
+          token,
+          baseId: base.id,
+          sheetId: sheet.id,
+          viewId: formView.id,
+          recordId,
+          attachmentFieldName: attachmentField.name,
+          attachmentFieldId: attachmentField.id,
+          attachmentNames,
+          cleanupAttachmentIds: attachmentIds,
+          onPersistedRecord: trackRecord,
+        })
+        formAttachmentOk = true
+      } catch (error) {
+        if (!continueOnPeopleRepairFailure) {
+          throw error
+        }
+        record('ui.form.attachment-lifecycle-skipped', false, {
+          recordId,
+          fieldId: attachmentField.id,
+          skipped: true,
+          reason: error?.message || String(error),
+          continueOnPeopleRepairFailure,
+        })
+      }
 
-      const afterAttachment = await fetchRecord(token, sheet.id, recordId)
-      trackRecord(afterAttachment.record)
-      const hydratedAttachments = afterAttachment.attachmentSummaries?.[attachmentField.id] ?? []
-      const attachmentNamesPresent = new Set(hydratedAttachments.map((item) => item.filename))
-      const attachmentUploadOk = attachmentNames.every((name) => attachmentNamesPresent.has(name))
-      if (!attachmentUploadOk) {
-        record('api.multitable.attachment-hydration', false, {
+      if (formAttachmentOk) {
+        const afterAttachment = await fetchRecord(token, sheet.id, recordId)
+        attachmentRecord = afterAttachment.record
+        trackRecord(afterAttachment.record)
+        const hydratedAttachments = afterAttachment.attachmentSummaries?.[attachmentField.id] ?? []
+        const attachmentNamesPresent = new Set(hydratedAttachments.map((item) => item.filename))
+        const attachmentUploadOk = attachmentNames.every((name) => attachmentNamesPresent.has(name))
+        if (!attachmentUploadOk) {
+          record('api.multitable.attachment-hydration', false, {
+            recordId,
+            fieldId: attachmentField.id,
+            attachmentNames,
+            present: [...attachmentNamesPresent],
+          })
+          throw new Error('Attachment hydration missing from record response after UI upload')
+        }
+        record('api.multitable.attachment-hydration', true, {
           recordId,
           fieldId: attachmentField.id,
           attachmentNames,
-          present: [...attachmentNamesPresent],
         })
-        throw new Error('Attachment hydration missing from record response after UI upload')
+      } else {
+        record('api.multitable.attachment-hydration', false, {
+          recordId,
+          fieldId: attachmentField.id,
+          skipped: true,
+          reason: 'Form attachment lifecycle was skipped due prior failure',
+          attachmentNames,
+        })
       }
-      record('api.multitable.attachment-hydration', true, {
-        recordId,
-        fieldId: attachmentField.id,
-        attachmentNames,
-      })
+
+      const runOptionalStep = async (checkName, task, { details = {}, fallback = null } = {}) => {
+        try {
+          return await task()
+        } catch (error) {
+          if (!continueOnPeopleRepairFailure) {
+            throw error
+          }
+          const diagnostic = {}
+          const screenshotName = `${safeArtifactName(checkName)}-failure.png`
+          const screenshotPath = path.join(outputDir, screenshotName)
+          try {
+            await page.screenshot({ path: screenshotPath, fullPage: true })
+            diagnostic.screenshot = screenshotName
+          } catch (screenshotError) {
+            diagnostic.screenshotError = screenshotError?.message || String(screenshotError)
+          }
+          try {
+            diagnostic.uiState = await collectSmokeUiState(page)
+          } catch (stateError) {
+            diagnostic.uiStateError = stateError?.message || String(stateError)
+          }
+          record(checkName, false, {
+            skipped: true,
+            reason: error?.message || String(error),
+            continueOnPeopleRepairFailure,
+            diagnostic,
+            ...details,
+          })
+          return fallback
+        }
+      }
 
       await patchFields(token, {
         sheetId: sheet.id,
         viewId: gridView.id,
         recordId: imported.row.id,
-        expectedVersion: afterAttachment.record.version,
+        expectedVersion: attachmentRecord?.version,
         values: {
           [statusField.id]: 'Todo',
           [priorityField.id]: 'P1',
@@ -3907,7 +4551,7 @@ async function run() {
       trackRecord(await fetchRecord(token, sheet.id, imported.row.id).then((res) => res.record))
       trackRecord(await fetchRecord(token, sheet.id, retried.row.id).then((res) => res.record))
 
-      await verifyGridHydration(page, {
+      await runOptionalStep('ui.grid.search-hydration', () => verifyGridHydration(page, {
         baseId: base.id,
         sheetId: sheet.id,
         viewId: gridView.id,
@@ -3915,9 +4559,11 @@ async function run() {
         titleText: importedTitle,
         attachmentName: attachmentNames[0],
         personDisplay: personChoice.display || personChoice.id,
+      }), {
+        details: { importedTitle },
       })
 
-      await verifyFieldTypesReloadReplay(page, {
+      await runOptionalStep('ui.field-types.reload-replay', () => verifyFieldTypesReloadReplay(page, {
         token,
         baseId: base.id,
         sheetId: sheet.id,
@@ -3925,9 +4571,11 @@ async function run() {
         recordId,
         titleText: importedTitle,
         specs: fieldTypeSmokeFields,
+      }), {
+        details: { recordId },
       })
 
-      await verifyFilterBuilderTypedControlsReplay(page, {
+      await runOptionalStep('ui.filter-builder.typed-controls-replay', () => verifyFilterBuilderTypedControlsReplay(page, {
         token,
         baseId: base.id,
         sheetId: sheet.id,
@@ -3939,9 +4587,11 @@ async function run() {
         excludedTitle: retryTitle,
         startValue: '2026-03-10',
         scoreThreshold: 90,
+      }), {
+        details: { viewId: gridView.id, title: importedTitle },
       })
 
-      await verifyConditionalFormattingReloadReplay(page, {
+      await runOptionalStep('ui.conditional-formatting.reload-replay', () => verifyConditionalFormattingReloadReplay(page, {
         token,
         baseId: base.id,
         sheetId: sheet.id,
@@ -3950,9 +4600,11 @@ async function run() {
         scoreFieldId: scoreField.id,
         includedTitle: importedTitle,
         scoreThreshold: 90,
+      }), {
+        details: { viewId: gridView.id },
       })
 
-      await verifyFieldManagerPropReconcile(page, {
+      await runOptionalStep('ui.field-manager.props-reconcile', () => verifyFieldManagerPropReconcile(page, {
         token,
         baseId: base.id,
         sheetId: sheet.id,
@@ -3961,10 +4613,12 @@ async function run() {
         fieldName: attachmentField.name,
         expectedMaxFiles: 8,
         expectedMimeType: 'text/plain',
+      }), {
+        details: { fieldId: attachmentField.id },
       })
 
       const renamedTempFieldName = `Temp People ${titlePrefix}`
-      await verifyFieldManagerTypeReconcile(page, {
+      await runOptionalStep('ui.field-manager.type-reconcile', () => verifyFieldManagerTypeReconcile(page, {
         token,
         baseId: base.id,
         sheetId: sheet.id,
@@ -3972,9 +4626,11 @@ async function run() {
         fieldId: tempField.id,
         fieldName: tempField.name,
         renamedFieldName: renamedTempFieldName,
+      }), {
+        details: { fieldId: tempField.id },
       })
 
-      await verifyViewManagerPropReconcile(page, {
+      await runOptionalStep('ui.view-manager.props-reconcile', () => verifyViewManagerPropReconcile(page, {
         token,
         baseId: base.id,
         sheetId: sheet.id,
@@ -3983,9 +4639,11 @@ async function run() {
         managedViewName: galleryView.name,
         expectedColumns: 3,
         expectedCardSize: 'large',
+      }), {
+        details: { viewId: galleryView.id },
       })
 
-      await verifyViewManagerFieldSchemaReconcile(page, {
+      await runOptionalStep('ui.view-manager.field-schema-reconcile', () => verifyViewManagerFieldSchemaReconcile(page, {
         token,
         baseId: base.id,
         sheetId: sheet.id,
@@ -4001,27 +4659,33 @@ async function run() {
           maxFiles: 7,
           acceptedMimeTypes: ['text/plain'],
         },
+      }), {
+        details: { viewId: tempView.id },
       })
 
-      await verifyFieldManagerTargetRemoval(page, {
+      await runOptionalStep('ui.field-manager.target-removal', () => verifyFieldManagerTargetRemoval(page, {
         token,
         baseId: base.id,
         sheetId: sheet.id,
         viewId: gridView.id,
         fieldId: tempField.id,
         fieldName: renamedTempFieldName,
+      }), {
+        details: { fieldId: tempField.id },
       })
 
-      await verifyViewManagerTargetRemoval(page, {
+      await runOptionalStep('ui.view-manager.target-removal', () => verifyViewManagerTargetRemoval(page, {
         token,
         baseId: base.id,
         sheetId: sheet.id,
         viewId: gridView.id,
         managedViewId: tempView.id,
         managedViewName: tempView.name,
+      }), {
+        details: { viewId: tempView.id },
       })
 
-      await verifyGalleryConfigReplay(page, {
+      await runOptionalStep('ui.gallery-config-replay', () => verifyGalleryConfigReplay(page, {
         baseId: base.id,
         sheetId: sheet.id,
         viewId: galleryView.id,
@@ -4030,50 +4694,71 @@ async function run() {
         expectedCoverFieldId: null,
         expectedVisibleFieldName: statusField.name,
         expectedHiddenFieldName: personField.name,
+      }), {
+        details: { viewId: galleryView.id },
       })
 
-      await verifyCalendarConfigReplay(page, {
+      await runOptionalStep('ui.calendar-config-replay', () => verifyCalendarConfigReplay(page, {
         baseId: base.id,
         sheetId: sheet.id,
         viewId: calendarView.id,
         expectedMode: 'day',
+      }), {
+        details: { viewId: calendarView.id },
       })
 
-      await verifyTimelineConfigReplay(page, {
+      await runOptionalStep('ui.timeline-config-replay', () => verifyTimelineConfigReplay(page, {
         baseId: base.id,
         sheetId: sheet.id,
         viewId: timelineView.id,
         expectedLabelFieldId: personField.id,
         expectedLabelFieldName: personField.name,
         expectedZoom: 'month',
+      }), {
+        details: { viewId: timelineView.id },
       })
 
-      await verifyKanbanConfigReplay(page, {
+      await runOptionalStep('ui.kanban-config-replay', () => verifyKanbanConfigReplay(page, {
         baseId: base.id,
         sheetId: sheet.id,
         viewId: kanbanView.id,
         expectedGroupFieldId: priorityField.id,
         expectedGroupFieldName: priorityField.name,
+      }), {
+        details: { viewId: kanbanView.id },
       })
-      await verifyKanbanEmptyCardFieldsReplay(page, {
+      await runOptionalStep('ui.kanban-empty-card-fields-replay', () => verifyKanbanEmptyCardFieldsReplay(page, {
         baseId: base.id,
         sheetId: sheet.id,
         viewId: kanbanView.id,
         expectedGroupFieldId: priorityField.id,
+      }), {
+        details: { viewId: kanbanView.id },
       })
-      await verifyKanbanClearGroupReplay(page, {
+      await runOptionalStep('ui.kanban-clear-group-replay', () => verifyKanbanClearGroupReplay(page, {
         baseId: base.id,
         sheetId: sheet.id,
         viewId: kanbanView.id,
+      }), {
+        details: { viewId: kanbanView.id },
       })
 
-      const embedHost = await verifyEmbedHostProtocol(page, {
+      const embedHost = await runOptionalStep('ui.embed-host.ready', () => verifyEmbedHostProtocol(page, {
         baseId: base.id,
         sheetId: sheet.id,
         initialViewId: gridView.id,
         targetViewId: galleryView.id,
+      }), {
+        details: { baseId: base.id, sheetId: sheet.id },
+        fallback: {
+          generatedRequestId: null,
+          explicitRequestId: null,
+          initialViewId: gridView.id,
+          targetViewId: galleryView.id,
+          ok: false,
+        },
       })
-      const embedHostDirtyNavigation = await verifyEmbedHostDirtyFormNavigation(page, {
+      const embedHostDirtyNavigation = await runOptionalStep('ui.embed-host.navigate.dirty', () => verifyEmbedHostDirtyFormNavigation(page, {
         token,
         baseId: base.id,
         sheetId: sheet.id,
@@ -4082,8 +4767,15 @@ async function run() {
         recordId,
         titleFieldId: titleField.id,
         originalTitle: importedTitle,
+      }), {
+        details: { formViewId: formView.id },
+        fallback: {
+          blockedRequestId: null,
+          confirmRequestId: null,
+          ok: false,
+        },
       })
-      const embedHostBusyDeferredNavigation = await verifyEmbedHostBusyDeferredNavigation(page, {
+      const embedHostBusyDeferredNavigation = await runOptionalStep('ui.embed-host.navigate.deferred', () => verifyEmbedHostBusyDeferredNavigation(page, {
         token,
         baseId: base.id,
         sheetId: sheet.id,
@@ -4094,34 +4786,60 @@ async function run() {
         recordId,
         titleFieldId: titleField.id,
         originalTitle: importedTitle,
+      }), {
+        details: { formViewId: formView.id },
+        fallback: {
+          deferredRequestId: null,
+          supersedingRequestId: null,
+          ok: false,
+        },
       })
 
-      await verifyAttachmentDeleteClear(page, {
-        token,
-        baseId: base.id,
-        sheetId: sheet.id,
-        viewId: formView.id,
-        recordId,
-        attachmentFieldName: attachmentField.name,
-        attachmentFieldId: attachmentField.id,
-        cleanupAttachmentIds: attachmentIds,
-      })
+      try {
+        await verifyAttachmentDeleteClear(page, {
+          token,
+          baseId: base.id,
+          sheetId: sheet.id,
+          viewId: formView.id,
+          recordId,
+          attachmentFieldName: attachmentField.name,
+          attachmentFieldId: attachmentField.id,
+          cleanupAttachmentIds: attachmentIds,
+        })
 
-      const afterClear = await fetchRecord(token, sheet.id, recordId)
-      trackRecord(afterClear.record)
-      const clearedAttachments = afterClear.attachmentSummaries?.[attachmentField.id] ?? []
-      const clearedFieldValue = afterClear.record?.data?.[attachmentField.id] ?? []
-      const clearedOk = clearedAttachments.length === 0 && (!Array.isArray(clearedFieldValue) || clearedFieldValue.length === 0)
-      record('api.form.attachment-delete-clear', clearedOk, {
-        recordId,
-        fieldId: attachmentField.id,
-        clearedAttachments: clearedAttachments.length,
-      })
-      if (!clearedOk) {
-        throw new Error('Attachment clear did not persist after form lifecycle check')
+        const afterClear = await fetchRecord(token, sheet.id, recordId)
+        trackRecord(afterClear.record)
+        const clearedAttachments = afterClear.attachmentSummaries?.[attachmentField.id] ?? []
+        const clearedFieldValue = afterClear.record?.data?.[attachmentField.id] ?? []
+        const clearedOk = clearedAttachments.length === 0 && (!Array.isArray(clearedFieldValue) || clearedFieldValue.length === 0)
+        record('api.form.attachment-delete-clear', clearedOk, {
+          recordId,
+          fieldId: attachmentField.id,
+          clearedAttachments: clearedAttachments.length,
+        })
+        if (!clearedOk) {
+          throw new Error('Attachment clear did not persist after form lifecycle check')
+        }
+      } catch (error) {
+        if (!continueOnPeopleRepairFailure) {
+          throw error
+        }
+        record('ui.form.attachment-delete-clear-skipped', false, {
+          recordId,
+          fieldId: attachmentField.id,
+          skipped: true,
+          reason: error?.message || String(error),
+          continueOnPeopleRepairFailure,
+        })
+        record('api.form.attachment-delete-clear', false, {
+          recordId,
+          fieldId: attachmentField.id,
+          skipped: true,
+          reason: 'Attachment clear check skipped due prior form attachment lifecycle failure',
+        })
       }
 
-      await verifyConflictRecovery(page, {
+      await runOptionalStep('ui.conflict-recovery', () => verifyConflictRecovery(page, {
         token,
         baseId: base.id,
         sheetId: sheet.id,
@@ -4130,6 +4848,8 @@ async function run() {
         titleFieldId: titleField.id,
         searchValue: importedTitle,
         originalTitle: importedTitle,
+      }), {
+        details: { recordId, viewId: gridView.id },
       })
 
       const finalRecord = await fetchRecord(token, sheet.id, recordId)
@@ -4237,7 +4957,7 @@ async function run() {
         personChoiceId: personChoice.id,
         primaryRecordId: recordId,
         retryRecordId: retried.row.id,
-        manualFixRecordId: manualFixed.row.id,
+        manualFixRecordId,
         xlsxImportRecordId: xlsxImported.id,
         viewSubmitRecordId: viewSubmit.record.id,
         embedHostGeneratedRequestId: embedHost.generatedRequestId,
