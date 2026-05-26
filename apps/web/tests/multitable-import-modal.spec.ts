@@ -804,6 +804,126 @@ describe('MetaImportModal', () => {
     container.remove()
   })
 
+  it('re-enables zh people repair after reconciling a stale selected repair', async () => {
+    useLocale().setLocale('zh')
+    mockListLinkOptions.mockResolvedValue({
+      field: { id: 'fld_owner', name: '负责人', type: 'person', property: { refKind: 'user', foreignSheetId: 'sheet_people', limitSingleRecord: true } },
+      targetSheet: { id: 'sheet_people', baseId: 'base_1', name: '人员' },
+      selected: [],
+      records: [{ id: 'rec_owner_1', display: '张三' }],
+      page: { offset: 0, limit: 50, total: 1, hasMore: false },
+    })
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const importCalls: Array<{ records: Array<Record<string, unknown>>; failures: Array<{ rowIndex: number; message: string }> }> = []
+
+    const Harness = defineComponent({
+      setup() {
+        const visible = ref(true)
+        const importing = ref(false)
+        const result = ref<any>(null)
+        const fields = ref<any[]>([
+          { id: 'fld_title', name: '标题', type: 'string' },
+          { id: 'fld_owner', name: '负责人', type: 'person', property: { refKind: 'user', foreignSheetId: 'sheet_people', limitSingleRecord: true } },
+        ])
+        const fieldResolvers = {
+          fld_owner: async () => {
+            throw new Error('Multiple people match "负责人". Use email for an exact match.')
+          },
+        }
+
+        return {
+          visible,
+          importing,
+          result,
+          fields,
+          fieldResolvers,
+          onClose: vi.fn(),
+          onImport(payload: { records: Array<Record<string, unknown>>; failures: Array<{ rowIndex: number; message: string }> }) {
+            importCalls.push({ records: payload.records, failures: payload.failures })
+            result.value = {
+              attempted: payload.records.length + payload.failures.length,
+              succeeded: payload.records.length,
+              failed: payload.failures.length,
+              firstError: payload.failures[0]?.message ?? null,
+              failures: payload.failures,
+            }
+            importing.value = false
+          },
+        }
+      },
+      render() {
+        return h(MetaImportModal, {
+          visible: this.visible,
+          fields: this.fields,
+          fieldResolvers: this.fieldResolvers,
+          importing: this.importing,
+          result: this.result,
+          onClose: this.onClose,
+          onImport: this.onImport,
+        })
+      },
+    })
+
+    const app = createApp(Harness)
+    const vm = app.mount(container) as any
+    await flushUi()
+
+    const textarea = document.body.querySelector('.meta-import__textarea') as HTMLTextAreaElement
+    textarea.value = '标题\t负责人\nAlpha\tOwner'
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(document.body.querySelector('.meta-import__btn--primary') as HTMLButtonElement)?.click()
+    await flushUi()
+
+    Array.from(document.body.querySelectorAll('.meta-import__actions .meta-import__btn'))
+      .find((button) => button.textContent?.includes('导入'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+
+    Array.from(document.body.querySelectorAll('.meta-import__fix-picker-row .meta-import__btn'))
+      .find((button) => button.textContent?.includes('选择人员'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+
+    ;(document.body.querySelector('.meta-link-picker__item input[type="checkbox"]') as HTMLInputElement)?.click()
+    await flushUi()
+    ;(document.body.querySelector('.meta-link-picker__confirm') as HTMLButtonElement)?.click()
+    await flushUi()
+
+    vm.fields = [
+      { id: 'fld_title', name: '标题', type: 'string' },
+      { id: 'fld_owner', name: '负责人文本', type: 'string', property: {} },
+    ]
+    await flushUi()
+
+    expect(document.body.textContent).toContain('为 负责人文本 选择的关联记录修复项已失效，因为该字段类型已变更。请先修复草稿再导入。')
+    const applyButtonBefore = Array.from(document.body.querySelectorAll('.meta-import__actions .meta-import__btn'))
+      .find((button) => button.textContent?.includes('应用修正并重试')) as HTMLButtonElement | undefined
+    expect(applyButtonBefore?.disabled).toBe(true)
+
+    Array.from(document.body.querySelectorAll('.meta-import__warning .meta-import__btn-inline'))
+      .find((button) => button.textContent?.includes('修复草稿'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+
+    expect(document.body.querySelector('.meta-import__warning')).toBeNull()
+    const applyButtonAfter = Array.from(document.body.querySelectorAll('.meta-import__actions .meta-import__btn'))
+      .find((button) => button.textContent?.includes('应用修正并重试')) as HTMLButtonElement | undefined
+    expect(applyButtonAfter?.disabled).toBe(false)
+
+    applyButtonAfter?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+
+    expect(importCalls).toHaveLength(2)
+    expect(importCalls[1]?.records).toEqual([{ fld_title: 'Alpha', fld_owner: '张三' }])
+    expect(importCalls[1]?.failures).toEqual([])
+
+    app.unmount()
+    container.remove()
+  })
+
   it('restores a persisted import draft when reopened for the same sheet', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
