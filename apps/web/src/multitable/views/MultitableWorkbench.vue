@@ -246,7 +246,7 @@
           :rows="grid.rows.value" :visible-fields="scopedGridFields" :sort-rules="grid.sortRules.value"
           :loading="grid.loading.value" :current-page="grid.currentPage.value" :total-pages="grid.totalPages.value"
           :start-index="pageStartIndex" :selected-record-id="selectedRecordId" :can-edit="effectiveRowActions.canEdit"
-          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-create="caps.canCreateRecord.value" :frozen-left-column-ids="activeFrozenLeftColumnIds" :field-read-only-ids="readOnlyFieldIds" :column-widths="grid.columnWidths.value"
+          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-create="caps.canCreateRecord.value" :frozen-left-column-ids="activeFrozenLeftColumnIds" :aggregation-config="activeAggregationConfig" :aggregates="aggregateValues" :aggregate-too-large="aggregateTooLarge" :field-read-only-ids="readOnlyFieldIds" :column-widths="grid.columnWidths.value"
           :row-action-overrides="grid.rowActionOverrides.value"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
           :enable-multi-select="gridAllowsAnyDelete || effectiveRowActions.canEdit"
@@ -262,6 +262,7 @@
           @bulk-delete="onBulkDelete" @bulk-edit="onBulkEditRequest" @reorder-field="onReorderField"
           @create-record="onAddRecord"
           @set-frozen="onSetFrozen"
+          @set-aggregation="onSetAggregation"
           @open-comments="onOpenRecordComments"
           @open-field-comments="onOpenGridFieldComments"
         />
@@ -1748,6 +1749,48 @@ function onSetFrozen(frozenLeftColumnIds: string[]) {
   void onPersistActiveViewConfig({
     config: { ...(workbench.activeView.value?.config ?? {}), frozenLeftColumnIds },
   })
+}
+
+// aggregation footer (#4-3b-1): SERVER-RESPONSE ONLY — never compute aggregates from local rows
+const aggregateValues = ref<Record<string, { fn: string; value: number }>>({})
+const aggregateTooLarge = ref(false)
+const activeAggregationConfig = computed<Record<string, string>>(() => {
+  const raw = workbench.activeView.value?.config?.aggregations
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  const out: Record<string, string> = {}
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) if (typeof k === 'string' && typeof v === 'string') out[k] = v
+  return out
+})
+async function loadAggregates() {
+  const sheetId = workbench.activeSheetId.value
+  const viewId = workbench.activeViewId.value
+  if (!sheetId || Object.keys(activeAggregationConfig.value).length === 0) {
+    aggregateValues.value = {}
+    aggregateTooLarge.value = false
+    return
+  }
+  try {
+    const r = await workbench.client.aggregateView({ sheetId, viewId: viewId || undefined, search: searchText.value || undefined })
+    aggregateValues.value = r.aggregates ?? {}
+    aggregateTooLarge.value = false
+  } catch (e) {
+    aggregateValues.value = {} // NO local fallback — keeps the "filtered set, not page rows" contract
+    aggregateTooLarge.value = (e as { code?: string })?.code === 'AGGREGATE_TOO_LARGE'
+  }
+}
+watch(
+  [() => workbench.activeViewId.value, () => workbench.activeSheetId.value, () => JSON.stringify(activeAggregationConfig.value), () => searchText.value],
+  () => { void loadAggregates() },
+  { immediate: true },
+)
+function onSetAggregation(payload: { fieldId: string; fn: string | null }) {
+  const next = { ...activeAggregationConfig.value }
+  if (payload.fn) next[payload.fieldId] = payload.fn
+  else delete next[payload.fieldId]
+  void onPersistActiveViewConfig({
+    config: { ...(workbench.activeView.value?.config ?? {}), aggregations: next },
+  })
+  // the watch on activeAggregationConfig re-fires loadAggregates once the persisted view reloads
 }
 
 async function updateViewInternal(

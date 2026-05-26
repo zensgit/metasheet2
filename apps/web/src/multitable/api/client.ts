@@ -737,6 +737,11 @@ function normalizeCommentsParams(params: { containerId: string; targetId: string
   }
 }
 
+export interface ViewAggregateResult {
+  total: number
+  aggregates: Record<string, { fn: string; value: number }>
+}
+
 export class MultitableApiClient {
   private fetch: FetchFn
   private readonly isZhOption?: ApiErrorLocaleOption
@@ -1014,6 +1019,15 @@ export class MultitableApiClient {
     search?: string
   }): Promise<MetaViewData> {
     const res = await this.fetch(`/api/multitable/view${qs(params as Record<string, string | number | boolean | undefined>)}`)
+    return this.parseJson(res)
+  }
+
+  // Footer aggregation (#4-3b-1): server aggregates over the full filtered set. On 413 (too large)
+  // parseJson throws a MultitableApiError with code 'AGGREGATE_TOO_LARGE' — caller handles, never
+  // falls back to local aggregation.
+  async aggregateView(params: { sheetId: string; viewId?: string; search?: string }): Promise<ViewAggregateResult> {
+    const { sheetId, ...rest } = params
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/view-aggregate${qs(rest as Record<string, string | undefined>)}`)
     return this.parseJson(res)
   }
 
