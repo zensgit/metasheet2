@@ -50,10 +50,41 @@ Before citing a green integration check as pass evidence, run this **3-point che
 ### R5 — Wire-vs-fixture / save-path drift
 - A field added to a normalizer/object isn't "settable/persistable" until proven by a **route round-trip** (write via the real endpoint → read back), not a unit test on the normalizer. Check both the **request** validator (zod schema) and the **response** projection — either can silently strip a new field (#1829 zod-strip; #1781 `dayIndex` serialization-strip). See `[[skip-when-unreachable-blind-spot]]`.
 
+## Triage flow: a PR's CI is red (copy-paste)
+
+The most common need. Run from repo root; uses local `gh` auth only.
+
+1. **Classify before rerun or merge.** Don't touch the PR yet:
+   ```bash
+   scripts/ci/ci-flake-classify.sh <PR#>
+   ```
+   It reads each failing job's log and prints a verdict + sets an exit code:
+   - `0` CLEAR — no failing checks (re-check; it may have already settled)
+   - `2` INFRA — every failure matches a known GitHub-infra signature → safe to rerun
+   - `3` GENUINE — at least one real failure → open the failing job log and fix; **do not rerun blindly**
+   - `1` usage / `gh` error
+2. **If INFRA, rerun the failed jobs** (opt-in; only re-runs when all-infra):
+   ```bash
+   scripts/ci/ci-flake-classify.sh <PR#> --rerun
+   ```
+   Re-poll. If still INFRA after **≤3 rounds** (space them out so GitHub can recover), **stop and report** — don't keep hammering.
+3. **Never admin-merge while CI is red** — even red-by-infra. Merge only after a genuinely green settle.
+4. **Bounded auto-loop** (optional; chains on the exit code — `3`=genuine stops, `0`=green stops):
+   ```bash
+   for r in 1 2 3; do
+     scripts/ci/ci-flake-classify.sh <PR#> --rerun; rc=$?
+     [ "$rc" = 0 ] && { echo "green"; break; }
+     [ "$rc" = 3 ] && { echo "genuine failure — stop, do not merge"; break; }
+     sleep 1500   # ~25m for GitHub infra to recover before the next round
+   done
+   ```
+
+A failure whose log matches no infra signature (e.g. a real `HTTP 403` auth/permission test) is classified **GENUINE** — the tool never silently reruns a real failure.
+
 ## Reusable tooling
 
-- `scripts/ci/ci-flake-classify.sh` — CI-flake classifier (R3). `gh`-only, read-only by default.
-  - Matcher unit test: `scripts/ci/__tests__/ci-flake-classify.test.sh` (feeds recorded incident excerpts in `scripts/ci/__fixtures__/`; no live-CI dependency).
+- `scripts/ci/ci-flake-classify.sh` — CI-flake classifier (R3; triage flow above). `gh`-only, read-only by default; `--rerun` opt-in and only acts when all failures are infra.
+  - Matcher unit test: `scripts/ci/__tests__/ci-flake-classify.test.sh` (feeds recorded incident excerpts in `scripts/ci/__fixtures__/`; no live-CI dependency). Run: `bash scripts/ci/__tests__/ci-flake-classify.test.sh`.
 
 ## Boundaries
 
