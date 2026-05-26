@@ -1,0 +1,4 @@
+test (20.x)	Run integration tests	FAIL tests/integration/attendance-plugin.test.ts > admin route rejects non-admin
+test (20.x)	Run integration tests	AssertionError: expected response status 200 to be 403
+test (20.x)	Run integration tests	  POST /api/attendance/settings → HTTP 403 Forbidden (permission denied)
+test (20.x)	Run integration tests	 Tests  1 failed | 77 passed (78)

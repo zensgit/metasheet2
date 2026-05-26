@@ -36,7 +36,7 @@ command line.**
 
 ### R3 — GitHub-infra flake vs genuine failure
 - Many checks failing in **2–4 s** across **unrelated** suites = a shared pre-code step failure (Set up job / Checkout), almost always GitHub infra, not your change.
-- Infra signatures: `pnpm/action-setup` / `codeload.github.com` / "could not be found at the URI" / "Failed to download archive" (action-CDN); `HTTP 403` / "unable to access … github" / "RPC failed" / "expected 'packfile'" / git exit 128 (checkout/throttle).
+- Infra signatures are **context-bound** (a bare `HTTP 403` / `exit code 128` is *not* a signature — genuine auth/permission tests print those): action-CDN — `pnpm/action-setup` / `codeload.github.com` / "Download action repository" / "could not be found at the URI" / "Failed to download archive"; git checkout — "unable to access 'https://…github" (URL-bound 403) / "RPC failed; HTTP" / "/usr/bin/git' failed with exit code 128" / "fatal: expected 'packfile'".
 - Tool: `scripts/ci/ci-flake-classify.sh <PR#> [--rerun]` — classify-only by default; exit `0` clear / `2` all-infra / `3` genuine. Re-run **only** when classified all-infra; bound retries (≤3 rounds) and **never merge red CI**.
 - Fail-safe: a failure matching no infra signature is treated as **genuine** (never silently rerun).
 

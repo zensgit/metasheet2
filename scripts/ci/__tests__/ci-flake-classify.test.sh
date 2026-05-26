@@ -12,4 +12,5 @@ assert_genuine()  { if is_infra_log "$(cat "$1")"; then echo "FAIL genuine: $(ba
 assert_infra   "$FIX/infra-action-setup.txt"
 assert_infra   "$FIX/infra-checkout-403.txt"
 assert_genuine "$FIX/genuine-test-failure.txt"
+assert_genuine "$FIX/genuine-app-403.txt"
 [[ "$fail" == "0" ]] && { echo "ci-flake-classify matcher: PASS"; exit 0; } || { echo "ci-flake-classify matcher: FAIL"; exit 1; }

@@ -19,14 +19,18 @@ set -euo pipefail
 #   3  at least one genuine failure (do NOT rerun blindly — investigate)
 #   1  script/usage error (bad args, gh unavailable)
 #
-# Infra-flake signatures — observed in real GitHub Actions incidents (2026-05-26, PR #1876):
-#   pnpm/action-setup, codeload.github.com, "could not be found at the URI",
-#   "Failed to download archive"            → action-CDN download flake (Set up job)
-#   "HTTP 403", "unable to access", "RPC failed", "expected 'packfile'", git exit 128
-#                                           → repo checkout / git throttle (Checkout repository)
-# A failure whose log matches none of these is classified GENUINE (fail-safe direction:
-# unknown → treat as real, never silently rerun).
-INFRA_SIGNATURES='pnpm/action-setup|codeload\.github\.com|could not be found at the URI|Failed to download archive|HTTP 403|unable to access .https://github|RPC failed|expected .packfile|failed with exit code 128'
+# Infra-flake signatures — observed in real GitHub Actions incidents (2026-05-26, PR #1876).
+# EVERY signature is CONTEXT-BOUND: a bare token like "HTTP 403" or "exit code 128" is NOT a
+# signature, because genuine app/auth/permission tests legitimately print those. Each pattern
+# ties the failure to a GitHub-infra context (action download or git checkout):
+#   action-CDN download (Set up job): pnpm/action-setup, codeload.github.com,
+#     "Download action repository", "could not be found at the URI", "Failed to download archive"
+#   repo checkout / git transport (Checkout repository): "unable to access 'https://…github"
+#     (URL-bound 403/auth), "RPC failed; HTTP" (git RPC), "/usr/bin/git' failed with exit code 128"
+#     (git-bound 128), "fatal: expected 'packfile'" (git clone)
+# A failure whose log matches none of these is classified GENUINE (fail-safe: unknown → real,
+# never silently rerun). In particular a bare app-level "HTTP 403" stays GENUINE.
+INFRA_SIGNATURES='pnpm/action-setup|codeload\.github\.com|Download action repository|could not be found at the URI|Failed to download archive|unable to access .https?://[^ ]*github|RPC failed; HTTP|/usr/bin/git. failed with exit code 128|fatal: expected .packfile'
 
 # is_infra_log <text> | echo <text> | is_infra_log
 # Returns 0 if the log text matches a known infra signature, 1 otherwise.
