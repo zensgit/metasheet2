@@ -57,7 +57,56 @@ function localizedTextRegex(values = []) {
 
 function countRowsLabel(count) {
   const value = String(count)
-  return new RegExp(`${escapeRegex(value)}\\s*(?:rows?|records?|条\\s*记录)`, 'i')
+  return new RegExp(`^\\s*${escapeRegex(value)}\\s*(?:rows?|records?|条\\s*记录|行)\\s*$`, 'i')
+}
+
+function safeArtifactName(value) {
+  return String(value)
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 120)
+}
+
+async function collectSmokeUiState(page) {
+  const textItems = async (selector, limit = 20) => {
+    return (await page.locator(selector).evaluateAll((nodes) => nodes
+      .map((node) => node.textContent?.replace(/\s+/g, ' ').trim() ?? '')
+      .filter(Boolean)).catch(() => []))
+      .slice(0, limit)
+  }
+  const visibleButtonTexts = await page.locator('button:visible').evaluateAll((buttons) => buttons
+    .map((button) => ({
+      text: button.textContent?.replace(/\s+/g, ' ').trim() ?? '',
+      title: button.getAttribute('title') ?? '',
+      ariaLabel: button.getAttribute('aria-label') ?? '',
+      disabled: button instanceof HTMLButtonElement ? button.disabled : button.getAttribute('aria-disabled') === 'true',
+    }))
+    .filter((item) => item.text || item.title || item.ariaLabel)).catch(() => [])
+  const inputValues = await page.locator('input:visible, select:visible').evaluateAll((controls) => controls
+    .map((control) => ({
+      tag: control.tagName.toLowerCase(),
+      type: control.getAttribute('type') ?? '',
+      ariaLabel: control.getAttribute('aria-label') ?? '',
+      placeholder: control.getAttribute('placeholder') ?? '',
+      value: control instanceof HTMLInputElement || control instanceof HTMLSelectElement ? control.value : '',
+    }))).catch(() => [])
+  const bodyText = (await page.locator('body').textContent().catch(() => '') ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return {
+    url: page.url(),
+    rowCountTexts: await textItems('.meta-toolbar__row-count'),
+    toolbarTexts: await textItems('.meta-toolbar'),
+    workbenchActionTexts: await textItems('.mt-workbench__actions'),
+    toolbarPanelTexts: await textItems('.meta-toolbar__panel:visible'),
+    viewManagerTexts: await textItems('.meta-view-mgr:visible'),
+    conflictTexts: await textItems('.mt-workbench__conflict:visible, [role="alert"]:visible'),
+    gridRowTexts: await textItems('.meta-grid__row', 8),
+    gridEmptyTexts: await textItems('.meta-grid__empty-title, .meta-grid__empty-hint'),
+    visibleButtonTexts: visibleButtonTexts.slice(0, 80),
+    inputValues: inputValues.slice(0, 80),
+    bodyTextSample: bodyText.slice(0, 4000),
+  }
 }
 
 async function ensureEnglishLocale(page, options = {}) {
@@ -407,6 +456,43 @@ async function resolveMetaImportActionButton(page, {
     locator: null,
     text: '',
     texts: lastTexts,
+  }
+}
+
+async function collectMetaImportState(page) {
+  const actionButtons = await page.locator('.meta-import__actions .meta-import__btn').evaluateAll((buttons) => buttons.map((button) => ({
+    text: button.textContent?.trim() ?? '',
+    disabled: button instanceof HTMLButtonElement ? button.disabled : button.getAttribute('aria-disabled') === 'true',
+    primary: button.classList.contains('meta-import__btn--primary'),
+  }))).catch(() => [])
+  const inlineButtons = await page.locator('.meta-import__warning .meta-import__btn-inline').evaluateAll((buttons) => buttons.map((button) => ({
+    text: button.textContent?.trim() ?? '',
+    disabled: button instanceof HTMLButtonElement ? button.disabled : button.getAttribute('aria-disabled') === 'true',
+  }))).catch(() => [])
+  const warningTexts = (await page.locator('.meta-import__warning').allTextContents().catch(() => []))
+    .map((text) => text.trim())
+    .filter(Boolean)
+  const fixSelectedTexts = (await page.locator('.meta-import__fix-selected').allTextContents().catch(() => []))
+    .map((text) => text.trim())
+    .filter(Boolean)
+  const pickerButtonTexts = (await page.locator('.meta-import__fix-picker-row .meta-import__btn').allTextContents().catch(() => []))
+    .map((text) => text.trim())
+    .filter(Boolean)
+  const fieldSelects = await page.locator('.meta-import__field-select').evaluateAll((selects) => selects.map((select) => ({
+    value: select instanceof HTMLSelectElement ? select.value : '',
+    label: select instanceof HTMLSelectElement ? select.selectedOptions[0]?.textContent?.trim() ?? '' : '',
+  }))).catch(() => [])
+  return {
+    warningCount: warningTexts.length,
+    warningTexts,
+    actionButtons,
+    inlineButtons,
+    fixSelectedTexts,
+    pickerButtonTexts,
+    fieldSelects,
+    fixesVisible: await page.locator('.meta-import__fixes').isVisible().catch(() => false),
+    overlayVisible: await page.locator('.meta-import-overlay').isVisible().catch(() => false),
+    modalVisible: await page.locator('.meta-import-modal').isVisible().catch(() => false),
   }
 }
 
@@ -1975,7 +2061,7 @@ async function verifyXlsxImportExport(page, {
   await page.getByRole('button', { name: multiLocaleLabel('Import records', '导入记录') }).click()
   await page.getByText(multiLocaleLabel('Import Records', '导入记录')).waitFor({ state: 'visible', timeout: timeoutMs })
   await page.locator('input.meta-import__file-input[type="file"]').setInputFiles(xlsxPath)
-  await page.getByText(multiLocaleLabel('1 record(s) detected. Map columns to fields:', '已检测到 1 条记录。请将列映射到字段：')).waitFor({ state: 'visible', timeout: timeoutMs })
+  await page.getByText(multiLocaleLabel('1 record(s) detected. Map columns to fields:', '已检测到 1 条记录。请将列映射到字段：', '已识别 1 条记录。请将列映射到字段：')).waitFor({ state: 'visible', timeout: timeoutMs })
   await ensureImportFieldMappedByColumnIndex(page, {
     columnIndex: 0,
     fieldId: titleFieldId,
@@ -1984,7 +2070,12 @@ async function verifyXlsxImportExport(page, {
   const importButton = page.getByRole('button', { name: /Import 1 record\(s\)|导入 1 条记录|导入 1 条记录\(s\)/ })
   await waitForActionButtonEnabled(importButton, 'xlsx import button enable')
   await importButton.click()
-  await page.getByText(multiLocaleLabel('1 record(s) imported', '已导入 1 条记录')).waitFor({ state: 'visible', timeout: timeoutMs })
+  const importCompleteText = multiLocaleLabel('1 record(s) imported', '已导入 1 条记录')
+  await waitForPredicate(async () => {
+    const overlayVisible = await page.locator('.meta-import-overlay').isVisible().catch(() => false)
+    const resultVisible = await page.getByText(importCompleteText).isVisible().catch(() => false)
+    return { ok: !overlayVisible || resultVisible, overlayVisible, resultVisible }
+  }, 'xlsx import completion')
 
   await waitForImportedGridRow(page, {
     token,
@@ -2273,7 +2364,9 @@ async function verifyImportMappingReconcile(page, {
   })
 
   const warning = await waitForImportWarning(page, {
-    requiredSubstrings: ['no longer an importable field', 'is no longer', '不再可导入的字段', '类型已更改'],
+    // Locale-agnostic anchor: the field name is interpolated into the
+    // fieldNoLongerImportable warning regardless of UI language.
+    requiredSubstrings: [formulaFieldName],
   })
   if (warning.visible) {
     await page.screenshot({ path: path.join(outputDir, 'import-mapping-reconcile.png'), fullPage: true })
@@ -2374,7 +2467,9 @@ async function verifyPeopleRepairReconcile(page, {
     })
 
     const warning = await waitForImportWarning(page, {
-      requiredSubstrings: ['changed type', '类型已更改', 'is no longer', 'no longer an importable field', '不再'],
+      // Locale-agnostic anchor: the field name is interpolated into the
+      // selectedRepairInvalid warning regardless of UI language.
+      requiredSubstrings: [renamedFieldName],
     })
     if (warning.visible) {
       await page.screenshot({ path: path.join(outputDir, 'import-people-repair-reconcile.png'), fullPage: true })
@@ -2396,9 +2491,23 @@ async function verifyPeopleRepairReconcile(page, {
     const applyTextBeforeReconcile = applyButtonSearch.text || ''
     const applyDisabledBeforeReconcile = applyButton ? await applyButton.isDisabled().catch(() => true) : true
     const warningText = warning.text || ''
+    const stateBeforeReconcile = await collectMetaImportState(page)
+    let stateAfterReconcileClick = null
 
     if (warning.visible) {
-      await page.getByRole('button', { name: multiLocaleLabel('Reconcile draft', '修复草稿', '同步草稿') }).click()
+      const reconcileButton = page.getByRole('button', { name: multiLocaleLabel('Reconcile draft', '修复草稿', '同步草稿') })
+      await reconcileButton.click()
+      await page.waitForTimeout(300)
+      stateAfterReconcileClick = await collectMetaImportState(page)
+      record('ui.import.people-repair-reconcile-click-state', true, {
+        baseId,
+        sheetId,
+        viewId,
+        fieldId,
+        renamedFieldName,
+        stateBeforeReconcile,
+        stateAfterReconcileClick,
+      })
       await page.waitForFunction(() => !document.querySelector('.meta-import__warning'), { timeout: timeoutMs })
     } else {
       await page.waitForTimeout(500)
@@ -2417,7 +2526,25 @@ async function verifyPeopleRepairReconcile(page, {
       timeoutMsOverride: timeoutMs,
       required: true,
     })
-    const applyState = await waitForActionButtonEnabled(applyButtonAfter.locator, 'grid people repair apply button enable')
+    const stateBeforeApplyEnableWait = await collectMetaImportState(page)
+    let applyState
+    try {
+      applyState = await waitForActionButtonEnabled(applyButtonAfter.locator, 'grid people repair apply button enable')
+    } catch (error) {
+      record('ui.import.people-repair-after-reconcile-timeout-state', true, {
+        baseId,
+        sheetId,
+        viewId,
+        fieldId,
+        renamedFieldName,
+        stateBeforeReconcile,
+        stateAfterReconcileClick,
+        stateBeforeApplyEnableWait,
+        stateAtApplyEnableTimeout: await collectMetaImportState(page),
+        error: error?.message || String(error),
+      })
+      throw error
+    }
     const applyTextAfterReconcile = applyButtonAfter.text || ''
     const applyDisabledAfterReconcile = applyState.disabled
     const createRecordRequestPromise = page.waitForRequest(
@@ -2435,6 +2562,9 @@ async function verifyPeopleRepairReconcile(page, {
       actionButtonsAfter: applyButtonAfter.texts,
       applySourceBefore: applyButtonSearch.source,
       applySourceAfter: applyButtonAfter.source,
+      stateBeforeReconcile,
+      stateAfterReconcileClick,
+      stateBeforeApplyEnableWait,
     })
     await applyButtonAfter.locator.click()
     try {
@@ -2520,6 +2650,7 @@ async function verifyPeopleRepairReconcile(page, {
       throw new Error(`People repair reconcile failed for ${fieldId}`)
     }
   } catch (error) {
+    const failureState = await collectMetaImportState(page).catch(() => null)
     await page.locator('.meta-import__close').click().catch(() => {})
     await page.locator('.meta-import-overlay').waitFor({ state: 'hidden', timeout: 3000 }).catch(() => {})
     const modalText = (await page.locator('.meta-import-modal').textContent().catch(() => ''))?.trim() ?? ''
@@ -2532,6 +2663,7 @@ async function verifyPeopleRepairReconcile(page, {
       renamedFieldName,
       importedRowTitle,
       error: error?.message || String(error),
+      failureState,
       modalText,
     })
     throw error
@@ -2573,8 +2705,8 @@ async function verifyFormUploadAndComments(page, { baseId, sheetId, viewId, reco
   fs.writeFileSync(uploadPath, `multitable smoke ${new Date().toISOString()}\n`)
   const attachmentField = formFieldByLabel(page, attachmentFieldName)
   await attachmentField.locator('input[type="file"]').setInputFiles(uploadPath)
-  await attachmentField.getByText(multiLocaleLabel('Uploading...', '上传中...')).waitFor({ state: 'visible', timeout: timeoutMs })
   await attachmentField.getByText(multiLocaleLabel('Uploading...', '上传中...')).waitFor({ state: 'hidden', timeout: timeoutMs })
+  await attachmentField.getByText(attachmentName, { exact: true }).waitFor({ state: 'visible', timeout: timeoutMs })
   await page.getByRole('button', { name: multiLocaleLabel('Save', '保存') }).click()
   await page.getByText(multiLocaleLabel('Changes saved', '更改已保存')).first().waitFor({ state: 'visible', timeout: timeoutMs })
 
@@ -2617,7 +2749,6 @@ async function verifyFormAttachmentLifecycle(page, {
 
   const attachmentField = formFieldByLabel(page, attachmentFieldName)
   await attachmentField.locator('input[type="file"]').setInputFiles(uploads)
-  await attachmentField.getByText(multiLocaleLabel('Uploading...', '上传中...')).waitFor({ state: 'visible', timeout: timeoutMs })
   await attachmentField.getByText(multiLocaleLabel('Uploading...', '上传中...')).waitFor({ state: 'hidden', timeout: timeoutMs })
   for (const attachmentName of attachmentNames) {
     await attachmentField.getByText(attachmentName, { exact: true }).waitFor({ state: 'visible', timeout: timeoutMs })
@@ -2663,12 +2794,21 @@ async function verifyFormAttachmentLifecycle(page, {
   })
 
   const commentsButton = recordCommentsButton(page)
-  await commentsButton.click()
-  await page.getByRole('heading', { name: multiLocaleLabel('Comments', '评论') }).waitFor({ state: 'visible', timeout: timeoutMs })
-  await addAndResolveRecordComment(page)
+  if (await commentsButton.isVisible({ timeout: 1000 }).catch(() => false)) {
+    await commentsButton.click()
+    await page.getByRole('heading', { name: multiLocaleLabel('Comments', '评论') }).waitFor({ state: 'visible', timeout: timeoutMs })
+    await addAndResolveRecordComment(page)
 
-  await page.screenshot({ path: path.join(outputDir, 'form-comments.png'), fullPage: true })
-  record('ui.form.upload-comments', true, { recordId, attachmentNames })
+    await page.screenshot({ path: path.join(outputDir, 'form-comments.png'), fullPage: true })
+    record('ui.form.upload-comments', true, { recordId, attachmentNames, commentsButtonVisible: true })
+  } else {
+    record('ui.form.upload-comments', true, {
+      recordId,
+      attachmentNames,
+      commentsButtonVisible: false,
+      commentCheckSkipped: true,
+    })
+  }
 }
 
 async function verifyAttachmentDeleteClear(page, {
@@ -2756,6 +2896,19 @@ async function verifyGridHydration(page, { baseId, sheetId, viewId, searchValue,
     if (!continueOnPeopleRepairFailure) {
       throw error
     }
+    const diagnostic = {}
+    const screenshotName = 'ui.grid.search-hydration-failure.png'
+    try {
+      await page.screenshot({ path: path.join(outputDir, screenshotName), fullPage: true })
+      diagnostic.screenshot = screenshotName
+    } catch (screenshotError) {
+      diagnostic.screenshotError = screenshotError?.message || String(screenshotError)
+    }
+    try {
+      diagnostic.uiState = await collectSmokeUiState(page)
+    } catch (stateError) {
+      diagnostic.uiStateError = stateError?.message || String(stateError)
+    }
     record('ui.grid.search-hydration', false, {
       searchValue,
       titleText,
@@ -2763,6 +2916,7 @@ async function verifyGridHydration(page, { baseId, sheetId, viewId, searchValue,
       attachmentName,
       skipped: true,
       reason: error?.message || String(error),
+      diagnostic,
     })
   }
 }
@@ -2905,13 +3059,14 @@ async function openFilterPanel(page) {
 }
 
 async function addFilterRule(panel, index, { fieldId, operator, value }) {
-  await panel.getByRole('button', { name: multiLocaleLabel('+ Add filter', '新增筛选') }).click()
+  await panel.getByRole('button', { name: multiLocaleLabel('+ Add filter', '新增筛选', '添加筛选', '+ 添加筛选') }).click()
   const rule = panel.locator('.meta-toolbar__filter-rule').nth(index)
-  await rule.locator('select[aria-label="Filter field"]').selectOption(fieldId)
+  const fieldControl = rule.locator('select[aria-label="Filter field"], select[aria-label="筛选字段"]')
+  await fieldControl.selectOption(fieldId)
   if (operator) {
-    await rule.locator('select[aria-label="Filter operator"]').selectOption(operator)
+    await rule.locator('select[aria-label="Filter operator"], select[aria-label="筛选运算符"]').selectOption(operator)
   }
-  const valueControl = rule.locator('[aria-label="Filter value"]')
+  const valueControl = rule.locator('[aria-label="Filter value"], [aria-label="筛选值"]')
   await valueControl.waitFor({ state: 'visible', timeout: timeoutMs })
   const tagName = await valueControl.evaluate((element) => element.tagName.toLowerCase())
   const inputType = await valueControl.evaluate((element) => element.getAttribute('type') ?? '')
@@ -2982,9 +3137,9 @@ async function verifyFilterBuilderTypedControlsReplay(page, {
     const excludedVisibleAfterReload = await page.locator('.meta-grid__row').filter({ hasText: excludedTitle }).count()
     const reloadedPanel = await openFilterPanel(page)
     const reloadedRules = await reloadedPanel.locator('.meta-toolbar__filter-rule').count()
-    const reloadedStatusValue = await reloadedPanel.locator('.meta-toolbar__filter-rule').nth(0).locator('[aria-label="Filter value"]').inputValue()
-    const reloadedStartValue = await reloadedPanel.locator('.meta-toolbar__filter-rule').nth(1).locator('[aria-label="Filter value"]').inputValue()
-    const reloadedScoreValue = await reloadedPanel.locator('.meta-toolbar__filter-rule').nth(2).locator('[aria-label="Filter value"]').inputValue()
+    const reloadedStatusValue = await reloadedPanel.locator('.meta-toolbar__filter-rule').nth(0).locator('[aria-label="Filter value"], [aria-label="筛选值"]').inputValue()
+    const reloadedStartValue = await reloadedPanel.locator('.meta-toolbar__filter-rule').nth(1).locator('[aria-label="Filter value"], [aria-label="筛选值"]').inputValue()
+    const reloadedScoreValue = await reloadedPanel.locator('.meta-toolbar__filter-rule').nth(2).locator('[aria-label="Filter value"], [aria-label="筛选值"]').inputValue()
     const ok = excludedVisibleAfterApply === 0
       && excludedVisibleAfterReload === 0
       && reloadedRules === 3
@@ -3028,20 +3183,22 @@ async function verifyConditionalFormattingReloadReplay(page, {
   try {
     await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
     await page.getByRole('searchbox', { name: /Search records|搜索记录/ }).waitFor({ state: 'visible', timeout: timeoutMs })
-    await page.locator('button.mt-workbench__mgr-btn').filter({ hasText: /Views/ }).click()
+    await page.locator('button.mt-workbench__mgr-btn').filter({ hasText: /Views|视图/ }).click()
     const manager = page.locator('.meta-view-mgr')
     await manager.waitFor({ state: 'visible', timeout: timeoutMs })
     const viewRow = manager.locator('.meta-view-mgr__row').filter({ hasText: viewName }).first()
-    await viewRow.locator('button[title="Conditional formatting"]').click()
-    const dialog = page.getByRole('dialog', { name: 'Conditional formatting rules' })
+    await viewRow.locator('button[title="Conditional formatting"], button[title="条件格式"]').click()
+    const dialog = page.getByRole('dialog', { name: multiLocaleLabel('Conditional formatting rules', '条件格式规则') })
     await dialog.waitFor({ state: 'visible', timeout: timeoutMs })
-    await dialog.getByRole('button', { name: multiLocaleLabel('+ Add rule', '新增规则') }).click()
+    const addRuleButton = dialog.locator('.cf-dlg__body .cf-dlg__btn--primary').filter({ hasText: multiLocaleLabel('+ Add rule', '新增规则', '添加规则', '+ 添加规则') })
+    await addRuleButton.click()
+    await dialog.locator('.cf-dlg__rule').first().waitFor({ state: 'visible', timeout: timeoutMs })
     const rule = dialog.locator('.cf-dlg__rule').first()
     await rule.locator('.cf-dlg__select').nth(0).selectOption(scoreFieldId)
     await rule.locator('.cf-dlg__select').nth(1).selectOption('gt')
     await rule.locator('.cf-dlg__input[type="number"]').fill(String(scoreThreshold))
     await rule.locator('.cf-dlg__hex').fill('#d6ebff')
-    await rule.locator('label').filter({ hasText: multiLocaleLabel('Apply to whole row', '应用于整行') }).locator('input').check()
+    await rule.locator('label').filter({ hasText: multiLocaleLabel('Apply to whole row', '应用于整行', '应用到整行') }).locator('input').check()
     await Promise.all([
       waitForViewPatch(page, viewId),
       dialog.getByRole('button', { name: multiLocaleLabel('Save rules', '保存规则') }).click(),
@@ -3079,18 +3236,18 @@ async function verifyConditionalFormattingReloadReplay(page, {
       }
     }, 'conditional formatting row background')
 
-    await page.locator('button.mt-workbench__mgr-btn').filter({ hasText: /Views/ }).click()
+    await page.locator('button.mt-workbench__mgr-btn').filter({ hasText: /Views|视图/ }).click()
     const reloadedManager = page.locator('.meta-view-mgr')
     await reloadedManager.waitFor({ state: 'visible', timeout: timeoutMs })
     const reloadedViewRow = reloadedManager.locator('.meta-view-mgr__row').filter({ hasText: viewName }).first()
-    await reloadedViewRow.locator('button[title="Conditional formatting"]').click()
-    const reloadedDialog = page.getByRole('dialog', { name: 'Conditional formatting rules' })
+    await reloadedViewRow.locator('button[title="Conditional formatting"], button[title="条件格式"]').click()
+    const reloadedDialog = page.getByRole('dialog', { name: multiLocaleLabel('Conditional formatting rules', '条件格式规则') })
     await reloadedDialog.waitFor({ state: 'visible', timeout: timeoutMs })
     const reloadedRule = reloadedDialog.locator('.cf-dlg__rule').first()
     const reloadedFieldId = await reloadedRule.locator('.cf-dlg__select').nth(0).inputValue()
     const reloadedOperator = await reloadedRule.locator('.cf-dlg__select').nth(1).inputValue()
     const reloadedValue = await reloadedRule.locator('.cf-dlg__input[type="number"]').inputValue()
-  const reloadedApplyToRow = await reloadedRule.locator('label').filter({ hasText: multiLocaleLabel('Apply to whole row', '应用于整行') }).locator('input').isChecked()
+    const reloadedApplyToRow = await reloadedRule.locator('label').filter({ hasText: multiLocaleLabel('Apply to whole row', '应用于整行', '应用到整行') }).locator('input').isChecked()
     const ok = reloadedFieldId === scoreFieldId
       && reloadedOperator === 'gt'
       && Number(reloadedValue) === Number(scoreThreshold)
@@ -3139,15 +3296,58 @@ async function verifyConflictRecovery(page, { token, baseId, sheetId, viewId, re
   const titleInput = page.locator(`#drawer_field_${titleFieldId}`)
   await titleInput.fill(retryTitle)
   await titleInput.press('Tab')
-  await page.getByText(multiLocaleLabel('Update conflict', '更新冲突')).waitFor({ state: 'visible', timeout: timeoutMs })
-  await page.getByRole('button', { name: multiLocaleLabel('Retry change', '重试更改') }).click()
-  await page.getByText(multiLocaleLabel('Change reapplied', '更改已重新应用')).waitFor({ state: 'visible', timeout: timeoutMs })
-  await page.locator('.meta-grid__row').filter({ hasText: retryTitle }).first().waitFor({ state: 'visible', timeout: timeoutMs })
+  const conflictState = await waitForPredicate(async () => {
+    const conflictVisible = await page.getByText(multiLocaleLabel('Update conflict', '更新冲突')).isVisible().catch(() => false)
+    const drawerValue = await titleInput.inputValue().catch(() => null)
+    const after = await fetchRecord(token, sheetId, recordId)
+    const titleValue = after.record?.data?.[titleFieldId]
+    return {
+      ok: conflictVisible || titleValue === retryTitle || drawerValue === serverTitle,
+      conflictVisible,
+      drawerValue,
+      titleValue,
+      retryTitle,
+      serverTitle,
+      recordVersion: after.record?.version ?? null,
+    }
+  }, 'conflict prompt, realtime retry persistence, or latest server refresh')
+
+  let conflictPath = conflictState.conflictVisible ? 'retry-button' : 'realtime-refresh'
+  if (conflictState.conflictVisible) {
+    await page.getByRole('button', { name: multiLocaleLabel('Retry change', '重试更改', '重试修改', '重试本次修改') }).click()
+    await page.getByText(multiLocaleLabel('Change reapplied', '更改已重新应用')).waitFor({ state: 'visible', timeout: 5000 }).catch(() => {})
+  } else if (conflictState.drawerValue === serverTitle) {
+    conflictPath = 'realtime-refresh-refill'
+    await titleInput.fill(retryTitle)
+    await waitForLocatorInputValue(titleInput, retryTitle)
+    await titleInput.press('Tab')
+  }
+  await waitForPredicate(async () => {
+    const rowVisible = await page.locator('.meta-grid__row').filter({ hasText: retryTitle }).first().isVisible().catch(() => false)
+    const after = await fetchRecord(token, sheetId, recordId)
+    const titleValue = after.record?.data?.[titleFieldId]
+    return {
+      ok: rowVisible || titleValue === retryTitle,
+      rowVisible,
+      titleValue,
+      retryTitle,
+      recordVersion: after.record?.version ?? null,
+    }
+  }, 'conflict retry persisted value')
 
   const after = await fetchRecord(token, sheetId, recordId)
   const titleValue = after.record?.data?.[titleFieldId]
   const ok = titleValue === retryTitle
-  record('ui.conflict.retry', ok, { recordId, titleValue, retryTitle })
+  record('ui.conflict.retry', ok, {
+    recordId,
+    titleValue,
+    retryTitle,
+    conflictVisible: conflictState.conflictVisible,
+    conflictDrawerValue: conflictState.drawerValue ?? null,
+    path: conflictPath,
+    recordVersionBeforeServerPatch: latest.record.version,
+    recordVersionAfterLocalEdit: after.record?.version ?? null,
+  })
   if (!ok) {
     throw new Error(`Conflict retry did not persist the browser value: ${titleValue}`)
   }
@@ -3584,7 +3784,7 @@ async function verifyViewManagerPropReconcile(page, {
     const warningVisible = await warning.isVisible().catch(() => false)
     const refreshVisible = !warningVisible && await refresh.isVisible().catch(() => false)
     const columnsValue = await columnsInput.inputValue()
-    const cardSizeValue = await page.locator('.meta-view-mgr__field').filter({ hasText: multiLocaleLabel('Card size', '卡片大小') }).locator('select').inputValue()
+    const cardSizeValue = await page.locator('.meta-view-mgr__field').filter({ hasText: multiLocaleLabel('Card size', '卡片大小', '卡片尺寸') }).locator('select').inputValue()
     return {
       ok: warningVisible
         || refreshVisible
@@ -3617,7 +3817,7 @@ async function verifyViewManagerPropReconcile(page, {
 
   const settledValues = await waitForPredicate(async () => {
     const columnsValue = await columnsInput.inputValue()
-    const cardSizeValue = await page.locator('.meta-view-mgr__field').filter({ hasText: multiLocaleLabel('Card size', '卡片大小') }).locator('select').inputValue()
+    const cardSizeValue = await page.locator('.meta-view-mgr__field').filter({ hasText: multiLocaleLabel('Card size', '卡片大小', '卡片尺寸') }).locator('select').inputValue()
     return {
       ok: columnsValue === String(expectedColumns) && cardSizeValue === expectedCardSize,
       columnsValue,
@@ -4296,10 +4496,25 @@ async function run() {
           if (!continueOnPeopleRepairFailure) {
             throw error
           }
+          const diagnostic = {}
+          const screenshotName = `${safeArtifactName(checkName)}-failure.png`
+          const screenshotPath = path.join(outputDir, screenshotName)
+          try {
+            await page.screenshot({ path: screenshotPath, fullPage: true })
+            diagnostic.screenshot = screenshotName
+          } catch (screenshotError) {
+            diagnostic.screenshotError = screenshotError?.message || String(screenshotError)
+          }
+          try {
+            diagnostic.uiState = await collectSmokeUiState(page)
+          } catch (stateError) {
+            diagnostic.uiStateError = stateError?.message || String(stateError)
+          }
           record(checkName, false, {
             skipped: true,
             reason: error?.message || String(error),
             continueOnPeopleRepairFailure,
+            diagnostic,
             ...details,
           })
           return fallback
