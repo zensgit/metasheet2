@@ -173,6 +173,21 @@ export interface IntegrationPipelineObservationQuery extends IntegrationScope {
   offset?: number
 }
 
+// One per-record target-write business response (sanitized + capped at 50
+// server-side). This is the concrete present-day grain of #1839's RowResult.
+export interface IntegrationTargetWriteSummary {
+  [key: string]: unknown
+}
+
+// Forward-compatible: the runner records `targetWriteSummaries` (row-level write
+// results, #1813) and `watermarkAdvanced` inside `run.details` today; unknown
+// keys are preserved so new detail fields don't require a type bump.
+export interface IntegrationPipelineRunDetails {
+  targetWriteSummaries?: IntegrationTargetWriteSummary[]
+  watermarkAdvanced?: boolean
+  [key: string]: unknown
+}
+
 export interface IntegrationPipelineRun {
   id: string
   tenantId: string
@@ -189,7 +204,7 @@ export interface IntegrationPipelineRun {
   finishedAt?: string | null
   durationMs?: number | null
   errorSummary?: string | null
-  details?: Record<string, unknown>
+  details?: IntegrationPipelineRunDetails
   createdAt?: string | null
 }
 

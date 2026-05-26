@@ -1198,4 +1198,109 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.querySelector('[data-testid="staging-project-id-scope-warning"]')).toBeNull()
     expect(scopeStatus.textContent).toContain('default:integration-core')
   })
+
+  it('renders run monitoring with row-level results and read-only dead-letter display', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      // onMounted bootstrap (refreshBootstrap)
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url.startsWith('/api/integration/external-systems')) return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      // monitoring reads
+      if (url === '/api/integration/runs?tenantId=default&pipelineId=pipe_mon&limit=5') {
+        return jsonResponse([
+          {
+            id: 'run_mon_1',
+            tenantId: 'default',
+            workspaceId: null,
+            pipelineId: 'pipe_mon',
+            mode: 'manual',
+            triggeredBy: 'api',
+            status: 'partial',
+            rowsRead: 3,
+            rowsCleaned: 3,
+            rowsWritten: 2,
+            rowsFailed: 1,
+            durationMs: 1200,
+            startedAt: '2026-05-26T01:00:00.000Z',
+            finishedAt: '2026-05-26T01:00:01.200Z',
+            errorSummary: '1 row failed validation',
+            details: {
+              watermarkAdvanced: false,
+              targetWriteSummaries: [
+                { code: 'MAT-001', result: 'ok', targetId: 'K3-9001' },
+                { code: 'MAT-002', result: 'ok', targetId: 'K3-9002' },
+              ],
+            },
+          },
+        ])
+      }
+      if (url === '/api/integration/dead-letters?tenantId=default&pipelineId=pipe_mon&status=open&limit=5') {
+        return jsonResponse([
+          {
+            id: 'dl_mon_1',
+            tenantId: 'default',
+            workspaceId: null,
+            pipelineId: 'pipe_mon',
+            runId: 'run_mon_1',
+            idempotencyKey: 'MAT-003',
+            errorCode: 'VALIDATION_FAILED',
+            errorMessage: 'missing name',
+            retryCount: 0,
+            status: 'open',
+          },
+        ])
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi()
+
+    // Stage-5 term (renamed from 运行观察).
+    expect(container.textContent).toContain('运行监控')
+
+    // Point monitoring at an existing pipeline, then refresh.
+    const pipelineIdInput = container.querySelector('[data-testid="pipeline-id"]') as HTMLInputElement
+    pipelineIdInput.value = 'pipe_mon'
+    pipelineIdInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="refresh-observation"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    // Run row surfaces status + emphasized write/fail counts.
+    const runRow = container.querySelector('[data-testid="pipeline-run-run_mon_1"]') as HTMLElement
+    expect(runRow).not.toBeNull()
+    expect(runRow.textContent).toContain('partial')
+    expect(runRow.textContent).toContain('write 2')
+    expect(runRow.textContent).toContain('fail 1')
+
+    // Row-level results are collapsed by default, then expandable.
+    expect(container.querySelector('[data-testid="run-row-summaries-run_mon_1"]')).toBeNull()
+    ;(container.querySelector('[data-testid="toggle-run-summaries-run_mon_1"]') as HTMLButtonElement).click()
+    await flushUi()
+    const summaries = container.querySelector('[data-testid="run-row-summaries-run_mon_1"]') as HTMLElement
+    expect(summaries).not.toBeNull()
+    expect(summaries.textContent).toContain('K3-9001')
+    expect(summaries.textContent).toContain('MAT-002')
+
+    // Dead-letter is read-only (error code / message / status). DF-N1 surfaces
+    // no replay action — replay is deferred to its own PR — so neither the
+    // replay button nor the retryability badge is rendered.
+    const dlRow = container.querySelector('[data-testid="dead-letter-dl_mon_1"]') as HTMLElement
+    expect(dlRow).not.toBeNull()
+    expect(dlRow.textContent).toContain('VALIDATION_FAILED')
+    expect(dlRow.textContent).toContain('open')
+    expect(container.querySelector('[data-testid="replay-dead-letter-dl_mon_1"]')).toBeNull()
+    expect(container.querySelector('[data-testid="dead-letter-retryable-dl_mon_1"]')).toBeNull()
+  })
 })
