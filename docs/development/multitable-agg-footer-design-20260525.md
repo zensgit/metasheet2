@@ -31,8 +31,9 @@ K3 stage-1 lock; not integration-core/k3-wise/attendance), but a deliberate back
   query params; it reads `view.filterInfo`/`view.sortInfo` from the DB (univer-meta.ts ~5743). So the
   aggregate endpoint reuses the **same persisted filter/sort + `search`**. An ad-hoc filter query
   schema is out of MVP (it would be a NEW schema, not a reuse).
-- **Aggregations requested:** from `view.config.aggregations` (server reads the view) OR an explicit
-  query param; MVP reads the view's config so the footer is consistent with what's persisted.
+- **Aggregations requested:** from `view.config.aggregations` (server reads the persisted view).
+  **MVP is view-config-driven only** — a per-request aggregations param is **deferred** (avoids
+  reopening an ad-hoc request schema). Footer is consistent with what's persisted.
 - **Response:**
   ```jsonc
   { "ok": true, "data": {
@@ -58,7 +59,12 @@ predicate), B complex filter/sort (loads all rows, filters **in-memory**), C unf
   *paginates* — are scanned in full here (the unpaginated branches at univer-meta.ts ~5869 / ~5986
   already fetch the full result before slicing). This is an **intentional in-memory filtered-set scan**;
   for a large unfiltered sheet it reads all rows. **SQL-side aggregation is the deferred optimization**
-  (avoids loading rows) → #4-3b-2 / if perf demands. MVP documents the scan + a sane max-rows guard.
+  (avoids loading rows) → #4-3b-2 / if perf demands.
+- **Max-rows guard — HARD-FAIL, never truncate:** when the filtered set exceeds a configured cap, the
+  endpoint returns a clear error (e.g. 413 / `{ code: 'AGGREGATE_TOO_LARGE' }`), and the footer shows a
+  "too large to aggregate" state. It must NOT truncate to the cap — a truncated aggregate would be
+  silently **wrong** (footer aggregates must be exact). The cap is the bound that makes the in-memory
+  scan safe until SQL-side aggregation lands.
 - **Deferred optimization:** SQL-side aggregation (`SUM((data->>'fld')::numeric) WHERE <predicate>`)
   for the SQL-predicate paths (A/C) — faster on large tables, but more code + jsonb-numeric-cast edge
   cases. Not MVP; flagged as a follow-up if perf demands.
