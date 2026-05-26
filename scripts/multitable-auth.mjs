@@ -6,6 +6,8 @@ export async function resolveMultitableAuthToken({
   perms = '',
   userId = 'dev-admin',
   roles = 'admin',
+  loginEmail = process.env.LOGIN_EMAIL || process.env.AUTH_EMAIL || '',
+  loginPassword = process.env.LOGIN_PASSWORD || process.env.AUTH_PASSWORD || '',
 }) {
   const trimmedToken = String(envToken || '').trim()
   if (trimmedToken) {
@@ -19,8 +21,32 @@ export async function resolveMultitableAuthToken({
   record('api.dev-token', Boolean(result?.res?.ok && token), {
     status: result?.res?.status ?? 0,
   })
-  if (!result?.res?.ok || !token) {
-    throw new Error('Dev token unavailable')
+  if (result?.res?.ok && token) {
+    return token
   }
-  return token
+
+  const trimmedLoginEmail = String(loginEmail || '').trim()
+  const trimmedLoginPassword = String(loginPassword || '').trim()
+  if (trimmedLoginEmail && trimmedLoginPassword) {
+    const loginUrl = `${apiBase}/api/auth/login`
+    const loginResult = await fetchJson(loginUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: trimmedLoginEmail,
+        password: trimmedLoginPassword,
+      }),
+    })
+    const loginToken = loginResult?.json?.data?.token || loginResult?.json?.token || ''
+    record('api.login-token', Boolean(loginResult?.res?.ok && loginToken), {
+      status: loginResult?.res?.status ?? 0,
+      email: trimmedLoginEmail,
+    })
+    if (!loginResult?.res?.ok || !loginToken) {
+      throw new Error('Login token unavailable')
+    }
+    return loginToken
+  }
+
+  throw new Error('Dev token unavailable')
 }
