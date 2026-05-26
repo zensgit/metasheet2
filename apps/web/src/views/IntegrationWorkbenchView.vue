@@ -688,11 +688,11 @@
     <section class="integration-workbench__panel">
       <div class="integration-workbench__panel-head">
         <div>
-          <h2>运行观察</h2>
-          <p>{{ observationSummary }}。这里显示最近 5 条 run 和 open dead letters，便于清洗后回看失败原因。</p>
+          <h2>运行监控</h2>
+          <p>{{ observationSummary }}。展示最近 5 条 run（状态 / 写入 / 失败 + 行级结果）与 open dead letters，便于清洗后回看失败原因。</p>
         </div>
         <button type="button" class="integration-workbench__button" data-testid="refresh-observation" :disabled="observingPipeline" @click="refreshPipelineObservation(false)">
-          {{ observingPipeline ? '刷新中' : '刷新观察' }}
+          {{ observingPipeline ? '刷新中' : '刷新监控' }}
         </button>
       </div>
 
@@ -701,11 +701,27 @@
           <h3>最近运行</h3>
           <div v-if="pipelineRuns.length === 0" class="integration-workbench__empty">暂无运行记录。</div>
           <ol v-else class="integration-workbench__record-list" data-testid="pipeline-runs">
-            <li v-for="run in pipelineRuns" :key="run.id">
-              <strong>{{ run.status }}</strong>
-              <span>{{ run.mode }}</span>
-              <span>read {{ run.rowsRead }} / clean {{ run.rowsCleaned }} / write {{ run.rowsWritten }} / fail {{ run.rowsFailed }}</span>
-              <small>{{ run.startedAt || run.createdAt || run.id }}</small>
+            <li v-for="run in pipelineRuns" :key="run.id" :data-testid="`pipeline-run-${run.id}`">
+              <div class="integration-workbench__run-head">
+                <strong :class="`integration-workbench__run-status integration-workbench__run-status--${run.status}`" :data-testid="`run-status-${run.id}`">{{ run.status }}</strong>
+                <span>{{ run.mode }}</span>
+                <span v-if="run.triggeredBy">by {{ run.triggeredBy }}</span>
+              </div>
+              <div class="integration-workbench__run-metrics">
+                <span>read {{ run.rowsRead }}</span>
+                <span>clean {{ run.rowsCleaned }}</span>
+                <span class="integration-workbench__run-metric--write">write {{ run.rowsWritten }}</span>
+                <span class="integration-workbench__run-metric--fail">fail {{ run.rowsFailed }}</span>
+                <span v-if="run.durationMs != null">{{ run.durationMs }}ms</span>
+              </div>
+              <small>{{ run.startedAt || run.createdAt || run.id }}<template v-if="run.finishedAt"> → {{ run.finishedAt }}</template></small>
+              <p v-if="run.errorSummary" class="integration-workbench__run-error" :data-testid="`run-error-${run.id}`">{{ run.errorSummary }}</p>
+              <div v-if="runRowSummaries(run).length > 0" class="integration-workbench__run-summaries">
+                <button type="button" class="integration-workbench__link-button" :data-testid="`toggle-run-summaries-${run.id}`" @click="toggleRunSummaries(run.id)">
+                  {{ isRunExpanded(run.id) ? '收起行级结果' : `展开行级结果（${runRowSummaries(run).length}）` }}
+                </button>
+                <pre v-if="isRunExpanded(run.id)" :data-testid="`run-row-summaries-${run.id}`">{{ JSON.stringify(runRowSummaries(run), null, 2) }}</pre>
+              </div>
             </li>
           </ol>
         </div>
@@ -713,10 +729,12 @@
           <h3>Open Dead Letters</h3>
           <div v-if="deadLetters.length === 0" class="integration-workbench__empty">暂无 open dead letters。</div>
           <ol v-else class="integration-workbench__record-list" data-testid="dead-letters">
-            <li v-for="deadLetter in deadLetters" :key="deadLetter.id">
+            <li v-for="deadLetter in deadLetters" :key="deadLetter.id" :data-testid="`dead-letter-${deadLetter.id}`">
               <strong>{{ deadLetter.errorCode }}</strong>
               <span>{{ deadLetter.errorMessage }}</span>
-              <small>{{ deadLetter.status }} · {{ deadLetter.createdAt || deadLetter.id }}</small>
+              <small>
+                {{ deadLetter.status }} · {{ deadLetter.createdAt || deadLetter.id }}<template v-if="deadLetter.retryCount"> · retries {{ deadLetter.retryCount }}</template><template v-if="deadLetter.idempotencyKey"> · key {{ deadLetter.idempotencyKey }}</template>
+              </small>
             </li>
           </ol>
         </div>
@@ -775,6 +793,7 @@ import {
   type IntegrationPipelineMode,
   type IntegrationPipelineRun,
   type IntegrationPipelineRunResult,
+  type IntegrationTargetWriteSummary,
   type IntegrationStagingDescriptor,
   type IntegrationStagingInstallResult,
   type IntegrationStagingOpenTarget,
@@ -914,6 +933,7 @@ const pipelineResultText = ref('尚未执行')
 const lastDryRunResult = ref<IntegrationPipelineRunResult | null>(null)
 const pipelineRuns = ref<IntegrationPipelineRun[]>([])
 const deadLetters = ref<IntegrationDeadLetter[]>([])
+const expandedRunIds = ref<Set<string>>(new Set())
 const statusMessage = ref('')
 const statusKind = ref<'idle' | 'success' | 'error'>('idle')
 const pipelineName = ref('')
@@ -2308,6 +2328,22 @@ async function refreshPipelineObservation(silent = false): Promise<void> {
   }
 }
 
+function runRowSummaries(run: IntegrationPipelineRun): IntegrationTargetWriteSummary[] {
+  const summaries = run.details?.targetWriteSummaries
+  return Array.isArray(summaries) ? summaries : []
+}
+
+function isRunExpanded(runId: string): boolean {
+  return expandedRunIds.value.has(runId)
+}
+
+function toggleRunSummaries(runId: string): void {
+  const next = new Set(expandedRunIds.value)
+  if (next.has(runId)) next.delete(runId)
+  else next.add(runId)
+  expandedRunIds.value = next
+}
+
 async function savePipeline(): Promise<void> {
   savingPipeline.value = true
   try {
@@ -3181,6 +3217,91 @@ watch(showAdvancedConnectors, () => {
 
 .integration-workbench__record-list small {
   color: #5c6878;
+}
+
+.integration-workbench__run-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.integration-workbench__run-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: #5c6878;
+}
+
+.integration-workbench__run-metric--write {
+  color: #1f6f43;
+  font-weight: 600;
+}
+
+.integration-workbench__run-metric--fail {
+  color: #8f1d1d;
+  font-weight: 600;
+}
+
+.integration-workbench__run-status {
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #e7eef6;
+  color: #24476b;
+}
+
+.integration-workbench__run-status--succeeded {
+  background: #e3f3e8;
+  color: #1f6f43;
+}
+
+.integration-workbench__run-status--partial {
+  background: #fdf3e0;
+  color: #8a5a12;
+}
+
+.integration-workbench__run-status--failed,
+.integration-workbench__run-status--cancelled {
+  background: #fbe7e7;
+  color: #8f1d1d;
+}
+
+.integration-workbench__run-error {
+  margin: 0;
+  font-size: 12px;
+  color: #8f1d1d;
+}
+
+.integration-workbench__run-summaries {
+  display: grid;
+  gap: 4px;
+}
+
+/* Inline row-level results: override the global tall/dark `pre` so each
+   expanded run stays compact within the record list. */
+.integration-workbench__run-summaries pre {
+  min-height: 0;
+  max-height: 200px;
+  margin: 4px 0 0;
+}
+
+.integration-workbench__link-button {
+  border: none;
+  background: none;
+  padding: 0;
+  color: #357abd;
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+}
+
+.integration-workbench__link-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .integration-workbench__preview {
