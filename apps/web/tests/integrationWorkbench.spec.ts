@@ -14,7 +14,9 @@ import {
   upsertWorkbenchExternalSystem,
   upsertIntegrationPipeline,
   isIntegrationScopedProjectId,
+  isDeadLetterReplayable,
   normalizeIntegrationProjectId,
+  replayIntegrationDeadLetter,
 } from '../src/services/integration/workbench'
 
 const apiFetchMock = vi.fn()
@@ -302,5 +304,68 @@ describe('integration workbench service', () => {
       status: 'open',
       limit: 5,
     })).resolves.toHaveLength(1)
+  })
+})
+
+describe('integration dead-letter replay service', () => {
+  beforeEach(() => {
+    apiFetchMock.mockReset()
+    if (typeof localStorage?.clear === 'function') localStorage.clear()
+  })
+
+  it.each([
+    ['open', true],
+    ['replayed', false],
+    ['discarded', false],
+    ['unknown', false],
+  ])('isDeadLetterReplayable(status=%s) -> %s', (status, expected) => {
+    expect(isDeadLetterReplayable({ status })).toBe(expected)
+  })
+
+  it('replays a dead letter via the existing :id/replay route and returns the envelope data', async () => {
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/dead-letters/dl%201/replay') {
+        expect(init?.method).toBe('POST')
+        expect(JSON.parse(String(init?.body))).toEqual({
+          tenantId: 'default',
+          workspaceId: null,
+          mode: 'manual',
+        })
+        return jsonResponse({
+          deadLetter: { id: 'dl 1', status: 'replayed' },
+          replay: { run: { id: 'run_9' }, metrics: { rowsWritten: 1, rowsFailed: 0 } },
+        })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    await expect(replayIntegrationDeadLetter('dl 1', {
+      tenantId: 'default',
+      workspaceId: null,
+      mode: 'manual',
+    })).resolves.toMatchObject({
+      deadLetter: { id: 'dl 1', status: 'replayed' },
+      replay: { metrics: { rowsFailed: 0 } },
+    })
+  })
+
+  it('surfaces a backend replay error (e.g. 501 REPLAY_NOT_IMPLEMENTED)', async () => {
+    apiFetchMock.mockImplementation(async () => new Response(
+      JSON.stringify({ ok: false, error: { code: 'REPLAY_NOT_IMPLEMENTED', message: 'Dead-letter replay is not implemented' } }),
+      { status: 501, headers: { 'Content-Type': 'application/json' } },
+    ))
+    await expect(replayIntegrationDeadLetter('dl 1', { tenantId: 'default' }))
+      .rejects.toThrow('Dead-letter replay is not implemented')
+  })
+
+  it('surfaces a 403 when the caller lacks write permission on the replay route', async () => {
+    // Replay is a write — the backend route enforces requireAccess(req, 'write').
+    // A forbidden caller must see the error, not a silent success.
+    apiFetchMock.mockImplementation(async () => new Response(
+      JSON.stringify({ ok: false, error: { code: 'FORBIDDEN', message: 'write permission required' } }),
+      { status: 403, headers: { 'Content-Type': 'application/json' } },
+    ))
+    await expect(replayIntegrationDeadLetter('dl 1', { tenantId: 'default' }))
+      .rejects.toThrow('write permission required')
   })
 })

@@ -490,6 +490,41 @@ export async function listIntegrationDeadLetters(
   return Array.isArray(data) ? data : []
 }
 
+export interface IntegrationDeadLetterReplayPayload extends IntegrationScope {
+  mode?: IntegrationPipelineMode
+}
+
+// Backend returns 202 with { deadLetter, replay, warning? }. `replay` is the
+// re-run result; on full success the deadLetter is marked 'replayed'.
+export interface IntegrationDeadLetterReplayResult {
+  deadLetter?: IntegrationDeadLetter
+  replay?: IntegrationPipelineRunResult
+  warning?: { code?: string; message?: string }
+  [key: string]: unknown
+}
+
+// Only 'open' letters are replayable — the server enforces the same, but the UI
+// must not even offer replay for replayed/discarded letters (a second live ERP
+// write). Keep this in lock-step with the backend guard in pipeline-runner.cjs.
+export function isDeadLetterReplayable(deadLetter: Pick<IntegrationDeadLetter, 'status'>): boolean {
+  return deadLetter.status === 'open'
+}
+
+// Surfaces the existing dead-letter replay route (POST .../:id/replay). This is
+// a single manual one-record re-enqueue (DF-N1) — NOT bounded retry/back-pressure
+// orchestration (DF-N3). Replay re-runs the pipeline with the stored payload,
+// i.e. a real target write; callers must gate it behind an explicit confirm.
+export async function replayIntegrationDeadLetter(
+  deadLetterId: string,
+  payload: IntegrationDeadLetterReplayPayload,
+): Promise<IntegrationDeadLetterReplayResult> {
+  const response = await apiFetch(`/api/integration/dead-letters/${encodeURIComponent(deadLetterId)}/replay`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+  return parseIntegrationResponse<IntegrationDeadLetterReplayResult>(response)
+}
+
 export async function listIntegrationStagingDescriptors(): Promise<IntegrationStagingDescriptor[]> {
   const response = await apiFetch('/api/integration/staging/descriptors')
   const data = await parseIntegrationResponse<IntegrationStagingDescriptor[]>(response)
