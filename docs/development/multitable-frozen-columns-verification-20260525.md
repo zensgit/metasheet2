@@ -55,8 +55,9 @@ freeform `jsonb`; `frozenLeftColumnIds` rides existing `updateView` PATCH.
 
 ## 5. Known MVP limitations / deferred
 
-- Frozen cells use a **solid bg** (occlude scrolled content) → they don't show row hover/selection tint
-  on the frozen prefix (common grid behavior; documented).
+- Frozen cells use an **opaque bg** (occlude scrolled content) that **preserves conditional-formatting
+  `backgroundColor`** (falls back to `#fff` only when no formatting) — verified by spec. They still
+  don't show row **hover/selection** tint on the frozen prefix (common grid behavior; documented).
 - No cap if the frozen prefix exceeds viewport width (allowed; user's choice).
 - Deferred polish (separate opt-ins): richer freeze dropdown menu, right-edge freeze, frozen-cell
   row-state tint. Next #4 sub-slice: aggregation footer / group rollup.

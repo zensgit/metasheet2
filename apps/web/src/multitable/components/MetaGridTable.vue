@@ -505,10 +505,12 @@ function cellStyle(rid: string, fid: string, ci?: number) {
   const formatStyle = formatting
     ? composeStyleObject(undefined, formatting.cellStyles[fid])
     : undefined
-  // frozen body cell: sticky-left + opaque bg (occludes scrolled-under content). The solid bg means
-  // frozen cells don't show row hover/selection tint — accepted MVP limitation (see design §3).
+  // frozen body cell: sticky-left + an OPAQUE bg (occludes scrolled-under content). Preserve any
+  // conditional-formatting backgroundColor — only fall back to #fff when formatting set none. (Row
+  // hover/selection tint is still not shown on frozen cells — accepted MVP limitation; conditional
+  // formatting is NOT lost.)
   const frozenStyle: Record<string, string> | undefined = frozen
-    ? { position: 'sticky', left: `${frozenLeft(ci!)}px`, zIndex: '2', background: '#fff' }
+    ? { position: 'sticky', left: `${frozenLeft(ci!)}px`, zIndex: '2', backgroundColor: formatStyle?.backgroundColor ?? '#fff' }
     : undefined
   if (!widthStyle && !formatStyle && !frozenStyle) return undefined
   return { ...(widthStyle ?? {}), ...(formatStyle ?? {}), ...(frozenStyle ?? {}) }

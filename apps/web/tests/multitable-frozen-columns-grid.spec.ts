@@ -79,6 +79,33 @@ describe('MetaGridTable frozen columns — offsets', () => {
     const root = mountGrid({ frozenLeftColumnIds: [], enableMultiSelect: false })
     expect(headers(root)[0].style.position).not.toBe('sticky')
   })
+
+  it('frozen cell PRESERVES conditional-formatting background (not clobbered by the opaque #fff)', () => {
+    const root = mountGrid({
+      rows: [{ id: 'r1', version: 1, data: { f1: 'A' } }],
+      frozenLeftColumnIds: ['f1'],
+      columnWidths: { f1: 100 },
+      enableMultiSelect: false,
+      conditionalFormatting: {
+        rules: [],
+        byRecordId: new Map([['r1', { rowStyle: undefined, cellStyles: { f1: { backgroundColor: '#ffeeee' } }, matchedRuleIds: [] }]]),
+      },
+    })
+    const cell = root.querySelector('.meta-grid__cell') as HTMLElement // r1/f1, frozen
+    expect(cell.style.position).toBe('sticky')
+    expect(cell.style.backgroundColor).toBe('rgb(255, 238, 238)') // #ffeeee preserved, NOT #fff
+  })
+
+  it('frozen cell WITHOUT conditional formatting falls back to opaque #fff', () => {
+    const root = mountGrid({
+      rows: [{ id: 'r1', version: 1, data: { f1: 'A' } }],
+      frozenLeftColumnIds: ['f1'],
+      columnWidths: { f1: 100 },
+      enableMultiSelect: false,
+    })
+    const cell = root.querySelector('.meta-grid__cell') as HTMLElement
+    expect(cell.style.backgroundColor).toBe('rgb(255, 255, 255)') // #fff
+  })
 })
 
 describe('MetaGridTable frozen columns — pin interaction', () => {
