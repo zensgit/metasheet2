@@ -246,7 +246,7 @@
           :rows="grid.rows.value" :visible-fields="scopedGridFields" :sort-rules="grid.sortRules.value"
           :loading="grid.loading.value" :current-page="grid.currentPage.value" :total-pages="grid.totalPages.value"
           :start-index="pageStartIndex" :selected-record-id="selectedRecordId" :can-edit="effectiveRowActions.canEdit"
-          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :field-read-only-ids="readOnlyFieldIds" :column-widths="grid.columnWidths.value"
+          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-create="caps.canCreateRecord.value" :field-read-only-ids="readOnlyFieldIds" :column-widths="grid.columnWidths.value"
           :row-action-overrides="grid.rowActionOverrides.value"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
           :enable-multi-select="gridAllowsAnyDelete || effectiveRowActions.canEdit"
@@ -260,6 +260,7 @@
           @select-record="onSelectRecord" @toggle-sort="onToggleSort" @patch-cell="onPatchCell"
           @go-to-page="grid.goToPage" @open-link-picker="onGridLinkPicker" @resize-column="grid.setColumnWidth"
           @bulk-delete="onBulkDelete" @bulk-edit="onBulkEditRequest" @reorder-field="onReorderField"
+          @create-record="onAddRecord"
           @open-comments="onOpenRecordComments"
           @open-field-comments="onOpenGridFieldComments"
         />

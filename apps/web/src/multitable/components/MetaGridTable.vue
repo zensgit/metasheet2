@@ -116,6 +116,13 @@
               <div class="meta-grid__empty-hint">{{ l('grid.noRecordsHintPrefix') }} <strong>{{ l('grid.noRecordsHintAction') }}</strong> {{ l('grid.noRecordsHintSuffix') }}</div>
             </td>
           </tr>
+          <tr v-if="canCreate && filteredRows.length && !loading" class="meta-grid__add-row">
+            <td :colspan="colSpan">
+              <button type="button" class="meta-grid__add-row-btn" @click="emit('create-record')">
+                <span class="meta-grid__add-row-plus" aria-hidden="true">+</span> {{ l('grid.addRecordInline') }}
+              </button>
+            </td>
+          </tr>
         </tbody>
         <tbody v-else>
           <template v-for="(row, ri) in filteredRows" :key="row.id">
@@ -223,6 +230,13 @@
               </template>
             </td>
           </tr>
+          <tr v-if="canCreate && filteredRows.length && !loading" class="meta-grid__add-row">
+            <td :colspan="colSpan">
+              <button type="button" class="meta-grid__add-row-btn" @click="emit('create-record')">
+                <span class="meta-grid__add-row-plus" aria-hidden="true">+</span> {{ l('grid.addRecordInline') }}
+              </button>
+            </td>
+          </tr>
         </tbody>
       </table>
     </div>
@@ -296,6 +310,7 @@ const props = defineProps<{
   canEdit: boolean
   canDelete?: boolean
   canBulkEdit?: boolean
+  canCreate?: boolean
   rowActionOverrides?: Record<string, MetaRowActions>
   fieldReadOnlyIds?: string[]
   columnWidths?: Record<string, number>
@@ -325,6 +340,7 @@ const emit = defineEmits<{
   (e: 'bulk-delete', recordIds: string[]): void
   (e: 'bulk-edit', payload: { mode: 'set' | 'clear'; recordIds: string[] }): void
   (e: 'reorder-field', fromFieldId: string, toFieldId: string): void
+  (e: 'create-record'): void
 }>()
 
 const { isZh } = useLocale()
@@ -637,6 +653,14 @@ function onKeydown(e: KeyboardEvent) {
 .meta-grid__field-comment-action--idle {
   color: #94a3b8;
 }
+.meta-grid__add-row td { padding: 0; border-top: 1px solid #eef0f2; }
+.meta-grid__add-row-btn {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  padding: 8px 12px; background: transparent; border: none; cursor: pointer;
+  font-size: 13px; color: #4a5568; text-align: left; position: sticky; left: 0;
+}
+.meta-grid__add-row-btn:hover { background: #f5f7fa; color: #2563eb; }
+.meta-grid__add-row-plus { font-weight: 700; font-size: 15px; line-height: 1; }
 .meta-grid__empty { text-align: center; padding: 48px 32px; color: #999; }
 .meta-grid__empty-icon { font-size: 36px; margin-bottom: 8px; opacity: 0.5; }
 .meta-grid__empty-title { font-size: 15px; font-weight: 600; color: #666; margin-bottom: 4px; }
