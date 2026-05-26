@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest'
 import type { MetaSheetServer } from '../../src/index'
 import * as path from 'path'
 import net from 'net'
@@ -117,6 +117,20 @@ const expectedBulkRecordsChunkSize = resolvePositiveIntEnvForTest(
   5000
 )
 
+const attendanceIntegrationDbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+const attendanceIntegrationDescribe = attendanceIntegrationDbUrl ? describe : describe.skip
+const attendanceIntegrationMissingDbMessage =
+  'Attendance integration tests require ATTENDANCE_TEST_DATABASE_URL or DATABASE_URL; skipping instead of silently returning.'
+
+async function requireAttendanceTable(pool: Pool, tableName: string): Promise<void> {
+  const tableCheck = await pool.query(`SELECT to_regclass($1) AS name`, [`public.${tableName}`])
+  if (!tableCheck.rows[0]?.name) {
+    throw new Error(
+      `Attendance integration database is missing ${tableName}; run core-backend migrations before executing this suite.`
+    )
+  }
+}
+
 function expectChunkConfigMatchesEngine(engine: unknown, chunkConfig: any) {
   expect(typeof chunkConfig?.itemsChunkSize).toBe('number')
   expect(typeof chunkConfig?.recordsChunkSize).toBe('number')
@@ -179,7 +193,11 @@ async function waitForImportJobCompletion(
   )
 }
 
-describe('Attendance Plugin Integration', () => {
+attendanceIntegrationDescribe(
+  attendanceIntegrationDbUrl
+    ? 'Attendance Plugin Integration'
+    : `Attendance Plugin Integration (${attendanceIntegrationMissingDbMessage})`,
+  () => {
   let server: MetaSheetServer | undefined
   let baseUrl: string | undefined
   let importUploadDir: string | undefined
@@ -190,10 +208,14 @@ describe('Attendance Plugin Integration', () => {
       s.once('error', () => resolve(false))
       s.listen(0, '127.0.0.1', () => s.close(() => resolve(true)))
     })
-    if (!canListen) return
+    if (!canListen) {
+      throw new Error('Attendance integration tests require an available loopback port.')
+    }
 
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
-    if (!dbUrl) return
+    if (!dbUrl) {
+      throw new Error(attendanceIntegrationMissingDbMessage)
+    }
 
     process.env.DATABASE_URL = dbUrl
     process.env.RBAC_BYPASS = 'true'
@@ -234,34 +256,22 @@ describe('Attendance Plugin Integration', () => {
     const pool = new Pool({ connectionString: dbUrl })
     try {
       await pool.query('SELECT 1')
-      const tableCheck = await pool.query(`SELECT to_regclass('public.attendance_events') AS name`)
-      if (!tableCheck.rows[0]?.name) return
-      const approvalCheck = await pool.query(`SELECT to_regclass('public.approval_instances') AS name`)
-      if (!approvalCheck.rows[0]?.name) return
-      const leaveCheck = await pool.query(`SELECT to_regclass('public.attendance_leave_types') AS name`)
-      if (!leaveCheck.rows[0]?.name) return
-      const overtimeCheck = await pool.query(`SELECT to_regclass('public.attendance_overtime_rules') AS name`)
-      if (!overtimeCheck.rows[0]?.name) return
-      const shiftCheck = await pool.query(`SELECT to_regclass('public.attendance_shifts') AS name`)
-      if (!shiftCheck.rows[0]?.name) return
-      const assignmentCheck = await pool.query(`SELECT to_regclass('public.attendance_shift_assignments') AS name`)
-      if (!assignmentCheck.rows[0]?.name) return
-      const holidayCheck = await pool.query(`SELECT to_regclass('public.attendance_holidays') AS name`)
-      if (!holidayCheck.rows[0]?.name) return
-      const rotationRuleCheck = await pool.query(`SELECT to_regclass('public.attendance_rotation_rules') AS name`)
-      if (!rotationRuleCheck.rows[0]?.name) return
-      const rotationAssignmentCheck = await pool.query(`SELECT to_regclass('public.attendance_rotation_assignments') AS name`)
-      if (!rotationAssignmentCheck.rows[0]?.name) return
-      const groupCheck = await pool.query(`SELECT to_regclass('public.attendance_groups') AS name`)
-      if (!groupCheck.rows[0]?.name) return
-      const groupMemberCheck = await pool.query(`SELECT to_regclass('public.attendance_group_members') AS name`)
-      if (!groupMemberCheck.rows[0]?.name) return
-      const templateLibraryCheck = await pool.query(`SELECT to_regclass('public.attendance_rule_template_library') AS name`)
-      if (!templateLibraryCheck.rows[0]?.name) return
-      const templateVersionCheck = await pool.query(`SELECT to_regclass('public.attendance_rule_template_versions') AS name`)
-      if (!templateVersionCheck.rows[0]?.name) return
-    } catch {
-      return
+      await requireAttendanceTable(pool, 'attendance_events')
+      await requireAttendanceTable(pool, 'approval_instances')
+      await requireAttendanceTable(pool, 'attendance_leave_types')
+      await requireAttendanceTable(pool, 'attendance_overtime_rules')
+      await requireAttendanceTable(pool, 'attendance_shifts')
+      await requireAttendanceTable(pool, 'attendance_shift_assignments')
+      await requireAttendanceTable(pool, 'attendance_holidays')
+      await requireAttendanceTable(pool, 'attendance_rotation_rules')
+      await requireAttendanceTable(pool, 'attendance_rotation_assignments')
+      await requireAttendanceTable(pool, 'attendance_groups')
+      await requireAttendanceTable(pool, 'attendance_group_members')
+      await requireAttendanceTable(pool, 'attendance_rule_template_library')
+      await requireAttendanceTable(pool, 'attendance_rule_template_versions')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(`Attendance integration database setup failed: ${message}`)
     } finally {
       await pool.end()
     }
@@ -276,8 +286,16 @@ describe('Attendance Plugin Integration', () => {
     })
     await server.start()
     const address = server.getAddress()
-    if (!address || typeof address === 'string') return
+    if (!address || typeof address === 'string') {
+      throw new Error('Attendance integration server did not expose a TCP address.')
+    }
     baseUrl = `http://127.0.0.1:${address.port}`
+  })
+
+  beforeEach(() => {
+    if (!baseUrl) {
+      throw new Error('Attendance integration server was not started; inspect beforeAll setup output.')
+    }
   })
 
   afterAll(async () => {
