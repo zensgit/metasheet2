@@ -20,7 +20,10 @@ reorder semantics simple.
 ## 1. Persistence
 
 - Stored at `view.config.frozenLeftColumnIds: string[]` — the ordered field ids of the frozen prefix.
-- Read: `workbench.activeView.value?.config?.frozenLeftColumnIds` → prop into `MetaGridTable`.
+- **Read via a narrow helper** (should-fix): `config` is `Record<string, unknown>`, so
+  `parseFrozenIds(config)` returns `string[]` **only** when the field is an array of strings; any
+  other shape (missing / non-array / non-string elements / dirty config) → `[]`. Dirty config must
+  never reach the sticky-offset math. Then → prop into `MetaGridTable`.
 - Write: existing `onPersistActiveViewConfig({ config: { ...currentConfig, frozenLeftColumnIds } })`
   → `client.updateView` (PATCH) → reload. (No new API.)
 
@@ -40,11 +43,14 @@ ids are normalized to the prefix on the next freeze action.
 
 ## 3. Sticky stack offsets (the core)
 
-**Existing quirk to fix:** `.meta-grid__check-col` (36px) and `.meta-grid__row-num` (56px) are BOTH
-`position: sticky; left: 0` → they overlap when multi-select is on. Frozen columns require an
-**offset-driven** stack. When `frozenCount > 0`, set inline `left` on the whole prefix:
+**Base-fix (GLOBAL, per review):** `.meta-grid__check-col` (36px) and `.meta-grid__row-num` (56px) are
+BOTH `position: sticky; left: 0` today → they overlap when multi-select is on. Fix it **globally, not
+just in frozen mode**: check-col `left:0`, row-num `left: multiSelect ? 36 : 0` — always. Small + correct;
+removes the overlap even when nothing is frozen, and avoids the meta columns "jumping" the instant
+freeze is toggled on. (Not "absorbing the overlap into the frozen base" — that would be adapting to a
+known layout bug.) The offset stack:
 
-| element | inline `left` (only when `frozenCount>0`) | width |
+| element | inline `left` (always) | width |
 |---|---|---|
 | check-col (if multiSelect) | `0` | 36 |
 | row-num | `multiSelect ? 36 : 0` | 56 |
@@ -52,11 +58,14 @@ ids are normalized to the prefix on the next freeze action.
 
 `base = (multiSelect ? 36 : 0) + 56`. `width(id) = columnWidths[id] ?? FROZEN_DEFAULT_WIDTH` (160).
 **Reactive to `columnWidths`** → resizing a frozen column recomputes downstream offsets automatically.
+Frozen data columns get sticky styling only when `i < frozenCount`; the check-col/row-num base-fix is
+unconditional.
 
-- When `frozenCount === 0`: **no inline left** → existing CSS unchanged (no behavior change; the
-  pre-existing overlap stays as-is, out of this slice's scope to "fix" globally).
-- The base-fix (inline left on check-col/row-num) applies **only in frozen mode** — documented as an
-  incidental correctness improvement, not a separate refactor.
+**Header positioning fix (should-fix):** `MetaFieldHeader`'s `<th>` currently has `position: sticky`
+*then* `position: relative` (`MetaFieldHeader.vue:92`) — the `relative` overrides, so the header is NOT
+actually sticky. Frozen-header implementation must **fix the header positioning** (don't rely on the
+broken current sticky semantics) while **preserving the `absolute` resize handle** (give the handle its
+own stacking context / keep it positioned within the th). Frozen header cells then layer per below.
 
 **z-index layers:** normal cells (0) < frozen body cells (2) < sticky header row (3) < frozen header
 cells (4). Frozen cells get an opaque `background` (so scrolled content doesn't show through).
@@ -78,6 +87,10 @@ full width; freezing it is meaningless). Only data cells + headers stick.
   `visibleFields[0..i].map(id)`.
 - click when `i` is the current boundary → unfreeze: emit `set-frozen` with `[]`.
 - visual: pin icon filled when the column is within the frozen prefix.
+- **MUST `@click.stop` AND `@mousedown.stop`** (should-fix): the header cell's own click triggers
+  **sort** (`MetaFieldHeader.vue:7`) and mousedown can start resize/reorder — the pin button must not
+  bubble into either (no accidental sort/reorder on freeze toggle). Pin button gets an `aria-label` +
+  `title` ("Freeze up to this column" / "Unfreeze"), localized via `meta-core-labels`.
 
 `MetaGridTable` re-emits to the workbench → `onPersistActiveViewConfig`. (A richer dropdown menu —
 "freeze 1/2/3 columns", per-column context menu — is a later polish; MVP is the pin toggle.)
@@ -96,8 +109,14 @@ full width; freezing it is meaningless). Only data cells + headers stick.
 - **Component test** (`MetaGridTable`): asserts `isFrozen` prefix derivation + computed `left` offset
   values (the offset math) for a few width configs + multiselect on/off; asserts non-prefix-after-
   reorder is not sticky. Asserts `MetaFieldHeader` pin emits `set-frozen` with the right prefix.
+- **`parseFrozenIds` unit test (should-fix):** dirty/invalid `config` → `[]`. Cases: missing field,
+  `frozenLeftColumnIds` not an array, array with non-string elements, `null`, nested object — each
+  must yield `[]` (never reaches the offset math). Valid `string[]` passes through.
+- **Pin no-side-effect test:** clicking the pin emits `set-frozen` and does **not** emit `toggle-sort`
+  / `reorder` (verifies `.stop` handlers).
 - **Caveat:** actual CSS `position: sticky` rendering is browser-native and NOT unit-testable headless;
-  the test covers the **offset math + gating + emit**, which is the logic. Visual confirmation is manual.
+  the test covers the **offset math + gating + emit + parse + no-bubble**, which is the logic. Visual
+  confirmation is manual.
 - vue-tsc clean; `src/multitable/**` not in eslint allowlist (gated by type-check + tests).
 
 ## 8. Slicing
