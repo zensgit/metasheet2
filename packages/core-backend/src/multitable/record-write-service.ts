@@ -283,6 +283,20 @@ export interface RecordWriteHelpers {
     query: QueryFn,
     updatedRecordIds: string[],
   ) => Promise<Array<{ sheetId: string; recordId: string; data: Record<string, unknown> }>>
+  /**
+   * Recalculate `formula` fields for the given just-updated records when a
+   * changed field has a dependent formula (per `formula_dependencies`). Returns
+   * the recomputed formula values per record so the caller can surface them in
+   * the response + realtime patch. Returns `[]` when nothing depends on the
+   * change. Intra-sheet / intra-record only (no cross-sheet read → no perm gate).
+   */
+  recalculateFormulaFields: (
+    query: QueryFn,
+    sheetId: string,
+    fields: UniverMetaField[],
+    updatedRecordIds: string[],
+    changedFieldIds: string[],
+  ) => Promise<Array<{ recordId: string; data: Record<string, unknown> }>>
   loadLinkValuesByRecord: (
     query: QueryFn,
     recordIds: string[],
@@ -839,7 +853,40 @@ export class RecordWriteService {
         data: h.filterRecordDataByFieldIds(record.data, visiblePropertyFieldIds),
       }))
     const crossSheetRelated = relatedRecords.filter((record) => record.sheetId !== sheetId)
-    const mergedRecords = h.mergeComputedRecords(computedRecords, sameSheetRelated)
+
+    // -----------------------------------------------------------------------
+    // Step 4c: Formula field recalculation (field.property.expression-based).
+    // Unlike lookup/rollup (computed-on-read), formula values are materialized
+    // back to the record by the helper; here we collect the recomputed values to
+    // surface in the response + realtime patch so the editing client AND other
+    // clients refresh after a source field changes via this write path.
+    // -----------------------------------------------------------------------
+    const changedFieldIds = [
+      ...new Set(
+        Array.from(changesByRecord.values()).flatMap((changes) => changes.map((change) => change.fieldId)),
+      ),
+    ]
+    const formulaRecords =
+      updates.length > 0
+        ? (
+            await h.recalculateFormulaFields(
+              this.pool.query.bind(this.pool),
+              sheetId,
+              fields,
+              updates.map((update) => update.recordId),
+              changedFieldIds,
+            )
+          ).map((record) => ({
+            recordId: record.recordId,
+            data: h.filterRecordDataByFieldIds(record.data, visiblePropertyFieldIds),
+          }))
+        : []
+    const formulaByRecord = new Map(formulaRecords.map((record) => [record.recordId, record.data]))
+
+    const mergedRecords = h.mergeComputedRecords(
+      h.mergeComputedRecords(computedRecords, sameSheetRelated),
+      formulaRecords,
+    )
 
     // -----------------------------------------------------------------------
     // Step 5: Link / attachment summary rebuild
@@ -893,16 +940,23 @@ export class RecordWriteService {
         kind: 'record-updated',
         recordIds: updates.map((update) => update.recordId),
         fieldIds: [
-          ...new Set(
-            Array.from(changesByRecord.values()).flatMap((changes) => changes.map((change) => change.fieldId)),
-          ),
+          ...new Set([
+            ...changedFieldIds,
+            ...formulaRecords.flatMap((record) => Object.keys(record.data)),
+          ]),
         ],
         recordPatches: updates.map((update) => ({
           recordId: update.recordId,
           version: update.version,
-          patch: Object.fromEntries(
-            (changesByRecord.get(update.recordId) ?? []).map((change) => [change.fieldId, change.value]),
-          ),
+          patch: {
+            ...Object.fromEntries(
+              (changesByRecord.get(update.recordId) ?? []).map((change) => [change.fieldId, change.value]),
+            ),
+            // Materialized formula values so other clients merge the fresh value
+            // (applyRemoteRecordPatch does `{ ...data, ...patch }`) rather than
+            // keeping a stale formula after only the source field is patched.
+            ...(formulaByRecord.get(update.recordId) ?? {}),
+          },
         })),
       })
 
