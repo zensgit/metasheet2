@@ -2310,7 +2310,10 @@ async function verifyImportMappingReconcile(page, {
   })
 
   const warning = await waitForImportWarning(page, {
-    requiredSubstrings: ['no longer an importable field', 'is no longer', '不再可导入的字段', '类型已更改'],
+    // Locale-agnostic anchor: the field name is interpolated into the warning
+    // (fieldNoLongerImportable) regardless of UI language. Avoids chasing zh
+    // synonyms (product is "不再是可导入字段", not the old "不再可导入的字段").
+    requiredSubstrings: [formulaFieldName],
   })
   if (warning.visible) {
     await page.screenshot({ path: path.join(outputDir, 'import-mapping-reconcile.png'), fullPage: true })
@@ -2411,7 +2414,11 @@ async function verifyPeopleRepairReconcile(page, {
     })
 
     const warning = await waitForImportWarning(page, {
-      requiredSubstrings: ['changed type', '类型已更改', 'is no longer', 'no longer an importable field', '不再'],
+      // Locale-agnostic anchor: the field name is interpolated into the warning
+      // (selectedRepairInvalid) regardless of UI language. The old zh needle
+      // '类型已更改' never matched the product text '...类型已变更...' (变更≠更改),
+      // so warning.visible stayed false and reconcileImportDraft was skipped.
+      requiredSubstrings: [renamedFieldName],
     })
     if (warning.visible) {
       await page.screenshot({ path: path.join(outputDir, 'import-people-repair-reconcile.png'), fullPage: true })
