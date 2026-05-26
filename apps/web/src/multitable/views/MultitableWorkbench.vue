@@ -246,7 +246,7 @@
           :rows="grid.rows.value" :visible-fields="scopedGridFields" :sort-rules="grid.sortRules.value"
           :loading="grid.loading.value" :current-page="grid.currentPage.value" :total-pages="grid.totalPages.value"
           :start-index="pageStartIndex" :selected-record-id="selectedRecordId" :can-edit="effectiveRowActions.canEdit"
-          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-create="caps.canCreateRecord.value" :field-read-only-ids="readOnlyFieldIds" :column-widths="grid.columnWidths.value"
+          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-create="caps.canCreateRecord.value" :frozen-left-column-ids="activeFrozenLeftColumnIds" :field-read-only-ids="readOnlyFieldIds" :column-widths="grid.columnWidths.value"
           :row-action-overrides="grid.rowActionOverrides.value"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
           :enable-multi-select="gridAllowsAnyDelete || effectiveRowActions.canEdit"
@@ -261,6 +261,7 @@
           @go-to-page="grid.goToPage" @open-link-picker="onGridLinkPicker" @resize-column="grid.setColumnWidth"
           @bulk-delete="onBulkDelete" @bulk-edit="onBulkEditRequest" @reorder-field="onReorderField"
           @create-record="onAddRecord"
+          @set-frozen="onSetFrozen"
           @open-comments="onOpenRecordComments"
           @open-field-comments="onOpenGridFieldComments"
         />
@@ -508,6 +509,7 @@ import {
   type CalendarHolidayFetchState,
 } from '../utils/calendar-holiday-notice'
 import { addPeopleLookupToken, inferPeopleLookupKind, resolvePeopleImportValue } from '../utils/people-import'
+import { parseFrozenIds } from '../utils/frozen-columns'
 import { buildRecordFormattingMap, extractRulesFromConfig } from '../utils/conditional-formatting'
 import {
   decorateAndSortBases,
@@ -1738,6 +1740,14 @@ async function onPersistActiveViewConfig(input: {
   const viewId = workbench.activeViewId.value
   if (!viewId) return
   await updateViewInternal(viewId, input, false)
+}
+
+// frozen columns (left-prefix) — read via narrow helper; persist merges into view.config
+const activeFrozenLeftColumnIds = computed(() => parseFrozenIds(workbench.activeView.value?.config))
+function onSetFrozen(frozenLeftColumnIds: string[]) {
+  void onPersistActiveViewConfig({
+    config: { ...(workbench.activeView.value?.config ?? {}), frozenLeftColumnIds },
+  })
 }
 
 async function updateViewInternal(
