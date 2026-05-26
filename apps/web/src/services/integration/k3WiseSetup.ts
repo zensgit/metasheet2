@@ -6,6 +6,8 @@ export type K3SqlServerMode = 'readonly' | 'middle-table' | 'stored-procedure'
 export type K3WiseWebApiAuthMode = 'authority-code' | 'login'
 export type IntegrationPipelineRunMode = 'manual' | 'incremental' | 'full'
 export type K3WisePipelineTarget = 'material' | 'bom'
+// A4: per-reference-field K3 Save shape — {FNumber} / {FID} single-key, or object-passthrough.
+export type K3WiseReferenceShape = 'FNumber' | 'FID' | 'object'
 export type IntegrationPipelineRunStatus = 'pending' | 'running' | 'succeeded' | 'partial' | 'failed' | 'cancelled'
 export type IntegrationDeadLetterStatus = 'open' | 'replayed' | 'discarded'
 export type PlmReadMethod = 'api' | 'database' | 'table' | 'file' | 'manual'
@@ -164,6 +166,8 @@ export interface K3WiseSetupForm {
   materialSavePath: string
   materialSubmitPath: string
   materialAuditPath: string
+  // A4: per-reference-field Save shape for Material (field name → shape); empty/unset ⇒ {FNumber}.
+  materialReferenceShapes: Record<string, K3WiseReferenceShape>
   bomSavePath: string
   bomSubmitPath: string
   bomAuditPath: string
@@ -239,6 +243,10 @@ export interface K3WiseDocumentTemplate {
       identifier?: string
       identifierField?: string
       key?: string
+      // A4: declared object-passthrough intent for this reference field. The shipped
+      // #1817 adapter already passes object values through regardless; this flag records
+      // the operator's choice for the downstream composition/Save work to consume.
+      passthrough?: boolean
     }
   }>
   sampleSource: Record<string, unknown>
@@ -967,6 +975,7 @@ export function createDefaultK3WiseSetupForm(): K3WiseSetupForm {
     materialSavePath: '/K3API/Material/Save',
     materialSubmitPath: '/K3API/Material/Submit',
     materialAuditPath: '/K3API/Material/Audit',
+    materialReferenceShapes: defaultMaterialReferenceShapes(),
     bomSavePath: '/K3API/BOM/Save',
     bomSubmitPath: '/K3API/BOM/Submit',
     bomAuditPath: '/K3API/BOM/Audit',
@@ -1875,6 +1884,54 @@ export function buildK3WisePipelineObservationQuery(
   }
 }
 
+// A4: build the COMPLETE Material schema array with each reference field's chosen shape.
+// Non-reference fields are preserved unchanged (the array must be complete — the config
+// merge replaces the whole schema array, not a deep-merge). FNumber/FID set reference.identifier;
+// 'object' keeps a sane scalar-fallback identifier and records passthrough intent.
+export function buildK3WiseMaterialReferenceSchema(
+  shapeByField: Record<string, K3WiseReferenceShape> = {},
+): K3WiseDocumentTemplate['schema'] {
+  const template = K3_WISE_DOCUMENT_TEMPLATES.material
+  return template.schema.map((field) => {
+    const base = cloneJson(field)
+    if (!base.reference) return base
+    const shape = shapeByField[field.name] ?? 'FNumber'
+    base.reference = shape === 'object'
+      ? { identifier: 'FNumber', passthrough: true }
+      : { identifier: shape }
+    return base
+  })
+}
+
+// A4: default per-field shapes — every Material reference field starts at {FNumber}.
+export function defaultMaterialReferenceShapes(): Record<string, K3WiseReferenceShape> {
+  return Object.fromEntries(
+    K3_WISE_DOCUMENT_TEMPLATES.material.schema
+      .filter((field) => field.reference)
+      .map((field) => [field.name, 'FNumber' as K3WiseReferenceShape]),
+  )
+}
+
+// A4: restore per-field shapes from a SAVED material schema, merged OVER the defaults — so every
+// reference field stays present (fields absent from the saved schema remain {FNumber}) and the
+// reload round-trip does not silently downgrade an operator's earlier FID / object choices.
+export function parseMaterialReferenceShapesFromSchema(schema: unknown): Record<string, K3WiseReferenceShape> {
+  const shapes = defaultMaterialReferenceShapes()
+  if (!Array.isArray(schema)) return shapes
+  for (const field of schema) {
+    if (!field || typeof field !== 'object') continue
+    const name = (field as { name?: unknown }).name
+    if (typeof name !== 'string' || !(name in shapes)) continue
+    const reference = (field as { reference?: unknown }).reference
+    if (!reference || typeof reference !== 'object') continue
+    const ref = reference as { identifier?: unknown; passthrough?: unknown }
+    if (ref.passthrough === true) shapes[name] = 'object'
+    else if (ref.identifier === 'FID') shapes[name] = 'FID'
+    else shapes[name] = 'FNumber'
+  }
+  return shapes
+}
+
 export function buildK3WiseSetupPayloads(form: K3WiseSetupForm): K3WiseSetupPayloads {
   const workspaceId = optionalString(form.workspaceId) ?? null
   const baseSystem = {
@@ -1914,6 +1971,9 @@ export function buildK3WiseSetupPayloads(form: K3WiseSetupForm): K3WiseSetupPayl
           ...(optionalString(form.materialSubmitPath) ? { submitPath: trim(form.materialSubmitPath) } : {}),
           ...(optionalString(form.materialAuditPath) ? { auditPath: trim(form.materialAuditPath) } : {}),
           keyField: 'FNumber',
+          // A4: persist the COMPLETE material schema (shallow-merge replaces the whole array,
+          // so a partial would drop sibling fields) with the operator's per-field reference shape.
+          schema: buildK3WiseMaterialReferenceSchema(form.materialReferenceShapes),
           k3Template: getK3WiseDocumentTemplateMeta('material'),
         },
         bom: {
@@ -2121,6 +2181,9 @@ export function applyExternalSystemToForm(form: K3WiseSetupForm, system: Integra
     next.bomSavePath = typeof bom.savePath === 'string' ? bom.savePath : next.bomSavePath
     next.bomSubmitPath = typeof bom.submitPath === 'string' ? bom.submitPath : next.bomSubmitPath
     next.bomAuditPath = typeof bom.auditPath === 'string' ? bom.auditPath : next.bomAuditPath
+    // A4: restore per-field shape selections from the saved schema so a reload + re-save does not
+    // silently downgrade them to the default {FNumber} (merged over defaults; missing fields stay FNumber).
+    next.materialReferenceShapes = parseMaterialReferenceShapesFromSchema(material.schema)
   }
   if (system.kind === SQLSERVER_KIND) {
     const config = system.config || {}

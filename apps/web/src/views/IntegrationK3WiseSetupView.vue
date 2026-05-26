@@ -852,6 +852,35 @@
           </template>
         </section>
 
+        <section class="k3-setup__section" data-testid="reference-shape-selector">
+          <div class="k3-setup__preview-head">
+            <strong>Material 引用字段 Save Shape</strong>
+            <span>保存时写入 config.objects.material.schema(完整 schema)</span>
+          </div>
+          <p class="k3-setup__hint">
+            为每个 Material 引用字段选择 K3 Save 形态:<code>{FNumber}</code> / <code>{FID}</code> 单键,或 object-passthrough(由源提供完整对象)。
+            保存时写入<strong>完整</strong> material schema —— 浅合并会整体替换 schema 数组,partial 会丢字段。
+          </p>
+          <div class="k3-setup__grid">
+            <label
+              v-for="field in materialReferenceFields"
+              :key="`shape:${field.name}`"
+              class="k3-setup__field"
+            >
+              <span>{{ field.label }}（{{ field.name }}）</span>
+              <select
+                :value="form.materialReferenceShapes[field.name]"
+                :data-testid="`reference-shape-${field.name}`"
+                @change="setMaterialReferenceShape(field.name, ($event.target as HTMLSelectElement).value)"
+              >
+                <option value="FNumber">{FNumber}</option>
+                <option value="FID">{FID}</option>
+                <option value="object">object-passthrough</option>
+              </select>
+            </label>
+          </div>
+        </section>
+
         <details class="k3-setup__section k3-setup__details">
           <summary class="k3-setup__section-summary">
             <span>Pipeline 执行参数</span>
@@ -989,6 +1018,16 @@ const templatePreviewTarget = ref<K3WisePipelineTarget>('material')
 
 const savedSystems = computed(() => [...webApiSystems.value, ...sqlSystems.value])
 const documentTemplates = listK3WiseDocumentTemplates()
+// A4: Material reference fields offered in the per-field shape selector.
+const materialReferenceFields = computed(() =>
+  (documentTemplates.find((template) => template.targetObject === 'material')?.schema ?? [])
+    .filter((field) => Boolean(field.reference)),
+)
+const setMaterialReferenceShape = (fieldName: string, value: string) => {
+  if (value === 'FNumber' || value === 'FID' || value === 'object') {
+    form.materialReferenceShapes[fieldName] = value
+  }
+}
 const validationIssues = computed(() => validateK3WiseSetupForm(form))
 const stagingIssues = computed(() => validateK3WiseStagingInstallForm(form))
 const pipelineIssues = computed(() => validateK3WisePipelineTemplateForm(form, stagingDescriptors.value))
