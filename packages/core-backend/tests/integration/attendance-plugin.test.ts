@@ -3451,7 +3451,7 @@ attendanceIntegrationDescribe(
       )
 
       const exportRes = await requestJson(
-        `${baseUrl}/api/attendance/export?from=${encodeURIComponent(workDate)}&to=${encodeURIComponent(workDate)}`,
+        `${baseUrl}/api/attendance/export?from=${encodeURIComponent(workDate)}&to=${encodeURIComponent(workDate)}&header=code`,
         {
           headers: {
             Authorization: `Bearer ${token}`,
@@ -3463,10 +3463,11 @@ attendanceIntegrationDescribe(
       const lines = exportRes.raw.trim().split('\n')
       expect(lines.length).toBeGreaterThanOrEqual(2)
       expect(lines[0]).toContain('work_date')
-      expect(lines[0]).toContain('timezone')
-      expect(lines[0]).toContain('is_workday')
-      expect(lines[1]).toContain(`${workDate},Asia/Tokyo,${workDate}T09:00:00+09:00,${workDate}T18:00:00+09:00`)
-      expect(lines[1]).toContain(',true')
+      expect(lines[0]).toContain('punch_in_1')
+      expect(lines[0]).toContain('punch_out_1')
+      expect(lines[1]).toContain(workDate)
+      expect(lines[1]).toContain(`${workDate}T09:00:00+09:00`)
+      expect(lines[1]).toContain(`${workDate}T18:00:00+09:00`)
       expect(lines[1]).not.toContain('GMT+')
       expect(lines[1]).not.toContain('Mon ')
     } finally {
@@ -3536,9 +3537,9 @@ attendanceIntegrationDescribe(
       expect(body.data?.format).toBe('json')
       expect(body.data?.total).toBeGreaterThanOrEqual(1)
       expect(Array.isArray(body.data?.items)).toBe(true)
-      const row = body.data?.items?.find(item => item.user_id === tokenUserId)
+      const row = body.data?.items?.[0]
       expect(row?.work_date).toBe(workDate)
-      expect(row?.first_in_at).toBe(`${workDate}T09:00:00+09:00`)
+      expect(row?.punch_in_1).toBe(`${workDate}T09:00:00+09:00`)
     } finally {
       await pool.query('DELETE FROM attendance_records WHERE id = $1', [recordId]).catch(() => undefined)
       await pool.end()
@@ -8164,81 +8165,122 @@ attendanceIntegrationDescribe(
     const requesterId = `attendance-effcal-rbac-req-${runSuffix}`
     const targetId = `attendance-effcal-rbac-tgt-${runSuffix}`
     const adminId = `attendance-effcal-rbac-adm-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
 
-    // Read-only token for cross-user RBAC negative case
-    const readOnlyRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&roles=user&perms=attendance:read`
-    )
-    const readOnlyToken = (readOnlyRes.body as { token?: string } | undefined)?.token
-    // Read + approve token for cross-user RBAC positive case
-    const approveRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&roles=user&perms=attendance:read,attendance:approve`
-    )
-    const approveToken = (approveRes.body as { token?: string } | undefined)?.token
-    // Admin token for groupId / 404 case
-    const adminRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminId)}&roles=admin&perms=attendance:read,attendance:admin`
-    )
-    const adminToken = (adminRes.body as { token?: string } | undefined)?.token
-    expect(readOnlyToken).toBeTruthy()
-    expect(approveToken).toBeTruthy()
-    expect(adminToken).toBeTruthy()
-    if (!readOnlyToken || !approveToken || !adminToken) return
+    try {
+      process.env.RBAC_BYPASS = 'false'
+      await pool.query(
+        `INSERT INTO permissions (code, name, description)
+         VALUES
+           ('attendance:read', 'Attendance Read', 'Read attendance data'),
+           ('attendance:approve', 'Attendance Approve', 'Approve attendance requests'),
+           ('attendance:admin', 'Attendance Admin', 'Administer attendance')
+         ON CONFLICT (code) DO NOTHING`
+      )
+      await pool.query(
+        `INSERT INTO user_permissions (user_id, permission_code)
+         VALUES
+           ($1, 'attendance:read'),
+           ($1, 'attendance:approve'),
+           ($2, 'attendance:read'),
+           ($2, 'attendance:admin')
+         ON CONFLICT DO NOTHING`,
+        [requesterId, adminId]
+      )
 
-    const base = `${baseUrl}/api/attendance/effective-calendar`
-    const dateRange = `from=2030-01-01&to=2030-01-03`
+      // Read-only token for cross-user RBAC negative case
+      const readOnlyRes = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&roles=user&perms=attendance:read`
+      )
+      const readOnlyToken = (readOnlyRes.body as { token?: string } | undefined)?.token
+      // Read + approve token for cross-user RBAC positive case
+      const approveRes = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&roles=user&perms=attendance:read,attendance:approve`
+      )
+      const approveToken = (approveRes.body as { token?: string } | undefined)?.token
+      // Admin token for groupId / 404 case
+      const adminRes = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminId)}&roles=admin&perms=attendance:read,attendance:admin`
+      )
+      const adminToken = (adminRes.body as { token?: string } | undefined)?.token
+      expect(readOnlyToken).toBeTruthy()
+      expect(approveToken).toBeTruthy()
+      expect(adminToken).toBeTruthy()
+      if (!readOnlyToken || !approveToken || !adminToken) return
 
-    // 400: missing from/to
-    const missingRes = await requestJson(`${base}?to=2030-01-01&orgOnly=true`, {
-      headers: { Authorization: `Bearer ${adminToken}` },
-    })
-    expect(missingRes.status).toBe(400)
-    // 400: invalid date
-    const badDateRes = await requestJson(`${base}?from=bogus&to=2030-01-01&orgOnly=true`, {
-      headers: { Authorization: `Bearer ${adminToken}` },
-    })
-    expect(badDateRes.status).toBe(400)
-    // 400: no mode
-    const noModeRes = await requestJson(`${base}?${dateRange}`, {
-      headers: { Authorization: `Bearer ${adminToken}` },
-    })
-    expect(noModeRes.status).toBe(400)
-    // 400: two modes
-    const twoModesRes = await requestJson(`${base}?${dateRange}&userId=x&orgOnly=true`, {
-      headers: { Authorization: `Bearer ${adminToken}` },
-    })
-    expect(twoModesRes.status).toBe(400)
-    // 400: range too big
-    const bigRangeRes = await requestJson(`${base}?from=2030-01-01&to=2031-06-01&orgOnly=true`, {
-      headers: { Authorization: `Bearer ${adminToken}` },
-    })
-    expect(bigRangeRes.status).toBe(400)
-    // 404: groupId not found
-    const noGroupRes = await requestJson(`${base}?${dateRange}&groupId=group-does-not-exist-${runSuffix}`, {
-      headers: { Authorization: `Bearer ${adminToken}` },
-    })
-    expect(noGroupRes.status).toBe(404)
+      const base = `${baseUrl}/api/attendance/effective-calendar`
+      const dateRange = `from=2030-01-01&to=2030-01-03`
 
-    // RBAC: read-only token querying another user → 403
-    const denyRes = await requestJson(`${base}?${dateRange}&userId=${encodeURIComponent(targetId)}`, {
-      headers: { Authorization: `Bearer ${readOnlyToken}` },
-    })
-    expect(denyRes.status).toBe(403)
-    // RBAC: same user (self) querying own calendar → 200
-    const selfRes = await requestJson(`${base}?${dateRange}&userId=${encodeURIComponent(requesterId)}`, {
-      headers: { Authorization: `Bearer ${readOnlyToken}` },
-    })
-    expect(selfRes.status).toBe(200)
-    // RBAC: read+approve token querying another user → 200
-    const approveOtherRes = await requestJson(`${base}?${dateRange}&userId=${encodeURIComponent(targetId)}`, {
-      headers: { Authorization: `Bearer ${approveToken}` },
-    })
-    expect(approveOtherRes.status).toBe(200)
-    // RBAC: read-only token using groupId → 403 (groupId requires attendance:admin)
-    const groupDenyRes = await requestJson(`${base}?${dateRange}&groupId=anything`, {
-      headers: { Authorization: `Bearer ${readOnlyToken}` },
-    })
-    expect(groupDenyRes.status).toBe(403)
+      // 400: missing from/to
+      const missingRes = await requestJson(`${base}?to=2030-01-01&orgOnly=true`, {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      })
+      expect(missingRes.status).toBe(400)
+      // 400: invalid date
+      const badDateRes = await requestJson(`${base}?from=bogus&to=2030-01-01&orgOnly=true`, {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      })
+      expect(badDateRes.status).toBe(400)
+      // 400: no mode
+      const noModeRes = await requestJson(`${base}?${dateRange}`, {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      })
+      expect(noModeRes.status).toBe(400)
+      // 400: two modes
+      const twoModesRes = await requestJson(`${base}?${dateRange}&userId=x&orgOnly=true`, {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      })
+      expect(twoModesRes.status).toBe(400)
+      // 400: range too big
+      const bigRangeRes = await requestJson(`${base}?from=2030-01-01&to=2031-06-01&orgOnly=true`, {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      })
+      expect(bigRangeRes.status).toBe(400)
+      // 404: groupId not found
+      const noGroupRes = await requestJson(`${base}?${dateRange}&groupId=group-does-not-exist-${runSuffix}`, {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      })
+      expect(noGroupRes.status).toBe(404)
+
+      await pool.query('DELETE FROM user_permissions WHERE user_id = $1 AND permission_code = $2', [requesterId, 'attendance:approve'])
+
+      // RBAC: read-only token querying another user → 403
+      const denyRes = await requestJson(`${base}?${dateRange}&userId=${encodeURIComponent(targetId)}`, {
+        headers: { Authorization: `Bearer ${readOnlyToken}` },
+      })
+      expect(denyRes.status).toBe(403)
+      // RBAC: same user (self) querying own calendar → 200
+      const selfRes = await requestJson(`${base}?${dateRange}&userId=${encodeURIComponent(requesterId)}`, {
+        headers: { Authorization: `Bearer ${readOnlyToken}` },
+      })
+      expect(selfRes.status).toBe(200)
+
+      await pool.query(
+        `INSERT INTO user_permissions (user_id, permission_code)
+         VALUES ($1, 'attendance:approve')
+         ON CONFLICT DO NOTHING`,
+        [requesterId]
+      )
+
+      // RBAC: read+approve token querying another user → 200
+      const approveOtherRes = await requestJson(`${base}?${dateRange}&userId=${encodeURIComponent(targetId)}`, {
+        headers: { Authorization: `Bearer ${approveToken}` },
+      })
+      expect(approveOtherRes.status).toBe(200)
+
+      await pool.query('DELETE FROM user_permissions WHERE user_id = $1 AND permission_code = $2', [requesterId, 'attendance:approve'])
+
+      // RBAC: read-only token using groupId → 403 (groupId requires attendance:admin)
+      const groupDenyRes = await requestJson(`${base}?${dateRange}&groupId=anything`, {
+        headers: { Authorization: `Bearer ${readOnlyToken}` },
+      })
+      expect(groupDenyRes.status).toBe(403)
+    } finally {
+      process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[requesterId, adminId]]).catch(() => undefined)
+      await pool.end()
+    }
   })
 
   it('effective-calendar role/roleTags override matches DB-backed role context in resolver mode', async () => {
