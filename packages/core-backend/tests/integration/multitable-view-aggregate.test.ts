@@ -88,9 +88,12 @@ describeIfDatabase('multitable view-aggregate (real DB)', () => {
     expect(res.body.data.aggregates[FLD_CAT]).toEqual({ fn: 'count', value: 60 })
   })
 
-  test('PARITY: /view-aggregate total === /view page.total (no search-predicate drift)', async () => {
-    const viewRes = await request(app).get(`/api/multitable/view?sheetId=${SHEET_ID}&viewId=${V_MAIN}`)
-    const aggRes = await aggregate(V_MAIN)
+  test('PARITY: /view-aggregate total === /view filtered page.total (filter-resolution agreement)', async () => {
+    // /view returns a `page` object only when paginated → pass limit. Use the FILTERED view so this
+    // validates the aggregate's persisted-filter resolution matches /view's (not just a raw count).
+    const viewRes = await request(app).get(`/api/multitable/view?sheetId=${SHEET_ID}&viewId=${V_FILTER}&limit=1&offset=0`)
+    const aggRes = await aggregate(V_FILTER)
+    expect(viewRes.body.data.page.total).toBe(30) // /view applies the persisted cat=A filter
     expect(aggRes.body.data.total).toBe(viewRes.body.data.page.total)
   })
 
