@@ -1,0 +1,3 @@
+contracts (openapi)	Set up job	Download action repository 'pnpm/action-setup@v4' (SHA:b906affcce14559ad1aafd4ab0e942779e9f58b1)
+contracts (openapi)	Set up job	##[error]An action could not be found at the URI 'https://codeload.github.com/pnpm/action-setup/tar.gz/b906affcce14559ad1aafd4ab0e942779e9f58b1'
+contracts (openapi)	Set up job	##[error]Failed to download archive 'https://codeload.github.com/pnpm/action-setup/tar.gz/...' after 1 attempts.
