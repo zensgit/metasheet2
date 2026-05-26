@@ -12,8 +12,9 @@ re-sync both behave correctly. Original staging settings were restored.
 ## Scope / safety
 
 - Staging only — production untouched. No code change. No migration.
-- Admin token read from a local 0600 file, never printed; deleted after the run. (Token had
-  been pasted into the operator chat, so it was rotated/invalidated afterward.)
+- Admin token read from a local 0600 file, never printed by the script, and the local file
+  was deleted after the run. Because the token had been pasted into operator chat, server-side
+  invalidation/rotation is required separately and was requested (not confirmed done here).
 - The only writes were: a reversible `attendance.settings` cap change (restored at the end)
   and period-summary snapshot rows (the rebuildable report layer — designed behavior).
 
