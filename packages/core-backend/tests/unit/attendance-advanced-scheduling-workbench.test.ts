@@ -200,4 +200,63 @@ describe('attendance advanced scheduling read-only workbench', () => {
     expect(pluginSource).toContain('assignmentAggregateRows')
     expect(pluginSource).toContain('scheduleGroupAssignmentAggregateRows')
   })
+
+  describe('rule_set preview-divergence diagnostic (read-only)', () => {
+    const baseInput = (overrides: Record<string, unknown> = {}) => ({
+      from: '2026-06-01',
+      to: '2026-06-30',
+      scheduleGroups: [
+        { id: 'sg-1', name: 'Group 1', source: 'manual', isActive: true, attendanceGroupId: 'ag-rule' },
+        { id: 'sg-2', name: 'Group 2', source: 'manual', isActive: true, attendanceGroupId: 'ag-plain' },
+      ],
+      scheduleGroupMembers: [
+        { id: 'm-1', scheduleGroupId: 'sg-1', userId: 'u-1', effectiveFrom: '2026-06-01', effectiveTo: null },
+        { id: 'm-2', scheduleGroupId: 'sg-2', userId: 'u-2', effectiveFrom: '2026-06-01', effectiveTo: null },
+      ],
+      ...overrides,
+    })
+
+    it('positive: flags schedule groups whose attendance group carries a rule_set override', () => {
+      const wb = helpers.buildAttendanceAdvancedSchedulingWorkbench(
+        baseInput({ ruleSetAttendanceGroupIds: ['ag-rule'] }),
+      )
+      const diag = wb.diagnostics.find((d: any) => d.code === 'schedule_group_rule_set_preview_divergence')
+      expect(diag).toMatchObject({ severity: 'info', count: 1, scheduleGroupIds: ['sg-1'] })
+      expect(diag.message).toContain('by design')
+    })
+
+    it('negative: no diagnostic when the linked attendance group has no rule_set', () => {
+      // sg-1/sg-2 both link to attendance groups, but neither id is in the rule_set set.
+      const wb = helpers.buildAttendanceAdvancedSchedulingWorkbench(
+        baseInput({ ruleSetAttendanceGroupIds: ['ag-unrelated'] }),
+      )
+      expect(wb.diagnostics.find((d: any) => d.code === 'schedule_group_rule_set_preview_divergence')).toBeUndefined()
+    })
+
+    it('absent input / no attendanceGroupId: diagnostic does not fire (backward compatible)', () => {
+      // No ruleSetAttendanceGroupIds passed at all.
+      const wbNoInput = helpers.buildAttendanceAdvancedSchedulingWorkbench(baseInput())
+      expect(wbNoInput.diagnostics.find((d: any) => d.code === 'schedule_group_rule_set_preview_divergence')).toBeUndefined()
+      // Group without attendanceGroupId is skipped even if some other id is in the set.
+      const wbNoLink = helpers.buildAttendanceAdvancedSchedulingWorkbench({
+        from: '2026-06-01',
+        to: '2026-06-30',
+        scheduleGroups: [{ id: 'sg-x', name: 'No link', source: 'manual', isActive: true }],
+        ruleSetAttendanceGroupIds: ['ag-rule'],
+      })
+      expect(wbNoLink.diagnostics.find((d: any) => d.code === 'schedule_group_rule_set_preview_divergence')).toBeUndefined()
+    })
+
+    it('source guard: the new query is a SELECT and the workbench route region is read-only', () => {
+      expect(pluginSource).toMatch(/SELECT id FROM attendance_groups WHERE org_id = \$1 AND rule_set_id IS NOT NULL/)
+      expect(pluginSource).toContain('ruleSetAttendanceGroupRows')
+      // Scope the write-guard to the workbench GET handler region only (the file legitimately
+      // writes attendance_groups elsewhere via group sync). The handler must be SELECT-only.
+      const start = pluginSource.indexOf("'/api/attendance/advanced-scheduling/workbench'")
+      expect(start).toBeGreaterThan(-1)
+      const nextRoute = pluginSource.indexOf('context.api.http.addRoute(', start + 1)
+      const handler = pluginSource.slice(start, nextRoute > start ? nextRoute : start + 12000)
+      expect(handler).not.toMatch(/\b(INSERT\s+INTO|UPDATE\s+\w|DELETE\s+FROM)\b/i)
+    })
+  })
 })
