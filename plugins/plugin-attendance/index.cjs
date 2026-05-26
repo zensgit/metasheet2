@@ -13951,6 +13951,25 @@ function createRbacHelpers(db, logger) {
 
   function withAnyPermission(permissions, handler) {
     return async (req, res, next) => {
+      const invokeHandler = async () => {
+        try {
+          await handler(req, res, next)
+        } catch (error) {
+          if (error instanceof HttpError && !res.headersSent) {
+            res.status(error.status).json({
+              ok: false,
+              error: {
+                code: error.code,
+                message: error.message,
+                ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+              },
+            })
+            return
+          }
+          throw error
+        }
+      }
+
       const userId = getUserId(req)
       if (!userId) {
         res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
@@ -13958,7 +13977,7 @@ function createRbacHelpers(db, logger) {
       }
 
       if (process.env.RBAC_BYPASS === 'true') {
-        await handler(req, res, next)
+        await invokeHandler()
         return
       }
 
@@ -13984,11 +14003,13 @@ function createRbacHelpers(db, logger) {
             return
           }
         }
-        await handler(req, res, next)
       } catch (error) {
         logger.error('RBAC guard error', error)
         res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Permission check failed' } })
+        return
       }
+
+      await invokeHandler()
     }
   }
 
@@ -17473,6 +17494,21 @@ module.exports = {
       return normalizeOptionalText(value)
     }
 
+    function normalizeRequestUuidReferenceInput(value, fallback = null, fieldName = 'id') {
+      const candidate = normalizeRequestReferenceInput(value, fallback)
+      if (!candidate) return candidate
+      const uuid = normalizeUuidString(candidate)
+      if (!uuid) {
+        throw new HttpError(
+          400,
+          'VALIDATION_ERROR',
+          `${fieldName} must be a UUID`,
+          singleValidationDetail(fieldName, 'Must be a UUID')
+        )
+      }
+      return uuid
+    }
+
     async function ensureAttendanceRequestAccess(requestRow, requesterId, actionLabel) {
       if (requestRow.user_id === requesterId) return
       const allowed = await canAccessOtherUsers(requesterId)
@@ -17577,7 +17613,11 @@ module.exports = {
       let overtimeRule = null
       if (requestType === 'leave') {
         leaveType = await loadLeaveType(db, orgId, {
-          id: normalizeRequestReferenceInput(firstDefinedValue(parsedData.leaveTypeId, parsedData.leave_type_id), existingLeaveType.id),
+          id: normalizeRequestUuidReferenceInput(
+            firstDefinedValue(parsedData.leaveTypeId, parsedData.leave_type_id),
+            existingLeaveType.id,
+            'leaveTypeId'
+          ),
           code: normalizeRequestReferenceInput(firstDefinedValue(parsedData.leaveTypeCode, parsedData.leave_type_code), existingLeaveType.code),
         })
         if (!leaveType) {
@@ -17596,7 +17636,11 @@ module.exports = {
         }
       } else if (requestType === 'overtime') {
         overtimeRule = await loadOvertimeRule(db, orgId, {
-          id: normalizeRequestReferenceInput(firstDefinedValue(parsedData.overtimeRuleId, parsedData.overtime_rule_id), existingOvertimeRule.id),
+          id: normalizeRequestUuidReferenceInput(
+            firstDefinedValue(parsedData.overtimeRuleId, parsedData.overtime_rule_id),
+            existingOvertimeRule.id,
+            'overtimeRuleId'
+          ),
           name: normalizeRequestReferenceInput(firstDefinedValue(parsedData.overtimeRuleName, parsedData.overtime_rule_name), existingOvertimeRule.name),
         })
         if (!overtimeRule) {
@@ -17632,7 +17676,11 @@ module.exports = {
 
       const approvalFlow = await loadApprovalFlow(db, orgId, {
         requestType,
-        flowId: normalizeRequestReferenceInput(firstDefinedValue(parsedData.approvalFlowId, parsedData.approval_flow_id), existingApprovalFlow.id),
+        flowId: normalizeRequestUuidReferenceInput(
+          firstDefinedValue(parsedData.approvalFlowId, parsedData.approval_flow_id),
+          existingApprovalFlow.id,
+          'approvalFlowId'
+        ),
       })
 
       const reason = parsedData.reason === undefined
@@ -17886,10 +17934,16 @@ module.exports = {
           return
         }
 
+        const requestId = normalizeUuidString(req.params.id)
+        if (!requestId) {
+          respondInvalidUuid(res)
+          return
+        }
+
         try {
           const rows = await db.query(
             'SELECT * FROM attendance_requests WHERE id = $1',
-            [req.params.id]
+            [requestId]
           )
           if (rows.length === 0) {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Request not found' } })
@@ -17933,11 +17987,17 @@ module.exports = {
           return
         }
 
+        const requestId = normalizeUuidString(req.params.id)
+        if (!requestId) {
+          respondInvalidUuid(res)
+          return
+        }
+
         try {
           const request = await db.transaction(async (trx) => {
             const requestRows = await trx.query(
               'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE',
-              [req.params.id]
+              [requestId]
             )
             if (requestRows.length === 0) {
               throw new HttpError(404, 'NOT_FOUND', 'Request not found')
@@ -17961,7 +18021,7 @@ module.exports = {
                  AND status IN ('pending', 'approved')
                  AND id <> $5
                LIMIT 1`,
-              [existingRequest.org_id, existingRequest.user_id, draft.workDate, draft.requestType, req.params.id]
+              [existingRequest.org_id, existingRequest.user_id, draft.workDate, draft.requestType, requestId]
             )
             if (duplicateRows.length > 0) {
               throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
@@ -17979,7 +18039,7 @@ module.exports = {
                WHERE id = $1
                RETURNING *`,
               [
-                req.params.id,
+                requestId,
                 draft.workDate,
                 draft.requestType,
                 draft.requestedInAt,
@@ -18043,7 +18103,11 @@ module.exports = {
         return
       }
 
-      const requestId = req.params.id
+      const requestId = normalizeUuidString(req.params.id)
+      if (!requestId) {
+        respondInvalidUuid(res)
+        return
+      }
 
       try {
         const result = await db.transaction(async (trx) => {
@@ -18287,7 +18351,11 @@ module.exports = {
         return
       }
 
-      const requestId = req.params.id
+      const requestId = normalizeUuidString(req.params.id)
+      if (!requestId) {
+        respondInvalidUuid(res)
+        return
+      }
 
       try {
         const result = await db.transaction(async (trx) => {
@@ -23177,7 +23245,11 @@ module.exports = {
           return
         }
         const orgId = getOrgId(req)
-        const integrationId = req.params.id
+        const integrationId = normalizeUuidString(req.params.id)
+        if (!integrationId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const existing = await db.query(
@@ -23230,7 +23302,11 @@ module.exports = {
       '/api/attendance/integrations/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const integrationId = req.params.id
+        const integrationId = normalizeUuidString(req.params.id)
+        if (!integrationId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -23258,7 +23334,11 @@ module.exports = {
       '/api/attendance/integrations/:id/runs',
       withAttendanceImportPermission(async (req, res) => {
         const orgId = getOrgId(req)
-        const integrationId = req.params.id
+        const integrationId = normalizeUuidString(req.params.id)
+        if (!integrationId) {
+          respondInvalidUuid(res)
+          return
+        }
         const { page, pageSize, offset } = parsePagination(req.query)
 
         try {
@@ -23308,7 +23388,11 @@ module.exports = {
           res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
           return
         }
-        const integrationId = req.params.id
+        const integrationId = normalizeUuidString(req.params.id)
+        if (!integrationId) {
+          respondInvalidUuid(res)
+          return
+        }
         let run = null
         let imported = 0
         let skipped = []
@@ -23857,7 +23941,11 @@ module.exports = {
       '/api/attendance/import/batches/:id',
       withAttendanceImportPermission(async (req, res) => {
         const orgId = getOrgId(req)
-        const batchId = req.params.id
+        const batchId = normalizeUuidString(req.params.id)
+        if (!batchId) {
+          respondInvalidUuid(res)
+          return
+        }
         try {
           const rows = await db.query(
             'SELECT * FROM attendance_import_batches WHERE id = $1 AND org_id = $2',
@@ -23884,7 +23972,11 @@ module.exports = {
 	      '/api/attendance/import/batches/:id/items',
 	      withAttendanceImportPermission(async (req, res) => {
         const orgId = getOrgId(req)
-        const batchId = req.params.id
+        const batchId = normalizeUuidString(req.params.id)
+        if (!batchId) {
+          respondInvalidUuid(res)
+          return
+        }
         const { page, pageSize, offset } = parsePagination(req.query)
         try {
           const countRows = await db.query(
@@ -23924,7 +24016,11 @@ module.exports = {
 	      '/api/attendance/import/batches/:id/export.csv',
 	      withAttendanceImportPermission(async (req, res) => {
 	        const orgId = getOrgId(req)
-	        const batchId = req.params.id
+	        const batchId = normalizeUuidString(req.params.id)
+	        if (!batchId) {
+	          respondInvalidUuid(res)
+	          return
+	        }
 	        const rawType = String(req.query?.type ?? req.query?.kind ?? '').toLowerCase()
 	        const type = ['all', 'imported', 'skipped', 'anomalies'].includes(rawType) ? rawType : 'all'
 
@@ -24064,7 +24160,11 @@ module.exports = {
 	      '/api/attendance/import/rollback/:id',
       withAttendanceImportPermission(async (req, res) => {
         const orgId = getOrgId(req)
-        const batchId = req.params.id
+        const batchId = normalizeUuidString(req.params.id)
+        if (!batchId) {
+          respondInvalidUuid(res)
+          return
+        }
         try {
           const batchRows = await db.query(
             'SELECT * FROM attendance_import_batches WHERE id = $1 AND org_id = $2',
@@ -24815,7 +24915,11 @@ module.exports = {
       '/api/attendance/payroll-cycles/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const payrollCycleId = req.params.id
+        const payrollCycleId = normalizeUuidString(req.params.id)
+        if (!payrollCycleId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -24874,7 +24978,11 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const cycleId = req.params.id
+        const cycleId = normalizeUuidString(req.params.id)
+        if (!cycleId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const cycleRows = await db.query(
@@ -24948,7 +25056,11 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const cycleId = req.params.id
+        const cycleId = normalizeUuidString(req.params.id)
+        if (!cycleId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const cycleRows = await db.query(
@@ -27211,7 +27323,11 @@ module.exports = {
       '/api/attendance/holidays/:id',
       withPermission('attendance:read', async (req, res) => {
         const orgId = getOrgId(req)
-        const holidayId = req.params.id
+        const holidayId = normalizeUuidString(req.params.id)
+        if (!holidayId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -27424,7 +27540,11 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const holidayId = req.params.id
+        const holidayId = normalizeUuidString(req.params.id)
+        if (!holidayId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const existingRows = await db.query(
@@ -27477,7 +27597,11 @@ module.exports = {
       '/api/attendance/holidays/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const holidayId = req.params.id
+        const holidayId = normalizeUuidString(req.params.id)
+        if (!holidayId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(

@@ -3836,6 +3836,111 @@ describe('Attendance Plugin Integration', () => {
     expect((requestGetAfterDeleteRes.body as { data?: { request?: { status?: string } } } | undefined)?.data?.request?.status).toBe('cancelled')
   })
 
+  it('returns validation errors for malformed attendance UUID route params', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const testUserId = `attendance-invalid-id-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=user&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const cases = [
+      { method: 'GET', path: '/api/attendance/requests/not-a-uuid' },
+      { method: 'PUT', path: '/api/attendance/requests/not-a-uuid', body: {} },
+      { method: 'POST', path: '/api/attendance/requests/not-a-uuid/cancel', body: {} },
+      { method: 'DELETE', path: '/api/attendance/requests/not-a-uuid' },
+      { method: 'GET', path: '/api/attendance/payroll-cycles/not-a-uuid/summary' },
+      { method: 'GET', path: '/api/attendance/payroll-cycles/not-a-uuid/summary/export' },
+      { method: 'GET', path: '/api/attendance/payroll-cycles/not-a-uuid/export' },
+      { method: 'GET', path: '/api/attendance/holidays/not-a-uuid' },
+    ]
+
+    for (const testCase of cases) {
+      const res = await requestJson(`${baseUrl}${testCase.path}`, {
+        method: testCase.method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...(testCase.body ? { 'Content-Type': 'application/json' } : {}),
+        },
+        body: testCase.body ? JSON.stringify(testCase.body) : undefined,
+      })
+      expect(res.status, `${testCase.method} ${testCase.path}`).toBe(400)
+      const body = (res.body as { ok?: boolean; error?: { code?: string; message?: string } } | undefined) ?? {}
+      expect(body.ok, `${testCase.method} ${testCase.path}`).toBe(false)
+      expect(body.error?.code, `${testCase.method} ${testCase.path}`).toBe('VALIDATION_ERROR')
+      expect(body.error?.message, `${testCase.method} ${testCase.path}`).toBe('id must be a UUID')
+    }
+  })
+
+  it('returns validation errors for malformed attendance request reference UUIDs', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const testUserId = `attendance-invalid-ref-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=user&perms=attendance:read,attendance:write`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const workDate = new Date().toISOString().slice(0, 10)
+    const requestedInAt = new Date().toISOString()
+    const cases = [
+      {
+        field: 'leaveTypeId',
+        payload: {
+          workDate,
+          requestType: 'leave',
+          leaveTypeId: 'not-a-uuid',
+          minutes: 60,
+        },
+      },
+      {
+        field: 'overtimeRuleId',
+        payload: {
+          workDate,
+          requestType: 'overtime',
+          overtimeRuleId: 'not-a-uuid',
+          minutes: 60,
+        },
+      },
+      {
+        field: 'approvalFlowId',
+        payload: {
+          workDate,
+          requestType: 'time_correction',
+          requestedInAt,
+          approvalFlowId: 'not-a-uuid',
+        },
+      },
+    ]
+
+    for (const testCase of cases) {
+      const res = await requestJson(`${baseUrl}/api/attendance/requests`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(testCase.payload),
+      })
+      expect(res.status, testCase.field).toBe(400)
+      const body = (res.body as {
+        ok?: boolean
+        error?: { code?: string; message?: string; details?: Array<{ field?: string; message?: string }> }
+      } | undefined) ?? {}
+      expect(body.ok, testCase.field).toBe(false)
+      expect(body.error?.code, testCase.field).toBe('VALIDATION_ERROR')
+      expect(body.error?.message, testCase.field).toBe(`${testCase.field} must be a UUID`)
+      expect(body.error?.details?.[0]?.field, testCase.field).toBe(testCase.field)
+    }
+  })
+
   it('writes an adjusted attendance record after final approval for a missed check-in request', async () => {
     if (!baseUrl) return
 
