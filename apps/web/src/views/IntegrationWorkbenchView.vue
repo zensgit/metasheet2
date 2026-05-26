@@ -689,7 +689,7 @@
       <div class="integration-workbench__panel-head">
         <div>
           <h2>运行监控</h2>
-          <p>{{ observationSummary }}。展示最近 5 条 run（状态 / 写入 / 失败 + 行级结果）与 open dead letters，便于清洗后回看失败原因。</p>
+          <p>{{ observationSummary }}。展示最近 5 条 run（状态 / 写入 / 失败 + 行级结果）与 open dead letters（可重放），便于清洗后回看失败原因。</p>
         </div>
         <button type="button" class="integration-workbench__button" data-testid="refresh-observation" :disabled="observingPipeline" @click="refreshPipelineObservation(false)">
           {{ observingPipeline ? '刷新中' : '刷新监控' }}
@@ -735,6 +735,38 @@
               <small>
                 {{ deadLetter.status }} · {{ deadLetter.createdAt || deadLetter.id }}<template v-if="deadLetter.retryCount"> · retries {{ deadLetter.retryCount }}</template><template v-if="deadLetter.idempotencyKey"> · key {{ deadLetter.idempotencyKey }}</template>
               </small>
+              <div class="integration-workbench__dead-letter-actions">
+                <span
+                  :class="['integration-workbench__badge', isDeadLetterReplayable(deadLetter) ? 'integration-workbench__badge--retryable' : '']"
+                  :data-testid="`dead-letter-retryable-${deadLetter.id}`"
+                >{{ isDeadLetterReplayable(deadLetter) ? '可重放' : '不可重放' }}</span>
+                <template v-if="isDeadLetterReplayable(deadLetter)">
+                  <button
+                    v-if="confirmReplayDeadLetterId !== deadLetter.id"
+                    type="button"
+                    class="integration-workbench__button integration-workbench__button--ghost"
+                    :data-testid="`replay-dead-letter-${deadLetter.id}`"
+                    :disabled="replayingDeadLetterId === deadLetter.id"
+                    @click="requestReplay(deadLetter.id)"
+                  >准备 Replay</button>
+                  <template v-else>
+                    <button
+                      type="button"
+                      class="integration-workbench__button integration-workbench__button--danger"
+                      :data-testid="`confirm-replay-dead-letter-${deadLetter.id}`"
+                      :disabled="replayingDeadLetterId === deadLetter.id"
+                      @click="replayDeadLetter(deadLetter)"
+                    >{{ replayingDeadLetterId === deadLetter.id ? 'Replay 中…' : '确认 Replay（会真实写入）' }}</button>
+                    <button
+                      type="button"
+                      class="integration-workbench__link-button"
+                      :data-testid="`cancel-replay-dead-letter-${deadLetter.id}`"
+                      :disabled="replayingDeadLetterId === deadLetter.id"
+                      @click="cancelReplay"
+                    >取消</button>
+                  </template>
+                </template>
+              </div>
             </li>
           </ol>
         </div>
@@ -774,6 +806,7 @@ import {
   normalizeIntegrationProjectId,
   getExternalSystemSchema,
   installIntegrationStaging,
+  isDeadLetterReplayable,
   listIntegrationDeadLetters,
   listIntegrationPipelineRuns,
   listIntegrationStagingDescriptors,
@@ -781,6 +814,7 @@ import {
   listIntegrationAdapters,
   listWorkbenchExternalSystems,
   previewIntegrationTemplate,
+  replayIntegrationDeadLetter,
   runIntegrationPipeline,
   testExternalSystemConnection,
   upsertWorkbenchExternalSystem,
@@ -934,6 +968,8 @@ const lastDryRunResult = ref<IntegrationPipelineRunResult | null>(null)
 const pipelineRuns = ref<IntegrationPipelineRun[]>([])
 const deadLetters = ref<IntegrationDeadLetter[]>([])
 const expandedRunIds = ref<Set<string>>(new Set())
+const confirmReplayDeadLetterId = ref('')
+const replayingDeadLetterId = ref('')
 const statusMessage = ref('')
 const statusKind = ref<'idle' | 'success' | 'error'>('idle')
 const pipelineName = ref('')
@@ -2344,6 +2380,48 @@ function toggleRunSummaries(runId: string): void {
   expandedRunIds.value = next
 }
 
+// Two-step confirm before any live replay. Replay re-runs the pipeline with the
+// stored payload (a real target/ERP write), so it mirrors the deliberate
+// allowSaveOnlyRun opt-in used for Save-only runs in this view.
+function requestReplay(deadLetterId: string): void {
+  confirmReplayDeadLetterId.value = deadLetterId
+}
+
+function cancelReplay(): void {
+  confirmReplayDeadLetterId.value = ''
+}
+
+async function replayDeadLetter(deadLetter: IntegrationDeadLetter): Promise<void> {
+  if (!isDeadLetterReplayable(deadLetter)) {
+    setStatus('仅可重放 open 状态的 dead letter', 'error')
+    return
+  }
+  replayingDeadLetterId.value = deadLetter.id
+  try {
+    const result = await replayIntegrationDeadLetter(deadLetter.id, {
+      ...currentScope(),
+      mode: pipelineRunMode.value,
+    })
+    // Verdict is the ERP write outcome (rowsFailed) alone. A write that
+    // SUCCEEDED but whose markReplayed bookkeeping failed comes back with the
+    // letter still 'open' + a warning (pipeline-runner.cjs:732-756); that is
+    // still a success — prompting a retry there would risk a duplicate write.
+    const rowsFailed = Number(result.replay?.metrics?.rowsFailed ?? 0)
+    if (rowsFailed > 0) {
+      setStatus(`Replay 未完全成功：dead letter ${deadLetter.id} 仍未解决`, 'error')
+    } else {
+      const warning = result.warning?.message ? `（${result.warning.message}）` : ''
+      setStatus(`Replay 成功：dead letter ${deadLetter.id} 已重放${warning}`, 'success')
+    }
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), 'error')
+  } finally {
+    replayingDeadLetterId.value = ''
+    confirmReplayDeadLetterId.value = ''
+    await refreshPipelineObservation(true)
+  }
+}
+
 async function savePipeline(): Promise<void> {
   savingPipeline.value = true
   try {
@@ -3287,6 +3365,22 @@ watch(showAdvancedConnectors, () => {
   min-height: 0;
   max-height: 200px;
   margin: 4px 0 0;
+}
+
+.integration-workbench__dead-letter-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.integration-workbench__badge--retryable {
+  background: #e3f3e8;
+  color: #1f6f43;
+}
+
+.integration-workbench__button--ghost {
+  background: transparent;
 }
 
 .integration-workbench__link-button {

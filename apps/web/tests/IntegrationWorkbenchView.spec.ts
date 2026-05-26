@@ -1199,8 +1199,10 @@ describe('IntegrationWorkbenchView', () => {
     expect(scopeStatus.textContent).toContain('default:integration-core')
   })
 
-  it('renders run monitoring with row-level results and read-only dead-letter display', async () => {
-    apiFetchMock.mockImplementation(async (url: string) => {
+  it('renders run monitoring with row-level results and confirm-gated dead-letter replay', async () => {
+    const replayBodies: Array<Record<string, unknown>> = []
+    let deadLetterFetches = 0
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
       // onMounted bootstrap (refreshBootstrap)
       if (url === '/api/integration/adapters') return jsonResponse([])
       if (url.startsWith('/api/integration/external-systems')) return jsonResponse([])
@@ -1235,6 +1237,9 @@ describe('IntegrationWorkbenchView', () => {
         ])
       }
       if (url === '/api/integration/dead-letters?tenantId=default&pipelineId=pipe_mon&status=open&limit=5') {
+        deadLetterFetches += 1
+        // After replay, the letter leaves the open list.
+        if (deadLetterFetches >= 2) return jsonResponse([])
         return jsonResponse([
           {
             id: 'dl_mon_1',
@@ -1249,6 +1254,14 @@ describe('IntegrationWorkbenchView', () => {
             status: 'open',
           },
         ])
+      }
+      if (url === '/api/integration/dead-letters/dl_mon_1/replay') {
+        expect(init?.method).toBe('POST')
+        replayBodies.push(JSON.parse(String(init?.body)))
+        return jsonResponse({
+          deadLetter: { id: 'dl_mon_1', status: 'replayed' },
+          replay: { run: { id: 'run_mon_2' }, metrics: { rowsWritten: 1, rowsFailed: 0 } },
+        })
       }
       throw new Error(`unexpected URL ${url}`)
     })
@@ -1293,14 +1306,243 @@ describe('IntegrationWorkbenchView', () => {
     expect(summaries.textContent).toContain('K3-9001')
     expect(summaries.textContent).toContain('MAT-002')
 
-    // Dead-letter is read-only (error code / message / status). DF-N1 surfaces
-    // no replay action — replay is deferred to its own PR — so neither the
-    // replay button nor the retryability badge is rendered.
-    const dlRow = container.querySelector('[data-testid="dead-letter-dl_mon_1"]') as HTMLElement
-    expect(dlRow).not.toBeNull()
-    expect(dlRow.textContent).toContain('VALIDATION_FAILED')
-    expect(dlRow.textContent).toContain('open')
-    expect(container.querySelector('[data-testid="replay-dead-letter-dl_mon_1"]')).toBeNull()
-    expect(container.querySelector('[data-testid="dead-letter-retryable-dl_mon_1"]')).toBeNull()
+    // Open dead-letter shows as retryable.
+    expect(container.querySelector('[data-testid="dead-letter-dl_mon_1"]')).not.toBeNull()
+    expect((container.querySelector('[data-testid="dead-letter-retryable-dl_mon_1"]') as HTMLElement).textContent).toContain('可重放')
+
+    // Replay requires a two-step confirm: prepare click does NOT POST.
+    const prepareBtn = container.querySelector('[data-testid="replay-dead-letter-dl_mon_1"]') as HTMLButtonElement
+    expect(prepareBtn).not.toBeNull()
+    expect(container.querySelector('[data-testid="confirm-replay-dead-letter-dl_mon_1"]')).toBeNull()
+    prepareBtn.click()
+    await flushUi()
+    expect(replayBodies).toHaveLength(0)
+
+    // Confirm click POSTs to the existing replay route with the scoped body.
+    const confirmBtn = container.querySelector('[data-testid="confirm-replay-dead-letter-dl_mon_1"]') as HTMLButtonElement
+    expect(confirmBtn).not.toBeNull()
+    confirmBtn.click()
+    // Replay → success status → finally awaits refreshPipelineObservation (two
+    // parallel fetches + re-render); drain the full async chain.
+    await flushUi(15)
+    expect(replayBodies).toEqual([{ tenantId: 'default', workspaceId: null, mode: 'manual' }])
+
+    // Observation reloaded after replay; the replayed letter left the open list.
+    expect(deadLetterFetches).toBeGreaterThanOrEqual(2)
+    expect(container.querySelector('[data-testid="dead-letter-dl_mon_1"]')).toBeNull()
+    expect(container.textContent).toContain('Replay 成功')
+  })
+
+  it('treats a successful replay carrying a markReplayed warning as success (no false retry prompt)', async () => {
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url.startsWith('/api/integration/external-systems')) return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/runs?tenantId=default&pipelineId=pipe_warn&limit=5') return jsonResponse([])
+      if (url === '/api/integration/dead-letters?tenantId=default&pipelineId=pipe_warn&status=open&limit=5') {
+        return jsonResponse([
+          { id: 'dl_warn_1', tenantId: 'default', workspaceId: null, pipelineId: 'pipe_warn', runId: 'run_x', errorCode: 'TARGET_5XX', errorMessage: 'gateway timeout', status: 'open' },
+        ])
+      }
+      if (url === '/api/integration/dead-letters/dl_warn_1/replay') {
+        expect(init?.method).toBe('POST')
+        // ERP write SUCCEEDED (rowsFailed 0), but markReplayed bookkeeping failed:
+        // backend returns success + warning with the letter still 'open'
+        // (pipeline-runner.cjs:732-756).
+        return jsonResponse({
+          deadLetter: { id: 'dl_warn_1', status: 'open' },
+          replay: { run: { id: 'run_y' }, metrics: { rowsWritten: 1, rowsFailed: 0 } },
+          warning: { code: 'MARK_REPLAYED_FAILED', message: 'bookkeeping failed' },
+        })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi()
+
+    const pipelineIdInput = container.querySelector('[data-testid="pipeline-id"]') as HTMLInputElement
+    pipelineIdInput.value = 'pipe_warn'
+    pipelineIdInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="refresh-observation"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container.querySelector('[data-testid="replay-dead-letter-dl_warn_1"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container.querySelector('[data-testid="confirm-replay-dead-letter-dl_warn_1"]') as HTMLButtonElement).click()
+    await flushUi(15)
+
+    // A successful write must read as success even though the letter stayed
+    // 'open' and a warning came back — and must NOT show the retry prompt
+    // (which would invite a duplicate ERP write). The warning is surfaced.
+    expect(container.textContent).toContain('Replay 成功')
+    expect(container.textContent).toContain('bookkeeping failed')
+    expect(container.textContent).not.toContain('未完全成功')
+  })
+
+  it('does not offer replay for a non-open (replayed/discarded) dead-letter', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url.startsWith('/api/integration/external-systems')) return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/runs?tenantId=default&pipelineId=pipe_np&limit=5') return jsonResponse([])
+      if (url === '/api/integration/dead-letters?tenantId=default&pipelineId=pipe_np&status=open&limit=5') {
+        // A letter already 'replayed' must NOT be replayable again (a second
+        // live ERP write); the only-open guard must hide the replay button.
+        return jsonResponse([
+          { id: 'dl_np_1', tenantId: 'default', workspaceId: null, pipelineId: 'pipe_np', runId: 'run_z', errorCode: 'VALIDATION_FAILED', errorMessage: 'missing code', status: 'replayed' },
+        ])
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi()
+
+    const pipelineIdInput = container.querySelector('[data-testid="pipeline-id"]') as HTMLInputElement
+    pipelineIdInput.value = 'pipe_np'
+    pipelineIdInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="refresh-observation"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(container.querySelector('[data-testid="dead-letter-dl_np_1"]')).not.toBeNull()
+    expect((container.querySelector('[data-testid="dead-letter-retryable-dl_np_1"]') as HTMLElement).textContent).toContain('不可重放')
+    expect(container.querySelector('[data-testid="replay-dead-letter-dl_np_1"]')).toBeNull()
+  })
+
+  it('surfaces a 403 permission error on replay without removing the dead-letter', async () => {
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url.startsWith('/api/integration/external-systems')) return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/runs?tenantId=default&pipelineId=pipe_perm&limit=5') return jsonResponse([])
+      if (url === '/api/integration/dead-letters?tenantId=default&pipelineId=pipe_perm&status=open&limit=5') {
+        return jsonResponse([
+          { id: 'dl_perm_1', tenantId: 'default', workspaceId: null, pipelineId: 'pipe_perm', runId: 'run_p', errorCode: 'VALIDATION_FAILED', errorMessage: 'missing code', status: 'open' },
+        ])
+      }
+      if (url === '/api/integration/dead-letters/dl_perm_1/replay') {
+        expect(init?.method).toBe('POST')
+        // Backend route enforces requireAccess(req, 'write').
+        return new Response(
+          JSON.stringify({ ok: false, error: { code: 'FORBIDDEN', message: 'write permission required' } }),
+          { status: 403, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi()
+
+    const pipelineIdInput = container.querySelector('[data-testid="pipeline-id"]') as HTMLInputElement
+    pipelineIdInput.value = 'pipe_perm'
+    pipelineIdInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="refresh-observation"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container.querySelector('[data-testid="replay-dead-letter-dl_perm_1"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container.querySelector('[data-testid="confirm-replay-dead-letter-dl_perm_1"]') as HTMLButtonElement).click()
+    await flushUi(15)
+
+    // Permission failure is surfaced and the dead-letter stays put (the panel
+    // reflects server truth on refresh — there is no optimistic removal).
+    expect(container.textContent).toContain('write permission required')
+    expect(container.querySelector('[data-testid="dead-letter-dl_perm_1"]')).not.toBeNull()
+  })
+
+  it('locks the confirm button while a replay is in flight (no double-submit window)', async () => {
+    let resolveReplay!: (v: Response) => void
+    let replayCalls = 0
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url.startsWith('/api/integration/external-systems')) return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/runs?tenantId=default&pipelineId=pipe_if&limit=5') return jsonResponse([])
+      if (url === '/api/integration/dead-letters?tenantId=default&pipelineId=pipe_if&status=open&limit=5') {
+        return jsonResponse([
+          { id: 'dl_if_1', tenantId: 'default', workspaceId: null, pipelineId: 'pipe_if', runId: 'run_if', errorCode: 'VALIDATION_FAILED', errorMessage: 'missing code', status: 'open' },
+        ])
+      }
+      if (url === '/api/integration/dead-letters/dl_if_1/replay') {
+        replayCalls += 1
+        // Hold the request open so the in-flight UI state is observable.
+        return new Promise<Response>((resolve) => { resolveReplay = resolve })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi()
+
+    const pipelineIdInput = container.querySelector('[data-testid="pipeline-id"]') as HTMLInputElement
+    pipelineIdInput.value = 'pipe_if'
+    pipelineIdInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="refresh-observation"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container.querySelector('[data-testid="replay-dead-letter-dl_if_1"]') as HTMLButtonElement).click()
+    await flushUi()
+    const confirmBtn = container.querySelector('[data-testid="confirm-replay-dead-letter-dl_if_1"]') as HTMLButtonElement
+    expect(confirmBtn).not.toBeNull()
+    confirmBtn.click()
+    await flushUi()
+
+    // Request held open: the confirm button is disabled and shows the busy label,
+    // so a second click cannot fire another POST.
+    expect(confirmBtn.disabled).toBe(true)
+    expect(confirmBtn.textContent).toContain('Replay 中…')
+    expect(replayCalls).toBe(1)
+
+    // Resolve and let the flow complete.
+    resolveReplay(new Response(
+      JSON.stringify({ ok: true, data: { deadLetter: { id: 'dl_if_1', status: 'replayed' }, replay: { run: { id: 'run_if2' }, metrics: { rowsFailed: 0 } } } }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ))
+    await flushUi(15)
+    expect(replayCalls).toBe(1)
+    expect(container.textContent).toContain('Replay 成功')
   })
 })
