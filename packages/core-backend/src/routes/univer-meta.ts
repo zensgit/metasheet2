@@ -98,6 +98,7 @@ import { StorageServiceImpl } from '../services/StorageService'
 import { createUploadMiddleware, loadMulter } from '../types/multer'
 import type { RequestWithFile } from '../types/multer'
 import { MultitableFormulaEngine } from '../multitable/formula-engine'
+import { FormulaEngine } from '../formula/engine'
 import { validateRecord, getDefaultValidationRules } from '../multitable/field-validation-engine'
 import type { FieldValidationConfig } from '../multitable/field-validation'
 import { BATCH1_FIELD_TYPES, coerceBatch1Value, normalizeMultiSelectValue, validateLongTextValue } from '../multitable/field-codecs'
@@ -172,6 +173,18 @@ import {
 } from '../multitable/xlsx-service'
 
 const multitableFormulaEngine = new MultitableFormulaEngine()
+
+// Formula dry-run (#5a, design #1860): a no-DB engine is the hard backstop — combined with the
+// wrapper's A1/range pre-eval gate, dry-run physically cannot reach the database. The stub's only
+// method throws, so any (gate-escaped) cell/range ref surfaces as a runtime diagnostic, never a query.
+const DRY_RUN_NO_DB = {
+  selectFrom() { throw new Error('formula dry-run does not permit database access') },
+} as unknown as NonNullable<ConstructorParameters<typeof FormulaEngine>[0]>['db']
+const dryRunFormulaEngine = new MultitableFormulaEngine(new FormulaEngine({ db: DRY_RUN_NO_DB }))
+// Structural caps for the user-supplied expression (no hard in-process timeout — design #1860 §3.3).
+const DRY_RUN_MAX_EXPRESSION_LEN = 4000
+const DRY_RUN_MAX_REFERENCED_FIELDS = 64
+const DRY_RUN_MAX_PAREN_DEPTH = 32
 
 // Observation-readiness logger for the multitable H-series. Emits the stable
 // `[multitable.template.install]` event consumed by the H-series observation
@@ -5867,6 +5880,55 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] view-aggregate failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to aggregate view' } })
+    }
+  })
+
+  // Formula dry-run (#5a, design #1860): evaluate an UNSAVED formula expression against caller-supplied
+  // sample values. Pure in-memory ({fldId} refs only; A1/range rejected) over a no-DB engine.
+  router.post('/sheets/:sheetId/formula/dry-run', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const body = (req.body ?? {}) as { expression?: unknown; sampleValues?: unknown }
+    const expression = typeof body.expression === 'string' ? body.expression : ''
+    if (!sheetId || !expression.trim()) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and a non-empty expression are required' } })
+    }
+    const sampleValues =
+      body.sampleValues && typeof body.sampleValues === 'object' && !Array.isArray(body.sampleValues)
+        ? (body.sampleValues as Record<string, unknown>)
+        : {}
+    // Structural caps (no hard timeout) — reject before any eval.
+    if (expression.length > DRY_RUN_MAX_EXPRESSION_LEN) {
+      return res.status(413).json({ ok: false, error: { code: 'DRYRUN_EXPRESSION_TOO_LONG', message: `Expression exceeds ${DRY_RUN_MAX_EXPRESSION_LEN} characters` } })
+    }
+    let depth = 0
+    let maxDepth = 0
+    for (const ch of expression) {
+      if (ch === '(' || ch === '[') maxDepth = Math.max(maxDepth, ++depth)
+      else if (ch === ')' || ch === ']') depth = Math.max(0, depth - 1)
+    }
+    if (maxDepth > DRY_RUN_MAX_PAREN_DEPTH) {
+      return res.status(422).json({ ok: false, error: { code: 'DRYRUN_TOO_DEEP', message: `Expression nesting exceeds depth ${DRY_RUN_MAX_PAREN_DEPTH}` } })
+    }
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRowShared(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageFields) return sendForbidden(res)
+
+      if (dryRunFormulaEngine.extractFieldReferences(expression).length > DRY_RUN_MAX_REFERENCED_FIELDS) {
+        return res.status(422).json({ ok: false, error: { code: 'DRYRUN_TOO_MANY_REFS', message: `Expression references more than ${DRY_RUN_MAX_REFERENCED_FIELDS} fields` } })
+      }
+      const fields = await loadFieldsForSheetShared(pool.query.bind(pool), sheetId)
+      const data = await dryRunFormulaEngine.dryRun(expression, sampleValues, fields.map((f) => ({ id: f.id, type: f.type })))
+      return res.json({ ok: true, data })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] formula dry-run failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to dry-run formula' } })
     }
   })
 
