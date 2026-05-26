@@ -15,6 +15,15 @@
     <span v-if="sortDirection" class="meta-field-header__sort">
       {{ sortDirection === 'asc' ? '\u25B2' : '\u25BC' }}
     </span>
+    <button
+      type="button"
+      class="meta-field-header__pin"
+      :class="{ 'meta-field-header__pin--on': frozen }"
+      :aria-label="pinLabel"
+      :title="pinLabel"
+      @click.stop="emit('toggle-freeze')"
+      @mousedown.stop
+    >&#x1F4CC;</button>
     <div
       class="meta-field-header__resize"
       @mousedown.stop.prevent="onResizeStart"
@@ -25,6 +34,8 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import type { MetaField } from '../types'
+import { useLocale } from '../../composables/useLocale'
+import { metaCoreLabel } from '../utils/meta-core-labels'
 
 const FIELD_ICONS: Record<string, string> = {
   string: 'Aa', longText: '\u00B6', number: '#', boolean: '\u2611', date: '\u{1F4C5}', dateTime: '\u{1F552}', select: '\u25CF', multiSelect: '\u25C9',
@@ -38,13 +49,19 @@ const props = defineProps<{
   sortDirection?: 'asc' | 'desc' | null
   sortable?: boolean
   width?: number
+  frozen?: boolean
+  frozenLeft?: number | null
 }>()
 
 const emit = defineEmits<{
   (e: 'toggle-sort'): void
   (e: 'resize', fieldId: string, width: number): void
   (e: 'reorder', fromFieldId: string, toFieldId: string): void
+  (e: 'toggle-freeze'): void
 }>()
+
+const { isZh } = useLocale()
+const pinLabel = computed(() => metaCoreLabel(props.frozen ? 'grid.unfreezeColumns' : 'grid.freezeUpToColumn', isZh.value))
 
 const isDragOver = ref(false)
 
@@ -68,8 +85,21 @@ function onDrop(e: DragEvent) {
 const fieldTypeIcon = computed(() => FIELD_ICONS[props.field.type] ?? '?')
 
 const headerStyle = computed(() => {
-  if (!props.width) return undefined
-  return { width: `${props.width}px`, minWidth: `${props.width}px`, maxWidth: `${props.width}px` }
+  const style: Record<string, string> = {}
+  if (props.width) {
+    style.width = `${props.width}px`
+    style.minWidth = `${props.width}px`
+    style.maxWidth = `${props.width}px`
+  }
+  // frozen header: inline position:sticky overrides the CSS `position: relative`, giving horizontal
+  // stickiness; the absolute resize handle still anchors to this th (sticky is a containing block).
+  if (props.frozenLeft != null) {
+    style.position = 'sticky'
+    style.left = `${props.frozenLeft}px`
+    style.zIndex = '4'
+    style.background = '#f9fafb'
+  }
+  return Object.keys(style).length ? style : undefined
 })
 
 function onResizeStart(e: MouseEvent) {
@@ -99,6 +129,10 @@ function onResizeStart(e: MouseEvent) {
 .meta-field-header__icon { display: inline-block; width: 22px; text-align: center; color: #999; font-size: 12px; margin-right: 4px; }
 .meta-field-header__name { overflow: hidden; text-overflow: ellipsis; }
 .meta-field-header__sort { margin-left: 4px; font-size: 10px; color: #409eff; }
+.meta-field-header__pin { border: none; background: none; cursor: pointer; padding: 0 2px; margin-left: 4px; font-size: 11px; line-height: 1; opacity: 0; transition: opacity 0.12s; vertical-align: middle; }
+.meta-field-header:hover .meta-field-header__pin { opacity: 0.4; }
+.meta-field-header__pin:hover { opacity: 0.85; }
+.meta-field-header__pin--on { opacity: 0.9; }
 .meta-field-header__resize { position: absolute; top: 0; right: -4px; width: 9px; height: 100%; cursor: col-resize; z-index: 2; }
 .meta-field-header__resize:hover { background: #409eff; opacity: 0.5; }
 .meta-field-header__resize::after { content: ''; position: absolute; top: 25%; left: 3px; width: 3px; height: 50%; border-left: 1px solid transparent; border-right: 1px solid transparent; }

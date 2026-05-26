@@ -14,17 +14,20 @@
             <th v-if="enableMultiSelect" class="meta-grid__check-col">
               <input type="checkbox" :checked="allSelected" @change="toggleSelectAll" />
             </th>
-            <th class="meta-grid__row-num">#</th>
+            <th class="meta-grid__row-num" :style="{ left: `${rowNumLeft}px` }">#</th>
             <MetaFieldHeader
-              v-for="field in visibleFields"
+              v-for="(field, fi) in visibleFields"
               :key="field.id"
               :field="field"
               :sort-direction="getSortDir(field.id)"
               :sortable="isSortable(field)"
               :width="columnWidths?.[field.id]"
+              :frozen="isFrozen(fi)"
+              :frozen-left="isFrozen(fi) ? frozenLeft(fi) : null"
               @toggle-sort="emit('toggle-sort', field.id)"
               @resize="(fid, w) => emit('resize-column', fid, w)"
               @reorder="(from, to) => emit('reorder-field', from, to)"
+              @toggle-freeze="onToggleFreeze(fi)"
             />
           </tr>
         </thead>
@@ -51,7 +54,7 @@
                 <td v-if="enableMultiSelect" class="meta-grid__check-col" @click.stop>
                   <input type="checkbox" :checked="selectedIds.has(row.id)" :disabled="!rowAllowsAnyBulkAction(row.id)" @change="toggleSelectRow(row.id)" />
                 </td>
-                <td class="meta-grid__row-num">
+                <td class="meta-grid__row-num" :style="{ left: `${rowNumLeft}px` }">
                   <span>{{ startIndex + flatIndex(group, ri) + 1 }}</span>
                   <button
                     v-if="resolveRowActions(row.id).canComment"
@@ -70,7 +73,7 @@
                   :key="field.id"
                   class="meta-grid__cell"
                   :class="{ 'meta-grid__cell--editing': isEditing(row.id, field.id), 'meta-grid__cell--readonly': !isEditable(row.id, field), 'meta-grid__cell--focused': focusRow === flatIndex(group, ri) && focusCol === ci }"
-                  :style="cellStyle(row.id, field.id)"
+                  :style="cellStyle(row.id, field.id, ci)"
                   @dblclick="startEdit(row, field)"
                   @click.stop="onCellClick(flatIndex(group, ri), ci, row.id)"
                 >
@@ -137,7 +140,7 @@
               <td v-if="enableMultiSelect" class="meta-grid__check-col" @click.stop>
                 <input type="checkbox" :checked="selectedIds.has(row.id)" :disabled="!rowAllowsAnyBulkAction(row.id)" @change="toggleSelectRow(row.id)" />
               </td>
-              <td class="meta-grid__row-num">
+              <td class="meta-grid__row-num" :style="{ left: `${rowNumLeft}px` }">
                 <button class="meta-grid__expand-btn" :class="{ 'meta-grid__expand-btn--open': expandedRowIds.has(row.id) }" :aria-label="expandedRowIds.has(row.id) ? l('grid.collapseRow') : l('grid.expandRow')" @click.stop="toggleRowExpand(row.id)">&#x25B6;</button>
                 <span>{{ startIndex + ri + 1 }}</span>
                 <button
@@ -159,7 +162,7 @@
                 :aria-label="field.name"
                 class="meta-grid__cell"
                 :class="{ 'meta-grid__cell--editing': isEditing(row.id, field.id), 'meta-grid__cell--readonly': !isEditable(row.id, field), 'meta-grid__cell--focused': focusRow === ri && focusCol === ci }"
-                :style="cellStyle(row.id, field.id)"
+                :style="cellStyle(row.id, field.id, ci)"
                 @dblclick="startEdit(row, field)"
                 @click.stop="onCellClick(ri, ci, row.id)"
               >
@@ -285,6 +288,7 @@ import {
 } from '../utils/comment-affordance'
 import { isSystemField } from '../utils/system-fields'
 import { useLocale } from '../../composables/useLocale'
+import { frozenPrefixCount } from '../utils/frozen-columns'
 import {
   metaCoreLabel,
   selectedCount,
@@ -311,6 +315,7 @@ const props = defineProps<{
   canDelete?: boolean
   canBulkEdit?: boolean
   canCreate?: boolean
+  frozenLeftColumnIds?: string[]
   rowActionOverrides?: Record<string, MetaRowActions>
   fieldReadOnlyIds?: string[]
   columnWidths?: Record<string, number>
@@ -341,6 +346,7 @@ const emit = defineEmits<{
   (e: 'bulk-edit', payload: { mode: 'set' | 'clear'; recordIds: string[] }): void
   (e: 'reorder-field', fromFieldId: string, toFieldId: string): void
   (e: 'create-record'): void
+  (e: 'set-frozen', frozenLeftColumnIds: string[]): void
 }>()
 
 const { isZh } = useLocale()
@@ -488,8 +494,10 @@ const isEditable = (recordId: string, f: MetaField) =>
   resolveRowActions(recordId).canEdit && EDITABLE.has(f.type) && !isSystemField(f) && !props.fieldReadOnlyIds?.includes(f.id)
 const isEditing = (rid: string, fid: string) => editCell.value?.recordId === rid && editCell.value?.fieldId === fid
 
-function cellStyle(rid: string, fid: string) {
-  const w = props.columnWidths?.[fid]
+function cellStyle(rid: string, fid: string, ci?: number) {
+  const frozen = typeof ci === 'number' && isFrozen(ci)
+  // frozen cells need a definite width so the sticky-offset math is exact
+  const w = frozen ? colWidth(fid) : props.columnWidths?.[fid]
   const widthStyle: Record<string, string> | undefined = w
     ? { width: `${w}px`, minWidth: `${w}px`, maxWidth: `${w}px` }
     : undefined
@@ -497,8 +505,33 @@ function cellStyle(rid: string, fid: string) {
   const formatStyle = formatting
     ? composeStyleObject(undefined, formatting.cellStyles[fid])
     : undefined
-  if (!widthStyle && !formatStyle) return undefined
-  return { ...(widthStyle ?? {}), ...(formatStyle ?? {}) }
+  // frozen body cell: sticky-left + opaque bg (occludes scrolled-under content). The solid bg means
+  // frozen cells don't show row hover/selection tint — accepted MVP limitation (see design §3).
+  const frozenStyle: Record<string, string> | undefined = frozen
+    ? { position: 'sticky', left: `${frozenLeft(ci!)}px`, zIndex: '2', background: '#fff' }
+    : undefined
+  if (!widthStyle && !formatStyle && !frozenStyle) return undefined
+  return { ...(widthStyle ?? {}), ...(formatStyle ?? {}), ...(frozenStyle ?? {}) }
+}
+
+// ── frozen columns (left-prefix) ──────────────────────────────────────────
+const FROZEN_DEFAULT_WIDTH = 160
+const CHECK_COL_W = 36
+const ROW_NUM_W = 56
+const frozenCount = computed(() => frozenPrefixCount(props.visibleFields.map((f) => f.id), props.frozenLeftColumnIds ?? []))
+function isFrozen(i: number) { return i < frozenCount.value }
+function colWidth(fid: string) { return props.columnWidths?.[fid] ?? FROZEN_DEFAULT_WIDTH }
+const stickyBaseLeft = computed(() => (props.enableMultiSelect ? CHECK_COL_W : 0) + ROW_NUM_W)
+function frozenLeft(i: number) {
+  let left = stickyBaseLeft.value
+  for (let j = 0; j < i; j++) left += colWidth(props.visibleFields[j].id)
+  return left
+}
+// base-fix (global): row-num sits AFTER check-col, not overlapping at left:0
+const rowNumLeft = computed(() => (props.enableMultiSelect ? CHECK_COL_W : 0))
+function onToggleFreeze(i: number) {
+  if (i === frozenCount.value - 1) emit('set-frozen', [])
+  else emit('set-frozen', props.visibleFields.slice(0, i + 1).map((f) => f.id))
 }
 
 function rowStyle(rid: string): Record<string, string> | undefined {
