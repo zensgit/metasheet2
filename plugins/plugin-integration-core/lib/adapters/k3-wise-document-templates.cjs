@@ -96,6 +96,8 @@ const K3_WISE_DOCUMENT_TEMPLATES = {
     label: 'K3 WISE Material',
     operations: ['upsert'],
     savePath: '/K3API/Material/Save',
+    readPath: '/K3API/Material/GetDetail',
+    readMethod: 'POST',
     submitPath: '/K3API/Material/Submit',
     auditPath: '/K3API/Material/Audit',
     bodyKey: 'Data',
@@ -211,6 +213,7 @@ function normalizeTemplate(template, field) {
   }
   if (template.submitPath) normalized.submitPath = assertRelativeEndpoint(template.submitPath, `${field}.submitPath`)
   if (template.auditPath) normalized.auditPath = assertRelativeEndpoint(template.auditPath, `${field}.auditPath`)
+  if (template.readPath) normalized.readPath = assertRelativeEndpoint(template.readPath, `${field}.readPath`)
   normalized.k3Template = {
     id: template.id,
     version: template.version,

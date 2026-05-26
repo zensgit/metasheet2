@@ -19,6 +19,11 @@ const {
   __internals: sqlExecutorInternals,
   createK3WiseSqlServerReadOnlyExecutor,
 } = require(path.join(__dirname, '..', 'lib', 'adapters', 'k3-wise-sqlserver-executor.cjs'))
+const materialDetailFixture = require(path.join(__dirname, 'fixtures', 'k3-wise-material-detail-redacted.json'))
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value))
+}
 
 function jsonResponse(status, body, headers = {}) {
   return {
@@ -97,6 +102,33 @@ function createK3FetchMock() {
         })
       }
       return jsonResponse(200, { success: true, externalId: `item-${record.FNumber}`, billNo: record.FNumber })
+    }
+    if (parsed.pathname === '/K3API/Material/GetDetail') {
+      const materialNumber = body && body.Data && body.Data.FNumber
+      if (!materialNumber) {
+        return jsonResponse(200, {
+          StatusCode: 201,
+          Message: 'FNumber is required',
+          Data: [],
+        })
+      }
+      if (materialNumber === 'READFAIL') {
+        return jsonResponse(200, {
+          StatusCode: 500,
+          Message: 'material detail not found',
+          Data: [],
+        })
+      }
+      if (materialNumber === 'HTTPFAIL') {
+        return jsonResponse(503, {
+          StatusCode: 503,
+          Message: 'temporary upstream failure',
+        })
+      }
+      const response = cloneJson(materialDetailFixture)
+      response.Data[0].FNumber = materialNumber
+      response.Data[0].Data.FNumber = materialNumber
+      return jsonResponse(200, response)
     }
     if (parsed.pathname === '/K3API/Material/Submit') {
       return jsonResponse(200, { success: true, submitted: body.Number })
@@ -341,6 +373,14 @@ async function testK3WebApiAdapter() {
 
   const targetOnlyRead = await adapter.read({ object: 'material' }).catch((error) => error)
   assert.ok(targetOnlyRead instanceof UnsupportedAdapterOperationError, 'K3 WebAPI target rejects read')
+  const targetOnlyReadWithKey = await adapter.read({
+    object: 'material',
+    filters: { FNumber: 'MAT-DEFAULT-OFF' },
+  }).catch((error) => error)
+  assert.ok(
+    targetOnlyReadWithKey instanceof UnsupportedAdapterOperationError,
+    'K3 WebAPI material read stays default-off even when the request contains a valid FNumber',
+  )
 
   const failingLogin = createK3WiseWebApiAdapter({
     system: createK3WebApiSystem({
@@ -522,6 +562,134 @@ async function testK3WebApiAdapter() {
   assert.ok(invalidObjectEndpoint instanceof AdapterValidationError, 'absolute object endpoint is rejected')
 
   assert.equal(K3WiseWebApiAdapterError.name, 'K3WiseWebApiAdapterError')
+}
+
+async function testK3WebApiMaterialDetailReadSmoke() {
+  const { calls, fetchImpl } = createK3FetchMock()
+  const adapter = createK3WiseWebApiAdapter({
+    system: createK3WebApiSystem({
+      config: {
+        baseUrl: 'https://k3.example.test',
+        autoSubmit: true,
+        autoAudit: true,
+        objects: {
+          material: {
+            operations: ['upsert', 'read'],
+          },
+        },
+      },
+    }),
+    fetchImpl,
+  })
+
+  const read = await adapter.read({
+    object: 'material',
+    filters: { FNumber: 'MAT-GATE-001' },
+    options: { referenceFields: ['FUnitGroupID', 'FBaseUnitID', 'FAcctID', 'FTrack'] },
+  })
+
+  assert.equal(read.records.length, 1, 'Material/GetDetail smoke returns exactly one record')
+  assert.equal(read.nextCursor, null, 'single-detail smoke never returns a cursor')
+  assert.equal(read.done, true, 'single-detail smoke is terminal')
+  assert.equal(read.metadata.mode, 'material-detail-reference-smoke')
+  assert.equal(read.metadata.readOnly, true)
+  assert.equal(read.metadata.requestedNumber, 'MAT-GATE-001')
+  assert.equal(read.metadata.readPath, '/K3API/Material/GetDetail')
+  assert.deepEqual(read.metadata.referenceFields, ['FUnitGroupID', 'FBaseUnitID', 'FAcctID'])
+  assert.equal(read.metadata.referenceObjectCount, 3)
+
+  const record = read.records[0]
+  assert.equal(record.FNumber, 'MAT-GATE-001', 'requested FNumber is echoed onto the record')
+  assert.deepEqual(
+    record._k3ReferenceObjects.FUnitGroupID,
+    { FName: '<unit-group-name>' },
+    'FUnitGroupID with FName-only shape is accepted because the customer sample exposes it',
+  )
+  assert.deepEqual(record._k3ReferenceObjects.FBaseUnitID, {
+    FNumber: '<base-unit-number>',
+    FName: '<base-unit-name>',
+  })
+  assert.deepEqual(record._k3ReferenceObjects.FAcctID, {
+    FID: '<inventory-account-id>',
+    FName: '<inventory-account-name>',
+  })
+  assert.equal(record._k3ReferenceObjects.FTrack, undefined, 'non-object reference candidates are not harvested')
+
+  const getDetailCalls = calls.filter((call) => call.pathname === '/K3API/Material/GetDetail')
+  assert.equal(getDetailCalls.length, 1, 'read smoke calls Material/GetDetail once')
+  assert.equal(getDetailCalls[0].options.method, 'POST')
+  assert.equal(getDetailCalls[0].options.headers['X-K3-Session'], 'k3-session-1')
+  assert.deepEqual(getDetailCalls[0].body, {
+    Data: { FNumber: 'MAT-GATE-001' },
+    GetProperty: false,
+  })
+  assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Save'), false, 'read smoke must not Save')
+  assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Submit'), false, 'read smoke must not Submit')
+  assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Audit'), false, 'read smoke must not Audit')
+
+  const missingKey = await adapter.read({ object: 'material' }).catch((error) => error)
+  assert.ok(missingKey instanceof AdapterValidationError, 'Material read requires a concrete FNumber/template key')
+  assert.equal(missingKey.details.code, 'K3_WISE_READ_KEY_REQUIRED')
+
+  const broadFilter = await adapter.read({
+    object: 'material',
+    filters: { FNumber: 'MAT-GATE-001', modifiedSince: '2026-05-01T00:00:00Z' },
+  }).catch((error) => error)
+  assert.ok(broadFilter instanceof AdapterValidationError, 'broad list-style filters are blocked')
+  assert.equal(broadFilter.details.code, 'K3_WISE_READ_FILTER_UNSUPPORTED')
+
+  const cursorRead = await adapter.read({
+    object: 'material',
+    filters: { FNumber: 'MAT-GATE-001' },
+    cursor: 'next-page',
+  }).catch((error) => error)
+  assert.ok(cursorRead instanceof AdapterValidationError, 'cursor pagination is blocked')
+  assert.equal(cursorRead.details.code, 'K3_WISE_READ_LIST_UNSUPPORTED')
+
+  const watermarkRead = await adapter.read({
+    object: 'material',
+    filters: { FNumber: 'MAT-GATE-001' },
+    watermark: { FModifyDate: '2026-05-01T00:00:00Z' },
+  }).catch((error) => error)
+  assert.ok(watermarkRead instanceof AdapterValidationError, 'watermark list reads are blocked')
+  assert.equal(watermarkRead.details.code, 'K3_WISE_READ_LIST_UNSUPPORTED')
+
+  const businessFailure = await adapter.read({
+    object: 'material',
+    filters: { FNumber: 'READFAIL' },
+  }).catch((error) => error)
+  assert.ok(businessFailure instanceof K3WiseWebApiAdapterError, 'K3 business failure is surfaced as adapter error')
+  assert.equal(businessFailure.details.code, 'K3_WISE_READ_BUSINESS_ERROR')
+  assert.match(businessFailure.message, /material detail not found/)
+
+  const transportFailure = await adapter.read({
+    object: 'material',
+    filters: { FNumber: 'HTTPFAIL' },
+  }).catch((error) => error)
+  assert.ok(transportFailure instanceof K3WiseWebApiAdapterError, 'HTTP failure is surfaced as read failure')
+  assert.equal(transportFailure.details.code, 'K3_WISE_READ_FAILED')
+  assert.equal(transportFailure.details.path, '/K3API/Material/GetDetail')
+
+  const bomReadAdapter = createK3WiseWebApiAdapter({
+    system: createK3WebApiSystem({
+      config: {
+        baseUrl: 'https://k3.example.test',
+        autoSubmit: false,
+        autoAudit: false,
+        objects: {
+          bom: {
+            operations: ['upsert', 'read'],
+          },
+        },
+      },
+    }),
+    fetchImpl,
+  })
+  const bomRead = await bomReadAdapter.read({
+    object: 'bom',
+    filters: { FNumber: 'BOM-001' },
+  }).catch((error) => error)
+  assert.ok(bomRead instanceof UnsupportedAdapterOperationError, 'read-only smoke does not unlock BOM reads')
 }
 
 async function testK3WebApiAuthorityCodeToken() {
@@ -947,6 +1115,7 @@ async function testK3WebApiAutoFlagCoercion() {
 
 async function main() {
   await testK3WebApiAdapter()
+  await testK3WebApiMaterialDetailReadSmoke()
   await testK3WebApiAuthorityCodeToken()
   await testK3WebApiSaveBusinessEvidence()
   testSqlServerConnectionConfigNormalization()
