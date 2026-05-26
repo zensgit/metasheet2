@@ -65,6 +65,7 @@ import {
   tryResolveView as tryResolveViewShared,
   type MultitableViewConfig as SharedMultitableViewConfig,
 } from '../multitable/loaders'
+import { parseAggregations, aggregateField, type AggregationFn } from '../multitable/aggregation-helpers'
 import { ensureLegacyBase as ensureLegacyBaseShared } from '../multitable/provisioning'
 import {
   MultitableTemplateConflictError,
@@ -5737,6 +5738,90 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] xlsx export failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to export XLSX' } })
+    }
+  })
+
+  // Aggregation footer (benchmark v2 #4-3b-1): aggregate the full (unpaginated) PERSISTED-view-filtered
+  // record set. view-config-driven (view.config.aggregations), no ad-hoc params. Field visibility uses
+  // the D3c export composite (hidden fields' aggregates OMITTED — leak guard). Max-rows hard-fails (413).
+  router.get('/sheets/:sheetId/view-aggregate', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const viewId = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : ''
+    const search = typeof req.query.search === 'string' ? req.query.search.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+    try {
+      const pool = poolManager.get()
+      const sheet = await loadSheetRowShared(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      let view: SharedMultitableViewConfig | null = null
+      if (viewId) {
+        view = await tryResolveViewShared(pool.query.bind(pool), viewId)
+        if (!view || view.sheetId !== sheetId) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
+        }
+      }
+      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      if (!capabilities.canRead) return sendForbidden(res)
+
+      // max-rows guard: COUNT first, HARD-FAIL (413) with total — never truncate (aggregates must be exact)
+      const maxRows = Number(process.env.MULTITABLE_AGGREGATE_MAX_ROWS || '10000')
+      const countRes = await pool.query('SELECT COUNT(*)::int AS n FROM meta_records WHERE sheet_id = $1', [sheetId])
+      const rawCount = Number((countRes.rows[0] as { n?: number })?.n ?? 0)
+      if (rawCount > maxRows) {
+        return res.status(413).json({ ok: false, error: { code: 'AGGREGATE_TOO_LARGE', message: `Too many rows to aggregate (${rawCount} > ${maxRows})`, total: rawCount } })
+      }
+
+      // D3c permission composite → fields that may be aggregated (hidden/denied omitted)
+      const viewHiddenFieldIds = view?.hiddenFieldIds ?? []
+      const visibleFields = filterVisiblePropertyFields(await loadFieldsForSheetShared(pool.query.bind(pool), sheetId))
+      const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
+      const fieldPermissions = deriveFieldPermissions(visibleFields, capabilities, { hiddenFieldIds: viewHiddenFieldIds, fieldScopeMap })
+      const allowedFields = visibleFields.filter((field) => fieldPermissions[field.id]?.visible !== false)
+      const fieldTypeById = new Map(allowedFields.map((field) => [field.id, field.type]))
+
+      // full filtered set = all records + persisted filterInfo + search (no sort needed for aggregates)
+      const recordRes = await pool.query('SELECT id, version, data FROM meta_records WHERE sheet_id = $1', [sheetId])
+      let rows = (recordRes.rows as Array<{ id: unknown; version: unknown; data: unknown }>).map((r) => ({
+        id: String(r.id),
+        version: Number(r.version ?? 1),
+        data: normalizeJson(r.data),
+      }))
+      if (search) rows = rows.filter((rec) => recordMatchesSearch(rec, allowedFields, search))
+      const filterInfo = view ? parseMetaFilterInfo(view.filterInfo) : null
+      if (filterInfo) {
+        // computed (lookup/rollup) + hidden-field conditions are skipped here (MVP; matches /view's
+        // fieldTypeById gating). Full computed-filter parity is deferred to #4-3b-2.
+        const conditions = filterInfo.conditions.filter((c) => fieldTypeById.has(c.fieldId))
+        if (conditions.length > 0) {
+          rows = rows.filter((rec) => {
+            const matches = (c: MetaFilterCondition) => evaluateMetaFilterCondition(fieldTypeById.get(c.fieldId)!, rec.data[c.fieldId], c)
+            return filterInfo.conjunction === 'or' ? conditions.some(matches) : conditions.every(matches)
+          })
+        }
+      }
+
+      // aggregate only configured + allowed fields; disallowed (hidden) field aggregates are OMITTED
+      const aggConfig = parseAggregations(view?.config ?? null)
+      const aggregates: Record<string, { fn: AggregationFn; value: number }> = {}
+      for (const [fieldId, fn] of Object.entries(aggConfig)) {
+        const fieldType = fieldTypeById.get(fieldId)
+        if (!fieldType) continue // hidden / permission-denied / unknown → omit (no leak)
+        const value = aggregateField(rows.map((rec) => rec.data[fieldId]), fn, fieldType)
+        if (value !== null) aggregates[fieldId] = { fn, value }
+      }
+      return res.json({ ok: true, data: { total: rows.length, aggregates } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] view-aggregate failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to aggregate view' } })
     }
   })
 
