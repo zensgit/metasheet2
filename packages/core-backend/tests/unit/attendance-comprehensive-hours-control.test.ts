@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const require = createRequire(import.meta.url)
 const attendancePlugin = require('../../../../plugins/plugin-attendance/index.cjs')
@@ -594,5 +594,158 @@ describe('comprehensive-hours cap-policy persistence (V1)', () => {
   it('settingsSchema accepts comprehensiveHours.capDefaults (not stripped on save)', () => {
     expect(pluginSource).toMatch(/comprehensiveHours:\s*z\.object\(\{\s*\n\s*capDefaults:\s*z\.object\(\{/)
     expect(pluginSource).toMatch(/capDefaults:\s*z\.object\(\{\s*\n\s*month:\s*z\.number\(\)/)
+  })
+})
+
+describe('comprehensive-hours period value-plumbing (PR6)', () => {
+  const orgId = 'org-1'
+  const userId = 'u-1'
+  // Exact natural March → bridges to cycle-type 'month'.
+  const naturalMonth = {
+    periodType: 'date_range',
+    from: '2026-03-01',
+    to: '2026-03-31',
+    periodKey: '2026-03',
+    periodName: 'Mar 2026',
+    periodStart: '2026-03-01',
+    periodEnd: '2026-03-31',
+  }
+  const logger = { warn() {}, error() {}, info() {} }
+  const monthCap = (minutes: number | null) => ({ comprehensiveHours: { capDefaults: { month: minutes, quarter: null, year: null } } })
+
+  beforeEach(() => helpers.resetAttendanceSettingsCacheForTests())
+  afterEach(() => helpers.resetAttendanceSettingsCacheForTests())
+
+  function createMultitableContext() {
+    const createRecord = vi.fn().mockResolvedValue({ id: 'rec-new' })
+    const patchRecord = vi.fn().mockResolvedValue({})
+    const queryRecords = vi.fn().mockResolvedValue([])
+    const ensureObject = vi.fn().mockResolvedValue({ baseId: 'base-1', sheet: { id: 'sheet-1' } })
+    return {
+      createRecord,
+      patchRecord,
+      queryRecords,
+      // No resolveFieldIds → the sync uses identity field mapping, so logical id === physical id.
+      context: { api: { multitable: { provisioning: { ensureObject }, records: { queryRecords, createRecord, patchRecord } } } },
+    }
+  }
+
+  function createSyncDb(settings: unknown, totalMinutes = 13000) {
+    const queries: Array<{ sql: string, params: unknown[] }> = []
+    const summaryRow = {
+      total_days: 22, total_minutes: totalMinutes, total_late_minutes: 0, total_early_leave_minutes: 0,
+      normal_days: 22, late_days: 0, early_leave_days: 0, late_early_days: 0, partial_days: 0,
+      absent_days: 0, adjusted_days: 0, off_days: 9,
+    }
+    return {
+      queries,
+      async query(sql: string, params: unknown[] = []) {
+        const s = String(sql)
+        queries.push({ sql: s, params })
+        if (/FROM system_configs/i.test(s)) return [{ value: JSON.stringify(settings) }]
+        if (/is_workday THEN work_minutes/i.test(s)) return [summaryRow]
+        if (/FROM attendance_requests/i.test(s)) return []
+        if (/FROM users u/i.test(s)) return [{ user_name: 'U One', username: 'u1', meta: null }]
+        if (/FROM attendance_leave_types/i.test(s)) return []
+        if (/FROM attendance_overtime_rules/i.test(s)) return []
+        throw new Error('unmocked query: ' + s.replace(/\s+/g, ' ').slice(0, 90))
+      },
+    }
+  }
+
+  // --- value helper: stale-null + cap (no DB) ---
+  it('value helper: aligned date_range with cap → excess; others → null', () => {
+    const withCap = helpers.buildAttendanceComprehensiveHoursPeriodSummaryValues(monthCap(10560), orgId, userId, naturalMonth, 13000)
+    expect(withCap).toEqual({
+      comprehensive_hours_excess_minutes: 2440,
+      comprehensive_hours_cap_minutes: 10560,
+      comprehensive_hours_cap_source: 'org_default_by_cycle_type',
+      comprehensive_hours_cap_effective_key: expect.stringMatching(/^cfg:[0-9a-f]{12}$/),
+    })
+    const allNull = {
+      comprehensive_hours_excess_minutes: null,
+      comprehensive_hours_cap_minutes: null,
+      comprehensive_hours_cap_source: null,
+      comprehensive_hours_cap_effective_key: null,
+    }
+    expect(helpers.buildAttendanceComprehensiveHoursPeriodSummaryValues({}, orgId, userId, naturalMonth, 13000)).toEqual(allNull)
+    // Fail-closed periodType whitelist: only date_range proceeds.
+    expect(helpers.buildAttendanceComprehensiveHoursPeriodSummaryValues(monthCap(10560), orgId, userId, { ...naturalMonth, periodType: 'payroll_cycle' }, 13000)).toEqual(allNull)
+    expect(helpers.buildAttendanceComprehensiveHoursPeriodSummaryValues(monthCap(10560), orgId, userId, { ...naturalMonth, periodType: 'custom_range' }, 13000)).toEqual(allNull)
+    expect(helpers.buildAttendanceComprehensiveHoursPeriodSummaryValues(monthCap(10560), orgId, userId, { ...naturalMonth, periodType: 'some_future_type' }, 13000)).toEqual(allNull)
+    expect(helpers.buildAttendanceComprehensiveHoursPeriodSummaryValues(monthCap(10560), orgId, userId, { from: '2026-03-01', to: '2026-03-31' }, 13000)).toEqual(allNull)
+    // A non-aligned date_range still proceeds to the bridge, which yields custom_range → null.
+    expect(helpers.buildAttendanceComprehensiveHoursPeriodSummaryValues(monthCap(10560), orgId, userId, { periodType: 'date_range', from: '2026-03-02', to: '2026-03-30' }, 13000)).toEqual(allNull)
+  })
+
+  // --- stale-null through the real sync ---
+  it('sync stale-nulls the comprehensive-hours columns when no org default applies', async () => {
+    const mt = createMultitableContext()
+    const result = await helpers.syncAttendanceReportPeriodSummary(mt.context, createSyncDb(monthCap(null)), orgId, logger, { userId, period: naturalMonth })
+    expect(result.created).toBe(1)
+    const data = mt.createRecord.mock.calls[0][0].data
+    expect(data.comprehensive_hours_excess_minutes).toBeNull()
+    expect(data.comprehensive_hours_cap_minutes).toBeNull()
+    expect(data.comprehensive_hours_cap_source).toBeNull()
+    expect(data.comprehensive_hours_cap_effective_key).toBeNull()
+  })
+
+  it('sync writes the computed excess + cap companion fields when a cap is configured', async () => {
+    const mt = createMultitableContext()
+    await helpers.syncAttendanceReportPeriodSummary(mt.context, createSyncDb(monthCap(10560)), orgId, logger, { userId, period: naturalMonth })
+    const data = mt.createRecord.mock.calls[0][0].data
+    expect(data.comprehensive_hours_excess_minutes).toBe(2440)
+    expect(data.comprehensive_hours_cap_minutes).toBe(10560)
+    expect(data.comprehensive_hours_cap_source).toBe('org_default_by_cycle_type')
+    expect(data.comprehensive_hours_cap_effective_key).toMatch(/^cfg:/)
+  })
+
+  // --- cap-fingerprint re-sync (capture-and-replay through the real fingerprint mechanism) ---
+  it('re-syncs on cap change and skips when unchanged', async () => {
+    const mt = createMultitableContext()
+    const r1 = await helpers.syncAttendanceReportPeriodSummary(mt.context, createSyncDb(monthCap(10560)), orgId, logger, { userId, period: naturalMonth })
+    expect(r1.created).toBe(1)
+    const stored = mt.createRecord.mock.calls[0][0].data
+    mt.queryRecords.mockResolvedValue([{ id: 'rec-1', data: stored }])
+
+    helpers.resetAttendanceSettingsCacheForTests()
+    const r2 = await helpers.syncAttendanceReportPeriodSummary(mt.context, createSyncDb(monthCap(10560)), orgId, logger, { userId, period: naturalMonth })
+    expect(r2.skipped).toBe(1)
+    expect(mt.patchRecord).not.toHaveBeenCalled()
+
+    helpers.resetAttendanceSettingsCacheForTests()
+    const r3 = await helpers.syncAttendanceReportPeriodSummary(mt.context, createSyncDb(monthCap(9000)), orgId, logger, { userId, period: naturalMonth })
+    expect(r3.patched).toBe(1)
+    const changes = mt.patchRecord.mock.calls[0][0].changes
+    expect(changes.comprehensive_hours_cap_minutes).toBe(9000)
+    expect(changes.comprehensive_hours_excess_minutes).toBe(4000)
+  })
+
+  it('re-syncs a pre-PR6 row whose fingerprint predates the comprehensive-hours columns', async () => {
+    const mt = createMultitableContext()
+    mt.queryRecords.mockResolvedValue([{ id: 'rec-old', data: { source_fingerprint: 'stale-old-fp', field_fingerprint: 'stale-old-ff' } }])
+    const result = await helpers.syncAttendanceReportPeriodSummary(mt.context, createSyncDb(monthCap(10560)), orgId, logger, { userId, period: naturalMonth })
+    expect(result.patched).toBe(1)
+    expect(mt.patchRecord).toHaveBeenCalledTimes(1)
+  })
+
+  // --- no raw meta / snapshot-table write: snapshot writes go through the multitable records API only ---
+  it('performs no raw INSERT/UPDATE/DELETE and never touches meta_ or the snapshot table directly', async () => {
+    const mt = createMultitableContext()
+    const db = createSyncDb(monthCap(10560))
+    await helpers.syncAttendanceReportPeriodSummary(mt.context, db, orgId, logger, { userId, period: naturalMonth })
+    expect(db.queries.filter((q) => /\b(INSERT|UPDATE|DELETE)\b/i.test(q.sql))).toEqual([])
+    expect(db.queries.some((q) => /attendance_report_period_summaries|\bmeta_/i.test(q.sql))).toBe(false)
+    // The only snapshot writes are through the records API.
+    expect(mt.createRecord).toHaveBeenCalledTimes(1)
+  })
+
+  // --- no parallel producer + wiring + ordering (source-level guards) ---
+  it('no parallel comprehensive-hours producer; helper wired into the sync after the loop and before the fingerprint', () => {
+    expect(pluginSource).not.toMatch(/async function sync[A-Za-z]*Comprehensive[A-Za-z]*\b/)
+    expect(pluginSource).toMatch(/buildAttendanceComprehensiveHoursPeriodSummaryValues\(/)
+    expect(pluginSource).toMatch(
+      /for \(const column of valueColumns\)[\s\S]*?Object\.assign\(logical, comprehensiveHoursValues\)[\s\S]*?buildAttendanceReportPeriodSummarySourceFingerprint\(logical\)/,
+    )
   })
 })
