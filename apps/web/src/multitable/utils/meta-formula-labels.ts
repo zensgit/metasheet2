@@ -155,6 +155,36 @@ export function formulaDiagnosticLabel(key: FormulaDiagnosticLabelKey, isZh: boo
   return pick(DIAGNOSTIC_LABELS[key], isZh)
 }
 
+// Dry-run (#5b) diagnostics: localized by `kind`, interpolating structured context (fieldId / types /
+// Excel-sentinel `code`, all language-neutral). The server `message` is NEVER rendered here.
+export type DryRunDiagnosticInput = {
+  kind: string
+  code?: string
+  fieldId?: string
+  expectedType?: string
+  actualType?: string
+}
+
+const DRY_RUN_DIAGNOSTIC_LABELS: Record<string, LocaleText> = {
+  unknown_field: { en: 'Unknown field reference: {fieldId}', zh: '未知字段引用：{fieldId}' },
+  unsupported: { en: 'Cell/range references (e.g. A1, A1:B3) are not supported in dry-run.', zh: '试算暂不支持单元格/区域引用（如 A1、A1:B3）。' },
+  runtime: { en: 'Formula evaluated to an error: {code}', zh: '公式计算出错：{code}' },
+  type_mismatch: { en: 'Sample for {fieldId} is {actualType}, but the field type is {expectedType}.', zh: '{fieldId} 的示例值类型为 {actualType}，但字段类型为 {expectedType}。' },
+  missing_sample: { en: 'No sample value for {fieldId}; treated as empty.', zh: '{fieldId} 未提供示例值，按空值处理。' },
+}
+
+export function localizeDryRunDiagnostic(diagnostic: DryRunDiagnosticInput, isZh: boolean): string {
+  const tpl = DRY_RUN_DIAGNOSTIC_LABELS[diagnostic.kind]
+  // Unknown future kind → localized generic fallback showing only the raw kind token (language-neutral).
+  // NEVER fall back to the server `message` (would leak English into the localized UI — strict-zero).
+  if (!tpl) return isZh ? `诊断：${diagnostic.kind}` : `Diagnostic: ${diagnostic.kind}`
+  return pick(tpl, isZh)
+    .replace('{fieldId}', diagnostic.fieldId ?? '')
+    .replace('{code}', diagnostic.code ?? '')
+    .replace('{actualType}', diagnostic.actualType ?? '')
+    .replace('{expectedType}', diagnostic.expectedType ?? '')
+}
+
 export function formulaEmptyArgument(functionName: string, isZh: boolean): string {
   return isZh
     ? `${functionName} 存在空参数。`

@@ -28,6 +28,9 @@ export type MetaManagerLabelKey =
   | 'field.optionalOverride' | 'field.aggregation'
   | 'field.expression' | 'field.insertFieldToken'
   | 'field.formulaReference' | 'field.formulaSearchPlaceholder'
+  | 'field.formulaDryRun.test' | 'field.formulaDryRun.sampleHeading' | 'field.formulaDryRun.evaluating'
+  | 'field.formulaDryRun.resultHeading' | 'field.formulaDryRun.errorHeading' | 'field.formulaDryRun.invalidNumber'
+  | 'field.formulaDryRun.forbidden' | 'field.formulaDryRun.tooLarge' | 'field.formulaDryRun.requestFailed'
   | 'field.allCategories' | 'field.noMatchingFunctions'
   | 'field.maxFiles' | 'field.acceptedMimeTypes'
   | 'field.decimals' | 'field.preserve' | 'field.unit'
@@ -155,6 +158,15 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'field.expression': { en: 'Expression', zh: '表达式' },
   'field.insertFieldToken': { en: 'Insert field token', zh: '插入字段令牌' },
   'field.formulaReference': { en: 'Formula reference', zh: '公式参考' },
+  'field.formulaDryRun.test': { en: 'Test with sample data', zh: '用示例数据试算' },
+  'field.formulaDryRun.sampleHeading': { en: 'Sample values', zh: '示例值' },
+  'field.formulaDryRun.evaluating': { en: 'Evaluating…', zh: '试算中…' },
+  'field.formulaDryRun.resultHeading': { en: 'Result', zh: '结果' },
+  'field.formulaDryRun.errorHeading': { en: 'Could not evaluate', zh: '无法计算' },
+  'field.formulaDryRun.invalidNumber': { en: 'Enter a valid number', zh: '请输入有效数字' },
+  'field.formulaDryRun.forbidden': { en: 'You cannot manage fields on this sheet', zh: '你没有管理该表字段的权限' },
+  'field.formulaDryRun.tooLarge': { en: 'Expression is too large or complex to test', zh: '表达式过大或过于复杂，无法试算' },
+  'field.formulaDryRun.requestFailed': { en: 'Dry-run request failed', zh: '试算请求失败' },
   'field.formulaSearchPlaceholder': { en: 'Search SUM, IF, %, ^, &...', zh: '搜索 SUM、IF、%、^、&...' },
   'field.allCategories': { en: 'All categories', zh: '全部分类' },
   'field.noMatchingFunctions': { en: 'No matching functions.', zh: '没有匹配的函数。' },

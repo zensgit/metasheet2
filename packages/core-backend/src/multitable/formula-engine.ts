@@ -19,8 +19,12 @@ export type DryRunDiagnosticKind = 'unknown_field' | 'unsupported' | 'runtime' |
 export interface DryRunDiagnostic {
   severity: 'error' | 'warning' | 'info'
   kind: DryRunDiagnosticKind
-  message: string
+  message: string // English; for logs/debug only — the client localizes by kind/code (design #1869 §3a)
   code?: string
+  // Structured context so the client can render fully-localized templates without parsing `message`.
+  fieldId?: string
+  expectedType?: string
+  actualType?: string
 }
 export interface DryRunResult {
   success: boolean
@@ -137,7 +141,7 @@ export class MultitableFormulaEngine {
     const fieldById = new Map(fields.map((f) => [f.id, f.type]))
     for (const ref of referencedFields) {
       if (!fieldById.has(ref)) {
-        diagnostics.push({ severity: 'error', kind: 'unknown_field', message: `Unknown field reference: {${ref}}` })
+        diagnostics.push({ severity: 'error', kind: 'unknown_field', fieldId: ref, message: `Unknown field reference: {${ref}}` })
       }
     }
     // Gate (b): A1/cell/range references are unsupported (would reach the DB).
@@ -152,13 +156,13 @@ export class MultitableFormulaEngine {
     // Non-blocking advisories: type mismatch + missing sample (no silent coercion).
     for (const ref of referencedFields) {
       if (!(ref in sampleValues)) {
-        diagnostics.push({ severity: 'info', kind: 'missing_sample', message: `No sample value for {${ref}}; treated as empty` })
+        diagnostics.push({ severity: 'info', kind: 'missing_sample', fieldId: ref, message: `No sample value for {${ref}}; treated as empty` })
         continue
       }
       const declared = fieldById.get(ref)!
       const v = sampleValues[ref]
       if (NUMERIC_FIELD_TYPES.has(declared) && v !== null && v !== undefined && typeof v !== 'number') {
-        diagnostics.push({ severity: 'warning', kind: 'type_mismatch', message: `Sample for {${ref}} is ${typeof v}, but the field type is ${declared}` })
+        diagnostics.push({ severity: 'warning', kind: 'type_mismatch', fieldId: ref, expectedType: declared, actualType: typeof v, message: `Sample for {${ref}} is ${typeof v}, but the field type is ${declared}` })
       }
     }
 
