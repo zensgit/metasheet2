@@ -1,90 +1,93 @@
-# MetaSheet2 vs Teable 开源对标（多维表平台）2026-05-25
+# MetaSheet2 vs Teable / NocoBase 源码级对标 2026-05-25
 
 文档性质：开源对标研究。docs-only，不解锁任何 runtime。
-对标目的：**读开源代码、把可迁移的实现模式带回我们 Node/TS + Postgres 后端**。目的不同则选型不同（见 §2）。
-方法：我们一侧来自对本仓三子系统（multitable / automation / approval+BPMN）的深度读码（含 file:line 锚点）；开源一侧来自各项目官方仓库 + 文档的实证（2026-05-25 核对，附 §9 来源）。
+对标目的：**读开源真源码、把可迁移的实现模式带回我们 Node/TS + Postgres 后端**。
+方法：三方均为**源码级**阅读（非 web 摘要）。我们一侧 = 本仓 multitable / automation / approval 深读；对标一侧 = 克隆到 `references/` 的真源码（`references/teable` tarball、`references/nocobase` git），含 file:line 锚点、关键处亲验。
+选型脊柱：**Teable** = 数据平台轴（同栈 TS+Postgres，真表存储）；**NocoBase plugin-workflow** = 工作流引擎轴（同栈、微内核插件、DAG + 挂起/恢复）。
+
+## 0. 源码读对 web 实证版（v1）的两处纠正（可审计）
+
+v1（本文首版）基于 web 摘要，有两处被真源码推翻，本版已改：
+
+| # | v1 错误结论（web） | 源码实证（亲验） |
+|---|---|---|
+| C1 | 「Teable 自动化是 Enterprise 闭源，CE 无可读自动化码」 | **错**。CE 含完整自动化引擎：`apps/nestjs-backend/src/features/automation` **52 文件 / 3751 行**，基于 `json-rules-engine`；3 触发 + 5 动作（含 `Decision` 分支节点）。见 §4 |
+| C2 | 「Teable 实时协作机制未公开，不臆断 CRDT/OT」 | **已知**。用 **ShareDB（OT）**：`sharedb@4.1.2` + `sharedb-redis-pubsub`，`Ops`/`Snapshots` 版本化表。我们用 **Yjs（CRDT）** —— 真正的算法岔路。见 §3 |
+
+衍生修正：v1 §6「自动化轴改读 Baserow，因 Teable 闭源」——**前提不成立**。Teable CE 自动化可读；且 `references/nocobase` 已有更强的同栈 DAG 工作流引擎。**故本版不引入 Baserow**（未克隆、不需要），自动化轴走 Teable-automation + NocoBase-workflow 两个**真源码**参照。
 
 ## 1. 一句话结论
 
-在「能当作单一 codebase 深读、且整平台最贴我们」这个标准下，**Teable** 是最佳对标对象：同栈（TS + Postgres），覆盖我们三条可比面中的两条（多维表核心 + 实时协作），是当前最活跃的 Airtable 开源替代。
+- **数据平台**怎么搭：读 **Teable** —— 同栈、真 Postgres 表存储、字段即列。
+- **工作流/自动化引擎**怎么搭：读 **NocoBase plugin-workflow** —— 同栈、DAG + 节点挂起/恢复（manual/delay），正是我们线性引擎所缺、且 approval+automation 收敛需要的。
+- Teable 自身的 `json-rules-engine` 自动化是**第二个**可读自动化参照（带 Decision 分支，已超过我们的纯线性）。
 
-但有两条诚实边界，决定了它不能独家承担对标（§7）：
+## 2. MetaSheet2 是什么（grounded）
 
-- **存储是根本分歧**：Teable 把数据落进**真 Postgres 表（一字段一列）**，我们是 **JSONB blob（一记录一 `data` 列）**。Teable 的招牌能力建在这个分歧上，不能直接迁移。
-- **Teable 的自动化是 Enterprise 闭源**：AGPL 的 CE **没有可读的自动化代码**。而自动化恰是我们在研的主轴，所以该维改读 **Baserow**（MIT、有 router/condition/formula 节点）。
+**Node/TS + Express + Postgres** 多维表平台（Airtable/多维表 DNA），上层叠 automation + approval；**Vue3** 前端；**JSONB cell 存储**；**Yjs CRDT** 协作；深度钉钉集成；workspace 多租户。三套流程子系统并存：multitable automation（线性 trigger→action）、approval product（成熟 DAG 状态机，含版本冻结/三合并/管理员跳转/Resolver）、BPMN（自研实验性，独立运行时）。
 
-## 2. 对标目的 → 选型
+## 3. 数据平台轴：我们 vs Teable（源码级）
 
-| 目的 | 最佳对标 | 理由 |
+| 维度 | MetaSheet2 | Teable（`references/teable`） |
 |---|---|---|
-| 读码迁移到我们 TS 后端（本文采用） | **Teable** | 端到端 TS 单体；同栈；多维表+协作可读 |
-| 产品功能 parity（与 宜搭/yida benchmark 同竞品集） | **APITable（维格表）** | OSS 中文多维表 genre 孪生；robots+表单+BI |
-| 自动化引擎架构参照（PLAN-Automation） | **Baserow** | Automations Builder 有 router/分支/条件/公式；前端也是 Vue |
+| 后端 | Node/TS · Express · kysely | Node/TS · **NestJS** · Prisma · **Knex**(DDL) |
+| 存储模型 | **JSONB blob**：每记录一个 `meta_records.data`（`multitable/field-codecs.ts`） | **真物理表**：每用户表一张 PG 表、每字段一列 |
+| └ 建表 | 逻辑表=`meta_sheets` 行 | 运行时 `knex.schema.createTable(dbTableName,…)` + `$executeRawUnsafe`，系统列 `__id/__auto_number/__version/__created_*`（`features/table/table.service.ts:107-119`） |
+| └ 加字段 | JSON 加 key（无 DDL） | 运行时 `alterTable(…).table[typeKey](dbFieldName)`（`features/field/field.service.ts:128-138`） |
+| 字段类型 | 26 种含 link/lookup/rollup/formula（`field-codecs.ts:4-31`） | 22 逻辑类型（`packages/core/src/models/field/constant.ts`）→ 7 物理 `DbFieldType`（多值/Link 落 JSON；`field-calculate/field-supplement.service.ts:358`） |
+| Formula | 自研引擎 `{fld_xxx}` + 跨表 lookup/rollup（`multitable/formula-engine.ts`） | **Node 应用层逐行算后写回列**（`features/calculation/field-calculation.service.ts`）；**非**下推 PG 表达式、**非** HyperFormula |
+| 实时协作 | **Yjs（CRDT）** + WS，flag `ENABLE_YJS_COLLAB`（`collab/yjs-*`） | **ShareDB（OT）**：`sharedb@4.1.2`+`sharedb-redis-pubsub`，`Ops`/`Snapshots` 版本化表（`apps/nestjs-backend/package.json`；`template.prisma:129-152`；`ws/ws.gateway.ts`） |
+| 视图 | grid/kanban/calendar/gallery/form/gantt（6；`db/types.ts:184`） | 6：Grid/Calendar/Kanban/Form/Gallery/Gantt（`packages/core/src/models/view/constant.ts`） |
+| 表单 | 公开表单 + token（`record-history-service` source='public-form'） | `View.enableShare/shareId/shareMeta` + `share` 特性，Form view 可公开（`template.prisma:115`） |
+| 权限 | base/sheet/view/field/record 五级（`permission-derivation.ts`） | space/base/table/field |
+| License | 私有 | **AGPL（CE）/ EE 私有** |
 
-单轴（非整平台）参照：n8n（纯自动化模式）、Camunda/Flowable（BPMN 语义）、bpmn-js（设计器）、pg-boss/Graphile Worker（Postgres 持久队列）。
+**最值得读 Teable 的三处**：① 动态 DDL 存储（建表/加列/类型转换/删列）—— 我们 JSONB blob 没有的能力，对照看取舍（§6.1）；② NestJS 模块边界（field/record/calculation/share 分层）对照我们 Express+service；③ ShareDB(OT) vs 我们 Yjs(CRDT) 的协作算法选型差异。
 
-## 3. MetaSheet2 是什么（grounded 刻画）
+## 4. 工作流/自动化轴：我们 vs Teable-automation vs NocoBase-workflow（源码级）
 
-一个 **Node/TS + Express + Postgres** 的多维表平台（Airtable/多维表 DNA），上层叠 automation + approval；**Vue3** 前端；**JSONB cell 存储**；**Yjs CRDT** 实时协作；深度钉钉集成；workspace 多租户。三套流程子系统并存：multitable automation（线性 trigger→action）、approval product（成熟 DAG 状态机）、BPMN（自研实验性，与 approval 独立运行时）。
+这是收益最高的一轴 —— 我们的自动化是**线性、fail-stop、非 DAG、无挂起/恢复**，两个参照都超过我们，且 NocoBase 的能力正对 PLAN-Automation + approval/automation 收敛。
 
-- 后端栈：`packages/core-backend/package.json` — express 4 / kysely 0.28 / pg 8 / ioredis / socket.io / node-cron / xml2js / zod。
-- 前端栈：`apps/web/package.json` — vue 3.5 / pinia / element-plus / vite 7 / yjs 13.6 / socket.io-client。
-
-## 4. 八维对照（Teable 为脊）
-
-| 维度 | MetaSheet2（我们） | Teable | 迁移价值 |
+| 能力 | MetaSheet2 | Teable automation | NocoBase plugin-workflow |
 |---|---|---|---|
-| 后端 | Node/TS · Express · kysely | Node/TS · **NestJS** · Prisma | 高 — 同语言 |
-| 数据库/缓存 | Postgres · ioredis | Postgres(+SQLite) · Redis | 高 — 同栈 |
-| 前端 | **Vue3** · element-plus | Next.js（**React**） | 低 — 框架不同 |
-| 存储模型 | **JSONB blob**（`meta_records.data` 一列；`field-codecs.ts`） | **真 Postgres 表，一字段一列**（无抽象层，可被任意 PG 工具直查） | ⚠️ 岔路（§7.1） |
-| 字段类型 | 26 种含 link/lookup/rollup/formula（`field-codecs.ts:4-31`） | 自定义列 + formula + attachment + 字段转换（具体清单未公开枚举） | 中 |
-| 视图 | grid/kanban/calendar/gallery/form/gantt（6；`db/types.ts:184`） | Grid/Form/Kanban/Gallery/Calendar（5，无 Gantt） | 中 — 近一致 |
-| 实时协作 | **Yjs CRDT + WS**，flag `ENABLE_YJS_COLLAB`（`collab/yjs-*`） | 实时协作 + live cursor（**机制官方未公开**，不臆断 CRDT/OT） | 中 — 机制待查 |
-| 自动化 | 线性 trigger→cond→action（8 触发/~10 动作，非 DAG，无分支/循环；`automation-service.ts:45-67`） | **EE 闭源**；CE 无开源自动化码（§7.2） | ⚠️ 改读 Baserow |
-| 权限 | base/sheet/view/field/record 五级（`permission-derivation.ts`） | space/base/table/field（granularity 官方未细列） | 中 |
-| 表单 | 公开表单 + token 分享（`record-history-service` source='public-form'） | Form view（公开表单细节未在 README 公开） | 中 |
-| 多租户 | workspace 维度（`meta_bases.workspace_id`） | space（EE authority matrix） | 中 |
-| License | 私有 | **AGPL（CE）/ EE 私有** | 仅读码对标，不 fork，无碍 |
+| 执行模型 | **线性 1..N，fail-stop**（`automation-executor.ts:578-661`） | DAG（`parentNodeId/nextNodeId`）+ `json-rules-engine` | **分支 DAG**（`upstream/downstream`+`branchIndex`），`Processor` 驱动 |
+| 分支 | ❌ 无 | ✅ `Decision` 动作节点（`enums/action-type.enum.ts`） | ✅ `condition`/`parallel`(ALL/ANY/RACE)（`instructions/`、`plugin-workflow-parallel`） |
+| 循环 | ❌ 无 | ❌ | ✅ `plugin-workflow-loop`（`looped/done` 计数 + `WORKFLOW_LOOP_LIMIT`） |
+| **挂起/恢复** | ❌ 无（同步跑完） | ❌ | ✅ **一等公民**：`manual`(人工审批) / `delay`(定时) 返回 `JOB_STATUS.PENDING`，job 持久化，外部事件 `workflow.resume(job)` 恢复（`Processor.ts` / `Dispatcher.ts:125` / `plugin-workflow-delay`、`-manual`） |
+| 触发 | 8 类(record/field/schedule/webhook；`automation-service.ts:45-54`) | 3 类(RecordCreated/Updated/MatchesConditions) | collection/schedule/action(可扩展) |
+| 动作/节点 | ~10 类(`:56-67`) | 5(Webhook/Mail/CreateRecord/UpdateRecord/Decision) | 核心 create/update/destroy/query/calculation/condition/end + 插件 request/sql/aggregate/notification/cc… |
+| 状态模型 | 4 态(running/success/failed/skipped) | 执行历史表 | **9 态** QUEUEING/STARTED/RESOLVED/FAILED/ERROR/ABORTED/CANCELED/REJECTED/RETRY_NEEDED（`constants.ts`） |
+| 持久化 | `multitable_automation_executions`+steps（无 trigger 快照） | `AutomationWorkflowExecutionHistory`（`template.prisma:283`） | `workflows`/`flow_nodes`/`executions`/`jobs`/`workflowManualTasks` |
+| 调度 | 内存 timer + Redis leader lock（`automation-scheduler.ts`，非持久队列） | — | 持久 execution + job，可跨秒/天 |
+| 重试 | 仅 webhook 2 次退避 | — | `RETRY_NEEDED` 态有定义（核心无自动重试） |
 
-## 5. 三处最值得读 Teable 的地方（actionable）
+**核心洞见**：NocoBase 的 **job 挂起/恢复模型**（`JOB_STATUS.PENDING` + 持久 `jobs` + 外部事件 `resume()`）是把 **approval 的人工节点**和 **automation 的延时/等待节点**统一进**一个引擎**的关键 —— 它正好同时解决我们 (a) approval 与 automation 双引擎割裂、(b) 自动化无分支/循环/挂起、(c) PLAN-Automation 想要的 DAG 编排 三个问题。这是本对标最有迁移价值的发现。Teable 的 `Decision` 节点则示范了最小可用的「分支」起步。
 
-1. **真 Postgres 表存储的取舍**（最高价值）：Teable「无抽象层、一字段一列」让 formula 可下推到 Postgres 表达式、按列建索引扛规模、外部工具直查。读它如何做 schema 演进（加字段=加列）与类型转换，对照我们 JSONB blob 的查询/聚合短板（§7.1）。
-2. **NestJS 模块边界**：同为 TS 后端，Teable 的 NestJS 分层（field/view/record/collab module）可对照我们 Express + service 的组织方式，迁移成本低。
-3. **实时协作落地**：我们已选 Yjs（CRDT）。Teable 的实时机制虽未公开，但其 live-cursor/presence 的前端处理可对照我们 `MetaYjsPresenceChip` / presence 类型。
+## 5. 该实际拿走什么（actionable，均须独立 scope-gate）
 
-## 6. 自动化轴：改读 Baserow（Teable 此处闭源）
+1. **自动化加「分支/Decision 节点」**：起步参照 Teable `Decision`（最小），目标参照 NocoBase `condition`/`parallel`。补我们线性引擎最大短板。
+2. **引入「挂起/恢复 + 持久 job」模型**：参照 NocoBase `Processor`/`jobs`/`PENDING`+`resume()`。这是 approval+automation 收敛与「延时/等待节点」的地基，也是 PLAN-Automation A4/A5（retry/trigger 快照）的天然载体。
+3. **执行快照 + 状态模型加厚**：参照 NocoBase 9 态 + `executions/jobs`，对照 PLAN-Automation A1（trigger_event/rule_snapshot 快照）。
+4. **存储热表「物化列/生成列」评估**：参照 Teable 动态 DDL，对我们 JSONB blob 的跨记录聚合短板做**局部**优化（非全量改造，§6.1）。
 
-我们的自动化是**线性、fail-stop、非 DAG**（无分支/循环/错误处理节点；`automation-executor.ts:578-661`），调度是**内存 timer + Redis leader lock**（非持久队列；`automation-scheduler.ts`），无 retry/idempotency/trigger-event 快照。
+## 6. 诚实边界
 
-**Baserow 的 Automations Builder（MIT-core，可读）** 正好补齐我们缺、且 PLAN-Automation 想要的方向：
+### 6.1 存储分歧——不能 drop-in
+Teable 的杀手锏（SQL 直查、按列索引、列级类型）**依赖真表模型**，迁不进我们 JSONB blob。但这正是最有价值的对照：我们 JSONB 换来「动态 schema 零迁移、字段即 key」，代价是「跨记录聚合/查询要解 blob、lookup/rollup 须自研引擎」。是否在**个别热表**引入物化列是可单独评估的后续题。
 
-| 能力 | 我们 | Baserow Automations Builder |
-|---|---|---|
-| 执行模型 | 线性 1..N | 含 **router 节点**（分支） |
-| 条件 | 嵌套组（5 层），rule 级 AND | conditions + **formulas + variables** |
-| 运行历史 | execution + steps（无 trigger 快照、无 retry） | 触发/动作 + 运行记录 |
+### 6.2 法律/许可
+`references/` 已在 `.git/info/exclude` 本地忽略，**永不提交**外部源码。Teable/NocoBase/APITable 均 **AGPL** —— **只读研习合法，但严禁把其源码拷进我们代码库**；本对标只描述架构/模式，不复制实现。Baserow 为 MIT-core（本版未用）。
 
-→ Phase 3「编排节点」与 Phase 4「运行治理」选型时，**Baserow 是代码可读的首选参照**；Teable 的自动化只能当**功能参照**（读文档不读码）。APITable robots 为 AGPL 可读但 Java/多语言。
+## 7. 交叉引用 / 盘上其它参考
 
-## 7. 两条诚实的迁移边界
+- **并行对标**：`docs/research/multitable-vs-teable-hyperformula-comparison-20260526.md`（另一 session 在写，聚焦**公式引擎** vs HyperFormula）——本文不重复该轴，二者互补；注意：本文源码读发现 Teable formula 是 **Node 应用层**实现、**未用 HyperFormula**，该轴细节以那份为准。
+- `references/apitable`（维格表，Java Spring Boot 核 + TS + React canvas，OT collab，robots 自动化，AGPL）——产品 genre 孪生，需 Java 跨语言阅读，本文未深读。
+- `references/univer`（TS sheet 渲染引擎）——解释本仓 `univer-meta` 路由名来源；我们当前 grid 实为自研 Vue DOM，非 Univer。
 
-### 7.1 存储分歧——别期待 drop-in
+## 8. Lock / 范围
+docs-only、锁安全、调研储备；**非 K3-gate 工作**，不与 live K3 reference-mapping 链抢 runtime。§5 任一实现均须独立 scope-gate + 显式 opt-in；K3 stage-1 lock 期内 approval 下游 Phase 2/3-6 仍冻结。
 
-Teable 的杀手锏（SQL 直查、Postgres 表达式 formula、按列索引）**依赖「真表」模型**，迁不进我们的 JSONB blob。但这正是对标**最有价值**的部分：它是我们平台走过的具体岔路口。看清取舍——我们的 JSONB 换来了「动态 schema 零迁移、字段即 JSON key」，代价是「跨记录聚合/查询要解 blob、`lookup`/`rollup` 须自研引擎」。是否、以及在哪些热表上引入「物化列/生成列」是可单独评估的后续题（非本文范围）。
-
-### 7.2 Teable 自动化闭源
-
-README 明示 EE 才含 automation；CE（AGPL）无开源自动化码。故自动化轴的**代码级**对标只能走 Baserow（§6）。这条若不点明，会误以为「读 Teable 就能学自动化」。
-
-## 8. Lock / 范围声明
-
-本文 docs-only、锁安全，属**调研储备**，不是 K3-gate 工作，也不与正在推进的 K3 reference-mapping 链抢 runtime。任何由本文引出的实现（如存储物化列、自动化 DAG）均须独立 scope-gate + 显式 opt-in；K3 stage-1 lock 期内下游 Phase 2/3-6 仍冻结。
-
-## 9. 来源
-
-- 我们一侧：本仓深度读码（multitable / automation / approval+BPMN），file:line 锚点见正文。
-- Teable：<https://github.com/teableio/teable> · 自动化文档 <https://help.teable.ai/en/basic/automation>（automation 标注为 EE）。
-- Baserow：<https://github.com/baserow/baserow>（Django+Vue+PG；Automations Builder：triggers/actions/router/conditions/formulas/variables；MIT core + 私有 premium/enterprise）。
-- APITable：<https://github.com/apitable/apitable>（TS Next.js+NestJS + Java Spring Boot；OT collab；robots 自动化；AGPL）。
-- 横向：<https://openalternative.co/alternatives/airtable>。
+## 9. 来源（源码级）
+- 我们：本仓深读，file:line 见正文（`multitable/field-codecs.ts`、`formula-engine.ts`、`automation-service.ts`、`automation-executor.ts`、`automation-scheduler.ts`、`collab/yjs-*`、`permission-derivation.ts`）。
+- Teable：`references/teable`（tarball@main）—— `features/{table,field,calculation,record,automation,share}`、`packages/core/src/models/{field,view}`、`packages/db-main-prisma/prisma/template.prisma`、`apps/nestjs-backend/package.json`、`ws/ws.gateway.ts`。亲验：自动化枚举、DDL、sharedb 依赖。
+- NocoBase：`references/nocobase`（git）—— `packages/plugins/@nocobase/plugin-workflow/src/server/{Processor,Dispatcher,constants,instructions}`、`common/collections/{workflows,flow_nodes,executions,jobs}`、`plugin-workflow-{loop,parallel,manual,delay,…}`。AGPL-3.0。
