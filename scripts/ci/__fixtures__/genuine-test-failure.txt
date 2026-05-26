@@ -1,0 +1,5 @@
+test (20.x)	Run unit tests	FAIL tests/unit/attendance-advanced-scheduling-workbench.test.ts
+test (20.x)	Run unit tests	AssertionError: expected 500 to be 499
+test (20.x)	Run unit tests	  - Expected: 499
+test (20.x)	Run unit tests	  + Received: 500
+test (20.x)	Run unit tests	 Tests  1 failed | 8 passed (9)

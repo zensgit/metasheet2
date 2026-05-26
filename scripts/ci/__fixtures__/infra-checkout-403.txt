@@ -1,0 +1,4 @@
+DingTalk P4 ops regression gate	Checkout repository	##[error]fatal: unable to access 'https://github.com/zensgit/metasheet2/': The requested URL returned error: 403
+DingTalk P4 ops regression gate	Checkout repository	##[error]error: RPC failed; HTTP 403 curl 22 The requested URL returned error: 403
+DingTalk P4 ops regression gate	Checkout repository	##[error]fatal: expected 'packfile'
+DingTalk P4 ops regression gate	Checkout repository	The process '/usr/bin/git' failed with exit code 128
