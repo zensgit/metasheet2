@@ -16,8 +16,9 @@ agg footer / group rollup) are separate opt-ins.
 - **`MultitableWorkbench.vue`**: passes `:can-create="caps.canCreateRecord.value"` and wires
   `@create-record="onAddRecord"` — the **existing gated empty-create path** (`grid.createRecord()` →
   `loadViewData` reload). Same handler the toolbar "+ New Record" button uses.
-- **`meta-core-labels.ts`**: `grid.addRecordInline` (`+ New record` / `+ 新建记录`), via the typed
-  `MetaCoreLabelKey` module (i18n discipline).
+- **`meta-core-labels.ts`**: `grid.addRecordInline` (`New record` / `新建记录`) via the typed
+  `MetaCoreLabelKey` module; the `+` is a separate `aria-hidden` glyph span → renders `+ New record`
+  (label intentionally has **no** leading `+` to avoid a doubled glyph).
 - **CSS**: `.meta-grid__add-row-btn` — full-width, sticky-left (visible during horizontal scroll),
   hover affordance, `+` glyph `aria-hidden`.
 

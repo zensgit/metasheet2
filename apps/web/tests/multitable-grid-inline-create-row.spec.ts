@@ -43,17 +43,20 @@ function mountGrid(props: Record<string, unknown>) {
 }
 
 describe('MetaGridTable inline create row', () => {
-  it('renders the "+" add-row when canCreate and rows exist', () => {
+  const btnText = (root: HTMLElement) =>
+    (root.querySelector('.meta-grid__add-row-btn')?.textContent ?? '').replace(/\s+/g, ' ').trim()
+
+  it('renders the "+" add-row when canCreate and rows exist (single + glyph, no duplicate)', () => {
     const root = mountGrid({ canCreate: true, rows: ONE_ROW })
-    const btn = root.querySelector('.meta-grid__add-row-btn')
-    expect(btn).not.toBeNull()
-    expect(btn?.textContent).toContain('+ New record')
+    expect(root.querySelector('.meta-grid__add-row-btn')).not.toBeNull()
+    // exact normalized text — guards against the "+ +" glyph/label duplication
+    expect(btnText(root)).toBe('+ New record')
   })
 
-  it('localizes the add-row label in zh-CN', () => {
+  it('localizes the add-row label in zh-CN (single + glyph)', () => {
     useLocale().setLocale('zh-CN')
     const root = mountGrid({ canCreate: true, rows: ONE_ROW })
-    expect(root.querySelector('.meta-grid__add-row-btn')?.textContent).toContain('+ 新建记录')
+    expect(btnText(root)).toBe('+ 新建记录')
   })
 
   it('hides the add-row when canCreate is false (capability gate)', () => {
