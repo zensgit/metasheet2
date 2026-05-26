@@ -401,7 +401,11 @@ export class RecordWriteService {
           throw new RecordFieldForbiddenError(`Field is readonly: ${change.fieldId}`, change.fieldId)
         }
 
-        if (field.type === 'lookup' || field.type === 'rollup') {
+        // formula/lookup/rollup are computed (readonly) fields — their values are
+        // derived server-side, never written by clients. `deriveFieldPermissions`
+        // already marks them readonly for the UI; reject here too as the backend
+        // backstop so a non-UI client can't pollute record data with a written value.
+        if (field.type === 'formula' || field.type === 'lookup' || field.type === 'rollup') {
           throw new RecordFieldForbiddenError(`Field is readonly: ${change.fieldId}`, change.fieldId)
         }
 
@@ -571,11 +575,8 @@ export class RecordWriteService {
         for (const change of changes) {
           const field = fieldById.get(change.fieldId)
           if (!field) continue
-
-          if (field.type === 'formula') {
-            if (typeof change.value !== 'string') continue
-            if (change.value !== '' && !change.value.startsWith('=')) continue
-          }
+          // Note: formula/lookup/rollup are rejected up-front in validateChanges
+          // (Step 0), so no computed-field change reaches this write loop.
 
           if (field.type === 'link' && field.link) {
             const ids = h.normalizeLinkIds(change.value)

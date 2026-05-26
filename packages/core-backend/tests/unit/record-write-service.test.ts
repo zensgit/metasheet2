@@ -597,15 +597,14 @@ describe('RecordWriteService', () => {
   })
 
   it('should not emit events when no records are updated', async () => {
-    // Pass a formula field change with invalid value (not starting with =), so applied === 0
-    const changesByRecord = new Map([
-      ['rec1', [{ fieldId: 'fld_formula', value: 123 }]],
+    // A record whose change list is empty applies nothing (applied === 0), so no
+    // update is recorded and neither realtime nor eventBus fire. (Previously this
+    // leaned on the formula write-loop skip; formula is now rejected up-front in
+    // validateChanges, so an empty change list is the clean "no-op" scenario.)
+    const changesByRecord = new Map<string, Array<{ fieldId: string; value: unknown }>>([
+      ['rec1', []],
     ])
-    // Add formula field to fieldById so validation passes
-    const fieldByIdWithFormula = new Map([
-      ['fld_formula', { type: 'formula' as const, readOnly: false, hidden: false }],
-    ])
-    const input = buildTestInput({ changesByRecord, fieldById: fieldByIdWithFormula })
+    const input = buildTestInput({ changesByRecord })
     const service = new RecordWriteService(pool, eventBus as any, helpers)
     const result = await service.patchRecords(input)
 
@@ -688,9 +687,9 @@ describe('RecordWriteService', () => {
         .rejects.toThrow(RecordFieldForbiddenError)
     })
 
-    it('rejects lookup/rollup fields', async () => {
+    it('rejects computed fields (formula/lookup/rollup)', async () => {
       const service = new RecordWriteService(pool, eventBus as any, helpers)
-      for (const type of ['lookup', 'rollup'] as const) {
+      for (const type of ['formula', 'lookup', 'rollup'] as const) {
         const changesByRecord = new Map([
           ['rec1', [{ fieldId: 'fld1', value: 'x' }]],
         ])
