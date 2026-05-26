@@ -7545,6 +7545,13 @@ function buildAttendanceAdvancedSchedulingWorkbench(input = {}) {
       })
       .filter(Boolean)
   )
+  // Attendance-group ids that carry a rule_set override. Used only to surface a read-only
+  // preview-semantics signal; does not affect any calculation.
+  const ruleSetAttendanceGroupIds = new Set(
+    (Array.isArray(input.ruleSetAttendanceGroupIds) ? input.ruleSetAttendanceGroupIds : [])
+      .map(id => String(id || '').trim())
+      .filter(Boolean)
+  )
 
   const membersByGroupId = new Map()
   const groupIdsByUserId = new Map()
@@ -7612,6 +7619,12 @@ function buildAttendanceAdvancedSchedulingWorkbench(input = {}) {
     .filter(scope => Array.isArray(scope?.scope?.scheduleGroupIds) && scope.scope.scheduleGroupIds.some(groupId => !scheduleGroupIds.has(groupId)))
   const schedulerScopeUnknownGroupIds = schedulerScopesWithUnknownGroups
     .flatMap(scope => normalizeStringArray(scope?.scope?.scheduleGroupIds).filter(groupId => !scheduleGroupIds.has(groupId)))
+  // Active schedule groups whose linked attendance group carries a rule_set override. For
+  // these, a groupId-mode preview applies the rule_set (index.cjs groupId branch), while the
+  // per-user effective-calendar calc-chain (userId branch) intentionally does not — a
+  // by-design boundary surfaced here for visibility only.
+  const scheduleGroupsWithRuleSetOverride = groupItems
+    .filter(group => group.isActive !== false && group.attendanceGroupId && ruleSetAttendanceGroupIds.has(group.attendanceGroupId))
 
   const diagnostics = [
     groupsWithoutMembers.length
@@ -7657,6 +7670,15 @@ function buildAttendanceAdvancedSchedulingWorkbench(input = {}) {
         message: 'Scheduler scopes reference schedule groups that are not active in this workbench snapshot.',
         count: schedulerScopesWithUnknownGroups.length,
         scheduleGroupIds: schedulerScopeUnknownGroupIds,
+      })
+      : null,
+    scheduleGroupsWithRuleSetOverride.length
+      ? buildAttendanceAdvancedSchedulingDiagnostic({
+        code: 'schedule_group_rule_set_preview_divergence',
+        severity: 'info',
+        message: 'Schedule groups link to an attendance group with a rule_set override; group-mode preview applies the rule_set, while per-user effective-calendar resolution still follows existing boundaries (by design — calc chain unchanged).',
+        count: scheduleGroupsWithRuleSetOverride.length,
+        scheduleGroupIds: scheduleGroupsWithRuleSetOverride.map(group => group.id),
       })
       : null,
   ].filter(Boolean)
@@ -7818,6 +7840,23 @@ async function loadRuleSetConfigById(db, orgId, ruleSetId) {
   )
   if (!rows.length) return null
   return normalizeMetadata(rows[0].config)
+}
+
+// Read-only: attendance-group ids carrying a rule_set override, for the workbench
+// preview-divergence diagnostic. This is an OPTIONAL visibility signal — on an older schema
+// without attendance_groups.rule_set_id (or the table), degrade to [] so the diagnostic is
+// simply absent rather than failing the whole workbench with 503. Non-schema errors propagate.
+async function loadAttendanceRuleSetAttendanceGroupIds(db, orgId) {
+  try {
+    const rows = await db.query(
+      'SELECT id FROM attendance_groups WHERE org_id = $1 AND rule_set_id IS NOT NULL',
+      [orgId]
+    )
+    return rows.map(row => row.id).filter(Boolean)
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return []
+    throw error
+  }
 }
 
 async function loadAttendanceGroupRuleSetMap(db, orgId) {
@@ -14158,6 +14197,7 @@ module.exports = {
     buildAttendanceScheduleGroupMemberLockKey,
     acquireAttendanceScheduleGroupMemberLock,
     buildAttendanceAdvancedSchedulingWorkbench,
+    loadAttendanceRuleSetAttendanceGroupIds,
     normalizeAttendanceSchedulerScopeBody,
     normalizeAttendanceSchedulerScopeInput,
     mapAttendanceSchedulerScopeRow,
@@ -26014,6 +26054,7 @@ module.exports = {
             rotationAssignmentRows,
             assignmentAggregateRows,
             scheduleGroupAssignmentAggregateRows,
+            ruleSetAttendanceGroupIds,
           ] = await Promise.all([
             db.query(
               `SELECT *
@@ -26178,6 +26219,9 @@ module.exports = {
                GROUP BY m.schedule_group_id`,
               [orgId, rangeStart, rangeEnd]
             ),
+            // Optional visibility signal — schema-safe: degrades to [] (diagnostic absent)
+            // if attendance_groups.rule_set_id is missing, instead of failing the workbench.
+            loadAttendanceRuleSetAttendanceGroupIds(db, orgId),
           ])
 
           const shiftAssignmentsTruncated = shiftAssignmentRows.length > ATTENDANCE_ADVANCED_SCHEDULING_WORKBENCH_ASSIGNMENT_LIMIT
@@ -26217,6 +26261,7 @@ module.exports = {
             assignmentLimit: ATTENDANCE_ADVANCED_SCHEDULING_WORKBENCH_ASSIGNMENT_LIMIT,
             shiftAssignmentsTruncated,
             rotationAssignmentsTruncated,
+            ruleSetAttendanceGroupIds,
           })
           res.json({ ok: true, data })
         } catch (error) {
