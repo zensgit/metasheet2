@@ -75,6 +75,29 @@ function main() {
   )
   assert.equal(invalid.details.field, 'eventType')
 
+  // --- negative cases: bad at / empty-missing runId,rowId / attrs non-object ---
+  assert.equal(
+    assertValidationError(() => normalizeProvenanceEvent(createEvent({ at: 'not-a-date' })), 'bad at string rejected').details.field,
+    'at',
+  )
+  assertValidationError(() => normalizeProvenanceEvent(createEvent({ at: '' })), 'empty at rejected')
+  assertValidationError(() => normalizeProvenanceEvent(createEvent({ at: undefined })), 'missing at rejected')
+  assert.equal(
+    assertValidationError(() => normalizeProvenanceEvent(createEvent({ runId: '' })), 'empty runId rejected').details.field,
+    'runId',
+  )
+  assertValidationError(() => normalizeProvenanceEvent(createEvent({ runId: undefined })), 'missing runId rejected')
+  assert.equal(
+    assertValidationError(() => normalizeProvenanceEvent(createEvent({ rowId: '   ' })), 'whitespace rowId rejected').details.field,
+    'rowId',
+  )
+  assert.equal(
+    assertValidationError(() => normalizeProvenanceEvent(createEvent({ attrs: [] })), 'array attrs rejected').details.field,
+    'attrs',
+  )
+  assertValidationError(() => normalizeProvenanceEvent(createEvent({ attrs: 'nope' })), 'string attrs rejected')
+  assertValidationError(() => normalizeProvenanceEvent(createEvent({ attrs: null })), 'null attrs rejected')
+
   const redacted = normalizeProvenanceEvent(createEvent({
     attrs: {
       token: 'secret-token',
