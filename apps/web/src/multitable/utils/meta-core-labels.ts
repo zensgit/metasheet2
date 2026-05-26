@@ -52,6 +52,7 @@ export type MetaCoreLabelKey =
   | 'grid.clear' | 'grid.clearSelection'
   | 'grid.noRecordsTitle'
   | 'grid.noRecordsHintPrefix' | 'grid.noRecordsHintAction' | 'grid.noRecordsHintSuffix'
+  | 'grid.addRecordInline'
   | 'grid.noMatchingTitle' | 'grid.noMatchingHint'
   | 'grid.collapseRow' | 'grid.expandRow'
   | 'grid.prev' | 'grid.next' | 'grid.loading'
@@ -147,6 +148,7 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'grid.noRecordsHintPrefix': { en: 'Click', zh: '点击' },
   'grid.noRecordsHintAction': { en: '+ New Record', zh: '+ 新建记录' },
   'grid.noRecordsHintSuffix': { en: 'to add your first row', zh: '添加第一行' },
+  'grid.addRecordInline': { en: 'New record', zh: '新建记录' },
   'grid.noMatchingTitle': { en: 'No matching records', zh: '没有匹配的记录' },
   'grid.noMatchingHint': { en: 'Try a different search term', zh: '试试其他搜索词' },
   'grid.collapseRow': { en: 'Collapse row', zh: '收起行' },
