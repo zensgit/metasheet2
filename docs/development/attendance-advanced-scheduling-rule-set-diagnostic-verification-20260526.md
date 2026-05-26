@@ -51,8 +51,8 @@ template; no FE diff and (by requirement) no fix affordance.
 
 ## Verification run
 
-- `attendance-advanced-scheduling-workbench.test.ts`: 8/8 (existing 4 unchanged + 4 new).
-- Full core-backend unit suite: 2320/2320.
+- `attendance-advanced-scheduling-workbench.test.ts`: 9/9 (existing 4 unchanged + 5 new).
+- Full core-backend unit suite: 2321/2321.
 - `tsc` (build:cache): clean.
 
 ## Cross-references
