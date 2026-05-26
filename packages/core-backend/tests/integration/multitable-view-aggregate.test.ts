@@ -23,10 +23,13 @@ const FLD_QTY = `fld_qty_${TS}`
 const FLD_CAT = `fld_cat_${TS}`
 const FLD_SECRET = `fld_secret_${TS}`
 const FLD_NOTE = `fld_note_${TS}`
+const FLD_FORMULA = `fld_formula_${TS}`
 const V_MAIN = `v_main_${TS}`
 const V_FILTER = `v_filter_${TS}`
 const V_SECRET = `v_secret_${TS}`
 const V_BADFN = `v_badfn_${TS}`
+const V_HIDFILTER = `v_hidfilter_${TS}` // hides + filters on the same field
+const V_COMPUTED = `v_computed_${TS}` // filters on a computed (formula) field → must 422
 const N = 60 // > default page size (50) → proves full-set, not page
 
 let app: Express
@@ -49,6 +52,7 @@ describeIfDatabase('multitable view-aggregate (real DB)', () => {
     for (const [fid, name, type, order] of [
       [FLD_QTY, 'Qty', 'number', 1], [FLD_CAT, 'Cat', 'string', 2],
       [FLD_SECRET, 'Secret', 'number', 3], [FLD_NOTE, 'Note', 'string', 4],
+      [FLD_FORMULA, 'Formula', 'formula', 5],
     ] as const) {
       await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [fid, SHEET_ID, name, type, '{}', order])
     }
@@ -65,6 +69,18 @@ describeIfDatabase('multitable view-aggregate (real DB)', () => {
     await view(V_FILTER, { [FLD_QTY]: 'sum' }, { conjunction: 'and', conditions: [{ fieldId: FLD_CAT, operator: 'is', value: 'A' }] })
     await view(V_SECRET, { [FLD_SECRET]: 'sum', [FLD_QTY]: 'sum' }, null)
     await view(V_BADFN, { [FLD_CAT]: 'sum' }, null) // sum on a string field → not applicable
+    // hides FLD_CAT from display (view.hiddenFieldIds) but still FILTERS on it (cat=A). /view resolves
+    // the filter over static-visible fields → total 30; the aggregate must match (filter parity uses
+    // visibleFields, NOT the D3c-allowed set).
+    await q('INSERT INTO meta_views (id, sheet_id, name, type, hidden_field_ids, filter_info, config) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb)',
+      [V_HIDFILTER, SHEET_ID, V_HIDFILTER, 'grid', JSON.stringify([FLD_CAT]),
+        JSON.stringify({ conjunction: 'and', conditions: [{ fieldId: FLD_CAT, operator: 'is', value: 'A' }] }),
+        JSON.stringify({ aggregations: { [FLD_QTY]: 'sum' } })])
+    // filters on a computed (formula) field → can't be evaluated here → must HARD-FAIL 422
+    await q('INSERT INTO meta_views (id, sheet_id, name, type, hidden_field_ids, filter_info, config) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb)',
+      [V_COMPUTED, SHEET_ID, V_COMPUTED, 'grid', '[]',
+        JSON.stringify({ conjunction: 'and', conditions: [{ fieldId: FLD_FORMULA, operator: 'isnotempty' }] }),
+        JSON.stringify({ aggregations: { [FLD_QTY]: 'sum' } })])
     // hide fld_secret from this user (subject-scoped) — its aggregate must be OMITTED
     await q('INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,$3,$4,$5,$6)', [SHEET_ID, FLD_SECRET, 'user', USER, false, false])
   })
@@ -121,5 +137,30 @@ describeIfDatabase('multitable view-aggregate (real DB)', () => {
     expect(res.status).toBe(413)
     expect(res.body.error.code).toBe('AGGREGATE_TOO_LARGE')
     expect(res.body.error.total).toBe(N)
+  })
+
+  test('SEARCH PARITY: uppercase search is normalized (trim+lowercase) exactly like /view', async () => {
+    // cat values are 'A'/'B' (30 each). A raw (un-lowercased) 'A' would match nothing in the
+    // lowercase-compared cell text → divergence; normalizeSearchTerm makes both agree on 30.
+    const viewRes = await request(app).get(`/api/multitable/view?sheetId=${SHEET_ID}&viewId=${V_MAIN}&search=A&limit=1&offset=0`)
+    const aggRes = await request(app).get(`/api/multitable/sheets/${SHEET_ID}/view-aggregate?viewId=${V_MAIN}&search=A`)
+    expect(viewRes.body.data.page.total).toBe(30)
+    expect(aggRes.body.data.total).toBe(viewRes.body.data.page.total)
+  })
+
+  test('FILTER PARITY: filtering on a view-hidden field still counts rows (matches /view), aggregate present', async () => {
+    // V_HIDFILTER hides FLD_CAT but filters cat=A. Filter resolution uses static-visible fields (like
+    // /view), NOT the D3c-allowed set — so the row count must still be 30, not 60.
+    const viewRes = await request(app).get(`/api/multitable/view?sheetId=${SHEET_ID}&viewId=${V_HIDFILTER}&limit=1&offset=0`)
+    const aggRes = await aggregate(V_HIDFILTER)
+    expect(viewRes.body.data.page.total).toBe(30)
+    expect(aggRes.body.data.total).toBe(30)
+    expect(aggRes.body.data.aggregates[FLD_QTY]).toEqual({ fn: 'sum', value: 900 }) // FLD_QTY not hidden → present
+  })
+
+  test('COMPUTED FILTER: view filtering on a formula field HARD-FAILS 422 (no silent wrong total)', async () => {
+    const res = await aggregate(V_COMPUTED)
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('AGGREGATE_COMPUTED_FILTER_UNSUPPORTED')
   })
 })

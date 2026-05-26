@@ -5747,7 +5747,7 @@ export function univerMetaRouter(): Router {
   router.get('/sheets/:sheetId/view-aggregate', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const viewId = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : ''
-    const search = typeof req.query.search === 'string' ? req.query.search.trim() : ''
+    const search = normalizeSearchTerm(req.query.search) // same normalization as /view (trim+lowercase) → search parity
     if (!sheetId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
     }
@@ -5778,40 +5778,53 @@ export function univerMetaRouter(): Router {
         return res.status(413).json({ ok: false, error: { code: 'AGGREGATE_TOO_LARGE', message: `Too many rows to aggregate (${rawCount} > ${maxRows})`, total: rawCount } })
       }
 
-      // D3c permission composite → fields that may be aggregated (hidden/denied omitted)
+      // FILTER/SEARCH field set MIRRORS /view (static-visible only, NOT D3c-filtered) so the filtered
+      // SET is identical to /view. The AGGREGATE OUTPUT is separately restricted to the D3c-allowed set
+      // (hidden fields' aggregates omitted) — filtering on a hidden field still counts the rows (matches
+      // /view) but never outputs that field's aggregate (no leak).
       const viewHiddenFieldIds = view?.hiddenFieldIds ?? []
       const visibleFields = filterVisiblePropertyFields(await loadFieldsForSheetShared(pool.query.bind(pool), sheetId))
+      const filterFieldTypeById = new Map(visibleFields.map((field) => [field.id, field.type]))
+      const filterInfo = view ? parseMetaFilterInfo(view.filterInfo) : null
+
+      // Computed (lookup/rollup/formula) filter conditions can't be evaluated here (no applyLookupRollup),
+      // so the filtered set would silently disagree with /view. HARD-FAIL instead (deferred to #4-3b-2).
+      const COMPUTED_FILTER_TYPES = new Set(['lookup', 'rollup', 'formula'])
+      if (filterInfo?.conditions.some((c) => COMPUTED_FILTER_TYPES.has(filterFieldTypeById.get(c.fieldId) ?? ''))) {
+        return res.status(422).json({ ok: false, error: { code: 'AGGREGATE_COMPUTED_FILTER_UNSUPPORTED', message: 'Aggregation over a view filtering on a computed (lookup/rollup/formula) field is not yet supported' } })
+      }
+
+      // D3c permission composite → which fields' aggregates may be OUTPUT
       const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, access.userId)
       const fieldPermissions = deriveFieldPermissions(visibleFields, capabilities, { hiddenFieldIds: viewHiddenFieldIds, fieldScopeMap })
-      const allowedFields = visibleFields.filter((field) => fieldPermissions[field.id]?.visible !== false)
-      const fieldTypeById = new Map(allowedFields.map((field) => [field.id, field.type]))
+      const aggregateFieldTypeById = new Map(
+        visibleFields.filter((field) => fieldPermissions[field.id]?.visible !== false).map((field) => [field.id, field.type]),
+      )
 
-      // full filtered set = all records + persisted filterInfo + search (no sort needed for aggregates)
+      // full filtered set = all records + persisted filterInfo + search, resolved over the SAME field set
+      // as /view (visibleFields) → identical filtered set
       const recordRes = await pool.query('SELECT id, version, data FROM meta_records WHERE sheet_id = $1', [sheetId])
       let rows = (recordRes.rows as Array<{ id: unknown; version: unknown; data: unknown }>).map((r) => ({
         id: String(r.id),
         version: Number(r.version ?? 1),
         data: normalizeJson(r.data),
       }))
-      if (search) rows = rows.filter((rec) => recordMatchesSearch(rec, allowedFields, search))
-      const filterInfo = view ? parseMetaFilterInfo(view.filterInfo) : null
+      if (search) rows = rows.filter((rec) => recordMatchesSearch(rec, visibleFields, search))
       if (filterInfo) {
-        // computed (lookup/rollup) + hidden-field conditions are skipped here (MVP; matches /view's
-        // fieldTypeById gating). Full computed-filter parity is deferred to #4-3b-2.
-        const conditions = filterInfo.conditions.filter((c) => fieldTypeById.has(c.fieldId))
+        const conditions = filterInfo.conditions.filter((c) => filterFieldTypeById.has(c.fieldId))
         if (conditions.length > 0) {
           rows = rows.filter((rec) => {
-            const matches = (c: MetaFilterCondition) => evaluateMetaFilterCondition(fieldTypeById.get(c.fieldId)!, rec.data[c.fieldId], c)
+            const matches = (c: MetaFilterCondition) => evaluateMetaFilterCondition(filterFieldTypeById.get(c.fieldId)!, rec.data[c.fieldId], c)
             return filterInfo.conjunction === 'or' ? conditions.some(matches) : conditions.every(matches)
           })
         }
       }
 
-      // aggregate only configured + allowed fields; disallowed (hidden) field aggregates are OMITTED
+      // aggregate ONLY configured + D3c-allowed fields; disallowed (hidden) field aggregates are OMITTED
       const aggConfig = parseAggregations(view?.config ?? null)
       const aggregates: Record<string, { fn: AggregationFn; value: number }> = {}
       for (const [fieldId, fn] of Object.entries(aggConfig)) {
-        const fieldType = fieldTypeById.get(fieldId)
+        const fieldType = aggregateFieldTypeById.get(fieldId)
         if (!fieldType) continue // hidden / permission-denied / unknown → omit (no leak)
         const value = aggregateField(rows.map((rec) => rec.data[fieldId]), fn, fieldType)
         if (value !== null) aggregates[fieldId] = { fn, value }

@@ -1761,9 +1761,11 @@ const activeAggregationConfig = computed<Record<string, string>>(() => {
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) if (typeof k === 'string' && typeof v === 'string') out[k] = v
   return out
 })
+let aggregateReqSeq = 0
 async function loadAggregates() {
   const sheetId = workbench.activeSheetId.value
   const viewId = workbench.activeViewId.value
+  const seq = ++aggregateReqSeq // monotonic: a slow stale response must not overwrite a newer one
   if (!sheetId || Object.keys(activeAggregationConfig.value).length === 0) {
     aggregateValues.value = {}
     aggregateTooLarge.value = false
@@ -1771,9 +1773,11 @@ async function loadAggregates() {
   }
   try {
     const r = await workbench.client.aggregateView({ sheetId, viewId: viewId || undefined, search: searchText.value || undefined })
+    if (seq !== aggregateReqSeq) return // a newer request superseded this one
     aggregateValues.value = r.aggregates ?? {}
     aggregateTooLarge.value = false
   } catch (e) {
+    if (seq !== aggregateReqSeq) return
     aggregateValues.value = {} // NO local fallback — keeps the "filtered set, not page rows" contract
     aggregateTooLarge.value = (e as { code?: string })?.code === 'AGGREGATE_TOO_LARGE'
   }

@@ -34,12 +34,21 @@ Backend = `core-backend/src/multitable` + a route (multitable-internal kernel-po
 
 ## 4. Verification
 
-- **Backend real-DB (CI, dedicated `plugin-tests.yml` step): `multitable-view-aggregate.test.ts` 7/7** (run 26429049533) — full-set sum (60 rows > page), `/view` filter-resolution parity, persisted filter, **SECURITY hidden-field-omitted**, fn-not-applicable, **413 max-rows**. Backend `tsc` clean.
+- **Backend real-DB (CI, dedicated `plugin-tests.yml` step): `multitable-view-aggregate.test.ts` 10/10** — full-set sum (60 rows > page), `/view` filter-resolution parity, persisted filter, **SECURITY hidden-field-omitted**, fn-not-applicable, **413 max-rows**, **uppercase-search normalization parity**, **filter-on-view-hidden-field parity (counts rows like /view, not the D3c set)**, **computed (formula) filter 422 hard-fail**. Backend `tsc` clean.
 - **Frontend: 25 tests** (agg-footer 5 incl no-local-fallback + i18n/frozen/inline-create regressions). vue-tsc clean.
 - **Caveat:** offset/footer LAYOUT (sticky-bottom) is browser-native — not headless-unit-testable; the value-source / no-fallback / picker / too-large logic IS tested.
+
+## 4b. Review fixes (PR #1841 self-review, 4 findings)
+
+| finding | fix |
+|---|---|
+| **High** — filter/search resolved over the D3c-allowed set, diverging from `/view` | filter/search now use `visibleFields` (static-visible, mirrors `/view`); **only the aggregate OUTPUT** uses the D3c-allowed set. A filter on a view-hidden field still counts rows (parity) but that field's aggregate is omitted (no leak). |
+| **Medium** — search used raw `.trim()` (case-sensitive) | now `normalizeSearchTerm()` (trim+lowercase), identical to `/view`. |
+| **Medium** — computed filter conditions silently evaluated against raw `data` → wrong totals | computed (lookup/rollup/formula) filter conditions now **HARD-FAIL 422 `AGGREGATE_COMPUTED_FILTER_UNSUPPORTED`** — `/view` materializes these via `applyLookupRollup`; this endpoint does not, so a clear deferred error beats a silent wrong total. |
+| **Low** — `loadAggregates` had no request sequencing | monotonic `aggregateReqSeq`: a stale response is dropped if a newer request was issued. |
 
 ## 5. Deferred (#4-3b-2)
 
 - **Group subtotals** (`group.count` is page-only → needs per-group server aggregation).
 - **SQL-side aggregation** (avoid the in-memory full-set scan for large sheets; MVP is an intentional scan bounded by the 413 cap).
-- **Computed (lookup/rollup) filter parity** (MVP skips computed-field filter conditions, matching `/view`'s `fieldTypeById` gating).
+- **Computed (lookup/rollup/formula) filter parity** — currently 422 (clear deferred error, never silent-wrong). Parity requires running `applyLookupRollup` materialization in this endpoint too.
