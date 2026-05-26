@@ -58,7 +58,7 @@ describe('MultitableFormulaEngine.dryRun', () => {
     const r = await noDb.dryRun('={fld_missing}+1', { fld_missing: 9 }, FIELDS)
     expect(r.success).toBe(false)
     expect(r.result).toBeUndefined() // never evaluated → no false-green
-    expect(r.diagnostics).toContainEqual(expect.objectContaining({ kind: 'unknown_field', severity: 'error' }))
+    expect(r.diagnostics).toContainEqual(expect.objectContaining({ kind: 'unknown_field', severity: 'error', fieldId: 'fld_missing' }))
   })
 
   it('GATE: A1/range reference → unsupported error, NOT evaluated', async () => {
@@ -70,13 +70,13 @@ describe('MultitableFormulaEngine.dryRun', () => {
 
   it('type mismatch → warning, but still evaluates (no silent coercion)', async () => {
     const r = await noDb.dryRun('={fld_a}+1', { fld_a: '3' }, FIELDS) // string for a number field
-    expect(r.diagnostics).toContainEqual(expect.objectContaining({ kind: 'type_mismatch', severity: 'warning' }))
+    expect(r.diagnostics).toContainEqual(expect.objectContaining({ kind: 'type_mismatch', severity: 'warning', fieldId: 'fld_a', expectedType: 'number', actualType: 'string' }))
     expect(r.success).toBeDefined() // evaluation still proceeds
   })
 
   it('missing sample value → info diagnostic, treated as empty', async () => {
     const r = await noDb.dryRun('={fld_a}+{fld_b}', { fld_a: 1 }, FIELDS) // fld_b missing
-    expect(r.diagnostics).toContainEqual(expect.objectContaining({ kind: 'missing_sample', severity: 'info' }))
+    expect(r.diagnostics).toContainEqual(expect.objectContaining({ kind: 'missing_sample', severity: 'info', fieldId: 'fld_b' }))
     expect(r.success).toBe(true)
     expect(r.result).toBe(1) // fld_b → 0
   })

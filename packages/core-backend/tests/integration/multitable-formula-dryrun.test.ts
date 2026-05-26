@@ -59,7 +59,17 @@ describeIfDatabase('multitable formula dry-run (real DB)', () => {
     expect(res.status).toBe(200)
     expect(res.body.data.success).toBe(false)
     expect(res.body.data.result).toBeUndefined()
-    expect(res.body.data.diagnostics.some((d: { kind: string }) => d.kind === 'unknown_field')).toBe(true)
+    const unknown = res.body.data.diagnostics.find((d: { kind: string }) => d.kind === 'unknown_field')
+    expect(unknown).toBeDefined()
+    expect(unknown.fieldId).toBe(`fld_missing_${TS}`) // structured context survives the wire (i18n contract)
+  })
+
+  test('type mismatch carries structured context over the wire', async () => {
+    testPerms = ['multitable:write']
+    const res = await post({ expression: `={${FLD_A}}+1`, sampleValues: { [FLD_A]: 'x' } }) // string for a number field
+    expect(res.status).toBe(200)
+    const mismatch = res.body.data.diagnostics.find((d: { kind: string }) => d.kind === 'type_mismatch')
+    expect(mismatch).toMatchObject({ fieldId: FLD_A, expectedType: 'number', actualType: 'string' })
   })
 
   test('capability gate: read-only user (no multitable:write) → 403', async () => {

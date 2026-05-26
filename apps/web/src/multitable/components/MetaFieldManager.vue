@@ -173,6 +173,37 @@
               {{ diagnostic.message }}
             </div>
           </div>
+          <!-- #5b dry-run: evaluate the UNSAVED expression against sample data (server response only) -->
+          <div v-if="dryRunFn" class="meta-field-mgr__field meta-field-mgr__dryrun">
+            <div v-if="dryRunReferencedFields.length" class="meta-field-mgr__dryrun-samples">
+              <span>{{ ml('field.formulaDryRun.sampleHeading') }}</span>
+              <label v-for="f in dryRunReferencedFields" :key="f.id" class="meta-field-mgr__dryrun-sample">
+                <span class="meta-field-mgr__dryrun-sample-name">{{ f.name }}</span>
+                <input v-model="dryRunSamples[f.id]" :type="f.numeric ? 'number' : 'text'" class="meta-field-mgr__input" :placeholder="f.type" />
+              </label>
+              <div v-if="dryRunInvalidNumeric" class="meta-field-mgr__formula-diagnostic meta-field-mgr__formula-diagnostic--error">
+                {{ ml('field.formulaDryRun.invalidNumber') }}
+              </div>
+            </div>
+            <button type="button" class="meta-field-mgr__dryrun-btn" :disabled="!dryRunCanEvaluate" @click="runDryRun">
+              {{ dryRunRunning ? ml('field.formulaDryRun.evaluating') : ml('field.formulaDryRun.test') }}
+            </button>
+            <div v-if="dryRunTransportError" class="meta-field-mgr__dryrun-result meta-field-mgr__dryrun-result--error">{{ dryRunTransportError }}</div>
+            <div v-else-if="dryRunResult" class="meta-field-mgr__dryrun-result">
+              <div class="meta-field-mgr__dryrun-result-head">
+                <strong>{{ dryRunResult.success ? ml('field.formulaDryRun.resultHeading') : ml('field.formulaDryRun.errorHeading') }}</strong>
+                <code v-if="dryRunResult.success" class="meta-field-mgr__dryrun-value">{{ dryRunResultText }}</code>
+              </div>
+              <div
+                v-for="(d, i) in dryRunSortedDiagnostics"
+                :key="`${d.kind}-${d.code ?? ''}-${i}`"
+                class="meta-field-mgr__formula-diagnostic"
+                :class="`meta-field-mgr__formula-diagnostic--${d.severity}`"
+              >
+                <code v-if="d.code" class="meta-field-mgr__dryrun-tag">{{ d.code }}</code>{{ localizeDryRunDiag(d) }}
+              </div>
+            </div>
+          </div>
           <div class="meta-field-mgr__field">
             <span>{{ ml('field.insertFieldToken') }}</span>
             <div class="meta-field-mgr__chips">
@@ -396,10 +427,13 @@ import {
   getFormulaFunctionCategories,
   getFormulaFunctionCatalog,
   validateFormulaExpression,
+  extractFormulaFieldRefs,
   type FormulaFunctionCategory,
   type FormulaFunctionDoc,
   type FormulaDiagnostic,
 } from '../utils/formula-docs'
+import { localizeDryRunDiagnostic } from '../utils/meta-formula-labels'
+import type { DryRunResult, DryRunDiagnostic } from '../api/client'
 import {
   normalizeStringArray,
   resolveAutoNumberFieldProperty,
@@ -538,6 +572,9 @@ const props = defineProps<{
   fields: MetaField[]
   sheets: MetaSheet[]
   sheetId: string
+  // #5b: formula dry-run callback (the workbench wires it to client.dryRunFormula). Optional so the
+  // panel degrades gracefully (button hidden) where no fn is provided.
+  dryRunFn?: (params: { sheetId: string; expression: string; sampleValues: Record<string, unknown> }) => Promise<DryRunResult>
 }>()
 
 const emit = defineEmits<{
@@ -644,6 +681,104 @@ const configTargetType = computed(() => {
   if (configTarget.value) return configDraftType.value
   return newFieldConfigVisible.value && requiresConfig(newFieldType.value) ? newFieldType.value : null
 })
+
+// ---- #5b formula dry-run (C1–C4 per design #1869) ----
+const DRY_RUN_NUMERIC_TYPES = new Set(['number', 'currency', 'percent', 'rating', 'autoNumber'])
+const dryRunSamples = reactive<Record<string, string>>({})
+const dryRunResult = ref<DryRunResult | null>(null)
+const dryRunRunning = ref(false)
+const dryRunTransportError = ref<string | null>(null)
+let dryRunSeq = 0
+// C1: dry-run state is EPHEMERAL — cleared whenever the field config resets (close/reopen), so a
+// reopened formula field never pre-fills last time's sample values (and missing_sample still fires).
+function resetDryRunState() {
+  for (const key of Object.keys(dryRunSamples)) delete dryRunSamples[key]
+  dryRunResult.value = null
+  dryRunTransportError.value = null
+  dryRunRunning.value = false
+  dryRunSeq++
+}
+// C1: referenced fields come from the EXISTING extractFormulaFieldRefs (no mirror helper → no drift)
+const dryRunReferencedFields = computed(() => {
+  if (configTargetType.value !== 'formula') return []
+  // INTERSECT with formulaSourceFields — unknown {fld} refs are owned by the static diagnostics
+  // (which error and disable Evaluate), so they don't get confusing sample rows here.
+  return extractFormulaFieldRefs(formulaDraft.expression)
+    .map((id) => formulaSourceFields.value.find((f) => f.id === id))
+    .filter((field): field is NonNullable<typeof field> => Boolean(field))
+    .map((field) => ({ id: field.id, name: field.name, type: field.type, numeric: DRY_RUN_NUMERIC_TYPES.has(field.type) }))
+})
+const dryRunInvalidNumeric = computed(() =>
+  dryRunReferencedFields.value.some((f) => {
+    const raw = dryRunSamples[f.id]
+    const s = raw == null ? '' : String(raw) // type="number" v-model can yield a number, not a string
+    return f.numeric && s.trim() !== '' && Number.isNaN(Number(s))
+  }),
+)
+const dryRunHasStaticError = computed(() => formulaDiagnostics.value.some((d) => d.severity === 'error'))
+// C2: Evaluate enabled iff non-empty + no static error + no invalid numeric input + not running + fn wired
+const dryRunCanEvaluate = computed(() =>
+  Boolean(props.dryRunFn) &&
+  formulaDraft.expression.trim().length > 0 &&
+  !dryRunHasStaticError.value &&
+  !dryRunInvalidNumeric.value &&
+  !dryRunRunning.value,
+)
+// C3: diagnostics sorted error > warning > info
+const dryRunSortedDiagnostics = computed<DryRunDiagnostic[]>(() => {
+  const order: Record<string, number> = { error: 0, warning: 1, info: 2 }
+  return [...(dryRunResult.value?.diagnostics ?? [])].sort((a, b) => order[a.severity] - order[b.severity])
+})
+const dryRunResultText = computed(() => {
+  const r = dryRunResult.value
+  if (!r || !r.success || r.result === null || r.result === undefined) return ''
+  return String(r.result)
+})
+function localizeDryRunDiag(diagnostic: DryRunDiagnostic): string {
+  return localizeDryRunDiagnostic(diagnostic, isZh.value) // NEVER renders diagnostic.message
+}
+// C1 serialization: omit empty (→ server missing_sample), Number() for numeric, boolean for checkbox, else string
+function buildDryRunSampleValues(): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const f of dryRunReferencedFields.value) {
+    const raw = dryRunSamples[f.id]
+    const s = raw == null ? '' : String(raw)
+    if (s.trim() === '') continue // omit empty → server missing_sample
+    if (f.numeric) out[f.id] = Number(s)
+    else if (f.type === 'boolean') out[f.id] = s === 'true'
+    else out[f.id] = s
+  }
+  return out
+}
+async function runDryRun() {
+  if (!props.dryRunFn || !dryRunCanEvaluate.value) return
+  const seq = ++dryRunSeq
+  dryRunRunning.value = true
+  dryRunTransportError.value = null
+  try {
+    const res = await props.dryRunFn({ sheetId: props.sheetId, expression: formulaDraft.expression, sampleValues: buildDryRunSampleValues() })
+    if (seq !== dryRunSeq) return // stale response superseded
+    dryRunResult.value = res
+  } catch (err) {
+    if (seq !== dryRunSeq) return
+    dryRunResult.value = null
+    const status = (err as { status?: number }).status
+    if (status === 403) dryRunTransportError.value = ml('field.formulaDryRun.forbidden')
+    else if (status === 413 || status === 422) dryRunTransportError.value = ml('field.formulaDryRun.tooLarge')
+    else dryRunTransportError.value = ml('field.formulaDryRun.requestFailed')
+  } finally {
+    if (seq === dryRunSeq) dryRunRunning.value = false
+  }
+}
+// C2: result describes the current expression; any edit clears it + invalidates an in-flight response.
+// Also clear `running` — otherwise a superseded request's `finally` skips the reset (seq !== dryRunSeq)
+// and the Evaluate button would stay disabled for the new expression.
+watch(() => formulaDraft.expression, () => {
+  dryRunResult.value = null
+  dryRunTransportError.value = null
+  dryRunRunning.value = false
+  dryRunSeq++
+})
 const fieldConfigSchemaChanged = computed(() =>
   Boolean(configTarget.value && configDraftType.value && displayFieldType(configTarget.value) !== configDraftType.value),
 )
@@ -739,6 +874,7 @@ function resetDrafts() {
   formulaDraft.expression = ''
   formulaFunctionSearch.value = ''
   formulaFunctionCategory.value = 'all'
+  resetDryRunState()
   attachmentDraft.maxFiles = 1
   attachmentDraft.acceptedMimeTypesText = ''
   currencyDraft.code = 'CNY'

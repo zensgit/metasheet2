@@ -751,6 +751,26 @@ export interface ViewAggregateResult {
   groups?: ViewAggregateGroup[]
 }
 
+// Formula dry-run (#5b, design #1869). Diagnostics carry structured context; the client localizes by
+// kind/code and NEVER renders `message` in the UI (message is debug/EN-only).
+export type DryRunDiagnosticKind = 'unknown_field' | 'unsupported' | 'runtime' | 'type_mismatch' | 'missing_sample'
+export interface DryRunDiagnostic {
+  severity: 'error' | 'warning' | 'info'
+  kind: DryRunDiagnosticKind
+  message: string
+  code?: string
+  fieldId?: string
+  expectedType?: string
+  actualType?: string
+}
+export interface DryRunResult {
+  success: boolean
+  result?: string | number | boolean | null
+  resultType?: 'number' | 'string' | 'boolean' | 'date' | 'null'
+  referencedFields: string[]
+  diagnostics: DryRunDiagnostic[]
+}
+
 export class MultitableApiClient {
   private fetch: FetchFn
   private readonly isZhOption?: ApiErrorLocaleOption
@@ -1037,6 +1057,18 @@ export class MultitableApiClient {
   async aggregateView(params: { sheetId: string; viewId?: string; search?: string }): Promise<ViewAggregateResult> {
     const { sheetId, ...rest } = params
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/view-aggregate${qs(rest as Record<string, string | undefined>)}`)
+    return this.parseJson(res)
+  }
+
+  // Formula dry-run (#5b): evaluate an UNSAVED expression against caller-supplied sample values.
+  // 200 (even on success:false runtime errors) → DryRunResult; 403/413/422 → MultitableApiError.
+  async dryRunFormula(params: { sheetId: string; expression: string; sampleValues: Record<string, unknown> }): Promise<DryRunResult> {
+    const { sheetId, expression, sampleValues } = params
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/formula/dry-run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expression, sampleValues }),
+    })
     return this.parseJson(res)
   }
 
