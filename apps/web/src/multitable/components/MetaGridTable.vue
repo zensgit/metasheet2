@@ -241,6 +241,32 @@
             </td>
           </tr>
         </tbody>
+        <tfoot v-if="hasAnyAggregation" class="meta-grid__foot">
+          <tr>
+            <td v-if="enableMultiSelect" class="meta-grid__check-col" :style="{ left: '0px' }"></td>
+            <td class="meta-grid__row-num" :style="{ left: `${rowNumLeft}px` }">{{ aggregateTooLarge ? '!' : 'Σ' }}</td>
+            <td
+              v-for="(field, fi) in visibleFields"
+              :key="field.id"
+              class="meta-grid__foot-cell"
+              :style="isFrozen(fi) ? { position: 'sticky', left: `${frozenLeft(fi)}px`, zIndex: '2', background: '#f9fafb' } : undefined"
+            >
+              <span class="meta-grid__foot-value" :title="aggregates?.[field.id] ? `${aggregates[field.id].fn}` : ''">{{ aggValueDisplay(field.id) }}</span>
+              <select
+                class="meta-grid__foot-fn"
+                :value="aggregationConfig?.[field.id] ?? ''"
+                :aria-label="`aggregation for ${field.name}`"
+                @change="onAggChange(field.id, $event)"
+              >
+                <option value="">{{ '—' }}</option>
+                <option v-for="fn in aggFnOptions(field)" :key="fn" :value="fn">{{ fn }}</option>
+              </select>
+            </td>
+          </tr>
+          <tr v-if="aggregateTooLarge" class="meta-grid__foot-toolarge">
+            <td :colspan="colSpan">{{ l('grid.aggregateTooLarge') }}</td>
+          </tr>
+        </tfoot>
       </table>
     </div>
     <div v-if="totalPages > 1" class="meta-grid__pagination">
@@ -330,6 +356,9 @@ const props = defineProps<{
   canComment?: boolean
   commentPresence?: Record<string, MultitableCommentPresenceSummary | undefined>
   conditionalFormatting?: ConditionalFormattingByRecord
+  aggregationConfig?: Record<string, string>
+  aggregates?: Record<string, { fn: string; value: number }>
+  aggregateTooLarge?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -347,6 +376,7 @@ const emit = defineEmits<{
   (e: 'reorder-field', fromFieldId: string, toFieldId: string): void
   (e: 'create-record'): void
   (e: 'set-frozen', frozenLeftColumnIds: string[]): void
+  (e: 'set-aggregation', payload: { fieldId: string; fn: string | null }): void
 }>()
 
 const { isZh } = useLocale()
@@ -536,6 +566,25 @@ function onToggleFreeze(i: number) {
   else emit('set-frozen', props.visibleFields.slice(0, i + 1).map((f) => f.id))
 }
 
+// ── aggregation footer (#4-3b-1): SERVER-RESPONSE ONLY, no local fallback ──
+const AGG_NUMERIC_TYPES = new Set(['number', 'currency', 'percent', 'rating', 'autoNumber'])
+const AGG_FNS_NUMERIC = ['sum', 'avg', 'min', 'max', 'count', 'countNonEmpty', 'countDistinct']
+const AGG_FNS_OTHER = ['count', 'countNonEmpty', 'countDistinct']
+function aggFnOptions(field: MetaField): string[] {
+  return AGG_NUMERIC_TYPES.has(field.type) ? AGG_FNS_NUMERIC : AGG_FNS_OTHER
+}
+const hasAnyAggregation = computed(() => Object.keys(props.aggregationConfig ?? {}).length > 0 || !!props.aggregateTooLarge)
+// value comes ONLY from the server response (props.aggregates) — never computed from local rows
+function aggValueDisplay(fieldId: string): string {
+  const a = props.aggregates?.[fieldId]
+  if (!a) return ''
+  return Number.isInteger(a.value) ? String(a.value) : String(Math.round(a.value * 100) / 100)
+}
+function onAggChange(fieldId: string, e: Event) {
+  const v = (e.target as HTMLSelectElement).value
+  emit('set-aggregation', { fieldId, fn: v || null })
+}
+
 function rowStyle(rid: string): Record<string, string> | undefined {
   const formatting = props.conditionalFormatting?.byRecordId.get(rid)
   if (!formatting?.rowStyle) return undefined
@@ -689,6 +738,11 @@ function onKeydown(e: KeyboardEvent) {
   color: #94a3b8;
 }
 .meta-grid__add-row td { padding: 0; border-top: 1px solid #eef0f2; }
+.meta-grid__foot td { position: sticky; bottom: 0; background: #f9fafb; border-top: 2px solid #e5e7eb; font-size: 12px; padding: 4px 8px; z-index: 1; }
+.meta-grid__foot-value { font-weight: 600; color: #333; margin-right: 6px; }
+.meta-grid__foot-fn { font-size: 11px; color: #999; border: none; background: transparent; cursor: pointer; opacity: 0.5; }
+.meta-grid__foot-fn:hover { opacity: 1; }
+.meta-grid__foot-toolarge td { color: #c0392b; font-weight: 500; }
 .meta-grid__add-row-btn {
   display: flex; align-items: center; gap: 6px; width: 100%;
   padding: 8px 12px; background: transparent; border: none; cursor: pointer;
