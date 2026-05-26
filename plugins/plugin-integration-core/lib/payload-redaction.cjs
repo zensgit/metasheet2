@@ -22,6 +22,12 @@ const SENSITIVE_PAYLOAD_KEYS = new Set([
   'xsessionid',
   'credentials',
   'rawpayload',
+  'connectionstring',
+  'databaseurl',
+  'dburl',
+  'jdbcurl',
+  'odbcconnectionstring',
+  'sqlconnectionstring',
 ])
 
 const UNSAFE_PAYLOAD_KEYS = new Set(['__proto__', 'constructor', 'prototype'])

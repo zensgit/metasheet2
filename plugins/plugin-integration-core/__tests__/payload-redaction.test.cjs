@@ -15,6 +15,9 @@ function main() {
   assert.equal(isSensitivePayloadKey('connect.sid'), true)
   assert.equal(isSensitivePayloadKey('X-Session-Id'), true)
   assert.equal(isSensitivePayloadKey('sid'), true)
+  assert.equal(isSensitivePayloadKey('connectionString'), true)
+  assert.equal(isSensitivePayloadKey('database-url'), true)
+  assert.equal(isSensitivePayloadKey('jdbcUrl'), true)
   assert.equal(isSensitivePayloadKey('apiKeyHeader'), false)
   assert.equal(isSensitivePayloadKey('tokenPath'), false)
 
@@ -35,6 +38,8 @@ function main() {
     rawPayload: {
       token: 'raw-token',
     },
+    connectionString: 'postgres://user:pass@example.invalid/db',
+    databaseUrl: 'postgres://user:pass@example.invalid/db',
     rows: [
       { cookie: 'sid=1' },
     ],
@@ -50,6 +55,8 @@ function main() {
   assert.equal(redacted.cookies['connect.sid'], '[redacted]')
   assert.equal(redacted.cookies.sid, '[redacted]')
   assert.equal(redacted.rawPayload, '[redacted]')
+  assert.equal(redacted.connectionString, '[redacted]')
+  assert.equal(redacted.databaseUrl, '[redacted]')
   assert.equal(redacted.rows[0].cookie, '[redacted]')
   assert.equal(redacted.circular.self, '[circular]')
 
