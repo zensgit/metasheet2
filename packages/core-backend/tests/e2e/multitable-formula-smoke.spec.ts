@@ -147,6 +147,43 @@ test.describe('Multitable formula smoke', () => {
     expect(updatedField?.property?.expression).toBe('')
   })
 
+  test('recalculates a formula field after a source field changes via grid PATCH (A1 fix)', async ({ request }) => {
+    const client = makeAuthClient(request, token)
+    const label = uniqueLabel('f-recalc')
+
+    const base = await createBase(client, `${label}-base`)
+    const sheet = await createSheet(client, base.id, `${label}-sheet`)
+    const numA = await createField(client, sheet.id, 'A', 'number')
+    const numB = await createField(client, sheet.id, 'B', 'number')
+    // Creating the formula field populates formula_dependencies (A→Sum, B→Sum).
+    const expression = `={${numA.id}} + {${numB.id}}`
+    const formula = await createField(client, sheet.id, 'Sum', 'formula', { expression })
+
+    const record = await createRecord(client, sheet.id, { [numA.id]: 10, [numB.id]: 5 })
+
+    // Change source field A 10 → 20 through the REAL grid PATCH write path
+    // (POST /api/multitable/patch → RecordWriteService.patchRecords), the path
+    // that previously left the formula stale (recalc only fired on form-submit).
+    const patchEnv = await client.post<{
+      updated: Array<{ recordId: string; version: number }>
+      records?: Array<{ recordId: string; data: Record<string, unknown> }>
+    }>('/api/multitable/patch', {
+      sheetId: sheet.id,
+      changes: [{ recordId: record.id, fieldId: numA.id, value: 20 }],
+    })
+
+    // (a) API response surfaces the recomputed formula (20 + 5 = 25).
+    const responseRecords = patchEnv.data?.records ?? []
+    const responseFormula = responseRecords.find((entry) => entry.recordId === record.id)
+    expect(responseFormula?.data?.[formula.id]).toBe(25)
+
+    // (b) DB is materialized: an independent GET returns the fresh formula value.
+    const getEnv = await client.get<{ record: { data: Record<string, unknown> } }>(
+      `/api/multitable/records/${record.id}?sheetId=${sheet.id}`,
+    )
+    expect(getEnv.data?.record?.data?.[formula.id]).toBe(25)
+  })
+
   test('persisted ApiEnvelope shape on field list is well-formed (helpers contract)', async ({ request }) => {
     // Tiny smoke that doubles as a sanity guard for the shared helper
     // module: if the response envelope contract changes upstream and

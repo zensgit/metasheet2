@@ -308,35 +308,103 @@ describe('MultitableFormulaEngine', () => {
   })
 
   describe('recalculateRecord', () => {
-    it('evaluates formula fields and writes back', async () => {
-      const recordData = {
-        fld_price: 10,
-        fld_qty: 3,
-        fld_total: '={fld_price}*{fld_qty}',
-        fld_name: 'Item',
-      }
-
-      const selectMock = vi.fn().mockResolvedValue({
-        rows: [{ id: 'rec_1', data: recordData }],
-        rowCount: 1,
+    function makeQuery(recordData: Record<string, unknown>) {
+      const updateCalls: Array<{ sql: string; params: unknown[] }> = []
+      const mockQuery = vi.fn().mockImplementation((sql: string, params: unknown[]) => {
+        if (sql.startsWith('SELECT')) {
+          return Promise.resolve({ rows: [{ id: 'rec_1', data: recordData }], rowCount: 1 })
+        }
+        updateCalls.push({ sql, params })
+        return Promise.resolve({ rows: [], rowCount: 1 })
       })
-      const updateMock = vi.fn().mockResolvedValue({ rows: [], rowCount: 1 })
+      return { mockQuery, updateCalls }
+    }
 
-      const mockQuery = vi.fn().mockImplementation((sql: string) => {
-        if (sql.startsWith('SELECT')) return selectMock(sql)
-        return updateMock(sql)
-      })
+    it('sources the expression from field.property.expression (record data holds no formula string)', async () => {
+      // Production shape: the formula expression lives in field.property.expression,
+      // NOT in record.data[formulaId] (which holds the computed value or nothing).
+      const { mockQuery, updateCalls } = makeQuery({ fld_price: 10, fld_qty: 3, fld_name: 'Item' })
 
-      const result = await mtEngine.recalculateRecord(
-        mockQuery,
-        'sheet_1',
-        'rec_1',
-        sampleFields,
-      )
+      const result = await mtEngine.recalculateRecord(mockQuery, 'sheet_1', 'rec_1', sampleFields)
 
       expect(result).not.toBeNull()
       expect(result!.fld_total).toBe(30)
-      expect(mockQuery).toHaveBeenCalledTimes(2) // SELECT + UPDATE
+      // Writes back via a JSONB merge of ONLY the formula key (not a full-blob replace),
+      // so a concurrent write to other fields between SELECT and UPDATE is not clobbered.
+      expect(updateCalls).toHaveLength(1)
+      expect(updateCalls[0].sql).toContain('data || ')
+      expect(JSON.parse(updateCalls[0].params[0] as string)).toEqual({ fld_total: 30 })
+    })
+
+    it('falls back to a legacy "=..." string in record data when no property.expression', async () => {
+      const legacyFields: MultitableField[] = [
+        { id: 'fld_a', name: 'A', type: 'number' },
+        { id: 'fld_b', name: 'B', type: 'number' },
+        { id: 'fld_legacy', name: 'Legacy', type: 'formula' }, // no property.expression
+      ]
+      const { mockQuery } = makeQuery({ fld_a: 4, fld_b: 6, fld_legacy: '={fld_a}+{fld_b}' })
+
+      const result = await mtEngine.recalculateRecord(mockQuery, 'sheet_1', 'rec_1', legacyFields)
+
+      expect(result).not.toBeNull()
+      expect(result!.fld_legacy).toBe(10)
+    })
+
+    it('treats an empty property.expression as "no formula" and ignores a stale data string', async () => {
+      const emptyExprFields: MultitableField[] = [
+        { id: 'fld_a', name: 'A', type: 'number' },
+        { id: 'fld_empty', name: 'Empty', type: 'formula', property: { expression: '' } },
+      ]
+      // Record data holds a stale "=..." string for the formula field (e.g. a prior
+      // client write). With an empty property.expression the field has no formula,
+      // so it must NOT be recomputed from the stale string.
+      const { mockQuery, updateCalls } = makeQuery({ fld_a: 7, fld_empty: '={fld_a}' })
+
+      const result = await mtEngine.recalculateRecord(mockQuery, 'sheet_1', 'rec_1', emptyExprFields)
+
+      expect(updateCalls).toHaveLength(0)
+      expect(result!.fld_empty).toBe('={fld_a}') // unchanged — not recomputed
+    })
+
+    it('does not fall back to a stale data string when property.expression is present but non-string', async () => {
+      // Sanitization / bad input can leave property.expression as null or a number.
+      // The `expression` KEY is present, so the field "defines" an expression — a
+      // malformed one means "no formula", NOT a license to recompute from a stale
+      // "=..." string sitting in record data.
+      for (const badExpression of [null, 123] as const) {
+        const fields: MultitableField[] = [
+          { id: 'fld_a', name: 'A', type: 'number' },
+          { id: 'fld_x', name: 'X', type: 'formula', property: { expression: badExpression as unknown as string } },
+        ]
+        const { mockQuery, updateCalls } = makeQuery({ fld_a: 9, fld_x: '={fld_a}' })
+
+        const result = await mtEngine.recalculateRecord(mockQuery, 'sheet_1', 'rec_1', fields)
+
+        expect(updateCalls).toHaveLength(0)
+        expect(result!.fld_x).toBe('={fld_a}') // unchanged — stale string NOT recomputed
+      }
+    })
+
+    it('writes #ERROR! when the expression fails to evaluate', async () => {
+      const errFields: MultitableField[] = [
+        { id: 'fld_bad', name: 'Bad', type: 'formula', property: { expression: '=NOPE_FUNC()' } },
+      ]
+      const { mockQuery } = makeQuery({})
+
+      const result = await mtEngine.recalculateRecord(mockQuery, 'sheet_1', 'rec_1', errFields)
+
+      expect(result).not.toBeNull()
+      expect(result!.fld_bad).toBe('#ERROR!')
+    })
+
+    it('returns the record unchanged and issues no UPDATE when there are no formula fields', async () => {
+      const noFormulaFields: MultitableField[] = [{ id: 'fld_a', name: 'A', type: 'number' }]
+      const { mockQuery, updateCalls } = makeQuery({ fld_a: 1 })
+
+      const result = await mtEngine.recalculateRecord(mockQuery, 'sheet_1', 'rec_1', noFormulaFields)
+
+      expect(result).toEqual({ fld_a: 1 })
+      expect(updateCalls).toHaveLength(0)
     })
 
     it('returns null when record not found', async () => {

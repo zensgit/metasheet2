@@ -242,38 +242,51 @@ export class MultitableFormulaEngine {
       const data: Record<string, unknown> =
         typeof row.data === 'string' ? JSON.parse(row.data) : (row.data ?? {})
 
-      const formulaFields = fields.filter(
-        (f) => f.type === 'formula' && typeof data[f.id] === 'string' && (data[f.id] as string).startsWith('='),
-      )
+      // Resolve each formula field's expression. Field-defined formulas store the
+      // expression in `field.property.expression` (the authoring surface + the
+      // source `formula_dependencies` is built from). Fall back to a legacy `=…`
+      // string persisted directly in the record data so older records / direct
+      // writes still compute.
+      const formulaTargets = fields.flatMap((field) => {
+        if (field.type !== 'formula') return []
+        const property = field.property as Record<string, unknown> | undefined
+        // The legacy data-string fallback applies ONLY when the field has no
+        // `expression` property key at all (older records). If the key is present
+        // — even as null / a number / an empty string — the field "defines" an
+        // expression and that is the source of truth: a non-empty string is the
+        // formula; anything else means "no formula" and must NOT fall through to a
+        // possibly-stale `=…` string sitting in record data.
+        const hasExpressionKey = !!property && Object.prototype.hasOwnProperty.call(property, 'expression')
+        let expression: string | null = null
+        if (hasExpressionKey) {
+          const fromProperty = property!.expression
+          expression = typeof fromProperty === 'string' && fromProperty.trim().length > 0 ? fromProperty : null
+        } else if (typeof data[field.id] === 'string' && (data[field.id] as string).startsWith('=')) {
+          expression = data[field.id] as string
+        }
+        return expression ? [{ field, expression }] : []
+      })
 
-      if (formulaFields.length === 0) return data
+      if (formulaTargets.length === 0) return data
 
       const updates: Record<string, unknown> = {}
-      let changed = false
-
-      for (const field of formulaFields) {
-        const expression = data[field.id] as string
+      for (const { field, expression } of formulaTargets) {
         try {
-          const result = await this.evaluateField(expression, data, fields)
-          updates[field.id] = result
-          changed = true
+          updates[field.id] = await this.evaluateField(expression, data, fields)
         } catch (error) {
           logger.error(`Failed to evaluate formula for field ${field.id}:`, error as Error)
           updates[field.id] = '#ERROR!'
-          changed = true
         }
       }
 
-      if (changed) {
-        const nextData = { ...data, ...updates }
-        await query(
-          `UPDATE meta_records SET data = $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3`,
-          [JSON.stringify(nextData), recordId, sheetId],
-        )
-        return nextData
-      }
-
-      return data
+      // Merge only the computed formula keys (`data || $patch`) so a concurrent
+      // write to other fields between this SELECT and UPDATE is not clobbered. No
+      // version bump: formula values are derived, not an authoritative user edit.
+      await query(
+        `UPDATE meta_records SET data = data || $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3`,
+        [JSON.stringify(updates), recordId, sheetId],
+      )
+      return { ...data, ...updates }
     } catch (error) {
       logger.error('recalculateRecord failed:', error as Error)
       return null

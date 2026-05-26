@@ -1565,6 +1565,49 @@ async function loadLinkValuesByRecord(
   return linkValuesByRecord
 }
 
+/**
+ * Recalculate `formula` fields for just-updated records when a changed field has
+ * a dependent formula in this sheet (per `formula_dependencies`). Delegates the
+ * per-record evaluate + materialize to MultitableFormulaEngine.recalculateRecord
+ * (which sources the expression from `field.property.expression`) and returns the
+ * recomputed formula-field values per record so the write path can surface them
+ * in the response + realtime patch. Returns `[]` when no formula depends on the
+ * change. Intra-sheet / intra-record only — no cross-sheet read, no perm gate.
+ */
+async function recalculateFormulaFields(
+  query: QueryFn,
+  sheetId: string,
+  fields: UniverMetaField[],
+  updatedRecordIds: string[],
+  changedFieldIds: string[],
+): Promise<Array<{ recordId: string; data: Record<string, unknown> }>> {
+  if (updatedRecordIds.length === 0 || changedFieldIds.length === 0) return []
+  const formulaFieldIds = fields.filter((f) => f.type === 'formula').map((f) => f.id)
+  if (formulaFieldIds.length === 0) return []
+
+  // Gate: only recompute when a changed field actually feeds a formula here.
+  const depRes = await query(
+    `SELECT DISTINCT field_id FROM formula_dependencies
+     WHERE depends_on_field_id = ANY($1::text[])
+       AND (depends_on_sheet_id IS NULL OR depends_on_sheet_id = $2)
+       AND sheet_id = $2`,
+    [changedFieldIds, sheetId],
+  )
+  if (depRes.rows.length === 0) return []
+
+  const results: Array<{ recordId: string; data: Record<string, unknown> }> = []
+  for (const recordId of updatedRecordIds) {
+    const nextData = await multitableFormulaEngine.recalculateRecord(query, sheetId, recordId, fields)
+    if (!nextData) continue
+    const formulaData: Record<string, unknown> = {}
+    for (const fieldId of formulaFieldIds) {
+      if (fieldId in nextData) formulaData[fieldId] = nextData[fieldId]
+    }
+    results.push({ recordId, data: formulaData })
+  }
+  return results
+}
+
 async function applyLookupRollup(
   req: Request,
   query: QueryFn,
@@ -6855,12 +6898,23 @@ export function univerMetaRouter(): Router {
             [changedFieldIds, view.sheetId],
           )
           if (depRes.rows.length > 0) {
-            await multitableFormulaEngine.recalculateRecord(
+            const recalculated = await multitableFormulaEngine.recalculateRecord(
               pool.query.bind(pool),
               view.sheetId,
               record.id,
               fields,
             )
+            if (recalculated) {
+              // Surface freshly materialized formula values in the response/broadcast.
+              // record.data was already filtered + link-merged above, so overlay only
+              // visible formula fields rather than replacing it (avoids clobbering the
+              // normalized link values).
+              for (const field of fields) {
+                if (field.type === 'formula' && field.id in recalculated && visibleFormFieldIds.has(field.id)) {
+                  record.data[field.id] = recalculated[field.id]
+                }
+              }
+            }
           }
         }
       } catch (recalcErr) {
@@ -7929,6 +7983,7 @@ export function univerMetaRouter(): Router {
         serializeAttachmentSummaryMap,
         applyLookupRollup: (q, f, rows, rl, lv) => applyLookupRollup(req, q, f, rows, rl, lv),
         computeDependentLookupRollupRecords: (q, ids) => computeDependentLookupRollupRecords(req, q, ids),
+        recalculateFormulaFields,
         loadLinkValuesByRecord,
         buildLinkSummaries: (q, rows, rl, lv) => buildLinkSummaries(req, q, rows, rl, lv),
         buildAttachmentSummaries: (q, sid, rows, af) => buildAttachmentSummaries(q, req, sid, rows, af),

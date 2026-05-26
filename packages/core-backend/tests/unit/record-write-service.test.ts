@@ -49,6 +49,7 @@ function createMockHelpers(overrides: Partial<RecordWriteHelpers> = {}): RecordW
     serializeAttachmentSummaryMap: () => ({}),
     applyLookupRollup: vi.fn().mockResolvedValue(undefined),
     computeDependentLookupRollupRecords: vi.fn().mockResolvedValue([]),
+    recalculateFormulaFields: vi.fn().mockResolvedValue([]),
     loadLinkValuesByRecord: vi.fn().mockResolvedValue(new Map()),
     buildLinkSummaries: vi.fn().mockResolvedValue(new Map()),
     buildAttachmentSummaries: vi.fn().mockResolvedValue(new Map()),
@@ -220,6 +221,67 @@ describe('RecordWriteService', () => {
         recordIds: ['rec1'],
       }),
     )
+  })
+
+  it('recomputes dependent formula fields and surfaces them in the response + realtime patch', async () => {
+    const recalculateFormulaFields = vi
+      .fn()
+      .mockResolvedValue([{ recordId: 'rec1', data: { fld_total: 42 } }])
+    helpers = createMockHelpers({ recalculateFormulaFields })
+    const service = new RecordWriteService(pool, eventBus as any, helpers)
+
+    const fields: UniverMetaField[] = [
+      { id: 'fld_name', name: 'Name', type: 'string', order: 0 },
+      { id: 'fld_total', name: 'Total', type: 'formula', order: 1, property: { expression: '={fld_name}' } },
+    ]
+    const input = buildTestInput({
+      fields,
+      visiblePropertyFields: fields,
+      visiblePropertyFieldIds: new Set(fields.map((f) => f.id)),
+      fieldById: new Map(fields.map((f) => [f.id, { type: f.type, readOnly: false, hidden: false }])) as any,
+    })
+
+    const result = await service.patchRecords(input)
+
+    // Helper is invoked with the changed field ids so it can gate on formula_dependencies.
+    expect(recalculateFormulaFields).toHaveBeenCalledWith(
+      expect.any(Function),
+      'sheet1',
+      fields,
+      ['rec1'],
+      ['fld_name'],
+    )
+    // Editing client: the computed formula value rides back in the response records.
+    expect(result.records).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ recordId: 'rec1', data: expect.objectContaining({ fld_total: 42 }) }),
+      ]),
+    )
+    // Other clients: the formula field id is in fieldIds AND its value is in the
+    // realtime record patch, so applyRemoteRecordPatch merges fresh (no stale formula).
+    const realtimePayload = mockPublish.mock.calls[0][0] as {
+      fieldIds: string[]
+      recordPatches: Array<{ recordId: string; patch: Record<string, unknown> }>
+    }
+    expect(realtimePayload.fieldIds).toEqual(expect.arrayContaining(['fld_name', 'fld_total']))
+    const patchForRec1 = realtimePayload.recordPatches.find((p) => p.recordId === 'rec1')
+    expect(patchForRec1?.patch).toMatchObject({ fld_name: 'Alice', fld_total: 42 })
+  })
+
+  it('adds no formula values to the response or realtime when nothing depends on the change', async () => {
+    // Default mock helper reports no dependents (returns []).
+    const service = new RecordWriteService(pool, eventBus as any, helpers)
+
+    const result = await service.patchRecords(buildTestInput())
+
+    expect(helpers.recalculateFormulaFields).toHaveBeenCalled()
+    expect(result.records).toBeUndefined()
+    const realtimePayload = mockPublish.mock.calls[0][0] as {
+      fieldIds: string[]
+      recordPatches: Array<{ recordId: string; patch: Record<string, unknown> }>
+    }
+    expect(realtimePayload.fieldIds).toEqual(['fld_name'])
+    expect(realtimePayload.recordPatches[0].patch).toEqual({ fld_name: 'Alice' })
   })
 
   it('creates subscriber notifications for each updated record and skips the actor', async () => {

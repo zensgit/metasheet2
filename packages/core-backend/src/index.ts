@@ -2051,6 +2051,10 @@ export class MetaSheetServer {
           serializeAttachmentSummaryMap: () => ({}),
           applyLookupRollup: async () => {},
           computeDependentLookupRollupRecords: async () => [],
+          // Yjs-bridge writes intentionally skip computed-field recompute (lookup/
+          // rollup are stubbed above); formula recalc stays scoped to the REST PATCH
+          // path for now and is stubbed here for the same reason.
+          recalculateFormulaFields: async () => [],
           loadLinkValuesByRecord: async () => new Map(),
           buildLinkSummaries: async () => new Map(),
           buildAttachmentSummaries: async () => new Map(),
