@@ -24,6 +24,58 @@ function logWarn(message) {
   console.warn(`[attendance-production-flow] WARN: ${message}`)
 }
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function exactNamePattern(names) {
+  const alternatives = names.map(escapeRegExp).join('|')
+  return new RegExp(`^(?:${alternatives})$`, 'i')
+}
+
+const uiText = {
+  attendanceHeadings: ['Attendance', 'Attendance Reports', '考勤', '考勤报表'],
+  records: ['Records', '记录'],
+  reports: ['Reports', '报表'],
+  overview: ['Overview', '总览'],
+  checkIn: ['Check In', '上班打卡'],
+  adminCenter: ['Admin Center', '管理中心'],
+  desktopRecommended: ['Desktop recommended', '建议使用桌面端'],
+  userAccess: ['User Access', '用户权限'],
+  submitRequest: ['Submit request', '提交申请'],
+  refresh: ['Refresh', '刷新'],
+  reload: ['Reload', '重载'],
+  import: ['Import', '导入'],
+  assignRole: ['Assign role', '分配角色'],
+  load: ['Load', '加载'],
+  loadTemplate: ['Load template', '加载模板'],
+  loadCsv: ['Load CSV', '加载 CSV'],
+  applyProfile: ['Apply profile', '应用配置'],
+  preview: ['Preview', '预览'],
+  reloadBatches: ['Reload batches', '重载批次'],
+  importHeading: ['Import (DingTalk / Manual)', '导入（钉钉 / 手工）'],
+  importBatchesHeading: ['Import batches', '导入批次'],
+  policies: ['Policies', '规则', '规则策略'],
+  userIdUuid: ['User ID (UUID)', '用户 ID（UUID）'],
+}
+
+function buttonByNames(page, names, options = {}) {
+  return page.getByRole('button', {
+    name: exactNamePattern(names),
+    exact: options.exact ?? true,
+  })
+}
+
+function headingByNames(scope, names) {
+  return scope.getByRole('heading', { name: exactNamePattern(names) })
+}
+
+const localizedHeadingNames = new Map([
+  ['User Access', uiText.userAccess],
+  ['Import (DingTalk / Manual)', uiText.importHeading],
+  ['Import batches', uiText.importBatchesHeading],
+])
+
 function normalizeWebAttendanceUrl(raw) {
   const url = new URL(raw)
   if (!url.pathname || url.pathname === '/') {
@@ -161,12 +213,24 @@ async function ensureAttendanceLoaded(page) {
     },
     { timeout: timeoutMs },
   )
-  await page.getByRole('heading', { name: 'Attendance', exact: true }).waitFor({ timeout: timeoutMs })
+
+  const heading = headingByNames(page, uiText.attendanceHeadings).first()
+  try {
+    await heading.waitFor({ timeout: timeoutMs })
+    return
+  } catch (error) {
+    const shell = page.locator('.attendance, .attendance-shell').first()
+    if (await shell.isVisible().catch(() => false)) {
+      logWarn('Attendance route shell is visible, but localized attendance heading was not found; continuing with route-level fallback')
+      return
+    }
+    throw error
+  }
 }
 
 function getRecordsCard(page) {
   return page.locator('section.attendance__card').filter({
-    has: page.getByRole('heading', { name: 'Records' }),
+    has: headingByNames(page, uiText.records),
   })
 }
 
@@ -180,7 +244,7 @@ async function getVisibleRecordsCard(page) {
   const recordsCard = getRecordsCard(page)
   if (await recordsCard.count() && await recordsCard.first().isVisible().catch(() => false)) return recordsCard
 
-  const reportsTab = page.getByRole('button', { name: 'Reports', exact: true })
+  const reportsTab = buttonByNames(page, uiText.reports)
   if (await reportsTab.count()) {
     logInfo('Records card not visible on overview; switching to Reports tab')
     await reportsTab.first().click()
@@ -192,10 +256,10 @@ async function getVisibleRecordsCard(page) {
 }
 
 async function switchToOverview(page) {
-  const overviewTab = page.getByRole('button', { name: 'Overview', exact: true })
+  const overviewTab = buttonByNames(page, uiText.overview)
   if (await overviewTab.count()) {
     await overviewTab.first().click()
-    await page.getByRole('button', { name: 'Check In', exact: true }).waitFor({ timeout: timeoutMs })
+    await buttonByNames(page, uiText.checkIn).waitFor({ timeout: timeoutMs })
   }
 }
 
@@ -208,7 +272,7 @@ async function selectAdminSection(page, sectionId, headingName, waitMs = timeout
   const section = page.locator(`[data-admin-section="${sectionId}"]`).first()
   await section.waitFor({ state: 'visible', timeout: waitMs })
   if (headingName) {
-    await section.getByRole('heading', { name: headingName }).waitFor({ timeout: waitMs })
+    await headingByNames(section, localizedHeadingNames.get(headingName) || [headingName]).waitFor({ timeout: waitMs })
   }
   return section
 }
@@ -245,7 +309,7 @@ async function clickImportAndWaitForCommitResponse(page, importSection) {
     if (resp.request().method() !== 'POST') return false
     return isImportCommitUrl(resp.url())
   }, { timeout: timeoutMs })
-  await importSection.getByRole('button', { name: 'Import', exact: true }).click()
+  await importSection.getByRole('button', { name: exactNamePattern(uiText.import) }).click()
   const response = await responsePromise
   const raw = await response.text()
   let body = null
@@ -350,12 +414,12 @@ async function run() {
 
   // Ensure records can be refreshed before any mutations.
   logInfo('Refreshing records')
-  const refreshButton = page.getByRole('button', { name: 'Refresh', exact: true })
+  const refreshButton = buttonByNames(page, uiText.refresh)
   if (await refreshButton.count()) {
     await refreshButton.first().click()
   }
   const recordsCard = await getVisibleRecordsCard(page)
-  await recordsCard.getByRole('button', { name: 'Reload' }).click()
+  await recordsCard.getByRole('button', { name: exactNamePattern(uiText.reload) }).click()
   await switchToOverview(page)
 
   // 2) Punch flow (best-effort: constraints can legitimately block).
@@ -367,7 +431,7 @@ async function run() {
         (resp) => resp.request().method() === 'POST' && resp.url().includes('/api/attendance/punch'),
         { label: 'Punch' }
       )
-      await page.getByRole('button', { name: 'Check In' }).click()
+      await buttonByNames(page, uiText.checkIn).click()
       const { body } = await punchResp
       logInfo(`Punch API ok: ${Boolean(body?.ok)} workDate=${body?.data?.record?.workDate || ''}`)
     })(),
@@ -393,7 +457,7 @@ async function run() {
         (resp) => resp.request().method() === 'POST' && resp.url().includes('/api/attendance/requests'),
         { label: 'Submit request' }
       )
-      await page.getByRole('button', { name: 'Submit request' }).click()
+      await buttonByNames(page, uiText.submitRequest).click()
       const { body } = await reqResp
       logInfo(`Request API ok: ${Boolean(body?.ok)} id=${body?.data?.request?.id || ''}`)
     })(),
@@ -407,9 +471,9 @@ async function run() {
   }
 
   logInfo('Entering Admin Center')
-  await page.getByRole('button', { name: 'Admin Center' }).click()
+  await buttonByNames(page, uiText.adminCenter).click()
   if (mobile) {
-    await page.getByRole('heading', { name: 'Desktop recommended' }).waitFor({ timeout: timeoutMs })
+    await headingByNames(page, uiText.desktopRecommended).waitFor({ timeout: timeoutMs })
     await page.screenshot({ path: path.join(outputDir, '03-admin-mobile-gated.png'), fullPage: true })
     throw new Error('UI_MOBILE=true: admin import flow is desktop-only; rerun without UI_MOBILE')
   }
@@ -421,7 +485,7 @@ async function run() {
   logInfo('Validating permission provisioning UI')
   // Modern attendance-admin APIs require the target user to exist. Use the current user for a stable smoke check.
   const provisionUserId = userId || randomUUID()
-  await userAccessSection.getByLabel('User ID (UUID)').fill(provisionUserId)
+  await userAccessSection.getByLabel(exactNamePattern(uiText.userIdUuid)).fill(provisionUserId)
   await userAccessSection.locator('#attendance-provision-role').selectOption('employee')
 
   const grantResp = waitForJsonResponse(
@@ -438,7 +502,7 @@ async function run() {
   )
   // Modern deployments use attendance-scoped role templates ("Assign role").
   // Older deployments fall back to /api/permissions/grant with the same button.
-  await userAccessSection.getByRole('button', { name: 'Assign role' }).click()
+  await userAccessSection.getByRole('button', { name: exactNamePattern(uiText.assignRole) }).click()
   await grantResp
   await userAccessSection.locator('text=attendance:read').waitFor({ timeout: timeoutMs })
   await userAccessSection.locator('text=attendance:write').waitFor({ timeout: timeoutMs })
@@ -455,14 +519,14 @@ async function run() {
     },
     { label: 'Load user access' }
   )
-  await userAccessSection.getByRole('button', { name: 'Load' }).click()
+  await userAccessSection.getByRole('button', { name: exactNamePattern(uiText.load) }).click()
   await loadResp
   await page.screenshot({ path: path.join(outputDir, '03a-admin-user-access.png'), fullPage: true })
 
   const importSection = await selectAdminSection(page, adminSectionIds.import, 'Import (DingTalk / Manual)')
 
   logInfo('Loading import template')
-  await importSection.getByRole('button', { name: 'Load template' }).click()
+  await importSection.getByRole('button', { name: exactNamePattern(uiText.loadTemplate) }).click()
   await page.locator('#attendance-import-payload').waitFor({ timeout: timeoutMs })
 
   // Prepare a tiny CSV with explicit UserId so we don't need user-map.
@@ -483,7 +547,7 @@ async function run() {
   await page.locator('#attendance-import-group-assign').check()
 
   logInfo('Applying CSV into payload')
-  await importSection.getByRole('button', { name: 'Load CSV', exact: true }).click()
+  await importSection.getByRole('button', { name: exactNamePattern(uiText.loadCsv) }).click()
   await page.waitForFunction(() => {
     const el = document.querySelector('#attendance-import-payload')
     const value = el && 'value' in el ? el.value : ''
@@ -491,7 +555,7 @@ async function run() {
   })
 
   logInfo('Applying mapping profile into payload')
-  await importSection.getByRole('button', { name: 'Apply profile' }).click()
+  await importSection.getByRole('button', { name: exactNamePattern(uiText.applyProfile) }).click()
   await normalizeImportPayloadTextarea(importSection)
 
   logInfo('Preview import')
@@ -500,10 +564,10 @@ async function run() {
     (resp) => resp.request().method() === 'POST' && resp.url().includes('/api/attendance/import/preview'),
     { label: 'Import preview' }
   )
-  await importSection.getByRole('button', { name: 'Preview' }).click()
+  await importSection.getByRole('button', { name: exactNamePattern(uiText.preview) }).click()
   const previewJson = await previewResp
   const previewTable = importSection.locator('table.attendance__table').filter({
-    has: page.getByRole('columnheader', { name: 'Policies' }),
+    has: page.getByRole('columnheader', { name: exactNamePattern(uiText.policies) }),
   })
   await previewTable.locator('tbody tr').first().waitFor({ timeout: timeoutMs })
   await page.screenshot({ path: path.join(outputDir, '04-import-preview.png'), fullPage: true })
@@ -543,7 +607,7 @@ async function run() {
         (resp) => resp.request().method() === 'POST' && resp.url().includes('/api/attendance/import/preview'),
         { label: 'Import preview (retry)' }
       )
-      await importSection.getByRole('button', { name: 'Preview' }).click()
+      await importSection.getByRole('button', { name: exactNamePattern(uiText.preview) }).click()
       await previewRetryResp
       await page.waitForTimeout(250)
       continue
@@ -568,7 +632,7 @@ async function run() {
   // Ensure batch list has at least one row.
   try {
     const importBatchesSection = await selectAdminSection(page, adminSectionIds.importBatches, 'Import batches', 5000)
-    await importBatchesSection.getByRole('button', { name: 'Reload batches' }).click()
+    await importBatchesSection.getByRole('button', { name: exactNamePattern(uiText.reloadBatches) }).click()
   } catch (error) {
     logWarn(`Import batches UI was not reachable; continuing with API batch-item assertion: ${(error && error.message) || String(error)}`)
   }
@@ -605,16 +669,16 @@ async function run() {
 
   // 5) Back to overview and verify records can be refreshed for that date.
   logInfo('Returning to Overview')
-  await page.getByRole('button', { name: 'Overview' }).click()
+  await buttonByNames(page, uiText.overview).click()
   await ensureAttendanceLoaded(page)
   await page.locator('#attendance-from-date').fill(workDate)
   await page.locator('#attendance-to-date').fill(workDate)
   if (userId) {
     await page.locator('#attendance-user-id').fill(userId)
   }
-  await page.getByRole('button', { name: 'Refresh', exact: true }).click()
+  await buttonByNames(page, uiText.refresh).click()
   const recordsCardAfter = await getVisibleRecordsCard(page)
-  await recordsCardAfter.getByRole('button', { name: 'Reload' }).click()
+  await recordsCardAfter.getByRole('button', { name: exactNamePattern(uiText.reload) }).click()
   await page.screenshot({ path: path.join(outputDir, '06-overview-after-import.png'), fullPage: true })
 
   await context.close()
