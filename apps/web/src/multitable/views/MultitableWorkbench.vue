@@ -246,7 +246,7 @@
           :rows="grid.rows.value" :visible-fields="scopedGridFields" :sort-rules="grid.sortRules.value"
           :loading="grid.loading.value" :current-page="grid.currentPage.value" :total-pages="grid.totalPages.value"
           :start-index="pageStartIndex" :selected-record-id="selectedRecordId" :can-edit="effectiveRowActions.canEdit"
-          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-create="caps.canCreateRecord.value" :frozen-left-column-ids="activeFrozenLeftColumnIds" :aggregation-config="activeAggregationConfig" :aggregates="aggregateValues" :aggregate-too-large="aggregateTooLarge" :field-read-only-ids="readOnlyFieldIds" :column-widths="grid.columnWidths.value"
+          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-create="caps.canCreateRecord.value" :frozen-left-column-ids="activeFrozenLeftColumnIds" :aggregation-config="activeAggregationConfig" :aggregates="aggregateValues" :aggregate-too-large="aggregateTooLarge" :aggregate-groups="aggregateGroups" :field-read-only-ids="readOnlyFieldIds" :column-widths="grid.columnWidths.value"
           :row-action-overrides="grid.rowActionOverrides.value"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
           :enable-multi-select="gridAllowsAnyDelete || effectiveRowActions.canEdit"
@@ -1754,6 +1754,7 @@ function onSetFrozen(frozenLeftColumnIds: string[]) {
 // aggregation footer (#4-3b-1): SERVER-RESPONSE ONLY — never compute aggregates from local rows
 const aggregateValues = ref<Record<string, { fn: string; value: number }>>({})
 const aggregateTooLarge = ref(false)
+const aggregateGroups = ref<import('../api/client').ViewAggregateGroup[]>([]) // #4-3b-2a server per-group subtotals
 const activeAggregationConfig = computed<Record<string, string>>(() => {
   const raw = workbench.activeView.value?.config?.aggregations
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
@@ -1769,16 +1770,19 @@ async function loadAggregates() {
   if (!sheetId || Object.keys(activeAggregationConfig.value).length === 0) {
     aggregateValues.value = {}
     aggregateTooLarge.value = false
+    aggregateGroups.value = []
     return
   }
   try {
     const r = await workbench.client.aggregateView({ sheetId, viewId: viewId || undefined, search: searchText.value || undefined })
     if (seq !== aggregateReqSeq) return // a newer request superseded this one
     aggregateValues.value = r.aggregates ?? {}
+    aggregateGroups.value = r.groups ?? []
     aggregateTooLarge.value = false
   } catch (e) {
     if (seq !== aggregateReqSeq) return
     aggregateValues.value = {} // NO local fallback — keeps the "filtered set, not page rows" contract
+    aggregateGroups.value = []
     aggregateTooLarge.value = (e as { code?: string })?.code === 'AGGREGATE_TOO_LARGE'
   }
 }

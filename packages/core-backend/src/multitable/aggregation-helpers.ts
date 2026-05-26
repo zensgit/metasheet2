@@ -3,7 +3,8 @@
  *
  * Dedicated helper (NOT the private `ChartAggregationService.aggregate`) so the footer's locked fn set
  * + config naming can't drift. `toNumber` replicated from chart-aggregation-service.ts (it's private).
- * Design: docs/development/multitable-agg-footer-design-20260525.md.
+ * Design: docs/development/multitable-agg-footer-design-20260525.md
+ *       + docs/development/multitable-agg-footer-2b-design-20260526.md (#4-3b-2a group subtotals).
  */
 export type AggregationFn = 'sum' | 'avg' | 'min' | 'max' | 'count' | 'countNonEmpty' | 'countDistinct'
 
@@ -86,4 +87,51 @@ export function aggregateField(values: unknown[], fn: AggregationFn, fieldType: 
     }
   }
   return null
+}
+
+/** One group bucket: the emitted (JSON-serializable) key + the data rows that fell into it. */
+export interface AggregateGroupBucket {
+  key: string | number | boolean | null
+  rows: Array<Record<string, unknown>>
+}
+
+const GROUP_NULL_SENTINEL = '__empty__' // internal map key for the empty-value group
+
+// LOCKED (#4-3b-2a, design §3.1): empty cell → group key `null`; primitive → itself; complex (array/
+// object, e.g. multi-select/link) → its JSON string. The map key is namespaced so a primitive value
+// and its JSON form can't collide.
+function groupKeyOf(raw: unknown): { mapKey: string; emit: AggregateGroupBucket['key'] } {
+  if (isEmptyCell(raw)) return { mapKey: GROUP_NULL_SENTINEL, emit: null }
+  if (typeof raw === 'string' || typeof raw === 'number' || typeof raw === 'boolean') {
+    return { mapKey: `v:${typeof raw}:${String(raw)}`, emit: raw }
+  }
+  const json = JSON.stringify(raw)
+  return { mapKey: `j:${json}`, emit: json }
+}
+
+/**
+ * Partition `rows` by `groupFieldId` into buckets, ordered by key (empty/null group LAST; others by
+ * numeric-aware string compare). Pure + total-preserving: `Σ buckets[].rows.length === rows.length`.
+ * The route computes per-bucket aggregates with `aggregateField` under the same omission rules as the
+ * grand total. Single group field only (matches grid `view.groupInfo.fieldId`); no multi-level.
+ */
+export function groupRowsByField(
+  rows: Array<Record<string, unknown>>,
+  groupFieldId: string,
+): AggregateGroupBucket[] {
+  const buckets = new Map<string, AggregateGroupBucket>()
+  for (const data of rows) {
+    const { mapKey, emit } = groupKeyOf(data[groupFieldId])
+    let bucket = buckets.get(mapKey)
+    if (!bucket) {
+      bucket = { key: emit, rows: [] }
+      buckets.set(mapKey, bucket)
+    }
+    bucket.rows.push(data)
+  }
+  return [...buckets.values()].sort((a, b) => {
+    if (a.key === null) return b.key === null ? 0 : 1
+    if (b.key === null) return -1
+    return String(a.key).localeCompare(String(b.key), undefined, { numeric: true })
+  })
 }

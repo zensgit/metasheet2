@@ -65,7 +65,7 @@ import {
   tryResolveView as tryResolveViewShared,
   type MultitableViewConfig as SharedMultitableViewConfig,
 } from '../multitable/loaders'
-import { parseAggregations, aggregateField, type AggregationFn } from '../multitable/aggregation-helpers'
+import { parseAggregations, aggregateField, groupRowsByField, type AggregationFn } from '../multitable/aggregation-helpers'
 import { ensureLegacyBase as ensureLegacyBaseShared } from '../multitable/provisioning'
 import {
   MultitableTemplateConflictError,
@@ -5822,14 +5822,46 @@ export function univerMetaRouter(): Router {
 
       // aggregate ONLY configured + D3c-allowed fields; disallowed (hidden) field aggregates are OMITTED
       const aggConfig = parseAggregations(view?.config ?? null)
-      const aggregates: Record<string, { fn: AggregationFn; value: number }> = {}
-      for (const [fieldId, fn] of Object.entries(aggConfig)) {
-        const fieldType = aggregateFieldTypeById.get(fieldId)
-        if (!fieldType) continue // hidden / permission-denied / unknown → omit (no leak)
-        const value = aggregateField(rows.map((rec) => rec.data[fieldId]), fn, fieldType)
-        if (value !== null) aggregates[fieldId] = { fn, value }
+      const computeAggregates = (dataRows: Array<Record<string, unknown>>) => {
+        const out: Record<string, { fn: AggregationFn; value: number }> = {}
+        for (const [fieldId, fn] of Object.entries(aggConfig)) {
+          const fieldType = aggregateFieldTypeById.get(fieldId)
+          if (!fieldType) continue // hidden / permission-denied / unknown → omit (no leak)
+          const value = aggregateField(dataRows.map((d) => d[fieldId]), fn, fieldType)
+          if (value !== null) out[fieldId] = { fn, value }
+        }
+        return out
       }
-      return res.json({ ok: true, data: { total: rows.length, aggregates } })
+      // group subtotals (#4-3b-2a): grid group field is view.groupInfo.fieldId (NOT view.config.groupFieldId).
+      // Resolve + run the 422 gates BEFORE the grand total → no wasted aggregation on a refused request.
+      const groupFieldId =
+        typeof (view?.groupInfo as { fieldId?: unknown } | undefined)?.fieldId === 'string'
+          ? ((view!.groupInfo as { fieldId?: string }).fieldId as string).trim()
+          : ''
+      if (groupFieldId) {
+        // group field computed → can't materialize here (same posture as computed filter)
+        const groupFieldType = filterFieldTypeById.get(groupFieldId)
+        if (groupFieldType && COMPUTED_FILTER_TYPES.has(groupFieldType)) {
+          return res.status(422).json({ ok: false, error: { code: 'AGGREGATE_COMPUTED_GROUP_UNSUPPORTED', message: 'Grouping a view by a computed (lookup/rollup/formula) field is not yet supported' } })
+        }
+        // group field hidden/denied (or not a visible property field) → REFUSE: the group keys are that
+        // field's distinct values, so emitting them would leak data the user can't see.
+        if (!aggregateFieldTypeById.has(groupFieldId)) {
+          return res.status(422).json({ ok: false, error: { code: 'AGGREGATE_GROUP_FIELD_DENIED', message: 'Cannot group by a field that is not visible to this user' } })
+        }
+      }
+
+      const aggregates = computeAggregates(rows.map((rec) => rec.data))
+      if (!groupFieldId) {
+        // not grouped → response byte-identical to #4-3b-1
+        return res.json({ ok: true, data: { total: rows.length, aggregates } })
+      }
+      const groups = groupRowsByField(rows.map((rec) => rec.data), groupFieldId).map((bucket) => ({
+        key: bucket.key,
+        count: bucket.rows.length,
+        aggregates: computeAggregates(bucket.rows),
+      }))
+      return res.json({ ok: true, data: { total: rows.length, aggregates, groupFieldId, groups } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })

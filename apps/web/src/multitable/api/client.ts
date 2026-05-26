@@ -737,9 +737,18 @@ function normalizeCommentsParams(params: { containerId: string; targetId: string
   }
 }
 
+export interface ViewAggregateGroup {
+  key: string | number | boolean | null
+  count: number
+  aggregates: Record<string, { fn: string; value: number }>
+}
 export interface ViewAggregateResult {
   total: number
   aggregates: Record<string, { fn: string; value: number }>
+  // #4-3b-2a: present only when the view groups (view.groupInfo.fieldId resolves to an allowed,
+  // non-computed field); otherwise absent (response is byte-identical to the grand-total-only shape).
+  groupFieldId?: string
+  groups?: ViewAggregateGroup[]
 }
 
 export class MultitableApiClient {
