@@ -112,9 +112,9 @@ Gate 0: K3 GATE PASS + 阶段二 unlock
 - Multi-record / BOM / Submit/Audit = separate owner decisions, not in this plan.
 - **FaaS effectively spans roadmap 阶段三** (vendor registry / schema catalog / adapter builder) and 阶段四 (marketplace) — it is not "阶段二 wrap-up"; it sits last and may slip into 阶段三.
 
-## 6. Recommended minimal first move (if only one thing on unlock day)
+## 6. Recommended first move on unlock day (the DF-N2 mini-chain, contracts-first)
 
-**Start with N2-2 (the JSONB lineage) as a single PR** — lowest risk, zero new connector behavior, and the most direct payoff for the original 阶段二 motivation (per-record success/fail). Then the config layer C-1/C-2. **Explicitly do not** start with FaaS or DF-N4 (heaviest, furthest, most PoC-dependent).
+**Start the DF-N2 mini-chain — the first PR is N2-1 (contracts): freeze the `ProvenanceEvent` shape / event-type enum / redaction contract + OpenAPI before any runtime.** **N2-2 (the JSONB lineage) is the first *runtime* PR, immediately after N2-1** — it is the highest-value / lowest-risk runtime slice and the most direct payoff for the original 阶段二 motivation (per-record success/fail). Then N2-3, then the config layer C-1/C-2. **Explicitly do not** start with FaaS or DF-N4 (heaviest, furthest, most PoC-dependent), and **do not begin N2-2 runtime/migration before the N2-1 contract is frozen** (contracts-first — see the DF-N2 chain discipline in `data-factory-df-n2-task-checklist-20260526.md`).
 
 ## See also
 

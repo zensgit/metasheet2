@@ -11,7 +11,7 @@
 ## 已完成（Stage-5 监控）
 - [x] ✅ DF-N1 只读运行监控 UI（#1848）
 - [x] ✅ DF-N1.5 单条手动 dead-letter 重放（#1857）
-- [x] ✅ #1838 addendum：DF-N2 JSONB + FaaS-自有沙箱偏好（#1874，OPEN）
+- [x] ✅ #1838 addendum：DF-N2 JSONB + FaaS-自有沙箱偏好（#1874）
 
 ## DF-N2 — Provenance 逐记录血缘 〔最近 · 最低风险〕
 - [ ] 🔒 **N2-1** contracts：`ProvenanceEvent` 形状 + 11 event-type 枚举 + 脱敏契约 + OpenAPI　·　测试：schema parity / 非法枚举拒绝
@@ -48,8 +48,10 @@
 - [ ] OpenAPI parity 门 · wire-vs-fixture round-trip · enum 严格 · 脱敏强制 · 触权限走 real-DB golden 门
 - [ ] integration-core = plugin-local SQL（`migration-sql.test.cjs` 守门）· 部署查 pending-migration + auth round-trip
 
-## 解冻当天的最小起点
-- [ ] ⬜ **先做 N2-2（JSONB 血缘）单 PR**，再 C-1/C-2。**不要**从 FaaS / DF-N4 起步。
+## 解冻当天的起点（DF-N2 mini-chain，契约优先）
+- [ ] ⬜ **首个 PR = N2-1 契约**（先冻结 ProvenanceEvent / 枚举 / 脱敏 + OpenAPI，再动 runtime）
+- [ ] ⬜ **N2-2（JSONB 血缘）= N2-1 之后的首个 runtime PR**（最高价值 / 最低风险的 runtime 切片），再 N2-3，再 C-1/C-2
+- [ ] ⬜ **不要**从 FaaS / DF-N4 起步；**不要**在 N2-1 契约冻结前先做 N2-2 runtime（契约优先）
 
 ## 永不违反的硬锁
 - K3 Save-only / 单记录；无 Submit/Audit/BOM/多记录（除非 owner 决定）
