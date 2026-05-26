@@ -30,6 +30,11 @@ const V_SECRET = `v_secret_${TS}`
 const V_BADFN = `v_badfn_${TS}`
 const V_HIDFILTER = `v_hidfilter_${TS}` // hides + filters on the same field
 const V_COMPUTED = `v_computed_${TS}` // filters on a computed (formula) field → must 422
+const V_GROUP = `v_group_${TS}` // groups by cat (A/B)
+const V_GROUP_SECRET = `v_group_secret_${TS}` // groups by cat, aggregates a hidden field → omitted per group
+const V_GROUP_NOTE = `v_group_note_${TS}` // groups by note (has empty '' → null-key group)
+const V_GROUP_DENIED = `v_group_denied_${TS}` // groups by a hidden field → 422
+const V_GROUP_COMPUTED = `v_group_computed_${TS}` // groups by a computed (formula) field → 422
 const N = 60 // > default page size (50) → proves full-set, not page
 
 let app: Express
@@ -81,6 +86,16 @@ describeIfDatabase('multitable view-aggregate (real DB)', () => {
       [V_COMPUTED, SHEET_ID, V_COMPUTED, 'grid', '[]',
         JSON.stringify({ conjunction: 'and', conditions: [{ fieldId: FLD_FORMULA, operator: 'isnotempty' }] }),
         JSON.stringify({ aggregations: { [FLD_QTY]: 'sum' } })])
+    // grouped views (#4-3b-2a): grid group field = view.groupInfo.fieldId
+    const groupedView = (id: string, aggregations: Record<string, string>, groupFieldId: string) =>
+      q('INSERT INTO meta_views (id, sheet_id, name, type, hidden_field_ids, filter_info, config, group_info) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb,$8::jsonb)',
+        [id, SHEET_ID, id, 'grid', '[]', JSON.stringify({ conjunction: 'and', conditions: [] }),
+          JSON.stringify({ aggregations }), JSON.stringify({ fieldId: groupFieldId })])
+    await groupedView(V_GROUP, { [FLD_QTY]: 'sum' }, FLD_CAT) // A/B, 30 each
+    await groupedView(V_GROUP_SECRET, { [FLD_QTY]: 'sum', [FLD_SECRET]: 'sum' }, FLD_CAT) // secret omitted per group
+    await groupedView(V_GROUP_NOTE, { [FLD_QTY]: 'sum' }, FLD_NOTE) // '' → null-key group
+    await groupedView(V_GROUP_DENIED, { [FLD_QTY]: 'sum' }, FLD_SECRET) // hidden group field → 422
+    await groupedView(V_GROUP_COMPUTED, { [FLD_QTY]: 'sum' }, FLD_FORMULA) // computed group field → 422
     // hide fld_secret from this user (subject-scoped) — its aggregate must be OMITTED
     await q('INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,$3,$4,$5,$6)', [SHEET_ID, FLD_SECRET, 'user', USER, false, false])
   })
@@ -162,5 +177,56 @@ describeIfDatabase('multitable view-aggregate (real DB)', () => {
     const res = await aggregate(V_COMPUTED)
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('AGGREGATE_COMPUTED_FILTER_UNSUPPORTED')
+  })
+
+  // ---- #4-3b-2a group subtotals ----
+
+  test('GROUP: groups partition the full set (Σ count === total) with per-group sums', async () => {
+    const res = await aggregate(V_GROUP) // group by cat A/B
+    expect(res.status).toBe(200)
+    expect(res.body.data.total).toBe(N)
+    expect(res.body.data.groupFieldId).toBe(FLD_CAT)
+    const groups = res.body.data.groups as Array<{ key: unknown; count: number; aggregates: Record<string, { fn: string; value: number }> }>
+    expect(groups.map((g) => g.key)).toEqual(['A', 'B']) // server key order
+    expect(groups.reduce((s, g) => s + g.count, 0)).toBe(N) // partition
+    const byKey = Object.fromEntries(groups.map((g) => [g.key, g]))
+    expect(byKey.A.count).toBe(30)
+    expect(byKey.A.aggregates[FLD_QTY]).toEqual({ fn: 'sum', value: 900 }) // odd i 1..59
+    expect(byKey.B.aggregates[FLD_QTY]).toEqual({ fn: 'sum', value: 930 }) // even i 2..60
+    // grand total unchanged + still present alongside groups
+    expect(res.body.data.aggregates[FLD_QTY]).toEqual({ fn: 'sum', value: 1830 })
+  })
+
+  test('GROUP SECURITY: a hidden aggregate field is OMITTED in every group (not just the grand total)', async () => {
+    const res = await aggregate(V_GROUP_SECRET) // groups by cat, config aggregates FLD_SECRET (hidden) + FLD_QTY
+    expect(res.status).toBe(200)
+    for (const g of res.body.data.groups as Array<{ aggregates: Record<string, unknown> }>) {
+      expect(g.aggregates[FLD_QTY]).toBeDefined()
+      expect(g.aggregates[FLD_SECRET]).toBeUndefined() // hidden → omitted per group, NOT null/0
+    }
+    expect(res.body.data.aggregates[FLD_SECRET]).toBeUndefined() // and in the grand total
+  })
+
+  test('GROUP empty/NULL key: empty cell values form one group with key:null', async () => {
+    const res = await aggregate(V_GROUP_NOTE) // note = '' when i%3==0 (20 rows) else 'x' (40 rows)
+    expect(res.status).toBe(200)
+    const groups = res.body.data.groups as Array<{ key: unknown; count: number }>
+    expect(groups.reduce((s, g) => s + g.count, 0)).toBe(N)
+    const nullGroup = groups.find((g) => g.key === null)
+    expect(nullGroup).toBeDefined()
+    expect(nullGroup!.count).toBe(20) // the '' rows
+    expect(groups.find((g) => g.key === 'x')!.count).toBe(40)
+  })
+
+  test('GROUP DENIED: grouping by a hidden field HARD-FAILS 422 (group keys would leak its data)', async () => {
+    const res = await aggregate(V_GROUP_DENIED) // groups by FLD_SECRET (field_permissions.visible=false)
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('AGGREGATE_GROUP_FIELD_DENIED')
+  })
+
+  test('GROUP COMPUTED: grouping by a formula field HARD-FAILS 422', async () => {
+    const res = await aggregate(V_GROUP_COMPUTED)
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('AGGREGATE_COMPUTED_GROUP_UNSUPPORTED')
   })
 })

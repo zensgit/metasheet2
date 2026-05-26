@@ -110,6 +110,18 @@
                   </button>
                 </td>
               </tr>
+              <tr v-if="hasGroupSubtotals" class="meta-grid__group-subtotal">
+                <td v-if="enableMultiSelect" class="meta-grid__check-col" :style="{ left: '0px' }"></td>
+                <td class="meta-grid__row-num" :style="{ left: `${rowNumLeft}px` }">Σ</td>
+                <td
+                  v-for="(field, fi) in visibleFields"
+                  :key="field.id"
+                  class="meta-grid__foot-cell meta-grid__group-subtotal-cell"
+                  :style="isFrozen(fi) ? { position: 'sticky', left: `${frozenLeft(fi)}px`, zIndex: '1', background: '#fcfcfd' } : undefined"
+                >
+                  <span class="meta-grid__foot-value">{{ groupAggValueDisplay(group.key, field.id) }}</span>
+                </td>
+              </tr>
             </template>
           </template>
           <tr v-if="!rows.length && !loading">
@@ -359,6 +371,9 @@ const props = defineProps<{
   aggregationConfig?: Record<string, string>
   aggregates?: Record<string, { fn: string; value: number }>
   aggregateTooLarge?: boolean
+  // #4-3b-2a: server-computed per-group subtotals (full filtered set, NOT page). Matched to the
+  // client's rendered groups by key. Value rendered from this prop only — no local group aggregation.
+  aggregateGroups?: Array<{ key: string | number | boolean | null; count: number; aggregates: Record<string, { fn: string; value: number }> }>
 }>()
 
 const emit = defineEmits<{
@@ -574,11 +589,26 @@ function aggFnOptions(field: MetaField): string[] {
   return AGG_NUMERIC_TYPES.has(field.type) ? AGG_FNS_NUMERIC : AGG_FNS_OTHER
 }
 const hasAnyAggregation = computed(() => Object.keys(props.aggregationConfig ?? {}).length > 0 || !!props.aggregateTooLarge)
+function formatAggValue(value: number): string {
+  return Number.isInteger(value) ? String(value) : String(Math.round(value * 100) / 100)
+}
 // value comes ONLY from the server response (props.aggregates) — never computed from local rows
 function aggValueDisplay(fieldId: string): string {
   const a = props.aggregates?.[fieldId]
-  if (!a) return ''
-  return Number.isInteger(a.value) ? String(a.value) : String(Math.round(a.value * 100) / 100)
+  return a ? formatAggValue(a.value) : ''
+}
+// #4-3b-2a: server per-group subtotals, keyed by the client group-key form ('__ungrouped__' for null)
+const serverGroupAggByKey = computed(() => {
+  const m = new Map<string, Record<string, { fn: string; value: number }>>()
+  for (const g of props.aggregateGroups ?? []) {
+    m.set(g.key === null ? '__ungrouped__' : String(g.key), g.aggregates)
+  }
+  return m
+})
+const hasGroupSubtotals = computed(() => hasAnyAggregation.value && !props.aggregateTooLarge && (props.aggregateGroups?.length ?? 0) > 0)
+function groupAggValueDisplay(groupKey: string, fieldId: string): string {
+  const a = serverGroupAggByKey.value.get(groupKey)?.[fieldId]
+  return a ? formatAggValue(a.value) : ''
 }
 function onAggChange(fieldId: string, e: Event) {
   const v = (e.target as HTMLSelectElement).value
@@ -743,6 +773,9 @@ function onKeydown(e: KeyboardEvent) {
 .meta-grid__foot-fn { font-size: 11px; color: #999; border: none; background: transparent; cursor: pointer; opacity: 0.5; }
 .meta-grid__foot-fn:hover { opacity: 1; }
 .meta-grid__foot-toolarge td { color: #c0392b; font-weight: 500; }
+.meta-grid__group-subtotal { background: #fcfcfd; }
+.meta-grid__group-subtotal-cell { border-top: 1px solid #ececec; }
+.meta-grid__group-subtotal .meta-grid__foot-value { font-weight: 600; color: #555; }
 .meta-grid__add-row-btn {
   display: flex; align-items: center; gap: 6px; width: 100%;
   padding: 8px 12px; background: transparent; border: none; cursor: pointer;
