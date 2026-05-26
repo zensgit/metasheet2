@@ -410,6 +410,43 @@ async function resolveMetaImportActionButton(page, {
   }
 }
 
+async function collectMetaImportState(page) {
+  const actionButtons = await page.locator('.meta-import__actions .meta-import__btn').evaluateAll((buttons) => buttons.map((button) => ({
+    text: button.textContent?.trim() ?? '',
+    disabled: button instanceof HTMLButtonElement ? button.disabled : button.getAttribute('aria-disabled') === 'true',
+    primary: button.classList.contains('meta-import__btn--primary'),
+  }))).catch(() => [])
+  const inlineButtons = await page.locator('.meta-import__warning .meta-import__btn-inline').evaluateAll((buttons) => buttons.map((button) => ({
+    text: button.textContent?.trim() ?? '',
+    disabled: button instanceof HTMLButtonElement ? button.disabled : button.getAttribute('aria-disabled') === 'true',
+  }))).catch(() => [])
+  const warningTexts = (await page.locator('.meta-import__warning').allTextContents().catch(() => []))
+    .map((text) => text.trim())
+    .filter(Boolean)
+  const fixSelectedTexts = (await page.locator('.meta-import__fix-selected').allTextContents().catch(() => []))
+    .map((text) => text.trim())
+    .filter(Boolean)
+  const pickerButtonTexts = (await page.locator('.meta-import__fix-picker-row .meta-import__btn').allTextContents().catch(() => []))
+    .map((text) => text.trim())
+    .filter(Boolean)
+  const fieldSelects = await page.locator('.meta-import__field-select').evaluateAll((selects) => selects.map((select) => ({
+    value: select instanceof HTMLSelectElement ? select.value : '',
+    label: select instanceof HTMLSelectElement ? select.selectedOptions[0]?.textContent?.trim() ?? '' : '',
+  }))).catch(() => [])
+  return {
+    warningCount: warningTexts.length,
+    warningTexts,
+    actionButtons,
+    inlineButtons,
+    fixSelectedTexts,
+    pickerButtonTexts,
+    fieldSelects,
+    fixesVisible: await page.locator('.meta-import__fixes').isVisible().catch(() => false),
+    overlayVisible: await page.locator('.meta-import-overlay').isVisible().catch(() => false),
+    modalVisible: await page.locator('.meta-import-modal').isVisible().catch(() => false),
+  }
+}
+
 async function ensureImportFieldMapped(page, { headerText, fieldId, label }) {
   const mappingRow = page.locator('.meta-import__map-row').filter({ hasText: headerText }).first()
   const fieldSelect = mappingRow.locator('.meta-import__field-select')
@@ -2396,9 +2433,23 @@ async function verifyPeopleRepairReconcile(page, {
     const applyTextBeforeReconcile = applyButtonSearch.text || ''
     const applyDisabledBeforeReconcile = applyButton ? await applyButton.isDisabled().catch(() => true) : true
     const warningText = warning.text || ''
+    const stateBeforeReconcile = await collectMetaImportState(page)
+    let stateAfterReconcileClick = null
 
     if (warning.visible) {
-      await page.getByRole('button', { name: multiLocaleLabel('Reconcile draft', '修复草稿', '同步草稿') }).click()
+      const reconcileButton = page.getByRole('button', { name: multiLocaleLabel('Reconcile draft', '修复草稿', '同步草稿') })
+      await reconcileButton.click()
+      await page.waitForTimeout(300)
+      stateAfterReconcileClick = await collectMetaImportState(page)
+      record('ui.import.people-repair-reconcile-click-state', true, {
+        baseId,
+        sheetId,
+        viewId,
+        fieldId,
+        renamedFieldName,
+        stateBeforeReconcile,
+        stateAfterReconcileClick,
+      })
       await page.waitForFunction(() => !document.querySelector('.meta-import__warning'), { timeout: timeoutMs })
     } else {
       await page.waitForTimeout(500)
@@ -2417,7 +2468,25 @@ async function verifyPeopleRepairReconcile(page, {
       timeoutMsOverride: timeoutMs,
       required: true,
     })
-    const applyState = await waitForActionButtonEnabled(applyButtonAfter.locator, 'grid people repair apply button enable')
+    const stateBeforeApplyEnableWait = await collectMetaImportState(page)
+    let applyState
+    try {
+      applyState = await waitForActionButtonEnabled(applyButtonAfter.locator, 'grid people repair apply button enable')
+    } catch (error) {
+      record('ui.import.people-repair-after-reconcile-timeout-state', true, {
+        baseId,
+        sheetId,
+        viewId,
+        fieldId,
+        renamedFieldName,
+        stateBeforeReconcile,
+        stateAfterReconcileClick,
+        stateBeforeApplyEnableWait,
+        stateAtApplyEnableTimeout: await collectMetaImportState(page),
+        error: error?.message || String(error),
+      })
+      throw error
+    }
     const applyTextAfterReconcile = applyButtonAfter.text || ''
     const applyDisabledAfterReconcile = applyState.disabled
     const createRecordRequestPromise = page.waitForRequest(
@@ -2435,6 +2504,9 @@ async function verifyPeopleRepairReconcile(page, {
       actionButtonsAfter: applyButtonAfter.texts,
       applySourceBefore: applyButtonSearch.source,
       applySourceAfter: applyButtonAfter.source,
+      stateBeforeReconcile,
+      stateAfterReconcileClick,
+      stateBeforeApplyEnableWait,
     })
     await applyButtonAfter.locator.click()
     try {
@@ -2520,6 +2592,7 @@ async function verifyPeopleRepairReconcile(page, {
       throw new Error(`People repair reconcile failed for ${fieldId}`)
     }
   } catch (error) {
+    const failureState = await collectMetaImportState(page).catch(() => null)
     await page.locator('.meta-import__close').click().catch(() => {})
     await page.locator('.meta-import-overlay').waitFor({ state: 'hidden', timeout: 3000 }).catch(() => {})
     const modalText = (await page.locator('.meta-import-modal').textContent().catch(() => ''))?.trim() ?? ''
@@ -2532,6 +2605,7 @@ async function verifyPeopleRepairReconcile(page, {
       renamedFieldName,
       importedRowTitle,
       error: error?.message || String(error),
+      failureState,
       modalText,
     })
     throw error
