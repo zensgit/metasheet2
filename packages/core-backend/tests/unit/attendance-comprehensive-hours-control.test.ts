@@ -669,9 +669,13 @@ describe('comprehensive-hours period value-plumbing (PR6)', () => {
       comprehensive_hours_cap_effective_key: null,
     }
     expect(helpers.buildAttendanceComprehensiveHoursPeriodSummaryValues({}, orgId, userId, naturalMonth, 13000)).toEqual(allNull)
+    // Fail-closed periodType whitelist: only date_range proceeds.
     expect(helpers.buildAttendanceComprehensiveHoursPeriodSummaryValues(monthCap(10560), orgId, userId, { ...naturalMonth, periodType: 'payroll_cycle' }, 13000)).toEqual(allNull)
-    expect(helpers.buildAttendanceComprehensiveHoursPeriodSummaryValues(monthCap(10560), orgId, userId, { periodType: 'date_range', from: '2026-03-02', to: '2026-03-30' }, 13000)).toEqual(allNull)
+    expect(helpers.buildAttendanceComprehensiveHoursPeriodSummaryValues(monthCap(10560), orgId, userId, { ...naturalMonth, periodType: 'custom_range' }, 13000)).toEqual(allNull)
+    expect(helpers.buildAttendanceComprehensiveHoursPeriodSummaryValues(monthCap(10560), orgId, userId, { ...naturalMonth, periodType: 'some_future_type' }, 13000)).toEqual(allNull)
     expect(helpers.buildAttendanceComprehensiveHoursPeriodSummaryValues(monthCap(10560), orgId, userId, { from: '2026-03-01', to: '2026-03-31' }, 13000)).toEqual(allNull)
+    // A non-aligned date_range still proceeds to the bridge, which yields custom_range → null.
+    expect(helpers.buildAttendanceComprehensiveHoursPeriodSummaryValues(monthCap(10560), orgId, userId, { periodType: 'date_range', from: '2026-03-02', to: '2026-03-30' }, 13000)).toEqual(allNull)
   })
 
   // --- stale-null through the real sync ---

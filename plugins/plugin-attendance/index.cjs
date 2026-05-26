@@ -12096,7 +12096,9 @@ function buildAttendanceComprehensiveHoursPeriodSummaryValues(settings, orgId, u
     comprehensive_hours_cap_source: null,
     comprehensive_hours_cap_effective_key: null,
   }
-  if (!period || !period.periodType || period.periodType === 'payroll_cycle') return nullValues
+  // Whitelist date_range (fail-closed): only a date_range window bridges to a cycle-type.
+  // payroll_cycle, missing, and any future periodType stale-null until explicitly supported.
+  if (!period || period.periodType !== 'date_range') return nullValues
   const bridged = bridgeAttendanceDateRangeToComprehensiveHoursPeriod(period.from, period.to)
   const cap = resolveAttendanceComprehensiveHoursCap(settings, orgId, userId, bridged)
   if (!cap) return nullValues
