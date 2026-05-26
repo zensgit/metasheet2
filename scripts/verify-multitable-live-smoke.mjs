@@ -1689,8 +1689,23 @@ async function verifyEmbedHostBusyDeferredNavigation(page, {
       response.request().method() === 'POST'
     ), { timeout: timeoutMs })
 
-    await titleInput.fill(busyTitle)
-    const titleInputBeforeSave = (await titleInput.inputValue().catch(() => titleBeforeSave)) ?? ''
+    let titleInputBeforeSave = titleBeforeSave
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await titleInput.fill(busyTitle)
+      titleInputBeforeSave = (await titleInput.inputValue().catch(() => titleBeforeSave)) ?? ''
+      if (titleInputBeforeSave === busyTitle) break
+      await page.waitForTimeout(100)
+    }
+    const busyTitleInputOk = titleInputBeforeSave === busyTitle
+    record('ui.embed-host.form-busy-title-input-settled', busyTitleInputOk, {
+      recordId,
+      fieldId: titleFieldId,
+      expectedTitle: busyTitle,
+      titleInputBeforeSave,
+    })
+    if (!busyTitleInputOk) {
+      throw new Error('Embed host busy form title input did not settle before save')
+    }
     await frame.getByRole('button', { name: multiLocaleLabel('Save', '保存') }).click()
     await submitIntercepted
 
