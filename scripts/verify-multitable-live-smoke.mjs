@@ -1648,6 +1648,7 @@ async function verifyEmbedHostBusyDeferredNavigation(page, {
   const requestPattern = `**/api/multitable/views/${formViewId}/submit`
   let capturedRoute = null
   let releaseSubmitRoute = null
+  let submitRequestDetails = null
   const submitIntercepted = new Promise((resolve) => {
     capturedRoute = resolve
   })
@@ -1657,12 +1658,31 @@ async function verifyEmbedHostBusyDeferredNavigation(page, {
   })
   const routeHandler = async (route) => {
     capturedRoute(route)
+    const request = route.request()
+    const postData = request.postData()
+    let parsedPostData = null
+    if (postData) {
+      try {
+        parsedPostData = JSON.parse(postData)
+      } catch {
+        parsedPostData = postData
+      }
+    }
+    submitRequestDetails = {
+      url: request.url(),
+      method: request.method(),
+      headers: request.headers(),
+      postData,
+      parsedPostData,
+    }
     await releaseSubmit
     await route.continue()
   }
   await page.route(requestPattern, routeHandler)
 
   try {
+    const recordVersionBefore = (await fetchRecord(token, sheetId, recordId)).record?.version ?? null
+    const titleBeforeSave = (await titleInput.inputValue().catch(() => '')) ?? ''
     const busyTitle = `${originalTitle} busy-save`
     const saveResponsePromise = page.waitForResponse((response) => (
       response.url().includes(`/api/multitable/views/${formViewId}/submit`) &&
@@ -1670,6 +1690,7 @@ async function verifyEmbedHostBusyDeferredNavigation(page, {
     ), { timeout: timeoutMs })
 
     await titleInput.fill(busyTitle)
+    const titleInputBeforeSave = (await titleInput.inputValue().catch(() => titleBeforeSave)) ?? ''
     await frame.getByRole('button', { name: multiLocaleLabel('Save', '保存') }).click()
     await submitIntercepted
 
@@ -1766,7 +1787,14 @@ async function verifyEmbedHostBusyDeferredNavigation(page, {
     }
 
     releaseSubmitRoute()
-    await saveResponsePromise
+    const saveResponse = await saveResponsePromise
+    const saveResponseStatus = saveResponse.status()
+    let saveResponseBody = null
+    try {
+      saveResponseBody = await saveResponse.json()
+    } catch {
+      saveResponseBody = await saveResponse.text().catch(() => null)
+    }
     const replayApplied = await waitForEmbedHostMessage(page, (message) => (
       message?.type === 'mt:navigate-result' &&
       message.status === 'applied' &&
@@ -1800,6 +1828,12 @@ async function verifyEmbedHostBusyDeferredNavigation(page, {
       fieldId: titleFieldId,
       expectedTitle: busyTitle,
       persistedTitle: persistedRecord.record?.data?.[titleFieldId],
+      titleInputBeforeSave,
+      submitRequest: submitRequestDetails,
+      saveResponseStatus,
+      saveResponseBody,
+      recordVersionBefore,
+      recordVersionAfter: persistedRecord.record?.version ?? null,
     })
     if (!persistedOk) {
       throw new Error('Embed host busy deferred replay dropped the in-flight form save unexpectedly')
