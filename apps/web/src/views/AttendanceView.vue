@@ -16031,6 +16031,7 @@ async function exportPayrollCycleSummary() {
 }
 
 async function loadAdminData() {
+  if (!showAdmin.value) return
   try {
     await Promise.all([
       loadSettings(),
@@ -16083,7 +16084,9 @@ onMounted(() => {
       pluginsLoaded.value = true
       if (attendancePluginActive.value) {
         refreshAll()
-        loadAdminData()
+        if (showAdmin.value) {
+          loadAdminData()
+        }
       }
     })
     .catch(() => {
@@ -16094,7 +16097,9 @@ onMounted(() => {
 watch(orgId, () => {
   if (attendancePluginActive.value) {
     refreshAll()
-    loadAdminData()
+    if (showAdmin.value) {
+      loadAdminData()
+    }
   }
 })
 
