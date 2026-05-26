@@ -59,3 +59,18 @@ Designing the full platform before these close = designing on sand. The K3 PoC i
 - Project roadmap (4-stage ERP integration platform; currently 阶段一 K3 PoC).
 - K3 read/list: #1709 (runtime track), #1711 (relationship/master mapping), #1593 (contract), #1792 (GATE).
 - Today's K3 hub-proving chain: #1817 → #1824 → #1826 → #1828 → #1830 → #1832 → #1835.
+
+## Addendum — 2026-05-26: implementation-path preferences (still gated, docs-only)
+
+Two refinements recorded after a maintainer review of the NiFi-provenance and Yida-FaaS angles above. These are preferences for **if/when** each unlocks — **not** a build authorization. DF-N2 (provenance event) and the FaaS escape-hatch both remain **阶段二+**, gated on K3 PoC GATE evidence. No runtime, no migration, no full architecture in this note.
+
+### NiFi provenance — when DF-N2 lands, prefer JSONB-on-existing-tables over a new event table
+- #1839 deliberately leaves the implementation open ("existing logs vs JSONB vs new migration"). **Recommended first cut:** extend `integration_run_log` / `integration_exceptions` with a JSONB lineage field + a by-`rowId` query view, so per-record lineage (*this row → from system A → cleaned by step X → exported to B @ T → result + reason, **across runs/time/systems***) becomes queryable **without** a new table or new write path.
+- Today's grain (`run.details.targetWriteSummaries`, capped 50 + sanitized; per-failure dead-letters) is **run-scoped** — tracing one record across multiple runs needs manual cross-reference. JSONB-by-`rowId` closes exactly that gap at the lowest migration cost — the priority under the K3 Stage-1 lock.
+- A dedicated provenance table is the **heavy** version: defer until the PoC proves a cross-system, audit-grade need. Payload redaction stays mandatory (no tokens / passwords / connection strings).
+
+### Yida FaaS escape-hatch — build on our own plugin sandbox, not a cloud FC
+- **Whom it simplifies:** the operator-facing simplification is **already** the config tier (ConnectorProfile / DatasetDefinition / MappingRule / dry-run, #1839) + the 5-stage flow (#1844). FaaS does **not** simplify the operator — it cuts the **new-system onboarding cost** (long-tail system ⇒ an integrator-written function, not a core-team PR). Different axis, still valuable; don't conflate the two.
+- **Substrate (when it unlocks):** host the function tier on the **existing microkernel sandbox** — `packages/core-backend/src/core/plugin-sandbox.ts` + `PluginIsolationManager.ts` + `enhanced-plugin-context.ts` — implementing the `plugins/plugin-integration-core/lib/contracts.cjs` 5-method contract (`testConnection` / `listObjects` / `getSchema` / `read` / `upsert`). **Not** Aliyun FC. (contracts.cjs already says the shape is plugin-local for M1, "wider platform exposure can come later after the K3 WISE PoC proves the shape" — same gate.)
+- **Sequencing:** config tier first (O(N), covers regular systems); reserve the code tier for the long tail (≈O(1)).
+- **Avoid Yida's traps:** no single-cloud runtime binding; no 10s-timeout copy (design long/async); treat user-code as a real security surface (sandbox + resource limits + secret isolation). Never expose an arbitrary-JS / raw-SQL transform editor to business users (also forbidden by #1839).
