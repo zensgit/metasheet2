@@ -12,10 +12,11 @@
 const {
   AdapterValidationError,
   UnsupportedAdapterOperationError,
+  createReadResult,
   createUpsertResult,
   normalizeExternalSystemForAdapter,
+  normalizeReadRequest,
   normalizeUpsertRequest,
-  unsupportedAdapterOperation,
 } = require('../contracts.cjs')
 const {
   getK3WiseDocumentObjectDefaults,
@@ -440,6 +441,147 @@ function projectRecordForBody(record, objectConfig) {
   return projected
 }
 
+function normalizeStringList(value, field) {
+  if (value === undefined || value === null || value === '') return []
+  const list = Array.isArray(value)
+    ? value
+    : String(value).split(',')
+  const normalized = []
+  for (const item of list) {
+    if (typeof item !== 'string' && typeof item !== 'number') {
+      throw new AdapterValidationError(`${field} must contain only string field names`, { field })
+    }
+    const text = String(item).trim()
+    if (text) normalized.push(text)
+  }
+  return Array.from(new Set(normalized))
+}
+
+function resolveMaterialReadNumber(request) {
+  const number = firstDefined(
+    request.options.templateMaterialNumber,
+    request.options.materialNumber,
+    request.options.number,
+    request.options.FNumber,
+    request.filters.templateMaterialNumber,
+    request.filters.materialNumber,
+    request.filters.number,
+    request.filters.FNumber,
+  )
+  if (typeof number !== 'string' && typeof number !== 'number') {
+    throw new AdapterValidationError('K3 WISE Material read requires templateMaterialNumber or filters.FNumber', {
+      code: 'K3_WISE_READ_KEY_REQUIRED',
+      field: 'templateMaterialNumber',
+      object: request.object,
+    })
+  }
+  const normalized = String(number).trim()
+  if (!normalized) {
+    throw new AdapterValidationError('K3 WISE Material read requires a non-empty templateMaterialNumber', {
+      code: 'K3_WISE_READ_KEY_REQUIRED',
+      field: 'templateMaterialNumber',
+      object: request.object,
+    })
+  }
+  return normalized
+}
+
+function assertMaterialDetailReadOnlyScope(request) {
+  if (request.object !== 'material') {
+    throw new UnsupportedAdapterOperationError('K3 WISE WebAPI read-only smoke supports only material detail reads', {
+      kind: 'erp:k3-wise-webapi',
+      object: request.object,
+      operation: 'read',
+    })
+  }
+  if (request.cursor) {
+    throw new AdapterValidationError('K3 WISE Material read-only smoke does not support cursor/list pagination', {
+      code: 'K3_WISE_READ_LIST_UNSUPPORTED',
+      object: request.object,
+      field: 'cursor',
+    })
+  }
+  if (Object.keys(request.watermark || {}).length > 0) {
+    throw new AdapterValidationError('K3 WISE Material read-only smoke does not support watermark/list reads', {
+      code: 'K3_WISE_READ_LIST_UNSUPPORTED',
+      object: request.object,
+      field: 'watermark',
+    })
+  }
+  const allowedFilterKeys = new Set(['templateMaterialNumber', 'materialNumber', 'number', 'FNumber', 'referenceFields'])
+  const unknownFilters = Object.keys(request.filters).filter((key) => !allowedFilterKeys.has(key))
+  if (unknownFilters.length > 0) {
+    throw new AdapterValidationError('K3 WISE Material read-only smoke supports only a single material-number filter', {
+      code: 'K3_WISE_READ_FILTER_UNSUPPORTED',
+      object: request.object,
+      fields: unknownFilters,
+    })
+  }
+}
+
+function defaultMaterialReferenceFields(objectConfig) {
+  return Array.isArray(objectConfig.schema)
+    ? objectConfig.schema
+      .filter((field) => field && field.type === 'reference' && typeof field.name === 'string' && field.name.trim())
+      .map((field) => field.name.trim())
+    : []
+}
+
+function isReferenceObject(value) {
+  return isPlainObject(value) && Object.keys(value).some((key) => (
+    ['FNumber', 'FID', 'FId', 'FName', 'Name', 'Number', 'Id'].includes(key) &&
+    !isBlankValue(value[key])
+  ))
+}
+
+function materialDetailElement(data) {
+  const rows = getPath(data, 'Data')
+  if (Array.isArray(rows)) return rows.find(isPlainObject) || null
+  return isPlainObject(rows) ? rows : null
+}
+
+function extractMaterialDetailRecord(data, materialNumber) {
+  const element = materialDetailElement(data)
+  if (!element) return null
+  const detail = isPlainObject(element.Data) ? element.Data : element
+  const record = cloneJson(detail)
+  if (isPlainObject(record) && isBlankValue(record.FNumber)) {
+    const number = firstDefined(element.FNumber, materialNumber)
+    if (!isBlankValue(number)) record.FNumber = String(number)
+  }
+  return isPlainObject(record) ? record : null
+}
+
+function buildReadBody(materialNumber, objectConfig) {
+  const template = isPlainObject(objectConfig.readBodyTemplate)
+    ? cloneJson(objectConfig.readBodyTemplate)
+    : {}
+  template.Data = isPlainObject(template.Data)
+    ? { ...template.Data, FNumber: materialNumber }
+    : { FNumber: materialNumber }
+  if (template.GetProperty === undefined) template.GetProperty = false
+  return template
+}
+
+function buildMaterialReadRecord(detail, request, objectConfig) {
+  const requestedFields = [
+    ...normalizeStringList(request.options.referenceFields, 'options.referenceFields'),
+    ...normalizeStringList(request.filters.referenceFields, 'filters.referenceFields'),
+  ]
+  const referenceFields = requestedFields.length > 0
+    ? Array.from(new Set(requestedFields))
+    : defaultMaterialReferenceFields(objectConfig)
+  const referenceObjects = {}
+  for (const fieldName of referenceFields) {
+    const value = detail[fieldName]
+    if (isReferenceObject(value)) referenceObjects[fieldName] = cloneJson(value)
+  }
+  return {
+    ...detail,
+    _k3ReferenceObjects: referenceObjects,
+  }
+}
+
 function buildLifecycleBody(record, request, objectConfig, operation) {
   if (typeof objectConfig.buildLifecycleBody === 'function') {
     return objectConfig.buildLifecycleBody(record, request, operation)
@@ -838,6 +980,75 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     }
   }
 
+  async function read(input = {}) {
+    const request = normalizeReadRequest(input)
+    const objectConfig = objects[request.object]
+    if (!objectConfig) {
+      throw new AdapterValidationError(`K3 WISE object is not configured: ${request.object}`, { object: request.object })
+    }
+    ensureOperation(normalizedSystem.kind, request.object, objectConfig, 'read')
+    assertMaterialDetailReadOnlyScope(request)
+
+    const readPath = objectConfig.readPath
+      ? assertRelativePath(objectConfig.readPath, 'object.readPath')
+      : null
+    if (!readPath) {
+      throw new K3WiseWebApiAdapterError('K3 WISE read endpoint is not configured for material', {
+        code: 'K3_WISE_READ_NOT_CONFIGURED',
+        object: request.object,
+      })
+    }
+
+    const materialNumber = resolveMaterialReadNumber(request)
+    const authContext = await login()
+    let readResponse
+    try {
+      readResponse = await requestJson(readPath, {
+        method: objectConfig.readMethod || 'POST',
+        query: authContext.query,
+        headers: authContext.headers,
+        body: buildReadBody(materialNumber, objectConfig),
+      })
+    } catch (error) {
+      throw new K3WiseWebApiAdapterError(`K3 WISE WebAPI read failed: ${error && error.message ? error.message : String(error)}`, {
+        code: 'K3_WISE_READ_FAILED',
+        object: request.object,
+        status: error && error.status,
+        path: readPath,
+      })
+    }
+
+    if (!businessSuccess(readResponse.data, config)) {
+      throw new K3WiseWebApiAdapterError(String(responseMessage(readResponse.data, config, 'K3 WISE read business response failed')), {
+        code: 'K3_WISE_READ_BUSINESS_ERROR',
+        object: request.object,
+        responseCode: responseFailureCode(readResponse.data, config, 'K3_WISE_READ_BUSINESS_ERROR'),
+      })
+    }
+
+    const detail = extractMaterialDetailRecord(readResponse.data, materialNumber)
+    if (!detail) {
+      throw new K3WiseWebApiAdapterError('K3 WISE read response did not include a material detail record', {
+        code: 'K3_WISE_READ_BUSINESS_ERROR',
+        object: request.object,
+      })
+    }
+    const record = buildMaterialReadRecord(detail, request, objectConfig)
+    return createReadResult({
+      records: [record],
+      raw: readResponse.data,
+      metadata: {
+        object: request.object,
+        mode: 'material-detail-reference-smoke',
+        requestedNumber: materialNumber,
+        readPath,
+        readOnly: true,
+        referenceFields: Object.keys(record._k3ReferenceObjects || {}),
+        referenceObjectCount: Object.keys(record._k3ReferenceObjects || {}).length,
+      },
+    })
+  }
+
   async function upsert(input = {}) {
     const request = normalizeUpsertRequest(input)
     const objectConfig = objects[request.object]
@@ -997,7 +1208,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     listObjects,
     getSchema,
     previewUpsert,
-    read: unsupportedAdapterOperation(normalizedSystem.kind, 'read'),
+    read,
     upsert,
   }
 }
@@ -1014,6 +1225,8 @@ module.exports = {
     DEFAULT_OBJECTS,
     businessSuccess,
     extractRecordKey,
+    extractMaterialDetailRecord,
+    buildMaterialReadRecord,
     listK3WiseDocumentTemplates,
     normalizeObjects,
     projectRecordForBody,

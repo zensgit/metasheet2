@@ -1,0 +1,37 @@
+{
+  "StatusCode": 200,
+  "Message": "Successful",
+  "Data": [
+    {
+      "FNumber": "<template-material-number>",
+      "Data": {
+        "FNumber": "<template-material-number>",
+        "FName": "<redacted-material-name>",
+        "FModel": "<redacted-model>",
+        "FUnitGroupID": {
+          "FName": "<unit-group-name>"
+        },
+        "FBaseUnitID": {
+          "FNumber": "<base-unit-number>",
+          "FName": "<base-unit-name>"
+        },
+        "FOrderUnitID": {
+          "FNumber": "<order-unit-number>",
+          "FName": "<order-unit-name>"
+        },
+        "FAcctID": {
+          "FID": "<inventory-account-id>",
+          "FName": "<inventory-account-name>"
+        },
+        "FSaleAcctID": {
+          "FID": "<sales-account-id>",
+          "FName": "<sales-account-name>"
+        },
+        "FCostAcctID": {
+          "FID": "<cost-account-id>",
+          "FName": "<cost-account-name>"
+        }
+      }
+    }
+  ]
+}
