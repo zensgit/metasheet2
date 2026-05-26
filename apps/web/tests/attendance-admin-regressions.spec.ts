@@ -516,6 +516,38 @@ describe('Attendance admin regressions', () => {
     container = null
   })
 
+  it('does not preload admin-only attendance data on the employee overview surface', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const requestedUrls = vi.mocked(apiFetch).mock.calls.map(call => String(call[0]))
+    const forbiddenAdminLoads = [
+      '/api/attendance-admin/',
+      '/api/attendance/settings',
+      '/api/attendance/rule-templates',
+      '/api/attendance/rule-sets',
+      '/api/attendance/groups',
+      '/api/attendance/import/batches',
+      '/api/attendance/report-fields',
+      '/api/attendance/overtime-rules',
+      '/api/attendance/payroll-templates',
+      '/api/attendance/leave-types',
+      '/api/attendance/approval-flows',
+      '/api/attendance/payroll-cycles',
+      '/api/attendance/advanced-scheduling/workbench',
+      '/api/attendance/shifts',
+      '/api/attendance/rotation-assignments',
+      '/api/attendance/assignments',
+      '/api/attendance/rotation-rules',
+    ]
+
+    expect(requestedUrls.length).toBeGreaterThan(0)
+    expect(
+      requestedUrls.filter(url => forbiddenAdminLoads.some(prefix => url.startsWith(prefix))),
+    ).toEqual([])
+  })
+
   it('keeps the clicked admin section focused and retires the show-all toggle', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
