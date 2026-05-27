@@ -1,7 +1,7 @@
 'use strict'
 
 const crypto = require('node:crypto')
-const { sanitizeIntegrationPayload } = require('./payload-redaction.cjs')
+const { sanitizeIntegrationPayload, scrubSecretStringValue } = require('./payload-redaction.cjs')
 
 const TABLE = 'integration_dead_letters'
 const VALID_STATUSES = new Set(['open', 'replayed', 'discarded'])
@@ -105,7 +105,11 @@ function createDeadLetterStore({ db, idGenerator = crypto.randomUUID } = {}) {
       source_payload: normalizeJsonPayload(input.sourcePayload, 'sourcePayload'),
       transformed_payload: normalizeJsonPayload(input.transformedPayload, 'transformedPayload', { nullable: true }),
       error_code: requiredString(input.errorCode || 'VALIDATION_FAILED', 'errorCode'),
-      error_message: requiredString(input.errorMessage, 'errorMessage'),
+      // Scrub secret-shaped values out of the free-text error message before it is
+      // persisted (it rides into the run-monitoring UI and survives replay). Source/
+      // transformed payloads are already sanitized; the error message was the one
+      // un-scrubbed channel (a conn-string / token in an adapter error would leak).
+      error_message: scrubSecretStringValue(requiredString(input.errorMessage, 'errorMessage')),
       retry_count: normalizeNonNegativeInteger(input.retryCount, 'retryCount'),
       status: normalizeStatus(input.status),
       last_replay_run_id: optionalString(input.lastReplayRunId, 'lastReplayRunId'),

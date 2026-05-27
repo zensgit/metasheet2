@@ -247,12 +247,16 @@ function redactDeadLetter(deadLetter, fullPayload = false) {
       ...deadLetter,
       sourcePayload: sanitizeIntegrationPayload(deadLetter.sourcePayload),
       transformedPayload: sanitizeIntegrationPayload(deadLetter.transformedPayload),
+      // Scrub secret-shaped values from the free-text error message at display time too,
+      // so pre-fix dead-letters (stored before write-time scrubbing) cannot leak on read.
+      errorMessage: scrubSecretStringValue(deadLetter.errorMessage),
       payloadRedacted: true,
     }
   }
   const { sourcePayload: _sourcePayload, transformedPayload: _transformedPayload, ...safe } = deadLetter
   return {
     ...safe,
+    errorMessage: scrubSecretStringValue(deadLetter.errorMessage),
     payloadRedacted: true,
   }
 }
