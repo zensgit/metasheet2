@@ -98,6 +98,57 @@ function verify_web_dist_publish_entrypoints() {
     || die "attendance-onprem-deploy-run.ps1 must publish apps/web/dist to the nginx root"
 }
 
+function verify_core_backend_migration_set() {
+  local root="$1"
+  local provider="${root}/packages/core-backend/dist/src/db/migration-provider.js"
+  local dist_dir="${root}/packages/core-backend/dist/src/db/migrations"
+  local source_dir="${root}/packages/core-backend/src/db/migrations"
+  local legacy_sql_dir="${root}/packages/core-backend/migrations"
+  local required_upgrade_migrations=(
+    "zzzz20260318123000_formalize_meta_comments"
+    "zzzz20260320150000_add_spreadsheet_permissions_and_cell_versions"
+  )
+
+  [[ -f "$provider" ]] || die "Required package content missing: packages/core-backend/dist/src/db/migration-provider.js"
+  [[ -d "$dist_dir" ]] || die "Required package content missing: packages/core-backend/dist/src/db/migrations"
+  [[ -d "$source_dir" ]] || die "Required package content missing: packages/core-backend/src/db/migrations"
+  [[ -d "$legacy_sql_dir" ]] || die "Required package content missing: packages/core-backend/migrations"
+
+  search_fixed_string 'MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL' "$provider" \
+    || die "migration-provider.js must expose the superseded legacy SQL opt-in"
+  search_fixed_string '032_create_approval_records' "$provider" \
+    || die "migration-provider.js must carry the superseded legacy SQL skip list"
+
+  [[ -f "${source_dir}/20250925_create_view_tables.sql" ]] \
+    || die "Source SQL migration missing from package: 20250925_create_view_tables.sql"
+  [[ -f "${source_dir}/20250926_create_audit_tables.sql" ]] \
+    || die "Source SQL migration missing from package: 20250926_create_audit_tables.sql"
+  [[ -f "${legacy_sql_dir}/056_add_users_must_change_password.sql" ]] \
+    || die "Legacy SQL migration missing from package: 056_add_users_must_change_password.sql"
+
+  local migration_name
+  for migration_name in "${required_upgrade_migrations[@]}"; do
+    [[ -f "${source_dir}/${migration_name}.ts" ]] \
+      || die "Required upgraded-database migration missing from source set: ${migration_name}.ts"
+    [[ -f "${dist_dir}/${migration_name}.js" ]] \
+      || die "Required upgraded-database migration missing from dist set: ${migration_name}.js"
+  done
+
+  local missing_compiled=""
+  local source_file
+  while IFS= read -r source_file; do
+    migration_name="$(basename "$source_file" .ts)"
+    if [[ ! -f "${dist_dir}/${migration_name}.js" ]]; then
+      missing_compiled+="${migration_name}"$'\n'
+    fi
+  done < <(find "$source_dir" -maxdepth 1 -type f -name '*.ts' ! -name '_*' | sort)
+
+  if [[ -n "$missing_compiled" ]]; then
+    echo "$missing_compiled" >&2
+    die "Package missing compiled JS for one or more core backend TS migrations"
+  fi
+}
+
 function verify_no_github_links() {
   local root="$1"
   local patterns='github\.com|githubusercontent\.com|github\.io'
@@ -205,7 +256,15 @@ required=(
   "apps/web/package.json"
   "packages/core-backend/dist/src/index.js"
   "packages/core-backend/dist/src/db/migrate.js"
+  "packages/core-backend/dist/src/db/migration-provider.js"
   "packages/core-backend/package.json"
+  "packages/core-backend/src/db/migrations/20250925_create_view_tables.sql"
+  "packages/core-backend/src/db/migrations/20250926_create_audit_tables.sql"
+  "packages/core-backend/src/db/migrations/zzzz20260318123000_formalize_meta_comments.ts"
+  "packages/core-backend/src/db/migrations/zzzz20260320150000_add_spreadsheet_permissions_and_cell_versions.ts"
+  "packages/core-backend/dist/src/db/migrations/zzzz20260318123000_formalize_meta_comments.js"
+  "packages/core-backend/dist/src/db/migrations/zzzz20260320150000_add_spreadsheet_permissions_and_cell_versions.js"
+  "packages/core-backend/migrations/056_add_users_must_change_password.sql"
   "plugins/plugin-attendance/plugin.json"
   "plugins/plugin-attendance/index.cjs"
   "scripts/ops/attendance-onprem-start-pm2.ps1"
@@ -254,6 +313,7 @@ fi
 verify_onprem_env_templates "$pkg_root"
 verify_workspace_manifest "$pkg_root"
 verify_web_dist_publish_entrypoints "$pkg_root"
+verify_core_backend_migration_set "$pkg_root"
 
 if search_extended_regex 'VITE_API_(URL|BASE):"http://(127\.0\.0\.1|localhost)' "${pkg_root}/apps/web/dist"; then
   die "Frontend bundle embeds loopback VITE_API_* config; rebuild package with isolated web env"
