@@ -300,6 +300,7 @@ function verify_generic_integration_workbench_contract() {
   search_fixed_string 'READ_ANSWER_IDS' "$gate_contract_checker" || die "GATE contract checker must validate WebAPI read/list answer IDs"
   search_fixed_string 'RELATIONSHIP_ANSWER_IDS' "$gate_contract_checker" || die "GATE contract checker must validate relationship answer IDs"
   search_fixed_string 'GATE_BLOCKED' "$gate_contract_checker" || die "GATE contract checker must distinguish incomplete customer evidence"
+  search_fixed_string 'PASS_MATERIAL_ONLY' "$gate_contract_checker" || die "GATE contract checker must include the Material-only dry-run readiness decision"
   search_fixed_string 'SECRET_QUERY_PATTERN' "$gate_contract_checker" || die "GATE contract checker must reject secret-looking query parameters"
   search_fixed_string '--init-template' "$gate_contract_checker" || die "GATE contract checker must initialize a fillable packet template"
   search_fixed_string 'k3wise-gate-contract-packet.template.json' "$gate_contract_checker" || die "GATE contract checker must write the canonical packet template file"

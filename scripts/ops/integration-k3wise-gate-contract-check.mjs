@@ -5,6 +5,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const DEFAULT_OUTPUT_ROOT = 'output/integration-k3wise-gate-contract-check'
+const VALID_SCOPES = new Set(['full', 'material-only'])
 const READ_ANSWER_IDS = [
   'O1-MAT',
   'O1-MAT-M',
@@ -21,6 +22,9 @@ const READ_ANSWER_IDS = [
 ]
 const READ_METHOD_IDS = ['O1-MAT-M', 'O1-BOM-M']
 const READ_PATH_IDS = ['O1-MAT', 'O1-BOM']
+const MATERIAL_ONLY_READ_ANSWER_IDS = ['O1-MAT', 'O1-MAT-M', 'O6']
+const MATERIAL_ONLY_READ_METHOD_IDS = ['O1-MAT-M']
+const MATERIAL_ONLY_READ_PATH_IDS = ['O1-MAT']
 const READ_SAMPLES = {
   materialList: {
     label: 'Material list sample',
@@ -37,6 +41,12 @@ const READ_SAMPLES = {
   bomDetail: {
     label: 'BOM detail sample',
     validator: assertBomSample,
+  },
+}
+const MATERIAL_ONLY_READ_SAMPLES = {
+  materialDetail: {
+    label: 'Material detail sample',
+    validator: assertMaterialSample,
   },
 }
 const RELATIONSHIP_ANSWER_IDS = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7']
@@ -58,6 +68,14 @@ const RELATIONSHIP_SAMPLES = {
     validator: assertK3BomSaveShape,
   },
 }
+const MATERIAL_ONLY_SAFETY_ANSWER_IDS = [
+  'M0-SCOPE',
+  'M0-PREVIEW-FIELDS',
+  'M0-BOM-DEFERRED',
+  'M0-SAVE-ONLY-SEPARATE-APPROVAL',
+  'M0-AUTOSUBMIT-FALSE',
+  'M0-AUTOAUDIT-FALSE',
+]
 const TEMPLATE_PACKET_FILE = 'k3wise-gate-contract-packet.template.json'
 const TEMPLATE_HANDOFF_README_FILE = 'README-CUSTOMER-HANDOFF.zh.md'
 const TEMPLATE_SAMPLE_FILES = {
@@ -88,7 +106,7 @@ class GateContractCheckError extends Error {
 
 function printHelp() {
   console.log(`Usage:
-  node scripts/ops/integration-k3wise-gate-contract-check.mjs --input <packet.json> [options]
+  node scripts/ops/integration-k3wise-gate-contract-check.mjs --input <packet.json> [--scope full|material-only] [options]
   node scripts/ops/integration-k3wise-gate-contract-check.mjs --init-template <dir>
 
 Validates the customer GATE-front packet for #1526 before any K3 WISE read/list,
@@ -97,6 +115,7 @@ does not contact MetaSheet or K3.
 
 Options:
   --input <path>      JSON packet with WebAPI read/list and relationship answers
+  --scope <scope>     Validation scope: full (default) or material-only
   --init-template <dir>
                       Create a fillable packet + redacted sample skeleton outside Git
   --out-dir <dir>    Evidence output directory, default ${DEFAULT_OUTPUT_ROOT}/<timestamp>
@@ -121,6 +140,16 @@ Packet shape:
       "unresolvedChild": "relationship-unresolved-child.redacted.json",
       "k3BomSaveShape": "relationship-k3-bom-save-shape.redacted.json"
     }
+  },
+  "materialOnlySafety": {
+    "answers": {
+      "M0-SCOPE": "Material only first",
+      "M0-PREVIEW-FIELDS": "First dry-run preview only includes FNumber and FName",
+      "M0-BOM-DEFERRED": "BOM deferred until Material passes",
+      "M0-SAVE-ONLY-SEPARATE-APPROVAL": "Save-only requires separate approval after dry-run",
+      "M0-AUTOSUBMIT-FALSE": "autoSubmit=false",
+      "M0-AUTOAUDIT-FALSE": "autoAudit=false"
+    }
   }
 }`)
 }
@@ -138,6 +167,7 @@ function parseArgs(argv = process.argv.slice(2)) {
     input: '',
     initTemplate: '',
     outDir: '',
+    scope: 'full',
     help: false,
   }
   for (let i = 0; i < argv.length; i += 1) {
@@ -155,6 +185,10 @@ function parseArgs(argv = process.argv.slice(2)) {
         opts.outDir = readRequiredValue(argv, i, arg)
         i += 1
         break
+      case '--scope':
+        opts.scope = readRequiredValue(argv, i, arg)
+        i += 1
+        break
       case '--help':
       case '-h':
         opts.help = true
@@ -168,6 +202,9 @@ function parseArgs(argv = process.argv.slice(2)) {
   }
   if (opts.input && opts.initTemplate) {
     throw new GateContractCheckError('--input and --init-template cannot be used together')
+  }
+  if (!VALID_SCOPES.has(opts.scope)) {
+    throw new GateContractCheckError('--scope must be full or material-only', { scope: opts.scope })
   }
   return opts
 }
@@ -183,9 +220,10 @@ function isFilled(value) {
   return !PLACEHOLDER_PATTERN.test(String(value).trim())
 }
 
-function decisionFromIssues(issues) {
+function decisionFromIssues(issues, scope = 'full') {
   if (issues.some((issue) => issue.status === 'fail')) return { decision: 'FAIL', exitCode: 1 }
   if (issues.some((issue) => issue.status === 'blocked')) return { decision: 'GATE_BLOCKED', exitCode: 2 }
+  if (scope === 'material-only') return { decision: 'PASS_MATERIAL_ONLY', exitCode: 0 }
   return { decision: 'PASS', exitCode: 0 }
 }
 
@@ -213,15 +251,15 @@ function validateRequiredAnswers({ answers, ids, sectionId, issues }) {
   }
 }
 
-function validateReadAnswerSemantics(answers, issues) {
-  for (const id of READ_METHOD_IDS) {
+function validateReadAnswerSemantics(answers, issues, { methodIds = READ_METHOD_IDS, pathIds = READ_PATH_IDS } = {}) {
+  for (const id of methodIds) {
     const method = String(answers[id] || '').trim().toUpperCase()
     if (!method) continue
     if (method !== 'GET' && method !== 'POST') {
       addIssue(issues, 'blocked', `webapiReadList.${id}`, `${id} must be GET or POST`, { value: method })
     }
   }
-  for (const id of READ_PATH_IDS) {
+  for (const id of pathIds) {
     const endpoint = String(answers[id] || '').trim()
     if (!endpoint) continue
     if (/^https?:\/\//i.test(endpoint)) {
@@ -232,6 +270,27 @@ function validateReadAnswerSemantics(answers, issues) {
     if (SECRET_QUERY_PATTERN.test(endpoint)) {
       addIssue(issues, 'fail', `webapiReadList.${id}`, `${id} contains a secret-looking query parameter`)
     }
+  }
+}
+
+function validateMaterialOnlySafetyAnswers(answers, issues) {
+  validateRequiredAnswers({
+    answers,
+    ids: MATERIAL_ONLY_SAFETY_ANSWER_IDS,
+    sectionId: 'materialOnlySafety',
+    issues,
+  })
+  const autoSubmit = String(answers['M0-AUTOSUBMIT-FALSE'] || '').trim()
+  const autoAudit = String(answers['M0-AUTOAUDIT-FALSE'] || '').trim()
+  const previewFields = String(answers['M0-PREVIEW-FIELDS'] || '').trim()
+  if (previewFields && (!/\bFNumber\b/i.test(previewFields) || !/\bFName\b/i.test(previewFields))) {
+    addIssue(issues, 'blocked', 'materialOnlySafety.M0-PREVIEW-FIELDS', 'first Material dry-run preview must explicitly include FNumber and FName')
+  }
+  if (autoSubmit && !/autoSubmit\s*=\s*false|^false$|disabled|off|no|禁用|关闭|不启用/i.test(autoSubmit)) {
+    addIssue(issues, 'blocked', 'materialOnlySafety.M0-AUTOSUBMIT-FALSE', 'autoSubmit must be explicitly confirmed false')
+  }
+  if (autoAudit && !/autoAudit\s*=\s*false|^false$|disabled|off|no|禁用|关闭|不启用/i.test(autoAudit)) {
+    addIssue(issues, 'blocked', 'materialOnlySafety.M0-AUTOAUDIT-FALSE', 'autoAudit must be explicitly confirmed false')
   }
 }
 
@@ -384,52 +443,69 @@ async function validateSamples({ samples, sampleSpecs, baseDir, sectionId, issue
   return sampleResults
 }
 
-export async function buildGateContractReport(packet, { inputPath = '', generatedAt = new Date().toISOString() } = {}) {
+export async function buildGateContractReport(packet, { inputPath = '', generatedAt = new Date().toISOString(), scope = 'full' } = {}) {
+  if (!VALID_SCOPES.has(scope)) {
+    throw new GateContractCheckError('scope must be full or material-only', { scope })
+  }
   const issues = []
   const baseDir = inputPath ? path.dirname(path.resolve(inputPath)) : process.cwd()
   const webapiReadList = getObject(packet, 'webapiReadList')
   const relationshipMapping = getObject(packet, 'relationshipMapping')
+  const materialOnlySafety = getObject(packet, 'materialOnlySafety')
   const readAnswers = getObject(webapiReadList, 'answers')
   const relationshipAnswers = getObject(relationshipMapping, 'answers')
+  const materialOnlySafetyAnswers = getObject(materialOnlySafety, 'answers')
 
-  validateRequiredAnswers({
-    answers: readAnswers,
-    ids: READ_ANSWER_IDS,
-    sectionId: 'webapiReadList',
-    issues,
-  })
-  validateReadAnswerSemantics(readAnswers, issues)
+  const readAnswerIds = scope === 'material-only' ? MATERIAL_ONLY_READ_ANSWER_IDS : READ_ANSWER_IDS
+  const readSampleSpecs = scope === 'material-only' ? MATERIAL_ONLY_READ_SAMPLES : READ_SAMPLES
 
-  validateRequiredAnswers({
-    answers: relationshipAnswers,
-    ids: RELATIONSHIP_ANSWER_IDS,
-    sectionId: 'relationshipMapping',
-    issues,
+  validateRequiredAnswers({ answers: readAnswers, ids: readAnswerIds, sectionId: 'webapiReadList', issues })
+  validateReadAnswerSemantics(readAnswers, issues, {
+    methodIds: scope === 'material-only' ? MATERIAL_ONLY_READ_METHOD_IDS : READ_METHOD_IDS,
+    pathIds: scope === 'material-only' ? MATERIAL_ONLY_READ_PATH_IDS : READ_PATH_IDS,
   })
+
+  if (scope === 'material-only') {
+    validateMaterialOnlySafetyAnswers(materialOnlySafetyAnswers, issues)
+  } else {
+    validateRequiredAnswers({
+      answers: relationshipAnswers,
+      ids: RELATIONSHIP_ANSWER_IDS,
+      sectionId: 'relationshipMapping',
+      issues,
+    })
+  }
 
   scanSecrets(readAnswers, issues, 'webapiReadList.answers')
-  scanSecrets(relationshipAnswers, issues, 'relationshipMapping.answers')
+  if (scope === 'material-only') {
+    scanSecrets(materialOnlySafetyAnswers, issues, 'materialOnlySafety.answers')
+  } else {
+    scanSecrets(relationshipAnswers, issues, 'relationshipMapping.answers')
+  }
 
   const readSamples = await validateSamples({
     samples: getObject(webapiReadList, 'samples'),
-    sampleSpecs: READ_SAMPLES,
+    sampleSpecs: readSampleSpecs,
     baseDir,
     sectionId: 'webapiReadList',
     issues,
   })
-  const relationshipSamples = await validateSamples({
-    samples: getObject(relationshipMapping, 'samples'),
-    sampleSpecs: RELATIONSHIP_SAMPLES,
-    baseDir,
-    sectionId: 'relationshipMapping',
-    issues,
-  })
+  const relationshipSamples = scope === 'material-only'
+    ? []
+    : await validateSamples({
+      samples: getObject(relationshipMapping, 'samples'),
+      sampleSpecs: RELATIONSHIP_SAMPLES,
+      baseDir,
+      sectionId: 'relationshipMapping',
+      issues,
+    })
 
-  const decision = decisionFromIssues(issues)
+  const decision = decisionFromIssues(issues, scope)
   return {
     ok: decision.exitCode === 0,
     generatedAt,
     inputPath: inputPath ? path.resolve(inputPath) : '',
+    scope,
     decision: decision.decision,
     exitCode: decision.exitCode,
     stage1Lock: {
@@ -438,13 +514,22 @@ export async function buildGateContractReport(packet, { inputPath = '', generate
     },
     sections: {
       webapiReadList: {
-        requiredAnswers: READ_ANSWER_IDS.length,
-        answered: READ_ANSWER_IDS.filter((id) => isFilled(readAnswers[id])).length,
+        requiredAnswers: readAnswerIds.length,
+        answered: readAnswerIds.filter((id) => isFilled(readAnswers[id])).length,
         samples: readSamples,
       },
+      ...(scope === 'material-only'
+        ? {
+          materialOnlySafety: {
+            requiredAnswers: MATERIAL_ONLY_SAFETY_ANSWER_IDS.length,
+            answered: MATERIAL_ONLY_SAFETY_ANSWER_IDS.filter((id) => isFilled(materialOnlySafetyAnswers[id])).length,
+            samples: [],
+          },
+        }
+        : {}),
       relationshipMapping: {
-        requiredAnswers: RELATIONSHIP_ANSWER_IDS.length,
-        answered: RELATIONSHIP_ANSWER_IDS.filter((id) => isFilled(relationshipAnswers[id])).length,
+        requiredAnswers: scope === 'material-only' ? 0 : RELATIONSHIP_ANSWER_IDS.length,
+        answered: scope === 'material-only' ? 0 : RELATIONSHIP_ANSWER_IDS.filter((id) => isFilled(relationshipAnswers[id])).length,
         samples: relationshipSamples,
       },
     },
@@ -462,6 +547,7 @@ function renderMarkdown(report) {
     '# K3 WISE GATE Contract Check',
     '',
     `- Generated at: \`${report.generatedAt}\``,
+    `- Scope: \`${report.scope || 'full'}\``,
     `- Decision: \`${report.decision}\``,
     `- Exit code: \`${report.exitCode}\``,
     `- Stage 1 Lock: \`${report.stage1Lock.status}\``,
@@ -478,7 +564,11 @@ function renderMarkdown(report) {
   }
   lines.push('', '## Issues', '')
   if (report.issues.length === 0) {
-    lines.push('No issues. Runtime work can start only if the broader customer GATE is also PASS.')
+    if (report.scope === 'material-only') {
+      lines.push('No issues for Material-only dry-run readiness. This is not a full customer GATE pass and does not approve K3 Save-only, Submit, Audit, BOM, broad read/list, or production use.')
+    } else {
+      lines.push('No issues. Runtime work can start only if the broader customer GATE is also PASS.')
+    }
   } else {
     lines.push('| Status | ID | Message |', '| --- | --- | --- |')
     for (const issue of report.issues) {
@@ -489,6 +579,9 @@ function renderMarkdown(report) {
   lines.push('- This check does not contact K3 WISE or MetaSheet.')
   lines.push('- This check does not enable WebAPI read/list, SQL sampling, or relationship runtime.')
   lines.push('- This check does not lift the customer GATE.')
+  if (report.scope === 'material-only') {
+    lines.push('- Material-only PASS only means FNumber/FName dry-run readiness; Save-only still requires separate explicit approval.')
+  }
   return `${lines.join('\n')}\n`
 }
 
@@ -526,6 +619,9 @@ function buildTemplatePacket() {
         unresolvedChild: TEMPLATE_SAMPLE_FILES.unresolvedChild,
         k3BomSaveShape: TEMPLATE_SAMPLE_FILES.k3BomSaveShape,
       },
+    },
+    materialOnlySafety: {
+      answers: Object.fromEntries(MATERIAL_ONLY_SAFETY_ANSWER_IDS.map((id) => [id, '<fill-outside-git>'])),
     },
   }
 }
@@ -650,6 +746,19 @@ function buildCustomerHandoffReadme() {
 - \`${TEMPLATE_SAMPLE_FILES.unresolvedChild}\`：子件无法匹配时的样例。
 - \`${TEMPLATE_SAMPLE_FILES.k3BomSaveShape}\`：K3 BOM Save 请求体结构样例。
 
+## Material-only 快线
+
+如当前只需要推进 #1792 的 Material-only dry-run readiness，可使用：
+
+\`\`\`bash
+node scripts/ops/integration-k3wise-gate-contract-check.mjs \\
+  --scope material-only \\
+  --input /path/outside-git/k3wise-gate-contract/k3wise-gate-contract-packet.template.json \\
+  --out-dir /path/outside-git/k3wise-gate-contract/check-material-only
+\`\`\`
+
+Material-only 模式只验证物料详情读取路径、物料详情脱敏样例和 \`materialOnlySafety.answers\`。它不会要求 BOM、relationship、pagination 或 full read/list 项，也不会批准 Save、Submit、Audit 或 BOM。
+
 ## WebAPI read/list 必填项
 
 请在 \`webapiReadList.answers\` 中填写：
@@ -745,7 +854,7 @@ async function main() {
     return 0
   }
   const packet = await readJsonFile(opts.input)
-  const report = await buildGateContractReport(packet, { inputPath: opts.input })
+  const report = await buildGateContractReport(packet, { inputPath: opts.input, scope: opts.scope })
   const outDir = opts.outDir || path.join(DEFAULT_OUTPUT_ROOT, nowStamp())
   const outputs = await writeOutputs(report, outDir)
   console.log(JSON.stringify({
