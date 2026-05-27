@@ -21,7 +21,7 @@ COPY packages ./packages
 
 RUN pnpm install --frozen-lockfile
 RUN pnpm --filter @metasheet/web build
-RUN node -e "const fs=require('fs'); const info={commit:process.env.METASHEET_BUILD_COMMIT||null,imageTag:process.env.METASHEET_BUILD_IMAGE_TAG||null,source:process.env.METASHEET_BUILD_SOURCE||null,created:process.env.METASHEET_BUILD_CREATED||null}; fs.writeFileSync('apps/web/dist/build-info.json', JSON.stringify(info, null, 2)+'\n')"
+RUN node -e "const fs=require('fs'); const clean=(value)=>{const trimmed=(value||'').trim(); return !trimmed || trimmed === 'unknown' ? null : trimmed}; const info={commit:clean(process.env.METASHEET_BUILD_COMMIT),imageTag:clean(process.env.METASHEET_BUILD_IMAGE_TAG),source:clean(process.env.METASHEET_BUILD_SOURCE),created:clean(process.env.METASHEET_BUILD_CREATED)}; fs.writeFileSync('apps/web/dist/build-info.json', JSON.stringify(info, null, 2)+'\n')"
 
 FROM nginx:1.27-alpine
 ARG VCS_REF=unknown

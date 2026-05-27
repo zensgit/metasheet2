@@ -59,7 +59,7 @@ curl -fsS http://127.0.0.1:8081/build-info.json \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["commit"])'
 ```
 
-Both commands must print the expected commit.
+Both commands must print the expected commit. The workflow and manual script retry these probes by default; override `DEPLOY_BACKEND_HEALTH_URL` or `DEPLOY_WEB_BUILD_INFO_URL` only when the host exposes the same endpoints at non-default local URLs.
 
 To inspect immutable image provenance after pull:
 

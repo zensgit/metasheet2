@@ -155,6 +155,8 @@ jobs:
           DEPLOY_IMAGE_OWNER: zensgit
           DEPLOY_IMAGE_TAG: ${{ github.sha }}
           DEPLOY_EXPECTED_COMMIT: ${{ github.sha }}
+          DEPLOY_BACKEND_HEALTH_URL: ${{ vars.DEPLOY_BACKEND_HEALTH_URL || 'http://127.0.0.1:8900/health' }}
+          DEPLOY_WEB_BUILD_INFO_URL: ${{ vars.DEPLOY_WEB_BUILD_INFO_URL || 'http://127.0.0.1:8081/build-info.json' }}
           DEPLOY_JWT_SECRET: ${{ secrets.DEPLOY_JWT_SECRET || secrets.JWT_SECRET || '' }}
           DEPLOY_BCRYPT_SALT_ROUNDS: ${{ vars.DEPLOY_BCRYPT_SALT_ROUNDS || '12' }}
           ENABLE_YJS_COLLAB: ${{ vars.ENABLE_YJS_COLLAB || 'false' }}
@@ -170,6 +172,8 @@ jobs:
           DEPLOY_IMAGE_OWNER="${DEPLOY_IMAGE_OWNER:-zensgit}"
           DEPLOY_IMAGE_TAG="${DEPLOY_IMAGE_TAG:-${GITHUB_SHA}}"
           DEPLOY_EXPECTED_COMMIT="${DEPLOY_EXPECTED_COMMIT:-${GITHUB_SHA}}"
+          DEPLOY_BACKEND_HEALTH_URL="${DEPLOY_BACKEND_HEALTH_URL:-http://127.0.0.1:8900/health}"
+          DEPLOY_WEB_BUILD_INFO_URL="${DEPLOY_WEB_BUILD_INFO_URL:-http://127.0.0.1:8081/build-info.json}"
           DRILL_FAIL_STAGE="${DRILL_FAIL_STAGE:-none}"
           mkdir -p output/deploy
           deploy_log="output/deploy/deploy.log"
@@ -180,6 +184,8 @@ jobs:
             "DEPLOY_IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER:-zensgit}\""
             "DEPLOY_IMAGE_TAG=\"${DEPLOY_IMAGE_TAG:-${GITHUB_SHA}}\""
             "DEPLOY_EXPECTED_COMMIT=\"${DEPLOY_EXPECTED_COMMIT:-${GITHUB_SHA}}\""
+            "DEPLOY_BACKEND_HEALTH_URL=\"${DEPLOY_BACKEND_HEALTH_URL}\""
+            "DEPLOY_WEB_BUILD_INFO_URL=\"${DEPLOY_WEB_BUILD_INFO_URL}\""
             "DEPLOY_JWT_SECRET=\"${DEPLOY_JWT_SECRET:-}\""
             "DEPLOY_BCRYPT_SALT_ROUNDS=\"${DEPLOY_BCRYPT_SALT_ROUNDS:-12}\""
             "ENABLE_YJS_COLLAB=\"${ENABLE_YJS_COLLAB:-false}\""
@@ -416,8 +422,24 @@ jobs:
             "echo \"Smoke: api/plugins=ok health=ok web=ok\""
             "echo \"=== SMOKE END ===\""
             "echo \"=== VERSION VERIFY START ===\""
-            'backend_health_json="$(curl -fsS http://127.0.0.1:8900/health)"'
-            'web_build_json="$(curl -fsS http://127.0.0.1:8081/build-info.json)"'
+            'fetch_json_with_retry() {'
+            '  local label="$1"'
+            '  local url="$2"'
+            '  local attempts="${3:-15}"'
+            '  local delay_seconds="${4:-2}"'
+            '  local i'
+            '  for ((i = 1; i <= attempts; i += 1)); do'
+            '    if curl -fsS "${url}" 2>/dev/null; then'
+            '      return 0'
+            '    fi'
+            '    echo "[deploy-version] waiting for ${label} at ${url} (attempt ${i}/${attempts})" >&2'
+            '    sleep "${delay_seconds}"'
+            '  done'
+            '  echo "[deploy-version][error] ${label} check timed out at ${url}" >&2'
+            '  return 1'
+            '}'
+            'backend_health_json="$(fetch_json_with_retry "backend health" "${DEPLOY_BACKEND_HEALTH_URL}")"'
+            'web_build_json="$(fetch_json_with_retry "web build-info" "${DEPLOY_WEB_BUILD_INFO_URL}")"'
             'python3 - "${DEPLOY_EXPECTED_COMMIT}" "${backend_health_json}" "${web_build_json}" <<'\''PY'\'''
             'import json'
             'import sys'
@@ -433,12 +455,22 @@ jobs:
             'except Exception as exc:'
             '    fail(f"backend /health did not return valid JSON: {exc}")'
             ''
+            'if not isinstance(backend, dict):'
+            '    fail(f"backend /health response is not a JSON object, got: {type(backend).__name__}")'
+            ''
             'try:'
             '    web = json.loads(web_raw)'
             'except Exception as exc:'
             '    fail(f"web /build-info.json did not return valid JSON: {exc}")'
             ''
-            'backend_commit = str(((backend.get("build") or {}).get("commit") or "")).strip()'
+            'if not isinstance(web, dict):'
+            '    fail(f"web /build-info.json response is not a JSON object, got: {type(web).__name__}")'
+            ''
+            'backend_build = backend.get("build") or {}'
+            'if not isinstance(backend_build, dict):'
+            '    fail(f"backend /health build field is not a JSON object, got: {type(backend_build).__name__}")'
+            ''
+            'backend_commit = str((backend_build.get("commit") or "")).strip()'
             'web_commit = str((web.get("commit") or "")).strip()'
             'if backend_commit != expected:'
             '    fail(f"backend commit mismatch: expected {expected}, got {backend_commit or '<missing>'}")'
