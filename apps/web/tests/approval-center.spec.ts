@@ -74,7 +74,10 @@ const ElTabPane = defineComponent({
   name: 'ElTabPane',
   props: { label: String, name: String },
   render() {
-    return h('div', { 'data-tab-pane': this.name, 'data-tab-label': this.label }, this.$slots.default?.())
+    return h('div', { 'data-tab-pane': this.name, 'data-tab-label': this.label }, [
+      this.$slots.label?.(),
+      this.$slots.default?.(),
+    ])
   },
 })
 
@@ -233,10 +236,10 @@ describe('ApprovalCenterView', () => {
     expect(panes.length).toBe(4)
 
     const labels = Array.from(panes).map((p) => p.getAttribute('data-tab-label'))
-    expect(labels).toContain('待我处理')
     expect(labels).toContain('我发起的')
     expect(labels).toContain('抄送我的')
     expect(labels).toContain('已完成')
+    expect(container!.textContent).toContain('待我处理')
   })
 
   it('calls loadPending on mount', async () => {
@@ -281,5 +284,26 @@ describe('ApprovalCenterView', () => {
     await mountView()
     expect(container!.querySelector('[data-el-input]')).toBeTruthy()
     expect(container!.querySelector('[data-el-select]')).toBeTruthy()
+  })
+
+  it('shows the attendance approval queue entry and routes to the attendance requests section', async () => {
+    await mountView()
+
+    const entry = container!.querySelector('[data-testid="attendance-approval-queue-entry"]')
+    expect(entry?.textContent).toContain('考勤审批')
+    expect(entry?.textContent).toContain('待处理考勤审批')
+
+    const button = Array.from(container!.querySelectorAll('button')).find(candidate =>
+      candidate.textContent?.includes('待处理考勤审批'),
+    )
+    expect(button).toBeTruthy()
+
+    button!.click()
+    await flushUi()
+
+    expect(pushSpy).toHaveBeenCalledWith({
+      name: 'attendance',
+      query: { section: 'attendance-overview-requests' },
+    })
   })
 })

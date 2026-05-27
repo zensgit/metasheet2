@@ -133,6 +133,18 @@ describe('Attendance experience entrypoints', () => {
     expect(adminView?.dataset.section).toBe('attendance-admin-import')
   })
 
+  it('routes the attendance approval queue shortcut into the overview requests section', async () => {
+    routeState.query = { section: 'attendance-overview-requests' }
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    const overviewView = container!.querySelector<HTMLElement>('[data-view="overview"]')
+    expect(overviewView).toBeTruthy()
+    expect(overviewView?.dataset.section).toBe('attendance-overview-requests')
+  })
+
   it('routes the reports entrypoint into a dedicated reports view', async () => {
     routeState.query = { tab: 'reports' }
 

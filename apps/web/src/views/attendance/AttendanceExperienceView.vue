@@ -121,6 +121,11 @@ const desktopOnlyMessage = computed(() => {
   return t.value.adminDesktopHint
 })
 
+const overviewInitialSectionId = computed(() => {
+  const section = Array.isArray(route.query.section) ? route.query.section[0] : route.query.section
+  return section === 'attendance-overview-requests' ? section : ''
+})
+
 function matchesMediaQuery(query: string): boolean {
   try {
     return Boolean(window.matchMedia?.(query)?.matches)
@@ -149,7 +154,7 @@ const activeView = computed(() => {
       return {
         component: AttendanceOverview,
         key: 'attendance-overview',
-        props: {},
+        props: { initialSectionId: overviewInitialSectionId.value },
       }
     case 'reports':
       return {
