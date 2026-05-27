@@ -105,10 +105,39 @@ interface RateLimitEntry {
 const rateLimitStore = new Map<string, RateLimitEntry>()
 
 // Configuration
-const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000  // 15 minutes
-const MAX_LOGIN_ATTEMPTS = 5                   // Max failed attempts
-const BLOCK_DURATION_MS = 30 * 60 * 1000      // 30 minutes block
-const MAX_REGISTER_PER_IP = 3                  // Max registrations per IP per window
+const DEFAULT_AUTH_RATE_LIMIT_CONFIG = {
+  windowMs: 15 * 60 * 1000,          // 15 minutes
+  maxLoginAttempts: 5,               // Max failed attempts
+  blockDurationMs: 30 * 60 * 1000,   // 30 minutes block
+  maxRegisterPerIp: 3,               // Max registrations per IP per window
+} as const
+
+interface AuthRateLimitConfig {
+  windowMs: number
+  maxLoginAttempts: number
+  blockDurationMs: number
+  maxRegisterPerIp: number
+}
+
+function parsePositiveIntegerEnv(name: string, fallback: number): number {
+  const raw = process.env[name]
+  if (typeof raw !== 'string' || raw.trim().length === 0) return fallback
+  const parsed = Number(raw.trim())
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    logger.warn(`Ignoring invalid ${name}; expected a positive integer`)
+    return fallback
+  }
+  return parsed
+}
+
+function getAuthRateLimitConfig(): AuthRateLimitConfig {
+  return {
+    windowMs: parsePositiveIntegerEnv('AUTH_RATE_LIMIT_WINDOW_MS', DEFAULT_AUTH_RATE_LIMIT_CONFIG.windowMs),
+    maxLoginAttempts: parsePositiveIntegerEnv('AUTH_LOGIN_MAX_ATTEMPTS', DEFAULT_AUTH_RATE_LIMIT_CONFIG.maxLoginAttempts),
+    blockDurationMs: parsePositiveIntegerEnv('AUTH_LOGIN_BLOCK_DURATION_MS', DEFAULT_AUTH_RATE_LIMIT_CONFIG.blockDurationMs),
+    maxRegisterPerIp: parsePositiveIntegerEnv('AUTH_REGISTER_MAX_PER_IP', DEFAULT_AUTH_RATE_LIMIT_CONFIG.maxRegisterPerIp),
+  }
+}
 
 function getClientIP(req: Request): string {
   const forwarded = req.headers['x-forwarded-for']
@@ -138,7 +167,11 @@ function resolveRequestTenantId(req: Request): string | undefined {
   )
 }
 
-function checkRateLimit(key: string, maxAttempts: number): { allowed: boolean; retryAfter?: number } {
+function checkRateLimit(
+  key: string,
+  maxAttempts: number,
+  config: Pick<AuthRateLimitConfig, 'windowMs' | 'blockDurationMs'>,
+): { allowed: boolean; retryAfter?: number } {
   const now = Date.now()
   const entry = rateLimitStore.get(key)
 
@@ -151,7 +184,7 @@ function checkRateLimit(key: string, maxAttempts: number): { allowed: boolean; r
   if (!entry || entry.resetTime < now) {
     rateLimitStore.set(key, {
       count: 1,
-      resetTime: now + RATE_LIMIT_WINDOW_MS,
+      resetTime: now + config.windowMs,
       blocked: false
     })
     return { allowed: true }
@@ -161,9 +194,9 @@ function checkRateLimit(key: string, maxAttempts: number): { allowed: boolean; r
   entry.count++
   if (entry.count > maxAttempts) {
     entry.blocked = true
-    entry.blockExpires = now + BLOCK_DURATION_MS
-    logger.warn(`Blocking ${key} for ${BLOCK_DURATION_MS / 1000}s after ${entry.count} attempts`)
-    return { allowed: false, retryAfter: Math.ceil(BLOCK_DURATION_MS / 1000) }
+    entry.blockExpires = now + config.blockDurationMs
+    logger.warn(`Blocking ${key} for ${config.blockDurationMs / 1000}s after ${entry.count} attempts`)
+    return { allowed: false, retryAfter: Math.ceil(config.blockDurationMs / 1000) }
   }
 
   return { allowed: true }
@@ -185,7 +218,8 @@ const loginRateLimiter = (req: Request, res: Response, next: NextFunction) => {
   ).toLowerCase()
   const key = `login:${ip}:${identifier}`
 
-  const result = checkRateLimit(key, MAX_LOGIN_ATTEMPTS)
+  const config = getAuthRateLimitConfig()
+  const result = checkRateLimit(key, config.maxLoginAttempts, config)
   if (!result.allowed) {
     logger.warn(`Rate limit exceeded for login: ${ip} / ${identifier}`)
     return res.status(429).json({
@@ -202,7 +236,8 @@ const registerRateLimiter = (req: Request, res: Response, next: NextFunction) =>
   const ip = getClientIP(req)
   const key = `register:${ip}`
 
-  const result = checkRateLimit(key, MAX_REGISTER_PER_IP)
+  const config = getAuthRateLimitConfig()
+  const result = checkRateLimit(key, config.maxRegisterPerIp, config)
   if (!result.allowed) {
     logger.warn(`Rate limit exceeded for registration: ${ip}`)
     return res.status(429).json({
@@ -445,7 +480,7 @@ function requiresPasswordChange(user: User | null | undefined): boolean {
 
 /**
  * 用户登录
- * Protected by rate limiting: 5 attempts per 15 minutes
+ * Protected by configurable rate limiting: default 5 attempts per 15 minutes
  */
 authRouter.post('/login', loginRateLimiter, async (req: Request, res: Response) => {
   const ip = getClientIP(req)
@@ -504,7 +539,7 @@ authRouter.post('/login', loginRateLimiter, async (req: Request, res: Response) 
 
 /**
  * 用户注册
- * Protected by rate limiting: 3 registrations per IP per 15 minutes
+ * Protected by configurable rate limiting: default 3 registrations per IP per 15 minutes
  */
 authRouter.post('/register', registerRateLimiter, async (req: Request, res: Response) => {
   const ip = getClientIP(req)

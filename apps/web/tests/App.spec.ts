@@ -164,6 +164,11 @@ describe('App guest bootstrap', () => {
     window.localStorage.setItem('metasheet_product_mode', 'attendance')
     window.localStorage.setItem('user_permissions', '["attendance:admin"]')
     window.localStorage.setItem('user_roles', '["admin"]')
+    const authTokensSeenByLogoutFetch: Array<string | null> = []
+    vi.mocked(globalThis.fetch).mockImplementation(async () => {
+      authTokensSeenByLogoutFetch.push(window.localStorage.getItem('auth_token'))
+      return new Response('{}', { status: 200 })
+    })
 
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -189,11 +194,13 @@ describe('App guest bootstrap', () => {
 
     expect(globalThis.fetch).toHaveBeenCalledWith('https://api.example.com/api/auth/logout', {
       method: 'POST',
+      keepalive: true,
       headers: {
         Authorization: 'Bearer session-token',
       },
     })
     expect(mocks.clearStoredAuthState).toHaveBeenCalledTimes(1)
+    expect(authTokensSeenByLogoutFetch).toEqual([null])
     for (const key of [
       'auth_token',
       'jwt',
