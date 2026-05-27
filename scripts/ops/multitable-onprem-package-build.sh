@@ -123,6 +123,8 @@ REQUIRED_PATHS=(
   "docs/development/data-factory-issue1526-gate-contract-install-entry-verification-20260518.md"
   "docs/development/data-factory-issue1526-gate-contract-package-verify-design-20260518.md"
   "docs/development/data-factory-issue1526-gate-contract-package-verify-verification-20260518.md"
+  "docs/development/integration-k3wise-material-only-gate-checker-design-20260526.md"
+  "docs/development/integration-k3wise-material-only-gate-checker-verification-20260526.md"
   "docs/development/data-factory-issue1526-delivery-readiness-gate-contract-design-20260518.md"
   "docs/development/data-factory-issue1526-delivery-readiness-gate-contract-verification-20260518.md"
   "docs/development/data-factory-sqlserver-readonly-executor-design-20260519.md"
