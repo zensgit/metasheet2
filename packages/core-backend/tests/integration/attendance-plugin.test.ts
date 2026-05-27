@@ -149,6 +149,18 @@ function delay(ms: number): Promise<void> {
   })
 }
 
+async function fetchImportJob(baseUrl: string, token: string, jobId: string): Promise<any> {
+  const jobRes = await requestJson(`${baseUrl}/api/attendance/import/jobs/${jobId}`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+  })
+  expect(jobRes.status).toBe(200)
+  return (jobRes.body as { data?: any } | undefined)?.data
+}
+
 async function waitForImportJobCompletion(
   baseUrl: string,
   token: string,
@@ -157,28 +169,43 @@ async function waitForImportJobCompletion(
     attempts = 480,
     intervalMs = 250,
     failureMessage = 'async import job failed',
+    settle,
+    settleAttempts = 40,
+    settleIntervalMs = 250,
   }: {
     attempts?: number
     intervalMs?: number
     failureMessage?: string
+    // Optional gate applied AFTER status === 'completed'. The compact job summary
+    // (skippedCount/skippedRows, and the final failedRows) is written a beat after the status
+    // flips, so a caller asserting exact counts must wait for it to settle. Polls a bounded
+    // extra budget; if 'completed' is reached but the predicate never holds, throws with the
+    // full job payload so a genuine missing-summary bug fails loudly (not silently flaky).
+    // See docs/development/attendance-plugin-commit-async-skipped-summary-flake-lead-20260526.md (#1905).
+    settle?: (job: any) => boolean
+    settleAttempts?: number
+    settleIntervalMs?: number
   } = {}
 ): Promise<any> {
   let lastJobData: any = null
 
   for (let index = 0; index < attempts; index += 1) {
-    const jobRes = await requestJson(`${baseUrl}/api/attendance/import/jobs/${jobId}`, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-    })
-    expect(jobRes.status).toBe(200)
-
-    lastJobData = (jobRes.body as { data?: any } | undefined)?.data
+    lastJobData = await fetchImportJob(baseUrl, token, jobId)
     const status = String(lastJobData?.status || '')
     if (status === 'completed') {
-      return lastJobData
+      if (!settle) return lastJobData
+      for (let s = 0; s <= settleAttempts; s += 1) {
+        if (settle(lastJobData)) return lastJobData
+        if (s === settleAttempts) break
+        // eslint-disable-next-line no-await-in-loop
+        await delay(settleIntervalMs)
+        // eslint-disable-next-line no-await-in-loop
+        lastJobData = await fetchImportJob(baseUrl, token, jobId)
+      }
+      throw new Error(
+        `Import job ${jobId} reached 'completed' but its summary did not settle within ` +
+          `${(settleAttempts * settleIntervalMs) / 1000}s; last job: ${JSON.stringify(lastJobData)}`
+      )
     }
     if (status === 'failed') {
       throw new Error(String(lastJobData?.error || failureMessage))
@@ -5388,6 +5415,15 @@ attendanceIntegrationDescribe(
 
     const completedJob = await waitForImportJobCompletion(baseUrl, token, jobId, {
       failureMessage: 'async duplicate job failed',
+      // Settle-gate the compact skipped summary so the exact-count assertions below are
+      // deterministic: skippedRows is omitted from the compact payload until the summary lands
+      // just after status flips to 'completed' (failedRows/skippedCount/skippedRows are written
+      // together), which made this test intermittently observe failedRows=0. Gating on
+      // skippedRows presence (≥1) — not on the exact count — keeps the assertions strict.
+      // Test-only mitigation per
+      // docs/development/attendance-plugin-commit-async-skipped-summary-flake-lead-20260526.md (#1905);
+      // the heavier server-side fix (write the summary atomically with the status) is deliberately deferred.
+      settle: (job) => Array.isArray(job?.skippedRows) && job.skippedRows.length >= 1,
     })
     const batchId = String(completedJob?.batchId || '')
     expect(batchId).toBeTruthy()
