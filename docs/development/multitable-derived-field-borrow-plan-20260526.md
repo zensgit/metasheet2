@@ -66,7 +66,7 @@
 
 ## 2. Track B — 用真正的字段引用解析器替换宏展开（需 scope-gate；Teable `@teable/formula` 是 MIT 可改用）
 
-- [ ] 🔒 **B1 [scope-gate / 出一份短 RFC] 选型：改用/改写 `@teable/formula` vs 保留并加固宏展开**
+- [x] 🔬 **B1 RFC 已出 → `formula-parser-and-derived-ref-graph-rfc-b1c1-20260526.md`**（建议：**做 A2b 加固宏展开；B1a 不做、B1b 推迟**——核实 `{fld_xxx}` 正则抽取已够稳，且求值与网格引擎 46 函数紧耦合致 B1b parity 风险高）。等你拍板；拍后 A2b / B2 各自独立 opt-in。
   - **为什么**：宏展开（字符串替换 + 喂给 A1 引擎）本质脆弱；Teable `packages/formula` 用 ANTLR 把表达式解析成 AST、`FieldReferenceVisitor.getReferenceFieldIds()` 直接抽依赖。**许可证 MIT，可安全改用。**
   - **门**：这是一次有意义的新子工作面 → **需你显式 opt-in** 才进入。产出 = RFC（取舍 + 迁移面 + 风险）。
   - **K3**: 内核打磨范畴，但作为"新子战线"需 scope-gate 点头
@@ -83,7 +83,7 @@
 
 > 这是"让多维表派生字段真正成熟"的地基：支持多跳传递、派生字段可被再引用、环检测。属较大投入，作为一个 bundle 的 scope-gate。
 
-- [ ] 🔒 **C1 [scope-gate RFC] 统一依赖边表**
+- [x] 🔬 **C1 RFC 已出 → `formula-parser-and-derived-ref-graph-rfc-b1c1-20260526.md`**（建议：**暂不建**——C1 只建表几乎无价值，真问题是"要不要多跳派生字段"；无具体多跳需求前单跳模型 + A2-defense 自洽。出现具体多跳需求才按 C1→C2a→C3 启动）。
   - **做什么**：把现有 `formula_dependencies` 泛化成统一的 `Reference(from_field_id,to_field_id)` 边表，覆盖 formula + lookup + rollup（字段保存时按类型抽取依赖并 upsert）。
   - **来源/许可证**：思想来自 Teable `reference.service` / `field-supplement.service`（AGPL，**仅借思想**）。
   - **工作量**: M · **风险**: 中 · **依赖**: 与 B 协同最佳
