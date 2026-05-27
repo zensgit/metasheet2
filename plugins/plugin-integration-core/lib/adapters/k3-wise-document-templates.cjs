@@ -3,6 +3,7 @@
 const K3_WISE_DOCUMENT_TEMPLATE_VERSION = '2026.05.v1'
 
 const K3_REFERENCE_BY_NUMBER = { identifier: 'FNumber' }
+const K3_REFERENCE_BY_ID = { identifier: 'FID' }
 
 const MATERIAL_FIELD_MAPPINGS = [
   {
@@ -165,6 +166,63 @@ const K3_WISE_DOCUMENT_TEMPLATES = {
   },
 }
 
+// Opt-in customer-profiled Material preset. Stored SEPARATELY from
+// K3_WISE_DOCUMENT_TEMPLATES so it is never iterated by
+// getK3WiseDocumentObjectDefaults() (the generic default set must stay
+// material + bom only). Discoverable solely via getK3WiseDocumentTemplate /
+// listK3WiseDocumentTemplates and selected at runtime by its profile id.
+// Declares the customer field SET and per-field SHAPE only — every sampleSource
+// value is synthetic (never a real customer dictionary value).
+const K3_WISE_DOCUMENT_PROFILES = {
+  materialCustomerProfile: {
+    id: 'material-k3wise-customer-profile-v1',
+    version: K3_WISE_DOCUMENT_TEMPLATE_VERSION,
+    documentType: 'material',
+    targetObject: 'material',
+    label: 'K3 WISE Material (customer profile)',
+    lifecycle: 'save-only',
+    operations: ['upsert'],
+    savePath: '/K3API/Material/Save',
+    submitPath: '/K3API/Material/Submit',
+    auditPath: '/K3API/Material/Audit',
+    bodyKey: 'Data',
+    keyField: 'FNumber',
+    keyParam: 'Number',
+    schema: [
+      { name: 'FNumber', label: 'Material code', type: 'string', required: true },
+      { name: 'FName', label: 'Material name', type: 'string', required: true },
+      { name: 'FModel', label: 'Specification', type: 'string' },
+      // Numbered base-data references → { FNumber: value }
+      { name: 'FUnitGroupID', label: 'Unit group', type: 'reference', reference: K3_REFERENCE_BY_NUMBER, required: true },
+      { name: 'FUnitID', label: 'Base unit', type: 'reference', reference: K3_REFERENCE_BY_NUMBER, required: true },
+      { name: 'FOrderUnitID', label: 'Order unit', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FSaleUnitID', label: 'Sales unit', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FProductUnitID', label: 'Production unit', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FStoreUnitID', label: 'Inventory unit', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FAcctID', label: 'Inventory account', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FSaleAcctID', label: 'Sales account', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      { name: 'FCostAcctID', label: 'Cost account', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+      // Enum / category references → { FID: value }
+      { name: 'FErpClsID', label: 'ERP classification', type: 'reference', reference: K3_REFERENCE_BY_ID, required: true },
+      { name: 'FUseState', label: 'Use state', type: 'reference', reference: K3_REFERENCE_BY_ID },
+      { name: 'FProChkMde', label: 'Production inspection mode', type: 'reference', reference: K3_REFERENCE_BY_ID },
+      { name: 'FWWChkMde', label: 'Subcontract inspection mode', type: 'reference', reference: K3_REFERENCE_BY_ID },
+      { name: 'FSOChkMde', label: 'Sales inspection mode', type: 'reference', reference: K3_REFERENCE_BY_ID },
+      { name: 'FWthDrwChkMde', label: 'Issue inspection mode', type: 'reference', reference: K3_REFERENCE_BY_ID },
+      { name: 'FStkChkMde', label: 'Receipt inspection mode', type: 'reference', reference: K3_REFERENCE_BY_ID },
+      { name: 'FOtherChkMde', label: 'Other inspection mode', type: 'reference', reference: K3_REFERENCE_BY_ID },
+    ],
+    sampleSource: {
+      FNumber: 'MAT-001',
+      FName: 'Bolt',
+      FModel: 'M6 x 20',
+      FUnitGroupID: '<fill-outside-git>',
+      FUnitID: '<fill-outside-git>',
+      FErpClsID: '<fill-outside-git>',
+    },
+  },
+}
+
 function cloneJson(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value))
 }
@@ -223,12 +281,15 @@ function normalizeTemplate(template, field) {
 }
 
 function getK3WiseDocumentTemplate(name) {
-  const template = K3_WISE_DOCUMENT_TEMPLATES[name]
+  const template = K3_WISE_DOCUMENT_TEMPLATES[name] || K3_WISE_DOCUMENT_PROFILES[name]
   return template ? cloneJson(template) : null
 }
 
 function listK3WiseDocumentTemplates() {
-  return Object.values(K3_WISE_DOCUMENT_TEMPLATES).map((template) => cloneJson(template))
+  return [
+    ...Object.values(K3_WISE_DOCUMENT_TEMPLATES),
+    ...Object.values(K3_WISE_DOCUMENT_PROFILES),
+  ].map((template) => cloneJson(template))
 }
 
 function getK3WiseDocumentObjectDefaults() {
@@ -256,6 +317,7 @@ function mergeK3WiseDocumentObject(templateObject, configuredObject, field) {
 module.exports = {
   K3_WISE_DOCUMENT_TEMPLATE_VERSION,
   K3_WISE_DOCUMENT_TEMPLATES,
+  K3_WISE_DOCUMENT_PROFILES,
   getK3WiseDocumentObjectDefaults,
   getK3WiseDocumentTemplate,
   listK3WiseDocumentTemplates,

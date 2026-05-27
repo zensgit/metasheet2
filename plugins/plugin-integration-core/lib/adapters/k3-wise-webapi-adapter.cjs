@@ -20,10 +20,14 @@ const {
 } = require('../contracts.cjs')
 const {
   getK3WiseDocumentObjectDefaults,
+  getK3WiseDocumentTemplate,
   listK3WiseDocumentTemplates,
   mergeK3WiseDocumentObject,
   normalizeTemplate,
 } = require('./k3-wise-document-templates.cjs')
+const { scrubSecretStringValue } = require('../payload-redaction.cjs')
+
+const MATERIAL_CUSTOMER_PROFILE_ID = 'material-k3wise-customer-profile-v1'
 
 class K3WiseWebApiAdapterError extends Error {
   constructor(message, details = {}) {
@@ -146,6 +150,27 @@ function applyReferenceShape(value, field) {
   return { [identifier]: value }
 }
 
+// An unreplaced authoring placeholder: a string that (trimmed) is wrapped in
+// angle brackets, e.g. <fill-outside-git> / <placeholder> / <…>. Used by the
+// fail-closed guard so a half-configured customer profile errors cleanly before
+// the HTTP Save instead of writing corrupt data to K3.
+function isPlaceholderString(value) {
+  return typeof value === 'string' && /^<.*>$/.test(value.trim())
+}
+
+// Detect a placeholder in a field value, recursing ONE level into object keys
+// and values (covers a pre-shaped reference object such as { FNumber: '<...>' }).
+function containsPlaceholder(value) {
+  if (isPlaceholderString(value)) return true
+  if (isPlainObject(value)) {
+    for (const [key, child] of Object.entries(value)) {
+      if (isPlaceholderString(key)) return true
+      if (isPlaceholderString(child)) return true
+    }
+  }
+  return false
+}
+
 function normalizeBusinessBoolean(value) {
   if (value === undefined || value === null || value === '') return null
   if (typeof value === 'boolean') return value
@@ -255,7 +280,24 @@ function extractBusinessRows(data) {
       rows.add(candidate)
     }
   }
-  return Array.from(rows)
+  // One unwrap pass for the Data[0].Data nesting shape (mirrors the read path's
+  // `element.Data` unwrap): if a row carries its business signal under row.Data
+  // and the OUTER row carries none, use the inner object as the canonical row.
+  // Flat rows (outer has signal) are left untouched — one representation per row.
+  return Array.from(rows).map((row) => {
+    if (!isPlainObject(row.Data)) return row
+    const innerHasSignal = (
+      businessRowStatus(row.Data) !== null ||
+      businessRowMessage(row.Data) !== undefined ||
+      businessRowHasIdentifier(row.Data)
+    )
+    const outerHasSignal = (
+      businessRowStatus(row) !== null ||
+      businessRowMessage(row) !== undefined ||
+      businessRowHasIdentifier(row)
+    )
+    return innerHasSignal && !outerHasSignal ? row.Data : row
+  })
 }
 
 function hasExplicitBusinessFailure(data) {
@@ -350,12 +392,26 @@ function normalizeObjects(config) {
   const configured = toPlainObject(config.objects, 'config.objects')
   const normalized = {}
   for (const [name, defaults] of Object.entries(DEFAULT_OBJECTS)) {
+    const configuredObject = isPlainObject(configured[name]) ? configured[name] : {}
+    // Opt-in customer profile: ONLY when config explicitly selects it by id, and
+    // ONLY for the material object slot (it is a Material profile — never apply it to
+    // bom or any other object, even on a misconfigured `profile`). Any other / absent
+    // value leaves the generic default template untouched.
+    let baseTemplate = defaults
+    const usesCustomerProfile = name === 'material' && configuredObject.profile === MATERIAL_CUSTOMER_PROFILE_ID
+    if (usesCustomerProfile) {
+      const profileTemplate = getK3WiseDocumentTemplate('materialCustomerProfile')
+      if (profileTemplate) baseTemplate = normalizeTemplate(profileTemplate, `config.objects.${name}`)
+    }
     try {
       normalized[name] = mergeK3WiseDocumentObject(
-        defaults,
-        isPlainObject(configured[name]) ? configured[name] : {},
+        baseTemplate,
+        configuredObject,
         `config.objects.${name}`,
       )
+      // Re-pin save-only lifecycle after merge so a config override cannot
+      // clobber it — the autoSubmit/autoAudit hard guard is the last-line defense.
+      if (usesCustomerProfile) normalized[name].lifecycle = 'save-only'
     } catch (error) {
       throw new AdapterValidationError(error.message, {
         field: `config.objects.${name}`,
@@ -434,6 +490,15 @@ function projectRecordForBody(record, objectConfig) {
     const fieldName = field && field.name
     if (typeof fieldName !== 'string' || fieldName.trim().length === 0) continue
     if (Object.prototype.hasOwnProperty.call(record, fieldName)) {
+      // Fail-closed: an unreplaced placeholder in a REQUIRED field must never
+      // reach the Save body / the K3 wire. Throws out of projectRecordForBody
+      // before buildSaveBody → no HTTP Save for this record.
+      if (field.required === true && containsPlaceholder(record[fieldName])) {
+        throw new AdapterValidationError(
+          `K3 WISE Save refused: unreplaced placeholder in required field ${fieldName}`,
+          { field: fieldName },
+        )
+      }
       const value = applyReferenceShape(record[fieldName], field)
       if (!isBlankValue(value)) projected[fieldName] = value
     }
@@ -616,6 +681,10 @@ function responseMessage(data, config, fallback = 'K3 WISE WebAPI business respo
     getPath(data, 'Data.0.Message'),
     getPath(data, 'Data.0.ErrorMessage'),
     getPath(data, 'Data.0.FErrMessage'),
+    getPath(data, 'Data.0.Data.FMessage'),
+    getPath(data, 'Data.0.Data.Message'),
+    getPath(data, 'Data.0.Data.ErrorMessage'),
+    getPath(data, 'Data.0.Data.FErrMessage'),
     getPath(data, 'message'),
     getPath(data, 'Message'),
     getPath(data, 'error'),
@@ -634,6 +703,8 @@ function responseCode(data, config, fallback = 'OK') {
     getPath(data, 'ErrorCode'),
     getPath(data, 'Data.0.Code'),
     getPath(data, 'Data.0.ErrorCode'),
+    getPath(data, 'Data.0.Data.Code'),
+    getPath(data, 'Data.0.Data.ErrorCode'),
     getPath(data, 'StatusCode'),
     getPath(data, 'Data.Code'),
     getPath(data, 'Result.ResponseStatus.ErrorCode'),
@@ -650,6 +721,8 @@ function responseFailureCode(data, config, fallback) {
     getPath(data, 'ErrorCode'),
     getPath(data, 'Data.0.Code'),
     getPath(data, 'Data.0.ErrorCode'),
+    getPath(data, 'Data.0.Data.Code'),
+    getPath(data, 'Data.0.Data.ErrorCode'),
     getPath(data, 'Data.Code'),
     getPath(data, 'Result.ResponseStatus.ErrorCode'),
   )
@@ -668,8 +741,10 @@ function responseBillNo(data, config) {
     getPath(data, 'Number'),
     getPath(data, 'Data.FBillNo'),
     getPath(data, 'Data.0.FBillNo'),
+    getPath(data, 'Data.0.Data.FBillNo'),
     getPath(data, 'Data.FNumber'),
     getPath(data, 'Data.0.FNumber'),
+    getPath(data, 'Data.0.Data.FNumber'),
     getPath(data, 'Result.Number'),
     getPath(data, 'Result.ResponseStatus.SuccessEntitys.0.Number'),
   )
@@ -684,12 +759,24 @@ function responseExternalId(data, config) {
     getPath(data, 'FItemID'),
     getPath(data, 'Data.FItemID'),
     getPath(data, 'Data.0.FItemID'),
+    getPath(data, 'Data.0.Data.FItemID'),
     getPath(data, 'Data.Id'),
     getPath(data, 'Data.0.Id'),
+    getPath(data, 'Data.0.Data.Id'),
     getPath(data, 'Result.Id'),
     getPath(data, 'Result.ResponseStatus.SuccessEntitys.0.Id'),
   ]
   return candidates.find(isMeaningfulIdentifier)
+}
+
+// Conservative row-key masking for sanitized diagnostics: never the raw value.
+// Keeps a 3-char tail so an operator can correlate without the record identifier
+// leaking. Returns null for empty/blank inputs so a missing id stays absent.
+function maskRowKey(value) {
+  if (value === undefined || value === null) return null
+  const text = String(value)
+  if (text.trim().length === 0) return null
+  return `****${text.slice(-3)}`
 }
 
 function createBusinessResponseSummary(data, config, { operation, success }) {
@@ -708,6 +795,11 @@ function createBusinessResponseSummary(data, config, { operation, success }) {
     dataCode: firstDefined(getPath(data, 'Data.Code'), getPath(data, 'data.code'), null),
     responseCode: responseCode(data, config, null),
     responseMessagePresent: message !== undefined && message !== null && message !== '',
+    // Sanitized diagnostics: NEVER raw record identifiers or raw message text.
+    // Mask the identifiers; run the message through the shared secret scrubber.
+    responseMessageRedacted: typeof message === 'string' ? scrubSecretStringValue(message) : null,
+    externalIdMasked: isMeaningfulIdentifier(externalId) ? maskRowKey(externalId) : null,
+    billNoMasked: isMeaningfulIdentifier(billNo) ? maskRowKey(billNo) : null,
     rowCount: rows.length,
     successfulRowCount: successfulRows,
     failedRowCount: failedRows,
@@ -1060,8 +1152,15 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     const savePath = assertRelativePath(objectConfig.savePath || objectConfig.path, 'object.savePath')
     const submitPath = objectConfig.submitPath ? assertRelativePath(objectConfig.submitPath, 'object.submitPath') : null
     const auditPath = objectConfig.auditPath ? assertRelativePath(objectConfig.auditPath, 'object.auditPath') : null
-    const autoSubmit = resolveAutoFlag(request.options.autoSubmit, config.autoSubmit, 'autoSubmit')
-    const autoAudit = resolveAutoFlag(request.options.autoAudit, config.autoAudit, 'autoAudit')
+    let autoSubmit = resolveAutoFlag(request.options.autoSubmit, config.autoSubmit, 'autoSubmit')
+    let autoAudit = resolveAutoFlag(request.options.autoAudit, config.autoAudit, 'autoAudit')
+    // Save-only profile hard guard: force both lifecycle steps off, overriding
+    // request AND config. A save-only customer profile must never Submit/Audit —
+    // the if (autoSubmit) / if (autoAudit) blocks below can never fire for it.
+    if (objectConfig.lifecycle === 'save-only') {
+      autoSubmit = false
+      autoAudit = false
+    }
     const authContext = await login()
     const results = []
     const errors = []
@@ -1224,15 +1323,19 @@ module.exports = {
   __internals: {
     DEFAULT_OBJECTS,
     businessSuccess,
+    createBusinessResponseSummary,
+    extractBusinessRows,
     extractRecordKey,
     extractMaterialDetailRecord,
     buildMaterialReadRecord,
     listK3WiseDocumentTemplates,
+    maskRowKey,
     normalizeObjects,
     projectRecordForBody,
     responseBillNo,
     responseCode,
     responseExternalId,
+    responseMessage,
     saveBusinessSuccess,
   },
 }
