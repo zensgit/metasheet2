@@ -105,6 +105,73 @@ function Require-Command {
   }
 }
 
+function Add-PathEntryIfExists {
+  param([string]$PathEntry)
+
+  if ([string]::IsNullOrWhiteSpace($PathEntry) -or -not (Test-Path -LiteralPath $PathEntry)) {
+    return
+  }
+
+  $currentPath = [Environment]::GetEnvironmentVariable('PATH', 'Process')
+  $entries = @()
+  if (-not [string]::IsNullOrWhiteSpace($currentPath)) {
+    $entries = @($currentPath -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+  }
+
+  $alreadyPresent = $false
+  foreach ($entry in $entries) {
+    if ($entry.TrimEnd('\') -ieq $PathEntry.TrimEnd('\')) {
+      $alreadyPresent = $true
+      break
+    }
+  }
+
+  if (-not $alreadyPresent) {
+    $env:PATH = if ([string]::IsNullOrWhiteSpace($currentPath)) { $PathEntry } else { "$PathEntry;$currentPath" }
+  }
+}
+
+function Get-WindowsToolPathCandidates {
+  $candidates = @()
+  $programFiles = [Environment]::GetEnvironmentVariable('ProgramFiles')
+  $programFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+
+  foreach ($base in @($programFiles, $programFilesX86, 'C:\Program Files', 'C:\Program Files (x86)')) {
+    if (-not [string]::IsNullOrWhiteSpace($base)) {
+      $candidates += (Join-Path $base 'nodejs')
+    }
+  }
+
+  $npmBases = @($env:APPDATA, 'C:\Users\Administrator\AppData\Roaming')
+  if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+    $npmBases += (Join-Path $env:USERPROFILE 'AppData\Roaming')
+  }
+
+  foreach ($base in $npmBases) {
+    if (-not [string]::IsNullOrWhiteSpace($base)) {
+      $candidates += (Join-Path $base 'npm')
+    }
+  }
+
+  $systemRoot = if ([string]::IsNullOrWhiteSpace($env:SystemRoot)) { 'C:\Windows' } else { $env:SystemRoot }
+  $candidates += @(
+    (Join-Path $systemRoot 'System32'),
+    $systemRoot
+  )
+
+  return $candidates | Select-Object -Unique
+}
+
+function Initialize-WindowsSystemToolPath {
+  if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+    return
+  }
+
+  foreach ($candidate in Get-WindowsToolPathCandidates) {
+    Add-PathEntryIfExists -PathEntry $candidate
+  }
+}
+
 function Resolve-CommandPath {
   param([string]$Name)
 
@@ -117,6 +184,15 @@ function Resolve-CommandPath {
 }
 
 function Resolve-PnpmInstallCommand {
+  foreach ($dir in Get-WindowsToolPathCandidates) {
+    foreach ($leaf in @('pnpm.exe', 'pnpm.cmd', 'pnpm.ps1')) {
+      $candidate = Join-Path $dir $leaf
+      if (Test-Path -LiteralPath $candidate) {
+        return $candidate
+      }
+    }
+  }
+
   $cmdCommand = Get-Command 'pnpm.cmd' -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($cmdCommand -and -not [string]::IsNullOrWhiteSpace($cmdCommand.Source)) {
     return $cmdCommand.Source
@@ -447,6 +523,8 @@ if (-not (Test-Path -LiteralPath $resolvedEnvFile)) {
 $importedEnvCount = Import-AppEnvFile -EnvFile $resolvedEnvFile
 Write-Info ("Loaded env from {0} ({1} variables); migration / restart / healthcheck will inherit DATABASE_URL and JWT_SECRET when present in that file" -f $resolvedEnvFile, $importedEnvCount)
 
+Initialize-WindowsSystemToolPath
+
 $outputLogs = Join-Path $resolvedRoot 'output\logs'
 New-Item -ItemType Directory -Force -Path $outputLogs | Out-Null
 $extractRoot = New-ShortTempDirectory -Prefix 'mspa'
@@ -470,8 +548,8 @@ try {
   Set-Location $resolvedRoot
 
   Require-Command -Name 'node'
-  $pnpmPath = Resolve-CommandPath -Name 'pnpm'
   $pnpmInstallPath = Resolve-PnpmInstallCommand
+  $pnpmPath = $pnpmInstallPath
 
   if ($InstallDeps -ne '0') {
     $dependencyTimeoutSec = Convert-PositiveInt -Value $DependencyRefreshTimeoutSec -Label 'DependencyRefreshTimeoutSec'
