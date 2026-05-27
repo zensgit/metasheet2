@@ -35,7 +35,13 @@ jobs:
       
       - name: Build and push backend
         run: |
+          BUILD_CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "Building backend image for commit ${GITHUB_SHA} at ${BUILD_CREATED}"
           docker build -f Dockerfile.backend \
+            --build-arg VCS_REF="${GITHUB_SHA}" \
+            --build-arg BUILD_IMAGE_TAG="${GITHUB_SHA}" \
+            --build-arg BUILD_IMAGE_SOURCE="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --build-arg BUILD_CREATED="${BUILD_CREATED}" \
             -t ghcr.io/zensgit/metasheet2-backend:latest \
             -t ghcr.io/zensgit/metasheet2-backend:${{ github.sha }} \
             .
@@ -46,8 +52,14 @@ jobs:
         env:
           VITE_ENABLE_YJS_COLLAB: ${{ vars.VITE_ENABLE_YJS_COLLAB || 'false' }}
         run: |
+          BUILD_CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "Building frontend image for commit ${GITHUB_SHA} at ${BUILD_CREATED}"
           docker build -f Dockerfile.frontend \
             --build-arg VITE_ENABLE_YJS_COLLAB="${VITE_ENABLE_YJS_COLLAB}" \
+            --build-arg VCS_REF="${GITHUB_SHA}" \
+            --build-arg BUILD_IMAGE_TAG="${GITHUB_SHA}" \
+            --build-arg BUILD_IMAGE_SOURCE="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --build-arg BUILD_CREATED="${BUILD_CREATED}" \
             -t ghcr.io/zensgit/metasheet2-web:latest \
             -t ghcr.io/zensgit/metasheet2-web:${{ github.sha }} \
             .
@@ -142,6 +154,9 @@ jobs:
           DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
           DEPLOY_IMAGE_OWNER: zensgit
           DEPLOY_IMAGE_TAG: ${{ github.sha }}
+          DEPLOY_EXPECTED_COMMIT: ${{ github.sha }}
+          DEPLOY_BACKEND_HEALTH_URL: ${{ vars.DEPLOY_BACKEND_HEALTH_URL || 'http://127.0.0.1:8900/health' }}
+          DEPLOY_WEB_BUILD_INFO_URL: ${{ vars.DEPLOY_WEB_BUILD_INFO_URL || 'http://127.0.0.1:8081/build-info.json' }}
           DEPLOY_JWT_SECRET: ${{ secrets.DEPLOY_JWT_SECRET || secrets.JWT_SECRET || '' }}
           DEPLOY_BCRYPT_SALT_ROUNDS: ${{ vars.DEPLOY_BCRYPT_SALT_ROUNDS || '12' }}
           ENABLE_YJS_COLLAB: ${{ vars.ENABLE_YJS_COLLAB || 'false' }}
@@ -156,6 +171,9 @@ jobs:
           DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
           DEPLOY_IMAGE_OWNER="${DEPLOY_IMAGE_OWNER:-zensgit}"
           DEPLOY_IMAGE_TAG="${DEPLOY_IMAGE_TAG:-${GITHUB_SHA}}"
+          DEPLOY_EXPECTED_COMMIT="${DEPLOY_EXPECTED_COMMIT:-${GITHUB_SHA}}"
+          DEPLOY_BACKEND_HEALTH_URL="${DEPLOY_BACKEND_HEALTH_URL:-http://127.0.0.1:8900/health}"
+          DEPLOY_WEB_BUILD_INFO_URL="${DEPLOY_WEB_BUILD_INFO_URL:-http://127.0.0.1:8081/build-info.json}"
           DRILL_FAIL_STAGE="${DRILL_FAIL_STAGE:-none}"
           mkdir -p output/deploy
           deploy_log="output/deploy/deploy.log"
@@ -165,6 +183,9 @@ jobs:
             "DEPLOY_COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}\""
             "DEPLOY_IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER:-zensgit}\""
             "DEPLOY_IMAGE_TAG=\"${DEPLOY_IMAGE_TAG:-${GITHUB_SHA}}\""
+            "DEPLOY_EXPECTED_COMMIT=\"${DEPLOY_EXPECTED_COMMIT:-${GITHUB_SHA}}\""
+            "DEPLOY_BACKEND_HEALTH_URL=\"${DEPLOY_BACKEND_HEALTH_URL}\""
+            "DEPLOY_WEB_BUILD_INFO_URL=\"${DEPLOY_WEB_BUILD_INFO_URL}\""
             "DEPLOY_JWT_SECRET=\"${DEPLOY_JWT_SECRET:-}\""
             "DEPLOY_BCRYPT_SALT_ROUNDS=\"${DEPLOY_BCRYPT_SALT_ROUNDS:-12}\""
             "ENABLE_YJS_COLLAB=\"${ENABLE_YJS_COLLAB:-false}\""
@@ -209,6 +230,15 @@ jobs:
             'echo "[deploy] compose_cmd=${COMPOSE_CMD}"'
             'echo "[deploy] image_owner=${DEPLOY_IMAGE_OWNER}"'
             'echo "[deploy] image_tag=${DEPLOY_IMAGE_TAG}"'
+            'echo "[deploy-trace] expected_commit=${DEPLOY_EXPECTED_COMMIT}"'
+            'if ! [[ "${DEPLOY_IMAGE_TAG}" =~ ^[0-9a-f]{40}$ ]]; then'
+            '  echo "[deploy][error] DEPLOY_IMAGE_TAG must be an exact 40-character commit SHA for immutable deploy traceability, got: ${DEPLOY_IMAGE_TAG}" >&2'
+            '  exit 78'
+            'fi'
+            'if [[ "${DEPLOY_EXPECTED_COMMIT}" != "${DEPLOY_IMAGE_TAG}" ]]; then'
+            '  echo "[deploy][error] DEPLOY_EXPECTED_COMMIT must match DEPLOY_IMAGE_TAG, expected=${DEPLOY_EXPECTED_COMMIT}, tag=${DEPLOY_IMAGE_TAG}" >&2'
+            '  exit 78'
+            'fi'
             'ENV_FILE_PATH="docker/app.env"'
             'if [[ -f "${ENV_FILE_PATH}" ]]; then'
             '  database_url_line="$(grep -E "^DATABASE_URL=" "${ENV_FILE_PATH}" | tail -n 1 || true)"'
@@ -361,6 +391,14 @@ jobs:
             'if [[ "${DRILL_FAIL_STAGE:-none}" == "deploy" ]]; then echo "[deploy][drill] intentional failure at deploy stage"; exit 91; fi'
             'eval "IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} -f \"${DEPLOY_COMPOSE_FILE}\" up -d postgres redis"'
             'eval "IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} -f \"${DEPLOY_COMPOSE_FILE}\" pull backend web"'
+            'backend_image="ghcr.io/${DEPLOY_IMAGE_OWNER}/metasheet2-backend:${DEPLOY_IMAGE_TAG}"'
+            'web_image="ghcr.io/${DEPLOY_IMAGE_OWNER}/metasheet2-web:${DEPLOY_IMAGE_TAG}"'
+            'backend_repo_digest="$(docker image inspect "${backend_image}" --format "{{range .RepoDigests}}{{println .}}{{end}}" 2>/dev/null | grep "/metasheet2-backend@" | head -n 1 || true)"'
+            'web_repo_digest="$(docker image inspect "${web_image}" --format "{{range .RepoDigests}}{{println .}}{{end}}" 2>/dev/null | grep "/metasheet2-web@" | head -n 1 || true)"'
+            'echo "[deploy-trace] backend_image=${backend_image}"'
+            'echo "[deploy-trace] backend_repo_digest=${backend_repo_digest:-missing}"'
+            'echo "[deploy-trace] web_image=${web_image}"'
+            'echo "[deploy-trace] web_repo_digest=${web_repo_digest:-missing}"'
             'eval "IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} -f \"${DEPLOY_COMPOSE_FILE}\" up -d --no-deps --force-recreate backend web"'
             "echo \"=== DEPLOY END ===\""
             "# Ensure DB schema is up to date before smoke checks."
@@ -383,6 +421,68 @@ jobs:
             "curl -fsS http://127.0.0.1:8081 >/dev/null"
             "echo \"Smoke: api/plugins=ok health=ok web=ok\""
             "echo \"=== SMOKE END ===\""
+            "echo \"=== VERSION VERIFY START ===\""
+            'fetch_json_with_retry() {'
+            '  local label="$1"'
+            '  local url="$2"'
+            '  local attempts="${3:-15}"'
+            '  local delay_seconds="${4:-2}"'
+            '  local i'
+            '  for ((i = 1; i <= attempts; i += 1)); do'
+            '    if curl -fsS "${url}" 2>/dev/null; then'
+            '      return 0'
+            '    fi'
+            '    echo "[deploy-version] waiting for ${label} at ${url} (attempt ${i}/${attempts})" >&2'
+            '    sleep "${delay_seconds}"'
+            '  done'
+            '  echo "[deploy-version][error] ${label} check timed out at ${url}" >&2'
+            '  return 1'
+            '}'
+            'backend_health_json="$(fetch_json_with_retry "backend health" "${DEPLOY_BACKEND_HEALTH_URL}")"'
+            'web_build_json="$(fetch_json_with_retry "web build-info" "${DEPLOY_WEB_BUILD_INFO_URL}")"'
+            'python3 - "${DEPLOY_EXPECTED_COMMIT}" "${backend_health_json}" "${web_build_json}" <<'\''PY'\'''
+            'import json'
+            'import sys'
+            ''
+            'expected, backend_raw, web_raw = sys.argv[1:4]'
+            ''
+            'def fail(message):'
+            '    print(f"[deploy-version][error] {message}", file=sys.stderr)'
+            '    sys.exit(1)'
+            ''
+            'try:'
+            '    backend = json.loads(backend_raw)'
+            'except Exception as exc:'
+            '    fail(f"backend /health did not return valid JSON: {exc}")'
+            ''
+            'if not isinstance(backend, dict):'
+            '    fail(f"backend /health response is not a JSON object, got: {type(backend).__name__}")'
+            ''
+            'try:'
+            '    web = json.loads(web_raw)'
+            'except Exception as exc:'
+            '    fail(f"web /build-info.json did not return valid JSON: {exc}")'
+            ''
+            'if not isinstance(web, dict):'
+            '    fail(f"web /build-info.json response is not a JSON object, got: {type(web).__name__}")'
+            ''
+            'backend_build = backend.get("build") or {}'
+            'if not isinstance(backend_build, dict):'
+            '    fail(f"backend /health build field is not a JSON object, got: {type(backend_build).__name__}")'
+            ''
+            'backend_commit = str((backend_build.get("commit") or "")).strip()'
+            'web_commit = str((web.get("commit") or "")).strip()'
+            'if backend_commit != expected:'
+            '    fail(f"backend commit mismatch: expected {expected}, got {backend_commit or '<missing>'}")'
+            'if web_commit != expected:'
+            '    fail(f"web commit mismatch: expected {expected}, got {web_commit or '<missing>'}")'
+            ''
+            'print(f"[deploy-version] expected_commit={expected}")'
+            'print(f"[deploy-version] backend_commit={backend_commit}")'
+            'print(f"[deploy-version] web_commit={web_commit}")'
+            'PY'
+            'echo "Deploy version: expected=${DEPLOY_EXPECTED_COMMIT} backend=ok web=ok"'
+            "echo \"=== VERSION VERIFY END ===\""
           )
           set +e
           printf '%s\n' "${remote_cmds[@]}" | ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" bash -s 2>&1 | tee "$deploy_log"
@@ -651,12 +751,52 @@ jobs:
               fi
             fi
 
+            version_stage="UNKNOWN"
+            version_reason="start marker missing"
+            if has "=== VERSION VERIFY START ==="; then
+              version_stage="FAIL"
+              version_reason="start marker present; end marker missing; success line missing"
+              has_version_end="false"
+              if has "=== VERSION VERIFY END ==="; then
+                has_version_end="true"
+              fi
+              if grep -q "Deploy version: expected=" "$deploy_log" && [[ "$has_version_end" == "true" ]]; then
+                version_stage="PASS"
+                version_reason="backend and web served expected commit"
+              elif grep -q "Deploy version: expected=" "$deploy_log" && [[ "$has_version_end" != "true" ]]; then
+                version_reason="success line present; end marker missing (log truncated or script changed)"
+              elif [[ "$has_version_end" == "true" ]]; then
+                version_stage="UNKNOWN"
+                version_reason="end marker present; success line missing/changed"
+              fi
+            fi
+
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "### Remote Stages" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "- Deploy: **${deploy_stage}** (${deploy_reason})" >> "$GITHUB_STEP_SUMMARY"
             echo "- Migrate: **${migrate_stage}** (${migrate_reason})" >> "$GITHUB_STEP_SUMMARY"
             echo "- Smoke: **${smoke_stage}** (${smoke_reason})" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Version verify: **${version_stage}** (${version_reason})" >> "$GITHUB_STEP_SUMMARY"
+
+            expected_commit="$(grep -E "\\[deploy-trace\\] expected_commit=" "$deploy_log" | tail -n 1 | sed 's/^.*expected_commit=//' || true)"
+            backend_image="$(grep -E "\\[deploy-trace\\] backend_image=" "$deploy_log" | tail -n 1 | sed 's/^.*backend_image=//' || true)"
+            backend_repo_digest="$(grep -E "\\[deploy-trace\\] backend_repo_digest=" "$deploy_log" | tail -n 1 | sed 's/^.*backend_repo_digest=//' || true)"
+            web_image="$(grep -E "\\[deploy-trace\\] web_image=" "$deploy_log" | tail -n 1 | sed 's/^.*web_image=//' || true)"
+            web_repo_digest="$(grep -E "\\[deploy-trace\\] web_repo_digest=" "$deploy_log" | tail -n 1 | sed 's/^.*web_repo_digest=//' || true)"
+            backend_commit="$(grep -E "\\[deploy-version\\] backend_commit=" "$deploy_log" | tail -n 1 | sed 's/^.*backend_commit=//' || true)"
+            web_commit="$(grep -E "\\[deploy-version\\] web_commit=" "$deploy_log" | tail -n 1 | sed 's/^.*web_commit=//' || true)"
+
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### Deploy Traceability" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Expected commit: \`${expected_commit:-unknown}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Backend served commit: \`${backend_commit:-unknown}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Web served commit: \`${web_commit:-unknown}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Backend image: \`${backend_image:-unknown}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Backend repo digest: \`${backend_repo_digest:-unknown}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Web image: \`${web_image:-unknown}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Web repo digest: \`${web_repo_digest:-unknown}\`" >> "$GITHUB_STEP_SUMMARY"
 
             if [[ "${deploy_stage}" != "PASS" && "${deploy_stage}" != "UNKNOWN" ]]; then
               # Deploy failures often contain the most actionable error message near the end.
@@ -699,6 +839,18 @@ jobs:
                 echo '```' >> "$GITHUB_STEP_SUMMARY"
               fi
             fi
+
+            if [[ "${version_stage}" != "PASS" && "${version_stage}" != "UNKNOWN" ]]; then
+              version_block="$(extract_block "=== VERSION VERIFY START ===" "=== VERSION VERIFY END ===" 80 || true)"
+              if [[ -n "${version_block}" ]]; then
+                echo "" >> "$GITHUB_STEP_SUMMARY"
+                echo "### Version Verify Output (tail)" >> "$GITHUB_STEP_SUMMARY"
+                echo "" >> "$GITHUB_STEP_SUMMARY"
+                echo '```' >> "$GITHUB_STEP_SUMMARY"
+                echo "$version_block" >> "$GITHUB_STEP_SUMMARY"
+                echo '```' >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
           fi
 
           echo "" >> "$GITHUB_STEP_SUMMARY"
@@ -725,6 +877,7 @@ jobs:
           echo "- Deploy logs artifact: \`${artifact_name}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- K3 WISE smoke input check: \`output/deploy/k3wise-postdeploy-env-check/\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- K3 WISE smoke evidence: \`output/deploy/k3wise-postdeploy-smoke/\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Deploy traceability: \`output/deploy/deploy.log\` + \`output/deploy/step-summary.md\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Local evidence path (after download): \`output/playwright/ga/${GITHUB_RUN_ID}/deploy.log\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Download:" >> "$GITHUB_STEP_SUMMARY"
@@ -737,6 +890,7 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- Upload channel troubleshooting: ${repo_url}/blob/main/docs/attendance-production-import-upload-channel-20260212.md" >> "$GITHUB_STEP_SUMMARY"
           echo "- Production delivery checklist: ${repo_url}/blob/main/docs/attendance-production-delivery-20260207.md" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Immutable deploy traceability: ${repo_url}/blob/main/docs/operations/deploy-immutable-traceability-runbook.md" >> "$GITHUB_STEP_SUMMARY"
 
           # Archive step summary alongside deploy.log for offline audit/review.
           mkdir -p output/deploy
