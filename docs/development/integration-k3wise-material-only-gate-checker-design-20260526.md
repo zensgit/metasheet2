@@ -41,7 +41,7 @@ slice, without redefining or weakening the full GATE.
 | Read answers required | O1-MAT, O1-MAT-M, O1-BOM, O1-BOM-M, O2-P/T/C, O3-F/M, O4-MAT, O4-BOM, O6 | **O1-MAT, O1-MAT-M, O6 only** |
 | Relationship R1–R7 | required | **not required** |
 | Samples required | 8 (material + BOM + relationship) | **1 (`materialDetail`)** |
-| Safety answers | — | **`materialOnlySafety.answers` (5)** |
+| Safety answers | — | **`materialOnlySafety.answers` (6)** |
 | Pass decision | `PASS` | `PASS_MATERIAL_DRY_RUN_READY` |
 
 The Material-only pass decision is intentionally **not** `PASS`. It is
@@ -53,7 +53,7 @@ line cannot mistake it for a full GATE pass.
 
 Because the Material-only slice carries safety commitments that the full read/list
 packet does not encode, the schema gains an optional `materialOnlySafety.answers`
-block. All five are required in material-only mode:
+block. All six are required in material-only mode:
 
 - `materialScopeOnly` — first live scope is Material only. (must affirm)
 - `bomDeferred` — BOM is deferred until Material passes. (must affirm)
@@ -61,11 +61,34 @@ block. All five are required in material-only mode:
   dry-run review. (must affirm)
 - `autoSubmit` — **must be `false`** (boolean, or `no`/`off`/`否`/`关闭`).
 - `autoAudit` — **must be `false`** (same).
+- `previewFields` — confirms the **first dry-run preview scope**, locked to the
+  latest #1792 boundary: `Code → FNumber`, `Name → FName` only; `FModel` and unit
+  mapping deferred. (see §3.1)
 
 The three affirmations fail only if explicitly negated (a `false`/`no` value); the
 two write-action flags fail unless they are unambiguously false. Anchored matching
 is deliberate — a fuzzy "false (but…)" value should be rejected, because these are
 safety switches, not prose.
+
+### 3.1 `previewFields` — locking the first dry-run preview scope (#1792)
+
+#1792 now explicitly narrows the first Material dry-run preview to `FNumber` /
+`FName` only; `FModel` and unit mapping stay deferred until separately confirmed.
+The checker enforces this so it cannot return `PASS_MATERIAL_DRY_RUN_READY` for a
+preview that quietly widened:
+
+- The `previewFields` value **must contain** both `FNumber` and `FName` (missing
+  either → `blocked` — scope not confirmed).
+- If it mentions `FModel` or unit mapping (`F…Unit…`, `unit mapping`, `单位`), those
+  tokens **must be marked deferred** with an explicit defer word
+  (`defer`/`deferred`/`暂缓`/`暂不`/`exclude`/`不包含`/…). Otherwise → `FAIL`
+  (the preview is widening past the confirmed boundary).
+- The defer markers **deliberately exclude the bare word `only`**, so a value like
+  `FModel only` (an attempt to widen the preview) is still rejected as `FAIL`.
+
+Canonical value: `FNumber/FName only; FModel and unit mapping deferred`. Including
+`FModel`/unit mapping in the first dry-run is a separate, later confirmation — not
+part of this lane.
 
 ## 3. What is still required / rejected in Material-only mode
 
@@ -121,6 +144,22 @@ node scripts/ops/integration-k3wise-gate-contract-check.mjs \
 
 Only on `PASS_MATERIAL_DRY_RUN_READY` does the read-only `Material/GetDetail`
 dry-run proceed. Save-only remains a separate, later, explicit decision.
+
+## 6. Packaging guard (on-prem release)
+
+This is operator tooling for the entity machine, and we have been bitten before
+by code being correct while the released package did not actually contain the new
+tooling. So `scripts/ops/multitable-onprem-package-verify.sh` gains marker
+assertions (alongside the existing `$gate_contract_checker` markers) that fail the
+package build if the packaged checker omits this capability:
+
+- `PASS_MATERIAL_DRY_RUN_READY` — the Material-only dry-run readiness decision.
+- `material-only` — the `--scope material-only` sub-acceptance.
+- `materialOnlySafety` — the Material-only safety answers (scope / BOM / Save-only /
+  autoSubmit / autoAudit / previewFields).
+
+The checker is already in the packaged-file list, so these markers are enforced
+against the shipped copy. No package manifest or INSTALL.txt change is needed.
 
 See the companion verification doc:
 `integration-k3wise-material-only-gate-checker-verification-20260526.md`.

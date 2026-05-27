@@ -83,9 +83,20 @@ const REDACTED_VALUE_PATTERN = /^(<redacted>|<fill-outside-git>|\*\*\*|redacted)
 const MATERIAL_ONLY_READ_ANSWER_IDS = ['O1-MAT', 'O1-MAT-M', 'O6']
 const MATERIAL_ONLY_AFFIRM_IDS = ['materialScopeOnly', 'bomDeferred', 'saveOnlySeparateApproval']
 const MATERIAL_ONLY_DENY_IDS = ['autoSubmit', 'autoAudit']
-const MATERIAL_ONLY_SAFETY_IDS = [...MATERIAL_ONLY_AFFIRM_IDS, ...MATERIAL_ONLY_DENY_IDS]
+const MATERIAL_ONLY_PREVIEW_ID = 'previewFields'
+const MATERIAL_ONLY_SAFETY_IDS = [...MATERIAL_ONLY_AFFIRM_IDS, ...MATERIAL_ONLY_DENY_IDS, MATERIAL_ONLY_PREVIEW_ID]
 const MATERIAL_ONLY_SAMPLES = { materialDetail: READ_SAMPLES.materialDetail }
 const MATERIAL_ONLY_NEGATIVE_FLAG_PATTERN = /^(false|no|n|off|disabled|否|停用|关闭|禁用|0)$/i
+// First #1792 dry-run preview must stay minimal: FNumber + FName only.
+// FModel / unit mapping are deferred until separately confirmed. The defer markers
+// deliberately exclude the bare word "only" so "FModel only" (an attempt to widen
+// the preview) is still rejected.
+const MATERIAL_ONLY_PREVIEW_REQUIRED_FIELDS = [
+  { name: 'FNumber', pattern: /\bFNumber\b/i },
+  { name: 'FName', pattern: /\bFName\b/i },
+]
+const MATERIAL_ONLY_PREVIEW_BROADER_PATTERNS = [/\bFModel\b/i, /\bF\w*Unit\w*\b/i, /unit\s*mapping/i, /单位/]
+const MATERIAL_ONLY_PREVIEW_DEFER_PATTERN = /(defer|deferred|暂缓|暂不|exclude|excluded|not included|out of scope|不包含|不含)/i
 const MATERIAL_ONLY_TEMPLATE_PACKET_FILE = 'k3wise-gate-material-only-packet.template.json'
 const MATERIAL_ONLY_TEMPLATE_README_FILE = 'README-CUSTOMER-HANDOFF-MATERIAL-ONLY.zh.md'
 
@@ -416,6 +427,19 @@ function isFlagNegative(value) {
   return false
 }
 
+function validatePreviewFieldScope(value, issues) {
+  if (!isFilled(value)) return // missing is already blocked by the required-answer loop
+  const text = String(value)
+  const missing = MATERIAL_ONLY_PREVIEW_REQUIRED_FIELDS.filter((field) => !field.pattern.test(text)).map((field) => field.name)
+  if (missing.length > 0) {
+    addIssue(issues, 'blocked', `materialOnlySafety.${MATERIAL_ONLY_PREVIEW_ID}`, `previewFields must confirm the first dry-run preview includes ${missing.join(' and ')}`)
+  }
+  const widensPreview = MATERIAL_ONLY_PREVIEW_BROADER_PATTERNS.some((pattern) => pattern.test(text))
+  if (widensPreview && !MATERIAL_ONLY_PREVIEW_DEFER_PATTERN.test(text)) {
+    addIssue(issues, 'fail', `materialOnlySafety.${MATERIAL_ONLY_PREVIEW_ID}`, 'previewFields must defer FModel and unit mapping from the first dry-run unless separately confirmed')
+  }
+}
+
 function validateMaterialOnlySafety(answers, issues) {
   for (const id of MATERIAL_ONLY_SAFETY_IDS) {
     if (!isFilled(answers[id])) {
@@ -434,6 +458,7 @@ function validateMaterialOnlySafety(answers, issues) {
       addIssue(issues, 'fail', `materialOnlySafety.${id}`, `${id} must be false during the Material-only dry-run (auto write actions stay disabled)`)
     }
   }
+  validatePreviewFieldScope(answers[MATERIAL_ONLY_PREVIEW_ID], issues)
 }
 
 async function buildMaterialOnlyReport(packet, { inputPath = '', generatedAt = new Date().toISOString() } = {}) {
@@ -933,6 +958,7 @@ material-only **不要求** BOM 接口、分页、过滤、完整字段清单、
 - \`saveOnlySeparateApproval\`：确认 Save-only 在干跑评审后仍需单独显式审批；填 \`true\` 或 yes / confirmed。
 - \`autoSubmit\`：必须为 **JSON 布尔 false**（也接受 no / off / 否 / 关闭）。
 - \`autoAudit\`：必须为 **JSON 布尔 false**（也接受 no / off / 否 / 关闭）。
+- \`previewFields\`：确认首轮 Material 干跑预览字段范围，对应 #1792 最新边界——只看 \`FNumber\` / \`FName\`，\`FModel\` 与单位映射暂缓。推荐写法：\`FNumber/FName only; FModel and unit mapping deferred\`。校验要求：必须同时出现 \`FNumber\` 与 \`FName\`；若提到 \`FModel\` 或单位映射，必须用 defer / deferred / 暂缓 / 暂不 / exclude / 不包含 等明确“暂缓”措辞标注——注意 \`only\` 不算暂缓措辞，所以 \`FModel only\`（试图扩大预览）会被判为 FAIL。\`FModel\` 与单位映射如需纳入，需另行单独确认，不在本快线范围内。
 
 ## 脱敏要求
 

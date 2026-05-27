@@ -51,14 +51,15 @@ $ node ...-check.mjs --init-template /tmp/mo --scope material-only
 
 $ node ...-check.mjs --scope material-only --input /tmp/mo/k3wise-gate-material-only-packet.template.json --out-dir /tmp/mo/out
 { "ok": false, "decision": "GATE_BLOCKED", "exitCode": 2,
-  "summary": { "fail": 0, "blocked": 10, "pass": 0 } }   # 3 read + 5 safety + 2 placeholder-semantics
+  "summary": { "fail": 0, "blocked": 11, "pass": 0 } }   # 3 read + 6 safety + 2 placeholder-semantics
 ```
 
 ## V4. Material-only — filled packet is `PASS_MATERIAL_DRY_RUN_READY`
 
 After filling O1-MAT (`/K3API/Material/GetDetail`), O1-MAT-M (`POST`), O6, and
 `materialOnlySafety` (`materialScopeOnly/bomDeferred/saveOnlySeparateApproval =
-true`, `autoSubmit/autoAudit = false`) plus one redacted `materialDetail` sample:
+true`, `autoSubmit/autoAudit = false`, `previewFields = "FNumber/FName only;
+FModel and unit mapping deferred"`) plus one redacted `materialDetail` sample:
 
 ```
 { "ok": true, "decision": "PASS_MATERIAL_DRY_RUN_READY", "exitCode": 0,
@@ -89,6 +90,12 @@ Rendered Markdown leads with the boundary block (not a trailing footnote):
   evidence matches `secret-looking key` and does **not** contain the raw secret values.
 - `autoSubmit: true` → `FAIL` (`materialOnlySafety.autoSubmit`).
 - `bomDeferred: false` (negated affirmation) → `FAIL` (`materialOnlySafety.bomDeferred`).
+- `previewFields` missing / missing `FName` → `GATE_BLOCKED` (`materialOnlySafety.previewFields`).
+- `previewFields` widening to `FModel`/unit mapping without an explicit defer word
+  (e.g. `FNumber, FName, FModel`, or even `FModel only` — `only` is not a defer word)
+  → `FAIL` (`materialOnlySafety.previewFields`).
+- `previewFields = "FNumber/FName only; FModel and unit mapping deferred"` (the
+  reviewer's canonical string) and `"FNumber/FName only"` → **pass**.
 - Missing O1-MAT / O6 / `materialDetail` → `GATE_BLOCKED`.
 - Missing BOM / pagination / filters / relationship R1–R7 → **does not block** material-only.
 
@@ -96,22 +103,42 @@ Rendered Markdown leads with the boundary block (not a trailing footnote):
 
 ```
 $ node --test scripts/ops/integration-k3wise-gate-contract-check.test.mjs
-ℹ tests 16
-ℹ pass 16
+ℹ tests 17
+ℹ pass 17
 ℹ fail 0
 
 $ pnpm run verify:integration-k3wise:gate-contract
-ℹ tests 16
-ℹ pass 16
+ℹ tests 17
+ℹ pass 17
 ℹ fail 0
 
 $ git diff --check
 NO WHITESPACE ERRORS
 ```
 
-7 pre-existing tests unchanged + 9 new material-only tests, all green. The
+7 pre-existing tests unchanged + 10 new material-only tests, all green. The
 existing `verify:integration-k3wise:gate-contract` npm script picks up the new
 cases automatically (no script change needed).
+
+## V8. Packaging guard (on-prem release marker)
+
+`scripts/ops/multitable-onprem-package-verify.sh` gained three marker assertions in
+the `$gate_contract_checker` block so a release package cannot silently omit this
+capability. Verified without building a package:
+
+```
+$ bash -n scripts/ops/multitable-onprem-package-verify.sh
+BASH SYNTAX OK
+
+$ for n in PASS_MATERIAL_DRY_RUN_READY material-only materialOnlySafety; do
+    rg --fixed-strings -- "$n" scripts/ops/integration-k3wise-gate-contract-check.mjs >/dev/null && echo "FOUND: $n"; done
+FOUND: PASS_MATERIAL_DRY_RUN_READY
+FOUND: material-only
+FOUND: materialOnlySafety
+```
+
+The checker is already in the packaged-file list, so the markers are enforced
+against the shipped copy; no package manifest or INSTALL.txt change is needed.
 
 ## V7. Lock posture
 

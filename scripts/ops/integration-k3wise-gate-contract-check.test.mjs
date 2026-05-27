@@ -299,6 +299,7 @@ function materialOnlyPacket() {
         saveOnlySeparateApproval: true,
         autoSubmit: false,
         autoAudit: false,
+        previewFields: 'FNumber/FName only; FModel and unit mapping deferred',
       },
     },
   }
@@ -329,7 +330,7 @@ test('material-only scope passes and writes PASS_MATERIAL_DRY_RUN_READY evidence
   assert.equal(evidence.exitCode, 0)
   assert.equal(evidence.issues.length, 0)
   assert.equal(evidence.sections.materialRead.answered, 3)
-  assert.equal(evidence.sections.materialOnlySafety.answered, 5)
+  assert.equal(evidence.sections.materialOnlySafety.answered, 6)
   assert.equal(evidence.stage1Lock.status, 'held')
 
   const markdown = await readFile(path.join(outDir, 'integration-k3wise-gate-contract-check.md'), 'utf8')
@@ -453,6 +454,41 @@ test('material-only safety flags fail when autoSubmit is on or a scope confirmat
   const negReport = await buildGateContractReport(negated, { inputPath, scope: 'material-only' })
   assert.equal(negReport.decision, 'FAIL')
   assert(negReport.issues.some((issue) => issue.id === 'materialOnlySafety.bomDeferred' && issue.status === 'fail'))
+})
+
+test('material-only locks the first dry-run preview scope to FNumber/FName via previewFields', async () => {
+  const dir = await makeDir()
+  await writeMaterialDetailSample(dir)
+  const inputPath = path.join(dir, 'packet.json')
+  const withPreview = (value) => {
+    const packet = materialOnlyPacket()
+    packet.materialOnlySafety.answers.previewFields = value
+    return buildGateContractReport(packet, { inputPath, scope: 'material-only' })
+  }
+
+  // canonical (the reviewer's suggested string) and minimal forms pass; this also
+  // proves FNumber/FName do not trip the broader FModel/unit detection.
+  assert.equal((await withPreview('FNumber/FName only; FModel and unit mapping deferred')).decision, 'PASS_MATERIAL_DRY_RUN_READY')
+  assert.equal((await withPreview('FNumber/FName only')).decision, 'PASS_MATERIAL_DRY_RUN_READY')
+
+  // missing a required field → blocked
+  const missingName = await withPreview('FNumber only')
+  assert.equal(missingName.decision, 'GATE_BLOCKED')
+  assert(missingName.issues.some((issue) => issue.id === 'materialOnlySafety.previewFields' && issue.status === 'blocked'))
+
+  // widening to FModel / unit mapping without an explicit defer → fail ("only" is not a defer word)
+  for (const widened of ['FNumber, FName, FModel', 'FNumber/FName plus FModel only', 'FNumber FName 单位']) {
+    const report = await withPreview(widened)
+    assert.equal(report.decision, 'FAIL', `expected FAIL for: ${widened}`)
+    assert(report.issues.some((issue) => issue.id === 'materialOnlySafety.previewFields' && issue.status === 'fail'))
+  }
+
+  // missing previewFields entirely → blocked
+  const missingPreview = materialOnlyPacket()
+  delete missingPreview.materialOnlySafety.answers.previewFields
+  const missingReport = await buildGateContractReport(missingPreview, { inputPath, scope: 'material-only' })
+  assert.equal(missingReport.decision, 'GATE_BLOCKED')
+  assert(missingReport.issues.some((issue) => issue.id === 'materialOnlySafety.previewFields' && issue.status === 'blocked'))
 })
 
 test('full scope is the default and its report shape is unchanged when --scope is omitted', async () => {
