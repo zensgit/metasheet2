@@ -248,6 +248,7 @@ function compactGateContractDetails(report, details = {}) {
   const relationshipMapping = isPlainObject(sections.relationshipMapping) ? sections.relationshipMapping : {}
   return {
     ...details,
+    scope: typeof report?.scope === 'string' && report.scope ? report.scope : 'full',
     summary: {
       pass: Number.isFinite(Number(summary.pass)) ? Number(summary.pass) : 0,
       blocked: Number.isFinite(Number(summary.blocked)) ? Number(summary.blocked) : 0,
@@ -285,7 +286,15 @@ function evaluateGateContractCheck(report) {
     }))
   }
 
-  if (report.ok === true && report.decision === 'PASS') {
+  const scope = typeof report.scope === 'string' && report.scope ? report.scope : 'full'
+  if (scope !== 'full') {
+    return gate('gate-contract-check', 'K3 read/list and relationship GATE contract', 'fail', compactGateContractDetails(report, {
+      reason: `GATE contract check scope is "${scope}" (e.g. Material-only dry-run readiness); a non-full scope cannot satisfy the full K3 read/list + relationship GATE`,
+      decision: report.decision || null,
+    }))
+  }
+
+  if (report.ok === true && report.decision === 'PASS' && scope === 'full') {
     return gate('gate-contract-check', 'K3 read/list and relationship GATE contract', 'pass', compactGateContractDetails(report, {
       reason: 'O1-O6 and R1-R7 customer evidence passed the machine check',
       decision: 'PASS',

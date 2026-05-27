@@ -289,6 +289,48 @@ test('blocks readiness when GATE contract check is blocked or failed', () => {
   assert.match(failed.gates.find((gate) => gate.id === 'gate-contract-check').reason, /FAIL/)
 })
 
+test('does not treat a Material-only scope GATE contract check as full GATE readiness', () => {
+  const report = buildReadinessReport({
+    postdeploySmoke: postdeployPass(),
+    packageVerify: packageVerifyPass(),
+    gateContractCheck: gateContractPass({
+      decision: 'PASS_MATERIAL_DRY_RUN_READY',
+      scope: 'material-only',
+      sections: {
+        webapiReadList: { answered: 9, requiredAnswers: 9 },
+        relationshipMapping: { answered: 0, requiredAnswers: 0 },
+      },
+    }),
+    preflightPacket: preflightReadyPacket(),
+  }, { generatedAt: '2026-05-06T00:00:00.000Z' })
+
+  assert.equal(report.decision, BLOCKED_DECISION)
+  const gateContract = report.gates.find((gate) => gate.id === 'gate-contract-check')
+  assert.equal(gateContract.status, 'fail')
+  assert.equal(gateContract.scope, 'material-only')
+  assert.match(gateContract.reason, /non-full scope cannot satisfy the full K3 read\/list \+ relationship GATE/)
+})
+
+test('rejects a non-full scope even when the decision string is bare PASS (future-leak guard)', () => {
+  // Locks the regression: under the previous logic an ok:true/decision:'PASS' report
+  // would satisfy the pass branch. A non-full scope must never count as full GATE
+  // readiness, even if a future change sets the decision back to 'PASS' or loosens the
+  // exact decision match.
+  const report = buildReadinessReport({
+    postdeploySmoke: postdeployPass(),
+    packageVerify: packageVerifyPass(),
+    gateContractCheck: gateContractPass({
+      scope: 'material-only',
+    }),
+    preflightPacket: preflightReadyPacket(),
+  }, { generatedAt: '2026-05-06T00:00:00.000Z' })
+
+  assert.equal(report.decision, BLOCKED_DECISION)
+  const gateContract = report.gates.find((gate) => gate.id === 'gate-contract-check')
+  assert.equal(gateContract.status, 'fail')
+  assert.equal(gateContract.scope, 'material-only')
+})
+
 test('blocks readiness when GATE contract check does not hold the Stage 1 Lock', () => {
   const report = buildReadinessReport({
     postdeploySmoke: postdeployPass(),
