@@ -7,7 +7,9 @@
 import { sql } from 'kysely'
 import { db } from '../db/db'
 import { toJsonValue } from '../db/type-helpers'
+import { AUTOMATION_EXECUTION_SCHEMA_VERSION } from './automation-executor'
 import type { AutomationExecution, AutomationStepResult } from './automation-executor'
+import { redactString, redactValue } from './automation-log-redact'
 
 export interface AutomationStats {
   total: number
@@ -22,8 +24,21 @@ export class AutomationLogService {
    * Record an execution log by inserting into the database.
    */
   async record(execution: AutomationExecution): Promise<void> {
+    // Redact secret-shaped values out of ALL FOUR free-form channels BEFORE they
+    // hit the DB (they ride into the runs UI and would survive any future replay):
+    // steps (recursive — covers step.output/step.error), trigger_event,
+    // rule_snapshot, and the execution-level error. Business field values are
+    // preserved — this is secret-shaped value scrubbing only.
     // node-postgres treats JS arrays as PostgreSQL array literals unless we cast explicit JSON text.
-    const stepsJsonb = toJsonValue(execution.steps) as unknown as Record<string, unknown>[]
+    const stepsJsonb = toJsonValue(redactValue(execution.steps)) as unknown as Record<string, unknown>[]
+    const triggerEventJsonb =
+      execution.triggerEvent == null
+        ? null
+        : (toJsonValue(redactValue(execution.triggerEvent)) as unknown as Record<string, unknown>)
+    const ruleSnapshotJsonb =
+      execution.ruleSnapshot == null
+        ? null
+        : (toJsonValue(redactValue(execution.ruleSnapshot)) as unknown as Record<string, unknown>)
     await db
       .insertInto('multitable_automation_executions')
       .values({
@@ -33,8 +48,13 @@ export class AutomationLogService {
         triggered_at: execution.triggeredAt,
         status: execution.status,
         steps: stepsJsonb,
-        error: execution.error ?? null,
+        error: execution.error != null ? redactString(execution.error) : null,
         duration: execution.duration ?? null,
+        sheet_id: execution.sheetId ?? null,
+        trigger_event: triggerEventJsonb,
+        rule_snapshot: ruleSnapshotJsonb,
+        finished_at: execution.finishedAt ?? null,
+        schema_version: execution.schemaVersion ?? AUTOMATION_EXECUTION_SCHEMA_VERSION,
       })
       .execute()
   }
@@ -141,5 +161,22 @@ function toExecution(row: Record<string, unknown>): AutomationExecution {
       : row.steps) as AutomationStepResult[],
     error: (row.error as string) ?? undefined,
     duration: row.duration != null ? Number(row.duration) : undefined,
+    // A1 snapshot fields — null-safe for rows predating the migration.
+    sheetId: (row.sheet_id as string) ?? undefined,
+    triggerEvent: parseJsonColumn(row.trigger_event),
+    ruleSnapshot: parseJsonColumn(row.rule_snapshot) as AutomationExecution['ruleSnapshot'],
+    finishedAt:
+      row.finished_at == null
+        ? undefined
+        : row.finished_at instanceof Date
+          ? row.finished_at.toISOString()
+          : String(row.finished_at),
+    schemaVersion: row.schema_version != null ? Number(row.schema_version) : undefined,
   }
+}
+
+/** JSONB columns arrive as parsed objects from pg, but tolerate string form too. */
+function parseJsonColumn(value: unknown): unknown {
+  if (value == null) return undefined
+  return typeof value === 'string' ? JSON.parse(value) : value
 }

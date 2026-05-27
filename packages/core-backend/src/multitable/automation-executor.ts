@@ -5,6 +5,7 @@
 
 import { randomUUID } from 'crypto'
 import { Logger } from '../core/logger'
+import { redactString } from './automation-log-redact'
 import {
   DingTalkBusinessError,
   DingTalkRequestError,
@@ -213,13 +214,10 @@ function stringifyResponseBody(payload: unknown, fallback: string | null = null)
 }
 
 function redactDingTalkFailureAlertText(value: unknown): string {
-  return String(value ?? '')
-    .replace(/https:\/\/oapi\.dingtalk\.com\/robot\/send\?access_token=[A-Za-z0-9._~-]+/gi, '<dingtalk-robot-webhook-redacted>')
-    .replace(/access_token=[A-Za-z0-9._~-]+/gi, 'access_token=<redacted>')
-    .replace(/SEC[A-Za-z0-9+/=_-]{8,}/g, 'SEC<redacted>')
-    .replace(/Bearer\s+[A-Za-z0-9._-]{8,}/gi, 'Bearer <redacted>')
-    .replace(/eyJ[A-Za-z0-9._-]{20,}/g, '<jwt-redacted>')
-    .slice(0, DINGTALK_FAILURE_ALERT_CONTENT_LIMIT)
+  // Delegate to the shared automation-log redactor (single source of truth —
+  // covers Bearer/JWT/SEC/access_token/DingTalk-robot-webhook and more); keep
+  // only the DingTalk alert-specific length cap here.
+  return redactString(value).slice(0, DINGTALK_FAILURE_ALERT_CONTENT_LIMIT)
 }
 
 function mergeFailureAlertOutput(
@@ -467,6 +465,9 @@ export interface AutomationRule {
   updatedAt?: string
 }
 
+/** Snapshot schema version stamped on every execution row (A1 run-governance). */
+export const AUTOMATION_EXECUTION_SCHEMA_VERSION = 1
+
 export interface AutomationExecution {
   id: string
   ruleId: string
@@ -476,6 +477,17 @@ export interface AutomationExecution {
   steps: AutomationStepResult[]
   error?: string
   duration?: number
+  // ── A1 run-governance snapshot (persisted; secret-shaped values redacted at write) ──
+  /** Sheet the rule belongs to. */
+  sheetId?: string
+  /** The triggering event captured at execution time. */
+  triggerEvent?: unknown
+  /** The rule as it was at execution time (diagnosis / future retry source). */
+  ruleSnapshot?: AutomationRule
+  /** When the execution finished (cleaner provenance anchor than duration alone). */
+  finishedAt?: string
+  /** Forward-compat tag for the snapshot shape. */
+  schemaVersion?: number
 }
 
 export interface AutomationStepResult {
@@ -528,6 +540,12 @@ export class AutomationExecutor {
       triggeredAt: new Date().toISOString(),
       status: 'running',
       steps: [],
+      // A1 run-governance snapshot — secret-shaped values redacted at persist
+      // time in AutomationLogService.record(), not here.
+      sheetId: rule.sheetId,
+      triggerEvent,
+      ruleSnapshot: rule,
+      schemaVersion: AUTOMATION_EXECUTION_SCHEMA_VERSION,
     }
 
     // Build execution context from trigger event
@@ -548,6 +566,7 @@ export class AutomationExecutor {
       if (!conditionsPassed) {
         execution.status = 'skipped'
         execution.duration = Date.now() - startTime
+        execution.finishedAt = new Date().toISOString()
         return execution
       }
     }
@@ -569,6 +588,7 @@ export class AutomationExecutor {
     }
 
     execution.duration = Date.now() - startTime
+    execution.finishedAt = new Date().toISOString()
     return execution
   }
 
