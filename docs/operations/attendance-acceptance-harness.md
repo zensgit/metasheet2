@@ -72,7 +72,8 @@ The most common need. Run from repo root; uses local `gh` auth only.
 4. **Bounded auto-loop** (optional; chains on the exit code — `3`=genuine stops, `0`=green stops):
    ```bash
    for r in 1 2 3; do
-     scripts/ci/ci-flake-classify.sh <PR#> --rerun; rc=$?
+     # `|| rc=$?` captures the 0/2/3 exit code without aborting under `set -e`.
+     rc=0; scripts/ci/ci-flake-classify.sh <PR#> --rerun || rc=$?
      [ "$rc" = 0 ] && { echo "green"; break; }
      [ "$rc" = 3 ] && { echo "genuine failure — stop, do not merge"; break; }
      sleep 1500   # ~25m for GitHub infra to recover before the next round
