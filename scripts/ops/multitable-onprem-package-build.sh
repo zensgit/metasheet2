@@ -86,6 +86,7 @@ REQUIRED_PATHS=(
   "docs/operations/integration-k3wise-onprem-operator-handoff-checklist.md"
   "docs/operations/integration-k3wise-internal-trial-runbook.md"
   "docs/operations/integration-k3wise-live-gate-execution-package.md"
+  "docs/operations/integration-k3wise-material-only-process-control-plane-20260527.md"
   "docs/operations/integration-k3wise-sql-executor-bridge-handoff.md"
   "docs/operations/bridge-agent-driver-smoke-runbook-20260520.md"
   "docs/operations/bridge-agent-readonly-runbook-20260521.md"
