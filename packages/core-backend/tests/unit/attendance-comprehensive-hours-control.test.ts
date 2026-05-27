@@ -754,7 +754,7 @@ describe('comprehensive-hours period value-plumbing (PR6)', () => {
 
 // Coarse payroll_cycle → month cap mapping (V1) — design-lock:
 // docs/development/attendance-comprehensive-hours-payroll-cycle-cap-mapping-design-20260526.md
-describe('comprehensive-hours payroll_cycle cap-mapping (V1 coarse)', () => {
+describe('comprehensive-hours payroll_cycle cap-mapping (§7 precise template-window)', () => {
   const orgId = 'org-1'
   const userId = 'u-1'
   const logger = { warn() {}, error() {}, info() {} }
@@ -766,14 +766,16 @@ describe('comprehensive-hours payroll_cycle cap-mapping (V1 coarse)', () => {
     comprehensive_hours_cap_source: null,
     comprehensive_hours_cap_effective_key: null,
   }
-  // A template-bound payroll cycle: in-span (≤62d), templateId present. Dates here are a
-  // cross-month pay window (26th→25th) — deliberately NOT a natural calendar month, so the
+  // A template-verified payroll cycle: in-span (≤62d), templateId present, and (§7) its dates
+  // MATCH the template window — the producer sets templateWindowMatches:true. Dates here are a
+  // cross-month pay window (26th→25th), deliberately NOT a natural calendar month, so the
   // date_range bridge would yield custom_range; the payroll branch maps it to month.
   const payrollCycle = (overrides: Record<string, unknown> = {}) => ({
     periodType: 'payroll_cycle',
     periodKey: 'cycle:c-1',
     cycleId: 'c-1',
     templateId: 'tpl-1',
+    templateWindowMatches: true,
     from: '2026-02-26',
     to: '2026-03-25',
     periodStart: '2026-02-26',
@@ -820,16 +822,23 @@ describe('comprehensive-hours payroll_cycle cap-mapping (V1 coarse)', () => {
     expect(build(monthCap(10560), payrollCycle({ from: '2026-01-01', to: '2026-03-31' }))).toEqual(allNull)
   })
 
-  // P5b — DOCUMENTED IMPRECISION: templateId present, span≤62, but the dates do NOT match the
-  // template window (hand-entered, not a real monthly period). V1 has no JOIN/template read, so
-  // it STILL resolves month. The precise §7 upgrade would resolve null. Locking the coarse
-  // behavior here so the trade-off is explicit and a future change is a conscious one.
-  it('P5b: in-span but date-mismatched cycle still resolves month (coarse-heuristic limit)', () => {
-    const offWindow = payrollCycle({ from: '2026-03-10', to: '2026-04-08' }) // 30d, not a monthly window
-    expect(helpers.bridgeAttendanceDateRangeToComprehensiveHoursPeriod('2026-03-10', '2026-04-08').type).toBe('custom_range')
-    const values = build(monthCap(10560), offWindow)
-    expect(values.comprehensive_hours_cap_minutes).toBe(10560)
-    expect(values.comprehensive_hours_cap_source).toBe(PAYROLL_SOURCE)
+  // P5b — §7 PRECISE BEHAVIOR (flipped from the V1 coarse heuristic): templateId present,
+  // span≤62, but the cycle dates do NOT match the template window, so the producer sets
+  // templateWindowMatches:false. The builder now stale-nulls (under V1 this case resolved month).
+  // This is the imprecision the §7 upgrade removes.
+  it('P5b: in-span but date-mismatched cycle (templateWindowMatches:false) → null (§7)', () => {
+    const offWindow = payrollCycle({ from: '2026-03-10', to: '2026-04-08', templateWindowMatches: false })
+    expect(build(monthCap(10560), offWindow)).toEqual(allNull)
+  })
+
+  // §7 gate — templateWindowMatches is REQUIRED (not just templateId). Absent/false → null even
+  // for an in-span, template-bound cycle. Guards the builder against a producer that fails or
+  // skips verification (fail-closed).
+  it('§7 gate: templateWindowMatches must be exactly true (false/undefined → null)', () => {
+    expect(build(monthCap(10560), payrollCycle({ templateWindowMatches: false }))).toEqual(allNull)
+    expect(build(monthCap(10560), payrollCycle({ templateWindowMatches: undefined }))).toEqual(allNull)
+    // Truthy-but-not-true must not satisfy the strict === true check.
+    expect(build(monthCap(10560), payrollCycle({ templateWindowMatches: 1 as unknown as boolean }))).toEqual(allNull)
   })
 
   // Span guard — direct unit coverage of the ≤62 (inclusive) boundary.
@@ -856,27 +865,71 @@ describe('comprehensive-hours payroll_cycle cap-mapping (V1 coarse)', () => {
     expect(values.comprehensive_hours_cap_source).toBe('org_default_by_cycle_type')
   })
 
-  // WIRE-VS-FIXTURE (mandatory): the producer must EMIT templateId onto the payroll_cycle
-  // period — the builder tests above use synthetic periods and cannot catch a producer that
-  // forgets it (cf. the #1781 dayIndex serialization drift). Exercise the real producer.
-  it('producer carries templateId from the loaded payroll cycle row (and null when absent)', async () => {
-    const cycleId = '11111111-1111-4111-8111-111111111111'
-    const cycleDb = (templateId: string | null) => ({
-      async query(sql: string) {
-        if (/FROM attendance_payroll_cycles/i.test(String(sql))) {
-          return [{ id: cycleId, org_id: orgId, template_id: templateId, name: 'Feb cycle', start_date: '2026-02-26', end_date: '2026-03-25', status: 'open', metadata: null }]
-        }
-        throw new Error('unmocked query: ' + sql)
-      },
-    })
-    const withTpl = await helpers.resolveAttendanceReportPeriodSyncPeriod(cycleDb('tpl-9'), orgId, { cycleId })
-    expect(withTpl.ok).toBe(true)
-    expect(withTpl.period.periodType).toBe('payroll_cycle')
-    expect(withTpl.period.templateId).toBe('tpl-9')
-    expect(withTpl.period.from).toBe('2026-02-26')
+  // A 26th→25th monthly template: start_day 26, end_day 25, end_month_offset 1. Anchored on a
+  // cycle start of 2026-02-26 it generates the window 2026-02-26 .. 2026-03-25.
+  const monthlyTemplate26 = { id: 'tpl-9', org_id: orgId, name: 'monthly 26', timezone: 'UTC', start_day: 26, end_day: 25, end_month_offset: 1, auto_generate: true, config: null, is_default: true }
+  const cycleId = '11111111-1111-4111-8111-111111111111'
+  // db mock for the producer: serves the cycle row + (optionally) the template row.
+  const producerDb = (opts: { templateId: string | null, start?: string, end?: string, template?: Record<string, unknown> | null }) => ({
+    async query(sql: string, params: unknown[] = []) {
+      const s = String(sql)
+      if (/FROM attendance_payroll_cycles/i.test(s)) {
+        return [{ id: cycleId, org_id: orgId, template_id: opts.templateId, name: 'cycle', start_date: opts.start ?? '2026-02-26', end_date: opts.end ?? '2026-03-25', status: 'open', metadata: null }]
+      }
+      if (/FROM attendance_payroll_templates/i.test(s)) {
+        return opts.template === null ? [] : [opts.template ?? monthlyTemplate26]
+      }
+      throw new Error('unmocked query: ' + s + ' :: ' + JSON.stringify(params))
+    },
+  })
 
-    const noTpl = await helpers.resolveAttendanceReportPeriodSyncPeriod(cycleDb(null), orgId, { cycleId })
+  // WIRE-VS-FIXTURE (mandatory): the producer must EMIT templateId AND compute templateWindowMatches
+  // onto the payroll_cycle period — the builder tests above use synthetic periods and cannot catch a
+  // producer that forgets either (cf. the #1781 dayIndex serialization drift). Exercise the real producer.
+  it('producer carries templateId + templateWindowMatches (true when dates match the template window)', async () => {
+    const matched = await helpers.resolveAttendanceReportPeriodSyncPeriod(producerDb({ templateId: 'tpl-9' }), orgId, { cycleId })
+    expect(matched.ok).toBe(true)
+    expect(matched.period.periodType).toBe('payroll_cycle')
+    expect(matched.period.templateId).toBe('tpl-9')
+    expect(matched.period.from).toBe('2026-02-26')
+    expect(matched.period.templateWindowMatches).toBe(true)
+  })
+
+  it('producer sets templateWindowMatches false when the cycle dates do NOT match the template window', async () => {
+    // Hand-entered window 2026-03-10..2026-04-08 — the template would generate 2026-02-26..2026-03-25.
+    const mismatch = await helpers.resolveAttendanceReportPeriodSyncPeriod(producerDb({ templateId: 'tpl-9', start: '2026-03-10', end: '2026-04-08' }), orgId, { cycleId })
+    expect(mismatch.period.templateId).toBe('tpl-9')
+    expect(mismatch.period.templateWindowMatches).toBe(false)
+  })
+
+  it('producer sets templateId null + templateWindowMatches false when the cycle has no template', async () => {
+    const noTpl = await helpers.resolveAttendanceReportPeriodSyncPeriod(producerDb({ templateId: null }), orgId, { cycleId })
     expect(noTpl.period.templateId).toBeNull()
+    expect(noTpl.period.templateWindowMatches).toBe(false)
+  })
+
+  it('producer fails closed (templateWindowMatches false) when the template row is missing', async () => {
+    const gone = await helpers.resolveAttendanceReportPeriodSyncPeriod(producerDb({ templateId: 'tpl-9', template: null }), orgId, { cycleId })
+    expect(gone.period.templateWindowMatches).toBe(false)
+  })
+
+  // Direct unit coverage of the §7 verify helper — incl. the fail-closed catch on a throwing db
+  // (an old/partial schema must NOT 503 the period sync; it degrades to "unverified" → no cap).
+  it('verify helper: matches / mismatches / no-template / db-error all behave fail-closed', async () => {
+    const ok = await helpers.verifyAttendancePayrollCycleTemplateWindow(producerDb({ templateId: 'tpl-9' }), orgId, { templateId: 'tpl-9', startDate: '2026-02-26', endDate: '2026-03-25' })
+    expect(ok).toBe(true)
+    const bad = await helpers.verifyAttendancePayrollCycleTemplateWindow(producerDb({ templateId: 'tpl-9' }), orgId, { templateId: 'tpl-9', startDate: '2026-03-10', endDate: '2026-04-08' })
+    expect(bad).toBe(false)
+    const none = await helpers.verifyAttendancePayrollCycleTemplateWindow(producerDb({ templateId: 'tpl-9' }), orgId, { templateId: null, startDate: '2026-02-26', endDate: '2026-03-25' })
+    expect(none).toBe(false)
+    // Calendar-month template shape (start_day 1, end_day 31, offset 0) must also verify true —
+    // proves the helper handles same-month windows, not only the cross-month 26th→25th shape.
+    const calTemplate = { id: 'tpl-cal', org_id: orgId, name: 'cal', timezone: 'UTC', start_day: 1, end_day: 31, end_month_offset: 0, auto_generate: true, config: null, is_default: false }
+    const cal = await helpers.verifyAttendancePayrollCycleTemplateWindow(producerDb({ templateId: 'tpl-cal', template: calTemplate }), orgId, { templateId: 'tpl-cal', startDate: '2026-03-01', endDate: '2026-03-31' })
+    expect(cal).toBe(true)
+    const throwingDb = { async query() { throw new Error('relation "attendance_payroll_templates" does not exist') } }
+    const errored = await helpers.verifyAttendancePayrollCycleTemplateWindow(throwingDb, orgId, { templateId: 'tpl-9', startDate: '2026-02-26', endDate: '2026-03-25' })
+    expect(errored).toBe(false)
   })
 
   // P7 — cap edit changes effective_key → a payroll_cycle row re-syncs (run on the PAYROLL
