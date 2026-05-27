@@ -173,6 +173,25 @@ function main() {
     assert.equal(scrubSecretStringValue(s), s, `benign string must not be over-redacted: ${s}`)
   }
 
+  // DSN userinfo where the PASSWORD ITSELF contains '@' — must mask to the LAST '@'
+  // before the host, not stop at the first one (regression for the inherited bug).
+  assert.equal(
+    scrubSecretStringValue('jdbc:sqlserver://user:P@ssw0rd@host;databaseName=db'),
+    'jdbc:sqlserver://user:[redacted]@host;databaseName=db',
+  )
+  assert.equal(
+    scrubSecretStringValue('postgres://user:p@ss@host/db'),
+    'postgres://user:[redacted]@host/db',
+  )
+  // no secret tail must survive
+  assert.equal(scrubSecretStringValue('mongodb://u:p@ss@w0rd@cluster').includes('ss@w0rd'), false)
+  // through the live sanitizer under a benign key (the F1 conn-string leak case)
+  const dsnLeak = sanitizeIntegrationPayload({ detail: 'jdbc:sqlserver://user:P@ssw0rd@host;databaseName=db' })
+  assert.equal(dsnLeak.detail, 'jdbc:sqlserver://user:[redacted]@host;databaseName=db')
+  assert.equal(dsnLeak.detail.includes('ssw0rd'), false, 'password @-tail must not leak')
+  // host:port with NO credentials (no userinfo '@') must survive
+  assert.equal(scrubSecretStringValue('redis://localhost:6379/0'), 'redis://localhost:6379/0')
+
   console.log('✓ payload-redaction: sensitive key + value-scrub + false-positive matrix tests passed')
 }
 

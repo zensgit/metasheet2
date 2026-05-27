@@ -50,7 +50,10 @@ function isSensitivePayloadKey(key) {
 const SECRET_VALUE_PATTERNS = Object.freeze([
   // URL/DSN userinfo: scheme://user:password@host  → mask the password only.
   // Covers postgres/mysql/redis/amqp/http(s)/jdbc:... DSNs carrying credentials.
-  { re: /\b([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+):([^\s/@]+)@/gi, replace: '$1:[redacted]@' },
+  // Password is matched greedily up to the LAST `@` before the host (bounded to the
+  // authority via [^\s/?#]+), so passwords that themselves contain `@`
+  // (e.g. user:P@ssw0rd@host) are fully masked, not just up to the first `@`.
+  { re: /\b([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+):[^\s/?#]+@([^\s/@:;?#]+)/gi, replace: '$1:[redacted]@$2' },
   // key=value credential params (ODBC / SQL Server / JDBC query, URL query, free text):
   // password / pwd / passwd / secret / client_secret / token / access_token /
   // refresh_token / api_key / apikey. Anchored on `key=` so benign prose like the
