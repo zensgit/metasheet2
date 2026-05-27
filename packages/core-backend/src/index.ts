@@ -65,6 +65,7 @@ import {
 import { installMetrics, metrics as promMetrics, requestMetricsMiddleware } from './metrics/metrics'
 import { APIGateway } from './gateway/APIGateway'
 import { getPoolStats } from './db/pg'
+import { getBuildInfo } from './config/build-info'
 import { isDatabaseSchemaError } from './utils/database-errors'
 import { startOperationAuditRetention } from './audit/operation-audit-retention'
 import { startMultitableAttachmentCleanup } from './multitable/attachment-orphan-retention'
@@ -933,7 +934,8 @@ export class MetaSheetServer {
           timestamp: new Date().toISOString(),
           plugins: this.pluginLoader.getPlugins().size,
           pluginsSummary: pluginsSummary || undefined,
-          dbPool: stats || undefined
+          dbPool: stats || undefined,
+          build: getBuildInfo(),
         })
         endTimer?.({ route: '/health', method: 'GET' })(200)
       } catch (err) {
