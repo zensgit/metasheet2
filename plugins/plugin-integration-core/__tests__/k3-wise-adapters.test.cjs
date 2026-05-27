@@ -94,6 +94,21 @@ function createK3FetchMock() {
           Data: [{ FStatus: true, FItemID: 1001, FNumber: record.FNumber }],
         })
       }
+      if (record.FNumber === 'NESTEDOK') {
+        // Customer K3 that nests the per-row payload under Data[0].Data
+        return jsonResponse(200, {
+          StatusCode: 200,
+          Message: 'Successful',
+          Data: [{ FNumber: record.FNumber, Data: { FStatus: true, FItemID: 2002, FNumber: record.FNumber } }],
+        })
+      }
+      if (record.FNumber === 'NESTEDFAIL') {
+        return jsonResponse(200, {
+          StatusCode: 200,
+          Message: 'Successful',
+          Data: [{ FNumber: record.FNumber, Data: { FStatus: false, FItemID: 0, FMessage: 'nested unit group parameter invalid' } }],
+        })
+      }
       if (parsed.searchParams.get('Token')) {
         return jsonResponse(200, {
           StatusCode: 200,
@@ -774,6 +789,50 @@ async function testK3WebApiSaveBusinessEvidence() {
   )
 }
 
+// Keystone (M1 fix): a customer K3 that nests the per-row payload under Data[0].Data
+// must have its success/message/id parsed from the nested object, not the bare wrapper.
+// Pre-fix this was a parse-induced false-negative (a real success read as failed).
+async function testK3WebApiNestedDataSaveParse() {
+  const { fetchImpl } = createK3FetchMock()
+  const adapter = createK3WiseWebApiAdapter({
+    system: createK3WebApiSystem({
+      config: { baseUrl: 'https://k3.example.test', autoSubmit: false, autoAudit: false },
+    }),
+    fetchImpl,
+  })
+
+  const upsert = await adapter.upsert({
+    object: 'material',
+    records: [
+      { FNumber: 'NESTEDOK', FName: 'Nested success row' },
+      { FNumber: 'NESTEDFAIL', FName: 'Nested failure row' },
+    ],
+    keyFields: ['FNumber'],
+  })
+
+  // Nested Data[0].Data success is recognized (pre-fix: false-negative → written 0).
+  assert.equal(upsert.written, 1, 'nested Data[0].Data success row counts as written')
+  assert.equal(upsert.failed, 1, 'nested Data[0].Data failure row counts as failed')
+  assert.equal(upsert.results[0].key, 'NESTEDOK')
+  assert.equal(upsert.results[0].externalId, 2002, 'externalId resolved from Data[0].Data.FItemID')
+  assert.equal(upsert.results[0].responseSummary.success, true)
+  assert.equal(upsert.results[0].responseSummary.externalIdPresent, true)
+  // Nested failure: message resolved from Data[0].Data.FMessage, not the envelope fallback.
+  assert.equal(upsert.errors[0].code, 'K3_WISE_SAVE_FAILED')
+  assert.match(upsert.errors[0].message, /nested unit group/i)
+  assert.equal(upsert.errors[0].responseSummary.success, false)
+  assert.equal(upsert.errors[0].responseSummary.failedRowCount, 1)
+
+  // Regression: flat Data[0].X rows are unchanged by the unwrap.
+  const flat = await adapter.upsert({
+    object: 'material',
+    records: [{ FNumber: 'ROWOK', FName: 'Flat success row' }],
+    keyFields: ['FNumber'],
+  })
+  assert.equal(flat.written, 1, 'flat Data[0].X success still recognized')
+  assert.equal(flat.results[0].externalId, 1001, 'flat externalId unchanged')
+}
+
 async function testK3SqlServerChannel() {
   const executorCalls = []
   const queryExecutor = {
@@ -1118,6 +1177,7 @@ async function main() {
   await testK3WebApiMaterialDetailReadSmoke()
   await testK3WebApiAuthorityCodeToken()
   await testK3WebApiSaveBusinessEvidence()
+  await testK3WebApiNestedDataSaveParse()
   testSqlServerConnectionConfigNormalization()
   await testK3SqlServerChannel()
   await testK3WebApiAutoFlagCoercion()

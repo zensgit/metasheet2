@@ -235,6 +235,23 @@ function businessRowHasIdentifier(row) {
   ))
 }
 
+function unwrapBusinessRow(row) {
+  // Some K3 WISE envelopes nest the per-row payload under `row.Data`
+  // (e.g. `Data[0].Data.{FNumber,FMessage,Code,FItemID,...}`). Mirror the read-path
+  // unwrap (extractMaterialDetailRecord) so business success / message / code / id
+  // parsing sees the nested content instead of the bare wrapper. Preserve the outer key
+  // (FNumber) as a fallback when the inner record lacks one. Only unwraps when `.Data` is
+  // itself a plain object — flat rows (`Data[0].X`) are returned untouched.
+  if (isPlainObject(row) && isPlainObject(row.Data)) {
+    const inner = row.Data
+    if (isBlankValue(inner.FNumber) && !isBlankValue(row.FNumber)) {
+      return { ...inner, FNumber: row.FNumber }
+    }
+    return inner
+  }
+  return row
+}
+
 function extractBusinessRows(data) {
   const rows = new Set()
   const candidates = [
@@ -246,13 +263,16 @@ function extractBusinessRows(data) {
   ]
   for (const candidate of candidates) {
     if (Array.isArray(candidate)) {
-      candidate.filter(isPlainObject).forEach((row) => rows.add(row))
-    } else if (isPlainObject(candidate) && (
-      businessRowStatus(candidate) !== null ||
-      businessRowMessage(candidate) !== undefined ||
-      businessRowHasIdentifier(candidate)
-    )) {
-      rows.add(candidate)
+      candidate.filter(isPlainObject).forEach((row) => rows.add(unwrapBusinessRow(row)))
+    } else if (isPlainObject(candidate)) {
+      const row = unwrapBusinessRow(candidate)
+      if (
+        businessRowStatus(row) !== null ||
+        businessRowMessage(row) !== undefined ||
+        businessRowHasIdentifier(row)
+      ) {
+        rows.add(row)
+      }
     }
   }
   return Array.from(rows)
@@ -616,6 +636,12 @@ function responseMessage(data, config, fallback = 'K3 WISE WebAPI business respo
     getPath(data, 'Data.0.Message'),
     getPath(data, 'Data.0.ErrorMessage'),
     getPath(data, 'Data.0.FErrMessage'),
+    getPath(data, 'Data.0.Data.FMessage'),
+    getPath(data, 'Data.0.Data.Message'),
+    getPath(data, 'Data.0.Data.ErrorMessage'),
+    getPath(data, 'Data.0.Data.FErrMessage'),
+    getPath(data, 'Data.Data.FMessage'),
+    getPath(data, 'Data.Data.Message'),
     getPath(data, 'message'),
     getPath(data, 'Message'),
     getPath(data, 'error'),
@@ -634,6 +660,9 @@ function responseCode(data, config, fallback = 'OK') {
     getPath(data, 'ErrorCode'),
     getPath(data, 'Data.0.Code'),
     getPath(data, 'Data.0.ErrorCode'),
+    getPath(data, 'Data.0.Data.Code'),
+    getPath(data, 'Data.0.Data.ErrorCode'),
+    getPath(data, 'Data.Data.Code'),
     getPath(data, 'StatusCode'),
     getPath(data, 'Data.Code'),
     getPath(data, 'Result.ResponseStatus.ErrorCode'),
@@ -650,6 +679,9 @@ function responseFailureCode(data, config, fallback) {
     getPath(data, 'ErrorCode'),
     getPath(data, 'Data.0.Code'),
     getPath(data, 'Data.0.ErrorCode'),
+    getPath(data, 'Data.0.Data.Code'),
+    getPath(data, 'Data.0.Data.ErrorCode'),
+    getPath(data, 'Data.Data.Code'),
     getPath(data, 'Data.Code'),
     getPath(data, 'Result.ResponseStatus.ErrorCode'),
   )
@@ -668,8 +700,12 @@ function responseBillNo(data, config) {
     getPath(data, 'Number'),
     getPath(data, 'Data.FBillNo'),
     getPath(data, 'Data.0.FBillNo'),
+    getPath(data, 'Data.0.Data.FBillNo'),
+    getPath(data, 'Data.Data.FBillNo'),
     getPath(data, 'Data.FNumber'),
     getPath(data, 'Data.0.FNumber'),
+    getPath(data, 'Data.0.Data.FNumber'),
+    getPath(data, 'Data.Data.FNumber'),
     getPath(data, 'Result.Number'),
     getPath(data, 'Result.ResponseStatus.SuccessEntitys.0.Number'),
   )
@@ -684,8 +720,12 @@ function responseExternalId(data, config) {
     getPath(data, 'FItemID'),
     getPath(data, 'Data.FItemID'),
     getPath(data, 'Data.0.FItemID'),
+    getPath(data, 'Data.0.Data.FItemID'),
+    getPath(data, 'Data.Data.FItemID'),
     getPath(data, 'Data.Id'),
     getPath(data, 'Data.0.Id'),
+    getPath(data, 'Data.0.Data.Id'),
+    getPath(data, 'Data.Data.Id'),
     getPath(data, 'Result.Id'),
     getPath(data, 'Result.ResponseStatus.SuccessEntitys.0.Id'),
   ]
