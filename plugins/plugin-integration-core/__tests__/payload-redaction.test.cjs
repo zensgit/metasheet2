@@ -209,6 +209,9 @@ function main() {
   assert.equal(scrubSecretStringValue('Authorization: Basic dXNlcjpwYXNzd29yZA=='), 'Authorization: Basic [redacted]')
   assert.equal(scrubSecretStringValue('use Basic authentication for the proxy'), 'use Basic authentication for the proxy')
   assert.equal(scrubSecretStringValue('Basic auth required'), 'Basic auth required')
+  // non-ASCII (CJK) Basic credential must STILL redact (decode contains ':' + no control chars)
+  const cjkBasic = `Basic ${Buffer.from('用户:密码').toString('base64')}`
+  assert.equal(scrubSecretStringValue(`Authorization: ${cjkBasic}`), 'Authorization: Basic [redacted]')
 
   // SEC-prefixed opaque secret id (12+, requires a digit) → redacted; plain prose kept
   assert.equal(scrubSecretStringValue('id SEC1a2b3c4d5e6f7g'), 'id [redacted-secret-id]')

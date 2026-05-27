@@ -51,7 +51,17 @@ function looksLikeBasicCredential(token) {
   } catch {
     return false
   }
-  return decoded.includes(':') && /^[\x20-\x7e]+$/.test(decoded)
+  // A real `Basic <base64>` decodes to a "user:pass" string: contains ':' and is
+  // valid printable text. Non-ASCII (e.g. CJK) user/pass is allowed; only control
+  // chars (C0/DEL/C1) and U+FFFD (invalid-UTF-8 garbage, i.e. a benign word that
+  // happened to base64-decode) are rejected -- so "Basic authentication" is kept
+  // while a base64 of a CJK user:pass is redacted.
+  if (!decoded.includes(':')) return false
+  for (let i = 0; i < decoded.length; i++) {
+    const c = decoded.charCodeAt(i)
+    if (c <= 0x1f || (c >= 0x7f && c <= 0x9f) || c === 0xfffd) return false
+  }
+  return true
 }
 
 // Value-based secret scrubbing. Key-based redaction only fires when the KEY is
