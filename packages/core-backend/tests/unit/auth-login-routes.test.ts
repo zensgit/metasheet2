@@ -180,13 +180,14 @@ async function invokeRoute(
         })
         if (maybePromise && typeof maybePromise.then === 'function') {
           Promise.resolve(maybePromise).then(() => resolve()).catch(reject)
-        } else if (routeLayer.handle.length < 3) {
+        } else if (res.headersSent || routeLayer.handle.length < 3) {
           resolve()
         }
       } catch (error) {
         reject(error)
       }
     })
+    if (res.headersSent) break
   }
 
   return res
@@ -293,6 +294,25 @@ describe('auth login routes', () => {
         ipAddress: '127.0.0.1',
       }),
     )
+  })
+
+  it('honors env-tuned login rate limit thresholds', async () => {
+    vi.stubEnv('AUTH_LOGIN_MAX_ATTEMPTS', '1')
+    vi.stubEnv('AUTH_LOGIN_BLOCK_DURATION_MS', '2500')
+    authServiceMocks.login.mockResolvedValue(null)
+
+    const body = {
+      email: 'rate-limit-env@example.com',
+      password: 'WrongPass9A',
+    }
+
+    const firstResponse = await invokeRoute('post', '/login', { body })
+    const secondResponse = await invokeRoute('post', '/login', { body })
+
+    expect(firstResponse.statusCode).toBe(401)
+    expect(secondResponse.statusCode).toBe(429)
+    expect((secondResponse.body as Record<string, any>).retryAfter).toBe(3)
+    expect(authServiceMocks.login).toHaveBeenCalledTimes(1)
   })
 
   it('forwards x-tenant-id into the normal login flow', async () => {

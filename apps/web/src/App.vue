@@ -172,23 +172,24 @@ const accountEmail = computed(() => {
 
 async function logout(): Promise<void> {
   const token = getToken()
-  if (token) {
-    try {
-      await fetch(`${getApiBase()}/api/auth/logout`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      })
-    } catch {
-      // Ignore logout network failures and still clear local session.
-    }
-  }
   clearToken()
   try {
     clearStoredAuthState()
   } catch {
     // Ignore local session cleanup failures; logout should still leave the view.
+  }
+  if (token) {
+    try {
+      void fetch(`${getApiBase()}/api/auth/logout`, {
+        method: 'POST',
+        keepalive: true,
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }).catch(() => null)
+    } catch {
+      // Ignore logout network failures and still clear local session.
+    }
   }
   window.location.assign('/login')
 }
