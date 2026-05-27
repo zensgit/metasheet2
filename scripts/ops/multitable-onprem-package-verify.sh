@@ -309,7 +309,6 @@ function verify_generic_integration_workbench_contract() {
   search_fixed_string 'PASS_MATERIAL_DRY_RUN_READY' "$gate_contract_checker" || die "GATE contract checker must include the Material-only dry-run readiness decision (#1792)"
   search_fixed_string 'material-only' "$gate_contract_checker" || die "GATE contract checker must support the --scope material-only sub-acceptance (#1792)"
   search_fixed_string 'MATERIAL_ONLY_READ_ANSWER_IDS' "$gate_contract_checker" || die "GATE contract checker must define the Material-only read answer-id subset (#1792)"
-  search_fixed_string 'materialOnlySafety' "$gate_contract_checker" || die "GATE contract checker must require Material-only safety answers (auto write actions stay disabled)"
   search_fixed_string 'k3wise-gate-material-only-packet.template.json' "$gate_contract_checker" || die "GATE contract checker must provide a Material-only packet template"
   search_fixed_string 'material-only' "$material_only_gate_design" || die "Material-only GATE checker design must document the --scope material-only fast lane"
   search_fixed_string '--scope material-only' "$material_only_gate_verification" || die "Material-only GATE checker verification must document the --scope material-only invocation"

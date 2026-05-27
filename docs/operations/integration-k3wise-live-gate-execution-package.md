@@ -210,7 +210,7 @@ node scripts/ops/integration-k3wise-gate-contract-check.mjs --input <packet.json
 node scripts/ops/integration-k3wise-gate-contract-check.mjs --init-template <safe-dir> --scope material-only
 ```
 
-Material-only requires only `O1-MAT`, `O1-MAT-M`, `O2-P/T/C`, `O3-F/M`, `O4-MAT`, `O6` plus the two material sample files; it deliberately omits BOM (`O1-BOM*`, `O4-BOM`) and relationship (`R1`–`R7`) evidence and the BOM/relationship sample files. The report carries `scope: "material-only"` — it is **not** a full GATE pass and does **not** unblock the frozen K3 read/list + relationship-mapping runtime; the full lane (default `--scope full`, C3 above) is still required for that. See `docs/development/integration-k3wise-material-only-gate-checker-design-20260526.md`.
+Material-only requires only the material read answers `O1-MAT`, `O1-MAT-M`, `O6`, the `materialOnlySafety` answers (`materialScopeOnly` / `bomDeferred` / `saveOnlySeparateApproval` affirmations, `autoSubmit` / `autoAudit` denials, and a `previewFields` scope answer), and the single redacted material-detail sample (`sample-material-detail.redacted.json`). It deliberately omits BOM (`O1-BOM*`, `O4-BOM`) and relationship (`R1`–`R7`) evidence and the BOM / relationship / material-list samples. The report carries `scope: "material-only"` — it is **not** a full GATE pass and does **not** unblock the frozen K3 read/list + relationship-mapping runtime; the full lane (default `--scope full`, C3 above) is still required for that. See `docs/development/integration-k3wise-material-only-gate-checker-design-20260526.md`.
 
 ### C0.5 package verify report
 
