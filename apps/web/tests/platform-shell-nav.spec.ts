@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, ref, type App as VueApp, type Component } from 'vue'
+import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
@@ -8,6 +9,14 @@ async function flushUi(cycles = 4): Promise<void> {
     await Promise.resolve()
     await nextTick()
   }
+}
+
+function resolveWebFile(relativePath: string): string {
+  const candidates = [
+    resolve(process.cwd(), relativePath),
+    resolve(process.cwd(), 'apps/web', relativePath),
+  ]
+  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]
 }
 
 describe('platform shell navigation', () => {
@@ -207,8 +216,24 @@ describe('platform shell navigation', () => {
     expect(links.some((link) => link.href === '/admin/users')).toBe(false)
   })
 
+  it('keeps platform shell nav labels from wrapping vertically on desktop', async () => {
+    const source = await readFile(resolveWebFile('src/App.vue'), 'utf8')
+    const style = source.match(/<style>([\s\S]*?)<\/style>/)?.[1] ?? ''
+    const navLinksRule = style.match(/\.nav-links\s*\{([^}]+)\}/)?.[1] ?? ''
+    const navLinkRule = style.match(/\.nav-link\s*\{([^}]+)\}/)?.[1] ?? ''
+    const navUserRule = style.match(/\.nav-user\s*\{([^}]+)\}/)?.[1] ?? ''
+
+    expect(navLinksRule).toMatch(/flex:\s*1 1 auto/)
+    expect(navLinksRule).toMatch(/min-width:\s*0/)
+    expect(navLinksRule).toMatch(/overflow-x:\s*auto/)
+    expect(navLinkRule).toMatch(/flex:\s*0 0 auto/)
+    expect(navLinkRule).toMatch(/white-space:\s*nowrap/)
+    expect(navUserRule).toMatch(/text-overflow:\s*ellipsis/)
+    expect(navUserRule).toMatch(/white-space:\s*nowrap/)
+  })
+
   it('marks legacy table/view routes as deprecated while keeping deep links registered', async () => {
-    const source = await readFile(resolve(process.cwd(), 'src/router/appRoutes.ts'), 'utf8')
+    const source = await readFile(resolveWebFile('src/router/appRoutes.ts'), 'utf8')
     const deprecatedPaths = ['/kanban', '/calendar', '/gallery', '/form']
 
     for (const path of deprecatedPaths) {
@@ -220,7 +245,7 @@ describe('platform shell navigation', () => {
   })
 
   it('redirects /grid to /multitable as part of Grid retirement (Phase B)', async () => {
-    const source = await readFile(resolve(process.cwd(), 'src/router/appRoutes.ts'), 'utf8')
+    const source = await readFile(resolveWebFile('src/router/appRoutes.ts'), 'utf8')
     const gridRedirectPattern = /path:\s*'\/grid'[\s\S]*?redirect:\s*'\/multitable'[\s\S]*?deprecated:\s*true/
     expect(source, 'Expected /grid to redirect to /multitable with deprecated meta').toMatch(gridRedirectPattern)
     // GridView.vue and its formula engine have been removed; the route must not import them
@@ -228,7 +253,7 @@ describe('platform shell navigation', () => {
   })
 
   it('keeps a dedicated approvals route in the platform shell', async () => {
-    const source = await readFile(resolve(process.cwd(), 'src/router/appRoutes.ts'), 'utf8')
+    const source = await readFile(resolveWebFile('src/router/appRoutes.ts'), 'utf8')
 
     expect(source).toContain("path: '/approvals'")
     expect(source).toContain("import('../views/approval/ApprovalCenterView.vue')")
