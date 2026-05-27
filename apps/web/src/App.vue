@@ -243,6 +243,7 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   padding: 0 20px;
   height: 50px;
   background: #fff;
@@ -253,6 +254,7 @@ html, body {
 .nav-brand {
   display: flex;
   align-items: center;
+  flex: 0 0 auto;
   gap: 10px;
 }
 
@@ -260,28 +262,47 @@ html, body {
   font-size: 18px;
   font-weight: 600;
   color: #1976d2;
+  white-space: nowrap;
 }
 
 .nav-links {
   display: flex;
+  flex: 1 1 auto;
   gap: 8px;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+
+.nav-links::-webkit-scrollbar {
+  display: none;
 }
 
 .nav-actions {
   display: flex;
   align-items: center;
+  flex: 0 1 auto;
   gap: 12px;
+  min-width: 0;
 }
 
 .nav-user {
   color: #6b7280;
   font-size: 13px;
+  max-width: clamp(120px, 18vw, 260px);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .nav-locale {
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
   gap: 6px;
+  white-space: nowrap;
 }
 
 .nav-locale__label {
@@ -298,11 +319,16 @@ html, body {
 }
 
 .nav-link {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  line-height: 1.2;
   padding: 8px 16px;
   text-decoration: none;
   color: #666;
   border-radius: 4px;
   transition: all 0.2s;
+  white-space: nowrap;
 }
 
 .nav-link--button {
@@ -352,6 +378,7 @@ html, body {
 
   .nav-user {
     width: 100%;
+    max-width: 100%;
   }
 
   .nav-link {
