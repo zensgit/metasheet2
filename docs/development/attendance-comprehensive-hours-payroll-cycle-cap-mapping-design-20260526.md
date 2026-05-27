@@ -32,19 +32,32 @@ period. That makes `month` the correct comprehensive-hours cycle-type for a payr
 and notably it maps cross-month pay periods (26th→25th) to `month` correctly, where the
 existing date-range bridge (`:12067`) would mis-map them to `custom_range` → null.
 
-## 3. V1 mapping (locked)
+## 3. V1 mapping (locked) — a deliberately **coarse heuristic**
 
 A `payroll_cycle` period resolves the **`month`** org-default cap
-(`attendance.settings.comprehensiveHours.capDefaults.month`), with two guards:
+(`attendance.settings.comprehensiveHours.capDefaults.month`) via two guards that are
+**necessary but not sufficient** for "this cycle is a monthly window":
 
 1. **Template presence required.** `template_id` is nullable (`onDelete('set null')`, migration
    `:80`); a cycle with no template (or whose template was deleted) makes **no** monthly-cadence
    claim → resolve `null`. V1 does **not** read the template's config (no JOIN, no new query) —
-   the *presence* of a `templateId` is the cadence assertion the CHECK at `:63` guarantees.
-2. **Span sanity guard.** If the cycle span `endDate − startDate + 1 > 62` days → `null`. A
-   data-anomaly cycle (hand-edited to span multiple months) must not receive a `month` cap. 62
-   is the legitimate maximum for a monthly template (`start_day=1, end_day=31, offset=1` →
-   ~58–59 days; 62 leaves headroom without admitting genuinely non-monthly spans).
+   it treats the *presence* of a `templateId` as a (coarse) monthly-cadence signal.
+2. **Span guard.** If the cycle span `endDate − startDate + 1 > 62` days → `null`. 62 is the
+   legitimate maximum for a monthly template (`start_day=1, end_day=31, offset=1` → ~58–59 days);
+   it filters multi-month spans but does **not** by itself prove a monthly window.
+
+**Known imprecision (explicit).** The cycle create/update route does **not** validate that a
+cycle's dates match its template window: the POST handler (`index.cjs:24580`) uses body
+`startDate`/`endDate` **as-is** (the template window via `resolvePayrollWindow` `:7121` is only
+used to *fill in missing* dates) and validates only `start ≤ end` (`:24636`). So a cycle can
+carry a monthly `templateId` yet have hand-entered dates that do **not** match the template
+window. Such a cycle, if its span is ≤62 days, **will** receive the `month` cap under this V1
+rule even though it may not be a true monthly window. This is an accepted coarse-heuristic
+trade-off, not a guarantee — its blast radius is one reporting metric (excess minutes in the
+snapshot), never a calc-chain or enforcement decision, and payroll cycles are normally
+template-generated (`auto_generate` default true) so dates usually do match. The precise
+alternative (read the template + verify the dates match `resolvePayrollWindow`) is the deferred
+upgrade in §7.
 
 Resolved result for a payroll cycle that passes both guards:
 - `capMinutes` = the `month` org default (positive int, or `null` if `month` is unset → stale-null).
@@ -84,6 +97,7 @@ mapping must be revisited — that schema change is the signal to extend the map
 
 ## 7. Explicit deferred (each a separate opt-in)
 
+- **Precise template-window validation (the upgrade that removes §3's coarse-heuristic imprecision).** Read the cycle's template row, recompute its expected window with `resolvePayrollWindow` (`index.cjs:7121`) for the cycle's anchor month, and resolve `month` **only if** the cycle's `start_date`/`end_date` actually match that window (else `null`). This is a JOIN/read the V1 slice deliberately avoids; it makes a templateId-bearing-but-date-mismatched cycle resolve `null` instead of a `month` cap.
 - Quarterly / yearly payroll cadence (no template support today; gated on §6).
 - Per-template or per-cycle cap override (would need a new settings/config shape — out of scope).
 - Reading the template's `config` to derive cadence (V1 uses presence-only).
@@ -99,6 +113,7 @@ mapping must be revisited — that schema change is the signal to extend the map
 | P3 | payroll_cycle, `month` cap unset | `null` (stale-null) |
 | P4 | payroll_cycle, `templateId == null` | `null` |
 | P5 | payroll_cycle, span > 62d (anomaly) | `null` |
+| P5b | **coarse-heuristic limit:** templateId present, span ≤62d, but dates do NOT match the template window (hand-entered) | V1 **still resolves `month`** (documented imprecision §3); the precise §7 upgrade would resolve `null` |
 | P6 | quarterly/yearly (future) | `null` until §6 extension |
 | P7 | cap edit → `effective_key` changes → payroll-cycle row re-syncs | patched on next sync |
 | P8 | date_range path unchanged | existing bridge behavior intact |
