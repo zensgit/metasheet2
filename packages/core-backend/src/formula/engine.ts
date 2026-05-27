@@ -130,8 +130,6 @@ type SpreadsheetFunction = (...args: unknown[]) => unknown
 export class FormulaEngine {
   private db: Pick<Kysely<Database>, 'selectFrom'> | null
   private functions: Map<string, SpreadsheetFunction> = new Map()
-  private calculationOrder: string[] = []
-  private dependencyGraph: Map<string, Set<string>> = new Map()
 
   constructor(options: { db?: Pick<Kysely<Database>, 'selectFrom'> } = {}) {
     this.db = options.db ?? defaultDb
@@ -1025,57 +1023,6 @@ export class FormulaEngine {
         result.push(arg)
       }
     }
-    return result
-  }
-
-  /**
-   * Build dependency graph for a sheet
-   */
-  async buildDependencyGraph(sheetId: string): Promise<void> {
-    if (!this.db) return
-
-    const formulas = await this.db
-      .selectFrom('formulas')
-      .select(['cell_id', 'dependencies', 'dependents'])
-      .where('sheet_id', '=', sheetId)
-      .execute()
-
-    this.dependencyGraph.clear()
-
-    for (const formula of formulas) {
-      const deps = formula.dependencies as string[]
-      this.dependencyGraph.set(formula.cell_id, new Set(deps))
-    }
-
-    // Calculate topological order for calculation
-    this.calculationOrder = this.topologicalSort()
-  }
-
-  /**
-   * Topological sort for calculation order
-   */
-  private topologicalSort(): string[] {
-    const visited = new Set<string>()
-    const result: string[] = []
-
-    const visit = (node: string) => {
-      if (visited.has(node)) return
-      visited.add(node)
-
-      const deps = this.dependencyGraph.get(node)
-      if (deps) {
-        for (const dep of deps) {
-          visit(dep)
-        }
-      }
-
-      result.push(node)
-    }
-
-    for (const node of this.dependencyGraph.keys()) {
-      visit(node)
-    }
-
     return result
   }
 }

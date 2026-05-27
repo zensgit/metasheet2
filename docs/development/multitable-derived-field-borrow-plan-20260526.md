@@ -129,11 +129,11 @@
 
 ## 6. Track F — 网格 A1 引擎清理（内核打磨，低优先）
 
-- [ ] ⬜ **F1 删 `formula/engine.ts` 的死依赖图代码**
-  - **现状**：`buildDependencyGraph`/`topologicalSort`/`calculationOrder` **零调用方**（唯一 `rebuildDependencyGraph` 命中是无关的 `PluginRegistry`）。
-  - **验收**：删除后 build/类型/测试全绿，行为无变化。
-  - **工作量**: XS · **风险**: 极低 · **依赖**: 无
-  - **K3**: 允许
+- [x] ✅ **F1 (PR #1897 OPEN, `runtime/formula-engine-deadcode-f1-20260526`) 删 `formula/engine.ts` 的死依赖图代码**
+  - **现状**：`buildDependencyGraph`/`topologicalSort`/`calculationOrder`/`dependencyGraph` **零生产调用方**（唯一调用是一条只测内部状态的单测；`PluginRegistry`/openapi-sdk 的同名物不相关、未触碰）。
+  - **如建（as-built）**：删 `engine.ts` 两字段(`calculationOrder`/`dependencyGraph`) + 两方法(`buildDependencyGraph`/`topologicalSort`)；删只覆盖它的 `describe('Dependency Graph')` 测试块。净 −82 行纯删除、无行为变化。不动 `MultitableFormulaEngine`，不做 AST 缓存/环检测/重构。
+  - **验证**：tsc + `pnpm build` + eslint(0 error) + `formula-engine.test.ts`/`multitable-formula-engine.test.ts`(129 pass) + 全后端单元 3229 pass/86 skip 零回归。详见 `formula-engine-deadcode-cleanup-f1-verification-20260526.md`。
+  - **工作量**: XS · **风险**: 极低 · **依赖**: 无 · **K3**: 允许
 
 - [ ] 🔒 **F2 网格引擎 AST 缓存 + 环检测 —— 仅当网格公式被产品化**
   - **思想来源**：HyperFormula（GPL，仅思想）：AST 按归一化引用 hash 缓存、Tarjan SCC 环检测、脏子图局部重算。
@@ -146,7 +146,7 @@
 
 ```
 优先级（非自动推进）:
-  ✅ A1（#1883）· ✅ A1.1（#1890）· ✅ A2-defense  →  F1（顺手清理）   ← 内核打磨，下一顺位 F1
+  ✅ A1（#1883）· ✅ A1.1（#1890）· ✅ A2-defense · ✅ F1（死代码清理）   ← 内核打磨链已落
         ├─ A2-full（链式 topo）：🔒 降级 gated/future（产品不暴露链式 formula；先答"是否做成特性"）
         └─ 若决定投资真引擎 ─→ scope-gate: B1 ⊕ C1（打包一份 RFC）→ B2 · C2a · C3 ·（C2b 另议）
   D（outbox）        ：保持冻结，等 DF-N2
@@ -155,7 +155,7 @@
 ```
 
 - **重要**：箭头是优先级顺序，**不代表做完一条自动开下一条**。每条各需独立 opt-in；我一条一条来。
-- **A1 已合并**（#1883）、**A1.1 已合并**（#1890）、**A2-defense 已完成**（formula→formula 后端拒绝）。下一顺位 = **F1**（删网格死代码，顺手）；**A2-full（链式 topo）已降级为 gated/future**（产品不暴露链式 formula）；或走 B1⊕C1 的 RFC。各自独立 opt-in。
+- **A1**（#1883）、**A1.1**（#1890）、**A2-defense**、**F1**（删网格死代码）均已落。剩余均为独立 opt-in：**A2-full（链式 topo）已降级 gated/future**（产品不暴露链式 formula，先答"是否做成特性"）；或走 **B1⊕C1 的 RFC**（设计工作，不与清理混做）。
 - **想把多维表派生字段做"扎实"** → 额外 opt-in **B1⊕C1 的 RFC**，再逐条决定 B2/C2a/C3；**C2b（物化）是最重、最靠近存储模型的独立 gate，单独拍板**。
 - **阶段二相关（D）** 一律等 GATE/解锁，不在本轮。
 

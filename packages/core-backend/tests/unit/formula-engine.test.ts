@@ -761,35 +761,6 @@ describe('Formula Engine', () => {
     })
   })
 
-  describe('Dependency Graph', () => {
-    test('Build dependency graph', async () => {
-      const formulas = [
-        {
-          cell_id: 'cell1',
-          dependencies: ['A1', 'B1'],
-          dependents: []
-        },
-        {
-          cell_id: 'cell2',
-          dependencies: ['A1'],
-          dependents: []
-        }
-      ]
-
-      mockDb.selectFrom.mockReturnValue({
-        select: vi.fn().mockReturnThis(),
-        where: vi.fn().mockReturnThis(),
-        execute: vi.fn().mockResolvedValue(formulas)
-      })
-
-      await engine.buildDependencyGraph(TEST_IDS.SHEET_1)
-
-      // This tests internal state - in a real implementation,
-      // you'd expose methods to verify the dependency graph
-      expect(mockDb.selectFrom).toHaveBeenCalledWith('formulas')
-    })
-  })
-
   describe('Edge Cases', () => {
     test('Empty string formula', async () => {
       const result = await engine.calculate('', context)
