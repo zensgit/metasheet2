@@ -29,7 +29,8 @@ The design's "current state" (§2) is verifiable against `main`:
 |---|---|
 | Generic `k3wise.material.v1` already declares the unit/account family as `type: reference` | `plugins/plugin-integration-core/lib/adapters/k3-wise-document-templates.cjs:91`, fields `:110–118` (`FUnitGroupID`/`FBaseUnitID`/`FOrderUnitID`/`FSaleUnitID`/`FProductUnitID`/`FStoreUnitID`/`FAcctID`/`FSaleAcctID`/`FCostAcctID`) |
 | A row-level Save success gate already exists (#1813) — envelope-200 ≠ success | `k3-wise-webapi-adapter.cjs:172` `getStatusCode`, `:190` `businessRowMessage`, `:204–281` `FStatus`/`IsSuccess`/`businessTextIndicatesFailure` |
-| Readback already unwraps nested detail | `k3-wise-webapi-adapter.cjs:546` `const detail = isPlainObject(element.Data) ? element.Data : element` |
+| Read path already unwraps nested detail (`Data[0].Data`) | `k3-wise-webapi-adapter.cjs:546` `const detail = isPlainObject(element.Data) ? element.Data : element` |
+| But the **Save-response** parse path does **not** unwrap `Data[0].Data` | `extractBusinessRows:238` + `responseMessage`/`responseCode`/`responseFailureCode`/`responseBillNo`/`responseExternalId` probe only `Data[0].X`/`Data.X` (a `grep` for `Data.0.Data`/`Data.Data` in the adapter returns nothing) → **can** cause a parse-induced false-negative in diagnostics; **not** asserted to be M1's actual cause (the missing-fields rejection, §1, can coexist) |
 | Missing customer fields (G2) — `FErpClsID`/`FUseState`/quality-modes/strategies not in the template | absent from `k3-wise-document-templates.cjs` material field list (`:107–118`) |
 | FBaseUnitID-centric default mapping (G4) | `apps/web/src/services/integration/k3WiseSetup.ts`, `apps/web/src/views/IntegrationWorkbenchView.vue` reference `FBaseUnitID` |
 
@@ -47,12 +48,23 @@ The impl PR must ship the tests in design §5. Each maps to a boundary or a hard
 - **R-REDACT** → `diagnostics-redaction`: on envelope-200-but-row-fail, the persisted
   diagnostic contains only status / code / redacted-message / failed-field-**names**, and a
   string scan asserts it does **not** contain the raw `FNumber`, token, host, `authorityCode`,
-  password, or connection string.
+  password, or connection string. **Conservative keys:** any persisted row-correlation key is
+  mask/hashed (raw `FNumber` absent from the serialized diagnostic); a non-UUID `sourceId` is
+  masked too (full only when a confirmed MetaSheet internal UUID); message via
+  `scrubSecretStringValue`.
+- **R-FAILCLOSED** → `fail-closed-placeholder`: a preset with an unreplaced
+  `<fill-outside-git>`/`<placeholder>` in a required field → `upsert` fails validation and
+  makes **zero** Save HTTP calls for that row (mock save endpoint receives nothing); a
+  substituted preset proceeds. Negative control: remove the guard → placeholder reaches the
+  mock save body.
 - `no-hardcoded-values`: the preset declares structure only; no concrete dictionary value.
 - `base-data-object-shaping`: numbered → `{FNumber,FName}`, enum/category → `{FID,FName}`.
 - `envelope-200-row-fail`: adapter reports FAIL (mock K3 server extended to return
   200/`Successful` with row `FStatus=false` — it is currently write-success-only).
-- `readback-data0-data`: `Data[0].Data` nested shape parsed.
+- `readback-data0-data`: `Data[0].Data` parsed in **both** the readback and the
+  **Save-response** path — nested-success → judged succeeded; nested-failure → message/code
+  resolved; flat `Data[0].X` unchanged. Negative control: revert the `extractBusinessRows`
+  unwrap → the nested-success assertion fails.
 - `save-only-locks`: Submit/Audit/BOM/list/pagination rejected; `autoSubmit=false`/
   `autoAudit=false`; no multi-record.
 
