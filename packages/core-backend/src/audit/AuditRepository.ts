@@ -171,6 +171,18 @@ export interface AuditLogRow {
 
 type QueryValue = string | number | boolean | Date | string[] | null | undefined;
 
+function isMissingAuditLogPartitionError(error: unknown): boolean {
+  if (error instanceof Error) {
+    return /no partition of relation "audit_logs" found/i.test(error.message);
+  }
+
+  if (typeof error === 'object' && error !== null && 'message' in error) {
+    return /no partition of relation "audit_logs" found/i.test(String(error.message));
+  }
+
+  return false;
+}
+
 export class AuditRepository {
   constructor(private dbPool: Pool = pool!) {
     if (!this.dbPool) {
@@ -249,8 +261,25 @@ export class AuditRepository {
       data.parentEventId
     ];
 
-    const result = await query<{ id: number }>(sql, values);
-    return result.rows[0].id;
+    const insertAuditLog = async (): Promise<number> => {
+      const result = await query<{ id: number }>(sql, values);
+      const row = result.rows[0];
+      if (!row) {
+        throw new Error('Failed to insert audit log: no rows returned');
+      }
+      return row.id;
+    };
+
+    try {
+      return await insertAuditLog();
+    } catch (error) {
+      if (!isMissingAuditLogPartitionError(error)) {
+        throw error;
+      }
+
+      await this.ensureCurrentMonthPartition();
+      return insertAuditLog();
+    }
   }
 
   /**
@@ -514,5 +543,34 @@ export class AuditRepository {
    */
   async createMonthlyPartition(): Promise<void> {
     await query('SELECT create_audit_partition()');
+  }
+
+  /**
+   * Ensure the audit_logs partition for the database server's current month exists.
+   */
+  async ensureCurrentMonthPartition(): Promise<void> {
+    await query(`
+      DO $$
+      DECLARE
+        partition_date DATE;
+        partition_name TEXT;
+        start_date DATE;
+        end_date DATE;
+      BEGIN
+        partition_date := DATE_TRUNC('month', CURRENT_DATE);
+        partition_name := 'audit_logs_' || TO_CHAR(partition_date, 'YYYY_MM');
+        start_date := partition_date;
+        end_date := partition_date + INTERVAL '1 month';
+
+        PERFORM pg_advisory_xact_lock(hashtext('audit_logs_partition'), hashtext(partition_name));
+
+        IF to_regclass(partition_name) IS NULL THEN
+          EXECUTE format(
+            'CREATE TABLE IF NOT EXISTS %I PARTITION OF audit_logs FOR VALUES FROM (%L) TO (%L)',
+            partition_name, start_date, end_date
+          );
+        END IF;
+      END $$;
+    `);
   }
 }
