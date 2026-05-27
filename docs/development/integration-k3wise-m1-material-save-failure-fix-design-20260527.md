@@ -43,7 +43,7 @@ So the real gaps the M1 failure exposes are narrower and more precise:
 | **G3 Shape mismatch** | All current reference fields use by-**number** (`{FNumber,FName}`). The customer sample uses `{FNumber,FName}` for *numbered* base data but `{FID,FName}` for *enum/category* fields (e.g. `FErpClsID`, `FUseState`, quality modes). Per-field shape selection is needed. |
 | **G4 FBaseUnitID-centric default** | The setup/config default (`apps/web/src/services/integration/k3WiseSetup.ts`, `IntegrationWorkbenchView.vue`) leans on `FBaseUnitID`; the customer requires the `FUnitGroupID`/`FUnitID` family populated. |
 | **G5 Diagnostics too thin** | The gate fails correctly but does not persist enough **sanitized** row-level detail to explain *why* (which field/validation failed). |
-| **G6 Readback array index** | `:546` handles `element.Data`; confirm the exact customer shape `Data[0].Data` (array element `[0]` then `.Data`) is covered. |
+| **G6 `Data[0].Data` parse coverage** | The *read* path handles `element.Data` (`:546`), but the *Save-response* parsers (`extractBusinessRows:238`; `responseMessage`/`Code`/`FailureCode`/`BillNo`/`ExternalId`) probe only `Data[0].X`, never `Data[0].Data.X` — so a `Data[0].Data`-nesting customer **may** hit a parse-induced false-negative in diagnostics (distinct from, and possibly alongside, the missing-fields rejection). |
 
 ## 3. Design (per the 6 scoped points)
 
@@ -59,6 +59,11 @@ So the real gaps the M1 failure exposes are narrower and more precise:
    *field set and per-field shape* (`reference` + identifier kind). Actual dictionary
    values (unit codes, account codes, use-state IDs, etc.) come from operator-reviewed
    config at runtime and are **never** committed to Git or posted to the issue.
+   **Fail-closed (mandatory):** any unreplaced placeholder (`<fill-outside-git>` /
+   `<placeholder>` / `<…>`) in a required field must **fail validation before the HTTP
+   Save** — it must never reach the Save body or the K3 wire. A half-configured preset
+   yields a clean validation error, not a corrupt K3 write. (Guarded by the
+   fail-closed-placeholder test in §5.)
 3. **Base-data object fields**, especially the unit family `FUnitGroupID` / `FUnitID` /
    `FOrderUnitID` / `FSaleUnitID` / `FProductUnitID` / `FStoreUnitID`, plus G2's missing
    fields. Each declared with its correct shape (G3): numbered → `{FNumber,FName}`,
@@ -69,11 +74,27 @@ So the real gaps the M1 failure exposes are narrower and more precise:
    row-level **status**, response **code**, a **redacted** validation/error message, and
    the **failed field key names** (the field *names* such as `FUnitGroupID` — never their
    values). **Must NOT record**: raw `FNumber` or any record-identifier value, token,
-   host, `authorityCode`, password, or SQL connection string. The diagnostic captures
-   *which fields/validations failed*, not *what the customer's data was*. (Guarded by the
-   diagnostics-redaction test in §5.)
-5. **Readback `Data[0].Data`.** Confirm/extend the readback to take the first array
-   element then its nested `.Data` (`Data[0].Data`), consistent with `:546`.
+   host, `authorityCode`, password, or SQL connection string. **Conservative row-key
+   disposition:** if a per-row correlation key is persisted at all, it is a **mask/hash**
+   token, never the raw `FNumber` / K3 ref code; a `sourceId` is persisted in full **only**
+   when it is a confirmed MetaSheet internal row UUID, otherwise it is masked/hashed too
+   (default to masking when in doubt). The redacted validation message goes through
+   `scrubSecretStringValue`. The diagnostic captures *which fields/validations failed*, not
+   *what the customer's data was*. (Guarded by the diagnostics-redaction test in §5.)
+5. **`Data[0].Data` — readback AND Save-response parse.** The *read* path already
+   unwraps `element.Data` (`:546`). The *Save-response* parse path does **not**:
+   `extractBusinessRows` (`:238`) and the path helpers `responseMessage` /
+   `responseCode` / `responseFailureCode` / `responseBillNo` / `responseExternalId`
+   probe only `Data[0].X` / `Data.X`, never `Data[0].Data.X`. For a customer that
+   nests per-row content under `Data[0].Data`, this **can** (not necessarily did)
+   produce a parse-induced false-negative in the row diagnostics — a real success
+   read as failed, *and* a real failure message missed. We do **not** assert M1's
+   failure was this rather than the missing-fields rejection (§1 / G1–G3); the two
+   can coexist. Fix: **one** unwrap of `row.Data` in `extractBusinessRows` (mirroring
+   `:546`) + **targeted** `Data.0.Data.*` probes appended to the five path helpers
+   (after the existing `Data.0.*`, so flat-shape customers are unaffected; no
+   double-fix in the row-driven helpers). This makes nested **success and failure**
+   both legible, so a genuine K3 rejection is distinguishable from a parse miss.
 6. **No second Save-only attempt** until (a) the implementation PR merges, (b) a patched
    package is produced, and (c) a **fresh explicit approval** is posted on #1792.
 
@@ -86,7 +107,13 @@ So the real gaps the M1 failure exposes are narrower and more precise:
 - **R-REDACT — diagnostics are sanitized-only.** Row-level Save diagnostics persist **only**
   sanitized status / response code / redacted validation message / failed field **names**.
   They **never** record a raw `FNumber` (or any record-identifier value), token, host,
-  `authorityCode`, password, or SQL connection string.
+  `authorityCode`, password, or SQL connection string. Any persisted per-row correlation
+  key is **mask/hashed** (never the raw `FNumber` / ref code); `sourceId` is full only when
+  a confirmed MetaSheet internal UUID, else masked/hashed.
+- **R-FAILCLOSED — no unreplaced placeholder reaches K3.** Any `<fill-outside-git>` /
+  `<placeholder>` / `<…>` left in a required field must fail validation **before** the HTTP
+  Save; it must never enter the Save body. A half-configured preset errors cleanly rather
+  than writing corrupt data to K3.
 
 ## 4. Implementation plan — files the NEXT (impl) PR will change
 
@@ -95,7 +122,7 @@ So the real gaps the M1 failure exposes are narrower and more precise:
 | File | Change |
 |---|---|
 | `plugins/plugin-integration-core/lib/adapters/k3-wise-document-templates.cjs` | Add the customer-profiled Material preset (new id; full field set incl. G2; per-field shape G3). Generic `material.v1` untouched. |
-| `plugins/plugin-integration-core/lib/adapters/k3-wise-webapi-adapter.cjs` | Per-field base-data object shaping (by-number vs by-ID); richer **sanitized** row-level Save diagnostics (G5); confirm `Data[0].Data` readback (G6). |
+| `plugins/plugin-integration-core/lib/adapters/k3-wise-webapi-adapter.cjs` | Per-field base-data object shaping (by-number vs by-ID); richer **sanitized** row-level Save diagnostics (G5) with conservative mask/hash row keys; **Save-response `Data[0].Data` parse** — one `row.Data` unwrap in `extractBusinessRows` + targeted `Data.0.Data.*` probes on the five path helpers (G6); **fail-closed placeholder validation** before the HTTP Save. |
 | `apps/web/src/services/integration/k3WiseSetup.ts` | Move default unit mapping off `FBaseUnitID`-centric toward the unit family; preset selection (G4). Structure only. |
 | `apps/web/src/views/IntegrationWorkbenchView.vue` | Per-field shape selector surface for the preset (operator picks shape; values stay operator-supplied). |
 
@@ -105,10 +132,11 @@ So the real gaps the M1 failure exposes are narrower and more precise:
 |---|---|
 | preset-opt-in (`__tests__/k3-wise-adapters.test.cjs`) | `material-k3wise-customer-profile-v1` applies **only** when explicitly selected; the default Material template is byte-stable / behavior unchanged when not opted in. (point 1) |
 | no-hardcoded-values (`k3-wise-adapters.test.cjs`) | Preset declares field **structure** only; no concrete dictionary value baked in. (point 2) |
+| fail-closed-placeholder (`k3-wise-adapters.test.cjs` + mock save server) | A preset with an unreplaced `<fill-outside-git>`/`<placeholder>` in a required field → `upsert` **fails validation and issues ZERO Save HTTP calls** for that row (mock save endpoint receives nothing); a fully-substituted preset proceeds. **Negative control:** remove the guard → the placeholder reaches the mock save body, proving the guard blocks it. (point 2 / R-FAILCLOSED) |
 | base-data-object-shaping (`k3-wise-adapters.test.cjs`) | Each field emits the correct `{FNumber,FName}` / `{FID,FName}` shape. (points 3, G3) |
 | envelope-200-row-fail (`k3-wise-adapters.test.cjs` + mock `mock-k3-webapi-server.mjs` returning 200/Successful with row `FStatus=false`) | Adapter reports FAIL, not success. (point 4) |
-| diagnostics-redaction (`k3-wise-adapters.test.cjs`) | Persisted diagnostic keeps only status / code / redacted-message / failed-field-**names**, and asserts it does **NOT** contain the raw `FNumber`, token, host, `authorityCode`, password, or connection string. (point 4 redaction rule) |
-| readback-data0-data (`k3-wise-adapters.test.cjs`) | `Data[0].Data` nested shape parsed correctly. (point 5) |
+| diagnostics-redaction (`k3-wise-adapters.test.cjs`) | Persisted diagnostic keeps only status / code / redacted-message / failed-field-**names**; asserts it does **NOT** contain the raw `FNumber`, token, host, `authorityCode`, password, or connection string; any persisted row-correlation key is **mask/hashed** (raw `FNumber` string absent from the serialized diagnostic); a non-UUID `sourceId` is masked too. (point 4 redaction rule) |
+| readback-data0-data (`k3-wise-adapters.test.cjs`) | `Data[0].Data` parsed in **both** the readback and the **Save-response** path: a nested-success response → judged succeeded; a nested-failure response → message/code resolved; flat `Data[0].X` unchanged (regression). **Negative control:** revert the `extractBusinessRows` unwrap → the nested-success test fails, proving the fix. (point 5) |
 | save-only-locks (`k3-wise-adapters.test.cjs`) | Submit/Audit/BOM/list/pagination still rejected; `autoSubmit=false`/`autoAudit=false`; no multi-record. (boundaries) |
 | secret-scan (existing redaction tests) | General backstop: no sanitized artifact echoes raw secret/host/identifier values. |
 
