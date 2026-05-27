@@ -279,3 +279,270 @@ test('direct-run guard accepts equivalent real paths through symlinks', async ()
 
   assert.equal(isDirectCliRun(realScript, linkScript), true)
 })
+
+function materialOnlyPacket() {
+  return {
+    webapiReadList: {
+      answers: {
+        'O1-MAT': '/K3API/Material/GetDetail',
+        'O1-MAT-M': 'POST',
+        O6: 'ResponseStatus.IsSuccess plus error code and message on failure',
+      },
+      samples: {
+        materialDetail: 'sample-material-detail.redacted.json',
+      },
+    },
+    materialOnlySafety: {
+      answers: {
+        materialScopeOnly: true,
+        bomDeferred: true,
+        saveOnlySeparateApproval: true,
+        autoSubmit: false,
+        autoAudit: false,
+        previewFields: 'FNumber/FName only; FModel and unit mapping deferred',
+      },
+    },
+  }
+}
+
+async function writeMaterialDetailSample(dir, overrides = {}) {
+  await writeJson(path.join(dir, 'sample-material-detail.redacted.json'), {
+    ResponseStatus: { IsSuccess: true },
+    Data: { FNumber: 'MAT-001', FName: 'Sample material' },
+    ...overrides,
+  })
+}
+
+test('material-only scope passes and writes PASS_MATERIAL_DRY_RUN_READY evidence', async () => {
+  const dir = await makeDir()
+  await writeMaterialDetailSample(dir)
+  const packetPath = path.join(dir, 'packet.json')
+  const outDir = path.join(dir, 'out')
+  await writeJson(packetPath, materialOnlyPacket())
+
+  const result = runCli(['--input', packetPath, '--scope', 'material-only', '--out-dir', outDir])
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /"decision": "PASS_MATERIAL_DRY_RUN_READY"/)
+
+  const evidence = JSON.parse(await readFile(path.join(outDir, 'integration-k3wise-gate-contract-check.json'), 'utf8'))
+  assert.equal(evidence.decision, 'PASS_MATERIAL_DRY_RUN_READY')
+  assert.equal(evidence.scope, 'material-only')
+  assert.equal(evidence.exitCode, 0)
+  assert.equal(evidence.issues.length, 0)
+  assert.equal(evidence.sections.materialRead.answered, 3)
+  assert.equal(evidence.sections.materialOnlySafety.answered, 6)
+  assert.equal(evidence.stage1Lock.status, 'held')
+
+  const markdown = await readFile(path.join(outDir, 'integration-k3wise-gate-contract-check.md'), 'utf8')
+  assert.match(markdown, /Decision: `PASS_MATERIAL_DRY_RUN_READY`/)
+  assert.match(markdown, /Material-only dry-run readiness/)
+  assert.match(markdown, /does \*\*not\*\* approve Save-only/)
+  assert.match(markdown, /Submit, Audit, or BOM \(#1711\)/)
+  assert.match(markdown, /separate explicit approval/)
+  assert.match(markdown, /Full-scope GATE behavior is unchanged/)
+  // a Material-only pass must never be presented as a full GATE pass
+  assert.doesNotMatch(markdown, /Decision: `PASS`/)
+})
+
+test('material-only blocks when O1-MAT, O6, or the materialDetail sample is missing', async () => {
+  const dir = await makeDir()
+  await writeMaterialDetailSample(dir)
+  const inputPath = path.join(dir, 'packet.json')
+
+  const missingMat = materialOnlyPacket()
+  delete missingMat.webapiReadList.answers['O1-MAT']
+  const matReport = await buildGateContractReport(missingMat, {
+    inputPath,
+    scope: 'material-only',
+    generatedAt: '2026-05-26T00:00:00.000Z',
+  })
+  assert.equal(matReport.decision, 'GATE_BLOCKED')
+  assert.equal(matReport.exitCode, 2)
+  assert(matReport.issues.some((issue) => issue.id === 'webapiReadList.O1-MAT'))
+
+  const missingO6 = materialOnlyPacket()
+  delete missingO6.webapiReadList.answers.O6
+  const o6Report = await buildGateContractReport(missingO6, { inputPath, scope: 'material-only' })
+  assert.equal(o6Report.decision, 'GATE_BLOCKED')
+  assert(o6Report.issues.some((issue) => issue.id === 'webapiReadList.O6'))
+
+  const missingSample = materialOnlyPacket()
+  missingSample.webapiReadList.samples.materialDetail = '<fill>'
+  const sampleReport = await buildGateContractReport(missingSample, { inputPath, scope: 'material-only' })
+  assert.equal(sampleReport.decision, 'GATE_BLOCKED')
+  assert(sampleReport.issues.some((issue) => issue.id === 'webapiReadList.sample.materialDetail'))
+})
+
+test('material-only ignores missing BOM, pagination, filters, and relationship answers', async () => {
+  const dir = await makeDir()
+  await writeMaterialDetailSample(dir)
+  const inputPath = path.join(dir, 'packet.json')
+
+  const packet = materialOnlyPacket()
+  // Even when BOM / pagination / relationship stubs are present-but-unfilled,
+  // material-only must not block on them.
+  packet.webapiReadList.answers['O1-BOM'] = '<fill>'
+  packet.webapiReadList.answers['O2-P'] = '<fill>'
+  packet.relationshipMapping = { answers: { R1: '<fill>' }, samples: {} }
+
+  const report = await buildGateContractReport(packet, {
+    inputPath,
+    scope: 'material-only',
+    generatedAt: '2026-05-26T00:00:00.000Z',
+  })
+  assert.equal(report.decision, 'PASS_MATERIAL_DRY_RUN_READY')
+  assert.equal(report.issues.length, 0)
+  const ids = report.issues.map((issue) => issue.id).join(' ')
+  assert.doesNotMatch(ids, /O1-BOM|O2-|O3-|O4-BOM|bomList|bomDetail|relationship|\bR[1-7]\b|flatBomLines|treeBom/)
+})
+
+test('material-only fails on an absolute URL or a token query in O1-MAT', async () => {
+  const dir = await makeDir()
+  await writeMaterialDetailSample(dir)
+  const inputPath = path.join(dir, 'packet.json')
+
+  const absolute = materialOnlyPacket()
+  absolute.webapiReadList.answers['O1-MAT'] = 'https://k3.example.test/K3API/Material/GetDetail'
+  const absReport = await buildGateContractReport(absolute, { inputPath, scope: 'material-only' })
+  assert.equal(absReport.decision, 'FAIL')
+  assert.equal(absReport.exitCode, 1)
+  assert(absReport.issues.some((issue) => issue.id === 'webapiReadList.O1-MAT' && issue.status === 'fail'))
+
+  const tokenQuery = materialOnlyPacket()
+  tokenQuery.webapiReadList.answers['O1-MAT'] = '/K3API/Material/GetDetail?access_token=RAW-TOKEN-SHOULD-NOT-LEAK'
+  const tokenReport = await buildGateContractReport(tokenQuery, { inputPath, scope: 'material-only' })
+  assert.equal(tokenReport.decision, 'FAIL')
+  assert(tokenReport.issues.some((issue) => issue.id === 'webapiReadList.O1-MAT' && issue.status === 'fail'))
+  assert.equal(JSON.stringify(tokenReport).includes('RAW-TOKEN-SHOULD-NOT-LEAK'), false)
+})
+
+test('material-only still rejects raw secrets in the materialDetail sample', async () => {
+  const dir = await makeDir()
+  await writeMaterialDetailSample(dir, {
+    Data: {
+      FNumber: 'MAT-001',
+      FName: 'Sample material',
+      password: 'RAW-PASSWORD-SHOULD-NOT-LEAK',
+      callback: 'https://k3.example.test/K3API/?access_token=RAW-TOKEN-SHOULD-NOT-LEAK',
+    },
+  })
+  const packetPath = path.join(dir, 'packet.json')
+  const outDir = path.join(dir, 'out')
+  await writeJson(packetPath, materialOnlyPacket())
+
+  const result = runCli(['--input', packetPath, '--scope', 'material-only', '--out-dir', outDir])
+  assert.equal(result.status, 1)
+  const evidenceText = await readFile(path.join(outDir, 'integration-k3wise-gate-contract-check.json'), 'utf8')
+  assert.match(evidenceText, /secret-looking key/)
+  assert.equal(evidenceText.includes('RAW-PASSWORD-SHOULD-NOT-LEAK'), false)
+  assert.equal(evidenceText.includes('RAW-TOKEN-SHOULD-NOT-LEAK'), false)
+})
+
+test('material-only safety flags fail when autoSubmit is on or a scope confirmation is negated', async () => {
+  const dir = await makeDir()
+  await writeMaterialDetailSample(dir)
+  const inputPath = path.join(dir, 'packet.json')
+
+  const autoOn = materialOnlyPacket()
+  autoOn.materialOnlySafety.answers.autoSubmit = true
+  const autoReport = await buildGateContractReport(autoOn, { inputPath, scope: 'material-only' })
+  assert.equal(autoReport.decision, 'FAIL')
+  assert(autoReport.issues.some((issue) => issue.id === 'materialOnlySafety.autoSubmit' && issue.status === 'fail'))
+
+  const negated = materialOnlyPacket()
+  negated.materialOnlySafety.answers.bomDeferred = false
+  const negReport = await buildGateContractReport(negated, { inputPath, scope: 'material-only' })
+  assert.equal(negReport.decision, 'FAIL')
+  assert(negReport.issues.some((issue) => issue.id === 'materialOnlySafety.bomDeferred' && issue.status === 'fail'))
+})
+
+test('material-only locks the first dry-run preview scope to FNumber/FName via previewFields', async () => {
+  const dir = await makeDir()
+  await writeMaterialDetailSample(dir)
+  const inputPath = path.join(dir, 'packet.json')
+  const withPreview = (value) => {
+    const packet = materialOnlyPacket()
+    packet.materialOnlySafety.answers.previewFields = value
+    return buildGateContractReport(packet, { inputPath, scope: 'material-only' })
+  }
+
+  // canonical (the reviewer's suggested string) and minimal forms pass; this also
+  // proves FNumber/FName do not trip the broader FModel/unit detection.
+  assert.equal((await withPreview('FNumber/FName only; FModel and unit mapping deferred')).decision, 'PASS_MATERIAL_DRY_RUN_READY')
+  assert.equal((await withPreview('FNumber/FName only')).decision, 'PASS_MATERIAL_DRY_RUN_READY')
+
+  // missing a required field → blocked
+  const missingName = await withPreview('FNumber only')
+  assert.equal(missingName.decision, 'GATE_BLOCKED')
+  assert(missingName.issues.some((issue) => issue.id === 'materialOnlySafety.previewFields' && issue.status === 'blocked'))
+
+  // widening to FModel / unit mapping without an explicit defer → fail ("only" is not a defer word)
+  for (const widened of ['FNumber, FName, FModel', 'FNumber/FName plus FModel only', 'FNumber FName 单位']) {
+    const report = await withPreview(widened)
+    assert.equal(report.decision, 'FAIL', `expected FAIL for: ${widened}`)
+    assert(report.issues.some((issue) => issue.id === 'materialOnlySafety.previewFields' && issue.status === 'fail'))
+  }
+
+  // missing previewFields entirely → blocked
+  const missingPreview = materialOnlyPacket()
+  delete missingPreview.materialOnlySafety.answers.previewFields
+  const missingReport = await buildGateContractReport(missingPreview, { inputPath, scope: 'material-only' })
+  assert.equal(missingReport.decision, 'GATE_BLOCKED')
+  assert(missingReport.issues.some((issue) => issue.id === 'materialOnlySafety.previewFields' && issue.status === 'blocked'))
+})
+
+test('full scope is the default and its report shape is unchanged when --scope is omitted', async () => {
+  const dir = await makeDir()
+  const initResult = runCli(['--init-template', dir])
+  assert.equal(initResult.status, 0, initResult.stderr)
+  assert.match(initResult.stdout, /"sampleCount": 8/)
+
+  const packetPath = path.join(dir, 'k3wise-gate-contract-packet.template.json')
+  const outDir = path.join(dir, 'out')
+  const checkResult = runCli(['--input', packetPath, '--out-dir', outDir])
+  assert.equal(checkResult.status, 2, checkResult.stderr)
+  assert.match(checkResult.stdout, /"decision": "GATE_BLOCKED"/)
+
+  const evidence = JSON.parse(await readFile(path.join(outDir, 'integration-k3wise-gate-contract-check.json'), 'utf8'))
+  assert.equal(evidence.decision, 'GATE_BLOCKED')
+  // full report carries none of the material-only fields and keeps the original sections
+  assert.equal(evidence.scope, undefined)
+  assert.equal(evidence.boundaries, undefined)
+  assert.equal(evidence.authorizes, undefined)
+  assert.ok(evidence.sections.webapiReadList)
+  assert.ok(evidence.sections.relationshipMapping)
+  assert.equal(evidence.sections.materialRead, undefined)
+})
+
+test('an unknown --scope value is rejected before any work', () => {
+  const result = runCli(['--input', 'whatever.json', '--scope', 'bogus'])
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /--scope must be full or material-only/)
+})
+
+test('init-template --scope material-only writes a minimal blocked packet', async () => {
+  const dir = await makeDir()
+  const initResult = runCli(['--init-template', dir, '--scope', 'material-only'])
+  assert.equal(initResult.status, 0, initResult.stderr)
+  assert.match(initResult.stdout, /"scope": "material-only"/)
+  assert.match(initResult.stdout, /"sampleCount": 1/)
+  assert.match(initResult.stdout, /k3wise-gate-material-only-packet\.template\.json/)
+
+  const packetPath = path.join(dir, 'k3wise-gate-material-only-packet.template.json')
+  const packet = JSON.parse(await readFile(packetPath, 'utf8'))
+  assert.equal(packet.webapiReadList.answers['O1-MAT'], '<fill-outside-git>')
+  assert.equal(packet.materialOnlySafety.answers.autoSubmit, '<fill-outside-git>')
+  assert.equal(packet.materialOnlySafety.answers.autoAudit, '<fill-outside-git>')
+
+  const readmeText = await readFile(path.join(dir, 'README-CUSTOMER-HANDOFF-MATERIAL-ONLY.zh.md'), 'utf8')
+  assert.match(readmeText, /Material-only 快线/)
+  assert.match(readmeText, /不批准 Save-only/)
+  assert.match(readmeText, /PASS_MATERIAL_DRY_RUN_READY/)
+  assert.doesNotMatch(readmeText, /Bearer\s+[A-Za-z0-9._-]{16,}/i)
+  assert.doesNotMatch(readmeText, /[?&](access[_-]?token|api[_-]?key|auth|authorization|credential|jwt|password|secret|session[_-]?id|sign|signature|token)=([^&#\s]+)/i)
+
+  const outDir = path.join(dir, 'out')
+  const checkResult = runCli(['--input', packetPath, '--scope', 'material-only', '--out-dir', outDir])
+  assert.equal(checkResult.status, 2, checkResult.stderr)
+  assert.match(checkResult.stdout, /"decision": "GATE_BLOCKED"/)
+})
