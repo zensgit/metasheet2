@@ -46,9 +46,19 @@ if (-not (Test-Path $migratePath)) {
   throw "Missing backend migration entrypoint: $migratePath"
 }
 
+$publishWebDistScript = Join-Path $resolvedRoot 'scripts\ops\attendance-onprem-publish-web-dist.ps1'
+if (-not (Test-Path $publishWebDistScript)) {
+  throw "Missing web dist publish script: $publishWebDistScript"
+}
+
 & node $migratePath
 if ($LASTEXITCODE -ne 0) {
   throw 'database migration failed'
+}
+
+& $publishWebDistScript -RootDir $resolvedRoot
+if ($LASTEXITCODE -ne 0) {
+  throw 'web dist publish failed'
 }
 
 $startScript = Join-Path $resolvedRoot 'scripts\ops\attendance-onprem-start-pm2.ps1'

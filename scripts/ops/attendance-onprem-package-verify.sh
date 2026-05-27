@@ -87,6 +87,17 @@ function verify_onprem_env_templates() {
   done
 }
 
+function verify_web_dist_publish_entrypoints() {
+  local root="$1"
+
+  search_fixed_string 'attendance-onprem-publish-web-dist.sh' "${root}/scripts/ops/attendance-onprem-bootstrap.sh" \
+    || die "attendance-onprem-bootstrap.sh must publish apps/web/dist to the nginx root"
+  search_fixed_string 'attendance-onprem-publish-web-dist.sh' "${root}/scripts/ops/attendance-onprem-update.sh" \
+    || die "attendance-onprem-update.sh must publish apps/web/dist to the nginx root"
+  search_fixed_string 'attendance-onprem-publish-web-dist.ps1' "${root}/scripts/ops/attendance-onprem-deploy-run.ps1" \
+    || die "attendance-onprem-deploy-run.ps1 must publish apps/web/dist to the nginx root"
+}
+
 function verify_no_github_links() {
   local root="$1"
   local patterns='github\.com|githubusercontent\.com|github\.io'
@@ -201,6 +212,8 @@ required=(
   "scripts/ops/attendance-onprem-deploy-run.ps1"
   "scripts/ops/attendance-onprem-package-install.sh"
   "scripts/ops/attendance-onprem-package-upgrade.sh"
+  "scripts/ops/attendance-onprem-publish-web-dist.sh"
+  "scripts/ops/attendance-onprem-publish-web-dist.ps1"
   "run-migrate.bat"
   "scripts/ops/attendance-wsl-portproxy-refresh.ps1"
   "scripts/ops/attendance-wsl-portproxy-task.ps1"
@@ -240,6 +253,7 @@ fi
 
 verify_onprem_env_templates "$pkg_root"
 verify_workspace_manifest "$pkg_root"
+verify_web_dist_publish_entrypoints "$pkg_root"
 
 if search_extended_regex 'VITE_API_(URL|BASE):"http://(127\.0\.0\.1|localhost)' "${pkg_root}/apps/web/dist"; then
   die "Frontend bundle embeds loopback VITE_API_* config; rebuild package with isolated web env"

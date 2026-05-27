@@ -33,6 +33,8 @@ REQUIRED_PATHS=(
   "scripts/ops/attendance-onprem-env-check.sh"
   "scripts/ops/attendance-onprem-healthcheck.sh"
   "scripts/ops/attendance-onprem-update.sh"
+  "scripts/ops/attendance-onprem-publish-web-dist.sh"
+  "scripts/ops/attendance-onprem-publish-web-dist.ps1"
   "run-migrate.bat"
   "scripts/ops/attendance-wsl-portproxy-refresh.ps1"
   "scripts/ops/attendance-wsl-portproxy-task.ps1"
