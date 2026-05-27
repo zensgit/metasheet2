@@ -3472,6 +3472,12 @@ async function resolveAttendanceReportPeriodSyncPeriod(db, orgId, params = {}) {
         periodType: 'payroll_cycle',
         periodKey: `cycle:${cycle.id}`,
         cycleId: cycle.id,
+        // Carried for the comprehensive-hours cap mapping (coarse V1, see
+        // docs/development/attendance-comprehensive-hours-payroll-cycle-cap-mapping-design-20260526.md
+        // §4). Presence of a templateId is a (coarse) monthly-cadence signal; absence → no cap.
+        // Mirrored top-level (alongside the nested `cycle`) on purpose so the builder stays
+        // agnostic of the cycle row shape — consistent with how `cycleId` is surfaced.
+        templateId: cycle.templateId || null,
         periodName: cycle.name || cycle.id,
         from: cycle.startDate,
         to: cycle.endDate,
@@ -12086,11 +12092,25 @@ function bridgeAttendanceDateRangeToComprehensiveHoursPeriod(from, to) {
   return { type: 'custom_range', key: `range:${f}:${t}`, from: f, to: t }
 }
 
+// Cap source labels (snapshot column contract — distinct labels let later analysis tell a
+// payroll-mapped cap from a calendar-cycle-mapped one even when the minute value is identical).
+const ATTENDANCE_COMPREHENSIVE_HOURS_CAP_SOURCE_DEFAULT = 'org_default_by_cycle_type'
+const ATTENDANCE_COMPREHENSIVE_HOURS_CAP_SOURCE_PAYROLL_MONTHLY = 'payroll_cycle_template_monthly'
+
 // V1 resolver: org default cap by cycle-type. orgId / userId are forward-compat (per-org and
 // per-user override land later without changing callers) and intentionally unused in V1 —
-// attendance.settings is a single global config. Returns null when no org default applies
-// (payroll_cycle / custom_range, or the cap is unset); callers then stale-null the columns.
-function resolveAttendanceComprehensiveHoursCap(settings, orgId, userId, period) {
+// attendance.settings is a single global config. `sourceLabel` lets a caller stamp a distinct
+// cap-source on the same org-default value (the payroll_cycle → month coarse mapping uses
+// PAYROLL_MONTHLY); the cap minutes + effective_key are unchanged. Returns null when no org
+// default applies (custom_range / a type with no cap, or the cap is unset); callers then
+// stale-null the columns.
+function resolveAttendanceComprehensiveHoursCap(
+  settings,
+  orgId,
+  userId,
+  period,
+  sourceLabel = ATTENDANCE_COMPREHENSIVE_HOURS_CAP_SOURCE_DEFAULT,
+) {
   const capDefaults = settings?.comprehensiveHours?.capDefaults || {}
   const type = period?.type
   let capMinutes = null
@@ -12099,7 +12119,7 @@ function resolveAttendanceComprehensiveHoursCap(settings, orgId, userId, period)
     capMinutes = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : null
   }
   if (capMinutes === null) return null
-  const source = 'org_default_by_cycle_type'
+  const source = sourceLabel
   return {
     capMinutes,
     source,
@@ -12123,11 +12143,29 @@ const ATTENDANCE_COMPREHENSIVE_HOURS_PERIOD_VALUE_COLUMNS = Object.freeze([
   { id: 'comprehensive_hours_cap_effective_key', name: '综合工时上限版本', type: 'string', order: 4003 },
 ])
 
-// Compute the four comprehensive-hours period values for one row. Fail-closed: only an
-// explicit date_range that bridges to an aligned month/quarter/year with a configured org
-// default yields a cap; payroll_cycle / custom_range / missing type / unset cap all
-// stale-null. Reuses the cap resolver (#1829) and the shared excess math — no parallel
-// computation.
+// Coarse monthly-cadence guard for a payroll_cycle window (see the payroll-cycle cap-mapping
+// design-lock). A payroll template is structurally monthly (end_month_offset ∈ {0,1}), so its
+// max legitimate span is ~58–59 days; 62 (inclusive) is the conservative ceiling. This guard
+// is necessary-but-not-sufficient: it does NOT read the template or verify the cycle's dates
+// match the template window (the create route allows hand-entered dates), so a templateId-
+// bearing cycle with mismatched ≤62d dates still passes — an accepted V1 imprecision; the
+// precise template-window validation is a deferred opt-in.
+const ATTENDANCE_PAYROLL_CYCLE_MONTHLY_MAX_SPAN_DAYS = 62
+function attendancePayrollCycleWithinMonthlySpan(from, to) {
+  const f = normalizeDateOnlyStrict(from)
+  const t = normalizeDateOnlyStrict(to)
+  if (!f || !t || f > t) return false
+  return diffDays(f, t) + 1 <= ATTENDANCE_PAYROLL_CYCLE_MONTHLY_MAX_SPAN_DAYS
+}
+
+// Compute the four comprehensive-hours period values for one row. Fail-closed: a cap is
+// resolved only when one of the explicitly-supported period shapes matches —
+//   • date_range that bridges to an aligned month/quarter/year with a configured org default, or
+//   • payroll_cycle carrying a templateId whose span ≤62d (coarse monthly mapping → month cap,
+//     source=payroll_cycle_template_monthly).
+// custom_range / templateId-less or oversized payroll cycles / missing/unknown periodType /
+// unset cap all stale-null. Reuses the cap resolver (#1829) and the shared excess math — no
+// parallel computation.
 function buildAttendanceComprehensiveHoursPeriodSummaryValues(settings, orgId, userId, period, actualMinutes) {
   const nullValues = {
     comprehensive_hours_excess_minutes: null,
@@ -12135,15 +12173,36 @@ function buildAttendanceComprehensiveHoursPeriodSummaryValues(settings, orgId, u
     comprehensive_hours_cap_source: null,
     comprehensive_hours_cap_effective_key: null,
   }
-  // Whitelist date_range (fail-closed): only a date_range window bridges to a cycle-type.
-  // payroll_cycle, missing, and any future periodType stale-null until explicitly supported.
-  if (!period || period.periodType !== 'date_range') return nullValues
-  const bridged = bridgeAttendanceDateRangeToComprehensiveHoursPeriod(period.from, period.to)
-  const cap = resolveAttendanceComprehensiveHoursCap(settings, orgId, userId, bridged)
+  let cap = null
+  let comparisonKey = null
+  if (period?.periodType === 'date_range') {
+    // Only a date_range window bridges to a cycle-type (month/quarter/year/custom_range).
+    const bridged = bridgeAttendanceDateRangeToComprehensiveHoursPeriod(period.from, period.to)
+    cap = resolveAttendanceComprehensiveHoursCap(settings, orgId, userId, bridged)
+    comparisonKey = bridged.key
+  } else if (
+    period?.periodType === 'payroll_cycle'
+    && period.templateId
+    && attendancePayrollCycleWithinMonthlySpan(period.from, period.to)
+  ) {
+    // Coarse monthly mapping: a template-bound, in-span payroll cycle resolves the month
+    // org default, stamped with the distinct payroll source label.
+    cap = resolveAttendanceComprehensiveHoursCap(
+      settings,
+      orgId,
+      userId,
+      { type: 'month', key: period.periodKey || `cycle:${period.cycleId}` },
+      ATTENDANCE_COMPREHENSIVE_HOURS_CAP_SOURCE_PAYROLL_MONTHLY,
+    )
+    comparisonKey = period.periodKey || (period.cycleId ? `cycle:${period.cycleId}` : null)
+  } else {
+    // Fail-closed: missing/unknown periodType, templateId-less or oversized payroll cycle.
+    return nullValues
+  }
   if (!cap) return nullValues
   const comparison = buildAttendanceComprehensiveHoursComparison({
     userId,
-    period: bridged.key,
+    period: comparisonKey,
     metric: 'actual',
     enforcement: 'warn',
     capMinutes: cap.capMinutes,
@@ -14181,6 +14240,9 @@ module.exports = {
     resolveAttendanceComprehensiveHoursCap,
     buildAttendanceComprehensiveHoursCapEffectiveKey,
     buildAttendanceComprehensiveHoursPeriodSummaryValues,
+    attendancePayrollCycleWithinMonthlySpan,
+    ATTENDANCE_COMPREHENSIVE_HOURS_CAP_SOURCE_DEFAULT,
+    ATTENDANCE_COMPREHENSIVE_HOURS_CAP_SOURCE_PAYROLL_MONTHLY,
     ATTENDANCE_COMPREHENSIVE_HOURS_PERIOD_VALUE_COLUMNS,
     resetAttendanceSettingsCacheForTests,
     mergeSettings,

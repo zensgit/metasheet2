@@ -669,7 +669,9 @@ describe('comprehensive-hours period value-plumbing (PR6)', () => {
       comprehensive_hours_cap_effective_key: null,
     }
     expect(helpers.buildAttendanceComprehensiveHoursPeriodSummaryValues({}, orgId, userId, naturalMonth, 13000)).toEqual(allNull)
-    // Fail-closed periodType whitelist: only date_range proceeds.
+    // Fail-closed periodType whitelist: a date_range proceeds; a payroll_cycle WITHOUT a
+    // templateId stale-nulls (this is the P4 anchor for the payroll-cycle mapping block below —
+    // do NOT "fix" it by adding a templateId; templateId-less must remain null).
     expect(helpers.buildAttendanceComprehensiveHoursPeriodSummaryValues(monthCap(10560), orgId, userId, { ...naturalMonth, periodType: 'payroll_cycle' }, 13000)).toEqual(allNull)
     expect(helpers.buildAttendanceComprehensiveHoursPeriodSummaryValues(monthCap(10560), orgId, userId, { ...naturalMonth, periodType: 'custom_range' }, 13000)).toEqual(allNull)
     expect(helpers.buildAttendanceComprehensiveHoursPeriodSummaryValues(monthCap(10560), orgId, userId, { ...naturalMonth, periodType: 'some_future_type' }, 13000)).toEqual(allNull)
@@ -747,5 +749,168 @@ describe('comprehensive-hours period value-plumbing (PR6)', () => {
     expect(pluginSource).toMatch(
       /for \(const column of valueColumns\)[\s\S]*?Object\.assign\(logical, comprehensiveHoursValues\)[\s\S]*?buildAttendanceReportPeriodSummarySourceFingerprint\(logical\)/,
     )
+  })
+})
+
+// Coarse payroll_cycle → month cap mapping (V1) — design-lock:
+// docs/development/attendance-comprehensive-hours-payroll-cycle-cap-mapping-design-20260526.md
+describe('comprehensive-hours payroll_cycle cap-mapping (V1 coarse)', () => {
+  const orgId = 'org-1'
+  const userId = 'u-1'
+  const logger = { warn() {}, error() {}, info() {} }
+  const monthCap = (minutes: number | null) => ({ comprehensiveHours: { capDefaults: { month: minutes, quarter: null, year: null } } })
+  const PAYROLL_SOURCE = helpers.ATTENDANCE_COMPREHENSIVE_HOURS_CAP_SOURCE_PAYROLL_MONTHLY
+  const allNull = {
+    comprehensive_hours_excess_minutes: null,
+    comprehensive_hours_cap_minutes: null,
+    comprehensive_hours_cap_source: null,
+    comprehensive_hours_cap_effective_key: null,
+  }
+  // A template-bound payroll cycle: in-span (≤62d), templateId present. Dates here are a
+  // cross-month pay window (26th→25th) — deliberately NOT a natural calendar month, so the
+  // date_range bridge would yield custom_range; the payroll branch maps it to month.
+  const payrollCycle = (overrides: Record<string, unknown> = {}) => ({
+    periodType: 'payroll_cycle',
+    periodKey: 'cycle:c-1',
+    cycleId: 'c-1',
+    templateId: 'tpl-1',
+    from: '2026-02-26',
+    to: '2026-03-25',
+    periodStart: '2026-02-26',
+    periodEnd: '2026-03-25',
+    ...overrides,
+  })
+  const build = (settings: unknown, period: Record<string, unknown>, minutes = 13000) =>
+    helpers.buildAttendanceComprehensiveHoursPeriodSummaryValues(settings, orgId, userId, period, minutes)
+
+  // P1 — template + span≤62 + month cap set → excess against month cap; payroll source label.
+  it('P1: template-bound, in-span, month cap set → month cap with payroll source', () => {
+    expect(build(monthCap(10560), payrollCycle())).toEqual({
+      comprehensive_hours_excess_minutes: 2440,
+      comprehensive_hours_cap_minutes: 10560,
+      comprehensive_hours_cap_source: PAYROLL_SOURCE,
+      comprehensive_hours_cap_effective_key: expect.stringMatching(/^cfg:[0-9a-f]{12}$/),
+    })
+  })
+
+  // P2 — cross-month window the date_range bridge canNOT map (→ custom_range → null), but the
+  // payroll branch maps to month. This proves the new path CHANGES behavior, not just "no regression".
+  it('P2: cross-month (26th→25th) — bridge would null, payroll branch resolves month', () => {
+    const bridged = helpers.bridgeAttendanceDateRangeToComprehensiveHoursPeriod('2026-02-26', '2026-03-25')
+    expect(bridged.type).toBe('custom_range')
+    expect(helpers.resolveAttendanceComprehensiveHoursCap(monthCap(10560), orgId, userId, bridged)).toBeNull()
+    const values = build(monthCap(10560), payrollCycle())
+    expect(values.comprehensive_hours_cap_minutes).toBe(10560)
+    expect(values.comprehensive_hours_cap_source).toBe(PAYROLL_SOURCE)
+  })
+
+  // P3 — month cap unset → stale-null.
+  it('P3: month cap unset → null', () => {
+    expect(build(monthCap(null), payrollCycle())).toEqual(allNull)
+  })
+
+  // P4 — templateId null → null. (See also the anchor assertion in the PR6 block above.)
+  it('P4: templateId null → null (no monthly-cadence signal)', () => {
+    expect(build(monthCap(10560), payrollCycle({ templateId: null }))).toEqual(allNull)
+    expect(build(monthCap(10560), payrollCycle({ templateId: undefined }))).toEqual(allNull)
+  })
+
+  // P5 — span > 62d (anomaly / multi-month) → null even with a templateId.
+  it('P5: span > 62d → null', () => {
+    expect(build(monthCap(10560), payrollCycle({ from: '2026-01-01', to: '2026-03-31' }))).toEqual(allNull)
+  })
+
+  // P5b — DOCUMENTED IMPRECISION: templateId present, span≤62, but the dates do NOT match the
+  // template window (hand-entered, not a real monthly period). V1 has no JOIN/template read, so
+  // it STILL resolves month. The precise §7 upgrade would resolve null. Locking the coarse
+  // behavior here so the trade-off is explicit and a future change is a conscious one.
+  it('P5b: in-span but date-mismatched cycle still resolves month (coarse-heuristic limit)', () => {
+    const offWindow = payrollCycle({ from: '2026-03-10', to: '2026-04-08' }) // 30d, not a monthly window
+    expect(helpers.bridgeAttendanceDateRangeToComprehensiveHoursPeriod('2026-03-10', '2026-04-08').type).toBe('custom_range')
+    const values = build(monthCap(10560), offWindow)
+    expect(values.comprehensive_hours_cap_minutes).toBe(10560)
+    expect(values.comprehensive_hours_cap_source).toBe(PAYROLL_SOURCE)
+  })
+
+  // Span guard — direct unit coverage of the ≤62 (inclusive) boundary.
+  it('span guard: ≤62 inclusive passes, 63 fails, invalid/reversed fails', () => {
+    expect(helpers.attendancePayrollCycleWithinMonthlySpan('2026-02-26', '2026-03-25')).toBe(true)
+    expect(helpers.attendancePayrollCycleWithinMonthlySpan('2026-01-01', '2026-03-03')).toBe(true) // 62 inclusive
+    expect(helpers.attendancePayrollCycleWithinMonthlySpan('2026-01-01', '2026-03-04')).toBe(false) // 63
+    expect(helpers.attendancePayrollCycleWithinMonthlySpan('2026-03-25', '2026-02-26')).toBe(false) // reversed
+    expect(helpers.attendancePayrollCycleWithinMonthlySpan('not-a-date', '2026-03-25')).toBe(false)
+  })
+
+  // Source-label contract lock — the literal is a snapshot column value; pin it.
+  it('source label is the locked payroll literal, distinct from the calendar default', () => {
+    expect(PAYROLL_SOURCE).toBe('payroll_cycle_template_monthly')
+    expect(helpers.ATTENDANCE_COMPREHENSIVE_HOURS_CAP_SOURCE_DEFAULT).toBe('org_default_by_cycle_type')
+    expect(PAYROLL_SOURCE).not.toBe(helpers.ATTENDANCE_COMPREHENSIVE_HOURS_CAP_SOURCE_DEFAULT)
+  })
+
+  // P8 — date_range path is untouched (still the calendar default source).
+  it('P8: date_range path unchanged (calendar default source)', () => {
+    const naturalMonth = { periodType: 'date_range', from: '2026-03-01', to: '2026-03-31' }
+    const values = build(monthCap(10560), naturalMonth)
+    expect(values.comprehensive_hours_cap_minutes).toBe(10560)
+    expect(values.comprehensive_hours_cap_source).toBe('org_default_by_cycle_type')
+  })
+
+  // WIRE-VS-FIXTURE (mandatory): the producer must EMIT templateId onto the payroll_cycle
+  // period — the builder tests above use synthetic periods and cannot catch a producer that
+  // forgets it (cf. the #1781 dayIndex serialization drift). Exercise the real producer.
+  it('producer carries templateId from the loaded payroll cycle row (and null when absent)', async () => {
+    const cycleId = '11111111-1111-4111-8111-111111111111'
+    const cycleDb = (templateId: string | null) => ({
+      async query(sql: string) {
+        if (/FROM attendance_payroll_cycles/i.test(String(sql))) {
+          return [{ id: cycleId, org_id: orgId, template_id: templateId, name: 'Feb cycle', start_date: '2026-02-26', end_date: '2026-03-25', status: 'open', metadata: null }]
+        }
+        throw new Error('unmocked query: ' + sql)
+      },
+    })
+    const withTpl = await helpers.resolveAttendanceReportPeriodSyncPeriod(cycleDb('tpl-9'), orgId, { cycleId })
+    expect(withTpl.ok).toBe(true)
+    expect(withTpl.period.periodType).toBe('payroll_cycle')
+    expect(withTpl.period.templateId).toBe('tpl-9')
+    expect(withTpl.period.from).toBe('2026-02-26')
+
+    const noTpl = await helpers.resolveAttendanceReportPeriodSyncPeriod(cycleDb(null), orgId, { cycleId })
+    expect(noTpl.period.templateId).toBeNull()
+  })
+
+  // P7 — cap edit changes effective_key → a payroll_cycle row re-syncs (run on the PAYROLL
+  // branch explicitly; same fingerprint mechanism as date_range but assert it here).
+  it('P7: cap edit re-syncs a payroll_cycle row through the real sync', async () => {
+    helpers.resetAttendanceSettingsCacheForTests()
+    const createRecord = vi.fn().mockResolvedValue({ id: 'rec-new' })
+    const patchRecord = vi.fn().mockResolvedValue({})
+    const queryRecords = vi.fn().mockResolvedValue([])
+    const ensureObject = vi.fn().mockResolvedValue({ baseId: 'base-1', sheet: { id: 'sheet-1' } })
+    const context = { api: { multitable: { provisioning: { ensureObject }, records: { queryRecords, createRecord, patchRecord } } } }
+    const syncDb = (settings: unknown) => ({
+      async query(sql: string) {
+        const s = String(sql)
+        if (/FROM system_configs/i.test(s)) return [{ value: JSON.stringify(settings) }]
+        if (/is_workday THEN work_minutes/i.test(s)) return [{ total_days: 22, total_minutes: 13000, total_late_minutes: 0, total_early_leave_minutes: 0, normal_days: 22, late_days: 0, early_leave_days: 0, late_early_days: 0, partial_days: 0, absent_days: 0, adjusted_days: 0, off_days: 9 }]
+        if (/FROM attendance_requests/i.test(s)) return []
+        if (/FROM users u/i.test(s)) return [{ user_name: 'U One', username: 'u1', meta: null }]
+        if (/FROM attendance_leave_types/i.test(s)) return []
+        if (/FROM attendance_overtime_rules/i.test(s)) return []
+        throw new Error('unmocked query: ' + s.replace(/\s+/g, ' ').slice(0, 90))
+      },
+    })
+    const period = payrollCycle()
+    const r1 = await helpers.syncAttendanceReportPeriodSummary(context, syncDb(monthCap(10560)), orgId, logger, { userId, period })
+    expect(r1.created).toBe(1)
+    const stored = createRecord.mock.calls[0][0].data
+    expect(stored.comprehensive_hours_cap_source).toBe(PAYROLL_SOURCE)
+    expect(stored.comprehensive_hours_cap_minutes).toBe(10560)
+    queryRecords.mockResolvedValue([{ id: 'rec-1', data: stored }])
+
+    helpers.resetAttendanceSettingsCacheForTests()
+    const r2 = await helpers.syncAttendanceReportPeriodSummary(context, syncDb(monthCap(9000)), orgId, logger, { userId, period })
+    expect(r2.patched).toBe(1)
+    expect(patchRecord.mock.calls[0][0].changes.comprehensive_hours_cap_minutes).toBe(9000)
   })
 })
