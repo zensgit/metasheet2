@@ -44,6 +44,10 @@ function sanitizeMockBody(value) {
 export function createMockK3WebApiServer({
   logger = () => {},
   knownBadFNumbers = new Set(['BAD']),
+  // Envelope-200-but-row-level-fail: K3 returns StatusCode 200 / "Successful" yet the
+  // row did not save. Lets the live PoC demo exercise the M1 row-level diagnostic path
+  // offline. Default empty → no behavior change for existing callers.
+  rowFailFNumbers = new Set(),
   includeSessionCookie = true,
   includeSessionId = true,
 } = {}) {
@@ -110,6 +114,14 @@ export function createMockK3WebApiServer({
       const fNumber = (body?.Model || body?.Data)?.FNumber
       if (knownBadFNumbers.has(fNumber)) {
         jsonResponse(res, 200, { success: false, message: `mock K3 rejects ${fNumber}: invalid material code` })
+        return
+      }
+      if (rowFailFNumbers.has(fNumber)) {
+        jsonResponse(res, 200, {
+          StatusCode: 200,
+          Message: 'Successful',
+          Data: [{ FStatus: false, FItemID: 0, FMessage: `mock K3 row-level fail for ${fNumber}: required base-data object missing` }],
+        })
         return
       }
       jsonResponse(res, 200, { success: true, externalId: `mock-${fNumber}`, billNo: fNumber })
