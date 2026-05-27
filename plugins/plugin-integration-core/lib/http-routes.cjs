@@ -964,6 +964,7 @@ module.exports = {
   registerIntegrationRoutes,
   VALID_USER_RUN_MODES,
   __internals: {
+    buildTemplatePreview,
     hasPermission,
     requireAccess,
     resolveTenantId,
