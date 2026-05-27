@@ -1122,6 +1122,54 @@
                 </button>
               </div>
             </div>
+            <div class="attendance__admin-task-home" data-admin-task-home="true">
+              <div class="attendance__admin-task-home-header">
+                <div>
+                  <span class="attendance__admin-task-home-eyebrow">
+                    {{ tr('Admin workflow', '管理流程') }}
+                  </span>
+                  <h4>{{ tr('Start from the daily task, not the full settings list', '从日常任务开始，而不是从完整配置列表开始') }}</h4>
+                </div>
+                <span class="attendance__admin-task-home-hint">
+                  {{ tr('Detailed configuration remains available in the left rail.', '详细配置仍可从左侧区块进入。') }}
+                </span>
+              </div>
+              <div class="attendance__admin-task-grid">
+                <section
+                  v-for="group in adminTaskHomeGroups"
+                  :key="group.key"
+                  class="attendance__admin-task-group"
+                >
+                  <div class="attendance__admin-task-copy">
+                    <strong>{{ group.title }}</strong>
+                    <span>{{ group.detail }}</span>
+                  </div>
+                  <div class="attendance__admin-task-actions">
+                    <a
+                      v-for="action in group.linkActions"
+                      :key="action.key"
+                      class="attendance__btn attendance__btn--inline attendance__admin-task-action"
+                      :class="{ 'attendance__btn--primary': action.primary }"
+                      :data-admin-task-action="action.key"
+                      :href="action.href"
+                    >
+                      {{ action.label }}
+                    </a>
+                    <button
+                      v-for="action in group.buttonActions"
+                      :key="action.key"
+                      class="attendance__btn attendance__btn--inline attendance__admin-task-action"
+                      :class="{ 'attendance__btn--primary': action.primary }"
+                      :data-admin-task-action="action.key"
+                      type="button"
+                      @click="selectAdminSection(action.sectionId)"
+                    >
+                      {{ action.label }}
+                    </button>
+                  </div>
+                </section>
+              </div>
+            </div>
             <div class="attendance__admin-shell">
             <AttendanceAdminRail
               :tr="tr"
@@ -5571,6 +5619,31 @@ type AttendanceStatusContext =
   | 'request-resolve'
   | 'request-cancel'
 
+type AttendanceAdminTaskHomeAction = {
+  key: string
+  label: string
+  href?: string
+  sectionId?: string
+  primary?: boolean
+}
+
+type AttendanceAdminTaskHomeLinkAction = AttendanceAdminTaskHomeAction & {
+  href: string
+}
+
+type AttendanceAdminTaskHomeSectionAction = AttendanceAdminTaskHomeAction & {
+  sectionId: string
+}
+
+type AttendanceAdminTaskHomeGroup = {
+  key: string
+  title: string
+  detail: string
+  actions: AttendanceAdminTaskHomeAction[]
+  linkActions: AttendanceAdminTaskHomeLinkAction[]
+  buttonActions: AttendanceAdminTaskHomeSectionAction[]
+}
+
 interface AttendanceStatusMeta {
   code?: string
   hint?: string
@@ -8212,6 +8285,122 @@ const adminQuickJumpGroups = computed(() => {
   }
   return Array.from(groups.values())
 })
+
+function buildAdminTaskHomeGroup(
+  group: Omit<AttendanceAdminTaskHomeGroup, 'linkActions' | 'buttonActions'>,
+): AttendanceAdminTaskHomeGroup {
+  return {
+    ...group,
+    linkActions: group.actions.filter((action): action is AttendanceAdminTaskHomeLinkAction =>
+      typeof action.href === 'string' && action.href.length > 0,
+    ),
+    buttonActions: group.actions.filter((action): action is AttendanceAdminTaskHomeSectionAction =>
+      typeof action.sectionId === 'string' && action.sectionId.length > 0,
+    ),
+  }
+}
+
+const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
+  {
+    key: 'today-queue',
+    title: tr('Today queue', '今日待办'),
+    detail: tr(
+      'Review pending requests and make sure approval policy is ready before payroll work starts.',
+      '先处理待审批申请，并确认审批策略可用，再进入计薪处理。',
+    ),
+    actions: [
+      {
+        key: 'pending-attendance-approvals',
+        label: tr('Pending attendance approvals', '待处理考勤审批'),
+        href: '/attendance?section=attendance-overview-requests',
+        primary: true,
+      },
+      {
+        key: 'approval-flows',
+        label: tr('Approval flows', '审批流'),
+        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.approvalFlows,
+      },
+    ],
+  },
+  {
+    key: 'monthly-processing',
+    title: tr('Monthly processing', '月度处理'),
+    detail: tr(
+      'Import CSV, inspect import batches, tune report fields, then close payroll cycles.',
+      '导入 CSV、检查导入批次、调整统计字段，再收口计薪周期。',
+    ),
+    actions: [
+      {
+        key: 'monthly-import',
+        label: tr('Import CSV', '导入 CSV'),
+        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.import,
+        primary: true,
+      },
+      {
+        key: 'import-batches',
+        label: tr('Import batches', '导入批次'),
+        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.importBatches,
+      },
+      {
+        key: 'payroll-cycles',
+        label: tr('Payroll cycles', '计薪周期'),
+        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.payrollCycles,
+      },
+    ],
+  },
+  {
+    key: 'base-config',
+    title: tr('Base configuration', '基础配置'),
+    detail: tr(
+      'Maintain groups, members, shifts, holidays, and rule sets before daily import.',
+      '维护考勤组、成员、班次、节假日和规则集，为日常导入打底。',
+    ),
+    actions: [
+      {
+        key: 'attendance-groups',
+        label: tr('Groups', '考勤组'),
+        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups,
+        primary: true,
+      },
+      {
+        key: 'shifts',
+        label: tr('Shifts', '班次'),
+        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.shifts,
+      },
+      {
+        key: 'holidays',
+        label: tr('Holidays', '节假日'),
+        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.holidays,
+      },
+      {
+        key: 'rule-sets',
+        label: tr('Rule sets', '规则集'),
+        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.ruleSets,
+      },
+    ],
+  },
+  {
+    key: 'audit-rollback',
+    title: tr('Audit and rollback', '审计回滚'),
+    detail: tr(
+      'Trace recent admin changes and failed imports before retrying or rolling back.',
+      '重试或回滚前，先追踪最近管理变更和失败导入。',
+    ),
+    actions: [
+      {
+        key: 'audit-logs',
+        label: tr('Audit logs', '审计日志'),
+        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.auditLogs,
+        primary: true,
+      },
+      {
+        key: 'rollback-import-batches',
+        label: tr('Import batches', '导入批次'),
+        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.importBatches,
+      },
+    ],
+  },
+].map(buildAdminTaskHomeGroup))
 
 function shouldShowAdminSection(id: string): boolean {
   return !adminFocusedMode.value || resolvedAdminSectionId() === id
@@ -17386,6 +17575,90 @@ const holidaySectionBindings = {
   font-weight: 600;
 }
 
+.attendance__admin-task-home {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 16px;
+  padding: 14px 0 16px;
+  border-top: 1px solid #e2e8f0;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.attendance__admin-task-home-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.attendance__admin-task-home-eyebrow {
+  display: block;
+  margin-bottom: 4px;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.attendance__admin-task-home h4 {
+  margin: 0;
+  color: #0f172a;
+  font-size: 16px;
+}
+
+.attendance__admin-task-home-hint {
+  max-width: 300px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: right;
+}
+
+.attendance__admin-task-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.attendance__admin-task-group {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.attendance__admin-task-copy {
+  display: grid;
+  gap: 5px;
+}
+
+.attendance__admin-task-copy strong {
+  color: #1f2937;
+  font-size: 13px;
+}
+
+.attendance__admin-task-copy span {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.attendance__admin-task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.attendance__admin-task-action {
+  text-decoration: none;
+}
+
 .attendance__admin-content {
   min-width: 0;
 }
@@ -18006,6 +18279,19 @@ const holidaySectionBindings = {
 
   .attendance__admin-shortcuts-header {
     flex-direction: column;
+  }
+
+  .attendance__admin-task-home-header {
+    flex-direction: column;
+  }
+
+  .attendance__admin-task-home-hint {
+    max-width: none;
+    text-align: left;
+  }
+
+  .attendance__admin-task-grid {
+    grid-template-columns: 1fr;
   }
 
   .attendance__admin-current-section {
