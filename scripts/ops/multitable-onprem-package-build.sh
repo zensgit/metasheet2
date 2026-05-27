@@ -365,6 +365,65 @@ EOF
 EOF
 }
 
+function write_build_provenance() {
+  # Build-time source provenance + #1912 fix-marker attestation. The verify flow
+  # (multitable-onprem-package-verify.sh) requires this file, asserts a real
+  # 40-hex gitCommit, and cross-checks the issue1912 marker against the packaged
+  # adapter. Helpers only — no customer runtime is touched here.
+  local git_commit git_commit_short git_ref on_main marker_file marker_str embedded
+  git_commit="${GITHUB_SHA:-$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)}"
+  if [[ "$git_commit" =~ ^[0-9a-f]{40}$ ]]; then
+    git_commit_short="${git_commit:0:12}"
+  else
+    git_commit="unknown"
+    git_commit_short="unknown"
+  fi
+  git_ref="${GITHUB_REF_NAME:-$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)}"
+  # Soft provenance signal: is the build commit reachable on origin/main? Never fail
+  # (offline/disconnected builds are legitimate) — just record it for the reviewer.
+  on_main="unknown"
+  if [[ "$git_commit" != "unknown" ]] && git -C "$ROOT_DIR" rev-parse --verify -q origin/main >/dev/null 2>&1; then
+    if git -C "$ROOT_DIR" merge-base --is-ancestor "$git_commit" origin/main 2>/dev/null; then
+      on_main="true"
+    else
+      on_main="false"
+      info "WARNING: build commit ${git_commit_short} is not on origin/main; package provenance is local-only"
+    fi
+  fi
+  # Compute the #1912 marker presence from the STAGED adapter (the exact file about
+  # to be packaged) — not a hardcoded literal — so the verify cross-check is real.
+  marker_file="${PACKAGE_ROOT}/plugins/plugin-integration-core/lib/adapters/k3-wise-document-templates.cjs"
+  marker_str="material-k3wise-customer-profile-v1"
+  if [[ -f "$marker_file" ]] && grep -qF -- "$marker_str" "$marker_file"; then
+    embedded="true"
+  else
+    embedded="false"
+  fi
+  cat > "${PACKAGE_ROOT}/BUILD_PROVENANCE.json" <<EOF
+{
+  "schema": "metasheet-onprem-build-provenance/v1",
+  "packageName": "${PACKAGE_NAME}",
+  "version": "${PACKAGE_VERSION}",
+  "tag": "${PACKAGE_TAG}",
+  "gitCommit": "${git_commit}",
+  "gitCommitShort": "${git_commit_short}",
+  "gitRef": "${git_ref}",
+  "sourceIsOnOriginMain": "${on_main}",
+  "ciRunId": "${GITHUB_RUN_ID:-local}",
+  "ciRunAttempt": "${GITHUB_RUN_ATTEMPT:-local}",
+  "builtAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+  "fixMarkers": {
+    "issue1912": {
+      "title": "K3 WISE M1 Material Save-only backend fix",
+      "adapter": "plugins/plugin-integration-core/lib/adapters/k3-wise-document-templates.cjs",
+      "marker": "${marker_str}",
+      "embedded": ${embedded}
+    }
+  }
+}
+EOF
+}
+
 function cleanup() {
   [[ -n "$checksum_tmp" ]] && rm -f "$checksum_tmp" || true
   rm -rf "$TMP_OUTPUT_DIR" || true
@@ -417,6 +476,7 @@ stamp_packaged_version "package.json"
 stamp_packaged_version "packages/core-backend/package.json"
 write_windows_entrypoints
 write_deployment_guides
+write_build_provenance
 
 cat > "${PACKAGE_ROOT}/INSTALL.txt" <<EOF
 MetaSheet Multitable On-Prem Package

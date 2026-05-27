@@ -194,6 +194,49 @@ function verify_deployable_artifact_contract() {
   search_fixed_string '"windowsEntryPoint": "deploy.bat <package.zip|package.tgz>"' "$metadata_json" || die "PACKAGE-METADATA.json must document the Windows entrypoint"
 }
 
+function verify_build_provenance() {
+  local root="$1"
+  local prov="${root}/BUILD_PROVENANCE.json"
+
+  [[ -f "$prov" ]] || die "BUILD_PROVENANCE.json must be present in the package (build provenance attestation missing)"
+  search_fixed_string '"schema": "metasheet-onprem-build-provenance/v1"' "$prov" || die "BUILD_PROVENANCE.json must declare schema metasheet-onprem-build-provenance/v1"
+  # gitCommit must be a real 40-hex SHA, never the "unknown" fallback or a short SHA,
+  # so a reviewer can independently check ancestry (e.g. merge-base --is-ancestor c4c40934d).
+  if ! grep -Eq '"gitCommit": *"[0-9a-f]{40}"' "$prov"; then
+    die "BUILD_PROVENANCE.json gitCommit must be a full 40-hex commit (got a missing/short/unknown value); the package cannot prove its source provenance"
+  fi
+  search_fixed_string '"builtAt"' "$prov" || die "BUILD_PROVENANCE.json must record builtAt"
+}
+
+function verify_integration_fix_markers() {
+  # #1912 (K3 WISE M1 Material Save-only) must be present in the packaged adapters AND
+  # BUILD_PROVENANCE must agree. Each side is checked independently with a distinct
+  # failure message, so a stale adapter (build predates the fix) or a stale/lying
+  # provenance file is caught and the disagreeing side is named.
+  local root="$1"
+  local prov="${root}/BUILD_PROVENANCE.json"
+  local doc_templates="${root}/plugins/plugin-integration-core/lib/adapters/k3-wise-document-templates.cjs"
+  local webapi_adapter="${root}/plugins/plugin-integration-core/lib/adapters/k3-wise-webapi-adapter.cjs"
+  local marker='material-k3wise-customer-profile-v1'
+  local adapter_has=0
+  local prov_claims=0
+
+  search_fixed_string "$marker" "$doc_templates" && adapter_has=1 || true
+  search_fixed_string '"embedded": true' "$prov" && prov_claims=1 || true
+
+  if [[ "$prov_claims" == "1" && "$adapter_has" == "0" ]]; then
+    die "BUILD_PROVENANCE claims issue1912 embedded=true but packaged k3-wise-document-templates.cjs is MISSING the '${marker}' marker (stale adapter in the package)"
+  fi
+  if [[ "$prov_claims" == "0" && "$adapter_has" == "1" ]]; then
+    die "Packaged k3-wise-document-templates.cjs contains the '${marker}' marker but BUILD_PROVENANCE reports issue1912 embedded!=true (provenance file is stale or wrong)"
+  fi
+  if [[ "$adapter_has" == "0" ]]; then
+    die "#1912 marker '${marker}' not found in packaged k3-wise-document-templates.cjs (build predates the M1 Material Save-only fix)"
+  fi
+  # Fail-closed validation half of #1912 (separate adapter file).
+  search_fixed_string 'Unknown K3 WISE material profile' "$webapi_adapter" || die "#1912 fail-closed marker ('Unknown K3 WISE material profile') not found in packaged k3-wise-webapi-adapter.cjs"
+}
+
 function verify_migration_bridge_contract() {
   local root="$1"
   local provider="${root}/packages/core-backend/dist/src/db/migration-provider.js"
@@ -568,6 +611,10 @@ function verify_sha() {
   fi
 }
 
+# When sourced (e.g. by the focused test), define functions only — do not run the
+# package verification main flow. Direct execution (BASH_SOURCE[0] == $0) runs normally.
+if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" ]]; then
+
 [[ -n "$PACKAGE_FILE" ]] || die "Usage: scripts/ops/multitable-onprem-package-verify.sh <package.tgz|package.zip>"
 [[ -f "$PACKAGE_FILE" ]] || die "Package not found: ${PACKAGE_FILE}"
 
@@ -618,6 +665,7 @@ pkg_root="${EXTRACT_ROOT}/${pkg_name}"
 required=(
   "DEPLOYMENT.txt"
   "PACKAGE-METADATA.json"
+  "BUILD_PROVENANCE.json"
   "apps/web/dist/index.html"
   "apps/web/package.json"
   "packages/core-backend/dist/src/index.js"
@@ -746,6 +794,8 @@ verify_windows_entrypoints "$pkg_root"
 verify_root_runtime_dependencies "$pkg_root"
 verify_integration_plugin_runtime_dependencies "$pkg_root"
 verify_deployable_artifact_contract "$pkg_root"
+verify_build_provenance "$pkg_root"
+verify_integration_fix_markers "$pkg_root"
 verify_migration_bridge_contract "$pkg_root"
 verify_generic_integration_workbench_contract "$pkg_root"
 verify_bridge_agent_tooling_contract "$pkg_root"
@@ -765,3 +815,5 @@ fi
 if [[ -n "$VERIFY_REPORT_MD" ]]; then
   info "  verify_report_md: ${VERIFY_REPORT_MD}"
 fi
+
+fi  # end direct-execution guard
