@@ -109,6 +109,13 @@ function createK3FetchMock() {
           Data: [{ FNumber: record.FNumber, Data: { FStatus: false, FItemID: 0, FMessage: 'nested unit group parameter invalid' } }],
         })
       }
+      if (record.FNumber === 'SECRETFAIL') {
+        return jsonResponse(200, {
+          StatusCode: 200,
+          Message: 'Successful',
+          Data: [{ FStatus: false, FItemID: 0, FMessage: 'save failed: postgres://k3user:s3cretpw@db.internal/erp rejected the request' }],
+        })
+      }
       if (parsed.searchParams.get('Token')) {
         return jsonResponse(200, {
           StatusCode: 200,
@@ -833,6 +840,98 @@ async function testK3WebApiNestedDataSaveParse() {
   assert.equal(flat.results[0].externalId, 1001, 'flat externalId unchanged')
 }
 
+// Customer-profiled Material Save: base-data shaping (G3), fail-closed placeholder guard,
+// save-only locks, and conservative redacted row diagnostics (M1 fix §4/§5).
+function profileSystem() {
+  return createK3WebApiSystem({
+    config: {
+      baseUrl: 'https://k3.example.test',
+      autoSubmit: false,
+      autoAudit: false,
+      objects: { material: { profile: 'material-k3wise-customer-profile-v1' } },
+    },
+  })
+}
+
+async function testK3WebApiCustomerProfile() {
+  // ----- base-data object shaping (G3): numbered -> {FNumber}, enum/category -> {FID} -----
+  {
+    const { calls, fetchImpl } = createK3FetchMock()
+    const adapter = createK3WiseWebApiAdapter({ system: profileSystem(), fetchImpl })
+    const upsert = await adapter.upsert({
+      object: 'material',
+      records: [{ FNumber: 'SHAPE01', FName: 'Shaped', FUnitGroupID: '10', FErpClsID: '1001' }],
+      keyFields: ['FNumber'],
+    })
+    assert.equal(upsert.written, 1, 'profile save succeeds')
+    const saveCall = calls.find((call) => call.pathname === '/K3API/Material/Save')
+    assert.deepEqual(saveCall.body.Data.FUnitGroupID, { FNumber: '10' }, 'numbered base data wrapped {FNumber}')
+    assert.deepEqual(saveCall.body.Data.FErpClsID, { FID: '1001' }, 'enum/category wrapped {FID}')
+  }
+
+  // ----- fail-closed placeholder: unreplaced <fill-outside-git> never reaches K3 -----
+  {
+    const { calls, fetchImpl } = createK3FetchMock()
+    const adapter = createK3WiseWebApiAdapter({ system: profileSystem(), fetchImpl })
+    const upsert = await adapter.upsert({
+      object: 'material',
+      records: [{ FNumber: 'PH01', FName: 'Has placeholder', FUnitGroupID: '<fill-outside-git>' }],
+      keyFields: ['FNumber'],
+    })
+    assert.equal(upsert.written, 0, 'placeholder row is not written')
+    assert.equal(upsert.failed, 1)
+    assert.equal(upsert.errors[0].code, 'K3_WISE_PRESET_PLACEHOLDER_UNFILLED')
+    assert.equal(
+      calls.some((call) => call.pathname === '/K3API/Material/Save'),
+      false,
+      'fail-closed: NO Material/Save HTTP call was made for the placeholder row',
+    )
+  }
+
+  // ----- save-only locks: profile (no submit/audit path) + auto flags false -> no Submit/Audit -----
+  {
+    const { calls, fetchImpl } = createK3FetchMock()
+    const adapter = createK3WiseWebApiAdapter({ system: profileSystem(), fetchImpl })
+    await adapter.upsert({
+      object: 'material',
+      records: [{ FNumber: 'NESTEDOK', FName: 'Save only' }],
+      keyFields: ['FNumber'],
+    })
+    assert.ok(calls.some((call) => call.pathname === '/K3API/Material/Save'), 'save attempted')
+    assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Submit'), false, 'no Submit call')
+    assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Audit'), false, 'no Audit call')
+  }
+
+  // ----- conservative redacted row diagnostics (G5 / R-REDACT) -----
+  {
+    const { fetchImpl } = createK3FetchMock()
+    const adapter = createK3WiseWebApiAdapter({ system: profileSystem(), fetchImpl })
+    const upsert = await adapter.upsert({
+      object: 'material',
+      records: [
+        { FNumber: 'SECRETFAIL', FName: 'a', sourceId: 'plm-code-9' },
+        { FNumber: 'SECRETFAIL', FName: 'b', sourceId: '550e8400-e29b-41d4-a716-446655440000' },
+      ],
+      keyFields: ['FNumber'],
+    })
+    assert.equal(upsert.failed, 2)
+    const diag = upsert.errors[0].diagnostic
+    assert.deepEqual(Object.keys(diag).sort(), ['responseCode', 'rowKeys', 'rowStatus', 'validationMessage'])
+    assert.equal(diag.rowStatus, 'failed')
+    assert.match(diag.rowKeys.k3Key, /^sha12:[0-9a-f]{12}$/, 'K3 key is hashed, never raw')
+    assert.match(diag.rowKeys.sourceId, /^sha12:/, 'non-UUID sourceId is hashed')
+    // Second row: a confirmed internal UUID sourceId is kept in full.
+    assert.equal(upsert.errors[1].diagnostic.rowKeys.sourceId, '550e8400-e29b-41d4-a716-446655440000')
+    // Secret-shaped value in the K3 message is scrubbed; benign text survives.
+    const serialized = JSON.stringify(diag)
+    assert.equal(serialized.includes('SECRETFAIL'), false, 'raw FNumber absent from diagnostic')
+    assert.equal(serialized.includes('s3cretpw'), false, 'secret scrubbed from validation message')
+    assert.match(diag.validationMessage, /save failed/i, 'benign diagnostic text survives')
+    // The surfaced error.message is also scrubbed.
+    assert.equal(upsert.errors[0].message.includes('s3cretpw'), false, 'error.message scrubbed too')
+  }
+}
+
 async function testK3SqlServerChannel() {
   const executorCalls = []
   const queryExecutor = {
@@ -1178,6 +1277,7 @@ async function main() {
   await testK3WebApiAuthorityCodeToken()
   await testK3WebApiSaveBusinessEvidence()
   await testK3WebApiNestedDataSaveParse()
+  await testK3WebApiCustomerProfile()
   testSqlServerConnectionConfigNormalization()
   await testK3SqlServerChannel()
   await testK3WebApiAutoFlagCoercion()

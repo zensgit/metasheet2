@@ -20,10 +20,13 @@ const {
 } = require('../contracts.cjs')
 const {
   getK3WiseDocumentObjectDefaults,
+  getK3WiseMaterialProfile,
   listK3WiseDocumentTemplates,
   mergeK3WiseDocumentObject,
   normalizeTemplate,
 } = require('./k3-wise-document-templates.cjs')
+const crypto = require('node:crypto')
+const { scrubSecretStringValue } = require('../payload-redaction.cjs')
 
 class K3WiseWebApiAdapterError extends Error {
   constructor(message, details = {}) {
@@ -370,12 +373,26 @@ function normalizeObjects(config) {
   const configured = toPlainObject(config.objects, 'config.objects')
   const normalized = {}
   for (const [name, defaults] of Object.entries(DEFAULT_OBJECTS)) {
+    const configuredObject = isPlainObject(configured[name]) ? configured[name] : {}
+    let base = defaults
+    let overlay = configuredObject
+    // R-OPTIN: a config may select a named profile by id (the customer Material Save
+    // preset). When selected, the profile REPLACES the generic template as the merge base
+    // (the default template is never silently swapped — only on explicit opt-in). Operator
+    // config still overlays on top; the `profile` key itself is metadata, not a template field.
+    if (name === 'material' && typeof configuredObject.profile === 'string' && configuredObject.profile.trim()) {
+      const profile = getK3WiseMaterialProfile(configuredObject.profile)
+      if (!profile) {
+        throw new AdapterValidationError(`Unknown K3 WISE material profile: ${configuredObject.profile}`, {
+          field: `config.objects.${name}.profile`,
+        })
+      }
+      base = profile
+      overlay = { ...configuredObject }
+      delete overlay.profile
+    }
     try {
-      normalized[name] = mergeK3WiseDocumentObject(
-        defaults,
-        isPlainObject(configured[name]) ? configured[name] : {},
-        `config.objects.${name}`,
-      )
+      normalized[name] = mergeK3WiseDocumentObject(base, overlay, `config.objects.${name}`)
     } catch (error) {
       throw new AdapterValidationError(error.message, {
         field: `config.objects.${name}`,
@@ -440,6 +457,80 @@ function buildSaveBody(record, request, objectConfig) {
   return base
 }
 
+// A value that IS exactly a `<…>` token (template placeholder), not one that merely
+// contains angle brackets. Anchored so real values like "<M6>" specs are not over-matched
+// unless the whole value is a bare sentinel.
+const PLACEHOLDER_SENTINEL = /^<[^>]+>$/
+
+// Fail-closed: an unreplaced preset placeholder must never reach a K3 Save. Scan the
+// projected body recursively (reference shapes nest the placeholder one level down) and
+// reject BEFORE the HTTP call so a half-configured profile errors cleanly instead of
+// writing corrupt data to K3.
+function assertNoUnfilledPlaceholders(value, fieldPath) {
+  if (typeof value === 'string') {
+    if (PLACEHOLDER_SENTINEL.test(value.trim())) {
+      throw new AdapterValidationError(
+        `K3 WISE Save body has an unfilled placeholder at ${fieldPath}; supply the customer value before saving`,
+        { code: 'K3_WISE_PRESET_PLACEHOLDER_UNFILLED', field: fieldPath },
+      )
+    }
+    return
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertNoUnfilledPlaceholders(item, `${fieldPath}[${index}]`))
+    return
+  }
+  if (isPlainObject(value)) {
+    for (const [key, child] of Object.entries(value)) {
+      assertNoUnfilledPlaceholders(child, `${fieldPath}.${key}`)
+    }
+  }
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const DIAGNOSTIC_MESSAGE_MAX = 500
+
+function hashToken(value) {
+  return `sha12:${crypto.createHash('sha256').update(String(value)).digest('hex').slice(0, 12)}`
+}
+
+// Conservative row-key disposition (M1 R-REDACT): K3 identifiers (FNumber / ref codes) are
+// never persisted in full — only a stable hash token for correlation.
+function maskRowKey(value) {
+  return isBlankValue(value) ? null : hashToken(value)
+}
+
+// A sourceId is kept in full ONLY when it is a confirmed MetaSheet internal UUID; any other
+// shape (PLM / customer business code) is hashed too — default to masking when in doubt.
+function dispositionSourceId(value) {
+  if (isBlankValue(value)) return undefined
+  const str = String(value).trim()
+  return UUID_RE.test(str) ? str : hashToken(str)
+}
+
+function truncateDiagnosticMessage(value) {
+  const str = String(value)
+  return str.length > DIAGNOSTIC_MESSAGE_MAX ? `${str.slice(0, DIAGNOSTIC_MESSAGE_MAX)}…` : str
+}
+
+// Build a sanitized, conservative per-row Save diagnostic (G5 / R-REDACT). Persists ONLY:
+// rowStatus, masked/hashed row keys, response code, and a redacted + truncated validation
+// message. Never the raw FNumber, K3 ref values, token, host, authorityCode, password, or
+// connection string — the message is scrubbed via scrubSecretStringValue.
+function buildRowSaveDiagnostic({ status, record, key, error }) {
+  const rawMessage = error && error.message ? String(error.message) : ''
+  const code = error && error.details && error.details.code ? error.details.code : undefined
+  return {
+    rowStatus: status,
+    rowKeys: {
+      k3Key: maskRowKey(key),
+      sourceId: dispositionSourceId(isPlainObject(record) ? record.sourceId : undefined),
+    },
+    responseCode: code !== undefined && code !== null ? String(code) : null,
+    validationMessage: rawMessage ? truncateDiagnosticMessage(scrubSecretStringValue(rawMessage)) : null,
+  }
+}
+
 function projectRecordForBody(record, objectConfig) {
   if (objectConfig.passThroughBody === true) return record
   if (!isPlainObject(record)) return record
@@ -458,6 +549,7 @@ function projectRecordForBody(record, objectConfig) {
       if (!isBlankValue(value)) projected[fieldName] = value
     }
   }
+  assertNoUnfilledPlaceholders(projected, 'Data')
   return projected
 }
 
@@ -1212,15 +1304,19 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
           raw: save.data,
         })
       } catch (error) {
+        const rawMessage = error && error.message ? error.message : String(error)
         errors.push({
           index,
           key,
           object: request.object,
           code: error && error.details && error.details.code ? error.details.code : 'K3_WISE_UPSERT_FAILED',
-          message: error && error.message ? error.message : String(error),
+          message: scrubSecretStringValue(rawMessage),
           responseSummary: error && error.details && error.details.responseSummary
             ? error.details.responseSummary
             : undefined,
+          // Conservative sanitized row diagnostic (G5 / R-REDACT) — masked keys, scrubbed
+          // message; intended as the persisted artifact for explaining the row failure.
+          diagnostic: buildRowSaveDiagnostic({ status: 'failed', record, key, error }),
         })
       }
     }
