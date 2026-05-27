@@ -282,6 +282,23 @@ async function main() {
   assert.equal(replayed.lastReplayRunId, 'run_2')
   assert.equal(replayed.retryCount, 1)
 
+  // provenance hardening: a secret-shaped value in the free-text errorMessage must be
+  // scrubbed before persistence (it rides into the run-monitoring UI and survives replay).
+  const secretDl = await deadLetters.create({
+    id: 'dl_secret',
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    runId: 'run_1',
+    pipelineId: 'pipe_1',
+    sourcePayload: { code: 'S-01' },
+    errorCode: 'TARGET_WRITE_FAILED',
+    errorMessage: 'K3 connect failed: jdbc:sqlserver://user:P@ssw0rd@host;databaseName=db token=ABC123DEF456',
+  })
+  assert.ok(!secretDl.errorMessage.includes('P@ssw0rd'), 'dead-letter errorMessage must not leak DSN password')
+  assert.ok(!secretDl.errorMessage.includes('ABC123DEF456'), 'dead-letter errorMessage must not leak token value')
+  assert.match(secretDl.errorMessage, /\[redacted\]/)
+  assert.match(secretDl.errorMessage, /K3 connect failed/) // non-secret diagnostic context preserved
+
   await deadLetters.create({
     id: 'dl_discarded_store',
     tenantId: 'tenant_1',
