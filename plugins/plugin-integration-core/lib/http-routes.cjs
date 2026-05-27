@@ -31,7 +31,11 @@ const ROUTES = [
   ['POST', '/api/integration/dead-letters/:id/replay', 'deadLettersReplay'],
 ]
 const { sanitizeIntegrationPayload, scrubSecretStringValue } = require('./payload-redaction.cjs')
-const { getPath, setPath, transformRecord } = require('./transform-engine.cjs')
+const { getPath, transformRecord } = require('./transform-engine.cjs')
+// DF-T1-0: compose the no-write preview through the SAME K3 Save-body composer the adapter
+// uses, so the preview is byte-identical to the real Save (single source of truth — replaces
+// the former divergent applyPreviewReferenceShape/projectRecordForTemplate copies).
+const { projectRecordForBody, findUnfilledPlaceholders } = require('./adapters/k3-save-body-composer.cjs')
 const { validateRecord } = require('./validator.cjs')
 
 class HttpRouteError extends Error {
@@ -577,31 +581,9 @@ function schemaRequiredErrors(record, schema) {
   return errors
 }
 
-function projectRecordForTemplate(record, schema) {
-  if (!Array.isArray(schema) || schema.length === 0) return record
-  const projected = {}
-  for (const field of schema) {
-    const value = getPath(record, field.name)
-    if (value !== undefined) setPath(projected, field.name, applyPreviewReferenceShape(value, field))
-  }
-  return projected
-}
-
-function normalizePreviewReferenceIdentifier(field) {
-  const reference = field && isPlainObject(field.reference) ? field.reference : null
-  const identifier = firstString(
-    reference && reference.identifier,
-    reference && reference.identifierField,
-    reference && reference.key,
-  )
-  return identifier || null
-}
-
-function applyPreviewReferenceShape(value, field) {
-  const identifier = normalizePreviewReferenceIdentifier(field)
-  if (!identifier || value === undefined || value === null || value === '' || isPlainObject(value)) return value
-  return { [identifier]: value }
-}
+// projectRecordForTemplate / applyPreviewReferenceShape / normalizePreviewReferenceIdentifier
+// moved to the shared K3 Save-body composer (DF-T1-0): the preview now composes
+// byte-identically to the adapter Save instead of via a divergent duplicate.
 
 function buildTemplatePreview(input) {
   if (!isPlainObject(input)) {
@@ -615,14 +597,24 @@ function buildTemplatePreview(input) {
   const transformed = transformRecord(input.sourceRecord, fieldMappings)
   const validation = transformed.ok ? validateRecord(transformed.value, fieldMappings) : { ok: true, valid: true, errors: [] }
   const requiredErrors = transformed.ok ? schemaRequiredErrors(transformed.value, template.schema) : []
-  const targetRecord = projectRecordForTemplate(transformed.value, template.schema)
+  // Compose through the shared composer (same projection + reference shaping + drop-blank the
+  // adapter Save uses). template carries .schema + .bodyKey, so it serves as the objectConfig.
+  const targetRecord = projectRecordForBody(transformed.value, template)
   const payload = {
     [template.bodyKey]: cloneJson(targetRecord),
   }
+  // Same placeholder DETECTION as the Save path; the preview's disposition is valid:false
+  // (the Save path throws). A clean preview therefore cannot hide a placeholder the Save rejects.
+  const placeholderErrors = findUnfilledPlaceholders(payload).map((path) => ({
+    field: path,
+    code: 'UNFILLED_PLACEHOLDER',
+    message: `unfilled template placeholder at ${path}`,
+  }))
   const errors = [
     ...transformed.errors,
     ...validation.errors,
     ...requiredErrors,
+    ...placeholderErrors,
   ].map((error) => cloneJson(error))
   return sanitizeIntegrationPayload({
     valid: errors.length === 0,
@@ -632,6 +624,7 @@ function buildTemplatePreview(input) {
     transformErrors: transformed.errors.map((error) => cloneJson(error)),
     validationErrors: validation.errors.map((error) => cloneJson(error)),
     schemaErrors: requiredErrors.map((error) => cloneJson(error)),
+    placeholderErrors: placeholderErrors.map((error) => cloneJson(error)),
     template: template.meta,
   })
 }
