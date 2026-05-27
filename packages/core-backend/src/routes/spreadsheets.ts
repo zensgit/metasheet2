@@ -27,6 +27,15 @@ interface CellReadQuery {
   endRow?: number
 }
 
+interface CellSearchQuery {
+  q: string
+  limit: number
+  offset: number
+}
+
+const DEFAULT_CELL_SEARCH_LIMIT = 50
+const MAX_CELL_SEARCH_LIMIT = 200
+
 function getActorId(req: Request): string | undefined {
   const user = req.user
   if (!user) return undefined
@@ -75,6 +84,39 @@ function parseCellReadQuery(query: Request['query']): { value?: CellReadQuery; e
   }
 
   return { value: parsed }
+}
+
+function parseCellSearchQuery(query: Request['query']): { value?: CellSearchQuery; error?: string } {
+  const rawSearch = query.q ?? query.query
+  if (Array.isArray(rawSearch)) {
+    return { error: 'q must be a single non-empty string' }
+  }
+
+  const q = typeof rawSearch === 'string' ? rawSearch.trim() : ''
+  if (!q) {
+    return { error: 'q must be a non-empty string' }
+  }
+
+  const parsedLimit = parseOptionalNonNegativeInteger(query.limit, 'limit')
+  if (parsedLimit.error) return { error: parsedLimit.error }
+  if (parsedLimit.value !== undefined && parsedLimit.value > MAX_CELL_SEARCH_LIMIT) {
+    return { error: `limit must be less than or equal to ${MAX_CELL_SEARCH_LIMIT}` }
+  }
+
+  const parsedOffset = parseOptionalNonNegativeInteger(query.offset, 'offset')
+  if (parsedOffset.error) return { error: parsedOffset.error }
+
+  return {
+    value: {
+      q,
+      limit: parsedLimit.value ?? DEFAULT_CELL_SEARCH_LIMIT,
+      offset: parsedOffset.value ?? 0,
+    },
+  }
+}
+
+function escapeSqlLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, '\\$&')
 }
 
 /**
@@ -223,6 +265,66 @@ export function spreadsheetsRouter(_injector?: Injector, options: SpreadsheetRou
     } catch (error) {
       logger.error('Failed to load spreadsheet', error as Error)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load spreadsheet' } })
+    }
+  })
+
+  r.get('/api/spreadsheets/:id/search', rbacGuard('spreadsheets', 'read'), async (req: Request, res: Response) => {
+    const id = req.params.id
+    const parsed = parseCellSearchQuery(req.query)
+    if (parsed.error) {
+      return res.status(400).json({ ok: false, error: { code: 'INVALID_QUERY', message: parsed.error } })
+    }
+    const { q, limit, offset } = parsed.value
+    const pattern = `%${escapeSqlLikePattern(q)}%`
+
+    try {
+      const spreadsheet = await db
+        .selectFrom('spreadsheets')
+        .select(['id'])
+        .where('id', '=', id)
+        .where('deleted_at', 'is', null)
+        .executeTakeFirst()
+
+      if (!spreadsheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Spreadsheet not found' } })
+      }
+
+      const items = await db
+        .selectFrom('cells')
+        .innerJoin('sheets', 'sheets.id', 'cells.sheet_id')
+        .select([
+          'cells.id',
+          'cells.sheet_id',
+          'cells.row_index',
+          'cells.column_index',
+          'cells.value',
+          'cells.data_type',
+          'cells.formula',
+          'cells.computed_value',
+          'cells.version',
+          'cells.created_at',
+          'cells.updated_at',
+          'sheets.name as sheet_name',
+          'sheets.order_index as sheet_order_index',
+        ])
+        .where('sheets.spreadsheet_id', '=', id)
+        .where(sql<boolean>`(
+          COALESCE(cells.value::text, '') ILIKE ${pattern} ESCAPE '\\'
+          OR COALESCE(cells.computed_value::text, '') ILIKE ${pattern} ESCAPE '\\'
+          OR COALESCE(cells.formula, '') ILIKE ${pattern} ESCAPE '\\'
+          OR COALESCE(cells.data_type, '') ILIKE ${pattern} ESCAPE '\\'
+        )`)
+        .orderBy('sheets.order_index', 'asc')
+        .orderBy('cells.row_index', 'asc')
+        .orderBy('cells.column_index', 'asc')
+        .limit(limit)
+        .offset(offset)
+        .execute()
+
+      return res.json({ ok: true, data: { q, limit, offset, items } })
+    } catch (error) {
+      logger.error('Failed to search spreadsheet cells', error as Error)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to search spreadsheet cells' } })
     }
   })
 
