@@ -55,6 +55,8 @@ if [[ "$RUN_MIGRATIONS" == "1" ]]; then
   run node "${ROOT_DIR}/packages/core-backend/dist/src/db/migrate.js"
 fi
 
+run "${ROOT_DIR}/scripts/ops/attendance-onprem-publish-web-dist.sh"
+
 if [[ "$START_SERVICE" == "1" ]]; then
   if [[ "$SERVICE_MANAGER" == "pm2" ]]; then
     run mkdir -p "${ROOT_DIR}/output/logs"

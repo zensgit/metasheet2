@@ -78,6 +78,8 @@ metasheet/
     attendance-onprem-env-check.sh
     attendance-onprem-healthcheck.sh
     attendance-onprem-update.sh
+    attendance-onprem-publish-web-dist.sh
+    attendance-onprem-publish-web-dist.ps1
     attendance-wsl-portproxy-refresh.ps1
     attendance-wsl-portproxy-task.ps1
   docker/app.env.example
@@ -94,6 +96,7 @@ metasheet/
 
 - `apps/web/dist` 与 `packages/core-backend/dist` 现在是交付包必选项（非可选）。
 - `plugins/` 下只允许包含 `plugin-attendance`，确保交付包是“考勤专用”。
+- 安装/升级会把包内 `apps/web/dist` 发布到 nginx root。默认 root 为当前部署目录的 `apps/web/dist`；如果包先解压在 `packages/<package>/<package>` 下，脚本会自动发布到上层部署根的 `apps/web/dist`。特殊 nginx root 可用 `WEB_DIST_TARGET` 覆盖。
 
 ## 2. 首次安装（照抄）
 
