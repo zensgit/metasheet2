@@ -127,6 +127,52 @@ function main() {
   assert.equal(longSecret.blob.includes('u:p@'), false, 'raw password not exposed in truncated head')
   assert.equal(longSecret.blob.endsWith('...[truncated]'), true)
 
+  // value-scrub coverage extension: secret-shaped key=value beyond password/pwd,
+  // and standalone JWTs — all must redact even under a benign key.
+  const moreSecretValues = [
+    ['token=ABC123DEF456GHI789', 'token=[redacted]'],
+    ['api_key=sk_live_0123456789abcdef', 'api_key=[redacted]'],
+    ['apikey=0123456789abcdef', 'apikey=[redacted]'],
+    ['secret=topSecretValue123', 'secret=[redacted]'],
+    ['access_token=xyz987abc654', 'access_token=[redacted]'],
+    ['client_secret=cs_abc123def', 'client_secret=[redacted]'],
+    ['refresh_token=rt_998877', 'refresh_token=[redacted]'],
+    // standalone JWT with no Bearer/token= prefix
+    ['auth eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.SflKxwRJSMeKKF2QT4fwpM', 'auth [redacted-jwt]'],
+  ]
+  for (const [input, expected] of moreSecretValues) {
+    assert.equal(scrubSecretStringValue(input), expected, `secret value must be scrubbed: ${input}`)
+  }
+
+  // benign-key leak path through the live sanitizer (the F1 the value-scrub closes)
+  const leakObj = sanitizeIntegrationPayload({
+    detail: 'callback rejected: token=ABC123DEF456 expired',
+    note: 'use api_key=sk_test_abcdef when calling',
+    trace: 'id token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.aGVsbG8td29ybGQtc2ln',
+  })
+  assert.equal(leakObj.detail, 'callback rejected: token=[redacted] expired')
+  assert.equal(leakObj.note, 'use api_key=[redacted] when calling')
+  assert.equal(leakObj.trace.includes('[redacted-jwt]'), true)
+  assert.equal(leakObj.trace.includes('eyJhbGci'), false, 'raw JWT head must not survive')
+
+  // Bearer-prefixed JWT still redacted (regression on the existing Bearer rule)
+  assert.equal(
+    scrubSecretStringValue('Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.aGVsbG8td29ybGQ'),
+    'Authorization: Bearer [redacted]',
+  )
+
+  // extended false-positive matrix — these MUST survive (no `=`, or not JWT-shaped)
+  const benignExtended = [
+    'keep it secret, keep it safe',
+    'tokens of appreciation were handed out',
+    'the client secret handshake is documented here',
+    'order qty=2 price=100 status=open',
+    'base64 thumbnail starts eyJonly-one-segment-no-dots here',
+  ]
+  for (const s of benignExtended) {
+    assert.equal(scrubSecretStringValue(s), s, `benign string must not be over-redacted: ${s}`)
+  }
+
   console.log('✓ payload-redaction: sensitive key + value-scrub + false-positive matrix tests passed')
 }
 
