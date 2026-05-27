@@ -1005,6 +1005,70 @@ async function validateLookupRollupConfig(
   return null
 }
 
+/**
+ * A2-defense (formula→formula guard). The product does NOT support a formula field
+ * referencing another formula field: the frontend hard-blocks it (the token picker
+ * `formulaSourceFields` excludes `type === 'formula'`, and the expression validator
+ * flags a hand-typed formula ref as an error that disables save), and
+ * `recalculateRecord` has no intra-record topological order — so a formula→formula
+ * chain would silently compute against stale intermediate values. This closes the
+ * raw-API path the frontend can't. lookup/rollup fields ARE permitted as formula
+ * inputs (the frontend offers them — only `type !== 'formula'` is filtered), so only
+ * `formula`-typed references and self-references are rejected. Unknown / missing
+ * references stay tolerated (current behavior; a separate decision). Returns an
+ * error message (matching `validateLookupRollupConfig`'s Chinese-with-field-id style)
+ * or null when the expression is clean.
+ */
+async function validateFormulaReferences(
+  query: QueryFn,
+  sheetId: string,
+  fieldId: string,
+  expression: string,
+): Promise<string | null> {
+  const refs = multitableFormulaEngine.extractFieldReferences(expression)
+  if (refs.length === 0) return null
+  if (refs.includes(fieldId)) {
+    return `公式字段不能引用自身：{${fieldId}}`
+  }
+  const res = await query(
+    'SELECT id, type FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])',
+    [sheetId, refs],
+  )
+  const formulaRefs = (res.rows as Array<{ id: unknown; type: unknown }>)
+    .filter((row) => mapFieldType(String(row.type ?? '')) === 'formula')
+    .map((row) => String(row.id))
+  if (formulaRefs.length > 0) {
+    return `公式字段不能引用其它公式字段：${formulaRefs.map((id) => `{${id}}`).join('、')}`
+  }
+  return null
+}
+
+/**
+ * A2-defense reverse guard. Lists the *live* formula fields whose expression
+ * references `fieldId`, used to reject converting `fieldId` INTO a formula when a
+ * formula already depends on it (a path the forward guard never sees: A is created
+ * as a non-formula, formula B references A, then A is converted to formula). The
+ * JOIN + `mapFieldType` re-check is load-bearing: `formula_dependencies` is NOT
+ * cleaned up on field delete or on a formula→non-formula conversion, so it can hold
+ * stale edges pointing at fields that are no longer formulas — those must NOT block.
+ */
+async function findFormulaReferrers(
+  query: QueryFn,
+  sheetId: string,
+  fieldId: string,
+): Promise<string[]> {
+  const res = await query(
+    `SELECT DISTINCT fd.field_id AS field_id, mf.type AS type
+       FROM formula_dependencies fd
+       JOIN meta_fields mf ON mf.id = fd.field_id AND mf.sheet_id = fd.sheet_id
+      WHERE fd.sheet_id = $1 AND fd.depends_on_field_id = $2`,
+    [sheetId, fieldId],
+  )
+  return (res.rows as Array<{ field_id: unknown; type: unknown }>)
+    .filter((row) => mapFieldType(String(row.type ?? '')) === 'formula')
+    .map((row) => String(row.field_id))
+}
+
 function normalizeLinkIds(value: unknown): string[] {
   if (value === null || value === undefined) return []
 
@@ -4430,6 +4494,10 @@ export function univerMetaRouter(): Router {
         if (configError) {
           throw new ValidationError(configError)
         }
+        if (type === 'formula' && property?.expression) {
+          const formulaError = await validateFormulaReferences(query, sheetId, fieldId, String(property.expression))
+          if (formulaError) throw new ValidationError(formulaError)
+        }
 
         let order = desiredOrder
         if (typeof order !== 'number') {
@@ -4709,6 +4777,27 @@ export function univerMetaRouter(): Router {
         const configError = await validateLookupRollupConfig(req, query, sheetId, nextType, nextProperty)
         if (configError) {
           throw new ValidationError(configError)
+        }
+        // Only re-validate the expression when the caller is actually writing it
+        // (lazy/on-edit): `nextProperty` falls back to the stored `row.property`, so a
+        // rename-only PATCH on a pre-existing chained formula must NOT re-validate and
+        // 400. Gate on the payload explicitly carrying `property.expression`.
+        const expressionInPayload =
+          typeof parsed.data.property !== 'undefined'
+          && Object.prototype.hasOwnProperty.call(parsed.data.property ?? {}, 'expression')
+        if (nextType === 'formula' && expressionInPayload && nextProperty?.expression) {
+          const formulaError = await validateFormulaReferences(query, sheetId, fieldId, String(nextProperty.expression))
+          if (formulaError) throw new ValidationError(formulaError)
+        }
+        // Reverse guard: converting a non-formula field INTO a formula must not create
+        // a formula→formula edge that a formula already depends on (see findFormulaReferrers).
+        if (nextType === 'formula' && currentType !== 'formula') {
+          const referrers = await findFormulaReferrers(query, sheetId, fieldId)
+          if (referrers.length > 0) {
+            throw new ValidationError(
+              `无法将该字段转换为公式：已有公式字段引用它：${referrers.map((id) => `{${id}}`).join('、')}`,
+            )
+          }
         }
 
         if (typeof desiredOrder === 'number' && desiredOrder !== currentOrder) {
