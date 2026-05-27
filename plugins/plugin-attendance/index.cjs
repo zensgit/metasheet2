@@ -3466,18 +3466,23 @@ async function resolveAttendanceReportPeriodSyncPeriod(db, orgId, params = {}) {
       return { ok: false, status: 404, code: 'NOT_FOUND', message: 'Payroll cycle not found' }
     }
     const cycle = mapPayrollCycleRow(rows[0])
+    // §7 precise window verification (replaces the V1 coarse heuristic): only a cycle whose
+    // dates match its template's generated window maps to the month cap downstream.
+    const templateWindowMatches = await verifyAttendancePayrollCycleTemplateWindow(db, orgId, cycle)
     return {
       ok: true,
       period: {
         periodType: 'payroll_cycle',
         periodKey: `cycle:${cycle.id}`,
         cycleId: cycle.id,
-        // Carried for the comprehensive-hours cap mapping (coarse V1, see
+        // Carried for the comprehensive-hours cap mapping (see
         // docs/development/attendance-comprehensive-hours-payroll-cycle-cap-mapping-design-20260526.md
-        // §4). Presence of a templateId is a (coarse) monthly-cadence signal; absence → no cap.
-        // Mirrored top-level (alongside the nested `cycle`) on purpose so the builder stays
-        // agnostic of the cycle row shape — consistent with how `cycleId` is surfaced.
+        // §4/§7). Mirrored top-level (alongside the nested `cycle`) so the builder stays agnostic
+        // of the cycle row shape — consistent with how `cycleId` is surfaced.
         templateId: cycle.templateId || null,
+        // §7: true only when the cycle's dates equal the window its template would generate. The
+        // builder requires this (not just templateId presence) before mapping the month cap.
+        templateWindowMatches,
         periodName: cycle.name || cycle.id,
         from: cycle.startDate,
         to: cycle.endDate,
@@ -7152,6 +7157,32 @@ function addMonthsToDate(anchorDate, delta) {
   const { year, month, day } = getUtcParts(anchorDate)
   const next = addMonthsUtc(year, month, delta)
   return buildUtcDate(next.year, next.month, day)
+}
+
+// §7 precise cap-mapping check (see
+// docs/development/attendance-comprehensive-hours-payroll-cycle-cap-mapping-design-20260526.md §7):
+// does a payroll cycle's own dates actually match the window its template would generate? Read the
+// template, recompute its expected window anchored on the cycle's start date, and compare. This
+// replaces the V1 coarse "templateId present + span≤62" heuristic — a templateId-bearing cycle with
+// hand-entered dates that do NOT match the template window now fails verification (→ no cap).
+// Fail-closed: no templateId, missing template row, unparseable dates, or any read/compute error
+// all return false (the caller then stale-nulls the cap), so an old/partial schema never 503s the
+// period sync.
+async function verifyAttendancePayrollCycleTemplateWindow(db, orgId, cycle) {
+  try {
+    if (!cycle?.templateId || !cycle.startDate || !cycle.endDate) return false
+    const anchor = parseDateInput(cycle.startDate)
+    if (!anchor) return false
+    const rows = await db.query(
+      'SELECT * FROM attendance_payroll_templates WHERE id = $1 AND org_id = $2',
+      [cycle.templateId, orgId],
+    )
+    if (!Array.isArray(rows) || rows.length === 0) return false
+    const expected = resolvePayrollWindow(mapPayrollTemplateRow(rows[0]), anchor)
+    return expected.startDate === cycle.startDate && expected.endDate === cycle.endDate
+  } catch {
+    return false
+  }
 }
 
 function normalizeRuleOverride(value) {
@@ -12161,11 +12192,11 @@ function attendancePayrollCycleWithinMonthlySpan(from, to) {
 // Compute the four comprehensive-hours period values for one row. Fail-closed: a cap is
 // resolved only when one of the explicitly-supported period shapes matches —
 //   • date_range that bridges to an aligned month/quarter/year with a configured org default, or
-//   • payroll_cycle carrying a templateId whose span ≤62d (coarse monthly mapping → month cap,
-//     source=payroll_cycle_template_monthly).
-// custom_range / templateId-less or oversized payroll cycles / missing/unknown periodType /
-// unset cap all stale-null. Reuses the cap resolver (#1829) and the shared excess math — no
-// parallel computation.
+//   • payroll_cycle whose dates MATCH its template's generated window (§7: producer sets
+//     period.templateWindowMatches), span ≤62d → month cap, source=payroll_cycle_template_monthly.
+// custom_range / templateId-less / date-mismatched / oversized payroll cycles / missing/unknown
+// periodType / unset cap all stale-null. Reuses the cap resolver (#1829) and the shared excess
+// math — no parallel computation.
 function buildAttendanceComprehensiveHoursPeriodSummaryValues(settings, orgId, userId, period, actualMinutes) {
   const nullValues = {
     comprehensive_hours_excess_minutes: null,
@@ -12183,10 +12214,14 @@ function buildAttendanceComprehensiveHoursPeriodSummaryValues(settings, orgId, u
   } else if (
     period?.periodType === 'payroll_cycle'
     && period.templateId
+    && period.templateWindowMatches === true
     && attendancePayrollCycleWithinMonthlySpan(period.from, period.to)
   ) {
-    // Coarse monthly mapping: a template-bound, in-span payroll cycle resolves the month
-    // org default, stamped with the distinct payroll source label.
+    // §7 precise mapping: a payroll cycle whose dates MATCH its template's generated window
+    // (verified in the producer) resolves the month org default, stamped with the distinct
+    // payroll source label. templateWindowMatches subsumes the old coarse heuristic — a
+    // date-mismatched cycle now fails this branch and stale-nulls. The span guard is retained
+    // as cheap defense-in-depth (a matching monthly window is inherently ≤62d).
     cap = resolveAttendanceComprehensiveHoursCap(
       settings,
       orgId,
@@ -14241,6 +14276,7 @@ module.exports = {
     buildAttendanceComprehensiveHoursCapEffectiveKey,
     buildAttendanceComprehensiveHoursPeriodSummaryValues,
     attendancePayrollCycleWithinMonthlySpan,
+    verifyAttendancePayrollCycleTemplateWindow,
     ATTENDANCE_COMPREHENSIVE_HOURS_CAP_SOURCE_DEFAULT,
     ATTENDANCE_COMPREHENSIVE_HOURS_CAP_SOURCE_PAYROLL_MONTHLY,
     ATTENDANCE_COMPREHENSIVE_HOURS_PERIOD_VALUE_COLUMNS,
