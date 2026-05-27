@@ -200,6 +200,18 @@ next step only after PASS.
 | **C10** | **Evidence compiler signoff** | After C9 PASS | copy `scripts/ops/fixtures/integration-k3wise/evidence-onsite-c4-c9-template.json` outside Git, fill it, then run `node scripts/ops/integration-k3wise-live-poc-evidence.mjs --packet <packet.json> --evidence <filled-evidence.json>` | `decision=PASS` and `issues=[]` | `decision=FAIL` if any of `SAVE_ONLY_VIOLATED` / `SAVE_ONLY_ROW_COUNT` / `SAVE_ONLY_RUN_ID_REQUIRED` / `K3_RECORD_REQUIRED` / `BOM_PRODUCT_SCOPE_REQUIRED` / `BOM_RUN_ID_REQUIRED` / `BOM_ROW_COUNT` / `BOM_K3_RECORD_REQUIRED` / `BOM_K3_RESPONSE_REQUIRED` / `LEGACY_BOM_PRODUCT_ID_USED` fires; `decision=PARTIAL` when non-fail issues remain (typically checklist gaps) |
 | **C11** | **Delivery readiness compiler** | After C10 PASS, or earlier to show what remains blocked | see [C11 delivery readiness compiler](#c11-delivery-readiness-compiler) | before C10: `decision=CUSTOMER_TRIAL_READY`; after C10: `decision=CUSTOMER_TRIAL_SIGNED_OFF`; `productionUse.ready=false` remains explicit | `decision=BLOCKED`, missing package verify JSON, failed postdeploy smoke, failed preflight packet, or failed live evidence |
 
+### Material-only sub-acceptance lane (#1792)
+
+When the first live lane is **Material-only** (no BOM, no relationship mapping yet), the GATE contract checker accepts a narrower packet via `--scope material-only`:
+
+```bash
+node scripts/ops/integration-k3wise-gate-contract-check.mjs --input <packet.json> --scope material-only
+# fillable template:
+node scripts/ops/integration-k3wise-gate-contract-check.mjs --init-template <safe-dir> --scope material-only
+```
+
+Material-only requires only the material read answers `O1-MAT`, `O1-MAT-M`, `O6`, the `materialOnlySafety` answers (`materialScopeOnly` / `bomDeferred` / `saveOnlySeparateApproval` affirmations, `autoSubmit` / `autoAudit` denials, and a `previewFields` scope answer), and the single redacted material-detail sample (`sample-material-detail.redacted.json`). It deliberately omits BOM (`O1-BOM*`, `O4-BOM`) and relationship (`R1`–`R7`) evidence and the BOM / relationship / material-list samples. The report carries `scope: "material-only"` — it is **not** a full GATE pass and does **not** unblock the frozen K3 read/list + relationship-mapping runtime; the full lane (default `--scope full`, C3 above) is still required for that. See `docs/development/integration-k3wise-material-only-gate-checker-design-20260526.md`.
+
 ### C0.5 package verify report
 
 Run this against the exact package that will be installed. Capture both JSON
