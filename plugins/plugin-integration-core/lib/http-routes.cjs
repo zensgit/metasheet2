@@ -30,7 +30,7 @@ const ROUTES = [
   ['GET', '/api/integration/dead-letters', 'deadLettersList'],
   ['POST', '/api/integration/dead-letters/:id/replay', 'deadLettersReplay'],
 ]
-const { sanitizeIntegrationPayload } = require('./payload-redaction.cjs')
+const { sanitizeIntegrationPayload, scrubSecretStringValue } = require('./payload-redaction.cjs')
 const { getPath, setPath, transformRecord } = require('./transform-engine.cjs')
 const { validateRecord } = require('./validator.cjs')
 
@@ -274,10 +274,8 @@ const TEST_CONNECTION_RESULT_KEYS = new Set([
   'authenticated',
   'connected',
 ])
-const SECRET_TEXT_PATTERN = /(?:access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?id|api[_-]?key|secret|signature|sig|sign|password)=([^&#\s]+)/ig
-const AUTH_TEXT_PATTERN = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/ig
-const JWT_TEXT_PATTERN = /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g
-const SECRET_ID_PATTERN = /\bSEC[A-Za-z0-9_-]{12,}\b/g
+// Secret-text shapes are no longer maintained here — consolidated into the shared
+// scrubber (payload-redaction.cjs `scrubSecretStringValue`). See redactSecretText below.
 const DEFAULT_ADAPTER_SUPPORTS = ['testConnection', 'listObjects', 'getSchema', 'read', 'upsert']
 const DEFAULT_ADAPTER_ROLES = ['source', 'target', 'bidirectional']
 const DANGEROUS_JSON_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
@@ -381,18 +379,11 @@ const ADAPTER_METADATA = {
   },
 }
 
-function redactSecretText(value) {
-  if (typeof value !== 'string') return value
-  return value
-    .replace(/:\/\/([^:/?#\s]+):([^@/?#\s]+)@/g, '://[redacted]@')
-    .replace(SECRET_TEXT_PATTERN, (match) => {
-      const equals = match.indexOf('=')
-      return equals === -1 ? '[redacted]' : `${match.slice(0, equals + 1)}[redacted]`
-    })
-    .replace(AUTH_TEXT_PATTERN, '$1 [redacted]')
-    .replace(JWT_TEXT_PATTERN, '[redacted-jwt]')
-    .replace(SECRET_ID_PATTERN, '[redacted-secret-id]')
-}
+// Route-level secret-text redaction delegates to the shared scrubber
+// (payload-redaction.cjs) — single secret-shape source, no second regex set here.
+// DSN userinfo now preserves the username and masks only the password
+// (scheme://user:[redacted]@host), matching the shared diagnostic-preserving behavior.
+const redactSecretText = scrubSecretStringValue
 
 function isPlainObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))

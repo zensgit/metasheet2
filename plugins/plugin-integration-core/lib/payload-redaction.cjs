@@ -40,6 +40,30 @@ function isSensitivePayloadKey(key) {
   return SENSITIVE_PAYLOAD_KEYS.has(normalizeKey(key))
 }
 
+// Basic-auth credential heuristic: a real `Basic <base64>` decodes to a printable
+// "user:pass" (contains ':'). Used so benign phrases like "Basic authentication"
+// (whose word does NOT base64-decode to printable user:pass) are NOT redacted.
+function looksLikeBasicCredential(token) {
+  if (typeof token !== 'string' || token.length < 8) return false
+  let decoded
+  try {
+    decoded = Buffer.from(token, 'base64').toString('utf8')
+  } catch {
+    return false
+  }
+  // A real `Basic <base64>` decodes to a "user:pass" string: contains ':' and is
+  // valid printable text. Non-ASCII (e.g. CJK) user/pass is allowed; only control
+  // chars (C0/DEL/C1) and U+FFFD (invalid-UTF-8 garbage, i.e. a benign word that
+  // happened to base64-decode) are rejected -- so "Basic authentication" is kept
+  // while a base64 of a CJK user:pass is redacted.
+  if (!decoded.includes(':')) return false
+  for (let i = 0; i < decoded.length; i++) {
+    const c = decoded.charCodeAt(i)
+    if (c <= 0x1f || (c >= 0x7f && c <= 0x9f) || c === 0xfffd) return false
+  }
+  return true
+}
+
 // Value-based secret scrubbing. Key-based redaction only fires when the KEY is
 // sensitive; a secret riding inside a benign string value (error messages,
 // `details`, free text) would otherwise leak. These patterns mask the secret
@@ -54,16 +78,22 @@ const SECRET_VALUE_PATTERNS = Object.freeze([
   // authority via [^\s/?#]+), so passwords that themselves contain `@`
   // (e.g. user:P@ssw0rd@host) are fully masked, not just up to the first `@`.
   { re: /\b([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+):[^\s/?#]+@([^\s/@:;?#]+)/gi, replace: '$1:[redacted]@$2' },
-  // key=value credential params (ODBC / SQL Server / JDBC query, URL query, free text):
-  // password / pwd / passwd / secret / client_secret / token / access_token /
-  // refresh_token / api_key / apikey. Anchored on `key=` so benign prose like the
-  // word "secret" or "token" (no `=`) is never matched.
-  { re: /\b(password|pwd|passwd|secret|client[_-]?secret|token|access[_-]?token|refresh[_-]?token|api[_-]?key|apikey)=([^;&\s"']+)/gi, replace: '$1=[redacted]' },
-  // Bearer token — require a long token-shaped value so "Bearer of bad news" is safe.
-  { re: /\b(Bearer)\s+([A-Za-z0-9._~+/-]{20,}=*)/g, replace: '$1 [redacted]' },
+  // key=value credential params (ODBC / SQL Server / JDBC query, URL query, free text).
+  // Union of the shared set and the former http-routes set (consolidated here so there
+  // is ONE secret-shape source). LEFT word-boundary anchored so benign prose never
+  // matches — e.g. "design=x" / "assign=y" do NOT match sign=/sig=.
+  { re: /\b(password|pwd|passwd|secret|client[_-]?secret|token|access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?id|signature|sig|sign|api[_-]?key|apikey)=([^;&\s"']+)/gi, replace: '$1=[redacted]' },
+  // Bearer token — token-shaped value (8+, incl '=' padding); "Bearer of bad news" is safe.
+  { re: /\b(Bearer)\s+([A-Za-z0-9._~+/=-]{8,})/g, replace: '$1 [redacted]' },
+  // Basic auth — HIGH-CONFIDENCE ONLY: the base64 token must decode to a printable
+  // "user:pass" (contains ':'), so "Basic authentication" / "Basic auth" are kept.
+  { re: /\b(Basic)\s+([A-Za-z0-9+/]+={0,2})/g, replace: (m, _kw, tok) => (looksLikeBasicCredential(tok) ? 'Basic [redacted]' : m) },
   // Standalone JWT (eyJ… three base64url segments) even without a Bearer/token= prefix.
   // The `eyJ` header + dotted-triple shape is JWT-specific; benign text won't match.
   { re: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, replace: '[redacted-jwt]' },
+  // Opaque secret id: SEC-prefixed, 12+ chars, REQUIRING at least one digit so plain
+  // uppercase prose ("SECTIONHEADING") is not scrubbed.
+  { re: /\bSEC(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9_-]{12,}\b/g, replace: '[redacted-secret-id]' },
 ])
 
 function scrubSecretStringValue(value) {
