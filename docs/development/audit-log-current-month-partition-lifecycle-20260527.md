@@ -16,7 +16,7 @@ This note covers the operational lifecycle for the partitioned `audit_logs` tabl
   - retry the original audit insert once;
   - rethrow unrelated insert errors and any retry failure.
 
-The self-heal path uses the database server calendar (`CURRENT_DATE`) so it stays aligned with the `created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP` value produced by PostgreSQL during the insert.
+The self-heal path uses the database server calendar (`CURRENT_DATE`) so it stays aligned with the `created_at DEFAULT CURRENT_TIMESTAMP` value produced by PostgreSQL during the insert.
 
 ## Operator verification
 

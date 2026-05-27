@@ -72,6 +72,17 @@ describe('AuditRepository audit_logs partition lifecycle', () => {
     expect(queryMock).toHaveBeenCalledTimes(1)
   })
 
+  it('throws a clear error if INSERT RETURNING produces no row', async () => {
+    queryMock.mockResolvedValueOnce({ rows: [], rowCount: 0 })
+
+    const repository = new AuditRepository()
+
+    await expect(repository.createAuditLog(buildAuditLogData())).rejects.toThrow(
+      'Failed to insert audit log: no rows returned',
+    )
+    expect(queryMock).toHaveBeenCalledTimes(1)
+  })
+
   it('can ensure the database server current-month partition directly', async () => {
     queryMock.mockResolvedValueOnce({ rows: [], rowCount: 0 })
 
@@ -82,6 +93,8 @@ describe('AuditRepository audit_logs partition lifecycle', () => {
     expect(queryMock).toHaveBeenCalledTimes(1)
     expect(queryMock.mock.calls[0][0]).toContain("partition_name := 'audit_logs_'")
     expect(queryMock.mock.calls[0][0]).toContain("DATE_TRUNC('month', CURRENT_DATE)")
-    expect(queryMock.mock.calls[0][0]).toContain('pg_advisory_xact_lock')
+    expect(queryMock.mock.calls[0][0]).toContain(
+      "pg_advisory_xact_lock(hashtext('audit_logs_partition'), hashtext(partition_name))",
+    )
   })
 })

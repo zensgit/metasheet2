@@ -263,7 +263,11 @@ export class AuditRepository {
 
     const insertAuditLog = async (): Promise<number> => {
       const result = await query<{ id: number }>(sql, values);
-      return result.rows[0].id;
+      const row = result.rows[0];
+      if (!row) {
+        throw new Error('Failed to insert audit log: no rows returned');
+      }
+      return row.id;
     };
 
     try {
@@ -558,7 +562,7 @@ export class AuditRepository {
         start_date := partition_date;
         end_date := partition_date + INTERVAL '1 month';
 
-        PERFORM pg_advisory_xact_lock(hashtext('audit_logs_partition_' || partition_name)::bigint);
+        PERFORM pg_advisory_xact_lock(hashtext('audit_logs_partition'), hashtext(partition_name));
 
         IF to_regclass(partition_name) IS NULL THEN
           EXECUTE format(
