@@ -20,6 +20,13 @@ interface SpreadsheetRouterOptions {
   db?: SpreadsheetDb
 }
 
+interface CellReadQuery {
+  limit?: number
+  offset?: number
+  startRow?: number
+  endRow?: number
+}
+
 function getActorId(req: Request): string | undefined {
   const user = req.user
   if (!user) return undefined
@@ -34,6 +41,40 @@ function toCellValue(value: unknown): Record<string, unknown> | null {
   if (value === null) return null
   if (typeof value === 'object') return value as Record<string, unknown>
   return { value }
+}
+
+function parseOptionalNonNegativeInteger(raw: unknown, field: string): { value?: number; error?: string } {
+  if (raw === undefined) return {}
+  if (Array.isArray(raw)) {
+    return { error: `${field} must be a single non-negative integer` }
+  }
+
+  const text = String(raw).trim()
+  if (!/^\d+$/.test(text)) {
+    return { error: `${field} must be a non-negative integer` }
+  }
+
+  const value = Number(text)
+  if (!Number.isSafeInteger(value)) {
+    return { error: `${field} must be a safe non-negative integer` }
+  }
+
+  return { value }
+}
+
+function parseCellReadQuery(query: Request['query']): { value?: CellReadQuery; error?: string } {
+  const parsed: CellReadQuery = {}
+  for (const field of ['limit', 'offset', 'startRow', 'endRow'] as const) {
+    const result = parseOptionalNonNegativeInteger(query[field], field)
+    if (result.error) return { error: result.error }
+    if (result.value !== undefined) parsed[field] = result.value
+  }
+
+  if (parsed.startRow !== undefined && parsed.endRow !== undefined && parsed.endRow < parsed.startRow) {
+    return { error: 'endRow must be greater than or equal to startRow' }
+  }
+
+  return { value: parsed }
 }
 
 /**
@@ -327,6 +368,11 @@ export function spreadsheetsRouter(_injector?: Injector, options: SpreadsheetRou
 
   r.get('/api/spreadsheets/:id/sheets/:sheetId/cells', rbacGuard('spreadsheets', 'read'), async (req: Request, res: Response) => {
     const { id, sheetId } = req.params
+    const cellQuery = parseCellReadQuery(req.query)
+    if (cellQuery.error) {
+      return res.status(400).json({ ok: false, error: { code: 'INVALID_QUERY', message: cellQuery.error } })
+    }
+    const { limit, offset, startRow, endRow } = cellQuery.value ?? {}
 
     try {
       const sheet = await db
@@ -340,13 +386,27 @@ export function spreadsheetsRouter(_injector?: Injector, options: SpreadsheetRou
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Sheet not found' } })
       }
 
-      const cells = await db
+      let cellsQuery = db
         .selectFrom('cells')
         .selectAll()
         .where('sheet_id', '=', sheetId)
         .orderBy('row_index', 'asc')
         .orderBy('column_index', 'asc')
-        .execute()
+
+      if (startRow !== undefined) {
+        cellsQuery = cellsQuery.where('row_index', '>=', startRow)
+      }
+      if (endRow !== undefined) {
+        cellsQuery = cellsQuery.where('row_index', '<=', endRow)
+      }
+      if (limit !== undefined) {
+        cellsQuery = cellsQuery.limit(limit)
+      }
+      if (offset !== undefined) {
+        cellsQuery = cellsQuery.offset(offset)
+      }
+
+      const cells = await cellsQuery.execute()
 
       return res.json({ ok: true, data: { sheet, cells } })
     } catch (error) {
