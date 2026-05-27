@@ -5479,6 +5479,7 @@ import {
   type CalendarPolicyOverrideWire,
 } from './attendance/attendanceCalendarPolicyOverrides'
 import { useAttendanceAdminImportBatches } from './attendance/useAttendanceAdminImportBatches'
+import { normalizeImportPayloadColumns } from './attendance/attendanceImportPayload'
 import {
   buildRuleSetPreviewRecommendations,
   summarizeRuleSetPreviewResult,
@@ -10746,6 +10747,7 @@ function buildImportPayload(): Record<string, any> | null {
   }
   payload.mode = importMode.value || payload.mode || 'override'
   if (payload.mappingProfileId === '') delete payload.mappingProfileId
+  normalizeImportPayloadColumns(payload)
   return payload
 }
 

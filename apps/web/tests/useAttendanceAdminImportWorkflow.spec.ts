@@ -391,7 +391,10 @@ describe('useAttendanceAdminImportWorkflow', () => {
     const { workflow, apiFetch, setStatus } = createWorkflow({ readFileText })
     const file = new File(['userId,workDate\nu-1,2026-03-12\n'], 'attendance.csv', { type: 'text/csv' })
 
-    workflow.importForm.payload = JSON.stringify({ source: 'manual' }, null, 2)
+    workflow.importForm.payload = JSON.stringify({
+      source: 'manual',
+      columns: ['userId', { id: '', name: 'workDate' }],
+    }, null, 2)
     workflow.importMode.value = 'override'
     workflow.setImportCsvFile(file)
 
@@ -405,6 +408,10 @@ describe('useAttendanceAdminImportWorkflow', () => {
     expect(payload.source).toBe('manual')
     expect(payload.mode).toBe('override')
     expect(payload.csvFileId).toBeUndefined()
+    expect(workflow.buildImportPayload()?.columns).toEqual([
+      { id: 'userId', name: 'userId' },
+      { id: 'workDate', name: 'workDate' },
+    ])
     expect(workflow.importPayloadRowCountHint.value).toBe(1)
     expect(workflow.importPreviewLane.value).toBe('sync')
     expect(workflow.importCommitLane.value).toBe('sync')
