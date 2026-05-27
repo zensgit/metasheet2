@@ -192,6 +192,37 @@ function main() {
   // host:port with NO credentials (no userinfo '@') must survive
   assert.equal(scrubSecretStringValue('redis://localhost:6379/0'), 'redis://localhost:6379/0')
 
+  // consolidation: shapes folded in from the former http-routes redactor must scrub here
+  const consolidated = [
+    ['id_token=eyJhdr.body.sig', 'id_token=[redacted]'],
+    ['session_id=abc123sessionvalue', 'session_id=[redacted]'],
+    ['signature=9f8e7d6c5b4a', 'signature=[redacted]'],
+    ['sig=deadbeefcafe', 'sig=[redacted]'],
+    ['sign=abc123def', 'sign=[redacted]'],
+  ]
+  for (const [input, expected] of consolidated) {
+    assert.equal(scrubSecretStringValue(input), expected, `consolidated shape must scrub: ${input}`)
+  }
+
+  // Basic auth — HIGH-CONFIDENCE: base64 decodes to printable "user:pass" → redact;
+  // benign "Basic authentication"/"Basic auth" must NOT be redacted.
+  assert.equal(scrubSecretStringValue('Authorization: Basic dXNlcjpwYXNzd29yZA=='), 'Authorization: Basic [redacted]')
+  assert.equal(scrubSecretStringValue('use Basic authentication for the proxy'), 'use Basic authentication for the proxy')
+  assert.equal(scrubSecretStringValue('Basic auth required'), 'Basic auth required')
+
+  // SEC-prefixed opaque secret id (12+, requires a digit) → redacted; plain prose kept
+  assert.equal(scrubSecretStringValue('id SEC1a2b3c4d5e6f7g'), 'id [redacted-secret-id]')
+  assert.equal(scrubSecretStringValue('see the SECTIONHEADING below'), 'see the SECTIONHEADING below')
+
+  // Bearer now 8+ (folds the former http-routes 8+ coverage); benign phrase still safe
+  assert.equal(scrubSecretStringValue('Bearer abcd1234efgh5678'), 'Bearer [redacted]')
+  assert.equal(scrubSecretStringValue('Bearer of bad news arrived'), 'Bearer of bad news arrived')
+
+  // left word-boundary on sig/sign — must NOT over-redact design=/assign=
+  for (const s of ['the design=modern was chosen', 'please assign=alice to triage', 'redesign=v2 shipped']) {
+    assert.equal(scrubSecretStringValue(s), s, `word-boundary must protect: ${s}`)
+  }
+
   console.log('✓ payload-redaction: sensitive key + value-scrub + false-positive matrix tests passed')
 }
 
