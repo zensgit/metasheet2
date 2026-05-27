@@ -41,12 +41,19 @@
   - **如建（as-built）**：`validateChanges` 把 `formula` 并入 `lookup`/`rollup` 的 `RecordFieldForbiddenError`(FIELD_READONLY) 只读分支；并删掉写循环里现已 dead 的 formula skip（validateChanges 先行）。
   - **pre-check 结论（已做）**：formula 经 `deriveFieldPermissions`(`permission-derivation.ts:58`)→`readOnlyFieldIds` **已是 UI 只读** → 网格从不 PATCH formula；create/form-submit 走**独立** `record-service` 校验、不受影响；recalc 物化写是直连 DB UPDATE、不过 validateChanges。无生产写入方被破坏；唯一一个依赖旧"静默跳过"的测试已改成 empty-change no-op。2340 后端单测通过、tsc 绿。
 
-- [ ] ⬜ **A2 记录内 formula 链拓扑排序**
-  - **现状缺陷**：`recalculateRecord` 循环读**原始** `data`、写 `updates`，所以 `B={fld_A}` 且 A 也是 formula 时，B 读到 A 的旧值/公式串 —— 无序。
-  - **做什么**：对记录内 formula 字段按依赖做局部拓扑序求值。注意：`formula_dependencies` 记的是**表级 field→field 边**，不是单记录内的求值链；这里**复用它的边数据**（过滤出当前记录的 formula 字段子图来定序），不是直接复用一套现成机制 —— 需新写记录内的局部定序。
-  - **验收**：单测 —— B 引用 A（皆 formula），单次重算后 B = 基于 A 新值的结果。
-  - **工作量**: S · **风险**: 低 · **依赖**: 与 A1 同改更省事
-  - **K3**: 允许
+- [x] ✅ **A2-defense (PR #1896 OPEN — `runtime/multitable-formula-defense-20260526`) 后端拒绝 formula→formula 引用**
+  - **A2 pre-check 结论**（落地前取证）：链式 formula 在产品引导路径被**前端三层硬禁**（token 选择器排除 `type==='formula'` + 表达式校验 error + 保存禁用），但经 **raw API**（create/update 对 formula 表达式零校验）+ **类型转换**（建 string X→建 formula B 引用 X→把 X 转成 formula）**可达**，且 `recalculateRecord` 无 topo → 链式静默算错。详见 `multitable-formula-reference-guard-verification-20260526.md` §1。
+  - **判定**：不为"产品未暴露的功能"建 topo 机器；改做最小、锁安全的 defense，与前端立场一致。
+  - **如建（as-built）**：`univer-meta.ts` 新增 `validateFormulaReferences`（抽 refs，含自身 / 凡 `mapFieldType==='formula'` 的 ref → 拒；**只拒 formula 类型**，lookup/rollup 作输入放行，未知 ref 仍容忍）+ `findFormulaReferrers`（反向，`formula_dependencies JOIN meta_fields` 复检存活 formula 引用方，**JOIN+类型过滤忽略陈旧边**——删字段/转走 formula 都不清边）；三处强制点：create + update 校验本字段表达式、update `nextType==='formula' && currentType!=='formula'` 时反向拒转换。
+  - **测试**：新增 route-level `multitable-formula-reference-guard.test.ts`（真实路由 + 内存 pool，9 例含判别 lookup/nonexistent 放行 + 承重 stale-edge 转换放行 + 存量链式纯改名 on-edit 不触发）；全后端单元 3230 passed/86 skipped 零回归 + tsc 绿。
+  - **soft-migration**：存量含 formula 引用的 formula 字段，下次编辑表达式/转换时才校验失败（lazy/on-edit，不加迁移；存量链式误算属既有问题）。
+  - **K3 / OSS**：仅多维表内核字段校验；未碰 integration-core/K3/RBAC/auth/存储；无 OSS 代码；无 migration。
+
+- [ ] 🔒 **A2-full（记录内 formula 链拓扑排序）—— 降级为 gated/future**
+  - **为什么降级**：A2-defense 已使 formula→formula 在后端不可达（与前端一致），产品**不暴露**链式 formula → 没有正确性需求要支持它。topo 求值只在"决定把链式 formula 作为产品特性"时才有意义。
+  - **若启用做什么**：`recalculateRecord` 循环改读"边算边回灌"的工作副本，按 `formula_dependencies` 当前记录子图局部拓扑定序；同时放宽 A2-defense 的拒绝。
+  - **门**：需显式 opt-in（先回答"链式 formula 是否成为产品特性"），且与 B/C 的引擎/依赖图工作面协同最佳。
+  - **K3**: 允许（但默认 defer）
 
 - [ ] ⬜ **A2b 宏展开转义/注入加固**
   - **现状缺陷**：`evaluateField` 把字段值字面替换进表达式字符串；值含引号 / `{fld_` / 运算符时会污染表达式。
@@ -139,7 +146,8 @@
 
 ```
 优先级（非自动推进）:
-  ✅ A1（#1883）· ✅ A1.1（#1890） →  A2 · F1（顺手清理）   ← 内核打磨，下一顺位 A2
+  ✅ A1（#1883）· ✅ A1.1（#1890）· ✅ A2-defense  →  F1（顺手清理）   ← 内核打磨，下一顺位 F1
+        ├─ A2-full（链式 topo）：🔒 降级 gated/future（产品不暴露链式 formula；先答"是否做成特性"）
         └─ 若决定投资真引擎 ─→ scope-gate: B1 ⊕ C1（打包一份 RFC）→ B2 · C2a · C3 ·（C2b 另议）
   D（outbox）        ：保持冻结，等 DF-N2
   E（存储）          ：永不
@@ -147,7 +155,7 @@
 ```
 
 - **重要**：箭头是优先级顺序，**不代表做完一条自动开下一条**。每条各需独立 opt-in；我一条一条来。
-- **A1 已合并**（#1883）、**A1.1 已合并**（#1890）。下一顺位 = **A2**（记录内 formula 链拓扑排序），其后视情况 F1；或走 B1⊕C1 的 RFC。各自独立 opt-in。
+- **A1 已合并**（#1883）、**A1.1 已合并**（#1890）、**A2-defense 已完成**（formula→formula 后端拒绝）。下一顺位 = **F1**（删网格死代码，顺手）；**A2-full（链式 topo）已降级为 gated/future**（产品不暴露链式 formula）；或走 B1⊕C1 的 RFC。各自独立 opt-in。
 - **想把多维表派生字段做"扎实"** → 额外 opt-in **B1⊕C1 的 RFC**，再逐条决定 B2/C2a/C3；**C2b（物化）是最重、最靠近存储模型的独立 gate，单独拍板**。
 - **阶段二相关（D）** 一律等 GATE/解锁，不在本轮。
 
