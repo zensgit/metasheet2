@@ -41,7 +41,7 @@
   - **如建（as-built）**：`validateChanges` 把 `formula` 并入 `lookup`/`rollup` 的 `RecordFieldForbiddenError`(FIELD_READONLY) 只读分支；并删掉写循环里现已 dead 的 formula skip（validateChanges 先行）。
   - **pre-check 结论（已做）**：formula 经 `deriveFieldPermissions`(`permission-derivation.ts:58`)→`readOnlyFieldIds` **已是 UI 只读** → 网格从不 PATCH formula；create/form-submit 走**独立** `record-service` 校验、不受影响；recalc 物化写是直连 DB UPDATE、不过 validateChanges。无生产写入方被破坏；唯一一个依赖旧"静默跳过"的测试已改成 empty-change no-op。2340 后端单测通过、tsc 绿。
 
-- [x] ✅ **A2-defense (PR #1896 OPEN — `runtime/multitable-formula-defense-20260526`) 后端拒绝 formula→formula 引用**
+- [x] ✅ **A2-defense (PR #1896 MERGED `516176619` 2026-05-26) 后端拒绝 formula→formula 引用**
   - **A2 pre-check 结论**（落地前取证）：链式 formula 在产品引导路径被**前端三层硬禁**（token 选择器排除 `type==='formula'` + 表达式校验 error + 保存禁用），但经 **raw API**（create/update 对 formula 表达式零校验）+ **类型转换**（建 string X→建 formula B 引用 X→把 X 转成 formula）**可达**，且 `recalculateRecord` 无 topo → 链式静默算错。详见 `multitable-formula-reference-guard-verification-20260526.md` §1。
   - **判定**：不为"产品未暴露的功能"建 topo 机器；改做最小、锁安全的 defense，与前端立场一致。
   - **如建（as-built）**：`univer-meta.ts` 新增 `validateFormulaReferences`（抽 refs，含自身 / 凡 `mapFieldType==='formula'` 的 ref → 拒；**只拒 formula 类型**，lookup/rollup 作输入放行，未知 ref 仍容忍）+ `findFormulaReferrers`（反向，`formula_dependencies JOIN meta_fields` 复检存活 formula 引用方，**JOIN+类型过滤忽略陈旧边**——删字段/转走 formula 都不清边）；三处强制点：create + update 校验本字段表达式、update `nextType==='formula' && currentType!=='formula'` 时反向拒转换。
@@ -129,7 +129,7 @@
 
 ## 6. Track F — 网格 A1 引擎清理（内核打磨，低优先）
 
-- [x] ✅ **F1 (PR #1897 OPEN, `runtime/formula-engine-deadcode-f1-20260526`) 删 `formula/engine.ts` 的死依赖图代码**
+- [x] ✅ **F1 (PR #1897 MERGED `a7c1126d6` 2026-05-26) 删 `formula/engine.ts` 的死依赖图代码**
   - **现状**：`buildDependencyGraph`/`topologicalSort`/`calculationOrder`/`dependencyGraph` **零生产调用方**（唯一调用是一条只测内部状态的单测；`PluginRegistry`/openapi-sdk 的同名物不相关、未触碰）。
   - **如建（as-built）**：删 `engine.ts` 两字段(`calculationOrder`/`dependencyGraph`) + 两方法(`buildDependencyGraph`/`topologicalSort`)；删只覆盖它的 `describe('Dependency Graph')` 测试块。净 −82 行纯删除、无行为变化。不动 `MultitableFormulaEngine`，不做 AST 缓存/环检测/重构。
   - **验证**：tsc + `pnpm build` + eslint(0 error) + `formula-engine.test.ts`/`multitable-formula-engine.test.ts`(129 pass) + 全后端单元 3229 pass/86 skip 零回归。详见 `formula-engine-deadcode-cleanup-f1-verification-20260526.md`。
