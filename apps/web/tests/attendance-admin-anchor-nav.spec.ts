@@ -147,6 +147,31 @@ describe('Attendance admin anchor navigation', () => {
     expect(container!.querySelector('[data-admin-anchor-recent]')).toBeNull()
   })
 
+  it('renders a task-oriented admin home and routes task actions to existing sections', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const taskHome = container!.querySelector<HTMLElement>('[data-admin-task-home="true"]')
+    expect(taskHome).toBeTruthy()
+    expect(taskHome?.textContent).toContain('Admin workflow')
+    expect(taskHome?.textContent).toContain('Today queue')
+    expect(taskHome?.textContent).toContain('Monthly processing')
+    expect(taskHome?.textContent).toContain('Base configuration')
+    expect(taskHome?.textContent).toContain('Audit and rollback')
+
+    const pendingApprovalsLink = taskHome!.querySelector<HTMLAnchorElement>('[data-admin-task-action="pending-attendance-approvals"]')
+    expect(pendingApprovalsLink?.getAttribute('href')).toBe('/attendance?section=attendance-overview-requests')
+
+    const importButton = taskHome!.querySelector<HTMLButtonElement>('[data-admin-task-action="monthly-import"]')
+    expect(importButton).toBeTruthy()
+    importButton!.click()
+    await flushUi(2)
+
+    const currentSectionBar = container!.querySelector<HTMLElement>('[data-admin-current-section="true"]')
+    expect(currentSectionBar?.textContent).toContain('Import')
+  })
+
   it('collapses and expands admin anchor groups', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
