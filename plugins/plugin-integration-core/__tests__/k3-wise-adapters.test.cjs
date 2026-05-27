@@ -929,6 +929,91 @@ async function testK3WebApiCustomerProfile() {
     assert.match(diag.validationMessage, /save failed/i, 'benign diagnostic text survives')
     // The surfaced error.message is also scrubbed.
     assert.equal(upsert.errors[0].message.includes('s3cretpw'), false, 'error.message scrubbed too')
+    assert.ok(diag.validationMessage, 'validationMessage is populated when the error has a message')
+  }
+
+  // ----- HARD save-only lock: config + request + overlay paths cannot enable Submit/Audit -----
+  {
+    const { calls, fetchImpl } = createK3FetchMock()
+    const adapter = createK3WiseWebApiAdapter({
+      system: createK3WebApiSystem({
+        config: {
+          baseUrl: 'https://k3.example.test',
+          autoSubmit: true, // operator tries to enable via config
+          autoAudit: true,
+          objects: {
+            material: {
+              profile: 'material-k3wise-customer-profile-v1',
+              submitPath: '/K3API/Material/Submit', // overlay tries to re-inject the endpoints
+              auditPath: '/K3API/Material/Audit',
+            },
+          },
+        },
+      }),
+      fetchImpl,
+    })
+    const upsert = await adapter.upsert({
+      object: 'material',
+      records: [{ FNumber: 'NESTEDOK', FName: 'Hard lock' }],
+      keyFields: ['FNumber'],
+      options: { autoSubmit: true, autoAudit: true }, // request tries too
+    })
+    assert.equal(upsert.written, 1, 'save still succeeds under the hard lock')
+    assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Submit'), false, 'Submit refused (config+request+overlay)')
+    assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Audit'), false, 'Audit refused (config+request+overlay)')
+    assert.equal(upsert.metadata.saveOnly, true)
+    assert.equal(upsert.metadata.autoSubmit, false, 'autoSubmit forced false in metadata')
+    assert.equal(upsert.metadata.autoAudit, false, 'autoAudit forced false in metadata')
+    assert.equal(upsert.metadata.autoFlagsRefused, true, 'refusal is observable in metadata')
+  }
+
+  // ----- object-value passthrough fidelity: two-field {FNumber,FName}/{FID,FName} preserved -----
+  {
+    const { calls, fetchImpl } = createK3FetchMock()
+    const adapter = createK3WiseWebApiAdapter({ system: profileSystem(), fetchImpl })
+    await adapter.upsert({
+      object: 'material',
+      records: [{
+        FNumber: 'OBJ01',
+        FName: 'Object passthrough',
+        FUnitGroupID: { FNumber: '10', FName: 'Each' },
+        FErpClsID: { FID: '1001', FName: 'Raw materials' },
+      }],
+      keyFields: ['FNumber'],
+    })
+    const saveCall = calls.find((call) => call.pathname === '/K3API/Material/Save')
+    assert.deepEqual(saveCall.body.Data.FUnitGroupID, { FNumber: '10', FName: 'Each' }, 'two-field {FNumber,FName} preserved verbatim')
+    assert.deepEqual(saveCall.body.Data.FErpClsID, { FID: '1001', FName: 'Raw materials' }, 'two-field {FID,FName} preserved verbatim')
+  }
+
+  // ----- fail-closed: a present-but-empty / non-string profile must throw, not fall back -----
+  {
+    const { fetchImpl } = createK3FetchMock()
+    for (const bad of ['', '   ', 123]) {
+      assert.throws(
+        () => createK3WiseWebApiAdapter({
+          system: createK3WebApiSystem({
+            config: { baseUrl: 'https://k3.example.test', objects: { material: { profile: bad } } },
+          }),
+          fetchImpl,
+        }),
+        /profile must be a non-empty string/,
+        `profile=${JSON.stringify(bad)} fails closed`,
+      )
+    }
+  }
+
+  // ----- diagnostic message fallback: an error without .message still yields a message -----
+  {
+    const diag = webApiInternals.buildRowSaveDiagnostic({
+      status: 'failed',
+      record: { sourceId: 'plm-9' },
+      key: 'MAT-X',
+      rawMessage: String({ toString: () => 'opaque adapter failure' }),
+      code: 'K3_WISE_UPSERT_FAILED',
+    })
+    assert.equal(diag.validationMessage, 'opaque adapter failure', 'falls back to String(error), not null')
+    assert.match(diag.rowKeys.k3Key, /^sha12:/)
   }
 }
 

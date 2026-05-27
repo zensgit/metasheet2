@@ -376,11 +376,20 @@ function normalizeObjects(config) {
     const configuredObject = isPlainObject(configured[name]) ? configured[name] : {}
     let base = defaults
     let overlay = configuredObject
+    let saveOnlyProfile = false
     // R-OPTIN: a config may select a named profile by id (the customer Material Save
     // preset). When selected, the profile REPLACES the generic template as the merge base
     // (the default template is never silently swapped — only on explicit opt-in). Operator
     // config still overlays on top; the `profile` key itself is metadata, not a template field.
-    if (name === 'material' && typeof configuredObject.profile === 'string' && configuredObject.profile.trim()) {
+    if (name === 'material' && configuredObject.profile !== undefined) {
+      // Fail-closed: a `profile` that is present but empty / non-string is a misconfiguration.
+      // Do NOT silently fall back to the generic minimal template — the operator believes a
+      // customer profile is active.
+      if (typeof configuredObject.profile !== 'string' || !configuredObject.profile.trim()) {
+        throw new AdapterValidationError('config.objects.material.profile must be a non-empty string when present', {
+          field: `config.objects.${name}.profile`,
+        })
+      }
       const profile = getK3WiseMaterialProfile(configuredObject.profile)
       if (!profile) {
         throw new AdapterValidationError(`Unknown K3 WISE material profile: ${configuredObject.profile}`, {
@@ -390,6 +399,7 @@ function normalizeObjects(config) {
       base = profile
       overlay = { ...configuredObject }
       delete overlay.profile
+      saveOnlyProfile = profile.lifecycle === 'save-only'
     }
     try {
       normalized[name] = mergeK3WiseDocumentObject(base, overlay, `config.objects.${name}`)
@@ -397,6 +407,15 @@ function normalizeObjects(config) {
       throw new AdapterValidationError(error.message, {
         field: `config.objects.${name}`,
       })
+    }
+    // HARD LOCK (M1): a save-only profile cannot be downgraded by the operator overlay.
+    // Strip any submit/audit endpoints the overlay may have re-injected and pin the
+    // lifecycle marker AFTER the merge so it is non-overridable. upsert() reads
+    // `lifecycle === 'save-only'` to force autoSubmit/autoAudit off regardless of request/config.
+    if (saveOnlyProfile) {
+      normalized[name].lifecycle = 'save-only'
+      delete normalized[name].submitPath
+      delete normalized[name].auditPath
     }
   }
   for (const [name, value] of Object.entries(configured)) {
@@ -517,9 +536,11 @@ function truncateDiagnosticMessage(value) {
 // rowStatus, masked/hashed row keys, response code, and a redacted + truncated validation
 // message. Never the raw FNumber, K3 ref values, token, host, authorityCode, password, or
 // connection string — the message is scrubbed via scrubSecretStringValue.
-function buildRowSaveDiagnostic({ status, record, key, error }) {
-  const rawMessage = error && error.message ? String(error.message) : ''
-  const code = error && error.details && error.details.code ? error.details.code : undefined
+function buildRowSaveDiagnostic({ status, record, key, rawMessage, code }) {
+  // rawMessage is resolved by the caller with the same `String(error)` fallback the outer
+  // error.message uses, so the diagnostic message can never be null while the surfaced
+  // message is populated (and vice-versa).
+  const message = typeof rawMessage === 'string' ? rawMessage : (rawMessage == null ? '' : String(rawMessage))
   return {
     rowStatus: status,
     rowKeys: {
@@ -527,7 +548,7 @@ function buildRowSaveDiagnostic({ status, record, key, error }) {
       sourceId: dispositionSourceId(isPlainObject(record) ? record.sourceId : undefined),
     },
     responseCode: code !== undefined && code !== null ? String(code) : null,
-    validationMessage: rawMessage ? truncateDiagnosticMessage(scrubSecretStringValue(rawMessage)) : null,
+    validationMessage: message ? truncateDiagnosticMessage(scrubSecretStringValue(message)) : null,
   }
 }
 
@@ -1189,11 +1210,19 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
     }
     ensureOperation(normalizedSystem.kind, request.object, objectConfig, 'upsert')
 
+    // HARD LOCK (M1): a save-only profile forces autoSubmit/autoAudit OFF and drops any
+    // submit/audit endpoint, regardless of what request or config set. This is the lock the
+    // M1 design requires (not merely a default false). `autoFlagsRefused` records that a
+    // caller asked for submit/audit and was denied, so it is observable in metadata.
+    const saveOnly = objectConfig.lifecycle === 'save-only'
     const savePath = assertRelativePath(objectConfig.savePath || objectConfig.path, 'object.savePath')
-    const submitPath = objectConfig.submitPath ? assertRelativePath(objectConfig.submitPath, 'object.submitPath') : null
-    const auditPath = objectConfig.auditPath ? assertRelativePath(objectConfig.auditPath, 'object.auditPath') : null
-    const autoSubmit = resolveAutoFlag(request.options.autoSubmit, config.autoSubmit, 'autoSubmit')
-    const autoAudit = resolveAutoFlag(request.options.autoAudit, config.autoAudit, 'autoAudit')
+    const submitPath = saveOnly ? null : (objectConfig.submitPath ? assertRelativePath(objectConfig.submitPath, 'object.submitPath') : null)
+    const auditPath = saveOnly ? null : (objectConfig.auditPath ? assertRelativePath(objectConfig.auditPath, 'object.auditPath') : null)
+    const requestedAutoSubmit = resolveAutoFlag(request.options.autoSubmit, config.autoSubmit, 'autoSubmit')
+    const requestedAutoAudit = resolveAutoFlag(request.options.autoAudit, config.autoAudit, 'autoAudit')
+    const autoSubmit = saveOnly ? false : requestedAutoSubmit
+    const autoAudit = saveOnly ? false : requestedAutoAudit
+    const autoFlagsRefused = saveOnly && (requestedAutoSubmit === true || requestedAutoAudit === true)
     const authContext = await login()
     const results = []
     const errors = []
@@ -1305,18 +1334,19 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
         })
       } catch (error) {
         const rawMessage = error && error.message ? error.message : String(error)
+        const code = error && error.details && error.details.code ? error.details.code : 'K3_WISE_UPSERT_FAILED'
         errors.push({
           index,
           key,
           object: request.object,
-          code: error && error.details && error.details.code ? error.details.code : 'K3_WISE_UPSERT_FAILED',
+          code,
           message: scrubSecretStringValue(rawMessage),
           responseSummary: error && error.details && error.details.responseSummary
             ? error.details.responseSummary
             : undefined,
           // Conservative sanitized row diagnostic (G5 / R-REDACT) — masked keys, scrubbed
-          // message; intended as the persisted artifact for explaining the row failure.
-          diagnostic: buildRowSaveDiagnostic({ status: 'failed', record, key, error }),
+          // message (same rawMessage source as above); the persisted artifact for the failure.
+          diagnostic: buildRowSaveDiagnostic({ status: 'failed', record, key, rawMessage, code }),
         })
       }
     }
@@ -1329,8 +1359,10 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       raw,
       metadata: {
         object: request.object,
+        saveOnly,
         autoSubmit,
         autoAudit,
+        autoFlagsRefused,
         k3Template: objectConfig.k3Template ? { ...objectConfig.k3Template } : undefined,
         businessResponses,
       },
@@ -1360,6 +1392,7 @@ module.exports = {
   __internals: {
     DEFAULT_OBJECTS,
     businessSuccess,
+    buildRowSaveDiagnostic,
     extractRecordKey,
     extractMaterialDetailRecord,
     buildMaterialReadRecord,
