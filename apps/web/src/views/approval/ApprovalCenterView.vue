@@ -103,6 +103,20 @@
             全部标记已读
           </el-button>
         </div>
+        <div
+          class="approval-center__attendance-entry"
+          data-testid="attendance-approval-queue-entry"
+        >
+          <div class="approval-center__attendance-entry-copy">
+            <strong>考勤审批</strong>
+            <p>
+              补卡、请假、加班审批当前在考勤模块处理，不计入平台/PLM 待办列表。
+            </p>
+          </div>
+          <el-button type="primary" plain @click="openAttendanceApprovalQueue">
+            待处理考勤审批
+          </el-button>
+        </div>
         <el-table
           v-loading="store.loading"
           :data="store.pendingApprovals"
@@ -445,6 +459,13 @@ function handleRowClick(row: UnifiedApprovalDTO) {
   router.push({ name: 'approval-detail', params: { id: row.id } })
 }
 
+function openAttendanceApprovalQueue() {
+  router.push({
+    name: 'attendance',
+    query: { section: 'attendance-overview-requests' },
+  })
+}
+
 onMounted(() => {
   loadCurrentTab()
   void refreshPendingBadgeCount()
@@ -504,5 +525,41 @@ onMounted(() => {
   display: flex;
   justify-content: flex-end;
   margin-bottom: 12px;
+}
+
+.approval-center__attendance-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #eff6ff;
+}
+
+.approval-center__attendance-entry-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.approval-center__attendance-entry-copy strong {
+  color: #1f2937;
+  font-size: 14px;
+}
+
+.approval-center__attendance-entry-copy p {
+  margin: 0;
+  color: #4b5563;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+@media (max-width: 720px) {
+  .approval-center__attendance-entry {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }
 </style>
