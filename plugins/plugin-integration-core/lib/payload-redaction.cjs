@@ -22,6 +22,12 @@ const SENSITIVE_PAYLOAD_KEYS = new Set([
   'xsessionid',
   'credentials',
   'rawpayload',
+  'connectionstring',
+  'databaseurl',
+  'dburl',
+  'jdbcurl',
+  'odbcconnectionstring',
+  'sqlconnectionstring',
 ])
 
 const UNSAFE_PAYLOAD_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
@@ -32,6 +38,32 @@ function normalizeKey(key) {
 
 function isSensitivePayloadKey(key) {
   return SENSITIVE_PAYLOAD_KEYS.has(normalizeKey(key))
+}
+
+// Value-based secret scrubbing. Key-based redaction only fires when the KEY is
+// sensitive; a secret riding inside a benign string value (error messages,
+// `details`, free text) would otherwise leak. These patterns mask the secret
+// SUBSTRING only — preserving surrounding diagnostic context (scheme/host/db),
+// the operator-in-the-loop debugging signal — rather than nuking the whole value.
+// Patterns are deliberately anchored/conservative to avoid over-redacting benign
+// prose (e.g. the word "password" with no `=`, or "Bearer of bad news").
+const SECRET_VALUE_PATTERNS = Object.freeze([
+  // URL/DSN userinfo: scheme://user:password@host  → mask the password only.
+  // Covers postgres/mysql/redis/amqp/http(s)/jdbc:... DSNs carrying credentials.
+  { re: /\b([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+):([^\s/@]+)@/gi, replace: '$1:[redacted]@' },
+  // key=value credential params (ODBC / SQL Server / JDBC query): password= / pwd=
+  { re: /\b(password|pwd)=([^;&\s"']+)/gi, replace: '$1=[redacted]' },
+  // Bearer token — require a long token-shaped value so "Bearer of bad news" is safe.
+  { re: /\b(Bearer)\s+([A-Za-z0-9._~+/-]{20,}=*)/g, replace: '$1 [redacted]' },
+])
+
+function scrubSecretStringValue(value) {
+  if (typeof value !== 'string' || value.length === 0) return value
+  let out = value
+  for (const { re, replace } of SECRET_VALUE_PATTERNS) {
+    out = out.replace(re, replace)
+  }
+  return out
 }
 
 function jsonByteLength(value) {
@@ -71,9 +103,12 @@ function sanitizePayloadValue(value, options, state) {
 
   if (value === null || value === undefined) return value
   if (typeof value === 'string') {
-    return value.length > maxStringLength
-      ? `${value.slice(0, maxStringLength)}...[truncated]`
-      : value
+    // scrub secret-shaped substrings BEFORE truncation, otherwise a truncated
+    // prefix could still expose the secret head.
+    const scrubbed = scrubSecretStringValue(value)
+    return scrubbed.length > maxStringLength
+      ? `${scrubbed.slice(0, maxStringLength)}...[truncated]`
+      : scrubbed
   }
   if (typeof value !== 'object') return value
   if (seen.has(value)) return '[circular]'
@@ -115,7 +150,9 @@ function sanitizeIntegrationPayload(value, options = {}) {
 module.exports = {
   SENSITIVE_PAYLOAD_KEYS,
   UNSAFE_PAYLOAD_KEYS,
+  SECRET_VALUE_PATTERNS,
   jsonByteLength,
   isSensitivePayloadKey,
+  scrubSecretStringValue,
   sanitizeIntegrationPayload,
 }

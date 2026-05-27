@@ -1316,6 +1316,55 @@ components:
         updatedAt:
           type: string
           format: date-time
+    ProvenanceEventType:
+      type: string
+      description: >-
+        Data Factory DF-N2-1 provenance event type. `row_skipped` is
+        reserved/deferred and is not accepted by this contract.
+      enum:
+        - source_read
+        - row_imported
+        - row_edited
+        - mapping_applied
+        - validation_failed
+        - dry_run_previewed
+        - target_write_attempted
+        - target_write_succeeded
+        - target_write_failed
+        - row_retried
+        - row_exported
+    ProvenanceEvent:
+      type: object
+      description: >-
+        Data Factory DF-N2-1 row provenance event contract. This component
+        freezes the redacted event shape only; no route or runtime persistence
+        is introduced here.
+      additionalProperties: false
+      properties:
+        runId:
+          type: string
+          minLength: 1
+        rowId:
+          type: string
+          minLength: 1
+        eventType:
+          $ref: '#/components/schemas/ProvenanceEventType'
+        at:
+          type: string
+          format: date-time
+        attrs:
+          type: object
+          description: >-
+            Redacted safe attributes only. Tokens, passwords, authorization
+            headers, connection strings, raw payloads, and customer secrets must
+            not be exposed.
+          additionalProperties: true
+      required:
+        - runId
+        - rowId
+        - eventType
+        - at
+        - attrs
     AttendanceShift:
       type: object
       properties:
