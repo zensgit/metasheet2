@@ -1,5 +1,6 @@
 import { computed, reactive, ref, watch, type Ref } from 'vue'
 import { apiFetch as baseApiFetch } from '../../utils/api'
+import { normalizeImportPayloadColumns } from './attendanceImportPayload'
 
 type ApiFetchFn = typeof baseApiFetch
 type Translate = (en: string, zh: string) => string
@@ -1174,6 +1175,7 @@ export function useAttendanceAdminImportWorkflow({
     }
     payload.mode = importMode.value || payload.mode || 'override'
     if (payload.mappingProfileId === '') delete payload.mappingProfileId
+    normalizeImportPayloadColumns(payload)
     return payload
   }
 

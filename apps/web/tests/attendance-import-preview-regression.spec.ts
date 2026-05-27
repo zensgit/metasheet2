@@ -181,4 +181,72 @@ describe('Attendance import preview regression', () => {
     expect(unwrapRef<string[]>(setupState.importCsvWarnings)).toEqual([])
     expect(unwrapRef<Record<string, unknown> | null>(setupState.statusMeta)?.action).toBe('retry-preview-import')
   })
+
+  it('normalizes string CSV template columns before preview submit', async () => {
+    const apiFetchMock = vi.mocked(apiFetch)
+    let previewPayload: Record<string, any> | null = null
+
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      const url = String(path)
+      if (url.startsWith('/api/attendance/import/prepare')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            commitToken: 'token-columns',
+            expiresAt: '2099-01-01T00:00:00.000Z',
+          },
+        })
+      }
+
+      if (url.startsWith('/api/attendance/import/preview')) {
+        previewPayload = JSON.parse(String(init?.body ?? '{}'))
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [],
+            csvWarnings: [],
+            groupWarnings: [],
+            rowCount: 1,
+          },
+        })
+      }
+
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          items: [],
+          summary: null,
+        },
+      })
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    const vm = app.mount(container!)
+    await flushUi(6)
+
+    const setupState = (vm as any).$?.setupState as Record<string, any>
+    setupState.importForm.payload = JSON.stringify({
+      source: 'dingtalk_csv',
+      columns: ['日期', 'UserId', '考勤组'],
+      csvText: '日期,UserId,考勤组\n2026-03-12,u-1,白班\n',
+    }, null, 2)
+    await flushUi(2)
+
+    const importSection = findImportSection(container!)
+    findButton(importSection, 'Preview').click()
+    await flushUi(6)
+
+    expect(previewPayload?.columns).toEqual([
+      { id: '日期', name: '日期' },
+      { id: 'UserId', name: 'UserId' },
+      { id: '考勤组', name: '考勤组' },
+    ])
+    expect(previewPayload?.csvText).toBe('日期,UserId,考勤组\n2026-03-12,u-1,白班\n')
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/attendance/import/preview',
+      expect.objectContaining({
+        method: 'POST',
+      }),
+    )
+  })
 })
