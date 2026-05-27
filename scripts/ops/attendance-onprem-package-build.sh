@@ -22,6 +22,11 @@ REQUIRED_PATHS=(
   "apps/web/package.json"
   "packages/core-backend/dist"
   "packages/core-backend/package.json"
+  # The packaged migration runner resolves compiled TS migrations from dist,
+  # source SQL migrations from src/db/migrations, and legacy SQL bridge
+  # migrations from packages/core-backend/migrations.
+  "packages/core-backend/src/db/migrations"
+  "packages/core-backend/migrations"
   "plugins/plugin-attendance"
   "scripts/ops/attendance-onprem-package-install.sh"
   "scripts/ops/attendance-onprem-package-upgrade.sh"

@@ -69,6 +69,8 @@ metasheet/
     core-backend/
       package.json
       dist/
+      src/db/migrations/
+      migrations/
   scripts/ops/
     attendance-onprem-package-install.sh
     attendance-onprem-package-upgrade.sh
@@ -95,6 +97,8 @@ metasheet/
 说明：
 
 - `apps/web/dist` 与 `packages/core-backend/dist` 现在是交付包必选项（非可选）。
+- `packages/core-backend/src/db/migrations` 与 `packages/core-backend/migrations` 也必须随包交付：运行时从 `dist/src/db/migrations` 加载编译后的 TS 迁移，从 `src/db/migrations` 加载源 SQL 迁移，从 `migrations` 加载 legacy SQL bridge 迁移。
+- 发包校验会确认源 TS 迁移均存在对应的 `dist` JS 产物，并显式覆盖已升级数据库常见的 `zzzz20260318123000_formalize_meta_comments` 与 `zzzz20260320150000_add_spreadsheet_permissions_and_cell_versions`，避免迁移历史中存在的名称在包内不可见。
 - `plugins/` 下只允许包含 `plugin-attendance`，确保交付包是“考勤专用”。
 - 安装/升级会把包内 `apps/web/dist` 发布到 nginx root。默认 root 为当前部署目录的 `apps/web/dist`；如果包先解压在 `packages/<package>/<package>` 下，脚本会自动发布到上层部署根的 `apps/web/dist`。特殊 nginx root 可用 `WEB_DIST_TARGET` 覆盖。
 
