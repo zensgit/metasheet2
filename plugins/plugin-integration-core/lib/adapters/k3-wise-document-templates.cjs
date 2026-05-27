@@ -3,6 +3,7 @@
 const K3_WISE_DOCUMENT_TEMPLATE_VERSION = '2026.05.v1'
 
 const K3_REFERENCE_BY_NUMBER = { identifier: 'FNumber' }
+const K3_REFERENCE_BY_ID = { identifier: 'FID' }
 
 const MATERIAL_FIELD_MAPPINGS = [
   {
@@ -165,6 +166,70 @@ const K3_WISE_DOCUMENT_TEMPLATES = {
   },
 }
 
+// Customer-profiled Material Save preset (M1 Save-only fix). Distinct from the generic
+// minimal template `k3wise.material.v1`. Applied ONLY when config selects it by id
+// (`config.objects.material.profile`); the default template is NEVER silently swapped
+// (R-OPTIN). Declares the FULLER field set the customer K3 WISE env requires (G2) with
+// per-field reference shape (G3: numbered base data -> {FNumber,FName}; enum/category ->
+// {FID,FName}). STRUCTURE ONLY — no customer dictionary values are baked in; operators
+// supply values at runtime (no-hardcoded-values rule). Save-only by construction: no
+// submitPath/auditPath, so submit/audit cannot fire from this profile.
+const MATERIAL_CUSTOMER_PROFILE_ID = 'material-k3wise-customer-profile-v1'
+const MATERIAL_CUSTOMER_PROFILE = {
+  id: MATERIAL_CUSTOMER_PROFILE_ID,
+  version: K3_WISE_DOCUMENT_TEMPLATE_VERSION,
+  documentType: 'material',
+  targetObject: 'material',
+  label: 'K3 WISE Material (customer profile)',
+  operations: ['upsert'],
+  // Hard Save-only lock (M1): the adapter forces autoSubmit/autoAudit off and strips any
+  // submit/audit endpoint when this profile is selected — non-overridable by config/request.
+  lifecycle: 'save-only',
+  savePath: '/K3API/Material/Save',
+  readPath: '/K3API/Material/GetDetail',
+  readMethod: 'POST',
+  bodyKey: 'Data',
+  keyField: 'FNumber',
+  keyParam: 'Number',
+  schema: [
+    { name: 'FNumber', label: 'Material code', type: 'string', required: true },
+    { name: 'FName', label: 'Material name', type: 'string', required: true },
+    { name: 'FModel', label: 'Specification', type: 'string' },
+    // Unit family + accounts + warehouse + manager — numbered base data ({FNumber,FName})
+    { name: 'FUnitGroupID', label: 'Unit group', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+    { name: 'FUnitID', label: 'Unit', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+    { name: 'FBaseUnitID', label: 'Base unit', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+    { name: 'FOrderUnitID', label: 'Order unit', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+    { name: 'FSaleUnitID', label: 'Sales unit', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+    { name: 'FProductUnitID', label: 'Production unit', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+    { name: 'FStoreUnitID', label: 'Inventory unit', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+    { name: 'FAcctID', label: 'Inventory account', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+    { name: 'FSaleAcctID', label: 'Sales account', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+    { name: 'FCostAcctID', label: 'Cost account', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+    { name: 'FDefaultLoc', label: 'Default warehouse', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+    { name: 'FDSManagerID', label: 'Default stock manager', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+    // Enum / category — by FID ({FID,FName})
+    { name: 'FErpClsID', label: 'ERP material category', type: 'reference', reference: K3_REFERENCE_BY_ID },
+    { name: 'FUseState', label: 'Use state', type: 'reference', reference: K3_REFERENCE_BY_ID },
+    { name: 'FTrack', label: 'Track policy', type: 'reference', reference: K3_REFERENCE_BY_ID },
+    { name: 'FPlanTrategy', label: 'Planning strategy', type: 'reference', reference: K3_REFERENCE_BY_ID },
+    { name: 'FOrderTrategy', label: 'Order strategy', type: 'reference', reference: K3_REFERENCE_BY_ID },
+    { name: 'FInspectionLevel', label: 'Inspection level', type: 'reference', reference: K3_REFERENCE_BY_ID },
+    { name: 'FProChkMde', label: 'Production inspection mode', type: 'reference', reference: K3_REFERENCE_BY_ID },
+    { name: 'FWWChkMde', label: 'Outsourcing inspection mode', type: 'reference', reference: K3_REFERENCE_BY_ID },
+    { name: 'FSOChkMde', label: 'Sales inspection mode', type: 'reference', reference: K3_REFERENCE_BY_ID },
+    { name: 'FWthDrwChkMde', label: 'Receipt inspection mode', type: 'reference', reference: K3_REFERENCE_BY_ID },
+    { name: 'FStkChkMde', label: 'Stock inspection mode', type: 'reference', reference: K3_REFERENCE_BY_ID },
+    { name: 'FOtherChkMde', label: 'Other inspection mode', type: 'reference', reference: K3_REFERENCE_BY_ID },
+    { name: 'FPlanPrice', label: 'Plan price', type: 'number' },
+  ],
+  fieldMappings: MATERIAL_FIELD_MAPPINGS,
+}
+
+const K3_WISE_MATERIAL_PROFILES = {
+  [MATERIAL_CUSTOMER_PROFILE_ID]: MATERIAL_CUSTOMER_PROFILE,
+}
+
 function cloneJson(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value))
 }
@@ -231,6 +296,16 @@ function listK3WiseDocumentTemplates() {
   return Object.values(K3_WISE_DOCUMENT_TEMPLATES).map((template) => cloneJson(template))
 }
 
+function getK3WiseMaterialProfile(id) {
+  const key = typeof id === 'string' ? id.trim() : ''
+  const profile = key ? K3_WISE_MATERIAL_PROFILES[key] : null
+  return profile ? normalizeTemplate(profile, `materialProfile.${key}`) : null
+}
+
+function listK3WiseMaterialProfiles() {
+  return Object.keys(K3_WISE_MATERIAL_PROFILES)
+}
+
 function getK3WiseDocumentObjectDefaults() {
   const defaults = {}
   for (const [name, template] of Object.entries(K3_WISE_DOCUMENT_TEMPLATES)) {
@@ -256,9 +331,13 @@ function mergeK3WiseDocumentObject(templateObject, configuredObject, field) {
 module.exports = {
   K3_WISE_DOCUMENT_TEMPLATE_VERSION,
   K3_WISE_DOCUMENT_TEMPLATES,
+  K3_WISE_MATERIAL_PROFILES,
+  MATERIAL_CUSTOMER_PROFILE_ID,
   getK3WiseDocumentObjectDefaults,
   getK3WiseDocumentTemplate,
+  getK3WiseMaterialProfile,
   listK3WiseDocumentTemplates,
+  listK3WiseMaterialProfiles,
   mergeK3WiseDocumentObject,
   normalizeTemplate,
 }

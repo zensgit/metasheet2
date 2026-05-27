@@ -93,6 +93,30 @@ test('mock K3 still evaluates material payloads with the raw request body', asyn
   }
 })
 
+test('mock K3 can return envelope-200-but-row-level-fail for the M1 diagnostic path', async () => {
+  const mock = createMockK3WebApiServer({
+    rowFailFNumbers: new Set(['ROWFAIL']),
+  })
+  const baseUrl = await mock.start()
+  try {
+    const result = await postJson(baseUrl, '/K3API/Material/Save', {
+      Data: { FNumber: 'ROWFAIL', FName: 'Row level fail' },
+    })
+
+    // Envelope reports success, but the row did not save — the shape the M1 fix detects.
+    assert.equal(result.status, 200)
+    assert.equal(result.body.StatusCode, 200)
+    assert.equal(result.body.Message, 'Successful')
+    assert.equal(result.body.Data[0].FStatus, false)
+    assert.match(result.body.Data[0].FMessage, /row-level fail/)
+    // A non-listed FNumber still saves cleanly (default behavior unchanged).
+    const ok = await postJson(baseUrl, '/K3API/Material/Save', { Data: { FNumber: 'OK1', FName: 'ok' } })
+    assert.equal(ok.body.success, true)
+  } finally {
+    await mock.stop()
+  }
+})
+
 test('mock K3 WebAPI rejects methods that real K3 endpoints would not accept', async () => {
   const mock = createMockK3WebApiServer()
   const baseUrl = await mock.start()
