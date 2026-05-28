@@ -3195,20 +3195,27 @@
                   </section>
 
                   <section class="attendance__group-summary-grid" data-attendance-group-summaries>
-                    <div class="attendance__group-summary">
-                      <strong>{{ tr('Rule policy', '规则策略') }}</strong>
-                      <span>{{ attendanceGroupEditingId ? resolveRuleSetName(attendanceGroupForm.ruleSetId) : tr('Choose or save a group first', '先选择或保存考勤组') }}</span>
-                      <small>{{ tr('Edit rule sets in the Policies section.', '规则集请到规则策略中维护。') }}</small>
-                    </div>
-                    <div class="attendance__group-summary">
-                      <strong>{{ tr('Work time', '考勤时间') }}</strong>
-                      <span>{{ tr('Configured in shifts and assignments.', '在班次与排班分配中配置。') }}</span>
-                      <small>{{ tr('No group-specific schedule mutation in this slice.', '本切片不修改考勤组专属排班逻辑。') }}</small>
-                    </div>
-                    <div class="attendance__group-summary">
-                      <strong>{{ tr('Punch method', '打卡方式') }}</strong>
-                      <span>{{ tr('Workspace settings only in V1.', 'V1 仅使用工作区级设置。') }}</span>
-                      <small>{{ tr('Location, Wi-Fi, hardware, photo, and face verification stay deferred.', '地点、Wi-Fi、设备、拍照和人脸识别均保持 deferred。') }}</small>
+                    <div
+                      v-for="card in attendanceGroupSummaryCards"
+                      :key="card.key"
+                      class="attendance__group-summary"
+                      :data-attendance-group-summary-card="card.key"
+                    >
+                      <strong>{{ card.title }}</strong>
+                      <span>{{ card.value }}</span>
+                      <small>{{ card.detail }}</small>
+                      <div v-if="card.actions.length > 0" class="attendance__group-summary-actions">
+                        <button
+                          v-for="action in card.actions"
+                          :key="action.key"
+                          class="attendance__btn attendance__btn--inline"
+                          type="button"
+                          :data-attendance-group-summary-action="action.key"
+                          @click="selectAdminSection(action.sectionId)"
+                        >
+                          {{ action.label }}
+                        </button>
+                      </div>
                     </div>
                   </section>
                 </section>
@@ -6188,6 +6195,20 @@ interface AttendanceGroupMember {
   createdAt?: string
 }
 
+type AttendanceGroupSummaryAction = {
+  key: string
+  label: string
+  sectionId: string
+}
+
+type AttendanceGroupSummaryCard = {
+  key: string
+  title: string
+  value: string
+  detail: string
+  actions: AttendanceGroupSummaryAction[]
+}
+
 interface AttendancePayrollTemplate {
   id: string
   orgId?: string
@@ -7895,6 +7916,99 @@ const attendanceGroupMemberCountLabel = computed(() => {
   const count = total || visible
   if (count === 1) return tr('1 member', '1 位成员')
   return tr(`${count} members`, `${count} 位成员`)
+})
+const attendanceGroupSummaryCards = computed<AttendanceGroupSummaryCard[]>(() => {
+  const groupSaved = Boolean(attendanceGroupEditingId.value)
+  const ruleSetName = groupSaved
+    ? resolveRuleSetName(attendanceGroupForm.ruleSetId)
+    : tr('Choose or save a group first', '先选择或保存考勤组')
+
+  return [
+    {
+      key: 'rule-policy',
+      title: tr('Rule policy', '规则策略'),
+      value: ruleSetName,
+      detail: attendanceGroupForm.ruleSetId
+        ? tr('Rule set contents stay in the Policies section.', '规则集内容仍在规则策略中维护。')
+        : tr('Falls back to the workspace default rule until a rule set is linked.', '未关联规则集时使用工作区默认规则。'),
+      actions: [
+        {
+          key: 'open-rule-sets',
+          label: tr('Open Rule Sets', '打开规则集'),
+          sectionId: ATTENDANCE_ADMIN_SECTION_IDS.ruleSets,
+        },
+      ],
+    },
+    {
+      key: 'work-time',
+      title: tr('Work time', '考勤时间'),
+      value: tr('Configured in Shifts and Assignments', '在班次与排班分配中配置'),
+      detail: tr('This card does not claim a group schedule type or mutate schedules.', '此卡片不声明考勤组排班类型，也不修改排班。'),
+      actions: [
+        {
+          key: 'open-shifts',
+          label: tr('Open Shifts', '打开班次'),
+          sectionId: ATTENDANCE_ADMIN_SECTION_IDS.shifts,
+        },
+        {
+          key: 'open-assignments',
+          label: tr('Open Assignments', '打开排班分配'),
+          sectionId: ATTENDANCE_ADMIN_SECTION_IDS.assignments,
+        },
+      ],
+    },
+    {
+      key: 'scheduling-coverage',
+      title: tr('Scheduling coverage', '排班覆盖'),
+      value: tr('Advanced scheduling owns rotation and coverage checks', '高级排班负责轮班与覆盖检查'),
+      detail: tr('Attendance groups remain membership and policy groups; schedule groups stay separate.', '考勤组仍是成员与策略分组；排班组保持独立。'),
+      actions: [
+        {
+          key: 'open-advanced-scheduling',
+          label: tr('Open Advanced scheduling', '打开高级排班'),
+          sectionId: ATTENDANCE_ADMIN_SECTION_IDS.advancedSchedulingWorkbench,
+        },
+        {
+          key: 'open-rotation-rules',
+          label: tr('Open Rotation Rules', '打开轮班规则'),
+          sectionId: ATTENDANCE_ADMIN_SECTION_IDS.rotationRules,
+        },
+      ],
+    },
+    {
+      key: 'comprehensive-hours',
+      title: tr('Comprehensive hours', '综合工时'),
+      value: tr('Review and reporting live in their own admin surface', '复核与报表在独立管理面中维护'),
+      detail: tr('This group card does not run previews, save caps, or write snapshots.', '此考勤组卡片不运行预览、不保存上限、不写入快照。'),
+      actions: [
+        {
+          key: 'open-comprehensive-hours',
+          label: tr('Open Comprehensive hours', '打开综合工时'),
+          sectionId: ATTENDANCE_ADMIN_SECTION_IDS.comprehensiveHoursPreview,
+        },
+      ],
+    },
+    {
+      key: 'punch-method',
+      title: tr('Punch method', '打卡方式'),
+      value: tr('Workspace settings only in group settings V1', '考勤组设置 V1 仅使用工作区级设置'),
+      detail: tr('Group-specific Wi-Fi, location, hardware, photo, and face verification are not configured here.', '考勤组专属 Wi-Fi、地点、设备、拍照与人脸识别不在此配置。'),
+      actions: [
+        {
+          key: 'open-settings',
+          label: tr('Open Settings', '打开设置'),
+          sectionId: ATTENDANCE_ADMIN_SECTION_IDS.settings,
+        },
+      ],
+    },
+    {
+      key: 'advanced-controls',
+      title: tr('Advanced controls', '高级控制'),
+      value: tr('Owner, export, copy, and field-work controls are deferred', '负责人、导出、复制与外勤控制均保持 deferred'),
+      detail: tr('No disabled fake controls are rendered for unsupported group-owned capabilities.', '不会为尚未支持的考勤组能力渲染假的禁用控件。'),
+      actions: [],
+    },
+  ]
 })
 const attendanceGroupMemberSubmitAvailable = computed(() =>
   attendanceGroupPendingMemberIds.value.length > 0 || parseUserIdList(attendanceGroupMemberUserIds.value).length > 0
@@ -18609,6 +18723,13 @@ const holidaySectionBindings = {
 .attendance__group-summary small {
   color: #6b7280;
   font-size: 12px;
+}
+
+.attendance__group-summary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
 }
 
 .attendance__details {

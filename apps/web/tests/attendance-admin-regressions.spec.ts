@@ -629,7 +629,16 @@ describe('Attendance admin regressions', () => {
     expect(groupsSection!.querySelector('[data-attendance-group-people]')?.textContent).toContain('User picker')
     expect(groupsSection!.querySelector('[data-attendance-group-people]')?.textContent).toContain('Append selected user')
     expect(groupsSection!.querySelector('[data-attendance-group-people]')?.textContent).toContain('user-1')
-    expect(groupsSection!.querySelector('[data-attendance-group-summaries]')?.textContent).toContain('Punch method')
+    const summaryGrid = groupsSection!.querySelector<HTMLElement>('[data-attendance-group-summaries]')
+    expect(summaryGrid).toBeTruthy()
+    expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="rule-policy"]')?.textContent).toContain('Ops Rules')
+    expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="work-time"]')?.textContent).toContain('Configured in Shifts and Assignments')
+    expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="scheduling-coverage"]')?.textContent).toContain('Advanced scheduling owns rotation and coverage checks')
+    expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="comprehensive-hours"]')?.textContent).toContain('Review and reporting live in their own admin surface')
+    expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="punch-method"]')?.textContent).toContain('Workspace settings only in group settings V1')
+    expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="advanced-controls"]')?.textContent).toContain('No disabled fake controls')
+    expect(summaryGrid!.querySelectorAll('input, textarea, select').length).toBe(0)
+    expect(Array.from(summaryGrid!.querySelectorAll('button')).every(button => button.textContent?.trim().startsWith('Open'))).toBe(true)
 
     const newGroupButton = Array.from(groupsSection!.querySelectorAll<HTMLButtonElement>('button'))
       .find(button => button.textContent?.includes('New group'))
@@ -639,6 +648,33 @@ describe('Attendance admin regressions', () => {
 
     expect(groupsSection!.querySelector('[data-attendance-group-detail]')?.textContent).toContain('New attendance group')
     expect(groupsSection!.querySelector('[data-attendance-group-people]')?.textContent).toContain('Save the group before adding people.')
+    expect(groupsSection!.querySelector('[data-attendance-group-summary-card="rule-policy"]')?.textContent).toContain('Choose or save a group first')
+  })
+
+  it('navigates from attendance group summary cards without issuing API writes', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    const groupsNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')
+    expect(groupsNav).toBeTruthy()
+    groupsNav!.click()
+    await flushUi(4)
+
+    const summaryGrid = container!.querySelector<HTMLElement>('[data-attendance-group-summaries]')
+    expect(summaryGrid).toBeTruthy()
+    expect(summaryGrid!.querySelectorAll('[data-attendance-group-summary-action]').length).toBe(7)
+
+    const beforeCalls = vi.mocked(apiFetch).mock.calls.length
+    const openShifts = summaryGrid!.querySelector<HTMLButtonElement>('[data-attendance-group-summary-action="open-shifts"]')
+    expect(openShifts).toBeTruthy()
+    openShifts!.click()
+    await flushUi(4)
+
+    const newCalls = vi.mocked(apiFetch).mock.calls.slice(beforeCalls)
+    expect(newCalls).toHaveLength(0)
+    expect(window.getComputedStyle(container!.querySelector<HTMLElement>('#attendance-admin-shifts')!).display).not.toBe('none')
+    expect(window.getComputedStyle(container!.querySelector<HTMLElement>('#attendance-admin-groups')!).display).toBe('none')
   })
 
   it('renders the production calendar-policy quick-add panel and appends a group day-index row', async () => {
