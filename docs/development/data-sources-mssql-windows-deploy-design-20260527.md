@@ -1,6 +1,6 @@
-# 外接适配器完善 + MSSQL 多版本支持 + Windows 部署形态 — 设计稿(待审核)
+# 外接适配器完善 + MSSQL 多版本支持 + Windows 部署形态 — 设计稿(已落仓)
 
-> 状态:**草稿 v2(已并入 2026-05-27 review findings + 裁示)**,写在 `/tmp`,待你确认后落 `docs/development/`。
+> 状态:**已落仓 v2(并入 2026-05-27 三轮 review findings + 裁示)**,提交 `7dea4c685`,分支 `codex/data-sources-lane-a-hardening-20260527`(基于 origin/main,未 push)。
 > 本稿对应需求:把现有"外接数据源适配器"做实并修复质量缺口;新增对客户 **Windows Server + SQL Server(多版本)** 环境的连接与部署支持。
 > v2 关键变更:现状盘点纠正(真正可用仅 postgresql/postgres+http)、新增 A0 持久化接线 + A-RO 框架级只读、A1 改用真正 crypto service、A4 扩为 enum↔registry↔驱动三方对齐、Lane B 明确不动 K3 通道只抽共享 helper + gated 在 A 之后。
 
