@@ -61,7 +61,8 @@ jobs:
       rc: ${{ steps.run_check.outputs.rc }}
       reason: ${{ steps.run_check.outputs.reason }}
     env:
-      GH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_GH_TOKEN || secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_GH_TOKEN || github.token }}
+      GH_TOKEN_FALLBACK: ${{ github.token }}
       BRANCH: ${{ inputs.branch || 'main' }}
       REQUIRED_CHECKS_CSV: ${{ inputs.required_checks_csv || 'contracts (strict),contracts (dashboard)' }}
       REQUIRE_STRICT: ${{ inputs.require_strict || 'true' }}
@@ -82,18 +83,42 @@ jobs:
           set -o pipefail
           mkdir -p output/branch-protection
           log_file="output/branch-protection/protection.log"
+          : > "$log_file"
 
-          REPO="${GITHUB_REPOSITORY}" \
-          BRANCH="${BRANCH}" \
-          REQUIRED_CHECKS_CSV="${REQUIRED_CHECKS_CSV}" \
-          REQUIRE_STRICT="${REQUIRE_STRICT}" \
-          REQUIRE_ENFORCE_ADMINS="${REQUIRE_ENFORCE_ADMINS}" \
-          REQUIRE_PR_REVIEWS="${REQUIRE_PR_REVIEWS}" \
-          MIN_APPROVING_REVIEW_COUNT="${MIN_APPROVING_REVIEW_COUNT}" \
-          REQUIRE_CODE_OWNER_REVIEWS="${REQUIRE_CODE_OWNER_REVIEWS}" \
-          OUTPUT_JSON="output/branch-protection/protection.json" \
-          ./scripts/ops/attendance-check-branch-protection.sh 2>&1 | tee "$log_file"
-          rc="${PIPESTATUS[0]}"
+          run_check_once() {
+            local token="$1"
+            local label="$2"
+            echo "[attendance-branch-protection] token_source=${label}" | tee -a "$log_file"
+            GH_TOKEN="${token}" \
+            REPO="${GITHUB_REPOSITORY}" \
+            BRANCH="${BRANCH}" \
+            REQUIRED_CHECKS_CSV="${REQUIRED_CHECKS_CSV}" \
+            REQUIRE_STRICT="${REQUIRE_STRICT}" \
+            REQUIRE_ENFORCE_ADMINS="${REQUIRE_ENFORCE_ADMINS}" \
+            REQUIRE_PR_REVIEWS="${REQUIRE_PR_REVIEWS}" \
+            MIN_APPROVING_REVIEW_COUNT="${MIN_APPROVING_REVIEW_COUNT}" \
+            REQUIRE_CODE_OWNER_REVIEWS="${REQUIRE_CODE_OWNER_REVIEWS}" \
+            OUTPUT_JSON="output/branch-protection/protection.json" \
+            ./scripts/ops/attendance-check-branch-protection.sh 2>&1 | tee -a "$log_file"
+            return "${PIPESTATUS[0]}"
+          }
+
+          if run_check_once "${GH_TOKEN:-}" "configured"; then
+            rc=0
+          else
+            rc="$?"
+          fi
+
+          if [[ "$rc" != "0" ]] \
+            && grep -Eqi "Bad credentials|HTTP 401" "$log_file" \
+            && [[ -n "${GH_TOKEN_FALLBACK:-}" && "${GH_TOKEN_FALLBACK}" != "${GH_TOKEN:-}" ]]; then
+            echo "[attendance-branch-protection] configured token failed with 401; retrying with github.token fallback" | tee -a "$log_file"
+            if run_check_once "${GH_TOKEN_FALLBACK}" "github-token-fallback"; then
+              rc=0
+            else
+              rc="$?"
+            fi
+          fi
 
           if [[ "${DRILL_FAIL}" == "true" ]]; then
             echo "[attendance-branch-protection][drill] forcing failure after check" | tee -a "$log_file"
