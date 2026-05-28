@@ -22,6 +22,7 @@ DF-N2 is the **recommended first move** on unlock day (lowest risk, zero new con
 - [ ] 🔒 Back-compat: existing runs have no events → the view tolerates empty/null
 - [ ] 🔒 Tests: redaction (stored events carry no sensitive field) · correct event appended per step · **by-`rowId` cross-run timeline** (seed 2 runs for the same rowId, assert ordered) · **real-wire round-trip** (the lineage field survives real API serialization — wire-vs-fixture guard) · `migration-sql.test.cjs` green · replay does not wrongly duplicate events
 - ▸ Exit: per-record events queryable across runs, redacted
+- ▸ **Design (sub-split 2a storage / 2b runtime-write / 2c read-route + retention/aging + redaction pre-storage gate):** `data-factory-df-n2-2-provenance-runtime-design-20260528.md` — each sub-PR a separate opt-in.
 
 ## DF-N2-3 — frontend 〔lane: frontend〕
 - [ ] 🔒 `apps/web/src/services/integration/workbench.ts`: read-only types + by-`rowId` provenance read (client over the new GET route)
