@@ -83,6 +83,7 @@ The People header may show a count only from data already returned by the member
 - Prefer `payload.total` when present.
 - Fall back to `attendanceGroupMembers.length` only when total is absent.
 - Do not add a group list aggregate count to the groups endpoint.
+- The current member loader does not request additional pages, so runtime copy should distinguish total count from visible rows, for example "Showing N of total", instead of implying the table is exhaustive.
 - If no group is saved yet, keep the existing "Save the group before adding people" empty state.
 - If a saved group has no members, use copy that invites adding people rather than implying configuration is broken.
 
