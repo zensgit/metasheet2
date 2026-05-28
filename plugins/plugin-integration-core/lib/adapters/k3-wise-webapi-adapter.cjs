@@ -710,6 +710,37 @@ function responseMessage(data, config, fallback = 'K3 WISE WebAPI business respo
   )
 }
 
+function isSuccessLikeResponseMessage(value) {
+  if (typeof value !== 'string') return false
+  const normalized = value.trim().toLowerCase()
+  if (!normalized) return false
+  const hasChineseSuccess = /成功/.test(normalized) && !/[不未没]\s*成功/.test(normalized)
+  return ['success', 'successful', 'succeeded', 'ok'].includes(normalized) ||
+    hasChineseSuccess
+}
+
+function responseFailureMessage(data, config, summary, fallback = 'K3 WISE save failed row-level success gate') {
+  const message = responseMessage(data, config, null)
+  if (message && !isSuccessLikeResponseMessage(message)) return message
+
+  const fields = []
+  if (summary && typeof summary === 'object') {
+    for (const field of [
+      'rowCount',
+      'successfulRowCount',
+      'failedRowCount',
+      'successEntityCount',
+      'envelopeStatusCode',
+      'envelopeMessagePresent',
+    ]) {
+      if (summary[field] !== undefined && summary[field] !== null) {
+        fields.push(`${field}=${summary[field]}`)
+      }
+    }
+  }
+  return fields.length > 0 ? `${fallback} (${fields.join(', ')})` : fallback
+}
+
 function responseCode(data, config, fallback = 'OK') {
   return firstDefined(
     config.responseCodePath ? getPath(data, config.responseCodePath) : undefined,
@@ -1193,7 +1224,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
         raw.push({ index, operation: 'save', body: save.data, summary: saveSummary })
         businessResponses.push({ index, object: request.object, ...saveSummary })
         if (!saveSucceeded) {
-          throw new K3WiseWebApiAdapterError(String(responseMessage(save.data, config)), {
+          throw new K3WiseWebApiAdapterError(String(responseFailureMessage(save.data, config, saveSummary)), {
             code: responseFailureCode(save.data, config, 'K3_WISE_SAVE_FAILED'),
             body: save.data,
             responseSummary: saveSummary,
@@ -1348,6 +1379,7 @@ module.exports = {
     responseBillNo,
     responseCode,
     responseExternalId,
+    responseFailureMessage,
     saveBusinessSuccess,
   },
 }

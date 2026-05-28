@@ -87,6 +87,20 @@ function createK3FetchMock() {
           Data: [{ FStatus: false, FItemID: 0, FMessage: 'required unit missing' }],
         })
       }
+      if (record.FNumber === 'AMBIGUOUSFAIL') {
+        return jsonResponse(200, {
+          StatusCode: 200,
+          Message: 'Successful',
+          Data: [{ FStatus: false, FItemID: 0 }],
+        })
+      }
+      if (record.FNumber === 'CHINESENEGFAIL') {
+        return jsonResponse(200, {
+          StatusCode: 200,
+          Message: 'Successful',
+          Data: [{ FStatus: false, FItemID: 0, FMessage: '操作不成功' }],
+        })
+      }
       if (record.FNumber === 'ROWOK') {
         return jsonResponse(200, {
           StatusCode: 200,
@@ -511,6 +525,24 @@ async function testK3WebApiAdapter() {
     Message: 'Successful',
     Data: [{ FStatus: true, FItemID: 1001 }],
   }, {}), true)
+  assert.equal(
+    webApiInternals.responseFailureMessage(
+      { StatusCode: 200, Message: '操作成功', Data: [{ FStatus: false, FItemID: 0 }] },
+      {},
+      { failedRowCount: 1 },
+    ),
+    'K3 WISE save failed row-level success gate (failedRowCount=1)',
+    'Chinese success-like envelope message is synthesized when row-level success fails',
+  )
+  assert.equal(
+    webApiInternals.responseFailureMessage(
+      { StatusCode: 200, Message: '未成功', Data: [{ FStatus: false, FItemID: 0 }] },
+      {},
+      { failedRowCount: 1 },
+    ),
+    '未成功',
+    'Chinese negated-success message is preserved as a real failure message',
+  )
 
   const invalidBaseUrl = (() => {
     try {
@@ -773,12 +805,14 @@ async function testK3WebApiSaveBusinessEvidence() {
       { FNumber: 'ROWOK', FName: 'Positive row' },
       { FNumber: 'ROWFAIL', FName: 'Business row fail' },
       { FNumber: 'STATUS201', FName: 'Envelope fail' },
+      { FNumber: 'AMBIGUOUSFAIL', FName: 'Envelope-success row fail' },
+      { FNumber: 'CHINESENEGFAIL', FName: 'Chinese negated success row fail' },
     ],
     keyFields: ['FNumber'],
   })
 
   assert.equal(upsert.written, 1, 'only K3 business-positive row counts as written')
-  assert.equal(upsert.failed, 2, 'K3 row-level failures are counted as failed')
+  assert.equal(upsert.failed, 4, 'K3 row-level failures are counted as failed')
   assert.equal(upsert.results[0].externalId, 1001, 'positive FItemID is surfaced as external id')
   assert.equal(upsert.results[0].responseSummary.success, true)
   assert.equal(upsert.results[0].responseSummary.externalIdPresent, true)
@@ -788,10 +822,18 @@ async function testK3WebApiSaveBusinessEvidence() {
   assert.equal(upsert.errors[0].responseSummary.failedRowCount, 1)
   assert.equal(upsert.errors[1].code, 'K3_WISE_SAVE_FAILED')
   assert.match(upsert.errors[1].message, /required unit/i)
-  assert.equal(upsert.metadata.businessResponses.length, 3)
+  assert.equal(upsert.errors[2].code, 'K3_WISE_SAVE_FAILED')
+  assert.notEqual(upsert.errors[2].message, 'Successful')
+  assert.match(upsert.errors[2].message, /row-level success gate/i)
+  assert.match(upsert.errors[2].message, /failedRowCount=1/)
+  assert.equal(upsert.errors[2].diagnostic.validationMessage, upsert.errors[2].message)
+  assert.equal(upsert.errors[3].code, 'K3_WISE_SAVE_FAILED')
+  assert.equal(upsert.errors[3].message, '操作不成功')
+  assert.equal(upsert.errors[3].diagnostic.validationMessage, '操作不成功')
+  assert.equal(upsert.metadata.businessResponses.length, 5)
   assert.deepEqual(
     upsert.metadata.businessResponses.map((summary) => summary.success),
-    [true, false, false],
+    [true, false, false, false, false],
     'business response summaries preserve one entry per attempted save',
   )
 }
