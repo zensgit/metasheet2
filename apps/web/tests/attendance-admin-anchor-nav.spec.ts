@@ -244,9 +244,30 @@ describe('Attendance admin anchor navigation', () => {
   })
 
   it('stages attendance group members before posting unique pending IDs', async () => {
+    const existingMemberUserId = '11111111-1111-4111-8111-111111111111'
     const postBodies: unknown[] = []
+    const resolveBodies: unknown[] = []
     vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input.toString()
+      if (url === '/api/attendance-admin/users/batch/resolve') {
+        resolveBodies.push(JSON.parse(String(init?.body || '{}')))
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            requested: 1,
+            items: [
+              {
+                id: existingMemberUserId,
+                email: 'alice.member@example.com',
+                name: 'Alice Member',
+                is_active: true,
+              },
+            ],
+            missingUserIds: [],
+            inactiveUserIds: [],
+          },
+        })
+      }
       if (url.startsWith('/api/admin/users')) {
         return jsonResponse(200, {
           ok: true,
@@ -291,7 +312,7 @@ describe('Attendance admin anchor navigation', () => {
           ok: true,
           data: {
             items: [
-              { id: 'member-1', groupId: 'group-a', userId: 'user-1', createdAt: '2026-05-27T08:00:00.000Z' },
+              { id: 'member-1', groupId: 'group-a', userId: existingMemberUserId, createdAt: '2026-05-27T08:00:00.000Z' },
             ],
             total: 25,
           },
@@ -313,11 +334,15 @@ describe('Attendance admin anchor navigation', () => {
     const groupsAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')
     expect(groupsAnchor).toBeTruthy()
     groupsAnchor!.click()
-    await flushUi(4)
+    await flushUi(8)
 
     const people = container!.querySelector<HTMLElement>('[data-attendance-group-people]')
     expect(people).toBeTruthy()
     expect(people!.querySelector('[data-attendance-group-member-count]')?.textContent).toContain('Showing 1 of 25 members')
+    expect(resolveBodies.at(-1)).toEqual({ userIds: [existingMemberUserId] })
+    expect(people!.querySelector('[data-attendance-group-member-label]')?.textContent).toContain('Alice Member')
+    expect(people!.querySelector('[data-attendance-group-member-user-id]')?.textContent).toContain(existingMemberUserId)
+    expect(people!.querySelector('[data-attendance-group-member-secondary]')?.textContent).toContain('alice.member@example.com')
 
     const userSelect = people!.querySelector<HTMLSelectElement>('.attendance__user-picker select')
     expect(userSelect).toBeTruthy()
@@ -354,7 +379,7 @@ describe('Attendance admin anchor navigation', () => {
 
     const bulkInput = people!.querySelector<HTMLTextAreaElement>('#attendance-group-member-user-ids')
     expect(bulkInput).toBeTruthy()
-    bulkInput!.value = 'user-2, user-3\nuser-1'
+    bulkInput!.value = `user-2, user-3\n${existingMemberUserId}`
     bulkInput!.dispatchEvent(new Event('input', { bubbles: true }))
 
     const addButton = Array.from(people!.querySelectorAll<HTMLButtonElement>('button'))
@@ -368,6 +393,221 @@ describe('Attendance admin anchor navigation', () => {
         userIds: ['user-2', 'user-3'],
       },
     ])
+  })
+
+  it('keeps same-label attendance group members distinct and removes by user ID', async () => {
+    const firstMemberUserId = '22222222-2222-4222-8222-222222222222'
+    const secondMemberUserId = '33333333-3333-4333-8333-333333333333'
+    const deleteUrls: string[] = []
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url === '/api/attendance-admin/users/batch/resolve') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            requested: 2,
+            items: [
+              { id: firstMemberUserId, email: 'one@example.com', name: 'Shared Label', is_active: true },
+              { id: secondMemberUserId, email: 'two@example.com', name: 'Shared Label', is_active: true },
+            ],
+            missingUserIds: [],
+            inactiveUserIds: [],
+          },
+        })
+      }
+      if (url.startsWith('/api/attendance/groups?')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'group-a',
+                name: 'Operations floor',
+                code: 'ops_floor',
+                timezone: 'Asia/Shanghai',
+                ruleSetId: null,
+              },
+            ],
+          },
+        })
+      }
+      if (url === `/api/attendance/groups/group-a/members/${secondMemberUserId}` && init?.method === 'DELETE') {
+        deleteUrls.push(url)
+        return jsonResponse(200, { ok: true, data: { removed: true } })
+      }
+      if (url === '/api/attendance/groups/group-a/members') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: 'member-1', groupId: 'group-a', userId: firstMemberUserId, createdAt: '2026-05-27T08:00:00.000Z' },
+              { id: 'member-2', groupId: 'group-a', userId: secondMemberUserId, createdAt: '2026-05-27T08:05:00.000Z' },
+            ],
+            total: 2,
+          },
+        })
+      }
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          items: [],
+          summary: null,
+        },
+      })
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    const groupsAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')
+    expect(groupsAnchor).toBeTruthy()
+    groupsAnchor!.click()
+    await flushUi(8)
+
+    const rows = Array.from(container!.querySelectorAll<HTMLTableRowElement>('[data-attendance-group-people] tbody tr'))
+    expect(rows).toHaveLength(2)
+    expect(rows[0]?.textContent).toContain('Shared Label')
+    expect(rows[0]?.textContent).toContain(firstMemberUserId)
+    expect(rows[1]?.textContent).toContain('Shared Label')
+    expect(rows[1]?.textContent).toContain(secondMemberUserId)
+
+    const secondRemove = Array.from(rows[1]!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Remove'))
+    expect(secondRemove).toBeTruthy()
+    secondRemove!.click()
+    await flushUi(8)
+
+    expect(deleteUrls).toEqual([`/api/attendance/groups/group-a/members/${secondMemberUserId}`])
+  })
+
+  it('falls back to saved user IDs when attendance group member label resolution fails', async () => {
+    const memberUserId = '44444444-4444-4444-8444-444444444444'
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url === '/api/attendance-admin/users/batch/resolve') {
+        return jsonResponse(500, {
+          ok: false,
+          error: {
+            message: 'resolver unavailable',
+          },
+        })
+      }
+      if (url.startsWith('/api/attendance/groups?')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'group-a',
+                name: 'Operations floor',
+                code: 'ops_floor',
+                timezone: 'Asia/Shanghai',
+                ruleSetId: null,
+              },
+            ],
+          },
+        })
+      }
+      if (url === '/api/attendance/groups/group-a/members') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: 'member-1', groupId: 'group-a', userId: memberUserId, createdAt: '2026-05-27T08:00:00.000Z' },
+            ],
+            total: 1,
+          },
+        })
+      }
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          items: [],
+          summary: null,
+        },
+      })
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    const groupsAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')
+    expect(groupsAnchor).toBeTruthy()
+    groupsAnchor!.click()
+    await flushUi(8)
+
+    const people = container!.querySelector<HTMLElement>('[data-attendance-group-people]')
+    expect(people).toBeTruthy()
+    expect(people!.querySelector('[data-attendance-group-member-label]')).toBeNull()
+    expect(people!.querySelector('[data-attendance-group-member-user-id]')?.textContent).toContain(memberUserId)
+    expect(container!.textContent).not.toContain('resolver unavailable')
+  })
+
+  it('skips non-UUID attendance group member IDs before resolving labels', async () => {
+    const resolveBodies: unknown[] = []
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url === '/api/attendance-admin/users/batch/resolve') {
+        resolveBodies.push(JSON.parse(String(init?.body || '{}')))
+        return jsonResponse(400, {
+          ok: false,
+          error: {
+            message: 'Invalid user IDs',
+          },
+        })
+      }
+      if (url.startsWith('/api/attendance/groups?')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'group-a',
+                name: 'Operations floor',
+                code: 'ops_floor',
+                timezone: 'Asia/Shanghai',
+                ruleSetId: null,
+              },
+            ],
+          },
+        })
+      }
+      if (url === '/api/attendance/groups/group-a/members') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: 'member-1', groupId: 'group-a', userId: 'legacy-user-1', createdAt: '2026-05-27T08:00:00.000Z' },
+            ],
+            total: 1,
+          },
+        })
+      }
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          items: [],
+          summary: null,
+        },
+      })
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    const groupsAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')
+    expect(groupsAnchor).toBeTruthy()
+    groupsAnchor!.click()
+    await flushUi(8)
+
+    const people = container!.querySelector<HTMLElement>('[data-attendance-group-people]')
+    expect(people).toBeTruthy()
+    expect(resolveBodies).toEqual([])
+    expect(people!.querySelector('[data-attendance-group-member-label]')).toBeNull()
+    expect(people!.querySelector('[data-attendance-group-member-user-id]')?.textContent).toContain('legacy-user-1')
   })
 
   it('explains duplicate-only attendance group member input without posting', async () => {
