@@ -10,6 +10,8 @@ Issue `#1954` required reconciling the stale extracted attendance rules/groups c
 
 The production attendance group manager now lives in `apps/web/src/views/AttendanceView.vue` after Slice A and Slice B. The extracted `AttendanceRulesAndGroupsSection.vue` still represented the older form/table variant and was not rendered by the production admin surface.
 
+Lineage note: the `#1946` design lock allowed either wiring `AttendanceRulesAndGroupsSection.vue` into `AttendanceView.vue` or porting the list-detail structure into the existing inline production section; Slice A chose the port path, so this follow-up retires the now-stale extracted component.
+
 ## 2. Decision
 
 Retire the stale extracted component instead of updating it into a second full implementation.
