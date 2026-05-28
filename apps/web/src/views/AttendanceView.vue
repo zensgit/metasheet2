@@ -3168,14 +3168,31 @@
                         <table class="attendance__table">
                           <thead>
                             <tr>
-                              <th>{{ tr('User ID', '用户 ID') }}</th>
+                              <th>{{ tr('Member', '成员') }}</th>
                               <th>{{ tr('Joined', '加入时间') }}</th>
                               <th>{{ tr('Actions', '操作') }}</th>
                             </tr>
                           </thead>
                           <tbody>
                             <tr v-for="member in attendanceGroupMembers" :key="member.id">
-                              <td>{{ member.userId }}</td>
+                              <td>
+                                <span class="attendance__group-member-identity" data-attendance-group-member-identity>
+                                  <strong
+                                    v-if="attendanceGroupMemberPrimaryLabel(member.userId)"
+                                    data-attendance-group-member-label
+                                  >
+                                    {{ attendanceGroupMemberPrimaryLabel(member.userId) }}
+                                  </strong>
+                                  <span data-attendance-group-member-user-id>{{ member.userId }}</span>
+                                  <small
+                                    v-if="attendanceGroupMemberSecondaryLabel(member.userId)"
+                                    class="attendance__field-hint"
+                                    data-attendance-group-member-secondary
+                                  >
+                                    {{ attendanceGroupMemberSecondaryLabel(member.userId) }}
+                                  </small>
+                                </span>
+                              </td>
                               <td>{{ formatDateTime(member.createdAt ?? null) }}</td>
                               <td class="attendance__table-actions">
                                 <button
@@ -6195,6 +6212,8 @@ interface AttendanceGroupMember {
   createdAt?: string
 }
 
+type AttendanceGroupMemberResolvedUsers = Record<string, AttendanceAdminBatchResolveItem>
+
 type AttendanceGroupSummaryAction = {
   key: string
   label: string
@@ -7876,6 +7895,7 @@ const attendanceGroupMemberUserIds = ref('')
 const attendanceGroupPendingMemberIds = ref<string[]>([])
 const attendanceGroupMemberDuplicateNotice = ref('')
 const attendanceGroupMemberTotal = ref(0)
+const attendanceGroupMemberResolvedUsers = ref<AttendanceGroupMemberResolvedUsers>({})
 const payrollTemplateEditingId = ref<string | null>(null)
 const payrollCycleEditingId = ref<string | null>(null)
 const payrollCycleSummary = ref<AttendanceSummary | null>(null)
@@ -7917,6 +7937,56 @@ const attendanceGroupMemberCountLabel = computed(() => {
   if (count === 1) return tr('1 member', '1 位成员')
   return tr(`${count} members`, `${count} 位成员`)
 })
+
+function normalizeAttendanceGroupMemberResolvedUsers(payload: any, requestedUserIds: string[]): AttendanceGroupMemberResolvedUsers {
+  const requested = new Set(requestedUserIds)
+  const itemsRaw = Array.isArray(payload?.items) ? payload.items : []
+  const resolved: AttendanceGroupMemberResolvedUsers = {}
+
+  for (const raw of itemsRaw) {
+    if (!raw || typeof raw !== 'object') continue
+    const id = String((raw as any).id || '').trim()
+    if (!id || !requested.has(id) || resolved[id]) continue
+    resolved[id] = {
+      id,
+      email: String((raw as any).email || ''),
+      name: (raw as any).name === null || (raw as any).name === undefined ? null : String((raw as any).name),
+      is_active: (raw as any).is_active === false ? false : true,
+    }
+  }
+
+  return resolved
+}
+
+function attendanceGroupMemberResolverUserIds(members: AttendanceGroupMember[]): string[] {
+  const seen = new Set<string>()
+  const userIds: string[] = []
+  for (const member of members) {
+    const userId = String(member.userId || '').trim()
+    if (!isUuid(userId) || seen.has(userId)) continue
+    seen.add(userId)
+    userIds.push(userId)
+  }
+  return userIds
+}
+
+function attendanceGroupMemberPrimaryLabel(userId: string): string {
+  const item = attendanceGroupMemberResolvedUsers.value[userId]
+  if (!item) return ''
+  return item.name?.trim() || item.email.trim() || ''
+}
+
+function attendanceGroupMemberSecondaryLabel(userId: string): string {
+  const item = attendanceGroupMemberResolvedUsers.value[userId]
+  if (!item) return ''
+  const primary = attendanceGroupMemberPrimaryLabel(userId)
+  const parts: string[] = []
+  const email = item.email.trim()
+  if (email && email !== primary) parts.push(email)
+  if (!item.is_active) parts.push(tr('Inactive', '已停用'))
+  return parts.join(' · ')
+}
+
 const attendanceGroupSummaryCards = computed<AttendanceGroupSummaryCard[]>(() => {
   const groupSaved = Boolean(attendanceGroupEditingId.value)
   const ruleSetName = groupSaved
@@ -15694,6 +15764,7 @@ function resetAttendanceGroupForm() {
   attendanceGroupMemberGroupId.value = ''
   attendanceGroupMembers.value = []
   attendanceGroupMemberTotal.value = 0
+  attendanceGroupMemberResolvedUsers.value = {}
   resetAttendanceGroupMemberDraft()
 }
 
@@ -15709,6 +15780,7 @@ function editAttendanceGroup(item: AttendanceGroup) {
   if (groupChanged) {
     attendanceGroupMembers.value = []
     attendanceGroupMemberTotal.value = 0
+    attendanceGroupMemberResolvedUsers.value = {}
     resetAttendanceGroupMemberDraft()
   }
 }
@@ -15821,6 +15893,7 @@ async function loadAttendanceGroupMembers() {
   if (!groupId) {
     attendanceGroupMembers.value = []
     attendanceGroupMemberTotal.value = 0
+    attendanceGroupMemberResolvedUsers.value = {}
     return
   }
   attendanceGroupMemberLoading.value = true
@@ -15838,10 +15911,43 @@ async function loadAttendanceGroupMembers() {
     const items = Array.isArray(data.data?.items) ? data.data.items : []
     attendanceGroupMembers.value = items
     attendanceGroupMemberTotal.value = Number(data.data?.total ?? items.length) || items.length
+    void resolveAttendanceGroupMemberLabels(groupId, items)
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to load group members', '加载分组成员失败')), 'error')
   } finally {
     attendanceGroupMemberLoading.value = false
+  }
+}
+
+async function resolveAttendanceGroupMemberLabels(groupId: string, members: AttendanceGroupMember[]) {
+  const userIds = attendanceGroupMemberResolverUserIds(members)
+  if (userIds.length === 0) {
+    if (attendanceGroupMemberGroupId.value === groupId) {
+      attendanceGroupMemberResolvedUsers.value = {}
+    }
+    return
+  }
+
+  try {
+    const response = await apiFetch('/api/attendance-admin/users/batch/resolve', {
+      method: 'POST',
+      body: JSON.stringify({ userIds }),
+    })
+    if (attendanceGroupMemberGroupId.value !== groupId) return
+    if (response.status === 403 || response.status === 404) {
+      attendanceGroupMemberResolvedUsers.value = {}
+      return
+    }
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.ok) {
+      attendanceGroupMemberResolvedUsers.value = {}
+      return
+    }
+    attendanceGroupMemberResolvedUsers.value = normalizeAttendanceGroupMemberResolvedUsers(data.data, userIds)
+  } catch {
+    if (attendanceGroupMemberGroupId.value === groupId) {
+      attendanceGroupMemberResolvedUsers.value = {}
+    }
   }
 }
 
@@ -18691,6 +18797,17 @@ const holidaySectionBindings = {
   font-size: 14px;
   line-height: 1;
   padding: 0;
+}
+
+.attendance__group-member-identity {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.attendance__group-member-identity strong {
+  color: #111827;
+  font-size: 13px;
 }
 
 .attendance__group-sticky-actions {
