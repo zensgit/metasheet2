@@ -57,6 +57,10 @@ test('docker-build workflow deploys exact commit images and verifies served back
   assertContains(raw, 'DEPLOY_WEB_BUILD_INFO_URL', 'web version probe URL')
   assertContains(raw, 'fetch_json_with_retry', 'version probe retry loop')
   assertContains(raw, 'response is not a JSON object', 'version probe JSON type guard')
+  assert.ok(
+    !raw.includes("or '<missing>'"),
+    'remote deploy command array must not embed single-quoted Python strings inside shell single-quoted entries',
+  )
   assertContains(raw, 'backend commit mismatch', 'backend version assertion')
   assertContains(raw, 'web commit mismatch', 'web version assertion')
   assertContains(raw, 'Deploy version: expected=${DEPLOY_EXPECTED_COMMIT} backend=ok web=ok', 'version verify success marker')
