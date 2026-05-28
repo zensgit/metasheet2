@@ -110,4 +110,32 @@ describe('A1 credential encryption at rest', () => {
     expect(() => m.getDataSource('ok')).not.toThrow() // valid row still loads
     expect(() => m.getDataSource('corrupt')).toThrow(/not found/) // undecryptable row skipped
   })
+
+  it('round-trips a secret that literally starts with the enc: prefix', async () => {
+    const { db, rows } = statefulFakeDb()
+    const m1 = new DataSourceManager({ db: db as never })
+    await m1.addDataSource(
+      {
+        id: 'pfx',
+        name: 'pfx',
+        type: 'postgres',
+        connection: { host: 'localhost', port: 5432, database: 'x' },
+        credentials: { username: 'u', password: 'enc:literal-secret', apiKey: 'enc:also', token: 'enc:too' },
+        options: { autoConnect: false },
+      },
+      { ownerId: 'a' },
+    )
+
+    // must be genuinely encrypted, NOT passed through because it looked encrypted
+    const stored = (rows.get('pfx') as { config: { credentials: Record<string, string> } }).config.credentials
+    expect(stored.password).toMatch(/^enc:/)
+    expect(stored.password).not.toBe('enc:literal-secret')
+
+    const m2 = new DataSourceManager()
+    await m2.initialize(db as never)
+    const creds = m2.getDataSource('pfx').getConfig().credentials as Record<string, string>
+    expect(creds.password).toBe('enc:literal-secret')
+    expect(creds.apiKey).toBe('enc:also')
+    expect(creds.token).toBe('enc:too')
+  })
 })

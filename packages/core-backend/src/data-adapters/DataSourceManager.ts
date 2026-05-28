@@ -119,15 +119,18 @@ export class DataSourceManager extends EventEmitter {
   /**
    * Encrypt secret credential fields for storage (A1). Uses
    * encryptStoredSecretValue (NOT normalize) so secret values are not trimmed —
-   * a trailing space in a password is significant. Idempotent: already-encrypted
-   * values are skipped.
+   * a trailing space in a password is significant. ALWAYS encrypts: it does NOT
+   * use the enc: prefix to detect "already encrypted", because a real plaintext
+   * secret can legitimately start with "enc:" and persistDataSource always
+   * receives plaintext config (create = user plaintext; PUT doesn't touch
+   * credentials; load decrypts before re-persist) — there is nothing to skip.
    */
   private encryptCredentials(creds?: Credentials): Credentials | undefined {
     if (!creds) return creds
     const out: Credentials = { ...creds }
     for (const key of SENSITIVE_CREDENTIAL_KEYS) {
       const v = out[key]
-      if (typeof v === 'string' && v.length > 0 && !isEncryptedSecretValue(v)) {
+      if (typeof v === 'string' && v.length > 0) {
         out[key] = encryptStoredSecretValue(v)
       }
     }
