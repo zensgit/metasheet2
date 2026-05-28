@@ -47,6 +47,7 @@ import type {
   RecordPermissionEntry,
   AutomationRule,
   AutomationExecution,
+  AutomationRunView,
   AutomationStats,
   ChartConfig,
   ChartCreateInput,
@@ -1572,6 +1573,25 @@ export class MultitableApiClient {
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/stats`,
     )
     return this.parseJson<AutomationStats>(res)
+  }
+
+  // --- A2: read-only cross-rule runs API (admin-only; status emitted as C1 WorkflowJobStatus) ---
+  async listAutomationRuns(filters?: {
+    sheetId?: string
+    ruleId?: string
+    status?: string
+    limit?: number
+  }): Promise<AutomationRunView[]> {
+    const res = await this.fetch(`/api/multitable/automation-executions${qs({ ...filters })}`)
+    const data = await this.parseJson<{ executions: AutomationRunView[] }>(res)
+    return Array.isArray(data?.executions) ? data.executions : []
+  }
+
+  async getAutomationRun(executionId: string): Promise<AutomationRunView> {
+    const res = await this.fetch(
+      `/api/multitable/automation-executions/${encodeURIComponent(executionId)}`,
+    )
+    return this.parseJson<AutomationRunView>(res)
   }
 
   async getAutomationDingTalkPersonDeliveries(sheetId: string, ruleId: string, limit?: number): Promise<DingTalkPersonDelivery[]> {

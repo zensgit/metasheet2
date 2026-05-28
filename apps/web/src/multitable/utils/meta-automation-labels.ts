@@ -9,9 +9,12 @@ import type {
   AutomationExecution,
   AutomationTriggerType,
   ConditionOperator,
+  WorkflowJobStatus,
 } from '../types'
 
-export type AutomationStatus = AutomationExecution['status'] | 'running'
+// Legacy execution/step statuses (success/failed/skipped) + the converged C1
+// WorkflowJobStatus set surfaced by the A2 runs API (resolved/queued/suspended/…).
+export type AutomationStatus = AutomationExecution['status'] | WorkflowJobStatus
 
 // Keep in sync with MetaAutomationRuleEditor.vue ConditionValueWidget.
 export type AutomationConditionValueWidget =
@@ -239,6 +242,19 @@ export type AutomationLabelKey =
   | 'status.failed'
   | 'status.skipped'
   | 'status.running'
+  | 'status.resolved'
+  | 'status.queued'
+  | 'status.suspended'
+  | 'status.rejected'
+  | 'status.errored'
+  | 'runs.title'
+  | 'runs.subtitle'
+  | 'runs.adminOnly'
+  | 'runs.sheetFilter'
+  | 'runs.triggerEvent'
+  | 'runs.ruleSnapshot'
+  | 'runs.steps'
+  | 'runs.loadingDetail'
 
 export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'log.title',
@@ -431,6 +447,19 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'status.failed',
   'status.skipped',
   'status.running',
+  'status.resolved',
+  'status.queued',
+  'status.suspended',
+  'status.rejected',
+  'status.errored',
+  'runs.title',
+  'runs.subtitle',
+  'runs.adminOnly',
+  'runs.sheetFilter',
+  'runs.triggerEvent',
+  'runs.ruleSnapshot',
+  'runs.steps',
+  'runs.loadingDetail',
 ]
 
 const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
@@ -624,6 +653,19 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'status.failed': { en: 'failed', zh: '失败' },
   'status.skipped': { en: 'skipped', zh: '跳过' },
   'status.running': { en: 'running', zh: '运行中' },
+  'status.resolved': { en: 'resolved', zh: '已完成' },
+  'status.queued': { en: 'queued', zh: '排队中' },
+  'status.suspended': { en: 'suspended', zh: '已挂起' },
+  'status.rejected': { en: 'rejected', zh: '已拒绝' },
+  'status.errored': { en: 'errored', zh: '异常' },
+  'runs.title': { en: 'Automation Runs', zh: '自动化运行记录' },
+  'runs.subtitle': { en: 'Cross-sheet · admin only · read-only', zh: '跨表 · 仅管理员 · 只读' },
+  'runs.adminOnly': { en: 'Admin access required', zh: '需要管理员权限' },
+  'runs.sheetFilter': { en: 'Sheet ID', zh: '表 ID' },
+  'runs.triggerEvent': { en: 'Trigger event', zh: '触发事件' },
+  'runs.ruleSnapshot': { en: 'Rule snapshot', zh: '规则快照' },
+  'runs.steps': { en: 'Steps', zh: '步骤' },
+  'runs.loadingDetail': { en: 'Loading detail…', zh: '加载详情…' },
 }
 
 export function automationLabel(key: AutomationLabelKey, isZh: boolean): string {
@@ -636,6 +678,11 @@ export function automationStatusLabel(status: AutomationStatus | (string & {}), 
   if (status === 'failed') return automationLabel('status.failed', isZh)
   if (status === 'skipped') return automationLabel('status.skipped', isZh)
   if (status === 'running') return automationLabel('status.running', isZh)
+  if (status === 'resolved') return automationLabel('status.resolved', isZh)
+  if (status === 'queued') return automationLabel('status.queued', isZh)
+  if (status === 'suspended') return automationLabel('status.suspended', isZh)
+  if (status === 'rejected') return automationLabel('status.rejected', isZh)
+  if (status === 'errored') return automationLabel('status.errored', isZh)
   return String(status)
 }
 
