@@ -28,7 +28,7 @@ describe('automation-log-redact (shared backend redactor)', () => {
   })
 
   describe('redactValue — the four snapshot channels', () => {
-    it('rule_snapshot: scrubs in-string token + Bearer header, keeps business fields', () => {
+    it('rule_snapshot: masks auth header wholesale + scrubs in-string token, keeps business fields', () => {
       const ruleSnapshot = {
         id: 'rule_1',
         name: 'Notify on submit',
@@ -46,26 +46,61 @@ describe('automation-log-redact (shared backend redactor)', () => {
       expect(out.id).toBe('rule_1')
       expect(out.name).toBe('Notify on submit')
       expect(out.actions[0].type).toBe('send_webhook')
+      // auth header value masked wholesale (structured key, case-insensitive)
+      expect(out.actions[0].config.headers.authorization).toBe('<redacted>')
       const serialized = JSON.stringify(out)
-      expect(serialized).toContain('Bearer <redacted>')
       expect(serialized).toContain('access_token=<redacted>')
       expect(serialized).not.toContain('SUPERSECRETTOKEN')
       expect(serialized).not.toContain('zzz.yyy.xxx00001')
     })
 
-    it('masks structured-field keys wholesale (password / accessToken / webhookUrl / to)', () => {
+    it('masks secret structured keys wholesale (case/separator-insensitive)', () => {
       const out = redactValue({
         password: 'hunter2',
         accessToken: 'tok_123',
+        access_token: 'tok_456',
         webhookUrl: 'https://x?access_token=zzz',
-        to: ['a@example.com', 'b@example.com'],
         keep: 'visible',
       }) as Record<string, unknown>
       expect(out.password).toBe('<redacted>')
       expect(out.accessToken).toBe('<redacted>')
+      expect(out.access_token).toBe('<redacted>')
       expect(out.webhookUrl).toBe('<redacted>')
-      expect(out.to).toEqual(['<redacted>', '<redacted>'])
       expect(out.keep).toBe('visible')
+    })
+
+    it('masks arbitrary auth headers case/separator-insensitively (the Blocking gap)', () => {
+      const out = redactValue({
+        headers: {
+          Authorization: 'Basic dXNlcjpzZWNyZXQ=',
+          'X-API-Key': 'abc123key',
+          'X-Auth-Token': 'xyz789tok',
+          Cookie: 'sid=deadbeef; csrf=tok',
+          'Set-Cookie': 'sid=deadbeef',
+          'Content-Type': 'application/json',
+        },
+      }) as { headers: Record<string, unknown> }
+      expect(out.headers.Authorization).toBe('<redacted>')
+      expect(out.headers['X-API-Key']).toBe('<redacted>')
+      expect(out.headers['X-Auth-Token']).toBe('<redacted>')
+      expect(out.headers.Cookie).toBe('<redacted>')
+      expect(out.headers['Set-Cookie']).toBe('<redacted>')
+      expect(out.headers['Content-Type']).toBe('application/json') // non-secret header preserved
+      const serialized = JSON.stringify(out)
+      expect(serialized).not.toContain('dXNlcjpzZWNyZXQ=')
+      expect(serialized).not.toContain('abc123key')
+      expect(serialized).not.toContain('deadbeef')
+    })
+
+    it('preserves contact/PII keys (to / recipient) — PII masking deferred to the retry gate', () => {
+      const out = redactValue({
+        to: ['a@example.com', 'b@example.com'],
+        recipient: 'ops@example.com',
+        name: 'Alice',
+      }) as Record<string, unknown>
+      expect(out.to).toEqual(['a@example.com', 'b@example.com'])
+      expect(out.recipient).toBe('ops@example.com')
+      expect(out.name).toBe('Alice')
     })
 
     it('steps: scrubs step.output.responseBody and step.error, keeps actionType/status', () => {

@@ -13,9 +13,12 @@
  * backend stops carrying a separate copy. Adds the DingTalk robot-webhook URL
  * pattern (which a DingTalk action's rule_snapshot / alert text can contain).
  *
- * Scope: secret-shaped VALUE scrubbing only — business field values are
- * preserved for diagnosis. Business-data / PII masking is a separate concern
- * (deferred to the retry scope gate), NOT done here.
+ * Scope: secret/auth-shaped scrubbing — secret-shaped string VALUES, plus the
+ * values of auth/credential structured keys matched case- and separator-
+ * insensitively (so arbitrary `send_webhook` headers like `Authorization` /
+ * `X-API-Key` / `Cookie` are masked wholesale). Business field values are
+ * preserved for diagnosis; contact/PII keys (`to` / `recipient` / …) are NOT
+ * masked here — persist-time PII masking is deferred to the retry scope gate.
  */
 
 export const REDACTION_VERSION = 1
@@ -49,34 +52,42 @@ const STRING_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\b(mysql:\/\/)[^@\s"'<>]+@/gi, '$1<redacted>@'],
 ]
 
-/** Key names whose values are always replaced wholesale, regardless of shape. */
+/**
+ * Key names (NORMALIZED: lowercased, `-`/`_` stripped) whose values are masked
+ * wholesale regardless of value shape. Covers auth headers and credential config
+ * — `send_webhook.config.headers` is arbitrary, so matching is case- AND
+ * separator-insensitive: `Authorization`, `X-API-Key`, `auth_token`, `Set-Cookie`
+ * all hit. Contact/PII keys (`to` / `recipient` / …) are deliberately NOT here —
+ * persist-time PII masking is deferred to the retry scope gate, not decided in A1.
+ */
 const STRUCTURED_FIELDS: ReadonlySet<string> = new Set([
-  'authToken',
-  'auth_token',
-  'accessToken',
-  'access_token',
-  'apiKey',
-  'api_key',
-  'clientSecret',
-  'client_secret',
+  'authtoken',
+  'authorization',
+  'proxyauthorization',
+  'accesstoken',
+  'apikey',
+  'xapikey',
+  'xauthtoken',
+  'xamzsecuritytoken',
+  'clientsecret',
+  'secret',
+  'token',
   'jwt',
   'bearer',
   'password',
-  'smtpPassword',
-  'smtp_password',
-  'smtpUser',
-  'smtp_user',
-  'smtpHost',
-  'smtp_host',
-  'recipient',
-  'recipients',
-  'to',
-  'emailTo',
-  'email_to',
+  'cookie',
+  'setcookie',
+  'smtppassword',
+  'smtpuser',
+  'smtphost',
   'webhook',
-  'webhookUrl',
-  'webhook_url',
+  'webhookurl',
 ])
+
+/** Normalize a key for structured-field matching: lowercase + strip `-` and `_`. */
+function normalizeKey(key: string): string {
+  return key.toLowerCase().replace(/[-_]/g, '')
+}
 
 /** Redact secret-shaped substrings out of a single string. */
 export function redactString(value: unknown): string {
@@ -96,7 +107,7 @@ export function redactValue(value: unknown): unknown {
   if (typeof value === 'object') {
     const out: Record<string, unknown> = {}
     for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
-      if (STRUCTURED_FIELDS.has(key)) {
+      if (STRUCTURED_FIELDS.has(normalizeKey(key))) {
         out[key] = Array.isArray(val) ? val.map(() => '<redacted>') : val == null ? val : '<redacted>'
       } else {
         out[key] = redactValue(val)
