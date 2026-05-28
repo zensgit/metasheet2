@@ -85,10 +85,10 @@ Shape B (legacy preview fields compatible; DF-T1 evidence under `targetPayloadPr
 
 Closeout-verified on `main`: targetPayloadPreview + legacy arrays present; bodyKey guard active; no-write/fail-closed/redaction/grep-gate tests in place.
 
-### ⬜ DF-T1.5 — Preview provenance display — NEXT (gate satisfied; not auto-started)
-Gate satisfied: DF-T1 is green on `main` (#1945) and already emits `targetPayloadPreview.fieldProvenance`. Awaiting an explicit opt-in. (DF-T1.5 is a read-only display over that existing data — no new runtime.)
-- [ ] Per-field provenance (staging / template / constant / reference-table), derived read-only from the DF-T1 merge.
-- [ ] No new persisted provenance runtime field in this slice.
+### ✅ DF-T1.5 — Preview provenance display (DONE — 2026-05-28)
+Read-only display over the `targetPayloadPreview.fieldProvenance` DF-T1 emits; no new runtime. Frontend-only (`IntegrationWorkbenchView.vue` panel + pure `summarizeFieldProvenance` helper in `workbench.ts`); shows field name + source badge + per-source stats, gated on fieldProvenance presence (legacy preview unaffected), **never raw payload values**. Verification: `data-factory-df-t1_5-preview-provenance-display-verification-20260528.md`.
+- [x] Per-field provenance (staging / template / constant / reference-table), derived read-only from the DF-T1 merge.
+- [x] No new persisted provenance runtime field in this slice.
 
 ### 🔒 DF-T1A — Connector action metadata
 Gated on: DF-T1 + opt-in.
@@ -177,7 +177,7 @@ processors, or streaming cluster in this track.
 
 ## Sequencing rule
 
-One explicit opt-in per phase. Do not auto-start the next. **DF-T1-0 (#1936) and DF-T1 (#1945) are DONE; the active next is DF-T1.5** (preview provenance display — a read-only view over the `fieldProvenance` DF-T1 already emits). Everything below DF-T1.5 stays 🔒 until its predecessor gate is green and it is separately opted in.
+One explicit opt-in per phase. Do not auto-start the next. **DF-T1-0 (#1936), DF-T1 (#1945), and DF-T1.5 (preview provenance display) are DONE.** The next step is a separate explicit opt-in — either **DF-N2-2 (provenance runtime)** or **DF-T1A (connector action metadata)**; everything below stays 🔒 until its predecessor gate is green and it is separately opted in.
 
 ## Definition of done — DF-T1-0 (the immediate gate)
 

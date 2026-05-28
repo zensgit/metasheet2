@@ -277,6 +277,15 @@ describe('IntegrationWorkbenchView', () => {
           transformErrors: [],
           validationErrors: [],
           schemaErrors: [],
+          targetPayloadPreview: {
+            eligibleForSaveOnly: true,
+            unresolvedPlaceholders: [],
+            unresolvedReferenceComponents: [],
+            missingRequiredFields: [],
+            fieldProvenance: { FNumber: 'staging', FName: 'staging', FUnitGroupID: 'template', FErpClsID: 'reference_table' },
+            compositionSource: 'k3-save-body-composer',
+            redactionSelfCheck: { applied: true, clean: true },
+          },
         })
       }
       if (url === '/api/integration/pipelines') {
@@ -583,6 +592,23 @@ describe('IntegrationWorkbenchView', () => {
 
     ;(container.querySelector('[data-testid="preview-payload"]') as HTMLButtonElement).click()
     await flushUi()
+
+    // DF-T1.5: targetPayloadPreview.fieldProvenance in the response → the read-only provenance
+    // panel renders field names + source badges + per-source stats, and never any payload values.
+    const provenancePanel = container.querySelector('[data-testid="preview-provenance"]') as HTMLElement | null
+    expect(provenancePanel).not.toBeNull()
+    const provenanceText = provenancePanel?.textContent || ''
+    expect(provenanceText).toContain('FNumber')
+    expect(provenanceText).toContain('FUnitGroupID')
+    expect(provenanceText).toContain('FErpClsID')
+    const statsText = container.querySelector('[data-testid="preview-provenance-stats"]')?.textContent || ''
+    expect(statsText).toContain('暂存源: 2')
+    expect(statsText).toContain('模板: 1')
+    expect(statsText).toContain('引用表: 1')
+    // Secret hygiene: the provenance panel shows NO payload values.
+    expect(provenanceText).not.toContain('MAT-001')
+    expect(provenanceText).not.toContain('Bolt')
+    expect(provenanceText).not.toContain('Pcs')
 
     expect(previewBodies).toHaveLength(1)
     expect(previewBodies[0]).toMatchObject({

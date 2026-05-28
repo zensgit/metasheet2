@@ -273,6 +273,21 @@ export interface IntegrationTemplatePreviewRequest {
   }
 }
 
+export type IntegrationFieldProvenanceSource = 'staging' | 'template' | 'constant' | 'reference_table'
+
+// DF-T1 target-payload preview evidence — present only when the request carried a payloadTemplate.
+// All fields are sanitized metadata (names, counts, provenance sources); never raw payload values.
+export interface IntegrationTargetPayloadPreview {
+  eligibleForSaveOnly?: boolean
+  unresolvedPlaceholders?: string[]
+  unresolvedReferenceComponents?: Array<Record<string, unknown>>
+  missingRequiredFields?: string[]
+  // target field name -> provenance source ((string & {}) keeps autocomplete + tolerates new sources)
+  fieldProvenance?: Record<string, IntegrationFieldProvenanceSource | (string & {})>
+  compositionSource?: string
+  redactionSelfCheck?: { applied?: boolean; clean?: boolean }
+}
+
 export interface IntegrationTemplatePreviewResult {
   valid: boolean
   payload: Record<string, unknown>
@@ -282,6 +297,48 @@ export interface IntegrationTemplatePreviewResult {
   validationErrors: Array<Record<string, unknown>>
   schemaErrors: Array<Record<string, unknown>>
   template?: Record<string, unknown>
+  // DF-T1.5: present only in the DF-T1 payloadTemplate preview mode; the legacy preview omits it.
+  targetPayloadPreview?: IntegrationTargetPayloadPreview
+}
+
+export interface IntegrationFieldProvenanceEntry {
+  field: string
+  source: string
+}
+
+export interface IntegrationFieldProvenanceSummary {
+  entries: IntegrationFieldProvenanceEntry[]
+  stats: Array<{ source: string; count: number }>
+}
+
+// Canonical source order for the DF-T1.5 provenance stats badges.
+const FIELD_PROVENANCE_SOURCE_ORDER: IntegrationFieldProvenanceSource[] = ['staging', 'template', 'constant', 'reference_table']
+
+// DF-T1.5 (read-only): derive a names-only provenance view from a DF-T1 targetPayloadPreview.
+// Returns null when there is no fieldProvenance (legacy preview) so the UI renders nothing.
+// NEVER reads payload values — only field names and their declared source.
+export function summarizeFieldProvenance(
+  preview: IntegrationTargetPayloadPreview | null | undefined,
+): IntegrationFieldProvenanceSummary | null {
+  const provenance = preview?.fieldProvenance
+  if (!provenance || typeof provenance !== 'object') return null
+  const entries: IntegrationFieldProvenanceEntry[] = Object.keys(provenance)
+    .sort((a, b) => a.localeCompare(b))
+    .map((field) => ({ field, source: String(provenance[field]) }))
+  if (entries.length === 0) return null
+  const counts = new Map<string, number>()
+  for (const { source } of entries) counts.set(source, (counts.get(source) || 0) + 1)
+  const stats: Array<{ source: string; count: number }> = []
+  for (const source of FIELD_PROVENANCE_SOURCE_ORDER) {
+    if (counts.has(source)) {
+      stats.push({ source, count: counts.get(source) as number })
+      counts.delete(source)
+    }
+  }
+  for (const source of [...counts.keys()].sort((a, b) => a.localeCompare(b))) {
+    stats.push({ source, count: counts.get(source) as number })
+  }
+  return { entries, stats }
 }
 
 async function parseIntegrationResponse<T>(response: Response): Promise<T> {
