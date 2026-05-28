@@ -2,9 +2,23 @@
 
 Date: 2026-05-27
 Scope: multitable automation run governance only (the "governance half")
-Status: proposed
+Status: governance half closed at A3 + admin nav (2026-05-28)
 Companion: multitable-automation-run-governance-development-20260527.md
 Depends on (landed): C1 contract workflow-job-contract.ts (#1889, not-wired); RFC #1885
+
+## Closeout Snapshot — 2026-05-28
+
+The governance half is complete on `origin/main`:
+
+- A0 scope gate / two-gate doctrine: #1932.
+- A1 execution snapshot + before-persist redaction + consolidated backend redactor: #1937.
+- Dead-letter error message secret scrub: #1917.
+- A2 read-only runs API + C1 boundary mapping + admin-only gate: #1967 + #1973.
+- A3 admin runs view + admin navigation entry: #1975 + #1983.
+
+This closeout does NOT mark the capability half complete. A4 remains a future
+retry scope-gate, A5 retry runtime remains gated, and A6 convergence-engine
+runtime remains frozen / demand-gated.
 
 ## Doctrine — Two Gates (definition of "not lopsided")
 
@@ -46,7 +60,7 @@ K3 stage-1 lock remains in effect. Each item above is a separate named unlock.
 
 ## Current Baseline
 
-Already present:
+Already present before this line:
 
 - automation_rules CRUD
 - AutomationExecutor sequential action execution (status: success|failed|skipped per step)
@@ -59,14 +73,16 @@ Already present:
 - C1 WorkflowJob contract (workflow-job-contract.ts, #1889) — LANDED, NOT WIRED
   (WorkflowJobStatus 8-state; legacyAutomationStatusToJobStatus: success->resolved, rest identity)
 
-Missing (governance half — this line):
+Completed by this governance-half line:
 
-- execution trigger_event snapshot (redacted)
-- rule_snapshot at execution time (redacted)
-- finished_at, schema_version
-- write-time redaction of step.output / step.error (currently raw except DingTalk path)
-- cross-rule Automation Runs API (status via C1 bridge; steps via toWorkflowJobView)
-- execution detail API
+- execution trigger_event snapshot (redacted) — #1937.
+- rule_snapshot at execution time (redacted) — #1937.
+- finished_at, schema_version — #1937.
+- write-time redaction of step.output / step.error — #1937.
+- cross-rule Automation Runs API (status via C1 bridge; steps via toWorkflowJobView) — #1967.
+- execution detail API — #1967.
+- platform-admin-only gate for cross-sheet runs/detail snapshots — #1973.
+- frontend admin runs view and admin navigation entry — #1975 + #1983.
 
 Deferred (capability half — A6, frozen/demand-gated):
 
@@ -75,103 +91,106 @@ Deferred (capability half — A6, frozen/demand-gated):
 
 ## Milestones
 
-### A0 — Scope Gate and TODO  (lock: docs-only, now)
+### A0 — Scope Gate and TODO  (lock: docs-only, now) — DONE (#1932)
 
-- [ ] Add this TODO MD (incl. two-gate doctrine + per-milestone lock posture).
-- [ ] Add development MD for run governance.
-- [ ] State approval Phase 2 downstream items stay frozen.
-- [ ] State retry is not part of A1/A2/A3 runtime (A4 gate / A5 runtime).
-- [ ] Register the capability half (A6) as frozen/demand-gated; reference #1885 / #1889.
+- [x] Add this TODO MD (incl. two-gate doctrine + per-milestone lock posture).
+- [x] Add development MD for run governance.
+- [x] State approval Phase 2 downstream items stay frozen.
+- [x] State retry is not part of A1/A2/A3 runtime (A4 gate / A5 runtime).
+- [x] Register the capability half (A6) as frozen/demand-gated; reference #1885 / #1889.
 
 Acceptance:
 
-- [ ] Docs-only diff.
-- [ ] No runtime, migration, route, or UI changes.
+- [x] Docs-only diff.
+- [x] No runtime, migration, route, or UI changes.
 
-### A1 — Execution Snapshot Foundation  (lock: S1 named unlock)
+### A1 — Execution Snapshot Foundation  (lock: S1 named unlock) — DONE (#1937)
 
 Migration — add ONLY columns A1 populates with a real value now:
 
-- [ ] sheet_id TEXT
-- [ ] trigger_event JSONB        (redacted at write)
-- [ ] rule_snapshot JSONB        (redacted at write)
-- [ ] finished_at TIMESTAMPTZ NULL
-- [ ] schema_version INT NOT NULL DEFAULT 1
-- [ ] DO NOT add rerun_of_execution_id  (-> A5)
-- [ ] DO NOT add created_by/initiated_by (-> A5, only if execute path can pass the actor)
+- [x] sheet_id TEXT
+- [x] trigger_event JSONB        (redacted at write)
+- [x] rule_snapshot JSONB        (redacted at write)
+- [x] finished_at TIMESTAMPTZ NULL
+- [x] schema_version INT NOT NULL DEFAULT 1
+- [x] DO NOT add rerun_of_execution_id  (-> A5)
+- [x] DO NOT add created_by/initiated_by (-> A5, only if execute path can pass the actor)
 
 Steps storage:
 
-- [ ] Keep legacy AutomationStepResult[] UNCHANGED.
-- [ ] Do NOT persist a workflowJob sub-object.
-- [ ] Do NOT add upstreamStepKey/branchIndex graph columns (-> A6).
+- [x] Keep legacy AutomationStepResult[] UNCHANGED.
+- [x] Do NOT persist a workflowJob sub-object.
+- [x] Do NOT add upstreamStepKey/branchIndex graph columns (-> A6).
 
 Redaction (BEFORE persist, not at read):
 
-- [ ] Redact rule_snapshot (headers.authorization, URL query token, secret, ...).
-- [ ] Redact trigger_event.
-- [ ] Redact step.output AND step.error (the third channel: responseBody / generic error text).
-- [ ] Redaction = secret-shaped value scrub; PRESERVE business field values (diagnosis).
-- [ ] Business-field / PII masking is OUT of A1 scope -> open question decided at A4 gate.
-- [ ] Use ONE multitable/core redaction helper: reuse support-packet util or promote a
+- [x] Redact rule_snapshot (headers.authorization, URL query token, secret, ...).
+- [x] Redact trigger_event.
+- [x] Redact step.output AND step.error (the third channel: responseBody / generic error text).
+- [x] Redaction = secret-shaped value scrub; PRESERVE business field values (diagnosis).
+- [x] Business-field / PII masking is OUT of A1 scope -> open question decided at A4 gate.
+- [x] Use ONE multitable/core redaction helper: reuse support-packet util or promote a
       core shared helper; CONSOLIDATE the existing DingTalk-specific executor redactor.
-- [ ] Do NOT reverse-import integration-core/lib/payload-redaction.cjs (domain boundary).
+- [x] Do NOT reverse-import integration-core/lib/payload-redaction.cjs (domain boundary).
 
 Wiring:
 
-- [ ] AutomationService.executeRule() passes sheetId, triggerEvent, current rule snapshot.
-- [ ] AutomationLogService.record() persists redacted snapshot + finished_at + schema_version.
-- [ ] Preserve existing logs/stats/test API shapes.
-- [ ] Storage status stays legacy 4-state (no hot-path/status rewrite).
+- [x] AutomationService.executeRule() passes sheetId, triggerEvent, current rule snapshot.
+- [x] AutomationLogService.record() persists redacted snapshot + finished_at + schema_version.
+- [x] Preserve existing logs/stats/test API shapes.
+- [x] Storage status stays legacy 4-state (no hot-path/status rewrite).
 
 Acceptance:
 
-- [ ] Existing automation unit tests pass.
-- [ ] Test proves trigger_event / rule_snapshot persist.
-- [ ] Test proves secret-shaped values in rule_snapshot / trigger_event / step.output /
+- [x] Existing automation unit tests pass.
+- [x] Test proves trigger_event / rule_snapshot persist.
+- [x] Test proves secret-shaped values in rule_snapshot / trigger_event / step.output /
       step.error are scrubbed at write, AND business field values are preserved.
-- [ ] Test proves no new redactor is introduced; DingTalk path uses the consolidated helper.
-- [ ] Old rows with null snapshot fields still map safely (schema_version defaults 1).
+- [x] Test proves no extra redactor is introduced; DingTalk path uses the consolidated helper.
+- [x] Old rows with null snapshot fields still map safely (schema_version defaults 1).
 
-### A2 — Read-only Automation Runs API  (lock: S1 named unlock)
+### A2 — Read-only Automation Runs API  (lock: S1 named unlock) — DONE (#1967 + #1973)
 
-- [ ] Add GET /api/multitable/automation-executions (filters: sheetId, status, ruleId, limit; clamp 1..200).
-- [ ] Add GET /api/multitable/automation-executions/:executionId (404 on missing).
-- [ ] Emit execution status as WorkflowJobStatus via legacyAutomationStatusToJobStatus(); optional statusLegacy.
-- [ ] Add toWorkflowJobView(execution, step, index):
+- [x] Add GET /api/multitable/automation-executions (filters: sheetId, status, ruleId, limit; clamp 1..200).
+- [x] Add GET /api/multitable/automation-executions/:executionId (404 on missing).
+- [x] Gate both cross-sheet routes behind platform-admin access (`requireAdminRole()`).
+- [x] Emit execution status as WorkflowJobStatus via legacyAutomationStatusToJobStatus(); optional statusLegacy.
+- [x] Add toWorkflowJobView(execution, step, index):
         id = `${execution.id}:step:${index}`
         executionId = execution.id
         stepKey = String(index)
         status = legacyAutomationStatusToJobStatus(step.status)   // direct; no no-op ternary
         upstreamJobId = index > 0 ? `${execution.id}:step:${index-1}` : null
         result = step.output ; error = step.error   // already redacted at write (A1)
-- [ ] status= filter: C1 canonical (advertised), legacy accepted as migration grace.
-- [ ] Future statuses (queued/suspended/rejected/errored): legal but EMPTY result (not 400).
-- [ ] Do not add retry endpoint.
+- [x] status= filter: C1 canonical (advertised), legacy accepted as migration grace.
+- [x] Future statuses (queued/suspended/rejected/errored): legal but EMPTY result (not 400).
+- [x] Do not add retry endpoint.
 
 Acceptance:
 
-- [ ] Route tests: list/detail/filter/limit/not-found.
-- [ ] Test: toWorkflowJobView output passes C1 normalizeWorkflowJob() (not raw DB step).
-- [ ] Test: execution status emitted as C1 (success -> resolved).
-- [ ] Test: status= accepts both vocabularies; future-state filter returns empty (not 400).
-- [ ] Existing per-rule logs/stats/test shape unchanged.
+- [x] Route tests: list/detail/filter/limit/not-found.
+- [x] Test: toWorkflowJobView output passes C1 normalizeWorkflowJob() (not raw DB step).
+- [x] Test: execution status emitted as C1 (success -> resolved).
+- [x] Test: status= accepts both vocabularies; future-state filter returns empty (not 400).
+- [x] Existing per-rule logs/stats/test shape unchanged.
 
-### A3 — Frontend Runs View  (lock: S1 named unlock)
+### A3 — Frontend Runs View  (lock: S1 named unlock) — DONE (#1975 + #1983)
 
-- [ ] Client methods for runs list/detail.
-- [ ] Read-only runs list UI (filter status/rule/sheet; show finished_at).
-- [ ] Status labels from shared WorkflowJobStatus i18n keys.
-- [ ] Reuse support-packet renderer; expandable steps (C1 view).
-- [ ] Retry shown unavailable or omitted.
+- [x] Client methods for runs list/detail.
+- [x] Read-only runs list UI (filter status/rule/sheet; show finished_at).
+- [x] Status labels from shared WorkflowJobStatus i18n keys.
+- [x] Expandable steps (C1 view) with defensive snapshot redaction.
+- [x] Retry omitted.
+- [x] Admin navigation entry exposes the view.
 
 Acceptance:
 
-- [ ] UI tests: loading, empty, failed filter, expanded steps.
-- [ ] Existing MetaAutomationLogViewer tests still pass.
+- [x] UI tests: loading, admin gate, status filter, expanded steps, stale-response race guard.
+- [x] Existing MetaAutomationLogViewer tests still pass.
 
 ### A4 — Retry Scope Gate  (lock: design only)
 
+- [ ] Deferred until explicit retry demand / named opt-in.
 - [ ] Decide retry source: rule_snapshot vs current rule (default rule_snapshot).
 - [ ] Decide side-effect confirmation UX (explicit action / idempotency key).
 - [ ] Define audit fields + permission requirement + deleted-rule failure behavior.
@@ -180,6 +199,7 @@ Acceptance:
 
 ### A5 — Whole-execution Retry  (lock: runtime gated)
 
+- [ ] Runtime remains gated; do not start without explicit unlock.
 - [ ] Migration: add rerun_of_execution_id TEXT NULL, initiated_by TEXT NULL (writers exist now).
 - [ ] Add POST /api/multitable/automation-executions/:executionId/retry.
 - [ ] Reconstruct executor rule from rule_snapshot; reuse trigger_event.
@@ -193,6 +213,7 @@ Acceptance:
 
 ### A6 — Capability-half Bridge  (lock: design only, frozen / demand-gated)
 
+- [ ] Runtime remains frozen / demand-gated; this milestone is not complete.
 - [ ] Record convergence sequence: persist job -> suspend/resume [webhook before delay]
       -> branch/parallel -> BPMN compile/preview adapter -> approval-as-job.
 - [ ] Each step references a concrete integration use-case before unlock (demand gate).
