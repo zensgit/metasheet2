@@ -14,6 +14,11 @@
 // (`K3_WISE_PRESET_PLACEHOLDER_UNFILLED`); the preview reports them as a validation error. Both
 // consume `findUnfilledPlaceholders()`, so detection is identical and disposition is the caller's.
 
+// Nested-path projection (getPath/setPath) so a schema field name like "nested.code" projects
+// correctly — the generic preview contract DF-T1-0 must not break. For flat K3 names (FNumber,
+// FUnitGroupID, …) these behave exactly like flat access, so adapter Save parity is preserved.
+const { getPath, setPath } = require('../transform-engine.cjs')
+
 function isPlainObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
@@ -22,21 +27,16 @@ function isBlankValue(value) {
   return value === undefined || value === null || (typeof value === 'string' && value.trim() === '')
 }
 
-function firstDefined(...values) {
-  for (const value of values) {
-    if (value !== undefined && value !== null) return value
-  }
-  return undefined
-}
-
+// Resolve the reference identifier, treating an empty/whitespace string as ABSENT and falling
+// back to identifierField / key (a `{ identifier: '' }` must not disable wrapping when an
+// identifierField is present). Returns the trimmed identifier or null.
 function normalizeReferenceIdentifier(field) {
   const reference = field && isPlainObject(field.reference) ? field.reference : null
-  const identifier = firstDefined(
-    reference && reference.identifier,
-    reference && reference.identifierField,
-    reference && reference.key,
-  )
-  return typeof identifier === 'string' && identifier.trim() ? identifier.trim() : null
+  if (!reference) return null
+  for (const candidate of [reference.identifier, reference.identifierField, reference.key]) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim()
+  }
+  return null
 }
 
 // Scalar reference values are wrapped as `{ [identifier]: value }`; values that are already
@@ -59,10 +59,10 @@ function projectRecordForBody(record, objectConfig) {
   for (const field of schema) {
     const fieldName = field && field.name
     if (typeof fieldName !== 'string' || fieldName.trim().length === 0) continue
-    if (Object.prototype.hasOwnProperty.call(record, fieldName)) {
-      const value = applyReferenceShape(record[fieldName], field)
-      if (!isBlankValue(value)) projected[fieldName] = value
-    }
+    const raw = getPath(record, fieldName)
+    if (raw === undefined) continue
+    const value = applyReferenceShape(raw, field)
+    if (!isBlankValue(value)) setPath(projected, fieldName, value)
   }
   return projected
 }

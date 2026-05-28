@@ -605,9 +605,11 @@ function buildTemplatePreview(input) {
   }
   // Same placeholder DETECTION as the Save path; the preview's disposition is valid:false
   // (the Save path throws). A clean preview therefore cannot hide a placeholder the Save rejects.
+  // Same error CODE as the Save path's throw, so an operator can correlate a preview-detected
+  // placeholder with the Save-side failure that would follow.
   const placeholderErrors = findUnfilledPlaceholders(payload).map((path) => ({
     field: path,
-    code: 'UNFILLED_PLACEHOLDER',
+    code: 'K3_WISE_PRESET_PLACEHOLDER_UNFILLED',
     message: `unfilled template placeholder at ${path}`,
   }))
   const errors = [
