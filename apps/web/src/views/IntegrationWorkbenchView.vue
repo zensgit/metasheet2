@@ -777,6 +777,14 @@
       <div>
         <h2>样例记录</h2>
         <textarea v-model="sampleRecordText" data-testid="sample-record" spellcheck="false"></textarea>
+        <h2>目标模板 JSON</h2>
+        <textarea
+          v-model="payloadTemplateText"
+          data-testid="payload-template"
+          spellcheck="false"
+          placeholder='{ "FNumber": "&lt;code&gt;", "FName": "&lt;name&gt;" }'
+        ></textarea>
+        <small class="integration-workbench__hint">可选。填写后使用 DF-T1 no-write payloadTemplate 预览；留空则保持 legacy preview。</small>
       </div>
       <div>
         <div class="integration-workbench__panel-head">
@@ -838,6 +846,7 @@ import {
   previewIntegrationTemplate,
   replayIntegrationDeadLetter,
   runIntegrationPipeline,
+  deriveFieldRulesFromMappings,
   summarizeFieldProvenance,
   testExternalSystemConnection,
   upsertWorkbenchExternalSystem,
@@ -855,6 +864,7 @@ import {
   type IntegrationStagingInstallResult,
   type IntegrationStagingOpenTarget,
   type IntegrationSystemObject,
+  type IntegrationTemplatePreviewRequest,
   type WorkbenchExternalSystem,
 } from '../services/integration/workbench'
 
@@ -1019,6 +1029,9 @@ const sampleRecordText = ref(JSON.stringify({
   uom: 'EA',
   quantity: '2',
 }, null, 2))
+// DF-T1.5 reachability wire: optional payloadTemplate JSON. When filled, previewPayload sends the
+// DF-T1 no-write preview shape so the backend returns targetPayloadPreview (provenance); empty = legacy.
+const payloadTemplateText = ref('')
 const connectionDraft = reactive<ConnectionDraft>({
   id: '',
   name: '',
@@ -2517,9 +2530,10 @@ async function previewPayload(): Promise<void> {
   try {
     const sourceRecord = JSON.parse(sampleRecordText.value) as Record<string, unknown>
     const template = selectedTemplateMeta()
-    const result = await previewIntegrationTemplate({
+    const fieldMappings = buildMappings()
+    const request: IntegrationTemplatePreviewRequest = {
       sourceRecord,
-      fieldMappings: buildMappings(),
+      fieldMappings,
       template: {
         id: typeof template.id === 'string' ? template.id : targetObjectName.value,
         version: typeof template.version === 'string' ? template.version : undefined,
@@ -2528,7 +2542,20 @@ async function previewPayload(): Promise<void> {
         endpointPath: typeof template.endpointPath === 'string' ? template.endpointPath : undefined,
         schema: targetSchema.value.fields,
       },
-    })
+    }
+    // DF-T1.5 reachability wire: an optional payloadTemplate JSON switches the request to the DF-T1
+    // no-write preview (payloadTemplate + derived fieldRules); empty keeps the request byte-compatible
+    // with the legacy preview; invalid JSON throws here → error path, no backend call.
+    const payloadTemplateRaw = payloadTemplateText.value.trim()
+    if (payloadTemplateRaw) {
+      const parsed = JSON.parse(payloadTemplateRaw) as unknown
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('目标模板 JSON 必须是一个对象')
+      }
+      request.payloadTemplate = parsed as Record<string, unknown>
+      request.fieldRules = deriveFieldRulesFromMappings(fieldMappings)
+    }
+    const result = await previewIntegrationTemplate(request)
     previewText.value = JSON.stringify(result, null, 2)
     previewProvenance.value = summarizeFieldProvenance(result.targetPayloadPreview)
     setStatus(result.valid ? 'Payload 预览通过' : `Payload 预览发现 ${result.errors.length} 个问题`, result.valid ? 'success' : 'error')

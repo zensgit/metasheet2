@@ -10,6 +10,7 @@ import {
   listWorkbenchExternalSystems,
   previewIntegrationTemplate,
   runIntegrationPipeline,
+  deriveFieldRulesFromMappings,
   summarizeFieldProvenance,
   testExternalSystemConnection,
   upsertWorkbenchExternalSystem,
@@ -32,6 +33,31 @@ function jsonResponse(data: unknown): Response {
     headers: { 'Content-Type': 'application/json' },
   })
 }
+
+describe('deriveFieldRulesFromMappings (DF-T1.5 reachability wire)', () => {
+  it('maps each field mapping to a from_staging scalar rule', () => {
+    const rules = deriveFieldRulesFromMappings([
+      { sourceField: 'code', targetField: 'FNumber' },
+      { sourceField: 'name', targetField: 'FName' },
+    ] as Parameters<typeof deriveFieldRulesFromMappings>[0])
+    expect(rules).toEqual([
+      { targetField: 'FNumber', sourceType: 'from_staging', sourceField: 'code', shape: 'scalar' },
+      { targetField: 'FName', sourceType: 'from_staging', sourceField: 'name', shape: 'scalar' },
+    ])
+  })
+
+  it('skips mappings missing a source or target field, and tolerates an empty list', () => {
+    expect(deriveFieldRulesFromMappings([])).toEqual([])
+    const rules = deriveFieldRulesFromMappings([
+      { sourceField: '', targetField: 'FNumber' },
+      { sourceField: 'code', targetField: '' },
+      { sourceField: 'code', targetField: 'FNumber' },
+    ] as Parameters<typeof deriveFieldRulesFromMappings>[0])
+    expect(rules).toEqual([
+      { targetField: 'FNumber', sourceType: 'from_staging', sourceField: 'code', shape: 'scalar' },
+    ])
+  })
+})
 
 describe('summarizeFieldProvenance (DF-T1.5 preview provenance)', () => {
   it('returns null when there is no fieldProvenance (legacy preview / nothing to show)', () => {

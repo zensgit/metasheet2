@@ -89,6 +89,7 @@ Closeout-verified on `main`: targetPayloadPreview + legacy arrays present; bodyK
 Read-only display over the `targetPayloadPreview.fieldProvenance` DF-T1 emits; no new runtime. Frontend-only (`IntegrationWorkbenchView.vue` panel + pure `summarizeFieldProvenance` helper in `workbench.ts`); shows field name + source badge + per-source stats, gated on fieldProvenance presence (legacy preview unaffected), **never raw payload values**. Verification: `data-factory-df-t1_5-preview-provenance-display-verification-20260528.md`.
 - [x] Per-field provenance (staging / template / constant / reference-table), derived read-only from the DF-T1 merge.
 - [x] No new persisted provenance runtime field in this slice.
+- [x] **Reachability wired** (follow-up): the preview panel sends an optional `payloadTemplate` (+ derived `fieldRules`) so the DF-T1 backend returns `targetPayloadPreview` — the panel is live-triggerable, not just display-capable. Locks a request-body wire assertion. Verification: `data-factory-df-t1_5-reachability-wire-verification-20260528.md`.
 
 ### 🔒 DF-T1A — Connector action metadata
 Gated on: DF-T1 + opt-in.

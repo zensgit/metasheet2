@@ -271,6 +271,27 @@ export interface IntegrationTemplatePreviewRequest {
     endpointPath?: string
     schema?: IntegrationObjectSchemaField[]
   }
+  // DF-T1.5 reachability wire: when payloadTemplate is a plain object the backend runs the DF-T1
+  // no-write preview and returns targetPayloadPreview; omitted = legacy preview (byte-compatible).
+  payloadTemplate?: Record<string, unknown>
+  fieldRules?: Array<Record<string, unknown>>
+}
+
+// DF-T1.5 reachability wire: derive a minimal DF-T1 fieldRules set from the legacy preview's field
+// mappings — each mapped target becomes a from_staging scalar rule (the operator-supplied
+// payloadTemplate carries the rest; reference objects stay preserved by the template).
+export function deriveFieldRulesFromMappings(
+  fieldMappings: IntegrationFieldMapping[],
+): Array<Record<string, unknown>> {
+  return (Array.isArray(fieldMappings) ? fieldMappings : [])
+    .filter((mapping) => typeof mapping?.targetField === 'string' && mapping.targetField.trim()
+      && typeof mapping?.sourceField === 'string' && mapping.sourceField.trim())
+    .map((mapping) => ({
+      targetField: mapping.targetField,
+      sourceType: 'from_staging',
+      sourceField: mapping.sourceField,
+      shape: 'scalar',
+    }))
 }
 
 export type IntegrationFieldProvenanceSource = 'staging' | 'template' | 'constant' | 'reference_table'
