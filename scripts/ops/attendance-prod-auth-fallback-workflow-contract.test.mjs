@@ -45,3 +45,24 @@ for (const item of cases) {
     assert.match(raw, /AUTH_TOKEN_EFFECTIVE=\$\{resolved_token\}/)
   })
 }
+
+test('attendance strict gates default product mode matches current shared prod', () => {
+  const raw = readFileSync(
+    path.join(repoRoot, '.github/workflows/attendance-strict-gates-prod.yml'),
+    'utf8',
+  )
+
+  assert.match(
+    raw,
+    /expect_product_mode:\n\s+description:\s+'Expected product mode from \/api\/auth\/me -> features\.mode \(platform for current shared prod; use attendance for attendance-only deployments\)'/,
+  )
+  assert.match(raw, /default:\s+'platform'/)
+  assert.match(
+    raw,
+    /EXPECT_PRODUCT_MODE:\s+\$\{\{\s*inputs\.expect_product_mode\s+\|\|\s+vars\.ATTENDANCE_EXPECT_PRODUCT_MODE\s+\|\|\s+'platform'\s*\}\}/,
+  )
+  assert.doesNotMatch(
+    raw,
+    /EXPECT_PRODUCT_MODE:\s+\$\{\{\s*inputs\.expect_product_mode\s+\|\|\s+'attendance'\s*\}\}/,
+  )
+})

@@ -39,9 +39,9 @@ on:
         required: false
         default: 'http://23.254.236.11:8081/api'
       expect_product_mode:
-        description: 'Expected product mode (from /api/auth/me -> features.mode)'
+        description: 'Expected product mode from /api/auth/me -> features.mode (platform for current shared prod; use attendance for attendance-only deployments)'
         required: false
-        default: 'attendance'
+        default: 'platform'
       require_attendance_admin_api:
         description: 'Require attendance admin API endpoints (true/false)'
         required: false
@@ -269,7 +269,7 @@ jobs:
       DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
       DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
       PROVISION_USER_ID: ${{ vars.ATTENDANCE_PROVISION_USER_ID }}
-      EXPECT_PRODUCT_MODE: ${{ inputs.expect_product_mode || 'attendance' }}
+      EXPECT_PRODUCT_MODE: ${{ inputs.expect_product_mode || vars.ATTENDANCE_EXPECT_PRODUCT_MODE || 'platform' }}
       RUN_PREFLIGHT: 'false'
       REQUIRE_ATTENDANCE_ADMIN_API: ${{ inputs.require_attendance_admin_api || 'true' }}
       REQUIRE_IDEMPOTENCY: ${{ inputs.require_idempotency || 'true' }}
