@@ -99,6 +99,7 @@ function createPipelineRegistry(pipeline, db) {
         duration_ms: input.durationMs,
         error_summary: input.errorSummary || null,
         details: input.details || {},
+        ...(input.provenanceEvents !== undefined && { provenance_events: input.provenanceEvents }),
       }, {
         tenant_id: input.tenantId,
         workspace_id: input.workspaceId ?? null,
@@ -118,6 +119,7 @@ function createPipelineRegistry(pipeline, db) {
         durationMs: row.duration_ms,
         errorSummary: row.error_summary,
         details: row.details,
+        provenanceEvents: row.provenance_events ?? [],
       }
     },
   }
@@ -1441,7 +1443,157 @@ async function main() {
     assert.equal(hugeOptionLimits[0], 10000, 'huge batchSize is capped before adapter read()')
   }
 
+  // --- 14. DF-N2-2b: per-row write-outcome provenance, normalized + idempotency-keyed ---
+  {
+    const harness = createRunnerHarness({
+      sourceRecords: [
+        { code: 'prov-ok', revision: 'r1', qty: '2', name: 'Widget', updatedAt: '2026-04-24T01:00:00.000Z' },
+      ],
+    })
+    const res = await harness.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'full', triggeredBy: 'manual' })
+    assert.equal(res.run.status, 'succeeded')
+    const events = res.run.provenanceEvents
+    assert.equal(events.length, 1, 'one write-outcome event for the one written row')
+    const ev = events[0]
+    assert.equal(ev.eventType, 'target_write_succeeded')
+    assert.ok(typeof ev.rowId === 'string' && ev.rowId.length > 0, 'rowId is the idempotency key')
+    assert.equal(ev.runId, res.run.id, 'event carries the run id')
+    assert.match(ev.at, /^\d{4}-\d{2}-\d{2}T.*Z$/, 'at normalized to ISO (proves normalizeProvenanceEvent ran)')
+    assert.deepEqual(Object.keys(ev).sort(), ['at', 'attrs', 'eventType', 'rowId', 'runId'], 'canonical contract shape only')
+    assert.equal(res.run.details.provenanceCap, 500, 'cap surfaced in run details')
+  }
+
+  // --- 15. DF-N2-2b KEYSTONE: a secret-shaped VALUE in attrs is scrubbed BEFORE persist ---
+  // Proves the shared value-scrubber (payload-redaction SECRET_VALUE_PATTERNS, the #1882 F1
+  // fix) actually runs on provenance attrs via normalizeProvenanceEvents — not trusted blind.
+  // This assertion FAILS if normalize/scrub is bypassed (raw password would survive).
+  {
+    const harness = createRunnerHarness({
+      sourceRecords: [
+        { code: 'leak-01', revision: 'r1', qty: '1', name: 'Leak', updatedAt: '2026-04-24T01:00:00.000Z' },
+      ],
+      targetUpsert: async (input) => createUpsertResult({
+        written: 0,
+        failed: 1,
+        errors: [{
+          key: input.records[0]._integration_idempotency_key,
+          code: 'TARGET_AUTH',
+          message: 'connect failed: postgres://erp:S3cretPass@10.0.0.5:5432/k3db',
+        }],
+      }),
+    })
+    const res = await harness.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'full', triggeredBy: 'manual' })
+    const events = res.run.provenanceEvents
+    assert.equal(events.length, 1, 'one target_write_failed event')
+    assert.equal(events[0].eventType, 'target_write_failed')
+    const msg = events[0].attrs.errorMessage
+    assert.ok(!msg.includes('S3cretPass'), 'password VALUE scrubbed from provenance attrs (value-scrub ran)')
+    assert.match(msg, /postgres:\/\/erp:\[redacted\]@10\.0\.0\.5/, 'DSN context preserved, password masked')
+  }
+
+  // --- 16. DF-N2-2b: per-run cap (drop overflow, counter in details) + per-row uniqueness ---
+  {
+    const many = Array.from({ length: 502 }, (_, i) => ({
+      code: `cap-${i}`, revision: 'r1', qty: '1', name: `N${i}`, updatedAt: '2026-04-24T01:00:00.000Z',
+    }))
+    const harness = createRunnerHarness({ sourceRecords: many })
+    const res = await harness.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'full', triggeredBy: 'manual' })
+    assert.equal(res.run.status, 'succeeded')
+    const events = res.run.provenanceEvents
+    assert.equal(events.length, 500, 'events capped at MAX_PROVENANCE_EVENTS')
+    assert.equal(res.run.details.provenanceDropped, 2, 'overflow counted in details, not appended')
+    assert.equal(res.run.details.provenanceCap, 500)
+    assert.equal(new Set(events.map((e) => e.rowId)).size, 500, 'one event per row (no duplicate rowIds)')
+  }
+
+  // --- 17. DF-N2-2b: replay does NOT duplicate lineage (new run, original untouched) ---
+  {
+    let attempt = 0
+    const harness = createRunnerHarness({
+      sourceRecords: [
+        { code: 'replay-01', revision: 'r1', qty: '1', name: 'Replay', updatedAt: '2026-04-24T01:00:00.000Z' },
+      ],
+      targetUpsert: async (input) => {
+        attempt += 1
+        if (attempt === 1) {
+          return createUpsertResult({ written: 0, failed: 1, errors: [{ key: input.records[0]._integration_idempotency_key, code: 'TARGET_TEMP', message: 'temporary target failure' }] })
+        }
+        return createUpsertResult({ written: 1, failed: 0, results: input.records.map((r) => ({ key: r._integration_idempotency_key })) })
+      },
+    })
+    const firstRun = await harness.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'full', triggeredBy: 'manual' })
+    const firstRunId = firstRun.run.id
+    assert.equal(firstRun.run.provenanceEvents.length, 1)
+    assert.equal(firstRun.run.provenanceEvents[0].eventType, 'target_write_failed')
+    const deadLetter = harness.db.tables.get('integration_dead_letters')[0]
+    assert.ok(deadLetter, 'first run produced a dead letter to replay')
+    const replay = await harness.runner.replayDeadLetter({ tenantId: 'tenant_1', workspaceId: null, id: deadLetter.id })
+    const replayRunId = replay.replay.run.id
+    assert.notEqual(replayRunId, firstRunId, 'replay creates a NEW run')
+    assert.equal(replay.replay.run.provenanceEvents.length, 1, 'replay run has exactly one event')
+    assert.equal(replay.replay.run.provenanceEvents[0].eventType, 'target_write_succeeded')
+    const originalRow = harness.db.tables.get('integration_runs').find((r) => r.id === firstRunId)
+    assert.equal(originalRow.provenance_events.length, 1, 'original run lineage is NOT rewritten/duplicated by replay')
+    assert.equal(originalRow.provenance_events[0].eventType, 'target_write_failed')
+  }
+
+  // --- 18. DF-N2-2b: failed-run path keeps lineage for rows written before a mid-run throw ---
+  {
+    let pageReads = 0
+    const harness = createRunnerHarness({
+      sourceRecords: [],
+      sourceRead: async () => {
+        pageReads += 1
+        if (pageReads === 1) {
+          return createReadResult({ records: [{ code: 'pre-throw', revision: 'r1', qty: '1', name: 'Early', updatedAt: '2026-04-24T01:00:00.000Z' }], done: false, nextCursor: 'page-2' })
+        }
+        throw new Error('source read exploded on page 2')
+      },
+    })
+    await assert.rejects(
+      () => harness.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'full', triggeredBy: 'manual' }),
+      /pipeline run failed/,
+    )
+    const runRow = harness.db.tables.get('integration_runs')[0]
+    assert.equal(runRow.status, 'failed', 'run marked failed')
+    assert.equal(runRow.provenance_events.length, 1, 'pre-throw written row keeps its lineage on the failed run')
+    assert.equal(runRow.provenance_events[0].eventType, 'target_write_succeeded')
+  }
+
+  // --- 19. DF-N2-2b: unitemized failures → NO false success events (attribution gap recorded) ---
+  {
+    const harness = createRunnerHarness({
+      sourceRecords: [
+        { code: 'unitemized-a', revision: 'r1', qty: '1', name: 'A', updatedAt: '2026-04-24T01:00:00.000Z' },
+        { code: 'unitemized-b', revision: 'r1', qty: '1', name: 'B', updatedAt: '2026-04-24T01:00:00.000Z' },
+      ],
+      targetUpsert: async () => createUpsertResult({ written: 0, failed: 2, errors: [] }),
+    })
+    const res = await harness.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_1', mode: 'full', triggeredBy: 'manual' })
+    assert.equal(res.run.provenanceEvents.length, 0, 'no events emitted when failures are unattributed (no false success)')
+    assert.equal(res.run.details.provenanceAttributionSkipped, 2, 'attribution gap recorded in details')
+  }
+
+  // --- 20. DF-N2-2b: run-log normalize is best-effort — a bad event never loses the run record ---
+  {
+    let captured = null
+    const registry = {
+      async createPipelineRun(input) { return { id: input.id || 'run_x', ...input } },
+      async updatePipelineRun(input) { captured = input; return { id: input.id, details: input.details } },
+    }
+    const logger = createRunLogger({ pipelineRegistry: registry })
+    const run = { id: 'run_x', tenantId: 'tenant_1', workspaceId: null, startedAt: '2026-04-24T00:00:00.000Z', details: {} }
+    await logger.finishRun(run, { rowsWritten: 1 }, 'succeeded', {
+      provenanceEvents: [{ runId: 'run_x', rowId: 'r1', eventType: 'NOT_A_REAL_TYPE', at: '2026-04-24T00:00:00.000Z', attrs: {} }],
+    })
+    assert.ok(captured, 'run still persisted despite a malformed provenance event')
+    assert.equal(captured.provenanceEvents, undefined, 'bad provenance dropped (not persisted)')
+    assert.ok(captured.details.provenanceWarning, 'details surfaces a provenance warning')
+    assert.equal(captured.details.provenanceWarning.code, 'PROVENANCE_NORMALIZE_FAILED')
+  }
+
   console.log('✓ pipeline-runner: cleanse/idempotency/incremental E2E tests passed')
+  console.log('✓ pipeline-runner: DF-N2-2b provenance write tests passed (14-20)')
 }
 
 main().catch((err) => {

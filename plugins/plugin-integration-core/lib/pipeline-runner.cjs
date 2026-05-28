@@ -26,6 +26,12 @@ const DEFAULT_BATCH_SIZE = 1000
 const MAX_BATCH_SIZE = 10000
 const DEFAULT_MAX_PAGES = 100
 const MAX_RUN_PAGES = 10000
+// DF-N2-2b: per-run cap on appended provenance events. Keeps the
+// integration_runs.provenance_events JSONB column bounded (~300 bytes/event →
+// ~150KB) so a large run cannot bloat the row. Overflow is surfaced as a counter
+// in run details (provenanceDropped), never as a sentinel event, so the DF-N2-2a
+// by-row view stays uniform. Retention/aging stays run-level (DF-N2-2 design).
+const MAX_PROVENANCE_EVENTS = 500
 
 function coerceTruthyFlag(value, field) {
   if (value === undefined || value === null) return false
@@ -495,6 +501,33 @@ function createPipelineRunner(deps = {}) {
       },
     })
 
+    // DF-N2-2b: collect per-row write-outcome provenance in-memory; normalized +
+    // redacted at finishRun before persist. Declared outside the try so the
+    // failed-run path (catch → finishRun 'failed') still records lineage for rows
+    // that succeeded before a mid-run throw.
+    const provenanceEvents = []
+    let provenanceDropped = 0
+    let provenanceAttributionSkipped = 0
+    const appendProvenanceEvent = (rowId, eventType, attrs) => {
+      if (!rowId) return
+      if (provenanceEvents.length >= MAX_PROVENANCE_EVENTS) {
+        provenanceDropped += 1
+        return
+      }
+      provenanceEvents.push({
+        runId: run.id,
+        rowId: String(rowId),
+        eventType,
+        at: new Date(clock()).toISOString(),
+        attrs: attrs || {},
+      })
+    }
+    const buildProvenanceDetails = () => ({
+      ...(provenanceEvents.length > 0 || provenanceDropped > 0 ? { provenanceCap: MAX_PROVENANCE_EVENTS } : {}),
+      ...(provenanceDropped > 0 ? { provenanceDropped } : {}),
+      ...(provenanceAttributionSkipped > 0 ? { provenanceAttributionSkipped } : {}),
+    })
+
     try {
       const watermarkConfig = resolveWatermarkConfig(context.pipeline)
       const currentWatermark = mode === 'incremental'
@@ -570,19 +603,33 @@ function createPipelineRunner(deps = {}) {
           metrics.rowsWritten += writeResult.written || 0
           metrics.rowsFailed += writeResult.failed || 0
           const targetErrors = writeResult.errors || []
+          const erroredProvenanceKeys = new Set()
           for (const error of targetErrors) {
             const matched = findCleanRecordForTargetError(cleanRecords, error)
+            const rowKey = errorKey(error) || matched?.targetRecord?._integration_idempotency_key
+            const failureErrorCode = matched ? (error.code || 'TARGET_WRITE_FAILED') : 'TARGET_WRITE_UNMATCHED_ERROR'
+            const failureErrorMessage = error.message || 'target write failed'
             await writeDeadLetter({
               tenantId: context.tenantId,
               workspaceId: context.workspaceId,
               runId: run.id,
               pipelineId: context.pipeline.id,
-              idempotencyKey: errorKey(error) || matched?.targetRecord?._integration_idempotency_key,
+              idempotencyKey: rowKey,
               sourcePayload: sanitizeIntegrationPayload(error.sourcePayload || matched?.sourceRecord || buildUnmatchedTargetErrorPayload(error)),
               transformedPayload: sanitizeIntegrationPayload(error.record || matched?.targetRecord || null),
-              errorCode: matched ? (error.code || 'TARGET_WRITE_FAILED') : 'TARGET_WRITE_UNMATCHED_ERROR',
-              errorMessage: error.message || 'target write failed',
+              errorCode: failureErrorCode,
+              errorMessage: failureErrorMessage,
             })
+            // DF-N2-2b: per-row target_write_failed provenance. Only when a stable
+            // rowId (idempotency key) resolves; attrs reuse the dead-letter code/
+            // message verbatim (redacted by normalizeAttrs at finishRun).
+            if (rowKey) {
+              erroredProvenanceKeys.add(rowKey)
+              appendProvenanceEvent(rowKey, 'target_write_failed', {
+                errorCode: failureErrorCode,
+                errorMessage: failureErrorMessage,
+              })
+            }
           }
           const unitemizedFailures = Math.max(0, (writeResult.failed || 0) - targetErrors.length)
           if (unitemizedFailures > 0) {
@@ -604,6 +651,21 @@ function createPipelineRunner(deps = {}) {
               errorCode: 'TARGET_WRITE_AGGREGATE_FAILED',
               errorMessage: `target write failed for ${unitemizedFailures} record(s) without itemized errors`,
             })
+          }
+          // DF-N2-2b: emit target_write_succeeded only when per-row attribution is
+          // unambiguous (no unitemized failures AND consistent counts) — never infer
+          // "succeeded" from "absent from the error list", which would silently
+          // mislabel unattributed failures as writes. When attribution is unclear,
+          // skip success events for the batch and record the gap in run details.
+          const cleanAttribution = unitemizedFailures === 0 && writeResult.inconsistent !== true
+          for (const item of cleanRecords) {
+            const rowKey = item.targetRecord && item.targetRecord._integration_idempotency_key
+            if (!rowKey || erroredProvenanceKeys.has(rowKey)) continue
+            if (cleanAttribution) {
+              appendProvenanceEvent(rowKey, 'target_write_succeeded', {})
+            } else {
+              provenanceAttributionSkipped += 1
+            }
           }
           const feedback = await writeErpFeedback({ context, run, writeResult, cleanRecords })
           if (feedback) erpFeedback.push(feedback)
@@ -640,6 +702,7 @@ function createPipelineRunner(deps = {}) {
       let finishRunWarning = null
       try {
         run = await runLogger.finishRun(run, metrics, status, {
+          provenanceEvents,
           details: {
             dryRun,
             watermarkAdvanced: !dryRun && metrics.rowsFailed === 0 && Boolean(lastSuccessfulWatermark),
@@ -648,6 +711,7 @@ function createPipelineRunner(deps = {}) {
             ...(targetWriteSummaries.length > 0 && {
               targetWriteSummaries,
             }),
+            ...buildProvenanceDetails(),
             maxPagesReached,
             pagesProcessed: page,
           },
@@ -673,7 +737,9 @@ function createPipelineRunner(deps = {}) {
       // The stuck 'running' run will be recovered by abandonStaleRuns on next trigger.
       try {
         run = await runLogger.finishRun(run, metrics, 'failed', {
+          provenanceEvents,
           errorSummary: error.message || String(error),
+          details: buildProvenanceDetails(),
         })
       } catch {
         // Secondary failure — original error takes priority

@@ -256,6 +256,11 @@ function normalizeUpdateRunInput(input, now) {
     duration_ms: input.durationMs === undefined || input.durationMs === null ? null : nonNegativeInteger(input.durationMs, 'durationMs'),
     error_summary: optionalString(input.errorSummary, 'errorSummary'),
     details: input.details === undefined ? undefined : jsonbParam(jsonObject(input.details, 'details')),
+    // DF-N2-2b: persist per-row provenance to the integration_runs.provenance_events
+    // JSONB column (added by migration 060). The array is already normalized + redacted
+    // upstream in run-log.finishRun; this layer only serializes it. When absent, the
+    // undefined-cleanup below leaves the column at its '[]' default (no overwrite).
+    provenance_events: Array.isArray(input.provenanceEvents) ? jsonbParam(input.provenanceEvents) : undefined,
   }
   for (const key of Object.keys(set)) {
     if (set[key] === undefined || set[key] === null) delete set[key]
