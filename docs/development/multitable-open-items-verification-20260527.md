@@ -1,7 +1,7 @@
 # 多维表剩余 open 项 — 验证 / 验收矩阵
 
-> Date: 2026-05-27 · Status: **验收标准（实现后逐条填 ✅/❌）** · 配套：`multitable-open-items-development-plan-20260527.md` + `multitable-open-items-todo-20260527.md`
-> 每个**未 shipped** slice 的"done"= 下方该节全绿 + `pnpm validate:all` 绿。已 shipped 的 Slice 1/A2b 节为 **historical 证据快照**（非前置门）。
+> Date: 2026-05-27 · Status: **验收矩阵 / archive** · 配套：`multitable-open-items-development-plan-20260527.md` + `multitable-open-items-todo-20260527.md`
+> 每个**未 shipped** slice 的"done"= 下方该节全绿 + `pnpm validate:all` 绿。已 shipped 的 Slice 1/A2b 节为 **historical 证据快照**（非前置门）；**Slice 2 已由 C0（#1982）deferred**，其原验收项仅作 future reopen 参考。
 
 ## 0. 横切验收纪律（所有 slice 适用 — 来自 PR-hardening 经验）
 
@@ -48,9 +48,9 @@
 
 ---
 
-## Slice 2 — grid 分组/滚动（gated：C0 决策后再执行，先定标准）
+## Slice 2 — grid 分组/滚动 ⏸ **DEFERRED by C0 (#1982 = keep pager)**
 
-> 未启动；以下为**待执行验收标准**，C0 拍板后填实。
+> 本轮不执行。下表保留为 **future reopen reference**：仅当产品未来改拍连续 grouped browsing 时再恢复为 active gate。
 
 | ID | 验收项 | 通过判据（预定） |
 |---|---|---|
@@ -62,10 +62,10 @@
 
 ---
 
-## 验收执行顺序
+## 验收执行顺序 / 当前状态
 
 1. ✅ **Slice 1** — done（#1950；V-S1-7 视觉冒烟 RAN + PASS 2026-05-28，前端-only 真浏览器渲染）。
 2. ✅ **A2b** — done（#1958，defensive；V-A2b-3 → NOT-APPLICABLE）。
-3. **Slice 2** 待 **C0 决策** 后执行（唯一未决）。
+3. ⏸ **Slice 2** 已由 **C0（#1982）** deferred；当前不执行、无 active gate。
 
 **落地提示**：docs 与后续实现若要 land，先 `git fetch` 后从 `origin/main` 切新分支提交，勿从可能落后的本地分支提交（先 `git rev-list --count HEAD..origin/main` 确认基线）。
