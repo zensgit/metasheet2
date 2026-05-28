@@ -1,8 +1,8 @@
 # 多维表剩余 open 项 — TODO 追踪清单
 
-> Date: 2026-05-27 · Refreshed: 2026-05-28 · Status: **TRACKER（post-#1950 + #1958）** · 配套：开发计划 `multitable-open-items-development-plan-20260527.md` + 验证 `multitable-open-items-verification-20260527.md`
+> Date: 2026-05-27 · Refreshed: 2026-05-28 · Status: **TRACKER（post-#1950 + #1958 + C0 #1982）** · 配套：开发计划 `multitable-open-items-development-plan-20260527.md` + 验证 `multitable-open-items-verification-20260527.md`
 > **Reconcile 2026-05-28**：Slice 1 ✅ SHIPPED #1950 · A2b ✅ MERGED #1958（defensive）· **C0 ✅ resolved by #1982（keep pager）** · 本 tracker 现无 still-open implementation slice。
-> Drafting base `origin/main@8fd73257d`，reconciled through #1958（2026-05-28，状态已对齐现实）。K3 锁：均为内核打磨，允许；**每个 slice 仍是独立 opt-in，不自动开下一刀**。
+> Drafting base `origin/main@8fd73257d`，reconciled through #1982（2026-05-28，状态已对齐现实）。K3 锁：均为内核打磨，允许；**每个 slice 仍是独立 opt-in，不自动开下一刀**。
 > 标记：✅ done · ⬜ todo（opt-in 后可动手）· 🔒 gated（被决策/前置阻塞）· ☑️ 需 owner 拍板的决策点
 
 ---
