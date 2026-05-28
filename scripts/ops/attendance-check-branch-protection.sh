@@ -87,7 +87,6 @@ contexts_current=()
 function try_graphql_fallback() {
   set +e
   gh api graphql \
-    -f query='query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ branchProtectionRules(first:100){ nodes{ pattern requiresStrictStatusChecks isAdminEnforced requiredStatusCheckContexts requiresApprovingReviews requiredApprovingReviewCount requiresCodeOwnerReviews } } } }' \
     -f query='query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ branchProtectionRules(first:100){ nodes{ pattern requiresStrictStatusChecks isAdminEnforced requiresApprovingReviews requiredApprovingReviewCount requiresCodeOwnerReviews requiredStatusCheckContexts } } } }' \
     -f owner="$owner" \
     -f name="$repo_name" \
