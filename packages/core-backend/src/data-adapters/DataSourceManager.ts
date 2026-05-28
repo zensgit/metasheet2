@@ -5,6 +5,12 @@ import { PostgresAdapter } from './PostgresAdapter'
 import { MySQLAdapter } from './MySQLAdapter'
 import { HTTPAdapter } from './HTTPAdapter'
 import { MongoDBAdapter } from './MongoDBAdapter'
+import { encryptStoredSecretValue, decryptStoredSecretValue, isEncryptedSecretValue } from '../security/encrypted-secrets'
+
+// Credential fields that hold secrets and are encrypted at rest. Identifiers
+// like `username` are left as-is (matching the codebase's encrypt-secrets-only
+// convention).
+const SENSITIVE_CREDENTIAL_KEYS = ['password', 'apiKey', 'token']
 
 type AdapterConstructor = new (config: DataSourceConfig) => BaseDataAdapter
 
@@ -110,6 +116,48 @@ export class DataSourceManager extends EventEmitter {
     }
   }
 
+  /**
+   * Encrypt secret credential fields for storage (A1). Uses
+   * encryptStoredSecretValue (NOT normalize) so secret values are not trimmed —
+   * a trailing space in a password is significant. Idempotent: already-encrypted
+   * values are skipped.
+   */
+  private encryptCredentials(creds?: Credentials): Credentials | undefined {
+    if (!creds) return creds
+    const out: Credentials = { ...creds }
+    for (const key of SENSITIVE_CREDENTIAL_KEYS) {
+      const v = out[key]
+      if (typeof v === 'string' && v.length > 0 && !isEncryptedSecretValue(v)) {
+        out[key] = encryptStoredSecretValue(v)
+      }
+    }
+    return out
+  }
+
+  /**
+   * Decrypt secret credential fields after load (A1). Encrypted values are
+   * decrypted and FAIL LOUD on a key mismatch (a ciphertext is never passed
+   * through to the adapter). Legacy plaintext passes through unchanged — lazy
+   * migration: it is re-encrypted on the next persist.
+   */
+  private decryptCredentials(creds?: Credentials): Credentials | undefined {
+    if (!creds) return creds
+    const out: Credentials = { ...creds }
+    for (const key of SENSITIVE_CREDENTIAL_KEYS) {
+      const v = out[key]
+      if (typeof v === 'string' && isEncryptedSecretValue(v)) {
+        try {
+          out[key] = decryptStoredSecretValue(v)
+        } catch (err) {
+          throw new Error(
+            `Failed to decrypt credential '${key}' (ENCRYPTION_KEY may have changed): ${err instanceof Error ? err.message : String(err)}`
+          )
+        }
+      }
+    }
+    return out
+  }
+
   private recordToConfig(record: DataSourceRecord): DataSourceConfig {
     const configData = record.config as Record<string, unknown>
     return {
@@ -117,7 +165,7 @@ export class DataSourceManager extends EventEmitter {
       name: record.name,
       type: record.type,
       connection: (configData.connection || {}) as ConnectionConfig,
-      credentials: configData.credentials as Credentials | undefined,
+      credentials: this.decryptCredentials(configData.credentials as Credentials | undefined),
       options: configData.options as AdapterOptions | undefined,
       poolConfig: configData.poolConfig as DataSourceConfig['poolConfig']
     }
@@ -135,7 +183,7 @@ export class DataSourceManager extends EventEmitter {
       description: null,
       config: {
         connection: config.connection,
-        credentials: config.credentials, // TODO: Encrypt sensitive fields
+        credentials: this.encryptCredentials(config.credentials),
         options: config.options,
         poolConfig: config.poolConfig
       },
