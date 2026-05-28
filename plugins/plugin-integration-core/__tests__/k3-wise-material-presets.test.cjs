@@ -42,13 +42,27 @@ function testPresetIsDistinctAndOptIn() {
 function testPerFieldShapeDeclared() {
   const profile = getK3WiseMaterialProfile(MATERIAL_CUSTOMER_PROFILE_ID)
   const byName = new Map(profile.schema.map((field) => [field.name, field]))
-  const byNumber = ['FUnitGroupID', 'FUnitID', 'FBaseUnitID', 'FAcctID', 'FDefaultLoc']
+  const byNumber = ['FUnitGroupID', 'FUnitID', 'FAcctID', 'FDefaultLoc']
   const byId = ['FErpClsID', 'FUseState', 'FInspectionLevel', 'FProChkMde', 'FPlanTrategy']
   for (const name of byNumber) {
     assert.equal(byName.get(name).reference.identifier, 'FNumber', `${name} is by-FNumber`)
   }
   for (const name of byId) {
     assert.equal(byName.get(name).reference.identifier, 'FID', `${name} is by-FID (enum/category)`)
+  }
+}
+
+// Step 7 (#1792 M1 one-record Save PASSED 2026-05-28): the customer K3 contract (doAddMaterial)
+// uses FUnitID + the unit family but NOT FBaseUnitID. The profile omits it; default-projecting it
+// caused the dry-run cross-check mismatch behind the failed Save attempts. Composition behaviour
+// (a staging FBaseUnitID is dropped from the Save body) is covered in
+// k3-save-body-composer.parity.test.cjs.
+function testCustomerProfileOmitsFBaseUnitID() {
+  const profile = getK3WiseMaterialProfile(MATERIAL_CUSTOMER_PROFILE_ID)
+  const fields = new Set(profile.schema.map((field) => field.name))
+  assert.equal(fields.has('FBaseUnitID'), false, 'customer profile omits FBaseUnitID (M1 PASS shape)')
+  for (const name of ['FUnitID', 'FUnitGroupID', 'FOrderUnitID', 'FSaleUnitID', 'FProductUnitID', 'FStoreUnitID']) {
+    assert.ok(fields.has(name), `customer profile keeps the validated unit field ${name}`)
   }
 }
 
@@ -88,10 +102,11 @@ function testUnknownProfileResolvesNull() {
 function main() {
   testPresetIsDistinctAndOptIn()
   testPerFieldShapeDeclared()
+  testCustomerProfileOmitsFBaseUnitID()
   testOperationsStayUpsertOnly()
   testNoHardcodedCustomerValues()
   testUnknownProfileResolvesNull()
-  console.log('✓ k3-wise-material-presets: preset opt-in, per-field shape, operations, no-hardcoded-values, unknown-profile passed')
+  console.log('✓ k3-wise-material-presets: preset opt-in, per-field shape, FBaseUnitID-omitted, operations, no-hardcoded-values, unknown-profile passed')
 }
 
 main()
