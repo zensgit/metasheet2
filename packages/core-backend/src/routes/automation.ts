@@ -21,7 +21,7 @@ import { Router, type Request, type Response } from 'express'
 import type { AutomationService } from '../multitable/automation-service'
 import type { AutomationExecution, AutomationStepResult } from '../multitable/automation-executor'
 import { legacyAutomationStatusToJobStatus } from '../multitable/workflow-job-contract'
-import { rbacGuard } from '../rbac/rbac'
+import { requireAdminRole } from '../guards/audit-integration'
 
 // ── A2 run-governance read mappers (boundary only — no storage change) ───────
 
@@ -180,10 +180,11 @@ export function createAutomationRoutes(
 
   // ── A2: read-only runs API (cross-rule; status emitted as C1 WorkflowJobStatus) ──
 
-  // Cross-sheet run snapshots (incl. detail's triggerEvent/ruleSnapshot) are an
-  // operator/admin governance surface, not a per-reader one — gate behind the
-  // multitable management permission (rbacGuard already lets platform admins / *:* through).
-  router.get('/automation-executions', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  // Cross-sheet run snapshots (incl. detail's triggerEvent/ruleSnapshot) are a
+  // PLATFORM-ADMIN governance surface — gate behind requireAdminRole() (isAdmin,
+  // fail-safe 503 on RBAC error). Narrowed from multitable:write per review so a
+  // plain platform editor cannot read cross-sheet automation runs.
+  router.get('/automation-executions', requireAdminRole(), async (req: Request, res: Response) => {
     const svc = getService(res)
     if (!svc) return undefined
 
@@ -217,7 +218,7 @@ export function createAutomationRoutes(
     }
   })
 
-  router.get('/automation-executions/:executionId', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+  router.get('/automation-executions/:executionId', requireAdminRole(), async (req: Request, res: Response) => {
     const executionId = typeof req.params.executionId === 'string' ? req.params.executionId : ''
     if (!executionId) {
       return res.status(400).json({ error: 'executionId is required' })
