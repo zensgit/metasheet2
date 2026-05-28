@@ -10,6 +10,9 @@ const {
   normalizeProvenanceEvent,
   normalizeProvenanceEvents,
 } = require(path.join(__dirname, '..', 'lib', 'provenance-contracts.cjs'))
+// DF-N2-2c: the route projection's field list is the single source of truth for the
+// ProvenanceTimelineEntry shape; parity below asserts the OpenAPI required set equals it.
+const { __internals: pipelinesInternals } = require(path.join(__dirname, '..', 'lib', 'pipelines.cjs'))
 
 const ROOT_DIR = path.join(__dirname, '..', '..', '..')
 
@@ -52,6 +55,20 @@ function assertOpenApiParity() {
   assert.deepEqual(eventSchema.required, ['runId', 'rowId', 'eventType', 'at', 'attrs'])
   assert.equal(eventSchema.properties.eventType.$ref, '#/components/schemas/ProvenanceEventType')
   assert.equal(eventSchema.additionalProperties, false)
+
+  // DF-N2-2c: ProvenanceTimelineEntry (read-route response item) — strict + LOAD-BEARING.
+  // required set MUST equal the pipelines.cjs projection field list (so a drift between the
+  // route projection and the spec fails here), eventType reuses the enum-locked type, and
+  // additionalProperties:false forbids leaking extra view columns.
+  const timelineSchema = schemas && schemas.ProvenanceTimelineEntry
+  assert.ok(timelineSchema, 'OpenAPI ProvenanceTimelineEntry schema exists')
+  assert.equal(timelineSchema.additionalProperties, false, 'ProvenanceTimelineEntry forbids extra properties')
+  assert.equal(timelineSchema.properties.eventType.$ref, '#/components/schemas/ProvenanceEventType', 'eventType reuses the enum-locked type')
+  assert.deepEqual(
+    [...timelineSchema.required].sort(),
+    [...pipelinesInternals.PROVENANCE_TIMELINE_ENTRY_FIELDS].sort(),
+    'OpenAPI ProvenanceTimelineEntry.required === pipelines.cjs projection field list',
+  )
 }
 
 function main() {

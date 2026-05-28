@@ -13,6 +13,14 @@ const PIPELINES_TABLE = 'integration_pipelines'
 const FIELD_MAPPINGS_TABLE = 'integration_field_mappings'
 const EXTERNAL_SYSTEMS_TABLE = 'integration_external_systems'
 const RUNS_TABLE = 'integration_runs'
+// DF-N2-2c: read-only by-row provenance timeline. The view is created by migration 060
+// (DF-N2-2a); this layer only SELECTs from it (no write). The entry field list is the
+// single source of truth, triple-locked: PROVENANCE_TIMELINE_ENTRY_FIELDS ↔
+// rowToProvenanceEntry's keys ↔ OpenAPI ProvenanceTimelineEntry.required (parity test).
+const PROVENANCE_VIEW = 'integration_provenance_by_row'
+const PROVENANCE_TIMELINE_ENTRY_FIELDS = Object.freeze([
+  'runId', 'pipelineId', 'rowId', 'eventType', 'at', 'attrs', 'eventIndex', 'runStatus', 'runMode', 'runCreatedAt',
+])
 const VALID_MODES = new Set(['incremental', 'full', 'manual'])
 const VALID_RUN_MODES = new Set(['incremental', 'full', 'manual', 'replay'])
 const VALID_STATUSES = new Set(['draft', 'active', 'paused', 'disabled'])
@@ -333,6 +341,53 @@ function rowToPipelineRun(row) {
     details: parseJsonbValue(row.details, {}),
     createdAt: row.created_at ?? null,
   }
+}
+
+// DF-N2-2c: project an integration_provenance_by_row view row → the read-route timeline
+// entry. attrs were already redacted at write (DF-N2-2b scrub gate); the read path does
+// NOT re-redact (persistence boundary = security boundary). Keys MUST stay in lockstep
+// with PROVENANCE_TIMELINE_ENTRY_FIELDS + OpenAPI ProvenanceTimelineEntry.required.
+function rowToProvenanceEntry(row) {
+  return {
+    runId: row.run_id,
+    pipelineId: row.pipeline_id,
+    rowId: row.row_id,
+    eventType: row.event_type,
+    at: row.event_at,
+    attrs: parseJsonbValue(row.attrs, {}),
+    eventIndex: Number(row.event_index),
+    runStatus: row.run_status,
+    runMode: row.run_mode,
+    runCreatedAt: row.run_created_at,
+  }
+}
+
+function parseProvenanceWindowBound(value, field) {
+  if (value === undefined || value === null || value === '') return null
+  const ms = Date.parse(value)
+  if (Number.isNaN(ms)) {
+    throw new PipelineValidationError(`${field} must be an ISO date-time`, { field })
+  }
+  return ms
+}
+
+// Window bounds whole RUNS by run_created_at (the #1979 read-time-bounded-window story);
+// an undated run row (should not occur — the view selects integration_runs.created_at) is
+// kept rather than silently dropped.
+function provenanceEntryWithinWindow(runCreatedAt, fromMs, toMs) {
+  if (fromMs === null && toMs === null) return true
+  const ms = Date.parse(runCreatedAt)
+  if (Number.isNaN(ms)) return true
+  if (fromMs !== null && ms < fromMs) return false
+  if (toMs !== null && ms > toMs) return false
+  return true
+}
+
+function compareProvenanceEntries(a, b) {
+  const am = Date.parse(a.runCreatedAt)
+  const bm = Date.parse(b.runCreatedAt)
+  if (!Number.isNaN(am) && !Number.isNaN(bm) && am !== bm) return am - bm
+  return (a.eventIndex || 0) - (b.eventIndex || 0)
 }
 
 function unwrapRows(result) {
@@ -668,6 +723,34 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
     return rows.map(rowToPipelineRun)
   }
 
+  // DF-N2-2c: read-only cross-run provenance timeline for one rowId. SELECTs the
+  // migration-060 view (no write). db `where` is equality-only and `orderBy` single-column,
+  // so the optional run-time window + the (run_created_at, event_index) sort run in-app —
+  // bounded because one rowId yields few events. attrs already redacted at write (no
+  // re-redaction). The route 501s if a host's registry predates this method.
+  async function listProvenanceByRow(input = {}) {
+    const tenantId = requiredString(input.tenantId, 'tenantId')
+    const workspaceId = normalizeWorkspaceId(input.workspaceId)
+    const rowId = requiredString(input.rowId, 'rowId')
+    const where = { ...scopeWhere({ tenantId, workspaceId }), row_id: rowId }
+    if (input.pipelineId !== undefined && input.pipelineId !== null && input.pipelineId !== '') {
+      where.pipeline_id = requiredString(input.pipelineId, 'pipelineId')
+    }
+    const fromMs = parseProvenanceWindowBound(input.from, 'from')
+    const toMs = parseProvenanceWindowBound(input.to, 'to')
+    const rows = unwrapRows(await db.select(PROVENANCE_VIEW, {
+      where,
+      orderBy: ['run_created_at', 'ASC'],
+      limit: input.limit,
+      offset: input.offset,
+    }))
+    const entries = rows
+      .map(rowToProvenanceEntry)
+      .filter((entry) => provenanceEntryWithinWindow(entry.runCreatedAt, fromMs, toMs))
+    entries.sort(compareProvenanceEntries)
+    return entries
+  }
+
   // Marks 'running' runs that started more than `olderThanMs` milliseconds ago as 'failed'.
   // Called on plugin startup or before creating a new run to recover from crashed runner processes
   // that never called failRun(). Without this, a crash between startRun and finishRun permanently
@@ -714,6 +797,7 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
     createPipelineRun,
     updatePipelineRun,
     listPipelineRuns,
+    listProvenanceByRow,
     abandonStaleRuns,
   }
 }
@@ -728,6 +812,9 @@ module.exports = {
     FIELD_MAPPINGS_TABLE,
     EXTERNAL_SYSTEMS_TABLE,
     RUNS_TABLE,
+    PROVENANCE_VIEW,
+    PROVENANCE_TIMELINE_ENTRY_FIELDS,
+    rowToProvenanceEntry,
     VALID_MODES,
     VALID_RUN_MODES,
     VALID_STATUSES,
