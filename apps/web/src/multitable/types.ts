@@ -846,6 +846,55 @@ export interface AutomationExecution {
   error?: string
 }
 
+/**
+ * Converged workflow-job status (C1 contract). The A2 read-only runs API emits
+ * these at the read boundary (e.g. legacy `success` → `resolved`); the legacy
+ * `multitable_automation_executions.status` storage is unchanged.
+ */
+export type WorkflowJobStatus =
+  | 'queued'
+  | 'running'
+  | 'suspended'
+  | 'resolved'
+  | 'failed'
+  | 'skipped'
+  | 'rejected'
+  | 'errored'
+
+/** One step of a run, mapped to the C1 WorkflowJob view by the A2 read boundary. */
+export interface AutomationRunStepView {
+  id: string
+  executionId: string
+  stepKey: string
+  status: WorkflowJobStatus
+  upstreamJobId: string | null
+  result?: unknown
+  error?: string
+}
+
+/**
+ * A run as returned by the A2 read-only runs API
+ * (`GET /api/multitable/automation-executions` + `/:id`, admin-only). Status is
+ * the C1 vocabulary; `statusLegacy` keeps the stored value for diagnosis.
+ * `triggerEvent` / `ruleSnapshot` are detail-only (omitted in the list view).
+ */
+export interface AutomationRunView {
+  id: string
+  ruleId: string
+  sheetId: string | null
+  status: WorkflowJobStatus
+  statusLegacy: string
+  triggeredBy: string
+  triggeredAt: string
+  finishedAt: string | null
+  duration: number | null
+  error: string | null
+  schemaVersion: number | null
+  steps: AutomationRunStepView[]
+  triggerEvent?: unknown
+  ruleSnapshot?: unknown
+}
+
 export interface AutomationStats {
   total: number
   success: number

@@ -190,6 +190,12 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Permission Management', requiresAuth: true }
   },
   {
+    path: '/admin/automation-executions',
+    name: 'automation-executions',
+    component: () => import('../views/AutomationExecutionsView.vue'),
+    meta: { title: 'Automation Runs', titleZh: '自动化运行记录', requiresAuth: true }
+  },
+  {
     path: '/admin/audit',
     name: 'admin-audit',
     component: () => import('../views/AdminAuditView.vue'),
