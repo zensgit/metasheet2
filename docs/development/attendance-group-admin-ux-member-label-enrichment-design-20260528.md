@@ -79,9 +79,10 @@ After `loadAttendanceGroupMembers()` successfully loads the current page:
 
 1. Collect unique `userId` values from `attendanceGroupMembers`.
 2. If the list is empty, skip enrichment.
-3. Call the existing `POST /api/attendance-admin/users/batch/resolve` route with `{ userIds }`.
-4. Cache returned labels in component state keyed by `userId`.
-5. Render labels for matching rows and fall back for missing / unresolved rows.
+3. Filter the resolver request to IDs compatible with the resolver's accepted shape. Any non-compatible member ID stays visible as a single-row `userId` fallback instead of making the whole page lookup fail.
+4. Call the existing `POST /api/attendance-admin/users/batch/resolve` route with `{ userIds }`.
+5. Cache returned labels in component state keyed by `userId`.
+6. Render labels for matching rows and fall back for missing / unresolved rows.
 
 This resolver call is read-like but uses the existing POST contract. It must be best-effort: it should not block the member list, it should not clear loaded members, and it should not turn a label lookup failure into a membership failure.
 
@@ -142,9 +143,10 @@ Do not touch backend, migrations, OpenAPI contracts, plugin runtime, permission 
 | L5 | Add-member POST body still contains only `userIds`; labels never enter payloads. | Existing Slice B test extended with resolved labels. |
 | L6 | Remove-member action still targets the member `userId`, not a label. | Frontend mocked DELETE path assertion. |
 | L7 | Pending chip label, if present, comes from picker state; manually typed IDs remain ID-only. | Frontend test. |
-| L8 | Total-vs-visible copy remains honest when `total > items.length`; enrichment covers only visible rows. | Frontend test with first-page member fixture. |
-| L9 | Runtime PR has no backend, schema, migration, permission, OpenAPI, plugin, or route diff. | Reviewer diff check. |
-| L10 | `AttendanceRulesAndGroupsSection.vue` remains retired; no second People implementation returns. | Source grep / reviewer diff check. |
+| L8 | Two different `userId`s with the same display label remain distinct and can both be staged/submitted; duplicate logic keys only on `userId`. | Frontend fixture with colliding labels. |
+| L9 | Total-vs-visible copy remains honest when `total > items.length`; enrichment covers only visible rows. | Frontend test with first-page member fixture. |
+| L10 | Runtime PR has no backend, schema, migration, permission, OpenAPI, plugin, or route diff. | Reviewer diff check. |
+| L11 | `AttendanceRulesAndGroupsSection.vue` remains retired; no second People implementation returns. | Source grep / reviewer diff check. |
 
 ## 8. Explicitly Deferred
 
