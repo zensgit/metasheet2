@@ -169,6 +169,13 @@ export class DataSourceManager extends EventEmitter {
     config: DataSourceConfig,
     options?: { ownerId?: string; workspaceId?: string; persist?: boolean }
   ): Promise<BaseDataAdapter> {
+    // Reject duplicates BEFORE persisting — otherwise a create that will be
+    // rejected still runs the upsert and overwrites the existing row's config
+    // and owner. Use updateDataSource() to change an existing source.
+    if (this.adapters.has(config.id)) {
+      throw new Error(`Data source with id '${config.id}' already exists`)
+    }
+
     const persist = options?.persist !== false && this.db !== undefined
     const ownerId = options?.ownerId || 'system'
     const workspaceId = options?.workspaceId
@@ -180,6 +187,53 @@ export class DataSourceManager extends EventEmitter {
 
     const adapter = await this.addDataSourceInternal(config, false)
     this.scopes.set(config.id, { ownerId, workspaceId: workspaceId ?? null })
+    return adapter
+  }
+
+  /**
+   * Atomically update an existing data source. Persists the new config first
+   * (the only failure-prone step); the live adapter is swapped only after that
+   * succeeds. A failed update therefore leaves the original source intact —
+   * unlike a removeDataSource()+addDataSource() sequence, which soft-deletes
+   * the row and drops the adapter before the re-add can fail.
+   */
+  async updateDataSource(
+    id: string,
+    config: DataSourceConfig,
+    options?: { ownerId?: string; workspaceId?: string }
+  ): Promise<BaseDataAdapter> {
+    const existing = this.adapters.get(id)
+    if (!existing) {
+      throw new Error(`Data source with id '${id}' not found`)
+    }
+    const priorScope = this.scopes.get(id)
+    const ownerId = options?.ownerId ?? priorScope?.ownerId ?? 'system'
+    const workspaceId = options?.workspaceId ?? priorScope?.workspaceId ?? undefined
+
+    // Validate the target type before touching anything live.
+    if (!this.adapterTypes.get(config.type.toLowerCase())) {
+      throw new Error(`Unsupported data source type: ${config.type}`)
+    }
+
+    // Persist first — if this throws, the live source is untouched.
+    if (this.db !== undefined) {
+      await this.persistDataSource(config, ownerId, workspaceId)
+    }
+
+    // Persist succeeded: swap the in-memory adapter (no further failure-prone I/O).
+    try {
+      if (existing.isConnected()) {
+        await existing.disconnect()
+      }
+    } catch {
+      // best-effort teardown of the previous adapter
+    }
+    existing.removeAllListeners()
+    this.adapters.delete(id)
+    this.connectionPool.delete(id)
+
+    const adapter = await this.addDataSourceInternal(config, false)
+    this.scopes.set(id, { ownerId, workspaceId: workspaceId ?? null })
     return adapter
   }
 

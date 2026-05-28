@@ -34,6 +34,7 @@ function fakeDb(records: unknown[]) {
 // persist -> reload cycle (insert/upsert, soft-delete update, scoped load).
 function statefulFakeDb() {
   const rows = new Map<string, Record<string, unknown>>()
+  const control = { failUpsert: false }
 
   function selectBuilder() {
     const b = {
@@ -60,6 +61,7 @@ function statefulFakeDb() {
         return b
       },
       execute: async () => {
+        if (control.failUpsert) throw new Error('simulated persist failure')
         const id = pending.id as string
         if (rows.has(id) && updateSet) {
           rows.set(id, { ...rows.get(id), ...updateSet })
@@ -97,6 +99,7 @@ function statefulFakeDb() {
 
   return {
     rows,
+    control,
     db: {
       selectFrom: () => selectBuilder(),
       insertInto: () => insertBuilder(),
@@ -235,12 +238,12 @@ describe('data-sources route ownership scope (A0.1)', () => {
 })
 
 describe('DataSourceManager persistence round-trip (A0)', () => {
-  it('a source updated via remove + re-add still loads after a restart', async () => {
+  it('a source recreated with the same id after deletion still loads after a restart', async () => {
     const { db } = statefulFakeDb()
     const m1 = new DataSourceManager({ db: db as never })
     await m1.addDataSource(pgConfig('ds-x'), { ownerId: 'alice' })
 
-    // the route's PUT does remove() (soft-delete) then addDataSource() (upsert)
+    // delete (soft-delete) then recreate with the same id — upsert must revive
     await m1.removeDataSource('ds-x')
     await m1.addDataSource({ ...pgConfig('ds-x'), name: 'renamed' }, { ownerId: 'alice' })
 
@@ -249,6 +252,50 @@ describe('DataSourceManager persistence round-trip (A0)', () => {
     await m2.initialize(db as never)
     expect(m2.getScope('ds-x')).toEqual({ ownerId: 'alice', workspaceId: null })
     expect(m2.listDataSources().map((s) => s.id)).toContain('ds-x')
+  })
+
+  it('an updated source loads after a restart (updateDataSource persists)', async () => {
+    const { db } = statefulFakeDb()
+    const m1 = new DataSourceManager({ db: db as never })
+    await m1.addDataSource(pgConfig('ds-u'), { ownerId: 'alice' })
+    await m1.updateDataSource('ds-u', { ...pgConfig('ds-u'), name: 'renamed' }, { ownerId: 'alice' })
+
+    const m2 = new DataSourceManager()
+    await m2.initialize(db as never)
+    expect(m2.getScope('ds-u')).toEqual({ ownerId: 'alice', workspaceId: null })
+    expect(m2.listDataSources().map((s) => s.id)).toContain('ds-u')
+  })
+
+  it('a rejected duplicate create does not mutate the existing persisted row', async () => {
+    const { db, rows } = statefulFakeDb()
+    const m = new DataSourceManager({ db: db as never })
+    await m.addDataSource(pgConfig('ds-dup'), { ownerId: 'alice' })
+    const rowBefore = { ...rows.get('ds-dup') }
+
+    await expect(
+      m.addDataSource({ ...pgConfig('ds-dup'), name: 'hijack' }, { ownerId: 'mallory' }),
+    ).rejects.toThrow(/already exists/)
+
+    // the rejected create must not have overwritten config or owner
+    expect(rows.get('ds-dup')).toEqual(rowBefore)
+    expect(m.getScope('ds-dup')).toEqual({ ownerId: 'alice', workspaceId: null })
+  })
+
+  it('a failed persist during update leaves the original source intact (atomic update)', async () => {
+    const { db, control, rows } = statefulFakeDb()
+    const m = new DataSourceManager({ db: db as never })
+    await m.addDataSource(pgConfig('ds-z'), { ownerId: 'alice' })
+    const rowBefore = { ...rows.get('ds-z') }
+
+    control.failUpsert = true
+    await expect(
+      m.updateDataSource('ds-z', { ...pgConfig('ds-z'), name: 'renamed' }, { ownerId: 'alice' }),
+    ).rejects.toThrow(/simulated persist failure/)
+
+    // source survives in memory and the DB row is unchanged
+    expect(() => m.getDataSource('ds-z')).not.toThrow()
+    expect(m.getScope('ds-z')).toEqual({ ownerId: 'alice', workspaceId: null })
+    expect(rows.get('ds-z')).toEqual(rowBefore)
   })
 
   it('updating autoConnect is persisted so restart behavior is consistent', async () => {

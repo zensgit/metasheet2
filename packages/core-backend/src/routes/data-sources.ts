@@ -283,13 +283,9 @@ export function dataSourcesRouter(): Router {
       const id = req.params.id
       manager.assertAccess(id, resolveUserId(req))
 
-      // Get existing config + ownership (preserved across the remove/re-add)
       const existing = manager.getDataSource(id)
       const oldConfig = existing.getConfig()
       const scope = manager.getScope(id)
-
-      // Remove and re-add with updated config
-      await manager.removeDataSource(id)
 
       const newConfig: DataSourceConfig = {
         ...oldConfig,
@@ -297,8 +293,9 @@ export function dataSourcesRouter(): Router {
         id // Preserve original ID
       }
 
-      // Preserve ownership — without this, re-add would revert owner to 'system'
-      const adapter = await manager.addDataSource(newConfig, {
+      // Atomic update: persists first, swaps the adapter only on success, and
+      // preserves ownership. A failed update leaves the original source intact.
+      const adapter = await manager.updateDataSource(id, newConfig, {
         ownerId: scope?.ownerId ?? resolveUserId(req)!,
         workspaceId: scope?.workspaceId ?? undefined
       })
