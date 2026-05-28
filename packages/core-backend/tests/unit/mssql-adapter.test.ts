@@ -81,6 +81,12 @@ describe('MSSQLAdapter — config mapping', () => {
     expect(cfg.requestTimeout).toBe(12000)
   })
 
+  it('passes an explicit timeout of 0 through (no-timeout), not the default', () => {
+    const cfg = poolConfig({ host: 'db', database: 'D', connectionTimeoutMs: 0, requestTimeoutMs: 0 })
+    expect(cfg.connectionTimeout).toBe(0)
+    expect(cfg.requestTimeout).toBe(0)
+  })
+
   it('parses server alias (host:port and host,port) and host wins over server', () => {
     expect(poolConfig({ server: 'h1:1444', database: 'D' })).toMatchObject({ server: 'h1', port: 1444 })
     expect(poolConfig({ server: 'h2,1455', database: 'D' })).toMatchObject({ server: 'h2', port: 1455 })

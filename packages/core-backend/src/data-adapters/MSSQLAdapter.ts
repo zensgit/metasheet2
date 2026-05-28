@@ -126,8 +126,9 @@ export class MSSQLAdapter extends BaseDataAdapter {
         encrypt: coerceBoolean(conn.encrypt, true),
         trustServerCertificate: coerceBoolean(conn.trustServerCertificate, true)
       },
-      connectionTimeout: getNumberConfig(conn.connectionTimeoutMs) || 10000,
-      requestTimeout: getNumberConfig(conn.requestTimeoutMs) || 30000,
+      // ?? (not ||) so an explicit 0 ("no timeout" in mssql) is not overridden.
+      connectionTimeout: getNumberConfig(conn.connectionTimeoutMs) ?? 10000,
+      requestTimeout: getNumberConfig(conn.requestTimeoutMs) ?? 30000,
       pool: {
         max: this.config.poolConfig?.max || 20,
         min: this.config.poolConfig?.min || 0
