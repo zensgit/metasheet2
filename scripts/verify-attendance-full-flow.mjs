@@ -1106,6 +1106,14 @@ async function run() {
       }
 
       const importSectionCount = await importSection.count()
+      const needsImportSection = importSectionCount > 0 && (
+        assertImportScalabilityHint
+        || assertAdminRetry
+        || assertImportJobRecovery
+      )
+      if (needsImportSection) {
+        importSection = await selectAdminSection(page, adminSectionIds.import, labels.importHeading)
+      }
       if (assertImportScalabilityHint && importSectionCount > 0) {
         await importSection.getByText(/Auto mode:\s*preview\s*>=\s*\d+\s*rows/i).first().waitFor({ timeout: timeoutMs })
         logInfo('Import scalability hint verified')

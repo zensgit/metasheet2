@@ -66,3 +66,15 @@ test('attendance strict gates default product mode matches current shared prod',
     /EXPECT_PRODUCT_MODE:\s+\$\{\{\s*inputs\.expect_product_mode\s+\|\|\s+'attendance'\s*\}\}/,
   )
 })
+
+test('attendance full-flow reselects import section after payroll readiness check', () => {
+  const raw = readFileSync(path.join(repoRoot, 'scripts/verify-attendance-full-flow.mjs'), 'utf8')
+  const payrollSelect = raw.indexOf('payrollSection = await selectAdminSection(page, adminSectionIds.payrollCycles')
+  const reselect = raw.indexOf('importSection = await selectAdminSection(page, adminSectionIds.import, labels.importHeading)', payrollSelect + 1)
+  const retryAssertion = raw.indexOf('await assertAdminRetryState(page, importSection)', payrollSelect + 1)
+
+  assert.notEqual(payrollSelect, -1)
+  assert.notEqual(reselect, -1)
+  assert.notEqual(retryAssertion, -1)
+  assert.ok(reselect < retryAssertion)
+})
