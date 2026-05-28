@@ -15,13 +15,15 @@ DF-N2 is the **recommended first move** on unlock day (lowest risk, zero new con
 - ▸ Exit: contract frozen, zero runtime change
 
 ## DF-N2-2 — runtime + migration 〔lane: runtime〕
-- [ ] 🔒 Pick storage: a JSONB lineage column on the existing run / `integration_run_log` surface, events tagged by `rowId` — **no new write-path table**
-- [ ] 🔒 Plugin SQL migration (integration-core's own SQL, guarded by `migration-sql.test.cjs`): add the JSONB column + an `integration_provenance_by_row` **view** (unnest across runs, join `integration_dead_letters` / `integration_exceptions`)
-- [ ] 🔒 Wire `lib/pipeline-runner.cjs` to append a **redacted** event at each lifecycle point (reuse `sanitizeIntegrationPayload`)
-- [ ] 🔒 Capacity guard: per-row event count / size cap (mirror the `targetWriteSummaries` cap-50 discipline)
+- [ ] 🔒 Pick storage: a JSONB lineage column on the existing DB table `integration_runs`, events tagged by `rowId` — **no new write-path table**; `integration_run_log` / `integration_exceptions` are staging multitable objects, not the DB storage anchor
+- [ ] 🔒 Plugin SQL migration (integration-core's own SQL, guarded by `migration-sql.test.cjs`): add the JSONB column + an `integration_provenance_by_row` **view** (unnest across `integration_runs`; optional context may join real DB tables such as `integration_dead_letters`, not staging object names)
+- [ ] 🔒 Wire `lib/pipeline-runner.cjs` to append a **redacted** event at each lifecycle point (normalize through `provenance-contracts.cjs`; prove the shared scrubber removes secret-shaped values before persistence)
+- [ ] 🔒 Capacity guard: per-run/per-row event count / size cap while writing the current run (mirror the `targetWriteSummaries` cap-50 discipline; do not prune old run JSONB by scanning every historical `rowId`)
+- [ ] 🔒 Retention/aging: run-level retention window (`integration_runs.created_at` / `finished_at`, <= N days or <= M newest runs per pipeline) + bounded read-window parameters on the by-`rowId` route
 - [ ] 🔒 Back-compat: existing runs have no events → the view tolerates empty/null
 - [ ] 🔒 Tests: redaction (stored events carry no sensitive field) · correct event appended per step · **by-`rowId` cross-run timeline** (seed 2 runs for the same rowId, assert ordered) · **real-wire round-trip** (the lineage field survives real API serialization — wire-vs-fixture guard) · `migration-sql.test.cjs` green · replay does not wrongly duplicate events
 - ▸ Exit: per-record events queryable across runs, redacted
+- ▸ **Design (sub-split 2a storage / 2b runtime-write / 2c read-route + retention/aging + redaction pre-storage gate):** `data-factory-df-n2-2-provenance-runtime-design-20260528.md` — each sub-PR a separate opt-in.
 
 ## DF-N2-3 — frontend 〔lane: frontend〕
 - [ ] 🔒 `apps/web/src/services/integration/workbench.ts`: read-only types + by-`rowId` provenance read (client over the new GET route)
