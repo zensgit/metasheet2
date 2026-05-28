@@ -121,9 +121,9 @@ export class DataSourceManager extends EventEmitter {
    * encryptStoredSecretValue (NOT normalize) so secret values are not trimmed —
    * a trailing space in a password is significant. ALWAYS encrypts: it does NOT
    * use the enc: prefix to detect "already encrypted", because a real plaintext
-   * secret can legitimately start with "enc:" and persistDataSource always
-   * receives plaintext config (create = user plaintext; PUT doesn't touch
-   * credentials; load decrypts before re-persist) — there is nothing to skip.
+   * secret can legitimately start with "enc:". Callers always pass plaintext
+   * credentials — user input on create, and the preserved or freshly-decrypted
+   * value on update/load — so there is nothing already-encrypted to skip.
    */
   private encryptCredentials(creds?: Credentials): Credentials | undefined {
     if (!creds) return creds
