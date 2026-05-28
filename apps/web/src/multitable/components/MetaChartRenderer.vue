@@ -2,104 +2,15 @@
   <div class="meta-chart" :data-chart-type="chartData.chartType">
     <div v-if="displayConfig?.title" class="meta-chart__title">{{ displayConfig.title }}</div>
 
-    <!-- Bar chart -->
-    <template v-if="chartData.chartType === 'bar'">
-      <svg :viewBox="`0 0 ${barWidth} ${barHeight}`" class="meta-chart__svg" preserveAspectRatio="xMidYMid meet" data-chart="bar">
-        <g v-for="(pt, idx) in chartData.dataPoints" :key="idx">
-          <rect
-            v-if="isVertical"
-            :x="barPadding + idx * barSlotWidth + barSlotWidth * 0.1"
-            :y="barHeight - barBottomPad - barScale(pt.value)"
-            :width="barSlotWidth * 0.8"
-            :height="barScale(pt.value)"
-            :fill="pt.color || defaultColor(idx)"
-            :data-bar-index="idx"
-          />
-          <rect
-            v-else
-            :x="barLeftPad"
-            :y="barPadding + idx * barSlotHeight + barSlotHeight * 0.1"
-            :width="hBarScale(pt.value)"
-            :height="barSlotHeight * 0.8"
-            :fill="pt.color || defaultColor(idx)"
-            :data-bar-index="idx"
-          />
-          <text
-            v-if="isVertical"
-            :x="barPadding + idx * barSlotWidth + barSlotWidth / 2"
-            :y="barHeight - 4"
-            text-anchor="middle"
-            class="meta-chart__bar-label"
-          >{{ pt.label }}</text>
-          <text
-            v-if="isVertical && displayConfig?.showValues !== false"
-            :x="barPadding + idx * barSlotWidth + barSlotWidth / 2"
-            :y="barHeight - barBottomPad - barScale(pt.value) - 4"
-            text-anchor="middle"
-            class="meta-chart__bar-value"
-          >{{ pt.value }}</text>
-          <text
-            v-if="!isVertical"
-            :x="barLeftPad - 4"
-            :y="barPadding + idx * barSlotHeight + barSlotHeight / 2 + 4"
-            text-anchor="end"
-            class="meta-chart__bar-label"
-          >{{ pt.label }}</text>
-          <text
-            v-if="!isVertical && displayConfig?.showValues !== false"
-            :x="barLeftPad + hBarScale(pt.value) + 4"
-            :y="barPadding + idx * barSlotHeight + barSlotHeight / 2 + 4"
-            text-anchor="start"
-            class="meta-chart__bar-value"
-          >{{ pt.value }}</text>
-        </g>
-      </svg>
-    </template>
-
-    <!-- Line chart -->
-    <template v-else-if="chartData.chartType === 'line'">
-      <svg :viewBox="`0 0 ${lineWidth} ${lineHeight}`" class="meta-chart__svg" preserveAspectRatio="xMidYMid meet" data-chart="line">
-        <polyline
-          :points="linePoints"
-          fill="none"
-          stroke="#2563eb"
-          stroke-width="2"
-          stroke-linejoin="round"
-          class="meta-chart__line"
-        />
-        <circle
-          v-for="(pt, idx) in lineCoords"
-          :key="idx"
-          :cx="pt.x"
-          :cy="pt.y"
-          r="4"
-          fill="#2563eb"
-          :data-point-index="idx"
-        />
-        <text
-          v-for="(pt, idx) in lineCoords"
-          :key="'l' + idx"
-          :x="pt.x"
-          :y="lineHeight - 4"
-          text-anchor="middle"
-          class="meta-chart__line-label"
-        >{{ chartData.dataPoints[idx].label }}</text>
-      </svg>
-    </template>
-
-    <!-- Pie chart -->
-    <template v-else-if="chartData.chartType === 'pie'">
-      <div class="meta-chart__pie-wrapper">
-        <svg viewBox="0 0 200 200" class="meta-chart__svg meta-chart__svg--pie" preserveAspectRatio="xMidYMid meet" data-chart="pie">
-          <path
-            v-for="(seg, idx) in pieSegments"
-            :key="idx"
-            :d="seg.d"
-            :fill="seg.color"
-            :data-pie-index="idx"
-          />
-        </svg>
-        <div v-if="displayConfig?.showLegend !== false" class="meta-chart__legend" data-legend="true">
+    <!-- bar / line / pie → ECharts canvas. Title + (pie) legend stay as HTML chrome. -->
+    <template v-if="isEChartsType">
+      <div class="meta-chart__plot" :class="{ 'meta-chart__plot--pie': chartData.chartType === 'pie' }">
+        <div ref="chartEl" class="meta-chart__echarts" data-chart-canvas="true"></div>
+        <div
+          v-if="chartData.chartType === 'pie' && displayConfig?.showLegend !== false"
+          class="meta-chart__legend"
+          data-legend="true"
+        >
           <div v-for="(pt, idx) in chartData.dataPoints" :key="idx" class="meta-chart__legend-item">
             <span class="meta-chart__legend-swatch" :style="{ background: pt.color || defaultColor(idx) }"></span>
             <span class="meta-chart__legend-label">{{ pt.label }}</span>
@@ -140,10 +51,19 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import * as echarts from 'echarts/core'
+import { BarChart, LineChart, PieChart } from 'echarts/charts'
+import { GridComponent, TooltipComponent } from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
 import type { ChartData, ChartDisplayConfig } from '../types'
+import { buildChartOption, CHART_COLORS } from '../utils/buildChartOption'
 import { useLocale } from '../../composables/useLocale'
 import { viewRenderLabel } from '../utils/meta-view-render-labels'
+
+// Tree-shakeable: only the chart types + components actually used. Legend/title are HTML
+// chrome (not ECharts components), so LegendComponent/TitleComponent are deliberately absent.
+echarts.use([BarChart, LineChart, PieChart, GridComponent, TooltipComponent, CanvasRenderer])
 
 const props = defineProps<{
   chartData: ChartData
@@ -151,88 +71,56 @@ const props = defineProps<{
 }>()
 const { isZh } = useLocale()
 
-const COLORS = ['#2563eb', '#16a34a', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899', '#84cc16']
+const isEChartsType = computed(() =>
+  props.chartData.chartType === 'bar'
+  || props.chartData.chartType === 'line'
+  || props.chartData.chartType === 'pie',
+)
 
+// Legend swatch fallback color — same palette as buildChartOption so canvas + HTML legend match.
 function defaultColor(idx: number): string {
-  return COLORS[idx % COLORS.length]
+  return CHART_COLORS[idx % CHART_COLORS.length]
 }
 
-const isVertical = computed(() => props.displayConfig?.orientation !== 'horizontal')
+const chartEl = ref<HTMLElement | null>(null)
+let chart: ReturnType<typeof echarts.init> | null = null
+let resizeObserver: ResizeObserver | null = null
 
-// Bar chart helpers
-const barWidth = 400
-const barHeight = 250
-const barPadding = 20
-const barBottomPad = 24
-const barLeftPad = 80
-const barSlotWidth = computed(() => {
-  const count = props.chartData.dataPoints.length || 1
-  return (barWidth - barPadding * 2) / count
-})
-const barSlotHeight = computed(() => {
-  const count = props.chartData.dataPoints.length || 1
-  return (barHeight - barPadding * 2) / count
-})
-const barMax = computed(() => Math.max(1, ...props.chartData.dataPoints.map((p) => p.value)))
-
-function barScale(val: number): number {
-  return (val / barMax.value) * (barHeight - barPadding - barBottomPad - 20)
+// Attach the resize observer once the canvas exists. Idempotent + called on every render, so it
+// also wires up when the canvas appears LATER via a number/table → bar/line/pie type switch.
+function ensureResizeObserver(): void {
+  if (resizeObserver || !chartEl.value || typeof ResizeObserver === 'undefined') return
+  resizeObserver = new ResizeObserver(() => chart?.resize())
+  resizeObserver.observe(chartEl.value)
 }
 
-function hBarScale(val: number): number {
-  return (val / barMax.value) * (barWidth - barLeftPad - 20)
+function teardownChart(): void {
+  resizeObserver?.disconnect()
+  resizeObserver = null
+  chart?.dispose()
+  chart = null
 }
 
-// Line chart helpers
-const lineWidth = 400
-const lineHeight = 250
-const linePad = 30
-const lineCoords = computed(() => {
-  const pts = props.chartData.dataPoints
-  if (!pts.length) return []
-  const max = Math.max(1, ...pts.map((p) => p.value))
-  const xStep = pts.length > 1 ? (lineWidth - linePad * 2) / (pts.length - 1) : 0
-  return pts.map((p, i) => ({
-    x: linePad + i * xStep,
-    y: lineHeight - linePad - 20 - (p.value / max) * (lineHeight - linePad * 2 - 20),
-  }))
-})
-
-const linePoints = computed(() => lineCoords.value.map((c) => `${c.x},${c.y}`).join(' '))
-
-// Pie chart helpers
-const pieSegments = computed(() => {
-  const pts = props.chartData.dataPoints
-  const total = pts.reduce((s, p) => s + p.value, 0) || 1
-  const segments: Array<{ d: string; color: string }> = []
-  let startAngle = -Math.PI / 2
-  for (let i = 0; i < pts.length; i++) {
-    const angle = (pts[i].value / total) * Math.PI * 2
-    const endAngle = startAngle + angle
-    const largeArc = angle > Math.PI ? 1 : 0
-    const cx = 100
-    const cy = 100
-    const r = 90
-    const x1 = cx + r * Math.cos(startAngle)
-    const y1 = cy + r * Math.sin(startAngle)
-    const x2 = cx + r * Math.cos(endAngle)
-    const y2 = cy + r * Math.sin(endAngle)
-    // For a single-item pie, draw a full circle
-    if (pts.length === 1) {
-      segments.push({
-        d: `M ${cx - r} ${cy} A ${r} ${r} 0 1 1 ${cx + r} ${cy} A ${r} ${r} 0 1 1 ${cx - r} ${cy} Z`,
-        color: pts[i].color || defaultColor(i),
-      })
-    } else {
-      segments.push({
-        d: `M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${largeArc} 1 ${x2} ${y2} Z`,
-        color: pts[i].color || defaultColor(i),
-      })
-    }
-    startAngle = endAngle
+function renderChart(): void {
+  // non-chart type (number/table) → release any canvas instance + observer
+  if (!isEChartsType.value) {
+    teardownChart()
+    return
   }
-  return segments
-})
+  if (!chartEl.value) return
+  if (!chart) chart = echarts.init(chartEl.value)
+  ensureResizeObserver()
+  const option = buildChartOption(props.chartData, props.displayConfig)
+  if (option) chart.setOption(option, true)
+}
+
+onMounted(renderChart)
+
+// flush: 'post' — run AFTER the DOM updates so the canvas container exists when chartType
+// switches into bar/line/pie; a pre-flush watch would no-op on the not-yet-rendered ref.
+watch(() => [props.chartData, props.displayConfig], renderChart, { deep: true, flush: 'post' })
+
+onBeforeUnmount(teardownChart)
 </script>
 
 <style scoped>
@@ -246,19 +134,11 @@ const pieSegments = computed(() => {
   text-align: center;
 }
 
-.meta-chart__svg {
-  width: 100%;
-  height: auto;
-  display: block;
-}
+.meta-chart__plot { width: 100%; }
+.meta-chart__plot--pie { display: flex; align-items: flex-start; gap: 16px; }
+.meta-chart__plot--pie .meta-chart__echarts { flex: 1; min-width: 0; }
 
-.meta-chart__svg--pie { max-width: 200px; }
-
-.meta-chart__bar-label { font-size: 10px; fill: #64748b; }
-.meta-chart__bar-value { font-size: 9px; fill: #0f172a; font-weight: 600; }
-.meta-chart__line-label { font-size: 10px; fill: #64748b; }
-
-.meta-chart__pie-wrapper { display: flex; align-items: flex-start; gap: 16px; }
+.meta-chart__echarts { width: 100%; height: 250px; }
 
 .meta-chart__legend { display: flex; flex-direction: column; gap: 4px; }
 .meta-chart__legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; }

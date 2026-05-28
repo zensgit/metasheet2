@@ -5,6 +5,16 @@ function flushPromises() {
   return new Promise<void>((resolve) => setTimeout(resolve, 0)).then(() => nextTick())
 }
 
+// MetaDashboardView renders MetaChartRenderer, which now uses ECharts (needs a canvas absent in
+// jsdom) → mock the runtime entry points so the dashboard mounts cleanly.
+vi.mock('echarts/core', () => ({
+  init: vi.fn(() => ({ setOption: vi.fn(), resize: vi.fn(), dispose: vi.fn() })),
+  use: vi.fn(),
+}))
+vi.mock('echarts/charts', () => ({ BarChart: {}, LineChart: {}, PieChart: {} }))
+vi.mock('echarts/components', () => ({ GridComponent: {}, TooltipComponent: {} }))
+vi.mock('echarts/renderers', () => ({ CanvasRenderer: {} }))
+
 import MetaDashboardView from '../src/multitable/components/MetaDashboardView.vue'
 import { MultitableApiClient } from '../src/multitable/api/client'
 import type { Dashboard, ChartConfig, ChartData } from '../src/multitable/types'
