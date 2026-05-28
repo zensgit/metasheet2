@@ -269,7 +269,7 @@ describe('IntegrationWorkbenchView', () => {
       if (url === '/api/integration/templates/preview') {
         const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
         previewBodies.push(body)
-        return jsonResponse({
+        const baseResult = {
           valid: true,
           payload: { Data: { FNumber: 'MAT-001', FName: 'Bolt', FBaseUnitID: 'Pcs' } },
           targetRecord: { FNumber: 'MAT-001', FName: 'Bolt', FBaseUnitID: 'Pcs' },
@@ -277,16 +277,24 @@ describe('IntegrationWorkbenchView', () => {
           transformErrors: [],
           validationErrors: [],
           schemaErrors: [],
-          targetPayloadPreview: {
-            eligibleForSaveOnly: true,
-            unresolvedPlaceholders: [],
-            unresolvedReferenceComponents: [],
-            missingRequiredFields: [],
-            fieldProvenance: { FNumber: 'staging', FName: 'staging', FUnitGroupID: 'template', FErpClsID: 'reference_table' },
-            compositionSource: 'k3-save-body-composer',
-            redactionSelfCheck: { applied: true, clean: true },
-          },
-        })
+        }
+        // Faithful to the backend: targetPayloadPreview is returned ONLY when the request carried a
+        // payloadTemplate (the DF-T1 no-write preview path); the legacy preview omits it.
+        if (body.payloadTemplate) {
+          return jsonResponse({
+            ...baseResult,
+            targetPayloadPreview: {
+              eligibleForSaveOnly: true,
+              unresolvedPlaceholders: [],
+              unresolvedReferenceComponents: [],
+              missingRequiredFields: [],
+              fieldProvenance: { FNumber: 'staging', FName: 'staging', FUnitGroupID: 'template', FErpClsID: 'reference_table' },
+              compositionSource: 'k3-save-body-composer',
+              redactionSelfCheck: { applied: true, clean: true },
+            },
+          })
+        }
+        return jsonResponse(baseResult)
       }
       if (url === '/api/integration/pipelines') {
         const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
@@ -593,22 +601,11 @@ describe('IntegrationWorkbenchView', () => {
     ;(container.querySelector('[data-testid="preview-payload"]') as HTMLButtonElement).click()
     await flushUi()
 
-    // DF-T1.5: targetPayloadPreview.fieldProvenance in the response → the read-only provenance
-    // panel renders field names + source badges + per-source stats, and never any payload values.
-    const provenancePanel = container.querySelector('[data-testid="preview-provenance"]') as HTMLElement | null
-    expect(provenancePanel).not.toBeNull()
-    const provenanceText = provenancePanel?.textContent || ''
-    expect(provenanceText).toContain('FNumber')
-    expect(provenanceText).toContain('FUnitGroupID')
-    expect(provenanceText).toContain('FErpClsID')
-    const statsText = container.querySelector('[data-testid="preview-provenance-stats"]')?.textContent || ''
-    expect(statsText).toContain('暂存源: 2')
-    expect(statsText).toContain('模板: 1')
-    expect(statsText).toContain('引用表: 1')
-    // Secret hygiene: the provenance panel shows NO payload values.
-    expect(provenanceText).not.toContain('MAT-001')
-    expect(provenanceText).not.toContain('Bolt')
-    expect(provenanceText).not.toContain('Pcs')
+    // DF-T1.5 reachability — Test 1 (legacy request unchanged): payloadTemplate was empty, so the
+    // request stayed legacy and the provenance panel is ABSENT. The faithful mock returns
+    // targetPayloadPreview only when the request carries payloadTemplate, so the panel cannot
+    // render vacuously (this is the exact gap #1968's test had).
+    expect(container.querySelector('[data-testid="preview-provenance"]')).toBeNull()
 
     expect(previewBodies).toHaveLength(1)
     expect(previewBodies[0]).toMatchObject({
@@ -630,6 +627,52 @@ describe('IntegrationWorkbenchView', () => {
     })
     expect(container.textContent).toContain('"FNumber": "MAT-001"')
     expect(container.textContent).toContain('Payload 预览通过')
+    // Test 1 (cont.): the legacy POST carried neither payloadTemplate nor fieldRules.
+    expect(previewBodies[0]).not.toHaveProperty('payloadTemplate')
+    expect(previewBodies[0]).not.toHaveProperty('fieldRules')
+
+    // DF-T1.5 reachability — Test 2 (DF-T1 request is wired): fill the payloadTemplate JSON and
+    // re-run preview → the POST carries payloadTemplate + fieldRules, the backend returns
+    // targetPayloadPreview, and the provenance panel renders names + stats (never payload values).
+    const payloadTemplateInput = container.querySelector('[data-testid="payload-template"]') as HTMLTextAreaElement
+    payloadTemplateInput.value = JSON.stringify({ FNumber: '<code>', FName: '<name>', FUnitGroupID: { FNumber: '<n>', FName: '<u>' } })
+    payloadTemplateInput.dispatchEvent(new Event('input'))
+    await flushUi()
+    ;(container.querySelector('[data-testid="preview-payload"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(previewBodies).toHaveLength(2)
+    expect(previewBodies[1]).toHaveProperty('payloadTemplate')
+    expect(previewBodies[1]).toHaveProperty('fieldRules')
+    const wiredFieldRules = (previewBodies[1] as Record<string, unknown>).fieldRules as Array<Record<string, unknown>>
+    expect(Array.isArray(wiredFieldRules)).toBe(true)
+    expect(wiredFieldRules.length).toBeGreaterThan(0)
+    expect(wiredFieldRules[0]).toMatchObject({ sourceType: 'from_staging', shape: 'scalar' })
+    const wiredPanel = container.querySelector('[data-testid="preview-provenance"]') as HTMLElement | null
+    expect(wiredPanel).not.toBeNull()
+    const wiredText = wiredPanel?.textContent || ''
+    expect(wiredText).toContain('FNumber')
+    expect(wiredText).toContain('FUnitGroupID')
+    expect(container.querySelector('[data-testid="preview-provenance-stats"]')?.textContent || '').toContain('暂存源: 2')
+    // Secret hygiene: the provenance panel shows NO payload values.
+    expect(wiredText).not.toContain('MAT-001')
+    expect(wiredText).not.toContain('Bolt')
+    expect(wiredText).not.toContain('Pcs')
+
+    // DF-T1.5 reachability — Test 3 (invalid payloadTemplate JSON blocks the request): no new POST
+    // is made and an error is surfaced.
+    payloadTemplateInput.value = '{ not valid json'
+    payloadTemplateInput.dispatchEvent(new Event('input'))
+    await flushUi()
+    ;(container.querySelector('[data-testid="preview-payload"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(previewBodies).toHaveLength(2)
+    expect(container.textContent).toContain('预览失败')
+
+    // reset to legacy for the remainder of the test (pipeline save below is preview-independent)
+    payloadTemplateInput.value = ''
+    payloadTemplateInput.dispatchEvent(new Event('input'))
+    await flushUi()
 
     ;(container.querySelector('[data-testid="save-pipeline"]') as HTMLButtonElement).click()
     await flushUi()

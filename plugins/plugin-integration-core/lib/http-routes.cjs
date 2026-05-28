@@ -693,7 +693,15 @@ function buildTargetPayloadPreview(input) {
     code: 'K3_WISE_PRESET_PLACEHOLDER_UNFILLED',
     message: `unfilled template placeholder at ${path}`,
   }))
+  // DF-T1.5: when the workbench UI path supplied fieldMappings, the DF-T1 branch ran the same
+  // transform + (non-required) validation the legacy pipeline runs and passes the errors through
+  // here, so the preview reflects the real pipeline. Runbook callers omit fieldMappings → both
+  // stay [] (shape B). required stays owned by the fieldRules (missingRequiredFields).
+  const transformErrors = (Array.isArray(input.transformErrors) ? input.transformErrors : []).map((e) => cloneJson(e))
+  const validationErrors = (Array.isArray(input.validationErrors) ? input.validationErrors : []).map((e) => cloneJson(e))
   const errors = [
+    ...transformErrors,
+    ...validationErrors,
     ...placeholderErrors,
     ...missingRequiredFields.map((field) => ({ field, code: 'REQUIRED', message: `${field} is required` })),
     ...unresolvedReferenceComponents.map((u) => ({ field: u.field, code: 'INCOMPLETE_REFERENCE', message: `${u.field} requires ${u.rule}` })),
@@ -705,10 +713,11 @@ function buildTargetPayloadPreview(input) {
     targetRecord: cloneJson(merged),
     errors,
     placeholderErrors: placeholderErrors.map((e) => cloneJson(e)),
-    // Shape-B compatibility: keep the legacy preview's fixed array fields (empty in DF-T1
-    // mode — DF-T1 merges via fieldRules, not fieldMappings transform/validation) (P2).
-    transformErrors: [],
-    validationErrors: [],
+    // Shape-B: schemaErrors stays []. transformErrors/validationErrors are populated only when
+    // fieldMappings were supplied (the UI path); runbook callers (no fieldMappings) keep them []
+    // (P2). required is owned by the fieldRules (missingRequiredFields), not validationErrors.
+    transformErrors,
+    validationErrors,
     schemaErrors: [],
     targetPayloadPreview: {
       eligibleForSaveOnly: errors.length === 0,
@@ -739,6 +748,33 @@ function buildTemplatePreview(input) {
     throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', 'payloadTemplate must be an object', { field: 'payloadTemplate' })
   }
   if (isPlainObject(input.payloadTemplate)) {
+    // DF-T1.5 reachability wire: when fieldMappings are provided (the workbench UI path), run the
+    // SAME transform the legacy pipeline runs and compose from the TRANSFORMED record (keyed by
+    // target field) so the DF-T1 preview predicts the real Save body, not raw staging values.
+    // Derived fieldRules use sourceField = targetField. Callers that omit fieldMappings (operator
+    // runbook evidence with a target-shaped sourceRecord) keep reading raw — same shape, two callers.
+    const rawMappings = Array.isArray(input.fieldMappings) ? input.fieldMappings : []
+    if (rawMappings.length > 0) {
+      const fieldMappings = normalizePreviewFieldMappings(rawMappings)
+      const transformed = transformRecord(input.sourceRecord, fieldMappings)
+      // Run the SAME validation the legacy pipeline runs — but strip `required` from the mappings:
+      // required is already enforced by the derived fieldRules (missingRequiredFields), so this avoids
+      // double-counting while still surfacing non-required validations (min/max/regex/...) that the
+      // pipeline would reject. Closes the residual "green DF-T1 preview but pipeline rejects" gap.
+      const nonRequiredMappings = fieldMappings.map((mapping) => ({
+        ...mapping,
+        validation: Array.isArray(mapping.validation) ? mapping.validation.filter((rule) => rule && rule.type !== 'required') : [],
+      }))
+      const validation = transformed.ok ? validateRecord(transformed.value, nonRequiredMappings) : { errors: [] }
+      // transformed.value is always an object (the legacy path projects it even when !ok); the errors
+      // carry the bad news and are surfaced via transformErrors / validationErrors below.
+      return buildTargetPayloadPreview({
+        ...input,
+        sourceRecord: transformed.value,
+        transformErrors: transformed.errors,
+        validationErrors: validation.errors,
+      })
+    }
     return buildTargetPayloadPreview(input)
   }
   if (!isPlainObject(input.sourceRecord)) {

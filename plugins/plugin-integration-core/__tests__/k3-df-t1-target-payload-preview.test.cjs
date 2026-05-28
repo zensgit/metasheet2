@@ -195,6 +195,77 @@ function testShapeBCompatibility() {
   assert.ok('Model' in custom.payload && custom.payload.Model.FNumber === 'X', 'safe custom bodyKey honored')
 }
 
+// ---- DF-T1.5 reachability wire: with fieldMappings (the UI path), DF-T1 runs the SAME transform
+// the legacy pipeline runs and from_staging reads the TRANSFORMED (target-keyed) value, so the
+// preview predicts the real Save body — not raw staging. Negative control: revert the backend to
+// read raw (sourceRecord) and the transformed-value assertions below fail. ----
+function testTransformAppliedWithFieldMappings() {
+  const out = buildTemplatePreview({
+    sourceRecord: { code: ' mat-001 ', name: ' Bolt ', uom: 'EA', quantity: '2' },
+    fieldMappings: [
+      { sourceField: 'code', targetField: 'FNumber', transform: ['trim', 'upper'], validation: [{ type: 'required' }] },
+      { sourceField: 'name', targetField: 'FName', transform: { fn: 'trim' }, validation: [{ type: 'required' }] },
+      { sourceField: 'uom', targetField: 'FBaseUnitID', transform: { fn: 'dictMap', map: { EA: 'Pcs' } } },
+      { sourceField: 'quantity', targetField: 'FQty', transform: { fn: 'toNumber' } },
+    ],
+    payloadTemplate: { FNumber: '<n>', FName: '<n>', FBaseUnitID: '<u>', FQty: 0 },
+    fieldRules: [
+      { targetField: 'FNumber', sourceType: 'from_staging', sourceField: 'FNumber', required: true, shape: 'scalar' },
+      { targetField: 'FName', sourceType: 'from_staging', sourceField: 'FName', required: true, shape: 'scalar' },
+      { targetField: 'FBaseUnitID', sourceType: 'from_staging', sourceField: 'FBaseUnitID', shape: 'scalar' },
+      { targetField: 'FQty', sourceType: 'from_staging', sourceField: 'FQty', shape: 'scalar' },
+    ],
+  })
+  assert.equal(out.payload.Data.FNumber, 'MAT-001', 'trim+upper applied (not raw " mat-001 ")')
+  assert.equal(out.payload.Data.FName, 'Bolt', 'trim applied')
+  assert.equal(out.payload.Data.FBaseUnitID, 'Pcs', 'dictMap applied (EA -> Pcs)')
+  assert.equal(out.payload.Data.FQty, 2, 'toNumber applied (string -> number)')
+  assert.deepEqual(out.transformErrors, [], 'no transform errors for the clean sample')
+  assert.equal(out.valid, true)
+  assert.equal(out.targetPayloadPreview.eligibleForSaveOnly, true)
+}
+
+function testRequiredBlankWithFieldMappings() {
+  // A required staging field is blank after transform -> the preview is invalid (a green preview
+  // must not hide a missing required field).
+  const out = buildTemplatePreview({
+    sourceRecord: { code: 'MAT-9', name: '   ' },
+    fieldMappings: [
+      { sourceField: 'code', targetField: 'FNumber', transform: { fn: 'trim' }, validation: [{ type: 'required' }] },
+      { sourceField: 'name', targetField: 'FName', transform: { fn: 'trim' }, validation: [{ type: 'required' }] },
+    ],
+    payloadTemplate: {},
+    fieldRules: [
+      { targetField: 'FNumber', sourceType: 'from_staging', sourceField: 'FNumber', required: true, shape: 'scalar' },
+      { targetField: 'FName', sourceType: 'from_staging', sourceField: 'FName', required: true, shape: 'scalar' },
+    ],
+  })
+  assert.equal(out.valid, false, 'blank required field -> preview invalid')
+  assert.ok(out.targetPayloadPreview.missingRequiredFields.includes('FName'), 'FName flagged missing-required')
+  assert.equal(out.targetPayloadPreview.eligibleForSaveOnly, false)
+}
+
+function testValidationAppliedWithFieldMappings() {
+  // A non-required validation (min) runs in DF-T1 when fieldMappings are supplied: a failing min
+  // makes the preview invalid, matching the pipeline (closes the residual "green preview, pipeline
+  // rejects" gap). required stays owned by the fieldRules, so validateRecord here is non-required only.
+  const out = buildTemplatePreview({
+    sourceRecord: { code: 'MAT-1', qty: '0' },
+    fieldMappings: [
+      { sourceField: 'code', targetField: 'FNumber', transform: { fn: 'trim' } },
+      { sourceField: 'qty', targetField: 'FQty', transform: { fn: 'toNumber' }, validation: [{ type: 'min', value: 1 }] },
+    ],
+    payloadTemplate: { FNumber: '<n>', FQty: 0 },
+    fieldRules: [
+      { targetField: 'FNumber', sourceType: 'from_staging', sourceField: 'FNumber', shape: 'scalar' },
+      { targetField: 'FQty', sourceType: 'from_staging', sourceField: 'FQty', shape: 'scalar' },
+    ],
+  })
+  assert.equal(out.valid, false, 'failing min validation -> preview invalid (predicts pipeline rejection)')
+  assert.ok(out.validationErrors.length > 0, 'validationErrors surfaced from the pipeline validator')
+  assert.equal(out.targetPayloadPreview.eligibleForSaveOnly, false)
+}
+
 function main() {
   testModeNamespacing()
   testMergeSemantics()
@@ -207,7 +278,10 @@ function main() {
   testNoNewShaper()
   testInputValidation()
   testShapeBCompatibility()
-  console.log('✓ k3-df-t1-target-payload-preview: namespacing, merge, fail-closed, shared-composer parity, passthrough, completeness, redaction, no-write, input-validation, bodyKey-guard, shape-B-compat')
+  testTransformAppliedWithFieldMappings()
+  testRequiredBlankWithFieldMappings()
+  testValidationAppliedWithFieldMappings()
+  console.log('✓ k3-df-t1-target-payload-preview: namespacing, merge, fail-closed, shared-composer parity, passthrough, completeness, redaction, no-write, input-validation, bodyKey-guard, shape-B-compat, transform-applied, required-blank, validation-applied')
 }
 
 main()

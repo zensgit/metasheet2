@@ -271,6 +271,38 @@ export interface IntegrationTemplatePreviewRequest {
     endpointPath?: string
     schema?: IntegrationObjectSchemaField[]
   }
+  // DF-T1.5 reachability wire: when payloadTemplate is a plain object the backend runs the DF-T1
+  // no-write preview and returns targetPayloadPreview; omitted = legacy preview (byte-compatible).
+  payloadTemplate?: Record<string, unknown>
+  fieldRules?: Array<Record<string, unknown>>
+}
+
+// DF-T1.5 reachability wire: derive a minimal DF-T1 fieldRules set from the legacy preview's field
+// mappings — each mapped target becomes a from_staging scalar rule (the operator-supplied
+// payloadTemplate carries the rest; reference objects stay preserved by the template).
+export function deriveFieldRulesFromMappings(
+  fieldMappings: IntegrationFieldMapping[],
+): Array<Record<string, unknown>> {
+  return (Array.isArray(fieldMappings) ? fieldMappings : [])
+    .filter((mapping) => typeof mapping?.targetField === 'string' && mapping.targetField.trim()
+      && typeof mapping?.sourceField === 'string' && mapping.sourceField.trim())
+    .map((mapping) => {
+      // The DF-T1 backend transforms the staging record via fieldMappings first, so the transformed
+      // record is keyed by TARGET field — from_staging reads by targetField (not the raw sourceField),
+      // giving the preview the same transformed value the pipeline would Save.
+      const rule: Record<string, unknown> = {
+        targetField: mapping.targetField,
+        sourceType: 'from_staging',
+        sourceField: mapping.targetField,
+        shape: 'scalar',
+      }
+      // Preserve required semantics from the mapping's validation.
+      const validation = (mapping as { validation?: Array<{ type?: string }> }).validation
+      if (Array.isArray(validation) && validation.some((entry) => entry && entry.type === 'required')) {
+        rule.required = true
+      }
+      return rule
+    })
 }
 
 export type IntegrationFieldProvenanceSource = 'staging' | 'template' | 'constant' | 'reference_table'
