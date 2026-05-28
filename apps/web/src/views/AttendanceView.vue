@@ -3091,27 +3091,60 @@
                       {{ tr('Save the group before adding people.', '先保存考勤组，再添加考勤人员。') }}
                     </div>
                     <template v-else>
+                      <div class="attendance__group-people-meta">
+                        <span data-attendance-group-member-count>{{ attendanceGroupMemberCountLabel }}</span>
+                      </div>
                       <div class="attendance__admin-grid">
                         <AttendanceUserPickerField
                           v-model="attendanceGroupMemberSelectedUserId"
                           :tr="tr"
                           :label="tr('User picker', '用户选择器')"
                           name="attendanceGroupMemberUserPicker"
-                          :help-text="tr('Pick one user and append it to the bulk list below, or type multiple IDs manually.', '先选一个用户再追加到下方批量列表，也可以直接手动输入多个 ID。')"
+                          :help-text="tr('Pick one user and stage it before adding members, or paste multiple IDs manually.', '先选择一个用户并暂存，再添加成员；也可以手动粘贴多个 ID。')"
                           :search-placeholder="tr('Search users to append', '搜索要追加的用户')"
                           input-id="attendance-group-member-user-picker"
                         />
                         <label class="attendance__field attendance__field--full" for="attendance-group-member-user-ids">
                           <span>{{ tr('User IDs (bulk)', '用户 ID（批量）') }}</span>
-                          <input
+                          <textarea
                             id="attendance-group-member-user-ids"
                             v-model="attendanceGroupMemberUserIds"
-                            type="text"
+                            rows="2"
                             :placeholder="tr('userId1, userId2', 'userId1, userId2')"
-                          />
-                          <small class="attendance__field-hint">{{ tr('Separate multiple IDs with commas or spaces. The picker above can append one selected user at a time.', '多个 ID 请用逗号或空格分隔。上方选择器可一次追加一个用户。') }}</small>
+                          ></textarea>
+                          <small class="attendance__field-hint">{{ tr('Separate multiple IDs with commas, spaces, or new lines. They will be staged with the chips before submit.', '多个 ID 请用逗号、空格或换行分隔。提交前会与标签一起暂存。') }}</small>
                         </label>
                       </div>
+                      <div
+                        v-if="attendanceGroupPendingMemberIds.length > 0"
+                        class="attendance__group-pending-members"
+                        data-attendance-group-pending-members
+                      >
+                        <span class="attendance__field-hint">{{ tr('Pending members', '待添加成员') }}</span>
+                        <span
+                          v-for="userId in attendanceGroupPendingMemberIds"
+                          :key="userId"
+                          class="attendance__group-pending-member"
+                          data-attendance-group-pending-member
+                        >
+                          <span>{{ userId }}</span>
+                          <button
+                            type="button"
+                            :aria-label="tr(`Remove ${userId}`, `移除 ${userId}`)"
+                            data-attendance-group-pending-remove
+                            @click="removeAttendanceGroupPendingMember(userId)"
+                          >
+                            ×
+                          </button>
+                        </span>
+                      </div>
+                      <small
+                        v-if="attendanceGroupMemberDuplicateNotice"
+                        class="attendance__field-hint"
+                        data-attendance-group-member-notice
+                      >
+                        {{ attendanceGroupMemberDuplicateNotice }}
+                      </small>
                       <div class="attendance__admin-actions">
                         <button
                           class="attendance__btn"
@@ -3124,7 +3157,7 @@
                         <button
                           class="attendance__btn attendance__btn--primary"
                           type="button"
-                          :disabled="attendanceGroupMemberSaving"
+                          :disabled="attendanceGroupMemberSaving || !attendanceGroupMemberSubmitAvailable"
                           @click="addAttendanceGroupMembers"
                         >
                           {{ attendanceGroupMemberSaving ? tr('Saving...', '保存中...') : tr('Add members', '添加成员') }}
@@ -7819,6 +7852,9 @@ const attendanceGroupEditingId = ref<string | null>(null)
 const attendanceGroupMemberGroupId = ref('')
 const attendanceGroupMemberSelectedUserId = ref('')
 const attendanceGroupMemberUserIds = ref('')
+const attendanceGroupPendingMemberIds = ref<string[]>([])
+const attendanceGroupMemberDuplicateNotice = ref('')
+const attendanceGroupMemberTotal = ref(0)
 const payrollTemplateEditingId = ref<string | null>(null)
 const payrollCycleEditingId = ref<string | null>(null)
 const payrollCycleSummary = ref<AttendanceSummary | null>(null)
@@ -7846,6 +7882,22 @@ const attendanceGroupDetailSubtitle = computed(() =>
   attendanceGroupEditingId.value
     ? tr('Edit basic info, people, and read-only policy summaries for this group.', '编辑该考勤组的基础信息、人员与只读策略摘要。')
     : tr('Fill basic info first. People and summaries unlock after the group is saved.', '先填写基础信息。保存后再维护人员与摘要。')
+)
+const attendanceGroupLoadedMemberIds = computed(() =>
+  new Set(attendanceGroupMembers.value.map(member => member.userId))
+)
+const attendanceGroupMemberCountLabel = computed(() => {
+  const visible = attendanceGroupMembers.value.length
+  const total = attendanceGroupMemberTotal.value
+  if (total > visible) {
+    return tr(`Showing ${visible} of ${total} members`, `显示 ${visible}/${total} 位成员`)
+  }
+  const count = total || visible
+  if (count === 1) return tr('1 member', '1 位成员')
+  return tr(`${count} members`, `${count} 位成员`)
+})
+const attendanceGroupMemberSubmitAvailable = computed(() =>
+  attendanceGroupPendingMemberIds.value.length > 0 || parseUserIdList(attendanceGroupMemberUserIds.value).length > 0
 )
 const importCsvFile = ref<File | null>(null)
 const importCsvFileName = ref('')
@@ -15527,9 +15579,12 @@ function resetAttendanceGroupForm() {
   attendanceGroupForm.description = ''
   attendanceGroupMemberGroupId.value = ''
   attendanceGroupMembers.value = []
+  attendanceGroupMemberTotal.value = 0
+  resetAttendanceGroupMemberDraft()
 }
 
 function editAttendanceGroup(item: AttendanceGroup) {
+  const groupChanged = attendanceGroupMemberGroupId.value !== item.id
   attendanceGroupEditingId.value = item.id
   attendanceGroupForm.name = item.name
   attendanceGroupForm.code = item.code ?? ''
@@ -15537,6 +15592,11 @@ function editAttendanceGroup(item: AttendanceGroup) {
   attendanceGroupForm.ruleSetId = item.ruleSetId ?? ''
   attendanceGroupForm.description = item.description ?? ''
   attendanceGroupMemberGroupId.value = item.id
+  if (groupChanged) {
+    attendanceGroupMembers.value = []
+    attendanceGroupMemberTotal.value = 0
+    resetAttendanceGroupMemberDraft()
+  }
 }
 
 function startCreateAttendanceGroup() {
@@ -15646,6 +15706,7 @@ async function loadAttendanceGroupMembers() {
   const groupId = attendanceGroupMemberGroupId.value
   if (!groupId) {
     attendanceGroupMembers.value = []
+    attendanceGroupMemberTotal.value = 0
     return
   }
   attendanceGroupMemberLoading.value = true
@@ -15660,7 +15721,9 @@ async function loadAttendanceGroupMembers() {
       throw new Error(readErrorMessage(data, tr('Failed to load group members', '加载分组成员失败')))
     }
     adminForbidden.value = false
-    attendanceGroupMembers.value = data.data?.items ?? []
+    const items = Array.isArray(data.data?.items) ? data.data.items : []
+    attendanceGroupMembers.value = items
+    attendanceGroupMemberTotal.value = Number(data.data?.total ?? items.length) || items.length
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to load group members', '加载分组成员失败')), 'error')
   } finally {
@@ -15670,13 +15733,21 @@ async function loadAttendanceGroupMembers() {
 
 async function addAttendanceGroupMembers() {
   const groupId = attendanceGroupMemberGroupId.value
-  const userIds = parseUserIdList(attendanceGroupMemberUserIds.value)
+  const enteredUserIds = parseUserIdList(attendanceGroupMemberUserIds.value)
+  stageAttendanceGroupMemberIds(enteredUserIds)
+  attendanceGroupMemberUserIds.value = ''
+  const userIds = attendanceGroupPendingMemberIds.value.filter(userId => !attendanceGroupLoadedMemberIds.value.has(userId))
   if (!groupId) {
     setStatus(tr('Select an attendance group first.', '请先选择考勤分组。'), 'error')
     return
   }
   if (userIds.length === 0) {
-    setStatus(tr('Enter at least one user ID.', '请至少输入一个用户 ID。'), 'error')
+    setStatus(
+      enteredUserIds.length > 0
+        ? tr('All entered IDs are already in this group or pending.', '输入的 ID 均已在本组或待添加列表中。')
+        : tr('Enter at least one user ID.', '请至少输入一个用户 ID。'),
+      'error',
+    )
     return
   }
   attendanceGroupMemberSaving.value = true
@@ -15694,7 +15765,8 @@ async function addAttendanceGroupMembers() {
       throw new Error(readErrorMessage(data, tr('Failed to add group members', '添加分组成员失败')))
     }
     adminForbidden.value = false
-    attendanceGroupMemberUserIds.value = ''
+    attendanceGroupPendingMemberIds.value = []
+    attendanceGroupMemberDuplicateNotice.value = ''
     await loadAttendanceGroupMembers()
     setStatus(tr('Group members added.', '分组成员已添加。'))
   } catch (error: any) {
@@ -15707,15 +15779,42 @@ async function addAttendanceGroupMembers() {
 function appendAttendanceGroupMemberSelectedUser() {
   const userId = attendanceGroupMemberSelectedUserId.value.trim()
   if (!userId) return
-  const ids = attendanceGroupMemberUserIds.value
-    .split(/[\n,，\s]+/)
-    .map(item => item.trim())
-    .filter(Boolean)
-  if (!ids.includes(userId)) {
-    ids.push(userId)
-  }
-  attendanceGroupMemberUserIds.value = ids.join(', ')
+  stageAttendanceGroupMemberIds([userId])
   attendanceGroupMemberSelectedUserId.value = ''
+}
+
+function resetAttendanceGroupMemberDraft() {
+  attendanceGroupMemberSelectedUserId.value = ''
+  attendanceGroupMemberUserIds.value = ''
+  attendanceGroupPendingMemberIds.value = []
+  attendanceGroupMemberDuplicateNotice.value = ''
+}
+
+function stageAttendanceGroupMemberIds(userIds: string[]) {
+  const normalized = parseUserIdList(userIds.join('\n'))
+  if (normalized.length === 0) return
+  const pending = new Set(attendanceGroupPendingMemberIds.value)
+  const loaded = attendanceGroupLoadedMemberIds.value
+  const duplicates: string[] = []
+  for (const userId of normalized) {
+    if (loaded.has(userId) || pending.has(userId)) {
+      duplicates.push(userId)
+      continue
+    }
+    pending.add(userId)
+  }
+  attendanceGroupPendingMemberIds.value = Array.from(pending)
+  attendanceGroupMemberDuplicateNotice.value = duplicates.length > 0
+    ? tr(
+      `Already in this group or pending: ${duplicates.join(', ')}`,
+      `已在本组或待添加列表中：${duplicates.join(', ')}`,
+    )
+    : ''
+}
+
+function removeAttendanceGroupPendingMember(userId: string) {
+  attendanceGroupPendingMemberIds.value = attendanceGroupPendingMemberIds.value.filter(item => item !== userId)
+  attendanceGroupMemberDuplicateNotice.value = ''
 }
 
 async function removeAttendanceGroupMember(userId: string) {
@@ -18439,6 +18538,45 @@ const holidaySectionBindings = {
   display: grid;
   gap: 12px;
   padding: 14px;
+}
+
+.attendance__group-people-meta {
+  display: flex;
+  justify-content: flex-end;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.attendance__group-pending-members {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  border: 1px dashed #bfdbfe;
+  border-radius: 8px;
+  background: #eff6ff;
+}
+
+.attendance__group-pending-member {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #fff;
+  color: #1f2937;
+  font-size: 12px;
+}
+
+.attendance__group-pending-member button {
+  border: 0;
+  background: transparent;
+  color: #6b7280;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
 }
 
 .attendance__group-sticky-actions {
