@@ -10,6 +10,7 @@ import {
   listWorkbenchExternalSystems,
   previewIntegrationTemplate,
   runIntegrationPipeline,
+  summarizeFieldProvenance,
   testExternalSystemConnection,
   upsertWorkbenchExternalSystem,
   upsertIntegrationPipeline,
@@ -31,6 +32,45 @@ function jsonResponse(data: unknown): Response {
     headers: { 'Content-Type': 'application/json' },
   })
 }
+
+describe('summarizeFieldProvenance (DF-T1.5 preview provenance)', () => {
+  it('returns null when there is no fieldProvenance (legacy preview / nothing to show)', () => {
+    expect(summarizeFieldProvenance(null)).toBeNull()
+    expect(summarizeFieldProvenance(undefined)).toBeNull()
+    expect(summarizeFieldProvenance({})).toBeNull()
+    expect(summarizeFieldProvenance({ fieldProvenance: {} })).toBeNull()
+  })
+
+  it('lists fields sorted by name with their declared source', () => {
+    const summary = summarizeFieldProvenance({
+      fieldProvenance: { FName: 'staging', FNumber: 'staging', FUnitGroupID: 'template', FErpClsID: 'reference_table' },
+    })
+    expect(summary).not.toBeNull()
+    expect(summary?.entries.map((entry) => entry.field)).toEqual(['FErpClsID', 'FName', 'FNumber', 'FUnitGroupID'])
+    expect(summary?.entries.find((entry) => entry.field === 'FUnitGroupID')?.source).toBe('template')
+  })
+
+  it('counts per source in canonical order (staging, template, constant, reference_table)', () => {
+    const summary = summarizeFieldProvenance({
+      fieldProvenance: { a: 'reference_table', b: 'staging', c: 'staging', d: 'template' },
+    })
+    expect(summary?.stats).toEqual([
+      { source: 'staging', count: 2 },
+      { source: 'template', count: 1 },
+      { source: 'reference_table', count: 1 },
+    ])
+  })
+
+  it('appends unknown/forward-compat sources after the canonical ones', () => {
+    const summary = summarizeFieldProvenance({
+      fieldProvenance: { a: 'staging', b: 'future_source' },
+    })
+    expect(summary?.stats).toEqual([
+      { source: 'staging', count: 1 },
+      { source: 'future_source', count: 1 },
+    ])
+  })
+})
 
 describe('integration project-scope helpers', () => {
   it.each([

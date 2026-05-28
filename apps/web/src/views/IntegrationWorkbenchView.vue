@@ -789,6 +789,28 @@
           </button>
         </div>
         <pre data-testid="payload-preview">{{ previewText }}</pre>
+        <div
+          v-if="previewProvenance"
+          class="integration-workbench__provenance"
+          data-testid="preview-provenance"
+        >
+          <h3 class="integration-workbench__provenance-title">字段来源</h3>
+          <p class="integration-workbench__provenance-stats" data-testid="preview-provenance-stats">
+            <span
+              v-for="stat in previewProvenance.stats"
+              :key="stat.source"
+              class="integration-workbench__provenance-badge"
+              :data-source="stat.source"
+            >{{ provenanceSourceLabel(stat.source) }}: {{ stat.count }}</span>
+          </p>
+          <ul class="integration-workbench__provenance-list">
+            <li v-for="entry in previewProvenance.entries" :key="entry.field" :data-field="entry.field">
+              <code>{{ entry.field }}</code>
+              <span class="integration-workbench__provenance-badge" :data-source="entry.source">{{ provenanceSourceLabel(entry.source) }}</span>
+            </li>
+          </ul>
+          <p class="integration-workbench__hint">仅显示字段名与来源，不含字段值。</p>
+        </div>
       </div>
     </section>
   </section>
@@ -816,6 +838,7 @@ import {
   previewIntegrationTemplate,
   replayIntegrationDeadLetter,
   runIntegrationPipeline,
+  summarizeFieldProvenance,
   testExternalSystemConnection,
   upsertWorkbenchExternalSystem,
   upsertIntegrationPipeline,
@@ -963,6 +986,8 @@ const sourceSchema = ref<IntegrationObjectSchema>({ object: '', fields: [] })
 const targetSchema = ref<IntegrationObjectSchema>({ object: '', fields: [] })
 const mappings = ref<EditableMapping[]>([])
 const previewText = ref('尚未生成预览')
+// DF-T1.5: read-only provenance summary derived from a DF-T1 targetPayloadPreview (null = nothing to show).
+const previewProvenance = ref<ReturnType<typeof summarizeFieldProvenance>>(null)
 const pipelineResultText = ref('尚未执行')
 const lastDryRunResult = ref<IntegrationPipelineRunResult | null>(null)
 const pipelineRuns = ref<IntegrationPipelineRun[]>([])
@@ -2478,6 +2503,16 @@ async function executePipeline(dryRun: boolean): Promise<void> {
   }
 }
 
+const PROVENANCE_SOURCE_LABELS: Record<string, string> = {
+  staging: '暂存源',
+  template: '模板',
+  constant: '常量',
+  reference_table: '引用表',
+}
+function provenanceSourceLabel(source: string): string {
+  return PROVENANCE_SOURCE_LABELS[source] || source
+}
+
 async function previewPayload(): Promise<void> {
   try {
     const sourceRecord = JSON.parse(sampleRecordText.value) as Record<string, unknown>
@@ -2495,9 +2530,11 @@ async function previewPayload(): Promise<void> {
       },
     })
     previewText.value = JSON.stringify(result, null, 2)
+    previewProvenance.value = summarizeFieldProvenance(result.targetPayloadPreview)
     setStatus(result.valid ? 'Payload 预览通过' : `Payload 预览发现 ${result.errors.length} 个问题`, result.valid ? 'success' : 'error')
   } catch (error) {
     previewText.value = '预览失败'
+    previewProvenance.value = null
     setStatus(error instanceof Error ? error.message : String(error), 'error')
   }
 }
@@ -2512,6 +2549,41 @@ watch(showAdvancedConnectors, () => {
 </script>
 
 <style scoped>
+.integration-workbench__provenance {
+  margin-top: 12px;
+}
+.integration-workbench__provenance-title {
+  font-size: 14px;
+  margin: 0 0 6px;
+}
+.integration-workbench__provenance-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+.integration-workbench__provenance-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.integration-workbench__provenance-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.integration-workbench__provenance-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  background: #eef2ff;
+  color: #3730a3;
+}
+
 .integration-workbench {
   max-width: 1280px;
   margin: 0 auto;
