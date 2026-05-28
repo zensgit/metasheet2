@@ -198,7 +198,10 @@ const MATERIAL_CUSTOMER_PROFILE = {
     // Unit family + accounts + warehouse + manager — numbered base data ({FNumber,FName})
     { name: 'FUnitGroupID', label: 'Unit group', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
     { name: 'FUnitID', label: 'Unit', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
-    { name: 'FBaseUnitID', label: 'Base unit', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
+    // FBaseUnitID intentionally omitted: the customer K3 15.1 Material contract (doAddMaterial)
+    // uses FUnitID + the unit family, not FBaseUnitID. Default-projecting it caused the M1 dry-run
+    // cross-check mismatch and contributed to the failed Save attempts; M1 one-record Save PASSED
+    // 2026-05-28 with it removed. See integration-k3wise-m1-customer-profile-fbaseunitid-alignment-*.
     { name: 'FOrderUnitID', label: 'Order unit', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
     { name: 'FSaleUnitID', label: 'Sales unit', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },
     { name: 'FProductUnitID', label: 'Production unit', type: 'reference', reference: K3_REFERENCE_BY_NUMBER },

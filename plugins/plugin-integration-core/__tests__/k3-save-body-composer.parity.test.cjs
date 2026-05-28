@@ -171,6 +171,22 @@ function testNoDivergentDuplicate() {
     'the composer is the sole home of applyReferenceShape / projectRecordForBody')
 }
 
+// Step 7 (#1792 M1 one-record Save PASSED 2026-05-28): the customer profile must NOT compose
+// FBaseUnitID into the Save body even if a staging record carries it — schema-driven projection
+// drops it (the field is omitted from the profile schema). Composing FBaseUnitID was the dry-run
+// cross-check mismatch behind the 2 failed M1 Saves; the proven shape uses FUnitID + the unit
+// family. Negative control: re-add FBaseUnitID to the profile schema → this test fails.
+async function testCustomerProfileDropsFBaseUnitID() {
+  const record = { FNumber: 'MAT-7', FName: 'Widget', FModel: 'M-1', FBaseUnitID: { FNumber: '10', FName: 'Each' } }
+  const { body } = await adapterSaveBody(record)
+  const preview = previewPayload(record)
+  assert.equal('FBaseUnitID' in body.Data, false, 'adapter Save body omits FBaseUnitID (not in customer profile schema)')
+  assert.equal('FBaseUnitID' in preview.payload.Data, false, 'preview payload omits FBaseUnitID')
+  assert.deepEqual(preview.payload, body, 'preview ≡ adapter Save (no FBaseUnitID divergence)')
+  assert.equal(body.Data.FNumber, 'MAT-7', 'scalar identity still composes')
+  assert.equal(body.Data.FModel, 'M-1', 'FModel scalar still composes')
+}
+
 async function main() {
   await testScalarShapeParity()
   await testObjectPassthroughParity()
@@ -180,7 +196,8 @@ async function main() {
   testGenericNestedProjectionPreserved()
   testIdentifierEmptyStringFallback()
   testNoDivergentDuplicate()
-  console.log('✓ k3-save-body-composer.parity: preview ≡ adapter Save (shape/passthrough/placeholder), nested-path preserved, identifier-fallback, no-write, opt-in, no divergent duplicate')
+  await testCustomerProfileDropsFBaseUnitID()
+  console.log('✓ k3-save-body-composer.parity: preview ≡ adapter Save (shape/passthrough/placeholder), nested-path preserved, identifier-fallback, no-write, opt-in, no divergent duplicate, customer-profile drops FBaseUnitID')
 }
 
 main().catch((err) => {
