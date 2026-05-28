@@ -8,9 +8,11 @@ const repoRoot = path.resolve(__dirname, '..', '..', '..')
 const migrationPath = path.join(repoRoot, 'packages', 'core-backend', 'migrations', '057_create_integration_core_tables.sql')
 const runningUniqueMigrationPath = path.join(repoRoot, 'packages', 'core-backend', 'migrations', '058_integration_runs_running_unique.sql')
 const runHistoryIndexMigrationPath = path.join(repoRoot, 'packages', 'core-backend', 'migrations', '059_integration_runs_history_index.sql')
+const runProvenanceMigrationPath = path.join(repoRoot, 'packages', 'core-backend', 'migrations', '060_integration_runs_provenance.sql')
 const sql = fs.readFileSync(migrationPath, 'utf8')
 const runningUniqueSql = fs.readFileSync(runningUniqueMigrationPath, 'utf8')
 const runHistoryIndexSql = fs.readFileSync(runHistoryIndexMigrationPath, 'utf8')
+const runProvenanceSql = fs.readFileSync(runProvenanceMigrationPath, 'utf8')
 
 const expectedTables = [
   'integration_external_systems',
@@ -112,6 +114,63 @@ function main() {
     '059 migration adds run-history lookup index with workspace scope and created_at ordering',
   )
   assert.doesNotMatch(runHistoryIndexSql, /\bDROP\s+(?:TABLE|INDEX)\b/i, '059 migration must not drop objects')
+  assert.match(
+    runProvenanceSql,
+    /ALTER TABLE integration_runs\s+ADD COLUMN IF NOT EXISTS provenance_events JSONB NOT NULL DEFAULT '\[\]'::jsonb;/m,
+    '060 migration adds provenance_events JSONB column to integration_runs',
+  )
+  assert.match(
+    runProvenanceSql,
+    /CREATE OR REPLACE VIEW integration_provenance_by_row AS/m,
+    '060 migration creates the by-row provenance view',
+  )
+  assert.match(
+    runProvenanceSql,
+    /FROM integration_runs r\s+CROSS JOIN LATERAL jsonb_array_elements\(/m,
+    '060 provenance view unnests events from integration_runs',
+  )
+  assert.match(
+    runProvenanceSql,
+    /WITH ORDINALITY AS provenance_item\(event, ordinality\)/m,
+    '060 provenance view keeps stable event ordering per run',
+  )
+  assert.match(
+    runProvenanceSql,
+    /WHEN jsonb_typeof\(r\.provenance_events\) = 'array' THEN r\.provenance_events\s+ELSE '\[\]'::jsonb/m,
+    '060 provenance view tolerates null or non-array lineage payloads',
+  )
+  assert.match(
+    runProvenanceSql,
+    /provenance_item\.event ->> 'rowId' AS row_id/m,
+    '060 provenance view exposes rowId for the future read route',
+  )
+  assert.match(
+    runProvenanceSql,
+    /provenance_item\.event ->> 'eventType' AS event_type/m,
+    '060 provenance view exposes eventType for timeline rendering',
+  )
+  assert.match(
+    runProvenanceSql,
+    /provenance_item\.event ->> 'at' AS event_at/m,
+    '060 provenance view exposes event timestamps as text',
+  )
+  assert.match(
+    runProvenanceSql,
+    /COALESCE\(provenance_item\.event -> 'attrs', '\{\}'::jsonb\) AS attrs/m,
+    '060 provenance view exposes attrs with an object fallback',
+  )
+  assert.match(
+    runProvenanceSql,
+    /WHERE jsonb_typeof\(provenance_item\.event\) = 'object'\s+AND provenance_item\.event \? 'rowId';/m,
+    '060 provenance view filters to object events that carry rowId',
+  )
+  assert.doesNotMatch(runProvenanceSql, /\bCREATE\s+TABLE\b/i, '060 migration must not create a new event table')
+  assert.doesNotMatch(runProvenanceSql, /\bDROP\s+(?:TABLE|INDEX|VIEW)\b/i, '060 migration must not drop objects')
+  assert.doesNotMatch(
+    runProvenanceSql,
+    /\b(?:FROM|JOIN|ALTER\s+TABLE|CREATE\s+TABLE|UPDATE|INSERT\s+INTO|DELETE\s+FROM)\s+integration_(?:run_log|exceptions)\b/i,
+    '060 migration must not reference staging multitable object names as DB tables',
+  )
 
   const ddlTableRefs = Array.from(sql.matchAll(/\b(?:CREATE|ALTER|DROP|TRUNCATE)\s+TABLE(?:\s+IF\s+(?:NOT\s+)?EXISTS)?\s+([a-zA-Z_][a-zA-Z0-9_]*)/gi))
     .map((match) => match[1])
@@ -126,11 +185,17 @@ function main() {
     .map((match) => match[1])
   assertOnlyIntegrationTableRefs('index', indexTableRefs.concat(runningUniqueIndexTableRefs, runHistoryIndexTableRefs))
 
+  const provenanceAlterTableRefs = Array.from(runProvenanceSql.matchAll(/\bALTER\s+TABLE\s+([a-zA-Z_][a-zA-Z0-9_]*)/gi))
+    .map((match) => match[1])
+  const provenanceViewTableRefs = Array.from(runProvenanceSql.matchAll(/\bFROM\s+([a-zA-Z_][a-zA-Z0-9_]*)\b/gi))
+    .map((match) => match[1])
+  assertOnlyIntegrationTableRefs('060 DDL/view', provenanceAlterTableRefs.concat(provenanceViewTableRefs))
+
   const foreignTableRefs = Array.from(sql.matchAll(/\bREFERENCES\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/gi))
     .map((match) => match[1])
   assertOnlyIntegrationTableRefs('foreign key', foreignTableRefs)
 
-  console.log('✓ migration-sql: 057/058/059 integration migration structure passed')
+  console.log('✓ migration-sql: 057/058/059/060 integration migration structure passed')
 }
 
 main()
