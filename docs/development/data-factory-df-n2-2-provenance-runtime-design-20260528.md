@@ -24,34 +24,50 @@ build authorization:** each sub-PR is a separate explicit opt-in behind the 阶�
 
 ## Storage decision (locked)
 
-**JSONB on existing tables + a by-`rowId` view — NO new event table** (#1874). A JSONB lineage column
-on the existing run / `integration_run_log` surface, events tagged by `rowId`; an
-`integration_provenance_by_row` view unnests across runs (joining `integration_dead_letters` /
-`integration_exceptions`). No new write-path table.
+**JSONB on existing tables + a by-`rowId` view — NO new event table** (#1874). The DB anchor is the
+existing `integration_runs` table (see `057_create_integration_core_tables.sql`), not the staging
+multitable objects named `integration_run_log` / `integration_exceptions`. Add a JSONB lineage column
+to `integration_runs`; each event is tagged by `rowId`. An `integration_provenance_by_row` view unnests
+those run-local event arrays across runs. If the read route later needs dead-letter context, join only
+real DB tables such as `integration_dead_letters`; do not make the provenance view depend on staging
+sheet object names. No new write-path table.
 
 ## Redaction — a pre-storage HARD GATE (not optional)
 
 Provenance is **persisted and queryable**, so any secret leak is **durable**. Every event field is
 value-scrubbed via `scrubSecretStringValue` **before** it is written — presence flags + safe ids only;
-never token / password / connection-string / customer secret / raw error text. This **reuses the same
-`scrubSecretStringValue` that the in-flight `fix/df-run-provenance-hardening` is strengthening** (it
-value-scrubs dead-letter `errorMessage`); **DF-N2-2b should land after that hardening** so persisted
-provenance gets the strengthened scrub, and must not re-implement it. A stored-event redaction test (a
-token planted in `attrs` → stripped) is a 2b exit gate.
+never token / password / connection-string / customer secret / raw error text. Reuse the shared
+`scrubSecretStringValue`; do not re-implement a provenance-local redactor. Current main already carries
+the hardening chain this depends on (#1895 value-scrub for token/API-key/JWT shapes, #1898 shared
+http-route redaction, #1917 dead-letter `errorMessage` value-scrub), so 2b's gate is to **prove** that
+shared scrubber covers stored provenance values, including query-string secrets such as
+`?token=` / `?access_token=` / `?api_key=`. A stored-event redaction test (a token planted in `attrs` →
+stripped before persistence) is a 2b exit gate.
 
 ## Retention / aging (the #1880 gap — REQUIRED here)
 
 NiFi has a provenance retention/aging policy we currently lack; unbounded per-row events + cross-run
-accumulation would bloat the JSONB surface. DF-N2-2 must define:
-- **Per-row cap** (already in the checklist): a per-row event count / size cap, mirroring the
-  `targetWriteSummaries` cap-50 discipline (count-capped with an overflow marker; oldest events trimmed).
-- **Aging** (new): a documented retention window (default: keep ≤ N days / ≤ M runs per `rowId`) and a
-  prune path. The **prune job itself is out of DF-N2-2 scope**, but the JSONB shape + the window knob
-  MUST be designed now so aging is possible later **without a further migration**.
+accumulation would bloat the JSONB surface. Because events live inside historical `integration_runs`
+JSONB, retention must avoid rewriting old run rows per `rowId`.
+
+DF-N2-2 must define:
+- **Write-time per-run/per-row cap** (already in the checklist): while appending events to the current
+  run, cap each row's event count / JSON size, mirroring the `targetWriteSummaries` cap-50 discipline
+  (count-capped with an overflow marker; oldest events in the current run's row bucket trimmed before
+  the run is finalized).
+- **Run-level aging window** (new): a documented retention window based on `integration_runs.created_at`
+  / `finished_at` (default: keep <= N days or <= M newest runs per pipeline). The future prune job can
+  delete/archive old run rows or clear old run-level provenance arrays by run scope; it must not require
+  scanning every `rowId` across historical JSONB arrays.
+- **Read-time windowing**: the by-`rowId` route must accept/own a bounded run/time window so long-lived
+  rows do not force unbounded cross-run scans. The prune job itself is out of DF-N2-2 scope, but the JSONB
+  shape + run-level window knob must be designed now so aging is possible later **without a further
+  migration**.
 
 ## Sub-split (each a SEPARATE gated opt-in)
 
-- **DF-N2-2a — storage / migration** (schema only, no behavior): the JSONB lineage column + the
+- **DF-N2-2a — storage / migration** (schema only, no behavior): the `integration_runs` JSONB lineage
+  column + the
   `integration_provenance_by_row` view, via integration-core's own SQL migration (guarded by
   `migration-sql.test.cjs`); back-compat (existing runs → null/empty; the view tolerates it). *Exit:
   migration green, zero runtime behavior change.*
@@ -78,5 +94,5 @@ accumulation would bloat the JSONB surface. DF-N2-2 must define:
 Docs-only design; **no** runtime / migration / route code here. Each of 2a / 2b / 2c is a **separate
 explicit opt-in** behind the 阶段二 unlock, in order (2a → 2b → 2c; 2b depends on 2a's column, 2c on
 2b's events). No K3 write, no connector behavior, no new event shape (uses #1882's contract). **2b is
-gated on the in-flight redaction value-scrub (`fix/df-run-provenance-hardening`) landing first.**
-DF-N2-3 (frontend lineage timeline) stays a separate slice after 2c.
+gated on a stored-provenance redaction proof against the already-shared scrubber**, not on a new
+redaction implementation. DF-N2-3 (frontend lineage timeline) stays a separate slice after 2c.
