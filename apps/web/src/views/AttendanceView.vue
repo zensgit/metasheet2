@@ -15733,7 +15733,8 @@ async function loadAttendanceGroupMembers() {
 
 async function addAttendanceGroupMembers() {
   const groupId = attendanceGroupMemberGroupId.value
-  stageAttendanceGroupMemberIds(parseUserIdList(attendanceGroupMemberUserIds.value))
+  const enteredUserIds = parseUserIdList(attendanceGroupMemberUserIds.value)
+  stageAttendanceGroupMemberIds(enteredUserIds)
   attendanceGroupMemberUserIds.value = ''
   const userIds = attendanceGroupPendingMemberIds.value.filter(userId => !attendanceGroupLoadedMemberIds.value.has(userId))
   if (!groupId) {
@@ -15741,7 +15742,12 @@ async function addAttendanceGroupMembers() {
     return
   }
   if (userIds.length === 0) {
-    setStatus(tr('Enter at least one user ID.', '请至少输入一个用户 ID。'), 'error')
+    setStatus(
+      enteredUserIds.length > 0
+        ? tr('All entered IDs are already in this group or pending.', '输入的 ID 均已在本组或待添加列表中。')
+        : tr('Enter at least one user ID.', '请至少输入一个用户 ID。'),
+      'error',
+    )
     return
   }
   attendanceGroupMemberSaving.value = true

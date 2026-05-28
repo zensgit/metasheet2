@@ -370,6 +370,78 @@ describe('Attendance admin anchor navigation', () => {
     ])
   })
 
+  it('explains duplicate-only attendance group member input without posting', async () => {
+    const postBodies: unknown[] = []
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url.startsWith('/api/attendance/groups?')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'group-a',
+                name: 'Operations floor',
+                code: 'ops_floor',
+                timezone: 'Asia/Shanghai',
+                ruleSetId: null,
+              },
+            ],
+          },
+        })
+      }
+      if (url === '/api/attendance/groups/group-a/members' && init?.method === 'POST') {
+        postBodies.push(JSON.parse(String(init.body || '{}')))
+        return jsonResponse(200, { ok: true, data: { items: [] } })
+      }
+      if (url === '/api/attendance/groups/group-a/members') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: 'member-1', groupId: 'group-a', userId: 'user-1', createdAt: '2026-05-27T08:00:00.000Z' },
+            ],
+            total: 1,
+          },
+        })
+      }
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          items: [],
+          summary: null,
+        },
+      })
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    const groupsAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')
+    expect(groupsAnchor).toBeTruthy()
+    groupsAnchor!.click()
+    await flushUi(4)
+
+    const people = container!.querySelector<HTMLElement>('[data-attendance-group-people]')
+    expect(people).toBeTruthy()
+    const bulkInput = people!.querySelector<HTMLTextAreaElement>('#attendance-group-member-user-ids')
+    expect(bulkInput).toBeTruthy()
+    bulkInput!.value = 'user-1'
+    bulkInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+
+    const addButton = Array.from(people!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Add members'))
+    expect(addButton).toBeTruthy()
+    addButton!.click()
+    await flushUi(4)
+
+    expect(postBodies).toEqual([])
+    expect(container!.textContent).toContain('All entered IDs are already in this group or pending.')
+    expect(container!.textContent).not.toContain('Enter at least one user ID.')
+  })
+
   it('collapses and expands admin anchor groups', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
