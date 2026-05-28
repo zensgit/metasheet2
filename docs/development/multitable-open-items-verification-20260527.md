@@ -16,7 +16,7 @@
 
 ## Slice 1 — ECharts ✅ **SHIPPED (#1950, merge `b665b2b1c`)** — 证据快照
 
-> 结果：V-S1-1..6/8 ✅（33 specs + `vue-tsc -b` + build/tree-shaking 绿，受控实验剔除 ~537KB / 174KB-gzip）；**V-S1-7 视觉冒烟 = NOT-RUN（无 stack，须有 stack 时人工核对）**。下表为 as-verified 记录。
+> 结果：V-S1-1..8 ✅（33 specs + `vue-tsc -b` + build/tree-shaking 绿，受控实验剔除 ~537KB / 174KB-gzip）；**V-S1-7 视觉冒烟 = RAN + PASS（2026-05-28，前端-only 真浏览器渲染）**。下表为 as-verified 记录。
 
 | ID | 验收项 | 方法 | 通过判据 |
 |---|---|---|---|
@@ -27,10 +27,10 @@
 | **V-S1-4** | 生命周期（含跨类型切换） | vitest（mock + reactive 重渲染） | prop data 变 → `setOption(...,true)` 二次调；**number/table → bar/line/pie 切换**（watch `flush:'post'`，canvas 此时才在 DOM）→ `init()` + observer 补挂；**chart → number 切换** → `dispose()`；observer 回调 → `chart.resize()`；卸载 → `dispose()` |
 | **V-S1-5** | dashboard 消费者不崩 | `multitable-dashboard-view.spec.ts` + `vi.mock('echarts/core')` | 现有挂载测试在 mock 下绿（无 canvas 崩） |
 | **V-S1-6** | 包体 tree-shaken | grep + `pnpm --filter @metasheet/web build` | **runtime** 只 `from 'echarts/core'` 及子路径（**无 runtime `from 'echarts'`**）；`import type … from 'echarts'`（如 `EChartsOption`）**例外**——编译期擦除、不进 bundle；构建产物里 echarts 不进首屏主 chunk（静态 import 下进 dashboard 路由 chunk 或 vendor，仅 used modules）。**✅ 验证 2026-05-27**：build 绿；echarts 仅在 `MultitableEmbedHost` chunk（**不在首屏 `index`**）；tree-shaking 确认 = 子集 **1254kB** vs 全量 echarts **1791kB**（受控实验，剔除 **~537kB raw / ~174kB gzip**） |
-| **V-S1-7** | 视觉冒烟 | 手动 / Playwright（stack 起则跑，否则**显式标 not-run**） | **⏸ NOT-RUN（2026-05-27，无 stack）** — 待 dev server 起后人工核对：dashboard 5 类面板渲染一致、横向 bar 生效、resize 重排、切换/卸载无 console error、无 canvas 泄漏 |
+| **V-S1-7** | 视觉冒烟 | 手动 / Playwright（前端-only vite :8899 + sample data，无需 backend/Docker） | **✅ RAN + PASS（2026-05-28）** — 真浏览器渲染逐条核对：bar/line/pie 真 canvas 有绘制内容（`getImageData` 非空像素，实测彩色占比 bar 27% / line 24% / pie 5% / 横向 bar 29%）；**横向 bar** 生效（x/y 轴交换可视）；**resize 重排** canvas 1388→668 宽随容器回流；**pie HTML legend** 随 `showLegend` live 切换（关→`data-legend` 消失）；**number/table** 仍 HTML（无 canvas）；切换/卸载仅 favicon-404 一条 console err（无 chart 报错）；卸载无泄漏（dispose 由 V-S1-4 单测锁）。tooltip 已配置（hover 未自动化）。**截图**：MCP capture-timeout（canvas 重页）→ 改由 DOM + canvas 像素 + reflow 实证替代 |
 | **V-S1-8** | 质量门 | `pnpm validate:all` | validate:plugins + lint + type-check 全绿；**production code 无 `any`**（测试局部 any 例外）；i18n 走既有模块无新模块 |
 
-**Slice 1 = shipped via #1950（historical snapshot）**：V-S1-1..6/8 ✅；**V-S1-7 视觉冒烟仍 outstanding（NOT-RUN，待 stack 人工核对）** —— 唯一 post-merge 未做项，非阻塞门。
+**Slice 1 = shipped via #1950（historical snapshot）**：V-S1-1..8 ✅；**V-S1-7 视觉冒烟 RAN + PASS（2026-05-28，前端-only 真浏览器渲染）** —— #1950 最后一项非代码验证已闭环，无 outstanding。
 
 ---
 
@@ -64,7 +64,7 @@
 
 ## 验收执行顺序
 
-1. ✅ **Slice 1** — done（#1950；V-S1-7 视觉冒烟 NOT-RUN，待 stack 人工核对）。
+1. ✅ **Slice 1** — done（#1950；V-S1-7 视觉冒烟 RAN + PASS 2026-05-28，前端-only 真浏览器渲染）。
 2. ✅ **A2b** — done（#1958，defensive；V-A2b-3 → NOT-APPLICABLE）。
 3. **Slice 2** 待 **C0 决策** 后执行（唯一未决）。
 
