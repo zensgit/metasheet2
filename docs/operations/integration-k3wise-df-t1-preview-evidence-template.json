@@ -1,0 +1,43 @@
+{
+  "_instructions": [
+    "DF-T1 no-write preview evidence template (#1792). Copy this OFF Git, fill the real",
+    "customer values on the entity machine, then POST to /api/integration/templates/preview.",
+    "NO-WRITE only — this does not Save. Do NOT commit real FNumber/FName/reference codes,",
+    "customer host, or token. Leave any value you cannot fill as its <...> placeholder;",
+    "DF-T1 fail-closes on unfilled placeholders. Acceptance bar is in the companion runbook",
+    "integration-k3wise-df-t1-preview-evidence-runbook-20260527.md. This _instructions key is",
+    "a sibling of sourceRecord/payloadTemplate and is ignored by the preview; sourceRecord and",
+    "payloadTemplate below contain ONLY real fields (no annotation keys) so nothing pollutes",
+    "the composed payload. SCOPE (proven clone-Save path, NOT a general K3 authoring UI):",
+    "payloadTemplate MUST be a sanitized Material/GetDetail clone — the object-preservation path",
+    "already proven at the GATE — not a hand-built object. fieldRules v1 REPLACES ONLY the",
+    "identity fields FNumber/FName (from_staging); every reference object stays preserve_template",
+    "+ completeness (FNumber/FName or FID/FName). Do NOT author reference fields one-by-one. Fill",
+    "materialCode/materialName from a staging row. The reference fields below are ILLUSTRATIVE:",
+    "substitute the whole payloadTemplate with your sanitized clone (it usually carries more",
+    "objects, e.g. org/stock fields), keeping each object's shape and a <...> placeholder for",
+    "anything you cannot fill; mirror each new required reference field with a preserve_template",
+    "fieldRule."
+  ],
+  "bodyKey": "Data",
+  "sourceRecord": {
+    "materialCode": "<staging-material-code>",
+    "materialName": "<staging-material-name>"
+  },
+  "payloadTemplate": {
+    "FUnitGroupID": { "FNumber": "<unit-group-number>", "FName": "<unit-group-name>" },
+    "FUnitID": { "FNumber": "<unit-number>", "FName": "<unit-name>" },
+    "FBaseUnitID": { "FNumber": "<base-unit-number>", "FName": "<base-unit-name>" },
+    "FErpClsID": { "FID": "<erp-cls-id>", "FName": "<erp-cls-name>" },
+    "FUseState": { "FID": "<use-state-id>", "FName": "<use-state-name>" }
+  },
+  "fieldRules": [
+    { "targetField": "FNumber", "sourceType": "from_staging", "sourceField": "materialCode", "required": true, "shape": "scalar" },
+    { "targetField": "FName", "sourceType": "from_staging", "sourceField": "materialName", "required": true, "shape": "scalar" },
+    { "targetField": "FUnitGroupID", "sourceType": "preserve_template", "required": true, "completeness": "require-fnumber-fname" },
+    { "targetField": "FUnitID", "sourceType": "preserve_template", "required": true, "completeness": "require-fnumber-fname" },
+    { "targetField": "FBaseUnitID", "sourceType": "preserve_template", "required": true, "completeness": "require-fnumber-fname" },
+    { "targetField": "FErpClsID", "sourceType": "preserve_template", "required": true, "completeness": "require-fid-fname" },
+    { "targetField": "FUseState", "sourceType": "preserve_template", "required": true, "completeness": "require-fid-fname" }
+  ]
+}
