@@ -1,5 +1,12 @@
 # Multitable Automation 运行治理开发计划（development MD · v2 · 2026-05-27）
 
+> **Closeout update · 2026-05-28**：治理半已在 `origin/main` 闭环到 A3 + admin nav。落地链路：
+> A0 scope gate / two-gate doctrine (#1932) → A1 execution snapshot + before-persist redaction (#1937) →
+> A2 read-only runs API + C1 boundary mapping + admin-only gate (#1967 + #1973) →
+> A3 admin runs view + navigation entry (#1975 + #1983). `#1917` 另补 dead-letter error secret scrub。
+> 能力半未完成也未启动：A4 retry scope-gate 等显式需求；A5 retry runtime gated；A6 convergence-engine runtime
+> frozen / demand-gated.
+>
 > **v2 定位**：在原“运行治理”线（A0–A5）基础上，折入复审敲定的修订，使本线**不偏科**且实现阶段不踩契约坑。
 > v2 相对 v1 的实质变更（复审 Blocking/High 全部采纳）：
 > 1. **Blocking 1**：steps 存储完全不动，C1 `WorkflowJob` 视图在 **A2 读边界**用 `toWorkflowJobView()` 合成（不持久化任何 job 子对象，不爬入冻结的 persistent-jobs 轨）。
