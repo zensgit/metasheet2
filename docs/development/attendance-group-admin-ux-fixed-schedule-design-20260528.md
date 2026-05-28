@@ -23,7 +23,7 @@ This document locks that future path without starting implementation. It does no
 
 ## 3. Current Production Baseline
 
-All code citations were verified on `origin/main` at `bca657bb1`.
+All code citations were verified on `origin/main` at `4a7485dce`.
 
 | Area | Current state | Evidence |
 | --- | --- | --- |
@@ -69,7 +69,7 @@ The future runtime implementation must stay inside these boundaries unless a lat
 7. No group-specific punch method, Wi-Fi, location, hardware, photo, face, owner, sub-owner, export, copy, field-work, rest-day punch, makeup, comprehensive-hours cap, or reporting snapshot writes.
 8. No implicit schedule inference from group name, group code, timezone, member labels, or prior assignments.
 9. No frontend loop that posts one assignment per visible row without a complete conflict preview and all-member target resolution.
-10. No partial-success write by default. If any target conflicts, V1 fails closed before writing.
+10. No writes when any target has an unresolved blocking conflict. Already-satisfied targets may be skipped, and missing targets may still be created in the same apply run.
 
 This design document itself is docs-only and does not authorize the write path. The implementation is a separate explicit opt-in because it reopens scheduling writes.
 
@@ -79,8 +79,8 @@ The runtime PR should use group-scoped producer routes rather than a frontend lo
 
 | Route | Verb | Behavior |
 | --- | --- | --- |
-| `/api/attendance/groups/:id/fixed-schedule/preview` | `POST` | Read-only. Resolve group, shift, complete member target set, date window, and conflicts. Return the would-create rows. |
-| `/api/attendance/groups/:id/fixed-schedule/apply` | `POST` | Write. Re-run the same validation and conflict check inside a transaction; create rows only when the preview is still clean. |
+| `/api/attendance/groups/:id/fixed-schedule/preview` | `POST` | Read-only. Resolve group, shift, complete member target set, date window, already-satisfied skips, and blocking conflicts. Return the would-create rows. |
+| `/api/attendance/groups/:id/fixed-schedule/apply` | `POST` | Write. Re-run the same validation and conflict check inside a transaction; create rows only when no blocking conflict remains. Already-satisfied targets are skipped, not errors. |
 
 Payload:
 
@@ -103,9 +103,10 @@ Response fields should include:
 | `target.userIds` | User IDs targeted by the run, or a bounded sample plus total if the response would be too large. |
 | `wouldCreate[]` | Candidate assignment rows in preview. |
 | `created[]` | Created assignment rows in apply. |
-| `conflicts[]` | Per-user conflict details from the same conflict semantics as normal assignment save. |
+| `skipped[]` | Per-user rows that are already satisfied by an active exact-match assignment. |
+| `blockingConflicts[]` | Per-user overlap details that do not match the requested shift/window and therefore block the apply. |
 
-Route names may be adjusted during implementation, but the preview/apply separation, group-scoped target resolution, conflict semantics, and fail-closed write policy are not optional.
+Route names may be adjusted during implementation, but the preview/apply separation, group-scoped target resolution, skip-vs-conflict semantics, and fail-closed-on-blocking-conflict write policy are not optional.
 
 ## 7. Member Target Resolution
 
@@ -122,20 +123,23 @@ Member labels are not inputs. `userId` remains the only identity and assignment 
 
 ## 8. Conflict And Idempotency Policy
 
-V1 should use the existing assignment conflict semantics as the source of truth:
+V1 should use the existing assignment overlap semantics as the source of truth, but classify overlaps before deciding whether to block:
 
-- active overlapping shift assignment for the same user: conflict;
-- active overlapping rotation assignment for the same user: conflict;
+- active exact-match shift assignment for the same user, same `shiftId`, same `startDate`, and same normalized `endDate`: `skip` / already satisfied;
+- active overlapping shift assignment for the same user with a different shift or different window: blocking conflict;
+- active overlapping rotation assignment for the same user: blocking conflict;
 - inactive existing assignment: not a conflict for V1 unless the runtime PR deliberately opts into handling it;
-- exact rerun of the same group/shift/window: should not create duplicates, because existing active rows overlap and the run returns conflicts/skips.
+- exact rerun of the same group/shift/window: return `skipped[]` for already-satisfied members and create rows only for newly added members that are missing the assignment.
+
+`skip + create` is allowed and is not considered partial success. It is the idempotent full application of the requested group/shift/window over the current target set. A run becomes fail-closed only when `blockingConflicts[]` is non-empty; in that case, apply writes zero rows.
 
 Because the current `attendance_shift_assignments` schema has no producer/source marker, V1 must not promise managed-row rebuild/delete semantics. It can promise safety:
 
 1. preview before write;
-2. no partial writes when conflicts exist;
+2. no writes when unresolved blocking conflicts exist;
 3. no silent overwrite of manual assignments;
 4. no duplicate assignment creation on rerun;
-5. clear result summary for target count, conflicts, and created count.
+5. clear result summary for target count, skipped count, blocking conflict count, and created count.
 
 If a future product decision needs "reapply this group schedule and replace prior generated rows", that is a separate producer-metadata design and may require a migration.
 
@@ -150,7 +154,7 @@ When fixed-schedule runtime is explicitly opted in, the UI may add a Work time p
 - required start/end date fields;
 - preview button;
 - conflict/result panel;
-- apply button enabled only after a clean preview;
+- apply button enabled only after a preview with zero blocking conflicts;
 - link to Shifts for editing shift definitions;
 - link to Assignments for inspecting created rows.
 
@@ -161,7 +165,7 @@ Copy should be direct:
 - "Assign this shift to current group members for a date range."
 - "Preview conflicts before applying."
 - "Assignments are written as per-user shift assignments."
-- "Members added after this run are not automatically scheduled; run again for the new window or members."
+- "Members added after this run are not automatically scheduled; run again for the same window to skip already-scheduled members and create rows for new members."
 
 ## 10. Proposed Implementation Slices
 
@@ -182,11 +186,11 @@ Do not combine FS-B and FS-C unless the implementation stays small and the tests
 | FS2 | Preview rejects unsaved/missing group, missing shift, invalid date range, empty group, and partial member enumeration. | Backend unit/integration plus frontend state test. |
 | FS3 | Preview enumerates all group members, not only the first loaded UI page. | Backend test with more than one page of members. |
 | FS4 | Preview payload and apply payload use `userId` only; labels never participate in identity or writes. | Frontend/backend request assertion. |
-| FS5 | Preview reports existing shift-assignment overlap and rotation-assignment overlap using existing conflict semantics. | Backend test around the conflict helper or route-level mock DB. |
-| FS6 | Apply re-runs validation in a transaction and writes zero rows when any conflict is present. | Backend integration or route-level transaction test. |
-| FS7 | Clean apply creates one active `attendance_shift_assignments` row per target member with selected `shiftId`, `startDate`, `endDate`, and `isActive=true`. | Backend integration test. |
+| FS5 | Preview classifies exact-match active shift assignment as `skipped[]`, and different active shift/rotation overlaps as `blockingConflicts[]`. | Backend test around the conflict helper or route-level mock DB. |
+| FS6 | Apply re-runs validation in a transaction and writes zero rows when any blocking conflict is present. | Backend integration or route-level transaction test. |
+| FS7 | Clean apply creates one active `attendance_shift_assignments` row per missing target member with selected `shiftId`, `startDate`, `endDate`, and `isActive=true`, while returning already-satisfied targets as skipped. | Backend integration test. |
 | FS8 | Effective-calendar for a target user/date resolves the created shift assignment. | Backend route/integration test against `GET /api/attendance/effective-calendar`. |
-| FS9 | Rerun of the same group/shift/window does not create duplicate rows. | Backend test: first apply creates, second apply returns conflict/skip and count is unchanged. |
+| FS9 | Rerun of the same group/shift/window does not create duplicate rows and can schedule newly added members. | Backend test: first apply creates, second apply skips existing rows; after adding a new member, rerun creates only that member. |
 | FS10 | UI apply button is disabled until a clean preview is available; failed apply keeps form values. | Frontend regression test. |
 | FS11 | No `attendance_schedule_groups` read/write is introduced for this feature. | Source grep / reviewer diff check. |
 | FS12 | No weekly matrix, punch-method, owner/sub-owner, export/copy, comprehensive-hours write, migration, or reporting diff is introduced. | Reviewer diff check. |
@@ -215,6 +219,6 @@ This design is complete when:
 - it defines fixed schedule V1 as group + shift + explicit date window -> per-user shift assignments;
 - it forbids a new group schedule fact and `attendance_schedule_groups` reuse;
 - it states that implementation reopens scheduling writes and therefore needs a separate opt-in;
-- it requires all-member target resolution, preview, conflict checks, and zero partial writes;
+- it requires all-member target resolution, preview, skip-vs-conflict checks, and zero writes when blocking conflicts exist;
 - it records a future test matrix that protects identity, conflicts, effective-calendar consumption, and boundary discipline;
 - it adds no runtime code, tests, schema, migrations, routes, permissions, OpenAPI, ops scripts, or production writes.
