@@ -32,6 +32,7 @@
             <router-link v-if="canManageUsers" to="/admin/roles" class="nav-link">{{ navLabels.roles }}</router-link>
             <router-link v-if="canManageUsers" to="/admin/permissions" class="nav-link">{{ navLabels.permissions }}</router-link>
             <router-link v-if="canManageUsers" to="/admin/audit" class="nav-link">{{ navLabels.adminAudit }}</router-link>
+            <router-link v-if="canManageUsers" to="/admin/automation-executions" class="nav-link">{{ navLabels.automationRuns }}</router-link>
             <router-link v-if="canManageUsers" to="/approvals/metrics" class="nav-link">{{ navLabels.approvalMetrics }}</router-link>
             <router-link v-if="canUseIntegration" to="/integrations/workbench" class="nav-link">{{ navLabels.systemIntegration }}</router-link>
             <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
@@ -124,6 +125,7 @@ const navLabels = computed(() => {
       roles: '角色',
       permissions: '权限',
       adminAudit: '管理审计',
+      automationRuns: '自动化运行',
       approvalMetrics: '审批 SLA',
       systemIntegration: '数据工厂',
       plugins: '插件',
@@ -145,6 +147,7 @@ const navLabels = computed(() => {
     roles: 'Roles',
     permissions: 'Permissions',
     adminAudit: 'Admin Audit',
+    automationRuns: 'Automation Runs',
     approvalMetrics: 'Approval SLA',
     systemIntegration: 'Data Factory',
     plugins: 'Plugins',
