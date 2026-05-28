@@ -39,7 +39,7 @@ Per the confirmed 阶段二 direction (#1838) and DF-N phasing (#1839), the foll
 
 ## References
 
-- IA / 5-stage flow: `data-factory-user-flow-ia-design-20260526.md` (#1844) · direction & gating: `data-factory-hub-direction-20260525.md` (#1838) · run/provenance + DF-N phasing: `data-factory-nifi-inspired-run-provenance-design-20260526.md` (#1839).
-- DF-N1: `data-factory-df-n1-run-monitoring-ui-{design,verification}-20260526.md` (#1848).
-- DF-N1.5: `data-factory-df-n1_5-deadletter-replay-{design,verification}-20260526.md` (#1857).
+- IA / 5-stage flow: `docs/development/data-factory-user-flow-ia-design-20260526.md` (#1844) · direction & gating: `docs/research/data-factory-hub-direction-20260525.md` (#1838) · run/provenance + DF-N phasing: `docs/development/data-factory-nifi-inspired-run-provenance-design-20260526.md` (#1839).
+- DF-N1: `docs/development/data-factory-df-n1-run-monitoring-ui-{design,verification}-20260526.md` (#1848).
+- DF-N1.5: `docs/development/data-factory-df-n1_5-deadletter-replay-{design,verification}-20260526.md` (#1857).
 - Backend (unchanged, surfaced here): `plugins/plugin-integration-core/lib/pipeline-runner.cjs` (`replayDeadLetter`) · `lib/http-routes.cjs` (`runsList` / `deadLettersList` / `deadLettersReplay`).
