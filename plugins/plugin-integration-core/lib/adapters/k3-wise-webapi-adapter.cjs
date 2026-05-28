@@ -27,6 +27,10 @@ const {
 } = require('./k3-wise-document-templates.cjs')
 const crypto = require('node:crypto')
 const { scrubSecretStringValue } = require('../payload-redaction.cjs')
+// DF-T1-0: single source of truth for Save-body composition, shared with the no-write
+// preview (http-routes.cjs). Placeholder detection (findUnfilledPlaceholders) is shared; the
+// Save path below owns the throw disposition, the preview owns the valid:false disposition.
+const { composeSchemaBody, findUnfilledPlaceholders, projectRecordForBody } = require('./k3-save-body-composer.cjs')
 
 class K3WiseWebApiAdapterError extends Error {
   constructor(message, details = {}) {
@@ -133,21 +137,7 @@ function isBlankValue(value) {
   return value === undefined || value === null || (typeof value === 'string' && value.trim() === '')
 }
 
-function normalizeReferenceIdentifier(field) {
-  const reference = field && isPlainObject(field.reference) ? field.reference : null
-  const identifier = firstDefined(
-    reference && reference.identifier,
-    reference && reference.identifierField,
-    reference && reference.key,
-  )
-  return typeof identifier === 'string' && identifier.trim() ? identifier.trim() : null
-}
-
-function applyReferenceShape(value, field) {
-  const identifier = normalizeReferenceIdentifier(field)
-  if (!identifier || isBlankValue(value) || isPlainObject(value)) return value
-  return { [identifier]: value }
-}
+// normalizeReferenceIdentifier + applyReferenceShape moved to k3-save-body-composer.cjs (DF-T1-0).
 
 function normalizeBusinessBoolean(value) {
   if (value === undefined || value === null || value === '') return null
@@ -467,43 +457,18 @@ function buildSaveBody(record, request, objectConfig) {
   if (typeof objectConfig.buildBody === 'function') {
     return objectConfig.buildBody(record, request)
   }
-  const bodyKey = objectConfig.bodyKey || 'Data'
-  const base = isPlainObject(objectConfig.bodyTemplate) ? cloneJson(objectConfig.bodyTemplate) : {}
-  const projected = projectRecordForBody(record, objectConfig)
-  base[bodyKey] = isPlainObject(base[bodyKey]) && isPlainObject(projected)
-    ? { ...base[bodyKey], ...projected }
-    : projected
-  return base
-}
-
-// A value that IS exactly a `<…>` token (template placeholder), not one that merely
-// contains angle brackets. Anchored so real values like "<M6>" specs are not over-matched
-// unless the whole value is a bare sentinel.
-const PLACEHOLDER_SENTINEL = /^<[^>]+>$/
-
-// Fail-closed: an unreplaced preset placeholder must never reach a K3 Save. Scan the
-// projected body recursively (reference shapes nest the placeholder one level down) and
-// reject BEFORE the HTTP call so a half-configured profile errors cleanly instead of
-// writing corrupt data to K3.
-function assertNoUnfilledPlaceholders(value, fieldPath) {
-  if (typeof value === 'string') {
-    if (PLACEHOLDER_SENTINEL.test(value.trim())) {
-      throw new AdapterValidationError(
-        `K3 WISE Save body has an unfilled placeholder at ${fieldPath}; supply the customer value before saving`,
-        { code: 'K3_WISE_PRESET_PLACEHOLDER_UNFILLED', field: fieldPath },
-      )
-    }
-    return
+  const body = composeSchemaBody(record, objectConfig)
+  // Fail-closed: an unreplaced preset placeholder must never reach a K3 Save. Detection is
+  // shared with the no-write preview (findUnfilledPlaceholders); the Save path rejects before
+  // the HTTP call so a half-configured profile errors cleanly instead of writing corrupt data.
+  const unfilled = findUnfilledPlaceholders(body)
+  if (unfilled.length > 0) {
+    throw new AdapterValidationError(
+      `K3 WISE Save body has an unfilled placeholder at ${unfilled[0]}; supply the customer value before saving`,
+      { code: 'K3_WISE_PRESET_PLACEHOLDER_UNFILLED', field: unfilled[0] },
+    )
   }
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => assertNoUnfilledPlaceholders(item, `${fieldPath}[${index}]`))
-    return
-  }
-  if (isPlainObject(value)) {
-    for (const [key, child] of Object.entries(value)) {
-      assertNoUnfilledPlaceholders(child, `${fieldPath}.${key}`)
-    }
-  }
+  return body
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -552,27 +517,8 @@ function buildRowSaveDiagnostic({ status, record, key, rawMessage, code }) {
   }
 }
 
-function projectRecordForBody(record, objectConfig) {
-  if (objectConfig.passThroughBody === true) return record
-  if (!isPlainObject(record)) return record
-  const schemaFields = Array.isArray(objectConfig.schema)
-    ? objectConfig.schema
-      .map((field) => field && field.name)
-      .filter((name) => typeof name === 'string' && name.trim().length > 0)
-    : []
-  if (schemaFields.length === 0) return record
-  const projected = {}
-  for (const field of objectConfig.schema) {
-    const fieldName = field && field.name
-    if (typeof fieldName !== 'string' || fieldName.trim().length === 0) continue
-    if (Object.prototype.hasOwnProperty.call(record, fieldName)) {
-      const value = applyReferenceShape(record[fieldName], field)
-      if (!isBlankValue(value)) projected[fieldName] = value
-    }
-  }
-  assertNoUnfilledPlaceholders(projected, 'Data')
-  return projected
-}
+// projectRecordForBody moved to k3-save-body-composer.cjs (DF-T1-0); imported above and
+// re-exported via __internals for tests.
 
 function normalizeStringList(value, field) {
   if (value === undefined || value === null || value === '') return []
