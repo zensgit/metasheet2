@@ -1313,7 +1313,7 @@ function renderMarkdown({
         } else if (apiReason === 'RATE_LIMITED') {
           lines.push('- Strict Gates: `apiSmoke` was rate-limited. Wait briefly and rerun; consider reviewing rate-limit settings if this is frequent.')
         } else if (apiReason === 'PRODUCT_MODE_MISMATCH') {
-          lines.push('- Strict Gates: `apiSmoke` product mode mismatch. Ensure `PRODUCT_MODE=attendance` and `/api/auth/me -> features.mode` matches, then rerun.')
+          lines.push('- Strict Gates: `apiSmoke` product mode mismatch. Align `EXPECT_PRODUCT_MODE` / `ATTENDANCE_EXPECT_PRODUCT_MODE` with production `/api/auth/me -> features.mode` (current shared prod uses `platform`; attendance-only deployments use `attendance`), then rerun.')
         } else if (apiReason === 'FEATURE_DISABLED') {
           lines.push('- Strict Gates: `apiSmoke` feature disabled. Ensure attendance plugin is enabled in the target environment, then rerun.')
         } else if (apiReason === 'ADMIN_API_MISSING') {
@@ -1384,7 +1384,7 @@ function renderMarkdown({
         if (pwReason === 'AUTH_FAILED') {
           lines.push('- Strict Gates: `playwrightProd` auth failed. Refresh the admin token and rerun.')
         } else if (pwReason === 'PRODUCT_MODE_MISMATCH') {
-          lines.push('- Strict Gates: `playwrightProd` product mode mismatch. Ensure `PRODUCT_MODE=attendance` and `/api/auth/me -> features.mode` matches, then rerun.')
+          lines.push('- Strict Gates: `playwrightProd` product mode mismatch. Align `EXPECT_PRODUCT_MODE` / `ATTENDANCE_EXPECT_PRODUCT_MODE` with production `/api/auth/me -> features.mode` (current shared prod uses `platform`; attendance-only deployments use `attendance`), then rerun.')
         } else if (pwReason === 'FEATURE_DISABLED') {
           lines.push('- Strict Gates: `playwrightProd` feature disabled. Ensure attendance plugin is enabled, then rerun.')
         } else if (pwReason === 'RATE_LIMITED') {
@@ -1408,7 +1408,7 @@ function renderMarkdown({
         if (pwReason === 'AUTH_FAILED') {
           lines.push('- Strict Gates: `playwrightDesktop` auth failed. Refresh the admin token and rerun.')
         } else if (pwReason === 'PRODUCT_MODE_MISMATCH') {
-          lines.push('- Strict Gates: `playwrightDesktop` product mode mismatch. Ensure `PRODUCT_MODE=attendance` and `/api/auth/me -> features.mode` matches, then rerun.')
+          lines.push('- Strict Gates: `playwrightDesktop` product mode mismatch. Align `EXPECT_PRODUCT_MODE` / `ATTENDANCE_EXPECT_PRODUCT_MODE` with production `/api/auth/me -> features.mode` (current shared prod uses `platform`; attendance-only deployments use `attendance`), then rerun.')
         } else if (pwReason === 'FEATURE_DISABLED') {
           lines.push('- Strict Gates: `playwrightDesktop` feature disabled. Ensure attendance plugin is enabled, then rerun.')
         } else if (pwReason === 'RATE_LIMITED') {
@@ -1432,7 +1432,7 @@ function renderMarkdown({
         if (pwReason === 'AUTH_FAILED') {
           lines.push('- Strict Gates: `playwrightMobile` auth failed. Refresh the admin token and rerun.')
         } else if (pwReason === 'PRODUCT_MODE_MISMATCH') {
-          lines.push('- Strict Gates: `playwrightMobile` product mode mismatch. Ensure `PRODUCT_MODE=attendance` and `/api/auth/me -> features.mode` matches, then rerun.')
+          lines.push('- Strict Gates: `playwrightMobile` product mode mismatch. Align `EXPECT_PRODUCT_MODE` / `ATTENDANCE_EXPECT_PRODUCT_MODE` with production `/api/auth/me -> features.mode` (current shared prod uses `platform`; attendance-only deployments use `attendance`), then rerun.')
         } else if (pwReason === 'FEATURE_DISABLED') {
           lines.push('- Strict Gates: `playwrightMobile` feature disabled. Ensure attendance plugin is enabled, then rerun.')
         } else if (pwReason === 'RATE_LIMITED') {
