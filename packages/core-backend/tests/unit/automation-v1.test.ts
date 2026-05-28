@@ -2010,6 +2010,72 @@ describe('AutomationLogService', () => {
     expect(typeof (inserted.steps as { toOperationNode?: unknown }).toOperationNode).toBe('function')
   })
 
+  it('record() scrubs the execution-level error and persists snapshot fields', async () => {
+    const exec = createExecution({
+      ruleId: 'r1',
+      error: 'send_webhook failed: Authorization Bearer leakme.tok.en123456',
+      sheetId: 'sheet_9',
+      finishedAt: '2026-05-27T10:00:00.000Z',
+      schemaVersion: 1,
+      triggerEvent: { recordId: 'rec1', data: { secret: 'access_token=SECRETXYZ' } },
+      ruleSnapshot: { id: 'r1', name: 'n', actions: [] } as unknown as AutomationRule,
+    })
+    _executeResults.push([])
+    await logService.record(exec)
+    const inserted = _valuesCalls.at(-1) as Record<string, unknown>
+
+    // error is a plain string channel — assert it is scrubbed at write directly.
+    expect(inserted.error).toContain('Bearer <redacted>')
+    expect(inserted.error).not.toContain('leakme.tok.en123456')
+    // snapshot scalar fields persisted as-is.
+    expect(inserted.sheet_id).toBe('sheet_9')
+    expect(inserted.finished_at).toBe('2026-05-27T10:00:00.000Z')
+    expect(inserted.schema_version).toBe(1)
+    // object channels are wrapped as jsonb RawBuilders (redacted before wrapping).
+    expect(typeof (inserted.trigger_event as { toOperationNode?: unknown }).toOperationNode).toBe('function')
+    expect(typeof (inserted.rule_snapshot as { toOperationNode?: unknown }).toOperationNode).toBe('function')
+  })
+
+  it('record() defaults schema_version and nulls absent snapshot fields', async () => {
+    const exec = createExecution({ ruleId: 'r1' })
+    delete (exec as Partial<AutomationExecution>).schemaVersion
+    _executeResults.push([])
+    await logService.record(exec)
+    const inserted = _valuesCalls.at(-1) as Record<string, unknown>
+
+    expect(inserted.schema_version).toBe(1)
+    expect(inserted.sheet_id).toBeNull()
+    expect(inserted.trigger_event).toBeNull()
+    expect(inserted.rule_snapshot).toBeNull()
+    expect(inserted.finished_at).toBeNull()
+  })
+
+  it('getByRule() maps snapshot columns and stays null-safe for legacy rows', async () => {
+    const row = {
+      id: 'axe_2',
+      rule_id: 'r1',
+      triggered_by: 'event',
+      triggered_at: new Date('2026-01-01'),
+      status: 'success',
+      steps: [],
+      error: null,
+      duration: 10,
+      created_at: new Date('2026-01-01'),
+      sheet_id: 'sheet_9',
+      trigger_event: { recordId: 'rec1' },
+      rule_snapshot: { id: 'r1' },
+      finished_at: new Date('2026-01-01T01:00:00Z'),
+      schema_version: 1,
+    }
+    _executeResults.push([row])
+    const [mapped] = await logService.getByRule('r1')
+    expect(mapped.sheetId).toBe('sheet_9')
+    expect(mapped.triggerEvent).toEqual({ recordId: 'rec1' })
+    expect(mapped.ruleSnapshot).toEqual({ id: 'r1' })
+    expect(mapped.finishedAt).toBe('2026-01-01T01:00:00.000Z')
+    expect(mapped.schemaVersion).toBe(1)
+  })
+
   it('getByRule() returns mapped executions', async () => {
     const row = {
       id: 'axe_1',
