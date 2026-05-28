@@ -1,5 +1,7 @@
 'use strict'
 
+const { normalizeProvenanceEvents } = require('./provenance-contracts.cjs')
+
 // Cap on the error_summary column so adapter errors that include full HTTP
 // response bodies or huge stack traces don't bloat the runs table. Long
 // summaries are truncated with a clear suffix so downstream tools can detect
@@ -84,6 +86,25 @@ function createRunLogger({ pipelineRegistry, clock = nowIso } = {}) {
     const normalizedMetrics = normalizeMetrics(metrics)
     const finishedAt = toIso(extra.finishedAt || clock())
     const durationMs = normalizedMetrics.durationMs ?? deriveDurationMs(run.startedAt, finishedAt)
+    // DF-N2-2b: normalize provenance events BEFORE persist. normalizeProvenanceEvents
+    // runs the shared payload redaction on each event's attrs (see
+    // provenance-contracts.normalizeAttrs → sanitizeIntegrationPayload) — this is the
+    // pre-storage scrub gate. Best-effort: a malformed event must never lose the run
+    // record, so a contract failure drops provenance for this run and surfaces a
+    // details.provenanceWarning instead of throwing.
+    let provenanceEvents
+    let provenanceWarning
+    if (Array.isArray(extra.provenanceEvents) && extra.provenanceEvents.length > 0) {
+      try {
+        provenanceEvents = normalizeProvenanceEvents(extra.provenanceEvents)
+      } catch (error) {
+        provenanceEvents = undefined
+        provenanceWarning = {
+          code: 'PROVENANCE_NORMALIZE_FAILED',
+          message: error && error.message ? error.message : String(error),
+        }
+      }
+    }
     return pipelineRegistry.updatePipelineRun({
       tenantId: run.tenantId,
       workspaceId: run.workspaceId,
@@ -96,9 +117,11 @@ function createRunLogger({ pipelineRegistry, clock = nowIso } = {}) {
       finishedAt,
       durationMs,
       errorSummary: sanitizeErrorSummary(extra.errorSummary),
+      ...(provenanceEvents !== undefined && { provenanceEvents }),
       details: {
         ...(run.details || {}),
         ...(extra.details || {}),
+        ...(provenanceWarning && { provenanceWarning }),
       },
     })
   }

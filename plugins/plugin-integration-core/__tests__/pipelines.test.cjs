@@ -372,6 +372,26 @@ async function main() {
   assert.equal(completedRun.durationMs, 1234)
   assert.ok(completedRun.finishedAt, 'terminal update sets finishedAt')
 
+  // --- 8b. DF-N2-2b: provenance_events array is serialized to the JSONB column ---
+  await registry.updatePipelineRun({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    id: 'id_4',
+    status: 'succeeded',
+    rowsWritten: 1,
+    provenanceEvents: [{ runId: 'id_4', rowId: 'k1', eventType: 'target_write_succeeded', at: '2026-04-24T00:00:00.000Z', attrs: {} }],
+  })
+  const provUpdate = db.calls.filter(call => call[0] === 'updateRow' && call[1] === 'integration_runs').pop()
+  assert.equal(
+    provUpdate[2].provenance_events,
+    '[{"runId":"id_4","rowId":"k1","eventType":"target_write_succeeded","at":"2026-04-24T00:00:00.000Z","attrs":{}}]',
+    'provenanceEvents array serialized to the provenance_events JSONB column',
+  )
+  // omitted from SET when not provided → migration 060 default '[]' is preserved (no overwrite)
+  await registry.updatePipelineRun({ tenantId: 'tenant_1', workspaceId: null, id: 'id_4', status: 'succeeded', rowsWritten: 1 })
+  const noProvUpdate = db.calls.filter(call => call[0] === 'updateRow' && call[1] === 'integration_runs').pop()
+  assert.equal('provenance_events' in noProvUpdate[2], false, 'provenance_events omitted from SET when absent')
+
   const runs = await registry.listPipelineRuns({ tenantId: 'tenant_1', workspaceId: null, pipelineId: 'id_1', status: 'succeeded' })
   assert.equal(runs.length, 1)
   assert.equal(runs[0].id, 'id_4')
