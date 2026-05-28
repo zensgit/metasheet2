@@ -476,6 +476,7 @@ export class DataSourceManager extends EventEmitter {
     data: Record<string, DbValue> | Record<string, DbValue>[]
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
+    adapter.assertWritable() // defense-in-depth: reject mutations on a read-only source
 
     if (!adapter.isConnected()) {
       await this.connectDataSource(dataSourceId)
@@ -491,6 +492,7 @@ export class DataSourceManager extends EventEmitter {
     where: Record<string, WhereValue>
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
+    adapter.assertWritable() // defense-in-depth: reject mutations on a read-only source
 
     if (!adapter.isConnected()) {
       await this.connectDataSource(dataSourceId)
@@ -505,6 +507,7 @@ export class DataSourceManager extends EventEmitter {
     where: Record<string, WhereValue>
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
+    adapter.assertWritable() // defense-in-depth: reject mutations on a read-only source
 
     if (!adapter.isConnected()) {
       await this.connectDataSource(dataSourceId)

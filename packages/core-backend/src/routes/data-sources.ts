@@ -32,7 +32,9 @@ const DataSourceCreateSchema = z.object({
   options: z.object({
     autoConnect: z.boolean().optional(),
     timeout: z.number().optional(),
-    retryAttempts: z.number().optional()
+    retryAttempts: z.number().optional(),
+    // Read-only is the default; set false to permit write SQL via /query.
+    readOnly: z.boolean().optional()
   }).optional(),
   credentials: z.object({
     username: z.string().optional(),
@@ -54,7 +56,9 @@ const DataSourceUpdateSchema = z.object({
   options: z.object({
     autoConnect: z.boolean().optional(),
     timeout: z.number().optional(),
-    retryAttempts: z.number().optional()
+    retryAttempts: z.number().optional(),
+    // Read-only is the default; set false to permit write SQL via /query.
+    readOnly: z.boolean().optional()
   }).optional(),
   poolConfig: z.object({
     min: z.number().min(0).optional(),
@@ -117,6 +121,23 @@ function resolveUserId(req: Request): string | undefined {
   if (!u) return undefined
   const raw = u.id ?? u.userId ?? u.sub
   return raw != null ? String(raw) : undefined
+}
+
+/**
+ * Conservative read-only SQL classifier for the raw /query path on read-only
+ * SQL sources. Allows a single statement starting with SELECT / WITH / EXPLAIN
+ * / SHOW; rejects multiple statements and SELECT ... INTO.
+ *
+ * Best-effort application-layer gate, NOT a sandbox: it does NOT catch
+ * data-modifying CTEs (e.g. WITH t AS (DELETE ... RETURNING) SELECT ...) and
+ * over-rejects a query led by a comment. The real read-only guarantee must
+ * come from connecting the data source with a read-only database account.
+ */
+export function isReadOnlySql(raw: string): boolean {
+  const sql = raw.trim().replace(/;\s*$/, '') // drop a single trailing semicolon
+  if (sql.includes(';')) return false // no multiple statements
+  if (/\binto\b/i.test(sql)) return false // reject SELECT ... INTO
+  return /^\s*(select|with|explain|show)\b/i.test(sql)
 }
 
 // Helper to sanitize config for response (remove credentials)
@@ -290,6 +311,10 @@ export function dataSourcesRouter(): Router {
       const newConfig: DataSourceConfig = {
         ...oldConfig,
         ...parse.data,
+        // Deep-merge nested config: a partial update (e.g. only options.timeout)
+        // must not wipe sibling keys like readOnly / autoConnect / poolConfig.
+        options: { ...oldConfig.options, ...parse.data.options },
+        poolConfig: { ...oldConfig.poolConfig, ...parse.data.poolConfig },
         id // Preserve original ID
       }
 
@@ -549,6 +574,25 @@ export function dataSourcesRouter(): Router {
       const manager = getManager()
       manager.assertAccess(req.params.id, resolveUserId(req))
       const { sql, params } = parse.data
+
+      // A-RO: enforce read-only at the raw query path. SQL sources get a
+      // SELECT-only classifier; non-SQL sources have the raw path disabled
+      // entirely when read-only (a SQL classifier doesn't apply to them).
+      const adapter = manager.getDataSource(req.params.id)
+      if (adapter.isReadOnly()) {
+        if (!adapter.isSqlDialect()) {
+          return res.status(403).json({
+            ok: false,
+            error: { code: 'READ_ONLY', message: 'Data source is read-only; the raw query endpoint is disabled for non-SQL sources' }
+          })
+        }
+        if (!isReadOnlySql(sql)) {
+          return res.status(403).json({
+            ok: false,
+            error: { code: 'READ_ONLY', message: 'Data source is read-only; only read-only SQL (SELECT/WITH/EXPLAIN/SHOW) is permitted' }
+          })
+        }
+      }
 
       const result = await manager.query(req.params.id, sql, params as (string | number | boolean | null | Date | Buffer)[])
 
