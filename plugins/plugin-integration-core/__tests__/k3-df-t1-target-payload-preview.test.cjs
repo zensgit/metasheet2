@@ -167,6 +167,9 @@ function testInputValidation() {
     { fieldRules: [{ targetField: 'F', completeness: 'evil' }] },
     { fieldRules: [{ sourceType: 'from_staging' }] }, // no targetField
     { fieldRules: 'nope' },
+    { payloadTemplate: null },
+    { payloadTemplate: [] },
+    { payloadTemplate: 'not-an-object' },
     { bodyKey: '__proto__' },     // P2-1: DF-T1 must not bypass the unsafe-key guard
     { bodyKey: 'badkey' },  // P2-1: control char rejected
   ]) {
