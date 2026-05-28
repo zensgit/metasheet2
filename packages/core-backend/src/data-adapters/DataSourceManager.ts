@@ -38,6 +38,9 @@ export class DataSourceManager extends EventEmitter {
   private adapters: Map<string, BaseDataAdapter> = new Map()
   private adapterTypes: Map<string, AdapterConstructor> = new Map()
   private connectionPool: Map<string, Promise<void>> = new Map()
+  // Per-source ownership for scope enforcement (A0.1). Owner is the enforced
+  // boundary this slice; workspace is stored for a future workspace-shared model.
+  private scopes: Map<string, { ownerId: string; workspaceId: string | null }> = new Map()
   private db?: Kysely<unknown>
   private initialized = false
 
@@ -84,6 +87,11 @@ export class DataSourceManager extends EventEmitter {
         try {
           const config = this.recordToConfig(record)
           await this.addDataSourceInternal(config, false) // Don't persist again
+          // Ownership lives on the DB record, not in config (recordToConfig strips it)
+          this.scopes.set(record.id, {
+            ownerId: record.owner_id,
+            workspaceId: record.workspace_id ?? null
+          })
 
           if (record.auto_connect) {
             await this.connectDataSource(config.id).catch((err) => {
@@ -170,7 +178,26 @@ export class DataSourceManager extends EventEmitter {
       await this.persistDataSource(config, ownerId, workspaceId)
     }
 
-    return this.addDataSourceInternal(config, false)
+    const adapter = await this.addDataSourceInternal(config, false)
+    this.scopes.set(config.id, { ownerId, workspaceId: workspaceId ?? null })
+    return adapter
+  }
+
+  /**
+   * Assert the requester owns this data source (A0.1 scope enforcement).
+   * Throws the same "not found" wording as getDataSource so callers return a
+   * uniform 404 — a non-owner must not learn that someone else's source exists.
+   */
+  assertAccess(id: string, ownerId: string | undefined): void {
+    const scope = this.scopes.get(id)
+    if (!this.adapters.has(id) || !scope || scope.ownerId !== ownerId) {
+      throw new Error(`Data source with id '${id}' not found`)
+    }
+  }
+
+  /** Stored ownership scope for a data source, if present. */
+  getScope(id: string): { ownerId: string; workspaceId: string | null } | undefined {
+    return this.scopes.get(id)
   }
 
   /**
@@ -288,6 +315,7 @@ export class DataSourceManager extends EventEmitter {
     adapter.removeAllListeners()
     this.adapters.delete(id)
     this.connectionPool.delete(id)
+    this.scopes.delete(id)
 
     // Soft delete from database (or hard delete if specified)
     if (this.db) {
@@ -523,7 +551,7 @@ export class DataSourceManager extends EventEmitter {
   }
 
   // Management methods
-  listDataSources(): Array<{
+  listDataSources(filter?: { ownerId?: string }): Array<{
     id: string
     name: string
     type: string
@@ -537,6 +565,13 @@ export class DataSourceManager extends EventEmitter {
     }> = []
 
     for (const [id, adapter] of this.adapters) {
+      // A0.1: when an owner filter is supplied, only that owner's sources are listed
+      if (filter?.ownerId !== undefined) {
+        const scope = this.scopes.get(id)
+        if (!scope || scope.ownerId !== filter.ownerId) {
+          continue
+        }
+      }
       sources.push({
         id,
         name: adapter.getName(),
@@ -599,6 +634,7 @@ export class DataSourceManager extends EventEmitter {
     this.adapters.clear()
     this.adapterTypes.clear()
     this.connectionPool.clear()
+    this.scopes.clear()
     this.removeAllListeners()
   }
 }

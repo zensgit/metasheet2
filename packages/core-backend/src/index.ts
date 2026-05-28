@@ -1903,6 +1903,16 @@ export class MetaSheetServer {
       this.logger.error('AutomationService initialization failed; continuing in degraded mode', e as Error)
     }
 
+    // Bind external data-source manager to DB and load persisted sources (A0)
+    try {
+      const { db: kyselyDbDataSources } = await import('./db/db')
+      const { initializeDataSourceManager } = await import('./routes/data-sources')
+      await initializeDataSourceManager(kyselyDbDataSources)
+      this.logger.info('DataSourceManager persistence initialized')
+    } catch (e) {
+      this.logger.error('DataSourceManager initialization failed; continuing in degraded mode', e as Error)
+    }
+
     try {
       await startDirectorySyncScheduler()
       this.logger.info('Directory sync scheduler initialized')
