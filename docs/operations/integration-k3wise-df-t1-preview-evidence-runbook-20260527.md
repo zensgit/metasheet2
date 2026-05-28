@@ -76,11 +76,13 @@ the **exact target payload** an operator would Save — replacing "blind Save at
    Fix the template/staging row and re-run. Do **not** proceed to a Save request until the bar
    is green.
 
-   > **Necessary but not sufficient for config-track evidence.** A green bar proves the
-   > template you passed composes correctly — it does **not** prove the *pipeline* will Save
-   > that body. To use this preview as #1792 config-track evidence, the template MUST be the
-   > persisted pipeline `bodyTemplate` and MUST pass the dry-run cross-check — see
-   > **Binding the preview to the pipeline** below.
+   > **Necessary but not sufficient for config-track evidence.** A green bar is an *early
+   > structural check* — it proves the template you passed composes cleanly, not that the
+   > *pipeline* will Save that body. The **pipeline dry-run cross-check is the authoritative
+   > equality gate.** To use this preview as #1792 config-track evidence, the preview's
+   > `payloadTemplate` must be the inner object of the persisted pipeline `bodyTemplate`
+   > (`bodyTemplate.Data`) **and** the dry-run cross-check must match — see **Binding the
+   > preview to the pipeline** below.
 
 ## Binding the preview to the pipeline (config-track evidence)
 
@@ -91,23 +93,88 @@ The 7-field bar above proves *composition* — but the DF-T1 preview composes fr
 root cause), the pipeline still emits only the few mapped fields and the row-level Save fails
 again. **A green preview on an ad-hoc clone is not acceptable as final evidence.**
 
-To make this preview decisive for the config track:
+To make this preview usable as config-track evidence — the preview is an early structural
+check; the dry-run cross-check is the authoritative gate:
 
 1. **Persist first.** Put the operator-reviewed full Material object into
    `config.objects.material.bodyTemplate` (the pipeline's actual Save base) **before** running
-   the preview. Do not rely on an ad-hoc clone for evidence.
-2. **Preview the persisted template.** Run the DF-T1 preview with `payloadTemplate` set to that
-   **same persisted `bodyTemplate`** — not a separate clone — so the preview reflects the
-   pipeline's real base.
-3. **Pipeline dry-run cross-check.** Run a pipeline dry-run and confirm the actual transformed
-   Save-body **field set == the previewed field set** (same field names and object shapes;
-   compare names / shape presence only, never values).
+   the preview — shaped as `{ "Data": { …full Material object… } }` (the whole-body shape the
+   adapter merges; field data lives under the `Data` body key). See *Persisting the
+   `bodyTemplate`* below. Do not rely on an ad-hoc clone for evidence.
+2. **Preview that template's inner object.** Run the DF-T1 preview with `payloadTemplate` set to
+   the **inner object of the persisted `bodyTemplate`** (`bodyTemplate.Data`) — not the whole
+   `bodyTemplate`, and not a separate clone. The preview adds the `Data` wrapper itself, so
+   passing the whole `{ "Data": {…} }` would double-wrap it.
+3. **Pipeline dry-run cross-check (authoritative).** The preview overlay (`fieldRules`) and the
+   pipeline overlay (schema projection) are different filters over the same record, so a green
+   preview does not *prove* equality — only this step does. Run a pipeline dry-run and compare
+   the **adapter-composed Save body** `preview.records[0].targetPayload.Data` against the DF-T1
+   preview's `payload.Data` — **field set == field set** (same field names and object shapes;
+   names / shape presence only, never values). Compare `targetPayload.Data`, **not**
+   `preview.records[0].transformed` (that is the cleaned staging record, not the Save body).
 
-**Config track is closed only when both hold:** the 7-field preview bar is all-green **and**
-the dry-run field-set cross-check matches. Either one alone is insufficient.
+**Config track is closed only when both hold:** the 7-field preview bar is all-green (early
+structural check) **and** the pipeline dry-run field-set cross-check matches (the authoritative
+equality gate). A green preview alone — even on a real clone — does not close it.
 
 Closing the config track here still **does not authorize a Save** — a Save-only attempt remains
 a separate, explicit approval request (see the end of this runbook).
+
+### Persisting the `bodyTemplate`
+
+The `bodyTemplate` lives in the external system's config blob. The upsert **overwrites the whole
+config** — a partial POST drops your existing keys (`profile`, `savePath`, `keyField`, …). So
+**GET → edit → POST back the whole config** — but mind the redaction trap below.
+
+> **⚠ GET returns a REDACTED projection — do not POST it back blindly.**
+> `GET …/external-systems/:id` runs `config` through the secret redactor: any secret-keyed field
+> (`password`, `token`, `apiKey`, `secret`, `clientSecret`, `authorization`, `cookie`,
+> `connectionString`, `jdbcUrl`, …) comes back as the literal string `[redacted]`. Because the
+> upsert overwrites the whole config, POSTing a GET-derived file back **clobbers those real values
+> with `[redacted]`** and breaks the system. (The raw values are kept server-side for the adapter;
+> the GET projection never exposes them.)
+
+1. **GET the current config** (on the entity machine) — this is the *redacted* view:
+
+   ```bash
+   curl -sS "$BASE/api/integration/external-systems/$SYSTEM_ID" \
+     -H "Authorization: Bearer $TOKEN" > external-system.json
+   ```
+
+2. **Edit locally** — add `bodyTemplate` under `config.objects.material`, keeping every existing
+   key. Field data goes under `Data`:
+
+   ```jsonc
+   // config.objects.material — keep existing keys, add bodyTemplate
+   {
+     "profile": "material-k3wise-customer-profile-v1",
+     "savePath": "…", "keyField": "FNumber",
+     "bodyTemplate": { "Data": { /* full reviewed Material object, real values */ } }
+   }
+   ```
+
+3. **HARD RULE — scan for `[redacted]` before POSTing.** Search the edited `config` for the string
+   `[redacted]`. If **any** `[redacted]` value exists anywhere under `config`, do **not** POST the
+   file as-is — restore the real value from the entity-machine secure config source first, **or**
+   use an on-box merge helper that patches `bodyTemplate` into the **raw** stored config (not the
+   redacted GET). POSTing while `[redacted]` is present overwrites a real secret with that literal
+   token.
+
+4. **POST it back** (the whole edited document — only after the scan is clean):
+
+   ```bash
+   curl -sS -X POST "$BASE/api/integration/external-systems" \
+     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     --data @external-system.json
+   ```
+
+5. **Verify the round-trip** — GET again and confirm `config.objects.material.bodyTemplate.Data`
+   is present with the expected field count. This distinguishes "didn't post" from "posted but
+   stripped".
+
+The `bodyTemplate` holds **real customer values** — it stays on the entity machine. **Never**
+POST it to GitHub or paste/attach the config blob on #1792; evidence stays counts-and-presence
+only.
 
 ## What to post on #1792 (sanitized only)
 
@@ -120,8 +187,8 @@ DF-T1 no-write preview evidence (package <tag>, profile material-k3wise-customer
 - unresolvedPlaceholders: 0 | unresolvedReferenceComponents: 0 | missingRequiredFields: 0
 - redactionSelfCheck.clean: true | compositionSource: k3-save-body-composer
 - fields composed: <count> (identity from staging; <count> reference objects preserved) — count fieldProvenance, do not paste it
-- previewed template = persisted config.objects.material.bodyTemplate: yes
-- pipeline dry-run field-set cross-check: matches (transformed Save-body field set == previewed field set)
+- previewed payloadTemplate = persisted config.objects.material.bodyTemplate.Data: yes
+- pipeline dry-run field-set cross-check: matches (`preview.records[0].targetPayload.Data` field set == previewed `payload.Data` field set)
 ```
 
 Do **not** paste `payload` / `targetRecord` / `bodyTemplate` / `fieldProvenance` values, raw

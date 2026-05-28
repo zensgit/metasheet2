@@ -18,9 +18,11 @@
     "objects, e.g. org/stock fields), keeping each object's shape and a <...> placeholder for",
     "anything you cannot fill; mirror each new required reference field with a preserve_template",
     "fieldRule. BINDING (#1792 config-track evidence): for FINAL evidence this payloadTemplate",
-    "MUST be the persisted config.objects.material.bodyTemplate (see runbook section 'Binding the",
-    "preview to the pipeline') — an ad-hoc clone is NOT acceptable as final evidence; a pipeline",
-    "dry-run must confirm the transformed Save-body field set == the previewed field set."
+    "MUST be the INNER object (bodyTemplate.Data) of the persisted config.objects.material.",
+    "bodyTemplate (see runbook section 'Binding the preview to the pipeline'); the preview adds",
+    "the Data wrapper itself. An ad-hoc clone is NOT acceptable; the pipeline dry-run cross-check",
+    "must compare preview.records[0].targetPayload.Data (adapter-composed Save body) against the",
+    "previewed payload.Data, NOT preview.records[0].transformed — that is the authoritative gate."
   ],
   "bodyKey": "Data",
   "sourceRecord": {
