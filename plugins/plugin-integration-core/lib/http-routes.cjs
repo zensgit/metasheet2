@@ -31,11 +31,13 @@ const ROUTES = [
   ['POST', '/api/integration/dead-letters/:id/replay', 'deadLettersReplay'],
 ]
 const { sanitizeIntegrationPayload, scrubSecretStringValue } = require('./payload-redaction.cjs')
-const { getPath, transformRecord } = require('./transform-engine.cjs')
-// DF-T1-0: compose the no-write preview through the SAME K3 Save-body composer the adapter
-// uses, so the preview is byte-identical to the real Save (single source of truth — replaces
-// the former divergent applyPreviewReferenceShape/projectRecordForTemplate copies).
-const { projectRecordForBody, findUnfilledPlaceholders } = require('./adapters/k3-save-body-composer.cjs')
+const { getPath, setPath, transformRecord } = require('./transform-engine.cjs')
+// DF-T1-0/DF-T1: compose the no-write preview through the SAME K3 Save-body composer the
+// adapter uses, so the preview is byte-identical to the real Save (single source of truth —
+// replaces the former divergent applyPreviewReferenceShape/projectRecordForTemplate copies).
+// DF-T1 reuses applyReferenceShape (shaping) + findUnfilledPlaceholders (detection); it does
+// NOT introduce a new K3 shaper/projector.
+const { projectRecordForBody, findUnfilledPlaceholders, applyReferenceShape, isBlankValue } = require('./adapters/k3-save-body-composer.cjs')
 const { validateRecord } = require('./validator.cjs')
 
 class HttpRouteError extends Error {
@@ -585,9 +587,149 @@ function schemaRequiredErrors(record, schema) {
 // moved to the shared K3 Save-body composer (DF-T1-0): the preview now composes
 // byte-identically to the adapter Save instead of via a divergent duplicate.
 
+// ---- DF-T1: target payload template preview (shape B — evidence under targetPayloadPreview) ----
+const DF_T1_SOURCE_TYPES = new Set(['from_staging', 'from_constant', 'preserve_template', 'from_reference_table'])
+const DF_T1_SHAPES = new Set(['scalar', 'object-passthrough', 'by-fnumber', 'by-fid'])
+const DF_T1_COMPLETENESS = new Set(['none', 'require-fnumber-fname', 'require-fid-fname'])
+
+function normalizeFieldRules(value) {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value)) {
+    throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', 'fieldRules must be an array', { field: 'fieldRules' })
+  }
+  return value.map((rule, index) => {
+    if (!isPlainObject(rule)) {
+      throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', `fieldRules[${index}] must be an object`, { field: `fieldRules[${index}]` })
+    }
+    const targetField = firstString(rule.targetField)
+    if (!targetField) {
+      throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', `fieldRules[${index}].targetField is required`, { field: `fieldRules[${index}].targetField` })
+    }
+    const sourceType = firstString(rule.sourceType) || 'from_staging'
+    if (!DF_T1_SOURCE_TYPES.has(sourceType)) {
+      throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', `fieldRules[${index}].sourceType is invalid`, { field: `fieldRules[${index}].sourceType` })
+    }
+    const shape = firstString(rule.shape) || 'scalar'
+    if (!DF_T1_SHAPES.has(shape)) {
+      throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', `fieldRules[${index}].shape is invalid`, { field: `fieldRules[${index}].shape` })
+    }
+    const completeness = firstString(rule.completeness) || 'none'
+    if (!DF_T1_COMPLETENESS.has(completeness)) {
+      throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', `fieldRules[${index}].completeness is invalid`, { field: `fieldRules[${index}].completeness` })
+    }
+    return {
+      targetField,
+      sourceType,
+      sourceField: firstString(rule.sourceField) || targetField,
+      value: rule.value,
+      shape,
+      completeness,
+      required: rule.required === true,
+    }
+  })
+}
+
+// Reuse the shared composer's reference shaping — never a new K3 shaper (DF-T1 req #3).
+function applyDfT1Shape(value, shape) {
+  if (shape === 'by-fnumber') return applyReferenceShape(value, { reference: { identifier: 'FNumber' } })
+  if (shape === 'by-fid') return applyReferenceShape(value, { reference: { identifier: 'FID' } })
+  return value // scalar / object-passthrough → as-is
+}
+
+function checkReferenceCompleteness(completeness, value) {
+  if (completeness === 'require-fnumber-fname') {
+    return isPlainObject(value) && !isBlankValue(value.FNumber) && !isBlankValue(value.FName) ? null : 'require-fnumber-fname'
+  }
+  if (completeness === 'require-fid-fname') {
+    return isPlainObject(value) && !isBlankValue(value.FID) && !isBlankValue(value.FName) ? null : 'require-fid-fname'
+  }
+  return null
+}
+
+function buildTargetPayloadPreview(input) {
+  if (!isPlainObject(input.sourceRecord)) {
+    throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', 'sourceRecord must be an object', { field: 'sourceRecord' })
+  }
+  const bodyKey = firstString(input.bodyKey)
+    || (isPlainObject(input.template) ? firstString(input.template.bodyKey) : null)
+    || 'Data'
+  const fieldRules = normalizeFieldRules(input.fieldRules)
+  // Preserve whole-object payloadTemplate defaults; rules replace only the declared fields.
+  const merged = cloneJson(input.payloadTemplate)
+  const fieldProvenance = {}
+  const missingRequiredFields = []
+  const unresolvedReferenceComponents = []
+  for (const rule of fieldRules) {
+    if (rule.sourceType === 'preserve_template') {
+      fieldProvenance[rule.targetField] = 'template'
+    } else {
+      let raw
+      if (rule.sourceType === 'from_staging') raw = getPath(input.sourceRecord, rule.sourceField)
+      else raw = rule.value // from_constant, or from_reference_table (v1 = pre-resolved scalar)
+      fieldProvenance[rule.targetField] = rule.sourceType === 'from_staging' ? 'staging'
+        : rule.sourceType === 'from_constant' ? 'constant' : 'reference_table'
+      const shaped = applyDfT1Shape(raw, rule.shape)
+      if (isBlankValue(shaped)) {
+        if (rule.required) missingRequiredFields.push(rule.targetField)
+        // leave the template default in place; if it is a placeholder, fail-closed catches it.
+      } else {
+        setPath(merged, rule.targetField, shaped)
+      }
+    }
+    const finalValue = getPath(merged, rule.targetField)
+    if (rule.required && isBlankValue(finalValue) && !missingRequiredFields.includes(rule.targetField)) {
+      missingRequiredFields.push(rule.targetField)
+    }
+    const incomplete = checkReferenceCompleteness(rule.completeness, finalValue)
+    if (incomplete) unresolvedReferenceComponents.push({ field: rule.targetField, rule: incomplete })
+  }
+
+  const payload = { [bodyKey]: cloneJson(merged) }
+  // Same placeholder DETECTION + CODE as the Save path (shared composer findUnfilledPlaceholders).
+  const placeholderErrors = findUnfilledPlaceholders(payload).map((path) => ({
+    field: path,
+    code: 'K3_WISE_PRESET_PLACEHOLDER_UNFILLED',
+    message: `unfilled template placeholder at ${path}`,
+  }))
+  const errors = [
+    ...placeholderErrors,
+    ...missingRequiredFields.map((field) => ({ field, code: 'REQUIRED', message: `${field} is required` })),
+    ...unresolvedReferenceComponents.map((u) => ({ field: u.field, code: 'INCOMPLETE_REFERENCE', message: `${u.field} requires ${u.rule}` })),
+  ].map((e) => cloneJson(e))
+
+  const response = sanitizeIntegrationPayload({
+    valid: errors.length === 0,
+    payload,
+    targetRecord: cloneJson(merged),
+    errors,
+    placeholderErrors: placeholderErrors.map((e) => cloneJson(e)),
+    targetPayloadPreview: {
+      eligibleForSaveOnly: errors.length === 0,
+      unresolvedPlaceholders: placeholderErrors.map((e) => e.field),
+      unresolvedReferenceComponents: cloneJson(unresolvedReferenceComponents),
+      missingRequiredFields: cloneJson(missingRequiredFields),
+      fieldProvenance: cloneJson(fieldProvenance),
+      compositionSource: 'k3-save-body-composer',
+    },
+  })
+  // Redaction self-check: no secret-shaped value survived the sanitizer (DF-T1 req #4).
+  const serialized = JSON.stringify(response)
+  response.targetPayloadPreview.redactionSelfCheck = {
+    applied: true,
+    clean: serialized === scrubSecretStringValue(serialized),
+  }
+  return response
+}
+
 function buildTemplatePreview(input) {
   if (!isPlainObject(input)) {
     throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', 'input must be an object')
+  }
+  // DF-T1: target payload template mode (payloadTemplate + fieldRules). DF-T1 evidence is
+  // namespaced under `targetPayloadPreview`; the legacy fieldMappings/schema preview is unchanged
+  // and never carries that field (DF-T1 req #1, #2).
+  if (isPlainObject(input.payloadTemplate)) {
+    return buildTargetPayloadPreview(input)
   }
   if (!isPlainObject(input.sourceRecord)) {
     throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', 'sourceRecord must be an object', { field: 'sourceRecord' })
