@@ -118,4 +118,33 @@ describe('AutomationExecutionsView (A3 admin runs view)', () => {
     await settle()
     expect(client.listAutomationRuns).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'failed' }))
   })
+
+  it('drops a STALE detail response when a newer run is expanded (out-of-order race)', async () => {
+    const runA = { ...RUN_LIST, id: 'axe_A' }
+    const runB = { ...RUN_LIST, id: 'axe_B' }
+    const detailA = { ...RUN_DETAIL, id: 'axe_A', triggerEvent: { recordId: 'recA' } }
+    const detailB = { ...RUN_DETAIL, id: 'axe_B', triggerEvent: { recordId: 'recB' } }
+    const resolvers: Record<string, (v: AutomationRunView) => void> = {}
+    const client = makeClient({
+      listAutomationRuns: vi.fn().mockResolvedValue([runA, runB]),
+      getAutomationRun: vi.fn(
+        (id: string) => new Promise<AutomationRunView>((resolve) => { resolvers[id] = resolve }),
+      ),
+    })
+    mounted = mount(client)
+    await settle()
+    // Expand A, then B before A's detail resolves (both fetches now in flight).
+    ;(mounted.container.querySelector('[data-run-id="axe_A"]') as HTMLElement).click()
+    await nextTick()
+    ;(mounted.container.querySelector('[data-run-id="axe_B"]') as HTMLElement).click()
+    await nextTick()
+    // Resolve B (the current row) first, then A (now stale) LAST — out of order.
+    resolvers['axe_B'](detailB)
+    resolvers['axe_A'](detailA)
+    await settle()
+    // Detail must reflect B (current), never the stale A response that resolved last.
+    const trigger = mounted.container.querySelector('[data-field="trigger-event"]')?.textContent ?? ''
+    expect(trigger).toContain('recB')
+    expect(trigger).not.toContain('recA')
+  })
 })

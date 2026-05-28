@@ -97,7 +97,7 @@ import { useAuth } from '../composables/useAuth'
 import { multitableClient, type MultitableApiClient } from '../multitable/api/client'
 import type { AutomationRunView, WorkflowJobStatus } from '../multitable/types'
 import { automationLabel, automationStatusLabel } from '../multitable/utils/meta-automation-labels'
-import { redactString, summarizeStepError, summarizeStepOutput } from '../multitable/utils/automation-log-redact'
+import { redactString, redactValue, summarizeStepError, summarizeStepOutput } from '../multitable/utils/automation-log-redact'
 
 const props = defineProps<{ client?: MultitableApiClient }>()
 const client = props.client ?? multitableClient
@@ -143,18 +143,26 @@ async function loadData() {
 async function toggleExpand(id: string) {
   if (expandedId.value === id) {
     expandedId.value = null
+    detail.value = null
     return
   }
   expandedId.value = id
   detail.value = null
   detailLoading.value = true
+  let run: AutomationRunView | null = null
   try {
-    detail.value = await client.getAutomationRun(id)
+    run = await client.getAutomationRun(id)
   } catch {
-    // Detail is best-effort; the row summary stays. Collapse silently.
-    detailLoading.value = false
-    expandedId.value = null
-    return
+    run = null
+  }
+  // Drop a STALE response: if a newer row was expanded while this fetch was in
+  // flight, expandedId has moved on — that newer flow owns the state, so this
+  // (older) response must not paint its detail under the wrong row.
+  if (expandedId.value !== id) return
+  if (run) {
+    detail.value = run
+  } else {
+    expandedId.value = null // detail failed for the still-current row → collapse
   }
   detailLoading.value = false
 }
@@ -167,11 +175,16 @@ function formatTime(ts: string): string {
   }
 }
 
-/** Render a redacted snapshot blob (A2 already scrubs at persist; this is defense-in-depth). */
+/**
+ * Render a redacted snapshot blob (A2 already scrubs at persist; this is
+ * defense-in-depth). Uses redactValue (not redactString) so the UI-side guard
+ * also masks structured secret keys (authorization/cookie/…), matching the
+ * step-output redaction path — not just in-string patterns.
+ */
 function jsonView(value: unknown): string {
   if (value === undefined || value === null) return '—'
   try {
-    return redactString(JSON.stringify(value, null, 2))
+    return JSON.stringify(redactValue(value), null, 2)
   } catch {
     return '—'
   }
