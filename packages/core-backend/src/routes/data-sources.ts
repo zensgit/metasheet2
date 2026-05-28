@@ -12,6 +12,7 @@
 
 import type { Request, Response } from 'express'
 import { Router } from 'express'
+import type { Kysely } from 'kysely'
 import { z } from 'zod'
 import { rbacGuard } from '../rbac/rbac'
 import { auditLog } from '../audit/audit'
@@ -94,6 +95,30 @@ export function getDataSourceManager(): DataSourceManager {
   return getManager()
 }
 
+/**
+ * Bind the shared DataSourceManager singleton to the database and load
+ * persisted sources (A0). Call once at startup; route handlers then see a
+ * db-backed manager via getManager().
+ */
+export async function initializeDataSourceManager<DB>(db: Kysely<DB>): Promise<DataSourceManager> {
+  const manager = getManager()
+  // DataSourceManager is schema-agnostic (Kysely<unknown>); erase the concrete
+  // Database schema type at this boundary (Kysely is invariant in its schema).
+  await manager.initialize(db as unknown as Kysely<unknown>)
+  return manager
+}
+
+/**
+ * Resolve the authenticated user id for ownership scoping (A0.1).
+ * Precedence matches correlation.ts: id, then userId, then sub.
+ */
+function resolveUserId(req: Request): string | undefined {
+  const u = req.user
+  if (!u) return undefined
+  const raw = u.id ?? u.userId ?? u.sub
+  return raw != null ? String(raw) : undefined
+}
+
 // Helper to sanitize config for response (remove credentials)
 function sanitizeConfig(config: DataSourceConfig): Omit<DataSourceConfig, 'credentials'> & { hasCredentials: boolean } {
   const { credentials, ...rest } = config
@@ -110,10 +135,17 @@ export function dataSourcesRouter(): Router {
    * GET /api/data-sources
    * List all configured data sources
    */
-  router.get('/api/data-sources', rbacGuard('data_sources', 'read'), async (_req: Request, res: Response) => {
+  router.get('/api/data-sources', rbacGuard('data_sources', 'read'), async (req: Request, res: Response) => {
     try {
+      const userId = resolveUserId(req)
+      if (!userId) {
+        return res.status(401).json({
+          ok: false,
+          error: { code: 'UNAUTHENTICATED', message: 'Authentication required' }
+        })
+      }
       const manager = getManager()
-      const sources = manager.listDataSources()
+      const sources = manager.listDataSources({ ownerId: userId })
       return res.json({
         ok: true,
         data: {
@@ -139,6 +171,7 @@ export function dataSourcesRouter(): Router {
   router.get('/api/data-sources/:id', rbacGuard('data_sources', 'read'), async (req: Request, res: Response) => {
     try {
       const manager = getManager()
+      manager.assertAccess(req.params.id, resolveUserId(req))
       const adapter = manager.getDataSource(req.params.id)
       const config = adapter.getConfig()
 
@@ -183,9 +216,18 @@ export function dataSourcesRouter(): Router {
     }
 
     try {
+      const userId = resolveUserId(req)
+      if (!userId) {
+        return res.status(401).json({
+          ok: false,
+          error: { code: 'UNAUTHENTICATED', message: 'Authentication required' }
+        })
+      }
       const manager = getManager()
       const config = parse.data as DataSourceConfig
-      const adapter = await manager.addDataSource(config)
+      // A0.1: own the source; workspace_id stays null (no clean workspace
+      // context on req — workspace-shared access is a follow-up).
+      const adapter = await manager.addDataSource(config, { ownerId: userId })
 
       await auditLog({
         actorId: req.user?.id?.toString(),
@@ -239,13 +281,11 @@ export function dataSourcesRouter(): Router {
     try {
       const manager = getManager()
       const id = req.params.id
+      manager.assertAccess(id, resolveUserId(req))
 
-      // Get existing config
       const existing = manager.getDataSource(id)
       const oldConfig = existing.getConfig()
-
-      // Remove and re-add with updated config
-      await manager.removeDataSource(id)
+      const scope = manager.getScope(id)
 
       const newConfig: DataSourceConfig = {
         ...oldConfig,
@@ -253,7 +293,12 @@ export function dataSourcesRouter(): Router {
         id // Preserve original ID
       }
 
-      const adapter = await manager.addDataSource(newConfig)
+      // Atomic update: persists first, swaps the adapter only on success, and
+      // preserves ownership. A failed update leaves the original source intact.
+      const adapter = await manager.updateDataSource(id, newConfig, {
+        ownerId: scope?.ownerId ?? resolveUserId(req)!,
+        workspaceId: scope?.workspaceId ?? undefined
+      })
 
       await auditLog({
         actorId: req.user?.id?.toString(),
@@ -299,6 +344,7 @@ export function dataSourcesRouter(): Router {
     try {
       const manager = getManager()
       const id = req.params.id
+      manager.assertAccess(id, resolveUserId(req))
 
       // Get config before removal for audit
       const adapter = manager.getDataSource(id)
@@ -344,6 +390,7 @@ export function dataSourcesRouter(): Router {
     try {
       const manager = getManager()
       const id = req.params.id
+      manager.assertAccess(id, resolveUserId(req))
 
       await manager.connectDataSource(id)
       const adapter = manager.getDataSource(id)
@@ -380,6 +427,7 @@ export function dataSourcesRouter(): Router {
     try {
       const manager = getManager()
       const id = req.params.id
+      manager.assertAccess(id, resolveUserId(req))
 
       await manager.disconnectDataSource(id)
 
@@ -412,6 +460,7 @@ export function dataSourcesRouter(): Router {
     try {
       const manager = getManager()
       const id = req.params.id
+      manager.assertAccess(id, resolveUserId(req))
       const startTime = Date.now()
 
       const success = await manager.testConnection(id)
@@ -498,6 +547,7 @@ export function dataSourcesRouter(): Router {
 
     try {
       const manager = getManager()
+      manager.assertAccess(req.params.id, resolveUserId(req))
       const { sql, params } = parse.data
 
       const result = await manager.query(req.params.id, sql, params as (string | number | boolean | null | Date | Buffer)[])
@@ -550,6 +600,7 @@ export function dataSourcesRouter(): Router {
 
     try {
       const manager = getManager()
+      manager.assertAccess(req.params.id, resolveUserId(req))
       const { table, ...options } = parse.data
 
       // Cast options to proper QueryOptions type
@@ -583,6 +634,7 @@ export function dataSourcesRouter(): Router {
   router.get('/api/data-sources/:id/schema', rbacGuard('data_sources', 'read'), async (req: Request, res: Response) => {
     try {
       const manager = getManager()
+      manager.assertAccess(req.params.id, resolveUserId(req))
       const adapter = manager.getDataSource(req.params.id)
 
       if (!adapter.isConnected()) {
@@ -619,6 +671,7 @@ export function dataSourcesRouter(): Router {
   router.get('/api/data-sources/:id/tables/:table', rbacGuard('data_sources', 'read'), async (req: Request, res: Response) => {
     try {
       const manager = getManager()
+      manager.assertAccess(req.params.id, resolveUserId(req))
       const adapter = manager.getDataSource(req.params.id)
 
       if (!adapter.isConnected()) {

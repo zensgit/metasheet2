@@ -38,6 +38,9 @@ export class DataSourceManager extends EventEmitter {
   private adapters: Map<string, BaseDataAdapter> = new Map()
   private adapterTypes: Map<string, AdapterConstructor> = new Map()
   private connectionPool: Map<string, Promise<void>> = new Map()
+  // Per-source ownership for scope enforcement (A0.1). Owner is the enforced
+  // boundary this slice; workspace is stored for a future workspace-shared model.
+  private scopes: Map<string, { ownerId: string; workspaceId: string | null }> = new Map()
   private db?: Kysely<unknown>
   private initialized = false
 
@@ -84,6 +87,11 @@ export class DataSourceManager extends EventEmitter {
         try {
           const config = this.recordToConfig(record)
           await this.addDataSourceInternal(config, false) // Don't persist again
+          // Ownership lives on the DB record, not in config (recordToConfig strips it)
+          this.scopes.set(record.id, {
+            ownerId: record.owner_id,
+            workspaceId: record.workspace_id ?? null
+          })
 
           if (record.auto_connect) {
             await this.connectDataSource(config.id).catch((err) => {
@@ -161,6 +169,13 @@ export class DataSourceManager extends EventEmitter {
     config: DataSourceConfig,
     options?: { ownerId?: string; workspaceId?: string; persist?: boolean }
   ): Promise<BaseDataAdapter> {
+    // Reject duplicates BEFORE persisting — otherwise a create that will be
+    // rejected still runs the upsert and overwrites the existing row's config
+    // and owner. Use updateDataSource() to change an existing source.
+    if (this.adapters.has(config.id)) {
+      throw new Error(`Data source with id '${config.id}' already exists`)
+    }
+
     const persist = options?.persist !== false && this.db !== undefined
     const ownerId = options?.ownerId || 'system'
     const workspaceId = options?.workspaceId
@@ -170,7 +185,73 @@ export class DataSourceManager extends EventEmitter {
       await this.persistDataSource(config, ownerId, workspaceId)
     }
 
-    return this.addDataSourceInternal(config, false)
+    const adapter = await this.addDataSourceInternal(config, false)
+    this.scopes.set(config.id, { ownerId, workspaceId: workspaceId ?? null })
+    return adapter
+  }
+
+  /**
+   * Atomically update an existing data source. Persists the new config first
+   * (the only failure-prone step); the live adapter is swapped only after that
+   * succeeds. A failed update therefore leaves the original source intact —
+   * unlike a removeDataSource()+addDataSource() sequence, which soft-deletes
+   * the row and drops the adapter before the re-add can fail.
+   */
+  async updateDataSource(
+    id: string,
+    config: DataSourceConfig,
+    options?: { ownerId?: string; workspaceId?: string }
+  ): Promise<BaseDataAdapter> {
+    const existing = this.adapters.get(id)
+    if (!existing) {
+      throw new Error(`Data source with id '${id}' not found`)
+    }
+    const priorScope = this.scopes.get(id)
+    const ownerId = options?.ownerId ?? priorScope?.ownerId ?? 'system'
+    const workspaceId = options?.workspaceId ?? priorScope?.workspaceId ?? undefined
+
+    // Validate the target type before touching anything live.
+    if (!this.adapterTypes.get(config.type.toLowerCase())) {
+      throw new Error(`Unsupported data source type: ${config.type}`)
+    }
+
+    // Persist first — if this throws, the live source is untouched.
+    if (this.db !== undefined) {
+      await this.persistDataSource(config, ownerId, workspaceId)
+    }
+
+    // Persist succeeded: swap the in-memory adapter (no further failure-prone I/O).
+    try {
+      if (existing.isConnected()) {
+        await existing.disconnect()
+      }
+    } catch {
+      // best-effort teardown of the previous adapter
+    }
+    existing.removeAllListeners()
+    this.adapters.delete(id)
+    this.connectionPool.delete(id)
+
+    const adapter = await this.addDataSourceInternal(config, false)
+    this.scopes.set(id, { ownerId, workspaceId: workspaceId ?? null })
+    return adapter
+  }
+
+  /**
+   * Assert the requester owns this data source (A0.1 scope enforcement).
+   * Throws the same "not found" wording as getDataSource so callers return a
+   * uniform 404 — a non-owner must not learn that someone else's source exists.
+   */
+  assertAccess(id: string, ownerId: string | undefined): void {
+    const scope = this.scopes.get(id)
+    if (!this.adapters.has(id) || !scope || scope.ownerId !== ownerId) {
+      throw new Error(`Data source with id '${id}' not found`)
+    }
+  }
+
+  /** Stored ownership scope for a data source, if present. */
+  getScope(id: string): { ownerId: string; workspaceId: string | null } | undefined {
+    return this.scopes.get(id)
   }
 
   /**
@@ -235,6 +316,14 @@ export class DataSourceManager extends EventEmitter {
           name: record.name,
           type: record.type,
           config: record.config,
+          owner_id: record.owner_id,
+          workspace_id: record.workspace_id,
+          status: record.status,
+          auto_connect: record.auto_connect,
+          // Revive a previously soft-deleted row (remove() sets these) so an
+          // updated or recreated-with-same-id source survives a restart.
+          is_active: true,
+          deleted_at: null,
           updated_at: new Date()
         } as never)
       )
@@ -288,6 +377,7 @@ export class DataSourceManager extends EventEmitter {
     adapter.removeAllListeners()
     this.adapters.delete(id)
     this.connectionPool.delete(id)
+    this.scopes.delete(id)
 
     // Soft delete from database (or hard delete if specified)
     if (this.db) {
@@ -523,7 +613,7 @@ export class DataSourceManager extends EventEmitter {
   }
 
   // Management methods
-  listDataSources(): Array<{
+  listDataSources(filter?: { ownerId?: string }): Array<{
     id: string
     name: string
     type: string
@@ -537,6 +627,13 @@ export class DataSourceManager extends EventEmitter {
     }> = []
 
     for (const [id, adapter] of this.adapters) {
+      // A0.1: when an owner filter is supplied, only that owner's sources are listed
+      if (filter?.ownerId !== undefined) {
+        const scope = this.scopes.get(id)
+        if (!scope || scope.ownerId !== filter.ownerId) {
+          continue
+        }
+      }
       sources.push({
         id,
         name: adapter.getName(),
@@ -599,6 +696,7 @@ export class DataSourceManager extends EventEmitter {
     this.adapters.clear()
     this.adapterTypes.clear()
     this.connectionPool.clear()
+    this.scopes.clear()
     this.removeAllListeners()
   }
 }
