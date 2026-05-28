@@ -35,15 +35,26 @@ function jsonResponse(data: unknown): Response {
 }
 
 describe('deriveFieldRulesFromMappings (DF-T1.5 reachability wire)', () => {
-  it('maps each field mapping to a from_staging scalar rule', () => {
+  it('maps each field mapping to a from_staging scalar rule keyed by the TARGET field', () => {
+    // sourceField = targetField: the DF-T1 backend transforms the staging record first, so the
+    // transformed record is keyed by target field and from_staging reads the transformed value.
     const rules = deriveFieldRulesFromMappings([
       { sourceField: 'code', targetField: 'FNumber' },
       { sourceField: 'name', targetField: 'FName' },
     ] as Parameters<typeof deriveFieldRulesFromMappings>[0])
     expect(rules).toEqual([
-      { targetField: 'FNumber', sourceType: 'from_staging', sourceField: 'code', shape: 'scalar' },
-      { targetField: 'FName', sourceType: 'from_staging', sourceField: 'name', shape: 'scalar' },
+      { targetField: 'FNumber', sourceType: 'from_staging', sourceField: 'FNumber', shape: 'scalar' },
+      { targetField: 'FName', sourceType: 'from_staging', sourceField: 'FName', shape: 'scalar' },
     ])
+  })
+
+  it('preserves required semantics from the mapping validation', () => {
+    const rules = deriveFieldRulesFromMappings([
+      { sourceField: 'code', targetField: 'FNumber', validation: [{ type: 'required' }] },
+      { sourceField: 'spec', targetField: 'FModel', validation: [] },
+    ] as Parameters<typeof deriveFieldRulesFromMappings>[0])
+    expect(rules[0]).toEqual({ targetField: 'FNumber', sourceType: 'from_staging', sourceField: 'FNumber', shape: 'scalar', required: true })
+    expect(rules[1]).not.toHaveProperty('required')
   })
 
   it('skips mappings missing a source or target field, and tolerates an empty list', () => {
@@ -54,7 +65,7 @@ describe('deriveFieldRulesFromMappings (DF-T1.5 reachability wire)', () => {
       { sourceField: 'code', targetField: 'FNumber' },
     ] as Parameters<typeof deriveFieldRulesFromMappings>[0])
     expect(rules).toEqual([
-      { targetField: 'FNumber', sourceType: 'from_staging', sourceField: 'code', shape: 'scalar' },
+      { targetField: 'FNumber', sourceType: 'from_staging', sourceField: 'FNumber', shape: 'scalar' },
     ])
   })
 })

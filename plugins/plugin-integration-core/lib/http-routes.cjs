@@ -693,7 +693,12 @@ function buildTargetPayloadPreview(input) {
     code: 'K3_WISE_PRESET_PLACEHOLDER_UNFILLED',
     message: `unfilled template placeholder at ${path}`,
   }))
+  // DF-T1.5: when the workbench UI path supplied fieldMappings, the DF-T1 branch transformed the
+  // sourceRecord first and passes the transform errors through here, so the preview reflects the
+  // real pipeline transform. Runbook callers omit fieldMappings → no transformErrors (shape B []).
+  const transformErrors = (Array.isArray(input.transformErrors) ? input.transformErrors : []).map((e) => cloneJson(e))
   const errors = [
+    ...transformErrors,
     ...placeholderErrors,
     ...missingRequiredFields.map((field) => ({ field, code: 'REQUIRED', message: `${field} is required` })),
     ...unresolvedReferenceComponents.map((u) => ({ field: u.field, code: 'INCOMPLETE_REFERENCE', message: `${u.field} requires ${u.rule}` })),
@@ -705,9 +710,10 @@ function buildTargetPayloadPreview(input) {
     targetRecord: cloneJson(merged),
     errors,
     placeholderErrors: placeholderErrors.map((e) => cloneJson(e)),
-    // Shape-B compatibility: keep the legacy preview's fixed array fields (empty in DF-T1
-    // mode — DF-T1 merges via fieldRules, not fieldMappings transform/validation) (P2).
-    transformErrors: [],
+    // Shape-B compatibility: validationErrors/schemaErrors stay [] in DF-T1 (required is carried by
+    // fieldRules → missingRequiredFields). transformErrors is populated only when fieldMappings were
+    // supplied (the UI path); runbook callers (no fieldMappings) keep it [] (P2).
+    transformErrors,
     validationErrors: [],
     schemaErrors: [],
     targetPayloadPreview: {
@@ -739,6 +745,19 @@ function buildTemplatePreview(input) {
     throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', 'payloadTemplate must be an object', { field: 'payloadTemplate' })
   }
   if (isPlainObject(input.payloadTemplate)) {
+    // DF-T1.5 reachability wire: when fieldMappings are provided (the workbench UI path), run the
+    // SAME transform the legacy pipeline runs and compose from the TRANSFORMED record (keyed by
+    // target field) so the DF-T1 preview predicts the real Save body, not raw staging values.
+    // Derived fieldRules use sourceField = targetField. Callers that omit fieldMappings (operator
+    // runbook evidence with a target-shaped sourceRecord) keep reading raw — same shape, two callers.
+    const rawMappings = Array.isArray(input.fieldMappings) ? input.fieldMappings : []
+    if (rawMappings.length > 0) {
+      const fieldMappings = normalizePreviewFieldMappings(rawMappings)
+      const transformed = transformRecord(input.sourceRecord, fieldMappings)
+      // transformed.value is always an object (the legacy path projects it even when !ok); the
+      // errors carry the bad news and are surfaced via transformErrors below.
+      return buildTargetPayloadPreview({ ...input, sourceRecord: transformed.value, transformErrors: transformed.errors })
+    }
     return buildTargetPayloadPreview(input)
   }
   if (!isPlainObject(input.sourceRecord)) {

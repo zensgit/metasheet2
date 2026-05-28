@@ -286,12 +286,23 @@ export function deriveFieldRulesFromMappings(
   return (Array.isArray(fieldMappings) ? fieldMappings : [])
     .filter((mapping) => typeof mapping?.targetField === 'string' && mapping.targetField.trim()
       && typeof mapping?.sourceField === 'string' && mapping.sourceField.trim())
-    .map((mapping) => ({
-      targetField: mapping.targetField,
-      sourceType: 'from_staging',
-      sourceField: mapping.sourceField,
-      shape: 'scalar',
-    }))
+    .map((mapping) => {
+      // The DF-T1 backend transforms the staging record via fieldMappings first, so the transformed
+      // record is keyed by TARGET field — from_staging reads by targetField (not the raw sourceField),
+      // giving the preview the same transformed value the pipeline would Save.
+      const rule: Record<string, unknown> = {
+        targetField: mapping.targetField,
+        sourceType: 'from_staging',
+        sourceField: mapping.targetField,
+        shape: 'scalar',
+      }
+      // Preserve required semantics from the mapping's validation.
+      const validation = (mapping as { validation?: Array<{ type?: string }> }).validation
+      if (Array.isArray(validation) && validation.some((entry) => entry && entry.type === 'required')) {
+        rule.required = true
+      }
+      return rule
+    })
 }
 
 export type IntegrationFieldProvenanceSource = 'staging' | 'template' | 'constant' | 'reference_table'
