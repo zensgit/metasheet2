@@ -2948,90 +2948,237 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__group-manager"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups)"
+              data-attendance-group-manager
             >
               <div class="attendance__admin-section-header">
-                <h4>{{ tr('Attendance groups', '考勤组') }}</h4>
-                <button class="attendance__btn" :disabled="attendanceGroupLoading" @click="loadAttendanceGroups">
-                  {{ attendanceGroupLoading ? tr('Loading...', '加载中...') : tr('Reload groups', '重载分组') }}
-                </button>
+                <div>
+                  <h4>{{ tr('Attendance groups', '考勤组') }}</h4>
+                  <p class="attendance__field-hint">
+                    {{ tr('Create or select a group, then complete its people and policy sections in one place.', '先新建或选择考勤组，再在同一页完成成员与规则配置。') }}
+                  </p>
+                </div>
+                <div class="attendance__admin-actions">
+                  <button class="attendance__btn attendance__btn--primary" type="button" @click="startCreateAttendanceGroup">
+                    {{ tr('New group', '新建考勤组') }}
+                  </button>
+                  <button class="attendance__btn" type="button" :disabled="attendanceGroupLoading" @click="loadAttendanceGroups">
+                    {{ attendanceGroupLoading ? tr('Loading...', '加载中...') : tr('Reload groups', '重载分组') }}
+                  </button>
+                </div>
               </div>
-              <div class="attendance__admin-grid">
-                <label class="attendance__field" for="attendance-group-name">
-                  <span>{{ tr('Name', '名称') }}</span>
-                  <input id="attendance-group-name" v-model="attendanceGroupForm.name" type="text" />
-                </label>
-                <label class="attendance__field" for="attendance-group-code">
-                  <span>{{ tr('Code', '编码') }}</span>
-                  <input id="attendance-group-code" v-model="attendanceGroupForm.code" type="text" :placeholder="tr('optional', '可选')" />
-                </label>
-                <label class="attendance__field" for="attendance-group-timezone">
-                  <span>{{ tr('Timezone', '时区') }}</span>
-                  <select id="attendance-group-timezone" v-model="attendanceGroupForm.timezone">
-                    <option v-for="option in timezoneOptions" :key="`group-${option.value}`" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
-                  <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ attendanceGroupTimezoneLabel }}</small>
-                </label>
-                <label class="attendance__field" for="attendance-group-rule-set">
-                  <span>{{ tr('Rule set', '规则集') }}</span>
-                  <select
-                    id="attendance-group-rule-set"
-                    v-model="attendanceGroupForm.ruleSetId"
-                    :disabled="ruleSets.length === 0"
-                  >
-                    <option value="">(Optional) Use default rule</option>
-                    <option v-for="item in ruleSets" :key="item.id" :value="item.id">
-                      {{ item.name }}
-                    </option>
-                  </select>
-                </label>
-                <label class="attendance__field attendance__field--full" for="attendance-group-description">
-                  <span>{{ tr('Description', '描述') }}</span>
-                  <input id="attendance-group-description" v-model="attendanceGroupForm.description" type="text" />
-                </label>
-              </div>
-              <div class="attendance__admin-actions">
-                <button
-                  class="attendance__btn attendance__btn--primary"
-                  :disabled="attendanceGroupSaving"
-                  @click="saveAttendanceGroup"
-                >
-                  {{ attendanceGroupSaving ? tr('Saving...', '保存中...') : attendanceGroupEditingId ? tr('Update group', '更新分组') : tr('Create group', '创建分组') }}
-                </button>
-                <button class="attendance__btn" :disabled="attendanceGroupSaving" @click="resetAttendanceGroupForm">
-                  {{ tr('Reset', '重置') }}
-                </button>
-              </div>
-              <div v-if="attendanceGroups.length === 0" class="attendance__empty">{{ tr('No attendance groups.', '暂无考勤组。') }}</div>
-              <div v-else class="attendance__table-wrapper">
-                <table class="attendance__table">
-                  <thead>
-                    <tr>
-                      <th>{{ tr('Name', '名称') }}</th>
-                      <th>{{ tr('Code', '编码') }}</th>
-                      <th>{{ tr('Timezone', '时区') }}</th>
-                      <th>{{ tr('Rule set', '规则集') }}</th>
-                      <th>{{ tr('Actions', '操作') }}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="item in attendanceGroups" :key="item.id">
-                      <td>{{ item.name }}</td>
-                      <td>{{ item.code || '-' }}</td>
-                      <td>{{ displayTimezone(item.timezone) }}</td>
-                      <td>{{ resolveRuleSetName(item.ruleSetId) }}</td>
-                      <td class="attendance__table-actions">
-                        <button class="attendance__btn" @click="editAttendanceGroup(item)">{{ tr('Edit', '编辑') }}</button>
-                        <button class="attendance__btn attendance__btn--danger" @click="deleteAttendanceGroup(item.id)">
-                          {{ tr('Delete', '删除') }}
+
+              <div class="attendance__group-layout">
+                <aside class="attendance__group-list" data-attendance-group-list>
+                  <div class="attendance__group-list-header">
+                    <strong>{{ tr('Groups', '考勤组') }}</strong>
+                    <span>{{ tr(`${attendanceGroups.length} groups`, `${attendanceGroups.length} 个考勤组`) }}</span>
+                  </div>
+                  <div v-if="attendanceGroups.length === 0" class="attendance__empty">
+                    {{ tr('No attendance groups yet. Create one to start configuring members.', '暂无考勤组。先新建一个考勤组，再配置成员。') }}
+                  </div>
+                  <div v-else class="attendance__group-list-items">
+                    <button
+                      v-for="item in attendanceGroups"
+                      :key="item.id"
+                      type="button"
+                      class="attendance__group-list-item"
+                      :class="{ 'attendance__group-list-item--active': item.id === attendanceGroupEditingId }"
+                      data-attendance-group-row
+                      @click="selectAttendanceGroup(item)"
+                    >
+                      <span>
+                        <strong>{{ item.name }}</strong>
+                        <small>{{ item.code || item.id }}</small>
+                      </span>
+                      <span>{{ resolveRuleSetName(item.ruleSetId) }}</span>
+                    </button>
+                  </div>
+                </aside>
+
+                <section class="attendance__group-detail" data-attendance-group-detail>
+                  <div class="attendance__group-detail-header">
+                    <div>
+                      <h5>{{ attendanceGroupDetailTitle }}</h5>
+                      <p class="attendance__field-hint">{{ attendanceGroupDetailSubtitle }}</p>
+                    </div>
+                    <div v-if="attendanceGroupEditingId" class="attendance__group-detail-actions">
+                      <div class="attendance__admin-meta">
+                        <span>{{ tr('Code', '编码') }}: {{ attendanceGroupForm.code || '-' }}</span>
+                        <span>{{ tr('Timezone', '时区') }}: {{ displayTimezone(attendanceGroupForm.timezone) }}</span>
+                      </div>
+                      <button
+                        class="attendance__btn attendance__btn--danger"
+                        type="button"
+                        data-attendance-group-delete
+                        @click="deleteSelectedAttendanceGroup"
+                      >
+                        {{ tr('Delete group', '删除考勤组') }}
+                      </button>
+                    </div>
+                  </div>
+
+                  <section class="attendance__group-panel" data-attendance-group-basic>
+                    <div class="attendance__admin-section-header">
+                      <h6>{{ tr('Basic info', '基础信息') }}</h6>
+                      <span class="attendance__field-hint">{{ tr('Saved through the existing attendance group API.', '通过现有考勤组接口保存。') }}</span>
+                    </div>
+                    <div class="attendance__admin-grid">
+                      <label class="attendance__field" for="attendance-group-name">
+                        <span>{{ tr('Name', '名称') }}</span>
+                        <input id="attendance-group-name" v-model="attendanceGroupForm.name" type="text" />
+                      </label>
+                      <label class="attendance__field" for="attendance-group-code">
+                        <span>{{ tr('Code', '编码') }}</span>
+                        <input id="attendance-group-code" v-model="attendanceGroupForm.code" type="text" :placeholder="tr('optional', '可选')" />
+                      </label>
+                      <label class="attendance__field" for="attendance-group-timezone">
+                        <span>{{ tr('Timezone', '时区') }}</span>
+                        <select id="attendance-group-timezone" v-model="attendanceGroupForm.timezone">
+                          <option v-for="option in timezoneOptions" :key="`group-${option.value}`" :value="option.value">
+                            {{ option.label }}
+                          </option>
+                        </select>
+                        <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ attendanceGroupTimezoneLabel }}</small>
+                      </label>
+                      <label class="attendance__field" for="attendance-group-rule-set">
+                        <span>{{ tr('Rule policy', '规则策略') }}</span>
+                        <select
+                          id="attendance-group-rule-set"
+                          v-model="attendanceGroupForm.ruleSetId"
+                          :disabled="ruleSets.length === 0"
+                        >
+                          <option value="">{{ tr('(Optional) Use default rule', '（可选）使用默认规则') }}</option>
+                          <option v-for="item in ruleSets" :key="item.id" :value="item.id">
+                            {{ item.name }}
+                          </option>
+                        </select>
+                      </label>
+                      <label class="attendance__field attendance__field--full" for="attendance-group-description">
+                        <span>{{ tr('Description', '描述') }}</span>
+                        <input id="attendance-group-description" v-model="attendanceGroupForm.description" type="text" />
+                      </label>
+                    </div>
+                    <div class="attendance__admin-actions attendance__group-sticky-actions">
+                      <button
+                        class="attendance__btn attendance__btn--primary"
+                        type="button"
+                        :disabled="attendanceGroupSaving"
+                        @click="saveAttendanceGroup"
+                      >
+                        {{ attendanceGroupSaving ? tr('Saving...', '保存中...') : attendanceGroupEditingId ? tr('Save group', '保存考勤组') : tr('Create group', '创建考勤组') }}
+                      </button>
+                      <button class="attendance__btn" type="button" :disabled="attendanceGroupSaving" @click="cancelAttendanceGroupEdit">
+                        {{ tr('Cancel', '取消') }}
+                      </button>
+                    </div>
+                  </section>
+
+                  <section class="attendance__group-panel" data-attendance-group-people>
+                    <div class="attendance__admin-section-header">
+                      <h6>{{ tr('People', '考勤人员') }}</h6>
+                      <button
+                        class="attendance__btn"
+                        type="button"
+                        :disabled="attendanceGroupMemberLoading || !attendanceGroupEditingId"
+                        @click="loadAttendanceGroupMembers"
+                      >
+                        {{ attendanceGroupMemberLoading ? tr('Loading...', '加载中...') : tr('Reload members', '重载成员') }}
+                      </button>
+                    </div>
+                    <div v-if="!attendanceGroupEditingId" class="attendance__empty">
+                      {{ tr('Save the group before adding people.', '先保存考勤组，再添加考勤人员。') }}
+                    </div>
+                    <template v-else>
+                      <div class="attendance__admin-grid">
+                        <AttendanceUserPickerField
+                          v-model="attendanceGroupMemberSelectedUserId"
+                          :tr="tr"
+                          :label="tr('User picker', '用户选择器')"
+                          name="attendanceGroupMemberUserPicker"
+                          :help-text="tr('Pick one user and append it to the bulk list below, or type multiple IDs manually.', '先选一个用户再追加到下方批量列表，也可以直接手动输入多个 ID。')"
+                          :search-placeholder="tr('Search users to append', '搜索要追加的用户')"
+                          input-id="attendance-group-member-user-picker"
+                        />
+                        <label class="attendance__field attendance__field--full" for="attendance-group-member-user-ids">
+                          <span>{{ tr('User IDs (bulk)', '用户 ID（批量）') }}</span>
+                          <input
+                            id="attendance-group-member-user-ids"
+                            v-model="attendanceGroupMemberUserIds"
+                            type="text"
+                            :placeholder="tr('userId1, userId2', 'userId1, userId2')"
+                          />
+                          <small class="attendance__field-hint">{{ tr('Separate multiple IDs with commas or spaces. The picker above can append one selected user at a time.', '多个 ID 请用逗号或空格分隔。上方选择器可一次追加一个用户。') }}</small>
+                        </label>
+                      </div>
+                      <div class="attendance__admin-actions">
+                        <button
+                          class="attendance__btn"
+                          type="button"
+                          :disabled="attendanceGroupMemberSaving || !attendanceGroupMemberSelectedUserId"
+                          @click="appendAttendanceGroupMemberSelectedUser"
+                        >
+                          {{ tr('Append selected user', '追加所选用户') }}
                         </button>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
+                        <button
+                          class="attendance__btn attendance__btn--primary"
+                          type="button"
+                          :disabled="attendanceGroupMemberSaving"
+                          @click="addAttendanceGroupMembers"
+                        >
+                          {{ attendanceGroupMemberSaving ? tr('Saving...', '保存中...') : tr('Add members', '添加成员') }}
+                        </button>
+                      </div>
+                      <div v-if="attendanceGroupMembers.length === 0" class="attendance__empty">{{ tr('No group members yet.', '暂无分组成员。') }}</div>
+                      <div v-else class="attendance__table-wrapper">
+                        <table class="attendance__table">
+                          <thead>
+                            <tr>
+                              <th>{{ tr('User ID', '用户 ID') }}</th>
+                              <th>{{ tr('Joined', '加入时间') }}</th>
+                              <th>{{ tr('Actions', '操作') }}</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr v-for="member in attendanceGroupMembers" :key="member.id">
+                              <td>{{ member.userId }}</td>
+                              <td>{{ formatDateTime(member.createdAt ?? null) }}</td>
+                              <td class="attendance__table-actions">
+                                <button
+                                  class="attendance__btn attendance__btn--danger"
+                                  type="button"
+                                  :disabled="attendanceGroupMemberSaving"
+                                  @click="removeAttendanceGroupMember(member.userId)"
+                                >
+                                  {{ tr('Remove', '移除') }}
+                                </button>
+                              </td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </template>
+                  </section>
+
+                  <section class="attendance__group-summary-grid" data-attendance-group-summaries>
+                    <div class="attendance__group-summary">
+                      <strong>{{ tr('Rule policy', '规则策略') }}</strong>
+                      <span>{{ attendanceGroupEditingId ? resolveRuleSetName(attendanceGroupForm.ruleSetId) : tr('Choose or save a group first', '先选择或保存考勤组') }}</span>
+                      <small>{{ tr('Edit rule sets in the Policies section.', '规则集请到规则策略中维护。') }}</small>
+                    </div>
+                    <div class="attendance__group-summary">
+                      <strong>{{ tr('Work time', '考勤时间') }}</strong>
+                      <span>{{ tr('Configured in shifts and assignments.', '在班次与排班分配中配置。') }}</span>
+                      <small>{{ tr('No group-specific schedule mutation in this slice.', '本切片不修改考勤组专属排班逻辑。') }}</small>
+                    </div>
+                    <div class="attendance__group-summary">
+                      <strong>{{ tr('Punch method', '打卡方式') }}</strong>
+                      <span>{{ tr('Workspace settings only in V1.', 'V1 仅使用工作区级设置。') }}</span>
+                      <small>{{ tr('Location, Wi-Fi, hardware, photo, and face verification stay deferred.', '地点、Wi-Fi、设备、拍照和人脸识别均保持 deferred。') }}</small>
+                    </div>
+                  </section>
+                </section>
               </div>
             </div>
 
@@ -3042,90 +3189,12 @@
             >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Group members', '分组成员') }}</h4>
-                <button
-                  class="attendance__btn"
-                  :disabled="attendanceGroupMemberLoading"
-                  @click="loadAttendanceGroupMembers"
-                >
-                  {{ attendanceGroupMemberLoading ? tr('Loading...', '加载中...') : tr('Reload members', '重载成员') }}
+                <button class="attendance__btn attendance__btn--primary" type="button" @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups)">
+                  {{ tr('Open Attendance groups', '打开考勤组') }}
                 </button>
               </div>
-              <div class="attendance__admin-grid">
-                <label class="attendance__field" for="attendance-group-member-group">
-                  <span>{{ tr('Group', '分组') }}</span>
-                  <select
-                    id="attendance-group-member-group"
-                    v-model="attendanceGroupMemberGroupId"
-                    :disabled="attendanceGroups.length === 0"
-                  >
-                    <option value="">{{ tr('Select a group', '选择分组') }}</option>
-                    <option v-for="group in attendanceGroups" :key="group.id" :value="group.id">
-                      {{ group.name }}
-                    </option>
-                  </select>
-                </label>
-                <AttendanceUserPickerField
-                  v-model="attendanceGroupMemberSelectedUserId"
-                  :tr="tr"
-                  :label="tr('User picker', '用户选择器')"
-                  name="attendanceGroupMemberUserPicker"
-                  :help-text="tr('Pick one user and append it to the bulk list below, or type multiple IDs manually.', '先选一个用户再追加到下方批量列表，也可以直接手动输入多个 ID。')"
-                  :search-placeholder="tr('Search users to append', '搜索要追加的用户')"
-                  input-id="attendance-group-member-user-picker"
-                />
-                <label class="attendance__field attendance__field--full" for="attendance-group-member-user-ids">
-                  <span>{{ tr('User IDs (bulk)', '用户 ID（批量）') }}</span>
-                  <input
-                    id="attendance-group-member-user-ids"
-                    v-model="attendanceGroupMemberUserIds"
-                    type="text"
-                    :placeholder="tr('userId1, userId2', 'userId1, userId2')"
-                  />
-                  <small class="attendance__field-hint">{{ tr('Separate multiple IDs with commas or spaces. The picker above can append one selected user at a time.', '多个 ID 请用逗号或空格分隔。上方选择器可一次追加一个用户。') }}</small>
-                </label>
-              </div>
-              <div class="attendance__admin-actions">
-                <button
-                  class="attendance__btn"
-                  :disabled="attendanceGroupMemberSaving || !attendanceGroupMemberSelectedUserId"
-                  @click="appendAttendanceGroupMemberSelectedUser"
-                >
-                  {{ tr('Append selected user', '追加所选用户') }}
-                </button>
-                <button
-                  class="attendance__btn attendance__btn--primary"
-                  :disabled="attendanceGroupMemberSaving"
-                  @click="addAttendanceGroupMembers"
-                >
-                  {{ attendanceGroupMemberSaving ? tr('Saving...', '保存中...') : tr('Add members', '添加成员') }}
-                </button>
-              </div>
-              <div v-if="attendanceGroupMembers.length === 0" class="attendance__empty">{{ tr('No group members yet.', '暂无分组成员。') }}</div>
-              <div v-else class="attendance__table-wrapper">
-                <table class="attendance__table">
-                  <thead>
-                    <tr>
-                      <th>{{ tr('User ID', '用户 ID') }}</th>
-                      <th>{{ tr('Joined', '加入时间') }}</th>
-                      <th>{{ tr('Actions', '操作') }}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="member in attendanceGroupMembers" :key="member.id">
-                      <td>{{ member.userId }}</td>
-                      <td>{{ formatDateTime(member.createdAt ?? null) }}</td>
-                      <td class="attendance__table-actions">
-                        <button
-                          class="attendance__btn attendance__btn--danger"
-                          :disabled="attendanceGroupMemberSaving"
-                          @click="removeAttendanceGroupMember(member.userId)"
-                        >
-                          {{ tr('Remove', '移除') }}
-                        </button>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
+              <div class="attendance__empty" data-attendance-group-members-redirect>
+                {{ tr('Group members now live inside the selected attendance group detail. Use Attendance groups to select a group, then edit People.', '分组成员已并入所选考勤组详情。请打开考勤组，选择分组后在“考勤人员”中维护。') }}
               </div>
             </div>
 
@@ -7764,6 +7833,19 @@ const importTemplateGuide = computed(() => buildImportTemplateGuide(parseJsonCon
 const selectedImportProfileGuide = computed(() => buildImportProfileGuide(selectedImportProfile.value))
 const attendanceGroupOptions = computed(() =>
   attendanceGroups.value.map(group => group.name).filter(name => Boolean(name))
+)
+const selectedAttendanceGroup = computed(() =>
+  attendanceGroups.value.find(group => group.id === attendanceGroupEditingId.value) ?? null
+)
+const attendanceGroupDetailTitle = computed(() =>
+  attendanceGroupEditingId.value
+    ? (attendanceGroupForm.name.trim() || selectedAttendanceGroup.value?.name || tr('Attendance group', '考勤组'))
+    : tr('New attendance group', '新建考勤组')
+)
+const attendanceGroupDetailSubtitle = computed(() =>
+  attendanceGroupEditingId.value
+    ? tr('Edit basic info, people, and read-only policy summaries for this group.', '编辑该考勤组的基础信息、人员与只读策略摘要。')
+    : tr('Fill basic info first. People and summaries unlock after the group is saved.', '先填写基础信息。保存后再维护人员与摘要。')
 )
 const importCsvFile = ref<File | null>(null)
 const importCsvFileName = ref('')
@@ -15443,6 +15525,8 @@ function resetAttendanceGroupForm() {
   attendanceGroupForm.timezone = defaultTimezone
   attendanceGroupForm.ruleSetId = ''
   attendanceGroupForm.description = ''
+  attendanceGroupMemberGroupId.value = ''
+  attendanceGroupMembers.value = []
 }
 
 function editAttendanceGroup(item: AttendanceGroup) {
@@ -15452,6 +15536,28 @@ function editAttendanceGroup(item: AttendanceGroup) {
   attendanceGroupForm.timezone = item.timezone ?? defaultTimezone
   attendanceGroupForm.ruleSetId = item.ruleSetId ?? ''
   attendanceGroupForm.description = item.description ?? ''
+  attendanceGroupMemberGroupId.value = item.id
+}
+
+function startCreateAttendanceGroup() {
+  resetAttendanceGroupForm()
+}
+
+function selectAttendanceGroup(item: AttendanceGroup) {
+  editAttendanceGroup(item)
+}
+
+function cancelAttendanceGroupEdit() {
+  if (selectedAttendanceGroup.value) {
+    editAttendanceGroup(selectedAttendanceGroup.value)
+    return
+  }
+  resetAttendanceGroupForm()
+}
+
+function deleteSelectedAttendanceGroup() {
+  if (!attendanceGroupEditingId.value) return
+  void deleteAttendanceGroup(attendanceGroupEditingId.value)
 }
 
 function resolveRuleSetName(ruleSetId?: string | null): string {
@@ -15473,9 +15579,15 @@ async function loadAttendanceGroups() {
       throw new Error(readErrorMessage(data, tr('Failed to load attendance groups', '加载考勤分组失败')))
     }
     adminForbidden.value = false
+    const selectedId = attendanceGroupEditingId.value || attendanceGroupMemberGroupId.value
     attendanceGroups.value = data.data?.items ?? []
-    if (!attendanceGroupMemberGroupId.value && attendanceGroups.value.length > 0) {
-      attendanceGroupMemberGroupId.value = attendanceGroups.value[0].id
+    const selected = selectedId ? attendanceGroups.value.find(item => item.id === selectedId) : null
+    if (selected) {
+      editAttendanceGroup(selected)
+    } else if (attendanceGroups.value.length > 0) {
+      editAttendanceGroup(attendanceGroups.value[0])
+    } else {
+      resetAttendanceGroupForm()
     }
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to load attendance groups', '加载考勤分组失败')), 'error')
@@ -15516,8 +15628,12 @@ async function saveAttendanceGroup() {
       throw new Error(readErrorMessage(data, tr('Failed to save attendance group', '保存考勤分组失败')))
     }
     adminForbidden.value = false
-    resetAttendanceGroupForm()
+    const savedGroup = data.data as AttendanceGroup | undefined
     await loadAttendanceGroups()
+    if (savedGroup?.id) {
+      const freshGroup = attendanceGroups.value.find(item => item.id === savedGroup.id) ?? savedGroup
+      editAttendanceGroup(freshGroup)
+    }
     setStatus(tr('Attendance group saved.', '考勤分组已保存。'))
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to save attendance group', '保存考勤分组失败')), 'error')
@@ -15642,6 +15758,14 @@ async function deleteAttendanceGroup(id: string) {
     }
     adminForbidden.value = false
     await loadAttendanceGroups()
+    if (attendanceGroupEditingId.value === id) {
+      const nextGroup = attendanceGroups.value[0]
+      if (nextGroup) {
+        editAttendanceGroup(nextGroup)
+      } else {
+        resetAttendanceGroupForm()
+      }
+    }
     setStatus(tr('Attendance group deleted.', '考勤分组已删除。'))
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to delete attendance group', '删除考勤分组失败')), 'error')
@@ -18216,6 +18340,139 @@ const holidaySectionBindings = {
   margin-top: 12px;
 }
 
+.attendance__group-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.attendance__group-list,
+.attendance__group-detail,
+.attendance__group-panel,
+.attendance__group-summary {
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.attendance__group-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+}
+
+.attendance__group-list-header,
+.attendance__group-detail-header,
+.attendance__group-summary-grid {
+  display: flex;
+  gap: 12px;
+}
+
+.attendance__group-list-header,
+.attendance__group-detail-header {
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.attendance__group-detail-actions {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+}
+
+.attendance__group-list-header span {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.attendance__group-list-items {
+  display: grid;
+  gap: 8px;
+}
+
+.attendance__group-list-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f9fafb;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.attendance__group-list-item span {
+  display: grid;
+  gap: 4px;
+}
+
+.attendance__group-list-item small,
+.attendance__group-list-item > span:last-child {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.attendance__group-list-item--active {
+  border-color: #1f6feb;
+  background: #eff6ff;
+  box-shadow: 0 0 0 1px rgba(31, 111, 235, 0.12);
+}
+
+.attendance__group-detail {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+}
+
+.attendance__group-detail-header h5,
+.attendance__group-panel h6 {
+  margin: 0;
+  color: #111827;
+}
+
+.attendance__group-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.attendance__group-sticky-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  margin: 0 -14px -14px;
+  padding: 12px 14px;
+  border-top: 1px solid #e5e7eb;
+  background: rgba(255, 255, 255, 0.96);
+}
+
+.attendance__group-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.attendance__group-summary {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  background: #f9fafb;
+}
+
+.attendance__group-summary span {
+  color: #111827;
+  font-size: 13px;
+}
+
+.attendance__group-summary small {
+  color: #6b7280;
+  font-size: 12px;
+}
+
 .attendance__details {
   margin-top: 12px;
   padding: 12px;
@@ -18275,6 +18532,20 @@ const holidaySectionBindings = {
 
   .attendance__admin-shell {
     grid-template-columns: 1fr;
+  }
+
+  .attendance__group-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .attendance__group-detail-header,
+  .attendance__group-list-item {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .attendance__group-detail-actions {
+    justify-items: stretch;
   }
 
   .attendance__admin-shortcuts-header {

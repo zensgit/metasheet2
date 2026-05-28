@@ -204,6 +204,42 @@ describe('Attendance admin regressions', () => {
           },
         })
       }
+      if (url.includes('/api/attendance/groups/group-a/members')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'member-1',
+                groupId: 'group-a',
+                userId: 'user-1',
+                createdAt: '2026-03-28T08:00:00.000Z',
+              },
+            ],
+            total: 1,
+          },
+        })
+      }
+      if (url.includes('/api/attendance/groups')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'group-a',
+                name: 'Ops Team',
+                code: 'ops-team',
+                timezone: 'Asia/Shanghai',
+                ruleSetId: 'rule-set-1',
+                description: 'Operations attendance group',
+                createdAt: '2026-03-28T08:00:00.000Z',
+                updatedAt: '2026-03-28T08:30:00.000Z',
+              },
+            ],
+            total: 1,
+          },
+        })
+      }
       if (url.includes('/api/attendance/advanced-scheduling/workbench')) {
         return jsonResponse(200, {
           ok: true,
@@ -569,8 +605,40 @@ describe('Attendance admin regressions', () => {
     expect(window.getComputedStyle(settings!).display).toBe('none')
     expect(window.getComputedStyle(groupMembers!).display).not.toBe('none')
     expect(container!.querySelector('[data-admin-shortcut="attendance-admin-group-members"]')?.textContent).toContain('Organization · Group members')
-    expect(container!.textContent).toContain('User picker')
-    expect(container!.textContent).toContain('Append selected user')
+    expect(container!.textContent).toContain('Group members now live inside the selected attendance group detail.')
+    expect(container!.textContent).toContain('Open Attendance groups')
+  })
+
+  it('renders attendance groups as a list-detail manager with people inside the selected group', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    const groupsNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')
+    expect(groupsNav).toBeTruthy()
+    groupsNav!.click()
+    await flushUi(4)
+
+    const groupsSection = container!.querySelector<HTMLElement>('#attendance-admin-groups')
+    expect(groupsSection).toBeTruthy()
+    expect(window.getComputedStyle(groupsSection!).display).not.toBe('none')
+
+    expect(groupsSection!.matches('[data-attendance-group-manager]')).toBe(true)
+    expect(groupsSection!.querySelector('[data-attendance-group-list]')?.textContent).toContain('Ops Team')
+    expect(groupsSection!.querySelector('[data-attendance-group-detail]')?.textContent).toContain('Basic info')
+    expect(groupsSection!.querySelector('[data-attendance-group-people]')?.textContent).toContain('User picker')
+    expect(groupsSection!.querySelector('[data-attendance-group-people]')?.textContent).toContain('Append selected user')
+    expect(groupsSection!.querySelector('[data-attendance-group-people]')?.textContent).toContain('user-1')
+    expect(groupsSection!.querySelector('[data-attendance-group-summaries]')?.textContent).toContain('Punch method')
+
+    const newGroupButton = Array.from(groupsSection!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('New group'))
+    expect(newGroupButton).toBeTruthy()
+    newGroupButton!.click()
+    await flushUi(2)
+
+    expect(groupsSection!.querySelector('[data-attendance-group-detail]')?.textContent).toContain('New attendance group')
+    expect(groupsSection!.querySelector('[data-attendance-group-people]')?.textContent).toContain('Save the group before adding people.')
   })
 
   it('renders the production calendar-policy quick-add panel and appends a group day-index row', async () => {

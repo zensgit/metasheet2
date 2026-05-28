@@ -172,6 +172,77 @@ describe('Attendance admin anchor navigation', () => {
     expect(currentSectionBar?.textContent).toContain('Import')
   })
 
+  it('creates an attendance group from the detail pane and selects it for people management', async () => {
+    const savedGroups: Array<{
+      id: string
+      name: string
+      code?: string | null
+      timezone: string
+      ruleSetId?: string | null
+      description?: string | null
+    }> = []
+    const postBodies: unknown[] = []
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url.startsWith('/api/attendance/groups?')) {
+        return jsonResponse(200, { ok: true, data: { items: savedGroups } })
+      }
+      if (url === '/api/attendance/groups' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body || '{}'))
+        postBodies.push(body)
+        const group = {
+          id: 'group-new',
+          name: body.name,
+          code: body.code ?? 'morning-office',
+          timezone: body.timezone,
+          ruleSetId: body.ruleSetId ?? null,
+          description: body.description ?? null,
+        }
+        savedGroups.splice(0, savedGroups.length, group)
+        return jsonResponse(200, { ok: true, data: group })
+      }
+      if (url === '/api/attendance/groups/group-new/members') {
+        return jsonResponse(200, { ok: true, data: { items: [] } })
+      }
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          items: [],
+          summary: null,
+        },
+      })
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const groupsAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')
+    expect(groupsAnchor).toBeTruthy()
+    groupsAnchor!.click()
+    await flushUi(2)
+
+    const nameInput = container!.querySelector<HTMLInputElement>('#attendance-group-name')
+    expect(nameInput).toBeTruthy()
+    nameInput!.value = 'Morning office'
+    nameInput!.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const createButton = container!.querySelector<HTMLButtonElement>('[data-attendance-group-basic] .attendance__btn--primary')
+    expect(createButton?.textContent).toContain('Create group')
+    createButton!.click()
+    await flushUi(12)
+
+    expect(postBodies).toEqual([
+      expect.objectContaining({
+        name: 'Morning office',
+      }),
+    ])
+    expect(container!.querySelector('[data-attendance-group-detail]')?.textContent).toContain('Morning office')
+    expect(container!.querySelector('[data-attendance-group-people]')?.textContent).toContain('No group members yet.')
+    expect(container!.querySelector('[data-attendance-group-basic] .attendance__btn--primary')?.textContent).toContain('Save group')
+    expect(container!.querySelector('[data-attendance-group-delete]')).toBeTruthy()
+  })
+
   it('collapses and expands admin anchor groups', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
@@ -358,6 +429,53 @@ describe('Attendance admin anchor navigation', () => {
   })
 
   it('restores the live user picker, structured rule builder, and holiday month calendar interactions', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url.startsWith('/api/attendance/groups?')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'group-a',
+                name: 'Operations floor',
+                code: 'ops_floor',
+                timezone: 'Asia/Shanghai',
+                ruleSetId: 'rule-set-1',
+              },
+            ],
+          },
+        })
+      }
+      if (url === '/api/attendance/groups/group-a/members') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: 'member-1', groupId: 'group-a', userId: 'user-1', createdAt: '2026-05-27T08:00:00.000Z' },
+            ],
+          },
+        })
+      }
+      if (url.startsWith('/api/attendance/rule-sets?')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: 'rule-set-1', name: 'Ops rule', version: 1, scope: 'org', isDefault: true },
+            ],
+          },
+        })
+      }
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          items: [],
+          summary: null,
+        },
+      })
+    })
+
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
@@ -372,13 +490,26 @@ describe('Attendance admin anchor navigation', () => {
       }
     }
 
+    const groupsAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')
+    expect(groupsAnchor).toBeTruthy()
+    groupsAnchor!.click()
+    await flushUi(2)
+
+    expect(container!.querySelector('[data-attendance-group-manager]')).toBeTruthy()
+    expect(container!.querySelector('[data-attendance-group-detail]')?.textContent).toContain('Operations floor')
+    expect(container!.textContent).toContain('People')
+    expect(container!.textContent).toContain('Rule policy')
+    expect(container!.textContent).toContain('Work time')
+    expect(container!.textContent).toContain('Punch method')
+    expect(container!.textContent).toContain('user-1')
+    expect(container!.querySelector('#attendance-group-member-user-picker')).toBeTruthy()
+    expect(container!.textContent).toContain('Append selected user')
+
     const groupMembersAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-group-members"]')
     expect(groupMembersAnchor).toBeTruthy()
     groupMembersAnchor!.click()
     await flushUi(2)
-
-    expect(container!.querySelector('#attendance-group-member-user-picker')).toBeTruthy()
-    expect(container!.textContent).toContain('Append selected user')
+    expect(container!.querySelector('[data-attendance-group-members-redirect]')?.textContent).toContain('Group members now live inside')
 
     await ensureGroupVisible('Policies')
     const ruleSetsAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-rule-sets"]')
