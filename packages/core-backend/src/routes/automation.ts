@@ -21,6 +21,7 @@ import { Router, type Request, type Response } from 'express'
 import type { AutomationService } from '../multitable/automation-service'
 import type { AutomationExecution, AutomationStepResult } from '../multitable/automation-executor'
 import { legacyAutomationStatusToJobStatus } from '../multitable/workflow-job-contract'
+import { rbacGuard } from '../rbac/rbac'
 
 // ── A2 run-governance read mappers (boundary only — no storage change) ───────
 
@@ -179,7 +180,10 @@ export function createAutomationRoutes(
 
   // ── A2: read-only runs API (cross-rule; status emitted as C1 WorkflowJobStatus) ──
 
-  router.get('/automation-executions', async (req: Request, res: Response) => {
+  // Cross-sheet run snapshots (incl. detail's triggerEvent/ruleSnapshot) are an
+  // operator/admin governance surface, not a per-reader one — gate behind the
+  // multitable management permission (rbacGuard already lets platform admins / *:* through).
+  router.get('/automation-executions', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
     const svc = getService(res)
     if (!svc) return undefined
 
@@ -196,7 +200,10 @@ export function createAutomationRoutes(
     }
 
     try {
-      const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 50, 1), 200)
+      // Default missing/NaN → 50; clamp to [1,200]. Use a finite check (not `|| 50`)
+      // so `?limit=0` clamps to 1 rather than falling back to the default.
+      const rawLimit = parseInt(String(req.query.limit), 10)
+      const limit = Math.min(Math.max(Number.isFinite(rawLimit) ? rawLimit : 50, 1), 200)
       const executions = await svc.logs.listExecutions({
         sheetId: typeof req.query.sheetId === 'string' ? req.query.sheetId : undefined,
         ruleId: typeof req.query.ruleId === 'string' ? req.query.ruleId : undefined,
@@ -210,7 +217,7 @@ export function createAutomationRoutes(
     }
   })
 
-  router.get('/automation-executions/:executionId', async (req: Request, res: Response) => {
+  router.get('/automation-executions/:executionId', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
     const executionId = typeof req.params.executionId === 'string' ? req.params.executionId : ''
     if (!executionId) {
       return res.status(400).json({ error: 'executionId is required' })

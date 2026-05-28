@@ -8,6 +8,14 @@ import express from 'express'
 import request from 'supertest'
 import { createAutomationRoutes } from '../../src/routes/automation'
 import { normalizeWorkflowJob } from '../../src/multitable/workflow-job-contract'
+import { rbacGuard } from '../../src/rbac/rbac'
+
+// In prod the runs routes are gated by rbacGuard('multitable', 'write') (+ platform
+// admins via isAdmin/*:*). Here we pass it through so the handler logic is testable —
+// and separately assert the guard IS applied with the right permission.
+vi.mock('../../src/rbac/rbac', () => ({
+  rbacGuard: vi.fn(() => (_req: unknown, _res: unknown, next: () => void) => next()),
+}))
 
 function buildApp(service: unknown) {
   const app = express()
@@ -104,10 +112,19 @@ describe('A2 runs API — GET /automation-executions (list)', () => {
     expect(svc.logs.listExecutions).not.toHaveBeenCalled()
   })
 
-  it('limit clamps to [1,200]', async () => {
+  it('limit clamps to [1,200] — including the limit=0 corner (→ 1, not the 50 default)', async () => {
     const svc = makeMockService()
     await request(buildApp(svc)).get('/api/multitable/automation-executions?limit=5000').expect(200)
-    expect(svc.logs.listExecutions).toHaveBeenCalledWith(expect.objectContaining({ limit: 200 }))
+    expect(svc.logs.listExecutions).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 200 }))
+    await request(buildApp(svc)).get('/api/multitable/automation-executions?limit=0').expect(200)
+    expect(svc.logs.listExecutions).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 1 }))
+    await request(buildApp(svc)).get('/api/multitable/automation-executions?limit=-5').expect(200)
+    expect(svc.logs.listExecutions).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 1 }))
+  })
+
+  it('both runs routes are gated by rbacGuard("multitable", "write")', () => {
+    buildApp(makeMockService())
+    expect(vi.mocked(rbacGuard)).toHaveBeenCalledWith('multitable', 'write')
   })
 })
 
