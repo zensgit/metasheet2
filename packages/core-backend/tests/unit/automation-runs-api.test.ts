@@ -8,13 +8,14 @@ import express from 'express'
 import request from 'supertest'
 import { createAutomationRoutes } from '../../src/routes/automation'
 import { normalizeWorkflowJob } from '../../src/multitable/workflow-job-contract'
-import { rbacGuard } from '../../src/rbac/rbac'
+import { requireAdminRole } from '../../src/guards/audit-integration'
 
-// In prod the runs routes are gated by rbacGuard('multitable', 'write') (+ platform
-// admins via isAdmin/*:*). Here we pass it through so the handler logic is testable —
-// and separately assert the guard IS applied with the right permission.
-vi.mock('../../src/rbac/rbac', () => ({
-  rbacGuard: vi.fn(() => (_req: unknown, _res: unknown, next: () => void) => next()),
+// In prod the runs routes are gated by requireAdminRole() (platform-admin only).
+// Pass it through so the handler logic is testable — and separately assert the guard
+// IS applied to BOTH routes. Mocking the whole module also avoids pulling its heavy
+// audit/metrics deps into a unit test.
+vi.mock('../../src/guards/audit-integration', () => ({
+  requireAdminRole: vi.fn(() => (_req: unknown, _res: unknown, next: () => void) => next()),
 }))
 
 function buildApp(service: unknown) {
@@ -122,9 +123,11 @@ describe('A2 runs API — GET /automation-executions (list)', () => {
     expect(svc.logs.listExecutions).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 1 }))
   })
 
-  it('both runs routes are gated by rbacGuard("multitable", "write")', () => {
+  it('both runs routes (list + detail) are gated by requireAdminRole()', () => {
+    vi.mocked(requireAdminRole).mockClear()
     buildApp(makeMockService())
-    expect(vi.mocked(rbacGuard)).toHaveBeenCalledWith('multitable', 'write')
+    // exactly two guarded routes were constructed: list + detail
+    expect(vi.mocked(requireAdminRole)).toHaveBeenCalledTimes(2)
   })
 })
 
