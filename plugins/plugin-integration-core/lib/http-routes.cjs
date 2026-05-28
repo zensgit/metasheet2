@@ -735,6 +735,9 @@ function buildTemplatePreview(input) {
   // DF-T1: target payload template mode (payloadTemplate + fieldRules). DF-T1 evidence is
   // namespaced under `targetPayloadPreview`; the legacy fieldMappings/schema preview is unchanged
   // and never carries that field (DF-T1 req #1, #2).
+  if (Object.prototype.hasOwnProperty.call(input, 'payloadTemplate') && !isPlainObject(input.payloadTemplate)) {
+    throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', 'payloadTemplate must be an object', { field: 'payloadTemplate' })
+  }
   if (isPlainObject(input.payloadTemplate)) {
     return buildTargetPayloadPreview(input)
   }
