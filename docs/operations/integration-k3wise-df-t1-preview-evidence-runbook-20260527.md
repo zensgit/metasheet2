@@ -176,6 +176,41 @@ The `bodyTemplate` holds **real customer values** — it stays on the entity mac
 POST it to GitHub or paste/attach the config blob on #1792; evidence stays counts-and-presence
 only.
 
+## Template-alignment retry (customer Save template)
+
+If the persisted base is an incomplete `Material/GetDetail` clone, the preview fails completeness
+(e.g. `FUnitGroupID` comes back `{FName}`-only) and the pipeline composes a field the customer's
+K3 contract doesn't use (e.g. `FBaseUnitID`), so the dry-run cross-check won't match. Prefer the
+customer's own working `Material/Save` template as the authoritative base — this **refines the
+"GetDetail clone" framing above** for the customer case:
+
+1. **Base = the customer Save template, not a `GetDetail` clone.** Persist
+   `config.objects.material.bodyTemplate = { "Data": <customer Material/Save template object> }`
+   (operator-reviewed, real values, on-box, off-Git — same persist + `[redacted]` scan rule as
+   above). The customer's working template carries complete reference objects (e.g. `FUnitGroupID`
+   as `{FName, FNumber}`) that a `GetDetail` clone may lack.
+2. **Drop fields the customer contract doesn't use from the pipeline `fieldMappings`.** If the
+   customer's Material model has no `FBaseUnitID` (it uses `FUnitID` + the unit family), remove
+   the `FBaseUnitID` mapping. `projectRecordForBody` only projects schema fields the staging
+   record provides, so dropping the mapping stops the dry-run adding it — **no code change
+   needed**.
+3. **Preview replaces scalars only; references preserve the template.** Set `fieldRules` to
+   replace just the staging-sourced scalars (typically `FNumber`/`FName`/`FModel`/`FPlanPrice`)
+   as `from_staging`; keep **every** reference object as `preserve_template` (they come complete
+   from the customer template).
+4. **Re-run the no-write preview and require full parity:** the 7-field bar green,
+   `unresolvedReferenceComponents = 0`, **and** `preview.records[0].targetPayload.Data` field set
+   == `payload.Data` field set **including recursive (nested) shape**, not just top-level. A
+   top-level match with `recursive shape match: false` is **not** closed.
+5. **Post (sanitized):** the 7-field bar + `unresolvedReferenceComponents: 0` + `top-level field
+   match: yes` + `recursive shape match: yes` — names / counts / shape-presence only. If fields
+   still diverge, post the diverging field **names** only (no values) so the profile/schema/mapping
+   can be aligned (a separate change).
+
+This still **does not authorize a Save** — config-track parity proves the Save *body shape* (that
+we will Save exactly the customer's own template shape), not that K3 will accept it. The next
+Save-only attempt remains a separate, fresh approval.
+
 ## What to post on #1792 (sanitized only)
 
 Post the **acceptance result**, not the payload. A safe shape:
