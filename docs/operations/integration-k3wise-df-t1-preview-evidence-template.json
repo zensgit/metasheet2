@@ -8,10 +8,11 @@
     "integration-k3wise-df-t1-preview-evidence-runbook-20260527.md. This _instructions key is",
     "a sibling of sourceRecord/payloadTemplate and is ignored by the preview; sourceRecord and",
     "payloadTemplate below contain ONLY real fields (no annotation keys) so nothing pollutes",
-    "the composed payload. SCOPE (proven clone-Save path, NOT a general K3 authoring UI):",
-    "payloadTemplate MUST be a sanitized Material/GetDetail clone — the object-preservation path",
-    "already proven at the GATE — not a hand-built object. fieldRules v1 REPLACES ONLY the",
-    "identity fields FNumber/FName (from_staging); every reference object stays preserve_template",
+    "the composed payload. SCOPE (proven Save-template path, NOT a general K3 authoring UI):",
+    "payloadTemplate MUST be a sanitized real K3 Material object — the customer's working",
+    "Material/Save template is authoritative (a Material/GetDetail clone is a fallback and may be",
+    "incomplete, e.g. FUnitGroupID {FName}-only). fieldRules replace ONLY staging scalars",
+    "(typically FNumber/FName/FModel/FPlanPrice); every reference object stays preserve_template",
     "+ completeness (FNumber/FName or FID/FName). Do NOT author reference fields one-by-one. Fill",
     "materialCode/materialName from a staging row. The reference fields below are ILLUSTRATIVE:",
     "substitute the whole payloadTemplate with your sanitized clone (it usually carries more",
@@ -22,7 +23,9 @@
     "bodyTemplate (see runbook section 'Binding the preview to the pipeline'); the preview adds",
     "the Data wrapper itself. An ad-hoc clone is NOT acceptable; the pipeline dry-run cross-check",
     "must compare preview.records[0].targetPayload.Data (adapter-composed Save body) against the",
-    "previewed payload.Data, NOT preview.records[0].transformed — that is the authoritative gate."
+    "previewed payload.Data, NOT preview.records[0].transformed — that is the authoritative gate.",
+    "FBaseUnitID is intentionally omitted from the sample below — this customer's K3 contract uses",
+    "FUnitID + the unit family; see runbook section 'Template-alignment retry (customer Save template)'."
   ],
   "bodyKey": "Data",
   "sourceRecord": {
@@ -32,7 +35,6 @@
   "payloadTemplate": {
     "FUnitGroupID": { "FNumber": "<unit-group-number>", "FName": "<unit-group-name>" },
     "FUnitID": { "FNumber": "<unit-number>", "FName": "<unit-name>" },
-    "FBaseUnitID": { "FNumber": "<base-unit-number>", "FName": "<base-unit-name>" },
     "FErpClsID": { "FID": "<erp-cls-id>", "FName": "<erp-cls-name>" },
     "FUseState": { "FID": "<use-state-id>", "FName": "<use-state-name>" }
   },
@@ -41,7 +43,6 @@
     { "targetField": "FName", "sourceType": "from_staging", "sourceField": "materialName", "required": true, "shape": "scalar" },
     { "targetField": "FUnitGroupID", "sourceType": "preserve_template", "required": true, "completeness": "require-fnumber-fname" },
     { "targetField": "FUnitID", "sourceType": "preserve_template", "required": true, "completeness": "require-fnumber-fname" },
-    { "targetField": "FBaseUnitID", "sourceType": "preserve_template", "required": true, "completeness": "require-fnumber-fname" },
     { "targetField": "FErpClsID", "sourceType": "preserve_template", "required": true, "completeness": "require-fid-fname" },
     { "targetField": "FUseState", "sourceType": "preserve_template", "required": true, "completeness": "require-fid-fname" }
   ]
