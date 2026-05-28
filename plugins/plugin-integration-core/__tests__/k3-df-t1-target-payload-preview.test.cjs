@@ -167,11 +167,29 @@ function testInputValidation() {
     { fieldRules: [{ targetField: 'F', completeness: 'evil' }] },
     { fieldRules: [{ sourceType: 'from_staging' }] }, // no targetField
     { fieldRules: 'nope' },
+    { bodyKey: '__proto__' },     // P2-1: DF-T1 must not bypass the unsafe-key guard
+    { bodyKey: 'badkey' },  // P2-1: control char rejected
   ]) {
     let threw = null
     try { buildTemplatePreview({ sourceRecord: {}, payloadTemplate: { F: '1' }, ...bad }) } catch (e) { threw = e }
     assert.ok(threw && threw.code === 'INVALID_TEMPLATE_PREVIEW', `invalid DF-T1 input rejected: ${JSON.stringify(bad)}`)
   }
+}
+
+// ---- P2-2: DF-T1 response keeps the legacy fixed array fields (Shape B compatibility) ----
+function testShapeBCompatibility() {
+  const out = buildTemplatePreview({ sourceRecord: STAGING, payloadTemplate: TEMPLATE, fieldRules: RULES })
+  for (const f of ['transformErrors', 'validationErrors', 'schemaErrors']) {
+    assert.ok(Array.isArray(out[f]), `DF-T1 response keeps legacy array field ${f}`)
+    assert.equal(out[f].length, 0, `${f} is empty in DF-T1 mode`)
+  }
+  // P2-1 positive: a safe custom bodyKey (through normalizePreviewBodyKey) is honored.
+  const custom = buildTemplatePreview({
+    sourceRecord: { c: 'X' }, bodyKey: 'Model',
+    payloadTemplate: { FNumber: 'v' },
+    fieldRules: [{ targetField: 'FNumber', sourceType: 'from_staging', sourceField: 'c' }],
+  })
+  assert.ok('Model' in custom.payload && custom.payload.Model.FNumber === 'X', 'safe custom bodyKey honored')
 }
 
 function main() {
@@ -185,7 +203,8 @@ function main() {
   testNoWrite()
   testNoNewShaper()
   testInputValidation()
-  console.log('✓ k3-df-t1-target-payload-preview: namespacing, merge, fail-closed, shared-composer parity, passthrough, completeness, redaction, no-write, input-validation')
+  testShapeBCompatibility()
+  console.log('✓ k3-df-t1-target-payload-preview: namespacing, merge, fail-closed, shared-composer parity, passthrough, completeness, redaction, no-write, input-validation, bodyKey-guard, shape-B-compat')
 }
 
 main()

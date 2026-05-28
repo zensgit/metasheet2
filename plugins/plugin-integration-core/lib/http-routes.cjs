@@ -650,9 +650,11 @@ function buildTargetPayloadPreview(input) {
   if (!isPlainObject(input.sourceRecord)) {
     throw new HttpRouteError(400, 'INVALID_TEMPLATE_PREVIEW', 'sourceRecord must be an object', { field: 'sourceRecord' })
   }
-  const bodyKey = firstString(input.bodyKey)
-    || (isPlainObject(input.template) ? firstString(input.template.bodyKey) : null)
-    || 'Data'
+  // Reuse the legacy preview's bodyKey guard (rejects __proto__/prototype/constructor and
+  // control chars) — DF-T1 must NOT bypass it (P2).
+  const bodyKey = normalizePreviewBodyKey(
+    firstString(input.bodyKey) || (isPlainObject(input.template) ? firstString(input.template.bodyKey) : null),
+  )
   const fieldRules = normalizeFieldRules(input.fieldRules)
   // Preserve whole-object payloadTemplate defaults; rules replace only the declared fields.
   const merged = cloneJson(input.payloadTemplate)
@@ -703,6 +705,11 @@ function buildTargetPayloadPreview(input) {
     targetRecord: cloneJson(merged),
     errors,
     placeholderErrors: placeholderErrors.map((e) => cloneJson(e)),
+    // Shape-B compatibility: keep the legacy preview's fixed array fields (empty in DF-T1
+    // mode — DF-T1 merges via fieldRules, not fieldMappings transform/validation) (P2).
+    transformErrors: [],
+    validationErrors: [],
+    schemaErrors: [],
     targetPayloadPreview: {
       eligibleForSaveOnly: errors.length === 0,
       unresolvedPlaceholders: placeholderErrors.map((e) => e.field),
