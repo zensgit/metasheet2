@@ -2,7 +2,7 @@
 
 > Date: 2026-05-28  
 > Status: **DECISION MATERIAL — 非实现**  
-> Grounded in local checkout `HEAD @ f5013324e`（基于当前 `origin/main` 代码实读；本文件只做决策支持，不改 tracker / 不开工）
+> Grounded in docs branch `HEAD @ 8de72d4ad`；锚点已重新对齐 `origin/main @ 9e504de38`（2026-05-28）。本文件只做决策支持，不改 tracker / 不开工。
 
 ## TL;DR
 
@@ -23,14 +23,14 @@
 ### 1.1 前端 grid 当前就是“页局部分组”
 
 - `MetaGridTable.vue` 在 grouped 模式下渲染 group header，header 直接显示 `group.count`。[MetaGridTable.vue](/Users/chouhua/Downloads/Github/metasheet2/apps/web/src/multitable/components/MetaGridTable.vue:34)
-- `groupedRows` 的来源是对 **当前 `filteredRows`** 做本地分组；`count` 直接取 `rows.length`。[MetaGridTable.vue](/Users/chouhua/Downloads/Github/metasheet2/apps/web/src/multitable/components/MetaGridTable.vue:405)
-- grid 底部明确有分页器 UI：`currentPage / totalPages` + prev/next。[MetaGridTable.vue](/Users/chouhua/Downloads/Github/metasheet2/apps/web/src/multitable/components/MetaGridTable.vue:246)
+- `groupedRows` 的来源是对 **当前 `filteredRows`** 做本地分组；`count` 直接取 `rows.length`。[MetaGridTable.vue](/Users/chouhua/Downloads/Github/metasheet2/apps/web/src/multitable/components/MetaGridTable.vue:450)
+- grid 底部明确有分页器 UI：`currentPage / totalPages` + prev/next。[MetaGridTable.vue](/Users/chouhua/Downloads/Github/metasheet2/apps/web/src/multitable/components/MetaGridTable.vue:285)
 
 这说明当前 grouped grid 的真实语义不是“全集分组浏览”，而是“**当前页 rows 的本地分组浏览**”。
 
 ### 1.2 前端装载模型当前就是 offset/limit
 
-- `useMultitableGrid` 维护的分页 state 是 `MetaPage { offset, limit, total, hasMore }`。[types.ts](/Users/chouhua/Downloads/Github/metasheet2/apps/web/src/multitable/types.ts:125)
+- `useMultitableGrid` 维护的分页 state 是 `MetaPage { offset, limit, total, hasMore }`。[types.ts](/Users/chouhua/Downloads/Github/metasheet2/apps/web/src/multitable/types.ts:126)
 - `loadViewData(offset)` 每次调用 `/api/multitable/view` 都明确带 `limit` 和 `offset`。[useMultitableGrid.ts](/Users/chouhua/Downloads/Github/metasheet2/apps/web/src/multitable/composables/useMultitableGrid.ts:429)
 - `goToPage()` 的核心也是 `offset = (page - 1) * pageSize`。[useMultitableGrid.ts](/Users/chouhua/Downloads/Github/metasheet2/apps/web/src/multitable/composables/useMultitableGrid.ts:524)
 
@@ -45,8 +45,8 @@
 
 ### 1.4 后端 `/view` 当前也是分页返回，不是分组投递
 
-- `/view` 的 in-memory path 在 filter/sort 后，仍然执行 `sorted.slice(offset, offset + limit)`。[univer-meta.ts](/Users/chouhua/Downloads/Github/metasheet2/packages/core-backend/src/routes/univer-meta.ts:5943)
-- 默认 DB path 也返回 `page = { offset, limit, total, hasMore }`。[univer-meta.ts](/Users/chouhua/Downloads/Github/metasheet2/packages/core-backend/src/routes/univer-meta.ts:5979)
+- `/view` 的 in-memory path 在 filter/sort 后，仍然执行 `sorted.slice(offset, offset + limit)`。[univer-meta.ts](/Users/chouhua/Downloads/Github/metasheet2/packages/core-backend/src/routes/univer-meta.ts:6283)
+- 默认 DB path 也返回 `page = { offset, limit, total, hasMore }`。[univer-meta.ts](/Users/chouhua/Downloads/Github/metasheet2/packages/core-backend/src/routes/univer-meta.ts:6308)
 
 所以当前服务端 contract 是“给我第 N 页 rows”，不是“给我完整 groups / next chunk of grouped rows”。
 
@@ -65,10 +65,10 @@
 
 同时，有一条需要补充的现实约束：
 
-- `origin/main` 上已经有 `/sheets/:sheetId/view-aggregate` 路由，可返回 group aggregate 结果，并且计数/聚合这一侧已有现成权限门：computed group → `422 AGGREGATE_COMPUTED_GROUP_UNSUPPORTED`，hidden/denied group field → `422 AGGREGATE_GROUP_FIELD_DENIED`。[univer-meta.ts](/Users/chouhua/Downloads/Github/metasheet2/packages/core-backend/src/routes/univer-meta.ts:5892) [univer-meta.ts](/Users/chouhua/Downloads/Github/metasheet2/packages/core-backend/src/routes/univer-meta.ts:5990)
+- `origin/main` 上已经有 `/sheets/:sheetId/view-aggregate` 路由，可返回 group aggregate 结果，并且计数/聚合这一侧已有现成权限门：computed group → `422 AGGREGATE_COMPUTED_GROUP_UNSUPPORTED`，hidden/denied group field → `422 AGGREGATE_GROUP_FIELD_DENIED`。[univer-meta.ts](/Users/chouhua/Downloads/Github/metasheet2/packages/core-backend/src/routes/univer-meta.ts:5892) [univer-meta.ts](/Users/chouhua/Downloads/Github/metasheet2/packages/core-backend/src/routes/univer-meta.ts:5990) [univer-meta.ts](/Users/chouhua/Downloads/Github/metasheet2/packages/core-backend/src/routes/univer-meta.ts:5995)
 - 但这条原料只说明 **“计数/聚合那一侧大半现成”**，**不等于** “A2 的权限问题已经解决”。若将来要补“按 `groupKey` 拉组内行”的路径，那条 `/view + groupKey` 契约仍要单独审视权限与侧信道问题。
 - 这条 aggregate 路由还有 **10000 行硬上限**，超限直接 `413 AGGREGATE_TOO_LARGE`。[univer-meta.ts](/Users/chouhua/Downloads/Github/metasheet2/packages/core-backend/src/routes/univer-meta.ts:5919) [univer-meta.ts](/Users/chouhua/Downloads/Github/metasheet2/packages/core-backend/src/routes/univer-meta.ts:5923)
-- 这个 cap 不是“随手调大环境变量”就该解决的旋钮。当前实现本质上是把行 load 进内存后再做 JS 侧 filter/sort/group，因此 cap 在保护一次 O(n) 的内存分组过程。[univer-meta.ts](/Users/chouhua/Downloads/Github/metasheet2/packages/core-backend/src/routes/univer-meta.ts:5908) [univer-meta.ts](/Users/chouhua/Downloads/Github/metasheet2/packages/core-backend/src/routes/univer-meta.ts:5958)
+- 这个 cap 不是“随手调大环境变量”就该解决的旋钮。当前实现本质上是把行 load 进内存后再做 JS 侧 filter/sort/group，因此 cap 在保护一次 O(n) 的内存分组过程。[univer-meta.ts](/Users/chouhua/Downloads/Github/metasheet2/packages/core-backend/src/routes/univer-meta.ts:5951) [univer-meta.ts](/Users/chouhua/Downloads/Github/metasheet2/packages/core-backend/src/routes/univer-meta.ts:6004)
 
 所以这批现成原料的正确结论是：
 
