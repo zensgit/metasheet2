@@ -17,7 +17,10 @@
     "substitute the whole payloadTemplate with your sanitized clone (it usually carries more",
     "objects, e.g. org/stock fields), keeping each object's shape and a <...> placeholder for",
     "anything you cannot fill; mirror each new required reference field with a preserve_template",
-    "fieldRule."
+    "fieldRule. BINDING (#1792 config-track evidence): for FINAL evidence this payloadTemplate",
+    "MUST be the persisted config.objects.material.bodyTemplate (see runbook section 'Binding the",
+    "preview to the pipeline') — an ad-hoc clone is NOT acceptable as final evidence; a pipeline",
+    "dry-run must confirm the transformed Save-body field set == the previewed field set."
   ],
   "bodyKey": "Data",
   "sourceRecord": {
