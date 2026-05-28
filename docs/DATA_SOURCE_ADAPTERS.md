@@ -2,7 +2,9 @@
 
 ## Overview
 
-The Data Source Adapter system provides a unified interface for connecting to and querying multiple types of external data sources including relational databases (PostgreSQL, MySQL), NoSQL databases (MongoDB), and HTTP/REST APIs.
+The Data Source Adapter system provides a unified interface for connecting to and querying external data sources.
+
+> **Currently supported public types** (what `POST /api/data-sources` accepts, driven by `SUPPORTED_DATA_SOURCE_TYPES`): `postgresql` / `postgres`, `http`, and **`sqlserver`** (modern SQL Server, direct Node path). MySQL/MongoDB adapter classes still exist in the codebase but are **not** registered as public data-source types (they are used internally by `DataMaterializationService` only). Some sections below describe aspirational/partial capabilities — treat the supported-types list above as the source of truth.
 
 ## Architecture
 
@@ -77,17 +79,14 @@ Central management system for all data source adapters:
 - Streaming support for large result sets
 - Connection pooling with pg library
 
-#### MySQL Adapter
-- MySQL/MariaDB compatibility
-- Prepared statements for security
-- Batch insert optimization
-- Connection pool management
+#### SQL Server (modern direct path)
+- `type: 'sqlserver'`, driver `mssql` (^10), reuses the framework's read-only/owner-scope/credential-encryption.
+- **Secure by default**: `connection.encrypt = true` and `connection.trustServerCertificate = true` (encrypted wire, accepts an intranet self-signed cert). `encrypt: false` is an explicit per-source escape hatch only — not recommended.
+- Connection keys: `host`/`port`/`database`, `encrypt`, `trustServerCertificate`, `connectionTimeoutMs` (10000), `requestTimeoutMs` (30000). A `connection.server` alias is accepted (`host:port` or `host,port`); `host` takes precedence over `server`.
+- **Scope**: modern SQL Server (2017+) over a direct Node path. **Legacy SQL Server (2014 RTM / 2012 / 2008 / 2005) is out of scope here** — pre-login/TLS-negotiation failures continue to be handled by the Bridge Agent / Lane C design line; this adapter does not add legacy protocol hacks.
 
-#### MongoDB Adapter
-- Aggregation pipeline support
-- Document-based operations
-- GridFS for large files
-- Session-based transactions
+#### MySQL / MongoDB adapters (internal only — not a public data-source type)
+- The `MySQLAdapter` / `MongoDBAdapter` classes exist but are **not** registered as public `data-sources` types (A4 narrowed the public matrix). They are used only by `DataMaterializationService`. Do not assume `type: 'mysql'` / `'mongodb'` is accepted by `POST /api/data-sources` — it returns `400 VALIDATION_ERROR`.
 
 #### HTTP Adapter
 - RESTful API integration
