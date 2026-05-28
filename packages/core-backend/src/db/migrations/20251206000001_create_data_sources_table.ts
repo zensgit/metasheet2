@@ -24,7 +24,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         col.primaryKey().defaultTo(sql`gen_random_uuid()::text`)
       )
       .addColumn('name', 'text', col => col.notNull())
-      .addColumn('type', 'text', col => col.notNull()) // postgres, mysql, mongodb, http, redis, elasticsearch
+      .addColumn('type', 'text', col => col.notNull()) // persisted data-source type key; runtime support is enforced by the app layer
       .addColumn('description', 'text')
       // Connection config (encrypted sensitive fields like password)
       .addColumn('config', 'jsonb', col => col.notNull())
