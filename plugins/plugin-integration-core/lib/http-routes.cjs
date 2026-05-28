@@ -693,12 +693,15 @@ function buildTargetPayloadPreview(input) {
     code: 'K3_WISE_PRESET_PLACEHOLDER_UNFILLED',
     message: `unfilled template placeholder at ${path}`,
   }))
-  // DF-T1.5: when the workbench UI path supplied fieldMappings, the DF-T1 branch transformed the
-  // sourceRecord first and passes the transform errors through here, so the preview reflects the
-  // real pipeline transform. Runbook callers omit fieldMappings → no transformErrors (shape B []).
+  // DF-T1.5: when the workbench UI path supplied fieldMappings, the DF-T1 branch ran the same
+  // transform + (non-required) validation the legacy pipeline runs and passes the errors through
+  // here, so the preview reflects the real pipeline. Runbook callers omit fieldMappings → both
+  // stay [] (shape B). required stays owned by the fieldRules (missingRequiredFields).
   const transformErrors = (Array.isArray(input.transformErrors) ? input.transformErrors : []).map((e) => cloneJson(e))
+  const validationErrors = (Array.isArray(input.validationErrors) ? input.validationErrors : []).map((e) => cloneJson(e))
   const errors = [
     ...transformErrors,
+    ...validationErrors,
     ...placeholderErrors,
     ...missingRequiredFields.map((field) => ({ field, code: 'REQUIRED', message: `${field} is required` })),
     ...unresolvedReferenceComponents.map((u) => ({ field: u.field, code: 'INCOMPLETE_REFERENCE', message: `${u.field} requires ${u.rule}` })),
@@ -710,11 +713,11 @@ function buildTargetPayloadPreview(input) {
     targetRecord: cloneJson(merged),
     errors,
     placeholderErrors: placeholderErrors.map((e) => cloneJson(e)),
-    // Shape-B compatibility: validationErrors/schemaErrors stay [] in DF-T1 (required is carried by
-    // fieldRules → missingRequiredFields). transformErrors is populated only when fieldMappings were
-    // supplied (the UI path); runbook callers (no fieldMappings) keep it [] (P2).
+    // Shape-B: schemaErrors stays []. transformErrors/validationErrors are populated only when
+    // fieldMappings were supplied (the UI path); runbook callers (no fieldMappings) keep them []
+    // (P2). required is owned by the fieldRules (missingRequiredFields), not validationErrors.
     transformErrors,
-    validationErrors: [],
+    validationErrors,
     schemaErrors: [],
     targetPayloadPreview: {
       eligibleForSaveOnly: errors.length === 0,
@@ -754,9 +757,23 @@ function buildTemplatePreview(input) {
     if (rawMappings.length > 0) {
       const fieldMappings = normalizePreviewFieldMappings(rawMappings)
       const transformed = transformRecord(input.sourceRecord, fieldMappings)
-      // transformed.value is always an object (the legacy path projects it even when !ok); the
-      // errors carry the bad news and are surfaced via transformErrors below.
-      return buildTargetPayloadPreview({ ...input, sourceRecord: transformed.value, transformErrors: transformed.errors })
+      // Run the SAME validation the legacy pipeline runs — but strip `required` from the mappings:
+      // required is already enforced by the derived fieldRules (missingRequiredFields), so this avoids
+      // double-counting while still surfacing non-required validations (min/max/regex/...) that the
+      // pipeline would reject. Closes the residual "green DF-T1 preview but pipeline rejects" gap.
+      const nonRequiredMappings = fieldMappings.map((mapping) => ({
+        ...mapping,
+        validation: Array.isArray(mapping.validation) ? mapping.validation.filter((rule) => rule && rule.type !== 'required') : [],
+      }))
+      const validation = transformed.ok ? validateRecord(transformed.value, nonRequiredMappings) : { errors: [] }
+      // transformed.value is always an object (the legacy path projects it even when !ok); the errors
+      // carry the bad news and are surfaced via transformErrors / validationErrors below.
+      return buildTargetPayloadPreview({
+        ...input,
+        sourceRecord: transformed.value,
+        transformErrors: transformed.errors,
+        validationErrors: validation.errors,
+      })
     }
     return buildTargetPayloadPreview(input)
   }

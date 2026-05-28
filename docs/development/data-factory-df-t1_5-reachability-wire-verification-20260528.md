@@ -16,10 +16,12 @@ the request so the panel is reachable, and locks the missing request-body assert
   DF-T1 branch, when `fieldMappings` are supplied (the UI path) the preview now runs the SAME
   `transformRecord` the legacy pipeline runs and composes from the TRANSFORMED record (keyed by target
   field), surfacing `transformErrors`. So `from_staging` reads the transformed value and the DF-T1
-  preview predicts the real Save body — not raw staging. Callers that omit `fieldMappings` (operator
-  runbook, target-shaped `sourceRecord`) keep reading raw (shape B unchanged). `required` is carried
-  by the fieldRules (`missingRequiredFields`); `validateRecord` is intentionally not run in DF-T1 (no
-  duplicate error entries).
+  preview predicts the real Save body — not raw staging. It also runs `validateRecord` (non-required
+  validations — min/max/regex — surfaced as `validationErrors`), with `required` stripped from those
+  mappings because `required` is owned by the fieldRules (`missingRequiredFields`) — so both transform
+  AND validation match the pipeline with no duplicate error entries. Callers that omit `fieldMappings`
+  (operator runbook, target-shaped `sourceRecord`) keep reading raw and both error arrays stay []
+  (shape B unchanged).
 - `apps/web/src/views/IntegrationWorkbenchView.vue`: an optional `目标模板 JSON` textarea
   (`payloadTemplateText`); `previewPayload()` sends `payloadTemplate` + derived `fieldRules` **only**
   when the textarea parses to an object. Empty → byte-compatible legacy request. Invalid JSON →
@@ -30,9 +32,11 @@ the request so the panel is reachable, and locks the missing request-body assert
 
 - `plugins/plugin-integration-core/__tests__/k3-df-t1-target-payload-preview.test.cjs` — **transform
   alignment (review P2)**: with `fieldMappings`, DF-T1 applies trim+upper / dictMap / toNumber so the
-  payload carries the TRANSFORMED values (`MAT-001` / `Pcs` / `2`), not raw; and a required staging
-  field blank after transform → `valid: false` (`missingRequiredFields`). Existing no-`fieldMappings`
-  DF-T1 tests are unchanged (raw reads, `transformErrors: []`).
+  payload carries the TRANSFORMED values (`MAT-001` / `Pcs` / `2`), not raw; a required staging field
+  blank after transform → `valid: false` (`missingRequiredFields`); and a failing **non-required**
+  validation (`min`) → `valid: false` (`validationErrors`), proving the full pipeline validation runs.
+  Existing no-`fieldMappings` DF-T1 tests are unchanged (raw reads, `transformErrors`/`validationErrors`
+  `[]`).
 - `apps/web/tests/integrationWorkbench.spec.ts` — `deriveFieldRulesFromMappings` unit tests: maps to
   `from_staging` scalar **keyed by target field**; preserves `required` from the mapping validation;
   skips entries missing a source/target; tolerates an empty list.

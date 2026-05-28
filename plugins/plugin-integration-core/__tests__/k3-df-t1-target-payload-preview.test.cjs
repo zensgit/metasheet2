@@ -245,6 +245,27 @@ function testRequiredBlankWithFieldMappings() {
   assert.equal(out.targetPayloadPreview.eligibleForSaveOnly, false)
 }
 
+function testValidationAppliedWithFieldMappings() {
+  // A non-required validation (min) runs in DF-T1 when fieldMappings are supplied: a failing min
+  // makes the preview invalid, matching the pipeline (closes the residual "green preview, pipeline
+  // rejects" gap). required stays owned by the fieldRules, so validateRecord here is non-required only.
+  const out = buildTemplatePreview({
+    sourceRecord: { code: 'MAT-1', qty: '0' },
+    fieldMappings: [
+      { sourceField: 'code', targetField: 'FNumber', transform: { fn: 'trim' } },
+      { sourceField: 'qty', targetField: 'FQty', transform: { fn: 'toNumber' }, validation: [{ type: 'min', value: 1 }] },
+    ],
+    payloadTemplate: { FNumber: '<n>', FQty: 0 },
+    fieldRules: [
+      { targetField: 'FNumber', sourceType: 'from_staging', sourceField: 'FNumber', shape: 'scalar' },
+      { targetField: 'FQty', sourceType: 'from_staging', sourceField: 'FQty', shape: 'scalar' },
+    ],
+  })
+  assert.equal(out.valid, false, 'failing min validation -> preview invalid (predicts pipeline rejection)')
+  assert.ok(out.validationErrors.length > 0, 'validationErrors surfaced from the pipeline validator')
+  assert.equal(out.targetPayloadPreview.eligibleForSaveOnly, false)
+}
+
 function main() {
   testModeNamespacing()
   testMergeSemantics()
@@ -259,7 +280,8 @@ function main() {
   testShapeBCompatibility()
   testTransformAppliedWithFieldMappings()
   testRequiredBlankWithFieldMappings()
-  console.log('✓ k3-df-t1-target-payload-preview: namespacing, merge, fail-closed, shared-composer parity, passthrough, completeness, redaction, no-write, input-validation, bodyKey-guard, shape-B-compat, transform-applied, required-blank')
+  testValidationAppliedWithFieldMappings()
+  console.log('✓ k3-df-t1-target-payload-preview: namespacing, merge, fail-closed, shared-composer parity, passthrough, completeness, redaction, no-write, input-validation, bodyKey-guard, shape-B-compat, transform-applied, required-blank, validation-applied')
 }
 
 main()
