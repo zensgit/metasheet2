@@ -52,3 +52,12 @@ test('attendance locale zh smoke workflow keeps drill before resolver and real s
   assert.match(raw, /if:\s+\$\{\{\s+env\.DRILL_FAIL != 'true'\s+\}\}\n\s+id: resolve-auth-token/)
   assert.match(raw, /if:\s+\$\{\{\s+env\.DRILL_FAIL != 'true'\s+\}\}\n\s+env:\n\s+AUTH_TOKEN:/)
 })
+
+test('attendance locale zh smoke waits for async holiday badges while probing months', () => {
+  const raw = readFileSync(path.join(repoRoot, 'scripts/verify-attendance-locale-zh-smoke.mjs'), 'utf8')
+
+  assert.match(raw, /const holidayBadgeProbeWaitMsRaw = Number\(process\.env\.HOLIDAY_BADGE_WAIT_MS \|\| 10000\)/)
+  assert.match(raw, /const holidayBadgeProbeWaitMs = Number\.isFinite\(holidayBadgeProbeWaitMsRaw\) && holidayBadgeProbeWaitMsRaw > 0/)
+  assert.match(raw, /await target\.waitFor\(\{ timeout: holidayBadgeProbeWaitMs \}\)/)
+  assert.match(raw, /await target\.first\(\)\.waitFor\(\{ timeout: holidayBadgeProbeWaitMs \}\)/)
+})

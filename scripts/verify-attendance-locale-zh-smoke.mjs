@@ -14,6 +14,10 @@ const orgId = String(process.env.ORG_ID || 'default').trim()
 const verifyHoliday = process.env.VERIFY_HOLIDAY !== 'false'
 const requireToggleChecks = process.env.REQUIRE_TOGGLE_CHECKS === 'true'
 const requireShellTabChecks = process.env.REQUIRE_SHELL_TAB_CHECKS === 'true'
+const holidayBadgeProbeWaitMsRaw = Number(process.env.HOLIDAY_BADGE_WAIT_MS || 10000)
+const holidayBadgeProbeWaitMs = Number.isFinite(holidayBadgeProbeWaitMsRaw) && holidayBadgeProbeWaitMsRaw > 0
+  ? Math.min(timeoutMs, holidayBadgeProbeWaitMsRaw)
+  : Math.min(timeoutMs, 10000)
 
 function normalizeUrl(value) {
   return String(value || '').trim().replace(/\/+$/, '')
@@ -280,10 +284,11 @@ async function findHolidayBadgeAcrossMonths(page, holidayName) {
       await navButtonByStep[step].first().click()
       await page.waitForLoadState('networkidle', { timeout: timeoutMs })
     }
-    const count = await target.count()
-    if (count > 0) {
-      await target.waitFor({ timeout: 5000 })
+    try {
+      await target.waitFor({ timeout: holidayBadgeProbeWaitMs })
       return true
+    } catch {
+      // Keep probing adjacent months; effective-calendar chips load asynchronously.
     }
   }
   const calendarLabel = await page.locator('.attendance__calendar-label').first().textContent().catch(() => '')
@@ -312,6 +317,11 @@ async function findAnyHolidayBadgeAcrossMonths(page) {
     if (step) {
       await navButtonByStep[step].first().click()
       await page.waitForLoadState('networkidle', { timeout: timeoutMs })
+    }
+    try {
+      await target.first().waitFor({ timeout: holidayBadgeProbeWaitMs })
+    } catch {
+      // Keep probing adjacent months; badge data may still be loading for this month.
     }
     const count = await target.count()
     if (count > 0) {
