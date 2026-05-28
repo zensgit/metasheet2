@@ -101,15 +101,36 @@ export class MultitableFormulaEngine {
       expression = expression.substring(1)
     }
 
-    // Replace {fld_xxx} references with actual values from recordData
+    // Replace {fld_xxx} references with actual values from recordData. Complex values must become
+    // SAFE literals, never raw-substituted — the old `String(value)` injected `[object Object]`
+    // (object) or an unquoted `a,b` (array) straight into the expression, polluting/breaking the
+    // parse (A2b hardening; `evaluateField` is shared by record recalc + dry-run).
+    let hasUnusableValue = false
     const resolved = expression.replace(FIELD_REF_PATTERN, (_match, fieldId: string) => {
       const value = recordData[fieldId]
       if (value === null || value === undefined) return '0'
       if (typeof value === 'string') return JSON.stringify(value)
       if (typeof value === 'number') return String(value)
       if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE'
-      return String(value)
+      // multi-value lookup / multiSelect of SCALARS → quoted joined string literal. An array that
+      // holds an object/array (e.g. a multi-value lookup of an object/location-valued field — a real
+      // lookup shape) is NOT coercible → #VALUE!, never a fake "[object Object]" join.
+      if (Array.isArray(value)) {
+        const allScalar = value.every(
+          (v) => v == null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean',
+        )
+        if (allScalar) return JSON.stringify(value.join(','))
+        hasUnusableValue = true
+        return '0'
+      }
+      // any other complex value (e.g. a person/location object) is not a valid formula operand →
+      // propagate as an error rather than injecting it (placeholder keeps the replace well-formed)
+      hasUnusableValue = true
+      return '0'
     })
+    // An object-valued reference makes the whole field error (Excel-style propagation) instead of
+    // computing against a placeholder.
+    if (hasUnusableValue) return '#VALUE!'
 
     const context: FormulaContext = {
       sheetId: '',
