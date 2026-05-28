@@ -2,15 +2,14 @@ import { EventEmitter } from 'eventemitter3'
 import type { Kysely } from 'kysely'
 import type { BaseDataAdapter, DataSourceConfig, QueryOptions, QueryResult, DbValue, WhereValue, ConnectionConfig, Credentials, AdapterOptions } from './BaseAdapter'
 import { PostgresAdapter } from './PostgresAdapter'
-import { MySQLAdapter } from './MySQLAdapter'
 import { HTTPAdapter } from './HTTPAdapter'
-import { MongoDBAdapter } from './MongoDBAdapter'
 import { encryptStoredSecretValue, decryptStoredSecretValue, isEncryptedSecretValue } from '../security/encrypted-secrets'
 
 // Credential fields that hold secrets and are encrypted at rest. Identifiers
 // like `username` are left as-is (matching the codebase's encrypt-secrets-only
 // convention).
 const SENSITIVE_CREDENTIAL_KEYS = ['password', 'apiKey', 'token']
+export const SUPPORTED_DATA_SOURCE_TYPES = ['postgresql', 'postgres', 'http'] as const
 
 type AdapterConstructor = new (config: DataSourceConfig) => BaseDataAdapter
 
@@ -89,8 +88,12 @@ export class DataSourceManager extends EventEmitter {
         .where('deleted_at' as never, 'is', null as never)
         .execute() as DataSourceRecord[]
 
+      let loadedCount = 0
       for (const record of records) {
         try {
+          if (!this.adapterTypes.has(record.type.toLowerCase())) {
+            throw new Error(`Unsupported persisted data source type: ${record.type}`)
+          }
           const config = this.recordToConfig(record)
           await this.addDataSourceInternal(config, false) // Don't persist again
           // Ownership lives on the DB record, not in config (recordToConfig strips it)
@@ -104,12 +107,14 @@ export class DataSourceManager extends EventEmitter {
               console.error(`[DataSourceManager] Auto-connect failed for ${config.id}:`, err)
             })
           }
+          loadedCount += 1
         } catch (err) {
           console.error(`[DataSourceManager] Failed to load data source ${record.id}:`, err)
         }
       }
 
-      console.log(`[DataSourceManager] Loaded ${records.length} data sources from database`)
+      const skippedCount = records.length - loadedCount
+      console.log(`[DataSourceManager] Loaded ${loadedCount} data sources from database${skippedCount > 0 ? ` (${skippedCount} skipped)` : ''}`)
     } catch (err) {
       // Table might not exist yet
       console.warn('[DataSourceManager] Could not load from database:', err)
@@ -201,12 +206,10 @@ export class DataSourceManager extends EventEmitter {
   }
 
   private registerDefaultAdapters(): void {
-    // Cast adapters to AdapterConstructor - their pool property visibility differs but functionality is identical
+    // A4: public support is intentionally narrowed to the verified runtime set.
     this.registerAdapterType('postgresql', PostgresAdapter as unknown as AdapterConstructor)
     this.registerAdapterType('postgres', PostgresAdapter as unknown as AdapterConstructor)
-    this.registerAdapterType('mysql', MySQLAdapter as unknown as AdapterConstructor)
     this.registerAdapterType('http', HTTPAdapter as unknown as AdapterConstructor)
-    this.registerAdapterType('mongodb', MongoDBAdapter as unknown as AdapterConstructor)
   }
 
   registerAdapterType(type: string, adapterClass: AdapterConstructor): void {

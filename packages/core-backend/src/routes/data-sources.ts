@@ -2,7 +2,7 @@
  * Data Sources REST API Routes
  *
  * Provides API endpoints for managing external data source connections
- * including PostgreSQL, MySQL, MongoDB, HTTP/REST APIs, etc.
+ * including PostgreSQL and HTTP/REST APIs.
  *
  * V2 Features:
  * - Zod schema validation for all requests
@@ -16,7 +16,7 @@ import type { Kysely } from 'kysely'
 import { z } from 'zod'
 import { rbacGuard } from '../rbac/rbac'
 import { auditLog } from '../audit/audit'
-import { DataSourceManager } from '../data-adapters/DataSourceManager'
+import { DataSourceManager, SUPPORTED_DATA_SOURCE_TYPES } from '../data-adapters/DataSourceManager'
 import type { DataSourceConfig, QueryOptions } from '../data-adapters/BaseAdapter'
 
 // Zod schemas for request validation
@@ -25,7 +25,7 @@ const ConnectionConfigSchema = z.record(z.union([z.string(), z.number(), z.boole
 const DataSourceCreateSchema = z.object({
   id: z.string().min(1, 'ID is required'),
   name: z.string().min(1, 'Name is required'),
-  type: z.enum(['postgresql', 'postgres', 'mysql', 'mongodb', 'http', 'redis', 'elasticsearch'], {
+  type: z.enum(SUPPORTED_DATA_SOURCE_TYPES, {
     errorMap: () => ({ message: 'Unsupported data source type' })
   }),
   connection: ConnectionConfigSchema,

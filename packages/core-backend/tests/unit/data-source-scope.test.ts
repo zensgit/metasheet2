@@ -109,11 +109,11 @@ function statefulFakeDb() {
   }
 }
 
-function dbRecord(id: string, ownerId: string, workspaceId: string | null) {
+function dbRecord(id: string, ownerId: string, workspaceId: string | null, type = 'postgres') {
   return {
     id,
     name: id,
-    type: 'postgres',
+    type,
     description: null,
     config: { connection: {} },
     status: 'disconnected',
@@ -171,6 +171,17 @@ describe('DataSourceManager ownership scope (A0.1)', () => {
     expect(m.getScope('b1')).toEqual({ ownerId: 'bob', workspaceId: 'ws-b' })
     expect(() => m.assertAccess('a1', 'bob')).toThrow(/not found/)
     expect(m.listDataSources({ ownerId: 'bob' }).map((s) => s.id)).toEqual(['b1'])
+  })
+
+  it('skips persisted rows whose type is no longer in the supported runtime set', async () => {
+    const m = new DataSourceManager()
+    await m.initialize(fakeDb([
+      dbRecord('pg-ok', 'alice', null, 'postgres'),
+      dbRecord('legacy-mysql', 'alice', null, 'mysql'),
+    ]) as never)
+    expect(() => m.getDataSource('pg-ok')).not.toThrow()
+    expect(() => m.getDataSource('legacy-mysql')).toThrow(/not found/)
+    expect(m.listDataSources({ ownerId: 'alice' }).map((s) => s.id)).toEqual(['pg-ok'])
   })
 })
 
@@ -234,6 +245,18 @@ describe('data-sources route ownership scope (A0.1)', () => {
     currentUser = undefined
     const res = await request(app).post('/api/data-sources').send(pgConfig('ds-unauth'))
     expect(res.status).toBe(401)
+  })
+
+  it('rejects unsupported create types at validation time', async () => {
+    currentUser = admin('alice4')
+    for (const unsupportedType of ['mysql', 'mongodb', 'redis', 'elasticsearch']) {
+      const res = await request(app)
+        .post('/api/data-sources')
+        .send({ ...pgConfig(`bad-${unsupportedType}`), type: unsupportedType })
+      expect(res.status).toBe(400)
+      expect(res.body.error.code).toBe('VALIDATION_ERROR')
+      expect(res.body.error.message).toContain('Unsupported data source type')
+    }
   })
 })
 
