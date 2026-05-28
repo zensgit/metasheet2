@@ -73,27 +73,20 @@ Implementation notes:
   "must include both FNumber and FName"; do not make byte-parity tests imply
   that adapter Save composition enforces two-component completeness.
 
-### ⬜ DF-T1 — Target payload template preview (the GATE-relevant payoff) — ACTIVE NEXT
-Gate satisfied: DF-T1-0 parity is green on `main` (#1936). Awaiting the explicit build opt-in.
-- [ ] Extend the **existing** `/api/integration/templates/preview` (do not fork a parallel route) with `payloadTemplate` + `fieldRules`.
-- [ ] No-write merge: `payloadTemplate + fieldRules + staging record → final payload`, composed **through the DF-T1-0 single source of truth**.
-- [ ] Preserve whole-object `payloadTemplate` defaults; replace only fields declared by `fieldRules`.
-- [ ] Fail closed on unresolved placeholders (same path as Save).
-- [ ] Zero external calls; output passes shared redaction.
-- [ ] This is the immediate operator value: see the exact byte-identical payload before any Save attempt.
+### ✅ DF-T1 — Target payload template preview (DONE — PR #1945, squash `9c780d90a`, 2026-05-28)
+Shape B (legacy preview fields compatible; DF-T1 evidence under `targetPayloadPreview`, only when `payloadTemplate` is present). Owner review added 2 patches (P2-1 bodyKey reuses `normalizePreviewBodyKey` guard; P2-2 keeps legacy `transformErrors/validationErrors/schemaErrors` empty arrays).
+- [x] Extended the **existing** `/api/integration/templates/preview` with `payloadTemplate` + `fieldRules` (no new route).
+- [x] No-write merge `payloadTemplate + fieldRules + staging record → final payload`, composed **through the DF-T1-0 shared composer** (shaping via `applyReferenceShape`, detection via `findUnfilledPlaceholders`; no new shaper — grep-gated).
+- [x] Whole-object `payloadTemplate` defaults preserved; rules replace only declared fields.
+- [x] Fail-closed on unresolved placeholders (same `K3_WISE_PRESET_PLACEHOLDER_UNFILLED` code the Save throws; negative-controlled).
+- [x] Zero external calls; output passes shared redaction (`redactionSelfCheck.clean`).
+- [x] Evidence emitted: `eligibleForSaveOnly` / `unresolvedPlaceholders` / `unresolvedReferenceComponents` / `missingRequiredFields` / `fieldProvenance` / `redactionSelfCheck` / `compositionSource`.
+- [x] bodyKey routed through `normalizePreviewBodyKey` (rejects `__proto__`/control chars); shape-vs-completeness layered (require-both = readiness, not Save-body). `k3-df-t1-target-payload-preview.test.cjs` covers all of the above.
 
-Minimum accepted DF-T1 evidence:
+Closeout-verified on `main`: targetPayloadPreview + legacy arrays present; bodyKey guard active; no-write/fail-closed/redaction/grep-gate tests in place.
 
-- One sample staging row + one sanitized target `payloadTemplate` produces the
-  final target payload.
-- The output states whether it is eligible as Save-only evidence.
-- The output lists unresolved placeholders and unresolved reference components.
-- The output includes a redaction self-check result.
-- The output includes a composition-source marker proving it used the DF-T1-0
-  shared composer/parity seam.
-
-### 🔒 DF-T1.5 — Preview provenance display
-Gated on: DF-T1 + opt-in.
+### ⬜ DF-T1.5 — Preview provenance display — NEXT (gate satisfied; not auto-started)
+Gate satisfied: DF-T1 is green on `main` (#1945) and already emits `targetPayloadPreview.fieldProvenance`. Awaiting an explicit opt-in. (DF-T1.5 is a read-only display over that existing data — no new runtime.)
 - [ ] Per-field provenance (staging / template / constant / reference-table), derived read-only from the DF-T1 merge.
 - [ ] No new persisted provenance runtime field in this slice.
 
@@ -184,7 +177,7 @@ processors, or streaming cluster in this track.
 
 ## Sequencing rule
 
-One explicit opt-in per phase. Do not auto-start the next. **DF-T1-0 is DONE (#1936); the active next is DF-T1** (target payload template preview on the now-trustworthy seam). Everything below DF-T1 stays 🔒 until its predecessor gate is green and it is separately opted in.
+One explicit opt-in per phase. Do not auto-start the next. **DF-T1-0 (#1936) and DF-T1 (#1945) are DONE; the active next is DF-T1.5** (preview provenance display — a read-only view over the `fieldProvenance` DF-T1 already emits). Everything below DF-T1.5 stays 🔒 until its predecessor gate is green and it is separately opted in.
 
 ## Definition of done — DF-T1-0 (the immediate gate)
 
