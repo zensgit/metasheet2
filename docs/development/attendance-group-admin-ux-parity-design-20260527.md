@@ -6,9 +6,9 @@ Status: design lock only
 
 ## 1. Intent
 
-This document locks the first MetaSheet attendance-group admin UX improvement inspired by the locally reviewed DingTalk admin manual page for attendance group creation and editing.
+This document locks the first MetaSheet attendance-group admin UX improvement inspired by the locally reviewed reference admin manual page for attendance group creation and editing.
 
-The useful pattern is not "copy every DingTalk capability." The useful pattern is:
+The useful pattern is not "copy every reference capability." The useful pattern is:
 
 1. Make attendance groups the operator's primary object.
 2. Let the operator create or select a group first.
@@ -19,12 +19,12 @@ This design is docs-only. It does not unlock runtime implementation, backend sch
 
 ## 2. Current MetaSheet Surface
 
-All code citations were verified on `origin/main` at `536fb9829`.
+All code citations were verified on `origin/main` at `a04758c2c`.
 
 | Area | Current state | Evidence |
 | --- | --- | --- |
 | Group shape | Existing attendance group rows expose `id`, `orgId`, `name`, `code`, `timezone`, `ruleSetId`, `description`, timestamps. | `plugins/plugin-attendance/index.cjs:7275` |
-| Group CRUD | Existing admin routes already support list, detail, create, update, and delete. | `plugins/plugin-attendance/index.cjs:25269`, `plugins/plugin-attendance/index.cjs:25301`, `plugins/plugin-attendance/index.cjs:25364`, `plugins/plugin-attendance/index.cjs:25452` |
+| Group CRUD | Existing admin routes already support list, detail, create, update, and delete. | `plugins/plugin-attendance/index.cjs:25216`, `plugins/plugin-attendance/index.cjs:25269`, `plugins/plugin-attendance/index.cjs:25301`, `plugins/plugin-attendance/index.cjs:25364`, `plugins/plugin-attendance/index.cjs:25452` |
 | Member CRUD | Existing admin routes already support member list, add, and remove. Add accepts `userId` or `userIds`, de-duplicates with `ON CONFLICT DO NOTHING`. | `plugins/plugin-attendance/index.cjs:25483`, `plugins/plugin-attendance/index.cjs:25528`, `plugins/plugin-attendance/index.cjs:25586` |
 | Admin navigation | Attendance groups and group members are two separate admin sections under the Organization nav group. | `apps/web/src/views/attendance/useAttendanceAdminRail.ts:21`, `apps/web/src/views/attendance/useAttendanceAdminRail.ts:169`, `apps/web/src/views/attendance/useAttendanceAdminRail.ts:212` |
 | Production admin UI | The current production surface is a form plus table for groups, followed by a separate member-management block. | `apps/web/src/views/AttendanceView.vue:2949`, `apps/web/src/views/AttendanceView.vue:2960`, `apps/web/src/views/AttendanceView.vue:3021`, `apps/web/src/views/AttendanceView.vue:3038` |
@@ -52,8 +52,8 @@ The first runtime slice that follows this design must stay inside these boundari
 4. No group owner, sub-admin, or delegated permission model.
 5. No schedule-calculation change and no automatic shift matching change.
 6. No `attendance_schedule_groups` semantic reuse. Attendance groups remain policy and membership groups; schedule groups remain scheduling workbench groups.
-7. No fake support copy. If a DingTalk-like capability is not backed by existing MetaSheet data, the UI must say it is not configured or handled elsewhere.
-8. No PR6/reporting changes, no K3/Data Factory/DingTalk integration work.
+7. No fake support copy. If a reference-only capability is not backed by existing MetaSheet data, the UI must say it is not configured or handled elsewhere.
+8. No PR6/reporting changes, no K3/Data Factory/external integration work.
 
 Any item above requires a separate design and explicit opt-in.
 
@@ -113,7 +113,7 @@ Use operator language, not database language:
 - Prefer "Attendance group", "People", "Rule policy", "Work time", "Punch method".
 - Avoid exposing raw "rule_set_id" or "attendance_group_members".
 - Do not label a group as fixed schedule, shift schedule, or free schedule unless the UI has a real existing data source for that status.
-- For unsupported DingTalk-like sections, use "Not available in group settings yet" or "Configured in another attendance module" instead of a disabled fake form.
+- For unsupported reference-only sections, use "Not available in group settings yet" or "Configured in another attendance module" instead of a disabled fake form.
 
 ## 6. Proposed Implementation Slices
 
@@ -186,7 +186,7 @@ These are intentionally not answered by this design lock:
 
 1. Should attendance groups have owner/sub-owner permissions?
 2. Should punch methods ever be group-specific, or stay global/workspace-level?
-3. Should DingTalk-style work-time type labels be computed from rule sets, shifts, or explicit group settings?
+3. Should reference-style work-time type labels be computed from rule sets, shifts, or explicit group settings?
 4. Should member display names require a read-only user-enrichment endpoint?
 5. Should mobile admin editing be supported, or is desktop admin the only target for V1?
 
@@ -198,6 +198,6 @@ This document is complete when:
 
 - It records the current MetaSheet contracts before proposing UI changes.
 - It locks the first runtime slice to frontend-only UX reshape using existing APIs.
-- It makes unsupported DingTalk-like features explicit deferred items.
+- It makes unsupported reference-only features explicit deferred items.
 - It provides a test matrix for the runtime slice.
 - It does not modify runtime code, tests, schema, migrations, or operational scripts.
