@@ -30,6 +30,82 @@ function fakeDb(records: unknown[]) {
   return { selectFrom: () => builder }
 }
 
+// Stateful Kysely stand-in that simulates the data_sources table across a
+// persist -> reload cycle (insert/upsert, soft-delete update, scoped load).
+function statefulFakeDb() {
+  const rows = new Map<string, Record<string, unknown>>()
+
+  function selectBuilder() {
+    const b = {
+      selectAll: () => b,
+      where: () => b,
+      // mirrors loadFromDatabase's filter: is_active = true AND deleted_at IS NULL
+      execute: async () =>
+        [...rows.values()].filter((r) => r.is_active === true && r.deleted_at == null),
+    }
+    return b
+  }
+
+  function insertBuilder() {
+    let pending: Record<string, unknown> = {}
+    let updateSet: Record<string, unknown> | undefined
+    const b = {
+      values: (v: Record<string, unknown>) => {
+        pending = v
+        return b
+      },
+      onConflict: (cb: (oc: unknown) => unknown) => {
+        const oc = { column: () => ({ doUpdateSet: (s: Record<string, unknown>) => { updateSet = s; return oc } }) }
+        cb(oc)
+        return b
+      },
+      execute: async () => {
+        const id = pending.id as string
+        if (rows.has(id) && updateSet) {
+          rows.set(id, { ...rows.get(id), ...updateSet })
+        } else {
+          rows.set(id, { ...pending })
+        }
+        return []
+      },
+    }
+    return b
+  }
+
+  function updateBuilder() {
+    let setObj: Record<string, unknown> = {}
+    let whereId: string | undefined
+    const b = {
+      set: (s: Record<string, unknown>) => { setObj = s; return b },
+      where: (_col: unknown, _op: unknown, val: unknown) => { whereId = val as string; return b },
+      execute: async () => {
+        if (whereId != null && rows.has(whereId)) rows.set(whereId, { ...rows.get(whereId), ...setObj })
+        return []
+      },
+    }
+    return b
+  }
+
+  function deleteBuilder() {
+    let whereId: string | undefined
+    const b = {
+      where: (_col: unknown, _op: unknown, val: unknown) => { whereId = val as string; return b },
+      execute: async () => { if (whereId != null) rows.delete(whereId); return [] },
+    }
+    return b
+  }
+
+  return {
+    rows,
+    db: {
+      selectFrom: () => selectBuilder(),
+      insertInto: () => insertBuilder(),
+      updateTable: () => updateBuilder(),
+      deleteFrom: () => deleteBuilder(),
+    },
+  }
+}
+
 function dbRecord(id: string, ownerId: string, workspaceId: string | null) {
   return {
     id,
@@ -155,5 +231,34 @@ describe('data-sources route ownership scope (A0.1)', () => {
     currentUser = undefined
     const res = await request(app).post('/api/data-sources').send(pgConfig('ds-unauth'))
     expect(res.status).toBe(401)
+  })
+})
+
+describe('DataSourceManager persistence round-trip (A0)', () => {
+  it('a source updated via remove + re-add still loads after a restart', async () => {
+    const { db } = statefulFakeDb()
+    const m1 = new DataSourceManager({ db: db as never })
+    await m1.addDataSource(pgConfig('ds-x'), { ownerId: 'alice' })
+
+    // the route's PUT does remove() (soft-delete) then addDataSource() (upsert)
+    await m1.removeDataSource('ds-x')
+    await m1.addDataSource({ ...pgConfig('ds-x'), name: 'renamed' }, { ownerId: 'alice' })
+
+    // restart: a fresh manager loading the same table must still see the source
+    const m2 = new DataSourceManager()
+    await m2.initialize(db as never)
+    expect(m2.getScope('ds-x')).toEqual({ ownerId: 'alice', workspaceId: null })
+    expect(m2.listDataSources().map((s) => s.id)).toContain('ds-x')
+  })
+
+  it('updating autoConnect is persisted so restart behavior is consistent', async () => {
+    const { db, rows } = statefulFakeDb()
+    const m1 = new DataSourceManager({ db: db as never })
+    await m1.addDataSource({ ...pgConfig('ds-y'), options: { autoConnect: false } }, { ownerId: 'alice' })
+    expect(rows.get('ds-y')?.auto_connect).toBe(false)
+
+    await m1.removeDataSource('ds-y')
+    await m1.addDataSource({ ...pgConfig('ds-y'), options: { autoConnect: true } }, { ownerId: 'alice' })
+    expect(rows.get('ds-y')?.auto_connect).toBe(true)
   })
 })

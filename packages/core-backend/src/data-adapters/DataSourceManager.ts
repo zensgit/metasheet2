@@ -262,6 +262,14 @@ export class DataSourceManager extends EventEmitter {
           name: record.name,
           type: record.type,
           config: record.config,
+          owner_id: record.owner_id,
+          workspace_id: record.workspace_id,
+          status: record.status,
+          auto_connect: record.auto_connect,
+          // Revive a previously soft-deleted row (remove() sets these) so an
+          // updated or recreated-with-same-id source survives a restart.
+          is_active: true,
+          deleted_at: null,
           updated_at: new Date()
         } as never)
       )
