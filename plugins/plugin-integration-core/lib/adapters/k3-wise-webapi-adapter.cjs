@@ -714,8 +714,9 @@ function isSuccessLikeResponseMessage(value) {
   if (typeof value !== 'string') return false
   const normalized = value.trim().toLowerCase()
   if (!normalized) return false
+  const hasChineseSuccess = /成功/.test(normalized) && !/[不未没]\s*成功/.test(normalized)
   return ['success', 'successful', 'succeeded', 'ok'].includes(normalized) ||
-    /成功/.test(normalized)
+    hasChineseSuccess
 }
 
 function responseFailureMessage(data, config, summary, fallback = 'K3 WISE save failed row-level success gate') {
