@@ -38,20 +38,20 @@ branch under review when validating these anchors.
 - [x] Customer supplies/approves target fields; MetaSheet provides authoring/rules/validation/preview/redaction/evidence.
 - [x] **Parity recorded as a hard prerequisite** (design §"K3 composition single source of truth").
 
-### ⬜ DF-T1-0 — K3 composition parity (DO FIRST; ride #1928 now)
-The gate for everything else. **Recommended to land in / alongside #1928** while it is open and already touching the K3 diagnostic surface — locks the invariant before any DF-T1 UI, and #1928's own diagnostics get tested against the same canonical composer.
-- [ ] **Converge composition to one source of truth.** Seam choice (decide in scoping):
-  - **A** — preview invokes the adapter's `buildSaveBody` dry (noop `fetchImpl` / dry-run flag); bypass `login()` / `normalizeUpsertRequest` side-effects cleanly. Smallest diff.
-  - **B (recommended)** — extract `projectRecordForBody` + `applyReferenceShape` + `buildSaveBody` + the fail-closed scan + preset application into `lib/k3-save-body-composer.cjs`; adapter **and** preview route both import it. Kills the duplicate.
-- [ ] **Prefer seam B unless reviewer proves it too large.** The shared composer is a little more code movement, but it makes future drift mechanically harder.
-- [ ] Keep adapter public behavior byte-stable for existing generic/minimal Material/BOM tests.
-- [ ] **Parity test (preset):** `previewPayload.Data` ≡ adapter-composed Save body for the same input + the `material-k3wise-customer-profile-v1` profile selected.
-- [ ] **Parity test (placeholder):** the same unresolved `<…>` placeholder **fails closed identically** in preview and in Save (`K3_WISE_PRESET_PLACEHOLDER_UNFILLED`).
-- [ ] **Parity test (object passthrough):** `{FNumber,FName}` and `{FID,FName}` objects remain verbatim through preview and Save composition.
-- [ ] **No-write test:** DF-T1-0 preview composition does not call login, fetch, Submit, Audit, BOM, list/search, or pagination.
-- [ ] **Opt-in test:** default Material preview does not silently switch to `material-k3wise-customer-profile-v1`.
-- [ ] **Grep/lint gate** (if seam B) so a parallel copy cannot silently reappear.
-- [ ] No new write capability; no external call; integration-core opt-in (rides #1928's opt-in if folded there).
+### ✅ DF-T1-0 — K3 composition parity (DONE — PR #1936, squash `a10bb0d8c`, 2026-05-28)
+The gate for everything else. **Shipped via seam B** (shared `lib/adapters/k3-save-body-composer.cjs`); owner review added 3 patches (P1 nested-path projection preserved, P2 reference-identifier `''` fallback, P2 placeholder code aligned).
+- [x] **Converge composition to one source of truth** — seam **B**: `k3-save-body-composer.cjs` owns shaping/projection/placeholder-DETECTION; adapter `buildSaveBody` AND preview `buildTemplatePreview` both compose through it.
+- [x] **Seam B chosen** (reviewer agreed).
+- [x] Adapter public behavior byte-stable (k3-wise-adapters / presets / e2e / pipeline / http-routes all green).
+- [x] **Parity test (preset):** preview payload ≡ adapter Save body for the `material-k3wise-customer-profile-v1` profile.
+- [x] **Parity test (placeholder):** same `<…>` fails closed identically (Save throws `K3_WISE_PRESET_PLACEHOLDER_UNFILLED`, preview reports `valid:false` with the same code).
+- [x] **Parity test (object passthrough):** `{FNumber,FName}` / `{FID,FName}` preserved verbatim both sides.
+- [x] **No-write test:** preview composes with zero login/fetch/Submit/Audit/BOM/list/search.
+- [x] **Opt-in test:** generic Material preview never auto-applies the customer profile.
+- [x] **Grep gate** blocks a divergent shaper/projector copy reappearing.
+- [x] No new write capability; no external call; integration-core (landed under explicit opt-in). Negative controls verified for every fix.
+
+P1/P2 nuances carried forward: the composer uses `getPath/setPath` (nested-path schema like `nested.code` projects; flat K3 names unchanged → adapter parity holds); `normalizeReferenceIdentifier` treats `''` as absent and falls back to identifierField/key.
 
 Implementation notes:
 
@@ -73,8 +73,8 @@ Implementation notes:
   "must include both FNumber and FName"; do not make byte-parity tests imply
   that adapter Save composition enforces two-component completeness.
 
-### 🔒 DF-T1 — Target payload template preview (the GATE-relevant payoff)
-Gated on: DF-T1-0 parity green + explicit opt-in.
+### ⬜ DF-T1 — Target payload template preview (the GATE-relevant payoff) — ACTIVE NEXT
+Gate satisfied: DF-T1-0 parity is green on `main` (#1936). Awaiting the explicit build opt-in.
 - [ ] Extend the **existing** `/api/integration/templates/preview` (do not fork a parallel route) with `payloadTemplate` + `fieldRules`.
 - [ ] No-write merge: `payloadTemplate + fieldRules + staging record → final payload`, composed **through the DF-T1-0 single source of truth**.
 - [ ] Preserve whole-object `payloadTemplate` defaults; replace only fields declared by `fieldRules`.
@@ -184,7 +184,7 @@ processors, or streaming cluster in this track.
 
 ## Sequencing rule
 
-One explicit opt-in per phase. Do not auto-start the next. **The only immediately-actionable item is DF-T1-0**, and the recommendation is to land it now via #1928. Everything else is 🔒 until its predecessor gate is green and it is separately opted in.
+One explicit opt-in per phase. Do not auto-start the next. **DF-T1-0 is DONE (#1936); the active next is DF-T1** (target payload template preview on the now-trustworthy seam). Everything below DF-T1 stays 🔒 until its predecessor gate is green and it is separately opted in.
 
 ## Definition of done — DF-T1-0 (the immediate gate)
 
