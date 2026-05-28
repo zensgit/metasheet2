@@ -135,6 +135,22 @@ describe('data-sources route ownership scope (A0.1)', () => {
     expect(ids).not.toContain('ds-list-b')
   })
 
+  it('PUT preserves the owner — a non-owner still gets 404 after the update', async () => {
+    currentUser = admin('alice3')
+    const create = await request(app).post('/api/data-sources').send(pgConfig('ds-put-1'))
+    expect(create.status).toBe(201)
+
+    const put = await request(app).put('/api/data-sources/ds-put-1').send({ name: 'renamed' })
+    expect(put.status).toBe(200)
+
+    // Without owner preservation the re-add would revert to 'system' and leak
+    currentUser = admin('bob3')
+    expect((await request(app).get('/api/data-sources/ds-put-1')).status).toBe(404)
+
+    currentUser = admin('alice3')
+    expect((await request(app).get('/api/data-sources/ds-put-1')).status).toBe(200)
+  })
+
   it('rejects an unauthenticated request', async () => {
     currentUser = undefined
     const res = await request(app).post('/api/data-sources').send(pgConfig('ds-unauth'))
