@@ -335,4 +335,33 @@ export abstract class BaseDataAdapter extends EventEmitter {
   getType(): string {
     return this.config.type
   }
+
+  /**
+   * Whether this adapter speaks SQL (so a read-only SELECT classifier applies
+   * to its raw query path). Non-SQL adapters (HTTP/Mongo/Redis/ES) return false;
+   * the read-only route then disables the raw query path entirely instead of
+   * trying to classify a non-SQL payload.
+   */
+  isSqlDialect(): boolean {
+    return false
+  }
+
+  /**
+   * Read-only flag for this source. Defaults to TRUE — a source is writable
+   * only when options.readOnly is explicitly false.
+   */
+  isReadOnly(): boolean {
+    return this.config.options?.readOnly !== false
+  }
+
+  /**
+   * Defense-in-depth guard for mutating operations. Throws on a read-only
+   * source. NOTE: the real read-only guarantee must come from connecting with
+   * a read-only database account; this is only an application-layer gate.
+   */
+  assertWritable(): void {
+    if (this.isReadOnly()) {
+      throw new Error('Data source is read-only; write operations are not permitted')
+    }
+  }
 }

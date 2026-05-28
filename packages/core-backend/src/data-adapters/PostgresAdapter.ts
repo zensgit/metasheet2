@@ -61,6 +61,10 @@ function mapFKAction(rule: string): FKActionType {
 export class PostgresAdapter extends BaseDataAdapter {
   protected override pool: PgPool | null = null
 
+  override isSqlDialect(): boolean {
+    return true
+  }
+
   async connect(): Promise<void> {
     if (this.connected) {
       return

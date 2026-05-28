@@ -59,6 +59,10 @@ import {
 export class MySQLAdapter extends BaseDataAdapter {
   protected override pool: MySQLPool | null = null
 
+  override isSqlDialect(): boolean {
+    return true
+  }
+
   /**
    * Convert DbValue to string, ensuring it's a valid database name
    */
