@@ -8659,6 +8659,173 @@ async function findAttendanceScheduleAssignmentConflict(db, draft) {
   return mapAttendanceScheduleAssignmentConflict(otherKindRows[0], draft)
 }
 
+function mapAttendanceGroupFixedSchedulePreviewCandidate(userId, input) {
+  return {
+    userId,
+    shiftId: input.shiftId,
+    startDate: input.startDate,
+    endDate: input.endDate ?? null,
+    isActive: true,
+  }
+}
+
+function mapAttendanceGroupFixedScheduleSkipped(row, draft) {
+  return {
+    assignmentId: row.id,
+    userId: draft.userId,
+    shiftId: draft.shiftId,
+    startDate: normalizeDateOnly(row.start_date) ?? row.start_date,
+    endDate: normalizeAttendanceScheduleAssignmentEndDate(row.end_date),
+  }
+}
+
+function isExactAttendanceGroupFixedScheduleAssignment(row, draft) {
+  return row?.kind !== 'rotation'
+    && String(row?.shift_id || '') === String(draft.shiftId || '')
+    && (normalizeDateOnly(row?.start_date) ?? row?.start_date) === draft.startDate
+    && normalizeAttendanceScheduleAssignmentEndDate(row?.end_date) === normalizeAttendanceScheduleAssignmentEndDate(draft.endDate)
+}
+
+function mapAttendanceGroupFixedScheduleBlockingConflict(row, draft) {
+  const conflict = mapAttendanceScheduleAssignmentConflict(row, draft)
+  if (!conflict) return null
+  return {
+    ...conflict,
+    message: getAttendanceScheduleAssignmentConflictMessage(conflict),
+  }
+}
+
+async function buildAttendanceGroupFixedSchedulePreview(db, input) {
+  const groupRows = await db.query(
+    'SELECT * FROM attendance_groups WHERE id = $1 AND org_id = $2',
+    [input.groupId, input.orgId]
+  )
+  if (!groupRows.length) {
+    return {
+      ok: false,
+      status: 404,
+      code: 'NOT_FOUND',
+      message: 'Group not found',
+    }
+  }
+
+  const shiftRows = await db.query(
+    'SELECT * FROM attendance_shifts WHERE id = $1 AND org_id = $2',
+    [input.shiftId, input.orgId]
+  )
+  if (!shiftRows.length) {
+    return {
+      ok: false,
+      status: 404,
+      code: 'NOT_FOUND',
+      message: 'Shift not found',
+    }
+  }
+
+  const memberRows = await db.query(
+    `SELECT DISTINCT user_id
+       FROM attendance_group_members
+      WHERE org_id = $1
+        AND group_id = $2
+      ORDER BY user_id ASC`,
+    [input.orgId, input.groupId]
+  )
+  const userIds = Array.from(new Set(
+    memberRows
+      .map(row => String(row.user_id || '').trim())
+      .filter(Boolean)
+  ))
+  if (!userIds.length) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'VALIDATION_ERROR',
+      message: 'Group has no members to schedule',
+    }
+  }
+
+  const overlapEndDate = normalizeAttendanceScheduleAssignmentEndDate(input.endDate) || ATTENDANCE_SCHEDULE_OPEN_END_DATE
+  const shiftOverlapRows = await db.query(
+    `SELECT id, user_id, shift_id, start_date, end_date, 'shift'::text AS kind
+       FROM attendance_shift_assignments
+      WHERE org_id = $1
+        AND user_id = ANY($2::text[])
+        AND COALESCE(is_active, true) = true
+        AND start_date <= $4::date
+        AND COALESCE(end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
+      ORDER BY user_id ASC, start_date DESC, created_at DESC`,
+    [input.orgId, userIds, input.startDate, overlapEndDate]
+  )
+  const rotationOverlapRows = await db.query(
+    `SELECT id, user_id, rotation_rule_id, start_date, end_date, 'rotation'::text AS kind
+       FROM attendance_rotation_assignments
+      WHERE org_id = $1
+        AND user_id = ANY($2::text[])
+        AND COALESCE(is_active, true) = true
+        AND start_date <= $4::date
+        AND COALESCE(end_date, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
+      ORDER BY user_id ASC, start_date DESC, created_at DESC`,
+    [input.orgId, userIds, input.startDate, overlapEndDate]
+  )
+
+  const overlapsByUserId = new Map()
+  for (const row of [...shiftOverlapRows, ...rotationOverlapRows]) {
+    const userId = String(row.user_id || '').trim()
+    if (!userId) continue
+    const existing = overlapsByUserId.get(userId) ?? []
+    existing.push(row)
+    overlapsByUserId.set(userId, existing)
+  }
+
+  const wouldCreate = []
+  const skipped = []
+  const blockingConflicts = []
+
+  for (const userId of userIds) {
+    const draft = {
+      kind: 'shift',
+      orgId: input.orgId,
+      userId,
+      shiftId: input.shiftId,
+      startDate: input.startDate,
+      endDate: input.endDate ?? null,
+      isActive: true,
+    }
+    const overlaps = overlapsByUserId.get(userId) ?? []
+    const blockingRow = overlaps.find(row => !isExactAttendanceGroupFixedScheduleAssignment(row, draft))
+    if (blockingRow) {
+      const conflict = mapAttendanceGroupFixedScheduleBlockingConflict(blockingRow, draft)
+      if (conflict) blockingConflicts.push(conflict)
+      continue
+    }
+    const exactRow = overlaps.find(row => isExactAttendanceGroupFixedScheduleAssignment(row, draft))
+    if (exactRow) {
+      skipped.push(mapAttendanceGroupFixedScheduleSkipped(exactRow, draft))
+      continue
+    }
+    wouldCreate.push(mapAttendanceGroupFixedSchedulePreviewCandidate(userId, input))
+  }
+
+  return {
+    ok: true,
+    data: {
+      group: mapAttendanceGroupRow(groupRows[0]),
+      shift: mapShiftRow(shiftRows[0]),
+      window: {
+        startDate: input.startDate,
+        endDate: input.endDate ?? null,
+      },
+      target: {
+        total: userIds.length,
+        userIds,
+      },
+      wouldCreate,
+      skipped,
+      blockingConflicts,
+    },
+  }
+}
+
 function respondAttendanceScheduleAssignmentConflict(res, conflict) {
   res.status(409).json({
     ok: false,
@@ -14293,6 +14460,7 @@ module.exports = {
     resolveAttendanceComprehensiveHoursPreviewPeriod,
     previewAttendanceComprehensiveHours,
     findAttendanceScheduleAssignmentConflict,
+    buildAttendanceGroupFixedSchedulePreview,
     acquireAttendanceScheduleAssignmentLock,
     getAttendanceScheduleAssignmentConflictMessage,
     getAttendanceScheduleAssignmentConflictType,
@@ -25611,6 +25779,79 @@ module.exports = {
           }
           logger.error('Attendance group member delete failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to remove group member' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/groups/:id/fixed-schedule/preview',
+      withPermission('attendance:admin', async (req, res) => {
+        const schema = z.object({
+          shiftId: z.string().min(1),
+          startDate: z.string().min(1),
+          endDate: z.string().min(1),
+          orgId: z.string().optional(),
+        }).strict()
+
+        const parsed = schema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
+        const shiftId = normalizeUuidString(parsed.data.shiftId)
+        if (!shiftId) {
+          respondInvalidUuid(res, 'shiftId')
+          return
+        }
+        const startDate = normalizeDateOnlyStrict(parsed.data.startDate)
+        if (!startDate) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid "startDate" date. Use YYYY-MM-DD.' } })
+          return
+        }
+        const endDate = normalizeDateOnlyStrict(parsed.data.endDate)
+        if (!endDate) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid "endDate" date. Use YYYY-MM-DD.' } })
+          return
+        }
+        if (startDate > endDate) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: '"startDate" must be on or before "endDate".' } })
+          return
+        }
+
+        try {
+          const preview = await buildAttendanceGroupFixedSchedulePreview(db, {
+            orgId,
+            groupId,
+            shiftId,
+            startDate,
+            endDate,
+          })
+          if (!preview.ok) {
+            res.status(preview.status).json({
+              ok: false,
+              error: {
+                code: preview.code,
+                message: preview.message,
+              },
+            })
+            return
+          }
+          res.json({ ok: true, data: preview.data })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance group fixed schedule preview failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to preview fixed schedule' } })
         }
       })
     )
