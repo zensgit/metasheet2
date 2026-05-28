@@ -1,23 +1,19 @@
 # 多维表剩余 open 项 — TODO 追踪清单
 
-> Date: 2026-05-27 · Status: **TRACKER（非开工）** · 配套：开发计划 `multitable-open-items-development-plan-20260527.md` + 验证 `multitable-open-items-verification-20260527.md`
-> Grounded in `origin/main @ 8fd73257d`。K3 锁：均为内核打磨，允许；**每个 slice 仍是独立 opt-in，不自动开下一刀**。
+> Date: 2026-05-27 · Refreshed: 2026-05-28 · Status: **TRACKER（post-#1950 + #1958）** · 配套：开发计划 `multitable-open-items-development-plan-20260527.md` + 验证 `multitable-open-items-verification-20260527.md`
+> **Reconcile 2026-05-28**：Slice 1 ✅ SHIPPED #1950 · A2b ✅ MERGED #1958（defensive）· 唯一 still-open = **Slice 2（C0-gated）**。
+> Drafting base `origin/main@8fd73257d`，reconciled through #1958（2026-05-28，状态已对齐现实）。K3 锁：均为内核打磨，允许；**每个 slice 仍是独立 opt-in，不自动开下一刀**。
 > 标记：✅ done · ⬜ todo（opt-in 后可动手）· 🔒 gated（被决策/前置阻塞）· ☑️ 需 owner 拍板的决策点
 
 ---
 
-## Slice 1 — charts → ECharts（推荐下一刀，静态 import 先行）
+## Slice 1 — charts → ECharts ✅ **SHIPPED (#1950, merge `b665b2b1c`)**
 
-**前置**：`pnpm --filter @metasheet/web add echarts`（Apache-2.0）。范围：`MetaChartRenderer.vue`（1 组件）+ `MetaDashboardView.vue`（1 消费者）；后端零改动。
+> as-built：bar/line/pie→ECharts canvas；title + pie legend 留 HTML chrome；number/table HTML；tooltip 唯一 additive。33 specs + `vue-tsc -b` + build/tree-shaking 绿；**V-S1-7 视觉冒烟 NOT-RUN（无 stack）**。下方 S1-1..8 = as-built 记录（均已落）；**S1-9 async-import / S1-10 新图表类型** 仍为独立 follow-up。
 
-- ⬜ **S1-1** tree-shakeable 引入：`import * as echarts from 'echarts/core'` + `echarts/charts`(`BarChart/LineChart/PieChart`) + `echarts/components`(`GridComponent/TooltipComponent`) + `echarts/renderers`(`CanvasRenderer`) + `echarts.use([...])`。**不引 LegendComponent/TitleComponent**（legend/title = HTML chrome）。**禁 runtime `from 'echarts'`**（type-only 例外）。
-- ⬜ **S1-2** 纯函数 `buildOption(chartData, displayConfig): EChartsOption`（独立文件，便于单测）：bar 竖/横（`orientation`）、line、pie 三类映射；复用现有 8 色 `COLORS`（`displayConfig.colorScheme` 当前 dormant、本 slice 不接、wire→palette 留 follow-up）；仅 `showValues`→**bar** 系列 label + `orientation`→bar 轴 映射进 option；**`title`/`showLegend` = HTML chrome 不进 option**；**pie/line label-less**；最终 option 无 `legend`/`title`。
-- ⬜ **S1-3** `MetaChartRenderer.vue`：bar/line/pie 三个 `<template>` 分支 → 单一 `<div ref="chartEl">`；**number/table 两分支原样保留 HTML**；保留 wrapper `data-chart-type`（模板 L2）。
-- ⬜ **S1-4** 生命周期：`onMounted` init（仅 bar/line/pie）；`watch([()=>chartData,()=>displayConfig], ()=>inst.setOption(buildOption(...), true), {deep:true})`；`ResizeObserver`→`inst.resize()`；`onUnmounted`→`inst.dispose()`。
-- ⬜ **S1-5** **静态 import**（不用 `defineAsyncComponent`——见 S1-9 follow-up）。
-- ⬜ **S1-6** renderer spec 迁移：`vi.mock('echarts/core')`（jsdom 无 canvas）；断言 `buildOption` 输出（5 类型 + 空数据 + 横向 bar + per-point color + displayConfig 映射）；number/table HTML 断言保留。
-- ⬜ **S1-7** dashboard spec 补 `vi.mock('echarts/core')`（`multitable-dashboard-view.spec.ts` 挂载即用 renderer，否则 canvas 崩）。
-- ⬜ **S1-8** i18n 走既有 `meta-view-render-labels`，**不新建 label 模块**。
+**前置（as-built）**：`pnpm --filter @metasheet/web add echarts`（Apache-2.0）。范围：`MetaChartRenderer.vue`（1 组件）+ `MetaDashboardView.vue`（1 消费者）；后端零改动。
+
+- ✅ **S1-1..S1-8 done（as-built，#1950）**：tree-shakeable `echarts/core` + `charts`/`components`/`renderers`（不引 Legend/Title）· 纯函数 `buildOption`（scalar / scalar-array / pie 映射；title+legend 留 HTML chrome；pie/line label-less；option 无 legend/title）· renderer bar/line/pie→canvas + number/table HTML（保留 `data-chart-type`）· 生命周期 init/`setOption`/`watch{flush:'post'}`/`ResizeObserver`/`dispose` · 静态 import · renderer+dashboard specs `vi.mock('echarts/core')` · i18n 走既有 `meta-view-render-labels`。
 - ⬜ **S1-9** 🔒 follow-up：`defineAsyncComponent` 让 echarts 落异步 chunk（+ dashboard spec 改 `flushPromises`）。**单独 PR**，不进 S1 本刀。
 - ⬜ **S1-10** 🔒 follow-up：新图表类型（scatter/area/funnel/gauge/堆叠/组合）——需后端 `ChartAggregationService` 补多 series 维度。**单独 opt-in**。
 
@@ -36,23 +32,24 @@
 
 ---
 
-## Slice 3 — A2b 宏展开转义加固（contract-first）
+## Slice 3 — A2b 宏展开转义加固 ✅ **MERGED (#1958, squash `d9b5b031a`)** — defensive hardening
 
-> 勘误：lookup/rollup 合法进公式（`MetaFieldManager.vue:669` 不排除、后端 `univer-meta.ts:1015` 允许），复杂值真实走 `formula-engine.ts:111` `String(value)`。**改其字面化 = 行为变更，故先锁 contract。**
+> 落地 contract（owner 拍板 **object → `#VALUE!`**）：`formula-engine.ts evaluateField` 的 `String(value)` 兜底收口 —— 标量不变；**scalar array** → 引号 joined literal（值保留、修注入）；**array-with-object + 裸 object → `#VALUE!`**（无 `[object Object]` 假 join、无注入）。不碰 frozen `formula/engine.ts`。
 
-- ⬜ ☑️ **A2b-1（owner 拍板）** 锁 per-type contract 表（开发计划 §Slice 3 有草表）：标量不变；array→加引号 literal（值不变、修注入）；date→ISO 引号 literal；**object → `#VALUE!` 还是引号 literal？需拍板**。
-- ⬜ **A2b-2** 实现：`String(value)` 分支按 contract 安全编码（兼容保留为主）。
-- ⬜ **A2b-3** 回归测试 pin 现行标量行为 + 对抗性单测（`"`/`{fld_x}`/`1+1`/array/object/date/超长串）。
-- ⬜ **A2b-4** lookup-进-公式真 DB 集成测试（wire-vs-fixture：lookup 值经真 patch 流入 formula）。
+- ✅ **A2b-1** 拍板：object（含 array-with-object）→ `#VALUE!`；scalar array → 引号 join；date 在此层是 ISO 字符串走 string 分支。
+- ✅ **A2b-2** 实现已落（仅 `String(value)` 分支）。
+- ✅ **A2b-3** 13 unit：标量回归 + array/object contract（含 lookup-of-object 形状）+ 对抗性无注入（`"`/`{fld_x}`/`1+1`/object-array/超长串）；既有 formula/dry-run/write-path 套件无回归。
+- ⛔ **A2b-4 → NOT-APPLICABLE**（原 V-A2b-3 real-DB lookup→formula）：hydrated lookup 数据当前不流入 formula recalc（`recalculateRecord` 走 DB reload；lookup computed-on-read 不 materialize）→ A2b 是 **defensive**，该 e2e 断言与架构不符。
 - 🔒 **A2b-5** Track B（Teable `packages/formula` MIT 真解析器取代宏展开）——**单独 RFC**，若上马则 A2b 可作废，故 A2b 保持最小。
+- 🆕 **Backlog（独立、out-of-scope，本 reconcile 不写 note 本身）**：formula 引用 lookup → recalc 缺席 lookup 值 → `undefined→'0'`（`formula-engine.ts:109`，"按 0 算"）；characterization/design note only，单独决策。
 
 ---
 
 ## 决策点汇总（☑️ 待 owner）
 
-1. **C0**：翻页器 vs 连续滚动（解锁 2b/2c）。
-2. **A2b-1**：object 值进公式 → `#VALUE!` 还是引号 literal。
-3. **起点确认**：是否从 Slice 1（ECharts，静态 import）开工。
+1. **C0**：翻页器 vs 连续滚动（解锁 Slice 2 的 2b/2c）—— **唯一未决**。
+2. ✅ ~~A2b-1：object → `#VALUE!`~~（已拍板，#1958 落地）。
+3. ✅ ~~起点确认：Slice 1 ECharts~~（已 shipped #1950）。
 
 ## 落地提示
 

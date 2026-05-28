@@ -1,26 +1,30 @@
 # 多维表 — 剩余 open 项开发方案（clean, origin/main-grounded）
 
 > Date: 2026-05-27 · Author: Claude · Status: **PLAN — 非开工**
-> **Grounded in `origin/main` @ `8fd73257d`**（不是落后的本地 checkout —— 教训：做 benchmark/方案前先 `git fetch` + `git rev-list --count HEAD..origin/main` 对照基线，落后则以 `git show origin/main:<file>` 为准）。
+> **Drafting base `origin/main@8fd73257d`，reconciled through #1958（2026-05-28）** —— 下方状态已对齐当前现实（Slice 1 #1950 + A2b #1958 已 shipped）；`8fd73257d` 仅是初稿基线、非当前 HEAD。（纪律：方案/benchmark 前先 `git fetch` 对照 `origin/main`。）
 > K3 PoC Stage-1 锁：以下均为多维表内核打磨，允许；**每项仍是独立 opt-in**，不碰 integration-core/RBAC/auth。
 
 ## 0. 范围：只列 `origin/main` 上**确认仍未做**的项
 
-**已 shipped（不在本方案内，仅备查）**：agg-footer 后端#1841 + 分组小计#1852 + 前端 `<tfoot>`；formula recalc-on-patch#1883 + A1.1#1890 + A2-defense#1896 + F1#1897；formula dry-run #1865/#1873；frozen-col#1837；inline-create#1834；D2 perf#1815；D3 权限矩阵#1820/#1827/#1831。
+> **状态 reconcile（2026-05-28，docs-only）**：Slice 1 已 shipped（#1950）+ A2b 已 merged（#1958），本文随之收口；唯一 still-open = **Slice 2（C0-gated）**。下方各节标 ✅ 并保留为 as-built 记录。
 
-**本方案 = 3 项 still-open**：
+**已 shipped（不在本方案内，仅备查）**：agg-footer 后端#1841 + 分组小计#1852 + 前端 `<tfoot>`；formula recalc-on-patch#1883 + A1.1#1890 + A2-defense#1896 + F1#1897；formula dry-run #1865/#1873；frozen-col#1837；inline-create#1834；D2 perf#1815；D3 权限矩阵#1820/#1827/#1831；**charts → ECharts Slice 1 #1950（merge `b665b2b1c`）**；**A2b formula hardening #1958（squash `d9b5b031a`，defensive）**。
 
-| Slice | 项 | 深度 | K3 |
+**本方案 = 1 项 still-open（Slice 2，C0-gated）**：
+
+| Slice | 项 | 状态 | K3 |
 |---|---|---|---|
-| **1** | charts → **ECharts**（渲染层替换） | **PR 级**（最现实的下一刀） | 允许 |
-| **2** | grid 分组头 count + 滚动 UX | 2a **非 quick-win**（前端触发 gated on aggregations）→ 建议折叠进 2b；2b/2c 架构级需 C0 决策 | 允许 |
-| **3** | **A2b** 宏展开转义加固 | 小项（借鉴计划） | 允许 |
+| ~~1~~ | charts → ECharts | ✅ **SHIPPED** #1950 | — |
+| **2** | grid 分组头 count + 滚动 UX | ⬜ still-open，**C0 gated**（2a 非 quick-win→折叠进 2b；2b/2c 架构级） | 允许 |
+| ~~3~~ | A2b 宏展开转义加固 | ✅ **MERGED** #1958（defensive） | — |
 
 ---
 
-## Slice 1 — charts → ECharts（PR 级，建议下一刀）
+## Slice 1 — charts → ECharts ✅ **SHIPPED (#1950, merge `b665b2b1c`)** — 下方为 as-built 设计记录
 
-### 现状（origin/main 实读）
+> 实际落地：bar/line/pie→ECharts canvas；title + pie legend 留 HTML chrome；number/table HTML；tooltip 为唯一 additive。33 specs + `vue-tsc -b` + build/tree-shaking 绿；**V-S1-7 视觉冒烟 NOT-RUN（无 stack，须有 stack 时人工核对）**。S1-9 async-import / S1-10 新图表类型仍为独立 follow-up。
+
+### 现状（origin/main 实读，as-built 前）
 - `ChartType` = `bar | line | pie | number | table`（`types.ts:863`，5 类）。
 - `MetaChartRenderer.vue`（293 行）手搓：bar 用 `<rect>`（含 `orientation==='horizontal'` 横向分支）、line 用 `<polyline>`+`<circle>`、pie 用手算 `<path>` 弧段 + HTML 图例、number/table 用 HTML。8 色 `COLORS` 调色板 + `defaultColor(idx)`。
 - props = `chartData: ChartData` + `displayConfig?: ChartDisplayConfig`；`ChartData.dataPoints: {label,value,color?}[]` + `total` + `chartType`；`ChartDisplayConfig` = `title/showLegend/showValues/prefix/suffix/orientation` + **`colorScheme?: string`**（后者 **dormant**：`types.ts:878`/`charts.ts:42` 仅类型声明、无渲染器/服务消费者 → 本 slice **显式不接、沿用现有 8 色 `COLORS`**，不静默收窄类型；wire `colorScheme`→ECharts palette 留 follow-up）。
@@ -71,24 +75,27 @@
 
 ---
 
-## Slice 3 — A2b 宏展开转义加固 ⬜（借鉴计划项）→ **contract-first（owner review 勘误）**
+## Slice 3 — A2b 宏展开转义加固 ✅ **MERGED (#1958, squash `d9b5b031a`, 2026-05-28)** — defensive hardening
 
-### 现状（origin/main 实读）
-- `formula-engine.ts:108-111`：null/undefined→`'0'`、string→`JSON.stringify`（**已转义、非裸拼接**）、number→`String`、boolean→`TRUE/FALSE`、**其余→`return String(value)`（:111）兜底**。
-- **关键事实（勘误）**：lookup/rollup **被允许作为公式输入**（前端 `MetaFieldManager.vue:669` 只排除 `formula`、不排除 lookup/rollup；后端 `univer-meta.ts:1015` 注释明示"lookup/rollup ARE permitted as formula references"）。所以 `:111` 兜底分支**真实承载** lookup 的复杂值（多值 lookup = array、date、object）。
-- **因此把 array/object/date 一刀切成 `#N/A` 不是 hardening，是行为变更** —— 会破坏现有"lookup 值进公式"的用户公式。
+### 落地 contract（owner 拍板：object → `#VALUE!`）
+`formula-engine.ts evaluateField` 的 `String(value)` 兜底分支收口（仅此一处，不碰 frozen `formula/engine.ts`）：
 
-### 建议（我的推荐）：**先锁 contract，做 compatibility-preserving 收口，不做行为纠偏**
-- ⬜ **3.1 [先锁 contract，再写实现]** 定一张 per-type 表，**显式声明每类的产出 + 是否兼容现行为**，例如：
-  | 输入值类型 | 现状（`String(value)`） | A2b 收口（建议） | 是否行为变更 |
-  |---|---|---|---|
-  | string/number/boolean | 已安全 | 不动 | 否 |
-  | date | `String(date)` = locale 串、**未加引号→注入** | 产出 ISO 字符串 **literal（加引号）** | 值近似、修注入 |
-  | array（多值 lookup） | `"a,b"` **未引号→注入/语法污染** | **加引号**成字符串 literal（保留"拼成串"语义） | 仅修安全、值不变 |
-  | object | `[object Object]` 未引号 | 加引号 literal 或 `#VALUE!`（**需决策**） | 需 owner 拍板 |
-- ⬜ **3.2** 回归测试 **pin 现行标量行为**（string/number/boolean/rollup-number 产出不变）+ 对抗性单测（值含 `"`、`{fld_x}`、`1+1`、array、object、date、超长串）断言**无注入**。
-- ⬜ **3.3 [保持最小]** 任何**语义纠偏**（如"lookup array 应可被 SUM"）= **单独决策**，不并进本 hardening PR。且 Track B（Teable `packages/formula` 真解析器）若上马会整体取代宏展开转义 → **A2b 不过度投入**。
-- 权威跟踪 `multitable-derived-field-borrow-plan-20260526.md`；**A2-full（链式 topo）仍 gated/future**。
+| 输入值类型 | A2b 落地 | 行为变更 |
+|---|---|---|
+| string（含 JSONB ISO 日期）/ number / boolean | 不动（string 已 `JSON.stringify` 引号、安全） | 否 |
+| **scalar array**（多值 lookup of scalars） | 引号 joined literal（`["a","b"]→"a,b"`，值保留、修注入） | 仅修安全 |
+| **array-with-object + 裸 object** | **`#VALUE!`**（Excel 式错误传播，无 `[object Object]` 假 join、无注入） | 破→诚实 |
+
+> date 在此层是 JSONB ISO **字符串** → 走 string 分支（quoted）；裸 `Date` 对象无调用面 → `#VALUE!`（可接受）。
+
+### 性质 = DEFENSIVE，不是 live bug fix（owner-confirmed）
+**当前没有路径把 `applyLookupRollup` 的内存 object-array 喂进 `evaluateField`**：`recalculateRecord` 走 DB reload（`formula-engine.ts:249`）；lookup 是 computed-on-read / 不 materialize（`applyLookupRollup` 只写内存 `row.data`，`univer-meta.ts:1795`）。故 A2b 是"若复杂值真进 eval 则安全"的加固。13 unit 测试（标量回归 + array/object contract + 对抗性无注入）绿；既有 formula/dry-run/write-path 套件无回归。
+
+### V-A2b-3 → **NOT-APPLICABLE as a gate**
+原"real-DB lookup→formula→`#VALUE!`"end-to-end 断言与真实架构不符（该组合当前不发生，见上）→ 改为 architecture note，不作硬门。
+
+### 🆕 Backlog（独立、既有架构 gap，out-of-scope，不在本 PR）
+formula 引用 lookup 字段时，recalc 按 DB raw data 重算、lookup 值缺席 → `evaluateField` 把 `undefined→'0'`（`formula-engine.ts:109`）→ 实际"按 0 算"，不是用 lookup 值。**characterization/design-note only**（本 reconcile 不写该 note 本身）；需 materialize 或在 recalc 前喂 hydrated row 才能改 —— 单独决策。Track B（Teable `packages/formula` 真解析器）若上马会整体取代 A2b 宏展开转义。权威跟踪 `multitable-derived-field-borrow-plan-20260526.md`；**A2-full（链式 topo）仍 gated/future**。
 
 ---
 
@@ -96,9 +103,9 @@
 
 - **license**：ECharts(Apache)/TanStack Virtual(MIT)/Teable `packages/formula`(MIT) 可作依赖；引入仍是**独立 opt-in**。Chart.js(MIT) 为 ECharts 轻量备选。
 - **grounding 纪律**（本轮教训）：任何 benchmark/方案先 `git fetch && git rev-list --count HEAD..origin/main`，落后则以 `git show origin/main:<file>` 为准 —— 落后 checkout 的 file:line 会误导。
-- **staged opt-in**：**Slice 1 与 3（A2b）可各自独立起步**；**2b/2c 受 C0 gate**（2a 已折叠进 2b、非独立起跑项）；不自动开下一刀。
-- **建议起点**：**Slice 1（ECharts）**，且**先静态 import（只 mock echarts）**，async-import 拆 follow-up —— 改造面收敛到 1 组件 + 1 消费者、后端零改动、视觉收益最直接、测试面最小。
+- **staged opt-in**：Slice 1（#1950）+ A2b（#1958）均已落；**唯一 still-open = Slice 2，受 C0 gate**（2a 已折叠进 2b、非独立起跑项）；不自动开下一刀。
+- **下一刀（无 C0 不开实现）**：仅剩 Slice 2 的 **C0 决策**（翻页器 vs 连续滚动）+ 上面的 formula-over-lookup backlog characterization/design note（非实现）。
 
 > **Owner review v2（2026-05-27）已折入**：① 2a 比初稿大（前端 `loadAggregates` gated on `view.config.aggregations`、不听 groupField）→ 降级、建议折叠进 2b；② A2b 是行为变更不是纯 hardening（lookup/rollup 允许作公式输入，复杂值走 `String(value)`）→ 改 contract-first；③ Slice 1 测试漏了 dashboard consumer spec → 已补，且建议静态 import 先行。主排序不变（Slice 1 仍最干净）。
 
-**一句话**：剩余真正 open 的就三件 —— **Slice 1 ECharts**（PR 级、下一刀、静态 import 先行）、**grid 分组/滚动**（2a 非 quick-win，折叠进 2b 服务端分组投递；2b/2c 需 C0 决策）、**A2b**（contract-first、兼容收口、Track B 或将取代）。其余 BI-polish + formula 主线均已 shipped。
+**一句话**：Slice 1 ECharts（#1950）+ A2b（#1958，defensive）均已 shipped；**剩余真正 open 的只有 grid 分组/滚动（Slice 2）**，2b/2c 受 **C0 决策**（翻页器 vs 连续滚动）gate（2a 非 quick-win、折叠进 2b）。另有 formula-over-lookup→`'0'` 的既有架构 gap = backlog（characterization/design note，非实现）。其余 BI-polish + formula 主线均已 shipped。

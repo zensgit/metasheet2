@@ -1,7 +1,7 @@
 # 多维表剩余 open 项 — 验证 / 验收矩阵
 
 > Date: 2026-05-27 · Status: **验收标准（实现后逐条填 ✅/❌）** · 配套：`multitable-open-items-development-plan-20260527.md` + `multitable-open-items-todo-20260527.md`
-> 每个 slice 的"done"= 下方该节全绿 + `pnpm validate:all` 绿。
+> 每个**未 shipped** slice 的"done"= 下方该节全绿 + `pnpm validate:all` 绿。已 shipped 的 Slice 1/A2b 节为 **historical 证据快照**（非前置门）。
 
 ## 0. 横切验收纪律（所有 slice 适用 — 来自 PR-hardening 经验）
 
@@ -14,7 +14,9 @@
 
 ---
 
-## Slice 1 — ECharts（可立即验收）
+## Slice 1 — ECharts ✅ **SHIPPED (#1950, merge `b665b2b1c`)** — 证据快照
+
+> 结果：V-S1-1..6/8 ✅（33 specs + `vue-tsc -b` + build/tree-shaking 绿，受控实验剔除 ~537KB / 174KB-gzip）；**V-S1-7 视觉冒烟 = NOT-RUN（无 stack，须有 stack 时人工核对）**。下表为 as-verified 记录。
 
 | ID | 验收项 | 方法 | 通过判据 |
 |---|---|---|---|
@@ -28,21 +30,21 @@
 | **V-S1-7** | 视觉冒烟 | 手动 / Playwright（stack 起则跑，否则**显式标 not-run**） | **⏸ NOT-RUN（2026-05-27，无 stack）** — 待 dev server 起后人工核对：dashboard 5 类面板渲染一致、横向 bar 生效、resize 重排、切换/卸载无 console error、无 canvas 泄漏 |
 | **V-S1-8** | 质量门 | `pnpm validate:all` | validate:plugins + lint + type-check 全绿；**production code 无 `any`**（测试局部 any 例外）；i18n 走既有模块无新模块 |
 
-**Slice 1 done = V-S1-1..8 全绿**（V-S1-7 若 stack 不可达，显式标 not-run + 列手动复核步骤，不算静默通过）。
+**Slice 1 = shipped via #1950（historical snapshot）**：V-S1-1..6/8 ✅；**V-S1-7 视觉冒烟仍 outstanding（NOT-RUN，待 stack 人工核对）** —— 唯一 post-merge 未做项，非阻塞门。
 
 ---
 
-## Slice 3 — A2b 宏展开转义（contract-first 验收）
+## Slice 3 — A2b 宏展开转义 ✅ **MERGED (#1958, squash `d9b5b031a`)** — defensive hardening
 
-| ID | 验收项 | 方法 | 通过判据 |
-|---|---|---|---|
-| **V-A2b-0** | contract 表已锁 | 评审 | 开发计划 §Slice 3 的 per-type 表经 owner 拍板（含 object 分支裁决），与实现同 commit |
-| **V-A2b-1** | **标量行为零回归** | vitest golden | string/number/boolean/rollup-number 进公式的求值输出**改动前后逐字相同**（pin 现行为） |
-| **V-A2b-2** | 对抗性无注入 | vitest | 值含 `"`、`{fld_x}`、`1+1`、array、object、date、超长串 → ① 表达式**不被污染/注入**；② 产出符合锁定 contract（如 array→引号 literal） |
-| **V-A2b-3** | lookup-进-公式真 wire | **real-DB 集成**（非 fixture） | 建 string 字段 X → lookup L 拉 X → formula F 引用 L；经真 patch 路径写入；断 F 产出符合 contract（wire-vs-fixture 纪律） |
-| **V-A2b-4** | 最小化 | 评审 | 未越界做语义纠偏（如"lookup array 可 SUM"另开决策）；若 Track B 决定上马则记录 A2b 作废条件 |
+| ID | 验收项 | 结果 |
+|---|---|---|
+| **V-A2b-0** | contract 表已锁 | ✅ owner 拍板 **object → `#VALUE!`**；scalar array→引号 join；array-with-object→`#VALUE!`；date 走 string 分支（quoted） |
+| **V-A2b-1** | 标量行为零回归 | ✅ unit：string/number/boolean 求值逐字不变（`String(value)` 兜底分支外未动） |
+| **V-A2b-2** | 对抗性无注入 | ✅ unit：`"`/`{fld_x}`/`1+1`/object-array/超长串 → 表达式不被注入、产出合 contract（13 测试；既有 formula/dry-run/write-path 套件无回归） |
+| **V-A2b-3** | ~~lookup→formula 真 wire~~ | ⛔ **NOT-APPLICABLE（architecture note）**：hydrated lookup 数据当前不流入 formula recalc（`recalculateRecord` 走 DB reload `formula-engine.ts:249`；lookup computed-on-read 不 materialize，`applyLookupRollup` 只写内存 `row.data` `univer-meta.ts:1795`）→ A2b 是 defensive，e2e `#VALUE!` 断言与架构不符 |
+| **V-A2b-4** | 最小化 | ✅ 仅收口 `String(value)` 一处、未做语义纠偏；Track B 若上马则 A2b 作废 |
 
-**A2b done = V-A2b-0..4 全绿**；**V-A2b-1（零回归）是硬门** —— 任何标量产出变化都视为契约破坏，需回到 V-A2b-0 重新拍板。
+**A2b = MERGED**（defensive hardening）。**🆕 Backlog（独立、out-of-scope）**：formula 引用 lookup → recalc 缺席 lookup 值 → `undefined→'0'`（`formula-engine.ts:109`，"按 0 算"）；characterization/design note only，单独决策。
 
 ---
 
@@ -62,8 +64,8 @@
 
 ## 验收执行顺序
 
-1. **Slice 1** 现在可执行（V-S1-1..8）。
-2. **A2b** 待 A2b-1 contract 拍板后执行（V-A2b-0 先行）。
-3. **Slice 2** 待 C0 决策后执行。
+1. ✅ **Slice 1** — done（#1950；V-S1-7 视觉冒烟 NOT-RUN，待 stack 人工核对）。
+2. ✅ **A2b** — done（#1958，defensive；V-A2b-3 → NOT-APPLICABLE）。
+3. **Slice 2** 待 **C0 决策** 后执行（唯一未决）。
 
 **落地提示**：docs 与后续实现若要 land，先 `git fetch` 后从 `origin/main` 切新分支提交，勿从可能落后的本地分支提交（先 `git rev-list --count HEAD..origin/main` 确认基线）。
