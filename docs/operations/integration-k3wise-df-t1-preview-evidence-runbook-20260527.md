@@ -42,7 +42,10 @@ the **exact target payload** an operator would Save — replacing "blind Save at
    - `payloadTemplate` ← your sanitized GetDetail clone. The template's reference fields are
      **illustrative**; substitute the whole clone (it usually carries more objects, e.g.
      org/stock fields) and leave any value you cannot fill as its `<…>` placeholder — DF-T1
-     fail-closes on it.
+     fail-closes on it. A clone is fine for a quick iteration, but **for #1792 config-track
+     evidence the `payloadTemplate` MUST be the persisted `config.objects.material.bodyTemplate`**
+     (see *Binding the preview to the pipeline*) — an ad-hoc clone does not count as final
+     evidence.
    - `fieldRules` ← keep the provided rules (identity fields `from_staging`; reference objects
      `preserve_template` with the right `completeness`); add a `preserve_template` rule for any
      extra required reference field your clone carries.
@@ -73,6 +76,39 @@ the **exact target payload** an operator would Save — replacing "blind Save at
    Fix the template/staging row and re-run. Do **not** proceed to a Save request until the bar
    is green.
 
+   > **Necessary but not sufficient for config-track evidence.** A green bar proves the
+   > template you passed composes correctly — it does **not** prove the *pipeline* will Save
+   > that body. To use this preview as #1792 config-track evidence, the template MUST be the
+   > persisted pipeline `bodyTemplate` and MUST pass the dry-run cross-check — see
+   > **Binding the preview to the pipeline** below.
+
+## Binding the preview to the pipeline (config-track evidence)
+
+The 7-field bar above proves *composition* — but the DF-T1 preview composes from the
+`payloadTemplate` you pass it, while the actual pipeline Save composes from the persisted
+`config.objects.material.bodyTemplate`. A green preview on an **ad-hoc clone** therefore does
+**not** prove the pipeline will Save that body; with `bodyTemplate` absent (the 2nd Save-only
+root cause), the pipeline still emits only the few mapped fields and the row-level Save fails
+again. **A green preview on an ad-hoc clone is not acceptable as final evidence.**
+
+To make this preview decisive for the config track:
+
+1. **Persist first.** Put the operator-reviewed full Material object into
+   `config.objects.material.bodyTemplate` (the pipeline's actual Save base) **before** running
+   the preview. Do not rely on an ad-hoc clone for evidence.
+2. **Preview the persisted template.** Run the DF-T1 preview with `payloadTemplate` set to that
+   **same persisted `bodyTemplate`** — not a separate clone — so the preview reflects the
+   pipeline's real base.
+3. **Pipeline dry-run cross-check.** Run a pipeline dry-run and confirm the actual transformed
+   Save-body **field set == the previewed field set** (same field names and object shapes;
+   compare names / shape presence only, never values).
+
+**Config track is closed only when both hold:** the 7-field preview bar is all-green **and**
+the dry-run field-set cross-check matches. Either one alone is insufficient.
+
+Closing the config track here still **does not authorize a Save** — a Save-only attempt remains
+a separate, explicit approval request (see the end of this runbook).
+
 ## What to post on #1792 (sanitized only)
 
 Post the **acceptance result**, not the payload. A safe shape:
@@ -84,10 +120,13 @@ DF-T1 no-write preview evidence (package <tag>, profile material-k3wise-customer
 - unresolvedPlaceholders: 0 | unresolvedReferenceComponents: 0 | missingRequiredFields: 0
 - redactionSelfCheck.clean: true | compositionSource: k3-save-body-composer
 - fields composed: <count> (identity from staging; <count> reference objects preserved) — count fieldProvenance, do not paste it
+- previewed template = persisted config.objects.material.bodyTemplate: yes
+- pipeline dry-run field-set cross-check: matches (transformed Save-body field set == previewed field set)
 ```
 
-Do **not** paste `payload` / `targetRecord` / `fieldProvenance` values, raw `FNumber`/`FName`,
-reference objects, the host, or the token. If you must reference a record, use a masked key.
+Do **not** paste `payload` / `targetRecord` / `bodyTemplate` / `fieldProvenance` values, raw
+`FNumber`/`FName`, reference objects, the host, or the token. If you must reference a record,
+use a masked key. For the dry-run cross-check, post field **names** and shape presence only.
 
 ## After acceptance — Save is a SEPARATE gated request
 
