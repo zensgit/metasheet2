@@ -89,6 +89,23 @@ export class AutomationLogService {
   }
 
   /**
+   * List executions across rules with optional filters (A2 read-only runs API).
+   * `status` is the LEGACY stored value — the route resolves C1↔legacy (and the
+   * "future-state → empty" case) before calling, so this stays a plain equality.
+   */
+  async listExecutions(
+    filters: { sheetId?: string; ruleId?: string; status?: string; limit?: number } = {},
+  ): Promise<AutomationExecution[]> {
+    const limit = Math.min(Math.max(filters.limit ?? 50, 1), 200)
+    let q = db.selectFrom('multitable_automation_executions').selectAll()
+    if (filters.sheetId) q = q.where('sheet_id', '=', filters.sheetId)
+    if (filters.ruleId) q = q.where('rule_id', '=', filters.ruleId)
+    if (filters.status) q = q.where('status', '=', filters.status)
+    const rows = await q.orderBy('created_at', 'desc').limit(limit).execute()
+    return rows.map(toExecution)
+  }
+
+  /**
    * Get a specific execution by ID.
    */
   async getById(executionId: string): Promise<AutomationExecution | undefined> {
