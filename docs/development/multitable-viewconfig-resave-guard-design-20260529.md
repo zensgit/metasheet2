@@ -72,7 +72,7 @@ Why index plus `(fieldId, operator)`:
 2. Compute `allowedFieldIds` for the writer using the same #2059 helper path (`loadAllowedFieldIds`) before constructing `nextFilter`.
 3. If `parsed.data.filterInfo !== undefined`, pass `parsed.data.filterInfo`, `normalizeJson(row.filter_info)`, and `allowedFieldIds` through the merge helper.
 4. Persist the merged filter info in the existing `UPDATE meta_views` call.
-5. Cache the unredacted merged view (`metaViewConfigCache.set(viewId, view)`) and return `redactViewConfigFilterLiterals(view, allowedFieldIds)` as today.
+5. Cache the unredacted merged view (`metaViewConfigCache.set(viewId, view)`) and return `redactViewConfigFilterLiterals(view, allowedFieldIds)` as today. Never cache the redacted response object; if the implementation cannot prove the cached object is unredacted, invalidate instead.
 
 This keeps the cache invariant from #2059: cached view configs are unredacted; redaction is per-response and pure.
 
@@ -84,7 +84,7 @@ All permission-path tests should be real-DB integration tests. Mock-pool tests c
 - **R2 visible field still updates**: A condition on an allowed field updates its `value` normally.
 - **R3 denied explicit write remains current behavior**: If the same user submits an explicit `value` for a denied field, the DB stores that submitted value and the response redacts it. This pins the scope boundary: this slice is a preservation guard, not a new denied-field write policy.
 - **R4 remove means remove**: If the denied condition is absent from the incoming `conditions[]`, it is removed from `filter_info`; the guard must not resurrect it.
-- **R5 structural mismatch rejects**: If a denied condition arrives without `value` but the same array index no longer has the same `fieldId` and `operator` in the current DB filter, return `400 VALIDATION_ERROR` and leave DB state unchanged.
+- **R5 structural mismatch rejects**: If a denied condition arrives without `value` but the same array index no longer has the same `fieldId` and `operator` in the current DB filter, return `400 VALIDATION_ERROR` and leave DB state unchanged. This intentionally rejects reorder/edit attempts involving redacted conditions rather than guessing.
 - **R6 property.hidden path**: Repeat preservation for a layer-2 `property.hidden=true` field with no layer-3 denial. #2059 redacts it, so this guard must preserve it too.
 - **R7 layer-1 stays display-only**: A readable-but-view-hidden field keeps normal write behavior; no preservation guard should trigger just because the field is in `hidden_field_ids`.
 - **R8 cache/response invariant**: After a preserved update, a fully allowed user can read the literal, while the denied writer's immediate response remains redacted.
