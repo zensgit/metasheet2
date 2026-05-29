@@ -174,6 +174,7 @@ jobs:
             tests/integration/multitable-records-read-field-mask.test.ts \
             tests/integration/multitable-readpath-search-filter-field-mask.test.ts \
             tests/integration/multitable-viewconfig-filter-literal-redaction.test.ts \
+            tests/integration/multitable-viewconfig-resave-guard.test.ts \
             tests/integration/multitable-automation-retry.test.ts \
             --reporter=dot
 

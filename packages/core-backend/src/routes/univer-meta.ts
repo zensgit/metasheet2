@@ -2321,6 +2321,37 @@ function redactViewConfigFilterLiterals<T extends { filterInfo?: unknown } | nul
   return { ...(view as object), filterInfo: { ...(filterInfo as object), conditions: redactedConditions } } as T
 }
 
+// #2068 re-save guard: PURE merge of an incoming PATCH filterInfo against the current DB filterInfo, so a
+// field-denied user re-saving a view (whose denied conditions came back from #2059 redaction with NO `value`
+// key) does not silently erase the literal they were never allowed to see. Value-only, mirroring #2059 —
+// only filterInfo.conditions[].value is ever preserved; sortInfo/groupInfo/config/operator/fieldId pass through.
+// Matches by array-index + (fieldId, operator) (no stable condition IDs); rejects on structural mismatch
+// rather than guess. Returns null on structural mismatch so the route can answer 400 (never persist a missing literal).
+function mergeRedactedFilterInfoForUpdate(incoming: Record<string, unknown>, current: unknown, allowedFieldIds: Set<string>): Record<string, unknown> | null {
+  if (!Array.isArray((incoming as { conditions?: unknown }).conditions)) {
+    return incoming // not a conditions-bearing filter → nothing to preserve
+  }
+  const incomingConditions = (incoming as { conditions: Array<Record<string, unknown>> }).conditions
+  const currentConditions = (current && typeof current === 'object' && Array.isArray((current as { conditions?: unknown }).conditions))
+    ? (current as { conditions: Array<Record<string, unknown>> }).conditions
+    : []
+  const merged: Array<Record<string, unknown>> = []
+  for (let i = 0; i < incomingConditions.length; i++) {
+    const c = incomingConditions[i]
+    const fieldId = typeof c?.fieldId === 'string' ? c.fieldId : null
+    const allowed = fieldId !== null && allowedFieldIds.has(fieldId)
+    const hasValue = !!c && typeof c === 'object' && Object.prototype.hasOwnProperty.call(c, 'value')
+    if (allowed || hasValue) { merged.push(c); continue } // allowed field, or explicit value (incl. denied) → trust incoming
+    // denied field with NO value key → must restore from the same-index current condition or reject.
+    const cur = currentConditions[i]
+    const sameShape = !!cur && typeof cur === 'object' && cur.fieldId === c.fieldId && cur.operator === c.operator
+    if (!sameShape) return null // structural mismatch → reject (route answers 400; never persist a missing literal)
+    if (Object.prototype.hasOwnProperty.call(cur, 'value')) merged.push({ ...c, value: (cur as { value?: unknown }).value }) // restore the literal
+    else merged.push(c) // current is also unary (no value) → nothing to protect; keep as-is
+  }
+  return { ...incoming, conditions: merged }
+}
+
 async function loadXlsxModule(): Promise<XlsxModule> {
   return await import('xlsx') as unknown as XlsxModule
 }
@@ -5263,9 +5294,20 @@ export function univerMetaRouter(): Router {
       const row: any = current.rows[0]
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), String(row.sheet_id))
       if (!capabilities.canManageViews) return sendForbidden(res)
+      // #2068 re-save guard: compute the writer's allowed-field set up front, then merge the incoming
+      // filterInfo against the current DB filter so a redacted denied condition (echoed back with NO `value`)
+      // preserves the persisted literal instead of erasing it; reject 400 on a structural mismatch.
+      const allowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), String(row.sheet_id), (await resolveRequestAccess(req)).userId, capabilities)
       const nextName = parsed.data.name ?? String(row.name)
       const nextType = parsed.data.type ?? String(row.type ?? 'grid')
-      const nextFilter = parsed.data.filterInfo ?? normalizeJson(row.filter_info)
+      let nextFilter: Record<string, unknown> = normalizeJson(row.filter_info)
+      if (parsed.data.filterInfo !== undefined) {
+        const mergedFilter = mergeRedactedFilterInfoForUpdate(parsed.data.filterInfo, normalizeJson(row.filter_info), allowedFieldIds)
+        if (mergedFilter === null) {
+          return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Cannot re-save a hidden filter value that no longer matches the saved view; resubmit an explicit value or remove the condition.' } })
+        }
+        nextFilter = mergedFilter
+      }
       const nextSort = parsed.data.sortInfo ?? normalizeJson(row.sort_info)
       const nextGroup = parsed.data.groupInfo ?? normalizeJson(row.group_info)
       const nextHiddenFieldIds = parsed.data.hiddenFieldIds ?? normalizeJsonArray(row.hidden_field_ids)
@@ -5325,7 +5367,6 @@ export function univerMetaRouter(): Router {
       }
 
       metaViewConfigCache.set(viewId, view)
-      const allowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), String(row.sheet_id), (await resolveRequestAccess(req)).userId, capabilities)
       return res.json({ ok: true, data: { view: redactViewConfigFilterLiterals(view, allowedFieldIds) } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
