@@ -251,4 +251,28 @@ describe('A5 runs API — POST /automation-executions/:id/retry', () => {
     expect(serialized).not.toContain('LIVE-SECRET-TOKEN')
     expect(serialized).not.toContain('SECRETPW')
   })
+
+  it('retry stays 200 (minimal safe body) when the persisted-row re-fetch THROWS — a log read must not 500 a retry whose side effects already ran', async () => {
+    const rawNew = {
+      id: 'axe_new', ruleId: 'rule-1', status: 'success', triggeredBy: 'retry', triggeredAt: '2026-05-29T00:00:00.000Z',
+      rerunOfExecutionId: 'axe_1', initiatedBy: 'admin1',
+      ruleSnapshot: { actions: [{ config: { token: 'LIVE-SECRET-TOKEN' } }] },
+      steps: [{ actionType: 'send_webhook', status: 'failed', error: 'SECRETPW' }],
+    }
+    const svc = makeMockService(
+      { getById: vi.fn().mockRejectedValue(new Error('db down')) }, // log READ throws
+      { retryExecution: vi.fn().mockResolvedValue({ execution: rawNew }) },
+    )
+    const res = await request(buildApp(svc))
+      .post('/api/multitable/automation-executions/axe_1/retry')
+      .send({ confirmSideEffects: true })
+      .expect(200) // NOT 500 — the retry ran; only the log read failed
+    expect(res.body.id).toBe('axe_new')
+    expect(res.body.status).toBe('resolved')
+    expect(res.body.steps).toBeUndefined()
+    expect(res.body.ruleSnapshot).toBeUndefined()
+    const serialized = JSON.stringify(res.body)
+    expect(serialized).not.toContain('LIVE-SECRET-TOKEN')
+    expect(serialized).not.toContain('SECRETPW')
+  })
 })
