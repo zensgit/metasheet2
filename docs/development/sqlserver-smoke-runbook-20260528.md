@@ -83,8 +83,14 @@ If `MSSQL_TABLE` is set, it should also print:
 ```text
 [ok] table exists
 [ok] table info
-[ok] select sample
+[ok] select sample (TOP)
+[ok] select page (OFFSET/FETCH)
 ```
+
+The two `select` lines cover both pagination branches (`TOP` and `OFFSET…FETCH`). They run only when
+`MSSQL_SCHEMA` is the default `dbo`: `adapter.select()` is not schema-qualified, so on a non-`dbo`
+schema you instead see `[skip] select probes …` and only the schema-qualified metadata checks
+(`table exists` / `table info`) run.
 
 ## Local SQL Server Option
 
@@ -97,7 +103,7 @@ Do not run the container against customer data. For customer verification, prefe
 - All required `[ok]` lines appear.
 - No password or token is printed.
 - `MSSQL_ENCRYPT=true` works with the target server, or any `MSSQL_ENCRYPT=false` fallback is explicitly recorded as a legacy compatibility exception.
-- If a real table is supplied, `select sample` returns without write permissions.
+- If a real table is supplied on the default `dbo` schema, both `select sample (TOP)` and `select page (OFFSET/FETCH)` return without write permissions. On a non-`dbo` schema the select probes are skipped (`adapter.select()` is not schema-qualified); the schema-qualified metadata checks still run.
 
 ## Failure Triage
 

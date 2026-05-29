@@ -162,27 +162,40 @@ async function main(): Promise<void> {
         primaryKey: tableInfo.primaryKey ?? []
       })
 
-      const sample = await adapter.select(table, { limit: 5 })
-      if (sample.error) throw sample.error
-      console.log('[ok] select sample (TOP)', {
-        table: `${schema}.${table}`,
-        rows: sample.data.length
-      })
-
-      // Exercise the OFFSET/FETCH + ORDER BY branch as well (the TOP path above does not cover it).
-      const orderColumn = tableInfo.primaryKey?.[0] ?? tableInfo.columns[0]?.name
-      if (orderColumn) {
-        const paged = await adapter.select(table, {
-          limit: 3,
-          offset: 1,
-          orderBy: [{ column: orderColumn, direction: 'asc' }]
-        })
-        if (paged.error) throw paged.error
-        console.log('[ok] select page (OFFSET/FETCH)', {
+      // adapter.select() emits `FROM [table]` WITHOUT a schema, so it resolves against the login's
+      // DEFAULT schema — not necessarily MSSQL_SCHEMA. Only run the select codegen probes when the
+      // target is the default schema (dbo); otherwise they'd query the wrong table (false-fail, or
+      // worse, silently sample a same-named table in the default schema). The metadata checks above
+      // ARE schema-qualified, so they still run for any schema.
+      if (schema === 'dbo') {
+        const sample = await adapter.select(table, { limit: 5 })
+        if (sample.error) throw sample.error
+        console.log('[ok] select sample (TOP)', {
           table: `${schema}.${table}`,
-          orderBy: orderColumn,
-          rows: paged.data.length
+          rows: sample.data.length
         })
+
+        // Exercise the OFFSET/FETCH + ORDER BY branch as well (the TOP path above does not cover it).
+        const orderColumn = tableInfo.primaryKey?.[0] ?? tableInfo.columns[0]?.name
+        if (orderColumn) {
+          const paged = await adapter.select(table, {
+            limit: 3,
+            offset: 1,
+            orderBy: [{ column: orderColumn, direction: 'asc' }]
+          })
+          if (paged.error) throw paged.error
+          console.log('[ok] select page (OFFSET/FETCH)', {
+            table: `${schema}.${table}`,
+            orderBy: orderColumn,
+            rows: paged.data.length
+          })
+        }
+      } else {
+        console.log(
+          '[skip] select probes (TOP / OFFSET-FETCH) — adapter.select() is not schema-qualified; it ' +
+            `queries the login default schema, not "${schema}". Use a dbo table (or MSSQL_SCHEMA=dbo) ` +
+            `to cover the select codegen paths. (Metadata above WAS checked against "${schema}".)`
+        )
       }
     }
   } finally {
