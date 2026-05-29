@@ -260,6 +260,14 @@ export interface IntegrationStagingInstallResult {
   warnings: string[]
 }
 
+// DF-T3b-2b UI-wire: binds a from_reference_table domain to the staging system/object that holds its
+// mapping sheet. The preview route (DF-T3b-2b) live-bulk-reads each via the staging source-adapter.
+export interface IntegrationReferenceMappingSource {
+  domain: string
+  systemId: string
+  object: string
+}
+
 export interface IntegrationTemplatePreviewRequest {
   sourceRecord: Record<string, unknown>
   fieldMappings: IntegrationFieldMapping[]
@@ -275,6 +283,9 @@ export interface IntegrationTemplatePreviewRequest {
   // no-write preview and returns targetPayloadPreview; omitted = legacy preview (byte-compatible).
   payloadTemplate?: Record<string, unknown>
   fieldRules?: Array<Record<string, unknown>>
+  // DF-T3b-2b UI-wire: when present, the preview route live-bulk-reads each domain's mapping sheet so
+  // from_reference_table resolves per-material. Omitted = no live resolution (byte-compatible).
+  referenceMappingSources?: IntegrationReferenceMappingSource[]
 }
 
 // DF-T1.5 reachability wire: derive a minimal DF-T1 fieldRules set from the legacy preview's field
