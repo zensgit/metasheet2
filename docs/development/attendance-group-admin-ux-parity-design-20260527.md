@@ -192,6 +192,11 @@ These are intentionally not answered by this design lock:
 
 Each question is a separate product/API decision.
 
+Follow-up design locks now split the first two questions:
+
+- `docs/development/attendance-group-admin-ux-owner-role-design-20260529.md` covers owner/sub-owner roster and delegation boundaries.
+- `docs/development/attendance-group-admin-ux-punch-method-config-design-20260529.md` covers punch-method configuration boundaries.
+
 ## 9. Acceptance For This Design
 
 This document is complete when:
