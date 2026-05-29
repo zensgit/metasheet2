@@ -303,10 +303,12 @@ export class MSSQLAdapter extends BaseDataAdapter {
       ? options.select.map(col => this.quoteIdent(col)).join(', ')
       : '*'
 
-    const limit = options.limit != null ? Math.floor(Number(options.limit)) : null
+    // A5: `limit` is always a bounded positive int (omit -> MAX cap, > MAX -> throw), so a direct
+    // internal caller cannot issue an unbounded read.
+    const limit = this.resolveEffectiveLimit(options.limit)
     const offset = options.offset != null ? Math.floor(Number(options.offset)) : null
     // limit-without-offset uses TOP (no ORDER BY required); offset uses OFFSET/FETCH.
-    const useTop = limit != null && limit >= 0 && (offset == null || offset === 0)
+    const useTop = offset == null || offset === 0
 
     let sql = `SELECT ${useTop ? `TOP (${limit}) ` : ''}${selectClause} FROM ${this.quoteIdent(table)}`
     let params: DbValue[] = []
@@ -331,9 +333,7 @@ export class MSSQLAdapter extends BaseDataAdapter {
     if (offset != null && offset > 0) {
       // OFFSET requires an ORDER BY; fall back to a stable no-op ordering.
       sql += ` ORDER BY ${orderBy ?? '(SELECT NULL)'} OFFSET ${offset} ROWS`
-      if (limit != null && limit >= 0) {
-        sql += ` FETCH NEXT ${limit} ROWS ONLY`
-      }
+      sql += ` FETCH NEXT ${limit} ROWS ONLY`
     } else if (orderBy) {
       sql += ` ORDER BY ${orderBy}`
     }
