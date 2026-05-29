@@ -81,10 +81,9 @@ export class MySQLAdapter extends BaseDataAdapter {
    * Prevents SQL injection by removing dangerous characters and properly quoting
    */
   private sanitizeMySQLIdentifier(identifier: string): string {
-    // First sanitize using parent method to remove dangerous characters
-    const sanitized = this.sanitizeIdentifier(identifier)
-    // Then wrap in backticks for MySQL
-    return `\`${sanitized}\``
+    // A2: backtick-quote PER SEGMENT so a schema-qualified name becomes `schema`.`table`. The base
+    // sanitizer validates each segment and throws on illegal input.
+    return this.sanitizeIdentifier(identifier).split('.').map(seg => `\`${seg}\``).join('.')
   }
 
   async connect(): Promise<void> {

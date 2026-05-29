@@ -269,9 +269,10 @@ export class MSSQLAdapter extends BaseDataAdapter {
     }
   }
 
-  // Bracket-quote an identifier after the base sanitizer strips dangerous chars.
+  // A2: bracket-quote PER SEGMENT so a schema-qualified name becomes [schema].[table]. The base
+  // sanitizer validates each segment and throws on illegal input.
   private quoteIdent(identifier: string): string {
-    return `[${this.sanitizeIdentifier(identifier)}]`
+    return this.sanitizeIdentifier(identifier).split('.').map(seg => `[${seg}]`).join('.')
   }
 
   async query<T = Record<string, DbValue>>(sql: string, params?: DbValue[]): Promise<QueryResult<T>> {

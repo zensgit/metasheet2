@@ -247,8 +247,21 @@ export abstract class BaseDataAdapter extends EventEmitter {
 
   // Helper methods
   protected sanitizeIdentifier(identifier: string): string {
-    // Remove or escape potentially dangerous characters
-    return identifier.replace(/[^a-zA-Z0-9_]/g, '')
+    // A2: validate (THROW on illegal) instead of silently stripping, and support schema-qualified
+    // names by validating each '.'-separated segment. Silent stripping mangled `public.foo` ->
+    // `publicfoo` and masked bad input. Quoting (brackets/backticks) is each SQL adapter's job,
+    // applied PER SEGMENT.
+    if (typeof identifier !== 'string' || identifier.length === 0) {
+      throw new Error(`Invalid identifier: ${JSON.stringify(identifier)}`)
+    }
+    for (const segment of identifier.split('.')) {
+      if (!/^[a-zA-Z0-9_]+$/.test(segment)) {
+        throw new Error(
+          `Invalid identifier segment "${segment}" in "${identifier}" (allowed: letters, digits, underscore)`
+        )
+      }
+    }
+    return identifier
   }
 
   protected buildWhereClause(where: Record<string, WhereValue>): { sql: string; params: DbValue[] } {

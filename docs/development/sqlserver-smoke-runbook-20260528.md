@@ -85,6 +85,7 @@ If `MSSQL_TABLE` is set, it should also print:
 [ok] table info
 [ok] select sample (TOP)
 [ok] select page (OFFSET/FETCH)
+[ok] select schema-qualified ([schema].[table])
 ```
 
 The two `select` lines cover both pagination branches (`TOP` and `OFFSET…FETCH`). They run only when
