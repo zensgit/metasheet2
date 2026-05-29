@@ -251,6 +251,7 @@ describe('Attendance admin regressions', () => {
                 code: 'ops-team',
                 timezone: 'Asia/Shanghai',
                 ruleSetId: 'rule-set-1',
+                attendanceType: 'fixed_shift',
                 description: 'Operations attendance group',
                 createdAt: '2026-03-28T08:00:00.000Z',
                 updatedAt: '2026-03-28T08:30:00.000Z',
@@ -866,7 +867,8 @@ describe('Attendance admin regressions', () => {
     const summaryGrid = groupsSection!.querySelector<HTMLElement>('[data-attendance-group-summaries]')
     expect(summaryGrid).toBeTruthy()
     expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="rule-policy"]')?.textContent).toContain('Ops Rules')
-    expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="work-time"]')?.textContent).toContain('Configured in Shifts and Assignments')
+    expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="work-time"]')?.textContent).toContain('Fixed shift')
+    expect(groupsSection!.querySelector<HTMLSelectElement>('[data-attendance-group-type]')?.disabled).toBe(true)
     expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="scheduling-coverage"]')?.textContent).toContain('Advanced scheduling owns rotation and coverage checks')
     expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="comprehensive-hours"]')?.textContent).toContain('Review and reporting live in their own admin surface')
     expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="punch-method"]')?.textContent).toContain('applies to all attendance groups')
@@ -881,6 +883,7 @@ describe('Attendance admin regressions', () => {
     await flushUi(2)
 
     expect(groupsSection!.querySelector('[data-attendance-group-detail]')?.textContent).toContain('New attendance group')
+    expect(groupsSection!.querySelector<HTMLSelectElement>('[data-attendance-group-type]')?.disabled).toBe(false)
     expect(groupsSection!.querySelector('[data-attendance-group-people]')?.textContent).toContain('Save the group before adding people.')
     expect(groupsSection!.querySelector('[data-attendance-group-summary-card="rule-policy"]')?.textContent).toContain('Choose or save a group first')
   })
@@ -900,6 +903,7 @@ describe('Attendance admin regressions', () => {
         code: 'ops-team',
         timezone: 'Asia/Shanghai',
         ruleSetId: 'rule-set-1',
+        attendanceType: 'fixed_shift',
         description: 'Operations attendance group',
         createdAt: '2026-03-28T08:00:00.000Z',
         updatedAt: '2026-03-28T08:30:00.000Z',
@@ -910,6 +914,7 @@ describe('Attendance admin regressions', () => {
         code: 'qa-team',
         timezone: 'Asia/Shanghai',
         ruleSetId: null,
+        attendanceType: 'scheduled_shift',
         description: 'Quality attendance group',
         createdAt: '2026-03-29T08:00:00.000Z',
         updatedAt: '2026-03-29T08:30:00.000Z',
@@ -956,6 +961,7 @@ describe('Attendance admin regressions', () => {
           code: 'ops-team-copy',
           timezone: String(body.timezone || 'Asia/Shanghai'),
           ruleSetId: typeof body.ruleSetId === 'string' ? body.ruleSetId : null,
+          attendanceType: String(body.attendanceType || 'fixed_shift'),
           description: typeof body.description === 'string' ? body.description : null,
           createdAt: '2026-03-30T08:00:00.000Z',
           updatedAt: '2026-03-30T08:00:00.000Z',
@@ -998,9 +1004,30 @@ describe('Attendance admin regressions', () => {
       expect(list.textContent).toContain('Ops Team')
       expect(list.textContent).toContain('QA Team')
 
+      const typeFilter = groupsSection.querySelector<HTMLSelectElement>('#attendance-group-type-filter')!
+      typeFilter.value = 'fixed_shift'
+      typeFilter.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi(2)
+      expect(list.textContent).toContain('Ops Team')
+      expect(list.textContent).not.toContain('QA Team')
+      expect(list.textContent).toContain('1 of 2 groups')
+
+      groupsSection.querySelector<HTMLButtonElement>('.attendance__group-list-tool-actions button:nth-child(2)')!.click()
+      await flushUi(2)
+      expect(list.textContent).toContain('Ops Team')
+      expect(list.textContent).toContain('QA Team')
+
       groupsSection.querySelector<HTMLButtonElement>('[data-attendance-group-list-tools] .attendance__btn')!.click()
       expect(createObjectURL).toHaveBeenCalledTimes(1)
       expect(revokeObjectURL).toHaveBeenCalledWith('blob:attendance-groups')
+
+      const qaRow = Array.from(groupsSection.querySelectorAll<HTMLElement>('[data-attendance-group-row]'))
+        .find(row => row.textContent?.includes('QA Team'))
+      expect(qaRow).toBeTruthy()
+      qaRow!.querySelector<HTMLButtonElement>('.attendance__group-list-main')!.click()
+      await flushUi(2)
+      expect(groupsSection.querySelector('[data-attendance-group-schedule-type-placeholder]')?.textContent).toContain('Scheduled shift')
+      expect(groupsSection.querySelector('[data-attendance-group-fixed-schedule-preview]')).toBeNull()
 
       const opsRow = Array.from(groupsSection.querySelectorAll<HTMLElement>('[data-attendance-group-row]'))
         .find(row => row.textContent?.includes('Ops Team'))
@@ -1014,6 +1041,7 @@ describe('Attendance admin regressions', () => {
           code: null,
           timezone: 'Asia/Shanghai',
           ruleSetId: 'rule-set-1',
+          attendanceType: 'fixed_shift',
           description: 'Operations attendance group',
         }),
       ])

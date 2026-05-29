@@ -49,6 +49,8 @@ const ATTENDANCE_SCHEDULE_GROUP_SOURCES = new Set(['manual', 'import', 'integrat
 const ATTENDANCE_SCHEDULE_GROUP_MEMBER_ROLES = new Set(['member', 'lead', 'backup'])
 const ATTENDANCE_SCHEDULER_SCOPE_SUBJECT_TYPES = new Set(['user', 'role', 'role_tag'])
 const ATTENDANCE_SCHEDULER_SCOPE_ACTIONS = new Set(['view', 'edit', 'import', 'export', 'clear', 'approve', 'dispatch'])
+const ATTENDANCE_GROUP_TYPES = new Set(['fixed_shift', 'scheduled_shift', 'free_time'])
+const DEFAULT_ATTENDANCE_GROUP_TYPE = 'fixed_shift'
 
 const SETTINGS_KEY = 'attendance.settings'
 const SETTINGS_CACHE_TTL_MS = 60000
@@ -1217,6 +1219,14 @@ function readAttendanceReportFieldCatalogCell(record, fieldIds, logicalFieldId) 
 function normalizeCatalogString(value, fallback = '') {
   const normalized = typeof value === 'string' ? value.trim() : ''
   return normalized || fallback
+}
+
+function normalizeAttendanceGroupType(value, fallback = DEFAULT_ATTENDANCE_GROUP_TYPE) {
+  const normalized = normalizeCatalogString(value, fallback).toLowerCase().replace(/-/g, '_')
+  if (!ATTENDANCE_GROUP_TYPES.has(normalized)) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'attendanceType must be fixed_shift, scheduled_shift, or free_time')
+  }
+  return normalized
 }
 
 function normalizeCatalogBoolean(value, fallback) {
@@ -7343,6 +7353,7 @@ function mapShiftRow(row) {
 }
 
 function mapAttendanceGroupRow(row) {
+  const attendanceType = normalizeAttendanceGroupType(row.attendance_type)
   return {
     id: row.id,
     orgId: row.org_id ?? DEFAULT_ORG_ID,
@@ -7351,6 +7362,8 @@ function mapAttendanceGroupRow(row) {
     timezone: row.timezone ?? DEFAULT_RULE.timezone,
     ruleSetId: row.rule_set_id ?? null,
     description: row.description ?? null,
+    attendanceType,
+    attendance_type: attendanceType,
     createdAt: row.created_at ? new Date(row.created_at).toISOString() : undefined,
     updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : undefined,
   }
@@ -26156,6 +26169,7 @@ module.exports = {
           timezone: z.string().optional().nullable(),
           ruleSetId: z.string().uuid().optional().nullable(),
           description: z.string().optional().nullable(),
+          attendanceType: z.string().optional().nullable(),
         })
 
         const parsed = schema.safeParse(req.body ?? {})
@@ -26167,9 +26181,11 @@ module.exports = {
         const orgId = getOrgId(req)
         let name
         let timezone
+        let attendanceType
         try {
           name = normalizeSafeDisplayName('name', parsed.data.name)
           timezone = resolveExplicitTimeZoneOrThrow(parsed.data.timezone, DEFAULT_RULE.timezone)
+          attendanceType = normalizeAttendanceGroupType(parsed.data.attendanceType)
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
@@ -26188,10 +26204,10 @@ module.exports = {
 
         try {
           const rows = await db.query(
-            `INSERT INTO attendance_groups (org_id, name, code, timezone, rule_set_id, description, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, now(), now())
+            `INSERT INTO attendance_groups (org_id, name, code, timezone, rule_set_id, description, attendance_type, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now())
              RETURNING *`,
-            [orgId, name, code, timezone, ruleSetId, description]
+            [orgId, name, code, timezone, ruleSetId, description, attendanceType]
           )
           res.json({ ok: true, data: mapAttendanceGroupRow(rows[0]) })
         } catch (error) {
@@ -26219,6 +26235,7 @@ module.exports = {
           timezone: z.string().optional().nullable(),
           ruleSetId: z.string().uuid().optional().nullable(),
           description: z.string().optional().nullable(),
+          attendanceType: z.string().optional().nullable(),
         })
 
         const parsed = schema.safeParse(req.body ?? {})
@@ -26245,15 +26262,31 @@ module.exports = {
         const existing = existingRows[0]
         let name
         let timezone
+        let requestedAttendanceType
+        let existingAttendanceType
         try {
           name = normalizeSafeDisplayName('name', parsed.data.name)
           timezone = resolveExplicitTimeZoneOrThrow(parsed.data.timezone, DEFAULT_RULE.timezone)
+          existingAttendanceType = normalizeAttendanceGroupType(existing.attendance_type)
+          requestedAttendanceType = parsed.data.attendanceType == null
+            ? existingAttendanceType
+            : normalizeAttendanceGroupType(parsed.data.attendanceType, existingAttendanceType)
         } catch (error) {
           if (error instanceof HttpError) {
             res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
             return
           }
           throw error
+        }
+        if (requestedAttendanceType !== existingAttendanceType) {
+          res.status(409).json({
+            ok: false,
+            error: {
+              code: 'ATTENDANCE_GROUP_TYPE_LOCKED',
+              message: 'Attendance group type cannot be changed after creation',
+            },
+          })
+          return
         }
         const code = resolveAttendanceCode({
           explicitCode: parsed.data.code,

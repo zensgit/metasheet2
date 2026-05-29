@@ -848,6 +848,7 @@ attendanceIntegrationDescribe(
       body: JSON.stringify({
         name: groupName,
         timezone: 'UTC',
+        attendanceType: 'fixed_shift',
         description: 'integration-test',
       }),
     })
@@ -855,7 +856,9 @@ attendanceIntegrationDescribe(
     const groupId = (createGroupRes.body as { data?: { id?: string } } | undefined)?.data?.id
     expect(groupId).toBeTruthy()
     const createdGroupCode = (createGroupRes.body as { data?: { code?: string } } | undefined)?.data?.code
+    const createdGroupType = (createGroupRes.body as { data?: { attendanceType?: string } } | undefined)?.data?.attendanceType
     expect(createdGroupCode).toMatch(/^[a-z0-9-]+-[a-f0-9]{8}$/)
+    expect(createdGroupType).toBe('fixed_shift')
 
     if (groupId) {
       const updateGroupRes = await requestJson(`${baseUrl}/api/attendance/groups/${groupId}`, {
@@ -872,7 +875,25 @@ attendanceIntegrationDescribe(
       })
       expect(updateGroupRes.status).toBe(200)
       const updatedGroupCode = (updateGroupRes.body as { data?: { code?: string } } | undefined)?.data?.code
+      const updatedGroupType = (updateGroupRes.body as { data?: { attendanceType?: string } } | undefined)?.data?.attendanceType
       expect(updatedGroupCode).toBe(createdGroupCode)
+      expect(updatedGroupType).toBe('fixed_shift')
+
+      const changeGroupTypeRes = await requestJson(`${baseUrl}/api/attendance/groups/${groupId}`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name: `${groupName} Updated`,
+          timezone: 'UTC',
+          attendanceType: 'scheduled_shift',
+          description: 'integration-test-updated',
+        }),
+      })
+      expect(changeGroupTypeRes.status).toBe(409)
+      expect((changeGroupTypeRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('ATTENDANCE_GROUP_TYPE_LOCKED')
 
       const addGroupMemberRes = await requestJson(`${baseUrl}/api/attendance/groups/${groupId}/members`, {
         method: 'POST',
