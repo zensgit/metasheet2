@@ -144,9 +144,9 @@
 - 🔒 B6(后续切片)Windows 集成认证 `authType:'windows'` —— Kerberos/keytab/AD,独立设计
 
 ### Phase C — 部署形态(随 A/B 决策)
-- ⬜ C1 `/tmp/sandbox` → `os.tmpdir()`
-- ⬜ C2 A/B/C 三档部署 runbook
-- 🔒 C3 (仅走 C 时)Windows 原生运行时验证 pass
+- ✅ **C1** `'/tmp/sandbox'` → `path.join(os.tmpdir(),'sandbox')`(`ScriptSandbox.ts` + `script-sandbox-workdir.test.ts`;测试 mock `os.tmpdir()` 到非 `/tmp` sentinel,断言 workDir 派生自 `os.tmpdir()` 而非硬编码字面量 —— 否则 Linux CI 上 `os.tmpdir()===/tmp` 会让回退到字面量仍然 pass)
+- ✅ **C2** A/B/C 三档部署 runbook —— `docs/development/data-sources-mssql-windows-deploy-runbook-20260529.md`
+- 🔒 C3 (仅走 C 时)Windows 原生运行时验证 pass(需 Windows VM/快照,本预算未含)
 
 **推进顺序(已按裁示更新)**:Phase 0 → **A0 + A0.1(持久化 + scope 收口)→ A-RO + A1 + A4(基础面安全)→ A2/A3/A5/A6** → **B(仅当 A0/A0.1/A-RO/A1/A4 定住后才 opt-in)** → C(随部署形态)。
 - **Lane B 不再与 A 并行**:MSSQL 连接器必须落在已安全的框架上,故 gated 在 A0/A0.1/A-RO/A1/A4 之后(P0-4 裁示)。
