@@ -2192,7 +2192,12 @@ async function requireRecordReadable(
   query: QueryFn,
   sheetId: string,
   recordId: string,
-): Promise<{ access: ResolvedRequestAccess; capabilities: MultitableCapabilities } | { status: number; body: unknown }> {
+): Promise<{
+  access: ResolvedRequestAccess
+  capabilities: MultitableCapabilities
+  capabilityOrigin: MultitableCapabilityOrigin
+  sheetScope?: SheetPermissionScope
+} | { status: number; body: unknown }> {
   const recordCheck = await query(
     'SELECT id, sheet_id FROM meta_records WHERE id = $1 AND sheet_id = $2',
     [recordId, sheetId],
@@ -2204,7 +2209,7 @@ async function requireRecordReadable(
     }
   }
 
-  const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, sheetId)
+  const { access, capabilities, capabilityOrigin, sheetScope } = await resolveSheetReadableCapabilities(req, query, sheetId)
   if (!access.userId) {
     return { status: 401, body: { error: 'Authentication required' } }
   }
@@ -2228,7 +2233,7 @@ async function requireRecordReadable(
     }
   }
 
-  return { access, capabilities }
+  return { access, capabilities, capabilityOrigin, ...(sheetScope ? { sheetScope } : {}) }
 }
 
 type FieldMutationGuard = {
@@ -7419,11 +7424,9 @@ export function univerMetaRouter(): Router {
       }
 
       sheetId = String(row.sheet_id)
-      const { access, capabilities, capabilityOrigin, sheetScope } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!access.userId) {
-        return res.status(401).json({ error: 'Authentication required' })
-      }
-      if (!capabilities.canRead) return sendForbidden(res)
+      const readable = await requireRecordReadable(req, pool.query.bind(pool), sheetId, recordId)
+      if ('status' in readable) return res.status(readable.status).json(readable.body)
+      const { access, capabilities, capabilityOrigin, sheetScope } = readable
       const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })

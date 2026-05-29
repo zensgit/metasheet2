@@ -27,6 +27,9 @@ function createMockPool(
       return { rows: [], rowCount: 0 }
     }
     if (sql.includes('FROM record_permissions') && !sql.includes('FROM record_permissions rp')) return { rows: [], rowCount: 0 }
+    if (sql.includes('SELECT id, sheet_id FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+      return { rows: [{ id: String(params?.[0] ?? ''), sheet_id: String(params?.[1] ?? '') }], rowCount: 1 }
+    }
     if (sql.includes('SELECT pg_advisory_xact_lock(hashtext($1))')) {
       return { rows: [], rowCount: 1 }
     }
@@ -128,7 +131,7 @@ describe('Multitable sheet-scoped permissions API', () => {
   })
 
   test('narrows context and record actions when sheet permission is read-only', async () => {
-    const { app } = await createApp({
+    const { app, mockPool } = await createApp({
       tokenPerms: ['multitable:read', 'multitable:write', 'comments:write'],
       queryHandler: async (sql, params) => {
         if (sql.includes('FROM meta_sheets s') && sql.includes('LEFT JOIN meta_bases')) {
@@ -230,6 +233,10 @@ describe('Multitable sheet-scoped permissions API', () => {
       source: 'sheet-scope',
       hasSheetAssignments: true,
     })
+    expect(mockPool.query).toHaveBeenCalledWith(
+      expect.stringContaining('SELECT id, sheet_id FROM meta_records WHERE id = $1 AND sheet_id = $2'),
+      ['rec_1', 'sheet_ops'],
+    )
   })
 
   test('allows context when sheet read grant exists without global multitable permission', async () => {
