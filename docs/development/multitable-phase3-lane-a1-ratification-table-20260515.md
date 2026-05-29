@@ -2,17 +2,17 @@
 
 - Date: 2026-05-15
 - Author: Claude (Opus 4.7, 1M context), interactive harness; **read-only decision preparation, no code, no TODO Status change, no implementation PR**
-- Status: **Landed as read-only decision packet; not ratified.** This table consolidates seven outstanding ratification items for Lane A1 into a single operator-markup matrix. Until each item receives an operator answer AND the K3 PoC stage-1 lock lifts, A1 cannot ship — irrespective of this document landing.
+- Status: **Landed as read-only decision packet; not ratified.** This table consolidates seven outstanding ratification items for Lane A1 into a single operator-markup matrix. 2026-05-28 update: #1792 satisfies the K3 macro gate, but A1 still cannot ship until each item receives an operator answer.
 - Companion to: `/tmp/multitable-phase3-lane-a1-implementation-design-20260515.md` (A1 design draft, still in `/tmp/`, not committed to `docs/development/`).
 - Scope: consolidate the seven outstanding ratification items from the A1 design draft §15 into a single decision table the operator can mark up.
 
 ## 1. Charter
 
-The A1 design draft in `/tmp/multitable-phase3-lane-a1-implementation-design-20260515.md` carries proposed-but-not-ratified values across env names, RBAC posture, OpenAPI integration, response shape, provider allowlist, and default caps. Before A1 can become an implementation PR (which itself still needs K3 GATE PASS or `打破阶段一约束`), the operator must ratify each item.
+The A1 design draft in `/tmp/multitable-phase3-lane-a1-implementation-design-20260515.md` carries proposed-but-not-ratified values across env names, RBAC posture, OpenAPI integration, response shape, provider allowlist, and default caps. Before A1 can become an implementation PR, the operator must ratify each item.
 
 (Line count of the design draft intentionally omitted here — the draft may continue to evolve in `/tmp/` as the operator's review surfaces more refinements; this ratification table tracks decision content, not draft size.)
 
-This table consolidates them. **The macro gate (K3 lock) is a separate decision; this table does not propose lifting it.** Even if the operator ratifies every row below today, A1 still cannot ship until the macro gate lifts.
+This table consolidates them. **The K3 macro gate is now satisfied by #1792; this table still does not authorize implementation.** Even if the operator ratifies every row below today, A1 still needs a separate implementation opt-in.
 
 ## 2. Ratification matrix
 
@@ -120,12 +120,12 @@ Q-4: [accept 10 USD | =X]
 T-framing: [confirmed]
 ```
 
-Once **all** items above receive an operator answer AND the macro gate lifts (K3 GATE PASS or `打破阶段一约束`), A1 can move from `/tmp/` design draft to a Lane A1 implementation PR. **Until both happen, A1 stays deferred.**
+Once **all** items above receive an operator answer, A1 can move from `/tmp/` design draft to a Lane A1 implementation PR if the operator explicitly opts in. **Until then, A1 stays deferred.**
 
 ## 4. What this table did NOT do
 
 - Did NOT modify any TODO Status line.
-- Did NOT propose lifting the K3 lock.
+- Did NOT propose auto-starting A1 after #1792.
 - Did NOT propose an implementation PR.
 - Did NOT touch real provider keys, real env config, or real customer data.
 - Did NOT extend A1 scope into A2/A3 territory.

@@ -1,11 +1,11 @@
 # Data Factory 阶段二 — TODO (gated checklist) - 2026-05-26
 
 > **图例:** 🔒 blocked-by-gate · ⬜ ready-when-unlocked · ✅ done · ⏸ deferred
-> **全部 gated:** K3 PoC GATE PASS + 阶段二 unlock + 每个 PR 单独 opt-in。**Gate 0 今天未过 → 下面一项都不启动。**
+> **全部 gated:** K3 PoC GATE PASS + 阶段二 unlock + 每个 PR 单独 opt-in。**2026-05-28: #1792 已满足 K3 M1 GATE PASS；后续仍需 owner 阶段二 unlock + 单 PR opt-in。**
 > 这是 #1839 DF-N0..N4 phasing + #1874 偏好的执行清单，**非新设计、非开建授权**。
 
-## Gate 0 — 前置门（未过）
-- [ ] 🔒 K3 PoC **GATE PASS**（S3 read/list 决定 + S4 单记录 Save 回归仍未闭）
+## Gate 0 — 前置门
+- [x] ✅ K3 PoC **GATE PASS**（#1792: M1 单条 Material Save-only PASS；非 Submit/Audit/BOM/多条/生产）
 - [ ] 🔒 阶段二 **unlock** 决定（owner）
 
 ## 已完成（Stage-5 监控）
@@ -54,5 +54,5 @@
 - [ ] ⬜ **不要**从 FaaS / DF-N4 起步；**不要**在 N2-1 契约冻结前先做 N2-2 runtime（契约优先）
 
 ## 永不违反的硬锁
-- K3 Save-only / 单记录；无 Submit/Audit/BOM/多记录（除非 owner 决定）
+- K3 M1 已证明的是 Material Save-only / 单记录；无 Submit/Audit/BOM/多记录/生产（除非 owner 以单独 scoped gate 决定）
 - 业务用户面**永远只配置**，绝不开任意 JS/SQL 编辑器

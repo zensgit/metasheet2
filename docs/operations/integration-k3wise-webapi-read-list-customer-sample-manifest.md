@@ -6,9 +6,10 @@ Before MetaSheet can implement K3 WISE Material/BOM **read/list** (pull data fro
 K3 into the cleansing multitable, issue #1526 finding #2), we need the customer
 to confirm the WebAPI read contract and provide redacted sample responses.
 
-This is an **intake checklist**, not an execution runbook. The read/list runtime
-is deferred until the customer GATE PASS; this document front-loads the inputs so
-implementation is fast once unblocked.
+This is an **intake checklist**, not an execution runbook. #1792 now satisfies
+the K3 M1 GATE PASS precondition, but the read/list runtime still needs explicit
+owner opt-in plus the O1-O6 inputs below; this document front-loads those inputs
+so implementation is fast once the scoped #1709 slice is approved.
 
 Read alongside:
 
@@ -102,8 +103,8 @@ write template); confirm or correct in O4-BOM.
 ## Hand-back
 
 Return Part A inline (redacted) and Part B as the four `*.redacted.json` files
-through the secure channel. On receipt and customer GATE PASS, the runtime slice
-proceeds per the post-GATE plan in the design and verification docs.
+through the secure channel. On receipt plus explicit owner opt-in, the runtime
+slice proceeds per the post-GATE plan in the design and verification docs.
 
 ## Machine check before runtime
 
