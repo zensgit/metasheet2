@@ -208,4 +208,30 @@ describe('MetaFieldManager formula dry-run — current-record sampling (#5c)', (
     expect(zone.querySelectorAll('.meta-field-mgr__formula-diagnostic').length).toBeGreaterThan(0) // missing_sample shown
     expect(zone.textContent).not.toContain('LEAK_CANARY_DO_NOT_RENDER') // diagnostic.message never rendered (no leak)
   })
+
+  it('record button carries the §1.1 honest-label tooltip (sheet-scope / permission-safe / NOT a view-column mirror)', async () => {
+    const fn = vi.fn().mockResolvedValue({ success: true, result: 1, resultType: 'number', referencedFields: ['fld_price'], diagnostics: [] } satisfies DryRunResult)
+    const { container } = await mountFormulaConfig(fn, [], 'rec_42')
+    await setExpression(container, '={fld_price}+1')
+    const btn = recordBtn(container)
+    expect(btn).not.toBeNull()
+    // the load-bearing honest claim from design §1.1: it is NOT a mirror of the current view's displayed columns
+    expect(btn!.title).toContain('not a mirror of the columns shown in the current view')
+    expect(btn!.title).toContain('field-read permissions') // ...and it is permission-safe
+  })
+
+  it('T7: drops a STALE record-path dry-run superseded mid-flight (record path rides the same dryRunSeq guard)', async () => {
+    let resolveFn!: (r: DryRunResult) => void
+    const fn = vi.fn().mockReturnValue(new Promise<DryRunResult>((r) => { resolveFn = r }))
+    const { container } = await mountFormulaConfig(fn, [], 'rec_42')
+    await setExpression(container, '={fld_price}+1')
+    clickRecordPreview(container) // record dry-run seq N, pending
+    await nextTick()
+    await setExpression(container, '={fld_price}+2') // supersede: bumps dryRunSeq + clears running + clears result
+    resolveFn({ success: true, result: 999, resultType: 'number', referencedFields: ['fld_price'], diagnostics: [] }) // stale record resolve
+    await flush()
+    expect(container.querySelector('.meta-field-mgr__dryrun-result')).toBeNull() // stale record response NOT shown
+    const btn = container.querySelector('.meta-field-mgr__dryrun-btn') as HTMLButtonElement
+    expect(btn.disabled).toBe(false) // panel recovered (not stuck-disabled)
+  })
 })

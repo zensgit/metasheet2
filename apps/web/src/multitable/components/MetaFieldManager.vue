@@ -193,6 +193,7 @@
               type="button"
               class="meta-field-mgr__dryrun-btn meta-field-mgr__dryrun-btn--record"
               :disabled="!dryRunCanEvaluate"
+              :title="ml('field.formulaDryRun.recordHint')"
               @click="runDryRunWithRecord"
             >
               {{ dryRunRunning ? ml('field.formulaDryRun.evaluating') : ml('field.formulaDryRun.testWithRecord') }}
