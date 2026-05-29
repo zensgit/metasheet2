@@ -3125,6 +3125,15 @@
                         <button
                           class="attendance__btn attendance__btn--compact"
                           type="button"
+                          :disabled="attendanceGroupDeletingId === item.id"
+                          data-attendance-group-row-edit
+                          @click="selectAttendanceGroup(item)"
+                        >
+                          {{ tr('Edit', '编辑') }}
+                        </button>
+                        <button
+                          class="attendance__btn attendance__btn--compact"
+                          type="button"
                           :disabled="attendanceGroupCopyingId === item.id || attendanceGroupDeletingId === item.id"
                           data-attendance-group-copy
                           @click="copyAttendanceGroup(item)"
