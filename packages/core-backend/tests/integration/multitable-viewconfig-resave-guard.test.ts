@@ -167,4 +167,12 @@ describeIfDatabase('multitable view-config re-save guard (#2068, real DB)', () =
     expect(secretCond).toBeDefined()
     expect(Object.prototype.hasOwnProperty.call(secretCond ?? {}, 'value')).toBe(false) // no manufactured value
   })
+
+  test('R10: a malformed condition (null) → 400 VALIDATION_ERROR, DB unchanged (never a 500)', async () => {
+    // z.record(z.unknown()) lets a client send conditions: [..., null]; the guard must reject, not throw.
+    const res = await patch({ filterInfo: { conjunction: 'and', conditions: [{ fieldId: FLD_VISIBLE, operator: 'is', value: VIS_LIT }, null] } })
+    expect(res.status).toBe(400)
+    expect(res.body.error?.code).toBe('VALIDATION_ERROR')
+    expect(valueOf(await dbFilterInfo(), FLD_SECRET)).toBe(SECRET_LIT) // DB untouched on reject
+  })
 })

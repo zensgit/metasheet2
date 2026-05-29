@@ -2338,7 +2338,8 @@ function mergeRedactedFilterInfoForUpdate(incoming: Record<string, unknown>, cur
   const merged: Array<Record<string, unknown>> = []
   for (let i = 0; i < incomingConditions.length; i++) {
     const c = incomingConditions[i]
-    const fieldId = typeof c?.fieldId === 'string' ? c.fieldId : null
+    if (!c || typeof c !== 'object' || Array.isArray(c)) return null // malformed condition (null/non-object) → reject (route → 400), never a 500 or persisted garbage
+    const fieldId = typeof c.fieldId === 'string' ? c.fieldId : null
     const allowed = fieldId !== null && allowedFieldIds.has(fieldId)
     const hasValue = !!c && typeof c === 'object' && Object.prototype.hasOwnProperty.call(c, 'value')
     if (allowed || hasValue) { merged.push(c); continue } // allowed field, or explicit value (incl. denied) → trust incoming
