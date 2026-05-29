@@ -1569,7 +1569,7 @@ describe('UserManagementView', () => {
 
   it('creates a no-email user with username/mobile and surfaces temporary-password onboarding', async () => {
     app = createApp(UserManagementView)
-    registerRouterLink(app)
+    registerRouterLink(app, true)
     app.mount(container!)
     await flushUi(20)
 
@@ -1622,6 +1622,28 @@ describe('UserManagementView', () => {
     expect(container?.textContent).toContain('用户已创建')
     expect(container?.textContent).toContain('新用户临时密码：Temp#123456')
     expect(container?.textContent).toContain('账号：linlan')
+    const nextStep = container!.querySelector<HTMLElement>('[data-attendance-onboarding-next-step]')
+    expect(nextStep).toBeTruthy()
+    expect(nextStep?.textContent).toContain('下一步：补齐考勤配置')
+    expect(nextStep?.textContent).toContain('林岚 · 员工号 E-2026-010 · Assembly · Operator · 入职 2026-05-29')
+    const nextStepLinks = Array.from(nextStep!.querySelectorAll<HTMLAnchorElement>('a')).map(link => ({
+      text: link.textContent?.trim(),
+      href: link.getAttribute('href'),
+    }))
+    expect(nextStepLinks).toEqual([
+      {
+        text: '考勤组成员',
+        href: '/attendance?tab=admin&section=attendance-admin-group-members&userId=user-created&q=E-2026-010',
+      },
+      {
+        text: '班次分配',
+        href: '/attendance?tab=admin&section=attendance-admin-assignments&userId=user-created&q=E-2026-010',
+      },
+      {
+        text: '审批流',
+        href: '/attendance?tab=admin&section=attendance-admin-approval-flows&userId=user-created&q=E-2026-010',
+      },
+    ])
     expect(container?.textContent).not.toContain('首次设置密码链接：')
   })
 

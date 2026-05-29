@@ -99,6 +99,30 @@
       <p v-if="createdTemporaryPassword" class="user-admin__status">
         新用户临时密码：{{ createdTemporaryPassword }}
       </p>
+      <div v-if="createdAttendanceOnboardingTarget" class="user-admin__preset user-admin__attendance-next" data-attendance-onboarding-next-step>
+        <strong>下一步：补齐考勤配置</strong>
+        <p>{{ createdAttendanceOnboardingSummary }}</p>
+        <div class="user-admin__role-actions">
+          <router-link
+            class="user-admin__button user-admin__button--secondary user-admin__button-link"
+            :to="buildAttendanceAdminSectionLocation('attendance-admin-group-members')"
+          >
+            考勤组成员
+          </router-link>
+          <router-link
+            class="user-admin__button user-admin__button--secondary user-admin__button-link"
+            :to="buildAttendanceAdminSectionLocation('attendance-admin-assignments')"
+          >
+            班次分配
+          </router-link>
+          <router-link
+            class="user-admin__button user-admin__button--secondary user-admin__button-link"
+            :to="buildAttendanceAdminSectionLocation('attendance-admin-approval-flows')"
+          >
+            审批流
+          </router-link>
+        </div>
+      </div>
       <div v-if="selectedPreset" class="user-admin__preset">
         <strong>{{ selectedPreset.name }}</strong>
         <p>{{ selectedPreset.description }}</p>
@@ -951,6 +975,15 @@ type InviteLedgerRecord = {
   createdAt: string
 }
 
+type AttendanceOnboardingTarget = {
+  id: string
+  name: string
+  employeeNo: string
+  department: string
+  position: string
+  hireDate: string
+}
+
 type UserSessionRecord = {
   id: string
   userId: string
@@ -1004,6 +1037,7 @@ const temporaryPassword = ref('')
 const createdTemporaryPassword = ref('')
 const createdInviteMessage = ref('')
 const createdOnboarding = ref<OnboardingPacket | null>(null)
+const createdAttendanceOnboardingTarget = ref<AttendanceOnboardingTarget | null>(null)
 const inviteRecords = ref<InviteLedgerRecord[]>([])
 const userSessions = ref<UserSessionRecord[]>([])
 const access = ref<UserAccess | null>(null)
@@ -1032,6 +1066,19 @@ const createForm = ref<CreateUserForm>({
   isActive: true,
 })
 const selectedPreset = computed(() => accessPresets.value.find((preset) => preset.id === createForm.value.presetId) || null)
+const createdAttendanceOnboardingSummary = computed(() => {
+  const target = createdAttendanceOnboardingTarget.value
+  if (!target) return ''
+  const details = [
+    target.employeeNo ? `员工号 ${target.employeeNo}` : '',
+    target.department || '',
+    target.position || '',
+    target.hireDate ? `入职 ${target.hireDate}` : '',
+  ].filter(Boolean)
+  return details.length > 0
+    ? `${target.name || target.id} · ${details.join(' · ')}`
+    : `${target.name || target.id}`
+})
 const governanceSummary = computed(() => ({
   total: users.value.length,
   accountEnabled: users.value.filter((user) => user.is_active).length,
@@ -2234,11 +2281,36 @@ async function bulkUpdateNamespaceAdmissions(enabled: boolean): Promise<void> {
   }
 }
 
+function buildAttendanceOnboardingTarget(user: ManagedUser | undefined): AttendanceOnboardingTarget | null {
+  if (!user?.id) return null
+  return {
+    id: user.id,
+    name: String(user.name || user.username || user.email || user.id),
+    employeeNo: String(user.employeeNo || ''),
+    department: String(user.department || ''),
+    position: String(user.position || ''),
+    hireDate: String(user.hireDate || ''),
+  }
+}
+
+function buildAttendanceAdminSectionLocation(sectionId: string): string {
+  const params = new URLSearchParams({
+    tab: 'admin',
+    section: sectionId,
+  })
+  const target = createdAttendanceOnboardingTarget.value
+  if (target?.id) params.set('userId', target.id)
+  const query = target?.employeeNo || target?.name || target?.id || ''
+  if (query) params.set('q', query)
+  return `/attendance?${params.toString()}`
+}
+
 async function createUser(): Promise<void> {
   busy.value = true
   createdTemporaryPassword.value = ''
   createdInviteMessage.value = ''
   createdOnboarding.value = null
+  createdAttendanceOnboardingTarget.value = null
   try {
     const response = await apiFetch('/api/admin/users', {
       method: 'POST',
@@ -2271,6 +2343,7 @@ async function createUser(): Promise<void> {
     createdTemporaryPassword.value = String((payload.data as Record<string, unknown>).temporaryPassword || '')
     createdOnboarding.value = ((payload.data as Record<string, unknown>).onboarding as OnboardingPacket | undefined) || null
     createdInviteMessage.value = String(createdOnboarding.value?.inviteMessage || '')
+    createdAttendanceOnboardingTarget.value = buildAttendanceOnboardingTarget(access.value.user)
     createForm.value = {
       name: '',
       email: '',
