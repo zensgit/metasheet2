@@ -468,6 +468,41 @@ describe('Attendance self-service dashboard', () => {
     expect(workDate?.value).toBe('2026-04-15')
   })
 
+  it('loads active leave and overtime policies into self-service request selectors', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    expect(vi.mocked(apiFetch).mock.calls.some(call =>
+      String(call[0]) === '/api/attendance/leave-types?isActive=true'
+    )).toBe(true)
+    expect(vi.mocked(apiFetch).mock.calls.some(call =>
+      String(call[0]) === '/api/attendance/overtime-rules?isActive=true'
+    )).toBe(true)
+
+    const requestType = container!.querySelector<HTMLSelectElement>('#attendance-request-type')
+    expect(requestType).toBeTruthy()
+    requestType!.value = 'leave'
+    requestType!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    const leaveType = container!.querySelector<HTMLSelectElement>('#attendance-request-leave-type')
+    expect(leaveType).toBeTruthy()
+    expect(leaveType!.disabled).toBe(false)
+    expect(leaveType!.value).toBe('leave-annual')
+    expect(leaveType!.textContent).toContain('Annual Leave')
+
+    requestType!.value = 'overtime'
+    requestType!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    const overtimeRule = container!.querySelector<HTMLSelectElement>('#attendance-request-overtime-rule')
+    expect(overtimeRule).toBeTruthy()
+    expect(overtimeRule!.disabled).toBe(false)
+    expect(overtimeRule!.value).toBe('ot-default')
+    expect(overtimeRule!.textContent).toContain('Standard Overtime')
+  })
+
   it('explains zero-data onboarding when no attendance records exist yet', async () => {
     installZeroStateMock()
     app = createApp(AttendanceView, { mode: 'overview' })
@@ -484,6 +519,26 @@ describe('Attendance self-service dashboard', () => {
     expect(setupHint).toContain('confirm your group and shift setup')
     expect(focusList).toContain('Check attendance setup')
     expect(actionsCard).toContain('Wait for attendance setup')
+
+    const requestType = container!.querySelector<HTMLSelectElement>('#attendance-request-type')
+    expect(requestType).toBeTruthy()
+    requestType!.value = 'leave'
+    requestType!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    const leaveType = container!.querySelector<HTMLSelectElement>('#attendance-request-leave-type')
+    expect(leaveType).toBeTruthy()
+    expect(leaveType!.disabled).toBe(true)
+    expect(container!.textContent).toContain('Ask an attendance admin to enable an active leave type')
+
+    requestType!.value = 'overtime'
+    requestType!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    const overtimeRule = container!.querySelector<HTMLSelectElement>('#attendance-request-overtime-rule')
+    expect(overtimeRule).toBeTruthy()
+    expect(overtimeRule!.disabled).toBe(true)
+    expect(container!.textContent).toContain('Ask an attendance admin to enable an active overtime rule')
   })
 
   it('surfaces punch-too-soon failures with status code, hint, and retry affordance', async () => {

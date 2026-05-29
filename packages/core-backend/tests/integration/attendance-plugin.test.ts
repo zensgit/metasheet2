@@ -1119,6 +1119,89 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('lets attendance self-service users read only active leave and overtime policies', async () => {
+    if (!baseUrl) return
+    const runSuffix = Date.now().toString(36)
+    const adminUserId = `attendance-policy-admin-${runSuffix}`
+    const employeeUserId = `attendance-policy-employee-${runSuffix}`
+    const adminTokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const employeeTokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(employeeUserId)}&roles=user&perms=attendance:read,attendance:write`
+    )
+    const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
+    const employeeToken = (employeeTokenRes.body as { token?: string } | undefined)?.token
+    expect(adminToken).toBeTruthy()
+    expect(employeeToken).toBeTruthy()
+    if (!adminToken || !employeeToken) return
+
+    const activeLeaveName = `Policy Active Leave ${runSuffix}`
+    const inactiveLeaveName = `Policy Inactive Leave ${runSuffix}`
+    const activeOvertimeName = `Policy Active OT ${runSuffix}`
+    const inactiveOvertimeName = `Policy Inactive OT ${runSuffix}`
+
+    for (const payload of [
+      { code: `active-leave-${runSuffix}`, name: activeLeaveName, isActive: true },
+      { code: `inactive-leave-${runSuffix}`, name: inactiveLeaveName, isActive: false },
+    ]) {
+      const res = await requestJson(`${baseUrl}/api/attendance/leave-types`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      })
+      expect(res.status).toBe(201)
+    }
+
+    for (const payload of [
+      { name: activeOvertimeName, minMinutes: 0, isActive: true },
+      { name: inactiveOvertimeName, minMinutes: 0, isActive: false },
+    ]) {
+      const res = await requestJson(`${baseUrl}/api/attendance/overtime-rules`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      })
+      expect(res.status).toBe(201)
+    }
+
+    const employeeLeaveList = await requestJson(`${baseUrl}/api/attendance/leave-types?isActive=false`, {
+      headers: { Authorization: `Bearer ${employeeToken}` },
+    })
+    expect(employeeLeaveList.status).toBe(200)
+    const leaveItems =
+      (employeeLeaveList.body as { data?: { items?: Array<{ name?: string; isActive?: boolean }> } } | undefined)
+        ?.data?.items ?? []
+    expect(leaveItems.some(item => item.name === activeLeaveName && item.isActive === true)).toBe(true)
+    expect(leaveItems.some(item => item.name === inactiveLeaveName)).toBe(false)
+
+    const employeeOvertimeList = await requestJson(`${baseUrl}/api/attendance/overtime-rules?isActive=false`, {
+      headers: { Authorization: `Bearer ${employeeToken}` },
+    })
+    expect(employeeOvertimeList.status).toBe(200)
+    const overtimeItems =
+      (employeeOvertimeList.body as { data?: { items?: Array<{ name?: string; isActive?: boolean }> } } | undefined)
+        ?.data?.items ?? []
+    expect(overtimeItems.some(item => item.name === activeOvertimeName && item.isActive === true)).toBe(true)
+    expect(overtimeItems.some(item => item.name === inactiveOvertimeName)).toBe(false)
+
+    const forbiddenCreate = await requestJson(`${baseUrl}/api/attendance/leave-types`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${employeeToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ name: `Forbidden Leave ${runSuffix}` }),
+    })
+    expect(forbiddenCreate.status).toBe(403)
+  })
+
   it('lists raw punch events with stable timeline fields and cross-user guardrails', async () => {
     if (!baseUrl) return
 

@@ -46,6 +46,65 @@ describe('useAttendanceAdminLeavePolicies', () => {
     expect(adminForbidden.value).toBe(false)
   })
 
+  it('loads active-only leave and overtime policies for self-service selectors', async () => {
+    const adminForbidden = ref(false)
+    const requestForm = reactive({ leaveTypeId: '', overtimeRuleId: '' })
+    const apiFetch = vi.fn(async (input: string) => {
+      if (input === '/api/attendance/leave-types?isActive=true') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'leave-active',
+                code: 'annual',
+                name: 'Annual Leave',
+                paid: true,
+                requiresApproval: true,
+                requiresAttachment: false,
+                defaultMinutesPerDay: 480,
+                isActive: true,
+              },
+            ],
+          },
+        })
+      }
+      if (input === '/api/attendance/overtime-rules?isActive=true') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'ot-active',
+                name: 'Weekday OT',
+                minMinutes: 0,
+                roundingMinutes: 15,
+                maxMinutesPerDay: 600,
+                requiresApproval: true,
+                isActive: true,
+              },
+            ],
+          },
+        })
+      }
+      throw new Error(`Unexpected request: ${input}`)
+    })
+
+    const policies = useAttendanceAdminLeavePolicies({
+      adminForbidden,
+      requestForm,
+      apiFetch,
+    })
+
+    await policies.loadLeaveTypes({ activeOnly: true })
+    await policies.loadOvertimeRules({ activeOnly: true })
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance/leave-types?isActive=true')
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance/overtime-rules?isActive=true')
+    expect(requestForm.leaveTypeId).toBe('leave-active')
+    expect(requestForm.overtimeRuleId).toBe('ot-active')
+  })
+
   it('saves a leave type, reloads the list, resets the form, and forwards success status', async () => {
     const adminForbidden = ref(false)
     const requestForm = reactive({ leaveTypeId: '', overtimeRuleId: '' })

@@ -19076,7 +19076,7 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/leave-types',
-      withPermission('attendance:admin', async (req, res) => {
+      withPermission('attendance:read', async (req, res) => {
         const schema = z.object({
           orgId: z.string().optional(),
           isActive: z.string().optional(),
@@ -19094,14 +19094,20 @@ module.exports = {
 
         const { page, pageSize, offset } = parsePagination(req.query)
         const orgId = getOrgId(req)
+        const userId = getUserId(req)
         const params = [orgId]
         let activeFilter = ''
-        if (parsed.data.isActive !== undefined) {
-          params.push(parseBoolean(parsed.data.isActive, true))
-          activeFilter = `AND is_active = $${params.length}`
-        }
 
         try {
+          const canManagePolicies = userId ? await hasAttendanceAdminAccess(userId) : false
+          const activeOnly = canManagePolicies
+            ? (parsed.data.isActive === undefined ? null : parseBoolean(parsed.data.isActive, true))
+            : true
+          if (activeOnly !== null) {
+            params.push(activeOnly)
+            activeFilter = `AND is_active = $${params.length}`
+          }
+
           const countRows = await db.query(
             `SELECT COUNT(*)::int AS total
              FROM attendance_leave_types
@@ -19356,7 +19362,7 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/overtime-rules',
-      withPermission('attendance:admin', async (req, res) => {
+      withPermission('attendance:read', async (req, res) => {
         const schema = z.object({
           orgId: z.string().optional(),
           isActive: z.string().optional(),
@@ -19374,14 +19380,20 @@ module.exports = {
 
         const { page, pageSize, offset } = parsePagination(req.query)
         const orgId = getOrgId(req)
+        const userId = getUserId(req)
         const params = [orgId]
         let activeFilter = ''
-        if (parsed.data.isActive !== undefined) {
-          params.push(parseBoolean(parsed.data.isActive, true))
-          activeFilter = `AND is_active = $${params.length}`
-        }
 
         try {
+          const canManagePolicies = userId ? await hasAttendanceAdminAccess(userId) : false
+          const activeOnly = canManagePolicies
+            ? (parsed.data.isActive === undefined ? null : parseBoolean(parsed.data.isActive, true))
+            : true
+          if (activeOnly !== null) {
+            params.push(activeOnly)
+            activeFilter = `AND is_active = $${params.length}`
+          }
+
           const countRows = await db.query(
             `SELECT COUNT(*)::int AS total
              FROM attendance_overtime_rules

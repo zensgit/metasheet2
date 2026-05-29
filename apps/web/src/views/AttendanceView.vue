@@ -723,6 +723,9 @@
                   {{ item.name }}
                 </option>
               </select>
+              <small v-if="leaveTypes.length === 0" class="attendance__field-hint">
+                {{ tr('Ask an attendance admin to enable an active leave type before submitting leave requests.', '请联系考勤管理员启用可用请假类型后再提交请假申请。') }}
+              </small>
             </label>
             <label v-if="isOvertimeRequest" class="attendance__field" for="attendance-request-overtime-rule">
               <span>{{ tr('Overtime rule', '加班规则') }}</span>
@@ -737,6 +740,9 @@
                   {{ rule.name }}
                 </option>
               </select>
+              <small v-if="overtimeRules.length === 0" class="attendance__field-hint">
+                {{ tr('Ask an attendance admin to enable an active overtime rule before submitting overtime requests.', '请联系考勤管理员启用可用加班规则后再提交加班申请。') }}
+              </small>
             </label>
             <label class="attendance__field" for="attendance-request-in">
               <span>{{ isLeaveOrOvertimeRequest ? tr('Start', '开始') : tr('Requested in', '申请打卡入') }}</span>
@@ -4401,7 +4407,7 @@
             >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Leave Types', '请假类型') }}</h4>
-                <button class="attendance__btn" :disabled="leaveTypeLoading" @click="loadLeaveTypes">
+                <button class="attendance__btn" :disabled="leaveTypeLoading" @click="() => loadLeaveTypes()">
                   {{ leaveTypeLoading ? tr('Loading...', '加载中...') : tr('Reload leave types', '重载请假类型') }}
                 </button>
               </div>
@@ -4506,7 +4512,7 @@
             >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Overtime Rules', '加班规则') }}</h4>
-                <button class="attendance__btn" :disabled="overtimeRuleLoading" @click="loadOvertimeRules">
+                <button class="attendance__btn" :disabled="overtimeRuleLoading" @click="() => loadOvertimeRules()">
                   {{ overtimeRuleLoading ? tr('Loading...', '加载中...') : tr('Reload overtime rules', '重载加班规则') }}
                 </button>
               </div>
@@ -14232,7 +14238,11 @@ async function refreshAll(): Promise<boolean> {
   committedCalendarUserId.value = normalizedUserId() ?? currentUserId.value ?? null
   let success = true
   try {
-    const results = await Promise.allSettled([loadSummary(), loadRecords(), loadRequests(), loadAnomalies(), loadRequestReport(), loadHolidays()])
+    const tasks = [loadSummary(), loadRecords(), loadRequests(), loadAnomalies(), loadRequestReport(), loadHolidays()]
+    if (showOverview.value) {
+      tasks.push(loadLeaveTypes({ activeOnly: true }), loadOvertimeRules({ activeOnly: true }))
+    }
+    const results = await Promise.allSettled(tasks)
     const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
     if (failed) throw failed.reason
     if (showReports.value) {
@@ -15101,10 +15111,10 @@ function editLeaveType(item: AttendanceLeaveType) {
   leaveTypeForm.isActive = item.isActive
 }
 
-async function loadLeaveTypes() {
+async function loadLeaveTypes(options: { activeOnly?: boolean } = {}) {
   leaveTypeLoading.value = true
   try {
-    const query = buildQuery({ orgId: normalizedOrgId() })
+    const query = buildQuery({ orgId: normalizedOrgId(), isActive: options.activeOnly ? 'true' : undefined })
     const response = await apiFetch(`/api/attendance/leave-types?${query.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
@@ -15208,10 +15218,10 @@ function editOvertimeRule(item: AttendanceOvertimeRule) {
   overtimeRuleForm.isActive = item.isActive
 }
 
-async function loadOvertimeRules() {
+async function loadOvertimeRules(options: { activeOnly?: boolean } = {}) {
   overtimeRuleLoading.value = true
   try {
-    const query = buildQuery({ orgId: normalizedOrgId() })
+    const query = buildQuery({ orgId: normalizedOrgId(), isActive: options.activeOnly ? 'true' : undefined })
     const response = await apiFetch(`/api/attendance/overtime-rules?${query.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
