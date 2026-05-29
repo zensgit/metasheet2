@@ -78,6 +78,10 @@ jobs:
         # (a not-yet-started container fails connect and is retried).
         env:
           MSSQL_DATABASE: master
+          # Explicit write opt-in — the seed MUTATES the DB; allowed ONLY here, against the throwaway
+          # service container. Without it the seed fails loudly (guards against an accidental run with
+          # MSSQL_* pointed at a real/customer server).
+          MSSQL_SEED_ALLOW_WRITE: 'true'
         run: |
           for i in $(seq 1 40); do
             if pnpm --filter @metasheet/core-backend smoke:sqlserver:seed; then

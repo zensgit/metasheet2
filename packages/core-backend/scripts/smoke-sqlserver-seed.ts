@@ -35,6 +35,18 @@ async function main(): Promise<void> {
     console.log('[skip] seed skipped — no MSSQL_HOST / MSSQL_SERVER set (opt-in, CI-only).')
     return
   }
+  // SAFETY (track principle: ZERO modification to customer data sources). This seed MUTATES the
+  // target — CREATE DATABASE smoke_db + DROP/CREATE/INSERT smoke_probe — so it must NEVER touch a
+  // customer/production server. Refuse to run unless an explicit write opt-in is set; the CI workflow
+  // sets it only against the throwaway service container. Fails loudly (not skip) so an accidental run
+  // with MSSQL_* pointed at a real server is rejected, not silently ignored.
+  if (env.MSSQL_SEED_ALLOW_WRITE !== 'true') {
+    throw new Error(
+      'Refusing to seed: this script MUTATES the target SQL Server (CREATE DATABASE / DROP + CREATE + ' +
+        'INSERT). Set MSSQL_SEED_ALLOW_WRITE=true ONLY against a throwaway/CI database — never a customer ' +
+        'or production server.'
+    )
+  }
   if (!mssql) {
     throw new Error('mssql package is not installed')
   }

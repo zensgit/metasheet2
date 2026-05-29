@@ -87,4 +87,4 @@ Use a **read-only** SQL login; never the container against customer data. See th
 - Read-only smoke; no write path, no schema mutation.
 - Does **not** touch `plugin-integration-core`'s `k3-wise-sqlserver` channel, RBAC, or auth.
 - Not Windows-native deploy (Lane C) and not a new connector.
-- Next: **B4** (full 2017/2019/2022 version-compat matrix on this harness; 2008R2/2012 → Windows VM follow-up).
+- B4's modern matrix (**2019 + 2022**) is this slice. Next: **2008R2 / 2012** legacy validation (Windows VM — no Linux container image) and optionally **2017** (Linux container; add to the matrix if a customer needs it).
