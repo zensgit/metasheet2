@@ -203,3 +203,23 @@ function parseJsonColumn(value: unknown): unknown {
   if (value == null) return undefined
   return typeof value === 'string' ? JSON.parse(value) : value
 }
+
+/**
+ * Redact an IN-MEMORY AutomationExecution for an HTTP response — the same four
+ * secret channels `record()` scrubs at persist (steps / triggerEvent / ruleSnapshot
+ * / error), returning a NEW object with the flat AutomationExecution shape intact.
+ *
+ * Used as the SAFE fallback when the persisted (already-redacted) row can't be
+ * re-fetched: a fresh in-memory execution carries the live rule (credentials) in
+ * `ruleSnapshot` and raw action output in `steps`, which must never be serialized
+ * raw. Prefer the persisted row; fall back to this — never the raw execution.
+ */
+export function redactAutomationExecutionForResponse(execution: AutomationExecution): AutomationExecution {
+  return {
+    ...execution,
+    steps: redactValue(execution.steps) as AutomationStepResult[],
+    triggerEvent: redactValue(execution.triggerEvent),
+    ruleSnapshot: redactValue(execution.ruleSnapshot) as AutomationExecution['ruleSnapshot'],
+    error: execution.error !== undefined ? redactString(execution.error) : undefined,
+  }
+}
