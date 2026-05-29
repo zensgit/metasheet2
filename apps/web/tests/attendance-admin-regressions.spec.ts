@@ -877,6 +877,25 @@ describe('Attendance admin regressions', () => {
     expect(summaryGrid!.querySelectorAll('input, textarea, select').length).toBe(0)
     expect(Array.from(summaryGrid!.querySelectorAll('button')).every(button => button.textContent?.trim().startsWith('Open'))).toBe(true)
 
+    const beforeSavedDrawerCalls = vi.mocked(apiFetch).mock.calls.length
+    const openWorkTime = summaryGrid!.querySelector<HTMLButtonElement>('[data-attendance-group-summary-action="open-work-time-drawer"]')
+    expect(openWorkTime).toBeTruthy()
+    openWorkTime!.click()
+    await flushUi(2)
+
+    const savedDrawer = groupsSection!.querySelector<HTMLElement>('[data-attendance-group-work-time-drawer]')
+    expect(savedDrawer).toBeTruthy()
+    expect(savedDrawer!.querySelectorAll('[data-attendance-group-work-time-option]').length).toBe(3)
+    expect(savedDrawer!.querySelector('[data-attendance-group-work-time-selected]')?.textContent).toContain('Fixed shift')
+    expect(savedDrawer!.querySelector('[data-attendance-group-work-time-lock]')?.textContent).toContain('Type changes are blocked')
+    expect(savedDrawer!.querySelector<HTMLButtonElement>('[data-attendance-group-work-time-option="free_time"]')?.disabled).toBe(true)
+    expect(savedDrawer!.querySelectorAll('[data-attendance-group-work-time-week-day]').length).toBe(7)
+    expect(vi.mocked(apiFetch).mock.calls.slice(beforeSavedDrawerCalls)).toHaveLength(0)
+
+    savedDrawer!.querySelector<HTMLButtonElement>('[data-attendance-group-work-time-close]')!.click()
+    await flushUi(2)
+    expect(groupsSection!.querySelector('[data-attendance-group-work-time-drawer]')).toBeNull()
+
     const newGroupButton = Array.from(groupsSection!.querySelectorAll<HTMLButtonElement>('button'))
       .find(button => button.textContent?.includes('New group'))
     expect(newGroupButton).toBeTruthy()
@@ -887,6 +906,24 @@ describe('Attendance admin regressions', () => {
     expect(groupsSection!.querySelector<HTMLSelectElement>('[data-attendance-group-type]')?.disabled).toBe(false)
     expect(groupsSection!.querySelector('[data-attendance-group-people]')?.textContent).toContain('Save the group before adding people.')
     expect(groupsSection!.querySelector('[data-attendance-group-summary-card="rule-policy"]')?.textContent).toContain('Choose or save a group first')
+
+    const draftOpenWorkTime = groupsSection!.querySelector<HTMLButtonElement>('[data-attendance-group-summary-action="open-work-time-drawer"]')
+    expect(draftOpenWorkTime).toBeTruthy()
+    draftOpenWorkTime!.click()
+    await flushUi(2)
+
+    const draftDrawer = groupsSection!.querySelector<HTMLElement>('[data-attendance-group-work-time-drawer]')
+    expect(draftDrawer).toBeTruthy()
+    const freeTimeOption = draftDrawer!.querySelector<HTMLButtonElement>('[data-attendance-group-work-time-option="free_time"]')
+    expect(freeTimeOption).toBeTruthy()
+    expect(freeTimeOption!.disabled).toBe(false)
+    freeTimeOption!.click()
+    await flushUi(2)
+
+    expect(groupsSection!.querySelector<HTMLSelectElement>('[data-attendance-group-type]')?.value).toBe('free_time')
+    expect(draftDrawer!.querySelector('[data-attendance-group-work-time-selected]')?.textContent).toContain('Free time')
+    expect(draftDrawer!.querySelector('[data-attendance-group-work-time-draft]')?.textContent).toContain('selected type')
+    expect(draftDrawer!.querySelector('[data-attendance-group-work-time-week-matrix]')).toBeNull()
   })
 
   it('filters, exports, copies, and deletes attendance groups from the list tools', async () => {
@@ -1373,15 +1410,26 @@ describe('Attendance admin regressions', () => {
 
     const summaryGrid = container!.querySelector<HTMLElement>('[data-attendance-group-summaries]')
     expect(summaryGrid).toBeTruthy()
-    expect(summaryGrid!.querySelectorAll('[data-attendance-group-summary-action]').length).toBe(7)
+    expect(summaryGrid!.querySelectorAll('[data-attendance-group-summary-action]').length).toBe(8)
 
     const beforeCalls = vi.mocked(apiFetch).mock.calls.length
+    const openWorkTime = summaryGrid!.querySelector<HTMLButtonElement>('[data-attendance-group-summary-action="open-work-time-drawer"]')
+    expect(openWorkTime).toBeTruthy()
+    openWorkTime!.click()
+    await flushUi(2)
+    expect(container!.querySelector('[data-attendance-group-work-time-drawer]')).toBeTruthy()
+    expect(vi.mocked(apiFetch).mock.calls.slice(beforeCalls)).toHaveLength(0)
+
+    container!.querySelector<HTMLButtonElement>('[data-attendance-group-work-time-close]')!.click()
+    await flushUi(2)
+
+    const beforeNavCalls = vi.mocked(apiFetch).mock.calls.length
     const openShifts = summaryGrid!.querySelector<HTMLButtonElement>('[data-attendance-group-summary-action="open-shifts"]')
     expect(openShifts).toBeTruthy()
     openShifts!.click()
     await flushUi(4)
 
-    const newCalls = vi.mocked(apiFetch).mock.calls.slice(beforeCalls)
+    const newCalls = vi.mocked(apiFetch).mock.calls.slice(beforeNavCalls)
     expect(newCalls).toHaveLength(0)
     expect(window.getComputedStyle(container!.querySelector<HTMLElement>('#attendance-admin-shifts')!).display).not.toBe('none')
     expect(window.getComputedStyle(container!.querySelector<HTMLElement>('#attendance-admin-groups')!).display).toBe('none')
