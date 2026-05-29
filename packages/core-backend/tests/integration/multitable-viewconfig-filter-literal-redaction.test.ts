@@ -132,6 +132,15 @@ describeIfDatabase('multitable view-config filter-literal redaction (#2052, real
     testUserId = USER_ID
   })
 
+  test('R5b: AUTHENTICATED form-context follows the requester — denied literal redacted, READABLE literal kept (not always-empty)', async () => {
+    testUserId = USER_ID; testPerms = ['multitable:read'] // authenticated; FLD_SECRET denied via layer-3
+    const res = await request(app).get('/api/multitable/form-context').query({ viewId: VIEW_ID, publicToken: PUBLIC_TOKEN })
+    expect(res.status).toBe(200)
+    const b = body(res)
+    expect(b).not.toContain(SECRET_LIT) // denied field → redacted
+    expect(b).toContain(VISIBLE_LIT) // readable field → KEPT (proves form-context is field-perm-aware, not blanket-empty)
+  })
+
   test('R6 (cross-user / pure-helper): denied user then readable user on the SAME view — no cache corruption', async () => {
     testUserId = USER_ID; testPerms = ['multitable:read']
     const denied = await request(app).get('/api/multitable/view').query({ sheetId: SHEET_ID, viewId: VIEW_ID })

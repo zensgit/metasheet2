@@ -6696,9 +6696,11 @@ export function univerMetaRouter(): Router {
               : `/api/multitable/views/${resolved.view.id}/submit`)
             : '/api/multitable/records',
           sheet,
-          // #2052 (b): public form render — redact ALL filter literals (empty allowedFieldIds = fail closed).
-          // A public/anonymous caller has no field-read grants; the saved view's filter is irrelevant to form submit.
-          ...(resolved.view ? { view: redactViewConfigFilterLiterals(resolved.view, new Set<string>()) } : {}),
+          // #2052 (b): redact denied-field filter literals per the REQUESTER's allowed-field set (same
+          // field-permission-aware contract as the other readbacks). loadAllowedFieldIds fails CLOSED for an
+          // ANONYMOUS public-form caller (no access.userId → empty set → every literal redacted); an
+          // AUTHENTICATED caller keeps literals for fields they can read, redacts only the denied ones.
+          ...(resolved.view ? { view: redactViewConfigFilterLiterals(resolved.view, await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)) } : {}),
           fields: visibleFields,
           capabilities: effectiveCapabilities,
           ...(effectiveCapabilityOrigin ? { capabilityOrigin: effectiveCapabilityOrigin } : {}),
