@@ -118,6 +118,45 @@ function buildWhereClause(where, startParamIndex) {
   }
 }
 
+function buildRangeClause(range, startParamIndex) {
+  if (range === undefined || range === null) {
+    return { sql: '', params: [], nextIndex: startParamIndex }
+  }
+  if (typeof range !== 'object' || Array.isArray(range)) {
+    throw new ScopeViolationError('plugin-integration-core: range clause must be an object', {})
+  }
+  const parts = []
+  const params = []
+  let idx = startParamIndex
+  for (const rawCol of Object.keys(range)) {
+    const col = assertColumn(rawCol)
+    const spec = range[rawCol]
+    if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
+      throw new ScopeViolationError('plugin-integration-core: range bound must be an object', { column: rawCol })
+    }
+    for (const key of Object.keys(spec)) {
+      if (key !== 'gte' && key !== 'lte') {
+        throw new ScopeViolationError('plugin-integration-core: range only supports gte/lte bounds', { column: rawCol })
+      }
+    }
+    if (spec.gte !== undefined && spec.gte !== null) {
+      parts.push(`${quoteIdent(col)} >= $${idx}`)
+      params.push(prepareParamValue(spec.gte))
+      idx += 1
+    }
+    if (spec.lte !== undefined && spec.lte !== null) {
+      parts.push(`${quoteIdent(col)} <= $${idx}`)
+      params.push(prepareParamValue(spec.lte))
+      idx += 1
+    }
+  }
+  return {
+    sql: parts.join(' AND '),
+    params,
+    nextIndex: idx,
+  }
+}
+
 /**
  * Build a scoped DB helper on top of `context.api.database`.
  * The returned object never exposes `rawQuery`. Every method validates table
@@ -128,9 +167,14 @@ function createDb({ database, logger } = {}) {
     throw new Error('createDb: context.api.database is required')
   }
 
-  async function select(table, { where, orderBy, limit = 1000, offset = 0 } = {}) {
+  async function select(table, { where, range, orderBy, limit = 1000, offset = 0 } = {}) {
     const tableIdent = quoteIdent(assertTable(table))
     const whereClause = buildWhereClause(where, 1)
+    const rangeClause = buildRangeClause(range, whereClause.nextIndex)
+    const filters = []
+    if (whereClause.sql) filters.push(whereClause.sql.slice(' WHERE '.length))
+    if (rangeClause.sql) filters.push(rangeClause.sql)
+    const filterSql = filters.length > 0 ? ` WHERE ${filters.join(' AND ')}` : ''
     let orderSql = ''
     if (orderBy) {
       const [col, dir] = Array.isArray(orderBy) ? orderBy : [orderBy, 'ASC']
@@ -138,8 +182,8 @@ function createDb({ database, logger } = {}) {
     }
     const lim = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 10000) : 1000
     const off = Number.isInteger(offset) && offset >= 0 ? offset : 0
-    const sql = `SELECT * FROM ${tableIdent}${whereClause.sql}${orderSql} LIMIT ${lim} OFFSET ${off}`
-    return database.query(sql, whereClause.params)
+    const sql = `SELECT * FROM ${tableIdent}${filterSql}${orderSql} LIMIT ${lim} OFFSET ${off}`
+    return database.query(sql, whereClause.params.concat(rangeClause.params))
   }
 
   async function selectOne(table, where) {
@@ -294,6 +338,7 @@ module.exports = {
     assertTable,
     assertColumn,
     buildWhereClause,
+    buildRangeClause,
     quoteIdent,
     prepareParamValue,
     IDENT_RE,

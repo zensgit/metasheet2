@@ -109,13 +109,37 @@ function eventsToViewRows(run, events) {
 function createReadDb(viewRows) {
   const matches = (row, where) => Object.entries(where || {}).every(([k, v]) =>
     (v === null || v === undefined) ? (row[k] === null || row[k] === undefined) : row[k] === v)
+  const withinRange = (row, range) => {
+    if (!range) return true
+    return Object.entries(range).every(([column, bounds]) => {
+      const ms = Date.parse(row[column])
+      if (Number.isNaN(ms)) return true
+      if (bounds.gte !== undefined && bounds.gte !== null && ms < Date.parse(bounds.gte)) return false
+      if (bounds.lte !== undefined && bounds.lte !== null && ms > Date.parse(bounds.lte)) return false
+      return true
+    })
+  }
   return {
     async selectOne() { return null },
     async insertOne(_t, row) { return [row] },
     async updateRow() { return [] },
     async select(table, opts = {}) {
       assert.equal(table, 'integration_provenance_by_row', 'reads the migration-060 view')
-      return viewRows.filter((r) => matches(r, opts.where || {}))
+      const [orderColumn, direction = 'ASC'] = Array.isArray(opts.orderBy) ? opts.orderBy : []
+      const ordered = viewRows
+        .filter((r) => matches(r, opts.where || {}) && withinRange(r, opts.range))
+        .sort((a, b) => {
+          if (!orderColumn) return 0
+          const av = a[orderColumn]
+          const bv = b[orderColumn]
+          if (av === bv) return 0
+          return direction === 'DESC'
+            ? (av < bv ? 1 : -1)
+            : (av < bv ? -1 : 1)
+        })
+      const offset = Number.isInteger(opts.offset) && opts.offset > 0 ? opts.offset : 0
+      const limit = Number.isInteger(opts.limit) && opts.limit > 0 ? opts.limit : ordered.length
+      return ordered.slice(offset, offset + limit)
     },
   }
 }
@@ -166,6 +190,38 @@ async function main() {
   const windowed = await registry.listProvenanceByRow({ tenantId: 'tenant_1', workspaceId: null, rowId, from: '2026-04-24T01:30:00.000Z' })
   assert.equal(windowed.length, 1, 'from-window excludes run_1')
   assert.equal(windowed[0].runId, 'run_2')
+
+  // Regression: run_created_at window MUST be applied before limit/offset. If
+  // the registry fetches limit=1 first and filters from=... in JS afterward,
+  // this returns [] because the first DB row is older than the requested window.
+  const olderRows = Array.from({ length: 3 }, (_, i) => ({
+    tenant_id: 'tenant_1', workspace_id: null, pipeline_id: 'pipe_1',
+    run_id: `old_${i}`, run_mode: 'full', run_status: 'succeeded',
+    run_created_at: `2026-04-23T0${i}:00:00.000Z`,
+    run_started_at: `2026-04-23T0${i}:00:00.000Z`,
+    run_finished_at: `2026-04-23T0${i}:00:00.000Z`,
+    event_index: 1, row_id: rowId, event_type: 'target_write_succeeded',
+    event_at: `2026-04-23T0${i}:00:00.000Z`, attrs: {}, event: {},
+  }))
+  const lateRow = {
+    tenant_id: 'tenant_1', workspace_id: null, pipeline_id: 'pipe_1',
+    run_id: 'late_1', run_mode: 'full', run_status: 'succeeded',
+    run_created_at: '2026-04-25T00:00:00.000Z',
+    run_started_at: '2026-04-25T00:00:00.000Z',
+    run_finished_at: '2026-04-25T00:00:00.000Z',
+    event_index: 1, row_id: rowId, event_type: 'target_write_succeeded',
+    event_at: '2026-04-25T00:00:00.000Z', attrs: {}, event: {},
+  }
+  const rangeFirstRegistry = createPipelineRegistry({ db: createReadDb([...olderRows, lateRow]) })
+  const rangeFirst = await rangeFirstRegistry.listProvenanceByRow({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    rowId,
+    from: '2026-04-24T00:00:00.000Z',
+    limit: 1,
+  })
+  assert.equal(rangeFirst.length, 1, 'from-window is applied before limit')
+  assert.equal(rangeFirst[0].runId, 'late_1')
 
   // --- scope/rowId filter: an unknown rowId yields nothing ---
   const none = await registry.listProvenanceByRow({ tenantId: 'tenant_1', workspaceId: null, rowId: 'no-such-row' })

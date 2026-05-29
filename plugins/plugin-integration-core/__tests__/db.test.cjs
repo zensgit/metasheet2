@@ -100,9 +100,22 @@ async function main() {
   assert.match(q5.sql, / LIMIT 50 OFFSET 10/)
   assert.deepEqual(q5.params, ['active', 't1'])
 
+  await db5.select('integration_provenance_by_row', {
+    where: { tenant_id: 't1', row_id: 'k1' },
+    range: { run_created_at: { gte: '2026-04-24T00:00:00.000Z', lte: '2026-04-25T00:00:00.000Z' } },
+    orderBy: ['run_created_at', 'ASC'],
+    limit: 20,
+  })
+  const q5Range = mockDb5.calls[1]
+  assert.match(q5Range.sql, /^SELECT \* FROM "integration_provenance_by_row"/)
+  assert.match(q5Range.sql, / WHERE "tenant_id" = \$1 AND "row_id" = \$2 AND "run_created_at" >= \$3 AND "run_created_at" <= \$4/)
+  assert.match(q5Range.sql, / ORDER BY "run_created_at" ASC/)
+  assert.match(q5Range.sql, / LIMIT 20 OFFSET 0/)
+  assert.deepEqual(q5Range.params, ['t1', 'k1', '2026-04-24T00:00:00.000Z', '2026-04-25T00:00:00.000Z'])
+
   // select with no WHERE
   await db5.select('integration_runs', { limit: 1 })
-  const q5b = mockDb5.calls[1]
+  const q5b = mockDb5.calls[2]
   assert.match(q5b.sql, /^SELECT \* FROM "integration_runs" LIMIT 1 OFFSET 0$/)
   assert.deepEqual(q5b.params, [])
 
@@ -121,6 +134,14 @@ async function main() {
   let selErr = null
   try { await db5.select('users') } catch (e) { selErr = e }
   assert.ok(selErr instanceof ScopeViolationError)
+
+  let rangeErr = null
+  try {
+    await db5.select('integration_provenance_by_row', {
+      range: { ['run_created_at; DROP TABLE users; --']: { gte: '2026-04-24T00:00:00.000Z' } },
+    })
+  } catch (e) { rangeErr = e }
+  assert.ok(rangeErr instanceof ScopeViolationError, 'range column injection rejected')
 
   // insertOne
   const mockDb6 = mockDatabase()

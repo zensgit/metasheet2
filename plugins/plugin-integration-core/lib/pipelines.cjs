@@ -362,25 +362,13 @@ function rowToProvenanceEntry(row) {
   }
 }
 
-function parseProvenanceWindowBound(value, field) {
+function normalizeProvenanceWindowBound(value, field) {
   if (value === undefined || value === null || value === '') return null
   const ms = Date.parse(value)
   if (Number.isNaN(ms)) {
     throw new PipelineValidationError(`${field} must be an ISO date-time`, { field })
   }
-  return ms
-}
-
-// Window bounds whole RUNS by run_created_at (the #1979 read-time-bounded-window story);
-// an undated run row (should not occur — the view selects integration_runs.created_at) is
-// kept rather than silently dropped.
-function provenanceEntryWithinWindow(runCreatedAt, fromMs, toMs) {
-  if (fromMs === null && toMs === null) return true
-  const ms = Date.parse(runCreatedAt)
-  if (Number.isNaN(ms)) return true
-  if (fromMs !== null && ms < fromMs) return false
-  if (toMs !== null && ms > toMs) return false
-  return true
+  return value
 }
 
 function compareProvenanceEntries(a, b) {
@@ -724,10 +712,12 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
   }
 
   // DF-N2-2c: read-only cross-run provenance timeline for one rowId. SELECTs the
-  // migration-060 view (no write). db `where` is equality-only and `orderBy` single-column,
-  // so the optional run-time window + the (run_created_at, event_index) sort run in-app —
-  // bounded because one rowId yields few events. attrs already redacted at write (no
-  // re-redaction). The route 501s if a host's registry predates this method.
+  // migration-060 view (no write). The optional run-time window is pushed into
+  // the DB range predicate before limit/offset so a page cannot be filled by
+  // old rows that are later filtered out in-process. The secondary
+  // (run_created_at, event_index) sort remains in-app. attrs already redacted at
+  // write (no re-redaction). The route 501s if a host's registry predates this
+  // method.
   async function listProvenanceByRow(input = {}) {
     const tenantId = requiredString(input.tenantId, 'tenantId')
     const workspaceId = normalizeWorkspaceId(input.workspaceId)
@@ -736,17 +726,23 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
     if (input.pipelineId !== undefined && input.pipelineId !== null && input.pipelineId !== '') {
       where.pipeline_id = requiredString(input.pipelineId, 'pipelineId')
     }
-    const fromMs = parseProvenanceWindowBound(input.from, 'from')
-    const toMs = parseProvenanceWindowBound(input.to, 'to')
+    const from = normalizeProvenanceWindowBound(input.from, 'from')
+    const to = normalizeProvenanceWindowBound(input.to, 'to')
+    const runCreatedAtRange = from || to
+      ? {
+          ...(from ? { gte: from } : {}),
+          ...(to ? { lte: to } : {}),
+        }
+      : undefined
     const rows = unwrapRows(await db.select(PROVENANCE_VIEW, {
       where,
+      ...(runCreatedAtRange && { range: { run_created_at: runCreatedAtRange } }),
       orderBy: ['run_created_at', 'ASC'],
       limit: input.limit,
       offset: input.offset,
     }))
     const entries = rows
       .map(rowToProvenanceEntry)
-      .filter((entry) => provenanceEntryWithinWindow(entry.runCreatedAt, fromMs, toMs))
     entries.sort(compareProvenanceEntries)
     return entries
   }
