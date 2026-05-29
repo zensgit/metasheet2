@@ -224,6 +224,32 @@ describe('Attendance admin regressions', () => {
           },
         })
       }
+      if (url.includes('/api/attendance/groups/group-a/managers')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'manager-1',
+                groupId: 'group-a',
+                userId: 'owner-1',
+                role: 'owner',
+                createdBy: 'ops-admin',
+                createdAt: '2026-03-28T08:10:00.000Z',
+              },
+              {
+                id: 'manager-2',
+                groupId: 'group-a',
+                userId: 'owner-2',
+                role: 'sub_owner',
+                createdBy: 'ops-admin',
+                createdAt: '2026-03-28T08:20:00.000Z',
+              },
+            ],
+            total: 2,
+          },
+        })
+      }
       if (url.includes('/api/attendance/groups/group-a/members')) {
         return jsonResponse(200, {
           ok: true,
@@ -865,6 +891,11 @@ describe('Attendance admin regressions', () => {
     expect(groupsSection!.querySelector('[data-attendance-group-people]')?.textContent).toContain('User picker')
     expect(groupsSection!.querySelector('[data-attendance-group-people]')?.textContent).toContain('Append selected user')
     expect(groupsSection!.querySelector('[data-attendance-group-people]')?.textContent).toContain('user-1')
+    expect(groupsSection!.querySelector('[data-attendance-group-managers]')?.textContent).toContain('Owners')
+    expect(groupsSection!.querySelector('[data-attendance-group-managers]')?.textContent).toContain('owner-1')
+    expect(groupsSection!.querySelector('[data-attendance-group-managers]')?.textContent).toContain('Sub-owner')
+    expect(groupsSection!.querySelector('[data-attendance-group-managers]')?.textContent).toContain('Owners are not counted as attendance people')
+    expect(groupsSection!.querySelector('[data-attendance-group-manager-count]')?.textContent).toContain('1 owner')
     const summaryGrid = groupsSection!.querySelector<HTMLElement>('[data-attendance-group-summaries]')
     expect(summaryGrid).toBeTruthy()
     expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="rule-policy"]')?.textContent).toContain('Ops Rules')
@@ -906,6 +937,7 @@ describe('Attendance admin regressions', () => {
     expect(groupsSection!.querySelector('[data-attendance-group-detail]')?.textContent).toContain('New attendance group')
     expect(groupsSection!.querySelector<HTMLSelectElement>('[data-attendance-group-type]')?.disabled).toBe(false)
     expect(groupsSection!.querySelector('[data-attendance-group-people]')?.textContent).toContain('Save the group before adding people.')
+    expect(groupsSection!.querySelector('[data-attendance-group-managers]')?.textContent).toContain('Save the group before adding owners.')
     expect(groupsSection!.querySelector('[data-attendance-group-summary-card="rule-policy"]')?.textContent).toContain('Choose or save a group first')
 
     const draftOpenWorkTime = groupsSection!.querySelector<HTMLButtonElement>('[data-attendance-group-summary-action="open-work-time-drawer"]')
@@ -926,6 +958,161 @@ describe('Attendance admin regressions', () => {
     expect(draftDrawer!.querySelector('[data-attendance-group-work-time-draft]')?.textContent).toContain('selected type')
     expect(draftDrawer!.querySelector('[data-attendance-group-work-time-week-matrix]')).toBeNull()
     expect(draftDrawer!.querySelector('[data-attendance-group-work-time-holidays]')).toBeNull()
+  })
+
+  it('manages attendance group owners separately from attendance members', async () => {
+    const managerUserId = 'manager-user-1'
+    const existingOwnerId = 'owner-user-1'
+    const managerPostBodies: Array<Record<string, unknown>> = []
+    const deletedManagerIds: string[] = []
+    const managers = [
+      {
+        id: 'manager-owner',
+        groupId: 'group-a',
+        userId: existingOwnerId,
+        role: 'owner',
+        createdBy: 'ops-admin',
+        createdAt: '2026-05-29T08:00:00.000Z',
+      },
+    ]
+
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (url.startsWith('/api/admin/users')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              { id: managerUserId, email: 'manager@example.com', name: 'Manager User', role: 'employee', is_active: true, is_admin: false, last_login_at: null, created_at: '2026-05-29T00:00:00.000Z' },
+              { id: existingOwnerId, email: 'owner@example.com', name: 'Ops Owner', role: 'employee', is_active: true, is_admin: false, last_login_at: null, created_at: '2026-05-29T00:00:00.000Z' },
+            ],
+          },
+        })
+      }
+      if (url === '/api/attendance-admin/users/batch/resolve') {
+        const body = JSON.parse(String(init?.body || '{}')) as { userIds?: string[] }
+        const requested = Array.isArray(body.userIds) ? body.userIds : []
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: requested.map((userId) => ({
+              id: userId,
+              email: userId === managerUserId ? 'manager@example.com' : 'owner@example.com',
+              name: userId === managerUserId ? 'Manager User' : 'Ops Owner',
+              is_active: true,
+            })),
+          },
+        })
+      }
+      if (url.includes('/api/attendance/rule-sets')) {
+        return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      }
+      if (url.startsWith('/api/attendance/groups?') && method === 'GET') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'group-a',
+                name: 'Ops Team',
+                code: 'ops-team',
+                timezone: 'Asia/Shanghai',
+                ruleSetId: null,
+                attendanceType: 'fixed_shift',
+                description: null,
+                memberCount: 1,
+              },
+            ],
+            total: 1,
+          },
+        })
+      }
+      if (url === '/api/attendance/groups/group-a/members' && method === 'GET') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'member-1',
+                groupId: 'group-a',
+                userId: 'member-user-1',
+                createdAt: '2026-05-29T08:00:00.000Z',
+              },
+            ],
+            total: 1,
+          },
+        })
+      }
+      if (url === '/api/attendance/groups/group-a/managers' && method === 'GET') {
+        return jsonResponse(200, { ok: true, data: { items: [...managers], total: managers.length } })
+      }
+      if (url === '/api/attendance/groups/group-a/managers' && method === 'POST') {
+        const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        managerPostBodies.push(body)
+        managers.push({
+          id: 'manager-sub-owner',
+          groupId: 'group-a',
+          userId: String(body.userId),
+          role: String(body.role || 'owner'),
+          createdBy: 'ops-admin',
+          createdAt: '2026-05-29T08:30:00.000Z',
+        })
+        return jsonResponse(200, { ok: true, data: managers.at(-1) })
+      }
+      if (url === '/api/attendance/groups/group-a/managers/manager-owner' && method === 'DELETE') {
+        deletedManagerIds.push('manager-owner')
+        const index = managers.findIndex(manager => manager.id === 'manager-owner')
+        if (index >= 0) managers.splice(index, 1)
+        return jsonResponse(200, { ok: true, data: { id: 'manager-owner' } })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')!.click()
+    await flushUi(4)
+
+    const groupsSection = container!.querySelector<HTMLElement>('#attendance-admin-groups')!
+    const managersSection = groupsSection.querySelector<HTMLElement>('[data-attendance-group-managers]')!
+    expect(managersSection.textContent).toContain('Ops Owner')
+    expect(groupsSection.querySelector('[data-attendance-group-list-member-count]')?.textContent).toContain('1 member')
+
+    selectUserPicker(managersSection, '#attendance-group-manager-user-picker', managerUserId)
+    const roleSelect = managersSection.querySelector<HTMLSelectElement>('[data-attendance-group-manager-role]')!
+    roleSelect.value = 'sub_owner'
+    roleSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+    managersSection.querySelector<HTMLButtonElement>('[data-attendance-group-manager-add]')!.click()
+    await flushUi(8)
+
+    expect(managerPostBodies).toEqual([
+      expect.objectContaining({
+        userId: managerUserId,
+        role: 'sub_owner',
+      }),
+    ])
+    expect(managersSection.textContent).toContain('Manager User')
+    expect(managersSection.textContent).toContain('Sub-owner')
+
+    const existingOwnerRow = Array.from(managersSection.querySelectorAll<HTMLElement>('[data-attendance-group-manager-row]'))
+      .find(row => row.textContent?.includes('Ops Owner'))
+    expect(existingOwnerRow).toBeTruthy()
+    existingOwnerRow!.querySelector<HTMLButtonElement>('[data-attendance-group-manager-remove]')!.click()
+    await flushUi(8)
+
+    expect(deletedManagerIds).toEqual(['manager-owner'])
+    expect(Array.from(managersSection.querySelectorAll<HTMLElement>('[data-attendance-group-manager-row]')).some(row =>
+      row.textContent?.includes('Ops Owner')
+    )).toBe(false)
+    expect(groupsSection.querySelector('[data-attendance-group-list-member-count]')?.textContent).toContain('1 member')
+    expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
+      String(input).includes('/api/attendance/groups/group-a/members')
+      && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(String(init?.method || 'GET').toUpperCase())
+    )).toBe(false)
   })
 
   it('filters, exports, copies, and deletes attendance groups from the list tools', async () => {

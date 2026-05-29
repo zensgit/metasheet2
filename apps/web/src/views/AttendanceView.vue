@@ -3389,6 +3389,130 @@
                     </template>
                   </section>
 
+                  <section class="attendance__group-panel" data-attendance-group-managers>
+                    <div class="attendance__admin-section-header">
+                      <div>
+                        <h6>{{ tr('Owners', '负责人') }}</h6>
+                        <span class="attendance__field-hint">
+                          {{ tr('Owner and sub-owner roster only; delegated permissions are not granted in this slice.', '仅维护负责人/子负责人名单；本切片不授予委托权限。') }}
+                        </span>
+                      </div>
+                      <button
+                        class="attendance__btn"
+                        type="button"
+                        :disabled="attendanceGroupManagerLoading || !attendanceGroupEditingId"
+                        data-attendance-group-manager-reload
+                        @click="loadAttendanceGroupManagers"
+                      >
+                        {{ attendanceGroupManagerLoading ? tr('Loading...', '加载中...') : tr('Reload owners', '重载负责人') }}
+                      </button>
+                    </div>
+                    <div v-if="!attendanceGroupEditingId" class="attendance__empty">
+                      {{ tr('Save the group before adding owners.', '先保存考勤组，再添加负责人。') }}
+                    </div>
+                    <template v-else>
+                      <div class="attendance__group-people-meta">
+                        <span data-attendance-group-manager-count>{{ attendanceGroupManagerCountLabel }}</span>
+                        <span>{{ tr('Owners are not counted as attendance people.', '负责人不会计入考勤人员。') }}</span>
+                      </div>
+                      <div class="attendance__admin-grid">
+                        <AttendanceUserPickerField
+                          v-model="attendanceGroupManagerSelectedUserId"
+                          :tr="tr"
+                          :label="tr('Owner user', '负责人用户')"
+                          name="attendanceGroupManagerUserPicker"
+                          :help-text="tr('Pick a user to maintain the owner roster. This does not change group membership.', '选择用户维护负责人名单；不会改变考勤人员名单。')"
+                          :search-placeholder="tr('Search users to add as owner', '搜索要添加为负责人的用户')"
+                          input-id="attendance-group-manager-user-picker"
+                        />
+                        <label class="attendance__field" for="attendance-group-manager-role">
+                          <span>{{ tr('Role', '角色') }}</span>
+                          <select
+                            id="attendance-group-manager-role"
+                            v-model="attendanceGroupManagerRole"
+                            data-attendance-group-manager-role
+                          >
+                            <option
+                              v-for="role in ATTENDANCE_GROUP_MANAGER_ROLE_OPTIONS"
+                              :key="role.value"
+                              :value="role.value"
+                            >
+                              {{ tr(role.labelEn, role.labelZh) }}
+                            </option>
+                          </select>
+                          <small class="attendance__field-hint">
+                            {{ tr('Role labels are stored for display; route permissions remain admin-only.', '角色仅用于展示存储；路由权限仍保持管理员限定。') }}
+                          </small>
+                        </label>
+                      </div>
+                      <div class="attendance__admin-actions">
+                        <button
+                          class="attendance__btn attendance__btn--primary"
+                          type="button"
+                          :disabled="attendanceGroupManagerSaving || !attendanceGroupManagerSelectedUserId"
+                          data-attendance-group-manager-add
+                          @click="addAttendanceGroupManager"
+                        >
+                          {{ attendanceGroupManagerSaving ? tr('Saving...', '保存中...') : tr('Add owner', '添加负责人') }}
+                        </button>
+                      </div>
+                      <div v-if="attendanceGroupManagers.length === 0" class="attendance__empty">{{ tr('No owners yet.', '暂无负责人。') }}</div>
+                      <div v-else class="attendance__table-wrapper">
+                        <table class="attendance__table">
+                          <thead>
+                            <tr>
+                              <th>{{ tr('Owner', '负责人') }}</th>
+                              <th>{{ tr('Role', '角色') }}</th>
+                              <th>{{ tr('Created by', '创建人') }}</th>
+                              <th>{{ tr('Added', '添加时间') }}</th>
+                              <th>{{ tr('Actions', '操作') }}</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr v-for="manager in attendanceGroupManagers" :key="manager.id" data-attendance-group-manager-row>
+                              <td>
+                                <span class="attendance__group-member-identity" data-attendance-group-manager-identity>
+                                  <strong
+                                    v-if="attendanceGroupManagerPrimaryLabel(manager.userId)"
+                                    data-attendance-group-manager-label
+                                  >
+                                    {{ attendanceGroupManagerPrimaryLabel(manager.userId) }}
+                                  </strong>
+                                  <span data-attendance-group-manager-user-id>{{ manager.userId }}</span>
+                                  <small
+                                    v-if="attendanceGroupManagerSecondaryLabel(manager.userId)"
+                                    class="attendance__field-hint"
+                                    data-attendance-group-manager-secondary
+                                  >
+                                    {{ attendanceGroupManagerSecondaryLabel(manager.userId) }}
+                                  </small>
+                                </span>
+                              </td>
+                              <td>
+                                <span class="attendance__group-role-badge" :data-attendance-group-manager-role-value="manager.role">
+                                  {{ attendanceGroupManagerRoleLabel(manager.role) }}
+                                </span>
+                              </td>
+                              <td>{{ manager.createdBy || manager.created_by || '-' }}</td>
+                              <td>{{ formatDateTime(manager.createdAt ?? manager.created_at ?? null) }}</td>
+                              <td class="attendance__table-actions">
+                                <button
+                                  class="attendance__btn attendance__btn--danger"
+                                  type="button"
+                                  :disabled="attendanceGroupManagerSaving"
+                                  data-attendance-group-manager-remove
+                                  @click="removeAttendanceGroupManager(manager.id)"
+                                >
+                                  {{ tr('Remove', '移除') }}
+                                </button>
+                              </td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </template>
+                  </section>
+
                   <section class="attendance__group-summary-grid" data-attendance-group-summaries>
                     <div
                       v-for="card in attendanceGroupSummaryCards"
@@ -6897,6 +7021,45 @@ interface AttendanceGroupMember {
 
 type AttendanceGroupMemberResolvedUsers = Record<string, AttendanceAdminBatchResolveItem>
 
+type AttendanceGroupManagerRole = 'owner' | 'sub_owner'
+
+interface AttendanceGroupManager {
+  id: string
+  orgId?: string | null
+  org_id?: string | null
+  groupId?: string | null
+  group_id?: string | null
+  userId: string
+  user_id?: string
+  role: AttendanceGroupManagerRole
+  createdBy?: string | null
+  created_by?: string | null
+  createdAt?: string | null
+  created_at?: string | null
+  updatedAt?: string | null
+  updated_at?: string | null
+}
+
+const ATTENDANCE_GROUP_MANAGER_ROLE_OPTIONS: Array<{
+  value: AttendanceGroupManagerRole
+  labelEn: string
+  labelZh: string
+}> = [
+  { value: 'owner', labelEn: 'Owner', labelZh: '负责人' },
+  { value: 'sub_owner', labelEn: 'Sub-owner', labelZh: '子负责人' },
+]
+
+function normalizeAttendanceGroupManagerRole(value: unknown): AttendanceGroupManagerRole {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase().replace(/-/g, '_') : ''
+  return normalized === 'sub_owner' ? 'sub_owner' : 'owner'
+}
+
+function attendanceGroupManagerRoleLabel(value: unknown): string {
+  const normalized = normalizeAttendanceGroupManagerRole(value)
+  const option = ATTENDANCE_GROUP_MANAGER_ROLE_OPTIONS.find(item => item.value === normalized) ?? ATTENDANCE_GROUP_MANAGER_ROLE_OPTIONS[0]
+  return tr(option.labelEn, option.labelZh)
+}
+
 interface AttendanceGroupFixedSchedulePreviewCandidate {
   userId: string
   shiftId: string
@@ -8668,11 +8831,14 @@ const selectedRuleTemplateVersion = computed(
 )
 const attendanceGroups = ref<AttendanceGroup[]>([])
 const attendanceGroupMembers = ref<AttendanceGroupMember[]>([])
+const attendanceGroupManagers = ref<AttendanceGroupManager[]>([])
 const attendanceGroupSearch = ref('')
 const attendanceGroupRuleSetFilter = ref('')
 const attendanceGroupTypeFilter = ref<AttendanceGroupType | ''>('')
 const attendanceGroupCopyingId = ref<string | null>(null)
 const attendanceGroupDeletingId = ref<string | null>(null)
+const attendanceGroupManagerLoading = ref(false)
+const attendanceGroupManagerSaving = ref(false)
 const attendanceGroupWorkTimeDrawerOpen = ref(false)
 const attendanceGroupPunchMethodDrawerOpen = ref(false)
 const payrollTemplates = ref<AttendancePayrollTemplate[]>([])
@@ -8754,6 +8920,9 @@ const attendanceGroupPendingMemberIds = ref<string[]>([])
 const attendanceGroupMemberDuplicateNotice = ref('')
 const attendanceGroupMemberTotal = ref(0)
 const attendanceGroupMemberResolvedUsers = ref<AttendanceGroupMemberResolvedUsers>({})
+const attendanceGroupManagerSelectedUserId = ref('')
+const attendanceGroupManagerRole = ref<AttendanceGroupManagerRole>('owner')
+const attendanceGroupManagerResolvedUsers = ref<AttendanceGroupMemberResolvedUsers>({})
 const attendanceAssignmentResolvedUsers = ref<AttendanceGroupMemberResolvedUsers>({})
 let attendanceAssignmentResolveSeq = 0
 const attendanceGroupFixedSchedulePreviewForm = reactive({
@@ -8831,6 +9000,15 @@ const attendanceGroupMemberCountLabel = computed(() => {
   if (count === 1) return tr('1 member', '1 位成员')
   return tr(`${count} members`, `${count} 位成员`)
 })
+const attendanceGroupManagerCountLabel = computed(() => {
+  const ownerCount = attendanceGroupManagers.value.filter(manager => normalizeAttendanceGroupManagerRole(manager.role) === 'owner').length
+  const subOwnerCount = attendanceGroupManagers.value.filter(manager => normalizeAttendanceGroupManagerRole(manager.role) === 'sub_owner').length
+  if (attendanceGroupManagers.value.length === 0) return tr('0 owners', '0 位负责人')
+  return tr(
+    `${ownerCount} owner(s) · ${subOwnerCount} sub-owner(s)`,
+    `${ownerCount} 位负责人 · ${subOwnerCount} 位子负责人`,
+  )
+})
 
 function normalizeAttendanceGroupMemberResolvedUsers(payload: any, requestedUserIds: string[]): AttendanceGroupMemberResolvedUsers {
   const requested = new Set(requestedUserIds)
@@ -8876,6 +9054,39 @@ function attendanceGroupMemberSecondaryLabel(userId: string): string {
   const item = attendanceGroupMemberResolvedUsers.value[userId]
   if (!item) return ''
   const primary = attendanceGroupMemberPrimaryLabel(userId)
+  const parts: string[] = []
+  const employeeNo = item.employeeNo?.trim()
+  if (employeeNo && employeeNo !== primary) parts.push(employeeNo)
+  const department = item.department?.trim()
+  if (department && department !== primary) parts.push(department)
+  const email = item.email.trim()
+  if (email && email !== primary) parts.push(email)
+  if (!item.is_active) parts.push(tr('Inactive', '已停用'))
+  return parts.join(' · ')
+}
+
+function attendanceGroupManagerUserIds(managers: AttendanceGroupManager[]): string[] {
+  const seen = new Set<string>()
+  const userIds: string[] = []
+  for (const manager of managers) {
+    const userId = String(manager.userId || manager.user_id || '').trim()
+    if (!userId || seen.has(userId)) continue
+    seen.add(userId)
+    userIds.push(userId)
+  }
+  return userIds
+}
+
+function attendanceGroupManagerPrimaryLabel(userId: string): string {
+  const item = attendanceGroupManagerResolvedUsers.value[userId]
+  if (!item) return ''
+  return item.name?.trim() || item.email.trim() || ''
+}
+
+function attendanceGroupManagerSecondaryLabel(userId: string): string {
+  const item = attendanceGroupManagerResolvedUsers.value[userId]
+  if (!item) return ''
+  const primary = attendanceGroupManagerPrimaryLabel(userId)
   const parts: string[] = []
   const employeeNo = item.employeeNo?.trim()
   if (employeeNo && employeeNo !== primary) parts.push(employeeNo)
@@ -9089,7 +9300,7 @@ const attendanceGroupSummaryCards = computed<AttendanceGroupSummaryCard[]>(() =>
     {
       key: 'advanced-controls',
       title: tr('Advanced controls', '高级控制'),
-      value: tr('Owner, export, copy, and field-work controls are deferred', '负责人、导出、复制与外勤控制均保持 deferred'),
+      value: tr('Owner roster is editable; delegated permissions stay deferred', '负责人名单可维护；委托权限仍暂缓'),
       detail: tr('No disabled fake controls are rendered for unsupported group-owned capabilities.', '不会为尚未支持的考勤组能力渲染假的禁用控件。'),
       actions: [],
     },
@@ -17007,10 +17218,13 @@ function resetAttendanceGroupForm() {
   attendanceGroupForm.description = ''
   attendanceGroupMemberGroupId.value = ''
   attendanceGroupMembers.value = []
+  attendanceGroupManagers.value = []
   attendanceGroupMemberTotal.value = 0
   attendanceGroupMemberResolvedUsers.value = {}
+  attendanceGroupManagerResolvedUsers.value = {}
   resetAttendanceGroupFixedSchedulePreview()
   resetAttendanceGroupMemberDraft()
+  resetAttendanceGroupManagerDraft()
 }
 
 function resetAttendanceGroupFixedSchedulePreview() {
@@ -17032,10 +17246,13 @@ function editAttendanceGroup(item: AttendanceGroup) {
   attendanceGroupMemberGroupId.value = item.id
   if (groupChanged) {
     attendanceGroupMembers.value = []
+    attendanceGroupManagers.value = []
     attendanceGroupMemberTotal.value = 0
     attendanceGroupMemberResolvedUsers.value = {}
+    attendanceGroupManagerResolvedUsers.value = {}
     resetAttendanceGroupFixedSchedulePreview()
     resetAttendanceGroupMemberDraft()
+    resetAttendanceGroupManagerDraft()
   }
 }
 
@@ -17266,6 +17483,50 @@ function syncAttendanceGroupMemberCount(groupId: string, count: number) {
   group.member_count = normalizedCount
 }
 
+function normalizeAttendanceGroupManagerRow(value: any): AttendanceGroupManager | null {
+  if (!value || typeof value !== 'object') return null
+  const id = String(value.id || '').trim()
+  const userId = String(value.userId ?? value.user_id ?? '').trim()
+  if (!id || !userId) return null
+  return {
+    ...value,
+    id,
+    userId,
+    role: normalizeAttendanceGroupManagerRole(value.role),
+  }
+}
+
+async function loadAttendanceGroupManagers() {
+  const groupId = attendanceGroupMemberGroupId.value
+  if (!groupId) {
+    attendanceGroupManagers.value = []
+    attendanceGroupManagerResolvedUsers.value = {}
+    return
+  }
+  attendanceGroupManagerLoading.value = true
+  try {
+    const response = await apiFetch(`/api/attendance/groups/${groupId}/managers`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to load group owners', '加载考勤组负责人失败')))
+    }
+    adminForbidden.value = false
+    const items = Array.isArray(data.data?.items)
+      ? data.data.items.map(normalizeAttendanceGroupManagerRow).filter(Boolean) as AttendanceGroupManager[]
+      : []
+    attendanceGroupManagers.value = items
+    void resolveAttendanceGroupManagerLabels(groupId, items)
+  } catch (error: any) {
+    setStatus(readErrorMessage(error, tr('Failed to load group owners', '加载考勤组负责人失败')), 'error')
+  } finally {
+    attendanceGroupManagerLoading.value = false
+  }
+}
+
 async function previewAttendanceGroupFixedSchedule() {
   const groupId = attendanceGroupEditingId.value
   if (!groupId) {
@@ -17459,6 +17720,38 @@ async function resolveAttendanceGroupMemberLabels(groupId: string, members: Atte
   }
 }
 
+async function resolveAttendanceGroupManagerLabels(groupId: string, managers: AttendanceGroupManager[]) {
+  const userIds = attendanceGroupManagerUserIds(managers)
+  if (userIds.length === 0) {
+    if (attendanceGroupMemberGroupId.value === groupId) {
+      attendanceGroupManagerResolvedUsers.value = {}
+    }
+    return
+  }
+
+  try {
+    const response = await apiFetch('/api/attendance-admin/users/batch/resolve', {
+      method: 'POST',
+      body: JSON.stringify({ userIds }),
+    })
+    if (attendanceGroupMemberGroupId.value !== groupId) return
+    if (response.status === 403 || response.status === 404) {
+      attendanceGroupManagerResolvedUsers.value = {}
+      return
+    }
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.ok) {
+      attendanceGroupManagerResolvedUsers.value = {}
+      return
+    }
+    attendanceGroupManagerResolvedUsers.value = normalizeAttendanceGroupMemberResolvedUsers(data.data, userIds)
+  } catch {
+    if (attendanceGroupMemberGroupId.value === groupId) {
+      attendanceGroupManagerResolvedUsers.value = {}
+    }
+  }
+}
+
 async function resolveAttendanceAssignmentUserLabels() {
   const seq = ++attendanceAssignmentResolveSeq
   const userIds = attendanceAssignmentResolverUserIds()
@@ -17552,6 +17845,11 @@ function resetAttendanceGroupMemberDraft() {
   attendanceGroupMemberDuplicateNotice.value = ''
 }
 
+function resetAttendanceGroupManagerDraft() {
+  attendanceGroupManagerSelectedUserId.value = ''
+  attendanceGroupManagerRole.value = 'owner'
+}
+
 function stageAttendanceGroupMemberIds(userIds: string[]) {
   const normalized = parseUserIdList(userIds.join('\n'))
   if (normalized.length === 0) return
@@ -17579,6 +17877,46 @@ function removeAttendanceGroupPendingMember(userId: string) {
   attendanceGroupMemberDuplicateNotice.value = ''
 }
 
+async function addAttendanceGroupManager() {
+  const groupId = attendanceGroupMemberGroupId.value
+  const userId = attendanceGroupManagerSelectedUserId.value.trim()
+  if (!groupId) {
+    setStatus(tr('Select an attendance group first.', '请先选择考勤分组。'), 'error')
+    return
+  }
+  if (!userId) {
+    setStatus(tr('Select an owner user first.', '请先选择负责人用户。'), 'error')
+    return
+  }
+  attendanceGroupManagerSaving.value = true
+  try {
+    const response = await apiFetch(`/api/attendance/groups/${groupId}/managers`, {
+      method: 'POST',
+      body: JSON.stringify({
+        userId,
+        role: normalizeAttendanceGroupManagerRole(attendanceGroupManagerRole.value),
+        orgId: normalizedOrgId(),
+      }),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to add group owner', '添加考勤组负责人失败')))
+    }
+    adminForbidden.value = false
+    resetAttendanceGroupManagerDraft()
+    await loadAttendanceGroupManagers()
+    setStatus(tr('Group owner saved.', '考勤组负责人已保存。'))
+  } catch (error: any) {
+    setStatus(readErrorMessage(error, tr('Failed to add group owner', '添加考勤组负责人失败')), 'error')
+  } finally {
+    attendanceGroupManagerSaving.value = false
+  }
+}
+
 async function removeAttendanceGroupMember(userId: string) {
   const groupId = attendanceGroupMemberGroupId.value
   if (!groupId || !userId) return
@@ -17602,6 +17940,32 @@ async function removeAttendanceGroupMember(userId: string) {
     setStatus(readErrorMessage(error, tr('Failed to remove group member', '移除分组成员失败')), 'error')
   } finally {
     attendanceGroupMemberSaving.value = false
+  }
+}
+
+async function removeAttendanceGroupManager(managerId: string) {
+  const groupId = attendanceGroupMemberGroupId.value
+  if (!groupId || !managerId) return
+  attendanceGroupManagerSaving.value = true
+  try {
+    const response = await apiFetch(`/api/attendance/groups/${groupId}/managers/${encodeURIComponent(managerId)}`, {
+      method: 'DELETE',
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      return
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to remove group owner', '移除考勤组负责人失败')))
+    }
+    adminForbidden.value = false
+    await loadAttendanceGroupManagers()
+    setStatus(tr('Group owner removed.', '考勤组负责人已移除。'))
+  } catch (error: any) {
+    setStatus(readErrorMessage(error, tr('Failed to remove group owner', '移除考勤组负责人失败')), 'error')
+  } finally {
+    attendanceGroupManagerSaving.value = false
   }
 }
 
@@ -18435,6 +18799,7 @@ watch(
 watch(attendanceGroupMemberGroupId, () => {
   if (attendancePluginActive.value) {
     loadAttendanceGroupMembers()
+    loadAttendanceGroupManagers()
   }
 })
 
@@ -20520,6 +20885,19 @@ const holidaySectionBindings = {
 .attendance__group-member-identity strong {
   color: #111827;
   font-size: 13px;
+}
+
+.attendance__group-role-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 8px;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1e3a8a;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .attendance__group-sticky-actions {
