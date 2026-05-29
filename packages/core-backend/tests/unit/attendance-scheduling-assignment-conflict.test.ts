@@ -278,8 +278,15 @@ describe('attendance scheduling assignment conflict guard', () => {
         shiftId: 'shift-a',
         startDate: '2026-06-01',
         endDate: '2026-06-30',
+        ownership: 'unmanaged',
+        producerType: null,
+        producerRefId: null,
+        producerKey: null,
       },
     ])
+    expect(preview.data.skippedManaged).toEqual([])
+    expect(preview.data.skippedUnmanaged).toEqual(preview.data.skipped)
+    expect(preview.data.skippedExternalManaged).toEqual([])
     expect(preview.data.blockingConflicts.map((item: any) => item.userId)).toEqual([
       'user-shift-conflict',
       'user-rotation-conflict',
@@ -555,5 +562,229 @@ describe('attendance scheduling assignment conflict guard', () => {
     expect(result.details.blockingConflicts.map((item: any) => item.userId)).toEqual(['user-conflict'])
     const queries = db.query.mock.calls.map(call => String(call[0])).join('\n')
     expect(queries).not.toMatch(/\bINSERT INTO attendance_shift_assignments\b/i)
+  })
+
+  it('rebuilds managed fixed schedules by creating missing rows and soft-deactivating stale managed rows only', async () => {
+    const producerKey = 'attendance_group_fixed_schedule:group-a:shift-a:2026-06-01:2026-06-30'
+    const managedRows = [
+      {
+        id: '00000000-0000-4000-8000-000000000101',
+        user_id: 'user-managed',
+        shift_id: 'shift-a',
+        start_date: '2026-06-01',
+        end_date: '2026-06-30',
+        is_active: true,
+        producer_type: 'attendance_group_fixed_schedule',
+        producer_ref_id: 'group-a',
+        producer_key: producerKey,
+        producer_run_id: '00000000-0000-4000-8000-000000000001',
+        kind: 'shift',
+      },
+      {
+        id: '00000000-0000-4000-8000-000000000102',
+        user_id: 'user-stale',
+        shift_id: 'shift-a',
+        start_date: '2026-06-01',
+        end_date: '2026-06-30',
+        is_active: true,
+        producer_type: 'attendance_group_fixed_schedule',
+        producer_ref_id: 'group-a',
+        producer_key: producerKey,
+        producer_run_id: '00000000-0000-4000-8000-000000000001',
+        kind: 'shift',
+      },
+    ]
+    const db = {
+      query: vi.fn(async (sql: string, params: any[] = []) => {
+        const text = String(sql)
+        if (/FROM attendance_groups/.test(text)) return [{ id: 'group-a', org_id: 'org-a', name: 'Operations', timezone: 'UTC' }]
+        if (/FROM attendance_shifts/.test(text)) return [{ id: 'shift-a', org_id: 'org-a', name: 'Day shift', timezone: 'UTC' }]
+        if (/FROM attendance_group_members/.test(text)) return [{ user_id: 'user-create' }, { user_id: 'user-managed' }, { user_id: 'user-unmanaged' }]
+        if (/pg_advisory_xact_lock/.test(text)) return []
+        if (/\bINSERT INTO attendance_shift_assignments\b/i.test(text)) {
+          return [{
+            id: '00000000-0000-4000-8000-000000000201',
+            org_id: params[1],
+            user_id: params[2],
+            shift_id: params[3],
+            start_date: params[4],
+            end_date: params[5],
+            is_active: true,
+            producer_type: params[6],
+            producer_ref_id: params[7],
+            producer_key: params[8],
+            producer_run_id: params[9],
+          }]
+        }
+        if (/\bUPDATE attendance_shift_assignments\b/i.test(text)) {
+          return [{
+            ...managedRows[1],
+            is_active: false,
+          }]
+        }
+        if (/producer_type = \$2/.test(text) && /producer_key = \$4/.test(text)) return managedRows
+        if (/FROM attendance_shift_assignments/.test(text) && /user_id = ANY/.test(text)) {
+          return [
+            managedRows[0],
+            {
+              id: '00000000-0000-4000-8000-000000000103',
+              user_id: 'user-unmanaged',
+              shift_id: 'shift-a',
+              start_date: '2026-06-01',
+              end_date: '2026-06-30',
+              kind: 'shift',
+            },
+          ]
+        }
+        if (/FROM attendance_rotation_assignments/.test(text)) return []
+        return []
+      }),
+    }
+
+    const result = await helpers.rebuildAttendanceGroupFixedSchedule(db, {
+      orgId: 'org-a',
+      groupId: 'group-a',
+      shiftId: 'shift-a',
+      startDate: '2026-06-01',
+      endDate: '2026-06-30',
+    })
+
+    expect(result.ok).toBe(true)
+    expect(result.data.created.map((item: any) => item.userId)).toEqual(['user-create'])
+    expect(result.data.deactivated.map((item: any) => item.id)).toEqual(['00000000-0000-4000-8000-000000000102'])
+    expect(result.data.skippedManaged.map((item: any) => item.userId)).toEqual(['user-managed'])
+    expect(result.data.skippedUnmanaged.map((item: any) => item.userId)).toEqual(['user-unmanaged'])
+    expect(result.data.skippedExternalManaged).toEqual([])
+
+    const queries = db.query.mock.calls.map(call => String(call[0]))
+    const updateCalls = db.query.mock.calls.filter(call => /\bUPDATE attendance_shift_assignments\b/i.test(String(call[0])))
+    expect(queries.filter(sql => sql.includes('pg_advisory_xact_lock'))).toHaveLength(6)
+    expect(queries.filter(sql => /\bINSERT INTO attendance_shift_assignments\b/i.test(sql))).toHaveLength(1)
+    expect(updateCalls).toHaveLength(1)
+    expect(updateCalls[0][0]).toContain('producer_key = $4')
+    expect(updateCalls[0][1][4]).toEqual(['00000000-0000-4000-8000-000000000102'])
+    expect(queries.join('\n')).not.toMatch(/\bDELETE FROM attendance_shift_assignments\b/i)
+  })
+
+  it('refuses managed fixed-schedule rebuilds when another managed window blocks the target', async () => {
+    const db = {
+      query: vi.fn(async (sql: string) => {
+        const text = String(sql)
+        if (/FROM attendance_groups/.test(text)) return [{ id: 'group-a', org_id: 'org-a', name: 'Operations', timezone: 'UTC' }]
+        if (/FROM attendance_shifts/.test(text)) return [{ id: 'shift-a', org_id: 'org-a', name: 'Day shift', timezone: 'UTC' }]
+        if (/FROM attendance_group_members/.test(text)) return [{ user_id: 'user-a' }]
+        if (/pg_advisory_xact_lock/.test(text)) return []
+        if (/producer_type = \$2/.test(text) && /producer_key = \$4/.test(text)) return []
+        if (/FROM attendance_shift_assignments/.test(text) && /user_id = ANY/.test(text)) {
+          return [{
+            id: '00000000-0000-4000-8000-000000000301',
+            user_id: 'user-a',
+            shift_id: 'shift-a',
+            start_date: '2026-05-15',
+            end_date: '2026-06-15',
+            producer_type: 'attendance_group_fixed_schedule',
+            producer_ref_id: 'group-a',
+            producer_key: 'attendance_group_fixed_schedule:group-a:shift-a:2026-05-15:2026-06-15',
+            producer_run_id: '00000000-0000-4000-8000-000000000003',
+            kind: 'shift',
+          }]
+        }
+        if (/FROM attendance_rotation_assignments/.test(text)) return []
+        return []
+      }),
+    }
+
+    const result = await helpers.rebuildAttendanceGroupFixedSchedule(db, {
+      orgId: 'org-a',
+      groupId: 'group-a',
+      shiftId: 'shift-a',
+      startDate: '2026-06-01',
+      endDate: '2026-06-30',
+    })
+
+    expect(result).toMatchObject({
+      ok: false,
+      status: 409,
+      code: 'ATTENDANCE_GROUP_FIXED_SCHEDULE_BLOCKING_CONFLICT',
+    })
+    expect(result.details.blockingConflicts[0]).toEqual(expect.objectContaining({
+      userId: 'user-a',
+      managedScheduleAction: 'clear_existing_managed_schedule_first',
+    }))
+    const queries = db.query.mock.calls.map(call => String(call[0])).join('\n')
+    expect(queries).not.toMatch(/\bINSERT INTO attendance_shift_assignments\b/i)
+    expect(queries).not.toMatch(/\bUPDATE attendance_shift_assignments\b/i)
+  })
+
+  it('clears only managed rows for the exact fixed-schedule producer key', async () => {
+    const managedRows = [
+      {
+        id: '00000000-0000-4000-8000-000000000401',
+        user_id: 'user-a',
+        shift_id: 'shift-a',
+        start_date: '2026-06-01',
+        end_date: '2026-06-30',
+        is_active: true,
+        producer_type: 'attendance_group_fixed_schedule',
+        producer_ref_id: 'group-a',
+        producer_key: 'attendance_group_fixed_schedule:group-a:shift-a:2026-06-01:2026-06-30',
+        producer_run_id: '00000000-0000-4000-8000-000000000004',
+      },
+      {
+        id: '00000000-0000-4000-8000-000000000402',
+        user_id: 'user-b',
+        shift_id: 'shift-a',
+        start_date: '2026-06-01',
+        end_date: '2026-06-30',
+        is_active: true,
+        producer_type: 'attendance_group_fixed_schedule',
+        producer_ref_id: 'group-a',
+        producer_key: 'attendance_group_fixed_schedule:group-a:shift-a:2026-06-01:2026-06-30',
+        producer_run_id: '00000000-0000-4000-8000-000000000004',
+      },
+    ]
+    const db = {
+      query: vi.fn(async (sql: string, params: any[] = []) => {
+        const text = String(sql)
+        if (/pg_advisory_xact_lock/.test(text)) return []
+        if (/\bUPDATE attendance_shift_assignments\b/i.test(text)) {
+          return managedRows
+            .filter(row => params[4].includes(row.id))
+            .map(row => ({ ...row, is_active: false }))
+        }
+        if (/producer_type = \$2/.test(text) && /producer_key = \$4/.test(text)) return managedRows
+        return []
+      }),
+    }
+
+    const result = await helpers.clearAttendanceGroupFixedScheduleManagedRows(db, {
+      orgId: 'org-a',
+      groupId: 'group-a',
+      shiftId: 'shift-a',
+      startDate: '2026-06-01',
+      endDate: '2026-06-30',
+    })
+
+    expect(result.ok).toBe(true)
+    expect(result.data.producer).toEqual({
+      type: 'attendance_group_fixed_schedule',
+      refId: 'group-a',
+      key: 'attendance_group_fixed_schedule:group-a:shift-a:2026-06-01:2026-06-30',
+    })
+    expect(result.data.deactivated.map((item: any) => item.id)).toEqual([
+      '00000000-0000-4000-8000-000000000401',
+      '00000000-0000-4000-8000-000000000402',
+    ])
+    const queries = db.query.mock.calls.map(call => String(call[0]))
+    const updateCalls = db.query.mock.calls.filter(call => /\bUPDATE attendance_shift_assignments\b/i.test(String(call[0])))
+    expect(queries.filter(sql => sql.includes('pg_advisory_xact_lock'))).toHaveLength(2)
+    expect(updateCalls).toHaveLength(1)
+    expect(updateCalls[0][0]).toContain('producer_ref_id = $3')
+    expect(updateCalls[0][0]).toContain('producer_key = $4')
+    expect(updateCalls[0][1][4]).toEqual([
+      '00000000-0000-4000-8000-000000000401',
+      '00000000-0000-4000-8000-000000000402',
+    ])
+    expect(queries.join('\n')).not.toMatch(/\bDELETE FROM attendance_shift_assignments\b/i)
   })
 })

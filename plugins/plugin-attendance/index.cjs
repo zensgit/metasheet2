@@ -8699,13 +8699,27 @@ function buildAttendanceGroupFixedScheduleProducerMetadata(input, producerRunId)
   }
 }
 
-function mapAttendanceGroupFixedScheduleSkipped(row, draft) {
+function getAttendanceGroupFixedScheduleSkipOwnership(row, producerKey) {
+  if (row?.producer_type === ATTENDANCE_GROUP_FIXED_SCHEDULE_PRODUCER_TYPE && row?.producer_key === producerKey) {
+    return 'managed'
+  }
+  if (row?.producer_type == null && row?.producer_key == null) {
+    return 'unmanaged'
+  }
+  return 'externalManaged'
+}
+
+function mapAttendanceGroupFixedScheduleSkipped(row, draft, producerKey) {
   return {
     assignmentId: row.id,
     userId: draft.userId,
     shiftId: draft.shiftId,
     startDate: normalizeDateOnly(row.start_date) ?? row.start_date,
     endDate: normalizeAttendanceScheduleAssignmentEndDate(row.end_date),
+    ownership: getAttendanceGroupFixedScheduleSkipOwnership(row, producerKey),
+    producerType: row.producer_type ?? null,
+    producerRefId: row.producer_ref_id ?? null,
+    producerKey: row.producer_key ?? null,
   }
 }
 
@@ -8719,10 +8733,45 @@ function isExactAttendanceGroupFixedScheduleAssignment(row, draft) {
 function mapAttendanceGroupFixedScheduleBlockingConflict(row, draft) {
   const conflict = mapAttendanceScheduleAssignmentConflict(row, draft)
   if (!conflict) return null
-  return {
+  const mapped = {
     ...conflict,
     message: getAttendanceScheduleAssignmentConflictMessage(conflict),
   }
+  if (
+    row?.producer_type === ATTENDANCE_GROUP_FIXED_SCHEDULE_PRODUCER_TYPE
+    && row?.producer_ref_id === draft.groupId
+    && row?.producer_key
+  ) {
+    mapped.managedScheduleAction = 'clear_existing_managed_schedule_first'
+  }
+  return mapped
+}
+
+async function acquireAttendanceScheduleAssignmentLocks(db, orgId, userIds) {
+  const lockUserIds = Array.from(new Set(
+    (Array.isArray(userIds) ? userIds : [])
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+  )).sort()
+  for (const userId of lockUserIds) {
+    await acquireAttendanceScheduleAssignmentLock(db, orgId, userId)
+  }
+  return lockUserIds
+}
+
+async function loadAttendanceGroupFixedScheduleManagedRows(db, input) {
+  const producerMetadata = buildAttendanceGroupFixedScheduleProducerMetadata(input, '00000000-0000-4000-8000-000000000000')
+  return db.query(
+    `SELECT id, user_id, shift_id, start_date, end_date, is_active, producer_type, producer_ref_id, producer_key, producer_run_id, 'shift'::text AS kind
+       FROM attendance_shift_assignments
+      WHERE org_id = $1
+        AND producer_type = $2
+        AND producer_ref_id = $3
+        AND producer_key = $4
+        AND COALESCE(is_active, true) = true
+      ORDER BY user_id ASC, start_date ASC, created_at ASC`,
+    [input.orgId, producerMetadata.producerType, producerMetadata.producerRefId, producerMetadata.producerKey]
+  )
 }
 
 async function buildAttendanceGroupFixedSchedulePlan(db, input, options = {}) {
@@ -8774,15 +8823,23 @@ async function buildAttendanceGroupFixedSchedulePlan(db, input, options = {}) {
     }
   }
 
-  if (options.lockTargets) {
-    for (const userId of userIds) {
-      await acquireAttendanceScheduleAssignmentLock(db, input.orgId, userId)
-    }
+  const extraLockUserIds = Array.isArray(options.extraLockUserIds) ? [...options.extraLockUserIds] : []
+  if (options.lockManagedRowsForProducerKey) {
+    const managedRowsForLocks = await loadAttendanceGroupFixedScheduleManagedRows(db, input)
+    extraLockUserIds.push(...managedRowsForLocks.map(row => row.user_id))
   }
 
+  if (options.lockTargets) {
+    await acquireAttendanceScheduleAssignmentLocks(db, input.orgId, [
+      ...userIds,
+      ...extraLockUserIds,
+    ])
+  }
+
+  const producerKey = buildAttendanceGroupFixedScheduleProducerKey(input)
   const overlapEndDate = normalizeAttendanceScheduleAssignmentEndDate(input.endDate) || ATTENDANCE_SCHEDULE_OPEN_END_DATE
   const shiftOverlapRows = await db.query(
-    `SELECT id, user_id, shift_id, start_date, end_date, 'shift'::text AS kind
+    `SELECT id, user_id, shift_id, start_date, end_date, producer_type, producer_ref_id, producer_key, producer_run_id, 'shift'::text AS kind
        FROM attendance_shift_assignments
       WHERE org_id = $1
         AND user_id = ANY($2::text[])
@@ -8815,12 +8872,16 @@ async function buildAttendanceGroupFixedSchedulePlan(db, input, options = {}) {
 
   const wouldCreate = []
   const skipped = []
+  const skippedManaged = []
+  const skippedUnmanaged = []
+  const skippedExternalManaged = []
   const blockingConflicts = []
 
   for (const userId of userIds) {
     const draft = {
       kind: 'shift',
       orgId: input.orgId,
+      groupId: input.groupId,
       userId,
       shiftId: input.shiftId,
       startDate: input.startDate,
@@ -8836,7 +8897,11 @@ async function buildAttendanceGroupFixedSchedulePlan(db, input, options = {}) {
     }
     const exactRow = overlaps.find(row => isExactAttendanceGroupFixedScheduleAssignment(row, draft))
     if (exactRow) {
-      skipped.push(mapAttendanceGroupFixedScheduleSkipped(exactRow, draft))
+      const skippedItem = mapAttendanceGroupFixedScheduleSkipped(exactRow, draft, producerKey)
+      skipped.push(skippedItem)
+      if (skippedItem.ownership === 'managed') skippedManaged.push(skippedItem)
+      else if (skippedItem.ownership === 'externalManaged') skippedExternalManaged.push(skippedItem)
+      else skippedUnmanaged.push(skippedItem)
       continue
     }
     wouldCreate.push(mapAttendanceGroupFixedSchedulePreviewCandidate(userId, input))
@@ -8857,6 +8922,9 @@ async function buildAttendanceGroupFixedSchedulePlan(db, input, options = {}) {
       },
       wouldCreate,
       skipped,
+      skippedManaged,
+      skippedUnmanaged,
+      skippedExternalManaged,
       blockingConflicts,
     },
   }
@@ -8866,23 +8934,9 @@ async function buildAttendanceGroupFixedSchedulePreview(db, input) {
   return buildAttendanceGroupFixedSchedulePlan(db, input)
 }
 
-async function applyAttendanceGroupFixedSchedule(db, input) {
-  const result = await buildAttendanceGroupFixedSchedulePlan(db, input, { lockTargets: true })
-  if (!result.ok) return result
-  const plan = result.data
-  if (plan.blockingConflicts.length > 0) {
-    return {
-      ok: false,
-      status: 409,
-      code: 'ATTENDANCE_GROUP_FIXED_SCHEDULE_BLOCKING_CONFLICT',
-      message: 'Fixed schedule apply has blocking conflicts',
-      details: plan,
-    }
-  }
-
+async function insertAttendanceGroupFixedScheduleAssignments(db, input, items, producerMetadata) {
   const created = []
-  const producerMetadata = buildAttendanceGroupFixedScheduleProducerMetadata(input, randomUUID())
-  for (const item of plan.wouldCreate) {
+  for (const item of items) {
     const rows = await db.query(
       `INSERT INTO attendance_shift_assignments
        (id, org_id, user_id, shift_id, start_date, end_date, is_active, producer_type, producer_ref_id, producer_key, producer_run_id)
@@ -8903,6 +8957,55 @@ async function applyAttendanceGroupFixedSchedule(db, input) {
     )
     if (rows[0]) created.push(mapAssignmentRow(rows[0]))
   }
+  return created
+}
+
+async function softDeactivateAttendanceGroupFixedScheduleManagedRows(db, input, assignmentIds) {
+  const ids = Array.from(new Set(
+    (Array.isArray(assignmentIds) ? assignmentIds : [])
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+  ))
+  if (!ids.length) return []
+  const producerMetadata = buildAttendanceGroupFixedScheduleProducerMetadata(input, '00000000-0000-4000-8000-000000000000')
+  const rows = await db.query(
+    `UPDATE attendance_shift_assignments
+        SET is_active = false,
+            updated_at = now()
+      WHERE org_id = $1
+        AND producer_type = $2
+        AND producer_ref_id = $3
+        AND producer_key = $4
+        AND id = ANY($5::uuid[])
+        AND COALESCE(is_active, true) = true
+      RETURNING *`,
+    [
+      input.orgId,
+      producerMetadata.producerType,
+      producerMetadata.producerRefId,
+      producerMetadata.producerKey,
+      ids,
+    ]
+  )
+  return rows.map(mapAssignmentRow)
+}
+
+async function applyAttendanceGroupFixedSchedule(db, input) {
+  const result = await buildAttendanceGroupFixedSchedulePlan(db, input, { lockTargets: true })
+  if (!result.ok) return result
+  const plan = result.data
+  if (plan.blockingConflicts.length > 0) {
+    return {
+      ok: false,
+      status: 409,
+      code: 'ATTENDANCE_GROUP_FIXED_SCHEDULE_BLOCKING_CONFLICT',
+      message: 'Fixed schedule apply has blocking conflicts',
+      details: plan,
+    }
+  }
+
+  const producerMetadata = buildAttendanceGroupFixedScheduleProducerMetadata(input, randomUUID())
+  const created = await insertAttendanceGroupFixedScheduleAssignments(db, input, plan.wouldCreate, producerMetadata)
 
   return {
     ok: true,
@@ -8910,6 +9013,70 @@ async function applyAttendanceGroupFixedSchedule(db, input) {
       ...plan,
       created,
       applied: true,
+    },
+  }
+}
+
+async function rebuildAttendanceGroupFixedSchedule(db, input) {
+  const result = await buildAttendanceGroupFixedSchedulePlan(db, input, {
+    lockTargets: true,
+    lockManagedRowsForProducerKey: true,
+  })
+  if (!result.ok) return result
+  const plan = result.data
+  if (plan.blockingConflicts.length > 0) {
+    return {
+      ok: false,
+      status: 409,
+      code: 'ATTENDANCE_GROUP_FIXED_SCHEDULE_BLOCKING_CONFLICT',
+      message: 'Fixed schedule rebuild has blocking conflicts',
+      details: plan,
+    }
+  }
+
+  const activeManagedRows = await loadAttendanceGroupFixedScheduleManagedRows(db, input)
+  await acquireAttendanceScheduleAssignmentLocks(db, input.orgId, activeManagedRows.map(row => row.user_id))
+  const lockedManagedRows = await loadAttendanceGroupFixedScheduleManagedRows(db, input)
+  const targetUserIds = new Set(plan.target.userIds)
+  const deactivateIds = lockedManagedRows
+    .filter(row => !targetUserIds.has(String(row.user_id || '').trim()))
+    .map(row => row.id)
+
+  const producerMetadata = buildAttendanceGroupFixedScheduleProducerMetadata(input, randomUUID())
+  const created = await insertAttendanceGroupFixedScheduleAssignments(db, input, plan.wouldCreate, producerMetadata)
+  const deactivated = await softDeactivateAttendanceGroupFixedScheduleManagedRows(db, input, deactivateIds)
+
+  return {
+    ok: true,
+    data: {
+      ...plan,
+      created,
+      deactivated,
+      rebuilt: true,
+    },
+  }
+}
+
+async function clearAttendanceGroupFixedScheduleManagedRows(db, input) {
+  const activeManagedRows = await loadAttendanceGroupFixedScheduleManagedRows(db, input)
+  await acquireAttendanceScheduleAssignmentLocks(db, input.orgId, activeManagedRows.map(row => row.user_id))
+  const lockedManagedRows = await loadAttendanceGroupFixedScheduleManagedRows(db, input)
+  const deactivated = await softDeactivateAttendanceGroupFixedScheduleManagedRows(
+    db,
+    input,
+    lockedManagedRows.map(row => row.id)
+  )
+  const producerMetadata = buildAttendanceGroupFixedScheduleProducerMetadata(input, '00000000-0000-4000-8000-000000000000')
+  return {
+    ok: true,
+    data: {
+      producer: {
+        type: producerMetadata.producerType,
+        refId: producerMetadata.producerRefId,
+        key: producerMetadata.producerKey,
+      },
+      deactivated,
+      cleared: true,
     },
   }
 }
@@ -14552,10 +14719,15 @@ module.exports = {
     buildAttendanceGroupFixedSchedulePlan,
     buildAttendanceGroupFixedSchedulePreview,
     applyAttendanceGroupFixedSchedule,
+    rebuildAttendanceGroupFixedSchedule,
+    clearAttendanceGroupFixedScheduleManagedRows,
     ATTENDANCE_GROUP_FIXED_SCHEDULE_PRODUCER_TYPE,
     buildAttendanceGroupFixedScheduleProducerKey,
     buildAttendanceGroupFixedScheduleProducerMetadata,
+    loadAttendanceGroupFixedScheduleManagedRows,
+    softDeactivateAttendanceGroupFixedScheduleManagedRows,
     acquireAttendanceScheduleAssignmentLock,
+    acquireAttendanceScheduleAssignmentLocks,
     getAttendanceScheduleAssignmentConflictMessage,
     getAttendanceScheduleAssignmentConflictType,
     resolveAttendanceScheduleAssignmentUpdateEndDate,
@@ -26023,6 +26195,152 @@ module.exports = {
           }
           logger.error('Attendance group fixed schedule apply failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to apply fixed schedule' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/groups/:id/fixed-schedule/rebuild',
+      withPermission('attendance:admin', async (req, res) => {
+        const schema = z.object({
+          shiftId: z.string().min(1),
+          startDate: z.string().min(1),
+          endDate: z.string().min(1),
+          orgId: z.string().optional(),
+        }).strict()
+
+        const parsed = schema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
+        const shiftId = normalizeUuidString(parsed.data.shiftId)
+        if (!shiftId) {
+          respondInvalidUuid(res, 'shiftId')
+          return
+        }
+        const startDate = normalizeDateOnlyStrict(parsed.data.startDate)
+        if (!startDate) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid "startDate" date. Use YYYY-MM-DD.' } })
+          return
+        }
+        const endDate = normalizeDateOnlyStrict(parsed.data.endDate)
+        if (!endDate) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid "endDate" date. Use YYYY-MM-DD.' } })
+          return
+        }
+        if (startDate > endDate) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: '"startDate" must be on or before "endDate".' } })
+          return
+        }
+
+        try {
+          const result = await db.transaction((trx) => rebuildAttendanceGroupFixedSchedule(trx, {
+            orgId,
+            groupId,
+            shiftId,
+            startDate,
+            endDate,
+          }))
+          if (!result.ok) {
+            res.status(result.status).json({
+              ok: false,
+              error: {
+                code: result.code,
+                message: result.message,
+                details: result.details,
+              },
+            })
+            return
+          }
+          for (const assignment of result.data.created) {
+            emitEvent('attendance.assignment.created', { orgId, assignmentId: assignment.id })
+          }
+          for (const assignment of result.data.deactivated) {
+            emitEvent('attendance.assignment.updated', { orgId, assignmentId: assignment.id })
+          }
+          res.json({ ok: true, data: result.data })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance group fixed schedule rebuild failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to rebuild fixed schedule' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/groups/:id/fixed-schedule/clear',
+      withPermission('attendance:admin', async (req, res) => {
+        const schema = z.object({
+          shiftId: z.string().min(1),
+          startDate: z.string().min(1),
+          endDate: z.string().min(1),
+          orgId: z.string().optional(),
+        }).strict()
+
+        const parsed = schema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
+        const shiftId = normalizeUuidString(parsed.data.shiftId)
+        if (!shiftId) {
+          respondInvalidUuid(res, 'shiftId')
+          return
+        }
+        const startDate = normalizeDateOnlyStrict(parsed.data.startDate)
+        if (!startDate) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid "startDate" date. Use YYYY-MM-DD.' } })
+          return
+        }
+        const endDate = normalizeDateOnlyStrict(parsed.data.endDate)
+        if (!endDate) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid "endDate" date. Use YYYY-MM-DD.' } })
+          return
+        }
+        if (startDate > endDate) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: '"startDate" must be on or before "endDate".' } })
+          return
+        }
+
+        try {
+          const result = await db.transaction((trx) => clearAttendanceGroupFixedScheduleManagedRows(trx, {
+            orgId,
+            groupId,
+            shiftId,
+            startDate,
+            endDate,
+          }))
+          for (const assignment of result.data.deactivated) {
+            emitEvent('attendance.assignment.updated', { orgId, assignmentId: assignment.id })
+          }
+          res.json({ ok: true, data: result.data })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance group fixed schedule clear failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to clear fixed schedule' } })
         }
       })
     )
