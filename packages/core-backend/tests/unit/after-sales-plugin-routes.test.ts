@@ -6045,6 +6045,180 @@ describe('plugin-after-sales routes', () => {
     )
   })
 
+  it('rejects communication ticket methods when tenant context is missing', async () => {
+    const communicationApi = communicationRegister.mock.calls[0]?.[1] as Record<
+      string,
+      (args?: Record<string, unknown>) => unknown
+    >
+    const expectedMessage = 'tenantId is required for after-sales communication method'
+
+    eventsEmit.mockClear()
+    createRecord.mockClear()
+    getRecord.mockClear()
+    patchRecord.mockClear()
+    queryRecords.mockClear()
+    listRecords.mockClear()
+    deleteRecord.mockClear()
+
+    for (const method of [
+      'emitTicketCreated',
+      'emitTicketRefundRequested',
+      'emitTicketOverdue',
+      'emitFollowUpDue',
+    ]) {
+      expect(() => communicationApi[method]({})).toThrow(expectedMessage)
+    }
+
+    for (const method of [
+      'createTicket',
+      'updateTicket',
+      'requestTicketRefund',
+      'listTickets',
+      'deleteTicket',
+    ]) {
+      await expect(communicationApi[method]({}) as Promise<unknown>).rejects.toThrow(expectedMessage)
+    }
+
+    expect(eventsEmit).not.toHaveBeenCalled()
+    expect(createRecord).not.toHaveBeenCalled()
+    expect(getRecord).not.toHaveBeenCalled()
+    expect(patchRecord).not.toHaveBeenCalled()
+    expect(queryRecords).not.toHaveBeenCalled()
+    expect(listRecords).not.toHaveBeenCalled()
+    expect(deleteRecord).not.toHaveBeenCalled()
+  })
+
+  it('uses explicit tenantId for communication ticket methods', async () => {
+    const communicationApi = communicationRegister.mock.calls[0]?.[1] as Record<
+      string,
+      (args?: Record<string, unknown>) => unknown
+    >
+    const tenantId = 'tenant_42'
+    const projectId = 'tenant_42:after-sales'
+    const ticket = {
+      id: 'rec_ticket_001',
+      ticketNo: 'TK-2020',
+      title: 'Tenant-scoped communication',
+      priority: 'high',
+      source: 'phone',
+    }
+
+    eventsEmit.mockClear()
+    createRecord.mockClear()
+    getRecord.mockClear()
+    patchRecord.mockClear()
+    queryRecords.mockClear()
+    deleteRecord.mockClear()
+
+    const createdEvent = communicationApi.emitTicketCreated({
+      tenantId,
+      ticket,
+    }) as { payload: { tenantId: string; projectId: string } }
+    expect(createdEvent.payload).toMatchObject({ tenantId, projectId })
+
+    const refundEvent = communicationApi.emitTicketRefundRequested({
+      tenantId,
+      requesterId: 'writer_42',
+      ticket: {
+        ...ticket,
+        refundAmount: 42,
+      },
+    }) as { payload: { tenantId: string; projectId: string } }
+    expect(refundEvent.payload).toMatchObject({ tenantId, projectId })
+
+    const overdueEvent = communicationApi.emitTicketOverdue({
+      tenantId,
+      ticket,
+    }) as { payload: { tenantId: string; projectId: string } }
+    expect(overdueEvent.payload).toMatchObject({ tenantId, projectId })
+
+    const followUpEvent = communicationApi.emitFollowUpDue({
+      tenantId,
+      ticket,
+      followUp: {
+        id: 'followup_2020',
+        owner: 'csr_2020',
+      },
+    }) as { payload: { tenantId: string; projectId: string } }
+    expect(followUpEvent.payload).toMatchObject({ tenantId, projectId })
+
+    const createResult = await communicationApi.createTicket({
+      tenantId,
+      requesterId: 'writer_42',
+      ticket: {
+        ticketNo: 'TK-2021',
+        title: 'Created through communication',
+        source: 'phone',
+        priority: 'high',
+      },
+    }) as { projectId: string }
+    expect(createResult.projectId).toBe(projectId)
+    expect(createRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:serviceTicket:sheet',
+      data: expect.objectContaining({
+        [stPk('ticketNo')]: 'TK-2021',
+        [stPk('title')]: 'Created through communication',
+      }),
+    })
+
+    const updateResult = await communicationApi.updateTicket({
+      tenantId,
+      ticketId: 'rec_ticket_001',
+      ticket: {
+        title: 'Updated through communication',
+        source: 'email',
+        priority: 'normal',
+        status: 'assigned',
+      },
+    }) as { projectId: string }
+    expect(updateResult.projectId).toBe(projectId)
+
+    const refundResult = await communicationApi.requestTicketRefund({
+      tenantId,
+      ticketId: 'rec_ticket_001',
+      requesterId: 'writer_42',
+      refundAmount: 88,
+    }) as { projectId: string }
+    expect(refundResult.projectId).toBe(projectId)
+
+    const listResult = await communicationApi.listTickets({
+      tenantId,
+      status: 'new',
+      search: 'cooling',
+      limit: 5,
+    }) as { projectId: string }
+    expect(listResult.projectId).toBe(projectId)
+    expect(queryRecords).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:serviceTicket:sheet',
+      filters: {
+        [stPk('status')]: 'new',
+      },
+      search: 'cooling',
+      limit: 5,
+      offset: undefined,
+    })
+
+    const deleteResult = await communicationApi.deleteTicket({
+      tenantId,
+      ticketId: 'rec_ticket_001',
+    }) as { projectId: string; ticketId: string; deleted: boolean }
+    expect(deleteResult).toEqual({
+      projectId,
+      ticketId: 'rec_ticket_001',
+      version: 4,
+      deleted: true,
+    })
+    expect(deleteRecord).toHaveBeenCalledWith({
+      sheetId: 'tenant_42:after-sales:serviceTicket:sheet',
+      recordId: 'rec_ticket_001',
+    })
+
+    for (const [, payload] of eventsEmit.mock.calls) {
+      expect(payload).toMatchObject({ tenantId, projectId })
+      expect(payload.projectId).not.toBe('default:after-sales')
+    }
+  })
+
   it('registers workflow event listeners on activate', async () => {
     expect(eventsOn).toHaveBeenCalledWith('ticket.created', expect.any(Function))
     expect(eventsOn).toHaveBeenCalledWith('ticket.assigned', expect.any(Function))
