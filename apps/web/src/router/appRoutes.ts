@@ -229,7 +229,7 @@ export const appRoutes: RouteRecordRaw[] = [
     path: '/approvals',
     name: 'approval-list',
     component: () => import('../views/approval/ApprovalCenterView.vue'),
-    meta: { title: 'Approvals', titleZh: '审批中心', requiresAuth: true }
+    meta: { title: 'Approvals', titleZh: '审批中心', requiresAuth: true, permissions: ['approvals:read'] }
   },
   {
     path: '/approvals/new/:templateId',
