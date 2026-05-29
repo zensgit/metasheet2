@@ -376,6 +376,36 @@ export function useAttendanceAdminPayroll({
     metadata: '{}',
   })
 
+  const payrollCycleManualPeriodRequired = computed(() => !payrollCycleForm.templateId)
+  const payrollCycleManualPeriodComplete = computed(() =>
+    Boolean(payrollCycleForm.startDate && payrollCycleForm.endDate)
+  )
+  const payrollCycleCanSave = computed(() =>
+    Boolean(payrollCycleForm.templateId) || payrollCycleManualPeriodComplete.value
+  )
+  const payrollCycleValidationHint = computed(() => {
+    if (!payrollCycleManualPeriodRequired.value) return ''
+    if (!payrollCycleForm.startDate && !payrollCycleForm.endDate) {
+      return tr(
+        'Select a payroll template, or enter both start and end dates for a manual cycle.',
+        '请选择计薪模板，或为手工周期填写开始和结束日期。',
+      )
+    }
+    if (!payrollCycleForm.startDate) {
+      return tr(
+        'Enter a start date for this manual payroll cycle.',
+        '请填写手工计薪周期的开始日期。',
+      )
+    }
+    if (!payrollCycleForm.endDate) {
+      return tr(
+        'Enter an end date for this manual payroll cycle.',
+        '请填写手工计薪周期的结束日期。',
+      )
+    }
+    return ''
+  })
+
   function resetPayrollTemplateForm() {
     payrollTemplateEditingId.value = null
     payrollTemplateForm.name = ''
@@ -671,6 +701,14 @@ export function useAttendanceAdminPayroll({
   }
 
   async function savePayrollCycle() {
+    if (!payrollCycleCanSave.value) {
+      setStatus(
+        payrollCycleValidationHint.value || tr('Payroll cycle dates are required.', '计薪周期日期为必填项。'),
+        'error',
+      )
+      return
+    }
+
     payrollCycleSaving.value = true
     try {
       const payload: Record<string, any> = {
@@ -701,9 +739,18 @@ export function useAttendanceAdminPayroll({
         throw new Error(extractErrorMessage(data, tr('Failed to save payroll cycle', '保存计薪周期失败')))
       }
       adminForbidden.value = false
-      resetPayrollCycleForm()
+      const savedCycle = data.data ?? null
+      const savedCycleId = savedCycle?.id ?? payrollCycleEditingId.value
       await loadPayrollCycles()
-      setStatus(tr('Payroll cycle saved.', '计薪周期已保存。'))
+      const selectedCycle = savedCycleId
+        ? payrollCycles.value.find(item => item.id === savedCycleId) ?? savedCycle
+        : savedCycle
+      if (selectedCycle?.id) {
+        editPayrollCycle(selectedCycle)
+      } else {
+        resetPayrollCycleForm()
+      }
+      setStatus(tr('Payroll cycle saved and selected.', '计薪周期已保存并已选中。'))
     } catch (error) {
       const message = error instanceof Error && error.message
         ? error.message
@@ -814,6 +861,9 @@ export function useAttendanceAdminPayroll({
     payrollTemplateForm,
     payrollCycleForm,
     payrollCycleGenerateForm,
+    payrollCycleCanSave,
+    payrollCycleManualPeriodRequired,
+    payrollCycleValidationHint,
     payrollTemplateName,
     resetPayrollTemplateForm,
     editPayrollTemplate,

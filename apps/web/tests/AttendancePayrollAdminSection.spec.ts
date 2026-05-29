@@ -57,6 +57,9 @@ function mountSection(overrides: Partial<Record<string, unknown>> = {}) {
       endDate: '',
       status: 'open',
     }),
+    payrollCycleCanSave: ref(false),
+    payrollCycleManualPeriodRequired: ref(true),
+    payrollCycleValidationHint: ref('Select a payroll template, or enter both start and end dates for a manual cycle.'),
     payrollCycleGenerateForm: reactive({
       templateId: '',
       anchorDate: '2026-05-18',
@@ -128,5 +131,40 @@ describe('AttendancePayrollAdminSection', () => {
     await nextTick()
 
     expect(payroll.movePayrollSummaryFieldCode).toHaveBeenCalledWith('work_duration', 1)
+  })
+
+  it('shows manual cycle validation and disables summary until a cycle is selected', async () => {
+    const canSave = ref(false)
+    const editingId = ref<string | null>(null)
+    const validationHint = ref('Select a payroll template, or enter both start and end dates for a manual cycle.')
+    const { payroll } = mountSection({
+      payrollCycleCanSave: canSave,
+      payrollCycleEditingId: editingId,
+      payrollCycleValidationHint: validationHint,
+    })
+
+    const createButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Create cycle'))
+    const loadSummaryButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Load summary'))
+    const startInput = container!.querySelector<HTMLInputElement>('#attendance-payroll-cycle-start')
+    const endInput = container!.querySelector<HTMLInputElement>('#attendance-payroll-cycle-end')
+
+    expect(createButton?.disabled).toBe(true)
+    expect(loadSummaryButton?.disabled).toBe(true)
+    expect(startInput?.getAttribute('aria-invalid')).toBe('true')
+    expect(endInput?.getAttribute('aria-invalid')).toBe('true')
+    expect(container!.querySelector('[data-payroll-cycle-validation-hint]')?.textContent).toContain('start and end dates')
+
+    payroll.payrollCycleForm.startDate = '2026-05-01'
+    payroll.payrollCycleForm.endDate = '2026-05-31'
+    canSave.value = true
+    validationHint.value = ''
+    editingId.value = 'cycle-1'
+    await nextTick()
+
+    expect(createButton?.disabled).toBe(false)
+    expect(loadSummaryButton?.disabled).toBe(false)
+    expect(container!.querySelector('[data-payroll-cycle-validation-hint]')).toBeNull()
   })
 })
