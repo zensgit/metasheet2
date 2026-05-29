@@ -28,7 +28,7 @@ export type MetaManagerLabelKey =
   | 'field.optionalOverride' | 'field.aggregation'
   | 'field.expression' | 'field.insertFieldToken'
   | 'field.formulaReference' | 'field.formulaSearchPlaceholder'
-  | 'field.formulaDryRun.test' | 'field.formulaDryRun.testWithRecord' | 'field.formulaDryRun.sampleHeading' | 'field.formulaDryRun.evaluating'
+  | 'field.formulaDryRun.test' | 'field.formulaDryRun.testWithRecord' | 'field.formulaDryRun.recordHint' | 'field.formulaDryRun.sampleHeading' | 'field.formulaDryRun.evaluating'
   | 'field.formulaDryRun.resultHeading' | 'field.formulaDryRun.errorHeading' | 'field.formulaDryRun.invalidNumber'
   | 'field.formulaDryRun.forbidden' | 'field.formulaDryRun.tooLarge' | 'field.formulaDryRun.requestFailed'
   | 'field.allCategories' | 'field.noMatchingFunctions'
@@ -160,6 +160,10 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'field.formulaReference': { en: 'Formula reference', zh: '公式参考' },
   'field.formulaDryRun.test': { en: 'Test with sample data', zh: '用示例数据试算' },
   'field.formulaDryRun.testWithRecord': { en: 'Preview with current record', zh: '用当前记录预览/校验' },
+  // #5c-b honest-label (design §1.1): the record sampler is sheet-scoped + permission-safe + raw saved values,
+  // NOT a mirror of the current view's displayed columns. A field readable to you but hidden in your current
+  // view may still be sampled; a field denied by field-permissions never is.
+  'field.formulaDryRun.recordHint': { en: "Samples this record's saved values across the whole sheet, with your field-read permissions applied — not a mirror of the columns shown in the current view.", zh: '按整张表取该记录已保存的值，并按你的字段读取权限脱敏——并非镜像当前视图所显示的列。' },
   'field.formulaDryRun.sampleHeading': { en: 'Sample values', zh: '示例值' },
   'field.formulaDryRun.evaluating': { en: 'Evaluating…', zh: '试算中…' },
   'field.formulaDryRun.resultHeading': { en: 'Result', zh: '结果' },
