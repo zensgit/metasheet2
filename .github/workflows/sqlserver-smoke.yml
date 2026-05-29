@@ -1,0 +1,102 @@
+name: SQL Server smoke (real-wire)
+
+# B4: run the opt-in SQL Server smoke against REAL SQL Server 2019/2022 service containers, so the
+# generic `type=sqlserver` adapter (MSSQLAdapter) is validated across versions — not only the
+# fake-driver unit tests. The image is large (~1.5GB) and SQL Server takes ~30s to start, so this is
+# PATH-FILTERED to the data-source adapter/smoke surface, not run on every PR.
+#
+# SQL Server 2008R2/2012 have no Linux container image (Windows-only binaries) → they stay on the
+# protocol-mock / Windows-VM follow-up path, per the smoke verification doc. amd64 runners run the
+# image natively.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'packages/core-backend/src/data-adapters/**'
+      - 'packages/core-backend/scripts/smoke-sqlserver*.ts'
+      - 'packages/core-backend/package.json'
+      - '.github/workflows/sqlserver-smoke.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/core-backend/src/data-adapters/**'
+      - 'packages/core-backend/scripts/smoke-sqlserver*.ts'
+      - '.github/workflows/sqlserver-smoke.yml'
+
+jobs:
+  sqlserver-smoke:
+    name: SQL Server ${{ matrix.mssql }} real-wire smoke
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mssql: ['2019', '2022']
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:${{ matrix.mssql }}-latest
+        env:
+          ACCEPT_EULA: 'Y'
+          # Ephemeral, throwaway container password (destroyed with the job) — not a real credential.
+          MSSQL_SA_PASSWORD: 'Smoke!Probe2026'
+          SA_PASSWORD: 'Smoke!Probe2026'
+        ports:
+          - 1433:1433
+    env:
+      MSSQL_HOST: 127.0.0.1
+      MSSQL_PORT: '1433'
+      MSSQL_USERNAME: sa
+      MSSQL_PASSWORD: 'Smoke!Probe2026'
+      MSSQL_ENCRYPT: 'true'
+      MSSQL_TRUST_SERVER_CERTIFICATE: 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Wait for SQL Server + seed probe table
+        # The seed connects to master; retrying it doubles as the SQL-Server-readiness wait
+        # (a not-yet-started container fails connect and is retried).
+        env:
+          MSSQL_DATABASE: master
+          # Explicit write opt-in — the seed MUTATES the DB; allowed ONLY here, against the throwaway
+          # service container. Without it the seed fails loudly (guards against an accidental run with
+          # MSSQL_* pointed at a real/customer server).
+          MSSQL_SEED_ALLOW_WRITE: 'true'
+        run: |
+          for i in $(seq 1 40); do
+            if pnpm --filter @metasheet/core-backend smoke:sqlserver:seed; then
+              echo "seeded on attempt $i"
+              exit 0
+            fi
+            echo "attempt $i: SQL Server not ready yet; sleeping 5s"
+            sleep 5
+          done
+          echo "SQL Server never became ready within timeout"
+          exit 1
+
+      - name: SQL Server real-wire smoke (connect / param / introspection / tableInfo / TOP + OFFSET-FETCH)
+        env:
+          MSSQL_DATABASE: smoke_db
+          MSSQL_SCHEMA: dbo
+          MSSQL_TABLE: smoke_probe
+        run: pnpm --filter @metasheet/core-backend smoke:sqlserver

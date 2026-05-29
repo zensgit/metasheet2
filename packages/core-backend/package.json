@@ -18,6 +18,7 @@
     "seed:rbac": "tsx scripts/seed-rbac.ts",
     "smoke:plugins": "tsx scripts/smoke-plugins.ts",
     "smoke:sqlserver": "tsx scripts/smoke-sqlserver.ts",
+    "smoke:sqlserver:seed": "tsx scripts/smoke-sqlserver-seed.ts",
     "yjs:status": "node ../../scripts/ops/check-yjs-rollout-status.mjs",
     "yjs:validate": "node scripts/ops/yjs-node-client.mjs",
     "test": "vitest",
