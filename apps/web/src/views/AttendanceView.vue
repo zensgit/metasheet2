@@ -3220,6 +3220,20 @@
                     >
                       <strong>{{ card.title }}</strong>
                       <span>{{ card.value }}</span>
+                      <ul
+                        v-if="card.policyLines && card.policyLines.length > 0"
+                        class="attendance__group-summary-policy"
+                        data-attendance-group-punch-policy
+                      >
+                        <li
+                          v-for="line in card.policyLines"
+                          :key="line.key"
+                          :data-attendance-group-punch-line="line.key"
+                        >
+                          <span class="attendance__group-summary-policy-label">{{ line.label }}</span>:
+                          <span class="attendance__group-summary-policy-value">{{ line.value }}</span>
+                        </li>
+                      </ul>
                       <small>{{ card.detail }}</small>
                       <div v-if="card.actions.length > 0" class="attendance__group-summary-actions">
                         <button
@@ -6394,12 +6408,18 @@ type AttendanceGroupSummaryAction = {
   sectionId: string
 }
 
+type AttendanceGroupSummaryPolicyLine = {
+  key: string
+  label: string
+  value: string
+}
 type AttendanceGroupSummaryCard = {
   key: string
   title: string
   value: string
   detail: string
   actions: AttendanceGroupSummaryAction[]
+  policyLines?: AttendanceGroupSummaryPolicyLine[]
 }
 
 interface AttendancePayrollTemplate {
@@ -6880,6 +6900,7 @@ const pluginsLoaded = ref(false)
 const exporting = ref(false)
 const exportCsvHeaderMode = ref<'label' | 'code'>('label')
 const settingsLoading = ref(false)
+const attendanceSettings = ref<AttendanceSettings | null>(null)
 const holidaySyncLoading = ref(false)
 const provisionLoading = ref(false)
 const provisionHasLoaded = ref(false)
@@ -8171,6 +8192,45 @@ function attendanceGroupMemberSecondaryLabel(userId: string): string {
   return parts.join(' · ')
 }
 
+// Read-only, workspace-level punch policy surfaced from the already-loaded
+// org settings (no group scope). Mirrors what enforcePunchConstraints applies.
+function buildAttendanceGroupPunchPolicyLines(): AttendanceGroupSummaryPolicyLine[] {
+  const settings = attendanceSettings.value
+  const ipAllowlist = Array.isArray(settings?.ipAllowlist)
+    ? settings!.ipAllowlist!.filter(Boolean)
+    : []
+  const geoFence = settings?.geoFence ?? null
+  const intervalMinutes = Number.isFinite(settings?.minPunchIntervalMinutes)
+    ? Number(settings!.minPunchIntervalMinutes)
+    : 1
+  const geoFenceValue = !geoFence
+    ? tr('No geofence', '无地理围栏')
+    : Number.isFinite(geoFence.radiusMeters)
+      ? tr(`Geofence enabled · ${Number(geoFence.radiusMeters)} m radius`, `已启用地理围栏 · 半径 ${Number(geoFence.radiusMeters)} 米`)
+      : tr('Geofence enabled', '已启用地理围栏')
+  return [
+    {
+      key: 'ip',
+      label: tr('IP allowlist', 'IP 白名单'),
+      value: ipAllowlist.length === 0
+        ? tr('No IP restriction', '无 IP 限制')
+        : tr(`Restricted to ${ipAllowlist.length} address range(s)`, `限定 ${ipAllowlist.length} 个地址段`),
+    },
+    {
+      key: 'geofence',
+      label: tr('Geofence', '地理围栏'),
+      value: geoFenceValue,
+    },
+    {
+      key: 'interval',
+      label: tr('Minimum punch interval', '最小打卡间隔'),
+      value: intervalMinutes === 1
+        ? tr('1 minute', '1 分钟')
+        : tr(`${intervalMinutes} minutes`, `${intervalMinutes} 分钟`),
+    },
+  ]
+}
+
 const attendanceGroupSummaryCards = computed<AttendanceGroupSummaryCard[]>(() => {
   const groupSaved = Boolean(attendanceGroupEditingId.value)
   const ruleSetName = groupSaved
@@ -8245,8 +8305,9 @@ const attendanceGroupSummaryCards = computed<AttendanceGroupSummaryCard[]>(() =>
     {
       key: 'punch-method',
       title: tr('Punch method', '打卡方式'),
-      value: tr('Workspace settings only in group settings V1', '考勤组设置 V1 仅使用工作区级设置'),
-      detail: tr('Group-specific Wi-Fi, location, hardware, photo, and face verification are not configured here.', '考勤组专属 Wi-Fi、地点、设备、拍照与人脸识别不在此配置。'),
+      value: tr('Workspace-level policy · applies to all attendance groups', '工作区级策略 · 适用于所有考勤组'),
+      detail: tr('Wi-Fi, device, photo, and face verification are not available here.', 'Wi-Fi、设备、拍照与人脸识别在此不可用。'),
+      policyLines: buildAttendanceGroupPunchPolicyLines(),
       actions: [
         {
           key: 'open-settings',
@@ -14530,6 +14591,7 @@ async function loadSettings() {
       throw new Error(readErrorMessage(data, tr('Failed to load settings', '加载设置失败')))
     }
     adminForbidden.value = false
+    attendanceSettings.value = (data.data as AttendanceSettings | null) ?? null
     applySettingsToForm(data.data || {})
   } catch (error: any) {
     setStatusFromError(error, tr('Failed to load settings', '加载设置失败'), 'admin')
@@ -19259,6 +19321,20 @@ const holidaySectionBindings = {
 .attendance__group-summary small {
   color: #6b7280;
   font-size: 12px;
+}
+
+.attendance__group-summary-policy {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+  font-size: 12px;
+  color: #374151;
+}
+
+.attendance__group-summary-policy-label {
+  color: #6b7280;
 }
 
 .attendance__group-summary-actions {

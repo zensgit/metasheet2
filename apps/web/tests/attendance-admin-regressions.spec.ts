@@ -88,9 +88,11 @@ describe('Attendance admin regressions', () => {
   let exportReportFieldObjectId = 'attendance_report_field_catalog'
   let exportReportFieldSheetId = 'sheet-1'
   let exportReportFieldViewId = 'fields_by_category'
+  let attendanceSettingsData: Record<string, unknown> | null = null
 
   beforeEach(() => {
     vi.clearAllMocks()
+    attendanceSettingsData = null
     exportReportFieldFingerprint = 'records-unit-test-fingerprint'
     exportReportFieldCodes = 'work_date,employee_name'
     exportReportFieldCount = '2'
@@ -527,6 +529,9 @@ describe('Attendance admin regressions', () => {
           'X-Attendance-Report-Fields-View-Id': exportReportFieldViewId,
         })
       }
+      if (url.includes('/api/attendance/settings')) {
+        return jsonResponse(200, { ok: true, data: attendanceSettingsData ?? {} })
+      }
       return emptyAttendanceResponse()
     })
 
@@ -635,7 +640,7 @@ describe('Attendance admin regressions', () => {
     expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="work-time"]')?.textContent).toContain('Configured in Shifts and Assignments')
     expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="scheduling-coverage"]')?.textContent).toContain('Advanced scheduling owns rotation and coverage checks')
     expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="comprehensive-hours"]')?.textContent).toContain('Review and reporting live in their own admin surface')
-    expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="punch-method"]')?.textContent).toContain('Workspace settings only in group settings V1')
+    expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="punch-method"]')?.textContent).toContain('applies to all attendance groups')
     expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="advanced-controls"]')?.textContent).toContain('No disabled fake controls')
     expect(summaryGrid!.querySelectorAll('input, textarea, select').length).toBe(0)
     expect(Array.from(summaryGrid!.querySelectorAll('button')).every(button => button.textContent?.trim().startsWith('Open'))).toBe(true)
@@ -649,6 +654,82 @@ describe('Attendance admin regressions', () => {
     expect(groupsSection!.querySelector('[data-attendance-group-detail]')?.textContent).toContain('New attendance group')
     expect(groupsSection!.querySelector('[data-attendance-group-people]')?.textContent).toContain('Save the group before adding people.')
     expect(groupsSection!.querySelector('[data-attendance-group-summary-card="rule-policy"]')?.textContent).toContain('Choose or save a group first')
+  })
+
+  async function openAttendanceGroupPunchCard(): Promise<HTMLElement> {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')!.click()
+    await flushUi(4)
+    const card = container!.querySelector<HTMLElement>('[data-attendance-group-summary-card="punch-method"]')
+    expect(card).toBeTruthy()
+    return card!
+  }
+
+  it('surfaces live workspace-level punch policy in the group punch-method card', async () => {
+    attendanceSettingsData = {
+      ipAllowlist: ['10.0.0.0/8', '192.168.0.0/16'],
+      geoFence: { lat: 31.2, lng: 121.5, radiusMeters: 200 },
+      minPunchIntervalMinutes: 5,
+    }
+    const card = await openAttendanceGroupPunchCard()
+    // PM2: explicit workspace-level framing; never group-specific
+    expect(card.textContent).toContain('applies to all attendance groups')
+    expect(card.textContent).not.toContain("this group's punch")
+    // PM1: live values rendered per field
+    expect(card.querySelector('[data-attendance-group-punch-line="ip"]')?.textContent).toContain('Restricted to 2 address range(s)')
+    expect(card.querySelector('[data-attendance-group-punch-line="geofence"]')?.textContent).toContain('Geofence enabled · 200 m radius')
+    expect(card.querySelector('[data-attendance-group-punch-line="interval"]')?.textContent).toContain('5 minutes')
+    // raw IP ranges are never exposed (count only)
+    expect(card.textContent).not.toContain('10.0.0.0/8')
+    expect(card.textContent).not.toContain('192.168.0.0/16')
+  })
+
+  it('renders default punch policy as unrestricted in the group punch-method card', async () => {
+    attendanceSettingsData = null
+    const card = await openAttendanceGroupPunchCard()
+    // PM3: defaults
+    expect(card.querySelector('[data-attendance-group-punch-line="ip"]')?.textContent).toContain('No IP restriction')
+    expect(card.querySelector('[data-attendance-group-punch-line="geofence"]')?.textContent).toContain('No geofence')
+    expect(card.querySelector('[data-attendance-group-punch-line="interval"]')?.textContent).toContain('1 minute')
+  })
+
+  it('keeps the group punch-method card read-only with only an Open Settings nav', async () => {
+    const card = await openAttendanceGroupPunchCard()
+    // PM4: no inputs/toggles/save controls inside the punch card
+    expect(card.querySelectorAll('input, select, textarea').length).toBe(0)
+    const buttons = Array.from(card.querySelectorAll<HTMLButtonElement>('button'))
+    expect(buttons.length).toBe(1)
+    expect(buttons[0].textContent?.trim().startsWith('Open')).toBe(true)
+    expect(buttons.every(button => button.type !== 'submit')).toBe(true)
+    // PM5: T2 capabilities are honest not-available text, never controls
+    expect(card.textContent).toContain('not available')
+    expect(card.textContent?.toLowerCase()).toContain('wi-fi')
+    expect(card.textContent?.toLowerCase()).toContain('face')
+  })
+
+  it('does not write punch policy or touch clock events from the group detail', async () => {
+    const card = await openAttendanceGroupPunchCard()
+    const settingsAction = card.querySelector<HTMLButtonElement>('[data-attendance-group-summary-action="open-settings"]')
+    expect(settingsAction).toBeTruthy()
+    settingsAction!.click()
+    await flushUi(2)
+
+    const calls = vi.mocked(apiFetch).mock.calls
+    // PM6: no settings write, no punch-policy POST/PUT
+    const settingsWrites = calls.filter(([url, init]) =>
+      String(url).includes('/api/attendance/settings')
+      && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()))
+    expect(settingsWrites).toEqual([])
+    // PM9: the punch card / group-detail flow neither punches nor writes events/records.
+    // (A baseline GET /api/attendance/records overview load on admin mount is unrelated to this feature.)
+    const punchEventCalls = calls.filter(([url]) => String(url).includes('/api/attendance/punch'))
+    expect(punchEventCalls).toEqual([])
+    const recordWrites = calls.filter(([url, init]) =>
+      String(url).includes('/api/attendance/records')
+      && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()))
+    expect(recordWrites).toEqual([])
   })
 
   it('navigates from attendance group summary cards without issuing API writes', async () => {
