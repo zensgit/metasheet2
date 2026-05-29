@@ -2114,6 +2114,9 @@ import { apiFetch } from '../utils/api'
 interface AfterSalesManifest {
   id: string
   displayName: string
+  capabilities?: {
+    runtimeAdmin?: boolean
+  }
   platformDependencies: string[]
   objects: Array<{ id: string; name: string; backing: string }>
   workflows: Array<{ id: string; name: string }>
@@ -2656,9 +2659,7 @@ const createdObjectLabels = computed(() => current.value.installResult?.createdO
 const createdViewLabels = computed(() => current.value.installResult?.createdViews ?? [])
 const isInstalled = computed(() => current.value.status === 'installed' || current.value.status === 'partial')
 const isDegraded = computed(() => current.value.status === 'partial' || current.value.status === 'failed')
-const hasRuntimeAdminSupport = computed(
-  () => Array.isArray(manifest.value?.workflows) && manifest.value.workflows.some((workflow) => workflow && workflow.id === 'sla-watcher'),
-)
+const hasRuntimeAdminSupport = computed(() => manifest.value?.capabilities?.runtimeAdmin === true)
 const showRuntimeAdminSection = computed(
   () => isInstalled.value && hasRuntimeAdminSupport.value && !runtimeAdminAccessDenied.value,
 )

@@ -887,6 +887,24 @@ describe('plugin-after-sales routes', () => {
     await plugin.activate(setup.context)
   })
 
+  it('exposes runtime admin as an explicit app-manifest capability', async () => {
+    const handler = routes.get('GET /api/after-sales/app-manifest')
+    const res = new FakeResponse()
+
+    await handler?.({}, res)
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({
+      ok: true,
+      data: {
+        id: 'after-sales',
+        capabilities: {
+          runtimeAdmin: true,
+        },
+      },
+    })
+  })
+
   it('returns 401 for current when user is missing', async () => {
     const handler = routes.get('GET /api/after-sales/projects/current')
     const res = new FakeResponse()

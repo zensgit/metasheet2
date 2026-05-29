@@ -1466,20 +1466,16 @@ describe('AfterSalesView', () => {
     await waitForText(container!, 'Requested refund for AF-001')
   })
 
-  it('renders runtime admin controls when the manifest exposes the runtime-admin workflow', async () => {
+  it('renders runtime admin controls when the manifest exposes the runtime-admin capability', async () => {
     apiFetchMock.mockImplementation(async (path: string) => {
       if (path === '/api/after-sales/app-manifest') {
         return createResponse({
           id: 'after-sales-default',
           displayName: 'After Sales',
+          capabilities: { runtimeAdmin: true },
           platformDependencies: ['core-backend'],
           objects: [],
-          workflows: [
-            { id: 'ticket-triage', name: 'Ticket Triage' },
-            { id: 'sla-watcher', name: 'SLA Watcher' },
-            { id: 'refund-approval', name: 'Refund Approval' },
-            { id: 'service-record-notify', name: 'Service Record Notification' },
-          ],
+          workflows: [],
         })
       }
 
@@ -1550,7 +1546,7 @@ describe('AfterSalesView', () => {
 
     expect(container?.querySelector('#after-sales-runtime-admin')).not.toBeNull()
     expect(container?.textContent).toContain('Default automation rules')
-    expect(container?.textContent).toContain('SLA Watcher')
+    expect(container?.textContent).toContain('SLA watcher')
     expect(container?.textContent).toContain('refundAmount role matrix')
   })
 
@@ -1560,6 +1556,7 @@ describe('AfterSalesView', () => {
         return createResponse({
           id: 'after-sales-default',
           displayName: 'After Sales',
+          capabilities: { runtimeAdmin: true },
           platformDependencies: ['core-backend'],
           objects: [],
           workflows: [
@@ -1643,6 +1640,7 @@ describe('AfterSalesView', () => {
         return createResponse({
           id: 'after-sales-default',
           displayName: 'After Sales',
+          capabilities: { runtimeAdmin: true },
           platformDependencies: ['core-backend'],
           objects: [],
           workflows: [
@@ -1770,6 +1768,7 @@ describe('AfterSalesView', () => {
         return createResponse({
           id: 'after-sales-default',
           displayName: 'After Sales',
+          capabilities: { runtimeAdmin: true },
           platformDependencies: ['core-backend'],
           objects: [],
           workflows: [
@@ -1871,6 +1870,7 @@ describe('AfterSalesView', () => {
         return createResponse({
           id: 'after-sales-default',
           displayName: 'After Sales',
+          capabilities: { runtimeAdmin: true },
           platformDependencies: ['core-backend'],
           objects: [],
           workflows: [
@@ -2055,6 +2055,7 @@ describe('AfterSalesView', () => {
         return createResponse({
           id: 'after-sales-default',
           displayName: 'After Sales',
+          capabilities: { runtimeAdmin: true },
           platformDependencies: ['core-backend'],
           objects: [],
           workflows: [
@@ -2225,6 +2226,7 @@ describe('AfterSalesView', () => {
         return createResponse({
           id: 'after-sales-default',
           displayName: 'After Sales',
+          capabilities: { runtimeAdmin: true },
           platformDependencies: ['core-backend'],
           objects: [],
           workflows: [
