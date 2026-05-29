@@ -1897,6 +1897,52 @@ async function testProvenanceReadRoute() {
   assert.equal(res.body.error.code, 'PROVENANCE_READ_NOT_IMPLEMENTED')
 }
 
+async function testTemplatesDeriveRoute() {
+  const { services } = createMockServices()
+  const { routes } = mountRoutes(services)
+  const sample = {
+    FNumber: 'M1',
+    FName: 'Widget',
+    FUnitID: { FNumber: '01', FName: 'PCS' },
+    FBaseUnitID: { FNumber: '01', FName: 'PCS' },
+  }
+
+  // unauthenticated → 401/403
+  let res = await invoke(routes, 'POST', '/api/integration/templates/derive', { body: { payloadTemplate: sample } })
+  assertErrorResponse(res, [401, 403])
+
+  // read user → 200 (READ-ONLY route); response is the DF-T2a draft (the route reuses T2a)
+  res = await invoke(routes, 'POST', '/api/integration/templates/derive', { user: READ_USER, body: { payloadTemplate: sample } })
+  assertOkResponse(res, 200)
+  const draft = res.body.data
+  const byField = Object.fromEntries(draft.fieldRules.map((rule) => [rule.targetField, rule]))
+  assert.equal(byField.FNumber.sourceType, 'from_staging', 'scalar → replace')
+  assert.equal(byField.FUnitID.sourceType, 'preserve_template', 'reference → preserve')
+  assert.ok(!('FBaseUnitID' in byField), 'gated FBaseUnitID excluded from authorable rules')
+  assert.deepEqual(draft.gatedFields, ['FBaseUnitID'])
+  // P1: the response does NOT echo the raw payloadTemplate (no operator-local customer values);
+  // it returns a values-free evidence summary instead.
+  assert.ok(!('payloadTemplate' in draft), 'response does not echo the raw payloadTemplate')
+  assert.ok(draft.evidence && Array.isArray(draft.evidence.fields), 'response includes a values-free evidence summary')
+  const draftJson = JSON.stringify(draft)
+  assert.ok(!draftJson.includes('Widget') && !draftJson.includes('PCS'), 'response carries no raw customer values')
+
+  // 400 when payloadTemplate is missing / not an object
+  res = await invoke(routes, 'POST', '/api/integration/templates/derive', { user: READ_USER, body: {} })
+  assertErrorResponse(res, [400])
+  assert.equal(res.body.error.code, 'PAYLOAD_TEMPLATE_REQUIRED')
+
+  // 400 (fail-closed) on an outer K3 { Data: … } envelope — the DF-T2a guard, surfaced by the route
+  res = await invoke(routes, 'POST', '/api/integration/templates/derive', { user: READ_USER, body: { payloadTemplate: { Data: { FNumber: 'X' } } } })
+  assertErrorResponse(res, [400])
+  assert.equal(res.body.error.code, 'TEMPLATE_DERIVE_REJECTED')
+
+  // 400 (fail-closed) on a redaction marker — never derive an executable template from it
+  res = await invoke(routes, 'POST', '/api/integration/templates/derive', { user: READ_USER, body: { payloadTemplate: { FNumber: '[redacted]', FName: 'X' } } })
+  assertErrorResponse(res, [400])
+  assert.equal(res.body.error.code, 'TEMPLATE_DERIVE_REJECTED')
+}
+
 async function main() {
   await testUnauthenticatedWriteRequestIsRejected()
   await testExternalSystemRoutes()
@@ -1909,6 +1955,7 @@ async function main() {
   await testDocumentTemplateValidation()
   await testPipelineRoutes()
   await testTemplatePreviewRoute()
+  await testTemplatesDeriveRoute()
   await testStagingRoutes()
   await testRunAndDeadLetterRoutes()
   await testProvenanceReadRoute()

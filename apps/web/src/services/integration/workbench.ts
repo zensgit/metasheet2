@@ -591,6 +591,41 @@ export async function previewIntegrationTemplate(
   return parseIntegrationResponse<IntegrationTemplatePreviewResult>(response)
 }
 
+// DF-T2c: a values-free entry in the derive evidence summary (field names + shape presence only).
+export interface IntegrationTemplateEvidenceField {
+  field: string
+  sourceType: string
+  shape: string
+  completeness?: string
+  isReference: boolean
+  hasValue: boolean
+}
+
+// DF-T2c: the draft returned by the read-only derive route. Deliberately carries NO raw
+// payloadTemplate (the operator-local customer values stay off the wire) — only the rules, the
+// gated field names, and a values-free evidence summary.
+export interface IntegrationTemplateDraft {
+  fieldRules: IntegrationFieldRule[]
+  gatedFields: string[]
+  evidence?: {
+    fields: IntegrationTemplateEvidenceField[]
+    gatedFields: string[]
+  }
+}
+
+// DF-T2c: derive a draft { payloadTemplate, fieldRules, gatedFields } from a RAW operator-local
+// payloadTemplate via the read-only derive route (which runs the DF-T2a helper server-side — no
+// duplication, no write; fails closed on redaction markers / secrets / outer {Data:…} envelopes).
+export async function deriveIntegrationTemplate(
+  payloadTemplate: Record<string, unknown>,
+): Promise<IntegrationTemplateDraft> {
+  const response = await apiFetch('/api/integration/templates/derive', {
+    method: 'POST',
+    body: JSON.stringify({ payloadTemplate }),
+  })
+  return parseIntegrationResponse<IntegrationTemplateDraft>(response)
+}
+
 export async function upsertIntegrationPipeline(
   payload: IntegrationPipelineUpsertRequest,
 ): Promise<IntegrationPipeline> {

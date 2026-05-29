@@ -1784,4 +1784,87 @@ describe('IntegrationWorkbenchView', () => {
     expect(replayCalls).toBe(1)
     expect(container.textContent).toContain('Replay 成功')
   })
+
+  it('DF-T2c: derives a draft via the read-only route, and authoring edits reach the real preview request body', async () => {
+    const deriveBodies: Array<Record<string, unknown>> = []
+    const previewBodies: Array<Record<string, unknown>> = []
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url.startsWith('/api/integration/external-systems')) return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/templates/derive') {
+        deriveBodies.push(JSON.parse(String(init?.body)))
+        // the read-only route returns the DF-T2a draft (scalar→replace, reference→preserve, gated excluded)
+        // route returns values-free { fieldRules, gatedFields, evidence } — NO raw payloadTemplate
+        return jsonResponse({
+          fieldRules: [
+            { targetField: 'FNumber', sourceType: 'from_staging', sourceField: 'FNumber', shape: 'scalar' },
+            { targetField: 'FUnitID', sourceType: 'preserve_template', shape: 'object-passthrough', completeness: 'require-fnumber-fname' },
+          ],
+          gatedFields: ['FBaseUnitID'],
+          evidence: {
+            fields: [
+              { field: 'FNumber', sourceType: 'from_staging', shape: 'scalar', isReference: false, hasValue: true },
+              { field: 'FUnitID', sourceType: 'preserve_template', shape: 'object-passthrough', completeness: 'require-fnumber-fname', isReference: true, hasValue: true },
+            ],
+            gatedFields: ['FBaseUnitID'],
+          },
+        })
+      }
+      if (url === '/api/integration/templates/preview') {
+        previewBodies.push(JSON.parse(String(init?.body)))
+        return jsonResponse({ targetPayloadPreview: { fieldProvenance: {}, eligibleForSaveOnly: true } })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi()
+
+    // raw operator-local sample + a payloadTemplate to derive from
+    const sample = container.querySelector('[data-testid="sample-record"]') as HTMLTextAreaElement
+    sample.value = JSON.stringify({ materialCode: 'MAT-1' })
+    sample.dispatchEvent(new Event('input'))
+    const tpl = container.querySelector('[data-testid="payload-template"]') as HTMLTextAreaElement
+    tpl.value = JSON.stringify({ FNumber: 'MAT-1', FName: 'Widget', FUnitID: { FNumber: '01', FName: 'PCS' } })
+    tpl.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    // KEYSTONE 1 — derive FIRES the read-only route with the payloadTemplate (not a fixture)
+    ;(container.querySelector('[data-testid="derive-template-draft"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(deriveBodies).toHaveLength(1)
+    expect(deriveBodies[0]).toHaveProperty('payloadTemplate')
+    expect((deriveBodies[0].payloadTemplate as Record<string, unknown>).FUnitID).toBeDefined()
+    // the authoring UI is driven by the REAL derived draft
+    expect(container.querySelector('[data-testid="field-rule-FNumber"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="field-rule-locked-FUnitID"]')).not.toBeNull() // reference locked
+
+    // author: set FNumber's cleansed staging column
+    const source = container.querySelector('[data-testid="field-rule-source-FNumber"]') as HTMLInputElement
+    expect(source).not.toBeNull()
+    source.value = 'materialCode'
+    source.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    // KEYSTONE 2 — the PREVIEW request body carries payloadTemplate + the AUTHORED fieldRules
+    // (the edit flowed through to the wire; this is a request-body assertion, not a render check).
+    ;(container.querySelector('[data-testid="preview-payload"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(previewBodies).toHaveLength(1)
+    expect(previewBodies[0]).toHaveProperty('payloadTemplate')
+    const rules = previewBodies[0].fieldRules as Array<Record<string, unknown>>
+    expect(rules.find((r) => r.targetField === 'FNumber')).toMatchObject({ sourceType: 'from_staging', sourceField: 'materialCode', shape: 'scalar' })
+    expect(rules.find((r) => r.targetField === 'FUnitID')).toMatchObject({ sourceType: 'preserve_template' })
+  })
 })
