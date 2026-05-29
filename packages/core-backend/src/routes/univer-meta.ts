@@ -2192,7 +2192,7 @@ async function requireRecordReadable(
   query: QueryFn,
   sheetId: string,
   recordId: string,
-): Promise<{ access: ResolvedRequestAccess } | { status: number; body: unknown }> {
+): Promise<{ access: ResolvedRequestAccess; capabilities: MultitableCapabilities } | { status: number; body: unknown }> {
   const recordCheck = await query(
     'SELECT id, sheet_id FROM meta_records WHERE id = $1 AND sheet_id = $2',
     [recordId, sheetId],
@@ -2228,7 +2228,7 @@ async function requireRecordReadable(
     }
   }
 
-  return { access }
+  return { access, capabilities }
 }
 
 type FieldMutationGuard = {
@@ -6019,8 +6019,9 @@ export function univerMetaRouter(): Router {
   // sample values. Pure in-memory ({fldId} refs only; A1/range rejected) over a no-DB engine.
   router.post('/sheets/:sheetId/formula/dry-run', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
-    const body = (req.body ?? {}) as { expression?: unknown; sampleValues?: unknown }
+    const body = (req.body ?? {}) as { expression?: unknown; sampleValues?: unknown; recordId?: unknown }
     const expression = typeof body.expression === 'string' ? body.expression : ''
+    const recordId = typeof body.recordId === 'string' ? body.recordId.trim() : ''
     if (!sheetId || !expression.trim()) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and a non-empty expression are required' } })
     }
@@ -6047,14 +6048,56 @@ export function univerMetaRouter(): Router {
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      // #5c: when recordId is present, the record-level read gate (requireRecordReadable) yields
+      // access + capabilities (404 record-not-on-sheet / 401 / 403 sheet-!canRead). Per the current
+      // schema record-read is grant-additive (record_permissions.access_level is read|write|admin,
+      // no deny level), so this gate enforces existence + sheet-read, not a per-record read-deny.
+      // Absent recordId → unchanged #5b path. The dry-run ENGINE stays no-DB; the read below is route-level.
+      let capabilities: MultitableCapabilities
+      let recordReadAccess: ResolvedRequestAccess | undefined
+      if (recordId) {
+        const readable = await requireRecordReadable(req, pool.query.bind(pool), sheetId, recordId)
+        if ('status' in readable) {
+          return res.status(readable.status).json(readable.body)
+        }
+        capabilities = readable.capabilities
+        recordReadAccess = readable.access
+      } else {
+        const resolved = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+        capabilities = resolved.capabilities
+      }
       if (!capabilities.canManageFields) return sendForbidden(res)
 
       if (dryRunFormulaEngine.extractFieldReferences(expression).length > DRY_RUN_MAX_REFERENCED_FIELDS) {
         return res.status(422).json({ ok: false, error: { code: 'DRYRUN_TOO_MANY_REFS', message: `Expression references more than ${DRY_RUN_MAX_REFERENCED_FIELDS} fields` } })
       }
       const fields = await loadFieldsForSheetShared(pool.query.bind(pool), sheetId)
-      const data = await dryRunFormulaEngine.dryRun(expression, sampleValues, fields.map((f) => ({ id: f.id, type: f.type })))
+
+      // #5c: optional real-record sampling. RAW persisted data only (no applyLookupRollup) so the preview
+      // matches production recalc; lookup/rollup keys are absent in raw → existing missing_sample diagnostic.
+      let effectiveSampleValues: Record<string, unknown> = sampleValues
+      if (recordId && recordReadAccess) {
+        const userId = recordReadAccess.userId
+        if (userId) {
+          const recordRes = await pool.query(
+            'SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+            [recordId, sheetId],
+          )
+          const rawData = recordRes.rows.length > 0 ? normalizeJson(recordRes.rows[0].data) : {}
+          // D3c field mask, sheet-scope (hiddenFieldIds: [] — display-consistency defer, see #5c design-lock §4).
+          // scope.visible is the real field-read gate; a denied field is omitted → becomes missing_sample.
+          const visibleFields = filterVisiblePropertyFields(fields)
+          const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, userId)
+          const fieldPermissions = deriveFieldPermissions(visibleFields, capabilities, { hiddenFieldIds: [], fieldScopeMap })
+          const allowedIds = new Set(
+            visibleFields.filter((field) => fieldPermissions[field.id]?.visible !== false).map((field) => field.id),
+          )
+          const maskedData = filterRecordDataByFieldIds(rawData, allowedIds)
+          // Record values are the base; explicit manual sampleValues override per-field (denied keys stay omitted).
+          effectiveSampleValues = { ...maskedData, ...sampleValues }
+        }
+      }
+      const data = await dryRunFormulaEngine.dryRun(expression, effectiveSampleValues, fields.map((f) => ({ id: f.id, type: f.type })))
       return res.json({ ok: true, data })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
