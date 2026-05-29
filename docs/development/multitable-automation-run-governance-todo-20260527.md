@@ -48,7 +48,7 @@ It does not unlock:
 - suspend/resume, branch/parallel, cross-engine orchestration
 - Workflow Designer / BPMN live execution mapping
 
-K3 stage-1 lock remains in effect. Each item above is a separate named unlock.
+The K3 Stage-1 blanket lock is retired (#1993; #1792 = M1 one-record Material Save-only PASS) — replaced by post-GATE scoped gates (see `k3-post-gate-scoped-governance-20260528.md`). This does NOT open the capability half: each item above still requires a separate named unlock / demand gate.
 
 ## Lock posture (per milestone)
 
