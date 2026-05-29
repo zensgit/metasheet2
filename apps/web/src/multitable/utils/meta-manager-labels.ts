@@ -67,7 +67,7 @@ export type MetaManagerLabelKey =
   | 'view.orphanRecords' | 'view.noAdditionalConfig'
   | 'view.filterSortGroup' | 'view.sharedByViews'
   | 'view.filters' | 'view.sorts' | 'view.allConditions'
-  | 'view.anyCondition' | 'view.noValue' | 'view.addFilter'
+  | 'view.anyCondition' | 'view.noValue' | 'view.valueHiddenByPermission' | 'view.addFilter'
   | 'view.addSort' | 'view.sortAsc' | 'view.sortDesc'
   | 'view.changedWarning' | 'view.latestMetadataLoaded'
   | 'view.latestFieldMetadataLoaded'
@@ -251,6 +251,9 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'view.allConditions': { en: 'all conditions', zh: '满足全部条件' },
   'view.anyCondition': { en: 'any condition', zh: '满足任一条件' },
   'view.noValue': { en: 'no value', zh: '无值' },
+  // #UX-redacted-filter: a filter condition on a field the viewer can't read — the literal is hidden by
+  // permissions (server preserves it on re-save, #2074), so show a non-editable hint, not an empty input.
+  'view.valueHiddenByPermission': { en: 'value hidden by permissions', zh: '该值因权限隐藏' },
   'view.addFilter': { en: '+ Add filter', zh: '+ 添加筛选' },
   'view.addSort': { en: '+ Add sort', zh: '+ 添加排序' },
   'view.sortAsc': { en: 'A to Z', zh: 'A 到 Z' },
