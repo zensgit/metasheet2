@@ -6384,7 +6384,7 @@ attendanceIntegrationDescribe(
     }
   })
 
-  it('accepts fileId alias and defaults uploaded CSV imports to the daily summary profile', async () => {
+  it('rejects default-template CSV rows with 工号 when no userMap resolves them', async () => {
     if (!baseUrl) return
     if (!importUploadDir) return
 
@@ -6441,10 +6441,19 @@ attendanceIntegrationDescribe(
       }),
     })
     expect(previewRes.status).toBe(200)
-    const previewItems = (previewRes.body as { data?: { items?: Array<{ userId?: string; workDate?: string }> } } | undefined)?.data?.items ?? []
+    const previewItems = (
+      previewRes.body as {
+        data?: {
+          items?: Array<{ userId?: string; workDate?: string; status?: string; warnings?: string[] }>
+        }
+      } | undefined
+    )?.data?.items ?? []
     expect(previewItems.length).toBeGreaterThan(0)
-    expect(previewItems[0]?.userId).toBe(requesterId)
+    expect(previewItems[0]?.userId).toBe('unknown')
     expect(previewItems[0]?.workDate).toBe(workDate)
+    expect(previewItems[0]?.status).toBe('invalid')
+    expect(previewItems[0]?.warnings?.join('\n')).toContain('Unresolved user identifier')
+    expect(previewItems[0]?.warnings?.join('\n')).toContain('工号')
 
     const prepareCommitRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
       method: 'POST',
@@ -6475,8 +6484,10 @@ attendanceIntegrationDescribe(
     })
     expect(commitRes.status).toBe(200)
     const commitData = (commitRes.body as { data?: any } | undefined)?.data
-    expect(Number(commitData?.processedRows ?? 0)).toBeGreaterThanOrEqual(1)
-    expect(Number(commitData?.failedRows ?? 0)).toBeGreaterThanOrEqual(0)
+    expect(Number(commitData?.processedRows ?? -1)).toBe(0)
+    expect(Number(commitData?.failedRows ?? -1)).toBeGreaterThanOrEqual(1)
+    expect(commitData?.skipped?.[0]?.userId).toBeNull()
+    expect(commitData?.skipped?.[0]?.warnings?.join('\n')).toContain('Unresolved user identifier')
 
     const csvPath = path.join(importUploadDir, orgId, `${fileId}.csv`)
     const metaPath = path.join(importUploadDir, orgId, `${fileId}.json`)
