@@ -1078,8 +1078,13 @@ describe('Attendance admin regressions', () => {
       const qaRow = Array.from(groupsSection.querySelectorAll<HTMLElement>('[data-attendance-group-row]'))
         .find(row => row.textContent?.includes('QA Team'))
       expect(qaRow).toBeTruthy()
-      qaRow!.querySelector<HTMLButtonElement>('.attendance__group-list-main')!.click()
+      expect(qaRow!.querySelector<HTMLButtonElement>('[data-attendance-group-row-edit]')?.textContent).toContain('Edit')
+      const beforeEditCalls = vi.mocked(apiFetch).mock.calls.length
+      qaRow!.querySelector<HTMLButtonElement>('[data-attendance-group-row-edit]')!.click()
       await flushUi(2)
+      expect(vi.mocked(apiFetch).mock.calls.slice(beforeEditCalls).filter(([, init]) =>
+        ['POST', 'PUT', 'PATCH', 'DELETE'].includes(String(init?.method || 'GET').toUpperCase())
+      )).toEqual([])
       expect(groupsSection.querySelector('[data-attendance-group-schedule-type-placeholder]')?.textContent).toContain('Scheduled shift')
       expect(groupsSection.querySelector('[data-attendance-group-fixed-schedule-preview]')).toBeNull()
 
