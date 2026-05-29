@@ -6922,6 +6922,28 @@ function resolveUserMapEntry(userMap, key) {
   return null
 }
 
+function collectRowUserIdentityValues({ row, userMapKeyField, userMapSourceFields }) {
+  if (!row) return []
+  const fields = row.fields ?? {}
+  const candidates = []
+  if (userMapKeyField) candidates.push(userMapKeyField)
+  if (Array.isArray(userMapSourceFields)) candidates.push(...userMapSourceFields)
+  candidates.push('empNo', '工号', 'sourceUserKey', 'userKey', 'userName', '姓名')
+
+  const seenKeys = new Set()
+  const values = []
+  for (const key of candidates) {
+    if (!key || seenKeys.has(key)) continue
+    seenKeys.add(key)
+    const value = fields[key]
+    if (value === null || value === undefined || value === '') continue
+    const normalized = String(value).trim()
+    if (!normalized) continue
+    values.push({ field: key, value: normalized })
+  }
+  return values
+}
+
 function resolveRowUserId({ row, fallbackUserId, userMap, userMapKeyField, userMapSourceFields }) {
   if (!row) return fallbackUserId ?? null
   if (row.userId) return row.userId
@@ -6929,18 +6951,20 @@ function resolveRowUserId({ row, fallbackUserId, userMap, userMapKeyField, userM
   const fields = row.fields ?? {}
   const direct = fields.userId ?? fields.user_id
   if (direct) return direct
-  const candidates = []
-  if (userMapKeyField) candidates.push(userMapKeyField)
-  if (Array.isArray(userMapSourceFields)) candidates.push(...userMapSourceFields)
-  candidates.push('empNo', '工号', 'sourceUserKey', 'userKey', 'userName', '姓名')
-  for (const key of candidates) {
-    if (!key) continue
-    const value = fields[key]
-    if (value === null || value === undefined || value === '') continue
-    const mapped = resolveUserMapValue(userMap, String(value).trim())
+  const identityValues = collectRowUserIdentityValues({ row, userMapKeyField, userMapSourceFields })
+  for (const { value } of identityValues) {
+    const mapped = resolveUserMapValue(userMap, value)
     if (mapped) return mapped
   }
+  if (identityValues.length > 0) return null
   return fallbackUserId ?? null
+}
+
+function buildUnresolvedRowUserWarning({ row, userMapKeyField, userMapSourceFields }) {
+  const identityValues = collectRowUserIdentityValues({ row, userMapKeyField, userMapSourceFields })
+  if (!identityValues.length) return 'Missing userId'
+  const fields = Array.from(new Set(identityValues.map((entry) => entry.field))).join(', ')
+  return `Unresolved user identifier (${fields}); configure userMap or include userId`
 }
 
 function resolveRowUserProfile({ row, fallbackUserId, userMap, userMapKeyField, userMapSourceFields }) {
@@ -14596,6 +14620,11 @@ async function isApproverAllowed(db, userId, step, logger) {
 }
 
 module.exports = {
+  __attendanceImportForTests: {
+    buildUnresolvedRowUserWarning,
+    collectRowUserIdentityValues,
+    resolveRowUserId,
+  },
   __attendanceReportFieldCatalogForTests: {
     ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS,
     ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID,
@@ -15937,10 +15966,16 @@ module.exports = {
 	          userMap: payload.userMap,
 	          userMapKeyField: payload.userMapKeyField,
 	          userMapSourceFields: payload.userMapSourceFields,
-	        })
-	        const warnings = []
-	        if (!rowUserId) warnings.push('Missing userId')
-	        if (!workDate) warnings.push('Missing workDate')
+        })
+        const warnings = []
+        if (!rowUserId) {
+          warnings.push(buildUnresolvedRowUserWarning({
+            row,
+            userMapKeyField: payload.userMapKeyField,
+            userMapSourceFields: payload.userMapSourceFields,
+          }))
+        }
+        if (!workDate) warnings.push('Missing workDate')
 	        if (requiredFields.length) {
 	          const missingRequired = requiredFields.filter((field) => {
 	            const value = resolveRequiredFieldValue(row, field)
@@ -16721,10 +16756,16 @@ module.exports = {
 	            userMap: payload.userMap,
 	            userMapKeyField: payload.userMapKeyField,
 	            userMapSourceFields: payload.userMapSourceFields,
-	          })
-	          const importWarnings = []
-	          if (!rowUserId) importWarnings.push('Missing userId')
-	          if (!workDate) importWarnings.push('Missing workDate')
+          })
+          const importWarnings = []
+          if (!rowUserId) {
+            importWarnings.push(buildUnresolvedRowUserWarning({
+              row,
+              userMapKeyField: payload.userMapKeyField,
+              userMapSourceFields: payload.userMapSourceFields,
+            }))
+          }
+          if (!workDate) importWarnings.push('Missing workDate')
 	          if (requiredFields.length) {
 	            const missingRequired = requiredFields.filter((field) => {
 	              const value = resolveRequiredFieldValue(row, field)
@@ -21446,7 +21487,13 @@ module.exports = {
               userMapSourceFields: parsed.data.userMapSourceFields,
             })
             const importWarnings = []
-            if (!rowUserId) importWarnings.push('Missing userId')
+            if (!rowUserId) {
+              importWarnings.push(buildUnresolvedRowUserWarning({
+                row,
+                userMapKeyField: parsed.data.userMapKeyField,
+                userMapSourceFields: parsed.data.userMapSourceFields,
+              }))
+            }
             if (!workDate) importWarnings.push('Missing workDate')
             if (requiredFields.length) {
               const missingRequired = requiredFields.filter((field) => {
@@ -22296,7 +22343,13 @@ module.exports = {
                 userMapSourceFields: parsed.data.userMapSourceFields,
               })
               const importWarnings = []
-              if (!rowUserId) importWarnings.push('Missing userId')
+              if (!rowUserId) {
+                importWarnings.push(buildUnresolvedRowUserWarning({
+                  row,
+                  userMapKeyField: parsed.data.userMapKeyField,
+                  userMapSourceFields: parsed.data.userMapSourceFields,
+                }))
+              }
               if (!workDate) importWarnings.push('Missing workDate')
               if (requiredFields.length) {
                 const missingRequired = requiredFields.filter((field) => {
@@ -23310,7 +23363,13 @@ module.exports = {
                 userMapSourceFields: parsed.data.userMapSourceFields,
               })
               const importWarnings = []
-              if (!rowUserId) importWarnings.push('Missing userId')
+              if (!rowUserId) {
+                importWarnings.push(buildUnresolvedRowUserWarning({
+                  row,
+                  userMapKeyField: parsed.data.userMapKeyField,
+                  userMapSourceFields: parsed.data.userMapSourceFields,
+                }))
+              }
               if (!workDate) importWarnings.push('Missing workDate')
               if (requiredFields.length) {
                 const missingRequired = requiredFields.filter((field) => {
@@ -24071,7 +24130,13 @@ module.exports = {
                       userMapSourceFields: parsedImport.data.userMapSourceFields,
                     })
                     const importWarnings = []
-                    if (!rowUserId) importWarnings.push('Missing userId')
+                    if (!rowUserId) {
+                      importWarnings.push(buildUnresolvedRowUserWarning({
+                        row,
+                        userMapKeyField: parsedImport.data.userMapKeyField,
+                        userMapSourceFields: parsedImport.data.userMapSourceFields,
+                      }))
+                    }
                     if (!workDate) importWarnings.push('Missing workDate')
                     if (requiredFields.length) {
                       const missingRequired = requiredFields.filter((field) => {
