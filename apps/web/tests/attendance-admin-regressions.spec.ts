@@ -885,6 +885,146 @@ describe('Attendance admin regressions', () => {
     expect(groupsSection!.querySelector('[data-attendance-group-summary-card="rule-policy"]')?.textContent).toContain('Choose or save a group first')
   })
 
+  it('filters, exports, and copies attendance groups from the list tools', async () => {
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    const createObjectURL = vi.fn(() => 'blob:attendance-groups')
+    const revokeObjectURL = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
+
+    const savedGroups = [
+      {
+        id: 'group-a',
+        name: 'Ops Team',
+        code: 'ops-team',
+        timezone: 'Asia/Shanghai',
+        ruleSetId: 'rule-set-1',
+        description: 'Operations attendance group',
+        createdAt: '2026-03-28T08:00:00.000Z',
+        updatedAt: '2026-03-28T08:30:00.000Z',
+      },
+      {
+        id: 'group-b',
+        name: 'QA Team',
+        code: 'qa-team',
+        timezone: 'Asia/Shanghai',
+        ruleSetId: null,
+        description: 'Quality attendance group',
+        createdAt: '2026-03-29T08:00:00.000Z',
+        updatedAt: '2026-03-29T08:30:00.000Z',
+      },
+    ]
+    const copyBodies: Array<Record<string, unknown>> = []
+
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (url.includes('/api/attendance/rule-sets')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'rule-set-1',
+                name: 'Ops Rules',
+                scope: 'org',
+                version: 3,
+                config: {},
+                isDefault: true,
+              },
+            ],
+            total: 1,
+          },
+        })
+      }
+      if (url.startsWith('/api/attendance/groups?') && method === 'GET') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [...savedGroups],
+            total: savedGroups.length,
+          },
+        })
+      }
+      if (url === '/api/attendance/groups' && method === 'POST') {
+        const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        copyBodies.push(body)
+        const copied = {
+          id: 'group-copy',
+          name: String(body.name || 'Copied group'),
+          code: 'ops-team-copy',
+          timezone: String(body.timezone || 'Asia/Shanghai'),
+          ruleSetId: typeof body.ruleSetId === 'string' ? body.ruleSetId : null,
+          description: typeof body.description === 'string' ? body.description : null,
+          createdAt: '2026-03-30T08:00:00.000Z',
+          updatedAt: '2026-03-30T08:00:00.000Z',
+        }
+        savedGroups.unshift(copied)
+        return jsonResponse(200, { ok: true, data: copied })
+      }
+      if (url === '/api/attendance/groups/group-a/members' || url === '/api/attendance/groups/group-copy/members') {
+        return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    try {
+      app = createApp(AttendanceView, { mode: 'admin' })
+      app.mount(container!)
+      await flushUi(8)
+
+      container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')!.click()
+      await flushUi(4)
+
+      const groupsSection = container!.querySelector<HTMLElement>('#attendance-admin-groups')!
+      const list = groupsSection.querySelector<HTMLElement>('[data-attendance-group-list]')!
+      expect(list.textContent).toContain('2 groups')
+
+      setInput(groupsSection, '#attendance-group-search', 'qa')
+      await flushUi(2)
+      expect(list.textContent).toContain('QA Team')
+      expect(list.textContent).not.toContain('Ops Team')
+      expect(list.textContent).toContain('1 of 2 groups')
+
+      const ruleFilter = groupsSection.querySelector<HTMLSelectElement>('#attendance-group-rule-filter')!
+      ruleFilter.value = 'rule-set-1'
+      ruleFilter.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi(2)
+      expect(list.textContent).toContain('No groups match')
+
+      groupsSection.querySelector<HTMLButtonElement>('.attendance__group-list-tool-actions button:nth-child(2)')!.click()
+      await flushUi(2)
+      expect(list.textContent).toContain('Ops Team')
+      expect(list.textContent).toContain('QA Team')
+
+      groupsSection.querySelector<HTMLButtonElement>('[data-attendance-group-list-tools] .attendance__btn')!.click()
+      expect(createObjectURL).toHaveBeenCalledTimes(1)
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:attendance-groups')
+
+      const opsRow = Array.from(groupsSection.querySelectorAll<HTMLElement>('[data-attendance-group-row]'))
+        .find(row => row.textContent?.includes('Ops Team'))
+      expect(opsRow).toBeTruthy()
+      opsRow!.querySelector<HTMLButtonElement>('[data-attendance-group-copy]')!.click()
+      await flushUi(8)
+
+      expect(copyBodies).toEqual([
+        expect.objectContaining({
+          name: 'Ops Team copy',
+          code: null,
+          timezone: 'Asia/Shanghai',
+          ruleSetId: 'rule-set-1',
+          description: 'Operations attendance group',
+        }),
+      ])
+      expect(list.textContent).toContain('Ops Team copy')
+      expect(groupsSection.querySelector('[data-attendance-group-detail]')?.textContent).toContain('Ops Team copy')
+    } finally {
+      Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
+      Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
+    }
+  })
+
   it('keeps attendance setup flows on user pickers and resolved labels instead of UUID handoffs', async () => {
     const memberUserId = '11111111-1111-4111-8111-111111111111'
     const shiftUserId = '22222222-2222-4222-8222-222222222222'

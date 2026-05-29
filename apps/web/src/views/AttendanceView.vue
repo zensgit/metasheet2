@@ -3058,27 +3058,68 @@
                 <aside class="attendance__group-list" data-attendance-group-list>
                   <div class="attendance__group-list-header">
                     <strong>{{ tr('Groups', '考勤组') }}</strong>
-                    <span>{{ tr(`${attendanceGroups.length} groups`, `${attendanceGroups.length} 个考勤组`) }}</span>
+                    <span>{{ attendanceGroupListCountLabel }}</span>
+                  </div>
+                  <div class="attendance__group-list-tools" data-attendance-group-list-tools>
+                    <label class="attendance__field" for="attendance-group-search">
+                      <span>{{ tr('Search', '搜索') }}</span>
+                      <input
+                        id="attendance-group-search"
+                        v-model.trim="attendanceGroupSearch"
+                        type="search"
+                        :placeholder="tr('Name, code, rule, timezone...', '名称、编码、规则、时区...')"
+                      />
+                    </label>
+                    <label class="attendance__field" for="attendance-group-rule-filter">
+                      <span>{{ tr('Rule policy', '规则策略') }}</span>
+                      <select id="attendance-group-rule-filter" v-model="attendanceGroupRuleSetFilter">
+                        <option value="">{{ tr('All rule policies', '全部规则策略') }}</option>
+                        <option value="__default__">{{ tr('Default', '默认') }}</option>
+                        <option v-for="ruleSet in ruleSets" :key="ruleSet.id" :value="ruleSet.id">
+                          {{ ruleSet.name }}
+                        </option>
+                      </select>
+                    </label>
+                    <div class="attendance__group-list-tool-actions">
+                      <button class="attendance__btn attendance__btn--compact" type="button" :disabled="filteredAttendanceGroups.length === 0" @click="exportAttendanceGroupsCsv">
+                        {{ tr('Export CSV', '导出 CSV') }}
+                      </button>
+                      <button v-if="attendanceGroupFilterActive" class="attendance__btn attendance__btn--compact" type="button" @click="clearAttendanceGroupFilters">
+                        {{ tr('Clear filters', '清除筛选') }}
+                      </button>
+                    </div>
                   </div>
                   <div v-if="attendanceGroups.length === 0" class="attendance__empty">
                     {{ tr('No attendance groups yet. Create one to start configuring members.', '暂无考勤组。先新建一个考勤组，再配置成员。') }}
                   </div>
+                  <div v-else-if="filteredAttendanceGroups.length === 0" class="attendance__empty">
+                    {{ tr('No groups match the current filters.', '当前筛选条件下没有考勤组。') }}
+                  </div>
                   <div v-else class="attendance__group-list-items">
-                    <button
-                      v-for="item in attendanceGroups"
+                    <div
+                      v-for="item in filteredAttendanceGroups"
                       :key="item.id"
-                      type="button"
                       class="attendance__group-list-item"
                       :class="{ 'attendance__group-list-item--active': item.id === attendanceGroupEditingId }"
                       data-attendance-group-row
-                      @click="selectAttendanceGroup(item)"
                     >
-                      <span>
-                        <strong>{{ item.name }}</strong>
-                        <small>{{ item.code || item.id }}</small>
-                      </span>
-                      <span>{{ resolveRuleSetName(item.ruleSetId) }}</span>
-                    </button>
+                      <button class="attendance__group-list-main" type="button" @click="selectAttendanceGroup(item)">
+                        <span>
+                          <strong>{{ item.name }}</strong>
+                          <small>{{ item.code || item.id }}</small>
+                        </span>
+                        <span>{{ resolveRuleSetName(item.ruleSetId) }}</span>
+                      </button>
+                      <button
+                        class="attendance__btn attendance__btn--compact"
+                        type="button"
+                        :disabled="attendanceGroupCopyingId === item.id"
+                        data-attendance-group-copy
+                        @click="copyAttendanceGroup(item)"
+                      >
+                        {{ attendanceGroupCopyingId === item.id ? tr('Copying...', '复制中...') : tr('Copy', '复制') }}
+                      </button>
+                    </div>
                   </div>
                 </aside>
 
@@ -8244,6 +8285,9 @@ const selectedRuleTemplateVersion = computed(
 )
 const attendanceGroups = ref<AttendanceGroup[]>([])
 const attendanceGroupMembers = ref<AttendanceGroupMember[]>([])
+const attendanceGroupSearch = ref('')
+const attendanceGroupRuleSetFilter = ref('')
+const attendanceGroupCopyingId = ref<string | null>(null)
 const payrollTemplates = ref<AttendancePayrollTemplate[]>([])
 const payrollCycles = ref<AttendancePayrollCycle[]>([])
 const payrollSummaryFieldOptions = ref<AttendancePayrollSummaryFieldOption[]>(
@@ -8349,6 +8393,31 @@ const attendanceGroupOptions = computed(() =>
 const selectedAttendanceGroup = computed(() =>
   attendanceGroups.value.find(group => group.id === attendanceGroupEditingId.value) ?? null
 )
+const attendanceGroupFilterActive = computed(() =>
+  attendanceGroupSearch.value.trim().length > 0 || attendanceGroupRuleSetFilter.value !== ''
+)
+const filteredAttendanceGroups = computed(() => {
+  const term = attendanceGroupSearch.value.trim().toLowerCase()
+  const ruleSetFilter = attendanceGroupRuleSetFilter.value
+  return attendanceGroups.value.filter((group) => {
+    if (ruleSetFilter === '__default__' && group.ruleSetId) return false
+    if (ruleSetFilter && ruleSetFilter !== '__default__' && group.ruleSetId !== ruleSetFilter) return false
+    if (!term) return true
+    return [
+      group.name,
+      group.code ?? '',
+      group.timezone ?? '',
+      group.description ?? '',
+      resolveRuleSetName(group.ruleSetId),
+    ].some(value => value.toLowerCase().includes(term))
+  })
+})
+const attendanceGroupListCountLabel = computed(() => {
+  const visible = filteredAttendanceGroups.value.length
+  const total = attendanceGroups.value.length
+  if (visible === total) return tr(`${total} groups`, `${total} 个考勤组`)
+  return tr(`${visible} of ${total} groups`, `${visible} / ${total} 个考勤组`)
+})
 const attendanceGroupDetailTitle = computed(() =>
   attendanceGroupEditingId.value
     ? (attendanceGroupForm.name.trim() || selectedAttendanceGroup.value?.name || tr('Attendance group', '考勤组'))
@@ -16494,10 +16563,85 @@ function resolveRuleSetName(ruleSetId?: string | null): string {
   return ruleSets.value.find(item => item.id === ruleSetId)?.name ?? tr('Default', '默认')
 }
 
+function clearAttendanceGroupFilters() {
+  attendanceGroupSearch.value = ''
+  attendanceGroupRuleSetFilter.value = ''
+}
+
+function nextAttendanceGroupCopyName(sourceName: string): string {
+  const baseName = sourceName.trim() || tr('Attendance group', '考勤组')
+  const existingNames = new Set(attendanceGroups.value.map(group => group.name.trim().toLowerCase()).filter(Boolean))
+  const first = tr(`${baseName} copy`, `${baseName} 副本`)
+  if (!existingNames.has(first.toLowerCase())) return first
+  for (let index = 2; index <= 99; index += 1) {
+    const candidate = tr(`${baseName} copy ${index}`, `${baseName} 副本 ${index}`)
+    if (!existingNames.has(candidate.toLowerCase())) return candidate
+  }
+  return tr(`${baseName} copy ${new Date().toISOString().slice(0, 10)}`, `${baseName} 副本 ${new Date().toISOString().slice(0, 10)}`)
+}
+
+function exportAttendanceGroupsCsv() {
+  const rows = filteredAttendanceGroups.value
+  if (rows.length === 0) {
+    setStatus(tr('No attendance groups to export.', '没有可导出的考勤组。'), 'error')
+    return
+  }
+  const headers = ['Name', 'Code', 'Rule policy', 'Timezone', 'Description', 'Created at', 'Updated at']
+  const csvRows = rows.map(group => [
+    group.name,
+    group.code ?? '',
+    resolveRuleSetName(group.ruleSetId),
+    group.timezone ?? '',
+    group.description ?? '',
+    group.createdAt ?? '',
+    group.updatedAt ?? '',
+  ].map(value => escapeCsvCell(String(value))).join(','))
+  downloadCsvText(`attendance-groups-${new Date().toISOString().slice(0, 10)}.csv`, `${headers.map(escapeCsvCell).join(',')}\n${csvRows.join('\n')}\n`)
+  setStatus(tr('Attendance groups exported.', '考勤组已导出。'))
+}
+
+async function copyAttendanceGroup(item: AttendanceGroup) {
+  attendanceGroupCopyingId.value = item.id
+  try {
+    const payload = {
+      name: nextAttendanceGroupCopyName(item.name),
+      code: null,
+      timezone: item.timezone || defaultTimezone,
+      ruleSetId: item.ruleSetId || null,
+      description: item.description || null,
+      orgId: normalizedOrgId(),
+    }
+    const response = await apiFetch('/api/attendance/groups', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to copy attendance group', '复制考勤组失败')))
+    }
+    adminForbidden.value = false
+    const copiedGroup = data.data as AttendanceGroup | undefined
+    await loadAttendanceGroups()
+    if (copiedGroup?.id) {
+      const freshGroup = attendanceGroups.value.find(group => group.id === copiedGroup.id) ?? copiedGroup
+      editAttendanceGroup(freshGroup)
+    }
+    setStatus(tr('Attendance group copied.', '考勤组已复制。'))
+  } catch (error: any) {
+    setStatus(readErrorMessage(error, tr('Failed to copy attendance group', '复制考勤组失败')), 'error')
+  } finally {
+    attendanceGroupCopyingId.value = null
+  }
+}
+
 async function loadAttendanceGroups() {
   attendanceGroupLoading.value = true
   try {
-    const query = buildQuery({ orgId: normalizedOrgId() })
+    const query = buildQuery({ orgId: normalizedOrgId(), pageSize: '200' })
     const response = await apiFetch(`/api/attendance/groups?${query.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
@@ -19721,6 +19865,17 @@ const holidaySectionBindings = {
   font-size: 12px;
 }
 
+.attendance__group-list-tools {
+  display: grid;
+  gap: 10px;
+}
+
+.attendance__group-list-tool-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .attendance__group-list-items {
   display: grid;
   gap: 8px;
@@ -19729,6 +19884,7 @@ const holidaySectionBindings = {
 .attendance__group-list-item {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   gap: 12px;
   width: 100%;
   padding: 10px;
@@ -19736,17 +19892,28 @@ const holidaySectionBindings = {
   border-radius: 8px;
   background: #f9fafb;
   color: inherit;
+}
+
+.attendance__group-list-main {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex: 1;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
   text-align: left;
   cursor: pointer;
 }
 
-.attendance__group-list-item span {
+.attendance__group-list-main span {
   display: grid;
   gap: 4px;
 }
 
 .attendance__group-list-item small,
-.attendance__group-list-item > span:last-child {
+.attendance__group-list-main > span:last-child {
   color: #6b7280;
   font-size: 12px;
 }
