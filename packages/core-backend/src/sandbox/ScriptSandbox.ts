@@ -71,6 +71,25 @@ interface TypeScriptDiagnostic {
   messageText: string | { messageText: string }
 }
 
+/**
+ * Resolve the Python interpreter command for the sandbox subprocess.
+ *
+ * Lane C / C3: `python3` is the conventional command on POSIX, but on native Windows the
+ * interpreter is normally `python` — a bare `python3` often does not exist (or is a Microsoft
+ * Store launcher alias that does not actually run). `PYTHON_BIN` is an explicit escape hatch for
+ * hosts where the interpreter is not on a predictable PATH (e.g. a Windows service whose PATH
+ * differs from the interactive shell): set it to an absolute path or a specific command.
+ */
+export function resolvePythonBinary(
+  platform: NodeJS.Platform,
+  pythonBinEnv: string | undefined
+): string {
+  if (pythonBinEnv && pythonBinEnv.trim() !== '') {
+    return pythonBinEnv.trim()
+  }
+  return platform === 'win32' ? 'python' : 'python3'
+}
+
 export class ScriptSandbox extends EventEmitter {
   private options: SandboxOptions
   private worker: Worker | null = null
@@ -298,6 +317,10 @@ export class ScriptSandbox extends EventEmitter {
     })
   }
 
+  private getPythonBinary(): string {
+    return resolvePythonBinary(process.platform, process.env.PYTHON_BIN)
+  }
+
   private async executePython(
     script: string,
     context: ExecutionContext,
@@ -315,7 +338,7 @@ export class ScriptSandbox extends EventEmitter {
       const scriptPath = path.join(this.workDir, `${executionId}.py`)
       fs.writeFile(scriptPath, this.wrapPythonScript(script, context))
         .then(() => {
-          const pythonProcess = spawn('python3', [scriptPath], {
+          const pythonProcess = spawn(this.getPythonBinary(), [scriptPath], {
             env: { ...process.env, ...this.options.env },
             timeout: this.options.timeout
           })
@@ -371,10 +394,15 @@ export class ScriptSandbox extends EventEmitter {
             }
           })
 
-          pythonProcess.on('error', (error: Error) => {
+          pythonProcess.on('error', async (error: Error) => {
+            // Lane C / C3: a spawn 'error' (e.g. ENOENT when the python binary is not found — the
+            // common native-Windows case) fires WITHOUT 'close', so the temp script must be cleaned
+            // up here too or it leaks. Surface the resolved binary in the message to aid PYTHON_BIN
+            // diagnosis on hosts where the interpreter is not on the service PATH.
+            await fs.unlink(scriptPath).catch(() => {})
             resolve({
               success: false,
-              error: error.message,
+              error: `Failed to run python ('${this.getPythonBinary()}'): ${error.message}`,
               logs,
               metrics: {
                 executionTime: Date.now() - startTime,
@@ -632,7 +660,7 @@ except Exception as e:
           // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
           const { spawn } = require('child_process')
           return new Promise((resolve) => {
-            const pythonProcess = spawn('python3', [
+            const pythonProcess = spawn(this.getPythonBinary(), [
               '-c',
               `import ast; import sys; ast.parse(sys.stdin.read())`
             ])

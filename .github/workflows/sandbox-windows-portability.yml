@@ -1,0 +1,71 @@
+name: Sandbox Windows portability (C3)
+
+# Lane C / C3: GitHub windows-latest gives REAL native-Windows evidence for the sandbox
+# code-portability layer — that ScriptSandbox's workDir resolves under %TEMP% (C1) and that the
+# Python subprocess uses a Windows-resolvable interpreter (`python`, not the POSIX `python3`).
+# The *environment* layer (PostgreSQL/Garnet/Memurai on Windows, nssm/node-windows service
+# lifecycle, end-to-end boot) cannot be CI'd and stays a manual checklist in the C3 validation-plan
+# doc (docs/development/data-sources-windows-c3-validation-plan-20260529.md).
+#
+# TARGETED + PATH-FILTERED on purpose: this is NOT a whole-repo Windows gate on every PR. It
+# triggers ONLY when the sandbox or its portability tests change, and runs ONLY the sandbox/Python
+# portability vitest — no PG/Redis, no full suite. Windows runners cost more minutes, so the
+# path-filter keeps it off unrelated PRs.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'packages/core-backend/src/sandbox/**'
+      - 'packages/core-backend/tests/unit/script-sandbox-*.test.ts'
+      - '.github/workflows/sandbox-windows-portability.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/core-backend/src/sandbox/**'
+      - 'packages/core-backend/tests/unit/script-sandbox-*.test.ts'
+      - '.github/workflows/sandbox-windows-portability.yml'
+
+jobs:
+  sandbox-windows:
+    name: Sandbox + Python portability (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Setup Python
+        id: setup-python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Confirm python on PATH (fail loudly if absent — defeats the skip-trap)
+        run: python --version
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Sandbox + Python portability vitest (no PG/Redis)
+        env:
+          # Force the real-wire python test to RUN (never skip) on Windows — a broken python path
+          # then fails the job instead of masquerading as a green skip.
+          SANDBOX_REQUIRE_PYTHON: '1'
+          # Native-Windows escape hatch (the documented C3 guidance): point at the interpreter
+          # explicitly rather than relying on a bare `python` being on the (service) PATH/PATHEXT.
+          # The bare-default `python` resolution is still asserted by the pure resolvePythonBinary
+          # test, which runs here on real win32.
+          PYTHON_BIN: ${{ steps.setup-python.outputs.python-path }}
+        run: pnpm --filter @metasheet/core-backend exec vitest run script-sandbox

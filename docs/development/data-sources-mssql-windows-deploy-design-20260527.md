@@ -92,7 +92,7 @@
 
 ### Lane C — 部署形态(基础设施;运行时已基本可移植)
 
-**关键发现**:后端运行时是干净的 —— 生产启动即 `node dist/index.js`,**不 spawn 任何 shell 脚本**(仓库 189 个 `.sh` 全是 CI/部署/开发工具,非运行时);`src` 内唯一 runtime POSIX 假设是 `ScriptSandbox.ts:108` 的 `'/tmp/sandbox'` 默认值;pg/redis 驱动纯 JS 无原生编译。故"原生 Windows 跑"成本远低于最初估计。
+**关键发现(2026-05-29 全面审计已纠正)**:后端运行时是干净的 —— 生产启动即 `node dist/src/index.js`,**不 spawn 任何 shell 脚本**(仓库 `.sh` 全是 CI/部署/开发工具,非运行时);pg/redis/mssql 驱动纯 JS 无原生编译。`src`(+ 已加载 plugins + 部署期 `migrate`)内的 runtime POSIX 假设经全面审计共 **两处**,均已处理:① `ScriptSandbox` workDir `'/tmp/sandbox'`(C1,已修为 `os.tmpdir()`);② `ScriptSandbox` 两处 `spawn('python3')`(C3-code,已修为平台感知 `resolvePythonBinary` + `PYTHON_BIN`)。**初稿"唯一 `/tmp/sandbox`"的说法不完整 —— `python3` spawn 是审计补出的第二处。** 故"原生 Windows 跑"成本仍远低于最初估计,且代码层已 `windows-latest` CI 真证(见 C3 验证计划)。
 
 依赖侧:后端自身需 PostgreSQL + Redis。Postgres 有 Windows 官方安装包;**Redis 无官方 Windows 原生版** → Windows 原生兼容选项:**Microsoft Garnet(MIT 开源,.NET 8,RESP 兼容)** 作 OSS 首选,**Memurai**(开发版免费/商业版付费)作稳定商业 fallback;或 WSL2 / Docker。这才是 Docker 省事的真正原因,而非 Node app 本身。
 
@@ -128,8 +128,8 @@
 - ✅ **A0.1 scope/ownership 收口**(#1960):写路径带 owner + `assertAccess` 每个 `:id` 操作越权 404 + list 过滤 + 越权拒绝测试
 - ✅ **A-RO 框架级只读**(#1964 `b0f7c54df`):per-source `readOnly`(默认 true)+ 路由级 SELECT-only 分类器 + 适配器层 `assertWritable`
 - ✅ A1 凭据落库加密(#1972 `5e11ee72c`):用 `encrypted-secrets` AES-256-GCM(非 SecretManager)+ 惰性迁移 + decrypt fail-loud
-- ⬜ A2 `sanitizeIdentifier` 违规即抛 + schema-qualified 支持 + 非法值测试
-- ⬜ A3 query/testConnection 错误不吞,保留错因 + 集成测试
+- ✅ A2 `sanitizeIdentifier` 违规即抛 + schema-qualified 支持(#2037 `bf0eefc78`):按 `.` 分段校验、非法即抛(不再静默改写);MSSQL/MySQL per-segment quote;`[dbo].[table]` schema-qualified 经 SQL Server 容器 matrix 真 wire 证
+- ✅ A3 query/testConnection 错误不吞,保留错因(#2034):`testConnection` 返回 `{success,error?}`;错因经 `redactSecrets` 脱敏(`password`/`token` 不入 response/log);manager 仅转发 redacted `connectionError`;真 wire 集成测试覆盖
 - ✅ A4 enum↔registry↔驱动三方对齐(#1976 `f5013324e`):`SUPPORTED_DATA_SOURCE_TYPES` 单一支持矩阵 + 非法 type 400 + load 跳过不支持行
 - ⬜ A5 `stream()` 真游标流 或 明确文档标注 + 上限保护
 - ⬜ A6 Postgres connect/query/transaction/错误路径单测
@@ -146,7 +146,8 @@
 ### Phase C — 部署形态(随 A/B 决策)
 - ✅ **C1** `'/tmp/sandbox'` → `path.join(os.tmpdir(),'sandbox')`(`ScriptSandbox.ts` + `script-sandbox-workdir.test.ts`;测试 mock `os.tmpdir()` 到非 `/tmp` sentinel,断言 workDir 派生自 `os.tmpdir()` 而非硬编码字面量 —— 否则 Linux CI 上 `os.tmpdir()===/tmp` 会让回退到字面量仍然 pass)
 - ✅ **C2** A/B/C 三档部署 runbook —— `docs/development/data-sources-mssql-windows-deploy-runbook-20260529.md`
-- 🔒 C3 (仅走 C 时)Windows 原生运行时验证 pass(需 Windows VM/快照,本预算未含)
+- ✅ **C3-code** 代码可移植层(本刀):`ScriptSandbox` 两处 `spawn('python3')` → `resolvePythonBinary()`(平台感知 `win32→python` + `PYTHON_BIN` 逃生口)+ `executePython` error-path 临时文件 cleanup;`script-sandbox-python-portability.test.ts`(resolve 纯测 + bogus-binary error path + 真 wire `validateScript`)+ **`windows-latest` CI lane**(`sandbox-windows-portability.yml`,path-filtered + targeted,真 win32 证 workDir/python 解析/真 wire/error-path,无 PG/Redis)。审计纠正了"唯一 `/tmp/sandbox`"说法
+- 🔒 **C3-env** 环境集成层(仍 🔒,需客户 Windows 主机):PG/Garnet\|Memurai 连通 + nssm/node-windows 服务化 + 端到端启动,无法 CI → 手动 checklist 见 `docs/development/data-sources-windows-c3-validation-plan-20260529.md`
 
 **推进顺序(已按裁示更新)**:Phase 0 → **A0 + A0.1(持久化 + scope 收口)→ A-RO + A1 + A4(基础面安全)→ A2/A3/A5/A6** → **B(仅当 A0/A0.1/A-RO/A1/A4 定住后才 opt-in)** → C(随部署形态)。
 - **Lane B 不再与 A 并行**:MSSQL 连接器必须落在已安全的框架上,故 gated 在 A0/A0.1/A-RO/A1/A4 之后(P0-4 裁示)。
