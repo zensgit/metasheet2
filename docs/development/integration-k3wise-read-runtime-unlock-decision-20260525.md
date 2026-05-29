@@ -6,6 +6,7 @@ This is a **decision document first, a design second.** The first-order question
 
 - **Docs-only. No runtime implemented.** Any runtime is a **separate opt-in PR on the #1709 track**, only after an explicit unlock (see §5).
 - Builds on the existing **#1593** read/list GATE-front contract — it **carves a minimal slice and does NOT redesign** read/list (memory discipline: post-GATE, *execute* the #1593 design, don't redesign).
+- 2026-05-28 update: #1792 is now closed as PASS for M1 one-record Material Save-only. The old Stage-1 blanket lock no longer blocks this discussion, but #1709 still needs explicit owner opt-in plus the read/list O1-O6 inputs before runtime.
 
 ## 1. The decision (first-order — owner's call)
 
@@ -13,7 +14,7 @@ This is a **decision document first, a design second.** The first-order question
 
 **Why it matters:** making *"staging auto-produces complete K3 reference objects"* stable structurally needs a **read** — the GATE positive Save sourced its 66 reference objects by reading an existing Material detail (clone). A4 (#1832) persists per-field *shape*, S2 (#1828) *previews* completeness, but **neither sources the objects**. Read is the missing producer.
 
-**Lock status:** read/list runtime is the frozen **#1709** ("[Post-GATE] K3 WebAPI read/list adapter for Material/BOM", OPEN) track; **#1593** front-loaded the contract (docs). Per the K3 Stage 1 Lock, implementing it requires an explicit owner unlock (or GATE PASS). #1526 is the now-closed umbrella; the read-adapter runtime moved to #1709.
+**Lock status:** read/list runtime remains the scoped **#1709** ("[Post-GATE] K3 WebAPI read/list adapter for Material/BOM", OPEN) track; **#1593** front-loaded the contract (docs). The K3 macro gate is satisfied by #1792, but implementation still requires an explicit owner unlock and current read/list inputs. #1526 is the now-closed umbrella; the read-adapter runtime moved to #1709.
 
 **Options (owner picks — this doc does not decide):**
 - **(a)** Unlock the minimal read slice now, citing the save+readback PASS as sufficient evidence.

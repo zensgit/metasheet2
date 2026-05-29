@@ -8,6 +8,7 @@ Date: 2026-05-14
 - Goal: continue Feishu parity toward AI-assisted authoring and customer-trial hardening.
 - Rule: each completed implementation item must include PR, merge commit, development MD, verification MD, and verification summary.
 - Worktree rule: all implementation work starts from a clean worktree based on `origin/main`; do not develop from the dirty root checkout.
+- 2026-05-28 update: #1792 satisfies the K3 macro gate for M1 one-record Material Save-only. Status text that says `deferred pending K3 GATE PASS` should now be read as `deferred pending lane-local blockers and operator opt-in`; this TODO does not auto-flip any lane to active.
 
 ## Completion Rules
 
@@ -24,17 +25,16 @@ Mark an item complete only after all are true:
 
 The K3 PoC stage-1 lock recorded in
 `docs/development/integration-erp-platform-roadmap-20260425.md` §4-§5
-is in effect. Under that lock, lanes carry one of three statuses:
+was in effect when this TODO landed. As of 2026-05-28, #1792 satisfies the K3
+macro gate; lanes still carry explicit statuses and require follow-up operator
+opt-in before re-entry:
 
 - `pending` — in the active queue. Implementation may start once
   Phase 0 hygiene is complete.
-- `deferred pending K3 GATE PASS` — blocked by the stage-1 lock. The
-  lane re-enters `pending` only after the operator announces K3 GATE
-  PASSED (or explicitly invokes "打破阶段一约束" per
-  `project_k3_poc_stage1_lock.md`) **and** the lane's T-numbered
-  blockers from
+- `deferred pending K3 GATE PASS` — historical status text. After #1792,
+  read this as deferred pending the lane's T-numbered blockers from
   `docs/development/multitable-feishu-phase3-ai-hardening-review-20260514.md`
-  are closed.
+  plus explicit operator opt-in.
 - `pending PM / SME assignment` — blocked by missing non-engineering
   inputs. The lane re-enters `pending` only after PM / PD ownership
   and domain SME availability are confirmed, and rollback budget
@@ -42,8 +42,8 @@ is in effect. Under that lock, lanes carry one of three statuses:
 
 Active queue at the time this TODO lands: Lane D0, Lane D1, Lane D4.
 
-Deferred under stage-1 lock: Lane A1 / A2 / A3, Lane B1 / B2, Lane
-D2, Lane D3.
+Formerly deferred under the stage-1 lock, still deferred until local blockers /
+operator opt-in: Lane A1 / A2 / A3, Lane B1 / B2, Lane D2, Lane D3.
 
 Deferred under PM / SME assignment: Lane C1, Lane C2.
 

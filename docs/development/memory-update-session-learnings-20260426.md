@@ -13,7 +13,7 @@ load these on startup via `MEMORY.md` index.
 |------|------|------|
 | `feedback_stacked_pr_rebase_after_squash.md` | feedback | Use `git rebase --onto origin/main <old-parent-tip>` after parent squash-merge; naive rebase causes AA/UU collisions |
 | `feedback_channel_env_gating.md` | feedback | Optional notification channels register only when env configured; default-registration → per-tick warn noise under at-least-once retry |
-| `project_k3_poc_stage1_lock.md` | project | Roadmap阶段一锁定 — until K3 PoC customer GATE PASS, no new战线 / no integration-core touch; 内核打磨 permitted |
+| `project_k3_poc_stage1_lock.md` | project | Roadmap阶段一锁定 — retired for planning on 2026-05-28 after #1792 PASS; replaced by post-GATE scoped gates |
 
 ## M1 — Stacked-PR rebase after squash-merge (feedback)
 
@@ -59,6 +59,14 @@ but skips dispatch), (c) the no-op-stub / unwire-callback alternatives.
 
 ## M3 — K3 PoC Stage 1 lock (project)
 
+**2026-05-28 update**: The global Stage-1 lock is retired for planning
+purposes. #1792 closed as PASS for the accepted M1 scope (K3 WISE Material
+Save-only, one record, Save success + readonly readback + productized on-prem
+package + post-deploy no-write regression). Future work uses the scoped-gate
+rules in `docs/development/k3-post-gate-scoped-governance-20260528.md`.
+Submit, Audit, BOM, multi-record / batch, production signoff, and broad
+`plugin-integration-core` refactors remain separately gated.
+
 **Source**: `docs/development/integration-erp-platform-roadmap-20260425.md`
 explicitly states: 「阶段一锁定不开新战线; 任何 K3 之外的工作必须等
 PoC PASS 才启动」 and 「客户答卷与平台化路线解耦：阶段一可同步做内核
@@ -82,6 +90,10 @@ PoC PASS 才启动」 and 「客户答卷与平台化路线解耦：阶段一可
 
 **Lift conditions**: (a) user announces customer GATE PASSED, or (b)
 explicit "打破阶段一约束" (push back once before agreeing).
+
+**Lift result**: L-M-1 fired on 2026-05-28 via #1792. Do not use this
+Stage-1 lock as a blanket blocker for unrelated planning after that date; do
+keep the post-GATE K3 scope gates above.
 
 **Why it matters**: roadmap names "过度工程" as the #1 risk. The 4-stage
 path (PoC → 抽离+第2家ERP → 平台化基建 → Marketplace+SaaS) is

@@ -4,7 +4,7 @@ Status: operational process contract. **Docs-only control plane** — it describ
 
 It **references, does not re-derive** the existing operator docs: the C0–C11 sequence in `docs/operations/integration-k3wise-live-gate-execution-package.md`, `docs/operations/integration-k3wise-onprem-operator-handoff-checklist.md`, and the customer-sample manifests. All decision names and issue codes below are **anchored to the landed `scripts/ops/integration-k3wise-*.mjs`**, not invented here.
 
-K3 lock: the customer GATE (#1792) is not PASS. This doc governs **dry-run / read-only / preflight / packaging** process only; K3 Save / BOM / Submit / Audit and server-side reference resolution remain frozen (separate named opt-in / GATE).
+Post-GATE scope: #1792 is PASS for **M1 one-record Material Save-only**. This doc governs **dry-run / read-only / preflight / packaging** process only; additional K3 Save attempts, BOM, Submit, Audit, multi-record / batch, production signoff, and server-side reference resolution remain separate named opt-in gates.
 
 ## 1. Two lanes (do not merge into one linear flow)
 
@@ -65,7 +65,7 @@ Boundaries (not a staffing count — who is accountable for which artifact/gate)
 
 - No `automation-executor.ts` change; **does not import workflow-job-contract**; no runner, no report generator, no new schema.
 - Material-only readiness is **not** customer-trial signoff (§1, tool-enforced).
-- K3 Save / BOM / Submit / Audit and server-side reference resolver/composition stay frozen until the customer GATE PASS or a separate named opt-in.
+- Additional K3 Save attempts / BOM / Submit / Audit / multi-record and server-side reference resolver/composition stay frozen until a separate named opt-in.
 
 ## 6. Enforcement
 

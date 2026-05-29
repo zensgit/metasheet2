@@ -6,17 +6,18 @@
 expands the already-merged `DF-N0..N4` phasing (#1839) plus the implementation-path
 preferences recorded in #1874 into **concrete PR-level steps** — scope, lane, test
 strategy, and the gate that unlocks each. It introduces **no new contracts or
-architecture**; per #1838's "PAUSE 阶段二 design", further *design* detail still
-waits for K3 PoC evidence. Everything here is gated behind **K3 PoC GATE PASS +
-an explicit 阶段二 unlock + a separate per-PR opt-in**.
+architecture**; per #1838's "PAUSE 阶段二 design", further *design* detail was
+waiting for K3 PoC evidence. As of 2026-05-28, #1792 satisfies the K3 M1
+GATE PASS precondition; everything here still requires **an explicit 阶段二
+unlock + a separate per-PR opt-in**.
 
 K3 WISE stays a **preset**, not the product center.
 
 ## 0. Reading rules (read first)
 
 - **Gate 0 (precondition for everything):** K3 PoC **GATE PASS** + 阶段二 unlock + per-PR opt-in.
-- **Current gate status (2026-05-26):** positive K3 Material Save proven 2026-05-25, but the **S3 read/list runtime decision + S4 single-record positive-Save regression are NOT closed**, and Submit/Audit/BOM/multi-record remain blocked → **Gate 0 is NOT passed → zero PRs below start now.**
-- **The whole 阶段二 touches `plugin-integration-core`** (plugin-managed SQL + the pipeline runner + routes) — which is exactly what the K3 Stage-1 lock freezes. Each step is therefore explicitly gated behind unlock; none is implied by this doc.
+- **Current gate status (2026-05-28):** K3 M1 one-record Material Save-only is PASS and #1792 is closed. The old Stage-1 blanket lock no longer blocks planning; Submit/Audit/BOM/multi-record/production remain separate K3 scoped gates. 阶段二 work still starts only by explicit owner unlock and per-PR opt-in.
+- **The whole 阶段二 touches `plugin-integration-core`** (plugin-managed SQL + the pipeline runner + routes). The old K3 Stage-1 freeze is lifted, but each step is still explicitly gated behind scoped unlock; none is implied by this doc.
 - **Hard locks that persist through every phase:** K3 stays Save-only / one-record; no Submit/Audit/BOM/multi-record K3 push without a separate owner decision; payload redaction mandatory; **never expose an arbitrary-JS / raw-SQL editor to business users**; OpenAPI parity gate; wire-vs-fixture round-trip test for any new serialized field; real-DB golden gate for anything touching permissions.
 - ⚠️ **The PoC may reshape DF-N4 / FaaS** (read model, write-back semantics, reference resolution — the open #1838 gating questions). Do **not** pre-build those.
 
@@ -121,4 +122,4 @@ Gate 0: K3 GATE PASS + 阶段二 unlock
 - #1838 (direction / gating, incl. the NiFi + Yida-FaaS takeaways) + its 2026-05-26 addendum #1874 (DF-N2 JSONB + FaaS-on-own-sandbox preferences).
 - #1839 (run/provenance + core data model + DF-N0..N4 phasing). #1844 (UX/IA 5-stage flow). #1826 (K3 ref-mapping UI contract). #1835/#1709 (read-only unlock decision / read-list track). #1792 (GATE).
 - Shipped: #1848 (DF-N1 read-only monitoring) · #1857 (DF-N1.5 single manual replay).
-- Locks: K3 PoC Stage-1 lock; K3 GATE Save-path progression (S3 read/list + S4 regression still open).
+- Locks: post-GATE scoped gates in `k3-post-gate-scoped-governance-20260528.md`; Submit/Audit/BOM/multi-record/production still need separate approval.

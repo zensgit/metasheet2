@@ -5,6 +5,8 @@
 > 主笔：Claude（Sonnet 4.6, 1M context）+ 团队对话提取
 > 目的：在 K3 WISE Live PoC 进入门槛前，把"是否走平台化"这个战略问题落到文字，避免日后用错精力或错失时机
 
+> 2026-05-28 更新：#1792 已关闭为 M1 单条 Material Save-only PASS。本文中的"阶段一锁"不再作为全局规划冻结；后续按 `k3-post-gate-scoped-governance-20260528.md` 的 scoped gates 管理。Submit / Audit / BOM / 多条批量 / 生产签核仍未解锁。
+
 ---
 
 ## 1. 背景与问题
@@ -81,10 +83,10 @@
 ## 4. 四阶段路线图
 
 ```
-阶段一（现在 - 1 个月）·  K3 PoC 跑通
+阶段一（已完成 M1）·  K3 PoC 跑通
   目标：验证产品-市场契合度（PMF），不分散精力做平台化
-  关键交付：K3 真客户测试账套 Live PoC PASS
-  决策门槛：PoC PASS = 进入阶段二；FAIL = 修 K3 adapter 不开新战线
+  关键交付：K3 真客户测试账套 Live PoC PASS（#1792: M1 单条 Material Save-only）
+  决策门槛：M1 PoC PASS = 可进入阶段二评估；后续 K3 能力仍按 scoped gates 单独解锁
 
 阶段二（1-3 个月）· 抽离 + 第 2 家 ERP
   目标：用真实复用证明"通用"不是 PPT
@@ -116,7 +118,7 @@
 
 | 风险 | 表现 | 缓解 |
 |---|---|---|
-| **过度工程**（最大风险） | K3 PoC 还没过就投入平台化，结果客户没买单，平台化沉没成本巨大 | 阶段一锁定不开新战线；任何"K3 之外"的工作必须等 PoC PASS 才启动 |
+| **过度工程**（最大风险） | M1 PoC 已过，但把一次 Save-only 结果误读成"所有 K3/ERP 平台化已验证" | Stage-1 全局锁退役；改用 post-GATE scoped gates。Submit/Audit/BOM/多条/生产签核仍需单独 owner gate；平台化仍按阶段二单 PR opt-in 推进 |
 | **Vendor 长尾陷阱** | 看似 80/20 实际是 20/80：每接一家 ERP 维护成本上升，国内 ERP 版本碎片严重 | 阶段二只接 1 家，证明 ROI 后才扩展；自我设限"每季度最多 1 家新 ERP" |
 | **Schema 版本漂移** | K3 WISE 15 vs K3 WISE 14 字段差异；用友 U8 v15 vs v17 | Vendor profile 中心引入 `vendor.version` 字段；mappings 按版本绑定 |
 | **认证方式异构爆炸** | OAuth2 / SAP login ticket / Oracle SSWS / 用友 token / NetSuite TBA / SAP Ariba SOAP-WSSE | 阶段三 Adapter Builder 优先支持 top 5 auth 模式；其他走 vendor adapter 自定义 |
@@ -131,7 +133,7 @@
 
 | 决策点 | 问题 | 当前状态（2026-04-25） |
 |---|---|---|
-| D1 | K3 PoC 是否 PASS？ | 等客户 GATE 答卷 |
+| D1 | K3 PoC 是否 PASS？ | 已 PASS：#1792 M1 单条 Material Save-only；非 Submit/Audit/BOM/多条/生产 |
 | D2 | 第 2 家 ERP 是哪家？是否有真实客户需求？ | 未确定 |
 | D3 | 第 2 家 ERP 的接入是否 ≤ 3 周完成？ | N/A |
 | D4 | 是否已有 ≥ 3 家成功案例？ | N/A |
@@ -143,6 +145,7 @@
 
 - 本文（roadmap）：战略层
 - 同日 `integration-vendor-abstraction-checklist-20260425.md`：阶段二抽离工作的具体 task list
+- `k3-post-gate-scoped-governance-20260528.md`：#1792 之后的 scoped-gate 治理边界
 - 已有 `integration-core-k3wise-live-poc-design-20260425.md` + `*-verification-20260425.md`：阶段一执行
 - 已合 main · K3 PoC 运行手册（#1155）：
   - 本体：`packages/core-backend/claudedocs/integration-plm-k3wise-mvp.md`（703 行 runbook）

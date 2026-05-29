@@ -2,6 +2,8 @@
 
 Date: 2026-05-14
 
+2026-05-28 update: #1792 satisfies the K3 macro gate for M1 one-record Material Save-only. Mentions of "stage-1 lock" below are historical activation context; they no longer block planning by themselves. Deferred lanes still require their T-numbered blockers and explicit operator opt-in before implementation.
+
 ## Status
 
 This document starts the next multitable Feishu-parity phase after the signed RC and Phase 2 closeout.
@@ -43,17 +45,17 @@ authorial intent — is:
 4. Phase 3C - template and industry solution center V2.
 5. Phase 3D1 - commercial hardening gates on 142 staging.
 
-The Activation Constraints section below supersedes the active-queue
-portion of this order under the K3 PoC stage-1 lock.
+The Activation Constraints section below records the active-queue decision made
+under the K3 PoC stage-1 lock, plus the post-GATE reading after #1792.
 
 ## Activation Constraints
 
 The K3 PoC stage-1 lock recorded in
 `docs/development/integration-erp-platform-roadmap-20260425.md` §4-§5
-is in effect at the time this plan lands. Under that lock, only kernel
-polish on already-shipped multitable features may proceed; new product
-战线 (AI surface, industry solution center, marketplace) must wait
-until K3 GATE PASS.
+was in effect when this plan landed. As of 2026-05-28, #1792 satisfies the K3
+macro gate. Re-entry is now governed by lane-local blockers, operator
+ratification, and the scoped-gate rules in
+`docs/development/k3-post-gate-scoped-governance-20260528.md`.
 
 ### Active queue (allowed under stage-1 lock)
 
@@ -71,11 +73,11 @@ do not touch `plugins/plugin-integration-core/*` or any K3 PoC path.
 
 | Lane | Status | Re-entry condition |
 | --- | --- | --- |
-| Lane A - AI Field Shortcuts V1 (A1 / A2 / A3) | deferred pending K3 GATE PASS | K3 GATE PASS plus T1, T2, T3, T6 closed |
-| Lane B - Formula AI Assist and Diagnostics (B1 / B2) | deferred pending K3 GATE PASS | K3 GATE PASS plus T1, T3, T6 closed |
+| Lane A - AI Field Shortcuts V1 (A1 / A2 / A3) | deferred pending T-blockers / operator ratification | T1, T2, T3, T6 closed; K3 macro gate satisfied via #1792 |
+| Lane B - Formula AI Assist and Diagnostics (B1 / B2) | deferred pending T-blockers / operator ratification | T1, T3, T6 closed; K3 macro gate satisfied via #1792 |
 | Lane C - Template / Industry Solution Center V2 (C1 / C2) | pending PM / SME assignment | PM / PD ownership plus domain SME for at least three of the five industry templates, plus T7 closed |
-| D2 - Large Table Performance Gate | deferred | K3-free staging environment available, or K3 GATE PASS; plus T4 closed |
-| D3 - Permission Matrix Gate | deferred | K3-free staging environment available, or K3 GATE PASS; plus T5 closed |
+| D2 - Large Table Performance Gate | deferred | K3 macro gate satisfied via #1792; still needs T4 / 142 host decision |
+| D3 - Permission Matrix Gate | deferred | K3 macro gate satisfied via #1792; still needs T5 and staging / 142 decision |
 
 ### Activation blockers — T1 through T7
 
@@ -107,14 +109,11 @@ closed, the corresponding lane stays deferred:
 
 ### Re-entry process
 
-When the stage-1 lock lifts — operator announces K3 GATE PASSED, or
-explicitly invokes "打破阶段一约束" per
-`project_k3_poc_stage1_lock.md` — the relevant lane becomes eligible
-for activation after closing its T-numbered blocker(s). Each
-activation must be recorded in this plan as a follow-up commit that
-moves the lane row from the Deferred table to the Active queue, and
-in the companion TODO as a Status field update from `deferred` to
-`pending`.
+Because #1792 has satisfied the K3 macro gate, the relevant lane becomes eligible
+for activation only after closing its T-numbered blocker(s) and receiving
+operator opt-in. Each activation must be recorded in this plan as a follow-up
+commit that moves the lane row from the Deferred table to the Active queue, and
+in the companion TODO as a Status field update from `deferred` to `pending`.
 
 ## Worktree Rule
 
@@ -536,20 +535,19 @@ Status: pending activation. Depends on PR R2 (D0 skeleton).
 
 ### Deferred — not in active queue
 
-The following PRs from the original sequence are deferred under the
-Activation Constraints above. They re-enter the active queue only
-after stage-1 lock lifts and the corresponding T-numbered blockers
-are closed.
+The following PRs from the original sequence remain deferred under the
+Activation Constraints above. After #1792, they re-enter the active queue only
+after the corresponding T-numbered blockers close and the operator opts in.
 
 | Original PR | Lane | Defer reason |
 | --- | --- | --- |
-| PR 3 — AI provider readiness | Lane A1 | Stage-1 lock plus T1 / T6 open |
-| PR 4 — AI field shortcut backend | Lane A2 | Stage-1 lock plus T1 / T2 / T3 open |
-| PR 5 — AI field shortcut frontend | Lane A3 | Stage-1 lock plus T3 / T6 open |
-| PR 6 — formula diagnostics | Lane B1 | Stage-1 lock |
-| PR 7 — formula AI assist | Lane B2 | Stage-1 lock plus T1 / T3 / T6 open |
-| PR 8 — template center preview | Lane C1 | Stage-1 lock plus PM / SME unassigned |
-| PR 9 — template onboarding | Lane C2 | Stage-1 lock plus T7 unbudgeted |
+| PR 3 — AI provider readiness | Lane A1 | T1 / T6 open; operator ratification missing |
+| PR 4 — AI field shortcut backend | Lane A2 | T1 / T2 / T3 open |
+| PR 5 — AI field shortcut frontend | Lane A3 | T3 / T6 open |
+| PR 6 — formula diagnostics | Lane B1 | Operator opt-in required |
+| PR 7 — formula AI assist | Lane B2 | T1 / T3 / T6 open |
+| PR 8 — template center preview | Lane C1 | PM / SME unassigned |
+| PR 9 — template onboarding | Lane C2 | T7 unbudgeted |
 | (Original PR 10 sub-gate) — large-table perf | D2 | T4 open; risk to 142 K3 PoC integrity |
 | (Original PR 10 sub-gate) — permission matrix | D3 | T5 open |
 
