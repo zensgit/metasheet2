@@ -847,6 +847,14 @@
           placeholder='{ "FNumber": "&lt;code&gt;", "FName": "&lt;name&gt;" }'
         ></textarea>
         <small class="integration-workbench__hint">可选。填写后使用 DF-T1 no-write payloadTemplate 预览；留空则保持 legacy preview。</small>
+        <h2>引用映射来源 JSON</h2>
+        <textarea
+          v-model="referenceMappingSourcesText"
+          data-testid="reference-mapping-sources"
+          spellcheck="false"
+          placeholder='[ { "domain": "unit", "systemId": "…", "object": "…" } ]'
+        ></textarea>
+        <small class="integration-workbench__hint">可选。为 from_reference_table 字段绑定各 domain 的映射表（staging 系统 / 对象）；填写后预览会实时 bulk-read 解析，留空则不解析。仅在已填写目标模板 JSON 时生效。</small>
         <button
           type="button"
           class="integration-workbench__button"
@@ -943,6 +951,7 @@ import {
   type IntegrationStagingOpenTarget,
   type IntegrationSystemObject,
   type IntegrationFieldRule,
+  type IntegrationReferenceMappingSource,
   type IntegrationTemplatePreviewRequest,
   type WorkbenchExternalSystem,
 } from '../services/integration/workbench'
@@ -1118,6 +1127,10 @@ const sampleRecordText = ref(JSON.stringify({
 // DF-T1.5 reachability wire: optional payloadTemplate JSON. When filled, previewPayload sends the
 // DF-T1 no-write preview shape so the backend returns targetPayloadPreview (provenance); empty = legacy.
 const payloadTemplateText = ref('')
+// DF-T3b-2b UI-wire: optional referenceMappingSources JSON; when filled (and a payloadTemplate is set),
+// previewPayload sends it so the route live-bulk-reads each domain's mapping sheet and resolves
+// from_reference_table per-material. Empty = no live resolution (byte-compatible).
+const referenceMappingSourcesText = ref('')
 // DF-T2c: the authored fieldRules draft (from the read-only derive route, then edited via the
 // authoring UI) + the gated fields it returns. previewPayload sends these (not a re-derive) when set.
 const authoredFieldRules = ref<IntegrationFieldRule[]>([])
@@ -2763,6 +2776,17 @@ async function previewPayload(): Promise<void> {
       request.fieldRules = authoredFieldRules.value.length > 0
         ? authoredFieldRules.value
         : deriveFieldRulesFromMappings(fieldMappings)
+      // DF-T3b-2b UI-wire: when the operator provides reference mapping sources, send them so the route
+      // live-bulk-reads each domain's mapping sheet (from_reference_table resolves per-material). Empty =
+      // omitted (byte-compatible); invalid JSON / non-array throws here → error path, no backend call.
+      const referenceMappingSourcesRaw = referenceMappingSourcesText.value.trim()
+      if (referenceMappingSourcesRaw) {
+        const parsedSources = JSON.parse(referenceMappingSourcesRaw) as unknown
+        if (!Array.isArray(parsedSources)) {
+          throw new Error('引用映射来源 JSON 必须是一个数组')
+        }
+        request.referenceMappingSources = parsedSources as IntegrationReferenceMappingSource[]
+      }
     }
     const result = await previewIntegrationTemplate(request)
     previewText.value = JSON.stringify(result, null, 2)

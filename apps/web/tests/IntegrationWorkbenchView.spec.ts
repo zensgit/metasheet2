@@ -659,6 +659,26 @@ describe('IntegrationWorkbenchView', () => {
     expect(wiredText).not.toContain('Bolt')
     expect(wiredText).not.toContain('Pcs')
 
+    // DF-T3b-2b UI-wire — filling reference mapping sources sends them in the preview POST so the route
+    // live-bulk-reads (from_reference_table resolution becomes operator-UI-reachable). The #1968
+    // request-body keystone: assert the POST body carries referenceMappingSources (not just a render).
+    expect(previewBodies[1]).not.toHaveProperty('referenceMappingSources') // empty before → omitted
+    const refSourcesInput = container.querySelector('[data-testid="reference-mapping-sources"]') as HTMLTextAreaElement
+    refSourcesInput.value = JSON.stringify([{ domain: 'unit', systemId: 'metasheet_staging_project_1', object: 'unit_dict' }])
+    refSourcesInput.dispatchEvent(new Event('input'))
+    await flushUi()
+    ;(container.querySelector('[data-testid="preview-payload"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(previewBodies).toHaveLength(3)
+    expect(previewBodies[2]).toHaveProperty('payloadTemplate') // still the DF-T1 path
+    expect((previewBodies[2] as Record<string, unknown>).referenceMappingSources).toEqual([
+      { domain: 'unit', systemId: 'metasheet_staging_project_1', object: 'unit_dict' },
+    ])
+    // reset so the invalid-payloadTemplate test below keeps its original semantics
+    refSourcesInput.value = ''
+    refSourcesInput.dispatchEvent(new Event('input'))
+    await flushUi()
+
     // DF-T1.5 reachability — Test 3 (invalid payloadTemplate JSON blocks the request): no new POST
     // is made and an error is surfaced.
     payloadTemplateInput.value = '{ not valid json'
@@ -666,7 +686,7 @@ describe('IntegrationWorkbenchView', () => {
     await flushUi()
     ;(container.querySelector('[data-testid="preview-payload"]') as HTMLButtonElement).click()
     await flushUi()
-    expect(previewBodies).toHaveLength(2)
+    expect(previewBodies).toHaveLength(3)
     expect(container.textContent).toContain('预览失败')
 
     // reset to legacy for the remainder of the test (pipeline save below is preview-independent)
