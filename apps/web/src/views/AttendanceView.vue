@@ -3300,6 +3300,15 @@
                       >
                         {{ attendanceGroupFixedSchedulePreviewLoading ? tr('Previewing...', '预览中...') : tr('Preview fixed schedule', '预览固定排班') }}
                       </button>
+                      <button
+                        class="attendance__btn"
+                        type="button"
+                        :disabled="!attendanceGroupFixedScheduleApplyAvailable"
+                        data-attendance-group-fixed-schedule-apply-submit
+                        @click="applyAttendanceGroupFixedSchedulePreview"
+                      >
+                        {{ attendanceGroupFixedScheduleApplyLoading ? tr('Applying...', '应用中...') : tr('Apply preview', '应用预览') }}
+                      </button>
                     </div>
                     <div
                       v-if="attendanceGroupFixedSchedulePreviewResult"
@@ -3311,8 +3320,9 @@
                         <span data-attendance-group-fixed-schedule-preview-create>{{ tr('Would create', '将创建') }}: {{ attendanceGroupFixedSchedulePreviewResult.wouldCreate.length }}</span>
                         <span data-attendance-group-fixed-schedule-preview-skip>{{ tr('Skipped', '跳过') }}: {{ attendanceGroupFixedSchedulePreviewResult.skipped.length }}</span>
                         <span data-attendance-group-fixed-schedule-preview-conflict>{{ tr('Blocking conflicts', '阻断冲突') }}: {{ attendanceGroupFixedSchedulePreviewResult.blockingConflicts.length }}</span>
+                        <span v-if="attendanceGroupFixedSchedulePreviewResult.applied" data-attendance-group-fixed-schedule-apply-created>{{ tr('Created', '已创建') }}: {{ attendanceGroupFixedSchedulePreviewResult.created?.length ?? 0 }}</span>
                       </div>
-                      <small class="attendance__field-hint">{{ tr('If blocking conflicts are present, the future apply step must write nothing.', '如果存在阻断冲突，后续应用步骤必须零写入。') }}</small>
+                      <small class="attendance__field-hint">{{ tr('If blocking conflicts are present, apply stays disabled and writes nothing.', '如果存在阻断冲突，应用保持禁用且零写入。') }}</small>
                     </div>
                   </section>
                 </section>
@@ -6337,6 +6347,8 @@ interface AttendanceGroupFixedSchedulePreviewResult {
   wouldCreate: AttendanceGroupFixedSchedulePreviewCandidate[]
   skipped: AttendanceGroupFixedSchedulePreviewSkipped[]
   blockingConflicts: AttendanceGroupFixedSchedulePreviewConflict[]
+  created?: AttendanceAssignment[]
+  applied?: boolean
 }
 
 type AttendanceGroupSummaryAction = {
@@ -6920,6 +6932,7 @@ const attendanceGroupSaving = ref(false)
 const attendanceGroupMemberLoading = ref(false)
 const attendanceGroupMemberSaving = ref(false)
 const attendanceGroupFixedSchedulePreviewLoading = ref(false)
+const attendanceGroupFixedScheduleApplyLoading = ref(false)
 const payrollTemplateLoading = ref(false)
 const payrollTemplateSaving = ref(false)
 const payrollSummaryFieldOptionsLoading = ref(false)
@@ -8222,6 +8235,15 @@ const attendanceGroupFixedSchedulePreviewAvailable = computed(() =>
       && attendanceGroupFixedSchedulePreviewForm.startDate
       && attendanceGroupFixedSchedulePreviewForm.endDate
       && !attendanceGroupFixedSchedulePreviewLoading.value,
+  )
+)
+const attendanceGroupFixedScheduleApplyAvailable = computed(() =>
+  Boolean(
+    attendanceGroupFixedSchedulePreviewResult.value
+      && attendanceGroupFixedSchedulePreviewResult.value.blockingConflicts.length === 0
+      && !attendanceGroupFixedSchedulePreviewResult.value.applied
+      && !attendanceGroupFixedSchedulePreviewLoading.value
+      && !attendanceGroupFixedScheduleApplyLoading.value,
   )
 )
 const attendanceGroupFixedSchedulePreviewSummary = computed(() => {
@@ -16121,6 +16143,47 @@ async function previewAttendanceGroupFixedSchedule() {
     setStatus(readErrorMessage(error, tr('Failed to preview fixed schedule', '预览固定排班失败')), 'error')
   } finally {
     attendanceGroupFixedSchedulePreviewLoading.value = false
+  }
+}
+
+async function applyAttendanceGroupFixedSchedulePreview() {
+  const groupId = attendanceGroupEditingId.value
+  const preview = attendanceGroupFixedSchedulePreviewResult.value
+  if (!groupId || !preview) {
+    setStatus(tr('Preview the fixed schedule before applying.', '请先预览固定排班再应用。'), 'error')
+    return
+  }
+  if (preview.blockingConflicts.length > 0) {
+    setStatus(tr('Resolve blocking conflicts before applying.', '请先解决阻断冲突再应用。'), 'error')
+    return
+  }
+  attendanceGroupFixedScheduleApplyLoading.value = true
+  try {
+    const response = await apiFetch(`/api/attendance/groups/${groupId}/fixed-schedule/apply`, {
+      method: 'POST',
+      body: JSON.stringify({
+        shiftId: attendanceGroupFixedSchedulePreviewForm.shiftId,
+        startDate: attendanceGroupFixedSchedulePreviewForm.startDate,
+        endDate: attendanceGroupFixedSchedulePreviewForm.endDate,
+        orgId: normalizedOrgId(),
+      }),
+    })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to apply fixed schedule', '应用固定排班失败')))
+    }
+    adminForbidden.value = false
+    attendanceGroupFixedSchedulePreviewResult.value = data.data as AttendanceGroupFixedSchedulePreviewResult
+    await loadAssignments()
+    setStatus(tr('Fixed schedule applied.', '固定排班已应用。'))
+  } catch (error: any) {
+    setStatus(readErrorMessage(error, tr('Failed to apply fixed schedule', '应用固定排班失败')), 'error')
+  } finally {
+    attendanceGroupFixedScheduleApplyLoading.value = false
   }
 }
 

@@ -8695,7 +8695,7 @@ function mapAttendanceGroupFixedScheduleBlockingConflict(row, draft) {
   }
 }
 
-async function buildAttendanceGroupFixedSchedulePreview(db, input) {
+async function buildAttendanceGroupFixedSchedulePlan(db, input, options = {}) {
   const groupRows = await db.query(
     'SELECT * FROM attendance_groups WHERE id = $1 AND org_id = $2',
     [input.groupId, input.orgId]
@@ -8741,6 +8741,12 @@ async function buildAttendanceGroupFixedSchedulePreview(db, input) {
       status: 400,
       code: 'VALIDATION_ERROR',
       message: 'Group has no members to schedule',
+    }
+  }
+
+  if (options.lockTargets) {
+    for (const userId of userIds) {
+      await acquireAttendanceScheduleAssignmentLock(db, input.orgId, userId)
     }
   }
 
@@ -8822,6 +8828,53 @@ async function buildAttendanceGroupFixedSchedulePreview(db, input) {
       wouldCreate,
       skipped,
       blockingConflicts,
+    },
+  }
+}
+
+async function buildAttendanceGroupFixedSchedulePreview(db, input) {
+  return buildAttendanceGroupFixedSchedulePlan(db, input)
+}
+
+async function applyAttendanceGroupFixedSchedule(db, input) {
+  const result = await buildAttendanceGroupFixedSchedulePlan(db, input, { lockTargets: true })
+  if (!result.ok) return result
+  const plan = result.data
+  if (plan.blockingConflicts.length > 0) {
+    return {
+      ok: false,
+      status: 409,
+      code: 'ATTENDANCE_GROUP_FIXED_SCHEDULE_BLOCKING_CONFLICT',
+      message: 'Fixed schedule apply has blocking conflicts',
+      details: plan,
+    }
+  }
+
+  const created = []
+  for (const item of plan.wouldCreate) {
+    const rows = await db.query(
+      `INSERT INTO attendance_shift_assignments
+       (id, org_id, user_id, shift_id, start_date, end_date, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6, true)
+       RETURNING *`,
+      [
+        randomUUID(),
+        input.orgId,
+        item.userId,
+        item.shiftId,
+        item.startDate,
+        item.endDate,
+      ]
+    )
+    if (rows[0]) created.push(mapAssignmentRow(rows[0]))
+  }
+
+  return {
+    ok: true,
+    data: {
+      ...plan,
+      created,
+      applied: true,
     },
   }
 }
@@ -14460,7 +14513,9 @@ module.exports = {
     resolveAttendanceComprehensiveHoursPreviewPeriod,
     previewAttendanceComprehensiveHours,
     findAttendanceScheduleAssignmentConflict,
+    buildAttendanceGroupFixedSchedulePlan,
     buildAttendanceGroupFixedSchedulePreview,
+    applyAttendanceGroupFixedSchedule,
     acquireAttendanceScheduleAssignmentLock,
     getAttendanceScheduleAssignmentConflictMessage,
     getAttendanceScheduleAssignmentConflictType,
@@ -25852,6 +25907,83 @@ module.exports = {
           }
           logger.error('Attendance group fixed schedule preview failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to preview fixed schedule' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/groups/:id/fixed-schedule/apply',
+      withPermission('attendance:admin', async (req, res) => {
+        const schema = z.object({
+          shiftId: z.string().min(1),
+          startDate: z.string().min(1),
+          endDate: z.string().min(1),
+          orgId: z.string().optional(),
+        }).strict()
+
+        const parsed = schema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
+        const shiftId = normalizeUuidString(parsed.data.shiftId)
+        if (!shiftId) {
+          respondInvalidUuid(res, 'shiftId')
+          return
+        }
+        const startDate = normalizeDateOnlyStrict(parsed.data.startDate)
+        if (!startDate) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid "startDate" date. Use YYYY-MM-DD.' } })
+          return
+        }
+        const endDate = normalizeDateOnlyStrict(parsed.data.endDate)
+        if (!endDate) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid "endDate" date. Use YYYY-MM-DD.' } })
+          return
+        }
+        if (startDate > endDate) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: '"startDate" must be on or before "endDate".' } })
+          return
+        }
+
+        try {
+          const result = await db.transaction((trx) => applyAttendanceGroupFixedSchedule(trx, {
+            orgId,
+            groupId,
+            shiftId,
+            startDate,
+            endDate,
+          }))
+          if (!result.ok) {
+            res.status(result.status).json({
+              ok: false,
+              error: {
+                code: result.code,
+                message: result.message,
+                details: result.details,
+              },
+            })
+            return
+          }
+          for (const assignment of result.data.created) {
+            emitEvent('attendance.assignment.created', { orgId, assignmentId: assignment.id })
+          }
+          res.status(201).json({ ok: true, data: result.data })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance group fixed schedule apply failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to apply fixed schedule' } })
         }
       })
     )
