@@ -24,6 +24,7 @@ const ROUTES = [
   ['POST', '/api/integration/pipelines/:id/run', 'pipelinesRun'],
   ['POST', '/api/integration/pipelines/:id/dry-run', 'pipelinesDryRun'],
   ['POST', '/api/integration/templates/preview', 'templatesPreview'],
+  ['POST', '/api/integration/templates/derive', 'templatesDerive'],
   ['GET', '/api/integration/staging/descriptors', 'stagingDescriptors'],
   ['POST', '/api/integration/staging/install', 'stagingInstall'],
   ['GET', '/api/integration/runs', 'runsList'],
@@ -39,6 +40,8 @@ const { getPath, setPath, transformRecord } = require('./transform-engine.cjs')
 // DF-T1 reuses applyReferenceShape (shaping) + findUnfilledPlaceholders (detection); it does
 // NOT introduce a new K3 shaper/projector.
 const { projectRecordForBody, findUnfilledPlaceholders, applyReferenceShape, isBlankValue } = require('./adapters/k3-save-body-composer.cjs')
+// DF-T2c: read-only derive route reuses the DF-T2a helper (no duplication; pure compute, no write).
+const { deriveK3MaterialTemplateDraft, summarizeTemplateForEvidence, TemplateDeriveError } = require('./connector-template-derive.cjs')
 const { validateRecord } = require('./validator.cjs')
 
 class HttpRouteError extends Error {
@@ -1055,6 +1058,35 @@ function createHandlers(services) {
     async templatesPreview(req, res) {
       requireAccess(req, 'write')
       return sendOk(res, buildTemplatePreview(requestBody(req)))
+    },
+
+    // DF-T2c: read-only derive — run the DF-T2a helper on an operator-supplied (raw, operator-local)
+    // payloadTemplate and return the draft { payloadTemplate, fieldRules, gatedFields }. Pure compute:
+    // no external call, no write, no K3. Fails closed (400) on a redaction marker / unfilled
+    // placeholder / secret-shaped value / outer {Data:…} envelope — the DF-T2a guards.
+    async templatesDerive(req, res) {
+      requireAccess(req, 'read')
+      const body = requestBody(req)
+      if (!isPlainObject(body.payloadTemplate)) {
+        throw new HttpRouteError(400, 'PAYLOAD_TEMPLATE_REQUIRED', 'payloadTemplate (an object) is required')
+      }
+      try {
+        const draft = deriveK3MaterialTemplateDraft(body.payloadTemplate)
+        // P1: do NOT echo the raw payloadTemplate (operator-local customer values) in the response.
+        // Return the rules + gated field names + a VALUES-FREE evidence summary only.
+        return sendOk(res, {
+          fieldRules: draft.fieldRules,
+          gatedFields: draft.gatedFields,
+          evidence: summarizeTemplateForEvidence(draft),
+        })
+      } catch (error) {
+        if (error instanceof TemplateDeriveError) {
+          throw new HttpRouteError(400, 'TEMPLATE_DERIVE_REJECTED', error.message, {
+            reason: error.details && error.details.reason,
+          })
+        }
+        throw error
+      }
     },
 
     async stagingDescriptors(req, res) {

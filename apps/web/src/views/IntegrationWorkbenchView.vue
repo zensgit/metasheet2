@@ -847,6 +847,19 @@
           placeholder='{ "FNumber": "&lt;code&gt;", "FName": "&lt;name&gt;" }'
         ></textarea>
         <small class="integration-workbench__hint">可选。填写后使用 DF-T1 no-write payloadTemplate 预览；留空则保持 legacy preview。</small>
+        <button
+          type="button"
+          class="integration-workbench__button"
+          data-testid="derive-template-draft"
+          :disabled="derivingDraft"
+          @click="deriveTemplateDraft"
+        >{{ derivingDraft ? '派生中…' : '从模板派生字段规则草案' }}</button>
+        <p v-if="deriveError" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="derive-error">{{ deriveError }}</p>
+        <MetaIntegrationFieldRuleAuthoring
+          v-if="authoredFieldRules.length > 0"
+          v-model="authoredFieldRules"
+          :gated-fields="authoredGatedFields"
+        />
       </div>
       <div>
         <div class="integration-workbench__panel-head">
@@ -910,6 +923,7 @@ import {
   replayIntegrationDeadLetter,
   runIntegrationPipeline,
   deriveFieldRulesFromMappings,
+  deriveIntegrationTemplate,
   summarizeFieldProvenance,
   testExternalSystemConnection,
   upsertWorkbenchExternalSystem,
@@ -928,9 +942,11 @@ import {
   type IntegrationStagingInstallResult,
   type IntegrationStagingOpenTarget,
   type IntegrationSystemObject,
+  type IntegrationFieldRule,
   type IntegrationTemplatePreviewRequest,
   type WorkbenchExternalSystem,
 } from '../services/integration/workbench'
+import MetaIntegrationFieldRuleAuthoring from '../components/integration/MetaIntegrationFieldRuleAuthoring.vue'
 
 type WorkbenchSide = 'source' | 'target'
 type TransformFn = '' | 'trim' | 'upper' | 'lower' | 'toNumber' | 'dictMap'
@@ -1102,6 +1118,12 @@ const sampleRecordText = ref(JSON.stringify({
 // DF-T1.5 reachability wire: optional payloadTemplate JSON. When filled, previewPayload sends the
 // DF-T1 no-write preview shape so the backend returns targetPayloadPreview (provenance); empty = legacy.
 const payloadTemplateText = ref('')
+// DF-T2c: the authored fieldRules draft (from the read-only derive route, then edited via the
+// authoring UI) + the gated fields it returns. previewPayload sends these (not a re-derive) when set.
+const authoredFieldRules = ref<IntegrationFieldRule[]>([])
+const authoredGatedFields = ref<string[]>([])
+const derivingDraft = ref(false)
+const deriveError = ref('')
 const connectionDraft = reactive<ConnectionDraft>({
   id: '',
   name: '',
@@ -2674,6 +2696,41 @@ function provenanceSourceLabel(source: string): string {
   return PROVENANCE_SOURCE_LABELS[source] || source
 }
 
+// DF-T2c: derive a draft via the READ-ONLY route, then drive the authoring UI with it. The pasted
+// payloadTemplate is RAW/operator-local; the route (DF-T2a) fails closed on redaction markers /
+// secrets / outer {Data:…} envelopes, surfaced here as deriveError. No write, no K3 call.
+async function deriveTemplateDraft(): Promise<void> {
+  deriveError.value = ''
+  const raw = payloadTemplateText.value.trim()
+  if (!raw) {
+    deriveError.value = '请先填写目标模板 JSON'
+    return
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    deriveError.value = '目标模板 JSON 解析失败'
+    return
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    deriveError.value = '目标模板 JSON 必须是一个对象'
+    return
+  }
+  derivingDraft.value = true
+  try {
+    const draft = await deriveIntegrationTemplate(parsed as Record<string, unknown>)
+    authoredFieldRules.value = Array.isArray(draft.fieldRules) ? draft.fieldRules : []
+    authoredGatedFields.value = Array.isArray(draft.gatedFields) ? draft.gatedFields : []
+  } catch (error) {
+    deriveError.value = error instanceof Error ? error.message : String(error)
+    authoredFieldRules.value = []
+    authoredGatedFields.value = []
+  } finally {
+    derivingDraft.value = false
+  }
+}
+
 async function previewPayload(): Promise<void> {
   try {
     const sourceRecord = JSON.parse(sampleRecordText.value) as Record<string, unknown>
@@ -2701,7 +2758,11 @@ async function previewPayload(): Promise<void> {
         throw new Error('目标模板 JSON 必须是一个对象')
       }
       request.payloadTemplate = parsed as Record<string, unknown>
-      request.fieldRules = deriveFieldRulesFromMappings(fieldMappings)
+      // DF-T2c: send the AUTHORED rules (derived via the read-only route + edited in the authoring
+      // UI) when present; else fall back to the legacy mapping-derived rules (byte-compatible w/ #1970).
+      request.fieldRules = authoredFieldRules.value.length > 0
+        ? authoredFieldRules.value
+        : deriveFieldRulesFromMappings(fieldMappings)
     }
     const result = await previewIntegrationTemplate(request)
     previewText.value = JSON.stringify(result, null, 2)
