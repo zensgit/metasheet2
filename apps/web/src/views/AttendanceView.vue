@@ -3503,6 +3503,27 @@
                         </div>
                       </div>
 
+                      <div
+                        v-if="normalizeAttendanceGroupType(attendanceGroupForm.attendanceType) === 'fixed_shift'"
+                        class="attendance__work-time-holiday-callout"
+                        data-attendance-group-work-time-holidays
+                      >
+                        <div>
+                          <strong>{{ tr('Holiday calendar', '节假日日历') }}</strong>
+                          <span>
+                            {{ tr('Holiday auto-rest and special-date exceptions stay in the Holidays surface for this slice.', '本切片中节假日自动排休与特殊日期例外仍在节假日管理中维护。') }}
+                          </span>
+                        </div>
+                        <button
+                          class="attendance__btn attendance__btn--compact"
+                          type="button"
+                          data-attendance-group-work-time-holidays-open
+                          @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.holidays); closeAttendanceGroupWorkTimeDrawer()"
+                        >
+                          {{ tr('Open Holidays', '打开节假日') }}
+                        </button>
+                      </div>
+
                       <div class="attendance__work-time-drawer-actions">
                         <button
                           class="attendance__btn"
@@ -20543,6 +20564,34 @@ const holidaySectionBindings = {
   border: 1px solid #dbe3ee;
   border-radius: 8px;
   background: #f9fafb;
+}
+
+.attendance__work-time-holiday-callout {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #d7dde7;
+  border-radius: 8px;
+  background: #fff7ed;
+}
+
+.attendance__work-time-holiday-callout div {
+  display: grid;
+  gap: 4px;
+  min-width: min(100%, 280px);
+}
+
+.attendance__work-time-holiday-callout strong {
+  color: #111827;
+  font-weight: 700;
+}
+
+.attendance__work-time-holiday-callout span {
+  color: #52606d;
+  font-size: 12px;
 }
 
 .attendance__work-time-drawer-actions {

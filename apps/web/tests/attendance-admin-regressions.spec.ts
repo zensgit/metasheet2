@@ -890,6 +890,7 @@ describe('Attendance admin regressions', () => {
     expect(savedDrawer!.querySelector('[data-attendance-group-work-time-lock]')?.textContent).toContain('Type changes are blocked')
     expect(savedDrawer!.querySelector<HTMLButtonElement>('[data-attendance-group-work-time-option="free_time"]')?.disabled).toBe(true)
     expect(savedDrawer!.querySelectorAll('[data-attendance-group-work-time-week-day]').length).toBe(7)
+    expect(savedDrawer!.querySelector('[data-attendance-group-work-time-holidays]')?.textContent).toContain('Holiday calendar')
     expect(vi.mocked(apiFetch).mock.calls.slice(beforeSavedDrawerCalls)).toHaveLength(0)
 
     savedDrawer!.querySelector<HTMLButtonElement>('[data-attendance-group-work-time-close]')!.click()
@@ -924,6 +925,7 @@ describe('Attendance admin regressions', () => {
     expect(draftDrawer!.querySelector('[data-attendance-group-work-time-selected]')?.textContent).toContain('Free time')
     expect(draftDrawer!.querySelector('[data-attendance-group-work-time-draft]')?.textContent).toContain('selected type')
     expect(draftDrawer!.querySelector('[data-attendance-group-work-time-week-matrix]')).toBeNull()
+    expect(draftDrawer!.querySelector('[data-attendance-group-work-time-holidays]')).toBeNull()
   })
 
   it('filters, exports, copies, and deletes attendance groups from the list tools', async () => {
@@ -1432,6 +1434,37 @@ describe('Attendance admin regressions', () => {
     const newCalls = vi.mocked(apiFetch).mock.calls.slice(beforeNavCalls)
     expect(newCalls).toHaveLength(0)
     expect(window.getComputedStyle(container!.querySelector<HTMLElement>('#attendance-admin-shifts')!).display).not.toBe('none')
+    expect(window.getComputedStyle(container!.querySelector<HTMLElement>('#attendance-admin-groups')!).display).toBe('none')
+  })
+
+  it('opens the Holidays surface from the fixed-shift work-time drawer without writes', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    const groupsNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')
+    expect(groupsNav).toBeTruthy()
+    groupsNav!.click()
+    await flushUi(4)
+
+    const openWorkTime = container!.querySelector<HTMLButtonElement>('[data-attendance-group-summary-action="open-work-time-drawer"]')
+    expect(openWorkTime).toBeTruthy()
+    openWorkTime!.click()
+    await flushUi(2)
+
+    const drawer = container!.querySelector<HTMLElement>('[data-attendance-group-work-time-drawer]')
+    expect(drawer).toBeTruthy()
+    expect(drawer!.querySelector('[data-attendance-group-work-time-holidays]')?.textContent).toContain('Holiday calendar')
+
+    const beforeCalls = vi.mocked(apiFetch).mock.calls.length
+    const openHolidays = drawer!.querySelector<HTMLButtonElement>('[data-attendance-group-work-time-holidays-open]')
+    expect(openHolidays).toBeTruthy()
+    openHolidays!.click()
+    await flushUi(4)
+
+    expect(vi.mocked(apiFetch).mock.calls.slice(beforeCalls)).toHaveLength(0)
+    expect(container!.querySelector('[data-attendance-group-work-time-drawer]')).toBeNull()
+    expect(window.getComputedStyle(container!.querySelector<HTMLElement>('#attendance-admin-holidays')!).display).not.toBe('none')
     expect(window.getComputedStyle(container!.querySelector<HTMLElement>('#attendance-admin-groups')!).display).toBe('none')
   })
 
