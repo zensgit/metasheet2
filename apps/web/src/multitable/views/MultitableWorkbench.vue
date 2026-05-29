@@ -352,6 +352,7 @@
     <MetaFieldManager
       :visible="showFieldManager" :fields="propertyVisibleWorkbenchFields" :sheets="workbench.sheets.value" :sheet-id="workbench.activeSheetId.value"
       :dry-run-fn="dryRunFormulaFn"
+      :current-record-id="selectedRecordId"
       @update:dirty="fieldManagerDirty = $event"
       @close="showFieldManager = false" @create-field="onCreateField" @update-field="onUpdateField" @delete-field="onDeleteField"
     />
@@ -1757,7 +1758,7 @@ const aggregateValues = ref<Record<string, { fn: string; value: number }>>({})
 const aggregateTooLarge = ref(false)
 const aggregateGroups = ref<import('../api/client').ViewAggregateGroup[]>([]) // #4-3b-2a server per-group subtotals
 // #5b: formula dry-run passthrough to the API client (MetaFieldManager is emit-based, so it takes a fn prop)
-const dryRunFormulaFn = (params: { sheetId: string; expression: string; sampleValues: Record<string, unknown> }) =>
+const dryRunFormulaFn = (params: { sheetId: string; expression: string; sampleValues: Record<string, unknown>; recordId?: string }) =>
   workbench.client.dryRunFormula(params)
 const activeAggregationConfig = computed<Record<string, string>>(() => {
   const raw = workbench.activeView.value?.config?.aggregations

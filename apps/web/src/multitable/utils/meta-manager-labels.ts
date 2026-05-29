@@ -28,7 +28,7 @@ export type MetaManagerLabelKey =
   | 'field.optionalOverride' | 'field.aggregation'
   | 'field.expression' | 'field.insertFieldToken'
   | 'field.formulaReference' | 'field.formulaSearchPlaceholder'
-  | 'field.formulaDryRun.test' | 'field.formulaDryRun.sampleHeading' | 'field.formulaDryRun.evaluating'
+  | 'field.formulaDryRun.test' | 'field.formulaDryRun.testWithRecord' | 'field.formulaDryRun.sampleHeading' | 'field.formulaDryRun.evaluating'
   | 'field.formulaDryRun.resultHeading' | 'field.formulaDryRun.errorHeading' | 'field.formulaDryRun.invalidNumber'
   | 'field.formulaDryRun.forbidden' | 'field.formulaDryRun.tooLarge' | 'field.formulaDryRun.requestFailed'
   | 'field.allCategories' | 'field.noMatchingFunctions'
@@ -159,6 +159,7 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'field.insertFieldToken': { en: 'Insert field token', zh: '插入字段令牌' },
   'field.formulaReference': { en: 'Formula reference', zh: '公式参考' },
   'field.formulaDryRun.test': { en: 'Test with sample data', zh: '用示例数据试算' },
+  'field.formulaDryRun.testWithRecord': { en: 'Preview with current record', zh: '用当前记录预览/校验' },
   'field.formulaDryRun.sampleHeading': { en: 'Sample values', zh: '示例值' },
   'field.formulaDryRun.evaluating': { en: 'Evaluating…', zh: '试算中…' },
   'field.formulaDryRun.resultHeading': { en: 'Result', zh: '结果' },

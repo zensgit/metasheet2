@@ -1063,12 +1063,15 @@ export class MultitableApiClient {
 
   // Formula dry-run (#5b): evaluate an UNSAVED expression against caller-supplied sample values.
   // 200 (even on success:false runtime errors) → DryRunResult; 403/413/422 → MultitableApiError.
-  async dryRunFormula(params: { sheetId: string; expression: string; sampleValues: Record<string, unknown> }): Promise<DryRunResult> {
-    const { sheetId, expression, sampleValues } = params
+  // recordId (#5c): sample an existing record's RAW values server-side (manual sampleValues still
+  // override per-field). The server applies field-read masking, so a denied/hidden field's value is
+  // never returned — it degrades to a missing_sample diagnostic.
+  async dryRunFormula(params: { sheetId: string; expression: string; sampleValues: Record<string, unknown>; recordId?: string }): Promise<DryRunResult> {
+    const { sheetId, expression, sampleValues, recordId } = params
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/formula/dry-run`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ expression, sampleValues }),
+      body: JSON.stringify({ expression, sampleValues, ...(recordId ? { recordId } : {}) }),
     })
     return this.parseJson(res)
   }
