@@ -1,14 +1,15 @@
 # Multitable Automation Retry Scope Gate (A4) — 2026-05-29
 
-Status: design-only scope gate / scout complete
+Status: design-only scope gate / scout complete; consumed by A5 runtime (#2047)
 Scope: `POST /api/multitable/automation-executions/:id/retry` planning only
-Runtime: not started
+Runtime: implemented later by #2047; response hardening by #2051/#2053
 Companion: `docs/development/run-governance-forward-plan-20260528.md`
 
 ## Verdict
 
 Automation retry can proceed only as a separately named A5 runtime unlock. This
-A4 document does not add runtime, route, migration, UI, or retry behavior.
+A4 document itself did not add runtime, route, migration, UI, or retry behavior;
+that later happened through the explicit A5 unlock in #2047.
 
 The key design constraint is that A1 deliberately persists redacted execution
 snapshots. Therefore A5 must not blindly replay the stored `rule_snapshot` for
@@ -28,7 +29,8 @@ Recommended A5 direction:
 
 ## Grounding
 
-Current code on `origin/main` supports A4 planning but not A5 runtime:
+At A4 authoring time, code on `origin/main` supported planning but not A5
+runtime:
 
 - `AutomationExecutor.execute()` captures `triggerEvent` and `ruleSnapshot` on
   the in-memory execution object before persistence.
@@ -154,6 +156,11 @@ fields, `automation_jobs`, or BPMN/approval bridges in A5. Retry is a whole-run
 rerun, not the convergence engine.
 
 ## A5 Minimal Implementation Shape (Future Unlock)
+
+> Closeout note (2026-05-29): A5 was unlocked and implemented by #2047 using
+> this design's current-rule + stored-trigger-event direction. #2051/#2053 then
+> closed the `/test` and retry response-redaction / log-read fail-open
+> hardening. The implementation did not unlock A6.
 
 Files likely touched by A5:
 

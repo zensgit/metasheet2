@@ -1,24 +1,27 @@
 # Multitable Automation Run Governance TODO
 
 Date: 2026-05-27
-Scope: multitable automation run governance only (the "governance half")
-Status: governance half closed at A3 + admin nav (2026-05-28)
+Scope: multitable automation run governance + whole-execution retry only
+Status: A0-A5 closed through retry runtime + redaction invariant hardening (2026-05-29); A6 remains frozen / demand-gated
 Companion: multitable-automation-run-governance-development-20260527.md
 Depends on (landed): C1 contract workflow-job-contract.ts (#1889, not-wired); RFC #1885
 
-## Closeout Snapshot — 2026-05-28
+## Closeout Snapshot — 2026-05-29
 
-The governance half is complete on `origin/main`:
+The governance half and named A5 retry runtime are complete on `origin/main`:
 
 - A0 scope gate / two-gate doctrine: #1932.
 - A1 execution snapshot + before-persist redaction + consolidated backend redactor: #1937.
 - Dead-letter error message secret scrub: #1917.
 - A2 read-only runs API + C1 boundary mapping + admin-only gate: #1967 + #1973.
 - A3 admin runs view + admin navigation entry: #1975 + #1983.
+- A4 retry scope gate / design lock: #2039.
+- A5 whole-execution retry runtime: #2047.
+- A1/A5 HTTP serialization hardening: #2051 + #2053.
 
-This closeout does NOT mark the capability half complete. A4 remains a future
-retry scope-gate, A5 retry runtime remains gated, and A6 convergence-engine
-runtime remains frozen / demand-gated.
+This closeout does NOT mark the convergence engine complete. A6 remains frozen /
+demand-gated: persistent WorkflowJob runtime, suspend/resume, branch/parallel,
+BPMN adapter, and approval-as-job are still separate future unlocks.
 
 ## Doctrine — Two Gates (definition of "not lopsided")
 
@@ -55,7 +58,8 @@ The K3 Stage-1 blanket lock is retired (#1993; #1792 = M1 one-record Material Sa
 - A0: docs-only, can do now.
 - A1 / A2 / A3: S1 observability — low risk, but each still a NAMED UNLOCK
   (explicit opt-in; not "read-only so no review needed").
-- A4: docs only (design); A5 runtime gated/frozen.
+- A4 / A5: completed by explicit opt-in (#2039 + #2047); retry UI,
+  idempotency keys, and re-fetch-current-record context remain future opt-ins.
 - A6: docs only; all runtime frozen / demand-gated.
 
 ## Current Baseline
@@ -83,6 +87,12 @@ Completed by this governance-half line:
 - execution detail API — #1967.
 - platform-admin-only gate for cross-sheet runs/detail snapshots — #1973.
 - frontend admin runs view and admin navigation entry — #1975 + #1983.
+
+Completed by the named A4/A5 retry line:
+
+- retry scope gate with current-rule + stored-trigger-event decision — #2039.
+- whole-execution retry route, provenance, and side-effect confirmation — #2047.
+- HTTP response serialization invariant for `/test` + retry — #2051 + #2053.
 
 Deferred (capability half — A6, frozen/demand-gated):
 
@@ -188,28 +198,35 @@ Acceptance:
 - [x] UI tests: loading, admin gate, status filter, expanded steps, stale-response race guard.
 - [x] Existing MetaAutomationLogViewer tests still pass.
 
-### A4 — Retry Scope Gate  (lock: design only)
+### A4 — Retry Scope Gate  (lock: design only) — DONE (#2039)
 
-- [ ] Deferred until explicit retry demand / named opt-in.
-- [ ] Decide retry source: rule_snapshot vs current rule (default rule_snapshot).
-- [ ] Decide side-effect confirmation UX (explicit action / idempotency key).
-- [ ] Define audit fields + permission requirement + deleted-rule failure behavior.
-- [ ] State retry = degenerate case of future resume (A6); reuse resume path later.
-- [ ] DECIDE the A1-flagged open question: business-field/PII masking in replayed snapshots.
+- [x] Explicit retry demand / named opt-in captured.
+- [x] Decide retry source: current enabled rule + stored trigger_event (not redacted rule_snapshot).
+- [x] Decide side-effect confirmation UX: `confirmSideEffects === true`.
+- [x] Define provenance fields + admin-only permission + missing/deleted-rule failure behavior.
+- [x] State retry = whole-run rerun, not A6 suspend/resume.
+- [x] Decide the A1-flagged business-field/PII question for A5 v1: no broader PII masking;
+      secret-shaped values remain redacted per A1, re-fetch-current-record context is a future opt-in.
 
-### A5 — Whole-execution Retry  (lock: runtime gated)
+### A5 — Whole-execution Retry  (lock: runtime gated) — DONE (#2047 + #2051 + #2053)
 
-- [ ] Runtime remains gated; do not start without explicit unlock.
-- [ ] Migration: add rerun_of_execution_id TEXT NULL, initiated_by TEXT NULL (writers exist now).
-- [ ] Add POST /api/multitable/automation-executions/:executionId/retry.
-- [ ] Reconstruct executor rule from rule_snapshot; reuse trigger_event.
-- [ ] Persist new execution; link via rerun_of_execution_id; record initiated_by.
+- [x] Runtime started only after explicit unlock.
+- [x] Migration: add rerun_of_execution_id TEXT NULL, initiated_by TEXT NULL.
+- [x] Add POST /api/multitable/automation-executions/:executionId/retry.
+- [x] Execute current enabled rule with stored trigger_event; never execute persisted redacted rule_snapshot.
+- [x] Persist new execution; link via rerun_of_execution_id; record initiated_by.
+- [x] Require admin-only access + explicit side-effect confirmation.
+- [x] Fail closed for missing/non-retryable/invalid trigger/missing rule cases.
+- [x] Serialize persisted redacted row; safe fallback on log-read failure.
+- [x] Harden `/test` endpoint to follow the same response-redaction invariant.
 
 Acceptance:
 
-- [ ] Failed/skipped retry creates new execution id; original unchanged.
-- [ ] Success and failed retry both persist logs.
-- [ ] Retry rejects success/running executions.
+- [x] Failed/skipped retry creates new execution id; original unchanged.
+- [x] Retry persists logs + retry provenance.
+- [x] Retry rejects success/running executions.
+- [x] Retry rejects missing / empty / invalid trigger events without loading rule or executing actions.
+- [x] Retry response and `/test` response never serialize raw in-memory ruleSnapshot / steps.
 
 ### A6 — Capability-half Bridge  (lock: design only, frozen / demand-gated)
 
