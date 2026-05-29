@@ -8904,19 +8904,24 @@
           }
         ],
         "requestBody": {
-          "required": false,
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
                 "properties": {
                   "comment": {
-                    "type": "string"
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Required rejection note shown back to the requester."
                   },
                   "metadata": {
                     "type": "object"
                   }
-                }
+                },
+                "required": [
+                  "comment"
+                ]
               }
             }
           }
@@ -9043,6 +9048,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"

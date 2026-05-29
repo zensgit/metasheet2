@@ -117,6 +117,7 @@ function installOverviewMock(): void {
               request_type: 'leave',
               requested_in_at: '2026-04-15T09:00:00+08:00',
               requested_out_at: '2026-04-15T18:00:00+08:00',
+              reason: 'Family medical appointment',
               status: 'pending',
               metadata: { minutes: 480 },
             },
@@ -135,8 +136,15 @@ function installOverviewMock(): void {
               request_type: 'missed_check_in',
               requested_in_at: '2026-04-09T09:00:00+08:00',
               requested_out_at: null,
+              reason: 'Forgot to check in at the lobby kiosk',
               status: 'rejected',
-              metadata: {},
+              metadata: {
+                resolution: {
+                  action: 'reject',
+                  status: 'rejected',
+                  comment: 'Please attach lobby access evidence.',
+                },
+              },
             },
           ],
         },
@@ -403,10 +411,35 @@ describe('Attendance self-service dashboard', () => {
     expect(requestsCard).toContain('Rejected · 1')
     expect(requestsCard).toContain('In:')
     expect(requestsCard).toContain('Out:')
+    expect(requestsCard).toContain('Reason: Family medical appointment')
+    expect(requestsCard).toContain('Reason: Forgot to check in at the lobby kiosk')
+    expect(requestsCard).toContain('Rejection note: Please attach lobby access evidence.')
     expect(requestsCard).toContain('has already been approved')
     expect(requestsCard).toContain('was rejected')
     expect(actionsCard).toContain('Resolve anomaly reminders')
     expect(actionsCard).toContain('Start with missing-punch handling to resolve the current anomaly reminder.')
+  })
+
+  it('requires and submits a rejection note when rejecting an attendance request', async () => {
+    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('Needs manager evidence')
+    try {
+      app = createApp(AttendanceView, { mode: 'overview' })
+      app.mount(container!)
+      await flushUi()
+
+      findButton(container!, 'Reject').click()
+      await flushUi()
+
+      const rejectCall = vi.mocked(apiFetch).mock.calls.find(call =>
+        String(call[0]).includes('/api/attendance/requests/request-pending/reject')
+      )
+      expect(rejectCall).toBeTruthy()
+      expect(JSON.parse(String(rejectCall?.[1]?.body))).toEqual({
+        comment: 'Needs manager evidence',
+      })
+    } finally {
+      promptSpy.mockRestore()
+    }
   })
 
   it('prefills the request form from quick actions without leaving overview', async () => {

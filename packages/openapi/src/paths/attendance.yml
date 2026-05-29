@@ -618,14 +618,18 @@ paths:
           required: true
           schema: { type: string }
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
             schema:
               type: object
               properties:
-                comment: { type: string }
+                comment:
+                  type: string
+                  minLength: 1
+                  description: Required rejection note shown back to the requester.
                 metadata: { type: object }
+              required: [comment]
       responses:
         '200':
           description: OK
@@ -686,6 +690,7 @@ paths:
                           - { $ref: '#/components/schemas/AttendanceRecord' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '400': { $ref: '#/components/responses/ValidationError' }
   /api/attendance/requests/{id}/cancel:
     x-plugin: plugin-attendance
     post:

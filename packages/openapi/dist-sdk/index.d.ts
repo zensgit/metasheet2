@@ -1541,10 +1541,11 @@ export interface paths {
                 };
                 cookie?: never;
             };
-            requestBody?: {
+            requestBody: {
                 content: {
                     "application/json": {
-                        comment?: string;
+                        /** @description Required rejection note shown back to the requester. */
+                        comment: string;
                         metadata?: Record<string, never>;
                     };
                 };
@@ -1568,6 +1569,7 @@ export interface paths {
                         };
                     };
                 };
+                400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
             };

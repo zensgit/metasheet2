@@ -235,6 +235,12 @@
                 <span>{{ formatDate(item.work_date) }}</span>
                 <span>{{ selfServiceRequestSubtitle(item) }}</span>
               </div>
+              <div class="attendance__request-meta" v-if="requestReasonText(item)">
+                <span>{{ tr('Reason', '原因') }}: {{ requestReasonText(item) }}</span>
+              </div>
+              <div class="attendance__request-meta" v-if="requestDecisionCommentText(item)">
+                <span>{{ requestDecisionCommentLabel(item) }}: {{ requestDecisionCommentText(item) }}</span>
+              </div>
               <p class="attendance__request-note">
                 {{ describeRequestStatus(item.status, item) }}
               </p>
@@ -803,6 +809,12 @@
                   <span v-if="item.metadata.leaveType">{{ tr('Leave', '请假') }}: {{ item.metadata.leaveType.name }}</span>
                   <span v-if="item.metadata.overtimeRule">{{ tr('Overtime', '加班') }}: {{ item.metadata.overtimeRule.name }}</span>
                   <span v-if="item.metadata.minutes">{{ tr('Minutes', '分钟') }}: {{ item.metadata.minutes }}</span>
+                </div>
+                <div class="attendance__request-meta" v-if="requestReasonText(item)">
+                  <span>{{ tr('Reason', '原因') }}: {{ requestReasonText(item) }}</span>
+                </div>
+                <div class="attendance__request-meta" v-if="requestDecisionCommentText(item)">
+                  <span>{{ requestDecisionCommentLabel(item) }}: {{ requestDecisionCommentText(item) }}</span>
                 </div>
                 <div class="attendance__request-meta">
                   <span>{{ tr('In', '入') }}: {{ formatDateTime(item.requested_in_at) }}</span>
@@ -6105,6 +6117,7 @@ interface AttendanceRequest {
   request_type: string
   requested_in_at: string | null
   requested_out_at: string | null
+  reason?: string | null
   status: string
   metadata?: Record<string, any>
 }
@@ -10078,6 +10091,33 @@ function selfServiceRequestSubtitle(item: AttendanceRequest): string {
   ].filter(Boolean)
   if (pieces.length > 0) return pieces.join(' · ')
   return tr('No explicit time range', '没有显式时间段')
+}
+
+function normalizeRequestNoteText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function requestReasonText(item: AttendanceRequest): string {
+  return normalizeRequestNoteText(item.reason)
+}
+
+function requestDecisionCommentText(item: AttendanceRequest): string {
+  const metadata = item.metadata ?? {}
+  const resolution = metadata.resolution && typeof metadata.resolution === 'object'
+    ? metadata.resolution as Record<string, unknown>
+    : {}
+  return normalizeRequestNoteText(
+    resolution.comment
+      ?? metadata.rejectionComment
+      ?? metadata.rejection_comment
+      ?? metadata.rejectComment
+  )
+}
+
+function requestDecisionCommentLabel(item: AttendanceRequest): string {
+  return String(item.status || '').toLowerCase() === 'rejected'
+    ? tr('Rejection note', '驳回说明')
+    : tr('Decision note', '审批说明')
 }
 
 function requestTypeCtaLabel(value: string): string {
@@ -14407,10 +14447,28 @@ async function submitRequest() {
 }
 
 async function resolveRequest(id: string, action: 'approve' | 'reject') {
+  const payload: { comment?: string } = {}
+  if (action === 'reject') {
+    const comment = window.prompt(
+      tr('Rejection reason is required', '请填写驳回原因'),
+      '',
+    )
+    if (comment === null) return
+    const normalizedComment = comment.trim()
+    if (!normalizedComment) {
+      setStatus(
+        appendStatusContext(tr('Rejection reason is required.', '驳回原因不能为空。'), requestTimezoneContextHint.value),
+        'error',
+      )
+      return
+    }
+    payload.comment = normalizedComment
+  }
+
   try {
     const response = await apiFetch(`/api/attendance/requests/${id}/${action}`, {
       method: 'POST',
-      body: JSON.stringify({})
+      body: JSON.stringify(payload)
     })
     const data = await response.json()
     if (!response.ok || !data.ok) {

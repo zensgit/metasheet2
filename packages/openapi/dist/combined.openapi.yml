@@ -6152,7 +6152,7 @@ paths:
           schema:
             type: string
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
             schema:
@@ -6160,8 +6160,12 @@ paths:
               properties:
                 comment:
                   type: string
+                  minLength: 1
+                  description: Required rejection note shown back to the requester.
                 metadata:
                   type: object
+              required:
+                - comment
       responses:
         '200':
           description: OK
@@ -6237,6 +6241,8 @@ paths:
                         nullable: true
                         allOf:
                           - $ref: '#/components/schemas/AttendanceRecord'
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
