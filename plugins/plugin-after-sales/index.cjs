@@ -151,6 +151,29 @@ function getTenantId(context, req, res) {
   return null
 }
 
+function getCommunicationTenantId(context, args) {
+  const explicitTenantId =
+    args && typeof args === 'object' && typeof args.tenantId === 'string' && args.tenantId.trim()
+      ? args.tenantId.trim()
+      : ''
+  if (explicitTenantId) return explicitTenantId
+
+  const contextTenantId = context
+    && context.api
+    && context.api.tenant
+    && typeof context.api.tenant.getTenantId === 'function'
+    ? context.api.tenant.getTenantId()
+    : ''
+  if (typeof contextTenantId === 'string' && contextTenantId.trim()) {
+    return contextTenantId.trim()
+  }
+
+  const error = new Error('tenantId is required for after-sales communication method')
+  error.code = 'VALIDATION_ERROR'
+  error.details = { field: 'tenantId' }
+  throw error
+}
+
 function getUserId(req) {
   const u = req.user
   if (!u) return null
@@ -4262,9 +4285,7 @@ module.exports = {
         return handleRefundApprovalDecisionCallback(context, args)
       },
       emitTicketCreated(args) {
-        const tenantId = (args && typeof args === 'object' && typeof args.tenantId === 'string' && args.tenantId.trim())
-          ? args.tenantId.trim()
-          : 'default'
+        const tenantId = getCommunicationTenantId(context, args)
         const payload = buildTicketCreatedEventPayload(args || {}, {
           tenantId,
           projectId: installer.getProjectId(tenantId, appManifest.id),
@@ -4274,9 +4295,7 @@ module.exports = {
         return { accepted: true, event: 'ticket.created', payload }
       },
       emitTicketRefundRequested(args) {
-        const tenantId = (args && typeof args === 'object' && typeof args.tenantId === 'string' && args.tenantId.trim())
-          ? args.tenantId.trim()
-          : 'default'
+        const tenantId = getCommunicationTenantId(context, args)
         const payload = buildRefundRequestedEventPayload(args || {}, {
           tenantId,
           projectId: installer.getProjectId(tenantId, appManifest.id),
@@ -4286,9 +4305,7 @@ module.exports = {
         return { accepted: true, event: 'ticket.refundRequested', payload }
       },
       emitTicketOverdue(args) {
-        const tenantId = (args && typeof args === 'object' && typeof args.tenantId === 'string' && args.tenantId.trim())
-          ? args.tenantId.trim()
-          : 'default'
+        const tenantId = getCommunicationTenantId(context, args)
         const payload = buildTicketOverdueEventPayload(args || {}, {
           tenantId,
           projectId: installer.getProjectId(tenantId, appManifest.id),
@@ -4298,9 +4315,7 @@ module.exports = {
         return { accepted: true, event: 'ticket.overdue', payload }
       },
       emitFollowUpDue(args) {
-        const tenantId = (args && typeof args === 'object' && typeof args.tenantId === 'string' && args.tenantId.trim())
-          ? args.tenantId.trim()
-          : 'default'
+        const tenantId = getCommunicationTenantId(context, args)
         const payload = buildFollowUpDueEventPayload(args || {}, {
           tenantId,
           projectId: installer.getProjectId(tenantId, appManifest.id),
@@ -4310,9 +4325,7 @@ module.exports = {
         return { accepted: true, event: 'followup.due', payload }
       },
       async createTicket(args) {
-        const tenantId = (args && typeof args === 'object' && typeof args.tenantId === 'string' && args.tenantId.trim())
-          ? args.tenantId.trim()
-          : 'default'
+        const tenantId = getCommunicationTenantId(context, args)
         const projectId = installer.getProjectId(tenantId, appManifest.id)
         const multitableApi = getMultitableWriteApi(context)
         if (!multitableApi) {
@@ -4350,9 +4363,7 @@ module.exports = {
         }
       },
       async updateTicket(args) {
-        const tenantId = (args && typeof args === 'object' && typeof args.tenantId === 'string' && args.tenantId.trim())
-          ? args.tenantId.trim()
-          : 'default'
+        const tenantId = getCommunicationTenantId(context, args)
         const projectId = installer.getProjectId(tenantId, appManifest.id)
         const ticketId = typeof args?.ticketId === 'string' ? args.ticketId.trim() : ''
         if (!ticketId) {
@@ -4382,9 +4393,7 @@ module.exports = {
         }
       },
       async requestTicketRefund(args) {
-        const tenantId = (args && typeof args === 'object' && typeof args.tenantId === 'string' && args.tenantId.trim())
-          ? args.tenantId.trim()
-          : 'default'
+        const tenantId = getCommunicationTenantId(context, args)
         const projectId = installer.getProjectId(tenantId, appManifest.id)
         const ticketId = typeof args?.ticketId === 'string' ? args.ticketId.trim() : ''
         if (!ticketId) {
@@ -4433,9 +4442,7 @@ module.exports = {
         }
       },
       async listTickets(args) {
-        const tenantId = (args && typeof args === 'object' && typeof args.tenantId === 'string' && args.tenantId.trim())
-          ? args.tenantId.trim()
-          : 'default'
+        const tenantId = getCommunicationTenantId(context, args)
         const projectId = installer.getProjectId(tenantId, appManifest.id)
         const multitableApi = getMultitableReadApi(context)
         if (!multitableApi) {
@@ -4488,9 +4495,7 @@ module.exports = {
         }
       },
       async deleteTicket(args) {
-        const tenantId = (args && typeof args === 'object' && typeof args.tenantId === 'string' && args.tenantId.trim())
-          ? args.tenantId.trim()
-          : 'default'
+        const tenantId = getCommunicationTenantId(context, args)
         const projectId = installer.getProjectId(tenantId, appManifest.id)
         const ticketId = typeof args?.ticketId === 'string' ? args.ticketId.trim() : ''
         if (!ticketId) {
