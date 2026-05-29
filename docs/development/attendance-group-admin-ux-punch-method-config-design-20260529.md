@@ -32,7 +32,7 @@ All code citations were verified on `origin/main` at `d1e445fc5`.
 | Punch policy fields exist | `ipAllowlist`, `geoFence`, and `minPunchIntervalMinutes` exist as settings fields with concrete defaults (`ipAllowlist: []`, `geoFence: null`, `minPunchIntervalMinutes: 1`). | `plugins/plugin-attendance/index.cjs:90`, `:91`, `:92` |
 | Punch policy is **org-global** | The effective settings come from `getSettings(db)`, which takes only `db` (no `orgId`, no `groupId`) and returns a single process-cached settings object. There is no per-group or per-rule-set resolution. | `plugins/plugin-attendance/index.cjs:10690`, `normalizeSettings` `:10505`/`:10514`/`:10606` |
 | Punch policy is **enforced, not vestigial** | `enforcePunchConstraints({ … settings … })` rejects punches that fail the IP allowlist, the geofence, or the minimum punch interval, using the org-global settings. | `plugins/plugin-attendance/index.cjs:14156`, `:14157` (`isIpAllowed` `:5486`), `:14164` (`isGeoAllowed` `:5526`), `:14175`–`:14190` |
-| Punch facts table (do not touch) | The punch route records clock events into `attendance_records`; punch-method validation runs **before** the insert and never alters recorded events. | `plugins/plugin-attendance/index.cjs:17291` (route), `:14200` (`INSERT INTO attendance_records`) |
+| Punch facts tables (do not touch) | The punch route writes raw clock events to `attendance_events` and updates the daily `attendance_records` summary via `upsertAttendanceRecord`; punch-method validation runs **before** the transaction, so a rejected punch writes neither event nor record. | `plugins/plugin-attendance/index.cjs:17291` (route), `:17314`–`:17323` (enforce), `:17351`–`:17383` (`attendance_events` insert + `upsertAttendanceRecord` call), `upsertAttendanceRecord` `:13128` / `:13175`–`:13192` (`attendance_records` upsert) |
 | Settings read path (the wire) | `GET /api/attendance/settings` is guarded by `attendance:admin` (the same permission the group admin uses) and returns `data: settings` — the full normalized object, **including `ipAllowlist`, `geoFence`, `minPunchIntervalMinutes`, with no redaction.** | `plugins/plugin-attendance/index.cjs:28960` |
 | Settings write path | `PUT /api/attendance/settings` (`attendance:admin`) validates against `settingsSchema`, which accepts `ipAllowlist` / `geoFence` / `minPunchIntervalMinutes`, and emits `attendance.settings.updated`. | `plugins/plugin-attendance/index.cjs:28978`, schema `:14871`–`:14877` |
 | Frontend already loads settings | `AttendanceView.vue` already fetches `/api/attendance/settings` via `loadSettings()` during admin load, with an `AttendanceSettings` interface and `applySettingsToForm`. The punch fields are already client-side in the admin context. | `apps/web/src/views/AttendanceView.vue:14520`, `:14523`, called at `:17079`; interface `:6192`; `applySettingsToForm` `:14424` |
@@ -86,7 +86,7 @@ The future runtime slice must stay inside these boundaries unless a later design
 5. No write path from the group detail to punch policy. Editing stays at `PUT /api/attendance/settings` via the existing Settings surface.
 6. **No fake controls (T2).** Wi-Fi, hardware/device, photo, and face verification must read as "not available," never as disabled-looking inputs.
 7. No mobile-client capability is designed or promised here (no device binding, no app-side geofence, no camera/biometric capture).
-8. No change to `attendance_records` or any recorded clock/check-in event. V1 touches policy display only, never event facts.
+8. No change to `attendance_events` (raw clock events) or `attendance_records` (daily summary), or any recorded clock/check-in fact. V1 touches policy display only, never event facts.
 9. No `attendance_schedule_groups` reuse and no punch semantics added to the rule set.
 10. No owner/sub-owner, delegated-admin, export/copy, weekly matrix, multi-shift, or comprehensive-hours work.
 
@@ -108,7 +108,7 @@ If a future product decision wants group-specific punch policy, the gating reaso
 | New `attendance_group_punch_overrides` table (scoped override layer) | Clean separation; nullable/sparse; structured geofence; mirrors the provenance-on-existing-table discipline without overloading the group | One more table + migration; resolution/merge logic to design |
 | Extend the rule set | Reuses the existing group→ruleSet link | **Breaks the attendance↔rule-set boundary** (rule sets are scheduling/formula/engine, not punch enforcement); couples punch to scheduling identity |
 
-**Lean: a scoped override layer (override table), resolved at punch time and merged over org defaults — not a rule-set field (preserves the boundary) and not a new event-fact table (events stay in `attendance_records`).** This is a recommendation to be ratified by the T3 design lock, not a commitment.
+**Lean: a scoped override layer (override table), resolved at punch time and merged over org defaults — not a rule-set field (preserves the boundary) and not a new event-fact table (punch facts stay in `attendance_events` / `attendance_records`).** This is a recommendation to be ratified by the T3 design lock, not a commitment.
 
 ## 7. V1 UX Contract (read-only)
 
@@ -138,7 +138,7 @@ A future V1-enrich runtime PR should be one frontend-only PR:
 | T2 honesty | Keep "not available" copy; assert no controls render. |
 | Tests | Extend `attendance-admin-regressions.spec.ts` around the group-detail Punch method card. |
 
-Do not touch `plugins/plugin-attendance/index.cjs`, settings routes, `enforcePunchConstraints`, migrations, OpenAPI, the rule set, or `attendance_records` in the V1 runtime PR.
+Do not touch `plugins/plugin-attendance/index.cjs`, settings routes, `enforcePunchConstraints`, migrations, OpenAPI, the rule set, or the punch fact tables (`attendance_events` / `attendance_records`) in the V1 runtime PR.
 
 ## 9. Test Matrix (for the future runtime slice)
 
@@ -152,7 +152,7 @@ Do not touch `plugins/plugin-attendance/index.cjs`, settings routes, `enforcePun
 | PM6 | The group detail issues no write to `/api/attendance/settings` and no punch-policy POST/PUT. | Mocked `apiFetch` call-count assertion. |
 | PM7 | No backend, route, schema, migration, OpenAPI, or `enforcePunchConstraints` diff. | Reviewer diff check. |
 | PM8 | Slice C card copy and its existing test are updated in lockstep with the rendered values. | Reviewer diff check + updated regression test. |
-| PM9 | No `attendance_records` / clock-event read or write is introduced. | Source grep / reviewer diff check. |
+| PM9 | No `attendance_events` / `attendance_records` / clock-event read or write is introduced. | Source grep / reviewer diff check. |
 
 ## 10. Explicitly Deferred
 
@@ -166,7 +166,7 @@ Each is a separate design-lock-first opt-in:
 - export/copy of punch policy;
 - weekly schedule matrix, multiple shifts per weekday;
 - comprehensive-hours writes from the group detail;
-- any change to `attendance_records` or recorded clock/check-in events.
+- any change to `attendance_events` / `attendance_records` or recorded clock/check-in facts.
 
 ## 11. Acceptance For This Design
 
@@ -177,6 +177,6 @@ This design lock is complete when:
 - it answers `#1946` open question #2 for V1: punch method stays workspace-level; the group detail surfaces it read-only, honestly framed;
 - it forbids fake Wi-Fi/location/device/photo/face controls and mobile promises;
 - it states the no-new-table / no-migration / no-enforcement-change V1 path and gives the T3 storage tradeoffs with a recommendation;
-- it confirms recorded clock/check-in events (`attendance_records`) are never touched;
+- it confirms recorded clock/check-in facts (`attendance_events` / `attendance_records`) are never touched;
 - it provides a runtime slice shape and test matrix;
 - it adds no runtime code, tests, schema, migrations, routes, permissions, OpenAPI, ops scripts, or production writes.
