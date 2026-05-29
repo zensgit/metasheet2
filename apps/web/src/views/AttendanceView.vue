@@ -8196,6 +8196,20 @@ function attendanceGroupMemberSecondaryLabel(userId: string): string {
 // org settings (no group scope). Mirrors what enforcePunchConstraints applies.
 function buildAttendanceGroupPunchPolicyLines(): AttendanceGroupSummaryPolicyLine[] {
   const settings = attendanceSettings.value
+  // Honesty: null = settings not loaded / failed / forbidden. Never render a
+  // confident "unrestricted" policy we have not actually fetched (design §5.1).
+  // A loaded-but-empty object ({}) is a real workspace default and DOES show values.
+  if (!settings) {
+    return [
+      {
+        key: 'status',
+        label: tr('Workspace policy', '工作区策略'),
+        value: settingsLoading.value
+          ? tr('Loading…', '加载中…')
+          : tr('Unavailable', '暂不可用'),
+      },
+    ]
+  }
   const ipAllowlist = Array.isArray(settings?.ipAllowlist)
     ? settings!.ipAllowlist!.filter(Boolean)
     : []

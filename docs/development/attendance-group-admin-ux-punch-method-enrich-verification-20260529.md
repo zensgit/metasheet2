@@ -16,6 +16,7 @@ Frontend + tests only. No backend, route, schema, migration, OpenAPI, permission
   - Added `attendanceSettings` ref; `loadSettings()` now retains the **already-fetched** `/api/attendance/settings` response (no new request) alongside the existing `applySettingsToForm` mapping.
   - Added `AttendanceGroupSummaryPolicyLine` type + optional `policyLines` on `AttendanceGroupSummaryCard`.
   - `buildAttendanceGroupPunchPolicyLines()` derives 3 read-only lines from the loaded settings (mirrors the values `enforcePunchConstraints` applies): IP allowlist (empty → "No IP restriction"; non-empty → count only, **no raw ranges**), geofence (null → "No geofence"; else "Geofence enabled" + radius), min interval ("N minute(s)").
+  - **Honesty (design §5.1):** when `attendanceSettings` is `null` (not loaded / failed / forbidden) the card shows a single neutral status line ("Loading…" or "Unavailable"), **never** a confident unrestricted policy. Only a successfully-loaded settings object (including an empty `{}` workspace default) renders the value lines.
   - Punch card `value` = "Workspace-level policy · applies to all attendance groups"; `detail` = T2 "not available" copy; `actions` = Open Settings (unchanged).
   - Template renders `policyLines` as a read-only `<ul>` with stable `data-attendance-group-punch-line="ip|geofence|interval"` selectors. No input/select/toggle/save control.
 
@@ -36,7 +37,8 @@ Note: a fresh worktree has no `node_modules`; the runs above used the workspace 
 | --- | --- | --- |
 | PM1 | Live settings values render per field. | "surfaces live workspace-level punch policy …": ip=2 ranges, geofence 200 m, interval 5 minutes. |
 | PM2 | Copy is workspace-level, not group-specific. | Same test: asserts "applies to all attendance groups"; asserts `not.toContain("this group's punch")`. Plus updated list-detail assertion. |
-| PM3 | Defaults: No IP restriction / No geofence / 1 minute. | "renders default punch policy as unrestricted …" (settings = {}). |
+| PM3 | Defaults: No IP restriction / No geofence / 1 minute. | "renders default punch policy as unrestricted …" (loaded settings = {}). |
+| F1 | Unavailable/failed settings show neutral copy, not a confident unrestricted policy. | "shows a neutral punch policy … when workspace settings are unavailable" (settings GET 500 → status line "Unavailable", no "No IP restriction"/"No geofence", ip line absent). |
 | PM4 | No input/select/textarea/toggle/save in the card. | "keeps the group punch-method card read-only …": `querySelectorAll('input, select, textarea').length === 0`; single button starts with "Open"; no `type="submit"`. |
 | PM5 | Wi-Fi/device/photo/face = not-available text, no controls. | Same test: asserts "not available" + "wi-fi" + "face"; PM4 proves no controls. |
 | PM6 | No settings write, no punch-policy POST/PUT. | "does not write punch policy …": clicks Open Settings; asserts zero POST/PUT/PATCH/DELETE to `/api/attendance/settings`. |

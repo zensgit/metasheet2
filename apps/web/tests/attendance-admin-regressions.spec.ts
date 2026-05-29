@@ -89,10 +89,12 @@ describe('Attendance admin regressions', () => {
   let exportReportFieldSheetId = 'sheet-1'
   let exportReportFieldViewId = 'fields_by_category'
   let attendanceSettingsData: Record<string, unknown> | null = null
+  let attendanceSettingsFail = false
 
   beforeEach(() => {
     vi.clearAllMocks()
     attendanceSettingsData = null
+    attendanceSettingsFail = false
     exportReportFieldFingerprint = 'records-unit-test-fingerprint'
     exportReportFieldCodes = 'work_date,employee_name'
     exportReportFieldCount = '2'
@@ -530,6 +532,9 @@ describe('Attendance admin regressions', () => {
         })
       }
       if (url.includes('/api/attendance/settings')) {
+        if (attendanceSettingsFail) {
+          return jsonResponse(500, { ok: false, error: { code: 'INTERNAL_ERROR', message: 'settings unavailable' } })
+        }
         return jsonResponse(200, { ok: true, data: attendanceSettingsData ?? {} })
       }
       return emptyAttendanceResponse()
@@ -689,10 +694,23 @@ describe('Attendance admin regressions', () => {
   it('renders default punch policy as unrestricted in the group punch-method card', async () => {
     attendanceSettingsData = null
     const card = await openAttendanceGroupPunchCard()
-    // PM3: defaults
+    // PM3: a successfully-loaded (empty) settings object is a real workspace default
     expect(card.querySelector('[data-attendance-group-punch-line="ip"]')?.textContent).toContain('No IP restriction')
     expect(card.querySelector('[data-attendance-group-punch-line="geofence"]')?.textContent).toContain('No geofence')
     expect(card.querySelector('[data-attendance-group-punch-line="interval"]')?.textContent).toContain('1 minute')
+  })
+
+  it('shows a neutral punch policy (not unrestricted) when workspace settings are unavailable', async () => {
+    // F1: settings failed/forbidden/not-loaded must NOT be reported as a confident
+    // "No IP restriction / No geofence" policy (design §5.1 honesty constraint).
+    attendanceSettingsFail = true
+    const card = await openAttendanceGroupPunchCard()
+    expect(card.textContent).not.toContain('No IP restriction')
+    expect(card.textContent).not.toContain('No geofence')
+    expect(card.querySelector('[data-attendance-group-punch-line="ip"]')).toBeNull()
+    expect(card.querySelector('[data-attendance-group-punch-line="status"]')?.textContent).toContain('Unavailable')
+    // workspace-level framing still present; only the values are withheld
+    expect(card.textContent).toContain('applies to all attendance groups')
   })
 
   it('keeps the group punch-method card read-only with only an Open Settings nav', async () => {
