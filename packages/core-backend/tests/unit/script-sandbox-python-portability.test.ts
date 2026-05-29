@@ -72,9 +72,9 @@ describe('ScriptSandbox python error path (C3)', () => {
 // job sets SANDBOX_REQUIRE_PYTHON=1, which converts the skip into a hard failure, so a broken python
 // path on Windows can never masquerade as a green run (the "skip-when-unreachable" trap).
 //
-// NB: this exercises validateScript() (spawn + ast.parse over stdin), NOT executePython()'s
-// wrapPythonScript path — the latter has a separate pre-existing double-indent bug (tracked in the
-// C3 plan doc) that makes wrapped execution fail on every platform, independent of this fix.
+// NB: this exercises validateScript() (spawn + ast.parse over stdin). The executePython()
+// wrapPythonScript path — whose double-indent bug is fixed in this slice — is covered end-to-end by
+// the executePython describe below.
 const pythonBin = resolvePythonBinary(process.platform, process.env.PYTHON_BIN)
 const probe = spawnSync(pythonBin, ['--version'])
 const pythonAvailable = !probe.error && probe.status === 0
@@ -98,6 +98,49 @@ describe('ScriptSandbox python real-wire (C3)', () => {
 
         const bad = await sandbox.validateScript('def (:\n', 'python')
         expect(bad.valid).toBe(false)
+      } finally {
+        await sandbox.cleanup()
+      }
+    }
+  )
+})
+
+// executePython end-to-end (indent-fix): wrapPythonScript used to double-indent the user script
+// (template `    ${...}` + per-line `map('    '+l)` = 8 spaces under a 4-space `result = None`),
+// IndentationError-ing EVERY non-empty script on all platforms. These lock the fix: real wrapped
+// execution must succeed (single-line, multi-line, context data) and surface runtime errors.
+describe('ScriptSandbox executePython end-to-end (indent-fix)', () => {
+  it.skipIf(!pythonAvailable && !requirePython)(
+    'runs wrapped python (single-line, multi-line, context) and surfaces runtime errors',
+    async () => {
+      expect(
+        pythonAvailable,
+        `SANDBOX_REQUIRE_PYTHON=1 but python binary '${pythonBin}' is not runnable ` +
+          `(${probe.error?.message ?? `exit ${probe.status}`}).`
+      ).toBe(true)
+
+      const sandbox = new ScriptSandbox({ timeout: 20000 })
+      await sandbox.initialize()
+      try {
+        // single-line — the minimal repro of the old double-indent IndentationError
+        const single = await sandbox.execute('result = 40 + 2', {}, 'python')
+        expect(single.success).toBe(true)
+        expect(single.output).toBe(42)
+
+        // multi-line — proves EVERY line (not just the first) is indented consistently
+        const multi = await sandbox.execute('a = 40\nb = 2\nresult = a + b', {}, 'python')
+        expect(multi.success).toBe(true)
+        expect(multi.output).toBe(42)
+
+        // context data is threaded in via json.loads
+        const withCtx = await sandbox.execute('result = data["x"] * 2', { data: { x: 21 } }, 'python')
+        expect(withCtx.success).toBe(true)
+        expect(withCtx.output).toBe(42)
+
+        // runtime error → graceful failure (NOT a thrown/IndentationError), error surfaced
+        const failure = await sandbox.execute('result = 1 / 0', {}, 'python')
+        expect(failure.success).toBe(false)
+        expect(String(failure.error)).toContain('ZeroDivisionError')
       } finally {
         await sandbox.cleanup()
       }

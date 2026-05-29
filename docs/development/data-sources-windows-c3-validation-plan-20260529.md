@@ -53,7 +53,7 @@
 - ⬜ **PostgreSQL**(Windows 安装包):`DATABASE_URL` 连通;`migrate -- --list` 无 pending。
 - ⬜ **Redis 替代**(Garnet / Memurai):`REDIS_HOST`/`REDIS_PORT` 连通;缓存读写正常。
 - ⬜ **文件 / 路径**:`ScriptSandbox` workDir 落 `%TEMP%\sandbox` 可创建/写/清理;`uploads` 落 `<cwd>\uploads`。
-- ⬜ **Python**(仅当用到 workflow Python 脚本节点):设 `PYTHON_BIN`(见 §5);`validateScript` 通(注意 §6 的 executePython 预存 bug)。
+- ⬜ **Python**(仅当用到 workflow Python 脚本节点):设 `PYTHON_BIN`(见 §5);`validateScript` 与 `executePython` 均通(executePython 双重缩进 bug 已修,见 §6)。
 - ⬜ **Auth round-trip**:登录 → 带 token 调鉴权接口 → 200(**静默 401 = schema gap**,先查迁移)。
 - ⬜ **数据源只读**:`GET /api/data-sources/:id/test` 通;SQL Server smoke(如已配)通。
 - ⬜ **凭据加密**:`ENCRYPTION_KEY`/`ENCRYPTION_SALT` 稳定;服务重启后已存数据源仍可解密(decrypt fail-loud)。
@@ -78,6 +78,6 @@
 
 ## 6. 已知缺口(独立 follow-up,非本刀)
 
-- 🐛 **`executePython` 的 `wrapPythonScript` 双重缩进 bug(可移植性审计期发现,与本刀正交)**:模板行 `    ${...}` 已含 4 空格,而每行又 `map(line => '    ' + line)` 再加 4 空格 → 用户代码落 **8 空格缩进**于 4 空格的 `result = None` 之下 → **任何非空 python 脚本均 `IndentationError`**。这是**预存 bug**,使 `executePython` 端到端在**所有平台**均不可用(`validateScript` 路径无 wrapper,不受影响)。修复 trivial(去掉模板多余 4 空格),但属**功能正确性**、超出 C3 可移植范围 → 建议作**独立切片**(opt-in)修复 + 补 e2e。本刀的 python 可移植性修复(binary 解析 + cleanup)对此 bug 无影响也不依赖它。
+- ✅ **`executePython` 的 `wrapPythonScript` 双重缩进 bug —— 已修(独立小切片 PR,2026-05-29)**:模板行 `    ${...}` 已含 4 空格,而每行又 `map(line => '    ' + line)` 再加 4 空格 → 用户代码落 **8 空格缩进**于 4 空格的 `result = None` 之下 → 曾使**任何非空 python 脚本均 `IndentationError`**(`executePython` 端到端在所有平台不可用;`validateScript` 路径无 wrapper 不受影响)。修复 = 去掉模板插值行的多余 4 空格(由每行 `map` 提供唯一缩进)+ 补 e2e(`script-sandbox-python-portability.test.ts`:单行/多行/context/运行时错误,经真 python 证)。与 C3 可移植性正交,故按裁示作**独立切片**,不混 C3-env。
 - 🔒 **2008R2 / 2012 真实验证**(需 Windows VM —— 无 Linux 容器)。
 - 🔒 **B6 Windows 集成认证**(`authType:'windows'`,Kerberos/keytab/AD)。
