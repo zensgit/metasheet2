@@ -9,23 +9,25 @@ import {
 describe('approval realtime count publisher', () => {
   it('computes pending and unread counts with user, role, and source filters', async () => {
     const query = vi.fn<ApprovalCountQuery>(async (_sql, params) => {
-      expect(params).toEqual(['u1', ['finance'], 'platform'])
+      expect(params).toEqual(['u1', ['finance'], ['attendance:approve'], 'platform'])
       return { rows: [{ count: '4', unread_count: '2' }] }
     })
 
     const counts = await computeApprovalPendingCounts(query, {
       userId: 'u1',
       roles: ['finance'],
+      permissions: ['attendance:approve'],
       sourceSystem: 'platform',
     })
 
     expect(counts).toEqual({ count: 4, unreadCount: 2 })
-    expect(query.mock.calls[0][0]).toContain(`COALESCE(i.source_system, 'platform') = $3`)
+    expect(query.mock.calls[0][0]).toContain(`assignment_type = 'source_queue'`)
+    expect(query.mock.calls[0][0]).toContain(`COALESCE(i.source_system, 'platform') = $4`)
   })
 
   it('publishes all/platform/plm count snapshots to the current user room', async () => {
     const query = vi.fn<ApprovalCountQuery>(async (_sql, params) => {
-      const sourceSystem = params[2]
+      const sourceSystem = params[3]
       if (sourceSystem === 'platform') return { rows: [{ count: '2', unread_count: '1' }] }
       if (sourceSystem === 'plm') return { rows: [{ count: '1', unread_count: '1' }] }
       return { rows: [{ count: '3', unread_count: '2' }] }

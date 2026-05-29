@@ -27,6 +27,7 @@ export async function computeApprovalPendingCounts(
   input: {
     userId: string
     roles?: string[]
+    permissions?: string[]
     sourceSystem?: ApprovalCountSourceSystem
   },
 ): Promise<ApprovalCounts> {
@@ -35,15 +36,18 @@ export async function computeApprovalPendingCounts(
     : null
   const roles = input.roles?.filter((role) => role.trim().length > 0) ?? []
   const actorRolesParam = roles.length > 0 ? roles : ['__none__']
+  const permissions = input.permissions?.filter((permission) => permission.trim().length > 0) ?? []
+  const actorPermissionsParam = permissions.length > 0 ? permissions : ['__none__']
   const conditions = [
     `a.is_active = TRUE`,
     `i.status = 'pending'`,
     `(
       (a.assignment_type = 'user' AND a.assignee_id = $1)
       OR (a.assignment_type = 'role' AND a.assignee_id = ANY($2))
+      OR (a.assignment_type = 'source_queue' AND a.assignee_id = ANY($3))
     )`,
   ]
-  const params: unknown[] = [input.userId, actorRolesParam]
+  const params: unknown[] = [input.userId, actorRolesParam, actorPermissionsParam]
 
   if (sourceSystem) {
     conditions.push(`COALESCE(i.source_system, 'platform') = $${params.length + 1}`)
@@ -70,6 +74,7 @@ export async function buildApprovalCountsUpdatedPayload(
   input: {
     userId: string
     roles?: string[]
+    permissions?: string[]
     reason: string
     query?: ApprovalCountQuery
   },
@@ -78,9 +83,9 @@ export async function buildApprovalCountsUpdatedPayload(
   if (!query) return null
 
   const [all, platform, plm] = await Promise.all([
-    computeApprovalPendingCounts(query, { userId: input.userId, roles: input.roles, sourceSystem: 'all' }),
-    computeApprovalPendingCounts(query, { userId: input.userId, roles: input.roles, sourceSystem: 'platform' }),
-    computeApprovalPendingCounts(query, { userId: input.userId, roles: input.roles, sourceSystem: 'plm' }),
+    computeApprovalPendingCounts(query, { userId: input.userId, roles: input.roles, permissions: input.permissions, sourceSystem: 'all' }),
+    computeApprovalPendingCounts(query, { userId: input.userId, roles: input.roles, permissions: input.permissions, sourceSystem: 'platform' }),
+    computeApprovalPendingCounts(query, { userId: input.userId, roles: input.roles, permissions: input.permissions, sourceSystem: 'plm' }),
   ])
 
   return {
@@ -99,6 +104,7 @@ export async function publishApprovalCountsUpdate(
     logger?: Pick<ILogger, 'warn'>
     userId: string
     roles?: string[]
+    permissions?: string[]
     reason: string
     query?: ApprovalCountQuery
   },

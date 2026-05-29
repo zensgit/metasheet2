@@ -272,6 +272,7 @@ export class ApprovalBridgeService {
     const includeExternalTabSources = options?.includeExternalTabSources === true
     if (options?.tab && options.actorId) {
       const actorRoles = options.actorRoles && options.actorRoles.length > 0 ? options.actorRoles : ['__none__']
+      const actorPermissions = options.actorPermissions && options.actorPermissions.length > 0 ? options.actorPermissions : ['__none__']
 
       if (sourceSystem === 'plm') {
         // PLM assignment filtering is not available in phase 1. The source
@@ -301,6 +302,8 @@ export class ApprovalBridgeService {
         params.push(options.actorId)
         const actorRolesParam = paramIndex++
         params.push(actorRoles)
+        const actorPermissionsParam = paramIndex++
+        params.push(actorPermissions)
 
         if (options.tab === 'pending') {
           conditions.push(
@@ -315,6 +318,7 @@ export class ApprovalBridgeService {
                     AND (
                       (assignment_type = 'user' AND assignee_id = $${actorIdParam})
                       OR (assignment_type = 'role' AND assignee_id = ANY($${actorRolesParam}))
+                      OR (assignment_type = 'source_queue' AND assignee_id = ANY($${actorPermissionsParam}))
                     )
                 )
               )
@@ -363,6 +367,7 @@ export class ApprovalBridgeService {
                     FROM approval_assignments
                     WHERE (assignment_type = 'user' AND assignee_id = $${actorIdParam})
                        OR (assignment_type = 'role' AND assignee_id = ANY($${actorRolesParam}))
+                       OR (assignment_type = 'source_queue' AND assignee_id = ANY($${actorPermissionsParam}))
                   )
                 )
               )
@@ -378,6 +383,8 @@ export class ApprovalBridgeService {
         params.push(options.actorId)
         const actorRolesParam = paramIndex++
         params.push(actorRoles)
+        const actorPermissionsParam = paramIndex++
+        params.push(actorPermissions)
         conditions.push(`COALESCE(source_system, 'platform') = 'platform'`)
 
         if (options.tab === 'pending') {
@@ -390,6 +397,7 @@ export class ApprovalBridgeService {
                 AND (
                   (assignment_type = 'user' AND assignee_id = $${actorIdParam})
                   OR (assignment_type = 'role' AND assignee_id = ANY($${actorRolesParam}))
+                  OR (assignment_type = 'source_queue' AND assignee_id = ANY($${actorPermissionsParam}))
                 )
             )`,
           )
@@ -429,6 +437,7 @@ export class ApprovalBridgeService {
                 FROM approval_assignments
                 WHERE (assignment_type = 'user' AND assignee_id = $${actorIdParam})
                    OR (assignment_type = 'role' AND assignee_id = ANY($${actorRolesParam}))
+                   OR (assignment_type = 'source_queue' AND assignee_id = ANY($${actorPermissionsParam}))
               )
             )`,
           )

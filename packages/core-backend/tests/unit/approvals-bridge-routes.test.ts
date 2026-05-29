@@ -541,7 +541,7 @@ vi.mock('../../src/middleware/auth', () => ({
       sub: 'test-user',
       name: 'Test User',
       email: 'test@example.com',
-      permissions: ['*:*'],
+      permissions: ['*:*', 'attendance:approve'],
       roles: ['admin'],
     } as never
     next()
@@ -1081,6 +1081,20 @@ describe('approval bridge routes', () => {
 
     expect(response.body.total).toBe(1)
     expect(response.body.data[0].id).toBe('local-1')
+  })
+
+  it('lets source-queue approvals match the actor permission set for the pending tab', async () => {
+    const app = createApp(createPlmAdapterMock())
+    await request(app)
+      .get('/api/approvals?tab=pending&sourceSystem=platform')
+      .expect(200)
+
+    const listCall = routeState.pool.query.mock.calls.find(([sql]) => (
+      String(sql).includes('SELECT * FROM approval_instances')
+      && String(sql).includes("assignment_type = 'source_queue'")
+    ))
+    expect(listCall).toBeTruthy()
+    expect(listCall?.[1]).toContainEqual(['*:*', 'attendance:approve'])
   })
 
   it('keeps legacy pending approvals scoped to platform-owned rows', async () => {

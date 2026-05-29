@@ -43,6 +43,8 @@ const REQUEST_TYPES = [
   'leave',
   'overtime',
 ]
+const ATTENDANCE_APPROVAL_WORKFLOW_KEY = 'attendance.request'
+const ATTENDANCE_APPROVAL_QUEUE_PERMISSIONS = ['attendance:approve', 'attendance:admin']
 const ATTENDANCE_SCHEDULE_GROUP_SOURCES = new Set(['manual', 'import', 'integration'])
 const ATTENDANCE_SCHEDULE_GROUP_MEMBER_ROLES = new Set(['member', 'lead', 'backup'])
 const ATTENDANCE_SCHEDULER_SCOPE_SUBJECT_TYPES = new Set(['user', 'role', 'role_tag'])
@@ -14593,6 +14595,216 @@ function normalizeApprovalSteps(value) {
     .filter(Boolean)
 }
 
+function attendanceRequestTypeLabel(requestType) {
+  const labels = {
+    missed_check_in: '漏打上班卡',
+    missed_check_out: '漏打下班卡',
+    time_correction: '时间更正',
+    leave: '请假',
+    overtime: '加班',
+  }
+  return labels[requestType] ?? String(requestType ?? '考勤')
+}
+
+function buildAttendanceApprovalNodeKey(stepIndex) {
+  return `attendance_request_step_${Math.max(0, Number(stepIndex ?? 0))}`
+}
+
+function buildAttendanceApprovalAssignments(flowSteps, stepIndex = 0) {
+  const steps = normalizeApprovalSteps(flowSteps)
+  const index = steps.length > 0
+    ? Math.min(Math.max(Number.isFinite(Number(stepIndex)) ? Number(stepIndex) : 0, 0), steps.length - 1)
+    : 0
+  const currentStep = steps[index]
+  const nodeKey = buildAttendanceApprovalNodeKey(index)
+  const assignments = []
+  const seen = new Set()
+
+  const pushAssignment = (assignmentType, assigneeId, metadata = {}) => {
+    const normalizedAssignee = String(assigneeId ?? '').trim()
+    if (!normalizedAssignee) return
+    const key = `${assignmentType}:${normalizedAssignee}`
+    if (seen.has(key)) return
+    seen.add(key)
+    assignments.push({
+      assignmentType,
+      assigneeId: normalizedAssignee,
+      sourceStep: index,
+      nodeKey,
+      metadata,
+    })
+  }
+
+  if (currentStep) {
+    for (const approverUserId of currentStep.approverUserIds ?? []) {
+      pushAssignment('user', approverUserId, { source: 'attendance', stepName: currentStep.name ?? null })
+    }
+    for (const approverRoleId of currentStep.approverRoleIds ?? []) {
+      pushAssignment('role', approverRoleId, { source: 'attendance', stepName: currentStep.name ?? null })
+    }
+  }
+
+  if (assignments.length === 0) {
+    pushAssignment('role', 'admin', { source: 'attendance', queue: 'attendance-approval' })
+    for (const permission of ATTENDANCE_APPROVAL_QUEUE_PERMISSIONS) {
+      pushAssignment('source_queue', permission, { source: 'attendance', queue: 'attendance-approval' })
+    }
+  }
+
+  return assignments
+}
+
+function buildAttendanceApprovalInstancePayload({ approvalId, requestId, orgId, userId, requesterName, draft }) {
+  const requestType = draft?.requestType
+  const requestLabel = attendanceRequestTypeLabel(requestType)
+  const workDate = draft?.workDate ?? null
+  const flowSteps = normalizeApprovalSteps(draft?.metadata?.approvalFlow?.steps)
+  const totalSteps = flowSteps.length > 0 ? flowSteps.length : 1
+  const title = `考勤审批 · ${requestLabel} · ${workDate ?? '-'}`
+  const formSnapshot = {
+    attendanceRequestId: requestId,
+    orgId,
+    userId,
+    workDate,
+    requestType,
+    requestedInAt: draft?.requestedInAt ? new Date(draft.requestedInAt).toISOString() : null,
+    requestedOutAt: draft?.requestedOutAt ? new Date(draft.requestedOutAt).toISOString() : null,
+    reason: draft?.reason ?? null,
+    minutes: draft?.metadata?.minutes ?? null,
+  }
+
+  return {
+    id: approvalId,
+    status: 'pending',
+    version: 0,
+    sourceSystem: 'platform',
+    workflowKey: ATTENDANCE_APPROVAL_WORKFLOW_KEY,
+    businessKey: `attendance-request:${requestId}`,
+    title,
+    requesterSnapshot: {
+      id: userId,
+      name: requesterName || userId,
+    },
+    subjectSnapshot: {
+      type: 'attendance_request',
+      requestId,
+      orgId,
+      userId,
+      workDate,
+      requestType,
+      label: requestLabel,
+    },
+    policySnapshot: {
+      rejectCommentRequired: true,
+      sourceOfTruth: 'attendance',
+    },
+    metadata: {
+      source: 'attendance',
+      requestId,
+      orgId,
+      userId,
+      workDate,
+      requestType,
+      approvalFlow: draft?.metadata?.approvalFlow ?? null,
+    },
+    currentStep: 0,
+    totalSteps,
+    requestNo: `ATT-${requestId}`,
+    formSnapshot,
+    currentNodeKey: buildAttendanceApprovalNodeKey(0),
+  }
+}
+
+async function upsertAttendanceApprovalInstance(client, payload) {
+  await client.query(
+    `INSERT INTO approval_instances
+     (id, status, version, source_system, workflow_key, business_key, title,
+      requester_snapshot, subject_snapshot, policy_snapshot, metadata,
+      current_step, total_steps, request_no, form_snapshot, current_node_key,
+      sync_status, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7,
+             $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb,
+             $12, $13, $14, $15::jsonb, $16,
+             'ok', now(), now())
+     ON CONFLICT (id) DO UPDATE
+       SET status = EXCLUDED.status,
+           source_system = EXCLUDED.source_system,
+           workflow_key = EXCLUDED.workflow_key,
+           business_key = EXCLUDED.business_key,
+           title = EXCLUDED.title,
+           requester_snapshot = EXCLUDED.requester_snapshot,
+           subject_snapshot = EXCLUDED.subject_snapshot,
+           policy_snapshot = EXCLUDED.policy_snapshot,
+           metadata = EXCLUDED.metadata,
+           current_step = EXCLUDED.current_step,
+           total_steps = EXCLUDED.total_steps,
+           request_no = EXCLUDED.request_no,
+           form_snapshot = EXCLUDED.form_snapshot,
+           current_node_key = EXCLUDED.current_node_key,
+           sync_status = 'ok',
+           updated_at = now()`,
+    [
+      payload.id,
+      payload.status,
+      payload.version,
+      payload.sourceSystem,
+      payload.workflowKey,
+      payload.businessKey,
+      payload.title,
+      JSON.stringify(payload.requesterSnapshot),
+      JSON.stringify(payload.subjectSnapshot),
+      JSON.stringify(payload.policySnapshot),
+      JSON.stringify(payload.metadata),
+      payload.currentStep,
+      payload.totalSteps,
+      payload.requestNo,
+      JSON.stringify(payload.formSnapshot),
+      payload.currentNodeKey,
+    ]
+  )
+}
+
+async function replaceAttendanceApprovalAssignments(client, approvalId, assignments) {
+  await client.query(
+    `UPDATE approval_assignments
+     SET is_active = FALSE, updated_at = now()
+     WHERE instance_id = $1 AND is_active = TRUE`,
+    [approvalId]
+  )
+
+  for (const assignment of assignments) {
+    await client.query(
+      `INSERT INTO approval_assignments
+       (instance_id, assignment_type, assignee_id, source_step, node_key, is_active, metadata)
+       VALUES ($1, $2, $3, $4, $5, TRUE, $6::jsonb)
+       ON CONFLICT (instance_id, assignment_type, assignee_id)
+       WHERE is_active = TRUE
+       DO UPDATE SET source_step = EXCLUDED.source_step,
+                     node_key = EXCLUDED.node_key,
+                     is_active = TRUE,
+                     metadata = EXCLUDED.metadata,
+                     updated_at = now()`,
+      [
+        approvalId,
+        assignment.assignmentType,
+        assignment.assigneeId,
+        assignment.sourceStep,
+        assignment.nodeKey,
+        JSON.stringify(assignment.metadata ?? {}),
+      ]
+    )
+  }
+}
+
+async function deactivateAttendanceApprovalAssignments(client, approvalId) {
+  await client.query(
+    `UPDATE approval_assignments
+     SET is_active = FALSE, updated_at = now()
+     WHERE instance_id = $1 AND is_active = TRUE`,
+    [approvalId]
+  )
+}
+
 async function userHasAnyRole(db, userId, roleIds, logger) {
   if (!roleIds || roleIds.length === 0) return false
   try {
@@ -14795,6 +15007,14 @@ module.exports = {
     matchScopeFilters,
     loadAttendanceScopeContextForUser,
     loadAttendanceScopeContextMapForUsers,
+  },
+  __attendanceApprovalCenterForTests: {
+    ATTENDANCE_APPROVAL_WORKFLOW_KEY,
+    ATTENDANCE_APPROVAL_QUEUE_PERMISSIONS,
+    attendanceRequestTypeLabel,
+    buildAttendanceApprovalNodeKey,
+    buildAttendanceApprovalAssignments,
+    buildAttendanceApprovalInstancePayload,
   },
 
   async activate(context) {
@@ -18355,7 +18575,17 @@ module.exports = {
           throw error
         }
 
+        const requestId = randomUUID()
         const approvalId = `apv_${randomUUID()}`
+        const approvalPayload = buildAttendanceApprovalInstancePayload({
+          approvalId,
+          requestId,
+          orgId,
+          userId,
+          requesterName: getUserLabel(req, userId),
+          draft,
+        })
+        const approvalAssignments = buildAttendanceApprovalAssignments(draft.metadata?.approvalFlow?.steps, 0)
 
         try {
           const request = await db.transaction(async (trx) => {
@@ -18369,10 +18599,8 @@ module.exports = {
             if (duplicateRequest) {
               throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
             }
-            await trx.query(
-              'INSERT INTO approval_instances (id, status, version) VALUES ($1, $2, $3)',
-              [approvalId, 'pending', 0]
-            )
+            await upsertAttendanceApprovalInstance(trx, approvalPayload)
+            await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
 
             const rows = await trx.query(
               `INSERT INTO attendance_requests
@@ -18380,7 +18608,7 @@ module.exports = {
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
                RETURNING *`,
               [
-                randomUUID(),
+                requestId,
                 userId,
                 orgId,
                 draft.workDate,
@@ -18608,6 +18836,19 @@ module.exports = {
               throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
             }
 
+            const approvalId = existingRequest.approval_instance_id || `apv_${randomUUID()}`
+            const approvalPayload = buildAttendanceApprovalInstancePayload({
+              approvalId,
+              requestId,
+              orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+              userId: existingRequest.user_id,
+              requesterName: existingRequest.user_id,
+              draft,
+            })
+            const approvalAssignments = buildAttendanceApprovalAssignments(draft.metadata?.approvalFlow?.steps, 0)
+            await upsertAttendanceApprovalInstance(trx, approvalPayload)
+            await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
+
             const rows = await trx.query(
               `UPDATE attendance_requests
                SET work_date = $2,
@@ -18616,6 +18857,7 @@ module.exports = {
                    requested_out_at = $5,
                    reason = $6,
                    metadata = $7::jsonb,
+                   approval_instance_id = $8,
                    updated_at = now()
                WHERE id = $1
                RETURNING *`,
@@ -18627,6 +18869,7 @@ module.exports = {
                 draft.requestedOutAt,
                 draft.reason,
                 JSON.stringify(draft.metadata),
+                approvalId,
               ]
             )
             return rows[0]
@@ -18757,10 +19000,27 @@ module.exports = {
           const newVersion = Number(approval.version ?? 0) + 1
           const resolvedAt = new Date()
 
+          const nextStepIndex = isFinalApproval ? currentStepIndex : currentStepIndex + 1
           await trx.query(
-            'UPDATE approval_instances SET status = $1, version = $2, updated_at = now() WHERE id = $3',
-            [newStatus, newVersion, approvalId]
+            `UPDATE approval_instances
+             SET status = $1,
+                 version = $2,
+                 current_step = $3,
+                 current_node_key = $4,
+                 updated_at = now()
+             WHERE id = $5`,
+            [newStatus, newVersion, nextStepIndex, buildAttendanceApprovalNodeKey(nextStepIndex), approvalId]
           )
+
+          if (isFinalApproval) {
+            await deactivateAttendanceApprovalAssignments(trx, approvalId)
+          } else {
+            await replaceAttendanceApprovalAssignments(
+              trx,
+              approvalId,
+              buildAttendanceApprovalAssignments(flowSteps, nextStepIndex)
+            )
+          }
 
           const recordMetadata = {
             ...(parsed.data.metadata ?? {}),
@@ -18794,7 +19054,7 @@ module.exports = {
               id: flowMeta.id,
               name: flowMeta.name,
               steps: flowSteps,
-              currentStep: isFinalApproval ? currentStepIndex : currentStepIndex + 1,
+              currentStep: nextStepIndex,
             }
           }
           if (isFinalApproval) {
@@ -18997,6 +19257,7 @@ module.exports = {
                 'UPDATE approval_instances SET status = $1, version = $2, updated_at = now() WHERE id = $3',
                 [newStatus, newVersion, approvalId]
               )
+              await deactivateAttendanceApprovalAssignments(trx, approvalId)
 
               await trx.query(
                 `INSERT INTO approval_records

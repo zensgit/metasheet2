@@ -95,6 +95,7 @@ export interface ApprovalQueryOptions {
   includeExternalTabSources?: boolean
   actorId?: string
   actorRoles?: string[]
+  actorPermissions?: string[]
   limit?: number
   offset?: number
 }

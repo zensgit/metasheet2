@@ -546,6 +546,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         includeExternalTabSources: rawSourceSystem === 'all',
         actorId: actorId || undefined,
         actorRoles,
+        actorPermissions: resolveApprovalActorPermissions(req),
         limit,
         offset,
       })
@@ -750,6 +751,8 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         : (rawSourceSystem as 'platform' | 'plm')
       const actorRoles = resolveApprovalActorRoles(req)
       const actorRolesParam = actorRoles.length > 0 ? actorRoles : ['__none__']
+      const actorPermissions = resolveApprovalActorPermissions(req)
+      const actorPermissionsParam = actorPermissions.length > 0 ? actorPermissions : ['__none__']
 
       const conditions: string[] = [
         `a.is_active = TRUE`,
@@ -757,9 +760,10 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         `(
           (a.assignment_type = 'user' AND a.assignee_id = $1)
           OR (a.assignment_type = 'role' AND a.assignee_id = ANY($2))
+          OR (a.assignment_type = 'source_queue' AND a.assignee_id = ANY($3))
         )`,
       ]
-      const params: unknown[] = [userId, actorRolesParam]
+      const params: unknown[] = [userId, actorRolesParam, actorPermissionsParam]
 
       if (sourceSystem) {
         conditions.push(`COALESCE(i.source_system, 'platform') = $${params.length + 1}`)
@@ -891,6 +895,8 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         : (rawSourceSystem as 'platform' | 'plm')
       const actorRoles = resolveApprovalActorRoles(req)
       const actorRolesParam = actorRoles.length > 0 ? actorRoles : ['__none__']
+      const actorPermissions = resolveApprovalActorPermissions(req)
+      const actorPermissionsParam = actorPermissions.length > 0 ? actorPermissions : ['__none__']
 
       const conditions: string[] = [
         `a.is_active = TRUE`,
@@ -898,9 +904,10 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         `(
           (a.assignment_type = 'user' AND a.assignee_id = $2)
           OR (a.assignment_type = 'role' AND a.assignee_id = ANY($3))
+          OR (a.assignment_type = 'source_queue' AND a.assignee_id = ANY($4))
         )`,
       ]
-      const params: unknown[] = [userId, userId, actorRolesParam]
+      const params: unknown[] = [userId, userId, actorRolesParam, actorPermissionsParam]
 
       if (sourceSystem) {
         conditions.push(`COALESCE(i.source_system, 'platform') = $${params.length + 1}`)
