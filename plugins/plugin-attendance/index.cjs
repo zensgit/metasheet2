@@ -8677,6 +8677,28 @@ function mapAttendanceGroupFixedSchedulePreviewCandidate(userId, input) {
   }
 }
 
+const ATTENDANCE_GROUP_FIXED_SCHEDULE_PRODUCER_TYPE = 'attendance_group_fixed_schedule'
+
+function buildAttendanceGroupFixedScheduleProducerKey(input) {
+  const endDate = normalizeAttendanceScheduleAssignmentEndDate(input.endDate)
+  return [
+    ATTENDANCE_GROUP_FIXED_SCHEDULE_PRODUCER_TYPE,
+    input.groupId,
+    input.shiftId,
+    input.startDate,
+    endDate ?? 'null',
+  ].join(':')
+}
+
+function buildAttendanceGroupFixedScheduleProducerMetadata(input, producerRunId) {
+  return {
+    producerType: ATTENDANCE_GROUP_FIXED_SCHEDULE_PRODUCER_TYPE,
+    producerRefId: input.groupId,
+    producerKey: buildAttendanceGroupFixedScheduleProducerKey(input),
+    producerRunId,
+  }
+}
+
 function mapAttendanceGroupFixedScheduleSkipped(row, draft) {
   return {
     assignmentId: row.id,
@@ -8859,11 +8881,12 @@ async function applyAttendanceGroupFixedSchedule(db, input) {
   }
 
   const created = []
+  const producerMetadata = buildAttendanceGroupFixedScheduleProducerMetadata(input, randomUUID())
   for (const item of plan.wouldCreate) {
     const rows = await db.query(
       `INSERT INTO attendance_shift_assignments
-       (id, org_id, user_id, shift_id, start_date, end_date, is_active)
-       VALUES ($1, $2, $3, $4, $5, $6, true)
+       (id, org_id, user_id, shift_id, start_date, end_date, is_active, producer_type, producer_ref_id, producer_key, producer_run_id)
+       VALUES ($1, $2, $3, $4, $5, $6, true, $7, $8, $9, $10)
        RETURNING *`,
       [
         randomUUID(),
@@ -8872,6 +8895,10 @@ async function applyAttendanceGroupFixedSchedule(db, input) {
         item.shiftId,
         item.startDate,
         item.endDate,
+        producerMetadata.producerType,
+        producerMetadata.producerRefId,
+        producerMetadata.producerKey,
+        producerMetadata.producerRunId,
       ]
     )
     if (rows[0]) created.push(mapAssignmentRow(rows[0]))
@@ -14525,6 +14552,9 @@ module.exports = {
     buildAttendanceGroupFixedSchedulePlan,
     buildAttendanceGroupFixedSchedulePreview,
     applyAttendanceGroupFixedSchedule,
+    ATTENDANCE_GROUP_FIXED_SCHEDULE_PRODUCER_TYPE,
+    buildAttendanceGroupFixedScheduleProducerKey,
+    buildAttendanceGroupFixedScheduleProducerMetadata,
     acquireAttendanceScheduleAssignmentLock,
     getAttendanceScheduleAssignmentConflictMessage,
     getAttendanceScheduleAssignmentConflictType,
