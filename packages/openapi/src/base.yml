@@ -1337,6 +1337,105 @@ components:
           format: date-time
           description: Run creation time; the read-route from/to window bounds whole runs by this field.
       required: [runId, pipelineId, rowId, eventType, at, attrs, eventIndex, runStatus, runMode, runCreatedAt]
+    ConnectorActionOperation:
+      type: string
+      description: >-
+        DF-T1A connector action operation kind. read/preview/export are non-mutating;
+        upsert is a write (always gated). Submit/Audit/BOM are intentionally NOT modeled here.
+      enum: [read, preview, upsert, export]
+    ConnectorActionInput:
+      type: object
+      additionalProperties: false
+      description: >-
+        One business input for a connector action. References data by `source`
+        (e.g. record.FNumber); never an inline literal value (no secrets in metadata).
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        source:
+          type: string
+        required:
+          type: boolean
+    ConnectorAction:
+      type: object
+      description: >-
+        DF-T1A connector action metadata — one safe, named operation exposed by a connector
+        profile, as metadata around an existing adapter method. Latent contract: authorizes no
+        generic HTTP client, user JavaScript, or SQL. Write actions (upsert) are always gated.
+      additionalProperties: false
+      properties:
+        actionId:
+          type: string
+          minLength: 1
+        connectorKind:
+          type: string
+          minLength: 1
+        operation:
+          $ref: '#/components/schemas/ConnectorActionOperation'
+        label:
+          type: string
+        request:
+          type: object
+          additionalProperties: false
+          required: [method, path, inputs]
+          properties:
+            method:
+              type: string
+            path:
+              type: string
+              description: >-
+                Relative to the connector base URL — no scheme/host/backslash, and no query (?)
+                or fragment (#); query/header/body go through inputs.
+            inputs:
+              type: object
+              additionalProperties: false
+              properties:
+                path:
+                  type: array
+                  items: { $ref: '#/components/schemas/ConnectorActionInput' }
+                query:
+                  type: array
+                  items: { $ref: '#/components/schemas/ConnectorActionInput' }
+                header:
+                  type: array
+                  items: { $ref: '#/components/schemas/ConnectorActionInput' }
+                body:
+                  type: array
+                  items: { $ref: '#/components/schemas/ConnectorActionInput' }
+        output:
+          type: object
+          additionalProperties: false
+          required: [recordPath, successPath, errorPath]
+          properties:
+            recordPath:
+              type: string
+            successPath:
+              type: string
+            successValue: {}
+            errorPath:
+              type: string
+        safety:
+          type: object
+          additionalProperties: false
+          required: [readOnly, allowBatch, maxRowsPreview, requiresApproval]
+          properties:
+            readOnly:
+              type: boolean
+            allowBatch:
+              type: boolean
+            maxRowsPreview:
+              type: integer
+            requiresApproval:
+              type: boolean
+        gated:
+          type: boolean
+          description: Derived — true for a write op OR requiresApproval; the UI renders gated actions disabled.
+        help:
+          type: object
+          additionalProperties: true
+      required: [actionId, connectorKind, operation, request, output, safety, gated]
     AttendanceShift:
       type: object
       properties:
