@@ -51,6 +51,7 @@ const ATTENDANCE_SCHEDULER_SCOPE_SUBJECT_TYPES = new Set(['user', 'role', 'role_
 const ATTENDANCE_SCHEDULER_SCOPE_ACTIONS = new Set(['view', 'edit', 'import', 'export', 'clear', 'approve', 'dispatch'])
 const ATTENDANCE_GROUP_TYPES = new Set(['fixed_shift', 'scheduled_shift', 'free_time'])
 const DEFAULT_ATTENDANCE_GROUP_TYPE = 'fixed_shift'
+const ATTENDANCE_GROUP_MANAGER_ROLES = new Set(['owner', 'sub_owner'])
 
 const SETTINGS_KEY = 'attendance.settings'
 const SETTINGS_CACHE_TTL_MS = 60000
@@ -1225,6 +1226,14 @@ function normalizeAttendanceGroupType(value, fallback = DEFAULT_ATTENDANCE_GROUP
   const normalized = normalizeCatalogString(value, fallback).toLowerCase().replace(/-/g, '_')
   if (!ATTENDANCE_GROUP_TYPES.has(normalized)) {
     throw new HttpError(400, 'VALIDATION_ERROR', 'attendanceType must be fixed_shift, scheduled_shift, or free_time')
+  }
+  return normalized
+}
+
+function normalizeAttendanceGroupManagerRole(value) {
+  const normalized = normalizeCatalogString(value).replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase().replace(/-/g, '_')
+  if (!ATTENDANCE_GROUP_MANAGER_ROLES.has(normalized)) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'role must be owner or sub_owner')
   }
   return normalized
 }
@@ -7382,6 +7391,20 @@ function mapAttendanceGroupMemberRow(row) {
   }
 }
 
+function mapAttendanceGroupManagerRow(row) {
+  return {
+    id: row.id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    groupId: row.group_id,
+    userId: row.user_id,
+    role: normalizeAttendanceGroupManagerRole(row.role),
+    createdBy: row.created_by ?? null,
+    created_by: row.created_by ?? null,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : undefined,
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : undefined,
+  }
+}
+
 function normalizeNullableText(value) {
   if (value === undefined || value === null) return null
   const text = String(value).trim()
@@ -8469,6 +8492,14 @@ function normalizeGroupMembersPayload(value) {
     ...payload,
     userId: firstDefinedValue(payload.userId, payload.user_id),
     userIds: firstDefinedValue(payload.userIds, payload.user_ids),
+  }
+}
+
+function normalizeGroupManagerPayload(value) {
+  const payload = normalizeObjectPayload(value)
+  return {
+    ...payload,
+    userId: firstDefinedValue(payload.userId, payload.user_id),
   }
 }
 
@@ -26510,6 +26541,146 @@ module.exports = {
           }
           logger.error('Attendance group member delete failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to remove group member' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/groups/:id/managers',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
+        const { page, pageSize, offset } = parsePagination(req.query)
+
+        try {
+          const countRows = await db.query(
+            'SELECT COUNT(*)::int AS total FROM attendance_group_managers WHERE org_id = $1 AND group_id = $2',
+            [orgId, groupId]
+          )
+          const total = Number(countRows[0]?.total ?? 0)
+          const rows = await db.query(
+            `SELECT *
+             FROM attendance_group_managers
+             WHERE org_id = $1 AND group_id = $2
+             ORDER BY CASE role WHEN 'owner' THEN 0 ELSE 1 END, created_at DESC
+             LIMIT $3 OFFSET $4`,
+            [orgId, groupId, pageSize, offset]
+          )
+          res.json({
+            ok: true,
+            data: {
+              items: rows.map(mapAttendanceGroupManagerRow),
+              total,
+              page,
+              pageSize,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance group manager tables missing' } })
+            return
+          }
+          logger.error('Attendance group managers fetch failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load group managers' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'POST',
+      '/api/attendance/groups/:id/managers',
+      withPermission('attendance:admin', async (req, res) => {
+        const schema = z.object({
+          userId: z.string().trim().min(1),
+          role: z.string(),
+        })
+
+        const parsed = schema.safeParse(normalizeGroupManagerPayload(req.body ?? {}))
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
+
+        let role
+        try {
+          role = normalizeAttendanceGroupManagerRole(parsed.data.role)
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          throw error
+        }
+
+        try {
+          const rows = await db.query(
+            `INSERT INTO attendance_group_managers (org_id, group_id, user_id, role, created_by, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, now(), now())
+             ON CONFLICT (org_id, group_id, user_id, role)
+             DO UPDATE SET updated_at = attendance_group_managers.updated_at
+             RETURNING *`,
+            [orgId, groupId, parsed.data.userId.trim(), role, getUserId(req) ?? null]
+          )
+          res.json({ ok: true, data: mapAttendanceGroupManagerRow(rows[0]) })
+        } catch (error) {
+          if (error?.code === '23503') {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found' } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance group manager tables missing' } })
+            return
+          }
+          logger.error('Attendance group manager create failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to add group manager' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/attendance/groups/:id/managers/:managerId',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
+        const managerId = normalizeUuidString(req.params.managerId)
+        if (!managerId) {
+          respondInvalidUuid(res, 'managerId')
+          return
+        }
+        try {
+          const rows = await db.query(
+            'DELETE FROM attendance_group_managers WHERE id = $1 AND org_id = $2 AND group_id = $3 RETURNING id',
+            [managerId, orgId, groupId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Group manager not found' } })
+            return
+          }
+          res.json({ ok: true, data: { id: managerId } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance group manager tables missing' } })
+            return
+          }
+          logger.error('Attendance group manager delete failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to remove group manager' } })
         }
       })
     )
