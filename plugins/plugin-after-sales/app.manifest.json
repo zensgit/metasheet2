@@ -15,6 +15,9 @@
       "templateId": "after-sales-default"
     }
   },
+  "capabilities": {
+    "runtimeAdmin": true
+  },
   "platformDependencies": [
     "auth",
     "rbac",
