@@ -185,6 +185,8 @@ export abstract class BaseDataAdapter extends EventEmitter {
   protected config: DataSourceConfig
   protected connected: boolean = false
   protected pool: ConnectionPool
+  // A3: redacted cause of the most recent connect/test failure, surfaced by manager.testConnection.
+  protected lastConnectionError: string | null = null
 
   constructor(config: DataSourceConfig) {
     super()
@@ -302,8 +304,38 @@ export abstract class BaseDataAdapter extends EventEmitter {
     return operators[op] || '='
   }
 
+  // A3: the redacted cause of the most recent connect/test failure (null when healthy).
+  get connectionError(): string | null {
+    return this.lastConnectionError
+  }
+
+  // A3: scrub configured secret values + common secret patterns out of a message before it can be
+  // returned to a client or logged. Defense-in-depth: a connection error must never carry a password.
+  protected redactSecrets(message: string): string {
+    let out = message
+    const creds = this.config.credentials ?? {}
+    const conn = this.config.connection ?? {}
+    const secretValues = [creds.password, creds.token, creds.apiKey, creds.secret, conn.password]
+      .filter((v): v is string => typeof v === 'string' && v.length > 0)
+    for (const secret of secretValues) {
+      out = out.split(secret).join('***')
+    }
+    // key=value / key: value with a single-token value.
+    out = out.replace(
+      /(\b(?:password|pwd|pass|token|api[_-]?key|secret)\b\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s;,)]+)/gi,
+      '$1***'
+    )
+    // Authorization carries a scheme + token (e.g. "Bearer xyz"); consume the whole credential so the
+    // token after the scheme is not left behind (a single-token rule would leave "Bearer ***  xyz").
+    return out.replace(
+      /(\bauthorization\b\s*[=:]\s*)(?:bearer|basic|digest|negotiate)?\s*[^\s;,)]+/gi,
+      '$1***'
+    )
+  }
+
   // Lifecycle hooks
   protected async onConnect(): Promise<void> {
+    this.lastConnectionError = null // A3: a successful connect clears the prior failure cause
     this.emit('connected', { adapter: this.config.name })
   }
 
@@ -312,6 +344,8 @@ export abstract class BaseDataAdapter extends EventEmitter {
   }
 
   protected async onError(error: Error): Promise<void> {
+    // A3: capture the redacted cause so a connection-test failure is explainable; never store secrets.
+    this.lastConnectionError = this.redactSecrets(error.message)
     this.emit('error', { adapter: this.config.name, error })
   }
 

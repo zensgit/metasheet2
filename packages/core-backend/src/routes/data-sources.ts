@@ -488,15 +488,18 @@ export function dataSourcesRouter(): Router {
       manager.assertAccess(id, resolveUserId(req))
       const startTime = Date.now()
 
-      const success = await manager.testConnection(id)
+      const result = await manager.testConnection(id)
       const latency = Date.now() - startTime
 
+      // A3: keep request-layer ok:true (a completed test is a successful request); the connection
+      // outcome is data.success, with a redacted cause in data.error.message on failure.
       return res.json({
         ok: true,
         data: {
           id,
-          success,
-          latency: `${latency}ms`
+          success: result.success,
+          latency: `${latency}ms`,
+          ...(result.error ? { error: { message: result.error } } : {})
         }
       })
     } catch (error) {
