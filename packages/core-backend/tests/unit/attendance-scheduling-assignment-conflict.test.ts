@@ -164,6 +164,27 @@ describe('attendance scheduling assignment conflict guard', () => {
     expect(provenanceMigrationSource).not.toContain("createTable('attendance_schedule")
   })
 
+  it('builds stable fixed-schedule producer keys for finite and open-ended windows', () => {
+    const input = {
+      orgId: 'org-a',
+      groupId: '11111111-1111-4111-8111-111111111111',
+      shiftId: '22222222-2222-4222-8222-222222222222',
+      startDate: '2026-06-01',
+      endDate: '2026-06-30',
+    }
+
+    expect(helpers.ATTENDANCE_GROUP_FIXED_SCHEDULE_PRODUCER_TYPE).toBe('attendance_group_fixed_schedule')
+    expect(helpers.buildAttendanceGroupFixedScheduleProducerKey(input)).toBe(
+      'attendance_group_fixed_schedule:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222:2026-06-01:2026-06-30',
+    )
+    expect(helpers.buildAttendanceGroupFixedScheduleProducerKey({
+      ...input,
+      endDate: null,
+    })).toBe(
+      'attendance_group_fixed_schedule:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222:2026-06-01:null',
+    )
+  })
+
   it('builds fixed-schedule group previews from the complete member set without writes', async () => {
     const db = {
       query: vi.fn()
@@ -301,35 +322,45 @@ describe('attendance scheduling assignment conflict guard', () => {
   })
 
   it('applies fixed-schedule group plans by locking users, skipping exact matches, and inserting only missing rows', async () => {
+    const pendingRows = [
+      [{ id: 'group-a', org_id: 'org-a', name: 'Operations', timezone: 'UTC' }],
+      [{ id: 'shift-a', org_id: 'org-a', name: 'Day shift', timezone: 'UTC' }],
+      [{ user_id: 'user-create' }, { user_id: 'user-skip' }],
+      [],
+      [],
+      [
+        {
+          id: 'assignment-skip',
+          user_id: 'user-skip',
+          shift_id: 'shift-a',
+          start_date: '2026-06-01',
+          end_date: '2026-06-30',
+          kind: 'shift',
+        },
+      ],
+      [],
+    ]
     const db = {
-      query: vi.fn()
-        .mockResolvedValueOnce([{ id: 'group-a', org_id: 'org-a', name: 'Operations', timezone: 'UTC' }])
-        .mockResolvedValueOnce([{ id: 'shift-a', org_id: 'org-a', name: 'Day shift', timezone: 'UTC' }])
-        .mockResolvedValueOnce([{ user_id: 'user-create' }, { user_id: 'user-skip' }])
-        .mockResolvedValueOnce([])
-        .mockResolvedValueOnce([])
-        .mockResolvedValueOnce([
-          {
-            id: 'assignment-skip',
-            user_id: 'user-skip',
-            shift_id: 'shift-a',
-            start_date: '2026-06-01',
-            end_date: '2026-06-30',
-            kind: 'shift',
-          },
-        ])
-        .mockResolvedValueOnce([])
-        .mockResolvedValueOnce([
-          {
-            id: 'assignment-created',
-            org_id: 'org-a',
-            user_id: 'user-create',
-            shift_id: 'shift-a',
-            start_date: '2026-06-01',
-            end_date: '2026-06-30',
-            is_active: true,
-          },
-        ]),
+      query: vi.fn(async (sql: string, params: any[] = []) => {
+        if (/\bINSERT INTO attendance_shift_assignments\b/i.test(String(sql))) {
+          return [
+            {
+              id: 'assignment-created',
+              org_id: params[1],
+              user_id: params[2],
+              shift_id: params[3],
+              start_date: params[4],
+              end_date: params[5],
+              is_active: true,
+              producer_type: params[6],
+              producer_ref_id: params[7],
+              producer_key: params[8],
+              producer_run_id: params[9],
+            },
+          ]
+        }
+        return pendingRows.shift() ?? []
+      }),
     }
 
     const result = await helpers.applyAttendanceGroupFixedSchedule(db, {
@@ -353,12 +384,139 @@ describe('attendance scheduling assignment conflict guard', () => {
         startDate: '2026-06-01',
         endDate: '2026-06-30',
         isActive: true,
+        producerType: 'attendance_group_fixed_schedule',
+        producerRefId: 'group-a',
+        producerKey: 'attendance_group_fixed_schedule:group-a:shift-a:2026-06-01:2026-06-30',
       }),
     ])
 
     const queries = db.query.mock.calls.map(call => String(call[0]))
+    const insertCalls = db.query.mock.calls.filter(call => /\bINSERT INTO attendance_shift_assignments\b/i.test(String(call[0])))
     expect(queries.filter(sql => sql.includes('pg_advisory_xact_lock'))).toHaveLength(2)
-    expect(queries.filter(sql => /\bINSERT INTO attendance_shift_assignments\b/i.test(sql))).toHaveLength(1)
+    expect(insertCalls).toHaveLength(1)
+    expect(insertCalls[0][0]).toContain('producer_type, producer_ref_id, producer_key, producer_run_id')
+    expect(insertCalls[0][1]).toEqual(expect.arrayContaining([
+      'attendance_group_fixed_schedule',
+      'group-a',
+      'attendance_group_fixed_schedule:group-a:shift-a:2026-06-01:2026-06-30',
+    ]))
+    expect(insertCalls[0][1][9]).toMatch(/^[0-9a-f-]{36}$/i)
+    expect(queries.join('\n')).not.toMatch(/\bUPDATE attendance_shift_assignments\b/i)
+  })
+
+  it('uses one producer run id across multiple fixed-schedule creates without mutating skips', async () => {
+    const pendingRows = [
+      [{ id: 'group-a', org_id: 'org-a', name: 'Operations', timezone: 'UTC' }],
+      [{ id: 'shift-a', org_id: 'org-a', name: 'Day shift', timezone: 'UTC' }],
+      [{ user_id: 'user-a' }, { user_id: 'user-b' }, { user_id: 'user-skip' }],
+      [],
+      [],
+      [],
+      [
+        {
+          id: 'assignment-skip',
+          user_id: 'user-skip',
+          shift_id: 'shift-a',
+          start_date: '2026-06-01',
+          end_date: '2026-06-30',
+          kind: 'shift',
+        },
+      ],
+      [],
+    ]
+    const db = {
+      query: vi.fn(async (sql: string, params: any[] = []) => {
+        if (/\bINSERT INTO attendance_shift_assignments\b/i.test(String(sql))) {
+          return [
+            {
+              id: params[0],
+              org_id: params[1],
+              user_id: params[2],
+              shift_id: params[3],
+              start_date: params[4],
+              end_date: params[5],
+              is_active: true,
+              producer_type: params[6],
+              producer_ref_id: params[7],
+              producer_key: params[8],
+              producer_run_id: params[9],
+            },
+          ]
+        }
+        return pendingRows.shift() ?? []
+      }),
+    }
+
+    const result = await helpers.applyAttendanceGroupFixedSchedule(db, {
+      orgId: 'org-a',
+      groupId: 'group-a',
+      shiftId: 'shift-a',
+      startDate: '2026-06-01',
+      endDate: '2026-06-30',
+    })
+
+    expect(result.ok).toBe(true)
+    expect(result.data.created.map((item: any) => item.userId)).toEqual(['user-a', 'user-b'])
+    expect(result.data.skipped.map((item: any) => item.userId)).toEqual(['user-skip'])
+    expect(new Set(result.data.created.map((item: any) => item.producerRunId))).toHaveLength(1)
+    expect(new Set(result.data.created.map((item: any) => item.producerKey))).toEqual(new Set([
+      'attendance_group_fixed_schedule:group-a:shift-a:2026-06-01:2026-06-30',
+    ]))
+
+    const queries = db.query.mock.calls.map(call => String(call[0]))
+    expect(queries.filter(sql => /\bINSERT INTO attendance_shift_assignments\b/i.test(sql))).toHaveLength(2)
+    expect(queries.join('\n')).not.toMatch(/\bUPDATE attendance_shift_assignments\b/i)
+  })
+
+  it('leaves open-ended fixed-schedule creates under an explicit null-ended producer key', async () => {
+    const pendingRows = [
+      [{ id: 'group-a', org_id: 'org-a', name: 'Operations', timezone: 'UTC' }],
+      [{ id: 'shift-a', org_id: 'org-a', name: 'Day shift', timezone: 'UTC' }],
+      [{ user_id: 'user-a' }],
+      [],
+      [],
+      [],
+      [],
+    ]
+    const db = {
+      query: vi.fn(async (sql: string, params: any[] = []) => {
+        if (/\bINSERT INTO attendance_shift_assignments\b/i.test(String(sql))) {
+          return [
+            {
+              id: params[0],
+              org_id: params[1],
+              user_id: params[2],
+              shift_id: params[3],
+              start_date: params[4],
+              end_date: params[5],
+              is_active: true,
+              producer_type: params[6],
+              producer_ref_id: params[7],
+              producer_key: params[8],
+              producer_run_id: params[9],
+            },
+          ]
+        }
+        return pendingRows.shift() ?? []
+      }),
+    }
+
+    const result = await helpers.applyAttendanceGroupFixedSchedule(db, {
+      orgId: 'org-a',
+      groupId: 'group-a',
+      shiftId: 'shift-a',
+      startDate: '2026-06-01',
+      endDate: null,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(result.data.created).toEqual([
+      expect.objectContaining({
+        userId: 'user-a',
+        endDate: null,
+        producerKey: 'attendance_group_fixed_schedule:group-a:shift-a:2026-06-01:null',
+      }),
+    ])
   })
 
   it('refuses fixed-schedule group applies without inserting when a blocking conflict exists', async () => {
